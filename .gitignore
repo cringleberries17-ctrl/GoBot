@@ -1,0 +1,32 @@
+build/
+*.user
+*.suo
+.vs/
+
+# Packaged releases. These are build output -- 75 MB of zips and the unpacked
+# copies beside them -- and they are rebuilt by package.ps1 from the sources
+# that are tracked here.
+dist/
+
+# Captured traffic and the frames taken while working out what it means. These
+# are recordings of a live session on a real account: they carry positions,
+# names and whatever was in chat at the time, and none of that belongs in a
+# repository.
+#
+# gobot_sniff --record writes <name>.s2c and <name>.c2s, which are the same
+# thing under different extensions and were not covered before.
+*.bin
+*.pcap
+*.s2c
+*.c2s
+*.log
+frame.png
+region.png
+
+# The game's UI pictures.
+#
+# The build stages these next to the executable so a built bot is
+# self-contained, and that is where they stay. They are the game's own artwork;
+# a machine that has the game has them already, and committing them here would
+# be publishing somebody else's art rather than merely using it.
+templates/
