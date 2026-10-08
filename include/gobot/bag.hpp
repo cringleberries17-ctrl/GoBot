@@ -35,7 +35,18 @@ struct BagLayout {
 
     /// The scroll bar's two arrows, from the strip's top-left.
     int scroll_up_dx   = 236, scroll_up_dy   = 32;
-    int scroll_down_dx = 236, scroll_down_dy = 159;
+    int scroll_down_dx = 236, scroll_down_dy = 163;
+
+    /// The trash bin, the square in the window's bottom-right corner: from the
+    /// strip's top-left to the can it shows when empty. Measured on the live
+    /// client, and the same in the commercial client's picture of the window.
+    ///
+    /// Taken from here rather than searched for. The bin shows the can only
+    /// while it is empty; with an item in it the nearest thing to a can is
+    /// whatever grey item is in the bag, and a drag aimed there moves things
+    /// about inside the bag.
+    int bin_dx = 228, bin_dy = 178;
+    int bin_w  = 16,  bin_h  = 22;
 
     /// Parts of a slot that say nothing about what is in it: the corner the
     /// stack count is printed in, and the edge, where the hover and selection
@@ -58,8 +69,8 @@ struct BagView {
     bool       found = false;
     float      score = 0.0f;
     ScreenRect strip;              ///< the tab strip
-    bool       has_trash = false;
-    ScreenRect trash;              ///< the trash can
+    ScreenRect trash;              ///< the trash bin, from the layout
+    bool       bin_empty = false;  ///< the can is showing: nothing waits in it
 
     ScreenRect slot(const BagLayout& l, int col, int row) const;
     std::vector<ScreenRect> slots(const BagLayout& l) const;   ///< row by row
@@ -68,8 +79,8 @@ struct BagView {
 
 namespace bag {
 
-/// Find the bag: its tab strip, then the trash can in the window's corner.
-BagView find(const Frame& f, const TemplateStore& store);
+/// Find the bag by its tab strip, and say whether its trash bin is empty.
+BagView find(const Frame& f, const TemplateStore& store, const BagLayout& l);
 
 /// A slot cut out of a frame, fully opaque.
 Frame cut(const Frame& f, const ScreenRect& r);
@@ -278,10 +289,19 @@ public:
 private:
     bool grab_view(Frame& f, BagView& v);
     bool rid(Frame& f, BagView& v, int index, const TrashList::Item& item, int count);
-    /// Answer the dialog the drag brought up. What came of it: done, nothing
-    /// asked at all, or a step that did not go and was backed out of.
+    /// Answer the dialogs the game puts up -- one, or a confirmation and then
+    /// a quantity. What came of it: done, nothing asked at all, or a step that
+    /// did not go.
     enum { kFailed = 0, kDone = 1, kNoDialog = 2 };
     int  answer_dialog(TrashList::Action action, int count);
+
+    /// Put into the trash: onto the bin, which takes it and waits; then a
+    /// click on the bin, which is what asks.
+    bool trash_one(Frame& f, BagView& v, int index, const TrashList::Item& item, int count);
+
+    /// Give back whatever is waiting in the bin: click it and answer Hủy Bỏ.
+    /// True when the bin is empty afterwards.
+    bool clear_bin();
     void keep(const Frame& f, const char* what);
     void scroll_to_top(BagView& v);
     void say(const std::string& line);

@@ -1984,7 +1984,7 @@ int run_bag(const Options& o) {
     settings.load(resolve("configs/trash.ini"));
     const BagLayout& l = settings.layout;
 
-    const BagView v = bag::find(shot, store);
+    const BagView v = bag::find(shot, store, l);
     if (!v.found) {
         std::printf("No bag in %s. Open it in the game, make sure nothing covers it, and "
                     "take the screenshot again.\n", o.bag_image.c_str());
@@ -1992,10 +1992,9 @@ int run_bag(const Options& o) {
     }
     std::printf("tab strip   at %d,%d  %dx%d  (match %.2f)\n",
                 v.strip.x, v.strip.y, v.strip.w, v.strip.h, static_cast<double>(v.score));
-    if (v.has_trash)
-        std::printf("trash can   at %d,%d  %dx%d\n", v.trash.x, v.trash.y, v.trash.w, v.trash.h);
-    else
-        std::printf("trash can   not found near the bag\n");
+    std::printf("trash bin   at %d,%d  %dx%d  (%s)\n", v.trash.x, v.trash.y, v.trash.w,
+                v.trash.h, v.bin_empty ? "empty"
+                                       : "something waiting in it, or not where the layout says");
 
     TrashList list;
     list.load(resolve("configs/trash"), l);
@@ -2026,7 +2025,7 @@ int run_bag(const Options& o) {
     };
     outline(v.strip, 0, 255, 0);
     for (const ScreenRect& s : slots) outline(s, 255, 220, 0);
-    if (v.has_trash) outline(v.trash, 0, 200, 255);
+    outline(v.trash, 0, 200, 255);
     for (int t = 0; t < kBagTabs; ++t) {
         int x = 0, y = 0;
         v.tab_point(l, t, x, y);

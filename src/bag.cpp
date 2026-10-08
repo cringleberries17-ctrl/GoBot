@@ -45,7 +45,7 @@ const char* const kNotice = "grabbed/dialog_ok";
 /// How alike the strip has to be. Lower than a fixed button: whichever tab is
 /// selected is drawn differently, and the picture was taken with the first.
 constexpr float kStripScore = 0.62f;
-constexpr float kTrashScore = 0.70f;
+constexpr float kTrashScore = 0.80f;
 constexpr float kButtonScore = 0.82f;
 constexpr float kDialogScore = 0.60f;
 
@@ -90,6 +90,10 @@ void BagLayout::load(const IniFile& ini) {
     scroll_up_dy   = ini.get_int("Bag", "scroll_up_dy", scroll_up_dy);
     scroll_down_dx = ini.get_int("Bag", "scroll_down_dx", scroll_down_dx);
     scroll_down_dy = ini.get_int("Bag", "scroll_down_dy", scroll_down_dy);
+    bin_dx         = ini.get_int("Bag", "bin_dx", bin_dx);
+    bin_dy         = ini.get_int("Bag", "bin_dy", bin_dy);
+    bin_w          = ini.get_int("Bag", "bin_w", bin_w);
+    bin_h          = ini.get_int("Bag", "bin_h", bin_h);
     count_w        = ini.get_int("Bag", "count_w", count_w);
     count_h        = ini.get_int("Bag", "count_h", count_h);
     edge           = ini.get_int("Bag", "edge", edge);
@@ -128,7 +132,7 @@ void BagView::tab_point(const BagLayout& l, int tab, int& x, int& y) const {
 
 namespace bag {
 
-BagView find(const Frame& f, const TemplateStore& store) {
+BagView find(const Frame& f, const TemplateStore& store, const BagLayout& l) {
     BagView v;
     if (!f.valid()) return v;
 
@@ -146,19 +150,20 @@ BagView find(const Frame& f, const TemplateStore& store) {
     }
     if (!v.found) return v;
 
-    // The trash can sits in the window's bottom corner. Looked for around the
-    // bag rather than across the screen, where any small grey picture would do.
-    const ScreenRect around = clamp_to(f, ScreenRect{ v.strip.x - 20, v.strip.y,
-                                                    kBagWidth + 40, 240 });
-    float best = 0.0f;
+    // The bin is where the layout says. The can is only drawn in it while it
+    // is empty, so looking for the can says whether it is -- looked for right
+    // there and nowhere else.
+    v.trash = ScreenRect{ v.strip.x + l.bin_dx, v.strip.y + l.bin_dy, l.bin_w, l.bin_h };
+    const ScreenRect around = clamp_to(f, ScreenRect{ v.trash.x - 4, v.trash.y - 4,
+                                                      v.trash.w + 8, v.trash.h + 8 });
     for (const char* name : kTrashCans) {
         const Frame* t = store.get(name);
         if (t == nullptr || around.w < t->width || around.h < t->height) continue;
         const auto m = TemplateMatcher::find(f, around, *t, kTrashScore);
-        if (m.found && m.score > best) {
-            best = m.score;
-            v.has_trash = true;
+        if (m.found) {
+            v.bin_empty = true;
             v.trash = m.at;
+            break;
         }
     }
     return v;
@@ -636,7 +641,7 @@ bool BagCleaner::wait_ms(int ms) {
 
 bool BagCleaner::grab_view(Frame& f, BagView& v) {
     if (!grab_ || !grab_(f) || !f.valid()) return false;
-    v = bag::find(f, store_);
+    v = bag::find(f, store_, settings_.layout);
     return v.found;
 }
 
@@ -685,11 +690,11 @@ BagCleaner::Result BagCleaner::run() {
         }
     }
 
-    bool needs_trash = false;
-    for (const auto& item : trash_->items)
-        if (item.action == TrashList::Action::Delete) needs_trash = true;
-    if (needs_trash && !v.has_trash && !dry_run_) {
-        res.trouble = "không thấy thùng rác trong túi đồ";
+    // Something left waiting in the bin -- by a pass that stopped half way,
+    // or by hand -- goes back first. Otherwise the next item dropped on the bin
+    // is dropped on that one.
+    if (!v.bin_empty && !dry_run_ && !clear_bin()) {
+        res.trouble = "thùng rác đang có đồ chờ xoá và không trả lại được";
         if (opened_here) input_.key_press(settings_.bag_key);
         return res;
     }
@@ -777,25 +782,115 @@ BagCleaner::Result BagCleaner::run() {
     return res;
 }
 
+bool BagCleaner::clear_bin() {
+    Frame f;
+    BagView v;
+    if (!grab_view(f, v)) return false;
+    if (v.bin_empty) return true;
+
+    const Frame* confirm = store_.get(kConfirm);
+    if (confirm == nullptr) return false;
+    input_.click_at(v.trash.cx(), v.trash.cy());
+    for (int i = 0; i < 10; ++i) {
+        if (!wait_ms(150) || !grab_ || !grab_(f) || !f.valid()) continue;
+        const auto m = TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *confirm,
+                                             kButtonScore);
+        if (m.found) {
+            // Hủy Bỏ, the right half of the pair: the item goes back.
+            input_.click_at(m.at.x + m.at.w * 3 / 4, m.at.cy());
+            break;
+        }
+    }
+    wait_ms(400);
+    if (!grab_view(f, v)) return false;
+    if (!v.bin_empty) keep(f, "bin_stuck");
+    return v.bin_empty;
+}
+
+bool BagCleaner::trash_one(Frame& f, BagView& v, int index, const TrashList::Item& item,
+                           int count) {
+    const BagLayout& l = settings_.layout;
+    const auto slots = v.slots(l);
+    const ScreenRect& s = slots[static_cast<std::size_t>(index)];
+
+    if (!v.bin_empty && !clear_bin()) {
+        say("thùng rác đang có đồ chờ xoá và không trả lại được");
+        return false;
+    }
+
+    // 1. Onto the bin. It takes the item and waits, showing it where the can
+    //    was, and leaves a faded copy in the slot.
+    bool moved = false;
+    if (settings_.click_to_move)
+        moved = input_.click_at(s.cx(), s.cy()) && wait_ms(220) &&
+                input_.click_at(v.trash.cx(), v.trash.cy());
+    else
+        moved = input_.drag(s.cx(), s.cy(), v.trash.cx(), v.trash.cy());
+    if (!moved) {
+        say("không điều khiển được chuột trong cửa sổ game");
+        return false;
+    }
+
+    Frame g;
+    BagView w;
+    bool waiting = false;
+    for (int i = 0; i < 8 && !waiting; ++i) {
+        if (!wait_ms(150)) return false;
+        waiting = grab_view(g, w) && !w.bin_empty;
+    }
+    if (!waiting) {
+        say("món đồ không vào thùng rác");
+        keep(g, "not_in_bin");
+        return false;
+    }
+
+    // 2. A click on the bin, which is what asks -- and 3. the answer.
+    input_.click_at(w.trash.cx(), w.trash.cy());
+    const int answered = answer_dialog(TrashList::Action::Delete, count);
+    if (answered != kDone) {
+        if (answered == kNoDialog) say("bấm vào thùng rác mà không thấy hộp thoại xác nhận");
+        // Whatever is still open is said no to, and the item goes back.
+        clear_bin();
+        return false;
+    }
+
+    // 4. Only gone counts: the bin empty again, and the slot not holding it.
+    wait_ms(300);
+    if (!grab_view(g, w)) return false;
+    if (!w.bin_empty) {
+        say("thùng rác vẫn còn món đồ");
+        keep(g, "still_in_bin");
+        clear_bin();
+        return false;
+    }
+    const ScreenRect& same = w.slots(l)[static_cast<std::size_t>(index)];
+    if (!bag::is_empty(g, same, l)) {
+        const int still = trash_->match(g, same, settings_.min_score);
+        if (still >= 0 && &trash_->items[static_cast<std::size_t>(still)] == &item) {
+            say("món đồ vẫn còn trong túi");
+            keep(g, "still_there");
+            return false;
+        }
+    }
+    f = g;
+    v = w;
+    return true;
+}
+
 bool BagCleaner::rid(Frame& f, BagView& v, int index, const TrashList::Item& item, int count) {
     const BagLayout& l = settings_.layout;
     const auto slots = v.slots(l);
     if (index < 0 || index >= static_cast<int>(slots.size())) return false;
+    if (item.action == TrashList::Action::Delete) return trash_one(f, v, index, item, count);
     const ScreenRect& s = slots[static_cast<std::size_t>(index)];
     const int fx = s.cx(), fy = s.cy();
 
-    int tx = 0, ty = 0;
-    if (item.action == TrashList::Action::Delete) {
-        tx = v.trash.cx();
-        ty = v.trash.cy();
-    } else {
-        // Onto the ground, clear of the bag: whichever side has more room.
-        const int room_left = v.strip.x;
-        const int room_right = f.width - (v.strip.x + kBagWidth);
-        tx = room_left > room_right ? std::max(40, v.strip.x - 160)
-                                    : std::min(f.width - 40, v.strip.x + kBagWidth + 160);
-        ty = std::clamp(v.strip.y + 40, 140, std::max(140, f.height - 160));
-    }
+    // Onto the ground, clear of the bag: whichever side has more room.
+    const int room_left = v.strip.x;
+    const int room_right = f.width - (v.strip.x + kBagWidth);
+    const int tx = room_left > room_right ? std::max(40, v.strip.x - 160)
+                                          : std::min(f.width - 40, v.strip.x + kBagWidth + 160);
+    const int ty = std::clamp(v.strip.y + 40, 140, std::max(140, f.height - 160));
 
     bool moved = false;
     if (settings_.click_to_move) {
@@ -808,37 +903,28 @@ bool BagCleaner::rid(Frame& f, BagView& v, int index, const TrashList::Item& ite
         return false;
     }
 
+    // A drop has to be asked about and answered to count. An item that has
+    // merely left its slot may be waiting somewhere -- which is exactly how the
+    // bin behaves, and taking that for done is what made the first version
+    // report items gone that were not.
     const int answered = answer_dialog(item.action, count);
-    if (answered == kFailed) {
-        // Whatever is half done -- a dialog, an item on the pointer -- undone.
+    if (answered != kDone) {
+        if (answered == kNoDialog) say("không thấy hộp thoại vứt đồ");
         input_.key_press(VK_ESCAPE);
         wait_ms(300);
         return false;
     }
 
-    // Only gone counts. Including when nothing asked: a single item may go
-    // into the trash without a word, and an item that has left its slot has
-    // gone whether or not there was a dialog about it.
     wait_ms(350);
     Frame g;
     BagView w;
-    if (!grab_view(g, w)) {
-        if (answered == kNoDialog) input_.key_press(VK_ESCAPE);
-        return false;
-    }
-    const auto after = w.slots(l);
-    const ScreenRect& same = after[static_cast<std::size_t>(index)];
+    if (!grab_view(g, w)) return false;
+    const ScreenRect& same = w.slots(l)[static_cast<std::size_t>(index)];
     if (!bag::is_empty(g, same, l)) {
         const int still = trash_->match(g, same, settings_.min_score);
         if (still >= 0 && &trash_->items[static_cast<std::size_t>(still)] == &item) {
-            if (answered == kNoDialog) {
-                say("không thấy hộp thoại xác nhận, món đồ vẫn còn");
-                input_.key_press(VK_ESCAPE);
-                wait_ms(300);
-            } else {
-                say("món đồ vẫn còn trong túi");
-                keep(g, "still_there");
-            }
+            say("món đồ vẫn còn trong túi");
+            keep(g, "still_there");
             return false;
         }
     }
@@ -853,90 +939,103 @@ int BagCleaner::answer_dialog(TrashList::Action action, int count) {
         say("thiếu hình nút Xác Nhận, nên không bấm gì");
         return kFailed;
     }
-
-    Frame f;
-    TemplateMatcher::Match button;
-    for (int i = 0; i < 14 && !button.found; ++i) {
-        if (!wait_ms(150)) return kFailed;
-        if (!grab_ || !grab_(f) || !f.valid()) continue;
-        button = TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *confirm,
-                                       kButtonScore);
-    }
-    if (!button.found) {
-        keep(f, "no_dialog");
-        return kNoDialog;
-    }
-
-    // Ours, and the right one of ours: an item meant for the trash that was
-    // let go outside the bag gets asked whether to drop it, and must not be.
+    const Frame* notice = store_.get(kNotice);
     const bool deleting = action == TrashList::Action::Delete;
-    const ScreenRect above = clamp_to(f, ScreenRect{ button.at.x - 210, button.at.y - 95,
-                                                     button.at.w + 230, button.at.h + 105 });
-    bool ours = false;
-    const auto look = [&](const char* const* names, std::size_t n) {
-        for (std::size_t i = 0; i < n && !ours; ++i) {
-            const Frame* t = store_.get(names[i]);
-            if (t == nullptr || above.w < t->width || above.h < t->height) continue;
-            ours = TemplateMatcher::find(f, above, *t, kDialogScore).found;
-        }
-    };
-    if (deleting) look(kDeleteDialogs, std::size(kDeleteDialogs));
-    else          look(kDropDialogs, std::size(kDropDialogs));
-    if (!ours) {
-        say(deleting ? "hộp thoại này không phải hộp thoại xoá đồ, nên không bấm"
-                     : "hộp thoại này không phải hộp thoại vứt đồ, nên không bấm");
-        keep(f, "wrong_dialog");
-        return kFailed;
-    }
 
-    // The dialogs for a stack have a quantity box left of the buttons: dark,
-    // where the others are the dialog's pale grey. It takes the exact number
-    // in the stack and nothing else, so an unreadable count is a stop, not a
-    // guess.
-    const ScreenRect box = clamp_to(f, ScreenRect{ button.at.x - 88, button.at.y + 3,
-                                                   82, std::max(4, button.at.h - 6) });
-    long total = 0;
-    int n = 0;
-    for (int y = box.y; y < box.y + box.h; ++y)
-        for (int x = box.x; x < box.x + box.w; ++x) { total += lum(f, x, y); ++n; }
-    if (n > 0 && total / n < 100) {
-        if (count <= 0) {
-            say("không đọc được số lượng trên ô đồ, nên bỏ qua món này");
-            keep(f, "no_count");
+    // One dialog or a short run of them -- an "are you sure" and then the
+    // quantity, or the other way round. Each is checked before it is answered.
+    Frame f;
+    for (int round = 0; round < 3; ++round) {
+        TemplateMatcher::Match button;
+        const int tries = round == 0 ? 14 : 6;
+        for (int i = 0; i < tries && !button.found; ++i) {
+            if (!wait_ms(150)) return kFailed;
+            if (!grab_ || !grab_(f) || !f.valid()) continue;
+            button = TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *confirm,
+                                           kButtonScore);
+        }
+        if (!button.found) {
+            if (round == 0) {
+                keep(f, "no_dialog");
+                return kNoDialog;
+            }
+            return kDone;               // the last one has closed and nothing followed
+        }
+
+        // Ours, and the right one of ours: an item meant for the trash that was
+        // let go outside the bag gets asked whether to drop it, and must not be.
+        const ScreenRect above = clamp_to(f, ScreenRect{ button.at.x - 210, button.at.y - 95,
+                                                         button.at.w + 230, button.at.h + 105 });
+        bool ours = false;
+        const auto look = [&](const char* const* names, std::size_t n) {
+            for (std::size_t i = 0; i < n && !ours; ++i) {
+                const Frame* t = store_.get(names[i]);
+                if (t == nullptr || above.w < t->width || above.h < t->height) continue;
+                ours = TemplateMatcher::find(f, above, *t, kDialogScore).found;
+            }
+        };
+        if (deleting) look(kDeleteDialogs, std::size(kDeleteDialogs));
+        else          look(kDropDialogs, std::size(kDropDialogs));
+        if (!ours) {
+            say(deleting ? "hộp thoại này không phải hộp thoại xoá đồ, nên không bấm"
+                         : "hộp thoại này không phải hộp thoại vứt đồ, nên không bấm");
+            keep(f, "wrong_dialog");
             return kFailed;
         }
-        input_.click_at(box.cx(), box.cy());
-        wait_ms(120);
-        input_.key_press(VK_END, 25);
-        for (int i = 0; i < 6; ++i) input_.key_press(VK_BACK, 25);
-        input_.type_text(std::to_string(count));
-        wait_ms(200);
-    }
 
-    // Xác Nhận is the left half of the pair.
-    input_.click_at(button.at.x + button.at.w / 4, button.at.cy());
-    const Frame* notice = store_.get(kNotice);
-    for (int i = 0; i < 12; ++i) {
-        if (!wait_ms(150)) return kFailed;
-        if (!grab_ || !grab_(f) || !f.valid()) continue;
-        const ScreenRect all{ 0, 0, f.width, f.height };
-
-        // A refusal -- a message with only Xác Nhận under it -- is answered
-        // and counted as a failure.
-        if (notice != nullptr) {
-            const auto m = TemplateMatcher::find(f, all, *notice, 0.75f);
-            if (m.found && !TemplateMatcher::find(f, all, *confirm, kButtonScore).found) {
-                keep(f, "refused");
-                input_.click_at(m.at.x + m.at.w - 40, m.at.y + m.at.h - 14);
-                say("game không nhận, đã đóng thông báo");
+        // The dialogs for a stack have a quantity box left of the buttons:
+        // dark, where the others are the dialog's pale grey. It takes the
+        // exact number in the stack and nothing else, so an unreadable count
+        // is a stop, not a guess.
+        const ScreenRect box = clamp_to(f, ScreenRect{ button.at.x - 88, button.at.y + 3,
+                                                       82, std::max(4, button.at.h - 6) });
+        long total = 0;
+        int n = 0;
+        for (int y = box.y; y < box.y + box.h; ++y)
+            for (int x = box.x; x < box.x + box.w; ++x) { total += lum(f, x, y); ++n; }
+        if (n > 0 && total / n < 100) {
+            if (count <= 0) {
+                say("không đọc được số lượng trên ô đồ, nên bỏ qua món này");
+                keep(f, "no_count");
                 return kFailed;
             }
+            input_.click_at(box.cx(), box.cy());
+            wait_ms(120);
+            input_.key_press(VK_END, 25);
+            for (int i = 0; i < 6; ++i) input_.key_press(VK_BACK, 25);
+            input_.type_text(std::to_string(count));
+            wait_ms(200);
         }
-        if (!TemplateMatcher::find(f, all, *confirm, kButtonScore).found) return kDone;
+
+        // Xác Nhận is the left half of the pair.
+        input_.click_at(button.at.x + button.at.w / 4, button.at.cy());
+
+        // Wait for it to close. A refusal -- a message with only Xác Nhận
+        // under it -- is answered and counted as a failure.
+        bool closed = false;
+        for (int i = 0; i < 12 && !closed; ++i) {
+            if (!wait_ms(150)) return kFailed;
+            if (!grab_ || !grab_(f) || !f.valid()) continue;
+            const ScreenRect all{ 0, 0, f.width, f.height };
+            const bool pair = TemplateMatcher::find(f, all, *confirm, kButtonScore).found;
+            if (notice != nullptr && !pair) {
+                const auto m = TemplateMatcher::find(f, all, *notice, 0.75f);
+                if (m.found) {
+                    keep(f, "refused");
+                    input_.click_at(m.at.x + m.at.w - 40, m.at.y + m.at.h - 14);
+                    say("game không nhận, đã đóng thông báo");
+                    return kFailed;
+                }
+            }
+            closed = !pair;
+        }
+        if (!closed) {
+            say("hộp thoại không đóng lại");
+            keep(f, "stuck");
+            return kFailed;
+        }
     }
-    say("hộp thoại không đóng lại");
-    keep(f, "stuck");
-    return kFailed;
+    return kDone;
 }
 
 } // namespace gobot

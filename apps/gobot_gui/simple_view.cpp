@@ -1655,7 +1655,7 @@ void GuiApp::simple_trash_tab() {
         if (!capture.grab(input_.target_window(), frame) || !frame.valid()) {
             simple_note("Không chụp được màn hình game.", 7000);
         } else {
-            const BagView view = bag::find(frame, simple_store_);
+            const BagView view = bag::find(frame, simple_store_, simple_clean_.layout);
             if (!view.found) {
                 simple_note("Không thấy túi đồ trên màn hình. Mở túi đồ trong game (phím " +
                             InputManager::key_name(simple_clean_.bag_key) +
@@ -1665,7 +1665,7 @@ void GuiApp::simple_trash_tab() {
                 simple_bag_view_ = view;
                 simple_bag_shot_ = true;
                 simple_rematch_bag();
-                simple_note(view.has_trash
+                simple_note(view.bin_empty
                     ? "Đã chụp túi đồ. Bấm vào món muốn bỏ."
                     : "Đã chụp túi đồ, nhưng không thấy thùng rác. Thử lại khi túi đồ hiện rõ.",
                     7000);

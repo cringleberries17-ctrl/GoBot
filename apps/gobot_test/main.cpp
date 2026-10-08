@@ -4468,18 +4468,34 @@ void test_bag() {
         std::printf("  [skip] the bag pictures are not installed here\n");
         return;
     }
+    check(l.bin_dx == 228 && l.bin_dy == 178, "the bin is measured from the live client");
     Frame scene = bag_scene(1024, 768, 60);
     for (int y = 300; y < 300 + 220; ++y)            // the bag's dark panel
         for (int x = 290; x < 290 + 272; ++x) put_px(scene, x, y, 20, 22, 30);
     blit(scene, *store.get("grabbed/inventory"), 300, 300);
-    blit(scene, *store.get("inven/0/trash_can"), 300 + 215, 300 + 180);
+    blit(scene, *store.get("inven/0/trash_can"), 300 + l.bin_dx, 300 + l.bin_dy);
 
-    const BagView found = bag::find(scene, store);
+    const BagView found = bag::find(scene, store, l);
     check(found.found && found.strip.x == 300 && found.strip.y == 300,
           "the bag is found by its tab strip");
-    check(found.has_trash && std::abs(found.trash.x - 515) <= 1 &&
-              std::abs(found.trash.y - 480) <= 1,
-          "and the trash can in its corner");
+    check(found.bin_empty && std::abs(found.trash.x - (300 + l.bin_dx)) <= 1 &&
+              std::abs(found.trash.y - (300 + l.bin_dy)) <= 1,
+          "and its trash bin, empty, in the corner");
+
+    // With an item waiting in the bin the can is gone -- and a can-like
+    // picture elsewhere in the bag must not be taken for the bin. That is what
+    // sent drags into the middle of the bag on the first live try.
+    {
+        Frame loaded = scene;
+        const ScreenRect bin{ 300 + l.bin_dx - 4, 300 + l.bin_dy - 2, 24, 24 };
+        paint_item(loaded, bin, 6);
+        const auto in_bag = found.slots(l)[8];
+        blit(loaded, *store.get("inven/0/trash_can"), in_bag.x + 9, in_bag.y + 6);
+        const BagView busy = bag::find(loaded, store, l);
+        check(busy.found && !busy.bin_empty, "a bin with something in it is not empty");
+        check(busy.trash.x == 300 + l.bin_dx && busy.trash.y == 300 + l.bin_dy,
+              "and is still where the layout puts it, not where a can-like item is");
+    }
 
     const auto bag_slots = found.slots(l);
     paint_item(scene, bag_slots[5], 1);
