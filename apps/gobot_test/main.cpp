@@ -1,4 +1,4 @@
-﻿// gobot_test — self-tests for the parts that can be checked without the game.
+// gobot_test — self-tests for the parts that can be checked without the game.
 //
 // The protocol layers are the ones most likely to be subtly wrong and the
 // hardest to debug live: by the time a framing bug shows up as "the bot walks
@@ -7,6 +7,7 @@
 
 #include "gobot/byte_reader.hpp"
 #include "gobot/config.hpp"
+#include "gobot/capture_file.hpp"
 #include "gobot/framing.hpp"
 #include "gobot/game_state.hpp"
 #include "gobot/input_manager.hpp"
@@ -529,6 +530,104 @@ void test_both_framings_configured() {
                 "server spec %zu/%zu\n",
                 right.packets.size(), right.resyncs,
                 wrong.packets.size(), wrong.resyncs);
+}
+
+// --------------------------------------------------------- capture files
+
+/// Reading back a recording, and getting its direction right.
+///
+/// This exists because the first version got it wrong in a way that produced
+/// no error at all. It chose between the two framings on resync count, and
+/// both tile a short client capture with zero resyncs -- the scanner stops at
+/// the first header it cannot use rather than running to the end of the file,
+/// so "no resyncs" can mean "read two frames and gave up". The tie went to
+/// whichever was tried first and client recordings were read as server ones,
+/// silently, with plausible output.
+void test_capture_file() {
+    section("Reading a recorded capture");
+
+    FramingSpec server;
+    server.header_size = 8;
+    server.length_offset = 4; server.length_size = 2; server.length_le = true;
+    server.length_includes_header = true;
+    server.opcode_offset = 2; server.opcode_size = 2; server.opcode_le = true;
+    server.min_frame = 8; server.max_frame = 16384; server.checksum_offset = 6;
+
+    FramingSpec client;
+    client.header_size = 8;
+    client.length_offset = 4; client.length_size = 2; client.length_le = true;
+    client.length_includes_header = false; client.length_adjust = 4;
+    client.opcode_offset = 6; client.opcode_size = 2; client.opcode_le = true;
+    client.min_frame = 8; client.max_frame = 32768;
+
+    // The name decides the direction when it says one.
+    {
+        capture_file::Half h{};
+        check(capture_file::half_from_name("walk.c2s", h) &&
+              h == capture_file::Half::Client, "a .c2s name reads as the client half");
+        check(capture_file::half_from_name("probe.flow0.s2c", h) &&
+              h == capture_file::Half::Server, "and .flow0.s2c as the server half");
+        check(!capture_file::half_from_name("capture.bin", h),
+              "a name that says nothing is left to the scan");
+    }
+
+    // A client recording: 8-byte header, opcode at offset 6, body of 40.
+    std::vector<std::uint8_t> c2s;
+    for (int i = 0; i < 6; ++i) {
+        const std::uint16_t body = 36;              // length + adjust
+        c2s.push_back(static_cast<std::uint8_t>(i));   // sequence
+        c2s.push_back(0);
+        c2s.push_back(0); c2s.push_back(0);
+        c2s.push_back(static_cast<std::uint8_t>(body & 0xFF));
+        c2s.push_back(static_cast<std::uint8_t>(body >> 8));
+        c2s.push_back(0xC5); c2s.push_back(0x00);   // opcode 0x00C5 at offset 6
+        for (int b = 8; b < 48; ++b)
+            c2s.push_back(static_cast<std::uint8_t>(b * 3 + i));
+    }
+
+    const std::string path = temp_file("gobot_capture_test.c2s");
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(c2s.data()),
+                  static_cast<std::streamsize>(c2s.size()));
+    }
+
+    std::vector<Bytes> got;
+    const capture_file::Reading r =
+        capture_file::extract(path, server, client, 0x00C5, got);
+
+    check(r.ok, "the recording is read");
+    check(r.decided_by == capture_file::HalfSource::Name,
+          "and its direction comes from the name, not a guess");
+    check(r.half == capture_file::Half::Client,
+          "a .c2s file is read as the client half -- this is the bug that was "
+          "silent: both framings tile it, so a scan picks whichever is first");
+    check(got.size() == 6, "every packet of the opcode comes back -- got " +
+                           std::to_string(got.size()));
+    if (!got.empty())
+        check(got.front().size() == 40, "with the header stripped");
+
+    // The wrong spec must not quietly produce something that looks fine.
+    {
+        std::vector<Bytes> wrong;
+        const auto as_server = extract_frames(server, c2s.data(), c2s.size(),
+                                              Direction::ToClient, 0, false);
+        for (const auto& p : as_server.packets)
+            if (p.opcode == 0x00C5) wrong.push_back(p.payload);
+        check(wrong.size() != got.size() || as_server.packets.empty(),
+              "read under the server spec it does NOT yield the same packets");
+    }
+
+    std::remove(path.c_str());
+
+    // A missing file is an error, not an empty result that reads as "nothing
+    // of that opcode here".
+    {
+        std::vector<Bytes> none;
+        const auto bad = capture_file::extract("no_such_capture.c2s", server,
+                                               client, 0x0038, none);
+        check(!bad.ok && !bad.error.empty(), "a missing file reports an error");
+    }
 }
 
 // ------------------------------------------------------------- reassembly
@@ -4564,6 +4663,7 @@ int main() {
     test_framing_detect();
     test_checksum_framing();
     test_frame_trailer();
+    test_capture_file();
     test_both_framings_configured();
     test_reassembler();
     test_stream_tap();

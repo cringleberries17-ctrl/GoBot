@@ -1,0 +1,88 @@
+#include "gobot/capture_file.hpp"
+
+#include <algorithm>
+#include <fstream>
+#include <iterator>
+
+namespace gobot {
+namespace capture_file {
+namespace {
+
+bool ends_with(const std::string& s, const char* suffix) {
+    const std::string t = suffix;
+    return s.size() >= t.size() &&
+           std::equal(t.rbegin(), t.rend(), s.rbegin(),
+                      [](char a, char b) {
+                          return std::tolower(static_cast<unsigned char>(a)) ==
+                                 std::tolower(static_cast<unsigned char>(b));
+                      });
+}
+
+} // namespace
+
+bool half_from_name(const std::string& path, Half& out) {
+    if (ends_with(path, ".c2s")) { out = Half::Client; return true; }
+    if (ends_with(path, ".s2c")) { out = Half::Server; return true; }
+    return false;
+}
+
+Reading extract(const std::string& path,
+                const FramingSpec& server,
+                const FramingSpec& client,
+                std::uint16_t opcode,
+                std::vector<Bytes>& out) {
+    Reading r;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { r.error = "cannot read " + path; return r; }
+    const std::vector<std::uint8_t> buf((std::istreambuf_iterator<char>(in)),
+                                         std::istreambuf_iterator<char>());
+    if (buf.empty()) { r.error = path + " is empty"; return r; }
+
+    const bool have_client = client.plausible();
+
+    Half named{};
+    FrameScanResult scan;
+    if (half_from_name(path, named) && (named == Half::Server || have_client)) {
+        r.half = named;
+        r.decided_by = HalfSource::Name;
+        const FramingSpec& spec = (named == Half::Client) ? client : server;
+        const Direction dir = (named == Half::Client) ? Direction::ToServer
+                                                      : Direction::ToClient;
+        scan = extract_frames(spec, buf.data(), buf.size(), dir, 0, false);
+    } else {
+        r.decided_by = HalfSource::Scan;
+        // Frames first, resyncs only to break a tie: a spec that reads more of
+        // the file is reading more of the file, whereas a low resync count can
+        // simply mean the scanner gave up early.
+        FrameScanResult best;
+        bool have_best = false;
+        Half best_half = Half::Server;
+
+        const FrameScanResult s = extract_frames(server, buf.data(), buf.size(),
+                                                 Direction::ToClient, 0, false);
+        best = s; have_best = true; best_half = Half::Server;
+
+        if (have_client) {
+            const FrameScanResult c = extract_frames(client, buf.data(), buf.size(),
+                                                     Direction::ToServer, 0, false);
+            if (c.packets.size() > best.packets.size() ||
+                (c.packets.size() == best.packets.size() && c.resyncs < best.resyncs)) {
+                best = c; best_half = Half::Client;
+            }
+        }
+        if (!have_best) { r.error = "no usable framing"; return r; }
+        scan = std::move(best);
+        r.half = best_half;
+    }
+
+    r.frames = scan.packets.size();
+    r.resyncs = scan.resyncs;
+    for (const GamePacket& p : scan.packets)
+        if (p.opcode == opcode) out.push_back(p.payload);
+    r.ok = true;
+    return r;
+}
+
+} // namespace capture_file
+} // namespace gobot

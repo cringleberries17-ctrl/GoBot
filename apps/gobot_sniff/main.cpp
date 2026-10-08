@@ -18,6 +18,7 @@
 
 #include "gobot/byte_reader.hpp"
 #include "gobot/config.hpp"
+#include "gobot/capture_file.hpp"
 #include "gobot/framing.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/net_discovery.hpp"
@@ -733,18 +734,6 @@ int cmd_dump(const Options& o) {
 /// nonsense rather than an obvious failure.
 bool samples_from_file(const std::string& path, const std::string& config,
                        std::uint16_t opcode, std::vector<Bytes>& out) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        std::fprintf(stderr, "error: cannot read %s\n", path.c_str());
-        return false;
-    }
-    const std::vector<std::uint8_t> buf((std::istreambuf_iterator<char>(in)),
-                                         std::istreambuf_iterator<char>());
-    if (buf.empty()) {
-        std::fprintf(stderr, "error: %s is empty\n", path.c_str());
-        return false;
-    }
-
     bool have_server = false, have_client = false;
     const FramingSpec server = load_framing(config, have_server);
     const FramingSpec client = load_framing(config, have_client, "FramingClient");
@@ -753,71 +742,30 @@ bool samples_from_file(const std::string& path, const std::string& config,
         return false;
     }
 
-    struct Try { const char* name; const FramingSpec* spec; Direction dir; bool ok; };
-    const Try tries[] = {
-        { "[Framing] (server -> client)", &server, Direction::ToClient, true },
-        { "[FramingClient] (client -> server)", &client, Direction::ToServer, have_client },
-    };
+    const capture_file::Reading r =
+        capture_file::extract(path, server, have_client ? client : FramingSpec{},
+                              opcode, out);
+    if (!r.ok) {
+        std::fprintf(stderr, "error: %s\n", r.error.c_str());
+        return false;
+    }
 
-    // The name says it, when --record wrote it: <name>.s2c and <name>.c2s, and
-    // .flow0.s2c for a single connection. Trust that over guessing.
-    //
-    // Guessing is not reliable here. Both specs tile a 47-frame client capture
-    // with zero resyncs, because this scanner stops at the first header it
-    // cannot use rather than sliding to the end of the file -- so "no resyncs"
-    // can mean "read two frames and gave up" as easily as "read all of it".
-    // A tie then picks whichever was tried first, which is how a client
-    // recording comes to be read as a server one.
-    const auto ends_with = [&](const char* suffix) {
-        const std::string s = suffix;
-        return path.size() >= s.size() &&
-               path.compare(path.size() - s.size(), s.size(), s) == 0;
-    };
-
-    const Try* best = nullptr;
-    if (ends_with(".c2s") && have_client) best = &tries[1];
-    else if (ends_with(".s2c"))           best = &tries[0];
-
-    if (best) {
+    const char* half = (r.half == capture_file::Half::Client)
+                           ? "[FramingClient] (client -> server)"
+                           : "[Framing] (server -> client)";
+    if (r.decided_by == capture_file::HalfSource::Name)
         std::printf("  named %s, so reading it as %s\n",
-                    ends_with(".c2s") ? ".c2s" : ".s2c", best->name);
-    }
+                    (r.half == capture_file::Half::Client) ? ".c2s" : ".s2c", half);
+    else
+        std::printf("  no .s2c/.c2s in the name; read as %s\n", half);
+    std::printf("  %-36s %5zu frames, %6zu resync bytes\n\n",
+                half, r.frames, r.resyncs);
 
-    FrameScanResult best_scan;
-    if (best) {
-        best_scan = extract_frames(*best->spec, buf.data(), buf.size(),
-                                   best->dir, 0, false);
-        std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
-                    best->name, best_scan.packets.size(), best_scan.resyncs);
-    } else {
-        for (const Try& t : tries) {
-            if (!t.ok) continue;
-            FrameScanResult scan = extract_frames(*t.spec, buf.data(), buf.size(),
-                                                  t.dir, 0, false);
-            std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
-                        t.name, scan.packets.size(), scan.resyncs);
-            // Frames first, resyncs to break a tie. A spec that reads more of
-            // the file is reading more of the file.
-            if (!best || scan.packets.size() > best_scan.packets.size() ||
-                (scan.packets.size() == best_scan.packets.size() &&
-                 scan.resyncs < best_scan.resyncs)) {
-                best = &t;
-                best_scan = std::move(scan);
-            }
-        }
-        if (best)
-            std::printf("  -> no .s2c/.c2s in the name; read as %s\n", best->name);
-    }
-    if (!best) return false;
-    std::printf("\n");
-    if (best_scan.resyncs > best_scan.packets.size()) {
+    if (r.resyncs > r.frames) {
         std::printf("  !! more resync bytes than frames. Either this is the other\n"
                     "     direction, the framing is wrong, or the capture lost\n"
                     "     packets. Treat anything below with suspicion.\n\n");
     }
-
-    for (const GamePacket& p : best_scan.packets)
-        if (p.opcode == opcode) out.push_back(p.payload);
     return true;
 }
 

@@ -143,6 +143,7 @@ add_library(gobot_core STATIC
     src/logger.cpp
     src/config.cpp
     src/framing.cpp
+    src/capture_file.cpp
     src/tcp_reassembler.cpp
     src/packet_capture.cpp
     src/net_discovery.cpp
