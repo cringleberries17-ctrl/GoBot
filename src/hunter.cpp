@@ -27,6 +27,8 @@ bool HunterConfig::load(const std::string& path) {
     reach              = ini.get_int("Hunt", "reach", 150);
     height_tolerance   = ini.get_int("Hunt", "height_tolerance", 60);
     give_up_ms         = static_cast<std::uint32_t>(ini.get_int("Hunt", "give_up_ms", 4000));
+    dead_below         = ini.get_float("Hunt", "dead_below", 0.05f);
+    finish_wounded     = ini.get_bool("Hunt", "finish_wounded", true);
     step_ms            = static_cast<std::uint32_t>(ini.get_int("Hunt", "step_ms", 180));
     attack_interval_ms = static_cast<std::uint32_t>(ini.get_int("Hunt", "attack_interval_ms", 700));
     jump_to_reach      = ini.get_bool("Hunt", "jump_to_reach", true);
@@ -48,6 +50,8 @@ bool HunterConfig::save(const std::string& path) const {
     ini.set_int ("Hunt", "reach", reach);
     ini.set_int ("Hunt", "height_tolerance", height_tolerance);
     ini.set_int ("Hunt", "give_up_ms", static_cast<int>(give_up_ms));
+    ini.set_float("Hunt", "dead_below", dead_below);
+    ini.set_bool("Hunt", "finish_wounded", finish_wounded);
     ini.set_int ("Hunt", "step_ms", static_cast<int>(step_ms));
     ini.set_int ("Hunt", "attack_interval_ms", static_cast<int>(attack_interval_ms));
     ini.set_bool("Hunt", "jump_to_reach", jump_to_reach);
@@ -172,6 +176,14 @@ void Hunter::loop() {
             }
             // Too far from where it was: it died and this is a different one.
             if (best > 120) target = nullptr;
+
+            // Its bar is empty. Let go now rather than going on swinging at it
+            // until the give-up timer fires several seconds later.
+            if (target && target->hp <= cfg.dead_below) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++status_.targets_finished;
+                target = nullptr;
+            }
             if (target && now - target_since_ms_ > cfg.give_up_ms) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++status_.targets_dropped;
@@ -188,15 +200,37 @@ void Hunter::loop() {
             // seventy-nine steps and one swing.
             Nameplate me_now;
             if (detector_.player(me_now)) {
+                const Nameplate* wounded = nullptr;
                 for (const Nameplate& n : mobs) {
-                    if (std::abs(n.y() - me_now.y()) <= cfg.height_tolerance) {
-                        target = &n;
-                        break;
-                    }
+                    if (std::abs(n.y() - me_now.y()) > cfg.height_tolerance) continue;
+                    if (n.hp <= cfg.dead_below) continue;    // already finished
+                    if (!target) target = &n;                // nearest reachable
+                    if (cfg.finish_wounded &&
+                        (!wounded || n.hp < wounded->hp)) wounded = &n;
+                }
+                // Finish something already hurt instead of starting afresh.
+                // Only among those it could reach anyway, so this never sends
+                // it chasing across the screen.
+                if (wounded && wounded->hp < 1.0f) target = wounded;
+            }
+
+            // Nothing level, or no idea where we are: the nearest that still
+            // has health, and let the timer decide.
+            if (!target) {
+                for (const Nameplate& n : mobs) {
+                    if (n.hp > cfg.dead_below) { target = &n; break; }
                 }
             }
-            // Nothing level: take the nearest anyway and let the timer decide.
-            if (!target) target = &mobs.front();
+
+            // Everything in view reads as finished. Standing still beats
+            // swinging at a corpse, which holds the hunter in place while
+            // something living walks past.
+            if (!target) {
+                release_movement();
+                set_state(State::NoTargets);
+                have_target_ = false;
+                continue;
+            }
             target_since_ms_ = now;
         }
 

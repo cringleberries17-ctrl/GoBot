@@ -44,6 +44,31 @@ struct HunterConfig {
     /// into a wall under a platform it cannot climb.
     std::uint32_t give_up_ms = 4000;
 
+    /// Health, as a fraction of the plate's bar, below which a creature counts
+    /// as finished: not worth picking, and worth abandoning if it is the
+    /// current target.
+    ///
+    /// Target selection used to ignore the health bar entirely -- it picked by
+    /// position alone and noticed a death only when the plate had moved more
+    /// than 120 pixels from where it was. So the bot went on swinging at
+    /// something whose bar was empty until the give-up timer fired seconds
+    /// later, which is most of what "it attacks corpses" looks like from
+    /// outside.
+    ///
+    /// Not zero. MobDetector's reading is approximate -- its own comment says
+    /// the empty part of a bar is hard to bound -- so a creature at one or two
+    /// percent reads as a sliver rather than as nothing, and a bar that is
+    /// genuinely empty can measure slightly above zero.
+    float dead_below = 0.05f;
+
+    /// Prefer the most wounded reachable creature over the nearest one.
+    ///
+    /// Finishing something already hurt returns a kill sooner than starting on
+    /// a fresh one, and it stops the bot spreading damage across a whole
+    /// screen of monsters and killing none of them. Only ever among creatures
+    /// it could already reach, so this never sends it chasing across the map.
+    bool finish_wounded = true;
+
     /// How long a walk step presses the direction key.
     std::uint32_t step_ms = 180;
 
@@ -105,7 +130,13 @@ public:
         int        dx = 0, dy = 0;          ///< target relative to the player
         std::uint64_t attacks = 0;
         std::uint64_t steps = 0;
-        std::uint64_t targets_dropped = 0;
+        std::uint64_t targets_dropped = 0;    ///< gave up: out of reach too long
+
+        /// Let go because the bar was empty. Worth counting separately from
+        /// targets_dropped: one of these is a kill and the other is a failure
+        /// to reach something, and a panel showing only the sum cannot tell
+        /// you which the bot has been doing all afternoon.
+        std::uint64_t targets_finished = 0;
     };
     Status status() const;
 
