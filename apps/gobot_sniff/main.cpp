@@ -66,7 +66,8 @@ COMMANDS
   --dump <opcode>            Hexdump live packets of one opcode.
   --diff <opcode>            Show which byte offsets change between successive
                              packets of one opcode. This is how you locate
-                             coordinate, HP and id fields.
+                             coordinate, HP and id fields. Add --from to read a
+                             recording instead of live traffic.
   --decode                   Decode live traffic with configs/protocol.ini and
                              print the result. Use to verify a layout.
   --analyze                  Capture, then infer what each opcode means. Same
@@ -82,6 +83,16 @@ OPTIONS
   --config <path>            Protocol config (default: configs/protocol.ini).
   --seconds <n>              Stop after n seconds (default: run until Ctrl+C).
   --max <n>                  For --dump/--diff: stop after n packets.
+  --from <capture>           For --diff: analyse a file written by --record
+                             instead of capturing. Needs no game running and
+                             nothing happening in front of you, and the same
+                             bytes can be re-read when a hypothesis changes --
+                             which is the difference between measuring and
+                             remembering. Both framings are tried and the one
+                             that tiles is used, since a recording does not say
+                             which direction it holds.
+                             (Still prompts for Administrator: this program
+                             asks for it up front because capture needs it.)
   --verbose                  Debug logging.
 
 NOTES
@@ -93,6 +104,7 @@ NOTES
 struct Options {
     std::string command;
     std::string file;
+    std::string from;        ///< --from: analyse this recording, not live traffic
     std::string iface;
     std::string host;
     std::string filter;
@@ -136,6 +148,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--config")   { o.config = next("--config"); }
         else if (a == "--seconds")  { o.seconds = std::stoi(next("--seconds")); }
         else if (a == "--max")      { o.max = std::stoi(next("--max")); }
+        else if (a == "--from")     { o.from = next("--from"); }
         else if (a == "--verbose")  { o.verbose = true; }
         else if (a == "--help" || a == "-h") { print_usage(); std::exit(0); }
         else {
@@ -701,53 +714,129 @@ int cmd_dump(const Options& o) {
 /// entity; a coordinate changes smoothly as you walk; HP changes only when you
 /// take damage. The change *pattern* identifies the field far more reliably
 /// than staring at hex.
-int cmd_diff(const Options& o) {
-    bool have_framing = false;
-    const FramingSpec spec = load_framing(o.config, have_framing);
-    if (!have_framing) {
-        std::fprintf(stderr, "error: no [Framing] section in %s\n", o.config.c_str());
-        return 1;
+/// Read a recorded stream and pull out every payload of one opcode.
+///
+/// A recording does not say which direction it is, and the two are framed
+/// differently, so both specs are tried and the one that tiles is used. That
+/// choice is reported: a file analysed under the wrong spec yields plausible
+/// nonsense rather than an obvious failure.
+bool samples_from_file(const std::string& path, const std::string& config,
+                       std::uint16_t opcode, std::vector<Bytes>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::fprintf(stderr, "error: cannot read %s\n", path.c_str());
+        return false;
+    }
+    const std::vector<std::uint8_t> buf((std::istreambuf_iterator<char>(in)),
+                                         std::istreambuf_iterator<char>());
+    if (buf.empty()) {
+        std::fprintf(stderr, "error: %s is empty\n", path.c_str());
+        return false;
     }
 
-    PacketCapture cap;
-    cap.set_framing(spec);
-    attach_client_framing(cap, o.config);
-    cap.set_opcode_filter({ o.opcode });
+    bool have_server = false, have_client = false;
+    const FramingSpec server = load_framing(config, have_server);
+    const FramingSpec client = load_framing(config, have_client, "FramingClient");
+    if (!have_server) {
+        std::fprintf(stderr, "error: no [Framing] section in %s\n", config.c_str());
+        return false;
+    }
 
-    std::mutex mutex;
+    struct Try { const char* name; const FramingSpec* spec; Direction dir; bool ok; };
+    const Try tries[] = {
+        { "[Framing] (server -> client)", &server, Direction::ToClient, true },
+        { "[FramingClient] (client -> server)", &client, Direction::ToServer, have_client },
+    };
+
+    const Try* best = nullptr;
+    FrameScanResult best_scan;
+    for (const Try& t : tries) {
+        if (!t.ok) continue;
+        FrameScanResult scan = extract_frames(*t.spec, buf.data(), buf.size(),
+                                              t.dir, 0, false);
+        std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
+                    t.name, scan.packets.size(), scan.resyncs);
+        // Resyncs, not coverage: a wrong spec can swallow a whole file inside
+        // one bogus oversized frame and call that 100% covered.
+        if (!best || scan.resyncs < best_scan.resyncs ||
+            (scan.resyncs == best_scan.resyncs &&
+             scan.packets.size() > best_scan.packets.size())) {
+            best = &t;
+            best_scan = std::move(scan);
+        }
+    }
+    if (!best) return false;
+
+    std::printf("  -> read as %s\n\n", best->name);
+    if (best_scan.resyncs > best_scan.packets.size()) {
+        std::printf("  !! more resync bytes than frames. Either this is the other\n"
+                    "     direction, the framing is wrong, or the capture lost\n"
+                    "     packets. Treat anything below with suspicion.\n\n");
+    }
+
+    for (const GamePacket& p : best_scan.packets)
+        if (p.opcode == opcode) out.push_back(p.payload);
+    return true;
+}
+
+int cmd_diff(const Options& o) {
     std::vector<Bytes> samples;
-    const int want = o.max > 0 ? o.max : 200;
 
-    cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
-        std::lock_guard<std::mutex> lock(mutex);
-        for (const auto& p : packets) {
-            if (p.opcode != o.opcode) continue;
-            samples.push_back(p.payload);
-            if (static_cast<int>(samples.size()) >= want) g_stop.store(true);
+    if (!o.from.empty()) {
+        // Re-analysing a recording. No game, no Administrator, no waiting for
+        // the right thing to happen in front of you -- and the same bytes can
+        // be examined again after a hypothesis changes, which live capture
+        // cannot offer.
+        std::printf("Reading %s\n", o.from.c_str());
+        if (!samples_from_file(o.from, o.config, o.opcode, samples)) return 1;
+        std::printf("%zu packets of opcode 0x%04X in the recording.\n",
+                    samples.size(), o.opcode);
+    } else {
+        bool have_framing = false;
+        const FramingSpec spec = load_framing(o.config, have_framing);
+        if (!have_framing) {
+            std::fprintf(stderr, "error: no [Framing] section in %s\n", o.config.c_str());
+            return 1;
         }
-    });
 
-    if (!cap.start(make_capture_config(o))) return 1;
+        PacketCapture cap;
+        cap.set_framing(spec);
+        attach_client_framing(cap, o.config);
+        cap.set_opcode_filter({ o.opcode });
 
-    std::printf("Collecting up to %d packets of opcode 0x%04X.\n", want, o.opcode);
-    std::printf("Do one thing at a time in game — walk left and right, then\n"
-                "stand still and take damage. Ctrl+C when done.\n\n");
+        std::mutex mutex;
+        const int want = o.max > 0 ? o.max : 200;
 
-    std::thread reporter([&] {
-        while (!g_stop.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+        cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
             std::lock_guard<std::mutex> lock(mutex);
-            std::printf("\r  %zu / %d collected  ", samples.size(), want);
-            std::fflush(stdout);
-        }
-    });
+            for (const auto& p : packets) {
+                if (p.opcode != o.opcode) continue;
+                samples.push_back(p.payload);
+                if (static_cast<int>(samples.size()) >= want) g_stop.store(true);
+            }
+        });
 
-    wait_for_stop(o.seconds);
-    g_stop.store(true);
-    reporter.join();
-    cap.stop();
+        if (!cap.start(make_capture_config(o))) return 1;
 
-    std::lock_guard<std::mutex> lock(mutex);
+        std::printf("Collecting up to %d packets of opcode 0x%04X.\n", want, o.opcode);
+        std::printf("Do one thing at a time in game — walk left and right, then\n"
+                    "stand still and take damage. Ctrl+C when done.\n\n");
+
+        std::thread reporter([&] {
+            while (!g_stop.load()) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::lock_guard<std::mutex> lock(mutex);
+                std::printf("\r  %zu / %d collected  ", samples.size(), want);
+                std::fflush(stdout);
+            }
+        });
+
+        wait_for_stop(o.seconds);
+        g_stop.store(true);
+        reporter.join();
+        cap.stop();
+    }
+
     if (samples.size() < 2) {
         std::fprintf(stderr, "\nNeed at least 2 packets, got %zu.\n", samples.size());
         return 1;

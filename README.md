@@ -37,6 +37,39 @@ Everything else — capture, reassembly, framing, decoding, world model,
 targeting, skill rotation, healing, buffing, pathfinding, input — is written
 and working.
 
+### What is actually known about the protocol
+
+Measured, not assumed. The detail and the evidence are in
+[docs/protocol-findings.md](docs/protocol-findings.md).
+
+- **The server stream parses cleanly** — 100% coverage, zero resyncs — and the
+  monster world model matches the commercial client exactly: 42 creatures
+  against its 43.
+- **`0x0038` is the entity update.** `id@8`, `x@80`, `y@82` are confirmed. It
+  carries a **sub-type at offset 4**: 0 and 1 restate a creature where it
+  already is, 9 relocates it and carries the move parameters. Reading a field
+  without splitting on that first averages three layouts together.
+- **Your own position is not transmitted in either direction.** The server
+  broadcasts every other actor and says nothing about you. Memory reading is
+  closed off by XIGNCODE3, and the on-screen `WorldAnchor` never converges.
+  Dead reckoning from the bot's own issued commands is the remaining route,
+  and it is what ZTeam's server must have been doing too.
+- **Map geometry needs no protocol work at all.** The game ships 781 `.map`
+  collision files and `MapFile` already reads them; that is what ZTeam's server
+  was parsing and charging for.
+
+### A warning about this game's framing
+
+Two things here will cost a day each if met without warning, and both are
+configured correctly now:
+
+- **Opcode `0x0081` carries twelve bytes past its declared length.** Miss it and
+  the scanner resyncs, slides a byte at a time and swallows real frames — one
+  such packet every few hundred frames hid 73% of the stream.
+- **The two directions are framed differently.** The opcode sits at offset 2
+  coming down and offset 6 going up, so a capture given only `[Framing]`
+  decodes the server and grinds the client's half into noise.
+
 ---
 
 ## Build
@@ -67,11 +100,13 @@ Verify the build:
 .\build\bin\Release\gobot_test.exe
 ```
 
-103 checks covering the layers that can be tested without the game — frame
-extraction and resync, framing auto-detection, TCP reassembly (out-of-order,
-retransmits, partial overlap), packet decoding, the world model, and
-pathfinding. These are where a subtle bug is most expensive: by the time bad
-framing surfaces as "the bot walks into a wall", the cause is six layers down.
+663 checks covering the layers that can be tested without the game — frame
+extraction and resync, frames that carry a trailer, both directions being
+framed, framing auto-detection, TCP reassembly (out-of-order, retransmits,
+partial overlap), packet decoding, the world model, pathfinding, the glyph
+reader, and the shipped configs themselves. These are where a subtle bug is
+most expensive: by the time bad framing surfaces as "the bot walks into a
+wall", the cause is six layers down.
 
 Npcap itself must already be installed (it is, if the original client ran) —
 get it from <https://npcap.com/#download> with *WinPcap API-compatible Mode*
@@ -379,15 +414,26 @@ otherwise the character keeps running into a wall after you alt-tab.
 - **Encrypted payloads defeat this entirely.** If `--detect` finds no tiling,
   stop here.
 - **Position accuracy is what the protocol gives you.** If the server only
-  broadcasts movement every 200ms, the bot's world model is 200ms stale.
-- **No vision layer.** The original also did OpenCV template matching for
-  inventory, shops, quests and captcha solving. This is packet-only, by
-  choice — those features would need that layer rebuilt.
+  broadcasts movement every 200ms, the bot's world model is 200ms stale. And
+  your *own* position is not broadcast at all — see the protocol notes above.
+- **There is a vision layer, and it is not optional.** This file used to say
+  there was none. There is: template matching, a glyph reader, HP/MP bar
+  reading, nameplate detection, minimap recognition, auto-login and the macro
+  mode all read the screen, and the macro works with no packet capture at all.
+  What vision does *not* do reliably is supply world state — `WorldAnchor`
+  never converges on a position — so it belongs on the interface, not the
+  world.
+- **Reading the screen needs the game unobscured.** `PrintWindow` returns a
+  blank frame for this client, so pixels are lifted off the screen itself.
+  Anything covering the game gets read instead of the game.
 - **Captcha suspends the bot rather than solving it.** A dialog that eats
   keystrokes plus a bot that keeps typing combat keys into it is worse than
   stopping.
-- **Pathfinding needs a `map_data` packet.** Without one, movement is direct
-  walking only. `enable_tile_pathfinding` stays off until you have it.
+- **Pathfinding needs to know *which* map you are in, not map data.** The
+  geometry is already there: 781 `.map` files the game ships, which `MapFile`
+  reads. What is missing is identifying the current one — currently done by
+  minimap fingerprinting and reading the place name off the title bar, neither
+  of which is solid — and knowing where in it you are.
 
 ---
 
