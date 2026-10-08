@@ -93,6 +93,15 @@ OPTIONS
                              which direction it holds.
                              (Still prompts for Administrator: this program
                              asks for it up front because capture needs it.)
+  --versus <capture>         For --diff --from: compare the two recordings
+                             rather than describing one. Record one capture
+                             standing still and one walking, and the position
+                             fields are the ones quiet in the first and busy in
+                             the second. Timers and sequence numbers are busy
+                             in both and rule themselves out -- which a single
+                             capture cannot tell you, and which is how an
+                             afternoon gets spent on a field that turns out to
+                             be a clock.
   --verbose                  Debug logging.
 
 NOTES
@@ -105,6 +114,7 @@ struct Options {
     std::string command;
     std::string file;
     std::string from;        ///< --from: analyse this recording, not live traffic
+    std::string versus;      ///< --versus: compare --from against this one
     std::string iface;
     std::string host;
     std::string filter;
@@ -149,6 +159,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--seconds")  { o.seconds = std::stoi(next("--seconds")); }
         else if (a == "--max")      { o.max = std::stoi(next("--max")); }
         else if (a == "--from")     { o.from = next("--from"); }
+        else if (a == "--versus")   { o.versus = next("--versus"); }
         else if (a == "--verbose")  { o.verbose = true; }
         else if (a == "--help" || a == "-h") { print_usage(); std::exit(0); }
         else {
@@ -748,26 +759,57 @@ bool samples_from_file(const std::string& path, const std::string& config,
         { "[FramingClient] (client -> server)", &client, Direction::ToServer, have_client },
     };
 
+    // The name says it, when --record wrote it: <name>.s2c and <name>.c2s, and
+    // .flow0.s2c for a single connection. Trust that over guessing.
+    //
+    // Guessing is not reliable here. Both specs tile a 47-frame client capture
+    // with zero resyncs, because this scanner stops at the first header it
+    // cannot use rather than sliding to the end of the file -- so "no resyncs"
+    // can mean "read two frames and gave up" as easily as "read all of it".
+    // A tie then picks whichever was tried first, which is how a client
+    // recording comes to be read as a server one.
+    const auto ends_with = [&](const char* suffix) {
+        const std::string s = suffix;
+        return path.size() >= s.size() &&
+               path.compare(path.size() - s.size(), s.size(), s) == 0;
+    };
+
     const Try* best = nullptr;
+    if (ends_with(".c2s") && have_client) best = &tries[1];
+    else if (ends_with(".s2c"))           best = &tries[0];
+
+    if (best) {
+        std::printf("  named %s, so reading it as %s\n",
+                    ends_with(".c2s") ? ".c2s" : ".s2c", best->name);
+    }
+
     FrameScanResult best_scan;
-    for (const Try& t : tries) {
-        if (!t.ok) continue;
-        FrameScanResult scan = extract_frames(*t.spec, buf.data(), buf.size(),
-                                              t.dir, 0, false);
+    if (best) {
+        best_scan = extract_frames(*best->spec, buf.data(), buf.size(),
+                                   best->dir, 0, false);
         std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
-                    t.name, scan.packets.size(), scan.resyncs);
-        // Resyncs, not coverage: a wrong spec can swallow a whole file inside
-        // one bogus oversized frame and call that 100% covered.
-        if (!best || scan.resyncs < best_scan.resyncs ||
-            (scan.resyncs == best_scan.resyncs &&
-             scan.packets.size() > best_scan.packets.size())) {
-            best = &t;
-            best_scan = std::move(scan);
+                    best->name, best_scan.packets.size(), best_scan.resyncs);
+    } else {
+        for (const Try& t : tries) {
+            if (!t.ok) continue;
+            FrameScanResult scan = extract_frames(*t.spec, buf.data(), buf.size(),
+                                                  t.dir, 0, false);
+            std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
+                        t.name, scan.packets.size(), scan.resyncs);
+            // Frames first, resyncs to break a tie. A spec that reads more of
+            // the file is reading more of the file.
+            if (!best || scan.packets.size() > best_scan.packets.size() ||
+                (scan.packets.size() == best_scan.packets.size() &&
+                 scan.resyncs < best_scan.resyncs)) {
+                best = &t;
+                best_scan = std::move(scan);
+            }
         }
+        if (best)
+            std::printf("  -> no .s2c/.c2s in the name; read as %s\n", best->name);
     }
     if (!best) return false;
-
-    std::printf("  -> read as %s\n\n", best->name);
+    std::printf("\n");
     if (best_scan.resyncs > best_scan.packets.size()) {
         std::printf("  !! more resync bytes than frames. Either this is the other\n"
                     "     direction, the framing is wrong, or the capture lost\n"
@@ -779,7 +821,98 @@ bool samples_from_file(const std::string& path, const std::string& config,
     return true;
 }
 
+/// Compare one opcode across two recordings taken under different conditions.
+///
+/// A single capture says which bytes move. Two say which bytes move *because
+/// of the thing you changed*, and that is a different and much sharper
+/// question. Record one capture standing still and one walking, and the
+/// position fields are the ones that are quiet in the first and busy in the
+/// second -- while timers and sequence numbers, which look identical to a
+/// single-capture scan, are busy in both and rule themselves out.
+int diff_two(const Options& o) {
+    std::vector<Bytes> a, b;
+    std::printf("A: %s\n", o.from.c_str());
+    if (!samples_from_file(o.from, o.config, o.opcode, a)) return 1;
+    std::printf("B: %s\n", o.versus.c_str());
+    if (!samples_from_file(o.versus, o.config, o.opcode, b)) return 1;
+
+    if (a.size() < 2 || b.size() < 2) {
+        std::fprintf(stderr, "Need at least 2 packets of 0x%04X in each: "
+                             "got %zu and %zu.\n", o.opcode, a.size(), b.size());
+        return 1;
+    }
+
+    std::size_t common = a.front().size();
+    for (const auto& s : a) common = std::min(common, s.size());
+    for (const auto& s : b) common = std::min(common, s.size());
+
+    std::printf("\n0x%04X: %zu packets in A, %zu in B, %zu common bytes\n\n",
+                o.opcode, a.size(), b.size(), common);
+
+    const auto distinct_at = [](const std::vector<Bytes>& v, std::size_t off) {
+        std::vector<std::uint8_t> vals;
+        vals.reserve(v.size());
+        for (const auto& s : v) vals.push_back(s[off]);
+        std::sort(vals.begin(), vals.end());
+        return static_cast<std::size_t>(
+            std::distance(vals.begin(), std::unique(vals.begin(), vals.end())));
+    };
+
+    std::printf("%-8s %-10s %-10s %s\n", "offset", "A distinct", "B distinct", "reading");
+    std::printf("%s\n", std::string(66, '-').c_str());
+
+    std::vector<std::size_t> woke, slept;
+    for (std::size_t off = 0; off < common; ++off) {
+        const std::size_t da = distinct_at(a, off);
+        const std::size_t db = distinct_at(b, off);
+        if (da == 1 && db == 1) continue;             // dead in both; say nothing
+
+        const char* note = "varies in both  <- timer, sequence or counter";
+        if (da <= 2 && db >= 5)      { note = "QUIET in A, ACTIVE in B"; woke.push_back(off); }
+        else if (da >= 5 && db <= 2) { note = "ACTIVE in A, quiet in B"; slept.push_back(off); }
+        else if (da == 1)            { note = "constant in A only"; }
+        else if (db == 1)            { note = "constant in B only"; }
+
+        std::printf("  %-6zu %-10zu %-10zu %s\n", off, da, db, note);
+    }
+
+    const auto runs_of = [&](const std::vector<std::size_t>& offs, const char* what) {
+        if (offs.empty()) return;
+        std::printf("\n%s:\n", what);
+        std::size_t i = 0;
+        while (i < offs.size()) {
+            std::size_t j = i;
+            while (j + 1 < offs.size() && offs[j + 1] == offs[j] + 1) ++j;
+            const std::size_t len = j - i + 1;
+            const char* guess = (len == 1) ? "u8"
+                              : (len == 2) ? "u16 / i16"
+                              : (len == 4) ? "u32 / i32 / f32"
+                                           : "struct or string";
+            std::printf("  offset %-4zu length %-3zu  -> %s\n", offs[i], len, guess);
+            i = j + 1;
+        }
+    };
+    runs_of(woke, "Became active in B -- the fields that respond to what changed");
+    runs_of(slept, "Went quiet in B");
+
+    if (woke.empty() && slept.empty()) {
+        std::printf("\nNothing changed behaviour between the two captures. Either the\n"
+                    "thing you varied is not reported in this opcode, or both captures\n"
+                    "caught the same conditions.\n");
+    }
+    return 0;
+}
+
 int cmd_diff(const Options& o) {
+    if (!o.versus.empty()) {
+        if (o.from.empty()) {
+            std::fprintf(stderr, "--versus needs --from as well: two recordings "
+                                 "to compare.\n");
+            return 1;
+        }
+        return diff_two(o);
+    }
+
     std::vector<Bytes> samples;
 
     if (!o.from.empty()) {
