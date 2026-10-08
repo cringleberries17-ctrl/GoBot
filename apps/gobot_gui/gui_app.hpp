@@ -137,6 +137,10 @@ private:
 
     void draw_profile_panel();     ///< class, weapon, and the range preset
     void draw_attack_panel();      ///< what it hits and how it stands to hit it
+    void draw_hunt_settings();     ///< the hunter's knobs, shared with Radar
+    /// Whether the protocol map can place the character. Without that the
+    /// packet bot has no idea where it is, and Attack uses the hunter.
+    bool packet_bot_can_see_self() const;
     void draw_buff_panel();
     void draw_waypoints_panel();
     void draw_area_panel();

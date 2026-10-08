@@ -1154,11 +1154,30 @@ void GuiApp::draw_feature_list() {
     ImGui::Dummy(ImVec2(0, 4));
 
     // --- what it fights, and how ---
-    bool attacking = bot_running_;
+    // Attack drives whichever engine can actually fight.
+    //
+    // It used to start the packet bot unconditionally. That bot needs your
+    // own position and nothing in the protocol map supplies one -- the server
+    // does not send it -- so ticking the one control everybody reaches for
+    // first either did nothing (no capture running: the tick quietly undid
+    // itself) or started a bot ranking monsters by their distance from the
+    // map's origin. The engine that works, the name-plate hunter, was three
+    // menus down under a heading saying none of it was needed.
+    //
+    // Now: the packet bot when the protocol map can place the character, the
+    // hunter otherwise. When a self-position layout is mapped this switches
+    // over by itself, with nothing else to change.
+    const bool via_packets = packet_bot_can_see_self();
+    const bool engaged = via_packets ? bot_running_ : hunting_;
+    bool attacking = engaged;
     draw_feature("Attack", &attacking,
-                 "picks a target and fights it",
+                 via_packets ? "picks a target and fights it -- from packets"
+                             : "picks a target and fights it -- by name plates",
                  [this] { draw_attack_panel(); });
-    if (attacking != bot_running_) { if (attacking) start_bot(); else stop_bot(); }
+    if (attacking != engaged) {
+        if (via_packets) { if (attacking) start_bot();  else stop_bot();  }
+        else             { if (attacking) start_hunt(); else stop_hunt(); }
+    }
 
     draw_feature("Weapon ranges", nullptr,
                  "how far to stand, from the weapon",
@@ -1789,7 +1808,47 @@ void GuiApp::draw_profile_panel() {
 
 /// What it hits, and how it stands in order to hit it. The old Bot and Skills
 /// panels put together, which is where the original keeps them.
+bool GuiApp::packet_bot_can_see_self() const {
+    return !registry_.opcodes_for(Semantic::SelfState).empty() ||
+           !registry_.opcodes_for(Semantic::SelfMove).empty();
+}
+
 void GuiApp::draw_attack_panel() {
+    if (!packet_bot_can_see_self()) {
+        ImGui::TextWrapped(
+            "Fighting by name plates: monsters are found on screen by their red "
+            "health bars, and your character by its name. The packet bot takes "
+            "over by itself once the protocol map can say where you are standing "
+            "-- the server does not send that, so for now this is the engine "
+            "that can fight.");
+        ImGui::Dummy(ImVec2(0, 4));
+
+        const Hunter::Status hs = hunter_->status();
+        if (hunting_) {
+            const bool good = hs.state == Hunter::State::Attacking ||
+                              hs.state == Hunter::State::Approaching;
+            ImGui::PushStyleColor(ImGuiCol_Text, good ? kGreen : kAmber);
+            ImGui::Text("%s", Hunter::to_string(hs.state));
+            ImGui::PopStyleColor();
+        } else {
+            text_dim("not running");
+        }
+        // Kills and give-ups apart: one is the bot working, the other is it
+        // failing to reach something, and only the split says which.
+        text_dim("%llu attacks   %llu finished off   %llu given up on (out of reach)",
+                 static_cast<unsigned long long>(hs.attacks),
+                 static_cast<unsigned long long>(hs.targets_finished),
+                 static_cast<unsigned long long>(hs.targets_dropped));
+
+        draw_hunt_settings();
+
+        ImGui::Dummy(ImVec2(0, 6));
+        if (ImGui::Button("Save##hunt", ImVec2(110, 0))) save_hunt_config();
+        ImGui::SameLine();
+        text_dim("The view of what it can see is under View > Advanced panels > Radar.");
+        return;
+    }
+
     draw_bot_panel();
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::Separator();
@@ -3544,6 +3603,130 @@ void GuiApp::save_hunt_config() {
     }
 }
 
+/// The hunter's settings, shared by the Attack feature and the Radar tab.
+void GuiApp::draw_hunt_settings() {
+    // ---- hunting settings ----
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::SeparatorText("Hunting");
+
+    bool changed = false;
+
+    // How the bot sees its own character. Nothing else on screen will do it:
+    // every creature is found by its health bar and the local character has
+    // none, so without a name here the bot knows where the monsters are and
+    // not where it is standing.
+    {
+        char name[64];
+        copy_to(name, sizeof(name), hunt_config_.character_name);
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::InputText("Your character's name", name, sizeof(name))) {
+            hunt_config_.character_name = name;
+            detector_.set_character_name(hunt_config_.character_name);
+            changed = true;
+        }
+        help_marker("Exactly as the game writes it under your feet. The bot "
+                    "reads the screen for it -- your character has no health "
+                    "bar to be spotted by, because your health is in the HUD. "
+                    "Without this it can see the monsters but not itself.");
+
+        if (!font_.loaded()) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                               "(no glyph set installed -- cannot read names)");
+        } else if (hunt_config_.character_name.empty()) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "(not set)");
+        }
+        ImGui::Dummy(ImVec2(0, 4));
+    }
+
+    char key[24];
+    copy_to(key, sizeof(key), InputManager::key_name(hunt_config_.attack_key));
+    ImGui::SetNextItemWidth(110);
+    if (ImGui::InputText("Attack key", key, sizeof(key))) {
+        if (const std::uint32_t vk = InputManager::parse_key(key)) {
+            hunt_config_.attack_key = vk;
+            changed = true;
+        }
+    }
+    help_marker("The skill the hunter throws when it is in range. Your other "
+                "skills keep running on the Macro tab's timers alongside it.");
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    changed |= ImGui::SliderInt("Reach (px)", &hunt_config_.reach, 40, 400);
+    help_marker("How close it has to be before attacking instead of walking. "
+                "Set this to about how far your attack actually reaches -- the "
+                "boxes in the view above are in the same pixels.");
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    changed |= ImGui::SliderInt("Height (px)", &hunt_config_.height_tolerance, 10, 200);
+    help_marker("How far above or below a monster may be and still count as "
+                "reachable. Too large and the bot swings at things on other "
+                "platforms.");
+
+    int attack_ms = static_cast<int>(hunt_config_.attack_interval_ms);
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::SliderInt("Swing every (ms)", &attack_ms, 200, 3000)) {
+        hunt_config_.attack_interval_ms = static_cast<std::uint32_t>(attack_ms);
+        changed = true;
+    }
+
+    ImGui::SameLine();
+    int step_ms = static_cast<int>(hunt_config_.step_ms);
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::SliderInt("Step (ms)", &step_ms, 40, 500)) {
+        hunt_config_.step_ms = static_cast<std::uint32_t>(step_ms);
+        changed = true;
+    }
+
+    ImGui::SameLine();
+    int give_up = static_cast<int>(hunt_config_.give_up_ms);
+    ImGui::SetNextItemWidth(170);
+    if (ImGui::SliderInt("Give up after (ms)", &give_up, 1000, 15000)) {
+        hunt_config_.give_up_ms = static_cast<std::uint32_t>(give_up);
+        changed = true;
+    }
+    help_marker("A target it cannot reach in this long is abandoned for the next "
+                "one. Without it the bot walks into the wall under a ledge for "
+                "the rest of the session.");
+
+    changed |= ImGui::Checkbox("Jump at things above you", &hunt_config_.jump_to_reach);
+    ImGui::SameLine();
+    changed |= ImGui::Checkbox("Only while the game has focus##hunt",
+                               &hunt_config_.require_focus);
+    ImGui::SameLine();
+    changed |= ImGui::Checkbox("Bring the game to the front when starting##hunt",
+                               &hunt_config_.focus_on_start);
+    help_marker("Clicking START HUNTING takes focus off the game, and the hunter "
+                "will not send anything to an unfocused window -- so without this "
+                "it starts and waits forever. Only on the way on: it never grabs "
+                "the foreground back while running.");
+
+
+    // ---- what counts as dead, and what to finish first ----
+    {
+        int dead_pct = static_cast<int>(hunt_config_.dead_below * 100.0f + 0.5f);
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::SliderInt("Dead below (%)", &dead_pct, 0, 30)) {
+            hunt_config_.dead_below = static_cast<float>(dead_pct) / 100.0f;
+            changed = true;
+        }
+        help_marker("A monster whose health bar reads below this is treated as "
+                    "dead: the hunter lets go of it at once and never picks it. "
+                    "Not zero, because reading a bar is approximate and an empty "
+                    "one can measure slightly above nothing.");
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Finish the wounded first", &hunt_config_.finish_wounded);
+        help_marker("Among monsters it can already reach, go for the most hurt "
+                    "instead of the nearest. Kills come sooner, and damage is not "
+                    "spread across a whole screen of monsters killing none of them.");
+    }
+
+    if (changed) hunter_->set_config(hunt_config_);
+}
+
 void GuiApp::draw_radar_panel() {
     ImGui::TextWrapped(
         "Finds monsters by their name plates. Every creature on screen wears a "
@@ -3737,106 +3920,7 @@ void GuiApp::draw_radar_panel() {
     ImGui::SeparatorText("Where you are, and places worth coming back to");
     draw_movement_section();
 
-    // ---- hunting settings ----
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::SeparatorText("Hunting");
-
-    bool changed = false;
-
-    // How the bot sees its own character. Nothing else on screen will do it:
-    // every creature is found by its health bar and the local character has
-    // none, so without a name here the bot knows where the monsters are and
-    // not where it is standing.
-    {
-        char name[64];
-        copy_to(name, sizeof(name), hunt_config_.character_name);
-        ImGui::SetNextItemWidth(220);
-        if (ImGui::InputText("Your character's name", name, sizeof(name))) {
-            hunt_config_.character_name = name;
-            detector_.set_character_name(hunt_config_.character_name);
-            changed = true;
-        }
-        help_marker("Exactly as the game writes it under your feet. The bot "
-                    "reads the screen for it -- your character has no health "
-                    "bar to be spotted by, because your health is in the HUD. "
-                    "Without this it can see the monsters but not itself.");
-
-        if (!font_.loaded()) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                               "(no glyph set installed -- cannot read names)");
-        } else if (hunt_config_.character_name.empty()) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "(not set)");
-        }
-        ImGui::Dummy(ImVec2(0, 4));
-    }
-
-    char key[24];
-    copy_to(key, sizeof(key), InputManager::key_name(hunt_config_.attack_key));
-    ImGui::SetNextItemWidth(110);
-    if (ImGui::InputText("Attack key", key, sizeof(key))) {
-        if (const std::uint32_t vk = InputManager::parse_key(key)) {
-            hunt_config_.attack_key = vk;
-            changed = true;
-        }
-    }
-    help_marker("The skill the hunter throws when it is in range. Your other "
-                "skills keep running on the Macro tab's timers alongside it.");
-
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160);
-    changed |= ImGui::SliderInt("Reach (px)", &hunt_config_.reach, 40, 400);
-    help_marker("How close it has to be before attacking instead of walking. "
-                "Set this to about how far your attack actually reaches -- the "
-                "boxes in the view above are in the same pixels.");
-
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160);
-    changed |= ImGui::SliderInt("Height (px)", &hunt_config_.height_tolerance, 10, 200);
-    help_marker("How far above or below a monster may be and still count as "
-                "reachable. Too large and the bot swings at things on other "
-                "platforms.");
-
-    int attack_ms = static_cast<int>(hunt_config_.attack_interval_ms);
-    ImGui::SetNextItemWidth(160);
-    if (ImGui::SliderInt("Swing every (ms)", &attack_ms, 200, 3000)) {
-        hunt_config_.attack_interval_ms = static_cast<std::uint32_t>(attack_ms);
-        changed = true;
-    }
-
-    ImGui::SameLine();
-    int step_ms = static_cast<int>(hunt_config_.step_ms);
-    ImGui::SetNextItemWidth(160);
-    if (ImGui::SliderInt("Step (ms)", &step_ms, 40, 500)) {
-        hunt_config_.step_ms = static_cast<std::uint32_t>(step_ms);
-        changed = true;
-    }
-
-    ImGui::SameLine();
-    int give_up = static_cast<int>(hunt_config_.give_up_ms);
-    ImGui::SetNextItemWidth(170);
-    if (ImGui::SliderInt("Give up after (ms)", &give_up, 1000, 15000)) {
-        hunt_config_.give_up_ms = static_cast<std::uint32_t>(give_up);
-        changed = true;
-    }
-    help_marker("A target it cannot reach in this long is abandoned for the next "
-                "one. Without it the bot walks into the wall under a ledge for "
-                "the rest of the session.");
-
-    changed |= ImGui::Checkbox("Jump at things above you", &hunt_config_.jump_to_reach);
-    ImGui::SameLine();
-    changed |= ImGui::Checkbox("Only while the game has focus##hunt",
-                               &hunt_config_.require_focus);
-    ImGui::SameLine();
-    changed |= ImGui::Checkbox("Bring the game to the front when starting##hunt",
-                               &hunt_config_.focus_on_start);
-    help_marker("Clicking START HUNTING takes focus off the game, and the hunter "
-                "will not send anything to an unfocused window -- so without this "
-                "it starts and waits forever. Only on the way on: it never grabs "
-                "the foreground back while running.");
-
-    if (changed) hunter_->set_config(hunt_config_);
+    draw_hunt_settings();
 
     // ---- detector tuning ----
     ImGui::Dummy(ImVec2(0, 6));
