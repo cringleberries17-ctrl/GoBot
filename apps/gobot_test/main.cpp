@@ -4446,14 +4446,18 @@ void test_bag() {
               "a folder that is not there is an empty list");
     }
 
-    // The settings as shipped.
+    // The settings. Their defaults, and the file beside the program -- which
+    // is the player's own once they have ticked anything, so only what nobody
+    // changes from the screen is held to its shipped value.
     {
+        const CleanSettings d;
+        check(!d.enabled, "trash cleaning is off until somebody turns it on");
+        check(d.bag_key == 'I' && d.tabs[0] && !d.tabs[4] && d.min_score >= 0.89f &&
+                  d.catalog_score >= 0.84f,
+              "with the bag on I, the pet tab left alone and strict matches");
         CleanSettings s;
-        check(s.load(exe_relative("configs/trash.ini")), "the shipped trash settings load");
-        check(!s.enabled, "and leave it off until somebody turns it on");
-        check(s.bag_key == 'I' && s.tabs[0] && !s.tabs[4] && s.min_score >= 0.89f,
-              "with the bag on I, the pet tab left alone and a strict match");
-        check(s.layout.pitch == 37 && s.layout.grid_dy == 25, "and the measured layout");
+        check(s.load(exe_relative("configs/trash.ini")), "the trash settings load");
+        check(s.layout.pitch == 37 && s.layout.grid_dy == 25, "with the measured layout");
     }
 
     // Finding the bag, and a look-only pass over it, with the game's pictures.
@@ -4500,6 +4504,121 @@ void test_bag() {
     TrashList empty_list;
     cleaner.set_trash(&empty_list);
     check(!cleaner.run().ran, "with nothing listed, it does not open the bag at all");
+}
+
+void test_bag_counts() {
+    section("Bag stack counts and the item catalog");
+
+    // The count is printed in the client's own 5x8 digits, white with a dark
+    // outline, over the item. Drawn here from those digits, so the reader is
+    // tested against exactly what the game draws.
+    CountReader counts;
+    const std::string font_dir = GlyphFont::default_dir();
+    if (font_dir.empty() || !counts.load(font_dir)) {
+        std::printf("  [skip] the client's digit glyphs are not installed here\n");
+        return;
+    }
+    check(counts.loaded(), "the ten digits load");
+
+    const auto slot_with = [&](const std::string& text, bool white_item) {
+        Frame f = bag_scene(80, 60);
+        const ScreenRect s{ 10, 10, 34, 34 };
+        // An item filling the slot -- white, the hard case, or coloured.
+        for (int y = 3; y < 31; ++y)
+            for (int x = 3; x < 31; ++x)
+                if (white_item) put_px(f, s.x + x, s.y + y, 235, 235, 240);
+                else            put_px(f, s.x + x, s.y + y, 220, 170, 40);
+        int x = s.x + 2;
+        for (const char c : text) {
+            Frame g;
+            load_png(font_dir + "\\lower\\" + std::string(1, c) + ".png", g);
+            // The outline first, then the digit.
+            for (int pass = 0; pass < 2; ++pass)
+                for (int gy = 0; gy < g.height; ++gy)
+                    for (int gx = 0; gx < g.width; ++gx) {
+                        std::uint8_t r, gg, b;
+                        g.get(gx, gy, r, gg, b);
+                        if ((r + gg + b) / 3 <= 128) continue;
+                        if (pass == 0) {
+                            for (int oy = -1; oy <= 1; ++oy)
+                                for (int ox = -1; ox <= 1; ++ox)
+                                    put_px(f, x + gx + ox, s.y + 3 + gy + oy, 10, 10, 10);
+                        } else {
+                            put_px(f, x + gx, s.y + 3 + gy, 250, 250, 250);
+                        }
+                    }
+            x += g.width + 1;
+        }
+        return std::make_pair(f, s);
+    };
+    for (const char* text : { "7", "97", "100", "67", "1", "2345", "8086" }) {
+        auto [f, s] = slot_with(text, false);
+        const int got = counts.read(f, s);
+        check(got == std::atoi(text), std::string("reads ") + text + " -- got " + std::to_string(got));
+    }
+    {
+        auto [f, s] = slot_with("42", true);
+        check(counts.read(f, s) == 42, "and reads it over a white item too");
+    }
+    {
+        auto [f, s] = slot_with("", false);
+        check(counts.read(f, s) == 0, "an item with no count reads as none");
+    }
+
+    // The catalog of the client's item icons.
+    ItemCatalog catalog;
+    if (!catalog.load(ItemCatalog::default_dir())) {
+        std::printf("  [skip] the client's item icons are not installed here\n");
+        return;
+    }
+    check(catalog.size() >= 50, "the item icons load -- " + std::to_string(catalog.size()));
+    const ItemCatalog::Entry* bottle = catalog.find("spend/mana/8810101");
+    check(bottle != nullptr && bottle->icon.valid() && bottle->tile.width == 34,
+          "an icon is found by its id, with a slot-sized tile for the screen");
+    check(catalog.find("spend/mana/0000000") == nullptr, "an unknown id is not");
+    if (bottle == nullptr) return;
+
+    // Chosen from the catalog, recognised in the bag -- under a stack count.
+    TrashList list;
+    list.add_catalog(catalog, { "spend/mana/8810101", "no/such/item" },
+                     TrashList::Action::Delete, 0.85f);
+    check(list.items.size() == 1 && list.items[0].id == "spend/mana/8810101",
+          "ids the catalog has are added, others skipped");
+
+    auto [f, s] = slot_with("", false);
+    for (int y = 0; y < 34; ++y)                     // an empty slot again
+        for (int x = 0; x < 34; ++x) put_px(f, s.x + x, s.y + y, 14, 14, 14);
+    blit(f, bottle->icon, s.x + 3, s.y + 2);
+    for (int y = 3; y < 11; ++y)                     // "97" in white over the corner
+        for (int x = 2; x < 13; ++x)
+            if ((x + y) % 3) put_px(f, s.x + x, s.y + y, 250, 250, 250);
+    float score = 0.0f;
+    const int which = list.match(f, s, 0.90f, &score);
+    check(which == 0, "the catalog icon is recognised in a slot, count and all -- score " +
+                      std::to_string(score));
+
+    const ItemCatalog::Entry* other = catalog.find("spend/hp/8820051");
+    if (other != nullptr) {
+        auto [g, gs] = slot_with("", false);
+        for (int y = 0; y < 34; ++y)
+            for (int x = 0; x < 34; ++x) put_px(g, gs.x + x, gs.y + y, 14, 14, 14);
+        blit(g, other->icon, gs.x + 2, gs.y + 4);
+        check(list.match(g, gs, 0.90f) < 0, "a different item is not");
+    }
+
+    // The ids chosen beforehand, as configs/trash.ini keeps them.
+    {
+        const std::string path = temp_file("gobot_trash_items.ini");
+        {
+            std::ofstream out(path);
+            out << "[Items]\ndelete=spend/fragment/1103063, spend/mana/8810101\ndrop=\n";
+        }
+        CleanSettings cs;
+        check(cs.load(path) && cs.delete_ids.size() == 2 && cs.drop_ids.empty() &&
+                  cs.delete_ids[1] == "spend/mana/8810101",
+              "the chosen ids read back from [Items]");
+        std::remove(path.c_str());
+    }
 }
 
 /// The gate between a reading and a key press.
@@ -5025,6 +5144,7 @@ int main() {
     test_hunter_config();
     test_hunter();
     test_bag();
+    test_bag_counts();
     test_config();
     test_protocol_handler();
 

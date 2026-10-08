@@ -86,11 +86,71 @@ bool is_empty(const Frame& f, const ScreenRect& r, const BagLayout& l);
 /// moved anything -- which is how the bottom of the bag is found.
 std::uint64_t grid_hash(const Frame& f, const BagView& v, const BagLayout& l);
 
-/// The stack count printed in a slot's corner; 0 when there is none or it
-/// cannot be read.
-int read_count(const Frame& f, const ScreenRect& r, const BagLayout& l, const GlyphFont& font);
+/// Whether two looks at the bag show the same items -- most slots alike --
+/// which is how scrolling is found to have reached the bottom. Not an exact
+/// comparison: a slot under the pointer lights up, and an item can glint.
+bool same_page(const Frame& a, const BagView& va, const Frame& b, const BagView& vb,
+               const BagLayout& l);
 
 } // namespace bag
+
+/// Reads the stack count printed in a slot's corner.
+///
+/// The trash dialog for a stack takes the exact number in it and nothing
+/// else, so this has to be right. The client prints it in the same 5 by 8
+/// pixel digits as everything else, white with a dark outline, a couple of
+/// pixels in from the corner -- the commercial client's glyphs for those digits
+/// match it pixel for pixel. Measured against real slots reading 7, 97, 100
+/// and 67.
+class CountReader {
+public:
+    /// `<font_dir>/lower/0.png` to `9.png`.
+    bool load(const std::string& font_dir);
+    bool loaded() const { return loaded_; }
+
+    /// The number in the slot's corner, or 0 for none or unreadable.
+    int read(const Frame& f, const ScreenRect& slot) const;
+
+    /// Give a digit its shape directly. For tests.
+    void set_digit(int d, int w, int h, const std::vector<std::uint8_t>& on);
+
+private:
+    struct Glyph {
+        int w = 0, h = 0;
+        std::vector<std::uint8_t> on;   ///< 1 where the digit is drawn
+        int lit = 0;
+    };
+    Glyph digits_[10];
+    bool  loaded_ = false;
+};
+
+/// Item icons the commercial client ships, named by item id: fragments,
+/// materials, potions, buffs, seals.
+///
+/// For choosing what to throw away before it is ever in the bag. Matched
+/// against a slot they score 0.91 to 1.00 for the right item and never above
+/// 0.68 for a wrong one, once the corner with the count in it is left out.
+struct ItemCatalog {
+    struct Entry {
+        std::string id;         ///< "spend/fragment/1103063"
+        Frame       icon;       ///< with its own transparency
+        Frame       tile;       ///< the icon on a slot's dark ground, for the screen
+    };
+    struct Group {
+        std::string        folder;     ///< "spend/fragment"
+        const char*        name;       ///< in Vietnamese, for the screen
+        std::vector<Entry> entries;
+    };
+    std::vector<Group> groups;
+
+    /// Load from a folder laid out like the client's `data\images`.
+    bool load(const std::string& images_dir);
+    const Entry* find(const std::string& id) const;
+    std::size_t size() const;
+
+    /// The staged copy beside this program, else the client's own.
+    static std::string default_dir();
+};
 
 /// What to get rid of: pictures of items, cut from the player's own bag, kept
 /// as PNGs in one folder for each way of getting rid of them.
@@ -107,12 +167,19 @@ struct TrashList {
     static const char* folder(Action a);
 
     struct Item {
-        std::string file;
+        std::string file;       ///< a picture cut from the bag, or empty
+        std::string id;         ///< a catalog icon's id, or empty
         Action      action = Action::Delete;
-        Frame       shown;      ///< as cut from the bag, for the screen
+        Frame       shown;      ///< for the screen
         Frame       picture;    ///< masked, for matching
+        float       min_score = 0.0f;   ///< 0: the caller's
     };
     std::vector<Item> items;
+
+    /// Add catalog icons by id. The count corner of each is left out, as for
+    /// a picture cut from the bag; ids the catalog does not have are skipped.
+    void add_catalog(const ItemCatalog& catalog, const std::vector<std::string>& ids,
+                     Action a, float min_score);
 
     /// Load `dir`/delete/*.png and `dir`/drop/*.png. A folder that is not
     /// there yet is an empty list.
@@ -148,6 +215,15 @@ struct CleanSettings {
     /// miss here deletes something that was not on the list.
     float min_score = 0.90f;
 
+    /// The same, for icons chosen from the catalog. Lower because those are
+    /// the client's sprite rather than a photo of the slot -- the right one
+    /// scores 0.91 and up, a wrong one at most 0.68.
+    float catalog_score = 0.85f;
+
+    /// Catalog ids chosen beforehand, from [Items].
+    std::vector<std::string> delete_ids;
+    std::vector<std::string> drop_ids;
+
     /// A bound on one pass, so a mistake costs a handful of items at most.
     int max_per_run = 40;
 
@@ -176,7 +252,12 @@ public:
 
     void set_settings(const CleanSettings& s) { settings_ = s; }
     void set_trash(const TrashList* t) { trash_ = t; }
-    void set_font(const GlyphFont* f) { font_ = f; }
+    void set_counts(const CountReader* c) { counts_ = c; }
+
+    /// Where to keep a picture of the screen whenever a step goes wrong, so
+    /// the next attempt can be fixed from what happened rather than guessed.
+    /// Empty keeps none.
+    void set_debug_dir(const std::string& dir) { debug_dir_ = dir; }
     void on_report(Report r) { report_ = std::move(r); }
 
     /// Look only: open the bag and go through it as usual, say what is on the
@@ -197,7 +278,11 @@ public:
 private:
     bool grab_view(Frame& f, BagView& v);
     bool rid(Frame& f, BagView& v, int index, const TrashList::Item& item, int count);
-    bool answer_dialog(int count);
+    /// Answer the dialog the drag brought up. What came of it: done, nothing
+    /// asked at all, or a step that did not go and was backed out of.
+    enum { kFailed = 0, kDone = 1, kNoDialog = 2 };
+    int  answer_dialog(TrashList::Action action, int count);
+    void keep(const Frame& f, const char* what);
     void scroll_to_top(BagView& v);
     void say(const std::string& line);
     bool wait_ms(int ms);           ///< false when cancelled
@@ -207,7 +292,8 @@ private:
     Grab                 grab_;
     CleanSettings        settings_;
     const TrashList*     trash_ = nullptr;
-    const GlyphFont*     font_ = nullptr;
+    const CountReader*   counts_ = nullptr;
+    std::string          debug_dir_;
     Report               report_;
     bool                 dry_run_ = false;
     std::atomic<bool>    cancelled_{false};

@@ -2927,14 +2927,17 @@ void GuiApp::trash_loop() {
         finish("Không có hình giao diện của game, nên không nhận ra được túi đồ.");
         return;
     }
-    GlyphFont font;
-    font.load(GlyphFont::default_dir());
+    CountReader counts;
+    if (!counts.load(GlyphFont::default_dir()))
+        say_trash("Không có bộ chữ số của game, nên không đọc được số lượng trên ô đồ.");
+    ItemCatalog catalog;
+    catalog.load(ItemCatalog::default_dir());
     ScreenCapture capture;
     const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
 
-    // The first timed pass a minute in, so a run gets going before it stops
-    // to tidy up.
-    std::uint64_t next = now_ms() + 60'000;
+    // The first timed pass shortly after the start, so what was put on the
+    // list is dealt with now rather than in ten minutes.
+    std::uint64_t next = now_ms() + 15'000;
     while (!trash_stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const int request = trash_request_.exchange(0);
@@ -2949,6 +2952,10 @@ void GuiApp::trash_loop() {
 
         TrashList list;
         list.load(exe_relative("configs/trash"), settings.layout);
+        list.add_catalog(catalog, settings.delete_ids, TrashList::Action::Delete,
+                         settings.catalog_score);
+        list.add_catalog(catalog, settings.drop_ids, TrashList::Action::Drop,
+                         settings.catalog_score);
         if (list.items.empty()) {
             say_trash("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.");
             if (trash_oneshot_) break;
@@ -2972,7 +2979,8 @@ void GuiApp::trash_loop() {
         BagCleaner cleaner(input_, store, grab);
         cleaner.set_settings(settings);
         cleaner.set_trash(&list);
-        cleaner.set_font(&font);
+        cleaner.set_counts(&counts);
+        cleaner.set_debug_dir(exe_relative("trash_debug"));
         cleaner.set_dry_run(look_only);
         cleaner.on_report([this](const std::string& line) { say_trash(line); });
         {

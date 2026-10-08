@@ -622,6 +622,15 @@ private:
     int               simple_pick_slot_ = -1;
     void simple_rematch_bag();
 
+    /// The client's item icons, for choosing what to throw away beforehand.
+    ItemCatalog       simple_catalog_;
+    bool              simple_catalog_loaded_ = false;
+    std::string       simple_pick_id_;     ///< the icon whose menu is open
+    /// Read the list again: pictures cut from the bag, and the icons ticked.
+    void simple_reload_trash();
+    /// Write the icons ticked to [Items] in configs/trash.ini.
+    void simple_save_ids();
+
     /// The simple screen's own switches, kept in [Simple] in configs/app.ini
     /// and written key by key so the rest of that file is left as it is.
     struct SimpleOptions {

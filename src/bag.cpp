@@ -28,12 +28,19 @@ const char* const kTrashCans[] = { "inven/0/trash_can", "inven/0/trash_can1",
 /// [Xác Nhận][Hủy Bỏ], the pair under every one of the dialogs below.
 const char* const kConfirm = "grabbed/confirm_button";
 
-/// The dialogs that putting an item in the trash or on the floor brings up:
-/// "do you really want to put it in the trash?", "how many to put in the
-/// trash?", the drop confirmation, and the quantity box the drop shares with
-/// selling.
-const char* const kDialogs[] = { "grabbed/del_item_confirm_1", "grabbed/del_item_confirm_2",
-                                 "grabbed/drop_confirm", "grabbed/sell_confirm" };
+/// The dialogs each way of getting rid of something brings up. Into the
+/// trash: "do you really want to put it in the trash?" for one item, "how many
+/// to put in the trash?" for a stack. Onto the floor: the drop confirmation,
+/// and the quantity box it shares with selling. Kept apart so that an item
+/// meant for the trash that lands outside the bag -- and gets asked whether it
+/// should be dropped -- is never dropped by accident.
+const char* const kDeleteDialogs[] = { "grabbed/del_item_confirm_1",
+                                       "grabbed/del_item_confirm_2" };
+const char* const kDropDialogs[]   = { "grabbed/drop_confirm", "grabbed/sell_confirm" };
+
+/// A message with only Xác Nhận under it: what the client says when it
+/// refuses, a wrong quantity for one.
+const char* const kNotice = "grabbed/dialog_ok";
 
 /// How alike the strip has to be. Lower than a fixed button: whichever tab is
 /// selected is drawn differently, and the picture was taken with the first.
@@ -223,17 +230,216 @@ std::uint64_t grid_hash(const Frame& f, const BagView& v, const BagLayout& l) {
     return h;
 }
 
-int read_count(const Frame& f, const ScreenRect& r, const BagLayout& l, const GlyphFont& font) {
-    if (!font.loaded()) return 0;
-    const std::string text =
-        font.read_line(f, ScreenRect{ r.x + 1, r.y, l.count_w + 6, l.count_h + 3 });
-    if (text.empty() || text.size() > 4) return 0;
-    for (const char c : text)
-        if (c < '0' || c > '9') return 0;
-    return std::atoi(text.c_str());
+bool same_page(const Frame& a, const BagView& va, const Frame& b, const BagView& vb,
+               const BagLayout& l) {
+    const auto sa = va.slots(l), sb = vb.slots(l);
+    if (sa.size() != sb.size() || sa.empty()) return false;
+    std::size_t alike = 0;
+    for (std::size_t i = 0; i < sa.size(); ++i) {
+        // The middle of each slot, coarsely: enough to tell items apart, too
+        // coarse to notice a glint.
+        long da = 0, db = 0;
+        int n = 0;
+        for (int y = 8; y < l.cell - 8; y += 2)
+            for (int x = 8; x < l.cell - 8; x += 2) {
+                da += lum(a, sa[i].x + x, sa[i].y + y);
+                db += lum(b, sb[i].x + x, sb[i].y + y);
+                ++n;
+            }
+        if (n > 0 && std::abs(da - db) / n <= 6) ++alike;
+    }
+    return alike * 10 >= sa.size() * 9;
 }
 
 } // namespace bag
+
+// ---------------------------------------------------------------- counts
+
+bool CountReader::load(const std::string& font_dir) {
+    loaded_ = false;
+    int got = 0;
+    for (int d = 0; d < 10; ++d) {
+        Frame f;
+        if (!load_png(font_dir + "\\lower\\" + std::to_string(d) + ".png", f) || !f.valid())
+            continue;
+        std::vector<std::uint8_t> on(static_cast<std::size_t>(f.width) * f.height, 0);
+        for (int y = 0; y < f.height; ++y)
+            for (int x = 0; x < f.width; ++x)
+                on[static_cast<std::size_t>(y) * f.width + x] = lum(f, x, y) > 128 ? 1 : 0;
+        set_digit(d, f.width, f.height, on);
+        ++got;
+    }
+    loaded_ = got == 10;
+    return loaded_;
+}
+
+void CountReader::set_digit(int d, int w, int h, const std::vector<std::uint8_t>& on) {
+    if (d < 0 || d > 9 || w <= 0 || h <= 0 ||
+        on.size() != static_cast<std::size_t>(w) * h) return;
+    Glyph& g = digits_[d];
+    g.w = w;
+    g.h = h;
+    g.on = on;
+    g.lit = 0;
+    for (const auto v : on) g.lit += v ? 1 : 0;
+    loaded_ = true;
+    for (const Glyph& each : digits_)
+        if (each.w == 0) loaded_ = false;
+}
+
+int CountReader::read(const Frame& f, const ScreenRect& slot) const {
+    if (!loaded_ || !f.valid()) return 0;
+
+    // The digits are white and the item under them is not: bright and grey
+    // picks out the one from the other, even over a white potion, because
+    // the digits carry a dark outline that keeps them apart.
+    constexpr int kW = 28, kH = 16;
+    std::uint8_t white[kH][kW] = {};
+    for (int y = 0; y < kH; ++y)
+        for (int x = 0; x < kW; ++x) {
+            std::uint8_t r, g, b;
+            f.get(slot.x + x, slot.y + y, r, g, b);
+            const int lo = std::min({ r, g, b }), hi = std::max({ r, g, b });
+            white[y][x] = (r + g + b) / 3 > 175 && hi - lo < 40 ? 1 : 0;
+        }
+
+    // How well digit `d` sits at (x, y): the share of its box that agrees,
+    // and the share of its strokes that are there.
+    const auto fit = [&](int d, int x, int y, double& agree, double& strokes) {
+        const Glyph& g = digits_[d];
+        agree = strokes = 0.0;
+        if (x + g.w > kW || y + g.h > kH || g.lit == 0) return;
+        int same = 0, hit = 0;
+        for (int gy = 0; gy < g.h; ++gy)
+            for (int gx = 0; gx < g.w; ++gx) {
+                const std::uint8_t want = g.on[static_cast<std::size_t>(gy) * g.w + gx];
+                const std::uint8_t have = white[y + gy][x + gx];
+                if (want == have) ++same;
+                if (want && have) ++hit;
+            }
+        agree = static_cast<double>(same) / (g.w * g.h);
+        strokes = static_cast<double>(hit) / g.lit;
+    };
+
+    // Left to right along each starting row; the row that reads the most
+    // digits wins.
+    std::string best;
+    for (int y = 0; y + 8 <= kH && y < 7; ++y) {
+        std::string text;
+        int x = 0, misses = 0;
+        while (x < kW - 2 && text.size() < 5) {
+            int found = -1;
+            double found_agree = 0.0;
+            for (int d = 0; d < 10; ++d) {
+                double agree = 0.0, strokes = 0.0;
+                fit(d, x, y, agree, strokes);
+                if (agree >= 0.88 && strokes >= 0.88 && agree > found_agree) {
+                    found = d;
+                    found_agree = agree;
+                }
+            }
+            if (found >= 0) {
+                text += static_cast<char>('0' + found);
+                x += digits_[found].w + 1;
+                misses = 0;
+            } else {
+                if (!text.empty() && ++misses > 2) break;
+                ++x;
+            }
+        }
+        if (text.size() > best.size()) best = text;
+    }
+    if (best.empty() || best.size() > 4) return 0;
+    return std::atoi(best.c_str());
+}
+
+// --------------------------------------------------------------- catalog
+
+namespace {
+
+/// An icon drawn into the middle of an empty slot, the way the bag shows it.
+Frame slot_tile(const Frame& icon) {
+    Frame t;
+    t.width = 34;
+    t.height = 34;
+    t.pixels.assign(34u * 34u * 4u, 255);
+    for (std::size_t i = 0; i < t.pixels.size(); i += 4)
+        t.pixels[i] = t.pixels[i + 1] = t.pixels[i + 2] = 16;
+    const int ox = (34 - icon.width) / 2, oy = (34 - icon.height) / 2;
+    for (int y = 0; y < icon.height; ++y)
+        for (int x = 0; x < icon.width; ++x) {
+            const std::size_t s = (static_cast<std::size_t>(y) * icon.width + x) * 4;
+            if (icon.pixels[s + 3] < 128) continue;
+            const int tx = ox + x, ty = oy + y;
+            if (tx < 0 || ty < 0 || tx >= 34 || ty >= 34) continue;
+            const std::size_t d = (static_cast<std::size_t>(ty) * 34 + tx) * 4;
+            t.pixels[d] = icon.pixels[s];
+            t.pixels[d + 1] = icon.pixels[s + 1];
+            t.pixels[d + 2] = icon.pixels[s + 2];
+        }
+    return t;
+}
+
+} // namespace
+
+std::string ItemCatalog::default_dir() {
+    const std::string staged = TemplateStore::default_dir();
+    if (!staged.empty() &&
+        GetFileAttributesA((staged + "\\spend").c_str()) != INVALID_FILE_ATTRIBUTES)
+        return staged;
+    return TemplateStore::client_images();
+}
+
+bool ItemCatalog::load(const std::string& images_dir) {
+    groups.clear();
+    if (images_dir.empty()) return false;
+    const struct { const char* folder; const char* name; } kGroups[] = {
+        { "spend/fragment", "Mảnh ghép" },
+        { "spend/craft",    "Nguyên liệu" },
+        { "spend/hp",       "Hồi máu" },
+        { "spend/mana",     "Hồi mana" },
+        { "spend/buff",     "Bùa" },
+        { "seal",           "Ấn" },
+        { "other",          "Khác" },
+    };
+    for (const auto& k : kGroups) {
+        Group group;
+        group.folder = k.folder;
+        group.name = k.name;
+        std::string dir = images_dir + "\\" + k.folder;
+        std::replace(dir.begin(), dir.end(), '/', '\\');
+
+        WIN32_FIND_DATAA fd{};
+        HANDLE h = FindFirstFileA((dir + "\\*.png").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            Entry e;
+            std::string file = fd.cFileName;
+            if (!load_png(dir + "\\" + file, e.icon) || !e.icon.valid()) continue;
+            e.id = std::string(k.folder) + "/" + file.substr(0, file.size() - 4);
+            e.tile = slot_tile(e.icon);
+            group.entries.push_back(std::move(e));
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+        std::sort(group.entries.begin(), group.entries.end(),
+                  [](const Entry& a, const Entry& b) { return a.id < b.id; });
+        if (!group.entries.empty()) groups.push_back(std::move(group));
+    }
+    return !groups.empty();
+}
+
+const ItemCatalog::Entry* ItemCatalog::find(const std::string& id) const {
+    for (const Group& g : groups)
+        for (const Entry& e : g.entries)
+            if (e.id == id) return &e;
+    return nullptr;
+}
+
+std::size_t ItemCatalog::size() const {
+    std::size_t n = 0;
+    for (const Group& g : groups) n += g.entries.size();
+    return n;
+}
 
 // ------------------------------------------------------------------ list
 
@@ -298,6 +504,32 @@ void TrashList::add_picture(const Frame& cut, Action a, const BagLayout& l) {
     items.push_back(std::move(item));
 }
 
+void TrashList::add_catalog(const ItemCatalog& catalog, const std::vector<std::string>& ids,
+                            Action a, float min_score) {
+    for (const std::string& id : ids) {
+        const ItemCatalog::Entry* e = catalog.find(id);
+        if (e == nullptr) continue;
+        Item item;
+        item.id = id;
+        item.action = a;
+        item.min_score = min_score;
+
+        // The icon as it is, with its own transparency, less the corner the
+        // count is printed over. The icon sits about two pixels into the slot,
+        // so the slot's count corner is this much of the icon.
+        item.picture = e->icon;
+        for (int y = 0; y < item.picture.height; ++y)
+            for (int x = 0; x < item.picture.width; ++x) {
+                std::uint8_t& alpha =
+                    item.picture.pixels[(static_cast<std::size_t>(y) * item.picture.width + x) * 4 + 3];
+                if (x < 20 && y < 11) alpha = 0;
+            }
+
+        item.shown = e->tile.valid() ? e->tile : slot_tile(e->icon);
+        items.push_back(std::move(item));
+    }
+}
+
 bool TrashList::remove(std::size_t index) {
     if (index >= items.size()) return false;
     if (!items[index].file.empty()) DeleteFileA(items[index].file.c_str());
@@ -314,7 +546,8 @@ int TrashList::match(const Frame& f, const ScreenRect& slot, float min_score,
     for (std::size_t i = 0; i < items.size(); ++i) {
         const Frame& p = items[i].picture;
         if (!p.valid() || area.w < p.width || area.h < p.height) continue;
-        const auto m = TemplateMatcher::find(f, area, p, min_score,
+        const float need = items[i].min_score > 0.0f ? items[i].min_score : min_score;
+        const auto m = TemplateMatcher::find(f, area, p, need,
                                              TemplateMatcher::Tone::Colour);
         if (m.found && m.score > best_score) {
             best = static_cast<int>(i);
@@ -339,6 +572,24 @@ bool CleanSettings::load(const std::string& path) {
     min_score        = std::clamp(ini.get_float("Trash", "min_score", min_score), 0.70f, 0.99f);
     max_per_run      = std::clamp(ini.get_int("Trash", "max_per_run", max_per_run), 1, 500);
     click_to_move    = ini.get_bool("Trash", "click_to_move", click_to_move);
+    catalog_score    = std::clamp(ini.get_float("Trash", "catalog_score", catalog_score), 0.70f, 0.99f);
+
+    const auto ids = [&](const char* key) {
+        std::vector<std::string> out;
+        std::string all = ini.get("Items", key, ""), one;
+        all += ',';
+        for (const char c : all) {
+            if (c == ',' || c == ' ') {
+                if (!one.empty()) out.push_back(one);
+                one.clear();
+            } else {
+                one += c;
+            }
+        }
+        return out;
+    };
+    delete_ids = ids("delete");
+    drop_ids   = ids("drop");
     layout.load(ini);
     return true;
 }
@@ -347,6 +598,28 @@ bool CleanSettings::load(const std::string& path) {
 
 BagCleaner::BagCleaner(InputManager& input, const TemplateStore& store, Grab grab)
     : input_(input), store_(store), grab_(std::move(grab)) {}
+
+void BagCleaner::keep(const Frame& f, const char* what) {
+    if (debug_dir_.empty() || !f.valid()) return;
+    CreateDirectoryA(debug_dir_.c_str(), nullptr);
+
+    // A few dozen at most: the newest are the ones that matter.
+    std::vector<std::string> old;
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA((debug_dir_ + "\\*.png").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do { old.push_back(fd.cFileName); } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    std::sort(old.begin(), old.end());
+    for (std::size_t i = 0; old.size() >= 30 && i + 29 < old.size(); ++i)
+        DeleteFileA((debug_dir_ + "\\" + old[i]).c_str());
+
+    static int n = 0;
+    const std::string path = debug_dir_ + "\\" + stamp() + "_" + std::to_string(n++ % 100) +
+                             "_" + what + ".png";
+    if (save_png(f, path)) GB_INFO("Trash: kept the screen as %s", path.c_str());
+}
 
 void BagCleaner::say(const std::string& line) {
     GB_INFO("Trash: %s", line.c_str());
@@ -372,13 +645,15 @@ void BagCleaner::scroll_to_top(BagView& v) {
     Frame f;
     BagView now;
     if (!grab_view(f, now)) return;
-    std::uint64_t before = bag::grid_hash(f, now, l);
-    for (int i = 0; i < 40 && !cancelled_; ++i) {
+    for (int i = 0; i < 15 && !cancelled_; ++i) {
         input_.click_at(now.strip.x + l.scroll_up_dx, now.strip.y + l.scroll_up_dy);
-        if (!wait_ms(140) || !grab_view(f, now)) break;
-        const std::uint64_t after = bag::grid_hash(f, now, l);
-        if (after == before) break;
-        before = after;
+        Frame g;
+        BagView after;
+        if (!wait_ms(160) || !grab_view(g, after)) break;
+        const bool moved = !bag::same_page(f, now, g, after, l);
+        f = std::move(g);
+        now = after;
+        if (!moved) break;
     }
     v = now;
 }
@@ -434,7 +709,8 @@ BagCleaner::Result BagCleaner::run() {
         // Round and round the page on show: after anything is thrown away the
         // page is looked at afresh, since the slot it was in is now empty and
         // the rest may have moved up into it.
-        for (int round = 0; round < 200 && !stop && !cancelled_; ++round) {
+        int scrolls = 0;
+        for (int round = 0; round < 120 && !stop && !cancelled_; ++round) {
             if (!grab_view(f, v)) {
                 res.trouble = "mất dấu túi đồ";
                 stop = true;
@@ -466,7 +742,7 @@ BagCleaner::Result BagCleaner::run() {
                     break;
                 }
 
-                const int count = font_ ? bag::read_count(f, slots[s], l, *font_) : 0;
+                const int count = counts_ ? counts_->read(f, slots[s]) : 0;
                 if (rid(f, v, static_cast<int>(s), item, count)) {
                     ++done;
                     if (item.action == TrashList::Action::Delete) ++res.deleted;
@@ -487,13 +763,13 @@ BagCleaner::Result BagCleaner::run() {
             if (acted || stop) continue;
 
             // Nothing more on this page: the next rows, until scrolling stops
-            // changing anything.
-            const std::uint64_t before = bag::grid_hash(f, v, l);
+            // changing anything. Bounded too, in case it never seems to stop.
+            if (++scrolls > 15) break;
             input_.click_at(v.strip.x + l.scroll_down_dx, v.strip.y + l.scroll_down_dy);
-            if (!wait_ms(180)) break;
+            if (!wait_ms(200)) break;
             Frame g;
             BagView w;
-            if (!grab_view(g, w) || bag::grid_hash(g, w, l) == before) break;
+            if (!grab_view(g, w) || bag::same_page(f, v, g, w, l)) break;
         }
     }
 
@@ -532,24 +808,37 @@ bool BagCleaner::rid(Frame& f, BagView& v, int index, const TrashList::Item& ite
         return false;
     }
 
-    if (!answer_dialog(count)) {
+    const int answered = answer_dialog(item.action, count);
+    if (answered == kFailed) {
         // Whatever is half done -- a dialog, an item on the pointer -- undone.
         input_.key_press(VK_ESCAPE);
         wait_ms(300);
         return false;
     }
 
-    // Only gone counts.
+    // Only gone counts. Including when nothing asked: a single item may go
+    // into the trash without a word, and an item that has left its slot has
+    // gone whether or not there was a dialog about it.
     wait_ms(350);
     Frame g;
     BagView w;
-    if (!grab_view(g, w)) return false;
+    if (!grab_view(g, w)) {
+        if (answered == kNoDialog) input_.key_press(VK_ESCAPE);
+        return false;
+    }
     const auto after = w.slots(l);
     const ScreenRect& same = after[static_cast<std::size_t>(index)];
     if (!bag::is_empty(g, same, l)) {
         const int still = trash_->match(g, same, settings_.min_score);
         if (still >= 0 && &trash_->items[static_cast<std::size_t>(still)] == &item) {
-            say("món đồ vẫn còn trong túi");
+            if (answered == kNoDialog) {
+                say("không thấy hộp thoại xác nhận, món đồ vẫn còn");
+                input_.key_press(VK_ESCAPE);
+                wait_ms(300);
+            } else {
+                say("món đồ vẫn còn trong túi");
+                keep(g, "still_there");
+            }
             return false;
         }
     }
@@ -558,43 +847,52 @@ bool BagCleaner::rid(Frame& f, BagView& v, int index, const TrashList::Item& ite
     return true;
 }
 
-bool BagCleaner::answer_dialog(int count) {
+int BagCleaner::answer_dialog(TrashList::Action action, int count) {
     const Frame* confirm = store_.get(kConfirm);
     if (confirm == nullptr) {
         say("thiếu hình nút Xác Nhận, nên không bấm gì");
-        return false;
+        return kFailed;
     }
 
     Frame f;
     TemplateMatcher::Match button;
-    for (int i = 0; i < 12 && !button.found; ++i) {
-        if (!wait_ms(150)) return false;
+    for (int i = 0; i < 14 && !button.found; ++i) {
+        if (!wait_ms(150)) return kFailed;
         if (!grab_ || !grab_(f) || !f.valid()) continue;
         button = TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *confirm,
                                        kButtonScore);
     }
     if (!button.found) {
-        say("không thấy hộp thoại xác nhận");
-        return false;
+        keep(f, "no_dialog");
+        return kNoDialog;
     }
 
-    // Ours, and not some other dialog with the same two buttons: one of the
-    // trash or drop dialogs has to be sitting on top of them.
+    // Ours, and the right one of ours: an item meant for the trash that was
+    // let go outside the bag gets asked whether to drop it, and must not be.
+    const bool deleting = action == TrashList::Action::Delete;
     const ScreenRect above = clamp_to(f, ScreenRect{ button.at.x - 210, button.at.y - 95,
                                                      button.at.w + 230, button.at.h + 105 });
     bool ours = false;
-    for (const char* name : kDialogs) {
-        const Frame* t = store_.get(name);
-        if (t == nullptr || above.w < t->width || above.h < t->height) continue;
-        if (TemplateMatcher::find(f, above, *t, kDialogScore).found) { ours = true; break; }
-    }
+    const auto look = [&](const char* const* names, std::size_t n) {
+        for (std::size_t i = 0; i < n && !ours; ++i) {
+            const Frame* t = store_.get(names[i]);
+            if (t == nullptr || above.w < t->width || above.h < t->height) continue;
+            ours = TemplateMatcher::find(f, above, *t, kDialogScore).found;
+        }
+    };
+    if (deleting) look(kDeleteDialogs, std::size(kDeleteDialogs));
+    else          look(kDropDialogs, std::size(kDropDialogs));
     if (!ours) {
-        say("hộp thoại này không phải hộp thoại bỏ đồ, nên không bấm");
-        return false;
+        say(deleting ? "hộp thoại này không phải hộp thoại xoá đồ, nên không bấm"
+                     : "hộp thoại này không phải hộp thoại vứt đồ, nên không bấm");
+        keep(f, "wrong_dialog");
+        return kFailed;
     }
 
     // The dialogs for a stack have a quantity box left of the buttons: dark,
-    // where the others are the dialog's pale grey.
+    // where the others are the dialog's pale grey. It takes the exact number
+    // in the stack and nothing else, so an unreadable count is a stop, not a
+    // guess.
     const ScreenRect box = clamp_to(f, ScreenRect{ button.at.x - 88, button.at.y + 3,
                                                    82, std::max(4, button.at.h - 6) });
     long total = 0;
@@ -602,26 +900,43 @@ bool BagCleaner::answer_dialog(int count) {
     for (int y = box.y; y < box.y + box.h; ++y)
         for (int x = box.x; x < box.x + box.w; ++x) { total += lum(f, x, y); ++n; }
     if (n > 0 && total / n < 100) {
+        if (count <= 0) {
+            say("không đọc được số lượng trên ô đồ, nên bỏ qua món này");
+            keep(f, "no_count");
+            return kFailed;
+        }
         input_.click_at(box.cx(), box.cy());
         wait_ms(120);
+        input_.key_press(VK_END, 25);
         for (int i = 0; i < 6; ++i) input_.key_press(VK_BACK, 25);
-        // The whole stack. When the count cannot be read, more than any
-        // stack holds: the box takes what is there.
-        input_.type_text(std::to_string(count > 0 ? count : 9999));
-        wait_ms(150);
+        input_.type_text(std::to_string(count));
+        wait_ms(200);
     }
 
     // Xác Nhận is the left half of the pair.
     input_.click_at(button.at.x + button.at.w / 4, button.at.cy());
-    for (int i = 0; i < 10; ++i) {
-        if (!wait_ms(150)) return false;
-        if (grab_ && grab_(f) && f.valid() &&
-            !TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *confirm,
-                                   kButtonScore).found)
-            return true;
+    const Frame* notice = store_.get(kNotice);
+    for (int i = 0; i < 12; ++i) {
+        if (!wait_ms(150)) return kFailed;
+        if (!grab_ || !grab_(f) || !f.valid()) continue;
+        const ScreenRect all{ 0, 0, f.width, f.height };
+
+        // A refusal -- a message with only Xác Nhận under it -- is answered
+        // and counted as a failure.
+        if (notice != nullptr) {
+            const auto m = TemplateMatcher::find(f, all, *notice, 0.75f);
+            if (m.found && !TemplateMatcher::find(f, all, *confirm, kButtonScore).found) {
+                keep(f, "refused");
+                input_.click_at(m.at.x + m.at.w - 40, m.at.y + m.at.h - 14);
+                say("game không nhận, đã đóng thông báo");
+                return kFailed;
+            }
+        }
+        if (!TemplateMatcher::find(f, all, *confirm, kButtonScore).found) return kDone;
     }
     say("hộp thoại không đóng lại");
-    return false;
+    keep(f, "stuck");
+    return kFailed;
 }
 
 } // namespace gobot

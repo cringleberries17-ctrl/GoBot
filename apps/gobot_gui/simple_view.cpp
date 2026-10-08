@@ -1425,20 +1425,49 @@ void GuiApp::simple_rematch_bag() {
                 : simple_trash_.match(simple_bag_frame_, s, simple_clean_.min_score));
 }
 
+void GuiApp::simple_reload_trash() {
+    simple_trash_.load(exe_relative("configs/trash"), simple_clean_.layout);
+    simple_trash_.add_catalog(simple_catalog_, simple_clean_.delete_ids,
+                              TrashList::Action::Delete, simple_clean_.catalog_score);
+    simple_trash_.add_catalog(simple_catalog_, simple_clean_.drop_ids,
+                              TrashList::Action::Drop, simple_clean_.catalog_score);
+    simple_rematch_bag();
+}
+
+void GuiApp::simple_save_ids() {
+    const auto join = [](const std::vector<std::string>& ids) {
+        std::string out;
+        for (const std::string& id : ids) {
+            if (!out.empty()) out += ',';
+            out += id;
+        }
+        return out;
+    };
+    const std::string cfg = exe_relative("configs/trash.ini");
+    if (!IniFile::set_in_place(cfg, "Items", "delete", join(simple_clean_.delete_ids)) ||
+        !IniFile::set_in_place(cfg, "Items", "drop", join(simple_clean_.drop_ids)))
+        simple_note("Không lưu được configs/trash.ini.", 8000);
+}
+
 void GuiApp::simple_trash_tab() {
     const std::string cfg = exe_relative("configs/trash.ini");
     const std::string dir = exe_relative("configs/trash");
+    if (!simple_catalog_loaded_) {
+        simple_catalog_loaded_ = true;
+        simple_catalog_.load(ItemCatalog::default_dir());
+    }
     if (!simple_clean_loaded_) {
         simple_clean_loaded_ = true;
         if (!simple_clean_.load(cfg)) simple_note("Không đọc được configs/trash.ini.", 8000);
-        simple_trash_.load(dir, simple_clean_.layout);
-        simple_rematch_bag();
+        simple_reload_trash();
     }
     const auto put = [&](const char* key, const std::string& value) {
         if (!IniFile::set_in_place(cfg, "Trash", key, value))
             simple_note("Không lưu được configs/trash.ini.", 8000);
     };
     const BagLayout& layout = simple_clean_.layout;
+    const ImU32 kDeleteMark = ImGui::GetColorU32(kBad);
+    const ImU32 kDropMark = ImGui::GetColorU32(kWait);
 
     // ---- when ----
     if (!begin_card("##trash")) { end_card(); return; }
@@ -1466,7 +1495,8 @@ void GuiApp::simple_trash_tab() {
             ImGui::EndCombo();
         }
     }
-    hint("GoBot mở túi đồ, bỏ những món có trong danh sách dưới đây, rồi đóng túi lại. "
+    hint("Chọn món cần bỏ một lần ở dưới. Khi bot chạy, GoBot tự mở túi đồ, bỏ những món "
+         "đó rồi đóng túi lại: lần đầu ngay sau khi bấm BẮT ĐẦU, sau đó theo giờ ở trên. "
          "Đánh quái, bình và buff tạm dừng trong lúc dọn.");
 
     ImGui::Dummy(ImVec2(0, 4));
@@ -1487,28 +1517,111 @@ void GuiApp::simple_trash_tab() {
     }
     end_card();
 
-    // ---- what ----
-    if (!begin_card("##trashlist")) { end_card(); return; }
-    heading(strong_font_, ("Đồ bỏ đi (" + std::to_string(simple_trash_.items.size()) +
-                           " món)").c_str());
-    if (simple_trash_.items.empty()) {
-        hint("Chưa có món nào. Thêm từ túi đồ ở phần dưới.");
+    // ---- what, chosen beforehand ----
+    if (!begin_card("##trashcatalog")) { end_card(); return; }
+    {
+        int chosen = 0;
+        for (const auto& item : simple_trash_.items) if (!item.id.empty()) ++chosen;
+        heading(strong_font_, ("Chọn đồ cần bỏ (" + std::to_string(chosen) + " món)").c_str());
+    }
+    if (simple_catalog_.groups.empty()) {
+        hint("Không tìm thấy hình các món đồ của game.");
     } else {
+        hint("Bấm vào món muốn bỏ. Viền đỏ: bỏ vào thùng rác, mất hẳn. Viền vàng: vứt xuống "
+             "đất. Không cần món đó đang có trong túi.");
+        for (const auto& group : simple_catalog_.groups) {
+            ImGui::PushFont(nullptr, kSmall);
+            ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+            ImGui::TextUnformatted(group.name);
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+
+            const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+            for (std::size_t i = 0; i < group.entries.size(); ++i) {
+                const auto& e = group.entries[i];
+                if (i > 0) {
+                    const float next = ImGui::GetItemRectMax().x + 4 + 34;
+                    if (next <= right) ImGui::SameLine(0, 4);
+                }
+                ImGui::PushID(e.id.c_str());
+                draw_frame_region(e.tile, 0, 0, e.tile.width, e.tile.height, 1.0f, "##tile");
+                const bool del = std::find(simple_clean_.delete_ids.begin(),
+                                           simple_clean_.delete_ids.end(), e.id) !=
+                                 simple_clean_.delete_ids.end();
+                const bool drop = std::find(simple_clean_.drop_ids.begin(),
+                                            simple_clean_.drop_ids.end(), e.id) !=
+                                  simple_clean_.drop_ids.end();
+                const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                if (del)       ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 3.0f);
+                else if (drop) ImGui::GetWindowDrawList()->AddRect(a, b, kDropMark, 0, 0, 3.0f);
+                else if (ImGui::IsItemHovered())
+                    ImGui::GetWindowDrawList()->AddRect(a, b, ImGui::GetColorU32(kDim), 0, 0, 1.0f);
+                ImGui::SetItemTooltip("%s", del  ? "Sẽ bỏ vào thùng rác. Bấm để đổi."
+                                          : drop ? "Sẽ vứt xuống đất. Bấm để đổi."
+                                                 : "Bấm để chọn bỏ món này.");
+                if (ImGui::IsItemClicked()) {
+                    simple_pick_id_ = e.id;
+                    ImGui::OpenPopup("##catpick");
+                }
+                if (ImGui::BeginPopup("##catpick")) {
+                    const auto set = [&](int how) {     // 0 keep, 1 delete, 2 drop
+                        auto& d = simple_clean_.delete_ids;
+                        auto& p = simple_clean_.drop_ids;
+                        d.erase(std::remove(d.begin(), d.end(), simple_pick_id_), d.end());
+                        p.erase(std::remove(p.begin(), p.end(), simple_pick_id_), p.end());
+                        if (how == 1) d.push_back(simple_pick_id_);
+                        if (how == 2) p.push_back(simple_pick_id_);
+                        simple_save_ids();
+                        simple_reload_trash();
+                        ImGui::CloseCurrentPopup();
+                    };
+                    if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)", del)) set(1);
+                    if (ImGui::Selectable("Vứt xuống đất", drop)) set(2);
+                    ImGui::Separator();
+                    if (ImGui::Selectable("Không bỏ món này", !del && !drop)) set(0);
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+            }
+            ImGui::Dummy(ImVec2(0, 2));
+        }
+    }
+    ImGui::PushFont(nullptr, kSmall);
+    coloured(kWait, "Xoá là mất hẳn, không lấy lại được. Bấm Thử tìm ở dưới trước khi bật.");
+    ImGui::PopFont();
+    end_card();
+
+    // ---- what, photographed from the bag ----
+    if (!begin_card("##trashpick")) { end_card(); return; }
+    {
+        int cut = 0;
+        for (const auto& item : simple_trash_.items) if (!item.file.empty()) ++cut;
+        heading(strong_font_, ("Món khác, chụp từ túi đồ (" + std::to_string(cut) + ")").c_str());
+    }
+    hint("Cho món không có ở trên, như đồ trang bị. Mở túi đồ trong game ở ngăn có món đó, "
+         "để túi đồ không bị GoBot che, bấm Chụp túi đồ, rồi bấm vào món.");
+
+    // What was cut from the bag before, each with its way off the list.
+    {
         const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
         int remove = -1;
+        bool first = true;
         for (std::size_t i = 0; i < simple_trash_.items.size(); ++i) {
             const auto& item = simple_trash_.items[i];
-            if (i > 0) {
+            if (item.file.empty()) continue;
+            if (!first) {
                 const float next = ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + 60;
                 if (next <= right) ImGui::SameLine();
             }
+            first = false;
             ImGui::PushID(static_cast<int>(i));
             ImGui::BeginGroup();
             draw_frame_region(item.shown, 0, 0, item.shown.width, item.shown.height, 1.5f,
                               "##thumb");
-            ImGui::SetItemTooltip("%s", item.action == TrashList::Action::Delete
-                                        ? "Bỏ vào thùng rác (xoá hẳn)"
-                                        : "Vứt xuống đất");
+            const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddRect(
+                a, b, item.action == TrashList::Action::Delete ? kDeleteMark : kDropMark,
+                0, 0, 2.0f);
             ImGui::PushFont(nullptr, kSmall);
             ImGui::TextUnformatted(item.action == TrashList::Action::Delete ? "Xoá" : "Vứt");
             ImGui::SameLine();
@@ -1523,18 +1636,7 @@ void GuiApp::simple_trash_tab() {
             simple_rematch_bag();
         }
     }
-    ImGui::Dummy(ImVec2(0, 2));
-    ImGui::PushFont(nullptr, kSmall);
-    coloured(kWait, "Xoá là mất hẳn, không lấy lại được. Chỉ thêm món bạn chắc chắn không cần, "
-                    "và bấm Thử tìm trước khi bật.");
-    ImGui::PopFont();
-    end_card();
 
-    // ---- adding ----
-    if (!begin_card("##trashpick")) { end_card(); return; }
-    heading(strong_font_, "Thêm đồ từ túi");
-    hint("Mở túi đồ trong game, chọn ngăn có món cần bỏ, để túi đồ không bị GoBot che, "
-         "rồi bấm Chụp túi đồ. Sau đó bấm vào món muốn bỏ.");
     if (input_.window_valid() && overlap_fraction() > 0.02f) {
         mark(Mark::Bad);
         ImGui::SameLine();
@@ -1583,9 +1685,9 @@ void GuiApp::simple_trash_tab() {
             const int listed = i < simple_bag_match_.size() ? simple_bag_match_[i] : -1;
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             if (listed >= 0)
-                ImGui::GetWindowDrawList()->AddRect(a, b, ImGui::GetColorU32(kBad), 0, 0, 3.0f);
+                ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 3.0f);
             else if (!empty && ImGui::IsItemHovered())
-                ImGui::GetWindowDrawList()->AddRect(a, b, ImGui::GetColorU32(kWait), 0, 0, 2.0f);
+                ImGui::GetWindowDrawList()->AddRect(a, b, kDropMark, 0, 0, 2.0f);
             if (!empty && listed < 0 && ImGui::IsItemClicked()) {
                 simple_pick_slot_ = static_cast<int>(i);
                 ImGui::OpenPopup("##pickitem");
@@ -1624,7 +1726,9 @@ void GuiApp::simple_trash_tab() {
     ImGui::SameLine();
     if (ImGui::Button("Dọn ngay")) request_trash(false);
     ImGui::EndDisabled();
-    hint("Thử tìm: mở túi đồ, xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì.");
+    hint("Thử tìm: mở túi đồ, xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. "
+         "Khi một bước không được, GoBot giữ lại ảnh màn hình lúc đó trong thư mục "
+         "trash_debug để sửa.");
     std::vector<std::string> lines;
     {
         std::lock_guard<std::mutex> lock(worker_mutex_);
