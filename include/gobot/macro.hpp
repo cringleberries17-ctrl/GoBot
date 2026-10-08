@@ -59,6 +59,25 @@ struct MacroKey {
     bool conditional() const { return trigger != MacroTrigger::Always; }
 };
 
+/// What a key is for, worked out from how it is set up.
+///
+/// Keys carry no role of their own: a potion is a key with a trigger on it,
+/// and a buff is a key on a long timer. The simple screen groups them by this,
+/// so a player sees "HP potion, key 1" rather than a table of nine columns.
+enum class MacroKeyKind {
+    Skill,      ///< a short timer: fired over and over while fighting
+    Buff,       ///< a long timer: cast again every few minutes
+    HpPotion,   ///< drinks when HP drops
+    MpPotion,   ///< drinks when MP drops
+};
+
+/// Timers at least this long are buffs, anything shorter a skill. A minute
+/// sits well clear of both: skill cooldowns here run to seconds, buffs to
+/// minutes.
+constexpr std::uint32_t kBuffMinIntervalMs = 60'000;
+
+MacroKeyKind macro_key_kind(const MacroKey& k);
+
 /// One entry in an ordered sequence.
 struct MacroStep {
     std::uint32_t keycode = 0;          ///< 0 = pure delay
@@ -174,6 +193,12 @@ public:
 
         /// Presses held because the character was not in the world.
         std::uint64_t held_suspended = 0;
+
+        /// Presses per timed key, in the order of the config's keys. What a
+        /// panel needs to say "3 potions" rather than "412 presses", a figure
+        /// that counts every skill along with them. Sequence steps are not
+        /// counted here: they are not keys of the config.
+        std::vector<std::uint64_t> key_presses;
     };
     Stats stats() const;
     void  reset_stats();

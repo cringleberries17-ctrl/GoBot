@@ -117,13 +117,30 @@ otherwise.
 
 ---
 
+## Getting started
+
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, laid out in the
+order things have to happen:
+
+1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
+   it, your character's name, HP/MP being read, keys reaching the game. Each
+   line that is not ticked has the button that fixes it next to it.
+2. **Bot sẽ làm gì** — five switches: fight monsters, use skills, HP potion,
+   MP potion, buffs. Click a key box and press the key to change it.
+3. **BẮT ĐẦU**, or **F10** in game. **F12** stops everything at once.
+
+Settings save themselves as they change. Everything else — every timer, the
+radar, the packet tools — is under **Nâng cao ►** at the bottom, and
+**◄ Giao diện đơn giản** at the top left of that window comes back.
+
 ## Keyboard macro
 
-The macro needs no packet capture, no protocol work, and no Administrator. Open
-`gobot_gui.exe`, go to the **Macro** tab (it opens there):
+The macro needs no packet capture and no protocol work. On the simple screen
+it is the skill, potion and buff rows. Its full settings are under
+**Nâng cao ►**:
 
-1. **Capture** tab → pick the game window from the list
-2. **Macro** tab → set your keys and intervals
+1. Pick the game window from the list
+2. **Timed keys** → set your keys and intervals
 3. **START MACRO**, or press **F10** in game
 
 Two mechanisms, usable together:

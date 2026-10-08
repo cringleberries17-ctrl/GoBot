@@ -41,6 +41,8 @@
 #include <string>
 #include <vector>
 
+struct ImFont;
+
 namespace gobot {
 
 /// The GUI front-end.
@@ -67,6 +69,12 @@ public:
     /// Our own top-level window. Needed to tell whether we are sitting on top
     /// of the game, which breaks screen capture. Set before initialise().
     void set_main_window(void* hwnd) { main_hwnd_ = hwnd; }
+
+    /// The faces the simple screen is drawn in: one for text and a heavier one
+    /// for headings and the start button, both with Vietnamese in them.
+    /// ImGui's own font is ASCII only and draws every "ế" as a question mark.
+    /// Null keeps the default. Set before the first draw.
+    void set_fonts(ImFont* text, ImFont* strong) { text_font_ = text; strong_font_ = strong; }
 
     /// Load configs, find the game window. Call once before the first draw.
     void initialise();
@@ -521,6 +529,67 @@ private:
     // ---- log panel ----
     int  log_level_filter_ = 2;      ///< index into the level combo
     bool log_autoscroll_ = true;
+
+    // ---- the simple screen ----
+    //
+    // What a player sees first. One screen, in Vietnamese, in the order things
+    // have to happen: get ready, choose what the bot does, start it. It drives
+    // the same engines as everything else; the full window is one click away
+    // behind "Nâng cao", and has a button back. Lives in simple_view.cpp.
+    void draw_simple_view();
+    void simple_checklist();
+    void simple_vitals();
+    void simple_jobs();
+    void simple_start_block();
+    void simple_window_list();
+
+    /// Everything the player ticked, on or off. One button and one key.
+    void simple_start();
+    void simple_stop();
+    void simple_toggle();
+    bool simple_running() const { return macro_running_ || hunting_; }
+
+    /// Notice a run starting or stopping, however it happened -- the button,
+    /// the keys, the panic key, the full screen -- and start or freeze the
+    /// tallies under the button. Called from tick(), which runs even while
+    /// the game covers this window and nothing is drawn.
+    void simple_track_run(bool running);
+
+    /// After a change on the simple screen: hand it to whatever is running,
+    /// start what now has something to do, and write it to disk. That screen
+    /// has no Save button; a setting a player has to remember to save is a
+    /// setting they lose.
+    void simple_changed();
+
+    /// A box showing one key. Click it, then press a key; Delete empties it
+    /// when `can_clear`, Esc leaves it as it was. True on the frame it changed.
+    bool simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, bool dimmed,
+                        const char* tip);
+
+    /// A line of Vietnamese saying what just happened, under the start
+    /// button. Kept apart from set_status(), whose messages come from the
+    /// engines and are in English.
+    void simple_note(const std::string& msg, std::uint32_t ms = 6000);
+
+    ImFont*       text_font_ = nullptr;
+    ImFont*       strong_font_ = nullptr;
+    bool          simple_view_ = true;
+    bool          simple_seeded_ = false;        ///< potion keys made sure of
+    bool          simple_reader_tried_ = false;  ///< HP/MP reader started for this window
+    bool          simple_find_bars_ = false;     ///< look for the bars on the next frame
+    std::uint64_t simple_find_bars_since_ms_ = 0;
+    bool          simple_pick_window_ = false;   ///< open the window list
+    std::uint32_t simple_listening_ = 0;         ///< ImGui id of the key box waiting for a key
+    /// A key just added with +, whose box should wait for its key as soon as
+    /// it is drawn. Pressing + and then the key is the whole of adding one.
+    std::size_t   simple_listen_key_ = static_cast<std::size_t>(-1);
+    std::string   simple_note_;
+    std::uint64_t simple_note_until_ms_ = 0;
+    bool          simple_was_running_ = false;
+    std::uint64_t simple_started_ms_ = 0;
+    std::uint64_t simple_stopped_ms_ = 0;
+    std::uint64_t simple_base_finished_ = 0;     ///< the hunter's tally when the run began
+    std::vector<std::uint64_t> simple_base_presses_;   ///< the macro's, per key
 
     // ---- status ----
     std::string status_message_;

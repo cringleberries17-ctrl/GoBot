@@ -13,6 +13,8 @@
 #include <tchar.h>
 
 #include <cstdio>
+#include <initializer_list>
+#include <string>
 
 // Declared in imgui_impl_win32.cpp; not in the public header.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg,
@@ -161,6 +163,47 @@ bool running_as_admin() {
     return elevated != FALSE;
 }
 
+/// Faces with Vietnamese in them, for the simple screen.
+///
+/// ImGui's built-in font covers ASCII and nothing more, so every "ế" and "ộ"
+/// would come out as a question mark. Every Windows this runs on has Segoe UI,
+/// with Tahoma and Arial behind it. Glyphs are rasterised as they are first
+/// drawn -- ImGui 1.92 and its DX11 backend build the atlas on demand -- so
+/// there are no ranges to list.
+///
+/// The built-in font is added first and stays the default. The full window is
+/// laid out for it, and a different face under it would move every column.
+struct Faces {
+    ImFont* text = nullptr;
+    ImFont* strong = nullptr;
+};
+
+Faces load_faces(ImGuiIO& io) {
+    io.Fonts->AddFontDefault();
+
+    char windows[MAX_PATH] = {};
+    const UINT n = GetWindowsDirectoryA(windows, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    const std::string dir = std::string(windows) + "\\Fonts\\";
+
+    const auto first_of = [&](std::initializer_list<const char*> files) -> ImFont* {
+        for (const char* file : files) {
+            const std::string path = dir + file;
+            if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            ImFontConfig cfg;
+            cfg.Flags |= ImFontFlags_NoLoadError;
+            if (ImFont* f = io.Fonts->AddFontFromFileTTF(path.c_str(), 18.0f, &cfg)) return f;
+        }
+        return nullptr;
+    };
+
+    Faces faces;
+    faces.text   = first_of({ "segoeui.ttf", "tahoma.ttf", "arial.ttf" });
+    faces.strong = first_of({ "seguisb.ttf", "segoeuib.ttf", "tahomabd.ttf", "arialbd.ttf" });
+    if (!faces.strong) faces.strong = faces.text;
+    return faces;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
@@ -213,11 +256,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     io.IniFilename = ini_path.c_str();
 
     apply_style();
+    const Faces faces = load_faces(io);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
 
     gobot::GuiApp app;
+    app.set_fonts(faces.text, faces.strong);
     // Npcap cannot open an adapter without elevation, and the failure surfaces
     // much later as a mysteriously empty interface list. Surfaced as a banner
     // inside the window rather than a modal before it: a dialog that blocks

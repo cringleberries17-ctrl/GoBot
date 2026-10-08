@@ -36,6 +36,15 @@ MacroTrigger macro_trigger_from_string(const std::string& s) {
     return MacroTrigger::Always;
 }
 
+MacroKeyKind macro_key_kind(const MacroKey& k) {
+    switch (k.trigger) {
+        case MacroTrigger::HpBelow: return MacroKeyKind::HpPotion;
+        case MacroTrigger::MpBelow: return MacroKeyKind::MpPotion;
+        case MacroTrigger::Always:  break;
+    }
+    return k.interval_ms >= kBuffMinIntervalMs ? MacroKeyKind::Buff : MacroKeyKind::Skill;
+}
+
 // ---------------------------------------------------------------- config
 
 bool MacroConfig::needs_vitals() const {
@@ -475,7 +484,12 @@ void MacroEngine::timer_loop() {
                 if (i < due_ms_.size()) due_ms_[i] = now + next;
             }
 
-            press(k.keycode, k.hold_ms, "macro-timer");
+            if (press(k.keycode, k.hold_ms, "macro-timer")) {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                if (stats_.key_presses.size() < cfg.keys.size())
+                    stats_.key_presses.resize(cfg.keys.size(), 0);
+                ++stats_.key_presses[i];
+            }
         }
     }
 }

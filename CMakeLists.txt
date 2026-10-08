@@ -246,6 +246,7 @@ if(GOBOT_BUILD_GUI)
     add_executable(gobot_gui WIN32
         apps/gobot_gui/main.cpp
         apps/gobot_gui/gui_app.cpp
+        apps/gobot_gui/simple_view.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"

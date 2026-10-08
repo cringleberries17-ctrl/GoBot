@@ -39,6 +39,7 @@
 #include "gobot/session_manager.hpp"
 #include "gobot/vitals_reader.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <windows.h>
@@ -4414,6 +4415,69 @@ void test_macro_engine() {
     engine.stop();
 }
 
+void test_macro_key_kind() {
+    section("Macro key kinds");
+
+    // The simple screen groups keys by what they are for, and keys carry no
+    // role of their own -- so its rows are only as right as this is.
+    MacroKey k;
+    k.trigger = MacroTrigger::HpBelow;
+    check(macro_key_kind(k) == MacroKeyKind::HpPotion, "an HP trigger is an HP potion");
+    k.trigger = MacroTrigger::MpBelow;
+    check(macro_key_kind(k) == MacroKeyKind::MpPotion, "an MP trigger is an MP potion");
+
+    k.trigger = MacroTrigger::Always;
+    k.interval_ms = 1200;
+    check(macro_key_kind(k) == MacroKeyKind::Skill, "a short timer is a skill");
+    k.interval_ms = kBuffMinIntervalMs - 1;
+    check(macro_key_kind(k) == MacroKeyKind::Skill, "just under a minute is still a skill");
+    k.interval_ms = kBuffMinIntervalMs;
+    check(macro_key_kind(k) == MacroKeyKind::Buff, "a minute is a buff");
+
+    // The simple screen's buff interval goes down to one minute, so a buff
+    // edited there must not turn into a skill and jump rows.
+    k.interval_ms = 1 * 60000;
+    check(macro_key_kind(k) == MacroKeyKind::Buff, "its shortest buff interval stays a buff");
+
+    // A potion on a long cooldown is still a potion: the trigger decides.
+    k.trigger = MacroTrigger::HpBelow;
+    k.interval_ms = 300000;
+    check(macro_key_kind(k) == MacroKeyKind::HpPotion, "the trigger wins over the interval");
+
+    // The shipped defaults land in the rows the simple screen shows.
+    MacroConfig cfg;
+    cfg.apply_defaults();
+    int skills = 0, buffs = 0, hp = 0, mp = 0;
+    for (const auto& key : cfg.keys) {
+        switch (macro_key_kind(key)) {
+            case MacroKeyKind::Skill:    ++skills; break;
+            case MacroKeyKind::Buff:     ++buffs;  break;
+            case MacroKeyKind::HpPotion: ++hp;     break;
+            case MacroKeyKind::MpPotion: ++mp;     break;
+        }
+    }
+    check(skills == 4 && buffs == 2 && hp == 1 && mp == 1,
+          "defaults: four skills, two buffs, a potion of each");
+
+    // The per-key tally behind "Bình HP: 3". Nothing reaches a test run --
+    // there is no focused game window -- so nothing may be counted against
+    // any key, whatever else the engine tried.
+    InputManager input;
+    ExecutionCoordinator coord;
+    MacroEngine engine(input, coord);
+    for (auto& key : cfg.keys) { key.enabled = true; key.interval_ms = 20; }
+    cfg.require_focus = true;
+    engine.set_config(cfg);
+    engine.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    engine.stop();
+    const auto st = engine.stats();
+    check(st.presses == 0, "nothing pressed without a window");
+    check(std::all_of(st.key_presses.begin(), st.key_presses.end(),
+                      [](std::uint64_t n) { return n == 0; }),
+          "and nothing counted against any key");
+}
+
 // ------------------------------------------------------------------ config
 
 void test_config() {
@@ -4675,6 +4739,7 @@ int main() {
     test_macro_config();
     test_macro_trigger_config();
     test_macro_engine();
+    test_macro_key_kind();
     test_vitals_reader();
     test_find_bars();
     test_macro_triggers();

@@ -293,9 +293,17 @@ void GuiApp::tick() {
     // toggled from inside the game. GetAsyncKeyState rather than
     // RegisterHotKey: a registered hotkey is swallowed and never reaches the
     // game, which matters when the toggle shares a key with something.
+    //
+    // On the simple screen the key is that screen's one button, which starts
+    // the fighting and the potions along with the timers. Not while a key box
+    // there is waiting for a key: binding something to it would otherwise
+    // start the bot as a side effect.
     static bool was_down = false;
     const bool down = (GetAsyncKeyState(static_cast<int>(macro_config_.toggle_key)) & 0x8000) != 0;
-    if (down && !was_down) toggle_macro();
+    if (down && !was_down && simple_listening_ == 0) {
+        if (simple_view_) simple_toggle();
+        else              toggle_macro();
+    }
     was_down = down;
 
     // Panic key: stop everything and let go of every held key, unconditionally.
@@ -321,10 +329,11 @@ void GuiApp::tick() {
     static bool hunt_was_down = false;
     const bool hunt_down =
         (GetAsyncKeyState(static_cast<int>(hunt_config_.toggle_key)) & 0x8000) != 0;
-    if (hunt_down && !hunt_was_down) toggle_hunt();
+    if (hunt_down && !hunt_was_down && simple_listening_ == 0) toggle_hunt();
     hunt_was_down = hunt_down;
 
     if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
+    simple_track_run(simple_running());
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -1051,6 +1060,9 @@ void GuiApp::reload_configs() {
 // =========================================================================
 
 void GuiApp::draw() {
+    // The simple screen is the default, and draws the whole window itself.
+    if (simple_view_) { draw_simple_view(); return; }
+
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -2203,6 +2215,13 @@ void GuiApp::draw_tools_panel() {
 
 void GuiApp::draw_menu_bar() {
     if (!ImGui::BeginMenuBar()) return;
+
+    // The way back to the simple screen: first in the bar, and in that
+    // screen's language, so the person who needs it is the one who can read it.
+    if (text_font_) ImGui::PushFont(text_font_, 0.0f);
+    const bool back = ImGui::MenuItem("◄ Giao diện đơn giản");
+    if (text_font_) ImGui::PopFont();
+    if (back) simple_view_ = true;
 
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("Save macro"))       save_macro_config();

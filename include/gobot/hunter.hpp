@@ -13,6 +13,9 @@
 namespace gobot {
 
 struct HunterConfig {
+    /// Whether START on the simple screen goes hunting -- that screen's
+    /// fighting switch. The hunter itself never reads it: F11 and the Attack
+    /// switch start it regardless.
     bool enabled = false;
 
     /// Your character's name, exactly as it appears under its feet.
