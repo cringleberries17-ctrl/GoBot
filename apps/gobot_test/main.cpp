@@ -29,6 +29,7 @@
 #include "gobot/protocol_handler.hpp"
 #include "gobot/tcp_reassembler.hpp"
 #include "gobot/auto_login.hpp"
+#include "gobot/bag.hpp"
 #include "gobot/dialog_driver.hpp"
 #include "gobot/gatherer.hpp"
 #include "gobot/party.hpp"
@@ -4313,6 +4314,194 @@ void test_hunter() {
     hunter.stop();
 }
 
+// -------------------------------------------------------------------- bag
+
+namespace {
+
+/// A frame the colour of an empty bag slot.
+Frame bag_scene(int w, int h, std::uint8_t grey = 14) {
+    Frame f;
+    f.width = w;
+    f.height = h;
+    f.pixels.assign(static_cast<std::size_t>(w) * h * 4, 255);
+    for (std::size_t i = 0; i < f.pixels.size(); i += 4)
+        f.pixels[i] = f.pixels[i + 1] = f.pixels[i + 2] = grey;
+    return f;
+}
+
+void put_px(Frame& f, int x, int y, int r, int g, int b) {
+    if (x < 0 || y < 0 || x >= f.width || y >= f.height) return;
+    const std::size_t i = (static_cast<std::size_t>(y) * f.width + x) * 4;
+    f.pixels[i] = static_cast<std::uint8_t>(b);
+    f.pixels[i + 1] = static_cast<std::uint8_t>(g);
+    f.pixels[i + 2] = static_cast<std::uint8_t>(r);
+}
+
+/// Something colourful in a slot, inside its edge. `swap` draws the same
+/// picture with red and blue exchanged: one shape, another colour.
+void paint_item(Frame& f, const ScreenRect& s, int seed, bool swap = false) {
+    for (int y = 4; y < s.h - 4; ++y)
+        for (int x = 4; x < s.w - 4; ++x) {
+            const int r = 128 + static_cast<int>(100 * std::sin(x * 0.5 + seed));
+            const int g = 128 + static_cast<int>(100 * std::cos(y * 0.4 + seed * 2));
+            const int b = 40 + (x * y * (seed + 3)) % 200;
+            put_px(f, s.x + x, s.y + y, swap ? b : r, g, swap ? r : b);
+        }
+}
+
+/// A stack count in the corner: white marks that depend on the number.
+void paint_count(Frame& f, const ScreenRect& s, int value) {
+    for (int i = 0; i < 12; ++i)
+        if ((value >> (i % 7)) & 1)
+            for (int y = 2; y < 9; ++y) put_px(f, s.x + 2 + i, s.y + y, 250, 250, 250);
+}
+
+void blit(Frame& f, const Frame& t, int at_x, int at_y) {
+    for (int y = 0; y < t.height; ++y)
+        for (int x = 0; x < t.width; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * t.width + x) * 4;
+            if (t.pixels[i + 3] < 128) continue;
+            put_px(f, at_x + x, at_y + y, t.pixels[i + 2], t.pixels[i + 1], t.pixels[i]);
+        }
+}
+
+} // namespace
+
+void test_bag() {
+    section("Bag and trash");
+
+    // Where the slots are, from the strip.
+    BagLayout l;
+    BagView v;
+    v.found = true;
+    v.strip = ScreenRect{ 100, 200, 246, 19 };
+    const auto slots = v.slots(l);
+    check(slots.size() == 24, "six slots by four");
+    check(slots[0].x == 101 && slots[0].y == 225 && slots[0].w == 34 && slots[0].h == 34,
+          "the first just under the strip");
+    check(slots[7].x == 101 + 37 && slots[7].y == 225 + 37, "the rest on a 37 pixel pitch");
+    int tx = 0, ty = 0;
+    v.tab_point(l, 2, tx, ty);
+    check(tx == 100 + 2 * 37 + 18 && ty == 209, "a tab is clicked in its middle");
+    check(std::string(bag_tab_name(2)) == "Tiêu Dùng", "and the third is Tiêu Dùng");
+
+    // Empty or not.
+    Frame f = bag_scene(500, 450);
+    paint_item(f, slots[3], 1);
+    check(bag::is_empty(f, slots[0], l), "a dark slot is empty");
+    check(!bag::is_empty(f, slots[3], l), "a slot with something in it is not");
+
+    // The corner with the count and the edge with the highlight are left out.
+    const Frame mask = bag::masked(bag::cut(f, slots[3]), l);
+    const auto alpha = [&](int x, int y) {
+        return mask.pixels[(static_cast<std::size_t>(y) * mask.width + x) * 4 + 3];
+    };
+    check(alpha(0, 0) == 0 && alpha(33, 20) == 0, "the edge is see-through");
+    check(alpha(6, 5) == 0, "and so is the count corner");
+    check(alpha(20, 20) == 255, "but the item itself is not");
+
+    // Recognising a listed item.
+    TrashList list;
+    list.add_picture(bag::cut(f, slots[3]), TrashList::Action::Delete, l);
+    check(list.match(f, slots[3], 0.90f) == 0, "a listed item is known where it was cut from");
+
+    Frame g = bag_scene(500, 450);
+    paint_item(g, slots[10], 1);
+    paint_count(g, slots[10], 67);
+    // Matched first and reported after: the order a function's arguments are
+    // worked out in is not fixed, and the score would be read before it was set.
+    float score = 0.0f;
+    const int same_item = list.match(g, slots[10], 0.90f, &score);
+    check(same_item == 0,
+          "and in another slot, with a different count -- score " + std::to_string(score));
+    paint_item(g, slots[11], 2);
+    check(list.match(g, slots[11], 0.90f) < 0, "a different item is not");
+    paint_item(g, slots[12], 1, true);
+    float colour_score = 0.0f;
+    list.match(g, slots[12], 0.0f, &colour_score);
+    check(list.match(g, slots[12], 0.90f) < 0,
+          "nor the same drawing in another colour -- score " + std::to_string(colour_score));
+    check(list.match(g, slots[0], 0.90f) < 0, "nor an empty slot");
+
+    // The list on disk.
+    {
+        const std::string dir = temp_file("gobot_trash_test");
+        TrashList on_disk;
+        const std::string file =
+            on_disk.add(dir, bag::cut(f, slots[3]), TrashList::Action::Drop, l);
+        check(!file.empty() && GetFileAttributesA(file.c_str()) != INVALID_FILE_ATTRIBUTES,
+              "a picture is saved");
+        TrashList back;
+        check(back.load(dir, l) && back.items.size() == 1 &&
+                  back.items[0].action == TrashList::Action::Drop,
+              "and read back, in the folder for its action");
+        check(back.match(f, slots[3], 0.90f) == 0, "and still recognised");
+        check(back.remove(0) && back.items.empty() &&
+                  GetFileAttributesA(file.c_str()) == INVALID_FILE_ATTRIBUTES,
+              "removing it deletes the file");
+        RemoveDirectoryA((dir + "\\drop").c_str());
+        RemoveDirectoryA(dir.c_str());
+        TrashList none;
+        check(none.load(temp_file("gobot_trash_nowhere"), l) && none.items.empty(),
+              "a folder that is not there is an empty list");
+    }
+
+    // The settings as shipped.
+    {
+        CleanSettings s;
+        check(s.load(exe_relative("configs/trash.ini")), "the shipped trash settings load");
+        check(!s.enabled, "and leave it off until somebody turns it on");
+        check(s.bag_key == 'I' && s.tabs[0] && !s.tabs[4] && s.min_score >= 0.89f,
+              "with the bag on I, the pet tab left alone and a strict match");
+        check(s.layout.pitch == 37 && s.layout.grid_dy == 25, "and the measured layout");
+    }
+
+    // Finding the bag, and a look-only pass over it, with the game's pictures.
+    TemplateStore store;
+    const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
+                      store.get("grabbed/inventory") && store.get("inven/0/trash_can");
+    if (!have) {
+        std::printf("  [skip] the bag pictures are not installed here\n");
+        return;
+    }
+    Frame scene = bag_scene(1024, 768, 60);
+    for (int y = 300; y < 300 + 220; ++y)            // the bag's dark panel
+        for (int x = 290; x < 290 + 272; ++x) put_px(scene, x, y, 20, 22, 30);
+    blit(scene, *store.get("grabbed/inventory"), 300, 300);
+    blit(scene, *store.get("inven/0/trash_can"), 300 + 215, 300 + 180);
+
+    const BagView found = bag::find(scene, store);
+    check(found.found && found.strip.x == 300 && found.strip.y == 300,
+          "the bag is found by its tab strip");
+    check(found.has_trash && std::abs(found.trash.x - 515) <= 1 &&
+              std::abs(found.trash.y - 480) <= 1,
+          "and the trash can in its corner");
+
+    const auto bag_slots = found.slots(l);
+    paint_item(scene, bag_slots[5], 1);
+    paint_item(scene, bag_slots[9], 4);
+    TrashList wanted;
+    wanted.add_picture(bag::cut(scene, bag_slots[5]), TrashList::Action::Delete, l);
+
+    InputManager no_window;          // no target: nothing it does reaches anything
+    BagCleaner cleaner(no_window, store, [&](Frame& out) { out = scene; return true; });
+    CleanSettings cs;
+    cs.tabs[0] = true;
+    cs.tabs[1] = cs.tabs[2] = cs.tabs[3] = cs.tabs[4] = false;
+    cleaner.set_settings(cs);
+    cleaner.set_trash(&wanted);
+    cleaner.set_dry_run(true);
+    const auto res = cleaner.run();
+    check(res.ran, "a look-only pass searches the bag");
+    check(res.matched == 1, "finds the one listed item and not the other -- found " +
+                            std::to_string(res.matched));
+    check(res.deleted == 0 && res.dropped == 0 && res.failed == 0, "and throws nothing away");
+
+    TrashList empty_list;
+    cleaner.set_trash(&empty_list);
+    check(!cleaner.run().ran, "with nothing listed, it does not open the bag at all");
+}
+
 /// The gate between a reading and a key press.
 ///
 /// Runs with require_focus on, so nothing is actually typed anywhere: what is
@@ -4835,6 +5024,7 @@ int main() {
     test_minimap_tracker();
     test_hunter_config();
     test_hunter();
+    test_bag();
     test_config();
     test_protocol_handler();
 

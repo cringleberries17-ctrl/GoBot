@@ -129,7 +129,8 @@ depends on a server, a subscription or a login to anyone else.
 
 | GoC | | GoBot |
 |---|---|---|
-| Xử lý vật phẩm — fragments, delete or drop junk, on a timer | ✗ | |
+| Xử lý vật phẩm — Xóa rác / Vứt rác: delete or drop junk on a timer | ✓ | **Dọn rác** tab. Every 5–60 minutes it opens the bag, goes through the tabs you tick, and drags anything on your list to the trash can (or onto the ground), answering the confirmation and the quantity box. GoC lists items by picking icons from its own library, which has potions, pets and seals but nothing that drops; GoBot's list is pictures cut from your own bag, so anything in it can go on. *Thử tìm* goes through the bag and says what it would throw away without throwing anything. |
+| Xử lý vật phẩm — Sử dụng mảnh ghép (use fragments) | ✗ | |
 | Mua sắm — buy potions from the Hawker / Người giữ sân, safe place first, exact quantity | ✗ | Click sequences exist for buying a rod and a pickaxe; potions are the same shape. |
 | Làm nhiệm vụ nhanh | — | Dropped: around seventy quest icons for one feature. |
 | Bật chat — messages on a timer | ✗ | |

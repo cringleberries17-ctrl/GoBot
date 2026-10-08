@@ -170,6 +170,7 @@ add_library(gobot_core STATIC
     src/party_invite.cpp
     src/player_list.cpp
     src/auto_login.cpp
+    src/bag.cpp
     src/dialog_driver.cpp
     src/routine.cpp
     src/gatherer.cpp

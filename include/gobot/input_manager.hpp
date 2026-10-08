@@ -160,6 +160,14 @@ public:
     /// are being brought to the front, and a click is how they get there.
     bool click_at(int x, int y, bool right_button = false);
 
+    /// Press at one point, move to another with the button held, let go.
+    ///
+    /// How an item goes from a bag slot to the trash can. The pointer travels
+    /// in steps rather than jumping: a game sees the drag only through the
+    /// moves it is sent, and one that teleports from slot to target looks like
+    /// a click in two places. Coordinates are client-area, like `click_at`.
+    bool drag(int from_x, int from_y, int to_x, int to_y);
+
     /// Type a string into whatever has focus, one character at a time.
     ///
     /// Sent as Unicode rather than as key codes, so what arrives does not

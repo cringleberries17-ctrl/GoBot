@@ -323,6 +323,20 @@ bool read_png(const std::wstring& path, Frame& out) {
     return true;
 }
 
+} // namespace
+
+bool load_png(const std::string& path, Frame& out) {
+    if (path.empty()) return false;
+    const int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (n <= 0) return false;
+    std::wstring wide(static_cast<std::size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), n);
+    wide.resize(static_cast<std::size_t>(n - 1));
+    return read_png(wide, out);
+}
+
+namespace {
+
 std::string to_utf8(const std::wstring& w) {
     if (w.empty()) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),

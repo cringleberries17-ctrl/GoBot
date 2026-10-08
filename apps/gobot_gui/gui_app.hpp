@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "gobot/bag.hpp"
 #include "gobot/bot_brain.hpp"
 #include "gobot/calibrator.hpp"
 #include "gobot/camera_tracker.hpp"
@@ -363,6 +364,26 @@ private:
     std::atomic<int>         revive_count_{0};
     std::vector<std::string> revive_log_;          ///< guarded by worker_mutex_
 
+    // ---- trash cleaning ----
+    /// Opens the bag every so often and gets rid of what is on the list. One
+    /// thread for both the timed passes and the ones asked for by a button;
+    /// started for a button press alone, it does that one pass and ends.
+    void start_trash();                   ///< the timed passes, for a run
+    void request_trash(bool look_only);   ///< one pass now
+    void stop_trash();
+    void trash_loop();
+    void say_trash(const std::string& line);
+
+    std::thread              trash_thread_;
+    std::atomic<bool>        trash_running_{false};
+    std::atomic<bool>        trash_stop_{false};
+    std::atomic<bool>        trash_oneshot_{false};   ///< here for one asked-for pass
+    std::atomic<int>         trash_request_{0};       ///< 1 clean now, 2 look only
+    std::atomic<int>         trash_thrown_{0};        ///< items got rid of, all runs
+    std::vector<std::string> trash_log_;              ///< guarded by worker_mutex_
+    std::mutex               trash_cleaner_mutex_;
+    BagCleaner*              trash_cleaner_ = nullptr; ///< the pass under way, to cancel
+
     // ---- vitals ----
     /// Reads HP and MP off the on-screen bars. The only live game state
     /// available without decoding the protocol or reading the process.
@@ -578,13 +599,28 @@ private:
     void simple_toggle();
     bool simple_running() const {
         return macro_running_ || hunting_ || party_running_ || keeper_running_ ||
-               revive_running_;
+               revive_running_ || (trash_running_ && !trash_oneshot_);
     }
 
     /// The tabs. Fighting is what the whole screen used to be.
     void simple_fight_tab();
     void simple_party_tab();
     void simple_login_tab();
+    void simple_trash_tab();
+
+    /// The trash tab's copy of configs/trash.ini and of the pictures, and the
+    /// bag as last photographed for picking from.
+    CleanSettings     simple_clean_;
+    TrashList         simple_trash_;
+    bool              simple_clean_loaded_ = false;
+    TemplateStore     simple_store_;
+    bool              simple_store_loaded_ = false;
+    Frame             simple_bag_frame_;
+    BagView           simple_bag_view_;
+    bool              simple_bag_shot_ = false;
+    std::vector<int>  simple_bag_match_;   ///< per slot: the list item it is, or -1
+    int               simple_pick_slot_ = -1;
+    void simple_rematch_bag();
 
     /// The simple screen's own switches, kept in [Simple] in configs/app.ini
     /// and written key by key so the rest of that file is left as it is.

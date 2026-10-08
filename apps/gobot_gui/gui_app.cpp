@@ -106,6 +106,7 @@ GuiApp::~GuiApp() {
     stop_party();
     stop_keeper();
     stop_revive();
+    stop_trash();
     stop_vitals();
     stop_macro();
     stop_bot();
@@ -322,6 +323,7 @@ void GuiApp::tick() {
         // These click the game too, and the keeper can start it.
         stop_party();
         stop_revive();
+        stop_trash();
         stop_keeper();
         input_.release_all();
         set_status("Panic stop -- all input released", 5000);
@@ -2867,6 +2869,137 @@ void GuiApp::revive_loop() {
 
     say_revive("stopped");
     revive_running_ = false;
+}
+
+// ------------------------------------------------------------ trash cleaning
+
+void GuiApp::say_trash(const std::string& line) {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    trash_log_.push_back(line);
+    if (trash_log_.size() > 200) trash_log_.erase(trash_log_.begin());
+}
+
+void GuiApp::start_trash() {
+    if (trash_running_) {
+        trash_oneshot_ = false;          // a one-off pass in progress becomes a run
+        return;
+    }
+    if (trash_thread_.joinable()) trash_thread_.join();
+    trash_stop_ = false;
+    trash_oneshot_ = false;
+    trash_running_ = true;
+    trash_thread_ = std::thread([this] { trash_loop(); });
+}
+
+void GuiApp::request_trash(bool look_only) {
+    trash_request_ = look_only ? 2 : 1;
+    if (trash_running_) return;
+    if (trash_thread_.joinable()) trash_thread_.join();
+    trash_stop_ = false;
+    trash_oneshot_ = true;
+    trash_running_ = true;
+    trash_thread_ = std::thread([this] { trash_loop(); });
+}
+
+void GuiApp::stop_trash() {
+    trash_stop_ = true;
+    {
+        std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+        if (trash_cleaner_) trash_cleaner_->cancel();
+    }
+    if (trash_thread_.joinable()) trash_thread_.join();
+    trash_running_ = false;
+}
+
+/// The timed passes, and the ones asked for.
+///
+/// Every other part of the bot is held off for the length of a pass: the
+/// hunter walking off with the bag open drags it out of reach, and a potion key
+/// pressed while a quantity box has the keyboard types a number into it.
+void GuiApp::trash_loop() {
+    const auto finish = [this](const std::string& why) {
+        say_trash(why);
+        trash_running_ = false;
+    };
+
+    TemplateStore store;
+    if (!store.load_best(exe_relative("configs/templates.ini"))) {
+        finish("Không có hình giao diện của game, nên không nhận ra được túi đồ.");
+        return;
+    }
+    GlyphFont font;
+    font.load(GlyphFont::default_dir());
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
+
+    // The first timed pass a minute in, so a run gets going before it stops
+    // to tidy up.
+    std::uint64_t next = now_ms() + 60'000;
+    while (!trash_stop_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const int request = trash_request_.exchange(0);
+
+        CleanSettings settings;
+        settings.load(exe_relative("configs/trash.ini"));
+        if (request == 0) {
+            if (trash_oneshot_) break;
+            if (!settings.enabled || now_ms() < next) continue;
+        }
+        next = now_ms() + static_cast<std::uint64_t>(settings.interval_minutes) * 60'000ull;
+
+        TrashList list;
+        list.load(exe_relative("configs/trash"), settings.layout);
+        if (list.items.empty()) {
+            say_trash("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.");
+            if (trash_oneshot_) break;
+            continue;
+        }
+        if (!input_.window_valid()) {
+            say_trash("Chưa thấy cửa sổ game.");
+            if (trash_oneshot_) break;
+            continue;
+        }
+
+        const bool look_only = request == 2;
+        say_trash(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
+        coord_.engage_critical("trash cleaning");
+        input_.release_all();
+        if (!input_.window_focused()) {
+            input_.focus_window();
+            std::this_thread::sleep_for(std::chrono::milliseconds(350));
+        }
+
+        BagCleaner cleaner(input_, store, grab);
+        cleaner.set_settings(settings);
+        cleaner.set_trash(&list);
+        cleaner.set_font(&font);
+        cleaner.set_dry_run(look_only);
+        cleaner.on_report([this](const std::string& line) { say_trash(line); });
+        {
+            std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+            trash_cleaner_ = &cleaner;
+        }
+        const BagCleaner::Result r = cleaner.run();
+        {
+            std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+            trash_cleaner_ = nullptr;
+        }
+        coord_.disengage_critical();
+
+        trash_thrown_ += r.deleted + r.dropped;
+        if (!r.trouble.empty())
+            say_trash("Dừng: " + r.trouble + ".");
+        else if (look_only)
+            say_trash(r.matched == 0
+                ? "Thử xong: không thấy món nào trong danh sách."
+                : "Thử xong: thấy " + std::to_string(r.matched) +
+                  " ô sẽ bị bỏ. Không bỏ gì.");
+        else
+            say_trash("Xong: xoá " + std::to_string(r.deleted) + ", vứt " +
+                      std::to_string(r.dropped) + " món.");
+        if (trash_oneshot_) break;
+    }
+    trash_running_ = false;
 }
 
 void GuiApp::autodetect_bar(BarSpec& bar, const char* which) {

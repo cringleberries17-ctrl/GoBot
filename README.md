@@ -119,7 +119,7 @@ otherwise.
 
 ## Getting started
 
-`gobot_gui.exe` opens on one simple screen, in Vietnamese, with three tabs.
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, with four tabs.
 **Đánh quái** is laid out in the order things have to happen:
 
 1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
@@ -134,8 +134,11 @@ otherwise.
 with an accept-only list, an invite list and a blacklist. **Tự đăng nhập**
 logs back in when the client crashes or loses its connection, to the channel
 and character you pick; the game account is saved there, its password
-encrypted with your Windows account's key. BẮT ĐẦU starts whatever is ticked
-on any tab.
+encrypted with your Windows account's key. **Dọn rác** opens the bag every
+few minutes and puts what is on your list in the trash can, or drops it; the
+list is pictures you click in a photo of your own bag, and *Thử tìm* shows what
+would go without throwing anything away. BẮT ĐẦU starts whatever is ticked on
+any tab.
 
 Settings save themselves as they change. Everything else — every timer, the
 radar, the packet tools — is under **Nâng cao ►** at the bottom, and

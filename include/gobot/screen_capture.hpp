@@ -35,6 +35,10 @@ struct Frame {
 /// actually given, not the one you assume it got.
 bool save_png(const Frame& f, const std::string& path);
 
+/// Read a PNG -- a screenshot, say -- into a frame. Defined beside the
+/// template loader, which reads them the same way.
+bool load_png(const std::string& path, Frame& out);
+
 /// Grabs the client area of a window.
 ///
 /// Uses PrintWindow with PW_RENDERFULLCONTENT, which asks the window to render

@@ -602,6 +602,33 @@ bool InputManager::click_at(int x, int y, bool right_button) {
     return SendInput(1, &in[1], sizeof(INPUT)) == 1;
 }
 
+bool InputManager::drag(int from_x, int from_y, int to_x, int to_y) {
+    if (!move_pointer(from_x, from_y)) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(60, 110)));
+
+    INPUT down{};
+    down.type = INPUT_MOUSE;
+    down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    if (SendInput(1, &down, sizeof(INPUT)) != 1) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(90, 140)));
+
+    // Always let go, whatever happens on the way: a button left held down is
+    // an item stuck to the pointer, and the next click drops it somewhere.
+    INPUT up = down;
+    up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+
+    constexpr int kSteps = 10;
+    bool moved = true;
+    for (int i = 1; i <= kSteps && moved; ++i) {
+        moved = move_pointer(from_x + (to_x - from_x) * i / kSteps,
+                             from_y + (to_y - from_y) * i / kSteps);
+        std::this_thread::sleep_for(std::chrono::milliseconds(jitter(18, 30)));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(80, 130)));
+    const bool released = SendInput(1, &up, sizeof(INPUT)) == 1;
+    return moved && released;
+}
+
 bool InputManager::type_text(const std::string& utf8) {
     if (utf8.empty()) return false;
 

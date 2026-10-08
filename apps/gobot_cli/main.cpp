@@ -16,6 +16,7 @@
 // into the focused game window.
 
 #include "gobot/auto_login.hpp"
+#include "gobot/bag.hpp"
 #include "gobot/crash_watch.hpp"
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
@@ -235,6 +236,13 @@ UNATTENDED RUNNING
                       corrected with the game open in front of you, which is
                       what will be wanted when the publisher patches the client.
   --routine <name>    Run one.
+  --bag <png>         Find the bag in a screenshot and say what the trash
+                      cleaner would see: where the tab strip is, the trash
+                      can, and which slots hold something. Writes the
+                      screenshot again with all of it outlined, beside the
+                      original or to --bagout <png>. Touches nothing; for
+                      checking the layout in configs/trash.ini against a
+                      real bag.
   --close             Close whatever dialogs are in the way, for real. The one
                       thing here that needs no calibration -- the middle of a
                       close button is the close button -- so it is the right
@@ -306,6 +314,8 @@ struct Options {
     int  auto_party_seconds = 0;
     bool set_login = false;
     bool routines = false;
+    std::string bag_image;
+    std::string bag_out;
     bool dry_run = false;
     bool close_popups = false;
     bool party = false;
@@ -382,6 +392,8 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--vitals")    o.vitals_seconds = std::stoi(next("--vitals"));
         else if (a == "--session")   o.session_seconds = std::stoi(next("--session"));
         else if (a == "--routines")  o.routines = true;
+        else if (a == "--bag")       o.bag_image = next("--bag");
+        else if (a == "--bagout")    o.bag_out = next("--bagout");
         else if (a == "--routine")   { o.routines = true; o.routine_name = next("--routine"); }
         else if (a == "--dry")       o.dry_run = true;
         else if (a == "--close")     o.close_popups = true;
@@ -1955,6 +1967,88 @@ int run_close(const Options& o, const AppConfig& app) {
 /// worked out from the pictures' names rather than by watching the game, so the
 /// first pass over any routine is expected to be wrong somewhere, and finding
 /// out by watching it misclick through a shop is the expensive way.
+/// The trash cleaner's view of a screenshot, drawn on it.
+int run_bag(const Options& o) {
+    Frame shot;
+    if (!load_png(o.bag_image, shot) || !shot.valid()) {
+        std::fprintf(stderr, "Could not read %s\n", o.bag_image.c_str());
+        return 1;
+    }
+
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini"))) {
+        std::fprintf(stderr, "No UI pictures to find the bag by.\n");
+        return 1;
+    }
+    CleanSettings settings;
+    settings.load(resolve("configs/trash.ini"));
+    const BagLayout& l = settings.layout;
+
+    const BagView v = bag::find(shot, store);
+    if (!v.found) {
+        std::printf("No bag in %s. Open it in the game, make sure nothing covers it, and "
+                    "take the screenshot again.\n", o.bag_image.c_str());
+        return 1;
+    }
+    std::printf("tab strip   at %d,%d  %dx%d  (match %.2f)\n",
+                v.strip.x, v.strip.y, v.strip.w, v.strip.h, static_cast<double>(v.score));
+    if (v.has_trash)
+        std::printf("trash can   at %d,%d  %dx%d\n", v.trash.x, v.trash.y, v.trash.w, v.trash.h);
+    else
+        std::printf("trash can   not found near the bag\n");
+
+    TrashList list;
+    list.load(resolve("configs/trash"), l);
+    std::printf("\nslots (. empty, # something, X on the list of %zu):\n", list.items.size());
+    const auto slots = v.slots(l);
+    for (int r = 0; r < l.rows; ++r) {
+        std::printf("   ");
+        for (int c = 0; c < l.cols; ++c) {
+            const ScreenRect& s = slots[static_cast<std::size_t>(r * l.cols + c)];
+            const char mark = bag::is_empty(shot, s, l) ? '.'
+                            : list.match(shot, s, settings.min_score) >= 0 ? 'X' : '#';
+            std::printf(" %c", mark);
+        }
+        std::printf("\n");
+    }
+
+    // The picture, with what was found drawn on it.
+    Frame out = shot;
+    const auto outline = [&](const ScreenRect& r, std::uint8_t cr, std::uint8_t cg,
+                             std::uint8_t cb) {
+        const auto px = [&](int x, int y) {
+            if (x < 0 || y < 0 || x >= out.width || y >= out.height) return;
+            const std::size_t i = (static_cast<std::size_t>(y) * out.width + x) * 4;
+            out.pixels[i] = cb; out.pixels[i + 1] = cg; out.pixels[i + 2] = cr;
+        };
+        for (int x = r.x; x < r.x + r.w; ++x) { px(x, r.y); px(x, r.y + r.h - 1); }
+        for (int y = r.y; y < r.y + r.h; ++y) { px(r.x, y); px(r.x + r.w - 1, y); }
+    };
+    outline(v.strip, 0, 255, 0);
+    for (const ScreenRect& s : slots) outline(s, 255, 220, 0);
+    if (v.has_trash) outline(v.trash, 0, 200, 255);
+    for (int t = 0; t < kBagTabs; ++t) {
+        int x = 0, y = 0;
+        v.tab_point(l, t, x, y);
+        outline(ScreenRect{ x - 2, y - 2, 5, 5 }, 255, 0, 255);
+    }
+    outline(ScreenRect{ v.strip.x + l.scroll_up_dx - 3, v.strip.y + l.scroll_up_dy - 3, 7, 7 },
+            255, 0, 255);
+    outline(ScreenRect{ v.strip.x + l.scroll_down_dx - 3, v.strip.y + l.scroll_down_dy - 3, 7, 7 },
+            255, 0, 255);
+
+    std::string path = o.bag_out;
+    if (path.empty()) {
+        path = o.bag_image;
+        const auto dot = path.find_last_of('.');
+        path = (dot == std::string::npos ? path : path.substr(0, dot)) + "_bag.png";
+    }
+    if (save_png(out, path))
+        std::printf("\nOutlined: %s\n  green the tab strip, yellow the slots, blue the trash "
+                    "can, pink where tabs and scroll arrows are clicked.\n", path.c_str());
+    return 0;
+}
+
 int run_routines(const Options& o, const AppConfig& app) {
     const std::string path = resolve("configs/routines.ini");
     const auto routines = Routine::load(path);
@@ -3961,6 +4055,7 @@ int main(int argc, char** argv) {
     if (opt.party) return run_party(opt, app);
     if (opt.close_popups) return run_close(opt, app);
     if (opt.routines) return run_routines(opt, app);
+    if (!opt.bag_image.empty()) return run_bag(opt);
     if (opt.set_login) return run_set_login(opt);
     if (opt.login) return run_login(opt, app);
     if (opt.keepalive_minutes > 0) return run_keepalive(opt, app, opt.keepalive_minutes);
