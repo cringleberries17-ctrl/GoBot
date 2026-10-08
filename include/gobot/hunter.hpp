@@ -82,6 +82,26 @@ struct HunterConfig {
     /// Jump when the target is above and out of reach.
     bool jump_to_reach = true;
 
+    /// Pick up what the monsters drop, with the game's pick-up key.
+    ///
+    /// Pressed a few times straight after each kill, and every
+    /// `loot_interval_ms` while fighting. What a monster drops lands where it
+    /// stood, which is in front of the character, so after a kill is when
+    /// there is something to pick up. The commercial client's "Nhặt đồ"
+    /// presses it continuously instead.
+    ///
+    /// A switch apart from the key, so switching it off does not forget which
+    /// key it was.
+    bool          loot = false;
+    std::uint32_t loot_key = 0;
+    std::uint32_t loot_interval_ms = 2000;
+    bool loots() const { return loot && loot_key != 0; }
+
+    /// Stand still: attack whatever comes within reach and never walk to
+    /// anything. For a spot the monsters come to. The commercial client's
+    /// "Chế độ lười".
+    bool stay_put = false;
+
     /// Only act while the game window has focus. Same reasoning as the macro:
     /// off, the keys go somewhere else.
     bool require_focus = true;
@@ -124,7 +144,8 @@ public:
 
     /// What it is doing, for the UI. Plain words -- this is the panel's
     /// explanation of why nothing is happening when nothing is happening.
-    enum class State { Idle, NoPlayer, NoTargets, Approaching, Attacking, Unfocused };
+    enum class State { Idle, NoPlayer, NoTargets, Approaching, Attacking, Unfocused,
+                       Waiting };   ///< standing still, nothing within reach yet
 
     struct Status {
         State      state = State::Idle;
@@ -140,6 +161,8 @@ public:
         /// to reach something, and a panel showing only the sum cannot tell
         /// you which the bot has been doing all afternoon.
         std::uint64_t targets_finished = 0;
+
+        std::uint64_t loots = 0;              ///< pick-up key presses
     };
     Status status() const;
 
@@ -148,6 +171,9 @@ public:
 private:
     void loop();
     void release_movement();
+
+    /// One press of the pick-up key, if the input is free. True if it went.
+    bool press_loot(const HunterConfig& cfg);
 
     InputManager&         input_;
     ExecutionCoordinator& coord_;
@@ -167,6 +193,9 @@ private:
     bool          have_target_ = false;
     std::uint64_t target_since_ms_ = 0;
     std::uint64_t last_attack_ms_ = 0;
+
+    int           loot_left_ = 0;       ///< presses still owed to the last kill
+    std::uint64_t last_loot_ms_ = 0;
 };
 
 } // namespace gobot

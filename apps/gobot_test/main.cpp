@@ -1906,6 +1906,62 @@ void test_party() {
         check(s.may_invite("Reserved"), "a priority name may be invited");
     }
 
+    // Who may be accepted. Not the invite question: this one goes by the
+    // accept-only list, which answering invitations used to ignore -- so
+    // "only accept from these" accepted everybody.
+    {
+        Party::Settings s;
+        check(s.accept_all, "everyone is accepted by default");
+        check(s.may_accept("Stranger"), "so a stranger's invitation is taken");
+        check(s.may_accept(""), "and one whose name could not be read, with no list to check");
+
+        s.accept_all = false;
+        s.accept_only = { "Friend" };
+        check(s.may_accept("Friend"), "a name on the accept-only list is accepted");
+        check(s.may_accept("friend"), "whatever its case");
+        check(!s.may_accept("Stranger"), "and nobody else, while the list is in force");
+        check(!s.may_accept(""), "nor an unreadable name, which cannot be checked");
+
+        // The invite list says nothing about accepting.
+        s.by_list = true;
+        s.whitelist = { "Stranger" };
+        check(!s.may_accept("Stranger"), "the invite list does not let anyone in");
+
+        s.accept_all = true;
+        s.use_blacklist = true;
+        s.blacklist = { "Friend" };
+        check(!s.may_accept("Friend"), "the blacklist wins over accepting everyone");
+        check(!s.may_accept(""),
+              "and an unreadable name is refused once there is a blacklist to check");
+        check(s.may_accept("Stranger"), "while anyone not on it is still taken");
+    }
+
+    // "Accept everyone" is a key of GoBot's own, so a file without it -- the
+    // commercial client's -- has to mean what that file meant.
+    {
+        const std::string path = temp_file("gobot_party_accept.ini");
+        {
+            std::ofstream f(path);
+            f << "[Party]\nparty_accept_only=Friend,Other\n";
+        }
+        Party::Settings s;
+        check(s.load(path) && !s.accept_all,
+              "a file with an accept-only list and no switch accepts only those");
+        {
+            std::ofstream f(path);
+            f << "[Party]\nparty_accept_only=\n";
+        }
+        check(s.load(path) && s.accept_all, "and one with an empty list accepts everyone");
+
+        s.accept_all = false;
+        s.accept_only = { "Friend" };
+        check(s.save(path), "the switch writes");
+        Party::Settings back;
+        check(back.load(path) && !back.accept_all && back.accept_only.size() == 1,
+              "and reads back");
+        std::remove(path.c_str());
+    }
+
     // The settings use the commercial client's own keys, so they round trip.
     {
         Party::Settings s;
@@ -4186,6 +4242,16 @@ void test_hunter_config() {
     cfg.jump_to_reach = false;
     cfg.toggle_key = 119;
 
+    // Picking up is its own switch, so turning it off keeps the key.
+    check(!cfg.loot && cfg.loot_key == 0 && !cfg.loots(), "picks nothing up by default");
+    cfg.loot_key = 'A';
+    check(!cfg.loots(), "a key alone does not switch it on");
+    cfg.loot = true;
+    check(cfg.loots(), "the switch and a key do");
+    cfg.loot_interval_ms = 1700;
+    check(!cfg.stay_put, "walks to monsters by default");
+    cfg.stay_put = true;
+
     const std::string path = temp_file("gobot_hunt_test.ini");
     check(cfg.save(path), "saves");
 
@@ -4198,6 +4264,9 @@ void test_hunter_config() {
     check(back.give_up_ms == 7000, "give-up survives");
     check(!back.jump_to_reach, "jump flag survives");
     check(back.toggle_key == 119, "toggle key survives");
+    check(back.loot && back.loot_key == 'A' && back.loot_interval_ms == 1700,
+          "picking up survives");
+    check(back.stay_put, "standing still survives");
     // Off has to stick, or hunting grabs the foreground from someone who
     // explicitly asked it not to.
     check(!back.focus_on_start, "focus-on-start survives being switched off");

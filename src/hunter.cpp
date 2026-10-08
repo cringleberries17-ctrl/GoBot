@@ -32,6 +32,10 @@ bool HunterConfig::load(const std::string& path) {
     step_ms            = static_cast<std::uint32_t>(ini.get_int("Hunt", "step_ms", 180));
     attack_interval_ms = static_cast<std::uint32_t>(ini.get_int("Hunt", "attack_interval_ms", 700));
     jump_to_reach      = ini.get_bool("Hunt", "jump_to_reach", true);
+    loot               = ini.get_bool("Hunt", "loot", false);
+    loot_key           = static_cast<std::uint32_t>(ini.get_int("Hunt", "loot_key", 0));
+    loot_interval_ms   = static_cast<std::uint32_t>(ini.get_int("Hunt", "loot_interval_ms", 2000));
+    stay_put           = ini.get_bool("Hunt", "stay_put", false);
     require_focus      = ini.get_bool("Hunt", "require_focus", true);
     focus_on_start     = ini.get_bool("Hunt", "focus_on_start", true);
     toggle_key         = static_cast<std::uint32_t>(ini.get_int("Hunt", "toggle_key", 122));
@@ -55,6 +59,10 @@ bool HunterConfig::save(const std::string& path) const {
     ini.set_int ("Hunt", "step_ms", static_cast<int>(step_ms));
     ini.set_int ("Hunt", "attack_interval_ms", static_cast<int>(attack_interval_ms));
     ini.set_bool("Hunt", "jump_to_reach", jump_to_reach);
+    ini.set_bool("Hunt", "loot", loot);
+    ini.set_int ("Hunt", "loot_key", static_cast<int>(loot_key));
+    ini.set_int ("Hunt", "loot_interval_ms", static_cast<int>(loot_interval_ms));
+    ini.set_bool("Hunt", "stay_put", stay_put);
     ini.set_bool("Hunt", "require_focus", require_focus);
     ini.set_bool("Hunt", "focus_on_start", focus_on_start);
     ini.set_int ("Hunt", "toggle_key", static_cast<int>(toggle_key));
@@ -70,6 +78,7 @@ const char* Hunter::to_string(State s) {
         case State::Approaching: return "walking to the target";
         case State::Attacking:   return "attacking";
         case State::Unfocused:   return "waiting for the game to have focus";
+        case State::Waiting:     return "standing still, waiting for a monster to come within reach";
         case State::Idle:        break;
     }
     return "idle";
@@ -124,6 +133,16 @@ void Hunter::release_movement() {
     input_.release_all();
 }
 
+bool Hunter::press_loot(const HunterConfig& cfg) {
+    auto token = coord_.acquire("hunt-loot", Priority::Loot);
+    if (!token) return false;
+    input_.key_press(cfg.loot_key, 40);
+    last_loot_ms_ = now_ms();
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++status_.loots;
+    return true;
+}
+
 void Hunter::loop() {
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
@@ -146,6 +165,14 @@ void Hunter::loop() {
             continue;
         }
 
+        // What the last kill dropped. A few presses, spaced so the game sees
+        // each one, before anything else is chased -- walking off to the next
+        // monster first leaves the drop behind.
+        if (cfg.loots() && loot_left_ > 0 && now_ms() - last_loot_ms_ >= 220) {
+            if (press_loot(cfg)) --loot_left_;
+            continue;
+        }
+
         Nameplate me;
         if (!detector_.player(me)) {
             release_movement();
@@ -158,6 +185,9 @@ void Hunter::loop() {
         if (mobs.empty()) {
             release_movement();
             set_state(State::NoTargets);
+            // The last one in view has just gone, and the likeliest reason is
+            // that it died.
+            if (have_target_) loot_left_ = 3;
             have_target_ = false;
             continue;
         }
@@ -175,7 +205,10 @@ void Hunter::loop() {
                 if (!target || d < best) { target = &n; best = d; }
             }
             // Too far from where it was: it died and this is a different one.
-            if (best > 120) target = nullptr;
+            if (best > 120) {
+                target = nullptr;
+                loot_left_ = 3;
+            }
 
             // Its bar is empty. Let go now rather than going on swinging at it
             // until the give-up timer fires several seconds later.
@@ -183,6 +216,7 @@ void Hunter::loop() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++status_.targets_finished;
                 target = nullptr;
+                loot_left_ = 3;
             }
             if (target && now - target_since_ms_ > cfg.give_up_ms) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -271,7 +305,33 @@ void Hunter::loop() {
                     ++status_.attacks;
                 }
             }
+            if (cfg.loots() && now - last_loot_ms_ >= cfg.loot_interval_ms)
+                press_loot(cfg);
             set_state(State::Attacking);
+            continue;
+        }
+
+        // Standing still: never walk. Take whatever is already within reach
+        // instead, and attack it next time round; with nothing in reach, wait
+        // for something to come.
+        if (cfg.stay_put) {
+            release_movement();
+            const Nameplate* in_reach = nullptr;
+            int nearest = 0;
+            for (const Nameplate& n : mobs) {
+                if (n.hp <= cfg.dead_below) continue;
+                const int ndx = std::abs(n.x() - me.x());
+                if (ndx > cfg.reach || std::abs(n.y() - me.y()) > cfg.height_tolerance) continue;
+                if (!in_reach || ndx < nearest) { in_reach = &n; nearest = ndx; }
+            }
+            if (in_reach) {
+                target_x_ = in_reach->x();
+                target_y_ = in_reach->y();
+                target_since_ms_ = now;
+            } else {
+                have_target_ = false;
+            }
+            set_state(State::Waiting);
             continue;
         }
 

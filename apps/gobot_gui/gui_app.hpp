@@ -45,6 +45,8 @@ struct ImFont;
 
 namespace gobot {
 
+class AutoLogin;
+
 /// The GUI front-end.
 ///
 /// Owns the whole pipeline and draws it. Panels mirror the workflow rather
@@ -334,6 +336,33 @@ private:
     void say_party(const std::string& line);
     void say_keeper(const std::string& line);
 
+    /// The login the keeper is in the middle of, so stopping it can cancel
+    /// the login instead of waiting minutes for it to finish by itself.
+    std::mutex keeper_flow_mutex_;
+    AutoLogin* keeper_flow_ = nullptr;
+
+    /// Set by the keeper once it is back in the world. The game it logged in
+    /// to is a new process with a new window, and everything here still points
+    /// at the one that went away; tick() points it all at the new one.
+    std::atomic<bool> keeper_reattach_{false};
+    void reattach_game();
+
+    // ---- reviving ----
+    /// Watches for the death dialog and presses its revive button, through
+    /// the `revive` click sequence in configs/routines.ini. Three tries for
+    /// each death, then it stops trying and says so: a button that will not
+    /// take is not going to start taking on the fortieth press.
+    void start_revive();
+    void stop_revive();
+    void revive_loop();
+    void say_revive(const std::string& line);
+
+    std::thread              revive_thread_;
+    std::atomic<bool>        revive_running_{false};
+    std::atomic<bool>        revive_stop_{false};
+    std::atomic<int>         revive_count_{0};
+    std::vector<std::string> revive_log_;          ///< guarded by worker_mutex_
+
     // ---- vitals ----
     /// Reads HP and MP off the on-screen bars. The only live game state
     /// available without decoding the protocol or reading the process.
@@ -547,7 +576,49 @@ private:
     void simple_start();
     void simple_stop();
     void simple_toggle();
-    bool simple_running() const { return macro_running_ || hunting_; }
+    bool simple_running() const {
+        return macro_running_ || hunting_ || party_running_ || keeper_running_ ||
+               revive_running_;
+    }
+
+    /// The tabs. Fighting is what the whole screen used to be.
+    void simple_fight_tab();
+    void simple_party_tab();
+    void simple_login_tab();
+
+    /// The simple screen's own switches, kept in [Simple] in configs/app.ini
+    /// and written key by key so the rest of that file is left as it is.
+    struct SimpleOptions {
+        bool keep_alive = false;   ///< watch the client; log back in when it goes
+        bool revive = false;       ///< press the revive button when the character dies
+        bool refocus = true;       ///< bring the game back when nobody is using the machine
+    };
+    SimpleOptions simple_opts_;
+    void load_simple_options();
+    void save_simple_option(const char* key, bool value);
+
+    /// Bring the game back to the front during a run, when it has lost focus
+    /// and nobody has touched the mouse or keyboard for half a minute. The
+    /// keys only land while the game is in front, so a notification that
+    /// steals focus at 2am otherwise stops the bot until morning. Waiting for
+    /// the machine to go idle is what keeps it from fighting a person for
+    /// their own desktop. Called from tick().
+    void refocus_if_idle();
+    std::uint64_t last_refocus_ms_ = 0;
+
+    /// The party tab's copy of the rules: read once, written key by key.
+    Party::Settings simple_party_;
+    bool            simple_party_loaded_ = false;
+    char            simple_accept_list_[1024] = "";
+    char            simple_invite_list_[1024] = "";
+    char            simple_black_list_[1024] = "";
+    char            simple_keyword_[32] = "";
+
+    /// The login tab's account boxes. The password is held here only between
+    /// being typed and Save, which encrypts it and wipes this.
+    char simple_user_[64] = "";
+    char simple_pass_[128] = "";
+    bool simple_login_loaded_ = false;
 
     /// Notice a run starting or stopping, however it happened -- the button,
     /// the keys, the panic key, the full screen -- and start or freeze the

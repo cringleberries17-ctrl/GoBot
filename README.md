@@ -119,19 +119,29 @@ otherwise.
 
 ## Getting started
 
-`gobot_gui.exe` opens on one simple screen, in Vietnamese, laid out in the
-order things have to happen:
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, with three tabs.
+**Đánh quái** is laid out in the order things have to happen:
 
 1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
    it, your character's name, HP/MP being read, keys reaching the game. Each
    line that is not ticked has the button that fixes it next to it.
-2. **Bot sẽ làm gì** — five switches: fight monsters, use skills, HP potion,
-   MP potion, buffs. Click a key box and press the key to change it.
+2. **Bot sẽ làm gì** — fight monsters (or stand still and fight what comes),
+   use skills, pick up drops, HP potion, MP potion, buffs, revive on death.
+   Click a key box and press the key to change it.
 3. **BẮT ĐẦU**, or **F10** in game. **F12** stops everything at once.
+
+**Tổ đội** answers party invitations and invites whoever chats the keyword,
+with an accept-only list, an invite list and a blacklist. **Tự đăng nhập**
+logs back in when the client crashes or loses its connection, to the channel
+and character you pick; the game account is saved there, its password
+encrypted with your Windows account's key. BẮT ĐẦU starts whatever is ticked
+on any tab.
 
 Settings save themselves as they change. Everything else — every timer, the
 radar, the packet tools — is under **Nâng cao ►** at the bottom, and
 **◄ Giao diện đơn giản** at the top left of that window comes back.
+
+How this compares with GoC, feature by feature: `docs/goc-comparison.md`.
 
 ## Keyboard macro
 

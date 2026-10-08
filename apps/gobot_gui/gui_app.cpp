@@ -105,6 +105,7 @@ GuiApp::~GuiApp() {
     // down is a worker clicking at a target that is no longer there.
     stop_party();
     stop_keeper();
+    stop_revive();
     stop_vitals();
     stop_macro();
     stop_bot();
@@ -268,6 +269,7 @@ void GuiApp::initialise() {
     hunt_config_.load(exe_relative("configs/hunt.ini"));
     hunter_ = std::make_unique<Hunter>(input_, coord_, detector_);
     hunter_->set_config(hunt_config_);
+    load_simple_options();
 
     nav_config_.load(exe_relative("configs/hunt.ini"));
     places_.load(exe_relative("configs/waypoints.ini"));
@@ -317,6 +319,10 @@ void GuiApp::tick() {
         stop_hunt();
         stop_macro();
         stop_bot();
+        // These click the game too, and the keeper can start it.
+        stop_party();
+        stop_revive();
+        stop_keeper();
         input_.release_all();
         set_status("Panic stop -- all input released", 5000);
         GB_WARN("Panic key pressed: everything stopped");
@@ -334,6 +340,9 @@ void GuiApp::tick() {
 
     if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
     simple_track_run(simple_running());
+
+    if (keeper_reattach_.exchange(false)) reattach_game();
+    refocus_if_idle();
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -1465,7 +1474,7 @@ void GuiApp::draw_not_built_list() {
         { "Fishing",        "the routines exist; the loop around them does not" },
         { "Mining",         "likewise -- and the pickaxe-breaking test is written" },
         { "Crest boxes",    "every picture it needs is extracted and named" },
-        { "Party",          "invite, accept, blacklist, exp and loot sharing" },
+        { "Party sharing",  "exp and loot sharing, always leading, held slots" },
         { "Items",          "bag monitor, use, drop, sell, shop" },
         { "Chat",           "a rotating list of messages on a timer" },
         { "Pet and avatar",  "pet healing, looting, avatar reset window" },
@@ -2221,7 +2230,12 @@ void GuiApp::draw_menu_bar() {
     if (text_font_) ImGui::PushFont(text_font_, 0.0f);
     const bool back = ImGui::MenuItem("◄ Giao diện đơn giản");
     if (text_font_) ImGui::PopFont();
-    if (back) simple_view_ = true;
+    if (back) {
+        simple_view_ = true;
+        // The full screen may have changed what the tabs show.
+        simple_party_loaded_ = false;
+        simple_login_loaded_ = false;
+    }
 
     if (ImGui::BeginMenu("File")) {
         if (ImGui::MenuItem("Save macro"))       save_macro_config();
@@ -2403,6 +2417,9 @@ void GuiApp::start_party() {
         set_status("Pick the game window first", 6000);
         return;
     }
+    // A loop that ended by itself leaves its thread to be joined. Assigning
+    // over a thread that still wants joining ends the program.
+    if (party_thread_.joinable()) party_thread_.join();
     party_stop_ = false;
     party_running_ = true;
     party_accepted_ = 0;
@@ -2411,7 +2428,8 @@ void GuiApp::start_party() {
 }
 
 void GuiApp::stop_party() {
-    if (!party_running_) return;
+    // Joined even when it is no longer running: a loop that stopped by itself
+    // still has a thread, and destroying that unjoined ends the program.
     party_stop_ = true;
     if (party_thread_.joinable()) party_thread_.join();
     party_running_ = false;
@@ -2474,8 +2492,32 @@ void GuiApp::party_loop() {
 
     say_party("watching");
     std::string answered;
+    std::uint64_t rules_read_ms = now_ms();
 
     while (!party_stop_) {
+        // Pick up changes made while it runs. The simple screen writes the
+        // file as boxes are ticked and has no "restart it" to ask for; a rule
+        // that only took effect next time would look like a rule ignored.
+        if (now_ms() - rules_read_ms > 2000) {
+            rules_read_ms = now_ms();
+            Party::Settings fresh;
+            if (fresh.load(config)) rules = fresh;
+            IniFile fresh_ini;
+            if (fresh_ini.load(config)) {
+                const std::string keyword = fresh_ini.get("Chat", "keyword", rules.magic_word);
+                if (keyword != chat_rules.keyword) {
+                    chat_rules.keyword = keyword;
+                    chat.set_settings(chat_rules);
+                }
+            }
+        }
+
+        // Both halves switched off: nothing to look at, so do not look.
+        if (!rules.auto_accept && !rules.auto_invite) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
         Frame frame;
         if (!input_.window_valid() ||
             !capture.grab(input_.target_window(), frame) || !frame.valid()) {
@@ -2491,13 +2533,13 @@ void GuiApp::party_loop() {
                 answered.clear();
             } else if (seen.who.empty() || seen.who != answered) {
                 const bool name_matters =
-                    !rules.accept_only.empty() ||
+                    !rules.accept_all ||
                     (rules.use_blacklist && !rules.blacklist.empty());
 
                 if (seen.who.empty() && name_matters) {
                     say_party("an invitation, but the name could not be read and "
                               "there is a list to check it against");
-                } else if (name_matters && !rules.may_invite(seen.who)) {
+                } else if (name_matters && !rules.may_accept(seen.who)) {
                     if (!input_.window_focused()) input_.focus_window();
                     input_.click_at(seen.decline_x, seen.decline_y);
                     say_party("declined " + seen.who);
@@ -2582,6 +2624,7 @@ void GuiApp::party_loop() {
 
 void GuiApp::start_keeper() {
     if (keeper_running_) return;
+    if (keeper_thread_.joinable()) keeper_thread_.join();
     keeper_stop_ = false;
     keeper_running_ = true;
     keeper_restarts_ = 0;
@@ -2589,8 +2632,12 @@ void GuiApp::start_keeper() {
 }
 
 void GuiApp::stop_keeper() {
-    if (!keeper_running_) return;
     keeper_stop_ = true;
+    {
+        // A login in progress takes minutes to finish by itself.
+        std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+        if (keeper_flow_) keeper_flow_->cancel();
+    }
     if (keeper_thread_.joinable()) keeper_thread_.join();
     keeper_running_ = false;
 }
@@ -2665,11 +2712,22 @@ void GuiApp::keeper_loop() {
         flow.on_step([this](AutoLogin::Step s, const std::string& detail) {
             say_keeper(std::string(AutoLogin::step_name(s)) + ": " + detail);
         });
-        if (!flow.run()) {
+        {
+            std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+            keeper_flow_ = &flow;
+        }
+        const bool in = !keeper_stop_ && flow.run();
+        {
+            std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+            keeper_flow_ = nullptr;
+        }
+        if (keeper_stop_) break;
+        if (!in) {
             say_keeper("could not get back in: " + flow.trouble());
             break;
         }
         say_keeper("back in the world");
+        keeper_reattach_ = true;
     }
 
     {
@@ -2678,6 +2736,137 @@ void GuiApp::keeper_loop() {
     }
     say_keeper("stopped");
     keeper_running_ = false;
+}
+
+/// Point everything at the game window again, after the keeper logged back in.
+///
+/// The client it started is a new process with a new window. Without this the
+/// reader goes on reading the window that closed, the macro holds for want of
+/// a reading, the hunter looks at nothing -- and the run that the login was
+/// meant to save stops anyway, just later.
+void GuiApp::reattach_game() {
+    windows_ = InputManager::enumerate_windows();
+    window_list_loaded_ = true;
+    if (!input_.find_game_window(app_config_.window_title, app_config_.window_class,
+                                 app_config_.process_name)) {
+        GB_WARN("Logged back in, but the game window could not be found again");
+        return;
+    }
+    apply_vitals_config();
+    if (detector_running_) detector_.set_target_window(input_.target_window());
+    GB_INFO("Following the new game window after logging back in");
+    set_status("Logged back in -- following the new game window", 6000);
+}
+
+// ----------------------------------------------------------------- reviving
+
+void GuiApp::say_revive(const std::string& line) {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    revive_log_.push_back(line);
+    if (revive_log_.size() > 200) revive_log_.erase(revive_log_.begin());
+}
+
+void GuiApp::start_revive() {
+    if (revive_running_) return;
+    if (revive_thread_.joinable()) revive_thread_.join();
+    revive_stop_ = false;
+    revive_running_ = true;
+    revive_thread_ = std::thread([this] { revive_loop(); });
+}
+
+void GuiApp::stop_revive() {
+    revive_stop_ = true;
+    if (revive_thread_.joinable()) revive_thread_.join();
+    revive_running_ = false;
+}
+
+/// Watch for the death dialog and press its revive button.
+///
+/// The `revive` click sequence knows the button; this decides when to run it.
+/// It looks for the sequence's first picture a little over once a second --
+/// a full-window match against one small picture, which costs a few
+/// milliseconds -- and runs the sequence when it is there, with every other
+/// part of the bot held off: potion keys pressed at a death dialog do nothing,
+/// and the hunter walking would be worse.
+void GuiApp::revive_loop() {
+    const auto finish = [this](const std::string& why) {
+        say_revive(why);
+        revive_running_ = false;
+    };
+
+    const auto routines = Routine::load(exe_relative("configs/routines.ini"));
+    const Routine* revive = Routine::find(routines, "revive");
+    if (revive == nullptr || !revive->valid()) {
+        finish("no 'revive' sequence in configs/routines.ini, so nothing to press");
+        return;
+    }
+
+    TemplateStore store;
+    if (!store.load_best(exe_relative("configs/templates.ini"))) {
+        finish("no UI pictures, so the death dialog cannot be recognised");
+        return;
+    }
+    const DialogDriver::Step& first = revive->steps.front();
+    const Frame* button = store.get(first.find);
+    if (button == nullptr) {
+        finish("the picture '" + first.find + "' is not loaded");
+        return;
+    }
+
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
+
+    // Tries at the death on screen now, and a rest after three that failed.
+    int tries = 0;
+    std::uint64_t resting_until = 0;
+    constexpr int kTries = 3;
+    constexpr std::uint64_t kRestMs = 5 * 60 * 1000;
+
+    say_revive("watching");
+    while (!revive_stop_) {
+        for (int i = 0; i < 12 && !revive_stop_; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (revive_stop_) break;
+
+        Frame frame;
+        if (!input_.window_valid() || !grab(frame) || !frame.valid()) continue;
+
+        const auto hit = TemplateMatcher::find(
+            frame, ScreenRect{ 0, 0, frame.width, frame.height }, *button, first.score);
+        if (!hit.found) { tries = 0; continue; }
+        if (now_ms() < resting_until) continue;
+
+        if (tries >= kTries) {
+            say_revive("the revive button was pressed " + std::to_string(kTries) +
+                       " times and the dialog is still up -- leaving it for five "
+                       "minutes; a person may be needed");
+            resting_until = now_ms() + kRestMs;
+            tries = 0;
+            continue;
+        }
+        ++tries;
+
+        coord_.engage_critical("reviving");
+        if (!input_.window_focused()) {
+            input_.focus_window();
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+        DialogDriver driver(input_, store, grab);
+        std::string trouble;
+        const std::size_t done = driver.run_all(revive->steps, &trouble);
+        coord_.disengage_critical();
+
+        if (done == revive->steps.size()) {
+            ++revive_count_;
+            tries = 0;
+            say_revive("revived");
+        } else {
+            say_revive("the revive did not take: " + trouble);
+        }
+    }
+
+    say_revive("stopped");
+    revive_running_ = false;
 }
 
 void GuiApp::autodetect_bar(BarSpec& bar, const char* which) {

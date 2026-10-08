@@ -109,6 +109,7 @@ bool Party::Settings::load(const std::string& path) {
     blacklist   = split_names(ini.get("Party", "party_blacklist", {}));
     priority    = split_names(ini.get("Party", "party_priority_list", {}));
     accept_only = split_names(ini.get("Party", "party_accept_only", {}));
+    accept_all  = ini.get_bool("Party", "party_accept_all", accept_only.empty());
 
     // Written as numbers by the commercial client, so read as numbers.
     exp_share  = ini.get_int("Party", "party_exp_share_type", 0) == 1
@@ -132,6 +133,7 @@ bool Party::Settings::save(const std::string& path) const {
     ini.set("Party", "party_blacklist", join_names(blacklist));
     ini.set("Party", "party_priority_list", join_names(priority));
     ini.set("Party", "party_accept_only", join_names(accept_only));
+    ini.set_bool("Party", "party_accept_all", accept_all);
     ini.set_int("Party", "party_exp_share_type", exp_share == ExpShare::More ? 1 : 0);
     ini.set_int("Party", "party_drop_share_type",
                 loot_share == LootShare::Contribution ? 1 : 0);
@@ -155,6 +157,20 @@ bool Party::Settings::may_invite(const std::string& who) const {
     // end of the matter.
     if (by_list && !contains(whitelist, who) && !contains(priority, who))
         return false;
+
+    return true;
+}
+
+bool Party::Settings::may_accept(const std::string& who) const {
+    // A name that could not be read passes only when no name would have been
+    // checked anyway.
+    if (who.empty()) return accept_all && !(use_blacklist && !blacklist.empty());
+
+    if (use_blacklist && contains(blacklist, who)) return false;
+
+    // Accepting used to go through may_invite, which never looks at this
+    // list -- so "only accept from these" accepted everybody.
+    if (!accept_all) return contains(accept_only, who);
 
     return true;
 }

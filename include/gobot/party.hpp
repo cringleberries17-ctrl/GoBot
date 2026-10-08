@@ -56,6 +56,15 @@ public:
         std::vector<std::string> priority;
         std::vector<std::string> accept_only;
 
+        /// Accept an invitation from anyone not on the blacklist. Off, only
+        /// from the names in `accept_only`.
+        ///
+        /// The commercial client's "Chấp nhận tất cả". Its file has no key
+        /// for it, so this one is GoBot's own, and a file without it reads as
+        /// "everyone" exactly when the list is empty -- which is what that file
+        /// meant.
+        bool accept_all = true;
+
         ExpShare  exp_share  = ExpShare::Equal;
         LootShare loot_share = LootShare::Free;
 
@@ -64,6 +73,11 @@ public:
 
         /// Whether a name may be invited, by the rules above.
         bool may_invite(const std::string& who) const;
+
+        /// Whether an invitation from this name may be taken. Not the same
+        /// question: inviting goes by the invite list, accepting by
+        /// `accept_only`, and the blacklist wins over both.
+        bool may_accept(const std::string& who) const;
     };
 
     /// What the helper's detector made of the screen, plus where to click.

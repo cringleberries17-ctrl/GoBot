@@ -18,6 +18,7 @@
 
 #include "gui_app.hpp"
 
+#include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
@@ -312,9 +313,35 @@ void GuiApp::draw_simple_view() {
     ImGui::BeginChild("##column", ImVec2(width, 0), ImGuiChildFlags_None);
     ImGui::PopStyleColor();
 
+    // Three tabs, fighting first: it is what most people open this for. The
+    // other two run beside it, and the start button under the tabs starts
+    // whichever of them is switched on. A dot on a tab says it is running.
     ImGui::Dummy(ImVec2(0, 4));
-    simple_checklist();
-    simple_jobs();
+    if (ImGui::BeginTabBar("##simpletabs")) {
+        const auto tab = [](const char* name, bool running, const char* id) {
+            std::string text = name;
+            if (running) text += "  ●";
+            text += "###";
+            text += id;
+            return ImGui::BeginTabItem(text.c_str());
+        };
+        if (tab("Đánh quái", macro_running_ || hunting_ || revive_running_, "fight")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_fight_tab();
+            ImGui::EndTabItem();
+        }
+        if (tab("Tổ đội", party_running_, "party")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_party_tab();
+            ImGui::EndTabItem();
+        }
+        if (tab("Tự đăng nhập", keeper_running_, "login")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_login_tab();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     simple_start_block();
 
     // The way to everything else, out of the way at the bottom.
@@ -340,6 +367,11 @@ void GuiApp::draw_simple_view() {
 }
 
 // -------------------------------------------------------------- checklist
+
+void GuiApp::simple_fight_tab() {
+    simple_checklist();
+    simple_jobs();
+}
 
 void GuiApp::simple_checklist() {
     if (!begin_card("##ready")) { end_card(); return; }
@@ -637,7 +669,12 @@ void GuiApp::simple_jobs() {
     ImGui::SameLine();
     if (simple_key_box("attack", hunt_config_.attack_key, false, false, nullptr))
         simple_changed();
-    hint("Tự đi tới con quái gần nhất và đánh nó.");
+    ImGui::SameLine(0, 18);
+    if (ImGui::Checkbox("Đứng yên một chỗ", &hunt_config_.stay_put)) simple_changed();
+    ImGui::SetItemTooltip("Không đi đâu cả: chỉ đánh con quái nào tới trong tầm đánh.\n"
+                          "Hợp với chỗ quái tự kéo tới.");
+    hint(hunt_config_.stay_put ? "Đứng yên tại chỗ, đánh con quái nào tới trong tầm đánh."
+                               : "Tự đi tới con quái gần nhất và đánh nó.");
     row_gap();
 
     // ---- skills ----
@@ -665,6 +702,38 @@ void GuiApp::simple_jobs() {
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Thêm một phím kỹ năng: bấm + rồi nhấn phím (bấm mỗi 3 giây).");
         hint("Bấm các phím kỹ năng liên tục, mỗi phím theo giờ hồi chiêu của nó.");
+        row_gap();
+    }
+
+    // ---- picking up ----
+    //
+    // Part of fighting -- the hunter presses it, after each kill -- but a row
+    // of its own, because it is a key of its own and the first thing people
+    // look for after "does it fight".
+    {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        bool loot = hunt_config_.loot;
+        if (ImGui::Checkbox("Tự nhặt đồ", &loot)) {
+            hunt_config_.loot = loot;
+            // Ticked with no key yet: ask for it straight away.
+            if (loot && hunt_config_.loot_key == 0) {
+                ImGui::PushID("loot");
+                simple_listening_ = ImGui::GetID("##box");
+                ImGui::PopID();
+            }
+            simple_changed();
+        }
+        ImGui::TableNextColumn();
+        label("Phím nhặt");
+        ImGui::SameLine();
+        if (simple_key_box("loot", hunt_config_.loot_key, false, !hunt_config_.loot, nullptr)) {
+            if (hunt_config_.loot_key != 0) hunt_config_.loot = true;
+            simple_changed();
+        }
+        hint(hunt_config_.enabled
+             ? "Bấm phím nhặt đồ sau mỗi con quái bị hạ, và thỉnh thoảng khi đang đánh."
+             : "Nhặt đồ đi cùng Tự đánh quái, nên cần bật cả hai.");
         row_gap();
     }
 
@@ -750,7 +819,22 @@ void GuiApp::simple_jobs() {
             label("phút");
         }
         hint("Dùng lại các phím buff sau mỗi khoảng thời gian.");
+        row_gap();
     }
+
+    // ---- dying ----
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    if (ImGui::Checkbox("Tự hồi sinh", &simple_opts_.revive)) {
+        save_simple_option("revive", simple_opts_.revive);
+        if (simple_running()) {
+            if (simple_opts_.revive) start_revive();
+            else                     stop_revive();
+        }
+    }
+    ImGui::TableNextColumn();
+    hint("Bấm nút hồi sinh khi nhân vật chết. Thử tối đa 3 lần mỗi lần chết, rồi để "
+         "yên 5 phút.");
 
     ImGui::EndTable();
     end_card();
@@ -857,6 +941,15 @@ void GuiApp::simple_start_block() {
         ImGui::PushStyleColor(ImGuiCol_Text, kDim);
         ImGui::TextUnformatted(keys.c_str());
         ImGui::PopStyleColor();
+
+        bool refocus = simple_opts_.refocus;
+        if (ImGui::Checkbox("Tự đưa game lên trước khi bạn không dùng máy 30 giây", &refocus)) {
+            simple_opts_.refocus = refocus;
+            save_simple_option("refocus", refocus);
+        }
+        ImGui::SetItemTooltip("Bot chỉ bấm phím được khi game ở phía trước. Nếu một cửa sổ khác "
+                              "chiếm chỗ\n(thông báo, tin nhắn...) trong lúc bot chạy mà không ai "
+                              "đụng chuột, bàn phím\n30 giây, GoBot đưa game lên lại.");
         ImGui::PopFont();
     }
 
@@ -874,7 +967,7 @@ void GuiApp::simple_start_block() {
     } else if (macro_running_ && macro_->suspended()) {
         coloured(kWait, "Tạm dừng: nhân vật không ở trong game (mất kết nối, đang tải, hoặc "
                         "đã chết). Bot tự chạy lại khi nhân vật quay lại.");
-    } else if (!focused) {
+    } else if (!focused && (macro_running_ || hunting_)) {
         coloured(kWait, "Đang chờ: hãy bấm vào cửa sổ game. Bot chỉ bấm phím khi game ở "
                         "phía trước.");
     } else if (hunting_ && hunter_) {
@@ -889,10 +982,32 @@ void GuiApp::simple_start_block() {
             case Hunter::State::Unfocused:
                 coloured(kWait, "Đang chờ: hãy bấm vào cửa sổ game.");
                 break;
+            case Hunter::State::Waiting:
+                coloured(kGood, "Đứng yên, chờ quái tới trong tầm đánh.");
+                break;
             case Hunter::State::Idle:        coloured(kDim, "Đang khởi động…"); break;
         }
-    } else {
+    } else if (macro_running_) {
         coloured(kGood, "Đang chạy: tự bấm phím theo giờ và tự uống bình.");
+    } else {
+        coloured(kGood, "Đang chạy.");
+    }
+
+    // ---- the parts that run beside it ----
+    if (party_running_)
+        hint(("Tổ đội: đã nhận " + std::to_string(party_accepted_.load()) +
+              " lời mời, đã mời " + std::to_string(party_invited_.load()) + " người.").c_str());
+    if (keeper_running_) {
+        const int restarts = keeper_restarts_.load();
+        hint(("Tự đăng nhập: đang theo dõi game" +
+              (restarts > 0 ? ", đã vào lại " + std::to_string(restarts) + " lần" : std::string()) +
+              ".").c_str());
+    }
+    if (revive_running_) {
+        const int revived = revive_count_.load();
+        hint(("Tự hồi sinh: đang theo dõi" +
+              (revived > 0 ? ", đã hồi sinh " + std::to_string(revived) + " lần" : std::string()) +
+              ".").c_str());
     }
 
     // ---- what it has done ----
@@ -989,7 +1104,11 @@ void GuiApp::simple_start() {
     }
 
     const bool any_key = any_key_on(macro_config_);
-    if (!any_key && !hunt_config_.enabled) {
+    Party::Settings party_rules;
+    const bool party = party_rules.load(exe_relative("configs/party.ini")) &&
+                       (party_rules.auto_accept || party_rules.auto_invite);
+    if (!any_key && !hunt_config_.enabled && !party && !simple_opts_.keep_alive &&
+        !simple_opts_.revive) {
         simple_note("Chưa chọn việc nào. Đánh dấu ít nhất một việc ở phần \"Bot sẽ làm gì\".");
         return;
     }
@@ -1011,12 +1130,20 @@ void GuiApp::simple_start() {
         if (hunter_) hunter_->set_config(hunt_config_);
         start_hunt();
     }
+
+    // What runs beside the fighting, each when it is switched on.
+    if (party) start_party();
+    if (simple_opts_.keep_alive) start_keeper();
+    if (simple_opts_.revive) start_revive();
     simple_note("Đã bắt đầu.");
 }
 
 void GuiApp::simple_stop() {
     stop_hunt();
     stop_macro();
+    stop_party();
+    stop_revive();
+    stop_keeper();
     simple_track_run(false);
     simple_note("Đã dừng.");
 }
@@ -1063,6 +1190,379 @@ void GuiApp::simple_changed() {
 void GuiApp::simple_note(const std::string& msg, std::uint32_t ms) {
     simple_note_ = msg;
     simple_note_until_ms_ = now_ms() + ms;
+}
+
+// ---------------------------------------------------------------- options
+
+void GuiApp::load_simple_options() {
+    IniFile ini;
+    if (!ini.load(exe_relative("configs/app.ini"))) return;
+    simple_opts_.keep_alive = ini.get_bool("Simple", "keep_alive", simple_opts_.keep_alive);
+    simple_opts_.revive     = ini.get_bool("Simple", "revive", simple_opts_.revive);
+    simple_opts_.refocus    = ini.get_bool("Simple", "refocus", simple_opts_.refocus);
+}
+
+void GuiApp::save_simple_option(const char* key, bool value) {
+    if (!IniFile::set_in_place(exe_relative("configs/app.ini"), "Simple", key,
+                               value ? "true" : "false"))
+        simple_note("Không lưu được cài đặt vào configs/app.ini.", 8000);
+}
+
+void GuiApp::refocus_if_idle() {
+    if (!simple_opts_.refocus) return;
+    if (!macro_running_ && !hunting_) return;     // only the keys need the game in front
+    if (!input_.window_valid() || input_.window_focused()) return;
+
+    // One try every so often, not a tug of war with whatever took the focus.
+    const std::uint64_t now = now_ms();
+    if (now - last_refocus_ms_ < 15000) return;
+
+    LASTINPUTINFO last{};
+    last.cbSize = sizeof last;
+    if (!GetLastInputInfo(&last)) return;
+    const DWORD idle_ms = GetTickCount() - last.dwTime;
+    if (idle_ms < 30000) return;
+
+    last_refocus_ms_ = now;
+    if (input_.focus_window())
+        GB_INFO("Brought the game back to the front: it lost focus during a run and the "
+                "machine has been idle %lus", static_cast<unsigned long>(idle_ms / 1000));
+}
+
+// ------------------------------------------------------------------ party
+
+namespace {
+
+/// Names as one line for the file, from a box with one name per line. Commas
+/// are taken too: that is how the file writes them, and how people paste them.
+std::string names_line(const char* text) {
+    std::string out, name;
+    const auto flush = [&] {
+        const auto b = name.find_first_not_of(" \t");
+        const auto e = name.find_last_not_of(" \t");
+        if (b != std::string::npos) {
+            if (!out.empty()) out += ',';
+            out += name.substr(b, e - b + 1);
+        }
+        name.clear();
+    };
+    for (const char* p = text; *p; ++p) {
+        if (*p == '\n' || *p == '\r' || *p == ',') flush();
+        else name += *p;
+    }
+    flush();
+    return out;
+}
+
+/// The other way: one name per line, for the box.
+void names_box(char* out, std::size_t size, const std::vector<std::string>& names) {
+    std::string text;
+    for (const std::string& n : names) {
+        if (!text.empty()) text += '\n';
+        text += n;
+    }
+    std::snprintf(out, size, "%s", text.c_str());
+}
+
+/// The last few lines a worker wrote, small and grey.
+void last_lines(const std::vector<std::string>& lines, std::size_t n) {
+    for (std::size_t i = lines.size() > n ? lines.size() - n : 0; i < lines.size(); ++i)
+        hint(lines[i].c_str());
+}
+
+} // namespace
+
+void GuiApp::simple_party_tab() {
+    const std::string path = exe_relative("configs/party.ini");
+    if (!simple_party_loaded_) {
+        simple_party_loaded_ = true;
+        if (!simple_party_.load(path))
+            simple_note("Không đọc được configs/party.ini.", 8000);
+        names_box(simple_accept_list_, sizeof simple_accept_list_, simple_party_.accept_only);
+        names_box(simple_invite_list_, sizeof simple_invite_list_, simple_party_.whitelist);
+        names_box(simple_black_list_, sizeof simple_black_list_, simple_party_.blacklist);
+        std::snprintf(simple_keyword_, sizeof simple_keyword_, "%s",
+                      simple_party_.magic_word.c_str());
+    }
+
+    // Written key by key. Below these switches the file carries the measured
+    // geometry of the party dialogs and the reasoning for every number, which
+    // a rewrite of the whole file would throw away.
+    const auto put = [&](const char* key, const std::string& value) {
+        if (!IniFile::set_in_place(path, "Party", key, value))
+            simple_note("Không lưu được configs/party.ini.", 8000);
+    };
+    const auto put_bool = [&](const char* key, bool value) { put(key, value ? "true" : "false"); };
+
+    // Switched on mid-run: start it. The worker reads the file again every
+    // couple of seconds, so everything else follows by itself.
+    const auto follow = [&] {
+        if (simple_running() && !party_running_ &&
+            (simple_party_.auto_accept || simple_party_.auto_invite))
+            start_party();
+    };
+
+    if (!begin_card("##party")) { end_card(); return; }
+    heading(strong_font_, "Tổ đội");
+    hint("Chạy khi bấm BẮT ĐẦU, cùng với đánh quái hoặc một mình.");
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // ---- answering ----
+    if (ImGui::Checkbox("Tự nhận lời mời vào tổ đội", &simple_party_.auto_accept)) {
+        put_bool("party_auto_accept", simple_party_.auto_accept);
+        follow();
+    }
+    ImGui::Indent(mark_indent());
+    ImGui::BeginDisabled(!simple_party_.auto_accept);
+    if (ImGui::RadioButton("Nhận từ mọi người (trừ danh sách đen)", simple_party_.accept_all)) {
+        simple_party_.accept_all = true;
+        put_bool("party_accept_all", true);
+    }
+    if (ImGui::RadioButton("Chỉ nhận từ những người này:", !simple_party_.accept_all)) {
+        simple_party_.accept_all = false;
+        put_bool("party_accept_all", false);
+    }
+    if (!simple_party_.accept_all) {
+        ImGui::InputTextMultiline("##acceptonly", simple_accept_list_, sizeof simple_accept_list_,
+                                  ImVec2(-1, 84));
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            put("party_accept_only", names_line(simple_accept_list_));
+        hint("Mỗi dòng một tên.");
+    }
+    ImGui::EndDisabled();
+    ImGui::Unindent(mark_indent());
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // ---- inviting ----
+    if (ImGui::Checkbox("Tự mời người chat từ khoá", &simple_party_.auto_invite)) {
+        put_bool("party_auto_party", simple_party_.auto_invite);
+        follow();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110);
+    ImGui::InputText("##keyword", simple_keyword_, sizeof simple_keyword_);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        simple_party_.magic_word = simple_keyword_;
+        put("party_magic_word", simple_party_.magic_word);
+        if (!IniFile::set_in_place(path, "Chat", "keyword", simple_party_.magic_word))
+            simple_note("Không lưu được configs/party.ini.", 8000);
+    }
+    ImGui::Indent(mark_indent());
+    ImGui::BeginDisabled(!simple_party_.auto_invite);
+    hint("Ai chat đúng từ này, đứng riêng chứ không dính vào chữ khác, sẽ được mời vào tổ đội.");
+    if (ImGui::Checkbox("Chỉ mời người có tên trong danh sách:", &simple_party_.by_list))
+        put_bool("party_by_list", simple_party_.by_list);
+    if (simple_party_.by_list) {
+        ImGui::InputTextMultiline("##invitelist", simple_invite_list_, sizeof simple_invite_list_,
+                                  ImVec2(-1, 84));
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            put("party_whitelist", names_line(simple_invite_list_));
+        hint("Mỗi dòng một tên.");
+    }
+    ImGui::EndDisabled();
+    ImGui::Unindent(mark_indent());
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // ---- never ----
+    if (ImGui::Checkbox("Dùng danh sách đen", &simple_party_.use_blacklist))
+        put_bool("use_blacklist", simple_party_.use_blacklist);
+    ImGui::Indent(mark_indent());
+    hint("Không bao giờ nhận lời mời của những người này, và không mời họ.");
+    if (simple_party_.use_blacklist) {
+        ImGui::InputTextMultiline("##blacklist", simple_black_list_, sizeof simple_black_list_,
+                                  ImVec2(-1, 84));
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            put("party_blacklist", names_line(simple_black_list_));
+        hint("Mỗi dòng một tên.");
+    }
+    ImGui::Unindent(mark_indent());
+    end_card();
+
+    // ---- what it is doing ----
+    if (!begin_card("##partystate")) { end_card(); return; }
+    if (party_running_)
+        coloured(kGood, ("Đang chạy: đã nhận " + std::to_string(party_accepted_.load()) +
+                         " lời mời, đã mời " + std::to_string(party_invited_.load()) +
+                         " người.").c_str());
+    else if (simple_party_.auto_accept || simple_party_.auto_invite)
+        coloured(kDim, "Sẽ chạy khi bấm BẮT ĐẦU.");
+    else
+        coloured(kDim, "Đang tắt.");
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        lines = party_log_;
+    }
+    last_lines(lines, 4);
+    end_card();
+}
+
+// ------------------------------------------------------------------ login
+
+void GuiApp::simple_login_tab() {
+    const std::string path = exe_relative("configs/login.ini");
+
+    // Read every time, as the full screen does: the command line tool and a
+    // person with a text editor write this file too.
+    AutoLogin::Settings login;
+    const bool have = login.load(path);
+    if (!simple_login_loaded_) {
+        simple_login_loaded_ = true;
+        std::snprintf(simple_user_, sizeof simple_user_, "%s",
+                      have ? login.username.c_str() : "");
+    }
+
+    if (!begin_card("##login")) { end_card(); return; }
+    heading(strong_font_, "Tự vào lại game");
+
+    if (ImGui::Checkbox("Tự vào lại game khi bị văng hoặc mất kết nối", &simple_opts_.keep_alive)) {
+        save_simple_option("keep_alive", simple_opts_.keep_alive);
+        if (simple_running()) {
+            if (simple_opts_.keep_alive) start_keeper();
+            else                         stop_keeper();
+        }
+    }
+    hint("GoBot theo dõi game. Nếu game tắt, bị treo hoặc hiện bảng lỗi, GoBot đóng game, mở "
+         "lại launcher, đăng nhập, rồi vào đúng kênh và nhân vật dưới đây. Đánh quái, bình và "
+         "buff tự chạy tiếp khi nhân vật vào lại game.");
+
+    // Lines up the boxes after their names.
+    const float field = ImGui::GetCursorPosX() + 150.0f;
+
+    // ---- the account ----
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::SeparatorText("Tài khoản game");
+    const bool have_account = have && !login.username.empty() &&
+                              !login.password_protected.empty();
+    mark(have_account ? Mark::Good : Mark::Bad);
+    ImGui::SameLine();
+    label(have_account ? ("Đã lưu tài khoản " + login.username).c_str()
+                       : "Chưa lưu tài khoản game");
+
+    label("Tên đăng nhập");
+    ImGui::SameLine(field);
+    ImGui::SetNextItemWidth(260);
+    ImGui::InputText("##user", simple_user_, sizeof simple_user_,
+                     ImGuiInputTextFlags_CharsNoBlank);
+
+    label("Mật khẩu");
+    ImGui::SameLine(field);
+    ImGui::SetNextItemWidth(260);
+    ImGui::InputTextWithHint("##pass", have_account ? "đã lưu, gõ để đổi" : "", simple_pass_,
+                             sizeof simple_pass_, ImGuiInputTextFlags_Password);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(simple_user_[0] == '\0' || simple_pass_[0] == '\0');
+    if (ImGui::Button("Lưu tài khoản")) {
+        // Encrypted on the spot and the typed copy wiped, the same as the
+        // command line tool: the password is never written down in the clear.
+        const std::string sealed = AutoLogin::protect(simple_pass_);
+        SecureZeroMemory(simple_pass_, sizeof simple_pass_);
+        if (sealed.empty()) {
+            simple_note("Windows không mã hoá được mật khẩu, nên chưa lưu gì.", 8000);
+        } else {
+            bool ok = false;
+            if (have) {
+                ok = IniFile::set_in_place(path, "Login", "username", simple_user_) &&
+                     IniFile::set_in_place(path, "Login", "password", sealed);
+            } else {
+                AutoLogin::Settings fresh;
+                fresh.pages = AutoLogin::default_pages();
+                fresh.launcher_window = "VTCZone";
+                fresh.game_window = "GhostOnlineVTC";
+                fresh.username = simple_user_;
+                fresh.password_protected = sealed;
+                ok = fresh.save(path);
+            }
+            simple_note(ok ? "Đã lưu tài khoản. Mật khẩu đã được mã hoá."
+                           : "Không lưu được configs/login.ini.", 8000);
+        }
+    }
+    ImGui::EndDisabled();
+    hint("Mật khẩu được mã hoá bằng khoá của tài khoản Windows này, nên file cấu hình chép "
+         "sang máy khác hay người dùng khác sẽ không đọc được.");
+
+    // ---- where to ----
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::SeparatorText("Vào kênh và nhân vật nào");
+    if (have) {
+        const AutoLogin::Page* channel_page = nullptr;
+        const AutoLogin::Page* char_page = nullptr;
+        for (const auto& page : login.pages) {
+            if (page.step == AutoLogin::Step::Channel)   channel_page = &page;
+            if (page.step == AutoLogin::Step::Character) char_page = &page;
+        }
+        const int channels =
+            channel_page != nullptr && channel_page->row_count > 0 ? channel_page->row_count : 8;
+        const int characters =
+            char_page != nullptr && char_page->row_count > 0 ? char_page->row_count : 3;
+
+        // Counted from one here and from zero in the file: "Kênh 1" is what
+        // the client calls it.
+        const auto pick = [&](const char* id, const char* what, int count, int current,
+                              const char* key) {
+            label(what);
+            ImGui::SameLine(field);
+            ImGui::SetNextItemWidth(180);
+            const std::string shown = std::string(what) + " " + std::to_string(current + 1);
+            if (ImGui::BeginCombo(id, shown.c_str())) {
+                for (int i = 0; i < count; ++i) {
+                    const std::string item = std::string(what) + " " + std::to_string(i + 1);
+                    if (ImGui::Selectable(item.c_str(), i == current) && i != current &&
+                        !IniFile::set_in_place(path, "Login", key, i))
+                        simple_note("Không lưu được configs/login.ini.", 8000);
+                }
+                ImGui::EndCombo();
+            }
+        };
+        pick("##channel", "Kênh", channels, std::clamp(login.channel_index, 0, channels - 1),
+             "channel_index");
+        pick("##character", "Nhân vật", characters,
+             std::clamp(login.character_index, 0, characters - 1), "character_index");
+        if (char_page != nullptr && char_page->pick == AutoLogin::Pick::Slot)
+            hint("Nhân vật đếm từ bên trái màn hình chọn nhân vật.");
+    } else {
+        hint("Lưu tài khoản trước, rồi chọn kênh và nhân vật ở đây.");
+    }
+
+    // ---- whether it can ----
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::SeparatorText("Kiểm tra");
+    const bool launcher_ok = have && !login.launcher_path.empty() &&
+        GetFileAttributesA(login.launcher_path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    mark(launcher_ok ? Mark::Good : Mark::Bad);
+    ImGui::SameLine();
+    label(launcher_ok ? "Đã thấy launcher" : "Không thấy launcher");
+    if (have && !login.launcher_path.empty()) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("(%s)", login.launcher_path.c_str());
+        ImGui::PopStyleColor();
+    }
+    const std::size_t unknown = have ? login.unidentified().size() : 1;
+    mark(unknown == 0 ? Mark::Good : Mark::Bad);
+    ImGui::SameLine();
+    label(unknown == 0 ? "Đã nhận ra các màn hình đăng nhập"
+                       : "Còn màn hình đăng nhập chưa nhận ra, xem Nâng cao");
+    end_card();
+
+    // ---- what it is doing ----
+    if (!begin_card("##loginstate")) { end_card(); return; }
+    if (keeper_running_) {
+        const int restarts = keeper_restarts_.load();
+        coloured(kGood, ("Đang theo dõi game" +
+                         (restarts > 0 ? ", đã vào lại " + std::to_string(restarts) + " lần"
+                                       : std::string()) + ".").c_str());
+    } else {
+        coloured(kDim, simple_opts_.keep_alive ? "Sẽ bật khi bấm BẮT ĐẦU." : "Đang tắt.");
+    }
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        lines = keeper_log_;
+    }
+    last_lines(lines, 4);
+    end_card();
 }
 
 } // namespace gobot
