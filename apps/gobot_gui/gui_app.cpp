@@ -1468,10 +1468,32 @@ void GuiApp::draw_routines_panel() {
         "with the game open in front of you.");
     ImGui::Dummy(ImVec2(0, 6));
 
-    // Re-read each frame: this file is meant to be edited while the bot runs,
-    // and a panel showing what it said at startup would be telling somebody
-    // their edit did not take.
-    const auto routines = Routine::load(exe_relative("configs/routines.ini"));
+    // This file is meant to be edited while the bot runs, and a panel showing
+    // what it said at startup would be telling somebody their edit did not
+    // take. So it is re-read -- but on the file's timestamp, not every frame.
+    //
+    // Re-reading each frame did work, at the cost of parsing the file sixty
+    // times a second for as long as the panel was open: 2,837 reads, and 2,837
+    // log lines, in a single session. Watching the modification time gives the
+    // same liveness for one read per actual edit.
+    {
+        const std::string path = exe_relative("configs/routines.ini");
+        const std::uint64_t now = now_ms();
+        if (now - routines_checked_ms_ > 250) {
+            routines_checked_ms_ = now;
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            std::uint64_t stamp = 0;
+            if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad)) {
+                stamp = (static_cast<std::uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32)
+                      | fad.ftLastWriteTime.dwLowDateTime;
+            }
+            if (stamp != routines_mtime_ || routines_cache_.empty()) {
+                routines_mtime_ = stamp;
+                routines_cache_ = Routine::load(path);
+            }
+        }
+    }
+    const auto& routines = routines_cache_;
     if (routines.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
         ImGui::TextUnformatted("No routines loaded.");

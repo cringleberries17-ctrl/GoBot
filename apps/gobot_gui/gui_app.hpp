@@ -23,6 +23,7 @@
 #include "gobot/pathfinder.hpp"
 #include "gobot/protocol_analyzer.hpp"
 #include "gobot/protocol_handler.hpp"
+#include "gobot/routine.hpp"
 #include "gobot/crash_watch.hpp"
 #include "gobot/party.hpp"
 #include "gobot/party_chat.hpp"
@@ -141,6 +142,12 @@ private:
     void draw_area_panel();
     void draw_monsters_panel();
     void draw_routines_panel();    ///< the click sequences, and a dry run
+
+    /// routines.ini, re-read when it changes rather than every frame.
+    std::vector<Routine> routines_cache_;
+    std::uint64_t        routines_mtime_ = 0;       ///< last write time seen
+    std::uint64_t        routines_checked_ms_ = 0;  ///< when it was last stat'd
+
     void draw_session_panel();     ///< the watcher, auto-login, and stopping
     void draw_keys_panel();        ///< the keys the game itself is set to
     void draw_tools_panel();       ///< everything that exists to take the game apart
