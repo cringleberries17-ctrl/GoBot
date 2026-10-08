@@ -12,15 +12,37 @@
 #
 # Call with -DSRC=<configs dir> -DDST=<where they go>.
 
+# Not overwriting is right, but doing it silently is not. Editing a shipped
+# default and rebuilding leaves the running copy untouched with no sign that
+# anything was ignored -- which costs an afternoon the first time a change to
+# configs/protocol.ini appears to have had no effect whatsoever. So a file that
+# is kept because it differs is named, with what to do about it.
+
 file(GLOB _config_files RELATIVE "${SRC}" "${SRC}/*")
+
+set(_stale "")
 
 foreach(_name IN LISTS _config_files)
     if(IS_DIRECTORY "${SRC}/${_name}")
         continue()
     endif()
     if(EXISTS "${DST}/${_name}")
+        file(SHA256 "${SRC}/${_name}" _src_hash)
+        file(SHA256 "${DST}/${_name}" _dst_hash)
+        if(NOT _src_hash STREQUAL _dst_hash)
+            list(APPEND _stale "${_name}")
+        endif()
         continue()
     endif()
     file(COPY "${SRC}/${_name}" DESTINATION "${DST}")
     message(STATUS "staged default config: ${_name}")
 endforeach()
+
+if(_stale)
+    string(REPLACE ";" ", " _stale_list "${_stale}")
+    message(STATUS "configs kept as they are (they differ from the shipped "
+                   "defaults): ${_stale_list}")
+    message(STATUS "  Your edits there are safe and are what the build output "
+                   "will use. If you meant to change the SHIPPED default "
+                   "instead, delete the staged copy and build again.")
+endif()

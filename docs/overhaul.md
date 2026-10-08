@@ -362,21 +362,42 @@ the parts that work.
 
 ### Phase 5 — Operational hardening
 
-Independent of the protocol work and each individually small:
+Most of this list turned out to be already handled. Checking first saved
+"fixing" three things that were not broken, and the same caution is worth
+applying to the rest of this document.
 
-- **Require elevation, don't warn about it.** Over half of all launches could not
-  press a key. Relaunch elevated or refuse to start.
-- **One window identity.** `[Window]` (`Game.exe` / `GhostSoul` /
-  `GhostOnlineVTC`) is correct; `[Crash]`'s launcher name must never reach the
-  window finder. Audit every `find_game_window` caller.
-- **Stage every config.** `hunt.ini` was missing from the build output and
-  hunting silently ran on defaults. Fail loudly on a missing config instead.
+**Done:**
+
+- **Glyph set switched** to `data/images/bitmap_font`. Confirmed loading 183
+  glyphs where it previously loaded 179 and was missing `F`, `J`, `W` and
+  lowercase `w` — the letters absent from Vietnamese orthography, which is why
+  the set was built without them. That is the cause of `ExampleWin` reading as
+  `Exampley in`. The short set remains as a fallback.
+- **Pixel spam demoted to DEBUG.** Per-candidate band logging was 71,029 of
+  80,357 lines in one session — 88% of the log, which is why the warnings that
+  mattered went unread. The verdict line stays at INFO; `--verbose` brings the
+  detail back.
+- **Config staging now reports what it kept.** It deliberately never overwrites
+  an existing config — a rebuild once reset `channel_index` and the bot logged
+  into the wrong channel — but it did so silently, so editing a shipped default
+  and rebuilding appeared to do nothing. It now names the files it left alone.
+
+**Already correct, do not "fix":**
+
+- **Elevation.** `gobot_cli`, `gobot_gui` and `gobot_sniff` all carry
+  `requireAdministrator` in their manifests, and the GUI additionally detects
+  filtered input and offers a Restart as Administrator button. The
+  `elevated: no` lines in the logs predate the manifests.
+- **The window identity.** `client_class=#32770` / `client_process=GhostOnlineVTC.exe`
+  in `login.ini` correctly describe the launcher's untitled dialog. The
+  `Game window not found (class='#32770' …)` lines are the auto-login flow
+  probing for a window that has not appeared yet, which is what it should do.
+- **`hunt.ini`** is staged and identical to the shipped default. The earlier
+  "cannot read hunt.ini" predates its being added.
+
+**Still outstanding:**
+
 - **Load configs once.** `routines.ini` was read 2,837 times in a session.
-- **Demote the pixel spam to DEBUG**, so a log is readable.
-- **Switch the glyph set** to `data/images/bitmap_font` — 183 glyphs against the
-  179 currently loaded, which are missing `F`, `J`, `W` and lowercase `w`. See
-  [goc-reference.md](goc-reference.md). This matters less once text is not
-  load-bearing, but chat and player names still go through it.
 
 ### Phase 6 — Vision, demoted and rebuilt
 

@@ -970,17 +970,26 @@ int VitalsReader::find_bars(const Frame& f, BarSpec& hp, BarSpec& mp) {
         if (only->trough > only->len / 3) spec->width = only->len;
     }
 
-    // Log what was actually in the running, not just the tally. When this
-    // picks the wrong thing the only useful question is what else it was
-    // looking at, and that is a question you can only ask after the fact.
+    // What was actually in the running, not just the tally. When this picks
+    // the wrong thing the only useful question is what else it was looking at,
+    // and that can only be asked after the fact.
+    //
+    // At DEBUG, though. Every candidate band at INFO came to 71,029 of the
+    // 80,357 lines in one session's log -- 88% of it -- and a log that is
+    // seven-eighths one routine's working notes is one nobody reads, so the
+    // warnings that matter went unseen among them. Run with --verbose when a
+    // bar is picked wrongly and this all comes back.
     for (const Band* band : reds)
-        GB_INFO("  red   x=%d y=%d..%d len=%d trough=%d rgb=%u,%u,%u",
-                band->x, band->y0, band->y1, band->len, band->trough,
-                band->r, band->g, band->b);
+        GB_DEBUG("  red   x=%d y=%d..%d len=%d trough=%d rgb=%u,%u,%u",
+                 band->x, band->y0, band->y1, band->len, band->trough,
+                 band->r, band->g, band->b);
     for (const Band* band : blues)
-        GB_INFO("  blue  x=%d y=%d..%d len=%d trough=%d rgb=%u,%u,%u",
-                band->x, band->y0, band->y1, band->len, band->trough,
-                band->r, band->g, band->b);
+        GB_DEBUG("  blue  x=%d y=%d..%d len=%d trough=%d rgb=%u,%u,%u",
+                 band->x, band->y0, band->y1, band->len, band->trough,
+                 band->r, band->g, band->b);
+
+    // The verdict stays at INFO: one line per attempt, and it is the line that
+    // says whether the reader has anything to work with.
     GB_INFO("find_bars: %zu runs, %zu bands, %d bar(s) identified",
             runs.size(), bands.size(), found);
     return found;

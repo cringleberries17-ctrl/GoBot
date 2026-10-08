@@ -72,9 +72,22 @@ std::string GlyphFont::default_dir() {
             return beside;
     }
 
-    // Then where the commercial client keeps the set it extracted from the
+    // Then where the commercial client keeps the sets it extracted from the
     // game. Read in place; nothing is copied out of there.
+    //
+    // It ships TWO, and the order here matters. data\images\bitmap_font holds
+    // 183 glyphs; data\bitmap_font holds 179 and is missing F, J, W and
+    // lowercase w -- precisely the Latin letters absent from Vietnamese
+    // orthography, so whoever assembled it worked from Vietnamese text and
+    // never noticed. Reading the short set turns "ExampleWin" into
+    // "Exampley in", which is the misreading the loose name matching in
+    // party_invite.cpp and player_list.cpp was built to absorb.
+    //
+    // Prefer the complete set. Keep the short one as a fallback: a machine
+    // with only the older client installed still gets Vietnamese names right.
     const char* candidates[] = {
+        "C:\\Program Files\\ZTeam\\GoC\\data\\images\\bitmap_font",
+        "C:\\Program Files (x86)\\ZTeam\\GoC\\data\\images\\bitmap_font",
         "C:\\Program Files\\ZTeam\\GoC\\data\\bitmap_font",
         "C:\\Program Files (x86)\\ZTeam\\GoC\\data\\bitmap_font",
     };
