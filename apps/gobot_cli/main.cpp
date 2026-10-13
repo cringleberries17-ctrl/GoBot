@@ -243,6 +243,19 @@ UNATTENDED RUNNING
                       original or to --bagout <png>. Touches nothing; for
                       checking the layout in configs/trash.ini against a
                       real bag.
+  --trash             One pass of the trash cleaner against the live game,
+                      built the way the GUI's trash tab builds its passes:
+                      open the bag, go through the tabs ticked in
+                      configs/trash.ini and get rid of what is on its list.
+                      Throws one item away at most unless --max <n> says
+                      more, since this is for trying the cleaner on a real
+                      bag; with --dry it goes through the bag and says what
+                      it would throw away, throwing nothing. Every line the
+                      cleaner reports is printed with the time, and the last
+                      is TRASH RESULT with the counts. Exits 0 only when the
+                      pass ran, nothing stopped it and every item it tried
+                      was got rid of. Close the GUI first: both driving the
+                      bag at once get in each other's way.
   --close             Close whatever dialogs are in the way, for real. The one
                       thing here that needs no calibration -- the middle of a
                       close button is the close button -- so it is the right
@@ -316,6 +329,8 @@ struct Options {
     bool routines = false;
     std::string bag_image;
     std::string bag_out;
+    bool trash = false;
+    int  trash_max = 0;             ///< 0: not given
     bool dry_run = false;
     bool close_popups = false;
     bool party = false;
@@ -394,6 +409,21 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--routines")  o.routines = true;
         else if (a == "--bag")       o.bag_image = next("--bag");
         else if (a == "--bagout")    o.bag_out = next("--bagout");
+        else if (a == "--trash")     o.trash = true;
+        else if (a == "--max") {
+            // Checked here rather than clamped later: a typo in the one bound
+            // on how much a pass may throw away should stop it, not turn into
+            // some other number.
+            const std::string n = next("--max");
+            const bool digits = !n.empty() && n.size() <= 3 &&
+                                n.find_first_not_of("0123456789") == std::string::npos;
+            o.trash_max = digits ? std::atoi(n.c_str()) : 0;
+            if (o.trash_max < 1 || o.trash_max > 500) {
+                std::fprintf(stderr, "error: --max needs a number from 1 to 500, not '%s'\n\n",
+                             n.c_str());
+                return false;
+            }
+        }
         else if (a == "--routine")   { o.routines = true; o.routine_name = next("--routine"); }
         else if (a == "--dry")       o.dry_run = true;
         else if (a == "--close")     o.close_popups = true;
@@ -1959,14 +1989,6 @@ int run_close(const Options& o, const AppConfig& app) {
     return 0;
 }
 
-/// List the routines, or run one.
-///
-/// With --dry it finds each step's picture and says where it would click,
-/// without clicking. That is the mode that matters while the tables are being
-/// written: the click offsets and the step order in configs/routines.ini were
-/// worked out from the pictures' names rather than by watching the game, so the
-/// first pass over any routine is expected to be wrong somewhere, and finding
-/// out by watching it misclick through a shop is the expensive way.
 /// The trash cleaner's view of a screenshot, drawn on it.
 int run_bag(const Options& o) {
     Frame shot;
@@ -1993,23 +2015,66 @@ int run_bag(const Options& o) {
     std::printf("tab strip   at %d,%d  %dx%d  (match %.2f)\n",
                 v.strip.x, v.strip.y, v.strip.w, v.strip.h, static_cast<double>(v.score));
     std::printf("trash bin   at %d,%d  %dx%d  (%s)\n", v.trash.x, v.trash.y, v.trash.w,
-                v.trash.h, v.bin_empty ? "empty"
+                v.trash.h, v.bin_empty ? "the can shows: empty, or its dialog holds the item"
                                        : "something waiting in it, or not where the layout says");
-
-    TrashList list;
-    list.load(resolve("configs/trash"), l);
-    std::printf("\nslots (. empty, # something, X on the list of %zu):\n", list.items.size());
-    const auto slots = v.slots(l);
-    for (int r = 0; r < l.rows; ++r) {
-        std::printf("   ");
-        for (int c = 0; c < l.cols; ++c) {
-            const ScreenRect& s = slots[static_cast<std::size_t>(r * l.cols + c)];
-            const char mark = bag::is_empty(shot, s, l) ? '.'
-                            : list.match(shot, s, settings.min_score) >= 0 ? 'X' : '#';
-            std::printf(" %c", mark);
+    if (v.scroll_known())
+        std::printf("scroll bar  rows %d-%d of %d on show%s\n", v.first_row + 1,
+                    v.first_row + l.rows, v.total_rows,
+                    v.at_bottom(l) ? " (the bottom)" : v.at_top() ? " (the top)" : "");
+    else
+        std::printf("scroll bar  not readable (covered?)\n");
+    std::printf("slot rows   %d of %d%s\n", v.slot_rows < 0 ? l.rows : v.slot_rows, l.rows,
+                v.slot_rows >= 0 && v.slot_rows < l.rows ? " (the rest is the buy-more-room "
+                                                           "button, or covered)" : "");
+    for (const bag::Dialog& d : bag::find_dialogs(shot, store)) {
+        std::printf("dialog      buttons at %d,%d: %s", d.pair.x, d.pair.y,
+                    bag::dialog_name(d.kind));
+        if (d.ours()) std::printf(" (words %.3f)", static_cast<double>(d.words));
+        if (d.quantity) {
+            CountReader counts;
+            if (counts.load(GlyphFont::default_dir()))
+                std::printf(", box at %d,%d reads %d", d.box.x, d.box.y,
+                            counts.read_field(shot, d.box));
         }
         std::printf("\n");
     }
+
+    // The list exactly as a pass builds it: the pictures, the icons chosen in
+    // [Items], and the rest of the catalog to tell them from.
+    ItemCatalog catalog;
+    catalog.load(ItemCatalog::default_dir());
+    TrashList list;
+    list.build(resolve("configs/trash"), settings, catalog);
+    std::printf("\nslots (. empty, # something, X on the list of %zu, ? like a listed item "
+                "but not taken for it):\n", list.items.size());
+    const auto slots = v.slots(l);
+    std::vector<std::string> doubts;
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        if (i % static_cast<std::size_t>(l.cols) == 0) std::printf("   ");
+        const ScreenRect& s = slots[i];
+        char mark = '.';
+        if (!bag::is_empty(shot, s, l)) {
+            const TrashList::Verdict k = list.judge(shot, s, settings.min_score);
+            mark = k.item >= 0 ? 'X' : k.doubt != TrashList::Verdict::Doubt::None ? '?' : '#';
+            if (mark == '?' && k.like >= 0) {
+                const std::string& like = list.items[static_cast<std::size_t>(k.like)].id;
+                const std::string why = k.doubt == TrashList::Verdict::Doubt::Colour
+                    ? "its colour is " + std::to_string(k.tone_off) + " off"
+                    : "also like " + k.rival + ", which is not listed";
+                char line[240];
+                std::snprintf(line, sizeof line, "row %zu col %zu: like %s (%.2f) but %s",
+                              i / static_cast<std::size_t>(l.cols) + 1,
+                              i % static_cast<std::size_t>(l.cols) + 1,
+                              like.empty() ? "a picture" : like.c_str(),
+                              static_cast<double>(k.like_score), why.c_str());
+                doubts.push_back(line);
+            }
+        }
+        std::printf(" %c", mark);
+        if (i % static_cast<std::size_t>(l.cols) + 1 == static_cast<std::size_t>(l.cols))
+            std::printf("\n");
+    }
+    for (const std::string& d : doubts) std::printf("   %s\n", d.c_str());
 
     // The picture, with what was found drawn on it.
     Frame out = shot;
@@ -2048,6 +2113,184 @@ int run_bag(const Options& o) {
     return 0;
 }
 
+/// The time of day to the millisecond, for reading lines beside the log and
+/// the screenshots the trash cleaner keeps.
+std::string clock_text() {
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%02d:%02d:%02d.%03d", static_cast<int>(t.wHour),
+                  static_cast<int>(t.wMinute), static_cast<int>(t.wSecond),
+                  static_cast<int>(t.wMilliseconds));
+    return buf;
+}
+
+/// One pass of the trash cleaner against the live game, without the GUI.
+///
+/// Put together the way GuiApp::trash_loop puts its passes together -- the
+/// same settings, list, catalog, digits and pictures, aimed at the same
+/// window -- so what happens here is what the trash tab would do, and it can
+/// be followed line by line from a pipe. What the GUI would say is said in
+/// its words, in Vietnamese; what only this says is in English, like the
+/// rest of this program.
+///
+/// The one difference is the bound. Unless --max says otherwise a real pass
+/// gets rid of one item at most: this is how a change to the cleaner is first
+/// tried on a real bag, and a mistake there should cost one item, not forty.
+int run_trash(const Options& o, const AppConfig& app) {
+    // Flushed line by line, stderr first: whoever reads this is reading a
+    // pipe while the pass is still going, and the log's own lines -- which
+    // screenshots were kept, among them -- belong in between.
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    // A pass that tried an item and did not get rid of it has not worked,
+    // whether or not it stopped for it.
+    const auto finish = [](const BagCleaner::Result& r) {
+        std::fflush(stderr);
+        std::printf("TRASH RESULT ran=%d matched=%d deleted=%d dropped=%d failed=%d doubtful=%d "
+                    "trouble=%s\n",
+                    r.ran ? 1 : 0, r.matched, r.deleted, r.dropped, r.failed, r.doubtful,
+                    r.trouble.c_str());
+        std::fflush(stdout);
+        return r.ran && r.trouble.empty() && r.failed == 0 ? 0 : 1;
+    };
+    const auto give_up = [&](const std::string& why) {
+        say(why + ".");
+        BagCleaner::Result r;
+        r.trouble = why;
+        return finish(r);
+    };
+
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini")))
+        return give_up("Không có hình giao diện của game, nên không nhận ra được túi đồ");
+    CountReader counts;
+    if (!counts.load(GlyphFont::default_dir()))
+        say("Không có bộ chữ số của game, nên không đọc được số lượng trên ô đồ.");
+    ItemCatalog catalog;
+    catalog.load(ItemCatalog::default_dir());
+
+    CleanSettings settings;
+    if (!settings.load(resolve("configs/trash.ini")))
+        say("no configs/trash.ini, so going by the built-in settings");
+    TrashList list;
+    list.build(resolve("configs/trash"), settings, catalog);
+    // The list leaves out ids its catalog does not have without a word, and an
+    // item that is never looked for looks just like one that is not in the bag.
+    for (const std::vector<std::string>* ids : { &settings.delete_ids, &settings.drop_ids })
+        for (const std::string& id : *ids)
+            if (catalog.find(id) == nullptr)
+                say("not in the item catalog, so not looked for: " + id);
+    if (list.items.empty())
+        return give_up("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn");
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game");
+
+    if (o.trash_max > 0) settings.max_per_run = o.trash_max;
+    else if (!o.dry_run) settings.max_per_run = 1;
+
+    // What the pass goes by, to read what it says against.
+    std::string tabs;
+    for (int t = 0; t < kBagTabs; ++t)
+        if (settings.tabs[t]) tabs += std::string(tabs.empty() ? "" : ", ") + bag_tab_name(t);
+    int pictures = 0, icons = 0, to_drop = 0;
+    for (const TrashList::Item& item : list.items) {
+        if (!item.file.empty()) ++pictures;
+        if (!item.id.empty()) ++icons;
+        if (item.action == TrashList::Action::Drop) ++to_drop;
+    }
+    char scores[80];
+    std::snprintf(scores, sizeof scores, "alike at least %.2f, %.2f for icons",
+                  static_cast<double>(settings.min_score),
+                  static_cast<double>(settings.catalog_score));
+    say((o.dry_run ? std::string("looking only, throwing nothing away")
+                   : "for real, " + std::to_string(settings.max_per_run) + " item(s) at most") +
+        "; tabs: " + (tabs.empty() ? std::string("none ticked") : tabs) +
+        "; on the list: " + std::to_string(list.items.size()) + " (" +
+        std::to_string(pictures) + " pictures, " + std::to_string(icons) + " icons, " +
+        std::to_string(to_drop) + " to drop); " + std::to_string(list.rivals.size()) +
+        " other catalog icons to tell them from; " + scores +
+        (settings.fragments_loose ? "; fragments may be roughly the right colour"
+                                  : "; fragments held to their colour") +
+        (counts.loaded() ? "" : "; no digits, so no stack counts"));
+    if (to_drop > 0 && !bag::can_check(store, TrashList::Action::Drop))
+        say("the items to drop are left alone: there is no picture of the drop question with "
+            "its words, so it cannot be told from any other dialog");
+
+    // Nothing in this process holds off for the pass the way the GUI's macro
+    // and hunter hold off for its own, and a pass of the GUI's at the same
+    // time would move the bag about under this one.
+    if (SessionManager::process_running("gobot_gui.exe"))
+        say("gobot_gui is running as well: anything it does in the game during this pass "
+            "gets in the way");
+
+    input.release_all();
+    if (!input.window_focused()) {
+        input.focus_window();
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    int w = 0, h = 0;
+    input.window_size(w, h);
+    say("game window " + std::to_string(w) + "x" + std::to_string(h) +
+        (input.window_focused() ? ", in front"
+                                : ", not in front, so the keys the pass presses go nowhere"));
+
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) { return capture.grab(input.target_window(), f); };
+
+    say(o.dry_run ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
+    BagCleaner cleaner(input, store, grab);
+    cleaner.set_settings(settings);
+    cleaner.set_trash(&list);
+    cleaner.set_counts(&counts);
+    cleaner.set_debug_dir(exe_relative("trash_debug"));
+    cleaner.set_dry_run(o.dry_run);
+    cleaner.on_report(say);
+
+    // Ctrl+C stops the pass at its next pause, as the GUI's Stop does, and the
+    // pass gives back whatever is in the bin as it stops. Watched from beside
+    // the pass, which knows nothing of g_stop.
+    std::atomic<bool> passing{true};
+    std::thread watch([&] {
+        while (passing) {
+            if (g_stop) cleaner.cancel();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    });
+    BagCleaner::Result r = cleaner.run();
+    passing = false;
+    watch.join();
+    if (g_stop && r.trouble.empty()) r.trouble = "dừng giữa chừng vì Ctrl+C";
+
+    // The same words as the trash tab's last line.
+    std::string extra;
+    if (r.failed > 0) extra += " " + std::to_string(r.failed) + " món không bỏ được.";
+    if (r.doubtful > 0)
+        extra += " " + std::to_string(r.doubtful) + " món giống nhưng không chắc, nên để lại.";
+    if (!r.trouble.empty())
+        say("Dừng: " + r.trouble + "." + extra);
+    else if (o.dry_run)
+        say((r.matched == 0 ? std::string("Thử xong: không thấy món nào trong danh sách.")
+                            : "Thử xong: thấy " + std::to_string(r.matched) +
+                              " ô sẽ bị bỏ. Không bỏ gì.") + extra);
+    else
+        say("Xong: xoá " + std::to_string(r.deleted) + ", vứt " + std::to_string(r.dropped) +
+            " món." + extra);
+    return finish(r);
+}
+
+/// List the routines, or run one.
+///
+/// With --dry it finds each step's picture and says where it would click,
+/// without clicking. That is the mode that matters while the tables are being
+/// written: the click offsets and the step order in configs/routines.ini were
+/// worked out from the pictures' names rather than by watching the game, so the
+/// first pass over any routine is expected to be wrong somewhere, and finding
+/// out by watching it misclick through a shop is the expensive way.
 int run_routines(const Options& o, const AppConfig& app) {
     const std::string path = resolve("configs/routines.ini");
     const auto routines = Routine::load(path);
@@ -4055,6 +4298,7 @@ int main(int argc, char** argv) {
     if (opt.close_popups) return run_close(opt, app);
     if (opt.routines) return run_routines(opt, app);
     if (!opt.bag_image.empty()) return run_bag(opt);
+    if (opt.trash) return run_trash(opt, app);
     if (opt.set_login) return run_set_login(opt);
     if (opt.login) return run_login(opt, app);
     if (opt.keepalive_minutes > 0) return run_keepalive(opt, app, opt.keepalive_minutes);

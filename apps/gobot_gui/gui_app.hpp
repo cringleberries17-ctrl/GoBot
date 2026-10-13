@@ -383,6 +383,11 @@ private:
     std::vector<std::string> trash_log_;              ///< guarded by worker_mutex_
     std::mutex               trash_cleaner_mutex_;
     BagCleaner*              trash_cleaner_ = nullptr; ///< the pass under way, to cancel
+    /// Held for a trash pass and for the revive sequence, so the two never
+    /// drive the mouse at once: a click on the death dialog in the middle of
+    /// a drag lets the item go wherever the pointer was.
+    std::mutex               game_mouse_mutex_;
+    std::atomic<bool>        trash_pass_{false};      ///< a pass is driving the bag
 
     // ---- vitals ----
     /// Reads HP and MP off the on-screen bars. The only live game state

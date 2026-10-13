@@ -1426,11 +1426,9 @@ void GuiApp::simple_rematch_bag() {
 }
 
 void GuiApp::simple_reload_trash() {
-    simple_trash_.load(exe_relative("configs/trash"), simple_clean_.layout);
-    simple_trash_.add_catalog(simple_catalog_, simple_clean_.delete_ids,
-                              TrashList::Action::Delete, simple_clean_.catalog_score);
-    simple_trash_.add_catalog(simple_catalog_, simple_clean_.drop_ids,
-                              TrashList::Action::Drop, simple_clean_.catalog_score);
+    // The same list a pass goes by, rivals and all, so the red outlines on the
+    // photographed bag are what a pass would throw away.
+    simple_trash_.build(exe_relative("configs/trash"), simple_clean_, simple_catalog_);
     simple_rematch_bag();
 }
 
@@ -1573,10 +1571,29 @@ void GuiApp::simple_trash_tab() {
                         if (how == 2) p.push_back(simple_pick_id_);
                         simple_save_ids();
                         simple_reload_trash();
+                        // A few ids are one picture. A slot holding either is
+                        // both, and is left alone unless both are chosen: said
+                        // now, rather than found out as an item that is never
+                        // thrown away.
+                        if (how != 0) {
+                            const auto& chosen = how == 1 ? d : p;
+                            std::string missing;
+                            for (const std::string& twin : simple_catalog_.twins(simple_pick_id_))
+                                if (std::find(chosen.begin(), chosen.end(), twin) == chosen.end())
+                                    missing += (missing.empty() ? "" : ", ") + twin;
+                            if (!missing.empty())
+                                simple_note("Món này giống hệt " + missing +
+                                            ". GoBot không phân biệt được, nên chỉ bỏ khi chọn "
+                                            "cả các món đó.", 12000);
+                        }
                         ImGui::CloseCurrentPopup();
                     };
                     if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)", del)) set(1);
-                    if (ImGui::Selectable("Vứt xuống đất", drop)) set(2);
+                    // Not offered: GoBot has no picture of the drop question
+                    // with its words, and answers no dialog it cannot tell
+                    // from the others.
+                    ImGui::Selectable("Vứt xuống đất (chưa dùng được)", drop,
+                                      ImGuiSelectableFlags_Disabled);
                     ImGui::Separator();
                     if (ImGui::Selectable("Không bỏ món này", !del && !drop)) set(0);
                     ImGui::EndPopup();
@@ -1585,6 +1602,13 @@ void GuiApp::simple_trash_tab() {
             }
             ImGui::Dummy(ImVec2(0, 2));
         }
+        if (ImGui::Checkbox("Bỏ mảnh ghép cả khi màu hơi khác", &simple_clean_.fragments_loose)) {
+            put("fragments_loose", simple_clean_.fragments_loose ? "true" : "false");
+            simple_reload_trash();
+        }
+        hint("Mảnh ghép trong túi đồ đổi màu liên tục, nên ít khi đúng màu với hình ở trên. "
+             "Bật lên thì mảnh ghép đã chọn bị bỏ khi đúng hình và gần đúng màu. Mảnh khác "
+             "màu hẳn, như bộ mảnh màu đỏ, vẫn để lại: muốn bỏ thì chụp nó ở mục dưới.");
     }
     ImGui::PushFont(nullptr, kSmall);
     coloured(kWait, "Xoá là mất hẳn, không lấy lại được. Bấm Thử tìm ở dưới trước khi bật.");
@@ -1632,8 +1656,10 @@ void GuiApp::simple_trash_tab() {
             ImGui::PopID();
         }
         if (remove >= 0) {
+            // Read back whole, since the catalog icons a picture stood for are
+            // rivals again once it is gone.
             simple_trash_.remove(static_cast<std::size_t>(remove));
-            simple_rematch_bag();
+            simple_reload_trash();
         }
     }
 
@@ -1702,19 +1728,20 @@ void GuiApp::simple_trash_tab() {
                         simple_trash_.add(dir, bag::cut(simple_bag_frame_, at), action, layout);
                     simple_note(file.empty() ? "Không lưu được hình món đồ."
                                              : "Đã thêm vào danh sách đồ bỏ đi.", 6000);
-                    simple_rematch_bag();
+                    simple_reload_trash();
                     ImGui::CloseCurrentPopup();
                 };
                 if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)")) add(TrashList::Action::Delete);
-                if (ImGui::Selectable("Vứt xuống đất")) add(TrashList::Action::Drop);
+                ImGui::Selectable("Vứt xuống đất (chưa dùng được)", false,
+                                  ImGuiSelectableFlags_Disabled);
                 ImGui::Separator();
                 if (ImGui::Selectable("Thôi")) ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
             ImGui::PopID();
         }
-        hint("Ô viền đỏ là món đã có trong danh sách. Vứt xuống đất thì người khác nhặt được, "
-             "và nếu bật Tự nhặt đồ thì bot có thể nhặt lại.");
+        hint("Ô viền đỏ là món sẽ bị bỏ. Món trông giống món đã chọn nhưng khác màu, hoặc "
+             "giống cả một món khác chưa chọn, thì không bị bỏ: bấm Thử tìm để xem.");
     }
     end_card();
 

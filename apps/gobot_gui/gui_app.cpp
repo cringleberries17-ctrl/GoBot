@@ -2514,8 +2514,10 @@ void GuiApp::party_loop() {
             }
         }
 
-        // Both halves switched off: nothing to look at, so do not look.
-        if (!rules.auto_accept && !rules.auto_invite) {
+        // Both halves switched off: nothing to look at, so do not look. And
+        // nothing clicked while a trash pass has the bag open: an invitation
+        // answered in the middle of a drag drops the item wherever it is.
+        if ((!rules.auto_accept && !rules.auto_invite) || trash_pass_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
@@ -2848,6 +2850,14 @@ void GuiApp::revive_loop() {
         }
         ++tries;
 
+        // A trash pass under way finishes first -- it is bounded, and gives
+        // back what is in the bin when it stops -- rather than having the
+        // death dialog clicked in the middle of one of its drags. Waited for
+        // a little at a time, so a stop is not held up behind the pass.
+        std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
+        while (!revive_stop_ && !mouse.try_lock())
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (revive_stop_) break;
         coord_.engage_critical("reviving");
         if (!input_.window_focused()) {
             input_.focus_window();
@@ -2856,7 +2866,7 @@ void GuiApp::revive_loop() {
         DialogDriver driver(input_, store, grab);
         std::string trouble;
         const std::size_t done = driver.run_all(revive->steps, &trouble);
-        coord_.disengage_critical();
+        if (coord_.critical_reason() == "reviving") coord_.disengage_critical();
 
         if (done == revive->steps.size()) {
             ++revive_count_;
@@ -2917,8 +2927,14 @@ void GuiApp::stop_trash() {
 /// hunter walking off with the bag open drags it out of reach, and a potion key
 /// pressed while a quantity box has the keyboard types a number into it.
 void GuiApp::trash_loop() {
-    const auto finish = [this](const std::string& why) {
-        say_trash(why);
+    // What the worker says for itself goes to the log as well as the screen;
+    // what the cleaner reports it logs on its own.
+    const auto tell = [this](const std::string& line) {
+        GB_INFO("Trash: %s", line.c_str());
+        say_trash(line);
+    };
+    const auto finish = [&](const std::string& why) {
+        tell(why);
         trash_running_ = false;
     };
 
@@ -2929,11 +2945,20 @@ void GuiApp::trash_loop() {
     }
     CountReader counts;
     if (!counts.load(GlyphFont::default_dir()))
-        say_trash("Không có bộ chữ số của game, nên không đọc được số lượng trên ô đồ.");
+        tell("Không có bộ chữ số của game, nên không đọc được số lượng trên ô đồ.");
     ItemCatalog catalog;
     catalog.load(ItemCatalog::default_dir());
     ScreenCapture capture;
     const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
+
+    // Kept from one look at the file to the next, and replaced only by a
+    // reading that worked: the trash tab rewrites the file in place as boxes
+    // are ticked, and one caught half written reads as the built-in defaults
+    // -- the equipment tabs ticked and nothing on the list.
+    const std::string config = exe_relative("configs/trash.ini");
+    CleanSettings settings;
+    settings.load(config);
+    std::uint64_t read_ms = now_ms();
 
     // The first timed pass shortly after the start, so what was put on the
     // list is dealt with now rather than in ten minutes.
@@ -2941,41 +2966,50 @@ void GuiApp::trash_loop() {
     while (!trash_stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const int request = trash_request_.exchange(0);
-
-        CleanSettings settings;
-        settings.load(exe_relative("configs/trash.ini"));
+        if (request == 0 && now_ms() - read_ms > 1000) {
+            CleanSettings fresh;
+            if (fresh.load(config)) settings = fresh;
+            read_ms = now_ms();
+        }
         if (request == 0) {
             if (trash_oneshot_) break;
             if (!settings.enabled || now_ms() < next) continue;
         }
+
+        // Read again for the pass itself, a few times if it is caught being
+        // written.
+        for (int i = 0; i < 5; ++i) {
+            CleanSettings fresh;
+            if (fresh.load(config)) { settings = fresh; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        read_ms = now_ms();
+
+        // Something else holding everything off -- a captcha -- is not
+        // something to clean the bag through, and its hold is not this
+        // worker's to end. Tried again shortly.
+        if (coord_.critical_active()) {
+            tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
+            if (trash_oneshot_) break;
+            next = now_ms() + 30'000;
+            continue;
+        }
         next = now_ms() + static_cast<std::uint64_t>(settings.interval_minutes) * 60'000ull;
 
         TrashList list;
-        list.load(exe_relative("configs/trash"), settings.layout);
-        list.add_catalog(catalog, settings.delete_ids, TrashList::Action::Delete,
-                         settings.catalog_score);
-        list.add_catalog(catalog, settings.drop_ids, TrashList::Action::Drop,
-                         settings.catalog_score);
+        list.build(exe_relative("configs/trash"), settings, catalog);
         if (list.items.empty()) {
-            say_trash("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.");
+            tell("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.");
             if (trash_oneshot_) break;
             continue;
         }
         if (!input_.window_valid()) {
-            say_trash("Chưa thấy cửa sổ game.");
+            tell("Chưa thấy cửa sổ game.");
             if (trash_oneshot_) break;
             continue;
         }
 
         const bool look_only = request == 2;
-        say_trash(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
-        coord_.engage_critical("trash cleaning");
-        input_.release_all();
-        if (!input_.window_focused()) {
-            input_.focus_window();
-            std::this_thread::sleep_for(std::chrono::milliseconds(350));
-        }
-
         BagCleaner cleaner(input_, store, grab);
         cleaner.set_settings(settings);
         cleaner.set_trash(&list);
@@ -2987,24 +3021,49 @@ void GuiApp::trash_loop() {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
             trash_cleaner_ = &cleaner;
         }
-        const BagCleaner::Result r = cleaner.run();
+        // A stop that came while all of the above was being done found no
+        // cleaner to cancel; it is passed on now instead.
+        if (trash_stop_) cleaner.cancel();
+
+        BagCleaner::Result r;
+        {
+            // Not while the revive sequence is clicking, nor it while this is.
+            std::lock_guard<std::mutex> mouse(game_mouse_mutex_);
+            trash_pass_ = true;
+            tell(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
+            coord_.engage_critical("trash cleaning");
+            input_.release_all();
+            if (!input_.window_focused()) {
+                input_.focus_window();
+                std::this_thread::sleep_for(std::chrono::milliseconds(350));
+            }
+            r = cleaner.run();
+            // Ended only if it is still this pass's: a captcha seen during the
+            // pass has taken it over, and keeps it.
+            if (coord_.critical_reason() == "trash cleaning") coord_.disengage_critical();
+            trash_pass_ = false;
+        }
         {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
             trash_cleaner_ = nullptr;
         }
-        coord_.disengage_critical();
 
         trash_thrown_ += r.deleted + r.dropped;
+        std::string extra;
+        if (r.failed > 0)
+            extra += " " + std::to_string(r.failed) + " món không bỏ được.";
+        if (r.doubtful > 0)
+            extra += " " + std::to_string(r.doubtful) + " món giống nhưng không chắc, nên để lại.";
         if (!r.trouble.empty())
-            say_trash("Dừng: " + r.trouble + ".");
+            tell("Dừng: " + r.trouble + "." + extra);
         else if (look_only)
-            say_trash(r.matched == 0
-                ? "Thử xong: không thấy món nào trong danh sách."
-                : "Thử xong: thấy " + std::to_string(r.matched) +
-                  " ô sẽ bị bỏ. Không bỏ gì.");
+            tell((r.matched == 0
+                ? std::string("Thử xong: không thấy món nào trong danh sách.")
+                : "Thử xong: thấy " + std::to_string(r.matched) + " ô sẽ bị bỏ. Không bỏ gì.") +
+                 extra);
         else
-            say_trash("Xong: xoá " + std::to_string(r.deleted) + ", vứt " +
-                      std::to_string(r.dropped) + " món.");
+            tell("Xong: xoá " + std::to_string(r.deleted) + ", vứt " +
+                 std::to_string(r.dropped) + " món." + extra);
         if (trash_oneshot_) break;
     }
     trash_running_ = false;

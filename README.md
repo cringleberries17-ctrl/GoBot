@@ -135,11 +135,13 @@ with an accept-only list, an invite list and a blacklist. **Tự đăng nhập**
 logs back in when the client crashes or loses its connection, to the channel
 and character you pick; the game account is saved there, its password
 encrypted with your Windows account's key. **Dọn rác** opens the bag every
-few minutes and puts what is on your list in the trash can, or drops it; you
-pick the junk once from the game's item icons (or a photo of your bag for
-anything else), and *Thử tìm* shows what would go without throwing anything
-away. BẮT ĐẦU starts whatever is ticked on
-any tab.
+few minutes and puts what is on your list in the trash can; you pick the junk
+once from the game's item icons (or a photo of your bag for anything else),
+and *Thử tìm* shows what would go without throwing anything away. Only the
+bin's own dialogs are answered, told apart by their words, and an item that
+looks like one on the list but is another colour, or looks as much like an
+icon you did not pick, is left where it is. BẮT ĐẦU starts whatever is ticked
+on any tab.
 
 Settings save themselves as they change. Everything else — every timer, the
 radar, the packet tools — is under **Nâng cao ►** at the bottom, and

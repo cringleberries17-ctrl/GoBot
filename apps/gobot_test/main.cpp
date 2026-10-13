@@ -4365,6 +4365,62 @@ void blit(Frame& f, const Frame& t, int at_x, int at_y) {
         }
 }
 
+void fill(Frame& f, const ScreenRect& r, int red, int green, int blue) {
+    for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) put_px(f, x, y, red, green, blue);
+}
+
+/// A number in the client's own digits, white with a dark outline, the way
+/// the game prints stack counts and quantity boxes.
+void print_number(Frame& f, int x, int y, const std::string& text, const std::string& font_dir) {
+    for (const char c : text) {
+        Frame g;
+        load_png(font_dir + "\\lower\\" + std::string(1, c) + ".png", g);
+        for (int pass = 0; pass < 2; ++pass)
+            for (int gy = 0; gy < g.height; ++gy)
+                for (int gx = 0; gx < g.width; ++gx) {
+                    std::uint8_t r, gg, b;
+                    g.get(gx, gy, r, gg, b);
+                    if ((r + gg + b) / 3 <= 128) continue;
+                    if (pass == 0) {
+                        for (int oy = -1; oy <= 1; ++oy)
+                            for (int ox = -1; ox <= 1; ++ox)
+                                put_px(f, x + gx + ox, y + gy + oy, 10, 10, 10);
+                    } else {
+                        put_px(f, x + gx, y + gy, 250, 250, 250);
+                    }
+                }
+        x += g.width + 1;
+    }
+}
+
+/// The frames the live client draws round its slots: one flat line down the
+/// right side of each, which the row with the buy-more-room button has none of.
+void frame_slots(Frame& f, const BagView& v, const BagLayout& l, int rows) {
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < l.cols; ++c) {
+            const ScreenRect s = v.slot(l, c, r);
+            for (int y = s.y; y < s.y + l.cell; ++y) put_px(f, s.x + l.cell + 1, y, 82, 82, 82);
+        }
+}
+
+/// The scroll bar as the live client draws it: lighter ends, a dark middle,
+/// and a white thumb as long and as far down as the rows say.
+void draw_track(Frame& f, const BagView& v, const BagLayout& l, int first_row, int total_rows) {
+    const int x = v.strip.x + l.scroll_up_dx;
+    const int top = v.strip.y + l.track_top_dy, bottom = v.strip.y + l.track_bottom_dy;
+    const int span = bottom - top + 1;
+    for (int y = top; y <= bottom; ++y) put_px(f, x, y, 65, 65, 65);
+    put_px(f, x, top, 249, 249, 249);
+    put_px(f, x, bottom, 247, 247, 247);
+    const int len = static_cast<int>(std::lround(static_cast<double>(span) * l.rows / total_rows));
+    const int at = total_rows > l.rows
+        ? static_cast<int>(std::lround(static_cast<double>(span - len) * first_row /
+                                       (total_rows - l.rows)))
+        : 0;
+    for (int y = top + at; y < top + at + len && y <= bottom; ++y) put_px(f, x, y, 255, 255, 255);
+}
+
 } // namespace
 
 void test_bag() {
@@ -4423,6 +4479,61 @@ void test_bag() {
           "nor the same drawing in another colour -- score " + std::to_string(colour_score));
     check(list.match(g, slots[0], 0.90f) < 0, "nor an empty slot");
 
+    // The same drawing a little darker or lighter is another item too: the
+    // shape correlates perfectly, so only the colour says so.
+    {
+        Frame h = bag_scene(500, 450);
+        for (int y = 4; y < slots[13].h - 4; ++y)
+            for (int x = 4; x < slots[13].w - 4; ++x) {
+                std::uint8_t r, gg, b;
+                f.get(slots[3].x + x, slots[3].y + y, r, gg, b);
+                put_px(h, slots[13].x + x, slots[13].y + y, std::min(255, r + 20),
+                       std::min(255, gg + 20), std::min(255, b + 20));
+            }
+        const TrashList::Verdict k = list.judge(h, slots[13], 0.90f);
+        check(k.item < 0 && k.doubt == TrashList::Verdict::Doubt::Colour && k.tone_off >= 15,
+              "the same drawing twenty levels lighter is refused -- off by " +
+                  std::to_string(k.tone_off));
+    }
+
+    // Something unlisted that looks as much like the slot is as good an
+    // answer, and the slot is left alone.
+    {
+        TrashList rivalled;
+        rivalled.add_picture(bag::cut(f, slots[3]), TrashList::Action::Delete, l);
+        TrashList other;
+        other.add_picture(bag::cut(f, slots[3]), TrashList::Action::Delete, l);
+        other.items[0].id = "spend/craft/0000001";
+        rivalled.rivals.push_back(other.items[0]);
+        const TrashList::Verdict k = rivalled.judge(f, slots[3], 0.90f);
+        check(k.item < 0 && k.doubt == TrashList::Verdict::Doubt::Rival &&
+                  k.rival == "spend/craft/0000001",
+              "a listed picture that ties with an unlisted one is left alone");
+        rivalled.rivals.clear();
+        check(rivalled.judge(f, slots[3], 0.90f).item == 0, "and taken once that one is gone");
+    }
+
+    // Telling a page from the next by its slots. Every slot has to agree: a
+    // page with two items and the empty page below it differ in two slots.
+    {
+        Frame a = bag_scene(500, 450), b = bag_scene(500, 450);
+        paint_item(a, slots[2], 3);
+        paint_item(a, slots[7], 5);
+        check(!bag::same_page(a, v, b, v, l), "a page with two items is not the empty page");
+        check(bag::same_page(a, v, a, v, l), "a page is the same page as itself");
+        Frame c = a;
+        paint_item(c, slots[20], 2);
+        check(!bag::same_page(a, v, c, v, l), "nor is it once one more slot has something");
+    }
+
+    // A slot still holding what it held.
+    {
+        const Frame before = bag::cut(f, slots[3]);
+        check(bag::alike(before, bag::cut(f, slots[3]), l) > 0.99f, "a slot is alike to itself");
+        check(bag::alike(before, bag::cut(g, slots[11]), l) < 0.80f,
+              "and not to a slot with another item in it");
+    }
+
     // The list on disk.
     {
         const std::string dir = temp_file("gobot_trash_test");
@@ -4458,6 +4569,31 @@ void test_bag() {
         CleanSettings s;
         check(s.load(exe_relative("configs/trash.ini")), "the trash settings load");
         check(s.layout.pitch == 37 && s.layout.grid_dy == 25, "with the measured layout");
+        check(s.layout.track_top_dy == 39 && s.layout.track_bottom_dy == 155,
+              "and the scroll bar's track, measured on the live client");
+        check(!d.fragments_loose, "fragments are held to their colour until somebody says not");
+
+        // A file caught half written -- emptied, about to be filled again by
+        // the trash tab -- is not the defaults. It is refused, and what was
+        // read before stands.
+        const std::string path = temp_file("gobot_trash_half.ini");
+        {
+            std::ofstream out(path);
+            out << "[Trash]\ntab_equip1=false\ntab_use=true\nfragments_loose=true\n"
+                   "[Bag]\ntrack_top_dy=40\n[Items]\ndelete=spend/fragment/1103023\n";
+        }
+        CleanSettings kept;
+        check(kept.load(path) && kept.fragments_loose && !kept.tabs[0] && kept.tabs[2] &&
+                  kept.layout.track_top_dy == 40 && kept.delete_ids.size() == 1,
+              "the settings read back, fragments, tabs, track and all");
+        {
+            std::ofstream out(path, std::ios::trunc);
+            out << "# nothing yet\n";
+        }
+        check(!kept.load(path) && kept.fragments_loose && !kept.tabs[0] &&
+                  kept.delete_ids.size() == 1,
+              "a file with no [Trash] in it is refused, and the last reading stands");
+        std::remove(path.c_str());
     }
 
     // Finding the bag, and a look-only pass over it, with the game's pictures.
@@ -4481,6 +4617,46 @@ void test_bag() {
     check(found.bin_empty && std::abs(found.trash.x - (300 + l.bin_dx)) <= 1 &&
               std::abs(found.trash.y - (300 + l.bin_dy)) <= 1,
           "and its trash bin, empty, in the corner");
+    check(!found.scroll_known() && found.slots(l).size() == 24,
+          "with no scroll bar to read, and all four rows taken for slots");
+
+    // Which rows are slots, and where the scroll bar says the page is.
+    {
+        Frame drawn = scene;
+        frame_slots(drawn, found, l, 3);
+        for (int c = 0; c < l.cols; ++c) {         // the last row: one panel, a button in it
+            const ScreenRect s = found.slot(l, c, 3);
+            for (int y = 0; y < l.cell; ++y)
+                for (int x = 0; x <= l.pitch; ++x) put_px(drawn, s.x + x, s.y + y, 0, 0, 4 * y / 3);
+        }
+        fill(drawn, ScreenRect{ found.slot(l, 1, 3).x + 10, found.slot(l, 0, 3).y + 9, 150, 16 },
+             200, 205, 215);
+        draw_track(drawn, found, l, 6, 10);
+        const BagView bottom = bag::find(drawn, store, l);
+        check(bottom.slot_rows == 3 && bottom.slots(l).size() == 18,
+              "the row with the buy-more-room button is not taken for slots");
+        check(bottom.scroll_known() && bottom.first_row == 6 && bottom.total_rows == 10 &&
+                  bottom.at_bottom(l) && !bottom.at_top(),
+              "the thumb at the bottom: rows 7 to 10 of 10 -- read " +
+                  std::to_string(bottom.first_row) + " of " + std::to_string(bottom.total_rows));
+
+        Frame mid = scene;
+        frame_slots(mid, found, l, 4);
+        bool all = true;
+        for (const int row : { 0, 2, 3, 5 }) {
+            draw_track(mid, found, l, row, 10);
+            const BagView at = bag::find(mid, store, l);
+            all = all && at.slot_rows == 4 && at.first_row == row && at.total_rows == 10 &&
+                  at.at_top() == (row == 0) && !at.at_bottom(l);
+        }
+        check(all, "the thumb part way down says which row is at the top");
+
+        Frame covered = mid;
+        fill(covered, ScreenRect{ found.strip.x + l.scroll_up_dx - 3, found.strip.y + 50, 60, 30 },
+             216, 216, 216);
+        check(!bag::find(covered, store, l).scroll_known(),
+              "and a dialog over the scroll bar makes it unreadable, not wrong");
+    }
 
     // With an item waiting in the bin the can is gone -- and a can-like
     // picture elsewhere in the bag must not be taken for the bin. That is what
@@ -4511,6 +4687,7 @@ void test_bag() {
     cleaner.set_settings(cs);
     cleaner.set_trash(&wanted);
     cleaner.set_dry_run(true);
+    cleaner.set_skip_focus_check(true);
     const auto res = cleaner.run();
     check(res.ran, "a look-only pass searches the bag");
     check(res.matched == 1, "finds the one listed item and not the other -- found " +
@@ -4520,6 +4697,27 @@ void test_bag() {
     TrashList empty_list;
     cleaner.set_trash(&empty_list);
     check(!cleaner.run().ran, "with nothing listed, it does not open the bag at all");
+
+    // With the game behind another window it does not reach for the mouse.
+    {
+        BagCleaner behind(no_window, store, [&](Frame& out) { out = scene; return true; });
+        behind.set_settings(cs);
+        behind.set_trash(&wanted);
+        behind.set_dry_run(true);
+        const auto r = behind.run();
+        check(r.matched == 0 && !r.trouble.empty(),
+              "and with the game not in front it clicks nothing -- " + r.trouble);
+    }
+
+    // A stop that comes before the pass gets going still stops it.
+    {
+        BagCleaner early(no_window, store, [&](Frame& out) { out = scene; return true; });
+        early.set_settings(cs);
+        early.set_trash(&wanted);
+        early.set_skip_focus_check(true);
+        early.cancel();
+        check(!early.run().ran, "a pass cancelled before it starts does not run");
+    }
 }
 
 void test_bag_counts() {
@@ -4577,8 +4775,38 @@ void test_bag_counts() {
         check(counts.read(f, s) == 42, "and reads it over a white item too");
     }
     {
+        // The client prints counts from 2 up. A single item of a kind that
+        // stacks has nothing in its corner, and the bin still asks how many,
+        // with 1 in the box: so nothing printed reads as 1.
         auto [f, s] = slot_with("", false);
-        check(counts.read(f, s) == 0, "an item with no count reads as none");
+        check(counts.read(f, s) == 1, "an item with no count printed is a stack of one");
+    }
+    {
+        // White in the corner that is not a number -- a white icon, a digit
+        // half covered -- is not a count of one.
+        auto [f, s] = slot_with("", false);
+        for (int y = 3; y < 11; ++y)
+            for (int x = 2; x < 13; ++x)
+                if ((x * 7 + y * 3) % 4 == 0) put_px(f, s.x + x, s.y + y, 250, 250, 250);
+        check(counts.read(f, s) == CountReader::kUnreadable,
+              "white marks that do not read as a number are unreadable, not 1");
+    }
+
+    // The quantity box of the bin's dialog: the same digits on a dark field,
+    // with a yellow caret after them.
+    {
+        Frame f = bag_scene(120, 40, 216);
+        const ScreenRect box{ 10, 10, 82, 15 };
+        for (int y = box.y; y < box.bottom(); ++y)
+            for (int x = box.x; x < box.right(); ++x)
+                put_px(f, x, y, 65 + (y - box.y), 65 + (y - box.y), 70 + (y - box.y));
+        check(counts.read_field(f, box) == 0, "an empty quantity box reads as nothing");
+        print_number(f, box.x + 7, box.y + 6, "1", font_dir);
+        for (int y = box.y + 2; y < box.y + 14; ++y) put_px(f, box.x + 12, y, 230, 200, 20);
+        check(counts.read_field(f, box) == 1, "the 1 the bin puts in the box reads as 1");
+        Frame g = f;
+        print_number(g, box.x + 7, box.y + 6, "16", font_dir);
+        check(counts.read_field(g, box) == 16, "and a number typed over it reads back");
     }
 
     // The catalog of the client's item icons.
@@ -4622,18 +4850,394 @@ void test_bag_counts() {
         check(list.match(g, gs, 0.90f) < 0, "a different item is not");
     }
 
+    // An icon in a slot, as the bag draws it.
+    const auto slot_of = [&](const ItemCatalog::Entry& e) {
+        auto [g, gs] = slot_with("", false);
+        for (int y = 0; y < 34; ++y)
+            for (int x = 0; x < 34; ++x) put_px(g, gs.x + x, gs.y + y, 14, 14, 14);
+        blit(g, e.icon, gs.x + (34 - e.icon.width) / 2, gs.y + (34 - e.icon.height) / 2);
+        return std::make_pair(g, gs);
+    };
+
+    // One drawing in two colours, two strengths of one potion: the colour or
+    // the rest of the catalog tells them apart, never the shape alone.
+    {
+        const struct { const char* listed; const char* in_bag; } kAlike[] = {
+            { "spend/buff/8871061", "spend/buff/8871051" },    // pink seal, grey seal
+            { "spend/hp/8843017", "spend/hp/8843015" },        // within 7 levels of colour
+            { "spend/craft/8800960", "spend/craft/8800852" },  // 15 levels apart
+            { "seal/8219021", "seal/8211045" },
+        };
+        for (const auto& pair : kAlike) {
+            const ItemCatalog::Entry* bagged = catalog.find(pair.in_bag);
+            if (bagged == nullptr || catalog.find(pair.listed) == nullptr) continue;
+            TrashList chosen;
+            chosen.add_catalog(catalog, { pair.listed }, TrashList::Action::Delete, 0.85f);
+            chosen.add_rivals(catalog);
+            auto [g, gs] = slot_of(*bagged);
+            const TrashList::Verdict k = chosen.judge(g, gs, 0.90f);
+            check(k.item < 0, std::string("listing ") + pair.listed + " leaves " + pair.in_bag +
+                                  " alone -- " +
+                                  (k.doubt == TrashList::Verdict::Doubt::Rival ? "it is " + k.rival
+                                   : k.doubt == TrashList::Verdict::Doubt::Colour
+                                       ? "colour off by " + std::to_string(k.tone_off)
+                                       : std::string("no likeness")));
+            TrashList right;
+            right.add_catalog(catalog, { pair.in_bag }, TrashList::Action::Delete, 0.85f);
+            right.add_rivals(catalog);
+            // Matched first and reported after, as above.
+            float right_score = 0.0f;
+            const int taken = right.match(g, gs, 0.90f, &right_score);
+            check(taken == 0, std::string("while listing ") + pair.in_bag + " takes it -- score " +
+                                  std::to_string(right_score));
+        }
+    }
+
+    // A few ids are one picture. Neither is thrown away unless both are listed.
+    {
+        const std::vector<std::string> twins = catalog.twins("spend/craft/8800975");
+        if (catalog.find("spend/craft/8800975") != nullptr &&
+            catalog.find("spend/craft/8800956") != nullptr) {
+            check(std::find(twins.begin(), twins.end(), "spend/craft/8800956") != twins.end(),
+                  "8800975 and 8800956 are found to be one picture");
+            auto [g, gs] = slot_of(*catalog.find("spend/craft/8800975"));
+            TrashList one;
+            one.add_catalog(catalog, { "spend/craft/8800975" }, TrashList::Action::Delete, 0.85f);
+            one.add_rivals(catalog);
+            check(one.match(g, gs, 0.90f) < 0, "so listing one of them alone throws neither away");
+            TrashList both;
+            both.add_catalog(catalog, { "spend/craft/8800975", "spend/craft/8800956" },
+                             TrashList::Action::Delete, 0.85f);
+            both.add_rivals(catalog);
+            check(both.match(g, gs, 0.90f) >= 0, "and listing both throws it away");
+        }
+        check(catalog.twins("spend/mana/8810101").empty(), "most icons have no twin");
+    }
+
+    // Fragments change colour in the bag. Held to their icon's colour they are
+    // left alone; allowed to be roughly the right colour, they are not -- but
+    // the steady red of another set of pieces is too far off either way.
+    if (const ItemCatalog::Entry* piece = catalog.find("spend/fragment/1103023")) {
+        const auto tinted = [&](int dr, int dg, int db) {
+            auto [g, gs] = slot_of(*piece);
+            for (int y = 0; y < 34; ++y)
+                for (int x = 0; x < 34; ++x) {
+                    std::uint8_t r, gg, b;
+                    g.get(gs.x + x, gs.y + y, r, gg, b);
+                    if (r + gg + b <= 3 * 14) continue;
+                    put_px(g, gs.x + x, gs.y + y, std::clamp(r + dr, 0, 255),
+                           std::clamp(gg + dg, 0, 255), std::clamp(b + db, 0, 255));
+                }
+            return std::make_pair(g, gs);
+        };
+        CleanSettings strict, loose;
+        strict.delete_ids = loose.delete_ids = { "spend/fragment/1103023" };
+        loose.fragments_loose = true;
+        TrashList held, roughly;
+        held.build(temp_file("gobot_trash_nowhere"), strict, catalog);
+        roughly.build(temp_file("gobot_trash_nowhere"), loose, catalog);
+        check(!held.rivals.empty() && held.rivals.size() + 1 == catalog.size(),
+              "a list built for a pass has every other catalog icon as a rival");
+
+        auto [pulse, ps] = tinted(10, -45, -40);           // as measured on the live bag
+        check(held.match(pulse, ps, 0.90f) < 0, "a fragment mid-pulse is refused when strict");
+        check(roughly.match(pulse, ps, 0.90f) == 0, "and taken when roughly is enough");
+        auto [red, rs] = tinted(-60, -110, -70);           // another set, steady
+        check(roughly.match(red, rs, 0.90f) < 0, "but not the steady red of another set");
+        auto [same, ss] = slot_of(*piece);
+        check(held.match(same, ss, 0.90f) == 0, "and the fragment as its icon is taken either way");
+    }
+
     // The ids chosen beforehand, as configs/trash.ini keeps them.
     {
         const std::string path = temp_file("gobot_trash_items.ini");
         {
             std::ofstream out(path);
-            out << "[Items]\ndelete=spend/fragment/1103063, spend/mana/8810101\ndrop=\n";
+            out << "[Trash]\nenabled=false\n"
+                   "[Items]\ndelete=spend/fragment/1103063, spend/mana/8810101\ndrop=\n";
         }
         CleanSettings cs;
         check(cs.load(path) && cs.delete_ids.size() == 2 && cs.drop_ids.empty() &&
                   cs.delete_ids[1] == "spend/mana/8810101",
               "the chosen ids read back from [Items]");
         std::remove(path.c_str());
+    }
+}
+
+namespace {
+
+/// The bin's quantity dialog as the live client draws it: the picture of its
+/// words, then the row with the box and the two buttons, the box holding
+/// `in_box`. The buttons end up at `at` + (100, 50), as measured.
+void draw_count_dialog(Frame& f, const TemplateStore& store, int x, int y,
+                       const std::string& in_box, const std::string& font_dir) {
+    blit(f, *store.get("grabbed/del_item_confirm_2"), x, y);
+    fill(f, ScreenRect{ x, y + 49, 196, 30 }, 216, 216, 216);
+    const ScreenRect pair{ x + 100, y + 50, 85, 21 };
+    const ScreenRect box{ pair.x - 88, pair.y + 3, 82, 15 };
+    for (int yy = box.y; yy < box.bottom(); ++yy)
+        for (int xx = box.x; xx < box.right(); ++xx)
+            put_px(f, xx, yy, 65 + (yy - box.y), 65 + (yy - box.y), 70 + (yy - box.y));
+    if (!in_box.empty()) print_number(f, box.x + 7, box.y + 6, in_box, font_dir);
+    blit(f, *store.get("grabbed/confirm_button"), pair.x, pair.y);
+}
+
+/// A pretend game for the cleaner's hands: the bag with one item in it, the
+/// bin, and the bin's dialogs, answering a drag, a click and a key the way the
+/// live client was seen to. Drag the item onto the bin and the bin holds it;
+/// click the bin and it asks; Xác Nhận with the right number and the item is
+/// gone, Hủy Bỏ and it is back in its slot.
+struct PretendBin {
+    const TemplateStore* store = nullptr;
+    std::string font_dir;
+    Frame       base;          ///< the bag, the item in its slot, the can in the bin
+    ScreenRect  slot;          ///< the item's
+    ScreenRect  bin;
+    int         count = 1;     ///< in the stack; what the box has to say
+    bool        stacks = true; ///< asks how many, rather than whether
+
+    enum class State { Idle, InBin, Asking } state = State::Idle;
+    bool        gone = false;
+    std::string box;           ///< what the quantity box holds
+    bool        revive_up = false;   ///< another dialog is up as well
+    bool        wrong_dialog = false; ///< the bin brings up somebody else's dialog
+    int         drags = 0, confirms = 0, cancels = 0, typed = 0, wrong_answers = 0;
+
+    static constexpr int kDialogX = 600, kDialogY = 120;
+    ScreenRect pair() const {
+        return stacks || wrong_dialog ? ScreenRect{ kDialogX + 100, kDialogY + 50, 85, 21 }
+                                      : ScreenRect{ kDialogX + 101, kDialogY + 51, 85, 21 };
+    }
+
+    Frame render() const {
+        Frame f = base;
+        if (gone) fill(f, ScreenRect{ slot.x + 2, slot.y + 2, slot.w - 4, slot.h - 4 }, 14, 14, 14);
+        if (state == State::InBin) paint_item(f, ScreenRect{ bin.x - 4, bin.y - 2, 24, 26 }, 6);
+        if (state == State::Asking) {
+            if (wrong_dialog)
+                blit(f, *store->get("grabbed/sell_confirm"), kDialogX, kDialogY - 3);
+            else if (stacks)
+                draw_count_dialog(f, *store, kDialogX, kDialogY, box, font_dir);
+            else
+                blit(f, *store->get("grabbed/del_item_confirm_1"), kDialogX, kDialogY);
+        }
+        if (revive_up) blit(f, *store->get("grabbed/hoisinh_confirm"), 640, 420);
+        return f;
+    }
+
+    BagCleaner::Hands hands() {
+        BagCleaner::Hands h;
+        h.drag = [this](int fx, int fy, int tx, int ty) {
+            ++drags;
+            const ScreenRect near_bin{ bin.x - 4, bin.y - 4, bin.w + 8, bin.h + 8 };
+            if (state == State::Idle && !gone && slot.contains(fx, fy) && near_bin.contains(tx, ty))
+                state = State::InBin;
+            return true;
+        };
+        h.click = [this](int x, int y) {
+            const ScreenRect near_bin{ bin.x - 4, bin.y - 4, bin.w + 8, bin.h + 8 };
+            if (state == State::InBin && near_bin.contains(x, y)) {
+                state = State::Asking;
+                box = "1";
+                return true;
+            }
+            const ScreenRect p = pair();
+            if (state == State::Asking && p.contains(x, y)) {
+                if (x < p.x + p.w / 2) {
+                    ++confirms;
+                    if (wrong_dialog) ++wrong_answers;
+                    else if (!stacks || box == std::to_string(count)) gone = true;
+                } else {
+                    ++cancels;
+                }
+                state = State::Idle;
+            }
+            return true;
+        };
+        h.key = [this](std::uint32_t vk) {
+            if (state == State::Asking && vk == VK_BACK && !box.empty()) box.pop_back();
+            return true;
+        };
+        h.type = [this](const std::string& text) {
+            if (state == State::Asking) {
+                box += text;
+                ++typed;
+            }
+            return true;
+        };
+        return h;
+    }
+};
+
+} // namespace
+
+void test_bag_dialogs() {
+    section("Bag: the bin's dialogs, and an item's way into the bin");
+
+    TemplateStore store;
+    const std::string font_dir = GlyphFont::default_dir();
+    CountReader counts;
+    const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
+                      store.get("grabbed/inventory") && store.get("inven/0/trash_can") &&
+                      store.get("grabbed/confirm_button") &&
+                      store.get("grabbed/del_item_confirm_1") &&
+                      store.get("grabbed/del_item_confirm_2") &&
+                      store.get("grabbed/hoisinh_confirm") && store.get("grabbed/sell_confirm") &&
+                      store.get("grabbed/drop_confirm") && !font_dir.empty() &&
+                      counts.load(font_dir);
+    if (!have) {
+        std::printf("  [skip] the dialog pictures or the digits are not installed here\n");
+        return;
+    }
+
+    // Told apart by their words, where the words sit relative to the buttons.
+    {
+        Frame f = bag_scene(1280, 720, 60);
+        draw_count_dialog(f, store, 354, 306, "1", font_dir);      // where the live one was
+        blit(f, *store.get("grabbed/del_item_confirm_1"), 40, 40);
+        blit(f, *store.get("grabbed/hoisinh_confirm"), 700, 60);
+        blit(f, *store.get("grabbed/drop_confirm"), 700, 300);
+        blit(f, *store.get("grabbed/sell_confirm"), 700, 500);
+        const auto dialogs = bag::find_dialogs(f, store);
+        const auto at = [&](int x, int y) -> const bag::Dialog* {
+            for (const bag::Dialog& d : dialogs)
+                if (std::abs(d.pair.x - x) <= 2 && std::abs(d.pair.y - y) <= 2) return &d;
+            return nullptr;
+        };
+        const bag::Dialog* count = at(454, 356);
+        check(count != nullptr && count->ours() && count->kind == bag::kCountDialog &&
+                  count->quantity && count->box.x == 366 && count->box.y == 359,
+              "the bin's quantity dialog is known, its box beside the buttons");
+        check(count != nullptr && counts.read_field(f, count->box) == 1,
+              "and the 1 in its box reads as 1");
+        const bag::Dialog* ask = at(141, 91);
+        check(ask != nullptr && ask->ours() && ask->kind == bag::kAskDialog && !ask->quantity,
+              "the bin's question is known, by the buttons as it draws them");
+        const bag::Dialog* revive = at(803, 115);
+        check(revive != nullptr && !revive->ours(),
+              "the revive question is found and is not the bin's");
+        const bag::Dialog* drop = at(802, 353);
+        check(drop != nullptr && !drop->ours(),
+              "nor is a dialog with no words, the drop picture's");
+        const bag::Dialog* sell = at(800, 553);
+        check(sell != nullptr && !sell->ours(), "nor a shop's quantity box");
+        check(dialogs.size() == 5, "and nothing else is taken for a dialog -- found " +
+                                   std::to_string(dialogs.size()));
+        check(bag::can_check(store, TrashList::Action::Delete) &&
+                  !bag::can_check(store, TrashList::Action::Drop),
+              "the bin's dialogs can be checked; the drop question cannot, so nothing is dropped");
+    }
+
+    // The pretend game: the bag with an item in slot 5 and the can in the bin.
+    BagLayout l;
+    Frame scene = bag_scene(1024, 768, 60);
+    for (int y = 300; y < 300 + 220; ++y)
+        for (int x = 290; x < 290 + 272; ++x) put_px(scene, x, y, 20, 22, 30);
+    blit(scene, *store.get("grabbed/inventory"), 300, 300);
+    blit(scene, *store.get("inven/0/trash_can"), 300 + l.bin_dx, 300 + l.bin_dy);
+    const BagView v = bag::find(scene, store, l);
+    if (!v.found) {
+        check(false, "the pretend bag is found");
+        return;
+    }
+    const ScreenRect slot = v.slots(l)[5];
+    paint_item(scene, slot, 1);
+    // Nothing white where a count would be: this is an item of one.
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 28; ++x) {
+            std::uint8_t r, gg, b;
+            scene.get(slot.x + x, slot.y + y, r, gg, b);
+            if ((r + gg + b) / 3 > 150) put_px(scene, slot.x + x, slot.y + y, 200, 120, 60);
+        }
+    TrashList wanted;
+    wanted.add_picture(bag::cut(scene, slot), TrashList::Action::Delete, l);
+
+    CleanSettings cs;
+    cs.tabs[0] = true;
+    cs.tabs[1] = cs.tabs[2] = cs.tabs[3] = cs.tabs[4] = false;
+
+    const auto pass = [&](PretendBin& game) {
+        InputManager no_window;
+        BagCleaner cleaner(no_window, store, [&](Frame& out) { out = game.render(); return true; });
+        cleaner.set_settings(cs);
+        cleaner.set_trash(&wanted);
+        cleaner.set_counts(&counts);
+        cleaner.set_hands(game.hands());
+        return cleaner.run();
+    };
+    const auto game_with = [&](const std::string& corner) {
+        PretendBin game;
+        game.store = &store;
+        game.font_dir = font_dir;
+        game.base = scene;
+        game.slot = slot;
+        game.bin = v.trash;
+        if (corner == "?") {
+            for (int y = 3; y < 11; ++y)
+                for (int x = 2; x < 13; ++x)
+                    if ((x * 7 + y * 3) % 4 == 0) put_px(game.base, slot.x + x, slot.y + y, 250, 250, 250);
+        } else if (!corner.empty()) {
+            print_number(game.base, slot.x + 3, slot.y + 3, corner, font_dir);
+            game.count = std::atoi(corner.c_str());
+        }
+        return game;
+    };
+
+    {
+        PretendBin game = game_with("");
+        const auto r = pass(game);
+        check(r.ran && r.deleted == 1 && r.failed == 0 && game.gone && game.confirms == 1 &&
+                  game.typed == 0,
+              "a stack of one: dragged, the bin clicked, its 1 left as it is, Xác Nhận -- "
+              "deleted " + std::to_string(r.deleted) + ", failed " + std::to_string(r.failed));
+    }
+    {
+        PretendBin game = game_with("7");
+        const auto r = pass(game);
+        check(r.deleted == 1 && game.gone && game.typed == 1 && game.box == "7",
+              "a stack of seven: 7 typed over the 1, read back, then Xác Nhận -- box holds '" +
+                  game.box + "'");
+    }
+    {
+        PretendBin game = game_with("?");
+        const auto r = pass(game);
+        check(r.deleted == 0 && r.failed == 1 && !game.gone && game.confirms == 0 &&
+                  game.cancels == 1 && game.state == PretendBin::State::Idle,
+              "a count that does not read: Hủy Bỏ, and the item is back in the bag -- "
+              "cancels " + std::to_string(game.cancels));
+    }
+    {
+        PretendBin game = game_with("");
+        game.stacks = false;
+        const auto r = pass(game);
+        check(r.deleted == 1 && game.gone && game.typed == 0,
+              "an item that does not stack: the question answered Xác Nhận");
+    }
+    {
+        // The state the live run left the game in: the quantity dialog up,
+        // holding the item, with 1 in the box.
+        PretendBin game = game_with("");
+        game.state = PretendBin::State::Asking;
+        game.box = "1";
+        const auto r = pass(game);
+        check(r.ran && game.cancels == 1 && r.deleted == 1 && game.gone,
+              "a dialog left open by an earlier pass is said no to first, then the pass goes on");
+    }
+    {
+        PretendBin game = game_with("");
+        game.revive_up = true;
+        const auto r = pass(game);
+        check(!r.ran && !r.trouble.empty() && game.drags == 0 && game.confirms == 0 &&
+                  game.cancels == 0,
+              "with somebody else's dialog up, nothing is touched -- " + r.trouble);
+    }
+    {
+        PretendBin game = game_with("");
+        game.wrong_dialog = true;
+        const auto r = pass(game);
+        check(r.deleted == 0 && game.wrong_answers == 0 && game.confirms == 0 && !game.gone &&
+                  !r.trouble.empty(),
+              "when the bin brings up a dialog that is not its own, it is not answered");
     }
 }
 
@@ -5161,6 +5765,7 @@ int main() {
     test_hunter();
     test_bag();
     test_bag_counts();
+    test_bag_dialogs();
     test_config();
     test_protocol_handler();
 
