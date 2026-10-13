@@ -397,6 +397,14 @@ private:
     /// A stop ended that hold with nothing left to watch the bin, so nothing
     /// is started again until the game is seen with nothing waiting.
     std::atomic<bool>        trash_left_held_{false};
+    /// Whether something that presses keys may start: the hunter, the macro,
+    /// the packet bot, walking to a place, the calibration, or the simple
+    /// screen's BẮT ĐẦU. Always, unless trash_left_held_ is set; then only
+    /// once a fresh look at the game shows no dialog up and nothing waiting
+    /// in the bin, which clears it. Says why not, on whichever screen is up.
+    /// Every one of those starts goes through here, so that no way of
+    /// starting one -- F10, F11, a button on either screen -- gets round it.
+    bool keys_may_start();
 
     /// Hold every other part of the bot off for `reason`, unless something
     /// else holds it already: a captcha's hold is not a trash pass's or a

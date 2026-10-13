@@ -429,8 +429,8 @@ void CountReader::set_digit(int d, int w, int h, const std::vector<std::uint8_t>
 }
 
 int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool caret,
-                      int& white) const {
-    white = 0;
+                      int& white, int& stray) const {
+    white = stray = 0;
     const int kW = area.w, kH = area.h;
     if (!f.valid() || kW <= 0 || kH <= 0) return -1;
 
@@ -464,12 +464,15 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool 
 
     // How well digit `d` sits at (x, y): the share of its box that agrees,
     // and the share of its strokes that are there, both of what can be seen.
-    // A digit with a quarter of its box or of its strokes out of sight does
-    // not fit at all: that is a guess, not a reading. The caret over a 2
-    // hides a fifth of its box and three of its nineteen strokes.
-    const auto fit = [&](int d, int x, int y, double& agree, double& strokes) {
+    // A digit with a quarter of its box or of its strokes out of sight is
+    // `hidden`, and is not read there: that is a guess, not a reading. The
+    // caret over a 2 hides a fifth of its box and three of its nineteen
+    // strokes. How well a hidden digit fits what can be seen is still
+    // measured, for telling whether another digit read there is sure.
+    const auto fit = [&](int d, int x, int y, double& agree, double& strokes, bool& hidden) {
         const Glyph& g = digits_[d];
         agree = strokes = 0.0;
+        hidden = false;
         if (x + g.w > kW || y + g.h > kH || g.lit == 0) return;
         int seen = 0, seen_lit = 0, same = 0, hit = 0;
         for (int gy = 0; gy < g.h; ++gy)
@@ -482,48 +485,87 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool 
                 if (want == (have == kStroke)) ++same;
                 if (want && have == kStroke) ++hit;
             }
-        if (seen * 4 < g.w * g.h * 3 || seen_lit * 4 < g.lit * 3) return;
+        hidden = seen * 4 < g.w * g.h * 3 || seen_lit * 4 < g.lit * 3;
+        if (seen == 0 || seen_lit == 0) return;
         agree = static_cast<double>(same) / seen;
         strokes = static_cast<double>(hit) / seen_lit;
     };
 
     // Left to right along each starting row; the row that reads the most
-    // digits wins.
-    std::string best;
+    // digits wins. Where each digit was read is kept, to tell afterwards
+    // whether the digits read are all the white there is.
+    //
+    // A digit read where a hidden one fits what can be seen as well is no
+    // reading: with the caret over its first column a 6 looks like a 3, so
+    // what reads as 3 there may be a 6. Only ever so where something is out
+    // of sight, which a slot's corner never has.
+    struct Line {
+        std::string      text;
+        std::vector<int> at;            ///< where each digit's box starts
+        int              y = 0;
+        bool             unsure = false;
+    };
+    Line best;
     for (int y = 0; y + 8 <= kH && y <= max_top; ++y) {
-        std::string text;
+        Line line;
+        line.y = y;
         int x = 0, misses = 0;
-        while (x < kW - 2 && text.size() < 6) {
+        while (x < kW - 2 && line.text.size() < 6) {
             int found = -1;
             double found_agree = 0.0;
+            bool hidden_fits = false;
             for (int d = 0; d < 10; ++d) {
                 double agree = 0.0, strokes = 0.0;
-                fit(d, x, y, agree, strokes);
-                if (agree >= 0.88 && strokes >= 0.88 && agree > found_agree) {
+                bool hidden = false;
+                fit(d, x, y, agree, strokes, hidden);
+                if (agree < 0.88 || strokes < 0.88) continue;
+                if (hidden) {
+                    hidden_fits = true;
+                } else if (agree > found_agree) {
                     found = d;
                     found_agree = agree;
                 }
             }
             if (found >= 0) {
-                text += static_cast<char>('0' + found);
+                line.text += static_cast<char>('0' + found);
+                line.at.push_back(x);
+                line.unsure = line.unsure || hidden_fits;
                 x += digits_[found].w + 1;
                 misses = 0;
             } else {
-                if (!text.empty() && ++misses > 2) break;
+                if (!line.text.empty() && ++misses > 2) break;
                 ++x;
             }
         }
-        if (text.size() > best.size()) best = text;
+        if (line.text.size() > best.text.size()) best = std::move(line);
     }
+
+    // White outside every digit read: a digit that did not read, or
+    // something that is no digit at all.
+    for (int y = 0; y < kH; ++y)
+        for (int x = 0; x < kW; ++x) {
+            if (map[static_cast<std::size_t>(y) * kW + x] != kStroke) continue;
+            bool inside = false;
+            for (std::size_t i = 0; i < best.text.size() && !inside; ++i) {
+                const Glyph& g = digits_[best.text[i] - '0'];
+                inside = x >= best.at[i] && x < best.at[i] + g.w && y >= best.y && y < best.y + g.h;
+            }
+            if (!inside) ++stray;
+        }
+
     // A count never starts with a nought, and none is that long.
-    if (best.empty() || best.size() > 5 || (best.size() > 1 && best[0] == '0')) return -1;
-    return std::atoi(best.c_str());
+    if (best.unsure || best.text.empty() || best.text.size() > 5 ||
+        (best.text.size() > 1 && best.text[0] == '0'))
+        return -1;
+    return std::atoi(best.text.c_str());
 }
 
 int CountReader::read(const Frame& f, const ScreenRect& slot) const {
     if (!loaded_ || !f.valid()) return kUnreadable;
-    int white = 0;
-    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, false, white);
+    // White the digits leave over says nothing in a slot's corner: the item
+    // under the count can be white itself.
+    int white = 0, stray = 0;
+    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, false, white, stray);
     if (white == 0) return 1;                 // nothing printed: a stack of one
     if (n <= 0 || n > 9999) return kUnreadable;
     return n;
@@ -531,10 +573,15 @@ int CountReader::read(const Frame& f, const ScreenRect& slot) const {
 
 int CountReader::read_field(const Frame& f, const ScreenRect& area) const {
     if (!loaded_ || !f.valid()) return kUnreadable;
-    int white = 0;
-    const int n = scan(f, area, std::max(0, area.h - 8), true, white);
+    int white = 0, stray = 0;
+    const int n = scan(f, area, std::max(0, area.h - 8), true, white, stray);
     if (white == 0) return 0;                 // the caret alone is an empty box
-    return n < 0 ? kUnreadable : n;
+    // Nothing in a box is white but its number, so white the digits read
+    // leave over is a digit that did not read -- most of it under the caret
+    // -- and the digits before it are not the number in the box: "12" with
+    // the 2 under the caret is not 1.
+    if (n < 0 || stray > 0) return kUnreadable;
+    return n;
 }
 
 // --------------------------------------------------------------- catalog
@@ -1068,32 +1115,8 @@ bool BagCleaner::drag(int fx, int fy, int tx, int ty) {
     return hands_.drag ? hands_.drag(fx, fy, tx, ty) : input_.drag(fx, fy, tx, ty);
 }
 
-bool BagCleaner::press(std::uint32_t vk, int hold_ms) {
-    return hands_.key ? hands_.key(vk) : input_.key_press(vk, hold_ms);
-}
-
-bool BagCleaner::type_number(int n) {
-    // Key presses, not text. The game's box takes keys the way the keyboard
-    // sends them -- END and BACKSPACE emptied it live -- and ignores text sent
-    // as Unicode characters, which is how InputManager::type_text sends it:
-    // the count typed that way never appeared. '0' to '9' are the virtual
-    // keys of the digits along the top of the keyboard, sent with their scan
-    // codes like every other key.
-    //
-    // Keys go to whatever has the keyboard, so not while the game is not in
-    // front -- key_press would not send them anyway, and this says why. The
-    // box is read back before Xác Nhận, so a count that went nowhere is a
-    // dialog said no to, not a guess.
-    if (!hands_.key && !input_.window_focused()) {
-        say("cửa sổ game không ở trên cùng, nên không gõ số lượng");
-        return false;
-    }
-    if (n < 0) return false;
-    for (const char digit : std::to_string(n)) {
-        if (!press(static_cast<std::uint32_t>(digit), 30)) return false;
-        pause_ms(60);                // one key at a time, as a hand would
-    }
-    return true;
+bool BagCleaner::press(std::uint32_t vk) {
+    return hands_.key ? hands_.key(vk) : input_.key_press(vk);
 }
 
 bool BagCleaner::grab_view(Frame& f, BagView& v) {
@@ -1586,8 +1609,8 @@ int BagCleaner::answer(const bag::Dialog& first, int count) {
     bag::Dialog d = first;
     for (int asked = 0; asked < 2; ++asked) {
         if (d.quantity) {
-            // The box takes the exact number in the stack and nothing else, so
-            // an unreadable count is a stop, not a guess.
+            // Only the exact count in the stack is ever confirmed, so a count
+            // that does not read is a stop, not a guess.
             if (counts_ == nullptr || !counts_->loaded() || count == CountReader::kUnreadable ||
                 count <= 0) {
                 say("không đọc được số lượng trên ô đồ, nên bỏ qua món này");
@@ -1595,30 +1618,20 @@ int BagCleaner::answer(const bag::Dialog& first, int count) {
                 if (grab_ && grab_(f)) keep(f, "no_count");
                 return kFailed;
             }
-            // The game fills the box in with the whole stack itself, so the
-            // box usually holds the count already, and then it is left
-            // alone. Only a number that is not the count is replaced: a box
-            // that does not read may well hold the right one, and erasing it
-            // would throw away the one number the game is sure to take.
+            // Nothing is ever typed into the box, nor is it clicked. The game
+            // fills it in with the whole stack of whatever is in the bin, and
+            // Xác Nhận is pressed only when that number is the count read off
+            // the slot. A box that holds anything else through a whole blink
+            // -- another number, nothing, a number that does not read or does
+            // not hold still -- means the count was misread or the bin holds
+            // something other than the item judged, since the bag can change
+            // under a pass; and a deletion cannot be undone. So the item goes
+            // back instead: trash_one answers Hủy Bỏ.
             Frame f;
-            int in_box = box_holds(d, f);
+            const int in_box = box_holds(d, f);
             if (cancelled_) return kFailed;
-            if (in_box >= 0 && in_box != count) {
-                say((in_box == 0 ? std::string("ô số lượng đang trống")
-                                 : "ô số lượng ghi " + std::to_string(in_box)) +
-                    ", nên gõ " + std::to_string(count) + " vào");
-                if (!mouse_ok(d.box.cx(), d.box.cy())) return kFailed;
-                click(d.box.cx(), d.box.cy());
-                if (!wait_ms(150)) return kFailed;
-                press(VK_END, 25);
-                for (int i = 0; i < 6; ++i) press(VK_BACK, 25);
-                type_number(count);
-                // Read back the same way, once the box has caught up.
-                if (!wait_ms(250)) return kFailed;
-                in_box = box_holds(d, f);
-                if (cancelled_) return kFailed;
-            }
             if (in_box != count) {
+                const std::string slot = std::to_string(count) + " như trên ô đồ";
                 say(in_box == kBoxGone
                         ? std::string("hộp thoại hỏi số lượng không còn ở chỗ cũ, nên không bấm "
                                       "Xác Nhận")
@@ -1628,10 +1641,9 @@ int BagCleaner::answer(const bag::Dialog& first, int count) {
                     : in_box == CountReader::kUnreadable
                         ? std::string("không đọc được số trong ô số lượng, nên không bấm Xác Nhận")
                     : in_box == 0
-                        ? "ô số lượng trống chứ không ghi " + std::to_string(count) +
-                              ", nên không bấm Xác Nhận"
-                        : "ô số lượng ghi " + std::to_string(in_box) + " chứ không phải " +
-                              std::to_string(count) + ", nên không bấm Xác Nhận");
+                        ? "ô số lượng trống chứ không ghi " + slot + ", nên không bấm Xác Nhận"
+                        : "ô số lượng ghi " + std::to_string(in_box) + " chứ không phải " + slot +
+                              ", nên không bấm Xác Nhận");
                 keep(f, "box");
                 return kFailed;
             }

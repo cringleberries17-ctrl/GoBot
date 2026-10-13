@@ -4897,6 +4897,44 @@ void test_bag_counts() {
             check(counts.read_field(f, box) == CountReader::kUnreadable,
                   "a digit with too much of it under the caret is not guessed at");
         }
+
+        // A digit that does not read takes the number with it: the digits
+        // either side of it are not the number in the box. The caret stands
+        // where the client never draws it here -- over the middle of a digit,
+        // or over a 6's first column, which leaves a 6 looking like a 3.
+        // `column` is from the digit's left edge.
+        const auto digit_x = [&](const std::string& text, std::size_t i) {
+            int x = box.x + 7;                       // as box_with prints it
+            for (std::size_t k = 0; k < i; ++k) {
+                Frame g;
+                load_png(font_dir + "\\lower\\" + std::string(1, text[k]) + ".png", g);
+                x += g.width + 1;
+            }
+            return x;
+        };
+        const auto caret_over = [&](const std::string& text, std::size_t digit, int column) {
+            Frame f = box_with(text, false);
+            draw_caret(f, box, digit_x(text, digit) + column);
+            return counts.read_field(f, box);
+        };
+        {
+            const int middle = caret_over("12", 1, 1), later = caret_over("12", 1, 2);
+            check(middle == CountReader::kUnreadable && later == CountReader::kUnreadable,
+                  "12 with the caret over the middle columns of its 2 does not read, rather than "
+                  "reading 1 -- read " + std::to_string(middle) + " and " + std::to_string(later));
+        }
+        {
+            struct Hidden { const char* text; std::size_t digit; int column; };
+            std::string misread;
+            for (const Hidden& h : { Hidden{ "125", 2, 2 }, Hidden{ "120", 2, 1 }, Hidden{ "26", 0, 1 },
+                                     Hidden{ "6", 0, -1 }, Hidden{ "16", 1, -1 } }) {
+                const int got = caret_over(h.text, h.digit, h.column);
+                if (got != CountReader::kUnreadable)
+                    misread += std::string(" ") + h.text + " read " + std::to_string(got);
+            }
+            check(misread.empty(), "nor does a number with its last digit, its first or a 6 under "
+                                   "the caret: never 12 for 125, 6 for 26, or 3 for 6" + misread);
+        }
     }
 
     // The catalog of the client's item icons.
@@ -5188,9 +5226,9 @@ void draw_count_dialog(Frame& f, const TemplateStore& store, int x, int y,
 /// live client was seen to. Drag the item onto the bin and the bin holds it;
 /// click the bin and it asks, the whole stack already in the box and the caret
 /// blinking after it; Xác Nhận with the right number and the item is gone,
-/// Hủy Bỏ and it is back in its slot. The box takes digit keys and BACKSPACE,
-/// and nothing else: there is no way to type text into it, as there is none
-/// into the live one.
+/// Hủy Bỏ and it is back in its slot. The box takes digit keys and BACKSPACE
+/// as the live one does, and every key pressed and every click into it while
+/// it is up is counted: the cleaner is to make none.
 struct PretendBin {
     const TemplateStore* store = nullptr;
     std::string font_dir;
@@ -5206,11 +5244,11 @@ struct PretendBin {
     /// What the game puts in the box when it asks. Empty for the whole
     /// stack, which is what the live client does.
     std::string prefill;
+    bool        blank = false;       ///< the box comes up with nothing in it
     /// The caret: 0 not drawn, 1 on all the time, 2 blinking half a second on
     /// and half off, starting on when the dialog comes up -- as live.
     int         caret = 2;
     std::chrono::steady_clock::time_point asked_at = std::chrono::steady_clock::now();
-    bool        deaf = false;        ///< the box takes no keys at all
     bool        scribble = false;    ///< white marks in the box that are no number
     std::string flicker;             ///< in the box every other look instead
     mutable int looks = 0;
@@ -5221,9 +5259,9 @@ struct PretendBin {
     ScreenRect  strip;               ///< the bag's tab strip
     bool        bag_shut = false;    ///< the bag closed: no strip, until its key
     int         drags = 0, confirms = 0, cancels = 0, wrong_answers = 0;
-    /// Digit keys and BACKSPACEs pressed while the box was up, and clicks
-    /// into it: none of them for a box left as the game filled it.
-    int         digits = 0, backs = 0, box_clicks = 0;
+    /// Keys pressed while the box was up, any of them, and clicks into it:
+    /// none of either for a box left as the game filled it.
+    int         box_keys = 0, box_clicks = 0;
     int         keys_into_dialog = 0; ///< the bag's key pressed with a dialog up
 
     bool box_up() const { return state == State::Asking && stacks && !wrong_dialog && !again; }
@@ -5289,7 +5327,7 @@ struct PretendBin {
             const ScreenRect near_bin{ bin.x - 4, bin.y - 4, bin.w + 8, bin.h + 8 };
             if (state == State::InBin && near_bin.contains(x, y)) {
                 state = State::Asking;
-                box = prefill.empty() ? std::to_string(count) : prefill;
+                box = blank ? std::string() : prefill.empty() ? std::to_string(count) : prefill;
                 asked_at = std::chrono::steady_clock::now();
                 return true;
             }
@@ -5322,14 +5360,9 @@ struct PretendBin {
         };
         h.key = [this](std::uint32_t vk) {
             if (box_up()) {
-                if (vk == VK_BACK) {
-                    ++backs;
-                    if (!deaf && !box.empty()) box.pop_back();
-                }
-                if (vk >= '0' && vk <= '9') {
-                    ++digits;
-                    if (!deaf) box += static_cast<char>(vk);
-                }
+                ++box_keys;
+                if (vk == VK_BACK && !box.empty()) box.pop_back();
+                if (vk >= '0' && vk <= '9') box += static_cast<char>(vk);
             }
             if (vk == 'I') {
                 if (state == State::Asking) ++keys_into_dialog;
@@ -5428,7 +5461,8 @@ void test_bag_dialogs() {
     cs.tabs[0] = true;
     cs.tabs[1] = cs.tabs[2] = cs.tabs[3] = cs.tabs[4] = false;
 
-    const auto pass = [&](PretendBin& game, bool look_only = false) {
+    const auto pass = [&](PretendBin& game, bool look_only = false,
+                          std::vector<std::string>* said = nullptr) {
         InputManager no_window;
         BagCleaner cleaner(no_window, store, [&](Frame& out) { out = game.render(); return true; });
         cleaner.set_settings(cs);
@@ -5436,6 +5470,7 @@ void test_bag_dialogs() {
         cleaner.set_counts(&counts);
         cleaner.set_dry_run(look_only);
         cleaner.set_hands(game.hands());
+        if (said) cleaner.on_report([said](const std::string& line) { said->push_back(line); });
         return cleaner.run();
     };
     const auto game_with = [&](const std::string& corner) {
@@ -5458,7 +5493,12 @@ void test_bag_dialogs() {
     };
 
     const auto untouched = [](const PretendBin& game) {
-        return game.digits == 0 && game.backs == 0 && game.box_clicks == 0;
+        return game.box_keys == 0 && game.box_clicks == 0;
+    };
+    const auto says = [](const std::vector<std::string>& lines, const std::string& what) {
+        for (const std::string& line : lines)
+            if (line.find(what) != std::string::npos) return true;
+        return false;
     };
     {
         PretendBin game = game_with("");
@@ -5479,8 +5519,7 @@ void test_bag_dialogs() {
         const auto r = pass(game);
         check(r.deleted == 1 && game.gone && game.confirms == 1 && untouched(game),
               "a stack of two, the caret over the game's 2: Xác Nhận without touching the box -- "
-              "deleted " + std::to_string(r.deleted) + ", keys " +
-                  std::to_string(game.digits + game.backs));
+              "deleted " + std::to_string(r.deleted) + ", keys " + std::to_string(game.box_keys));
     }
     {
         PretendBin game = game_with("7");
@@ -5489,25 +5528,40 @@ void test_bag_dialogs() {
               "a stack of seven, the caret blinking: the game's 7 confirmed as it is");
     }
     {
-        // Another number in the box: erased, and the count pressed in as
-        // digit keys -- the box takes nothing else -- then read back.
+        // Another number in the box than the slot's: the count off the slot
+        // was misread, or the bin holds something else. Nothing is ever typed
+        // over the game's number, and it is not confirmed.
         PretendBin game = game_with("12");
         game.prefill = "1";
-        const auto r = pass(game);
-        check(r.deleted == 1 && game.gone && game.digits == 2 && game.backs > 0 &&
-                  game.box == "12",
-              "a 1 in the box for a stack of twelve: erased, 1 and 2 pressed as keys, read back, "
-              "Xác Nhận -- the box holds '" + game.box + "'");
+        std::vector<std::string> said;
+        const auto r = pass(game, false, &said);
+        check(r.deleted == 0 && r.failed == 1 && !game.gone && game.confirms == 0 &&
+                  game.cancels == 1 && untouched(game) && game.box == "1",
+              "a 1 in the box for a stack of twelve: Hủy Bỏ, the game's 1 left in the box -- "
+              "cancels " + std::to_string(game.cancels) + ", keys " + std::to_string(game.box_keys) +
+                  ", the box holds '" + game.box + "'");
+        check(says(said, "ô số lượng ghi 1 chứ không phải 12"), "and it says what the box held");
     }
     {
-        PretendBin game = game_with("7");
-        game.prefill = "1";
-        game.deaf = true;
+        // The bag changed under the pass: what went into the bin is a stack
+        // of fifty, where the slot that was judged said 2.
+        PretendBin game = game_with("2");
+        game.prefill = "50";
         const auto r = pass(game);
-        check(r.deleted == 0 && r.failed == 1 && !game.gone && game.confirms == 0 &&
-                  game.cancels == 1 && game.digits == 1,
-              "keys that never reach the box: it still reads 1, not 7, so Hủy Bỏ and the item "
-              "is back -- cancels " + std::to_string(game.cancels));
+        check(r.deleted == 0 && !game.gone && game.confirms == 0 && game.cancels == 1 &&
+                  untouched(game) && game.box == "50",
+              "50 in the box where the slot said 2: Hủy Bỏ, and nothing typed over the 50 -- "
+              "keys " + std::to_string(game.box_keys) + ", clicks into the box " +
+                  std::to_string(game.box_clicks));
+    }
+    {
+        PretendBin game = game_with("2");
+        game.blank = true;
+        std::vector<std::string> said;
+        const auto r = pass(game, false, &said);
+        check(r.deleted == 0 && !game.gone && game.confirms == 0 && game.cancels == 1 &&
+                  untouched(game) && game.box.empty() && says(said, "ô số lượng trống"),
+              "an empty box for a stack of two: Hủy Bỏ, and nothing typed into it");
     }
     {
         PretendBin game = game_with("2");
@@ -5527,6 +5581,31 @@ void test_bag_dialogs() {
               "a box that reads 2 one look and 3 the next: no reading, so Hủy Bỏ");
     }
     {
+        // The dialog goes away while its box is watched -- the game closed it,
+        // and the item is back in the bag: not confirmed, and nothing left to
+        // say no to.
+        PretendBin game = game_with("2");
+        int asking = 0;
+        std::vector<std::string> said;
+        InputManager no_window;
+        BagCleaner cleaner(no_window, store, [&](Frame& out) {
+            if (game.state == PretendBin::State::Asking && ++asking == 3)
+                game.state = PretendBin::State::Idle;
+            out = game.render();
+            return true;
+        });
+        cleaner.set_settings(cs);
+        cleaner.set_trash(&wanted);
+        cleaner.set_counts(&counts);
+        cleaner.set_hands(game.hands());
+        cleaner.on_report([&](const std::string& line) { said.push_back(line); });
+        const auto r = cleaner.run();
+        check(r.deleted == 0 && r.failed == 1 && !game.gone && game.confirms == 0 &&
+                  untouched(game) && !r.stuck && says(said, "không còn ở chỗ cũ"),
+              "a box whose dialog goes away while it is watched: not confirmed -- confirms " +
+                  std::to_string(game.confirms) + ", failed " + std::to_string(r.failed));
+    }
+    {
         PretendBin game = game_with("?");
         const auto r = pass(game);
         check(r.deleted == 0 && r.failed == 1 && !game.gone && game.confirms == 0 &&
@@ -5538,7 +5617,7 @@ void test_bag_dialogs() {
         PretendBin game = game_with("");
         game.stacks = false;
         const auto r = pass(game);
-        check(r.deleted == 1 && game.gone && game.digits == 0,
+        check(r.deleted == 1 && game.gone && untouched(game),
               "an item that does not stack: the question answered Xác Nhận");
     }
     {

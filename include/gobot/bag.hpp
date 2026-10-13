@@ -145,12 +145,13 @@ float alike(const Frame& a, const Frame& b, const BagLayout& l);
 /// Reads numbers in the game's 5 by 8 pixel digits: the stack count in a
 /// slot's corner, and the number in a dialog's quantity box.
 ///
-/// The trash dialog for a stack takes the exact number in it and nothing
-/// else, so this has to be right. The client prints both in the same digits as
-/// everything else, white with a dark outline -- the commercial client's
-/// glyphs for those digits match them pixel for pixel. Measured against real
-/// slots reading 2, 7, 97, 100 and 67, and boxes reading 1 and 2, the 2 with
-/// the box's caret over its last column.
+/// The bin's quantity dialog is confirmed only when the number the game put
+/// in its box reads as the count in the slot's corner, and a deletion cannot
+/// be undone, so both have to be right. The client prints both in the same
+/// digits as everything else, white with a dark outline -- the commercial
+/// client's glyphs for those digits match them pixel for pixel. Measured
+/// against real slots reading 2, 7, 97, 100 and 67, and boxes reading 1 and
+/// 2, the 2 with the box's caret over its last column.
 class CountReader {
 public:
     /// Something white is there that does not read as a number.
@@ -176,7 +177,11 @@ public:
     /// and while it is on it stands over the last column of a digit five
     /// pixels wide. What is under it cannot be seen, so its pixels are left
     /// out of the comparison, neither stroke nor ground; a digit with too much
-    /// of itself under it does not read.
+    /// of itself under it does not read, and then neither does the number.
+    /// White that the digits read leave over, or a digit read where another,
+    /// too much of it under the caret to read, would fit what can be seen as
+    /// well, makes it kUnreadable -- never the digits that did read, as if
+    /// they were the whole number.
     int read_field(const Frame& f, const ScreenRect& area) const;
 
     /// Give a digit its shape directly. For tests.
@@ -185,9 +190,11 @@ public:
 private:
     /// Digits in `area`, left to right, the line starting no lower than
     /// `max_top`: the number, or -1 when none reads. `white` gets how many
-    /// pixels there were white enough to be part of a digit. With `caret`,
-    /// the caret's yellow pixels are unknown rather than ground.
-    int scan(const Frame& f, const ScreenRect& area, int max_top, bool caret, int& white) const;
+    /// pixels there were white enough to be part of a digit, and `stray` how
+    /// many of those lie outside every digit read. With `caret`, the caret's
+    /// yellow pixels are unknown rather than ground.
+    int scan(const Frame& f, const ScreenRect& area, int max_top, bool caret, int& white,
+             int& stray) const;
 
     struct Glyph {
         int w = 0, h = 0;
@@ -439,11 +446,12 @@ bool can_check(const TemplateStore& store, TrashList::Action a);
 ///
 /// Every step is checked against the screen before the next: the bag has to be
 /// found before anything is touched, a dialog has to be the bin's own -- by
-/// its words -- before its button is pressed, the number in a quantity box has
-/// to read as the stack's count, look after look, before it is confirmed, and
-/// an item has to be gone before it counts. Anything unexpected and it backs
-/// out, answering Hủy Bỏ on the bin's dialog so the item goes back to the bag,
-/// rather than pressing on: this is the one feature that destroys things.
+/// its words -- before its button is pressed, the number the game puts in a
+/// quantity box has to read as the stack's count, look after look, before it
+/// is confirmed -- nothing is ever typed there -- and an item has to be gone
+/// before it counts. Anything unexpected and it backs out, answering Hủy Bỏ on
+/// the bin's dialog so the item goes back to the bag, rather than pressing on:
+/// this is the one feature that destroys things.
 class BagCleaner {
 public:
     using Grab = std::function<bool(Frame&)>;
@@ -481,9 +489,10 @@ public:
     /// whole of an item's way into the bin is tried without one. Setting them
     /// also skips the check that the game is in front.
     ///
-    /// No text is typed as such: a count goes into the quantity box as
-    /// presses of the digit keys, through `key`, since the game's box ignores
-    /// text sent as Unicode characters.
+    /// Nothing is ever typed into the bin's quantity box, and it is never
+    /// clicked: the number the game fills it with is the only one confirmed.
+    /// So `key` is only ever the key that opens and closes the bag, pressed
+    /// only on a look at the screen that shows no dialog up.
     struct Hands {
         std::function<bool(int, int)>                click;
         std::function<bool(int, int, int, int)>      drag;
@@ -545,8 +554,10 @@ private:
     bool trash_one(const Frame& f, const BagView& v, int index, int count);
 
     /// Answer the bin's dialog that is up -- the question, or the quantity,
-    /// confirmed only with the stack's count in the box -- and then whatever
-    /// the bin asks next, up to one more. kDone when the last one has closed.
+    /// confirmed only when the number the game put in the box is the stack's
+    /// count -- and then whatever the bin asks next, up to one more. kDone
+    /// when the last one has closed, kFailed on anything else, and then
+    /// trash_one backs out.
     enum { kFailed = 0, kDone = 1 };
     int  answer(const bag::Dialog& first, int count);
 
@@ -574,9 +585,7 @@ private:
     // Through the hands when they are set, else the game's input.
     bool click(int x, int y);
     bool drag(int fx, int fy, int tx, int ty);
-    bool press(std::uint32_t vk, int hold_ms = -1);
-    /// `n` as presses of the digit keys along the top of the keyboard.
-    bool type_number(int n);
+    bool press(std::uint32_t vk);
 
     InputManager&        input_;
     const TemplateStore& store_;

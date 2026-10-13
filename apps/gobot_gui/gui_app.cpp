@@ -906,6 +906,7 @@ void GuiApp::start_bot() {
         set_status("Start capture first", 6000);
         return;
     }
+    if (!keys_may_start()) return;
 
     brain_->update_config(bot_config_);
     executor_->update_config(bot_config_);
@@ -2338,6 +2339,7 @@ void GuiApp::start_macro() {
         set_status("Pick the game window first -- the list is at the top of this tab", 6000);
         return;
     }
+    if (!keys_may_start()) return;
     macro_->set_config(macro_config_);
 
     // Conditional keys are inert without a reading, so bring the reader up
@@ -2995,12 +2997,13 @@ bool GuiApp::stop_trash() {
     // typing potion keys into the dialog's box once the hold is lifted, and
     // the player is told whether or not those were running: DỪNG stops them
     // before it gets here, and BẮT ĐẦU would start them again straight away.
-    // So BẮT ĐẦU looks at the game first; see simple_start.
+    // So nothing that presses keys starts until the game has been looked at;
+    // see keys_may_start.
     if (trash_hold_.exchange(false)) {
-        if (macro_running_ || hunting_) {
-            stop_hunt();
-            stop_macro();
-        }
+        stop_hunt();
+        stop_macro();
+        stop_bot();
+        if (navigator_ && navigator_->running()) navigator_->stop();
         trash_left_held_ = true;
         simple_note("Hộp thoại của thùng rác có thể vẫn đang mở trong game, nên GoBot dừng "
                     "cả đánh quái và bình để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
@@ -3010,6 +3013,43 @@ bool GuiApp::stop_trash() {
         return true;
     }
     return false;
+}
+
+bool GuiApp::keys_may_start() {
+    if (!trash_left_held_) return true;
+
+    // The last stop ended the trash worker's hold while the bin's dialog may
+    // still have been open with an item in it, and that dialog's box takes
+    // the macro's potion keys as numbers -- the hunter's keys go into it as
+    // well. Not until the game is seen with no dialog up and nothing waiting
+    // in the bin. Anything that leaves that in doubt is a no: the screen not
+    // captured, or no pictures to know the bin's dialogs by.
+    const auto refuse = [this](const std::string& why) {
+        simple_note(why, 12000);
+        if (!simple_view_) set_status(why, 12000);
+        GB_WARN("Not started, as the bin's dialog may still be open: %s", why.c_str());
+        return false;
+    };
+    if (!simple_store_loaded_) {
+        simple_store_loaded_ = true;
+        simple_store_.load_best(exe_relative("configs/templates.ini"));
+    }
+    if (!bag::can_check(simple_store_, TrashList::Action::Delete))
+        return refuse("Không có hình giao diện của game, nên không xem được hộp thoại của thùng "
+                      "rác đã đóng chưa.");
+    ScreenCapture capture;
+    Frame frame;
+    if (!input_.window_valid() || !capture.grab(input_.target_window(), frame) || !frame.valid())
+        return refuse("Chưa chụp được màn hình game để xem hộp thoại của thùng rác đã đóng chưa. "
+                      "Để game hiện rõ rồi thử lại.");
+    CleanSettings clean;
+    clean.load(exe_relative("configs/trash.ini"));     // only for where the bin is in the bag
+    if (!bag::nothing_held(frame, simple_store_, clean.layout))
+        return refuse("Trong game vẫn còn một hộp thoại đang mở, hoặc thùng rác vẫn giữ một món "
+                      "đồ. Bấm Hủy Bỏ trong game (thùng rác thì bấm vào nó rồi chọn Hủy Bỏ), "
+                      "rồi thử lại.");
+    trash_left_held_ = false;
+    return true;
 }
 
 bool GuiApp::take_hold(const std::string& reason) {
@@ -4027,7 +4067,7 @@ void GuiApp::draw_movement_section() {
 
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(!have_pos);
-            if (ImGui::SmallButton("Go")) navigator_->go_to(w);
+            if (ImGui::SmallButton("Go") && keys_may_start()) navigator_->go_to(w);
             ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::SmallButton("Forget")) {
@@ -4042,7 +4082,8 @@ void GuiApp::draw_movement_section() {
     // ---- going places ----
     ImGui::Dummy(ImVec2(0, 4));
     ImGui::BeginDisabled(here.size() < 2 || !have_pos);
-    if (ImGui::Button("Patrol these", ImVec2(150, 0))) navigator_->patrol(here);
+    if (ImGui::Button("Patrol these", ImVec2(150, 0)) && keys_may_start())
+        navigator_->patrol(here);
     ImGui::EndDisabled();
     help_marker("Walks back and forth along the saved places, in order. With "
                 "hunting on as well, it fights whatever it meets on the way.");
@@ -4146,6 +4187,7 @@ void GuiApp::start_hunt() {
         set_status("Pick the game window first", 6000);
         return;
     }
+    if (!keys_may_start()) return;
     if (!detector_running_) start_detector();
     if (!detector_running_) return;
 
@@ -4956,7 +4998,8 @@ void GuiApp::draw_calibrate_panel() {
         if (!capture_running_) ImGui::BeginDisabled();
         ImGui::PushStyleColor(ImGuiCol_Button, kGreen);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
-        if (ImGui::Button(calib_ran_ ? "Run again" : "Start calibration", ImVec2(240, 40))) {
+        if (ImGui::Button(calib_ran_ ? "Run again" : "Start calibration", ImVec2(240, 40)) &&
+            keys_may_start()) {
             if (const std::uint32_t vk = InputManager::parse_key(calib_cast_key_))
                 calibrator_->set_cast_key(vk);
 
@@ -6844,9 +6887,17 @@ void GuiApp::draw_status_bar() {
         return;
     }
     ImGui::Separator();
+    // A message in Vietnamese -- the one saying the bin's dialog may still be
+    // open, which the player has to be able to read -- in the face that has
+    // its letters. The built-in one has none of them.
+    const bool vietnamese = text_font_ != nullptr &&
+        std::any_of(status_message_.begin(), status_message_.end(),
+                    [](char c) { return static_cast<unsigned char>(c) >= 0x80; });
+    if (vietnamese) ImGui::PushFont(text_font_, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
     ImGui::TextUnformatted(status_message_.c_str());
     ImGui::PopStyleColor();
+    if (vietnamese) ImGui::PopFont();
 }
 
 } // namespace gobot
