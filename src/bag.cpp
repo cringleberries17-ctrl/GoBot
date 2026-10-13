@@ -515,22 +515,24 @@ int CountReader::read_field(const Frame& f, const ScreenRect& area) const {
 
 namespace {
 
-/// An icon drawn into the middle of an empty slot, the way the bag shows it.
-Frame slot_tile(const Frame& icon) {
+/// An icon drawn into the middle of an empty slot `size` pixels square, the
+/// way the bag shows it. The bag's slots are 34; a wider one leaves room to
+/// search a picture cut from the bag over it.
+Frame slot_tile(const Frame& icon, int size = 34) {
     Frame t;
-    t.width = 34;
-    t.height = 34;
-    t.pixels.assign(34u * 34u * 4u, 255);
+    t.width = size;
+    t.height = size;
+    t.pixels.assign(static_cast<std::size_t>(size) * size * 4, 255);
     for (std::size_t i = 0; i < t.pixels.size(); i += 4)
         t.pixels[i] = t.pixels[i + 1] = t.pixels[i + 2] = 16;
-    const int ox = (34 - icon.width) / 2, oy = (34 - icon.height) / 2;
+    const int ox = (size - icon.width) / 2, oy = (size - icon.height) / 2;
     for (int y = 0; y < icon.height; ++y)
         for (int x = 0; x < icon.width; ++x) {
             const std::size_t s = (static_cast<std::size_t>(y) * icon.width + x) * 4;
             if (icon.pixels[s + 3] < 128) continue;
             const int tx = ox + x, ty = oy + y;
-            if (tx < 0 || ty < 0 || tx >= 34 || ty >= 34) continue;
-            const std::size_t d = (static_cast<std::size_t>(ty) * 34 + tx) * 4;
+            if (tx < 0 || ty < 0 || tx >= size || ty >= size) continue;
+            const std::size_t d = (static_cast<std::size_t>(ty) * size + tx) * 4;
             t.pixels[d] = icon.pixels[s];
             t.pixels[d + 1] = icon.pixels[s + 1];
             t.pixels[d + 2] = icon.pixels[s + 2];
@@ -538,78 +540,52 @@ Frame slot_tile(const Frame& icon) {
     return t;
 }
 
-/// Which of an item's pixels its colour is judged by, and their mean colour.
-/// A photo is the whole slot, and the slot's dark ground is the same under
-/// every item, so only the item's own -- brighter -- pixels are counted.
-void prepare_tone(TrashList::Item& item, bool photo) {
-    const Frame& p = item.picture;
-    item.tone_px.clear();
-    item.tone[0] = item.tone[1] = item.tone[2] = 0.0f;
-    if (!p.valid()) return;
-    std::vector<std::uint16_t> all, lit;
+/// An icon as it is matched: its own transparency, less the corner the count
+/// is printed over. The icon sits about two pixels into the slot, so the
+/// slot's count corner is this much of the icon.
+Frame icon_picture(const ItemCatalog::Entry& e) {
+    Frame p = e.icon;
     for (int y = 0; y < p.height; ++y)
-        for (int x = 0; x < p.width; ++x) {
-            const std::size_t i = (static_cast<std::size_t>(y) * p.width + x) * 4;
-            if (p.pixels[i + 3] < TemplateMatcher::kOpaque) continue;
-            const auto at = static_cast<std::uint16_t>(y * p.width + x);
-            all.push_back(at);
-            if ((p.pixels[i] + p.pixels[i + 1] + p.pixels[i + 2]) / 3 > 48) lit.push_back(at);
-        }
-    item.tone_px = photo && lit.size() >= 30 ? std::move(lit) : std::move(all);
-    double sum[3] = { 0, 0, 0 };
-    for (const std::uint16_t at : item.tone_px) {
-        const std::size_t i = static_cast<std::size_t>(at) * 4;
-        sum[0] += p.pixels[i + 2];
-        sum[1] += p.pixels[i + 1];
-        sum[2] += p.pixels[i];
-    }
-    if (!item.tone_px.empty())
-        for (int c = 0; c < 3; ++c)
-            item.tone[c] = static_cast<float>(sum[c] / static_cast<double>(item.tone_px.size()));
+        for (int x = 0; x < p.width; ++x)
+            if (x < 20 && y < 11) p.pixels[(static_cast<std::size_t>(y) * p.width + x) * 4 + 3] = 0;
+    return p;
 }
 
-/// How far the colour of `f` under the item's pixels, with the picture placed
-/// at (x, y), is from the item's own: the worst of the three channels, in
-/// levels of 255.
-int tone_off(const Frame& f, int x, int y, const TrashList::Item& item) {
-    if (item.tone_px.empty() || !item.picture.valid()) return 0;
-    double sum[3] = { 0, 0, 0 };
-    const int w = item.picture.width;
-    for (const std::uint16_t at : item.tone_px) {
-        std::uint8_t r, g, b;
-        f.get(x + at % w, y + at / w, r, g, b);
-        sum[0] += r;
-        sum[1] += g;
-        sum[2] += b;
-    }
-    const double n = static_cast<double>(item.tone_px.size());
-    int worst = 0;
-    for (int c = 0; c < 3; ++c)
-        worst = std::max(worst, static_cast<int>(std::lround(std::abs(sum[c] / n - item.tone[c]))));
-    return worst;
-}
-
-/// A catalog icon as a list item: its own transparency, less the corner the
-/// count is printed over. The icon sits about two pixels into the slot, so
-/// the slot's count corner is this much of the icon.
-TrashList::Item catalog_item(const ItemCatalog::Entry& e, TrashList::Action a, float min_score,
-                             int tolerance) {
+/// A catalog icon as a list item.
+TrashList::Item catalog_item(const ItemCatalog::Entry& e, TrashList::Action a, float min_score) {
     TrashList::Item item;
     item.id = e.id;
     item.action = a;
     item.min_score = min_score;
-    item.tolerance = tolerance;
-    item.picture = e.icon;
-    for (int y = 0; y < item.picture.height; ++y)
-        for (int x = 0; x < item.picture.width; ++x)
-            if (x < 20 && y < 11)
-                item.picture.pixels[(static_cast<std::size_t>(y) * item.picture.width + x) * 4 + 3] = 0;
+    item.picture = icon_picture(e);
     item.shown = e.tile.valid() ? e.tile : slot_tile(e.icon);
-    prepare_tone(item, false);
     return item;
 }
 
-bool is_fragment(const std::string& id) { return id.rfind("spend/fragment/", 0) == 0; }
+/// How alike the drawing `tpl` is to the best place for it in `in`, colour
+/// left out: the two correlated in grey, over `tpl`'s opaque pixels. -1 when
+/// it does not fit or nothing is alike at all.
+float drawn_like(const Frame& in, const Frame& tpl) {
+    if (!in.valid() || !tpl.valid() || in.width < tpl.width || in.height < tpl.height)
+        return -1.0f;
+    const auto m = TemplateMatcher::find(in, ScreenRect{ 0, 0, in.width, in.height }, tpl, -1.0f,
+                                         TemplateMatcher::Tone::Grey);
+    return m.found ? m.score : -1.0f;
+}
+
+/// Two pictures are one drawing when each is found in the other: one way
+/// only is a drawing that holds the other -- a bag with a potion beside it
+/// holds the same bag alone -- and those are two items.
+bool one_drawing(const Frame& a, const Frame& a_in, const Frame& b, const Frame& b_in) {
+    return drawn_like(b_in, a) >= TrashList::kSameDrawing &&
+           drawn_like(a_in, b) >= TrashList::kSameDrawing;
+}
+
+bool listed(const std::vector<TrashList::Item>& items, const std::string& id) {
+    for (const TrashList::Item& it : items)
+        if (it.id == id) return true;
+    return false;
+}
 
 } // namespace
 
@@ -672,22 +648,15 @@ std::size_t ItemCatalog::size() const {
     return n;
 }
 
-std::vector<std::string> ItemCatalog::twins(const std::string& id) const {
+std::vector<std::string> ItemCatalog::same_drawing(const std::string& id) const {
     std::vector<std::string> out;
     const Entry* me = find(id);
-    if (me == nullptr) return out;
-    const TrashList::Item probe = catalog_item(*me, TrashList::Action::Delete, 0.0f,
-                                               TrashList::kTone);
+    if (me == nullptr || !me->tile.valid()) return out;
+    const Frame mine = icon_picture(*me);
     for (const Group& g : groups)
-        for (const Entry& e : g.entries) {
-            if (e.id == id || !e.tile.valid() || e.tile.width < probe.picture.width ||
-                e.tile.height < probe.picture.height)
-                continue;
-            const auto m = TemplateMatcher::find(e.tile, ScreenRect{ 0, 0, e.tile.width, e.tile.height },
-                                                 probe.picture, 0.99f,
-                                                 TemplateMatcher::Tone::Colour);
-            if (m.found && tone_off(e.tile, m.at.x, m.at.y, probe) <= 3) out.push_back(e.id);
-        }
+        for (const Entry& e : g.entries)
+            if (e.id != id && e.tile.valid() && one_drawing(mine, me->tile, icon_picture(e), e.tile))
+                out.push_back(e.id);
     return out;
 }
 
@@ -702,11 +671,13 @@ bool CleanSettings::load(const std::string& path) {
     const char* const kTabKeys[kBagTabs] = { "tab_equip1", "tab_equip2", "tab_use",
                                              "tab_other", "tab_pet" };
     for (int i = 0; i < kBagTabs; ++i) tabs[i] = ini.get_bool("Trash", kTabKeys[i], tabs[i]);
-    min_score        = std::clamp(ini.get_float("Trash", "min_score", min_score), 0.70f, 0.99f);
+    // Not below 0.85: in grey, two different fragments score up to 0.74 on a
+    // real slot and two different potions 0.81, and a hand-edited 0.70 would
+    // let those through wherever the catalog has nothing better to say.
+    min_score        = std::clamp(ini.get_float("Trash", "min_score", min_score), 0.85f, 0.99f);
     max_per_run      = std::clamp(ini.get_int("Trash", "max_per_run", max_per_run), 1, 500);
     click_to_move    = ini.get_bool("Trash", "click_to_move", click_to_move);
-    catalog_score    = std::clamp(ini.get_float("Trash", "catalog_score", catalog_score), 0.70f, 0.99f);
-    fragments_loose  = ini.get_bool("Trash", "fragments_loose", fragments_loose);
+    catalog_score    = std::clamp(ini.get_float("Trash", "catalog_score", catalog_score), 0.85f, 0.99f);
 
     const auto ids = [&](const char* key) {
         std::vector<std::string> out;
@@ -753,7 +724,6 @@ bool TrashList::load(const std::string& dir, const BagLayout& l) {
             for (std::size_t i = 3; i < item.shown.pixels.size(); i += 4)
                 item.shown.pixels[i] = 255;
             item.picture = bag::masked(item.shown, l);
-            prepare_tone(item, true);
             items.push_back(std::move(item));
         }
     }
@@ -781,7 +751,6 @@ std::string TrashList::add(const std::string& dir, const Frame& cut, Action a,
     item.action = a;
     item.shown = cut;
     item.picture = bag::masked(cut, l);
-    prepare_tone(item, true);
     items.push_back(std::move(item));
     return path;
 }
@@ -791,16 +760,36 @@ void TrashList::add_picture(const Frame& cut, Action a, const BagLayout& l) {
     item.action = a;
     item.shown = cut;
     item.picture = bag::masked(cut, l);
-    prepare_tone(item, true);
     items.push_back(std::move(item));
 }
 
 void TrashList::add_catalog(const ItemCatalog& catalog, const std::vector<std::string>& ids,
-                            Action a, float min_score, int tolerance) {
+                            Action a, float min_score) {
+    const std::size_t first = items.size();
     for (const std::string& id : ids) {
         const ItemCatalog::Entry* e = catalog.find(id);
-        if (e == nullptr) continue;
-        items.push_back(catalog_item(*e, a, min_score, tolerance));
+        if (e == nullptr || listed(items, id)) continue;
+        Item item = catalog_item(*e, a, min_score);
+        item.kin = catalog.same_drawing(id);
+        item.kin.push_back(id);
+        items.push_back(std::move(item));
+    }
+    // The same drawing in other colours goes too, each as an item of its own:
+    // its own icon is what matches it best, and the screen can say which
+    // chosen icon brought it. Held to that one's group, so a drawing that is
+    // only like one of these, and not like what was chosen, is a rival still.
+    const std::size_t chosen = items.size();
+    for (std::size_t i = first; i < chosen; ++i) {
+        const std::vector<std::string> group = items[i].kin;
+        const std::string via = items[i].id;
+        for (const std::string& id : group) {
+            const ItemCatalog::Entry* e = catalog.find(id);
+            if (e == nullptr || listed(items, id)) continue;
+            Item item = catalog_item(*e, a, min_score);
+            item.kin = group;
+            item.via = via;
+            items.push_back(std::move(item));
+        }
     }
 }
 
@@ -808,38 +797,30 @@ void TrashList::add_rivals(const ItemCatalog& catalog) {
     rivals.clear();
     for (const ItemCatalog::Group& g : catalog.groups)
         for (const ItemCatalog::Entry& e : g.entries) {
-            bool chosen = false;
-            for (const Item& it : items)
-                if (it.id == e.id) { chosen = true; break; }
-            if (chosen) continue;
+            if (!listed(items, e.id)) rivals.push_back(catalog_item(e, Action::Delete, 0.0f));
 
-            Item rival = catalog_item(e, Action::Delete, 0.0f, kTone);
-            // A picture cut from the bag may be of this very item, and then
-            // the icon is what was chosen rather than something to tell it
-            // from: otherwise the two would tie on every slot holding it, and
-            // it would never be thrown away.
-            for (const Item& it : items) {
-                if (!it.id.empty() || !it.shown.valid() || it.shown.width < rival.picture.width ||
-                    it.shown.height < rival.picture.height)
-                    continue;
-                const auto m = TemplateMatcher::find(
-                    it.shown, ScreenRect{ 0, 0, it.shown.width, it.shown.height }, rival.picture,
-                    0.95f, TemplateMatcher::Tone::Colour);
-                if (m.found && tone_off(it.shown, m.at.x, m.at.y, rival) <= kTone) {
-                    chosen = true;
-                    break;
-                }
+            // A picture cut from the bag may be of this very item, or of its
+            // drawing in another colour -- a red piece, where the icon is
+            // gold. Then the icon is the same thing as what was chosen rather
+            // than something to tell it from: as a rival it would tie on
+            // every slot holding it, and nothing would be thrown away.
+            // The picture is a whole slot, so the icon is drawn on a wider
+            // one for the picture to be searched over.
+            const Frame icon = icon_picture(e);
+            const Frame wide = slot_tile(e.icon, 40);
+            for (Item& it : items) {
+                if (!it.id.empty() || !it.shown.valid()) continue;
+                if (one_drawing(icon, wide, it.picture, it.shown) &&
+                    std::find(it.kin.begin(), it.kin.end(), e.id) == it.kin.end())
+                    it.kin.push_back(e.id);
             }
-            if (!chosen) rivals.push_back(std::move(rival));
         }
 }
 
 void TrashList::build(const std::string& dir, const CleanSettings& s, const ItemCatalog& catalog) {
     load(dir, s.layout);
-    for (const Action a : { Action::Delete, Action::Drop })
-        for (const std::string& id : a == Action::Delete ? s.delete_ids : s.drop_ids)
-            add_catalog(catalog, { id }, a, s.catalog_score,
-                        s.fragments_loose && is_fragment(id) ? kLooseTone : kTone);
+    add_catalog(catalog, s.delete_ids, Action::Delete, s.catalog_score);
+    add_catalog(catalog, s.drop_ids, Action::Drop, s.catalog_score);
     add_rivals(catalog);
 }
 
@@ -855,50 +836,45 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
     Verdict v;
     const ScreenRect area = clamp_to(f, ScreenRect{ slot.x - 3, slot.y - 3,
                                                     slot.w + 6, slot.h + 6 });
+    // The drawing alone, in grey. Measured on every real frame, the right
+    // icon scores 0.952 or more on its item in any colour the bag draws it --
+    // gold, orange, the red of GoC's own pictures -- the best other drawing
+    // 0.81 at most, and the enlarged copy a slot shows while its item waits
+    // in the bin 0.79 at most.
     for (std::size_t i = 0; i < items.size(); ++i) {
         const Item& item = items[i];
         const Frame& p = item.picture;
         if (!p.valid() || area.w < p.width || area.h < p.height) continue;
         const float need = item.min_score > 0.0f ? item.min_score : min_score;
-        const auto m = TemplateMatcher::find(f, area, p, need, TemplateMatcher::Tone::Colour);
-        if (!m.found) continue;
-        const int off = tone_off(f, m.at.x, m.at.y, item);
-        if (off <= item.tolerance) {
-            if (m.score > v.score) {
-                v.item = static_cast<int>(i);
-                v.score = m.score;
-            }
-        } else if (m.score > v.like_score) {
-            v.like = static_cast<int>(i);
-            v.like_score = m.score;
-            v.tone_off = off;
+        const auto m = TemplateMatcher::find(f, area, p, need, TemplateMatcher::Tone::Grey);
+        if (m.found && m.score > v.score) {
+            v.item = static_cast<int>(i);
+            v.score = m.score;
         }
     }
-    if (v.item < 0) {
-        if (v.like >= 0) v.doubt = Verdict::Doubt::Colour;
-        return v;
-    }
+    if (v.item < 0) return v;
 
-    // Something not on the list that looks as much like the slot is as good
-    // an answer, and the slot is left alone. That is how the same drawing in
-    // another colour is told apart when its colour is close -- and the two
-    // ids that are one picture are both chosen or neither is thrown away.
+    // Something not on the list, drawn differently, that looks as much like
+    // the slot is as good an answer, and the slot is left alone: a bag with a
+    // potion beside it is not the same bag alone. The same drawing in another
+    // colour is not a rival -- by the player's rule it is the same thing.
+    const Item& won = items[static_cast<std::size_t>(v.item)];
     for (const Item& rival : rivals) {
+        if (std::find(won.kin.begin(), won.kin.end(), rival.id) != won.kin.end()) continue;
         const Frame& p = rival.picture;
         if (!p.valid() || area.w < p.width || area.h < p.height) continue;
         const auto m = TemplateMatcher::find(f, area, p, v.score - kRivalMargin,
-                                             TemplateMatcher::Tone::Colour);
-        if (!m.found || tone_off(f, m.at.x, m.at.y, rival) > rival.tolerance) continue;
+                                             TemplateMatcher::Tone::Grey);
+        if (!m.found) continue;
         v.doubt = Verdict::Doubt::Rival;
         v.like = v.item;
         v.like_score = v.score;
         v.rival = rival.id;
+        v.rival_score = m.score;
         v.item = -1;
         v.score = 0.0f;
         return v;
     }
-    v.like = -1;
-    v.like_score = 0.0f;
     return v;
 }
 
@@ -978,6 +954,21 @@ std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store) {
     return out;
 }
 
+bool bin_asking(const Frame& f, const TemplateStore& store) {
+    for (const Dialog& d : find_dialogs(f, store))
+        if (d.ours()) return true;
+    return false;
+}
+
+bool nothing_held(const Frame& f, const TemplateStore& store, const BagLayout& l) {
+    if (!f.valid()) return false;
+    // Any dialog at all: one of the bin's whose words did not match is still
+    // the bin's, and holds the item.
+    if (!find_dialogs(f, store).empty()) return false;
+    const BagView v = find(f, store, l);
+    return !v.found || v.bin_empty;
+}
+
 bool can_check(const TemplateStore& store, TrashList::Action a) {
     if (store.get(kConfirm) == nullptr) return false;
     if (a == TrashList::Action::Drop) return false;      // see the header
@@ -994,7 +985,9 @@ namespace {
 
 /// What the list calls an item, for the screen.
 std::string item_name(const TrashList::Item& item) {
-    return item.id.empty() ? std::string("hình đã chụp") : item.id;
+    if (item.id.empty()) return "hình đã chụp";
+    if (!item.via.empty()) return item.id + " (cùng hình với " + item.via + ")";
+    return item.id;
 }
 
 } // namespace
@@ -1054,7 +1047,16 @@ bool BagCleaner::press(std::uint32_t vk, int hold_ms) {
 }
 
 bool BagCleaner::type(const std::string& text) {
-    return hands_.type ? hands_.type(text) : input_.type_text(text);
+    if (hands_.type) return hands_.type(text);
+    // Typing goes to whatever has the keyboard, and the game's own input does
+    // not check which: a player who clicked GoBot a moment ago would get the
+    // count in one of its boxes. The box is read back before Xác Nhận, so a
+    // count that went nowhere is a dialog said no to, not a guess.
+    if (!input_.window_focused()) {
+        say("cửa sổ game không ở trên cùng, nên không gõ số lượng");
+        return false;
+    }
+    return input_.type_text(text);
 }
 
 bool BagCleaner::grab_view(Frame& f, BagView& v) {
@@ -1067,13 +1069,13 @@ bool BagCleaner::clean(const Frame& f, const BagView& v) {
     return v.found && v.bin_empty && bag::find_dialogs(f, store_).empty();
 }
 
-bool BagCleaner::mouse_ok(int x, int y) {
+bool BagCleaner::mouse_ok(int x, int y, bool need_front) {
     if (skip_focus_check_) return true;
     // A click aimed at the game lands on whatever is on top at that point,
     // and the frames come from PrintWindow, which shows the game even when it
     // is covered. A pass that went on with GoBot over the bag would drag
     // items about in GoBot's own window.
-    if (!input_.window_focused()) {
+    if (need_front && !input_.window_focused()) {
         say("cửa sổ game không ở trên cùng, nên không dùng chuột");
         return false;
     }
@@ -1086,6 +1088,12 @@ bool BagCleaner::mouse_ok(int x, int y) {
         return false;
     }
     return true;
+}
+
+void BagCleaner::bring_forward() {
+    if (skip_focus_check_ || input_.window_focused()) return;
+    input_.focus_window();
+    pause_ms(150);
 }
 
 void BagCleaner::scroll_to_top(BagView& v) {
@@ -1123,11 +1131,38 @@ BagCleaner::Result BagCleaner::run() {
         return res;
     }
     if (cancelled_) return res;          // stopped before it began
+    item_out_ = false;
 
     Frame f;
     BagView v;
     bool opened_here = false;
-    if (!grab_view(f, v)) {
+    if (!grab_view(f, v) && f.valid() && !bag::find_dialogs(f, store_).empty()) {
+        // A dialog up with the bag out of sight: the key that opens the bag
+        // would go to the dialog -- into a quantity box, say. The bin's own is
+        // said no to first; anything else is left alone.
+        bool ours = false;
+        for (const bag::Dialog& d : bag::find_dialogs(f, store_)) ours = ours || d.ours();
+        if (dry_run_ || !ours) {
+            res.trouble = "có một hộp thoại đang mở; đóng nó trong game rồi thử lại";
+            return res;
+        }
+        back_out();                  // ends on the bag not being found, even when it worked
+        if (!grab_ || !grab_(f) || !f.valid() || !bag::find_dialogs(f, store_).empty()) {
+            res.trouble = stuck_.empty()
+                ? std::string("hộp thoại của thùng rác đang mở, và không trả lại được")
+                : stuck_;
+            res.stuck = item_out_ || !f.valid() || bag::bin_asking(f, store_);
+            return res;
+        }
+        item_out_ = false;
+        grab_view(f, v);
+    }
+    if (!f.valid()) {
+        // Not even a look at the screen: no key is pressed blind.
+        res.trouble = "không chụp được màn hình game";
+        return res;
+    }
+    if (!v.found) {
         press(settings_.bag_key);
         opened_here = true;
         for (int i = 0; i < 12 && !v.found; ++i) {
@@ -1176,6 +1211,7 @@ BagCleaner::Result BagCleaner::run() {
             res.trouble = stuck_.empty() ? std::string("thùng rác đang có đồ chờ xoá hoặc có "
                                                        "hộp thoại đang mở, và không trả lại được")
                                          : stuck_;
+            res.stuck = item_out_;
             close_bag();
             return res;
         }
@@ -1209,7 +1245,17 @@ BagCleaner::Result BagCleaner::run() {
                 stop = true;
                 break;
             }
-            if (!dry_run_ && !clean(f, v)) {
+            // Never a slot judged while the bin holds something or a dialog
+            // is up: the slot an item was dragged from shows an enlarged copy
+            // of it until it is gone or given back, and that copy is no item
+            // to drag. Looking only says what is in the way and stops.
+            if (!clean(f, v)) {
+                if (dry_run_) {
+                    res.trouble = "thùng rác đang có đồ chờ xoá hoặc có hộp thoại đang mở; "
+                                  "xong việc đó trong game rồi thử lại";
+                    stop = true;
+                    break;
+                }
                 if (!back_out()) {
                     res.trouble = stuck_.empty()
                         ? std::string("thùng rác đang có đồ chờ xoá hoặc có hộp thoại đang mở, "
@@ -1251,32 +1297,26 @@ BagCleaner::Result BagCleaner::run() {
                     seen.insert(key);
                     ++res.doubtful;
                     const TrashList::Item& like = trash_->items[static_cast<std::size_t>(k.like)];
-                    if (k.doubt == TrashList::Verdict::Doubt::Rival) {
-                        say(std::string("thấy món ở ") + where + " giống " + item_name(like) +
-                            " nhưng cũng giống " + k.rival +
-                            " (không có trong danh sách), nên không bỏ");
-                    } else {
-                        std::string why = std::string("thấy món ở ") + where + " giống " +
-                                          item_name(like) + " nhưng khác màu (lệch " +
-                                          std::to_string(k.tone_off) + "), nên không bỏ";
-                        if (is_fragment(like.id) && like.tolerance < TrashList::kLooseTone &&
-                            k.tone_off <= TrashList::kLooseTone)
-                            why += "; mảnh ghép trong túi đổi màu liên tục: bật \"Bỏ mảnh ghép "
-                                   "cả khi màu hơi khác\" nếu muốn bỏ";
-                        else if (k.tone_off > TrashList::kLooseTone)
-                            why += "; có thể là món khác: nếu đúng là món cần bỏ, chụp nó ở "
-                                   "mục Món khác, chụp từ túi đồ";
-                        say(why);
-                    }
+                    char scores[64];
+                    std::snprintf(scores, sizeof scores, " (%.0f%% và %.0f%%)",
+                                  static_cast<double>(k.like_score) * 100.0,
+                                  static_cast<double>(k.rival_score) * 100.0);
+                    say(std::string("thấy món ở ") + where + " giống " + item_name(like) +
+                        " nhưng cũng giống " + k.rival + scores +
+                        ", là món khác hình không có trong danh sách, nên không bỏ");
                     continue;
                 }
 
                 seen.insert(key);
                 const TrashList::Item& item = trash_->items[static_cast<std::size_t>(k.item)];
                 ++res.matched;
-                char score[24];
-                std::snprintf(score, sizeof score, " (giống %.0f%%)",
-                              static_cast<double>(k.score) * 100.0);
+                char percent[24];
+                std::snprintf(percent, sizeof percent, "%.0f%%", static_cast<double>(k.score) * 100.0);
+                // Which listed item, when it is one that came along with a
+                // chosen icon for being drawn the same.
+                const std::string score = " (giống " + std::string(percent) +
+                                          (item.via.empty() ? std::string()
+                                                            : ", " + item_name(item)) + ")";
                 if (dry_run_) {
                     if (item.action == TrashList::Action::Delete)
                         say(std::string("thấy đồ bỏ đi ở ") + where + score);
@@ -1339,21 +1379,34 @@ BagCleaner::Result BagCleaner::run() {
     }
 
     // A stop that came in the middle of an item has given it back already;
-    // this is for anything else it left behind.
-    if (cancelled_ && !dry_run_) back_out();
+    // this is for anything else it left behind. When even this cannot click
+    // -- the game covered where the button is -- whoever ran the pass is told,
+    // so the macro is kept off a box that would take its keys as numbers.
+    if (cancelled_ && !dry_run_ && !back_out() && res.trouble.empty())
+        res.trouble = stuck_.empty() ? std::string("dừng giữa chừng, và không trả lại được món "
+                                                   "đồ trong thùng rác")
+                                     : stuck_;
+    res.stuck = item_out_;
     close_bag();
     return res;
 }
 
 bool BagCleaner::back_out() {
     stuck_.clear();
+    // The game to the front first. A stop is mostly pressed in GoBot's own
+    // window -- unticking "Tự dọn rác", DỪNG, closing it -- or in a console,
+    // and the answer has to reach the game all the same. From here on a click
+    // only needs the game on top where it lands.
+    bring_forward();
     for (int attempt = 0; attempt < 5; ++attempt) {
         Frame f;
-        BagView v;
-        if (!grab_view(f, v)) {
-            stuck_ = "mất dấu túi đồ";
+        if (!grab_ || !grab_(f) || !f.valid()) {
+            stuck_ = "không chụp được màn hình game";
             return false;
         }
+        // The dialogs first, whether or not the bag is to be seen: the bin's
+        // quantity dialog sits over the bag and is answered without it.
+        const BagView v = bag::find(f, store_, settings_.layout);
         const auto dialogs = bag::find_dialogs(f, store_);
         bool ours = false;
         bag::Dialog d;
@@ -1362,10 +1415,15 @@ bool BagCleaner::back_out() {
 
         if (ours) {
             // Hủy Bỏ, the right half of the pair: the item goes back.
-            if (!mouse_ok(d.cancel_x(), d.y())) {
+            if (!mouse_ok(d.cancel_x(), d.y(), false)) {
                 stuck_ = "hộp thoại của thùng rác đang mở mà không bấm được Hủy Bỏ";
+                item_out_ = true;
+                say(stuck_);
+                keep(f, "cancel_blocked");
                 return false;
             }
+            say(std::string("bấm Hủy Bỏ trên hộp thoại ") + bag::dialog_name(d.kind) +
+                ", để món đồ về lại túi");
             click(d.cancel_x(), d.y());
             for (int i = 0; i < 12; ++i) {
                 pause_ms(150);
@@ -1379,20 +1437,29 @@ bool BagCleaner::back_out() {
             continue;
         }
         if (!dialogs.empty()) {
-            // Not the bin's: the revive question, an invitation, a shop. Not
-            // answered, whatever it is.
+            // Not the bin's: the revive question, an invitation, a shop -- or
+            // the bin's question in words that did not match, which is why an
+            // item sent towards the bin this pass stays counted as out.
+            // Not answered, whatever it is.
             stuck_ = "có một hộp thoại khác đang mở, nên không bấm gì";
             say(stuck_);
             keep(f, "other_dialog");
             return false;
         }
+        if (!v.found) {
+            stuck_ = "mất dấu túi đồ";
+            return false;
+        }
         if (!v.bin_empty) {
             // Something waits in the bin: clicking it brings up its dialog,
             // and Hủy Bỏ there is how it goes back.
-            if (!mouse_ok(v.trash.cx(), v.trash.cy())) {
+            if (!mouse_ok(v.trash.cx(), v.trash.cy(), false)) {
                 stuck_ = "thùng rác đang có đồ chờ xoá mà không bấm được vào thùng rác";
+                item_out_ = true;
+                say(stuck_);
                 return false;
             }
+            say("bấm vào thùng rác, để lấy lại món đồ đang chờ xoá");
             click(v.trash.cx(), v.trash.cy());
             bool up = false;
             for (int i = 0; i < 12 && !up; ++i) {
@@ -1403,19 +1470,24 @@ bool BagCleaner::back_out() {
             }
             if (!up) {
                 stuck_ = "thùng rác đang có đồ chờ xoá, và bấm vào thì không thấy hộp thoại";
+                item_out_ = true;
                 say(stuck_);
                 keep(f, "bin_stuck");
                 return false;
             }
             continue;
         }
+        item_out_ = false;
         return true;
     }
     Frame f;
     BagView v;
     const bool ok = grab_view(f, v) && clean(f, v);
-    if (!ok) {
+    if (ok) {
+        item_out_ = false;
+    } else {
         stuck_ = "thùng rác vẫn chưa trả lại món đồ";
+        item_out_ = true;
         say(stuck_);
         keep(f, "bin_stuck");
     }
@@ -1486,8 +1558,9 @@ int BagCleaner::answer(const bag::Dialog& first, int count) {
             }
         }
 
-        // Xác Nhận, the left half of the pair.
-        if (!mouse_ok(d.confirm_x(), d.y())) return kFailed;
+        // Xác Nhận, the left half of the pair -- unless a stop came in the
+        // meantime, which gives the item back instead of deleting it.
+        if (cancelled_ || !mouse_ok(d.confirm_x(), d.y())) return kFailed;
         click(d.confirm_x(), d.y());
 
         // Gone from where it was -- or replaced there by the bin's other
@@ -1518,9 +1591,12 @@ int BagCleaner::answer(const bag::Dialog& first, int count) {
 
         // A refusal is a message with only Xác Nhận under it. Its picture has
         // no words, so it is not answered: what it says is the player's to
-        // read.
+        // read. Only taken for one when no dialog with both buttons is up --
+        // the wordless picture matches the bin's own question at 0.84, and
+        // that question is the next step, not a refusal.
         if (const Frame* notice = store_.get(kNotice)) {
-            if (TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f)
+            if (bag::find_dialogs(f, store_).empty() &&
+                TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f)
                     .found) {
                 say("game không nhận và hiện một thông báo; để nguyên cho người chơi đọc");
                 keep(f, "refused");
@@ -1551,8 +1627,9 @@ bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int coun
     const Frame before = bag::cut(f, s);
 
     // 1. Onto the bin. It takes the item and waits, showing it where the can
-    //    was, and leaves a faded copy in the slot.
+    //    was, and leaves an enlarged copy in the slot.
     if (!mouse_ok(s.cx(), s.cy()) || !mouse_ok(v.trash.cx(), v.trash.cy())) return false;
+    item_out_ = true;                // until it is seen gone, or given back
     bool moved = false;
     if (settings_.click_to_move)
         moved = click(s.cx(), s.cy()) && wait_ms(220) &&
@@ -1618,6 +1695,9 @@ bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int coun
         back_out();
         return false;
     }
+    // Nothing of it in the bin or in a dialog any more: gone, or back in the
+    // bag, which is all the rest of this tells apart.
+    if (bag::find_dialogs(g, store_).empty()) item_out_ = false;
     if (v.scroll_known() && w.scroll_known() && w.first_row != v.first_row) {
         say("trang túi đồ đã đổi, nên không biết món đồ còn hay không");
         return false;

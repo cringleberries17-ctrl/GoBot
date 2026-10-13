@@ -1526,7 +1526,9 @@ void GuiApp::simple_trash_tab() {
         hint("Không tìm thấy hình các món đồ của game.");
     } else {
         hint("Bấm vào món muốn bỏ. Viền đỏ: bỏ vào thùng rác, mất hẳn. Viền vàng: vứt xuống "
-             "đất. Không cần món đó đang có trong túi.");
+             "đất. Không cần món đó đang có trong túi. Món được nhận theo hình vẽ, không theo "
+             "màu: mảnh ghép trong túi đổi màu liên tục, và món cùng hình khác màu (viền đỏ "
+             "mảnh) cũng bị xoá theo.");
         for (const auto& group : simple_catalog_.groups) {
             ImGui::PushFont(nullptr, kSmall);
             ImGui::PushStyleColor(ImGuiCol_Text, kDim);
@@ -1549,19 +1551,66 @@ void GuiApp::simple_trash_tab() {
                 const bool drop = std::find(simple_clean_.drop_ids.begin(),
                                             simple_clean_.drop_ids.end(), e.id) !=
                                   simple_clean_.drop_ids.end();
+                // On the list without being ticked: drawn like a ticked one.
+                std::string via;
+                for (const auto& item : simple_trash_.items)
+                    if (item.id == e.id && !item.via.empty() &&
+                        item.action == TrashList::Action::Delete)
+                        via = item.via;
                 const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
                 if (del)       ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 3.0f);
                 else if (drop) ImGui::GetWindowDrawList()->AddRect(a, b, kDropMark, 0, 0, 3.0f);
+                else if (!via.empty())
+                    ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 1.0f);
                 else if (ImGui::IsItemHovered())
                     ImGui::GetWindowDrawList()->AddRect(a, b, ImGui::GetColorU32(kDim), 0, 0, 1.0f);
-                ImGui::SetItemTooltip("%s", del  ? "Sẽ bỏ vào thùng rác. Bấm để đổi."
-                                          : drop ? "Sẽ vứt xuống đất. Bấm để đổi."
-                                                 : "Bấm để chọn bỏ món này.");
+                if (!del && !drop && !via.empty())
+                    ImGui::SetItemTooltip("Cũng sẽ bị xoá: cùng hình với %s, khác màu. Bấm để xem.",
+                                          via.c_str());
+                else
+                    ImGui::SetItemTooltip("%s", del  ? "Sẽ bỏ vào thùng rác. Bấm để đổi."
+                                              : drop ? "Sẽ vứt xuống đất. Bấm để đổi."
+                                                     : "Bấm để chọn bỏ món này.");
                 if (ImGui::IsItemClicked()) {
                     simple_pick_id_ = e.id;
+                    // Worked out once, when the menu opens: the menu shows
+                    // them before anything is ticked.
+                    simple_pick_kin_ = simple_catalog_.same_drawing(e.id);
                     ImGui::OpenPopup("##catpick");
                 }
                 if (ImGui::BeginPopup("##catpick")) {
+                    // The same drawing in other colours goes with it, by the
+                    // player's rule: shown here, before anything is ticked.
+                    std::string kin;
+                    for (const std::string& id : simple_pick_kin_)
+                        kin += (kin.empty() ? "" : ", ") + id;
+                    // A popup sizes itself to what is in it, so the lines
+                    // are given a width to wrap at.
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 330.0f);
+                    if (!del && !drop && !via.empty()) {
+                        ImGui::PushFont(nullptr, kSmall);
+                        coloured(kWait, ("Món này cũng bị xoá, vì cùng hình với " + via +
+                                         ". Muốn giữ nó thì bỏ chọn món đó.").c_str());
+                        ImGui::PopFont();
+                        ImGui::Separator();
+                    }
+                    if (!simple_pick_kin_.empty()) {
+                        ImGui::PushFont(nullptr, kSmall);
+                        coloured(kWait, "Chọn món này thì cũng xoá luôn các món cùng hình, "
+                                        "khác màu:");
+                        ImGui::PopFont();
+                        for (std::size_t k = 0; k < simple_pick_kin_.size(); ++k) {
+                            const ItemCatalog::Entry* same = simple_catalog_.find(simple_pick_kin_[k]);
+                            if (same == nullptr) continue;
+                            if (k > 0) ImGui::SameLine(0, 4);
+                            ImGui::PushID(static_cast<int>(k));
+                            draw_frame_region(same->tile, 0, 0, same->tile.width,
+                                              same->tile.height, 1.0f, "##kin");
+                            ImGui::SetItemTooltip("%s", same->id.c_str());
+                            ImGui::PopID();
+                        }
+                        ImGui::Separator();
+                    }
                     const auto set = [&](int how) {     // 0 keep, 1 delete, 2 drop
                         auto& d = simple_clean_.delete_ids;
                         auto& p = simple_clean_.drop_ids;
@@ -1571,21 +1620,8 @@ void GuiApp::simple_trash_tab() {
                         if (how == 2) p.push_back(simple_pick_id_);
                         simple_save_ids();
                         simple_reload_trash();
-                        // A few ids are one picture. A slot holding either is
-                        // both, and is left alone unless both are chosen: said
-                        // now, rather than found out as an item that is never
-                        // thrown away.
-                        if (how != 0) {
-                            const auto& chosen = how == 1 ? d : p;
-                            std::string missing;
-                            for (const std::string& twin : simple_catalog_.twins(simple_pick_id_))
-                                if (std::find(chosen.begin(), chosen.end(), twin) == chosen.end())
-                                    missing += (missing.empty() ? "" : ", ") + twin;
-                            if (!missing.empty())
-                                simple_note("Món này giống hệt " + missing +
-                                            ". GoBot không phân biệt được, nên chỉ bỏ khi chọn "
-                                            "cả các món đó.", 12000);
-                        }
+                        if (how == 1 && !kin.empty())
+                            simple_note("Cũng sẽ xoá: " + kin + " (cùng hình, khác màu).", 12000);
                         ImGui::CloseCurrentPopup();
                     };
                     if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)", del)) set(1);
@@ -1596,19 +1632,13 @@ void GuiApp::simple_trash_tab() {
                                       ImGuiSelectableFlags_Disabled);
                     ImGui::Separator();
                     if (ImGui::Selectable("Không bỏ món này", !del && !drop)) set(0);
+                    ImGui::PopTextWrapPos();
                     ImGui::EndPopup();
                 }
                 ImGui::PopID();
             }
             ImGui::Dummy(ImVec2(0, 2));
         }
-        if (ImGui::Checkbox("Bỏ mảnh ghép cả khi màu hơi khác", &simple_clean_.fragments_loose)) {
-            put("fragments_loose", simple_clean_.fragments_loose ? "true" : "false");
-            simple_reload_trash();
-        }
-        hint("Mảnh ghép trong túi đồ đổi màu liên tục, nên ít khi đúng màu với hình ở trên. "
-             "Bật lên thì mảnh ghép đã chọn bị bỏ khi đúng hình và gần đúng màu. Mảnh khác "
-             "màu hẳn, như bộ mảnh màu đỏ, vẫn để lại: muốn bỏ thì chụp nó ở mục dưới.");
     }
     ImGui::PushFont(nullptr, kSmall);
     coloured(kWait, "Xoá là mất hẳn, không lấy lại được. Bấm Thử tìm ở dưới trước khi bật.");
@@ -1726,9 +1756,19 @@ void GuiApp::simple_trash_tab() {
                     const ScreenRect& at = slots[static_cast<std::size_t>(simple_pick_slot_)];
                     const std::string file =
                         simple_trash_.add(dir, bag::cut(simple_bag_frame_, at), action, layout);
-                    simple_note(file.empty() ? "Không lưu được hình món đồ."
-                                             : "Đã thêm vào danh sách đồ bỏ đi.", 6000);
                     simple_reload_trash();
+                    // Matched by its drawing, so the catalog's icons drawn
+                    // like it -- the gold pieces for a red one -- go too.
+                    std::string kin;
+                    for (const auto& item : simple_trash_.items)
+                        if (!file.empty() && item.file == file)
+                            for (const std::string& id : item.kin)
+                                kin += (kin.empty() ? "" : ", ") + id;
+                    simple_note(file.empty() ? std::string("Không lưu được hình món đồ.")
+                                : kin.empty() ? std::string("Đã thêm vào danh sách đồ bỏ đi.")
+                                              : "Đã thêm vào danh sách đồ bỏ đi. Cũng sẽ xoá: " +
+                                                    kin + " (cùng hình, khác màu).",
+                                kin.empty() ? 6000 : 12000);
                     ImGui::CloseCurrentPopup();
                 };
                 if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)")) add(TrashList::Action::Delete);
@@ -1740,8 +1780,9 @@ void GuiApp::simple_trash_tab() {
             }
             ImGui::PopID();
         }
-        hint("Ô viền đỏ là món sẽ bị bỏ. Món trông giống món đã chọn nhưng khác màu, hoặc "
-             "giống cả một món khác chưa chọn, thì không bị bỏ: bấm Thử tìm để xem.");
+        hint("Ô viền đỏ là món sẽ bị bỏ, dù màu khác với hình đã chọn. Món trông giống món đã "
+             "chọn mà cũng giống cả một món khác hình chưa chọn thì không bị bỏ: bấm Thử tìm "
+             "để xem.");
     }
     end_card();
 

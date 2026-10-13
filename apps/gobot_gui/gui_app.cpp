@@ -188,7 +188,12 @@ void GuiApp::initialise() {
     });
     protocol_->set_captcha_callback([this] {
         GB_WARN("Captcha detected -- suspending input");
-        coord_.engage_critical("captcha");
+        {
+            // Over whatever holds it: a captcha outranks a trash pass and a
+            // revive, and neither of them ends a hold that is not theirs.
+            std::lock_guard<std::mutex> lock(hold_mutex_);
+            coord_.engage_critical("captcha");
+        }
         stop_bot();
     });
     protocol_->set_death_callback([this] {
@@ -2494,6 +2499,7 @@ void GuiApp::party_loop() {
 
     say_party("watching");
     std::string answered;
+    std::string refused;            // the dialog last left alone, and why
     std::uint64_t rules_read_ms = now_ms();
 
     while (!party_stop_) {
@@ -2535,30 +2541,62 @@ void GuiApp::party_loop() {
                                              have_font ? &font : nullptr);
             if (!seen.up) {
                 answered.clear();
+                refused.clear();
             } else if (seen.who.empty() || seen.who != answered) {
                 const bool name_matters =
                     !rules.accept_all ||
                     (rules.use_blacklist && !rules.blacklist.empty());
 
-                if (seen.who.empty() && name_matters) {
-                    say_party("an invitation, but the name could not be read and "
-                              "there is a list to check it against");
-                } else if (name_matters && !rules.may_accept(seen.who)) {
-                    if (!input_.window_focused()) input_.focus_window();
-                    input_.click_at(seen.decline_x, seen.decline_y);
-                    say_party("declined " + seen.who);
-                    answered = seen.who;
-                } else {
+                // The footer picture is the two buttons every dialog has: it
+                // matches the trash bin's quantity dialog at 0.90, and the drop
+                // and revive questions at 0.86. So never one of the bin's
+                // dialogs -- Xác Nhận there deletes an item, its count unchecked
+                // -- and never a dialog whose line does not read as an
+                // invitation's, "Yêu cầu của <name>.", whatever accept_all says.
+                std::string why_not;
+                if (bag::bin_asking(frame, store))
+                    why_not = "it is the trash bin's own dialog";
+                else if (seen.who.empty())
+                    why_not = have_font ? "its line does not read as an invitation's"
+                                        : "there is no font to read its line with";
+
+                // Answered with the mouse to itself, and only if, after the
+                // pause, the same invitation is still there and still not the
+                // bin's: the screen a second later is not this one.
+                const auto answer = [&](bool accept) {
+                    std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);
+                    if (!mouse.owns_lock() || trash_pass_) return false;
                     if (!input_.window_focused()) {
                         input_.focus_window();
                         std::this_thread::sleep_for(std::chrono::milliseconds(250));
                     }
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(accept_geometry.settle_ms));
-                    input_.click_at(seen.accept_x, seen.accept_y);
-                    say_party("accepted " +
-                              (seen.who.empty() ? std::string("an invitation")
-                                                : seen.who));
+                    if (accept)
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(accept_geometry.settle_ms));
+                    Frame now;
+                    if (!capture.grab(input_.target_window(), now) || !now.valid()) return false;
+                    const auto again = answering.look(now, store, have_font ? &font : nullptr);
+                    if (!again.up || again.who.empty() || bag::bin_asking(now, store) ||
+                        std::abs(again.at.x - seen.at.x) > 3 || std::abs(again.at.y - seen.at.y) > 3)
+                        return false;
+                    return accept ? input_.click_at(again.accept_x, again.accept_y)
+                                  : input_.click_at(again.decline_x, again.decline_y);
+                };
+
+                if (!why_not.empty()) {
+                    // Said once for each dialog, not every look.
+                    const std::string key = std::to_string(seen.at.x) + "," +
+                                            std::to_string(seen.at.y) + why_not;
+                    if (key != refused)
+                        say_party("a dialog with the invitation's buttons, not answered: " + why_not);
+                    refused = key;
+                } else if (name_matters && !rules.may_accept(seen.who)) {
+                    if (answer(false)) {
+                        say_party("declined " + seen.who);
+                        answered = seen.who;
+                    }
+                } else if (answer(true)) {
+                    say_party("accepted " + seen.who);
                     answered = seen.who;
                     ++party_accepted_;
                 }
@@ -2583,6 +2621,16 @@ void GuiApp::party_loop() {
                 if (party_stop_) break;
                 if (!rules.may_invite(who)) {
                     say_party(who + " asked, and the rules say no");
+                    continue;
+                }
+
+                // The mouse to itself for the whole of it -- opening the list,
+                // finding the row, the invite -- so a trash pass that starts
+                // meanwhile waits for it rather than having its drags clicked
+                // through.
+                std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);
+                if (!mouse.owns_lock() || trash_pass_) {
+                    say_party(who + " asked while the trash cleaner had the mouse; not invited");
                     continue;
                 }
 
@@ -2823,6 +2871,7 @@ void GuiApp::revive_loop() {
     // Tries at the death on screen now, and a rest after three that failed.
     int tries = 0;
     std::uint64_t resting_until = 0;
+    bool said_waiting = false;
     constexpr int kTries = 3;
     constexpr std::uint64_t kRestMs = 5 * 60 * 1000;
 
@@ -2848,7 +2897,6 @@ void GuiApp::revive_loop() {
             tries = 0;
             continue;
         }
-        ++tries;
 
         // A trash pass under way finishes first -- it is bounded, and gives
         // back what is in the bin when it stops -- rather than having the
@@ -2858,7 +2906,21 @@ void GuiApp::revive_loop() {
         while (!revive_stop_ && !mouse.try_lock())
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (revive_stop_) break;
-        coord_.engage_critical("reviving");
+        // Not over a hold that is somebody else's: a captcha's, which taking
+        // would end. A trash pass that could not give an item back holds
+        // everything too, but only to keep keys out of the bin's box, and it
+        // waits for every dialog to close -- the death dialog among them. A
+        // revive presses no keys, so it goes ahead under that hold and leaves
+        // it as it was.
+        const bool under_trash = trash_hold_ && coord_.critical_reason() == "trash cleaning";
+        if (!under_trash && !take_hold("reviving")) {
+            if (!said_waiting)
+                say_revive("waiting: everything is held off (" + coord_.critical_reason() + ")");
+            said_waiting = true;
+            continue;
+        }
+        said_waiting = false;
+        ++tries;
         if (!input_.window_focused()) {
             input_.focus_window();
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -2866,7 +2928,7 @@ void GuiApp::revive_loop() {
         DialogDriver driver(input_, store, grab);
         std::string trouble;
         const std::size_t done = driver.run_all(revive->steps, &trouble);
-        if (coord_.critical_reason() == "reviving") coord_.disengage_critical();
+        if (!under_trash) end_hold("reviving");
 
         if (done == revive->steps.size()) {
             ++revive_count_;
@@ -2915,10 +2977,45 @@ void GuiApp::stop_trash() {
     trash_stop_ = true;
     {
         std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
-        if (trash_cleaner_) trash_cleaner_->cancel();
+        if (trash_cleaner_) {
+            // A pass under way gives its item back as it stops, which needs
+            // the game in front. Brought forward from here, by the thread
+            // whose window has the focus, rather than by the pass while this
+            // thread sits waiting for it below.
+            if (trash_pass_ && !input_.window_focused()) input_.focus_window();
+            trash_cleaner_->cancel();
+        }
     }
     if (trash_thread_.joinable()) trash_thread_.join();
     trash_running_ = false;
+
+    // A pass that could not give its item back -- the game covered where Hủy
+    // Bỏ is -- leaves the bin's dialog open, and with the worker gone nothing
+    // is left watching it. Whatever presses keys stops too, rather than
+    // typing potion keys into the dialog's box once the hold is lifted.
+    if (trash_hold_.exchange(false)) {
+        if (macro_running_ || hunting_) {
+            stop_hunt();
+            stop_macro();
+            simple_note("Hộp thoại của thùng rác có thể vẫn đang mở trong game, nên GoBot dừng "
+                        "cả đánh quái và bình để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
+                        "rồi bấm BẮT ĐẦU.", 15000);
+        }
+        GB_WARN("Trash: stopped while the bin may still hold an item; the keys are stopped too");
+        end_hold("trash cleaning");
+    }
+}
+
+bool GuiApp::take_hold(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(hold_mutex_);
+    if (coord_.critical_active() && coord_.critical_reason() != reason) return false;
+    coord_.engage_critical(reason);
+    return true;
+}
+
+void GuiApp::end_hold(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(hold_mutex_);
+    if (coord_.critical_active() && coord_.critical_reason() == reason) coord_.disengage_critical();
 }
 
 /// The timed passes, and the ones asked for.
@@ -2963,8 +3060,24 @@ void GuiApp::trash_loop() {
     // The first timed pass shortly after the start, so what was put on the
     // list is dealt with now rather than in ten minutes.
     std::uint64_t next = now_ms() + 15'000;
+    // A pass that could not give an item back keeps everything held off --
+    // the bin's dialog may be open, and its box takes the macro's potion keys
+    // as numbers -- until the game shows nothing waiting: the player answered
+    // it, or a later pass did.
+    bool held = trash_hold_;
+    std::uint64_t held_looked_ms = 0;
     while (!trash_stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (held && now_ms() - held_looked_ms > 1500) {
+            held_looked_ms = now_ms();
+            Frame f;
+            if (grab(f) && f.valid() && bag::nothing_held(f, store, settings.layout)) {
+                held = false;
+                trash_hold_ = false;
+                end_hold("trash cleaning");
+                tell("Không còn gì chờ trong thùng rác; đánh quái, bình và buff chạy lại.");
+            }
+        }
         const int request = trash_request_.exchange(0);
         if (request == 0 && now_ms() - read_ms > 1000) {
             CleanSettings fresh;
@@ -2972,7 +3085,12 @@ void GuiApp::trash_loop() {
             read_ms = now_ms();
         }
         if (request == 0) {
-            if (trash_oneshot_) break;
+            // A pass asked for by a button ends here -- unless it left the
+            // bin holding something, which is watched for until it is not.
+            if (trash_oneshot_) {
+                if (!held) break;
+                continue;
+            }
             if (!settings.enabled || now_ms() < next) continue;
         }
 
@@ -2987,10 +3105,14 @@ void GuiApp::trash_loop() {
 
         // Something else holding everything off -- a captcha -- is not
         // something to clean the bag through, and its hold is not this
-        // worker's to end. Tried again shortly.
-        if (coord_.critical_active()) {
+        // worker's to end. Tried again shortly. This worker's own hold is
+        // what a pass is for: it starts by giving the item back.
+        const auto held_by_other = [&] {
+            return coord_.critical_active() && coord_.critical_reason() != "trash cleaning";
+        };
+        if (held_by_other()) {
             tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
-            if (trash_oneshot_) break;
+            if (trash_oneshot_ && !held) break;
             next = now_ms() + 30'000;
             continue;
         }
@@ -3000,12 +3122,12 @@ void GuiApp::trash_loop() {
         list.build(exe_relative("configs/trash"), settings, catalog);
         if (list.items.empty()) {
             tell("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.");
-            if (trash_oneshot_) break;
+            if (trash_oneshot_ && !held) break;
             continue;
         }
         if (!input_.window_valid()) {
             tell("Chưa thấy cửa sổ game.");
-            if (trash_oneshot_) break;
+            if (trash_oneshot_ && !held) break;
             continue;
         }
 
@@ -3026,26 +3148,41 @@ void GuiApp::trash_loop() {
         if (trash_stop_) cleaner.cancel();
 
         BagCleaner::Result r;
+        bool passed = false;
         {
-            // Not while the revive sequence is clicking, nor it while this is.
+            // Not while the revive sequence or the party worker is clicking,
+            // nor they while this is. The hold is taken only now, with the
+            // mouse: a captcha or a revive that began while this waited for
+            // it keeps its own, and the pass waits instead.
             std::lock_guard<std::mutex> mouse(game_mouse_mutex_);
-            trash_pass_ = true;
-            tell(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
-            coord_.engage_critical("trash cleaning");
-            input_.release_all();
-            if (!input_.window_focused()) {
-                input_.focus_window();
-                std::this_thread::sleep_for(std::chrono::milliseconds(350));
+            if (take_hold("trash cleaning")) {
+                passed = true;
+                trash_pass_ = true;
+                tell(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
+                input_.release_all();
+                if (!input_.window_focused()) {
+                    input_.focus_window();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+                }
+                r = cleaner.run();
+                // Kept while the bin may still hold the item; otherwise ended,
+                // if it is still this pass's -- a captcha seen during the pass
+                // has taken it over, and keeps it.
+                held = r.stuck;
+                trash_hold_ = held;
+                if (!held) end_hold("trash cleaning");
+                trash_pass_ = false;
             }
-            r = cleaner.run();
-            // Ended only if it is still this pass's: a captcha seen during the
-            // pass has taken it over, and keeps it.
-            if (coord_.critical_reason() == "trash cleaning") coord_.disengage_critical();
-            trash_pass_ = false;
         }
         {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
             trash_cleaner_ = nullptr;
+        }
+        if (!passed) {
+            tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
+            if (trash_oneshot_ && !held) break;
+            next = now_ms() + 30'000;
+            continue;
         }
 
         trash_thrown_ += r.deleted + r.dropped;
@@ -3064,7 +3201,15 @@ void GuiApp::trash_loop() {
         else
             tell("Xong: xoá " + std::to_string(r.deleted) + ", vứt " +
                  std::to_string(r.dropped) + " món." + extra);
-        if (trash_oneshot_) break;
+        if (held) {
+            // Tried again in a minute -- a pass starts by giving it back --
+            // and watched for in between, in case the player does it first.
+            next = now_ms() + 60'000;
+            held_looked_ms = now_ms();
+            tell("Món đồ có thể vẫn đang ở trong thùng rác hoặc trong hộp thoại của nó. Bấm "
+                 "Hủy Bỏ trong game; đánh quái, bình và buff tạm dừng đến khi không còn gì chờ.");
+        }
+        if (trash_oneshot_ && !held) break;
     }
     trash_running_ = false;
 }

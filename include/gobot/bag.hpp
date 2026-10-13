@@ -109,6 +109,11 @@ namespace bag {
 /// can, which rows on show are slots, and where the scroll bar is.
 BagView find(const Frame& f, const TemplateStore& store, const BagLayout& l);
 
+/// Nothing of the bag's is waiting on an answer: no dialog with the two
+/// buttons on screen, and the bin, when the bag is open, showing its can. What
+/// a pass that could not give an item back waits for before the bot goes on.
+bool nothing_held(const Frame& f, const TemplateStore& store, const BagLayout& l);
+
 /// A slot cut out of a frame, fully opaque.
 Frame cut(const Frame& f, const ScreenRect& r);
 
@@ -189,10 +194,13 @@ private:
 ///
 /// For choosing what to throw away before it is ever in the bag. The client
 /// draws most of them exactly as they are here -- potions match their slots at
-/// 1.00 -- but not all of them are told apart by shape: several are one
-/// drawing in two or three colours, scoring 0.91 to 0.95 against each other,
-/// and a few pairs are the same picture under two ids. So a slot is held to
-/// colour as well, and to the rest of the catalog: see TrashList::judge.
+/// 1.00 -- but not always in their colours: the fragments in the bag cycle
+/// from gold to orange to red and back, and GoC's own pictures of them in the
+/// bag are red. So a slot is matched by the drawing alone. Several icons are
+/// one drawing in two or three colours, and a few pairs are the same picture
+/// under two ids; by the player's rule those are one thing, and choosing one
+/// throws all of them away -- same_drawing says which, and the trash tab
+/// shows it before anything is deleted.
 struct ItemCatalog {
     struct Entry {
         std::string id;         ///< "spend/fragment/1103063"
@@ -211,10 +219,10 @@ struct ItemCatalog {
     const Entry* find(const std::string& id) const;
     std::size_t size() const;
 
-    /// Other ids whose icon is the same picture as this one's, colour and
-    /// all. A slot holding either is both, so neither is thrown away unless
-    /// both are chosen -- which the screen says when one of them is ticked.
-    std::vector<std::string> twins(const std::string& id) const;
+    /// Other ids whose icon is the same drawing as this one's, in any colour:
+    /// each found in the other at TrashList::kSameDrawing or better. Choosing
+    /// this one throws those away too.
+    std::vector<std::string> same_drawing(const std::string& id) const;
 
     /// The staged copy beside this program, else the client's own.
     static std::string default_dir();
@@ -227,21 +235,17 @@ struct CleanSettings {
     std::uint32_t bag_key = 'I';
     bool          tabs[kBagTabs] = { true, true, true, true, false };
 
-    /// How alike a slot has to be to a listed picture. High on purpose: a near
-    /// miss here deletes something that was not on the list.
+    /// How alike a slot's drawing has to be to a listed picture's, colour
+    /// left out. High on purpose: a near miss here deletes something that was
+    /// not on the list. Measured on every real frame, a picture cut from the
+    /// bag scores 0.92 or more on the same item in another colour, and 0.83 at
+    /// most on anything else.
     float min_score = 0.90f;
 
-    /// The same, for icons chosen from the catalog. Lower because those are
-    /// the client's sprite rather than a photo of the slot, with the count
-    /// corner cut out of it.
-    float catalog_score = 0.85f;
-
-    /// The fragments in the bag (spend/fragment) change colour all the time,
-    /// gold to orange to red and back, so their colour hardly ever matches
-    /// their icon's. With this on, a chosen fragment only has to be roughly
-    /// the right colour; off, it has to be the right colour like everything
-    /// else, and is thrown away only when caught at the moment it is.
-    bool fragments_loose = false;
+    /// The same, for icons chosen from the catalog. The right icon scores
+    /// 0.95 or more on its item whatever colour the bag draws it in -- 0.952
+    /// for the red pieces GoC photographs -- and another drawing 0.81 at most.
+    float catalog_score = 0.90f;
 
     /// Catalog ids chosen beforehand, from [Items].
     std::vector<std::string> delete_ids;
@@ -257,7 +261,8 @@ struct CleanSettings {
 
     /// False, and nothing changed, when the file cannot be read or has no
     /// [Trash] section -- which is also what a file caught half way through
-    /// being rewritten looks like.
+    /// being rewritten looks like. Keys it does not know are passed over,
+    /// fragments_loose among them: colour no longer counts for anything.
     bool load(const std::string& path);
 };
 
@@ -275,18 +280,18 @@ struct TrashList {
     };
     static const char* folder(Action a);
 
-    /// How far a slot's colour may be from a picture's, per channel, in levels
-    /// of 255. The client draws an item exactly as its icon or its photo, so
-    /// the right one is within two or three; the same drawing in another
-    /// colour, which is another item, is mostly 15 to 55 away. The few that
-    /// are closer -- two strengths of one potion, 7 apart -- are told apart by
-    /// the rest of the catalog instead: see kRivalMargin.
-    static constexpr int kTone = 12;
-    /// The same for fragments, whose colour cycles: measured up to 65 away from
-    /// their icon. Gold to the steady red of another set of pieces is over 100.
-    static constexpr int kLooseTone = 70;
+    /// How alike two pictures have to be, each found in the other, to be one
+    /// drawing in whatever colours. Measured on the client's icons in grey:
+    /// one drawing in two colours scores 0.89 to 1.00 both ways, two drawings
+    /// 0.81 at most -- and one that holds the other, a bag with a potion
+    /// beside it and the same bag alone, scores high one way only.
+    static constexpr float kSameDrawing = 0.85f;
     /// How much better a listed item has to match than anything in the catalog
-    /// that is not listed.
+    /// that is drawn differently and not listed. Measured on every real frame,
+    /// the right icon beats the best other drawing by 0.14 or more, so this
+    /// only ever comes into it when two drawings are a near tie. Not wider: a
+    /// drawing that holds another -- the bag with a potion beside it holds
+    /// the bag alone, found in it at 0.91 -- would then never be thrown away.
     static constexpr float kRivalMargin = 0.05f;
 
     struct Item {
@@ -296,27 +301,33 @@ struct TrashList {
         Frame       shown;      ///< for the screen
         Frame       picture;    ///< masked, for matching
         float       min_score = 0.0f;   ///< 0: the caller's
-        int         tolerance = kTone;  ///< see kTone
 
-        /// The pixels whose colour is compared, as indices into `picture`,
-        /// and their mean red, green and blue. For a photo, the item's own
-        /// pixels rather than the slot around it.
-        std::vector<std::uint16_t> tone_px;
-        float tone[3] = { 0, 0, 0 };
+        /// Catalog ids drawn like what was chosen: its own and the same
+        /// drawing in other colours. By the player's rule they are one thing,
+        /// so none of them is a rival to this item.
+        std::vector<std::string> kin;
+
+        /// For an icon on the list only because it is drawn like one that was
+        /// chosen: the one that was. Empty for what was chosen itself.
+        std::string via;
     };
     std::vector<Item> items;
 
     /// Catalog icons not on the list -- everything a listed item has to look
-    /// more like the slot than. Filled by add_rivals.
+    /// more like the slot than, unless it is drawn the same. Filled by
+    /// add_rivals.
     std::vector<Item> rivals;
 
-    /// Add catalog icons by id. The count corner of each is left out, as for
-    /// a picture cut from the bag; ids the catalog does not have are skipped.
+    /// Add catalog icons by id, and every icon drawn the same, as items that
+    /// say which one brought them. The count corner of each is left out, as
+    /// for a picture cut from the bag; ids the catalog does not have are
+    /// skipped.
     void add_catalog(const ItemCatalog& catalog, const std::vector<std::string>& ids,
-                     Action a, float min_score, int tolerance = kTone);
+                     Action a, float min_score);
 
-    /// Every catalog icon that is not on the list, by id or as a picture cut
-    /// from the bag, becomes a rival. Call after everything is added.
+    /// Every catalog icon that is not on the list becomes a rival, and each
+    /// picture cut from the bag learns which icons are drawn like it. Call
+    /// after everything is added.
     void add_rivals(const ItemCatalog& catalog);
 
     /// The whole list a pass goes by: the pictures under `dir`, the ids in the
@@ -342,24 +353,26 @@ struct TrashList {
         float score = 0.0f;         ///< how alike it is to that item
 
         /// When it looks like a listed item and is still not taken for it,
-        /// why: its colour is off, or something in the catalog that is not
-        /// listed looks as much like it. For saying so on a look-only pass.
-        enum class Doubt { None, Colour, Rival };
+        /// why: something in the catalog that is not listed, and is drawn
+        /// differently, looks as much like it. For saying so on a look-only
+        /// pass.
+        enum class Doubt { None, Rival };
         Doubt       doubt = Doubt::None;
         int         like = -1;      ///< the listed item it looks like
         float       like_score = 0.0f;
-        int         tone_off = 0;   ///< how far off its colour is, for Colour
-        std::string rival;          ///< the unlisted look-alike, for Rival
+        std::string rival;          ///< the unlisted look-alike
+        float       rival_score = 0.0f;
     };
 
     /// Which listed item the slot holds, if any.
     ///
-    /// Shape is not enough: three strengths of one potion are one drawing in
-    /// three colours, and throwing away the wrong one is not undone. So the
-    /// slot's colour has to be within the item's tolerance of the picture's,
-    /// and no unlisted catalog icon may match it within kRivalMargin of the
-    /// listed one. Searched a few pixels either side of the slot, since the
-    /// grid is measured rather than given.
+    /// By its drawing, whatever its colour: the bag draws fragments in a
+    /// colour that cycles, and the player's rule is that the drawing decides.
+    /// Compared in grey, with the count corner and the edge left out. What
+    /// keeps a look-alike from being thrown away is the rest of the catalog:
+    /// no unlisted icon of another drawing may match the slot within
+    /// kRivalMargin of the listed one. Searched a few pixels either side of
+    /// the slot, since the grid is measured rather than given.
     Verdict judge(const Frame& f, const ScreenRect& slot, float min_score) const;
 
     /// judge, reduced to the item, or -1. `score` gets how alike it is -- or,
@@ -400,6 +413,11 @@ const char* dialog_name(int kind);
 /// Every dialog with the two buttons on screen, the bin's own marked.
 std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store);
 
+/// One of the bin's dialogs is on screen. For anything else that presses
+/// Xác Nhận on a dialog -- a party invitation's footer picture matches the
+/// bin's quantity dialog at 0.90 -- to keep its hands off.
+bool bin_asking(const Frame& f, const TemplateStore& store);
+
 /// Whether the pictures to tell the dialogs for `a` apart are there. There is
 /// no picture of the drop question with its words, so nothing is dropped:
 /// a dialog that cannot be told from the others is not answered.
@@ -438,9 +456,11 @@ public:
     /// list, and throw nothing away.
     void set_dry_run(bool on) { dry_run_ = on; }
 
-    /// Stop at the next pause, giving back whatever is in the bin first. A
-    /// cleaner that is cancelled stays cancelled: a stop that arrives before
-    /// the pass gets going still stops it.
+    /// Stop at the next pause, giving back whatever is in the bin first --
+    /// with the game brought to the front for it, since a stop is mostly
+    /// pressed in GoBot's window or a console. A cleaner that is cancelled
+    /// stays cancelled: a stop that arrives before the pass gets going still
+    /// stops it.
     void cancel() { cancelled_ = true; }
 
     /// Only for tests, which have no game window: do not ask whether the game
@@ -467,6 +487,12 @@ public:
         int  failed = 0;            ///< tried and not got rid of
         int  doubtful = 0;          ///< looked like a listed item, not taken for one
         std::string trouble;        ///< why it stopped early, in Vietnamese
+
+        /// An item went towards the bin and was never seen given back or
+        /// gone: it may still be in the bin, or in a dialog whose box takes
+        /// whatever is typed. Whoever ran the pass keeps everything that
+        /// presses keys held off until bag::nothing_held says otherwise.
+        bool stuck = false;
     };
     Result run();
 
@@ -480,12 +506,17 @@ private:
     /// Give back whatever the bin holds -- answer Hủy Bỏ on its dialog, or
     /// click the bin to bring the dialog up and then answer it -- and leave
     /// any other dialog alone. True when the screen is clean afterwards.
-    /// Runs to the end even when cancelled: it is what a stop needs.
+    /// Runs to the end even when cancelled: it is what a stop needs. Brings
+    /// the game to the front first, and clicks wherever the game is on top.
     bool back_out();
 
-    /// The mouse goes where it is aimed: the game is in front, and the window
-    /// under that point is the game's. Says why not when not.
-    bool mouse_ok(int x, int y);
+    /// The mouse goes where it is aimed: the window under that point is the
+    /// game's, and -- for everything but giving an item back -- the game is
+    /// in front. Says why not when not.
+    bool mouse_ok(int x, int y, bool need_front = true);
+
+    /// The game to the front, unless it is there already or this is a test.
+    void bring_forward();
 
     /// Put the item in slot `index` of `v` into the trash: onto the bin, which
     /// takes it and waits; then a click on the bin, which brings up the bin's
@@ -527,6 +558,9 @@ private:
     bool                 skip_focus_check_ = false;
     Hands                hands_;
     std::string          stuck_;        ///< why the last back_out left the screen unclean
+    /// An item has gone towards the bin and the screen has not been seen
+    /// clean since: see Result::stuck.
+    bool                 item_out_ = false;
     std::atomic<bool>    cancelled_{false};
 };
 

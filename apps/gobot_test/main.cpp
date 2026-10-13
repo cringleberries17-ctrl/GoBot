@@ -4337,15 +4337,14 @@ void put_px(Frame& f, int x, int y, int r, int g, int b) {
     f.pixels[i + 2] = static_cast<std::uint8_t>(r);
 }
 
-/// Something colourful in a slot, inside its edge. `swap` draws the same
-/// picture with red and blue exchanged: one shape, another colour.
-void paint_item(Frame& f, const ScreenRect& s, int seed, bool swap = false) {
+/// Something colourful in a slot, inside its edge.
+void paint_item(Frame& f, const ScreenRect& s, int seed) {
     for (int y = 4; y < s.h - 4; ++y)
         for (int x = 4; x < s.w - 4; ++x) {
             const int r = 128 + static_cast<int>(100 * std::sin(x * 0.5 + seed));
             const int g = 128 + static_cast<int>(100 * std::cos(y * 0.4 + seed * 2));
             const int b = 40 + (x * y * (seed + 3)) % 200;
-            put_px(f, s.x + x, s.y + y, swap ? b : r, g, swap ? r : b);
+            put_px(f, s.x + x, s.y + y, r, g, b);
         }
 }
 
@@ -4472,32 +4471,55 @@ void test_bag() {
           "and in another slot, with a different count -- score " + std::to_string(score));
     paint_item(g, slots[11], 2);
     check(list.match(g, slots[11], 0.90f) < 0, "a different item is not");
-    paint_item(g, slots[12], 1, true);
-    float colour_score = 0.0f;
-    list.match(g, slots[12], 0.0f, &colour_score);
-    check(list.match(g, slots[12], 0.90f) < 0,
-          "nor the same drawing in another colour -- score " + std::to_string(colour_score));
     check(list.match(g, slots[0], 0.90f) < 0, "nor an empty slot");
 
-    // The same drawing a little darker or lighter is another item too: the
-    // shape correlates perfectly, so only the colour says so.
+    // The drawing decides, not the colour: the bag draws fragments gold,
+    // orange or red as they pulse, and the player's rule is that the same
+    // drawing is the same item whatever its colour. Here the item redrawn in
+    // one orange-red ramp, its brightness kept, and twenty levels lighter.
     {
         Frame h = bag_scene(500, 450);
         for (int y = 4; y < slots[13].h - 4; ++y)
             for (int x = 4; x < slots[13].w - 4; ++x) {
                 std::uint8_t r, gg, b;
                 f.get(slots[3].x + x, slots[3].y + y, r, gg, b);
-                put_px(h, slots[13].x + x, slots[13].y + y, std::min(255, r + 20),
+                const int grey = (r * 77 + gg * 151 + b * 28) >> 8;
+                put_px(h, slots[13].x + x, slots[13].y + y, std::min(255, grey + 40),
+                       grey * 45 / 100, grey * 15 / 100);
+                put_px(h, slots[14].x + x, slots[14].y + y, std::min(255, r + 20),
                        std::min(255, gg + 20), std::min(255, b + 20));
             }
-        const TrashList::Verdict k = list.judge(h, slots[13], 0.90f);
-        check(k.item < 0 && k.doubt == TrashList::Verdict::Doubt::Colour && k.tone_off >= 15,
-              "the same drawing twenty levels lighter is refused -- off by " +
-                  std::to_string(k.tone_off));
+        float red = 0.0f, lighter = 0.0f;
+        const int as_red = list.match(h, slots[13], 0.90f, &red);
+        const int as_lighter = list.match(h, slots[14], 0.90f, &lighter);
+        check(as_red == 0, "the same drawing in another colour is the same item -- score " +
+                               std::to_string(red));
+        check(as_lighter == 0, "and so is it twenty levels lighter -- score " +
+                                   std::to_string(lighter));
     }
 
-    // Something unlisted that looks as much like the slot is as good an
-    // answer, and the slot is left alone.
+    // While an item waits in the bin, its slot shows it enlarged. That copy
+    // is never to be taken for an item of its own and dragged.
+    {
+        Frame h = bag_scene(500, 450);
+        const ScreenRect at = slots[13];
+        for (int y = 0; y < at.h; ++y)
+            for (int x = 0; x < at.w; ++x) {
+                // 1.35 times the size, about the middle of the slot.
+                const int sx = slots[3].x + 17 + static_cast<int>(std::lround((x - 17) / 1.35));
+                const int sy = slots[3].y + 17 + static_cast<int>(std::lround((y - 17) / 1.35));
+                std::uint8_t r, gg, b;
+                f.get(sx, sy, r, gg, b);
+                put_px(h, at.x + x, at.y + y, r, gg, b);
+            }
+        float enlarged = 0.0f;
+        const int taken = list.match(h, at, 0.90f, &enlarged);
+        check(taken < 0, "nor the enlarged copy of it a slot shows while it waits in the bin -- "
+                         "score " + std::to_string(enlarged));
+    }
+
+    // Something unlisted, and drawn differently, that looks as much like the
+    // slot is as good an answer, and the slot is left alone.
     {
         TrashList rivalled;
         rivalled.add_picture(bag::cut(f, slots[3]), TrashList::Action::Delete, l);
@@ -4507,8 +4529,14 @@ void test_bag() {
         rivalled.rivals.push_back(other.items[0]);
         const TrashList::Verdict k = rivalled.judge(f, slots[3], 0.90f);
         check(k.item < 0 && k.doubt == TrashList::Verdict::Doubt::Rival &&
-                  k.rival == "spend/craft/0000001",
+                  k.rival == "spend/craft/0000001" && k.rival_score > 0.9f,
               "a listed picture that ties with an unlisted one is left alone");
+        // The same drawing is the same thing, by the player's rule, and is no
+        // rival: a red piece photographed is the gold piece's icon too.
+        rivalled.items[0].kin = { "spend/craft/0000001" };
+        check(rivalled.judge(f, slots[3], 0.90f).item == 0,
+              "but not when that one is the same drawing as the listed one");
+        rivalled.items[0].kin.clear();
         rivalled.rivals.clear();
         check(rivalled.judge(f, slots[3], 0.90f).item == 0, "and taken once that one is gone");
     }
@@ -4564,34 +4592,37 @@ void test_bag() {
         const CleanSettings d;
         check(!d.enabled, "trash cleaning is off until somebody turns it on");
         check(d.bag_key == 'I' && d.tabs[0] && !d.tabs[4] && d.min_score >= 0.89f &&
-                  d.catalog_score >= 0.84f,
+                  d.catalog_score >= 0.89f,
               "with the bag on I, the pet tab left alone and strict matches");
         CleanSettings s;
         check(s.load(exe_relative("configs/trash.ini")), "the trash settings load");
         check(s.layout.pitch == 37 && s.layout.grid_dy == 25, "with the measured layout");
         check(s.layout.track_top_dy == 39 && s.layout.track_bottom_dy == 155,
               "and the scroll bar's track, measured on the live client");
-        check(!d.fragments_loose, "fragments are held to their colour until somebody says not");
 
         // A file caught half written -- emptied, about to be filled again by
         // the trash tab -- is not the defaults. It is refused, and what was
-        // read before stands.
+        // read before stands. The file has the fragments_loose key an earlier
+        // GoBot wrote: colour counts for nothing now, and it is passed over.
         const std::string path = temp_file("gobot_trash_half.ini");
         {
             std::ofstream out(path);
             out << "[Trash]\ntab_equip1=false\ntab_use=true\nfragments_loose=true\n"
+                   "min_score=0.5\ncatalog_score=0.93\n"
                    "[Bag]\ntrack_top_dy=40\n[Items]\ndelete=spend/fragment/1103023\n";
         }
         CleanSettings kept;
-        check(kept.load(path) && kept.fragments_loose && !kept.tabs[0] && kept.tabs[2] &&
+        check(kept.load(path) && !kept.tabs[0] && kept.tabs[2] &&
                   kept.layout.track_top_dy == 40 && kept.delete_ids.size() == 1,
-              "the settings read back, fragments, tabs, track and all");
+              "the settings read back, tabs, track and all, an old fragments_loose key and all");
+        check(kept.min_score >= 0.85f && std::abs(kept.catalog_score - 0.93f) < 1e-4f,
+              "with a score too low to tell drawings apart raised to 0.85 -- " +
+                  std::to_string(kept.min_score));
         {
             std::ofstream out(path, std::ios::trunc);
             out << "# nothing yet\n";
         }
-        check(!kept.load(path) && kept.fragments_loose && !kept.tabs[0] &&
-                  kept.delete_ids.size() == 1,
+        check(!kept.load(path) && !kept.tabs[0] && kept.delete_ids.size() == 1,
               "a file with no [Trash] in it is refused, and the last reading stands");
         std::remove(path.c_str());
     }
@@ -4693,6 +4724,22 @@ void test_bag() {
     check(res.matched == 1, "finds the one listed item and not the other -- found " +
                             std::to_string(res.matched));
     check(res.deleted == 0 && res.dropped == 0 && res.failed == 0, "and throws nothing away");
+
+    // Nothing is judged while the bin holds something: the slot its item came
+    // from shows an enlarged copy of it, which is no item to drag. Looking
+    // only says what is in the way, and touches nothing.
+    {
+        Frame waiting = scene;
+        paint_item(waiting, ScreenRect{ 300 + l.bin_dx - 4, 300 + l.bin_dy - 2, 24, 24 }, 6);
+        BagCleaner looking(no_window, store, [&](Frame& out) { out = waiting; return true; });
+        looking.set_settings(cs);
+        looking.set_trash(&wanted);
+        looking.set_dry_run(true);
+        looking.set_skip_focus_check(true);
+        const auto r = looking.run();
+        check(r.matched == 0 && !r.trouble.empty() && !r.stuck,
+              "with something waiting in the bin no slot is judged -- " + r.trouble);
+    }
 
     TrashList empty_list;
     cleaner.set_trash(&empty_list);
@@ -4859,31 +4906,43 @@ void test_bag_counts() {
         return std::make_pair(g, gs);
     };
 
-    // One drawing in two colours, two strengths of one potion: the colour or
-    // the rest of the catalog tells them apart, never the shape alone.
+    // One drawing in two colours is one item, by the player's rule: listing
+    // either throws both away. Two drawings that only look alike -- a bag
+    // with a potion beside it and the same bag alone, two bowls of different
+    // soup, a gourd with a tag and one without -- are told apart by the rest
+    // of the catalog, and the one not listed is left alone.
     {
-        const struct { const char* listed; const char* in_bag; } kAlike[] = {
-            { "spend/buff/8871061", "spend/buff/8871051" },    // pink seal, grey seal
-            { "spend/hp/8843017", "spend/hp/8843015" },        // within 7 levels of colour
-            { "spend/craft/8800960", "spend/craft/8800852" },  // 15 levels apart
-            { "seal/8219021", "seal/8211045" },
+        const struct { const char* listed; const char* in_bag; bool same; } kAlike[] = {
+            { "spend/buff/8871061", "spend/buff/8871051", true },    // pink seal, grey seal
+            { "spend/craft/8800960", "spend/craft/8800852", true },  // one scroll, two colours
+            { "seal/8219021", "seal/8211045", true },                // one ring, two gems
+            { "spend/hp/8820011", "spend/mana/8810011", true },      // one gourd, red and blue
+            { "spend/hp/8843017", "spend/hp/8843015", false },       // the bag, and the bag and potion
+            { "spend/mana/8810071", "spend/mana/8810081", false },   // two soups
+            { "spend/hp/8820011", "spend/hp/8820013", false },       // the gourd, and it with a tag
         };
         for (const auto& pair : kAlike) {
             const ItemCatalog::Entry* bagged = catalog.find(pair.in_bag);
             if (bagged == nullptr || catalog.find(pair.listed) == nullptr) continue;
+            const std::vector<std::string> kin = catalog.same_drawing(pair.listed);
+            const bool found_same = std::find(kin.begin(), kin.end(), pair.in_bag) != kin.end();
+            check(found_same == pair.same, std::string(pair.listed) + " and " + pair.in_bag +
+                                               (pair.same ? " are one drawing" : " are two drawings"));
             TrashList chosen;
-            chosen.add_catalog(catalog, { pair.listed }, TrashList::Action::Delete, 0.85f);
+            chosen.add_catalog(catalog, { pair.listed }, TrashList::Action::Delete, 0.90f);
             chosen.add_rivals(catalog);
             auto [g, gs] = slot_of(*bagged);
             const TrashList::Verdict k = chosen.judge(g, gs, 0.90f);
-            check(k.item < 0, std::string("listing ") + pair.listed + " leaves " + pair.in_bag +
-                                  " alone -- " +
-                                  (k.doubt == TrashList::Verdict::Doubt::Rival ? "it is " + k.rival
-                                   : k.doubt == TrashList::Verdict::Doubt::Colour
-                                       ? "colour off by " + std::to_string(k.tone_off)
-                                       : std::string("no likeness")));
+            if (pair.same)
+                check(k.item >= 0, std::string("listing ") + pair.listed + " throws " + pair.in_bag +
+                                       " away too -- score " + std::to_string(k.score));
+            else
+                check(k.item < 0, std::string("listing ") + pair.listed + " leaves " + pair.in_bag +
+                                      " alone -- " +
+                                      (k.doubt == TrashList::Verdict::Doubt::Rival
+                                           ? "it is " + k.rival : std::string("no likeness")));
             TrashList right;
-            right.add_catalog(catalog, { pair.in_bag }, TrashList::Action::Delete, 0.85f);
+            right.add_catalog(catalog, { pair.in_bag }, TrashList::Action::Delete, 0.90f);
             right.add_rivals(catalog);
             // Matched first and reported after, as above.
             float right_score = 0.0f;
@@ -4893,30 +4952,37 @@ void test_bag_counts() {
         }
     }
 
-    // A few ids are one picture. Neither is thrown away unless both are listed.
+    // A few ids are one picture, and the same drawing in another colour is
+    // on the list along with what was ticked, saying which brought it.
     {
-        const std::vector<std::string> twins = catalog.twins("spend/craft/8800975");
         if (catalog.find("spend/craft/8800975") != nullptr &&
             catalog.find("spend/craft/8800956") != nullptr) {
-            check(std::find(twins.begin(), twins.end(), "spend/craft/8800956") != twins.end(),
+            const std::vector<std::string> kin = catalog.same_drawing("spend/craft/8800975");
+            check(std::find(kin.begin(), kin.end(), "spend/craft/8800956") != kin.end(),
                   "8800975 and 8800956 are found to be one picture");
-            auto [g, gs] = slot_of(*catalog.find("spend/craft/8800975"));
+            auto [g, gs] = slot_of(*catalog.find("spend/craft/8800956"));
             TrashList one;
-            one.add_catalog(catalog, { "spend/craft/8800975" }, TrashList::Action::Delete, 0.85f);
+            one.add_catalog(catalog, { "spend/craft/8800975" }, TrashList::Action::Delete, 0.90f);
             one.add_rivals(catalog);
-            check(one.match(g, gs, 0.90f) < 0, "so listing one of them alone throws neither away");
-            TrashList both;
-            both.add_catalog(catalog, { "spend/craft/8800975", "spend/craft/8800956" },
-                             TrashList::Action::Delete, 0.85f);
-            both.add_rivals(catalog);
-            check(both.match(g, gs, 0.90f) >= 0, "and listing both throws it away");
+            check(one.match(g, gs, 0.90f) >= 0, "so listing one of them throws both away");
+            bool brought = false;
+            for (const TrashList::Item& item : one.items)
+                brought = brought || (item.id == "spend/craft/8800956" &&
+                                      item.via == "spend/craft/8800975");
+            check(brought, "the other is on the list as drawn like the one ticked");
+            bool rival = false;
+            for (const TrashList::Item& r : one.rivals) rival = rival || r.id == "spend/craft/8800956";
+            check(!rival, "and is no rival to it");
         }
-        check(catalog.twins("spend/mana/8810101").empty(), "most icons have no twin");
+        check(catalog.same_drawing("spend/mana/8810101").empty(),
+              "most icons have no other drawn like them");
+        TrashList none;
+        none.add_catalog(catalog, { "spend/mana/8810101" }, TrashList::Action::Delete, 0.90f);
+        check(none.items.size() == 1, "and bring nothing else onto the list");
     }
 
-    // Fragments change colour in the bag. Held to their icon's colour they are
-    // left alone; allowed to be roughly the right colour, they are not -- but
-    // the steady red of another set of pieces is too far off either way.
+    // Fragments change colour in the bag, gold to orange to red and back, and
+    // are thrown away at any point of it: the drawing decides.
     if (const ItemCatalog::Entry* piece = catalog.find("spend/fragment/1103023")) {
         const auto tinted = [&](int dr, int dg, int db) {
             auto [g, gs] = slot_of(*piece);
@@ -4930,22 +4996,111 @@ void test_bag_counts() {
                 }
             return std::make_pair(g, gs);
         };
-        CleanSettings strict, loose;
-        strict.delete_ids = loose.delete_ids = { "spend/fragment/1103023" };
-        loose.fragments_loose = true;
-        TrashList held, roughly;
-        held.build(temp_file("gobot_trash_nowhere"), strict, catalog);
-        roughly.build(temp_file("gobot_trash_nowhere"), loose, catalog);
-        check(!held.rivals.empty() && held.rivals.size() + 1 == catalog.size(),
+        CleanSettings one_piece;
+        one_piece.delete_ids = { "spend/fragment/1103023" };
+        TrashList list_one;
+        list_one.build(temp_file("gobot_trash_nowhere"), one_piece, catalog);
+        check(!list_one.rivals.empty() && list_one.rivals.size() + 1 == catalog.size(),
               "a list built for a pass has every other catalog icon as a rival");
 
-        auto [pulse, ps] = tinted(10, -45, -40);           // as measured on the live bag
-        check(held.match(pulse, ps, 0.90f) < 0, "a fragment mid-pulse is refused when strict");
-        check(roughly.match(pulse, ps, 0.90f) == 0, "and taken when roughly is enough");
-        auto [red, rs] = tinted(-60, -110, -70);           // another set, steady
-        check(roughly.match(red, rs, 0.90f) < 0, "but not the steady red of another set");
+        auto [pulse, ps] = tinted(10, -45, -40);           // mid-pulse, as on the live bag
+        check(list_one.match(pulse, ps, 0.90f) == 0, "a fragment mid-pulse is taken");
+        auto [red, rs] = tinted(-60, -110, -70);           // the red of GoC's pictures
+        check(list_one.match(red, rs, 0.90f) == 0, "and red, as the bag draws it too");
         auto [same, ss] = slot_of(*piece);
-        check(held.match(same, ss, 0.90f) == 0, "and the fragment as its icon is taken either way");
+        check(list_one.match(same, ss, 0.90f) == 0, "and gold, as its icon");
+        if (const ItemCatalog::Entry* other_piece = catalog.find("spend/fragment/1103063")) {
+            auto [o, os] = slot_of(*other_piece);
+            check(list_one.match(o, os, 0.90f) < 0, "but not another piece's drawing");
+        }
+
+        // The enlarged copy a slot shows while its item waits in the bin.
+        {
+            auto [g, gs] = slot_of(*piece);
+            Frame big = g;
+            for (int y = 0; y < 34; ++y)
+                for (int x = 0; x < 34; ++x) {
+                    const int sx = 17 + static_cast<int>(std::lround((x - 17) / 1.35));
+                    const int sy = 17 + static_cast<int>(std::lround((y - 17) / 1.35));
+                    std::uint8_t r, gg, b;
+                    g.get(gs.x + sx, gs.y + sy, r, gg, b);
+                    put_px(big, gs.x + x, gs.y + y, r, gg, b);
+                }
+            float enlarged = 0.0f;
+            const int taken = list_one.match(big, gs, 0.90f, &enlarged);
+            check(taken < 0, "and not the enlarged copy shown while it waits in the bin -- score " +
+                                 std::to_string(enlarged));
+        }
+    }
+
+    // GoC's own pictures of fragments in the bag ("mảnh quái rơi"): all nine
+    // drawings, red, on the bag's slots. Every piece is taken for its own
+    // gold icon, and for no other.
+    {
+        TemplateStore pictures;
+        pictures.load_best(exe_relative("configs/templates.ini"));
+        const Frame* roi1 = pictures.get("grabbed/manhquai_roi1");
+        const Frame* roi3 = pictures.get("grabbed/manhquai_roi3");
+        if (roi1 == nullptr || roi3 == nullptr || catalog.find("spend/fragment/1103093") == nullptr) {
+            std::printf("  [skip] GoC's pictures of fragments in the bag are not installed here\n");
+        } else {
+            // Slots measured off the pictures: 37 apart, as in the bag, and
+            // the piece each holds.
+            struct Slot { const Frame* in; int x, y; const char* id; };
+            const Slot kPieces[] = {
+                { roi1, 77, 1, "1103083" },  { roi1, 114, 1, "1103053" },
+                { roi1, 151, 1, "1103043" }, { roi1, 188, 1, "1103043" },
+                { roi1, 3, 38, "1103033" },  { roi1, 40, 38, "1103033" },
+                { roi1, 77, 38, "1103023" }, { roi1, 114, 38, "1103013" },
+                { roi1, 151, 38, "1103093" }, { roi1, 188, 38, "1103083" },
+                { roi1, 3, 75, "1103073" },  { roi1, 40, 75, "1103053" },
+                { roi1, 77, 75, "1103033" }, { roi1, 114, 75, "1103013" },
+                { roi3, 16, 11, "1103013" }, { roi3, 90, 11, "1103033" },
+                { roi3, 53, 48, "1103053" }, { roi3, 16, 85, "1103073" },
+                { roi3, 53, 85, "1103083" }, { roi3, 90, 85, "1103093" },
+            };
+            CleanSettings all_nine;
+            for (const char* id : { "1103013", "1103023", "1103033", "1103043", "1103053",
+                                    "1103063", "1103073", "1103083", "1103093" })
+                all_nine.delete_ids.push_back(std::string("spend/fragment/") + id);
+            TrashList nine;
+            nine.build(temp_file("gobot_trash_nowhere"), all_nine, catalog);
+            int right = 0, total = 0;
+            float lowest = 1.0f;
+            std::string wrong;
+            for (const Slot& p : kPieces) {
+                const ScreenRect at{ p.x, p.y, 34, 34 };
+                const TrashList::Verdict k = nine.judge(*p.in, at, 0.90f);
+                ++total;
+                const std::string want = std::string("spend/fragment/") + p.id;
+                if (k.item >= 0 && nine.items[static_cast<std::size_t>(k.item)].id == want) {
+                    ++right;
+                    lowest = std::min(lowest, k.score);
+                } else {
+                    wrong += std::string(" ") + p.id;
+                }
+            }
+            check(right == total, "every red piece is taken for its gold icon: " +
+                                      std::to_string(right) + " of " + std::to_string(total) +
+                                      ", the lowest at " + std::to_string(lowest) +
+                                      (wrong.empty() ? "" : "; wrong:" + wrong));
+
+            // One listed: only its pieces go.
+            CleanSettings only;
+            only.delete_ids = { "spend/fragment/1103033" };
+            TrashList one_kind;
+            one_kind.build(temp_file("gobot_trash_nowhere"), only, catalog);
+            int taken = 0, should = 0;
+            for (const Slot& p : kPieces) {
+                const bool is = std::string(p.id) == "1103033";
+                should += is ? 1 : 0;
+                const int k = one_kind.match(*p.in, ScreenRect{ p.x, p.y, 34, 34 }, 0.90f);
+                if ((k >= 0) == is) ++taken;
+            }
+            check(taken == total && should == 4,
+                  "and listing one piece takes its four and leaves the other sixteen -- " +
+                      std::to_string(taken) + " of " + std::to_string(total) + " right");
+        }
     }
 
     // The ids chosen beforehand, as configs/trash.ini keeps them.
@@ -5001,10 +5156,18 @@ struct PretendBin {
     std::string box;           ///< what the quantity box holds
     bool        revive_up = false;   ///< another dialog is up as well
     bool        wrong_dialog = false; ///< the bin brings up somebody else's dialog
+    bool        two_step = false;    ///< after the quantity, the question as well
+    bool        again = false;       ///< that question is the one up
+    ScreenRect  strip;               ///< the bag's tab strip
+    bool        bag_shut = false;    ///< the bag closed: no strip, until its key
     int         drags = 0, confirms = 0, cancels = 0, typed = 0, wrong_answers = 0;
+    int         keys_into_dialog = 0; ///< the bag's key pressed with a dialog up
 
     static constexpr int kDialogX = 600, kDialogY = 120;
+    /// Where the question comes up after the quantity: somewhere else.
+    static constexpr int kAgainX = kDialogX + 60, kAgainY = kDialogY + 40;
     ScreenRect pair() const {
+        if (again) return ScreenRect{ kAgainX + 101, kAgainY + 51, 85, 21 };
         return stacks || wrong_dialog ? ScreenRect{ kDialogX + 100, kDialogY + 50, 85, 21 }
                                       : ScreenRect{ kDialogX + 101, kDialogY + 51, 85, 21 };
     }
@@ -5014,7 +5177,9 @@ struct PretendBin {
         if (gone) fill(f, ScreenRect{ slot.x + 2, slot.y + 2, slot.w - 4, slot.h - 4 }, 14, 14, 14);
         if (state == State::InBin) paint_item(f, ScreenRect{ bin.x - 4, bin.y - 2, 24, 26 }, 6);
         if (state == State::Asking) {
-            if (wrong_dialog)
+            if (again)
+                blit(f, *store->get("grabbed/del_item_confirm_1"), kAgainX, kAgainY);
+            else if (wrong_dialog)
                 blit(f, *store->get("grabbed/sell_confirm"), kDialogX, kDialogY - 3);
             else if (stacks)
                 draw_count_dialog(f, *store, kDialogX, kDialogY, box, font_dir);
@@ -5022,6 +5187,7 @@ struct PretendBin {
                 blit(f, *store->get("grabbed/del_item_confirm_1"), kDialogX, kDialogY);
         }
         if (revive_up) blit(f, *store->get("grabbed/hoisinh_confirm"), 640, 420);
+        if (bag_shut) fill(f, strip, 20, 22, 30);
         return f;
     }
 
@@ -5045,17 +5211,31 @@ struct PretendBin {
             if (state == State::Asking && p.contains(x, y)) {
                 if (x < p.x + p.w / 2) {
                     ++confirms;
-                    if (wrong_dialog) ++wrong_answers;
-                    else if (!stacks || box == std::to_string(count)) gone = true;
+                    if (wrong_dialog) {
+                        ++wrong_answers;
+                    } else if (again) {
+                        gone = true;
+                    } else if (!stacks || box == std::to_string(count)) {
+                        if (two_step) {
+                            again = true;          // and the question is up instead
+                            return true;
+                        }
+                        gone = true;
+                    }
                 } else {
                     ++cancels;
                 }
+                again = false;
                 state = State::Idle;
             }
             return true;
         };
         h.key = [this](std::uint32_t vk) {
             if (state == State::Asking && vk == VK_BACK && !box.empty()) box.pop_back();
+            if (vk == 'I') {
+                if (state == State::Asking) ++keys_into_dialog;
+                else                        bag_shut = !bag_shut;
+            }
             return true;
         };
         h.type = [this](const std::string& text) {
@@ -5172,6 +5352,7 @@ void test_bag_dialogs() {
         game.base = scene;
         game.slot = slot;
         game.bin = v.trash;
+        game.strip = v.strip;
         if (corner == "?") {
             for (int y = 3; y < 11; ++y)
                 for (int x = 2; x < 13; ++x)
@@ -5190,6 +5371,7 @@ void test_bag_dialogs() {
                   game.typed == 0,
               "a stack of one: dragged, the bin clicked, its 1 left as it is, Xác Nhận -- "
               "deleted " + std::to_string(r.deleted) + ", failed " + std::to_string(r.failed));
+        check(!r.stuck, "and an item deleted leaves nothing held");
     }
     {
         PretendBin game = game_with("7");
@@ -5224,12 +5406,26 @@ void test_bag_dialogs() {
               "a dialog left open by an earlier pass is said no to first, then the pass goes on");
     }
     {
+        // The same with the bag shut: the key that opens it would go into the
+        // dialog's box, so the dialog is said no to before the key is pressed.
+        PretendBin game = game_with("");
+        game.state = PretendBin::State::Asking;
+        game.box = "1";
+        game.bag_shut = true;
+        const auto r = pass(game);
+        check(game.keys_into_dialog == 0 && game.cancels == 1 && r.ran && r.deleted == 1 &&
+                  game.gone,
+              "with the bag shut and the bin's dialog up, Hủy Bỏ first, and only then the bag's "
+              "key -- keys into the dialog " + std::to_string(game.keys_into_dialog));
+    }
+    {
         PretendBin game = game_with("");
         game.revive_up = true;
         const auto r = pass(game);
         check(!r.ran && !r.trouble.empty() && game.drags == 0 && game.confirms == 0 &&
                   game.cancels == 0,
               "with somebody else's dialog up, nothing is touched -- " + r.trouble);
+        check(!r.stuck, "and nothing of the pass's is held, so nothing is held off for it");
     }
     {
         PretendBin game = game_with("");
@@ -5238,6 +5434,63 @@ void test_bag_dialogs() {
         check(r.deleted == 0 && game.wrong_answers == 0 && game.confirms == 0 && !game.gone &&
                   !r.trouble.empty(),
               "when the bin brings up a dialog that is not its own, it is not answered");
+        check(r.stuck, "and the pass says the item may still be held, so the keys stay off");
+    }
+    {
+        // The bin asks how many, then whether: the question comes up
+        // somewhere else, and the wordless notice picture matches it at 0.84.
+        // It is the next step, not a refusal.
+        PretendBin game = game_with("7");
+        game.two_step = true;
+        const auto r = pass(game);
+        check(r.deleted == 1 && game.gone && game.confirms == 2 && game.cancels == 0,
+              "the quantity and then the question, both answered -- confirms " +
+                  std::to_string(game.confirms) + ", deleted " + std::to_string(r.deleted));
+    }
+    {
+        // A stop that comes once the bin's dialog is up gives the item back
+        // rather than pressing Xác Nhận.
+        PretendBin game = game_with("");
+        InputManager no_window;
+        BagCleaner* running = nullptr;
+        BagCleaner cleaner(no_window, store, [&](Frame& out) {
+            out = game.render();
+            if (game.state == PretendBin::State::Asking && running) running->cancel();
+            return true;
+        });
+        running = &cleaner;
+        cleaner.set_settings(cs);
+        cleaner.set_trash(&wanted);
+        cleaner.set_counts(&counts);
+        cleaner.set_hands(game.hands());
+        const auto r = cleaner.run();
+        check(game.confirms == 0 && game.cancels >= 1 && !game.gone && r.deleted == 0 && !r.stuck &&
+                  game.state == PretendBin::State::Idle,
+              "a stop while the bin asks answers Hủy Bỏ, and the item is back -- cancels " +
+                  std::to_string(game.cancels));
+    }
+
+    // Anything else that presses Xác Nhận keeps its hands off the bin's
+    // dialogs: the party invitation's footer picture -- the same two buttons
+    // -- is found on the bin's quantity dialog, and its line does not read as
+    // an invitation's.
+    {
+        Frame f = bag_scene(1280, 720, 60);
+        draw_count_dialog(f, store, 354, 306, "1", font_dir);
+        check(bag::bin_asking(f, store), "the bin's quantity dialog is the bin asking");
+        if (store.get("grabbed/party_invite_buttons") != nullptr) {
+            GlyphFont font;
+            const bool have_font = font.load(GlyphFont::default_dir());
+            PartyInvite invite;
+            const auto seen = invite.look(f, store, have_font ? &font : nullptr);
+            const ScreenRect pair{ 454, 356, 85, 21 };
+            check(!seen.up || pair.contains(seen.accept_x, seen.accept_y),
+                  "the invitation's picture, where it is found on it, puts Xác Nhận on the bin's");
+            check(seen.who.empty(), "and no invitation's name is read off its words");
+        }
+        Frame g = bag_scene(1280, 720, 60);
+        blit(g, *store.get("grabbed/hoisinh_confirm"), 700, 60);
+        check(!bag::bin_asking(g, store), "while the revive question is not the bin asking");
     }
 }
 

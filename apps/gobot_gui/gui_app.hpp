@@ -383,11 +383,25 @@ private:
     std::vector<std::string> trash_log_;              ///< guarded by worker_mutex_
     std::mutex               trash_cleaner_mutex_;
     BagCleaner*              trash_cleaner_ = nullptr; ///< the pass under way, to cancel
-    /// Held for a trash pass and for the revive sequence, so the two never
-    /// drive the mouse at once: a click on the death dialog in the middle of
-    /// a drag lets the item go wherever the pointer was.
+    /// Held for a trash pass, for the revive sequence and for the party
+    /// worker's clicks, so no two drive the mouse at once: a click on the
+    /// death dialog in the middle of a drag lets the item go wherever the
+    /// pointer was.
     std::mutex               game_mouse_mutex_;
     std::atomic<bool>        trash_pass_{false};      ///< a pass is driving the bag
+    /// A pass could not give an item back -- the bin's dialog may be open
+    /// with its box taking keys -- so everything that presses them stays held
+    /// off until the bag shows nothing waiting.
+    std::atomic<bool>        trash_hold_{false};
+
+    /// Hold every other part of the bot off for `reason`, unless something
+    /// else holds it already: a captcha's hold is not a trash pass's or a
+    /// revive's to take over, nor theirs to end. Asked and taken under one
+    /// lock, so two workers cannot both find it free.
+    bool take_hold(const std::string& reason);
+    /// End the hold, if it is still `reason`'s.
+    void end_hold(const std::string& reason);
+    std::mutex               hold_mutex_;
 
     // ---- vitals ----
     /// Reads HP and MP off the on-screen bars. The only live game state
@@ -631,6 +645,8 @@ private:
     ItemCatalog       simple_catalog_;
     bool              simple_catalog_loaded_ = false;
     std::string       simple_pick_id_;     ///< the icon whose menu is open
+    /// That icon's drawing in other colours, which go with it when it is ticked.
+    std::vector<std::string> simple_pick_kin_;
     /// Read the list again: pictures cut from the bag, and the icons ticked.
     void simple_reload_trash();
     /// Write the icons ticked to [Items] in configs/trash.ini.

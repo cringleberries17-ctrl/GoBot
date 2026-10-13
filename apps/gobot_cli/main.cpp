@@ -253,9 +253,12 @@ UNATTENDED RUNNING
                       it would throw away, throwing nothing. Every line the
                       cleaner reports is printed with the time, and the last
                       is TRASH RESULT with the counts. Exits 0 only when the
-                      pass ran, nothing stopped it and every item it tried
-                      was got rid of. Close the GUI first: both driving the
-                      bag at once get in each other's way.
+                      pass ran, nothing stopped it, every item it tried was
+                      got rid of and nothing was left waiting in the bin
+                      (stuck=1 says it may have been). Items are matched by
+                      their drawing, whatever their colour. Close the GUI
+                      first: both driving the bag at once get in each
+                      other's way.
   --close             Close whatever dialogs are in the way, for real. The one
                       thing here that needs no calibration -- the middle of a
                       close button is the close button -- so it is the right
@@ -2048,7 +2051,7 @@ int run_bag(const Options& o) {
     std::printf("\nslots (. empty, # something, X on the list of %zu, ? like a listed item "
                 "but not taken for it):\n", list.items.size());
     const auto slots = v.slots(l);
-    std::vector<std::string> doubts;
+    std::vector<std::string> notes;      // what each X and ? was, under the grid
     for (std::size_t i = 0; i < slots.size(); ++i) {
         if (i % static_cast<std::size_t>(l.cols) == 0) std::printf("   ");
         const ScreenRect& s = slots[i];
@@ -2058,23 +2061,35 @@ int run_bag(const Options& o) {
             mark = k.item >= 0 ? 'X' : k.doubt != TrashList::Verdict::Doubt::None ? '?' : '#';
             if (mark == '?' && k.like >= 0) {
                 const std::string& like = list.items[static_cast<std::size_t>(k.like)].id;
-                const std::string why = k.doubt == TrashList::Verdict::Doubt::Colour
-                    ? "its colour is " + std::to_string(k.tone_off) + " off"
-                    : "also like " + k.rival + ", which is not listed";
                 char line[240];
-                std::snprintf(line, sizeof line, "row %zu col %zu: like %s (%.2f) but %s",
+                std::snprintf(line, sizeof line,
+                              "row %zu col %zu: like %s (%.2f) but also like %s (%.2f), "
+                              "another drawing and not listed",
                               i / static_cast<std::size_t>(l.cols) + 1,
                               i % static_cast<std::size_t>(l.cols) + 1,
                               like.empty() ? "a picture" : like.c_str(),
-                              static_cast<double>(k.like_score), why.c_str());
-                doubts.push_back(line);
+                              static_cast<double>(k.like_score), k.rival.c_str(),
+                              static_cast<double>(k.rival_score));
+                notes.push_back(line);
+            } else if (mark == 'X') {
+                // What took it, and how well: what the thresholds were set
+                // from, read off a real bag.
+                const TrashList::Item& item = list.items[static_cast<std::size_t>(k.item)];
+                char line[240];
+                std::snprintf(line, sizeof line, "row %zu col %zu: %s (%.3f)%s%s",
+                              i / static_cast<std::size_t>(l.cols) + 1,
+                              i % static_cast<std::size_t>(l.cols) + 1,
+                              item.id.empty() ? "a picture" : item.id.c_str(),
+                              static_cast<double>(k.score),
+                              item.via.empty() ? "" : ", drawn like ", item.via.c_str());
+                notes.push_back(line);
             }
         }
         std::printf(" %c", mark);
         if (i % static_cast<std::size_t>(l.cols) + 1 == static_cast<std::size_t>(l.cols))
             std::printf("\n");
     }
-    for (const std::string& d : doubts) std::printf("   %s\n", d.c_str());
+    for (const std::string& n : notes) std::printf("   %s\n", n.c_str());
 
     // The picture, with what was found drawn on it.
     Frame out = shot;
@@ -2151,11 +2166,11 @@ int run_trash(const Options& o, const AppConfig& app) {
     const auto finish = [](const BagCleaner::Result& r) {
         std::fflush(stderr);
         std::printf("TRASH RESULT ran=%d matched=%d deleted=%d dropped=%d failed=%d doubtful=%d "
-                    "trouble=%s\n",
+                    "stuck=%d trouble=%s\n",
                     r.ran ? 1 : 0, r.matched, r.deleted, r.dropped, r.failed, r.doubtful,
-                    r.trouble.c_str());
+                    r.stuck ? 1 : 0, r.trouble.c_str());
         std::fflush(stdout);
-        return r.ran && r.trouble.empty() && r.failed == 0 ? 0 : 1;
+        return r.ran && r.trouble.empty() && r.failed == 0 && !r.stuck ? 0 : 1;
     };
     const auto give_up = [&](const std::string& why) {
         say(why + ".");
@@ -2197,10 +2212,11 @@ int run_trash(const Options& o, const AppConfig& app) {
     std::string tabs;
     for (int t = 0; t < kBagTabs; ++t)
         if (settings.tabs[t]) tabs += std::string(tabs.empty() ? "" : ", ") + bag_tab_name(t);
-    int pictures = 0, icons = 0, to_drop = 0;
+    int pictures = 0, icons = 0, alike = 0, to_drop = 0;
     for (const TrashList::Item& item : list.items) {
         if (!item.file.empty()) ++pictures;
-        if (!item.id.empty()) ++icons;
+        if (!item.id.empty() && item.via.empty()) ++icons;
+        if (!item.via.empty()) ++alike;
         if (item.action == TrashList::Action::Drop) ++to_drop;
     }
     char scores[80];
@@ -2212,10 +2228,10 @@ int run_trash(const Options& o, const AppConfig& app) {
         "; tabs: " + (tabs.empty() ? std::string("none ticked") : tabs) +
         "; on the list: " + std::to_string(list.items.size()) + " (" +
         std::to_string(pictures) + " pictures, " + std::to_string(icons) + " icons, " +
+        std::to_string(alike) + " more drawn like a chosen icon, " +
         std::to_string(to_drop) + " to drop); " + std::to_string(list.rivals.size()) +
         " other catalog icons to tell them from; " + scores +
-        (settings.fragments_loose ? "; fragments may be roughly the right colour"
-                                  : "; fragments held to their colour") +
+        "; matched by drawing, whatever the colour" +
         (counts.loaded() ? "" : "; no digits, so no stack counts"));
     if (to_drop > 0 && !bag::can_check(store, TrashList::Action::Drop))
         say("the items to drop are left alone: there is no picture of the drop question with "
@@ -2252,8 +2268,9 @@ int run_trash(const Options& o, const AppConfig& app) {
     cleaner.on_report(say);
 
     // Ctrl+C stops the pass at its next pause, as the GUI's Stop does, and the
-    // pass gives back whatever is in the bin as it stops. Watched from beside
-    // the pass, which knows nothing of g_stop.
+    // pass gives back whatever is in the bin as it stops -- bringing the game
+    // back in front of this console to do it. Watched from beside the pass,
+    // which knows nothing of g_stop.
     std::atomic<bool> passing{true};
     std::thread watch([&] {
         while (passing) {
@@ -2280,6 +2297,11 @@ int run_trash(const Options& o, const AppConfig& app) {
     else
         say("Xong: xoá " + std::to_string(r.deleted) + ", vứt " + std::to_string(r.dropped) +
             " món." + extra);
+    // Nothing here holds keys off the way the GUI does, so the player is told
+    // instead: a box left open takes whatever is typed next as the count.
+    if (r.stuck)
+        say("Món đồ có thể vẫn đang ở trong thùng rác hoặc trong hộp thoại của nó: bấm Hủy Bỏ "
+            "trong game trước khi gõ phím nào.");
     return finish(r);
 }
 
