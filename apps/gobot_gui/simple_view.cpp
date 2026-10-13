@@ -1126,6 +1126,30 @@ void GuiApp::simple_start() {
         return;
     }
 
+    // The last stop ended the trash worker's hold while the bin's dialog may
+    // still have been open with an item in it, and that dialog's box takes
+    // the macro's potion keys as numbers. Nothing starts until the game is
+    // seen with no dialog up and nothing waiting in the bin.
+    if (trash_left_held_) {
+        if (!simple_store_loaded_) {
+            simple_store_loaded_ = true;
+            simple_store_.load_best(exe_relative("configs/templates.ini"));
+        }
+        ScreenCapture capture;
+        Frame frame;
+        if (!capture.grab(input_.target_window(), frame) || !frame.valid()) {
+            simple_note("Chưa chụp được màn hình game để xem hộp thoại của thùng rác đã đóng chưa. "
+                        "Để game hiện rõ rồi bấm BẮT ĐẦU.", 12000);
+            return;
+        }
+        if (!bag::nothing_held(frame, simple_store_, clean.layout)) {
+            simple_note("Trong game vẫn còn một hộp thoại đang mở, có thể là của thùng rác. Bấm "
+                        "Hủy Bỏ trong game rồi bấm BẮT ĐẦU.", 12000);
+            return;
+        }
+        trash_left_held_ = false;
+    }
+
     // The tallies start here, before anything can press a key, rather than
     // when the tick next notices the bot is running.
     simple_track_run(true);
@@ -1157,10 +1181,11 @@ void GuiApp::simple_stop() {
     stop_macro();
     stop_party();
     stop_revive();
-    stop_trash();
+    // Not said over the word that the bin's dialog may still be open.
+    const bool bin_note = stop_trash();
     stop_keeper();
     simple_track_run(false);
-    simple_note("Đã dừng.");
+    if (!bin_note) simple_note("Đã dừng.");
 }
 
 void GuiApp::simple_track_run(bool running) {

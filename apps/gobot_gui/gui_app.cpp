@@ -2973,7 +2973,7 @@ void GuiApp::request_trash(bool look_only) {
     trash_thread_ = std::thread([this] { trash_loop(); });
 }
 
-void GuiApp::stop_trash() {
+bool GuiApp::stop_trash() {
     trash_stop_ = true;
     {
         std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
@@ -2992,18 +2992,24 @@ void GuiApp::stop_trash() {
     // A pass that could not give its item back -- the game covered where Hủy
     // Bỏ is -- leaves the bin's dialog open, and with the worker gone nothing
     // is left watching it. Whatever presses keys stops too, rather than
-    // typing potion keys into the dialog's box once the hold is lifted.
+    // typing potion keys into the dialog's box once the hold is lifted, and
+    // the player is told whether or not those were running: DỪNG stops them
+    // before it gets here, and BẮT ĐẦU would start them again straight away.
+    // So BẮT ĐẦU looks at the game first; see simple_start.
     if (trash_hold_.exchange(false)) {
         if (macro_running_ || hunting_) {
             stop_hunt();
             stop_macro();
-            simple_note("Hộp thoại của thùng rác có thể vẫn đang mở trong game, nên GoBot dừng "
-                        "cả đánh quái và bình để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
-                        "rồi bấm BẮT ĐẦU.", 15000);
         }
+        trash_left_held_ = true;
+        simple_note("Hộp thoại của thùng rác có thể vẫn đang mở trong game, nên GoBot dừng "
+                    "cả đánh quái và bình để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
+                    "rồi bấm BẮT ĐẦU.", 15000);
         GB_WARN("Trash: stopped while the bin may still hold an item; the keys are stopped too");
         end_hold("trash cleaning");
+        return true;
     }
+    return false;
 }
 
 bool GuiApp::take_hold(const std::string& reason) {
@@ -3066,6 +3072,23 @@ void GuiApp::trash_loop() {
     // it, or a later pass did.
     bool held = trash_hold_;
     std::uint64_t held_looked_ms = 0;
+    // The same from the start when the game already shows the bin asking, or
+    // something waiting in it -- left by a pass a stop cut short, or by hand:
+    // held off now, not from the first pass fifteen seconds on.
+    if (!held) {
+        Frame f;
+        if (grab(f) && f.valid()) {
+            const BagView v = bag::find(f, store, settings.layout);
+            if ((bag::bin_asking(f, store) || (v.found && !v.bin_empty)) &&
+                take_hold("trash cleaning")) {
+                held = true;
+                trash_hold_ = true;
+                held_looked_ms = now_ms();
+                tell("Thùng rác đang giữ một món đồ, hoặc hộp thoại của nó đang mở: đánh quái, "
+                     "bình và buff tạm dừng đến khi không còn gì chờ. Bấm Hủy Bỏ trong game.");
+            }
+        }
+    }
     while (!trash_stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (held && now_ms() - held_looked_ms > 1500) {
@@ -3165,10 +3188,13 @@ void GuiApp::trash_loop() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(350));
                 }
                 r = cleaner.run();
-                // Kept while the bin may still hold the item; otherwise ended,
-                // if it is still this pass's -- a captcha seen during the pass
-                // has taken it over, and keeps it.
-                held = r.stuck;
+                // Kept while the bin may still hold the item, and by a pass
+                // that never got to a clean screen -- a look-only one, or one
+                // that met a dialog it would not answer -- since it saw
+                // nothing of an earlier item coming back. Otherwise ended, if
+                // it is still this pass's: a captcha seen during the pass has
+                // taken it over, and keeps it.
+                held = r.keeps_hold(held);
                 trash_hold_ = held;
                 if (!held) end_hold("trash cleaning");
                 trash_pass_ = false;

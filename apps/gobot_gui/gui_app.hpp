@@ -370,7 +370,8 @@ private:
     /// started for a button press alone, it does that one pass and ends.
     void start_trash();                   ///< the timed passes, for a run
     void request_trash(bool look_only);   ///< one pass now
-    void stop_trash();
+    /// True when it ended a hold the bin may still need, and said so.
+    bool stop_trash();
     void trash_loop();
     void say_trash(const std::string& line);
 
@@ -393,6 +394,9 @@ private:
     /// with its box taking keys -- so everything that presses them stays held
     /// off until the bag shows nothing waiting.
     std::atomic<bool>        trash_hold_{false};
+    /// A stop ended that hold with nothing left to watch the bin, so nothing
+    /// is started again until the game is seen with nothing waiting.
+    std::atomic<bool>        trash_left_held_{false};
 
     /// Hold every other part of the bot off for `reason`, unless something
     /// else holds it already: a captcha's hold is not a trash pass's or a

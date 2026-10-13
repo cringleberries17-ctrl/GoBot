@@ -149,7 +149,8 @@ float alike(const Frame& a, const Frame& b, const BagLayout& l);
 /// else, so this has to be right. The client prints both in the same digits as
 /// everything else, white with a dark outline -- the commercial client's
 /// glyphs for those digits match them pixel for pixel. Measured against real
-/// slots reading 2, 7, 97, 100 and 67, and a box reading 1.
+/// slots reading 2, 7, 97, 100 and 67, and boxes reading 1 and 2, the 2 with
+/// the box's caret over its last column.
 class CountReader {
 public:
     /// Something white is there that does not read as a number.
@@ -169,6 +170,13 @@ public:
     /// A number written in `area`: 0 when there is nothing white in it at all,
     /// kUnreadable when there is but it does not read, or the digits are not
     /// loaded.
+    ///
+    /// This is for a quantity box. Its caret -- a yellow bar two pixels wide,
+    /// right after the number -- blinks about half a second on and half off,
+    /// and while it is on it stands over the last column of a digit five
+    /// pixels wide. What is under it cannot be seen, so its pixels are left
+    /// out of the comparison, neither stroke nor ground; a digit with too much
+    /// of itself under it does not read.
     int read_field(const Frame& f, const ScreenRect& area) const;
 
     /// Give a digit its shape directly. For tests.
@@ -177,8 +185,9 @@ public:
 private:
     /// Digits in `area`, left to right, the line starting no lower than
     /// `max_top`: the number, or -1 when none reads. `white` gets how many
-    /// pixels there were white enough to be part of a digit.
-    int scan(const Frame& f, const ScreenRect& area, int max_top, int& white) const;
+    /// pixels there were white enough to be part of a digit. With `caret`,
+    /// the caret's yellow pixels are unknown rather than ground.
+    int scan(const Frame& f, const ScreenRect& area, int max_top, bool caret, int& white) const;
 
     struct Glyph {
         int w = 0, h = 0;
@@ -431,10 +440,10 @@ bool can_check(const TemplateStore& store, TrashList::Action a);
 /// Every step is checked against the screen before the next: the bag has to be
 /// found before anything is touched, a dialog has to be the bin's own -- by
 /// its words -- before its button is pressed, the number in a quantity box has
-/// to be read back before it is confirmed, and an item has to be gone before
-/// it counts. Anything unexpected and it backs out, answering Hủy Bỏ on the
-/// bin's dialog so the item goes back to the bag, rather than pressing on:
-/// this is the one feature that destroys things.
+/// to read as the stack's count, look after look, before it is confirmed, and
+/// an item has to be gone before it counts. Anything unexpected and it backs
+/// out, answering Hủy Bỏ on the bin's dialog so the item goes back to the bag,
+/// rather than pressing on: this is the one feature that destroys things.
 class BagCleaner {
 public:
     using Grab = std::function<bool(Frame&)>;
@@ -471,11 +480,14 @@ public:
     /// input unless set; a test sets them to a pretend game, which is how the
     /// whole of an item's way into the bin is tried without one. Setting them
     /// also skips the check that the game is in front.
+    ///
+    /// No text is typed as such: a count goes into the quantity box as
+    /// presses of the digit keys, through `key`, since the game's box ignores
+    /// text sent as Unicode characters.
     struct Hands {
         std::function<bool(int, int)>                click;
         std::function<bool(int, int, int, int)>      drag;
         std::function<bool(std::uint32_t)>           key;
-        std::function<bool(const std::string&)>      type;
     };
     void set_hands(Hands h) { hands_ = std::move(h); skip_focus_check_ = true; }
 
@@ -493,6 +505,15 @@ public:
         /// whatever is typed. Whoever ran the pass keeps everything that
         /// presses keys held off until bag::nothing_held says otherwise.
         bool stuck = false;
+
+        /// Whether everything that presses keys stays held off after this
+        /// pass, given whether it was before. Taken while an item may be
+        /// out; and left as it was by a pass that never got to a clean
+        /// screen -- a look-only one, or one that met a dialog it would not
+        /// answer -- since that pass has seen nothing of whether an earlier
+        /// item came back. Only a pass that ran, or bag::nothing_held on a
+        /// fresh look, ends it.
+        bool keeps_hold(bool held_before) const { return stuck || (held_before && !ran); }
     };
     Result run();
 
@@ -523,11 +544,21 @@ private:
     /// dialog; then the answer. `count` is the stack count read off the slot.
     bool trash_one(const Frame& f, const BagView& v, int index, int count);
 
-    /// Answer the bin's dialog that is up -- the question, or the quantity
-    /// with the box filled in and read back -- and then whatever the bin asks
-    /// next, up to one more. kDone when the last one has closed.
+    /// Answer the bin's dialog that is up -- the question, or the quantity,
+    /// confirmed only with the stack's count in the box -- and then whatever
+    /// the bin asks next, up to one more. kDone when the last one has closed.
     enum { kFailed = 0, kDone = 1 };
     int  answer(const bag::Dialog& first, int count);
+
+    /// What the box of the bin's quantity dialog `d` holds, looked at again
+    /// and again for a whole blink of its caret: the number every look that
+    /// read one agrees on, two looks at least. kUnreadable when fewer read
+    /// one, kBoxMixed when two read different numbers, kBoxGone when the
+    /// dialog was no longer the bin's, where it was. `last` gets the last
+    /// frame looked at.
+    static constexpr int kBoxMixed = -2;
+    static constexpr int kBoxGone = -3;
+    int  box_holds(const bag::Dialog& d, Frame& last);
 
     /// A dialog of the bin's on screen within `ms`, or one with kind -1 and
     /// an empty pair. `foreign` is set when another dialog came up instead,
@@ -544,7 +575,8 @@ private:
     bool click(int x, int y);
     bool drag(int fx, int fy, int tx, int ty);
     bool press(std::uint32_t vk, int hold_ms = -1);
-    bool type(const std::string& text);
+    /// `n` as presses of the digit keys along the top of the keyboard.
+    bool type_number(int n);
 
     InputManager&        input_;
     const TemplateStore& store_;

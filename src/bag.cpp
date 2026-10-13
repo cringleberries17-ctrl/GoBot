@@ -38,11 +38,12 @@ const char* const kNotice = "grabbed/dialog_ok";
 /// The bin's two dialogs, and where the pair of buttons sits in each picture.
 ///
 /// The question for one item, and the quantity for a stack -- which a single
-/// item of a kind that stacks gets as well, with 1 already in the box. The
-/// question's picture draws its two buttons a pixel closer together than the
-/// quantity's does, so the pair is looked for in both drawings; the quantity's
-/// picture stops above its buttons, and where they sit was measured on the
-/// live client, which matched that picture at 1.000.
+/// item of a kind that stacks gets as well. The game fills the box in itself
+/// with the whole stack: 1 for a single piece, 2 for a stack of two, seen
+/// live. The question's picture draws its two buttons a pixel closer together
+/// than the quantity's does, so the pair is looked for in both drawings; the
+/// quantity's picture stops above its buttons, and where they sit was measured
+/// on the live client, which matched that picture at 1.000.
 struct DialogPicture {
     const char* name;
     int         pair_dx, pair_dy;   ///< the pair, from the picture's top-left
@@ -72,6 +73,12 @@ constexpr float kButtonScore = 0.82f;
 
 /// The quantity box, from the pair of buttons: left of them, a little inset.
 constexpr int kBoxDx = -88, kBoxDy = 3, kBoxW = 82;
+
+/// How long the quantity box is watched before its number is taken, and how
+/// often it is looked at meanwhile: a whole blink of its caret, which is on
+/// for about half a second and off for about as long, with some to spare.
+constexpr int kBoxWatchMs = 1200;
+constexpr int kBoxLookMs = 150;
 
 /// How alike a slot has to stay to what it held before the drag for the item
 /// to count as still there.
@@ -421,44 +428,63 @@ void CountReader::set_digit(int d, int w, int h, const std::vector<std::uint8_t>
         if (each.w == 0) loaded_ = false;
 }
 
-int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, int& white) const {
+int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool caret,
+                      int& white) const {
     white = 0;
     const int kW = area.w, kH = area.h;
     if (!f.valid() || kW <= 0 || kH <= 0) return -1;
 
     // The digits are white and the item under them is not: bright and grey
     // picks out the one from the other, even over a white potion, because
-    // the digits carry a dark outline that keeps them apart. A box's caret is
-    // yellow, so it is not taken for a 1.
-    std::vector<std::uint8_t> map(static_cast<std::size_t>(kW) * kH, 0);
+    // the digits carry a dark outline that keeps them apart.
+    //
+    // A quantity box's caret is yellow -- 200 to 255 red and green, 55 blue
+    // at most, brighter where a stroke is under it -- so it is never taken
+    // for a 1. While it is on it covers the last column of a digit five
+    // pixels wide, and counted as ground it cost a 2 three of its nineteen
+    // strokes, so that the game's own count in the box did not read. In a box
+    // its pixels are unknown instead: left out of the comparison either way.
+    // Not in a slot's corner, where yellow is the item's own.
+    enum : std::uint8_t { kGround = 0, kStroke = 1, kUnknown = 2 };
+    std::vector<std::uint8_t> map(static_cast<std::size_t>(kW) * kH, kGround);
     for (int y = 0; y < kH; ++y)
         for (int x = 0; x < kW; ++x) {
             std::uint8_t r, g, b;
             f.get(area.x + x, area.y + y, r, g, b);
             const int lo = std::min({ r, g, b }), hi = std::max({ r, g, b });
+            std::uint8_t& m = map[static_cast<std::size_t>(y) * kW + x];
             if ((r + g + b) / 3 > 175 && hi - lo < 40) {
-                map[static_cast<std::size_t>(y) * kW + x] = 1;
+                m = kStroke;
                 ++white;
+            } else if (caret && r > 150 && g > 150 && b < 100) {
+                m = kUnknown;
             }
         }
     if (!loaded_ || white == 0) return -1;
 
     // How well digit `d` sits at (x, y): the share of its box that agrees,
-    // and the share of its strokes that are there.
+    // and the share of its strokes that are there, both of what can be seen.
+    // A digit with a quarter of its box or of its strokes out of sight does
+    // not fit at all: that is a guess, not a reading. The caret over a 2
+    // hides a fifth of its box and three of its nineteen strokes.
     const auto fit = [&](int d, int x, int y, double& agree, double& strokes) {
         const Glyph& g = digits_[d];
         agree = strokes = 0.0;
         if (x + g.w > kW || y + g.h > kH || g.lit == 0) return;
-        int same = 0, hit = 0;
+        int seen = 0, seen_lit = 0, same = 0, hit = 0;
         for (int gy = 0; gy < g.h; ++gy)
             for (int gx = 0; gx < g.w; ++gx) {
-                const std::uint8_t want = g.on[static_cast<std::size_t>(gy) * g.w + gx];
+                const bool want = g.on[static_cast<std::size_t>(gy) * g.w + gx] != 0;
                 const std::uint8_t have = map[static_cast<std::size_t>(y + gy) * kW + x + gx];
-                if (want == have) ++same;
-                if (want && have) ++hit;
+                if (have == kUnknown) continue;
+                ++seen;
+                if (want) ++seen_lit;
+                if (want == (have == kStroke)) ++same;
+                if (want && have == kStroke) ++hit;
             }
-        agree = static_cast<double>(same) / (g.w * g.h);
-        strokes = static_cast<double>(hit) / g.lit;
+        if (seen * 4 < g.w * g.h * 3 || seen_lit * 4 < g.lit * 3) return;
+        agree = static_cast<double>(same) / seen;
+        strokes = static_cast<double>(hit) / seen_lit;
     };
 
     // Left to right along each starting row; the row that reads the most
@@ -497,7 +523,7 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, int& 
 int CountReader::read(const Frame& f, const ScreenRect& slot) const {
     if (!loaded_ || !f.valid()) return kUnreadable;
     int white = 0;
-    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, white);
+    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, false, white);
     if (white == 0) return 1;                 // nothing printed: a stack of one
     if (n <= 0 || n > 9999) return kUnreadable;
     return n;
@@ -506,8 +532,8 @@ int CountReader::read(const Frame& f, const ScreenRect& slot) const {
 int CountReader::read_field(const Frame& f, const ScreenRect& area) const {
     if (!loaded_ || !f.valid()) return kUnreadable;
     int white = 0;
-    const int n = scan(f, area, std::max(0, area.h - 8), white);
-    if (white == 0) return 0;
+    const int n = scan(f, area, std::max(0, area.h - 8), true, white);
+    if (white == 0) return 0;                 // the caret alone is an empty box
     return n < 0 ? kUnreadable : n;
 }
 
@@ -1046,17 +1072,28 @@ bool BagCleaner::press(std::uint32_t vk, int hold_ms) {
     return hands_.key ? hands_.key(vk) : input_.key_press(vk, hold_ms);
 }
 
-bool BagCleaner::type(const std::string& text) {
-    if (hands_.type) return hands_.type(text);
-    // Typing goes to whatever has the keyboard, and the game's own input does
-    // not check which: a player who clicked GoBot a moment ago would get the
-    // count in one of its boxes. The box is read back before Xác Nhận, so a
-    // count that went nowhere is a dialog said no to, not a guess.
-    if (!input_.window_focused()) {
+bool BagCleaner::type_number(int n) {
+    // Key presses, not text. The game's box takes keys the way the keyboard
+    // sends them -- END and BACKSPACE emptied it live -- and ignores text sent
+    // as Unicode characters, which is how InputManager::type_text sends it:
+    // the count typed that way never appeared. '0' to '9' are the virtual
+    // keys of the digits along the top of the keyboard, sent with their scan
+    // codes like every other key.
+    //
+    // Keys go to whatever has the keyboard, so not while the game is not in
+    // front -- key_press would not send them anyway, and this says why. The
+    // box is read back before Xác Nhận, so a count that went nowhere is a
+    // dialog said no to, not a guess.
+    if (!hands_.key && !input_.window_focused()) {
         say("cửa sổ game không ở trên cùng, nên không gõ số lượng");
         return false;
     }
-    return input_.type_text(text);
+    if (n < 0) return false;
+    for (const char digit : std::to_string(n)) {
+        if (!press(static_cast<std::uint32_t>(digit), 30)) return false;
+        pause_ms(60);                // one key at a time, as a hand would
+    }
+    return true;
 }
 
 bool BagCleaner::grab_view(Frame& f, BagView& v) {
@@ -1513,13 +1550,44 @@ bag::Dialog BagCleaner::wait_for_dialog(int ms, bool& foreign, Frame* last) {
     return bag::Dialog{};
 }
 
+int BagCleaner::box_holds(const bag::Dialog& d, Frame& last) {
+    // Every look until the caret has been on and off: one that reads a
+    // number has to agree with every other that does, and a look that reads
+    // nothing -- the dialog caught being drawn, say -- counts neither way.
+    int value = CountReader::kUnreadable, reads = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        if (!wait_ms(kBoxLookMs)) return CountReader::kUnreadable;     // stopped
+        const bool long_enough = std::chrono::steady_clock::now() - start >=
+                                 std::chrono::milliseconds(kBoxWatchMs);
+        Frame f;
+        if (grab_ && grab_(f) && f.valid()) {
+            bool there = false;
+            for (const bag::Dialog& each : bag::find_dialogs(f, store_))
+                there = there || (each.ours() && each.quantity && same_place(each.pair, d.pair));
+            if (!there) {
+                last = std::move(f);
+                return kBoxGone;
+            }
+            const int n = counts_ ? counts_->read_field(f, d.box) : CountReader::kUnreadable;
+            last = std::move(f);
+            if (n != CountReader::kUnreadable) {
+                if (reads > 0 && n != value) return kBoxMixed;
+                value = n;
+                ++reads;
+            }
+        }
+        if (long_enough) break;
+    }
+    return reads >= 2 ? value : CountReader::kUnreadable;
+}
+
 int BagCleaner::answer(const bag::Dialog& first, int count) {
     bag::Dialog d = first;
     for (int asked = 0; asked < 2; ++asked) {
         if (d.quantity) {
             // The box takes the exact number in the stack and nothing else, so
-            // an unreadable count is a stop, not a guess -- and what goes in is
-            // read back before it is confirmed.
+            // an unreadable count is a stop, not a guess.
             if (counts_ == nullptr || !counts_->loaded() || count == CountReader::kUnreadable ||
                 count <= 0) {
                 say("không đọc được số lượng trên ô đồ, nên bỏ qua món này");
@@ -1527,34 +1595,45 @@ int BagCleaner::answer(const bag::Dialog& first, int count) {
                 if (grab_ && grab_(f)) keep(f, "no_count");
                 return kFailed;
             }
+            // The game fills the box in with the whole stack itself, so the
+            // box usually holds the count already, and then it is left
+            // alone. Only a number that is not the count is replaced: a box
+            // that does not read may well hold the right one, and erasing it
+            // would throw away the one number the game is sure to take.
             Frame f;
-            if (!grab_ || !grab_(f) || !f.valid()) return kFailed;
-            int in_box = counts_->read_field(f, d.box);
-            if (in_box != count) {
+            int in_box = box_holds(d, f);
+            if (cancelled_) return kFailed;
+            if (in_box >= 0 && in_box != count) {
+                say((in_box == 0 ? std::string("ô số lượng đang trống")
+                                 : "ô số lượng ghi " + std::to_string(in_box)) +
+                    ", nên gõ " + std::to_string(count) + " vào");
                 if (!mouse_ok(d.box.cx(), d.box.cy())) return kFailed;
                 click(d.box.cx(), d.box.cy());
                 if (!wait_ms(150)) return kFailed;
                 press(VK_END, 25);
                 for (int i = 0; i < 6; ++i) press(VK_BACK, 25);
-                type(std::to_string(count));
-                // Read back, a few looks while the box catches up.
-                bool there = false;
-                for (int look = 0; look < 3 && in_box != count; ++look) {
-                    if (!wait_ms(200)) return kFailed;
-                    if (!grab_(f) || !f.valid()) continue;
-                    there = false;
-                    for (const bag::Dialog& each : bag::find_dialogs(f, store_))
-                        there = there || (each.ours() && same_place(each.pair, d.pair));
-                    in_box = there ? counts_->read_field(f, d.box) : CountReader::kUnreadable;
-                }
-                if (!there || in_box != count) {
-                    say("ô số lượng ghi " +
-                        (in_box == CountReader::kUnreadable ? std::string("số không đọc được")
-                                                            : std::to_string(in_box)) +
-                        " chứ không phải " + std::to_string(count) + ", nên không bấm Xác Nhận");
-                    keep(f, "box");
-                    return kFailed;
-                }
+                type_number(count);
+                // Read back the same way, once the box has caught up.
+                if (!wait_ms(250)) return kFailed;
+                in_box = box_holds(d, f);
+                if (cancelled_) return kFailed;
+            }
+            if (in_box != count) {
+                say(in_box == kBoxGone
+                        ? std::string("hộp thoại hỏi số lượng không còn ở chỗ cũ, nên không bấm "
+                                      "Xác Nhận")
+                    : in_box == kBoxMixed
+                        ? std::string("ô số lượng lúc đọc ra số này lúc ra số khác, nên không bấm "
+                                      "Xác Nhận")
+                    : in_box == CountReader::kUnreadable
+                        ? std::string("không đọc được số trong ô số lượng, nên không bấm Xác Nhận")
+                    : in_box == 0
+                        ? "ô số lượng trống chứ không ghi " + std::to_string(count) +
+                              ", nên không bấm Xác Nhận"
+                        : "ô số lượng ghi " + std::to_string(in_box) + " chứ không phải " +
+                              std::to_string(count) + ", nên không bấm Xác Nhận");
+                keep(f, "box");
+                return kFailed;
             }
         }
 
