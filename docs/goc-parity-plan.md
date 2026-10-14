@@ -392,3 +392,14 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
 - **Reading or writing game memory, forging or injecting packets (for own position or anything else)**: Forbidden by the project's limits, and the game ships XIGNCODE3 (docs/overhaul.md). Position research (P3-1) is limited to the screen, passive packets and GoBot's own inputs.
 - **Vendor auto-update (WinSparkle appcast)**: GoBot is built from its own repository (build.ps1, package.ps1). An updater that pulls binaries from an outside server is a supply-chain risk.
 - **EULA screen, Discord/Telegram community links, GoC server reconnect overlay, latency and packet counters**: These cover GoC's vendor relationship and its link to its own server (0x17d8e8-0x17ed00, 0x17c720, 0x176168-0x1761b0). GoBot has no such server.
+
+## Decisions by the player (2026-10-14)
+
+- **Revive without revive items:** never fall back to reviving in the village (it costs 2% EXP). Leave
+  the revive as it is and, when the revive items run out, stop the bot (with an alert once alerts exist).
+- **Failed login:** try the crossing 3 times; if all three fail, stop and wait for the player (no timed
+  retries after that).
+- **Quick quest:** build it, reusing GoC's own approach and pictures as far as possible (BA first).
+- **Alerts:** no Telegram bot. Alternatives offered: a Discord webhook or ntfy for one-way phone alerts,
+  a Zalo bot later if two-way control is wanted; plus a local sound/Windows notification. The player's
+  choice is pending. The webhook URL / topic / token is stored with DPAPI and never logged.
