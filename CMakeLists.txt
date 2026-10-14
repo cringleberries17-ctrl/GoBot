@@ -125,8 +125,8 @@ endfunction()
 # DLL is absent. This was applied to the GUI alone, and the consequence was
 # only found by dumping the import table of a package meant for somebody else:
 # gobot_cli.exe would not launch on a machine without Npcap -- so neither would
-# `--setlogin`, which is the first thing the instructions tell a new user to
-# run, and which has nothing to do with capturing packets.
+# `--doctor`, which is the first thing a new user is asked to run when
+# something does not work, and which has nothing to do with capturing packets.
 #
 # Every one of these reads the screen for a living. Npcap is for the protocol
 # tools and nothing else, and the dependency belongs to them alone.
@@ -311,6 +311,10 @@ endif()
 add_executable(gobot_test apps/gobot_test/main.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
+# Where the configs that ship are, so a test checks those against the code --
+# not the copies beside the exe, which are a player's to change.
+target_compile_definitions(gobot_test PRIVATE
+    GOBOT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 enable_testing()
 add_test(NAME selftest COMMAND gobot_test)

@@ -218,15 +218,16 @@ UNATTENDED RUNNING
                       is not failing at random, and a program that keeps
                       reconnecting to a server refusing it is indistinguishable
                       from an attack on that server.
-  --setlogin          Write the game account down for the auto-login. The
-                      password is typed with the echo off, never appears on a
-                      command line, and is stored encrypted with your Windows
-                      account's own key.
-  --login             Cross from a cold machine to a character in the world:
-                      launcher, login page, game list, start, connect, channel,
-                      character. Says what it still needs if any page has yet
-                      to be identified. It does not answer captchas and never
-                      will -- if one appears it stops and says so.
+  --setlogin          Not needed any more, and writes nothing: GoBot does not
+                      use a user name or a password. Sign in to VTCZone once,
+                      with its remember option; GoBot only presses Choi game.
+  --login             Cross from VTCZone to a character in the world: the game
+                      list, Choi game, the game's own launcher and its START,
+                      connect, channel, character. VTCZone has to be signed in
+                      already -- if it shows its sign-in form the flow stops and
+                      says so. It does not answer captchas or Security Alert
+                      boxes and never will: if one appears it stops and says so.
+                      With --dry it only looks, and says what it would click.
   --upto <page>       With --login: cross as far as that page and stop with it
                       on screen. For measuring. The channel list and the
                       character select are each up for about a second in the
@@ -294,7 +295,8 @@ UNATTENDED RUNNING
                       open, Enter to send only once the field shows the text,
                       and a look that it closed. Every step is printed; the
                       last line is
-                        CHAT RESULT sent=<0|1> method=<m> typed="<text>" trouble=<text>
+                        CHAT RESULT sent=<0|1> left_open=<0|1> method=<m>
+                                    typed="<text>" trouble=<text>
                       and it exits 0 only when the line was sent. It refuses
                       while gobot_gui runs (that one's keys cannot be held off
                       from here), and within 30 seconds of the last line it
@@ -304,7 +306,9 @@ UNATTENDED RUNNING
                       the front, not the game, so what was typed may be left
                       in the game's chat line: look before pressing a key there.
                       When the line may have been left open, it looks a few
-                      times more, pressing nothing, and says what it saw.
+                      times more, pressing nothing, and says what it saw;
+                      left_open=1 says those looks still could not see it
+                      shut, so look at it before pressing a key in the game.
   --chat <text>       The same with these words, for a person at a console.
   --method <m>        With --chat-once or --chat: type with vk (a key per
                       character, GoC's way), unicode, wmchar or imechar
@@ -2598,16 +2602,21 @@ int run_chat(const Options& o, const AppConfig& app) {
     };
     std::string method = "vk";
     std::string typed;
-    const auto finish = [&](bool sent, const std::string& trouble) {
+    // left_open: the chat line may still be open after this, as far as the
+    // last looks could tell -- said on the result line itself, so that a
+    // result read at a glance does not pass for a line sent and shut.
+    const auto finish = [&](bool sent, bool left_open, const std::string& trouble) {
         std::fflush(stderr);
-        std::printf("CHAT RESULT sent=%d method=%s typed=\"%s\" trouble=%s\n", sent ? 1 : 0,
-                    method.c_str(), typed.c_str(), trouble.c_str());
+        std::printf("CHAT RESULT sent=%d left_open=%d method=%s typed=\"%s\" trouble=%s\n",
+                    sent ? 1 : 0, left_open ? 1 : 0, method.c_str(), typed.c_str(),
+                    trouble.c_str());
         std::fflush(stdout);
         return sent ? 0 : 1;
     };
+    // Before anything is pressed, so nothing of this can have left it open.
     const auto give_up = [&](const std::string& why) {
         say(why);
-        return finish(false, why);
+        return finish(false, false, why);
     };
 
     TemplateStore store;
@@ -2752,7 +2761,7 @@ int run_chat(const Options& o, const AppConfig& app) {
                   chat_bar_name(r.last.state), r.last.dark,
                   static_cast<double>(r.last.closed_score), r.last.ink);
     say(last);
-    return finish(r.sent, r.trouble);
+    return finish(r.sent, still_doubt, r.trouble);
 }
 
 /// List the routines, or run one.
@@ -2869,85 +2878,37 @@ int run_routines(const Options& o, const AppConfig& app) {
     return 1;
 }
 
-/// Write the account down, once, so the flow can log in without being asked.
+/// Text that is UTF-8, printed so a console shows it as written.
 ///
-/// The password is read with the console's echo turned off and is never put on
-/// a command line -- a command line is visible to every process on the machine
-/// and ends up in the shell's history besides. What lands in the file is
-/// encrypted with this Windows account's own key.
-int run_set_login(const Options&) {
-    const std::string path = resolve("configs/login.ini");
-
-    AutoLogin::Settings settings;
-    if (!settings.load(path)) {
-        settings.pages = AutoLogin::default_pages();
-        settings.launcher_window = "VTCZone";
-        // client_window stays empty on purpose: the game's launcher has no
-        // title and is found by its class and program instead.
-        settings.game_window = "GhostOnlineVTC";
-    }
-
-    std::printf("Account for the auto-login, written to %s\n\n", path.c_str());
-
-    std::printf("Username: ");
-    std::fflush(stdout);
-    std::string username;
-    if (!std::getline(std::cin, username) || username.empty()) {
-        std::fprintf(stderr, "\nNothing entered; nothing written.\n");
-        return 1;
-    }
-
-    // Echo off for the password.
-    const HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+/// The console shows bytes in its own code page, which is not UTF-8, and
+/// Vietnamese comes out of it as rubbish. Switched for the one write and
+/// switched back, because the code page belongs to the console window -- the
+/// shell this was started from goes on using it after this program has gone.
+/// Output that is redirected to a file gets the bytes as they are.
+void print_utf8(const char* text) {
     DWORD mode = 0;
-    const bool is_console = GetConsoleMode(in, &mode) != 0;
-    if (is_console) SetConsoleMode(in, mode & ~static_cast<DWORD>(ENABLE_ECHO_INPUT));
-
-    std::printf("Password: ");
+    const bool console = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) != 0;
+    const UINT was = console ? GetConsoleOutputCP() : 0;
     std::fflush(stdout);
-    std::string password;
-    const bool got = static_cast<bool>(std::getline(std::cin, password));
+    if (console) SetConsoleOutputCP(CP_UTF8);
+    std::fputs(text, stdout);
+    std::fflush(stdout);
+    if (console) SetConsoleOutputCP(was);
+}
 
-    if (is_console) SetConsoleMode(in, mode);
-    std::printf("\n");
-
-    if (!got || password.empty()) {
-        std::fprintf(stderr, "Nothing entered; nothing written.\n");
-        return 1;
-    }
-
-    const std::string protected_text = AutoLogin::protect(password);
-    // Scrub the copy in this process before it can reach a crash dump.
-    SecureZeroMemory(password.data(), password.size());
-    if (protected_text.empty()) {
-        std::fprintf(stderr, "Windows would not encrypt it; nothing written.\n");
-        return 1;
-    }
-
-    settings.username = username;
-    settings.password_protected = protected_text;
-
-    // Two keys changed in place when the file already exists, rather than the
-    // whole thing rewritten.
-    //
-    // login.ini is written in by hand: every page of the crossing carries the
-    // measurements that identify it and the reasoning behind each number.
-    // Saving the settings object over the file keeps the values and throws
-    // away all of that, which would be a steep price for typing in a password.
-    const bool existed = std::ifstream(path).good();
-    const bool wrote =
-        existed
-            ? (IniFile::set_in_place(path, "Login", "username", username) &&
-               IniFile::set_in_place(path, "Login", "password", protected_text))
-            : settings.save(path);
-    if (!wrote) {
-        std::fprintf(stderr, "Could not write %s\n", path.c_str());
-        return 1;
-    }
-
-    std::printf("Written. The password is encrypted with your Windows account's\n"
-                "own key, so the file is of no use to another user or on another\n"
-                "machine -- including after you copy this folder somewhere else.\n");
+/// Kept so that old instructions still work, and does nothing.
+///
+/// This used to write the game account into configs/login.ini for the flow
+/// to type into VTCZone. Nothing needs one now: VTCZone stays signed in by
+/// itself and the crossing starts at its list of games, as GoC's does. It
+/// reads nothing and writes nothing -- a file that still has an account in it
+/// from before is left exactly as it is.
+int run_set_login(const Options&) {
+    print_utf8("Không cần nữa: GoBot không dùng tên đăng nhập/mật khẩu. Hãy đăng nhập "
+               "VTCZone một lần; GoBot chỉ bấm Chơi game.\n");
+    std::printf("\nNot needed any more: GoBot does not use a user name or a password.\n"
+                "Sign in to VTCZone once, with its remember option, and it stays signed\n"
+                "in; the auto-login only presses Choi game. Nothing was written.\n");
     return 0;
 }
 
@@ -2957,41 +2918,36 @@ int run_set_login(const Options&) {
 /// Shared, because `--keepalive` runs the same crossing as `--login` and the
 /// two drifting apart would mean a bot that logs in differently when it is
 /// recovering from a crash than when a person asked it to.
-bool login_setup(const Options& o, const AppConfig& app, AutoLogin::Settings& settings,
+bool login_setup(const Options& o, const AppConfig& /*app*/, AutoLogin::Settings& settings,
                  TemplateStore& store, std::string& path, std::string& source) {
     path = resolve("configs/login.ini");
 
+    // A missing file gets the table that ships -- every page's picture and
+    // its measured geometry -- so it crosses as written rather than waiting
+    // to be filled in. Only a missing one: a file that is there and will not
+    // open just now is somebody's, measurements and notes and all, and the
+    // table is crossed with instead of being written over it.
     if (!settings.load(path)) {
-        settings.pages = AutoLogin::default_pages();
-        settings.launcher_window = "VTCZone";
+        settings = AutoLogin::Settings{};
         // No client_window: the game's launcher is untitled. See the header.
-        settings.game_window = o.window.empty() ? app.window_title : o.window;
-        settings.save(path);
-        std::printf("Wrote a blank %s to fill in.\n\n", path.c_str());
+        // The game's own title is the one that ships unless --window says
+        // otherwise; a title on its own only finds a window that has exactly it.
+        if (!o.window.empty()) settings.game_window = o.window;
+        if (!AutoLogin::Settings::file_missing(path))
+            std::printf("Could not read %s -- using the pages that ship, and leaving\n"
+                        "the file as it is.\n\n", path.c_str());
+        else if (settings.save(path))
+            std::printf("Wrote %s with the pages that ship.\n\n", path.c_str());
     }
 
-    // The launcher's pages are not in the game's own picture set.
-    //
-    // They were only ever in the other helper's assembly, so a machine that has
-    // the game and not that helper had nothing to match them against and the
-    // crossing failed on its first page. Copies now sit beside this executable
-    // and are named in configs/templates.ini, and the local set is used when
-    // the helper is not installed.
-    source = o.template_source.empty() ? TemplateStore::helper_assembly()
-                                       : o.template_source;
-    bool loaded = false;
-    if (!source.empty()) {
-        const bool is_dll = source.size() > 4 &&
-            _stricmp(source.c_str() + source.size() - 4, ".dll") == 0;
-        if (is_dll)
-            loaded = store.load_from_assembly(source, resolve("configs/templates.ini"));
-        else if (store.load(source)) {
-            store.apply_names(resolve("configs/templates.ini"));
-            loaded = true;
-        }
-    }
-    if (!loaded && store.load_best(resolve("configs/templates.ini")))
-        source = store.source();
+    // The launcher's pages are not in the game's own picture set. They were
+    // cut out of the other helper's assembly into templates\grabbed and are
+    // named in configs/templates.ini, so the best set on this machine has
+    // them. The same call as the GUI's keeper, so the two cannot cross
+    // differently; --tplsrc picks a set by hand, for measuring.
+    source = o.template_source;
+    AutoLogin::load_pictures(store, resolve("configs/templates.ini"), o.template_source);
+    if (!store.source().empty()) source = store.source();    // the best set, when it was used
 
     const auto missing = settings.unidentified();
     if (missing.empty()) return true;
@@ -3020,11 +2976,11 @@ int run_login(const Options& o, const AppConfig& app) {
     // Looking, not doing.
     //
     // Running the real thing restarts the client, so it is not something to
-    // try while somebody is playing -- and it needs an account besides. This
-    // checks the table instead: for each page, is its picture on screen right
-    // now, and where would it click? Most will be absent, because a sequence
-    // only ever has one of its pages up at a time. What matters is that the
-    // one that IS up is found, and found where it actually is.
+    // try while somebody is playing. This checks the table instead: for each
+    // page, is its picture on screen right now, and where would it click?
+    // Most will be absent, because a sequence only ever has one of its pages
+    // up at a time. What matters is that the one that IS up is found, and
+    // found where it actually is.
     if (o.dry_run) {
         std::printf("Looking only -- nothing will be clicked.\n\n");
 
@@ -3104,6 +3060,28 @@ int run_login(const Options& o, const AppConfig& app) {
                     "the flow\nis standing on is among them, and found where it "
                     "actually is.\n",
                     on_screen, settings.pages.size());
+
+        // Not a page: what stops the crossing. VTCZone signed out shows its
+        // sign-in form instead of the game, and the flow stops on seeing it
+        // rather than typing into it.
+        if (!settings.signin_picture.empty()) {
+            const char* verdict = "VTCZone is not up, so it cannot be said";
+            if (seen[0].frame.valid()) {
+                switch (AutoLogin::look_at_publisher(seen[0].frame, store, settings)) {
+                    case AutoLogin::Publisher::Ready:
+                        verdict = "signed in -- it is showing the game"; break;
+                    case AutoLogin::Publisher::SignIn:
+                        verdict = "SIGNED OUT -- it is showing its sign-in form, and the "
+                                  "crossing would stop there"; break;
+                    case AutoLogin::Publisher::Unknown:
+                        verdict = "neither the game nor the sign-in form is on it"; break;
+                }
+            }
+            std::printf("\nVTCZone sign-in check (%s): %s\n",
+                        store.get(settings.signin_picture) ? settings.signin_picture.c_str()
+                                                           : "picture not loaded",
+                        verdict);
+        }
         return 0;
     }
 
@@ -3194,11 +3172,12 @@ int run_doctor(const Options& o, const AppConfig& app) {
         good("UI pictures", std::to_string(store.size()) + " from " + store.source());
 
         // The ones features actually look up by name. A set that loaded but
-        // has none of these is a set from somewhere unexpected.
+        // has none of these is a set from somewhere unexpected. login_page is
+        // VTCZone's sign-in button, which the auto-login stops on.
         const char* needed[] = {
-            "hpmp_indicator2", "start_game_page", "start_game_button",
+            "hpmp_indicator2", "app_select_page", "start_game_page", "start_game_button",
             "game_ready_indicator", "channel_first_index",
-            "select_char_indicator", "login_popup1",
+            "select_char_indicator", "login_page",
             "party_invite_buttons", "player_list_grid", "player_in_map_icon",
         };
         std::string absent;
@@ -3293,16 +3272,13 @@ int run_doctor(const Options& o, const AppConfig& app) {
             note("auto-login", "configs/login.ini will not load");
         } else if (login.launcher_path.empty()) {
             note("auto-login", "no launcher written down");
-        } else if (GetFileAttributesA(login.launcher_path.c_str()) ==
-                   INVALID_FILE_ATTRIBUTES) {
+        } else if (!login.launcher_found()) {
             bad("auto-login launcher", login.launcher_path +
                 " does not exist on this machine -- set `launcher` in "
                 "configs/login.ini to where VTCZone is installed here");
         } else {
             good("auto-login launcher", login.launcher_path);
         }
-        if (login.username.empty())
-            note("auto-login account", "none written down -- run --setlogin");
     }
 
     // ---- the optional things ----
@@ -3396,11 +3372,13 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
     const auto until = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
     int restarts = 0;
     bool said_fine = false;
+    bool seen_running = false;      // the client has been up at some point
 
     while (std::chrono::steady_clock::now() < until) {
         const CrashWatch::Look seen = watch.look();
 
         if (!seen.bad()) {
+            seen_running = true;
             if (!said_fine) {
                 std::printf("  [%-22s] %s\n", "watching",
                             "the client is running and answering");
@@ -3418,25 +3396,38 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
             std::printf("  [%-22s] %s\n", "error code", seen.code.c_str());
         std::fflush(stdout);
 
-        if (restarts >= watch_settings.max_restarts) {
-            std::fprintf(stderr,
-                "\nThat is %d restart(s) and it has gone again. Stopping.\n\n"
-                "A client that falls over this often is not failing at random, and\n"
-                "restarting it again will not fix whatever it is -- nor should a\n"
-                "program keep reconnecting to a server that is refusing it.\n",
-                restarts);
-            return 1;
+        // Never up since this began: that is a start, not a restart, the way
+        // GoC treats a missing window. There is no client to end and no
+        // session for the server to see close, so neither the shut-down nor
+        // the cool-down -- and a game launcher already open is left for the
+        // crossing to carry on from, as GoC does. It is one crossing either
+        // way, and one that fails stops this.
+        const bool cold = !seen_running && seen.what == CrashWatch::Trouble::Gone;
+        if (cold) {
+            std::printf("  [%-22s] %s\n\n", "starting the game",
+                        "it was not running when this began");
+            std::fflush(stdout);
+        } else {
+            if (restarts >= watch_settings.max_restarts) {
+                std::fprintf(stderr,
+                    "\nThat is %d restart(s) and it has gone again. Stopping.\n\n"
+                    "A client that falls over this often is not failing at random, and\n"
+                    "restarting it again will not fix whatever it is -- nor should a\n"
+                    "program keep reconnecting to a server that is refusing it.\n",
+                    restarts);
+                return 1;
+            }
+
+            watch.shut_down(seen);
+            std::printf("  [%-22s] %ds\n", "cooling down", watch_settings.cooldown_s);
+            std::fflush(stdout);
+            std::this_thread::sleep_for(std::chrono::seconds(watch_settings.cooldown_s));
+
+            ++restarts;
+            std::printf("  [%-22s] %d of %d\n\n", "logging back in", restarts,
+                        watch_settings.max_restarts);
+            std::fflush(stdout);
         }
-
-        watch.shut_down(seen);
-        std::printf("  [%-22s] %ds\n", "cooling down", watch_settings.cooldown_s);
-        std::fflush(stdout);
-        std::this_thread::sleep_for(std::chrono::seconds(watch_settings.cooldown_s));
-
-        ++restarts;
-        std::printf("  [%-22s] %d of %d\n\n", "logging back in", restarts,
-                    watch_settings.max_restarts);
-        std::fflush(stdout);
 
         AutoLogin flow;
         flow.set_settings(settings);
@@ -3450,6 +3441,7 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
                          flow.trouble().c_str());
             return 1;
         }
+        seen_running = true;
         std::printf("\n");
     }
 

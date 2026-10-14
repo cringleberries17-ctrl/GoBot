@@ -22,10 +22,12 @@
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/session_manager.hpp"
 
 #include "imgui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <string>
 
@@ -916,7 +918,10 @@ bool GuiApp::simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, b
 
 void GuiApp::simple_start_block() {
     const bool running = simple_running();
-    const bool can_start = input_.window_valid();
+    const bool have_game = input_.window_valid();
+    // With the game closed BẮT ĐẦU still starts when "Tự vào lại game" is on:
+    // the keeper opens the game and logs in first.
+    const bool can_start = have_game || simple_opts_.keep_alive;
     const std::string toggle = InputManager::key_name(macro_config_.toggle_key);
 
     ImGui::Dummy(ImVec2(0, 2));
@@ -938,7 +943,9 @@ void GuiApp::simple_start_block() {
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(4);
     ImGui::PopFont();
-    if (!running && !can_start) ImGui::SetItemTooltip("Cần tìm thấy game trước.");
+    if (!running && !can_start)
+        ImGui::SetItemTooltip("Cần tìm thấy game trước, hoặc bật \"Tự vào lại game\" ở thẻ Tự "
+                              "đăng nhập để GoBot tự mở game.");
 
     {
         const std::string keys = toggle + ": bật / tắt     ·     " +
@@ -968,12 +975,24 @@ void GuiApp::simple_start_block() {
     if (!begin_card("##state")) { end_card(); return; }
 
     const bool focused = input_.window_focused();
+    std::string keeper_now, keeper_problem;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        keeper_now = keeper_vi_;
+        keeper_problem = keeper_problem_vi_;
+    }
     if (!running) {
         if (!can_start)
             coloured(kWait, "Chưa chạy. Làm xong các mục đỏ ở trên trước.");
+        else if (!have_game)
+            coloured(kDim, ("Chưa chạy. Game đang tắt: bấm BẮT ĐẦU hoặc phím " + toggle +
+                            " để GoBot mở game và vào nhân vật, rồi chạy các việc đã "
+                            "chọn.").c_str());
         else
             coloured(kDim, ("Chưa chạy. Vào game, rồi bấm BẮT ĐẦU hoặc phím " + toggle +
                             ".").c_str());
+    } else if (simple_cold_start_) {
+        coloured(kWait, keeper_now.empty() ? "Đang mở game và vào nhân vật…" : keeper_now.c_str());
     } else if (macro_running_ && macro_->suspended()) {
         coloured(kWait, "Tạm dừng: nhân vật không ở trong game (mất kết nối, đang tải, hoặc "
                         "đã chết). Bot tự chạy lại khi nhân vật quay lại.");
@@ -1009,9 +1028,13 @@ void GuiApp::simple_start_block() {
               " lời mời, đã mời " + std::to_string(party_invited_.load()) + " người.").c_str());
     if (keeper_running_) {
         const int restarts = keeper_restarts_.load();
-        hint(("Tự đăng nhập: đang theo dõi game" +
-              (restarts > 0 ? ", đã vào lại " + std::to_string(restarts) + " lần" : std::string()) +
-              ".").c_str());
+        const std::string now = keeper_now.empty() ? std::string("Đang theo dõi game.") : keeper_now;
+        hint(("Tự đăng nhập: " + now +
+              (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần." : std::string()))
+                 .c_str());
+    } else if (simple_opts_.keep_alive && !keeper_problem.empty()) {
+        // Stopped for a person: why, where it will be seen.
+        coloured(kBad, ("Tự đăng nhập đã dừng: " + keeper_problem).c_str());
     }
     if (revive_running_) {
         const int revived = revive_count_.load();
@@ -1120,10 +1143,6 @@ void GuiApp::simple_window_list() {
 
 void GuiApp::simple_start() {
     if (simple_running()) return;
-    if (!input_.window_valid()) {
-        simple_note("Chưa tìm thấy game. Mở game, vào nhân vật, rồi bấm Tìm lại.");
-        return;
-    }
 
     const bool any_key = any_key_on(macro_config_);
     Party::Settings party_rules;
@@ -1139,9 +1158,67 @@ void GuiApp::simple_start() {
         return;
     }
 
-    // Nothing at all starts while a stop may have left the bin's dialog open:
-    // the macro and the hunter would press keys into it, and the rest would
-    // start without them.
+    // Opened since GoBot last looked? Then there is nothing to open.
+    if (!input_.window_valid() &&
+        input_.find_game_window(app_config_.window_title, app_config_.window_class,
+                                app_config_.process_name)) {
+        apply_vitals_config();
+        simple_reader_tried_ = false;
+    }
+
+    if (!input_.window_valid()) {
+        // The game is closed. With "Tự vào lại game" on, the keeper opens it
+        // and logs in -- GoC goes from a missing window to the world the same
+        // way -- and the rest starts once the character is in, from tick().
+        // Nothing else starts before: there is no game to press keys into.
+        if (!simple_opts_.keep_alive) {
+            simple_note("Chưa tìm thấy game. Mở game, vào nhân vật, rồi bấm Tìm lại — hoặc bật "
+                        "\"Tự vào lại game\" ở thẻ Tự đăng nhập để GoBot tự mở game.");
+            return;
+        }
+        if (!elevated_) {
+            simple_note("GoBot không chạy bằng quyền Administrator nên không bấm được vào "
+                        "VTCZone/game.", 10000);
+            return;
+        }
+        // Running, only its window not found: there is no game to open, and
+        // the keeper would watch it run and never log in, so nothing else
+        // would ever start.
+        IniFile app_ini;
+        app_ini.load(exe_relative("configs/app.ini"));
+        CrashWatch::Settings crash;
+        crash.load(app_ini);
+        if (SessionManager::process_running(crash.game_process)) {
+            simple_note("Game đang chạy nhưng GoBot chưa tìm thấy cửa sổ của nó. Bấm Tìm lại "
+                        "hoặc \"Chọn cửa sổ…\" ở thẻ Đánh quái.", 10000);
+            return;
+        }
+        start_keeper();
+        simple_cold_start_ = true;
+        // Said at once, rather than "watching" until the keeper has loaded
+        // its pictures and looked for the first time.
+        say_keeper_vi("Đang mở game và vào nhân vật…");
+        simple_note("Đang mở game và vào nhân vật…", 15000);
+        return;
+    }
+    simple_start_jobs();
+}
+
+void GuiApp::simple_start_jobs() {
+    const bool any_key = any_key_on(macro_config_);
+    Party::Settings party_rules;
+    const bool party = party_rules.load(exe_relative("configs/party.ini")) &&
+                       (party_rules.auto_accept || party_rules.auto_invite);
+    CleanSettings clean;
+    const bool trash = clean.load(exe_relative("configs/trash.ini")) && clean.enabled;
+    // Read again here rather than handed over from simple_start: after a cold
+    // start this runs minutes later, and the tab may have changed it since.
+    ChatSettings chat_rules;
+    const bool chat = chat_rules.load(exe_relative("configs/chat.ini")) && chat_rules.enabled;
+
+    // Nothing at all starts while a stop may have left the bin's dialog, or
+    // the game's chat line, open: the macro and the hunter would press keys
+    // into it, and the rest would start without them.
     if (!keys_may_start()) return;
 
     // The tallies start here, before anything can press a key, rather than
@@ -1172,6 +1249,7 @@ void GuiApp::simple_start() {
 }
 
 void GuiApp::simple_stop() {
+    simple_cold_start_ = false;     // nothing is started after a stop
     // The chat first: a line half typed is rubbed out and closed as it stops,
     // under its hold, which keeps everything else off until it is done. Not
     // waited for here: that takes a few seconds for a long line, and the
@@ -1815,11 +1893,17 @@ void GuiApp::simple_trash_tab() {
     // ---- now ----
     if (!begin_card("##trashrun")) { end_card(); return; }
     const bool busy = trash_running_ && (trash_oneshot_ || trash_request_ != 0);
-    ImGui::BeginDisabled(busy || !input_.window_valid() || simple_trash_.items.empty());
+    // Not while the game's chat line may be open: a pass presses the bag key,
+    // which would be a letter in it. The worker waits for that as well.
+    const bool chat_open = chat_doubt_;
+    ImGui::BeginDisabled(busy || chat_open || !input_.window_valid() || simple_trash_.items.empty());
     if (ImGui::Button("Thử tìm (không xoá)")) request_trash(true);
     ImGui::SameLine();
     if (ImGui::Button("Dọn ngay")) request_trash(false);
     ImGui::EndDisabled();
+    if (chat_open)
+        coloured(kWait, "Ô chat trong game có thể đang mở: chưa dọn rác được cho đến khi ô chat đóng "
+                        "(xem thẻ Tự chat).");
     hint("Thử tìm: mở túi đồ, xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. "
          "Khi một bước không được, GoBot giữ lại ảnh màn hình lúc đó trong thư mục "
          "trash_debug để sửa.");
@@ -1866,7 +1950,9 @@ void GuiApp::simple_chat_tab() {
     heading(strong_font_, "Tự chat");
     if (ImGui::Checkbox("Bật tự chat", &simple_chat_.enabled)) {
         put("enabled", simple_chat_.enabled ? "true" : "false");
-        if (simple_chat_.enabled && simple_running()) start_chat();
+        // Not while BẮT ĐẦU is still opening the game: there is no chat line
+        // yet, and what is ticked then starts once the character is in.
+        if (simple_chat_.enabled && simple_running() && !simple_cold_start_) start_chat();
         // Not the player taking over the keys -- the fighting goes on -- so a
         // chat line left in doubt is still watched, and the keys held off,
         // until it shows shut.
@@ -2003,7 +2089,10 @@ void GuiApp::simple_chat_tab() {
     ImGui::SetItemTooltip("Chỉ xem ô chat đang mở hay đóng, không bấm phím nào.\nĐừng để cửa sổ "
                           "nào che khung chat ở góc trái dưới màn hình game.");
     ImGui::SameLine();
-    const bool cooling = simple_chat_tested_ms_ != 0 && now_ms() - simple_chat_tested_ms_ < 10'000;
+    // As long as the shortest interval, as no two lines go closer together
+    // than that; the worker also counts from a timed line.
+    const bool cooling = simple_chat_tested_ms_ != 0 &&
+                         now_ms() - simple_chat_tested_ms_ < ChatSettings::kMinInterval * 1000ull;
     const bool trash_busy = trash_pass_ || (trash_running_ && (trash_oneshot_ || trash_request_ != 0));
     const bool have_line = !ChatSettings::split_lines(simple_chat_lines_).empty();
     ImGui::BeginDisabled(busy || cooling || trash_busy || !input_.window_valid() || !have_line ||
@@ -2014,7 +2103,8 @@ void GuiApp::simple_chat_tab() {
     }
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("Gửi câu đầu tiên một lần, đúng các bước như khi chạy: đưa game lên "
-                          "trước, mở ô chat, gõ, gửi.\nMỗi lần bấm cách nhau ít nhất 10 giây.");
+                          "trước, mở ô chat, gõ, gửi.\nHai câu, kể cả câu gửi thử, luôn cách nhau ít "
+                          "nhất 30 giây.");
     hint("Khi một bước không được, GoBot giữ lại ảnh màn hình lúc đó trong thư mục chat_debug.");
 
     // The chat line maybe left open, first: it is why nothing else moves.
@@ -2026,9 +2116,22 @@ void GuiApp::simple_chat_tab() {
                            : "Tự chat đã dừng, nhưng ô chat trong game có thể vẫn đang mở: đánh quái, "
                              "bình và buff chưa chạy lại.");
         hint(watched ? "Đóng ô chat trong game: xoá chữ trong đó rồi bấm Enter. GoBot cũng tự xoá và "
-                       "đóng khi thấy ô chat mở mà không ai dùng chuột hay bàn phím. Bấm DỪNG nếu "
-                       "muốn tự xử lý."
+                       "đóng khi thấy ô chat mở mà không ai dùng chuột hay bàn phím."
                      : "Đóng ô chat trong game (xoá chữ trong đó rồi bấm Enter), rồi bấm BẮT ĐẦU.");
+        // The player taking it over, here on the tab: the big button reads
+        // BẮT ĐẦU when only Tự chat's own worker is left watching the line --
+        // after a Gửi thử, or with Tự chat unticked. As DỪNG does it: what
+        // runs stops, GoBot presses nothing more into the line, and the keys
+        // stay held off until a look shows it shut.
+        if (watched) {
+            if (ImGui::Button("Để tôi tự đóng ô chat")) {
+                if (simple_running()) simple_stop();
+                else                  stop_chat(true, false);
+            }
+            ImGui::SetItemTooltip("GoBot thôi tự xoá và đóng ô chat, và dừng các việc đang chạy như "
+                                  "nút DỪNG.\nĐóng ô chat trong game (xoá chữ trong đó rồi bấm Enter), "
+                                  "rồi bấm BẮT ĐẦU.");
+        }
     }
     if (chat_running_ && chat_stop_) {
         coloured(kWait, chat_doubt_watched_ ? "Đang dừng: chờ thấy ô chat đóng…"
@@ -2058,17 +2161,75 @@ void GuiApp::simple_chat_tab() {
 
 // ------------------------------------------------------------------ login
 
+void GuiApp::simple_login_look() {
+    // Taken when it is in; never waited for.
+    if (login_look_.valid()) {
+        if (login_look_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        login_seen_ = login_look_.get();
+    }
+    // Counted from when the last one began, so an answer that waited while
+    // the tab was not up is followed by a fresh look at once.
+    if (login_seen_.done && now_ms() - login_looked_ms_ < 4000) return;
+    login_looked_ms_ = now_ms();
+
+    // One look at a time, so the pictures loaded here are only ever the
+    // look's. The first one loads them, which takes a few seconds.
+    login_look_ = std::async(std::launch::async, [this] {
+        LoginLook out;
+        if (!login_store_loaded_) {
+            login_store_loaded_ = true;
+            AutoLogin::load_pictures(login_store_, exe_relative("configs/templates.ini"));
+        }
+        AutoLogin::Settings login;
+        login.load(exe_relative("configs/login.ini"));     // what ships, with no file
+        out.pages = login.pages.size();
+        out.recognised = login.recognised(login_store_);
+
+        if (!SessionManager::process_running("VTCZone.exe")) {
+            out.vtczone = VtcZone::NotRunning;
+        } else if (void* hwnd = AutoLogin::window_of(login, AutoLogin::On::Publisher)) {
+            ScreenCapture capture;
+            Frame frame;
+            if (capture.grab(hwnd, frame)) {
+                AutoLogin::Publisher seen = AutoLogin::look_at_publisher(frame, login_store_, login);
+                // A frame read off the screen is whatever is over VTCZone, and
+                // a blue button on some other window is not VTCZone signed out.
+                // This only looks, so it cannot bring VTCZone to the front as
+                // the crossing does; the form counts only if VTCZone is clear.
+                if (seen == AutoLogin::Publisher::SignIn && capture.from_screen() &&
+                    !AutoLogin::uncovered(hwnd))
+                    seen = AutoLogin::Publisher::Unknown;
+                switch (seen) {
+                    case AutoLogin::Publisher::Ready:   out.vtczone = VtcZone::SignedIn; break;
+                    case AutoLogin::Publisher::SignIn:  out.vtczone = VtcZone::SignInForm; break;
+                    case AutoLogin::Publisher::Unknown: break;
+                }
+            }
+        }
+        out.done = true;
+        return out;
+    });
+}
+
 void GuiApp::simple_login_tab() {
     const std::string path = exe_relative("configs/login.ini");
 
     // Read every time, as the full screen does: the command line tool and a
     // person with a text editor write this file too.
+    //
+    // With no file at all, the one that ships is written out, so there is a
+    // file to pick a channel in and to put right by hand. Once, until there is
+    // a file again, so a folder that cannot be written to is not tried every
+    // frame -- and only when there is truly none: a file that is there and
+    // will not open for a moment is the player's, and is never replaced.
     AutoLogin::Settings login;
-    const bool have = login.load(path);
-    if (!simple_login_loaded_) {
-        simple_login_loaded_ = true;
-        std::snprintf(simple_user_, sizeof simple_user_, "%s",
-                      have ? login.username.c_str() : "");
+    bool have = login.load(path);
+    if (have) {
+        login_file_tried_ = false;
+    } else if (!login_file_tried_ && AutoLogin::Settings::file_missing(path)) {
+        login_file_tried_ = true;
+        have = login.save(path);
+        if (have) GB_INFO("Wrote %s with the pages that ship", path.c_str());
     }
 
     if (!begin_card("##login")) { end_card(); return; }
@@ -2081,69 +2242,20 @@ void GuiApp::simple_login_tab() {
             else                         stop_keeper();
         }
     }
-    hint("GoBot theo dõi game. Nếu game tắt, bị treo hoặc hiện bảng lỗi, GoBot đóng game, mở "
-         "lại launcher, đăng nhập, rồi vào đúng kênh và nhân vật dưới đây. Đánh quái, bình và "
-         "buff tự chạy tiếp khi nhân vật vào lại game.");
+    hint("GoBot theo dõi game. Nếu game tắt, bị treo hoặc hiện bảng lỗi, GoBot đóng game, bấm "
+         "Chơi game trong VTCZone rồi vào đúng kênh và nhân vật dưới đây. VTCZone phải đang mở "
+         "(hoặc mở được) và đã đăng nhập sẵn — GoBot không cần, không hỏi và không lưu tên đăng "
+         "nhập hay mật khẩu.");
+    hint("Game đang tắt? Bật ô này rồi bấm BẮT ĐẦU: GoBot mở game và vào nhân vật trước, rồi "
+         "mới chạy đánh quái, bình và buff.");
 
     // Lines up the boxes after their names.
     const float field = ImGui::GetCursorPosX() + 150.0f;
 
-    // ---- the account ----
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::SeparatorText("Tài khoản game");
-    const bool have_account = have && !login.username.empty() &&
-                              !login.password_protected.empty();
-    mark(have_account ? Mark::Good : Mark::Bad);
-    ImGui::SameLine();
-    label(have_account ? ("Đã lưu tài khoản " + login.username).c_str()
-                       : "Chưa lưu tài khoản game");
-
-    label("Tên đăng nhập");
-    ImGui::SameLine(field);
-    ImGui::SetNextItemWidth(260);
-    ImGui::InputText("##user", simple_user_, sizeof simple_user_,
-                     ImGuiInputTextFlags_CharsNoBlank);
-
-    label("Mật khẩu");
-    ImGui::SameLine(field);
-    ImGui::SetNextItemWidth(260);
-    ImGui::InputTextWithHint("##pass", have_account ? "đã lưu, gõ để đổi" : "", simple_pass_,
-                             sizeof simple_pass_, ImGuiInputTextFlags_Password);
-    ImGui::SameLine();
-    ImGui::BeginDisabled(simple_user_[0] == '\0' || simple_pass_[0] == '\0');
-    if (ImGui::Button("Lưu tài khoản")) {
-        // Encrypted on the spot and the typed copy wiped, the same as the
-        // command line tool: the password is never written down in the clear.
-        const std::string sealed = AutoLogin::protect(simple_pass_);
-        SecureZeroMemory(simple_pass_, sizeof simple_pass_);
-        if (sealed.empty()) {
-            simple_note("Windows không mã hoá được mật khẩu, nên chưa lưu gì.", 8000);
-        } else {
-            bool ok = false;
-            if (have) {
-                ok = IniFile::set_in_place(path, "Login", "username", simple_user_) &&
-                     IniFile::set_in_place(path, "Login", "password", sealed);
-            } else {
-                AutoLogin::Settings fresh;
-                fresh.pages = AutoLogin::default_pages();
-                fresh.launcher_window = "VTCZone";
-                fresh.game_window = "GhostOnlineVTC";
-                fresh.username = simple_user_;
-                fresh.password_protected = sealed;
-                ok = fresh.save(path);
-            }
-            simple_note(ok ? "Đã lưu tài khoản. Mật khẩu đã được mã hoá."
-                           : "Không lưu được configs/login.ini.", 8000);
-        }
-    }
-    ImGui::EndDisabled();
-    hint("Mật khẩu được mã hoá bằng khoá của tài khoản Windows này, nên file cấu hình chép "
-         "sang máy khác hay người dùng khác sẽ không đọc được.");
-
     // ---- where to ----
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::SeparatorText("Vào kênh và nhân vật nào");
-    if (have) {
+    {
         const AutoLogin::Page* channel_page = nullptr;
         const AutoLogin::Page* char_page = nullptr;
         for (const auto& page : login.pages) {
@@ -2157,6 +2269,11 @@ void GuiApp::simple_login_tab() {
 
         // Counted from one here and from zero in the file: "Kênh 1" is what
         // the client calls it.
+        //
+        // One key changed in place. configs/login.ini is written in by hand,
+        // and its comments are the only record of how each page was measured.
+        // With no file, the one that ships is written out first and the key
+        // changed in that; with one that will not open, nothing is written.
         const auto pick = [&](const char* id, const char* what, int count, int current,
                               const char* key) {
             label(what);
@@ -2166,9 +2283,11 @@ void GuiApp::simple_login_tab() {
             if (ImGui::BeginCombo(id, shown.c_str())) {
                 for (int i = 0; i < count; ++i) {
                     const std::string item = std::string(what) + " " + std::to_string(i + 1);
-                    if (ImGui::Selectable(item.c_str(), i == current) && i != current &&
-                        !IniFile::set_in_place(path, "Login", key, i))
-                        simple_note("Không lưu được configs/login.ini.", 8000);
+                    if (!ImGui::Selectable(item.c_str(), i == current) || i == current) continue;
+                    const bool wrote = (have || (AutoLogin::Settings::file_missing(path) &&
+                                                 AutoLogin::Settings{}.save(path))) &&
+                                       IniFile::set_in_place(path, "Login", key, i);
+                    if (!wrote) simple_note("Không lưu được configs/login.ini.", 8000);
                 }
                 ImGui::EndCombo();
             }
@@ -2179,48 +2298,102 @@ void GuiApp::simple_login_tab() {
              std::clamp(login.character_index, 0, characters - 1), "character_index");
         if (char_page != nullptr && char_page->pick == AutoLogin::Pick::Slot)
             hint("Nhân vật đếm từ bên trái màn hình chọn nhân vật.");
-    } else {
-        hint("Lưu tài khoản trước, rồi chọn kênh và nhân vật ở đây.");
     }
 
     // ---- whether it can ----
+    simple_login_look();
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::SeparatorText("Kiểm tra");
-    const bool launcher_ok = have && !login.launcher_path.empty() &&
-        GetFileAttributesA(login.launcher_path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    const auto indented_hint = [](const char* text) {
+        ImGui::Indent(mark_indent());
+        hint(text);
+        ImGui::Unindent(mark_indent());
+    };
+
+    const bool launcher_ok = login.launcher_found();
     mark(launcher_ok ? Mark::Good : Mark::Bad);
     ImGui::SameLine();
-    label(launcher_ok ? "Đã thấy launcher" : "Không thấy launcher");
-    if (have && !login.launcher_path.empty()) {
+    label(launcher_ok ? "Đã thấy VTCZone" : "Không thấy VTCZone");
+    if (!login.launcher_path.empty()) {
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Text, kDim);
         ImGui::AlignTextToFramePadding();
         ImGui::Text("(%s)", login.launcher_path.c_str());
         ImGui::PopStyleColor();
     }
-    const std::size_t unknown = have ? login.unidentified().size() : 1;
-    mark(unknown == 0 ? Mark::Good : Mark::Bad);
-    ImGui::SameLine();
-    label(unknown == 0 ? "Đã nhận ra các màn hình đăng nhập"
-                       : "Còn màn hình đăng nhập chưa nhận ra, xem Nâng cao");
+
+    if (!login_seen_.done) {
+        mark(Mark::Wait);
+        ImGui::SameLine();
+        label("Đang xem VTCZone và các hình nhận diện…");
+    } else {
+        const bool vtczone_up = login_seen_.vtczone != VtcZone::NotRunning;
+        mark(vtczone_up ? Mark::Good : launcher_ok ? Mark::Wait : Mark::Bad);
+        ImGui::SameLine();
+        label(vtczone_up   ? "VTCZone đang chạy"
+              : launcher_ok ? "VTCZone chưa chạy — GoBot sẽ tự mở"
+                            : "VTCZone chưa chạy, và GoBot không tìm thấy nó để mở");
+        if (!vtczone_up && !launcher_ok)
+            indented_hint("Hãy mở VTCZone bằng tay, hoặc sửa dòng launcher= trong "
+                          "configs/login.ini cho đúng chỗ cài VTCZone.");
+
+        if (vtczone_up) {
+            switch (login_seen_.vtczone) {
+                case VtcZone::SignedIn:
+                    mark(Mark::Good);
+                    ImGui::SameLine();
+                    label("VTCZone đã đăng nhập");
+                    break;
+                case VtcZone::SignInForm:
+                    mark(Mark::Bad);
+                    ImGui::SameLine();
+                    label("VTCZone đang ở màn hình đăng nhập — hãy đăng nhập bằng tay");
+                    indented_hint("Chọn ghi nhớ đăng nhập nếu có, để VTCZone tự giữ đăng nhập. "
+                                  "GoBot không bao giờ gõ gì vào đó.");
+                    break;
+                default:
+                    mark(Mark::Wait);
+                    ImGui::SameLine();
+                    label("Chưa xem được VTCZone đã đăng nhập chưa");
+                    indented_hint("Để VTCZone hiện rõ trên màn hình, ở trang có nút Chơi game "
+                                  "(không thu nhỏ, không bị che), rồi xem lại.");
+                    break;
+            }
+        }
+
+        const bool all_seen = login_seen_.pages > 0 && login_seen_.recognised == login_seen_.pages;
+        mark(all_seen ? Mark::Good : Mark::Bad);
+        ImGui::SameLine();
+        label(("Đã nhận ra " + std::to_string(login_seen_.recognised) + "/" +
+               std::to_string(login_seen_.pages) + " màn hình vào game").c_str());
+        if (!all_seen) indented_hint("Thiếu hình nhận diện màn hình — cài lại GoBot.");
+    }
+
+    if (!elevated_) {
+        mark(Mark::Bad);
+        ImGui::SameLine();
+        label("GoBot không chạy bằng quyền Administrator nên không bấm được vào VTCZone/game.");
+    }
     end_card();
 
     // ---- what it is doing ----
     if (!begin_card("##loginstate")) { end_card(); return; }
+    std::string now, problem;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        now = keeper_vi_;
+        problem = keeper_problem_vi_;
+    }
     if (keeper_running_) {
         const int restarts = keeper_restarts_.load();
-        coloured(kGood, ("Đang theo dõi game" +
-                         (restarts > 0 ? ", đã vào lại " + std::to_string(restarts) + " lần"
-                                       : std::string()) + ".").c_str());
+        coloured(kGood, ((now.empty() ? std::string("Đang theo dõi game.") : now) +
+                         (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần."
+                                       : std::string())).c_str());
     } else {
         coloured(kDim, simple_opts_.keep_alive ? "Sẽ bật khi bấm BẮT ĐẦU." : "Đang tắt.");
     }
-    std::vector<std::string> lines;
-    {
-        std::lock_guard<std::mutex> lock(worker_mutex_);
-        lines = keeper_log_;
-    }
-    last_lines(lines, 4);
+    // What stopped it last, in words; the English is in gobot.log.
+    if (!problem.empty()) coloured(kBad, problem.c_str());
     end_card();
 }
 

@@ -339,6 +339,13 @@ private:
     void say_party(const std::string& line);
     void say_keeper(const std::string& line);
 
+    /// The keeper in Vietnamese, for the simple screen: what it is doing now,
+    /// and what last stopped it -- kept after it has stopped, so the reason is
+    /// still there to read. keeper_log_ is the English, as is gobot.log.
+    std::string              keeper_vi_;
+    std::string              keeper_problem_vi_;
+    void say_keeper_vi(const std::string& now, const std::string& problem = {});
+
     /// The login the keeper is in the middle of, so stopping it can cancel
     /// the login instead of waiting minutes for it to finish by itself.
     std::mutex keeper_flow_mutex_;
@@ -751,6 +758,12 @@ private:
     void simple_start();
     void simple_stop();
     void simple_toggle();
+    /// What simple_start starts once there is a game to start it on.
+    void simple_start_jobs();
+    /// BẮT ĐẦU with the game closed and "Tự vào lại game" ticked: the keeper
+    /// opens the game and logs in, as GoC does from a missing window, and
+    /// everything else that is ticked starts once it is back in the world.
+    bool simple_cold_start_ = false;
     bool simple_running() const {
         return macro_running_ || hunting_ || party_running_ || keeper_running_ ||
                revive_running_ || (trash_running_ && !trash_oneshot_) ||
@@ -770,7 +783,7 @@ private:
     bool              simple_chat_loaded_ = false;
     char              simple_chat_lines_[4096] = "";
     int               simple_chat_interval_ = 120;
-    std::uint64_t     simple_chat_tested_ms_ = 0;   ///< the last Gửi thử, for its ten seconds
+    std::uint64_t     simple_chat_tested_ms_ = 0;   ///< the last Gửi thử, for its thirty seconds
     /// What the tab warns of, worked out every few seconds rather than every
     /// frame: a look at every process running is not free.
     std::uint64_t     simple_chat_checked_ms_ = 0;
@@ -830,11 +843,29 @@ private:
     char            simple_black_list_[1024] = "";
     char            simple_keyword_[32] = "";
 
-    /// The login tab's account boxes. The password is held here only between
-    /// being typed and Save, which encrypts it and wipes this.
-    char simple_user_[64] = "";
-    char simple_pass_[128] = "";
-    bool simple_login_loaded_ = false;
+    /// What the login tab last saw: how many of the crossing's pages have
+    /// their picture loaded, and whether VTCZone is signed in. Taken off the
+    /// drawing thread every few seconds while the tab is up, because loading
+    /// the pictures takes seconds and a look at VTCZone is a capture and a
+    /// few matches -- too slow for every frame.
+    enum class VtcZone { Unknown, NotRunning, SignedIn, SignInForm };
+    struct LoginLook {
+        bool        done = false;       ///< a look has finished
+        std::size_t pages = 0;          ///< in the table
+        std::size_t recognised = 0;     ///< of them, with their picture loaded
+        VtcZone     vtczone = VtcZone::Unknown;
+    };
+    void simple_login_look();
+    LoginLook                login_seen_;
+    std::uint64_t            login_looked_ms_ = 0;
+    /// The look's own pictures. Declared before the look so the look is gone
+    /// before they are.
+    TemplateStore            login_store_;
+    bool                     login_store_loaded_ = false;   ///< by the look
+    std::future<LoginLook>   login_look_;
+    /// The tab has tried to write a missing configs/login.ini, and not tried
+    /// again since: cleared once there is a file.
+    bool                     login_file_tried_ = false;
 
     /// Notice a run starting or stopping, however it happened -- the button,
     /// the keys, the panic key, the full screen -- and start or freeze the

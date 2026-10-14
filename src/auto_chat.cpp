@@ -1611,6 +1611,14 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
                            chat_method_name(how) + ") — câu chưa gửi.",
                        r.typed + clear);
     }
+    // A stop, or the guard, asked once more: the look just taken, with its
+    // dialog check, takes a quarter of a second, and a DỪNG or a hold that
+    // came meanwhile is not followed by the line going out. Rubbed out and
+    // closed, as one stopped between keys is.
+    {
+        const std::string why = stop_why();
+        if (!why.empty()) return abort_line(why, r.typed + 2, 5000);
+    }
     // On the look just taken, which shows the line open with the text in it
     // and no dialog.
     if (!focused() || !enter(false, 50)) return lost_front(r.typed + 2);
