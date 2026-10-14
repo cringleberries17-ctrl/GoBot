@@ -64,6 +64,16 @@ struct BagLayout {
     int count_h = 11;
     int edge    = 2;
 
+    /// The opposite corner, from the slot's bottom-right, where the client
+    /// draws a badge over some items -- a green ring with a red P -- left out
+    /// the same way. Measured on the live client, on a buff and on a card:
+    /// 11 by 11 pixels from the slot's 24th column and 23rd row, so 12 by 12
+    /// holds it with a column to spare. Compared, it held the badged buff to
+    /// 0.87 on its own icon, under catalog_score, and it was never taken for
+    /// it; left out, 0.99.
+    int badge_w = 12;
+    int badge_h = 12;
+
     void load(const IniFile& ini);
 };
 
@@ -117,7 +127,8 @@ bool nothing_held(const Frame& f, const TemplateStore& store, const BagLayout& l
 /// A slot cut out of a frame, fully opaque.
 Frame cut(const Frame& f, const ScreenRect& r);
 
-/// The same picture with the count corner and the edge made see-through.
+/// The same picture with the count corner, the badge corner and the edge
+/// made see-through.
 Frame masked(const Frame& picture, const BagLayout& l);
 
 /// Nothing in it. An empty slot is the bag's dark gradient, whose brightest
@@ -237,7 +248,9 @@ struct ItemCatalog {
 
     /// Other ids whose icon is the same drawing as this one's, in any colour:
     /// each found in the other at TrashList::kSameDrawing or better. Choosing
-    /// this one throws those away too.
+    /// this one throws those away too. Icon against icon, the badge corner
+    /// included: an icon never has a badge, and two that differ only there
+    /// are two things.
     std::vector<std::string> same_drawing(const std::string& id) const;
 
     /// The staged copy beside this program, else the client's own.
@@ -253,14 +266,22 @@ struct CleanSettings {
 
     /// How alike a slot's drawing has to be to a listed picture's, colour
     /// left out. High on purpose: a near miss here deletes something that was
-    /// not on the list. Measured on every real frame, a picture cut from the
-    /// bag scores 0.92 or more on the same item in another colour, and 0.83 at
-    /// most on anything else.
+    /// not on the list. Measured on the clean, uncovered slots of every real
+    /// frame, a picture cut from the bag scores 0.93 or more on the same item
+    /// in another colour, and 0.81 at most on anything else.
+    ///
+    /// Not on its own a bar against every other item, though. With the badge
+    /// corner left out, two potions that differ mostly there -- the plain
+    /// gourd and the decorated one, drawn into slots as the client draws them
+    /// -- score up to 0.92 on each other's slots. What keeps them apart is the
+    /// other gourd's icon, which matches its own slot better and is a rival
+    /// to the picture: see TrashList::add_rivals.
     float min_score = 0.90f;
 
     /// The same, for icons chosen from the catalog. The right icon scores
-    /// 0.95 or more on its item whatever colour the bag draws it in -- 0.952
-    /// for the red pieces GoC photographs -- and another drawing 0.81 at most.
+    /// 0.947 or more on its item whatever colour the bag draws it in -- the
+    /// least on a red piece like the ones GoC photographs -- and 0.99 on the
+    /// badged buff; another drawing 0.77 at most.
     float catalog_score = 0.90f;
 
     /// Catalog ids chosen beforehand, from [Items].
@@ -316,6 +337,10 @@ struct TrashList {
         Action      action = Action::Delete;
         Frame       shown;      ///< for the screen
         Frame       picture;    ///< masked, for matching
+        /// For a picture cut from the bag: masked with the badge corner kept,
+        /// for add_rivals to compare with the catalog's icons. Empty for an
+        /// icon.
+        Frame       drawing;
         float       min_score = 0.0f;   ///< 0: the caller's
 
         /// Catalog ids drawn like what was chosen: its own and the same
@@ -335,14 +360,16 @@ struct TrashList {
     std::vector<Item> rivals;
 
     /// Add catalog icons by id, and every icon drawn the same, as items that
-    /// say which one brought them. The count corner of each is left out, as
-    /// for a picture cut from the bag; ids the catalog does not have are
-    /// skipped.
+    /// say which one brought them. The count corner and the badge corner of
+    /// each are left out, as for a picture cut from the bag; ids the catalog
+    /// does not have are skipped.
     void add_catalog(const ItemCatalog& catalog, const std::vector<std::string>& ids,
                      Action a, float min_score);
 
     /// Every catalog icon that is not on the list becomes a rival, and each
-    /// picture cut from the bag learns which icons are drawn like it. Call
+    /// picture cut from the bag learns which icons are drawn like it: the
+    /// icons it is one drawing with, the badge corner compared too, as
+    /// same_drawing compares two icons -- and those icons' own colours. Call
     /// after everything is added.
     void add_rivals(const ItemCatalog& catalog);
 
@@ -384,11 +411,11 @@ struct TrashList {
     ///
     /// By its drawing, whatever its colour: the bag draws fragments in a
     /// colour that cycles, and the player's rule is that the drawing decides.
-    /// Compared in grey, with the count corner and the edge left out. What
-    /// keeps a look-alike from being thrown away is the rest of the catalog:
-    /// no unlisted icon of another drawing may match the slot within
-    /// kRivalMargin of the listed one. Searched a few pixels either side of
-    /// the slot, since the grid is measured rather than given.
+    /// Compared in grey, with the count corner, the badge corner and the edge
+    /// left out. What keeps a look-alike from being thrown away is the rest
+    /// of the catalog: no unlisted icon of another drawing may match the slot
+    /// within kRivalMargin of the listed one. Searched a few pixels either
+    /// side of the slot, since the grid is measured rather than given.
     Verdict judge(const Frame& f, const ScreenRect& slot, float min_score) const;
 
     /// judge, reduced to the item, or -1. `score` gets how alike it is -- or,
@@ -429,6 +456,13 @@ const char* dialog_name(int kind);
 /// Every dialog with the two buttons on screen, the bin's own marked.
 std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store);
 
+/// How alike the words over `d`'s buttons are to each of the bin's pictures,
+/// indexed by kind: the best within two pixels of where that picture puts
+/// them, however low, or -1 where there is no picture with words. For saying
+/// how near a dialog came to being taken for the bin's -- find_dialogs takes
+/// it from 0.90 -- not for deciding anything.
+std::vector<float> words_scores(const Frame& f, const TemplateStore& store, const Dialog& d);
+
 /// One of the bin's dialogs is on screen. For anything else that presses
 /// Xác Nhận on a dialog -- a party invitation's footer picture matches the
 /// bin's quantity dialog at 0.90 -- to keep its hands off.
@@ -464,8 +498,9 @@ public:
     void set_counts(const CountReader* c) { counts_ = c; }
 
     /// Where to keep a picture of the screen whenever a step goes wrong, so
-    /// the next attempt can be fixed from what happened rather than guessed.
-    /// Empty keeps none.
+    /// the next attempt can be fixed from what happened rather than guessed --
+    /// the newest few dozen -- and a probe's frames, apart from those. Empty
+    /// keeps none.
     void set_debug_dir(const std::string& dir) { debug_dir_ = dir; }
     void on_report(Report r) { report_ = std::move(r); }
 
@@ -526,7 +561,55 @@ public:
     };
     Result run();
 
+    /// What a probe of the bin saw: see probe.
+    struct Probe {
+        /// What came up: "none"; "ask", the bin's question; "quantity", its
+        /// quantity dialog; or "foreign", a dialog with the two buttons whose
+        /// words are neither.
+        std::string dialog = "none";
+        /// It came up as the item landed in the bin, before any click on the
+        /// bin, which was then never clicked. Otherwise it came up once the
+        /// bin was clicked.
+        bool  at_drop = false;
+        /// How alike its words were to the picture it was taken for -- for a
+        /// foreign one, to the nearer of the two -- at best over the frames
+        /// watched. 0 when nothing came up.
+        float words = 0.0f;
+        int   frames = 0;           ///< frames looked at, from the drag on
+        bool  moved = false;        ///< the item left its slot for the bin
+        bool  back = false;         ///< the item is in its slot again, the bin clean
+        std::string trouble;        ///< why not, in Vietnamese
+    };
+
+    /// See what the bin asks for one item, and give the item back: nothing
+    /// is deleted. For the live client's question for an item that does not
+    /// stack, which no pass has seen yet.
+    ///
+    /// Opens the bag if it is shut, clicks tab `tab`, scrolls to the top and
+    /// -- on a clean screen only -- drags the item at `row`, `col` of the page
+    /// on show (all from 0) onto the bin. From then on it looks at every
+    /// frame, keeps each in the debug folder as probe_<time>_NN.png and says
+    /// what every dialog on it is. When a dialog comes up as the item lands,
+    /// that is what the bin asks: it is watched for about a second and a
+    /// half, and the bin is not clicked. Otherwise, once the bin has shown the
+    /// item for a moment with nothing up, the bin is clicked and what that
+    /// brings up is watched for as long. Then it answers Hủy Bỏ on whatever
+    /// came up, the bin's or not -- Hủy Bỏ never destroys anything -- or, when
+    /// nothing came up, gives the item back the way a pass does; and last it
+    /// looks for the item in its slot again.
+    ///
+    /// Xác Nhận is never pressed here, and no key at all once the item has
+    /// moved: the one key is the bag's, pressed only on a look with no
+    /// dialog up.
+    Probe probe(int tab, int row, int col);
+
 private:
+    /// Hủy Bỏ on every dialog with the two buttons, the bin's first, until
+    /// none is left or `tries` run out -- whoever's they are, since Hủy Bỏ
+    /// never destroys anything. What a probe answers with; true when none is
+    /// left.
+    bool cancel_all(int tries);
+
     bool grab_view(Frame& f, BagView& v);
 
     /// The screen is in a state to start on an item: the bag found, the can

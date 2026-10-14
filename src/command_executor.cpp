@@ -216,6 +216,18 @@ void CommandExecutor::report(const std::string& msg) {
     if (on_status_) on_status_(msg);
 }
 
+bool CommandExecutor::held_by_pause() {
+    // Asked twice where keys are pressed: before the coordinator's token is
+    // asked for, so as not to take it from anyone for nothing, and once it is
+    // held. The second is what counts. A stop pauses this before it ends the
+    // trash pass's hold on the coordinator, so whatever gets the token once
+    // that hold has ended sees the pause here, however the two raced.
+    if (!paused_.load()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.held_paused;
+    return true;
+}
+
 // ------------------------------------------------------------- main dispatch
 
 void CommandExecutor::execution_loop() {
@@ -252,8 +264,13 @@ void CommandExecutor::execution_loop() {
 bool CommandExecutor::execute_now(const Command& cmd) { return dispatch(cmd); }
 
 bool CommandExecutor::dispatch(const Command& cmd) {
+    // Before the token is asked for: paused, nothing of this is to happen.
+    if (held_by_pause()) return false;
+
     auto token = coord_.acquire("executor", cmd.priority);
     if (!token) return false;
+    // And again once it is held: see held_by_pause.
+    if (held_by_pause()) return false;
 
     if (!input_.window_focused()) {
         // Not an error: the user alt-tabbed. The brain keeps thinking, we
@@ -383,11 +400,13 @@ void CommandExecutor::heal_loop() {
         }
 
         if (key == 0) continue;
+        if (held_by_pause()) continue;
 
         // Healing pre-empts combat: dying with a full potion belt is the one
         // failure mode that ends a session.
         auto token = coord_.acquire("heal", Priority::Heal);
         if (!token) continue;
+        if (held_by_pause()) continue;     // paused while the token was asked for
 
         if (input_.window_focused() && input_.key_press(key)) {
             heal_last_ms_ = now_ms();
@@ -421,8 +440,12 @@ void CommandExecutor::buff_loop() {
             const std::uint64_t due = buff_last_ms_[i] + static_cast<std::uint64_t>(b.cooldown_sec) * 1000ull;
             if (buff_last_ms_[i] != 0 && now < due) continue;
 
+            // Still due once the pause is over: its time is left as it was.
+            if (held_by_pause()) break;
+
             auto token = coord_.acquire("buff", Priority::Buff);
             if (!token) break;      // combat is busy; try again next pass
+            if (held_by_pause()) break;     // paused while the token was asked for
 
             if (input_.window_focused() && input_.use_skill(b.keycode)) {
                 buff_last_ms_[i] = now;
@@ -480,7 +503,7 @@ std::vector<PathStep> CommandExecutor::current_path() const {
 void CommandExecutor::pathfinding_loop() {
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
-        if (!pathfinding_.load()) continue;
+        if (!pathfinding_.load() || paused_.load()) continue;
         if (!step_path()) stop_pathfinding();
     }
 }
@@ -525,6 +548,9 @@ bool CommandExecutor::step_path() {
 
     auto token = coord_.acquire("pathfind", Priority::Movement);
     if (!token) return true;      // combat has the keyboard; retry next tick
+    // Paused while the token was asked for: the path waits, as it does in
+    // pathfinding_loop.
+    if (held_by_pause()) return true;
 
     if (!input_.window_focused()) return true;
 

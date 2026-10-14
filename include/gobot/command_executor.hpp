@@ -61,6 +61,18 @@ public:
     void set_auto_attack(bool on) { auto_attack_.store(on); }
     bool auto_attack() const { return auto_attack_.load(); }
 
+    /// Press no keys at all until this is set off again. The threads keep
+    /// running and the timers keep their place: a buff that falls due
+    /// meanwhile is held, not skipped, and a queued command is dropped.
+    ///
+    /// For a box in the game that would take keys as typing -- the trash
+    /// bin's quantity dialog, which a stopped trash pass can leave open with
+    /// nothing left to watch it. The coordinator's critical mode cannot cover
+    /// that: it was the pass's hold, and it ends with the pass, while these
+    /// threads run from launch and nothing else stops them.
+    void set_paused(bool on) { paused_.store(on); }
+    bool paused() const { return paused_.load(); }
+
     // ---- pathing ----
     void set_path_target(const Vec2& target);
     void stop_pathfinding();
@@ -75,6 +87,8 @@ public:
         std::uint64_t skills_cast = 0;
         std::uint64_t buffs_cast = 0;
         std::uint64_t heals = 0;
+        /// Buffs, potions and commands that were due while paused.
+        std::uint64_t held_paused = 0;
     };
     Stats stats() const;
 
@@ -90,6 +104,9 @@ private:
     bool dispatch(const Command& cmd);
     bool step_path();
     void report(const std::string& msg);
+    /// Paused, and so counted as held. Asked before the token is asked for,
+    /// and again once it is held, which is the answer that counts.
+    bool held_by_pause();
 
     BotConfig            config_;
     mutable std::mutex   config_mutex_;
@@ -108,6 +125,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> auto_attack_{false};
     std::atomic<bool> pathfinding_{false};
+    std::atomic<bool> paused_{false};
 
     mutable std::mutex    path_mutex_;
     std::vector<PathStep> path_;

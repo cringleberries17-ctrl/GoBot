@@ -107,6 +107,9 @@ GuiApp::~GuiApp() {
     stop_keeper();
     stop_revive();
     stop_trash();
+    // A look at the game for the bin may still be under way; it reads the
+    // window handle and its own pictures, which go away below.
+    if (left_held_look_.valid()) left_held_look_.wait();
     stop_vitals();
     stop_macro();
     stop_bot();
@@ -347,6 +350,11 @@ void GuiApp::tick() {
 
     if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
     simple_track_run(simple_running());
+
+    // A stop that left the bin's dialog in doubt paused the executor's buffs
+    // and potions; with no trash worker to look, they come back once the game
+    // shows nothing waiting.
+    watch_left_held();
 
     if (keeper_reattach_.exchange(false)) reattach_game();
     refocus_if_idle();
@@ -2999,20 +3007,56 @@ bool GuiApp::stop_trash() {
     // before it gets here, and BẮT ĐẦU would start them again straight away.
     // So nothing that presses keys starts until the game has been looked at;
     // see keys_may_start.
+    //
+    // The executor is not stopped by any of that: it runs from launch, and
+    // its buff timer and potions ask only the coordinator, whose hold ends
+    // below. It is paused before then, until the bin is seen with nothing
+    // waiting -- looked for every couple of seconds, by watch_left_held when
+    // no trash worker runs: see bin_seen_clear.
     if (trash_hold_.exchange(false)) {
         stop_hunt();
         stop_macro();
         stop_bot();
         if (navigator_ && navigator_->running()) navigator_->stop();
+        if (executor_) executor_->set_paused(true);
+        ++left_held_gen_;
         trash_left_held_ = true;
         simple_note("Hộp thoại của thùng rác có thể vẫn đang mở trong game, nên GoBot dừng "
-                    "cả đánh quái và bình để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
+                    "cả đánh quái, bình và buff để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
                     "rồi bấm BẮT ĐẦU.", 15000);
         GB_WARN("Trash: stopped while the bin may still hold an item; the keys are stopped too");
         end_hold("trash cleaning");
         return true;
     }
     return false;
+}
+
+void GuiApp::bin_seen_clear() {
+    trash_left_held_ = false;
+    if (executor_) executor_->set_paused(false);
+}
+
+bool GuiApp::bin_looks_clear(const TemplateStore& store, std::string* why) {
+    // Anything that leaves it in doubt is a no: the screen not captured, or
+    // no pictures to know the bin's dialogs by.
+    const auto no = [why](const char* text) {
+        if (why) *why = text;
+        return false;
+    };
+    if (!bag::can_check(store, TrashList::Action::Delete))
+        return no("Không có hình giao diện của game, nên không xem được hộp thoại của thùng rác "
+                  "đã đóng chưa.");
+    ScreenCapture capture;
+    Frame frame;
+    if (!input_.window_valid() || !capture.grab(input_.target_window(), frame) || !frame.valid())
+        return no("Chưa chụp được màn hình game để xem hộp thoại của thùng rác đã đóng chưa. Để "
+                  "game hiện rõ rồi thử lại.");
+    CleanSettings clean;
+    clean.load(exe_relative("configs/trash.ini"));     // only for where the bin is in the bag
+    if (!bag::nothing_held(frame, store, clean.layout))
+        return no("Trong game vẫn còn một hộp thoại đang mở, hoặc thùng rác vẫn giữ một món đồ. "
+                  "Bấm Hủy Bỏ trong game (thùng rác thì bấm vào nó rồi chọn Hủy Bỏ), rồi thử lại.");
+    return true;
 }
 
 bool GuiApp::keys_may_start() {
@@ -3022,34 +3066,57 @@ bool GuiApp::keys_may_start() {
     // still have been open with an item in it, and that dialog's box takes
     // the macro's potion keys as numbers -- the hunter's keys go into it as
     // well. Not until the game is seen with no dialog up and nothing waiting
-    // in the bin. Anything that leaves that in doubt is a no: the screen not
-    // captured, or no pictures to know the bin's dialogs by.
-    const auto refuse = [this](const std::string& why) {
-        simple_note(why, 12000);
-        if (!simple_view_) set_status(why, 12000);
-        GB_WARN("Not started, as the bin's dialog may still be open: %s", why.c_str());
-        return false;
-    };
+    // in the bin.
     if (!simple_store_loaded_) {
         simple_store_loaded_ = true;
         simple_store_.load_best(exe_relative("configs/templates.ini"));
     }
-    if (!bag::can_check(simple_store_, TrashList::Action::Delete))
-        return refuse("Không có hình giao diện của game, nên không xem được hộp thoại của thùng "
-                      "rác đã đóng chưa.");
-    ScreenCapture capture;
-    Frame frame;
-    if (!input_.window_valid() || !capture.grab(input_.target_window(), frame) || !frame.valid())
-        return refuse("Chưa chụp được màn hình game để xem hộp thoại của thùng rác đã đóng chưa. "
-                      "Để game hiện rõ rồi thử lại.");
-    CleanSettings clean;
-    clean.load(exe_relative("configs/trash.ini"));     // only for where the bin is in the bag
-    if (!bag::nothing_held(frame, simple_store_, clean.layout))
-        return refuse("Trong game vẫn còn một hộp thoại đang mở, hoặc thùng rác vẫn giữ một món "
-                      "đồ. Bấm Hủy Bỏ trong game (thùng rác thì bấm vào nó rồi chọn Hủy Bỏ), "
-                      "rồi thử lại.");
-    trash_left_held_ = false;
+    std::string why;
+    if (!bin_looks_clear(simple_store_, &why)) {
+        simple_note(why, 12000);
+        if (!simple_view_) set_status(why, 12000);
+        GB_WARN("Not started, as the bin's dialog may still be open: %s", why.c_str());
+        return false;
+    }
+    bin_seen_clear();
     return true;
+}
+
+void GuiApp::watch_left_held() {
+    // With a trash worker running, its own look does this (see trash_loop).
+    // Without one, nothing else would look until BẮT ĐẦU, and the executor's
+    // buffs and potions -- paused by the stop -- would stay off all session
+    // for a player who answered the bin's dialog and went on by hand.
+    if (left_held_look_.valid()) {
+        if (left_held_look_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        const bool clear = left_held_look_.get();
+        // Only for the doubt it was started for, and not over a trash worker
+        // that has started since, which looks for itself.
+        if (!clear || !trash_left_held_ || trash_running_ || left_held_look_gen_ != left_held_gen_)
+            return;
+        bin_seen_clear();
+        const std::string note = "Thùng rác không còn giữ gì. Bấm BẮT ĐẦU để đánh quái, bình và "
+                                 "buff chạy lại.";
+        simple_note(note, 12000);
+        if (!simple_view_) set_status(note, 12000);
+        GB_INFO("Trash: the game shows nothing waiting in the bin any more; the executor's buffs "
+                "and potions go on");
+        return;
+    }
+    if (!trash_left_held_ || trash_running_) return;
+    const std::uint64_t now = now_ms();
+    if (now - left_held_looked_ms_ < 2000) return;
+    left_held_looked_ms_ = now;
+    left_held_look_gen_ = left_held_gen_;
+    // One look at a time, so the pictures loaded here are only ever the
+    // look's.
+    left_held_look_ = std::async(std::launch::async, [this] {
+        if (!left_held_store_loaded_) {
+            left_held_store_loaded_ = true;
+            left_held_store_.load_best(exe_relative("configs/templates.ini"));
+        }
+        return bin_looks_clear(left_held_store_, nullptr);
+    });
 }
 
 bool GuiApp::take_hold(const std::string& reason) {
@@ -3129,18 +3196,32 @@ void GuiApp::trash_loop() {
             }
         }
     }
+    // A fresh look at the game, and if it shows nothing of the bin's waiting,
+    // the end of this worker's hold -- and of what an earlier stop left in
+    // doubt, which held the executor's buffs and potions off with the worker
+    // gone (see stop_trash), once the bin's dialogs can be told from the rest,
+    // as keys_may_start asks. That stop stopped the fighting and the potion
+    // keys as well, and those wait for BẮT ĐẦU.
+    const auto look_for_clear = [&] {
+        held_looked_ms = now_ms();
+        Frame f;
+        if (!grab(f) || !f.valid() || !bag::nothing_held(f, store, settings.layout)) return;
+        const bool was_held = held;
+        if (held) {
+            held = false;
+            trash_hold_ = false;
+            end_hold("trash cleaning");
+        }
+        const bool left = trash_left_held_;
+        if (left && bag::can_check(store, TrashList::Action::Delete)) bin_seen_clear();
+        if (was_held && !left)
+            tell("Không còn gì chờ trong thùng rác; đánh quái, bình và buff chạy lại.");
+        else if (was_held || !trash_left_held_)
+            tell("Không còn gì chờ trong thùng rác.");
+    };
     while (!trash_stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (held && now_ms() - held_looked_ms > 1500) {
-            held_looked_ms = now_ms();
-            Frame f;
-            if (grab(f) && f.valid() && bag::nothing_held(f, store, settings.layout)) {
-                held = false;
-                trash_hold_ = false;
-                end_hold("trash cleaning");
-                tell("Không còn gì chờ trong thùng rác; đánh quái, bình và buff chạy lại.");
-            }
-        }
+        if ((held || trash_left_held_) && now_ms() - held_looked_ms > 1500) look_for_clear();
         const int request = trash_request_.exchange(0);
         if (request == 0 && now_ms() - read_ms > 1000) {
             CleanSettings fresh;
@@ -3275,6 +3356,10 @@ void GuiApp::trash_loop() {
             tell("Món đồ có thể vẫn đang ở trong thùng rác hoặc trong hộp thoại của nó. Bấm "
                  "Hủy Bỏ trong game; đánh quái, bình và buff tạm dừng đến khi không còn gì chờ.");
         }
+        // A pass that left the bin clear ends a stop's doubt as well, now
+        // rather than at the next look, which a pass asked for by a button
+        // does not stay for.
+        if (!held && trash_left_held_) look_for_clear();
         if (trash_oneshot_ && !held) break;
     }
     trash_running_ = false;

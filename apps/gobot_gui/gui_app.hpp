@@ -36,6 +36,7 @@
 #include <atomic>
 #include <thread>
 #include <deque>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -395,8 +396,34 @@ private:
     /// off until the bag shows nothing waiting.
     std::atomic<bool>        trash_hold_{false};
     /// A stop ended that hold with nothing left to watch the bin, so nothing
-    /// is started again until the game is seen with nothing waiting.
+    /// is started again until the game is seen with nothing waiting. Nor does
+    /// the executor press anything meanwhile: its buff and potion threads run
+    /// from launch, and nothing but that hold kept them off.
     std::atomic<bool>        trash_left_held_{false};
+    /// The game has been seen with nothing waiting since that stop: clears
+    /// trash_left_held_ and lets the executor go on. From keys_may_start,
+    /// from a trash worker's own look, and from watch_left_held.
+    void bin_seen_clear();
+    /// A fresh look at the game shows no dialog up and nothing waiting in the
+    /// bin, by `store`'s pictures, which have to be there to tell the bin's
+    /// dialogs by. When not, `why` -- if given -- gets why not, in
+    /// Vietnamese.
+    bool bin_looks_clear(const TemplateStore& store, std::string* why);
+    /// From tick(): while a stop's doubt is left and no trash worker is
+    /// running to look, bin_looks_clear every couple of seconds, so the
+    /// executor's buffs and potions come back by themselves once the player
+    /// has answered the bin's dialog. What the stop stopped waits for BẮT ĐẦU.
+    /// The look runs on a thread of its own, with pictures of its own: it
+    /// takes a quarter of a second, too long to hold the window up for.
+    void watch_left_held();
+    TemplateStore            left_held_store_;          ///< the look's own
+    bool                     left_held_store_loaded_ = false;   ///< by the look
+    std::future<bool>        left_held_look_;           ///< a look under way
+    std::uint64_t            left_held_looked_ms_ = 0;
+    /// One more for every stop that leaves the bin in doubt. A look's answer
+    /// counts only for the doubt it was started for.
+    std::atomic<unsigned>    left_held_gen_{0};
+    unsigned                 left_held_look_gen_ = 0;
     /// Whether something that presses keys may start: the hunter, the macro,
     /// the packet bot, walking to a place, the calibration, or the simple
     /// screen's BẮT ĐẦU. Always, unless trash_left_held_ is set; then only

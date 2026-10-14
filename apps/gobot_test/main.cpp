@@ -9,6 +9,7 @@
 #include "gobot/config.hpp"
 #include "gobot/capture_file.hpp"
 #include "gobot/framing.hpp"
+#include "gobot/command_executor.hpp"
 #include "gobot/game_state.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
@@ -5062,6 +5063,59 @@ void test_bag_counts() {
         check(none.items.size() == 1, "and bring nothing else onto the list");
     }
 
+    // The same for a picture cut from the bag. The gourd with a tag and the
+    // plain one differ mostly in the corner a badge goes in, which a slot is
+    // matched without, so a picture of either scores over 0.90 on the other's
+    // slot. Which icons a picture is drawn like is decided with that corner
+    // in, as for two icons: the other gourd stays a rival, and its icon,
+    // which matches its own slot better, keeps the picture off it.
+    if (const ItemCatalog::Entry* tagged = catalog.find("spend/mana/8810013")) {
+        if (const ItemCatalog::Entry* plain = catalog.find("spend/mana/8810011")) {
+            const BagLayout layout;
+            // Drawn as the client draws an icon: a pixel right of the middle
+            // of the slot, blended over its dark.
+            const auto drawn = [&](const ItemCatalog::Entry& e) {
+                Frame f = bag_scene(80, 60);
+                const ScreenRect s{ 10, 10, 34, 34 };
+                const int ox = s.x + (36 - e.icon.width) / 2, oy = s.y + (34 - e.icon.height) / 2;
+                for (int y = 0; y < e.icon.height; ++y)
+                    for (int x = 0; x < e.icon.width; ++x) {
+                        const std::size_t i = (static_cast<std::size_t>(y) * e.icon.width + x) * 4;
+                        const int a = e.icon.pixels[i + 3];
+                        std::uint8_t r, gg, b;
+                        f.get(ox + x, oy + y, r, gg, b);
+                        put_px(f, ox + x, oy + y, (e.icon.pixels[i + 2] * a + r * (255 - a)) / 255,
+                               (e.icon.pixels[i + 1] * a + gg * (255 - a)) / 255,
+                               (e.icon.pixels[i] * a + b * (255 - a)) / 255);
+                    }
+                return std::make_pair(f, s);
+            };
+            const std::pair<const ItemCatalog::Entry*, const ItemCatalog::Entry*> kGourds[] = {
+                { tagged, plain }, { plain, tagged } };
+            for (const auto& [from, to] : kGourds) {
+                auto [g, gs] = drawn(*from);
+                auto [h, hs] = drawn(*to);
+                TrashList cut;
+                cut.add_picture(bag::cut(g, gs), TrashList::Action::Delete, layout);
+                cut.add_rivals(catalog);
+                const TrashList::Verdict on_other = cut.judge(h, hs, 0.90f);
+                check(on_other.item < 0 && on_other.doubt == TrashList::Verdict::Doubt::Rival,
+                      "a picture cut from a slot of " + from->id + " leaves " + to->id +
+                          " alone, though alike enough to be taken -- " +
+                          (on_other.doubt == TrashList::Verdict::Doubt::Rival
+                               ? std::to_string(on_other.like_score) + ", and " + on_other.rival +
+                                     " " + std::to_string(on_other.rival_score)
+                               : on_other.item >= 0 ? "TAKEN at " + std::to_string(on_other.score)
+                                                    : std::string("no likeness")));
+                const auto& kin = cut.items[0].kin;
+                const bool own = std::find(kin.begin(), kin.end(), from->id) != kin.end();
+                const bool others = std::find(kin.begin(), kin.end(), to->id) != kin.end();
+                check(own && !others, "it is drawn like " + from->id + ", and not like " + to->id);
+                check(cut.judge(g, gs, 0.90f).item == 0, "while it takes " + from->id + " itself");
+            }
+        }
+    }
+
     // Fragments change colour in the bag, gold to orange to red and back, and
     // are thrown away at any point of it: the drawing decides.
     if (const ItemCatalog::Entry* piece = catalog.find("spend/fragment/1103023")) {
@@ -5254,6 +5308,12 @@ struct PretendBin {
     mutable int looks = 0;
     bool        revive_up = false;   ///< another dialog is up as well
     bool        wrong_dialog = false; ///< the bin brings up somebody else's dialog
+    int         silent = 0;          ///< clicks on the bin, holding the item, that bring nothing up
+    /// The bin asks as the item lands on it, before it is clicked -- as the
+    /// live client may for an item that does not stack, for all anyone has
+    /// seen of it.
+    bool        asks_on_drop = false;
+    int         bin_clicks = 0;      ///< clicks on the bin, whatever came of them
     bool        two_step = false;    ///< after the quantity, the question as well
     bool        again = false;       ///< that question is the one up
     ScreenRect  strip;               ///< the bag's tab strip
@@ -5314,21 +5374,33 @@ struct PretendBin {
         return f;
     }
 
+    /// The bin asks about the item it holds, the whole stack in the box.
+    void ask() {
+        state = State::Asking;
+        box = blank ? std::string() : prefill.empty() ? std::to_string(count) : prefill;
+        asked_at = std::chrono::steady_clock::now();
+    }
+
     BagCleaner::Hands hands() {
         BagCleaner::Hands h;
         h.drag = [this](int fx, int fy, int tx, int ty) {
             ++drags;
             const ScreenRect near_bin{ bin.x - 4, bin.y - 4, bin.w + 8, bin.h + 8 };
-            if (state == State::Idle && !gone && slot.contains(fx, fy) && near_bin.contains(tx, ty))
-                state = State::InBin;
+            if (state == State::Idle && !gone && slot.contains(fx, fy) && near_bin.contains(tx, ty)) {
+                if (asks_on_drop) ask();
+                else              state = State::InBin;
+            }
             return true;
         };
         h.click = [this](int x, int y) {
             const ScreenRect near_bin{ bin.x - 4, bin.y - 4, bin.w + 8, bin.h + 8 };
+            if (near_bin.contains(x, y)) ++bin_clicks;
+            if (state == State::InBin && near_bin.contains(x, y) && silent > 0) {
+                --silent;                  // the game let the click go by
+                return true;
+            }
             if (state == State::InBin && near_bin.contains(x, y)) {
-                state = State::Asking;
-                box = blank ? std::string() : prefill.empty() ? std::to_string(count) : prefill;
-                asked_at = std::chrono::steady_clock::now();
+                ask();
                 return true;
             }
             if (box_up() && box_rect().contains(x, y)) {
@@ -5714,6 +5786,161 @@ void test_bag_dialogs() {
                   std::to_string(game.cancels));
     }
 
+    // A probe: what the bin asks for one item, answered Hủy Bỏ whatever it
+    // is, with nothing confirmed, nothing typed and the item back in its
+    // slot -- the first row's sixth here.
+    // `frames_dir` keeps its frames; `asks_after` has the bin ask by itself
+    // on the look that many after it first holds the item.
+    const auto probe = [&](PretendBin& game, int row, int col, std::vector<std::string>* said = nullptr,
+                           bool stop_when_asked = false, const std::string& frames_dir = std::string(),
+                           int asks_after = 0) {
+        InputManager no_window;
+        BagCleaner* running = nullptr;
+        BagCleaner cleaner(no_window, store, [&](Frame& out) {
+            if (asks_after > 0 && game.state == PretendBin::State::InBin && --asks_after == 0) game.ask();
+            out = game.render();
+            if (stop_when_asked && game.state == PretendBin::State::Asking && running) running->cancel();
+            return true;
+        });
+        running = &cleaner;
+        cleaner.set_settings(cs);
+        cleaner.set_counts(&counts);
+        cleaner.set_hands(game.hands());
+        if (!frames_dir.empty()) cleaner.set_debug_dir(frames_dir);
+        if (said) cleaner.on_report([said](const std::string& line) { said->push_back(line); });
+        return cleaner.probe(0, row, col);
+    };
+    const auto left_alone = [](const PretendBin& game) {
+        return game.confirms == 0 && game.box_keys == 0 && game.box_clicks == 0 &&
+               game.keys_into_dialog == 0 && !game.gone;
+    };
+    // The probe frames kept in `dir`, cleared away: how many there were.
+    const auto probe_frames = [](const std::string& dir) {
+        std::vector<std::string> names;
+        WIN32_FIND_DATAA fd{};
+        HANDLE h = FindFirstFileA((dir + "\\probe_*.png").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do { names.push_back(fd.cFileName); } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        for (const std::string& n : names) DeleteFileA((dir + "\\" + n).c_str());
+        return static_cast<int>(names.size());
+    };
+    {
+        // A stack, the bag shut to begin with: its key first, on a screen
+        // with no dialog up, and then the bin's quantity dialog -- once the
+        // bin is clicked, which is what asks.
+        PretendBin game = game_with("7");
+        game.bag_shut = true;
+        std::vector<std::string> said;
+        const auto r = probe(game, 0, 5, &said);
+        check(r.moved && r.dialog == "quantity" && !r.at_drop && game.bin_clicks >= 1 &&
+                  r.words >= 0.90f && r.frames > 0,
+              "a probe sees the bin's quantity dialog, once the bin is clicked -- " + r.dialog +
+                  (r.at_drop ? "@drop" : "") + ", words " + std::to_string(r.words) + ", " +
+                  std::to_string(r.frames) + " frames");
+        check(left_alone(game) && game.cancels == 1 && game.state == PretendBin::State::Idle && r.back,
+              "and answers it Hủy Bỏ: nothing confirmed, nothing typed, the item back -- cancels " +
+                  std::to_string(game.cancels));
+        check(says(said, "hộp thoại ở") && says(said, "ô ghi 7"),
+              "and says what each frame showed, the game's 7 in the box among it");
+    }
+    {
+        // The question comes up as the item lands, before the bin is
+        // clicked. Seen there and kept from the drag on, said to be the
+        // drop's, and answered Hủy Bỏ with the bin never clicked.
+        PretendBin game = game_with("");
+        game.stacks = false;
+        game.asks_on_drop = true;
+        std::vector<std::string> said;
+        const std::string dir = temp_file("gobot_probe_frames");
+        CreateDirectoryA(dir.c_str(), nullptr);
+        probe_frames(dir);
+        const auto r = probe(game, 0, 5, &said, false, dir);
+        const int kept = probe_frames(dir);
+        RemoveDirectoryA(dir.c_str());
+        check(r.moved && r.dialog == "ask" && r.at_drop && r.words >= 0.90f && r.frames > 0,
+              "a question that comes up as the item lands is seen there -- " + r.dialog +
+                  (r.at_drop ? "@drop" : "") + ", words " + std::to_string(r.words));
+        check(left_alone(game) && game.bin_clicks == 0 && game.cancels == 1 && r.back,
+              "and answered Hủy Bỏ, the bin never clicked, the item back -- clicks on the bin " +
+                  std::to_string(game.bin_clicks) + ", cancels " + std::to_string(game.cancels));
+        check(kept == r.frames && says(said, "ngay khi món đồ vào thùng rác") &&
+                  says(said, "sau khi thả vào thùng rác") && !says(said, "sau khi bấm vào thùng rác"),
+              "every frame from the drag on is kept and read, and said to be the drop's -- " +
+                  std::to_string(kept) + " kept of " + std::to_string(r.frames));
+    }
+    {
+        // A moment after the item shows in the bin, before the bin would be
+        // clicked: still the drop's.
+        PretendBin game = game_with("7");
+        std::vector<std::string> said;
+        const auto r = probe(game, 0, 5, &said, false, std::string(), 3);
+        check(r.dialog == "quantity" && r.at_drop && game.bin_clicks == 0 && left_alone(game) &&
+                  game.cancels == 1 && r.back && says(said, "ô ghi 7"),
+              "and so is one that comes up a moment after the item shows in the bin -- " + r.dialog +
+                  (r.at_drop ? "@drop" : "") + ", clicks on the bin " + std::to_string(game.bin_clicks));
+    }
+    {
+        PretendBin game = game_with("");
+        game.asks_on_drop = true;
+        game.wrong_dialog = true;
+        const auto r = probe(game, 0, 5);
+        check(r.dialog == "foreign" && r.at_drop && r.words < 0.90f && left_alone(game) &&
+                  game.wrong_answers == 0 && game.bin_clicks == 0 && game.cancels == 1 && r.back,
+              "somebody else's dialog as the item lands: foreign, at the drop, and Hủy Bỏ all the "
+              "same -- " + r.dialog + (r.at_drop ? "@drop" : ""));
+    }
+    {
+        PretendBin game = game_with("");
+        game.stacks = false;
+        const auto r = probe(game, 0, 5);
+        check(r.dialog == "ask" && r.words >= 0.90f && left_alone(game) && game.cancels == 1 && r.back,
+              "an item that does not stack: the bin's question, answered Hủy Bỏ -- " + r.dialog);
+    }
+    {
+        // The question for an item that does not stack, if its words were not
+        // the picture's: somebody else's dialog, as far as anything can tell.
+        // A pass leaves that alone; a probe says no to it all the same.
+        PretendBin game = game_with("");
+        game.wrong_dialog = true;
+        const auto r = probe(game, 0, 5);
+        check(r.dialog == "foreign" && r.words < 0.90f && left_alone(game) && game.wrong_answers == 0 &&
+                  game.cancels == 1 && r.back,
+              "a dialog that is not the bin's comes up: foreign, and Hủy Bỏ all the same -- " +
+                  r.dialog + ", cancels " + std::to_string(game.cancels));
+    }
+    {
+        PretendBin game = game_with("");
+        game.silent = 1;
+        std::vector<std::string> said;
+        const auto r = probe(game, 0, 5, &said);
+        check(r.dialog == "none" && says(said, "không thấy hộp thoại nào") && left_alone(game) &&
+                  game.cancels == 1 && r.back,
+              "nothing comes up: it says so, and gives the item back as a pass does -- cancels " +
+                  std::to_string(game.cancels));
+    }
+    {
+        PretendBin game = game_with("2");
+        const auto r = probe(game, 0, 5, nullptr, true);
+        check(left_alone(game) && game.cancels == 1 && r.back,
+              "a stop while it watches: Hủy Bỏ straight away, and the item back");
+    }
+    {
+        PretendBin game = game_with("");
+        game.revive_up = true;
+        const auto r = probe(game, 0, 5);
+        check(!r.trouble.empty() && !r.moved && game.drags == 0 && game.cancels == 0 &&
+                  game.confirms == 0 && r.dialog == "none" && !r.back,
+              "with another dialog up, a probe touches nothing -- " + r.trouble);
+    }
+    {
+        PretendBin game = game_with("");
+        const auto r = probe(game, 0, 0);
+        check(!r.trouble.empty() && !r.moved && game.drags == 0 && !r.back,
+              "nor on an empty slot -- " + r.trouble);
+    }
+
     // Anything else that presses Xác Nhận keeps its hands off the bin's
     // dialogs: the party invitation's footer picture -- the same two buttons
     // -- is found on the bin's quantity dialog, and its line does not read as
@@ -5970,6 +6197,69 @@ void test_macro_key_kind() {
     check(std::all_of(st.key_presses.begin(), st.key_presses.end(),
                       [](std::uint64_t n) { return n == 0; }),
           "and nothing counted against any key");
+}
+
+/// The executor paused, as the GUI pauses it after a stop that may have left
+/// the trash bin's quantity dialog open.
+///
+/// Its buff and potion threads run from launch, and the only thing that kept
+/// them out of that dialog's box was the trash pass's hold on the
+/// coordinator, which the stop ends. Nothing reaches the keyboard in a test
+/// run -- there is no game window -- so what is watched is whether it asks
+/// the coordinator for the keys at all, which it does before it looks for
+/// the window: something holding them at the lowest priority loses them to
+/// a buff or a potion that asks.
+void test_executor_pause() {
+    section("Executor: paused while the bin may be asking");
+
+    BotConfig cfg;
+    cfg.auto_buff = true;
+    cfg.buffs[0].enabled = true;
+    cfg.buffs[0].keycode = '6';
+    cfg.buffs[0].cooldown_sec = 60;          // the live config's buff
+    cfg.hp_heal1.enabled = true;
+    cfg.hp_heal1.keycode = '1';
+    cfg.hp_heal1.trigger_pct = 50;
+    GameState state;
+    state.update_self_hp(10, 100);           // a potion is due as well
+    InputManager input;
+    ExecutionCoordinator coord;
+
+    // What the hold did, and why it is not enough: while the trash pass
+    // holds everything off a buff is refused, and once a stop ends that hold
+    // nothing refuses it.
+    coord.engage_critical("trash cleaning");
+    check(!coord.request("buff", Priority::Buff), "a buff is refused while the pass holds the keys");
+    coord.disengage_critical();
+    check(coord.request("buff", Priority::Buff), "and let through once the stop ends that hold");
+    coord.release("buff");
+
+    CommandExecutor exec(cfg, state, input, coord);
+    exec.set_paused(true);
+    check(exec.paused(), "pauses");
+    check(coord.request("test", Priority::Idle), "something low holds the keys");
+    exec.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    const auto held = exec.stats();
+    check(coord.held() && coord.current_owner() == "test",
+          "paused, neither the buff timer nor the potion asks for the keys -- held by '" +
+              coord.current_owner() + "'");
+    check(held.held_paused > 0 && held.buffs_cast == 0 && held.heals == 0,
+          "and what fell due is counted as held -- " + std::to_string(held.held_paused));
+    check(!exec.execute_now(Command::buff('6', 0)) && coord.current_owner() == "test",
+          "a command is refused before it asks for the keys");
+
+    // Let go: the buff is still due, and now it asks.
+    exec.set_paused(false);
+    bool asked = false;
+    for (int i = 0; i < 40 && !asked; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        asked = coord.current_owner() != "test";
+    }
+    check(asked, "let go, it asks for the keys again");
+    exec.stop();
+    check(exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
+          "and with no game window, still nothing is pressed");
 }
 
 // ------------------------------------------------------------------ config
@@ -6234,6 +6524,7 @@ int main() {
     test_macro_trigger_config();
     test_macro_engine();
     test_macro_key_kind();
+    test_executor_pause();
     test_vitals_reader();
     test_find_bars();
     test_macro_triggers();

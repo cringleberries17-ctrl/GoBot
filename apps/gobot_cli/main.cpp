@@ -259,6 +259,24 @@ UNATTENDED RUNNING
                       their drawing, whatever their colour. Close the GUI
                       first: both driving the bag at once get in each
                       other's way.
+  --trash-probe <tab> <row> <col>
+                      See what the bin asks for one item, deleting nothing:
+                      tab 1-5 (Trang Bị 1, Trang Bị 2, Tiêu Dùng, Khác, Linh
+                      Thú), row 1-4 and column 1-6 of that tab scrolled to
+                      the top. On a clean screen only -- the can in the bin,
+                      no dialog up -- it drags the item onto the bin and,
+                      unless a dialog comes up as the item lands, clicks the
+                      bin. From the drag on it keeps every frame in
+                      trash_debug as probe_<time>_NN.png and says what each
+                      dialog on it is, watching one for about 1.5 s, then
+                      answers Hủy Bỏ on whatever came up, the bin's or not.
+                      It never presses Xác Nhận, nor any key once the item
+                      has moved. The last line is
+                        PROBE RESULT dialog=<none|ask|quantity|foreign>[@drop]
+                                     words=<score> back=<yes|no>
+                      where @drop says the dialog came up as the item landed,
+                      before any click on the bin. It exits 0 only when the
+                      item is back in its slot and the bin is clean.
   --close             Close whatever dialogs are in the way, for real. The one
                       thing here that needs no calibration -- the middle of a
                       close button is the close button -- so it is the right
@@ -334,6 +352,8 @@ struct Options {
     std::string bag_out;
     bool trash = false;
     int  trash_max = 0;             ///< 0: not given
+    bool trash_probe = false;
+    int  probe_tab = 0, probe_row = 0, probe_col = 0;   ///< from 1, as typed
     bool dry_run = false;
     bool close_popups = false;
     bool party = false;
@@ -413,6 +433,24 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--bag")       o.bag_image = next("--bag");
         else if (a == "--bagout")    o.bag_out = next("--bagout");
         else if (a == "--trash")     o.trash = true;
+        else if (a == "--trash-probe") {
+            // Each number checked here, one digit in its range: a probe aimed
+            // at the wrong slot moves the wrong item.
+            const auto number = [&](const char* what, int hi) {
+                const std::string n = next("--trash-probe");
+                const int v = n.size() == 1 && n[0] >= '1' && n[0] <= '9' ? n[0] - '0' : 0;
+                if (v < 1 || v > hi) {
+                    std::fprintf(stderr, "error: --trash-probe needs the %s, 1 to %d, not '%s'\n\n",
+                                 what, hi, n.c_str());
+                    return 0;
+                }
+                return v;
+            };
+            o.trash_probe = true;
+            if ((o.probe_tab = number("tab", kBagTabs)) == 0) return false;
+            if ((o.probe_row = number("row", 4)) == 0) return false;
+            if ((o.probe_col = number("column", 6)) == 0) return false;
+        }
         else if (a == "--max") {
             // Checked here rather than clamped later: a typo in the one bound
             // on how much a pass may throw away should stop it, not turn into
@@ -2300,6 +2338,97 @@ int run_trash(const Options& o, const AppConfig& app) {
     // Nothing here holds keys off the way the GUI does, so the player is told
     // instead: a box left open takes whatever is typed next as the count.
     if (r.stuck)
+        say("Món đồ có thể vẫn đang ở trong thùng rác hoặc trong hộp thoại của nó: bấm Hủy Bỏ "
+            "trong game trước khi gõ phím nào.");
+    return finish(r);
+}
+
+/// What the bin asks for one item, against the live game, with nothing thrown
+/// away: BagCleaner::probe, set up the way run_trash sets up a pass. For the
+/// question an item that does not stack gets, which no pass has seen yet --
+/// what it is, and whether its words are taken for the bin's -- while the
+/// item only ever gets Hủy Bỏ.
+int run_trash_probe(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    const auto finish = [](const BagCleaner::Probe& r) {
+        std::fflush(stderr);
+        std::printf("PROBE RESULT dialog=%s%s words=%.3f back=%s\n", r.dialog.c_str(),
+                    r.at_drop ? "@drop" : "", static_cast<double>(r.words), r.back ? "yes" : "no");
+        std::fflush(stdout);
+        return r.back ? 0 : 1;
+    };
+    const auto give_up = [&](const std::string& why) {
+        say(why + ".");
+        BagCleaner::Probe r;
+        r.trouble = why;
+        return finish(r);
+    };
+
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini")))
+        return give_up("Không có hình giao diện của game, nên không nhận ra được túi đồ");
+    if (!bag::can_check(store, TrashList::Action::Delete))
+        say("the pictures of the bin's dialogs are not all here, so no dialog can be taken for "
+            "the bin's");
+    CountReader counts;
+    if (!counts.load(GlyphFont::default_dir()))
+        say("Không có bộ chữ số của game, nên không đọc được số lượng trên ô đồ.");
+    CleanSettings settings;
+    if (!settings.load(resolve("configs/trash.ini")))
+        say("no configs/trash.ini, so going by the built-in settings");
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game");
+
+    say(std::string("probing ") + bag_tab_name(o.probe_tab - 1) + ", row " +
+        std::to_string(o.probe_row) + ", column " + std::to_string(o.probe_col) +
+        ": whatever the bin asks is answered Hủy Bỏ, and nothing is deleted");
+    if (SessionManager::process_running("gobot_gui.exe"))
+        say("gobot_gui is running as well: anything it does in the game during this probe "
+            "gets in the way");
+
+    input.release_all();
+    if (!input.window_focused()) {
+        input.focus_window();
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    int w = 0, h = 0;
+    input.window_size(w, h);
+    say("game window " + std::to_string(w) + "x" + std::to_string(h) +
+        (input.window_focused() ? ", in front" : ", not in front, so the probe will not use the mouse"));
+
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) { return capture.grab(input.target_window(), f); };
+    BagCleaner cleaner(input, store, grab);
+    cleaner.set_settings(settings);
+    cleaner.set_counts(&counts);
+    cleaner.set_debug_dir(exe_relative("trash_debug"));
+    cleaner.on_report(say);
+
+    // Ctrl+C cuts the watching short, and the item is given back all the same.
+    std::atomic<bool> probing{true};
+    std::thread watch([&] {
+        while (probing) {
+            if (g_stop) cleaner.cancel();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    });
+    const BagCleaner::Probe r = cleaner.probe(o.probe_tab - 1, o.probe_row - 1, o.probe_col - 1);
+    probing = false;
+    watch.join();
+
+    if (r.moved)
+        say(std::to_string(r.frames) + " frame(s) looked at from the drag on" +
+            (r.frames > 0 ? ", kept in trash_debug as probe_*.png" : "") +
+            (r.at_drop ? "; the dialog came up as the item landed, so the bin was not clicked" : ""));
+    if (!r.trouble.empty()) say("Dừng: " + r.trouble + ".");
+    // Nothing here holds keys off the way the GUI does, so the player is told
+    // instead, when the item left its slot and was not seen back.
+    if (r.moved && !r.back)
         say("Món đồ có thể vẫn đang ở trong thùng rác hoặc trong hộp thoại của nó: bấm Hủy Bỏ "
             "trong game trước khi gõ phím nào.");
     return finish(r);
@@ -4320,6 +4449,7 @@ int main(int argc, char** argv) {
     if (opt.close_popups) return run_close(opt, app);
     if (opt.routines) return run_routines(opt, app);
     if (!opt.bag_image.empty()) return run_bag(opt);
+    if (opt.trash_probe) return run_trash_probe(opt, app);
     if (opt.trash) return run_trash(opt, app);
     if (opt.set_login) return run_set_login(opt);
     if (opt.login) return run_login(opt, app);

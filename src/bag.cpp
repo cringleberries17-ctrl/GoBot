@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <map>
 #include <set>
 #include <thread>
 
@@ -126,6 +127,50 @@ bool same_place(const ScreenRect& a, const ScreenRect& b) {
     return std::abs(a.x - b.x) <= 3 && std::abs(a.y - b.y) <= 3;
 }
 
+/// How alike the screen is to bin dialog `pic`'s panel of words, where that
+/// panel would sit for a pair of buttons at `at`: the best within two pixels,
+/// when `least` or better, else -1. -1 too for a picture that is not loaded
+/// or has no words to tell anything apart by.
+float words_at(const Frame& f, const TemplateStore& store, const ScreenRect& at,
+               const DialogPicture& pic, float least) {
+    const Frame* t = store.get(pic.name);
+    if (t == nullptr) return -1.0f;
+    const Frame words = crop(*t, ScreenRect{ kWordsX, kWordsY, kWordsW, kWordsH });
+    if (!words.valid()) return -1.0f;
+    int bright = 0;
+    for (std::size_t i = 0; i < words.pixels.size(); i += 4)
+        if ((words.pixels[i] + words.pixels[i + 1] + words.pixels[i + 2]) / 3 > 150) ++bright;
+    if (bright < kWordsAtLeast) return -1.0f;     // no words: tells nothing apart
+
+    // Right where they sit relative to the buttons, give or take two pixels,
+    // and nowhere else.
+    const ScreenRect place = clamp_to(f, ScreenRect{ at.x - pic.pair_dx + kWordsX - 2,
+                                                     at.y - pic.pair_dy + kWordsY - 2,
+                                                     kWordsW + 4, kWordsH + 4 });
+    if (place.w < words.width || place.h < words.height) return -1.0f;
+    const auto m = TemplateMatcher::find(f, place, words, least);
+    return m.found ? m.score : -1.0f;
+}
+
+/// The oldest PNGs of one kind in `dir` -- a probe's frames, or the rest --
+/// deleted until `keep` are left. Named by when they were taken, they sort
+/// oldest first.
+void prune_pngs(const std::string& dir, bool probes, std::size_t keep) {
+    std::vector<std::string> old;
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA((dir + "\\*.png").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            const bool probe = std::string(fd.cFileName).rfind("probe_", 0) == 0;
+            if (probe == probes) old.push_back(fd.cFileName);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    std::sort(old.begin(), old.end());
+    for (std::size_t i = 0; i + keep < old.size(); ++i)
+        DeleteFileA((dir + "\\" + old[i]).c_str());
+}
+
 } // namespace
 
 // ----------------------------------------------------------------- layout
@@ -151,6 +196,8 @@ void BagLayout::load(const IniFile& ini) {
     count_w         = ini.get_int("Bag", "count_w", count_w);
     count_h         = ini.get_int("Bag", "count_h", count_h);
     edge            = ini.get_int("Bag", "edge", edge);
+    badge_w         = ini.get_int("Bag", "badge_w", badge_w);
+    badge_h         = ini.get_int("Bag", "badge_h", badge_h);
 }
 
 const char* bag_tab_name(int tab) {
@@ -314,8 +361,9 @@ Frame masked(const Frame& picture, const BagLayout& l) {
             const bool at_edge = x < l.edge || y < l.edge ||
                                  x >= out.width - l.edge || y >= out.height - l.edge;
             const bool in_count = x < l.count_w && y < l.count_h;
+            const bool in_badge = x >= out.width - l.badge_w && y >= out.height - l.badge_h;
             out.pixels[(static_cast<std::size_t>(y) * out.width + x) * 4 + 3] =
-                (at_edge || in_count) ? 0 : 255;
+                (at_edge || in_count || in_badge) ? 0 : 255;
         }
     }
     return out;
@@ -613,14 +661,42 @@ Frame slot_tile(const Frame& icon, int size = 34) {
     return t;
 }
 
-/// An icon as it is matched: its own transparency, less the corner the count
-/// is printed over. The icon sits about two pixels into the slot, so the
-/// slot's count corner is this much of the icon.
-Frame icon_picture(const ItemCatalog::Entry& e) {
+/// An icon as another icon is compared with it: its own transparency, less
+/// the corner the count is printed over. The icon sits about two pixels into
+/// the slot, so the slot's count corner is this much of the icon.
+Frame icon_drawing(const ItemCatalog::Entry& e) {
     Frame p = e.icon;
     for (int y = 0; y < p.height; ++y)
         for (int x = 0; x < p.width; ++x)
             if (x < 20 && y < 11) p.pixels[(static_cast<std::size_t>(y) * p.width + x) * 4 + 3] = 0;
+    return p;
+}
+
+/// How much of an icon's bottom-right corner a badge in its slot can cover.
+/// The client draws an icon in the middle of its slot, a pixel right of the
+/// middle -- measured on every real frame, on icons 30 to 34 wide and 26 to
+/// 34 tall -- so this much of any icon up to the slot's size holds all of
+/// the slot's badge corner (BagLayout::badge_w) that lies over it: to the
+/// pixel for an icon of 34 by 34, with room to spare for anything smaller.
+constexpr int kIconBadge = 12;
+
+/// An icon as a slot is matched against it: less the badge corner as well,
+/// which a slot can have and an icon never does.
+///
+/// Not for deciding which drawings are one, neither icon against icon nor
+/// icon against a picture cut from the bag: two drawings that differ mostly
+/// in that corner are two things. Compared without it, the plain and the
+/// decorated gourd potions -- 8820011 and 8820013, and their blue twins --
+/// came out as one, at 0.85 icon against icon, and a picture of one took the
+/// other's slots at 0.91. Decided with it, they are two, and the one not
+/// listed is a rival in the bag that matches its own slots better than the
+/// listed one does -- which is what leaves them alone, since with the corner
+/// left out the listed one still scores over min_score there.
+Frame icon_picture(const ItemCatalog::Entry& e) {
+    Frame p = icon_drawing(e);
+    for (int y = std::max(0, p.height - kIconBadge); y < p.height; ++y)
+        for (int x = std::max(0, p.width - kIconBadge); x < p.width; ++x)
+            p.pixels[(static_cast<std::size_t>(y) * p.width + x) * 4 + 3] = 0;
     return p;
 }
 
@@ -658,6 +734,20 @@ bool listed(const std::vector<TrashList::Item>& items, const std::string& id) {
     for (const TrashList::Item& it : items)
         if (it.id == id) return true;
     return false;
+}
+
+/// A picture cut from the bag as an icon is compared with it: masked like the
+/// picture it is matched by, but with the badge corner kept, as icon_drawing
+/// keeps it. See icon_picture for why.
+Frame cut_drawing(const Frame& cut, const BagLayout& l) {
+    BagLayout with_corner = l;
+    with_corner.badge_w = 0;
+    with_corner.badge_h = 0;
+    return bag::masked(cut, with_corner);
+}
+
+void add_kin(TrashList::Item& item, const std::string& id) {
+    if (std::find(item.kin.begin(), item.kin.end(), id) == item.kin.end()) item.kin.push_back(id);
 }
 
 } // namespace
@@ -725,10 +815,11 @@ std::vector<std::string> ItemCatalog::same_drawing(const std::string& id) const 
     std::vector<std::string> out;
     const Entry* me = find(id);
     if (me == nullptr || !me->tile.valid()) return out;
-    const Frame mine = icon_picture(*me);
+    // Icon against icon, so with the badge corner: see icon_picture.
+    const Frame mine = icon_drawing(*me);
     for (const Group& g : groups)
         for (const Entry& e : g.entries)
-            if (e.id != id && e.tile.valid() && one_drawing(mine, me->tile, icon_picture(e), e.tile))
+            if (e.id != id && e.tile.valid() && one_drawing(mine, me->tile, icon_drawing(e), e.tile))
                 out.push_back(e.id);
     return out;
 }
@@ -744,8 +835,8 @@ bool CleanSettings::load(const std::string& path) {
     const char* const kTabKeys[kBagTabs] = { "tab_equip1", "tab_equip2", "tab_use",
                                              "tab_other", "tab_pet" };
     for (int i = 0; i < kBagTabs; ++i) tabs[i] = ini.get_bool("Trash", kTabKeys[i], tabs[i]);
-    // Not below 0.85: in grey, two different fragments score up to 0.74 on a
-    // real slot and two different potions 0.81, and a hand-edited 0.70 would
+    // Not below 0.85: in grey, two different fragments score up to 0.73 on a
+    // real slot and two different potions 0.77, and a hand-edited 0.70 would
     // let those through wherever the catalog has nothing better to say.
     min_score        = std::clamp(ini.get_float("Trash", "min_score", min_score), 0.85f, 0.99f);
     max_per_run      = std::clamp(ini.get_int("Trash", "max_per_run", max_per_run), 1, 500);
@@ -797,6 +888,7 @@ bool TrashList::load(const std::string& dir, const BagLayout& l) {
             for (std::size_t i = 3; i < item.shown.pixels.size(); i += 4)
                 item.shown.pixels[i] = 255;
             item.picture = bag::masked(item.shown, l);
+            item.drawing = cut_drawing(item.shown, l);
             items.push_back(std::move(item));
         }
     }
@@ -824,6 +916,7 @@ std::string TrashList::add(const std::string& dir, const Frame& cut, Action a,
     item.action = a;
     item.shown = cut;
     item.picture = bag::masked(cut, l);
+    item.drawing = cut_drawing(cut, l);
     items.push_back(std::move(item));
     return path;
 }
@@ -833,6 +926,7 @@ void TrashList::add_picture(const Frame& cut, Action a, const BagLayout& l) {
     item.action = a;
     item.shown = cut;
     item.picture = bag::masked(cut, l);
+    item.drawing = cut_drawing(cut, l);
     items.push_back(std::move(item));
 }
 
@@ -868,6 +962,10 @@ void TrashList::add_catalog(const ItemCatalog& catalog, const std::vector<std::s
 
 void TrashList::add_rivals(const ItemCatalog& catalog) {
     rivals.clear();
+    // Learned afresh: what an earlier call learned would be taken below for
+    // what the comparison found, and its colours added on top of it.
+    for (Item& it : items)
+        if (it.id.empty()) it.kin.clear();
     for (const ItemCatalog::Group& g : catalog.groups)
         for (const ItemCatalog::Entry& e : g.entries) {
             if (!listed(items, e.id)) rivals.push_back(catalog_item(e, Action::Delete, 0.0f));
@@ -879,15 +977,34 @@ void TrashList::add_rivals(const ItemCatalog& catalog) {
             // every slot holding it, and nothing would be thrown away.
             // The picture is a whole slot, so the icon is drawn on a wider
             // one for the picture to be searched over.
-            const Frame icon = icon_picture(e);
+            //
+            // Decided the way same_drawing decides it for two icons, with the
+            // badge corner compared on both sides: see icon_picture. Left out,
+            // the plain and the decorated gourds came out as one drawing, and
+            // a picture of either took the other's slots.
+            const Frame icon = icon_drawing(e);
             const Frame wide = slot_tile(e.icon, 40);
             for (Item& it : items) {
-                if (!it.id.empty() || !it.shown.valid()) continue;
-                if (one_drawing(icon, wide, it.picture, it.shown) &&
-                    std::find(it.kin.begin(), it.kin.end(), e.id) == it.kin.end())
-                    it.kin.push_back(e.id);
+                if (!it.id.empty() || !it.shown.valid() || !it.drawing.valid()) continue;
+                if (one_drawing(icon, wide, it.drawing, it.shown)) add_kin(it, e.id);
             }
         }
+
+    // And each of those icons' drawing in its other colours, as choosing it
+    // from the catalog would bring. A badge over the picture's corner can hold
+    // the picture under kSameDrawing of some of them -- a buff with a P on it,
+    // of the same buff in another colour -- and as rivals those would tie with
+    // it on every slot holding it.
+    std::map<std::string, std::vector<std::string>> colours;
+    for (Item& it : items) {
+        if (!it.id.empty()) continue;
+        const std::vector<std::string> found = it.kin;
+        for (const std::string& id : found) {
+            auto c = colours.find(id);
+            if (c == colours.end()) c = colours.emplace(id, catalog.same_drawing(id)).first;
+            for (const std::string& other : c->second) add_kin(it, other);
+        }
+    }
 }
 
 void TrashList::build(const std::string& dir, const CleanSettings& s, const ItemCatalog& catalog) {
@@ -909,11 +1026,12 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
     Verdict v;
     const ScreenRect area = clamp_to(f, ScreenRect{ slot.x - 3, slot.y - 3,
                                                     slot.w + 6, slot.h + 6 });
-    // The drawing alone, in grey. Measured on every real frame, the right
-    // icon scores 0.952 or more on its item in any colour the bag draws it --
-    // gold, orange, the red of GoC's own pictures -- the best other drawing
-    // 0.81 at most, and the enlarged copy a slot shows while its item waits
-    // in the bin 0.79 at most.
+    // The drawing alone, in grey, without the count's corner or a badge's.
+    // Measured on every real frame, the right icon scores 0.947 or more on
+    // its item in any colour the bag draws it -- gold, orange, the red of
+    // GoC's own pictures -- and 0.99 on a buff with a badge over it, the best
+    // other drawing 0.77 at most, and the enlarged copy a slot shows while
+    // its item waits in the bin 0.77 at most.
     for (std::size_t i = 0; i < items.size(); ++i) {
         const Item& item = items[i];
         const Frame& p = item.picture;
@@ -998,25 +1116,10 @@ std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store) {
         d.pair = at;
         for (int k = 0; k < static_cast<int>(std::size(kBinDialogs)); ++k) {
             const DialogPicture& pic = kBinDialogs[k];
-            const Frame* t = store.get(pic.name);
-            if (t == nullptr) continue;
-            const Frame words = crop(*t, ScreenRect{ kWordsX, kWordsY, kWordsW, kWordsH });
-            if (!words.valid()) continue;
-            int bright = 0;
-            for (std::size_t i = 0; i < words.pixels.size(); i += 4)
-                if ((words.pixels[i] + words.pixels[i + 1] + words.pixels[i + 2]) / 3 > 150) ++bright;
-            if (bright < kWordsAtLeast) continue;     // no words: tells nothing apart
-
-            // Right where they sit relative to the buttons, give or take two
-            // pixels, and nowhere else.
-            const ScreenRect place = clamp_to(f, ScreenRect{ at.x - pic.pair_dx + kWordsX - 2,
-                                                             at.y - pic.pair_dy + kWordsY - 2,
-                                                             kWordsW + 4, kWordsH + 4 });
-            if (place.w < words.width || place.h < words.height) continue;
-            const auto m = TemplateMatcher::find(f, place, words, kWordsScore);
-            if (m.found && m.score > d.words) {
+            const float words = words_at(f, store, at, pic, kWordsScore);
+            if (words >= kWordsScore && words > d.words) {
                 d.kind = k;
-                d.words = m.score;
+                d.words = words;
                 d.quantity = pic.quantity;
             }
         }
@@ -1024,6 +1127,12 @@ std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store) {
             d.box = ScreenRect{ at.x + kBoxDx, at.y + kBoxDy, kBoxW, std::max(4, at.h - 6) };
         out.push_back(d);
     }
+    return out;
+}
+
+std::vector<float> words_scores(const Frame& f, const TemplateStore& store, const Dialog& d) {
+    std::vector<float> out;
+    for (const DialogPicture& pic : kBinDialogs) out.push_back(words_at(f, store, d.pair, pic, -1.0f));
     return out;
 }
 
@@ -1072,17 +1181,9 @@ void BagCleaner::keep(const Frame& f, const char* what) {
     if (debug_dir_.empty() || !f.valid()) return;
     CreateDirectoryA(debug_dir_.c_str(), nullptr);
 
-    // A few dozen at most: the newest are the ones that matter.
-    std::vector<std::string> old;
-    WIN32_FIND_DATAA fd{};
-    HANDLE h = FindFirstFileA((debug_dir_ + "\\*.png").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do { old.push_back(fd.cFileName); } while (FindNextFileA(h, &fd));
-        FindClose(h);
-    }
-    std::sort(old.begin(), old.end());
-    for (std::size_t i = 0; old.size() >= 30 && i + 29 < old.size(); ++i)
-        DeleteFileA((debug_dir_ + "\\" + old[i]).c_str());
+    // A few dozen at most: the newest are the ones that matter. A probe's
+    // frames are a record of their own, kept apart from these: see probe.
+    prune_pngs(debug_dir_, false, 29);
 
     static int n = 0;
     const std::string path = debug_dir_ + "\\" + stamp() + "_" + std::to_string(n++ % 100) +
@@ -1802,6 +1903,333 @@ bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int coun
         return false;
     }
     return true;
+}
+
+// ------------------------------------------------------------------ probe
+
+namespace {
+
+/// How long a probe watches a dialog that has come up -- from the click on
+/// the bin, or from the first look that showed it when it came up as the item
+/// landed -- and how often it looks at most. The bin's dialog was seen live
+/// to be up and settled within half a second of the click.
+constexpr int kProbeWatchMs = 1500;
+constexpr int kProbeLookMs = 40;
+
+/// How long the item may take to show in the bin after the drag, as a pass
+/// gives it; and how long it then has to stay there with nothing up before
+/// the bin is clicked, so that a question coming up a moment after the item
+/// lands is put down to the drop rather than to the click.
+constexpr int kProbeLandMs = 1200;
+constexpr int kProbeSettleMs = 300;
+
+/// Frames one probe keeps at most, and frames of earlier probes kept at most:
+/// the last two or three probes'.
+constexpr int kProbeFramesMax = 100;
+constexpr std::size_t kProbeFramesKept = 60;
+
+} // namespace
+
+bool BagCleaner::cancel_all(int tries) {
+    // Hủy Bỏ, the right half of the pair, and nothing else: the item goes
+    // back, and anybody else's dialog is said no to, which loses nothing.
+    bring_forward();
+    for (int attempt = 0; attempt < tries; ++attempt) {
+        Frame f;
+        if (!grab_ || !grab_(f) || !f.valid()) {
+            pause_ms(150);
+            continue;
+        }
+        const auto dialogs = bag::find_dialogs(f, store_);
+        if (dialogs.empty()) return true;
+        bag::Dialog d = dialogs.front();
+        for (const bag::Dialog& each : dialogs)
+            if (each.ours()) { d = each; break; }
+        if (!mouse_ok(d.cancel_x(), d.y(), false)) {
+            keep(f, "cancel_blocked");
+            return false;
+        }
+        say(std::string("bấm Hủy Bỏ trên hộp thoại ") + bag::dialog_name(d.kind));
+        click(d.cancel_x(), d.y());
+        for (int i = 0; i < 12; ++i) {
+            pause_ms(150);
+            Frame g;
+            if (!grab_ || !grab_(g) || !g.valid()) continue;
+            bool still = false;
+            for (const bag::Dialog& each : bag::find_dialogs(g, store_))
+                still = still || same_place(each.pair, d.pair);
+            if (!still) break;
+        }
+    }
+    Frame f;
+    return grab_ && grab_(f) && f.valid() && bag::find_dialogs(f, store_).empty();
+}
+
+BagCleaner::Probe BagCleaner::probe(int tab, int row, int col) {
+    // Nothing in a probe presses Xác Nhận: there is no confirm_x() here, nor
+    // in cancel_all and back_out, which give the item back with Hủy Bỏ. Nor
+    // does it press any key once the item has moved: the bag's key, the only
+    // one, comes first, and only on a look with no dialog up.
+    Probe res;
+    const BagLayout& l = settings_.layout;
+    const auto give_up = [&](const std::string& why) {
+        res.trouble = why;
+        say(why);
+        return res;
+    };
+    if (tab < 0 || tab >= kBagTabs || row < 0 || row >= l.rows || col < 0 || col >= l.cols)
+        return give_up("không có ô đó trong túi đồ");
+    if (store_.get(kConfirm) == nullptr)
+        return give_up("thiếu hình nút Xác Nhận, nên không nhận ra được hộp thoại nào");
+    if (cancelled_) return give_up("dừng trước khi bắt đầu");
+    item_out_ = false;
+    bring_forward();
+
+    // Nothing is touched but on a clean screen: the bag found, the can in the
+    // bin, and no dialog with the two buttons anywhere.
+    const auto unclean = [&](const Frame& f, const BagView& v) {
+        if (!f.valid()) return std::string("không chụp được màn hình game");
+        if (!bag::find_dialogs(f, store_).empty())
+            return std::string("có một hộp thoại đang mở; đóng nó trong game rồi thử lại");
+        if (!v.found) return std::string("không thấy túi đồ, hoặc túi đồ bị che");
+        return std::string("thùng rác đang có đồ chờ xoá; bấm vào thùng rác trong game, chọn Hủy "
+                           "Bỏ, rồi thử lại");
+    };
+    Frame f;
+    BagView v;
+    if (!grab_view(f, v)) {
+        // Shut, it seems. Its key goes to a dialog when one is up -- into a
+        // quantity box, say -- so not then.
+        if (!f.valid() || !bag::find_dialogs(f, store_).empty()) return give_up(unclean(f, v));
+        press(settings_.bag_key);
+        for (int i = 0; i < 12 && !v.found; ++i) {
+            if (!wait_ms(150)) return give_up("dừng giữa chừng");
+            grab_view(f, v);
+        }
+        if (!v.found)
+            return give_up("không mở được túi đồ (phím " + InputManager::key_name(settings_.bag_key) +
+                           "), hoặc túi đồ bị che");
+    }
+    if (!clean(f, v)) return give_up(unclean(f, v));
+
+    int tx = 0, ty = 0;
+    v.tab_point(l, tab, tx, ty);
+    if (!mouse_ok(tx, ty))
+        return give_up("không bấm được vào túi đồ: cửa sổ game bị che hoặc không ở trên cùng");
+    click(tx, ty);
+    if (!wait_ms(350)) return give_up("dừng giữa chừng");
+    scroll_to_top(v);
+    if (cancelled_) return give_up("dừng giữa chừng");
+    if (!grab_view(f, v) || !clean(f, v)) return give_up(unclean(f, v));
+    if (v.scroll_known() && !v.at_top()) return give_up("không cuộn được túi đồ lên đầu");
+    if (!v.scroll_known())
+        say("không đọc được thanh cuộn, nên hàng được đếm từ hàng đang hiện trên cùng");
+    if (row >= (v.slot_rows < 0 ? l.rows : v.slot_rows))
+        return give_up("hàng " + std::to_string(row + 1) +
+                       " không hiện ra: bị che, hoặc ngăn này không có hàng đó");
+
+    const ScreenRect s = v.slot(l, col, row);
+    char where[96];
+    std::snprintf(where, sizeof where, "%s, hàng %d ô %d", bag_tab_name(tab), row + 1, col + 1);
+    if (bag::is_empty(f, s, l)) return give_up(std::string("ô ở ") + where + " đang trống");
+    const Frame before = bag::cut(f, s);
+    const int count = counts_ ? counts_->read(f, s) : CountReader::kUnreadable;
+    say(std::string("thử với món ở ") + where +
+        (count > 0 ? ", số lượng " + std::to_string(count) : std::string(", không đọc được số lượng")));
+
+    // From the drag on, the item is given back before this returns, whatever
+    // happens: Hủy Bỏ on whatever dialog is up; with none up, the bin clicked
+    // and its dialog answered Hủy Bỏ, the way a pass gives an item back; and
+    // Hủy Bỏ on whatever that click brings up that a pass would leave alone.
+    const auto give_back = [&] {
+        for (int round = 0; round < 2; ++round) {
+            cancel_all(5);
+            Frame g;
+            BagView w;
+            if (!grab_view(g, w) || clean(g, w)) return;
+            back_out();
+        }
+        cancel_all(5);
+    };
+    // Back: no dialog, the can in the bin, and the slot holding what it held
+    // -- the same page, as nothing has scrolled it since.
+    const auto finish = [&] {
+        pause_ms(300);
+        Frame g;
+        BagView w;
+        res.back = grab_view(g, w) && clean(g, w) && !bag::is_empty(g, w.slot(l, col, row), l) &&
+                   bag::alike(bag::cut(g, w.slot(l, col, row)), before, l) >= kStillThere;
+        if (res.back) {
+            item_out_ = false;
+            say("món đồ đã về lại ô cũ, thùng rác trống");
+        } else {
+            if (res.trouble.empty()) res.trouble = "món đồ chưa về lại ô cũ, hoặc thùng rác chưa trống";
+            say("món đồ chưa về lại ô cũ, hoặc thùng rác chưa trống: bấm Hủy Bỏ trong game trước "
+                "khi gõ phím nào");
+            keep(g, "probe_not_back");
+        }
+        return res;
+    };
+
+    if (!mouse_ok(s.cx(), s.cy()) || !mouse_ok(v.trash.cx(), v.trash.cy()))
+        return give_up("không bấm được vào túi đồ: cửa sổ game bị che hoặc không ở trên cùng");
+    if (cancelled_) return give_up("dừng giữa chừng");
+
+    // Every frame from the drag on, kept and read -- not only those after the
+    // click on the bin. A question that comes up as the item lands is the
+    // very answer a probe is for, and not a sign that the item stayed out.
+    const std::string name = "probe_" + stamp();
+    if (!debug_dir_.empty()) {
+        CreateDirectoryA(debug_dir_.c_str(), nullptr);
+        prune_pngs(debug_dir_, true, kProbeFramesKept);
+    }
+    // What the looks find, over all of them: the bin's own dialog with the
+    // best words, or how near any other came to the bin's.
+    bool seen = false;
+    int kind = -1;
+    float ours = 0.0f, nearest = -1.0f;
+    // One look: kept as probe_<time>_NN.png and said, every dialog with the
+    // two buttons on it weighed. How many of those it has, or -1 when there
+    // was no frame to look at.
+    const auto look_at = [&](Frame& k, long long ms, const char* since) {
+        if (res.frames >= kProbeFramesMax || !grab_ || !grab_(k) || !k.valid()) return -1;
+        char nn[8];
+        std::snprintf(nn, sizeof nn, "%02d", res.frames++);
+        std::string line =
+            std::string("khung ") + nn + " (+" + std::to_string(ms) + " ms " + since + ")";
+        if (!debug_dir_.empty() && save_png(k, debug_dir_ + "\\" + name + "_" + nn + ".png"))
+            line += ", lưu " + name + "_" + nn + ".png";
+        const auto dialogs = bag::find_dialogs(k, store_);
+        if (dialogs.empty()) {
+            // A refusal has only Xác Nhận under it, and is never pressed:
+            // said, for whoever reads the frames.
+            const Frame* notice = store_.get(kNotice);
+            const bool told = notice != nullptr &&
+                              TemplateMatcher::find(k, ScreenRect{ 0, 0, k.width, k.height },
+                                                    *notice, 0.75f).found;
+            line += told ? ": không có hộp thoại hai nút, mà có một thông báo chỉ có nút Xác "
+                           "Nhận (để nguyên)"
+                         : ": không có hộp thoại nào";
+        }
+        for (const bag::Dialog& d : dialogs) {
+            seen = true;
+            const std::vector<float> words = bag::words_scores(k, store_, d);
+            // Below 0.30 the matcher does not say how far below.
+            const auto score = [](float s) {
+                char buf[16];
+                std::snprintf(buf, sizeof buf, "%.3f", static_cast<double>(s));
+                return s < 0.0f ? std::string("dưới 0.30") : std::string(buf);
+            };
+            char at[48];
+            std::snprintf(at, sizeof at, ": hộp thoại ở %d,%d là ", d.pair.x, d.pair.y);
+            line += at + std::string(bag::dialog_name(d.kind)) +
+                    "; chữ giống câu hỏi bỏ vào thùng rác " + score(words[bag::kAskDialog]) +
+                    ", câu hỏi số lượng " + score(words[bag::kCountDialog]) + "; " +
+                    (d.quantity ? "có ô số lượng" : "không có ô số lượng");
+            if (d.quantity && counts_ && counts_->loaded())
+                line += ", ô ghi " + std::to_string(counts_->read_field(k, d.box));
+            if (d.ours() && d.words > ours) {
+                ours = d.words;
+                kind = d.kind;
+            }
+            for (const float each : words) nearest = std::max(nearest, each);
+        }
+        say(line);
+        return static_cast<int>(dialogs.size());
+    };
+    const auto ms_since = [](std::chrono::steady_clock::time_point t) {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t)
+                                          .count());
+    };
+    // Not faster than this; saving a frame makes it slower anyway.
+    const auto pace = [](std::chrono::steady_clock::time_point look) {
+        const auto spent = std::chrono::steady_clock::now() - look;
+        if (spent < std::chrono::milliseconds(kProbeLookMs))
+            std::this_thread::sleep_for(std::chrono::milliseconds(kProbeLookMs) - spent);
+    };
+    const auto what_came_up = [&] {
+        res.dialog = kind == bag::kCountDialog ? "quantity" : kind == bag::kAskDialog ? "ask" : "foreign";
+        res.words = kind >= 0 ? ours : std::max(0.0f, nearest);
+    };
+
+    // 1. Onto the bin, which takes it and waits -- or asks there and then.
+    item_out_ = true;
+    res.moved = true;
+    const bool moved = settings_.click_to_move
+                           ? click(s.cx(), s.cy()) && wait_ms(220) && click(v.trash.cx(), v.trash.cy())
+                           : drag(s.cx(), s.cy(), v.trash.cx(), v.trash.cy());
+    const auto dropped = std::chrono::steady_clock::now();
+    Frame g;
+    BagView w;
+    long long asked = -1;       // a dialog first seen, this long after the drop
+    long long settled = -1;     // the bin showing the item with nothing up since
+    bool waiting = false;
+    while (moved && !cancelled_ && res.frames < kProbeFramesMax) {
+        const auto look = std::chrono::steady_clock::now();
+        const long long ms = ms_since(dropped);
+        // A dialog watched for its while, or the item not shown in the bin in
+        // time; and whatever happens, not longer than both together.
+        if (asked >= 0 ? ms > asked + kProbeWatchMs : settled < 0 && ms > kProbeLandMs) break;
+        if (ms > kProbeLandMs + kProbeWatchMs) break;
+        const int up = look_at(g, ms, "sau khi thả vào thùng rác");
+        if (up > 0 && asked < 0) {
+            asked = ms;
+            say("hộp thoại hiện ra ngay khi món đồ vào thùng rác, trước khi bấm vào thùng rác: xem "
+                "tiếp một lúc, và không bấm vào thùng rác");
+        } else if (up == 0 && asked < 0) {
+            w = bag::find(g, store_, l);
+            if (!w.found || w.bin_empty) {
+                settled = -1;
+            } else if (settled < 0) {
+                settled = ms;
+            } else if (ms - settled >= kProbeSettleMs) {
+                waiting = true;
+                break;
+            }
+        }
+        pace(look);
+    }
+    if (asked >= 0) {
+        // What the bin asks, and when: as the item landed. The bin is left
+        // alone -- what it asks is up already -- and the answer is Hủy Bỏ.
+        res.at_drop = true;
+        what_came_up();
+        give_back();
+        return finish();
+    }
+    if (!waiting || cancelled_ || !mouse_ok(w.trash.cx(), w.trash.cy())) {
+        res.trouble = cancelled_     ? "dừng giữa chừng"
+                    : !moved         ? "không điều khiển được chuột trong cửa sổ game"
+                    : settled >= 0 && !waiting
+                        ? "món đồ vào thùng rác, nhưng sau đó không chụp được màn hình game"
+                    : !waiting       ? "món đồ không vào thùng rác"
+                                     : "không bấm được vào thùng rác";
+        say(res.trouble);
+        give_back();
+        return finish();
+    }
+
+    // 2. The bin clicked, which is what asks; then every frame for about a
+    //    second and a half, kept and read, with no click and no key in
+    //    between, whatever is up.
+    click(w.trash.cx(), w.trash.cy());
+    const auto clicked = std::chrono::steady_clock::now();
+    while (!cancelled_ && res.frames < kProbeFramesMax) {
+        const auto look = std::chrono::steady_clock::now();
+        const long long ms = ms_since(clicked);
+        if (ms > kProbeWatchMs) break;
+        Frame k;
+        look_at(k, ms, "sau khi bấm vào thùng rác");
+        pace(look);
+    }
+    if (seen) what_came_up();
+    else      say("bấm vào thùng rác mà không thấy hộp thoại nào");
+
+    // 3. Hủy Bỏ on whatever came up, the bin's or not -- or, with nothing up,
+    //    the item given back the way a pass gives one back.
+    give_back();
+    return finish();
 }
 
 } // namespace gobot
