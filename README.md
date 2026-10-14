@@ -133,8 +133,10 @@ otherwise.
 **Tổ đội** answers party invitations and invites whoever chats the keyword,
 with an accept-only list, an invite list and a blacklist. **Tự đăng nhập**
 logs back in when the client crashes or loses its connection, to the channel
-and character you pick; the game account is saved there, its password
-encrypted with your Windows account's key. **Dọn rác** opens the bag every
+and character you pick, and with the game closed BẮT ĐẦU opens it first. It
+needs no account and no password: VTCZone stays signed in (sign in to it once,
+with its remember option) and GoBot only presses *Chơi game*; if VTCZone shows
+its sign-in form instead, it stops and says so. **Dọn rác** opens the bag every
 few minutes and puts what is on your list in the trash can; you pick the junk
 once from the game's item icons (or a photo of your bag for anything else),
 and *Thử tìm* shows what would go without throwing anything away. Items are

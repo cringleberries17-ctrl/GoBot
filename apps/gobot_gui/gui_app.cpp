@@ -108,8 +108,10 @@ GuiApp::~GuiApp() {
     stop_revive();
     stop_trash();
     // A look at the game for the bin may still be under way; it reads the
-    // window handle and its own pictures, which go away below.
+    // window handle and its own pictures, which go away below. So may the
+    // login tab's look at VTCZone, with pictures of its own.
     if (left_held_look_.valid()) left_held_look_.wait();
+    if (login_look_.valid()) login_look_.wait();
     stop_vitals();
     stop_macro();
     stop_bot();
@@ -356,7 +358,21 @@ void GuiApp::tick() {
     // shows nothing waiting.
     watch_left_held();
 
-    if (keeper_reattach_.exchange(false)) reattach_game();
+    if (keeper_reattach_.exchange(false)) {
+        reattach_game();
+        // BẮT ĐẦU was pressed with the game closed, and the keeper has now
+        // brought it up: start what else was ticked, on the new window. Only
+        // while the keeper is still on -- one stopped by the panic key, or by
+        // hand, in the moment between getting in and this tick means nothing
+        // is to start, and starting the macro then would press keys straight
+        // after somebody asked for everything to stop.
+        if (simple_cold_start_ && keeper_running_ && !keeper_stop_) {
+            simple_cold_start_ = false;
+            if (input_.window_valid()) simple_start_jobs();
+        }
+    }
+    // A keeper that ended without getting in leaves nothing to start.
+    if (simple_cold_start_ && !keeper_running_) simple_cold_start_ = false;
     refocus_if_idle();
 
     if (detector_running_) {
@@ -1435,9 +1451,10 @@ void GuiApp::draw_keeper_panel() {
 
     ImGui::Dummy(ImVec2(0, 6));
 
+    // With no file, the table that ships, which the keeper writes out.
     AutoLogin::Settings login;
-    const bool can_login = login.load(exe_relative("configs/login.ini")) &&
-                           login.unidentified().empty();
+    login.load(exe_relative("configs/login.ini"));
+    const bool can_login = login.unidentified().empty();
     if (!can_login) {
         ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
         ImGui::TextWrapped(
@@ -2069,15 +2086,17 @@ void GuiApp::draw_session_panel() {
     if (!login.load(login_path)) {
         text_dim("No %s yet.", login_path.c_str());
     } else {
-        if (login.username.empty() || login.password_protected.empty()) {
+        // No account here, and none anywhere: VTCZone keeps itself signed in
+        // and the crossing starts at its list of games, as GoC's does.
+        text_dim("Starts from VTCZone signed in -- sign in to it once, with its "
+                 "remember option. If it shows its sign-in form the crossing "
+                 "stops and says so; nothing is typed into it.");
+        if (!login.launcher_found()) {
             ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
-            ImGui::TextUnformatted("No account written down.");
+            ImGui::TextWrapped("VTCZone is not at %s -- it is started from there when "
+                               "it is not running. Change `launcher` in %s.",
+                               login.launcher_path.c_str(), login_path.c_str());
             ImGui::PopStyleColor();
-            text_dim("Run  gobot_cli --setlogin  -- the password is typed with "
-                     "the echo off and stored encrypted with your Windows "
-                     "account's own key, which a text box here could not do.");
-        } else {
-            ImGui::Text("Account: %s", login.username.c_str());
         }
 
         // Which channel, and which character.
@@ -2168,7 +2187,8 @@ void GuiApp::draw_session_panel() {
                 "game, so there is nothing to go on until one is on screen.");
         } else {
             ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
-            ImGui::TextUnformatted("Every page is identified.");
+            ImGui::Text("All %zu pages of the crossing have a picture named.",
+                        login.pages.size());
             ImGui::PopStyleColor();
         }
     }
@@ -2248,9 +2268,10 @@ void GuiApp::draw_menu_bar() {
     if (text_font_) ImGui::PopFont();
     if (back) {
         simple_view_ = true;
-        // The full screen may have changed what the tabs show.
+        // The full screen may have changed what the tabs show. The login tab
+        // reads its file every frame; it only needs a fresh look at VTCZone.
         simple_party_loaded_ = false;
-        simple_login_loaded_ = false;
+        login_looked_ms_ = 0;
     }
 
     if (ImGui::BeginMenu("File")) {
@@ -2426,6 +2447,12 @@ void GuiApp::say_keeper(const std::string& line) {
     std::lock_guard<std::mutex> lock(worker_mutex_);
     keeper_log_.push_back(line);
     if (keeper_log_.size() > 200) keeper_log_.erase(keeper_log_.begin());
+}
+
+void GuiApp::say_keeper_vi(const std::string& now, const std::string& problem) {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    keeper_vi_ = now;
+    if (!problem.empty()) keeper_problem_vi_ = problem;
 }
 
 void GuiApp::start_party() {
@@ -2690,10 +2717,21 @@ void GuiApp::start_keeper() {
     keeper_stop_ = false;
     keeper_running_ = true;
     keeper_restarts_ = 0;
+    {
+        // A new start, so whatever stopped the last one is old news.
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        keeper_vi_ = "Đang theo dõi game.";
+        keeper_problem_vi_.clear();
+    }
     keeper_thread_ = std::thread([this] { keeper_loop(); });
 }
 
 void GuiApp::stop_keeper() {
+    // A cold start waiting on this keeper has nothing left to wait for. Every
+    // way of stopping it comes through here -- the panic key, DỪNG LẠI,
+    // unticking "Tự vào lại game", the full screen -- and none of them should
+    // be followed by the ticked jobs starting once the game is up.
+    simple_cold_start_ = false;
     keeper_stop_ = true;
     {
         // A login in progress takes minutes to finish by itself.
@@ -2706,28 +2744,67 @@ void GuiApp::stop_keeper() {
 
 /// Notice the client has fallen over, end it, and cross back in.
 void GuiApp::keeper_loop() {
+    // Its own lines go to gobot.log as well as to the panel. The crossing's
+    // steps are logged by the crossing itself, so those only go to the panel.
+    const auto note = [this](const std::string& line) {
+        GB_INFO("Keeper: %s", line.c_str());
+        say_keeper(line);
+    };
+    // Stopping for a person: in English for the log and the panel, and in
+    // Vietnamese for the simple screen, where it stays after the keeper has
+    // gone so the reason is still there to read.
+    const auto give_up = [this](const std::string& english, const std::string& vi) {
+        GB_WARN("Keeper: %s", english.c_str());
+        say_keeper(english);
+        say_keeper_vi(vi, vi);
+    };
+    // A captcha's hold is a person's to end. Nothing is crossed or clicked
+    // under it: that would be clicking into the very game it holds for.
+    const auto captcha_up = [this] {
+        return coord_.critical_active() && coord_.critical_reason() == "captcha";
+    };
+
     IniFile app_ini;
     app_ini.load(exe_relative("configs/app.ini"));
     CrashWatch::Settings watch_settings;
     watch_settings.load(app_ini);
 
+    // With no file, the table that ships: written out, as the command line
+    // does, so there is a file to change. Only when there is truly no file,
+    // though. One that is there and will not open -- a virus scan or a sync
+    // holding it for a moment -- is the player's, measurements and notes and
+    // all: the table is crossed with instead, and the file is left alone.
     AutoLogin::Settings login;
     const std::string login_path = exe_relative("configs/login.ini");
-    const bool have_login = login.load(login_path);
-    if (have_login) {
-        if (!login.game_process.empty())
-            watch_settings.game_process = login.game_process;
-        if (!login.client_process.empty())
-            watch_settings.launcher_process = login.client_process;
+    if (!login.load(login_path)) {
+        if (!AutoLogin::Settings::file_missing(login_path))
+            note("could not read " + login_path + " -- crossing with the pages that ship, "
+                 "and leaving the file as it is");
+        else if (login.save(login_path))
+            note("wrote " + login_path + " with the pages that ship");
     }
+    if (!login.game_process.empty())
+        watch_settings.game_process = login.game_process;
+    if (!login.client_process.empty())
+        watch_settings.launcher_process = login.client_process;
 
-    TemplateStore store;
-    const std::string source = TemplateStore::helper_assembly();
-    if (!source.empty())
-        store.load_from_assembly(source, exe_relative("configs/templates.ini"));
+    // The same pictures, from the same place, as the command line's crossing.
+    // Reading them only out of the other helper's assembly meant a package --
+    // which does not carry that file -- had nothing to match any page against.
+    // Only the crossing's own are kept: this runs for hours, and the whole set
+    // is some sixty megabytes of which it needs seven pictures. Loaded again
+    // only if the file comes to name others; see below.
+    const auto load_store = [](const AutoLogin::Settings& for_these) {
+        TemplateStore all;
+        AutoLogin::load_pictures(all, exe_relative("configs/templates.ini"));
+        return AutoLogin::pictures_for(for_these, all);
+    };
+    TemplateStore store = load_store(login);
+    std::vector<std::string> kept = AutoLogin::picture_names(login);
 
     CrashWatch watch(watch_settings);
-    say_keeper("watching");
+    note("watching");
+    bool seen_running = false;      // the client has been up since this started
 
     while (!keeper_stop_) {
         const CrashWatch::Look seen = watch.look();
@@ -2738,41 +2815,106 @@ void GuiApp::keeper_loop() {
         }
 
         if (!seen.bad()) {
+            seen_running = true;
             for (int i = 0; i < 6 && !keeper_stop_; ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        say_keeper(seen.detail);
-        if (!seen.code.empty()) say_keeper("error code " + seen.code);
+        note(seen.detail);
+        if (!seen.code.empty()) note("error code " + seen.code);
 
-        if (keeper_restarts_ >= watch_settings.max_restarts) {
-            say_keeper("that is " + std::to_string(keeper_restarts_.load()) +
-                       " restarts and it has gone again -- stopping, a person "
-                       "is needed");
+        // Never up since this started -- BẮT ĐẦU with the game closed. That is
+        // a start, not a restart, the way GoC treats a missing window: there
+        // is no client to end and no session for the server to see close, so
+        // neither the shut-down nor the cool-down, and a game launcher already
+        // open is left for the crossing to carry on from. It is one crossing
+        // either way, and one that fails stops this.
+        const bool cold = !seen_running && seen.what == CrashWatch::Trouble::Gone;
+
+        if (!cold && keeper_restarts_ >= watch_settings.max_restarts) {
+            const std::string n = std::to_string(keeper_restarts_.load());
+            give_up("that is " + n + " restarts and it has gone again -- stopping, a person "
+                    "is needed",
+                    "Game văng " + n + " lần liền — GoBot ngừng tự vào lại. Cần người kiểm tra.");
+            break;
+        }
+        if (captcha_up()) {
+            give_up("a captcha is up, so the client is not started again under it -- a "
+                    "person is needed",
+                    AutoLogin::advice(AutoLogin::Why::Captcha));
             break;
         }
 
-        watch.shut_down(seen);
-        for (int i = 0; i < watch_settings.cooldown_s * 2 && !keeper_stop_; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        if (keeper_stop_) break;
+        if (!cold) {
+            const char* what = seen.what == CrashWatch::Trouble::Gone ? "Game đã tắt"
+                             : seen.what == CrashWatch::Trouble::Hung ? "Game bị treo"
+                                                                      : "Game hiện bảng lỗi";
+            say_keeper_vi(std::string(what) + " — GoBot đóng game rồi vào lại sau " +
+                          std::to_string(watch_settings.cooldown_s) + " giây.");
+            watch.shut_down(seen);
+            for (int i = 0; i < watch_settings.cooldown_s * 2 && !keeper_stop_; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (keeper_stop_) break;
+        }
 
-        if (!have_login || !login.unidentified().empty()) {
-            say_keeper("the client is down and the crossing is not set up, so "
-                       "it cannot be started again -- see configs/login.ini");
+        // Read again for every crossing. A channel or a character picked on
+        // the tab while this runs is meant for the next one -- the tab says
+        // GoBot goes to the one shown there -- and a file that will not read
+        // just now leaves the last copy that did.
+        {
+            AutoLogin::Settings fresh;
+            if (fresh.load(login_path)) login = fresh;
+        }
+        // A page given another picture since then is a picture not kept.
+        if (AutoLogin::picture_names(login) != kept) {
+            note("configs/login.ini names other pictures now -- loading them");
+            store = load_store(login);
+            kept = AutoLogin::picture_names(login);
+        }
+
+        if (!login.unidentified().empty()) {
+            std::string pages;
+            for (const AutoLogin::Page* page : login.unidentified())
+                pages += (pages.empty() ? "" : ", ") + page->key;
+            give_up("the client is down and the crossing is not set up, so it cannot be "
+                    "started again -- see configs/login.ini",
+                    AutoLogin::advice(AutoLogin::Why::NotSetUp, pages));
             break;
         }
 
-        ++keeper_restarts_;
-        say_keeper("logging back in (" + std::to_string(keeper_restarts_.load()) +
-                   " of " + std::to_string(watch_settings.max_restarts) + ")");
+        // The game and VTCZone run as administrator, and Windows drops clicks
+        // sent to them from a program that does not.
+        if (!elevated_) {
+            give_up("GoBot is not running as administrator, so its clicks cannot reach "
+                    "VTCZone or the game",
+                    "GoBot không chạy bằng quyền Administrator nên không bấm được vào "
+                    "VTCZone/game.");
+            break;
+        }
+
+        if (cold) {
+            note("starting the game -- it was not running when this began");
+        } else {
+            ++keeper_restarts_;
+            note("logging back in (" + std::to_string(keeper_restarts_.load()) + " of " +
+                 std::to_string(watch_settings.max_restarts) + ")");
+        }
 
         AutoLogin flow;
         flow.set_settings(login);
         flow.set_templates(&store);
-        flow.on_step([this](AutoLogin::Step s, const std::string& detail) {
+        flow.set_captcha_check(captcha_up);
+        const std::string doing = cold ? "Đang mở game và vào nhân vật: " : "Đang vào lại game: ";
+        flow.on_step([this, doing, &flow](AutoLogin::Step s, const std::string& detail) {
             say_keeper(std::string(AutoLogin::step_name(s)) + ": " + detail);
+            if (s == AutoLogin::Step::Blocked || s == AutoLogin::Step::InWorld) return;
+            std::string vi = doing + AutoLogin::step_name_vi(s) + "…";
+            // Waiting on a window in the way, not stuck: said while it waits,
+            // so the player at the screen knows what to move.
+            if (flow.holding())
+                vi += " " + AutoLogin::advice(AutoLogin::Why::Covered, flow.held_by());
+            say_keeper_vi(vi);
         });
         {
             std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
@@ -2785,10 +2927,15 @@ void GuiApp::keeper_loop() {
         }
         if (keeper_stop_) break;
         if (!in) {
-            say_keeper("could not get back in: " + flow.trouble());
+            // Stop and ask, as before: the crossing has already used its
+            // attempts, and the next try is for a person to decide.
+            give_up("could not get back in: " + flow.trouble(), flow.advice());
             break;
         }
-        say_keeper("back in the world");
+        seen_running = true;
+        note("back in the world");
+        say_keeper_vi(cold ? "Đã vào game. Đang theo dõi game."
+                           : "Đã vào lại game. Đang theo dõi game.");
         keeper_reattach_ = true;
     }
 

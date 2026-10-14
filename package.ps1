@@ -277,20 +277,23 @@ PACKET-CAPTURE BOT  -- optional, needs Administrator and Npcap, unfinished
   default: View -> Advanced panels. Set autostart=true in configs\app.ini
   and run as administrator. See README.md.
 
-AUTO-LOGIN  -- from a cold machine to a character in the world
-  Fill in configs\login.ini once. Put the account in with
+AUTO-LOGIN  -- from VTCZone to a character in the world
+  No account and no password. Sign in to VTCZone once, with its own
+  remember option, and it stays signed in; GoBot only presses Choi game,
+  then START, the channel and the character. If VTCZone shows its sign-in
+  form instead, the auto-login stops and says so -- it never types into it.
+  The launcher's path is `launcher` in configs\login.ini.
 
-      gobot_cli.exe --setlogin
+  Channel and character are on the Tu dang nhap tab, counting from 1, and
+  in the Auto-login section of "Watch the session".
 
-  which reads the password with the echo off and stores it encrypted with
-  your own Windows account's key -- the file is of no use on another
-  machine or to another user.
+  Leave the mouse alone while it crosses. Before each click it brings
+  VTCZone or the game to the front and checks that nothing else is over
+  the spot; if something is, it waits and says what, and gives that
+  attempt up after half a minute. A minimised VTCZone is brought back.
 
-  Channel and character are plain numbers counting from 1, in the
-  Auto-login section of "Watch the session".
-
-  It does not answer captchas and never will. If one appears it stops and
-  says so.
+  It does not answer captchas, or a Security Alert box from the game's
+  launcher, and never will. If one appears it stops and says so.
 
 KEEP THE CLIENT ALIVE  -- notices a crash and logs back in
   The session watcher asks whether the HUD is there, which is the right
@@ -371,8 +374,8 @@ $problems = @()
 # wpcap.dll comes with Npcap, which is a separate installation. A STATIC
 # import means Windows refuses to start the process when it is missing, so
 # gobot_cli.exe would not launch on a machine without Npcap -- and that is the
-# program somebody runs first, to write down their account. It is delay-loaded
-# now; this is what stops that silently coming back.
+# program somebody runs first, to see what is wrong with --doctor. It is
+# delay-loaded now; this is what stops that silently coming back.
 $dumpbin = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" `
             -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
            Where-Object { $_.FullName -like '*Hostx64\x64*' } | Select-Object -First 1
@@ -413,7 +416,7 @@ Get-Content $tplIni | Where-Object { $_ -match '=\s*grabbed/(\S+)\s*$' } | ForEa
 
 # 4. The crossing's pages, by name, resolved out of the package alone.
 $loginIni = Join-Path $stage 'configs\login.ini'
-$pages = Get-Content $loginIni | Where-Object { $_ -match '^\s*picture\s*=\s*(\S+)' } |
+$pages = Get-Content $loginIni | Where-Object { $_ -match '^\s*(?:signin_)?picture\s*=\s*(\S+)' } |
          ForEach-Object { $Matches[1] } | Sort-Object -Unique
 foreach ($p in $pages) {
     $named = Get-Content $tplIni | Where-Object { $_ -match "^\s*$([regex]::Escape($p))\s*=" }

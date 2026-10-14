@@ -1611,7 +1611,7 @@ void test_assembly_templates() {
         "party/loot_2",
         "hoisinh_confirm",          // the revive dialog
         "inventory_empty_slot",
-        "login_popup1",             // the launcher pages the login flow needs
+        "login_page",               // VTCZone's sign-in button, which stops the login flow
         "app_select_page",
         "start_game_button2",
         "game_ready_indicator",
@@ -2886,20 +2886,58 @@ void test_session_manager() {
     }
 }
 
+/// The auto-login with no game, no launcher and no window: its table, its
+/// settings file old and new, how it decides where it is, and what it says.
+/// Nothing here can start or click anything -- every flow that is run stops
+/// at a check made before the first window is touched.
 void test_auto_login() {
     section("Auto-login");
 
-    // The crossing is nine screens and the table has to cover them in the
+    // The crossing is seven screens and the table has to cover them in the
     // order they are met. A page out of order is a flow that clicks the wrong
     // thing on a page that has not appeared yet.
     const auto pages = AutoLogin::default_pages();
-    check(pages.size() >= 7, "the table covers the crossing");
+    check(pages.size() == 7, "the table covers the crossing: seven pages");
     {
         bool ordered = true;
         for (std::size_t i = 1; i < pages.size(); ++i)
             if (static_cast<int>(pages[i].step) <= static_cast<int>(pages[i - 1].step))
                 ordered = false;
         check(ordered, "the pages are in the order they are met");
+        check(!pages.empty() && pages.front().key == "game_list" &&
+                  pages.front().step == AutoLogin::Step::GameList,
+              "it starts at VTCZone's list of games, signed in, as GoC's does");
+        check(std::none_of(pages.begin(), pages.end(),
+                           [](const AutoLogin::Page& p) { return p.key == "login_page"; }),
+              "and no page of it is a sign-in form to type into");
+    }
+
+    // The table carries what ships, so a missing or old file still crosses.
+    {
+        const AutoLogin::Settings s;
+        check(s.pages.size() == 7 && s.unidentified().empty(),
+              "a fresh table names a picture for every page");
+        const AutoLogin::Page* channel = nullptr;
+        const AutoLogin::Page* who = nullptr;
+        for (const auto& p : s.pages) {
+            if (p.step == AutoLogin::Step::Channel)   channel = &p;
+            if (p.step == AutoLogin::Step::Character) who = &p;
+        }
+        check(channel != nullptr && channel->picture == "channel_first_index" &&
+                  channel->pick == AutoLogin::Pick::Row && channel->click_dx == 54 &&
+                  channel->click_dy == 140 && channel->row_step == 31 && channel->row_count == 8,
+              "the channel list ships with its measured rows");
+        check(who != nullptr && who->picture == "select_char_indicator" &&
+                  who->pick == AutoLogin::Pick::Slot && who->click_dx == 81 &&
+                  who->click_dy == 25 && who->row_dx == -518 && who->row_dy == -160 &&
+                  who->row_step == 202 && who->row_across && who->row_count == 3,
+              "and the character select with its measured slots");
+        check(s.signin_picture == "login_page" && s.signin_score > 0.79f && s.signin_score < 0.81f,
+              "VTCZone's sign-in form is known by its button, at 0.80");
+        check(s.launcher_path == "C:\\Program Files\\VTCZone\\VTCZone.exe" &&
+                  s.launcher_window == "VTCZone" && s.game_window == "GhostOnlineVTC" &&
+                  s.client_class == "#32770" && s.client_process == "GhostOnlineVTC.exe",
+              "and the three windows are the ones that ship");
     }
 
     // Nothing runs until every page has been identified. This is the check
@@ -2907,7 +2945,7 @@ void test_auto_login() {
     // leaving a window open for somebody else to close.
     {
         AutoLogin::Settings s;
-        s.pages = AutoLogin::default_pages();
+        for (auto& page : s.pages) page.picture.clear();
         check(s.unidentified().size() == s.pages.size(),
               "a blank table counts every page as unidentified");
 
@@ -2916,20 +2954,19 @@ void test_auto_login() {
     }
 
     // The settings survive a file, pages and all. Click offsets that did not
-    // come back would click the middle of the picture instead of the field
-    // above it, and type an account name into nothing.
+    // come back would click the middle of the picture instead of the entry.
     {
         AutoLogin::Settings s;
-        s.pages = AutoLogin::default_pages();
         s.launcher_path = "C:\\somewhere\\Launcher.exe";
         s.launcher_window = "TheLauncher";
-        s.username = "someone";
+        s.signin_picture = "signin_marker";
+        s.signin_score = 0.9f;
         s.channel_index = 5;
         s.game_slot = 2;
-        s.pages[0].picture = "login_marker";
+        s.pages[0].picture = "games_marker";
         s.pages[0].click_dx = 40;
         s.pages[0].click_dy = 120;
-        s.pages[1].picture = "games_marker";
+        s.pages[1].picture = "start_marker";
         s.pages[1].row_step = 37;
 
         const std::string path = temp_file("gobot_login_roundtrip_test.ini");
@@ -2939,30 +2976,133 @@ void test_auto_login() {
         check(back.load(path), "and reads back");
         check(back.launcher_path == s.launcher_path &&
               back.launcher_window == s.launcher_window &&
-              back.username == s.username &&
+              back.signin_picture == "signin_marker" && back.signin_score > 0.89f &&
               back.channel_index == 5 && back.game_slot == 2,
-              "the account and the windows survive");
+              "the launcher, the sign-in check and the choices survive");
         check(back.pages.size() == s.pages.size() &&
-              back.pages[0].picture == "login_marker" &&
+              back.pages[0].picture == "games_marker" &&
               back.pages[0].click_dx == 40 && back.pages[0].click_dy == 120 &&
               back.pages[1].row_step == 37,
               "each page's picture and click offsets survive");
+        check(!back.stale_keys, "a file GoBot wrote has nothing old in it");
         std::remove(path.c_str());
     }
 
-    // The password goes in and comes back, and nothing else does.
+    // A file from before, when GoBot typed an account into VTCZone: an account
+    // name, an encrypted password and a sign-in page, on top of the pages that
+    // ship. It still loads and still crosses, and nothing of the account is
+    // read, kept or written anywhere.
     {
-        const std::string secret = "a password with spaces & symbols";
-        const std::string stored = AutoLogin::protect(secret);
-        check(!stored.empty() && stored != secret,
-              "the password is not written down as itself");
-        check(AutoLogin::unprotect(stored) == secret, "and comes back intact");
+        const std::string path = temp_file("gobot_login_old_test.ini");
+        AutoLogin::Settings shipped;
+        shipped.channel_index = 4;
+        shipped.character_index = 1;
+        const std::string sealed = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        check(shipped.save(path) &&
+                  IniFile::set_in_place(path, "Login", "username", "someone") &&
+                  IniFile::set_in_place(path, "Login", "password", sealed) &&
+                  // Whatever an old file named for it; the picture does not matter.
+                  IniFile::set_in_place(path, "Page.login_page", "picture", "daily_popup") &&
+                  IniFile::set_in_place(path, "Page.login_page", "score", "0.55"),
+              "an old login.ini, account and sign-in page and all, is written");
 
-        check(AutoLogin::protect({}).empty(), "nothing in, nothing out");
-        check(AutoLogin::unprotect("not hex at all").empty(),
-              "rubbish does not come back as a password");
-        check(AutoLogin::unprotect("deadbeef").empty(),
-              "and neither does well-formed rubbish");
+        AutoLogin::Settings old;
+        check(old.load(path), "it loads");
+        check(old.pages.size() == 7 &&
+                  std::none_of(old.pages.begin(), old.pages.end(),
+                               [](const AutoLogin::Page& p) { return p.key == "login_page"; }),
+              "with the seven pages, and no sign-in page among them");
+        check(old.unidentified().empty(), "none of which counts as unidentified");
+        check(old.channel_index == 4 && old.character_index == 1,
+              "the channel and the character are as they were");
+        check(old.stale_keys, "the old keys are noticed -- and only noticed");
+
+        const auto text_of = [](const std::string& p) {
+            std::ifstream in(p);
+            std::stringstream ss;
+            ss << in.rdbuf();
+            return ss.str();
+        };
+        const std::string again = temp_file("gobot_login_old_resaved_test.ini");
+        check(old.save(again), "it saves");
+        const std::string saved = text_of(again);
+        check(saved.find("username") == std::string::npos &&
+                  saved.find("password") == std::string::npos &&
+                  saved.find(sealed) == std::string::npos &&
+                  saved.find("Page.login_page") == std::string::npos,
+              "and what it saves has no account, no password and no sign-in page in it");
+
+        // The player's own file is theirs: changing the channel from the
+        // screen changes that one key and leaves the rest as it was.
+        check(IniFile::set_in_place(path, "Login", "channel_index", 6),
+              "a channel picked on the screen is written into the old file");
+        const std::string kept = text_of(path);
+        check(kept.find("channel_index=6") != std::string::npos &&
+                  kept.find("username=someone") != std::string::npos &&
+                  kept.find("password=" + sealed) != std::string::npos,
+              "which leaves the old lines exactly as they were");
+        std::remove(again.c_str());
+        std::remove(path.c_str());
+    }
+
+    // The configs/login.ini that ships, from the source tree, against the
+    // table: the same pages, pictures and measurements, and the same [Login].
+    // The table is what a missing file is replaced with, so the two differing
+    // would be a bot that crosses one way with the file and another without.
+    {
+#ifdef GOBOT_SOURCE_DIR
+        const std::string repo = std::string(GOBOT_SOURCE_DIR) + "/configs/login.ini";
+#else
+        const std::string repo;
+#endif
+        AutoLogin::Settings shipped;
+        if (repo.empty() || !shipped.load(repo)) {
+            std::printf("  [skip] the source tree's configs/login.ini is not here\n");
+        } else {
+            const AutoLogin::Settings table;
+            bool same = shipped.pages.size() == table.pages.size();
+            for (std::size_t i = 0; same && i < table.pages.size(); ++i) {
+                const AutoLogin::Page& a = shipped.pages[i];
+                const AutoLogin::Page& b = table.pages[i];
+                same = a.key == b.key && a.picture == b.picture && a.on == b.on &&
+                       a.click_dx == b.click_dx && a.click_dy == b.click_dy &&
+                       a.wait_s == b.wait_s && std::fabs(a.score - b.score) < 1e-4f &&
+                       a.pick == b.pick && a.row_step == b.row_step &&
+                       a.row_across == b.row_across && a.row_dx == b.row_dx &&
+                       a.row_dy == b.row_dy && a.step_dx == b.step_dx && a.step_dy == b.step_dy &&
+                       a.step_pause_ms == b.step_pause_ms && a.row_count == b.row_count;
+            }
+            check(same, "the shipped configs/login.ini has the table's pages, pictures and "
+                        "measurements, field by field");
+            check(shipped.launcher_path == table.launcher_path &&
+                      shipped.launcher_window == table.launcher_window &&
+                      shipped.client_class == table.client_class &&
+                      shipped.client_process == table.client_process &&
+                      shipped.game_window == table.game_window &&
+                      shipped.signin_picture == table.signin_picture &&
+                      std::fabs(shipped.signin_score - table.signin_score) < 1e-4f &&
+                      shipped.channel_index == table.channel_index &&
+                      shipped.character_index == table.character_index &&
+                      shipped.game_slot == table.game_slot && shipped.attempts == table.attempts &&
+                      shipped.heal_on_arrival == table.heal_on_arrival &&
+                      shipped.heal_hp_key == table.heal_hp_key &&
+                      shipped.heal_mp_key == table.heal_mp_key && !shipped.stale_keys,
+                  "and its [Login] is the table's, with nothing old in it");
+        }
+    }
+
+    // The file the player is running on, read and never written. Not held to
+    // the table: putting a page right after VTCZone or the client changes is
+    // what that file is for. Whatever it has, it loads into the seven pages,
+    // each with a picture named.
+    {
+        AutoLogin::Settings live;
+        if (!live.load(exe_relative("configs/login.ini"))) {
+            std::printf("  [skip] there is no configs/login.ini beside this test\n");
+        } else {
+            check(live.pages.size() == pages.size() && live.unidentified().empty(),
+                  "the configs/login.ini here loads into the seven pages, each named");
+        }
     }
 
     // Each page knows which of the three windows it is drawn on.
@@ -2974,8 +3114,7 @@ void test_auto_login() {
     {
         bool right = true;
         for (const auto& p : pages) {
-            const bool launcher = p.step == AutoLogin::Step::LoginPage ||
-                                  p.step == AutoLogin::Step::GameList ||
+            const bool launcher = p.step == AutoLogin::Step::GameList ||
                                   p.step == AutoLogin::Step::StartGame;
             const bool client   = p.step == AutoLogin::Step::ClientLauncher;
             const auto want = launcher ? AutoLogin::On::Publisher
@@ -3061,6 +3200,526 @@ void test_auto_login() {
                                  who->click_dy != who->row_dy),
               "and confirming is a separate point from the slot");
         std::remove(path.c_str());
+    }
+
+    // Where the crossing goes on from, given what is on screen. The same rule
+    // starts each attempt and moves it on while it waits for a page.
+    {
+        const auto at = [&](const char* key) {
+            for (std::size_t i = 0; i < pages.size(); ++i)
+                if (pages[i].key == key) return i;
+            return AutoLogin::kNone;
+        };
+        const std::size_t games = at("game_list"), start = at("start_game");
+        const std::size_t client = at("client_start"), connect = at("connect");
+        const std::size_t channel = at("channel_list"), character = at("character");
+        const auto same_as_connect = [&](std::size_t i) {
+            return pages[i].picture == pages[connect].picture;
+        };
+
+        check(AutoLogin::furthest_up(pages, 0, [](std::size_t) { return false; }) ==
+                  AutoLogin::kNone,
+              "nothing up is nowhere to go on from");
+        check(AutoLogin::furthest_up(pages, 0, [&](std::size_t i) {
+                  return i == games || i == start; }) == start,
+              "VTCZone showing the game and Choi game goes on from Choi game");
+        check(AutoLogin::furthest_up(pages, 0, same_as_connect) == connect,
+              "the connect button proves only the first connect, not the one after the channel");
+        check(AutoLogin::furthest_up(pages, connect + 1, same_as_connect) == AutoLogin::kNone,
+              "so waiting for one connect, the other is never a page further on");
+        check(AutoLogin::furthest_up(pages, start + 1, [&](std::size_t i) {
+                  return i == client; }) == client,
+              "waiting on Choi game with the game's START up goes on to START, not a second "
+              "Choi game");
+        check(AutoLogin::furthest_up(pages, client + 1, [&](std::size_t i) {
+                  return i == channel; }) == channel,
+              "and a client already on its channel list costs no wait");
+        check(AutoLogin::furthest_up(pages, 0, [&](std::size_t i) {
+                  return i == character; }, "channel_list") == channel,
+              "nothing goes past the page a person asked to be left on");
+    }
+
+    // A frame of VTCZone, read for whether it is signed in. Pictures nothing
+    // else looks like -- blocks of random colour, big enough to survive being
+    // looked at at a quarter of the size -- stand in for the real ones, on a
+    // smooth background that looks like none of them. A background of random
+    // blocks too did not work: a small picture of a few dozen blocks matches
+    // some patch of a large random one by chance, well above 0.7.
+    const auto blocks = [](unsigned seed, int w, int h) {
+        Frame f = make_frame(w, h);
+        std::mt19937 r(seed);
+        for (int by = 0; by < h; by += 4)
+            for (int bx = 0; bx < w; bx += 4) {
+                const auto red = static_cast<std::uint8_t>(r() % 256);
+                const auto green = static_cast<std::uint8_t>(r() % 256);
+                for (int y = by; y < std::min(h, by + 4); ++y)
+                    for (int x = bx; x < std::min(w, bx + 4); ++x)
+                        put_px(f, x, y, red, green, static_cast<std::uint8_t>(255 - red));
+            }
+        return f;
+    };
+    const auto backdrop = [](int w, int h) {
+        Frame f = make_frame(w, h);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                put_px(f, x, y, static_cast<std::uint8_t>(x * 255 / w),
+                       static_cast<std::uint8_t>(y * 255 / h), 128);
+        return f;
+    };
+    const auto paste = [](Frame& into, const Frame& what, int px, int py) {
+        for (int y = 0; y < what.height; ++y)
+            for (int x = 0; x < what.width; ++x) {
+                const std::size_t i = (static_cast<std::size_t>(y) * what.width + x) * 4;
+                if (what.pixels[i + 3] < 128) continue;
+                put_px(into, px + x, py + y, what.pixels[i + 2], what.pixels[i + 1],
+                       what.pixels[i]);
+            }
+    };
+    {
+        const Frame poster = blocks(101, 64, 80);
+        const Frame play = blocks(202, 56, 24);
+        const Frame signin = blocks(303, 72, 24);
+        TemplateStore store;
+        store.put("app_select_page", poster);
+        store.put("start_game_page", play);
+        store.put("login_page", signin);
+        AutoLogin::Settings s;
+        using Seen = AutoLogin::Publisher;
+
+        Frame shown = backdrop(640, 480);
+        check(AutoLogin::look_at_publisher(shown, store, s) == Seen::Unknown,
+              "VTCZone showing none of it is not known to be either");
+        paste(shown, signin, 300, 260);
+        check(AutoLogin::look_at_publisher(shown, store, s) == Seen::SignIn,
+              "its sign-in button with no game in sight is the sign-in form");
+        paste(shown, play, 120, 380);
+        check(AutoLogin::look_at_publisher(shown, store, s) == Seen::Ready,
+              "but Choi game anywhere on it means signed in, whatever else is there");
+
+        Frame games = backdrop(640, 480);
+        paste(games, poster, 40, 60);
+        check(AutoLogin::look_at_publisher(games, store, s) == Seen::Ready,
+              "and so does the game's poster");
+
+        AutoLogin::Settings off = s;
+        off.signin_picture.clear();
+        Frame form = backdrop(640, 480);
+        paste(form, signin, 200, 200);
+        check(AutoLogin::look_at_publisher(form, store, off) == Seen::Unknown,
+              "with the check turned off, the sign-in form is not looked for");
+        check(AutoLogin::look_at_publisher(Frame{}, store, s) == Seen::Unknown,
+              "and a window that could not be captured says nothing");
+    }
+
+    // The same with the pictures GoBot ships, where they are installed.
+    {
+        TemplateStore real;
+        if (!AutoLogin::load_pictures(real, exe_relative("configs/templates.ini")) ||
+            !real.get("login_page") || !real.get("start_game_page")) {
+            std::printf("  [skip] the login pictures are not installed here\n");
+        } else {
+            const AutoLogin::Settings s;
+            check(s.recognised(real) == s.pages.size(),
+                  "every page of the crossing has its picture among those installed");
+            Frame form = backdrop(1024, 768);
+            paste(form, *real.get("login_page"), 360, 420);
+            check(AutoLogin::look_at_publisher(form, real, s) == AutoLogin::Publisher::SignIn,
+                  "the shipped sign-in button is found as the sign-in form");
+            Frame ready = backdrop(1024, 768);
+            paste(ready, *real.get("start_game_page"), 402, 547);
+            check(AutoLogin::look_at_publisher(ready, real, s) == AutoLogin::Publisher::Ready,
+                  "and the shipped Choi game as signed in");
+        }
+    }
+
+    // How many pages can be recognised: named and loaded, not just named.
+    {
+        AutoLogin::Settings s;
+        TemplateStore store;
+        check(s.recognised(store) == 0, "with no pictures loaded no page can be recognised");
+        store.put("app_select_page", blocks(1, 16, 16));
+        store.put("start_game_page", blocks(2, 16, 16));
+        check(s.recognised(store) == 2, "a page counts once its picture is loaded");
+        s.pages[0].picture.clear();
+        check(s.recognised(store) == 1, "and a page with no picture named never does");
+
+        // What a keeper keeps for its hours of watching: the crossing's own.
+        const AutoLogin::Settings shipped;
+        TemplateStore every;
+        for (const auto& p : shipped.pages) every.put(p.picture, blocks(3, 16, 16));
+        every.put(shipped.signin_picture, blocks(4, 16, 16));
+        every.put("inventory", blocks(5, 16, 16));
+        every.put("hpmp_indicator2", blocks(6, 16, 16));
+        const TemplateStore kept = AutoLogin::pictures_for(shipped, every);
+        // Six pages' pictures -- both connect steps are one button -- and the
+        // sign-in form's.
+        check(kept.size() == 7 && shipped.recognised(kept) == shipped.pages.size() &&
+                  kept.get(shipped.signin_picture) != nullptr,
+              "a keeper keeps the crossing's pictures and the sign-in form's");
+        check(!kept.has("inventory") && !kept.has("hpmp_indicator2"),
+              "and none of the rest of the set");
+    }
+
+    // The Security Alert box the game's launcher can put up, which is a
+    // person's to answer.
+    {
+        check(AutoLogin::is_security_alert("#32770", "Security Alert"),
+              "the Security Alert box is known by its class and its title");
+        check(AutoLogin::is_security_alert("#32770", "  security alert "),
+              "whatever the case and the spaces");
+        check(!AutoLogin::is_security_alert("#32770", ""),
+              "the game's own untitled launcher is not one");
+        check(!AutoLogin::is_security_alert("Chrome_WidgetWin_1", "Security Alert"),
+              "nor is some other window that happens to have the title");
+    }
+
+    // Whether VTCZone is where the file says -- by the wide name, so an
+    // install folder with Vietnamese in its name is found too.
+    {
+        AutoLogin::Settings s;
+        s.launcher_path = temp_file("gobot_login_launcher_test.exe");
+        { std::ofstream(s.launcher_path) << "x"; }
+        check(s.launcher_found(), "a launcher that is there is found");
+        std::remove(s.launcher_path.c_str());
+        check(!s.launcher_found(), "and one that is not, is not");
+
+        const std::string dir = temp_file("");
+        s.launcher_path = dir;
+        check(!s.launcher_found(), "a folder is not a launcher");
+        s.launcher_path.clear();
+        check(!s.launcher_found(), "nor is no path at all");
+
+        const std::string named = dir + "gobot_thử_vtczone.exe";
+        const int n = MultiByteToWideChar(CP_UTF8, 0, named.c_str(), -1, nullptr, 0);
+        std::wstring wide(static_cast<std::size_t>(n > 0 ? n : 1), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, named.c_str(), -1, wide.data(), n);
+        const HANDLE h = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                     FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            std::printf("  [skip] could not make a file with a Vietnamese name here\n");
+        } else {
+            CloseHandle(h);
+            s.launcher_path = named;
+            check(s.launcher_found(), "one in a folder with a Vietnamese name is found too");
+            DeleteFileW(wide.c_str());
+        }
+    }
+
+    // What the simple screen says when the crossing stops, and whether
+    // another attempt is worth making.
+    {
+        using Why = AutoLogin::Why;
+        const std::string signin = AutoLogin::advice(Why::SignIn);
+        check(signin.rfind("VTCZone đang hiện màn hình đăng nhập", 0) == 0 &&
+                  signin.find("ghi nhớ") != std::string::npos,
+              "the sign-in form: sign in to VTCZone once, with its remember option");
+        check(AutoLogin::advice(Why::LauncherMissing, "D:\\VTC\\VTCZone.exe")
+                      .find("D:\\VTC\\VTCZone.exe") != std::string::npos,
+              "a launcher that is not there is named");
+        check(AutoLogin::advice(Why::GamePage, "60").find("60 giây") != std::string::npos &&
+                  AutoLogin::advice(Why::ClientStart, "90").find("Security Alert") != std::string::npos,
+              "a page that never came says how long it was waited for");
+        check(AutoLogin::advice(Why::NoPicture, "channel_first_index")
+                      .find("channel_first_index") != std::string::npos,
+              "a missing picture is named");
+        bool all_said = true;
+        for (int w = static_cast<int>(Why::Cancelled); w <= static_cast<int>(Why::Captcha); ++w)
+            if (AutoLogin::advice(static_cast<Why>(w), "x").empty()) all_said = false;
+        check(all_said && AutoLogin::advice(Why::None).empty(),
+              "every reason to stop has words for the screen, and no reason has none");
+
+        check(!AutoLogin::worth_retrying(Why::SignIn) &&
+                  !AutoLogin::worth_retrying(Why::LauncherMissing) &&
+                  !AutoLogin::worth_retrying(Why::NoPicture) &&
+                  !AutoLogin::worth_retrying(Why::SecurityAlert) &&
+                  !AutoLogin::worth_retrying(Why::Captcha) &&
+                  !AutoLogin::worth_retrying(Why::Cancelled),
+              "what another attempt cannot get past stops the crossing at once");
+        check(AutoLogin::worth_retrying(Why::GamePage) &&
+                  AutoLogin::worth_retrying(Why::Channel) &&
+                  AutoLogin::worth_retrying(Why::World) &&
+                  AutoLogin::worth_retrying(Why::LauncherNoWindow),
+              "and a page that was slow to come gets the next attempt");
+        check(AutoLogin::gave_up(3, Why::Channel) ==
+                  "Đã thử 3 lần không vào lại được: Không thấy danh sách kênh (Chọn Kênh). "
+                  "Cần người kiểm tra.",
+              "after every attempt: how many, and the last reason, one full stop each");
+
+        bool all_named = true;
+        for (int st = static_cast<int>(AutoLogin::Step::Idle);
+             st <= static_cast<int>(AutoLogin::Step::Blocked); ++st)
+            if (std::string(AutoLogin::step_name_vi(static_cast<AutoLogin::Step>(st))) == "?")
+                all_named = false;
+        check(all_named, "every step has a Vietnamese name for the screen");
+    }
+
+    // The flow refuses, before touching any window, whatever it cannot cross.
+    {
+        using Why = AutoLogin::Why;
+        TemplateStore all;
+        for (const auto& p : pages) all.put(p.picture, blocks(9, 16, 16));
+
+        AutoLogin::Settings blank;
+        for (auto& p : blank.pages) p.picture.clear();
+        AutoLogin unnamed;
+        unnamed.set_settings(blank);
+        unnamed.set_templates(&all);
+        check(!unnamed.run() && unnamed.why() == Why::NotSetUp && unnamed.attempts_made() == 0,
+              "a table with no pictures named refuses before the first attempt");
+
+        TemplateStore none;
+        AutoLogin missing;
+        missing.set_settings(AutoLogin::Settings{});
+        missing.set_templates(&none);
+        check(!missing.run() && missing.why() == Why::NoPicture &&
+                  missing.why_detail() == pages.front().picture && missing.attempts_made() == 0,
+              "a picture that is not installed is named, and nothing is started");
+
+        AutoLogin::Settings nowhere;
+        nowhere.launcher_path.clear();
+        AutoLogin no_launcher;
+        no_launcher.set_settings(nowhere);
+        no_launcher.set_templates(&all);
+        check(!no_launcher.run() && no_launcher.why() == Why::NoLauncher &&
+                  no_launcher.attempts_made() == 0,
+              "and so does a file with no launcher in it");
+
+        // A captcha already up: nothing is crossed under it.
+        AutoLogin held;
+        held.set_settings(AutoLogin::Settings{});
+        held.set_templates(&all);
+        held.set_captcha_check([] { return true; });
+        check(!held.run() && held.why() == Why::Captcha && held.attempts_made() == 0 &&
+                  held.advice() == AutoLogin::advice(Why::Captcha),
+              "a captcha stops the crossing before it starts, and says so");
+        check(held.step() == AutoLogin::Step::Blocked, "and leaves it blocked for a person");
+    }
+
+    // Numbers in the file that are not what they look like. A comma for the
+    // decimal point reads "0,80" as 0, and a picture matched at 0 is found in
+    // every frame; a wait one digit too long ran the clock over.
+    {
+        const std::string path = temp_file("gobot_login_numbers_test.ini");
+        {
+            std::ofstream out(path);
+            out << "[Login]\n"
+                   "signin_score=0,80\n"
+                   "[Page.connect]\n"
+                   "score=0\n"
+                   "wait_s=2147483647\n"
+                   "[Page.channel_list]\n"
+                   "score=1.5\n"
+                   "wait_s=-5\n"
+                   "[Page.character]\n"
+                   "score=0.65\n"
+                   "step_pause_ms=999999999\n";
+        }
+        AutoLogin::Settings s;
+        check(s.load(path), "a file with odd numbers in it loads");
+        const auto page_of = [&](const char* key) -> const AutoLogin::Page* {
+            for (const auto& p : s.pages)
+                if (p.key == key) return &p;
+            return nullptr;
+        };
+        const AutoLogin::Page* connect = page_of("connect");
+        const AutoLogin::Page* channel = page_of("channel_list");
+        const AutoLogin::Page* who = page_of("character");
+        check(s.signin_score > 0.79f && s.signin_score < 0.81f,
+              "signin_score=0,80 is not taken for 0: the usual 0.80 is used");
+        check(connect && connect->score > 0.69f && connect->score < 0.71f && channel &&
+                  channel->score > 0.69f && channel->score < 0.71f,
+              "nor is a page's score of 0, or of 1.5");
+        check(who && who->score > 0.64f && who->score < 0.66f,
+              "while a real score, lowered, is kept");
+        check(connect && connect->wait_s == AutoLogin::kMaxWaitS && channel && channel->wait_s == 1,
+              "a wait is held to between one second and the most a page is waited for");
+        check(who && who->step_pause_ms == 10000, "and a pause between two clicks to ten seconds");
+        std::remove(path.c_str());
+    }
+
+    // Which file is missing, and which only will not open just now. Only the
+    // first is ever written over with the table: the second is somebody's.
+    {
+        const std::string none = temp_file("gobot_login_surely_not_here.ini");
+        std::remove(none.c_str());
+        check(AutoLogin::Settings::file_missing(none), "a file that is not there is missing");
+        check(AutoLogin::Settings::file_missing(temp_file("gobot_no_such_folder\\login.ini")),
+              "and so is one in a folder that is not there");
+        check(!AutoLogin::Settings::file_missing(temp_file("")) &&
+                  !AutoLogin::Settings::file_missing(""),
+              "a folder is not a missing file, and nor is no name at all");
+
+        const std::string held = temp_file("gobot_login_held_test.ini");
+        { std::ofstream(held) << "# somebody's own notes\n[Login]\nchannel_index=6\n"; }
+        const HANDLE lock = CreateFileA(held.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (lock == INVALID_HANDLE_VALUE) {
+            std::printf("  [skip] could not hold a file open here\n");
+        } else {
+            AutoLogin::Settings s;
+            const bool read = s.load(held);
+            const bool missing = AutoLogin::Settings::file_missing(held);
+            CloseHandle(lock);
+            check(!read && !missing,
+                  "a file held open by something else does not load, and is not missing "
+                  "either -- so it is not written over");
+        }
+        std::remove(held.c_str());
+    }
+
+    // How long VTCZone's sign-in form has to stay up before it is stopped for.
+    {
+        using A = AutoLogin;
+        check(!A::signin_settled(A::kSignInHoldMs - 1, -1) &&
+                  A::signin_settled(A::kSignInHoldMs, -1),
+              "a VTCZone that was running already: the form, up five seconds, stops it");
+        check(!A::signin_settled(A::kSignInHoldMs * 3, A::kSignInGraceMs - 1),
+              "one this flow has just started gets its first half minute to sign itself in");
+        check(A::signin_settled(A::kSignInHoldMs, A::kSignInGraceMs) &&
+                  !A::signin_settled(A::kSignInHoldMs - 1, A::kSignInGraceMs * 2),
+              "and after that the same five seconds as any other");
+        check(A::kSignInGraceMs + A::kSignInHoldMs < 60 * 1000,
+              "which still stops it well inside the minute its first page is waited for");
+    }
+
+    // The pictures a crossing needs, by name: what a keeper that reads the
+    // file again compares, to load pictures again only when they changed.
+    {
+        const AutoLogin::Settings s;
+        const auto names = AutoLogin::picture_names(s);
+        check(names.size() == 7 && std::is_sorted(names.begin(), names.end()) &&
+                  std::find(names.begin(), names.end(), "login_page") != names.end(),
+              "the shipped crossing needs seven pictures, the sign-in form's among them");
+        AutoLogin::Settings picked = s;
+        picked.channel_index = 5;
+        picked.character_index = 2;
+        check(AutoLogin::picture_names(picked) == names,
+              "a channel or a character picked changes none of them");
+        AutoLogin::Settings renamed = s;
+        renamed.pages[2].picture = "start_game_button_new";
+        check(AutoLogin::picture_names(renamed) != names, "a page given another picture does");
+        AutoLogin::Settings off = s;
+        off.signin_picture.clear();
+        check(AutoLogin::picture_names(off).size() == 6,
+              "and with the sign-in check off there is one fewer");
+    }
+
+    // A click held back by a window in the way, in Vietnamese.
+    {
+        using Why = AutoLogin::Why;
+        const std::string other = AutoLogin::advice(Why::Covered, "chrome.exe");
+        check(other.find("chrome.exe") != std::string::npos &&
+                  other.find("che chỗ") != std::string::npos,
+              "a window in the way is named by its program");
+        check(AutoLogin::advice(Why::Covered, "gobot_gui.exe").rfind("Cửa sổ GoBot", 0) == 0,
+              "GoBot's own window is called GoBot's");
+        check(AutoLogin::advice(Why::Covered, "?").find('?') == std::string::npos,
+              "one whose program cannot be told is just another window");
+        check(AutoLogin::advice(Why::Covered, "").find("màn hình") != std::string::npos,
+              "and a point off the screen says so");
+        check(AutoLogin::worth_retrying(Why::Covered),
+              "the next attempt brings the windows to the front again, so it is worth one");
+    }
+
+    // Whether a click lands where it is meant to. Small windows of this
+    // test's own, kept on top without taking the focus and gone again at
+    // once: nothing the player has open is touched, and nothing is clicked.
+    {
+        const HINSTANCE self = GetModuleHandleA(nullptr);
+        WNDCLASSA wc{};
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = self;
+        wc.lpszClassName = "GoBotTestClickTarget";
+        RegisterClassA(&wc);        // already there from an earlier run: the same
+        const auto make = [&](DWORD ex, DWORD style, const char* title, int x, int y, int w,
+                              int h, HWND parent) {
+            return CreateWindowExA(ex, wc.lpszClassName, title, style, x, y, w, h, parent,
+                                   nullptr, self, nullptr);
+        };
+        const DWORD on_top = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        RECT work{};
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
+        const int x0 = static_cast<int>(work.left) + 40;
+        const int y0 = static_cast<int>(work.top) + 40;
+
+        HWND target = make(on_top, WS_POPUP, "", x0, y0, 240, 160, nullptr);
+        if (target) ShowWindow(target, SW_SHOWNOACTIVATE);
+        const POINT middle{ x0 + 120, y0 + 80 };
+        if (target == nullptr || WindowFromPoint(middle) != target) {
+            // Something else kept on top there, or no desktop to show on.
+            std::printf("  [skip] a test window could not be put on top here\n");
+        } else {
+            std::string in_way = "x";
+            check(AutoLogin::lands_on(target, 120, 80, &in_way) && in_way.empty(),
+                  "a click on a window nothing covers lands on it");
+            check(!AutoLogin::lands_on(target, -1, 80) && !AutoLogin::lands_on(target, 240, 80) &&
+                      !AutoLogin::lands_on(target, 120, 160),
+                  "a point off its client area does not");
+
+            HWND child = make(0, WS_CHILD | WS_VISIBLE, "", 10, 10, 60, 40, target);
+            check(child != nullptr && AutoLogin::lands_on(target, 30, 30),
+                  "a point on a child of it -- a button, the view inside a frame -- does");
+            check(AutoLogin::uncovered(target),
+                  "and with only its own child on it, the window is uncovered");
+
+            HWND cover = make(on_top, WS_POPUP, "", x0 + 140, y0, 160, 160, nullptr);
+            if (cover) ShowWindow(cover, SW_SHOWNOACTIVATE);
+            in_way.clear();
+            const bool held = !AutoLogin::lands_on(target, 200, 80, &in_way);
+            std::string named = in_way;
+            for (char& c : named)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            check(cover != nullptr && held && named.rfind("gobot_test", 0) == 0,
+                  "a point another window covers does not, and that window's program is named");
+            check(AutoLogin::lands_on(target, 60, 80),
+                  "while a point beside the other window still does");
+            check(!AutoLogin::uncovered(target),
+                  "a window with another over a part of it is not uncovered, so a frame of "
+                  "it read off the screen is not trusted to show the sign-in form");
+            if (cover) ShowWindow(cover, SW_HIDE);
+            check(AutoLogin::lands_on(target, 200, 80) && AutoLogin::uncovered(target),
+                  "and once that window is gone, the point it covered does too");
+
+            const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            SetWindowPos(target, nullptr, left - 1000, y0, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            in_way = "x";
+            check(!AutoLogin::lands_on(target, 120, 80, &in_way) && in_way.empty(),
+                  "a window dragged off every screen is not clicked, and nothing is blamed");
+            if (cover) DestroyWindow(cover);
+        }
+        if (target) DestroyWindow(target);
+        check(!AutoLogin::lands_on(nullptr, 0, 0) && !AutoLogin::uncovered(nullptr),
+              "and no window is never landed on, nor uncovered");
+
+        // A minimised VTCZone, found among its program's windows -- where
+        // window_of never looks -- so that it can be brought back.
+        char exe[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        std::string me = exe;
+        me = me.substr(me.find_last_of("\\/") + 1);
+        const std::string title = "GoBot test launcher " + std::to_string(GetCurrentProcessId());
+        AutoLogin::Settings s;
+        s.launcher_window = title;
+        HWND down = make(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, title.c_str(),
+                         x0, y0, 300, 200, nullptr);
+        if (down == nullptr) {
+            std::printf("  [skip] could not make a window to minimise here\n");
+        } else {
+            ShowWindow(down, SW_SHOWMINNOACTIVE);
+            check(IsIconic(down) && AutoLogin::minimised_window(s, me) == down,
+                  "a minimised launcher is found by its program and its title");
+            check(!AutoLogin::lands_on(down, 10, 10), "and is never clicked while minimised");
+            AutoLogin::Settings other = s;
+            other.launcher_window = title + " (another)";
+            check(AutoLogin::minimised_window(other, me) == nullptr &&
+                      AutoLogin::minimised_window(s, "surely_not_this_one.exe") == nullptr,
+                  "another title is not it, nor is another program's window");
+            ShowWindow(down, SW_SHOWNOACTIVATE);
+            check(!IsIconic(down) && AutoLogin::minimised_window(s, me) == nullptr,
+                  "and once it is up again, it is not a minimised one");
+            DestroyWindow(down);
+        }
     }
 }
 
@@ -6364,6 +7023,38 @@ void test_config() {
 
         check(!IniFile::set_in_place("no_such_file_at_all.ini", "A", "b", 1),
               "a file that is not there is a failure, not a new file");
+        std::remove(path.c_str());
+    }
+
+    // And the file keeps its own line endings. A text-mode write turned a
+    // file that was all LF into one that was all CRLF when one key changed:
+    // every line the same, and the file not.
+    {
+        const auto bytes_of = [](const std::string& p) {
+            std::ifstream in(p, std::ios::binary);
+            std::stringstream ss;
+            ss << in.rdbuf();
+            return ss.str();
+        };
+        const auto put = [](const std::string& p, const std::string& bytes) {
+            std::ofstream(p, std::ios::binary) << bytes;
+        };
+        const std::string path = temp_file("gobot_inplace_eol_test.ini");
+        const std::string bom = "\xEF\xBB\xBF";
+
+        put(path, bom + "# notes, Kênh 1\n[Login]\nchannel_index=0\n");
+        check(IniFile::set_in_place(path, "Login", "channel_index", 4) &&
+                  bytes_of(path) == bom + "# notes, Kênh 1\n[Login]\nchannel_index=4\n",
+              "an LF file stays LF, with its BOM and its Vietnamese as they were");
+        check(IniFile::set_in_place(path, "Login", "character_index", 1) &&
+                  bytes_of(path) ==
+                      bom + "# notes, Kênh 1\n[Login]\nchannel_index=4\ncharacter_index=1\n",
+              "and a key added to it goes in with an LF");
+
+        put(path, "[Login]\r\nchannel_index=0\r\n");
+        check(IniFile::set_in_place(path, "Login", "channel_index", 2) &&
+                  bytes_of(path) == "[Login]\r\nchannel_index=2\r\n",
+              "a CRLF file stays CRLF");
         std::remove(path.c_str());
     }
 

@@ -42,16 +42,37 @@ bool parse_bool(const std::string& v, bool def) {
 
 bool IniFile::set_in_place(const std::string& path, const std::string& section,
                            const std::string& key, const std::string& value) {
+    // Read and written as bytes, so the file keeps its own line endings. A
+    // text-mode stream writes every line back with CRLF, and a file that had
+    // been all LF came back all CRLF from one key being changed -- every line
+    // the same and the file different, which is not leaving it as it was.
     std::vector<std::string> lines;
+    std::size_t crlf = 0, lf = 0;
     {
-        std::ifstream in(path);
+        std::ifstream in(path, std::ios::binary);
         if (!in) return false;
         std::string line;
         while (std::getline(in, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const bool ended = !in.eof();          // a last line may have no ending
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+                if (ended) ++crlf;
+            } else if (ended) {
+                ++lf;
+            }
             lines.push_back(line);
         }
     }
+    // Whichever the file mostly uses; CRLF, as this always wrote, when it has
+    // no line ending to go by.
+    const char* const eol = lf > crlf ? "\n" : "\r\n";
+    const auto write = [&] {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        for (const std::string& l : lines) out << l << eol;
+        out.flush();
+        return static_cast<bool>(out);
+    };
 
     const std::string want_section = lower(trim(section));
     const std::string want_key     = lower(trim(key));
@@ -83,10 +104,7 @@ bool IniFile::set_in_place(const std::string& path, const std::string& section,
         if (lower(trim(line.substr(0, eq))) != want_key) continue;
 
         lines[i] = trim(key) + "=" + value;
-        std::ofstream out(path, std::ios::trunc);
-        if (!out) return false;
-        for (const std::string& l : lines) out << l << "\n";
-        return true;
+        return write();
     }
 
     // Not there. Add it: at the end of its section, or in a new one.
@@ -102,11 +120,7 @@ bool IniFile::set_in_place(const std::string& path, const std::string& section,
         lines.push_back("[" + trim(section) + "]");
         lines.push_back(added);
     }
-
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) return false;
-    for (const std::string& l : lines) out << l << "\n";
-    return true;
+    return write();
 }
 
 bool IniFile::set_in_place(const std::string& path, const std::string& section,

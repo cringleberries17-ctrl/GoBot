@@ -108,7 +108,10 @@ depends on a server, a subscription or a login to anyone else.
 
 | GoC | | GoBot |
 |---|---|---|
-| Bật AutoLogin — log back in when disconnected; Kênh (1~8), Nhân vật (1~3) | ✓ | On the new **Tự đăng nhập** tab: watches for the client exiting, hanging or showing an error box, ends it, starts the launcher, logs in, and picks the channel and character. The game account is saved from the tab, its password encrypted with this Windows account's key. |
+| Bật AutoLogin — log back in when disconnected; Kênh (1~8), Nhân vật (1~3) | ✓ | On the **Tự đăng nhập** tab: watches for the client exiting, hanging or showing an error box, ends it, presses Chơi game in VTCZone (starting VTCZone first when it is closed), and picks the channel and character. Like GoC it needs no account and no password: VTCZone stays signed in, and when it shows its sign-in form instead GoBot stops and says so rather than typing into it. With the game closed, BẮT ĐẦU opens it first. |
+| ClickLauncher2Start accepts "Security Alert" boxes (&Yes) | ✗ by choice | GoBot stops and says so: whether to trust a certificate is the player's call. |
+| ClickLauncher1Start restores a minimised VTCZone | ✓ | GoBot restores it too, and a window of the crossing that is minimised part way. |
+| — | ✓ | Before every click of the crossing GoBot brings that window to the front and checks the click would land on it. If another window is over the spot (a browser, a chat, GoBot itself) it waits and says what is in the way, and gives the attempt up after half a minute, rather than clicking whatever is on top. |
 | — | ✓ | **Fixed in this round:** after logging back in GoBot now follows the new game window. Before, the client it started was a new window and everything still pointed at the old one, so the run the login saved stopped anyway. |
 | — | ✓ | GoBot gives up after five restarts and waits between them, so a locked account or a bad patch does not become a reconnect loop against the server. |
 

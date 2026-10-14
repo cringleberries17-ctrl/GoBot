@@ -27,7 +27,8 @@ public:
     /// the only record of how those numbers were arrived at.
     ///
     /// Adds the key if the section has not got one, and the section too if it
-    /// is missing. False if the file could not be read or written.
+    /// is missing. The file keeps its own line endings, LF or CRLF. False if
+    /// the file could not be read or written.
     static bool set_in_place(const std::string& path, const std::string& section,
                              const std::string& key, const std::string& value);
     static bool set_in_place(const std::string& path, const std::string& section,
