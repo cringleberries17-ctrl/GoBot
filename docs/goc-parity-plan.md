@@ -400,6 +400,6 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
 - **Failed login:** try the crossing 3 times; if all three fail, stop and wait for the player (no timed
   retries after that).
 - **Quick quest:** build it, reusing GoC's own approach and pictures as far as possible (BA first).
-- **Alerts:** no Telegram bot. Alternatives offered: a Discord webhook or ntfy for one-way phone alerts,
-  a Zalo bot later if two-way control is wanted; plus a local sound/Windows notification. The player's
-  choice is pending. The webhook URL / topic / token is stored with DPAPI and never logged.
+- **Alerts:** no Telegram bot. The player chose a **Discord webhook** first (one-way phone alerts through
+  the Discord app), plus a local sound/Windows notification; a Zalo bot may follow later for two-way
+  control, after a BA checks Zalo's Bot Platform. The webhook URL is stored with DPAPI and never logged.
