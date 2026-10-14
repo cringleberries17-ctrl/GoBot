@@ -171,6 +171,7 @@ add_library(gobot_core STATIC
     src/player_list.cpp
     src/auto_login.cpp
     src/bag.cpp
+    src/auto_chat.cpp
     src/dialog_driver.cpp
     src/routine.cpp
     src/gatherer.cpp
@@ -196,7 +197,8 @@ target_include_directories(gobot_core
 
 target_link_libraries(gobot_core
     PUBLIC  Npcap::Npcap
-    PRIVATE ws2_32 iphlpapi user32 gdiplus
+    # normaliz: NormalizeString, which takes the marks off a chat line.
+    PRIVATE ws2_32 iphlpapi user32 gdiplus normaliz
 )
 
 if(GOBOT_USE_OPENCV)

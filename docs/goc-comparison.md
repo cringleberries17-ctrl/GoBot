@@ -101,7 +101,7 @@ depends on a server, a subscription or a login to anyone else.
 | Danh sách đen | ✓ | Wins over every other list. |
 | Luôn làm chủ party, chỉ mời khi đang làm chủ | ✗ | |
 | Danh sách ưu tiên (giữ slot) | ✗ | Read from the file, not acted on. |
-| Tự chat khi không có party | ✗ | Needs chat typing. |
+| Tự chat khi không có party | ✗ | The typing is there now (**Tự chat**); a line said only while not in a party is not. |
 | EXP / loot share | ✗ | Read from the file, not acted on. |
 
 ## AutoLogin
@@ -120,7 +120,7 @@ depends on a server, a subscription or a login to anyone else.
 | Tự động focus cửa sổ game khi mất focus | ✓ | **New.** During a run, when something else has taken the focus and nobody has touched the mouse or keyboard for 30 s. Waiting for the machine to be idle is what stops it fighting a person for their own desktop. |
 | Trở về địa điểm cũ, Trở về map cũ, Sai số trở về | ✗ | Needs your position. |
 | Tự động fix tọa độ sau khi login | ✗ | Likewise. |
-| Kiểm tra Chat Input | ✗ | |
+| Kiểm tra Chat Input | ✓ | **Kiểm tra ô chat** on the **Tự chat** tab, and `gobot_cli --chatcheck`: whether the chat line is open or shut, found the way GoC's own check finds it, with the numbers that decided it. Presses nothing. |
 | Telegram: death, disconnect, chat, party changes, remote control | ✗ | |
 | Khung giờ reset avatar — switch character to reset the avatar timer | ✗ | |
 | Giảm tải khi map đông người | — | Nothing to reduce: GoBot reads the screen, not the monster stream. |
@@ -133,7 +133,7 @@ depends on a server, a subscription or a login to anyone else.
 | Xử lý vật phẩm — Sử dụng mảnh ghép (use fragments) | ✗ | |
 | Mua sắm — buy potions from the Hawker / Người giữ sân, safe place first, exact quantity | ✗ | Click sequences exist for buying a rod and a pickaxe; potions are the same shape. |
 | Làm nhiệm vụ nhanh | — | Dropped: around seventy quest icons for one feature. |
-| Bật chat — messages on a timer | ✗ | |
+| Bật chat — messages on a timer | ✓ | The **Tự chat** tab: up to ten lines, one every 30–3600 s, in turn or at random. Typed as GoC types them -- Enter, six Backspaces, a key per letter, digit or space, Enter -- but with a look at the screen before each key: nothing is typed until the line is seen open and cleared, every key goes only while it still is, Enter only on a fresh look that shows no dialog (it would answer one), and a line that goes wrong is rubbed out rather than sent. Everything else that presses keys waits while a line is typed, and for as long after as the line may still be open, until a look shows it shut. GoC's per-message delay, repeat and party-request flags are not copied, nor any way of typing through the clipboard. |
 | Captcha | — | GoBot notices a captcha and holds; it does not answer them. |
 
 ---

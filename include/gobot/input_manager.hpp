@@ -6,6 +6,7 @@
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace gobot {
 
@@ -140,8 +141,42 @@ public:
     bool normal_attack();
     bool loot();
 
-    /// Type a line into the game chat: open, type, send.
+    /// Refuses, and says so: chat goes through ChatSender (gobot/auto_chat.hpp).
+    ///
+    /// This used to press Enter and type blind. Letters typed into a chat line
+    /// that did not open are skill keys, and an Enter pressed on a dialog
+    /// answers it, so a line is only ever typed once a look at the screen has
+    /// shown it open -- which needs pictures and frames this class has not got.
     bool send_chat(const std::string& text, std::uint32_t chat_key = 13);
+
+    // ---- typing into the game's chat line ----
+
+    /// One key press for typing: `vk` down -- with Shift down before it when
+    /// `shift` -- held `hold_ms`, and up again. Only while the game is in front.
+    ///
+    /// Not recorded among the keys held. The hunter calls release_all() every
+    /// time it stops walking, from its own thread, and that let go of a Shift
+    /// held for a capital between Shift going down and the letter. So Shift
+    /// and the key go down in one SendInput call, which nothing can get
+    /// between, and come up in another, sent whether or not the game is still
+    /// in front, so that neither is left held.
+    bool type_key(std::uint32_t vk, bool shift, int hold_ms);
+
+    /// One UTF-16 unit as Unicode input (KEYEVENTF_UNICODE), down and up, only
+    /// while the game is in front.
+    bool type_unit(wchar_t unit);
+
+    /// One UTF-16 unit posted to the game's window as WM_CHAR, or as
+    /// WM_IME_CHAR when `ime`. Only while the game is in front: the chat line
+    /// it is meant for was opened by a key, and is only open while it is.
+    bool post_char(wchar_t unit, bool ime);
+
+    // Nothing here pastes. The clipboard is the player's, and a paste the game
+    // got round to after it was put back would post what the player had
+    // copied -- a password, say -- to the chat.
+
+    /// Whether Caps Lock is on.
+    static bool caps_lock_on();
 
     // ---- pointer ----
     //

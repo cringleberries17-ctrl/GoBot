@@ -313,8 +313,8 @@ void GuiApp::draw_simple_view() {
     ImGui::BeginChild("##column", ImVec2(width, 0), ImGuiChildFlags_None);
     ImGui::PopStyleColor();
 
-    // Three tabs, fighting first: it is what most people open this for. The
-    // other two run beside it, and the start button under the tabs starts
+    // Five tabs, fighting first: it is what most people open this for. The
+    // others run beside it, and the start button under the tabs starts
     // whichever of them is switched on. A dot on a tab says it is running.
     ImGui::Dummy(ImVec2(0, 4));
     if (ImGui::BeginTabBar("##simpletabs")) {
@@ -333,6 +333,11 @@ void GuiApp::draw_simple_view() {
         if (tab("Tổ đội", party_running_, "party")) {
             ImGui::Dummy(ImVec2(0, 4));
             simple_party_tab();
+            ImGui::EndTabItem();
+        }
+        if (tab("Tự chat", chat_running_ && !chat_oneshot_ && !chat_stop_, "chat")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_chat_tab();
             ImGui::EndTabItem();
         }
         if (tab("Tự đăng nhập", keeper_running_, "login")) {
@@ -1020,6 +1025,12 @@ void GuiApp::simple_start_block() {
               (thrown > 0 ? ", đã bỏ " + std::to_string(thrown) + " món" : std::string()) +
               ".").c_str());
     }
+    if (chat_running_ && !chat_oneshot_ && !chat_stop_)
+        hint(("Tự chat: đang bật, đã gửi " + std::to_string(chat_sent_.load()) + " câu.").c_str());
+    // Said here too, by the button: it is why the fighting has stopped.
+    if (chat_doubt_)
+        coloured(kWait, "Ô chat trong game có thể đang mở: đánh quái, bình và buff chờ đến khi ô chat "
+                        "đóng (xem thẻ Tự chat).");
 
     // ---- what it has done ----
     if (simple_started_ms_ != 0) {
@@ -1120,8 +1131,10 @@ void GuiApp::simple_start() {
                        (party_rules.auto_accept || party_rules.auto_invite);
     CleanSettings clean;
     const bool trash = clean.load(exe_relative("configs/trash.ini")) && clean.enabled;
+    ChatSettings chat_rules;
+    const bool chat = chat_rules.load(exe_relative("configs/chat.ini")) && chat_rules.enabled;
     if (!any_key && !hunt_config_.enabled && !party && !simple_opts_.keep_alive &&
-        !simple_opts_.revive && !trash) {
+        !simple_opts_.revive && !trash && !chat) {
         simple_note("Chưa chọn việc nào. Đánh dấu ít nhất một việc ở phần \"Bot sẽ làm gì\".");
         return;
     }
@@ -1154,10 +1167,17 @@ void GuiApp::simple_start() {
     if (simple_opts_.keep_alive) start_keeper();
     if (simple_opts_.revive) start_revive();
     if (trash) start_trash();
+    if (chat) start_chat();
     simple_note("Đã bắt đầu.");
 }
 
 void GuiApp::simple_stop() {
+    // The chat first: a line half typed is rubbed out and closed as it stops,
+    // under its hold, which keeps everything else off until it is done. Not
+    // waited for here: that takes a few seconds for a long line, and the
+    // window would freeze meanwhile. The player has taken over: a chat line
+    // still in doubt after that is handed over to tick(), not waited on.
+    stop_chat(true, false);
     stop_hunt();
     stop_macro();
     stop_party();
@@ -1809,6 +1829,230 @@ void GuiApp::simple_trash_tab() {
         lines = trash_log_;
     }
     last_lines(lines, 6);
+    end_card();
+}
+
+// ------------------------------------------------------------------- chat
+
+void GuiApp::simple_chat_tab() {
+    const std::string cfg = exe_relative("configs/chat.ini");
+    if (!simple_chat_loaded_) {
+        simple_chat_loaded_ = true;
+        // No file is Tự chat off, which is what the defaults say.
+        if (!simple_chat_.load(cfg) && GetFileAttributesA(cfg.c_str()) != INVALID_FILE_ATTRIBUTES)
+            simple_note("Không đọc được configs/chat.ini.", 8000);
+        std::snprintf(simple_chat_lines_, sizeof simple_chat_lines_, "%s",
+                      ChatSettings::join_lines(simple_chat_.lines).c_str());
+        simple_chat_interval_ = simple_chat_.interval_s;
+    }
+    const auto put = [&](const char* key, const std::string& value) {
+        if (!ChatSettings::save_key(cfg, key, value))
+            simple_note("Không lưu được configs/chat.ini.", 8000);
+    };
+
+    // What is worth warning about, looked at every few seconds rather than
+    // every frame: going through every process running is not free.
+    if (simple_chat_checked_ms_ == 0 || now_ms() - simple_chat_checked_ms_ > 5000) {
+        simple_chat_checked_ms_ = now_ms();
+        std::string typers;
+        for (const std::string& t : vietnamese_typers_running())
+            typers += (typers.empty() ? "" : ", ") + t;
+        simple_chat_typers_ = typers;
+        simple_chat_layout_ = window_keyboard_layout(input_.target_window());
+    }
+
+    // ---- what to say, and how often ----
+    if (!begin_card("##chat")) { end_card(); return; }
+    heading(strong_font_, "Tự chat");
+    if (ImGui::Checkbox("Bật tự chat", &simple_chat_.enabled)) {
+        put("enabled", simple_chat_.enabled ? "true" : "false");
+        if (simple_chat_.enabled && simple_running()) start_chat();
+        // Not the player taking over the keys -- the fighting goes on -- so a
+        // chat line left in doubt is still watched, and the keys held off,
+        // until it shows shut.
+        if (!simple_chat_.enabled && chat_running_ && !chat_oneshot_) stop_chat(false, false);
+    }
+    {
+        const int first = simple_chat_.first_delay_s;
+        const std::string when = first > 0 ? "khoảng " + std::to_string(first) +
+                                                 " giây sau khi bấm BẮT ĐẦU"
+                                           : "ngay khi bấm BẮT ĐẦU";
+        hint(("Khi bot chạy, GoBot gõ các câu dưới đây vào ô chat của game, mỗi lần một câu: câu "
+              "đầu " + when + ", sau đó theo giờ ở dưới. Đánh quái, bình và buff tạm dừng trong "
+              "mấy giây lúc gõ.").c_str());
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    label("Các câu sẽ gửi (mỗi dòng một câu, tối đa 10 câu)");
+    ImGui::InputTextMultiline("##chatlines", simple_chat_lines_, sizeof simple_chat_lines_,
+                              ImVec2(-1, ImGui::GetTextLineHeightWithSpacing() * 6.5f));
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        simple_chat_.lines = ChatSettings::split_lines(simple_chat_lines_);
+        if (!ChatSettings::save_lines(cfg, simple_chat_.lines))
+            simple_note("Không lưu được configs/chat.ini.", 8000);
+    }
+
+    // What each line will come out as, worked out from the box as it is now.
+    {
+        const std::string text = simple_chat_lines_;
+        int written = 0;
+        for (std::size_t at = 0; at <= text.size();) {
+            const std::size_t end = text.find('\n', at);
+            const std::string one = text.substr(at, end == std::string::npos ? std::string::npos
+                                                                             : end - at);
+            if (one.find_first_not_of(" \t\r") != std::string::npos) ++written;
+            if (end == std::string::npos) break;
+            at = end + 1;
+        }
+        const auto lines = ChatSettings::split_lines(text);
+        ImGui::PushFont(nullptr, kSmall);
+        if (lines.empty()) coloured(kWait, "Danh sách câu đang trống.");
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const ChatText t = prepare_chat(lines[i], simple_chat_.method,
+                                            simple_chat_.strip_diacritics, simple_chat_.max_length);
+            const std::string head = std::to_string(i + 1) + ". Sẽ gõ: ";
+            if (t.empty()) {
+                coloured(kBad, (head + "(không còn chữ nào gõ được, câu này sẽ bị bỏ qua)").c_str());
+                continue;
+            }
+            std::string what;
+            if (t.stripped) what += "bỏ dấu";
+            if (t.dropped) what += std::string(what.empty() ? "" : ", ") + "bỏ ký tự không gõ được";
+            if (t.cut) what += std::string(what.empty() ? "" : ", ") + "cắt còn " +
+                               std::to_string(simple_chat_.max_length) + " ký tự";
+            if (what.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+                ImGui::TextWrapped("%s%s", head.c_str(), t.typed.c_str());
+                ImGui::PopStyleColor();
+            } else {
+                coloured(kWait, (head + t.typed + "   (" + what + ")").c_str());
+            }
+        }
+        if (written > ChatSettings::kMaxLines)
+            coloured(kWait, ("Chỉ dùng " + std::to_string(ChatSettings::kMaxLines) +
+                             " câu đầu tiên.").c_str());
+        ImGui::PopFont();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    label("Gửi mỗi");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(90);
+    ImGui::InputInt("##chatevery", &simple_chat_interval_, 0, 0);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const int asked = simple_chat_interval_;
+        simple_chat_interval_ = ChatSettings::clamp_interval(asked);
+        simple_chat_.interval_s = simple_chat_interval_;
+        put("interval_s", std::to_string(simple_chat_interval_));
+        if (asked < ChatSettings::kMinInterval)
+            simple_note("Ít nhất 30 giây giữa hai câu, để khỏi bị coi là spam.", 8000);
+        else if (asked > ChatSettings::kMaxInterval)
+            simple_note("Nhiều nhất 3600 giây (1 giờ) giữa hai câu.", 8000);
+    }
+    ImGui::SameLine();
+    label("giây (ít nhất 30)");
+    ImGui::SameLine(0, 24);
+    if (ImGui::RadioButton("Lần lượt", !simple_chat_.random_order)) {
+        simple_chat_.random_order = false;
+        put("order", "in_turn");
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Ngẫu nhiên", simple_chat_.random_order)) {
+        simple_chat_.random_order = true;
+        put("order", "random");
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    hint("Câu được gửi vào kênh đang chọn ở nút bên trái ô chat trong game (thường là Thường). "
+         "Muốn gửi vào Đội hay Môn Phái thì đổi nút đó trong game trước khi bấm BẮT ĐẦU.");
+    if (simple_chat_.method == ChatMethod::Vk)
+        hint("Chỉ gõ được chữ không dấu, số và dấu cách; chữ có dấu sẽ được bỏ dấu.");
+    else
+        coloured(kWait, (std::string("Cách gõ: ") + chat_method_name(simple_chat_.method) +
+                         " (đang thử nghiệm, đặt trong configs/chat.ini).").c_str());
+    if (!simple_chat_.method_note.empty()) coloured(kWait, simple_chat_.method_note.c_str());
+
+    // ---- what gets in the way ----
+    if (!simple_chat_typers_.empty()) {
+        ImGui::PushFont(nullptr, kSmall);
+        coloured(kWait, ("Unikey/EVKey đang chạy (" + simple_chat_typers_ +
+                         "): chuyển sang gõ tiếng Anh (E) khi dùng Tự chat, nếu không chữ có "
+                         "thể bị đổi (vd dd thành đ).").c_str());
+        ImGui::PopFont();
+    }
+    if (simple_chat_layout_ != 0 && simple_chat_layout_ != 0x0409) {
+        ImGui::PushFont(nullptr, kSmall);
+        coloured(kWait, "Bàn phím trong game không phải English (US): chữ và số có thể bị gõ sai.");
+        ImGui::PopFont();
+    }
+    if (input_.window_valid() && overlap_fraction() > 0.02f) {
+        mark(Mark::Bad);
+        ImGui::SameLine();
+        label("Cửa sổ GoBot đang che game");
+        ImGui::SameLine();
+        if (ImGui::Button("Dời GoBot sang bên##chat")) move_clear_of_game();
+    }
+    end_card();
+
+    // ---- now ----
+    if (!begin_card("##chatrun")) { end_card(); return; }
+    const bool busy = chat_running_ && (chat_oneshot_ || chat_request_ != 0 || chat_stop_);
+    ImGui::BeginDisabled(busy || !input_.window_valid());
+    if (ImGui::Button("Kiểm tra ô chat")) request_chat(false);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Chỉ xem ô chat đang mở hay đóng, không bấm phím nào.\nĐừng để cửa sổ "
+                          "nào che khung chat ở góc trái dưới màn hình game.");
+    ImGui::SameLine();
+    const bool cooling = simple_chat_tested_ms_ != 0 && now_ms() - simple_chat_tested_ms_ < 10'000;
+    const bool trash_busy = trash_pass_ || (trash_running_ && (trash_oneshot_ || trash_request_ != 0));
+    const bool have_line = !ChatSettings::split_lines(simple_chat_lines_).empty();
+    ImGui::BeginDisabled(busy || cooling || trash_busy || !input_.window_valid() || !have_line ||
+                         chat_doubt_);
+    if (ImGui::Button("Gửi thử 1 câu")) {
+        simple_chat_tested_ms_ = now_ms();
+        request_chat(true);
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Gửi câu đầu tiên một lần, đúng các bước như khi chạy: đưa game lên "
+                          "trước, mở ô chat, gõ, gửi.\nMỗi lần bấm cách nhau ít nhất 10 giây.");
+    hint("Khi một bước không được, GoBot giữ lại ảnh màn hình lúc đó trong thư mục chat_debug.");
+
+    // The chat line maybe left open, first: it is why nothing else moves.
+    if (chat_doubt_) {
+        const bool watched = chat_doubt_watched_;
+        coloured(kBad, watched
+                           ? "Ô chat trong game có thể đang mở. GoBot giữ đánh quái, bình và buff lại "
+                             "cho đến khi thấy ô chat đóng, để không gõ phím vào đó."
+                           : "Tự chat đã dừng, nhưng ô chat trong game có thể vẫn đang mở: đánh quái, "
+                             "bình và buff chưa chạy lại.");
+        hint(watched ? "Đóng ô chat trong game: xoá chữ trong đó rồi bấm Enter. GoBot cũng tự xoá và "
+                       "đóng khi thấy ô chat mở mà không ai dùng chuột hay bàn phím. Bấm DỪNG nếu "
+                       "muốn tự xử lý."
+                     : "Đóng ô chat trong game (xoá chữ trong đó rồi bấm Enter), rồi bấm BẮT ĐẦU.");
+    }
+    if (chat_running_ && chat_stop_) {
+        coloured(kWait, chat_doubt_watched_ ? "Đang dừng: chờ thấy ô chat đóng…"
+                                            : "Đang dừng: xoá câu đang gõ dở và đóng ô chat…");
+    } else if (chat_running_ && !chat_oneshot_) {
+        const std::uint64_t next = chat_next_ms_.load();
+        std::string state = "Đang chạy: đã gửi " + std::to_string(chat_sent_.load()) + " câu";
+        if (next != 0) {
+            const std::uint64_t now = now_ms();
+            const std::uint64_t left = next > now ? (next - now + 999) / 1000 : 0;
+            state += ", câu tiếp theo sau " + std::to_string(left) + " giây";
+        }
+        coloured(kGood, (state + ".").c_str());
+    } else if (simple_chat_.enabled) {
+        coloured(kDim, "Sẽ chạy khi bấm BẮT ĐẦU.");
+    } else {
+        coloured(kDim, "Đang tắt.");
+    }
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        lines = chat_log_;
+    }
+    last_lines(lines, 4);
     end_card();
 }
 

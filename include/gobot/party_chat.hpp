@@ -101,6 +101,14 @@ public:
     /// subsequence. The helper uses the same measure.
     static double alike(const std::string& a, const std::string& b);
 
+    /// Whether a line read off the chat is `said` coming back: the bot's own
+    /// words, said by Tự chat, rather than somebody asking for an invitation.
+    /// The line read has the channel and the speaker's name in front, and one
+    /// too long for the chat box goes on in a line of its own; so it is
+    /// enough that the two have eight letters and digits in a row in common,
+    /// or the whole of a shorter line.
+    static bool echoes(const std::string& read, const std::string& said);
+
     void set_settings(const Settings& s) { settings_ = s; }
     Settings settings() const { return settings_; }
 

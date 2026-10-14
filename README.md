@@ -119,7 +119,7 @@ otherwise.
 
 ## Getting started
 
-`gobot_gui.exe` opens on one simple screen, in Vietnamese, with four tabs.
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, with five tabs.
 **Đánh quái** is laid out in the order things have to happen:
 
 1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
@@ -144,6 +144,17 @@ in other colours, and the tab shows which. Only the bin's own dialogs are
 answered, told apart by their words, and an item that looks as much like an
 icon you did not pick, drawn differently, is left where it is. BẮT ĐẦU starts
 whatever is ticked on any tab.
+
+**Tự chat** says up to ten lines of your own in the game's chat, one every
+so often (30 seconds at the least), in turn or at random, into whatever
+channel the button beside the game's chat box is set to. It types the way
+GoC does, a key per letter, so the marks come off Vietnamese and only
+letters, digits and spaces go in. Each key is pressed only once a look at
+the screen shows the chat line open, Enter only on a fresh look that shows
+no dialog, and the fighting, potions and buffs wait for the few seconds a
+line takes -- and, when GoBot cannot see the chat line shut afterwards, for
+as long as that lasts, as every key would go into it. Nothing of GoBot's
+uses the clipboard.
 
 Settings save themselves as they change. Everything else — every timer, the
 radar, the packet tools — is under **Nâng cao ►** at the bottom, and

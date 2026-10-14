@@ -113,13 +113,11 @@ bool PartyChat::asks_to_join(const std::string& said, const Settings& s) {
     return false;
 }
 
-double PartyChat::alike(const std::string& a, const std::string& b) {
-    const std::string x = canonical(a), y = canonical(b);
-    if (x.empty() || y.empty()) return x == y ? 1.0 : 0.0;
-    if (x == y) return 1.0;
+namespace {
 
-    // Longest common subsequence, over two rows rather than a full table:
-    // names are short, but this runs on every line of every look.
+/// The longest common subsequence of two strings, over two rows rather than a
+/// full table: names are short, but this runs on every line of every look.
+std::size_t common_length(const std::string& x, const std::string& y) {
     std::vector<std::size_t> previous(y.size() + 1, 0), current(y.size() + 1, 0);
     for (std::size_t i = 1; i <= x.size(); ++i) {
         for (std::size_t j = 1; j <= y.size(); ++j) {
@@ -129,8 +127,43 @@ double PartyChat::alike(const std::string& a, const std::string& b) {
         }
         previous.swap(current);
     }
-    const double common = static_cast<double>(previous[y.size()]);
+    return previous[y.size()];
+}
+
+} // namespace
+
+double PartyChat::alike(const std::string& a, const std::string& b) {
+    const std::string x = canonical(a), y = canonical(b);
+    if (x.empty() || y.empty()) return x == y ? 1.0 : 0.0;
+    if (x == y) return 1.0;
+    const double common = static_cast<double>(common_length(x, y));
     return common / static_cast<double>(std::max(x.size(), y.size()));
+}
+
+bool PartyChat::echoes(const std::string& read, const std::string& said) {
+    const std::string ours = canonical(said);
+    if (ours.size() < 3) return false;      // "pt" is everybody's
+    const std::string text = canonical(read);
+
+    // The longest run of letters and digits the two have in common, in a row.
+    // Our own line read back has the whole of it -- after the channel and the
+    // name, or in pieces where the box wrapped it or the reader dropped a
+    // letter -- and somebody's "pt" has two letters of it at most. A subsequence
+    // would not do: any long line holds the letters of a short one in order.
+    std::size_t run = 0;
+    std::vector<std::size_t> previous(ours.size() + 1, 0), current(ours.size() + 1, 0);
+    for (std::size_t i = 1; i <= text.size(); ++i) {
+        for (std::size_t j = 1; j <= ours.size(); ++j) {
+            current[j] = text[i - 1] == ours[j - 1] ? previous[j - 1] + 1 : 0;
+            run = std::max(run, current[j]);
+        }
+        previous.swap(current);
+    }
+    // Eight in a row, or the whole of our line, or the whole of a line read
+    // that is the end of ours wrapped onto a line of its own -- four at least.
+    const std::size_t need =
+        std::min({ std::size_t{ 8 }, ours.size(), std::max<std::size_t>(text.size(), 4) });
+    return run >= need;
 }
 
 std::vector<std::string> PartyChat::saw(const std::vector<std::string>& raw_lines,

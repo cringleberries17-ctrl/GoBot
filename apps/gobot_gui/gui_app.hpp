@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "gobot/auto_chat.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/bot_brain.hpp"
 #include "gobot/calibrator.hpp"
@@ -428,9 +429,12 @@ private:
     /// the packet bot, walking to a place, the calibration, or the simple
     /// screen's BẮT ĐẦU. Always, unless trash_left_held_ is set; then only
     /// once a fresh look at the game shows no dialog up and nothing waiting
-    /// in the bin, which clears it. Says why not, on whichever screen is up.
-    /// Every one of those starts goes through here, so that no way of
-    /// starting one -- F10, F11, a button on either screen -- gets round it.
+    /// in the bin, which clears it. The same for a chat line Tự chat was
+    /// stopped with in doubt, until a look shows it shut; and not while a
+    /// Tự chat worker that was told to quit is still on its way out, as it
+    /// may yet leave one. Says why not, on whichever screen is up. Every one
+    /// of those starts goes through here, so that no way of starting one --
+    /// F10, F11, a button on either screen -- gets round it.
     bool keys_may_start();
 
     /// Hold every other part of the bot off for `reason`, unless something
@@ -441,6 +445,98 @@ private:
     /// End the hold, if it is still `reason`'s.
     void end_hold(const std::string& reason);
     std::mutex               hold_mutex_;
+
+    // ---- saying things in chat ----
+    /// Says the lines in configs/chat.ini in the game's chat, one at a time on
+    /// a timer, with every other part of the bot held off while a line is
+    /// typed -- and for as long after as the chat line may be open, until a
+    /// look shows it shut. One thread for the timed lines and for the chat
+    /// tab's two buttons; started for a button alone, it does that and ends.
+    void start_chat();                    ///< the timed lines, for a run
+    void request_chat(bool send_one);     ///< look at the chat bar, or say one line now
+    /// Stops the worker. A line half typed is rubbed out and its line closed
+    /// first, which takes a second or three: with `wait` false this returns
+    /// at once and the worker finishes that on its own, joined by tick() or
+    /// the next start, so the window does not freeze meanwhile.
+    ///
+    /// `quit` is the player taking over -- DỪNG, F12, closing GoBot: a chat
+    /// line still in doubt then is handed over (chat_handover_) rather than
+    /// waited on. Without it -- Tự chat unticked -- the worker stays until it
+    /// sees the line shut, holding everything off until then.
+    void stop_chat(bool quit = true, bool wait = true);
+    void chat_loop();
+    void say_chat(const std::string& line);
+    /// A line Tự chat has just said, for the party worker: read back off the
+    /// chat it is our own words, not somebody asking for an invitation.
+    void remember_said(const std::string& typed);
+    /// The lines said in the last half hour.
+    std::vector<std::string> recently_said();
+    /// When the last line was said, a Gửi thử's among them, on now_ms()'s
+    /// clock; 0 for none yet.
+    std::uint64_t last_said_ms();
+
+    std::thread              chat_thread_;
+    std::atomic<bool>        chat_running_{false};
+    std::atomic<bool>        chat_stop_{false};
+    std::atomic<bool>        chat_quit_{false};       ///< stop_chat's `quit`
+    /// A one-off, or a worker stopping, turned into a run: it starts over.
+    std::atomic<bool>        chat_restart_{false};
+    /// Held for turning a worker into a run, and by the worker on its way
+    /// out, so that a run asked for then is not lost with the worker.
+    std::mutex               chat_life_mutex_;
+    std::atomic<bool>        chat_oneshot_{false};    ///< here for one asked-for look or line
+    std::atomic<int>         chat_request_{0};        ///< 1 look at the bar, 2 say one line
+    std::atomic<int>         chat_sent_{0};           ///< lines said this run
+    /// When the next line is due, on now_ms()'s clock; 0 when none is.
+    std::atomic<std::uint64_t> chat_next_ms_{0};
+    /// A line waits while HP is under this: what the HP potion fires at, or
+    /// 50 when that is lower. Kept by tick() from the macro's settings, which
+    /// belong to the drawing thread.
+    std::atomic<int>         chat_hp_floor_{50};
+    std::vector<std::string> chat_log_;               ///< guarded by worker_mutex_
+    std::mutex               chat_sender_mutex_;
+    ChatSender*              chat_sender_ = nullptr;  ///< the line under way, to cancel
+    std::mutex               chat_said_mutex_;
+    /// What was said, and when on now_ms()'s clock; guarded by chat_said_mutex_.
+    std::vector<std::pair<std::string, std::uint64_t>> chat_said_;
+
+    /// The game's chat line may be open: Tự chat could not show it shut and
+    /// empty. With it open every key pressed goes into it -- a skill key is a
+    /// letter, a potion a digit -- so the executor is paused while this is
+    /// set, and the 'auto chat' hold kept on while a worker watches it.
+    std::atomic<bool>        chat_doubt_{false};
+    /// A worker is watching that doubt, with its hold on. Without one -- the
+    /// worker was stopped by the player -- nothing that presses keys starts
+    /// until a look shows the line shut (keys_may_start, watch_chat_doubt).
+    std::atomic<bool>        chat_doubt_watched_{false};
+    /// Set by a worker stopped with the line in doubt, as the last thing it
+    /// does with it: tick() then stops everything else that presses keys and
+    /// lets the worker's hold go.
+    std::atomic<bool>        chat_handover_{false};
+    /// One more for every doubt handed over. A look's answer counts only for
+    /// the doubt it was started for.
+    std::atomic<unsigned>    chat_doubt_gen_{0};
+    unsigned                 chat_doubt_look_gen_ = 0;
+    std::future<bool>        chat_doubt_look_;          ///< a look under way
+    std::uint64_t            chat_doubt_looked_ms_ = 0;
+    TemplateStore            chat_doubt_store_;         ///< the look's own
+    bool                     chat_doubt_store_loaded_ = false;   ///< by the look
+    /// The doubt is over: the executor goes on, unless the bin's doubt keeps it.
+    void chat_seen_shut();
+    /// `looks` fresh looks at the game, a frame or two apart, all show the
+    /// chat line shut -- or there is no game, so no line to type into. When
+    /// not, `why` -- if given -- gets why not, in Vietnamese.
+    bool chat_line_looks_shut(const TemplateStore& store, int looks, std::string* why);
+    /// From tick(): while a doubt is left with no worker watching it, a look
+    /// every couple of seconds, on a thread of its own, so the executor's
+    /// buffs and potions come back by themselves once the player has shut the
+    /// line. What the stop stopped waits for BẮT ĐẦU.
+    void watch_chat_doubt();
+
+    /// The executor's buffs and potions paused while either doubt -- the bin's
+    /// or the chat line's -- is left, and going again once neither is.
+    void update_executor_pause();
+    std::mutex               pause_mutex_;
 
     // ---- vitals ----
     /// Reads HP and MP off the on-screen bars. The only live game state
@@ -657,7 +753,8 @@ private:
     void simple_toggle();
     bool simple_running() const {
         return macro_running_ || hunting_ || party_running_ || keeper_running_ ||
-               revive_running_ || (trash_running_ && !trash_oneshot_);
+               revive_running_ || (trash_running_ && !trash_oneshot_) ||
+               (chat_running_ && !chat_oneshot_ && !chat_stop_);
     }
 
     /// The tabs. Fighting is what the whole screen used to be.
@@ -665,6 +762,20 @@ private:
     void simple_party_tab();
     void simple_login_tab();
     void simple_trash_tab();
+    void simple_chat_tab();
+
+    /// The chat tab's copy of configs/chat.ini, and the box its lines are
+    /// edited in.
+    ChatSettings      simple_chat_;
+    bool              simple_chat_loaded_ = false;
+    char              simple_chat_lines_[4096] = "";
+    int               simple_chat_interval_ = 120;
+    std::uint64_t     simple_chat_tested_ms_ = 0;   ///< the last Gửi thử, for its ten seconds
+    /// What the tab warns of, worked out every few seconds rather than every
+    /// frame: a look at every process running is not free.
+    std::uint64_t     simple_chat_checked_ms_ = 0;
+    std::string       simple_chat_typers_;          ///< Unikey and the like, running
+    std::uint16_t     simple_chat_layout_ = 0;      ///< the game's keyboard layout
 
     /// The trash tab's copy of configs/trash.ini and of the pictures, and the
     /// bag as last photographed for picking from.
