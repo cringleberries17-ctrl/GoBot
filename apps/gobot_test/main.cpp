@@ -29,6 +29,7 @@
 #include "gobot/mob_detector.hpp"
 #include "gobot/protocol_handler.hpp"
 #include "gobot/tcp_reassembler.hpp"
+#include "gobot/auto_chat.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/dialog_driver.hpp"
@@ -53,8 +54,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <iterator>
 #include <random>
 #include <string>
 #include <thread>
@@ -92,11 +95,26 @@ void section(const char* name) {
 /// when it is somewhere like Program Files the write fails and the test reports
 /// a product bug that does not exist. The temp directory is writable by
 /// definition.
+///
+/// And in a folder of this run's own there, gobot_test_<process id>, made as
+/// the run starts and removed as it ends (alerts_test.cpp and quest_test.cpp
+/// name the same one). With fixed names in %TEMP% itself, two runs at once --
+/// a reviewer's and a tester's -- wrote, read and deleted each other's files,
+/// and both failed checks for nothing in the code.
 std::string temp_file(const char* name) {
     char dir[MAX_PATH]{};
     const DWORD n = GetTempPathA(MAX_PATH, dir);
     if (n == 0 || n > MAX_PATH) return name;      // fall back to CWD
-    return std::string(dir) + name;
+    return std::string(dir) + "gobot_test_" + std::to_string(GetCurrentProcessId()) + "\\" + name;
+}
+
+/// The folder temp_file() puts things in, as a wide path, for making it and
+/// removing it.
+std::wstring run_temp_dir() {
+    wchar_t dir[MAX_PATH]{};
+    const DWORD n = GetTempPathW(MAX_PATH, dir);
+    if (n == 0 || n > MAX_PATH) return {};
+    return std::wstring(dir) + L"gobot_test_" + std::to_wstring(GetCurrentProcessId());
 }
 
 // ---------------------------------------------------------------- ByteReader
@@ -1648,8 +1666,10 @@ void test_assembly_templates() {
         const std::string shot_dir = temp_file("gobot_anchor_probe");
         CreateDirectoryA(shot_dir.c_str(), nullptr);
         const std::string copy = shot_dir + "\\shot.png";
-        if (CopyFileA("C:\\Users\\Duong\\source\\GoBot\\build\\bin\\Release\\frame.png",
-                      copy.c_str(), FALSE)) {
+        // The frame beside this executable, as the other tests take it, not
+        // one on a path of the machine this was written on.
+        if (CopyFileW(utf8_to_wide(exe_relative("frame.png")).c_str(),
+                      utf8_to_wide(copy).c_str(), FALSE)) {
             TemplateStore shots;
             const Frame* shot = shots.load(shot_dir) ? shots.get("shot") : nullptr;
             if (anchor && shot && shot->valid()) {
@@ -1731,6 +1751,28 @@ void test_party_chat() {
               "while two real names are not close");
         check(PartyChat::alike("", "") > 0.99, "two nothings are alike");
         check(PartyChat::alike("A", "") < 0.01, "something and nothing are not");
+    }
+
+    // Tự chat's own lines, read back off the chat, are not requests.
+    {
+        const std::string advert = "tuyen pt lv 50 ban do gia re";
+        check(PartyChat::echoes("[Kenh]MyChar : tuyen pt lv 50 ban do gia re", advert),
+              "our own advert read back, channel and name in front, is ours");
+        check(PartyChat::echoes("l l KenhlMyChar tuyen pt lv 50 ban d", advert),
+              "and so is it cut off where the box wrapped it, with the reader's mess in front");
+        check(PartyChat::echoes("do gia re", advert), "and the rest of it, on a line of its own");
+        check(PartyChat::echoes("[Kenh]MyChar : tuyen pt lv 5O ban do gia re", advert),
+              "a letter misread still leaves eight in a row");
+        check(!PartyChat::echoes("[Kenh]Someone : pt", advert),
+              "somebody's own 'pt' is not ours");
+        check(!PartyChat::echoes("[Kenh]Someone : cho pt voi, lv 50", advert),
+              "nor a request with a word or two of ours in it");
+        check(PartyChat::echoes("[Kenh]MyChar : tim pt", "tim pt"),
+              "a short line of ours is recognised whole");
+        check(!PartyChat::echoes("[Kenh]Someone : tuyen thu pt", "tim pt"),
+              "while a long line holding its letters in order is not it");
+        check(!PartyChat::echoes("[Kenh]Someone : pt", "pt"),
+              "and a line of ours that is only the keyword cannot be told from a request");
     }
 
     // The voting. One reading is not enough; three agreeing is.
@@ -1827,6 +1869,20 @@ void test_party_chat() {
 /// .NET, without that helper installed, and without a game running.
 void test_party() {
     section("Party");
+
+    // Off until a file says otherwise. A party.ini that is missing, or held
+    // by another program as it is read, left the code's own "on" in force:
+    // the tab showed both boxes ticked, and the worker took anyone's
+    // invitation and invited whoever typed the keyword.
+    {
+        const Party::Settings fresh;
+        check(!fresh.auto_accept && !fresh.auto_invite,
+              "accepting and inviting are off when no file has said otherwise");
+        Party::Settings missing;
+        check(!missing.load(temp_file("gobot_test_no_party.ini")) && !missing.auto_accept &&
+                  !missing.auto_invite,
+              "and a party.ini that cannot be read turns neither on");
+    }
 
     // Reading the bridge's answer. This is the exact text that came back from
     // the live client, so a change in their field names fails here rather than
@@ -2012,49 +2068,139 @@ void test_party() {
     }
 }
 
-/// The shipped macro config can actually do something.
+/// The shipped macro config: filled in, and nothing on.
 ///
-/// This is the test that was missing, and the gap it left was the whole of
-/// "HP/MP reads fine but it never drinks". The reader worked, the trigger logic
-/// worked and had its own passing tests, the keys were configured with sensible
-/// thresholds -- and `key_6_enabled` was false in the file that ships, so the
-/// potion key was never armed and nothing in the suite noticed. Every part was
-/// tested; the thing as delivered was not.
+/// What ships is what a tester's first start runs, and nothing that acts on
+/// the game may be on until the player ticks it -- the sequence included,
+/// which the simple screen does not show and which pressed Z, X and C in a
+/// loop whenever any key was ticked. But every row comes filled in, the
+/// potions above all: the first version of this test was written for "HP/MP
+/// reads fine but it never drinks", where the reader worked, the triggers
+/// worked, and nothing in the suite noticed that the potion key in the file
+/// could not drink. So each kind of key is checked to be there, with what it
+/// needs, ready for its tick. Read from the source tree: the copy beside the
+/// executable is the player's own.
 void test_shipped_macro_works() {
-    section("The shipped macro is armed");
+    section("The shipped macro: filled in, and nothing on");
 
+#ifdef GOBOT_SOURCE_DIR
+    const std::string path = std::string(GOBOT_SOURCE_DIR) + "/configs/macro.ini";
+#else
+    const std::string path;
+#endif
     MacroConfig cfg;
-    const std::string path = exe_relative("configs/macro.ini");
-    check(cfg.load(path), "the shipped macro config loads");
-
-    check(cfg.timers_enabled, "its timers are on");
-    check(cfg.vitals_enabled,
-          "and it is set to read the bars -- without that the potion keys have "
-          "nothing to test against and hold forever");
-
-    // At least one armed key for each of the two things people actually want.
-    const struct { MacroTrigger trigger; const char* what; } kWanted[] = {
-        { MacroTrigger::HpBelow, "health" },
-        { MacroTrigger::MpBelow, "mana" },
-    };
-    for (const auto& want : kWanted) {
-        const MacroKey* found = nullptr;
-        for (const auto& key : cfg.keys)
-            if (key.enabled && key.trigger == want.trigger && key.keycode != 0) {
-                found = &key;
-                break;
-            }
-        check(found != nullptr,
-              std::string("a key is armed to drink when ") + want.what + " drops");
-        if (found)
-            check(found->threshold_pct > 0 && found->threshold_pct < 100,
-                  std::string("and its ") + want.what + " threshold is a usable "
-                  "percentage -- " + std::to_string(found->threshold_pct) + "%");
+    if (path.empty() || !cfg.load(path)) {
+        std::printf("  [skip] the source tree's configs/macro.ini is not here\n");
+        return;
     }
 
-    check(cfg.needs_vitals(),
-          "and the config knows it needs a reading, so starting the macro "
-          "brings the reader up with it");
+    check(cfg.timers_enabled, "its timers are on");
+    check(cfg.vitals_enabled, "and it is set to read the bars -- which only looks");
+    check(!cfg.sequence_enabled,
+          "the sequence, which the simple screen does not show, is off");
+    bool none_on = !cfg.keys.empty();
+    for (const MacroKey& k : cfg.keys) none_on = none_on && !k.enabled;
+    check(none_on, "every key is off -- " + std::to_string(cfg.keys.size()) + " keys in the file");
+
+    // Each kind, filled in for its row.
+    const struct { MacroKeyKind kind; const char* what; } kKinds[] = {
+        { MacroKeyKind::Skill, "a skill" },
+        { MacroKeyKind::Buff, "a buff" },
+        { MacroKeyKind::HpPotion, "an HP potion" },
+        { MacroKeyKind::MpPotion, "an MP potion" },
+    };
+    for (const auto& want : kKinds) {
+        const MacroKey* found = nullptr;
+        for (const MacroKey& k : cfg.keys)
+            if (macro_key_kind(k) == want.kind && k.keycode != 0) {
+                found = &k;
+                break;
+            }
+        bool usable = found != nullptr;
+        if (found && found->conditional())
+            usable = found->threshold_pct > 0 && found->threshold_pct < 100;
+        if (found && want.kind == MacroKeyKind::Buff)
+            usable = clamp_buff_seconds(static_cast<int>(found->interval_ms / 1000)) ==
+                     static_cast<int>(found->interval_ms / 1000);
+        check(usable, std::string(want.what) + " key is filled in, ready to tick");
+    }
+
+    // Ticked, the potions bring the reader up with them.
+    MacroConfig ticked = cfg;
+    for (MacroKey& k : ticked.keys) k.enabled = true;
+    check(ticked.needs_vitals(),
+          "ticked, the potion keys need a reading, so starting the macro brings the reader up");
+}
+
+/// Everything else that ships: whatever acts on the game, off, and nothing of
+/// any one player's in it.
+///
+/// The package goes to players who will press BẮT ĐẦU before reading a word,
+/// so a switch left on in a file here is a key pressed, an invitation taken
+/// or a line said in somebody else's game. And the files here were once this
+/// project's own player's: a character's name went out in one. Read from the
+/// source tree, which is what package.ps1 copies.
+void test_shipped_configs() {
+    section("The shipped configs: nothing on, nothing of anybody's");
+
+#ifdef GOBOT_SOURCE_DIR
+    const std::string dir = std::string(GOBOT_SOURCE_DIR) + "/configs/";
+#else
+    const std::string dir;
+#endif
+    IniFile app;
+    if (dir.empty() || !app.load(dir + "app.ini")) {
+        std::printf("  [skip] the source tree's configs are not here\n");
+        return;
+    }
+    check(!app.get_bool("Simple", "keep_alive", true) && !app.get_bool("Simple", "revive", true),
+          "app.ini: the client keeper and the revive are off");
+    check(!app.get_bool("Capture", "autostart", true), "app.ini: the packet bot does not start by itself");
+    check(app.get_bool("Simple", "refocus", false),
+          "app.ini: bringing the game forward after 30 s idle stays on -- it presses nothing");
+    check(app.get_bool("Paths", "new_log_each_start", false),
+          "app.ini: gobot_gui.log starts afresh each session, so a tester's holds two, not weeks");
+
+    HunterConfig hunt;
+    check(hunt.load(dir + "hunt.ini") && !hunt.enabled && !hunt.loot && !hunt.stay_put,
+          "hunt.ini: hunting, looting and standing still are off");
+    check(hunt.character_name.empty(), "hunt.ini: no character's name");
+
+    Party::Settings party;
+    check(party.load(dir + "party.ini") && !party.auto_accept && !party.auto_invite,
+          "party.ini: accepting and inviting are off");
+    check(party.whitelist.empty() && party.blacklist.empty() && party.accept_only.empty() &&
+              party.priority.empty(),
+          "party.ini: every list of names is empty");
+
+    CleanSettings trash;
+    check(trash.load(dir + "trash.ini") && !trash.enabled && trash.delete_ids.empty() &&
+              trash.drop_ids.empty(),
+          "trash.ini: cleaning is off and nothing is on the list");
+    check(!path_exists(dir + "trash"), "and no folder of photographed items is there to ship");
+
+    ChatSettings chat;
+    check(chat.load(dir + "chat.ini") && !chat.enabled && chat.lines.empty(),
+          "chat.ini: Tự chat is off and has no lines");
+
+    IniFile quest;
+    check(quest.load(dir + "quest.ini") && !quest.get_bool("Quest", "enabled", true),
+          "quest.ini: quick quest is off");
+
+    IniFile alerts;
+    check(alerts.load(dir + "alerts.ini") && !alerts.get_bool("Alerts", "enabled", true) &&
+              alerts.get("Alerts", "label", "").empty() && alerts.get("Alerts", "webhook", "").empty(),
+          "alerts.ini: alerts are off, with no label and no webhook");
+
+    AutoLogin::Settings login;
+    check(login.load(dir + "login.ini") && login.channel_index == 0 && login.character_index == 0,
+          "login.ini: channel 1, the first character");
+    IniFile login_ini;
+    bool account = false;
+    if (login_ini.load(dir + "login.ini"))
+        for (const char* key : { "username", "password", "account", "user" })
+            account = account || !login_ini.get("Login", key, "").empty();
+    check(!account, "login.ini: no account and no password");
 }
 
 /// Fishing and mining: the deciding half.
@@ -3446,6 +3592,28 @@ void test_auto_login() {
         }
     }
 
+    // VTCZone installed somewhere other than the file says: while it runs,
+    // its own path is used -- only read off the process, nothing is started
+    // -- and never over a path in the file that is there.
+    {
+        const std::string running = AutoLogin::running_launcher(true);
+        if (running.empty()) {
+            std::printf("  [skip] VTCZone is not running here, so there is no path to take from it\n");
+        } else {
+            AutoLogin::Settings moved;
+            moved.launcher_path = temp_file("gobot_no_vtczone_here.exe");
+            check(moved.adopt_running_launcher(false) && moved.launcher_path == running &&
+                      moved.launcher_found(),
+                  "a launcher path that names nothing, with VTCZone running: the running one's is used");
+            wchar_t self[MAX_PATH]{};
+            GetModuleFileNameW(nullptr, self, MAX_PATH);
+            AutoLogin::Settings kept;
+            kept.launcher_path = wide_to_utf8(self);
+            check(!kept.adopt_running_launcher(false) && kept.launcher_path == wide_to_utf8(self),
+                  "and a path that is there is kept, whatever else is running");
+        }
+    }
+
     // What the simple screen says when the crossing stops, and whether
     // another attempt is worth making.
     {
@@ -3669,6 +3837,45 @@ void test_auto_login() {
               "and a point off the screen says so");
         check(AutoLogin::worth_retrying(Why::Covered),
               "the next attempt brings the windows to the front again, so it is worth one");
+        // The taskbar cannot be moved aside as a window can: "move it away"
+        // was advice nobody could follow.
+        const std::string bar_click = AutoLogin::advice(Why::Covered, "taskbar");
+        const std::string bar_look = AutoLogin::hidden_advice("taskbar");
+        check(bar_click.rfind("Thanh tác vụ", 0) == 0 && bar_click.find("tự ẩn") != std::string::npos &&
+                  bar_look.rfind("Thanh tác vụ", 0) == 0 && bar_look.find("tự ẩn") != std::string::npos &&
+                  bar_look.find("dời cửa sổ") == std::string::npos,
+              "the taskbar in the way: have it hide itself, or the window higher -- not \"move it\"");
+    }
+
+    // What lies over a client area, by where it is drawn and where the
+    // screens are -- the rule behind uncovered(), with no window of anybody's.
+    {
+        using Box = AutoLogin::Box;
+        const std::vector<Box> laptop{ Box{ 0, 0, 1366, 768 } };
+        // A 1024x768 game under a title bar: its client reaches 31 px past
+        // the bottom of a 768-px screen.
+        const Box game{ 171, 31, 1195, 799 };
+        check(!AutoLogin::lies_over(Box{ 0, 766, 1366, 806 }, game, laptop, true),
+              "a taskbar hidden past the bottom, 2 px of it left on the screen, is not over the game");
+        check(AutoLogin::lies_over(Box{ 0, 728, 1366, 768 }, game, laptop, true),
+              "the same taskbar shown, over the game's bottom 40 px, is");
+        check(AutoLogin::lies_over(Box{ 0, 766, 1366, 806 }, game, laptop, false),
+              "and a 2-px strip that is not the taskbar is over it like any other window");
+        check(!AutoLogin::lies_over(Box{ 300, 780, 500, 800 }, game, laptop),
+              "a window wholly past the bottom edge, over only the part of the game nobody sees, "
+              "is not over it");
+        check(AutoLogin::lies_over(Box{ 300, 700, 500, 760 }, game, laptop),
+              "while one on the screen over the game is");
+        check(!AutoLogin::lies_over(Box{ 1200, 300, 1300, 400 }, game, laptop),
+              "and one beside it is not");
+        // Two screens side by side, the second shorter: the part of a game on
+        // the second counts, the gap under the second screen does not.
+        const std::vector<Box> two{ Box{ 0, 0, 1366, 768 }, Box{ 1366, 0, 2646, 720 } };
+        const Box wide{ 1000, 100, 2024, 868 };
+        check(AutoLogin::lies_over(Box{ 1500, 200, 1600, 300 }, wide, two),
+              "a window over the part of the game on the second screen is over it");
+        check(!AutoLogin::lies_over(Box{ 1500, 740, 1600, 800 }, wide, two),
+              "one under the shorter second screen, on no screen at all, is not");
     }
 
     // Whether a click lands where it is meant to. Small windows of this
@@ -3747,6 +3954,37 @@ void test_auto_login() {
             check(AutoLogin::lands_on(target, 200, 80) && AutoLogin::uncovered(target),
                   "and once that window is gone, the point it covered does too");
 
+            // A window over a strip along its bottom edge, where the connect
+            // page's button is, touching none of the five points across it.
+            // The frame used to be trusted, the page read as absent, and a
+            // game waiting on Kết Nối was ended as stuck.
+            HWND strip = make(on_top, WS_POPUP, "", x0 + 90, y0 + 135, 60, 20, nullptr);
+            if (strip) ShowWindow(strip, SW_SHOWNOACTIVATE);
+            over.clear();
+            const bool strip_hid = !AutoLogin::uncovered(target, &over);
+            for (char& c : over)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            check(strip != nullptr && strip_hid && over.rfind("gobot_test", 0) == 0 &&
+                      AutoLogin::over(target) == strip,
+                  "a window over a strip of it that no point across it touches: not uncovered, "
+                  "and named");
+            if (strip) DestroyWindow(strip);
+            check(AutoLogin::uncovered(target), "and gone again, nothing is over it");
+
+            // Above it but beside it: not over it.
+            HWND beside = make(on_top, WS_POPUP, "", x0 + 250, y0, 60, 60, nullptr);
+            if (beside) ShowWindow(beside, SW_SHOWNOACTIVATE);
+            check(beside != nullptr && AutoLogin::uncovered(target),
+                  "a window above it but beside it leaves it uncovered");
+            if (beside) DestroyWindow(beside);
+
+            // A popup of its own -- a dialog of the game's -- is part of it.
+            HWND popup = make(on_top, WS_POPUP, "", x0 + 90, y0 + 135, 60, 20, target);
+            if (popup) ShowWindow(popup, SW_SHOWNOACTIVATE);
+            check(popup != nullptr && AutoLogin::uncovered(target),
+                  "and a popup of its own over it is its own, not in the way");
+            if (popup) DestroyWindow(popup);
+
             // Dragged part off the screen: its left quarter points are on no
             // screen and read black, which hides nothing -- before, a game
             // like that was never looked at, and its wait ran out as "not
@@ -3760,6 +3998,20 @@ void test_auto_login() {
                 AutoLogin::landing(target, 180, 120) == L::Lands) {
                 check(AutoLogin::uncovered(target),
                       "a window dragged part off the screen, nothing over it, is uncovered");
+
+                // Kept on top, wholly past the screen's edge, over only the
+                // part of it out there: nobody sees that part, the frame
+                // included. Counted, the bottom of a game taller than the
+                // screen -- under a hidden taskbar's rest -- had a working
+                // game waited on until it was given up.
+                HWND past = make(on_top, WS_POPUP, "", left - 90, y0 + 20, 80, 60, nullptr);
+                if (past) ShowWindow(past, SW_SHOWNOACTIVATE);
+                std::string by = "x";
+                check(past != nullptr && AutoLogin::over(target) == nullptr &&
+                          AutoLogin::uncovered(target, &by) && by.empty(),
+                      "a window kept on top wholly off the screen, over only the part of it out "
+                      "there, is in nobody's way");
+                if (past) DestroyWindow(past);
             } else {
                 std::printf("  [skip] the test window could not be put half off the screen\n");
             }
@@ -5020,7 +5272,7 @@ void test_mob_detector() {
 
     paint_plate(f, 300, 400, 60, 60, false);     // a monster, unhurt
     paint_plate(f, 700, 500, 20, 60, false);     // a monster, badly hurt
-    paint_plate(f, 512, 450, 50, 50, true);      // the character
+    paint_plate(f, 512, 450, 50, 50, true);      // another player: a mana bar too
 
     // A red flower on a dark rock: red, with something dark above it, and no
     // writing anywhere. This is the shape of every false positive the real
@@ -5038,14 +5290,15 @@ void test_mob_detector() {
         if (n.is_player) ++players; else ++monsters;
     }
     check(monsters == 2, "finds both monsters");
-    check(players == 1, "finds the character");
+    check(players == 1, "finds the other player, by its mana bar");
     check(found.size() == 3, "and nothing else -- the flower is not a monster");
 
     // Position comes from the name box, which does not move as health drops.
     for (const Nameplate& n : found) {
         if (n.is_player) {
-            check(std::abs(n.x() - 512) <= 3, "character x from the name box");
-            check(std::abs(n.y() - 450) <= 3, "character y at its feet");
+            check(std::abs(n.x() - 512) <= 3, "a player's x from the name box");
+            check(std::abs(n.y() - 450) <= 3, "a player's y at its feet");
+            check(!n.is_self, "and a plate found by its bars is never yours");
         }
     }
     bool hurt_ok = false;
@@ -5074,9 +5327,178 @@ void test_mob_detector() {
         if (std::abs(n.x() - 300) <= 4) gone = false;
     check(gone, "the excluded rectangle is skipped");
 
-    // Nearest-first, measured from the character.
+    // You are the plate found by your name, never one found by its bars: a
+    // plate with bars may be yours or another player's. Taking the player
+    // nearest the middle for you had the bot walk and hit relative to a party
+    // member, or with no name typed at all, to whoever stood in view.
     Nameplate me;
-    check(MobDetector::pick_player(found, f.width, me), "picks the character out");
+    check(!MobDetector::pick_player(found, f.width, me),
+          "another player in the middle of the screen is not taken for you");
+    {
+        std::vector<Nameplate> with_self = found;
+        Nameplate self;
+        self.plate = ScreenRect{ 200, 440, 40, 10 };
+        self.bar = ScreenRect{ 200, 440, 40, 1 };
+        self.is_player = true;
+        self.is_self = true;
+        with_self.push_back(self);
+        check(MobDetector::pick_player(with_self, f.width, me) && me.is_self && me.x() == 220,
+              "the plate made where your name was read is you, though another player stands "
+              "nearer the middle");
+    }
+
+    // Found by name on a frame, as the running detector finds it on every
+    // frame: with a stranger's plate in the middle of the screen as well.
+    {
+        GlyphFont font;
+        const std::string dir = GlyphFont::default_dir();
+        Frame name;
+        const char* const who = "ThanhAmCoc";
+        if (dir.empty() || !font.load(dir)) {
+            std::printf("  [skip] no glyph set installed -- no name to look for\n");
+        } else if (!font.render_line(who, name)) {
+            check(false, "the test's name can be drawn with the glyphs");
+        } else {
+            Frame g = f;
+            const int nx = 180, ny = 560;       // in the play field, left of the stranger
+            for (int y = 0; y < name.height; ++y)
+                for (int x = 0; x < name.width; ++x) {
+                    std::uint8_t r = 0, gr = 0, b = 0;
+                    name.get(x, y, r, gr, b);
+                    put_px(g, nx + x, ny + y, r, gr, b);
+                }
+            Nameplate self;
+            float sure = 0.0f;
+            const bool got = MobDetector::find_self(g, t, font, who, self, &sure);
+            check(got && self.is_self && self.is_player &&
+                      std::abs(self.x() - (nx + name.width / 2)) <= 4,
+                  "your character is found where its name is written (" +
+                      std::to_string(static_cast<int>(sure * 100.0f)) + "% sure)");
+            std::vector<Nameplate> all = MobDetector::detect(g, t, &font);
+            if (got) all.push_back(self);
+            Nameplate picked;
+            check(got && MobDetector::pick_player(all, g.width, picked) && picked.is_self &&
+                      std::abs(picked.x() - self.x()) <= 1,
+                  "and that, not the stranger nearer the middle, is who the bot walks from");
+            Nameplate none;
+            check(!MobDetector::find_self(g, t, font, "", none),
+                  "with no name typed there is no you at all");
+
+            // Only the whole name on its plate is you. A player whose name had
+            // yours inside it was read as well as your own plate, and taken for
+            // you whenever theirs was met first -- as here, written higher up.
+            const auto write = [&font](Frame& on, const std::string& text, int x0, int y0) {
+                Frame drawn;
+                if (!font.render_line(text, drawn)) return -1;
+                for (int y = 0; y < drawn.height; ++y)
+                    for (int x = 0; x < drawn.width; ++x) {
+                        std::uint8_t r = 0, gr = 0, b = 0;
+                        drawn.get(x, y, r, gr, b);
+                        put_px(on, x0 + x, y0 + y, r, gr, b);
+                    }
+                return x0 + drawn.width / 2;
+            };
+            struct Pair { const char* mine; const char* theirs; };
+            for (const Pair& c : { Pair{ "Anh", "TuanAnh" }, Pair{ "KhiCon", "KhiCon2" } }) {
+                Frame both = f;
+                const int yours = write(both, c.mine, 180, 560);
+                const int theirs = write(both, c.theirs, 600, 300);
+                Nameplate seen;
+                const bool got_one = MobDetector::find_self(both, t, font, c.mine, seen);
+                check(yours > 0 && theirs > 0 && got_one && std::abs(seen.x() - yours) <= 4,
+                      std::string("\"") + c.mine + "\" is found on its own plate, not inside \"" +
+                          c.theirs + "\" written above it");
+                Frame theirs_only = f;
+                write(theirs_only, c.theirs, 600, 300);
+                check(!MobDetector::find_self(theirs_only, t, font, c.mine, seen),
+                      std::string("and with only \"") + c.theirs + "\" on screen, nobody is you");
+            }
+
+            // Nor a name a letter away from yours, or yours a letter short, or
+            // yours with an accent, while your own plate is out of sight.
+            {
+                Frame other = f;
+                write(other, "ThanhAn", 600, 300);
+                Nameplate seen;
+                check(!MobDetector::find_self(other, t, font, "ThanhAm", seen),
+                      "\"ThanhAn\" alone on screen is not \"ThanhAm\"");
+                Frame shorter = f;
+                write(shorter, "KhiCon", 600, 300);
+                check(!MobDetector::find_self(shorter, t, font, "KhiCon2", seen),
+                      "\"KhiCon\" alone on screen is not \"KhiCon2\"");
+                Frame accented = f;
+                write(accented, "Ánh", 600, 300);
+                check(!MobDetector::find_self(accented, t, font, "Anh", seen),
+                      "\"Ánh\" alone on screen is not \"Anh\"");
+            }
+
+            // A letter that hangs below the line is still one of the name's:
+            // the "g" of "Long", drawn as the game draws it, two rows lower
+            // than the letters beside it. Stood on the line, it was never
+            // found, and a name ending in one was never found whole.
+            {
+                Frame hung = f;
+                Frame head, tail;
+                if (font.render_line("Lon", head) && font.render_line("g", tail)) {
+                    const int x0 = 180, y0 = 560;
+                    for (int y = y0; y < y0 + head.height + 3; ++y)
+                        for (int x = x0; x < x0 + head.width + 8; ++x) put_px(hung, x, y, 0, 0, 0);
+                    write(hung, "Lon", x0, y0);
+                    const int foot = y0 + head.height - 3;          // where "Lon" stands
+                    const int gy = foot - (tail.height - 6) - 3 + 2;
+                    const int gx = x0 + head.width - 6;
+                    for (int y = 0; y < tail.height; ++y)
+                        for (int x = 0; x < tail.width; ++x) {
+                            std::uint8_t r = 0, gr = 0, b = 0;
+                            tail.get(x, y, r, gr, b);
+                            if (r > 128) put_px(hung, gx + x, gy + y, r, gr, b);
+                        }
+                    Nameplate seen;
+                    check(MobDetector::find_self(hung, t, font, "Long", seen) &&
+                              std::abs(seen.x() - (x0 + (head.width + tail.width - 6) / 2)) <= 4,
+                          "\"Long\", its g hanging below the line, is found whole");
+                } else {
+                    check(false, "the test's letters can be drawn with the glyphs");
+                }
+            }
+
+            // A letter eaten by something that is not writing -- a pet, a
+            // glow, grass in front of it -- still leaves you found.
+            {
+                Frame covered = f;
+                const int centre = write(covered, who, 180, 560);
+                Frame head, letter;
+                if (font.render_line("ThanhA", head) && font.render_line("m", letter)) {
+                    const int lx = 180 + head.width - 3;      // the "m", after "ThanhA"
+                    const int lw = letter.width - 7;          // its own width, no padding
+                    for (int y = 560 + 3; y < 560 + name.height - 3; ++y)
+                        for (int x = lx; x < lx + lw; ++x) put_px(covered, x, y, 60, 170, 70);
+                }
+                Nameplate seen;
+                check(MobDetector::find_self(covered, t, font, who, seen) &&
+                          std::abs(seen.x() - centre) <= 4,
+                      "with one letter covered by a green pet, your name is still you");
+            }
+
+            // Your name in two places -- your plate, and a chat bubble that
+            // says it -- is you at the one nearer where you were last seen,
+            // not whichever the search meets first.
+            {
+                Frame twice = f;
+                const int low = write(twice, who, 180, 560);
+                const int high = write(twice, who, 600, 300);
+                Nameplate seen;
+                const ScreenRect near_high{ 520, 200, 60, 8 };
+                const ScreenRect near_low{ 250, 650, 60, 8 };
+                check(MobDetector::find_self(twice, t, font, who, seen, nullptr, &near_high) &&
+                          std::abs(seen.x() - high) <= 4,
+                      "your name twice on screen: the one nearer where you were (above)");
+                check(MobDetector::find_self(twice, t, font, who, seen, nullptr, &near_low) &&
+                          std::abs(seen.x() - low) <= 4,
+                      "your name twice on screen: the one nearer where you were (below)");
+            }
+        }
+    }
 
     check(MobDetector::detect(Frame{}, t).empty(), "no frame finds nothing");
 
@@ -7563,7 +7985,9 @@ void test_reviver() {
         g.base = whole_frame ? world : corner;
         return g;
     };
-    struct Heard { int revived = 0, out = 0; std::string reason; };
+    // What the reviver told: each revive, each stop request, and the two the
+    // alerts are raised from -- a death begun, and a death come back from.
+    struct Heard { int revived = 0, out = 0, deaths = 0, back = 0; std::string reason; };
     const auto reviver_for = [&](PretendDeath& g, Heard& heard) {
         auto r = std::make_unique<Reviver>(no_window, store, [&g](Frame& out) {
             out = g.look();
@@ -7572,6 +7996,8 @@ void test_reviver() {
         r->set_hands(g.hands());
         r->set_clock(g.clock());
         r->on_revived([&heard] { ++heard.revived; });
+        r->on_death([&heard] { ++heard.deaths; });
+        r->on_back([&heard] { ++heard.back; });
         r->on_out_of_tries([&heard](const std::string& why) {
             ++heard.out;
             heard.reason = why;
@@ -7635,8 +8061,93 @@ void test_reviver() {
                   std::all_of(later.begin(), later.end(),
                               [](Reviver::Turn t) { return t == Reviver::Turn::Alive; }),
               "and alive afterwards, nothing more is clicked");
-        check(r->tries() == 0, "its try is given back once the character has stayed up for 5 s");
+        // No HP reader here: the revive was taken from the panel staying
+        // away, so its try is kept until the character has stayed up a minute.
+        check(r->tries() == 1 && heard.deaths == 1 && heard.back == 0,
+              "with HP unreadable its try is still counted 20 s on, and the revive not yet told");
+        (void)turns_for(*r, g, 45, 5000);
+        check(r->tries() == 0 && heard.deaths == 1 && heard.back == 1,
+              "given back once the character has stayed up for 60 s -- and the revive told then, "
+              "once");
         macro.stop();
+    }
+    {
+        // The alerts' two hooks, and the stop request: a death with a revive
+        // item tells of the death and of the revive, once each; one without
+        // tells of the death and asks for the stop, once each.
+        PretendDeath with = game();
+        Heard a;
+        auto r1 = reviver_for(with, a);
+        r1->set_hp([&with] { return with.panel ? 0.0f : 80.0f; });
+        (void)turns_for(*r1, with, 30);
+        check(a.deaths == 1 && a.revived == 1 && a.back == 1 && a.out == 0,
+              "a death with a revive item: told dead once, revived once, no stop -- " +
+                  std::to_string(a.deaths) + " / " + std::to_string(a.back) + " / " +
+                  std::to_string(a.out));
+        PretendDeath without = game();
+        without.has_item = false;
+        Heard b;
+        auto r2 = reviver_for(without, b);
+        r2->set_hp([&without] { return without.panel ? 0.0f : 80.0f; });
+        (void)turns_for(*r2, without, 60);
+        (void)turns_for(*r2, without, 300, 30000);
+        check(b.deaths == 1 && b.back == 0 && b.revived == 0 && b.out == 1 &&
+                  without.item_clicks == 3,
+              "a death with no revive item: told dead once, never revived, one stop request -- " +
+                  std::to_string(b.deaths) + " / " + std::to_string(b.back) + " / " +
+                  std::to_string(b.out));
+    }
+    {
+        // Revived on the spot among whatever killed it, and dead again 3 s
+        // later, over and over -- with revive items left. HP read above 0
+        // confirms each revive, so each death is a new one with its own
+        // tries: the bot never stops for want of items it still has.
+        PretendDeath g = game();
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        r->set_hp([&g] { return g.panel ? 0.0f : 80.0f; });
+        bool was_up = false;
+        auto up_since = g.time.t;
+        const auto until = g.time.t + std::chrono::seconds(120);
+        while (g.time.t < until) {
+            (void)r->turn();
+            g.time.advance(1200);
+            if (!g.panel && !was_up) {
+                was_up = true;
+                up_since = g.time.t;
+            }
+            if (!g.panel && g.time.ms_since(up_since) >= 3000) {
+                g.panel = true;           // killed again
+                was_up = false;
+            }
+        }
+        check(heard.out == 0 && heard.revived >= 6 && heard.deaths >= heard.revived && heard.deaths <= heard.revived + 1 &&
+                  heard.back == heard.revived && never_wrong(g),
+              "dead again 3 s after each revive, items left: revived every time and never stopped -- " +
+                  std::to_string(heard.revived) + " revives, " + std::to_string(heard.deaths) +
+                  " deaths told, " + std::to_string(heard.out) + " stop requests");
+    }
+    {
+        // No revive item, HP unreadable, and the game puts the panel away
+        // for 10 s after each Xác Nhận. Each of those passes for a revive,
+        // but the panel is back long before the character has stayed up for
+        // a minute: the same death, so the third try is still the last, and
+        // the bot stops.
+        for (const int blink : { 10000, 15000 }) {
+            PretendDeath g = game();
+            g.has_item = false;
+            g.blink_ms = blink;
+            Heard heard;
+            auto r = reviver_for(g, heard);
+            (void)turns_for(*r, g, 120);
+            (void)turns_for(*r, g, 180, 30000);
+            check(heard.out == 1 && g.item_clicks == 3 && g.confirm_clicks == 3 && heard.deaths == 1 &&
+                      heard.back == 0 && never_wrong(g),
+                  "no item, HP unreadable, the panel away " + std::to_string(blink / 1000) +
+                      " s after each Xác Nhận: still 3 tries, one death told, then the stop -- " +
+                      std::to_string(g.item_clicks) + " tries, " + std::to_string(heard.revived) +
+                      " taken for revives, " + std::to_string(heard.out) + " stop requests");
+        }
     }
     {
         // The panel and the question both up -- the item button pressed by
@@ -7762,7 +8273,7 @@ void test_reviver() {
     {
         // Away longer than that -- 5 s, past the 3 s it has to stay gone --
         // and each comes back as a "revive"; but a panel back before the
-        // character has stayed up 5 s is the same death, its tries not given
+        // character has stayed up a minute is the same death, its tries not given
         // back, so this still ends in the stop rather than going on.
         PretendDeath g = game();
         g.has_item = false;
@@ -8810,6 +9321,1322 @@ void test_executor_screen_only() {
     exec.stop();
 }
 
+// -------------------------------------------------------------- auto chat
+
+namespace {
+
+/// A pretend game for the chat sender's hands and look: the chat bar in the
+/// bottom-left, drawn from the game's own pictures, open or shut. Enter opens
+/// the shut line and sends and shuts the open one; Backspace rubs a character
+/// out; a letter key puts one in -- unless `ignore_text`, when the game takes
+/// the key but shows nothing, as it did Unicode input in the bin's box. Every
+/// Enter pressed while a dialog is up and every key pressed while the line is
+/// shut is counted: the sender is to press none.
+///
+/// It keeps a clock of its own, which waits and key holds move on. A key acts
+/// `lag` ms after it is pressed, as the live game takes a key a frame or more
+/// later; a look shows the game as it is when it is taken.
+struct PretendChat {
+    const TemplateStore* store = nullptr;
+    const ChatSettings*  settings = nullptr;
+    // Where the open picture's top-left sits. By 690 the 24-pixel-tall bar
+    // ends at 713, inside a 720-tall frame, with its divider at frame row 695
+    // -- the corner look_chat_bar searches is the bottom 145 rows.
+    int bx = 0, by = 690;
+    enum class State { Shut, Open } state = State::Shut;
+    int  typed = 0;            ///< characters in the open line now
+    bool focused = true;
+    bool caps = false;
+    std::string dialog;        ///< a dialog is up: its name, for dialog_up
+    bool ignore_text = false;  ///< the game shows nothing for a typed character
+    int  draft = 0;            ///< characters a shut line still holds, shown when it opens
+    int  shut_after = -1;      ///< the game shuts the line after this many letters
+    bool hide_on_shut = false; ///< and the bar goes out of sight as it does
+    bool deaf = false;         ///< Enter on the shut line does nothing
+    bool stays_open = false;   ///< Enter on the open line sends it, and it stays open
+    int  field_grey = 49;      ///< the open field's grey: GoC's picture's is 49
+    int  flicker = -1;         ///< this frame, counted from 1, shows the line shut whatever it is
+    bool hidden = false;       ///< the bar out of sight: a window over the corner
+    int  hide_after_enters = -1;   ///< the bar goes out of sight once this many Enters have acted
+    int  stuck_ink = 0;        ///< something drawn this far into the open field that Backspace does not remove
+    int  lag = 0;              ///< ms from a key's press to the game acting on it
+    int  dialog_ms = 0;        ///< ms a look for the dialogs takes
+    /// The pretend clock at which `to_cancel` is told to stop: DỪNG at a moment.
+    std::uint64_t cancel_at = ~0ull;
+    ChatSender*   to_cancel = nullptr;
+    /// Called after every key is pressed, with its key code: a test's stop, at a moment.
+    std::function<void(std::uint32_t)> after_key;
+
+    std::vector<int> sent;     ///< how many characters each sent line had
+    int enters_with_dialog = 0;    ///< Enter pressed with a dialog up -- must stay 0
+    int keys_while_shut = 0;       ///< a letter or Backspace with the line shut
+    int enters = 0, backspaces = 0, letters = 0;
+    mutable int frames = 0;        ///< frames drawn so far
+    std::uint64_t clock = 0;       ///< the pretend clock, in ms
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> queue;   ///< pressed, not acted on yet
+
+    void act(std::uint32_t vk) {
+        if (vk == VK_RETURN) {
+            ++enters;
+            if (!dialog.empty()) {
+                ++enters_with_dialog;
+            } else if (state == State::Shut) {
+                if (!deaf) { state = State::Open; typed = draft; }
+            } else {
+                if (typed > 0) sent.push_back(typed);
+                typed = 0;
+                if (!stays_open) state = State::Shut;
+            }
+            if (hide_after_enters >= 0 && enters >= hide_after_enters) hidden = true;
+        } else if (vk == VK_BACK) {
+            ++backspaces;
+            if (state == State::Open) { if (typed > 0) --typed; }
+            else ++keys_while_shut;
+        } else {
+            ++letters;
+            if (state == State::Open) {
+                if (!ignore_text) ++typed;
+                if (shut_after >= 0 && letters >= shut_after) {
+                    state = State::Shut;
+                    if (hide_on_shut) hidden = true;
+                }
+            } else {
+                ++keys_while_shut;
+            }
+        }
+    }
+
+    void advance(std::uint64_t ms) {
+        clock += ms;
+        while (!queue.empty() && queue.front().first <= clock) {
+            const std::uint32_t vk = queue.front().second;
+            queue.erase(queue.begin());
+            act(vk);
+        }
+        if (to_cancel != nullptr && clock >= cancel_at) to_cancel->cancel();
+    }
+
+    Frame render() const {
+        // The screen around the bar, made once: a frame this size is slow to
+        // fill, and the sender looks hundreds of times.
+        static const Frame background = [] {
+            Frame f = make_frame(1280, 720);
+            for (std::size_t i = 0; i < f.pixels.size(); i += 4) {
+                f.pixels[i] = 20; f.pixels[i + 1] = 22; f.pixels[i + 2] = 30; f.pixels[i + 3] = 255;
+            }
+            return f;
+        }();
+        Frame f = background;
+        if (hidden) return f;
+        const Frame* open = store->get(settings->open_picture);
+        const Frame* shut = store->get(settings->closed_picture);
+        blit(f, *open, bx, by);        // the bar frame, and a dark open field
+        const bool flickers = ++frames == flicker;
+        if ((state == State::Shut || flickers) && shut != nullptr) {
+            // The light-grey closed field over the open one, where it sits for
+            // the real client: five right of the divider, two up.
+            blit(f, *shut, bx + 85, by + 3);
+        } else {
+            // The field in another grey than GoC's picture has, when asked.
+            if (field_grey != 49)
+                fill(f, ScreenRect{ bx + 84, by + 3, 308, 15 }, field_grey, field_grey, field_grey);
+            // A caret, and a mark for each character, so the field shows ink
+            // that grows with what was typed -- as far as the field goes.
+            for (int i = 0; i <= typed && 88 + i * 5 < 84 + 308; ++i)
+                for (int y = by + 4; y < by + 17; ++y)
+                    put_px(f, bx + 88 + i * 5, y, 0, 0, 0);
+            if (stuck_ink > 0)
+                for (int y = by + 4; y < by + 17; ++y) put_px(f, bx + 84 + stuck_ink - 1, y, 0, 0, 0);
+        }
+        return f;
+    }
+
+    std::string dialog_up(const Frame&) {
+        if (dialog_ms > 0) advance(static_cast<std::uint64_t>(dialog_ms));
+        return dialog;
+    }
+
+    ChatSender::Hands hands() {
+        ChatSender::Hands h;
+        h.key = [this](std::uint32_t vk, bool, int hold) -> bool {
+            if (!focused) return false;
+            if (lag > 0) queue.emplace_back(clock + static_cast<std::uint64_t>(lag), vk);
+            else act(vk);
+            if (after_key) after_key(vk);
+            advance(static_cast<std::uint64_t>(std::max(0, hold)));
+            return true;
+        };
+        h.text = [this](const std::wstring& t, ChatMethod) -> bool {
+            if (!focused || state != State::Open) return false;
+            if (!ignore_text) typed += static_cast<int>(t.size());
+            return true;
+        };
+        h.focused = [this] { return focused; };
+        h.caps_lock = [this] { return caps; };
+        h.sleep = [this](int ms) { advance(static_cast<std::uint64_t>(std::max(0, ms))); };
+        h.now = [this] { return clock; };
+        return h;
+    }
+};
+
+} // namespace
+
+void test_auto_chat() {
+    section("Auto chat");
+
+    // ---- CA1: text preparation ----
+    const auto vk = [](const std::string& s) {
+        return prepare_chat(s, ChatMethod::Vk, true, 60);
+    };
+    check(vk("Mua đồ giá rẻ, inbox!").typed == "Mua do gia re inbox",
+          "marks off, punctuation out, spaces tidied");
+    check(vk("ĐỘI 5 cần người").typed == "DOI 5 can nguoi", "capitals and đ, with a digit");
+    {
+        const ChatText t = vk(std::string(70, 'a'));
+        check(t.typed.size() == 60 && t.cut, "a 70-character line is cut to 60");
+    }
+    check(vk("!!!").typed.empty(), "a line of only punctuation is left with nothing");
+    check(vk("a\t\tb   c").typed == "a b c", "tabs and double spaces collapse to one");
+    check(vk("  giữa  ").typed == "giua", "ends trimmed, marks off");
+    {
+        const ChatText t = vk("xin chào");
+        check(t.stripped && !t.dropped && t.typed == "xin chao", "a stripped line is marked stripped");
+    }
+    // Composed and decomposed Vietnamese come out the same.
+    check(prepare_chat("che\xCC\x82\x31", ChatMethod::Vk, true, 60).typed ==
+          prepare_chat("ch\xC3\xAA\x31", ChatMethod::Vk, true, 60).typed,
+          "a mark typed on its own is the same letter as one built in");
+    // Unicode keeps the marks but still drops control characters.
+    {
+        const ChatText u = prepare_chat("thử tiếng Việt", ChatMethod::Unicode, false, 60);
+        check(u.typed == "thử tiếng Việt" && !u.stripped, "unicode keeps the marks");
+        const ChatText uk = prepare_chat("thử", ChatMethod::Unicode, true, 60);
+        check(uk.typed == "thu", "strip_diacritics=true strips even for unicode");
+        // As shipped, the marks come off for vk only: the other methods are
+        // there to find out whether the game takes them.
+        const ChatSettings shipped;
+        check(!shipped.strip_diacritics, "strip_diacritics is off unless chat.ini turns it on");
+        check(prepare_chat("thử tiếng Việt", ChatMethod::Unicode, shipped.strip_diacritics, 60).typed ==
+                  "thử tiếng Việt",
+              "so unicode keeps the marks by default");
+        check(prepare_chat("thử tiếng Việt", ChatMethod::Vk, shipped.strip_diacritics, 60).typed ==
+                  "thu tieng Viet",
+              "while vk takes them off all the same, having no keys for them");
+    }
+
+    // ---- CA2: the key plan ----
+    {
+        const auto keys = chat_keys("Ab 1", false);
+        check(keys.size() == 4 && keys[0].vk == 'A' && keys[0].shift &&
+              keys[1].vk == 'B' && !keys[1].shift &&
+              keys[2].vk == VK_SPACE && !keys[2].shift &&
+              keys[3].vk == '1' && !keys[3].shift,
+              "Caps off: Shift for the capital, none for the rest");
+        const auto on = chat_keys("Ab 1", true);
+        check(on.size() == 4 && on[0].vk == 'A' && !on[0].shift && on[1].vk == 'B' && on[1].shift,
+              "Caps on: the small letter gets Shift, the capital none");
+        bool digit_or_space_shifted = false;
+        for (const ChatKey& k : chat_keys("A b 9 Z", false))
+            if ((k.vk == VK_SPACE || (k.vk >= '0' && k.vk <= '9')) && k.shift)
+                digit_or_space_shifted = true;
+        check(!digit_or_space_shifted, "never Shift around a digit or a space");
+        bool every_scan = true;
+        for (const ChatKey& k : chat_keys("Hello 123", false))
+            every_scan = every_scan && InputManager::scan_code(k.vk) != 0;
+        check(every_scan, "every key has a scan code");
+    }
+
+    // ---- CA3: the scheduler ----
+    {
+        ChatSettings s;
+        s.interval_s = 10;      // asked below 30
+        s.first_delay_s = 15;
+        s.lines = { "a", "b", "c" };
+        ChatSchedule sch(1234);
+        sch.start(1000, s);
+        check(sch.due_at() == 1000 + 15'000, "the first line comes first_delay_s after start");
+        check(!sch.due(1000 + 14'000) && sch.due(1000 + 15'000), "and not before");
+        check(sch.turn() == 0, "in turn, the first line is line 1");
+        std::vector<int> order;
+        std::uint64_t now = sch.due_at();
+        for (int i = 0; i < 4; ++i) { order.push_back(sch.turn()); sch.sent(now); now = sch.due_at(); }
+        check((order == std::vector<int>{ 0, 1, 2, 0 }), "in turn it cycles 1, 2, 3, 1");
+        check(sch.draw_gap_ms() >= 30'000, "an interval of 10 is floored at 30 s");
+    }
+    {
+        // random never repeats the previous line over 1,000 draws.
+        ChatSettings s;
+        s.random_order = true;
+        s.lines = { "a", "b", "c", "d" };
+        ChatSchedule sch(99);
+        int last = -1;
+        bool repeated = false;
+        std::uint64_t now = 0;
+        sch.start(now, s);
+        for (int i = 0; i < 1000; ++i) {
+            const int t = sch.turn();
+            if (t == last) repeated = true;
+            last = t;
+            now = sch.due_at();
+            sch.sent(now);
+        }
+        check(!repeated, "random never says the same line twice in a row");
+    }
+    {
+        // Jitter stays within the percentage; a postponed line keeps its turn.
+        ChatSettings s;
+        s.interval_s = 100;
+        s.jitter_pct = 15;
+        s.lines = { "a", "b" };
+        ChatSchedule sch(7);
+        sch.start(0, s);
+        bool within = true;
+        for (int i = 0; i < 500; ++i) {
+            const std::uint64_t g = sch.draw_gap_ms();
+            within = within && g >= 85'000 && g <= 115'000;
+        }
+        check(within, "the jitter stays within +/-15%");
+        sch.sent(0);
+        const int turn = sch.turn();
+        sch.postpone(0, 5000);
+        check(sch.turn() == turn && sch.due_at() == 5000, "a postponed line keeps its turn");
+    }
+
+    // ---- CA4: the gate ----
+    {
+        const auto base = [] {
+            ChatGateInput in;
+            in.window = in.focused = in.looked = in.hud = true;
+            in.bar = ChatBarState::Closed;
+            in.hp_pct = 90;
+            in.hp_floor = 50;
+            return in;
+        };
+        check(chat_gate(base()).send, "everything clear: send");
+        { auto in = base(); in.dialog = "thùng rác"; check(!chat_gate(in).send, "a dialog up: wait"); }
+        { auto in = base(); in.trash = true; check(!chat_gate(in).send, "a trash pass or hold: wait"); }
+        { auto in = base(); in.held_by = "reviving"; check(!chat_gate(in).send, "another hold: wait"); }
+        { auto in = base(); in.hp_pct = 30;
+          const ChatGate g = chat_gate(in);
+          check(!g.send && g.wait_ms == 2000, "HP 30% with floor 50: wait 2 s"); }
+        { auto in = base(); in.bar = ChatBarState::Open;
+          const ChatGate g = chat_gate(in);
+          check(!g.send && g.wait_ms == 15000, "the line already open: wait 15 s"); }
+        { auto in = base(); in.focused = false; check(!chat_gate(in).send, "the game not in front: wait"); }
+        { auto in = base(); in.bar = ChatBarState::Unknown;
+          const ChatGate g = chat_gate(in);
+          check(!g.send && g.why.find("ô chat") != std::string::npos,
+                "the bar not found: wait with the 'chưa thấy ô chat' message"); }
+        { auto in = base(); in.user_active = true; check(!chat_gate(in).send, "a person typing: wait"); }
+    }
+
+    // ---- CA6: the config round-trips ----
+    {
+        const std::string path = temp_file("gobot_chat.ini");
+        std::remove(path.c_str());
+        ChatSettings missing;
+        check(!missing.load(path), "a missing chat.ini does not load, so Tự chat is off");
+
+        check(ChatSettings::save_key(path, "enabled", "true"), "a key is written, making the file");
+        check(ChatSettings::save_key(path, "interval_s", "45"), "interval");
+        check(ChatSettings::save_key(path, "order", "random"), "order");
+        check(ChatSettings::save_key(path, "method", "wmchar"), "method");
+        const std::vector<std::string> lines = { "Mua đồ giá rẻ", "pt nào", "" };
+        check(ChatSettings::save_lines(path, lines), "the lines are written");
+
+        ChatSettings got;
+        check(got.load(path), "and it reads back");
+        check(got.enabled && got.interval_s == 45 && got.random_order &&
+              got.method == ChatMethod::WmChar && got.method_note.empty(), "every setting survived");
+        check(got.lines.size() == 2 && got.lines[0] == "Mua đồ giá rẻ" && got.lines[1] == "pt nào",
+              "the Vietnamese lines survived and the empty one was dropped");
+
+        // Writing the lines again replaces them rather than stacking up.
+        check(ChatSettings::save_lines(path, { "chỉ một câu" }), "the lines are written again");
+        ChatSettings again;
+        again.load(path);
+        check(again.lines.size() == 1 && again.lines[0] == "chỉ một câu" && again.enabled,
+              "the old lines are gone and the other settings are kept");
+
+        // Out-of-range values are brought into range on load.
+        ChatSettings::save_key(path, "interval_s", "5");
+        ChatSettings::save_key(path, "jitter_pct", "90");
+        ChatSettings floor;
+        floor.load(path);
+        check(floor.interval_s == 30 && floor.jitter_pct == 30, "values out of range are clamped");
+        std::remove(path.c_str());
+    }
+
+    // ---- chat.ini edited by hand ----
+    {
+        const std::string path = temp_file("gobot_chat_hand.ini");
+        const auto write = [&](const std::string& bytes) {
+            std::ofstream o(path, std::ios::binary | std::ios::trunc);
+            o << bytes;
+        };
+        const auto read = [&] {
+            std::ifstream in(path, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+
+        // Notepad's "UTF-8 with BOM", [Chat] on the first line, sections and
+        // keys in another case.
+        write("\xEF\xBB\xBF[chat]\r\nEnabled=true\r\nINTERVAL_S=90\r\nempty_ink=3\r\n\r\n"
+              "[LINES]\r\nLINE2=hai\r\nline1=một\r\n");
+        ChatSettings hand;
+        check(hand.load(path), "a BOM before [Chat] on the first line does not hide it");
+        check(hand.enabled && hand.interval_s == 90, "sections and keys are read in any case");
+        check(hand.lines.size() == 2 && hand.lines[0] == "một" && hand.lines[1] == "hai",
+              "LINE2= counts as line2, in its turn");
+        check(hand.empty_ink == 3, "empty_ink is read");
+
+        // Saved by the tab, it stays a CRLF file with its BOM, every key in place.
+        check(ChatSettings::save_key(path, "interval_s", "120"), "a key saved into it");
+        check(ChatSettings::save_key(path, "order", "random"), "and a key it did not have");
+        check(ChatSettings::save_lines(path, { "ba" }), "and its lines");
+        const std::string after = read();
+        std::size_t lf = 0, crlf = 0;
+        for (std::size_t i = 0; i < after.size(); ++i)
+            if (after[i] == '\n') { ++lf; if (i > 0 && after[i - 1] == '\r') ++crlf; }
+        check(after.compare(0, 3, "\xEF\xBB\xBF") == 0, "the BOM is kept");
+        check(lf > 0 && lf == crlf, "every line still ends CRLF");
+        check(after.find("INTERVAL_S") == std::string::npos &&
+                  after.find("interval_s=120") != std::string::npos &&
+                  after.find("Enabled=true") != std::string::npos,
+              "the key was replaced where it was, whatever its case, and the rest left as written");
+        ChatSettings back;
+        check(back.load(path) && back.interval_s == 120 && back.random_order && back.enabled &&
+                  back.lines.size() == 1 && back.lines[0] == "ba",
+              "and it all reads back");
+        check(GetFileAttributesA((path + ".tmp").c_str()) == INVALID_FILE_ATTRIBUTES,
+              "no .tmp file is left beside it");
+
+        // A file of LF lines stays LF.
+        write("[Chat]\nenabled=false\n");
+        ChatSettings::save_key(path, "enabled", "true");
+        check(read() == "[Chat]\nenabled=true\n", "an LF file stays LF, with no BOM added");
+
+        // empty_ink is brought into range.
+        write("[Chat]\nempty_ink=500\n");
+        ChatSettings wide;
+        wide.load(path);
+        write("[Chat]\nempty_ink=0\n");
+        ChatSettings narrow;
+        narrow.load(path);
+        check(wide.empty_ink == 40 && narrow.empty_ink == 1, "empty_ink is kept within 1 to 40");
+
+        // Numbers as people write them: a leading zero is not octal, hex
+        // after 0x still works, and a decimal comma is a point.
+        write("[Chat]\ninterval_s=090\nmax_length=0120\njitter_pct=0x0A\nclosed_score=0,95\n");
+        ChatSettings nums;
+        check(nums.load(path) && nums.interval_s == 90 && nums.max_length == 120 &&
+                  nums.jitter_pct == 10 && std::abs(nums.closed_score - 0.95f) < 0.001f,
+              "090 is ninety, 0120 a hundred and twenty, 0x0A ten, and 0,95 is 0.95");
+
+        // Notepad's "Unicode": UTF-16 with its BOM, read, and saved as it was.
+        {
+            const std::wstring wide_text = L"[Chat]\r\nenabled=true\r\ninterval_s=75\r\n\r\n[Lines]\r\nline1=một\r\n";
+            std::string bytes = "\xFF\xFE";
+            for (const wchar_t c : wide_text) {
+                bytes += static_cast<char>(c & 0xFF);
+                bytes += static_cast<char>((c >> 8) & 0xFF);
+            }
+            write(bytes);
+            ChatSettings u;
+            check(u.load(path) && u.enabled && u.interval_s == 75 && u.lines.size() == 1 &&
+                      u.lines[0] == "một",
+                  "a UTF-16 chat.ini is read, Vietnamese and all");
+            check(ChatSettings::save_key(path, "interval_s", "90") &&
+                      ChatSettings::save_lines(path, { "một", "hai" }),
+                  "keys and lines are saved into it");
+            const std::string saved = read();
+            check(saved.compare(0, 2, "\xFF\xFE") == 0 && saved.find("interval_s") == std::string::npos,
+                  "and it is still UTF-16, with nothing in UTF-8 added to it");
+            ChatSettings u2;
+            check(u2.load(path) && u2.interval_s == 90 && u2.enabled && u2.lines.size() == 2 &&
+                      u2.lines[0] == "một" && u2.lines[1] == "hai",
+                  "and it reads back");
+        }
+
+        // A method no longer offered, or none at all, is typed with vk -- and
+        // the tab is told why.
+        write("[Chat]\nmethod=paste\n");
+        ChatSettings pasted;
+        check(pasted.load(path) && pasted.method == ChatMethod::Vk && !pasted.method_note.empty(),
+              "method=paste, no longer offered, is typed with vk, and says so");
+        write("[Chat]\nmethod=sendkeys\n");
+        ChatSettings odd;
+        check(odd.load(path) && odd.method == ChatMethod::Vk && !odd.method_note.empty(),
+              "so is a method that never was");
+        write("[Chat]\nmethod=Unicode\n");
+        ChatSettings uni;
+        check(uni.load(path) && uni.method == ChatMethod::Unicode && uni.method_note.empty(),
+              "a method still offered is taken, with nothing to say");
+        std::remove(path.c_str());
+    }
+
+    // ---- the method names round-trip, and paste is not one ----
+    {
+        bool all = true;
+        for (ChatMethod m : { ChatMethod::Vk, ChatMethod::Unicode, ChatMethod::WmChar,
+                              ChatMethod::ImeChar }) {
+            ChatMethod back;
+            all = all && chat_method_from(chat_method_name(m), back) && back == m;
+        }
+        ChatMethod bad;
+        check(all && !chat_method_from("nope", bad), "the method names round-trip");
+        ChatMethod kept = ChatMethod::WmChar;
+        check(!chat_method_from("paste", kept) && !chat_method_from(" PASTE ", kept) &&
+                  kept == ChatMethod::WmChar,
+              "paste is not a method: nothing of GoBot's touches the clipboard");
+    }
+
+    // ---- CA5 and CA7: the bar pictures and the sender, with the game's own
+    //       chat-bar pictures ----
+    TemplateStore store;
+    ChatSettings settings;
+    const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
+                      can_look_for_chat(store, settings);
+    if (!have) {
+        std::printf("  [skip] the chat-bar pictures are not installed here\n");
+        return;
+    }
+
+    PretendChat game;
+    game.store = &store;
+    game.settings = &settings;
+
+    // CA5: the shut line reads shut, with the closed picture matching well; a
+    // field of the open grey reads open.
+    {
+        game.state = PretendChat::State::Shut;
+        const ChatBar shut = look_chat_bar(game.render(), store, settings);
+        check(shut.found && shut.state == ChatBarState::Closed,
+              "the chat bar is found, and the shut line reads shut");
+        check(shut.closed_score >= 0.95f, "the closed picture matches the shut field well");
+        check(shut.dark < 100, "the shut field has little of the open field's grey");
+        game.state = PretendChat::State::Open;
+        const ChatBar open = look_chat_bar(game.render(), store, settings);
+        check(open.found && open.state == ChatBarState::Open, "the open line reads open");
+        check(open.dark >= 100, "the open field is full of the open field's grey");
+    }
+
+    InputManager no_window;    // never used: the hands stand in for it
+    const auto make_sender = [&](PretendChat& g) {
+        auto s = std::make_unique<ChatSender>(no_window, store,
+                                              [&g](Frame& f) { f = g.render(); return true; });
+        s->set_settings(settings);
+        s->set_dialog_check([&g](const Frame& f) { return g.dialog_up(f); });
+        s->set_hands(g.hands());
+        return s;
+    };
+
+    // CA7: a whole line, start to finish -- opened, typed, sent, shut -- with
+    // no Enter on a dialog and no key pressed while the line was shut.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        const ChatText line = prepare_chat("test 1", settings.method, settings.strip_diacritics,
+                                           settings.max_length);
+        const ChatSender::Result r = sender->send(line);
+        check(r.sent && r.opened && !r.left_open, "a line is opened, typed and sent");
+        check(r.typed == static_cast<int>(line.typed.size()), "every character's key went");
+        check(g.sent.size() == 1 && g.state == PretendChat::State::Shut,
+              "the game got one line and the chat line is shut");
+        check(g.enters_with_dialog == 0 && g.keys_while_shut == 0,
+              "no Enter on a dialog, and no key pressed while the line was shut");
+    }
+
+    // The line already open when it starts: the player is typing, so nothing
+    // is pressed and it waits.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        auto sender = make_sender(g);
+        const ChatText line = prepare_chat("test", ChatMethod::Vk, true, 60);
+        const ChatSender::Result r = sender->send(line);
+        check(r.not_now && !r.sent && g.sent.empty(),
+              "the line already open: nothing sent, try again later");
+        check(g.enters_with_dialog == 0 && g.keys_while_shut == 0, "and nothing pressed");
+    }
+
+    // A dialog up: no Enter, nothing sent.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.dialog = "thùng rác";
+        auto sender = make_sender(g);
+        const ChatText line = prepare_chat("test", ChatMethod::Vk, true, 60);
+        const ChatSender::Result r = sender->send(line);
+        check(!r.sent && g.sent.empty() && g.enters_with_dialog == 0,
+              "a dialog up: no Enter, nothing sent");
+    }
+
+    // The game not in front: nothing is typed.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.focused = false;
+        auto sender = make_sender(g);
+        const ChatText line = prepare_chat("test", ChatMethod::Vk, true, 60);
+        const ChatSender::Result r = sender->send(line);
+        check(!r.sent && r.typed == 0 && g.sent.empty(), "the game not in front: nothing typed");
+    }
+
+    // Cancelled before it starts: nothing pressed, the line left shut.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        sender->cancel();
+        const ChatText line = prepare_chat("test", ChatMethod::Vk, true, 60);
+        const ChatSender::Result r = sender->send(line);
+        check(!r.sent && g.sent.empty() && g.state == PretendChat::State::Shut,
+              "cancelled before the first Enter: the line stays shut, nothing sent");
+    }
+
+    // Stopped in the middle of typing: what was typed is rubbed out and the
+    // line closed, never sent.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        int calls = 0;
+        sender->set_guard([&calls]() -> std::string {
+            return ++calls > 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
+        });
+        const ChatText line = prepare_chat("abcdefghij", ChatMethod::Vk, true, 60);
+        const ChatSender::Result r = sender->send(line);
+        check(!r.sent && !r.left_open && g.sent.empty(),
+              "stopped mid-line: nothing sent and the line not left open");
+        check(g.state == PretendChat::State::Shut && g.typed == 0,
+              "what was typed is rubbed out and the line closed");
+    }
+
+    // The game shows nothing for the typed characters (as it ignored Unicode
+    // in the bin's box): the line is not sent, and it is rubbed out and closed.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.ignore_text = true;
+        auto sender = make_sender(g);
+        const ChatText line = prepare_chat("test 1", ChatMethod::Vk, true, 60);
+        const ChatSender::Result r = sender->send(line);
+        check(!r.sent && g.sent.empty(), "text that does not show up is never sent");
+        check(g.state == PretendChat::State::Shut, "and the line is closed again");
+    }
+
+    const auto line_of = [](const char* text) { return prepare_chat(text, ChatMethod::Vk, true, 60); };
+
+    // What an empty line shows, measured once it is cleared, is kept for
+    // closing it later.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && r.empty_ink == 5, "the cleared line's caret is measured and handed back");
+    }
+
+    // The game shuts the line part way through -- a click in the game, a map
+    // change: not one key more goes in, a Backspace least of all, and it is a
+    // failure rather than a line put off.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.shut_after = 5;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("ban do lv 50 zalo 0912345678"));
+        check(!r.sent && g.sent.empty(), "a line the game shuts part way is not sent");
+        check(g.keys_while_shut == 0 && g.letters == 5,
+              "and not one key goes into the game once it has shut (" +
+                  std::to_string(g.keys_while_shut) + " did)");
+        check(!r.aborted && !r.left_open, "a failure, with the line seen shut");
+    }
+    // The same, with the bar going out of sight as the line shuts: the line
+    // cannot be seen, so nothing is rubbed out blind into a shut game -- it is
+    // reported as maybe open, for whoever watches it after.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.shut_after = 8;
+        g.hide_on_shut = true;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("ban do lv 50 zalo 0912345678"));
+        check(!r.sent && g.keys_while_shut == 0 && g.letters == 8,
+              "the bar out of sight mid-line: not a Backspace into the shut game (" +
+                  std::to_string(g.keys_while_shut) + " went)");
+        check(r.left_open && r.aborted && !r.stop,
+              "the line put off and reported as maybe open, for the watcher");
+    }
+    // One frame that shows the line shut while it is not is looked past: the
+    // look after it, with no key pressed between, has the last word.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.flicker = 6;              // a look before one of the first keys
+        auto sender = make_sender(g);
+        const ChatText line = line_of("test 12345");
+        const ChatSender::Result r = sender->send(line);
+        check(r.sent && g.sent.size() == 1 && g.sent[0] == line.chars && g.keys_while_shut == 0,
+              "one frame wrongly showing the line shut does not end the line");
+    }
+
+    // A line that will not open: two Enters, never three -- a game that takes
+    // them late is left as it was, shut -- and the line reported as maybe
+    // open, so that it is watched for.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.deaf = true;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && g.enters == 2 && g.letters == 0 && g.backspaces == 0,
+              "a line that will not open: two Enters and nothing typed");
+        check(r.left_open && !r.aborted, "a failure, and the line left to be watched");
+    }
+
+    // The line opens but looks like neither picture -- the live client's open
+    // line has never been photographed: nothing is typed, one Enter more
+    // shuts it again, and Tự chat is told to stop.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.field_grey = 64;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && r.stop && g.letters == 0 && g.backspaces == 0,
+              "an open line that looks like neither picture: nothing typed, and a stop");
+        check(g.state == PretendChat::State::Shut && !r.left_open && g.sent.empty() && g.enters == 2,
+              "and one Enter more has shut it again, sending nothing");
+    }
+    // The first Enter not taken, and the bar out of sight after it: no bar
+    // at all is not a bar that looks like neither picture. No Enter more --
+    // it could open a shut line -- and the line is left to be watched.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.deaf = true;
+        g.hide_after_enters = 1;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(g.enters == 1 && g.letters == 0 && g.backspaces == 0,
+              "the bar gone after the first Enter: no Enter more, nothing typed (" +
+                  std::to_string(g.enters) + " Enters)");
+        check(!r.sent && r.left_open && r.aborted && !r.stop,
+              "put off, not stopped, and left to be watched");
+    }
+
+    // A shut line that still holds ten characters of the player's: rubbed
+    // out before typing, so the line goes out as typed and nothing else.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.draft = 10;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && g.sent.size() == 1 && g.sent[0] == 4,
+              "a draft left in the line is rubbed out first: the game gets the 4 characters typed");
+    }
+    // Drafts of other lengths: one or two characters left after the six
+    // Backspaces look no wider than the caret, and long ones take more than
+    // a round or two. The game gets the line as typed every time.
+    for (const int draft : { 7, 8, 12, 40, 61, 90, 100 }) {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.draft = draft;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && g.sent.size() == 1 && g.sent[0] == 4 && g.keys_while_shut == 0,
+              "a draft of " + std::to_string(draft) + " is rubbed out: the game gets only 'test' (got " +
+                  (g.sent.empty() ? std::string("nothing") : std::to_string(g.sent[0])) + ")");
+    }
+    // One too long to rub out within the most Backspaces pressed at once:
+    // not typed after it, and not sent.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.draft = 200;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && g.sent.empty() && g.letters == 0,
+              "a draft too long to rub out: nothing typed after it, nothing sent");
+    }
+    // Something in the field that Backspace does not take away: nothing is
+    // typed, nothing sent, and the line is left to be watched rather than
+    // shut with Enter, which would send whatever it is.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.stuck_ink = 40;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && !r.aborted && g.letters == 0 && g.sent.empty() && r.left_open,
+              "a field Backspace cannot clear: a failure, nothing typed or sent, left to be watched");
+    }
+
+    // The same, stopped while the line is being cleared: what was left in it
+    // is rubbed out too, and the line shut empty -- never sent.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.draft = 10;
+        auto sender = make_sender(g);
+        ChatSender* const s = sender.get();
+        int bs = 0;
+        g.after_key = [&](std::uint32_t vk) { if (vk == VK_BACK && ++bs == 2) s->cancel(); };
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && g.sent.empty(), "a stop while the line is cleared never sends what was in it");
+        check(g.state == PretendChat::State::Shut && g.typed == 0, "the line is rubbed out and shut");
+        check(r.aborted, "and a stop is a line put off, not a failure");
+    }
+
+    // A stop that comes while the screen is looked at just before the first
+    // Enter: no Enter -- nothing would be left to see to it.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        ChatSender* const s = sender.get();
+        sender->set_dialog_check([&g, s](const Frame& f) {
+            s->cancel();
+            return g.dialog_up(f);
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(g.enters == 0 && !r.sent && !r.left_open && g.state == PretendChat::State::Shut,
+              "a stop during the look before the first Enter: no Enter pressed");
+    }
+    // A stop just after the first Enter, in a game that takes keys a third of
+    // a second late: the line a look still shows shut opens a moment later.
+    // It is not taken for shut until the Enter has had time to show, and it
+    // is closed again -- never left open with the sender saying it is shut.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.lag = 300;
+        auto sender = make_sender(g);
+        ChatSender* const s = sender.get();
+        g.after_key = [s](std::uint32_t vk) { if (vk == VK_RETURN) s->cancel(); };
+        const ChatSender::Result r = sender->send(line_of("test"));
+        g.advance(2000);            // whatever was still on its way lands
+        check(g.state == PretendChat::State::Shut && !r.left_open && g.sent.empty(),
+              "a stop just after a late Enter: the line is seen open after all, and shut again");
+    }
+    // Stops at every moment of the first second and a half of a short line,
+    // in a game that takes keys 120 ms late and looks for dialogs that take a
+    // tenth of a second: the line never ends open while the sender says it
+    // is shut, and nothing is ever sent.
+    {
+        int unreported = 0, sent = 0, runs = 0;
+        for (std::uint64_t at = 0; at <= 1500; at += 100) {
+            PretendChat g;
+            g.store = &store; g.settings = &settings;
+            g.lag = 120;
+            g.dialog_ms = 100;
+            auto sender = make_sender(g);
+            g.to_cancel = sender.get();
+            g.cancel_at = at;
+            const ChatSender::Result r = sender->send(line_of("test 1"));
+            g.to_cancel = nullptr;
+            g.advance(2000);
+            ++runs;
+            if (g.state == PretendChat::State::Open && !r.left_open) ++unreported;
+            if (!g.sent.empty()) ++sent;
+        }
+        check(unreported == 0 && sent == 0,
+              "a stop at any moment never leaves the line open unreported (" + std::to_string(unreported) +
+                  " of " + std::to_string(runs) + " did), and sends nothing (" + std::to_string(sent) + ")");
+    }
+    // A stop, or the guard, that comes while the screen is looked at for the
+    // last time before the sending Enter -- the dialog check alone takes a
+    // while: the line does not go out. Rubbed out, shut, and put off.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        ChatSender* const s = sender.get();
+        sender->set_dialog_check([&g, s](const Frame& f) {
+            if (g.letters == 4) s->cancel();        // every letter of "test" typed
+            return g.dialog_up(f);
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && r.aborted && g.sent.empty() && g.typed == 0 &&
+                  g.state == PretendChat::State::Shut && !r.left_open,
+              "a stop during the last look before the sending Enter: not sent, rubbed out and shut");
+    }
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        sender->set_guard([&g]() -> std::string {
+            return g.letters >= 4 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && r.aborted && g.sent.empty() && g.typed == 0 &&
+                  g.state == PretendChat::State::Shut,
+              "HP falling after the last key, before the sending Enter: not sent, rubbed out and shut");
+    }
+
+    // A line left open with something in it, closed by a sender that never
+    // cleared it and so does not know its caret: all of it is rubbed out, and
+    // only an empty line gets the Enter.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.typed = 15;
+        auto closer = make_sender(g);
+        check(closer->close_left_open(3), "a line left open with text in it is closed");
+        check(g.sent.empty() && g.typed == 0 && g.state == PretendChat::State::Shut,
+              "and nothing that was in it is sent, though only 3 Backspaces were asked for");
+    }
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        auto closer = make_sender(g);
+        closer->set_empty_ink(5);
+        check(closer->close_left_open(0) && g.backspaces == 0 && g.sent.empty(),
+              "an empty line, as it showed once cleared, is closed with no Backspace");
+    }
+
+    // Ended part way for something that is not the line's fault: put off, not
+    // failed -- HP falling under the potion's mark, a dialog coming up, the
+    // game losing the front.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        int calls = 0;
+        sender->set_guard([&calls]() -> std::string {
+            return ++calls > 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
+        });
+        const ChatSender::Result r = sender->send(line_of("abcdefghij"));
+        check(!r.sent && r.aborted && r.wait_ms > 0, "HP falling mid-line: put off, not failed");
+    }
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.after_key = [&g](std::uint32_t) { if (g.letters == 14) g.dialog = "lời mời tổ đội"; };
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("abcdefghijklmnopqrstuvwxyz"));
+        check(!r.sent && r.aborted && !r.dialog.empty() && g.enters_with_dialog == 0 && g.typed == 0,
+              "a dialog coming up mid-line: rubbed out, no Enter, put off");
+    }
+    // The same dialog on a frame that wrongly shows the line shut: believed
+    // shut only on a second look, which shows it open -- so it is rubbed out,
+    // and reported as maybe open rather than let go with the text in it.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        // Frames: the first Enter's look, the look that sees it open, two
+        // while clearing, one before each of the first twelve keys -- the
+        // seventeenth is the look before key 13, which takes in the dialogs.
+        g.flicker = 17;
+        g.after_key = [&g](std::uint32_t) { if (g.letters == 12) g.dialog = "lời mời tổ đội"; };
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("abcdefghijklmnopqrstuvwxyz"));
+        check(!r.sent && r.left_open && g.typed == 0 && g.enters_with_dialog == 0 && g.frames >= 18,
+              "a dialog on a frame wrongly showing the line shut: rubbed out, and left to be watched");
+    }
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.after_key = [&g](std::uint32_t) { if (g.letters == 3) g.focused = false; };
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("abcdefghij"));
+        check(!r.sent && r.aborted && r.left_open && g.enters == 1,
+              "the game losing the front for good: no Enter, put off, the line reported as left open");
+    }
+
+    // Sent, and then the line will not shut: sent it was, and Tự chat is told
+    // to stop all the same -- the open line is where the fighting keys go.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.stays_open = true;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && r.stop && r.left_open && g.sent.size() == 1 && g.enters == 4,
+              "a line that will not shut after sending: sent, a stop, two Enters at most to shut it");
+    }
+
+    // Somebody at the mouse or keyboard just before the first Enter: nothing
+    // is pressed, and the line waits.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto sender = make_sender(g);
+        sender->set_ready_check([] {
+            return std::string("Bạn đang dùng chuột hoặc bàn phím — chat sau.");
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.not_now && g.enters == 0 && g.letters == 0,
+              "the player busy just before the line: nothing pressed");
+    }
+
+    // How long the line took, as the potions saw it: from the hold, which
+    // starts before the line does.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.clock = 10'000;
+        auto sender = make_sender(g);
+        sender->set_held_since(7'500);
+        std::string closed;
+        sender->on_report([&closed](const std::string& s) {
+            if (s.find("đã đóng") != std::string::npos) closed = s;
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && closed.find("bot bị giữ") != std::string::npos,
+              "the closing report says how long the bot was held, counted from the hold: " + closed);
+    }
+
+    // ---- a chat line left in doubt is held on to until it shows shut ----
+    struct DoubtWatch {
+        int holds = 0, releases = 0;
+        std::string released, said;
+        bool same = true, quiet = true;
+        ChatDoubt::Hooks hooks() {
+            ChatDoubt::Hooks h;
+            h.hold = [this] { ++holds; };
+            h.release = [this](const std::string& why) { ++releases; released = why; };
+            h.same_game = [this] { return same; };
+            h.when_quiet = [this](const std::function<bool()>& close) { return quiet && close(); };
+            h.say = [this](const std::string& why) { said = why; };
+            return h;
+        }
+    };
+    const auto left_open = [](int typed) {
+        ChatSender::Result r;
+        r.left_open = true;
+        r.typed = typed;
+        return r;
+    };
+    // Steps every 100 ms of the pretend clock, as the worker takes them.
+    const auto steps = [](ChatDoubt& d, ChatSender& s, PretendChat& g, int n) {
+        for (int i = 0; i < n && d.active(); ++i) {
+            g.advance(100);
+            d.step(s, g.clock);
+        }
+    };
+    {
+        // Open with text in it, nobody at the mouse or keyboard: rubbed out
+        // and shut, nothing sent, and let go once, after it is seen shut.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.typed = 12;
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        ChatDoubt d(w.hooks());
+        d.note(left_open(10), 18, g.clock);
+        check(d.active() && w.holds >= 1 && w.releases == 0,
+              "a line left maybe open: held on to, everything else held off");
+        steps(d, *closer, g, 40);
+        check(!d.active() && w.releases == 1 && g.state == PretendChat::State::Shut && g.sent.empty(),
+              "it is closed with nothing sent, and only then let go -- once (" + w.released + ")");
+    }
+    {
+        // Out of sight: held for as long as that lasts, and nothing pressed
+        // into a game that cannot be seen; let go once it shows shut.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.typed = 3;
+        g.hidden = true;
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        ChatDoubt d(w.hooks());
+        d.note(left_open(3), 9, g.clock);
+        steps(d, *closer, g, 600);   // a minute
+        check(d.active() && w.releases == 0 && g.enters == 0 && g.backspaces == 0 && !w.said.empty(),
+              "a line out of sight for a minute: still held, nothing pressed, and the tab told why");
+        g.hidden = false;
+        g.state = PretendChat::State::Shut;   // the player shut it
+        steps(d, *closer, g, 30);
+        check(!d.active() && w.releases == 1, "seen shut at last: let go");
+    }
+    {
+        // Somebody at the keyboard -- typing in the line, maybe: not touched,
+        // still held; the player sends it, the line shuts, and it is let go.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.typed = 5;
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        w.quiet = false;
+        ChatDoubt d(w.hooks());
+        d.note(left_open(0), 8, g.clock);
+        steps(d, *closer, g, 100);
+        check(d.active() && w.releases == 0 && g.enters == 0 && g.backspaces == 0,
+              "somebody at the mouse or keyboard: the open line is not touched, and still held");
+        g.state = PretendChat::State::Shut;
+        steps(d, *closer, g, 30);
+        check(!d.active() && w.releases == 1, "the player shuts it: let go");
+    }
+    {
+        // A dialog up: no Enter, no Backspace, still held.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.dialog = "lời mời tổ đội";
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        ChatDoubt d(w.hooks());
+        d.note(left_open(0), 8, g.clock);
+        steps(d, *closer, g, 50);
+        check(d.active() && w.releases == 0 && g.enters == 0 && g.backspaces == 0,
+              "a dialog up over the open line: nothing pressed, still held");
+    }
+    {
+        // The game gone: let go, as the line went with it.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.hidden = true;
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        ChatDoubt d(w.hooks());
+        d.note(left_open(0), 8, g.clock);
+        steps(d, *closer, g, 5);
+        w.same = false;
+        steps(d, *closer, g, 5);
+        check(!d.active() && w.releases == 1 && g.enters == 0, "the game closed: let go");
+    }
+    {
+        // Handed over, when the player takes over: nothing let go here.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        ChatDoubt d(w.hooks());
+        d.note(left_open(0), 8, g.clock);
+        d.hand_over();
+        steps(d, *closer, g, 20);
+        check(!d.active() && w.releases == 0, "handed over on a stop: nothing let go by it");
+        // A line that shows shut leaves nothing in doubt.
+        ChatSender::Result fine;
+        d.note(fine, 0, g.clock);
+        check(!d.active(), "a line seen shut starts no doubt");
+    }
+    {
+        // What a line left in doubt shows, one look at a time.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        auto s = make_sender(g);
+        std::string why;
+        check(s->check_left_open(&why) == ChatSender::LeftOpen::Shut, "shut reads shut");
+        g.state = PretendChat::State::Open;
+        check(s->check_left_open(&why) == ChatSender::LeftOpen::Closable, "open with nothing in the way: closable");
+        g.focused = false;
+        check(s->check_left_open(&why) == ChatSender::LeftOpen::Busy && !why.empty(),
+              "the game not in front: not to be touched now");
+        g.focused = true;
+        g.hidden = true;
+        check(s->check_left_open(&why) == ChatSender::LeftOpen::Unseen && !why.empty(), "out of sight: unseen");
+        check(g.enters == 0 && g.backspaces == 0 && g.letters == 0, "and looking presses nothing");
+    }
+
+    // ---- the dialogs, looked for side by side, are still seen: none on a
+    //      clear screen, one with the death dialog up ----
+    if (ChatDialogs::can_check(store)) {
+        ChatDialogs dialogs;
+        Frame clear = game.render();
+        check(dialogs.up(clear, store).empty(), "a screen with no dialog: none");
+        if (const Frame* dead = store.get(dialogs.death)) {
+            Frame died = clear;
+            blit(died, *dead, 500, 300);
+            // Seen as a dialog, whatever it is taken for: its two buttons are the
+            // invitation's too, and any dialog at all keeps Enter back.
+            check(!dialogs.up(died, store).empty(), "the death dialog is seen among the four looks");
+        }
+    } else {
+        std::printf("  [skip] the dialogs' pictures are not installed here\n");
+    }
+}
+
+// ------------------------------------------------------------------ paths
+
+/// A GoBot folder with Vietnamese letters in its name.
+///
+/// Testers unzip into their Desktop, and a Windows user called Đức has one
+/// whose path the machine's code page cannot spell. Through the narrow calls
+/// exe_relative's path came out as another one, and no config, picture or
+/// glyph in the folder was found. Paths are UTF-8 now, and go to Windows wide.
+/// On a machine whose code page is UTF-8 -- this one, it may be -- both read
+/// the same and this passes either way; it is for the Vietnamese ones.
+void test_unicode_paths() {
+    section("Paths: a folder named with Vietnamese letters");
+
+    wchar_t tmp[MAX_PATH]{};
+    const DWORD n = GetTempPathW(MAX_PATH, tmp);
+    if (n == 0 || n > MAX_PATH) {
+        std::printf("  [skip] no temp folder\n");
+        return;
+    }
+    const std::string base = wide_to_utf8(std::wstring(tmp) + L"gobot_test_" +
+                                          std::to_wstring(GetCurrentProcessId()));
+    const std::string dir = base + "\\GoBot thử của Đức";
+    check(wide_to_utf8(utf8_to_wide(dir)) == dir, "a UTF-8 path goes to Windows and back unchanged");
+    check(make_folder(dir) && is_folder(dir) && path_exists(dir),
+          "the folder is made, and found again by its name");
+
+    // A config, written, read back, and changed in place.
+    const std::string ini_path = dir + "\\cấu hình.ini";
+    IniFile ini;
+    ini.set("Hunt", "character_name", "Tên Nhân Vật");
+    ini.set_bool("Hunt", "enabled", true);
+    IniFile back;
+    check(ini.save(ini_path) && back.load(ini_path) && back.get_bool("Hunt", "enabled", false) &&
+              back.get("Hunt", "character_name", "") == "Tên Nhân Vật",
+          "an ini in it is written and read back");
+    IniFile changed;
+    check(IniFile::set_in_place(ini_path, "Hunt", "enabled", "false") && changed.load(ini_path) &&
+              !changed.get_bool("Hunt", "enabled", true),
+          "and changed in place");
+
+    // A picture, saved and loaded, alone and through the store.
+    Frame f;
+    f.width = 4;
+    f.height = 3;
+    f.pixels.assign(static_cast<std::size_t>(4 * 3 * 4), 0);
+    for (std::size_t i = 0; i < f.pixels.size(); i += 4) {
+        f.pixels[i] = static_cast<std::uint8_t>(i * 5);
+        f.pixels[i + 1] = 200;
+        f.pixels[i + 2] = 30;
+        f.pixels[i + 3] = 255;
+    }
+    Frame g;
+    check(save_png(f, dir + "\\hình ảnh.png") && load_png(dir + "\\hình ảnh.png", g) && g.valid() &&
+              g.width == 4 && g.height == 3 && g.pixels == f.pixels,
+          "a picture in it is saved and loaded, pixel for pixel");
+    TemplateStore store;
+    check(store.load(dir) && store.get("hình ảnh") != nullptr,
+          "and the picture store finds it there, by its name");
+    const std::vector<std::string> found = files_in(dir, "*.png");
+    check(found.size() == 1 && found[0] == "hình ảnh.png", "its file is listed by its own name");
+
+    // A log, written and read.
+    const std::string log_path = dir + "\\nhật ký.log";
+    if (std::FILE* out = open_file(log_path, "ab")) {
+        std::fputs("dòng một\n", out);
+        std::fclose(out);
+    }
+    std::string text;
+    if (std::FILE* in = open_file(log_path, "rb")) {
+        char buf[64]{};
+        text.assign(buf, std::fread(buf, 1, sizeof buf, in));
+        std::fclose(in);
+    }
+    check(text == "dòng một\n", "a file in it is written and read");
+
+    check(remove_file(ini_path) && remove_file(dir + "\\hình ảnh.png") && remove_file(log_path) &&
+              !path_exists(ini_path),
+          "and each file is removed again");
+    RemoveDirectoryW(utf8_to_wide(dir).c_str());
+    check(!path_exists(dir), "and the folder");
+
+    // Where this program is, in UTF-8: whatever the folder is called, the
+    // configs beside it are found.
+    const std::string here = exe_relative("configs\\app.ini");
+    check(path_exists(here) == (GetFileAttributesW(utf8_to_wide(here).c_str()) !=
+                                INVALID_FILE_ATTRIBUTES) &&
+              wide_to_utf8(utf8_to_wide(here)) == here,
+          "exe_relative's path is UTF-8, and the wide call finds what it names");
+}
+
+/// VERSION.txt, which package.ps1 writes beside the program: the version on
+/// line 1, "commit <hash>" on line 2. The title and the simple screen show
+/// the first, gobot_gui.log both.
+void test_version_file() {
+    section("Version: VERSION.txt");
+
+    const std::string file = "2026.10.15\r\ncommit abc1234\r\n";
+    check(version_line(file, 0) == "2026.10.15" && version_line(file, 1) == "commit abc1234",
+          "line 1 the version, line 2 the commit, with CRLF");
+    check(version_line("2026.10.15\ncommit abc1234+\n", 1) == "commit abc1234+", "and with LF");
+    check(version_line("\xEF\xBB\xBF" "2026.10.15\r\n", 0) == "2026.10.15", "a BOM in front is skipped");
+    check(version_line("   2026.10.15  \r\n", 0) == "2026.10.15", "spaces round it are trimmed");
+    check(version_line("", 0).empty() && version_line("2026.10.15", 1).empty() &&
+              version_line("\r\n2026", 0).empty(),
+          "a missing line, or an empty one, is nothing");
+    check(version_line("2026\x01.10\xC3\xA9.15\t\r\n", 0) == "2026.10.15",
+          "only printable ASCII is kept: it goes into a window title and the log");
+    check(version_line(std::string(100, '9') + "\n", 0) == std::string(40, '9'),
+          "and at most 40 characters of it");
+
+    // Beside this program there may be one or not: a build of its own has
+    // none, and says so.
+    if (path_exists(exe_relative("VERSION.txt")))
+        check(!package_version().empty(), "the version is read from beside the program");
+    else
+        check(package_version().empty() && package_commit().empty(),
+              "with no VERSION.txt beside the program, there is no version");
+    check(version_shown() == (package_version().empty() ? std::string("bản tự build") : package_version()),
+          "what is shown: the version, or \"bản tự build\" -- now \"" + version_shown() + "\"");
+}
+
+/// gobot_gui.log afresh each session, the one before kept beside it: what a
+/// tester sends with a problem holds two sessions, not every character name,
+/// chat line and folder path since the day the package was unzipped.
+void test_log_each_start() {
+    section("Log: afresh each session, the one before kept");
+
+    check(Logger::old_name("C:\\GoBot\\gobot_gui.log") == "C:\\GoBot\\gobot_gui.old.log" &&
+              Logger::old_name("C:\\Go.Bot\\gobot") == "C:\\Go.Bot\\gobot.old",
+          "the session before goes beside it, as gobot_gui.old.log");
+
+    const std::string log = temp_file("gobot_test_session.log");
+    const std::string old = Logger::old_name(log);
+    remove_file(log);
+    remove_file(old);
+    const auto read = [](const std::string& path) {
+        std::string text;
+        if (std::FILE* f = open_file(path, "rb")) {
+            char buf[4096];
+            std::size_t n = 0;
+            while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+            std::fclose(f);
+        }
+        return text;
+    };
+    const auto has = [](const std::string& text, const char* what) {
+        return text.find(what) != std::string::npos;
+    };
+
+    // Three sessions, a line each. The tests run with no log file, and are
+    // left with none.
+    Logger& logger = Logger::instance();
+    const LogLevel was = logger.level();
+    logger.set_level(LogLevel::Info);
+    for (const char* line : { "first session", "second session", "third session" }) {
+        logger.set_file(log, true);
+        GB_INFO("gobot_test: %s", line);
+    }
+    logger.set_file("");
+    const std::string now = read(log), before = read(old);
+    check(has(now, "third session") && !has(now, "second session") && !has(now, "first session"),
+          "the log holds this session alone");
+    check(has(before, "second session") && !has(before, "first session"),
+          "the .old one the session before, and the one before that is gone");
+
+    // Without it -- gobot_cli, or a configs folder older than the key --
+    // a session is added to the end, as always.
+    logger.set_file(log, false);
+    GB_INFO("gobot_test: %s", "fourth session");
+    logger.set_file("");
+    logger.set_level(was);
+    const std::string added = read(log);
+    check(has(added, "third session") && has(added, "fourth session"),
+          "without it, a session is added to the end of the one file");
+    remove_file(log);
+    remove_file(old);
+}
+
 // ------------------------------------------------------------------ config
 
 void test_config() {
@@ -9081,10 +10908,17 @@ void test_protocol_handler() {
 
 } // namespace
 
+// The alerts' tests, in alerts_test.cpp, reporting through check() and section().
+void test_alerts(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Quick quest's, in quest_test.cpp, the same way.
+void test_quest(void (*check)(bool, const std::string&), void (*section)(const char*));
+
 int main() {
     Logger::instance().set_level(LogLevel::Error);   // keep test output readable
 
     std::printf("GoBot self-tests\n");
+    // This run's scratch folder: see temp_file.
+    if (!run_temp_dir().empty()) CreateDirectoryW(run_temp_dir().c_str(), nullptr);
 
     test_byte_reader();
     test_framing_extract();
@@ -9117,6 +10951,7 @@ int main() {
     test_party_chat();
     test_party();
     test_shipped_macro_works();
+    test_shipped_configs();
     test_colour_templates();
     test_dialog_driver();
     test_anchored_bars();
@@ -9138,10 +10973,20 @@ int main() {
     test_bag_dialogs();
     test_reviver();
     test_screen_layout();
+    test_auto_chat();
+    test_alerts(check, section);
+    test_quest(check, section);
     test_config();
+    test_unicode_paths();
+    test_version_file();
+    test_log_each_start();
     test_protocol_handler();
 
     std::printf("\n%s\n", std::string(50, '-').c_str());
     std::printf("%d passed, %d failed\n", g_passed, g_failed);
+    if (!run_temp_dir().empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(run_temp_dir()), ec);
+    }
     return g_failed == 0 ? 0 : 1;
 }

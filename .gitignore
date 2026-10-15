@@ -23,6 +23,11 @@ dist/
 frame.png
 region.png
 
+# The alerts' Discord webhook, encrypted. GoBot keeps it in %LOCALAPPDATA%\GoBot
+# and never in here; this is for a copy that strays in. *.bin above covers it
+# too -- it is named so that narrowing that one does not let this through.
+alerts_webhook.bin
+
 # The game's UI pictures.
 #
 # The build stages these next to the executable so a built bot is

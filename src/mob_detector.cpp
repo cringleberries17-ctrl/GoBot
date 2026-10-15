@@ -93,6 +93,19 @@ bool is_name_text(const Px& p) {
     return mn >= 170 && mx - mn <= 45;
 }
 
+/// Your own character's plate, where its name `at` was read. The name sits
+/// under the character's feet, so where the name is, is where it stands.
+Nameplate self_plate(const ScreenRect& at, const std::string& name, float sure) {
+    Nameplate me;
+    me.plate = at;
+    me.bar = ScreenRect{ at.x, at.y, at.w, 1 };
+    me.is_player = true;
+    me.is_self = true;
+    me.name = name;
+    me.name_confidence = sure;
+    return me;
+}
+
 } // namespace
 
 DetectorTuning DetectorTuning::defaults() {
@@ -501,12 +514,16 @@ void MobDetector::loop() {
 
         // Your own character, found by reading its name.
         //
-        // Nothing else will find it. Other players are known by the mana bar
-        // under their health bar, and the local character has neither -- its
-        // health is in the HUD, not over its head. All it has is its name,
-        // written under its feet like everyone else's, so the way to see your
-        // character is to go and read the screen for it.
-        if (font && font->loaded() && !name_known(found)) {
+        // Nothing else will find it. A plate with a mana bar under its health
+        // bar is a player's, and it may be yours or another player's: the
+        // bars say a player stands there, not which one. Your name, written
+        // under your feet like everyone else's, is what says which, so the way
+        // to see your character is to go and read the screen for it.
+        //
+        // On every frame, not only when no player is in view: with one there,
+        // the search was skipped and the nearest of them was taken for you,
+        // so the bot walked and hit relative to a stranger or a party member.
+        if (font && font->loaded()) {
             std::string want;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -521,10 +538,13 @@ void MobDetector::loop() {
         if (MinimapTracker* mm = minimap_.load()) mm->update(frame);
         if (CameraTracker* cam = camera_.load()) cam->update(frame);
 
+        // Seen means your own character, by its name: another player in view
+        // is not you, and said "your character is there" when it was not.
         std::size_t mobs = 0;
         bool saw_player = false;
         for (const Nameplate& n : found) {
-            if (n.is_player) saw_player = true; else ++mobs;
+            if (n.is_self) saw_player = true;
+            if (!n.is_player) ++mobs;
         }
 
         {
@@ -558,62 +578,86 @@ std::string MobDetector::character_name() const {
     return character_name_;
 }
 
-bool MobDetector::name_known(const std::vector<Nameplate>& found) {
-    for (const Nameplate& n : found) if (n.is_player) return true;
-    return false;
-}
-
 void MobDetector::find_character(const Frame& f, const DetectorTuning& t,
                                  const GlyphFont& font, const std::string& want,
                                  std::vector<Nameplate>& out) {
-    // Inside the same box the monsters are looked for in, for this frame.
-    ScreenRect area = t.resolved(f.width, f.height).area;
-
-    // Look where it was last, before looking everywhere. A whole frame takes
-    // long enough to matter at ten frames a second, and a character does not
-    // teleport -- so the search only widens when it has actually been lost.
-    ScreenRect near{};
+    // Where it was last seen, while that is recent enough to go on.
+    ScreenRect last{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (last_player_.plate.valid() && now_ms() - last_player_ms_ <= kPlayerMemoryMs)
-            near = last_player_.plate;
-    }
-    if (near.valid()) {
-        ScreenRect box{ near.x - 120, near.y - 40, near.w + 240, near.h + 80 };
-        box.x = std::max(area.x, box.x);
-        box.y = std::max(area.y, box.y);
-        box.w = std::min(area.right(), box.right()) - box.x;
-        box.h = std::min(area.bottom(), box.bottom()) - box.y;
-        near = box;
+            last = last_player_.plate;
     }
 
-    // The search itself is the slow part and reads nothing that is shared, so
-    // it happens with no lock held.
-    ScreenRect at{};
+    // The same search the tools make on one frame, so the two cannot come to
+    // different answers about who you are. It is the slow part and reads
+    // nothing that is shared, so it happens with no lock held.
+    Nameplate me;
     float sure = 0.0f;
-    bool got = near.valid() && font.find_text(f, near, want, at, &sure);
-    if (!got) got = font.find_text(f, area, want, at, &sure);
+    const bool got = find_self(f, t, font, want, me, &sure, last.valid() ? &last : nullptr);
 
     // Said once each way round, so a character that cannot be found says so
     // instead of the bot silently standing still.
     if (got != said_player_) {
         said_player_ = got;
         if (got) GB_INFO("Found your character \"%s\" at %d,%d", want.c_str(),
-                         at.cx(), at.y);
+                         me.plate.cx(), me.plate.y);
         else     GB_WARN("Cannot find \"%s\" on screen -- check it against the "
                          "name the game writes under your feet", want.c_str());
     }
     if (!got) return;
-
-    // The name sits under the character's feet, so where the name is, is where
-    // the character is standing.
-    Nameplate me;
-    me.plate = at;
-    me.bar = ScreenRect{ at.x, at.y, at.w, 1 };
-    me.is_player = true;
-    me.name = want;
-    me.name_confidence = sure;
     out.push_back(me);
+}
+
+bool MobDetector::find_self(const Frame& f, const DetectorTuning& t, const GlyphFont& font,
+                            const std::string& name, Nameplate& out, float* sure,
+                            const ScreenRect* last) {
+    if (name.empty() || !font.loaded() || !f.valid()) return false;
+
+    // Inside the same box the monsters are looked for in, for this frame.
+    const ScreenRect area = t.resolved(f.width, f.height).area;
+    const bool have_last = last && last->valid();
+
+    // Only the whole name on its plate. Any line that merely says the name
+    // somewhere was enough before, and another player's plate says it too
+    // when their name is yours with more letters ("TuanAnh" for "Anh",
+    // "KhiCon2" for "KhiCon") or a letter away from it ("ThanhAn" for
+    // "ThanhAm"): read as well as your own, it was taken for you whenever it
+    // came first, and the bot walked and hit relative to that player.
+    //
+    // Where you were last, before everywhere. A whole frame takes long
+    // enough to matter at ten frames a second, and a character does not
+    // teleport -- so the search only widens when it has actually been lost.
+    std::vector<GlyphFont::Spot> spots;
+    if (have_last) {
+        ScreenRect box{ last->x - 120, last->y - 40, last->w + 240, last->h + 80 };
+        box.x = std::max(area.x, box.x);
+        box.y = std::max(area.y, box.y);
+        box.w = std::min(area.right(), box.right()) - box.x;
+        box.h = std::min(area.bottom(), box.bottom()) - box.y;
+        if (box.valid()) spots = font.find_whole(f, box, name);
+    }
+    if (spots.empty()) spots = font.find_whole(f, area, name);
+    if (spots.empty()) return false;
+
+    // Two places with your whole name on them: the one nearest where you
+    // were is you, not whichever the search met first. With nowhere to go
+    // on, the one read best.
+    const GlyphFont::Spot* pick = nullptr;
+    long long pick_d = 0;
+    for (const GlyphFont::Spot& s : spots) {
+        if (have_last) {
+            const long long dx = s.where.cx() - last->cx();
+            const long long dy = s.where.y - last->y;
+            const long long d = dx * dx + dy * dy;
+            if (!pick || d < pick_d) { pick = &s; pick_d = d; }
+        } else if (!pick || s.sure > pick->sure) {
+            pick = &s;
+        }
+    }
+    out = self_plate(pick->where, name, pick->sure);
+    if (sure) *sure = pick->sure;
+    return true;
 }
 
 std::vector<Nameplate> MobDetector::plates() const {
@@ -655,17 +699,16 @@ std::vector<Nameplate> MobDetector::mobs() const {
 
 bool MobDetector::pick_player(const std::vector<Nameplate>& plates, int frame_width,
                               Nameplate& out) {
-    // Party members show health and mana bars too, so "has a mana bar" narrows
-    // it to the players but does not say which one is you. The camera follows
-    // your character, so of the candidates you are the one nearest the middle
-    // of the screen. It is only wrong at the edges of a map, where the camera
-    // stops scrolling and you walk away from the centre -- and there the next
-    // frame with nobody else on it corrects it.
+    // Only the plate made where your name was read. A plate with a mana bar
+    // may be yours or another player's, party members' included, and "the
+    // one nearest the middle" was somebody else whenever another player stood
+    // nearer the middle than you. There is one plate of yours a frame; the
+    // middle only breaks a tie there never is.
     const int centre = frame_width > 0 ? frame_width / 2 : 0;
     const Nameplate* best = nullptr;
     int best_d = 0;
     for (const Nameplate& n : plates) {
-        if (!n.is_player) continue;
+        if (!n.is_self) continue;
         const int d = std::abs(n.x() - centre);
         if (!best || d < best_d) { best = &n; best_d = d; }
     }

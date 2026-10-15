@@ -321,7 +321,19 @@ public:
 
         /// Whether the launcher is where `launcher_path` says.
         bool launcher_found() const;
+
+        /// VTCZone installed somewhere other than `launcher_path` says, and
+        /// seen running this session: its program's own path instead, said
+        /// once in the log, so that it can be started again if it is closed.
+        /// `look` asks the running processes now; without it, only what was
+        /// seen last (see running_launcher). True when it changed the path.
+        bool adopt_running_launcher(bool look = true);
     };
+
+    /// Where the running VTCZone's program is, asked of the process when
+    /// `look` is true -- and remembered for the rest of the session -- else
+    /// as last seen. Empty when it has not been seen running.
+    static std::string running_launcher(bool look = true);
 
     /// The pictures the crossing matches against, from wherever they are.
     ///
@@ -406,15 +418,38 @@ public:
         return landing(window, x, y, in_the_way) == Landing::Lands;
     }
 
-    /// Whether nothing else is over `window` at five points spread across its
-    /// client area. For trusting a frame read off the screen, which holds
-    /// whatever lies over the window rather than the window itself. A point
-    /// off every screen does not count against it -- what is read there is
-    /// black, and no page or HUD is found in black -- as long as one of the
-    /// five is on a screen; a window dragged part off the screen is still
-    /// looked at. When another window is over a point, `in_the_way` names its
-    /// program, as `landing` does.
+    /// Whether nothing else is over any part of `window`'s client area. For
+    /// trusting a frame read off the screen, which holds whatever lies over
+    /// the window rather than the window itself. Every window above it in the
+    /// order windows are drawn is asked -- visible, not minimised, not cloaked,
+    /// not click-through, and not one of its own popups -- and one that lies
+    /// over the client area anywhere on a screen is in the way: `in_the_way`
+    /// names its program, as `landing` does, or "taskbar" for Windows' own.
+    /// Off every screen does not count against it -- what is read there is
+    /// black, and no page or HUD is found in black -- neither a part of the
+    /// window nor a window over only that part, as long as one of five points
+    /// across it is on a screen; a window dragged part off the screen, or
+    /// taller than the screen, is still looked at.
     static bool uncovered(void* window, std::string* in_the_way = nullptr);
+    /// The first window above `window` that lies over its client area, by the
+    /// rules above; null when there is none.
+    static void* over(void* window);
+
+    /// A rectangle on the screen as Windows gives one: left, top, right,
+    /// bottom, in pixels.
+    struct Box { long left = 0, top = 0, right = 0, bottom = 0; };
+    /// Whether a window drawn at `drawn` lies over a client area at `client`:
+    /// whether the two meet on one of `screens`. Past every screen's edge
+    /// nothing is seen by anybody, the game's frame included, so a window
+    /// there is in nobody's way -- one kept on top past the bottom edge, say,
+    /// over the part of a game taller than the screen. A `taskbar` with no
+    /// more than kHiddenBarPx of itself on a screen is hidden: set to hide
+    /// itself, it leaves that strip at the edge to be brought back with, and
+    /// the rest of it lies past the edge. It counted against a game reaching
+    /// that edge, and the crossing waited on a taskbar nobody could move.
+    static bool lies_over(const Box& drawn, const Box& client, const std::vector<Box>& screens,
+                          bool taskbar = false);
+    static constexpr long kHiddenBarPx = 3;
 
     /// Where the HUD's "Level" plate -- hpmp_indicator2 -- sits on the game,
     /// on every client size, and how near it and how alike it has to be.
@@ -568,6 +603,12 @@ public:
     /// thread, to say so while the flow waits.
     bool holding() const { return holding_; }
     const std::string& held_by() const { return held_by_; }
+    /// Whether that hold is for a window that cannot be seen at all -- a page
+    /// or the HUD awaited behind another window -- rather than for a click.
+    bool hiding() const { return hidden_; }
+    /// The Vietnamese for that: what is in the way, by its program, or that
+    /// the window is minimised or off the screen when `by` is empty.
+    static std::string hidden_advice(const std::string& by);
 
     /// The default table: every page of the crossing, in order, with the
     /// pictures and the measured geometry that ship in configs/login.ini.

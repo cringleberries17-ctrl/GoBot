@@ -7,9 +7,12 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #include <windows.h>
+#include <dwmapi.h>
+#include <tlhelp32.h>
 
 namespace gobot {
 namespace {
@@ -174,6 +177,27 @@ std::string program_of(HWND hwnd) {
     return "?";
 }
 
+/// Whether a window is Windows' taskbar, on the main screen or another one.
+bool is_taskbar(HWND hwnd) {
+    char cls[64]{};
+    GetClassNameA(hwnd, cls, sizeof(cls) - 1);
+    return std::strcmp(cls, "Shell_TrayWnd") == 0 || std::strcmp(cls, "Shell_SecondaryTrayWnd") == 0;
+}
+
+/// Where two boxes meet, and whether that is nowhere.
+AutoLogin::Box meet(const AutoLogin::Box& a, const AutoLogin::Box& b) {
+    return AutoLogin::Box{ std::max(a.left, b.left), std::max(a.top, b.top),
+                           std::min(a.right, b.right), std::min(a.bottom, b.bottom) };
+}
+bool nowhere(const AutoLogin::Box& b) { return b.right <= b.left || b.bottom <= b.top; }
+
+/// Every screen, as the rectangle it shows of the desktop.
+BOOL CALLBACK add_screen(HMONITOR, HDC, LPRECT r, LPARAM out) {
+    reinterpret_cast<std::vector<AutoLogin::Box>*>(out)->push_back(
+        AutoLogin::Box{ r->left, r->top, r->right, r->bottom });
+    return TRUE;
+}
+
 /// What a wait that ran out says, by which page it was and whether the
 /// window that page is drawn on ever came up.
 AutoLogin::Why why_not_seen(const AutoLogin::Page& page, bool window_up) {
@@ -286,6 +310,25 @@ bool AutoLogin::worth_retrying(Why why) {
     }
 }
 
+std::string AutoLogin::hidden_advice(const std::string& by) {
+    if (by.empty())
+        return "Cửa sổ GoBot cần xem đang bị thu nhỏ hoặc nằm ngoài màn hình, nên GoBot chưa "
+               "nhìn thấy nó.";
+    // The taskbar cannot be moved out of the way as a window can: what helps
+    // is having it hide itself, or the window higher up.
+    if (by == "taskbar")
+        return "Thanh tác vụ (taskbar) của Windows đang che một phần cửa sổ GoBot cần xem, nên "
+               "GoBot chưa nhìn thấy nó — hãy cho thanh tác vụ tự ẩn (chuột phải vào thanh tác "
+               "vụ → Taskbar settings → Automatically hide the taskbar), hoặc kéo cửa sổ đó lên "
+               "cao hơn.";
+    const bool ours = lower(by).rfind("gobot", 0) == 0;
+    const std::string who = ours ? std::string("Cửa sổ GoBot")
+                          : by == "?" ? std::string("Một cửa sổ khác")
+                                      : "Cửa sổ của " + by;
+    return who + " đang che cửa sổ GoBot cần xem, nên GoBot chưa nhìn thấy nó — hãy dời cửa sổ "
+                 "đó ra.";
+}
+
 std::string AutoLogin::advice(Why why, const std::string& detail) {
     // A number of seconds when the flow knows how long it waited, and the
     // usual wait when it does not.
@@ -337,10 +380,15 @@ std::string AutoLogin::advice(Why why, const std::string& detail) {
             return "Đã chọn nhân vật nhưng 120 giây vẫn chưa vào game.";
         case Why::Covered: {
             // "Chưa bấm", not yet: the same words say what it is waiting on
-            // while it waits, and why it stopped once it has.
+            // while it waits, and why it stopped once it has. Nothing to click
+            // yet, only to look at: hidden_advice.
             if (detail.empty())
                 return "Chỗ GoBot cần bấm không nằm trên màn hình (cửa sổ bị thu nhỏ, hoặc bị kéo "
                        "ra ngoài màn hình?), nên GoBot chưa bấm.";
+            if (detail == "taskbar")
+                return "Thanh tác vụ (taskbar) của Windows đang che chỗ GoBot cần bấm, nên GoBot "
+                       "chưa bấm — hãy cho thanh tác vụ tự ẩn, hoặc kéo cửa sổ VTCZone hay game "
+                       "lên cao hơn.";
             const bool ours = lower(detail).rfind("gobot", 0) == 0;
             const std::string who = ours ? std::string("Cửa sổ GoBot")
                                   : detail == "?" ? std::string("Một cửa sổ khác")
@@ -626,12 +674,66 @@ bool AutoLogin::Settings::launcher_found() const {
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+std::string AutoLogin::running_launcher(bool look) {
+    static std::mutex mutex;
+    static std::string seen;
+    if (look) {
+        std::string now;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W entry{};
+            entry.dwSize = sizeof(entry);
+            if (Process32FirstW(snap, &entry)) {
+                do {
+                    if (_wcsicmp(entry.szExeFile, L"VTCZone.exe") != 0) continue;
+                    HANDLE proc =
+                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+                    if (proc == nullptr) continue;
+                    wchar_t path[MAX_PATH * 2]{};
+                    DWORD size = static_cast<DWORD>(std::size(path));
+                    if (QueryFullProcessImageNameW(proc, 0, path, &size) && size > 0)
+                        now = wide_to_utf8(std::wstring(path, size));
+                    CloseHandle(proc);
+                } while (now.empty() && Process32NextW(snap, &entry));
+            }
+            CloseHandle(snap);
+        }
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!now.empty()) seen = now;
+        return seen;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return seen;
+}
+
+bool AutoLogin::Settings::adopt_running_launcher(bool look) {
+    // Only when the file's path names nothing: a path that is there is the
+    // player's choice, even with another VTCZone running -- and no path at
+    // all says there is no launcher to start, which is not this to undo.
+    if (launcher_path.empty() || launcher_found()) return false;
+    const std::string there = running_launcher(look);
+    if (there.empty() || there == launcher_path || !path_exists(there)) return false;
+    static std::mutex said_mutex;
+    static std::string said;
+    {
+        std::lock_guard<std::mutex> lock(said_mutex);
+        if (said != there) {
+            said = there;
+            GB_INFO("AutoLogin: VTCZone is not at %s, which configs/login.ini names -- using the "
+                    "running one's own path, %s, for this session",
+                    launcher_path.c_str(), there.c_str());
+        }
+    }
+    launcher_path = there;
+    return true;
+}
+
 bool AutoLogin::Settings::file_missing(const std::string& path) {
-    // Asked by the narrow name, the way IniFile opens it, so the two cannot
+    // Asked by the wide name, the way IniFile opens it, so the two cannot
     // disagree about which file is meant. Only "not found" counts: a file
     // that is there and cannot be looked at is still somebody's file.
     if (path.empty()) return false;
-    if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+    if (path_exists(path)) return false;
     const DWORD err = GetLastError();
     return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
 }
@@ -751,14 +853,93 @@ AutoLogin::Landing AutoLogin::landing(void* window, int x, int y, std::string* i
     const HWND there = WindowFromPoint(at);
     const HWND top = there != nullptr ? GetAncestor(there, GA_ROOT) : nullptr;
     if (top != nullptr && top == GetAncestor(target, GA_ROOT)) return Landing::Lands;
-    if (in_the_way) *in_the_way = program_of(top);
+    // The taskbar by what the player sees, as uncovered() calls it, rather
+    // than as the explorer.exe behind it: its advice is its own.
+    if (in_the_way)
+        *in_the_way = top != nullptr && is_taskbar(top) ? std::string("taskbar") : program_of(top);
     return Landing::Covered;
+}
+
+bool AutoLogin::lies_over(const Box& drawn, const Box& client, const std::vector<Box>& screens,
+                          bool taskbar) {
+    for (const Box& screen : screens) {
+        const Box seen = meet(drawn, screen);
+        if (nowhere(seen)) continue;
+        // All there is of a taskbar set to hide itself, on this screen: the
+        // strip along the edge that brings it back. Over nothing anybody
+        // reads -- the frame of a game reaching that edge loses two rows.
+        if (taskbar && std::min(seen.right - seen.left, seen.bottom - seen.top) <= kHiddenBarPx)
+            continue;
+        if (!nowhere(meet(seen, client))) return true;
+    }
+    return false;
+}
+
+void* AutoLogin::over(void* window) {
+    const HWND target = static_cast<HWND>(window);
+    RECT client{};
+    if (target == nullptr || !GetClientRect(target, &client)) return nullptr;
+    POINT tl{ 0, 0 }, br{ client.right, client.bottom };
+    if (!ClientToScreen(target, &tl) || !ClientToScreen(target, &br)) return nullptr;
+    const Box area{ tl.x, tl.y, br.x, br.y };
+
+    // Only what is on a screen. Past every screen's edge nothing is seen,
+    // the game's frame included: a window kept on top there, or the rest of
+    // a taskbar hidden past the bottom, lay over the part of a game taller
+    // than the screen, and the crossing waited for it to move. With no
+    // screen to be told of, the window itself stands in for one.
+    std::vector<Box> screens;
+    EnumDisplayMonitors(nullptr, nullptr, add_screen, reinterpret_cast<LPARAM>(&screens));
+    if (screens.empty()) screens.push_back(area);
+
+    // Every window above it, from the one just above to the top. The
+    // window's own popups -- owned by it -- are its; anything else is not,
+    // even another window of the same program.
+    const HWND root = GetAncestor(target, GA_ROOT);
+    const HWND owner = GetAncestor(root, GA_ROOTOWNER);
+    int guard = 0;
+    for (HWND w = GetWindow(root, GW_HWNDPREV); w != nullptr && guard < 4096;
+         w = GetWindow(w, GW_HWNDPREV), ++guard) {
+        if (!IsWindowVisible(w) || IsIconic(w)) continue;
+        if (GetAncestor(w, GA_ROOTOWNER) == owner) continue;
+        // Click-through overlays are passed over, as WindowFromPoint passes
+        // them: a game's or a graphics driver's, drawn over every window.
+        if (GetWindowLongW(w, GWL_EXSTYLE) & WS_EX_TRANSPARENT) continue;
+        // Nor what is not on this desktop: a window on another virtual
+        // desktop, or a suspended app's, is "visible" and cloaked.
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked)
+            continue;
+        // Where it is drawn, not its rectangle: a window's invisible resizing
+        // border reaches a few pixels past what is seen of it, and one put
+        // beside the game is not over it.
+        RECT r{};
+        if (FAILED(DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof r)) &&
+            !GetWindowRect(w, &r))
+            continue;
+        if (lies_over(Box{ r.left, r.top, r.right, r.bottom }, area, screens, is_taskbar(w)))
+            return w;
+    }
+    return nullptr;
 }
 
 bool AutoLogin::uncovered(void* window, std::string* in_the_way) {
     if (in_the_way) in_the_way->clear();
     RECT client{};
     if (window == nullptr || !GetClientRect(static_cast<HWND>(window), &client)) return false;
+    // Anything over any part of it, not only over a few points: a window over
+    // the strip where the connect page's button is -- far below every point
+    // looked at -- left that page unseen in frames taken for the game's, and
+    // a game waiting on Kết Nối was ended as stuck.
+    if (IsIconic(static_cast<HWND>(window))) return false;
+    if (void* const w = over(window)) {
+        // Windows' taskbar is always on top, and a game window taller than
+        // the screen less the taskbar has its bottom under it: called what
+        // the player sees, not the program behind it.
+        const HWND hw = static_cast<HWND>(w);
+        if (in_the_way) *in_the_way = is_taskbar(hw) ? std::string("taskbar") : program_of(hw);
+        return false;
+    }
     const int w = static_cast<int>(client.right), h = static_cast<int>(client.bottom);
     const int at[][2] = { { w / 2, h / 2 },     { w / 4, h / 4 },     { 3 * w / 4, h / 4 },
                           { w / 4, 3 * h / 4 }, { 3 * w / 4, 3 * h / 4 } };
@@ -1034,6 +1215,9 @@ void AutoLogin::note_hidden(Step during, On which, bool hidden) {
             hidden_ = false;
             holding_ = false;
             held_by_.clear();
+            // Said, so that whoever shows the steps -- the keeper's card --
+            // stops naming a window that has moved away.
+            say(during, std::string(on_name(which)) + " can be seen again");
         }
         return;
     }
@@ -1464,6 +1648,11 @@ bool AutoLogin::cross() {
     }
     if (settings_.launcher_path.empty())
         return stop(Why::NoLauncher, "no launcher is configured");
+    // VTCZone installed somewhere login.ini does not say: where the running
+    // one is, remembered, in case it has to be started again later. Only once
+    // nothing above has refused -- a refusal touches no window -- and not for
+    // a pretend game, whose programs are not the machine's.
+    if (!hands_.running) settings_.adopt_running_launcher();
     if (!settings_.signin_picture.empty() && store_->get(settings_.signin_picture) == nullptr)
         GB_WARN("AutoLogin: there is no picture called '%s', so VTCZone's sign-in form "
                 "cannot be told from a page that is slow to come",
@@ -1520,6 +1709,9 @@ bool AutoLogin::cross() {
             say(Step::StartLauncher, settings_.launcher_path);
             const bool was_running = running(kPublisherProcess);
             if (!was_running) {
+                // Seen running earlier, somewhere else than the file says:
+                // started from there.
+                if (!hands_.running) settings_.adopt_running_launcher(false);
                 // A path that is wrong now is wrong on the next attempt as well.
                 if (!settings_.launcher_found())
                     return stop(Why::LauncherMissing,

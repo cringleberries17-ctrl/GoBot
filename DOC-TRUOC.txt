@@ -1,0 +1,229 @@
+﻿GOBOT – ĐỌC TRƯỚC KHI DÙNG
+
+Bản thử cho người chơi. Phiên bản ghi ở thanh tiêu đề cửa sổ GoBot, ở dòng
+dưới cùng màn hình GoBot và trong file VERSION.txt (ví dụ: 2026.10.15).
+Khi báo lỗi, nhớ ghi phiên bản.
+
+
+1. GOBOT LÀ GÌ
+
+GoBot là chương trình tự chơi Ghost Online (bản VTC) trên máy của bạn: đánh
+quái, dùng kỹ năng, uống bình, buff, hồi sinh, tự vào lại game khi bị văng,
+tổ đội, dọn rác, tự chat, làm nhiệm vụ nhanh và báo tin về điện thoại.
+
+GoBot chỉ nhìn màn hình game rồi bấm phím, bấm chuột như người chơi. GoBot
+không đọc hay sửa bộ nhớ game, không sửa gói tin, không hỏi tài khoản hay
+mật khẩu, không cần bản quyền, và không gửi gì đi đâu, trừ tin "Thông báo"
+vào kênh Discord của chính bạn khi bạn bật.
+
+Đây là bản thử. Một số phần chưa từng chạy trên game thật (xem mục 5). Hãy
+thử trên nhân vật phụ, và ngồi xem khi thử.
+
+
+2. CÀI VÀ CHẠY
+
+- Giải nén cả file zip ra một thư mục mới, tốt nhất có đường dẫn không dấu,
+  ví dụ C:\GoBot. Thư mục có tên tiếng Việt có dấu (ví dụ Desktop của tài
+  khoản Windows có dấu) chưa được thử trên nhiều máy: nếu GoBot không đọc
+  được hình hay chữ của game, hãy chuyển sang thư mục không dấu và báo lại.
+  Đừng chạy GoBot từ bên trong file zip.
+- Chạy gobot_gui.exe. Windows sẽ hỏi quyền quản trị (Administrator): bấm
+  "Có" (Yes). GoBot phải có quyền này vì game chạy bằng quyền quản trị;
+  thiếu nó, phím của bot không tới được game.
+- Nếu Windows hiện "Windows protected your PC": bấm "More info" rồi
+  "Run anyway" (GoBot chưa có chữ ký số). Nếu phần mềm diệt virus chặn hay
+  xoá file, đừng tắt diệt virus: hãy báo lại cho người gửi bạn bản này.
+- Không cần cài thêm gì, không cần GoC.
+
+
+3. CỬA SỔ GAME
+
+- Để game ở chế độ cửa sổ (không toàn màn hình), cỡ 1024x768 hoặc
+  1280x720. GoBot đã được kiểm tra với hai cỡ này; cỡ khác chưa thử.
+- Để tỉ lệ hiển thị của Windows (Scale, trong Settings > Display) ở 100%,
+  như GoC cũng khuyên.
+- GoBot nhìn màn hình để đọc game, nên game phải hiện rõ. Đừng để cửa sổ
+  GoBot, thanh tác vụ (taskbar) của Windows hay cửa sổ nào khác che game.
+  Nếu GoBot báo "Cửa sổ GoBot đang che game", bấm "Dời GoBot sang bên".
+- Màn hình thấp (cao 768 điểm ảnh, như nhiều máy xách tay): cửa sổ game cỡ
+  1024x768 cao hơn cả màn hình, không vừa. Hãy dùng cỡ 1280x720 và cho
+  thanh tác vụ tự ẩn (chuột phải vào thanh tác vụ → Taskbar settings → bật
+  "Automatically hide the taskbar"), rồi kéo cửa sổ game lên sát mép trên.
+- Màn hình nhỏ, không đủ chỗ đặt GoBot bên cạnh game: bấm BẮT ĐẦU rồi thu
+  nhỏ cửa sổ GoBot xuống thanh tác vụ. Bot vẫn chạy, và trong game vẫn
+  dùng được F10 (bật/tắt) và F12 (dừng hết).
+- Mỗi GoBot lo một game. Đừng chạy GoBot cùng lúc với GoC hay bot khác
+  trên cùng một game.
+
+
+4. DÙNG NHANH
+
+- Thẻ "Đánh quái", phần "Trước khi bắt đầu": làm cho các dòng có dấu xanh.
+  + Chưa tìm thấy game: mở game, vào nhân vật, bấm "Tìm lại" (hoặc "Chọn
+    cửa sổ…").
+  + Tên nhân vật: gõ đúng tên hiện dưới chân nhân vật (chỉ cần khi bật
+    "Tự đánh quái"). GoBot tìm nhân vật của bạn bằng tên này; chưa gõ tên
+    thì GoBot không bật Tự đánh quái và ghi lý do ở khung dưới nút BẮT ĐẦU.
+  + Chưa đọc được HP và MP: bấm "Tự tìm" lúc HP và MP đang đầy.
+- Phần "Bot sẽ làm gì": lúc mới giải nén, mọi việc đều TẮT. Đánh dấu việc
+  bạn muốn. Muốn đổi phím: bấm vào ô phím rồi nhấn phím bạn dùng trong game.
+- Bấm "BẮT ĐẦU" (hoặc F10 trong game). BẮT ĐẦU chạy mọi việc đã đánh dấu ở
+  tất cả các thẻ. Bấm "DỪNG LẠI" (hoặc F10) để dừng.
+- F12: dừng TẤT CẢ ngay và nhả mọi phím. Hãy nhớ phím này.
+  F11: bật/tắt riêng việc đánh quái.
+- Cài đặt tự lưu ngay khi bạn đổi.
+- Ô "Tự đưa game lên trước khi bạn không dùng máy 30 giây" (dưới nút
+  BẮT ĐẦU) đang bật: khi bot chạy mà bạn để yên máy 30 giây, GoBot đưa game
+  lên trên cùng. Bỏ đánh dấu nếu bạn không thích.
+- "Nâng cao ►" là màn hình chi tiết bằng tiếng Anh, cho người rành. Bạn
+  không cần dùng tới.
+
+
+5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM
+
+"Thử nghiệm" nghĩa là đã kiểm tra kỹ trên máy, nhưng chưa chạy trên game
+thật. Trên màn hình, các phần này có chữ "Thử nghiệm" ở dòng đầu của thẻ,
+hoặc ở đầu dòng giải thích dưới ô.
+
+- Dọn rác: đã chạy tốt trên game thật.
+- Tự hồi sinh (thử nghiệm): khi nhân vật chết, GoBot bấm "Sử dụng vật phẩm
+  hồi sinh" rồi "Xác Nhận". Cần có giấy hồi sinh hoặc bùa hồi sinh trong
+  túi. GoBot không bao giờ hồi sinh tại làng (mất 2% EXP) và không dùng
+  Cash. Thử 3 lần không được thì GoBot dừng cả bot, ghi lý do bằng chữ đỏ,
+  và để nhân vật nằm tại chỗ chờ bạn.
+- Tự buff (thử nghiệm): mỗi phím buff có thời gian riêng, từ 60 đến 7200
+  giây. Sau khi chết, hồi sinh hoặc vào lại game, GoBot buff lại tất cả.
+- Tự đánh quái: vùng tìm quái nay theo cỡ cửa sổ game (1024x768, 1280x720).
+  GoBot chỉ nhận ra nhân vật của bạn khi thấy đúng và đủ tên đã gõ, nên
+  không còn lấy người chơi khác đứng gần làm mình, kể cả người có tên dài
+  hơn chứa tên bạn (ví dụ TuanAnh khi bạn là Anh).
+- Tổ đội, "Tự mời người chat từ khoá" (thử nghiệm): nay đọc được khung
+  chat và danh sách người chơi ở cả cửa sổ 1280x720.
+- Tự đăng nhập (thử nghiệm): không còn ô tài khoản, mật khẩu. VTCZone tự
+  giữ đăng nhập; GoBot chỉ bấm "Chơi game", START, chọn kênh và nhân vật.
+  Thử 3 lần không được thì dừng và chờ bạn.
+- Tự chat (thử nghiệm): nói các câu của bạn trong khung chat game, theo giờ.
+- Nhiệm vụ (thử nghiệm): làm nhiệm vụ nhanh như GoC: cứ vài phút GoBot mở
+  cửa sổ Nhiệm Vụ, sang thẻ NV Phụ, bật ô "Tự Động" của game nếu đang tắt,
+  rồi đóng cửa sổ.
+- Thông báo (thử nghiệm): báo tin vào Discord của bạn (xem trên điện
+  thoại), kêu và hiện thông báo trên máy khi nhân vật chết, mất kết nối,
+  bot tự dừng…
+- GoBot không xử lý captcha (mã xác nhận của game). Nếu game hỏi, bạn phải
+  tự trả lời; đừng để bot chạy một mình lâu nếu game của bạn hay hỏi.
+
+
+6. THỬ TỪNG PHẦN CHO AN TOÀN
+
+Thử từng phần một, ở chỗ an toàn, và ngồi xem. Thấy gì lạ: bấm F12.
+
+- Dọn rác: chọn món cần bỏ, rồi bấm "Thử tìm (không xoá)". GoBot mở túi đồ,
+  xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. Chỉ khi danh
+  sách đúng mới bật "Tự dọn rác" hoặc bấm "Dọn ngay". Xoá là mất hẳn: đừng
+  chọn đồ quý, và đừng bấm gì trong game khi GoBot đang dọn.
+- Nhiệm vụ: mở cửa sổ Nhiệm Vụ bằng tay ở thẻ NV Phụ, rồi bấm "Thử xem
+  (không bấm gì)": GoBot chỉ nhìn và cho biết nó thấy gì. Thấy đúng rồi mới
+  bấm "Làm ngay 1 lần" và nhìn theo. Ngay sau khi bấm, GoBot đưa game lên
+  trước; nếu phải chờ lâu hơn vài giây, GoBot chờ bạn tự đưa game lên. Chưa
+  ai biết chắc ô "Tự Động" của game làm gì (có thể game tự nhận, trả nhiệm
+  vụ, hoặc cho nhân vật tự đi): nếu nhân vật tự đi chỗ khác, bấm F12, bỏ
+  đánh dấu "Làm nhiệm vụ nhanh" và báo lại. Phím mở cửa sổ Nhiệm Vụ mặc
+  định là U; game của bạn dùng phím khác thì đổi ở thẻ này.
+- Thông báo: trong Discord, dùng một kênh của riêng bạn: mở Cài đặt máy chủ
+  → Tích hợp → Webhook → Webhook mới → Sao chép URL webhook. Dán vào thẻ
+  Thông báo, bấm "Lưu", đánh dấu "Bật thông báo", rồi bấm "Gửi thử": một
+  tin thử vào Discord, máy kêu và hiện thông báo; game không bị đụng tới.
+  Webhook là bí mật: ai có nó đều gửi được tin vào kênh của bạn. Đừng dán
+  vào chat, đừng gửi cho ai, đừng chụp màn hình. GoBot mã hoá webhook và
+  cất ngoài thư mục GoBot; muốn bỏ thì bấm "Xoá webhook".
+- Tự chat: trong game, chọn kênh chat ở nút bên trái ô chat (thường là
+  Thường). Tắt Unikey/EVKey và để bàn phím Windows ở English (US). Gõ câu
+  vào ô "Các câu sẽ gửi", bấm "Kiểm tra ô chat" (chỉ xem, không bấm phím
+  nào), rồi bấm "Gửi thử 1 câu": câu đầu tiên được gõ thật vào game, không
+  dấu. Đừng ghi điều riêng tư vào câu chat; để cách nhau ít nhất 30 giây
+  và đừng spam.
+- Tự đánh quái: gõ đúng tên nhân vật trước. Lần đầu thử ở chỗ vắng, một
+  mình; rồi thử khi có người chơi khác hay người trong tổ đội đứng gần:
+  nhân vật phải đi và đánh từ chỗ của chính nó. Nếu nó đi lung tung hay
+  đánh nhầm hướng, bấm F12 và báo lại.
+- Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
+  xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
+- Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
+  không.
+- Tự đăng nhập: đăng nhập VTCZone một lần và chọn ghi nhớ đăng nhập. Chọn
+  Kênh và Nhân vật (nhân vật đếm từ bên trái màn hình chọn nhân vật). Nếu
+  game đang tắt, đánh dấu "Tự vào lại game khi bị văng hoặc mất kết nối"
+  rồi bấm BẮT ĐẦU: GoBot mở game, vào nhân vật rồi mới chạy các việc khác.
+  Lúc GoBot đang vào game, đừng đụng chuột và bàn phím. GoBot mở VTCZone ở
+  C:\Program Files\VTCZone; nếu thẻ báo "Không thấy VTCZone", hãy mở
+  VTCZone bằng tay: thấy VTCZone đang chạy, GoBot nhớ chỗ của nó cho tới khi
+  tắt GoBot. GoBot không bao giờ gõ tài khoản, mật khẩu: nếu VTCZone hiện
+  màn hình đăng nhập, GoBot dừng và báo. Gặp hộp "Security Alert" của game,
+  GoBot cũng dừng, để bạn tự quyết.
+- Tổ đội: thử với người quen. "Tự nhận lời mời vào tổ đội" nhận lời mời của
+  mọi người trừ danh sách đen, hoặc chỉ của những tên bạn ghi. "Tự mời
+  người chat từ khoá" mời người gõ đúng từ khoá (mặc định "pt"). Tên được
+  đọc từ màn hình nên đôi khi sai một hai chữ.
+
+Đừng:
+- bật nhiều phần thử nghiệm cùng lúc khi chưa thử từng phần;
+- để bot chạy một mình lâu khi đang thử;
+- chạy hai GoBot, hoặc GoBot cùng GoC hay bot khác, trên cùng một game;
+- bấm phím hay chuột trong game lúc GoBot đang làm một việc ngắn (dọn rác,
+  nhiệm vụ, gõ chat, vào game).
+
+
+7. KHI GẶP LỖI
+
+- Ghi lại: phiên bản GoBot, cỡ cửa sổ game, bạn đã làm gì, GoBot đã làm
+  gì, khoảng mấy giờ. Nếu GoBot hiện chữ đỏ, chụp màn hình cửa sổ GoBot
+  (che tên nhân vật nếu muốn).
+- Gửi file gobot_gui.log (nằm cạnh gobot_gui.exe). File này chỉ ghi lần mở
+  GoBot gần nhất; lần trước đó nằm trong gobot_gui.old.log, còn các lần cũ
+  hơn thì bị xoá. Nếu lỗi xảy ra trước khi bạn tắt rồi mở lại GoBot, gửi
+  cả gobot_gui.old.log. Hai file này có thể có: tên nhân vật bạn đã gõ,
+  tên những người chơi khác mà GoBot đã mời vào tổ đội (và tên người vào
+  tổ đội, nếu bạn bật "Kèm tên người chơi khác" ở thẻ Thông báo), đường
+  dẫn thư mục trên máy (có tên người dùng Windows), địa chỉ mạng trong nhà
+  (dạng 192.168.x.x), và các câu Tự chat đã gõ. File không có mật khẩu hay
+  webhook. Bạn có thể mở bằng Notepad để xem trước, và thay các tên bằng
+  chữ khác nếu muốn.
+- Các thư mục trash_debug, revive_debug, quest_debug, chat_debug là ảnh
+  chụp màn hình game lúc có lỗi: trong đó thấy tên nhân vật, khung chat và
+  người chơi khác. Chỉ gửi khi được hỏi, và xem trước khi gửi.
+- Đừng gửi: thư mục configs, file alerts_webhook.bin, webhook, tài khoản,
+  mật khẩu.
+
+
+8. CẬP NHẬT TỪ BẢN GOBOT CŨ
+
+- Giải nén bản mới ra một thư mục MỚI; đừng giải nén đè lên bản cũ.
+- Đơn giản nhất: đặt lại phím, tên nhân vật và danh sách tổ đội trên màn
+  hình mới (vài phút).
+- Muốn giữ cài đặt cũ: đóng GoBot, rồi chép party.ini (tổ đội) từ thư mục
+  configs cũ sang thư mục configs mới. Nếu bản cũ đã có Dọn rác, chép thêm
+  trash.ini và thư mục trash. Đừng chép các file khác: bản mới đã khác.
+- Đừng chép hunt.ini: hunt.ini của các bản cũ (trước 15/10/2026) có thể có
+  sẵn tên nhân vật của người khác. Gõ lại tên nhân vật và phím đánh ở thẻ
+  Đánh quái. Nếu lỡ chép rồi, xem lại ô "Tên nhân vật": phải là tên nhân
+  vật của chính bạn.
+- Phím kỹ năng, bình và buff cũng đặt lại trên màn hình mới: macro.ini của
+  bản cũ có bật sẵn một chuỗi phím Z, X, C tự lặp mà màn hình mới không
+  hiện.
+- party.ini của các bản cũ (trước 15/10/2026) bật sẵn "Tự nhận lời mời
+  vào tổ đội" và "Tự mời người chat từ khoá". Chép nó sang rồi thì mở thẻ
+  Tổ đội trước khi bấm BẮT ĐẦU, và bỏ đánh dấu những việc bạn không muốn:
+  không thì GoBot nhận lời mời của mọi người và mời bất kỳ ai gõ "pt".
+- Sau đó chọn lại Kênh, Nhân vật ở thẻ Tự đăng nhập và đánh dấu lại các
+  việc bạn muốn.
+- Webhook Discord được cất trên máy, không nằm trong thư mục GoBot: bản mới
+  tự dùng lại.
+- Các bản cũ (trước 15/10/2026) có chỗ ghi tài khoản, mật khẩu VTCZone
+  trong configs\login.ini. Bản này không dùng tới nữa. Chuyển xong thì xoá
+  hẳn thư mục GoBot cũ.
+
+
+9. LƯU Ý
+
+Dùng bot là vi phạm điều khoản sử dụng của game (VTC), và tài khoản có thể
+bị khoá. Bạn tự chịu trách nhiệm khi dùng. Nên thử trên nhân vật phụ.

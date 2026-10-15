@@ -41,8 +41,13 @@ public:
     enum class LootShare { Free, Contribution };
 
     struct Settings {
-        bool auto_accept = true;        ///< accept invitations
-        bool auto_invite = true;        ///< invite others
+        /// Both off until a file says otherwise. Each one acts on the game --
+        /// an invitation taken, one sent -- and a party.ini that is missing,
+        /// or held by another program as it is read, says nothing about what
+        /// the player chose: on, they had the tab show both ticked and took
+        /// invitations from anyone.
+        bool auto_accept = false;       ///< accept invitations
+        bool auto_invite = false;       ///< invite others
         bool always_leader = false;     ///< only invite while leading
 
         bool use_blacklist = false;

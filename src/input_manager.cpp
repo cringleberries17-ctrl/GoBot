@@ -534,29 +534,78 @@ bool InputManager::normal_attack() {
 bool InputManager::loot() { return key_press(key_loot_); }
 
 bool InputManager::send_chat(const std::string& text, std::uint32_t chat_key) {
+    // It pressed Enter and typed whatever it was given, one byte at a time as
+    // Unicode, without looking: a Vietnamese letter came out as two wrong
+    // characters, the game ignores Unicode input in at least one of its boxes,
+    // and letters typed when the line had not opened were skill keys. A line
+    // needs a look at the screen before each key, which ChatSender does.
+    (void)chat_key;
+    GB_WARN("Chat: send_chat typed nothing (%zu bytes asked for): a line is only typed once "
+            "the screen shows the chat line open, which ChatSender does", text.size());
+    return false;
+}
+
+// ------------------------------------------------------------------- typing
+
+namespace {
+
+INPUT key_event(std::uint32_t vk, bool down) {
+    INPUT in{};
+    in.type       = INPUT_KEYBOARD;
+    in.ki.wVk     = static_cast<WORD>(vk);
+    in.ki.wScan   = InputManager::scan_code(vk);
+    in.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+    if (is_extended(vk)) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    return in;
+}
+
+} // namespace
+
+bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms) {
+    if (vk == 0) return false;
     if (!window_focused()) return false;
-    if (text.empty()) return false;
 
-    key_press(chat_key);
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    INPUT down[2]{};
+    UINT n = 0;
+    if (shift) down[n++] = key_event(VK_SHIFT, true);
+    down[n++] = key_event(vk, true);
+    const UINT went = SendInput(n, down, sizeof(INPUT));
+    if (went == n) std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, hold_ms)));
 
-    // Unicode injection: typing via VK codes would depend on the active
-    // keyboard layout, which we don't control.
-    for (char ch : text) {
-        INPUT in[2]{};
-        in[0].type = INPUT_KEYBOARD;
-        in[0].ki.wScan   = static_cast<WORD>(static_cast<unsigned char>(ch));
-        in[0].ki.dwFlags = KEYEVENTF_UNICODE;
-        in[1] = in[0];
-        in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+    // Up whatever happened, and not gated on focus: a key that went down and
+    // never came up is held in the game from then on.
+    INPUT up[2]{};
+    UINT m = 0;
+    up[m++] = key_event(vk, false);
+    if (shift) up[m++] = key_event(VK_SHIFT, false);
+    SendInput(m, up, sizeof(INPUT));
 
-        SendInput(2, in, sizeof(INPUT));
-        std::this_thread::sleep_for(std::chrono::milliseconds(jitter(20, 45)));
+    if (went != n) {
+        GB_WARN("SendInput failed for vk=0x%02X (err %lu)", vk, GetLastError());
+        return false;
     }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
-    key_press(chat_key);
     return true;
+}
+
+bool InputManager::type_unit(wchar_t unit) {
+    if (!window_focused()) return false;
+    INPUT in[2]{};
+    in[0].type       = INPUT_KEYBOARD;
+    in[0].ki.wScan   = static_cast<WORD>(unit);
+    in[0].ki.dwFlags = KEYEVENTF_UNICODE;
+    in[1] = in[0];
+    in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+    return SendInput(2, in, sizeof(INPUT)) == 2;
+}
+
+bool InputManager::post_char(wchar_t unit, bool ime) {
+    if (!window_focused()) return false;
+    HWND h = static_cast<HWND>(hwnd_.load());
+    return PostMessageW(h, ime ? WM_IME_CHAR : WM_CHAR, static_cast<WPARAM>(unit), 1) != FALSE;
+}
+
+bool InputManager::caps_lock_on() {
+    return (GetKeyState(VK_CAPITAL) & 1) != 0;
 }
 
 // ------------------------------------------------------------------ pointer

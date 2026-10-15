@@ -49,10 +49,14 @@ namespace gobot {
 /// player's rule is that the bot stops then rather than revive in the village,
 /// and `on_out_of_tries` is where whoever runs this hears it. A revive counts
 /// once the panel and the question have stayed away -- for a moment when HP
-/// reads above 0, for kSettleBlindMs when it cannot be read -- and its try is
-/// only given back once the character has stayed up for kAliveMs: a panel that
-/// comes back at once is the same death, so a game that only hides the panel
-/// for a moment when there is no revive item cannot keep it trying for ever.
+/// reads above 0, for kSettleBlindMs when it cannot be read. One that HP read
+/// above 0 confirmed ends the death there and then: the character is up, and
+/// a death that follows at once -- revived among whatever killed it -- is a
+/// new one with its own three tries, so quick deaths never stop the bot while
+/// revive items last. One taken with HP unreadable gives its try back only
+/// once the character has stayed up for kAliveBlindMs: a panel that comes back
+/// before that is the same death, so a game that only hides the panel for a
+/// while when there is no revive item cannot keep it trying for ever.
 ///
 /// Everything it does to the game goes through a grab, a click and a clock,
 /// each replaceable, so the whole of it is tried on a pretend game in the
@@ -120,6 +124,11 @@ public:
     /// Seen alive this long and the next death is a new one, with its own
     /// three tries. Longer than a flicker of the panel during an attempt.
     static constexpr int kAliveMs = 5000;
+    /// The same after a revive taken with HP unreadable. Far longer than any
+    /// time the game may keep the panel away after Xác Nhận with no revive
+    /// item left -- seen at up to 15 s on a pretend game -- so that does not
+    /// pass for a revive that held and give the tries back every time.
+    static constexpr int kAliveBlindMs = 60000;
     /// Tries per death.
     static constexpr int kAttempts = 3;
 
@@ -218,6 +227,14 @@ public:
     void on_report(Report r) { report_ = std::move(r); }
     /// Called once for each revive.
     void on_revived(std::function<void()> f) { revived_hook_ = std::move(f); }
+    /// Called once for each death, at the first look that shows its panel. A
+    /// panel back before the death is over -- see the class comment -- is the
+    /// same death, and is not told again.
+    void on_death(std::function<void()> f) { death_hook_ = std::move(f); }
+    /// Called once for each death the character came back from with a revive
+    /// of this one's, once that is sure: at the revive when HP read above 0
+    /// confirmed it, otherwise once it has stayed up for kAliveBlindMs.
+    void on_back(std::function<void()> f) { back_hook_ = std::move(f); }
     /// Called once for each death whose tries ran out, with the reason in
     /// English.
     void on_out_of_tries(std::function<void(const std::string&)> f) { out_hook_ = std::move(f); }
@@ -227,8 +244,8 @@ public:
     void set_debug_dir(const std::string& dir) { debug_dir_ = dir; }
     static constexpr std::size_t kKeptFrames = 20;
 
-    /// Tries used at this death -- and at the last revive, until the
-    /// character has stayed up for kAliveMs.
+    /// Tries used at this death -- and at the last revive taken with HP
+    /// unreadable, until the character has stayed up for kAliveBlindMs.
     int  tries() const { return tries_; }
     int  revived() const { return revived_; }        ///< since this was made
     bool out_of_tries() const { return tries_ >= kAttempts; }
@@ -255,6 +272,11 @@ private:
     /// Every try at this death used: says so, and calls `on_out_of_tries`,
     /// once for the death.
     Turn give_up();
+    /// The panel seen: a death begins, and is told, unless one is under way.
+    void begin_death();
+    /// This death is over: the next one gets its own tries. `came_back`: a
+    /// revive of this one's brought the character up, and `on_back` is told.
+    void end_death(bool came_back);
     /// Click a client point of the game; false, and `why_not` says why, when
     /// the click did not go out.
     bool click(int x, int y, const char* what, std::string* why_not = nullptr);
@@ -282,6 +304,8 @@ private:
     std::atomic<bool>    cancelled_{false};
     Report               report_;
     std::function<void()> revived_hook_;
+    std::function<void()> death_hook_;
+    std::function<void()> back_hook_;
     std::function<void(const std::string&)> out_hook_;
     std::string          debug_dir_;
 
@@ -295,6 +319,12 @@ private:
     bool death_on_ = false;
     /// `on_out_of_tries` has been called for this death.
     bool gave_up_ = false;
+    /// A death is under way, and has been told: from the first look at its
+    /// panel until the next death would get its own tries.
+    bool in_death_ = false;
+    /// This death was revived with HP unreadable: it is over only once the
+    /// character has stayed up for kAliveBlindMs.
+    bool blind_up_ = false;
     /// When the character was first seen alive since it was last seen dead.
     std::chrono::steady_clock::time_point alive_since_{};
     bool alive_seen_ = false;

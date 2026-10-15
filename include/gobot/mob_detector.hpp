@@ -50,6 +50,11 @@ struct Nameplate {
     ScreenRect bar;         ///< the health bar
     ScreenRect plate;       ///< the dark name box above it
     bool       is_player = false;
+    /// Your own character: the plate made where the name you typed was read
+    /// under its feet. Never a plate found by its bars: a plate with bars may
+    /// be yours or another player's, a party member's included, and only the
+    /// name says which.
+    bool       is_self = false;
     float      hp = 1.0f;   ///< 0..1, approximate — the empty part is hard to bound
 
     /// What the plate says, when a glyph set was available to read it with.
@@ -170,7 +175,8 @@ public:
     /// Every plate found, players included. For the tuning view.
     std::vector<Nameplate> plates() const;
 
-    /// The local character, identified by the mana bar under its health bar.
+    /// Your own character, found by its name (set_character_name) -- never
+    /// another player, whatever bars they wear. With no name there is none.
     ///
     /// Remembered briefly when it cannot be seen. The character's own name
     /// plate is routinely covered for a frame or two by its pet, its own
@@ -213,9 +219,10 @@ public:
 
     /// Your own character's name, so the detector can go and look for it.
     ///
-    /// Everything else on screen is found by its health bar; the local
-    /// character has none, because its health is in the HUD. Give the detector
-    /// the name and it reads the screen for it. Needs a glyph set to read with.
+    /// Everything else on screen is found by its health bar, and a plate with
+    /// bars may be yours or another player's: the bars say a player stands
+    /// there, not which one. Give the detector the name and it reads the
+    /// screen for it. Needs a glyph set to read with.
     void set_character_name(const std::string& name);
     std::string character_name() const;
 
@@ -233,15 +240,34 @@ public:
                                          const GlyphFont* font = nullptr,
                                          Cost* cost = nullptr);
 
-    /// Which of several player plates is the local character. Exposed for
-    /// tests; the instance methods use it internally.
+    /// Your own character among the plates: the one found by its name
+    /// (is_self), the nearest the middle should there ever be two. A plate
+    /// found by its bars is never taken for you, however near the middle: it
+    /// may be yours or another player's, and taking the nearest player for
+    /// you had the bot walk and hit relative to another player whenever one
+    /// stood nearer the middle. Exposed for tests; the instance methods use
+    /// it internally.
     static bool pick_player(const std::vector<Nameplate>& plates, int frame_width,
                             Nameplate& out);
+
+    /// Your own character on one frame, by its name as the game writes it
+    /// under its feet, looked for inside the tuning's box: the plate the
+    /// running detector makes on every frame, and what tools that look at
+    /// one frame use.
+    ///
+    /// Only the whole name on its plate counts (GlyphFont::find_whole): a
+    /// player whose name contains yours, or is a letter away from it, is not
+    /// you. Should two places say it -- your plate and a chat bubble saying
+    /// your name, say -- the one nearest `last`, where you were last seen,
+    /// is you, and that neighbourhood is searched first. Without `last`, the
+    /// best read. `sure` is how well the name was read, 0..1.
+    static bool find_self(const Frame& f, const DetectorTuning& t, const GlyphFont& font,
+                          const std::string& name, Nameplate& out, float* sure = nullptr,
+                          const ScreenRect* last = nullptr);
 
 private:
     void loop();
 
-    static bool name_known(const std::vector<Nameplate>& found);
     void find_character(const Frame& f, const DetectorTuning& t, const GlyphFont& font,
                         const std::string& want, std::vector<Nameplate>& out);
 

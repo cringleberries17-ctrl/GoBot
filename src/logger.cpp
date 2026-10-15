@@ -47,7 +47,15 @@ Logger::~Logger() {
     }
 }
 
-bool Logger::set_file(const std::string& path) {
+std::string Logger::old_name(const std::string& path) {
+    const std::size_t slash = path.find_last_of("\\/");
+    const std::size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+        return path + ".old";
+    return path.substr(0, dot) + ".old" + path.substr(dot);
+}
+
+bool Logger::set_file(const std::string& path, bool fresh) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (file_) {
         std::fclose(file_);
@@ -55,7 +63,11 @@ bool Logger::set_file(const std::string& path) {
     }
     if (path.empty()) return true;
 
-    file_ = std::fopen(path.c_str(), "a");
+    // The last session kept once, beside it; the ones before that go. If it
+    // will not move, the new session is added to the end, as it always was.
+    if (fresh && path_exists(path)) move_file(path, old_name(path));
+
+    file_ = open_file(path, "a");
     if (!file_) return false;
 
     std::fprintf(file_, "\n=== GoBot session start %s ===\n", wall_clock().c_str());

@@ -28,7 +28,17 @@ public:
     LogLevel level() const { return level_; }
 
     /// Mirror output into `path`. Empty string detaches the file sink.
-    bool set_file(const std::string& path);
+    ///
+    /// `fresh` starts the file anew: what was in it is moved to old_name(),
+    /// in place of the one before, so the file holds this session and the
+    /// .old one the last -- a log sent with a problem report then carries
+    /// those two, not weeks of names, chat lines and paths. A file that cannot
+    /// be moved (another copy of GoBot has it open) is added to, as without.
+    bool set_file(const std::string& path, bool fresh = false);
+
+    /// Where `fresh` keeps the session before: "gobot_gui.log" becomes
+    /// "gobot_gui.old.log", and a name with no extension gains ".old".
+    static std::string old_name(const std::string& path);
 
     void write(LogLevel lvl, const std::string& msg);
 

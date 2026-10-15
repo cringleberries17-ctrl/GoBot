@@ -50,7 +50,7 @@ There is no `monster_remove`, no `self_hpmp` and no `self_state`.
 | Missing packet | What stands in | Cost |
 |---|---|---|
 | own position | `WorldAnchor` — accumulates stationary monsters as landmarks, solves for the camera | Needs 6 sightings per landmark, 4+ agreeing, 10 to settle the scale, re-solves every 12 frames, 2.5 s hold. Cannot converge on a sparse or busy map, or while moving. |
-| own position (2nd route) | reading the character's own name off the screen | `Cannot find "examplename" on screen` × 4 — and those are all common letters, so this is not only the glyph gap |
+| own position (2nd route) | reading the character's own name off the screen | `Cannot find "ThanhAmCoc" on screen` × 4 — and those are all common letters, so this is not only the glyph gap |
 | `self_hpmp` | counting coloured pixels on the HP/MP bars | `PrintWindow returns a blank frame for this window` × 63 → pixels are lifted off the *screen*, so the game must be foreground and unobscured |
 | map identity | minimap image fingerprinting | ~20 distinct `Map changed -- minimap fingerprint …` lines in one session, several appearing once. Map identity thrashes, so anything keyed to a map thrashes with it. |
 

@@ -1,7 +1,14 @@
 # GoBot
 
-A packet-capture bot for GhostOnline. No account system, no licence server, no
-subscription — everything runs locally.
+**Players: read `DOC-TRUOC.txt` (in Vietnamese) or `START-HERE.txt` in the
+package, not this file.**
+
+A bot for GhostOnline, the VTC client, that plays by reading the screen -- the
+HUD's figures, the monsters' name plates, the game's own dialogs -- and
+pressing keys and clicking as a player would. No account system, no licence
+server, no subscription — everything runs locally. A packet-capture bot is in
+here too, optional and unfinished: it cannot run without your own position,
+which the server never sends (see below).
 
 Built as a clean reimplementation of the architecture used by ZTeam's GoC
 client, with the one part that made that client dependent on a vendor removed.
@@ -94,13 +101,21 @@ Output lands in `build\bin\Release\`:
 `gobot_gui` covers everything the two CLI tools do. They remain for scripting
 and for running the bot without a window.
 
+`.\package.ps1 -Version <version>` builds, runs the self-tests as a gate and
+zips what a player needs into `dist\`: the GUI and the CLI, the configs as
+shipped, the game's pictures and glyphs, the two notes, `VERSION.txt`, and
+`THIRD-PARTY-NOTICES.txt` -- the licences of OpenCV, zlib, Berkeley SoftFloat
+(compiled into OpenCV's core) and Dear ImGui, which are linked into the
+programs. It refuses while GoBot is running, and refuses a package that
+carries anything of this machine's player's.
+
 Verify the build:
 
 ```powershell
 .\build\bin\Release\gobot_test.exe
 ```
 
-663 checks covering the layers that can be tested without the game — frame
+Over 1,700 checks covering the layers that can be tested without the game — frame
 extraction and resync, frames that carry a trailer, both directions being
 framed, framing auto-detection, TCP reassembly (out-of-order, retransmits,
 partial overlap), packet decoding, the world model, pathfinding, the glyph
@@ -119,7 +134,7 @@ otherwise.
 
 ## Getting started
 
-`gobot_gui.exe` opens on one simple screen, in Vietnamese, with four tabs.
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, with seven tabs.
 **Đánh quái** is laid out in the order things have to happen:
 
 1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
@@ -129,6 +144,33 @@ otherwise.
    use skills, pick up drops, HP potion, MP potion, buffs, revive on death.
    Click a key box and press the key to change it.
 3. **BẮT ĐẦU**, or **F10** in game. **F12** stops everything at once.
+
+Everything that acts on the game ships switched **off**: nothing is pressed
+until something is ticked. **Tự hồi sinh** revives on the spot with a revive
+item -- the death panel's *Sử dụng vật phẩm hồi sinh*, then Xác Nhận; never
+the village (−2% EXP), never Cash -- three tries a death, and when they fail
+the whole bot stops and says why in red. **Tự buff** gives each buff key its
+own time, 60–7200 seconds, and casts every buff again after a death, a revive
+or logging back in. The game has to be windowed, 1024x768 or 1280x720 -- the
+readers follow either size -- with Windows' display scale at 100%. On a
+screen 768 pixels high only 1280x720 fits, with the taskbar set to hide
+itself; a hidden taskbar's strip, and anything past the screen's edge, is
+not counted as covering the game.
+
+Fighting finds your character by the name typed on the checklist, and only
+by that name, whole on its plate: a player whose name has yours inside it
+("TuanAnh" for "Anh", "KhiCon2" for "KhiCon") or is a letter away from it is
+not you. A plate with bars may be yours or somebody else's -- a party
+member's included -- so a plate is never taken for you by its bars. Without
+a name, **Tự đánh quái** does not start (nor does F11): the box under
+BẮT ĐẦU says why, and while it is ticked the name's row on the checklist has
+a red cross.
+
+The version is in the window's title and at the bottom left of the simple
+screen: the one `package.ps1` wrote into `VERSION.txt`, or *bản tự build* for
+a build of your own. Whatever has passed every test here but never run on the
+real game is marked *Thử nghiệm*: on the first line of a tab that is new as a
+whole, at the start of a row's hint for a new switch.
 
 **Tổ đội** answers party invitations and invites whoever chats the keyword,
 with an accept-only list, an invite list and a blacklist. **Tự đăng nhập**
@@ -146,6 +188,59 @@ in other colours, and the tab shows which. Only the bin's own dialogs are
 answered, told apart by their words, and an item that looks as much like an
 icon you did not pick, drawn differently, is left where it is. BẮT ĐẦU starts
 whatever is ticked on any tab.
+
+**Tự chat** says up to ten lines of your own in the game's chat, one every
+so often (30 seconds at the least), in turn or at random, into whatever
+channel the button beside the game's chat box is set to. It types the way
+GoC does, a key per letter, so the marks come off Vietnamese and only
+letters, digits and spaces go in. Each key is pressed only once a look at
+the screen shows the chat line open, Enter only on a fresh look that shows
+no dialog, and the fighting, potions and buffs wait for the few seconds a
+line takes -- and, when GoBot cannot see the chat line shut afterwards, for
+as long as that lasts, as every key would go into it. Nothing of GoBot's
+uses the clipboard.
+
+**Nhiệm vụ** is quick quest, done as GoC does it for this client: every few
+minutes of a run, GoBot opens the Nhiệm Vụ window with its key (U by default),
+goes to the NV Phụ tab and ticks the game's own **Tự Động** there if it is
+off, then closes the window again -- the fighting, potions and buffs wait
+those few seconds, and HP falling under the potion's mark ends a round at
+once. A timed round waits while the game is not the window in front; only
+*Làm ngay 1 lần* brings it forward, and only in the few seconds after the
+click -- one that had to wait longer waits for the game to be in front, as a
+timed round does, rather than pull it over a window you have gone to since. It reads the box before clicking, so an
+option already on is left alone, and it never clicks Hủy Nhiệm Vụ, the
+quest's accept, give-up or complete buttons, the low-level-quests checkbox
+or another tab, and types nothing; GoBot itself never accepts, hands in or
+picks a quest. *Thử xem* looks without pressing anything: open Nhiệm Vụ on
+NV Phụ by hand first, and it also says whether a round would click where it
+needs to. Three failed rounds in a row stop it, with the frames kept in
+`quest_debug` beside GoBot. The English client, whose quests GoC picks by
+picture, is not supported.
+
+**Thông báo** tells you when something needs a person: the character died
+(or was revived, or could not be), the game went and GoBot is logging back
+in (or gave up), the character has been out of the world for minutes, a stop
+left the trash bin's dialog or the chat line open, Tự chat or quick quest
+stopped itself.
+Each is one short message in Vietnamese to a Discord channel of yours,
+through a webhook, so the Discord app on your phone shows it, and a beep and
+a Windows notification on this PC that never take the focus from the game.
+Every event has its own tick; repeats within a minute come as one message
+(×N), at most 5 go a minute and, unless one needs a person, 30 an hour, and
+what could not go while the network was down goes when it is back, with its
+own time. A message is fixed
+sentences and numbers only: never your account, a password, your character's
+name, the map or position, a screenshot or another player's words -- a party
+message names the other player only if you tick that.
+
+The webhook is a secret: whoever has it can post in your channel. Paste it on
+the tab and GoBot keeps it encrypted by Windows (DPAPI), for your Windows
+account on this PC only, in `%LOCALAPPDATA%\GoBot\alerts_webhook.bin` --
+outside the GoBot folder, so copying or zipping GoBot never takes it along,
+and never in a log or in `configs/alerts.ini`. The tab shows only its last
+four characters. **Xoá webhook** on the tab deletes it; so does deleting that
+file. Alerts are off until **Bật thông báo** is ticked.
 
 Settings save themselves as they change. Everything else — every timer, the
 radar, the packet tools — is under **Nâng cao ►** at the bottom, and
@@ -168,7 +263,7 @@ Two mechanisms, usable together:
 | | what it does |
 |---|---|
 | **Repeating keys** | Each key on its own timer — a skill every 1.2s next to a buff every 5 minutes. Independent, so adding one never disturbs another's timing. |
-| **Sequence** | An ordered combo: key, pause, next key. Optionally looping. |
+| **Sequence** | An ordered combo: key, pause, next key. Optionally looping. Off as shipped; the simple screen does not show it. |
 
 **F10** toggles, **F12** is a panic stop that halts everything and releases every
 held key. Both work while the game has focus, so you never have to find the
@@ -374,9 +469,21 @@ gobot_cli
 
 | file | holds |
 |---|---|
-| `configs/app.ini` | capture interface, server address, window title |
+| `configs/app.ini` | the game's window, the client keeper, the simple screen's switches; capture interface and server address; whether `gobot_gui.log` starts afresh each session (`new_log_each_start`, on as shipped: the session before is kept as `gobot_gui.old.log`) |
+| `configs/macro.ini` | the macro's keys -- skills, potions, buffs -- and the sequence |
+| `configs/hunt.ini` | hunting: your character's name, the attack and pick-up keys, the reach |
+| `configs/party.ini` | party: accepting, inviting by keyword, the lists of names |
+| `configs/login.ini` | logging back in: where VTCZone is, the pages, the channel and character |
+| `configs/trash.ini`, `configs/trash\` | bag cleaning: the icons picked, and the photographed items |
+| `configs/chat.ini` | Tự chat: the lines, and how often |
+| `configs/quest.ini` | quick quest: the key, and how often |
+| `configs/alerts.ini` | alerts: which events, the limits -- never the webhook |
+| `%LOCALAPPDATA%\GoBot\alerts_webhook.bin` | the Discord webhook, encrypted for your Windows account |
 | `configs/protocol.ini` | framing + packet layouts (**you write this**) |
-| `configs/bot_default.ini` | combat behaviour, skills, healing, keys |
+| `configs/bot_default.ini` | the packet bot: combat behaviour, skills, healing, keys |
+
+Every one ships with whatever acts on the game switched off, and with no
+player's names, keys or lists in it.
 
 `bot_default.ini` follows the original client's schema, so existing configs
 port with minimal editing.

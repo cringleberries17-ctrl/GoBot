@@ -1,4 +1,5 @@
 #include "gobot/config.hpp"
+#include "gobot/common.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -49,7 +50,7 @@ bool IniFile::set_in_place(const std::string& path, const std::string& section,
     std::vector<std::string> lines;
     std::size_t crlf = 0, lf = 0;
     {
-        std::ifstream in(path, std::ios::binary);
+        std::ifstream in(utf8_to_wide(path).c_str(), std::ios::binary);
         if (!in) return false;
         std::string line;
         while (std::getline(in, line)) {
@@ -67,7 +68,7 @@ bool IniFile::set_in_place(const std::string& path, const std::string& section,
     // no line ending to go by.
     const char* const eol = lf > crlf ? "\n" : "\r\n";
     const auto write = [&] {
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        std::ofstream out(utf8_to_wide(path).c_str(), std::ios::binary | std::ios::trunc);
         if (!out) return false;
         for (const std::string& l : lines) out << l << eol;
         out.flush();
@@ -129,7 +130,7 @@ bool IniFile::set_in_place(const std::string& path, const std::string& section,
 }
 
 bool IniFile::load(const std::string& path) {
-    std::ifstream in(path);
+    std::ifstream in(utf8_to_wide(path).c_str());
     if (!in) return false;
 
     clear();
@@ -162,7 +163,7 @@ bool IniFile::load(const std::string& path) {
 }
 
 bool IniFile::save(const std::string& path, const std::string& header) const {
-    std::ofstream out(path, std::ios::trunc);
+    std::ofstream out(utf8_to_wide(path).c_str(), std::ios::trunc);
     if (!out) return false;
 
     if (!header.empty()) {
@@ -564,11 +565,21 @@ bool AppConfig::save(const std::string& path) const {
 }
 
 std::string exe_relative(const std::string& relative) {
-    char buf[MAX_PATH]{};
-    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return relative;
-
-    std::string dir(buf, n);
+    // In UTF-8, as every path in GoBot is, and asked for in full: a folder
+    // named with Vietnamese letters is another path read back in the
+    // machine's code page, and a long one does not fit MAX_PATH.
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+        if (n == 0) return relative;
+        if (n < buf.size()) {
+            buf.resize(n);
+            break;
+        }
+        if (buf.size() >= 32768) return relative;
+        buf.resize(buf.size() * 2);
+    }
+    std::string dir = wide_to_utf8(buf);
     const auto slash = dir.find_last_of("\\/");
     if (slash == std::string::npos) return relative;
     dir.resize(slash + 1);

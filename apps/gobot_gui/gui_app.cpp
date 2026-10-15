@@ -1,8 +1,10 @@
 #include "gui_app.hpp"
+#include "gobot/alerts.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/reviver.hpp"
 #include "gobot/routine.hpp"
 #include "gobot/screen_layout.hpp"
+#include "gobot/session_manager.hpp"
 
 #include "gobot/byte_reader.hpp"
 #include "gobot/common.hpp"
@@ -90,6 +92,13 @@ void copy_to(char* dst, std::size_t cap, const std::string& src) {
     std::snprintf(dst, cap, "%s", src.c_str());
 }
 
+/// The hold a chat line is typed under, and kept under while the chat line
+/// may be open, by name.
+const char* const kChatHold = "auto chat";
+
+/// What a trash pass says while it waits for the chat line to be seen shut.
+const char* const kTrashWaitsForChat = "Chờ: ô chat trong game có thể đang mở, dọn rác sau.";
+
 } // namespace
 
 // =========================================================================
@@ -102,22 +111,30 @@ GuiApp::~GuiApp() {
     if (navigator_) navigator_->stop();
     stop_hunt();
     stop_detector();
-    // These two own a thread that clicks the game. Joined before anything else
-    // goes away: a worker still running while the things it reads are torn
-    // down is a worker clicking at a target that is no longer there.
+    // These own a thread that clicks the game or types into it. Joined before
+    // anything else goes away: a worker still running while the things it
+    // reads are torn down is a worker clicking at a target that is no longer
+    // there. The chat first: a line half typed is rubbed out and closed as it
+    // stops, and it holds everything else off until then.
+    stop_chat();
     stop_party();
     stop_keeper();
     stop_revive();
     stop_trash();
-    // A look at the game for the bin may still be under way; it reads the
-    // window handle and its own pictures, which go away below. So may the
-    // login tab's look at VTCZone, with pictures of its own.
+    stop_quest();
+    // A look at the game for the bin, or for the chat line, may still be under
+    // way; it reads the window handle and its own pictures, which go away
+    // below. So may the login tab's look at VTCZone, with pictures of its own.
     if (left_held_look_.valid()) left_held_look_.wait();
+    if (chat_doubt_look_.valid()) chat_doubt_look_.wait();
     if (login_look_.valid()) login_look_.wait();
     stop_vitals();
     stop_macro();
     stop_bot();
     stop_capture();
+    // Last, once nothing is left to raise an alert: it ends a request under
+    // way and forgets the webhook's address.
+    alerts_shutdown();
 }
 
 void GuiApp::initialise() {
@@ -125,8 +142,22 @@ void GuiApp::initialise() {
 
     // A windowed app has no console, so stderr goes nowhere. Without a file
     // sink a startup failure is completely silent.
-    Logger::instance().set_file(exe_relative("gobot_gui.log"));
-    GB_INFO("GoBot GUI starting (elevated: %s)", elevated_ ? "yes" : "no");
+    //
+    // Started afresh each time when app.ini says so, as the package's does:
+    // a tester's log, sent with a problem, then holds this session and the
+    // one before (gobot_gui.old.log) -- not every character name, chat line
+    // and folder path since the day they unzipped it. Without the key, as in
+    // a configs folder older than it, every session is added to the one file.
+    IniFile app_ini;
+    const bool fresh_log = app_ini.load(exe_relative("configs/app.ini")) &&
+                           app_ini.get_bool("Paths", "new_log_each_start", false);
+    Logger::instance().set_file(exe_relative("gobot_gui.log"), fresh_log);
+    // The version first, so that every log a tester sends says which build
+    // it came from.
+    std::string build = package_version();
+    if (build.empty()) build = "(not packaged: no VERSION.txt)";
+    if (!package_commit().empty()) build += " (" + package_commit() + ")";
+    GB_INFO("GoBot GUI %s starting (elevated: %s)", build.c_str(), elevated_ ? "yes" : "no");
 
     // Which matcher is live. Linked statically, so there is no DLL in the
     // build folder to see it by, and "no DLLs" looks exactly like "not used".
@@ -279,6 +310,7 @@ void GuiApp::initialise() {
     hunter_ = std::make_unique<Hunter>(input_, coord_, detector_);
     hunter_->set_config(hunt_config_);
     load_simple_options();
+    alerts_init();
 
     nav_config_.load(exe_relative("configs/hunt.ini"));
     places_.load(exe_relative("configs/waypoints.ini"));
@@ -328,10 +360,15 @@ void GuiApp::tick() {
         stop_hunt();
         stop_macro();
         stop_bot();
-        // These click the game too, and the keeper can start it.
+        // These click the game too, and the keeper can start it. The chat
+        // rubs out a line half typed and closes it, under its hold, on its own
+        // thread: not waited for, as that can take a few seconds. A chat line
+        // it still cannot show shut is handed over below.
+        stop_chat(true, false);
         stop_party();
         stop_revive();
         stop_trash();
+        stop_quest();
         stop_keeper();
         input_.release_all();
         set_status("Panic stop -- all input released", 5000);
@@ -351,6 +388,17 @@ void GuiApp::tick() {
     if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
     simple_track_run(simple_running());
 
+    // A chat line waits while HP is under what the HP potion fires at, or 50:
+    // the potion is held off while a line is typed. The macro's settings are
+    // this thread's, so the number is handed over from here.
+    {
+        int floor = 50;
+        for (const MacroKey& k : macro_config_.keys)
+            if (k.enabled && k.keycode != 0 && macro_key_kind(k) == MacroKeyKind::HpPotion)
+                floor = std::max(floor, k.threshold_pct);
+        chat_hp_floor_ = floor;
+    }
+
     // A stop that left the bin's dialog in doubt paused the executor's buffs
     // and potions; with no trash worker to look, they come back once the game
     // shows nothing waiting.
@@ -358,8 +406,38 @@ void GuiApp::tick() {
 
     // The revive ran out of tries. The player's rule: stop the bot, never
     // revive in the village. Here rather than on the worker, which stopping
-    // joins.
+    // joins. First: the stop hands a chat line in doubt over to the block
+    // below, which takes it on the next tick.
     if (revive_gave_up_.exchange(false)) stop_after_revive();
+
+    // Tự chat was stopped by the player with the chat line maybe open, and has
+    // handed it over: its hold is still on, so nothing has typed into the line
+    // since. Whatever presses keys stops -- DỪNG and F12 have stopped most of
+    // it already -- the executor stays paused, and the hold goes; nothing of
+    // that starts again until a look shows the line shut (keys_may_start).
+    if (chat_handover_.exchange(false)) {
+        // Unless a look has shown it shut since (keys_may_start, for a BẮT
+        // ĐẦU pressed in between): then what that started is left running.
+        if (chat_doubt_) {
+            if (navigator_ && navigator_->running()) navigator_->stop();
+            stop_hunt();
+            stop_macro();
+            stop_bot();
+            const std::string note = "Ô chat trong game có thể vẫn đang mở, nên GoBot dừng cả đánh "
+                                     "quái, bình và buff để không gõ phím vào đó. Đóng ô chat trong game "
+                                     "(xoá chữ trong đó rồi bấm Enter), rồi bấm BẮT ĐẦU.";
+            simple_note(note, 15000);
+            if (!simple_view_) set_status(note, 15000);
+            GB_WARN("Chat: stopped while the chat line may be open; the keys are stopped too until "
+                    "it is seen shut");
+        }
+        end_hold(kChatHold);
+    }
+    // The same doubt, with no worker to watch it: the executor comes back by
+    // itself once the game shows the line shut.
+    watch_chat_doubt();
+    // A worker that has finished is joined here, rather than at the next start.
+    if (!chat_running_ && chat_thread_.joinable()) chat_thread_.join();
 
     if (keeper_reattach_.exchange(false)) {
         const bool found = reattach_game();
@@ -388,6 +466,7 @@ void GuiApp::tick() {
         keeper_cold_start_ = false;
     }
     refocus_if_idle();
+    alerts_tick();
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -761,7 +840,7 @@ void GuiApp::auto_step() {
             // memory means every failure is unreproducible.
             if (!sample.empty()) {
                 const std::string dump = exe_relative("last_capture.s2c");
-                if (std::FILE* f = std::fopen(dump.c_str(), "wb")) {
+                if (std::FILE* f = open_file(dump, "wb")) {
                     std::fwrite(sample.data(), 1, sample.size(), f);
                     std::fclose(f);
                     GB_INFO("Recorded sample written to %s (%zu bytes, stream %s)",
@@ -1547,12 +1626,13 @@ void GuiApp::draw_not_built_list() {
         { "Crest boxes",    "every picture it needs is extracted and named" },
         { "Party sharing",  "exp and loot sharing, always leading, held slots" },
         { "Items",          "bag monitor, use, drop, sell, shop" },
-        { "Chat",           "a rotating list of messages on a timer" },
+        { "Party advert",   "a chat line said only while not in a party" },
         { "Pet and avatar",  "pet healing, looting, avatar reset window" },
         { "TDO exchange",   "sixteen items, traded in a priority order" },
         { "Raid boss run",  "travel on a schedule and fight" },
         { "Profiles",       "named config sets, exportable" },
-        { "Telegram",       "a message when the session drops at 3am" },
+        { "Zalo",           "two-way control, later" },
+        { "Quest picking",  "choosing quests by picture, GoC's English-client way" },
     };
     for (const auto& p : kPending) {
         ImGui::Bullet();
@@ -1561,10 +1641,6 @@ void GuiApp::draw_not_built_list() {
         ImGui::SameLine();
         text_dim("-- %s", p.note);
     }
-
-    ImGui::Dummy(ImVec2(0, 8));
-    text_dim("Quick quest is deliberately dropped: around seventy quest icons, "
-             "more than every other feature put together.");
 
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button("Close", ImVec2(100, 0))) show_not_built_ = false;
@@ -2526,8 +2602,25 @@ void GuiApp::stop_party() {
 void GuiApp::party_loop() {
     const std::string config = exe_relative("configs/party.ini");
 
+    // Never on the code's own defaults. A file that cannot be read says
+    // nothing about what the player ticked, and a worker that ran anyway
+    // answered and sent invitations by rules nobody chose. Tried a few times
+    // first: the tab writes the file as a box is ticked, and something may
+    // hold it for a moment just then -- a virus scanner, say.
     Party::Settings rules;
-    rules.load(config);
+    bool read = rules.load(config);
+    for (int i = 0; !read && i < 5 && !party_stop_; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        read = rules.load(config);
+    }
+    if (!read) {
+        GB_WARN("Party: cannot read %s -- not started, rather than run on rules nobody chose",
+                config.c_str());
+        say_party("Không đọc được configs/party.ini nên Tổ đội không chạy. Kiểm tra file đó "
+                  "rồi bấm BẮT ĐẦU lại.");
+        party_running_ = false;
+        return;
+    }
 
     IniFile ini;
     ini.load(config);
@@ -2675,6 +2768,7 @@ void GuiApp::party_loop() {
                     say_party("accepted " + seen.who);
                     answered = seen.who;
                     ++party_accepted_;
+                    alert_party(true, seen.who);
                 }
             }
         }
@@ -2686,6 +2780,19 @@ void GuiApp::party_loop() {
                 const std::string text = font.read_line(frame, box);
                 if (!text.empty()) lines.push_back(text);
             }
+
+            // Tự chat's own lines, read back off the chat, are not somebody
+            // asking: an advert with the keyword in it would otherwise have
+            // the player try to invite himself after every one.
+            const std::vector<std::string> ours = recently_said();
+            if (!ours.empty())
+                lines.erase(std::remove_if(lines.begin(), lines.end(),
+                                           [&](const std::string& l) {
+                                               for (const std::string& s : ours)
+                                                   if (PartyChat::echoes(l, s)) return true;
+                                               return false;
+                                           }),
+                            lines.end());
 
             const std::uint64_t now = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2735,6 +2842,7 @@ void GuiApp::party_loop() {
                 }
                 say_party("invited " + who);
                 ++party_invited_;
+                alert_party(false, who);
             }
         }
 
@@ -2884,12 +2992,17 @@ void GuiApp::keeper_loop() {
         // open is left for the crossing to carry on from. It is one crossing
         // either way, and one that fails stops this.
         const bool cold = move == CrashWatch::Move::Start;
+        if (!cold)
+            alert("disconnect", alert_text::disconnect(seen.what, seen.code,
+                                                       keeper_restarts_ < watch_settings.max_restarts &&
+                                                       elevated_ && login.unidentified().empty()));
 
         if (!cold && keeper_restarts_ >= watch_settings.max_restarts) {
             const std::string n = std::to_string(keeper_restarts_.load());
             give_up("that is " + n + " restarts and it has gone again -- stopping, a person "
                     "is needed",
                     "Game văng " + n + " lần liền — GoBot ngừng tự vào lại. Cần người kiểm tra.");
+            alert("keeper_gave_up", alert_text::gave_up_restarts(keeper_restarts_));
             break;
         }
 
@@ -2927,6 +3040,7 @@ void GuiApp::keeper_loop() {
             give_up("the client is down and the crossing is not set up, so it cannot be "
                     "started again -- see configs/login.ini",
                     AutoLogin::advice(AutoLogin::Why::NotSetUp, pages));
+            alert("keeper_gave_up", alert_text::gave_up_not_set_up());
             break;
         }
 
@@ -2937,6 +3051,7 @@ void GuiApp::keeper_loop() {
                     "VTCZone or the game",
                     "GoBot không chạy bằng quyền Administrator nên không bấm được vào "
                     "VTCZone/game.");
+            alert("keeper_gave_up", alert_text::gave_up_not_elevated());
             break;
         }
 
@@ -2964,7 +3079,9 @@ void GuiApp::keeper_loop() {
             // Waiting on a window in the way, not stuck: said while it waits,
             // so the player at the screen knows what to move.
             if (flow.holding())
-                vi += " " + AutoLogin::advice(AutoLogin::Why::Covered, flow.held_by());
+                vi += " " + (flow.hiding() ? AutoLogin::hidden_advice(flow.held_by())
+                                           : AutoLogin::advice(AutoLogin::Why::Covered,
+                                                               flow.held_by()));
             say_keeper_vi(vi);
         });
         {
@@ -2981,11 +3098,13 @@ void GuiApp::keeper_loop() {
             // Stop and ask, as before: the crossing has already used its
             // attempts, and the next try is for a person to decide.
             give_up("could not get back in: " + flow.trouble(), flow.advice());
+            alert("keeper_gave_up", alert_text::gave_up_crossing(flow.attempts_made(), flow.why()));
             break;
         }
         seen_running = true;
         crossed_in = true;
         note("back in the world");
+        if (!cold) alert("back_in", alert_text::back_in(keeper_restarts_, watch_settings.max_restarts));
         say_keeper_vi(cold ? "Đã vào game. Đang theo dõi game."
                            : "Đã vào lại game. Đang theo dõi game.");
         keeper_reattach_ = true;
@@ -3087,6 +3206,11 @@ void GuiApp::revive_loop() {
     reviver.set_debug_dir(exe_relative("revive_debug"));
     reviver.on_report(tell);
     reviver.on_revived([this] { ++revive_count_; });
+    // The phone hears of a death once, when its panel is first seen, and of
+    // the revive once the Reviver is sure the character is up. Three failed
+    // tries are told by stop_after_revive alone, with why the bot stopped.
+    reviver.on_death([this] { alert("death", alert_text::death(true)); });
+    reviver.on_back([this] { alert("revived", alert_text::revived()); });
     reviver.on_out_of_tries([this](const std::string& reason) {
         {
             std::lock_guard<std::mutex> lock(worker_mutex_);
@@ -3116,9 +3240,13 @@ void GuiApp::revive_loop() {
         // Not over a hold that is somebody else's, which taking would end. A
         // trash pass that could not give an item back holds everything too,
         // but only to keep keys out of the bin's box; a revive presses no
-        // keys, so it goes ahead under that hold and leaves it as it was.
-        const bool under_trash = trash_hold_ && coord_.critical_reason() == "trash cleaning";
-        if (!holding && !under_trash) {
+        // keys, so it goes ahead under that hold and leaves it as it was. The
+        // same for a chat line left in doubt, whose hold keeps keys out of the
+        // line for as long as it takes: a character left dead meanwhile is
+        // worse than a click on the death panel.
+        const bool under_other = (trash_hold_ && coord_.critical_reason() == "trash cleaning") ||
+                                 (chat_doubt_ && coord_.critical_reason() == kChatHold);
+        if (!holding && !under_other) {
             if (!take_hold("reviving")) {
                 mouse.unlock();
                 if (!said_held)
@@ -3187,12 +3315,6 @@ void GuiApp::stop_after_revive() {
                60000);
 }
 
-void GuiApp::alert(const char* event, const std::string& text_vi) {
-    // The one place an alert is raised. Only written to the log for now;
-    // the Discord webhook and a sound are to be called from here.
-    GB_WARN("ALERT %s: %s", event, text_vi.c_str());
-}
-
 // ------------------------------------------------------------ trash cleaning
 
 void GuiApp::say_trash(const std::string& line) {
@@ -3258,13 +3380,14 @@ bool GuiApp::stop_trash() {
         stop_macro();
         stop_bot();
         if (navigator_ && navigator_->running()) navigator_->stop();
-        if (executor_) executor_->set_paused(true);
         ++left_held_gen_;
         trash_left_held_ = true;
+        update_executor_pause();
         simple_note("Hộp thoại của thùng rác có thể vẫn đang mở trong game, nên GoBot dừng "
                     "cả đánh quái, bình và buff để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
                     "rồi bấm BẮT ĐẦU.", 15000);
         GB_WARN("Trash: stopped while the bin may still hold an item; the keys are stopped too");
+        alert("trash_stuck", alert_text::trash_stuck(true));
         end_hold("trash cleaning");
         return true;
     }
@@ -3273,7 +3396,8 @@ bool GuiApp::stop_trash() {
 
 void GuiApp::bin_seen_clear() {
     trash_left_held_ = false;
-    if (executor_) executor_->set_paused(false);
+    // Not if a chat line left in doubt keeps it paused as well.
+    update_executor_pause();
 }
 
 bool GuiApp::bin_looks_clear(const TemplateStore& store, std::string* why) {
@@ -3300,6 +3424,33 @@ bool GuiApp::bin_looks_clear(const TemplateStore& store, std::string* why) {
 }
 
 bool GuiApp::keys_may_start() {
+    const auto refuse = [this](const std::string& why) {
+        simple_note(why, 12000);
+        if (!simple_view_) set_status(why, 12000);
+        GB_WARN("Not started: %s", why.c_str());
+        return false;
+    };
+    // A Tự chat worker told to stop with a line under way rubs it out and
+    // shuts it first, and may yet hand over a line it cannot show shut: what
+    // started meanwhile would type into it.
+    if (chat_running_ && chat_quit_)
+        return refuse("Đang dừng Tự chat: xoá câu đang gõ dở và đóng ô chat. Chờ một chút rồi bấm lại.");
+    if ((chat_doubt_ && !chat_doubt_watched_) || trash_left_held_) {
+        if (!simple_store_loaded_) {
+            simple_store_loaded_ = true;
+            simple_store_.load_best(exe_relative("configs/templates.ini"));
+        }
+    }
+    // Tự chat was stopped with the chat line maybe open, and no worker is
+    // left to watch it: every key would go into it. Not until two looks a
+    // frame apart show it shut, as the sender and watch_chat_doubt ask: one
+    // frame has been seen showing the line shut while it was open. (One a
+    // worker still watches holds everything off by itself.)
+    if (chat_doubt_ && !chat_doubt_watched_) {
+        std::string why;
+        if (!chat_line_looks_shut(simple_store_, 2, &why)) return refuse(why);
+        chat_seen_shut();
+    }
     if (!trash_left_held_) return true;
 
     // The last stop ended the trash worker's hold while the bin's dialog may
@@ -3307,10 +3458,6 @@ bool GuiApp::keys_may_start() {
     // the macro's potion keys as numbers -- the hunter's keys go into it as
     // well. Not until the game is seen with no dialog up and nothing waiting
     // in the bin.
-    if (!simple_store_loaded_) {
-        simple_store_loaded_ = true;
-        simple_store_.load_best(exe_relative("configs/templates.ini"));
-    }
     std::string why;
     if (!bin_looks_clear(simple_store_, &why)) {
         simple_note(why, 12000);
@@ -3487,6 +3634,18 @@ void GuiApp::trash_loop() {
         }
         read_ms = now_ms();
 
+        // Not while the game's chat line may be open, which Tự chat could not
+        // show shut: a pass presses the bag key, a letter in that line. One a
+        // Tự chat worker still watches is under its hold as well, but one a
+        // stop handed over holds nothing, and only this keeps a pass asked
+        // for with a button out of it. Tried again shortly, as below.
+        if (chat_doubt_) {
+            tell(kTrashWaitsForChat);
+            if (trash_oneshot_ && !held) break;
+            next = now_ms() + 30'000;
+            continue;
+        }
+
         // Something else holding everything off -- a revive, say -- is not
         // something to clean the bag through, and its hold is not this
         // worker's to end. Tried again shortly. This worker's own hold is
@@ -3537,9 +3696,11 @@ void GuiApp::trash_loop() {
             // Not while the revive sequence or the party worker is clicking,
             // nor they while this is. The hold is taken only now, with the
             // mouse: a revive that began while this waited for it keeps its
-            // own, and the pass waits instead.
+            // own, and the pass waits instead. The chat line is asked about
+            // again with the mouse in hand: a line left in doubt since the
+            // look above was under Tự chat's hold until then.
             std::lock_guard<std::mutex> mouse(game_mouse_mutex_);
-            if (take_hold("trash cleaning")) {
+            if (!chat_doubt_ && take_hold("trash cleaning")) {
                 passed = true;
                 trash_pass_ = true;
                 tell(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
@@ -3566,7 +3727,8 @@ void GuiApp::trash_loop() {
             trash_cleaner_ = nullptr;
         }
         if (!passed) {
-            tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
+            if (chat_doubt_) tell(kTrashWaitsForChat);
+            else tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
             if (trash_oneshot_ && !held) break;
             next = now_ms() + 30'000;
             continue;
@@ -3603,6 +3765,739 @@ void GuiApp::trash_loop() {
         if (trash_oneshot_ && !held) break;
     }
     trash_running_ = false;
+}
+
+// --------------------------------------------------------------- auto chat
+
+namespace {
+
+/// Runs `fn` on the way out of a scope, however it is left.
+struct OnExit {
+    std::function<void()> fn;
+    ~OnExit() { if (fn) fn(); }
+};
+
+const char* const kStopped = "Đã dừng.";
+const char* const kUserActive = "Bạn đang dùng chuột hoặc bàn phím — chat sau.";
+
+/// How far over the HP potion's mark HP has to be for a line to start, and the
+/// most that asks for, so that a potion set high still lets a full bar chat.
+constexpr int kChatHpMargin = 10;
+constexpr int kChatHpTop = 95;
+
+/// What a look at the bar said, for the log: the numbers it went by.
+std::string bar_numbers(const ChatBar& bar) {
+    char out[160];
+    std::snprintf(out, sizeof out, " (ô chat %s, dark %d, giống ô chat đóng %.3f, vết chữ %d)",
+                  chat_bar_name(bar.state), bar.dark, static_cast<double>(bar.closed_score),
+                  bar.ink);
+    return out;
+}
+
+} // namespace
+
+void GuiApp::say_chat(const std::string& line) {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    chat_log_.push_back(line);
+    if (chat_log_.size() > 200) chat_log_.erase(chat_log_.begin());
+}
+
+void GuiApp::start_chat() {
+    {
+        // A worker here already -- for a one-off look or line, or stopping
+        // because Tự chat was unticked and waiting to see the chat line shut
+        // -- becomes this run, started over from the first line's grace. Under
+        // the lock the worker leaves by, so that it is not on its way out
+        // meanwhile with the run lost.
+        std::lock_guard<std::mutex> lock(chat_life_mutex_);
+        if (chat_running_ && !chat_quit_) {
+            chat_stop_ = false;
+            chat_oneshot_ = false;
+            chat_request_ = 0;
+            chat_restart_ = true;
+            return;
+        }
+    }
+    // A worker told to quit finishes rubbing out its line first: a few
+    // seconds at most, as it never waits on a line left in doubt.
+    if (chat_thread_.joinable()) chat_thread_.join();
+    chat_stop_ = false;
+    chat_quit_ = false;
+    chat_restart_ = false;
+    chat_oneshot_ = false;
+    // A Gửi thử click from before is not this run's to answer: it would type
+    // straight away, skipping the first line's grace.
+    chat_request_ = 0;
+    chat_sent_ = 0;
+    chat_running_ = true;
+    chat_thread_ = std::thread([this] { chat_loop(); });
+}
+
+void GuiApp::request_chat(bool send_one) {
+    {
+        std::lock_guard<std::mutex> lock(chat_life_mutex_);
+        if (chat_running_ && !chat_quit_) {
+            chat_request_ = send_one ? 2 : 1;
+            return;
+        }
+    }
+    if (chat_thread_.joinable()) chat_thread_.join();
+    chat_request_ = send_one ? 2 : 1;
+    chat_stop_ = false;
+    chat_quit_ = false;
+    chat_restart_ = false;
+    chat_oneshot_ = true;
+    chat_running_ = true;
+    chat_thread_ = std::thread([this] { chat_loop(); });
+}
+
+void GuiApp::stop_chat(bool quit, bool wait) {
+    chat_stop_ = true;
+    if (quit) chat_quit_ = true;
+    {
+        std::lock_guard<std::mutex> lock(chat_sender_mutex_);
+        if (chat_sender_) {
+            // A line under way is rubbed out and closed as it stops, which
+            // needs the game in front -- and a stop is mostly pressed in this
+            // window. Brought forward from here, by the thread that has the
+            // foreground to give, rather than by the line meanwhile.
+            if (!input_.window_focused()) input_.focus_window();
+            chat_sender_->cancel();
+        }
+    }
+    chat_next_ms_ = 0;
+    if (!wait) return;
+    if (chat_thread_.joinable()) chat_thread_.join();
+    chat_running_ = false;
+    // Asked for while it ran and never answered: not for the next run.
+    chat_request_ = 0;
+}
+
+void GuiApp::remember_said(const std::string& typed) {
+    std::lock_guard<std::mutex> lock(chat_said_mutex_);
+    const std::uint64_t now = now_ms();
+    chat_said_.emplace_back(typed, now);
+    while (!chat_said_.empty() &&
+           (chat_said_.size() > 20 || now - chat_said_.front().second > 30 * 60'000ull))
+        chat_said_.erase(chat_said_.begin());
+}
+
+std::vector<std::string> GuiApp::recently_said() {
+    std::lock_guard<std::mutex> lock(chat_said_mutex_);
+    const std::uint64_t now = now_ms();
+    std::vector<std::string> out;
+    for (const auto& [text, when] : chat_said_)
+        if (now - when <= 30 * 60'000ull) out.push_back(text);
+    return out;
+}
+
+std::uint64_t GuiApp::last_said_ms() {
+    std::lock_guard<std::mutex> lock(chat_said_mutex_);
+    return chat_said_.empty() ? 0 : chat_said_.back().second;
+}
+
+void GuiApp::update_executor_pause() {
+    // Both doubts pause it, and either clearing must not let it go while the
+    // other is left: worked out from both, under one lock, whoever asks.
+    std::lock_guard<std::mutex> lock(pause_mutex_);
+    if (executor_) executor_->set_paused(trash_left_held_ || chat_doubt_);
+}
+
+void GuiApp::chat_seen_shut() {
+    chat_doubt_ = false;
+    update_executor_pause();
+}
+
+bool GuiApp::chat_line_looks_shut(const TemplateStore& store, int looks, std::string* why) {
+    const auto no = [why](const char* text) {
+        if (why) *why = text;
+        return false;
+    };
+    // No game, no chat line to type into: a game started again starts with
+    // its chat line shut.
+    if (!input_.window_valid()) return true;
+    ChatSettings settings;
+    settings.load(exe_relative("configs/chat.ini"));       // only for the pictures' names
+    if (!can_look_for_chat(store, settings))
+        return no("Không có hình ô chat của game, nên không biết ô chat trong game đã đóng chưa.");
+    ScreenCapture capture;
+    for (int i = 0; i < looks; ++i) {
+        // A frame or two apart: one odd frame does not decide it.
+        if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        Frame f;
+        if (!capture.grab(input_.target_window(), f) || !f.valid())
+            return no("Chưa chụp được màn hình game để xem ô chat đã đóng chưa. Để game hiện rõ rồi "
+                      "thử lại.");
+        const ChatBar bar = look_chat_bar(f, store, settings);
+        if (bar.state == ChatBarState::Open)
+            return no("Ô chat trong game vẫn đang mở. Xoá chữ trong ô chat rồi bấm Enter để đóng nó, "
+                      "rồi bấm BẮT ĐẦU.");
+        if (bar.state != ChatBarState::Closed)
+            return no("Không thấy ô chat ở góc trái dưới màn hình game, nên chưa biết ô chat đã đóng "
+                      "chưa. Đừng để cửa sổ nào che khung chat, rồi bấm BẮT ĐẦU.");
+    }
+    return true;
+}
+
+void GuiApp::watch_chat_doubt() {
+    // With a Tự chat worker watching it, the doubt is the worker's, and it
+    // looks every second. Without one -- it was stopped with the line maybe
+    // open -- nothing would look until BẮT ĐẦU, and the executor's buffs and
+    // potions would stay paused all session for a player who shut the line by
+    // hand and went on.
+    if (chat_doubt_look_.valid()) {
+        if (chat_doubt_look_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        const bool shut = chat_doubt_look_.get();
+        // Only for the doubt it was started for, and not over a worker
+        // watching one of its own since.
+        if (!shut || !chat_doubt_ || chat_doubt_watched_ || chat_doubt_look_gen_ != chat_doubt_gen_)
+            return;
+        chat_seen_shut();
+        const std::string note = "Ô chat trong game đã đóng. Bấm BẮT ĐẦU để đánh quái, bình và buff "
+                                 "chạy lại.";
+        simple_note(note, 12000);
+        if (!simple_view_) set_status(note, 12000);
+        GB_INFO("Chat: the game shows the chat line shut; the executor's buffs and potions go on");
+        return;
+    }
+    if (!chat_doubt_ || chat_doubt_watched_) return;
+    const std::uint64_t now = now_ms();
+    if (now - chat_doubt_looked_ms_ < 2000) return;
+    chat_doubt_looked_ms_ = now;
+    chat_doubt_look_gen_ = chat_doubt_gen_;
+    // One look at a time, so the pictures loaded here are only ever this
+    // look's; on a thread of its own, as a capture can take a while.
+    chat_doubt_look_ = std::async(std::launch::async, [this] {
+        if (!chat_doubt_store_loaded_) {
+            chat_doubt_store_loaded_ = true;
+            chat_doubt_store_.load_best(exe_relative("configs/templates.ini"));
+        }
+        return chat_line_looks_shut(chat_doubt_store_, 2, nullptr);
+    });
+}
+
+/// The timed lines, and the ones asked for.
+///
+/// Every other part of the bot is held off while a line is typed: with the
+/// chat line open a skill key is a letter in it and a potion key a digit, and
+/// with it shut the line's own letters are skill keys. And held off for as
+/// long after as the line may still be open: until a look shows it shut.
+void GuiApp::chat_loop() {
+    const auto tell = [this](const std::string& line) {
+        GB_INFO("Chat: %s", line.c_str());
+        say_chat(line);
+    };
+    // The way out, under the lock start_chat turns a worker into a run under:
+    // a run asked for meanwhile keeps the worker. True when it stays.
+    const auto stays = [this] {
+        std::lock_guard<std::mutex> lock(chat_life_mutex_);
+        if (chat_restart_ && !chat_quit_) return true;
+        chat_next_ms_ = 0;
+        chat_running_ = false;
+        return false;
+    };
+    const auto finish = [&](const std::string& why) {
+        tell(why);
+        std::lock_guard<std::mutex> lock(chat_life_mutex_);
+        chat_next_ms_ = 0;
+        chat_running_ = false;
+    };
+
+    TemplateStore store;
+    if (!store.load_best(exe_relative("configs/templates.ini"))) {
+        finish("Không có hình giao diện của game, nên không nhận ra được ô chat.");
+        return;
+    }
+    // Kept from one look at the file to the next, and replaced only by a
+    // reading that worked: the tab rewrites the file as things change.
+    const std::string config = exe_relative("configs/chat.ini");
+    ChatSettings settings;
+    if (!settings.load(config)) tell("Không đọc được configs/chat.ini, nên dùng cài đặt mặc định.");
+    if (!can_look_for_chat(store, settings)) {
+        finish("Không có hình ô chat của game (" + settings.open_picture + "), nên không biết ô "
+               "chat đang mở hay đóng — không chat.");
+        return;
+    }
+    // Enter answers a dialog. Without the pictures to know a dialog by there
+    // is no telling whether one is up, and nothing is typed.
+    if (!ChatDialogs::can_check(store)) {
+        finish("Không có hình hộp thoại của game, nên không biết có hộp thoại nào đang mở không — "
+               "không chat.");
+        return;
+    }
+    ChatDialogs dialogs;
+    dialogs.load(exe_relative("configs/trash.ini"), exe_relative("configs/party.ini"),
+                 exe_relative("configs/routines.ini"));
+    const auto dialog_up = [&](const Frame& f) { return dialogs.up(f, store); };
+
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
+
+    // Each reason for waiting said once a minute at most, not every look.
+    std::map<std::string, std::uint64_t> said;
+    const auto tell_now_and_then = [&](const std::string& why) {
+        const std::uint64_t now = now_ms();
+        const auto it = said.find(why);
+        if (it != said.end() && now - it->second < 60'000) return;
+        said[why] = now;
+        tell(why);
+    };
+
+    // Waits that any stop cuts short: false when one came. And waits only
+    // quitting cuts short, for a chat line in doubt, which is watched through
+    // an unticking of Tự chat as through anything else.
+    const auto nap = [&](int ms) {
+        for (int slept = 0; slept < ms && !chat_stop_ && !chat_quit_; slept += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, ms - slept)));
+        return !chat_stop_ && !chat_quit_;
+    };
+    const auto nap_unless_quit = [&](int ms) {
+        for (int slept = 0; slept < ms && !chat_quit_; slept += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, ms - slept)));
+        return !chat_quit_;
+    };
+
+    // Under the hold: a key going down as the hold began finishes first --
+    // nothing else gets the coordinator's token while the hold lasts -- and
+    // nothing is left held down.
+    const auto settle = [&](bool for_doubt) {
+        const auto stopped = [&] { return chat_quit_ || (!for_doubt && chat_stop_); };
+        for (int i = 0; i < 40 && coord_.held() && !stopped(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (stopped() || coord_.held()) return false;
+        input_.release_all();
+        return true;
+    };
+
+    // Whether anybody has used the mouse or keyboard since `since`. Only
+    // asked under the hold, after settle(): GoBot presses nothing then, so
+    // whatever Windows counts is a person's -- who may be typing in the chat.
+    const auto last_input = [] {
+        LASTINPUTINFO info{};
+        info.cbSize = sizeof info;
+        return GetLastInputInfo(&info) ? info.dwTime : 0;
+    };
+    const auto touched_since = [&](DWORD since) { return last_input() != since; };
+
+    // A chat line that may be open: everything that presses keys held off --
+    // the hold, kept from the line that left it so, and the executor paused
+    // -- until a look shows it shut. See ChatDoubt.
+    bool doubt_held = false;            // this worker's doubt, with its hold
+    void* doubt_window = nullptr;       // the game the line was open in
+    ChatDoubt doubt;
+    ChatDoubt::Hooks hooks;
+    hooks.hold = [&] {
+        if (!doubt_held) {
+            doubt_held = true;
+            doubt_window = input_.target_window();
+            chat_doubt_watched_ = true;
+            chat_doubt_ = true;
+            update_executor_pause();
+            tell("Ô chat có thể đang mở: đánh quái, bình và buff tạm dừng đến khi thấy ô chat đóng.");
+        }
+        // Taken back if somebody else's hold ended meanwhile; somebody else's
+        // still on holds everything off as well.
+        if (!coord_.critical_active()) take_hold(kChatHold);
+    };
+    hooks.release = [&](const std::string& why) {
+        doubt_held = false;
+        chat_doubt_ = false;
+        chat_doubt_watched_ = false;
+        update_executor_pause();
+        end_hold(kChatHold);
+        tell(why + " GoBot chạy tiếp.");
+    };
+    hooks.same_game = [&] {
+        return input_.window_valid() && input_.target_window() == doubt_window;
+    };
+    // Closed only with the mouse to itself, nothing held down, and nobody at
+    // the mouse or keyboard for a second: the open line may be the player's
+    // by now, typing in it.
+    hooks.when_quiet = [&](const std::function<bool()>& close) {
+        std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);
+        if (!mouse.owns_lock() || trash_pass_) return false;
+        if (!settle(true)) return false;
+        const DWORD quiet = last_input();
+        if (!nap_unless_quit(1000)) return false;
+        if (touched_since(quiet)) {
+            tell_now_and_then("Ô chat đang mở và có người đang dùng chuột hoặc bàn phím — chưa đóng.");
+            return false;
+        }
+        return close();
+    };
+    hooks.say = [&](const std::string& why) { tell_now_and_then(why); };
+    doubt.set_hooks(hooks);
+    // The looks and the closing, one sender for the whole of a doubt: it
+    // knows what it pressed itself.
+    std::unique_ptr<ChatSender> closer;
+    const auto note_doubt = [&](const ChatSender::Result& r) {
+        if (!r.left_open) return;
+        if (!closer) {
+            closer = std::make_unique<ChatSender>(input_, store, grab);
+            closer->set_settings(settings);
+            closer->set_dialog_check(dialog_up);
+            closer->set_debug_dir(exe_relative("chat_debug"));
+        }
+        doubt.note(r, r.typed + settings.clear_backspaces + 2, now_ms());
+    };
+
+    // One line: what can be told without a look, then the mouse and the hold,
+    // then a look, then the line. Nothing has been pressed when the result
+    // says not_now. A line that may have been left open keeps the hold.
+    const auto attempt = [&](const ChatText& line, bool asked) {
+        ChatSender::Result none;
+        none.not_now = true;
+        const auto wait = [&](std::uint64_t ms, std::string why) {
+            none.wait_ms = ms;
+            none.trouble = std::move(why);
+            return none;
+        };
+
+        ChatGateInput in;
+        in.window = input_.window_valid();
+        // Asked for with a button in this window: the game is brought forward
+        // first, as the trash tab's Thử tìm does. The timed lines never do
+        // that -- the player may be busy in another window, and is left to it.
+        if (asked && in.window && !input_.window_focused()) {
+            input_.focus_window();
+            if (!nap(350)) return wait(0, kStopped);
+        }
+        const auto fill = [&] {
+            in.focused = input_.window_focused();
+            {
+                std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+                in.keeper = keeper_flow_ != nullptr;
+            }
+            in.trash = trash_pass_ || trash_hold_ || trash_left_held_;
+            const std::string reason = coord_.critical_active() ? coord_.critical_reason()
+                                                                : std::string();
+            in.held_by = reason == kChatHold ? std::string() : reason;
+            in.hp_pct = vitals_.hp_percent();
+            // Started only with some way to go before the potion's mark, where
+            // the guard below ends a line: HP hovering at the mark in a fight
+            // would otherwise start a line, end it, and start it again,
+            // holding the potion off each time.
+            const int floor = chat_hp_floor_.load();
+            in.hp_floor = std::max(floor, std::min(kChatHpTop, floor + kChatHpMargin));
+        };
+        fill();
+        ChatGate gate = chat_gate(in);
+        if (!gate.send) return wait(gate.wait_ms, gate.why);
+
+        // Not while the trash cleaner, the revive sequence or the party worker
+        // is clicking, nor they while this types: a click can shut the line,
+        // and a trash pass has the mouse for the whole of it.
+        std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);
+        if (!mouse.owns_lock() || trash_pass_)
+            return wait(5000, trash_pass_ ? "Đang dọn rác — chat sau."
+                                          : "Bot đang bấm chuột trong game — chat sau.");
+        if (!take_hold(kChatHold))
+            return wait(10000, "Bot đang tạm dừng (" + coord_.critical_reason() + ") — chat sau.");
+        // How long everything else waits for this line, which the line's
+        // report counts from: the potions are held off from here.
+        const std::uint64_t held_at = now_ms();
+        bool keep_hold = false;
+        OnExit hold{ [&] { if (!keep_hold) end_hold(kChatHold); } };
+        if (!settle(false)) return wait(5000, chat_stop_ ? kStopped : "Bot đang bấm phím — chat sau.");
+        // GoBot presses nothing from here until the line, so any input
+        // Windows counts from now on is a person's -- maybe typing in the
+        // chat. Taken at once, so that the whole of the pause below counts,
+        // and asked again just before the first Enter.
+        const DWORD quiet = last_input();
+        if (!nap(300)) return wait(0, kStopped);
+
+        Frame frame;
+        if (!grab(frame) || !frame.valid()) return wait(5000, "Chưa chụp được màn hình game.");
+        fill();
+        in.looked = true;
+        in.hud = SessionManager::hud_present(frame);
+        in.dialog = dialog_up(frame);
+        in.bar = look_chat_bar(frame, store, settings).state;
+        in.user_active = touched_since(quiet);
+        gate = chat_gate(in);
+        if (!gate.send) return wait(gate.wait_ms, gate.why);
+
+        ChatSender sender(input_, store, grab);
+        sender.set_settings(settings);
+        sender.set_dialog_check(dialog_up);
+        sender.set_debug_dir(exe_relative("chat_debug"));
+        sender.set_held_since(held_at);
+        sender.on_report([](const std::string& s) { GB_INFO("Chat: %s", s.c_str()); });
+        sender.set_ready_check([&]() -> std::string {
+            return touched_since(quiet) ? kUserActive : std::string();
+        });
+        // Between keys: HP falling under the potion's mark ends the line, so
+        // the potion is not held off for the rest of it; so does the hold
+        // being anything but this line's own, whoever took it over.
+        sender.set_guard([this]() -> std::string {
+            const float hp = vitals_.hp_percent();
+            if (hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()))
+                return "Máu thấp — dừng câu đang gõ.";
+            const std::string reason = coord_.critical_reason();
+            if (reason != kChatHold) return "Bot đang tạm dừng (" + reason + ").";
+            return {};
+        });
+        {
+            std::lock_guard<std::mutex> lock(chat_sender_mutex_);
+            chat_sender_ = &sender;
+        }
+        OnExit forget{ [this] {
+            std::lock_guard<std::mutex> lock(chat_sender_mutex_);
+            chat_sender_ = nullptr;
+        } };
+        // A stop that came while all of the above was done found no line to
+        // cancel; it is passed on now instead.
+        if (chat_stop_ || chat_quit_) sender.cancel();
+
+        ChatSender::Result r = sender.send(line);
+
+        // A dialog came up with the line open: what was typed is rubbed out
+        // and no Enter pressed. The mouse is let go so that whoever answers
+        // the dialog -- the party worker, or the player -- can; the hold is
+        // kept, so that nothing types into the open line meanwhile; and the
+        // line is closed once the dialog has gone, ten seconds at most.
+        if (!r.dialog.empty() && r.left_open) {
+            mouse.unlock();
+            tell(r.trouble);
+            const std::uint64_t since = now_ms();
+            while (!chat_quit_ && now_ms() - since < 10'000) {
+                if (!nap_unless_quit(300)) break;
+                Frame f;
+                if (grab(f) && f.valid() && dialog_up(f).empty()) break;
+            }
+            if (!chat_quit_ && sender.close_left_open(r.typed + settings.clear_backspaces))
+                r.left_open = false;
+        }
+        // Still maybe open: the hold is not let go, but kept for as long as
+        // that lasts (see note_doubt).
+        keep_hold = r.left_open;
+        return r;
+    };
+
+    ChatSchedule schedule;
+    int put_off_in_row = 0;                 // lines ended part way, one after another
+    bool stopped_self = false;              // Tự chat stopped itself: done once the line is shut
+    std::uint64_t read_ms = now_ms();
+    // A run from its beginning: the first line after its grace, nothing sent.
+    const auto begin_run = [&] {
+        schedule.start(now_ms(), settings);
+        chat_sent_ = 0;
+        put_off_in_row = 0;
+        stopped_self = false;
+        tell(settings.lines.empty()
+                 ? std::string("Danh sách câu đang trống.")
+                 : "Bắt đầu: câu đầu tiên sau " + std::to_string(settings.first_delay_s) +
+                       " giây, rồi mỗi " + std::to_string(settings.interval_s) + " giây một câu.");
+        chat_next_ms_ = settings.lines.empty() ? 0 : schedule.due_at();
+    };
+    if (!chat_oneshot_) begin_run();
+
+    for (;;) {
+        while (!chat_quit_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // A one-off, or a worker stopping, turned into a run: from the
+            // start, as a run of its own would be.
+            if (chat_restart_.exchange(false)) begin_run();
+            const int request = chat_request_.exchange(0);
+            if (now_ms() - read_ms > 1000) {
+                ChatSettings fresh;
+                if (fresh.load(config)) {
+                    settings = fresh;
+                    schedule.update(settings);
+                    if (closer) closer->set_settings(settings);
+                }
+                read_ms = now_ms();
+            }
+
+            if (request == 1) {
+                // Kiểm tra ô chat: a look, and what it saw. Nothing is pressed.
+                Frame f;
+                if (!input_.window_valid() || !grab(f) || !f.valid()) {
+                    tell("Chưa chụp được màn hình game.");
+                } else {
+                    const ChatBar bar = look_chat_bar(f, store, settings);
+                    const std::string dialog = dialog_up(f);
+                    char scores[200];
+                    std::snprintf(scores, sizeof scores,
+                                  " (điểm màu ô chat mở: %d, giống ô chat đóng: %.3f, vết chữ: %d)",
+                                  bar.dark, static_cast<double>(bar.closed_score), bar.ink);
+                    std::string said_line = std::string("Ô chat ") + chat_bar_name(bar.state) + scores + ".";
+                    if (bar.state == ChatBarState::Unknown) {
+                        said_line = bar.found
+                            ? std::string("Thấy ô chat nhưng không giống hình ô chat đang mở hay đang "
+                                          "đóng") + scores + "."
+                            : std::string("Không thấy ô chat") + scores +
+                                  ". Đừng để cửa sổ nào che khung chat ở góc trái dưới màn hình game.";
+                        ChatSender keeper(input_, store, grab);
+                        keeper.set_settings(settings);
+                        keeper.set_debug_dir(exe_relative("chat_debug"));
+                        keeper.keep(f, "check", &bar);
+                    }
+                    if (!dialog.empty()) said_line += " Đang có hộp thoại: " + dialog + ".";
+                    tell(said_line);
+                }
+                continue;
+            }
+            if (request == 2) {
+                // Gửi thử 1 câu: the first line, under every rule a timed one
+                // goes by. The run's own turn and timer are left as they were.
+                const std::string raw = settings.lines.empty() ? settings.test_line : settings.lines.front();
+                const ChatText line = prepare_chat(raw, settings.method, settings.strip_diacritics,
+                                                   settings.max_length);
+                const std::uint64_t said_at = last_said_ms();
+                const std::uint64_t floor_ms = ChatSettings::kMinInterval * 1000ull;
+                const std::uint64_t asked_at = now_ms();
+                if (chat_doubt_) {
+                    tell("Chưa gửi thử được: ô chat trong game có thể đang mở. Đóng ô chat trong game "
+                         "(xoá chữ trong đó rồi bấm Enter) rồi thử lại.");
+                } else if (line.empty()) {
+                    tell("Câu số 1 không còn chữ nào gõ được.");
+                } else if (said_at != 0 && asked_at < said_at + floor_ms) {
+                    // Never two lines closer together than the shortest
+                    // interval, as for the timed ones: a click just after a
+                    // timed line, or after the last Gửi thử, would otherwise
+                    // put two in the channel seconds apart.
+                    tell("Chưa gửi thử được: mới gửi một câu " +
+                         std::to_string((asked_at - said_at) / 1000) + " giây trước — chờ ít nhất " +
+                         std::to_string(ChatSettings::kMinInterval) + " giây giữa hai câu.");
+                } else {
+                    const ChatSender::Result r = attempt(line, true);
+                    note_doubt(r);
+                    if (r.not_now) {
+                        tell("Chưa gửi thử được: " + r.trouble);
+                    } else if (r.sent) {
+                        remember_said(line.typed);
+                        GB_INFO("Chat: gửi thử (%s): \"%s\"", chat_method_name(settings.method),
+                                line.typed.c_str());
+                        say_chat("Đã gửi thử: \"" + line.typed + "\"");
+                        if (!r.trouble.empty()) tell(r.trouble);
+                    } else {
+                        tell("Gửi thử không được: " + r.trouble + bar_numbers(r.last));
+                    }
+                    if (r.stop) {
+                        // The line would not close, or the bar did not look
+                        // like either picture: a person has to look, run or no
+                        // run -- once the line is known shut.
+                        if (!chat_oneshot_) tell("Tự chat đã dừng.");
+                        stopped_self = true;
+                    }
+                }
+                continue;
+            }
+
+            if (doubt.active()) {
+                chat_next_ms_ = 0;
+                doubt.step(*closer, now_ms());
+                if (doubt.active()) continue;   // nothing else while the line may be open
+            }
+            if (chat_stop_ || stopped_self || chat_oneshot_) break;
+            if (!settings.enabled || settings.lines.empty()) {
+                chat_next_ms_ = 0;
+                if (settings.enabled) tell_now_and_then("Danh sách câu đang trống.");
+                continue;
+            }
+            chat_next_ms_ = schedule.due_at();
+            const std::uint64_t now = now_ms();
+            if (!schedule.due(now)) continue;
+
+            const int index = schedule.turn();
+            const int count = static_cast<int>(settings.lines.size());
+            const ChatText line = prepare_chat(settings.lines[static_cast<std::size_t>(index)],
+                                               settings.method, settings.strip_diacritics,
+                                               settings.max_length);
+            if (line.empty()) {
+                // Passed over for the next one, unless none of them can be typed.
+                bool any = false;
+                for (const std::string& l : settings.lines)
+                    any = any || !prepare_chat(l, settings.method, settings.strip_diacritics,
+                                               settings.max_length).empty();
+                tell_now_and_then("Câu số " + std::to_string(index + 1) + " không còn chữ nào gõ được.");
+                if (any) schedule.skip(now);
+                else schedule.postpone(now, 30'000);
+                continue;
+            }
+            if (chat_doubt_) {
+                // Somebody else's doubt, left by a worker that was stopped:
+                // nothing typed until the line is seen shut.
+                schedule.postpone(now, 5000);
+                tell_now_and_then("Ô chat có thể đang mở — chờ thấy ô chat đóng rồi mới chat.");
+                continue;
+            }
+            // Never two lines closer together than the shortest interval --
+            // a Gửi thử just before the run began among them.
+            const std::uint64_t said_at = last_said_ms();
+            const std::uint64_t floor_ms = ChatSettings::kMinInterval * 1000ull;
+            if (said_at != 0 && now < said_at + floor_ms) {
+                schedule.postpone(now, said_at + floor_ms - now);
+                continue;
+            }
+
+            const ChatSender::Result r = attempt(line, false);
+            const std::uint64_t end = now_ms();
+            note_doubt(r);
+            if (r.not_now) {
+                schedule.postpone(end, r.wait_ms);
+                tell_now_and_then(r.trouble);
+            } else if (r.sent) {
+                schedule.sent(end);
+                ++chat_sent_;
+                put_off_in_row = 0;
+                remember_said(line.typed);
+                GB_INFO("Chat: gửi câu %d/%d (%s): \"%s\"", index + 1, count,
+                        chat_method_name(settings.method), line.typed.c_str());
+                say_chat("Đã gửi câu " + std::to_string(index + 1) + "/" + std::to_string(count) +
+                         ": \"" + line.typed + "\"");
+                if (!r.trouble.empty()) tell(r.trouble);
+                // Sent, and then would not close: stopped all the same -- the
+                // line open is what the fighting keys would be typed into.
+                if (r.stop) {
+                    tell("Tự chat đã dừng.");
+                    stopped_self = true;
+                }
+            } else if (r.aborted && !r.stop) {
+                // Ended part way for something that is no fault of the line's --
+                // HP, a dialog, the game losing the front -- and rubbed out. Its
+                // turn kept and tried again soon; not a failure, or a long fight
+                // would stop Tự chat by itself. Several in a row wait longer.
+                ++put_off_in_row;
+                const std::uint64_t wait_ms =
+                    put_off_in_row >= 3 ? 60'000 : std::max<std::uint64_t>(r.wait_ms, 3000);
+                schedule.postpone(end, wait_ms);
+                tell_now_and_then("Câu " + std::to_string(index + 1) + " để sau: " + r.trouble);
+            } else {
+                // Its turn kept, tried again after a pause; and stopped for good
+                // after a few in a row, which is not bad luck.
+                schedule.failed(end, 30'000);
+                tell("Không gửi được câu " + std::to_string(index + 1) + ": " + r.trouble +
+                     bar_numbers(r.last));
+                if (r.stop) {
+                    tell("Tự chat đã dừng.");
+                    stopped_self = true;
+                } else if (schedule.failures() >= settings.max_failures) {
+                    tell(std::to_string(schedule.failures()) +
+                         " lần liền không gửi được câu chat — Tự chat đã dừng.");
+                    alert("chat_stopped", alert_text::chat_stopped(schedule.failures()));
+                    stopped_self = true;
+                }
+            }
+            chat_next_ms_ = schedule.due_at();
+        }
+
+        // Told to quit -- DỪNG, F12, closing GoBot: the player has taken over.
+        // A line still in doubt is handed over rather than waited on: its
+        // hold stays on and the executor paused until tick() has stopped
+        // everything else that presses keys, and nothing of that starts again
+        // until a look shows the line shut (keys_may_start).
+        if (chat_quit_ && doubt.active()) {
+            doubt.hand_over();
+            doubt_held = false;
+            ++chat_doubt_gen_;
+            chat_doubt_watched_ = false;
+            tell("Đã dừng Tự chat, nhưng ô chat trong game có thể vẫn đang mở.");
+            chat_handover_ = true;          // last: tick() acts on it from here
+        }
+        if (!stays()) break;
+    }
 }
 
 void GuiApp::autodetect_bar(BarSpec& bar, const char* which) {
@@ -4514,6 +5409,19 @@ void GuiApp::start_hunt() {
         set_status("Pick the game window first", 6000);
         return;
     }
+    // Your character is found by its name and nothing else: a plate with bars
+    // may be yours or another player's. Started without one, the hunter only
+    // stood there -- after F11 had brought the game forward -- or, before the
+    // detector stopped taking the nearest player for you, walked and hit
+    // relative to a stranger.
+    if (!hunt_named()) {
+        simple_note("Chưa gõ tên nhân vật nên chưa bật Tự đánh quái. Gõ tên ở phần \"Trước khi "
+                    "bắt đầu\" của thẻ Đánh quái.", 12000);
+        if (!simple_view_)
+            set_status("Type your character's name first: the hunter finds you by it", 12000);
+        GB_WARN("Hunting not started: no character name typed, so there is no 'you' to walk from");
+        return;
+    }
     if (!keys_may_start()) return;
     if (!detector_running_) start_detector();
     if (!detector_running_) return;
@@ -4562,9 +5470,9 @@ void GuiApp::draw_hunt_settings() {
     bool changed = false;
 
     // How the bot sees its own character. Nothing else on screen will do it:
-    // every creature is found by its health bar and the local character has
-    // none, so without a name here the bot knows where the monsters are and
-    // not where it is standing.
+    // every creature is found by its health bar, and a plate with bars may be
+    // yours or another player's, so without a name here the bot knows where
+    // the monsters are and not where it is standing.
     {
         char name[64];
         copy_to(name, sizeof(name), hunt_config_.character_name);
@@ -4575,9 +5483,10 @@ void GuiApp::draw_hunt_settings() {
             changed = true;
         }
         help_marker("Exactly as the game writes it under your feet. The bot "
-                    "reads the screen for it -- your character has no health "
-                    "bar to be spotted by, because your health is in the HUD. "
-                    "Without this it can see the monsters but not itself.");
+                    "reads the screen for the whole name -- the bars under a "
+                    "name say a player stands there, not which one, and a "
+                    "longer name with yours inside it is not you. Without "
+                    "this it can see the monsters but not itself.");
 
         if (!font_.loaded()) {
             ImGui::SameLine();
@@ -5731,7 +6640,7 @@ void GuiApp::draw_mapper_panel() {
     ImGui::Dummy(ImVec2(0, 6));
     if (ImGui::Button("Save map", ImVec2(140, 0))) {
         const std::string path = exe_relative("maps/" + mapper_->suggested_filename());
-        CreateDirectoryA(exe_relative("maps").c_str(), nullptr);
+        make_folder(exe_relative("maps"));
         set_status(mapper_->save(path) ? "Saved " + path : "FAILED to save " + path, 6000);
     }
     ImGui::SameLine();

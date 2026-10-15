@@ -16,6 +16,12 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 if(MSVC)
     add_compile_options(/W4 /permissive- /utf-8 /Zc:__cplusplus /MP)
+    # Every __FILE__ without the path of the folder this was built in. OpenCV's
+    # error checks name their source files, so without this the executables
+    # carry the build machine's user name to everybody they are given to. Set
+    # here, before OpenCV is pulled in, so its sources get it too. The compiler
+    # matches the prefix whatever the case and the slashes.
+    add_compile_options("/d1trimfile:${CMAKE_SOURCE_DIR}/")
     add_compile_definitions(
         NOMINMAX
         WIN32_LEAN_AND_MEAN
@@ -60,6 +66,10 @@ if(GOBOT_USE_OPENCV)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(BUILD_WITH_STATIC_CRT ON CACHE BOOL "" FORCE)
     set(OPENCV_FORCE_3RDPARTY_BUILD OFF CACHE BOOL "" FORCE)
+    # No Python is needed for core and imgproc, and the one found would be
+    # written into the build information compiled into the executables --
+    # with the build machine's user name in its path.
+    set(OPENCV_PYTHON_SKIP_DETECTION ON CACHE BOOL "" FORCE)
 
     foreach(_off
             BUILD_TESTS BUILD_PERF_TESTS BUILD_EXAMPLES BUILD_DOCS
@@ -172,6 +182,9 @@ add_library(gobot_core STATIC
     src/player_list.cpp
     src/auto_login.cpp
     src/bag.cpp
+    src/auto_chat.cpp
+    src/alerts.cpp
+    src/quick_quest.cpp
     src/dialog_driver.cpp
     src/routine.cpp
     src/reviver.cpp
@@ -198,7 +211,12 @@ target_include_directories(gobot_core
 
 target_link_libraries(gobot_core
     PUBLIC  Npcap::Npcap
-    PRIVATE ws2_32 iphlpapi user32 gdiplus
+    # normaliz: NormalizeString, which takes the marks off a chat line.
+    # winhttp and crypt32: the Discord alerts' webhook, posted over HTTPS and
+    # kept encrypted with DPAPI -- the two GoC itself uses for the same jobs.
+    # dwmapi: where a window over the game is drawn, and whether it is on this
+    # desktop at all, for trusting a frame of the game read off the screen.
+    PRIVATE ws2_32 iphlpapi user32 gdiplus normaliz winhttp crypt32 dwmapi
 )
 
 if(GOBOT_USE_OPENCV)
@@ -250,6 +268,8 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/main.cpp
         apps/gobot_gui/gui_app.cpp
         apps/gobot_gui/simple_view.cpp
+        apps/gobot_gui/simple_alerts.cpp
+        apps/gobot_gui/simple_quest.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"
@@ -308,7 +328,8 @@ endif()
 # ---------------------------------------------------------------- self-tests
 # Covers the layers that can be checked without the game running: framing,
 # reassembly, packet decoding, world model, pathfinding.
-add_executable(gobot_test apps/gobot_test/main.cpp)
+add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.cpp
+                          apps/gobot_test/quest_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

@@ -572,7 +572,7 @@ bool TemplateStore::load_from_assembly(const std::string& dll_path,
     by_name_.clear();
     if (dll_path.empty()) return false;
 
-    std::FILE* f = std::fopen(dll_path.c_str(), "rb");
+    std::FILE* f = open_file(dll_path, "rb");
     if (!f) {
         GB_WARN("TemplateStore: cannot open %s", dll_path.c_str());
         return false;
@@ -671,11 +671,8 @@ std::string TemplateStore::client_images() {
         "C:\\Program Files\\ZTeam\\GoC\\data\\images",
         "C:\\Program Files (x86)\\ZTeam\\GoC\\data\\images",
     };
-    for (const char* c : candidates) {
-        const DWORD attr = GetFileAttributesA(c);
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
-            return c;
-    }
+    for (const char* c : candidates)
+        if (is_folder(c)) return c;
     return {};
 }
 
@@ -684,7 +681,7 @@ bool TemplateStore::load_best(const std::string& name_map_ini) {
 
     // Staged beside the executable, if the build put them there.
     const std::string staged = default_dir();
-    if (GetFileAttributesA(staged.c_str()) != INVALID_FILE_ATTRIBUTES && load(staged)) {
+    if (path_exists(staged) && load(staged)) {
         source_ = staged;
         apply_names(name_map_ini);
         return true;
@@ -752,7 +749,7 @@ std::string TemplateStore::helper_assembly() {
     // installation that this project reads -- the pictures are resources
     // inside it -- so a package carries the file rather than the install.
     const std::string beside = exe_relative("TungHaVGOBot.dll");
-    if (GetFileAttributesA(beside.c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (path_exists(beside))
         return beside;
 
     const char* candidates[] = {
@@ -760,7 +757,7 @@ std::string TemplateStore::helper_assembly() {
         "C:\\Program Files (x86)\\TH_VGO_Bot_Helper\\TungHaVGOBot.dll",
     };
     for (const char* c : candidates)
-        if (GetFileAttributesA(c) != INVALID_FILE_ATTRIBUTES) return c;
+        if (path_exists(c)) return c;
     return {};
 }
 

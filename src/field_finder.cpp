@@ -1,4 +1,5 @@
 ﻿#include "gobot/field_finder.hpp"
+#include "gobot/common.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -564,7 +565,7 @@ FieldFinder::position_fields(double world_w, double world_h,
 
 bool FieldFinder::save(const std::string& path) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    std::FILE* f = open_file(path, "wb");
     if (!f) return false;
 
     const auto u32 = [&](std::uint32_t v) { std::fwrite(&v, 4, 1, f); };
@@ -588,7 +589,7 @@ bool FieldFinder::save(const std::string& path) const {
 }
 
 bool FieldFinder::load(const std::string& path) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
+    std::FILE* f = open_file(path, "rb");
     if (!f) return false;
 
     const auto u32 = [&](std::uint32_t& v) { return std::fread(&v, 4, 1, f) == 1; };

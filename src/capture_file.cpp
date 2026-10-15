@@ -1,4 +1,5 @@
 #include "gobot/capture_file.hpp"
+#include "gobot/common.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -33,7 +34,7 @@ Reading extract(const std::string& path,
                 std::vector<Bytes>& out) {
     Reading r;
 
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(utf8_to_wide(path).c_str(), std::ios::binary);
     if (!in) { r.error = "cannot read " + path; return r; }
     const std::vector<std::uint8_t> buf((std::istreambuf_iterator<char>(in)),
                                          std::istreambuf_iterator<char>());

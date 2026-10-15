@@ -1,5 +1,6 @@
 #include "gobot/reviver.hpp"
 #include "gobot/bag.hpp"
+#include "gobot/common.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -255,6 +256,23 @@ Reviver::Turn Reviver::give_up() {
     return Turn::OutOfTries;
 }
 
+void Reviver::begin_death() {
+    death_on_ = true;
+    if (in_death_) return;
+    in_death_ = true;
+    if (death_hook_) death_hook_();
+}
+
+void Reviver::end_death(bool came_back) {
+    tries_ = 0;
+    gave_up_ = false;
+    death_on_ = false;
+    blind_up_ = false;
+    if (!in_death_) return;
+    in_death_ = false;
+    if (came_back && back_hook_) back_hook_();
+}
+
 // ----------------------------------------------------------------- one turn
 
 Reviver::Turn Reviver::turn() {
@@ -269,23 +287,23 @@ Reviver::Turn Reviver::turn() {
     // opens with the same words scores nearly as well as the revive question:
     // with nobody dead it is somebody else's to answer, and Xác Nhận on it
     // could spend an item. (Nor is it looked for then: see look().)
-    if (s.panel) death_on_ = true;
+    if (s.panel) begin_death();
     if (!dead_at(s)) {
         // A death is over once the character has stayed alive a while; the
         // next one gets its own tries. Not on one look: the panel can
         // flicker as an attempt goes through, and a game with no revive item
-        // left may put it away for a moment after Xác Nhận.
+        // left may put it away for a while after Xác Nhận -- the longer wait
+        // after a revive taken with HP unreadable is for that.
         const auto t = now();
+        const int alive_ms = blind_up_ ? kAliveBlindMs : kAliveMs;
         if (!alive_seen_) {
             alive_seen_ = true;
             alive_since_ = t;
-        } else if (t - alive_since_ >= std::chrono::milliseconds(kAliveMs)) {
+        } else if (t - alive_since_ >= std::chrono::milliseconds(alive_ms)) {
             if (tries_ > 0)
-                say("the character has been alive for " + std::to_string(kAliveMs / 1000) +
+                say("the character has been alive for " + std::to_string(alive_ms / 1000) +
                     " s -- the next death gets its own " + std::to_string(kAttempts) + " tries");
-            tries_ = 0;
-            gave_up_ = false;
-            death_on_ = false;
+            end_death(blind_up_);
         }
         said_waiting_ = false;
         return Turn::Alive;
@@ -330,7 +348,7 @@ Reviver::Turn Reviver::turn() {
             return stop_now() ? Turn::Stopped
                               : wait("dead, and the game could not be looked at again just "
                                      "before the click -- nothing clicked");
-        if (s2.panel) death_on_ = true;
+        if (s2.panel) begin_death();
         if (!dead_at(s2)) return wait("the panel went while waiting to click -- nothing clicked");
         int x2 = 0, y2 = 0;
         bool q2 = false;
@@ -396,6 +414,7 @@ Reviver::Turn Reviver::turn() {
     int clear = 0;
     std::chrono::steady_clock::time_point clear_from{};
     bool up = false;
+    bool by_hp = false;
     Seen v;
     Frame vf;
     while (!stop_now() && now() < deadline) {
@@ -413,6 +432,7 @@ Reviver::Turn Reviver::turn() {
                     hp >= kHpZero || now() - clear_from >= std::chrono::milliseconds(kSettleBlindMs);
                 if (clear >= 2 && sure) {
                     up = true;
+                    by_hp = hp >= kHpZero;
                     break;
                 }
             }
@@ -423,16 +443,27 @@ Reviver::Turn Reviver::turn() {
 
     if (up) {
         ++revived_;
-        // The try is not given back yet: that waits for the character to
-        // stay up for kAliveMs (see above). A panel back at once is this
-        // death still, so a game that only hides it for a while when there
-        // is no revive item runs out of tries, and the bot stops, instead
-        // of being revived for ever.
-        death_on_ = false;
         alive_seen_ = true;
         alive_since_ = now();
-        say("revived, on attempt " + std::to_string(attempt));
+        say("revived, on attempt " + std::to_string(attempt) +
+            (by_hp ? " -- HP reads above 0, so the next death gets its own " +
+                         std::to_string(kAttempts) + " tries"
+                   : " -- HP cannot be read, so its try is given back once the character has "
+                     "stayed up for " + std::to_string(kAliveBlindMs / 1000) + " s"));
         if (revived_hook_) revived_hook_();
+        if (by_hp) {
+            // Up for certain: this death is over, however soon the next one
+            // comes.
+            end_death(true);
+        } else {
+            // Not given back yet: a panel back before the character has
+            // stayed up for kAliveBlindMs is this death still, so a game
+            // that only hides it for a while when there is no revive item
+            // runs out of tries, and the bot stops, instead of being revived
+            // for ever.
+            death_on_ = false;
+            blind_up_ = true;
+        }
         return Turn::Revived;
     }
 
@@ -538,20 +569,13 @@ void Reviver::say(const std::string& line) const {
 
 void Reviver::keep(const Frame& f) {
     if (debug_dir_.empty() || !f.valid()) return;
-    CreateDirectoryA(debug_dir_.c_str(), nullptr);
+    make_folder(debug_dir_);
 
     // The newest few: the oldest go first, and the names sort by time.
-    std::vector<std::string> old;
-    WIN32_FIND_DATAA fd{};
-    HANDLE h = FindFirstFileA((debug_dir_ + "\\revive_*.png").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do old.push_back(fd.cFileName);
-        while (FindNextFileA(h, &fd));
-        FindClose(h);
-    }
+    std::vector<std::string> old = files_in(debug_dir_, "revive_*.png");
     std::sort(old.begin(), old.end());
     for (std::size_t i = 0; i + kKeptFrames <= old.size(); ++i)
-        DeleteFileA((debug_dir_ + "\\" + old[i]).c_str());
+        remove_file(debug_dir_ + "\\" + old[i]);
 
     static int n = 0;
     const std::string path =

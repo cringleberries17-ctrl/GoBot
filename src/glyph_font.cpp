@@ -1,9 +1,11 @@
 ﻿#include "gobot/glyph_font.hpp"
+#include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include <windows.h>
 #include <objidl.h>
@@ -66,11 +68,7 @@ std::string GlyphFont::default_dir() {
     // game installed. Looking here first is what makes a folder you can copy
     // somewhere else work.
     const std::string beside = exe_relative("bitmap_font");
-    {
-        const DWORD attr = GetFileAttributesA(beside.c_str());
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
-            return beside;
-    }
+    if (is_folder(beside)) return beside;
 
     // Then where the commercial client keeps the sets it extracted from the
     // game. Read in place; nothing is copied out of there.
@@ -91,11 +89,8 @@ std::string GlyphFont::default_dir() {
         "C:\\Program Files\\ZTeam\\GoC\\data\\bitmap_font",
         "C:\\Program Files (x86)\\ZTeam\\GoC\\data\\bitmap_font",
     };
-    for (const char* c : candidates) {
-        const DWORD attr = GetFileAttributesA(c);
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
-            return c;
-    }
+    for (const char* c : candidates)
+        if (is_folder(c)) return c;
     return {};
 }
 
@@ -195,6 +190,7 @@ bool GlyphFont::load_dir(const std::wstring& dir) {
 bool GlyphFont::load(const std::string& dir) {
     glyphs_.clear();
     tallest_ = 0;
+    cap_height_ = 0;
     if (dir.empty() || !gdiplus().ok) return false;
 
     const std::wstring base = to_wide(dir);
@@ -202,6 +198,10 @@ bool GlyphFont::load(const std::string& dir) {
     any |= load_dir(base + L"\\upper");
     any |= load_dir(base + L"\\lower");
     any |= load_dir(base);               // a flat directory works too
+
+    for (const Glyph& g : glyphs_)
+        if (g.ch.size() == 1 && g.ch[0] >= 'A' && g.ch[0] <= 'Z')
+            cap_height_ = std::max(cap_height_, g.h);
 
     // Widest first. A narrow glyph is often a piece of a wide one -- 'i' sits
     // inside 'n' -- and trying the wide one first stops a name being read as
@@ -459,33 +459,18 @@ std::vector<GlyphFont::Placed> GlyphFont::candidates(const Frame& f, const Scree
     return out;
 }
 
-bool GlyphFont::find_text(const Frame& f, const ScreenRect& area,
-                          const std::string& utf8, ScreenRect& where,
-                          float* confidence) const {
-    if (confidence) *confidence = 0.0f;
-    if (glyphs_.empty() || utf8.empty()) return false;
-
-    std::vector<const Glyph*> want;
-    if (!spell(utf8, want)) return false;
-
+void GlyphFont::runs(const Patch& p, const std::vector<const Glyph*>& want, std::size_t need,
+                     const std::function<void(const Run&)>& each) const {
     const Glyph* first = nullptr;
-    std::size_t first_at = 0;
-    for (std::size_t i = 0; i < want.size(); ++i)
-        if (want[i]) { first = want[i]; first_at = i; break; }
-    if (!first) return false;
+    std::size_t first_at = 0, last_at = 0;
+    for (std::size_t i = 0; i < want.size(); ++i) {
+        if (!want[i]) continue;
+        if (!first) { first = want[i]; first_at = i; }
+        last_at = i;
+    }
+    if (!first) return;
 
-    const Patch p = patch_of(f, area);
-    if (!p.valid()) return false;
-
-    // How many letters have to be found, counting from the whole string.
-    const std::size_t letters = static_cast<std::size_t>(
-        std::count_if(want.begin(), want.end(), [](const Glyph* g) { return g != nullptr; }));
-    const std::size_t need = std::max<std::size_t>(
-        2, static_cast<std::size_t>(letters * kMinFoundFraction));
-
-    double best_score = 0.0;
-    bool found = false;
-
+    Run run;
     for (int py = 0; py + first->h <= p.h; ++py) {
         for (int px = 0; px + first->w <= p.w; ++px) {
             // A higher bar than reading asks for. Reading has a region that is
@@ -498,9 +483,15 @@ bool GlyphFont::find_text(const Frame& f, const ScreenRect& area,
             // The first letter fits here. Walk the rest of the string from it,
             // left and right, on the baseline it implies.
             const int foot = py + first->h;
-            double score = lead.correlation;
-            std::size_t hits = 1;
-            int left = px, right = px + first->w;
+            run.left = px;
+            run.right = px + first->w;
+            run.top = py;
+            run.foot = foot;
+            run.hits = 1;
+            run.score = lead.correlation;
+            run.last_found = first_at == last_at;
+            run.letters.clear();
+            run.letters.push_back(Run::Letter{ first, px, py });
 
             const auto walk = [&](std::size_t from, int step, int start_edge) {
                 int at = start_edge;
@@ -512,18 +503,29 @@ bool GlyphFont::find_text(const Frame& f, const ScreenRect& area,
 
                     // Letters sit a pixel apart, but a plate drawn over
                     // scenery can shift one either way; try the neighbours.
+                    //
+                    // And a little below the foot, as reading does: the files
+                    // are cropped to their own ink, so a "g", a "y" or a
+                    // dot-below vowel ends lower than the letters beside it
+                    // while sharing their baseline. Stood on the foot, such a
+                    // letter was never found, and a name ending in one --
+                    // "Long", "Huy" -- could never be found whole.
                     double got = 0.0;
-                    int landed = at;
-                    for (int slack = 0; slack <= 2; ++slack) {
-                        const int gx = step > 0 ? at + slack - 1
-                                                : at - g->w - slack + 1;
-                        if (gx < 0 || gx + g->w > p.w) continue;
-                        const int gy = foot - g->h;
+                    int landed = at, got_x = at, got_y = 0;
+                    for (int drop = 0; drop <= kMaxDescent; ++drop) {
+                        const int gy = foot - g->h + drop;
                         if (gy < 0 || gy + g->h > p.h) continue;
-                        const Fit c = fit(*g, p, gx, gy);
-                        if (c.correlation <= got) continue;
-                        got = c.correlation;
-                        landed = step > 0 ? gx + g->w : gx;
+                        for (int slack = 0; slack <= 2; ++slack) {
+                            const int gx = step > 0 ? at + slack - 1
+                                                    : at - g->w - slack + 1;
+                            if (gx < 0 || gx + g->w > p.w) continue;
+                            const Fit c = fit(*g, p, gx, gy);
+                            if (c.correlation <= got) continue;
+                            got = c.correlation;
+                            got_x = gx;
+                            got_y = gy;
+                            landed = step > 0 ? gx + g->w : gx;
+                        }
                     }
                     if (got < kMinQuality) {
                         // A letter or two can be eaten by a flower or a
@@ -537,30 +539,197 @@ bool GlyphFont::find_text(const Frame& f, const ScreenRect& area,
                         continue;
                     }
                     missed_in_a_row = 0;
-                    score += got;
-                    ++hits;
+                    run.score += got;
+                    ++run.hits;
+                    if (k == last_at) run.last_found = true;
+                    run.letters.push_back(Run::Letter{ g, got_x, got_y });
                     at = landed + (step > 0 ? 1 : -1);
-                    if (step > 0) right = std::max(right, landed);
-                    else          left  = std::min(left, landed);
+                    if (step > 0) run.right = std::max(run.right, landed);
+                    else          run.left  = std::min(run.left, landed);
                 }
             };
             walk(first_at + 1, +1, px + first->w + 1);
             if (first_at > 0) walk(first_at - 1, -1, px - 1);
 
-            if (hits < need) continue;
-            if (score <= best_score) continue;
-
-            best_score = score;
-            found = true;
-            where = ScreenRect{ p.x0 + left, p.y0 + foot - tallest_,
-                                right - left, tallest_ };
-            where.y = p.y0 + py;
-            where.h = foot - py;
-            if (confidence)
-                *confidence = static_cast<float>(score / static_cast<double>(letters));
+            if (run.hits < need) continue;
+            each(run);
         }
     }
+}
+
+bool GlyphFont::find_text(const Frame& f, const ScreenRect& area,
+                          const std::string& utf8, ScreenRect& where,
+                          float* confidence) const {
+    if (confidence) *confidence = 0.0f;
+    if (glyphs_.empty() || utf8.empty()) return false;
+
+    std::vector<const Glyph*> want;
+    if (!spell(utf8, want)) return false;
+
+    // How many letters have to be found, counting from the whole string.
+    const std::size_t letters = static_cast<std::size_t>(
+        std::count_if(want.begin(), want.end(), [](const Glyph* g) { return g != nullptr; }));
+    if (letters == 0) return false;
+    const std::size_t need = std::max<std::size_t>(
+        2, static_cast<std::size_t>(letters * kMinFoundFraction));
+
+    const Patch p = patch_of(f, area);
+    if (!p.valid()) return false;
+
+    double best_score = 0.0;
+    bool found = false;
+    runs(p, want, need, [&](const Run& r) {
+        if (r.score <= best_score) return;
+        best_score = r.score;
+        found = true;
+        where = ScreenRect{ p.x0 + r.left, p.y0 + r.top, r.right - r.left, r.foot - r.top };
+        if (confidence)
+            *confidence = static_cast<float>(r.score / static_cast<double>(letters));
+    });
     return found;
+}
+
+bool GlyphFont::alone(const Frame& f, const Patch& p, const Run& r, int line_h) const {
+    // The colour the name is written in, from its own strokes. Measured, not
+    // assumed: names are white, yellow or green, and drawn half-transparent
+    // over whatever is behind them.
+    long sum_r = 0, sum_g = 0, sum_b = 0;
+    int inked = 0;
+    for (const Run::Letter& l : r.letters)
+        for (int gy = 0; gy < l.g->h; ++gy)
+            for (int gx = 0; gx < l.g->w; ++gx) {
+                if (!l.g->ink[static_cast<std::size_t>(gy) * l.g->w + gx]) continue;
+                std::uint8_t cr, cg, cb;
+                f.get(p.x0 + l.x + gx, p.y0 + l.y + gy, cr, cg, cb);
+                if (level(cr, cg, cb) < kMinInkLevel) continue;
+                sum_r += cr; sum_g += cg; sum_b += cb;
+                ++inked;
+            }
+    if (inked == 0) return false;      // no stroke of its own to compare with
+    const int ink_r = static_cast<int>(sum_r / inked);
+    const int ink_g = static_cast<int>(sum_g / inked);
+    const int ink_b = static_cast<int>(sum_b / inked);
+
+    // The line: from a space's width before the first letter to a space's
+    // width after the last, and from the baseline as high as letters reach.
+    // A letter closer than a space is part of the same word -- "Tuan" before
+    // "Anh", or the "2" after "KhiCon" -- and one further off is another word.
+    //
+    // And the marks Vietnamese puts over and under a letter, so that "Ánh"
+    // is not taken for "Anh": in each letter's own columns, as far above it
+    // as an accent reaches and as far below the line as a dot. Not right
+    // across the line, and not over a letter that carries its own accent:
+    // higher up is whatever the game draws above a name.
+    constexpr int kMarkAbove = 3;      // an accent's two rows, and the gap under it
+    constexpr int kMarkBelow = 2;      // a dot's row, and the gap over it
+    const int foot = p.y0 + r.foot;
+    const int band_top = foot - line_h;
+    const int x0 = std::max(0, p.x0 + r.left - kSpaceGap);
+    const int x1 = std::min(f.width, p.x0 + r.right + kSpaceGap);
+    const int y0 = std::max(0, band_top - kMarkAbove);
+    const int y1 = std::min(f.height, foot + kMarkBelow);
+    if (x1 <= x0 || y1 <= y0 || foot <= y0) return false;
+    const int bw = x1 - x0, bh = y1 - y0;
+
+    std::vector<std::uint8_t> look(static_cast<std::size_t>(bw) * bh, 0);
+    const auto mark = [&](int from_x, int to_x, int from_y, int to_y) {
+        for (int y = std::max(y0, from_y); y < std::min(y1, to_y); ++y)
+            for (int x = std::max(x0, from_x); x < std::min(x1, to_x); ++x)
+                look[static_cast<std::size_t>(y - y0) * bw + (x - x0)] = 1;
+    };
+    mark(x0, x1, band_top, foot);
+    for (const Run::Letter& l : r.letters) {
+        const int top = p.y0 + l.y;
+        const int from = l.g->h <= cap_height_ ? top - kMarkAbove : top;
+        mark(p.x0 + l.x, p.x0 + l.x + l.g->w, from, y1);
+    }
+
+    // What the letters found account for: their strokes, and a pixel round
+    // each in case one sits a pixel off.
+    std::vector<std::uint8_t> own(static_cast<std::size_t>(bw) * bh, 0);
+    for (const Run::Letter& l : r.letters)
+        for (int gy = 0; gy < l.g->h; ++gy)
+            for (int gx = 0; gx < l.g->w; ++gx) {
+                if (!l.g->ink[static_cast<std::size_t>(gy) * l.g->w + gx]) continue;
+                const int fx = p.x0 + l.x + gx, fy = p.y0 + l.y + gy;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int bx = fx + dx - x0, by = fy + dy - y0;
+                        if (bx >= 0 && by >= 0 && bx < bw && by < bh)
+                            own[static_cast<std::size_t>(by) * bw + bx] = 1;
+                    }
+            }
+
+    // Anything else written in the name's colour there makes it part of some
+    // other writing: more letters of a longer name, another letter where one
+    // of this name's was not found, or a mark this name does not have. A glow
+    // or a pet over a letter is another colour, or no stroke at all, and does
+    // not count.
+    int stray = 0;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x) {
+            const std::size_t at = static_cast<std::size_t>(y - y0) * bw + (x - x0);
+            if (!look[at] || own[at]) continue;
+            if (!looks_like_stroke(f, x, y)) continue;
+            std::uint8_t cr, cg, cb;
+            f.get(x, y, cr, cg, cb);
+            if (std::abs(cr - ink_r) > kSameInk || std::abs(cg - ink_g) > kSameInk ||
+                std::abs(cb - ink_b) > kSameInk)
+                continue;
+            if (++stray >= kStrayInk) return false;
+        }
+    return true;
+}
+
+std::vector<GlyphFont::Spot> GlyphFont::find_whole(const Frame& f, const ScreenRect& area,
+                                                   const std::string& utf8) const {
+    std::vector<Spot> out;
+    if (glyphs_.empty() || utf8.empty()) return out;
+
+    std::vector<const Glyph*> want;
+    if (!spell(utf8, want)) return out;
+
+    // As many letters as find_text asks for: a letter may be eaten. Which
+    // letters, and what stands where one is missing, is alone()'s question.
+    const std::size_t letters = static_cast<std::size_t>(
+        std::count_if(want.begin(), want.end(), [](const Glyph* g) { return g != nullptr; }));
+    if (letters == 0) return out;
+    const std::size_t need = std::max<std::size_t>(
+        2, static_cast<std::size_t>(letters * kMinFoundFraction));
+
+    // As high as the name's own letters reach, and at least as high as a
+    // capital: a name of small letters must still see the stem of a capital
+    // written right before it.
+    int line_h = cap_height_;
+    for (const Glyph* g : want)
+        if (g) line_h = std::max(line_h, g->h);
+
+    const Patch p = patch_of(f, area);
+    if (!p.valid()) return out;
+
+    runs(p, want, need, [&](const Run& r) {
+        // The last letter found, as the first always is. A name a letter
+        // short at its end is a shorter name -- "KhiCon" when "KhiCon2" is
+        // sought -- and nothing on the line beyond it can say otherwise.
+        if (!r.last_found) return;
+        if (!alone(f, p, r, line_h)) return;
+
+        Spot s;
+        s.where = ScreenRect{ p.x0 + r.left, p.y0 + r.top, r.right - r.left, r.foot - r.top };
+        s.sure = static_cast<float>(r.score / static_cast<double>(letters));
+
+        // The same writing is met again from the starting points beside it.
+        // Keep its best read, once.
+        bool beaten = false;
+        for (const Spot& o : out)
+            if (o.where.overlaps(s.where) && o.sure >= s.sure) { beaten = true; break; }
+        if (beaten) return;
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [&](const Spot& o) { return o.where.overlaps(s.where); }),
+                  out.end());
+        out.push_back(s);
+    });
+    return out;
 }
 
 std::string GlyphFont::read_line(const Frame& f, const ScreenRect& r) const {

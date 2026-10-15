@@ -157,18 +157,13 @@ float words_at(const Frame& f, const TemplateStore& store, const ScreenRect& at,
 /// oldest first.
 void prune_pngs(const std::string& dir, bool probes, std::size_t keep) {
     std::vector<std::string> old;
-    WIN32_FIND_DATAA fd{};
-    HANDLE h = FindFirstFileA((dir + "\\*.png").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            const bool probe = std::string(fd.cFileName).rfind("probe_", 0) == 0;
-            if (probe == probes) old.push_back(fd.cFileName);
-        } while (FindNextFileA(h, &fd));
-        FindClose(h);
+    for (const std::string& name : files_in(dir, "*.png")) {
+        const bool probe = name.rfind("probe_", 0) == 0;
+        if (probe == probes) old.push_back(name);
     }
     std::sort(old.begin(), old.end());
     for (std::size_t i = 0; i + keep < old.size(); ++i)
-        DeleteFileA((dir + "\\" + old[i]).c_str());
+        remove_file(dir + "\\" + old[i]);
 }
 
 } // namespace
@@ -754,8 +749,7 @@ void add_kin(TrashList::Item& item, const std::string& id) {
 
 std::string ItemCatalog::default_dir() {
     const std::string staged = TemplateStore::default_dir();
-    if (!staged.empty() &&
-        GetFileAttributesA((staged + "\\spend").c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (!staged.empty() && path_exists(staged + "\\spend"))
         return staged;
     return TemplateStore::client_images();
 }
@@ -779,18 +773,13 @@ bool ItemCatalog::load(const std::string& images_dir) {
         std::string dir = images_dir + "\\" + k.folder;
         std::replace(dir.begin(), dir.end(), '/', '\\');
 
-        WIN32_FIND_DATAA fd{};
-        HANDLE h = FindFirstFileA((dir + "\\*.png").c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        do {
+        for (const std::string& file : files_in(dir, "*.png")) {
             Entry e;
-            std::string file = fd.cFileName;
             if (!load_png(dir + "\\" + file, e.icon) || !e.icon.valid()) continue;
             e.id = std::string(k.folder) + "/" + file.substr(0, file.size() - 4);
             e.tile = slot_tile(e.icon);
             group.entries.push_back(std::move(e));
-        } while (FindNextFileA(h, &fd));
-        FindClose(h);
+        }
         std::sort(group.entries.begin(), group.entries.end(),
                   [](const Entry& a, const Entry& b) { return a.id < b.id; });
         if (!group.entries.empty()) groups.push_back(std::move(group));
@@ -874,7 +863,7 @@ bool TrashList::load(const std::string& dir, const BagLayout& l) {
     rivals.clear();
     for (const Action a : { Action::Delete, Action::Drop }) {
         const std::string sub = dir + "\\" + folder(a);
-        if (GetFileAttributesA(sub.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        if (!path_exists(sub)) continue;
 
         TemplateStore store;
         store.load(sub);
@@ -900,14 +889,14 @@ std::string TrashList::add(const std::string& dir, const Frame& cut, Action a,
                            const BagLayout& l) {
     if (!cut.valid()) return {};
     const std::string sub = dir + "\\" + folder(a);
-    CreateDirectoryA(dir.c_str(), nullptr);
-    CreateDirectoryA(sub.c_str(), nullptr);
+    make_folder(dir);
+    make_folder(sub);
 
     // Named by when, which is unique enough for something a person clicks.
     std::string path;
     for (int n = 0; n < 100; ++n) {
         path = sub + "\\item_" + stamp() + "_" + std::to_string(n) + ".png";
-        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) break;
+        if (!path_exists(path)) break;
     }
     if (!save_png(cut, path)) return {};
 
@@ -1016,7 +1005,7 @@ void TrashList::build(const std::string& dir, const CleanSettings& s, const Item
 
 bool TrashList::remove(std::size_t index) {
     if (index >= items.size()) return false;
-    if (!items[index].file.empty()) DeleteFileA(items[index].file.c_str());
+    if (!items[index].file.empty()) remove_file(items[index].file);
     items.erase(items.begin() + static_cast<std::ptrdiff_t>(index));
     return true;
 }
@@ -1179,7 +1168,7 @@ BagCleaner::BagCleaner(InputManager& input, const TemplateStore& store, Grab gra
 
 void BagCleaner::keep(const Frame& f, const char* what) {
     if (debug_dir_.empty() || !f.valid()) return;
-    CreateDirectoryA(debug_dir_.c_str(), nullptr);
+    make_folder(debug_dir_);
 
     // A few dozen at most: the newest are the ones that matter. A probe's
     // frames are a record of their own, kept apart from these: see probe.
@@ -2089,7 +2078,7 @@ BagCleaner::Probe BagCleaner::probe(int tab, int row, int col) {
     // very answer a probe is for, and not a sign that the item stayed out.
     const std::string name = "probe_" + stamp();
     if (!debug_dir_.empty()) {
-        CreateDirectoryA(debug_dir_.c_str(), nullptr);
+        make_folder(debug_dir_);
         prune_pngs(debug_dir_, true, kProbeFramesKept);
     }
     // What the looks find, over all of them: the bin's own dialog with the

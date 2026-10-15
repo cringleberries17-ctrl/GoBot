@@ -1,0 +1,4 @@
+# The Vietnamese note for testers is copied into the package byte for byte:
+# UTF-8 with a BOM, and CRLF, so that Notepad on any Windows shows its
+# Vietnamese. No clone may convert its line endings.
+DOC-TRUOC.txt -text

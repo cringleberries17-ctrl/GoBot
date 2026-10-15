@@ -15,6 +15,7 @@
 // Capture is read-only; the bot acts only through synthetic keyboard input
 // into the focused game window.
 
+#include "gobot/auto_chat.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/crash_watch.hpp"
@@ -23,6 +24,7 @@
 #include "gobot/party_chat.hpp"
 #include "gobot/bot_brain.hpp"
 #include "gobot/command_executor.hpp"
+#include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/game_state.hpp"
@@ -43,6 +45,7 @@
 #include "gobot/dialog_driver.hpp"
 #include "gobot/party.hpp"
 #include "gobot/reviver.hpp"
+#include "gobot/quick_quest.hpp"
 #include "gobot/routine.hpp"
 #include "gobot/screen_layout.hpp"
 #include "gobot/session_manager.hpp"
@@ -61,6 +64,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -106,6 +110,7 @@ bool running_as_admin() {
 }
 
 void print_usage() {
+    // In more than one piece: MSVC refuses any one string literal over 16 KB.
     std::printf(R"(gobot_cli — GhostOnline packet-capture bot
 
 USAGE
@@ -141,9 +146,10 @@ OPTIONS
                       glyphs are matched against the font's own pictures and
                       the answer is exact.
   --find <text>       Say where that text is on screen, searching the whole
-                      frame. This is how the bot finds your own character:
-                      it has no health bar to be spotted by — its health is
-                      in the HUD — but it has its name under its feet.
+                      frame, inside a longer line too. The bot finds your own
+                      character by its name the same way, but only where the
+                      name is the whole of its line: the bars under a name
+                      say a player stands there, not which one.
   --vitals <n>        Watch HP and MP for n seconds and print both readings:
                       the figures the game prints across its bars, and what
                       measuring the coloured part says. They disagree, and the
@@ -289,6 +295,76 @@ UNATTENDED RUNNING
                       where @drop says the dialog came up as the item landed,
                       before any click on the bin. It exits 0 only when the
                       item is back in its slot and the bin is clean.
+  --chatcheck         Look at the game's chat bar, bottom left, and say whether
+                      the chat line is open or shut, with the numbers that
+                      decided it, and whether a dialog is up. Presses nothing.
+                      Keeps the frame in chat_debug. The last line is
+                        CHAT CHECK state=<closed|open|unknown> found=<0|1> at=x,y
+                                   dark=<n> closed=<score> ink=<n> dialog=<..>
+                                   hud=<0|1> focused=<0|1>
+                      and it exits 0 when the bar was found open or shut.
+  --chat-once         Say configs/chat.ini's test_line once in the game's chat,
+                      the way the Tự chat tab says its lines: the game brought
+                      to the front, Enter only on a screen showing the line
+                      shut and no dialog, typing only once the line is seen
+                      open, Enter to send only once the field shows the text,
+                      and a look that it closed. Every step is printed; the
+                      last line is
+                        CHAT RESULT sent=<0|1> left_open=<0|1> method=<m>
+                                    typed="<text>" trouble=<text>
+                      and it exits 0 only when the line was sent. It refuses
+                      while gobot_gui runs (that one's keys cannot be held off
+                      from here), and within 30 seconds of the last line it
+                      typed. It keeps the frame it judged the screen by, and
+                      any frame where a step went wrong, in chat_debug. Ctrl+C
+                      stops it at the next key -- but brings this console to
+                      the front, not the game, so what was typed may be left
+                      in the game's chat line: look before pressing a key there.
+                      When the line may have been left open, it looks a few
+                      times more, pressing nothing, and says what it saw;
+                      left_open=1 says those looks still could not see it
+                      shut, so look at it before pressing a key in the game.
+  --chat <text>       The same with these words, for a person at a console.
+)" R"(  --quest-probe       Look for the quick quest window, as the Nhiệm vụ tab's
+                      Thử xem does: open Nhiệm Vụ by hand on NV Phụ first.
+                      Says whether the window, its tabs and Tự Động are seen,
+                      with their scores, and whether Tự Động's box is ticked.
+                      Presses nothing; keeps the frame in quest_debug as
+                      probe_<time>.png. Also says whether a round would click
+                      the two points it would have to -- NV Phụ, and Tự Động
+                      -- or refuse them for lying on a place it never clicks
+                      (Hủy Nhiệm Vụ, the quest buttons, another tab, outside).
+                      The last line is
+                        QUEST PROBE window=<0|1> at=x,y title=<s> tabs=<s>
+                                    tabs_en=<s> skin=<vi|en> tab_ok=<0|1>
+                                    auto=<0|1> at=x,y score=<s>
+                                    state=<on|off|unknown> on=<s> off=<s>
+                                    click_ok=<0|1>
+                      and it exits 0 when the window and Tự Động were found
+                      and both points may be clicked.
+  --quest-once        One quick quest round against the live game, as the tab's
+                      Làm ngay 1 lần makes it: the game brought to the front,
+                      the window opened with configs/quest.ini's quest_key if
+                      it is shut, NV Phụ clicked, Tự Động clicked only if its
+                      box is off, and the window closed again if this opened
+                      it -- two keys and two clicks at most. Every step is
+                      printed; the last line is
+                        QUEST RESULT outcome=<name> keys=<n> clicks=<n>
+                                     opened=<0|1> left_open=<0|1>
+                                     maybe_open=<0|1>
+                      and it exits 0 when Tự Động ends ticked and the window
+                      is not left open. maybe_open=1: the key went in and no
+                      quest window came up, so whatever it opened, if
+                      anything, is still there. Refuses while gobot_gui runs,
+                      and a quest_key that is one of GoBot's own switches in
+                      macro.ini or hunt.ini. Ctrl+C stops it at the next key
+                      or click, pressing nothing more.
+  --method <m>        With --chat-once or --chat: type with vk (a key per
+                      character, GoC's way), unicode, wmchar or imechar
+                      instead of chat.ini's method. Every method but vk keeps
+                      the marks on Vietnamese letters (unless chat.ini says
+                      strip_diacritics=true), so to find out whether one gets
+                      them through, chat.ini's test_line needs some.
   --close             Close whatever dialogs are in the way, for real. The one
                       thing here that needs no calibration -- the middle of a
                       close button is the close button -- so it is the right
@@ -366,6 +442,13 @@ struct Options {
     int  trash_max = 0;             ///< 0: not given
     bool trash_probe = false;
     int  probe_tab = 0, probe_row = 0, probe_col = 0;   ///< from 1, as typed
+    bool chat_check = false;
+    bool chat_once = false;         ///< chat.ini's test_line
+    bool chat_given = false;        ///< --chat, even with nothing after it
+    std::string chat_text;          ///< --chat, said as given
+    std::string chat_method;        ///< --method; empty for chat.ini's
+    bool quest_probe = false;       ///< --quest-probe: look, press nothing
+    bool quest_once = false;        ///< --quest-once: one quick quest round
     bool dry_run = false;
     bool close_popups = false;
     bool party = false;
@@ -477,6 +560,21 @@ bool parse_args(int argc, char** argv, Options& o) {
                 return false;
             }
         }
+        else if (a == "--chatcheck") o.chat_check = true;
+        else if (a == "--quest-probe") o.quest_probe = true;
+        else if (a == "--quest-once") o.quest_once = true;
+        else if (a == "--chat-once") o.chat_once = true;
+        else if (a == "--chat")      { o.chat_text = next("--chat"); o.chat_given = true; }
+        else if (a == "--method") {
+            const std::string m = next("--method");
+            ChatMethod how = ChatMethod::Vk;
+            if (!chat_method_from(m, how)) {
+                std::fprintf(stderr, "error: --method takes vk, unicode, wmchar or imechar, "
+                                     "not '%s'\n\n", m.c_str());
+                return false;
+            }
+            o.chat_method = m;
+        }
         else if (a == "--routine")   { o.routines = true; o.routine_name = next("--routine"); }
         else if (a == "--dry")       o.dry_run = true;
         else if (a == "--close")     o.close_popups = true;
@@ -497,6 +595,11 @@ bool parse_args(int argc, char** argv, Options& o) {
             std::fprintf(stderr, "error: unknown argument '%s'\n\n", a.c_str());
             return false;
         }
+    }
+    // One line or the other: which was meant cannot be told.
+    if (o.chat_once && o.chat_given) {
+        std::fprintf(stderr, "error: --chat-once and --chat do not go together\n\n");
+        return false;
     }
     return true;
 }
@@ -791,31 +894,28 @@ int run_see(const Options& o, const AppConfig& app) {
                     n.name.c_str());
     }
 
+    // Your character, by its name, as the hunter finds it. The bar test cannot
+    // say which plate is yours -- a plate with bars may be yours or another
+    // player's -- so none is taken for you, however near the middle.
     Nameplate me;
     std::printf("\n");
-    bool have_me = MobDetector::pick_player(plates, frame.width, me);
-    if (have_me) {
-        std::printf("Your character is at %d,%d.\n", me.x(), me.y());
-    } else {
-        // The bar test cannot find the local character -- it wears no bars --
-        // so look for its name instead.
-        HunterConfig hc;
-        hc.load(resolve("configs/hunt.ini"));
-        ScreenRect at{};
+    bool have_me = false;
+    HunterConfig hc;
+    hc.load(resolve("configs/hunt.ini"));
+    {
         float sure = 0.0f;
         if (hc.character_name.empty()) {
             std::printf("No character_name set in configs/hunt.ini, so there is "
                         "nothing to look for.\n"
-                        "Your character wears no health bar -- your health is in "
-                        "the HUD -- so its name is the only way to find it.\n");
+                        "A plate with bars may be yours or another player's, so "
+                        "your name is the only way to tell which is you.\n");
         } else if (!have_font) {
             std::printf("No glyph set installed, so \"%s\" cannot be looked for.\n",
                         hc.character_name.c_str());
-        } else if (font.find_text(frame, ScreenRect{ 0, 0, frame.width, frame.height },
-                                  hc.character_name, at, &sure)) {
+        } else if (MobDetector::find_self(frame, tuning, font, hc.character_name, me, &sure)) {
             have_me = true;
             std::printf("Your character \"%s\" is at %d,%d  (found by name, %.0f%% "
-                        "sure)\n", hc.character_name.c_str(), at.cx(), at.y,
+                        "sure)\n", hc.character_name.c_str(), me.x(), me.y(),
                         sure * 100.0f);
         } else {
             std::printf("\"%s\" is not on screen. Check the spelling against what "
@@ -861,9 +961,8 @@ int run_see(const Options& o, const AppConfig& app) {
                     fx.confidence * 100.0f);
 
         Nameplate now;
-        if (cap2.grab(input.target_window(), fr)) {
-            const std::vector<Nameplate> again = MobDetector::detect(fr, tuning);
-            if (MobDetector::pick_player(again, fr.width, now)) {
+        if (have_font && cap2.grab(input.target_window(), fr)) {
+            if (MobDetector::find_self(fr, tuning, font, hc.character_name, now)) {
                 double wx = 0.0, wy = 0.0;
                 cam.to_world(now.x(), now.y(), wx, wy);
                 std::printf("  you are at %.0f,%.0f in the level\n", wx, wy);
@@ -1080,8 +1179,8 @@ int run_grab(const Options& o, const AppConfig& app, const std::string& spec) {
     }
 
     const std::string dir = TemplateStore::default_dir() + "\\grabbed";
-    CreateDirectoryA(TemplateStore::default_dir().c_str(), nullptr);
-    CreateDirectoryA(dir.c_str(), nullptr);
+    make_folder(TemplateStore::default_dir());
+    make_folder(dir);
     const std::string path = dir + "\\" + name + ".png";
     if (!save_png(cut, path)) {
         std::fprintf(stderr, "Could not write %s\n", path.c_str());
@@ -1270,8 +1369,8 @@ int run_templates(const Options& o, const AppConfig& app, const std::string& whi
     // time.
     if (o.template_save) {
         const std::string dir = TemplateStore::default_dir() + "\\seen";
-        CreateDirectoryA(TemplateStore::default_dir().c_str(), nullptr);
-        CreateDirectoryA(dir.c_str(), nullptr);
+        make_folder(TemplateStore::default_dir());
+        make_folder(dir);
 
         std::vector<std::string> wanted;
         if (which == "*") wanted = store.names();
@@ -2564,6 +2663,436 @@ int run_trash_probe(const Options& o, const AppConfig& app) {
 
 int run_revive(const Options& o, const AppConfig& app);
 
+/// Whether the game's chat line is open or shut, looked at once, as the Tự
+/// chat tab's Kiểm tra ô chat looks at it. Nothing is pressed, and the game is
+/// not brought forward: this is for reading the chat bar's state, with the
+/// numbers that decided it, while a person opens and shuts the line by hand.
+int run_chat_check(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    const auto result = [](const char* state, const ChatBar& bar, const std::string& dialog,
+                           bool hud, bool focused) {
+        std::fflush(stderr);
+        std::printf("CHAT CHECK state=%s found=%d at=%d,%d dark=%d closed=%.3f ink=%d dialog=%s "
+                    "hud=%d focused=%d\n",
+                    state, bar.found ? 1 : 0, bar.x, bar.y, bar.dark,
+                    static_cast<double>(bar.closed_score), bar.ink,
+                    dialog.empty() ? "none" : dialog.c_str(), hud ? 1 : 0, focused ? 1 : 0);
+        std::fflush(stdout);
+    };
+    const auto give_up = [&](const std::string& why) {
+        say(why);
+        result("unknown", ChatBar{}, std::string(), false, false);
+        return 1;
+    };
+
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini")))
+        return give_up("Không có hình giao diện của game, nên không nhận ra được ô chat.");
+    ChatSettings settings;
+    if (!settings.load(resolve("configs/chat.ini")))
+        say("no configs/chat.ini, so going by the built-in settings");
+    if (!can_look_for_chat(store, settings))
+        return give_up("Không có hình ô chat (" + settings.open_picture + ").");
+    ChatDialogs dialogs;
+    dialogs.load(resolve("configs/trash.ini"), resolve("configs/party.ini"),
+                 resolve("configs/routines.ini"));
+    if (!ChatDialogs::can_check(store))
+        say("no pictures of the dialogs' buttons, so whether a dialog is up cannot be told");
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game.");
+    int w = 0, h = 0;
+    input.window_size(w, h);
+    const bool focused = input.window_focused();
+    say("game window " + std::to_string(w) + "x" + std::to_string(h) +
+        (focused ? ", in front" : ", not in front: whatever covers its bottom-left corner is "
+                                  "seen instead"));
+
+    ScreenCapture capture;
+    Frame frame;
+    if (!capture.grab(input.target_window(), frame) || !frame.valid())
+        return give_up("Chưa chụp được màn hình game.");
+
+    const ChatBar bar = look_chat_bar(frame, store, settings);
+    const std::string dialog = ChatDialogs::can_check(store) ? dialogs.up(frame, store) : "";
+    const bool hud = SessionManager::hud_present(frame);
+    char numbers[200];
+    std::snprintf(numbers, sizeof numbers,
+                  "dark %d of %d pixels in the open field's grey (open from 100), like the shut "
+                  "field %.3f (shut from %.2f), drawn on it up to %d px",
+                  bar.dark, bar.field.w * bar.field.h, static_cast<double>(bar.closed_score),
+                  static_cast<double>(settings.closed_score), bar.ink);
+    if (bar.found)
+        say((bar.state == ChatBarState::Unknown
+                 ? std::string("Thấy ô chat nhưng không giống hình ô chat đang mở hay đang đóng")
+                 : "Ô chat " + std::string(chat_bar_name(bar.state))) +
+            ": the bar's divider at " + std::to_string(bar.x) + "," + std::to_string(bar.y) + "; " +
+            numbers);
+    else
+        say("Không thấy ô chat ở góc trái dưới màn hình game. Đừng để cửa sổ nào che khung chat.");
+    if (!dialog.empty()) say("Đang có hộp thoại trong game: " + dialog + ".");
+    if (!hud) say("no HP and MP bars on screen: the character is not in the world");
+
+    // Kept for the live test, whatever it showed: the open look of the line
+    // has never been photographed.
+    ChatSender keeper(input, store, [](Frame&) { return false; });
+    keeper.set_settings(settings);
+    keeper.set_debug_dir(exe_relative("chat_debug"));
+    keeper.keep(frame, bar.state == ChatBarState::Open     ? "check_open"
+                       : bar.state == ChatBarState::Closed ? "check_closed"
+                                                           : "check_unknown",
+                &bar);
+
+    const char* state = bar.state == ChatBarState::Open     ? "open"
+                        : bar.state == ChatBarState::Closed ? "closed"
+                                                            : "unknown";
+    result(state, bar, dialog, hud, focused);
+    return bar.state == ChatBarState::Unknown ? 1 : 0;
+}
+
+/// One line said in the game's chat, as the Tự chat tab says its lines: the
+/// same settings, pictures, checks and keys, aimed at the same window. The
+/// line is chat.ini's test_line for --chat-once -- the live test's, so that
+/// what it says cannot be handed in from outside -- or --chat's words.
+///
+/// What this cannot do is hold the rest of the bot off, as the GUI does: it
+/// is a process of its own. So it will not type while the GUI runs.
+int run_chat(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    std::string method = "vk";
+    std::string typed;
+    // left_open: the chat line may still be open after this, as far as the
+    // last looks could tell -- said on the result line itself, so that a
+    // result read at a glance does not pass for a line sent and shut.
+    const auto finish = [&](bool sent, bool left_open, const std::string& trouble) {
+        std::fflush(stderr);
+        std::printf("CHAT RESULT sent=%d left_open=%d method=%s typed=\"%s\" trouble=%s\n",
+                    sent ? 1 : 0, left_open ? 1 : 0, method.c_str(), typed.c_str(),
+                    trouble.c_str());
+        std::fflush(stdout);
+        return sent ? 0 : 1;
+    };
+    // Before anything is pressed, so nothing of this can have left it open.
+    const auto give_up = [&](const std::string& why) {
+        say(why);
+        return finish(false, false, why);
+    };
+
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini")))
+        return give_up("Không có hình giao diện của game, nên không nhận ra được ô chat.");
+    ChatSettings settings;
+    if (!settings.load(resolve("configs/chat.ini")))
+        say("no configs/chat.ini, so going by the built-in settings");
+    if (!o.chat_method.empty()) {
+        chat_method_from(o.chat_method, settings.method);
+        settings.method_note.clear();       // chat.ini's method is not the one used
+    }
+    if (!settings.method_note.empty()) say(settings.method_note);
+    method = chat_method_name(settings.method);
+
+    const std::string raw = o.chat_once ? settings.test_line : o.chat_text;
+    const ChatText line = prepare_chat(raw, settings.method, settings.strip_diacritics,
+                                       settings.max_length);
+    typed = line.typed;
+    if (line.empty()) return give_up("Câu không còn chữ nào gõ được.");
+
+    // Not while the GUI runs: its fighting keys, pressed while this types,
+    // would land in the open chat line and go out with it -- and only the
+    // GUI's own lines can hold them off.
+    if (SessionManager::process_running("gobot_gui.exe"))
+        return give_up("gobot_gui đang chạy — đóng GoBot trước khi gửi thử từ dòng lệnh: trong lúc "
+                       "gõ câu, bot ở đó vẫn bấm phím vào game.");
+    // At most a line every 30 seconds from here, as from the tab: a list of
+    // these run one after another is not a line a second.
+    const std::string debug_dir = exe_relative("chat_debug");
+    const std::string last_path = debug_dir + "\\last_cli_line.txt";
+    {
+        std::ifstream last_in(utf8_to_wide(last_path).c_str());
+        long long last = 0;
+        const long long now = static_cast<long long>(std::time(nullptr));
+        if (last_in >> last && now >= last && now - last < ChatSettings::kMinInterval)
+            return give_up("Mới gửi thử " + std::to_string(now - last) + " giây trước — chờ ít nhất " +
+                           std::to_string(ChatSettings::kMinInterval) + " giây giữa hai câu.");
+    }
+    if (!can_look_for_chat(store, settings))
+        return give_up("Không có hình ô chat (" + settings.open_picture + "), nên không biết ô chat "
+                       "đang mở hay đóng.");
+    if (!ChatDialogs::can_check(store))
+        return give_up("Không có hình hộp thoại của game, nên không biết có hộp thoại nào đang mở "
+                       "không.");
+    ChatDialogs dialogs;
+    dialogs.load(resolve("configs/trash.ini"), resolve("configs/party.ini"),
+                 resolve("configs/routines.ini"));
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game.");
+
+    std::string changes;
+    if (line.stripped) changes += ", marks taken off";
+    if (line.dropped) changes += ", characters with no key left out";
+    if (line.cut) changes += ", cut to " + std::to_string(settings.max_length) + " characters";
+    say("typing \"" + line.typed + "\" (" + std::to_string(line.chars) + " characters) with " +
+        method + changes);
+    for (const std::string& typer : vietnamese_typers_running())
+        say(typer + " is running: in its Vietnamese mode it changes what is typed (dd becomes đ)");
+    const std::uint16_t layout = window_keyboard_layout(input.target_window());
+    if (layout != 0 && layout != 0x0409) {
+        char hex[16];
+        std::snprintf(hex, sizeof hex, "%04X", layout);
+        say(std::string("the game's keyboard layout is ") + hex +
+            ", not English (US) 0409: letters and digits may come out wrong");
+    }
+    input.release_all();
+    if (!input.window_focused()) {
+        input.focus_window();
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) { return capture.grab(input.target_window(), f); };
+
+    // The checks the GUI's line goes by, but the ones about the rest of the
+    // bot: this process has none of it.
+    Frame frame;
+    if (!grab(frame) || !frame.valid()) return give_up("Chưa chụp được màn hình game.");
+    ChatGateInput in;
+    in.window = true;
+    in.focused = input.window_focused();
+    in.looked = true;
+    in.hud = SessionManager::hud_present(frame);
+    in.dialog = dialogs.up(frame, store);
+    const ChatBar bar = look_chat_bar(frame, store, settings);
+    in.bar = bar.state;
+    say(std::string("before: ô chat ") + chat_bar_name(bar.state) + ", dark " +
+        std::to_string(bar.dark) + ", like the shut field " + std::to_string(bar.closed_score) +
+        ", ink " + std::to_string(bar.ink) +
+        (in.focused ? "" : ", the game NOT in front") + (in.hud ? "" : ", no HP/MP bars") +
+        (in.dialog.empty() ? "" : ", dialog: " + in.dialog));
+
+    ChatSender sender(input, store, grab);
+    sender.set_settings(settings);
+    sender.set_dialog_check([&](const Frame& f) { return dialogs.up(f, store); });
+    sender.set_debug_dir(debug_dir);
+    sender.on_report(say);
+    // The screen this was judged by, whatever it showed, for the live test.
+    sender.keep(frame, "chat_before", &bar);
+
+    const ChatGate gate = chat_gate(in);
+    if (!gate.send) return give_up(gate.why);
+
+    {
+        make_folder(debug_dir);
+        std::ofstream last_out(utf8_to_wide(last_path).c_str(), std::ios::trunc);
+        last_out << static_cast<long long>(std::time(nullptr)) << "\n";
+    }
+
+    // Ctrl+C stops the line at its next key, as the GUI's DỪNG does. What was
+    // typed is rubbed out if the game is in front -- which, with this console
+    // brought forward by the Ctrl+C, it may well not be. Watched from beside
+    // the line, which knows nothing of g_stop.
+    std::atomic<bool> sending{true};
+    std::thread watch([&] {
+        while (sending) {
+            if (g_stop) sender.cancel();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    });
+    const ChatSender::Result r = sender.send(line);
+    sending = false;
+    watch.join();
+
+    if (r.sent) say("Đã gửi: \"" + line.typed + "\"");
+    if (!r.trouble.empty()) say((r.sent ? "" : "Không gửi được: ") + r.trouble);
+    bool still_doubt = r.left_open;
+    if (still_doubt) {
+        // Nothing here can hold the GUI's keys off, and nothing more is
+        // pressed: a few looks over three seconds say whether it has shut
+        // since, as an Enter the game was slow to take would leave it.
+        for (int i = 0; i < 6 && still_doubt && !g_stop; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            still_doubt = sender.check_left_open() != ChatSender::LeftOpen::Shut;
+        }
+        say(still_doubt ? "Ô chat có thể vẫn đang mở: xem ô chat trong game trước khi bấm phím nào."
+                        : "Ô chat đã đóng.");
+    }
+    char last[160];
+    std::snprintf(last, sizeof last, "after: ô chat %s, dark %d, like the shut field %.3f, ink %d",
+                  chat_bar_name(r.last.state), r.last.dark,
+                  static_cast<double>(r.last.closed_score), r.last.ink);
+    say(last);
+    return finish(r.sent, still_doubt, r.trouble);
+}
+
+/// What the Nhiệm vụ tab's Thử xem sees, looked at once: the quest window, its
+/// tabs, Tự Động and its box, with the numbers that decided each. Nothing is
+/// pressed and the game is not brought forward -- the window is opened by
+/// hand first, on NV Phụ. For the live test's first step, which settles
+/// whether GoC's pictures fit the live client at all.
+int run_quest_probe(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    const auto result = [](const QuestProbe& p) {
+        std::fflush(stderr);
+        std::printf("QUEST PROBE window=%d at=%d,%d title=%.3f tabs=%.3f tabs_en=%.3f skin=%s tab_ok=%d "
+                    "auto=%d at=%d,%d score=%.3f state=%s on=%.3f off=%.3f click_ok=%d\n",
+                    p.window.found ? 1 : 0, p.window.at.x, p.window.at.y,
+                    static_cast<double>(p.window.score), static_cast<double>(p.window.tabs),
+                    static_cast<double>(p.window.tabs_en), p.window.english ? "en" : "vi",
+                    p.tab_ok ? 1 : 0, p.option.found ? 1 : 0, p.option.at.x, p.option.at.y,
+                    static_cast<double>(p.option.score), auto_state_name(p.option.state),
+                    static_cast<double>(p.option.on), static_cast<double>(p.option.off),
+                    p.click_ok ? 1 : 0);
+        std::fflush(stdout);
+    };
+    const auto give_up = [&](const std::string& why) {
+        say(why);
+        result(QuestProbe{});
+        return 1;
+    };
+
+    QuestSettings settings;
+    if (!settings.load(resolve("configs/quest.ini")))
+        say("no configs/quest.ini, so going by the built-in settings");
+    QuestPictures pictures;
+    std::string from;
+    if (!pictures.load_best(settings, &from)) return give_up(quest_missing_vi(pictures));
+    say("pictures from " + from +
+        (pictures.knows_en() ? "" : " (the English client's are missing, so it cannot be told apart)"));
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game.");
+    ScreenCapture capture;
+    Frame frame;
+    if (!capture.grab(input.target_window(), frame) || !frame.valid())
+        return give_up("Chưa chụp được màn hình game.");
+
+    const QuestProbe p = probe_quest(frame, pictures, settings);
+    say(p.log);
+    say(p.vi);
+    const std::string kept = keep_quest_frame(exe_relative("quest_debug"), frame, "", true);
+    if (!kept.empty()) say("kept the frame as " + kept);
+    result(p);
+    // Found is not enough: a round refuses a point on a place it never clicks.
+    return p.window.found && p.option.found && p.tab_ok && p.click_ok ? 0 : 1;
+}
+
+/// One quick quest round against the live game, as the Nhiệm vụ tab's Làm
+/// ngay 1 lần makes it: the same settings, pictures, checks, keys and clicks.
+///
+/// What this cannot do is hold the rest of the bot off, as the GUI does: it is
+/// a process of its own. So it will not run while the GUI runs.
+int run_quest_once(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    const auto finish = [](const QuestResult& r) {
+        std::fflush(stderr);
+        std::printf("QUEST RESULT outcome=%s keys=%d clicks=%d opened=%d left_open=%d maybe_open=%d\n",
+                    quest_outcome_name(r.outcome), r.keys_pressed, r.clicks, r.opened_by_us ? 1 : 0,
+                    r.left_open ? 1 : 0, r.maybe_open ? 1 : 0);
+        std::fflush(stdout);
+        return r.done() ? 0 : 1;
+    };
+    // Before anything is pressed.
+    const auto give_up = [&](const std::string& why) {
+        say(why);
+        QuestResult r;
+        r.outcome = QuestOutcome::NotNow;
+        return finish(r);
+    };
+
+    // Not while the GUI runs: its fighting keys and clicks, pressed while
+    // this has the window open, would land on it.
+    if (SessionManager::process_running("gobot_gui.exe"))
+        return give_up("gobot_gui đang chạy — đóng GoBot trước khi thử từ dòng lệnh: trong lúc làm, "
+                       "bot ở đó vẫn bấm phím và chuột vào game.");
+    QuestSettings settings;
+    if (!settings.load(resolve("configs/quest.ini")))
+        say("no configs/quest.ini, so going by the built-in settings");
+    if (settings.skin == QuestSettings::Skin::En)
+        return give_up("Bản game tiếng Anh: chưa hỗ trợ (cần chọn nhiệm vụ như GoC).");
+    // Not one of GoBot's own switches, which a GoBot watching for them --
+    // another gobot_cli, or one started meanwhile -- would take for the
+    // player's press: the panic key stops everything.
+    {
+        MacroConfig macro;
+        macro.load(resolve("configs/macro.ini"));
+        HunterConfig hunt;
+        hunt.load(resolve("configs/hunt.ini"));
+        const std::string clash = quest_key_clash_vi(
+            settings.quest_key, { macro.toggle_key, macro.panic_key, hunt.toggle_key });
+        if (!clash.empty()) return give_up("Không làm: " + clash + ".");
+    }
+    QuestPictures pictures;
+    std::string from;
+    if (!pictures.load_best(settings, &from)) return give_up(quest_missing_vi(pictures));
+    say("pictures from " + from);
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game.");
+    input.release_all();
+    if (!input.window_focused()) {
+        input.focus_window();
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    if (!input.window_focused())
+        return give_up("Không đưa được game lên trước: bấm vào cửa sổ game rồi chạy lại.");
+    say("quest key " + InputManager::key_name(settings.quest_key) + "; Ctrl+C stops it at the next "
+        "key or click");
+
+    ScreenCapture capture;
+    QuestRound::Hands hands;
+    hands.grab = [&](Frame& f) { return capture.grab(input.target_window(), f) && f.valid(); };
+    hands.key = [&](std::uint32_t vk, int hold_ms) {
+        return input.window_focused() && input.key_press(vk, hold_ms);
+    };
+    // Only with the game in front and the game itself under the point: the
+    // frames come from PrintWindow, which shows the game even when covered.
+    hands.click = [&](int x, int y) {
+        if (!input.window_focused()) return false;
+        HWND game = static_cast<HWND>(input.target_window());
+        POINT p{ x, y };
+        if (game == nullptr || !ClientToScreen(game, &p)) return false;
+        HWND under = WindowFromPoint(p);
+        if (under == nullptr || (under != game && GetAncestor(under, GA_ROOT) != game)) return false;
+        return input.click_at(x, y);
+    };
+    hands.move = [&](int x, int y) { return input.move_pointer(x, y); };
+    hands.now = [] { return now_ms(); };
+    hands.sleep = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
+    hands.stop = [] { return g_stop.load(); };
+    // The game gone behind another window part way: not now, as in the GUI.
+    hands.behind = [&] { return !input.window_focused(); };
+
+    QuestRound round(pictures, settings, hands);
+    round.on_report(say);
+    const QuestResult r = round.run();
+    say(quest_result_vi(r, InputManager::key_name(settings.quest_key)) + ".");
+    if (r.failed() || r.outcome == QuestOutcome::Cancelled) {
+        const std::string kept =
+            keep_quest_frame(exe_relative("quest_debug"), r.last, quest_outcome_name(r.outcome), false);
+        if (!kept.empty()) say("kept the frame as " + kept);
+    }
+    if (r.left_open) say("Cửa sổ Nhiệm Vụ có thể vẫn đang mở: xem trong game trước khi bấm phím nào.");
+    if (r.maybe_open)
+        say("Phím đã bấm mà không thấy cửa sổ Nhiệm Vụ: có thể đã mở một cửa sổ khác mà GoBot không "
+            "nhận ra — xem trong game trước khi bấm phím nào.");
+    return finish(r);
+}
+
 /// List the routines, or run one.
 ///
 /// With --dry it finds each step's picture and says where it would click,
@@ -3059,9 +3588,13 @@ int run_doctor(const Options& o, const AppConfig& app) {
 
     // ---- the machine ----
     {
-        char path[MAX_PATH]{};
-        GetModuleFileNameA(nullptr, path, MAX_PATH);
-        note("running from", path);
+        // In UTF-8, as every path here is: a folder named with Vietnamese
+        // letters comes out as it is called.
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        note("running from", wide_to_utf8(path));
+        note("version", package_version().empty() ? std::string("none -- not packaged (no VERSION.txt)")
+                                                  : package_version() + " (" + package_commit() + ")");
 
         OSVERSIONINFOEXA os{};
         os.dwOSVersionInfoSize = sizeof(os);
@@ -3130,7 +3663,7 @@ int run_doctor(const Options& o, const AppConfig& app) {
         std::string absent;
         for (const char* f : files) {
             const std::string p = resolve(std::string("configs/") + f);
-            if (GetFileAttributesA(p.c_str()) == INVALID_FILE_ATTRIBUTES)
+            if (!path_exists(p))
                 absent += std::string(absent.empty() ? "" : ", ") + f;
         }
         if (absent.empty()) good("configs", "all present");
@@ -4283,6 +4816,19 @@ int run_click(const Options& o, const AppConfig& app, const std::string& spec) {
 /// arrow keys are a guess and not a given — and a bot pressing the wrong key
 /// looks exactly like a bot whose input does not work at all.
 int run_keytest(const Options& o, const AppConfig& app) {
+    // The character is followed by its name, as the hunter finds it: a plate
+    // with bars may be yours or somebody else's. Asked for before the game is
+    // touched, so that going without brings nothing to the front.
+    HunterConfig hc;
+    hc.load(resolve("configs/hunt.ini"));
+    GlyphFont font;
+    const std::string font_dir = GlyphFont::default_dir();
+    if (hc.character_name.empty() || font_dir.empty() || !font.load(font_dir)) {
+        std::fprintf(stderr, "Needs character_name in configs/hunt.ini and the game's glyph set: "
+                             "the character is followed by its name.\n");
+        return 1;
+    }
+
     InputManager input;
     const std::string title = o.window.empty() ? app.window_title : o.window;
     if (!attach_window(input, o, app)) {
@@ -4307,8 +4853,7 @@ int run_keytest(const Options& o, const AppConfig& app) {
         if (!cap.grab(input.target_window(), frame)) return false;
         camera.update(frame);
         Nameplate me;
-        const std::vector<Nameplate> plates = MobDetector::detect(frame, tuning);
-        if (!MobDetector::pick_player(plates, frame.width, me)) return false;
+        if (!MobDetector::find_self(frame, tuning, font, hc.character_name, me)) return false;
         camera.to_world(me.x(), me.y(), wx, wy);
         return true;
     };
@@ -4472,10 +5017,10 @@ int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
                 // Where the character is, taken from where the view is.
                 //
                 // Not from finding the character on screen. That was the
-                // mistake that made every earlier run useless: the local
-                // character wears no health bar -- its health is in the HUD --
-                // so the detector finds it almost never, and a measurement
-                // that only arrives almost never pairs with almost no packets.
+                // mistake that made every earlier run useless: the detector,
+                // looking for the character by a health bar, found it almost
+                // never, and a measurement that only arrives almost never
+                // pairs with almost no packets.
                 // Two hundred samples came out of a run that saw tens of
                 // thousands of frames, and nothing correlated.
                 //
@@ -4693,6 +5238,10 @@ int main(int argc, char** argv) {
     if (!opt.bag_image.empty()) return run_bag(opt);
     if (opt.trash_probe) return run_trash_probe(opt, app);
     if (opt.trash) return run_trash(opt, app);
+    if (opt.chat_check) return run_chat_check(opt, app);
+    if (opt.chat_once || opt.chat_given) return run_chat(opt, app);
+    if (opt.quest_probe) return run_quest_probe(opt, app);
+    if (opt.quest_once) return run_quest_once(opt, app);
     if (opt.set_login) return run_set_login(opt);
     if (opt.login) return run_login(opt, app);
     if (opt.keepalive_minutes > 0) return run_keepalive(opt, app, opt.keepalive_minutes);

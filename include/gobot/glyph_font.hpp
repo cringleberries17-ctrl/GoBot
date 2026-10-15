@@ -4,6 +4,7 @@
 #include "gobot/screen_capture.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,11 +52,11 @@ public:
     /// Find a known string on screen.
     ///
     /// Reading asks "what does this say?" and needs to be pointed at something
-    /// first. This asks "where does it say this?", which is the question with
-    /// no name plate to point at -- and the local character has none. Other
-    /// players are known by the mana bar under their health bar; your own
-    /// character shows neither, because its health is in the HUD. All it has
-    /// is its name, drawn under its feet like everyone else's.
+    /// first. This asks "where does it say this?" -- anywhere, inside a longer
+    /// line too. Your own character is found by its name with the stricter
+    /// find_whole below: a plate with bars under it may be yours or another
+    /// player's -- the bars say a player stands there, not which one -- so
+    /// only the name, drawn under its feet like everyone else's, says which.
     ///
     /// Fast enough to run on a whole frame: the first letter is tried at every
     /// position, which the probe test rejects in a few lookups almost
@@ -65,6 +66,31 @@ public:
     /// Returns the best place it was found, and how well, or false.
     bool find_text(const Frame& f, const ScreenRect& area, const std::string& utf8,
                    ScreenRect& where, float* confidence = nullptr) const;
+
+    /// One place a sought string was found.
+    struct Spot {
+        ScreenRect where;          ///< its letters, in frame coordinates
+        float      sure = 0.0f;    ///< how well they were read, 0..1
+    };
+
+    /// Every place a string is written as the whole of its line, as a name is
+    /// on its plate: not inside a longer name, and not a name a letter away.
+    ///
+    /// find_text is satisfied by any line that says the string somewhere, and
+    /// for a name that is the wrong question: "Anh" is written in "TuanAnh",
+    /// "KhiCon" in "KhiCon2", and six of the seven letters of "ThanhAm" in
+    /// "ThanhAn". Looking for your own character that way took another player
+    /// for you. Here a place counts only when the first and the last letters
+    /// are found and every stroke in their colour on the line, from a space's
+    /// width before the name to a space's width after it, is one of the
+    /// letters found -- the marks over and under each letter included, so
+    /// "Ánh" is not "Anh". A letter in between may still be missing -- grass
+    /// or a casting effect eats one, and writes nothing in the name's colour
+    /// where it was -- but not replaced by another.
+    ///
+    /// A spot found from several starting points is given once, the best read.
+    std::vector<Spot> find_whole(const Frame& f, const ScreenRect& area,
+                                 const std::string& utf8) const;
 
     /// How much of a sought string has to be legible. A floating name is drawn
     /// over whatever the character is standing in and a letter is routinely
@@ -174,6 +200,18 @@ public:
     /// ordinary letter spacing.
     static constexpr int kSpaceGap = 3;
 
+    /// How far a pixel's colour may stray from a name's own strokes, in each
+    /// channel, and still be the same writing (find_whole). Generous: the
+    /// writing is drawn half-transparent and takes some of the colour behind
+    /// it, while a glow or an icon beside it is another colour altogether.
+    static constexpr int kSameInk = 60;
+
+    /// How many strokes in a name's colour that are not its own letters make
+    /// it part of some other writing (find_whole). One is a speck of
+    /// something; the edge of a letter, or an accent, is several. The one
+    /// mark this cannot tell from a speck is the single pixel under an "ị".
+    static constexpr int kStrayInk = 2;
+
     /// How far below the line's foot a glyph may still sit. The files are
     /// cropped to their own ink, so a 'j' or a dot-below vowel ends lower than
     /// the letters beside it while sharing their baseline.
@@ -257,10 +295,39 @@ private:
 
     Fit fit(const Glyph& g, const Patch& p, int px, int py) const;
 
+    /// One way a sought string lines up with the screen: where its first
+    /// letter fitted, and what walking the rest of the string from there
+    /// found. In the patch's coordinates.
+    struct Run {
+        struct Letter {
+            const Glyph* g = nullptr;
+            int          x = 0, y = 0;     ///< where its box starts
+        };
+        int                 left = 0, right = 0;   ///< the letters found; right is one past them
+        int                 top = 0, foot = 0;     ///< the first letter's top, and the baseline
+        std::size_t         hits = 0;              ///< how many letters were found
+        double              score = 0.0;           ///< their correlations, summed
+        bool                last_found = false;    ///< whether the string's last letter was
+        std::vector<Letter> letters;               ///< each letter found, and where
+    };
+
+    /// Every run of `want` across the patch that finds at least `need` of its
+    /// letters, handed to `each` in the order the first letter was met. What
+    /// find_text and find_whole both search with.
+    void runs(const Patch& p, const std::vector<const Glyph*>& want, std::size_t need,
+              const std::function<void(const Run&)>& each) const;
+
+    /// Whether a run is the whole of its line, as find_whole means it. `line_h`
+    /// is how far above the baseline the line's letters reach.
+    bool alone(const Frame& f, const Patch& p, const Run& r, int line_h) const;
+
     bool load_dir(const std::wstring& dir);
 
     std::vector<Glyph>          glyphs_;
     int                         tallest_ = 0;
+    /// The tallest plain capital, A to Z: how high a line of names reaches
+    /// even where the name sought has no capital in it.
+    int                         cap_height_ = 0;
     mutable float               last_confidence_ = 0.0f;
     mutable std::vector<Placed> last_placed_;
 };

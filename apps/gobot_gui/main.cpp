@@ -231,7 +231,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     const int screen_h = GetSystemMetrics(SM_CYMAXIMIZED);
     const int height = screen_h > 0 ? std::min(wanted_h, screen_h) : wanted_h;
 
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"GoBot",
+    // The version in the title, the way GoC shows its own ("GoC - 0.5.8.6"):
+    // the first thing to quote when reporting a problem.
+    const std::wstring title = gobot::utf8_to_wide("GoBot - " + gobot::version_shown());
+    HWND hwnd = CreateWindowW(wc.lpszClassName, title.c_str(),
                               WS_OVERLAPPEDWINDOW,
                               100, 20, wanted_w, height,
                               nullptr, nullptr, inst, nullptr);

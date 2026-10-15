@@ -21,12 +21,13 @@ struct HunterConfig {
     /// Your character's name, exactly as it appears under its feet.
     ///
     /// This is how the bot sees its own character. Everything else on screen
-    /// is found by its health bar, and the local character has none -- its
-    /// health is in the HUD -- so without this the bot knows where the
-    /// monsters are but not where it is standing, and cannot walk to one.
+    /// is found by its health bar, and a plate with bars may be yours or
+    /// another player's -- the bars say a player stands there, not which one
+    /// -- so without this the bot knows where the monsters are but not where
+    /// it is standing, and cannot walk to one.
     ///
-    /// Leave it blank for the old behaviour: the character is found only when
-    /// it happens to be wearing a health bar with a mana bar under it.
+    /// Left blank, there is no "you" at all: a plate with bars is never taken
+    /// for you, and the screens refuse to start hunting without a name.
     std::string character_name;
 
     std::uint32_t attack_key = 'Z';
