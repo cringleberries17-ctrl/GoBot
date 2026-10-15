@@ -1196,16 +1196,26 @@ void BagCleaner::say(const std::string& line) {
     if (report_) report_(line);
 }
 
+std::chrono::steady_clock::time_point BagCleaner::now() const {
+    return clock_.now ? clock_.now() : std::chrono::steady_clock::now();
+}
+
+void BagCleaner::sleep(int ms) {
+    if (ms <= 0) return;
+    if (clock_.sleep) clock_.sleep(ms);
+    else std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
 bool BagCleaner::wait_ms(int ms) {
     for (int slept = 0; slept < ms; slept += 30) {
         if (cancelled_) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::min(30, ms - slept)));
+        sleep(std::min(30, ms - slept));
     }
     return !cancelled_;
 }
 
 void BagCleaner::pause_ms(int ms) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    sleep(ms);
 }
 
 bool BagCleaner::click(int x, int y) {
@@ -1679,11 +1689,10 @@ int BagCleaner::box_holds(const bag::Dialog& d, Frame& last) {
     // number has to agree with every other that does, and a look that reads
     // nothing -- the dialog caught being drawn, say -- counts neither way.
     int value = CountReader::kUnreadable, reads = 0;
-    const auto start = std::chrono::steady_clock::now();
+    const auto start = now();
     for (;;) {
         if (!wait_ms(kBoxLookMs)) return CountReader::kUnreadable;     // stopped
-        const bool long_enough = std::chrono::steady_clock::now() - start >=
-                                 std::chrono::milliseconds(kBoxWatchMs);
+        const bool long_enough = now() - start >= std::chrono::milliseconds(kBoxWatchMs);
         Frame f;
         if (grab_ && grab_(f) && f.valid()) {
             bool there = false;
@@ -2137,16 +2146,14 @@ BagCleaner::Probe BagCleaner::probe(int tab, int row, int col) {
         say(line);
         return static_cast<int>(dialogs.size());
     };
-    const auto ms_since = [](std::chrono::steady_clock::time_point t) {
-        return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          std::chrono::steady_clock::now() - t)
-                                          .count());
+    const auto ms_since = [this](std::chrono::steady_clock::time_point t) {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now() - t).count());
     };
     // Not faster than this; saving a frame makes it slower anyway.
-    const auto pace = [](std::chrono::steady_clock::time_point look) {
-        const auto spent = std::chrono::steady_clock::now() - look;
-        if (spent < std::chrono::milliseconds(kProbeLookMs))
-            std::this_thread::sleep_for(std::chrono::milliseconds(kProbeLookMs) - spent);
+    const auto pace = [&](std::chrono::steady_clock::time_point look) {
+        const long long spent = ms_since(look);
+        if (spent < kProbeLookMs) sleep(static_cast<int>(kProbeLookMs - spent));
     };
     const auto what_came_up = [&] {
         res.dialog = kind == bag::kCountDialog ? "quantity" : kind == bag::kAskDialog ? "ask" : "foreign";
@@ -2159,14 +2166,14 @@ BagCleaner::Probe BagCleaner::probe(int tab, int row, int col) {
     const bool moved = settings_.click_to_move
                            ? click(s.cx(), s.cy()) && wait_ms(220) && click(v.trash.cx(), v.trash.cy())
                            : drag(s.cx(), s.cy(), v.trash.cx(), v.trash.cy());
-    const auto dropped = std::chrono::steady_clock::now();
+    const auto dropped = now();
     Frame g;
     BagView w;
     long long asked = -1;       // a dialog first seen, this long after the drop
     long long settled = -1;     // the bin showing the item with nothing up since
     bool waiting = false;
     while (moved && !cancelled_ && res.frames < kProbeFramesMax) {
-        const auto look = std::chrono::steady_clock::now();
+        const auto look = now();
         const long long ms = ms_since(dropped);
         // A dialog watched for its while, or the item not shown in the bin in
         // time; and whatever happens, not longer than both together.
@@ -2214,9 +2221,9 @@ BagCleaner::Probe BagCleaner::probe(int tab, int row, int col) {
     //    second and a half, kept and read, with no click and no key in
     //    between, whatever is up.
     click(w.trash.cx(), w.trash.cy());
-    const auto clicked = std::chrono::steady_clock::now();
+    const auto clicked = now();
     while (!cancelled_ && res.frames < kProbeFramesMax) {
-        const auto look = std::chrono::steady_clock::now();
+        const auto look = now();
         const long long ms = ms_since(clicked);
         if (ms > kProbeWatchMs) break;
         Frame k;

@@ -198,7 +198,6 @@ No work outstanding on any of these.
 | One-input-token priority arbiter | `ExecutionCoordinator`, `command.hpp` (`Critical = 100`) |
 | Multi-thread executor split | Four threads: exec, heal, buff, pathfind |
 | Scancodes + jitter + focus gate | `src/input_manager.cpp` |
-| Captcha *detection* → suspend | `Semantic::Captcha`, `set_captcha_callback`. Detection only; solving is out. |
 | Two-skin awareness | Documented in `configs/templates.ini` |
 
 Alpha masking is already handled, and handled better than a straight port would
@@ -309,8 +308,8 @@ For the pet features — heal, revive, loot.
   own traffic with `gobot_sniff` is the only route; that has not changed.
 - **Targeting and tactics.** Server-side.
 - **`HTTPClient`, licensing, HWID, payment, Telegram.** No server, and not wanted.
-- **Captcha solving.** Out by request, and GoBot's stated policy is that it does
-  not answer captchas. Detection-and-suspend stays; `data/images/captcha` goes
+- **Captcha detection and solving.** Both out, by the player's decision: GoBot
+  neither watches for a captcha nor answers one, and `data/images/captcha` goes
   unused.
 - **`data/images/equip`.** Empty in GoC as well.
 - **`CryptoHandler`, WinSparkle, `imgui.ini`.**

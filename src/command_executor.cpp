@@ -428,7 +428,13 @@ void CommandExecutor::buff_loop() {
         }
         if (!cfg.auto_buff) continue;
 
+        // Nothing without the packet bot's own picture of the character. A
+        // run that reads the screen never fills it, and this scheduler then
+        // pressed bot_default.ini's buff keys whenever the game was in front
+        // -- keys nobody had set on the simple screen, beside the macro's
+        // own buffs there. The heal loop beside it waits for the same thing.
         const Self me = state_.self();
+        if (me.max_hp <= 0) continue;
         if (me.dead) continue;
 
         const std::uint64_t now = now_ms();

@@ -239,6 +239,15 @@ CrashWatch::Look CrashWatch::look() {
     return out;
 }
 
+CrashWatch::Move CrashWatch::next_move(const Look& seen, bool seen_running, bool start_pending) {
+    if (!seen.bad()) return start_pending ? Move::Follow : Move::Watch;
+    // Never up since the keeper began: there is no client to end and no
+    // session for the server to see close -- the way GoC treats a missing
+    // window -- so it is a start. Anything else is the client falling over.
+    if (!seen_running && seen.what == Trouble::Gone) return Move::Start;
+    return Move::Restart;
+}
+
 // ------------------------------------------------------------- shutting down
 
 bool CrashWatch::shut_down(const Look& seen) {

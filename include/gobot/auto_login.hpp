@@ -44,16 +44,13 @@ namespace gobot {
 /// `gobot_cli --window <launcher> --tplsrc <set> --survey`, and write down
 /// what it found.
 ///
-/// Three things are deliberately not done here.
+/// Some things are deliberately not done here.
 ///
-/// A captcha is left alone. If one is up the flow stops and says so; it does
-/// not try to read it, and it never will. That is somebody asking whether a
-/// person is there, and the honest answer is no.
-///
-/// So is a security prompt. The game's own launcher can put up a "Security
-/// Alert" box, which is Windows asking whether to trust a site's certificate.
-/// GoC presses Yes on it. This stops and says so instead: whether to trust a
-/// certificate is not a question a bot gets to answer for somebody.
+/// A security prompt is left alone. The game's own launcher can put up a
+/// "Security Alert" box, which is Windows asking whether to trust a site's
+/// certificate. GoC presses Yes on it. This stops and says so instead:
+/// whether to trust a certificate is not a question a bot gets to answer for
+/// somebody.
 ///
 /// Nothing is retried forever. Three attempts, then it stops and asks for a
 /// person. A login loop that keeps hammering a server which is refusing it is
@@ -68,6 +65,19 @@ namespace gobot {
 /// point is checked to be on it; when another window is there instead -- the
 /// player's browser, GoBot's own -- the click is held back and the page
 /// looked at again, and after half a minute of that the attempt is given up.
+/// A point that is not on the window at all is an offset written wrong in
+/// configs/login.ini, and that stops the crossing at once and says which.
+///
+/// Nor is anything of VTCZone's pressed while a game is open. "Chơi game"
+/// pressed under a game that is part way in -- at Kết Nối, the channel list,
+/// the character select -- puts a second launcher up for the same account,
+/// the thing GoC never does: it does not go back to VTCZone while a client
+/// is open. So each attempt looks at the game and the game's launcher first,
+/// carries on from the furthest page of theirs that is up, and ends at once
+/// when the character is already in the world. A game that stays on a screen
+/// the crossing does not know is ended, as GoC's KILL_GAME_PROCESS ends one,
+/// by whoever owns ending clients -- see `set_end_client` -- and the next
+/// attempt starts from VTCZone.
 class AutoLogin {
 public:
     /// What the flow is doing, in the order it does it.
@@ -83,6 +93,7 @@ public:
         Channel,            ///< pick a channel
         ConnectAgain,       ///< "Kết Nối" once more
         Character,          ///< pick the character
+        EndClient,          ///< end a game stuck on a screen nobody knows
         InWorld,            ///< the HUD is up: done
         Blocked,            ///< a person is needed
     };
@@ -113,18 +124,20 @@ public:
         Character,          ///< no character select
         World,              ///< a character was picked and never arrived
         Covered,            ///< another window stayed over the place to click
-        Captcha,            ///< a captcha is up
+        BadPoint,           ///< a place to click is off its window: an offset in login.ini
     };
 
     /// Whether another attempt could get past it. The ones that cannot -- the
-    /// sign-in form, a missing picture, a prompt that is a person's to answer
-    /// -- stop the flow at once rather than three times over.
+    /// sign-in form, a missing picture, a prompt that is a person's to answer,
+    /// an offset written wrong -- stop the flow at once rather than three
+    /// times over.
     static bool worth_retrying(Why why);
 
     /// The Vietnamese for why it stopped, for the simple screen. `detail` is
     /// what the message names: the launcher's path, a picture, a page, a
     /// number of seconds, or the program whose window was in the way,
-    /// depending on `why`.
+    /// depending on `why`. For BadPoint it is the page's key in
+    /// configs/login.ini, and the message says which [Page.*] to put right.
     static std::string advice(Why why, const std::string& detail = {});
 
     /// The same after every attempt was used: "Đã thử 3 lần không vào lại
@@ -371,19 +384,61 @@ public:
     /// flow -- which needs this to know there is one.
     static void* minimised_window(const Settings& settings, const std::string& process);
 
-    /// Whether a click at client point `x`,`y` of `window` lands on it: the
-    /// point is inside its client area, on a screen, and the window there is
-    /// `window` or one of its own children. When something else is there,
-    /// `in_the_way` names its program -- by file name, never by title, which
-    /// could be anything from a chat to a document -- or "?" when that cannot
-    /// be told. It is left empty when the point is on no screen or off the
-    /// window, which no other window can be blamed for.
-    static bool lands_on(void* window, int x, int y, std::string* in_the_way = nullptr);
+    /// Where a click at a client point of a window would go.
+    enum class Landing {
+        Lands,          ///< on the window, or one of its own children
+        OffClient,      ///< outside its client area: an offset gone wrong, not a window in the way
+        Minimised,      ///< the window is minimised, or gone
+        OffScreen,      ///< on no monitor: the window is dragged part off the screen
+        Covered,        ///< another window is over the point
+    };
+
+    /// Where a click at client point `x`,`y` of `window` would go: onto it
+    /// when the point is inside its client area, on a screen, and the window
+    /// there is `window` or one of its own children. When something else is
+    /// there, `in_the_way` names its program -- by file name, never by title,
+    /// which could be anything from a chat to a document -- or "?" when that
+    /// cannot be told. It is left empty otherwise: no other window is to blame
+    /// for a point that is off the window or off the screen.
+    static Landing landing(void* window, int x, int y, std::string* in_the_way = nullptr);
+    /// The same, as yes or no: whether the click lands on it.
+    static bool lands_on(void* window, int x, int y, std::string* in_the_way = nullptr) {
+        return landing(window, x, y, in_the_way) == Landing::Lands;
+    }
 
     /// Whether nothing else is over `window` at five points spread across its
     /// client area. For trusting a frame read off the screen, which holds
-    /// whatever lies over the window rather than the window itself.
-    static bool uncovered(void* window);
+    /// whatever lies over the window rather than the window itself. A point
+    /// off every screen does not count against it -- what is read there is
+    /// black, and no page or HUD is found in black -- as long as one of the
+    /// five is on a screen; a window dragged part off the screen is still
+    /// looked at. When another window is over a point, `in_the_way` names its
+    /// program, as `landing` does.
+    static bool uncovered(void* window, std::string* in_the_way = nullptr);
+
+    /// Where the HUD's "Level" plate -- hpmp_indicator2 -- sits on the game,
+    /// on every client size, and how near it and how alike it has to be.
+    static constexpr int   kLandmarkX = 44;
+    static constexpr int   kLandmarkY = 4;
+    static constexpr int   kLandmarkSlack = 4;
+    static constexpr float kLandmarkScore = 0.75f;
+
+    /// Whether the HUD's landmark is in a picture of the game where it always
+    /// sits, give or take kLandmarkSlack. `landmark` may be null or empty: no.
+    static bool plate_at(const Frame& game, const Frame* landmark);
+
+    /// Whether a picture of the game shows the character in the world: the
+    /// HP and MP bars found as a pair (SessionManager::hud_present), or the
+    /// HUD's landmark where it always sits.
+    ///
+    /// Either will do. The bars alone missed the HUD on most frames with the
+    /// bag open -- the MP bar was taken from a panel beside it -- and a
+    /// crossing that took a game in the world for one stuck on a screen it
+    /// does not know would end it. The landmark, the HUD's "Level" plate, was
+    /// found at 0.85 or better on all but one of a thousand saved frames of
+    /// the world; it is part of the HUD, which no screen of the login draws.
+    /// `landmark` may be null or empty: the bars only.
+    static bool in_world(const Frame& game, const Frame* landmark);
 
     /// Nothing is up. See `furthest_up`.
     static constexpr std::size_t kNone = static_cast<std::size_t>(-1);
@@ -401,6 +456,26 @@ public:
                                    const std::function<bool(std::size_t)>& up,
                                    const std::string& halt_at = {});
 
+    /// The first page the crossing may wait for, carry on from or click,
+    /// given whether the game's launcher (`client_up`: its window, or
+    /// GhostOnlineVTC.exe running) and the game (`game_up`: its window, or
+    /// Game.exe running) are up: the first page drawn on the game while the
+    /// game is up, else the first page on the launcher while that is up,
+    /// else the first page of all.
+    ///
+    /// Nothing of VTCZone's is ever touched while the game or its launcher is
+    /// open. Its pages stay drawn in its own picture of itself under them,
+    /// and "Chơi game" pressed then starts a second launcher for the account.
+    static std::size_t first_allowed_page(const std::vector<Page>& pages, bool client_up,
+                                          bool game_up);
+
+    /// Where an attempt carries on from: the furthest page `up` says is on
+    /// screen among those `first_allowed_page` allows, or the first of those
+    /// when none is. Never a page of a window that may not be touched.
+    static std::size_t resume_from(const std::vector<Page>& pages, bool client_up, bool game_up,
+                                   const std::function<bool(std::size_t)>& up,
+                                   const std::string& halt_at = {});
+
     AutoLogin();
 
     void set_settings(const Settings& s);
@@ -410,12 +485,49 @@ public:
     /// game's own set.
     void set_templates(TemplateStore* store) { store_ = store; }
 
+    /// The HUD's landmark to tell the world by (see in_world). Without one
+    /// the crossing loads hpmp_indicator2 itself, once, from the same places
+    /// as every other picture -- the staged ones first.
+    void set_landmark(const Frame& landmark) {
+        landmark_ = landmark;
+        landmark_loaded_ = true;
+    }
+
     /// Called as the flow moves, for logging and for the UI.
     void on_step(std::function<void(Step, const std::string&)> fn) { report_ = std::move(fn); }
 
-    /// Asked all the way through: true while a captcha is up. The flow then
-    /// stops where it is, clicks and presses nothing more, and says so.
-    void set_captcha_check(std::function<bool()> fn) { captcha_up_ = std::move(fn); }
+    /// How to end a game that came up and then stayed on a screen the
+    /// crossing does not know -- not one of its pages, and not the world --
+    /// and how long to wait after it before the next attempt.
+    ///
+    /// Ending clients belongs to the keeper (CrashWatch), not to the crossing,
+    /// so whoever runs the crossing hands it in: the GUI's keeper and the
+    /// command line pass one that ends the game and its launcher the way a
+    /// crashed client is ended. With none set such an attempt just fails, as
+    /// any other does, and nothing is ended. Nor is anything ended after the
+    /// last attempt: what is on the screen then is for a person to look at.
+    void set_end_client(std::function<bool()> end, int cooldown_s) {
+        end_client_ = std::move(end);
+        end_cooldown_s_ = cooldown_s;
+    }
+
+    /// What the crossing does to the desktop, one function each: the real
+    /// thing unless set. A test sets them to a pretend desktop of its own
+    /// windows and pictures, which is how the crossing's decisions are tried
+    /// without VTCZone or the game -- and without a click, a change of focus
+    /// or a program started anywhere on the real one.
+    struct Hands {
+        std::function<void*(On)>                   find;      ///< see window_of
+        /// A picture of that window. Taken as the window's own picture of
+        /// itself, which is good whatever lies over it.
+        std::function<bool(On, void*, Frame&)>     grab;
+        std::function<bool(void*)>                 focus;     ///< to the front
+        std::function<bool(int, int)>              click;     ///< a client point of the window aimed at
+        std::function<bool(const std::string&)>    running;   ///< is that program running
+        std::function<bool(const std::string&)>    start;     ///< start that program
+        std::function<void(void*)>                 minimise;  ///< put that window away
+    };
+    void set_hands(Hands h) { hands_ = std::move(h); }
 
     /// Cross as far as this page and stop, leaving it on the screen.
     ///
@@ -428,7 +540,10 @@ public:
     /// empty string, the default, means run the whole crossing.
     void halt_before(std::string page_key) { halt_at_ = std::move(page_key); }
 
-    /// Ask it to stop at the next opportunity.
+    /// Ask it to stop at the next opportunity -- a click already on its way
+    /// included: one asked for after the page was found is not clicked, nor
+    /// its window brought forward. It stays asked: a flow is made for one
+    /// crossing, and a stop that comes before run() still stops it.
     void cancel() { cancelled_.store(true); }
 
     /// Run the whole thing. Blocks until the character is in the world, a
@@ -464,6 +579,7 @@ private:
     enum class Seen {
         Page,       ///< it is up, at `found`
         Later,      ///< a page after it is up instead: go on from there
+        Barred,     ///< its window may not be touched now: go on from `later`
         Stopped,    ///< something a person must see to; `why_` says what
         TimedOut,   ///< not seen for its wait_s; this attempt is over
     };
@@ -472,8 +588,24 @@ private:
     enum class Click {
         Done,       ///< clicked
         Held,       ///< not clicked: something else is there; `held_by_` says what
-        Stopped,    ///< not clicked: a Security Alert is up and the flow has stopped
+        BadPoint,   ///< not clicked: the point is off the window's client area
+        Stopped,    ///< not clicked: a stop was asked for, or a Security Alert is up
     };
+
+    /// The game and its launcher, as one look finds them: their windows, or
+    /// null, and whether each is up at all -- a window, or its program
+    /// running without one yet.
+    struct Ahead {
+        void* game = nullptr;
+        void* client = nullptr;
+        bool  game_up = false;
+        bool  client_up = false;
+    };
+    Ahead  ahead_now();
+
+    /// What an attempt finds before it touches VTCZone; see cross().
+    enum class FirstLook { Nothing, Client, Game, InWorld, Stopped };
+    FirstLook first_look(const Ahead& ahead);
 
     bool   cross();
     Seen   await(std::size_t index, ScreenRect& found, std::size_t& later);
@@ -482,8 +614,45 @@ private:
     Click  click(int x, int y);
     /// Each window's picture, now. Quiet: a window that is not up is just
     /// left out, because this is asked every second while a page is awaited.
-    void   look_around(Frame (&frames)[3]);
+    /// So is a picture read off the screen while its window is not in front
+    /// and clear, which shows whatever lies over the window instead; `behind`
+    /// says which were left out for that.
+    void   look_around(Frame (&frames)[3], bool (&behind)[3]);
+    /// One window's picture, and whether it can be trusted to show that
+    /// window: one the window drew of itself always can, one read off the
+    /// screen only while the window is in front and nothing is over it.
+    bool   grab(On which, void* hwnd, Frame& out, bool& trusted);
     bool   up_anywhere(std::size_t index, const Frame (&frames)[3]) const;
+    /// Whether any page drawn on the game is in `frame`.
+    bool   game_page_in(const Frame& frame) const;
+    /// The landmark set or loaded for this crossing -- loaded the first time
+    /// it is wanted -- or null when there is none.
+    const Frame* landmark();
+    /// in_world, by that landmark.
+    bool   world_in(const Frame& frame);
+    /// Whether a picture of the game `hwnd` shows the world, trusted or not:
+    /// one that cannot be trusted as a whole -- something over another part
+    /// of the game -- still shows the landmark truly where nothing is over
+    /// the corner it sits in. Only the landmark is looked for then, in that
+    /// corner; the bars are looked for over more of the picture than that.
+    bool   world_on(void* hwnd, const Frame& frame, bool trusted);
+    /// Whether nothing is over the corner of the game where the landmark sits.
+    bool   plate_clear(void* hwnd);
+    /// While the picture of the window a wait is on cannot be trusted, say
+    /// what is over it -- as `holding()` does for a held click, so the screen
+    /// can name it while the flow waits -- and stop saying so once it can.
+    void   note_hidden(Step during, On which, bool hidden);
+
+    /// What the game shows, looked at after an attempt failed on one of its
+    /// pages or on the way into the world.
+    enum class GameNow {
+        Gone,       ///< no game at all
+        InWorld,    ///< the character is in the world after all
+        OnPage,     ///< one of the crossing's pages is up: the next attempt goes on from it
+        Stuck,      ///< up on a screen the crossing does not know, or with no window at all
+        Unknown,    ///< up, and its picture cannot be trusted to be the game's
+    };
+    GameNow judge_game();
     bool   security_alert_up() const;
     /// Stop for a Security Alert box, if one is up. True when it stopped.
     bool   stop_for_alert();
@@ -494,9 +663,24 @@ private:
     /// Sleep in short slices so cancelling does not wait out a whole page.
     bool   nap(int ms);
 
+    // Through the hands when they are set, else the real desktop.
+    void*  find(On which);
+    /// The game's window when it is minimised -- which `find` never sees --
+    /// or null. Always null on a pretend desktop.
+    void*  minimised_game();
+    /// Bring a minimised game back, as a minimised VTCZone is brought back.
+    /// True when there was one; false too when stopped meanwhile.
+    bool   restore_game(Step during);
+    bool   bring_forward();
+    bool   running(const std::string& program);
+    /// Put VTCZone away once the game is up, as GoC does: once an attempt.
+    void   put_vtczone_away();
+
     Settings           settings_;
     std::string        halt_at_;
     TemplateStore*     store_ = nullptr;
+    Frame              landmark_;               ///< see set_landmark
+    bool               landmark_loaded_ = false;
     InputManager       input_;
     On                 aimed_at_ = On::Publisher;   ///< where `input_` points
     /// One per window: each keeps its own bitmap and its own idea of whether
@@ -504,19 +688,32 @@ private:
     ScreenCapture      capture_[3];
     std::atomic<Step>  step_{Step::Idle};
     std::atomic<bool>  cancelled_{false};
-    std::function<bool()> captcha_up_;
-    bool               captcha_seen_ = false;
     std::string        trouble_;
     Why                why_ = Why::None;
     std::string        why_detail_;
     int                attempts_made_ = 0;
     std::function<void(Step, const std::string&)> report_;
+    Hands              hands_;
+    std::function<bool()> end_client_;
+    int                end_cooldown_s_ = 15;
 
     bool               holding_ = false;        ///< see holding()
     std::string        held_by_;
+    Landing            held_where_ = Landing::Lands;    ///< why the last click was held
+    /// Set by note_hidden: `holding_` is for a picture that cannot be
+    /// trusted, not for a held click.
+    bool               hidden_ = false;
+    /// For each window, what was over it when its last picture could not be
+    /// trusted -- the program in front, or over one of the points looked at
+    /// -- or empty: minimised, or nothing of it on a screen.
+    std::string        behind_by_[3];
     /// Set when this run started VTCZone itself, for the sign-in form's grace.
     bool               started_vtczone_ = false;
     std::chrono::steady_clock::time_point vtczone_started_{};
+    /// VTCZone has been put away this attempt, now that the game is up.
+    bool               vtczone_put_away_ = false;
+    /// When the window awaited was last brought forward to be looked at.
+    std::chrono::steady_clock::time_point brought_forward_{};
 };
 
 } // namespace gobot

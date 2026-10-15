@@ -4,12 +4,63 @@
 #include "gobot/party_invite.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <thread>
 
 namespace gobot {
+namespace {
+
+// The panel and its columns from the top-left of the button that opens the
+// list. The numbers measured on a 1024x768 client are this button, at
+// 956,139, plus these; on the 1280x720 client the button is at 1212,139 in
+// every one of 1,036 saved frames, and the list hangs off it the same way.
+constexpr int kRoiDx = -212, kRoiDy = 21;
+constexpr int kLevelDx = -208;
+constexpr int kNameDx = -161;
+constexpr int kClickDx = -94;
+constexpr int kFirstRowDy = 33;
+
+} // namespace
+
+PlayerList::Settings PlayerList::Settings::at_button(int bx, int by) const {
+    Settings s = *this;
+    s.roi_x = bx + kRoiDx;
+    s.roi_y = by + kRoiDy;
+    s.level_x = bx + kLevelDx;
+    s.name_x = bx + kNameDx;
+    s.click_x = bx + kClickDx;
+    s.first_row_y = by + kFirstRowDy;
+    return s;
+}
+
+void PlayerList::place(int bx, int by, int frame_w, int frame_h) {
+    placed_ = settings_.fixed ? settings_ : settings_.at_button(bx, by);
+    placed_ok_ = true;
+    frame_w_ = frame_w;
+    frame_h_ = frame_h;
+}
+
+bool PlayerList::in_panel(int x, int y) const {
+    if (!placed_ok_) return false;
+    const ScreenRect panel{ placed_.roi_x, placed_.roi_y, placed_.roi_w, placed_.roi_h };
+    return panel.contains(x, y) && x >= 0 && y >= 0 && x < frame_w_ && y < frame_h_;
+}
+
+bool PlayerList::click(InputManager& input, int x, int y) const {
+    return click_ ? click_(x, y) : input.click_at(x, y);
+}
 
 void PlayerList::Settings::load(const IniFile& ini) {
+    // Only an explicit "fixed" keeps the numbers below as written: every
+    // party.ini from before has them, measured on a 1024x768 client, and
+    // their being there says nothing about wanting them.
+    std::string place = ini.get("PlayerList", "place", "auto");
+    std::transform(place.begin(), place.end(), place.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    fixed = place == "fixed";
+    level_x = ini.get_int("PlayerList", "level_x", level_x);
+    level_w = ini.get_int("PlayerList", "level_width", level_w);
     open_picture = ini.get("PlayerList", "open_button_picture", open_picture);
     open_score   = ini.get_float("PlayerList", "open_score", open_score);
     roi_x        = ini.get_int("PlayerList", "roi_x", roi_x);
@@ -52,19 +103,24 @@ void PlayerList::Settings::save(IniFile& ini) const {
     ini.set_int("PlayerList", "menu_wait_ms", menu_wait_ms);
     ini.set_float("PlayerList", "min_name_match",
                   static_cast<float>(min_name_match));
+    ini.set("PlayerList", "place", fixed ? "fixed" : "auto");
+    ini.set_int("PlayerList", "level_x", level_x);
+    ini.set_int("PlayerList", "level_width", level_w);
 }
 
 std::vector<PlayerList::Row> PlayerList::read(const Frame& frame,
                                               const GlyphFont& font) const {
     std::vector<Row> out;
-    if (!frame.valid() || !font.loaded()) return out;
+    // Not before the list has been placed from its button: the numbers it
+    // starts with belong to one size of client.
+    if (!placed_ok_ || !frame.valid() || !font.loaded()) return out;
+    const Settings& g = placed_;
 
-    for (int i = 0; i < settings_.rows; ++i) {
-        const int top = settings_.first_row_y + i * settings_.row_height;
-        if (top < 0 || top + settings_.row_height > frame.height) break;
+    for (int i = 0; i < g.rows; ++i) {
+        const int top = g.first_row_y + i * g.row_height;
+        if (top < 0 || top + g.row_height > frame.height) break;
 
-        ScreenRect box{ settings_.name_x, top, settings_.name_w,
-                        settings_.row_height };
+        ScreenRect box{ g.name_x, top, g.name_w, g.row_height };
         if (box.x < 0 || box.x + box.w > frame.width) break;
 
         const std::string text = font.read_line(frame, box);
@@ -75,7 +131,7 @@ std::vector<PlayerList::Row> PlayerList::read(const Frame& frame,
 
         Row row;
         row.index = i;
-        row.y     = top + settings_.row_height / 2;
+        row.y     = top + g.row_height / 2;
         row.name  = text;
         out.push_back(row);
     }
@@ -89,8 +145,8 @@ bool PlayerList::menu_up(const Frame& frame, int row_y) const {
     // only pale thing in that rectangle. Counted rather than matched against a
     // picture because their text changes with the client's language and their
     // position follows the row that was picked.
-    const int x0 = std::max(0, settings_.click_x + settings_.invite_dx - 30);
-    const int x1 = std::min(frame.width, settings_.click_x + settings_.invite_dx + 30);
+    const int x0 = std::max(0, placed_.click_x + placed_.invite_dx - 30);
+    const int x1 = std::min(frame.width, placed_.click_x + placed_.invite_dx + 30);
     const int y0 = std::max(0, row_y + 6);
     const int y1 = std::min(frame.height, row_y + 72);
     if (x1 <= x0 || y1 <= y0) return false;
@@ -152,6 +208,9 @@ bool PlayerList::ensure_open(InputManager& input, ScreenCapture& capture,
     if (!found.found)
         return fail("the players-on-map button is not on screen");
 
+    // The list hangs off its button, wherever the client's size puts that.
+    place(found.at.x, found.at.y, frame.width, frame.height);
+
     const int bx = found.at.x + found.at.w / 2;
     const int by = found.at.y + found.at.h / 2;
 
@@ -207,14 +266,33 @@ int PlayerList::find(const std::vector<Row>& rows, const std::string& who) const
 }
 
 bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
-                        const TemplateStore& store, const Row& row,
+                        const TemplateStore& /*store*/, const Row& row,
                         std::string* why) const {
+    // Both clicks inside the list as placed from its button, or neither.
+    // Outside it is the play field -- where the 1024x768 numbers put them on
+    // a 1280x720 client -- or another panel, and a click there is a walk or
+    // somebody else's button.
+    const int x = placed_.click_x + placed_.invite_dx;
+    const int y = row.y + placed_.invite_dy;
+    if (!placed_ok_) {
+        if (why) *why = "the list has not been found -- the button that opens it was not seen";
+        return false;
+    }
+    if (!in_panel(placed_.click_x, row.y) || !in_panel(x, y)) {
+        GB_WARN("PlayerList: not clicking row %d at %d,%d nor Req Party at %d,%d -- outside "
+                "the list at %d,%d %dx%d in a %dx%d window",
+                row.index + 1, placed_.click_x, row.y, x, y, placed_.roi_x, placed_.roi_y,
+                placed_.roi_w, placed_.roi_h, frame_w_, frame_h_);
+        if (why) *why = "that row, or its Req Party, is outside the list";
+        return false;
+    }
+
     if (!input.window_focused()) {
         input.focus_window();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 
-    input.click_at(settings_.click_x, row.y);
+    click(input, placed_.click_x, row.y);
 
     // Wait for the menu to be drawn before pressing anything on it.
     //
@@ -229,9 +307,7 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
     // reached by offset from the row rather than by looking for a lone button
     // -- there are three of them, they look alike, and clicking either of the
     // others is not a quiet failure.
-    const int x = settings_.click_x + settings_.invite_dx;
-    const int y = row.y + settings_.invite_dy;
-    if (!input.click_at(x, y)) {
+    if (!click(input, x, y)) {
         if (why) *why = "the invite click was refused";
         return false;
     }
@@ -262,7 +338,7 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
     }
 
     GB_INFO("PlayerList: invited row %d ('%s') -- row at %d,%d, Req Party at %d,%d",
-            row.index + 1, row.name.c_str(), settings_.click_x, row.y, x, y);
+            row.index + 1, row.name.c_str(), placed_.click_x, row.y, x, y);
     return true;
 }
 

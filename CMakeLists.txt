@@ -152,6 +152,7 @@ add_library(gobot_core STATIC
     src/screen_capture.cpp
     src/vitals_reader.cpp
     src/mob_detector.cpp
+    src/screen_layout.cpp
     src/glyph_font.cpp
     src/camera_tracker.cpp
     src/world_anchor.cpp
@@ -173,6 +174,7 @@ add_library(gobot_core STATIC
     src/bag.cpp
     src/dialog_driver.cpp
     src/routine.cpp
+    src/reviver.cpp
     src/gatherer.cpp
     src/clr_bridge.cpp
     src/party.cpp

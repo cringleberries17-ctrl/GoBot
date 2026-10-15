@@ -157,6 +157,14 @@ public:
     /// Which source the last `load_best` used, for saying so.
     const std::string& source() const { return source_; }
 
+    /// One picture by its short name, from the first of the places
+    /// `load_best` looks in that has it -- the staged `templates\`, then the
+    /// commercial client's set, then the helper's assembly -- without loading
+    /// the thousand others. `name_map_ini` says which file the short name is.
+    /// False when none has it; `from` gets where it came from, for saying so.
+    static bool load_one(const std::string& name, const std::string& name_map_ini,
+                         Frame& out, std::string* from = nullptr);
+
     /// The commercial client's extracted pictures, if that client is here.
     static std::string client_images();
 

@@ -38,6 +38,9 @@
 #include "gobot/routine.hpp"
 #include "gobot/crash_watch.hpp"
 #include "gobot/party_invite.hpp"
+#include "gobot/player_list.hpp"
+#include "gobot/reviver.hpp"
+#include "gobot/screen_layout.hpp"
 #include "gobot/session_manager.hpp"
 #include "gobot/vitals_reader.hpp"
 
@@ -50,6 +53,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <random>
 #include <string>
 #include <thread>
@@ -70,10 +75,15 @@ void check(bool cond, const std::string& what) {
         ++g_failed;
         std::printf("  [FAIL] %s\n", what.c_str());
     }
+    // Out at once, a whole line at a time. Sent to a file, stdout waits for a
+    // full buffer while the log writes to stderr straight away, and its lines
+    // landed in the middle of a check's name -- one a search for it missed.
+    std::fflush(stdout);
 }
 
 void section(const char* name) {
     std::printf("\n== %s ==\n", name);
+    std::fflush(stdout);
 }
 
 /// A writable path for tests that need a real file.
@@ -3237,6 +3247,37 @@ void test_auto_login() {
         check(AutoLogin::furthest_up(pages, 0, [&](std::size_t i) {
                   return i == character; }, "channel_list") == channel,
               "nothing goes past the page a person asked to be left on");
+
+        // Nothing of VTCZone's while the game or its launcher is open. Its
+        // own picture of itself still shows Choi game under a game that is
+        // part way in, and pressing it starts a second launcher.
+        check(AutoLogin::first_allowed_page(pages, false, false) == 0 &&
+                  AutoLogin::first_allowed_page(pages, true, false) == client &&
+                  AutoLogin::first_allowed_page(pages, false, true) == connect &&
+                  AutoLogin::first_allowed_page(pages, true, true) == connect,
+              "the first page that may be touched: VTCZone's with nothing open, START with "
+              "the launcher open, Ket Noi with the game open");
+        const auto up_of = [](std::initializer_list<std::size_t> shown) {
+            const std::vector<std::size_t> list(shown);
+            return [list](std::size_t i) {
+                return std::find(list.begin(), list.end(), i) != list.end();
+            };
+        };
+        const std::size_t with_game = AutoLogin::resume_from(pages, false, true, up_of({ start }));
+        check(with_game == connect && pages[with_game].on == AutoLogin::On::Game,
+              "with the game up and Choi game seen in VTCZone's picture, the crossing goes on "
+              "from the game's first page, never Choi game");
+        check(AutoLogin::resume_from(pages, false, true, up_of({ games, start, channel })) ==
+                  channel,
+              "and from the game's furthest page that is up");
+        const std::size_t with_launcher =
+            AutoLogin::resume_from(pages, true, false, up_of({ games, start }));
+        check(with_launcher == client && pages[with_launcher].on == AutoLogin::On::Client,
+              "with only the game's launcher up, from its START, never Choi game");
+        check(AutoLogin::resume_from(pages, false, false, up_of({ games, start })) == start,
+              "with neither up, Choi game is carried on from as before");
+        check(AutoLogin::resume_from(pages, false, true, up_of({ start }), "start_game") >= connect,
+              "and a page asked to be stopped at that may not be touched is not walked back to");
     }
 
     // A frame of VTCZone, read for whether it is signed in. Pictures nothing
@@ -3423,7 +3464,7 @@ void test_auto_login() {
                       .find("channel_first_index") != std::string::npos,
               "a missing picture is named");
         bool all_said = true;
-        for (int w = static_cast<int>(Why::Cancelled); w <= static_cast<int>(Why::Captcha); ++w)
+        for (int w = static_cast<int>(Why::Cancelled); w <= static_cast<int>(Why::BadPoint); ++w)
             if (AutoLogin::advice(static_cast<Why>(w), "x").empty()) all_said = false;
         check(all_said && AutoLogin::advice(Why::None).empty(),
               "every reason to stop has words for the screen, and no reason has none");
@@ -3432,9 +3473,26 @@ void test_auto_login() {
                   !AutoLogin::worth_retrying(Why::LauncherMissing) &&
                   !AutoLogin::worth_retrying(Why::NoPicture) &&
                   !AutoLogin::worth_retrying(Why::SecurityAlert) &&
-                  !AutoLogin::worth_retrying(Why::Captcha) &&
+                  !AutoLogin::worth_retrying(Why::BadPoint) &&
                   !AutoLogin::worth_retrying(Why::Cancelled),
               "what another attempt cannot get past stops the crossing at once");
+
+        // A point off the window is an offset written wrong, said as one: the
+        // page, its window, and the keys of configs/login.ini to put right.
+        const std::string bad = AutoLogin::advice(Why::BadPoint, "character");
+        check(bad.find("[Page.character]") != std::string::npos &&
+                  bad.find("configs/login.ini") != std::string::npos &&
+                  bad.find("click_dx/click_dy") != std::string::npos &&
+                  bad.find("chọn nhân vật") != std::string::npos &&
+                  bad.find("cửa sổ game") != std::string::npos,
+              "a point off the window names [Page.character], its screen and window, and "
+              "configs/login.ini");
+        check(AutoLogin::advice(Why::BadPoint, "start_game").find("cửa sổ VTCZone") !=
+                  std::string::npos,
+              "and VTCZone, for a page drawn on VTCZone");
+        check(std::string(AutoLogin::step_name_vi(AutoLogin::Step::EndClient)) ==
+                  "đóng game đang mở dở",
+              "ending a half-started game has its Vietnamese words");
         check(AutoLogin::worth_retrying(Why::GamePage) &&
                   AutoLogin::worth_retrying(Why::Channel) &&
                   AutoLogin::worth_retrying(Why::World) &&
@@ -3483,16 +3541,8 @@ void test_auto_login() {
         check(!no_launcher.run() && no_launcher.why() == Why::NoLauncher &&
                   no_launcher.attempts_made() == 0,
               "and so does a file with no launcher in it");
-
-        // A captcha already up: nothing is crossed under it.
-        AutoLogin held;
-        held.set_settings(AutoLogin::Settings{});
-        held.set_templates(&all);
-        held.set_captcha_check([] { return true; });
-        check(!held.run() && held.why() == Why::Captcha && held.attempts_made() == 0 &&
-                  held.advice() == AutoLogin::advice(Why::Captcha),
-              "a captcha stops the crossing before it starts, and says so");
-        check(held.step() == AutoLogin::Step::Blocked, "and leaves it blocked for a person");
+        check(no_launcher.step() == AutoLogin::Step::Blocked,
+              "and leaves it blocked for a person");
     }
 
     // Numbers in the file that are not what they look like. A comma for the
@@ -3655,6 +3705,15 @@ void test_auto_login() {
             check(!AutoLogin::lands_on(target, -1, 80) && !AutoLogin::lands_on(target, 240, 80) &&
                       !AutoLogin::lands_on(target, 120, 160),
                   "a point off its client area does not");
+            using L = AutoLogin::Landing;
+            in_way = "x";
+            check(AutoLogin::landing(target, -1, 5, &in_way) == L::OffClient && in_way.empty() &&
+                      AutoLogin::landing(target, 240, 5) == L::OffClient &&
+                      AutoLogin::landing(target, 5, 160) == L::OffClient,
+                  "and says why: (-1,5) and (client width,5) are off its client area, an offset "
+                  "gone wrong, with no window blamed");
+            check(AutoLogin::landing(target, 239, 80) == L::Lands,
+                  "while its last column is on it");
 
             HWND child = make(0, WS_CHILD | WS_VISIBLE, "", 10, 10, 60, 40, target);
             check(child != nullptr && AutoLogin::lands_on(target, 30, 30),
@@ -3671,21 +3730,49 @@ void test_auto_login() {
                 if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
             check(cover != nullptr && held && named.rfind("gobot_test", 0) == 0,
                   "a point another window covers does not, and that window's program is named");
+            check(AutoLogin::landing(target, 200, 80) == L::Covered,
+                  "-- covered, which is a hold, not a bad offset");
             check(AutoLogin::lands_on(target, 60, 80),
                   "while a point beside the other window still does");
             check(!AutoLogin::uncovered(target),
                   "a window with another over a part of it is not uncovered, so a frame of "
                   "it read off the screen is not trusted to show the sign-in form");
+            std::string over;
+            const bool hid = !AutoLogin::uncovered(target, &over);
+            for (char& c : over)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            check(cover != nullptr && hid && over.rfind("gobot_test", 0) == 0,
+                  "and what is over it is named, for the crossing to say while it waits");
             if (cover) ShowWindow(cover, SW_HIDE);
             check(AutoLogin::lands_on(target, 200, 80) && AutoLogin::uncovered(target),
                   "and once that window is gone, the point it covered does too");
 
+            // Dragged part off the screen: its left quarter points are on no
+            // screen and read black, which hides nothing -- before, a game
+            // like that was never looked at, and its wait ran out as "not
+            // found".
             const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            SetWindowPos(target, nullptr, left - 100, y0, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            if (AutoLogin::landing(target, 60, 40) == L::OffScreen &&
+                AutoLogin::landing(target, 120, 80) == L::Lands &&
+                AutoLogin::landing(target, 180, 40) == L::Lands &&
+                AutoLogin::landing(target, 180, 120) == L::Lands) {
+                check(AutoLogin::uncovered(target),
+                      "a window dragged part off the screen, nothing over it, is uncovered");
+            } else {
+                std::printf("  [skip] the test window could not be put half off the screen\n");
+            }
+
             SetWindowPos(target, nullptr, left - 1000, y0, 0, 0,
                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             in_way = "x";
             check(!AutoLogin::lands_on(target, 120, 80, &in_way) && in_way.empty(),
                   "a window dragged off every screen is not clicked, and nothing is blamed");
+            check(AutoLogin::landing(target, 120, 80) == L::OffScreen,
+                  "-- off the screen, which is a hold too");
+            check(!AutoLogin::uncovered(target),
+                  "and with nothing of it on a screen, it is not uncovered either");
             if (cover) DestroyWindow(cover);
         }
         if (target) DestroyWindow(target);
@@ -3710,6 +3797,9 @@ void test_auto_login() {
             check(IsIconic(down) && AutoLogin::minimised_window(s, me) == down,
                   "a minimised launcher is found by its program and its title");
             check(!AutoLogin::lands_on(down, 10, 10), "and is never clicked while minimised");
+            check(AutoLogin::landing(down, 10, 10) == AutoLogin::Landing::Minimised &&
+                      AutoLogin::landing(down, 5000, 5000) == AutoLogin::Landing::Minimised,
+                  "and minimised is never taken for a bad offset, wherever the point is");
             AutoLogin::Settings other = s;
             other.launcher_window = title + " (another)";
             check(AutoLogin::minimised_window(other, me) == nullptr &&
@@ -3720,6 +3810,370 @@ void test_auto_login() {
                   "and once it is up again, it is not a minimised one");
             DestroyWindow(down);
         }
+    }
+
+    // The crossing itself, on a pretend desktop: a window of this test's
+    // standing in for the game, pictures made up for its pages, and hands
+    // that only count. The hands are the only way the crossing reaches the
+    // desktop, so nothing real is clicked, brought forward or started, and
+    // VTCZone, the game's launcher and the game are never asked after.
+    {
+        using Why = AutoLogin::Why;
+        using On = AutoLogin::On;
+        const HINSTANCE self = GetModuleHandleA(nullptr);
+        WNDCLASSA wc{};
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = self;
+        wc.lpszClassName = "GoBotTestPretendGame";
+        RegisterClassA(&wc);        // already there from an earlier run: the same
+        RECT work{};
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
+        const int x0 = static_cast<int>(work.left) + 60;
+        const int y0 = static_cast<int>(work.top) + 60;
+        HWND game = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                    wc.lpszClassName, "", WS_POPUP, x0, y0, 240, 160, nullptr,
+                                    nullptr, self, nullptr);
+        if (game) ShowWindow(game, SW_SHOWNOACTIVATE);
+        // VTCZone's stand-in is never shown: only its picture is looked at.
+        HWND vtczone = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "",
+                                       WS_POPUP, x0, y0, 400, 300, nullptr, nullptr, self, nullptr);
+        const bool on_top = game != nullptr && WindowFromPoint(POINT{ x0 + 120, y0 + 80 }) == game;
+
+        // One picture per page, nothing like the others or the backdrop.
+        TemplateStore made_up;
+        unsigned seed = 700;
+        for (const auto& p : pages)
+            if (!made_up.has(p.picture)) made_up.put(p.picture, blocks(seed++, 48, 32));
+        made_up.put("login_page", blocks(seed++, 48, 32));
+
+        Frame hud = make_frame(1024, 768);
+        for (int y = 0; y < hud.height; ++y)
+            for (int x = 0; x < hud.width; ++x) put_px(hud, x, y, 30, 40, 55);
+        paint_hud(hud, 83, 8);
+        const Frame nowhere = backdrop(240, 160);       // a screen the crossing does not know
+        Frame at_connect = backdrop(240, 160);
+        paste(at_connect, *made_up.get("game_ready_indicator"), 20, 20);
+        Frame vtczone_play = backdrop(400, 300);
+        paste(vtczone_play, *made_up.get("app_select_page"), 40, 40);
+        paste(vtczone_play, *made_up.get("start_game_page"), 200, 200);
+
+        struct Desk {
+            Frame game_shows;
+            bool  vtczone_up = false;
+            Frame vtczone_shows;
+            int   clicks = 0, focuses = 0, starts = 0, minimised = 0, ended = 0;
+            std::function<void()> on_grab;      // the test's own doing, as the game is looked at
+            std::function<void()> on_focus;     // ... and as a window is brought forward
+        };
+        const auto hands_for = [&](Desk& d) {
+            AutoLogin::Hands h;
+            h.find = [&d, game, vtczone](On w) -> void* {
+                if (w == On::Game) return game;
+                if (w == On::Publisher && d.vtczone_up) return vtczone;
+                return nullptr;
+            };
+            h.grab = [&d](On w, void*, Frame& out) {
+                if (w == On::Game) {
+                    if (d.on_grab) d.on_grab();
+                    out = d.game_shows;
+                    return out.valid();
+                }
+                if (w == On::Publisher && d.vtczone_up) {
+                    out = d.vtczone_shows;
+                    return out.valid();
+                }
+                return false;
+            };
+            h.focus = [&d](void*) {
+                ++d.focuses;
+                if (d.on_focus) d.on_focus();
+                return true;
+            };
+            h.click = [&d](int, int) { ++d.clicks; return true; };
+            h.running = [](const std::string&) { return false; };
+            h.start = [&d](const std::string&) { ++d.starts; return false; };
+            h.minimise = [&d](void*) { ++d.minimised; };
+            return h;
+        };
+        // The table, every page waited for one second, one attempt, and no
+        // program of the real desktop named: a slip into VTCZone's half would
+        // stop at once on a launcher that is not there.
+        AutoLogin::Settings quick;
+        for (auto& p : quick.pages) p.wait_s = 1;
+        quick.attempts = 1;
+        quick.launcher_path = temp_file("gobot_test_no_such_launcher.exe");
+        quick.client_process = "gobot_test_no_such_launcher.exe";
+        quick.game_process = "gobot_test_no_such_game.exe";
+        const auto seconds_since = [](std::chrono::steady_clock::time_point t) {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+        };
+
+        if (game == nullptr || vtczone == nullptr) {
+            std::printf("  [skip] could not make the pretend game's windows here\n");
+        } else {
+            {
+                Desk d;
+                d.game_shows = hud;
+                AutoLogin flow;
+                flow.set_settings(quick);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                const bool in = flow.run();
+                check(in && flow.step() == AutoLogin::Step::InWorld && flow.attempts_made() == 1 &&
+                          d.clicks == 0 && d.starts == 0 && d.minimised == 0,
+                      "a game already in the world at the first look: done, with nothing clicked, "
+                      "nothing started and VTCZone left alone");
+            }
+            {
+                // The game up at Ket Noi, VTCZone's own picture showing Choi
+                // game: nothing of VTCZone's is pressed.
+                Desk d;
+                d.game_shows = nowhere;
+                d.vtczone_up = true;
+                d.vtczone_shows = vtczone_play;
+                AutoLogin flow;
+                flow.set_settings(quick);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                const bool in = flow.run();
+                check(!in && d.clicks == 0 && d.starts == 0,
+                      "with the game up, Choi game in VTCZone's picture is never clicked");
+                check(d.minimised == 1, "and VTCZone is put away once, as GoC does");
+            }
+            {
+                // An offset that puts the point past the game's right edge.
+                Desk d;
+                d.game_shows = at_connect;
+                AutoLogin::Settings s = quick;
+                s.attempts = 3;
+                for (auto& p : s.pages)
+                    if (p.key == "connect") { p.click_dx = 400; p.click_dy = 5; }
+                AutoLogin flow;
+                flow.set_settings(s);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                const auto t0 = std::chrono::steady_clock::now();
+                const bool in = flow.run();
+                check(!in && flow.why() == Why::BadPoint && flow.why_detail() == "connect" &&
+                          flow.attempts_made() == 1 && d.clicks == 0 && seconds_since(t0) < 10.0,
+                      "a point off the game's client area stops the crossing on the first try, "
+                      "at once, with nothing clicked");
+                check(flow.advice() == AutoLogin::advice(Why::BadPoint, "connect") &&
+                          flow.trouble().find("[Page.connect]") != std::string::npos,
+                      "and says which [Page.*] of configs/login.ini to put right, not 'tried 3 "
+                      "times'");
+            }
+            {
+                // A stop asked for once the page is found, before its click.
+                Desk d;
+                d.game_shows = at_connect;
+                AutoLogin flow;
+                bool armed = false;
+                int focused_then = -1;
+                flow.on_step([&](AutoLogin::Step s, const std::string&) {
+                    if (s == AutoLogin::Step::Connect) armed = true;
+                });
+                d.on_grab = [&] {
+                    if (armed && focused_then < 0) {
+                        flow.cancel();
+                        focused_then = d.focuses;
+                    }
+                };
+                flow.set_settings(quick);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                const bool in = flow.run();
+                check(!in && flow.why() == Why::Cancelled && d.clicks == 0 &&
+                          focused_then >= 0 && d.focuses == focused_then,
+                      "a stop asked for after the page was found: no click, and the window is "
+                      "not even brought forward for one");
+            }
+            if (!on_top) {
+                std::printf("  [skip] the pretend game could not be put on top here\n");
+            } else {
+                // A stop asked for while the window is being brought forward
+                // for the click: the last look before the click sees it.
+                Desk d;
+                d.game_shows = at_connect;
+                AutoLogin flow;
+                bool armed = false;
+                flow.on_step([&](AutoLogin::Step s, const std::string&) {
+                    if (s == AutoLogin::Step::Connect) armed = true;
+                });
+                d.on_focus = [&] { if (armed) flow.cancel(); };
+                flow.set_settings(quick);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                const bool in = flow.run();
+                check(!in && flow.why() == Why::Cancelled && d.clicks == 0,
+                      "a stop asked for while the window is brought forward for the click: no "
+                      "click");
+            }
+            {
+                // Two attempts, each ending on a game that sits on a screen
+                // the crossing does not know.
+                Desk d;
+                d.game_shows = nowhere;
+                AutoLogin::Settings s = quick;
+                s.attempts = 2;
+                AutoLogin flow;
+                flow.set_settings(s);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                flow.set_end_client([&d] { ++d.ended; return true; }, 0);
+                const bool in = flow.run();
+                check(!in && flow.attempts_made() == 2 && d.ended == 1 && d.clicks == 0 &&
+                          d.starts == 0,
+                      "a game stuck on a screen the crossing does not know is ended once, between "
+                      "the attempts -- and not after the last, which is left for a person");
+                check(flow.why() == Why::Connect, "the attempt itself fails as it always did");
+            }
+            {
+                Desk d;
+                d.game_shows = nowhere;
+                AutoLogin flow;
+                flow.set_settings(quick);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                const bool in = flow.run();
+                check(!in && flow.why() == Why::Connect && d.clicks == 0 && d.starts == 0,
+                      "with nothing to end it with, that attempt just fails, and nothing is ended");
+            }
+            {
+                // The HUD covered at the first look, and seen when the
+                // crossing looks at the game again after the wait ran out.
+                Desk d;
+                d.game_shows = nowhere;
+                d.on_focus = [&] { if (d.focuses == 2) d.game_shows = hud; };
+                AutoLogin::Settings s = quick;
+                s.attempts = 2;
+                AutoLogin flow;
+                flow.set_settings(s);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                int ended = 0;
+                flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                const bool in = flow.run();
+                check(in && flow.step() == AutoLogin::Step::InWorld && ended == 0 && d.clicks == 0,
+                      "a game found in the world after its page wait ran out is done, not ended");
+            }
+
+            // A real frame of the world with the bag open, on which the HP and
+            // MP bars alone were missed: the MP bar was taken from the panel
+            // beside it. The HUD's "Level" plate is where it always is.
+            Frame real, landmark;
+            const bool have_real =
+                load_png(exe_relative("trash_debug\\20261009_003950_0_no_dialog.png"), real) &&
+                real.valid() &&
+                TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"),
+                                        landmark);
+            if (!have_real) {
+                std::printf("  [skip] no saved frame of the world, or no HUD landmark, here\n");
+            } else {
+                check(AutoLogin::in_world(real, &landmark),
+                      std::string("a real frame of the world with the bag open is in the world by "
+                                  "the HUD's landmark (the bars alone: ") +
+                          (SessionManager::hud_present(real) ? "found" : "missed") + ")");
+                check(!AutoLogin::in_world(nowhere, &landmark) &&
+                          !AutoLogin::in_world(at_connect, &landmark) &&
+                          AutoLogin::in_world(real, nullptr) == SessionManager::hud_present(real),
+                      "a screen that is not the world is not, and without the landmark only the "
+                      "bars decide");
+                // The same plate somewhere else on the screen is not the HUD.
+                Frame moved = make_frame(real.width, real.height);
+                for (int y = 0; y < moved.height; ++y)
+                    for (int x = 0; x < moved.width; ++x) put_px(moved, x, y, 30, 40, 55);
+                for (int y = 0; y < landmark.height; ++y)
+                    for (int x = 0; x < landmark.width; ++x) {
+                        std::uint8_t r, g, b;
+                        real.get(44 + x, 4 + y, r, g, b);
+                        put_px(moved, 300 + x, 200 + y, r, g, b);
+                        put_px(moved, 44 + 6 + x, 4 + 6 + y, r, g, b);
+                    }
+                check(!AutoLogin::in_world(moved, &landmark),
+                      "nor is the plate anywhere but where the HUD puts it, 6 pixels off included");
+                Frame placed = moved;
+                for (int y = 0; y < landmark.height; ++y)
+                    for (int x = 0; x < landmark.width; ++x) {
+                        std::uint8_t r, g, b;
+                        real.get(44 + x, 4 + y, r, g, b);
+                        put_px(placed, 44 + 3 + x, 4 - 2 + y, r, g, b);
+                    }
+                check(AutoLogin::in_world(placed, &landmark),
+                      "while a few pixels off where it sits still is");
+
+                {
+                    Desk d;
+                    d.game_shows = real;
+                    AutoLogin::Settings s = quick;
+                    s.attempts = 3;
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&made_up);
+                    flow.set_landmark(landmark);
+                    flow.set_hands(hands_for(d));
+                    int ended = 0;
+                    flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                    const bool in = flow.run();
+                    check(in && flow.step() == AutoLogin::Step::InWorld &&
+                              flow.attempts_made() == 1 && ended == 0 && d.clicks == 0 &&
+                              d.starts == 0,
+                          "a crossing that finds that frame is in the world at once: nothing "
+                          "clicked, and nothing ended");
+                }
+                {
+                    // Not seen at the first look, and seen when the crossing
+                    // judges the game after its page wait: in the world, not
+                    // a client to end.
+                    Desk d;
+                    d.game_shows = nowhere;
+                    d.on_focus = [&] { if (d.focuses == 2) d.game_shows = real; };
+                    AutoLogin::Settings s = quick;
+                    s.attempts = 3;
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&made_up);
+                    flow.set_landmark(landmark);
+                    flow.set_hands(hands_for(d));
+                    int ended = 0;
+                    flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                    const bool in = flow.run();
+                    check(in && flow.step() == AutoLogin::Step::InWorld && ended == 0 &&
+                              d.clicks == 0,
+                          "and judged after a page wait ran out, that frame is the world too: the "
+                          "end hook is called 0 times");
+                }
+            }
+            {
+                // Judged stuck only on two looks it can trust, and none of
+                // them the world: one look in three showing the HUD is enough
+                // to leave the game alone.
+                Desk d;
+                d.game_shows = nowhere;
+                int grabs_after = 0;
+                bool judging = false;
+                d.on_focus = [&] { if (d.focuses == 2) judging = true; };
+                d.on_grab = [&] {
+                    if (!judging) return;
+                    ++grabs_after;
+                    d.game_shows = grabs_after == 3 ? hud : nowhere;
+                };
+                AutoLogin::Settings s = quick;
+                s.attempts = 2;
+                AutoLogin flow;
+                flow.set_settings(s);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                int ended = 0;
+                flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                const bool in = flow.run();
+                check(in && ended == 0 && grabs_after == 3,
+                      "a game that shows its HUD on the third of three looks is in the world, "
+                      "and not ended");
+            }
+        }
+        if (vtczone) DestroyWindow(vtczone);
+        if (game) DestroyWindow(game);
     }
 }
 
@@ -3905,6 +4359,29 @@ void test_crash_watch() {
         s.reporter_process = {};
         CrashWatch watch(s);
         check(!watch.look().bad(), "a running, answering program reads as fine");
+    }
+
+    // What a keeper does about one look. BẮT ĐẦU with the game closed waits
+    // on the keeper to open it; a game that came up by itself meanwhile is
+    // followed, not crossed into again, and is no restart.
+    {
+        using M = CrashWatch::Move;
+        CrashWatch::Look fine;
+        CrashWatch::Look gone;
+        gone.what = CrashWatch::Trouble::Gone;
+        CrashWatch::Look hung;
+        hung.what = CrashWatch::Trouble::Hung;
+        check(CrashWatch::next_move(fine, false, true) == M::Follow,
+              "a cold start whose game is up already: follow it and start the jobs");
+        check(CrashWatch::next_move(gone, false, true) == M::Start,
+              "a cold start with the game closed: cross in, as a start");
+        check(CrashWatch::next_move(fine, true, false) == M::Watch &&
+                  CrashWatch::next_move(fine, false, false) == M::Watch,
+              "a game that is up with nothing waiting on it: just watch");
+        check(CrashWatch::next_move(gone, true, false) == M::Restart &&
+                  CrashWatch::next_move(hung, false, false) == M::Restart &&
+                  CrashWatch::next_move(gone, true, true) == M::Restart,
+              "and one that was up and fell over, or hangs, is a restart");
     }
 }
 
@@ -4602,6 +5079,102 @@ void test_mob_detector() {
     check(MobDetector::pick_player(found, f.width, me), "picks the character out");
 
     check(MobDetector::detect(Frame{}, t).empty(), "no frame finds nothing");
+
+    // The box and what is cut out of it follow the client's size: the
+    // player's client is 1280x720, and a box measured on 1024x768 cut its
+    // right fifth off and took in its hotbar.
+    {
+        const auto same = [](const ScreenRect& a, const ScreenRect& b) {
+            return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+        };
+        const DetectorTuning small = t.resolved(1024, 768);
+        check(t.automatic() && same(small.area, ScreenRect{ 0, 104, 1024, 566 }) &&
+                  same(small.exclude, ScreenRect{ 812, 0, 212, 360 }) &&
+                  same(small.exclude2, ScreenRect{ 984, 568, 40, 200 }),
+              "at 1024x768 the box is the one measured there, plus the icon column");
+        const DetectorTuning wide = t.resolved(1280, 720);
+        check(same(wide.area, ScreenRect{ 0, 104, 1280, 518 }) &&
+                  same(wide.exclude, ScreenRect{ 1068, 0, 212, 360 }) &&
+                  same(wide.exclude2, ScreenRect{ 1240, 520, 40, 200 }),
+              "and at 1280x720 it runs the whole width, stops above the hotbar, and cuts "
+              "out the notices and the icon column against the right edge");
+        check(same(narrow.resolved(1024, 768).area, narrow.area) &&
+                  same(blocked.resolved(1024, 768).exclude, blocked.exclude),
+              "a rectangle written down is used as written");
+    }
+    {
+        Frame g = make_frame(1280, 720);
+        for (int y = 0; y < 720; ++y)
+            for (int x = 0; x < 1280; ++x) put_px(g, x, y, 120, 150, 190);
+        const auto found_near = [&](int x, int y) {
+            for (const Nameplate& n : MobDetector::detect(g, t))
+                if (std::abs(n.x() - x) <= 4 && std::abs(n.y() - y) <= 4) return true;
+            return false;
+        };
+        paint_plate(g, 1150, 400, 50, 60, false);
+        check(found_near(1150, 400), "on a 1280x720 client a monster right of x 1024 is found");
+        paint_plate(g, 1150, 200, 50, 60, false);
+        check(!found_near(1150, 200), "one under the notices column is not");
+        paint_plate(g, 1260, 560, 20, 30, false);
+        check(!found_near(1260, 560), "nor one whose bar starts in the icon column");
+        paint_plate(g, 600, 650, 50, 60, false);
+        check(!found_near(600, 650), "nor one in the hotbar band");
+    }
+    // On the player's own frames: nothing in the hotbar band, nothing in the
+    // icon column. What is found is not printed -- those frames have names
+    // in them.
+    {
+        std::vector<std::string> shots{ exe_relative("frame.png") };
+        WIN32_FIND_DATAA fd{};
+        const std::string dir = exe_relative("trash_debug");
+        HANDLE h = FindFirstFileA((dir + "\\*.png").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do { shots.push_back(dir + "\\" + fd.cFileName); } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        int looked = 0, wrong = 0;
+        for (const std::string& path : shots) {
+            Frame shot;
+            if (!load_png(path, shot) || !shot.valid()) continue;
+            ++looked;
+            const DetectorTuning used = t.resolved(shot.width, shot.height);
+            for (const Nameplate& n : MobDetector::detect(shot, t))
+                if (n.bar.y >= shot.height - 98 || used.exclude2.contains(n.bar.x, n.bar.y))
+                    ++wrong;
+        }
+        if (looked == 0)
+            std::printf("  [skip] no saved frames of the client here\n");
+        else
+            check(wrong == 0, "on " + std::to_string(looked) + " saved frames of the client, "
+                              "nothing is taken from the hotbar band or the icon column");
+    }
+    // Edited by hand on the full screen, the tuning is kept in hunt.ini's
+    // [Detect]; left alone, it stays following the client's size.
+    {
+        const std::string path = temp_file("gobot_detect_test.ini");
+        { std::ofstream(path) << "# somebody's hunt.ini\n[Hunt]\nreach=150\n"; }
+        DetectorTuning edited = DetectorTuning::defaults();
+        edited.red_min = 160;
+        edited.area = ScreenRect{ 10, 120, 900, 500 };
+        check(edited.save(path), "the tuning saves into [Detect]");
+        IniFile ini;
+        DetectorTuning back = DetectorTuning::defaults();
+        check(ini.load(path), "and the file reads");
+        back.load(ini);
+        check(back.red_min == 160 && back.area.x == 10 && back.area.w == 900 &&
+                  !back.exclude.valid() && !back.exclude2.valid() && !back.automatic() &&
+                  ini.get_int("Hunt", "reach", 0) == 150,
+              "an edited box comes back as written, the rectangles left alone still follow "
+              "the client, and the rest of the file is kept");
+        check(DetectorTuning::defaults().save(path), "a reset tuning saves too");
+        IniFile again;
+        DetectorTuning reset = edited;
+        again.load(path);
+        reset.load(again);
+        check(reset.automatic() && again.get("Detect", "area") == "auto",
+              "and reads back as following the client's size");
+        std::remove(path.c_str());
+    }
 }
 
 // --------------------------------------------------------- camera tracking
@@ -5934,6 +6507,28 @@ void draw_count_dialog(Frame& f, const TemplateStore& store, int x, int y,
     blit(f, *store.get("grabbed/confirm_button"), pair.x, pair.y);
 }
 
+/// The time as a pretend game and the cleaner looking at it both see it: on
+/// only by the cleaner's own waits and by each look at the game, which costs
+/// kFrameMs -- never by the machine being busy. Every decision the cleaner
+/// makes by how long something took then comes out the same on every run; a
+/// probe under load once clicked the bin before the third look, which the
+/// test had the bin's question come up on.
+struct PretendClock {
+    static constexpr int kFrameMs = 40;
+    std::chrono::steady_clock::time_point t =
+        std::chrono::steady_clock::time_point{} + std::chrono::hours(1);
+    void advance(int ms) { t += std::chrono::milliseconds(ms); }
+    long long ms_since(std::chrono::steady_clock::time_point then) const {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(t - then).count();
+    }
+    BagCleaner::Clock clock() {
+        BagCleaner::Clock c;
+        c.now = [this] { return t; };
+        c.sleep = [this](int ms) { advance(ms); };
+        return c;
+    }
+};
+
 /// A pretend game for the cleaner's hands: the bag with one item in it, the
 /// bin, and the bin's dialogs, answering a drag, a click and a key the way the
 /// live client was seen to. Drag the item onto the bin and the bin holds it;
@@ -5941,7 +6536,8 @@ void draw_count_dialog(Frame& f, const TemplateStore& store, int x, int y,
 /// blinking after it; Xác Nhận with the right number and the item is gone,
 /// Hủy Bỏ and it is back in its slot. The box takes digit keys and BACKSPACE
 /// as the live one does, and every key pressed and every click into it while
-/// it is up is counted: the cleaner is to make none.
+/// it is up is counted: the cleaner is to make none. Its time is its own
+/// clock's, which `look` moves on by a frame.
 struct PretendBin {
     const TemplateStore* store = nullptr;
     std::string font_dir;
@@ -5961,10 +6557,14 @@ struct PretendBin {
     /// The caret: 0 not drawn, 1 on all the time, 2 blinking half a second on
     /// and half off, starting on when the dialog comes up -- as live.
     int         caret = 2;
-    std::chrono::steady_clock::time_point asked_at = std::chrono::steady_clock::now();
+    PretendClock time;
+    std::chrono::steady_clock::time_point asked_at = time.t;
     bool        scribble = false;    ///< white marks in the box that are no number
     std::string flicker;             ///< in the box every other look instead
     mutable int looks = 0;
+    /// When not -1: the box shows its number for that long after it came up,
+    /// on the pretend clock, and white marks that are no number from then on.
+    int         readable_ms = -1;
     bool        revive_up = false;   ///< another dialog is up as well
     bool        wrong_dialog = false; ///< the bin brings up somebody else's dialog
     int         silent = 0;          ///< clicks on the bin, holding the item, that bring nothing up
@@ -5990,9 +6590,7 @@ struct PretendBin {
     }
     bool caret_on() const {
         if (caret != 2) return caret == 1;
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - asked_at).count();
-        return (ms / 500) % 2 == 0;
+        return (time.ms_since(asked_at) / 500) % 2 == 0;
     }
 
     static constexpr int kDialogX = 600, kDialogY = 120;
@@ -6015,10 +6613,12 @@ struct PretendBin {
                 blit(f, *store->get("grabbed/sell_confirm"), kDialogX, kDialogY - 3);
             } else if (stacks) {
                 const bool other = !flicker.empty() && looks++ % 2 == 1;
+                const bool marks =
+                    scribble || (readable_ms >= 0 && time.ms_since(asked_at) >= readable_ms);
                 draw_count_dialog(f, *store, kDialogX, kDialogY,
-                                  scribble ? std::string() : other ? flicker : box, font_dir,
+                                  marks ? std::string() : other ? flicker : box, font_dir,
                                   caret_on());
-                if (scribble) {
+                if (marks) {
                     const ScreenRect b = box_rect();
                     for (int y = 3; y < 11; ++y)
                         for (int x = 2; x < 13; ++x)
@@ -6037,7 +6637,14 @@ struct PretendBin {
     void ask() {
         state = State::Asking;
         box = blank ? std::string() : prefill.empty() ? std::to_string(count) : prefill;
-        asked_at = std::chrono::steady_clock::now();
+        asked_at = time.t;
+    }
+
+    /// One look at the game, as the cleaner's grab: a frame's worth of time
+    /// passes, then the screen as it is.
+    Frame look() {
+        time.advance(PretendClock::kFrameMs);
+        return render();
     }
 
     BagCleaner::Hands hands() {
@@ -6195,12 +6802,13 @@ void test_bag_dialogs() {
     const auto pass = [&](PretendBin& game, bool look_only = false,
                           std::vector<std::string>* said = nullptr) {
         InputManager no_window;
-        BagCleaner cleaner(no_window, store, [&](Frame& out) { out = game.render(); return true; });
+        BagCleaner cleaner(no_window, store, [&](Frame& out) { out = game.look(); return true; });
         cleaner.set_settings(cs);
         cleaner.set_trash(&wanted);
         cleaner.set_counts(&counts);
         cleaner.set_dry_run(look_only);
         cleaner.set_hands(game.hands());
+        cleaner.set_clock(game.time.clock());
         if (said) cleaner.on_report([said](const std::string& line) { said->push_back(line); });
         return cleaner.run();
     };
@@ -6311,6 +6919,28 @@ void test_bag_dialogs() {
                   untouched(game),
               "a box that reads 2 one look and 3 the next: no reading, so Hủy Bỏ");
     }
+    // How many looks the box needs, on the pretend clock: the bin's dialog
+    // is first seen 190 ms after the bin is clicked, and the box is then
+    // looked at every 190 ms until 1200 ms of watching have passed -- at 380,
+    // 570, 760 ms and on after the click.
+    {
+        PretendBin game = game_with("7");
+        game.readable_ms = 650;         // the looks at 380 and 570 ms read it
+        const auto r = pass(game);
+        check(r.deleted == 1 && game.gone && game.confirms == 1 && untouched(game),
+              "two looks inside the box's watch that read the same number are its number: "
+              "confirmed -- deleted " + std::to_string(r.deleted));
+    }
+    {
+        PretendBin game = game_with("7");
+        game.readable_ms = 470;         // only the look at 380 ms reads it
+        std::vector<std::string> said;
+        const auto r = pass(game, false, &said);
+        check(r.deleted == 0 && !game.gone && game.confirms == 0 && game.cancels == 1 &&
+                  untouched(game) && says(said, "không đọc được số trong ô số lượng"),
+              "one look alone is not: the box counts as unreadable, and Hủy Bỏ -- cancels " +
+                  std::to_string(game.cancels));
+    }
     {
         // The dialog goes away while its box is watched -- the game closed it,
         // and the item is back in the bag: not confirmed, and nothing left to
@@ -6322,13 +6952,14 @@ void test_bag_dialogs() {
         BagCleaner cleaner(no_window, store, [&](Frame& out) {
             if (game.state == PretendBin::State::Asking && ++asking == 3)
                 game.state = PretendBin::State::Idle;
-            out = game.render();
+            out = game.look();
             return true;
         });
         cleaner.set_settings(cs);
         cleaner.set_trash(&wanted);
         cleaner.set_counts(&counts);
         cleaner.set_hands(game.hands());
+        cleaner.set_clock(game.time.clock());
         cleaner.on_report([&](const std::string& line) { said.push_back(line); });
         const auto r = cleaner.run();
         check(r.deleted == 0 && r.failed == 1 && !game.gone && game.confirms == 0 &&
@@ -6429,7 +7060,7 @@ void test_bag_dialogs() {
         InputManager no_window;
         BagCleaner* running = nullptr;
         BagCleaner cleaner(no_window, store, [&](Frame& out) {
-            out = game.render();
+            out = game.look();
             if (game.state == PretendBin::State::Asking && running) running->cancel();
             return true;
         });
@@ -6438,6 +7069,7 @@ void test_bag_dialogs() {
         cleaner.set_trash(&wanted);
         cleaner.set_counts(&counts);
         cleaner.set_hands(game.hands());
+        cleaner.set_clock(game.time.clock());
         const auto r = cleaner.run();
         check(game.confirms == 0 && game.cancels >= 1 && !game.gone && r.deleted == 0 && !r.stuck &&
                   game.state == PretendBin::State::Idle,
@@ -6457,7 +7089,7 @@ void test_bag_dialogs() {
         BagCleaner* running = nullptr;
         BagCleaner cleaner(no_window, store, [&](Frame& out) {
             if (asks_after > 0 && game.state == PretendBin::State::InBin && --asks_after == 0) game.ask();
-            out = game.render();
+            out = game.look();
             if (stop_when_asked && game.state == PretendBin::State::Asking && running) running->cancel();
             return true;
         });
@@ -6465,6 +7097,7 @@ void test_bag_dialogs() {
         cleaner.set_settings(cs);
         cleaner.set_counts(&counts);
         cleaner.set_hands(game.hands());
+        cleaner.set_clock(game.time.clock());
         if (!frames_dir.empty()) cleaner.set_debug_dir(frames_dir);
         if (said) cleaner.on_report([said](const std::string& line) { said->push_back(line); });
         return cleaner.probe(0, row, col);
@@ -6539,6 +7172,29 @@ void test_bag_dialogs() {
                   game.cancels == 1 && r.back && says(said, "ô ghi 7"),
               "and so is one that comes up a moment after the item shows in the bin -- " + r.dialog +
                   (r.at_drop ? "@drop" : "") + ", clicks on the bin " + std::to_string(game.bin_clicks));
+    }
+    // The edges of that moment: the bin is clicked once it has shown the
+    // item for 300 ms with nothing up. On the pretend clock a look comes
+    // every 40 ms from the drop, so the looks either side of it are 280 ms
+    // and 320 ms after the item first showed.
+    {
+        PretendBin game = game_with("7");
+        const auto r = probe(game, 0, 5, nullptr, false, std::string(), 8);
+        check(r.dialog == "quantity" && r.at_drop && game.bin_clicks == 0 && left_alone(game) &&
+                  game.cancels == 1 && r.back,
+              "a question first seen 280 ms after the item showed in the bin is the drop's: the "
+              "bin is never clicked -- " + r.dialog + (r.at_drop ? "@drop" : "") +
+                  ", clicks on the bin " + std::to_string(game.bin_clicks));
+    }
+    {
+        PretendBin game = game_with("7");
+        const auto r = probe(game, 0, 5, nullptr, false, std::string(), 10);
+        check(r.dialog == "quantity" && !r.at_drop && game.bin_clicks == 1 && left_alone(game) &&
+                  game.cancels == 1 && r.back,
+              "one not up by the look 320 ms on is not: the bin is clicked exactly once, what it "
+              "asks is answered Hủy Bỏ and the item is back -- " + r.dialog +
+                  (r.at_drop ? "@drop" : "") + ", clicks on the bin " +
+                  std::to_string(game.bin_clicks));
     }
     {
         PretendBin game = game_with("");
@@ -6621,6 +7277,903 @@ void test_bag_dialogs() {
         Frame g = bag_scene(1280, 720, 60);
         blit(g, *store.get("grabbed/hoisinh_confirm"), 700, 60);
         check(!bag::bin_asking(g, store), "while the revive question is not the bin asking");
+    }
+}
+
+namespace {
+
+/// A pretend game for the reviver: a 1280x720 frame of the world with the
+/// death panel on it, and what the game does with a click there. The panel
+/// is the player's own (grabbed/chardeadpanel), centred where the client
+/// draws a dialog; its item button brings up the question, and Xác Nhận on
+/// that revives -- or, with no revive item left, only closes it and leaves
+/// the panel. Every click is kept, and where it landed counted.
+struct PretendDeath {
+    const TemplateStore* store = nullptr;
+    Frame base;
+    bool panel = true;
+    bool question = false;
+    bool bin = false;               ///< the bin's question up as well
+    bool has_item = true;           ///< a revive item in the bag
+    bool asks = true;               ///< the item button brings up the question
+    /// With no revive item, Xác Nhận puts the panel away for this long before
+    /// it is back -- what the live game does then is not known yet.
+    int  blink_ms = 0;
+    std::chrono::steady_clock::time_point hidden_until{};
+    std::function<void(Frame&)> also;   ///< anything else on the screen
+    PretendClock time;
+
+    static constexpr int kPanelX = 432, kPanelY = 244;
+    static constexpr int kAskX = 541, kAskY = 319;
+
+    // Where the buttons are on that frame, as measured on the pictures.
+    static ScreenRect item()    { return ScreenRect{ kPanelX + 157, kPanelY + 58, 105, 43 }; }
+    static ScreenRect village() { return ScreenRect{ kPanelX + 34, kPanelY + 58, 105, 43 }; }
+    static ScreenRect cash()    { return ScreenRect{ kPanelX + 280, kPanelY + 58, 105, 43 }; }
+    static ScreenRect tick1()   { return ScreenRect{ 684, 432, 13, 12 }; }
+    static ScreenRect tick2()   { return ScreenRect{ 811, 432, 13, 12 }; }
+    static ScreenRect confirm() { return ScreenRect{ kAskX + 104, kAskY + 56, 39, 20 }; }
+    static ScreenRect cancel()  { return ScreenRect{ kAskX + 146, kAskY + 56, 39, 20 }; }
+
+    int item_clicks = 0, confirm_clicks = 0, cancel_clicks = 0;
+    int village_clicks = 0, cash_clicks = 0, tick_clicks = 0, other_clicks = 0;
+    std::vector<std::pair<int, int>> clicks;
+
+    Frame render() const {
+        Frame f = base;
+        if (panel && time.t >= hidden_until)
+            blit(f, *store->get("grabbed/chardeadpanel"), kPanelX, kPanelY);
+        if (question) blit(f, *store->get("grabbed/hoisinh_confirm"), kAskX, kAskY);
+        if (bin) blit(f, *store->get("grabbed/del_item_confirm_1"), 120, 120);
+        if (also) also(f);
+        return f;
+    }
+    /// What a look costs on the pretend clock: a little more than one takes
+    /// on the player's machine, so that the looks of ten pretend minutes of a
+    /// death -- each a few full-frame matches, in real time -- stay few.
+    static constexpr int kLookCostMs = 700;
+    Frame look() {
+        time.advance(kLookCostMs);
+        return render();
+    }
+    Reviver::Hands hands() {
+        Reviver::Hands h;
+        h.click = [this](int x, int y) {
+            clicks.emplace_back(x, y);
+            if (village().contains(x, y)) ++village_clicks;
+            if (cash().contains(x, y)) ++cash_clicks;
+            if (tick1().contains(x, y) || tick2().contains(x, y)) ++tick_clicks;
+            if (question && confirm().contains(x, y)) {
+                ++confirm_clicks;
+                question = false;
+                if (has_item) panel = false;
+                else if (blink_ms > 0) hidden_until = time.t + std::chrono::milliseconds(blink_ms);
+            } else if (question && cancel().contains(x, y)) {
+                ++cancel_clicks;
+                question = false;
+            } else if (panel && !question && item().contains(x, y)) {
+                ++item_clicks;
+                if (asks) question = true;
+                else if (has_item) panel = false;
+            } else {
+                ++other_clicks;
+            }
+            return true;
+        };
+        return h;
+    }
+    Reviver::Clock clock() {
+        Reviver::Clock c;
+        c.now = [this] { return time.t; };
+        c.sleep = [this](int ms) { time.advance(ms); };
+        return c;
+    }
+};
+
+} // namespace
+
+/// Reviving, as GoC does it: the panel found by two corners of its buttons,
+/// its revive-item button, Xác Nhận on the question -- three tries a death,
+/// never the village or Cash, and nothing while the bin's dialog is up.
+void test_reviver() {
+    section("Revive: the death panel's item button, then Xác Nhận; never the village");
+    const auto started = std::chrono::steady_clock::now();
+
+    TemplateStore store;
+    const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
+                      store.get("grabbed/chardeadpanel") && store.get("grabbed/hoisinh_confirm") &&
+                      store.get("dialog_panic") && store.get("grabbed/confirm_button") &&
+                      store.get("grabbed/del_item_confirm_1") &&
+                      store.get("grabbed/del_item_confirm_2") && store.get("grabbed/drop_confirm") &&
+                      store.get("grabbed/sell_confirm");
+    if (!have) {
+        std::printf("  [skip] the death panel's or the dialogs' pictures are not installed here\n");
+        return;
+    }
+    const std::string font_dir = GlyphFont::default_dir();
+
+    // The world to die in: a real frame of the client when there is one.
+    Frame world;
+    if (!load_png(exe_relative("frame.png"), world) || world.width != 1280 || world.height != 720)
+        world = bag_scene(1280, 720, 40);
+
+    InputManager no_window;
+    {
+        Reviver r(no_window, store, [](Frame&) { return false; });
+        std::string why;
+        check(r.ready(&why), "the pictures it needs are here: " + (why.empty() ? std::string("all") : why));
+    }
+    const auto seen_on = [&](const Frame& f) {
+        Reviver r(no_window, store, [](Frame&) { return false; });
+        return r.look(f);
+    };
+
+    // ---- what one look sees ----
+    {
+        Frame f = world;
+        blit(f, *store.get("grabbed/chardeadpanel"), 432, 244);
+        const auto s = seen_on(f);
+        check(s.panel && s.by_anchors && s.item.x == 589 && s.item.y == 302 &&
+                  s.item.w == 105 && s.item.h == 42 && !s.question,
+              "the player's panel at 432,244 is found by GoC's two corners (" +
+                  std::to_string(s.panel_score).substr(0, 4) + "); the item button at 589,302");
+        check(ScreenRect{ 589, 302, 105, 43 }.contains(s.item_x(), s.item_y()) &&
+                  !PretendDeath::village().contains(s.item_x(), s.item_y()) &&
+                  !PretendDeath::cash().contains(s.item_x(), s.item_y()),
+              "its middle is inside 589..693, 302..344 -- the village and Cash buttons are not");
+    }
+    {
+        // GoC's own picture of the panel, in English: the corners carry no
+        // words, so the same button is found.
+        Frame f = world;
+        blit(f, *store.get("dialog_panic"), 430, 241);
+        const auto s = seen_on(f);
+        check(s.panel && s.by_anchors && s.item.x == 589 && s.item.y == 302,
+              "GoC's English panel put there instead gives the same item button");
+    }
+    {
+        // Without GoC's picture, the player's own panel, whole.
+        TemplateStore some;
+        for (const char* n : { "grabbed/chardeadpanel", "grabbed/hoisinh_confirm",
+                               "grabbed/confirm_button", "grabbed/del_item_confirm_1",
+                               "grabbed/del_item_confirm_2" })
+            some.put(n, *store.get(n));
+        Frame f = world;
+        blit(f, *store.get("grabbed/chardeadpanel"), 432, 244);
+        Reviver r(no_window, some, [](Frame&) { return false; });
+        const auto s = r.look(f);
+        check(r.ready() && s.panel && !s.by_anchors && s.item.x == 589 && s.item.y == 302,
+              "without GoC's picture the whole panel is the fallback, with the same button");
+    }
+    {
+        // The item button lit up under the pointer that has just clicked it:
+        // its corner no longer matches, and the whole panel still does --
+        // still dead, rather than taken for revived.
+        Frame f = world;
+        blit(f, *store.get("grabbed/chardeadpanel"), 432, 244);
+        for (int t = 0; t < 2; ++t)
+            for (int i = 0; i < 105; ++i) {
+                put_px(f, 589 + i, 302 + t, 255, 255, 200);
+                put_px(f, 589 + i, 302 + 41 - t, 255, 255, 200);
+                if (i < 42) {
+                    put_px(f, 589 + t, 302 + i, 255, 255, 200);
+                    put_px(f, 589 + 104 - t, 302 + i, 255, 255, 200);
+                }
+            }
+        const auto s = seen_on(f);
+        check(s.panel && !s.by_anchors && s.item.x == 589 && s.item.y == 302,
+              "the item button lit up: its corner is not found, the whole panel round the "
+              "village corner is (" + std::to_string(s.panel_score).substr(0, 4) + ")");
+    }
+    {
+        // The village button lit up instead -- the pointer resting on it when
+        // the character died. Its corner is gone, and the strongest place
+        // left for that picture is the Cash button's corner: the panel is
+        // looked for round that too, and its item button is the same.
+        Frame f = world;
+        blit(f, *store.get("grabbed/chardeadpanel"), 432, 244);
+        const ScreenRect v = PretendDeath::village();
+        for (int t = 0; t < 2; ++t)
+            for (int i = 0; i < 105; ++i) {
+                put_px(f, v.x + i, v.y + t, 255, 255, 200);
+                put_px(f, v.x + i, v.y + 41 - t, 255, 255, 200);
+                if (i < 42) {
+                    put_px(f, v.x + t, v.y + i, 255, 255, 200);
+                    put_px(f, v.x + 104 - t, v.y + i, 255, 255, 200);
+                }
+            }
+        const auto s = seen_on(f);
+        check(s.panel && s.item.x == 589 && s.item.y == 302 &&
+                  !PretendDeath::village().contains(s.item_x(), s.item_y()) &&
+                  !PretendDeath::cash().contains(s.item_x(), s.item_y()),
+              "the village button lit up: the panel is still found -- round the Cash corner -- "
+              "and the item button with it (" + std::to_string(s.panel_score).substr(0, 4) + ")");
+    }
+    {
+        Frame f = world;
+        blit(f, *store.get("grabbed/hoisinh_confirm"), 541, 319);
+        const auto s = seen_on(f);
+        check(s.question && std::abs(s.confirm_x() - 664) <= 2 && std::abs(s.confirm_y() - 384) <= 2 &&
+                  PretendDeath::confirm().contains(s.confirm_x(), s.confirm_y()),
+              "the revive question at 541,319 (" + std::to_string(s.question_score).substr(0, 4) +
+                  "): Xác Nhận at " + std::to_string(s.confirm_x()) + "," +
+                  std::to_string(s.confirm_y()) + ", inside 645..683, 375..394");
+        check(!s.bin_asking && s.others.empty(), "and its own buttons are not taken for another dialog");
+    }
+    {
+        // The bin's dialogs and the others score up to 0.87 against the
+        // question's picture: none of them is taken for it.
+        struct Case { const char* what; std::function<void(Frame&)> paint; };
+        const Case cases[] = {
+            { "the bin's question", [&](Frame& f) { blit(f, *store.get("grabbed/del_item_confirm_1"), 541, 319); } },
+            { "the bin's count dialog", [&](Frame& f) { draw_count_dialog(f, store, 541, 319, "1", font_dir); } },
+            { "the drop question", [&](Frame& f) { blit(f, *store.get("grabbed/drop_confirm"), 541, 319); } },
+            { "a shop's quantity box", [&](Frame& f) { blit(f, *store.get("grabbed/sell_confirm"), 541, 319); } },
+        };
+        for (const Case& c : cases) {
+            Frame f = world;
+            c.paint(f);
+            const auto s = seen_on(f);
+            check(!s.question && !s.panel && !s.dead(),
+                  std::string(c.what) + " alone is not the revive question (" +
+                      std::to_string(s.question_score).substr(0, 4) + ")");
+        }
+    }
+    {
+        // Real frames of the client: never a panel, never a question.
+        std::vector<std::string> shots{ exe_relative("frame.png") };
+        const std::string dir = exe_relative("trash_debug");
+        WIN32_FIND_DATAA fd{};
+        HANDLE h = FindFirstFileA((dir + "\\*.png").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do shots.push_back(dir + "\\" + fd.cFileName);
+            while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        int looked = 0, dead = 0;
+        double ms = 0.0;
+        Reviver r(no_window, store, [](Frame&) { return false; });
+        for (const std::string& path : shots) {
+            Frame shot;
+            if (!load_png(path, shot) || !shot.valid()) continue;
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto s = r.look(shot);
+            ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            ++looked;
+            if (s.dead()) ++dead;
+        }
+        if (looked == 0) {
+            std::printf("  [skip] no saved frames of the client here\n");
+        } else {
+            check(dead == 0, "on " + std::to_string(looked) +
+                                 " real frames of the client nobody is dead: no panel, no question");
+            std::printf("  [info] a look takes %.0f ms on a 1280x720 frame\n", ms / looked);
+        }
+    }
+
+    // ---- turns on a pretend game ----
+    //
+    // The whole 1280x720 frame where it counts, and its top-left 880x520 --
+    // everything the panel and the dialogs need -- for the pretend minutes,
+    // which are a few hundred looks each.
+    const Frame corner = bag::cut(world, ScreenRect{ 0, 0, 880, 520 });
+    const auto game = [&](bool whole_frame = false) {
+        PretendDeath g;
+        g.store = &store;
+        g.base = whole_frame ? world : corner;
+        return g;
+    };
+    struct Heard { int revived = 0, out = 0; std::string reason; };
+    const auto reviver_for = [&](PretendDeath& g, Heard& heard) {
+        auto r = std::make_unique<Reviver>(no_window, store, [&g](Frame& out) {
+            out = g.look();
+            return true;
+        });
+        r->set_hands(g.hands());
+        r->set_clock(g.clock());
+        r->on_revived([&heard] { ++heard.revived; });
+        r->on_out_of_tries([&heard](const std::string& why) {
+            ++heard.out;
+            heard.reason = why;
+        });
+        return r;
+    };
+    // Turns a little over a second apart, as the GUI's worker takes them --
+    // or further apart, where only the turns' answers matter.
+    const auto turns_for = [](Reviver& r, PretendDeath& g, int seconds, int gap_ms = 1200) {
+        std::vector<Reviver::Turn> out;
+        const auto until = g.time.t + std::chrono::seconds(seconds);
+        while (g.time.t < until) {
+            out.push_back(r.turn());
+            g.time.advance(gap_ms);
+        }
+        return out;
+    };
+    const auto never_wrong = [](const PretendDeath& g) {
+        return g.village_clicks == 0 && g.cash_clicks == 0 && g.tick_clicks == 0 &&
+               g.cancel_clicks == 0 && g.other_clicks == 0;
+    };
+    {
+        PretendDeath g = game(true);
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        // The re-cast it sets off: the macro's own, on a clock of its own.
+        InputManager keys;
+        ExecutionCoordinator coord;
+        MacroEngine macro(keys, coord);
+        std::uint64_t macro_now = 3'600'000;
+        MacroEngine::Clock mc;
+        mc.now_ms = [&macro_now] { return macro_now; };
+        macro.set_clock(mc);
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys.resize(1);
+        cfg.keys[0].keycode = 'F';
+        cfg.keys[0].enabled = true;
+        cfg.keys[0].interval_ms = 1600000;
+        cfg.keys[0].trigger = MacroTrigger::Always;
+        macro.set_config(cfg);
+        macro.start_stepped();
+        macro_now += 60'000;
+        int recasts = 0;
+        r->on_revived([&] {
+            ++heard.revived;
+            if (macro.recast_buffs("a revive")) ++recasts;
+        });
+
+        const auto turn = r->turn();
+        check(turn == Reviver::Turn::Revived && g.item_clicks == 1 && g.confirm_clicks == 1 &&
+                  never_wrong(g) && !g.panel && !g.question,
+              "the panel at 432,244: the item button once, then Xác Nhận once -- revived");
+        check(g.clicks.size() == 2 && PretendDeath::item().contains(g.clicks[0].first, g.clicks[0].second) &&
+                  PretendDeath::confirm().contains(g.clicks[1].first, g.clicks[1].second),
+              "exactly two clicks: inside 589..693, 302..344, then inside Xác Nhận");
+        check(r->revived() == 1 && heard.revived == 1 && recasts == 1,
+              "the revive is counted once, and its re-cast hook re-casts the buffs once");
+        const auto later = turns_for(*r, g, 20, 4000);
+        check(g.clicks.size() == 2 &&
+                  std::all_of(later.begin(), later.end(),
+                              [](Reviver::Turn t) { return t == Reviver::Turn::Alive; }),
+              "and alive afterwards, nothing more is clicked");
+        check(r->tries() == 0, "its try is given back once the character has stayed up for 5 s");
+        macro.stop();
+    }
+    {
+        // The panel and the question both up -- the item button pressed by
+        // hand, say: Xác Nhận on the question straight away.
+        PretendDeath g = game();
+        g.question = true;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        check(r->turn() == Reviver::Turn::Revived && g.confirm_clicks == 1 && g.item_clicks == 0 &&
+                  g.clicks.size() == 1 && never_wrong(g),
+              "the panel and the question both up: Xác Nhận on the question, and nothing else");
+    }
+    {
+        // The question with nobody dead: a dialog with the same frame and
+        // the same words, about an item the player clicked. Left alone.
+        PretendDeath g = game();
+        g.panel = false;
+        g.question = true;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        const auto turns = turns_for(*r, g, 60, 5000);
+        const bool alive = std::all_of(turns.begin(), turns.end(),
+                                       [](Reviver::Turn t) { return t == Reviver::Turn::Alive; });
+        check(g.clicks.empty() && alive && r->tries() == 0 && heard.revived == 0,
+              "the question up with no death panel seen: alive, and nothing clicked in a minute");
+        check(r->look(g.render()).question,
+              "though a look for the dry run still finds it -- and says it would be left alone");
+    }
+    {
+        // The panel seen at the death, then the question up over it --
+        // covering it, or with the panel gone: that is the death's question,
+        // and Xác Nhận is pressed on it.
+        PretendDeath g = game();
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        bool allow = false;
+        Reviver::Guard guard;
+        guard.take = [&allow] { return allow; };
+        r->set_guard(guard);
+        const auto first = r->turn();           // the panel seen; put off by the guard
+        g.panel = false;
+        g.question = true;
+        allow = true;
+        const auto second = r->turn();
+        check(first == Reviver::Turn::Waiting && second == Reviver::Turn::Revived &&
+                  g.confirm_clicks == 1 && g.item_clicks == 0 && never_wrong(g),
+              "the panel seen, then the question up without it: Xác Nhận on the question");
+    }
+    for (const bool asks : { true, false }) {
+        // No revive item: the panel never goes away.
+        PretendDeath g = game();
+        g.has_item = false;
+        g.asks = asks;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        // Ten minutes: the first, a turn a little over a second apart, has
+        // all three tries in it; the other nine are looked at every 30 s.
+        auto turns = turns_for(*r, g, 60);
+        const auto rest = turns_for(*r, g, 540, 30000);
+        turns.insert(turns.end(), rest.begin(), rest.end());
+        const auto count = [&](Reviver::Turn t) {
+            return static_cast<int>(std::count(turns.begin(), turns.end(), t));
+        };
+        const std::string how = asks ? "the question comes and Xác Nhận does nothing"
+                                     : "the item button brings nothing up";
+        check(g.item_clicks == 3 && g.confirm_clicks == (asks ? 3 : 0) && never_wrong(g) &&
+                  g.clicks.size() == static_cast<std::size_t>(asks ? 6 : 3),
+              "no revive item (" + how + "): exactly 3 tries -- " + std::to_string(g.item_clicks) +
+                  " item clicks, " + std::to_string(g.confirm_clicks) + " Xác Nhận");
+        check(heard.out == 1 && count(Reviver::Turn::Failed) == 2 && r->out_of_tries() &&
+                  heard.reason.find("revive items") != std::string::npos,
+              "then one stop request, with the reason, and no 4th click in ten minutes");
+        if (asks) {
+            // Alive for a while, and dead again: a new death, with its own tries.
+            g.panel = false;
+            (void)turns_for(*r, g, 9);
+            g.panel = true;
+            (void)turns_for(*r, g, 5);
+            check(g.item_clicks == 4 && heard.out == 1,
+                  "a death after being seen alive for 5 s gets its own tries again");
+        }
+    }
+    {
+        // The panel gone for a moment between tries is the same death.
+        PretendDeath g = game();
+        g.has_item = false;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        (void)r->turn();
+        g.panel = false;
+        (void)turns_for(*r, g, 2);
+        g.panel = true;
+        (void)turns_for(*r, g, 60);
+        check(g.item_clicks == 3 && heard.out == 1,
+              "the panel gone for 2 s between tries is the same death: still 3 tries in all");
+    }
+    {
+        // HP read as 0 with the panel gone: not revived.
+        PretendDeath g = game();
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        r->set_hp([] { return 0.0f; });
+        const auto turn = r->turn();
+        check(turn == Reviver::Turn::Failed && heard.revived == 0 && r->tries() == 1,
+              "the panel gone while HP reads 0 is not a revive");
+    }
+    {
+        // No revive item, and the game puts the panel away for a second and
+        // a half after Xác Nhận. With HP not to be read, two clear looks were
+        // taken for a revive and the tries given back every time: the bot
+        // clicked on for ever instead of stopping.
+        PretendDeath g = game();
+        g.has_item = false;
+        g.blink_ms = 1500;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        (void)turns_for(*r, g, 75);
+        check(heard.revived == 0 && heard.out == 1 && g.item_clicks == 3 && g.confirm_clicks == 3 &&
+                  never_wrong(g),
+              "no item and the panel away for 1.5 s after Xác Nhận, HP unreadable: no revive "
+              "counted, 3 tries, then the stop -- " + std::to_string(g.item_clicks) + " tries");
+    }
+    {
+        // Away longer than that -- 5 s, past the 3 s it has to stay gone --
+        // and each comes back as a "revive"; but a panel back before the
+        // character has stayed up 5 s is the same death, its tries not given
+        // back, so this still ends in the stop rather than going on.
+        PretendDeath g = game();
+        g.has_item = false;
+        g.blink_ms = 5000;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        (void)turns_for(*r, g, 60);
+        (void)turns_for(*r, g, 180, 30000);
+        check(heard.out == 1 && g.item_clicks == 3 && r->out_of_tries() && never_wrong(g),
+              "no item and the panel away for 5 s each time: still 3 tries in all, then the stop "
+              "-- " + std::to_string(g.item_clicks) + " tries, " +
+                  std::to_string(heard.revived) + " taken for revives");
+    }
+    {
+        // With HP read above 0, two clear looks are still enough.
+        PretendDeath g = game();
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        r->set_hp([&g] { return g.panel ? 0.0f : 80.0f; });
+        const auto before = g.time.t;
+        const auto turn = r->turn();
+        const long long took = g.time.ms_since(before);
+        check(turn == Reviver::Turn::Revived && heard.revived == 1 && took < 5000,
+              "with HP read above 0 a revive is taken at once, without the 3 s wait -- " +
+                  std::to_string(took) + " ms of pretend time");
+    }
+    {
+        // Nothing is clicked in any of these, however long they last.
+        struct Case { const char* what; std::function<void(PretendDeath&)> set; };
+        const Case cases[] = {
+            { "nothing up", [](PretendDeath& g) { g.panel = false; } },
+            { "the bin's question alone", [](PretendDeath& g) { g.panel = false; g.bin = true; } },
+            { "the bin's count dialog alone",
+              [&](PretendDeath& g) {
+                  g.panel = false;
+                  g.also = [&](Frame& f) { draw_count_dialog(f, store, 120, 120, "1", font_dir); };
+              } },
+            { "the drop question alone",
+              [&](PretendDeath& g) {
+                  g.panel = false;
+                  g.also = [&](Frame& f) { blit(f, *store.get("grabbed/drop_confirm"), 541, 319); };
+              } },
+            { "a shop's quantity box alone",
+              [&](PretendDeath& g) {
+                  g.panel = false;
+                  g.also = [&](Frame& f) { blit(f, *store.get("grabbed/sell_confirm"), 541, 319); };
+              } },
+            { "the revive question with the bin's dialog up",
+              [](PretendDeath& g) { g.panel = false; g.question = true; g.bin = true; } },
+            { "the panel and the revive question with the bin's dialog up",
+              [](PretendDeath& g) { g.question = true; g.bin = true; } },
+            { "the panel with the bin's dialog up", [](PretendDeath& g) { g.bin = true; } },
+            { "the panel with a shop's box over its item button",
+              [&](PretendDeath& g) {
+                  g.also = [&](Frame& f) { blit(f, *store.get("grabbed/sell_confirm"), 600, 318); };
+              } },
+        };
+        for (const Case& c : cases) {
+            PretendDeath g = game();
+            c.set(g);
+            Heard heard;
+            auto r = reviver_for(g, heard);
+            const auto turns = turns_for(*r, g, 60, 10000);
+            const bool waited = std::all_of(turns.begin(), turns.end(), [](Reviver::Turn t) {
+                return t == Reviver::Turn::Waiting || t == Reviver::Turn::Alive;
+            });
+            check(g.clicks.empty() && r->tries() == 0 && heard.out == 0 && waited,
+                  std::string(c.what) + ": nothing clicked in a minute, and no try counted");
+        }
+    }
+    {
+        // Put off by whoever runs it -- the mouse taken, everything held off
+        // by somebody else: nothing clicked, nothing counted.
+        PretendDeath g = game();
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        bool allow = false;
+        int taken = 0, given_back = 0;
+        Reviver::Guard guard;
+        guard.take = [&] { ++taken; return allow; };
+        guard.done = [&] { ++given_back; };
+        r->set_guard(guard);
+        const auto first = r->turn();
+        check(first == Reviver::Turn::Waiting && g.clicks.empty() && r->tries() == 0,
+              "put off before its first click, it clicks nothing and counts nothing");
+        allow = true;
+        const auto second = r->turn();
+        check(second == Reviver::Turn::Revived && taken == 2 && given_back == 1,
+              "let go ahead, it revives, and gives the mouse back after");
+    }
+    {
+        // The screen changes while whoever runs it makes the reviver wait --
+        // a trash pass finishing, the player at the keyboard. The look that
+        // decided the attempt is from before that: it is looked at again
+        // once let go, and nothing is clicked on the strength of the old one.
+        struct Case {
+            const char* what;
+            std::function<void(PretendDeath&)> before;     ///< the screen when it decides
+            std::function<void(PretendDeath&)> meanwhile;  ///< what changes during the wait
+        };
+        const Case cases[] = {
+            { "revived by hand meanwhile", [](PretendDeath&) {},
+              [](PretendDeath& g) { g.panel = false; } },
+            { "the bin's question up meanwhile", [](PretendDeath&) {},
+              [](PretendDeath& g) { g.bin = true; } },
+            { "the revive question gone and the bin's in its place",
+              [](PretendDeath& g) { g.question = true; },
+              [&](PretendDeath& g) {
+                  g.question = false;
+                  g.also = [&](Frame& f) {
+                      blit(f, *store.get("grabbed/del_item_confirm_1"), PretendDeath::kAskX,
+                           PretendDeath::kAskY);
+                  };
+              } },
+            { "a shop's box over the item button meanwhile", [](PretendDeath&) {},
+              [&](PretendDeath& g) {
+                  g.also = [&](Frame& f) { blit(f, *store.get("grabbed/sell_confirm"), 600, 318); };
+              } },
+        };
+        for (const Case& c : cases) {
+            PretendDeath g = game();
+            c.before(g);
+            Heard heard;
+            auto r = reviver_for(g, heard);
+            int given_back = 0;
+            Reviver::Guard guard;
+            guard.take = [&] {
+                c.meanwhile(g);
+                return true;
+            };
+            guard.done = [&] { ++given_back; };
+            r->set_guard(guard);
+            const auto turn = r->turn();
+            check(turn == Reviver::Turn::Waiting && g.clicks.empty() && r->tries() == 0 &&
+                      given_back == 1,
+                  std::string(c.what) + ": nothing clicked, no try counted, the mouse given back");
+        }
+    }
+    std::printf("  [info] the revive checks took %.0f s\n",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+}
+
+/// The readers that follow the client's size: the chat lines from the chat
+/// bar, the player list from its button, the HUD landmark from the staged
+/// pictures. The player's client is 1280x720; what was measured was 1024x768.
+void test_screen_layout() {
+    section("Readers placed from the client's own landmarks");
+
+    const auto same = [](const ScreenRect& a, const ScreenRect& b) {
+        return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+    };
+
+    // ---- the chat lines, from the chat bar ----
+    {
+        // The bar's top-left as the client draws it: 84 in, 22 up.
+        const auto small = ChatLines::above_bar(84, 746, 2, 768);
+        check(small.size() == 2 && same(small[0], ScreenRect{ 6, 710, 390, 16 }) &&
+                  same(small[1], ScreenRect{ 6, 726, 390, 16 }),
+              "at 1024x768 the two lines are read at 710 and 726, top first");
+        const auto wide = ChatLines::above_bar(84, 698, 2, 720);
+        check(wide.size() == 2 && same(wide[0], ScreenRect{ 6, 662, 390, 16 }) &&
+                  same(wide[1], ScreenRect{ 6, 678, 390, 16 }),
+              "at 1280x720 at 662 and 678, inside the frame");
+        bool clear = true;
+        for (const ScreenRect& box : ChatLines::above_bar(84, 698, 6, 720))
+            if (box.y < 698 - 41) clear = false;
+        check(clear && ChatLines::above_bar(84, 698, 6, 720).size() == 2,
+              "and asked for six, still only the two below the tab strip: its labels are "
+              "never read");
+    }
+    {
+        // A party.ini from before, with the 1024x768 numbers in it: having
+        // them is not asking for them.
+        IniFile old;
+        old.set_int("Chat", "chat_x", 6);
+        old.set_int("Chat", "chat_y", 710);
+        old.set_int("Chat", "line_height", 13);
+        ChatLines::Settings s;
+        s.load(old);
+        check(!s.fixed && s.lines == 2, "the old chat numbers in party.ini leave the lines placed "
+                                        "from the bar");
+        old.set("Chat", "place", "fixed");
+        ChatLines::Settings f;
+        f.load(old);
+        ChatLines fixed;
+        fixed.set_settings(f);
+        const auto boxes = fixed.boxes(make_frame(1024, 768), TemplateStore{});
+        check(f.fixed && boxes.size() == 3 && same(boxes[0], ScreenRect{ 6, 710, 390, 16 }) &&
+                  fixed.bar() == ChatLines::Bar::Fixed,
+              "and place = fixed reads them as written, three lines as it always did");
+    }
+    {
+        TemplateStore store;
+        GlyphFont font;
+        const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
+                          store.get("inven/0/dialog_chat_res3.spr/1") != nullptr &&
+                          font.load(GlyphFont::default_dir());
+        if (!have) {
+            std::printf("  [skip] the chat bar's picture or the glyphs are not installed here\n");
+        } else {
+            const Frame& bar = *store.get("inven/0/dialog_chat_res3.spr/1");
+            // A chat panel: the bar, and two lines written above it in the
+            // game's own glyphs, under made-up names.
+            const auto panel = [&](int w, int h, int bar_y, bool with_bar) {
+                Frame f = make_frame(w, h);
+                for (int y = 0; y < h; ++y)
+                    for (int x = 0; x < w; ++x) put_px(f, x, y, 40, 46, 58);
+                if (with_bar) blit(f, bar, 84, bar_y);
+                // No letter that hangs below the line in the names: drawn
+                // here, those sit on it.
+                const char* said[] = { "NhanThu xin chao", "NhanThu pt" };
+                for (int i = 0; i < 2; ++i) {
+                    Frame text;
+                    if (!font.render_line(said[i], text)) continue;
+                    blit(f, text, 8, bar_y - 34 + 16 * i);
+                }
+                return f;
+            };
+            const auto read = [&](ChatLines& lines, const Frame& f) {
+                std::vector<std::string> out;
+                for (const ScreenRect& box : lines.boxes(f, store)) {
+                    const std::string text = font.read_line(f, box);
+                    if (!text.empty()) out.push_back(text);
+                }
+                return out;
+            };
+            for (const auto& size : { std::pair<int, int>{ 1280, 720 }, std::pair<int, int>{ 1024, 768 } }) {
+                const int w = size.first, h = size.second;
+                ChatLines lines;
+                const Frame f = panel(w, h, h - 22, true);
+                const auto got = read(lines, f);
+                const std::string at = std::to_string(w) + "x" + std::to_string(h);
+                check(lines.bar() == ChatLines::Bar::Found && lines.bar_x() == 84 &&
+                          lines.bar_y() == h - 22,
+                      "at " + at + " the chat bar is found where the client draws it");
+                check(got.size() == 2 && got[1].find("pt") != std::string::npos,
+                      "and both lines above it are read, the newest last -- " +
+                          std::to_string(got.size()) + " read");
+                PartyChat chat;
+                PartyChat::Settings rules;
+                chat.set_settings(rules);
+                std::vector<std::string> asked;
+                for (int look = 0; look < 3; ++look)
+                    for (const std::string& who : chat.saw(got, 100000 + 200 * look))
+                        asked.push_back(who);
+                check(asked.size() == 1 && PartyChat::alike(asked[0], "NhanThu") > 0.8,
+                      "and the keyword vote sees 'pt', from the one who wrote it");
+            }
+            {
+                // What is said in the log, caught for the length of it.
+                Logger::instance().set_level(LogLevel::Info);
+                Logger::instance().set_ring_capacity(400);
+                Logger::instance().clear_ring();
+                ChatLines lines;
+                const Frame f = panel(1280, 720, 698, false);
+                const auto first = lines.boxes(f, store);
+                lines.boxes(f, store);
+                Logger::instance().set_level(LogLevel::Error);
+                int said = 0;
+                for (const LogLine& line : Logger::instance().ring())
+                    if (line.text.find("Chat: the chat bar") != std::string::npos) ++said;
+                check(lines.bar() == ChatLines::Bar::Assumed && lines.bar_y() == 720 - 22 &&
+                          first.size() == 2 && same(first[0], ScreenRect{ 6, 662, 390, 16 }),
+                      "with no bar on screen the lines are read where it always is, 22 rows up");
+                check(said == 1, "and that is said once in the log, not on every look -- " +
+                                     std::to_string(said));
+                // Found once, then covered: where it was found last.
+                ChatLines seen;
+                seen.boxes(panel(1280, 720, 640, true), store);
+                seen.boxes(f, store);
+                check(seen.bar() == ChatLines::Bar::Remembered && seen.bar_y() == 640,
+                      "and a bar seen before and covered now is read where it was last seen");
+            }
+        }
+    }
+
+    // ---- on the player's own frames, where they are here ----
+    {
+        TemplateStore store;
+        Frame wide, small;
+        const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
+                          store.get("inven/0/dialog_chat_res3.spr/1") != nullptr &&
+                          store.get("player_in_map_icon") != nullptr;
+        const bool have_wide = have && load_png(exe_relative("frame.png"), wide) &&
+                               wide.width == 1280 && wide.height == 720;
+        const bool have_small = have && load_png(exe_relative("playerlist.png"), small) &&
+                                small.width == 1024 && small.height == 768;
+        if (!have_wide && !have_small) {
+            std::printf("  [skip] no saved frames of the client here\n");
+        } else if (!have_wide || !have_small) {
+            // Said, not left out quietly: `gobot_cli --read` and
+            // `--playerlist` write these two files, and one taken at another
+            // size takes these checks with it.
+            std::printf("  [skip] %s is missing here, or not the %s frame -- its checks are left "
+                        "out\n",
+                        have_wide ? "playerlist.png" : "frame.png",
+                        have_wide ? "1024x768" : "1280x720");
+        }
+        for (const Frame* f : { have_wide ? &wide : nullptr, have_small ? &small : nullptr }) {
+            if (f == nullptr) continue;
+            const std::string at = std::to_string(f->width) + "x" + std::to_string(f->height);
+            ChatLines lines;
+            const auto boxes = lines.boxes(*f, store);
+            const std::string where = ChatLines::bar_name(lines.bar()) + std::string(" at ") +
+                                      std::to_string(lines.bar_x()) + "," +
+                                      std::to_string(lines.bar_y());
+            check(lines.bar() == ChatLines::Bar::Found && lines.bar_x() == 84 &&
+                      lines.bar_y() == f->height - 22 && boxes.size() == 2 && boxes[0].x == 6,
+                  "on the player's " + at + " frame the chat bar is found at 84," +
+                      std::to_string(f->height - 22) + ", the lines read from x 6 -- " + where);
+            const auto button = TemplateMatcher::find(
+                *f, ScreenRect{ 0, 0, f->width, f->height }, *store.get("player_in_map_icon"),
+                PlayerList::Settings{}.open_score);
+            check(button.found && button.at.x == f->width - 68 && button.at.y == 139,
+                  "and the player list's button at " + std::to_string(f->width - 68) +
+                      ",139, against the right edge");
+        }
+    }
+
+    // ---- the player list, from its button ----
+    {
+        PlayerList::Settings measured;
+        const PlayerList::Settings small = measured.at_button(956, 139);
+        check(small.roi_x == 744 && small.roi_y == 160 && small.roi_w == 276 &&
+                  small.roi_h == 214 && small.level_x == 748 && small.name_x == 795 &&
+                  small.click_x == 862 && small.first_row_y == 172,
+              "the list placed from its button at 956,139 is the list measured on 1024x768");
+        const PlayerList::Settings wide = measured.at_button(1212, 139);
+        check(wide.roi_x == 1000 && wide.name_x == 1051 && wide.click_x == 1118 &&
+                  wide.level_x == 1004 && wide.first_row_y == 172,
+              "and from its button at 1212,139, where it is on 1280x720, it is against the "
+              "right edge");
+
+        PlayerList list;
+        list.set_settings(measured);
+        int clicks = 0;
+        list.set_click([&](int, int) { ++clicks; return true; });
+        InputManager no_window;
+        ScreenCapture capture;
+        std::string why;
+        PlayerList::Row row;
+        row.index = 0;
+        row.y = 182;
+        check(!list.invite(no_window, capture, TemplateStore{}, row, &why) && clicks == 0 &&
+                  list.read(make_frame(1280, 720), GlyphFont{}).empty(),
+              "nothing is read or clicked before the list is placed from its button");
+        list.place(1212, 139, 1280, 720);
+        check(list.in_panel(1118, 182) && !list.in_panel(862, 182) && !list.in_panel(1118, 500),
+              "placed on 1280x720, a row of it is in the list and the 1024x768 click point "
+              "is not");
+        row.y = 600;
+        why.clear();
+        const bool refused = !list.invite(no_window, capture, TemplateStore{}, row, &why);
+        check(refused && clicks == 0 && !why.empty(),
+              "a row outside the list is refused, with nothing clicked -- " + why);
+        row.y = 362;        // the tenth row: its Req Party would be below the list
+        check(!list.invite(no_window, capture, TemplateStore{}, row, &why) && clicks == 0,
+              "and so is a row whose Req Party would land below the list");
+
+        PlayerList::Settings pinned = measured;
+        pinned.fixed = true;
+        PlayerList old_way;
+        old_way.set_settings(pinned);
+        old_way.place(1212, 139, 1280, 720);
+        check(old_way.geometry().click_x == 862 && old_way.geometry().roi_x == 744,
+              "with place = fixed the numbers in party.ini are used as written");
+        IniFile ini;
+        ini.set_int("PlayerList", "roi_x", 744);
+        PlayerList::Settings loaded;
+        loaded.load(ini);
+        check(!loaded.fixed, "and a party.ini with only the old numbers is not fixed");
+    }
+
+    // ---- the HUD landmark, from the staged pictures ----
+    {
+        Frame landmark;
+        std::string from;
+        if (!TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"),
+                                     landmark, &from)) {
+            std::printf("  [skip] no picture of the HUD landmark here\n");
+        } else {
+            check(from.find("templates") != std::string::npos &&
+                      from.find("hpmp_indicator2") != std::string::npos,
+                  "the HUD landmark comes from the pictures staged beside GoBot first");
+            Logger::instance().set_level(LogLevel::Info);
+            Logger::instance().set_ring_capacity(400);
+            Logger::instance().clear_ring();
+            VitalsReader reader;
+            reader.start();
+            const bool anchored = reader.has_anchor();
+            reader.stop();
+            Logger::instance().set_level(LogLevel::Error);
+            bool logged = false;
+            for (const LogLine& line : Logger::instance().ring())
+                if (line.text.find("Vitals: using the HUD landmark from") != std::string::npos &&
+                    line.text.find("templates") != std::string::npos)
+                    logged = true;
+            check(anchored && logged,
+                  "and a started reader takes it from there, and says where it came from");
+            Frame shot;
+            if (!load_png(exe_relative("frame.png"), shot) || !shot.valid()) {
+                std::printf("  [skip] no saved frame of the client here\n");
+            } else {
+                const auto hit = TemplateMatcher::find(
+                    shot, ScreenRect{ 0, 0, std::min(shot.width, 560), std::min(shot.height, 280) },
+                    landmark, 0.75f);
+                check(hit.found && hit.at.x == 44 && hit.at.y == 4,
+                      "on the player's 1280x720 frame it is found at 44,4, where it is on "
+                      "1024x768 too");
+            }
+        }
     }
 }
 
@@ -6756,8 +8309,13 @@ void test_macro_engine() {
     // depend on a window: with focus required and absent, nothing presses
     // either way, but which counter moves says which rule did the holding.
     {
-        engine.reset_stats();
+        // Suspended first, and counted from a moment later: a press the
+        // timer thread had already taken past the suspend check when it was
+        // set still ends at the focus check, and counted from before, that
+        // one press read as the rule not holding.
         engine.set_suspended(true, "testing");
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        engine.reset_stats();
         check(engine.suspended(), "suspends");
         check(engine.suspended_reason() == "testing", "and remembers why");
 
@@ -6858,6 +8416,299 @@ void test_macro_key_kind() {
           "and nothing counted against any key");
 }
 
+/// The buffs on their own clocks, and cast again after a death: the engine
+/// driven a step at a time on a clock of the test's own, with a pretend
+/// keyboard -- hours of it in a moment, no thread, no sleep, and the same
+/// answer however busy the machine is.
+void test_macro_buffs() {
+    section("Macro: a clock for each buff, and every buff again after a death");
+
+    // The simple screen's seconds box, and what it writes.
+    check(clamp_buff_seconds(59) == 60 && clamp_buff_seconds(9000) == 7200 &&
+              clamp_buff_seconds(1600) == 1600 && clamp_buff_seconds(60) == 60,
+          "a buff's seconds are held to 60..7200: 59 is 60, 9000 is 7200");
+    {
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys.clear();
+        const struct { std::uint32_t vk; int seconds; } kBuffs[] = { { 'A', 1600 }, { 'S', 1600 },
+                                                                     { 'F', 60 } };
+        for (const auto& b : kBuffs) {
+            MacroKey k;
+            k.keycode = b.vk;
+            k.label = std::string(1, static_cast<char>(b.vk));
+            k.enabled = true;
+            k.jitter_pct = 5;
+            k.interval_ms = static_cast<std::uint32_t>(clamp_buff_seconds(b.seconds)) * 1000u;
+            cfg.keys.push_back(k);
+        }
+        const std::string path = temp_file("gobot_test_buffs.ini");
+        MacroConfig back;
+        IniFile raw;
+        const bool ok = cfg.save(path) && back.load(path) && raw.load(path);
+        check(ok && back.keys.size() == 3 && back.keys[0].interval_ms == 1600000 &&
+                  back.keys[1].interval_ms == 1600000 && back.keys[2].interval_ms == 60000 &&
+                  raw.get_int("Keys", "key_2_interval_ms", 0) == 60000,
+              "buffs at 1600, 1600 and 60 s are written as 1600000, 1600000 and 60000 ms, and "
+              "read back the same");
+        check(ok && back.keys.size() == 3 &&
+                  std::all_of(back.keys.begin(), back.keys.end(),
+                              [](const MacroKey& k) { return macro_key_kind(k) == MacroKeyKind::Buff; }),
+              "and all three are still buffs");
+        std::remove(path.c_str());
+    }
+
+    // The pretend world: a clock, whether the game is in front, and every
+    // key that reached it, with when.
+    struct Pretend {
+        std::uint64_t t = 3'600'000;
+        bool focused = true;
+        std::vector<std::pair<std::uint32_t, std::uint64_t>> pressed;
+        std::vector<std::uint64_t> when(std::uint32_t vk) const {
+            std::vector<std::uint64_t> out;
+            for (const auto& p : pressed)
+                if (p.first == vk) out.push_back(p.second);
+            return out;
+        }
+    };
+    struct Rig {
+        InputManager input;
+        ExecutionCoordinator coord;
+        MacroEngine engine{ input, coord };
+        Pretend p;
+        explicit Rig(std::vector<MacroKey> keys) {
+            MacroEngine::Clock c;
+            c.now_ms = [this] { return p.t; };
+            engine.set_clock(c);
+            MacroEngine::Hands h;
+            h.focused = [this] { return p.focused; };
+            h.key = [this](std::uint32_t vk, int) {
+                p.pressed.emplace_back(vk, p.t);
+                return true;
+            };
+            engine.set_hands(h);
+            MacroConfig cfg;
+            cfg.apply_defaults();
+            cfg.keys = std::move(keys);
+            cfg.sequence_enabled = false;
+            cfg.require_focus = true;
+            cfg.global_jitter_pct = 0;
+            engine.set_config(cfg);
+            engine.start_stepped();
+        }
+        ~Rig() { engine.stop(); }
+        /// `ms` of pretend time, a pass of the timers every 10 ms, as the thread does.
+        void run(std::uint64_t ms) {
+            for (const std::uint64_t until = p.t + ms; p.t < until; p.t += 10) engine.step();
+        }
+    };
+    const auto key = [](std::uint32_t vk, std::uint32_t interval_ms, int jitter,
+                        std::uint32_t delay = 0) {
+        MacroKey k;
+        k.keycode = vk;
+        k.label = std::string(1, static_cast<char>(vk));
+        k.enabled = true;
+        k.interval_ms = interval_ms;
+        k.jitter_pct = jitter;
+        k.start_delay_ms = delay;
+        return k;
+    };
+    const auto spaced = [](std::vector<std::uint64_t> times, std::uint64_t gap) {
+        std::sort(times.begin(), times.end());
+        for (std::size_t i = 1; i < times.size(); ++i)
+            if (times[i] - times[i - 1] < gap) return false;
+        return true;
+    };
+
+    {
+        // The player's own: F every 60 s, A every 1600 s.
+        Rig rig({ key('F', 60000, 5), key('A', 1600000, 10, 150) });
+        const std::uint64_t t0 = rig.p.t;
+        rig.run(3600 * 1000);
+        const auto f = rig.p.when('F');
+        const auto a = rig.p.when('A');
+        check(f.size() >= 57 && f.size() <= 63,
+              "over an hour a 60-s buff (5% either way) is pressed 57..63 times -- " +
+                  std::to_string(f.size()));
+        const auto s = [&](std::size_t i) { return static_cast<double>(a[i] - t0) / 1000.0; };
+        check(a.size() == 3 && s(0) < 2.0 && s(1) >= 1440.0 && s(1) <= 1765.0 && s(2) >= 2880.0 &&
+                  s(2) <= 3530.0,
+              "and a 1600-s buff exactly 3 times, at about 0, 1600 and 3200 s -- " +
+                  std::to_string(a.size()) + " times");
+    }
+    {
+        // Three buffs set up 150 ms apart, as the simple screen adds them.
+        Rig rig({ key('A', 600000, 10, 0), key('S', 600000, 10, 150), key('F', 600000, 10, 300) });
+        rig.run(10'000);
+        std::vector<std::uint64_t> all;
+        for (const auto& p : rig.p.pressed) all.push_back(p.second);
+        check(rig.p.pressed.size() == 3 && spaced(all, MacroEngine::kBuffGapMs),
+              "at the start every buff goes out once, at least 1.2 s apart");
+    }
+    {
+        // Out of the world for 15 s -- dead, reviving -- then back.
+        Rig rig({ key('A', 600000, 10, 0), key('S', 900000, 10, 150), key('F', 1200000, 10, 300) });
+        rig.run(100'000);
+        rig.p.pressed.clear();
+        rig.engine.set_suspended(true, "dead");
+        rig.run(15'000);
+        const bool held = rig.p.pressed.empty();
+        const std::uint64_t back = rig.p.t;
+        rig.engine.set_suspended(false);
+        rig.run(20'000);
+        std::vector<std::uint64_t> all;
+        bool each_once = true;
+        for (const std::uint32_t vk : { 'A', 'S', 'F' }) {
+            const auto t = rig.p.when(vk);
+            each_once = each_once && t.size() == 1 && t[0] >= back && t[0] - back <= 5000;
+            all.insert(all.end(), t.begin(), t.end());
+        }
+        check(held && each_once && spaced(all, MacroEngine::kBuffGapMs),
+              "after 15 s out of the world every buff is cast once within 5 s of coming back, at "
+              "least 1.2 s apart");
+        rig.run(500'000);
+        check(rig.p.when('A').size() == 1 && rig.p.when('S').size() == 1 && rig.p.when('F').size() == 1,
+              "and then waits its whole interval again");
+    }
+    {
+        // A map change: 3 s out of the world adds nothing.
+        Rig rig({ key('A', 600000, 10, 0), key('S', 900000, 10, 150) });
+        rig.run(100'000);
+        rig.p.pressed.clear();
+        rig.engine.set_suspended(true, "loading");
+        rig.run(3'000);
+        rig.engine.set_suspended(false);
+        rig.run(20'000);
+        check(rig.p.pressed.empty(), "3 s out of the world casts nothing again");
+    }
+    {
+        // Asked for while still out of the world: done the moment it is back.
+        Rig rig({ key('A', 600000, 10, 0), key('S', 900000, 10, 150) });
+        rig.run(100'000);
+        rig.p.pressed.clear();
+        rig.engine.set_suspended(true, "dead");
+        const bool taken = rig.engine.recast_buffs("a revive");
+        rig.run(3'000);
+        const bool quiet = rig.p.pressed.empty();
+        const std::uint64_t back = rig.p.t;
+        rig.engine.set_suspended(false);
+        rig.run(10'000);
+        const auto a = rig.p.when('A');
+        const auto s = rig.p.when('S');
+        check(taken && quiet && a.size() == 1 && s.size() == 1 && a[0] - back <= 5000 &&
+                  s[0] - back <= 5000,
+              "a re-cast asked for out of the world is done as soon as the character is back");
+    }
+    {
+        // One revive asked about twice -- the revive itself, then HP back
+        // from 0 a couple of seconds later: once.
+        Rig rig({ key('A', 600000, 10, 0), key('S', 900000, 10, 150) });
+        rig.run(100'000);
+        rig.p.pressed.clear();
+        const bool first = rig.engine.recast_buffs("a revive");
+        rig.run(2'000);
+        const bool second = rig.engine.recast_buffs("HP came back from 0");
+        rig.run(25'000);
+        check(first && !second && rig.p.when('A').size() == 1 && rig.p.when('S').size() == 1,
+              "one revive asked about twice, 2 s apart, casts each buff once");
+        // Killed again among whatever killed it, and revived 25 s after the
+        // first re-cast: the 30 s this once waited swallowed that, and the
+        // buffs stayed off for a whole interval.
+        const bool again = rig.engine.recast_buffs("a revive");
+        rig.run(10'000);
+        check(again && rig.p.when('A').size() == 2 && rig.p.when('S').size() == 2,
+              "a second death revived 25 s after the first re-cast casts them again");
+    }
+    {
+        // Quicker than that: HP read at 0 in between, so it is a death of
+        // its own however soon it comes.
+        Rig rig({ key('A', 600000, 10, 0), key('S', 900000, 10, 150) });
+        rig.run(100'000);
+        rig.p.pressed.clear();
+        rig.engine.set_vitals(80.0f, 50.0f);
+        const bool first = rig.engine.recast_buffs("a revive");
+        rig.run(2'000);
+        rig.engine.set_vitals(0.0f, 50.0f);      // dead again
+        rig.run(1'000);
+        rig.engine.set_vitals(60.0f, 50.0f);     // and back
+        const bool second = rig.engine.recast_buffs("a revive");
+        rig.run(15'000);
+        check(first && second && rig.p.when('A').size() == 2 && rig.p.when('S').size() == 2,
+              "dead again 3 s after a revive -- HP read at 0 between -- is re-cast too");
+    }
+    {
+        // Killed and revived 20 s after BẮT ĐẦU: a start is not a re-cast.
+        Rig rig({ key('A', 1600000, 10, 0), key('S', 1600000, 10, 150) });
+        rig.run(20'000);
+        const auto at_start = rig.p.pressed.size();
+        const bool taken = rig.engine.recast_buffs("a revive");
+        rig.run(10'000);
+        check(at_start == 2 && taken && rig.p.when('A').size() == 2 && rig.p.when('S').size() == 2,
+              "a death and revive 20 s after the start is re-cast, not swallowed by the start");
+    }
+    {
+        // A buff's seconds box turned down during a run: due at its last
+        // press plus the new interval, not when the old one runs out.
+        Rig rig({ key('F', 300000, 0, 0) });
+        rig.run(10'000);
+        const auto first = rig.p.when('F');
+        MacroConfig cfg = rig.engine.config();
+        cfg.keys[0].interval_ms = 60000;
+        rig.engine.set_config(cfg);
+        rig.run(60'000);
+        const auto f = rig.p.when('F');
+        check(first.size() == 1 && f.size() == 2 && f[1] - f[0] >= 59'000 && f[1] - f[0] <= 61'000,
+              "a buff turned down from 300 s to 60 s during a run goes out 60 s after its last "
+              "press -- " + std::to_string(f.size() == 2 ? (f[1] - f[0]) / 1000 : 0) + " s");
+        cfg.keys[0].interval_ms = 1600000;
+        rig.engine.set_config(cfg);
+        rig.run(70'000);
+        check(rig.p.when('F').size() == 3,
+              "and turned up again, it goes out once more where it was due, then waits the longer "
+              "interval");
+    }
+    {
+        // The keys held for 40 s by a dialog -- the trash pass's hold: the
+        // buff that fell due then goes out right after, the skill keeps to
+        // its own beat.
+        Rig rig({ key('Z', 5000, 0, 0), key('F', 60000, 0, 0) });
+        const std::uint64_t t0 = rig.p.t;
+        rig.run(59'500);
+        rig.coord.engage_critical("trash cleaning");
+        const std::size_t before = rig.p.pressed.size();
+        rig.run(40'000);
+        const bool none_held = rig.p.pressed.size() == before;
+        rig.coord.disengage_critical();
+        const std::uint64_t freed = rig.p.t;
+        rig.run(20'000);
+        std::uint64_t first_f = 0;
+        for (const std::uint64_t t : rig.p.when('F'))
+            if (t >= freed) { first_f = t; break; }
+        check(none_held && first_f != 0 && first_f - freed <= 3000,
+              "a buff that fell due while the keys were held for 40 s goes out within 3 s of "
+              "the hold ending -- " + std::to_string(first_f ? first_f - freed : 0) + " ms");
+        const auto z = rig.p.when('Z');
+        check(!z.empty() && std::all_of(z.begin(), z.end(),
+                                        [&](std::uint64_t t) { return (t - t0) % 5000 == 0; }),
+              "while a skill refused the same way keeps to its own 5-s beat, as before");
+    }
+    {
+        // The game not in front: a buff is tried again every couple of
+        // seconds, not a whole interval later.
+        Rig rig({ key('F', 60000, 5, 0) });
+        rig.p.focused = false;
+        rig.run(10'000);
+        const bool none = rig.p.pressed.empty();
+        rig.p.focused = true;
+        const std::uint64_t front = rig.p.t;
+        rig.run(5'000);
+        const auto f = rig.p.when('F');
+        check(none && f.size() == 1 && f[0] - front <= 2200,
+              "a buff refused for want of the game in front goes out within ~2 s of it coming "
+              "back");
+    }
+}
+
 /// The executor paused, as the GUI pauses it after a stop that may have left
 /// the trash bin's quantity dialog open.
 ///
@@ -6919,6 +8770,44 @@ void test_executor_pause() {
     exec.stop();
     check(exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
           "and with no game window, still nothing is pressed");
+}
+
+/// The packet bot's own buff timer in a run that reads the screen.
+///
+/// The executor starts with the GUI, and its buff timer used to ask for the
+/// keys -- and press bot_default.ini's buff keys whenever the game was in
+/// front -- with nothing started at all: only the buffs set on the simple
+/// screen are the player's. Its heal loop already waited for the character's
+/// own HP from packets, which a screen run never has.
+void test_executor_screen_only() {
+    section("Executor: no buffs of its own without the packets' picture of the character");
+
+    BotConfig cfg;
+    cfg.auto_buff = true;
+    cfg.buffs[0].enabled = true;
+    cfg.buffs[0].keycode = '6';
+    cfg.buffs[0].cooldown_sec = 60;          // due at once
+    GameState state;                         // no HP of the character's own
+    InputManager input;
+    ExecutionCoordinator coord;
+    check(coord.request("test", Priority::Idle), "something low holds the keys");
+
+    CommandExecutor exec(cfg, state, input, coord);
+    exec.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    check(coord.current_owner() == "test" && exec.stats().buffs_cast == 0,
+          "with no packet HP its buff timer never asks for the keys -- held by '" +
+              coord.current_owner() + "'");
+
+    // The packet bot running: its HP known, and the buff asks as before.
+    state.update_self_hp(100, 100);
+    bool asked = false;
+    for (int i = 0; i < 40 && !asked; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        asked = coord.current_owner() != "test";
+    }
+    check(asked, "with the character's HP from packets, the buff asks for the keys as before");
+    exec.stop();
 }
 
 // ------------------------------------------------------------------ config
@@ -7215,7 +9104,9 @@ int main() {
     test_macro_trigger_config();
     test_macro_engine();
     test_macro_key_kind();
+    test_macro_buffs();
     test_executor_pause();
+    test_executor_screen_only();
     test_vitals_reader();
     test_find_bars();
     test_macro_triggers();
@@ -7245,6 +9136,8 @@ int main() {
     test_bag();
     test_bag_counts();
     test_bag_dialogs();
+    test_reviver();
+    test_screen_layout();
     test_config();
     test_protocol_handler();
 

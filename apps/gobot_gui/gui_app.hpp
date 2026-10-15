@@ -352,25 +352,49 @@ private:
 
     /// Set by the keeper once it is back in the world. The game it logged in
     /// to is a new process with a new window, and everything here still points
-    /// at the one that went away; tick() points it all at the new one.
+    /// at the one that went away; tick() points it all at the new one. Also
+    /// set while a cold start waits and the game is found up already.
     std::atomic<bool> keeper_reattach_{false};
-    void reattach_game();
+    /// True when the game window was found; says so in the log once a run.
+    bool reattach_game();
+    bool reattach_missed_ = false;      ///< the last reattach found no window
+    /// The keeper was started by a cold start (simple_cold_start_, which only
+    /// the drawing thread may read) and the ticked jobs have not started yet.
+    /// The keeper's own copy of it; cleared by tick() once they have, and by
+    /// stop_keeper().
+    std::atomic<bool> keeper_cold_start_{false};
 
     // ---- reviving ----
-    /// Watches for the death dialog and presses its revive button, through
-    /// the `revive` click sequence in configs/routines.ini. Three tries for
-    /// each death, then it stops trying and says so: a button that will not
-    /// take is not going to start taking on the fortieth press.
+    /// Watches for the death panel and revives on the spot with a revive
+    /// item, the way GoC does: see Reviver. Three tries for each death; when
+    /// they run out the bot stops -- the player's rule, rather than revive in
+    /// the village for 2% EXP.
     void start_revive();
     void stop_revive();
     void revive_loop();
     void say_revive(const std::string& line);
+    /// The revive's tries ran out: stop every job, let go of every key, and
+    /// say why in red until the next BẮT ĐẦU. On the drawing thread, from
+    /// tick(): stopping joins the revive worker that asked for it.
+    void stop_after_revive();
 
     std::thread              revive_thread_;
     std::atomic<bool>        revive_running_{false};
     std::atomic<bool>        revive_stop_{false};
     std::atomic<int>         revive_count_{0};
     std::vector<std::string> revive_log_;          ///< guarded by worker_mutex_
+    std::atomic<bool>        revive_gave_up_{false};   ///< set by the worker; see stop_after_revive
+    std::string              revive_gave_up_why_;      ///< guarded by worker_mutex_
+    int                      revive_seen_ = 0;         ///< revive_count_ as tick() last saw it
+    /// When the HP reading first showed 0 -- dead with the HUD up -- for
+    /// re-casting the buffs once it is above 0 again; 0 when it is not 0.
+    std::uint64_t            hp_zero_since_ms_ = 0;
+
+    /// Something happened that the player should hear about even when not
+    /// at the screen. Every alert goes through here, and only here: for now
+    /// a line in gobot_gui.log; the Discord webhook and a sound will be
+    /// called from here. `event` is a fixed word, `text_vi` what to say.
+    void alert(const char* event, const std::string& text_vi);
 
     // ---- trash cleaning ----
     /// Opens the bag every so often and gets rid of what is on the list. One
@@ -441,9 +465,9 @@ private:
     bool keys_may_start();
 
     /// Hold every other part of the bot off for `reason`, unless something
-    /// else holds it already: a captcha's hold is not a trash pass's or a
-    /// revive's to take over, nor theirs to end. Asked and taken under one
-    /// lock, so two workers cannot both find it free.
+    /// else holds it already: one worker's hold is not another's to take
+    /// over, nor theirs to end. Asked and taken under one lock, so two
+    /// workers cannot both find it free.
     bool take_hold(const std::string& reason);
     /// End the hold, if it is still `reason`'s.
     void end_hold(const std::string& reason);
@@ -792,6 +816,8 @@ private:
     std::size_t   simple_listen_key_ = static_cast<std::size_t>(-1);
     std::string   simple_note_;
     std::uint64_t simple_note_until_ms_ = 0;
+    /// Why the bot stopped itself, in red on the card until the next BẮT ĐẦU.
+    std::string   simple_stopped_vi_;
     bool          simple_was_running_ = false;
     std::uint64_t simple_started_ms_ = 0;
     std::uint64_t simple_stopped_ms_ = 0;

@@ -45,7 +45,6 @@ enum class Semantic {
     SkillConfirm,       ///< server acknowledged our skill use
     AttackConfirm,
     BuffApplied,
-    Captcha,
     Disconnect,
 };
 

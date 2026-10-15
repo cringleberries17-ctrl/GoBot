@@ -140,11 +140,6 @@ void ProtocolHandler::apply(const DecodedPacket& d, const GamePacket& raw) {
 
         case Semantic::Chat: handle_chat(d); break;
 
-        case Semantic::Captcha:
-            GB_WARN("Captcha packet received (0x%04X)", d.opcode);
-            if (on_captcha_) on_captcha_();
-            break;
-
         case Semantic::Disconnect:
             GB_WARN("Disconnect packet received");
             break;

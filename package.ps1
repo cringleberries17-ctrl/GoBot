@@ -291,9 +291,16 @@ AUTO-LOGIN  -- from VTCZone to a character in the world
   VTCZone or the game to the front and checks that nothing else is over
   the spot; if something is, it waits and says what, and gives that
   attempt up after half a minute. A minimised VTCZone is brought back.
+  A click point outside its window is a wrong number in configs\login.ini,
+  and it says which at once.
 
-  It does not answer captchas, or a Security Alert box from the game's
-  launcher, and never will. If one appears it stops and says so.
+  While the game is open it never presses Choi game again: it carries on
+  from the game's own screen, and minimises VTCZone, as GoC does. A game
+  left on a screen it does not know is closed, and the next try starts
+  from VTCZone -- except after the last try, when it is left for you.
+
+  It does not answer a Security Alert box from the game's launcher, and
+  never will. If one appears it stops and says so.
 
 KEEP THE CLIENT ALIVE  -- notices a crash and logs back in
   The session watcher asks whether the HUD is there, which is the right

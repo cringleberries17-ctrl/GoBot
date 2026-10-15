@@ -42,7 +42,9 @@
 #include "gobot/clr_bridge.hpp"
 #include "gobot/dialog_driver.hpp"
 #include "gobot/party.hpp"
+#include "gobot/reviver.hpp"
 #include "gobot/routine.hpp"
+#include "gobot/screen_layout.hpp"
 #include "gobot/session_manager.hpp"
 #include "gobot/template_matcher.hpp"
 #include "gobot/vitals_reader.hpp"
@@ -127,7 +129,11 @@ OPTIONS
   --see               Look at the game window once and print every name plate
                       found, then exit. No packets, no keys pressed — this is
                       how to check what the radar can actually see, from a
-                      console where nothing is covering the game.
+                      console where nothing is covering the game. First it says
+                      where each reader looks at this client's size: the
+                      monster box, the chat bar and the lines read above it,
+                      the player list placed from its button, the HUD
+                      landmark. Nothing is focused and nothing is clicked.
   --read [x,y,w,h]    Read the game's text. With a rectangle, reads that patch;
                       with none, reads the map's name off the minimap title bar
                       and the name on every plate found. This is not OCR
@@ -223,8 +229,8 @@ UNATTENDED RUNNING
                       list, Choi game, the game's own launcher and its START,
                       connect, channel, character. VTCZone has to be signed in
                       already -- if it shows its sign-in form the flow stops and
-                      says so. It does not answer captchas or Security Alert
-                      boxes and never will: if one appears it stops and says so.
+                      says so. It does not answer a Security Alert box and
+                      never will: if one appears it stops and says so.
                       With --dry it only looks, and says what it would click.
   --upto <page>       With --login: cross as far as that page and stop with it
                       on screen. For measuring. The channel list and the
@@ -232,11 +238,16 @@ UNATTENDED RUNNING
                       middle of a crossing, which is not long enough to
                       photograph one and work out where its entries are.
   --routines          List the click sequences in configs/routines.ini: buying,
-                      mining, reviving, closing whatever is in the way. They
-                      live in a config file rather than in code so they can be
+                      mining, closing whatever is in the way. They live in a
+                      config file rather than in code so they can be
                       corrected with the game open in front of you, which is
                       what will be wanted when the publisher patches the client.
-  --routine <name>    Run one.
+  --routine <name>    Run one. "revive" runs the GUI's reviver instead: the
+                      death panel's revive-item button, then Xac Nhan on its
+                      question, three tries, never the village or Cash, and
+                      nothing while the trash bin's dialog is up. With --dry
+                      it only looks, and prints both points it would click;
+                      nothing is focused and nothing is clicked.
   --bag <png>         Find the bag in a screenshot and say what the trash
                       cleaner would see: where the tab strip is, the trash
                       can, and which slots hold something. Writes the
@@ -604,6 +615,102 @@ int run_see(const Options& o, const AppConfig& app) {
     const std::string font_dir = GlyphFont::default_dir();
     const bool have_font = !font_dir.empty() && font.load(font_dir);
 
+    // The monster finder's box as the GUI uses it: following the client's
+    // size, unless edited by hand and saved into hunt.ini's [Detect].
+    DetectorTuning tuning = DetectorTuning::defaults();
+    {
+        IniFile hunt_ini;
+        if (hunt_ini.load(resolve("configs/hunt.ini"))) tuning.load(hunt_ini);
+    }
+
+    // Where each reader looks on this frame, worked out from the frame as it
+    // is. Looking only: nothing is focused and nothing is clicked.
+    {
+        std::printf("Where each reader looks, for a %dx%d client:\n", frame.width, frame.height);
+        const auto rect = [](const ScreenRect& r) {
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%d,%d %dx%d", r.x, r.y, r.w, r.h);
+            return std::string(buf);
+        };
+        const DetectorTuning used = tuning.resolved(frame.width, frame.height);
+        std::printf("  monsters     looked for in %s, not in %s nor %s%s\n",
+                    rect(used.area).c_str(), rect(used.exclude).c_str(),
+                    rect(used.exclude2).c_str(),
+                    tuning.automatic() ? "  (following the client's size)"
+                                       : "  (written by hand in hunt.ini [Detect])");
+
+        TemplateStore store;
+        const bool have_store = store.load_best(resolve("configs/templates.ini"));
+
+        // The chat lines the keyword reader reads, from the chat bar.
+        IniFile party_ini;
+        party_ini.load(resolve("configs/party.ini"));
+        ChatLines::Settings chat_place;
+        chat_place.load(party_ini);
+        ChatLines chat_lines;
+        chat_lines.set_settings(chat_place);
+        const auto chat_boxes = chat_lines.boxes(frame, store);
+        if (chat_lines.bar() == ChatLines::Bar::Fixed)
+            std::printf("  chat bar     %s\n", ChatLines::bar_name(chat_lines.bar()));
+        else
+            std::printf("  chat bar     at %d,%d -- %s\n", chat_lines.bar_x(),
+                        chat_lines.bar_y(), ChatLines::bar_name(chat_lines.bar()));
+        for (const ScreenRect& box : chat_boxes) {
+            std::printf("  chat line    %s", rect(box).c_str());
+            if (have_font) std::printf("  \"%s\"", font.read_line(frame, box).c_str());
+            std::printf("\n");
+        }
+
+        // The player list, placed from the button that opens it.
+        PlayerList::Settings list_settings;
+        list_settings.load(party_ini);
+        PlayerList list;
+        list.set_settings(list_settings);
+        const Frame* button = have_store ? store.get(list_settings.open_picture) : nullptr;
+        const auto at = button ? TemplateMatcher::find(
+                                     frame, ScreenRect{ 0, 0, frame.width, frame.height },
+                                     *button, list_settings.open_score)
+                               : TemplateMatcher::Match{};
+        if (!at.found) {
+            std::printf("  player list  its button (%s) is not on screen\n",
+                        list_settings.open_picture.c_str());
+        } else {
+            list.place(at.at.x, at.at.y, frame.width, frame.height);
+            const PlayerList::Settings& g = list.geometry();
+            std::printf("  player list  button at %d,%d; the list at %d,%d %dx%d, names from "
+                        "x %d, rows from y %d, clicked at x %d%s\n",
+                        at.at.x, at.at.y, g.roi_x, g.roi_y, g.roi_w, g.roi_h, g.name_x,
+                        g.first_row_y, g.click_x,
+                        g.fixed ? "  (place = fixed in party.ini)" : "");
+            if (list.open(frame, store)) {
+                const auto rows = have_font ? list.read(frame, font)
+                                            : std::vector<PlayerList::Row>{};
+                std::printf("  player list  open, %zu row(s) read\n", rows.size());
+                for (const PlayerList::Row& r : rows)
+                    std::printf("    %2d  y=%-4d %s\n", r.index + 1, r.y, r.name.c_str());
+            } else {
+                std::printf("  player list  not open\n");
+            }
+        }
+
+        // The HUD landmark the HP/MP reader places the bars from.
+        Frame landmark;
+        std::string from;
+        if (!TemplateStore::load_one("hpmp_indicator2", resolve("configs/templates.ini"),
+                                     landmark, &from)) {
+            std::printf("  HUD landmark no picture of it anywhere\n");
+        } else {
+            const ScreenRect look{ 0, 0, std::min(frame.width, 560), std::min(frame.height, 280) };
+            const auto hit = TemplateMatcher::find(frame, look, landmark, 0.75f);
+            if (hit.found)
+                std::printf("  HUD landmark at %d,%d (%.2f), the picture from %s\n", hit.at.x,
+                            hit.at.y, static_cast<double>(hit.score), from.c_str());
+            else
+                std::printf("  HUD landmark not found (the picture from %s)\n", from.c_str());
+        }
+        std::printf("\n");
+    }
+
     // Vitals, read with whatever the macro config says the bars are.
     {
         MacroConfig mc;
@@ -659,7 +766,6 @@ int run_see(const Options& o, const AppConfig& app) {
                             "from pixel statistics.%.0s\n\n",
                 font.size());
 
-    const DetectorTuning tuning = DetectorTuning::defaults();
     MobDetector::Cost cost;
     const auto t_detect = std::chrono::steady_clock::now();
     const std::vector<Nameplate> plates =
@@ -739,7 +845,7 @@ int run_see(const Options& o, const AppConfig& app) {
     // follow; stand still and they should not move.
     {
         CameraTracker cam;
-        cam.set_play_area(ScreenRect{ 100, 130, 620, 380 });
+        cam.set_play_area(ScreenRect{});    // its own: the middle of the window, any size
         ScreenCapture cap2;
         Frame fr;
         std::printf("\nFollowing the view for 4 seconds...\n");
@@ -1607,10 +1713,14 @@ int run_invite_player(const Options& o, const AppConfig& app,
                 who.c_str(), row->index + 1, row->name.c_str());
 
     if (o.dry_run) {
-        std::printf("Looking only -- would click %d,%d then %d,%d.\n",
-                    geometry.click_x, row->y,
-                    geometry.click_x + geometry.invite_dx,
-                    row->y + geometry.invite_dy);
+        // Where the list was placed from its button, not the numbers it
+        // started with.
+        const PlayerList::Settings& placed = list.geometry();
+        const int ix = placed.click_x + placed.invite_dx, iy = row->y + placed.invite_dy;
+        std::printf("Looking only -- would click %d,%d then %d,%d%s.\n",
+                    placed.click_x, row->y, ix, iy,
+                    list.in_panel(placed.click_x, row->y) && list.in_panel(ix, iy)
+                        ? "" : " -- but one of those is outside the list, so it would not");
         return 0;
     }
 
@@ -1647,13 +1757,12 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
     chat_rules.min_name_match = ini.get_float("Chat", "min_name_match", 0.7f);
     chat_rules.whole_word_only = ini.get_bool("Chat", "whole_word_only", true);
 
-    // Where the chat lines are, measured on a 1024x768 client: two readable
-    // lines at y 710 and 723, so a pitch of 13, running x 6 to 396.
-    const int chat_x = ini.get_int("Chat", "chat_x", 6);
-    const int chat_y = ini.get_int("Chat", "chat_y", 707);
-    const int chat_w = ini.get_int("Chat", "chat_width", 390);
-    const int line_h = std::max(6, ini.get_int("Chat", "line_height", 13));
-    const int line_n = std::max(1, ini.get_int("Chat", "lines", 3));
+    // Where the chat lines are: placed from the chat bar on every look, the
+    // same as the GUI's party worker, so they are found at any client size.
+    ChatLines::Settings chat_place;
+    chat_place.load(ini);
+    ChatLines chat_lines;
+    chat_lines.set_settings(chat_place);
 
     TemplateStore store;
     if (!store.load_best(resolve("configs/templates.ini"))) {
@@ -1676,10 +1785,12 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
     std::printf("Inviting on '%s' for %d seconds.\n\n"
                 "  seen this often  %d times, %dms apart\n"
                 "  cooldown         %ds per player\n"
-                "  chat read at     %d,%d  %dx%d, %d line(s)\n\n",
+                "  chat read        %s, %d line(s)\n\n",
                 chat_rules.keyword.c_str(), seconds,
                 chat_rules.votes, chat_rules.vote_gap_ms, chat_rules.cooldown_s,
-                chat_x, chat_y, chat_w, line_h * line_n, line_n);
+                chat_place.fixed ? "where party.ini [Chat] says (place = fixed)"
+                                 : "above the chat bar, wherever it is",
+                chat_place.lines);
 
     ScreenCapture capture;
     PartyChat chat;
@@ -1700,9 +1811,7 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
         }
 
         std::vector<std::string> lines;
-        for (int i = 0; i < line_n; ++i) {
-            const ScreenRect box{ chat_x, chat_y + i * line_h, chat_w, line_h + 3 };
-            if (box.y + box.h > frame.height) break;
+        for (const ScreenRect& box : chat_lines.boxes(frame, store)) {
             const std::string text = font.read_line(frame, box);
             if (!text.empty()) lines.push_back(text);
         }
@@ -1949,11 +2058,29 @@ int run_player_list(const Options& o, const AppConfig& app) {
     if (o.pick_row > 0) {
         IniFile ini;
         ini.load(resolve("configs/party.ini"));
-        const int click_x = ini.get_int("PlayerList", "click_x", 862);
-        const int first_y = ini.get_int("PlayerList", "first_row_y", 172);
-        const int row_h   = ini.get_int("PlayerList", "row_height", 20);
+        // Placed from the button found above, as the invite places it, unless
+        // party.ini says place = fixed.
+        PlayerList::Settings loaded;
+        loaded.load(ini);
+        PlayerList list;
+        list.set_settings(loaded);
+        list.place(found.at.x, found.at.y, before.width, before.height);
+        const PlayerList::Settings& geometry = list.geometry();
+        const int click_x = geometry.click_x;
+        const int first_y = geometry.first_row_y;
+        const int row_h   = geometry.row_height;
         const int row_y   = first_y + (o.pick_row - 1) * row_h + row_h / 2;
 
+        // Only inside the list, as an invite only clicks there: a row number
+        // past its end is the play field, and the character would walk to it.
+        if (!list.in_panel(click_x, row_y)) {
+            std::fprintf(stderr,
+                         "\nRow %d would be clicked at %d,%d, which is outside the list "
+                         "(%d,%d %dx%d) -- not clicking.\n",
+                         o.pick_row, click_x, row_y, geometry.roi_x, geometry.roi_y,
+                         geometry.roi_w, geometry.roi_h);
+            return 1;
+        }
         std::printf("\nselecting row %d at %d,%d\n", o.pick_row, click_x, row_y);
         input.click_at(click_x, row_y);
         std::this_thread::sleep_for(std::chrono::milliseconds(900));
@@ -2435,6 +2562,8 @@ int run_trash_probe(const Options& o, const AppConfig& app) {
     return finish(r);
 }
 
+int run_revive(const Options& o, const AppConfig& app);
+
 /// List the routines, or run one.
 ///
 /// With --dry it finds each step's picture and says where it would click,
@@ -2444,6 +2573,11 @@ int run_trash_probe(const Options& o, const AppConfig& app) {
 /// first pass over any routine is expected to be wrong somewhere, and finding
 /// out by watching it misclick through a shop is the expensive way.
 int run_routines(const Options& o, const AppConfig& app) {
+    // Reviving is not a click table any more: the panel is found by GoC's two
+    // corners and the bin's dialogs are kept clear of, which a table cannot
+    // say. The name still works, and runs what the GUI runs.
+    if (o.routine_name == "revive") return run_revive(o, app);
+
     const std::string path = resolve("configs/routines.ini");
     const auto routines = Routine::load(path);
     if (routines.empty()) {
@@ -2565,6 +2699,112 @@ void print_utf8(const char* text) {
     std::fputs(text, stdout);
     std::fflush(stdout);
     if (console) SetConsoleOutputCP(was);
+}
+
+/// `--routine revive`: the GUI's reviver, against the live game.
+///
+/// With --dry it looks once and says what it sees and where it would click,
+/// both points -- the panel's revive-item button and the question's Xác Nhận
+/// -- with how well each matched. Nothing is focused and nothing is clicked.
+/// Without --dry it does what the GUI does at one death: up to three tries,
+/// never the village or Cash, and nothing while the bin's dialog is up. The
+/// pictures come from where the GUI's come from, the staged ones first.
+int run_revive(const Options& o, const AppConfig& app) {
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini"))) {
+        std::fprintf(stderr, "No UI pictures anywhere, so the death panel cannot be recognised.\n");
+        return 1;
+    }
+    std::printf("Pictures from %s\n", store.source().c_str());
+
+    InputManager input;
+    if (!attach_window(input, o, app)) {
+        std::fprintf(stderr, "No game window.\n");
+        return 1;
+    }
+    ScreenCapture capture;
+    const auto grab = [&](Frame& f) {
+        return input.window_valid() && capture.grab(input.target_window(), f) && f.valid();
+    };
+    Reviver reviver(input, store, grab);
+    std::string why;
+    if (!reviver.ready(&why)) {
+        print_utf8((why + "\n").c_str());
+        return 1;
+    }
+
+    if (o.dry_run) {
+        std::printf("revive -- looking only: nothing is focused and nothing is clicked.\n\n");
+        Frame frame;
+        if (!grab(frame)) {
+            std::fprintf(stderr, "Could not capture the window.\n");
+            return 1;
+        }
+        const Reviver::Seen s = reviver.look(frame);
+        std::printf("  frame %dx%d\n", frame.width, frame.height);
+        if (s.panel)
+            std::printf("  death panel   up, by %s (%.2f): the revive-item button at %d,%d %dx%d"
+                        " -- would click %d,%d\n",
+                        s.by_anchors ? "GoC's two corners" : "the whole picture",
+                        static_cast<double>(s.panel_score), s.item.x, s.item.y, s.item.w,
+                        s.item.h, s.item_x(), s.item_y());
+        else
+            std::printf("  death panel   not up\n");
+        if (s.question && s.panel)
+            std::printf("  question      up at %d,%d (%.2f) -- would click Xac Nhan at %d,%d\n",
+                        s.question_at.x, s.question_at.y, static_cast<double>(s.question_score),
+                        s.confirm_x(), s.confirm_y());
+        else if (s.question)
+            std::printf("  question      up at %d,%d (%.2f), with no death panel: left alone -- "
+                        "Xac Nhan at %d,%d is clicked only once the panel has been seen at the "
+                        "death\n",
+                        s.question_at.x, s.question_at.y, static_cast<double>(s.question_score),
+                        s.confirm_x(), s.confirm_y());
+        else
+            std::printf("  question      not up (best %.2f, needs %.2f) -- once up, Xac Nhan is "
+                        "clicked at +%d,+%d of it\n",
+                        static_cast<double>(s.question_score),
+                        static_cast<double>(Reviver::kQuestionScore), Reviver::kConfirmDx,
+                        Reviver::kConfirmDy);
+        if (s.bin_asking)
+            std::printf("  the trash bin's dialog is up: nothing would be clicked at all\n");
+        for (const ScreenRect& r : s.others)
+            std::printf("  another dialog at about %d,%d %dx%d: nothing would be clicked there\n",
+                        r.x, r.y, r.w, r.h);
+        std::printf("  never clicked: the village button, the Cash button, the Khoa ticks\n");
+        return 0;
+    }
+
+    if (!input.window_focused()) {
+        input.focus_window();
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    reviver.on_report([](const std::string& line) {
+        std::printf("  %s\n", line.c_str());
+        std::fflush(stdout);
+    });
+    // One death: until it is up again, or its tries have run out -- a minute
+    // and a half at most, three tries of thirteen seconds with time to spare.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    while (std::chrono::steady_clock::now() < until) {
+        const Reviver::Turn turn = reviver.turn();
+        if (turn == Reviver::Turn::Alive) {
+            std::printf(reviver.revived() > 0 ? "\nUp again.\n"
+                                              : "\nThe character is not dead: nothing to do.\n");
+            return 0;
+        }
+        if (turn == Reviver::Turn::Revived) {
+            std::printf("\nRevived.\n");
+            return 0;
+        }
+        if (turn == Reviver::Turn::OutOfTries) {
+            print_utf8(("\n" + Reviver::out_of_tries_vi() + "\n").c_str());
+            return 2;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    }
+    std::fprintf(stderr, "\nStill dead after 90 s.\n");
+    return 1;
 }
 
 /// Kept so that old instructions still work, and does nothing.
@@ -2759,6 +2999,18 @@ int run_login(const Options& o, const AppConfig& app) {
     AutoLogin flow;
     flow.set_settings(settings);
     flow.set_templates(&store);
+    // A game that comes up part way and then sits on a screen the crossing
+    // does not know is ended the way --keepalive ends a crashed one, with
+    // the same [Crash] settings, and the next attempt starts from VTCZone.
+    IniFile app_ini;
+    app_ini.load(resolve(o.app_path));
+    CrashWatch::Settings crash;
+    crash.load(app_ini);
+    if (!settings.game_process.empty()) crash.game_process = settings.game_process;
+    if (!settings.client_process.empty()) crash.launcher_process = settings.client_process;
+    CrashWatch ender(crash);
+    flow.set_end_client([&ender] { return ender.shut_down(CrashWatch::Look{}); },
+                        crash.cooldown_s);
     if (!o.login_upto.empty()) {
         const bool known = std::any_of(
             settings.pages.begin(), settings.pages.end(),
@@ -2893,9 +3145,12 @@ int run_doctor(const Options& o, const AppConfig& app) {
             input.window_size(w, h);
             good("game window", "found, client " + std::to_string(w) + "x" +
                                 std::to_string(h));
-            if (w != 1024 || h != 768)
-                note("", "every measurement in the configs was taken on 1024x768; "
-                         "another size needs them re-measured");
+            // The readers place what they read from the client's own size
+            // and its own landmarks, so no size is the wrong one. --see shows
+            // what each uses for the window as it is.
+            note("", "the monster box, the chat lines, the player list and the HP/MP "
+                     "landmark follow the client's size -- see --see for where each "
+                     "looks");
 
             ScreenCapture cap;
             Frame frame;
@@ -3073,7 +3328,8 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
         // the cool-down -- and a game launcher already open is left for the
         // crossing to carry on from, as GoC does. It is one crossing either
         // way, and one that fails stops this.
-        const bool cold = !seen_running && seen.what == CrashWatch::Trouble::Gone;
+        const bool cold =
+            CrashWatch::next_move(seen, seen_running, false) == CrashWatch::Move::Start;
         if (cold) {
             std::printf("  [%-22s] %s\n\n", "starting the game",
                         "it was not running when this began");
@@ -3103,6 +3359,8 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
         AutoLogin flow;
         flow.set_settings(settings);
         flow.set_templates(&store);
+        flow.set_end_client([&watch] { return watch.shut_down(CrashWatch::Look{}); },
+                            watch_settings.cooldown_s);
         flow.on_step([](AutoLogin::Step s, const std::string& detail) {
             std::printf("  [%-22s] %s\n", AutoLogin::step_name(s), detail.c_str());
             std::fflush(stdout);
@@ -3354,7 +3612,7 @@ int run_anchor(const Options& o, const AppConfig& app, int seconds) {
 
     WorldAnchor anchor;
     CameraTracker camera;
-    camera.set_play_area(ScreenRect{ 100, 130, 620, 380 });
+    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
 
     // The view is tracked in a loop of its own, far faster than anything else
     // here runs.
@@ -3595,7 +3853,7 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
     int w = 0, h = 0;
     input.window_size(w, h);
     minimap.set_layout(MinimapTracker::default_layout(w, h));
-    camera.set_play_area(ScreenRect{ 100, 130, 620, 380 });
+    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
 
     detector.set_target_window(input.target_window());
     detector.set_tuning(DetectorTuning::defaults());
@@ -4037,7 +4295,7 @@ int run_keytest(const Options& o, const AppConfig& app) {
     }
 
     CameraTracker camera;
-    camera.set_play_area(ScreenRect{ 100, 130, 620, 380 });
+    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
     ScreenCapture cap;
     Frame frame;
     const DetectorTuning tuning = DetectorTuning::defaults();
@@ -4158,7 +4416,7 @@ int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
     FieldFinder finder;
     MobDetector detector;
     CameraTracker camera;
-    camera.set_play_area(ScreenRect{ 100, 130, 620, 380 });
+    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
 
     MacroConfig macro;
     macro.load(resolve("configs/macro.ini"));
@@ -4534,17 +4792,6 @@ int main(int argc, char** argv) {
             g_bot_enabled.store(false);
             brain.stop();
         }
-    });
-
-    protocol.set_captcha_callback([&] {
-        // A captcha dialog eats keystrokes and an unattended bot will fail it.
-        // Freezing is the honest response: the alternative is typing combat
-        // keys into an anti-bot prompt.
-        GB_WARN("Captcha detected — suspending all input");
-        coord.engage_critical("captcha");
-        g_bot_enabled.store(false);
-        brain.stop();
-        input.release_all();
     });
 
     // ---- game window ----

@@ -1,5 +1,6 @@
 ﻿#include "gobot/vitals_reader.hpp"
 #include "gobot/common.hpp"
+#include "gobot/config.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -81,18 +82,22 @@ void VitalsReader::start() {
     // most callers silently getting the worse half.
     if (!has_font()) load_font();
 
-    // And the HUD landmark, likewise. It comes from the other helper's
-    // assembly, where it is called images/hpmp_indicator2.png -- the "Level"
-    // plate beside the bars. Without it this falls back to scanning for
-    // coloured runs, which works until it doesn't.
+    // And the HUD landmark, likewise: the "Level" plate beside the bars,
+    // hpmp_indicator2. Without it this falls back to scanning for coloured
+    // runs, which works until it doesn't. From the same places every other
+    // picture comes from, in the same order -- the pictures staged beside
+    // GoBot first -- rather than only out of the other helper's assembly,
+    // which a package does not carry.
     if (!has_anchor()) {
-        TemplateStore store;
-        const std::string dll = TemplateStore::helper_assembly();
-        if (!dll.empty() && store.load_from_assembly(dll, {})) {
-            if (const Frame* anchor = store.get("hpmp_indicator2")) {
-                set_anchor(*anchor);
-                GB_INFO("Vitals: using the HUD landmark from %s", dll.c_str());
-            }
+        Frame anchor;
+        std::string from;
+        if (TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"),
+                                    anchor, &from)) {
+            set_anchor(anchor);
+            GB_INFO("Vitals: using the HUD landmark from %s", from.c_str());
+        } else {
+            GB_INFO("Vitals: no picture of the HUD landmark anywhere -- finding the bars by "
+                    "their colours");
         }
     }
 

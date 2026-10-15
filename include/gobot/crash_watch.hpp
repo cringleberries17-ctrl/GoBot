@@ -105,6 +105,21 @@ public:
     /// running holds the executable open for the next start.
     bool shut_down(const Look& seen);
 
+    /// What a keeper does about one look -- the GUI's and the command line's
+    /// alike, so the two cannot drift apart.
+    enum class Move {
+        Watch,      ///< the client is fine: keep watching
+        Follow,     ///< fine, and a start was waiting on it: follow the game, start what was asked for
+        Start,      ///< gone, and never up since the keeper began: cross in -- a start, not a restart
+        Restart,    ///< it fell over: end what is left of it, cool down, cross back in
+    };
+    /// `seen_running`: the client has been up since the keeper began.
+    /// `start_pending`: the keeper was started to open the game -- BẮT ĐẦU
+    /// with the game closed -- and what was asked for has not started yet. A
+    /// game that came up by itself in the meantime, by hand or by another
+    /// tool, is then followed rather than crossed into a second time.
+    static Move next_move(const Look& seen, bool seen_running, bool start_pending);
+
     /// Pull an error code out of a dialog's text.
     ///
     /// Recognises the shapes these actually come in: a hex code (0x8007000E),

@@ -45,6 +45,10 @@ MacroKeyKind macro_key_kind(const MacroKey& k) {
     return k.interval_ms >= kBuffMinIntervalMs ? MacroKeyKind::Buff : MacroKeyKind::Skill;
 }
 
+int clamp_buff_seconds(int seconds) {
+    return std::clamp(seconds, kBuffMinSeconds, kBuffMaxSeconds);
+}
+
 // ---------------------------------------------------------------- config
 
 bool MacroConfig::needs_vitals() const {
@@ -266,6 +270,23 @@ MacroEngine::~MacroEngine() { stop(); }
 
 void MacroEngine::set_config(const MacroConfig& cfg) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // A timed key made shorter while the macro runs is due at its last press
+    // plus the new interval. Left alone, the time armed at that press stood:
+    // a buff turned down from 1600 s to 60 s on the simple screen during a
+    // run went out next 26 minutes later. The same key in the same place
+    // only; a potion's interval is a cooldown its trigger re-arms anyway.
+    if (running_.load()) {
+        const std::size_t n = std::min({ config_.keys.size(), cfg.keys.size(), due_ms_.size(),
+                                         pressed_ms_.size() });
+        for (std::size_t i = 0; i < n; ++i) {
+            const MacroKey& was = config_.keys[i];
+            const MacroKey& now = cfg.keys[i];
+            if (now.keycode != was.keycode || now.conditional() || pressed_ms_[i] == 0 ||
+                now.interval_ms >= was.interval_ms)
+                continue;
+            due_ms_[i] = std::min(due_ms_[i], pressed_ms_[i] + now.interval_ms);
+        }
+    }
     config_ = cfg;
     if (config_.keys.size() > MacroConfig::kMaxKeys)
         config_.keys.resize(MacroConfig::kMaxKeys);
@@ -276,15 +297,21 @@ MacroConfig MacroEngine::config() const {
     return config_;
 }
 
+std::uint64_t MacroEngine::clock_now() const {
+    return clock_.now_ms ? clock_.now_ms() : now_ms();
+}
+
 void MacroEngine::set_vitals(float hp_pct, float mp_pct) {
+    const std::uint64_t now = clock_now();
     vit_hp_.store(hp_pct);
     vit_mp_.store(mp_pct);
-    vit_at_ms_.store(now_ms());
+    vit_at_ms_.store(now);
+    if (hp_pct >= 0.0f && hp_pct < kDownHpPct) down_ms_.store(now);
 }
 
 void MacroEngine::current_vitals(float& hp_pct, float& mp_pct) const {
     const std::uint64_t at = vit_at_ms_.load();
-    if (at == 0 || now_ms() - at > kVitalsStaleMs) {
+    if (at == 0 || clock_now() - at > kVitalsStaleMs) {
         hp_pct = mp_pct = -1.0f;
         return;
     }
@@ -331,19 +358,44 @@ std::uint32_t MacroEngine::jittered(std::uint32_t base, int pct) const {
     return static_cast<std::uint32_t>(std::max(1.0, out));
 }
 
+void MacroEngine::arm(std::uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    due_ms_.assign(config_.keys.size(), 0);
+    pressed_ms_.assign(config_.keys.size(), 0);
+    // Every key at its own start delay -- except that the buffs keep
+    // kBuffGapMs apart, in the order of the keys: the game drops a cast that
+    // comes right on top of another, and the simple screen staggers its keys
+    // by only 150 ms.
+    bool buff_before = false;
+    std::uint64_t last_buff = 0;
+    for (std::size_t i = 0; i < config_.keys.size(); ++i) {
+        const MacroKey& k = config_.keys[i];
+        std::uint64_t due = now + k.start_delay_ms;
+        if (k.enabled && k.keycode != 0 && macro_key_kind(k) == MacroKeyKind::Buff) {
+            if (buff_before && due < last_buff + kBuffGapMs) due = last_buff + kBuffGapMs;
+            last_buff = due;
+            buff_before = true;
+        }
+        due_ms_[i] = due;
+    }
+    // A start is not a re-cast. Counted as one, it swallowed the re-cast
+    // after a death and revive in the first half minute of a run -- and the
+    // buffs a start sends at a death panel, a bot started on a dead
+    // character, are no buffs at all. Nothing asks for one at a start anyway:
+    // a cold start's login comes before the macro is running.
+    recast_once_ = false;
+    recast_pending_ = false;
+    buff_pressed_ = false;
+}
+
 void MacroEngine::start() {
     if (running_.exchange(true)) return;
 
     if (timer_thread_.joinable()) timer_thread_.join();
     if (seq_thread_.joinable())   seq_thread_.join();
 
-    const std::uint64_t now = now_ms();
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        due_ms_.assign(config_.keys.size(), 0);
-        for (std::size_t i = 0; i < config_.keys.size(); ++i)
-            due_ms_[i] = now + config_.keys[i].start_delay_ms;
-    }
+    stepped_ = false;
+    arm(clock_now());
     seq_pos_.store(0);
 
     timer_thread_ = std::thread(&MacroEngine::timer_loop, this);
@@ -352,8 +404,24 @@ void MacroEngine::start() {
     GB_INFO("=== MACRO ON ===");
 }
 
+void MacroEngine::start_stepped() {
+    if (running_.exchange(true)) return;
+
+    if (timer_thread_.joinable()) timer_thread_.join();
+    if (seq_thread_.joinable())   seq_thread_.join();
+
+    stepped_ = true;
+    arm(clock_now());
+    seq_pos_.store(0);
+}
+
+void MacroEngine::step() {
+    if (running_.load() && stepped_.load()) run_timers(clock_now());
+}
+
 void MacroEngine::stop() {
     if (!running_.exchange(false)) return;
+    stepped_ = false;
 
     if (timer_thread_.joinable()) timer_thread_.join();
     if (seq_thread_.joinable())   seq_thread_.join();
@@ -367,11 +435,17 @@ void MacroEngine::stop() {
 
 void MacroEngine::set_suspended(bool suspended, const std::string& why) {
     const bool was = suspended_.exchange(suspended);
+    std::uint64_t out_ms = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         suspended_why_ = suspended ? why : std::string{};
+        if (suspended && !was) suspended_at_ms_ = clock_now();
+        if (!suspended && was) out_ms = clock_now() - suspended_at_ms_;
     }
     if (was == suspended) return;
+    // Out of the world, up to this moment: a re-cast asked for from here on
+    // is for this absence, not one more ask about the last return.
+    down_ms_.store(clock_now());
 
     if (suspended) {
         // Let go of anything being held. A direction key held across a
@@ -381,7 +455,88 @@ void MacroEngine::set_suspended(bool suspended, const std::string& why) {
         GB_INFO("Macro suspended: %s", why.empty() ? "not in the world" : why.c_str());
     } else {
         GB_INFO("Macro resumed");
+        // Long enough out of the world to have died, been revived or logged
+        // back in -- each of which takes the buffs off the character. A map
+        // change is a few seconds and leaves them on. Or a re-cast was asked
+        // for while it was out, and is done now that it can be.
+        bool pending = false;
+        std::string asked;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending = recast_pending_;
+            asked = recast_why_;
+            recast_pending_ = false;
+        }
+        if (pending)
+            apply_recast(asked);
+        else if (out_ms >= kRecastAfterSuspendMs)
+            apply_recast(std::to_string(out_ms / 1000) + " s out of the world");
     }
+}
+
+bool MacroEngine::recast_buffs(const std::string& why) {
+    if (!running_.load()) return false;
+    // Out of the world nothing can be cast, and a buff due now would only be
+    // tried and tried again: re-cast the moment the character is back.
+    if (suspended_.load()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!recast_pending_)
+            GB_INFO("Buffs: re-cast after %s once the character is back in the world",
+                    why.c_str());
+        recast_pending_ = true;
+        recast_why_ = why;
+        return true;
+    }
+    return apply_recast(why);
+}
+
+bool MacroEngine::apply_recast(const std::string& why) {
+    if (!running_.load()) return false;
+    const std::uint64_t now = clock_now();
+    std::size_t n = 0;
+    bool merged = false;
+    std::uint64_t ago = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // One more ask about the return just re-cast for -- the revive, HP
+        // back from 0 and the HUD back all ask within a second or two -- is
+        // nothing to do. Only that, though: a few seconds at most, and only
+        // with the character not seen down since. The 30 s this once was
+        // swallowed the re-cast after a second death soon after a revive,
+        // and with it the buffs for up to a whole interval.
+        if (recast_once_ && down_ms_.load() <= recast_ms_ && now - recast_ms_ < kRecastMergeMs) {
+            merged = true;
+            ago = now - recast_ms_;
+        } else {
+            if (due_ms_.size() != config_.keys.size()) due_ms_.resize(config_.keys.size(), now);
+            for (std::size_t i = 0; i < config_.keys.size(); ++i) {
+                const MacroKey& k = config_.keys[i];
+                if (!k.enabled || k.keycode == 0 || k.interval_ms == 0 ||
+                    macro_key_kind(k) != MacroKeyKind::Buff)
+                    continue;
+                // One after another, give or take a tenth of the gap: never
+                // closer than kBuffGapMs, and never on the same beat.
+                const long long spread =
+                    static_cast<long long>(kRecastGapMs) * random_percent_offset(10) / 100;
+                due_ms_[i] = static_cast<std::uint64_t>(
+                    static_cast<long long>(now + kRecastFirstMs + n * kRecastGapMs) + spread);
+                ++n;
+            }
+            if (n > 0) {
+                recast_ms_ = now;
+                recast_once_ = true;
+            }
+        }
+    }
+    if (merged) {
+        GB_INFO("Buffs: no second re-cast for %s -- they were re-armed %.1f s ago for the same "
+                "return",
+                why.c_str(), static_cast<double>(ago) / 1000.0);
+        return false;
+    }
+    if (n == 0) return false;
+    GB_INFO("Buffs: re-casting %zu key(s) after %s", n, why.c_str());
+    return true;
 }
 
 std::string MacroEngine::suspended_reason() const {
@@ -408,7 +563,8 @@ bool MacroEngine::press(std::uint32_t keycode, std::uint32_t hold_ms, const char
         need_focus = config_.require_focus;
     }
 
-    if (need_focus && !input_.window_focused()) {
+    const bool focused = hands_.focused ? hands_.focused() : input_.window_focused();
+    if (need_focus && !focused) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.skipped_unfocused;
         return false;
@@ -423,7 +579,8 @@ bool MacroEngine::press(std::uint32_t keycode, std::uint32_t hold_ms, const char
         return false;
     }
 
-    const bool ok = input_.key_press(keycode, hold_ms ? static_cast<int>(hold_ms) : -1);
+    const int hold = hold_ms ? static_cast<int>(hold_ms) : -1;
+    const bool ok = hands_.key ? hands_.key(keycode, hold) : input_.key_press(keycode, hold);
     if (ok) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.presses;
@@ -435,61 +592,95 @@ void MacroEngine::timer_loop() {
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if (!running_.load()) break;
+        run_timers(clock_now());
+    }
+}
 
-        MacroConfig cfg;
+void MacroEngine::run_timers(std::uint64_t now) {
+    MacroConfig cfg;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cfg = config_;
+        if (due_ms_.size() != cfg.keys.size())
+            due_ms_.resize(cfg.keys.size(), now);
+        if (pressed_ms_.size() != cfg.keys.size())
+            pressed_ms_.resize(cfg.keys.size(), 0);
+    }
+    if (!cfg.timers_enabled) return;
+
+    for (std::size_t i = 0; i < cfg.keys.size(); ++i) {
+        const MacroKey& k = cfg.keys[i];
+        if (!k.enabled || k.keycode == 0 || k.interval_ms == 0) continue;
+
+        std::uint64_t due;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            cfg = config_;
-            if (due_ms_.size() != cfg.keys.size())
-                due_ms_.resize(cfg.keys.size(), now_ms());
+            if (i >= due_ms_.size()) continue;
+            due = due_ms_[i];
         }
-        if (!cfg.timers_enabled) continue;
+        if (now < due) continue;
 
-        const std::uint64_t now = now_ms();
+        // Conditional keys re-arm quickly when the trigger is false, so
+        // the interval reads as a cooldown between firings rather than as
+        // how long you bleed before the potion arrives.
+        if (k.conditional()) {
+            const Gate g = check_gate(k);
+            if (g != Gate::Pass) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (i < due_ms_.size()) due_ms_[i] = now + kGatePollMs;
+                }
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                if (g == Gate::NoReading) ++stats_.held_no_reading;
+                else                      ++stats_.held_condition;
+                continue;
+            }
+        }
 
-        for (std::size_t i = 0; i < cfg.keys.size(); ++i) {
-            const MacroKey& k = cfg.keys[i];
-            if (!k.enabled || k.keycode == 0 || k.interval_ms == 0) continue;
+        // Never two buffs closer than kBuffGapMs: one that comes due right
+        // after another waits its turn. Buffs tried again after a refusal
+        // would otherwise go out in a bunch the moment the keys are free, and
+        // the game drops all but the first.
+        const bool buff = macro_key_kind(k) == MacroKeyKind::Buff;
+        if (buff) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (buff_pressed_ && now < last_buff_ms_ + kBuffGapMs) {
+                if (i < due_ms_.size()) due_ms_[i] = last_buff_ms_ + kBuffGapMs;
+                continue;
+            }
+        }
 
-            std::uint64_t due;
+        // Schedule the next fire before pressing, so a slow press does not
+        // push the whole cadence later and later.
+        const std::uint32_t next = jittered(k.interval_ms, k.jitter_pct);
+        const std::uint64_t armed = now + next;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (i < due_ms_.size()) due_ms_[i] = armed;
+        }
+
+        if (press(k.keycode, k.hold_ms, "macro-timer")) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (i >= due_ms_.size()) continue;
-                due = due_ms_[i];
-            }
-            if (now < due) continue;
-
-            // Conditional keys re-arm quickly when the trigger is false, so
-            // the interval reads as a cooldown between firings rather than as
-            // how long you bleed before the potion arrives.
-            if (k.conditional()) {
-                const Gate g = check_gate(k);
-                if (g != Gate::Pass) {
-                    {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (i < due_ms_.size()) due_ms_[i] = now + kGatePollMs;
-                    }
-                    std::lock_guard<std::mutex> lock(stats_mutex_);
-                    if (g == Gate::NoReading) ++stats_.held_no_reading;
-                    else                      ++stats_.held_condition;
-                    continue;
+                if (i < pressed_ms_.size()) pressed_ms_[i] = now;
+                if (buff) {
+                    last_buff_ms_ = now;
+                    buff_pressed_ = true;
                 }
             }
-
-            // Schedule the next fire before pressing, so a slow press does not
-            // push the whole cadence later and later.
-            const std::uint32_t next = jittered(k.interval_ms, k.jitter_pct);
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (i < due_ms_.size()) due_ms_[i] = now + next;
-            }
-
-            if (press(k.keycode, k.hold_ms, "macro-timer")) {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                if (stats_.key_presses.size() < cfg.keys.size())
-                    stats_.key_presses.resize(cfg.keys.size(), 0);
-                ++stats_.key_presses[i];
-            }
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            if (stats_.key_presses.size() < cfg.keys.size())
+                stats_.key_presses.resize(cfg.keys.size(), 0);
+            ++stats_.key_presses[i];
+        } else if (buff) {
+            // A buff that did not go out -- held while out of the world, the
+            // game not in front, the keys held for a dialog -- is tried again
+            // in a couple of seconds. Left to its interval, a 1600-s buff
+            // refused during a trash pass was gone for 27 minutes. Unless a
+            // re-cast has re-armed it meanwhile, which wins.
+            const std::uint64_t retry = now + jittered(kBuffRetryMs, k.jitter_pct);
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (i < due_ms_.size() && due_ms_[i] == armed) due_ms_[i] = retry;
         }
     }
 }
@@ -534,7 +725,7 @@ std::vector<std::uint64_t> MacroEngine::next_due_ms() const {
     std::vector<std::uint64_t> out;
     if (!running_.load()) return out;
 
-    const std::uint64_t now = now_ms();
+    const std::uint64_t now = clock_now();
     std::lock_guard<std::mutex> lock(mutex_);
     out.reserve(due_ms_.size());
     for (std::uint64_t d : due_ms_) out.push_back(d > now ? d - now : 0);

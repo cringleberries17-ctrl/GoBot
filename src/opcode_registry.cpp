@@ -100,7 +100,6 @@ Semantic semantic_from_string(const std::string& raw) {
     if (s == "skill_confirm")   return Semantic::SkillConfirm;
     if (s == "attack_confirm")  return Semantic::AttackConfirm;
     if (s == "buff_applied")    return Semantic::BuffApplied;
-    if (s == "captcha")         return Semantic::Captcha;
     if (s == "disconnect")      return Semantic::Disconnect;
     return Semantic::Unknown;
 }
@@ -132,7 +131,6 @@ const char* to_string(Semantic s) {
         case Semantic::SkillConfirm:    return "skill_confirm";
         case Semantic::AttackConfirm:   return "attack_confirm";
         case Semantic::BuffApplied:     return "buff_applied";
-        case Semantic::Captcha:         return "captcha";
         case Semantic::Disconnect:      return "disconnect";
         case Semantic::Unknown:         break;
     }

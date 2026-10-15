@@ -6,6 +6,7 @@
 #include "gobot/template_matcher.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -535,6 +536,19 @@ public:
     };
     void set_hands(Hands h) { hands_ = std::move(h); skip_focus_check_ = true; }
 
+    /// The time as the cleaner reads it, and its waits: the steady clock and
+    /// real sleeps unless set. Every decision it makes by how long something
+    /// took goes through these -- how long the bin has shown an item with
+    /// nothing up, how long a dialog has been watched, the box's blink. A test
+    /// sets them to a clock of its own that moves only on a wait and on each
+    /// look at its pretend game, so those decisions come out the same however
+    /// busy the machine is.
+    struct Clock {
+        std::function<std::chrono::steady_clock::time_point()> now;
+        std::function<void(int)>                                 sleep;     ///< milliseconds
+    };
+    void set_clock(Clock c) { clock_ = std::move(c); }
+
     struct Result {
         bool ran = false;           ///< the bag was found and searched
         int  matched = 0;           ///< listed items found, each slot once
@@ -664,6 +678,9 @@ private:
     void say(const std::string& line);
     bool wait_ms(int ms);           ///< false when cancelled
     void pause_ms(int ms);          ///< whether cancelled or not
+    // Through the clock when it is set, else the steady clock and a sleep.
+    std::chrono::steady_clock::time_point now() const;
+    void sleep(int ms);
 
     // Through the hands when they are set, else the game's input.
     bool click(int x, int y);
@@ -681,6 +698,7 @@ private:
     bool                 dry_run_ = false;
     bool                 skip_focus_check_ = false;
     Hands                hands_;
+    Clock                clock_;
     std::string          stuck_;        ///< why the last back_out left the screen unclean
     /// An item has gone towards the bin and the screen has not been seen
     /// clean since: see Result::stuck.

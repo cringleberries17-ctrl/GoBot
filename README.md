@@ -463,9 +463,6 @@ otherwise the character keeps running into a wall after you alt-tab.
 - **Reading the screen needs the game unobscured.** `PrintWindow` returns a
   blank frame for this client, so pixels are lifted off the screen itself.
   Anything covering the game gets read instead of the game.
-- **Captcha suspends the bot rather than solving it.** A dialog that eats
-  keystrokes plus a bot that keeps typing combat keys into it is worse than
-  stopping.
 - **Pathfinding needs to know *which* map you are in, not map data.** The
   geometry is already there: 781 `.map` files the game ships, which `MapFile`
   reads. What is missing is identifying the current one — currently done by

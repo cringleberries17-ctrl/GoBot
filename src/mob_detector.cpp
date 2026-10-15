@@ -1,13 +1,16 @@
 ﻿#include "gobot/mob_detector.hpp"
 #include "gobot/common.hpp"
+#include "gobot/config.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/camera_tracker.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/minimap_tracker.hpp"
+#include "gobot/screen_layout.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <thread>
 
 namespace gobot {
@@ -93,14 +96,66 @@ bool is_name_text(const Px& p) {
 } // namespace
 
 DetectorTuning DetectorTuning::defaults() {
-    DetectorTuning t;
-    // Measured against a 1024x768 client. The band between the top HUD and the
-    // chat and skill bars is where the play field is; the game's own panels are
-    // full of red text and buttons and would otherwise dominate the results.
-    t.area = ScreenRect{ 0, 104, 1024, 566 };
-    // The minimap and the quest log stack down the right-hand side.
-    t.exclude = ScreenRect{ 812, 0, 212, 360 };
+    // The band between the top HUD and the chat and skill bars is where the
+    // play field is; the game's own panels are full of red text and buttons
+    // and would otherwise dominate the results. Where those are depends on
+    // the client's size, so the box and what is cut out of it are left empty
+    // here and worked out from each frame -- see resolved().
+    return DetectorTuning{};
+}
+
+DetectorTuning DetectorTuning::resolved(int width, int height) const {
+    DetectorTuning t = *this;
+    if (!t.area.valid()) t.area = screen_layout::play_field(width, height);
+    if (!t.exclude.valid()) t.exclude = screen_layout::notices(width, height);
+    if (!t.exclude2.valid()) t.exclude2 = screen_layout::right_icons(width, height);
     return t;
+}
+
+namespace {
+
+/// "x,y,w,h", or "auto" for a rectangle left to follow the frame.
+std::string rect_text(const ScreenRect& r) {
+    if (!r.valid()) return "auto";
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%d,%d,%d,%d", r.x, r.y, r.w, r.h);
+    return buf;
+}
+
+ScreenRect rect_from(const std::string& text, const ScreenRect& fallback) {
+    if (text.empty()) return fallback;
+    if (text == "auto") return ScreenRect{};
+    ScreenRect r;
+    if (std::sscanf(text.c_str(), "%d , %d , %d , %d", &r.x, &r.y, &r.w, &r.h) != 4 ||
+        !r.valid())
+        return fallback;
+    return r;
+}
+
+} // namespace
+
+void DetectorTuning::load(const IniFile& ini) {
+    const char* const S = "Detect";
+    red_min       = ini.get_int(S, "red_min", red_min);
+    other_max     = ini.get_int(S, "other_max", other_max);
+    min_bar       = ini.get_int(S, "min_bar", min_bar);
+    max_bar       = ini.get_int(S, "max_bar", max_bar);
+    min_text_rows = ini.get_int(S, "min_text_rows", min_text_rows);
+    area     = rect_from(ini.get(S, "area"), area);
+    exclude  = rect_from(ini.get(S, "exclude"), exclude);
+    exclude2 = rect_from(ini.get(S, "exclude2"), exclude2);
+}
+
+bool DetectorTuning::save(const std::string& path) const {
+    const char* const S = "Detect";
+    return IniFile::set_in_place(path, S, "red_min", red_min) &&
+           IniFile::set_in_place(path, S, "other_max", other_max) &&
+           IniFile::set_in_place(path, S, "min_bar", min_bar) &&
+           IniFile::set_in_place(path, S, "max_bar", max_bar) &&
+           IniFile::set_in_place(path, S, "min_text_rows", min_text_rows) &&
+           IniFile::set_in_place(path, S, "area", rect_text(area)) &&
+           IniFile::set_in_place(path, S, "exclude", rect_text(exclude)) &&
+           IniFile::set_in_place(path, S, "exclude2", rect_text(exclude2));
 }
 
 MobDetector::MobDetector() { tuning_ = DetectorTuning::defaults(); }
@@ -135,11 +190,13 @@ void MobDetector::stop() {
     GB_INFO("Mob detector stopped");
 }
 
-std::vector<Nameplate> MobDetector::detect(const Frame& f, const DetectorTuning& t,
+std::vector<Nameplate> MobDetector::detect(const Frame& f, const DetectorTuning& given,
                                            const GlyphFont* font, Cost* cost) {
     Cost spent;
     std::vector<Nameplate> out;
     if (!f.valid()) return out;
+    // The box and what is cut out of it, for this frame's size.
+    const DetectorTuning t = given.resolved(f.width, f.height);
 
     const int x0 = t.area.valid() ? std::max(0, t.area.x) : 0;
     const int y0 = t.area.valid() ? std::max(0, t.area.y) : 0;
@@ -170,7 +227,11 @@ std::vector<Nameplate> MobDetector::detect(const Frame& f, const DetectorTuning&
             const int len = end - x;
 
             if (len < t.min_bar || len > t.max_bar) { x = end; continue; }
-            if (t.exclude.valid() && t.exclude.contains(x, y)) { x = end; continue; }
+            if ((t.exclude.valid() && t.exclude.contains(x, y)) ||
+                (t.exclude2.valid() && t.exclude2.contains(x, y))) {
+                x = end;
+                continue;
+            }
 
             // A bar is a few pixels tall, so the same one is met again on the
             // next few rows. Skipping anything that overlaps what is already
@@ -505,7 +566,8 @@ bool MobDetector::name_known(const std::vector<Nameplate>& found) {
 void MobDetector::find_character(const Frame& f, const DetectorTuning& t,
                                  const GlyphFont& font, const std::string& want,
                                  std::vector<Nameplate>& out) {
-    ScreenRect area = t.area.valid() ? t.area : ScreenRect{ 0, 0, f.width, f.height };
+    // Inside the same box the monsters are looked for in, for this frame.
+    ScreenRect area = t.resolved(f.width, f.height).area;
 
     // Look where it was last, before looking everywhere. A whole frame takes
     // long enough to matter at ten frames a second, and a character does not

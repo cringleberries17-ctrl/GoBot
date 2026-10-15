@@ -49,7 +49,7 @@ enum class Priority : int {
     Buff     = 30,
     Loot     = 15,
     Heal     = 80,
-    Critical = 100,     ///< captcha, death recovery — pre-empts everything
+    Critical = 100,     ///< death recovery — pre-empts everything
 };
 
 struct Command {

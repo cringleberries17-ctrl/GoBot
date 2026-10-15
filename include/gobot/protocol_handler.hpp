@@ -33,14 +33,12 @@ public:
     using MapWarpCallback   = std::function<void(const std::string& map, std::int32_t id)>;
     using DeathCallback     = std::function<void()>;
     using ChatCallback      = std::function<void(const std::string& from, const std::string& text)>;
-    using CaptchaCallback   = std::function<void()>;
     using MapDataCallback   = std::function<void(const MapData&)>;
     using UnknownCallback   = std::function<void(const GamePacket&)>;
 
     void set_map_warp_callback(MapWarpCallback cb) { on_map_warp_ = std::move(cb); }
     void set_death_callback(DeathCallback cb)      { on_death_ = std::move(cb); }
     void set_chat_callback(ChatCallback cb)        { on_chat_ = std::move(cb); }
-    void set_captcha_callback(CaptchaCallback cb)  { on_captcha_ = std::move(cb); }
     void set_map_data_callback(MapDataCallback cb) { on_map_data_ = std::move(cb); }
 
     /// Fires for opcodes with no entry in protocol.ini. This is the hook the
@@ -78,7 +76,6 @@ private:
     MapWarpCallback on_map_warp_;
     DeathCallback   on_death_;
     ChatCallback    on_chat_;
-    CaptchaCallback on_captcha_;
     MapDataCallback on_map_data_;
     UnknownCallback on_unknown_;
 

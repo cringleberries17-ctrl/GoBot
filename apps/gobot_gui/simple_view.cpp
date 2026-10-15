@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <string>
 
 #include <windows.h>    // the VK_ codes keys are stored as
@@ -637,13 +638,16 @@ void GuiApp::simple_jobs() {
     };
 
     // A row of key boxes, one per key of a kind. Returns the right-hand edge
-    // it wrapped at, for whatever follows on the same row.
+    // it wrapped at, for whatever follows on the same row. `after` draws
+    // something more beside each box, `after_w` wide.
     const auto key_row = [&](const std::vector<std::size_t>& which, const char* id,
-                             bool show_interval) {
+                             bool show_interval,
+                             const std::function<void(MacroKey&)>& after = nullptr,
+                             float after_w = 0.0f) {
         const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
         for (std::size_t n = 0; n < which.size(); ++n) {
             MacroKey& k = keys[which[n]];
-            if (n) beside(right, kKeyBox);
+            if (n) beside(right, kKeyBox + after_w);
             ImGui::PushID(static_cast<int>(which[n]));
             if (which[n] == simple_listen_key_) {
                 simple_listen_key_ = kNone;
@@ -661,6 +665,7 @@ void GuiApp::simple_jobs() {
                 if (k.keycode == 0) k.enabled = false;
                 simple_changed();
             }
+            if (after) after(k);
             ImGui::PopID();
         }
         if (!which.empty()) beside(right, ImGui::GetFrameHeight());
@@ -790,42 +795,42 @@ void GuiApp::simple_jobs() {
             simple_changed();
         }
         ImGui::TableNextColumn();
-        const float right = key_row(buffs, "buff", false);
+        // Each buff on its own clock, in seconds, as GoC has them: the
+        // player's run 60 s and 1600 s, which no one interval suits. From
+        // 60 s, where a key stops being a buff and would jump to the skills
+        // row, to two hours.
+        constexpr float kSecondsBox = 110.0f;
+        const float seconds_w = 4.0f + kSecondsBox + 4.0f + ImGui::CalcTextSize("giây").x;
+        const auto seconds_box = [&](MacroKey& k) {
+            ImGui::SameLine(0, 4);
+            int secs = static_cast<int>(k.interval_ms / 1000);
+            ImGui::SetNextItemWidth(kSecondsBox);
+            if (ImGui::InputInt("##seconds", &secs, 10, 60)) {
+                secs = clamp_buff_seconds(secs);
+                k.interval_ms = static_cast<std::uint32_t>(secs) * 1000u;
+                simple_changed();
+            }
+            ImGui::SetItemTooltip("Bấm lại phím này sau mỗi %d giây (%d–%d).", secs,
+                                  kBuffMinSeconds, kBuffMaxSeconds);
+            ImGui::SameLine(0, 4);
+            label("giây");
+        };
+        (void)key_row(buffs, "buff", false, seconds_box, seconds_w);
         ImGui::BeginDisabled(keys.size() >= MacroConfig::kMaxKeys);
         if (ImGui::Button("+##buff", ImVec2(ImGui::GetFrameHeight(), 0))) {
             simple_listen_key_ = keys.size();
             MacroKey k;
             k.label = "Buff " + std::to_string(buffs.size() + 1);
-            k.interval_ms = buffs.empty() ? 300000 : keys[buffs.front()].interval_ms;
+            k.interval_ms = 300000;
             k.jitter_pct = 5;
             k.start_delay_ms = static_cast<std::uint32_t>(keys.size()) * 150;
             keys.push_back(std::move(k));
             simple_changed();
         }
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Thêm một phím buff: bấm + rồi nhấn phím.");
-
-        // One interval for all of them: buffs here last minutes, and a player
-        // who needs them on different clocks has the full screen for it.
-        if (!buffs.empty()) {
-            const ImGuiStyle& st = ImGui::GetStyle();
-            const float every = ImGui::CalcTextSize("mỗi").x + 105.0f +
-                                ImGui::CalcTextSize("phút").x + st.ItemSpacing.x * 2.0f;
-            beside(right, every, 16.0f);
-            label("mỗi");
-            ImGui::SameLine();
-            int minutes = static_cast<int>(keys[buffs.front()].interval_ms / 60000);
-            ImGui::SetNextItemWidth(105);
-            if (ImGui::InputInt("##minutes", &minutes, 1, 5)) {
-                minutes = std::clamp(minutes, 1, 120);
-                for (std::size_t i : buffs)
-                    keys[i].interval_ms = static_cast<std::uint32_t>(minutes) * 60000u;
-                simple_changed();
-            }
-            ImGui::SameLine();
-            label("phút");
-        }
-        hint("Dùng lại các phím buff sau mỗi khoảng thời gian.");
+        ImGui::SetItemTooltip("Thêm một phím buff: bấm + rồi nhấn phím (bấm mỗi 300 giây).");
+        hint("Mỗi phím buff có thời gian riêng (giây). Sau khi chết, hồi sinh hoặc vào lại game, "
+             "GoBot buff lại tất cả.");
         row_gap();
     }
 
@@ -840,8 +845,8 @@ void GuiApp::simple_jobs() {
         }
     }
     ImGui::TableNextColumn();
-    hint("Bấm nút hồi sinh khi nhân vật chết. Thử tối đa 3 lần mỗi lần chết, rồi để "
-         "yên 5 phút.");
+    hint("Khi nhân vật chết, bấm Sử dụng vật phẩm hồi sinh rồi Xác Nhận. Thử tối đa 3 lần; "
+         "không được thì dừng bot. Không hồi sinh tại làng, không dùng Cash.");
 
     ImGui::EndTable();
     end_card();
@@ -976,7 +981,11 @@ void GuiApp::simple_start_block() {
         keeper_now = keeper_vi_;
         keeper_problem = keeper_problem_vi_;
     }
-    if (!running) {
+    if (!running && !simple_stopped_vi_.empty()) {
+        // The bot stopped itself -- the revive ran out of tries -- and says
+        // why until the next BẮT ĐẦU.
+        coloured(kBad, simple_stopped_vi_.c_str());
+    } else if (!running) {
         if (!can_start)
             coloured(kWait, "Chưa chạy. Làm xong các mục đỏ ở trên trước.");
         else if (!have_game)
@@ -1021,13 +1030,16 @@ void GuiApp::simple_start_block() {
     if (party_running_)
         hint(("Tổ đội: đã nhận " + std::to_string(party_accepted_.load()) +
               " lời mời, đã mời " + std::to_string(party_invited_.load()) + " người.").c_str());
-    if (keeper_running_) {
+    // Not while a cold start is under way: the line above already says what
+    // the keeper is doing, and the same words twice -- a held click's long
+    // reason among them -- are just noise. Back once the game is in.
+    if (keeper_running_ && !simple_cold_start_) {
         const int restarts = keeper_restarts_.load();
         const std::string now = keeper_now.empty() ? std::string("Đang theo dõi game.") : keeper_now;
         hint(("Tự đăng nhập: " + now +
               (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần." : std::string()))
                  .c_str());
-    } else if (simple_opts_.keep_alive && !keeper_problem.empty()) {
+    } else if (!keeper_running_ && simple_opts_.keep_alive && !keeper_problem.empty()) {
         // Stopped for a person: why, where it will be seen.
         coloured(kBad, ("Tự đăng nhập đã dừng: " + keeper_problem).c_str());
     }
@@ -1132,6 +1144,7 @@ void GuiApp::simple_window_list() {
 
 void GuiApp::simple_start() {
     if (simple_running()) return;
+    simple_stopped_vi_.clear();     // what stopped the last run is old news
 
     const bool any_key = any_key_on(macro_config_);
     Party::Settings party_rules;
@@ -1180,6 +1193,10 @@ void GuiApp::simple_start() {
                         "hoặc \"Chọn cửa sổ…\" ở thẻ Đánh quái.", 10000);
             return;
         }
+        // Told to the keeper before it starts, so its very first look knows:
+        // a game that comes up while it loads its pictures is followed, and
+        // what was ticked starts on it.
+        keeper_cold_start_ = true;
         start_keeper();
         simple_cold_start_ = true;
         // Said at once, rather than "watching" until the keeper has loaded

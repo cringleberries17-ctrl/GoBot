@@ -1,6 +1,8 @@
 #include "gui_app.hpp"
 #include "gobot/auto_login.hpp"
+#include "gobot/reviver.hpp"
 #include "gobot/routine.hpp"
+#include "gobot/screen_layout.hpp"
 
 #include "gobot/byte_reader.hpp"
 #include "gobot/common.hpp"
@@ -72,7 +74,7 @@ const char* const kSemanticNames[] = {
     "monster_selected", "player_spawn", "player_move", "player_remove",
     "item_drop", "item_remove", "map_warp", "map_data", "party_update",
     "party_invite", "party_leave", "party_hp", "chat", "skill_confirm",
-    "attack_confirm", "buff_applied", "captcha", "disconnect",
+    "attack_confirm", "buff_applied", "disconnect",
 };
 constexpr int kSemanticCount = static_cast<int>(sizeof(kSemanticNames) / sizeof(kSemanticNames[0]));
 
@@ -191,16 +193,6 @@ void GuiApp::initialise() {
         pathfinder_.set_double_jump(bot_config_.double_jump);
         pathfinder_.init(map);
     });
-    protocol_->set_captcha_callback([this] {
-        GB_WARN("Captcha detected -- suspending input");
-        {
-            // Over whatever holds it: a captcha outranks a trash pass and a
-            // revive, and neither of them ends a hold that is not theirs.
-            std::lock_guard<std::mutex> lock(hold_mutex_);
-            coord_.engage_critical("captcha");
-        }
-        stop_bot();
-    });
     protocol_->set_death_callback([this] {
         if (!bot_config_.continue_auto_after_death) stop_bot();
     });
@@ -274,7 +266,13 @@ void GuiApp::initialise() {
         GB_WARN("Synthetic keystrokes are being filtered -- nothing GoBot presses "
                 "will reach the game");
 
+    // Following the client's size unless edited by hand on the Radar tab and
+    // saved, which is kept in [Detect] of hunt.ini.
     detect_tuning_ = DetectorTuning::defaults();
+    {
+        IniFile hunt_ini;
+        if (hunt_ini.load(exe_relative("configs/hunt.ini"))) detect_tuning_.load(hunt_ini);
+    }
     detector_.set_tuning(detect_tuning_);
     map_book_.load(exe_relative("configs/maps.ini"));
     hunt_config_.load(exe_relative("configs/hunt.ini"));
@@ -358,21 +356,37 @@ void GuiApp::tick() {
     // shows nothing waiting.
     watch_left_held();
 
+    // The revive ran out of tries. The player's rule: stop the bot, never
+    // revive in the village. Here rather than on the worker, which stopping
+    // joins.
+    if (revive_gave_up_.exchange(false)) stop_after_revive();
+
     if (keeper_reattach_.exchange(false)) {
-        reattach_game();
+        const bool found = reattach_game();
+        // Logged back in: every buff came off with the old session. Nothing
+        // for a cold start's first login, whose jobs start below and cast
+        // every buff as they start.
+        if (found && macro_ && macro_->running()) macro_->recast_buffs("logging back in");
         // BẮT ĐẦU was pressed with the game closed, and the keeper has now
-        // brought it up: start what else was ticked, on the new window. Only
+        // brought it up -- or found it up already, opened by hand or by
+        // another tool: start what else was ticked, on that window. Only
         // while the keeper is still on -- one stopped by the panic key, or by
         // hand, in the moment between getting in and this tick means nothing
         // is to start, and starting the macro then would press keys straight
-        // after somebody asked for everything to stop.
-        if (simple_cold_start_ && keeper_running_ && !keeper_stop_) {
+        // after somebody asked for everything to stop. A window not found
+        // yet leaves the start waiting; the keeper asks again on its next
+        // look.
+        if (simple_cold_start_ && keeper_running_ && !keeper_stop_ && found) {
             simple_cold_start_ = false;
-            if (input_.window_valid()) simple_start_jobs();
+            keeper_cold_start_ = false;
+            simple_start_jobs();
         }
     }
     // A keeper that ended without getting in leaves nothing to start.
-    if (simple_cold_start_ && !keeper_running_) simple_cold_start_ = false;
+    if (simple_cold_start_ && !keeper_running_) {
+        simple_cold_start_ = false;
+        keeper_cold_start_ = false;
+    }
     refocus_if_idle();
 
     if (detector_running_) {
@@ -413,12 +427,36 @@ void GuiApp::tick() {
     // Only while the reader is running: with no reader there is nothing to
     // judge by, and a macro suspended on no evidence is worse than one that
     // carries on.
+    //
+    // A suspension of ten seconds or more re-casts every buff as it ends: the
+    // engine sees to that itself (see MacroEngine::set_suspended).
     if (vitals_running_ && macro_ && macro_->running()) {
         const bool in_world = vitals_.hp_percent() >= 0.0f;
         if (in_world == macro_->suspended())
             macro_->set_suspended(!in_world,
                                   in_world ? std::string{}
                                            : "the character is not in the world");
+    }
+
+    // A death costs every buff. Cast again after a revive -- the worker's,
+    // or one by hand that the HUD showed: HP at 0 for a couple of seconds,
+    // then above it. Asked for twice in a row, the engine casts once.
+    {
+        const int revived = revive_count_.load();
+        if (revived != revive_seen_) {
+            if (revived > revive_seen_ && macro_ && macro_->running())
+                macro_->recast_buffs("a revive");
+            revive_seen_ = revived;
+        }
+        const float hp = vitals_running_ ? vitals_.hp_percent() : -1.0f;
+        if (hp >= 0.0f && hp < 0.5f) {
+            if (hp_zero_since_ms_ == 0) hp_zero_since_ms_ = now_ms();
+        } else if (hp > 0.0f) {
+            if (hp_zero_since_ms_ != 0 && now_ms() - hp_zero_since_ms_ >= 2000 && macro_ &&
+                macro_->running())
+                macro_->recast_buffs("HP came back from 0");
+            hp_zero_since_ms_ = 0;
+        }
     }
 
     if (vitals_running_) {
@@ -2507,11 +2545,12 @@ void GuiApp::party_loop() {
     chat_rules.min_name_match = ini.get_float("Chat", "min_name_match", 0.7f);
     chat_rules.whole_word_only = ini.get_bool("Chat", "whole_word_only", true);
 
-    const int chat_x = ini.get_int("Chat", "chat_x", 6);
-    const int chat_y = ini.get_int("Chat", "chat_y", 710);
-    const int chat_w = ini.get_int("Chat", "chat_width", 390);
-    const int line_h = std::max(6, ini.get_int("Chat", "line_height", 13));
-    const int line_n = std::max(1, ini.get_int("Chat", "lines", 3));
+    // Where the chat lines are: placed from the chat bar on every look, so
+    // they are found on a 1280x720 client as on a 1024x768 one.
+    ChatLines::Settings chat_place;
+    chat_place.load(ini);
+    ChatLines chat_lines;
+    chat_lines.set_settings(chat_place);
 
     TemplateStore store;
     if (!store.load_best(exe_relative("configs/templates.ini"))) {
@@ -2643,9 +2682,7 @@ void GuiApp::party_loop() {
         // ---- somebody is asking in chat ----
         if (rules.auto_invite && have_font) {
             std::vector<std::string> lines;
-            for (int i = 0; i < line_n; ++i) {
-                const ScreenRect box{ chat_x, chat_y + i * line_h, chat_w, line_h + 3 };
-                if (box.y + box.h > frame.height) break;
+            for (const ScreenRect& box : chat_lines.boxes(frame, store)) {
                 const std::string text = font.read_line(frame, box);
                 if (!text.empty()) lines.push_back(text);
             }
@@ -2732,6 +2769,7 @@ void GuiApp::stop_keeper() {
     // unticking "Tự vào lại game", the full screen -- and none of them should
     // be followed by the ticked jobs starting once the game is up.
     simple_cold_start_ = false;
+    keeper_cold_start_ = false;
     keeper_stop_ = true;
     {
         // A login in progress takes minutes to finish by itself.
@@ -2757,11 +2795,6 @@ void GuiApp::keeper_loop() {
         GB_WARN("Keeper: %s", english.c_str());
         say_keeper(english);
         say_keeper_vi(vi, vi);
-    };
-    // A captcha's hold is a person's to end. Nothing is crossed or clicked
-    // under it: that would be clicking into the very game it holds for.
-    const auto captcha_up = [this] {
-        return coord_.critical_active() && coord_.critical_reason() == "captcha";
     };
 
     IniFile app_ini;
@@ -2805,6 +2838,8 @@ void GuiApp::keeper_loop() {
     CrashWatch watch(watch_settings);
     note("watching");
     bool seen_running = false;      // the client has been up since this started
+    bool crossed_in = false;        // this keeper has logged in at least once
+    bool said_found = false;        // the cold start's game was found up, and said so
 
     while (!keeper_stop_) {
         const CrashWatch::Look seen = watch.look();
@@ -2814,8 +2849,26 @@ void GuiApp::keeper_loop() {
                                        : "the client is running and answering";
         }
 
-        if (!seen.bad()) {
+        const CrashWatch::Move move =
+            CrashWatch::next_move(seen, seen_running, keeper_cold_start_.load());
+        if (move == CrashWatch::Move::Watch || move == CrashWatch::Move::Follow) {
             seen_running = true;
+            // BẮT ĐẦU was pressed with the game closed, and what was ticked
+            // has not started yet. When the game is up without this keeper
+            // having crossed in -- opened by hand, or by another tool, while
+            // the pictures loaded -- there is nothing to cross: it is
+            // followed, and tick() starts what was ticked, as BẮT ĐẦU does
+            // with the game open. Asked again on every look until that has
+            // happened, in case its window is not found the first time.
+            if (move == CrashWatch::Move::Follow) {
+                if (!crossed_in && !said_found) {
+                    note("the game is already running -- following it and starting the "
+                         "ticked jobs");
+                    say_keeper_vi("Game đã mở sẵn. Đang theo dõi game.");
+                    said_found = true;
+                }
+                keeper_reattach_ = true;
+            }
             for (int i = 0; i < 6 && !keeper_stop_; ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
@@ -2830,19 +2883,13 @@ void GuiApp::keeper_loop() {
         // neither the shut-down nor the cool-down, and a game launcher already
         // open is left for the crossing to carry on from. It is one crossing
         // either way, and one that fails stops this.
-        const bool cold = !seen_running && seen.what == CrashWatch::Trouble::Gone;
+        const bool cold = move == CrashWatch::Move::Start;
 
         if (!cold && keeper_restarts_ >= watch_settings.max_restarts) {
             const std::string n = std::to_string(keeper_restarts_.load());
             give_up("that is " + n + " restarts and it has gone again -- stopping, a person "
                     "is needed",
                     "Game văng " + n + " lần liền — GoBot ngừng tự vào lại. Cần người kiểm tra.");
-            break;
-        }
-        if (captcha_up()) {
-            give_up("a captcha is up, so the client is not started again under it -- a "
-                    "person is needed",
-                    AutoLogin::advice(AutoLogin::Why::Captcha));
             break;
         }
 
@@ -2904,7 +2951,11 @@ void GuiApp::keeper_loop() {
         AutoLogin flow;
         flow.set_settings(login);
         flow.set_templates(&store);
-        flow.set_captcha_check(captcha_up);
+        // A game that comes up part way and stays on a screen the crossing
+        // does not know is ended the way a crashed one is, and the next
+        // attempt starts from VTCZone.
+        flow.set_end_client([&watch] { return watch.shut_down(CrashWatch::Look{}); },
+                            watch_settings.cooldown_s);
         const std::string doing = cold ? "Đang mở game và vào nhân vật: " : "Đang vào lại game: ";
         flow.on_step([this, doing, &flow](AutoLogin::Step s, const std::string& detail) {
             say_keeper(std::string(AutoLogin::step_name(s)) + ": " + detail);
@@ -2933,6 +2984,7 @@ void GuiApp::keeper_loop() {
             break;
         }
         seen_running = true;
+        crossed_in = true;
         note("back in the world");
         say_keeper_vi(cold ? "Đã vào game. Đang theo dõi game."
                            : "Đã vào lại game. Đang theo dõi game.");
@@ -2947,24 +2999,30 @@ void GuiApp::keeper_loop() {
     keeper_running_ = false;
 }
 
-/// Point everything at the game window again, after the keeper logged back in.
+/// Point everything at the game window again, after the keeper logged back in
+/// -- or found the game up already, for a cold start.
 ///
 /// The client it started is a new process with a new window. Without this the
 /// reader goes on reading the window that closed, the macro holds for want of
 /// a reading, the hunter looks at nothing -- and the run that the login was
 /// meant to save stops anyway, just later.
-void GuiApp::reattach_game() {
+bool GuiApp::reattach_game() {
     windows_ = InputManager::enumerate_windows();
     window_list_loaded_ = true;
     if (!input_.find_game_window(app_config_.window_title, app_config_.window_class,
                                  app_config_.process_name)) {
-        GB_WARN("Logged back in, but the game window could not be found again");
-        return;
+        // Said once: a cold start waiting on the window asks every few seconds.
+        if (!reattach_missed_)
+            GB_WARN("The game is up, but its window could not be found -- looking again");
+        reattach_missed_ = true;
+        return false;
     }
+    reattach_missed_ = false;
     apply_vitals_config();
     if (detector_running_) detector_.set_target_window(input_.target_window());
-    GB_INFO("Following the new game window after logging back in");
-    set_status("Logged back in -- following the new game window", 6000);
+    GB_INFO("Following the game window the keeper found");
+    set_status("Following the game window", 6000);
+    return true;
 }
 
 // ----------------------------------------------------------------- reviving
@@ -2989,115 +3047,150 @@ void GuiApp::stop_revive() {
     revive_running_ = false;
 }
 
-/// Watch for the death dialog and press its revive button.
+/// Watch for the death panel and revive on the spot, with a revive item.
 ///
-/// The `revive` click sequence knows the button; this decides when to run it.
-/// It looks for the sequence's first picture a little over once a second --
-/// a full-window match against one small picture, which costs a few
-/// milliseconds -- and runs the sequence when it is there, with every other
-/// part of the bot held off: potion keys pressed at a death dialog do nothing,
-/// and the hunter walking would be worse.
+/// What to click, and when, is the Reviver's: the panel's "Sử dụng vật phẩm
+/// hồi sinh", then Xác Nhận on the question, three tries for each death, never
+/// the village or Cash, and nothing while one of the trash bin's dialogs is up.
+/// This runs it a little over once a second, and holds every other part of
+/// the bot off from the first click at a death until the character is up
+/// again: potion keys pressed at the death panel do nothing, and the hunter
+/// walking would be worse. When the tries run out the player's rule is that
+/// the bot stops; tick() does that, since stopping joins this thread.
 void GuiApp::revive_loop() {
-    const auto finish = [this](const std::string& why) {
-        say_revive(why);
+    const auto tell = [this](const std::string& line) {
+        GB_INFO("Revive: %s", line.c_str());
+        say_revive(line);
+    };
+    const auto finish = [&](const std::string& why) {
+        tell(why);
         revive_running_ = false;
     };
 
-    const auto routines = Routine::load(exe_relative("configs/routines.ini"));
-    const Routine* revive = Routine::find(routines, "revive");
-    if (revive == nullptr || !revive->valid()) {
-        finish("no 'revive' sequence in configs/routines.ini, so nothing to press");
-        return;
-    }
-
     TemplateStore store;
     if (!store.load_best(exe_relative("configs/templates.ini"))) {
-        finish("no UI pictures, so the death dialog cannot be recognised");
+        finish("no UI pictures, so the death panel cannot be recognised");
         return;
     }
-    const DialogDriver::Step& first = revive->steps.front();
-    const Frame* button = store.get(first.find);
-    if (button == nullptr) {
-        finish("the picture '" + first.find + "' is not loaded");
-        return;
-    }
-
     ScreenCapture capture;
-    const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
+    const auto grab = [&](Frame& f) {
+        return input_.window_valid() && capture.grab(input_.target_window(), f) && f.valid();
+    };
+    Reviver reviver(input_, store, grab);
+    std::string why_not;
+    if (!reviver.ready(&why_not)) {
+        finish(why_not);
+        return;
+    }
+    reviver.set_stop([this] { return revive_stop_.load(); });
+    reviver.set_hp([this] { return vitals_.hp_percent(); });
+    reviver.set_debug_dir(exe_relative("revive_debug"));
+    reviver.on_report(tell);
+    reviver.on_revived([this] { ++revive_count_; });
+    reviver.on_out_of_tries([this](const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> lock(worker_mutex_);
+            revive_gave_up_why_ = reason;
+        }
+        revive_gave_up_ = true;
+    });
 
-    // Tries at the death on screen now, and a rest after three that failed.
-    int tries = 0;
-    std::uint64_t resting_until = 0;
-    bool said_waiting = false;
-    constexpr int kTries = 3;
-    constexpr std::uint64_t kRestMs = 5 * 60 * 1000;
+    // The hold, from the first click at a death until the character is up;
+    // the mouse, for the clicks of one attempt.
+    bool holding = false;
+    bool said_held = false;
+    const auto release = [&] {
+        if (holding) end_hold("reviving");
+        holding = false;
+    };
+    std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
+    Reviver::Guard guard;
+    guard.take = [&] {
+        // A trash pass under way finishes first -- it is bounded, and gives
+        // back what is in the bin when it stops -- rather than having the
+        // panel clicked in the middle of one of its drags. Waited for a
+        // little at a time, so a stop is not held up behind the pass.
+        while (!revive_stop_ && !mouse.try_lock())
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (revive_stop_) return false;
+        // Not over a hold that is somebody else's, which taking would end. A
+        // trash pass that could not give an item back holds everything too,
+        // but only to keep keys out of the bin's box; a revive presses no
+        // keys, so it goes ahead under that hold and leaves it as it was.
+        const bool under_trash = trash_hold_ && coord_.critical_reason() == "trash cleaning";
+        if (!holding && !under_trash) {
+            if (!take_hold("reviving")) {
+                mouse.unlock();
+                if (!said_held)
+                    tell("waiting: everything is held off (" + coord_.critical_reason() + ")");
+                said_held = true;
+                return false;
+            }
+            holding = true;
+            // A direction key the hunter was holding when the character
+            // died is let go, as a trash pass lets go of them: held across
+            // the revive, it walks the character off the moment it is up.
+            input_.release_all();
+        }
+        said_held = false;
+        return true;
+    };
+    guard.done = [&] {
+        if (mouse.owns_lock()) mouse.unlock();
+    };
+    reviver.set_guard(guard);
 
-    say_revive("watching");
+    tell("watching");
     while (!revive_stop_) {
         for (int i = 0; i < 12 && !revive_stop_; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (revive_stop_) break;
 
-        Frame frame;
-        if (!input_.window_valid() || !grab(frame) || !frame.valid()) continue;
-
-        const auto hit = TemplateMatcher::find(
-            frame, ScreenRect{ 0, 0, frame.width, frame.height }, *button, first.score);
-        if (!hit.found) { tries = 0; continue; }
-        if (now_ms() < resting_until) continue;
-
-        if (tries >= kTries) {
-            say_revive("the revive button was pressed " + std::to_string(kTries) +
-                       " times and the dialog is still up -- leaving it for five "
-                       "minutes; a person may be needed");
-            resting_until = now_ms() + kRestMs;
-            tries = 0;
-            continue;
-        }
-
-        // A trash pass under way finishes first -- it is bounded, and gives
-        // back what is in the bin when it stops -- rather than having the
-        // death dialog clicked in the middle of one of its drags. Waited for
-        // a little at a time, so a stop is not held up behind the pass.
-        std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
-        while (!revive_stop_ && !mouse.try_lock())
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (revive_stop_) break;
-        // Not over a hold that is somebody else's: a captcha's, which taking
-        // would end. A trash pass that could not give an item back holds
-        // everything too, but only to keep keys out of the bin's box, and it
-        // waits for every dialog to close -- the death dialog among them. A
-        // revive presses no keys, so it goes ahead under that hold and leaves
-        // it as it was.
-        const bool under_trash = trash_hold_ && coord_.critical_reason() == "trash cleaning";
-        if (!under_trash && !take_hold("reviving")) {
-            if (!said_waiting)
-                say_revive("waiting: everything is held off (" + coord_.critical_reason() + ")");
-            said_waiting = true;
-            continue;
-        }
-        said_waiting = false;
-        ++tries;
-        if (!input_.window_focused()) {
-            input_.focus_window();
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        }
-        DialogDriver driver(input_, store, grab);
-        std::string trouble;
-        const std::size_t done = driver.run_all(revive->steps, &trouble);
-        if (!under_trash) end_hold("reviving");
-
-        if (done == revive->steps.size()) {
-            ++revive_count_;
-            tries = 0;
-            say_revive("revived");
-        } else {
-            say_revive("the revive did not take: " + trouble);
+        const Reviver::Turn turn = reviver.turn();
+        if (turn == Reviver::Turn::Alive || turn == Reviver::Turn::Revived) release();
+        if (turn == Reviver::Turn::OutOfTries) {
+            // The hold stays: tick() ends it once everything else has
+            // stopped, so nothing presses a key at the panel meanwhile.
+            tell("out of tries -- asking for the whole bot to stop");
+            revive_running_ = false;
+            return;
         }
     }
 
-    say_revive("stopped");
+    release();
+    tell("stopped");
     revive_running_ = false;
+}
+
+void GuiApp::stop_after_revive() {
+    std::string why;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        why = revive_gave_up_why_;
+    }
+    // Everything, as the panic key does -- with the trash pass giving its
+    // item back on the way -- and the cold start that may be waiting.
+    if (navigator_) navigator_->stop();
+    simple_stop();
+    stop_bot();
+    input_.release_all();
+    end_hold("reviving");
+
+    const std::string vi = Reviver::out_of_tries_vi();
+    simple_stopped_vi_ = vi;
+    GB_WARN("Revive: %s -- every job is stopped and every key let go; the character is left "
+            "where it is",
+            why.c_str());
+    alert("revive_failed", vi);
+    set_status("Stopped: the revive failed 3 times -- probably out of revive items. "
+               "Revive by hand, then start again.",
+               60000);
+}
+
+void GuiApp::alert(const char* event, const std::string& text_vi) {
+    // The one place an alert is raised. Only written to the log for now;
+    // the Discord webhook and a sound are to be called from here.
+    GB_WARN("ALERT %s: %s", event, text_vi.c_str());
 }
 
 // ------------------------------------------------------------ trash cleaning
@@ -3394,7 +3487,7 @@ void GuiApp::trash_loop() {
         }
         read_ms = now_ms();
 
-        // Something else holding everything off -- a captcha -- is not
+        // Something else holding everything off -- a revive, say -- is not
         // something to clean the bag through, and its hold is not this
         // worker's to end. Tried again shortly. This worker's own hold is
         // what a pass is for: it starts by giving the item back.
@@ -3443,8 +3536,8 @@ void GuiApp::trash_loop() {
         {
             // Not while the revive sequence or the party worker is clicking,
             // nor they while this is. The hold is taken only now, with the
-            // mouse: a captcha or a revive that began while this waited for
-            // it keeps its own, and the pass waits instead.
+            // mouse: a revive that began while this waited for it keeps its
+            // own, and the pass waits instead.
             std::lock_guard<std::mutex> mouse(game_mouse_mutex_);
             if (take_hold("trash cleaning")) {
                 passed = true;
@@ -3460,8 +3553,8 @@ void GuiApp::trash_loop() {
                 // that never got to a clean screen -- a look-only one, or one
                 // that met a dialog it would not answer -- since it saw
                 // nothing of an earlier item coming back. Otherwise ended, if
-                // it is still this pass's: a captcha seen during the pass has
-                // taken it over, and keeps it.
+                // it is still this pass's: one taken over during the pass is
+                // somebody else's to end.
                 held = r.keeps_hold(held);
                 trash_hold_ = held;
                 if (!held) end_hold("trash cleaning");
@@ -4065,8 +4158,10 @@ void GuiApp::start_detector() {
     detector_.set_character_name(hunt_config_.character_name);
 
     // Track the scenery over the play field only. The HUD does not scroll, and
-    // matching it against itself would say the view never moves.
-    camera_.set_play_area(ScreenRect{ 100, 130, 620, 380 });
+    // matching it against itself would say the view never moves. Its own
+    // default is the middle of whatever size the window is; a box measured
+    // on a 1024x768 client sat off-centre on a 1280x720 one.
+    camera_.set_play_area(ScreenRect{});
     camera_.reset();
     anchor_.reset();
 
@@ -4448,7 +4543,9 @@ void GuiApp::toggle_hunt() {
 
 void GuiApp::save_hunt_config() {
     const std::string path = exe_relative("configs/hunt.ini");
-    if (hunt_config_.save(path)) {
+    // The detector's tuning goes with it, into [Detect]: what the Radar tab
+    // edits by hand is kept, and a reset one is kept as following the window.
+    if (hunt_config_.save(path) && detect_tuning_.save(path)) {
         hunter_->set_config(hunt_config_);
         set_status("Saved " + path);
     } else {
@@ -4718,11 +4815,12 @@ void GuiApp::draw_radar_panel() {
                             col, 0.0f, 0, thick);
             };
 
-            // Where the detector is allowed to look.
-            if (detect_tuning_.area.valid())
-                box(detect_tuning_.area, IM_COL32(120, 120, 140, 90), 1.0f);
-            if (detect_tuning_.exclude.valid())
-                box(detect_tuning_.exclude, IM_COL32(150, 90, 90, 90), 1.0f);
+            // Where the detector is allowed to look, as it is for this size
+            // of window.
+            const DetectorTuning used = detect_tuning_.resolved(frame.width, frame.height);
+            if (used.area.valid()) box(used.area, IM_COL32(120, 120, 140, 90), 1.0f);
+            if (used.exclude.valid()) box(used.exclude, IM_COL32(150, 90, 90, 90), 1.0f);
+            if (used.exclude2.valid()) box(used.exclude2, IM_COL32(150, 90, 90, 90), 1.0f);
 
             Nameplate me;
             const bool have_me = detector_.player(me);
@@ -4784,9 +4882,9 @@ void GuiApp::draw_radar_panel() {
 
         ImGui::TextWrapped(
             "Only change these if the view above is marking the wrong things. "
-            "The outlined rectangle is where it looks; the dull red one is cut "
-            "out of it, which is how the quest log and minimap are kept out of "
-            "the results.");
+            "The outlined rectangle is where it looks; the dull red ones are cut "
+            "out of it, which is how the minimap, its notices and the icons down "
+            "the right edge are kept out of the results.");
 
         ImGui::SetNextItemWidth(150);
         t |= ImGui::SliderInt("Health bar red at least", &detect_tuning_.red_min, 80, 250);
@@ -4806,35 +4904,44 @@ void GuiApp::draw_radar_panel() {
                     "counts. This is what keeps red artwork out: flowers and fire "
                     "have no name written over them.");
 
-        ImGui::TextUnformatted("Look here:");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("x##ax", &detect_tuning_.area.x, 0, 0);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("y##ay", &detect_tuning_.area.y, 0, 0);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("w##aw", &detect_tuning_.area.w, 0, 0);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("h##ah", &detect_tuning_.area.h, 0, 0);
-
-        ImGui::TextUnformatted("Not here:");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("x##ex", &detect_tuning_.exclude.x, 0, 0);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("y##ey", &detect_tuning_.exclude.y, 0, 0);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("w##ew", &detect_tuning_.exclude.w, 0, 0);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(70);
-        t |= ImGui::InputInt("h##eh", &detect_tuning_.exclude.h, 0, 0);
+        // The box and what is cut out of it, as they are for the window's
+        // size now. While they follow the window they are shown worked out;
+        // the first edit writes all three down, and from then on they are
+        // used as written, whatever size the window is.
+        int fw = have_frame ? frame.width : 0, fh = have_frame ? frame.height : 0;
+        if (!have_frame) input_.window_size(fw, fh);
+        DetectorTuning shown = detect_tuning_.resolved(fw, fh);
+        text_dim(detect_tuning_.automatic()
+                     ? "These follow the game window's size."
+                     : "Written by hand: used as written. Reset to defaults to follow the "
+                       "game window's size again.");
+        bool rect_edit = false;
+        const auto rect_row = [&](const char* label, const char* id, ScreenRect& r) {
+            ImGui::TextUnformatted(label);
+            int* const part[] = { &r.x, &r.y, &r.w, &r.h };
+            const char* const name[] = { "x", "y", "w", "h" };
+            for (int i = 0; i < 4; ++i) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70);
+                const std::string box = std::string(name[i]) + "##" + id + name[i];
+                rect_edit |= ImGui::InputInt(box.c_str(), part[i], 0, 0);
+            }
+        };
+        // With no window to measure there is nothing to show them for.
+        ImGui::BeginDisabled(fw <= 0 || fh <= 0);
+        rect_row("Look here:", "area", shown.area);
+        rect_row("Not here:", "excl", shown.exclude);
+        rect_row("Nor here:", "excl2", shown.exclude2);
+        ImGui::EndDisabled();
+        if (rect_edit) {
+            detect_tuning_.area = shown.area;
+            detect_tuning_.exclude = shown.exclude;
+            detect_tuning_.exclude2 = shown.exclude2;
+            t = true;
+        }
 
         if (ImGui::Button("Reset to defaults")) {
-            input_injection_ok_ = InputManager::injection_works();
-    if (!input_injection_ok_)
-        GB_WARN("Synthetic keystrokes are being filtered -- nothing GoBot presses "
-                "will reach the game");
-
-    detect_tuning_ = DetectorTuning::defaults();
+            detect_tuning_ = DetectorTuning::defaults();
             t = true;
         }
         if (t) detector_.set_tuning(detect_tuning_);

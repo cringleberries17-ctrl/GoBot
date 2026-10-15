@@ -6,6 +6,7 @@
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,24 @@ public:
         /// "Mag cTo h n", which is seven of ten letters in the right order.
         double min_name_match = 0.6;
 
+        /// The level column, the first of the three.
+        int level_x = 748, level_w = 45;
+
+        /// party.ini [PlayerList] place = fixed: the panel, the columns,
+        /// first_row_y and click_x are used as written, the old way.
+        /// Otherwise -- and with no key at all -- they are placed from where
+        /// the button that opens the list was found, every time the list is
+        /// used. The numbers above were measured on a 1024x768 client, and on
+        /// a 1280x720 one they read and click over the play field: the button
+        /// keeps to the right edge (956,139 on the one, 1212,139 on the
+        /// other) and the list hangs off it.
+        bool fixed = false;
+
+        /// These settings with the panel placed from the button whose
+        /// top-left is `bx`,`by`. For a button at 956,139 -- where it is on a
+        /// 1024x768 client -- that is exactly the numbers above.
+        Settings at_button(int bx, int by) const;
+
         void load(const IniFile& ini);
         void save(IniFile& ini) const;
     };
@@ -101,8 +120,29 @@ public:
         std::string name;
     };
 
-    void set_settings(const Settings& s) { settings_ = s; }
+    void set_settings(const Settings& s) {
+        settings_ = s;
+        placed_ = s;
+        placed_ok_ = false;
+    }
     Settings settings() const { return settings_; }
+
+    /// Place the list from the button that opens it, found with its top-left
+    /// at `bx`,`by` in a frame `frame_w` x `frame_h`: what read(), menu_up()
+    /// and invite() go by from then on. ensure_open() does this each time it
+    /// finds the button; nothing is read or clicked before it has.
+    void place(int bx, int by, int frame_w, int frame_h);
+    bool placed() const { return placed_ok_; }
+    /// The panel, the columns and the click points as placed.
+    const Settings& geometry() const { return placed_; }
+
+    /// Whether a click at `x`,`y` is inside the placed panel and inside the
+    /// frame it was placed in: the only place a row or "Req Party" is ever
+    /// clicked. Outside it is the play field, or another panel.
+    bool in_panel(int x, int y) const;
+
+    /// For tests: the clicks go here instead of to the game.
+    void set_click(std::function<bool(int, int)> fn) { click_ = std::move(fn); }
 
     /// Whether the three-button menu is drawn over the list, below this row.
     ///
@@ -115,12 +155,12 @@ public:
     /// Whether the list is showing, by its ruled empty rows.
     bool open(const Frame& frame, const TemplateStore& store) const;
 
-    /// Open it if it is not already. False, with a reason, if the button that
-    /// opens it is not on screen.
+    /// Open it if it is not already, and place it from its button. False,
+    /// with a reason, if the button that opens it is not on screen.
     bool ensure_open(InputManager& input, ScreenCapture& capture,
                      const TemplateStore& store, std::string* why);
 
-    /// Every row that has a name on it.
+    /// Every row that has a name on it -- none until the list is placed.
     std::vector<Row> read(const Frame& frame, const GlyphFont& font) const;
 
     /// The row holding this player, or -1. Matched loosely -- see
@@ -134,7 +174,13 @@ public:
                 std::string* why) const;
 
 private:
+    bool click(InputManager& input, int x, int y) const;
+
     Settings settings_;
+    Settings placed_;
+    bool     placed_ok_ = false;
+    int      frame_w_ = 0, frame_h_ = 0;    ///< the frame the list was placed in
+    std::function<bool(int, int)> click_;
 };
 
 } // namespace gobot

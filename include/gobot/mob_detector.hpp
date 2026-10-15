@@ -14,6 +14,7 @@ namespace gobot {
 class MinimapTracker;
 class CameraTracker;
 class GlyphFont;
+class IniFile;
 
 /// A rectangle in the game window's client area.
 struct ScreenRect {
@@ -104,15 +105,40 @@ struct DetectorTuning {
 
     /// Where to look. Everything outside is ignored, which is how the game's
     /// own panels — quest log, skill bar, shop buttons, all full of red — are
-    /// kept out of the results. Zero width or height means the whole frame.
+    /// kept out of the results.
+    ///
+    /// Left empty, as it is unless written by hand, it is worked out from the
+    /// frame's own size on every look -- below the top bars, above the hotbar
+    /// and chat (screen_layout::play_field) -- so the same tuning serves a
+    /// 1024x768 client and a 1280x720 one. A box measured for one size cut
+    /// the right fifth off the other and took in its hotbar.
     ScreenRect area;
 
-    /// A second rectangle to ignore inside the area, for a panel that sits in
-    /// the middle of the play field. The minimap and quest log do, by default.
+    /// Two rectangles to ignore inside the area, for panels that sit in the
+    /// play field: the minimap and its notices down the top right, and the
+    /// icons down the right edge, whose red reads as health bars. Each worked
+    /// out from the frame's size while left empty, as `area` is.
     ScreenRect exclude;
+    ScreenRect exclude2;
 
-    /// Defaults measured against a 1024x768 client.
+    /// Whether the box and both rectangles follow the frame's size: none of
+    /// them has been written down by hand.
+    bool automatic() const { return !area.valid() && !exclude.valid() && !exclude2.valid(); }
+
+    /// This tuning as it is used on a frame `width` x `height`: each of the
+    /// three rectangles left empty filled in for that size.
+    DetectorTuning resolved(int width, int height) const;
+
+    /// The measured colours, with the box and both rectangles following the
+    /// frame's size.
     static DetectorTuning defaults();
+
+    /// [Detect] in configs/hunt.ini, where a tuning edited by hand on the full
+    /// screen is kept. A rectangle written as "auto", or not at all, follows
+    /// the frame's size. `load` leaves anything missing as it was.
+    void load(const IniFile& ini);
+    /// Each key changed in place, so the rest of the file stays as it is.
+    bool save(const std::string& path) const;
 };
 
 /// Finds monsters on screen.

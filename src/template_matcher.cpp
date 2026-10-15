@@ -710,6 +710,43 @@ bool TemplateStore::load_best(const std::string& name_map_ini) {
     return false;
 }
 
+bool TemplateStore::load_one(const std::string& name, const std::string& name_map_ini,
+                             Frame& out, std::string* from) {
+    // The file the short name stands for, in a set of files: its entry in the
+    // name map, or the name itself.
+    std::string file = name;
+    {
+        IniFile ini;
+        if (!name_map_ini.empty() && ini.load(name_map_ini))
+            file = ini.get("Templates", name, name);
+    }
+    std::replace(file.begin(), file.end(), '/', '\\');
+    const auto from_dir = [&](const std::string& dir) {
+        if (dir.empty()) return false;
+        const std::string path = dir + "\\" + file + ".png";
+        Frame f;
+        if (GetFileAttributesW(to_wide(path).c_str()) == INVALID_FILE_ATTRIBUTES ||
+            !read_png(to_wide(path), f) || !f.valid())
+            return false;
+        out = std::move(f);
+        if (from) *from = path;
+        return true;
+    };
+    if (from_dir(default_dir()) || from_dir(client_images())) return true;
+
+    // The helper's assembly names its own pictures as it loads them.
+    const std::string dll = helper_assembly();
+    TemplateStore store;
+    if (!dll.empty() && store.load_from_assembly(dll, {})) {
+        if (const Frame* f = store.get(name)) {
+            out = *f;
+            if (from) *from = dll;
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string TemplateStore::helper_assembly() {
     // Beside the executable first. This is the one file out of that whole
     // installation that this project reads -- the pictures are resources

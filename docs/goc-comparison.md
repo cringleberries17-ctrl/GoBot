@@ -56,7 +56,7 @@ depends on a server, a subscription or a login to anyone else.
 | GoC | | GoBot |
 |---|---|---|
 | Tự đánh — auto attack | ✓ | **Tự đánh quái**: walks to the nearest monster it can reach and hits it. |
-| Tự buff | ✓ | **Tự buff**: keys on a timer, every N minutes. |
+| Tự buff — each buff with its own cooldown in seconds; every buff cast again after a login ("Buff state reset") | ✓ | **Tự buff**: each buff key has its own interval in seconds (60–7200), as GoC's buff list has. After a death, a revive or logging back in — anything that keeps the character out of the world for 10 s or more — every buff is cast again, 1.5 s apart. A buff the game did not get (the keys held for a dialog, the game not in front) is tried again 2 s later instead of a whole interval later. Buffs never go out closer than 1.2 s. A seconds box turned down during a run counts from that key's last press. |
 | Nhặt đồ — press the pick-up key continuously | ✓ | **Tự nhặt đồ** *(new)*. Pressed a few times straight after each kill, and every 2 s while fighting. |
 | Chế độ lười — stand still | ✓ | **Đứng yên một chỗ** *(new)*. Attacks only what comes within reach. |
 | Đánh đúng hướng — face the target | ✓ | Turns to face before each swing. |
@@ -80,7 +80,7 @@ depends on a server, a subscription or a login to anyone else.
 | GoC | | GoBot |
 |---|---|---|
 | HP Heal / MP Heal, Lv1 and Lv2 — key and threshold each | ✓ | **Tự uống bình HP / MP**, key and threshold. A second tier is possible on the full screen; the simple screen shows the first. |
-| Tự động hồi sinh tại chỗ, Số lần thử | ✓ | **Tự hồi sinh** *(new)*. Watches for the death dialog and presses its revive button — three tries for each death, then it leaves it for five minutes rather than clicking all night. |
+| Tự động hồi sinh tại chỗ, Số lần thử | ✓ | **Tự hồi sinh**, the way GoC does it: the death panel is found by GoC's two button corners (dialog_Panic), **Sử dụng vật phẩm hồi sinh** is clicked, then Xác Nhận on the question — only at a death, once the panel has been seen, as GoC only looks for the OK after its own click on the panel; a look-alike question with nobody dead is left alone. The first click is aimed from a fresh look, taken once the mouse is free and the game in front. Three tries for each death (GoC's player_revive_max_attempts). Never the village button (−2% EXP), the Cash button or the Khóa ticks, and nothing at all while the trash bin's dialog is up — the revive question's picture is close to the bin's. When the three tries fail — most likely out of revive items — the whole bot stops and says why in red; GoC gives up silently. |
 | Pet Heal, Bơm liên tục, Hồi sinh pet, pet loot | ✗ | The pet pictures exist. |
 | Xử lý máu / mana cash | ✗ | |
 
@@ -111,7 +111,10 @@ depends on a server, a subscription or a login to anyone else.
 | Bật AutoLogin — log back in when disconnected; Kênh (1~8), Nhân vật (1~3) | ✓ | On the **Tự đăng nhập** tab: watches for the client exiting, hanging or showing an error box, ends it, presses Chơi game in VTCZone (starting VTCZone first when it is closed), and picks the channel and character. Like GoC it needs no account and no password: VTCZone stays signed in, and when it shows its sign-in form instead GoBot stops and says so rather than typing into it. With the game closed, BẮT ĐẦU opens it first. |
 | ClickLauncher2Start accepts "Security Alert" boxes (&Yes) | ✗ by choice | GoBot stops and says so: whether to trust a certificate is the player's call. |
 | ClickLauncher1Start restores a minimised VTCZone | ✓ | GoBot restores it too, and a window of the crossing that is minimised part way. |
-| — | ✓ | Before every click of the crossing GoBot brings that window to the front and checks the click would land on it. If another window is over the spot (a browser, a chat, GoBot itself) it waits and says what is in the way, and gives the attempt up after half a minute, rather than clicking whatever is on top. |
+| WaitForGameFocus / ExecuteStage — brings the game to the front and holds a stage until it has the focus | ✓ | GoBot does the same for every window of the crossing — VTCZone, the game's launcher and the game — and also checks that the exact point it is about to click lands on that window. If another window is over the spot (a browser, a chat, GoBot itself) it waits and says what is in the way, and gives the attempt up after 30 s, rather than clicking whatever is on top. A window kept over the game while a page or the HUD is awaited is named the same way, and a game dragged part off the screen is still looked at. |
+| Never goes back to VTCZone while a client is open; CheckGameClientOpen minimises VTCZone and brings the game forward | ✓ | Each attempt looks at the game and its launcher before VTCZone. While either is open GoBot never presses Chơi game — not even when VTCZone's own picture still shows it — and carries on from the game's own page; a game already in the world ends the crossing at once with nothing clicked (`gobot_cli --login` included). VTCZone is minimised once the game's window is up. |
+| KILL_GAME_PROCESS — a client it cannot place is ended and the sequence starts again | ✓ | A half-started game that stays on a screen the crossing does not know — none of its pages and no HUD — for the page's wait is ended the way a crashed one is, and after the cool-down the next attempt starts from VTCZone. Not after the last attempt: that one is left on screen for the player. |
+| A stage that cannot click its target is retried 3 times, then fails | ✓ | A click point outside its window — an offset typed wrong in configs/login.ini — is said at once, naming the `[Page.*]` to put right, rather than waited on and retried. |
 | — | ✓ | **Fixed in this round:** after logging back in GoBot now follows the new game window. Before, the client it started was a new window and everything still pointed at the old one, so the run the login saved stopped anyway. |
 | — | ✓ | GoBot gives up after five restarts and waits between them, so a locked account or a bad patch does not become a reconnect loop against the server. |
 
@@ -119,7 +122,7 @@ depends on a server, a subscription or a login to anyone else.
 
 | GoC | | GoBot |
 |---|---|---|
-| Không dừng Auto khi nhân vật chết | ✓ | GoBot never stops for a death. The keys hold while the HUD is gone — at a revive prompt, loading, disconnected — and carry on when it is back. |
+| Không dừng Auto khi nhân vật chết | ✓ | GoBot does not stop for a death it revives from: the keys hold while the HUD is gone — dead, loading, disconnected — and carry on when it is back, with every buff cast again. When **Tự hồi sinh** fails three times it stops everything, lets go of every key and says why — the player's rule: never revive in the village. (GoC stops at every death unless this is ticked.) |
 | Tự động focus cửa sổ game khi mất focus | ✓ | **New.** During a run, when something else has taken the focus and nobody has touched the mouse or keyboard for 30 s. Waiting for the machine to be idle is what stops it fighting a person for their own desktop. |
 | Trở về địa điểm cũ, Trở về map cũ, Sai số trở về | ✗ | Needs your position. |
 | Tự động fix tọa độ sau khi login | ✗ | Likewise. |
@@ -137,7 +140,7 @@ depends on a server, a subscription or a login to anyone else.
 | Mua sắm — buy potions from the Hawker / Người giữ sân, safe place first, exact quantity | ✗ | Click sequences exist for buying a rod and a pickaxe; potions are the same shape. |
 | Làm nhiệm vụ nhanh | — | Dropped: around seventy quest icons for one feature. |
 | Bật chat — messages on a timer | ✗ | |
-| Captcha | — | GoBot notices a captcha and holds; it does not answer them. |
+| Captcha — noticed by its packet, and answered | ✗ by choice | None, by the player's decision: GoBot neither watches for a captcha nor answers one, and nothing in it reacts to one. |
 
 ---
 

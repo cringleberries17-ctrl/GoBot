@@ -180,6 +180,16 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
         ClientToScreen(hwnd, &origin);
         HDC screen = GetDC(nullptr);
         if (!screen) return false;
+        // Black, rather than whatever the last frame left, wherever the copy
+        // does not reach: the part of a window dragged off the screen. An old
+        // picture of a page there would read as that page still being up.
+        // Only then: a window wholly on the screen is copied whole.
+        const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        if (origin.x < vx || origin.y < vy ||
+            origin.x + w > vx + GetSystemMetrics(SM_CXVIRTUALSCREEN) ||
+            origin.y + h > vy + GetSystemMetrics(SM_CYVIRTUALSCREEN))
+            std::memset(bits_, 0, static_cast<std::size_t>(w) * h * 4);
         ok = BitBlt(mem, 0, 0, w, h, screen, origin.x, origin.y, SRCCOPY);
         ReleaseDC(nullptr, screen);
         from_screen_ = true;
