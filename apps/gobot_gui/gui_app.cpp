@@ -1,4 +1,5 @@
 #include "gui_app.hpp"
+#include "gobot/alerts.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/routine.hpp"
 #include "gobot/session_manager.hpp"
@@ -118,6 +119,7 @@ GuiApp::~GuiApp() {
     stop_keeper();
     stop_revive();
     stop_trash();
+    stop_quest();
     // A look at the game for the bin, or for the chat line, may still be under
     // way; it reads the window handle and its own pictures, which go away
     // below. So may the login tab's look at VTCZone, with pictures of its own.
@@ -128,6 +130,9 @@ GuiApp::~GuiApp() {
     stop_macro();
     stop_bot();
     stop_capture();
+    // Last, once nothing is left to raise an alert: it ends a request under
+    // way and forgets the webhook's address.
+    alerts_shutdown();
 }
 
 void GuiApp::initialise() {
@@ -293,6 +298,7 @@ void GuiApp::initialise() {
     hunter_ = std::make_unique<Hunter>(input_, coord_, detector_);
     hunter_->set_config(hunt_config_);
     load_simple_options();
+    alerts_init();
 
     nav_config_.load(exe_relative("configs/hunt.ini"));
     places_.load(exe_relative("configs/waypoints.ini"));
@@ -350,6 +356,7 @@ void GuiApp::tick() {
         stop_party();
         stop_revive();
         stop_trash();
+        stop_quest();
         stop_keeper();
         input_.release_all();
         set_status("Panic stop -- all input released", 5000);
@@ -430,6 +437,7 @@ void GuiApp::tick() {
     // A keeper that ended without getting in leaves nothing to start.
     if (simple_cold_start_ && !keeper_running_) simple_cold_start_ = false;
     refocus_if_idle();
+    alerts_tick();
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -1570,7 +1578,8 @@ void GuiApp::draw_not_built_list() {
         { "TDO exchange",   "sixteen items, traded in a priority order" },
         { "Raid boss run",  "travel on a schedule and fight" },
         { "Profiles",       "named config sets, exportable" },
-        { "Telegram",       "a message when the session drops at 3am" },
+        { "Zalo",           "two-way control, later" },
+        { "Quest picking",  "choosing quests by picture, GoC's English-client way" },
     };
     for (const auto& p : kPending) {
         ImGui::Bullet();
@@ -1579,10 +1588,6 @@ void GuiApp::draw_not_built_list() {
         ImGui::SameLine();
         text_dim("-- %s", p.note);
     }
-
-    ImGui::Dummy(ImVec2(0, 8));
-    text_dim("Quick quest is deliberately dropped: around seventy quest icons, "
-             "more than every other feature put together.");
 
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button("Close", ImVec2(100, 0))) show_not_built_ = false;
@@ -2692,6 +2697,7 @@ void GuiApp::party_loop() {
                     say_party("accepted " + seen.who);
                     answered = seen.who;
                     ++party_accepted_;
+                    alert_party(true, seen.who);
                 }
             }
         }
@@ -2767,6 +2773,7 @@ void GuiApp::party_loop() {
                 }
                 say_party("invited " + who);
                 ++party_invited_;
+                alert_party(false, who);
             }
         }
 
@@ -2900,12 +2907,17 @@ void GuiApp::keeper_loop() {
         // open is left for the crossing to carry on from. It is one crossing
         // either way, and one that fails stops this.
         const bool cold = !seen_running && seen.what == CrashWatch::Trouble::Gone;
+        if (!cold)
+            alert("disconnect", alert_text::disconnect(seen.what, seen.code,
+                                                       keeper_restarts_ < watch_settings.max_restarts &&
+                                                       elevated_ && login.unidentified().empty()));
 
         if (!cold && keeper_restarts_ >= watch_settings.max_restarts) {
             const std::string n = std::to_string(keeper_restarts_.load());
             give_up("that is " + n + " restarts and it has gone again -- stopping, a person "
                     "is needed",
                     "Game văng " + n + " lần liền — GoBot ngừng tự vào lại. Cần người kiểm tra.");
+            alert("keeper_gave_up", alert_text::gave_up_restarts(keeper_restarts_));
             break;
         }
         if (captcha_up()) {
@@ -2949,6 +2961,7 @@ void GuiApp::keeper_loop() {
             give_up("the client is down and the crossing is not set up, so it cannot be "
                     "started again -- see configs/login.ini",
                     AutoLogin::advice(AutoLogin::Why::NotSetUp, pages));
+            alert("keeper_gave_up", alert_text::gave_up_not_set_up());
             break;
         }
 
@@ -2959,6 +2972,7 @@ void GuiApp::keeper_loop() {
                     "VTCZone or the game",
                     "GoBot không chạy bằng quyền Administrator nên không bấm được vào "
                     "VTCZone/game.");
+            alert("keeper_gave_up", alert_text::gave_up_not_elevated());
             break;
         }
 
@@ -2999,10 +3013,12 @@ void GuiApp::keeper_loop() {
             // Stop and ask, as before: the crossing has already used its
             // attempts, and the next try is for a person to decide.
             give_up("could not get back in: " + flow.trouble(), flow.advice());
+            alert("keeper_gave_up", alert_text::gave_up_crossing(flow.attempts_made(), flow.why()));
             break;
         }
         seen_running = true;
         note("back in the world");
+        if (!cold) alert("back_in", alert_text::back_in(keeper_restarts_, watch_settings.max_restarts));
         say_keeper_vi(cold ? "Đã vào game. Đang theo dõi game."
                            : "Đã vào lại game. Đang theo dõi game.");
         keeper_reattach_ = true;
@@ -3100,6 +3116,9 @@ void GuiApp::revive_loop() {
     bool said_waiting = false;
     constexpr int kTries = 3;
     constexpr std::uint64_t kRestMs = 5 * 60 * 1000;
+    // This death's alerts, and its score in the log, each said once: until the
+    // dialog has gone.
+    bool told_dead = false, told_failed = false, told_revived = false, logged = false;
 
     say_revive("watching");
     while (!revive_stop_) {
@@ -3112,13 +3131,32 @@ void GuiApp::revive_loop() {
 
         const auto hit = TemplateMatcher::find(
             frame, ScreenRect{ 0, 0, frame.width, frame.height }, *button, first.score);
-        if (!hit.found) { tries = 0; continue; }
+        if (!hit.found) { tries = 0; told_dead = told_failed = told_revived = logged = false; continue; }
+        // The score, once a sighting: whether the death alert goes turns on it,
+        // and a live test has to be able to see why it did not.
+        if (!logged) {
+            logged = true;
+            GB_INFO("Revive: the death dialog's picture matched at %.3f", static_cast<double>(hit.score));
+        }
+        // A death only on a close match that is not the bin's question, which
+        // the death dialog's picture also matches, at 0.85.
+        if (!told_dead && tries == 0 && now_ms() >= resting_until && hit.score >= 0.93f &&
+            !bag::bin_asking(frame, store)) {
+            told_dead = true;
+            alert("death", alert_text::death(true));
+        }
         if (now_ms() < resting_until) continue;
 
         if (tries >= kTries) {
             say_revive("the revive button was pressed " + std::to_string(kTries) +
                        " times and the dialog is still up -- leaving it for five "
                        "minutes; a person may be needed");
+            // Not for the bin's question, which the death dialog's picture
+            // matches too and which a revive press does not close: nobody
+            // died. A real death dialog matched under 0.93 is still told.
+            if (!told_failed && !bag::bin_asking(frame, store))
+                alert("revive_failed", alert_text::revive_failed(kTries));
+            told_failed = true;
             resting_until = now_ms() + kRestMs;
             tries = 0;
             continue;
@@ -3163,6 +3201,8 @@ void GuiApp::revive_loop() {
             ++revive_count_;
             tries = 0;
             say_revive("revived");
+            if (told_dead && !told_revived) alert("revived", alert_text::revived());
+            told_revived = true;
         } else {
             say_revive("the revive did not take: " + trouble);
         }
@@ -3244,6 +3284,7 @@ bool GuiApp::stop_trash() {
                     "cả đánh quái, bình và buff để không gõ phím vào đó. Bấm Hủy Bỏ trong game "
                     "rồi bấm BẮT ĐẦU.", 15000);
         GB_WARN("Trash: stopped while the bin may still hold an item; the keys are stopped too");
+        alert("trash_stuck", alert_text::trash_stuck(true));
         end_hold("trash cleaning");
         return true;
     }
@@ -4332,6 +4373,7 @@ void GuiApp::chat_loop() {
                 } else if (schedule.failures() >= settings.max_failures) {
                     tell(std::to_string(schedule.failures()) +
                          " lần liền không gửi được câu chat — Tự chat đã dừng.");
+                    alert("chat_stopped", alert_text::chat_stopped(schedule.failures()));
                     stopped_self = true;
                 }
             }

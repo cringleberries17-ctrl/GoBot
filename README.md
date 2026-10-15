@@ -119,7 +119,7 @@ otherwise.
 
 ## Getting started
 
-`gobot_gui.exe` opens on one simple screen, in Vietnamese, with five tabs.
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, with seven tabs.
 **Đánh quái** is laid out in the order things have to happen:
 
 1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
@@ -157,6 +157,46 @@ no dialog, and the fighting, potions and buffs wait for the few seconds a
 line takes -- and, when GoBot cannot see the chat line shut afterwards, for
 as long as that lasts, as every key would go into it. Nothing of GoBot's
 uses the clipboard.
+
+**Nhiệm vụ** is quick quest, done as GoC does it for this client: every few
+minutes of a run, GoBot opens the Nhiệm Vụ window with its key (U by default),
+goes to the NV Phụ tab and ticks the game's own **Tự Động** there if it is
+off, then closes the window again -- the fighting, potions and buffs wait
+those few seconds, and HP falling under the potion's mark ends a round at
+once. A timed round waits while the game is not the window in front; only
+*Làm ngay 1 lần* brings it forward. It reads the box before clicking, so an
+option already on is left alone, and it never clicks Hủy Nhiệm Vụ, the
+quest's accept, give-up or complete buttons, the low-level-quests checkbox
+or another tab, and types nothing; GoBot itself never accepts, hands in or
+picks a quest. *Thử xem* looks without pressing anything: open Nhiệm Vụ on
+NV Phụ by hand first, and it also says whether a round would click where it
+needs to. Three failed rounds in a row stop it, with the frames kept in
+`quest_debug` beside GoBot. The English client, whose quests GoC picks by
+picture, is not supported.
+
+**Thông báo** tells you when something needs a person: the character died
+(or was revived, or could not be), the game went and GoBot is logging back
+in (or gave up), the character has been out of the world for minutes, a stop
+left the trash bin's dialog or the chat line open, Tự chat or quick quest
+stopped itself.
+Each is one short message in Vietnamese to a Discord channel of yours,
+through a webhook, so the Discord app on your phone shows it, and a beep and
+a Windows notification on this PC that never take the focus from the game.
+Every event has its own tick; repeats within a minute come as one message
+(×N), at most 5 go a minute and, unless one needs a person, 30 an hour, and
+what could not go while the network was down goes when it is back, with its
+own time. A message is fixed
+sentences and numbers only: never your account, a password, your character's
+name, the map or position, a screenshot or another player's words -- a party
+message names the other player only if you tick that.
+
+The webhook is a secret: whoever has it can post in your channel. Paste it on
+the tab and GoBot keeps it encrypted by Windows (DPAPI), for your Windows
+account on this PC only, in `%LOCALAPPDATA%\GoBot\alerts_webhook.bin` --
+outside the GoBot folder, so copying or zipping GoBot never takes it along,
+and never in a log or in `configs/alerts.ini`. The tab shows only its last
+four characters. **Xoá webhook** on the tab deletes it; so does deleting that
+file. Alerts are off until **Bật thông báo** is ticked.
 
 Settings save themselves as they change. Everything else — every timer, the
 radar, the packet tools — is under **Nâng cao ►** at the bottom, and

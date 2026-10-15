@@ -767,7 +767,8 @@ private:
     bool simple_running() const {
         return macro_running_ || hunting_ || party_running_ || keeper_running_ ||
                revive_running_ || (trash_running_ && !trash_oneshot_) ||
-               (chat_running_ && !chat_oneshot_ && !chat_stop_);
+               (chat_running_ && !chat_oneshot_ && !chat_stop_) ||
+               (quest_running_ && !quest_oneshot_);
     }
 
     /// The tabs. Fighting is what the whole screen used to be.
@@ -908,6 +909,54 @@ private:
     std::uint64_t simple_stopped_ms_ = 0;
     std::uint64_t simple_base_finished_ = 0;     ///< the hunter's tally when the run began
     std::vector<std::uint64_t> simple_base_presses_;   ///< the macro's, per key
+
+    // ---- alerts ----
+    /// When something needs a person -- the character died, the game went,
+    /// the bot stopped itself -- one short message to the player's Discord,
+    /// and a beep and a Windows notification here. Lives in simple_alerts.cpp.
+    ///
+    /// The one way any part of GoBot raises an alert, from any thread: it
+    /// writes the one 'ALERT <event>: <text>' line to the log and hands the
+    /// rest to the alert service, which neither waits nor touches the network
+    /// on the caller's thread. `event` is one of alert_events()' keys.
+    void alert(const char* event, const std::string& text_vi);
+    /// A party joined or a player invited: the name goes only when the
+    /// Thông báo tab allows other players' names.
+    void alert_party(bool joined, const std::string& who);
+    void alerts_init();          ///< from initialise(): the settings and the saved webhook
+    void alerts_tick();          ///< from tick(): what is noticed by watching, and the beeps
+    void alerts_shutdown();      ///< from ~GuiApp, once every worker has stopped
+    void simple_alerts_tab();
+    /// The tab's dot: alerts on, and Discord not refusing the webhook.
+    bool alerts_dot() const;
+    struct AlertsUi;
+    struct AlertsUiFree { void operator()(AlertsUi* ui) const; };
+    std::unique_ptr<AlertsUi, AlertsUiFree> alerts_ui_;
+
+    // ---- quick quest ----
+    /// "Làm nhiệm vụ nhanh", as GoC does it for this client: every few minutes
+    /// of a run, open the Nhiệm Vụ window, go to NV Phụ and tick the game's own
+    /// Tự Động there if it is off, with everything else held off for those few
+    /// seconds. One thread for the timed rounds and for the tab's two buttons;
+    /// started for a button alone, it does that and ends. Lives in
+    /// simple_quest.cpp.
+    void start_quest();                   ///< the timed rounds, for a run
+    void request_quest(bool look_only);   ///< one round now, or a look that presses nothing
+    void stop_quest();                    ///< at once: nothing more is pressed
+    void quest_loop();
+    void say_quest(const std::string& line);
+    void simple_quest_tab();
+    std::thread              quest_thread_;
+    std::atomic<bool>        quest_running_{false};
+    std::atomic<bool>        quest_stop_{false};
+    std::atomic<bool>        quest_oneshot_{false};   ///< here for one asked-for round or look
+    std::atomic<bool>        quest_restart_{false};   ///< a one-off turned into a run
+    std::atomic<int>         quest_request_{0};       ///< 1 one round now, 2 look only
+    /// Held for turning a worker into a run, and by the worker on its way out.
+    std::mutex               quest_life_mutex_;
+    struct QuestUi;
+    struct QuestUiFree { void operator()(QuestUi* ui) const; };
+    std::unique_ptr<QuestUi, QuestUiFree> quest_ui_;
 
     // ---- status ----
     std::string status_message_;

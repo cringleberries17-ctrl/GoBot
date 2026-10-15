@@ -22,6 +22,7 @@
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/quick_quest.hpp"
 #include "gobot/session_manager.hpp"
 
 #include "imgui.h"
@@ -315,7 +316,7 @@ void GuiApp::draw_simple_view() {
     ImGui::BeginChild("##column", ImVec2(width, 0), ImGuiChildFlags_None);
     ImGui::PopStyleColor();
 
-    // Five tabs, fighting first: it is what most people open this for. The
+    // The tabs, fighting first: it is what most people open this for. The
     // others run beside it, and the start button under the tabs starts
     // whichever of them is switched on. A dot on a tab says it is running.
     ImGui::Dummy(ImVec2(0, 4));
@@ -350,6 +351,17 @@ void GuiApp::draw_simple_view() {
         if (tab("Dọn rác", trash_running_, "trash")) {
             ImGui::Dummy(ImVec2(0, 4));
             simple_trash_tab();
+            ImGui::EndTabItem();
+        }
+        if (tab("Nhiệm vụ", quest_running_ && !quest_oneshot_, "quest")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_quest_tab();
+            ImGui::EndTabItem();
+        }
+        // Last: it watches the others rather than doing anything itself.
+        if (tab("Thông báo", alerts_dot(), "alerts")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_alerts_tab();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -1050,6 +1062,7 @@ void GuiApp::simple_start_block() {
     }
     if (chat_running_ && !chat_oneshot_ && !chat_stop_)
         hint(("Tự chat: đang bật, đã gửi " + std::to_string(chat_sent_.load()) + " câu.").c_str());
+    if (quest_running_ && !quest_oneshot_) hint("Làm nhiệm vụ nhanh: đang bật.");
     // Said here too, by the button: it is why the fighting has stopped.
     if (chat_doubt_)
         coloured(kWait, "Ô chat trong game có thể đang mở: đánh quái, bình và buff chờ đến khi ô chat "
@@ -1152,8 +1165,10 @@ void GuiApp::simple_start() {
     const bool trash = clean.load(exe_relative("configs/trash.ini")) && clean.enabled;
     ChatSettings chat_rules;
     const bool chat = chat_rules.load(exe_relative("configs/chat.ini")) && chat_rules.enabled;
+    QuestSettings quest_rules;
+    const bool quest = quest_rules.load(exe_relative("configs/quest.ini")) && quest_rules.enabled;
     if (!any_key && !hunt_config_.enabled && !party && !simple_opts_.keep_alive &&
-        !simple_opts_.revive && !trash && !chat) {
+        !simple_opts_.revive && !trash && !chat && !quest) {
         simple_note("Chưa chọn việc nào. Đánh dấu ít nhất một việc ở phần \"Bot sẽ làm gì\".");
         return;
     }
@@ -1215,6 +1230,8 @@ void GuiApp::simple_start_jobs() {
     // start this runs minutes later, and the tab may have changed it since.
     ChatSettings chat_rules;
     const bool chat = chat_rules.load(exe_relative("configs/chat.ini")) && chat_rules.enabled;
+    QuestSettings quest_rules;
+    const bool quest = quest_rules.load(exe_relative("configs/quest.ini")) && quest_rules.enabled;
 
     // Nothing at all starts while a stop may have left the bin's dialog, or
     // the game's chat line, open: the macro and the hunter would press keys
@@ -1245,6 +1262,7 @@ void GuiApp::simple_start_jobs() {
     if (simple_opts_.revive) start_revive();
     if (trash) start_trash();
     if (chat) start_chat();
+    if (quest) start_quest();
     simple_note("Đã bắt đầu.");
 }
 
@@ -1260,6 +1278,7 @@ void GuiApp::simple_stop() {
     stop_macro();
     stop_party();
     stop_revive();
+    stop_quest();
     // Not said over the word that the bin's dialog may still be open.
     const bool bin_note = stop_trash();
     stop_keeper();

@@ -443,6 +443,24 @@ Get-ChildItem (Join-Path $stage 'configs') -Filter *.ini | ForEach-Object {
     foreach ($h in $hits) { $problems += "$($_.Name):$($h.LineNumber) points at this machine: $($h.Line.Trim())" }
 }
 
+# 6. No Discord webhook may travel with the package.
+#
+# The alerts keep the player's webhook encrypted outside the program folder,
+# in %LOCALAPPDATA%\GoBot, so nothing staged here should ever hold one. A file
+# that does -- a config it was pasted into, a stray copy of the encrypted
+# file -- would let whoever unzips this post in that player's channel. The
+# address itself is not printed: the build log is no place for it either.
+$hookPattern = '(discord|discordapp)\.com/api/(v\d+/)?webhooks/\d'
+Get-ChildItem $stage -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($stage.Length + 1)
+    if ($_.Name -ieq 'alerts_webhook.bin') {
+        $problems += "$rel is a saved Discord webhook -- it must never ship"
+    } elseif ($_.Extension -ine '.png') {
+        $hit = Select-String -LiteralPath $_.FullName -Pattern $hookPattern -List
+        if ($hit) { $problems += "${rel}:$($hit.LineNumber) holds a Discord webhook address -- it must never ship" }
+    }
+}
+
 if ($problems) {
     Write-Host ""
     $problems | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }

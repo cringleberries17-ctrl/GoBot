@@ -43,6 +43,7 @@
 #include "gobot/clr_bridge.hpp"
 #include "gobot/dialog_driver.hpp"
 #include "gobot/party.hpp"
+#include "gobot/quick_quest.hpp"
 #include "gobot/routine.hpp"
 #include "gobot/session_manager.hpp"
 #include "gobot/template_matcher.hpp"
@@ -106,6 +107,7 @@ bool running_as_admin() {
 }
 
 void print_usage() {
+    // In more than one piece: MSVC refuses any one string literal over 16 KB.
     std::printf(R"(gobot_cli — GhostOnline packet-capture bot
 
 USAGE
@@ -310,6 +312,40 @@ UNATTENDED RUNNING
                       left_open=1 says those looks still could not see it
                       shut, so look at it before pressing a key in the game.
   --chat <text>       The same with these words, for a person at a console.
+)" R"(  --quest-probe       Look for the quick quest window, as the Nhiệm vụ tab's
+                      Thử xem does: open Nhiệm Vụ by hand on NV Phụ first.
+                      Says whether the window, its tabs and Tự Động are seen,
+                      with their scores, and whether Tự Động's box is ticked.
+                      Presses nothing; keeps the frame in quest_debug as
+                      probe_<time>.png. Also says whether a round would click
+                      the two points it would have to -- NV Phụ, and Tự Động
+                      -- or refuse them for lying on a place it never clicks
+                      (Hủy Nhiệm Vụ, the quest buttons, another tab, outside).
+                      The last line is
+                        QUEST PROBE window=<0|1> at=x,y title=<s> tabs=<s>
+                                    tabs_en=<s> skin=<vi|en> tab_ok=<0|1>
+                                    auto=<0|1> at=x,y score=<s>
+                                    state=<on|off|unknown> on=<s> off=<s>
+                                    click_ok=<0|1>
+                      and it exits 0 when the window and Tự Động were found
+                      and both points may be clicked.
+  --quest-once        One quick quest round against the live game, as the tab's
+                      Làm ngay 1 lần makes it: the game brought to the front,
+                      the window opened with configs/quest.ini's quest_key if
+                      it is shut, NV Phụ clicked, Tự Động clicked only if its
+                      box is off, and the window closed again if this opened
+                      it -- two keys and two clicks at most. Every step is
+                      printed; the last line is
+                        QUEST RESULT outcome=<name> keys=<n> clicks=<n>
+                                     opened=<0|1> left_open=<0|1>
+                                     maybe_open=<0|1>
+                      and it exits 0 when Tự Động ends ticked and the window
+                      is not left open. maybe_open=1: the key went in and no
+                      quest window came up, so whatever it opened, if
+                      anything, is still there. Refuses while gobot_gui runs,
+                      and a quest_key that is one of GoBot's own switches in
+                      macro.ini or hunt.ini. Ctrl+C stops it at the next key
+                      or click, pressing nothing more.
   --method <m>        With --chat-once or --chat: type with vk (a key per
                       character, GoC's way), unicode, wmchar or imechar
                       instead of chat.ini's method. Every method but vk keeps
@@ -398,6 +434,8 @@ struct Options {
     bool chat_given = false;        ///< --chat, even with nothing after it
     std::string chat_text;          ///< --chat, said as given
     std::string chat_method;        ///< --method; empty for chat.ini's
+    bool quest_probe = false;       ///< --quest-probe: look, press nothing
+    bool quest_once = false;        ///< --quest-once: one quick quest round
     bool dry_run = false;
     bool close_popups = false;
     bool party = false;
@@ -510,6 +548,8 @@ bool parse_args(int argc, char** argv, Options& o) {
             }
         }
         else if (a == "--chatcheck") o.chat_check = true;
+        else if (a == "--quest-probe") o.quest_probe = true;
+        else if (a == "--quest-once") o.quest_once = true;
         else if (a == "--chat-once") o.chat_once = true;
         else if (a == "--chat")      { o.chat_text = next("--chat"); o.chat_given = true; }
         else if (a == "--method") {
@@ -2764,6 +2804,166 @@ int run_chat(const Options& o, const AppConfig& app) {
     return finish(r.sent, still_doubt, r.trouble);
 }
 
+/// What the Nhiệm vụ tab's Thử xem sees, looked at once: the quest window, its
+/// tabs, Tự Động and its box, with the numbers that decided each. Nothing is
+/// pressed and the game is not brought forward -- the window is opened by
+/// hand first, on NV Phụ. For the live test's first step, which settles
+/// whether GoC's pictures fit the live client at all.
+int run_quest_probe(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    const auto result = [](const QuestProbe& p) {
+        std::fflush(stderr);
+        std::printf("QUEST PROBE window=%d at=%d,%d title=%.3f tabs=%.3f tabs_en=%.3f skin=%s tab_ok=%d "
+                    "auto=%d at=%d,%d score=%.3f state=%s on=%.3f off=%.3f click_ok=%d\n",
+                    p.window.found ? 1 : 0, p.window.at.x, p.window.at.y,
+                    static_cast<double>(p.window.score), static_cast<double>(p.window.tabs),
+                    static_cast<double>(p.window.tabs_en), p.window.english ? "en" : "vi",
+                    p.tab_ok ? 1 : 0, p.option.found ? 1 : 0, p.option.at.x, p.option.at.y,
+                    static_cast<double>(p.option.score), auto_state_name(p.option.state),
+                    static_cast<double>(p.option.on), static_cast<double>(p.option.off),
+                    p.click_ok ? 1 : 0);
+        std::fflush(stdout);
+    };
+    const auto give_up = [&](const std::string& why) {
+        say(why);
+        result(QuestProbe{});
+        return 1;
+    };
+
+    QuestSettings settings;
+    if (!settings.load(resolve("configs/quest.ini")))
+        say("no configs/quest.ini, so going by the built-in settings");
+    QuestPictures pictures;
+    std::string from;
+    if (!pictures.load_best(settings, &from)) return give_up(quest_missing_vi(pictures));
+    say("pictures from " + from +
+        (pictures.knows_en() ? "" : " (the English client's are missing, so it cannot be told apart)"));
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game.");
+    ScreenCapture capture;
+    Frame frame;
+    if (!capture.grab(input.target_window(), frame) || !frame.valid())
+        return give_up("Chưa chụp được màn hình game.");
+
+    const QuestProbe p = probe_quest(frame, pictures, settings);
+    say(p.log);
+    say(p.vi);
+    const std::string kept = keep_quest_frame(exe_relative("quest_debug"), frame, "", true);
+    if (!kept.empty()) say("kept the frame as " + kept);
+    result(p);
+    // Found is not enough: a round refuses a point on a place it never clicks.
+    return p.window.found && p.option.found && p.tab_ok && p.click_ok ? 0 : 1;
+}
+
+/// One quick quest round against the live game, as the Nhiệm vụ tab's Làm
+/// ngay 1 lần makes it: the same settings, pictures, checks, keys and clicks.
+///
+/// What this cannot do is hold the rest of the bot off, as the GUI does: it is
+/// a process of its own. So it will not run while the GUI runs.
+int run_quest_once(const Options& o, const AppConfig& app) {
+    const auto say = [](const std::string& line) {
+        std::fflush(stderr);
+        std::printf("%s %s\n", clock_text().c_str(), line.c_str());
+        std::fflush(stdout);
+    };
+    const auto finish = [](const QuestResult& r) {
+        std::fflush(stderr);
+        std::printf("QUEST RESULT outcome=%s keys=%d clicks=%d opened=%d left_open=%d maybe_open=%d\n",
+                    quest_outcome_name(r.outcome), r.keys_pressed, r.clicks, r.opened_by_us ? 1 : 0,
+                    r.left_open ? 1 : 0, r.maybe_open ? 1 : 0);
+        std::fflush(stdout);
+        return r.done() ? 0 : 1;
+    };
+    // Before anything is pressed.
+    const auto give_up = [&](const std::string& why) {
+        say(why);
+        QuestResult r;
+        r.outcome = QuestOutcome::NotNow;
+        return finish(r);
+    };
+
+    // Not while the GUI runs: its fighting keys and clicks, pressed while
+    // this has the window open, would land on it.
+    if (SessionManager::process_running("gobot_gui.exe"))
+        return give_up("gobot_gui đang chạy — đóng GoBot trước khi thử từ dòng lệnh: trong lúc làm, "
+                       "bot ở đó vẫn bấm phím và chuột vào game.");
+    QuestSettings settings;
+    if (!settings.load(resolve("configs/quest.ini")))
+        say("no configs/quest.ini, so going by the built-in settings");
+    if (settings.skin == QuestSettings::Skin::En)
+        return give_up("Bản game tiếng Anh: chưa hỗ trợ (cần chọn nhiệm vụ như GoC).");
+    // Not one of GoBot's own switches, which a GoBot watching for them --
+    // another gobot_cli, or one started meanwhile -- would take for the
+    // player's press: the panic key stops everything.
+    {
+        MacroConfig macro;
+        macro.load(resolve("configs/macro.ini"));
+        HunterConfig hunt;
+        hunt.load(resolve("configs/hunt.ini"));
+        const std::string clash = quest_key_clash_vi(
+            settings.quest_key, { macro.toggle_key, macro.panic_key, hunt.toggle_key });
+        if (!clash.empty()) return give_up("Không làm: " + clash + ".");
+    }
+    QuestPictures pictures;
+    std::string from;
+    if (!pictures.load_best(settings, &from)) return give_up(quest_missing_vi(pictures));
+    say("pictures from " + from);
+
+    InputManager input;
+    if (!attach_window(input, o, app)) return give_up("Chưa thấy cửa sổ game.");
+    input.release_all();
+    if (!input.window_focused()) {
+        input.focus_window();
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    if (!input.window_focused())
+        return give_up("Không đưa được game lên trước: bấm vào cửa sổ game rồi chạy lại.");
+    say("quest key " + InputManager::key_name(settings.quest_key) + "; Ctrl+C stops it at the next "
+        "key or click");
+
+    ScreenCapture capture;
+    QuestRound::Hands hands;
+    hands.grab = [&](Frame& f) { return capture.grab(input.target_window(), f) && f.valid(); };
+    hands.key = [&](std::uint32_t vk, int hold_ms) {
+        return input.window_focused() && input.key_press(vk, hold_ms);
+    };
+    // Only with the game in front and the game itself under the point: the
+    // frames come from PrintWindow, which shows the game even when covered.
+    hands.click = [&](int x, int y) {
+        if (!input.window_focused()) return false;
+        HWND game = static_cast<HWND>(input.target_window());
+        POINT p{ x, y };
+        if (game == nullptr || !ClientToScreen(game, &p)) return false;
+        HWND under = WindowFromPoint(p);
+        if (under == nullptr || (under != game && GetAncestor(under, GA_ROOT) != game)) return false;
+        return input.click_at(x, y);
+    };
+    hands.move = [&](int x, int y) { return input.move_pointer(x, y); };
+    hands.now = [] { return now_ms(); };
+    hands.sleep = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
+    hands.stop = [] { return g_stop.load(); };
+
+    QuestRound round(pictures, settings, hands);
+    round.on_report(say);
+    const QuestResult r = round.run();
+    say(quest_result_vi(r, InputManager::key_name(settings.quest_key)) + ".");
+    if (r.failed() || r.outcome == QuestOutcome::Cancelled) {
+        const std::string kept =
+            keep_quest_frame(exe_relative("quest_debug"), r.last, quest_outcome_name(r.outcome), false);
+        if (!kept.empty()) say("kept the frame as " + kept);
+    }
+    if (r.left_open) say("Cửa sổ Nhiệm Vụ có thể vẫn đang mở: xem trong game trước khi bấm phím nào.");
+    if (r.maybe_open)
+        say("Phím đã bấm mà không thấy cửa sổ Nhiệm Vụ: có thể đã mở một cửa sổ khác mà GoBot không "
+            "nhận ra — xem trong game trước khi bấm phím nào.");
+    return finish(r);
+}
+
 /// List the routines, or run one.
 ///
 /// With --dry it finds each step's picture and says where it would click,
@@ -4766,6 +4966,8 @@ int main(int argc, char** argv) {
     if (opt.trash) return run_trash(opt, app);
     if (opt.chat_check) return run_chat_check(opt, app);
     if (opt.chat_once || opt.chat_given) return run_chat(opt, app);
+    if (opt.quest_probe) return run_quest_probe(opt, app);
+    if (opt.quest_once) return run_quest_once(opt, app);
     if (opt.set_login) return run_set_login(opt);
     if (opt.login) return run_login(opt, app);
     if (opt.keepalive_minutes > 0) return run_keepalive(opt, app, opt.keepalive_minutes);

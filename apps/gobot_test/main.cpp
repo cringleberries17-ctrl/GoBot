@@ -8354,6 +8354,11 @@ void test_protocol_handler() {
 
 } // namespace
 
+// The alerts' tests, in alerts_test.cpp, reporting through check() and section().
+void test_alerts(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Quick quest's, in quest_test.cpp, the same way.
+void test_quest(void (*check)(bool, const std::string&), void (*section)(const char*));
+
 int main() {
     Logger::instance().set_level(LogLevel::Error);   // keep test output readable
 
@@ -8408,6 +8413,8 @@ int main() {
     test_bag_counts();
     test_bag_dialogs();
     test_auto_chat();
+    test_alerts(check, section);
+    test_quest(check, section);
     test_config();
     test_protocol_handler();
 

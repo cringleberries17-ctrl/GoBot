@@ -172,6 +172,8 @@ add_library(gobot_core STATIC
     src/auto_login.cpp
     src/bag.cpp
     src/auto_chat.cpp
+    src/alerts.cpp
+    src/quick_quest.cpp
     src/dialog_driver.cpp
     src/routine.cpp
     src/gatherer.cpp
@@ -198,7 +200,9 @@ target_include_directories(gobot_core
 target_link_libraries(gobot_core
     PUBLIC  Npcap::Npcap
     # normaliz: NormalizeString, which takes the marks off a chat line.
-    PRIVATE ws2_32 iphlpapi user32 gdiplus normaliz
+    # winhttp and crypt32: the Discord alerts' webhook, posted over HTTPS and
+    # kept encrypted with DPAPI -- the two GoC itself uses for the same jobs.
+    PRIVATE ws2_32 iphlpapi user32 gdiplus normaliz winhttp crypt32
 )
 
 if(GOBOT_USE_OPENCV)
@@ -250,6 +254,8 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/main.cpp
         apps/gobot_gui/gui_app.cpp
         apps/gobot_gui/simple_view.cpp
+        apps/gobot_gui/simple_alerts.cpp
+        apps/gobot_gui/simple_quest.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"
@@ -308,7 +314,8 @@ endif()
 # ---------------------------------------------------------------- self-tests
 # Covers the layers that can be checked without the game running: framing,
 # reassembly, packet decoding, world model, pathfinding.
-add_executable(gobot_test apps/gobot_test/main.cpp)
+add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.cpp
+                          apps/gobot_test/quest_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --
