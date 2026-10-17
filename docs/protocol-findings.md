@@ -239,6 +239,11 @@ parsed by all three config readers, and covered by `test_frame_trailer()`.
 Confirmed live: `gobot_sniff --watch` now reports **482 frames, 0 resync bytes**
 over 20 seconds where it previously resynced hundreds of times.
 
+**Update 2026-10-17:** GoC does not treat those 12 bytes as a trailer. Its parser
+reads a whole game frame from byte 13 up to the declared length + 12. See
+[§4d](#4d-what-gocs-own-parser-does-2026-10-17). The framing above stays
+correct; what it throws away is content.
+
 The full server vocabulary is visible for the first time:
 
 | opcode | count / 20 s | size |
@@ -316,6 +321,15 @@ This is the same conclusion §4b reached, but it was an artifact there and is
 evidence here: 15 server opcodes and every client opcode, correctly framed,
 against real ground truth.
 
+**Caveat, 2026-10-17:** none of these searches looked inside `0x0081`. The
+trailer fix keeps the framing aligned but discards what GoC's own parser treats
+as a wrapped game frame ([§4d](#4d-what-gocs-own-parser-does-2026-10-17)).
+`0x0081` is the second most common server opcode (125 per 20 s in §4b). No
+capture included UDP either, and GoC's client reads your position from two
+opcodes, `0x0027` and `0x002A`, that never appear in GoBot's captures (§4d). So
+the conclusion holds for the opcodes that were searched, not yet for the stream
+as a whole.
+
 ### Useful by-product
 
 `0x003F` gives other players' ids, positions and facing **directly**. GoBot
@@ -323,7 +337,125 @@ currently finds them by OCR of the player list, which `START-HERE.txt` records
 as unreliable ("ExampleWin" → "Exampley in"). Mapping `0x003F` retires that for
 anything positional, and is worth doing regardless of the position question.
 
+## 4d. What GoC's own parser does (2026-10-17)
+
+From a full decompile of `GhostCore.dll`: `PacketCapture::ProcessPacket`,
+`ProcessPacketStream` and `ExtractGamePacket`. This is static reading; nothing
+was run. The rest of the decompile is summarised in
+[goc-reference.md](goc-reference.md#code-level-findings-full-decompile-2026-10-17).
+
+**Frame header, as GoC reads it.** It reads the marker u16 at 0 (`0x0005` in
+`configs/protocol.ini`), the opcode as a u16 at 2, and the total frame length
+(header included) as a u16 at 4. It does not check the checksum at 6 that
+GoBot's spec verifies. GoC captures TCP and UDP on the server's port range and
+reassembles each connection, keeping a partial frame for the next segment.
+
+### `0x0081` is a wrapper
+
+For opcode `0x0081` the frame occupies its declared length + 12 bytes: the
+"12-byte trailer" of §4b. GoC then takes bytes 13 to the end as **a complete
+inner game frame**, with its own header, opcode and length, and handles it like
+any other frame:
+
+- it checks the inner frame against the opcode allow-list;
+- it runs the character-select, login and captcha hooks on it;
+- it forwards it to its server.
+
+If the inner opcode is `0x0081` again, GoC unwraps that too. Its log strings
+call these "sub-packets".
+
+One rule GoC applies is not understood: when an `0x0081` frame's marker reads
+`0x0020` instead of `0x0005`, it stops parsing the rest of that TCP segment.
+
+GoBot keeps bytes 8 to the declared length as the payload (its header is 8
+bytes) and drops the last 12 (`src/framing.cpp:187-196`). So for every `0x0081`
+it reads a payload that starts 5 bytes before the inner frame and is cut 12
+bytes short, and it never decodes the inner frame.
+
+**Why it matters.** In §4b, `0x0081` arrived 125 times per 20 s, second only to
+`0x0038`, at 16–28 bytes: about the size of a small movement or stat update.
+§4c's conclusion that your own position is never sent was reached without
+looking inside any of them. GoC's server shows your position, HP/MP, fury, level,
+EXP and avatar time, all derived from the frames GoC uploads. Any of those not
+found in the plain opcodes may be inside `0x0081`. That is an inference, not
+confirmed.
+
+### GoC also captures UDP
+
+GoC's capture filter is `(tcp or udp)` on the server's port range, and it frames
+UDP payloads the same way as TCP. It drops `0x002E` and `0x0031` when they arrive
+over UDP. GoBot's filter is `tcp` only (`src/packet_capture.cpp:202`), so no
+GoBot capture has ever contained the game's UDP traffic, if there is any.
+
+### Your position, as GoC's client reads it
+
+ZTeam's server relays some raw game packets back to the client: message `0x13`,
+carrying the opcode, the length and the bytes. go_client.exe (`FUN_1400c1e90`)
+handles two of them and writes the result straight into your position
+(`FUN_1400b9320`):
+
+| Opcode | Minimum size | Your x, y |
+|---|---|---|
+| `0x0027` (a move) | 29 bytes | floats at bytes 16 and 20 |
+| `0x002A` (a jump) | 36 bytes | floats at bytes 20 and 24 |
+
+It is not known whether those offsets count the 8-byte frame header. If they do,
+the floats sit at payload offsets 8 and 12 (move) or 12 and 16 (jump).
+
+Neither opcode appears in any capture GoBot has made: not in the client-side
+inventory of §2, and not in the server table of §4b. So they travel somewhere
+GoBot has not looked. They could be inside `0x0081`: if §4b's 16–28 B are
+payload sizes, its inner frames are about 23–35 bytes, the right size. Or they
+could come over UDP.
+
+The map-change message GoC receives (`0x12`) also carries your x, y on the new
+map as floats. So the game's own map-load packet holds an absolute position as
+well.
+
+### Other opcodes GoC names in code
+
+| Opcode | What GoC does with it |
+|---|---|
+| `0x0014` | Character selected (inside `0x0081`) or channel switch (plain), during auto login |
+| `0x0038`, `0x0042`, `0x0051` | Login or map load done; watched only during auto login |
+| `0x073D` | Captcha: starts its solver |
+| `0x002E`, `0x0031` | Dropped when they arrive over UDP |
+| `0x005B` | Logged |
+
+`0x0038` is also the monster `EntityUpdate` of §6. GoC's hook fires on it only
+during auto login, where the first one means the world has loaded.
+
+### Text encodings
+
+GoC flags monsters whose name contains "ThậpNhịYêu". It looks for that name in
+three spellings: UTF-8, GBK, and a form where each non-ASCII letter is its
+two-byte UTF-16 code. So names in the stream may not all use one encoding.
+
+### What ZTeam's server extracts
+
+These are the fields its decoders return, so each of them is somewhere in the
+stream. The types are those of GoC's own messages, not necessarily the game's.
+
+- **You:** session id, HP and max HP, MP and max MP, fury and max fury, x and y
+  (floats), moving, facing, avatar state, avatar seconds left.
+- **Each monster:** id, position, about a dozen 16-bit stats, name.
+- **Movement:** player move (session id, x, y, moving, facing) and player jump.
+- **Spell results:** spell id, session id, status (0 = success).
+- **Other:** level (u16) and EXP (i32); party members' HP; pet HP and pet death;
+  chat lines (sender, channel, text); warp-gate areas; map changes.
+
+### What can be tested now
+
+Checked on 2026-10-17. The only capture still on disk,
+`build/bin/Release/last_capture.s2c`, holds 246 frames (`0x0038` ×221, `0x03C6`
+×25) and no `0x0081` at all. The `probe`, `walk`, `track`, `stand` and
+`hunt.flow0` captures are gone. Testing the lead needs one new recording that
+includes UDP, which is plan item P0-2 in [goc-parity-plan.md](goc-parity-plan.md).
+
 ## 5. The capture that settles it
+
+**Note, 2026-10-17:** §4b has since refuted the offsets 13–14 lead below. The
+next capture to take is the one in [§4d](#4d-what-gocs-own-parser-does-2026-10-17).
 
 The existing data cannot answer §2 because nothing in it moved far enough. What
 is needed is one deliberate session, in one map, on one connection:
