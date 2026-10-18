@@ -1123,8 +1123,10 @@ void GuiApp::on_packets(const std::vector<GamePacket>& all) {
             }
         }
     }
-    // Calibration needs the raw stream regardless of what is mapped, so it is
-    // fed before the protocol layer filters anything out.
+    // Calibration is fed every frame off the TCP stream whatever is mapped,
+    // before the protocol layer drops the opcodes it has no layout for -- but
+    // not the frames held back above: what it finds is keyed by opcode, as
+    // the tables are, and becomes a layout the bot acts on.
     if (calibrator_ && calibrator_->running()) calibrator_->on_packets(packets);
 
     if (protocol_) protocol_->on_packets(packets);

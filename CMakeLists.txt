@@ -260,6 +260,29 @@ target_link_libraries(gobot_sniff PRIVATE gobot_core)
 gobot_require_admin(gobot_sniff)
 gobot_delay_npcap(gobot_sniff)
 
+# --------------------------------------------- the same, for recordings only
+# gobot_sniff's commands that read files, built from the same source with
+# everything that captures left out (GOBOT_SNIFF_FILES_ONLY). Recordings are
+# analysed afterwards by agents that can never answer a UAC prompt, and
+# gobot_sniff asks for one on every start, because capturing needs it.
+#
+# So this one asks for nothing -- no gobot_require_admin -- and calls nothing
+# in wpcap.dll, which is then not among its imports at all, delay-loaded or
+# otherwise: gobot_delay_npcap would only warn that it found none to delay.
+# The check after the link holds it to both, and removes a build that breaks
+# either.
+#
+# A developer's tool: package.ps1 ships gobot_gui and gobot_cli alone, and
+# it is not installed.
+add_executable(gobot_sniff_files apps/gobot_sniff/main.cpp)
+target_link_libraries(gobot_sniff_files PRIVATE gobot_core)
+target_compile_definitions(gobot_sniff_files PRIVATE GOBOT_SNIFF_FILES_ONLY=1)
+add_custom_command(TARGET gobot_sniff_files POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:gobot_sniff_files>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_files_only.cmake
+    COMMENT "Checking that gobot_sniff_files asks for no administrator and loads no Npcap"
+)
+
 # ----------------------------------------------------------------------- GUI
 # Dear ImGui with the Win32 + Direct3D 11 backend — the same combination the
 # original client used, and the one with no dependencies beyond the Windows SDK.

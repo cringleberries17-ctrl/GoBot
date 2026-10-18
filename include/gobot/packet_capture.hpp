@@ -109,6 +109,12 @@ public:
     /// address and ports.
     static std::string build_filter(const CaptureConfig& cfg);
 
+    /// Whether a capture with this config would take every TCP and UDP flow
+    /// on the machine: no filter of its own, and no server address or port
+    /// that narrows the one build_filter makes. A recording made so holds
+    /// other programs' traffic, which is why gobot_sniff --record refuses it.
+    static bool captures_everything(const CaptureConfig& cfg);
+
     /// Run one captured Ethernet frame through the code a live capture runs
     /// -- IP, then TCP reassembly or the UDP datagram, framing, unwrapping,
     /// the taps -- and deliver whatever it decodes before returning.
@@ -117,6 +123,13 @@ public:
     /// without Npcap or a game, and how a saved capture could be read back.
     /// Refused while a live capture runs, whose thread owns the same state.
     bool replay(const std::uint8_t* frame, std::size_t caplen, std::uint64_t timestamp_ms);
+
+    /// This machine's own IPv4 addresses, dotted. They tell the game's end of
+    /// a datagram from the other end when neither is a known server
+    /// (datagram_direction). start() reads them from Windows every time it
+    /// starts; replay() reads nothing, so a test sets them here. Refused --
+    /// false -- while a live capture runs, whose thread reads them.
+    bool set_local_addresses(const std::vector<std::string>& ipv4);
 
     /// Hot-swap adapters without tearing down state (e.g. VPN came up).
     bool switch_interface(const std::string& interface_name);
@@ -145,11 +158,39 @@ public:
         /// together; game datagrams are expected to fit in one packet, and
         /// this says whether that holds.
         std::uint64_t udp_fragments    = 0;
+        /// Datagrams whose direction only their port numbers decided: no
+        /// known server at either end, and this machine's own address at
+        /// both ends or neither. Each may be in the wrong .udp file, framed
+        /// with the other direction's spec (datagram_direction).
+        std::uint64_t udp_by_port      = 0;
 
         /// Looking inside 0x0081, over TCP and UDP together.
         UnwrapCounts  unwrap;
     };
     Stats stats() const;
+
+    /// How long the game's session has been silent at `now`: the time since
+    /// the last TCP segment (Stats::last_tcp_ms), or 0 before any. The one
+    /// reading the disconnect watchdog acts on, so that a datagram arriving
+    /// after the connection went quiet cannot keep a dropped session alive.
+    static std::uint64_t silent_for_ms(const Stats& stats, std::uint64_t now);
+
+    /// The silence after which the watchdog says the game has disconnected.
+    static constexpr std::uint64_t kDisconnectSilenceMs = 15'000;
+
+    /// Which way a datagram went, decided in this order:
+    ///
+    ///   1. a known server at either end (`servers`; an address of 0 counts
+    ///      for nothing), whatever the ports;
+    ///   2. this machine's own address (`local`, host order) at one end and
+    ///      not the other: sent from it is ToServer, sent to it ToClient;
+    ///   3. otherwise the port numbers, as the reassembler reads a connection
+    ///      it joined part-way -- the client's is the ephemeral or the higher
+    ///      one. That is a guess, and `by_port`, when given, says it was used.
+    static Direction datagram_direction(const Endpoint& src, const Endpoint& dst,
+                                        const std::vector<Endpoint>& servers,
+                                        const std::vector<std::uint32_t>& local,
+                                        bool* by_port = nullptr);
 
     /// Raw stream tap, for gobot_sniff's --record. Null to detach.
     using RawStreamTap = std::function<void(const FlowKey&, Direction,
@@ -185,7 +226,6 @@ private:
     void on_datagram(const Endpoint& src, const Endpoint& dst,
                      const std::uint8_t* data, std::size_t size,
                      std::uint64_t timestamp_ms);
-    Direction datagram_direction(const Endpoint& src, const Endpoint& dst) const;
     void flush_batch();
     bool open_device(const std::string& name, const std::string& filter);
 
@@ -196,6 +236,11 @@ private:
     /// The server endpoints start() was told about, kept for labelling UDP,
     /// which has no connection for the reassembler to remember.
     std::vector<Endpoint> servers_;
+
+    /// This machine's own IPv4 addresses, host order: read by start(), or set
+    /// for replay(). They tell the game's end of a datagram whose other end
+    /// is no known server.
+    std::vector<std::uint32_t> local_ips_;
 
     /// Per (flow, direction) frame-alignment state (see extract_frames) and
     /// how many leading bytes of the current buffer the raw tap has already

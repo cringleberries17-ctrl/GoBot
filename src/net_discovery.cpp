@@ -103,12 +103,55 @@ std::vector<ProcessConnection> connections_for_pid(std::uint32_t pid) {
     return out;
 }
 
-std::vector<ProcessConnection> connections_for_process(const std::string& exe_name) {
+SocketOwners::SocketOwners(std::string exe_name, LookUp look_up, GameInstall install,
+                           GameInstall::Drives drives)
+    : exe_name_(std::move(exe_name)),
+      look_up_(std::move(look_up)),
+      install_(std::move(install)),
+      drives_(std::move(drives)) {
+    by_path_ = install_.names_the_game(exe_name_);
+}
+
+SocketOwners SocketOwners::here(const std::string& exe_name) {
+    return SocketOwners(
+        exe_name,
+        [](std::uint32_t pid) {
+            // The name as it was always read, so that any other --process
+            // name matches exactly what it matched before; the path as
+            // GameInstall reads a running program's.
+            Owner o;
+            o.name = process_name_for_pid(pid);
+            if (!o.name.empty()) o.path = program_path(pid);
+            return o;
+        },
+        GameInstall::here(), GameInstall::Drives::here());
+}
+
+bool SocketOwners::takes(std::uint32_t pid) {
+    // Once per process: one with many sockets would otherwise be opened, and
+    // its path held up against the game's, once per row.
+    if (const auto it = answers_.find(pid); it != answers_.end()) return it->second;
+    const Owner owner = look_up_ ? look_up_(pid) : Owner{};
+    bool taken = !owner.name.empty() && _stricmp(owner.name.c_str(), exe_name_.c_str()) == 0;
+    if (taken && by_path_ && !install_.is_game(owner.path, drives_)) {
+        taken = false;
+        ++passed_over_;
+    }
+    answers_.emplace(pid, taken);
+    return taken;
+}
+
+std::vector<ProcessConnection> connections_for_process(SocketOwners& owners) {
     std::vector<ProcessConnection> out;
     for (auto& c : tcp_connections()) {
-        if (_stricmp(c.process.c_str(), exe_name.c_str()) == 0) out.push_back(std::move(c));
+        if (owners.takes(c.pid)) out.push_back(std::move(c));
     }
     return out;
+}
+
+std::vector<ProcessConnection> connections_for_process(const std::string& exe_name) {
+    SocketOwners owners = SocketOwners::here(exe_name);
+    return connections_for_process(owners);
 }
 
 std::vector<ProcessConnection> game_connection_candidates(std::uint32_t pid) {
@@ -162,6 +205,11 @@ std::vector<std::string> local_ipv4_addresses() {
 }
 
 std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name) {
+    SocketOwners owners = SocketOwners::here(exe_name);
+    return udp_ports_for_process(owners);
+}
+
+std::vector<std::uint16_t> udp_ports_for_process(SocketOwners& owners) {
     std::vector<std::uint16_t> out;
 
     ULONG size = 0;
@@ -178,13 +226,9 @@ std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name) {
         return out;
     }
 
-    std::unordered_map<std::uint32_t, std::string> names;
     for (DWORD i = 0; i < table->dwNumEntries; ++i) {
         const MIB_UDPROW_OWNER_PID& row = table->table[i];
-        auto it = names.find(row.dwOwningPid);
-        if (it == names.end())
-            it = names.emplace(row.dwOwningPid, process_name_for_pid(row.dwOwningPid)).first;
-        if (_stricmp(it->second.c_str(), exe_name.c_str()) != 0) continue;
+        if (!owners.takes(row.dwOwningPid)) continue;
         out.push_back(static_cast<std::uint16_t>(ntohs(static_cast<u_short>(row.dwLocalPort))));
     }
 

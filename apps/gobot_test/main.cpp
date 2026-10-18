@@ -1002,6 +1002,75 @@ void test_udp_datagrams() {
                   udp_dirs[1] == Direction::ToServer,
               "server-to-client and client-to-server datagrams are told apart, for the two files");
     }
+
+    // The game's UDP to a host that is none of its servers -- a relay, another
+    // player -- on ports the port rule reads backwards. This machine's own
+    // address says which end is the game's, both ways round.
+    constexpr std::uint32_t kPeer = 0xCB007132;              // 203.0.113.50
+    const std::vector<Endpoint> servers = { Endpoint{ kServer, kServerPort } };
+    const std::vector<std::uint32_t> here = { kClient };
+    {
+        struct Ports { std::uint16_t client, peer; const char* what; };
+        for (const Ports& pp : { Ports{ 50123, 60000, "two high ports" },
+                                 Ports{ 9000, 15101, "two low ports" } }) {
+            const Endpoint client{ kClient, pp.client }, peer{ kPeer, pp.peer };
+            bool up_guessed = true, down_guessed = true, old_guessed = false;
+            const Direction up =
+                PacketCapture::datagram_direction(client, peer, servers, here, &up_guessed);
+            const Direction down =
+                PacketCapture::datagram_direction(peer, client, servers, here, &down_guessed);
+            const Direction by_ports =
+                PacketCapture::datagram_direction(client, peer, servers, {}, &old_guessed);
+            check(up == Direction::ToServer && down == Direction::ToClient && !up_guessed &&
+                      !down_guessed,
+                  std::string("to and from a host that is not the game's server, on ") + pp.what +
+                      " with the client's the lower: this machine's address tells them apart");
+            check(by_ports == Direction::ToClient && old_guessed,
+                  std::string("where the port numbers alone read them backwards, on ") + pp.what +
+                      ", and say that they guessed");
+        }
+
+        bool guessed = true;
+        check(PacketCapture::datagram_direction(Endpoint{ kServer, 60000 }, Endpoint{ kPeer, 50123 },
+                                                servers, here, &guessed) == Direction::ToClient &&
+                  !guessed,
+              "a known server settles it first, on any port, with this machine at neither end");
+        bool both = false, neither = false;
+        PacketCapture::datagram_direction(Endpoint{ kClient, 50123 }, Endpoint{ kClient, 15101 },
+                                          {}, here, &both);
+        PacketCapture::datagram_direction(Endpoint{ kPeer, 50123 }, Endpoint{ kPeer + 1, 15101 },
+                                          {}, here, &neither);
+        check(both && neither,
+              "with this machine at both ends, or at neither, only the ports are left, and that "
+              "is said");
+    }
+
+    // Through the capture's own code, as a recording files them: with this
+    // machine's addresses, which start() reads and a replay is given, the two
+    // go to the right files and nothing is guessed; without, the ports file
+    // them the wrong way round, and each guess is counted.
+    for (const bool told : { true, false }) {
+        PacketCapture rec;
+        rec.set_raw_only(true);
+        const bool set = !told || rec.set_local_addresses({ "10.0.0.1", "not an address" });
+        std::vector<Direction> dirs;
+        rec.set_raw_udp_tap([&](const FlowKey&, Direction dir, const std::uint8_t*, std::size_t) {
+            dirs.push_back(dir);
+        });
+        const Bytes up   = udp_packet(kClient, 50123, kPeer, 60000, move_body());
+        const Bytes down = udp_packet(kPeer, 60000, kClient, 50123, move_body());
+        rec.replay(up.data(), up.size(), 1);
+        rec.replay(down.data(), down.size(), 2);
+        const bool right = dirs.size() == 2 && dirs[0] == Direction::ToServer &&
+                           dirs[1] == Direction::ToClient;
+        if (told)
+            check(set && right && rec.stats().udp_by_port == 0,
+                  "replayed to and from that host, given this machine's address: the client's "
+                  "datagram is filed client-to-server, the host's server-to-client, none guessed");
+        else
+            check(!right && dirs.size() == 2 && rec.stats().udp_by_port == 2,
+                  "and without it, both are filed by port alone, the wrong way round, and counted");
+    }
 }
 
 /// The disconnect watchdog stops the bot after 15 s of silence from the game.
@@ -1022,6 +1091,8 @@ void test_watchdog_clock() {
     auto s = cap.stats();
     check(s.last_packet_ms == 1000 && s.last_tcp_ms == 0,
           "a datagram is a packet seen, and leaves the watchdog's clock where it was");
+    check(PacketCapture::silent_for_ms(s, 60'000) == 0,
+          "and with no segment yet there is no silence for the watchdog to act on");
 
     const Bytes segment = tcp_packet(kServer, kServerPort, kClient, kClientPort, 7000, frame);
     cap.replay(segment.data(), segment.size(), 2000);
@@ -1030,6 +1101,20 @@ void test_watchdog_clock() {
     check(s.last_tcp_ms == 2000 && s.last_packet_ms == 3000,
           "a TCP segment sets it, and UDP arriving after the connection went quiet does not move "
           "it on");
+
+    // What the watchdog itself decides by. A datagram a second ago changes
+    // nothing: 16 s after the last segment the session has been silent for
+    // 16 s, past the watchdog's limit, and it reports the game gone.
+    cap.replay(datagram.data(), datagram.size(), 17'000);
+    s = cap.stats();
+    const std::uint64_t silent = PacketCapture::silent_for_ms(s, 18'001);
+    check(s.last_packet_ms == 17'000 && silent == 16'001 &&
+              silent > PacketCapture::kDisconnectSilenceMs,
+          "16 s after the last segment the watchdog reads 16 s of silence, past its 15, though a "
+          "datagram came 1 s ago");
+    check(PacketCapture::silent_for_ms(s, 2'500) == 500 &&
+              PacketCapture::silent_for_ms(s, 2'500) <= PacketCapture::kDisconnectSilenceMs,
+          "while half a second after it, it reads half a second, and lets the bot go on");
 }
 
 // ------------------------------------------------------- capture filter
@@ -1084,6 +1169,91 @@ void test_capture_filters() {
     check(build_filter_for({}, { 50123 }) == "udp and (port 50123)",
           "the game's own UDP sockets alone, with no connection");
     check(build_filter_for({}) == "(tcp or udp)", "with no connection at all, TCP and UDP");
+
+    // What gobot_sniff --record refuses: a capture that nothing narrows,
+    // which would write every program's traffic on the machine to the files.
+    CaptureConfig port_only;
+    port_only.port_start = port_only.port_end = 15101;
+    CaptureConfig not_an_address;
+    not_an_address.server_ip_start = not_an_address.server_ip_end = "game.example";
+    CaptureConfig found;
+    found.bpf_filter = build_filter_for({ c }, { 50123 });
+    check(PacketCapture::captures_everything(none),
+          "with nothing named, a capture takes every flow on the machine: --record refuses it");
+    check(!PacketCapture::captures_everything(game) &&
+              !PacketCapture::captures_everything(port_only) &&
+              !PacketCapture::captures_everything(own) && !PacketCapture::captures_everything(found),
+          "an address, a port, a filter of one's own or the game's own sockets narrow it");
+    check(PacketCapture::captures_everything(not_an_address),
+          "and a --host that is not an IPv4 address narrows nothing");
+}
+
+/// --process picks sockets by their owner. Asked as Game.exe -- what a great
+/// many programs are called -- it must take the game's alone: another program
+/// of that name running beside it would put its traffic into a recording of
+/// the game's.
+void test_socket_owners() {
+    section("--process Game.exe takes the game's sockets, by where it runs from");
+
+    const std::string game_exe = "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe";
+    GameInstall install;
+    install.programs = { game_exe };
+    GameInstall::Drives drives;          // no disk to ask: the paths' text decides
+
+    // The processes owning sockets on a pretend machine, and how often each
+    // was looked up.
+    const std::map<std::uint32_t, SocketOwners::Owner> machine = {
+        { 1001, { "Game.exe", "C:\\Program Files\\Some Game\\Game.exe" } },
+        { 1002, { "Game.exe", game_exe } },
+        { 1003, { "Game.exe", "" } },
+        { 1004, { "GAME.EXE", "c:\\vtczone\\games\\ghost_online_pc_vtc\\GAME.EXE" } },
+        { 1005, { "chrome.exe", "C:\\Program Files\\Google\\Chrome\\chrome.exe" } },
+        { 1006, { "GhostOnlineVTC.exe",
+                  "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\GhostOnlineVTC.exe" } },
+        { 1007, { "GhostClient.exe", "D:\\Games\\Ghost\\GhostClient.exe" } },
+        { 1008, { "GhostClient.exe", "E:\\Copy\\GhostClient.exe" } },
+    };
+    std::map<std::uint32_t, int> asked;
+    const SocketOwners::LookUp look_up = [&](std::uint32_t pid) {
+        ++asked[pid];
+        const auto it = machine.find(pid);
+        return it == machine.end() ? SocketOwners::Owner{} : it->second;
+    };
+    const auto taken_by = [&](SocketOwners& owners) {
+        std::vector<std::uint32_t> out;
+        for (const auto& entry : machine)
+            if (owners.takes(entry.first)) out.push_back(entry.first);
+        return out;
+    };
+
+    SocketOwners game("Game.exe", look_up, install, drives);
+    check(taken_by(game) == std::vector<std::uint32_t>{ 1002, 1004 },
+          "the game's own Game.exe is taken, whatever the case, and no other: not one elsewhere, "
+          "nor one whose path cannot be read");
+    check(game.passed_over() == 2, "and the two of its name left out are counted, to be said");
+    for (int i = 0; i < 3; ++i) {
+        game.takes(1001);
+        game.takes(1002);
+    }
+    bool once = true;
+    for (const auto& entry : machine) once = once && asked[entry.first] == 1;
+    check(once && game.passed_over() == 2,
+          "each process is looked up once, however many sockets it holds");
+
+    SocketOwners other("chrome.exe", look_up, install, drives);
+    check(taken_by(other) == std::vector<std::uint32_t>{ 1005 } && other.passed_over() == 0,
+          "any other name is matched by name alone, as before");
+
+    SocketOwners nowhere("Game.exe", look_up, GameInstall{}, drives);
+    check(taken_by(nowhere).empty(),
+          "with nowhere known for the game, no Game.exe is taken for it");
+
+    GameInstall renamed;
+    renamed.programs = { "D:\\Games\\Ghost\\GhostClient.exe" };
+    SocketOwners renamed_game("ghostclient.exe", look_up, renamed, drives);
+    check(taken_by(renamed_game) == std::vector<std::uint32_t>{ 1007 },
+          "and a game installed under another name is taken by that name, by where it runs from "
+          "too");
 }
 
 // ------------------------------------------------- the config, old and new
@@ -1214,6 +1384,43 @@ void test_capture_file_inner() {
     const FrameScanResult t = capture_file::tile(data, server);
     check(t.outer_frames() == 5 && t.unwrap.inner == 3 && t.resyncs == 0 && t.consumed == rec.size(),
           "tiling the recording: 5 frames off the stream, 3 inside, no resync");
+    const FrameScanResult as_client = capture_file::tile(data, server, Direction::ToServer);
+    bool labelled = as_client.packets.size() == t.packets.size() && !t.packets.empty();
+    for (std::size_t i = 0; labelled && i < t.packets.size(); ++i)
+        labelled = t.packets[i].from_server && !as_client.packets[i].from_server &&
+                   as_client.packets[i].payload == t.packets[i].payload;
+    check(labelled, "the direction --verify gives a client half only labels the frames it reads");
+
+    // Every frame at once, as the --from commands read it. A recording of UDP
+    // -- <name>.udp.s2c, the datagrams one after another -- reads the same,
+    // each frame marked as having come over UDP.
+    {
+        const std::string udp_path = temp_file("inner_test.udp.s2c");
+        {
+            std::ofstream out(udp_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(rec.data()), static_cast<std::streamsize>(rec.size()));
+        }
+        std::vector<GamePacket> over_tcp, over_udp;
+        const capture_file::Reading rt = capture_file::read_all(path, server, client, over_tcp);
+        const capture_file::Reading ru = capture_file::read_all(udp_path, server, client, over_udp);
+        bool tcp_plain = over_tcp.size() == 8, udp_marked = over_udp.size() == 8;
+        std::size_t unwrapped = 0;
+        for (const auto& p : over_tcp) tcp_plain = tcp_plain && !p.udp;
+        for (const auto& p : over_udp) {
+            udp_marked = udp_marked && p.udp;
+            if (p.depth == 1 && p.opcode == 0x0027 && p.payload == inside) ++unwrapped;
+        }
+        check(rt.ok && ru.ok && rt.half == capture_file::Half::Server && tcp_plain && udp_marked &&
+                  unwrapped == 3,
+              "every frame of a recording at once, wrappers' insides after them; a .udp.s2c one's "
+              "marked as come over UDP");
+        check(capture_file::udp_from_name("walk.udp.c2s") &&
+                  capture_file::udp_from_name("WALK.UDP.S2C") &&
+                  !capture_file::udp_from_name("walk.s2c") &&
+                  !capture_file::udp_from_name("walk.flow0.s2c"),
+              "and only a recording named .udp.s2c or .udp.c2s holds UDP");
+        std::remove(udp_path.c_str());
+    }
     std::remove(path.c_str());
 }
 
@@ -5481,6 +5688,9 @@ void test_no_real_input() {
     if (gone == nullptr || IsWindow(gone)) {
         std::printf("  [skip] could not make a window and let it go here\n");
     } else {
+        // Where the pointer is, before and after: read, never set.
+        POINT before{}, after{};
+        const bool read_before = GetCursorPos(&before) != FALSE;
         InputManager pointer;
         pointer.set_target_window(gone);
         bool clicked = true, right = true, dragged = true, moved = true;
@@ -5491,6 +5701,19 @@ void test_no_real_input() {
               "so is a drag");
         check(refusals_in([&] { moved = pointer.move_pointer(5, 5); }) == 1 && !moved,
               "and the pointer is not moved");
+        const bool read = read_before && GetCursorPos(&after) != FALSE;
+        if (!read)
+            std::printf("  [skip] Windows would not say where the pointer is, so it was not "
+                        "compared\n");
+        else if (after.x != before.x || after.y != before.y)
+            // Each call above was refused before Windows was asked, and aimed
+            // at a window that is gone: something else moved it -- a hand on
+            // the mouse, most likely -- which is not this test's to judge.
+            std::printf("  [skip] the pointer moved while these ran, by a hand on the mouse most "
+                        "likely, so where it is was not compared\n");
+        else
+            check(after.x == before.x && after.y == before.y,
+                  "and Windows reads the pointer exactly where it was before them");
     }
 
     // ---- focus ----
@@ -12496,6 +12719,7 @@ int main() {
     test_udp_datagrams();
     test_watchdog_clock();
     test_capture_filters();
+    test_socket_owners();
     test_framing_config();
     test_capture_file_inner();
     test_protocol_handler_holds_back();

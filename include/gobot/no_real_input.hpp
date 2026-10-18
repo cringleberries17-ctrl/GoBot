@@ -26,7 +26,8 @@ namespace gobot {
 /// change nothing, and tests need them.
 ///
 /// Off unless turned on, so gobot_gui, gobot_cli and gobot_sniff act exactly
-/// as they always have.
+/// as they always have. gobot_sniff_files, which only reads recordings, turns
+/// it on first thing, as gobot_test does.
 ///
 /// A new way of reaching the desktop or another program is guarded the same
 /// way, by `if (refuse_real_input("what it does")) return <its failure>;` just

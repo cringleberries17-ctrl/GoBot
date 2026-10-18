@@ -100,6 +100,7 @@ Output lands in `build\bin\Release\`:
 | **`gobot_gui.exe`** | **the app — start here.** ImGui front-end, everything in one window |
 | `gobot_cli.exe` | headless bot runner |
 | `gobot_sniff.exe` | protocol discovery, command line |
+| `gobot_sniff_files.exe` | gobot_sniff's commands that only read recordings (`--verify`, `--detect`, and `--dump`, `--diff`, `--decode`, `--analyze` with `--from`), with no administrator prompt; it captures nothing, and is not packaged |
 | `gobot_test.exe` | self-tests |
 
 `gobot_gui` covers everything the two CLI tools do. They remain for scripting

@@ -1,5 +1,6 @@
 #include "gobot/packet_capture.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/net_discovery.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -32,13 +33,6 @@ std::uint32_t be32(const std::uint8_t* p) {
            (static_cast<std::uint32_t>(p[1]) << 16) |
            (static_cast<std::uint32_t>(p[2]) << 8)  |
             static_cast<std::uint32_t>(p[3]);
-}
-
-std::string ip_to_string(std::uint32_t ip) {
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-                  (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-    return buf;
 }
 
 bool valid_ipv4(const std::string& s) {
@@ -241,6 +235,28 @@ std::string PacketCapture::build_filter(const CaptureConfig& cfg) {
     return f.str();
 }
 
+bool PacketCapture::captures_everything(const CaptureConfig& cfg) {
+    // A filter of the caller's own is taken as meant, whatever it says.
+    if (!cfg.bpf_filter.empty()) return false;
+    // Otherwise whatever narrows the filter -- an address, a port -- is there
+    // in what build_filter makes of it, and an address that is not one is
+    // left out of it, so it narrows nothing either.
+    return build_filter(cfg) == build_filter(CaptureConfig{});
+}
+
+bool PacketCapture::set_local_addresses(const std::vector<std::string>& ipv4) {
+    if (running_.load()) {
+        GB_WARN("PacketCapture::set_local_addresses refused: a live capture is running");
+        return false;
+    }
+    local_ips_.clear();
+    for (const std::string& s : ipv4) {
+        in_addr a{};
+        if (inet_pton(AF_INET, s.c_str(), &a) == 1) local_ips_.push_back(ntohl(a.S_un.S_addr));
+    }
+    return true;
+}
+
 // -------------------------------------------------------------- lifecycle
 
 bool PacketCapture::open_device(const std::string& name, const std::string& filter) {
@@ -330,6 +346,14 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
     }
     servers_ = servers;
     reassembler_.set_servers(std::move(servers));
+
+    // This machine's own addresses, read once per capture. The game's UDP can
+    // go to a host none of its TCP connections does, and then they are what
+    // says which end of a datagram is the game's (datagram_direction).
+    set_local_addresses(local_ipv4_addresses());
+    if (local_ips_.empty())
+        GB_WARN("Could not read this machine's IPv4 addresses: a datagram whose other end is "
+                "not a known server is filed by its port numbers alone");
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -627,19 +651,36 @@ std::size_t PacketCapture::on_stream(const FlowKey& key, Direction dir,
     return scan.consumed;
 }
 
-Direction PacketCapture::datagram_direction(const Endpoint& src, const Endpoint& dst) const {
+Direction PacketCapture::datagram_direction(const Endpoint& src, const Endpoint& dst,
+                                            const std::vector<Endpoint>& servers,
+                                            const std::vector<std::uint32_t>& local,
+                                            bool* by_port) {
+    if (by_port) *by_port = false;
+
     // A known server's address settles it, whatever the port: a game server
     // sends its UDP from its own host, but not necessarily from the port its
     // TCP connection was found on.
-    for (const auto& s : servers_) {
+    for (const auto& s : servers) {
         if (s.ip == 0) continue;
         if (src.ip == s.ip) return Direction::ToClient;
         if (dst.ip == s.ip) return Direction::ToServer;
     }
 
-    // Otherwise the rule the reassembler uses for a connection it joined
-    // mid-flight: the client sends from an ephemeral high port, the server
-    // from a fixed lower one.
+    // Then this machine's own addresses. The game's UDP can go to a host that
+    // none of its TCP connections goes to -- a relay, another player -- and
+    // on ports the rule below reads backwards: 50123 to 60000, or 9000 to
+    // 15101. One end being this machine says which end is the game.
+    const auto here = [&local](std::uint32_t ip) {
+        return std::find(local.begin(), local.end(), ip) != local.end();
+    };
+    const bool from_here = here(src.ip);
+    if (from_here != here(dst.ip)) return from_here ? Direction::ToServer : Direction::ToClient;
+
+    // Otherwise -- both ends this machine, or neither -- the rule the
+    // reassembler uses for a connection it joined mid-flight: the client sends
+    // from an ephemeral high port, the server from a fixed lower one. A guess,
+    // so it is counted (Stats::udp_by_port).
+    if (by_port) *by_port = true;
     constexpr std::uint16_t kEphemeralFloor = 32768;
     const bool src_ephemeral = src.port >= kEphemeralFloor;
     const bool dst_ephemeral = dst.port >= kEphemeralFloor;
@@ -651,13 +692,14 @@ Direction PacketCapture::datagram_direction(const Endpoint& src, const Endpoint&
 void PacketCapture::on_datagram(const Endpoint& src, const Endpoint& dst,
                                 const std::uint8_t* data, std::size_t size,
                                 std::uint64_t timestamp_ms) {
+    bool by_port = false;
+    const FlowKey   key = FlowKey::make(src, dst);
+    const Direction dir = datagram_direction(src, dst, servers_, local_ips_, &by_port);
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.udp_datagrams;
+        if (by_port) ++stats_.udp_by_port;
     }
-
-    const FlowKey   key = FlowKey::make(src, dst);
-    const Direction dir = datagram_direction(src, dst);
 
     // Each datagram reaches the tap once, whole. There is no buffer carried
     // from one call to the next as there is for TCP, so nothing to repeat.
@@ -733,31 +775,28 @@ void PacketCapture::watchdog_loop() {
     // heartbeat or a position update. Prolonged silence means the game closed
     // or the adapter changed, and the bot should stop pressing keys.
     //
-    // Silence on the TCP connection, which is the session: UDP the filter now
-    // lets in as well, from the same host and port, would otherwise keep a
-    // dropped session looking alive.
-    constexpr std::uint64_t kSilenceMs = 15'000;
+    // Silence on the TCP connection, which is the session (silent_for_ms):
+    // UDP the filter now lets in as well, from the same host and port, would
+    // otherwise keep a dropped session looking alive.
     bool reported = false;
 
     while (running_.load() && !stopping_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-        std::uint64_t last = 0;
+        std::uint64_t silent = 0;
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
-            last = stats_.last_tcp_ms;
             if (handle_) {
                 pcap_stat ps{};
                 if (pcap_stats(handle_, &ps) == 0) stats_.pcap_dropped = ps.ps_drop;
             }
+            silent = silent_for_ms(stats_, now_ms());    // 0 until the first segment
         }
 
-        if (last == 0) continue;      // nothing seen yet
-
-        if (now_ms() - last > kSilenceMs) {
+        if (silent > kDisconnectSilenceMs) {
             if (!reported) {
                 GB_WARN("No game traffic for %llus -- assuming disconnect",
-                        static_cast<unsigned long long>(kSilenceMs / 1000));
+                        static_cast<unsigned long long>(kDisconnectSilenceMs / 1000));
                 reported = true;
                 if (on_disconnect_) on_disconnect_();
             }
@@ -770,6 +809,14 @@ void PacketCapture::watchdog_loop() {
 PacketCapture::Stats PacketCapture::stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
+}
+
+std::uint64_t PacketCapture::silent_for_ms(const Stats& stats, std::uint64_t now) {
+    // By the TCP connection alone, never by last_packet_ms: a datagram is a
+    // packet seen, and one arriving after the server dropped the session
+    // would otherwise keep the bot pressing keys into a disconnected client.
+    if (stats.last_tcp_ms == 0 || now <= stats.last_tcp_ms) return 0;
+    return now - stats.last_tcp_ms;
 }
 
 } // namespace gobot

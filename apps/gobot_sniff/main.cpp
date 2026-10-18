@@ -15,6 +15,14 @@
 //   5. gobot_sniff --diff 0x1234                find the fields inside one
 //        -> write a [Packet.0x1234] block into configs/protocol.ini
 //   6. gobot_sniff --decode                     confirm the layout reads right
+//
+// gobot_sniff_files is this program built with GOBOT_SNIFF_FILES_ONLY: the
+// commands that read recordings, and none that capture. Capturing needs
+// administrator, so gobot_sniff asks for it on every start, even for a
+// command that only reads a file -- and recordings are read afterwards by
+// agents that can never answer that prompt. Built without the capture code,
+// the twin asks for nothing, imports nothing from wpcap.dll, and refuses the
+// live commands by name.
 
 #include "gobot/byte_reader.hpp"
 #include "gobot/config.hpp"
@@ -22,6 +30,7 @@
 #include "gobot/framing.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/net_discovery.hpp"
+#include "gobot/no_real_input.hpp"
 #include "gobot/opcode_registry.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/protocol_analyzer.hpp"
@@ -37,6 +46,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -44,13 +54,75 @@
 
 using namespace gobot;
 
+// 1 for gobot_sniff_files (CMakeLists.txt): every live command is left out.
+#ifndef GOBOT_SNIFF_FILES_ONLY
+#define GOBOT_SNIFF_FILES_ONLY 0
+#endif
+
 namespace {
+
+/// This program's name, for the commands its hints suggest.
+constexpr const char* kProgram = GOBOT_SNIFF_FILES_ONLY ? "gobot_sniff_files" : "gobot_sniff";
 
 std::atomic<bool> g_stop{false};
 
 void on_signal(int) { g_stop.store(true); }
 
 void print_usage() {
+#if GOBOT_SNIFF_FILES_ONLY
+    std::printf(R"(gobot_sniff_files — GhostOnline protocol discovery, from recordings
+
+The commands of gobot_sniff that read the files gobot_sniff --record writes.
+It captures nothing, so it needs no administrator and asks for none. To
+record, or to watch live traffic, use gobot_sniff.
+
+USAGE
+  gobot_sniff_files <command> [options]
+
+COMMANDS
+  --verify <file>            Tile a recording with the configured framing --
+                             [FramingClient] for a .c2s file, [Framing] for
+                             any other -- and say how well it fits, including
+                             the frames found inside 0x0081.
+  --detect <file>            Brute-force the framing of a recorded stream.
+  --dump <opcode>            Hexdump every frame of one opcode in --from.
+  --diff <opcode>            Show which byte offsets change between successive
+                             frames of one opcode in --from: how coordinate,
+                             HP and id fields are found. With --versus, compare
+                             two recordings.
+  --decode                   Decode --from with the layouts in the config.
+  --analyze                  Infer what each opcode in --from means. Same
+                             engine the GUI's automatic setup uses.
+
+OPTIONS
+  --from <file>              The recording --dump, --diff, --decode and
+                             --analyze read: one file --record wrote, such as
+                             walk.flow0.s2c, walk.c2s or walk.udp.s2c. A name
+                             ending .s2c or .c2s says which half it holds;
+                             with neither, both framings are tried and the one
+                             that tiles is used.
+  --versus <file>            For --diff: the recording to compare --from with.
+                             Record one standing still and one walking, and
+                             the position fields are the ones quiet in the
+                             first and busy in the second.
+  --inner                    Take the frames found inside 0x0081 instead of
+                             those read straight off the stream. The same
+                             opcode number need not mean the same thing in
+                             both, so the two are never mixed.
+  --udp                      Say the file holds UDP. <name>.udp.s2c and
+                             <name>.udp.c2s do, and are read as UDP with or
+                             without it; with any other file it is an error.
+  --config <path>            Protocol config (default: configs/protocol.ini).
+  --max <n>                  For --dump: stop after n frames.
+  --verbose                  Debug logging.
+
+NOTES
+  A .udp file holds the game's datagrams one after another, read as one run
+  of frames -- which is what datagrams that hold whole frames read as.
+  Refused here, because they capture: --list, --discover, --record, --watch,
+  and --dump, --diff, --decode and --analyze without --from.
+)");
+#else
     std::printf(R"(gobot_sniff — GhostOnline protocol discovery
 
 USAGE
@@ -66,28 +138,37 @@ COMMANDS
                              UDP apart: <name>.s2c and <name>.c2s for the TCP
                              stream, <name>.udp.s2c and <name>.udp.c2s for UDP
                              datagrams, <name>.flowN.s2c for each connection.
-                             Nothing is framed, filtered or dropped.
+                             Nothing is framed, filtered or dropped. Refused
+                             unless --process, --host, --port or --filter says
+                             what to record: with none, it would record every
+                             program's traffic on the machine.
   --detect <file>            Brute-force the framing of a recorded stream.
-  --verify <file>            Tile a recording with the configured [Framing] and
-                             say how well it fits, including the frames found
-                             inside 0x0081.
+  --verify <file>            Tile a recording with the configured framing --
+                             [FramingClient] for a .c2s file, [Framing] for
+                             any other -- and say how well it fits, including
+                             the frames found inside 0x0081.
   --watch                    Live opcode histogram (needs framing configured).
                              Frames found inside 0x0081, and frames over UDP,
                              are counted in tables of their own.
-  --dump <opcode>            Hexdump live packets of one opcode.
+  --dump <opcode>            Hexdump live packets of one opcode, or with --from
+                             the frames of one opcode in a recording.
   --diff <opcode>            Show which byte offsets change between successive
                              packets of one opcode. This is how you locate
                              coordinate, HP and id fields. Add --from to read a
                              recording instead of live traffic.
   --decode                   Decode live traffic with configs/protocol.ini and
-                             print the result. Use to verify a layout.
-  --analyze                  Capture, then infer what each opcode means. Same
-                             engine the GUI's automatic setup uses; prints why
-                             each opcode was or was not classified.
+                             print the result -- or a recording, with --from.
+                             Use to verify a layout.
+  --analyze                  Capture, then infer what each opcode means -- or
+                             read a recording, with --from. Same engine the
+                             GUI's automatic setup uses; prints why each
+                             opcode was or was not classified.
 
 OPTIONS
   --process <exe>            For --discover, and to aim a capture: the TCP
                              connections and UDP sockets this executable owns.
+                             Asked as Game.exe, only the game's own: another
+                             program of that name is left out.
   --iface <name>             Capture interface (default: auto-detect).
   --host <ip>                Game server IP. Narrows the capture filter.
   --port <n>                 Game server port.
@@ -102,19 +183,21 @@ OPTIONS
                              need not mean the same thing in both, so the two
                              are never mixed. Works with --from too.
   --udp                      For --dump/--diff/--decode/--analyze, live: take
-                             frames that came over UDP instead of TCP. (A
-                             recording of UDP, <name>.udp.s2c, needs nothing
-                             extra with --from.)
-  --from <capture>           For --diff: analyse a file written by --record
-                             instead of capturing. Needs no game running and
-                             nothing happening in front of you, and the same
-                             bytes can be re-read when a hypothesis changes --
-                             which is the difference between measuring and
-                             remembering. Both framings are tried and the one
-                             that tiles is used, since a recording does not say
-                             which direction it holds.
+                             frames that came over UDP instead of TCP. (With
+                             --from the file says it: <name>.udp.s2c and
+                             <name>.udp.c2s hold UDP, any other file TCP.)
+  --from <capture>           For --diff, --dump, --decode and --analyze:
+                             analyse a file written by --record instead of
+                             capturing. Needs no game running and nothing
+                             happening in front of you, and the same bytes can
+                             be re-read when a hypothesis changes -- which is
+                             the difference between measuring and remembering.
+                             A name ending .s2c or .c2s says which direction it
+                             holds; otherwise both framings are tried and the
+                             one that tiles is used.
                              (Still prompts for Administrator: this program
-                             asks for it up front because capture needs it.)
+                             asks for it up front because capture needs it.
+                             gobot_sniff_files reads recordings without it.)
   --versus <capture>         For --diff --from: compare the two recordings
                              rather than describing one. Record one capture
                              standing still and one walking, and the position
@@ -131,7 +214,10 @@ NOTES
   Capture is read-only: nothing is injected, rewritten or blocked.
   GoC throws away opcodes 0x002E and 0x0031 when they come over UDP. Nothing
   here does: a recording keeps every byte, and --watch counts every frame.
+  gobot_sniff_files runs the commands that read recordings, without asking
+  for administrator.
 )");
+#endif
 }
 
 struct Options {
@@ -153,10 +239,11 @@ struct Options {
     bool udp = false;        ///< --udp: frames that came over UDP
 };
 
-/// Whether a live command takes this frame: by default those read straight
-/// off the TCP stream, which is all it ever saw; with --inner and --udp the
-/// other kinds instead. One kind at a time, because an opcode number need not
-/// mean the same thing inside a wrapper, or over UDP, as on the stream.
+/// Whether a command takes this frame: by default those read straight off
+/// the TCP stream, which is all it ever saw; with --inner and --udp the other
+/// kinds instead. One kind at a time, because an opcode number need not mean
+/// the same thing inside a wrapper, or over UDP, as on the stream. For a
+/// recording, `o` is as_read()'s: the file says whether it is UDP.
 bool picked(const GamePacket& p, const Options& o) {
     return p.udp == o.udp && (p.depth > 0) == o.inner;
 }
@@ -169,6 +256,7 @@ std::string kind_taken(const Options& o) {
     return "frames on the TCP stream";
 }
 
+#if !GOBOT_SNIFF_FILES_ONLY
 /// Where a frame of this kind was found, as where_found() says it.
 std::string where_label(bool udp, std::uint8_t depth) {
     GamePacket g;
@@ -177,6 +265,7 @@ std::string where_label(bool udp, std::uint8_t depth) {
     const std::string w = where_found(g);
     return w.empty() ? "TCP stream" : w;
 }
+#endif
 
 bool parse_args(int argc, char** argv, Options& o) {
     for (int i = 1; i < argc; ++i) {
@@ -224,6 +313,17 @@ bool parse_args(int argc, char** argv, Options& o) {
     return !o.command.empty();
 }
 
+#if !GOBOT_SNIFF_FILES_ONLY
+/// Say so when --process left out programs of the name it was given: asked as
+/// Game.exe it takes only the game, by where it runs from. Not where they run
+/// from: that can be a folder with somebody's name in it.
+void say_passed_over(const SocketOwners& owners, const std::string& process) {
+    if (owners.passed_over() == 0) return;
+    std::printf("Left out %zu program(s) called %s that do not run from where the game is\n"
+                "installed -- another program of that name, or one whose path could not be read.\n",
+                owners.passed_over(), process.c_str());
+}
+
 CaptureConfig make_capture_config(const Options& o) {
     CaptureConfig cfg;
     cfg.interface_name  = o.iface;
@@ -241,8 +341,11 @@ CaptureConfig make_capture_config(const Options& o) {
     // A game that reconnects often lands on a different server address, and a
     // filter pinned to the old one silently captures nothing at all.
     if (!o.process.empty()) {
+        // One for both of the game's socket tables, so that each process is
+        // looked up once.
+        SocketOwners owners = SocketOwners::here(o.process);
         std::vector<ProcessConnection> conns;
-        for (const auto& c : connections_for_process(o.process)) {
+        for (const auto& c : connections_for_process(owners)) {
             if (!c.established) continue;
             const std::uint32_t r = c.remote.ip;
             if (r == 0 || (r >> 24) == 127 || (r >> 16) == 0xA9FE) continue;
@@ -257,7 +360,7 @@ CaptureConfig make_capture_config(const Options& o) {
                 // on the servers' ports from any host, as GoC takes it. Whether
                 // it talks UDP at all is one of the things a recording is for,
                 // and its UDP need not use the port of its TCP connection.
-                cfg.bpf_filter = build_filter_for(conns, udp_ports_for_process(o.process));
+                cfg.bpf_filter = build_filter_for(conns, udp_ports_for_process(owners));
                 std::printf("Capturing %s: %s\n", o.process.c_str(), cfg.bpf_filter.c_str());
             } else {
                 std::printf("Using %zu server endpoint(s) from %s\n",
@@ -266,13 +369,16 @@ CaptureConfig make_capture_config(const Options& o) {
         } else {
             std::printf("Warning: %s has no game-like connection open.\n", o.process.c_str());
         }
+        say_passed_over(owners, o.process);
     }
     return cfg;
 }
+#endif
 
 // The [Framing] and [FramingClient] blocks are read by gobot::load_framing
 // (framing.hpp), the one reader shared with gobot_cli and the tests.
 
+#if !GOBOT_SNIFF_FILES_ONLY
 /// Also hand the capture the client-side framing.
 ///
 /// The two directions are framed differently in this game -- the opcode sits at
@@ -302,9 +408,11 @@ void wait_for_stop(int seconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 }
+#endif
 
 // ------------------------------------------------------------------ commands
 
+#if !GOBOT_SNIFF_FILES_ONLY
 int cmd_list() {
     if (!PacketCapture::npcap_available()) {
         std::fprintf(stderr,
@@ -342,8 +450,16 @@ int cmd_list() {
 /// owns is both easier and less error-prone than asking a person to read it
 /// off a terminal.
 int cmd_discover(const Options& o) {
-    auto conns = o.process.empty() ? tcp_connections()
-                                   : connections_for_process(o.process);
+    // With --process, one SocketOwners for both socket tables, so that each
+    // process is looked up once; asked as Game.exe, it takes the game alone.
+    std::optional<SocketOwners> owners;
+    std::vector<std::uint16_t> udp_ports;
+    if (!o.process.empty()) owners.emplace(SocketOwners::here(o.process));
+    auto conns = owners ? connections_for_process(*owners) : tcp_connections();
+    if (owners) {
+        udp_ports = udp_ports_for_process(*owners);
+        say_passed_over(*owners, o.process);
+    }
 
     // Established, routable, non-web: what game traffic looks like.
     std::vector<ProcessConnection> interesting;
@@ -381,7 +497,6 @@ int cmd_discover(const Options& o) {
     }
 
     if (!o.process.empty()) {
-        const std::vector<std::uint16_t> udp_ports = udp_ports_for_process(o.process);
         if (!udp_ports.empty()) {
             std::printf("\nUDP sockets %s holds, by local port:", o.process.c_str());
             for (std::uint16_t p : udp_ports) std::printf(" %u", static_cast<unsigned>(p));
@@ -405,6 +520,36 @@ int cmd_discover(const Options& o) {
 }
 
 int cmd_record(const Options& o) {
+    // What to capture, decided before any file is opened: a refusal must not
+    // empty the files of an earlier recording of the same name.
+    const CaptureConfig cfg = make_capture_config(o);
+
+    // Nothing named, nothing recorded. With no process, address, port or
+    // filter the capture takes every TCP and UDP flow on the machine, and the
+    // files would hold other programs' traffic -- a browser's, a chat's --
+    // beside the game's, or instead of it.
+    if (PacketCapture::captures_everything(cfg)) {
+        std::fprintf(stderr,
+            "error: nothing says what to record, so this would record every TCP and UDP\n"
+            "       flow on the machine -- other programs' traffic with the game's.\n");
+        // A --host that is an address narrows the capture, and a --process
+        // that finds the game's connections makes the filter unless --host
+        // was given -- so whichever was given is where it went wrong.
+        if (!o.host.empty())
+            std::fprintf(stderr, "       --host %s is not an IPv4 address.\n", o.host.c_str());
+        else if (!o.process.empty())
+            std::fprintf(stderr,
+                "       %s has no game-like connection open, so --process named nothing.\n",
+                o.process.c_str());
+        std::fprintf(stderr,
+            "Name what to record:\n"
+            "  --process Game.exe --port 15101   the game's own connections and UDP sockets,\n"
+            "                                    and port 15101 when it has none open\n"
+            "  --host <server-ip>, --port <n>    one server, one port, or both\n"
+            "  --filter \"<bpf>\"                  a capture filter of your own\n");
+        return 2;
+    }
+
     // Both directions, to separate files. They are separate protocols as far
     // as framing is concerned — detection has to run on one direction of one
     // connection — and the client->server side is where your own actions live,
@@ -481,7 +626,7 @@ int cmd_record(const Options& o) {
         udp_datagrams.fetch_add(1);
     });
 
-    if (!cap.start(make_capture_config(o))) return 1;
+    if (!cap.start(cfg)) return 1;
 
     std::printf("Recording to %s.*: the TCP stream and UDP datagrams, both directions.\n",
                 o.file.c_str());
@@ -538,6 +683,11 @@ int cmd_record(const Options& o) {
         std::printf("!! %llu UDP packet(s) were pieces of a datagram that IP split up. Nothing\n"
                     "   here puts the pieces back together, so they are NOT in the .udp files.\n",
                     static_cast<unsigned long long>(cap.stats().udp_fragments));
+    if (cap.stats().udp_by_port > 0)
+        std::printf("!! %llu datagram(s) had neither a server of the game's nor this machine at\n"
+                    "   just one end, so only their port numbers said which .udp file they went\n"
+                    "   to: they may be in the wrong one, as the other direction.\n",
+                    static_cast<unsigned long long>(cap.stats().udp_by_port));
 
     // Whether this recording is worth analysing at all.
     //
@@ -592,7 +742,7 @@ int cmd_record(const Options& o) {
         std::printf("\nThat is very little data. Check that:\n"
                     "  - the game was actually connected and moving\n"
                     "  - --iface is the adapter carrying game traffic\n"
-                    "  - --host matches the game server (omit it to capture all TCP)\n");
+                    "  - --host matches the game server (--process Game.exe finds it)\n");
     } else if (bytes_c2s.load() < 256) {
         std::printf("\nBarely anything went client -> server. That half carries your own\n"
                     "actions, and it is the clearest evidence there is for working out\n"
@@ -607,10 +757,34 @@ int cmd_record(const Options& o) {
     }
     if (udp_bytes.load() > 0)
         std::printf("And the UDP the server sent: gobot_sniff --verify %s\n", udp_s2c_path.c_str());
+    std::printf("gobot_sniff_files runs --verify, --detect and the --from commands on these\n"
+                "files without asking for administrator.\n");
     return 0;
+}
+#endif
+
+/// Whether --udp, given with a recording, fits it. A recording says for
+/// itself whether it holds UDP (capture_file::udp_from_name); --udp with one
+/// that holds the TCP stream is a mistake worth stopping on, not ignoring.
+bool udp_fits(const Options& o, const std::string& path) {
+    if (!o.udp || capture_file::udp_from_name(path)) return true;
+    std::fprintf(stderr, "error: --udp, but %s holds the TCP stream. A recording's UDP is in\n"
+                         "       <name>.udp.s2c and <name>.udp.c2s.\n", path.c_str());
+    return false;
+}
+
+/// `o` as it applies to a recording: UDP when the file holds UDP, whatever
+/// --udp said, so that picked() and kind_taken() read it as they read a
+/// live capture.
+Options as_read(const Options& o, const std::string& path) {
+    Options r = o;
+    r.udp = capture_file::udp_from_name(path);
+    return r;
 }
 
 int cmd_detect(const Options& o) {
+    if (!udp_fits(o, o.file)) return 1;
+
     std::ifstream in(o.file, std::ios::binary);
     if (!in) {
         std::fprintf(stderr, "error: cannot read %s\n", o.file.c_str());
@@ -688,10 +862,12 @@ int cmd_detect(const Options& o) {
                                       std::min<std::size_t>(p.payload.size(), 32), 16, 6).c_str());
         }
     }
-    std::printf("\nNext: add the [Framing] block above, then run --watch\n");
+    std::printf("\nNext: add the [Framing] block above, then run %s\n",
+                GOBOT_SNIFF_FILES_ONLY ? "--verify on a recording" : "--watch");
     return 0;
 }
 
+#if !GOBOT_SNIFF_FILES_ONLY
 int cmd_watch(const Options& o) {
     bool have_framing = false;
     const FramingSpec spec = load_framing(o.config, have_framing);
@@ -812,11 +988,12 @@ int cmd_watch(const Options& o) {
             }
             if (s.udp_datagrams > 0) {
                 std::printf("\n--- over UDP: %llu datagrams, %llu frames, %llu bytes unread, "
-                            "%llu fragments left ---\n",
+                            "%llu fragments left, %llu directions told by port alone ---\n",
                             static_cast<unsigned long long>(s.udp_datagrams),
                             static_cast<unsigned long long>(s.udp_frames),
                             static_cast<unsigned long long>(s.udp_unread_bytes),
-                            static_cast<unsigned long long>(s.udp_fragments));
+                            static_cast<unsigned long long>(s.udp_fragments),
+                            static_cast<unsigned long long>(s.udp_by_port));
                 if (udp_total > 0) {
                     std::printf("%-10s %-10s %-8s\n", "opcode", "count", "last");
                     std::size_t shown = 0;
@@ -839,7 +1016,18 @@ int cmd_watch(const Options& o) {
     std::printf("\nNext: pick a frequent opcode and run --diff 0x<opcode>\n");
     return 0;
 }
+#endif
 
+/// One frame as --dump shows it, live or from a recording: which it is,
+/// where it was found, and its bytes.
+void print_dumped(const GamePacket& p, int n) {
+    const std::string where = where_found(p);
+    std::printf("\n--- #%d  opcode 0x%04X  %zu bytes%s%s ---\n", n, p.opcode,
+                p.payload.size(), where.empty() ? "" : ", ", where.c_str());
+    std::printf("%s", hexdump(p.payload, 16, 2).c_str());
+}
+
+#if !GOBOT_SNIFF_FILES_ONLY
 int cmd_dump(const Options& o) {
     bool have_framing = false;
     const FramingSpec spec = load_framing(o.config, have_framing);
@@ -861,10 +1049,7 @@ int cmd_dump(const Options& o) {
             if (p.opcode != o.opcode) continue;
             if (!picked(p, o)) { passed_by.fetch_add(1); continue; }
             const int n = seen.fetch_add(1) + 1;
-            const std::string where = where_found(p);
-            std::printf("\n--- #%d  opcode 0x%04X  %zu bytes%s%s ---\n", n, p.opcode,
-                        p.payload.size(), where.empty() ? "" : ", ", where.c_str());
-            std::printf("%s", hexdump(p.payload, 16, 2).c_str());
+            print_dumped(p, n);
             if (o.max > 0 && n >= o.max) g_stop.store(true);
         }
     });
@@ -883,36 +1068,32 @@ int cmd_dump(const Options& o) {
                     kind_taken(o).c_str());
     return 0;
 }
+#endif
 
-/// Byte-offset volatility analysis.
+/// Read every frame of a recorded stream, and say how it was read.
 ///
-/// The core discovery technique: capture many instances of one opcode and see
-/// which offsets change. An entity id is constant across updates for the same
-/// entity; a coordinate changes smoothly as you walk; HP changes only when you
-/// take damage. The change *pattern* identifies the field far more reliably
-/// than staring at hex.
-/// Read a recorded stream and pull out every payload of one opcode.
-///
-/// A recording does not say which direction it is, and the two are framed
-/// differently, so both specs are tried and the one that tiles is used. That
-/// choice is reported: a file analysed under the wrong spec yields plausible
-/// nonsense rather than an obvious failure.
-bool samples_from_file(const std::string& path, const std::string& config,
-                       std::uint16_t opcode, std::vector<Bytes>& out, bool inner) {
+/// A recording's name usually says which direction it holds, and the two are
+/// framed differently; when it says neither, both specs are tried and the one
+/// that tiles is used. That choice is reported: a file analysed under the
+/// wrong spec yields plausible nonsense rather than an obvious failure. The
+/// frames of a .udp recording are UDP ones. `ok` is false when the file could
+/// not be read, which has been said; end_reading() finishes what is said.
+capture_file::Reading read_recording(const std::string& path, const Options& o,
+                                     std::vector<GamePacket>& out) {
+    capture_file::Reading r;
+    if (!udp_fits(o, path)) return r;
     bool have_server = false, have_client = false;
-    const FramingSpec server = load_framing(config, have_server);
-    const FramingSpec client = load_framing(config, have_client, "FramingClient");
+    const FramingSpec server = load_framing(o.config, have_server);
+    const FramingSpec client = load_framing(o.config, have_client, "FramingClient");
     if (!have_server) {
-        std::fprintf(stderr, "error: no [Framing] section in %s\n", config.c_str());
-        return false;
+        std::fprintf(stderr, "error: no [Framing] section in %s\n", o.config.c_str());
+        return r;
     }
 
-    const capture_file::Reading r =
-        capture_file::extract(path, server, have_client ? client : FramingSpec{},
-                              opcode, out, inner);
+    r = capture_file::read_all(path, server, have_client ? client : FramingSpec{}, out);
     if (!r.ok) {
         std::fprintf(stderr, "error: %s\n", r.error.c_str());
-        return false;
+        return r;
     }
 
     const char* half = (r.half == capture_file::Half::Client)
@@ -923,6 +1104,8 @@ bool samples_from_file(const std::string& path, const std::string& config,
                     (r.half == capture_file::Half::Client) ? ".c2s" : ".s2c", half);
     else
         std::printf("  no .s2c/.c2s in the name; read as %s\n", half);
+    if (capture_file::udp_from_name(path))
+        std::printf("  UDP: the game's datagrams, one after another\n");
     std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
                 half, r.frames, r.resyncs);
 
@@ -930,18 +1113,74 @@ bool samples_from_file(const std::string& path, const std::string& config,
     // others: say what was there either way.
     if (r.inner > 0)
         std::printf("  and %zu frame(s) inside 0x0081 -- %s\n", r.inner,
-                    inner ? "the ones taken here (--inner)" : "--inner takes those instead");
-    if (r.other_kind > 0)
-        std::printf("  %zu of opcode 0x%04X left out, being %s\n", r.other_kind, opcode,
-                    inner ? "straight off the stream" : "inside 0x0081");
-    std::printf("\n");
+                    o.inner ? "the ones taken here (--inner)" : "--inner takes those instead");
+    return r;
+}
 
+/// The end of what read_recording() says: a warning when the reading looks
+/// wrong.
+void end_reading(const capture_file::Reading& r) {
+    std::printf("\n");
     if (r.resyncs > r.frames) {
         std::printf("  !! more resync bytes than frames. Either this is the other\n"
                     "     direction, the framing is wrong, or the capture lost\n"
                     "     packets. Treat anything below with suspicion.\n\n");
     }
+}
+
+/// Read a recorded stream and pull out every payload of one opcode, of the
+/// kind asked for: straight off the stream, or with --inner from inside
+/// 0x0081.
+bool samples_from_file(const std::string& path, const Options& o, std::vector<Bytes>& out) {
+    std::vector<GamePacket> frames;
+    const capture_file::Reading r = read_recording(path, o, frames);
+    if (!r.ok) return false;
+
+    const Options taken = as_read(o, path);
+    std::size_t other_kind = 0;
+    for (const GamePacket& p : frames) {
+        if (p.opcode != o.opcode) continue;
+        if (picked(p, taken)) out.push_back(p.payload);
+        else                  ++other_kind;
+    }
+    if (other_kind > 0)
+        std::printf("  %zu of opcode 0x%04X left out, being %s\n", other_kind, o.opcode,
+                    o.inner ? "straight off the stream" : "inside 0x0081");
+    end_reading(r);
     return true;
+}
+
+/// --dump --from: every frame of one opcode in a recording, shown as --dump
+/// shows them live.
+int dump_file(const Options& o) {
+    std::printf("Reading %s\n", o.from.c_str());
+    std::vector<GamePacket> frames;
+    const capture_file::Reading r = read_recording(o.from, o, frames);
+    if (!r.ok) return 1;
+    end_reading(r);
+
+    const Options taken = as_read(o, o.from);
+    std::printf("Dumping opcode 0x%04X, %s.\n", o.opcode, kind_taken(taken).c_str());
+    int found = 0, shown = 0;
+    std::size_t passed_by = 0;
+    for (const GamePacket& p : frames) {
+        if (p.opcode != o.opcode) continue;
+        if (!picked(p, taken)) { ++passed_by; continue; }
+        ++found;
+        if (o.max <= 0 || shown < o.max) print_dumped(p, ++shown);
+    }
+
+    std::printf("\n%d frame(s) of opcode 0x%04X in the recording", found, o.opcode);
+    if (shown < found) std::printf(", the first %d shown (--max)", shown);
+    std::printf(".\n");
+    if (passed_by > 0) {
+        Options other = taken;
+        other.inner = !taken.inner;
+        std::printf("%zu more of opcode 0x%04X were %s; %s takes those.\n", passed_by,
+                    o.opcode, kind_taken(other).c_str(),
+                    o.inner ? "leaving out --inner" : "--inner");
+    }
+    return 0;
 }
 
 /// Compare one opcode across two recordings taken under different conditions.
@@ -955,9 +1194,9 @@ bool samples_from_file(const std::string& path, const std::string& config,
 int diff_two(const Options& o) {
     std::vector<Bytes> a, b;
     std::printf("A: %s\n", o.from.c_str());
-    if (!samples_from_file(o.from, o.config, o.opcode, a, o.inner)) return 1;
+    if (!samples_from_file(o.from, o, a)) return 1;
     std::printf("B: %s\n", o.versus.c_str());
-    if (!samples_from_file(o.versus, o.config, o.opcode, b, o.inner)) return 1;
+    if (!samples_from_file(o.versus, o, b)) return 1;
 
     if (a.size() < 2 || b.size() < 2) {
         std::fprintf(stderr, "Need at least 2 packets of 0x%04X in each: "
@@ -1026,6 +1265,13 @@ int diff_two(const Options& o) {
     return 0;
 }
 
+/// Byte-offset volatility analysis.
+///
+/// The core discovery technique: capture many instances of one opcode and see
+/// which offsets change. An entity id is constant across updates for the same
+/// entity; a coordinate changes smoothly as you walk; HP changes only when you
+/// take damage. The change *pattern* identifies the field far more reliably
+/// than staring at hex.
 int cmd_diff(const Options& o) {
     if (!o.versus.empty()) {
         if (o.from.empty()) {
@@ -1044,10 +1290,15 @@ int cmd_diff(const Options& o) {
         // be examined again after a hypothesis changes, which live capture
         // cannot offer.
         std::printf("Reading %s\n", o.from.c_str());
-        if (!samples_from_file(o.from, o.config, o.opcode, samples, o.inner)) return 1;
+        if (!samples_from_file(o.from, o, samples)) return 1;
         std::printf("%zu packets of opcode 0x%04X in the recording%s.\n",
                     samples.size(), o.opcode, o.inner ? ", inside 0x0081" : "");
     } else {
+#if GOBOT_SNIFF_FILES_ONLY
+        // Never reached: main() refuses --diff without --from here, as it
+        // captures.
+        return 2;
+#else
         bool have_framing = false;
         const FramingSpec spec = load_framing(o.config, have_framing);
         if (!have_framing) {
@@ -1100,6 +1351,7 @@ int cmd_diff(const Options& o) {
                         "--inner and --udp take the others.\n",
                         static_cast<unsigned long long>(passed_by), o.opcode,
                         kind_taken(o).c_str());
+#endif
     }
 
     if (samples.size() < 2) {
@@ -1196,15 +1448,30 @@ int cmd_diff(const Options& o) {
     std::printf("  name=MonsterUpdate\n");
     std::printf("  semantic=monster_update\n");
     std::printf("  fields=id:u32,x:f32,y:f32,hp:i32\n\n");
-    std::printf("Then: gobot_sniff --decode\n");
+    if (o.from.empty())
+        std::printf("Then: gobot_sniff --decode\n");
+    else
+        std::printf("Then: %s --decode%s --from %s\n", kProgram, o.inner ? " --inner" : "",
+                    o.from.c_str());
     return 0;
 }
 
+/// One frame into what the inference reads: per opcode, which way it went,
+/// and its first 256 bodies.
+void observe(std::map<std::uint16_t, OpcodeObservations>& obs, const GamePacket& p) {
+    auto& e = obs[p.opcode];
+    if (p.from_server) ++e.to_client; else ++e.to_server;
+    if (e.payloads.size() < 256) {
+        e.payloads.push_back(p.payload);
+        e.timestamps_ms.push_back(p.timestamp_ms);
+    }
+}
+
+int report_analysis(const Options& o, const std::map<std::uint16_t, OpcodeObservations>& obs,
+                    std::uint64_t passed_by);
+
+#if !GOBOT_SNIFF_FILES_ONLY
 /// Capture, then run the same inference the GUI's automatic setup runs.
-///
-/// Prints the per-opcode evidence alongside the verdicts, because "found
-/// nothing" is the failure that needs explaining most and a bare empty list
-/// explains nothing at all.
 int cmd_analyze(const Options& o) {
     bool have_framing = false;
     const FramingSpec spec = load_framing(o.config, have_framing);
@@ -1228,12 +1495,7 @@ int cmd_analyze(const Options& o) {
         std::lock_guard<std::mutex> lock(mutex);
         for (const auto& p : packets) {
             if (!picked(p, o)) { ++passed_by; continue; }
-            auto& e = obs[p.opcode];
-            if (p.from_server) ++e.to_client; else ++e.to_server;
-            if (e.payloads.size() < 256) {
-                e.payloads.push_back(p.payload);
-                e.timestamps_ms.push_back(p.timestamp_ms);
-            }
+            observe(obs, p);
         }
     });
 
@@ -1261,11 +1523,42 @@ int cmd_analyze(const Options& o) {
     cap.stop();
 
     std::lock_guard<std::mutex> lock(mutex);
+    return report_analysis(o, obs, passed_by);
+}
+#endif
 
-    std::printf("\n\nRead: %s.", kind_taken(o).c_str());
-    if (passed_by > 0)
+/// --analyze --from: the same inference, on a recording.
+int analyze_file(const Options& o) {
+    std::printf("Reading %s\n", o.from.c_str());
+    std::vector<GamePacket> frames;
+    const capture_file::Reading r = read_recording(o.from, o, frames);
+    if (!r.ok) return 1;
+    end_reading(r);
+
+    const Options taken = as_read(o, o.from);
+    std::map<std::uint16_t, OpcodeObservations> obs;
+    std::uint64_t passed_by = 0;
+    for (const GamePacket& p : frames) {
+        if (!picked(p, taken)) { ++passed_by; continue; }
+        observe(obs, p);
+    }
+    return report_analysis(taken, obs, passed_by);
+}
+
+/// What --analyze prints, live or from a recording: the per-opcode evidence
+/// alongside the verdicts, because "found nothing" is the failure that needs
+/// explaining most and a bare empty list explains nothing at all.
+int report_analysis(const Options& o, const std::map<std::uint16_t, OpcodeObservations>& obs,
+                    std::uint64_t passed_by) {
+    // Live, the line before is the progress count, left without its newline.
+    std::printf("%sRead: %s.", o.from.empty() ? "\n\n" : "", kind_taken(o).c_str());
+    if (passed_by > 0 && o.from.empty())
         std::printf(" %llu frames of the other kinds were left out; --inner and --udp\n"
                     "take them instead.", static_cast<unsigned long long>(passed_by));
+    else if (passed_by > 0)
+        std::printf(" %llu frames of the other kind were left out; %s takes them\n"
+                    "instead.", static_cast<unsigned long long>(passed_by),
+                    o.inner ? "leaving out --inner" : "--inner");
     std::printf("\n");
 
     std::printf("\n%-9s %-8s %-8s %-8s %-7s %s\n",
@@ -1308,14 +1601,21 @@ int cmd_analyze(const Options& o) {
                     static_cast<unsigned long long>(c2s),
                     static_cast<unsigned long long>(s2c));
 
-        if (c2s == 0 && s2c == 0) {
+        // A recording holds one direction, so what the two counts say about
+        // the client is said only of a live capture, which sees both.
+        if (c2s == 0 && s2c == 0 && !o.from.empty()) {
+            std::printf("No frames of this kind were read. Either the recording holds none, or\n"
+                        "the framing in %s does not describe it. Check it directly with:\n\n"
+                        "  %s --verify %s\n",
+                        o.config.c_str(), kProgram, o.from.c_str());
+        } else if (c2s == 0 && s2c == 0) {
             std::printf("No packets were decoded at all. Either nothing was captured --\n"
                         "check the adapter and filter -- or the framing in %s does not\n"
                         "describe this stream. Check it directly with:\n\n"
                         "  gobot_sniff --record cap.bin --process <game exe>\n"
                         "  gobot_sniff --verify cap.bin.flow0.s2c\n",
                         o.config.c_str());
-        } else if (c2s * 20 < s2c) {
+        } else if (o.from.empty() && c2s * 20 < s2c) {
             std::printf("The client barely sent anything, which is what an idle character\n"
                         "looks like -- a moving one sends position updates continuously.\n"
                         "Meaning is inferred from how values change, so a recording of a\n"
@@ -1323,11 +1623,14 @@ int cmd_analyze(const Options& o) {
                         "Run it again and keep moving the whole time: walk back and forth,\n"
                         "fight something, take damage, spend mana.\n");
         } else {
-            std::printf("There was traffic in both directions, but no field behaved like a\n"
+            std::printf("There was traffic%s, but no field behaved like a\n"
                         "coordinate or a health bar. The values may be packed in a form this\n"
                         "does not look for -- fixed-point, bit-packed, or delta-encoded.\n\n"
-                        "Read the busiest opcode by hand:  gobot_sniff --diff 0x%04X\n",
-                        rows.empty() ? 0 : rows.front().first);
+                        "Read the busiest opcode by hand:  %s --diff 0x%04X%s%s%s%s\n",
+                        o.from.empty() ? " in both directions" : "", kProgram,
+                        rows.empty() ? 0 : rows.front().first, o.inner ? " --inner" : "",
+                        o.udp && o.from.empty() ? " --udp" : "",
+                        o.from.empty() ? "" : " --from ", o.from.c_str());
         }
         return 1;
     }
@@ -1363,12 +1666,26 @@ int cmd_analyze(const Options& o) {
 /// what happens. Answers "is this spec right?" directly, instead of leaving it
 /// to be inferred from where the search ranked it.
 int cmd_verify(const Options& o) {
-    bool have = false;
-    const FramingSpec spec = load_framing(o.config, have);
+    if (!udp_fits(o, o.file)) return 1;
+    bool have = false, have_client = false;
+    const FramingSpec server = load_framing(o.config, have);
+    const FramingSpec client = load_framing(o.config, have_client, "FramingClient");
     if (!have) {
         std::fprintf(stderr, "error: no [Framing] section in %s\n", o.config.c_str());
         return 1;
     }
+
+    // The client's half is framed differently -- its opcode at offset 6, not
+    // 2 -- so a .c2s recording, TCP or UDP, is tiled with [FramingClient], as
+    // --from reads it. Under [Framing] it would be nothing but resyncs.
+    capture_file::Half half = capture_file::Half::Server;
+    const bool client_half =
+        capture_file::half_from_name(o.file, half) && half == capture_file::Half::Client;
+    if (client_half && !have_client)
+        std::printf("note: no [FramingClient] in %s, so this client half is read with\n"
+                    "      [Framing], which frames it wrong.\n", o.config.c_str());
+    const bool as_client = client_half && have_client;
+    const FramingSpec& spec = as_client ? client : server;
 
     std::ifstream in(o.file, std::ios::binary);
     if (!in) {
@@ -1378,11 +1695,22 @@ int cmd_verify(const Options& o) {
     std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)),
                                     std::istreambuf_iterator<char>());
 
-    std::printf("\nSpec : %s\n", spec.describe().c_str());
-    std::printf("File : %s (%zu bytes)\n\n", o.file.c_str(), data.size());
+    std::printf("\nSpec : %s %s\n", as_client ? "[FramingClient]" : "[Framing]",
+                spec.describe().c_str());
+    std::printf("File : %s (%zu bytes)%s\n\n", o.file.c_str(), data.size(),
+                capture_file::udp_from_name(o.file) ? ", UDP datagrams one after another" : "");
+    if (data.empty()) {
+        // Not a framing that fails: nothing was recorded in this file at all,
+        // which for a .udp file is what a game that sends no UDP leaves.
+        std::printf("Nothing to tile: the file is empty.%s\n",
+                    capture_file::udp_from_name(o.file)
+                        ? " The recording caught no UDP in this direction." : "");
+        return 1;
+    }
 
     // The same reading the tests check a real capture with.
-    const FrameScanResult scan = capture_file::tile(data, spec);
+    const FrameScanResult scan = capture_file::tile(
+        data, spec, as_client ? Direction::ToServer : Direction::ToClient);
 
     // Frames off the stream, as this has always listed them; those found
     // inside 0x0081 are listed apart, by depth and opcode, below.
@@ -1458,6 +1786,48 @@ int cmd_verify(const Options& o) {
     return 0;
 }
 
+/// The [Packet.*] layouts in the config, for --decode: false, and said, when
+/// there are none.
+bool load_layouts(const Options& o, OpcodeRegistry& registry) {
+    if (!registry.load(o.config) || registry.size() == 0) {
+        std::fprintf(stderr,
+            "error: no [Packet.*] layouts in %s\n"
+            "Use --diff to work out a layout first.\n", o.config.c_str());
+        return false;
+    }
+    return true;
+}
+
+/// What came of one frame through the layouts.
+enum class Decoded { Read, Failed, NoLayout };
+
+/// One frame through the layouts, printed as --decode prints it, live or
+/// from a recording: labelled with where it was found, when that is not the
+/// TCP stream.
+Decoded print_decoded(const OpcodeRegistry& registry, const GamePacket& p) {
+    const std::string where = where_found(p);
+    const std::string tag = where.empty() ? "" : " [" + where + "]";
+    if (auto d = registry.decode(p)) {
+        std::printf("%s%s\n", d->describe().c_str(), tag.c_str());
+        return Decoded::Read;
+    }
+    if (!registry.known(p.opcode)) return Decoded::NoLayout;
+    std::printf("0x%04X FAILED to decode (%zu byte body) — layout too long?%s\n",
+                p.opcode, p.payload.size(), tag.c_str());
+    return Decoded::Failed;
+}
+
+/// Said before decoding frames found inside 0x0081 or over UDP.
+void say_not_for_the_bot(const Options& o) {
+    if (o.inner || o.udp)
+        std::printf("Note: the bot applies these layouts only to frames off the TCP stream,\n"
+                    "where an opcode number need not mean what it means here. A layout that\n"
+                    "reads %s right is not, by that, right for the bot --\n"
+                    "which does not decode those yet (P0-3 in docs/goc-parity-plan.md).\n\n",
+                    kind_taken(o).c_str());
+}
+
+#if !GOBOT_SNIFF_FILES_ONLY
 int cmd_decode(const Options& o) {
     bool have_framing = false;
     const FramingSpec spec = load_framing(o.config, have_framing);
@@ -1467,12 +1837,7 @@ int cmd_decode(const Options& o) {
     }
 
     OpcodeRegistry registry;
-    if (!registry.load(o.config) || registry.size() == 0) {
-        std::fprintf(stderr,
-            "error: no [Packet.*] layouts in %s\n"
-            "Use --diff to work out a layout first.\n", o.config.c_str());
-        return 1;
-    }
+    if (!load_layouts(o, registry)) return 1;
 
     PacketCapture cap;
     cap.set_framing(spec);
@@ -1486,16 +1851,9 @@ int cmd_decode(const Options& o) {
     cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
         for (const auto& p : packets) {
             if (!picked(p, o)) { passed_by.fetch_add(1); continue; }
-            const std::string where = where_found(p);
-            const std::string tag = where.empty() ? "" : " [" + where + "]";
-            if (auto d = registry.decode(p)) {
-                decoded.fetch_add(1);
-                std::printf("%s%s\n", d->describe().c_str(), tag.c_str());
-            } else if (registry.known(p.opcode)) {
-                skipped.fetch_add(1);
-                std::printf("0x%04X FAILED to decode (%zu byte body) — layout too long?%s\n",
-                            p.opcode, p.payload.size(), tag.c_str());
-            }
+            const Decoded d = print_decoded(registry, p);
+            if (d == Decoded::Read)   decoded.fetch_add(1);
+            if (d == Decoded::Failed) skipped.fetch_add(1);
         }
     });
 
@@ -1503,12 +1861,7 @@ int cmd_decode(const Options& o) {
 
     std::printf("Decoding %s with %zu known layouts. Ctrl+C to stop.\n\n",
                 kind_taken(o).c_str(), registry.size());
-    if (o.inner || o.udp)
-        std::printf("Note: the bot applies these layouts only to frames off the TCP stream,\n"
-                    "where an opcode number need not mean what it means here. A layout that\n"
-                    "reads %s right is not, by that, right for the bot --\n"
-                    "which does not decode those yet (P0-3 in docs/goc-parity-plan.md).\n\n",
-                    kind_taken(o).c_str());
+    say_not_for_the_bot(o);
     wait_for_stop(o.seconds);
     cap.stop();
 
@@ -1520,10 +1873,50 @@ int cmd_decode(const Options& o) {
                     "take them instead.\n", static_cast<unsigned long long>(passed_by.load()));
     return 0;
 }
+#endif
+
+/// --decode --from: a recording through the layouts.
+int decode_file(const Options& o) {
+    OpcodeRegistry registry;
+    if (!load_layouts(o, registry)) return 1;
+
+    std::printf("Reading %s\n", o.from.c_str());
+    std::vector<GamePacket> frames;
+    const capture_file::Reading r = read_recording(o.from, o, frames);
+    if (!r.ok) return 1;
+    end_reading(r);
+
+    const Options taken = as_read(o, o.from);
+    std::printf("Decoding %s with %zu known layouts.\n\n", kind_taken(taken).c_str(),
+                registry.size());
+    say_not_for_the_bot(taken);
+
+    std::uint64_t decoded = 0, failed = 0, passed_by = 0;
+    for (const GamePacket& p : frames) {
+        if (!picked(p, taken)) { ++passed_by; continue; }
+        const Decoded d = print_decoded(registry, p);
+        if (d == Decoded::Read)   ++decoded;
+        if (d == Decoded::Failed) ++failed;
+    }
+
+    std::printf("\nDecoded %llu, failed %llu\n", static_cast<unsigned long long>(decoded),
+                static_cast<unsigned long long>(failed));
+    if (passed_by > 0)
+        std::printf("%llu frames of the other kind were not decoded; %s takes them instead.\n",
+                    static_cast<unsigned long long>(passed_by),
+                    o.inner ? "leaving out --inner" : "--inner");
+    return 0;
+}
 
 } // namespace
 
 int main(int argc, char** argv) {
+#if GOBOT_SNIFF_FILES_ONLY
+    // Before anything else, and never turned off. This program reads files
+    // and prints; should anything in it ever reach for a key, the pointer,
+    // the focus, or start or end a program, that is refused instead.
+    forbid_real_input();
+#endif
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
@@ -1541,17 +1934,38 @@ int main(int argc, char** argv) {
                           (o.config[1] == ':' || o.config[0] == '\\' || o.config[0] == '/');
     if (!absolute) o.config = exe_relative(o.config);
 
+    // What reads files, in both programs.
+    if (o.command == "detect") return cmd_detect(o);
+    if (o.command == "verify") return cmd_verify(o);
+    if (!o.from.empty()) {
+        if (o.command == "dump")    return dump_file(o);
+        if (o.command == "diff")    return cmd_diff(o);
+        if (o.command == "decode")  return decode_file(o);
+        if (o.command == "analyze") return analyze_file(o);
+    }
+
+#if GOBOT_SNIFF_FILES_ONLY
+    // Everything else captures, and is refused by name rather than tried.
+    const bool has_file_form = o.command == "dump" || o.command == "diff" ||
+                               o.command == "decode" || o.command == "analyze";
+    std::fprintf(stderr,
+        "error: --%s%s works on the live network, and gobot_sniff_files reads\n"
+        "       recordings only. Use gobot_sniff for it: it asks for administrator, as\n"
+        "       capturing needs. Here: --verify <file>, --detect <file>, or --dump,\n"
+        "       --diff, --decode or --analyze with --from <recording>.\n",
+        o.command.c_str(), has_file_form ? " without --from" : "");
+    return 2;
+#else
     if (o.command == "list")     return cmd_list();
     if (o.command == "discover") return cmd_discover(o);
-    if (o.command == "record") return cmd_record(o);
-    if (o.command == "detect") return cmd_detect(o);
-    if (o.command == "watch")  return cmd_watch(o);
-    if (o.command == "dump")   return cmd_dump(o);
-    if (o.command == "diff")   return cmd_diff(o);
-    if (o.command == "decode")  return cmd_decode(o);
-    if (o.command == "analyze") return cmd_analyze(o);
-    if (o.command == "verify")  return cmd_verify(o);
+    if (o.command == "record")   return cmd_record(o);
+    if (o.command == "watch")    return cmd_watch(o);
+    if (o.command == "dump")     return cmd_dump(o);
+    if (o.command == "diff")     return cmd_diff(o);
+    if (o.command == "decode")   return cmd_decode(o);
+    if (o.command == "analyze")  return cmd_analyze(o);
 
     print_usage();
     return 2;
+#endif
 }
