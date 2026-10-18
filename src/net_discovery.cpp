@@ -161,20 +161,86 @@ std::vector<std::string> local_ipv4_addresses() {
     return out;
 }
 
-std::string build_filter_for(const std::vector<ProcessConnection>& conns) {
-    if (conns.empty()) return "tcp";
+std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name) {
+    std::vector<std::uint16_t> out;
+
+    ULONG size = 0;
+    if (GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER) {
+        return out;     // no UDP sockets at all, or no table to read
+    }
+
+    std::vector<std::uint8_t> buf(size);
+    auto* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buf.data());
+    if (GetExtendedUdpTable(table, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR) {
+        GB_WARN("GetExtendedUdpTable failed");
+        return out;
+    }
+
+    std::unordered_map<std::uint32_t, std::string> names;
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const MIB_UDPROW_OWNER_PID& row = table->table[i];
+        auto it = names.find(row.dwOwningPid);
+        if (it == names.end())
+            it = names.emplace(row.dwOwningPid, process_name_for_pid(row.dwOwningPid)).first;
+        if (_stricmp(it->second.c_str(), exe_name.c_str()) != 0) continue;
+        out.push_back(static_cast<std::uint16_t>(ntohs(static_cast<u_short>(row.dwLocalPort))));
+    }
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::string build_filter_for(const std::vector<ProcessConnection>& conns,
+                             const std::vector<std::uint16_t>& udp_ports) {
+    // UDP as well as TCP, as GoC captures it: nothing GoBot has recorded can
+    // say whether the game uses UDP, and a filter that leaves it out cannot
+    // find out.
+    if (conns.empty() && udp_ports.empty()) return "(tcp or udp)";
 
     // Match each connection by its remote endpoint. Pinning the port as well
     // as the host keeps a busy server's other services out of the sample.
-    std::ostringstream f;
-    f << "tcp and (";
-    for (std::size_t i = 0; i < conns.size(); ++i) {
-        if (i) f << " or ";
-        f << "(host " << ip_to_string(conns[i].remote.ip)
-          << " and port " << conns[i].remote.port << ")";
+    std::ostringstream servers;
+    if (!conns.empty()) {
+        servers << "(tcp or udp) and (";
+        for (std::size_t i = 0; i < conns.size(); ++i) {
+            if (i) servers << " or ";
+            servers << "(host " << ip_to_string(conns[i].remote.ip)
+                    << " and port " << conns[i].remote.port << ")";
+        }
+        servers << ")";
     }
-    f << ")";
-    return f.str();
+
+    // UDP on two kinds of port, from any host:
+    //
+    //   - the game's own UDP sockets, by their local port: a UDP server need
+    //     not listen on the port its TCP connection uses, and these are the
+    //     game's own traffic whichever server it reaches;
+    //   - the servers' ports, as GoC's own "(tcp or udp) and port 15101"
+    //     takes them, with no host: a datagram from another of the game's
+    //     hosts, to a socket the game opened after this filter was built --
+    //     on a map load, say -- is still let in.
+    std::vector<std::uint16_t> ports = udp_ports;
+    for (const auto& c : conns) ports.push_back(c.remote.port);
+    std::sort(ports.begin(), ports.end());
+    ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+    ports.erase(std::remove(ports.begin(), ports.end(), std::uint16_t{0}), ports.end());
+
+    std::ostringstream udp;
+    if (!ports.empty()) {
+        udp << "udp and (";
+        for (std::size_t i = 0; i < ports.size(); ++i) {
+            if (i) udp << " or ";
+            udp << "port " << ports[i];
+        }
+        udp << ")";
+    }
+
+    if (ports.empty()) return servers.str();
+    if (conns.empty()) return udp.str();
+    return "(" + servers.str() + ") or (" + udp.str() + ")";
 }
 
 } // namespace gobot

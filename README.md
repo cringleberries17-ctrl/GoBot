@@ -72,7 +72,11 @@ configured correctly now:
 
 - **Opcode `0x0081` carries twelve bytes past its declared length.** Miss it and
   the scanner resyncs, slides a byte at a time and swallows real frames — one
-  such packet every few hundred frames hid 73% of the stream.
+  such packet every few hundred frames hid 73% of the stream. Those twelve bytes
+  are the end of a whole frame wrapped inside it, from its byte 13, which is how
+  GoC's own parser reads it. GoBot hands that inner frame out too, right after
+  the wrapper and marked as found inside it; the bot does not act on it yet
+  (`docs/protocol-findings.md` §4d).
 - **The two directions are framed differently.** The opcode sits at offset 2
   coming down and offset 6 going up, so a capture given only `[Framing]`
   decodes the server and grinds the client's half into noise.
@@ -122,6 +126,15 @@ partial overlap), packet decoding, the world model, pathfinding, the glyph
 reader, and the shipped configs themselves. These are where a subtle bug is
 most expensive: by the time bad framing surfaces as "the bot walks into a
 wall", the cause is six layers down.
+
+The tests run with no real input. `gobot_test` turns GoBot's "no real input"
+switch on before its first test, so nothing it runs can press a key, click,
+move the pointer, change the focus, post to another program's window, start or
+end a program, or read a launcher's path off a running one: each is refused,
+and named in the log as an error. The last lines of the run say how many were
+refused. Any beyond the switch's own test is a test reaching for the desktop,
+and it wants pretend hands: the run fails on it, so `package.ps1` will not
+package that build.
 
 Npcap itself must already be installed (it is, if the original client ran) —
 get it from <https://npcap.com/#download> with *WinPcap API-compatible Mode*
@@ -351,6 +364,11 @@ Variety matters more than volume — you are producing the evidence that the
 next two steps read.
 
 Narrow to one server with `--host`; a capture mixing connections will not tile.
+
+It writes `capture.bin.s2c` and `.c2s` for the TCP stream, one `.flowN.s2c`
+per connection, and `capture.bin.udp.s2c` and `.udp.c2s` for whatever came
+over UDP — captured as GoC captures it, on the same address and ports, and kept
+in files of its own. `--seconds <n>` stops it by itself.
 
 ### 3. Find the framing
 

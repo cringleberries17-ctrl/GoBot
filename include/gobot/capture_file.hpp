@@ -30,9 +30,17 @@ struct Reading {
     bool        ok = false;
     Half        half = Half::Server;
     HalfSource  decided_by = HalfSource::Scan;
-    std::size_t frames = 0;
+    std::size_t frames = 0;     ///< read straight off the stream, wrappers' insides apart
     std::size_t resyncs = 0;
     std::string error;          ///< set when ok is false
+
+    /// Frames taken out of 0x0081 wrappers, any opcode.
+    std::size_t inner = 0;
+    /// Frames of the opcode asked for that were the other kind -- inside a
+    /// wrapper when plain ones were asked for, or the reverse -- and so were
+    /// left out. Worth saying when nothing of the kind asked for was found.
+    std::size_t other_kind = 0;
+    UnwrapCounts unwrap;
 };
 
 /// The direction a recording's name implies, if its name implies one.
@@ -50,11 +58,22 @@ bool half_from_name(const std::string& path, Half& out);
 ///
 /// `client` may be implausible when the config has no [FramingClient]; the
 /// server spec is then the only candidate.
+///
+/// Frames read straight off the stream, by default, which is all this ever
+/// gave; with `inner`, only those found inside 0x0081 wrappers instead. The
+/// two are never mixed: one opcode number need not mean the same thing in
+/// both places.
 Reading extract(const std::string& path,
                 const FramingSpec& server,
                 const FramingSpec& client,
                 std::uint16_t opcode,
-                std::vector<Bytes>& out);
+                std::vector<Bytes>& out,
+                bool inner = false);
+
+/// A whole recording tiled with one spec from its first byte, as the server's
+/// half: what `gobot_sniff --verify` reports, and what the tests check a real
+/// capture against, so that both read it the same way.
+FrameScanResult tile(const Bytes& recording, const FramingSpec& spec);
 
 } // namespace capture_file
 } // namespace gobot

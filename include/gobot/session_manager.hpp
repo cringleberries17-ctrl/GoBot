@@ -127,11 +127,13 @@ public:
     // ---- processes ----
 
     /// Whether a process of this name is running. Name only, no path, case
-    /// insensitive -- "Game.exe".
+    /// insensitive -- "VTCZone.exe". Not for the game: plenty of programs are
+    /// called Game.exe, and `game_running` (gobot/game_install.hpp) asks
+    /// where one runs from.
     static bool process_running(const std::string& exe_name);
 
     /// Start a program and return whether it started. No console window, and
-    /// this does not wait for it.
+    /// this does not wait for it. Refused under the "no real input" switch.
     static bool start_program(const std::string& path);
 
     /// Ask the machine to shut down after a delay, announced to the user.
@@ -140,7 +142,8 @@ public:
     /// than calling the API directly, for one reason: that gives a visible
     /// countdown the person can call off with `shutdown /a`. An unattended bot
     /// turning a machine off is the single most annoying thing in this file if
-    /// it is ever wrong, so it had better be interruptible.
+    /// it is ever wrong, so it had better be interruptible. Refused under the
+    /// "no real input" switch.
     static bool request_shutdown(int delay_s, const std::string& why);
 
 private:

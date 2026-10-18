@@ -22,6 +22,7 @@
 #include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/quick_quest.hpp"
 #include "gobot/session_manager.hpp"
@@ -1273,12 +1274,13 @@ void GuiApp::simple_start() {
         }
         // Running, only its window not found: there is no game to open, and
         // the keeper would watch it run and never log in, so nothing else
-        // would ever start.
+        // would ever start. The game itself, by where it runs from: another
+        // program called Game.exe is no reason not to open the game.
         IniFile app_ini;
         app_ini.load(exe_relative("configs/app.ini"));
         CrashWatch::Settings crash;
         crash.load(app_ini);
-        if (SessionManager::process_running(crash.game_process)) {
+        if (game_running(crash.game_process, GameInstall::here())) {
             simple_note("Game đang chạy nhưng GoBot chưa tìm thấy cửa sổ của nó. Bấm Tìm lại "
                         "hoặc \"Chọn cửa sổ…\" ở thẻ Đánh quái.", 10000);
             return;

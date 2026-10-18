@@ -1,23 +1,21 @@
 #include "gobot/crash_watch.hpp"
+#include "gobot/common.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
-#include "gobot/session_manager.hpp"
+#include "gobot/no_real_input.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <thread>
+#include <vector>
 
 #include <windows.h>
-#include <tlhelp32.h>
 
 namespace gobot {
 namespace {
-
-long long now_ms() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
 
 std::string to_lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
@@ -43,41 +41,93 @@ std::size_t past_filler(const std::string& text, std::size_t at) {
     return at;
 }
 
-/// End every process of this name. Returns how many were ended.
+/// What Windows hands back for a command line: a counted string, its text
+/// straight after it (UNICODE_STRING).
+struct CountedText {
+    USHORT   bytes;
+    USHORT   room;
+    wchar_t* text;
+};
+
+/// The command line of the program behind `process`, UTF-8, or "" when
+/// Windows will not say.
 ///
-/// By name rather than by handle because the thing being ended has usually
-/// already lost its window, which is the only handle anybody was holding.
-int end_all(const std::string& exe_name) {
-    if (exe_name.empty()) return 0;
-
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-
-    const std::string want = to_lower(exe_name);
-    int ended = 0;
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    if (Process32FirstW(snap, &entry)) {
-        do {
-            char name[MAX_PATH] = {};
-            WideCharToMultiByte(CP_UTF8, 0, entry.szExeFile, -1, name, MAX_PATH,
-                                nullptr, nullptr);
-            if (to_lower(name) != want) continue;
-
-            HANDLE proc = OpenProcess(PROCESS_TERMINATE, FALSE, entry.th32ProcessID);
-            if (proc == nullptr) {
-                GB_WARN("CrashWatch: cannot end %s (pid %lu) -- it is running at a "
-                        "higher privilege than this program", name,
-                        static_cast<unsigned long>(entry.th32ProcessID));
-                continue;
-            }
-            if (TerminateProcess(proc, 0)) ++ended;
-            CloseHandle(proc);
-        } while (Process32NextW(snap, &entry));
+/// Asked through a handle that may only ask after the program -- the right
+/// that tells where a program runs from, not one that reads its memory --
+/// which Windows 8.1 and later answer for this (ProcessCommandLineInformation).
+std::string command_line_of_handle(HANDLE process) {
+    using Query = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static const Query query = reinterpret_cast<Query>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+    if (query == nullptr || process == nullptr) return {};
+    constexpr ULONG kCommandLine = 60;      // ProcessCommandLineInformation
+    std::vector<unsigned char> room(2048);
+    for (int tries = 0; tries < 3; ++tries) {
+        ULONG need = 0;
+        const LONG status =
+            query(process, kCommandLine, room.data(), static_cast<ULONG>(room.size()), &need);
+        if (status >= 0) {
+            const auto* line = reinterpret_cast<const CountedText*>(room.data());
+            if (line->text == nullptr || line->bytes == 0) return {};
+            return wide_to_utf8(std::wstring(line->text, line->bytes / sizeof(wchar_t)));
+        }
+        // Too little room, and Windows says how much it wants. A command line
+        // is at most 32767 characters: anything wanting more is not one.
+        if (need <= room.size() || need > 70000) return {};
+        room.resize(need);
     }
-    CloseHandle(snap);
+    return {};
+}
+
+/// The process a window belongs to, 0 when it cannot be told.
+unsigned long owner_of(void* hwnd) {
+    DWORD pid = 0;
+    if (hwnd != nullptr) GetWindowThreadProcessId(static_cast<HWND>(hwnd), &pid);
+    return pid;
+}
+
+/// End every crash reporter called `name` that is reporting on one of
+/// `games`, and no other: how many were ended.
+///
+/// Windows' crash reporter is one program for every crash on the machine, so
+/// ending it by its name ended other programs' reports, and the crashed
+/// programs behind them. Each is asked again through the very handle that
+/// ends it, so that one which has gone since it was looked at, its number
+/// taken by another program, is never ended in its place.
+int end_reporters(const std::string& name, const std::vector<RunningProgram>& games) {
+    if (name.empty()) return 0;
+    if (refuse_real_input("end a program")) return 0;
+
+    int ended = 0;
+    for (const RunningProgram& p : programs_called(name)) {
+        if (!CrashWatch::reports_on(CrashWatch::command_line_of(p.pid), games)) {
+            GB_INFO("CrashWatch: left %s (pid %lu) running: it is not reporting on the game",
+                    p.name.c_str(), p.pid);
+            continue;
+        }
+        HANDLE proc = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                  p.pid);
+        if (proc == nullptr) {
+            GB_WARN("CrashWatch: cannot end %s (pid %lu) -- it has ended already, or runs at a "
+                    "higher privilege than this program", p.name.c_str(), p.pid);
+            continue;
+        }
+        if (CrashWatch::reports_on(command_line_of_handle(proc), games)) {
+            if (TerminateProcess(proc, 0)) ++ended;
+        } else {
+            GB_WARN("CrashWatch: left pid %lu running: it is no longer reporting on the game",
+                    p.pid);
+        }
+        CloseHandle(proc);
+    }
     return ended;
+}
+
+/// Post a message to another program's window: the only way this file
+/// reaches one.
+void post(void* hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (refuse_real_input("post a message to another program's window")) return;
+    PostMessageA(static_cast<HWND>(hwnd), message, wparam, lparam);
 }
 
 } // namespace
@@ -190,12 +240,20 @@ bool CrashWatch::looks_like_a_box(const std::string& window_class,
 CrashWatch::Look CrashWatch::look() {
     Look out;
 
+    // Which program is the game: by where it runs from, never by its name
+    // alone. Found once a look, so that a copy of the game which came up
+    // since the last one is known by its window.
+    const GameInstall game = game_install();
+
     // A box first, because a client that is showing one is still running and
     // would otherwise read as merely "not in the world" for as long as the box
-    // stays up -- which is forever, since nobody is there to click it.
-    for (const std::string& who : { settings_.game_process, settings_.reporter_process }) {
-        if (who.empty()) continue;
-        for (const auto& w : InputManager::windows_of(who)) {
+    // stays up -- which is forever, since nobody is there to click it. The
+    // game's boxes from the game alone; Windows' crash reporter's while it is
+    // reporting on the game, as it speaks for a program that can no longer
+    // speak itself.
+    const auto box_among = [&](const std::string& who,
+                               const std::vector<InputManager::WindowInfo>& windows) {
+        for (const auto& w : windows) {
             const std::string text = InputManager::window_text(w.hwnd);
             if (!looks_like_a_box(w.window_class, w.title, text)) continue;
 
@@ -206,11 +264,38 @@ CrashWatch::Look CrashWatch::look() {
                          (text.empty() ? w.title : text);
             if (!out.code.empty()) out.detail += "  [code " + out.code + "]";
             hung_since_ms_ = 0;
-            return out;
+            return true;
         }
+        return false;
+    };
+    if (!settings_.game_process.empty() &&
+        box_among(settings_.game_process, game_windows(settings_.game_process, game)))
+        return out;
+
+    // The game's programs now: what a crash reporter has to be reporting on
+    // for its box to be the game's, and whether the game is running at all.
+    const std::vector<RunningProgram> games = game_programs(settings_.game_process, game);
+
+    // Windows' crash reporter puts up the same box for every program that
+    // crashes, so its name says nothing about whose crash it is: the process
+    // its command line names does. A box of somebody else's crash read as the
+    // game's once ended a healthy client mid-session.
+    if (!settings_.reporter_process.empty() && !games.empty()) {
+        std::vector<InputManager::WindowInfo> for_the_game;
+        for (InputManager::WindowInfo& w : InputManager::windows_of(settings_.reporter_process)) {
+            const unsigned long reporter = owner_of(w.hwnd);
+            if (reports_on(command_line_of(reporter), games)) {
+                for_the_game.push_back(std::move(w));
+            } else if (reporter != told_other_reporter_) {
+                told_other_reporter_ = reporter;
+                GB_INFO("CrashWatch: %s (pid %lu) is up for another program, not the game -- "
+                        "left alone", settings_.reporter_process.c_str(), reporter);
+            }
+        }
+        if (box_among(settings_.reporter_process, for_the_game)) return out;
     }
 
-    if (!SessionManager::process_running(settings_.game_process)) {
+    if (games.empty()) {
         out.what   = Trouble::Gone;
         out.detail = settings_.game_process + " is not running";
         hung_since_ms_ = 0;
@@ -218,7 +303,7 @@ CrashWatch::Look CrashWatch::look() {
     }
 
     // Still running. Is it answering?
-    const auto windows = InputManager::windows_of(settings_.game_process);
+    const auto windows = game_windows(settings_.game_process, game);
     bool answering = windows.empty();     // no window yet is not the same as hung
     for (const auto& w : windows)
         if (!InputManager::window_hung(w.hwnd)) { answering = true; break; }
@@ -228,7 +313,7 @@ CrashWatch::Look CrashWatch::look() {
         return out;
     }
 
-    const long long t = now_ms();
+    const long long t = static_cast<long long>(now_ms());   // the steady clock (common.hpp)
     if (hung_since_ms_ == 0) hung_since_ms_ = t;
     const long long stuck_for = (t - hung_since_ms_) / 1000;
     if (stuck_for >= settings_.hung_grace_s) {
@@ -251,40 +336,134 @@ CrashWatch::Move CrashWatch::next_move(const Look& seen, bool seen_running, bool
 // ------------------------------------------------------------- shutting down
 
 bool CrashWatch::shut_down(const Look& seen) {
-    // Click the box away first.
+    // Everything here posts to other programs' windows or ends programs, so
+    // under the "no real input" switch none of it happens -- not even the
+    // waits, which only make sense after something was asked.
+    if (refuse_real_input("end the game client")) return false;
+
+    const GameInstall game = game_install();
+    const GameInstall::Drives drives = GameInstall::Drives::here();
+
+    // The game's programs as they are before anything is asked to close. A
+    // crash reporter is the game's only while it reports on one of these, and
+    // the game being ended below must not make its own reporter a stranger.
+    const std::vector<RunningProgram> games = game_programs(settings_.game_process, game);
+
+    // Click the box away first -- while it is still the game's own, or its
+    // crash reporter's: the look that found it was a moment ago, and a box
+    // that has since become somebody else's is not this to answer.
     //
     // A process with a modal dialog up is sitting in that dialog's message
     // loop and will not act on anything else, including a polite request to
     // close. Dismissing it lets the program take its own exit path, which is
     // better than killing it part way through writing its files.
     if (seen.dialog != nullptr && IsWindow(static_cast<HWND>(seen.dialog))) {
-        GB_INFO("CrashWatch: dismissing the box");
-        PostMessageA(static_cast<HWND>(seen.dialog), WM_COMMAND, IDOK, 0);
-        PostMessageA(static_cast<HWND>(seen.dialog), WM_CLOSE, 0, 0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        if (box_for_the_game(seen.dialog, games)) {
+            GB_INFO("CrashWatch: dismissing the box");
+            post(seen.dialog, WM_COMMAND, IDOK, 0);
+            post(seen.dialog, WM_CLOSE, 0, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        } else {
+            GB_INFO("CrashWatch: left a box up -- it is neither the game's nor a crash report "
+                    "on the game");
+        }
     }
 
-    // Ask the windows that are left to close, and give them a moment.
-    for (const std::string& who : { settings_.game_process, settings_.launcher_process })
-        for (const auto& w : InputManager::windows_of(who))
-            PostMessageA(static_cast<HWND>(w.hwnd), WM_CLOSE, 0, 0);
+    // Ask the windows that are left to close, and give them a moment: the
+    // game's own, never another program's of its name, and the launcher's --
+    // the one beside the game, never a program of its name from elsewhere.
+    for (const auto& w : game_windows(settings_.game_process, game))
+        post(w.hwnd, WM_CLOSE, 0, 0);
+    for (const auto& w : InputManager::windows_of(settings_.launcher_process))
+        if (game.beside_the_game(w.path, drives)) post(w.hwnd, WM_CLOSE, 0, 0);
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
-    // Then end whatever is still there.
-    int ended = 0;
-    for (const std::string& who : { settings_.game_process, settings_.launcher_process,
-                                    settings_.reporter_process }) {
-        if (who.empty()) continue;
-        if (SessionManager::process_running(who)) ended += end_all(who);
-    }
+    // Then end whatever is still there: the game and its launcher by where
+    // they run from, the crash reporter by what it is reporting on. Every
+    // other program of those names is left running, and the log says so.
+    int ended = end_game(settings_.game_process, game);
+    ended += end_beside_the_game(settings_.launcher_process, game);
+    ended += end_reporters(settings_.reporter_process, games);
     if (ended > 0) GB_INFO("CrashWatch: ended %d process(es)", ended);
 
     std::this_thread::sleep_for(std::chrono::seconds(2));
-    const bool clean = !SessionManager::process_running(settings_.game_process);
+    const bool clean = !game_running(settings_.game_process, game);
     if (!clean)
         GB_WARN("CrashWatch: %s is still running. If GoBot is not elevated it "
                 "cannot end a process that is.", settings_.game_process.c_str());
     return clean;
+}
+
+bool CrashWatch::box_for_the_game(void* box, const std::vector<RunningProgram>& games) const {
+    const unsigned long owner = owner_of(box);
+    if (owner == 0) return false;
+    for (const RunningProgram& g : games)
+        if (g.pid == owner) return true;            // one of the game's own
+    // Else a crash reporter's, reporting on the game.
+    if (settings_.reporter_process.empty()) return false;
+    const std::string path = program_path(owner);
+    const std::size_t slash = path.find_last_of("\\/");
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    return !name.empty() && to_lower(name) == to_lower(settings_.reporter_process) &&
+           reports_on(command_line_of(owner), games);
+}
+
+// ------------------------------------------------------- the crash reporter
+
+unsigned long CrashWatch::reported_pid(const std::string& command_line) {
+    // Split as Windows splits a command line: at spaces and tabs, with a
+    // quoted run -- the program's own path, often -- kept whole.
+    std::vector<std::string> words;
+    std::string word;
+    bool quoted = false;
+    bool in_word = false;
+    for (const char c : command_line) {
+        if (c == '"') {
+            quoted = !quoted;
+            in_word = true;
+            continue;
+        }
+        if (!quoted && (c == ' ' || c == '\t')) {
+            if (in_word) words.push_back(word);
+            word.clear();
+            in_word = false;
+            continue;
+        }
+        word += c;
+        in_word = true;
+    }
+    if (in_word) words.push_back(word);
+
+    for (std::size_t i = 0; i + 1 < words.size(); ++i) {
+        const std::string flag = to_lower(words[i]);
+        if (flag != "-p" && flag != "/p") continue;
+        // The number whole, and nothing but: never "-pss", nor "-p 18x". A
+        // line that cannot be read is no report on anything.
+        const std::string& n = words[i + 1];
+        if (n.empty() || n.size() > 10 || n.find_first_not_of("0123456789") != std::string::npos)
+            return 0;
+        const unsigned long long pid = std::stoull(n);
+        return pid > 0xFFFFFFFFull ? 0 : static_cast<unsigned long>(pid);
+    }
+    return 0;
+}
+
+bool CrashWatch::reports_on(const std::string& command_line,
+                            const std::vector<RunningProgram>& games) {
+    const unsigned long pid = reported_pid(command_line);
+    if (pid == 0) return false;
+    for (const RunningProgram& g : games)
+        if (g.pid == pid) return true;
+    return false;
+}
+
+std::string CrashWatch::command_line_of(unsigned long pid) {
+    if (pid == 0) return {};
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process == nullptr) return {};
+    const std::string out = command_line_of_handle(process);
+    CloseHandle(process);
+    return out;
 }
 
 } // namespace gobot

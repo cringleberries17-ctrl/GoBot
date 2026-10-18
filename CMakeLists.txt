@@ -91,6 +91,23 @@ if(GOBOT_USE_OPENCV)
     # unless told what to assume instead.
     set(CMAKE_POLICY_VERSION_MINIMUM 3.10 CACHE STRING "" FORCE)
 
+    # Where `cmake --install` would put GoBot, pinned. OpenCV writes it into
+    # the build information it compiles into every executable, and when it is
+    # still CMake's own default OpenCV puts <build tree>/install there instead
+    # -- a path with the build machine's user name in it, which package.ps1's
+    # check 9 finds in the package. Only a default is replaced, so a tree
+    # given a prefix by hand keeps it; and the value is the one such trees
+    # were given, so one already built builds nothing again for this. So is
+    # the value OpenCV forced into a tree configured before this pin: by the
+    # time that tree is configured again, the prefix is no longer CMake's
+    # default, and it would keep <build tree>/install for good.
+    if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OR
+       CMAKE_INSTALL_PREFIX STREQUAL "${CMAKE_BINARY_DIR}/install")
+        set(CMAKE_INSTALL_PREFIX "C:/Program Files/GoBot" CACHE PATH
+            "Where cmake --install puts GoBot" FORCE)
+    endif()
+    set(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OFF)
+
     FetchContent_Declare(opencv
         URL          https://github.com/opencv/opencv/archive/refs/tags/4.8.0.zip
         URL_HASH     SHA256=${GOBOT_OPENCV_SHA256}
@@ -197,6 +214,8 @@ add_library(gobot_core STATIC
     src/game_state.cpp
     src/protocol_handler.cpp
     src/window_focus.cpp
+    src/no_real_input.cpp
+    src/game_install.cpp
     src/input_manager.cpp
     src/pathfinder.cpp
     src/execution_coordinator.cpp

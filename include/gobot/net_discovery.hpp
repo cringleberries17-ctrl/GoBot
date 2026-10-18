@@ -45,8 +45,19 @@ std::uint32_t pid_for_window(void* hwnd);
 /// adapter.
 std::vector<std::string> local_ipv4_addresses();
 
-/// Build a pcap filter matching the given connections. Empty input yields "tcp".
-std::string build_filter_for(const std::vector<ProcessConnection>& conns);
+/// The local ports of the UDP sockets a process owns, by executable name,
+/// lowest first. Read from Windows' socket table, like tcp_connections(); a
+/// UDP socket has no remote end there, so its own port is all there is.
+std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name);
+
+/// Build a pcap filter matching the given connections, TCP and UDP both, as
+/// GoC's "(tcp or udp)" does. UDP is matched from any host on the servers'
+/// ports too, as GoC's own "(tcp or udp) and port 15101" matches it, and on
+/// `udp_ports` -- local ports of the game's own UDP sockets
+/// (udp_ports_for_process) -- whatever server they talk to. Empty input
+/// yields "(tcp or udp)".
+std::string build_filter_for(const std::vector<ProcessConnection>& conns,
+                             const std::vector<std::uint16_t>& udp_ports = {});
 
 std::string ip_to_string(std::uint32_t ip_host_order);
 

@@ -9,15 +9,32 @@ namespace gobot {
 
 using Bytes = std::vector<std::uint8_t>;
 
-/// A single frame lifted out of the game's TCP stream.
+/// A single frame lifted out of the game's traffic.
 struct GamePacket {
     std::uint16_t opcode = 0;
     Bytes         payload;          ///< frame body, header already stripped
     bool          from_server = true;
     std::uint64_t timestamp_ms = 0;
+
+    /// How many 0x0081 wrappers this frame was found inside: 0 for a frame
+    /// read straight off the connection, 1 for the frame inside one, 2 for a
+    /// frame inside a wrapper that was itself inside one (see extract_frames).
+    std::uint8_t  depth = 0;
+
+    /// Read from a UDP datagram rather than the TCP stream.
+    bool          udp = false;
+
+    /// A frame of the only kind GoBot read before 2026-10-18: off the TCP
+    /// stream and not from inside a wrapper. Whatever acts on the game takes
+    /// only these until it is known what the others mean (plan item P0-3).
+    /// The same opcode number can mean something else inside a wrapper --
+    /// GoC's own log calls 0x0014 inside 0x0081 a character being selected,
+    /// and outside it a channel switch -- so the kinds are not mixed when
+    /// frames are counted or decoded by opcode.
+    bool plain() const { return depth == 0 && !udp; }
 };
 
-/// Which side of the TCP conversation a byte run came from.
+/// Which side of the conversation a byte run came from.
 enum class Direction { ToServer, ToClient };
 
 constexpr const char* to_string(Direction d) {

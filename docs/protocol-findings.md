@@ -348,7 +348,9 @@ was run. The rest of the decompile is summarised in
 `configs/protocol.ini`), the opcode as a u16 at 2, and the total frame length
 (header included) as a u16 at 4. It does not check the checksum at 6 that
 GoBot's spec verifies. GoC captures TCP and UDP on the server's port range and
-reassembles each connection, keeping a partial frame for the next segment.
+parses each segment or datagram from its first byte. It sets aside a partial
+frame for the next segment, but on a second reading (2026-10-18, below) it
+throws that away again before it parses the next one.
 
 ### `0x0081` is a wrapper
 
@@ -368,9 +370,36 @@ One rule GoC applies is not understood: when an `0x0081` frame's marker reads
 `0x0020` instead of `0x0005`, it stops parsing the rest of that TCP segment.
 
 GoBot keeps bytes 8 to the declared length as the payload (its header is 8
-bytes) and drops the last 12 (`src/framing.cpp:187-196`). So for every `0x0081`
-it reads a payload that starts 5 bytes before the inner frame and is cut 12
-bytes short, and it never decodes the inner frame.
+bytes) and drops the last 12. So for every `0x0081` it reads a payload that
+starts 5 bytes before the inner frame and is cut 12 bytes short. Until
+2026-10-18 it never decoded the inner frame. Since then (plan item P0-1) it
+still hands out that payload unchanged, and right after it the inner frame as a
+frame of its own, with its own opcode, marked by depth (`GamePacket::depth`;
+`FramingSpec::inner_offset`, `inner_frame_offset=13` in `configs/protocol.ini`).
+What acts on the game ignores inner frames until P0-3; `gobot_sniff --watch`,
+`--verify` and `--inner` show them.
+
+**Checked again, 2026-10-18** (`ProcessPacketStream` at `0x180040a10` in this
+GhostCore.dll):
+
+- The positions hold, counting from 0: the inner frame is bytes 13 up to the
+  declared length L + 12, so it is L − 1 bytes long, and bytes 8–12 are five
+  bytes GoC skips.
+- GoC never reads the inner frame's own length. It reads its marker and opcode,
+  needs at least 6 bytes, and forwards all L − 1 bytes as the frame. GoBot takes
+  the same room, and counts how often the inner length field disagrees with it.
+- An inner `0x0081` goes back through the whole parser, so its room is read as
+  a run of frames, each by its own length, any `0x0081` among them opened in
+  turn. GoBot does the same, to a depth of 4.
+- The `0x0020` rule is checked only once a whole `0x0081` frame is in the
+  buffer: GoC then forwards nothing from it and stops reading the rest of that
+  TCP segment or UDP datagram. GoBot skips only the wrapper's inside and counts
+  it, since its own framing runs on the reassembled stream with every header
+  proven by its check word; inside a wrapper it stops the run, as GoC does.
+- GoC parses each segment from its first byte. It saves an incomplete frame
+  under the connection, but the next call for that connection removes the
+  saved bytes before parsing, without joining them on. So a frame split across
+  two segments is lost to GoC; GoBot's reassembler keeps it.
 
 **Why it matters.** In §4b, `0x0081` arrived 125 times per 20 s, second only to
 `0x0038`, at 16–28 bytes: about the size of a small movement or stat update.
@@ -382,10 +411,20 @@ confirmed.
 
 ### GoC also captures UDP
 
-GoC's capture filter is `(tcp or udp)` on the server's port range, and it frames
-UDP payloads the same way as TCP. It drops `0x002E` and `0x0031` when they arrive
-over UDP. GoBot's filter is `tcp` only (`src/packet_capture.cpp:202`), so no
-GoBot capture has ever contained the game's UDP traffic, if there is any.
+GoC's capture filter is `(tcp or udp)` on the server's port range (the strings
+`(tcp or udp) and port ` and `(tcp or udp) and portrange ` are in GhostCore.dll),
+and it frames UDP payloads the same way as TCP. It drops `0x002E` and `0x0031`
+when they arrive over UDP. GoBot's filter was `tcp` only, so no GoBot capture has
+ever contained the game's UDP traffic, if there is any.
+
+Since 2026-10-18 GoBot's filter is `(tcp or udp)` on the same address and ports;
+an explicit `--filter` or `bpf_filter` still replaces it. With `--process`, UDP
+is also taken from any host on the servers' ports, as GoC's own filter takes it,
+and on the game's own UDP sockets by their local port. Each datagram is framed
+on its own, as GoC frames it, and its frames are marked `udp`. `--record` writes
+UDP to `<name>.udp.s2c` and `<name>.udp.c2s`, apart from the TCP stream. Unlike
+GoC, GoBot drops nothing: `0x002E` and `0x0031` stay in the recording and in
+`--watch`.
 
 ### Your position, as GoC's client reads it
 
@@ -461,7 +500,8 @@ The existing data cannot answer §2 because nothing in it moved far enough. What
 is needed is one deliberate session, in one map, on one connection:
 
 ```powershell
-# --record takes a BASENAME; it writes <name>.s2c and <name>.c2s itself.
+# --record takes a BASENAME; it writes <name>.s2c and <name>.c2s itself
+# (and, since 2026-10-18, <name>.udp.s2c and <name>.udp.c2s).
 gobot_sniff --record still --host <server-ip>     # stand still, 30s, Ctrl+C
 gobot_sniff --record walk  --host <server-ip>     # walk ONE direction, far, 30s
 ```

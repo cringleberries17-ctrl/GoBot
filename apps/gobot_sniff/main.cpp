@@ -39,6 +39,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace gobot;
@@ -61,9 +62,18 @@ COMMANDS
                              the pcap filter that would capture it. Use this
                              instead of netstat: --discover --process Game.exe
                              prints exactly what to pass to --host/--port.
-  --record <file>            Capture the raw server->client stream to a file.
+  --record <name>            Record the raw traffic, both directions, TCP and
+                             UDP apart: <name>.s2c and <name>.c2s for the TCP
+                             stream, <name>.udp.s2c and <name>.udp.c2s for UDP
+                             datagrams, <name>.flowN.s2c for each connection.
+                             Nothing is framed, filtered or dropped.
   --detect <file>            Brute-force the framing of a recorded stream.
+  --verify <file>            Tile a recording with the configured [Framing] and
+                             say how well it fits, including the frames found
+                             inside 0x0081.
   --watch                    Live opcode histogram (needs framing configured).
+                             Frames found inside 0x0081, and frames over UDP,
+                             are counted in tables of their own.
   --dump <opcode>            Hexdump live packets of one opcode.
   --diff <opcode>            Show which byte offsets change between successive
                              packets of one opcode. This is how you locate
@@ -76,14 +86,25 @@ COMMANDS
                              each opcode was or was not classified.
 
 OPTIONS
-  --process <exe>            For --discover: only this executable.
+  --process <exe>            For --discover, and to aim a capture: the TCP
+                             connections and UDP sockets this executable owns.
   --iface <name>             Capture interface (default: auto-detect).
   --host <ip>                Game server IP. Narrows the capture filter.
   --port <n>                 Game server port.
-  --filter <bpf>             Raw BPF filter, overrides --host/--port.
+  --filter <bpf>             Raw BPF filter, overrides --host/--port/--process.
+                             Without it the filter takes TCP and UDP both.
   --config <path>            Protocol config (default: configs/protocol.ini).
   --seconds <n>              Stop after n seconds (default: run until Ctrl+C).
   --max <n>                  For --dump/--diff: stop after n packets.
+  --inner                    For --dump/--diff/--decode/--analyze: take the
+                             frames found inside 0x0081 instead of those read
+                             straight off the stream. The same opcode number
+                             need not mean the same thing in both, so the two
+                             are never mixed. Works with --from too.
+  --udp                      For --dump/--diff/--decode/--analyze, live: take
+                             frames that came over UDP instead of TCP. (A
+                             recording of UDP, <name>.udp.s2c, needs nothing
+                             extra with --from.)
   --from <capture>           For --diff: analyse a file written by --record
                              instead of capturing. Needs no game running and
                              nothing happening in front of you, and the same
@@ -108,6 +129,8 @@ OPTIONS
 NOTES
   Npcap must be installed and this process must run as Administrator.
   Capture is read-only: nothing is injected, rewritten or blocked.
+  GoC throws away opcodes 0x002E and 0x0031 when they come over UDP. Nothing
+  here does: a recording keeps every byte, and --watch counts every frame.
 )");
 }
 
@@ -126,7 +149,34 @@ struct Options {
     int  seconds = 0;
     int  max = 0;
     bool verbose = false;
+    bool inner = false;      ///< --inner: frames found inside 0x0081
+    bool udp = false;        ///< --udp: frames that came over UDP
 };
+
+/// Whether a live command takes this frame: by default those read straight
+/// off the TCP stream, which is all it ever saw; with --inner and --udp the
+/// other kinds instead. One kind at a time, because an opcode number need not
+/// mean the same thing inside a wrapper, or over UDP, as on the stream.
+bool picked(const GamePacket& p, const Options& o) {
+    return p.udp == o.udp && (p.depth > 0) == o.inner;
+}
+
+/// The kind of frame a command is taking, for what it prints.
+std::string kind_taken(const Options& o) {
+    if (o.udp && o.inner) return "frames inside 0x0081 that came over UDP";
+    if (o.udp)            return "frames that came over UDP";
+    if (o.inner)          return "frames found inside 0x0081";
+    return "frames on the TCP stream";
+}
+
+/// Where a frame of this kind was found, as where_found() says it.
+std::string where_label(bool udp, std::uint8_t depth) {
+    GamePacket g;
+    g.udp = udp;
+    g.depth = depth;
+    const std::string w = where_found(g);
+    return w.empty() ? "TCP stream" : w;
+}
 
 bool parse_args(int argc, char** argv, Options& o) {
     for (int i = 1; i < argc; ++i) {
@@ -161,6 +211,8 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--max")      { o.max = std::stoi(next("--max")); }
         else if (a == "--from")     { o.from = next("--from"); }
         else if (a == "--versus")   { o.versus = next("--versus"); }
+        else if (a == "--inner")    { o.inner = true; }
+        else if (a == "--udp")      { o.udp = true; }
         else if (a == "--verbose")  { o.verbose = true; }
         else if (a == "--help" || a == "-h") { print_usage(); std::exit(0); }
         else {
@@ -201,7 +253,11 @@ CaptureConfig make_capture_config(const Options& o) {
 
         if (!conns.empty()) {
             if (cfg.bpf_filter.empty() && cfg.server_ip_start.empty()) {
-                cfg.bpf_filter = build_filter_for(conns);
+                // The game's own UDP sockets too, by their local port, and UDP
+                // on the servers' ports from any host, as GoC takes it. Whether
+                // it talks UDP at all is one of the things a recording is for,
+                // and its UDP need not use the port of its TCP connection.
+                cfg.bpf_filter = build_filter_for(conns, udp_ports_for_process(o.process));
                 std::printf("Capturing %s: %s\n", o.process.c_str(), cfg.bpf_filter.c_str());
             } else {
                 std::printf("Using %zu server endpoint(s) from %s\n",
@@ -214,33 +270,8 @@ CaptureConfig make_capture_config(const Options& o) {
     return cfg;
 }
 
-/// Read a framing block out of protocol.ini.
-FramingSpec load_framing(const std::string& path, bool& found,
-                         const char* section = "Framing") {
-    FramingSpec spec;
-    IniFile ini;
-    found = false;
-
-    if (!ini.load(path) || !ini.has_section(section)) return spec;
-
-    found = true;
-    const std::string S = section;
-    spec.header_size   = static_cast<std::uint32_t>(ini.get_int(S, "header_size", 4));
-    spec.length_offset = static_cast<std::uint32_t>(ini.get_int(S, "length_offset", 0));
-    spec.length_size   = static_cast<std::uint32_t>(ini.get_int(S, "length_size", 2));
-    spec.length_le     = ini.get(S, "length_endian", "little") != "big";
-    spec.length_includes_header = ini.get_bool(S, "length_includes_header", true);
-    spec.length_adjust = ini.get_int(S, "length_adjust", 0);
-    spec.opcode_offset = static_cast<std::uint32_t>(ini.get_int(S, "opcode_offset", 2));
-    spec.opcode_size   = static_cast<std::uint32_t>(ini.get_int(S, "opcode_size", 2));
-    spec.opcode_le     = ini.get(S, "opcode_endian", "little") != "big";
-    spec.min_frame     = static_cast<std::uint32_t>(ini.get_int(S, "min_frame", static_cast<int>(spec.header_size)));
-    spec.max_frame     = static_cast<std::uint32_t>(ini.get_int(S, "max_frame", 65535));
-    spec.checksum_offset = static_cast<std::uint32_t>(ini.get_int(S, "checksum_offset", static_cast<int>(FramingSpec::kNoChecksum)));
-    spec.trailer_opcode = static_cast<std::uint16_t>(ini.get_int(S, "trailer_opcode", 0));
-    spec.trailer_bytes  = static_cast<std::uint32_t>(ini.get_int(S, "trailer_bytes", 0));
-    return spec;
-}
+// The [Framing] and [FramingClient] blocks are read by gobot::load_framing
+// (framing.hpp), the one reader shared with gobot_cli and the tests.
 
 /// Also hand the capture the client-side framing.
 ///
@@ -350,8 +381,14 @@ int cmd_discover(const Options& o) {
     }
 
     if (!o.process.empty()) {
-        std::printf("\nFilter for these connections:\n\n  %s\n",
-                    build_filter_for(interesting).c_str());
+        const std::vector<std::uint16_t> udp_ports = udp_ports_for_process(o.process);
+        if (!udp_ports.empty()) {
+            std::printf("\nUDP sockets %s holds, by local port:", o.process.c_str());
+            for (std::uint16_t p : udp_ports) std::printf(" %u", static_cast<unsigned>(p));
+            std::printf("\n");
+        }
+        std::printf("\nFilter for these connections, TCP and UDP:\n\n  %s\n",
+                    build_filter_for(interesting, udp_ports).c_str());
         const auto& first = interesting.front();
         std::printf("\nOr pass them directly:\n\n"
                     "  gobot_sniff --record capture.bin --host %s --port %u\n",
@@ -375,11 +412,21 @@ int cmd_record(const Options& o) {
     const std::string s2c_path = o.file + ".s2c";
     const std::string c2s_path = o.file + ".c2s";
 
+    // UDP in files of its own. A TCP file is one byte stream, cut wherever
+    // the segments fell; a UDP file is the game's datagrams one after another,
+    // each of which GoC reads as whole frames from its first byte. Mixed into
+    // one file, neither would tile.
+    const std::string udp_s2c_path = o.file + ".udp.s2c";
+    const std::string udp_c2s_path = o.file + ".udp.c2s";
+
     std::ofstream out(s2c_path, std::ios::binary | std::ios::trunc);
     std::ofstream out_c2s(c2s_path, std::ios::binary | std::ios::trunc);
-    if (!out || !out_c2s) {
-        std::fprintf(stderr, "error: cannot write %s / %s\n",
-                     s2c_path.c_str(), c2s_path.c_str());
+    std::ofstream out_udp(udp_s2c_path, std::ios::binary | std::ios::trunc);
+    std::ofstream out_udp_c2s(udp_c2s_path, std::ios::binary | std::ios::trunc);
+    if (!out || !out_c2s || !out_udp || !out_udp_c2s) {
+        std::fprintf(stderr, "error: cannot write %s / %s / %s / %s\n",
+                     s2c_path.c_str(), c2s_path.c_str(),
+                     udp_s2c_path.c_str(), udp_c2s_path.c_str());
         return 1;
     }
 
@@ -419,10 +466,30 @@ int cmd_record(const Options& o) {
         }
     });
 
+    // Every datagram whole, in the order it arrived. Nothing is dropped:
+    // GoC throws away 0x002E and 0x0031 when they come over UDP, and what
+    // those are is for this recording to show.
+    std::atomic<std::uint64_t> udp_bytes{0};
+    std::atomic<std::uint64_t> udp_bytes_c2s{0};
+    std::atomic<std::uint64_t> udp_datagrams{0};
+    cap.set_raw_udp_tap([&](const FlowKey&, Direction dir,
+                            const std::uint8_t* data, std::size_t size) {
+        std::lock_guard<std::mutex> lock(write_mutex);
+        std::ofstream& to = (dir == Direction::ToClient) ? out_udp : out_udp_c2s;
+        to.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+        (dir == Direction::ToClient ? udp_bytes : udp_bytes_c2s).fetch_add(size);
+        udp_datagrams.fetch_add(1);
+    });
+
     if (!cap.start(make_capture_config(o))) return 1;
 
-    std::printf("Recording server->client stream to %s\n", o.file.c_str());
-    std::printf("Play the game normally. Ctrl+C to stop.\n\n");
+    std::printf("Recording to %s.*: the TCP stream and UDP datagrams, both directions.\n",
+                o.file.c_str());
+    if (o.seconds > 0)
+        std::printf("Play the game normally. It stops by itself after %d s, or on Ctrl+C.\n\n",
+                    o.seconds);
+    else
+        std::printf("Play the game normally. Ctrl+C to stop.\n\n");
 
     std::thread reporter([&] {
         while (!g_stop.load()) {
@@ -433,10 +500,12 @@ int cmd_record(const Options& o) {
             // hole that desynchronises everything after it, so later frames
             // read as garbage and the framing appears wrong when it is not.
             // Seeing it happen beats discovering it during analysis.
-            std::printf("\r  S->C %llu B | C->S %llu B | %llu packets | "
+            std::printf("\r  S->C %llu B | C->S %llu B | UDP %llu B in %llu | %llu packets | "
                         "%llu segs | dropped %llu   ",
                         static_cast<unsigned long long>(bytes.load()),
                         static_cast<unsigned long long>(bytes_c2s.load()),
+                        static_cast<unsigned long long>(udp_bytes.load() + udp_bytes_c2s.load()),
+                        static_cast<unsigned long long>(udp_datagrams.load()),
                         static_cast<unsigned long long>(s.packets_seen),
                         static_cast<unsigned long long>(s.tcp_segments),
                         static_cast<unsigned long long>(s.pcap_dropped));
@@ -450,11 +519,25 @@ int cmd_record(const Options& o) {
     cap.stop();
     out.close();
     out_c2s.close();
+    out_udp.close();
+    out_udp_c2s.close();
 
     std::printf("\n\nserver -> client : %llu bytes  ->  %s\n"
                 "client -> server : %llu bytes  ->  %s\n",
                 static_cast<unsigned long long>(bytes.load()), s2c_path.c_str(),
                 static_cast<unsigned long long>(bytes_c2s.load()), c2s_path.c_str());
+    std::printf("UDP, server -> client : %llu bytes  ->  %s\n"
+                "UDP, client -> server : %llu bytes  ->  %s\n"
+                "                        %llu datagram%s in all%s\n",
+                static_cast<unsigned long long>(udp_bytes.load()), udp_s2c_path.c_str(),
+                static_cast<unsigned long long>(udp_bytes_c2s.load()), udp_c2s_path.c_str(),
+                static_cast<unsigned long long>(udp_datagrams.load()),
+                udp_datagrams.load() == 1 ? "" : "s",
+                udp_datagrams.load() == 0 ? " -- the game sent no UDP that the filter let in" : "");
+    if (cap.stats().udp_fragments > 0)
+        std::printf("!! %llu UDP packet(s) were pieces of a datagram that IP split up. Nothing\n"
+                    "   here puts the pieces back together, so they are NOT in the .udp files.\n",
+                    static_cast<unsigned long long>(cap.stats().udp_fragments));
 
     // Whether this recording is worth analysing at all.
     //
@@ -518,7 +601,12 @@ int cmd_record(const Options& o) {
     } else {
         std::printf("\nNext: gobot_sniff --detect %s\n",
                     busiest.empty() ? s2c_path.c_str() : busiest.c_str());
+        std::printf("Or, with the framing known, see what it holds, inside 0x0081 too:\n"
+                    "      gobot_sniff --verify %s\n",
+                    busiest.empty() ? s2c_path.c_str() : busiest.c_str());
     }
+    if (udp_bytes.load() > 0)
+        std::printf("And the UDP the server sent: gobot_sniff --verify %s\n", udp_s2c_path.c_str());
     return 0;
 }
 
@@ -626,9 +714,23 @@ int cmd_watch(const Options& o) {
     std::map<std::uint16_t, std::uint64_t> counts;
     std::map<std::uint16_t, std::size_t>   sizes;
 
+    // Frames found inside 0x0081, and frames that came over UDP, counted per
+    // opcode in tables of their own: by (over UDP, depth, opcode). The same
+    // opcode number need not mean the same thing in each, so none of them is
+    // added to the counts above, which stay what they always were.
+    struct Other { std::uint64_t count = 0; std::size_t last = 0; };
+    using OtherKey = std::tuple<bool, std::uint8_t, std::uint16_t>;
+    std::map<OtherKey, Other> others;
+
     cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
         std::lock_guard<std::mutex> lock(counts_mutex);
         for (const auto& p : packets) {
+            if (!p.plain()) {
+                Other& r = others[OtherKey{ p.udp, p.depth, p.opcode }];
+                ++r.count;
+                r.last = p.payload.size();
+                continue;
+            }
             ++counts[p.opcode];
             sizes[p.opcode] = p.payload.size();
         }
@@ -646,13 +748,17 @@ int cmd_watch(const Options& o) {
 
             std::vector<std::pair<std::uint16_t, std::uint64_t>> sorted;
             std::map<std::uint16_t, std::size_t> size_copy;
+            std::vector<std::pair<OtherKey, Other>> other_rows;
             {
                 std::lock_guard<std::mutex> lock(counts_mutex);
                 sorted.assign(counts.begin(), counts.end());
                 size_copy = sizes;
+                other_rows.assign(others.begin(), others.end());
             }
             std::sort(sorted.begin(), sorted.end(),
                       [](const auto& a, const auto& b) { return a.second > b.second; });
+            std::sort(other_rows.begin(), other_rows.end(),
+                      [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
 
             const auto s = cap.stats();
             std::printf("\n=== %zu distinct opcodes | %llu frames | %llu resync bytes ===\n",
@@ -671,6 +777,56 @@ int cmd_watch(const Options& o) {
                 std::printf("0x%04X     %-10llu %-8zuB %s\n",
                             op, static_cast<unsigned long long>(n), size_copy[op],
                             known ? known->name.c_str() : "-");
+            }
+
+            // What was inside 0x0081 and what came over UDP, per opcode. None
+            // of it reaches the bot yet (plan item P0-3); the layouts in
+            // protocol.ini were written for the frames above, so the "mapped
+            // as" column is not repeated here.
+            std::uint64_t inner_total = 0, udp_total = 0;
+            for (const auto& [key, r] : other_rows) {
+                if (std::get<1>(key) > 0) inner_total += r.count;
+                else                      udp_total   += r.count;
+            }
+            if (inner_total > 0 || s.unwrap.unopened || s.unwrap.unreadable || s.unwrap.too_deep) {
+                std::printf("\n--- inside 0x0081: %llu frames (counted only; the bot does not use them) ---\n",
+                            static_cast<unsigned long long>(inner_total));
+                std::printf("%-10s %-10s %-8s %s\n", "opcode", "count", "last", "found");
+                std::size_t shown = 0;
+                for (const auto& [key, r] : other_rows) {
+                    if (std::get<1>(key) == 0) continue;
+                    if (++shown > 25) break;
+                    std::printf("0x%04X     %-10llu %-8zuB %s\n",
+                                std::get<2>(key), static_cast<unsigned long long>(r.count), r.last,
+                                where_label(std::get<0>(key), std::get<1>(key)).c_str());
+                }
+                std::printf("  left shut, marker 0x0020: %llu | unreadable insides: %llu | "
+                            "past depth %u: %llu\n",
+                            static_cast<unsigned long long>(s.unwrap.unopened),
+                            static_cast<unsigned long long>(s.unwrap.unreadable),
+                            static_cast<unsigned>(kMaxWrapDepth),
+                            static_cast<unsigned long long>(s.unwrap.too_deep));
+                std::printf("  own length not the room they fill: %llu | header check word off: %llu\n",
+                            static_cast<unsigned long long>(s.unwrap.length_differs),
+                            static_cast<unsigned long long>(s.unwrap.checksum_bad));
+            }
+            if (s.udp_datagrams > 0) {
+                std::printf("\n--- over UDP: %llu datagrams, %llu frames, %llu bytes unread, "
+                            "%llu fragments left ---\n",
+                            static_cast<unsigned long long>(s.udp_datagrams),
+                            static_cast<unsigned long long>(s.udp_frames),
+                            static_cast<unsigned long long>(s.udp_unread_bytes),
+                            static_cast<unsigned long long>(s.udp_fragments));
+                if (udp_total > 0) {
+                    std::printf("%-10s %-10s %-8s\n", "opcode", "count", "last");
+                    std::size_t shown = 0;
+                    for (const auto& [key, r] : other_rows) {
+                        if (std::get<1>(key) != 0) continue;
+                        if (++shown > 25) break;
+                        std::printf("0x%04X     %-10llu %-8zuB\n",
+                                    std::get<2>(key), static_cast<unsigned long long>(r.count), r.last);
+                    }
+                }
             }
         }
     });
@@ -698,12 +854,16 @@ int cmd_dump(const Options& o) {
     cap.set_opcode_filter({ o.opcode });
 
     std::atomic<int> seen{0};
+    std::atomic<std::uint64_t> passed_by{0};      // the other kinds, for the closing line
 
     cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
         for (const auto& p : packets) {
             if (p.opcode != o.opcode) continue;
+            if (!picked(p, o)) { passed_by.fetch_add(1); continue; }
             const int n = seen.fetch_add(1) + 1;
-            std::printf("\n--- #%d  opcode 0x%04X  %zu bytes ---\n", n, p.opcode, p.payload.size());
+            const std::string where = where_found(p);
+            std::printf("\n--- #%d  opcode 0x%04X  %zu bytes%s%s ---\n", n, p.opcode,
+                        p.payload.size(), where.empty() ? "" : ", ", where.c_str());
             std::printf("%s", hexdump(p.payload, 16, 2).c_str());
             if (o.max > 0 && n >= o.max) g_stop.store(true);
         }
@@ -711,11 +871,16 @@ int cmd_dump(const Options& o) {
 
     if (!cap.start(make_capture_config(o))) return 1;
 
-    std::printf("Dumping opcode 0x%04X. Ctrl+C to stop.\n", o.opcode);
+    std::printf("Dumping opcode 0x%04X, %s. Ctrl+C to stop.\n", o.opcode, kind_taken(o).c_str());
     wait_for_stop(o.seconds);
     cap.stop();
 
     std::printf("\nCaptured %d packets.\n", seen.load());
+    if (passed_by.load() > 0)
+        std::printf("%llu more of opcode 0x%04X went by that were not %s.\n"
+                    "--inner and --udp take the others.\n",
+                    static_cast<unsigned long long>(passed_by.load()), o.opcode,
+                    kind_taken(o).c_str());
     return 0;
 }
 
@@ -733,7 +898,7 @@ int cmd_dump(const Options& o) {
 /// choice is reported: a file analysed under the wrong spec yields plausible
 /// nonsense rather than an obvious failure.
 bool samples_from_file(const std::string& path, const std::string& config,
-                       std::uint16_t opcode, std::vector<Bytes>& out) {
+                       std::uint16_t opcode, std::vector<Bytes>& out, bool inner) {
     bool have_server = false, have_client = false;
     const FramingSpec server = load_framing(config, have_server);
     const FramingSpec client = load_framing(config, have_client, "FramingClient");
@@ -744,7 +909,7 @@ bool samples_from_file(const std::string& path, const std::string& config,
 
     const capture_file::Reading r =
         capture_file::extract(path, server, have_client ? client : FramingSpec{},
-                              opcode, out);
+                              opcode, out, inner);
     if (!r.ok) {
         std::fprintf(stderr, "error: %s\n", r.error.c_str());
         return false;
@@ -758,8 +923,18 @@ bool samples_from_file(const std::string& path, const std::string& config,
                     (r.half == capture_file::Half::Client) ? ".c2s" : ".s2c", half);
     else
         std::printf("  no .s2c/.c2s in the name; read as %s\n", half);
-    std::printf("  %-36s %5zu frames, %6zu resync bytes\n\n",
+    std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
                 half, r.frames, r.resyncs);
+
+    // Frames inside 0x0081 are taken with --inner and never mixed with the
+    // others: say what was there either way.
+    if (r.inner > 0)
+        std::printf("  and %zu frame(s) inside 0x0081 -- %s\n", r.inner,
+                    inner ? "the ones taken here (--inner)" : "--inner takes those instead");
+    if (r.other_kind > 0)
+        std::printf("  %zu of opcode 0x%04X left out, being %s\n", r.other_kind, opcode,
+                    inner ? "straight off the stream" : "inside 0x0081");
+    std::printf("\n");
 
     if (r.resyncs > r.frames) {
         std::printf("  !! more resync bytes than frames. Either this is the other\n"
@@ -780,9 +955,9 @@ bool samples_from_file(const std::string& path, const std::string& config,
 int diff_two(const Options& o) {
     std::vector<Bytes> a, b;
     std::printf("A: %s\n", o.from.c_str());
-    if (!samples_from_file(o.from, o.config, o.opcode, a)) return 1;
+    if (!samples_from_file(o.from, o.config, o.opcode, a, o.inner)) return 1;
     std::printf("B: %s\n", o.versus.c_str());
-    if (!samples_from_file(o.versus, o.config, o.opcode, b)) return 1;
+    if (!samples_from_file(o.versus, o.config, o.opcode, b, o.inner)) return 1;
 
     if (a.size() < 2 || b.size() < 2) {
         std::fprintf(stderr, "Need at least 2 packets of 0x%04X in each: "
@@ -869,9 +1044,9 @@ int cmd_diff(const Options& o) {
         // be examined again after a hypothesis changes, which live capture
         // cannot offer.
         std::printf("Reading %s\n", o.from.c_str());
-        if (!samples_from_file(o.from, o.config, o.opcode, samples)) return 1;
-        std::printf("%zu packets of opcode 0x%04X in the recording.\n",
-                    samples.size(), o.opcode);
+        if (!samples_from_file(o.from, o.config, o.opcode, samples, o.inner)) return 1;
+        std::printf("%zu packets of opcode 0x%04X in the recording%s.\n",
+                    samples.size(), o.opcode, o.inner ? ", inside 0x0081" : "");
     } else {
         bool have_framing = false;
         const FramingSpec spec = load_framing(o.config, have_framing);
@@ -887,11 +1062,13 @@ int cmd_diff(const Options& o) {
 
         std::mutex mutex;
         const int want = o.max > 0 ? o.max : 200;
+        std::uint64_t passed_by = 0;       // the other kinds of this opcode
 
         cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
             std::lock_guard<std::mutex> lock(mutex);
             for (const auto& p : packets) {
                 if (p.opcode != o.opcode) continue;
+                if (!picked(p, o)) { ++passed_by; continue; }
                 samples.push_back(p.payload);
                 if (static_cast<int>(samples.size()) >= want) g_stop.store(true);
             }
@@ -899,7 +1076,8 @@ int cmd_diff(const Options& o) {
 
         if (!cap.start(make_capture_config(o))) return 1;
 
-        std::printf("Collecting up to %d packets of opcode 0x%04X.\n", want, o.opcode);
+        std::printf("Collecting up to %d packets of opcode 0x%04X, %s.\n", want, o.opcode,
+                    kind_taken(o).c_str());
         std::printf("Do one thing at a time in game — walk left and right, then\n"
                     "stand still and take damage. Ctrl+C when done.\n\n");
 
@@ -916,6 +1094,12 @@ int cmd_diff(const Options& o) {
         g_stop.store(true);
         reporter.join();
         cap.stop();
+
+        if (passed_by > 0)
+            std::printf("\n%llu more of opcode 0x%04X went by that were not %s;\n"
+                        "--inner and --udp take the others.\n",
+                        static_cast<unsigned long long>(passed_by), o.opcode,
+                        kind_taken(o).c_str());
     }
 
     if (samples.size() < 2) {
@@ -1035,10 +1219,15 @@ int cmd_analyze(const Options& o) {
 
     std::mutex mutex;
     std::map<std::uint16_t, OpcodeObservations> obs;
+    std::uint64_t passed_by = 0;     // frames of the other kinds, left out
 
+    // One kind of frame at a time (--inner, --udp): the inference works per
+    // opcode, and a layout it suggests goes into protocol.ini, whose layouts
+    // the bot applies to frames off the TCP stream only.
     cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
         std::lock_guard<std::mutex> lock(mutex);
         for (const auto& p : packets) {
+            if (!picked(p, o)) { ++passed_by; continue; }
             auto& e = obs[p.opcode];
             if (p.from_server) ++e.to_client; else ++e.to_server;
             if (e.payloads.size() < 256) {
@@ -1073,7 +1262,13 @@ int cmd_analyze(const Options& o) {
 
     std::lock_guard<std::mutex> lock(mutex);
 
-    std::printf("\n\n%-9s %-8s %-8s %-8s %-7s %s\n",
+    std::printf("\n\nRead: %s.", kind_taken(o).c_str());
+    if (passed_by > 0)
+        std::printf(" %llu frames of the other kinds were left out; --inner and --udp\n"
+                    "take them instead.", static_cast<unsigned long long>(passed_by));
+    std::printf("\n");
+
+    std::printf("\n%-9s %-8s %-8s %-8s %-7s %s\n",
                 "opcode", "packets", "C->S", "S->C", "body", "note");
     std::printf("%s\n", std::string(72, '-').c_str());
 
@@ -1145,8 +1340,22 @@ int cmd_analyze(const Options& o) {
         std::printf("          %s\n\n", g.reason.c_str());
     }
 
-    std::printf("Add the ones that look right to %s, then --decode to check them.\n",
-                o.config.c_str());
+    if (o.inner || o.udp) {
+        // The bot applies protocol.ini's [Packet.*] layouts to frames off the
+        // TCP stream only. One inferred from these would never decode the
+        // frames it came from, and would take over the stream frames that
+        // share its opcode number -- which need not mean the same thing:
+        // 0x0014 inside 0x0081 is not 0x0014 outside it (protocol-findings §4d).
+        std::printf("These describe %s. The bot does not decode those yet\n"
+                    "(P0-3 in docs/goc-parity-plan.md), and it applies [Packet.*] layouts\n"
+                    "to frames off the TCP stream only: do not add these to %s\n"
+                    "as they stand, or they will be applied to the stream frames that share\n"
+                    "the opcode number.\n",
+                    kind_taken(o).c_str(), o.config.c_str());
+    } else {
+        std::printf("Add the ones that look right to %s, then --decode to check them.\n",
+                    o.config.c_str());
+    }
     return 0;
 }
 
@@ -1172,21 +1381,35 @@ int cmd_verify(const Options& o) {
     std::printf("\nSpec : %s\n", spec.describe().c_str());
     std::printf("File : %s (%zu bytes)\n\n", o.file.c_str(), data.size());
 
-    auto scan = extract_frames(spec, data.data(), data.size(), Direction::ToClient, 0, false);
+    // The same reading the tests check a real capture with.
+    const FrameScanResult scan = capture_file::tile(data, spec);
 
+    // Frames off the stream, as this has always listed them; those found
+    // inside 0x0081 are listed apart, by depth and opcode, below.
     std::size_t body = 0;
     std::map<std::uint16_t, std::size_t> ops;
+    struct Inner { std::size_t count = 0, min_size = SIZE_MAX, max_size = 0; };
+    std::map<std::pair<std::uint8_t, std::uint16_t>, Inner> inner;
     for (const auto& p : scan.packets) {
+        if (p.depth > 0) {
+            Inner& row = inner[{ p.depth, p.opcode }];
+            ++row.count;
+            row.min_size = std::min(row.min_size, p.payload.size());
+            row.max_size = std::max(row.max_size, p.payload.size());
+            continue;
+        }
         body += p.payload.size();
         ++ops[p.opcode];
     }
 
-    std::printf("frames        : %zu\n", scan.packets.size());
+    std::printf("frames        : %zu\n", scan.outer_frames());
     std::printf("consumed      : %zu / %zu  (%.1f%%)\n", scan.consumed, data.size(),
                 data.size() ? 100.0 * scan.consumed / data.size() : 0.0);
     std::printf("resync bytes  : %zu  (%.1f%%)\n", scan.resyncs,
                 data.size() ? 100.0 * scan.resyncs / data.size() : 0.0);
-    std::printf("distinct ops  : %zu\n\n", ops.size());
+    std::printf("distinct ops  : %zu\n", ops.size());
+    std::printf("inside 0x0081 : %zu frames%s\n\n", scan.unwrap.inner,
+                spec.unwraps() ? "" : "  (this spec does not look inside wrappers)");
 
     if (scan.packets.empty()) {
         std::printf("Nothing parsed. This spec does not describe this stream.\n");
@@ -1201,9 +1424,29 @@ int cmd_verify(const Options& o) {
     for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 15); ++i) {
         std::size_t sz = 0;
         for (const auto& p : scan.packets) {
-            if (p.opcode == sorted[i].first) { sz = p.payload.size(); break; }
+            if (p.depth == 0 && p.opcode == sorted[i].first) { sz = p.payload.size(); break; }
         }
         std::printf("0x%04X    %-8zu %zu\n", sorted[i].first, sorted[i].second, sz);
+    }
+
+    const UnwrapCounts& u = scan.unwrap;
+    if (!inner.empty() || u.unopened || u.unreadable || u.too_deep) {
+        std::printf("\nInside 0x0081 (each wrapper also counted above, as itself):\n");
+        std::printf("%-9s %-6s %-8s %s\n", "opcode", "depth", "count", "body size");
+        for (const auto& [key, row] : inner) {
+            if (row.min_size == row.max_size)
+                std::printf("0x%04X    %-6u %-8zu %zu\n", key.second,
+                            static_cast<unsigned>(key.first), row.count, row.max_size);
+            else
+                std::printf("0x%04X    %-6u %-8zu %zu-%zu\n", key.second,
+                            static_cast<unsigned>(key.first), row.count, row.min_size, row.max_size);
+        }
+        std::printf("left shut, marker 0x0020    : %zu\n", u.unopened);
+        std::printf("unreadable insides          : %zu\n", u.unreadable);
+        std::printf("not opened, past depth %u    : %zu\n",
+                    static_cast<unsigned>(kMaxWrapDepth), u.too_deep);
+        std::printf("own length not their room   : %zu\n", u.length_differs);
+        std::printf("header check word off       : %zu of %zu\n", u.checksum_bad, u.inner);
     }
 
     const double pct = data.size() ? 100.0 * scan.resyncs / data.size() : 100.0;
@@ -1235,30 +1478,46 @@ int cmd_decode(const Options& o) {
     cap.set_framing(spec);
     attach_client_framing(cap, o.config);
 
-    std::atomic<std::uint64_t> decoded{0}, skipped{0};
+    std::atomic<std::uint64_t> decoded{0}, skipped{0}, passed_by{0};
 
+    // The layouts were written for frames off the TCP stream, and the same
+    // opcode number need not mean the same thing inside 0x0081 or over UDP:
+    // those are decoded only when asked for, and labelled.
     cap.set_packet_callback([&](const std::vector<GamePacket>& packets) {
         for (const auto& p : packets) {
+            if (!picked(p, o)) { passed_by.fetch_add(1); continue; }
+            const std::string where = where_found(p);
+            const std::string tag = where.empty() ? "" : " [" + where + "]";
             if (auto d = registry.decode(p)) {
                 decoded.fetch_add(1);
-                std::printf("%s\n", d->describe().c_str());
+                std::printf("%s%s\n", d->describe().c_str(), tag.c_str());
             } else if (registry.known(p.opcode)) {
                 skipped.fetch_add(1);
-                std::printf("0x%04X FAILED to decode (%zu byte body) — layout too long?\n",
-                            p.opcode, p.payload.size());
+                std::printf("0x%04X FAILED to decode (%zu byte body) — layout too long?%s\n",
+                            p.opcode, p.payload.size(), tag.c_str());
             }
         }
     });
 
     if (!cap.start(make_capture_config(o))) return 1;
 
-    std::printf("Decoding with %zu known layouts. Ctrl+C to stop.\n\n", registry.size());
+    std::printf("Decoding %s with %zu known layouts. Ctrl+C to stop.\n\n",
+                kind_taken(o).c_str(), registry.size());
+    if (o.inner || o.udp)
+        std::printf("Note: the bot applies these layouts only to frames off the TCP stream,\n"
+                    "where an opcode number need not mean what it means here. A layout that\n"
+                    "reads %s right is not, by that, right for the bot --\n"
+                    "which does not decode those yet (P0-3 in docs/goc-parity-plan.md).\n\n",
+                    kind_taken(o).c_str());
     wait_for_stop(o.seconds);
     cap.stop();
 
     std::printf("\nDecoded %llu, failed %llu\n",
                 static_cast<unsigned long long>(decoded.load()),
                 static_cast<unsigned long long>(skipped.load()));
+    if (passed_by.load() > 0)
+        std::printf("%llu frames of the other kinds went by undecoded; --inner and --udp\n"
+                    "take them instead.\n", static_cast<unsigned long long>(passed_by.load()));
     return 0;
 }
 

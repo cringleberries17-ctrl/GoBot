@@ -327,13 +327,26 @@ public:
         /// once in the log, so that it can be started again if it is closed.
         /// `look` asks the running processes now; without it, only what was
         /// seen last (see running_launcher). True when it changed the path.
+        /// Refused under the "no real input" switch, whenever it would read
+        /// or take a running VTCZone's path.
         bool adopt_running_launcher(bool look = true);
+
+        /// The decision `adopt_running_launcher` makes, given the path a
+        /// running VTCZone was seen to run from: taken only when the file's
+        /// path names nothing, and never when there is no path at all -- no
+        /// path says there is no launcher to start, which is not this to
+        /// undo. True when it changed the path.
+        bool adopt_launcher(const std::string& running_path);
     };
 
     /// Where the running VTCZone's program is, asked of the process when
     /// `look` is true -- and remembered for the rest of the session -- else
-    /// as last seen. Empty when it has not been seen running.
-    static std::string running_launcher(bool look = true);
+    /// as last seen. Empty when it has not been seen running. Asking is
+    /// refused under the "no real input" switch: the answer is then empty.
+    /// `program` is VTCZone's, but for a test, which asks after one nothing
+    /// runs so that not even a broken switch could read a real path.
+    static std::string running_launcher(bool look = true,
+                                        const std::string& program = "VTCZone.exe");
 
     /// The pictures the crossing matches against, from wherever they are.
     ///
@@ -386,7 +399,10 @@ public:
 
     /// The window a page `on` it would be looked for in, or null. Picks the
     /// same window `InputManager::find_game_window` would, without a word in
-    /// the log when there is none -- for a look taken every few seconds.
+    /// the log when there is none -- for a look taken every few seconds. On
+    /// the game, only a window of the game's own program, told by where it
+    /// runs from (GameInstall): a folder or a document with the game's title
+    /// is no more the game than another program called Game.exe.
     static void* window_of(const Settings& settings, On which);
 
     /// VTCZone's window when it is minimised, among `process`'s windows, or
@@ -714,6 +730,9 @@ private:
     bool   restore_game(Step during);
     bool   bring_forward();
     bool   running(const std::string& program);
+    /// Whether the game is running under the name `program`: the game's own
+    /// program, by where it runs from, not any program of that name.
+    bool   game_running_now(const std::string& program);
     /// Put VTCZone away once the game is up, as GoC does: once an attempt.
     void   put_vtczone_away();
 
