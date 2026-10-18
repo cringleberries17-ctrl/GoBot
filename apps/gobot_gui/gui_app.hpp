@@ -32,6 +32,8 @@
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
 #include "gobot/vitals_reader.hpp"
+#include "gobot/auto_login.hpp"
+#include "gobot/hotkeys.hpp"
 
 #include <array>
 #include <atomic>
@@ -319,8 +321,9 @@ private:
     std::atomic<int>  party_invited_{0};
 
     // ---- keeping the client alive ----
-    /// Notices the client has fallen over and crosses back in.
-    void start_keeper();
+    /// Notices the client has fallen over and crosses back in. `oneshot`: for
+    /// "Vào game ngay" alone (simple_keeper.cpp).
+    void start_keeper(bool oneshot = false);
     void stop_keeper();
     void keeper_loop();
     void draw_keeper_panel();
@@ -790,10 +793,10 @@ private:
     /// everything else that is ticked starts once it is back in the world.
     bool simple_cold_start_ = false;
     bool simple_running() const {
-        return macro_running_ || hunting_ || party_running_ || keeper_running_ ||
+        return macro_running_ || hunting_ || party_running_ || (keeper_running_ && !keeper_oneshot_) ||
                revive_running_ || (trash_running_ && !trash_oneshot_) ||
                (chat_running_ && !chat_oneshot_ && !chat_stop_) ||
-               (quest_running_ && !quest_oneshot_);
+               (quest_running_ && !quest_oneshot_) || popups_running();
     }
 
     /// The tabs. Fighting is what the whole screen used to be.
@@ -984,6 +987,148 @@ private:
     struct QuestUi;
     struct QuestUiFree { void operator()(QuestUi* ui) const; };
     std::unique_ptr<QuestUi, QuestUiFree> quest_ui_;
+
+    // ---- GoBot's own keys ----
+    /// F10, F11 and F12, and the two that do one job at once -- "Dọn túi
+    /// ngay" and "Vào game ngay" -- read every tick and acted on by which
+    /// window is in front (gobot/hotkeys.hpp). Lives in simple_hotkeys.cpp.
+    /// Returns what tick() is to do -- start/stop, hunting, the panic stop --
+    /// and does the two new keys' jobs itself.
+    HotkeyActions hotkeys_tick();
+    void load_hotkeys();                        ///< from initialise()
+    /// Why `got` may not be a game key, in Vietnamese: one of GoBot's own
+    /// switches other than `mine`, the box's own key. Empty when it may.
+    std::string own_key_clash_vi(std::uint32_t got, std::uint32_t mine) const;
+    /// Every key GoBot presses or watches, and what for: the new keys' boxes
+    /// refuse each of them.
+    std::vector<NamedKey> game_keys_in_use();
+    void simple_hotkey_box(bool trash);         ///< "Phím dọn ngay", or "Phím vào game ngay"
+    std::string simple_hotkeys_line() const;    ///< the keys line's part for them
+    /// "Vào game ngay": one crossing, by the keeper watching or by a keeper
+    /// started for it alone; pressed again during it, that crossing stopped.
+    void login_now();
+    void cancel_login_now();
+    HotkeyConfig      hotkeys_;
+    HotkeyEdgeTracker hotkey_edges_;
+
+    // ---- the keeper's look between crashes ----
+    /// What keeper_loop does after a look, besides what CrashWatch says.
+    /// Lives in simple_keeper.cpp.
+    enum class KeeperWake {
+        None,       ///< nothing more: go on as CrashWatch says
+        Stalled,    ///< nobody in the world for too long: end the client, as for a crash
+        Quit,       ///< a keeper started for "Vào game ngay" alone is done
+    };
+    /// `move` is what CrashWatch made of the look `seen`. Stalled puts in
+    /// `seen` the look the client is ended by.
+    KeeperWake keeper_wake(CrashWatch::Move move, CrashWatch& watch,
+                           const CrashWatch::Settings& watch_settings,
+                           const AutoLogin::Settings& login, TemplateStore& store,
+                           CrashWatch::Look& seen);
+    /// The login key's crossing, on the keeper's thread. False when the
+    /// keeper is to stop: started for the key alone and done, or a crossing
+    /// that gave up.
+    bool keeper_key_crossing(CrashWatch& watch, const CrashWatch::Settings& watch_settings,
+                             const AutoLogin::Settings& login, TemplateStore& store);
+    std::atomic<bool> keeper_login_now_{false};    ///< the login key asked for a crossing
+    /// That crossing is under way; set and cleared under keeper_flow_mutex_.
+    std::atomic<bool> keeper_key_crossing_{false};
+    std::atomic<bool> keeper_key_cancel_{false};   ///< and the key was pressed again
+    /// Started for the login key alone: it ends in the world, and is no run.
+    std::atomic<bool> keeper_oneshot_{false};
+    /// The watchdog, for a game that runs with nobody in the world: the keeper
+    /// thread's alone, made afresh for each keeper (start_keeper).
+    struct KeeperUi;
+    struct KeeperUiFree { void operator()(KeeperUi* ui) const; };
+    std::unique_ptr<KeeperUi, KeeperUiFree> keeper_ui_;
+    /// After a crossing gets in: the watchdog counts afresh, after its grace.
+    void keeper_stall_restart();
+    /// Its tick and minutes, under "Tự vào lại game" on the Tự đăng nhập tab.
+    void simple_stall_option();
+    bool stall_tab_loaded_ = false;
+    bool stall_tab_on_ = false;
+    int  stall_tab_min_ = 5;
+
+    // ---- potion stock ----
+    /// "Còn N bình" under each potion row: the number on each potion key's
+    /// hotbar slot, read off the HP reader's frames every few seconds of a
+    /// run, and the "Sắp hết bình" and "Hết bình" alerts. Look only. Lives in
+    /// simple_potions.cpp.
+    void potions_tick();                            ///< from tick()
+    void simple_potion_stock(MacroKeyKind kind);    ///< under that potion row
+    struct PotionsUi;
+    struct PotionsUiFree { void operator()(PotionsUi* ui) const; };
+    std::unique_ptr<PotionsUi, PotionsUiFree> potions_ui_;
+
+    // ---- closing stray popups ----
+    /// "Tự đóng thông báo": during a run, the few popups on a fixed list --
+    /// the check-in reward's notice, Yêu Quái Bách Khoa, the ESC menu GoBot's
+    /// own ESC brought up -- closed by their own controls, once they have
+    /// stayed up 3 s and nothing else is up (gobot/popup_closer.hpp). Lives in
+    /// simple_popups.cpp.
+    void start_popups();            ///< for a run; nothing when it is unticked
+    void stop_popups();
+    bool popups_running() const;
+    void popup_loop();
+    void popups_load();             ///< [Simple] close_popups, once
+    void say_popups(const std::string& vi);
+    void simple_popups_row();       ///< its row on the Đánh quái tab
+    std::string simple_popups_line() const;     ///< its line on the state card
+    struct PopupsUi;
+    struct PopupsUiFree { void operator()(PopupsUi* ui) const; };
+    std::unique_ptr<PopupsUi, PopupsUiFree> popups_ui_;
+
+    // ---- the party HUD ----
+    /// The party as the game draws it (gobot/party_hud.hpp). The party worker
+    /// invites only when an invite can work -- not in a full party, and
+    /// leading when "Chỉ mời khi đang làm chủ tổ đội" is ticked -- and not
+    /// while anything else holds the game; the Tổ đội tab says what it saw.
+    /// Lives in simple_party.cpp.
+    /// One asker, on the party worker's thread, before the mouse is touched:
+    /// false, and said why, when the invite is not to go. `from_screen`: the
+    /// frame was read off the screen (ScreenCapture::from_screen).
+    bool party_may_invite(const std::string& who, const Frame& frame, bool from_screen,
+                          const TemplateStore& store, bool always_leader);
+    /// Every few seconds of the party worker, the HUD read off its frame for
+    /// the Tổ đội tab.
+    void party_hud_tick(const Frame& frame, bool from_screen, const TemplateStore& store);
+    void simple_party_leader_option();      ///< "Chỉ mời khi đang làm chủ tổ đội"
+    void simple_party_hud_line();           ///< "Tổ đội: …" on the state card, and "Thử xem"
+    struct PartyHudUi;
+    struct PartyHudUiFree { void operator()(PartyHudUi* ui) const; };
+    static PartyHudUi* make_party_hud_ui();
+    /// Made with the window, before any worker that reads it starts.
+    std::unique_ptr<PartyHudUi, PartyHudUiFree> party_hud_ui_{ make_party_hud_ui() };
+
+    // ---- Tự chat's "Chỉ khi chưa có tổ đội" ----
+    /// On Tự chat's thread, for the line whose turn it is: when that line is
+    /// ticked and the party HUD, read on a fresh frame, does not show the
+    /// player alone, it is passed over for the next -- or, with no other line
+    /// to go instead, put off a minute -- and true comes back, with nothing
+    /// held or pressed for it. Lives in simple_chat_alone.cpp.
+    bool chat_alone_put_off(const ChatSettings& s, int index, const TemplateStore& store,
+                            ChatSchedule& schedule, std::uint64_t now);
+    /// The tick after preview row `i` of the Tự chat tab, `lines` being the
+    /// box's lines as they are now.
+    void simple_chat_alone_tick(const std::vector<std::string>& lines, std::size_t i);
+    /// The box of lines edited: saved, each line keeping its tick by its words.
+    void simple_chat_save_lines(const std::string& cfg);
+    struct ChatAloneUi;
+    struct ChatAloneUiFree { void operator()(ChatAloneUi* ui) const; };
+    static ChatAloneUi* make_chat_alone_ui();
+    std::unique_ptr<ChatAloneUi, ChatAloneUiFree> chat_alone_ui_{ make_chat_alone_ui() };
+
+    // ---- "Dùng" in Dọn rác ----
+    /// Registering fragments in Yêu Quái Bách Khoa with the trash pass
+    /// (gobot/bag.hpp, TrashList::Action::Use): the options in the Dọn rác
+    /// tab's two pickers and what a pass says of it. Lives in
+    /// simple_trash_use.cpp.
+    /// The catalog picker's options for fragment `id`; true when one was taken.
+    bool simple_use_options(const std::string& id, const char* folder);
+    /// The bag picture's option for the slot picked, on Tiêu Dùng only.
+    bool simple_use_cut_option(const ScreenRect& at);
+    /// " Đã dùng N món." for the trash worker's line about a pass.
+    static std::string trash_use_said_vi(const BagCleaner::Result& r, bool look_only);
 
     // ---- status ----
     std::string status_message_;

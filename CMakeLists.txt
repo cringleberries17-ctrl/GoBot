@@ -185,6 +185,11 @@ add_library(gobot_core STATIC
     src/auto_chat.cpp
     src/alerts.cpp
     src/quick_quest.cpp
+    src/hotkeys.cpp
+    src/potion_stock.cpp
+    src/popup_closer.cpp
+    src/stall_watch.cpp
+    src/party_hud.cpp
     src/dialog_driver.cpp
     src/routine.cpp
     src/reviver.cpp
@@ -270,6 +275,13 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/simple_view.cpp
         apps/gobot_gui/simple_alerts.cpp
         apps/gobot_gui/simple_quest.cpp
+        apps/gobot_gui/simple_hotkeys.cpp
+        apps/gobot_gui/simple_keeper.cpp
+        apps/gobot_gui/simple_potions.cpp
+        apps/gobot_gui/simple_popups.cpp
+        apps/gobot_gui/simple_party.cpp
+        apps/gobot_gui/simple_chat_alone.cpp
+        apps/gobot_gui/simple_trash_use.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"
@@ -329,7 +341,10 @@ endif()
 # Covers the layers that can be checked without the game running: framing,
 # reassembly, packet decoding, world model, pathfinding.
 add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.cpp
-                          apps/gobot_test/quest_test.cpp)
+                          apps/gobot_test/quest_test.cpp apps/gobot_test/hotkey_test.cpp
+                          apps/gobot_test/potion_test.cpp apps/gobot_test/popup_test.cpp
+                          apps/gobot_test/stall_test.cpp apps/gobot_test/party_hud_test.cpp
+                          apps/gobot_test/chat_alone_test.cpp apps/gobot_test/use_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

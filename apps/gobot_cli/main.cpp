@@ -56,6 +56,10 @@
 #include "gobot/pathfinder.hpp"
 #include "gobot/protocol_handler.hpp"
 #include "gobot/window_focus.hpp"
+#include "gobot/popup_closer.hpp"
+#include "gobot/potion_stock.hpp"
+#include "gobot/stall_watch.hpp"
+#include "gobot/party_hud.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -227,7 +231,10 @@ UNATTENDED RUNNING
                       after a few restarts: a client that falls over that often
                       is not failing at random, and a program that keeps
                       reconnecting to a server refusing it is indistinguishable
-                      from an attack on that server.
+                      from an attack on that server. With [Crash]
+                      stall_enabled=true in app.ini, a client that runs with
+                      nobody in the world for stall_min minutes is ended the
+                      same way, as the GUI's keeper does.
   --setlogin          Not needed any more, and writes nothing: GoBot does not
                       use a user name or a password. Sign in to VTCZone once,
                       with its remember option; GoBot only presses Choi game.
@@ -359,16 +366,38 @@ UNATTENDED RUNNING
                       and a quest_key that is one of GoBot's own switches in
                       macro.ini or hunt.ini. Ctrl+C stops it at the next key
                       or click, pressing nothing more.
+  --potions [png]     Look only: find the hotbar and read the stack count on
+                      the slot of every potion key in configs/macro.ini -- the
+                      number the game prints there, the stack in use, not the
+                      whole bag -- as the Đánh quái tab reads it. On the
+                      screenshot named, or one capture of the game. Presses
+                      nothing.
   --method <m>        With --chat-once or --chat: type with vk (a key per
                       character, GoC's way), unicode, wmchar or imechar
                       instead of chat.ini's method. Every method but vk keeps
                       the marks on Vietnamese letters (unless chat.ini says
                       strip_diacritics=true), so to find out whether one gets
                       them through, chat.ini's test_line needs some.
-  --close             Close whatever dialogs are in the way, for real. The one
-                      thing here that needs no calibration -- the middle of a
-                      close button is the close button -- so it is the right
-                      first thing to try against a live client.
+  --close [seconds]   Close the popups on GoBot's allow-list that are up, as
+                      the GUI's "Tự đóng thông báo" does, looking once a second
+                      for that long (default 10): the check-in reward notice by
+                      its own Xác Nhận, Yêu Quái Bách Khoa by its X (or ESC when
+                      nothing else is up), and an ESC menu GoBot's own ESC
+                      brought up. A popup is closed only once it has stayed 3 s,
+                      and nothing at all while anything else is up: a dialog
+                      with Xác Nhận and Hủy Bỏ, a party invitation, the death
+                      panel, the quest window, the bag, the chat line, any
+                      other window with a close button. Never a close button
+                      on its own, never a blank dialog's Xác Nhận.
+  --popups [png]      Look only: what of that allow-list is up, what it would be
+                      closed with, and what else is up that would keep it shut.
+                      On the screenshot named, or one capture of the game.
+                      Presses nothing.
+  --party-hud [png]   Look only: read the party off the game's screen, as the
+                      party worker and Tự chat read it -- alone, a member or
+                      the leader, how many, and where each member's panel is.
+                      On the screenshot named, or one capture of the game.
+                      Presses nothing. (--party asks the other helper instead.)
   --dry               With --routine: find each step's picture and say where it
                       would click, without clicking anything. Use this first.
                       The offsets in that file were worked out from the
@@ -449,8 +478,15 @@ struct Options {
     std::string chat_method;        ///< --method; empty for chat.ini's
     bool quest_probe = false;       ///< --quest-probe: look, press nothing
     bool quest_once = false;        ///< --quest-once: one quick quest round
+    bool potions = false;           ///< --potions: read the potion keys' hotbar slots
+    std::string potions_image;      ///< on this screenshot rather than the game
     bool dry_run = false;
     bool close_popups = false;
+    int  close_seconds = 10;        ///< --close [seconds]
+    bool popups = false;            ///< --popups: what the closer sees, pressing nothing
+    std::string popups_image;       ///< on this screenshot rather than the game
+    bool party_hud = false;         ///< --party-hud: the party read off the screen
+    std::string party_hud_image;    ///< on this screenshot rather than the game
     bool party = false;
     bool player_list = false;
     int  pick_row = 0;
@@ -563,6 +599,10 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--chatcheck") o.chat_check = true;
         else if (a == "--quest-probe") o.quest_probe = true;
         else if (a == "--quest-once") o.quest_once = true;
+        else if (a == "--potions") {
+            o.potions = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.potions_image = argv[++i];
+        }
         else if (a == "--chat-once") o.chat_once = true;
         else if (a == "--chat")      { o.chat_text = next("--chat"); o.chat_given = true; }
         else if (a == "--method") {
@@ -577,7 +617,19 @@ bool parse_args(int argc, char** argv, Options& o) {
         }
         else if (a == "--routine")   { o.routines = true; o.routine_name = next("--routine"); }
         else if (a == "--dry")       o.dry_run = true;
-        else if (a == "--close")     o.close_popups = true;
+        else if (a == "--close") {
+            o.close_popups = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                o.close_seconds = std::max(1, std::min(600, std::atoi(argv[++i])));
+        }
+        else if (a == "--popups") {
+            o.popups = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.popups_image = argv[++i];
+        }
+        else if (a == "--party-hud") {
+            o.party_hud = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.party_hud_image = argv[++i];
+        }
         else if (a == "--party")     o.party = true;
         else if (a == "--playerlist") o.player_list = true;
         else if (a == "--pickrow")   { o.player_list = true; o.pick_row = std::stoi(next("--pickrow")); }
@@ -2216,22 +2268,162 @@ int run_player_list(const Options& o, const AppConfig& app) {
     return 0;
 }
 
-/// Close whatever dialogs are in the way, for real.
-///
-/// The smallest thing in this project that works end to end: look at the game,
-/// find a close button, click it, check it went away, repeat. It needs no click
-/// offsets -- the middle of a close button is the close button -- so it is the
-/// one feature that can be trusted before anything has been calibrated, and
-/// therefore the right first thing to run against a live client.
-int run_close(const Options& o, const AppConfig& app) {
-    TemplateStore store;
-    const std::string dll = o.template_source.empty()
-        ? TemplateStore::helper_assembly() : o.template_source;
-    if (dll.empty() || !store.load_from_assembly(dll, {})) {
-        std::fprintf(stderr, "No pictures to recognise dialogs with.\n");
+/// The frame a look-only command looks at: the screenshot named, or else one
+/// capture of the game. Nothing is pressed and nothing is brought forward.
+bool look_frame(const Options& o, const AppConfig& app, const std::string& png, Frame& f) {
+    if (!png.empty()) {
+        if (load_png(png, f) && f.valid()) return true;
+        std::fprintf(stderr, "Could not read %s\n", png.c_str());
+        return false;
+    }
+    InputManager input;
+    if (!attach_window(input, o, app)) {
+        std::fprintf(stderr, "No game window.\n");
+        return false;
+    }
+    ScreenCapture capture;
+    if (!capture.grab(input.target_window(), f) || !f.valid()) {
+        std::fprintf(stderr, "Could not capture the game window.\n");
+        return false;
+    }
+    if (capture.from_screen() && !input.window_focused())
+        std::printf("(read off the screen with the game behind another window: what covers it is "
+                    "what is read)\n");
+    return true;
+}
+
+/// The potion keys' hotbar slots, read once, as the Đánh quái tab reads them.
+/// Look only.
+int run_potions(const Options& o, const AppConfig& app) {
+    Frame picture;
+    std::string from;
+    if (!TemplateStore::load_one(hotbar::kPicture, resolve("configs/templates.ini"), picture, &from)) {
+        std::fprintf(stderr, "No picture of the hotbar (templates\\grabbed\\hotbar_frame.png) here.\n");
         return 1;
     }
+    CountReader digits;
+    if (!digits.load(GlyphFont::default_dir()))
+        std::printf("No digits of the game's font: counts cannot be read, only empty slots told.\n");
+    MacroConfig macro;
+    macro.load(resolve("configs/macro.ini"));
 
+    Frame f;
+    if (!look_frame(o, app, o.potions_image, f)) return 1;
+    const HotbarSpot bar = find_hotbar(f, picture);
+    std::printf("hotbar      %s", bar.found ? "found" : "NOT found");
+    if (bar.found) std::printf(" -- slot A at %d,%d", bar.x, bar.y);
+    std::printf(" (score %.3f; picture from %s)\n", static_cast<double>(bar.score), from.c_str());
+
+    std::vector<std::uint32_t> seen;
+    for (const MacroKey& k : macro.keys) {
+        const MacroKeyKind kind = macro_key_kind(k);
+        if (k.keycode == 0 || (kind != MacroKeyKind::HpPotion && kind != MacroKeyKind::MpPotion)) continue;
+        if (std::find(seen.begin(), seen.end(), k.keycode) != seen.end()) continue;
+        seen.push_back(k.keycode);
+        const SlotReading r = read_slot(f, bar, k.keycode, digits, picture);
+        const std::string value =
+            r.state == SlotState::Count ? std::to_string(r.count) : std::string(slot_state_name(r.state));
+        std::printf("key %-6s %s potion%s: %s", InputManager::key_name(k.keycode).c_str(),
+                    kind == MacroKeyKind::HpPotion ? "HP" : "MP", k.enabled ? "" : " (off)", value.c_str());
+        if (r.row >= 0) std::printf("  -- slot %d row %d", r.col + 1, r.row + 1);
+        if (r.label >= 0.0f) std::printf(", label %.2f", static_cast<double>(r.label));
+        std::printf("\n");
+    }
+    if (seen.empty()) std::printf("No potion key in configs/macro.ini.\n");
+    return 0;
+}
+
+/// The party, read off the game's screen once, as the party worker and Tự
+/// chat read it. Look only.
+int run_party_hud(const Options& o, const AppConfig& app) {
+    TemplateStore pictures;
+    std::string missing;
+    PartyHudReader reader;
+    if (!PartyHudReader::load_pictures(pictures, resolve("configs/templates.ini"), &missing) ||
+        !reader.load(pictures, &missing)) {
+        std::fprintf(stderr, "A picture of the party HUD is missing: %s\n", missing.c_str());
+        return 1;
+    }
+    Frame f;
+    if (!look_frame(o, app, o.party_hud_image, f)) return 1;
+    const PartyHud hud = reader.read(f);
+    std::printf("party       %s", party_state_name(hud.state));
+    if (hud.state == PartyState::Unknown) {
+        std::printf(" -- %s\n", hud.why.c_str());
+    } else {
+        std::printf(", %d of %d%s\n", hud.size, kPartyMax, hud.full ? ", full" : "");
+        std::printf("own panel   leader's frame %.3f%s\n", static_cast<double>(hud.own_score),
+                    hud.own_leader ? " -- leads" : "");
+        for (const PartyPanel& p : hud.panels)
+            std::printf("member      panel at %d,%d (%.3f), leader's frame %.3f%s\n", p.at.x, p.at.y,
+                        static_cast<double>(p.score), static_cast<double>(p.leader_score),
+                        p.leader ? " -- leads" : "");
+    }
+    for (const bool always : { false, true }) {
+        const PartyGate g = party_invite_gate(hud, always);
+        std::printf("invite      %s: %s\n", always ? "with \"only while leading\" ticked" : "as shipped",
+                    g.allowed ? "yes" : ("no -- " + g.reason_en).c_str());
+    }
+    std::printf("%s\n", party_hud_line_vi(hud).c_str());
+    return 0;
+}
+
+/// What the popup closer sees, once: what of its allow-list is up, what each
+/// would be closed with, and what else is up that keeps everything shut. Look
+/// only.
+int run_popups(const Options& o, const AppConfig& app) {
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini"))) {
+        std::fprintf(stderr, "No pictures to recognise popups with.\n");
+        return 1;
+    }
+    PopupEyes eyes;
+    eyes.load(store, resolve("configs"));
+    std::string why;
+    if (!eyes.ready(&why)) {
+        std::fprintf(stderr, "A picture the closer needs is missing: %s\n", why.c_str());
+        return 1;
+    }
+    Frame f;
+    if (!look_frame(o, app, o.popups_image, f)) return 1;
+    const std::vector<PopupSeen> up = eyes.popups(f);
+    if (up.empty()) std::printf("Nothing on the allow-list is up.\n");
+    for (const PopupSeen& p : up) {
+        std::printf("%-20s at %d,%d %dx%d, score %.3f -- ", popup_kind_name(p.kind), p.at.x, p.at.y, p.at.w,
+                    p.at.h, static_cast<double>(p.score));
+        if (p.kind == PopupKind::EscMenu)
+            std::printf("closed only right after GoBot's own ESC");
+        else if (p.control)
+            std::printf("would be closed by clicking %d,%d", p.x, p.y);
+        else
+            std::printf("no X found: ESC, when nothing else is up");
+        std::printf("\n");
+    }
+    for (const std::string& b : eyes.blockers(f, up))
+        std::printf("also up: %s -- nothing would be closed\n", b.c_str());
+    return 0;
+}
+
+/// Close the popups on the allow-list that are up, for real, as the GUI's
+/// "Tự đóng thông báo" does: the check-in reward notice by its own Xác Nhận,
+/// Yêu Quái Bách Khoa by its X (or ESC with nothing else up), and an ESC menu
+/// GoBot's own ESC brought up. Looks once a second for --close's seconds. It
+/// used to click every close button and every blank dialog's Xác Nhận it
+/// found, which agrees to whatever a dialog was asking; now it closes nothing
+/// that is not on the list, and nothing at all while anything else is up.
+int run_close(const Options& o, const AppConfig& app) {
+    TemplateStore store;
+    if (!store.load_best(resolve("configs/templates.ini"))) {
+        std::fprintf(stderr, "No pictures to recognise popups with.\n");
+        return 1;
+    }
+    PopupEyes eyes;
+    eyes.load(store, resolve("configs"));
+    std::string why;
+    if (!eyes.ready(&why)) {
+        std::fprintf(stderr, "A picture the closer needs is missing: %s\n", why.c_str());
+        return 1;
+    }
     InputManager input;
     if (!attach_window(input, o, app)) {
         std::fprintf(stderr, "No game window.\n");
@@ -2241,19 +2433,36 @@ int run_close(const Options& o, const AppConfig& app) {
         input.focus_window();
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
     }
-
+    Frame landmark;
+    const bool have_landmark =
+        TemplateStore::load_one("hpmp_indicator2", resolve("configs/templates.ini"), landmark);
     ScreenCapture capture;
-    DialogDriver driver(input, store, [&](Frame& f) {
-        return capture.grab(input.target_window(), f);
+    Frame last;
+    PopupCloser closer(input, eyes, [&](Frame& f) {
+        if (!capture.grab(input.target_window(), f) || !f.valid()) return false;
+        last = f;
+        return true;
     });
-
-    std::printf("Looking for anything in the way...\n");
-    const int closed = driver.close_popups(6);
-    if (closed == 0) {
-        std::printf("Nothing was in the way.\n");
-        return 0;
+    PopupCloser::Guard guard;
+    guard.gates = [&]() -> std::string {
+        if (!input.window_focused()) return "the game is not in front";
+        if (!AutoLogin::in_world(last, have_landmark ? &landmark : nullptr)) return "the HUD is not up";
+        return {};
+    };
+    // Ctrl+C while a frame is looked at: nothing more pressed.
+    guard.stopped = [] { return g_stop.load(); };
+    closer.set_guard(guard);
+    closer.on_report([](const std::string& line) {
+        std::printf("  %s\n", line.c_str());
+        std::fflush(stdout);
+    });
+    std::printf("Looking once a second for %d s; a popup is closed once it has stayed 3 s.\n",
+                o.close_seconds);
+    for (int s = 0; s < o.close_seconds && !g_stop; ++s) {
+        closer.turn();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    std::printf("Closed %d.\n", closed);
+    std::printf("Closed %d.\n", closer.closed());
     return 0;
 }
 
@@ -2431,9 +2640,9 @@ int run_trash(const Options& o, const AppConfig& app) {
     const auto finish = [](const BagCleaner::Result& r) {
         std::fflush(stderr);
         std::printf("TRASH RESULT ran=%d matched=%d deleted=%d dropped=%d failed=%d doubtful=%d "
-                    "stuck=%d trouble=%s\n",
+                    "use_matched=%d used=%d stuck=%d trouble=%s\n",
                     r.ran ? 1 : 0, r.matched, r.deleted, r.dropped, r.failed, r.doubtful,
-                    r.stuck ? 1 : 0, r.trouble.c_str());
+                    r.use_matched, r.used, r.stuck ? 1 : 0, r.trouble.c_str());
         std::fflush(stdout);
         return r.ran && r.trouble.empty() && r.failed == 0 && !r.stuck ? 0 : 1;
     };
@@ -2460,7 +2669,7 @@ int run_trash(const Options& o, const AppConfig& app) {
     list.build(resolve("configs/trash"), settings, catalog);
     // The list leaves out ids its catalog does not have without a word, and an
     // item that is never looked for looks just like one that is not in the bag.
-    for (const std::vector<std::string>* ids : { &settings.delete_ids, &settings.drop_ids })
+    for (const std::vector<std::string>* ids : { &settings.delete_ids, &settings.drop_ids, &settings.use_ids })
         for (const std::string& id : *ids)
             if (catalog.find(id) == nullptr)
                 say("not in the item catalog, so not looked for: " + id);
@@ -2472,6 +2681,8 @@ int run_trash(const Options& o, const AppConfig& app) {
 
     if (o.trash_max > 0) settings.max_per_run = o.trash_max;
     else if (!o.dry_run) settings.max_per_run = 1;
+    // The same bound on registering, which cannot be undone either.
+    settings.max_uses_per_run = std::min(settings.max_uses_per_run, settings.max_per_run);
 
     // What the pass goes by, to read what it says against.
     std::string tabs;
@@ -2501,6 +2712,14 @@ int run_trash(const Options& o, const AppConfig& app) {
     if (to_drop > 0 && !bag::can_check(store, TrashList::Action::Drop))
         say("the items to drop are left alone: there is no picture of the drop question with "
             "its words, so it cannot be told from any other dialog");
+    int to_use = 0;
+    for (const TrashList::Item& item : list.items) to_use += item.action == TrashList::Action::Use ? 1 : 0;
+    if (to_use > 0)
+        say(std::to_string(to_use) + " on the Dùng list, registered on Tiêu Dùng before anything there is "
+            "deleted" + (bag::can_check(store, TrashList::Action::Use)
+                             ? std::string(", at most ") + std::to_string(settings.max_uses_per_run)
+                             : std::string(" -- not this time: there is no picture of the registration "
+                                           "question (grabbed/fragment_register), so they are only said")));
 
     // Nothing in this process holds off for the pass the way the GUI's macro
     // and hunter hold off for its own, and a pass of the GUI's at the same
@@ -3818,6 +4037,16 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
         watch_settings.launcher_process = settings.client_process;
 
     CrashWatch watch(watch_settings);
+    // The watchdog, as the window's keeper has it: nobody in the world for
+    // stall_min minutes while the client runs is ended as a crash is.
+    StallKeeper stall;
+    {
+        StallSettings s;
+        s.load(ini);
+        stall.set_settings(s, resolve("configs/templates.ini"));
+        stall.restart(now_ms());
+    }
+    InputManager game;      // found again on each look: a restarted client has a new window
 
     std::printf("Keeping the client alive for %d minute(s).\n\n"
                 "  watching     %s, and %s behind it\n"
@@ -3834,7 +4063,7 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
     bool seen_running = false;      // the client has been up at some point
 
     while (std::chrono::steady_clock::now() < until) {
-        const CrashWatch::Look seen = watch.look();
+        CrashWatch::Look seen = watch.look();
 
         if (!seen.bad()) {
             seen_running = true;
@@ -3844,8 +4073,16 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
                 std::fflush(stdout);
                 said_fine = true;
             }
-            std::this_thread::sleep_for(std::chrono::seconds(3));
-            continue;
+            // Looked for only when there is none, or it has gone: every look
+            // lists every window and logs a line, every 3 s of a long run.
+            if (stall.settings().enabled && !game.window_valid())
+                game.find_game_window(app.window_title, app.window_class, app.process_name);
+            if (!stall.settings().enabled ||
+                !stall.check(game.target_window(), false, settings, store, now_ms(), seen,
+                             resolve("keeper_debug"))) {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                continue;
+            }
         }
         said_fine = false;
 
@@ -3904,6 +4141,7 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
             return 1;
         }
         seen_running = true;
+        stall.restart(now_ms());
         std::printf("\n");
     }
 
@@ -5234,6 +5472,8 @@ int main(int argc, char** argv) {
     if (opt.invite_seconds > 0) return run_invites(opt, app, opt.invite_seconds);
     if (opt.party) return run_party(opt, app);
     if (opt.close_popups) return run_close(opt, app);
+    if (opt.popups) return run_popups(opt, app);
+    if (opt.party_hud) return run_party_hud(opt, app);
     if (opt.routines) return run_routines(opt, app);
     if (!opt.bag_image.empty()) return run_bag(opt);
     if (opt.trash_probe) return run_trash_probe(opt, app);
@@ -5242,6 +5482,7 @@ int main(int argc, char** argv) {
     if (opt.chat_once || opt.chat_given) return run_chat(opt, app);
     if (opt.quest_probe) return run_quest_probe(opt, app);
     if (opt.quest_once) return run_quest_once(opt, app);
+    if (opt.potions) return run_potions(opt, app);
     if (opt.set_login) return run_set_login(opt);
     if (opt.login) return run_login(opt, app);
     if (opt.keepalive_minutes > 0) return run_keepalive(opt, app, opt.keepalive_minutes);

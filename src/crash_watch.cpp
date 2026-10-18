@@ -88,8 +88,21 @@ const char* CrashWatch::trouble_name(Trouble t) {
         case Trouble::Gone:     return "the client has exited";
         case Trouble::Hung:     return "the client has stopped answering";
         case Trouble::ErrorBox: return "the client is showing an error";
+        case Trouble::Stalled:  return "the client runs, but nobody is in the world";
     }
     return "?";
+}
+
+std::string CrashWatch::trouble_vi(const Look& seen) {
+    switch (seen.what) {
+        case Trouble::Gone:     return "Game đã tắt";
+        case Trouble::Hung:     return "Game bị treo";
+        case Trouble::Stalled:
+            return "Game không vào được thế giới " + std::to_string(seen.minutes) + " phút";
+        case Trouble::None:
+        case Trouble::ErrorBox: break;
+    }
+    return "Game hiện bảng lỗi";
 }
 
 // ------------------------------------------------------------------ settings

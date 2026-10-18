@@ -53,8 +53,8 @@ struct AlertEventInfo {
 
 /// Every event, in the order the tab lists them: death, revived,
 /// revive_failed, disconnect, back_in, keeper_gave_up, not_in_world,
-/// trash_stuck, chat_stuck, chat_stopped, quest_trouble, party_change -- and
-/// test, the tab's Gửi thử, which has no tick.
+/// trash_stuck, chat_stuck, chat_stopped, quest_trouble, potion_low,
+/// potion_out, party_change -- and test, the tab's Gửi thử, which has no tick.
 const std::vector<AlertEventInfo>& alert_events();
 /// The event `key` names, or null.
 const AlertEventInfo* find_alert_event(const std::string& key);
@@ -126,8 +126,10 @@ std::string revived();
 // same words the simple screen shows in red, which say the bot has stopped.
 /// `code` only when it has the shape CrashWatch::code_in gives -- a hex or a
 /// decimal number -- and is left out otherwise. `coming_back`: the keeper is
-/// about to log back in.
-std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool coming_back);
+/// about to log back in. `minutes`, for Trouble::Stalled: how long nobody was
+/// in the world while the game ran.
+std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool coming_back,
+                       int minutes = 0);
 std::string back_in(int restart, int max_restarts);
 std::string gave_up_restarts(int restarts);
 std::string gave_up_not_set_up();
@@ -145,6 +147,11 @@ std::string chat_stuck(bool stopped);
 std::string chat_stopped(int failures);
 /// `why` is one of the quick quest worker's own fixed phrases.
 std::string quest_trouble(int times, const std::string& why);
+/// A potion key's hotbar slot: `hp` the HP potion's or the MP potion's,
+/// `key` the key's name as InputManager::key_name gives it -- anything else
+/// in it is said as "?" -- and `count` the number the slot shows.
+std::string potion_low(bool hp, const std::string& key, int count);
+std::string potion_out(bool hp, const std::string& key);
 /// With `with_name` and a name that survives cleaning, the name; otherwise none.
 std::string party_joined(const std::string& who, bool with_name);
 std::string party_invited(const std::string& who, bool with_name);

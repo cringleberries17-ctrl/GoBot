@@ -361,6 +361,21 @@ bool is_line_key(const std::string& line) {
     return key.find_first_not_of("0123456789", 4) == std::string::npos;
 }
 
+/// `line` is "lineN_only_alone=..." for some N: a line's "Chỉ khi chưa có tổ
+/// đội" tick.
+bool is_tick_key(const std::string& line) {
+    const std::string t = trim(line);
+    const auto eq = t.find('=');
+    if (eq == std::string::npos) return false;
+    const std::string key = lower(trim(t.substr(0, eq)));
+    const std::string tail = "_only_alone";
+    if (key.size() < 5 + tail.size() || key.compare(0, 4, "line") != 0 ||
+        key.compare(key.size() - tail.size(), tail.size(), tail) != 0)
+        return false;
+    const std::string number = key.substr(4, key.size() - 4 - tail.size());
+    return !number.empty() && number.find_first_not_of("0123456789") == std::string::npos;
+}
+
 // ---- the debug folder -------------------------------------------------------
 
 std::string stamp() {
@@ -484,8 +499,13 @@ bool ChatSettings::load(const std::string& path) {
     if (!test.empty()) s.test_line = test;
 
     for (int i = 1; i <= kMaxLines; ++i) {
-        const std::string line = trim(ini.get("Lines", "line" + std::to_string(i)));
-        if (!line.empty()) s.lines.push_back(line);
+        const std::string key = "line" + std::to_string(i);
+        const std::string line = trim(ini.get("Lines", key));
+        if (line.empty()) continue;
+        s.lines.push_back(line);
+        // Its tick beside it, under the same number: a tick never belongs to
+        // the line that happens to land in its place.
+        s.only_alone.push_back(ini.get_bool("Lines", key + "_only_alone", false));
     }
     *this = std::move(s);
     return true;
@@ -537,6 +557,11 @@ bool ChatSettings::save_key(const std::string& path, const std::string& key,
 }
 
 bool ChatSettings::save_lines(const std::string& path, const std::vector<std::string>& lines) {
+    return save_lines(path, lines, {});
+}
+
+bool ChatSettings::save_lines(const std::string& path, const std::vector<std::string>& lines,
+                              const std::vector<bool>& only_alone) {
     if (!make_if_missing(path)) return false;
 
     TextLines file;
@@ -555,18 +580,25 @@ bool ChatSettings::save_lines(const std::string& path, const std::vector<std::st
             out.push_back(line);
             continue;
         }
-        if (in_lines && is_line_key(line)) continue;
+        // The old ticks go with the old lines: they are written again below,
+        // each beside the line it is now for.
+        if (in_lines && (is_line_key(line) || is_tick_key(line))) continue;
         out.push_back(line);
     }
     std::vector<std::string> keys;
-    for (std::size_t i = 0; i < lines.size() && keys.size() < static_cast<std::size_t>(kMaxLines);
-         ++i) {
+    int written = 0;
+    for (std::size_t i = 0; i < lines.size() && written < kMaxLines; ++i) {
         // One line each: a line break inside one would start a key of its own.
         std::string v = lines[i];
         std::replace(v.begin(), v.end(), '\n', ' ');
         std::replace(v.begin(), v.end(), '\r', ' ');
         v = trim(v);
-        if (!v.empty()) keys.push_back("line" + std::to_string(keys.size() + 1) + "=" + v);
+        if (v.empty()) continue;
+        const std::string key = "line" + std::to_string(++written);
+        keys.push_back(key + "=" + v);
+        // Only a tick that is there is written: a file without one reads as
+        // no tick, which is how the shipped file has every line.
+        if (i < only_alone.size() && only_alone[i]) keys.push_back(key + "_only_alone=true");
     }
     if (header == static_cast<std::size_t>(-1)) {
         if (!out.empty() && !trim(out.back()).empty()) out.push_back({});
@@ -609,6 +641,43 @@ std::string ChatSettings::join_lines(const std::vector<std::string>& lines) {
         out += line;
     }
     return out;
+}
+
+std::vector<bool> ChatSettings::carry_ticks(const std::vector<std::string>& before,
+                                            const std::vector<bool>& before_ticks,
+                                            const std::vector<std::string>& lines) {
+    std::vector<bool> out(lines.size(), false);
+    std::vector<bool> taken(before.size(), false);
+    const auto tick_of = [&](std::size_t j) { return j < before_ticks.size() && before_ticks[j]; };
+    // Each line's own place first, so that a list with the same words twice
+    // keeps each tick where it was; then the first of those words not taken.
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        if (i < before.size() && before[i] == lines[i]) {
+            out[i] = tick_of(i);
+            taken[i] = true;
+        }
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (i < before.size() && before[i] == lines[i]) continue;
+        for (std::size_t j = 0; j < before.size(); ++j)
+            if (!taken[j] && before[j] == lines[i]) {
+                out[i] = tick_of(j);
+                taken[j] = true;
+                break;
+            }
+    }
+    return out;
+}
+
+AloneTurn alone_turn(const std::vector<bool>& only_alone, const std::vector<bool>& typeable, int index,
+                     bool alone) {
+    const auto ticked = [&](std::size_t i) { return i < only_alone.size() && only_alone[i]; };
+    if (index < 0 || !ticked(static_cast<std::size_t>(index)) || alone) return AloneTurn::Send;
+    // In a party, or not known: passed over for the next line -- unless no
+    // line could go instead, when passing over would only come back round to
+    // this one a second later, the HUD read again each time.
+    for (std::size_t i = 0; i < typeable.size(); ++i)
+        if (typeable[i] && !ticked(i)) return AloneTurn::Skip;
+    return AloneTurn::Wait;
 }
 
 // -------------------------------------------------------------------- text

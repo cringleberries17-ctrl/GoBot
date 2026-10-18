@@ -122,6 +122,7 @@ GuiApp::~GuiApp() {
     stop_revive();
     stop_trash();
     stop_quest();
+    stop_popups();
     // A look at the game for the bin, or for the chat line, may still be under
     // way; it reads the window handle and its own pictures, which go away
     // below. So may the login tab's look at VTCZone, with pictures of its own.
@@ -311,6 +312,7 @@ void GuiApp::initialise() {
     hunter_->set_config(hunt_config_);
     load_simple_options();
     alerts_init();
+    load_hotkeys();
 
     nav_config_.load(exe_relative("configs/hunt.ini"));
     places_.load(exe_relative("configs/waypoints.ini"));
@@ -332,30 +334,28 @@ void GuiApp::initialise() {
 }
 
 void GuiApp::tick() {
-    // Hotkey works whether or not the GUI has focus, so the bot can be
-    // toggled from inside the game. GetAsyncKeyState rather than
+    // GoBot's own keys, read whether or not the GUI has focus, so the bot can
+    // be toggled from inside the game. GetAsyncKeyState rather than
     // RegisterHotKey: a registered hotkey is swallowed and never reaches the
-    // game, which matters when the toggle shares a key with something.
+    // game, which matters when the toggle shares a key with something. So a
+    // key goes to whatever window is in front as well, and acts only with the
+    // game or GoBot there -- the panic key alone from anywhere -- and never
+    // while a key box is waiting for a key: binding something to it would
+    // otherwise start the bot as a side effect. See simple_hotkeys.cpp.
     //
     // On the simple screen the key is that screen's one button, which starts
-    // the fighting and the potions along with the timers. Not while a key box
-    // there is waiting for a key: binding something to it would otherwise
-    // start the bot as a side effect.
-    static bool was_down = false;
-    const bool down = (GetAsyncKeyState(static_cast<int>(macro_config_.toggle_key)) & 0x8000) != 0;
-    if (down && !was_down && simple_listening_ == 0) {
+    // the fighting and the potions along with the timers.
+    const HotkeyActions keys = hotkeys_tick();
+    if (keys.toggle) {
         if (simple_view_) simple_toggle();
         else              toggle_macro();
     }
-    was_down = down;
 
     // Panic key: stop everything and let go of every held key, unconditionally.
     // Worth a dedicated binding — when a macro misbehaves the useful response
     // is always "stop now", and hunting for the window to click is exactly
     // what you cannot do while keys are being pressed into the game.
-    static bool panic_was_down = false;
-    const bool panic = (GetAsyncKeyState(static_cast<int>(macro_config_.panic_key)) & 0x8000) != 0;
-    if (panic && !panic_was_down) {
+    if (keys.panic) {
         if (navigator_) navigator_->stop();
         stop_hunt();
         stop_macro();
@@ -369,21 +369,17 @@ void GuiApp::tick() {
         stop_revive();
         stop_trash();
         stop_quest();
+        stop_popups();
         stop_keeper();
         input_.release_all();
         set_status("Panic stop -- all input released", 5000);
         GB_WARN("Panic key pressed: everything stopped");
     }
-    panic_was_down = panic;
 
     // Hunting gets its own toggle. It presses movement keys, which the macro
     // never does, so being able to stop just that without stopping the skill
     // timers is worth a key of its own.
-    static bool hunt_was_down = false;
-    const bool hunt_down =
-        (GetAsyncKeyState(static_cast<int>(hunt_config_.toggle_key)) & 0x8000) != 0;
-    if (hunt_down && !hunt_was_down && simple_listening_ == 0) toggle_hunt();
-    hunt_was_down = hunt_down;
+    if (keys.hunt) toggle_hunt();
 
     if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
     simple_track_run(simple_running());
@@ -467,6 +463,7 @@ void GuiApp::tick() {
     }
     refocus_if_idle();
     alerts_tick();
+    potions_tick();
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -2703,6 +2700,9 @@ void GuiApp::party_loop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
+        // "Tổ đội: …" on the tab, every few seconds (simple_party.cpp).
+        const bool frame_from_screen = capture.from_screen();
+        party_hud_tick(frame, frame_from_screen, store);
 
         // ---- somebody is asking us ----
         if (rules.auto_accept) {
@@ -2804,6 +2804,9 @@ void GuiApp::party_loop() {
                     say_party(who + " asked, and the rules say no");
                     continue;
                 }
+                // Only when an invite can work, by the party HUD on this
+                // frame, and nothing else holds the game (simple_party.cpp).
+                if (!party_may_invite(who, frame, frame_from_screen, store, rules.always_leader)) continue;
 
                 // The mouse to itself for the whole of it -- opening the list,
                 // finding the row, the invite -- so a trash pass that starts
@@ -2856,9 +2859,16 @@ void GuiApp::party_loop() {
 
 // -------------------------------------------------------- keeping it alive
 
-void GuiApp::start_keeper() {
-    if (keeper_running_) return;
+void GuiApp::start_keeper(bool oneshot) {
+    // A keeper started for "Vào game ngay" alone becomes the run's own.
+    if (keeper_running_) {
+        if (!oneshot) keeper_oneshot_ = false;
+        return;
+    }
     if (keeper_thread_.joinable()) keeper_thread_.join();
+    keeper_ui_.reset();                         // the watchdog starts afresh
+    keeper_oneshot_ = oneshot;
+    if (!oneshot) keeper_login_now_ = false;    // a key's request the last keeper never took
     keeper_stop_ = false;
     keeper_running_ = true;
     keeper_restarts_ = 0;
@@ -2950,15 +2960,20 @@ void GuiApp::keeper_loop() {
     bool said_found = false;        // the cold start's game was found up, and said so
 
     while (!keeper_stop_) {
-        const CrashWatch::Look seen = watch.look();
+        CrashWatch::Look seen = watch.look();
         {
             std::lock_guard<std::mutex> lock(worker_mutex_);
             keeper_state_ = seen.bad() ? CrashWatch::trouble_name(seen.what)
                                        : "the client is running and answering";
         }
 
-        const CrashWatch::Move move =
+        CrashWatch::Move move =
             CrashWatch::next_move(seen, seen_running, keeper_cold_start_.load());
+        // "Vào game ngay", and the watchdog for a game that runs with nobody
+        // in the world: see simple_keeper.cpp.
+        const KeeperWake wake = keeper_wake(move, watch, watch_settings, login, store, seen);
+        if (wake == KeeperWake::Quit) break;
+        if (wake == KeeperWake::Stalled) move = CrashWatch::Move::Restart;
         if (move == CrashWatch::Move::Watch || move == CrashWatch::Move::Follow) {
             seen_running = true;
             // BẮT ĐẦU was pressed with the game closed, and what was ticked
@@ -2995,7 +3010,8 @@ void GuiApp::keeper_loop() {
         if (!cold)
             alert("disconnect", alert_text::disconnect(seen.what, seen.code,
                                                        keeper_restarts_ < watch_settings.max_restarts &&
-                                                       elevated_ && login.unidentified().empty()));
+                                                       elevated_ && login.unidentified().empty(),
+                                                       seen.minutes));
 
         if (!cold && keeper_restarts_ >= watch_settings.max_restarts) {
             const std::string n = std::to_string(keeper_restarts_.load());
@@ -3007,10 +3023,7 @@ void GuiApp::keeper_loop() {
         }
 
         if (!cold) {
-            const char* what = seen.what == CrashWatch::Trouble::Gone ? "Game đã tắt"
-                             : seen.what == CrashWatch::Trouble::Hung ? "Game bị treo"
-                                                                      : "Game hiện bảng lỗi";
-            say_keeper_vi(std::string(what) + " — GoBot đóng game rồi vào lại sau " +
+            say_keeper_vi(CrashWatch::trouble_vi(seen) + " — GoBot đóng game rồi vào lại sau " +
                           std::to_string(watch_settings.cooldown_s) + " giây.");
             watch.shut_down(seen);
             for (int i = 0; i < watch_settings.cooldown_s * 2 && !keeper_stop_; ++i)
@@ -3108,6 +3121,7 @@ void GuiApp::keeper_loop() {
         say_keeper_vi(cold ? "Đã vào game. Đang theo dõi game."
                            : "Đã vào lại game. Đang theo dõi game.");
         keeper_reattach_ = true;
+        keeper_stall_restart();
     }
 
     {
@@ -3740,10 +3754,11 @@ void GuiApp::trash_loop() {
             extra += " " + std::to_string(r.failed) + " món không bỏ được.";
         if (r.doubtful > 0)
             extra += " " + std::to_string(r.doubtful) + " món giống nhưng không chắc, nên để lại.";
+        extra += trash_use_said_vi(r, look_only);       // "Dùng" (simple_trash_use.cpp)
         if (!r.trouble.empty())
             tell("Dừng: " + r.trouble + "." + extra);
         else if (look_only)
-            tell((r.matched == 0
+            tell((r.matched + r.use_matched == 0
                 ? std::string("Thử xong: không thấy món nào trong danh sách.")
                 : "Thử xong: thấy " + std::to_string(r.matched) + " ô sẽ bị bỏ. Không bỏ gì.") +
                  extra);
@@ -4416,6 +4431,9 @@ void GuiApp::chat_loop() {
                 else schedule.postpone(now, 30'000);
                 continue;
             }
+            // "Chỉ khi chưa có tổ đội": the party HUD looked at first, before
+            // anything is held or pressed (simple_chat_alone.cpp).
+            if (chat_alone_put_off(settings, index, store, schedule, now)) continue;
             if (chat_doubt_) {
                 // Somebody else's doubt, left by a worker that was stopped:
                 // nothing typed until the line is seen shut.

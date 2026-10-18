@@ -507,6 +507,8 @@ const std::vector<AlertEventInfo>& alert_events() {
         { "chat_stuck",     true,  true,  "Ô chat có thể đang mở" },
         { "chat_stopped",   false, true,  "Tự chat tự dừng" },
         { "quest_trouble",  true,  true,  "Làm nhiệm vụ nhanh gặp lỗi" },
+        { "potion_low",     false, true,  "Sắp hết bình" },
+        { "potion_out",     true,  true,  "Hết bình" },
         { "party_change",   false, false, "Tổ đội thay đổi" },
         { "test",           false, true,  nullptr },
     };
@@ -639,6 +641,17 @@ std::string gave_up(const std::string& reason) {
     return "GoBot ngừng tự vào lại game: " + reason + ". Cần người kiểm tra.";
 }
 
+/// A key's name as the alert may say it: what InputManager::key_name gives
+/// -- "1", "F2", "Numpad3" -- and nothing else. A name with anything else in
+/// it is not said at all.
+std::string plain_key(const std::string& key) {
+    if (key.empty() || key.size() > 12) return "?";
+    for (const char c : key)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != ' ' && c != '+' && c != '-')
+            return "?";
+    return key;
+}
+
 /// Each way a crossing can fail, in a few fixed words. Never AutoLogin's own
 /// advice, which names the launcher's path or another program's window.
 const char* crossing_reason(AutoLogin::Why why) {
@@ -684,7 +697,8 @@ bool plain_error_code(const std::string& code) {
     return code.size() <= 10 && all_digits(code);
 }
 
-std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool coming_back) {
+std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool coming_back,
+                       int minutes) {
     std::string s;
     switch (what) {
         case CrashWatch::Trouble::Hung:
@@ -693,6 +707,10 @@ std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool c
         case CrashWatch::Trouble::ErrorBox:
             s = plain_error_code(code) ? "Mất kết nối: game hiện bảng lỗi (mã " + code + ")."
                                        : std::string("Mất kết nối: game hiện bảng lỗi.");
+            break;
+        case CrashWatch::Trouble::Stalled:
+            s = "Mất kết nối: không thấy nhân vật trong game " + std::to_string(std::max(0, minutes)) +
+                " phút (game vẫn chạy).";
             break;
         default:
             s = "Mất kết nối: game đã tắt.";
@@ -751,6 +769,16 @@ std::string chat_stopped(int failures) {
 
 std::string quest_trouble(int times, const std::string& why) {
     return "Làm nhiệm vụ nhanh đã tự tắt: " + std::to_string(times) + " lần liền " + why + ".";
+}
+
+std::string potion_low(bool hp, const std::string& key, int count) {
+    return std::string("Sắp hết bình ") + (hp ? "HP" : "MP") + ": ô phím " + plain_key(key) + " còn " +
+           std::to_string(count) + " bình.";
+}
+
+std::string potion_out(bool hp, const std::string& key) {
+    return std::string("Hết bình ") + (hp ? "HP" : "MP") + " ở ô phím " + plain_key(key) +
+           " — GoBot vẫn bấm phím nhưng ô đã trống.";
 }
 
 std::string party_joined(const std::string& who, bool with_name) {

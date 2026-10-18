@@ -41,6 +41,10 @@ public:
         Gone,       ///< the process has exited
         Hung,       ///< the window is not answering
         ErrorBox,   ///< a message box is up, probably with a code in it
+        /// The client runs and answers, but nobody has been in the world for
+        /// minutes. Never one of look()'s: the keeper's watchdog, which looks
+        /// at the screen, says so (gobot/stall_watch.hpp).
+        Stalled,
     };
     static const char* trouble_name(Trouble t);
 
@@ -49,8 +53,14 @@ public:
         std::string detail;         ///< what to tell a person
         std::string code;           ///< the error code, when the text had one
         void*       dialog = nullptr;  ///< the box to dismiss, when there is one
+        int         minutes = 0;    ///< Stalled: how long nobody was in the world
         bool        bad() const { return what != Trouble::None; }
     };
+
+    /// The Vietnamese for what happened, for the simple screen: "Game đã
+    /// tắt", "Game bị treo", "Game hiện bảng lỗi", "Game không vào được thế
+    /// giới 5 phút".
+    static std::string trouble_vi(const Look& seen);
 
     struct Settings {
         /// The game, and the launcher that starts it. Both are ended on the

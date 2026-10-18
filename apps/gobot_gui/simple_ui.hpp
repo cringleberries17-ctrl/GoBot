@@ -99,6 +99,13 @@ inline constexpr bool kTrialAlerts = true;   ///< Thông báo
 inline constexpr bool kTrialBuffs  = true;   ///< Tự buff, seconds per key
 inline constexpr bool kTrialRevive = true;   ///< Tự hồi sinh, with a revive item
 inline constexpr bool kTrialInvite = true;   ///< Tự mời người chat từ khoá, at 1280x720
+inline constexpr bool kTrialHotkeys = true;  ///< Phím dọn ngay, phím vào game ngay
+inline constexpr bool kTrialPotions = true;  ///< Còn N bình, and its alerts
+inline constexpr bool kTrialPopups  = true;  ///< Tự đóng thông báo
+inline constexpr bool kTrialStall   = true;  ///< vào lại khi không thấy nhân vật
+inline constexpr bool kTrialPartyHud = true; ///< khung tổ đội: chỉ mời khi làm chủ, không mời khi đủ 6
+inline constexpr bool kTrialChatAlone = true; ///< Tự chat: câu chỉ gửi khi chưa có tổ đội
+inline constexpr bool kTrialUse     = true;  ///< Dọn rác: Dùng, đăng ký mảnh ghép
 
 inline constexpr const char* kTrialTabText =
     "Thử nghiệm: phần này chưa chạy trên game thật. Thử từng bước và ngồi xem; thấy lạ thì bấm F12.";

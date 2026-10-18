@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,9 @@ struct BagLayout {
 /// The bag's tabs, in the order the strip shows them.
 constexpr int kBagTabs = 5;
 const char* bag_tab_name(int tab);
+/// Tiêu Dùng, the tab of things that are used: the only one where anything is
+/// right-clicked.
+constexpr int kUseTab = 2;
 
 /// The bag as found in one frame.
 struct BagView {
@@ -102,6 +106,13 @@ struct BagView {
     /// -- covered by a dialog, say.
     int first_row = -1;
     int total_rows = -1;
+
+    /// Which tab the strip shows chosen, from 0: the client draws it darker
+    /// than the rest -- 92 to 99 of 255 against 115 to 123 for the others,
+    /// measured on the live client and on its own picture of the strip. -1
+    /// when no tab stands out like that. Nothing is right-clicked unless this
+    /// says Tiêu Dùng: on another tab a right-click equips what it lands on.
+    int selected_tab = -1;
     bool scroll_known() const { return first_row >= 0 && total_rows > 0; }
     bool at_top() const { return scroll_known() && first_row == 0; }
     bool at_bottom(const BagLayout& l) const {
@@ -288,9 +299,17 @@ struct CleanSettings {
     /// Catalog ids chosen beforehand, from [Items].
     std::vector<std::string> delete_ids;
     std::vector<std::string> drop_ids;
+    /// Fragments to register in Yêu Quái Bách Khoa, from [Items] use=. An id
+    /// that is on `delete_ids` as well is registered first, and what is left
+    /// of its stack deleted after -- in that pass only, and only once it has
+    /// been registered.
+    std::vector<std::string> use_ids;
 
     /// A bound on one pass, so a mistake costs a handful of items at most.
     int max_per_run = 40;
+    /// The same for registering, [Trash] max_uses_per_run: a registration
+    /// cannot be undone either.
+    int max_uses_per_run = 20;
 
     /// Click the item and then the target, instead of dragging it there.
     bool click_to_move = false;
@@ -315,6 +334,11 @@ struct TrashList {
     enum class Action {
         Delete,     ///< into the trash can: gone
         Drop,       ///< onto the ground, where anyone can pick it up
+        /// Right-clicked on Tiêu Dùng and its question confirmed: a fragment
+        /// registered in Yêu Quái Bách Khoa, which cannot be undone -- "một
+        /// khi đã đăng ký, bạn sẽ không thể lấy lại mảnh ghép đó", as GoC's
+        /// own page of the book says. GoC's "Sử dụng mảnh ghép".
+        Use,
     };
     static const char* folder(Action a);
 
@@ -352,6 +376,11 @@ struct TrashList {
         /// For an icon on the list only because it is drawn like one that was
         /// chosen: the one that was. Empty for what was chosen itself.
         std::string via;
+
+        /// A Use item that is on the delete list as well: once it has been
+        /// registered in a pass, the rest of it is deleted in that pass -- a
+        /// piece is registered once, and its copies are no more use.
+        bool then_delete = false;
     };
     std::vector<Item> items;
 
@@ -375,11 +404,12 @@ struct TrashList {
     void add_rivals(const ItemCatalog& catalog);
 
     /// The whole list a pass goes by: the pictures under `dir`, the ids in the
-    /// settings, and the rest of the catalog to tell them from.
+    /// settings, and the rest of the catalog to tell them from. An id chosen
+    /// both to use and to delete is one Use item with then_delete.
     void build(const std::string& dir, const CleanSettings& s, const ItemCatalog& catalog);
 
-    /// Load `dir`/delete/*.png and `dir`/drop/*.png. A folder that is not
-    /// there yet is an empty list.
+    /// Load `dir`/use/*.png, `dir`/delete/*.png and `dir`/drop/*.png, in that
+    /// order. A folder that is not there yet is an empty list.
     bool load(const std::string& dir, const BagLayout& l);
 
     /// Save a slot picture under `dir` and add it. Returns the file, or empty.
@@ -443,6 +473,13 @@ struct Dialog {
     ScreenRect box;                 ///< that box, when it has one
     float      words = 0.0f;        ///< how alike its words are to the picture's
 
+    /// The question a fragment's right-click brings up, to register it in
+    /// Yêu Quái Bách Khoa: its words match the picture of it (kRegisterDialog)
+    /// at 0.90, where they sit for these buttons. Never one of the bin's --
+    /// ours() is false for it -- and only true when that picture is there.
+    bool       registers = false;
+    float      register_words = 0.0f;
+
     bool ours() const { return kind >= 0; }
     int confirm_x() const { return pair.x + pair.w / 4; }    ///< Xác Nhận
     int cancel_x() const { return pair.x + pair.w * 3 / 4; } ///< Hủy Bỏ
@@ -453,6 +490,16 @@ struct Dialog {
 constexpr int kAskDialog = 0;       ///< "Bạn có thật sự muốn bỏ vào thùng rác không?"
 constexpr int kCountDialog = 1;     ///< "Vui lòng nhập số lượng cần xóa vào thùng rác."
 const char* dialog_name(int kind);
+
+/// The picture of the question a fragment's right-click brings up, under its
+/// name in templates\: the whole dialog, its words and its two buttons, cut
+/// from the live client. Not named in templates.ini and not shipped until it
+/// has been: no saved frame shows it. Until then nothing is registered --
+/// can_check(Use) is false -- and a fragment on the Dùng list is only said to
+/// be there. Its words are looked for where the bin's question has them, from
+/// its two buttons (both are the game's one dialog frame); a picture whose
+/// buttons are not at that place is not used.
+inline const char* const kRegisterDialog = "grabbed/fragment_register";
 
 /// Every dialog with the two buttons on screen, the bin's own marked.
 std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store);
@@ -471,8 +518,14 @@ bool bin_asking(const Frame& f, const TemplateStore& store);
 
 /// Whether the pictures to tell the dialogs for `a` apart are there. There is
 /// no picture of the drop question with its words, so nothing is dropped:
-/// a dialog that cannot be told from the others is not answered.
+/// a dialog that cannot be told from the others is not answered. For Use, the
+/// registration question's picture (kRegisterDialog), with words in it and its
+/// two buttons where the bin's question has them.
 bool can_check(const TemplateStore& store, TrashList::Action a);
+
+/// A message with only Xác Nhận under it is up, and no dialog with two buttons:
+/// what the client shows when it refuses something. Never answered.
+bool notice_up(const Frame& f, const TemplateStore& store);
 
 } // namespace bag
 
@@ -487,6 +540,14 @@ bool can_check(const TemplateStore& store, TrashList::Action a);
 /// before it counts. Anything unexpected and it backs out, answering Hủy Bỏ on
 /// the bin's dialog so the item goes back to the bag, rather than pressing on:
 /// this is the one feature that destroys things.
+///
+/// On Tiêu Dùng the items on the Dùng list -- fragments -- are registered in
+/// Yêu Quái Bách Khoa first, before anything there is deleted, as GoC does it:
+/// a right-click on the slot, and Xác Nhận on the question that brings up only
+/// when its words are the registration question's and nothing else is up; any
+/// other dialog gets Hủy Bỏ, a message with only Xác Nhận stops the pass with
+/// nothing pressed, and nothing is ever typed. A registration cannot be undone
+/// either, so it is held to the same rules as a deletion.
 class BagCleaner {
 public:
     using Grab = std::function<bool(Frame&)>;
@@ -528,11 +589,14 @@ public:
     /// Nothing is ever typed into the bin's quantity box, and it is never
     /// clicked: the number the game fills it with is the only one confirmed.
     /// So `key` is only ever the key that opens and closes the bag, pressed
-    /// only on a look at the screen that shows no dialog up.
+    /// only on a look at the screen that shows no dialog up. `right_click` is
+    /// only ever on a slot of Tiêu Dùng judged an item on the Dùng list, on a
+    /// clean screen.
     struct Hands {
         std::function<bool(int, int)>                click;
         std::function<bool(int, int, int, int)>      drag;
         std::function<bool(std::uint32_t)>           key;
+        std::function<bool(int, int)>                right_click;
     };
     void set_hands(Hands h) { hands_ = std::move(h); skip_focus_check_ = true; }
 
@@ -551,11 +615,15 @@ public:
 
     struct Result {
         bool ran = false;           ///< the bag was found and searched
-        int  matched = 0;           ///< listed items found, each slot once
+        int  matched = 0;           ///< listed items to throw away found, each slot once
         int  deleted = 0;
         int  dropped = 0;
-        int  failed = 0;            ///< tried and not got rid of
+        int  failed = 0;            ///< tried and not got rid of, or not registered
         int  doubtful = 0;          ///< looked like a listed item, not taken for one
+        /// Slots of items on the Dùng list found and not registered this pass
+        /// -- all of them on a look-only pass -- each slot once.
+        int  use_matched = 0;
+        int  used = 0;              ///< registered in Yêu Quái Bách Khoa
         std::string trouble;        ///< why it stopped early, in Vietnamese
 
         /// An item went towards the bin and was never seen given back or
@@ -650,6 +718,36 @@ private:
     /// dialog; then the answer. `count` is the stack count read off the slot.
     bool trash_one(const Frame& f, const BagView& v, int index, int count);
 
+    /// How a right-click on an item on the Dùng list came out.
+    enum class UseOutcome {
+        Used,           ///< its question confirmed, and its stack one less or gone
+        UsedUnasked,    ///< no question came up, and its stack went down: used all the same
+        Nothing,        ///< no question, and the stack as it was: it cannot be used
+        Refused,        ///< another dialog came up, answered Hủy Bỏ; or confirmed and not used
+        Notice,         ///< a message with only Xác Nhận came up: left for the player
+        Lost,           ///< the bag went out of sight, a dialog would not close, a stop
+        Untouched,      ///< nothing was pressed: the mouse could not reach the slot
+    };
+    struct UseResult {
+        UseOutcome  outcome = UseOutcome::Untouched;
+        std::string why;            ///< in Vietnamese, when it is not Used
+    };
+
+    /// Register the item in slot `index` of `v`: one right-click on it; then
+    /// its question, Xác Nhận only when its words are the registration's, on a
+    /// fresh look, with nothing else up; and whatever else comes up Hủy Bỏ.
+    /// Only gone, or one less in the stack, counts. `count` is the stack
+    /// count read off the slot.
+    UseResult use_one(const Frame& f, const BagView& v, int index, int count);
+
+    /// The use sweep of tab `tab` -- Tiêu Dùng -- before its delete sweep, as
+    /// GoC orders its pass: every slot judged an item on the Dùng list, one
+    /// at a time with a fresh look after each, at most max_uses_per_run.
+    /// `used` gets the list items registered, which no other slot of is
+    /// right-clicked again this pass; `no_use` those that came to nothing.
+    void use_sweep(int tab, BagView& v, Result& res, bool& stop, std::set<int>& used,
+                   std::set<int>& no_use, int& uses);
+
     /// Answer the bin's dialog that is up -- the question, or the quantity,
     /// confirmed only when the number the game put in the box is the stack's
     /// count -- and then whatever the bin asks next, up to one more. kDone
@@ -686,6 +784,7 @@ private:
     bool click(int x, int y);
     bool drag(int fx, int fy, int tx, int ty);
     bool press(std::uint32_t vk);
+    bool right_click(int x, int y);
 
     InputManager&        input_;
     const TemplateStore& store_;

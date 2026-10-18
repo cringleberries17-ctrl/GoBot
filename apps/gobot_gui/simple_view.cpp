@@ -806,6 +806,7 @@ void GuiApp::simple_jobs() {
             apply_macro_config();
         if (ImGui::IsItemDeactivatedAfterEdit()) simple_changed();
         hint(what);
+        simple_potion_stock(kind);      // "Còn N bình", simple_potions.cpp
         row_gap();
         ImGui::PopID();
     };
@@ -880,6 +881,7 @@ void GuiApp::simple_jobs() {
                                "Khi nhân vật chết, bấm Sử dụng vật phẩm hồi sinh rồi Xác Nhận. Thử "
                                "tối đa 3 lần; không được thì dừng bot. Không hồi sinh tại làng, "
                                "không dùng Cash.").c_str());
+    simple_popups_row();        // "Tự đóng thông báo", simple_popups.cpp
 
     ImGui::EndTable();
     end_card();
@@ -901,10 +903,9 @@ bool GuiApp::simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, b
             simple_listening_ = 0;
         } else if (const std::uint32_t got = pressed_vk()) {
             // The bot's own switches cannot double as game keys: pressing a
-            // potion key would stop the bot.
-            if (got == macro_config_.toggle_key || got == macro_config_.panic_key ||
-                got == hunt_config_.toggle_key) {
-                simple_note("Phím " + key_label(got) + " dùng để bật/tắt bot. Hãy chọn phím khác.");
+            // potion key would stop the bot (simple_hotkeys.cpp).
+            if (const std::string clash = own_key_clash_vi(got, vk); !clash.empty()) {
+                simple_note(clash);
             } else {
                 changed = got != vk;
                 vk = got;
@@ -983,7 +984,7 @@ void GuiApp::simple_start_block() {
     {
         const std::string keys = toggle + ": bật / tắt     ·     " +
                                  InputManager::key_name(macro_config_.panic_key) +
-                                 ": dừng ngay, thả hết phím";
+                                 ": dừng ngay, thả hết phím" + simple_hotkeys_line();
         ImGui::PushFont(nullptr, kSmall);
         const float w = ImGui::CalcTextSize(keys.c_str()).x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
@@ -1097,6 +1098,7 @@ void GuiApp::simple_start_block() {
     if (chat_running_ && !chat_oneshot_ && !chat_stop_)
         hint(("Tự chat: đang bật, đã gửi " + std::to_string(chat_sent_.load()) + " câu.").c_str());
     if (quest_running_ && !quest_oneshot_) hint("Làm nhiệm vụ nhanh: đang bật.");
+    if (popups_running()) hint(simple_popups_line().c_str());
     // Said here too, by the button: it is why the fighting has stopped.
     if (chat_doubt_)
         coloured(kWait, "Ô chat trong game có thể đang mở: đánh quái, bình và buff chờ đến khi ô chat "
@@ -1311,6 +1313,7 @@ void GuiApp::simple_start_jobs() {
     if (trash) start_trash();
     if (chat) start_chat();
     if (quest) start_quest();
+    start_popups();             // when "Tự đóng thông báo" is ticked
     if (unnamed)
         simple_note("Đã bắt đầu, nhưng chưa bật Tự đánh quái: chưa gõ tên nhân vật.", 12000);
     else
@@ -1330,6 +1333,7 @@ void GuiApp::simple_stop() {
     stop_party();
     stop_revive();
     stop_quest();
+    stop_popups();
     // Not said over the word that the bin's dialog may still be open.
     const bool bin_note = stop_trash();
     stop_keeper();
@@ -1541,6 +1545,7 @@ void GuiApp::simple_party_tab() {
     hint(simple_ui::trial_hint(simple_ui::kTrialInvite,
                                "Ai chat đúng từ này, đứng riêng chứ không dính vào chữ khác, sẽ "
                                "được mời vào tổ đội.").c_str());
+    simple_party_leader_option();       // "Chỉ mời khi đang làm chủ tổ đội" (simple_party.cpp)
     if (ImGui::Checkbox("Chỉ mời người có tên trong danh sách:", &simple_party_.by_list))
         put_bool("party_by_list", simple_party_.by_list);
     if (simple_party_.by_list) {
@@ -1579,6 +1584,7 @@ void GuiApp::simple_party_tab() {
         coloured(kDim, "Sẽ chạy khi bấm BẮT ĐẦU.");
     else
         coloured(kDim, "Đang tắt.");
+    simple_party_hud_line();            // "Tổ đội: …" and its "Thử xem" (simple_party.cpp)
     std::vector<std::string> lines;
     {
         std::lock_guard<std::mutex> lock(worker_mutex_);
@@ -1619,7 +1625,8 @@ void GuiApp::simple_save_ids() {
     };
     const std::string cfg = exe_relative("configs/trash.ini");
     if (!IniFile::set_in_place(cfg, "Items", "delete", join(simple_clean_.delete_ids)) ||
-        !IniFile::set_in_place(cfg, "Items", "drop", join(simple_clean_.drop_ids)))
+        !IniFile::set_in_place(cfg, "Items", "drop", join(simple_clean_.drop_ids)) ||
+        !IniFile::set_in_place(cfg, "Items", "use", join(simple_clean_.use_ids)))
         simple_note("Không lưu được configs/trash.ini.", 8000);
 }
 
@@ -1642,6 +1649,7 @@ void GuiApp::simple_trash_tab() {
     const BagLayout& layout = simple_clean_.layout;
     const ImU32 kDeleteMark = ImGui::GetColorU32(kBad);
     const ImU32 kDropMark = ImGui::GetColorU32(kWait);
+    const ImU32 kUseMark = ImGui::GetColorU32(kGood);       // Dùng: registered (simple_trash_use.cpp)
 
     // ---- when ----
     if (!begin_card("##trash")) { end_card(); return; }
@@ -1702,9 +1710,9 @@ void GuiApp::simple_trash_tab() {
         hint("Không tìm thấy hình các món đồ của game.");
     } else {
         hint("Bấm vào món muốn bỏ. Viền đỏ: bỏ vào thùng rác, mất hẳn. Viền vàng: vứt xuống "
-             "đất. Không cần món đó đang có trong túi. Món được nhận theo hình vẽ, không theo "
-             "màu: mảnh ghép trong túi đổi màu liên tục, và món cùng hình khác màu (viền đỏ "
-             "mảnh) cũng bị xoá theo.");
+             "đất. Viền xanh: dùng (đăng ký mảnh ghép). Không cần món đó đang có trong túi. Món "
+             "được nhận theo hình vẽ, không theo màu: mảnh ghép trong túi đổi màu liên tục, và "
+             "món cùng hình khác màu (viền đỏ mảnh) cũng bị xoá theo.");
         for (const auto& group : simple_catalog_.groups) {
             ImGui::PushFont(nullptr, kSmall);
             ImGui::PushStyleColor(ImGuiCol_Text, kDim);
@@ -1727,6 +1735,9 @@ void GuiApp::simple_trash_tab() {
                 const bool drop = std::find(simple_clean_.drop_ids.begin(),
                                             simple_clean_.drop_ids.end(), e.id) !=
                                   simple_clean_.drop_ids.end();
+                const bool use = std::find(simple_clean_.use_ids.begin(),
+                                           simple_clean_.use_ids.end(), e.id) !=
+                                 simple_clean_.use_ids.end();
                 // On the list without being ticked: drawn like a ticked one.
                 std::string via;
                 for (const auto& item : simple_trash_.items)
@@ -1734,17 +1745,27 @@ void GuiApp::simple_trash_tab() {
                         item.action == TrashList::Action::Delete)
                         via = item.via;
                 const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-                if (del)       ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 3.0f);
+                if (use) {
+                    // Green: registered; with the red inside it, the rest deleted after.
+                    ImGui::GetWindowDrawList()->AddRect(a, b, kUseMark, 0, 0, 3.0f);
+                    if (del)
+                        ImGui::GetWindowDrawList()->AddRect(ImVec2(a.x + 3, a.y + 3), ImVec2(b.x - 3, b.y - 3),
+                                                            kDeleteMark, 0, 0, 2.0f);
+                }
+                else if (del)  ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 3.0f);
                 else if (drop) ImGui::GetWindowDrawList()->AddRect(a, b, kDropMark, 0, 0, 3.0f);
                 else if (!via.empty())
                     ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 1.0f);
                 else if (ImGui::IsItemHovered())
                     ImGui::GetWindowDrawList()->AddRect(a, b, ImGui::GetColorU32(kDim), 0, 0, 1.0f);
-                if (!del && !drop && !via.empty())
+                if (!del && !drop && !use && !via.empty())
                     ImGui::SetItemTooltip("Cũng sẽ bị xoá: cùng hình với %s, khác màu. Bấm để xem.",
                                           via.c_str());
                 else
-                    ImGui::SetItemTooltip("%s", del  ? "Sẽ bỏ vào thùng rác. Bấm để đổi."
+                    ImGui::SetItemTooltip("%s", use && del ? "Sẽ đăng ký vào Yêu Quái Bách Khoa, rồi bỏ phần còn "
+                                                             "lại vào thùng rác. Bấm để đổi."
+                                              : use  ? "Sẽ đăng ký vào Yêu Quái Bách Khoa. Bấm để đổi."
+                                              : del  ? "Sẽ bỏ vào thùng rác. Bấm để đổi."
                                               : drop ? "Sẽ vứt xuống đất. Bấm để đổi."
                                                      : "Bấm để chọn bỏ món này.");
                 if (ImGui::IsItemClicked()) {
@@ -1790,8 +1811,10 @@ void GuiApp::simple_trash_tab() {
                     const auto set = [&](int how) {     // 0 keep, 1 delete, 2 drop
                         auto& d = simple_clean_.delete_ids;
                         auto& p = simple_clean_.drop_ids;
+                        auto& u = simple_clean_.use_ids;
                         d.erase(std::remove(d.begin(), d.end(), simple_pick_id_), d.end());
                         p.erase(std::remove(p.begin(), p.end(), simple_pick_id_), p.end());
+                        u.erase(std::remove(u.begin(), u.end(), simple_pick_id_), u.end());
                         if (how == 1) d.push_back(simple_pick_id_);
                         if (how == 2) p.push_back(simple_pick_id_);
                         simple_save_ids();
@@ -1800,14 +1823,15 @@ void GuiApp::simple_trash_tab() {
                             simple_note("Cũng sẽ xoá: " + kin + " (cùng hình, khác màu).", 12000);
                         ImGui::CloseCurrentPopup();
                     };
-                    if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)", del)) set(1);
+                    if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)", del && !use)) set(1);
                     // Not offered: GoBot has no picture of the drop question
                     // with its words, and answers no dialog it cannot tell
                     // from the others.
                     ImGui::Selectable("Vứt xuống đất (chưa dùng được)", drop,
                                       ImGuiSelectableFlags_Disabled);
+                    simple_use_options(e.id, group.folder.c_str());     // fragments (simple_trash_use.cpp)
                     ImGui::Separator();
-                    if (ImGui::Selectable("Không bỏ món này", !del && !drop)) set(0);
+                    if (ImGui::Selectable("Không bỏ món này", !del && !drop && !use)) set(0);
                     ImGui::PopTextWrapPos();
                     ImGui::EndPopup();
                 }
@@ -1849,11 +1873,12 @@ void GuiApp::simple_trash_tab() {
             draw_frame_region(item.shown, 0, 0, item.shown.width, item.shown.height, 1.5f,
                               "##thumb");
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+            const bool used = item.action == TrashList::Action::Use;
             ImGui::GetWindowDrawList()->AddRect(
-                a, b, item.action == TrashList::Action::Delete ? kDeleteMark : kDropMark,
+                a, b, used ? kUseMark : item.action == TrashList::Action::Delete ? kDeleteMark : kDropMark,
                 0, 0, 2.0f);
             ImGui::PushFont(nullptr, kSmall);
-            ImGui::TextUnformatted(item.action == TrashList::Action::Delete ? "Xoá" : "Vứt");
+            ImGui::TextUnformatted(used ? "Dùng" : item.action == TrashList::Action::Delete ? "Xoá" : "Vứt");
             ImGui::SameLine();
             if (ImGui::SmallButton("×")) remove = static_cast<int>(i);
             ImGui::PopFont();
@@ -1917,7 +1942,11 @@ void GuiApp::simple_trash_tab() {
             const int listed = i < simple_bag_match_.size() ? simple_bag_match_[i] : -1;
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             if (listed >= 0)
-                ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 3.0f);
+                ImGui::GetWindowDrawList()->AddRect(
+                    a, b,
+                    simple_trash_.items[static_cast<std::size_t>(listed)].action == TrashList::Action::Use
+                        ? kUseMark : kDeleteMark,
+                    0, 0, 3.0f);
             else if (!empty && ImGui::IsItemHovered())
                 ImGui::GetWindowDrawList()->AddRect(a, b, kDropMark, 0, 0, 2.0f);
             if (!empty && listed < 0 && ImGui::IsItemClicked()) {
@@ -1950,15 +1979,18 @@ void GuiApp::simple_trash_tab() {
                 if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)")) add(TrashList::Action::Delete);
                 ImGui::Selectable("Vứt xuống đất (chưa dùng được)", false,
                                   ImGuiSelectableFlags_Disabled);
+                // On Tiêu Dùng only (simple_trash_use.cpp).
+                if (simple_pick_slot_ >= 0 && static_cast<std::size_t>(simple_pick_slot_) < slots.size())
+                    simple_use_cut_option(slots[static_cast<std::size_t>(simple_pick_slot_)]);
                 ImGui::Separator();
                 if (ImGui::Selectable("Thôi")) ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
             ImGui::PopID();
         }
-        hint("Ô viền đỏ là món sẽ bị bỏ, dù màu khác với hình đã chọn. Món trông giống món đã "
-             "chọn mà cũng giống cả một món khác hình chưa chọn thì không bị bỏ: bấm Thử tìm "
-             "để xem.");
+        hint("Ô viền đỏ là món sẽ bị bỏ, dù màu khác với hình đã chọn; ô viền xanh là món sẽ dùng. "
+             "Món trông giống món đã chọn mà cũng giống cả một món khác hình chưa chọn thì không bị "
+             "bỏ: bấm Thử tìm để xem.");
     }
     end_card();
 
@@ -1973,6 +2005,8 @@ void GuiApp::simple_trash_tab() {
     ImGui::SameLine();
     if (ImGui::Button("Dọn ngay")) request_trash(false);
     ImGui::EndDisabled();
+    ImGui::SameLine(0, 18);
+    simple_hotkey_box(true);
     if (chat_open)
         coloured(kWait, "Ô chat trong game có thể đang mở: chưa dọn rác được cho đến khi ô chat đóng "
                         "(xem thẻ Tự chat).");
@@ -2045,11 +2079,8 @@ void GuiApp::simple_chat_tab() {
     label("Các câu sẽ gửi (mỗi dòng một câu, tối đa 10 câu)");
     ImGui::InputTextMultiline("##chatlines", simple_chat_lines_, sizeof simple_chat_lines_,
                               ImVec2(-1, ImGui::GetTextLineHeightWithSpacing() * 6.5f));
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
-        simple_chat_.lines = ChatSettings::split_lines(simple_chat_lines_);
-        if (!ChatSettings::save_lines(cfg, simple_chat_.lines))
-            simple_note("Không lưu được configs/chat.ini.", 8000);
-    }
+    // Each line keeps its "Chỉ khi chưa có tổ đội" by its words (simple_chat_alone.cpp).
+    if (ImGui::IsItemDeactivatedAfterEdit()) simple_chat_save_lines(cfg);
 
     // What each line will come out as, worked out from the box as it is now.
     {
@@ -2086,6 +2117,7 @@ void GuiApp::simple_chat_tab() {
             } else {
                 coloured(kWait, (head + t.typed + "   (" + what + ")").c_str());
             }
+            simple_chat_alone_tick(lines, i);
         }
         if (written > ChatSettings::kMaxLines)
             coloured(kWait, ("Chỉ dùng " + std::to_string(ChatSettings::kMaxLines) +
@@ -2177,7 +2209,7 @@ void GuiApp::simple_chat_tab() {
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("Gửi câu đầu tiên một lần, đúng các bước như khi chạy: đưa game lên "
                           "trước, mở ô chat, gõ, gửi.\nHai câu, kể cả câu gửi thử, luôn cách nhau ít "
-                          "nhất 30 giây.");
+                          "nhất 30 giây.\nCâu đầu được gửi thử cả khi có đánh dấu \"Chỉ khi chưa có tổ đội\".");
     hint("Khi một bước không được, GoBot giữ lại ảnh màn hình lúc đó trong thư mục chat_debug.");
 
     // The chat line maybe left open, first: it is why nothing else moves.
@@ -2325,6 +2357,8 @@ void GuiApp::simple_login_tab() {
          "nhập hay mật khẩu.");
     hint("Game đang tắt? Bật ô này rồi bấm BẮT ĐẦU: GoBot mở game và vào nhân vật trước, rồi "
          "mới chạy đánh quái, bình và buff.");
+    simple_stall_option();
+    simple_hotkey_box(false);
 
     // Lines up the boxes after their names.
     const float field = ImGui::GetCursorPosX() + 150.0f;

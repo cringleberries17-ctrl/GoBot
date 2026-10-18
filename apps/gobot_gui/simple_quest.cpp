@@ -65,17 +65,24 @@ DWORD last_input() {
     return GetLastInputInfo(&info) ? info.dwTime : 0;
 }
 
-/// GoBot's own switches -- the start/stop, panic and hunting keys -- as the
-/// window's thread has them, for the worker to check the quest key against.
-void set_own_keys(std::atomic<std::uint32_t> (&keys)[3], const MacroConfig& macro,
-                  const HunterConfig& hunt) {
+/// GoBot's own switches -- the start/stop, panic and hunting keys, and the
+/// two one-job keys, "Dọn túi ngay" and "Vào game ngay" -- as the window's
+/// thread has them, for the worker to check the quest key against.
+constexpr int kOwnKeys = 5;
+
+void set_own_keys(std::atomic<std::uint32_t> (&keys)[kOwnKeys], const MacroConfig& macro,
+                  const HunterConfig& hunt, const HotkeyConfig& hot) {
     keys[0] = macro.toggle_key;
     keys[1] = macro.panic_key;
     keys[2] = hunt.toggle_key;
+    keys[3] = hot.trash_now;
+    keys[4] = hot.login_now;
 }
 
-std::vector<std::uint32_t> own_keys_of(const std::atomic<std::uint32_t> (&keys)[3]) {
-    return { keys[0].load(), keys[1].load(), keys[2].load() };
+std::vector<std::uint32_t> own_keys_of(const std::atomic<std::uint32_t> (&keys)[kOwnKeys]) {
+    std::vector<std::uint32_t> out;
+    for (const auto& k : keys) out.push_back(k.load());
+    return out;
 }
 
 } // namespace
@@ -106,10 +113,10 @@ struct GuiApp::QuestUi {
     /// run, and it is kept here from one worker to the next: a stop in the
     /// middle of a round ends the worker with the window open.
     std::atomic<bool> ours_open{false};
-    /// GoBot's own switches -- start/stop, panic, hunting -- which the quest
-    /// key must not be. Copied from the window's thread, whose settings they
-    /// are, for the worker to read.
-    std::atomic<std::uint32_t> own_keys[3] = {};
+    /// GoBot's own switches -- start/stop, panic, hunting, the one-job keys --
+    /// which the quest key must not be. Copied from the window's thread, whose
+    /// settings they are, for the worker to read.
+    std::atomic<std::uint32_t> own_keys[kOwnKeys] = {};
 };
 
 void GuiApp::QuestUiFree::operator()(QuestUi* ui) const { delete ui; }
@@ -125,7 +132,7 @@ void GuiApp::say_quest(const std::string& line) {
 
 void GuiApp::start_quest() {
     if (!quest_ui_) quest_ui_.reset(new QuestUi);
-    set_own_keys(quest_ui_->own_keys, macro_config_, hunt_config_);
+    set_own_keys(quest_ui_->own_keys, macro_config_, hunt_config_, hotkeys_);
     {
         // A worker here already for a button -- a look, or one round -- becomes
         // this run, started from the first round's wait. Under the lock the
@@ -153,7 +160,7 @@ void GuiApp::start_quest() {
 
 void GuiApp::request_quest(bool look_only) {
     if (!quest_ui_) quest_ui_.reset(new QuestUi);
-    set_own_keys(quest_ui_->own_keys, macro_config_, hunt_config_);
+    set_own_keys(quest_ui_->own_keys, macro_config_, hunt_config_, hotkeys_);
     {
         std::lock_guard<std::mutex> lock(quest_life_mutex_);
         if (quest_running_ && !quest_stop_) {
@@ -476,7 +483,7 @@ void GuiApp::simple_quest_tab() {
     if (!quest_ui_) quest_ui_.reset(new QuestUi);
     QuestUi& ui = *quest_ui_;
     // Kept fresh for a run under way: they may have been changed meanwhile.
-    set_own_keys(ui.own_keys, macro_config_, hunt_config_);
+    set_own_keys(ui.own_keys, macro_config_, hunt_config_, hotkeys_);
     const std::string cfg = exe_relative("configs/quest.ini");
     if (!ui.loaded) {
         ui.loaded = true;

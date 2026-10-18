@@ -10912,6 +10912,20 @@ void test_protocol_handler() {
 void test_alerts(void (*check)(bool, const std::string&), void (*section)(const char*));
 // Quick quest's, in quest_test.cpp, the same way.
 void test_quest(void (*check)(bool, const std::string&), void (*section)(const char*));
+// GoBot's own keys', in hotkey_test.cpp.
+void test_hotkeys(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Potion stock's, in potion_test.cpp.
+void test_potions(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The popup closer's, in popup_test.cpp.
+void test_popups(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The keeper's watchdog's, in stall_test.cpp.
+void test_stall(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The party HUD's, in party_hud_test.cpp.
+void test_party_hud(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Tự chat's "Chỉ khi chưa có tổ đội", in chat_alone_test.cpp.
+void test_chat_alone(void (*check)(bool, const std::string&), void (*section)(const char*));
+// "Dùng" in Dọn rác, in use_test.cpp.
+void test_use(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     Logger::instance().set_level(LogLevel::Error);   // keep test output readable
@@ -10976,6 +10990,13 @@ int main() {
     test_auto_chat();
     test_alerts(check, section);
     test_quest(check, section);
+    test_hotkeys(check, section);
+    test_potions(check, section);
+    test_popups(check, section);
+    test_stall(check, section);
+    test_party_hud(check, section);
+    test_chat_alone(check, section);
+    test_use(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();

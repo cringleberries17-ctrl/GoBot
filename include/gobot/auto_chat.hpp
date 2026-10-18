@@ -112,6 +112,16 @@ struct ChatSettings {
     std::string test_line = "test";
     /// What to say, as written, in order. Empty lines are not kept.
     std::vector<std::string> lines;
+    /// For each line, whether it is ticked "Chỉ khi chưa có tổ đội": not said
+    /// while the player is in a party -- GoC's "Party Request: only send when
+    /// NOT in a party", for the advert that asks people to join. As long as
+    /// `lines`, from [Lines] lineN_only_alone=true beside lineN; a line without
+    /// that key is not ticked.
+    std::vector<bool> only_alone;
+    /// Whether line `i` is ticked so; false for a line that is not there.
+    bool alone_only(int i) const {
+        return i >= 0 && static_cast<std::size_t>(i) < only_alone.size() && only_alone[static_cast<std::size_t>(i)];
+    }
 
     static constexpr int kMinInterval = 30;     ///< anything shorter is spam
     static constexpr int kMaxInterval = 3600;
@@ -137,8 +147,20 @@ struct ChatSettings {
                          const std::string& value);
     /// Put these lines in [Lines], in place of what was there, in one write:
     /// the worker reads the file while the tab writes it, and must never find
-    /// half a list.
+    /// half a list. None of them ticked "Chỉ khi chưa có tổ đội".
     static bool save_lines(const std::string& path, const std::vector<std::string>& lines);
+    /// The same, with each line's tick from `only_alone` -- lineN_only_alone=true
+    /// beside each ticked lineN, in the same write, so a tick never lands on
+    /// another line. A line with no tick given is not ticked.
+    static bool save_lines(const std::string& path, const std::vector<std::string>& lines,
+                           const std::vector<bool>& only_alone);
+    /// The ticks for `lines`, as the box was edited from `before` and its
+    /// ticks: a line whose words are the same keeps its tick wherever it moved;
+    /// a new line, or one whose words changed, starts unticked. Two lines of
+    /// the same words take that text's ticks in turn, its own place first.
+    static std::vector<bool> carry_ticks(const std::vector<std::string>& before,
+                                         const std::vector<bool>& before_ticks,
+                                         const std::vector<std::string>& lines);
 
     /// A box's text, one line each, as the lines to keep: trimmed, the empty
     /// ones left out, at most kMaxLines.
@@ -234,6 +256,26 @@ private:
     int           sent_ = 0;
     int           failures_ = 0;
 };
+
+/// What Tự chat does with the line whose turn it is when that line is ticked
+/// "Chỉ khi chưa có tổ đội" (ChatSettings::only_alone) -- GoC's party-request
+/// lines, which its queue passes over in a party ("Skipping party-request
+/// message #N (already in party)") and goes on to the next.
+enum class AloneTurn {
+    Send,       ///< not ticked, or the party HUD showed the player alone: as any line
+    Skip,       ///< in a party, or the HUD unread: the next line's turn
+    Wait,       ///< and no other line could go instead: this one again a minute on
+};
+/// `alone`: the party HUD showed the player alone. A party seen is not alone,
+/// and neither is a HUD that could not be read: a missed advert is better
+/// than one sent in a party. `typeable[i]`: line i has something left to type
+/// once prepare_chat is done with it; one with nothing is passed over anyway,
+/// and is no line to go instead.
+AloneTurn alone_turn(const std::vector<bool>& only_alone, const std::vector<bool>& typeable, int index,
+                     bool alone);
+/// How long a ticked line waits when every line that could go is ticked and
+/// the player is in a party, so the HUD is not read every second.
+constexpr std::uint64_t kAloneWaitMs = 60'000;
 
 /// What the chat bar shows.
 enum class ChatBarState { Unknown, Closed, Open };
