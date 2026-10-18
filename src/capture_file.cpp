@@ -27,11 +27,20 @@ bool half_from_name(const std::string& path, Half& out) {
     return false;
 }
 
-Reading extract(const std::string& path,
-                const FramingSpec& server,
-                const FramingSpec& client,
-                std::uint16_t opcode,
-                std::vector<Bytes>& out) {
+bool udp_from_name(const std::string& path) {
+    return ends_with(path, ".udp.s2c") || ends_with(path, ".udp.c2s");
+}
+
+FrameScanResult tile(const Bytes& recording, const FramingSpec& spec, Direction dir) {
+    // Unlocked: a recording may begin part-way through a frame, and the
+    // scanner must slide past that rather than wait for it.
+    return extract_frames(spec, recording.data(), recording.size(), dir, 0, false);
+}
+
+Reading read_all(const std::string& path,
+                 const FramingSpec& server,
+                 const FramingSpec& client,
+                 std::vector<GamePacket>& out) {
     Reading r;
 
     std::ifstream in(utf8_to_wide(path).c_str(), std::ios::binary);
@@ -65,10 +74,12 @@ Reading extract(const std::string& path,
         best = s; have_best = true; best_half = Half::Server;
 
         if (have_client) {
+            // Frames off the stream decide it, not what unwrapping adds: only
+            // one of the two specs looks inside wrappers at all.
             const FrameScanResult c = extract_frames(client, buf.data(), buf.size(),
                                                      Direction::ToServer, 0, false);
-            if (c.packets.size() > best.packets.size() ||
-                (c.packets.size() == best.packets.size() && c.resyncs < best.resyncs)) {
+            if (c.outer_frames() > best.outer_frames() ||
+                (c.outer_frames() == best.outer_frames() && c.resyncs < best.resyncs)) {
                 best = c; best_half = Half::Client;
             }
         }
@@ -77,11 +88,35 @@ Reading extract(const std::string& path,
         r.half = best_half;
     }
 
-    r.frames = scan.packets.size();
+    r.frames  = scan.outer_frames();
     r.resyncs = scan.resyncs;
-    for (const GamePacket& p : scan.packets)
-        if (p.opcode == opcode) out.push_back(p.payload);
+    r.inner   = scan.unwrap.inner;
+    r.unwrap  = scan.unwrap;
+    // Where they came from, which the bytes cannot say: a tool listing them
+    // labels them by it (where_found), as it labels them live.
+    const bool udp = udp_from_name(path);
+    for (GamePacket& p : scan.packets) {
+        p.udp = udp;
+        out.push_back(std::move(p));
+    }
     r.ok = true;
+    return r;
+}
+
+Reading extract(const std::string& path,
+                const FramingSpec& server,
+                const FramingSpec& client,
+                std::uint16_t opcode,
+                std::vector<Bytes>& out,
+                bool inner) {
+    std::vector<GamePacket> frames;
+    Reading r = read_all(path, server, client, frames);
+    if (!r.ok) return r;
+    for (const GamePacket& p : frames) {
+        if (p.opcode != opcode) continue;
+        if ((p.depth > 0) == inner) out.push_back(p.payload);
+        else                        ++r.other_kind;
+    }
     return r;
 }
 

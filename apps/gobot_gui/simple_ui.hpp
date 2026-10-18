@@ -60,20 +60,29 @@ inline float mark_indent() {
 
 /// A card: a bordered panel sized to what is in it, a shade lighter than the
 /// window so the cards read as separate steps.
+///
+/// Measured on every frame, in sight or scrolled out of it: a card ImGui
+/// skips out of sight makes BeginChild() return false, and the tab stopping
+/// there loses every card under it, which pulls the scroll back up. The width
+/// the card's controls get by default is kept as it was. simple_view.cpp's own
+/// copy says more.
 inline bool begin_card(const char* id) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 12));
     const bool open = ImGui::BeginChild(id, ImVec2(0, 0),
                                         ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY |
+                                        ImGuiChildFlags_AlwaysAutoResize |
                                         ImGuiChildFlags_AlwaysUseWindowPadding);
     // The panel's own colour is for the panel; anything nested inside it
     // would otherwise paint it again.
     ImGui::PopStyleColor();
+    ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.65f);
     return open;
 }
 
 inline void end_card() {
+    ImGui::PopItemWidth();
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::Dummy(ImVec2(0, 6));

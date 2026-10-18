@@ -1,5 +1,6 @@
 #include "gobot/packet_capture.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/net_discovery.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -20,6 +21,8 @@ constexpr std::size_t kEthernetHeaderLen = 14;
 constexpr std::uint16_t kEtherTypeIPv4   = 0x0800;
 constexpr std::uint16_t kEtherTypeVlan   = 0x8100;
 constexpr std::uint8_t  kProtoTcp        = 6;
+constexpr std::uint8_t  kProtoUdp        = 17;
+constexpr std::size_t   kUdpHeaderLen    = 8;
 
 std::uint16_t be16(const std::uint8_t* p) {
     return static_cast<std::uint16_t>((p[0] << 8) | p[1]);
@@ -32,13 +35,6 @@ std::uint32_t be32(const std::uint8_t* p) {
             static_cast<std::uint32_t>(p[3]);
 }
 
-std::string ip_to_string(std::uint32_t ip) {
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-                  (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-    return buf;
-}
-
 bool valid_ipv4(const std::string& s) {
     in_addr addr{};
     return !s.empty() && inet_pton(AF_INET, s.c_str(), &addr) == 1;
@@ -46,7 +42,15 @@ bool valid_ipv4(const std::string& s) {
 
 } // namespace
 
-PacketCapture::PacketCapture() = default;
+PacketCapture::PacketCapture() {
+    // Set once, here rather than in start(), so that replay() takes the same
+    // path through the reassembler as a live capture.
+    reassembler_.set_callback([this](const FlowKey& key, Direction dir,
+                                     const std::uint8_t* data, std::size_t size,
+                                     std::uint64_t ts) {
+        return on_stream(key, dir, data, size, ts);
+    });
+}
 
 PacketCapture::~PacketCapture() {
     stop();
@@ -195,11 +199,19 @@ void PacketCapture::set_raw_tap(RawStreamTap tap) {
     raw_tap_ = std::move(tap);
 }
 
-std::string PacketCapture::build_filter(const CaptureConfig& cfg) const {
+void PacketCapture::set_raw_udp_tap(RawStreamTap tap) {
+    std::lock_guard<std::mutex> lock(tap_mutex_);
+    raw_udp_tap_ = std::move(tap);
+}
+
+std::string PacketCapture::build_filter(const CaptureConfig& cfg) {
     if (!cfg.bpf_filter.empty()) return cfg.bpf_filter;
 
+    // UDP as well as TCP, on the same address and ports: GoC's own filter is
+    // "(tcp or udp) and port(range) ...", and until a recording says whether
+    // the game sends anything over UDP, leaving it out is a guess.
     std::ostringstream f;
-    f << "tcp";
+    f << "(tcp or udp)";
 
     const bool have_start = valid_ipv4(cfg.server_ip_start);
     const bool have_end   = valid_ipv4(cfg.server_ip_end);
@@ -221,6 +233,28 @@ std::string PacketCapture::build_filter(const CaptureConfig& cfg) const {
         }
     }
     return f.str();
+}
+
+bool PacketCapture::captures_everything(const CaptureConfig& cfg) {
+    // A filter of the caller's own is taken as meant, whatever it says.
+    if (!cfg.bpf_filter.empty()) return false;
+    // Otherwise whatever narrows the filter -- an address, a port -- is there
+    // in what build_filter makes of it, and an address that is not one is
+    // left out of it, so it narrows nothing either.
+    return build_filter(cfg) == build_filter(CaptureConfig{});
+}
+
+bool PacketCapture::set_local_addresses(const std::vector<std::string>& ipv4) {
+    if (running_.load()) {
+        GB_WARN("PacketCapture::set_local_addresses refused: a live capture is running");
+        return false;
+    }
+    local_ips_.clear();
+    for (const std::string& s : ipv4) {
+        in_addr a{};
+        if (inet_pton(AF_INET, s.c_str(), &a) == 1) local_ips_.push_back(ntohl(a.S_un.S_addr));
+    }
+    return true;
 }
 
 // -------------------------------------------------------------- lifecycle
@@ -310,13 +344,16 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
         for (const auto& s : servers)
             GB_INFO("Known server endpoint: %s", s.to_string().c_str());
     }
+    servers_ = servers;
     reassembler_.set_servers(std::move(servers));
 
-    reassembler_.set_callback([this](const FlowKey& key, Direction dir,
-                                     const std::uint8_t* data, std::size_t size,
-                                     std::uint64_t ts) {
-        return on_stream(key, dir, data, size, ts);
-    });
+    // This machine's own addresses, read once per capture. The game's UDP can
+    // go to a host none of its TCP connections does, and then they are what
+    // says which end of a datagram is the game's (datagram_direction).
+    set_local_addresses(local_ipv4_addresses());
+    if (local_ips_.empty())
+        GB_WARN("Could not read this machine's IPv4 addresses: a datagram whose other end is "
+                "not a known server is filed by its port numbers alone");
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -429,19 +466,55 @@ void PacketCapture::on_raw_packet(const std::uint8_t* data, std::size_t caplen,
     const std::uint8_t* ip = data + offset;
     const std::uint8_t  ihl = static_cast<std::uint8_t>((ip[0] & 0x0F) * 4);
     if (ihl < 20 || caplen < offset + ihl) return;
-    if (ip[9] != kProtoTcp) return;
+    const std::uint8_t proto = ip[9];
+    if (proto != kProtoTcp && proto != kProtoUdp) return;
 
     const std::uint16_t total_len = be16(ip + 2);
     if (total_len < ihl) return;
 
+    const std::uint16_t frag = be16(ip + 6);
+    const std::uint32_t src_ip = be32(ip + 12);
+    const std::uint32_t dst_ip = be32(ip + 16);
+
+    if (proto == kProtoUdp) {
+        // A datagram that IP split up would have to be put back together
+        // first: one piece is not a run of whole frames. Nothing here does
+        // that, so a piece is counted and left, which says whether it matters.
+        if ((frag & 0x3FFF) != 0) {          // more-fragments flag, or an offset
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            ++stats_.udp_fragments;
+            return;
+        }
+        const std::size_t udp_off = offset + ihl;
+        if (caplen < udp_off + kUdpHeaderLen) return;
+        const std::uint8_t* udp = data + udp_off;
+        const std::uint16_t udp_len = be16(udp + 4);
+        const std::size_t ip_payload = static_cast<std::size_t>(total_len) - ihl;
+        if (udp_len < kUdpHeaderLen || ip_payload < kUdpHeaderLen) return;
+
+        // As for TCP, the length comes from the headers; a short snaplen can
+        // leave fewer bytes in the capture than they declare.
+        std::size_t payload_len = std::min<std::size_t>(udp_len - kUdpHeaderLen,
+                                                        ip_payload - kUdpHeaderLen);
+        const std::size_t available = caplen - (udp_off + kUdpHeaderLen);
+        if (payload_len > available) payload_len = available;
+
+        on_datagram(Endpoint{ src_ip, be16(udp) }, Endpoint{ dst_ip, be16(udp + 2) },
+                    udp + kUdpHeaderLen, payload_len, timestamp_ms);
+        return;
+    }
+
+    // TCP from here on. The watchdog's clock is set by it alone, as it was
+    // before UDP was captured at all (Stats::last_tcp_ms).
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.last_tcp_ms = timestamp_ms;
+    }
+
     // Fragmented IP would need its own reassembly stage. Game traffic inside
     // an MTU never fragments, so a middle/last fragment here means something
     // unrelated slipped through the filter.
-    const std::uint16_t frag = be16(ip + 6);
     if ((frag & 0x1FFF) != 0) return;
-
-    const std::uint32_t src_ip = be32(ip + 12);
-    const std::uint32_t dst_ip = be32(ip + 16);
 
     const std::size_t tcp_off = offset + ihl;
     if (caplen < tcp_off + 20) return;
@@ -559,8 +632,12 @@ std::size_t PacketCapture::on_stream(const FlowKey& key, Direction dir,
 
     if (!scan.packets.empty() || scan.resyncs) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.frames_decoded += scan.packets.size();
+        // Frames off the stream only, as always: the framing-health checks
+        // weigh this against resync_bytes, and a wrapper's inside says nothing
+        // about whether the stream is framed right.
+        stats_.frames_decoded += scan.outer_frames();
         stats_.resync_bytes   += scan.resyncs;
+        stats_.unwrap         += scan.unwrap;
     }
 
     if (!scan.packets.empty()) {
@@ -572,6 +649,105 @@ std::size_t PacketCapture::on_stream(const FlowKey& key, Direction dir,
     }
 
     return scan.consumed;
+}
+
+Direction PacketCapture::datagram_direction(const Endpoint& src, const Endpoint& dst,
+                                            const std::vector<Endpoint>& servers,
+                                            const std::vector<std::uint32_t>& local,
+                                            bool* by_port) {
+    if (by_port) *by_port = false;
+
+    // A known server's address settles it, whatever the port: a game server
+    // sends its UDP from its own host, but not necessarily from the port its
+    // TCP connection was found on.
+    for (const auto& s : servers) {
+        if (s.ip == 0) continue;
+        if (src.ip == s.ip) return Direction::ToClient;
+        if (dst.ip == s.ip) return Direction::ToServer;
+    }
+
+    // Then this machine's own addresses. The game's UDP can go to a host that
+    // none of its TCP connections goes to -- a relay, another player -- and
+    // on ports the rule below reads backwards: 50123 to 60000, or 9000 to
+    // 15101. One end being this machine says which end is the game.
+    const auto here = [&local](std::uint32_t ip) {
+        return std::find(local.begin(), local.end(), ip) != local.end();
+    };
+    const bool from_here = here(src.ip);
+    if (from_here != here(dst.ip)) return from_here ? Direction::ToServer : Direction::ToClient;
+
+    // Otherwise -- both ends this machine, or neither -- the rule the
+    // reassembler uses for a connection it joined mid-flight: the client sends
+    // from an ephemeral high port, the server from a fixed lower one. A guess,
+    // so it is counted (Stats::udp_by_port).
+    if (by_port) *by_port = true;
+    constexpr std::uint16_t kEphemeralFloor = 32768;
+    const bool src_ephemeral = src.port >= kEphemeralFloor;
+    const bool dst_ephemeral = dst.port >= kEphemeralFloor;
+    if (src_ephemeral != dst_ephemeral)
+        return src_ephemeral ? Direction::ToServer : Direction::ToClient;
+    return src.port > dst.port ? Direction::ToServer : Direction::ToClient;
+}
+
+void PacketCapture::on_datagram(const Endpoint& src, const Endpoint& dst,
+                                const std::uint8_t* data, std::size_t size,
+                                std::uint64_t timestamp_ms) {
+    bool by_port = false;
+    const FlowKey   key = FlowKey::make(src, dst);
+    const Direction dir = datagram_direction(src, dst, servers_, local_ips_, &by_port);
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stats_.udp_datagrams;
+        if (by_port) ++stats_.udp_by_port;
+    }
+
+    // Each datagram reaches the tap once, whole. There is no buffer carried
+    // from one call to the next as there is for TCP, so nothing to repeat.
+    {
+        std::lock_guard<std::mutex> lock(tap_mutex_);
+        if (raw_udp_tap_ && size > 0) raw_udp_tap_(key, dir, data, size);
+    }
+    if (raw_only_.load() || size == 0) return;
+
+    FramingSpec       spec;
+    bool              filtering = false;
+    std::vector<bool> allowed;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spec      = (dir == Direction::ToServer && has_client_framing_)
+                        ? client_framing_ : framing_;
+        filtering = filter_active_;
+        if (filtering) allowed = opcode_allowed_;
+    }
+    if (!spec.plausible()) return;     // no framing configured, as for TCP
+
+    FrameScanResult scan = extract_datagram(spec, data, size, dir, timestamp_ms);
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.udp_frames       += scan.outer_frames();
+        stats_.udp_unread_bytes += scan.resyncs;
+        stats_.unwrap           += scan.unwrap;
+    }
+
+    if (!scan.packets.empty()) {
+        std::lock_guard<std::mutex> lock(batch_mutex_);
+        for (auto& pkt : scan.packets) {
+            if (filtering && pkt.opcode < allowed.size() && !allowed[pkt.opcode]) continue;
+            batch_.push_back(std::move(pkt));
+        }
+    }
+}
+
+bool PacketCapture::replay(const std::uint8_t* frame, std::size_t caplen,
+                           std::uint64_t timestamp_ms) {
+    if (running_.load()) {
+        GB_WARN("PacketCapture::replay refused: a live capture is running");
+        return false;
+    }
+    if (frame == nullptr) return false;
+    on_raw_packet(frame, caplen, timestamp_ms);
+    flush_batch();
+    return true;
 }
 
 void PacketCapture::flush_batch() {
@@ -598,28 +774,29 @@ void PacketCapture::watchdog_loop() {
     // A live game connection is never silent for long — there is always a
     // heartbeat or a position update. Prolonged silence means the game closed
     // or the adapter changed, and the bot should stop pressing keys.
-    constexpr std::uint64_t kSilenceMs = 15'000;
+    //
+    // Silence on the TCP connection, which is the session (silent_for_ms):
+    // UDP the filter now lets in as well, from the same host and port, would
+    // otherwise keep a dropped session looking alive.
     bool reported = false;
 
     while (running_.load() && !stopping_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-        std::uint64_t last = 0;
+        std::uint64_t silent = 0;
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
-            last = stats_.last_packet_ms;
             if (handle_) {
                 pcap_stat ps{};
                 if (pcap_stats(handle_, &ps) == 0) stats_.pcap_dropped = ps.ps_drop;
             }
+            silent = silent_for_ms(stats_, now_ms());    // 0 until the first segment
         }
 
-        if (last == 0) continue;      // nothing seen yet
-
-        if (now_ms() - last > kSilenceMs) {
+        if (silent > kDisconnectSilenceMs) {
             if (!reported) {
                 GB_WARN("No game traffic for %llus -- assuming disconnect",
-                        static_cast<unsigned long long>(kSilenceMs / 1000));
+                        static_cast<unsigned long long>(kDisconnectSilenceMs / 1000));
                 reported = true;
                 if (on_disconnect_) on_disconnect_();
             }
@@ -632,6 +809,14 @@ void PacketCapture::watchdog_loop() {
 PacketCapture::Stats PacketCapture::stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
+}
+
+std::uint64_t PacketCapture::silent_for_ms(const Stats& stats, std::uint64_t now) {
+    // By the TCP connection alone, never by last_packet_ms: a datagram is a
+    // packet seen, and one arriving after the server dropped the session
+    // would otherwise keep the bot pressing keys into a disconnected client.
+    if (stats.last_tcp_ms == 0 || now <= stats.last_tcp_ms) return 0;
+    return now - stats.last_tcp_ms;
 }
 
 } // namespace gobot

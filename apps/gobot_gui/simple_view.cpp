@@ -22,11 +22,13 @@
 #include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/quick_quest.hpp"
 #include "gobot/session_manager.hpp"
 
 #include "imgui.h"
+#include "imgui_internal.h"     // where ImGui sent the mouse wheel, for the strips beside the column
 
 #include <algorithm>
 #include <chrono>
@@ -232,23 +234,55 @@ bool any_key_on(const MacroConfig& cfg) {
 
 /// A card: a bordered panel sized to what is in it, a shade lighter than the
 /// window so the three of them read as separate steps.
+///
+/// Measured on every frame, in sight or scrolled out of it. Left to itself
+/// ImGui skips a card that is out of sight: BeginChild() returns false and the
+/// card keeps its old height. Every tab stops at a card that returns false, so
+/// once a tab's first card was scrolled off the top the cards under it went
+/// missing, the column came up short and the scroll was pulled back up -- the
+/// bottom of a long tab could not be reached. The width the card's controls
+/// get by default is kept as it was: measured this way ImGui would narrow it.
 bool begin_card(const char* id) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 12));
     const bool open = ImGui::BeginChild(id, ImVec2(0, 0),
                                         ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY |
+                                        ImGuiChildFlags_AlwaysAutoResize |
                                         ImGuiChildFlags_AlwaysUseWindowPadding);
     // The panel's own colour is for the panel. Anything nested inside it --
     // the table, the window list -- would otherwise paint it again.
     ImGui::PopStyleColor();
+    ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.65f);
     return open;
 }
 
 void end_card() {
+    ImGui::PopItemWidth();
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::Dummy(ImVec2(0, 6));
+}
+
+/// The wheel anywhere outside the column -- the blank strips either side of
+/// it, the window's edges -- turns the column. ImGui hands the wheel to the
+/// window under the pointer or to one that window sits in, never to one inside
+/// it, so out there it reached only the outer window, which has nothing to
+/// scroll. Called inside the column, as it begins: the column turns by the
+/// step ImGui gives a notch over it (imgui.cpp, UpdateMouseWheel), a frame
+/// later. Left alone whenever ImGui has sent the wheel elsewhere: to a window
+/// it is held to after a turn, as zoom (Ctrl), sideways (Shift), or to a
+/// control that owns it.
+void wheel_beside_column() {
+    const ImGuiContext& g = *ImGui::GetCurrentContext();
+    const ImGuiWindow* column = g.CurrentWindow;
+    const ImGuiWindow* outer = column->ParentWindow;
+    if (g.HoveredWindow != outer || g.WheelingWindow != nullptr || g.IO.MouseWheel == 0.0f ||
+        g.IO.KeyCtrl || g.IO.MouseWheelRequestAxisSwap || column->ScrollMax.y == 0.0f ||
+        !ImGui::TestKeyOwner(ImGuiKey_MouseWheelY, outer->ID))
+        return;
+    const float step = ImTrunc(ImMin(5.0f * column->FontRefSize, column->InnerRect.GetHeight() * 0.67f));
+    ImGui::SetScrollY(column->Scroll.y - g.IO.MouseWheel * step);
 }
 
 } // namespace
@@ -317,6 +351,7 @@ void GuiApp::draw_simple_view() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));    // a column, not a panel
     ImGui::BeginChild("##column", ImVec2(width, 0), ImGuiChildFlags_None);
     ImGui::PopStyleColor();
+    wheel_beside_column();
 
     // The tabs, fighting first: it is what most people open this for. The
     // others run beside it, and the start button under the tabs starts
@@ -1241,12 +1276,13 @@ void GuiApp::simple_start() {
         }
         // Running, only its window not found: there is no game to open, and
         // the keeper would watch it run and never log in, so nothing else
-        // would ever start.
+        // would ever start. The game itself, by where it runs from: another
+        // program called Game.exe is no reason not to open the game.
         IniFile app_ini;
         app_ini.load(exe_relative("configs/app.ini"));
         CrashWatch::Settings crash;
         crash.load(app_ini);
-        if (SessionManager::process_running(crash.game_process)) {
+        if (game_running(crash.game_process, GameInstall::here())) {
             simple_note("Game đang chạy nhưng GoBot chưa tìm thấy cửa sổ của nó. Bấm Tìm lại "
                         "hoặc \"Chọn cửa sổ…\" ở thẻ Đánh quái.", 10000);
             return;

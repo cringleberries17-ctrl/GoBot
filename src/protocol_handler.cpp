@@ -46,6 +46,14 @@ void ProtocolHandler::on_packet(const GamePacket& pkt) {
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.total;
+        // The world model is what the bot acts on. A frame from inside a
+        // wrapper or from UDP is decoded by layouts written for plain frames,
+        // and one opcode number can mean something else there, so it changes
+        // nothing here until P0-3 says what these frames are.
+        if (!pkt.plain()) {
+            ++stats_.held_back;
+            return;
+        }
     }
 
     auto decoded = registry_.decode(pkt);

@@ -9,6 +9,7 @@
 #include "gobot/byte_reader.hpp"
 #include "gobot/common.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/no_real_input.hpp"
 
 #include "imgui.h"
 
@@ -189,6 +190,10 @@ void GuiApp::initialise() {
             ini.get_int("Framing", "trailer_opcode", 0));
         framing_.trailer_bytes = static_cast<std::uint32_t>(
             ini.get_int("Framing", "trailer_bytes", 0));
+        // 13 when missing, as in gobot::load_framing: a player's protocol.ini
+        // is never replaced by a build and predates the key.
+        framing_.inner_offset = static_cast<std::uint32_t>(
+            ini.get_int("Framing", "inner_frame_offset", 13));
         framing_verified_      = ini.get_bool("Framing", "verified", false);
     }
 
@@ -1071,9 +1076,27 @@ void GuiApp::toggle_bot() {
     if (bot_running_) stop_bot(); else start_bot();
 }
 
-void GuiApp::on_packets(const std::vector<GamePacket>& packets) {
+void GuiApp::on_packets(const std::vector<GamePacket>& all) {
+    // Frames found inside 0x0081, and frames that came over UDP, are counted
+    // and go no further. The tables here key everything by opcode, the same
+    // opcode number need not mean the same thing in those places, and the
+    // analyzer's suggestions become layouts the bot acts on -- so what the
+    // bot sees, and what this screen suggests, stays what it was until plan
+    // item P0-3 decides what those frames are. gobot_sniff --watch lists them.
+    std::uint64_t held_back = 0;
+    for (const auto& p : all)
+        if (!p.plain()) ++held_back;
+    std::vector<GamePacket> kept;
+    if (held_back > 0) {
+        kept.reserve(all.size() - held_back);
+        for (const auto& p : all)
+            if (p.plain()) kept.push_back(p);
+    }
+    const std::vector<GamePacket>& packets = held_back > 0 ? kept : all;
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        held_back_frames_ += held_back;
         for (const auto& p : packets) {
             auto& st = opcode_stats_[p.opcode];
             ++st.count;
@@ -1097,8 +1120,10 @@ void GuiApp::on_packets(const std::vector<GamePacket>& packets) {
             }
         }
     }
-    // Calibration needs the raw stream regardless of what is mapped, so it is
-    // fed before the protocol layer filters anything out.
+    // Calibration is fed every frame off the TCP stream whatever is mapped,
+    // before the protocol layer drops the opcodes it has no layout for -- but
+    // not the frames held back above: what it finds is keyed by opcode, as
+    // the tables are, and becomes a layout the bot acts on.
     if (calibrator_ && calibrator_->running()) calibrator_->on_packets(packets);
 
     if (protocol_) protocol_->on_packets(packets);
@@ -1166,6 +1191,7 @@ void GuiApp::save_protocol() {
     if (framing_.has_trailer()) {
         ini.set_int("Framing", "trailer_opcode", static_cast<int>(framing_.trailer_opcode));
         ini.set_int("Framing", "trailer_bytes", static_cast<int>(framing_.trailer_bytes));
+        ini.set_int("Framing", "inner_frame_offset", static_cast<int>(framing_.inner_offset));
     }
 
     for (std::uint16_t op : registry_.mapped_opcodes()) {
@@ -5120,6 +5146,12 @@ void GuiApp::draw_input_warning() {
 /// It is here because the alternative is explaining integrity levels to
 /// somebody who only wants the macro to press a key.
 void GuiApp::relaunch_elevated() {
+    // It starts a program -- and quits this one -- so it asks the switch like
+    // every other way of starting one.
+    if (refuse_real_input("restart GoBot as administrator")) {
+        set_status("Not restarted -- this copy of GoBot runs with no real input", 6000);
+        return;
+    }
     wchar_t path[MAX_PATH]{};
     if (GetModuleFileNameW(nullptr, path, MAX_PATH) == 0) {
         set_status("Could not work out where GoBot is, so cannot restart it", 6000);
@@ -7481,15 +7513,28 @@ void GuiApp::draw_opcode_table() {
         std::lock_guard<std::mutex> lock(mutex_);
         opcode_stats_.clear();
         samples_.clear();
+        held_back_frames_ = 0;
     }
 
     std::vector<std::pair<std::uint16_t, OpcodeStat>> rows;
+    std::uint64_t held_back = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         rows.assign(opcode_stats_.begin(), opcode_stats_.end());
+        held_back = held_back_frames_;
     }
     std::sort(rows.begin(), rows.end(),
               [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+
+    // Said whether or not anything else is listed: they are in the capture,
+    // and this table is not where they are counted.
+    if (held_back > 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+        ImGui::TextWrapped("%llu frames from inside 0x0081 or over UDP are not listed here "
+                           "or used by the bot yet. gobot_sniff --watch counts them by opcode.",
+                           static_cast<unsigned long long>(held_back));
+        ImGui::PopStyleColor();
+    }
 
     if (rows.empty()) {
         text_dim("No frames decoded yet. Start capture and check the framing.");

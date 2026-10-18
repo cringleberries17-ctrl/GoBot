@@ -1,5 +1,6 @@
 #include "gobot/framing.hpp"
 #include "gobot/byte_reader.hpp"
+#include "gobot/config.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -55,6 +56,13 @@ std::string FramingSpec::describe() const {
     if (length_adjust) os << (length_adjust > 0 ? "+" : "") << length_adjust;
     os << " op@" << opcode_offset << ":" << opcode_size
        << (opcode_le ? "le" : "be");
+    if (has_trailer()) {
+        char t[48];
+        std::snprintf(t, sizeof(t), " 0x%04X+%u", static_cast<unsigned>(trailer_opcode),
+                      static_cast<unsigned>(trailer_bytes));
+        os << t;
+        if (unwraps()) os << " inner@" << inner_offset;
+    }
     return os.str();
 }
 
@@ -77,8 +85,149 @@ std::string FramingSpec::to_ini() const {
     if (has_trailer())
         os << "trailer_opcode=0x" << std::hex << trailer_opcode << std::dec << "\n"
            << "trailer_bytes=" << trailer_bytes << "\n";
+    // Written whenever there is a trailer, 0 included: a block without the
+    // key would read back as 13, which is not what a spec with 0 meant.
+    if (has_trailer())
+        os << "inner_frame_offset=" << inner_offset << "\n";
     return os.str();
 }
+
+UnwrapCounts& UnwrapCounts::operator+=(const UnwrapCounts& o) {
+    inner          += o.inner;
+    unopened       += o.unopened;
+    unreadable     += o.unreadable;
+    too_deep       += o.too_deep;
+    length_differs += o.length_differs;
+    checksum_bad   += o.checksum_bad;
+    return *this;
+}
+
+// ------------------------------------------------------------ unwrapping
+
+namespace {
+
+/// Where a frame's payload ends, given its full size: a wrapper's payload
+/// stops short of the trailer_bytes past its declared length, so that a field
+/// at body offset N is at offset N whether or not its opcode carries them.
+std::size_t body_end(const FramingSpec& spec, std::size_t total, std::uint64_t opcode) {
+    if (spec.trailer_bytes == 0 || opcode != spec.trailer_opcode) return total;
+    const std::size_t trailer = spec.trailer_bytes;
+    return total >= spec.header_size + trailer ? total - trailer : spec.header_size;
+}
+
+GamePacket make_packet(const FramingSpec& spec, const std::uint8_t* frame, std::size_t end,
+                       std::uint64_t opcode, Direction dir, std::uint64_t timestamp_ms,
+                       std::uint8_t depth) {
+    GamePacket pkt;
+    pkt.opcode       = static_cast<std::uint16_t>(opcode);
+    pkt.from_server  = (dir == Direction::ToClient);
+    pkt.timestamp_ms = timestamp_ms;
+    pkt.depth        = depth;
+    const std::size_t start = std::min<std::size_t>(spec.header_size, end);
+    pkt.payload.assign(frame + start, frame + end);
+    return pkt;
+}
+
+void read_inside(const FramingSpec& spec, const std::uint8_t* in, std::size_t n,
+                 Direction dir, std::uint64_t timestamp_ms, std::uint8_t depth,
+                 FrameScanResult& out);
+
+/// GoC's one exception: a wrapper whose first two bytes, its marker, read
+/// 0x0020 rather than 0x0005. GoC does not open it, and stops reading the run
+/// of frames it is in. What the marker means is unknown.
+bool marked_shut(const std::uint8_t* w, std::size_t span) {
+    return span >= 2 && w[0] == 0x20 && w[1] == 0x00;
+}
+
+/// Open one wrapper `w` of `span` bytes -- its declared length plus the
+/// trailer -- that sits at `depth`, and add what is inside it to `out`.
+void open_wrapper(const FramingSpec& spec, const std::uint8_t* w, std::size_t span,
+                  Direction dir, std::uint64_t timestamp_ms, std::uint8_t depth,
+                  FrameScanResult& out) {
+    // Checked first, as GoC checks it. Whatever such a wrapper holds is not
+    // taken for a frame here either, and the count says how often it happens.
+    if (marked_shut(w, span)) {
+        ++out.unwrap.unopened;
+        return;
+    }
+    if (depth >= kMaxWrapDepth) {
+        ++out.unwrap.too_deep;
+        return;
+    }
+    if (span <= spec.inner_offset) {
+        ++out.unwrap.unreadable;
+        return;
+    }
+    read_inside(spec, w + spec.inner_offset, span - spec.inner_offset,
+                dir, timestamp_ms, static_cast<std::uint8_t>(depth + 1), out);
+}
+
+/// What one wrapper holds, `n` bytes at `in`, as frames at `depth`.
+void read_inside(const FramingSpec& spec, const std::uint8_t* in, std::size_t n,
+                 Direction dir, std::uint64_t timestamp_ms, std::uint8_t depth,
+                 FrameScanResult& out) {
+    // The fields GoC reads before anything else, the marker aside: enough of
+    // a header to say what the frame is and how long it claims to be.
+    auto head = [&](const std::uint8_t* f, std::size_t avail,
+                    std::uint64_t& op, std::uint64_t& raw) {
+        return read_uint_at(f, avail, spec.opcode_offset,
+                            static_cast<int>(spec.opcode_size), spec.opcode_le, op) &&
+               read_uint_at(f, avail, spec.length_offset,
+                            static_cast<int>(spec.length_size), spec.length_le, raw);
+    };
+
+    std::uint64_t op = 0, raw = 0;
+    if (!head(in, n, op, raw)) {
+        ++out.unwrap.unreadable;
+        return;
+    }
+
+    if (op != spec.trailer_opcode) {
+        // One frame, the whole room, as GoC takes it: GoC reads this frame's
+        // marker and opcode and forwards all n bytes without looking at its
+        // length. Whether that length agrees is worth knowing, so it is counted.
+        out.packets.push_back(make_packet(spec, in, n, op, dir, timestamp_ms, depth));
+        ++out.unwrap.inner;
+        if (spec.total_size_for(raw, op) != n) ++out.unwrap.length_differs;
+        if (!spec.checksum_ok(in, n))          ++out.unwrap.checksum_bad;
+        return;
+    }
+
+    // A wrapper inside a wrapper. GoC hands the whole room back to its own
+    // stream parser, which reads it as a run of frames, each by its own
+    // length, opening any wrapper among them. Read it the same way.
+    std::size_t pos = 0;
+    while (pos < n) {
+        const std::uint8_t* f = in + pos;
+        const std::size_t left = n - pos;
+        if (!head(f, left, op, raw)) {
+            ++out.unwrap.unreadable;      // a few bytes too short to be a frame
+            break;
+        }
+        const std::size_t total = spec.total_size_for(raw, op);
+        if (total < spec.header_size || total < spec.min_frame || total > left) {
+            ++out.unwrap.unreadable;      // claims more room than there is
+            break;
+        }
+        out.packets.push_back(make_packet(spec, f, body_end(spec, total, op), op,
+                                          dir, timestamp_ms, depth));
+        ++out.unwrap.inner;
+        if (!spec.checksum_ok(f, left)) ++out.unwrap.checksum_bad;
+        if (op == spec.trailer_opcode) {
+            // Inside a wrapper GoC's rule is followed to the letter: a wrapper
+            // left shut ends the run, since nothing here -- no check word is
+            // required inside -- could say where a frame after it begins.
+            if (marked_shut(f, total)) {
+                ++out.unwrap.unopened;
+                break;
+            }
+            open_wrapper(spec, f, total, dir, timestamp_ms, depth, out);
+        }
+        pos += total;
+    }
+}
+
+} // namespace
 
 // ------------------------------------------------------------- frame scanner
 
@@ -184,30 +333,75 @@ FrameScanResult extract_frames(const FramingSpec& spec,
             continue;
         }
 
-        // The trailer is framing, not content: it is excluded from the payload
-        // so that a field at body offset N is at offset N whether or not its
-        // opcode happens to carry one.
-        std::size_t body_end = pos + total;
-        if (spec.trailer_bytes != 0 && opcode == spec.trailer_opcode) {
-            const std::size_t trailer = spec.trailer_bytes;
-            body_end = (body_end >= pos + spec.header_size + trailer)
-                         ? body_end - trailer
-                         : pos + spec.header_size;
-        }
+        // The trailer is excluded from the payload so that a field at body
+        // offset N is at offset N whether or not its opcode carries one. It
+        // is the tail of the frame inside, which follows as frames of its own.
+        result.packets.push_back(make_packet(spec, buf + pos, body_end(spec, total, opcode),
+                                             opcode, dir, timestamp_ms, 0));
+        if (spec.unwraps() && opcode == spec.trailer_opcode)
+            open_wrapper(spec, buf + pos, total, dir, timestamp_ms, 0, result);
 
-        GamePacket pkt;
-        pkt.opcode       = static_cast<std::uint16_t>(opcode);
-        pkt.from_server  = (dir == Direction::ToClient);
-        pkt.timestamp_ms = timestamp_ms;
-        pkt.payload.assign(buf + pos + spec.header_size, buf + body_end);
-
-        result.packets.push_back(std::move(pkt));
         pos += total;
         result.locked = true;      // a frame parsed cleanly; alignment confirmed
     }
 
     result.consumed = pos;
     return result;
+}
+
+FrameScanResult extract_datagram(const FramingSpec& spec,
+                                 const std::uint8_t* data,
+                                 std::size_t size,
+                                 Direction dir,
+                                 std::uint64_t timestamp_ms) {
+    // Locked: a datagram's first byte is the start of a frame, so the
+    // scanner may trust a header there instead of sliding past it.
+    FrameScanResult r = extract_frames(spec, data, size, dir, timestamp_ms, true);
+    for (GamePacket& p : r.packets) p.udp = true;
+
+    // Whatever the scanner would have kept for the next call has no next call
+    // to wait for. It is counted rather than dropped quietly.
+    if (data != nullptr && r.consumed < size) r.resyncs += size - r.consumed;
+    r.consumed = size;
+    return r;
+}
+
+FramingSpec load_framing(const std::string& path, bool& found, const char* section) {
+    FramingSpec spec;
+    IniFile ini;
+    found = false;
+    if (!ini.load(path) || !ini.has_section(section)) return spec;
+
+    found = true;
+    const std::string S = section;
+    spec.header_size   = static_cast<std::uint32_t>(ini.get_int(S, "header_size", 4));
+    spec.length_offset = static_cast<std::uint32_t>(ini.get_int(S, "length_offset", 0));
+    spec.length_size   = static_cast<std::uint32_t>(ini.get_int(S, "length_size", 2));
+    spec.length_le     = ini.get(S, "length_endian", "little") != "big";
+    spec.length_includes_header = ini.get_bool(S, "length_includes_header", true);
+    spec.length_adjust = ini.get_int(S, "length_adjust", 0);
+    spec.opcode_offset = static_cast<std::uint32_t>(ini.get_int(S, "opcode_offset", 2));
+    spec.opcode_size   = static_cast<std::uint32_t>(ini.get_int(S, "opcode_size", 2));
+    spec.opcode_le     = ini.get(S, "opcode_endian", "little") != "big";
+    spec.min_frame     = static_cast<std::uint32_t>(ini.get_int(S, "min_frame", static_cast<int>(spec.header_size)));
+    spec.max_frame     = static_cast<std::uint32_t>(ini.get_int(S, "max_frame", 65535));
+    spec.checksum_offset = static_cast<std::uint32_t>(ini.get_int(S, "checksum_offset", static_cast<int>(FramingSpec::kNoChecksum)));
+    spec.trailer_opcode = static_cast<std::uint16_t>(ini.get_int(S, "trailer_opcode", 0));
+    spec.trailer_bytes  = static_cast<std::uint32_t>(ini.get_int(S, "trailer_bytes", 0));
+    // 13 when missing: the player's own copy of protocol.ini is never
+    // replaced by a build, and it was written before this key existed.
+    spec.inner_offset   = static_cast<std::uint32_t>(ini.get_int(S, "inner_frame_offset", 13));
+    return spec;
+}
+
+std::string where_found(const GamePacket& p) {
+    std::string out = p.udp ? "UDP" : "";
+    if (p.depth > 0) {
+        if (!out.empty()) out += ", ";
+        out += "inside 0x0081";
+        if (p.depth > 1) out += " x" + std::to_string(p.depth);
+    }
+    return out;
 }
 
 // ------------------------------------------------------------ auto-detection

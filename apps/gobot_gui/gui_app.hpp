@@ -752,6 +752,10 @@ private:
     };
     std::map<std::uint16_t, OpcodeStat> opcode_stats_;
 
+    /// Frames from inside 0x0081 or over UDP, which on_packets counts and
+    /// keeps out of every table and of the bot until plan item P0-3.
+    std::uint64_t held_back_frames_ = 0;
+
     /// Recent payloads per opcode, for the inspector and the field analyzer.
     std::map<std::uint16_t, std::deque<Bytes>> samples_;
     static constexpr std::size_t kMaxSamplesPerOpcode = 256;

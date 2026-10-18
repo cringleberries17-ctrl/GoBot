@@ -2,6 +2,7 @@
 #include "gobot/common.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/no_real_input.hpp"
 #include "gobot/vitals_reader.hpp"
 
 #include <algorithm>
@@ -254,6 +255,9 @@ bool SessionManager::process_running(const std::string& exe_name) {
 
 bool SessionManager::start_program(const std::string& path) {
     if (path.empty()) return false;
+    // Asked before anything about the program, so that a test can aim this at
+    // one that is not there and still see it refused.
+    if (refuse_real_input("start a program")) return false;
 
     const int wide_len = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
     if (wide_len <= 0) return false;
@@ -286,6 +290,9 @@ bool SessionManager::start_program(const std::string& path) {
 }
 
 bool SessionManager::request_shutdown(int delay_s, const std::string& why) {
+    // Before the warning below, which would otherwise announce a shut-down
+    // that is not coming. It starts a program, and turns the machine off.
+    if (refuse_real_input("shut the machine down")) return false;
     delay_s = std::clamp(delay_s, 10, 3600);
 
     // Loud, and in the log, because somebody will come back to a machine that

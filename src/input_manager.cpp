@@ -1,6 +1,8 @@
 ﻿#include "gobot/input_manager.hpp"
 #include "gobot/common.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/no_real_input.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -21,25 +23,19 @@ std::string to_lower(std::string s) {
     return s;
 }
 
-/// Executable file name owning `hwnd`, or "" if it can't be determined.
-std::string process_of(HWND hwnd) {
+/// Full path of the executable owning `hwnd`, UTF-8, or "" if it can't be
+/// determined. Wide underneath: the narrow call turned a folder named in
+/// Vietnamese into question marks.
+std::string path_of(HWND hwnd) {
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == 0) return {};
+    return program_path(pid);
+}
 
-    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!proc) return {};
-
-    char path[MAX_PATH]{};
-    DWORD size = MAX_PATH;
-    std::string out;
-    if (QueryFullProcessImageNameA(proc, 0, path, &size)) {
-        out = path;
-        const auto slash = out.find_last_of("\\/");
-        if (slash != std::string::npos) out = out.substr(slash + 1);
-    }
-    CloseHandle(proc);
-    return out;
+/// The file name at the end of a path.
+std::string file_name(const std::string& path) {
+    const auto slash = path.find_last_of("\\/");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 BOOL CALLBACK collect_proc(HWND hwnd, LPARAM param) {
@@ -65,13 +61,12 @@ BOOL CALLBACK collect_proc(HWND hwnd, LPARAM param) {
 
     // Never offer our own window: sending input to ourselves does nothing
     // useful and makes the list confusing.
-    const std::string proc = process_of(hwnd);
+    const std::string path = path_of(hwnd);
+    const std::string proc = file_name(path);
     static const std::string self = [] {
-        char p[MAX_PATH]{};
-        GetModuleFileNameA(nullptr, p, MAX_PATH);
-        std::string s = p;
-        const auto slash = s.find_last_of("\\/");
-        return slash == std::string::npos ? s : s.substr(slash + 1);
+        wchar_t p[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, p, MAX_PATH);
+        return file_name(wide_to_utf8(p));
     }();
     if (!proc.empty() && _stricmp(proc.c_str(), self.c_str()) == 0) return TRUE;
 
@@ -83,6 +78,7 @@ BOOL CALLBACK collect_proc(HWND hwnd, LPARAM param) {
     info.title        = title;
     info.window_class = cls;
     info.process      = proc;
+    info.path         = path;
     list->push_back(std::move(info));
     return TRUE;
 }
@@ -100,6 +96,14 @@ bool is_extended(std::uint32_t vk) {
         default:
             return false;
     }
+}
+
+/// Every input this class sends goes through here. Whichever way a key, a
+/// click or a move got this far, the "no real input" switch is asked once
+/// more just before Windows is -- the one place nothing can get round.
+UINT inject(INPUT* in, UINT count, const char* what) {
+    if (refuse_real_input(what)) return 0;
+    return SendInput(count, in, sizeof(INPUT));
 }
 
 } // namespace
@@ -129,7 +133,8 @@ struct Hunt {
 BOOL CALLBACK hunt_proc(HWND hwnd, LPARAM param) {
     auto* hunt = reinterpret_cast<Hunt*>(param);
     if (!IsWindowVisible(hwnd)) return TRUE;
-    if (to_lower(process_of(hwnd)) != hunt->want) return TRUE;
+    const std::string path = path_of(hwnd);
+    if (to_lower(file_name(path)) != hunt->want) return TRUE;
 
     char title[512]{};
     GetWindowTextA(hwnd, title, sizeof(title) - 1);
@@ -141,6 +146,7 @@ BOOL CALLBACK hunt_proc(HWND hwnd, LPARAM param) {
     info.title        = title;
     info.window_class = cls;
     info.process      = hunt->want;
+    info.path         = path;
     hunt->out->push_back(std::move(info));
     return TRUE;
 }
@@ -240,15 +246,30 @@ bool InputManager::find_game_window(const std::string& title_substr,
     // somebody's editor.
     static constexpr int kStrong = 3;
 
+    // A program asked for by the game's name is taken only when it is the
+    // game, by where it runs from (GameInstall). Game.exe is what plenty of
+    // other programs are called too, and the one chosen here is the one the
+    // macro types into. One whose path cannot be read is not the game either:
+    // GoBot runs as administrator, which reads the game's.
+    const GameInstall install = want_proc.empty() ? GameInstall{} : GameInstall::here();
+    const bool the_games_name = install.names_the_game(want_proc);
+    const GameInstall::Drives drives = the_games_name ? GameInstall::Drives::here()
+                                                      : GameInstall::Drives{};
+
     const auto windows = enumerate_windows();
     for (const auto& w : windows) {
         int score = 0;
 
         if (!want_proc.empty()) {
-            // A name that could not be read is unknown, not wrong. It comes
-            // from OpenProcess, which fails for a game running at a higher
-            // integrity level or one an anticheat has put a handle policy on.
-            if (w.process.empty())                    score += 0;
+            if (the_games_name) {
+                if (!install.is_game(w.path, drives)) continue;   // another program of its name
+                score += 4;
+            }
+            // Any other program: a name that could not be read is unknown,
+            // not wrong. It comes from OpenProcess, which fails for a program
+            // running at a higher integrity level or one an anticheat has put
+            // a handle policy on.
+            else if (w.process.empty())                score += 0;
             else if (to_lower(w.process) == want_proc) score += 4;
             else                                       continue;  // positively not it
         }
@@ -313,7 +334,11 @@ bool InputManager::window_focused() const {
 
 bool InputManager::focus_window() {
     void* h = hwnd_.load();
-    if (!h || !IsWindow(static_cast<HWND>(h))) return false;
+    if (!h) return false;       // no window to bring: nothing to refuse either
+    // Asked before the window is looked at, so that a test aiming at a window
+    // that has gone sees the refusal rather than the missing window.
+    if (refuse_real_input("bring a window to the front")) return false;
+    if (!IsWindow(static_cast<HWND>(h))) return false;
 
     HWND target = static_cast<HWND>(h);
     if (GetForegroundWindow() == target) return true;
@@ -354,7 +379,12 @@ std::uint16_t InputManager::scan_code(std::uint32_t vk) {
 }
 
 bool InputManager::send_key(std::uint32_t vk, bool down) {
-    if (vk == 0) return false;
+    // No key, or no window to send it to: nothing to do, and nothing to refuse.
+    if (vk == 0 || hwnd_.load() == nullptr) return false;
+
+    // Before the focus gate: refused for being a key at all, not for the game
+    // happening to be behind something.
+    if (refuse_real_input(down ? "press a key" : "let go of a key")) return false;
 
     // Input goes to the focused window, whatever it is. Sending while the game
     // is not foreground types into the user's other applications, so this is a
@@ -368,7 +398,7 @@ bool InputManager::send_key(std::uint32_t vk, bool down) {
     in.ki.dwFlags = (down ? 0 : KEYEVENTF_KEYUP);
     if (is_extended(vk)) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
 
-    const UINT sent = SendInput(1, &in, sizeof(INPUT));
+    const UINT sent = inject(&in, 1, down ? "press a key" : "let go of a key");
     if (sent != 1) {
         GB_WARN("SendInput failed for vk=0x%02X (err %lu)", vk, GetLastError());
         return false;
@@ -390,19 +420,22 @@ bool InputManager::injection_works() {
     // key anyone is likely to be holding down while this runs.
     constexpr int kProbe = VK_F7;
 
+    // The probe is a real key press, into whatever window is in front.
+    if (refuse_real_input("press F7 to see whether keys get through")) return false;
+
     GetAsyncKeyState(kProbe);        // clear the "pressed since last call" bit
 
     INPUT in{};
     in.type = INPUT_KEYBOARD;
     in.ki.wVk = static_cast<WORD>(kProbe);
     in.ki.wScan = scan_code(kProbe);
-    if (SendInput(1, &in, sizeof(INPUT)) != 1) return false;
+    if (inject(&in, 1, "press F7 to see whether keys get through") != 1) return false;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     const bool seen = (GetAsyncKeyState(kProbe) & 0x8000) != 0;
 
     in.ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(1, &in, sizeof(INPUT));
+    inject(&in, 1, "let go of F7");
 
     return seen;
 }
@@ -451,7 +484,7 @@ void InputManager::release_all() {
         in.ki.wScan   = scan_code(vk);
         in.ki.dwFlags = KEYEVENTF_KEYUP;
         if (is_extended(vk)) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-        SendInput(1, &in, sizeof(INPUT));
+        inject(&in, 1, "let go of a key");
     }
 
     if (!keys.empty()) GB_DEBUG("Released %zu held key(s)", keys.size());
@@ -562,14 +595,15 @@ INPUT key_event(std::uint32_t vk, bool down) {
 } // namespace
 
 bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms) {
-    if (vk == 0) return false;
+    if (vk == 0 || hwnd_.load() == nullptr) return false;
+    if (refuse_real_input("type a key")) return false;
     if (!window_focused()) return false;
 
     INPUT down[2]{};
     UINT n = 0;
     if (shift) down[n++] = key_event(VK_SHIFT, true);
     down[n++] = key_event(vk, true);
-    const UINT went = SendInput(n, down, sizeof(INPUT));
+    const UINT went = inject(down, n, "type a key");
     if (went == n) std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, hold_ms)));
 
     // Up whatever happened, and not gated on focus: a key that went down and
@@ -578,7 +612,7 @@ bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms) {
     UINT m = 0;
     up[m++] = key_event(vk, false);
     if (shift) up[m++] = key_event(VK_SHIFT, false);
-    SendInput(m, up, sizeof(INPUT));
+    inject(up, m, "let go of a typed key");
 
     if (went != n) {
         GB_WARN("SendInput failed for vk=0x%02X (err %lu)", vk, GetLastError());
@@ -588,6 +622,8 @@ bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms) {
 }
 
 bool InputManager::type_unit(wchar_t unit) {
+    if (hwnd_.load() == nullptr) return false;
+    if (refuse_real_input("type a character")) return false;
     if (!window_focused()) return false;
     INPUT in[2]{};
     in[0].type       = INPUT_KEYBOARD;
@@ -595,10 +631,14 @@ bool InputManager::type_unit(wchar_t unit) {
     in[0].ki.dwFlags = KEYEVENTF_UNICODE;
     in[1] = in[0];
     in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-    return SendInput(2, in, sizeof(INPUT)) == 2;
+    return inject(in, 2, "type a character") == 2;
 }
 
 bool InputManager::post_char(wchar_t unit, bool ime) {
+    if (hwnd_.load() == nullptr) return false;
+    // A message into another program's window: the one OS call here that is
+    // not SendInput, so it asks the switch itself.
+    if (refuse_real_input("post a character to another program's window")) return false;
     if (!window_focused()) return false;
     HWND h = static_cast<HWND>(hwnd_.load());
     return PostMessageW(h, ime ? WM_IME_CHAR : WM_CHAR, static_cast<WPARAM>(unit), 1) != FALSE;
@@ -612,7 +652,11 @@ bool InputManager::caps_lock_on() {
 
 bool InputManager::move_pointer(int x, int y) {
     HWND hwnd = static_cast<HWND>(hwnd_.load());
-    if (!hwnd || !IsWindow(hwnd)) return false;
+    if (!hwnd) return false;    // no window to aim at: nothing to refuse either
+    // Before the window is looked at: a test aims this at a window that has
+    // gone, so that nothing could move were the switch ever broken.
+    if (refuse_real_input("move the pointer")) return false;
+    if (!IsWindow(hwnd)) return false;
 
     POINT at{ x, y };
     if (!ClientToScreen(hwnd, &at)) return false;
@@ -631,10 +675,12 @@ bool InputManager::move_pointer(int x, int y) {
     in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
     in.mi.dx = static_cast<LONG>((at.x - vx) * 65535LL / vw);
     in.mi.dy = static_cast<LONG>((at.y - vy) * 65535LL / vh);
-    return SendInput(1, &in, sizeof(INPUT)) == 1;
+    return inject(&in, 1, "move the pointer") == 1;
 }
 
 bool InputManager::click_at(int x, int y, bool right_button) {
+    if (hwnd_.load() == nullptr) return false;
+    if (refuse_real_input("click")) return false;
     if (!move_pointer(x, y)) return false;
     // A pause between arriving and pressing. Several of these buttons light up
     // on hover and ignore a click that lands in the same instant as the move.
@@ -646,19 +692,21 @@ bool InputManager::click_at(int x, int y, bool right_button) {
     in[1] = in[0];
     in[1].mi.dwFlags = right_button ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
 
-    if (SendInput(1, &in[0], sizeof(INPUT)) != 1) return false;
+    if (inject(&in[0], 1, "press a mouse button") != 1) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(30, 70)));
-    return SendInput(1, &in[1], sizeof(INPUT)) == 1;
+    return inject(&in[1], 1, "let go of a mouse button") == 1;
 }
 
 bool InputManager::drag(int from_x, int from_y, int to_x, int to_y) {
+    if (hwnd_.load() == nullptr) return false;
+    if (refuse_real_input("drag")) return false;
     if (!move_pointer(from_x, from_y)) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(60, 110)));
 
     INPUT down{};
     down.type = INPUT_MOUSE;
     down.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    if (SendInput(1, &down, sizeof(INPUT)) != 1) return false;
+    if (inject(&down, 1, "press a mouse button") != 1) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(90, 140)));
 
     // Always let go, whatever happens on the way: a button left held down is
@@ -674,12 +722,15 @@ bool InputManager::drag(int from_x, int from_y, int to_x, int to_y) {
         std::this_thread::sleep_for(std::chrono::milliseconds(jitter(18, 30)));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(80, 130)));
-    const bool released = SendInput(1, &up, sizeof(INPUT)) == 1;
+    const bool released = inject(&up, 1, "let go of a mouse button") == 1;
     return moved && released;
 }
 
 bool InputManager::type_text(const std::string& utf8) {
     if (utf8.empty()) return false;
+    // Not gated on focus at all, so this is the one thing standing between a
+    // test and whatever window is in front.
+    if (refuse_real_input("type text")) return false;
 
     const int wide_len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
                                              static_cast<int>(utf8.size()), nullptr, 0);
@@ -695,7 +746,7 @@ bool InputManager::type_text(const std::string& utf8) {
         in[0].ki.dwFlags = KEYEVENTF_UNICODE;
         in[1] = in[0];
         in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        if (SendInput(2, in, sizeof(INPUT)) != 2) return false;
+        if (inject(in, 2, "type text") != 2) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(jitter(25, 55)));
     }
     return true;

@@ -52,6 +52,12 @@ public:
         std::uint64_t unknown = 0;
         std::uint64_t malformed = 0;
         std::map<std::uint16_t, std::uint64_t> unknown_opcodes;
+
+        /// Frames found inside 0x0081 or carried over UDP, counted and not
+        /// applied. What they mean is still to be found out (plan items P0-2
+        /// and P0-3); until then the bot acts on exactly what it acted on
+        /// before they were captured.
+        std::uint64_t held_back = 0;
     };
     Stats stats() const;
     void  reset_stats();

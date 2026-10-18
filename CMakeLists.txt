@@ -91,6 +91,23 @@ if(GOBOT_USE_OPENCV)
     # unless told what to assume instead.
     set(CMAKE_POLICY_VERSION_MINIMUM 3.10 CACHE STRING "" FORCE)
 
+    # Where `cmake --install` would put GoBot, pinned. OpenCV writes it into
+    # the build information it compiles into every executable, and when it is
+    # still CMake's own default OpenCV puts <build tree>/install there instead
+    # -- a path with the build machine's user name in it, which package.ps1's
+    # check 9 finds in the package. Only a default is replaced, so a tree
+    # given a prefix by hand keeps it; and the value is the one such trees
+    # were given, so one already built builds nothing again for this. So is
+    # the value OpenCV forced into a tree configured before this pin: by the
+    # time that tree is configured again, the prefix is no longer CMake's
+    # default, and it would keep <build tree>/install for good.
+    if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OR
+       CMAKE_INSTALL_PREFIX STREQUAL "${CMAKE_BINARY_DIR}/install")
+        set(CMAKE_INSTALL_PREFIX "C:/Program Files/GoBot" CACHE PATH
+            "Where cmake --install puts GoBot" FORCE)
+    endif()
+    set(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OFF)
+
     FetchContent_Declare(opencv
         URL          https://github.com/opencv/opencv/archive/refs/tags/4.8.0.zip
         URL_HASH     SHA256=${GOBOT_OPENCV_SHA256}
@@ -202,6 +219,8 @@ add_library(gobot_core STATIC
     src/game_state.cpp
     src/protocol_handler.cpp
     src/window_focus.cpp
+    src/no_real_input.cpp
+    src/game_install.cpp
     src/input_manager.cpp
     src/pathfinder.cpp
     src/execution_coordinator.cpp
@@ -245,6 +264,29 @@ add_executable(gobot_sniff apps/gobot_sniff/main.cpp)
 target_link_libraries(gobot_sniff PRIVATE gobot_core)
 gobot_require_admin(gobot_sniff)
 gobot_delay_npcap(gobot_sniff)
+
+# --------------------------------------------- the same, for recordings only
+# gobot_sniff's commands that read files, built from the same source with
+# everything that captures left out (GOBOT_SNIFF_FILES_ONLY). Recordings are
+# analysed afterwards by agents that can never answer a UAC prompt, and
+# gobot_sniff asks for one on every start, because capturing needs it.
+#
+# So this one asks for nothing -- no gobot_require_admin -- and calls nothing
+# in wpcap.dll, which is then not among its imports at all, delay-loaded or
+# otherwise: gobot_delay_npcap would only warn that it found none to delay.
+# The check after the link holds it to both, and removes a build that breaks
+# either.
+#
+# A developer's tool: package.ps1 ships gobot_gui and gobot_cli alone, and
+# it is not installed.
+add_executable(gobot_sniff_files apps/gobot_sniff/main.cpp)
+target_link_libraries(gobot_sniff_files PRIVATE gobot_core)
+target_compile_definitions(gobot_sniff_files PRIVATE GOBOT_SNIFF_FILES_ONLY=1)
+add_custom_command(TARGET gobot_sniff_files POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:gobot_sniff_files>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_files_only.cmake
+    COMMENT "Checking that gobot_sniff_files asks for no administrator and loads no Npcap"
+)
 
 # ----------------------------------------------------------------------- GUI
 # Dear ImGui with the Win32 + Direct3D 11 backend — the same combination the

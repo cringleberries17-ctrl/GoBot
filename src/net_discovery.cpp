@@ -103,12 +103,55 @@ std::vector<ProcessConnection> connections_for_pid(std::uint32_t pid) {
     return out;
 }
 
-std::vector<ProcessConnection> connections_for_process(const std::string& exe_name) {
+SocketOwners::SocketOwners(std::string exe_name, LookUp look_up, GameInstall install,
+                           GameInstall::Drives drives)
+    : exe_name_(std::move(exe_name)),
+      look_up_(std::move(look_up)),
+      install_(std::move(install)),
+      drives_(std::move(drives)) {
+    by_path_ = install_.names_the_game(exe_name_);
+}
+
+SocketOwners SocketOwners::here(const std::string& exe_name) {
+    return SocketOwners(
+        exe_name,
+        [](std::uint32_t pid) {
+            // The name as it was always read, so that any other --process
+            // name matches exactly what it matched before; the path as
+            // GameInstall reads a running program's.
+            Owner o;
+            o.name = process_name_for_pid(pid);
+            if (!o.name.empty()) o.path = program_path(pid);
+            return o;
+        },
+        GameInstall::here(), GameInstall::Drives::here());
+}
+
+bool SocketOwners::takes(std::uint32_t pid) {
+    // Once per process: one with many sockets would otherwise be opened, and
+    // its path held up against the game's, once per row.
+    if (const auto it = answers_.find(pid); it != answers_.end()) return it->second;
+    const Owner owner = look_up_ ? look_up_(pid) : Owner{};
+    bool taken = !owner.name.empty() && _stricmp(owner.name.c_str(), exe_name_.c_str()) == 0;
+    if (taken && by_path_ && !install_.is_game(owner.path, drives_)) {
+        taken = false;
+        ++passed_over_;
+    }
+    answers_.emplace(pid, taken);
+    return taken;
+}
+
+std::vector<ProcessConnection> connections_for_process(SocketOwners& owners) {
     std::vector<ProcessConnection> out;
     for (auto& c : tcp_connections()) {
-        if (_stricmp(c.process.c_str(), exe_name.c_str()) == 0) out.push_back(std::move(c));
+        if (owners.takes(c.pid)) out.push_back(std::move(c));
     }
     return out;
+}
+
+std::vector<ProcessConnection> connections_for_process(const std::string& exe_name) {
+    SocketOwners owners = SocketOwners::here(exe_name);
+    return connections_for_process(owners);
 }
 
 std::vector<ProcessConnection> game_connection_candidates(std::uint32_t pid) {
@@ -161,20 +204,87 @@ std::vector<std::string> local_ipv4_addresses() {
     return out;
 }
 
-std::string build_filter_for(const std::vector<ProcessConnection>& conns) {
-    if (conns.empty()) return "tcp";
+std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name) {
+    SocketOwners owners = SocketOwners::here(exe_name);
+    return udp_ports_for_process(owners);
+}
+
+std::vector<std::uint16_t> udp_ports_for_process(SocketOwners& owners) {
+    std::vector<std::uint16_t> out;
+
+    ULONG size = 0;
+    if (GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER) {
+        return out;     // no UDP sockets at all, or no table to read
+    }
+
+    std::vector<std::uint8_t> buf(size);
+    auto* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buf.data());
+    if (GetExtendedUdpTable(table, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR) {
+        GB_WARN("GetExtendedUdpTable failed");
+        return out;
+    }
+
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const MIB_UDPROW_OWNER_PID& row = table->table[i];
+        if (!owners.takes(row.dwOwningPid)) continue;
+        out.push_back(static_cast<std::uint16_t>(ntohs(static_cast<u_short>(row.dwLocalPort))));
+    }
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::string build_filter_for(const std::vector<ProcessConnection>& conns,
+                             const std::vector<std::uint16_t>& udp_ports) {
+    // UDP as well as TCP, as GoC captures it: nothing GoBot has recorded can
+    // say whether the game uses UDP, and a filter that leaves it out cannot
+    // find out.
+    if (conns.empty() && udp_ports.empty()) return "(tcp or udp)";
 
     // Match each connection by its remote endpoint. Pinning the port as well
     // as the host keeps a busy server's other services out of the sample.
-    std::ostringstream f;
-    f << "tcp and (";
-    for (std::size_t i = 0; i < conns.size(); ++i) {
-        if (i) f << " or ";
-        f << "(host " << ip_to_string(conns[i].remote.ip)
-          << " and port " << conns[i].remote.port << ")";
+    std::ostringstream servers;
+    if (!conns.empty()) {
+        servers << "(tcp or udp) and (";
+        for (std::size_t i = 0; i < conns.size(); ++i) {
+            if (i) servers << " or ";
+            servers << "(host " << ip_to_string(conns[i].remote.ip)
+                    << " and port " << conns[i].remote.port << ")";
+        }
+        servers << ")";
     }
-    f << ")";
-    return f.str();
+
+    // UDP on two kinds of port, from any host:
+    //
+    //   - the game's own UDP sockets, by their local port: a UDP server need
+    //     not listen on the port its TCP connection uses, and these are the
+    //     game's own traffic whichever server it reaches;
+    //   - the servers' ports, as GoC's own "(tcp or udp) and port 15101"
+    //     takes them, with no host: a datagram from another of the game's
+    //     hosts, to a socket the game opened after this filter was built --
+    //     on a map load, say -- is still let in.
+    std::vector<std::uint16_t> ports = udp_ports;
+    for (const auto& c : conns) ports.push_back(c.remote.port);
+    std::sort(ports.begin(), ports.end());
+    ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+    ports.erase(std::remove(ports.begin(), ports.end(), std::uint16_t{0}), ports.end());
+
+    std::ostringstream udp;
+    if (!ports.empty()) {
+        udp << "udp and (";
+        for (std::size_t i = 0; i < ports.size(); ++i) {
+            if (i) udp << " or ";
+            udp << "port " << ports[i];
+        }
+        udp << ")";
+    }
+
+    if (ports.empty()) return servers.str();
+    if (conns.empty()) return udp.str();
+    return "(" + servers.str() + ") or (" + udp.str() + ")";
 }
 
 } // namespace gobot

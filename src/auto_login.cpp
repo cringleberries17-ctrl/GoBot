@@ -1,12 +1,15 @@
 ﻿#include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/no_real_input.hpp"
 #include "gobot/session_manager.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -141,6 +144,22 @@ void* best_window(const std::vector<InputManager::WindowInfo>& all, const Spec& 
         best = w.hwnd;
     }
     return best;
+}
+
+/// Of `all`, the windows of the game's own program, told by where each one
+/// runs from (GameInstall). The game's window is found by its title, and a
+/// folder or a document named GhostOnlineVTC has that title too -- one the
+/// crossing would bring forward and click on -- as might any other program
+/// called Game.exe. A window whose program cannot be read is not the game.
+std::vector<InputManager::WindowInfo> only_the_game(std::vector<InputManager::WindowInfo> all) {
+    const GameInstall install = GameInstall::here();
+    const GameInstall::Drives drives = GameInstall::Drives::here();
+    all.erase(std::remove_if(all.begin(), all.end(),
+                             [&](const InputManager::WindowInfo& w) {
+                                 return !install.is_game(w.path, drives);
+                             }),
+              all.end());
+    return all;
 }
 
 /// The program a window belongs to, by its file name -- or its class when the
@@ -674,18 +693,28 @@ bool AutoLogin::Settings::launcher_found() const {
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-std::string AutoLogin::running_launcher(bool look) {
+std::string AutoLogin::running_launcher(bool look, const std::string& program) {
     static std::mutex mutex;
-    static std::string seen;
+    // What each program asked after was last seen running from, so that
+    // asking after one -- a test's, which nothing runs -- never hands back
+    // another's.
+    static std::map<std::string, std::string> seen;
+    const std::string key = lower(program);
+    // Reading a running program's path, to adopt it: on 2026-10-15 a test's
+    // empty launcher path became the running VTCZone's this way, and the
+    // crossing it was in then drove the real desktop.
+    if (look && refuse_real_input("read a running launcher's path, to adopt it")) return {};
     if (look) {
+        const std::wstring want = utf8_to_wide(program);
         std::string now;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        HANDLE snap = want.empty() ? INVALID_HANDLE_VALUE
+                                   : CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snap != INVALID_HANDLE_VALUE) {
             PROCESSENTRY32W entry{};
             entry.dwSize = sizeof(entry);
             if (Process32FirstW(snap, &entry)) {
                 do {
-                    if (_wcsicmp(entry.szExeFile, L"VTCZone.exe") != 0) continue;
+                    if (_wcsicmp(entry.szExeFile, want.c_str()) != 0) continue;
                     HANDLE proc =
                         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
                     if (proc == nullptr) continue;
@@ -699,19 +728,27 @@ std::string AutoLogin::running_launcher(bool look) {
             CloseHandle(snap);
         }
         std::lock_guard<std::mutex> lock(mutex);
-        if (!now.empty()) seen = now;
-        return seen;
+        if (!now.empty()) seen[key] = now;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    return seen;
+    const auto it = seen.find(key);
+    return it == seen.end() ? std::string{} : it->second;
 }
 
 bool AutoLogin::Settings::adopt_running_launcher(bool look) {
+    // A path that is there, or none at all, is kept whatever is running (see
+    // adopt_launcher). Asked first, so that the switch refuses only a path
+    // that would really be replaced.
+    if (launcher_path.empty() || launcher_found()) return false;
+    if (refuse_real_input("adopt a running VTCZone's path")) return false;
+    return adopt_launcher(running_launcher(look));
+}
+
+bool AutoLogin::Settings::adopt_launcher(const std::string& there) {
     // Only when the file's path names nothing: a path that is there is the
     // player's choice, even with another VTCZone running -- and no path at
     // all says there is no launcher to start, which is not this to undo.
     if (launcher_path.empty() || launcher_found()) return false;
-    const std::string there = running_launcher(look);
     if (there.empty() || there == launcher_path || !path_exists(there)) return false;
     static std::mutex said_mutex;
     static std::string said;
@@ -812,7 +849,9 @@ bool AutoLogin::is_security_alert(const std::string& window_class, const std::st
 }
 
 void* AutoLogin::window_of(const Settings& settings, On which) {
-    return best_window(InputManager::enumerate_windows(), spec_of(settings, which));
+    auto all = InputManager::enumerate_windows();
+    if (which == On::Game) all = only_the_game(std::move(all));
+    return best_window(all, spec_of(settings, which));
 }
 
 void* AutoLogin::minimised_window(const Settings& settings, const std::string& process) {
@@ -1073,8 +1112,9 @@ void* AutoLogin::minimised_game() {
     if (hands_.find) return nullptr;
     const std::string program =
         settings_.game_process.empty() ? std::string(kGameProcess) : settings_.game_process;
+    // Restored and brought forward once found, so only the game's own.
     std::vector<InputManager::WindowInfo> down;
-    for (InputManager::WindowInfo& w : InputManager::windows_of(program))
+    for (InputManager::WindowInfo& w : only_the_game(InputManager::windows_of(program)))
         if (IsIconic(static_cast<HWND>(w.hwnd))) down.push_back(std::move(w));
     return best_window(down, spec_of(settings_, On::Game));
 }
@@ -1100,6 +1140,14 @@ bool AutoLogin::running(const std::string& program) {
     return hands_.running ? hands_.running(program) : SessionManager::process_running(program);
 }
 
+bool AutoLogin::game_running_now(const std::string& program) {
+    if (program.empty()) return false;
+    if (hands_.running) return hands_.running(program);
+    // By where it runs from: another program called Game.exe running is no
+    // reason to leave VTCZone alone, nor one to carry on from the game.
+    return game_running(program, GameInstall::here());
+}
+
 void AutoLogin::put_vtczone_away() {
     // Once an attempt, and only once the game is up. VTCZone left over the
     // game hides it -- the game is read off the screen -- and GoC puts it
@@ -1110,7 +1158,8 @@ void AutoLogin::put_vtczone_away() {
     vtczone_put_away_ = true;
     GB_INFO("AutoLogin: the game's window is up -- minimising VTCZone, as GoC does");
     if (hands_.minimise) hands_.minimise(vtczone);
-    else ShowWindowAsync(static_cast<HWND>(vtczone), SW_SHOWMINNOACTIVE);
+    else if (!refuse_real_input("minimise VTCZone"))
+        ShowWindowAsync(static_cast<HWND>(vtczone), SW_SHOWMINNOACTIVE);
 }
 
 bool AutoLogin::grab(On which, void* hwnd, Frame& out, bool& trusted) {
@@ -1146,7 +1195,7 @@ AutoLogin::Ahead AutoLogin::ahead_now() {
     a.client = find(On::Client);
     const std::string game_program =
         settings_.game_process.empty() ? std::string(kGameProcess) : settings_.game_process;
-    a.game_up = a.game != nullptr || running(game_program);
+    a.game_up = a.game != nullptr || game_running_now(game_program);
     a.client_up = a.client != nullptr || running(settings_.client_process);
     return a;
 }
@@ -1374,13 +1423,16 @@ AutoLogin::Click AutoLogin::click(int x, int y) {
 void AutoLogin::look_around(Frame (&frames)[3], bool (&behind)[3]) {
     const auto all = hands_.find ? std::vector<InputManager::WindowInfo>{}
                                  : InputManager::enumerate_windows();
+    // The game's window as window_of finds it: the game's own program only.
+    const auto game_only = hands_.find ? std::vector<InputManager::WindowInfo>{}
+                                       : only_the_game(all);
     for (int k = 0; k < 3; ++k) {
         const On w = static_cast<On>(k);
         frames[k].width = frames[k].height = 0;     // not up unless grabbed below
         behind[k] = false;
         void* hwnd = (w == aimed_at_ && input_.window_valid()) ? input_.target_window()
                    : hands_.find                                ? hands_.find(w)
-                                                                : best_window(all, spec_of(settings_, w));
+                   : best_window(w == On::Game ? game_only : all, spec_of(settings_, w));
         bool trusted = false;
         if (grab(w, hwnd, frames[k], trusted) && !trusted) {
             // Read off the screen with something in front of it: whatever

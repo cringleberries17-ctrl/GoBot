@@ -9,7 +9,8 @@
 
 namespace gobot {
 
-/// How the game delimits messages inside its TCP stream.
+/// How the game delimits messages inside its TCP stream -- and its UDP
+/// datagrams, which use the same layout.
 ///
 /// GhostOnline's exact framing is not published, and the reference client did
 /// not carry it either — it received the opcode allowlist from a remote server
@@ -82,10 +83,33 @@ struct FramingSpec {
     /// Measured rather than guessed. Across four captures a trailer of 12
     /// takes the resync count to exactly zero at 100% coverage, while 11 and
     /// 13 leave hundreds and thousands of resyncs respectively.
+    ///
+    /// Those twelve bytes are not a trailer, though: they are the end of
+    /// another frame. See inner_offset.
     std::uint16_t trailer_opcode = 0;
     std::uint32_t trailer_bytes  = 0;
 
     bool has_trailer() const { return trailer_bytes != 0; }
+
+    /// Where a whole frame of its own starts inside a trailer_opcode frame,
+    /// counted from that frame's first byte. 0 = do not look inside.
+    ///
+    /// GoC's parser (GhostCore.dll, PacketCapture::ProcessPacketStream) reads
+    /// an 0x0081 frame as its declared length + 12 bytes and takes byte 13 to
+    /// the end as a complete game frame -- its own marker, opcode and length --
+    /// which it checks and forwards like any other. So the frame inside runs
+    /// from byte 13 to declared + 12, and the twelve bytes the length does not
+    /// count are its last twelve. Nothing inside one had ever been decoded:
+    /// the payload GoBot kept for 0x0081 starts five bytes before the inner
+    /// frame and stops twelve bytes short of its end.
+    ///
+    /// Below header_size this could not be a frame of its own, and nothing is
+    /// unwrapped. A spec built in code starts at 0 and reads exactly as it did
+    /// before; the config readers default it to 13 when the key is missing,
+    /// so a protocol.ini written before 2026-10-18 unwraps as well.
+    std::uint32_t inner_offset = 0;
+
+    bool unwraps() const { return has_trailer() && inner_offset >= header_size; }
 
     /// Total frame size, given the opcode that header carries.
     std::uint32_t total_size_for(std::uint64_t raw_length, std::uint64_t opcode) const {
@@ -101,12 +125,65 @@ struct FramingSpec {
     std::string to_ini() const;
 };
 
+/// How deep wrappers inside wrappers are opened.
+///
+/// GoC opens an 0x0081 found inside an 0x0081 too, by calling its own parser
+/// again, with no limit; each level costs only 13 bytes, so one large frame of
+/// nonsense could nest a thousand deep. Frames down to this depth come out --
+/// four, where anything real is expected at one or two -- and a wrapper at the
+/// limit comes out shut, counted in UnwrapCounts::too_deep.
+constexpr std::uint8_t kMaxWrapDepth = 4;
+
+/// What looking inside wrappers found besides the frames themselves. Every
+/// frame that could not or would not be taken out of one is counted here, and
+/// so are two things worth knowing about the ones that were.
+struct UnwrapCounts {
+    std::size_t inner      = 0;   ///< frames taken out of wrappers, at any depth
+
+    /// Wrappers left shut because their first two bytes read 0x0020 instead of
+    /// the usual marker. GoC's rule: on meeting one, it stops reading the TCP
+    /// segment it is in. GoBot reads a reassembled stream, not segments, and
+    /// each header it accepts is proven by its check word, so it skips only
+    /// what GoC would never have read in any case -- this wrapper's inside --
+    /// and keeps framing after it. A length that was not to be trusted shows
+    /// up there as resync bytes, which are counted as always. Inside another
+    /// wrapper, where no check word is required, GoC's rule is kept to the
+    /// letter: the rest of that wrapper's run of frames is not read either.
+    std::size_t unopened   = 0;
+
+    /// Insides too short to hold a frame header, or holding a frame that runs
+    /// past its end.
+    std::size_t unreadable = 0;
+
+    /// Wrappers at kMaxWrapDepth, not opened.
+    std::size_t too_deep   = 0;
+
+    /// Frames whose own length field does not match the room they fill. The
+    /// frame is still taken as the whole room, as GoC takes it; this says
+    /// how often the two readings would differ, which no capture has shown yet.
+    std::size_t length_differs = 0;
+
+    /// Frames whose header check word does not hold. GoC never checks it, so
+    /// neither does unwrapping; the count says whether inner frames carry one.
+    std::size_t checksum_bad = 0;
+
+    UnwrapCounts& operator+=(const UnwrapCounts& o);
+};
+
 /// Outcome of pulling frames off the front of a stream buffer.
 struct FrameScanResult {
+    /// In stream order. When the spec unwraps, the frames found inside a
+    /// wrapper come straight after it, marked with their depth, and the
+    /// wrapper itself keeps exactly the place and payload it always had.
     std::vector<GamePacket> packets;
     std::size_t consumed = 0;        ///< bytes to erase from the front
     std::size_t resyncs  = 0;        ///< bytes discarded hunting for alignment
     bool        locked   = false;    ///< pass back as `locked` on the next call
+    UnwrapCounts unwrap;             ///< see FramingSpec::inner_offset
+
+    /// Frames read straight off the buffer, leaving out those found inside
+    /// wrappers: the count every caller had before anything was unwrapped.
+    std::size_t outer_frames() const { return packets.size() - unwrap.inner; }
 };
 
 /// Extract as many whole frames as `buf` currently holds.
@@ -128,12 +205,58 @@ struct FrameScanResult {
 /// locked shreds a large packet that was only half-delivered. Start a stream
 /// with `locked = false` — attaching to a game that is already connected drops
 /// you mid-frame — and thread `FrameScanResult::locked` back in from then on.
+///
+/// When the spec unwraps (FramingSpec::inner_offset), each wrapper is followed
+/// by what is inside it, read the way GoC reads it:
+///
+///   - a wrapper whose first two bytes read 0x0020 is left shut and counted;
+///   - otherwise the inside is one frame filling the whole room, unless that
+///     frame is a wrapper too: then the room is read as a run of frames, each
+///     by its own length, and any wrapper among them is opened in turn, down
+///     to kMaxWrapDepth.
+///
+/// The inner frames carry the wrapper's direction and timestamp, and their
+/// payload starts after their own header_size bytes. Their header check word
+/// is not required, since GoC requires none; whether it holds is counted.
 FrameScanResult extract_frames(const FramingSpec& spec,
                                const std::uint8_t* buf,
                                std::size_t size,
                                Direction dir,
                                std::uint64_t timestamp_ms,
                                bool locked = true);
+
+/// Frame one UDP datagram on its own.
+///
+/// GoC reads each datagram as a run of whole frames from its first byte, in
+/// the same layout as the TCP stream, and so does this: the frames come out
+/// as extract_frames would give them, marked `udp`, wrappers opened the same
+/// way. Nothing carries over to the next datagram. Bytes no frame accounts
+/// for -- a frame cut short at the end, or a datagram that is not frames at
+/// all -- are counted in `resyncs`, and `consumed` is always the whole size.
+///
+/// GoC also throws away opcodes 0x002E and 0x0031 when they come over UDP.
+/// This keeps them: what they are is for a recording to show.
+FrameScanResult extract_datagram(const FramingSpec& spec,
+                                 const std::uint8_t* data,
+                                 std::size_t size,
+                                 Direction dir,
+                                 std::uint64_t timestamp_ms);
+
+/// Read a framing block -- [Framing], or [FramingClient] for what the client
+/// sends -- out of a protocol config. `found` says whether the section is
+/// there. A key that is missing takes the default, and inner_frame_offset
+/// defaults to 13 (see FramingSpec::inner_offset) so that a config written
+/// before it existed unwraps 0x0081 too.
+///
+/// One reader for gobot_sniff, gobot_cli and the tests, so that all of them
+/// frame a stream the same way.
+FramingSpec load_framing(const std::string& path, bool& found,
+                         const char* section = "Framing");
+
+/// Where a frame was found, for tools that list frames: "" for a frame off
+/// the TCP stream, otherwise e.g. "inside 0x0081", "inside 0x0081 x2", "UDP",
+/// or "UDP, inside 0x0081".
+std::string where_found(const GamePacket& p);
 
 /// How well a candidate spec explains a captured byte run.
 struct FramingScore {

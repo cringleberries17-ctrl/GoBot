@@ -18,6 +18,12 @@ namespace gobot {
 /// send is gated on the target window actually being foreground — a focus
 /// check is the difference between a key press landing in the game and
 /// landing in the user's browser.
+///
+/// Every key, click, pointer move, posted character and change of focus asks
+/// the "no real input" switch (gobot/no_real_input.hpp) and refuses while it
+/// is on: as soon as there is a window to aim at, before anything is asked of
+/// that window -- or first of all, for what goes to whatever is in front. One
+/// with no window at all does nothing, as it always did, and is not refused.
 class InputManager {
 public:
     InputManager();
@@ -29,6 +35,10 @@ public:
         std::string title;
         std::string window_class;
         std::string process;        ///< executable file name, e.g. "game.exe"
+        /// The full path of that program, UTF-8 -- what tells the game from
+        /// another program of the same name (gobot/game_install.hpp). Empty
+        /// when it cannot be read.
+        std::string path;
     };
 
     /// Every visible top-level window of a usable size, excluding our own.
@@ -47,6 +57,10 @@ public:
     ///
     /// Prefers, in order: exact title match, title starting with the string,
     /// then a plain substring hit — and never matches our own process.
+    ///
+    /// A program asked for by the game's name -- Game.exe -- is matched only
+    /// when it is the game, by where it runs from (GameInstall), never by the
+    /// name alone: plenty of other programs are called Game.exe.
     bool find_game_window(const std::string& title_substr,
                           const std::string& window_class = {},
                           const std::string& process_name = {});

@@ -19,6 +19,8 @@
 #include "gobot/macro.hpp"
 #include "gobot/map_file.hpp"
 #include "gobot/opcode_registry.hpp"
+#include "gobot/net_discovery.hpp"
+#include "gobot/packet_capture.hpp"
 #include "gobot/pathfinder.hpp"
 #include "gobot/protocol_analyzer.hpp"
 #include "gobot/minimap_tracker.hpp"
@@ -38,6 +40,8 @@
 #include "gobot/party_chat.hpp"
 #include "gobot/routine.hpp"
 #include "gobot/crash_watch.hpp"
+#include "gobot/game_install.hpp"
+#include "gobot/no_real_input.hpp"
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
 #include "gobot/reviver.hpp"
@@ -49,6 +53,7 @@
 #include <fstream>
 #include <sstream>
 #include <windows.h>
+#include <winioctl.h>
 
 #include <chrono>
 #include <cmath>
@@ -498,6 +503,1023 @@ void test_frame_trailer() {
         check(p.payload.size() == 96 - 8, "other opcodes keep their normal length");
         break;
     }
+}
+
+// ------------------------------------------------- frames inside 0x0081
+
+void put16le(Bytes& b, std::uint16_t v) {
+    b.push_back(static_cast<std::uint8_t>(v & 0xFF));
+    b.push_back(static_cast<std::uint8_t>(v >> 8));
+}
+
+/// One server frame as the game sends it: marker, opcode, total length and a
+/// check word equal to the sum of those three, then the body.
+Bytes game_frame(std::uint16_t opcode, const Bytes& body, std::uint16_t marker = 0x0005) {
+    Bytes f;
+    const auto total = static_cast<std::uint16_t>(8 + body.size());
+    put16le(f, marker);
+    put16le(f, opcode);
+    put16le(f, total);
+    put16le(f, static_cast<std::uint16_t>((marker + opcode + total) & 0xFFFF));
+    f.insert(f.end(), body.begin(), body.end());
+    return f;
+}
+
+/// An 0x0081 frame around `inner`, laid out the way GoC's parser reads one:
+/// it occupies its declared length + 12 bytes, and the inner frame is bytes 13
+/// to the end. So the declared length is the inner frame's size + 1, and five
+/// bytes of something nobody has read yet sit between the header and it.
+Bytes wrapped(const Bytes& inner, std::uint16_t marker = 0x0005) {
+    Bytes w;
+    const auto declared = static_cast<std::uint16_t>(inner.size() + 1);
+    put16le(w, marker);
+    put16le(w, 0x0081);
+    put16le(w, declared);
+    put16le(w, static_cast<std::uint16_t>((marker + 0x0081 + declared) & 0xFFFF));
+    for (int b : { 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 }) w.push_back(static_cast<std::uint8_t>(b));
+    w.insert(w.end(), inner.begin(), inner.end());
+    return w;
+}
+
+Bytes some_body(std::size_t n, std::uint8_t seed) {
+    Bytes b(n);
+    for (std::size_t i = 0; i < n; ++i) b[i] = static_cast<std::uint8_t>(seed + i * 7);
+    return b;
+}
+
+Bytes joined(std::initializer_list<Bytes> parts) {
+    Bytes out;
+    for (const Bytes& p : parts) out.insert(out.end(), p.begin(), p.end());
+    return out;
+}
+
+/// The shipped server framing, unwrapping as the config readers now set it.
+FramingSpec unwrapping_spec() {
+    FramingSpec spec;
+    spec.header_size = 8;
+    spec.length_offset = 4; spec.length_size = 2; spec.length_le = true;
+    spec.length_includes_header = true;
+    spec.opcode_offset = 2; spec.opcode_size = 2; spec.opcode_le = true;
+    spec.min_frame = 8; spec.max_frame = 16384;
+    spec.checksum_offset = 6;
+    spec.trailer_opcode = 0x0081; spec.trailer_bytes = 12;
+    spec.inner_offset = 13;
+    return spec;
+}
+
+/// The body of a move as GoC's client reads one: x and y as floats. Where they
+/// sit is not known yet; here at body offsets 8 and 12, so the test can read
+/// them back where it put them.
+Bytes move_body() {
+    Bytes b = some_body(21, 0x30);      // a 29-byte frame, GoC's minimum for 0x0027
+    const float x = 891.25f, y = 1096.0f;
+    std::memcpy(b.data() + 8, &x, 4);
+    std::memcpy(b.data() + 12, &y, 4);
+    return b;
+}
+
+bool same_frames(const std::vector<GamePacket>& a, const std::vector<GamePacket>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (a[i].opcode != b[i].opcode || a[i].payload != b[i].payload ||
+            a[i].depth != b[i].depth || a[i].from_server != b[i].from_server)
+            return false;
+    return true;
+}
+
+/// GoC's parser treats every 0x0081 as a wrapper around a whole frame: bytes
+/// 13 to the declared length + 12. GoBot dropped that as a trailer and decoded
+/// nothing inside. These are hand-built frames whose answer is known: a plain
+/// one, a wrapped one, one wrapped twice, one cut by a segment boundary, and
+/// the cases GoC's code handles specially.
+void test_unwrap() {
+    section("Frames inside 0x0081");
+
+    const FramingSpec spec = unwrapping_spec();
+    const Bytes body38 = some_body(88, 3);
+    const Bytes plain  = game_frame(0x0038, body38);          // 96 bytes
+    const Bytes body27 = move_body();
+    const Bytes move   = game_frame(0x0027, body27);          // 29 bytes
+    const Bytes w1     = wrapped(move);                       // 42 bytes, declares 30
+
+    check(spec.unwraps(), "the shipped spec, with inner_offset 13, unwraps");
+
+    // A plain frame: exactly as before.
+    {
+        const auto scan = extract_frames(spec, plain.data(), plain.size(),
+                                         Direction::ToClient, 7, false);
+        check(scan.packets.size() == 1 && scan.packets[0].opcode == 0x0038 &&
+                  scan.packets[0].payload == body38 && scan.packets[0].depth == 0 &&
+                  !scan.packets[0].udp && scan.packets[0].plain(),
+              "a plain frame comes out as before: its opcode, its body, depth 0");
+        check(scan.unwrap.inner == 0 && scan.resyncs == 0 && scan.consumed == plain.size(),
+              "with nothing unwrapped and nothing resynced");
+    }
+
+    // A wrapped frame: the wrapper as before, then the frame inside it.
+    {
+        const auto scan = extract_frames(spec, w1.data(), w1.size(),
+                                         Direction::ToClient, 7, false);
+        check(scan.packets.size() == 2,
+              "a wrapped frame gives two frames: the wrapper and the one inside -- got " +
+                  std::to_string(scan.packets.size()));
+        check(scan.consumed == w1.size() && scan.resyncs == 0,
+              "the wrapper's declared length + 12 is consumed, with no resync");
+        if (scan.packets.size() == 2) {
+            const GamePacket& outer = scan.packets[0];
+            const GamePacket& in    = scan.packets[1];
+            check(outer.opcode == 0x0081 && outer.depth == 0,
+                  "the wrapper comes first, in its place, at depth 0");
+            check(outer.payload == Bytes(w1.begin() + 8, w1.begin() + 30),
+                  "with the payload it always had: bytes 8 up to its declared length");
+            check(in.opcode == 0x0027 && in.depth == 1 && !in.plain(),
+                  "then the inner frame, with its own opcode, at depth 1");
+            check(in.payload == body27,
+                  "and its own payload: its body, from its byte 8 to the wrapper's end");
+            check(in.from_server && in.timestamp_ms == 7 && !in.udp,
+                  "in the wrapper's direction, with its time");
+            float x = 0, y = 0;
+            if (in.payload.size() >= 16) {
+                std::memcpy(&x, in.payload.data() + 8, 4);
+                std::memcpy(&y, in.payload.data() + 12, 4);
+            }
+            check(x == 891.25f && y == 1096.0f,
+                  "floats at the inner frame's body offsets 8 and 12 read back there");
+        }
+        check(scan.unwrap.inner == 1 && scan.outer_frames() == 1,
+              "one frame counted as found inside, one read off the stream");
+        check(scan.unwrap.length_differs == 0 && scan.unwrap.checksum_bad == 0,
+              "the inner frame's own length and check word agree with the room it fills");
+    }
+
+    // What was read before is read exactly the same.
+    {
+        FramingSpec off = spec;
+        off.inner_offset = 0;
+        const Bytes stream = joined({ plain, w1, plain });
+        const auto before = extract_frames(off, stream.data(), stream.size(),
+                                           Direction::ToClient, 0, false);
+        const auto after  = extract_frames(spec, stream.data(), stream.size(),
+                                           Direction::ToClient, 0, false);
+        std::vector<GamePacket> outer_after;
+        for (const auto& p : after.packets)
+            if (p.depth == 0) outer_after.push_back(p);
+        check(!off.unwraps() && same_frames(before.packets, outer_after),
+              "frames off the stream are the same, in the same order, with unwrapping as without");
+        check(before.consumed == after.consumed && before.resyncs == after.resyncs,
+              "and so are the bytes consumed and resynced");
+        check(after.packets.size() == 4 && after.packets[1].opcode == 0x0081 &&
+                  after.packets[2].opcode == 0x0027 && after.packets[2].depth == 1 &&
+                  after.packets[3].opcode == 0x0038,
+              "the inner frame comes straight after its wrapper, before the next frame");
+    }
+
+    // The stream the trailer test above uses, read with unwrapping on: its
+    // 0x0081 frames hold random bytes, not frames, and still nothing read off
+    // the stream changes.
+    {
+        const auto stream = synth_with_trailer(300, 4242, 0x0081, 12);
+        FramingSpec off = spec;
+        off.inner_offset = 0;
+        const auto before = extract_frames(off, stream.data(), stream.size(),
+                                           Direction::ToClient, 0, false);
+        const auto after  = extract_frames(spec, stream.data(), stream.size(),
+                                           Direction::ToClient, 0, false);
+        std::vector<GamePacket> outer_after;
+        for (const auto& p : after.packets)
+            if (p.depth == 0) outer_after.push_back(p);
+        check(after.outer_frames() == 300 && after.resyncs == 0 &&
+                  same_frames(before.packets, outer_after),
+              "on the trailer test's stream, unwrapping leaves all 300 frames and 0 resyncs as they were");
+        std::printf("         and finds %zu frames inside its 0x0081s, whose insides are random bytes\n",
+                    after.unwrap.inner);
+    }
+
+    // Wrapped twice, as GoC's parser handles by calling itself.
+    {
+        const Bytes body2a = some_body(28, 9);
+        const Bytes jump   = game_frame(0x002A, body2a);       // 36 bytes, GoC's minimum for 0x002A
+        const Bytes w2     = wrapped(wrapped(jump));
+        const auto scan = extract_frames(spec, w2.data(), w2.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 3,
+              "a doubly wrapped frame gives both wrappers and the frame inside -- got " +
+                  std::to_string(scan.packets.size()));
+        if (scan.packets.size() == 3) {
+            check(scan.packets[0].opcode == 0x0081 && scan.packets[0].depth == 0 &&
+                      scan.packets[1].opcode == 0x0081 && scan.packets[1].depth == 1,
+                  "the outer wrapper at depth 0, the inner one at depth 1");
+            check(scan.packets[2].opcode == 0x002A && scan.packets[2].depth == 2 &&
+                      scan.packets[2].payload == body2a,
+                  "and the innermost frame at depth 2, with its own opcode and payload");
+        }
+        check(scan.consumed == w2.size() && scan.resyncs == 0 && scan.unwrap.inner == 2,
+              "all of it consumed, no resync, two frames found inside");
+    }
+
+    // Cut by a segment boundary in the middle of the frame inside: nothing is
+    // read early, and when the rest comes the inner frame is whole.
+    {
+        const Bytes stream = joined({ plain, w1 });
+        const std::size_t cut = plain.size() + 20;
+        const auto a = extract_frames(spec, stream.data(), cut, Direction::ToClient, 0, true);
+        check(a.packets.size() == 1 && a.packets[0].opcode == 0x0038 &&
+                  a.consumed == plain.size() && a.resyncs == 0,
+              "a wrapper cut by a segment boundary waits in the buffer, nothing resynced");
+        const Bytes rest(stream.begin() + static_cast<std::ptrdiff_t>(a.consumed), stream.end());
+        const auto b = extract_frames(spec, rest.data(), rest.size(), Direction::ToClient, 0, true);
+        check(b.packets.size() == 2 && b.packets[1].opcode == 0x0027 &&
+                  b.packets[1].depth == 1 && b.packets[1].payload == body27,
+              "when the rest arrives, the frame inside comes out whole");
+    }
+
+    // A wrapper whose marker reads 0x0020: GoC stops reading the segment; here
+    // its inside is left shut and counted, and framing goes on after it.
+    {
+        const Bytes stream = joined({ wrapped(move, 0x0020), plain });
+        const auto scan = extract_frames(spec, stream.data(), stream.size(),
+                                         Direction::ToClient, 0, false);
+        check(scan.packets.size() == 2 && scan.packets[0].opcode == 0x0081 &&
+                  scan.packets[1].opcode == 0x0038,
+              "a wrapper marked 0x0020 comes out as itself, and the next frame after it");
+        check(scan.unwrap.unopened == 1 && scan.unwrap.inner == 0,
+              "its inside is not read, and that is counted, not silent");
+        check(scan.resyncs == 0 && scan.consumed == stream.size(),
+              "nothing after it is lost or resynced");
+    }
+
+    // Inside a wrapper, where no check word proves where frames start, GoC's
+    // rule is kept to the letter: a wrapper left shut ends the run it is in.
+    {
+        const Bytes run = joined({ wrapped(move, 0x0020), game_frame(0x0038, some_body(8, 4)) });
+        const Bytes w = wrapped(run);
+        const auto scan = extract_frames(spec, w.data(), w.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 2 && scan.packets[1].opcode == 0x0081 &&
+                  scan.packets[1].depth == 1,
+              "a shut wrapper inside a wrapper comes out as itself");
+        check(scan.unwrap.unopened == 1 && scan.unwrap.inner == 1,
+              "and the run of frames it was in is read no further, as GoC reads it; counted");
+        check(scan.consumed == w.size() && scan.resyncs == 0, "the stream itself goes on");
+    }
+
+    // Wrappers inside wrappers stop at the depth limit, counted.
+    {
+        Bytes deep = move;
+        for (int i = 0; i < kMaxWrapDepth + 2; ++i) deep = wrapped(deep);
+        const auto scan = extract_frames(spec, deep.data(), deep.size(),
+                                         Direction::ToClient, 0, false);
+        std::uint8_t deepest = 0;
+        for (const auto& p : scan.packets) deepest = std::max(deepest, p.depth);
+        check(deepest == kMaxWrapDepth, "nested wrappers are opened down to kMaxWrapDepth (" +
+                                            std::to_string(kMaxWrapDepth) + ") and no further");
+        check(scan.unwrap.too_deep == 1, "the wrapper at the limit is counted, not opened");
+        check(scan.consumed == deep.size() && scan.resyncs == 0,
+              "and the stream is still read whole");
+    }
+
+    // An inner frame shorter than its room is taken as the whole room, as GoC
+    // takes it, and the disagreement is counted.
+    {
+        Bytes roomy = move;
+        for (int i = 0; i < 3; ++i) roomy.push_back(0xEE);
+        const Bytes w = wrapped(roomy);
+        const auto scan = extract_frames(spec, w.data(), w.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 2 && scan.packets[1].opcode == 0x0027 &&
+                  scan.packets[1].payload.size() == body27.size() + 3,
+              "an inner frame that declares less than its room still fills the room");
+        check(scan.unwrap.length_differs == 1, "and the difference is counted");
+    }
+
+    // A wrapper inside that claims more room than there is: not read, counted.
+    {
+        const Bytes w = wrapped(game_frame(0x0081, some_body(10, 1)));
+        const auto scan = extract_frames(spec, w.data(), w.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 1 && scan.unwrap.unreadable == 1,
+              "a frame inside that runs past the wrapper's end is counted unreadable, not read");
+        check(scan.consumed == w.size() && scan.resyncs == 0, "and the stream goes on");
+    }
+
+    // An inner offset inside the header cannot be a frame of its own.
+    {
+        FramingSpec low = spec;
+        low.inner_offset = 5;
+        const auto scan = extract_frames(low, w1.data(), w1.size(), Direction::ToClient, 0, false);
+        check(!low.unwraps() && scan.packets.size() == 1,
+              "an inner offset inside the header unwraps nothing");
+    }
+
+    // How the tools name where a frame was found.
+    {
+        GamePacket p;
+        check(where_found(p).empty(), "a frame off the TCP stream needs no label");
+        p.depth = 1;
+        check(where_found(p) == "inside 0x0081", "one inside a wrapper is labelled so");
+        p.depth = 2;
+        check(where_found(p) == "inside 0x0081 x2", "and one inside two");
+        p.udp = true;
+        p.depth = 0;
+        check(where_found(p) == "UDP", "one over UDP");
+        p.depth = 1;
+        check(where_found(p) == "UDP, inside 0x0081", "and one inside a wrapper over UDP");
+    }
+}
+
+// ------------------------------------------------------------------- UDP
+
+Bytes ethernet_ipv4(std::uint8_t proto, std::uint32_t src_ip, std::uint32_t dst_ip,
+                    const Bytes& l4, std::uint16_t frag = 0x4000) {
+    Bytes f(12, 0);                         // the two MAC addresses, unused
+    f.push_back(0x08); f.push_back(0x00);   // IPv4
+    auto be16 = [&f](std::uint32_t v) {
+        f.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+        f.push_back(static_cast<std::uint8_t>(v & 0xFF));
+    };
+    f.push_back(0x45); f.push_back(0);      // version 4, a 20-byte header
+    be16(static_cast<std::uint32_t>(20 + l4.size()));
+    be16(0x1234);                           // identification
+    be16(frag);                             // 0x4000: don't fragment
+    f.push_back(64); f.push_back(proto);
+    be16(0);                                // header checksum: not checked
+    be16(src_ip >> 16); be16(src_ip & 0xFFFF);
+    be16(dst_ip >> 16); be16(dst_ip & 0xFFFF);
+    f.insert(f.end(), l4.begin(), l4.end());
+    return f;
+}
+
+Bytes udp_packet(std::uint32_t src_ip, std::uint16_t src_port,
+                 std::uint32_t dst_ip, std::uint16_t dst_port,
+                 const Bytes& payload, std::uint16_t frag = 0x4000) {
+    Bytes u;
+    for (std::uint32_t v : { std::uint32_t{ src_port }, std::uint32_t{ dst_port },
+                             static_cast<std::uint32_t>(8 + payload.size()), std::uint32_t{ 0 } }) {
+        u.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+        u.push_back(static_cast<std::uint8_t>(v & 0xFF));
+    }
+    u.insert(u.end(), payload.begin(), payload.end());
+    return ethernet_ipv4(17, src_ip, dst_ip, u, frag);
+}
+
+Bytes tcp_packet(std::uint32_t src_ip, std::uint16_t src_port,
+                 std::uint32_t dst_ip, std::uint16_t dst_port,
+                 std::uint32_t seq, const Bytes& payload) {
+    Bytes t;
+    auto be16 = [&t](std::uint32_t v) {
+        t.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+        t.push_back(static_cast<std::uint8_t>(v & 0xFF));
+    };
+    be16(src_port); be16(dst_port);
+    be16(seq >> 16); be16(seq & 0xFFFF);
+    be16(0); be16(0);                       // acknowledgement number
+    t.push_back(5 << 4);                    // a 20-byte header
+    t.push_back(0x18);                      // PSH, ACK
+    be16(65535); be16(0); be16(0);          // window, checksum, urgent
+    t.insert(t.end(), payload.begin(), payload.end());
+    return ethernet_ipv4(6, src_ip, dst_ip, t);
+}
+
+/// GoC captures UDP as well as TCP and frames each datagram the same way;
+/// GoBot never captured UDP at all. A datagram holding frames must decode
+/// exactly as the same bytes on the TCP stream, through the same capture code
+/// a live run uses, and a recording must keep the two apart.
+void test_udp_datagrams() {
+    section("UDP datagrams, framed like the TCP stream");
+
+    const FramingSpec spec = unwrapping_spec();
+    const Bytes body38   = some_body(88, 3);
+    const Bytes plain    = game_frame(0x0038, body38);
+    const Bytes body27   = move_body();
+    const Bytes w1       = wrapped(game_frame(0x0027, body27));
+    const Bytes datagram = joined({ plain, w1 });
+
+    // The framing itself.
+    {
+        const auto tcp = extract_frames(spec, datagram.data(), datagram.size(),
+                                        Direction::ToClient, 5, false);
+        const auto udp = extract_datagram(spec, datagram.data(), datagram.size(),
+                                          Direction::ToClient, 5);
+        check(udp.packets.size() == 3 && same_frames(tcp.packets, udp.packets),
+              "a datagram holding a frame and a wrapped one decodes as the same bytes on the "
+              "TCP stream: same opcodes, payloads and depths");
+        bool marked = !udp.packets.empty();
+        for (const auto& p : udp.packets) marked = marked && p.udp && !p.plain();
+        for (const auto& p : tcp.packets) marked = marked && !p.udp;
+        check(marked, "and its frames are marked as UDP");
+        check(udp.resyncs == 0 && udp.consumed == datagram.size(),
+              "with every byte accounted for");
+
+        const std::size_t cut = datagram.size() - 5;
+        const auto c = extract_datagram(spec, datagram.data(), cut, Direction::ToClient, 5);
+        check(c.packets.size() == 1 && c.resyncs == w1.size() - 5 && c.consumed == cut,
+              "a frame cut short at a datagram's end is counted unread, not kept for a next one");
+    }
+
+    constexpr std::uint32_t kServer = 0x0A000002, kClient = 0x0A000001;
+    constexpr std::uint16_t kServerPort = 15101, kClientPort = 50000;
+
+    // Through PacketCapture: Ethernet, IPv4, UDP, as the capture thread sees them.
+    std::vector<GamePacket> over_udp;
+    {
+        PacketCapture cap;
+        cap.set_framing(spec);
+        cap.set_packet_callback([&](const std::vector<GamePacket>& v) {
+            over_udp.insert(over_udp.end(), v.begin(), v.end());
+        });
+        const Bytes pkt = udp_packet(kServer, kServerPort, kClient, kClientPort, datagram);
+        check(cap.replay(pkt.data(), pkt.size(), 1), "a UDP packet runs through the capture's own code");
+        check(over_udp.size() == 3 && over_udp[0].udp && over_udp[0].from_server &&
+                  over_udp[0].opcode == 0x0038 && over_udp[0].payload == body38 &&
+                  over_udp[2].opcode == 0x0027 && over_udp[2].depth == 1 &&
+                  over_udp[2].payload == body27,
+              "and its frames come out, server to client, the wrapped one unwrapped");
+        const auto s = cap.stats();
+        check(s.udp_datagrams == 1 && s.udp_frames == 2 && s.unwrap.inner == 1 &&
+                  s.udp_unread_bytes == 0 && s.frames_decoded == 0 && s.resync_bytes == 0,
+              "counted as UDP, never as TCP frames or resyncs");
+
+        // A piece of a datagram that IP split: counted, not read.
+        const std::size_t before = over_udp.size();
+        const Bytes piece = udp_packet(kServer, kServerPort, kClient, kClientPort, datagram, 0x2000);
+        cap.replay(piece.data(), piece.size(), 2);
+        check(over_udp.size() == before && cap.stats().udp_fragments == 1,
+              "a fragment of a datagram is counted and not read as frames");
+    }
+
+    // The same bytes over TCP, in two segments cut inside the wrapped frame,
+    // through the reassembler: the same frames, not marked UDP.
+    {
+        PacketCapture cap;
+        cap.set_framing(spec);
+        std::vector<GamePacket> got;
+        cap.set_packet_callback([&](const std::vector<GamePacket>& v) {
+            got.insert(got.end(), v.begin(), v.end());
+        });
+        const std::size_t cut = plain.size() + 20;
+        const Bytes first(datagram.begin(), datagram.begin() + static_cast<std::ptrdiff_t>(cut));
+        const Bytes second(datagram.begin() + static_cast<std::ptrdiff_t>(cut), datagram.end());
+        const Bytes seg1 = tcp_packet(kServer, kServerPort, kClient, kClientPort, 1000, first);
+        const Bytes seg2 = tcp_packet(kServer, kServerPort, kClient, kClientPort,
+                                      1000 + static_cast<std::uint32_t>(cut), second);
+        cap.replay(seg1.data(), seg1.size(), 1);
+        check(got.size() == 1 && got[0].opcode == 0x0038,
+              "over TCP, the first segment gives the frame before the cut wrapper");
+        cap.replay(seg2.data(), seg2.size(), 2);
+        bool tcp_marked = got.size() == 3;
+        for (const auto& p : got) tcp_marked = tcp_marked && !p.udp;
+        check(got.size() == 3 && got[2].opcode == 0x0027 && got[2].depth == 1 &&
+                  got[2].payload == body27,
+              "the second gives the wrapper and the frame inside it, whole");
+        check(tcp_marked && same_frames(got, over_udp),
+              "the same frames as the datagram gave, marked as TCP");
+        const auto s = cap.stats();
+        check(s.frames_decoded == 2 && s.unwrap.inner == 1 && s.resync_bytes == 0 &&
+                  s.udp_datagrams == 0,
+              "counted as two frames off the stream and one found inside");
+    }
+
+    // A recording keeps the two apart: each tap is given only its own bytes,
+    // once and whole, with the direction the ports imply.
+    {
+        PacketCapture rec;
+        rec.set_raw_only(true);
+        Bytes tcp_seen, udp_seen;
+        std::vector<Direction> udp_dirs;
+        rec.set_raw_tap([&](const FlowKey&, Direction, const std::uint8_t* d, std::size_t n) {
+            tcp_seen.insert(tcp_seen.end(), d, d + n);
+        });
+        rec.set_raw_udp_tap([&](const FlowKey&, Direction dir, const std::uint8_t* d, std::size_t n) {
+            udp_seen.insert(udp_seen.end(), d, d + n);
+            udp_dirs.push_back(dir);
+        });
+        const Bytes seg  = tcp_packet(kServer, kServerPort, kClient, kClientPort, 5000, plain);
+        const Bytes down = udp_packet(kServer, kServerPort, kClient, kClientPort, w1);
+        const Bytes up   = udp_packet(kClient, kClientPort, kServer, kServerPort, move_body());
+        rec.replay(seg.data(), seg.size(), 1);
+        rec.replay(down.data(), down.size(), 2);
+        rec.replay(up.data(), up.size(), 3);
+        check(tcp_seen == plain, "the TCP tap sees the TCP bytes and nothing else");
+        check(udp_seen == joined({ w1, move_body() }),
+              "the UDP tap sees each datagram whole and nothing of the TCP stream");
+        check(udp_dirs.size() == 2 && udp_dirs[0] == Direction::ToClient &&
+                  udp_dirs[1] == Direction::ToServer,
+              "server-to-client and client-to-server datagrams are told apart, for the two files");
+    }
+
+    // The game's UDP to a host that is none of its servers -- a relay, another
+    // player -- on ports the port rule reads backwards. This machine's own
+    // address says which end is the game's, both ways round.
+    constexpr std::uint32_t kPeer = 0xCB007132;              // 203.0.113.50
+    const std::vector<Endpoint> servers = { Endpoint{ kServer, kServerPort } };
+    const std::vector<std::uint32_t> here = { kClient };
+    {
+        struct Ports { std::uint16_t client, peer; const char* what; };
+        for (const Ports& pp : { Ports{ 50123, 60000, "two high ports" },
+                                 Ports{ 9000, 15101, "two low ports" } }) {
+            const Endpoint client{ kClient, pp.client }, peer{ kPeer, pp.peer };
+            bool up_guessed = true, down_guessed = true, old_guessed = false;
+            const Direction up =
+                PacketCapture::datagram_direction(client, peer, servers, here, &up_guessed);
+            const Direction down =
+                PacketCapture::datagram_direction(peer, client, servers, here, &down_guessed);
+            const Direction by_ports =
+                PacketCapture::datagram_direction(client, peer, servers, {}, &old_guessed);
+            check(up == Direction::ToServer && down == Direction::ToClient && !up_guessed &&
+                      !down_guessed,
+                  std::string("to and from a host that is not the game's server, on ") + pp.what +
+                      " with the client's the lower: this machine's address tells them apart");
+            check(by_ports == Direction::ToClient && old_guessed,
+                  std::string("where the port numbers alone read them backwards, on ") + pp.what +
+                      ", and say that they guessed");
+        }
+
+        bool guessed = true;
+        check(PacketCapture::datagram_direction(Endpoint{ kServer, 60000 }, Endpoint{ kPeer, 50123 },
+                                                servers, here, &guessed) == Direction::ToClient &&
+                  !guessed,
+              "a known server settles it first, on any port, with this machine at neither end");
+        bool both = false, neither = false;
+        PacketCapture::datagram_direction(Endpoint{ kClient, 50123 }, Endpoint{ kClient, 15101 },
+                                          {}, here, &both);
+        PacketCapture::datagram_direction(Endpoint{ kPeer, 50123 }, Endpoint{ kPeer + 1, 15101 },
+                                          {}, here, &neither);
+        check(both && neither,
+              "with this machine at both ends, or at neither, only the ports are left, and that "
+              "is said");
+    }
+
+    // Through the capture's own code, as a recording files them: with this
+    // machine's addresses, which start() reads and a replay is given, the two
+    // go to the right files and nothing is guessed; without, the ports file
+    // them the wrong way round, and each guess is counted.
+    for (const bool told : { true, false }) {
+        PacketCapture rec;
+        rec.set_raw_only(true);
+        const bool set = !told || rec.set_local_addresses({ "10.0.0.1", "not an address" });
+        std::vector<Direction> dirs;
+        rec.set_raw_udp_tap([&](const FlowKey&, Direction dir, const std::uint8_t*, std::size_t) {
+            dirs.push_back(dir);
+        });
+        const Bytes up   = udp_packet(kClient, 50123, kPeer, 60000, move_body());
+        const Bytes down = udp_packet(kPeer, 60000, kClient, 50123, move_body());
+        rec.replay(up.data(), up.size(), 1);
+        rec.replay(down.data(), down.size(), 2);
+        const bool right = dirs.size() == 2 && dirs[0] == Direction::ToServer &&
+                           dirs[1] == Direction::ToClient;
+        if (told)
+            check(set && right && rec.stats().udp_by_port == 0,
+                  "replayed to and from that host, given this machine's address: the client's "
+                  "datagram is filed client-to-server, the host's server-to-client, none guessed");
+        else
+            check(!right && dirs.size() == 2 && rec.stats().udp_by_port == 2,
+                  "and without it, both are filed by port alone, the wrong way round, and counted");
+    }
+}
+
+/// The disconnect watchdog stops the bot after 15 s of silence from the game.
+/// Now that the filter lets UDP in as well, from the same host and port, a
+/// datagram must not count as the session being alive: the session is the
+/// TCP connection, and its silence is what the watchdog waits for.
+void test_watchdog_clock() {
+    section("The disconnect watchdog goes by the TCP connection alone");
+
+    constexpr std::uint32_t kServer = 0x0A000002, kClient = 0x0A000001;
+    constexpr std::uint16_t kServerPort = 15101, kClientPort = 50000;
+    const Bytes frame = game_frame(0x0038, some_body(88, 3));
+
+    PacketCapture cap;
+    cap.set_framing(unwrapping_spec());
+    const Bytes datagram = udp_packet(kServer, kServerPort, kClient, kClientPort, frame);
+    cap.replay(datagram.data(), datagram.size(), 1000);
+    auto s = cap.stats();
+    check(s.last_packet_ms == 1000 && s.last_tcp_ms == 0,
+          "a datagram is a packet seen, and leaves the watchdog's clock where it was");
+    check(PacketCapture::silent_for_ms(s, 60'000) == 0,
+          "and with no segment yet there is no silence for the watchdog to act on");
+
+    const Bytes segment = tcp_packet(kServer, kServerPort, kClient, kClientPort, 7000, frame);
+    cap.replay(segment.data(), segment.size(), 2000);
+    cap.replay(datagram.data(), datagram.size(), 3000);
+    s = cap.stats();
+    check(s.last_tcp_ms == 2000 && s.last_packet_ms == 3000,
+          "a TCP segment sets it, and UDP arriving after the connection went quiet does not move "
+          "it on");
+
+    // What the watchdog itself decides by. A datagram a second ago changes
+    // nothing: 16 s after the last segment the session has been silent for
+    // 16 s, past the watchdog's limit, and it reports the game gone.
+    cap.replay(datagram.data(), datagram.size(), 17'000);
+    s = cap.stats();
+    const std::uint64_t silent = PacketCapture::silent_for_ms(s, 18'001);
+    check(s.last_packet_ms == 17'000 && silent == 16'001 &&
+              silent > PacketCapture::kDisconnectSilenceMs,
+          "16 s after the last segment the watchdog reads 16 s of silence, past its 15, though a "
+          "datagram came 1 s ago");
+    check(PacketCapture::silent_for_ms(s, 2'500) == 500 &&
+              PacketCapture::silent_for_ms(s, 2'500) <= PacketCapture::kDisconnectSilenceMs,
+          "while half a second after it, it reads half a second, and lets the bot go on");
+}
+
+// ------------------------------------------------------- capture filter
+
+void test_capture_filters() {
+    section("The capture filter takes UDP as well as TCP");
+
+    CaptureConfig none;
+    check(PacketCapture::build_filter(none) == "(tcp or udp)",
+          "with nothing named, TCP and UDP both");
+
+    CaptureConfig game;
+    game.server_ip_start = game.server_ip_end = "203.0.113.10";
+    game.port_start = game.port_end = 15101;
+    check(PacketCapture::build_filter(game) ==
+              "(tcp or udp) and host 203.0.113.10 and port 15101",
+          "on the game server's address and port: " + PacketCapture::build_filter(game));
+
+    CaptureConfig range = game;
+    range.port_end = 15112;
+    check(PacketCapture::build_filter(range) ==
+              "(tcp or udp) and host 203.0.113.10 and portrange 15101-15112",
+          "and on a port range, as GoC's \"(tcp or udp) and portrange\" does");
+
+    CaptureConfig own = game;
+    own.bpf_filter = "tcp and port 15101";
+    check(PacketCapture::build_filter(own) == "tcp and port 15101",
+          "an explicit filter (--filter, bpf_filter) is used exactly as given, as before");
+
+    ProcessConnection c;
+    c.remote.ip = 0xCB00710A;            // 203.0.113.10
+    c.remote.port = 15101;
+    check(build_filter_for({ c }) ==
+              "((tcp or udp) and ((host 203.0.113.10 and port 15101))) or (udp and (port 15101))",
+          "a connection found by --process is captured over TCP and UDP, and UDP on its port from "
+          "any host, as GoC's own \"(tcp or udp) and port\" takes it");
+    check(build_filter_for({ c }, { 50123 }) ==
+              "((tcp or udp) and ((host 203.0.113.10 and port 15101))) or "
+              "(udp and (port 15101 or port 50123))",
+          "and the game's own UDP sockets by their port: " + build_filter_for({ c }, { 50123 }));
+    ProcessConnection d = c;
+    d.remote.ip = 0xCB00710B;            // 203.0.113.11
+    d.remote.port = 15112;
+    ProcessConnection e = c;
+    e.remote.ip = 0xCB00710C;            // 203.0.113.12, on the first one's port
+    check(build_filter_for({ c, d, e }, { 15101 }) ==
+              "((tcp or udp) and ((host 203.0.113.10 and port 15101) or (host 203.0.113.11 and "
+              "port 15112) or (host 203.0.113.12 and port 15101))) or "
+              "(udp and (port 15101 or port 15112))",
+          "each port once, however many servers and sockets share it: " +
+              build_filter_for({ c, d, e }, { 15101 }));
+    check(build_filter_for({}, { 50123 }) == "udp and (port 50123)",
+          "the game's own UDP sockets alone, with no connection");
+    check(build_filter_for({}) == "(tcp or udp)", "with no connection at all, TCP and UDP");
+
+    // What gobot_sniff --record refuses: a capture that nothing narrows,
+    // which would write every program's traffic on the machine to the files.
+    CaptureConfig port_only;
+    port_only.port_start = port_only.port_end = 15101;
+    CaptureConfig not_an_address;
+    not_an_address.server_ip_start = not_an_address.server_ip_end = "game.example";
+    CaptureConfig found;
+    found.bpf_filter = build_filter_for({ c }, { 50123 });
+    check(PacketCapture::captures_everything(none),
+          "with nothing named, a capture takes every flow on the machine: --record refuses it");
+    check(!PacketCapture::captures_everything(game) &&
+              !PacketCapture::captures_everything(port_only) &&
+              !PacketCapture::captures_everything(own) && !PacketCapture::captures_everything(found),
+          "an address, a port, a filter of one's own or the game's own sockets narrow it");
+    check(PacketCapture::captures_everything(not_an_address),
+          "and a --host that is not an IPv4 address narrows nothing");
+}
+
+/// --process picks sockets by their owner. Asked as Game.exe -- what a great
+/// many programs are called -- it must take the game's alone: another program
+/// of that name running beside it would put its traffic into a recording of
+/// the game's.
+void test_socket_owners() {
+    section("--process Game.exe takes the game's sockets, by where it runs from");
+
+    const std::string game_exe = "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe";
+    GameInstall install;
+    install.programs = { game_exe };
+    GameInstall::Drives drives;          // no disk to ask: the paths' text decides
+
+    // The processes owning sockets on a pretend machine, and how often each
+    // was looked up.
+    const std::map<std::uint32_t, SocketOwners::Owner> machine = {
+        { 1001, { "Game.exe", "C:\\Program Files\\Some Game\\Game.exe" } },
+        { 1002, { "Game.exe", game_exe } },
+        { 1003, { "Game.exe", "" } },
+        { 1004, { "GAME.EXE", "c:\\vtczone\\games\\ghost_online_pc_vtc\\GAME.EXE" } },
+        { 1005, { "chrome.exe", "C:\\Program Files\\Google\\Chrome\\chrome.exe" } },
+        { 1006, { "GhostOnlineVTC.exe",
+                  "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\GhostOnlineVTC.exe" } },
+        { 1007, { "GhostClient.exe", "D:\\Games\\Ghost\\GhostClient.exe" } },
+        { 1008, { "GhostClient.exe", "E:\\Copy\\GhostClient.exe" } },
+    };
+    std::map<std::uint32_t, int> asked;
+    const SocketOwners::LookUp look_up = [&](std::uint32_t pid) {
+        ++asked[pid];
+        const auto it = machine.find(pid);
+        return it == machine.end() ? SocketOwners::Owner{} : it->second;
+    };
+    const auto taken_by = [&](SocketOwners& owners) {
+        std::vector<std::uint32_t> out;
+        for (const auto& entry : machine)
+            if (owners.takes(entry.first)) out.push_back(entry.first);
+        return out;
+    };
+
+    SocketOwners game("Game.exe", look_up, install, drives);
+    check(taken_by(game) == std::vector<std::uint32_t>{ 1002, 1004 },
+          "the game's own Game.exe is taken, whatever the case, and no other: not one elsewhere, "
+          "nor one whose path cannot be read");
+    check(game.passed_over() == 2, "and the two of its name left out are counted, to be said");
+    for (int i = 0; i < 3; ++i) {
+        game.takes(1001);
+        game.takes(1002);
+    }
+    bool once = true;
+    for (const auto& entry : machine) once = once && asked[entry.first] == 1;
+    check(once && game.passed_over() == 2,
+          "each process is looked up once, however many sockets it holds");
+
+    SocketOwners other("chrome.exe", look_up, install, drives);
+    check(taken_by(other) == std::vector<std::uint32_t>{ 1005 } && other.passed_over() == 0,
+          "any other name is matched by name alone, as before");
+
+    SocketOwners nowhere("Game.exe", look_up, GameInstall{}, drives);
+    check(taken_by(nowhere).empty(),
+          "with nowhere known for the game, no Game.exe is taken for it");
+
+    GameInstall renamed;
+    renamed.programs = { "D:\\Games\\Ghost\\GhostClient.exe" };
+    SocketOwners renamed_game("ghostclient.exe", look_up, renamed, drives);
+    check(taken_by(renamed_game) == std::vector<std::uint32_t>{ 1007 },
+          "and a game installed under another name is taken by that name, by where it runs from "
+          "too");
+}
+
+// ------------------------------------------------- the config, old and new
+
+/// The player's own protocol.ini is never replaced by a build, and it was
+/// written before inner_frame_offset existed: its absence must mean 13.
+void test_framing_config() {
+    section("Reading [Framing], with and without inner_frame_offset");
+
+    const char* old_block =
+        "[Framing]\n"
+        "verified=true\n"
+        "header_size=8\n"
+        "length_offset=4\n"
+        "length_size=2\n"
+        "length_endian=little\n"
+        "length_includes_header=true\n"
+        "length_adjust=0\n"
+        "opcode_offset=2\n"
+        "opcode_size=2\n"
+        "opcode_endian=little\n"
+        "min_frame=8\n"
+        "max_frame=16384\n"
+        "checksum_offset=6\n"
+        "trailer_opcode=0x0081\n"
+        "trailer_bytes=12\n";
+
+    const std::string path = temp_file("protocol_before_p01.ini");
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << old_block;
+    }
+    bool found = false;
+    const FramingSpec spec = load_framing(path, found);
+    check(found && spec.trailer_opcode == 0x0081 && spec.trailer_bytes == 12 &&
+              spec.checksum_offset == 6,
+          "a [Framing] block from before 2026-10-18 reads as it did");
+    check(spec.inner_offset == 13 && spec.unwraps(),
+          "and, with no inner_frame_offset in it, unwraps from byte 13");
+    {
+        const Bytes w = wrapped(game_frame(0x0027, move_body()));
+        const auto scan = extract_frames(spec, w.data(), w.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 2 && scan.packets[1].opcode == 0x0027,
+              "so the player's own config finds the frame inside 0x0081");
+    }
+
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << old_block << "inner_frame_offset=0\n";
+    }
+    const FramingSpec off = load_framing(path, found);
+    check(found && off.inner_offset == 0 && !off.unwraps(), "inner_frame_offset=0 turns it off");
+
+    // What to_ini() writes reads back the same.
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << unwrapping_spec().to_ini();
+    }
+    const FramingSpec again = load_framing(path, found);
+    check(found && again.inner_offset == 13 && again.unwraps() && again.trailer_opcode == 0x0081,
+          "a spec written by to_ini() reads back with its inner offset");
+
+    bool client_found = true;
+    load_framing(path, client_found, "FramingClient");
+    check(!client_found, "a missing section is reported missing");
+    std::remove(path.c_str());
+
+#ifdef GOBOT_SOURCE_DIR
+    const std::string shipped = std::string(GOBOT_SOURCE_DIR) + "/configs/protocol.ini";
+    IniFile ini;
+    if (ini.load(shipped)) {
+        const FramingSpec s = load_framing(shipped, found);
+        check(ini.has_key("Framing", "inner_frame_offset") && s.inner_offset == 13 && s.unwraps(),
+              "the shipped protocol.ini says inner_frame_offset=13 itself");
+        bool c_found = false;
+        const FramingSpec c = load_framing(shipped, c_found, "FramingClient");
+        check(c_found && !c.unwraps(), "and the client's half, which has no wrapper, unwraps nothing");
+    } else {
+        std::printf("  [skip] the source tree's configs/protocol.ini is not here\n");
+    }
+#endif
+}
+
+// --------------------------------------------------- recordings, inside
+
+void test_capture_file_inner() {
+    section("Reading the frames inside 0x0081 out of a recording");
+
+    const FramingSpec server = unwrapping_spec();
+    FramingSpec client;
+    client.header_size = 8;
+    client.length_offset = 4; client.length_size = 2; client.length_le = true;
+    client.length_includes_header = false; client.length_adjust = 4;
+    client.opcode_offset = 6; client.opcode_size = 2; client.opcode_le = true;
+    client.min_frame = 8; client.max_frame = 32768;
+
+    const Bytes on_stream = some_body(21, 0x10);
+    const Bytes inside    = move_body();
+    const Bytes rec = joined({ game_frame(0x0027, on_stream), wrapped(game_frame(0x0027, inside)),
+                               game_frame(0x0027, on_stream), wrapped(game_frame(0x0027, inside)),
+                               wrapped(game_frame(0x0027, inside)) });
+    const std::string path = temp_file("inner_test.s2c");
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(rec.data()), static_cast<std::streamsize>(rec.size()));
+    }
+
+    std::vector<Bytes> got;
+    const capture_file::Reading plain_read =
+        capture_file::extract(path, server, client, 0x0027, got);
+    check(plain_read.ok && got.size() == 2 && got[0] == on_stream,
+          "by default, only the frames read straight off the stream, as before");
+    check(plain_read.frames == 5 && plain_read.inner == 3 && plain_read.other_kind == 3,
+          "with the frames inside counted, and those of the opcode left out said so");
+
+    got.clear();
+    const capture_file::Reading inner_read =
+        capture_file::extract(path, server, client, 0x0027, got, true);
+    check(inner_read.ok && got.size() == 3 && got[0] == inside && inner_read.other_kind == 2,
+          "with inner, only the frames found inside 0x0081, never the two mixed");
+
+    // What --verify reads, and the real-capture test below.
+    Bytes data;
+    {
+        std::ifstream in(path, std::ios::binary);
+        data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    const FrameScanResult t = capture_file::tile(data, server);
+    check(t.outer_frames() == 5 && t.unwrap.inner == 3 && t.resyncs == 0 && t.consumed == rec.size(),
+          "tiling the recording: 5 frames off the stream, 3 inside, no resync");
+    const FrameScanResult as_client = capture_file::tile(data, server, Direction::ToServer);
+    bool labelled = as_client.packets.size() == t.packets.size() && !t.packets.empty();
+    for (std::size_t i = 0; labelled && i < t.packets.size(); ++i)
+        labelled = t.packets[i].from_server && !as_client.packets[i].from_server &&
+                   as_client.packets[i].payload == t.packets[i].payload;
+    check(labelled, "the direction --verify gives a client half only labels the frames it reads");
+
+    // Every frame at once, as the --from commands read it. A recording of UDP
+    // -- <name>.udp.s2c, the datagrams one after another -- reads the same,
+    // each frame marked as having come over UDP.
+    {
+        const std::string udp_path = temp_file("inner_test.udp.s2c");
+        {
+            std::ofstream out(udp_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(rec.data()), static_cast<std::streamsize>(rec.size()));
+        }
+        std::vector<GamePacket> over_tcp, over_udp;
+        const capture_file::Reading rt = capture_file::read_all(path, server, client, over_tcp);
+        const capture_file::Reading ru = capture_file::read_all(udp_path, server, client, over_udp);
+        bool tcp_plain = over_tcp.size() == 8, udp_marked = over_udp.size() == 8;
+        std::size_t unwrapped = 0;
+        for (const auto& p : over_tcp) tcp_plain = tcp_plain && !p.udp;
+        for (const auto& p : over_udp) {
+            udp_marked = udp_marked && p.udp;
+            if (p.depth == 1 && p.opcode == 0x0027 && p.payload == inside) ++unwrapped;
+        }
+        check(rt.ok && ru.ok && rt.half == capture_file::Half::Server && tcp_plain && udp_marked &&
+                  unwrapped == 3,
+              "every frame of a recording at once, wrappers' insides after them; a .udp.s2c one's "
+              "marked as come over UDP");
+        check(capture_file::udp_from_name("walk.udp.c2s") &&
+                  capture_file::udp_from_name("WALK.UDP.S2C") &&
+                  !capture_file::udp_from_name("walk.s2c") &&
+                  !capture_file::udp_from_name("walk.flow0.s2c"),
+              "and only a recording named .udp.s2c or .udp.c2s holds UDP");
+        std::remove(udp_path.c_str());
+    }
+    std::remove(path.c_str());
+}
+
+// ---------------------------------------------- the world model holds back
+
+void test_protocol_handler_holds_back() {
+    section("The world model leaves frames from inside 0x0081 and UDP alone");
+
+    OpcodeRegistry reg;
+    PacketSpec mv;
+    mv.opcode = 0x0201;
+    mv.semantic = Semantic::SelfMove;
+    mv.fields = OpcodeRegistry::parse_field_list("id:u32,x:f32,y:f32", nullptr);
+    reg.add(mv);
+
+    GameState st;
+    ProtocolHandler ph(reg, st);
+
+    auto move_to = [](float x, float y) {
+        GamePacket p;
+        p.opcode = 0x0201;
+        p.payload.assign(12, 0);
+        p.payload[0] = 0x2A;
+        std::memcpy(p.payload.data() + 4, &x, 4);
+        std::memcpy(p.payload.data() + 8, &y, 4);
+        return p;
+    };
+
+    const Vec2 start = st.self().pos;
+    GamePacket inner = move_to(100.0f, 100.0f);
+    inner.depth = 1;
+    GamePacket udp = move_to(200.0f, 200.0f);
+    udp.udp = true;
+    ph.on_packet(inner);
+    ph.on_packet(udp);
+    check(st.self().pos.x == start.x && st.self().pos.y == start.y,
+          "a mapped frame from inside 0x0081, or over UDP, moves nothing");
+
+    ph.on_packet(move_to(640.0f, 480.0f));
+    check(std::abs(st.self().pos.x - 640.0f) < 0.01f, "the same frame off the TCP stream still does");
+
+    const auto s = ph.stats();
+    check(s.held_back == 2 && s.decoded == 1 && s.unknown == 0 && s.malformed == 0,
+          "the two held back are counted as such, not as unknown or malformed");
+}
+
+// ------------------------------------------------------ a real capture
+
+/// A capture taken from the game still tiles, read the way gobot_sniff
+/// --verify reads it. Real captures stay out of the repository -- they can
+/// hold a character's name -- so the file is named by GOBOT_TEST_CAPTURE.
+void test_real_capture() {
+    section("A real capture still tiles (GOBOT_TEST_CAPTURE)");
+
+    wchar_t buf[1024]{};
+    const DWORD n = GetEnvironmentVariableW(L"GOBOT_TEST_CAPTURE", buf,
+                                            static_cast<DWORD>(std::size(buf)));
+    if (n == 0 || n >= std::size(buf)) {
+        std::printf("  [skip] SKIPPED: GOBOT_TEST_CAPTURE is not set, so there is no "
+                    "real capture to tile\n");
+        return;
+    }
+    const std::string path = wide_to_utf8(std::wstring(buf, n));
+
+    // The shipped config, as package.ps1 ships it; the copy beside this test
+    // when the source tree is not here.
+    std::string config = exe_relative("configs/protocol.ini");
+#ifdef GOBOT_SOURCE_DIR
+    if (path_exists(std::string(GOBOT_SOURCE_DIR) + "/configs/protocol.ini"))
+        config = std::string(GOBOT_SOURCE_DIR) + "/configs/protocol.ini";
+#endif
+    bool found = false;
+    const FramingSpec spec = load_framing(config, found);
+    check(found, "[Framing] read from " + config);
+
+    Bytes data;
+    {
+        std::ifstream in(utf8_to_wide(path).c_str(), std::ios::binary);
+        data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    check(!data.empty(), "the capture is read: " + path);
+    if (data.empty() || !found) return;
+
+    const FrameScanResult scan = capture_file::tile(data, spec);
+    std::printf("         %zu bytes: %zu frames off the stream, %zu inside 0x0081, "
+                "%zu consumed, %zu resync bytes\n",
+                data.size(), scan.outer_frames(), scan.unwrap.inner, scan.consumed, scan.resyncs);
+    check(scan.outer_frames() > 0, "it holds frames");
+    check(scan.resyncs == 0, "and tiles with 0 resyncs");
+
+    FramingSpec off = spec;
+    off.inner_offset = 0;
+    const FrameScanResult before = capture_file::tile(data, off);
+    std::vector<GamePacket> outer;
+    for (const auto& p : scan.packets)
+        if (p.depth == 0) outer.push_back(p);
+    check(same_frames(before.packets, outer) && before.consumed == scan.consumed &&
+              before.resyncs == scan.resyncs,
+          "reading the same frames off the stream as it did with unwrapping off");
 }
 
 /// Each direction needs its own framing, and the shipped config must carry both.
@@ -3042,6 +4064,54 @@ void test_session_manager() {
     }
 }
 
+/// The game's windows on this desktop now (class GhostSoul), where they are.
+/// Only looked at: for keeping the test's own windows off them.
+std::vector<RECT> game_windows_on_screen() {
+    std::vector<RECT> out;
+    for (HWND g = FindWindowExW(nullptr, nullptr, L"GhostSoul", nullptr); g != nullptr;
+         g = FindWindowExW(nullptr, g, L"GhostSoul", nullptr)) {
+        RECT r{};
+        if (IsWindowVisible(g) && !IsIconic(g) && GetWindowRect(g, &r)) out.push_back(r);
+    }
+    return out;
+}
+
+/// Whether `r` is over any of `games`.
+bool over_the_game(const RECT& r, const std::vector<RECT>& games) {
+    for (const RECT& g : games) {
+        RECT both{};
+        if (IntersectRect(&both, &r, &g)) return true;
+    }
+    return false;
+}
+
+/// Where the test's windows that are kept on top can go: `w` by `h`, `margin`
+/// in from a corner of the work area, and over no window of the game's.
+///
+/// They sit over whatever is there for the moments a test needs them. Over
+/// the game they would hide its HUD -- the landmark, the HP and MP bars --
+/// from a GoBot the player is running, which reads this game off the screen,
+/// and take the player's clicks there. The top left, as always, when the game
+/// is not up; false when no corner is clear of it, and the test is left out.
+bool clear_of_the_game(int w, int h, int margin, POINT& at) {
+    RECT work{};
+    SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
+    const std::vector<RECT> games = game_windows_on_screen();
+    const POINT corners[] = {
+        { work.left + margin, work.top + margin },
+        { work.right - margin - w, work.top + margin },
+        { work.left + margin, work.bottom - margin - h },
+        { work.right - margin - w, work.bottom - margin - h },
+    };
+    for (const POINT& c : corners) {
+        if (!over_the_game(RECT{ c.x, c.y, c.x + w, c.y + h }, games)) {
+            at = c;
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The auto-login with no game, no launcher and no window: its table, its
 /// settings file old and new, how it decides where it is, and what it says.
 /// Nothing here can start or click anything -- every flow that is run stops
@@ -3593,25 +4663,37 @@ void test_auto_login() {
     }
 
     // VTCZone installed somewhere other than the file says: while it runs,
-    // its own path is used -- only read off the process, nothing is started
-    // -- and never over a path in the file that is there.
+    // its own path is used -- and never over a path in the file that is
+    // there, nor in place of no path at all. Decided on a path handed in as
+    // the running one's: reading a running program's path is refused in this
+    // process (see test_no_real_input), so no VTCZone is asked anything.
     {
-        const std::string running = AutoLogin::running_launcher(true);
-        if (running.empty()) {
-            std::printf("  [skip] VTCZone is not running here, so there is no path to take from it\n");
-        } else {
-            AutoLogin::Settings moved;
-            moved.launcher_path = temp_file("gobot_no_vtczone_here.exe");
-            check(moved.adopt_running_launcher(false) && moved.launcher_path == running &&
-                      moved.launcher_found(),
-                  "a launcher path that names nothing, with VTCZone running: the running one's is used");
-            wchar_t self[MAX_PATH]{};
-            GetModuleFileNameW(nullptr, self, MAX_PATH);
-            AutoLogin::Settings kept;
-            kept.launcher_path = wide_to_utf8(self);
-            check(!kept.adopt_running_launcher(false) && kept.launcher_path == wide_to_utf8(self),
-                  "and a path that is there is kept, whatever else is running");
-        }
+        const std::string elsewhere = temp_file("gobot_test_vtczone_elsewhere.exe");
+        { std::ofstream(elsewhere) << "x"; }
+        AutoLogin::Settings moved;
+        moved.launcher_path = temp_file("gobot_no_vtczone_here.exe");
+        check(moved.adopt_launcher(elsewhere) && moved.launcher_path == elsewhere &&
+                  moved.launcher_found(),
+              "a launcher path that names nothing, with VTCZone running elsewhere: the running "
+              "one's is used");
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        AutoLogin::Settings kept;
+        kept.launcher_path = wide_to_utf8(self);
+        check(!kept.adopt_launcher(elsewhere) && kept.launcher_path == wide_to_utf8(self),
+              "and a path that is there is kept, whatever else is running");
+        // The 2026-10-15 case: a test's empty path became the running
+        // VTCZone's, and the crossing it was in went on to the real desktop.
+        AutoLogin::Settings none;
+        none.launcher_path.clear();
+        check(!none.adopt_launcher(elsewhere) && none.launcher_path.empty(),
+              "and no path at all stays none: no launcher to start is not undone by one running");
+        AutoLogin::Settings gone;
+        gone.launcher_path = temp_file("gobot_no_vtczone_here.exe");
+        check(!gone.adopt_launcher(temp_file("gobot_test_vtczone_gone.exe")) &&
+                  gone.launcher_path == temp_file("gobot_no_vtczone_here.exe"),
+              "nor is a running path taken that is not there");
+        std::remove(elsewhere.c_str());
     }
 
     // What the simple screen says when the crossing stops, and whether
@@ -3894,15 +4976,20 @@ void test_auto_login() {
                                    nullptr, self, nullptr);
         };
         const DWORD on_top = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-        RECT work{};
-        SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
-        const int x0 = static_cast<int>(work.left) + 40;
-        const int y0 = static_cast<int>(work.top) + 40;
+        // Room for the target, every window put over or beside it, and the
+        // launcher's stand-in below -- clear of the game, if it is up.
+        POINT spot{};
+        const bool clear = clear_of_the_game(320, 210, 40, spot);
+        const int x0 = static_cast<int>(spot.x);
+        const int y0 = static_cast<int>(spot.y);
 
-        HWND target = make(on_top, WS_POPUP, "", x0, y0, 240, 160, nullptr);
+        HWND target = clear ? make(on_top, WS_POPUP, "", x0, y0, 240, 160, nullptr) : nullptr;
         if (target) ShowWindow(target, SW_SHOWNOACTIVATE);
         const POINT middle{ x0 + 120, y0 + 80 };
-        if (target == nullptr || WindowFromPoint(middle) != target) {
+        if (!clear) {
+            std::printf("  [skip] the game is up and no corner of the screen is clear of it: the "
+                        "click tests' windows would cover it\n");
+        } else if (target == nullptr || WindowFromPoint(middle) != target) {
             // Something else kept on top there, or no desktop to show on.
             std::printf("  [skip] a test window could not be put on top here\n");
         } else {
@@ -3990,30 +5077,37 @@ void test_auto_login() {
             // like that was never looked at, and its wait ran out as "not
             // found".
             const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            SetWindowPos(target, nullptr, left - 100, y0, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            if (AutoLogin::landing(target, 60, 40) == L::OffScreen &&
-                AutoLogin::landing(target, 120, 80) == L::Lands &&
-                AutoLogin::landing(target, 180, 40) == L::Lands &&
-                AutoLogin::landing(target, 180, 120) == L::Lands) {
-                check(AutoLogin::uncovered(target),
-                      "a window dragged part off the screen, nothing over it, is uncovered");
-
-                // Kept on top, wholly past the screen's edge, over only the
-                // part of it out there: nobody sees that part, the frame
-                // included. Counted, the bottom of a game taller than the
-                // screen -- under a hidden taskbar's rest -- had a working
-                // game waited on until it was given up.
-                HWND past = make(on_top, WS_POPUP, "", left - 90, y0 + 20, 80, 60, nullptr);
-                if (past) ShowWindow(past, SW_SHOWNOACTIVATE);
-                std::string by = "x";
-                check(past != nullptr && AutoLogin::over(target) == nullptr &&
-                          AutoLogin::uncovered(target, &by) && by.empty(),
-                      "a window kept on top wholly off the screen, over only the part of it out "
-                      "there, is in nobody's way");
-                if (past) DestroyWindow(past);
+            // The quarter of it left on the screen is where the screen
+            // begins, which has to be clear of the game as well.
+            if (over_the_game(RECT{ left, y0, left + 140, y0 + 160 }, game_windows_on_screen())) {
+                std::printf("  [skip] the game is at the screen's left edge, where the test "
+                            "window would go half off the screen\n");
             } else {
-                std::printf("  [skip] the test window could not be put half off the screen\n");
+                SetWindowPos(target, nullptr, left - 100, y0, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                if (AutoLogin::landing(target, 60, 40) == L::OffScreen &&
+                    AutoLogin::landing(target, 120, 80) == L::Lands &&
+                    AutoLogin::landing(target, 180, 40) == L::Lands &&
+                    AutoLogin::landing(target, 180, 120) == L::Lands) {
+                    check(AutoLogin::uncovered(target),
+                          "a window dragged part off the screen, nothing over it, is uncovered");
+
+                    // Kept on top, wholly past the screen's edge, over only
+                    // the part of it out there: nobody sees that part, the
+                    // frame included. Counted, the bottom of a game taller
+                    // than the screen -- under a hidden taskbar's rest -- had
+                    // a working game waited on until it was given up.
+                    HWND past = make(on_top, WS_POPUP, "", left - 90, y0 + 20, 80, 60, nullptr);
+                    if (past) ShowWindow(past, SW_SHOWNOACTIVATE);
+                    std::string by = "x";
+                    check(past != nullptr && AutoLogin::over(target) == nullptr &&
+                              AutoLogin::uncovered(target, &by) && by.empty(),
+                          "a window kept on top wholly off the screen, over only the part of it "
+                          "out there, is in nobody's way");
+                    if (past) DestroyWindow(past);
+                } else {
+                    std::printf("  [skip] the test window could not be put half off the screen\n");
+                }
             }
 
             SetWindowPos(target, nullptr, left - 1000, y0, 0, 0,
@@ -4040,9 +5134,13 @@ void test_auto_login() {
         const std::string title = "GoBot test launcher " + std::to_string(GetCurrentProcessId());
         AutoLogin::Settings s;
         s.launcher_window = title;
-        HWND down = make(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, title.c_str(),
-                         x0, y0, 300, 200, nullptr);
-        if (down == nullptr) {
+        HWND down = clear ? make(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW,
+                                 title.c_str(), x0, y0, 300, 200, nullptr)
+                          : nullptr;
+        if (!clear) {
+            std::printf("  [skip] the game is up and no corner of the screen is clear of it: the "
+                        "launcher's stand-in, shown again, would cover it\n");
+        } else if (down == nullptr) {
             std::printf("  [skip] could not make a window to minimise here\n");
         } else {
             ShowWindow(down, SW_SHOWMINNOACTIVE);
@@ -4078,13 +5176,16 @@ void test_auto_login() {
         wc.hInstance = self;
         wc.lpszClassName = "GoBotTestPretendGame";
         RegisterClassA(&wc);        // already there from an earlier run: the same
-        RECT work{};
-        SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
-        const int x0 = static_cast<int>(work.left) + 60;
-        const int y0 = static_cast<int>(work.top) + 60;
-        HWND game = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                                    wc.lpszClassName, "", WS_POPUP, x0, y0, 240, 160, nullptr,
-                                    nullptr, self, nullptr);
+        // Kept on top for every crossing below: clear of the real game, if it
+        // is up.
+        POINT spot{};
+        const bool clear = clear_of_the_game(240, 160, 60, spot);
+        const int x0 = static_cast<int>(spot.x);
+        const int y0 = static_cast<int>(spot.y);
+        HWND game = clear ? CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                            wc.lpszClassName, "", WS_POPUP, x0, y0, 240, 160,
+                                            nullptr, nullptr, self, nullptr)
+                          : nullptr;
         if (game) ShowWindow(game, SW_SHOWNOACTIVATE);
         // VTCZone's stand-in is never shown: only its picture is looked at.
         HWND vtczone = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "",
@@ -4160,7 +5261,10 @@ void test_auto_login() {
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
         };
 
-        if (game == nullptr || vtczone == nullptr) {
+        if (!clear) {
+            std::printf("  [skip] the game is up and no corner of the screen is clear of it: the "
+                        "pretend crossings' game window would cover it\n");
+        } else if (game == nullptr || vtczone == nullptr) {
             std::printf("  [skip] could not make the pretend game's windows here\n");
         } else {
             {
@@ -4509,6 +5613,573 @@ void test_party_invite() {
     }
 }
 
+/// The "no real input" switch, which main() turns on before the first test.
+///
+/// Each kind of reaching the real desktop is tried through the path GoBot
+/// itself takes, and each has to refuse, say so once, and leave nothing done.
+/// Every one is aimed where nothing could happen even with the guard broken --
+/// at a window of this test's own that has gone, at a hidden one that is
+/// never in front, at a key no program listens for, at a program that is not
+/// there, at a process number nobody has -- so that a broken guard shows as a
+/// failed check, never as a key in somebody's editor.
+void test_no_real_input() {
+    section("No real input: every way of reaching the desktop is refused");
+
+    check(real_input_forbidden(), "the switch is on before the first test runs");
+
+    // How many times the guard refused during one call.
+    const auto refusals_in = [](const std::function<void()>& call) {
+        const std::uint64_t before = real_input_refusals();
+        call();
+        return real_input_refusals() - before;
+    };
+
+    // A window of this test's own, never shown, so never in front: the focus
+    // gate behind the guard would stop a key or a character as well.
+    const HINSTANCE self = GetModuleHandleA(nullptr);
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = self;
+    wc.lpszClassName = "GoBotTestNoRealInput";
+    RegisterClassA(&wc);        // already there from an earlier run: the same
+    HWND hidden = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "",
+                                  WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, self, nullptr);
+    // Whatever reached it -- a key, a character, a command, a request to
+    // close -- taken off its queue and counted.
+    const auto reached_it = [&] {
+        int n = 0;
+        MSG m{};
+        while (hidden != nullptr && PeekMessageA(&m, hidden, 0, 0, PM_REMOVE))
+            if (m.message == WM_KEYDOWN || m.message == WM_KEYUP || m.message == WM_CHAR ||
+                m.message == WM_IME_CHAR || m.message == WM_COMMAND || m.message == WM_CLOSE)
+                ++n;
+        return n;
+    };
+    reached_it();       // anything Windows put there itself, before counting
+
+    // ---- a key ----
+    {
+        // Unassigned: no program anywhere listens for it.
+        constexpr std::uint32_t kNobodysKey = 0x97;
+        InputManager keys;
+        keys.set_target_window(hidden);
+        bool pressed = true, held = true, typed = true, unicode = true;
+        check(refusals_in([&] { pressed = keys.key_press(kNobodysKey, 1); }) == 1 && !pressed,
+              "a key press is refused, and said once");
+        check(refusals_in([&] { held = keys.key_down(kNobodysKey); }) == 1 && !held,
+              "so is holding a key down");
+        check(refusals_in([&] { typed = keys.type_key(kNobodysKey, true, 1); }) == 1 && !typed &&
+                  refusals_in([&] { unicode = keys.type_unit(L'x'); }) == 1 && !unicode,
+              "and typing one, with Shift or as Unicode");
+        check(hidden != nullptr && !keys.is_held(kNobodysKey) &&
+                  (GetAsyncKeyState(static_cast<int>(kNobodysKey)) & 0x8000) == 0 &&
+                  reached_it() == 0,
+              "and nothing is held, by GoBot or by Windows, nor reached the window aimed at");
+    }
+
+    // A window of this test's own that has gone: aimed at, there is nowhere
+    // for a click, the pointer or the focus to go. Its handle is not taken
+    // again in the moments this runs -- Windows hands a reused slot a new one.
+    HWND gone = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "",
+                                WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, self, nullptr);
+    if (gone != nullptr) DestroyWindow(gone);
+
+    // ---- a click, and the pointer ----
+    if (gone == nullptr || IsWindow(gone)) {
+        std::printf("  [skip] could not make a window and let it go here\n");
+    } else {
+        // Where the pointer is, before and after: read, never set.
+        POINT before{}, after{};
+        const bool read_before = GetCursorPos(&before) != FALSE;
+        InputManager pointer;
+        pointer.set_target_window(gone);
+        bool clicked = true, right = true, dragged = true, moved = true;
+        check(refusals_in([&] { clicked = pointer.click_at(5, 5); }) == 1 && !clicked &&
+                  refusals_in([&] { right = pointer.click_at(5, 5, true); }) == 1 && !right,
+              "a click is refused, left or right, and said once");
+        check(refusals_in([&] { dragged = pointer.drag(5, 5, 40, 40); }) == 1 && !dragged,
+              "so is a drag");
+        check(refusals_in([&] { moved = pointer.move_pointer(5, 5); }) == 1 && !moved,
+              "and the pointer is not moved");
+        const bool read = read_before && GetCursorPos(&after) != FALSE;
+        if (!read)
+            std::printf("  [skip] Windows would not say where the pointer is, so it was not "
+                        "compared\n");
+        else if (after.x != before.x || after.y != before.y)
+            // Each call above was refused before Windows was asked, and aimed
+            // at a window that is gone: something else moved it -- a hand on
+            // the mouse, most likely -- which is not this test's to judge.
+            std::printf("  [skip] the pointer moved while these ran, by a hand on the mouse most "
+                        "likely, so where it is was not compared\n");
+        else
+            check(after.x == before.x && after.y == before.y,
+                  "and Windows reads the pointer exactly where it was before them");
+    }
+
+    // ---- focus ----
+    if (gone != nullptr && !IsWindow(gone)) {
+        InputManager front;
+        front.set_target_window(gone);
+        bool brought = true;
+        check(refusals_in([&] { brought = front.focus_window(); }) == 1 && !brought,
+              "bringing a window to the front is refused, and said once");
+    }
+
+    // With no window at all nothing is aimed at, as before the switch, so
+    // there is nothing to refuse: a test whose pretend game has no window does
+    // not fill the log with refusals that were never a reach for the desktop.
+    {
+        InputManager none;
+        bool any = false;
+        const auto n = refusals_in([&] {
+            any = none.key_press(0x97, 1) || none.click_at(5, 5) || none.move_pointer(5, 5) ||
+                  none.drag(5, 5, 40, 40) || none.focus_window() || none.post_char(L'x', false);
+        });
+        check(!any && n == 0, "aimed at no window at all, nothing happens and nothing is refused");
+    }
+
+    // ---- a message to another program's window ----
+    {
+        InputManager chat;
+        chat.set_target_window(hidden);
+        bool posted = true, ime = true;
+        check(refusals_in([&] { posted = chat.post_char(L'x', false); }) == 1 && !posted &&
+                  refusals_in([&] { ime = chat.post_char(L'x', true); }) == 1 && !ime,
+              "a character posted to a window is refused, as WM_CHAR and as WM_IME_CHAR");
+
+        // The keeper's shut-down, with a box to dismiss that is that hidden
+        // window, and programs to close and end that nobody has.
+        CrashWatch::Settings s;
+        s.game_process = "gobot_test_no_such_game.exe";
+        s.launcher_process = "gobot_test_no_such_launcher.exe";
+        s.reporter_process = {};
+        CrashWatch keeper(s);
+        GameInstall nowhere;
+        nowhere.programs = { temp_file("gobot_test_no_such_game.exe") };
+        keeper.set_install(nowhere);
+        CrashWatch::Look box;
+        box.what = CrashWatch::Trouble::ErrorBox;
+        box.dialog = hidden;
+        bool shut = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto n = refusals_in([&] { shut = keeper.shut_down(box); });
+        const double took =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        check(!shut && n == 1 && took < 1.0,
+              "the keeper's shut-down is refused at once, said once, before it dismisses, "
+              "closes, ends or waits on anything");
+        check(reached_it() == 0 && IsWindow(hidden),
+              "and nothing was posted to the box it would have dismissed");
+    }
+
+    // ---- a program started ----
+    {
+        bool started = true;
+        check(refusals_in([&] {
+                  started = SessionManager::start_program(
+                      temp_file("gobot_test_no_such_program.exe"));
+              }) == 1 &&
+                  !started && !SessionManager::process_running("gobot_test_no_such_program.exe"),
+              "starting a program is refused, said once, and nothing runs under its name");
+    }
+
+    // ---- a program ended ----
+    {
+        // A process number nobody has: above any Windows hands out, and asked
+        // after to be sure -- without the right to do anything to it.
+        const unsigned long nobody = 0xFFFFFFF0ul;
+        const HANDLE there = OpenProcess(SYNCHRONIZE, FALSE, nobody);
+        if (there != nullptr) CloseHandle(there);
+        GameInstall nowhere;
+        nowhere.programs = { temp_file("gobot_test_no_such_game.exe") };
+        if (there != nullptr) {
+            std::printf("  [skip] a process numbered 0x%lX is running here\n", nobody);
+        } else {
+            bool ended = true;
+            check(refusals_in([&] { ended = end_game_program(nobody, nowhere); }) == 1 && !ended,
+                  "ending a program is refused, and said once");
+        }
+        int how_many = -1;
+        check(refusals_in([&] { how_many = end_game("gobot_test_no_such_game.exe", nowhere); }) ==
+                      1 &&
+                  how_many == 0,
+              "so is ending the game, by its name and where it is installed");
+        how_many = -1;
+        check(refusals_in([&] {
+                  how_many = end_beside_the_game("gobot_test_no_such_launcher.exe", nowhere);
+              }) == 1 &&
+                  how_many == 0,
+              "and ending the game's launcher, by its name and the game's folder");
+    }
+
+    // ---- a launcher's path, read off a running program to adopt it ----
+    {
+        // Asked after a program nothing runs, as the starting and ending
+        // above are: with the switch broken, there would still be no real
+        // launcher's path read, nor kept for the adopting below.
+        std::string seen = "x";
+        check(refusals_in([&] {
+                  seen = AutoLogin::running_launcher(true, "gobot_test_no_such_launcher.exe");
+              }) == 1 &&
+                  seen.empty(),
+              "reading a running launcher's path is refused, said once, and nothing is read");
+        AutoLogin::Settings s;
+        s.launcher_path = temp_file("gobot_test_no_vtczone_here.exe");
+        bool adopted = true;
+        // Without a fresh look, so that the refusal is the adopting's own.
+        check(refusals_in([&] { adopted = s.adopt_running_launcher(false); }) == 1 && !adopted &&
+                  s.launcher_path == temp_file("gobot_test_no_vtczone_here.exe"),
+              "and so is adopting one: the path in the file stays as it was");
+    }
+
+    if (hidden) DestroyWindow(hidden);
+    check(real_input_forbidden(), "and the switch is still on: nothing turned it off");
+}
+
+/// Make the folder `link` a junction to the folder `target`, as mklink /J
+/// does -- which needs no rights beyond the folder's own. Both full paths.
+/// False when this disk will not have one.
+bool make_junction(const std::wstring& link, const std::wstring& target) {
+    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
+    HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        RemoveDirectoryW(link.c_str());
+        return false;
+    }
+    // A mount point's reparse data: the tag, the length of what follows the
+    // first eight bytes, then where in the path buffer the kernel's form of
+    // the target and its printable form each are, then the two, each ended.
+    const std::wstring kernel = L"\\??\\" + target;
+    const auto sub = static_cast<USHORT>(kernel.size() * sizeof(wchar_t));
+    const auto print = static_cast<USHORT>(target.size() * sizeof(wchar_t));
+    const auto paths = static_cast<USHORT>(sub + sizeof(wchar_t) + print + sizeof(wchar_t));
+    std::vector<unsigned char> data(16 + paths, 0);
+    const auto put = [&data](std::size_t at, const void* from, std::size_t n) {
+        std::memcpy(data.data() + at, from, n);
+    };
+    const ULONG tag = IO_REPARSE_TAG_MOUNT_POINT;
+    const USHORT after_header = static_cast<USHORT>(8 + paths);
+    const USHORT print_at = static_cast<USHORT>(sub + sizeof(wchar_t));
+    const USHORT zero = 0;
+    put(0, &tag, 4);
+    put(4, &after_header, 2);
+    put(8, &zero, 2);
+    put(10, &sub, 2);
+    put(12, &print_at, 2);
+    put(14, &print, 2);
+    put(16, kernel.c_str(), sub);
+    put(16 + print_at, target.c_str(), print);
+    DWORD got = 0;
+    const BOOL made = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, data.data(),
+                                      static_cast<DWORD>(data.size()), nullptr, 0, &got, nullptr);
+    CloseHandle(h);
+    if (!made) RemoveDirectoryW(link.c_str());
+    return made != FALSE;
+}
+
+/// The one rule for the game: by where a program runs from, never by its
+/// name alone. Pretend lists of what is running and a pretend disk, so that
+/// nothing here depends on the game being installed, or running, here.
+void test_game_install() {
+    section("The game, told by where it runs from");
+
+    GameInstall install;
+    install.programs = { "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" };
+    // Two drives, and the 8.3 names this pretend disk gives two folders.
+    GameInstall::Drives drives;
+    drives.devices = { { "C:", "\\Device\\HarddiskVolume3" },
+                       { "D:", "\\Device\\HarddiskVolume7" } };
+    drives.long_name = [](const std::string& path) -> std::string {
+        std::string up = path;
+        for (char& c : up)
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        if (up == "C:\\VTCZONE\\GAMES\\GHOST_~1\\GAME.EXE")
+            return "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe";
+        if (up == "C:\\PROGRA~1\\SOMEGA~1\\GAME.EXE") return "C:\\Program Files\\Some Game\\Game.exe";
+        return {};
+    };
+
+    const std::vector<RunningProgram> running = {
+        { 1001, "Game.exe", "C:\\Program Files\\Some Game\\Game.exe" },
+        { 1002, "Game.exe", "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1003, "Game.exe", "" },
+        { 1004, "GAME.EXE", "c:\\vtczone\\games\\ghost_online_pc_vtc\\GAME.exe" },
+        { 1005, "Game.exe", "\\\\?\\C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1006, "Game.exe", "\\Device\\HarddiskVolume3\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1007, "Game.exe", "\\Device\\HarddiskVolume7\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1008, "Game.exe", "C:/VTCZone/Games/Ghost_Online_PC_VTC/Game.exe" },
+        { 1009, "GAME.EXE", "C:\\VTCZONE\\GAMES\\GHOST_~1\\GAME.EXE" },
+        { 1010, "GAME.EXE", "C:\\PROGRA~1\\SOMEGA~1\\GAME.EXE" },
+        { 1011, "Game.exe", "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\bin\\Game.exe" },
+        { 1012, "Game.exe", "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC_old\\Game.exe" },
+        { 1013, "Game.exe", "\\Device\\HarddiskVolume30\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1014, "Game.exe", "\\\\server\\share\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1015, "Game.exe", "C:\\VTCZone\\Games\\Other\\..\\Ghost_Online_PC_VTC\\.\\Game.exe" },
+        { 1016, "Game.exe", "\\??\\C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1017, "Game.exe",
+          "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1018, "Game.exe", "C:\\VTCZone\\Games\\\\Ghost_Online_PC_VTC\\Game.exe" },
+        { 1019, "GhostOnlineVTC.exe", "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\GhostOnlineVTC.exe" },
+    };
+    const auto is = [&](unsigned long pid) {
+        for (const RunningProgram& p : running)
+            if (p.pid == pid) return install.is_game(p, drives);
+        return false;
+    };
+    check(!is(1001), "a Game.exe outside the game's folder is not the game");
+    check(is(1002), "the game's own Game.exe is");
+    check(!is(1003), "one whose path cannot be read is not the game");
+    check(is(1004), "whatever the case of its path");
+    check(is(1005) && is(1016) && is(1017),
+          "with Windows' \\\\?\\ in front of its path, or the kernel's \\??\\ or \\\\?\\GLOBALROOT");
+    check(is(1006), "in the kernel's \\Device\\ form, on the drive the game is installed on");
+    check(!is(1007) && !is(1013),
+          "but not in the same folders on another drive, nor on a device whose name only starts "
+          "the same");
+    check(is(1008), "with forward slashes");
+    check(is(1015) && is(1018), "with '.', '..' or a doubled separator in its path");
+    check(is(1009), "by its 8.3 short name");
+    check(!is(1010), "while another Game.exe's short name is still another Game.exe");
+    check(!is(1011) && !is(1012),
+          "a Game.exe in a folder inside the game's is not it, nor one in a folder whose name "
+          "starts the same");
+    check(!is(1014), "nor one on a share with the same folders");
+    check(!is(1019), "and the game's launcher beside it is not the game");
+
+    std::vector<unsigned long> taken;
+    for (const RunningProgram& p : install.games_among(running, drives)) taken.push_back(p.pid);
+    check(taken == std::vector<unsigned long>{ 1002, 1004, 1005, 1006, 1008, 1009, 1015, 1016,
+                                               1017, 1018 },
+          "of everything running, only the game's own are taken -- what a keeper would end");
+
+    GameInstall unknown;
+    check(unknown.games_among(running, drives).empty() && unknown.names_the_game("Game.exe"),
+          "with nowhere known for the game, nothing is the game -- and a program asked for as "
+          "Game.exe still has to be, so none is taken for it");
+
+    check(install.names_the_game("game.exe") && install.names_the_game(" Game.exe ") &&
+              !install.names_the_game("GhostOnlineVTC.exe") && !install.names_the_game(""),
+          "a program asked for as Game.exe, whatever the case, has to be the game; others need not");
+    GameInstall renamed;
+    renamed.programs = { "D:\\Games\\Ghost\\GhostClient.exe" };
+    check(renamed.names_the_game("ghostclient.exe") &&
+              renamed.is_game("D:\\Games\\Ghost\\GhostClient.exe", drives),
+          "and a game installed under another name is asked for by that name too");
+
+    check(GameInstall::program_in_icon("C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe") ==
+                  "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" &&
+              GameInstall::program_in_icon("\"C:\\Games\\Ghost Online\\Game.exe\",0") ==
+                  "C:\\Games\\Ghost Online\\Game.exe" &&
+              GameInstall::program_in_icon(" C:\\Games\\Ghost\\Game.exe,0 ") ==
+                  "C:\\Games\\Ghost\\Game.exe",
+          "the installer's record is read whether its path is quoted or not, with or without "
+          "which icon");
+    check(GameInstall::program_in_icon("C:\\Games\\Ghost\\ghost.ico") ==
+                  "C:\\Games\\Ghost\\Game.exe" &&
+              GameInstall::program_in_icon("C:\\Games, old\\Game.exe") ==
+                  "C:\\Games, old\\Game.exe" &&
+              GameInstall::program_in_icon("").empty(),
+          "an icon file names the Game.exe beside it, a comma in a folder's name stays, and an "
+          "empty record names nothing");
+
+    {
+        GameInstall vn;
+        vn.programs = { "D:\\Trò chơi\\Ghost Online\\Game.exe" };
+        check(vn.is_game("d:\\TRÒ CHƠI\\ghost online\\GAME.EXE", drives),
+              "a folder named in Vietnamese, whatever the case of its letters");
+    }
+
+    // A game installed through a junction -- C:\VTCZone moved to D:\ and a
+    // junction left behind -- or on a subst drive: its record names the path
+    // it was installed by, and Windows gives the running program's path as
+    // where the file really is. The two are told to be one file by what is on
+    // disk, here a pretend disk whose files say which they are.
+    {
+        GameInstall moved;
+        moved.programs = { "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" };
+        GameInstall::Drives disk = drives;
+        int asked = 0;
+        disk.file_id = [&asked](const std::string& path) -> std::string {
+            ++asked;
+            std::string up = path;
+            for (char& c : up)
+                if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+            if (up == "C:\\VTCZONE\\GAMES\\GHOST_ONLINE_PC_VTC\\GAME.EXE" ||
+                up == "D:\\VTCZONE\\GAMES\\GHOST_ONLINE_PC_VTC\\GAME.EXE" ||
+                up == "D:\\ELSEWHERE\\RENAMED.EXE")
+                return "7:100";
+            if (up == "C:\\VTCZONE\\GAMES\\GHOST_ONLINE_PC_VTC" ||
+                up == "D:\\VTCZONE\\GAMES\\GHOST_ONLINE_PC_VTC")
+                return "7:99";
+            if (up == "E:\\COPY\\GAME.EXE") return "9:100";
+            if (up == "E:\\COPY") return "9:99";
+            return {};
+        };
+        check(moved.is_game("D:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe", disk),
+              "a game reached through a junction, running from where it leads, is the game");
+        check(!moved.is_game("E:\\Copy\\Game.exe", disk) && !moved.is_game("F:\\Gone\\Game.exe", disk),
+              "while another file of its name is not, nor is one that cannot be opened");
+        asked = 0;
+        const bool other_name = moved.is_game("D:\\Elsewhere\\Renamed.exe", disk);
+        check(!other_name && asked == 0,
+              "and a program of another name is never even asked of the disk: every window on the "
+              "screen is held up against the game this way");
+        check(!install.is_game("D:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe", drives),
+              "with no way to ask the disk, the paths' text decides, as before");
+
+        check(moved.beside_the_game("C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\GhostOnlineVTC.exe",
+                                    disk) &&
+                  moved.beside_the_game(
+                      "d:\\vtczone\\games\\ghost_online_pc_vtc\\GhostOnlineVTC.exe", disk),
+              "the game's launcher sits beside it -- in its folder, or there through the junction");
+        check(!moved.beside_the_game("C:\\Users\\Someone\\Downloads\\GhostOnlineVTC.exe", disk) &&
+                  !moved.beside_the_game("E:\\Copy\\GhostOnlineVTC.exe", disk) &&
+                  !moved.beside_the_game(
+                      "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\bin\\GhostOnlineVTC.exe", disk) &&
+                  !moved.beside_the_game("", disk) &&
+                  !GameInstall{}.beside_the_game(
+                      "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\GhostOnlineVTC.exe", disk),
+              "and one of its name anywhere else is not the game's launcher: another folder, a copy "
+              "of the game, a folder inside the game's, no path, or no game known");
+    }
+
+    // Where the game is installed, out of what this machine says: the
+    // installer's records, the usual place, the programs seen behind the
+    // game's window -- with a pretend disk saying which files are there.
+    {
+        const std::string usual = "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe";
+        const std::string elsewhere = "D:\\Games\\Ghost_Online_PC_VTC\\Game.exe";
+        const auto on_disk = [](const std::vector<std::string>& there) {
+            return [there](const std::string& path) {
+                return std::find(there.begin(), there.end(), path) != there.end();
+            };
+        };
+        check(GameInstall::found({ elsewhere, "" }, {}, on_disk({ usual }), drives).programs ==
+                  std::vector<std::string>{ usual },
+              "a record naming a folder since deleted or moved is dropped, and the game in the "
+              "usual place is known all the same");
+        check(GameInstall::found({ elsewhere }, {}, on_disk({ elsewhere, usual }), drives)
+                      .programs == std::vector<std::string>{ elsewhere, usual },
+              "a record that is there is kept, and the usual place beside it");
+        check(GameInstall::found({ usual }, {}, on_disk({ usual }), drives).programs ==
+                  std::vector<std::string>{ usual },
+              "the usual place, recorded, is one place and not two");
+        check(GameInstall::found({ elsewhere }, {}, on_disk({}), drives).programs.empty() &&
+                  GameInstall::found({}, { "E:\\Seen\\Game.exe" }, on_disk({}), drives).programs ==
+                      std::vector<std::string>{ "E:\\Seen\\Game.exe" },
+              "with nothing there, nowhere -- but a program seen behind the game's window needs no "
+              "asking");
+    }
+
+    // This machine's own drives and short names, on this test's own program.
+    // Nothing is printed about where that is: a folder with somebody's name
+    // in it.
+    {
+        const GameInstall::Drives here = GameInstall::Drives::here();
+        wchar_t self[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        const std::string me = wide_to_utf8(self);
+        GameInstall mine;
+        mine.programs = { me };
+        check(mine.is_game(me, here) && mine.is_game("\\\\?\\" + me, here),
+              "on this machine: this test's own program is itself, in the \\\\?\\ form too");
+        wchar_t native[1024]{};
+        DWORD size = 1024;
+        if (QueryFullProcessImageNameW(GetCurrentProcess(), PROCESS_NAME_NATIVE, native, &size))
+            check(mine.is_game(wide_to_utf8(std::wstring(native, size)), here),
+                  "and as the kernel names it, \\Device\\ and all, read off this machine's drives");
+        else
+            std::printf("  [skip] Windows would not give this program's path in the kernel's form\n");
+        wchar_t shorter[MAX_PATH]{};
+        const DWORD n = GetShortPathNameW(self, shorter, MAX_PATH);
+        if (n > 0 && n < MAX_PATH && std::wstring(shorter) != std::wstring(self))
+            check(mine.is_game(wide_to_utf8(shorter), here),
+                  "and by the short name this disk gives it");
+        else
+            std::printf("  [skip] this disk gives this test's folder no short names\n");
+        check(!mine.is_game(temp_file("gobot_test.exe"), here),
+              "while a program of the same name in another folder is not it");
+
+        // And off the list of what is really running.
+        bool listed = false;
+        for (const RunningProgram& p : programs_called("GOBOT_TEST.EXE"))
+            if (p.pid == GetCurrentProcessId()) listed = !p.path.empty();
+        GameInstall away;
+        away.programs = { temp_file("gobot_test.exe") };
+        check(listed && game_running("gobot_test.exe", mine) &&
+                  !game_running("gobot_test.exe", away),
+              "this test is among the programs running under its name, path and all -- and is "
+              "the game only where the game is installed");
+    }
+
+    // And on this machine's own disk, in this run's scratch folder: a
+    // junction and a hard link each lead to one file by another path, as a
+    // game installed through a junction does.
+    {
+        const GameInstall::Drives here = GameInstall::Drives::here();
+        const std::string real = temp_file("gi_real");
+        const std::string copy = temp_file("gi_copy");
+        const std::string hard = temp_file("gi_hard");
+        const std::string link = temp_file("gi_link");
+        const auto put_file = [](const std::string& path, const char* text) {
+            std::ofstream f(std::filesystem::path(utf8_to_wide(path)), std::ios::binary);
+            f << text;
+            return static_cast<bool>(f);
+        };
+        const bool made = CreateDirectoryW(utf8_to_wide(real).c_str(), nullptr) &&
+                          CreateDirectoryW(utf8_to_wide(copy).c_str(), nullptr) &&
+                          CreateDirectoryW(utf8_to_wide(hard).c_str(), nullptr) &&
+                          put_file(real + "\\Game.exe", "the game") &&
+                          put_file(copy + "\\Game.exe", "another program");
+        const bool joined =
+            made && make_junction(utf8_to_wide(link), utf8_to_wide(real));
+        const bool linked =
+            made && CreateHardLinkW(utf8_to_wide(hard + "\\Game.exe").c_str(),
+                                    utf8_to_wide(real + "\\Game.exe").c_str(), nullptr) != FALSE;
+        if (made)
+            check(here.file_id &&
+                      !here.file_id(GameInstall::plain(real + "\\Game.exe", here)).empty() &&
+                      here.file_id(GameInstall::plain(copy + "\\Game.exe", here)) !=
+                          here.file_id(GameInstall::plain(real + "\\Game.exe", here)) &&
+                      here.file_id("\\\\gobot-test-no-such-server\\share\\Game.exe").empty() &&
+                      here.file_id("\\Device\\Mup\\gobot-test-no-such-server\\share\\Game.exe")
+                          .empty(),
+                  "a file on this disk is known by its number there, two files by two numbers -- "
+                  "and nothing across the network is ever asked");
+        if (!joined) {
+            std::printf("  [skip] this disk would not take a junction here\n");
+        } else {
+            GameInstall through;
+            through.programs = { link + "\\Game.exe" };
+            check(through.is_game(real + "\\Game.exe", here),
+                  "on this disk: a record naming the junction's path, and the game running from "
+                  "where it leads, are one program");
+            check(!through.is_game(copy + "\\Game.exe", here),
+                  "while a file of the same name in another folder is another program");
+            check(through.beside_the_game(real + "\\GhostOnlineVTC.exe", here) &&
+                      !through.beside_the_game(copy + "\\GhostOnlineVTC.exe", here),
+                  "and a launcher in the folder the junction leads to is beside the game, one in "
+                  "another folder is not");
+        }
+        if (!linked) {
+            std::printf("  [skip] this disk would not take a hard link here\n");
+        } else {
+            GameInstall at;
+            at.programs = { real + "\\Game.exe" };
+            check(at.is_game(hard + "\\Game.exe", here) && !at.is_game(copy + "\\Game.exe", here),
+                  "a hard link to the game's own file is that file; a copy of it is not");
+        }
+        // The junction first, by itself: removing it leaves what it leads to.
+        if (joined) RemoveDirectoryW(utf8_to_wide(link).c_str());
+        for (const std::string& file : { hard + "\\Game.exe", copy + "\\Game.exe",
+                                          real + "\\Game.exe" })
+            DeleteFileW(utf8_to_wide(file).c_str());
+        for (const std::string& folder : { hard, copy, real })
+            RemoveDirectoryW(utf8_to_wide(folder).c_str());
+    }
+}
+
 void test_crash_watch() {
     section("Crash watch");
 
@@ -4564,6 +6235,51 @@ void test_crash_watch() {
               "the game's own window is not a box");
     }
 
+    // Windows' crash reporter puts up the same box for every program that
+    // crashes. Whose crash it is, is on its command line: the process after
+    // -p. Only a reporter reporting on the game speaks for the game.
+    {
+        check(CrashWatch::reported_pid("C:\\WINDOWS\\SysWOW64\\WerFault.exe -u -p 9876 -s 1088") ==
+                      9876 &&
+                  CrashWatch::reported_pid(
+                      "\"C:\\Windows\\system32\\WerFault.exe\" -pss -s 464 -p 1812 -ip 1812") ==
+                      1812 &&
+                  CrashWatch::reported_pid("werfault.exe /h /shared Global\\a1b2 /t 4300 /P 3504") ==
+                      3504,
+              "a crash reporter's command line names the process it reports on, after -p or /p, "
+              "whatever the case");
+        check(CrashWatch::reported_pid("C:\\WINDOWS\\system32\\WerFault.exe -k -rq") == 0 &&
+                  CrashWatch::reported_pid("WerFault.exe -pss -s 464") == 0 &&
+                  CrashWatch::reported_pid("WerFault.exe -u -p 18x -s 1") == 0 &&
+                  CrashWatch::reported_pid("WerFault.exe -u -p") == 0 &&
+                  CrashWatch::reported_pid("WerFault.exe -u -p 99999999999") == 0 &&
+                  CrashWatch::reported_pid("") == 0,
+              "and one that names none -- a queued report, -pss alone, a number that is not one -- "
+              "reports on nothing");
+        check(CrashWatch::reported_pid("\"C:\\Program Files\\x -p 7\\WerFault.exe\" -u -p 42") == 42,
+              "a -p inside the quoted path of the program is not taken for one");
+
+        const std::vector<RunningProgram> games = {
+            { 1812, "Game.exe", "C:\\VTCZone\\Games\\Ghost_Online_PC_VTC\\Game.exe" }
+        };
+        check(CrashWatch::reports_on("WerFault.exe -u -p 1812 -s 5", games) &&
+                  !CrashWatch::reports_on("WerFault.exe -u -p 4242 -s 5", games) &&
+                  !CrashWatch::reports_on("WerFault.exe -k -rq", games) &&
+                  !CrashWatch::reports_on("WerFault.exe -u -p 1812 -s 5", {}),
+              "a crash reporter is the game's only while it reports on one of the game's programs: "
+              "not on another program's crash, and not with the game not running");
+
+        // Windows tells a program's command line for the asking: this test's
+        // own, here, as it was started.
+        std::string mine = CrashWatch::command_line_of(GetCurrentProcessId());
+        for (char& c : mine)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        check(mine.find("gobot_test") != std::string::npos &&
+                  CrashWatch::command_line_of(0).empty() &&
+                  CrashWatch::command_line_of(0xFFFFFFF0ul).empty(),
+              "a program's command line is read off it, and a program that is not there has none");
+    }
+
     // The settings survive the file. A restart cap that did not load would be
     // a bot that keeps reconnecting to a server which is refusing it.
     {
@@ -4591,6 +6307,17 @@ void test_crash_watch() {
               "unusable values are clamped");
     }
 
+    // Where the game is installed, for the looks below: this test's own
+    // program stands in for it, and a folder of the test's own for anywhere
+    // else -- so nothing here depends on the game being installed, or
+    // running, on this machine.
+    wchar_t self_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self_path, MAX_PATH);
+    GameInstall here_too;
+    here_too.programs = { wide_to_utf8(self_path) };
+    GameInstall elsewhere;
+    elsewhere.programs = { temp_file("gobot_test.exe") };
+
     // A look at a machine where the game is certainly not running says so,
     // and says it without a capture, a template or a window.
     {
@@ -4598,6 +6325,7 @@ void test_crash_watch() {
         s.game_process = "surely_nothing_is_called_this.exe";
         s.reporter_process = {};
         CrashWatch watch(s);
+        watch.set_install(elsewhere);
         const auto seen = watch.look();
         check(seen.what == CrashWatch::Trouble::Gone,
               "a client that is not running reads as gone");
@@ -4610,7 +6338,58 @@ void test_crash_watch() {
         s.game_process = "gobot_test.exe";
         s.reporter_process = {};
         CrashWatch watch(s);
+        watch.set_install(here_too);
         check(!watch.look().bad(), "a running, answering program reads as fine");
+
+        // The same program with the game installed somewhere else is only
+        // called what the game is called: not watched, so not followed, and
+        // never ended as a client that fell over.
+        CrashWatch other(s);
+        other.set_install(elsewhere);
+        check(other.look().what == CrashWatch::Trouble::Gone,
+              "a program merely called what the game is called, running from another folder, "
+              "is not the game: the client reads as gone");
+    }
+
+    // A crash box up for another program: not the game's, so the keeper
+    // neither answers it nor ends its reporter. The box is a window of this
+    // test's own, put up off every screen; the reporter is this test's own
+    // program, whose command line names no -p. Before, the reporter's name
+    // alone made such a box the game's, and the keeper's shut-down then ended
+    // the game and every program of the reporter's name.
+    {
+        const HINSTANCE self = GetModuleHandleA(nullptr);
+        WNDCLASSA wc{};
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = self;
+        wc.lpszClassName = "GoBotTestOtherCrashBox";
+        RegisterClassA(&wc);        // already there from an earlier run: the same
+        const int far_x = GetSystemMetrics(SM_XVIRTUALSCREEN) - 4000;
+        const int far_y = GetSystemMetrics(SM_YVIRTUALSCREEN) - 4000;
+        HWND box = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
+                                   "Some Program has stopped working", WS_POPUP, far_x, far_y,
+                                   200, 100, nullptr, nullptr, self, nullptr);
+        if (box) ShowWindow(box, SW_SHOWNOACTIVATE);
+        // What the rule is for: a box of the reporter's program, read as one.
+        bool a_box = false;
+        for (const auto& w : InputManager::windows_of("gobot_test.exe"))
+            if (box != nullptr && w.hwnd == box)
+                a_box = CrashWatch::looks_like_a_box(w.window_class, w.title,
+                                                     InputManager::window_text(w.hwnd));
+        if (!a_box) {
+            std::printf("  [skip] could not put up a box of this test's own here\n");
+        } else {
+            CrashWatch::Settings s;
+            s.game_process = "gobot_test_no_such_game.exe";
+            s.reporter_process = "gobot_test.exe";
+            CrashWatch watch(s);
+            watch.set_install(elsewhere);
+            const auto seen = watch.look();
+            check(seen.what == CrashWatch::Trouble::Gone && seen.dialog == nullptr,
+                  "another program's crash box, up while the game is not running, is not the "
+                  "game's: the client reads as gone, with no box to answer");
+        }
+        if (box) DestroyWindow(box);
     }
 
     // What a keeper does about one look. BẮT ĐẦU with the game closed waits
@@ -10928,17 +12707,37 @@ void test_chat_alone(void (*check)(bool, const std::string&), void (*section)(co
 void test_use(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
+    // Before anything else, and never turned off. From here on nothing in this
+    // process presses a key, clicks, moves the pointer, changes the focus,
+    // posts to another program's window, starts or ends a program, or adopts
+    // a running launcher's path: a test that reaches for the real desktop is
+    // refused, in the log as an error, instead of acting. On 2026-10-15 one
+    // drove a real login crossing on the player's PC for three minutes.
+    forbid_real_input();
+
     Logger::instance().set_level(LogLevel::Error);   // keep test output readable
 
     std::printf("GoBot self-tests\n");
     // This run's scratch folder: see temp_file.
     if (!run_temp_dir().empty()) CreateDirectoryW(run_temp_dir().c_str(), nullptr);
 
+    test_no_real_input();
+    // Every refusal from here on is a test reaching for the real desktop.
+    const std::uint64_t guard_refusals = real_input_refusals();
     test_byte_reader();
     test_framing_extract();
     test_framing_detect();
     test_checksum_framing();
     test_frame_trailer();
+    test_unwrap();
+    test_udp_datagrams();
+    test_watchdog_clock();
+    test_capture_filters();
+    test_socket_owners();
+    test_framing_config();
+    test_capture_file_inner();
+    test_protocol_handler_holds_back();
+    test_real_capture();
     test_capture_file();
     test_both_framings_configured();
     test_reassembler();
@@ -10971,6 +12770,7 @@ int main() {
     test_anchored_bars();
     test_session_manager();
     test_auto_login();
+    test_game_install();
     test_crash_watch();
     test_party_invite();
     test_map_table();
@@ -11003,7 +12803,21 @@ int main() {
     test_log_each_start();
     test_protocol_handler();
 
+    // A reach outside the switch's own test was refused, and its error is in
+    // the log -- but a line in a log is what a check by hand misses, and
+    // package.ps1 goes by the exit code alone. So it fails the run.
+    section("Nothing but the switch's own test reached for the real desktop");
+    const std::uint64_t outside = real_input_refusals() - guard_refusals;
+    check(outside == 0,
+          outside == 0 ? std::string("no test reached for the real desktop outside the switch's own")
+                       : std::to_string(outside) +
+                             " reach(es) for the real desktop outside the switch's own test -- "
+                             "give that test pretend hands");
+
     std::printf("\n%s\n", std::string(50, '-').c_str());
+    // Each refusal is in the log above, as an error naming what was refused.
+    std::printf("%llu reach(es) for the real desktop refused\n",
+                static_cast<unsigned long long>(real_input_refusals()));
     std::printf("%d passed, %d failed\n", g_passed, g_failed);
     if (!run_temp_dir().empty()) {
         std::error_code ec;

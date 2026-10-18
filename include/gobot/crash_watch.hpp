@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gobot/config.hpp"
+#include "gobot/game_install.hpp"
 
 #include <string>
 #include <vector>
@@ -34,6 +35,13 @@ namespace gobot {
 /// hand it over for the asking. Matching a template would mean having a
 /// picture of every error this game can produce, and would still say nothing
 /// about which one it was.
+///
+/// The game is told by where it runs from, never by its name alone
+/// (GameInstall): another program called Game.exe is neither watched, nor
+/// followed, nor ended. So is everything else this touches: the launcher only
+/// beside the game, Windows' crash reporter only while it is reporting on the
+/// game. Neither name is the game's alone, and a box of somebody else's crash
+/// taken for the game's once ended a healthy client.
 class CrashWatch {
 public:
     enum class Trouble {
@@ -65,13 +73,19 @@ public:
     struct Settings {
         /// The game, and the launcher that starts it. Both are ended on the
         /// way to logging back in: leaving the launcher behind means the next
-        /// crossing finds a window it did not put there.
+        /// crossing finds a window it did not put there. Of the programs
+        /// called `game_process`, only the game's own is: the one running
+        /// from where the game is installed. Of those called
+        /// `launcher_process`, only the one in the game's own folder.
         std::string game_process = "Game.exe";
         std::string launcher_process = "GhostOnlineVTC.exe";
 
         /// Windows' own crash reporter. It puts up "Game.exe has stopped
         /// working" on behalf of a program that can no longer speak for
-        /// itself, so a crash can leave no dialog of the game's at all.
+        /// itself, so a crash can leave no dialog of the game's at all. It
+        /// does the same for every program that crashes, so its box counts,
+        /// and it is ended, only while it is reporting on the game: the
+        /// process its command line names after -p is one of the game's.
         std::string reporter_process = "WerFault.exe";
 
         /// How long a window may stay unresponsive before it counts as hung.
@@ -104,6 +118,14 @@ public:
     void set_settings(const Settings& s) { settings_ = s; }
     Settings settings() const { return settings_; }
 
+    /// Where the game is installed, which tells it from other programs of its
+    /// name. Found afresh on every look unless set: a test sets one of its
+    /// own, so that a program of its own can stand in for the game.
+    void set_install(GameInstall install) {
+        install_ = std::move(install);
+        install_set_ = true;
+    }
+
     /// One look. Cheap: no capture, no template, just Win32 asking after a
     /// handful of windows.
     Look look();
@@ -112,7 +134,12 @@ public:
     ///
     /// Dismisses the error box first if there is one, because a process with a
     /// modal dialog up will not exit on its own, and a crash reporter left
-    /// running holds the executable open for the next start.
+    /// running holds the executable open for the next start. Only ever the
+    /// game's own: the box only when it is still the game's or its reporter's,
+    /// the launcher only beside the game, the reporter only while it reports
+    /// on the game -- anything else of those names is left alone and said so.
+    /// Refused, at once and with nothing posted or ended, under the "no real
+    /// input" switch.
     bool shut_down(const Look& seen);
 
     /// What a keeper does about one look -- the GUI's and the command line's
@@ -144,11 +171,41 @@ public:
                                  const std::string& title,
                                  const std::string& text);
 
+    /// The process a crash reporter is reporting on, read off its command
+    /// line -- "WerFault.exe -u -p 9876 -s 1088", "... -pss -s 464 -p 1812
+    /// -ip 1812" -- by the number after -p (or /p) standing on its own. 0
+    /// when the line names none, which is never taken for the game.
+    static unsigned long reported_pid(const std::string& command_line);
+
+    /// Whether a crash reporter started with `command_line` is reporting on
+    /// one of `games`.
+    static bool reports_on(const std::string& command_line,
+                           const std::vector<RunningProgram>& games);
+
+    /// The command line program `pid` was started with, UTF-8, or "" when
+    /// Windows will not say. Asked with no more right than reading where a
+    /// program runs from takes (Windows 8.1 and later answer it), and asked
+    /// only of the crash reporter -- never of the game.
+    static std::string command_line_of(unsigned long pid);
+
 private:
+    /// The install set, or this machine's as found now.
+    GameInstall game_install() const { return install_set_ ? install_ : GameInstall::here(); }
+
+    /// Whether a box is one to dismiss for the game: the game's own, or a
+    /// crash reporter's that is reporting on one of `games`.
+    bool box_for_the_game(void* box, const std::vector<RunningProgram>& games) const;
+
     Settings settings_;
+    GameInstall install_;
+    bool install_set_ = false;
 
     /// When the window was first seen not answering. Zero when it is fine.
     long long hung_since_ms_ = 0;
+
+    /// The last crash reporter found speaking for another program, so that
+    /// leaving it alone is said once rather than on every look.
+    unsigned long told_other_reporter_ = 0;
 };
 
 } // namespace gobot

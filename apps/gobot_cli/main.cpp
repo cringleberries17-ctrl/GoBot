@@ -663,31 +663,8 @@ std::string resolve(const std::string& path) {
     return exe_relative(path);
 }
 
-FramingSpec load_framing(const std::string& path, bool& found,
-                         const char* section = "Framing") {
-    FramingSpec spec;
-    IniFile ini;
-    found = false;
-    if (!ini.load(path) || !ini.has_section(section)) return spec;
-
-    found = true;
-    const std::string Framing = section;     // the reads below name it
-    spec.header_size   = static_cast<std::uint32_t>(ini.get_int(Framing, "header_size", 4));
-    spec.length_offset = static_cast<std::uint32_t>(ini.get_int(Framing, "length_offset", 0));
-    spec.length_size   = static_cast<std::uint32_t>(ini.get_int(Framing, "length_size", 2));
-    spec.length_le     = ini.get(Framing, "length_endian", "little") != "big";
-    spec.length_includes_header = ini.get_bool(Framing, "length_includes_header", true);
-    spec.length_adjust = ini.get_int(Framing, "length_adjust", 0);
-    spec.opcode_offset = static_cast<std::uint32_t>(ini.get_int(Framing, "opcode_offset", 2));
-    spec.opcode_size   = static_cast<std::uint32_t>(ini.get_int(Framing, "opcode_size", 2));
-    spec.opcode_le     = ini.get(Framing, "opcode_endian", "little") != "big";
-    spec.min_frame     = static_cast<std::uint32_t>(ini.get_int(Framing, "min_frame", static_cast<int>(spec.header_size)));
-    spec.max_frame     = static_cast<std::uint32_t>(ini.get_int(Framing, "max_frame", 65535));
-    spec.checksum_offset = static_cast<std::uint32_t>(ini.get_int(Framing, "checksum_offset", static_cast<int>(FramingSpec::kNoChecksum)));
-    spec.trailer_opcode = static_cast<std::uint16_t>(ini.get_int(Framing, "trailer_opcode", 0));
-    spec.trailer_bytes  = static_cast<std::uint32_t>(ini.get_int(Framing, "trailer_bytes", 0));
-    return spec;
-}
+// [Framing] and [FramingClient] are read by gobot::load_framing (framing.hpp),
+// the one reader shared with gobot_sniff and the tests.
 
 /// Global hotkey thread. Uses GetAsyncKeyState rather than RegisterHotKey so
 /// the key still reaches the game — a registered hotkey is swallowed.
@@ -5108,18 +5085,11 @@ int run_keytest(const Options& o, const AppConfig& app) {
     // all? This process injects one and immediately asks Windows whether that
     // key is down. If its own key does not come back, the input never got as
     // far as the system -- which is a different problem from the game ignoring
-    // it, and one no choice of key will fix.
+    // it, and one no choice of key will fix. The same F7 probe as --inputcheck,
+    // through InputManager, so that it asks the "no real input" switch as every
+    // other key does instead of calling SendInput itself.
     {
-        GetAsyncKeyState(VK_F7);                // clear the sticky bit
-        INPUT in{};
-        in.type = INPUT_KEYBOARD;
-        in.ki.wVk = VK_F7;
-        in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(VK_F7, MAPVK_VK_TO_VSC));
-        SendInput(1, &in, sizeof(INPUT));
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));
-        const bool seen = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
-        in.ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(1, &in, sizeof(INPUT));
+        const bool seen = InputManager::injection_works();
 
         std::printf("injected keystrokes reach this machine: %s\n\n",
                     seen ? "yes" : "NO -- something is filtering them");
@@ -5209,8 +5179,13 @@ int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
     // The client frames its half differently, and its half is the one that
     // carries this character's own position.
     if (client_found) capture.set_client_framing(client_framing);
+    // Frames off the TCP stream only, as before. The finder groups by opcode,
+    // its saved files have no room to say where a frame came from, and one
+    // opcode number need not mean the same thing inside 0x0081 or over UDP;
+    // those are gobot_sniff's to look at (--watch, --verify, --inner).
     capture.set_packet_callback([&](const std::vector<GamePacket>& packets) {
-        for (const GamePacket& p : packets) finder.on_packet(p);
+        for (const GamePacket& p : packets)
+            if (p.plain()) finder.on_packet(p);
     });
 
     CaptureConfig cc;
@@ -5585,11 +5560,20 @@ int main(int argc, char** argv) {
     });
 
     // ---- game window ----
-    if (!input.find_game_window(app.window_title, app.window_class)) {
+    // Through attach_window like every other command: with app.ini's process
+    // as well as its title and class, so that the window followed and typed
+    // into is the game's, by where it runs from -- never a folder or a page
+    // that is merely titled like it -- and with --window honoured.
+    if (!attach_window(input, opt, app)) {
+        if (!opt.window.empty())
+            std::fprintf(stderr, "\nNo window matching --window '%s'.\n", opt.window.c_str());
+        else
+            std::fprintf(stderr, "\nGame window not found (looking for '%s', run by %s).\n",
+                         app.window_title.c_str(),
+                         app.process_name.empty() ? "any program" : app.process_name.c_str());
         std::fprintf(stderr,
-            "\nGame window not found (looking for title containing '%s').\n"
-            "Start the game first, or pass --window with a matching substring.\n",
-            app.window_title.c_str());
+            "Start the game first, or name the window with --window -- see --windows\n"
+            "for what is on screen.\n");
         if (!opt.status_only) return 1;
     } else {
         WindowFocusMonitor::instance().start(input.target_window());
