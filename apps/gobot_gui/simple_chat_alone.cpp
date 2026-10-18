@@ -29,6 +29,9 @@ using namespace simple_ui;
 
 /// A line passed over is said so once a minute at most, each line on its own.
 constexpr std::uint64_t kSaidEveryMs = 60'000;
+/// A ticked line whose turn finds the game behind another window waits this
+/// long before it is looked at again: what every line does then (chat_gate).
+constexpr std::uint64_t kHiddenWaitMs = 5000;
 
 const char* const kTickTip = "Không gửi câu này khi bạn đang trong tổ đội (GoBot nhìn khung tổ đội trên màn hình "
                              "game). Khi không đọc được khung tổ đội thì cũng không gửi.";
@@ -68,9 +71,38 @@ bool GuiApp::chat_alone_put_off(const ChatSettings& s, int index, const Template
     PartyHud hud;
     Frame f;
     void* const game = input_.target_window();
-    if (!ui.reader.ready()) hud.why = "the party pictures are missing";
-    else if (!input_.window_valid() || !ui.capture.grab(game, f) || !f.valid()) hud.why = "no picture of the game";
-    else hud = ui.reader.read(f, party_frame_trusted(ui.capture.from_screen(), game));
+    if (!ui.reader.ready()) {
+        hud.why = "the party pictures are missing";
+    } else if (!input_.window_valid() || !ui.capture.grab(game, f) || !f.valid()) {
+        hud.why = "no picture of the game";
+    } else {
+        switch (alone_look(party_frame_trusted(ui.capture.from_screen(), game), input_.window_focused())) {
+            case AloneLook::Read:
+                hud = ui.reader.read(f, true);
+                break;
+            case AloneLook::KeepTurn: {
+                // The game behind another window: no line goes until it is in
+                // front again (chat_gate), and this one keeps its turn.
+                schedule.postpone(now, kHiddenWaitMs);
+                const auto last = ui.said.find(index);
+                if (last == ui.said.end() || now - last->second >= kSaidEveryMs) {
+                    ui.said[index] = now;
+                    GB_INFO("Chat: line %d waits -- the game is not in front, so its party HUD is not read",
+                            index + 1);
+                    say_chat("Câu số " + std::to_string(index + 1) + " chỉ gửi khi chưa có tổ đội — chờ cửa sổ "
+                             "game lên trên cùng để xem khung tổ đội.");
+                }
+                return true;
+            }
+            case AloneLook::Unread:
+                // In front, and its left side under another window or past
+                // the screen's edge: no reading, as the HUD not understood --
+                // the line is passed over and the other lines go on (PA-R3).
+                hud.why = "the party's panels are not in view (another window over the game's left side, or the "
+                          "game past the screen's edge)";
+                break;
+        }
+    }
 
     std::vector<bool> typeable;
     for (const std::string& line : s.lines)
@@ -105,13 +137,23 @@ void GuiApp::simple_chat_alone_tick(const std::vector<std::string>& lines, std::
     // words, so a line being edited shows what it will keep.
     const std::vector<bool> ticks = ChatSettings::carry_ticks(simple_chat_.lines, simple_chat_.only_alone, lines);
     bool on = i < ticks.size() && ticks[i];
-    ImGui::SameLine(0, 12);
+    const char* const tick_label = "Chỉ khi chưa có tổ đội";
     ImGui::PushID(static_cast<int>(i));
-    ImGui::BeginDisabled(ui.available == 0);
     ImGui::PushFont(nullptr, kSmall);
-    const bool changed = ImGui::Checkbox("Chỉ khi chưa có tổ đội", &on);
-    ImGui::PopFont();
+    // Beside its line when there is room; under it, indented, when the line
+    // wrapped or reaches the card's edge: after a wrapped row the tick would
+    // land past the edge, where it can be neither seen nor clicked.
+    const float tick_w = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+                         ImGui::CalcTextSize(tick_label).x;
+    ImGui::SameLine(0, 12);
+    if (ImGui::GetContentRegionAvail().x < tick_w) {
+        ImGui::NewLine();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 24);
+    }
+    ImGui::BeginDisabled(ui.available == 0);
+    const bool changed = ImGui::Checkbox(tick_label, &on);
     ImGui::EndDisabled();
+    ImGui::PopFont();
     if (ui.available == 0)
         ImGui::SetItemTooltip("Chưa dùng được: GoBot thiếu hình khung tổ đội của game (%s).", ui.missing.c_str());
     else

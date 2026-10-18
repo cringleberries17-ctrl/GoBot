@@ -1651,18 +1651,10 @@ void GuiApp::simple_reload_trash() {
 }
 
 void GuiApp::simple_save_ids() {
-    const auto join = [](const std::vector<std::string>& ids) {
-        std::string out;
-        for (const std::string& id : ids) {
-            if (!out.empty()) out += ',';
-            out += id;
-        }
-        return out;
-    };
-    const std::string cfg = exe_relative("configs/trash.ini");
-    if (!IniFile::set_in_place(cfg, "Items", "delete", join(simple_clean_.delete_ids)) ||
-        !IniFile::set_in_place(cfg, "Items", "drop", join(simple_clean_.drop_ids)) ||
-        !IniFile::set_in_place(cfg, "Items", "use", join(simple_clean_.use_ids)))
+    // In an order that keeps the trash worker, which reads the file every
+    // second, from finding a fragment to register on the delete list alone
+    // between two writes: see CleanSettings::save_items.
+    if (!simple_clean_.save_items(exe_relative("configs/trash.ini")))
         simple_note("Không lưu được configs/trash.ini.", 8000);
 }
 
@@ -1749,6 +1741,11 @@ void GuiApp::simple_trash_tab() {
              "đất. Viền xanh: dùng (đăng ký mảnh ghép). Không cần món đó đang có trong túi. Món "
              "được nhận theo hình vẽ, không theo màu: mảnh ghép trong túi đổi màu liên tục, và "
              "món cùng hình khác màu (viền đỏ mảnh) cũng bị xoá theo.");
+        // Icons on the delete or drop list drawn like a picture on the Dùng
+        // list: a slot holding one is registered, not deleted (TrashList::judge).
+        std::vector<std::string> gives_way_ids;
+        for (const std::size_t k : simple_trash_.yielding_to_use())
+            if (!simple_trash_.items[k].id.empty()) gives_way_ids.push_back(simple_trash_.items[k].id);
         for (const auto& group : simple_catalog_.groups) {
             ImGui::PushFont(nullptr, kSmall);
             ImGui::PushStyleColor(ImGuiCol_Text, kDim);
@@ -1794,7 +1791,12 @@ void GuiApp::simple_trash_tab() {
                     ImGui::GetWindowDrawList()->AddRect(a, b, kDeleteMark, 0, 0, 1.0f);
                 else if (ImGui::IsItemHovered())
                     ImGui::GetWindowDrawList()->AddRect(a, b, ImGui::GetColorU32(kDim), 0, 0, 1.0f);
-                if (!del && !drop && !use && !via.empty())
+                const bool gives_way =
+                    std::find(gives_way_ids.begin(), gives_way_ids.end(), e.id) != gives_way_ids.end();
+                if (gives_way)
+                    ImGui::SetItemTooltip("Món này cũng có trong danh sách Dùng (hình chụp từ túi đồ): ô có nó sẽ "
+                                          "được đăng ký trước, không bị xoá cả chồng. Muốn xoá thì bấm × ở hình đó.");
+                else if (!del && !drop && !use && !via.empty())
                     ImGui::SetItemTooltip("Cũng sẽ bị xoá: cùng hình với %s, khác màu. Bấm để xem.",
                                           via.c_str());
                 else
@@ -1855,7 +1857,17 @@ void GuiApp::simple_trash_tab() {
                         if (how == 2) p.push_back(simple_pick_id_);
                         simple_save_ids();
                         simple_reload_trash();
-                        if (how == 1 && !kin.empty())
+                        // A picture cut from the bag on the Dùng list drawn
+                        // like it: a slot holding it is registered, not
+                        // deleted (TrashList::judge).
+                        bool gives_way = false;
+                        for (const std::size_t i : simple_trash_.yielding_to_use())
+                            gives_way = gives_way || simple_trash_.items[i].id == simple_pick_id_;
+                        if (how == 1 && gives_way)
+                            simple_note("Món này cũng có trong danh sách Dùng (hình chụp từ túi đồ): ô có nó sẽ được "
+                                        "đăng ký trước, không bị xoá cả chồng. Muốn xoá thì bấm × ở hình đó.",
+                                        15000);
+                        else if (how == 1 && !kin.empty())
                             simple_note("Cũng sẽ xoá: " + kin + " (cùng hình, khác màu).", 12000);
                         ImGui::CloseCurrentPopup();
                     };
@@ -1896,6 +1908,9 @@ void GuiApp::simple_trash_tab() {
         const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
         int remove = -1;
         bool first = true;
+        // Pictures on the delete or drop list of something on the Dùng list:
+        // a slot holding it is registered, not deleted (TrashList::judge).
+        const std::vector<std::size_t> yielding = simple_trash_.yielding_to_use();
         for (std::size_t i = 0; i < simple_trash_.items.size(); ++i) {
             const auto& item = simple_trash_.items[i];
             if (item.file.empty()) continue;
@@ -1908,13 +1923,24 @@ void GuiApp::simple_trash_tab() {
             ImGui::BeginGroup();
             draw_frame_region(item.shown, 0, 0, item.shown.width, item.shown.height, 1.5f,
                               "##thumb");
+            const bool gives_way = std::find(yielding.begin(), yielding.end(), i) != yielding.end();
+            if (gives_way)
+                ImGui::SetItemTooltip("Món này cũng có trong danh sách Dùng: ô có nó sẽ được đăng ký trước, "
+                                      "không bị xoá cả chồng. Không cần hình này nữa thì bấm ×.");
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             const bool used = item.action == TrashList::Action::Use;
             ImGui::GetWindowDrawList()->AddRect(
                 a, b, used ? kUseMark : item.action == TrashList::Action::Delete ? kDeleteMark : kDropMark,
                 0, 0, 2.0f);
             ImGui::PushFont(nullptr, kSmall);
-            ImGui::TextUnformatted(used ? "Dùng" : item.action == TrashList::Action::Delete ? "Xoá" : "Vứt");
+            if (gives_way) {
+                // Amber, and an asterisk the tooltip above explains.
+                ImGui::PushStyleColor(ImGuiCol_Text, kWait);
+                ImGui::TextUnformatted(item.action == TrashList::Action::Delete ? "Xoá*" : "Vứt*");
+                ImGui::PopStyleColor();
+            } else {
+                ImGui::TextUnformatted(used ? "Dùng" : item.action == TrashList::Action::Delete ? "Xoá" : "Vứt");
+            }
             ImGui::SameLine();
             if (ImGui::SmallButton("×")) remove = static_cast<int>(i);
             ImGui::PopFont();

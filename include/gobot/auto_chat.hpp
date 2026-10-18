@@ -277,6 +277,21 @@ AloneTurn alone_turn(const std::vector<bool>& only_alone, const std::vector<bool
 /// the player is in a party, so the HUD is not read every second.
 constexpr std::uint64_t kAloneWaitMs = 60'000;
 
+/// What becomes of a ticked line's turn before the party HUD is read, by what
+/// the window can tell of the game: whether a frame of it can be read for the
+/// party (party_frame_trusted) and whether the game is the window in front.
+enum class AloneLook {
+    Read,       ///< in front, the party's part of it in view: the HUD is read
+    KeepTurn,   ///< not in front: no line goes then (chat_gate), and this one keeps its turn
+    Unread,     ///< in front with the party's part of it out of view: as a HUD that could not be read
+};
+/// Behind another window no line goes at all, so the ticked one waits with its
+/// turn as every line does then. In front, a frame that cannot be read for the
+/// party is no reading -- the line is passed over, or waits a minute when every
+/// line is ticked, and the other lines go on (PA-R3) -- never a turn kept for
+/// as long as some window lies over the game's left side.
+AloneLook alone_look(bool trusted, bool focused);
+
 /// What the chat bar shows.
 enum class ChatBarState { Unknown, Closed, Open };
 /// In Vietnamese, for the screen: "đang đóng", "đang mở", "không thấy".

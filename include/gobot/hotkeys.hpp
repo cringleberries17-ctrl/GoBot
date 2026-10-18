@@ -101,6 +101,15 @@ struct HotkeyState {
     HotkeyWorld world = HotkeyWorld::Unknown;
     bool crossing = false;          ///< a login crossing is under way, whoever started it
     bool key_crossing = false;      ///< and this key started it
+
+    /// What GoBot itself presses the trash key or the login key for, in
+    /// Vietnamese -- "phím kỹ năng", "bình HP", "bật/tắt bot" -- or empty when
+    /// nothing: a key set to one of GoBot's own in the full screen's macro
+    /// table, or by hand in a file, neither of which checks the way the key
+    /// boxes do. Every press of GoBot's own goes down as the player's would,
+    /// so such a key is not heard at all.
+    std::string trash_key_use;
+    std::string login_key_use;
 };
 
 /// What to do about one tick's edges.
@@ -122,6 +131,12 @@ struct HotkeyActions {
     /// at all -- pressed with another window in front, which is no mistake.
     std::string trash_note_vi;
     std::string login_note_vi;
+
+    /// The trash key or the login key went down, and it is one GoBot presses
+    /// itself (HotkeyState::trash_key_use, login_key_use): nothing was done
+    /// for it. The window says why, with hotkey_text::key_taken_vi.
+    bool trash_taken = false;
+    bool login_taken = false;
 };
 
 HotkeyActions hotkey_action(const HotkeyEdges& edges, const HotkeyState& s);
@@ -135,10 +150,15 @@ inline const char* const kTrashNoGame = "Chưa thấy cửa sổ game.";
 inline const char* const kTrashEmpty = "Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.";
 inline const char* const kInWorld = "Nhân vật đã ở trong game.";
 inline const char* const kCrossing = "GoBot đang tự vào lại game.";
+/// "Phím F5 cũng là phím GoBot tự bấm (phím kỹ năng), nên không dùng làm phím
+/// dọn ngay được. Hãy chọn phím khác." -- `key` as the screen writes it, `use`
+/// what GoBot presses it for, `trash` which of the two keys it is.
+std::string key_taken_vi(const std::string& key, const std::string& use, bool trash);
 } // namespace hotkey_text
 
 /// Whether `vk` may be one of the two one-job keys: no key, or a function key,
-/// F1 to F24. Never a letter, a digit, Space, punctuation or a numpad key: those
+/// F1 to F12 -- what the key boxes and their notes ask for, and what a keyboard
+/// has. Never a letter, a digit, Space, punctuation or a numpad key: those
 /// are text, and with the game's chat line open the player typing that
 /// character would be pressing the key as well -- a trash pass started mid
 /// sentence, its bag key typed into the line. GoC's own are F8 to F11.

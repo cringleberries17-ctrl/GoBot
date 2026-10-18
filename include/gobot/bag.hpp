@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -56,6 +57,12 @@ struct BagLayout {
     /// about inside the bag.
     int bin_dx = 228, bin_dy = 178;
     int bin_w  = 16,  bin_h  = 22;
+
+    /// The bag window's own close button, its top-left from the strip's
+    /// top-left: where it is on every one of the 704 saved frames of the live
+    /// client with the bag open. A close button anywhere else is another
+    /// window's (bag::other_window_up).
+    int close_dx = 228, close_dy = -224;
 
     /// Parts of a slot that say nothing about what is in it: the corner the
     /// stack count is printed in, and the edge, where the hover and selection
@@ -301,8 +308,8 @@ struct CleanSettings {
     std::vector<std::string> drop_ids;
     /// Fragments to register in Yêu Quái Bách Khoa, from [Items] use=. An id
     /// that is on `delete_ids` as well is registered first, and what is left
-    /// of its stack deleted after -- in that pass only, and only once it has
-    /// been registered.
+    /// of the stack registered deleted after: in that pass only, from that
+    /// one slot only, and only once the registration has been seen through.
     std::vector<std::string> use_ids;
 
     /// A bound on one pass, so a mistake costs a handful of items at most.
@@ -321,6 +328,19 @@ struct CleanSettings {
     /// being rewritten looks like. Keys it does not know are passed over,
     /// fragments_loose among them: colour no longer counts for anything.
     bool load(const std::string& path);
+
+    /// Write use_ids, delete_ids and drop_ids to [Items] use=, delete= and
+    /// drop= of the file at `path`, each line changed in place and the rest
+    /// of the file left as it is.
+    ///
+    /// A pass reads the file every second and again just before it starts,
+    /// and may read it between any two of the writes this takes. No such read
+    /// may find an id on delete= and not on use= that was on use= before or
+    /// will be after: a fragment to be registered first would be deleted
+    /// outright, for good. So use= is written first holding every id it held
+    /// and every id it will hold, then delete= and drop=, and use= as it now
+    /// is last. `between`, when set, is called between two writes: for tests.
+    bool save_items(const std::string& path, const std::function<void()>& between = {}) const;
 };
 
 /// What to get rid of: pictures of items, cut from the player's own bag and
@@ -377,10 +397,23 @@ struct TrashList {
         /// chosen: the one that was. Empty for what was chosen itself.
         std::string via;
 
-        /// A Use item that is on the delete list as well: once it has been
-        /// registered in a pass, the rest of it is deleted in that pass -- a
-        /// piece is registered once, and its copies are no more use.
+        /// A Use item that is on the delete list as well: what is left of a
+        /// stack a pass has just registered is deleted in that pass -- a piece
+        /// is registered once, and its copies are no more use. That stack
+        /// only, from the very slot it was registered from. A fragment's icon
+        /// says only which of a monster's nine pieces it is, so another slot
+        /// drawn the same is most likely another monster's piece: it is never
+        /// deleted before a registration of its own.
         bool then_delete = false;
+
+        /// A fragment, and so something a pass may right-click when it is on
+        /// the Dùng list: one of the client's fragment icons, or a picture cut
+        /// from the bag that add_rivals found drawn like fragment icons and
+        /// like nothing else in the catalog. A right-click on anything else
+        /// uses it or equips it there and then -- a potion drunk, a box
+        /// opened, a scroll read -- so a picture of that on the Dùng list is
+        /// only ever said, never right-clicked.
+        bool fragment() const;
     };
     std::vector<Item> items;
 
@@ -426,6 +459,14 @@ struct TrashList {
         int   item = -1;            ///< the listed item it is, or -1
         float score = 0.0f;         ///< how alike it is to that item
 
+        /// When the slot was taken for an item on the Dùng list though an item
+        /// on the delete or drop list matched it better: that item, and how
+        /// alike it was -- kept when the Dùng item is then refused for a
+        /// rival, since the slot is left alone rather than deleted. For saying
+        /// why it is not deleted; see judge.
+        int   passed_over = -1;
+        float passed_over_score = 0.0f;
+
         /// When it looks like a listed item and is still not taken for it,
         /// why: something in the catalog that is not listed, and is drawn
         /// differently, looks as much like it. For saying so on a look-only
@@ -447,7 +488,23 @@ struct TrashList {
     /// of the catalog: no unlisted icon of another drawing may match the slot
     /// within kRivalMargin of the listed one. Searched a few pixels either
     /// side of the slot, since the grid is measured rather than given.
+    ///
+    /// A slot that an item on the Dùng list matches, at that item's own
+    /// threshold, is that item's however much better an item on the delete or
+    /// drop list matches it: the piece is registered first, and what is left
+    /// of it deleted only when the Dùng item says so (then_delete) -- never
+    /// deleted whole, which cannot be had back. Whatever the order of the
+    /// list: a picture cut from the bag scores 1.00 on its own slot and a
+    /// catalog icon 0.947 or more, so an older cut on the delete list would
+    /// otherwise take every slot of a fragment chosen later to use.
     Verdict judge(const Frame& f, const ScreenRect& slot, float min_score) const;
+
+    /// The items on the delete or drop list drawn like an item on the Dùng
+    /// list, by the catalog icons each was found drawn like (kin), as indexes
+    /// into `items`: a slot holding one is the Dùng item's (judge), so it is
+    /// registered rather than deleted. For the tab to say so. After
+    /// add_rivals, which is what tells a picture cut from the bag its kin.
+    std::vector<std::size_t> yielding_to_use() const;
 
     /// judge, reduced to the item, or -1. `score` gets how alike it is -- or,
     /// for a slot that is refused, how alike it was to what it resembles.
@@ -499,6 +556,13 @@ const char* dialog_name(int kind);
 /// be there. Its words are looked for where the bin's question has them, from
 /// its two buttons (both are the game's one dialog frame); a picture whose
 /// buttons are not at that place is not used.
+///
+/// The game names each piece after its monster -- "Mảnh Địa Quỷ Tâm Hỏa 6" in
+/// the bag's tooltip -- and the question may well name it too. Then a picture
+/// cut from one piece's question matches that piece's question alone, and
+/// every other piece's gets Hủy Bỏ. The name can be made see-through in the
+/// picture: only what is left is compared, so long as enough words are left
+/// and those words are none of another question's (see can_check).
 inline const char* const kRegisterDialog = "grabbed/fragment_register";
 
 /// Every dialog with the two buttons on screen, the bin's own marked.
@@ -520,12 +584,42 @@ bool bin_asking(const Frame& f, const TemplateStore& store);
 /// no picture of the drop question with its words, so nothing is dropped:
 /// a dialog that cannot be told from the others is not answered. For Use, the
 /// registration question's picture (kRegisterDialog), with words in it and its
-/// two buttons where the bin's question has them.
+/// two buttons where the bin's question has them -- and words that are none
+/// of the other questions GoBot has a picture of: the bin's, the revive
+/// question, dropping and selling. Words cut down to their fixed part, the
+/// piece's name see-through, could otherwise be no more than the "Bạn có
+/// muốn" every question opens with.
 bool can_check(const TemplateStore& store, TrashList::Action a);
+
+/// A picture cut from the bag is a fragment, as a pass decides it for one on
+/// the Dùng list (TrashList::Item::fragment): drawn like the catalog's
+/// fragment icons, and like nothing else in it. What the bag picture's "Dùng"
+/// is offered for.
+bool fragment_cut(const Frame& cut, const BagLayout& l, const ItemCatalog& catalog);
 
 /// A message with only Xác Nhận under it is up, and no dialog with two buttons:
 /// what the client shows when it refuses something. Never answered.
 bool notice_up(const Frame& f, const TemplateStore& store);
+
+/// The client's close buttons, every drawing it has for one -- the bag's own X
+/// among them, and those of Kho Cash, a shop and the monster book -- by the
+/// names the template store gives them.
+inline const char* const kCloseButtons[] = { "inven/1/btn_CloseDialog.spr/0", "inven/1/btn_CloseBox.spr/0",
+                                             "inven/1/monster-close" };
+
+/// Every picture other_window_up looks with is in `store`.
+bool can_see_windows(const TemplateStore& store);
+
+/// Another of the game's windows is open on `f` besides the bag `v`: a close
+/// button anywhere that is not the bag's own (BagLayout::close_dx, close_dy).
+/// Kho Cash, a shop, a storage or a trade window open beside the bag may take
+/// whatever is right-clicked in it, with no question asked -- and on the live
+/// client Kho Cash was seen open beside Tiêu Dùng with every other check a use
+/// sweep makes passing. `at` gets where the first such button is. True as
+/// well without every one of the pictures in `store`: what cannot be ruled
+/// out is taken to be there.
+bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& v, const BagLayout& l,
+                     ScreenRect* at = nullptr);
 
 } // namespace bag
 
@@ -547,7 +641,10 @@ bool notice_up(const Frame& f, const TemplateStore& store);
 /// when its words are the registration question's and nothing else is up; any
 /// other dialog gets Hủy Bỏ, a message with only Xác Nhận stops the pass with
 /// nothing pressed, and nothing is ever typed. A registration cannot be undone
-/// either, so it is held to the same rules as a deletion.
+/// either, so it is held to the same rules as a deletion. It counts only when
+/// the slot is seen to come out of it as a registration does -- empty, or one
+/// less in place -- and anything else stops the pass; what is left of a stack
+/// to be deleted after is deleted from that very slot and from no other.
 class BagCleaner {
 public:
     using Grab = std::function<bool(Frame&)>;
@@ -623,7 +720,12 @@ public:
         /// Slots of items on the Dùng list found and not registered this pass
         /// -- all of them on a look-only pass -- each slot once.
         int  use_matched = 0;
-        int  used = 0;              ///< registered in Yêu Quái Bách Khoa
+        int  used = 0;              ///< registered in Yêu Quái Bách Khoa, and seen to be
+        /// Right-clicked, and what came of it could not be seen through: its
+        /// question confirmed and the slot not seen empty or one less in place,
+        /// or no question at all and the stack gone down anyway. Never counted
+        /// as used, nothing of it deleted, and the pass stops at the first.
+        int  use_unsure = 0;
         std::string trouble;        ///< why it stopped early, in Vietnamese
 
         /// An item went towards the bin and was never seen given back or
@@ -718,12 +820,16 @@ private:
     /// dialog; then the answer. `count` is the stack count read off the slot.
     bool trash_one(const Frame& f, const BagView& v, int index, int count);
 
-    /// How a right-click on an item on the Dùng list came out.
+    /// How a right-click on an item on the Dùng list came out. Only Used,
+    /// Nothing and Refused let the pass go on: anything else is a surprise,
+    /// and after a surprise nothing more is right-clicked or deleted.
     enum class UseOutcome {
-        Used,           ///< its question confirmed, and its stack one less or gone
-        UsedUnasked,    ///< no question came up, and its stack went down: used all the same
+        Used,           ///< its question confirmed, and the slot seen empty, or one less in place
+        NotTaken,       ///< its question confirmed, and the stack as it was: not registered
+        Unsure,         ///< its question confirmed, or none came up, and the slot not seen either way
+        UsedUnasked,    ///< no question, and its stack went down: taken -- by a shop, perhaps
         Nothing,        ///< no question, and the stack as it was: it cannot be used
-        Refused,        ///< another dialog came up, answered Hủy Bỏ; or confirmed and not used
+        Refused,        ///< another dialog came up, answered Hủy Bỏ
         Notice,         ///< a message with only Xác Nhận came up: left for the player
         Lost,           ///< the bag went out of sight, a dialog would not close, a stop
         Untouched,      ///< nothing was pressed: the mouse could not reach the slot
@@ -731,22 +837,61 @@ private:
     struct UseResult {
         UseOutcome  outcome = UseOutcome::Untouched;
         std::string why;            ///< in Vietnamese, when it is not Used
+        /// When Used with some of the stack still in the slot: how many, and
+        /// the slot as it was seen then -- what deleting the rest goes by.
+        int         left = 0;
+        Frame       after;
     };
 
     /// Register the item in slot `index` of `v`: one right-click on it; then
     /// its question, Xác Nhận only when its words are the registration's, on a
     /// fresh look, with nothing else up; and whatever else comes up Hủy Bỏ.
-    /// Only gone, or one less in the stack, counts. `count` is the stack
-    /// count read off the slot.
+    /// Only gone, or one less in the stack, in that very slot, counts. `count`
+    /// is the stack count read off the slot.
     UseResult use_one(const Frame& f, const BagView& v, int index, int count);
 
+    /// What slot `index` of the page `v` holds now, against `before`, its look
+    /// when it held `count`: looked at twice, a moment apart, and only what
+    /// both looks agree on -- a count misread once, or a slot caught being
+    /// redrawn, is no answer. The page has to be the same by the scroll bar on
+    /// both looks: a slot on a page that cannot be told is no slot to go by.
+    enum class SlotNow {
+        Gone,       ///< empty
+        Less,       ///< the same drawing, one less than `count`
+        Same,       ///< the same drawing, still `count`
+        Asking,     ///< a dialog with two buttons is up, which nobody here asked for
+        Unknown,    ///< anything else; `why` says what, in Vietnamese
+    };
+    SlotNow slot_now(const BagView& v, int index, const Frame& before, int count, Frame& look,
+                     Frame& shot, std::string& why);
+
+    /// A slot this pass registered from, with some of its stack still in it,
+    /// by tab, row of the tab and column -- kept only where the scroll bar
+    /// said which row: the list item it was taken for, how many were left and
+    /// the slot as seen right then. What is left of the stack of an item to
+    /// be used and then deleted is deleted from these slots and no others, and
+    /// only while each still shows just that: another slot drawn the same is
+    /// most likely another monster's piece, which no registration of this one
+    /// says anything about.
+    struct Registered {
+        int   item = -1;
+        int   left = 0;
+        Frame look;
+    };
+    using Registrations = std::map<long long, Registered>;
+
     /// The use sweep of tab `tab` -- Tiêu Dùng -- before its delete sweep, as
-    /// GoC orders its pass: every slot judged an item on the Dùng list, one
+    /// GoC orders its pass: every slot judged a fragment on the Dùng list, one
     /// at a time with a fresh look after each, at most max_uses_per_run.
-    /// `used` gets the list items registered, which no other slot of is
-    /// right-clicked again this pass; `no_use` those that came to nothing.
+    /// `used` gets the list items registered -- one slot of a drawing a pass,
+    /// the others left for the next -- `no_use` those that came to nothing,
+    /// and `registered` the slots registered from that still hold some.
+    /// Nothing is right-clicked with another of the game's windows open
+    /// (bag::other_window_up); and a dialog up after one of the sweep's own
+    /// right-clicks -- its question come late -- is answered Hủy Bỏ, never
+    /// Xác Nhận, and the pass stops.
     void use_sweep(int tab, BagView& v, Result& res, bool& stop, std::set<int>& used,
-                   std::set<int>& no_use, int& uses);
+                   std::set<int>& no_use, int& uses, Registrations& registered);
 
     /// Answer the bin's dialog that is up -- the question, or the quantity,
     /// confirmed only when the number the game put in the box is the stack's
@@ -802,6 +947,10 @@ private:
     /// An item has gone towards the bin and the screen has not been seen
     /// clean since: see Result::stuck.
     bool                 item_out_ = false;
+    /// A right-click of this pass brought nothing up while it was watched:
+    /// its question may come up later still, and one up when the pass ends is
+    /// taken for it -- see run().
+    bool                 late_ask_ = false;
     std::atomic<bool>    cancelled_{false};
 };
 

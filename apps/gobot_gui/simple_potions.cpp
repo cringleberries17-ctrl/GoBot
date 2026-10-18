@@ -258,10 +258,12 @@ void GuiApp::simple_potion_stock(MacroKeyKind kind) {
     if (!potions_ui_) return;           // made by potions_tick, which runs first
     PotionsUi& ui = *potions_ui_;
 
-    // The row's key: the first of its kind, as the row shows it.
+    // The row's key: the first of its kind that is switched on, as
+    // potions_tick reads only those. A row switched off has no line: its
+    // slot is not read, and "not read yet" would look like a fault.
     const MacroKey* key = nullptr;
     for (const MacroKey& k : macro_config_.keys)
-        if (macro_key_kind(k) == kind && k.keycode != 0) {
+        if (macro_key_kind(k) == kind && k.keycode != 0 && k.enabled) {
             key = &k;
             break;
         }
@@ -277,6 +279,10 @@ void GuiApp::simple_potion_stock(MacroKeyKind kind) {
         } else if (!ui.trouble.empty()) {
             line = ui.trouble;
             colour = kWait;
+        } else if (!simple_running()) {
+            // Read only during a run: the last run's count, left up after
+            // DỪNG, would look like today's.
+            line = "Số bình được đọc khi bot chạy.";
         } else if (ui.watch.believed(key->keycode, r)) {
             line = potion_line_vi(r, name);
             if (r.state == SlotState::Empty) colour = kBad;
@@ -285,7 +291,7 @@ void GuiApp::simple_potion_stock(MacroKeyKind kind) {
             else if (r.has_count())
                 colour = kGood;
         } else {
-            line = simple_running() ? "Chưa đọc được số bình" : "Số bình được đọc khi bot chạy.";
+            line = "Chưa đọc được số bình";
         }
         ImGui::PushFont(nullptr, kSmall);
         coloured(colour, line.c_str());

@@ -73,8 +73,34 @@ HotkeyActions GuiApp::hotkeys_tick() {
         // crossing too: pressed again then, it is withdrawn, not asked twice.
         s.key_crossing = keeper_key_crossing_ || keeper_login_now_;
     }
+    // The two keys against every key GoBot presses itself, as their boxes
+    // check them: the full screen's macro table and a file edited by hand do
+    // not. Only when one of them went down -- the list reads three files.
+    if (edges.trash_now || edges.login_now) {
+        const std::vector<NamedKey> taken = game_keys_in_use();
+        if (const NamedKey* k = key_taken(hotkeys_.trash_now, taken)) s.trash_key_use = k->what_vi;
+        if (const NamedKey* k = key_taken(hotkeys_.login_now, taken)) s.login_key_use = k->what_vi;
+    }
 
     const HotkeyActions a = hotkey_action(edges, s);
+    // Said once, and again only ten minutes on: GoBot's own presses of the key
+    // come every few seconds.
+    const auto say_taken = [&](bool trash) {
+        const std::uint32_t vk = trash ? hotkeys_.trash_now : hotkeys_.login_now;
+        const std::string& use = trash ? s.trash_key_use : s.login_key_use;
+        const std::string note = hotkey_text::key_taken_vi(InputManager::key_name(vk), use, trash);
+        const std::uint64_t now = now_ms();
+        if (note == hotkey_taken_said_ && now - hotkey_taken_ms_ < 10 * 60'000) return;
+        hotkey_taken_said_ = note;
+        hotkey_taken_ms_ = now;
+        GB_WARN("Hotkeys: %s is also a key GoBot presses itself (%s), so it is not heard as the %s key",
+                InputManager::key_name(vk).c_str(), use.c_str(), trash ? "trash-now" : "login-now");
+        if (trash) say_trash(note);
+        else       say_keeper("login key: also a key GoBot presses itself, so it is not heard");
+        simple_note(note, 10000);
+    };
+    if (a.trash_taken) say_taken(true);
+    if (a.login_taken) say_taken(false);
     if (a.trash) {
         const std::string key = InputManager::key_name(hotkeys_.trash_now);
         GB_INFO("Hotkeys: %s pressed in the game -- one trash pass", key.c_str());

@@ -3786,6 +3786,8 @@ void GuiApp::trash_loop() {
         else if (look_only)
             tell((r.matched + r.use_matched == 0
                 ? std::string("Thử xong: không thấy món nào trong danh sách.")
+                : r.matched == 0
+                ? std::string("Thử xong: không có ô nào sẽ bị bỏ. Không bỏ gì.")
                 : "Thử xong: thấy " + std::to_string(r.matched) + " ô sẽ bị bỏ. Không bỏ gì.") +
                  extra);
         else

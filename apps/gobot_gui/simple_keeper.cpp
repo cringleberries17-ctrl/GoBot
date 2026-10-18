@@ -113,8 +113,10 @@ GuiApp::KeeperWake GuiApp::keeper_wake(CrashWatch::Move move, CrashWatch& watch,
     // GoBot's own hands on the game count as nobody looking: a hold, a trash
     // pass or its doubt, a chat line in doubt.
     const bool held = coord_.critical_active() || trash_pass_ || trash_hold_ || trash_left_held_ || chat_doubt_;
-    if (!ui.stall.check(input_.target_window(), held, login, store, now_ms(), seen,
-                        exe_relative("keeper_debug")))
+    // The window GoBot follows, looked at only while it is the game's own by
+    // where its program runs from: it may have been picked by hand.
+    if (!ui.stall.check(input_.target_window(), watch_settings.game_process, held, login, store, now_ms(),
+                        seen, exe_relative("keeper_debug")))
         return KeeperWake::None;
     return KeeperWake::Stalled;
 }

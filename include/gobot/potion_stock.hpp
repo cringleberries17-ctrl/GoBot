@@ -74,6 +74,22 @@ constexpr int kCountW = 28, kCountH = 16;
 constexpr int kEmptyBrightest = 60;
 /// The label's corner, left out of that.
 constexpr int kLabelCorner = 12;
+/// The bar's own frame round a slot, this many pixels of it along each side,
+/// has to be as the picture has it before the slot is read: on every one of
+/// the 1,026 saved frames where the bar is in view, every side of every slot
+/// is within 1.5 grey levels of it on average. A window over the top of a
+/// slot -- opaque, or black at a third of the way through -- is 11 or more.
+constexpr int kRingBand = 3;
+constexpr double kRingDiff = 6.0;
+/// What lies over a slot inside its frame leaves the frame as it is, and is
+/// told by the count's corner instead, when nothing white is in it: a corner
+/// whose darkest and brightest grey are this close is all one colour -- a
+/// window's body, not an icon -- and so is no reading. On the 1,057 saved
+/// frames with the bar in view, every slot read as one potion spans 130 grey
+/// levels or more there; so do the 23 of the catalog's icons that read as one
+/// drawn into an empty slot with no number. A count seen through a dark shade
+/// is told by reading the corner brightened back up to white.
+constexpr int kPlainSpread = 6;
 
 /// The keys the client's hotbar shows, row by row, left to right.
 extern const std::uint32_t kKeys[kRows][kCols];
@@ -127,7 +143,11 @@ struct SlotReading {
 };
 
 /// Read key `vk`'s slot. `picture` is the one the hotbar was found by, which
-/// carries the labels: the slot is read only when its label is the key's.
+/// carries the labels: the slot is read only when its label is the key's,
+/// and only when the bar's frame round it is as the picture has it -- nothing
+/// over any part of the slot; otherwise it is Unreadable. So is an icon with
+/// no number whose count's corner says something lies over it inside the
+/// frame (kPlainSpread): never one potion.
 /// Without the digits loaded a slot with a number in it is Unreadable; empty
 /// and single slots are still told.
 SlotReading read_slot(const Frame& f, const HotbarSpot& bar, std::uint32_t vk,

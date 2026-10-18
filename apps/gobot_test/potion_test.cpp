@@ -342,6 +342,145 @@ void test_covered() {
                                      never_a_count, seen) + (wrong.empty() ? std::string{} : " -- " + wrong));
 }
 
+/// `f` with a rectangle laid over it in a colour given as red, green, blue,
+/// `alpha` of the way through: 255 is a window, less one seen through.
+void lay_over(Frame& f, int x0, int y0, int x1, int y1, int r, int g, int b, int alpha) {
+    for (int y = std::max(0, y0); y < std::min(f.height, y1); ++y)
+        for (int x = std::max(0, x0); x < std::min(f.width, x1); ++x) {
+            std::uint8_t* p = &f.pixels[(static_cast<std::size_t>(y) * f.width + x) * 4];
+            p[0] = static_cast<std::uint8_t>((p[0] * (255 - alpha) + b * alpha) / 255);
+            p[1] = static_cast<std::uint8_t>((p[1] * (255 - alpha) + g * alpha) / 255);
+            p[2] = static_cast<std::uint8_t>((p[2] * (255 - alpha) + r * alpha) / 255);
+        }
+}
+
+void test_part_covered() {
+    section("Potions: a window over part of a slot (the 2A tester's step 9)");
+    const Eyes& e = eyes();
+    if (!e.ok) {
+        std::printf("  [skip] no frame.png from the live client, or no digits, here\n");
+        return;
+    }
+    const HotbarSpot bar = find_hotbar(e.frame, e.picture);
+    const ScreenRect one = bar.slot(0, 6);
+    // A window's edge over the top rows of slot 1, its label still showing:
+    // the count under it, and nothing white left in the corner, read as an
+    // icon with no number -- "Còn 1 bình" in orange on the tab.
+    struct Over {
+        const char* what;
+        int r, g, b, alpha;
+        int rows;
+    };
+    for (const Over& o : { Over{ "a dark window", 20, 20, 25, 255, 16 },
+                           Over{ "the same, 22 rows down", 20, 20, 25, 255, 22 },
+                           Over{ "black seen through at half", 0, 0, 0, 128, 16 },
+                           Over{ "black seen through at a third", 0, 0, 0, 90, 16 },
+                           Over{ "a grey window", 60, 60, 70, 255, 16 },
+                           Over{ "a window the bar's own blue", 33, 57, 90, 255, 16 } }) {
+        Frame f = e.frame;
+        lay_over(f, one.x - 60, 0, one.x + 80, one.y + o.rows, o.r, o.g, o.b, o.alpha);
+        const HotbarSpot b = find_hotbar(f, e.picture);
+        const SlotReading r = read_slot(f, b, '1', e.digits, e.picture);
+        check(r.state == SlotState::Unreadable || r.state == SlotState::NoHotbar,
+              std::string(o.what) + " over the top of slot 1: " + said(r) + ", never one left" +
+                  fmt(" (hotbar %.3f)", b.score));
+    }
+    // A small window over the left of slot 1 -- a tooltip, say -- hiding the
+    // 8 of its 89 and leaving the 9: never read as 9.
+    {
+        Frame f = e.frame;
+        lay_over(f, one.x - 4, one.y - 30, one.x + 12, one.y + 20, 24, 24, 30, 255);
+        const HotbarSpot b = find_hotbar(f, e.picture);
+        const SlotReading r = read_slot(f, b, '1', e.digits, e.picture);
+        check(b.found && r.state == SlotState::Unreadable,
+              "a small window over the left of slot 1, hiding the 8 of its 89: " + said(r) + ", never 9");
+    }
+    // Slot 2 beside it, untouched by either: read as ever.
+    {
+        Frame f = e.frame;
+        lay_over(f, one.x - 60, 0, one.x + 30, one.y + 16, 20, 20, 25, 255);
+        const HotbarSpot b = find_hotbar(f, e.picture);
+        const SlotReading two = read_slot(f, b, '2', e.digits, e.picture);
+        check(two.state == SlotState::Count && two.count == 94,
+              "and slot 2 beside it, nothing over it: 94 -- " + said(two));
+    }
+    // Something inside slot 1 alone, the bar's frame round it as it was: a
+    // dark corner over its count, or a dark shade seen through over the top
+    // of the slot or all of it, which leaves the 89 grey. The count is under
+    // it: never "one left" (the round 2 tester's problem 1).
+    {
+        std::string wrong;
+        int tried = 0;
+        const struct {
+            int alpha;
+            int rows;
+        } inside[] = { { 255, 16 }, { 255, 18 }, { 255, 20 }, { 255, 22 }, { 90, 16 },
+                       { 90, 18 },  { 90, 20 },  { 90, 22 },  { 90, 34 } };
+        for (const auto& c : inside) {
+            Frame f = e.frame;
+            lay_over(f, one.x, one.y, one.x + hotbar::kCell, one.y + c.rows, 0, 0, 0, c.alpha);
+            const HotbarSpot b = find_hotbar(f, e.picture);
+            const SlotReading r = read_slot(f, b, '1', e.digits, e.picture);
+            ++tried;
+            if (r.state != SlotState::Unreadable && r.state != SlotState::NoHotbar && wrong.empty())
+                wrong = fmt(" -- %s over the top %d rows read %s", c.alpha == 255 ? "black" : "a shade", c.rows,
+                            said(r).c_str());
+        }
+        check(wrong.empty(), fmt("%d covers inside slot 1 alone, opaque and seen through: never one left", tried) +
+                                 wrong);
+    }
+    // And an icon with no number is still one: V, a skill, on frame.png; and
+    // every icon of the catalog drawn into the empty slot 3 with nothing white
+    // where its count would be.
+    {
+        const SlotReading v = read_slot(e.frame, bar, 'V', e.digits, e.picture);
+        check(v.state == SlotState::Single, "V, a skill with nothing printed, still one -- " + said(v));
+        ItemCatalog catalog;
+        if (!catalog.load(ItemCatalog::default_dir())) {
+            std::printf("  [skip] the item catalog is not installed here\n");
+            return;
+        }
+        const ScreenRect three = bar.slot(0, 8);
+        int drawn = 0, ones = 0;
+        std::string wrong;
+        for (const auto& g : catalog.groups)
+            for (const auto& entry : g.entries) {
+                const Frame& icon = entry.icon;
+                if (!icon.valid() || icon.width > hotbar::kCell || icon.height > hotbar::kCell) continue;
+                Frame f = e.frame;
+                const int ox = three.x + (hotbar::kCell - icon.width) / 2;
+                const int oy = three.y + (hotbar::kCell - icon.height) / 2;
+                bool white = false;
+                for (int y = 0; y < icon.height; ++y)
+                    for (int x = 0; x < icon.width; ++x) {
+                        const int fx = ox + x, fy = oy + y;
+                        // The label's corner is the slot's own.
+                        if (fx >= three.x + hotbar::kCell - hotbar::kLabelCorner &&
+                            fy >= three.y + hotbar::kCell - hotbar::kLabelCorner)
+                            continue;
+                        const std::uint8_t* p = &icon.pixels[(static_cast<std::size_t>(y) * icon.width + x) * 4];
+                        if (p[3] < TemplateMatcher::kOpaque) continue;
+                        std::uint8_t* d = &f.pixels[(static_cast<std::size_t>(fy) * f.width + fx) * 4];
+                        std::copy_n(p, 3, d);
+                        const int lo = std::min({ p[0], p[1], p[2] }), hi = std::max({ p[0], p[1], p[2] });
+                        if (fx < three.x + hotbar::kCountW && fy < three.y + hotbar::kCountH &&
+                            (p[0] + p[1] + p[2]) / 3 > 175 && hi - lo < 40)
+                            white = true;
+                    }
+                // White in the corner is a count or not, never "one": the
+                // rest of read_slot's, tested above.
+                if (white) continue;
+                ++drawn;
+                const SlotReading r = read_slot(f, bar, '3', e.digits, e.picture);
+                ones += r.state == SlotState::Single ? 1 : 0;
+                if (r.state == SlotState::Unreadable && wrong.empty()) wrong = " -- " + entry.id + ": " + said(r);
+            }
+        check(drawn > 10 && wrong.empty(),
+              fmt("%d catalog icons drawn into slot 3 with no number: %d read as one, none as unreadable", drawn,
+                  ones) + wrong);
+    }
+}
+
 void test_drawn() {
     section("Potions: slots drawn into frame.png (PS-A5)");
     const Eyes& e = eyes();
@@ -352,8 +491,10 @@ void test_drawn() {
     const HotbarSpot bar = find_hotbar(e.frame, e.picture);
     const ScreenRect three = bar.slot(0, 8), one = bar.slot(0, 6);
 
-    // A number written into the empty slot 3 reads back.
-    for (const char* n : { "7", "42", "315" }) {
+    // A number written into the empty slot 3 reads back: every count the
+    // client prints, from 2 -- the least, a stack of one being its icon with
+    // no number -- to four digits.
+    for (const char* n : { "2", "7", "42", "315", "1000" }) {
         Frame f = e.frame;
         draw_number(f, three.x + 2, three.y + 2, n);
         const SlotReading r = read_slot(f, bar, '3', e.digits, e.picture);
@@ -611,6 +752,7 @@ void test_potions(void (*check_fn)(bool, const std::string&), void (*section_fn)
     test_1024();
     test_rounds();
     test_covered();
+    test_part_covered();
     test_drawn();
     test_watch();
     test_texts_and_settings();

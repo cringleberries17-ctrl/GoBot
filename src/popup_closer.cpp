@@ -199,18 +199,25 @@ bool PopupEyes::book_title_in(const Frame& f, const ScreenRect& area) const {
            TemplateMatcher::find(f, a, book_key_, kBookScore).found;
 }
 
-std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu) const {
+std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const ScreenRect* only_at) const {
     std::vector<PopupSeen> out;
     if (!f.valid()) return out;
     const ScreenRect all{ 0, 0, f.width, f.height };
+    // Where the notice's button and the book's title are looked for: all of
+    // the screen, or round `only_at` -- a popup where it was a moment ago,
+    // give or take as much as one still counts as there.
+    const ScreenRect look =
+        only_at == nullptr ? all
+                           : clamp_to(f, ScreenRect{ only_at->x - kSlack - 1, only_at->y - kSlack - 1,
+                                                     only_at->w + 2 * (kSlack + 1), only_at->h + 2 * (kSlack + 1) });
 
     // The check-in notice: a Xác Nhận with the notice's words where they sit
     // in the notice, give or take two pixels. The words are what tells it:
     // every dialog's frame and buttons are the same. Measured from a lone
     // Xác Nhận's place, they are nowhere near where a two-button dialog has
     // its words.
-    if (ok_.valid() && notice_words_.valid()) {
-        for (const auto& ok : TemplateMatcher::find_all(f, all, ok_, kOkScore, 8)) {
+    if (ok_.valid() && notice_words_.valid() && look.w >= ok_.width && look.h >= ok_.height) {
+        for (const auto& ok : TemplateMatcher::find_all(f, look, ok_, kOkScore, 8)) {
             const int dx = ok.at.x - ok_dx_ - kNoticeOkDx, dy = ok.at.y - ok_dy_ - kNoticeOkDy;
             const ScreenRect place =
                 clamp_to(f, ScreenRect{ dx + kWordsX - 2, dy + kWordsY - 2, kWordsW + 4, kWordsH + 4 });
@@ -234,7 +241,8 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu) const {
     const auto book_at = [&]() {
         TemplateMatcher::Match none;
         if (!book_.valid() || !book_key_.valid()) return none;
-        const auto key = TemplateMatcher::find(f, all, book_key_, kBookScore);
+        if (look.w < book_key_.width || look.h < book_key_.height) return none;
+        const auto key = TemplateMatcher::find(f, look, book_key_, kBookScore);
         if (!key.found) return none;
         const ScreenRect around = clamp_to(f, ScreenRect{ key.at.x - kBookKeyX + kBookInset - kSlack,
                                                           key.at.y - kBookKeyY + kBookInset - kSlack,
@@ -306,15 +314,16 @@ std::vector<std::string> PopupEyes::blockers(const Frame& f, const std::vector<P
     auto chat_open = std::async(std::launch::async, [&] {
         return look_chat_bar(f, store, chat_).state == ChatBarState::Open;
     });
-    auto xs = std::async(std::launch::async, [&] {
-        std::vector<TemplateMatcher::Match> found;
-        for (const Frame& x : close_x_) {
-            if (!x.valid()) continue;
-            const auto these = TemplateMatcher::find_all(f, all, x, kCloseScore, 16);
-            found.insert(found.end(), these.begin(), these.end());
-        }
-        return found;
-    });
+    // Each drawing of a close button on its own: they are matched through
+    // their see-through corners, the dearest searches here by far -- a third
+    // of a second together, a tenth side by side -- and the look under the
+    // hold keeps the potion keys waiting for as long as it takes.
+    std::vector<std::future<std::vector<TemplateMatcher::Match>>> xs;
+    for (const Frame& x : close_x_)
+        if (x.valid())
+            xs.push_back(std::async(std::launch::async, [&f, &all, &x] {
+                return TemplateMatcher::find_all(f, all, x, kCloseScore, 16);
+            }));
     auto oks = std::async(std::launch::async, [&] {
         return ok_.valid() ? TemplateMatcher::find_all(f, all, ok_, kOkScore, 16)
                            : std::vector<TemplateMatcher::Match>{};
@@ -351,7 +360,12 @@ std::vector<std::string> PopupEyes::blockers(const Frame& f, const std::vector<P
     }
     // And every X has to be an allowed popup's own: any other is a window
     // nothing here knows -- Kho Cash, a shop, the player list.
-    for (const auto& x : xs.get()) {
+    std::vector<TemplateMatcher::Match> found_x;
+    for (auto& these : xs) {
+        const std::vector<TemplateMatcher::Match> got = these.get();
+        found_x.insert(found_x.end(), got.begin(), got.end());
+    }
+    for (const auto& x : found_x) {
         const bool known = std::any_of(popups.begin(), popups.end(), [&](const PopupSeen& p) {
             return p.control && close_to(p.x, x.at.cx(), kSlack) && close_to(p.y, x.at.cy(), kSlack);
         });
@@ -531,6 +545,11 @@ PopupCloser::Turn PopupCloser::turn() {
             return Turn::Held;
         }
     }
+    // The hold, timed from the moment it is asked for: while it lasts the
+    // potion keys wait, so it is let go as soon as the hands are done, and
+    // never kept past kHoldMs.
+    const std::uint64_t asked = now();
+    const auto held_for = [&] { return now() - asked; };
     if (guard_.take && !guard_.take()) {
         tr.backoff_until = t + kBackoffMs;
         say(std::string("not closing ") + popup_kind_name(kind) + " now: not the moment");
@@ -539,15 +558,26 @@ PopupCloser::Turn PopupCloser::turn() {
     }
     struct Done {
         const Guard& g;
-        ~Done() { if (g.done) g.done(); }
+        bool over = false;
+        void let_go() {
+            if (!over && g.done) g.done();
+            over = true;
+        }
+        ~Done() { let_go(); }
     } done{ guard_ };
 
     // Everything once more on a fresh frame, just before the press: the
     // look that decided it is a moment old, and with the hold just taken.
+    // The allowed popups are looked for only where they were -- a few
+    // milliseconds, where a search of the whole screen takes a tenth of a
+    // second of the hold; anything else up is looked for everywhere, as
+    // before.
     Frame g;
     if (!grab_ || !grab_(g) || !g.valid()) return Turn::Blind;
     PopupScene again;
-    again.popups = allowed(g);
+    for (const PopupSeen& p : scene.popups)
+        for (const PopupSeen& q : eyes_.popups(g, false, &p.at))
+            if (same(again, q.kind, q.at) == nullptr) again.popups.push_back(q);
     const PopupSeen* still = same(again, kind, where);
     if (still == nullptr) return Turn::Nothing;
     again.blockers = eyes_.blockers(g, again.popups);
@@ -562,9 +592,20 @@ PopupCloser::Turn PopupCloser::turn() {
     // A stop that came while the fresh frame was looked at: nothing pressed.
     if (guard_.stopped && guard_.stopped()) return Turn::Held;
 
+    // That look took too long -- a busy machine -- to press now and still let
+    // go of the game in time: put off, nothing pressed, no try counted.
+    const bool with_esc = !still->control;
+    const std::uint64_t took = held_for();
+    if (took > (with_esc ? kEscPressByMs : kPressByMs)) {
+        tr.backoff_until = now() + kBackoffMs;
+        say(std::string("not closing ") + popup_kind_name(kind) + " now: the look before the press took " +
+            std::to_string(took) + " ms of the hold");
+        last_vi_ = std::string("Chưa đóng ") + popup_kind_vi(kind) + ": để sau 30 giây.";
+        return Turn::Held;
+    }
+
     // One click, or one ESC.
     tr.tries.push_back(t);
-    const bool with_esc = !still->control;
     const int cx = still->x, cy = still->y;
     const float score = still->score;
     const bool pressed = with_esc ? esc() : click(cx, cy);
@@ -575,18 +616,68 @@ PopupCloser::Turn PopupCloser::turn() {
         last_vi_ = std::string("Chưa đóng được ") + popup_kind_vi(kind) + ".";
         return Turn::NotClosed;
     }
+    // A click is all the hands do: the game is let go at once, and the rest
+    // is looking.
+    if (!with_esc) done.let_go();
+
+    // The ESC menu GoBot's own ESC brought up, first seen only once the game
+    // was let go -- an ESC late in the hold and a slow look after it: the hold
+    // taken again, every gate with it, for that one click on its X, and let go
+    // straight after. Left up, it would be taken for the player's from then
+    // on, and keep everything else shut for as long as it stayed (PU-R5).
+    const auto close_menu_again = [&](const PopupSeen& seen) {
+        if (guard_.gates) {
+            const std::string why = guard_.gates();
+            if (!why.empty()) {
+                say("GoBot's ESC brought up the ESC menu, seen only once the game was let go, and it is not the "
+                    "moment to take the game again (" + why + "): left as it is");
+                return;
+            }
+        }
+        const std::uint64_t asked_again = now();
+        if (guard_.take && !guard_.take()) {
+            say("GoBot's ESC brought up the ESC menu, seen only once the game was let go, and the game could not "
+                "be taken again: left as it is");
+            return;
+        }
+        Done again{ guard_ };
+        // Still there, where it was, on a fresh frame: its X is clicked only
+        // while it is.
+        Frame k;
+        if (!grab_ || !grab_(k) || !k.valid()) return;
+        PopupScene now_up;
+        now_up.popups = eyes_.popups(k, true, &seen.at);
+        const PopupSeen* menu = same(now_up, PopupKind::EscMenu, seen.at);
+        if (menu == nullptr) {
+            say("GoBot's ESC brought up the ESC menu, and it has gone by itself");
+            return;
+        }
+        if (!menu->control || (guard_.stopped && guard_.stopped()) || now() - asked_again > kPressByMs) {
+            say("GoBot's ESC brought up the ESC menu, seen only once the game was let go: left as it is");
+            return;
+        }
+        say("GoBot's ESC brought up the ESC menu, seen only once the game was let go: taken again and closed "
+            "with its X at " + at_text(menu->x, menu->y));
+        click(menu->x, menu->y);
+    };
 
     // Gone within kCheckMs -- and if GoBot's own ESC brought up the ESC menu,
-    // that is closed once, by its X.
+    // that is closed once, by its X: while the hold lasts, or with the hold
+    // taken again when it is seen only once it was let go. Each look is for
+    // the popup round its own place and the menu anywhere: a few milliseconds
+    // where a look for everything takes a tenth of a second or more, which
+    // would leave the menu to be seen that much later.
     bool gone = false, menu_tried = false;
     Frame after;
     for (int waited = 0; waited < kCheckMs; waited += kCheckLookMs) {
+        // No look started under the hold that could run past kHoldMs.
+        if (!done.over && held_for() + kCheckLookMs + kLookAllowMs > kHoldMs) done.let_go();
         sleep(kCheckLookMs);
         Frame h;
         if (!grab_ || !grab_(h) || !h.valid()) continue;
         after = h;
         PopupScene now_up;
-        now_up.popups = eyes_.popups(h);
+        now_up.popups = eyes_.popups(h, true, &where);
         gone = same(now_up, kind, where) == nullptr;
         const PopupSeen* menu = now_up.find(PopupKind::EscMenu);
         // One ESC does one thing: it shuts the book, or it brings up the
@@ -601,7 +692,10 @@ PopupCloser::Turn PopupCloser::turn() {
         }
         if (with_esc && menu != nullptr && !menu_tried && now() - own_esc_ms_ <= kOwnEscMs) {
             menu_tried = true;
-            if (guard_.stopped && guard_.stopped()) {
+            if (done.over || held_for() > kHoldMs) {
+                done.let_go();
+                close_menu_again(*menu);
+            } else if (guard_.stopped && guard_.stopped()) {
                 say("GoBot's ESC brought up the ESC menu, and a stop came: left as it is");
             } else if (menu->control) {
                 say("GoBot's ESC brought up the ESC menu: closing it with its X at " +
@@ -611,10 +705,14 @@ PopupCloser::Turn PopupCloser::turn() {
                 say("GoBot's ESC brought up the ESC menu, and its X is not where it should be: "
                     "left as it is");
             }
+            // The menu dealt with, the ESC is done with the game.
+            done.let_go();
             continue;
         }
+        // The book gone and no menu: the ESC did its one thing.
         if (gone && menu == nullptr) break;
     }
+    done.let_go();
 
     const std::string how = with_esc ? std::string("with ESC")
                           : kind == PopupKind::CheckinNotice ? std::string("with its Xác Nhận")

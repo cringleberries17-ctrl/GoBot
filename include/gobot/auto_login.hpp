@@ -451,9 +451,26 @@ public:
     /// rules above; null when there is none.
     static void* over(void* window);
 
+    /// Whether `part` of `window`'s client area, in client pixels, is all on a
+    /// screen with nothing over any of it -- whichever window is in front. A
+    /// frame read off the screen holds the game there, and a look that needs
+    /// only that part can trust it: the party's panels down the left of the
+    /// screen with GoBot's own window beside the game, say. Unlike
+    /// uncovered(), any of the part past a screen's edge counts against it:
+    /// it reads black there, and a look for the HUD or the party's panels
+    /// takes black for none of them. `in_the_way` names the program over it,
+    /// as uncovered() does, or says "off the screen".
+    static bool part_seen(void* window, const ScreenRect& part, std::string* in_the_way = nullptr);
+
     /// A rectangle on the screen as Windows gives one: left, top, right,
     /// bottom, in pixels.
     struct Box { long left = 0, top = 0, right = 0, bottom = 0; };
+    /// Whether all of `area` lies on `screens` -- which never overlap one
+    /// another. False for an empty area.
+    static bool on_screens(const Box& area, const std::vector<Box>& screens);
+    /// The first window above `window` that lies over `area`, in screen
+    /// pixels, by the rules of uncovered(); null when there is none.
+    static void* over_area(void* window, const Box& area);
     /// Whether a window drawn at `drawn` lies over a client area at `client`:
     /// whether the two meet on one of `screens`. Past every screen's edge
     /// nothing is seen by anybody, the game's frame included, so a window

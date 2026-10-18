@@ -275,7 +275,11 @@ UNATTENDED RUNNING
                       Throws one item away at most unless --max <n> says
                       more, since this is for trying the cleaner on a real
                       bag; with --dry it goes through the bag and says what
-                      it would throw away, throwing nothing. Every line the
+                      it would throw away, throwing nothing -- though it
+                      still presses the bag key (configs/trash.ini) to open
+                      a closed bag and to close it after, and clicks the
+                      bag's tabs and scroll arrows; never an item or a
+                      dialog. Every line the
                       cleaner reports is printed with the time, and the last
                       is TRASH RESULT with the counts. Exits 0 only when the
                       pass ran, nothing stopped it, every item it tried was
@@ -2328,7 +2332,8 @@ int run_party_hud(const Options& o, const AppConfig& app) {
     if (hud.state == PartyState::Unknown) {
         std::printf(" -- %s\n", hud.why.c_str());
     } else {
-        std::printf(", %d of %d%s\n", hud.size, kPartyMax, hud.full ? ", full" : "");
+        std::printf(", %s%d of %d%s%s\n", hud.covered ? "at least " : "", hud.size, kPartyMax,
+                    hud.full ? ", full" : "", hud.covered ? " -- the bag lies over some of the panels" : "");
         std::printf("own panel   leader's frame %.3f%s\n", static_cast<double>(hud.own_score),
                     hud.own_leader ? " -- leads" : "");
         for (const PartyPanel& p : hud.panels)
@@ -2338,8 +2343,10 @@ int run_party_hud(const Options& o, const AppConfig& app) {
     }
     for (const bool always : { false, true }) {
         const PartyGate g = party_invite_gate(hud, always);
+        const std::string said = g.allowed ? (g.note_en.empty() ? "yes" : "yes, though " + g.note_en)
+                                           : "no -- " + g.reason_en;
         std::printf("invite      %s: %s\n", always ? "with \"only while leading\" ticked" : "as shipped",
-                    g.allowed ? "yes" : ("no -- " + g.reason_en).c_str());
+                    said.c_str());
     }
     std::printf("%s\n", party_hud_line_vi(hud).c_str());
     return 0;
@@ -2617,9 +2624,9 @@ int run_trash(const Options& o, const AppConfig& app) {
     const auto finish = [](const BagCleaner::Result& r) {
         std::fflush(stderr);
         std::printf("TRASH RESULT ran=%d matched=%d deleted=%d dropped=%d failed=%d doubtful=%d "
-                    "use_matched=%d used=%d stuck=%d trouble=%s\n",
+                    "use_matched=%d used=%d use_unsure=%d stuck=%d trouble=%s\n",
                     r.ran ? 1 : 0, r.matched, r.deleted, r.dropped, r.failed, r.doubtful,
-                    r.use_matched, r.used, r.stuck ? 1 : 0, r.trouble.c_str());
+                    r.use_matched, r.used, r.use_unsure, r.stuck ? 1 : 0, r.trouble.c_str());
         std::fflush(stdout);
         return r.ran && r.trouble.empty() && r.failed == 0 && !r.stuck ? 0 : 1;
     };
@@ -4052,11 +4059,13 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
             }
             // Looked for only when there is none, or it has gone: every look
             // lists every window and logs a line, every 3 s of a long run.
-            if (stall.settings().enabled && !game.window_valid())
-                game.find_game_window(app.window_title, app.window_class, app.process_name);
+            // Found as every other command finds it, --window honoured; and
+            // looked at only while it is the game's own, by where its program
+            // runs from (StallKeeper::check).
+            if (stall.settings().enabled && !game.window_valid()) attach_window(game, o, app);
             if (!stall.settings().enabled ||
-                !stall.check(game.target_window(), false, settings, store, now_ms(), seen,
-                             resolve("keeper_debug"))) {
+                !stall.check(game.target_window(), watch_settings.game_process, false, settings, store,
+                             now_ms(), seen, resolve("keeper_debug"))) {
                 std::this_thread::sleep_for(std::chrono::seconds(3));
                 continue;
             }

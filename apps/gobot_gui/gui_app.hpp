@@ -1014,6 +1014,10 @@ private:
     void cancel_login_now();
     HotkeyConfig      hotkeys_;
     HotkeyEdgeTracker hotkey_edges_;
+    /// The last "this key is one GoBot presses itself" said, and when: said
+    /// again only when it changes, or ten minutes on.
+    std::string       hotkey_taken_said_;
+    std::uint64_t     hotkey_taken_ms_ = 0;
 
     // ---- the keeper's look between crashes ----
     /// What keeper_loop does after a look, besides what CrashWatch says.

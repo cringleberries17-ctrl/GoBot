@@ -1,6 +1,7 @@
 #include "gobot/stall_watch.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/common.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/session_manager.hpp"
 
@@ -168,6 +169,18 @@ bool stall_frame_trusted(bool grabbed, bool minimised, bool from_screen, bool cl
     return grabbed && !minimised && (!from_screen || clear);
 }
 
+bool stall_screen_clear(bool foreground, bool uncovered, bool hud_corner_seen) {
+    return foreground && uncovered && hud_corner_seen;
+}
+
+bool stall_window_is_the_games(void* window, const std::string& game_process,
+                               const GameInstall& install) {
+    if (window == nullptr) return false;
+    for (const InputManager::WindowInfo& w : game_windows(game_process, install))
+        if (w.hwnd == window) return true;
+    return false;
+}
+
 bool login_page_up(const Frame& f, const AutoLogin::Settings& login, const TemplateStore& pages) {
     if (!f.valid()) return false;
     const ScreenRect all{ 0, 0, f.width, f.height };
@@ -218,9 +231,13 @@ bool StallLooker::grab(void* window, Frame& f, bool& trusted) {
     const bool minimised = w == nullptr || IsIconic(w) != FALSE;
     const bool grabbed = !minimised && capture_.grab(window, f) && f.valid();
     // Read off the screen, the frame is the game only while the game is in
-    // front with nothing over it -- the crossing's own rule for trusting one.
+    // front with nothing over it -- the crossing's own rule for trusting one
+    // -- and with the HUD's corner on a screen. The crossing lets a window
+    // part off the screen be looked at; here, a HUD dragged past the edge
+    // reads black, black is no HUD, and the healthy game would be ended.
     const bool from_screen = grabbed && capture_.from_screen();
-    const bool clear = from_screen && GetForegroundWindow() == w && AutoLogin::uncovered(window);
+    const bool clear = from_screen && stall_screen_clear(GetForegroundWindow() == w, AutoLogin::uncovered(window),
+                                                         AutoLogin::part_seen(window, kHudCorner));
     trusted = stall_frame_trusted(grabbed, minimised, from_screen, clear);
     return grabbed;
 }
@@ -353,13 +370,25 @@ void StallKeeper::restart(std::uint64_t now_ms) {
     logged_minute_ = -1;
 }
 
-bool StallKeeper::check(void* window, bool held, const AutoLogin::Settings& login, const TemplateStore& pages,
-                        std::uint64_t now_ms, CrashWatch::Look& out, const std::string& debug_dir) {
+bool StallKeeper::check(void* window, const std::string& game_process, bool held,
+                        const AutoLogin::Settings& login, const TemplateStore& pages, std::uint64_t now_ms,
+                        CrashWatch::Look& out, const std::string& debug_dir) {
     if (!watch_.settings().enabled || now_ms < next_ms_) return false;
     next_ms_ = now_ms + kLookMs;
+    // Only a window of the game's own, by where its program runs from: the
+    // window GoBot follows may have been picked by hand, or found by its
+    // title alone, and a window that is not the game never shows the HUD --
+    // its looks would end a healthy game. Not looked at, it is a blind look.
+    looking_at_the_game_ =
+        stall_window_is_the_games(window, game_process, install_set_ ? install_ : GameInstall::here());
+    if (!looking_at_the_game_ && !said_not_the_game_)
+        GB_INFO("Keeper: the watchdog counts nothing for now -- %s",
+                window == nullptr ? "no window of the game's is followed"
+                                  : "the window followed is not one of the game's own");
+    said_not_the_game_ = !looking_at_the_game_;
     Frame frame;
     bool trusted = false;
-    looker_.grab(window, frame, trusted);
+    if (looking_at_the_game_) looker_.grab(window, frame, trusted);
     return judge(frame, trusted, held, login, pages, now_ms, out, debug_dir);
 }
 

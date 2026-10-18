@@ -22,25 +22,36 @@ namespace gobot {
 /// GoC's member panel to the pixel, with GoC's leader frame over it at the
 /// same place, apart from its two bars and a one-pixel shift of the cut.
 ///
-/// No saved frame of the live client has a party on it, so where the panels
+/// One saved frame of the live client has a party on it, so where the panels
 /// sit is searched for rather than assumed: anywhere in the left of the
 /// screen, below the top of the HUD. A panel is matched by its frame alone --
 /// the bars, the name box and the portrait box are left out, since what is in
-/// them changes -- and the red frame is looked for in colour, which is what
-/// tells it from the grey of a member's. On the 1,065 saved frames of the live
-/// client, all of them without a party, a member panel's frame scores 0.69 at
-/// best anywhere there and the red frames 0.42; drawn in, with bars, a name
-/// and a face, 0.99 and 1.00.
+/// them changes, and so are its last columns, under the bag where the player
+/// keeps it -- and the red frame is looked for in colour, which is what tells
+/// it from the grey of a member's. On the 1,058 saved frames of the live
+/// client without a party, a member panel's frame scores 0.71 at best anywhere
+/// there and the red frames 0.42; the one live party's panel 0.93, and drawn
+/// in, with bars, a name and a face, 0.99 and 1.00.
+///
+/// What it cannot see it does not guess: the bag's window over the panels'
+/// column leaves a party at least as big as what is seen, and nobody seen
+/// under it is no reading at all.
 ///
 /// Read only: nothing here clicks or presses anything.
 
 enum class PartyState {
-    Unknown,    ///< the HUD is not on screen, or what is there makes no sense
-    Alone,      ///< the HUD is up and no party panel is on it
-    Member,     ///< other members' panels, and the player does not lead
+    Unknown,    ///< the HUD is not on screen, what is there makes no sense, or the bag or a window hides the panels
+    Alone,      ///< the HUD is up and no party panel is on it, nor the bag over where they go
+    Member,     ///< other members' panels, one of them wearing the leader's frame
     Leader,     ///< the player's own panel wears the leader's frame
+    /// Other members' panels, and no leader's frame on any of them nor on the
+    /// player's own. A party always has its one leader, so this is a reading
+    /// that failed -- the player's own red frame not matched, or the leader's
+    /// panel under a window -- and who leads is not known: in a party, but
+    /// never taken for a member who does not lead.
+    InParty,
 };
-/// "unknown", "alone", "member", "leader", for the log.
+/// "unknown", "alone", "member", "leader", "in a party", for the log.
 const char* party_state_name(PartyState s);
 
 /// One other member's panel.
@@ -64,6 +75,10 @@ struct PartyHud {
     bool own_leader = false;        ///< the player's own panel wears the red frame
     float own_score = -1.0f;        ///< how alike to it, -1 when not looked for
     std::vector<PartyPanel> panels; ///< the other members', top to bottom
+    /// The bag's window lies over part of where the members' panels are
+    /// drawn: there may be more of them than were seen. `size` is then the
+    /// least the party has, and a reading of nobody is Unknown, never Alone.
+    bool covered = false;
     std::string why;                ///< when Unknown, why, in English for the log
 };
 
@@ -74,11 +89,13 @@ constexpr int kPartyMax = 6;
 class PartyHudReader {
 public:
     /// How alike a member panel's frame has to be. Real frames without a
-    /// party reach 0.69 at most, a panel drawn in 0.99.
+    /// party reach 0.71 at most, the live party's panel 0.93, a panel drawn in
+    /// 0.99.
     static constexpr float kPanelScore = 0.85f;
     /// How alike the red frame has to be, in colour, where a panel or the
     /// player's own panel is. A member's grey panel scores 0.13 against it;
-    /// the live helper's picture of a leader's panel 0.87.
+    /// the live helper's picture of a leader's panel 0.82, and the leader's
+    /// panel in the one saved live party 1.00.
     static constexpr float kLeaderScore = 0.70f;
     /// Where panels are looked for: the left of the screen, from the bottom of
     /// the player's own panel down -- more than twice as wide as a panel, and
@@ -88,11 +105,43 @@ public:
     static constexpr int kSearchTop = 40;
     static constexpr int kSearchRight = 320;
     static constexpr int kSearchBottom = 480;
+    /// A member's panel, and the red frame over a leader's, are matched by
+    /// their columns left of this. The bag where the player keeps it -- its
+    /// tab strip at 134,293 on every saved round of the live client -- has its
+    /// left edge at x=121, over the last nine of a panel's 130 columns: its
+    /// right border, without which no panel was found. Left of it the live
+    /// panels still score 0.92 to 1.00, and no saved frame without a party
+    /// more than 0.71.
+    static constexpr int kPanelMatchW = 118;
+    /// The bag's window round its tab strip, as bag::find finds the strip:
+    /// from 16 left of it and 230 above it, 280 wide and 440 high -- its left
+    /// edge measured 13 left of the strip and its top 225 above it, where the
+    /// player keeps it and dragged to the screen's left edge alike. A bag
+    /// reaching left of kPanelMatchW, anywhere down the panels' column, hides
+    /// panels.
+    static constexpr int kBagLeft = 16, kBagUp = 230, kBagW = 280, kBagH = 440;
+    /// How alike the tab strip has to be: what bag::find takes.
+    static constexpr float kBagStripScore = 0.62f;
+    /// Read off the screen with another program's window over the left of the
+    /// game, the panels' column -- left of kPanelMatchW, kSearchTop down to
+    /// kSearchBottom -- is that window: mostly one plain colour, as nothing the
+    /// game draws there is. On the 1,057 saved frames of the live client with
+    /// the HUD up and nothing over the game, the column's commonest colour is
+    /// 14% of it at most; on the ten read off the screen with a terminal or
+    /// another program over the game, 39% to 64%. A column this plain is no
+    /// reading at all: party_frame_trusted asks the windows, this the pixels.
+    static constexpr float kPlainShare = 0.30f;
+    /// The part of the screen a reading looks at: the player's own panel, and
+    /// the members' panels down the left. A frame read off the screen is
+    /// trusted for the party when this part of the game is all on a screen
+    /// with nothing over it (party_frame_trusted).
+    static constexpr ScreenRect kArea{ 0, 0, kSearchRight, kSearchBottom };
 
     /// Takes what it needs from `store`: the game's member panel, the two
-    /// leader frames (either skin -- the pictures are the same) and the HUD's
-    /// Level plate, which says the HUD is up at all. False, with what is
-    /// missing in `missing`, when one of them is not there.
+    /// leader frames (either skin -- the pictures are the same), the HUD's
+    /// Level plate, which says the HUD is up at all, and the bag's tab strip,
+    /// which says where the bag's window is. False, with what is missing in
+    /// `missing`, when one of them is not there.
     bool load(const TemplateStore& store, std::string* missing = nullptr);
     bool ready() const { return ready_; }
 
@@ -113,19 +162,26 @@ public:
     /// left see-through. For tests, and for gobot_cli --party-hud.
     const Frame& panel_picture() const { return panel_; }
 
+    /// Where the bag's window is in `f`, when its tab strip is there: what
+    /// read() goes by to tell a party it cannot see all of. For tests.
+    bool bag_window(const Frame& f, ScreenRect& out) const;
+
 private:
     Frame panel_;       ///< Dialog_PartyInfo, what changes made see-through
     Frame other_;       ///< Party_King_Other: the red frame over a member's panel
     Frame mine_;        ///< Party_King_My: the red frame over the player's own
     Frame landmark_;    ///< hpmp_indicator2, the HUD's Level plate
+    Frame strip_;       ///< the bag's tab strip, grabbed/inventory
     bool  ready_ = false;
 };
 
 /// Whether a frame of `window` can be read for its party: one the game drew
 /// itself always; one read off the screen (ScreenCapture::from_screen) only
-/// with the game in front and nothing over it -- the crossing's own rule for
-/// trusting a frame. Another window over the left of the screen would hide
-/// the panels and read as a player alone.
+/// when the part of the game the party is read from (PartyHudReader::kArea)
+/// is all on a screen with nothing over it -- whichever window is in front,
+/// so that GoBot's own window beside the game does not stop a reading.
+/// Another window over the left of the screen would hide the panels and read
+/// as a player alone; past a screen's edge reads black, which is no panel.
 bool party_frame_trusted(bool from_screen, void* window);
 
 /// Whether an invite can work now, by what the HUD says, as GoC's chat
@@ -135,12 +191,18 @@ bool party_frame_trusted(bool from_screen, void* window);
 /// - a party seen full: no;
 /// - a member who does not lead, with `always_leader` ("Chỉ mời khi đang làm
 ///   chủ tổ đội"): no;
-/// - anything else -- alone, leading, a member with the tick off, or a HUD
-///   that could not be read -- yes, as GoBot invited before it read the HUD.
+/// - anything else -- alone, leading, a member with the tick off, a party
+///   whose leader could not be told, or a HUD that could not be read -- yes,
+///   as GoBot invited before it read the HUD. Only a party seen to be led by
+///   somebody else stops an invite for the tick: a leader's frame that was
+///   not matched is no proof the player does not lead.
 struct PartyGate {
     bool        allowed = true;
     std::string reason_vi;          ///< why not, for the screen; empty when allowed
     std::string reason_en;          ///< the same for the log
+    /// Allowed, though the tick asked to know who leads and that could not be
+    /// told: for the log and the screen. Empty otherwise.
+    std::string note_vi, note_en;
 };
 PartyGate party_invite_gate(const PartyHud& hud, bool always_leader);
 
@@ -149,6 +211,7 @@ namespace party_text {
 inline const char* const kFull = "Tổ đội đã đủ 6 người";
 inline const char* const kNotLeader = "Đang trong tổ đội nhưng không phải chủ tổ đội";
 inline const char* const kUnread = "không đọc được khung tổ đội";
+inline const char* const kLeaderUnread = "không đọc được ai là chủ tổ đội";
 } // namespace party_text
 
 /// "Tổ đội: một mình", "Tổ đội: thành viên (3/6)", "Tổ đội: chủ tổ đội (3/6)",

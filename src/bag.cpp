@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <future>
 #include <map>
 #include <set>
 #include <thread>
@@ -61,10 +62,29 @@ const DialogPicture kBinDialogs[] = {
 /// of the bin's dialogs.
 const DialogPicture kRegisterPicture = { bag::kRegisterDialog, 101, 51, false };
 
+/// Every other question GoBot has a picture of, all in the game's one dialog
+/// frame over [Xác Nhận][Hủy Bỏ]: the bin's two, the revive question -- "Bạn
+/// có muốn sử dụng…", which a question about using an item would open with as
+/// well -- and the drop and sell questions. The registration's picture is used
+/// only when its words are found in none of them.
+const char* const kOtherQuestions[] = { "grabbed/del_item_confirm_1", "grabbed/del_item_confirm_2",
+                                        "grabbed/hoisinh_confirm", "grabbed/drop_confirm",
+                                        "grabbed/sell_confirm" };
+
 /// How long a right-click on a fragment is given to bring up its question,
 /// and how long its question, once answered, to go.
 constexpr int kUseAskMs = 1500;
 constexpr int kUseCloseMs = 1800;
+/// How long after a right-click that brought nothing up the use sweep waits,
+/// and looks again, before it right-clicks anything else: a question that
+/// comes up late, the game lagging, is then seen for the one it is, not taken
+/// for the next piece's.
+constexpr int kUseLateMs = 1500;
+
+/// A close button, as the popup closer finds one: each drawing at 0.90, and
+/// the bag's own within a few pixels of where the layout puts it.
+constexpr float kCloseScore = 0.90f;
+constexpr int kCloseSlack = 4;
 
 /// The dark panel of words in those pictures, from their top-left. Every
 /// dialog's frame and buttons are the same, so the words are what tells them
@@ -141,6 +161,19 @@ bool same_place(const ScreenRect& a, const ScreenRect& b) {
     return std::abs(a.x - b.x) <= 3 && std::abs(a.y - b.y) <= 3;
 }
 
+/// The bright pixels of a panel of words that the picture shows. A part made
+/// see-through -- a fragment's name, which may differ from question to
+/// question while the rest stays the same -- counts no more here than it does
+/// in the match.
+int bright_words(const Frame& words) {
+    int bright = 0;
+    for (std::size_t i = 0; i < words.pixels.size(); i += 4)
+        if (words.pixels[i + 3] >= TemplateMatcher::kOpaque &&
+            (words.pixels[i] + words.pixels[i + 1] + words.pixels[i + 2]) / 3 > 150)
+            ++bright;
+    return bright;
+}
+
 /// How alike the screen is to bin dialog `pic`'s panel of words, where that
 /// panel would sit for a pair of buttons at `at`: the best within two pixels,
 /// when `least` or better, else -1. -1 too for a picture that is not loaded
@@ -151,10 +184,7 @@ float words_at(const Frame& f, const TemplateStore& store, const ScreenRect& at,
     if (t == nullptr) return -1.0f;
     const Frame words = crop(*t, ScreenRect{ kWordsX, kWordsY, kWordsW, kWordsH });
     if (!words.valid()) return -1.0f;
-    int bright = 0;
-    for (std::size_t i = 0; i < words.pixels.size(); i += 4)
-        if ((words.pixels[i] + words.pixels[i + 1] + words.pixels[i + 2]) / 3 > 150) ++bright;
-    if (bright < kWordsAtLeast) return -1.0f;     // no words: tells nothing apart
+    if (bright_words(words) < kWordsAtLeast) return -1.0f;     // no words: tells nothing apart
 
     // Right where they sit relative to the buttons, give or take two pixels,
     // and nowhere else.
@@ -202,6 +232,8 @@ void BagLayout::load(const IniFile& ini) {
     bin_dy          = ini.get_int("Bag", "bin_dy", bin_dy);
     bin_w           = ini.get_int("Bag", "bin_w", bin_w);
     bin_h           = ini.get_int("Bag", "bin_h", bin_h);
+    close_dx        = ini.get_int("Bag", "close_dx", close_dx);
+    close_dy        = ini.get_int("Bag", "close_dy", close_dy);
     count_w         = ini.get_int("Bag", "count_w", count_w);
     count_h         = ini.get_int("Bag", "count_h", count_h);
     edge            = ini.get_int("Bag", "edge", edge);
@@ -903,6 +935,32 @@ bool CleanSettings::load(const std::string& path) {
     return true;
 }
 
+bool CleanSettings::save_items(const std::string& path, const std::function<void()>& between) const {
+    const auto join = [](const std::vector<std::string>& ids) {
+        std::string out;
+        for (const std::string& id : ids) {
+            if (!out.empty()) out += ',';
+            out += id;
+        }
+        return out;
+    };
+    // What use= holds on disk now, which a pass may be going by: every id
+    // that leaves it stays on it until delete= is as it will be.
+    std::vector<std::string> both = use_ids;
+    CleanSettings on_disk;
+    if (on_disk.load(path))
+        for (const std::string& id : on_disk.use_ids)
+            if (std::find(both.begin(), both.end(), id) == both.end()) both.push_back(id);
+    const auto step = [&](bool written) {
+        if (written && between) between();
+        return written;
+    };
+    return step(IniFile::set_in_place(path, "Items", "use", join(both))) &&
+           step(IniFile::set_in_place(path, "Items", "delete", join(delete_ids))) &&
+           step(IniFile::set_in_place(path, "Items", "drop", join(drop_ids))) &&
+           IniFile::set_in_place(path, "Items", "use", join(use_ids));
+}
+
 // ------------------------------------------------------------------ list
 
 const char* TrashList::folder(Action a) {
@@ -917,8 +975,11 @@ const char* TrashList::folder(Action a) {
 bool TrashList::load(const std::string& dir, const BagLayout& l) {
     items.clear();
     rivals.clear();
-    // Use first: a picture put in two folders by hand is then registered
-    // rather than deleted, which cannot be had back the other way.
+    // Use first, for the tab to show them so. Which of them takes a slot is
+    // not the order's doing: judge gives a slot any item on the Dùng list
+    // matches to that item, so a picture put in two folders by hand -- or
+    // one cut for the delete list and a fragment chosen later to use -- is
+    // registered rather than deleted, which cannot be had back the other way.
     for (const Action a : { Action::Use, Action::Delete, Action::Drop }) {
         const std::string sub = dir + "\\" + folder(a);
         if (!path_exists(sub)) continue;
@@ -1097,18 +1158,41 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
     // GoC's own pictures -- and 0.99 on a buff with a badge over it, the best
     // other drawing 0.77 at most, and the enlarged copy a slot shows while
     // its item waits in the bin 0.77 at most.
+    int use = -1;                   // the best of the items on the Dùng list that match
+    float use_score = 0.0f;
     for (std::size_t i = 0; i < items.size(); ++i) {
         const Item& item = items[i];
         const Frame& p = item.picture;
         if (!p.valid() || area.w < p.width || area.h < p.height) continue;
         const float need = item.min_score > 0.0f ? item.min_score : min_score;
         const auto m = TemplateMatcher::find(f, area, p, need, TemplateMatcher::Tone::Grey);
-        if (m.found && m.score > v.score) {
+        if (!m.found) continue;
+        if (m.score > v.score) {
             v.item = static_cast<int>(i);
             v.score = m.score;
         }
+        if (item.action == Action::Use && m.score > use_score) {
+            use = static_cast<int>(i);
+            use_score = m.score;
+        }
     }
     if (v.item < 0) return v;
+
+    // Registered rather than deleted: a slot an item on the Dùng list matches
+    // is that item's, whatever on the delete or drop list matches it better.
+    // A picture cut from the bag scores 1.00 on its own slot, and a catalog
+    // icon 0.947 or more on the same drawing -- so a fragment chosen to use
+    // from the catalog, with an older cut of it on the delete list, would
+    // otherwise be deleted whole on every pass and never registered. What is
+    // left of it after the registration goes only when the Dùng item says so
+    // (then_delete). Any doubt below leaves the slot alone, never falls back
+    // to the deletion.
+    if (use >= 0 && use != v.item) {
+        v.passed_over = v.item;
+        v.passed_over_score = v.score;
+        v.item = use;
+        v.score = use_score;
+    }
 
     // Something not on the list, drawn differently, that looks as much like
     // the slot is as good an answer, and the slot is left alone: a bag with a
@@ -1140,6 +1224,48 @@ int TrashList::match(const Frame& f, const ScreenRect& slot, float min_score,
     if (score) *score = v.item >= 0 ? v.score : v.like_score;
     return v.item;
 }
+
+std::vector<std::size_t> TrashList::yielding_to_use() const {
+    // What the Dùng list stands for in catalog icons: each item's own id, and
+    // the icons it is drawn like -- a picture cut from the bag has only those.
+    std::vector<std::string> use;
+    for (const Item& it : items) {
+        if (it.action != Action::Use) continue;
+        if (!it.id.empty()) use.push_back(it.id);
+        use.insert(use.end(), it.kin.begin(), it.kin.end());
+    }
+    const auto on_use = [&](const std::string& id) { return std::find(use.begin(), use.end(), id) != use.end(); };
+    std::vector<std::size_t> out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const Item& it = items[i];
+        if (it.action == Action::Use) continue;
+        if ((!it.id.empty() && on_use(it.id)) || std::any_of(it.kin.begin(), it.kin.end(), on_use))
+            out.push_back(i);
+    }
+    return out;
+}
+
+bool TrashList::Item::fragment() const {
+    // A catalog icon is one by its id. A picture cut from the bag is one by
+    // what add_rivals found it drawn like: fragment icons, and nothing else --
+    // a picture drawn like no icon at all, or like a potion as well, is not.
+    if (!id.empty() && !is_fragment(id)) return false;
+    if (kin.empty()) return false;
+    return std::all_of(kin.begin(), kin.end(), [](const std::string& k) { return is_fragment(k); });
+}
+
+namespace bag {
+
+bool fragment_cut(const Frame& cut, const BagLayout& l, const ItemCatalog& catalog) {
+    // The very list a pass would build with this picture on the Dùng list,
+    // and the very test the pass puts it to.
+    TrashList one;
+    one.add_picture(cut, TrashList::Action::Use, l);
+    one.add_rivals(catalog);
+    return !one.items.empty() && one.items.front().fragment();
+}
+
+} // namespace bag
 
 // --------------------------------------------------------------- dialogs
 
@@ -1239,21 +1365,43 @@ bool can_check(const TemplateStore& store, TrashList::Action a) {
     if (ask == nullptr) return false;
     const Frame words = crop(*ask, ScreenRect{ kWordsX, kWordsY, kWordsW, kWordsH });
     if (!words.valid()) return false;
-    int bright = 0;
-    for (std::size_t i = 0; i < words.pixels.size(); i += 4)
-        if ((words.pixels[i] + words.pixels[i + 1] + words.pixels[i + 2]) / 3 > 150) ++bright;
-    if (bright < kWordsAtLeast) return false;
+    if (bright_words(words) < kWordsAtLeast) {
+        GB_INFO("Trash: %s is not used: too few words are left in it to tell a question by", kRegisterPicture.name);
+        return false;
+    }
     const ScreenRect buttons = clamp_to(*ask, ScreenRect{ kRegisterPicture.pair_dx - 2, kRegisterPicture.pair_dy - 2,
                                                           pair->width + 4, pair->height + 4 });
     if (buttons.w < pair->width || buttons.h < pair->height) return false;
     // In either drawing of the two buttons find_dialogs knows them by: the
     // store's, and the bin's question's own, a pixel closer together.
-    if (TemplateMatcher::find(*ask, buttons, *pair, kButtonScore).found) return true;
-    const Frame* bin_ask = store.get(kBinDialogs[kAskDialog].name);
-    if (bin_ask == nullptr) return false;
-    const Frame other = crop(*bin_ask, ScreenRect{ kBinDialogs[kAskDialog].pair_dx, kBinDialogs[kAskDialog].pair_dy,
-                                                   pair->width, pair->height });
-    return other.valid() && TemplateMatcher::find(*ask, buttons, other, kButtonScore).found;
+    bool placed = TemplateMatcher::find(*ask, buttons, *pair, kButtonScore).found;
+    if (!placed) {
+        const Frame* bin_ask = store.get(kBinDialogs[kAskDialog].name);
+        if (bin_ask == nullptr) return false;
+        const Frame other = crop(*bin_ask, ScreenRect{ kBinDialogs[kAskDialog].pair_dx, kBinDialogs[kAskDialog].pair_dy,
+                                                       pair->width, pair->height });
+        placed = other.valid() && TemplateMatcher::find(*ask, buttons, other, kButtonScore).found;
+    }
+    if (!placed) {
+        GB_INFO("Trash: %s is not used: its two buttons are not where a question has them", kRegisterPicture.name);
+        return false;
+    }
+
+    // And words that no other question has. Cut down to what stays the same
+    // from piece to piece, the name see-through, what is left could be no more
+    // than the "Bạn có muốn" every question opens with -- and then the revive
+    // question, or the bin's, would be confirmed as a registration. Searched
+    // for anywhere in each picture, not only where its words sit.
+    for (const char* name : kOtherQuestions) {
+        const Frame* other = store.get(name);
+        if (other == nullptr || other->width < words.width || other->height < words.height) continue;
+        if (TemplateMatcher::find(*other, ScreenRect{ 0, 0, other->width, other->height }, words, kWordsScore)
+                .found) {
+            GB_INFO("Trash: %s is not used: its words are found in %s as well", kRegisterPicture.name, name);
+            return false;
+        }
+    }
+    return true;
 }
 
 bool notice_up(const Frame& f, const TemplateStore& store) {
@@ -1262,6 +1410,41 @@ bool notice_up(const Frame& f, const TemplateStore& store) {
     const Frame* notice = store.get(kNotice);
     if (notice == nullptr || !f.valid() || !find_dialogs(f, store).empty()) return false;
     return TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f).found;
+}
+
+bool can_see_windows(const TemplateStore& store) {
+    for (const char* name : kCloseButtons)
+        if (store.get(name) == nullptr) return false;
+    return true;
+}
+
+bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& v, const BagLayout& l,
+                     ScreenRect* at) {
+    if (!can_see_windows(store) || !f.valid()) return true;
+    // Each drawing on its own thread: matched through their see-through
+    // corners, these are the dearest searches of a look, and the game is held
+    // while they run.
+    const ScreenRect all{ 0, 0, f.width, f.height };
+    std::vector<std::future<std::vector<TemplateMatcher::Match>>> looks;
+    for (const char* name : kCloseButtons) {
+        const Frame* x = store.get(name);
+        looks.push_back(std::async(std::launch::async, [&f, all, x] {
+            return f.width >= x->width && f.height >= x->height ? TemplateMatcher::find_all(f, all, *x, kCloseScore, 16)
+                                                                : std::vector<TemplateMatcher::Match>{};
+        }));
+    }
+    // The bag's own X, where it always is: any other is a window's that a
+    // right-click might hand the item to.
+    bool other = false;
+    for (auto& look : looks)
+        for (const TemplateMatcher::Match& m : look.get()) {
+            const bool own = v.found && std::abs(m.at.x - (v.strip.x + l.close_dx)) <= kCloseSlack &&
+                             std::abs(m.at.y - (v.strip.y + l.close_dy)) <= kCloseSlack;
+            if (own || other) continue;
+            other = true;
+            if (at) *at = m.at;
+        }
+    return other;
 }
 
 } // namespace bag
@@ -1415,6 +1598,7 @@ BagCleaner::Result BagCleaner::run() {
     }
     if (cancelled_) return res;          // stopped before it began
     item_out_ = false;
+    late_ask_ = false;
 
     Frame f;
     BagView v;
@@ -1507,9 +1691,30 @@ BagCleaner::Result BagCleaner::run() {
     for (const TrashList::Item& it : trash_->items) any_use = any_use || it.action == TrashList::Action::Use;
     std::set<long long> seen;        // slots dealt with this pass: tab, row of the tab, column
     // List items registered this pass: no other slot of theirs is right-clicked
-    // again, and one to be deleted after it has been used is now deleted.
+    // again this pass. Not what deleting goes by: a fragment's drawing is one
+    // piece of every monster's nine, and only `registered` says which stack
+    // was registered.
     std::set<int> used;
     std::set<int> no_use;            // right-clicked to no end: not tried again this pass
+    // The slots registered from that still hold some of their stack, by tab,
+    // row of the tab and column: the only places what is left of an item to
+    // be used and then deleted is deleted from.
+    Registrations registered;
+    // Whether those places still hold: false once a deletion's slot is not
+    // seen empty afterwards, as it would not be in a bag that closes up its
+    // gaps -- and in such a bag a place says nothing about what is there.
+    bool by_place = true;
+    // Slot `index` of the page `was` shows empty on a fresh look, on that same
+    // page by the scroll bar.
+    const auto slot_left_empty = [&](const BagView& was, int index) {
+        Frame g;
+        BagView w;
+        if (!grab_view(g, w) || !was.scroll_known() || !w.scroll_known() || w.first_row != was.first_row)
+            return false;
+        const auto now = w.slots(l);
+        return static_cast<std::size_t>(index) < now.size() &&
+               bag::is_empty(g, now[static_cast<std::size_t>(index)], l);
+    };
     int done = 0, uses = 0;
     bool stop = false;
     for (int tab = 0; tab < kBagTabs && !stop && !cancelled_; ++tab) {
@@ -1530,10 +1735,18 @@ BagCleaner::Result BagCleaner::run() {
         // used and then deleted is registered first. Not on a look-only pass,
         // and not without the picture to tell the registration question by.
         if (tab == kUseTab && any_use && can_use && !dry_run_) {
-            use_sweep(tab, v, res, stop, used, no_use, uses);
+            use_sweep(tab, v, res, stop, used, no_use, uses, registered);
             if (stop || cancelled_) break;
             scroll_to_top(v);
         }
+        // What is left of a registered stack still to be deleted on this tab.
+        const auto rests_waiting = [&] {
+            if (tab != kUseTab || !by_place) return false;
+            for (const auto& each : registered)
+                if (each.second.left > 0 && trash_->items[static_cast<std::size_t>(each.second.item)].then_delete)
+                    return true;
+            return false;
+        };
 
         int scrolls = 0;
         bool hid_pointer = false;
@@ -1609,12 +1822,36 @@ BagCleaner::Result BagCleaner::run() {
 
                 seen.insert(key);
                 const TrashList::Item& item = trash_->items[static_cast<std::size_t>(k.item)];
-                // An item on the Dùng list is not deleted -- unless it is to
-                // be deleted once used, and has been, this pass.
-                const bool to_use = item.action == TrashList::Action::Use &&
-                                    !(item.then_delete && used.count(k.item));
-                if (to_use) ++res.use_matched;
-                else        ++res.matched;
+                // An item on the Dùng list is not deleted -- but for what is
+                // left of a stack this pass registered, of an item to be
+                // deleted once used: from that very slot, found by where it is
+                // -- only where the scroll bar says which row this is -- and
+                // only while it shows just what it did right after, the same
+                // drawing and the same count. Every other slot drawn the same
+                // waits for a registration of its own: the drawing says only
+                // which of a monster's nine pieces it is.
+                const auto reg = item.action == TrashList::Action::Use && v.scroll_known()
+                                     ? registered.find(key)
+                                     : registered.end();
+                const bool from_here = reg != registered.end();     // registered from this slot
+                bool rest = false;
+                std::string rest_kept;          // why what is left there stays
+                if (from_here && item.then_delete && reg->second.left > 0) {
+                    const int holds = counts_ ? counts_->read(f, slots[s]) : CountReader::kUnreadable;
+                    if (!by_place)
+                        rest_kept = "túi đồ có thể đã tự xếp lại sau một lần xoá, nên không còn chắc đây là ô "
+                                    "vừa đăng ký";
+                    else if (bag::alike(bag::cut(f, slots[s]), reg->second.look, l) < kStillThere)
+                        rest_kept = "ô không còn giống lúc vừa đăng ký";
+                    else if (holds != reg->second.left)
+                        rest_kept = "số lượng không còn là " + std::to_string(reg->second.left) +
+                                    " như lúc vừa đăng ký";
+                    else
+                        rest = true;
+                }
+                const bool to_use = item.action == TrashList::Action::Use && !rest;
+                if (!to_use)         ++res.matched;
+                else if (!from_here) ++res.use_matched;
                 char percent[24];
                 std::snprintf(percent, sizeof percent, "%.0f%%", static_cast<double>(k.score) * 100.0);
                 // Which listed item, when it is one that came along with a
@@ -1623,19 +1860,48 @@ BagCleaner::Result BagCleaner::run() {
                                           (item.via.empty() ? std::string()
                                                             : ", " + item_name(item)) + ")";
                 if (to_use) {
+                    if (from_here) {
+                        // Registered from here this pass. What is left stays,
+                        // and when it was to go, it is said why not.
+                        if (!rest_kept.empty())
+                            say(std::string("không xoá phần còn lại ở ") + where + score + ": " + rest_kept);
+                        continue;
+                    }
                     // What the use sweep did not register: said, never
                     // right-clicked here.
-                    const char* why_not = !can_use ? "GoBot chưa có hình hộp thoại đăng ký mảnh ghép của "
+                    const char* why_not = !item.fragment()
+                                              ? "hình này không giống mảnh ghép nào, mà chuột phải vào món "
+                                                "khác là dùng luôn món đó"
+                                        : !can_use ? "GoBot chưa có hình hộp thoại đăng ký mảnh ghép của "
                                                      "game để kiểm tra"
                                         : tab != kUseTab ? "chỉ dùng đồ ở ngăn Tiêu Dùng"
                                                          : nullptr;
+                    // An item on the delete or drop list that matched the
+                    // slot better and gave way to this one (judge): said, so
+                    // that the player sees why a picture of theirs on that
+                    // list leaves it be.
+                    std::string over;
+                    if (k.passed_over >= 0) {
+                        const TrashList::Item& o = trash_->items[static_cast<std::size_t>(k.passed_over)];
+                        char by[24];
+                        std::snprintf(by, sizeof by, "%.0f%%", static_cast<double>(k.passed_over_score) * 100.0);
+                        over = "; cũng giống " + item_name(o) + " trong danh sách " +
+                               (o.action == TrashList::Action::Drop ? "vứt" : "xoá") + " (" + by +
+                               "), nhưng danh sách Dùng được ưu tiên";
+                    }
                     if (dry_run_)
                         say(std::string("thấy đồ sẽ dùng ở ") + where + score +
-                            (item.then_delete ? ", rồi xoá phần còn lại" : "") +
-                            (why_not ? std::string(", nhưng sẽ không dùng: ") + why_not : std::string()));
+                            (item.then_delete ? ", rồi xoá phần còn lại của ô đó" : "") +
+                            (why_not ? std::string(", nhưng sẽ không dùng: ") + why_not : std::string()) + over);
                     else if (why_not)
                         say(std::string("thấy đồ sẽ dùng ở ") + where + score + ", nhưng sẽ không dùng: " +
-                            why_not);
+                            why_not + over);
+                    else if (item.then_delete)
+                        say(std::string("không xoá món ở ") + where + score +
+                            (v.scroll_known() ? ": chưa đăng ký từ ô này"
+                                              : ": không đọc được thanh cuộn, nên không biết đây có phải ô vừa "
+                                                "đăng ký không") +
+                            "; chỉ xoá phần còn lại của đúng ô vừa đăng ký" + over);
                     continue;
                 }
                 if (dry_run_) {
@@ -1659,10 +1925,17 @@ BagCleaner::Result BagCleaner::run() {
                 }
 
                 const int count = counts_ ? counts_->read(f, slots[s]) : CountReader::kUnreadable;
-                if (trash_one(f, v, static_cast<int>(s), count)) {
+                const bool gone = trash_one(f, v, static_cast<int>(s), count);
+                if (gone) {
                     ++done;
                     ++res.deleted;
-                    say(std::string("đã xoá món ở ") + where + score);
+                    if (rest) {
+                        say("đã xoá phần còn lại (" + std::to_string(count) + ") của món vừa dùng ở " + where +
+                            score);
+                        registered.erase(reg);
+                    } else {
+                        say(std::string("đã xoá món ở ") + where + score);
+                    }
                 } else {
                     ++res.failed;
                     say(std::string("không bỏ được món ở ") + where + score);
@@ -1670,6 +1943,21 @@ BagCleaner::Result BagCleaner::run() {
                         res.trouble = "bỏ đồ không được 3 lần, dừng lại";
                         stop = true;
                     }
+                }
+                // What is left of a registered stack is found again by where
+                // it is. A bag that closed up the gap a deletion left would
+                // have moved it, and something else drawn the same could stand
+                // there now: once a slot a deletion was tried on is not seen
+                // empty, nothing more is deleted by place this pass. Whether
+                // the deletion read as done or not: in such a bag one that
+                // went reads as failed when the next stack drawn the same
+                // moves into its slot -- "still there".
+                if (rests_waiting() && !slot_left_empty(v, static_cast<int>(s))) {
+                    by_place = false;
+                    say(gone ? "ô vừa xoá không trống ra (túi đồ có thể đã tự xếp lại), nên không xoá phần còn lại "
+                               "của món đã dùng nữa"
+                             : "ô vừa thử xoá không trống ra (món đồ còn đó, hoặc túi đồ có thể đã tự xếp lại), nên "
+                               "không xoá phần còn lại của món đã dùng nữa");
                 }
                 acted = true;
                 hid_pointer = false;        // it has been somewhere else since
@@ -1708,6 +1996,20 @@ BagCleaner::Result BagCleaner::run() {
                                                    "đồ trong thùng rác")
                                      : stuck_;
     res.stuck = item_out_;
+    // A right-click of this pass that brought nothing up while it was watched
+    // may have brought its question up since -- the delete sweep answers none
+    // but the bin's. A dialog up now is taken for it: GoBot's own question
+    // left open, which holds everything off as an item left in the bin does,
+    // until a look shows it gone (UF-R7).
+    if (!res.stuck && late_ask_) {
+        Frame g;
+        if (grab_ && grab_(g) && g.valid() && !bag::find_dialogs(g, store_).empty()) {
+            res.stuck = true;
+            keep(g, "use_left_open");
+            if (res.trouble.empty())
+                res.trouble = "một hộp thoại hiện ra muộn sau khi bấm chuột phải vào món đồ; bấm Hủy Bỏ trong game";
+        }
+    }
     close_bag();
     return res;
 }
@@ -2099,6 +2401,15 @@ BagCleaner::UseResult BagCleaner::use_one(const Frame& f, const BagView& v, int 
         out.why = why;
         return out;
     };
+    // A slot that did not come out the way a registration leaves it, or the
+    // way a right-click that did nothing leaves it: the frame kept, and the
+    // pass stops on it -- nothing more right-clicked, nothing of it deleted.
+    const auto doubt = [&](UseOutcome how, const std::string& why, const Frame& shot, const char* what) {
+        keep(shot, what);
+        out.outcome = how;
+        out.why = why;
+        return out;
+    };
 
     // 1. One right-click on the middle of the slot. From here until a look
     //    shows no dialog up, what it brought up may be waiting.
@@ -2154,30 +2465,43 @@ BagCleaner::UseResult BagCleaner::use_one(const Frame& f, const BagView& v, int 
 
     if (!asked) {
         // Nothing came up: what the right-click did, if anything, is in the
-        // slot -- on the same page, or it cannot be told.
+        // slot. As it was, it cannot be used, and the pass goes on. Gone or
+        // less, something took it without asking -- a shop or a storage
+        // window open beside the bag would -- and anything that cannot be
+        // told may be the same: either way nothing more is right-clicked.
+        // Its question may come up later still, the game lagging: the pass
+        // keeps that in mind to its end.
+        late_ask_ = true;
         Frame h;
         BagView w;
         if (!grab_view(h, w)) return lost("mất dấu túi đồ", h.valid() ? h : g, "use_lost");
         if (!bag::find_dialogs(h, store_).empty()) return refuse("một hộp thoại hiện ra muộn", h, "use_late_dialog");
         item_out_ = false;
-        const auto now = w.slots(l);
-        if ((v.scroll_known() && w.scroll_known() && w.first_row != v.first_row) ||
-            static_cast<std::size_t>(index) >= now.size()) {
-            out.outcome = UseOutcome::Nothing;
-            out.why = "trang túi đồ đã đổi, nên không biết đã dùng hay chưa";
-            return out;
+        Frame look, shot = h;
+        std::string why;
+        switch (slot_now(v, index, before, count, look, shot, why)) {
+            case SlotNow::Same:
+                out.outcome = UseOutcome::Nothing;
+                out.why = "bấm chuột phải mà không thấy gì";
+                return out;
+            case SlotNow::Asking:
+                // A question come up later still: answered as one that comes
+                // up a moment after the wait is.
+                return refuse("một hộp thoại hiện ra muộn", shot, "use_late_dialog");
+            case SlotNow::Gone:
+            case SlotNow::Less:
+                return doubt(UseOutcome::UsedUnasked,
+                             "đã dùng (không hỏi): bấm chuột phải thì không có câu hỏi nào mà món đồ đã bớt đi -- "
+                             "có thể đã dùng, cũng có thể một cửa hàng hay kho đồ đang mở đã lấy nó -- nên không "
+                             "dùng thêm món nào",
+                             shot, "use_unasked");
+            case SlotNow::Unknown:
+                break;
         }
-        const ScreenRect same = now[static_cast<std::size_t>(index)];
-        const bool empty = bag::is_empty(h, same, l);
-        const bool there = !empty && bag::alike(bag::cut(h, same), before, l) >= kStillThere;
-        const int left = there && counts_ ? counts_->read(h, same) : CountReader::kUnreadable;
-        if (empty || (there && count > 0 && left > 0 && left < count)) {
-            out.outcome = UseOutcome::UsedUnasked;
-            return out;
-        }
-        out.outcome = UseOutcome::Nothing;
-        out.why = there ? "bấm chuột phải mà không thấy gì" : "ô đồ đã đổi, nên không biết đã dùng hay chưa";
-        return out;
+        return doubt(UseOutcome::Unsure,
+                     "bấm chuột phải thì không có câu hỏi nào, và không xem lại được ô đồ (" + why +
+                         "), nên không dùng thêm món nào",
+                     shot, "use_unsure");
     }
 
     // 3. The registration question. Looked at once more on a fresh frame,
@@ -2217,9 +2541,17 @@ BagCleaner::UseResult BagCleaner::use_one(const Frame& f, const BagView& v, int 
     BagView w;
     const bool bag_seen = grab_view(h, w);
     // Anything with two buttons now is no question GoBot asked, whatever it
-    // follows from: Hủy Bỏ, and the item not tried again this pass.
-    if (h.valid() && !bag::find_dialogs(h, store_).empty())
-        return refuse("sau khi bấm Xác Nhận game hỏi thêm một câu khác, nên bấm Hủy Bỏ", h, "use_next_dialog");
+    // follows from: Hủy Bỏ. And with its question confirmed and no telling
+    // whether the registration took, the pass stops on it -- as it does when
+    // the same comes up a moment later, on a look back at the slot.
+    if (h.valid() && !bag::find_dialogs(h, store_).empty()) {
+        if (!cancel_all(5)) return lost("hộp thoại không đóng lại khi bấm Hủy Bỏ", h, "use_stuck");
+        item_out_ = false;
+        return doubt(UseOutcome::Unsure,
+                     "sau khi bấm Xác Nhận game hỏi thêm một câu khác, nên bấm Hủy Bỏ; không biết đã đăng ký "
+                     "hay chưa",
+                     h, "use_next_dialog");
+    }
     if (!bag_seen)
         return lost("sau khi đăng ký, túi đồ bị che (có thể Yêu Quái Bách Khoa đã mở ra): đóng nó trong game",
                     h.valid() ? h : after, "use_covered");
@@ -2231,42 +2563,144 @@ BagCleaner::UseResult BagCleaner::use_one(const Frame& f, const BagView& v, int 
         return out;
     }
 
-    // 5. Only gone, or one less in the stack, counts.
-    const auto now = w.slots(l);
-    if ((v.scroll_known() && w.scroll_known() && w.first_row != v.first_row) ||
-        static_cast<std::size_t>(index) >= now.size()) {
-        // The game took the question; which slot it came out of cannot be
-        // told now. Taken as done, so that nothing of it is right-clicked
-        // again this pass.
-        out.outcome = UseOutcome::Used;
-        out.why = "trang túi đồ đã đổi, nên không xem lại được ô đồ";
-        return out;
+    // 5. Only gone, or one less in the stack, counts: in that very slot, on
+    //    the page it was on, the same on two looks. Anything else the
+    //    question may or may not have done, and nothing is built on it -- not
+    //    counted as used, nothing of it deleted, and the pass stops. Even the
+    //    stack as it was: a bag that closed up the gap a single piece left
+    //    would show the next piece drawn the same there, just so.
+    Frame look, shot = h;
+    std::string why;
+    switch (slot_now(v, index, before, count, look, shot, why)) {
+        case SlotNow::Gone:
+            out.outcome = UseOutcome::Used;
+            return out;
+        case SlotNow::Less:
+            out.outcome = UseOutcome::Used;
+            out.left = count - 1;
+            out.after = std::move(look);
+            return out;
+        case SlotNow::Same:
+            return doubt(UseOutcome::NotTaken, "đã bấm Xác Nhận mà số lượng không giảm", shot, "use_not_taken");
+        case SlotNow::Asking:
+            // Asked something more, a moment on: no question GoBot asked, so
+            // Hủy Bỏ, as on the look before -- and still no telling whether
+            // the registration took.
+            if (!cancel_all(5)) return lost("hộp thoại không đóng lại khi bấm Hủy Bỏ", shot, "use_stuck");
+            item_out_ = false;
+            return doubt(UseOutcome::Unsure,
+                         "sau khi bấm Xác Nhận game hỏi thêm một câu khác, nên bấm Hủy Bỏ; không biết đã đăng ký "
+                         "hay chưa",
+                         shot, "use_unsure");
+        case SlotNow::Unknown:
+            break;
     }
-    const ScreenRect same = now[static_cast<std::size_t>(index)];
-    if (bag::is_empty(h, same, l)) {
-        out.outcome = UseOutcome::Used;
-        return out;
+    return doubt(UseOutcome::Unsure,
+                 "đã bấm Xác Nhận mà không thấy ô đồ trống ra hay bớt đúng một (" + why +
+                     "), nên không biết đã đăng ký hay chưa",
+                 shot, "use_unsure");
+}
+
+BagCleaner::SlotNow BagCleaner::slot_now(const BagView& v, int index, const Frame& before, int count,
+                                         Frame& look, Frame& shot, std::string& why) {
+    const BagLayout& l = settings_.layout;
+    SlotNow first = SlotNow::Unknown;
+    for (int n = 0; n < 2; ++n) {
+        if (n > 0) pause_ms(150);
+        Frame g;
+        BagView w;
+        const bool found = grab_view(g, w);
+        if (g.valid()) shot = g;
+        if (!found) {
+            why = "mất dấu túi đồ";
+            return SlotNow::Unknown;
+        }
+        // Something up now that the look before did not show: it waits on an
+        // answer, and everything stays held off until a look shows it gone.
+        if (!bag::find_dialogs(g, store_).empty()) {
+            item_out_ = true;
+            why = "có một hộp thoại hiện ra";
+            return SlotNow::Asking;
+        }
+        if (!v.scroll_known() || !w.scroll_known()) {
+            why = "không đọc được thanh cuộn của túi đồ, nên không biết có còn đúng trang không";
+            return SlotNow::Unknown;
+        }
+        if (w.first_row != v.first_row) {
+            why = "trang túi đồ đã đổi";
+            return SlotNow::Unknown;
+        }
+        const auto slots = w.slots(l);
+        if (static_cast<std::size_t>(index) >= slots.size()) {
+            why = "ô đồ bị che";
+            return SlotNow::Unknown;
+        }
+        const ScreenRect s = slots[static_cast<std::size_t>(index)];
+        look = bag::cut(g, s);
+        SlotNow is = SlotNow::Unknown;
+        if (bag::is_empty(g, s, l)) {
+            is = SlotNow::Gone;
+        } else if (bag::alike(look, before, l) < kStillThere) {
+            why = "ô đồ giờ có hình khác";
+            return SlotNow::Unknown;
+        } else {
+            const int left = counts_ ? counts_->read(g, s) : CountReader::kUnreadable;
+            if (left == count) {
+                is = SlotNow::Same;
+            } else if (count >= 2 && left == count - 1) {
+                is = SlotNow::Less;
+            } else {
+                why = left == CountReader::kUnreadable
+                          ? std::string("không đọc lại được số lượng trên ô đồ")
+                          : "số lượng trên ô đồ từ " + std::to_string(count) + " thành " + std::to_string(left);
+                return SlotNow::Unknown;
+            }
+        }
+        if (n > 0 && is != first) {
+            why = "hai lần xem lại ô đồ không giống nhau";
+            return SlotNow::Unknown;
+        }
+        first = is;
     }
-    const bool there = bag::alike(bag::cut(h, same), before, l) >= kStillThere;
-    const int left = counts_ ? counts_->read(h, same) : CountReader::kUnreadable;
-    if (there && count > 0 && left == count - 1) {
-        out.outcome = UseOutcome::Used;
-        return out;
-    }
-    if (there && count > 0 && left == count) {
-        keep(h, "use_not_taken");
-        out.outcome = UseOutcome::Refused;
-        out.why = "đã bấm Xác Nhận mà số lượng không giảm";
-        return out;
-    }
-    out.outcome = UseOutcome::Used;
-    out.why = "không đọc lại được số lượng trên ô đồ";
-    return out;
+    return first;
 }
 
 void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::set<int>& used,
-                           std::set<int>& no_use, int& uses) {
+                           std::set<int>& no_use, int& uses, Registrations& registered) {
     const BagLayout& l = settings_.layout;
+    // Whether a right-click registered anything is read off the slot's count,
+    // so without the game's digits nothing is right-clicked at all.
+    if (counts_ == nullptr || !counts_->loaded()) {
+        say("không có bộ chữ số của game để đọc số lượng trên ô đồ, nên không dùng món nào");
+        return;
+    }
+    // Nor with no way to tell another of the game's windows open beside the
+    // bag, which a right-click might hand the item to.
+    if (!bag::can_see_windows(store_)) {
+        say("không có hình nút đóng cửa sổ của game để biết có cửa sổ khác đang mở cạnh túi đồ không, nên không "
+            "dùng món nào");
+        return;
+    }
+    // A dialog up after one of this sweep's own right-clicks, which use_one
+    // had stopped watching for: most likely that right-click's question, come
+    // late. Never confirmed -- whose it is cannot be told by now -- but
+    // answered Hủy Bỏ, which loses nothing, and everything held off while it
+    // will not close: a question of GoBot's own left open counts as an item
+    // left out (UF-R7). The pass stops either way.
+    bool clicked = false;
+    const auto answer_late = [&](const Frame& g) {
+        keep(g, "use_late_dialog");
+        item_out_ = true;
+        if (cancel_all(5)) {
+            item_out_ = false;
+            res.trouble = "một hộp thoại hiện ra muộn sau khi bấm chuột phải vào món đồ; đã bấm Hủy Bỏ, nên không "
+                          "dùng thêm món nào";
+        } else {
+            res.trouble = "một hộp thoại hiện ra muộn sau khi bấm chuột phải vào món đồ, và bấm Hủy Bỏ không đóng "
+                          "được: đóng nó trong game";
+        }
+        stop = true;
+    };
     std::set<long long> seen;
     int scrolls = 0;
     bool hid_pointer = false;
@@ -2280,6 +2714,10 @@ void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::se
         // Nothing is right-clicked over anything else: not with a dialog up
         // or the bin holding something, nor a message with only Xác Nhận.
         if (!clean(f, v)) {
+            if (clicked && !bag::find_dialogs(f, store_).empty()) {
+                answer_late(f);
+                return;
+            }
             res.trouble = "thùng rác đang có đồ chờ xoá hoặc có hộp thoại đang mở; xong việc đó trong game "
                           "rồi thử lại";
             stop = true;
@@ -2301,18 +2739,31 @@ void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::se
             if (!wait_ms(300)) return;
             continue;
         }
+        // Whether a right-click registered anything is read off the slot on
+        // this same page, by the scroll bar. With the bar not to be read --
+        // something over it -- that could not be read either.
+        if (!v.scroll_known()) {
+            say("không đọc được thanh cuộn của túi đồ, nên không dùng món nào");
+            return;
+        }
 
         bool acted = false;
         const auto slots = v.slots(l);
         for (std::size_t s = 0; s < slots.size() && !stop && !cancelled_; ++s) {
             const int r = static_cast<int>(s) / l.cols, c = static_cast<int>(s) % l.cols;
-            const int row = v.scroll_known() ? v.first_row + r : 1000 * (scrolls + 1) + r;
+            const int row = v.first_row + r;
             const long long key = static_cast<long long>(row) * 100 + c;
             if (seen.count(key) || bag::is_empty(f, slots[s], l)) continue;
             const TrashList::Verdict k = trash_->judge(f, slots[s], settings_.min_score);
             if (k.item < 0) continue;       // and a doubt is said by the delete sweep
             const TrashList::Item& item = trash_->items[static_cast<std::size_t>(k.item)];
-            if (item.action != TrashList::Action::Use || used.count(k.item) || no_use.count(k.item)) continue;
+            // A fragment only, and one slot of a drawing a pass: the others
+            // drawn the same are most likely other monsters' pieces, each
+            // with its own question, and wait for the next pass. What is
+            // passed over here the delete sweep says.
+            if (item.action != TrashList::Action::Use || !item.fragment() || used.count(k.item) ||
+                no_use.count(k.item))
+                continue;
             seen.insert(key);
 
             char where[96];
@@ -2326,24 +2777,77 @@ void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::se
                 say("đã dùng " + std::to_string(uses) + " món, đủ cho một lần");
                 return;
             }
+            // Whether it was registered is read off this count afterwards: a
+            // count that does not read now could not tell then either.
+            const int count = counts_->read(f, slots[s]);
+            if (count == CountReader::kUnreadable || count <= 0) {
+                say(std::string("không dùng món ở ") + where + score +
+                    ": không đọc được số lượng trên ô đồ, nên sau khi đăng ký không xem lại được");
+                continue;
+            }
+            // Nor with another of the game's windows open beside the bag --
+            // Kho Cash, a shop, a storage or trade window -- which may take
+            // the item without a question: any close button but the bag's own
+            // says one is. Looked for on this same frame, the moment before.
+            ScreenRect other;
+            if (bag::other_window_up(f, store_, v, l, &other)) {
+                say("đang có cửa sổ khác mở cạnh túi đồ (kho, cửa hàng…), nên không dùng món nào; đóng nó rồi "
+                    "thử lại");
+                GB_INFO("Trash: a close button that is not the bag's own at %d,%d -- nothing right-clicked",
+                        other.x, other.y);
+                keep(f, "use_other_window");
+                return;
+            }
 
-            const int count = counts_ ? counts_->read(f, slots[s]) : CountReader::kUnreadable;
+            clicked = true;
             const UseResult u = use_one(f, v, static_cast<int>(s), count);
             acted = true;
             hid_pointer = false;
             switch (u.outcome) {
-                case UseOutcome::Used:
-                case UseOutcome::UsedUnasked:
+                case UseOutcome::Used: {
                     ++uses;
                     ++res.used;
                     used.insert(k.item);
-                    say(std::string(u.outcome == UseOutcome::Used ? "đã dùng món ở " : "đã dùng (không hỏi) món ở ") +
-                        where + score + (u.why.empty() ? std::string() : "; " + u.why));
+                    // What is left in the slot is kept by where it is: the
+                    // tab, the row of the tab and the column -- the scroll bar
+                    // was read before and after, or this was no Used.
+                    std::string rest;
+                    if (u.left > 0 && v.scroll_known()) {
+                        const long long place = static_cast<long long>(tab) * 100000000LL + key;
+                        registered[place] = Registered{ k.item, u.left, u.after };
+                        if (item.then_delete)
+                            rest = "; còn " + std::to_string(u.left) + ", sẽ xoá phần còn lại của ô này";
+                    }
+                    say(std::string("đã dùng món ở ") + where + score + rest);
                     break;
-                case UseOutcome::Nothing:
+                }
+                case UseOutcome::NotTaken:
+                    no_use.insert(k.item);
+                    ++res.failed;
+                    say(std::string("dừng ở món ") + where + score + ": " + u.why);
+                    res.trouble = u.why;
+                    stop = true;
+                    break;
+                case UseOutcome::Unsure:
+                case UseOutcome::UsedUnasked:
+                    no_use.insert(k.item);
+                    ++res.use_unsure;
+                    say(std::string("dừng ở món ") + where + score + ": " + u.why);
+                    res.trouble = u.why;
+                    stop = true;
+                    break;
+                case UseOutcome::Nothing: {
                     no_use.insert(k.item);
                     say(std::string("không dùng được món ở ") + where + score + ": " + u.why);
+                    // Its question may come up yet, late: nothing more is
+                    // right-clicked until a look a moment on shows none, so
+                    // that it is never answered as the next piece's -- the
+                    // next round's look sees to one that comes after this.
+                    pause_ms(kUseLateMs);
+                    Frame g;
+                    if (grab_ && grab_(g) && g.valid() && !bag::find_dialogs(g, store_).empty()) answer_late(g);
                     break;
+                }
                 case UseOutcome::Refused:
                     no_use.insert(k.item);
                     ++res.failed;

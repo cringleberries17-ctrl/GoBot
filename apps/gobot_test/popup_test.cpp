@@ -159,12 +159,18 @@ struct Pretend {
     std::uint64_t t = 0;
     int clicks = 0, escs = 0, missed = 0;
     std::vector<std::pair<int, int>> clicked;
-    /// ESC with nothing it closes brings up the ESC menu, as in the game.
+    std::vector<std::uint64_t> pressed_at;      ///< when each click and ESC came, on the pretend clock
+    /// ESC with nothing it closes brings up the ESC menu, as in the game --
+    /// drawn `menu_lag_ms` after the ESC, a busy game being slow to.
     bool esc_opens_menu = true;
+    std::uint64_t menu_lag_ms = 0;
+    std::uint64_t menu_from = 0;
 
+    bool drawn(const Shown& s) const { return s.what != "menu" || t >= menu_from; }
     Frame render() const {
         Frame f = base;
-        for (const Shown& s : shown) blit(f, s.pic, s.x, s.y);
+        for (const Shown& s : shown)
+            if (drawn(s)) blit(f, s.pic, s.x, s.y);
         return f;
     }
     void add(const std::string& what, const Frame& pic, int x, int y, ScreenRect control = {},
@@ -177,8 +183,9 @@ struct Pretend {
     bool click(int x, int y) {
         ++clicks;
         clicked.emplace_back(x, y);
+        pressed_at.push_back(t);
         for (std::size_t i = shown.size(); i-- > 0;)
-            if (shown[i].control.valid() && shown[i].control.contains(x, y)) {
+            if (drawn(shown[i]) && shown[i].control.valid() && shown[i].control.contains(x, y)) {
                 shown.erase(shown.begin() + static_cast<std::ptrdiff_t>(i));
                 return true;
             }
@@ -187,12 +194,16 @@ struct Pretend {
     }
     bool esc() {
         ++escs;
+        pressed_at.push_back(t);
         for (std::size_t i = shown.size(); i-- > 0;)
             if (shown[i].esc_closes) {
                 shown.erase(shown.begin() + static_cast<std::ptrdiff_t>(i));
                 return true;
             }
-        if (esc_opens_menu && !has("menu")) add_menu();
+        if (esc_opens_menu && !has("menu")) {
+            add_menu();
+            menu_from = t + menu_lag_ms;
+        }
         return true;
     }
     void add_menu() {
@@ -214,10 +225,13 @@ struct Rig {
     Pretend      game;
     std::unique_ptr<PopupCloser> closer;
     std::vector<std::string> log;
+    /// What one capture costs on the pretend clock: a busy machine.
+    std::uint64_t grab_ms = 0;
 
     explicit Rig(bool plain = false) {
         game.base = plain ? plain_frame() : kit().base;
         closer = std::make_unique<PopupCloser>(no_window, kit().eyes, [this](Frame& f) {
+            game.t += grab_ms;
             f = game.render();
             return true;
         });
@@ -568,6 +582,174 @@ void test_gates() {
     }
 }
 
+/// A guard that times the hold on the pretend clock: taken when asked for,
+/// the quiet wait standing in for the window's, and let go when done.
+struct Timed {
+    std::uint64_t taken = 0, gone = 0;
+    int takes = 0, dones = 0;
+    PopupCloser::Guard guard(Pretend& g, std::uint64_t quiet_ms = 400) {
+        PopupCloser::Guard out;
+        out.take = [this, &g, quiet_ms] {
+            ++takes;
+            taken = g.t;
+            g.t += quiet_ms;
+            return true;
+        };
+        out.done = [this, &g] {
+            ++dones;
+            gone = g.t;
+        };
+        return out;
+    }
+    std::uint64_t held() const { return gone - taken; }
+};
+
+/// The same, every hold kept: from the moment it was asked for to the moment
+/// it was let go, on the pretend clock.
+struct Holds {
+    std::vector<std::uint64_t> held;
+    std::uint64_t asked = 0;
+    bool on = false;
+    PopupCloser::Guard guard(Pretend& g, std::uint64_t quiet_ms = 400) {
+        PopupCloser::Guard out;
+        out.take = [this, &g, quiet_ms] {
+            asked = g.t;
+            g.t += quiet_ms;
+            on = true;
+            return true;
+        };
+        out.done = [this, &g] {
+            if (on) held.push_back(g.t - asked);
+            on = false;
+        };
+        return out;
+    }
+};
+
+void test_hold() {
+    section("Popups: the game is held for at most 2 s, and let go after the click (PU-R5, R2A-2)");
+    if (skip_without_kit()) return;
+    {
+        // Looked at again under the hold only where it was: found there, in
+        // a few milliseconds, and nowhere else.
+        Pretend p;
+        p.base = kit().base;
+        add_notice(p);
+        const Frame f = p.render();
+        const ScreenRect at{ 542, 320, 196, 80 }, elsewhere{ 100, 100, 196, 80 };
+        const std::size_t there = kit().eyes.popups(f, false, &at).size();
+        const std::size_t not_there = kit().eyes.popups(f, false, &elsewhere).size();
+        check(there == 1 && not_there == 0,
+              fmt("the notice looked for again round its own place: found (%zu); round another: not (%zu)",
+                  there, not_there));
+    }
+    {
+        // Every capture costing 150 ms: the notice clicked, and the hold --
+        // the potion keys waiting -- over the moment the click is in.
+        Rig r;
+        r.grab_ms = 150;
+        Timed timed;
+        r.closer->set_guard(timed.guard(r.game));
+        add_notice(r.game);
+        r.run(6);
+        check(r.game.clicks == 1 && timed.dones == 1 && timed.held() <= PopupCloser::kHoldMs &&
+                  r.game.pressed_at.size() == 1 && timed.gone == r.game.pressed_at[0],
+              fmt("the notice: one click %llu ms into the hold, and the hold let go then -- held %llu ms",
+                  static_cast<unsigned long long>(r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0] - timed.taken),
+                  static_cast<unsigned long long>(timed.held())));
+        check(r.said("closed the check-in notice"), "and the look that it is gone, after, holds nothing");
+    }
+    {
+        // A click that does not take: the notice still up for the 1.5 s it is
+        // given -- looked at with the game let go all the same.
+        Rig r;
+        r.grab_ms = 150;
+        Timed timed;
+        r.closer->set_guard(timed.guard(r.game));
+        add_notice(r.game);
+        r.game.shown.back().control = ScreenRect{};
+        r.run(6);
+        check(r.game.clicks == 1 && r.game.missed == 1 && timed.dones == 1 && timed.gone == r.game.pressed_at[0] &&
+                  timed.held() <= PopupCloser::kHoldMs && r.said("is still up after closing it"),
+              fmt("a click that did not take: the hold let go at the click, %llu ms in, not after the 1.5 s "
+                  "looking", static_cast<unsigned long long>(timed.held())));
+    }
+    {
+        // The book with no X, and the ESC bringing up the ESC menu: its X
+        // clicked under the same hold, and the hold let go by 2 s.
+        Rig r;
+        r.grab_ms = 150;
+        Timed timed;
+        r.closer->set_guard(timed.guard(r.game));
+        add_book(r.game, false);
+        r.game.shown.back().esc_closes = false;
+        r.run(6);
+        check(r.game.escs == 1 && r.game.clicks == 1 && !r.game.has("menu") && timed.dones == 1 &&
+                  timed.held() <= PopupCloser::kHoldMs && timed.gone >= r.game.pressed_at.back(),
+              fmt("an ESC that brought up the menu: its X clicked, and the hold let go %llu ms after it was "
+                  "asked for", static_cast<unsigned long long>(timed.held())));
+    }
+    {
+        // The menu that ESC brings up drawn only 1.5 s after it -- seen once
+        // the hold was let go: the game taken again, its gates and all, for
+        // that one click on its X, and let go at once. Never left up to be
+        // taken for the player's (S-RS2-3, F-RF-2).
+        Rig r;
+        r.grab_ms = 150;
+        Holds holds;
+        r.closer->set_guard(holds.guard(r.game));
+        add_book(r.game, false);
+        r.game.shown.back().esc_closes = false;
+        r.game.menu_lag_ms = 1500;
+        r.run(6);
+        bool short_holds = !holds.held.empty();
+        std::string each;
+        for (const std::uint64_t h : holds.held) {
+            short_holds = short_holds && h <= PopupCloser::kHoldMs;
+            each += fmt(" %llu ms", static_cast<unsigned long long>(h));
+        }
+        check(r.game.escs == 1 && r.game.clicks == 1 && r.game.missed == 0 && !r.game.has("menu") &&
+                  holds.held.size() == 2 && short_holds && r.said("taken again and closed"),
+              "the menu drawn after the hold was let go: closed by its X under a hold taken again -- holds" + each);
+    }
+    {
+        // The same with the moment not right to take the game again -- the
+        // player at the keyboard, say: nothing pressed, and the menu left.
+        Rig r;
+        r.grab_ms = 150;
+        Holds holds;
+        PopupCloser::Guard g = holds.guard(r.game);
+        int gate_asks = 0;
+        g.gates = [&] { return ++gate_asks > 1 ? std::string("someone is at the keyboard") : std::string(); };
+        r.closer->set_guard(g);
+        add_book(r.game, false);
+        r.game.shown.back().esc_closes = false;
+        r.game.menu_lag_ms = 1500;
+        r.run(6);
+        check(r.game.escs == 1 && r.game.clicks == 0 && holds.held.size() == 1 && r.said("not the moment"),
+              "and with the gates saying no then: the menu left as it is, nothing more pressed");
+    }
+    {
+        // A busy machine: the look under the hold takes 1.3 s. Too late to
+        // press and still let go in time -- nothing pressed, put off, and the
+        // hold let go at once.
+        Rig r;
+        Timed timed;
+        r.closer->set_guard(timed.guard(r.game));
+        add_notice(r.game);
+        r.run(3);
+        r.grab_ms = 1300;
+        r.closer->turn();
+        check(r.game.clicks == 0 && timed.takes == 1 && timed.dones == 1 &&
+                  timed.held() <= PopupCloser::kHoldMs && r.said("the look before the press took"),
+              fmt("the look under the hold taking 1.3 s: nothing pressed, held %llu ms",
+                  static_cast<unsigned long long>(timed.held())));
+        r.grab_ms = 0;
+        r.run(40);
+        check(r.game.clicks == 1, "and closed on a later try, once the machine is quicker");
+    }
+}
+
 void test_real_frames() {
     section("Popups: frames from the live rounds -- nothing is taken for a popup (PU-A6)");
     if (skip_without_kit()) return;
@@ -655,6 +837,7 @@ void test_popups(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_menu_not_ours();
     test_blockers();
     test_gates();
+    test_hold();
     test_real_frames();
     test_settings();
 }

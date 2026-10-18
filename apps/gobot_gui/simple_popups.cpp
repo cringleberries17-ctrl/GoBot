@@ -42,6 +42,11 @@ const char* const kPopupHold = "đóng thông báo";
 /// held off, before a popup is clicked: GoBot presses nothing then, so what
 /// Windows counts is a person's.
 constexpr int kQuietMs = 400;
+/// How long a key press of GoBot's own already under way is waited for once
+/// the hold is taken -- a potion or a skill, a few dozen milliseconds. Longer,
+/// and the popup is put off: the hold is not to last past
+/// PopupCloser::kHoldMs, and this wait is part of it.
+constexpr int kKeyUnderWayMs = 500;
 
 DWORD last_input() {
     LASTINPUTINFO info{};
@@ -186,7 +191,7 @@ void GuiApp::popup_loop() {
         }
         // Nothing of GoBot's presses anything now; wait for a key press under
         // way to finish, and let go of every key.
-        for (int i = 0; i < 40 && coord_.held() && !ui.stop; ++i)
+        for (int i = 0; i < kKeyUnderWayMs / 50 && coord_.held() && !ui.stop; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         input_.release_all();
         const DWORD quiet = last_input();
@@ -272,7 +277,7 @@ void GuiApp::simple_popups_row() {
                     out += (i ? ", " : "") + std::string(up[i].kind == PopupKind::EscMenu
                                                              ? "menu ESC"
                                                              : popup_kind_vi(up[i].kind));
-                    if (up[i].kind == PopupKind::EscMenu) out += " (chỉ đóng khi GoBot mở nó)";
+                    if (up[i].kind == PopupKind::EscMenu) out += " (GoBot không đóng menu do bạn mở)";
                     else if (up[i].kind == PopupKind::CheckinNotice) out += " (sẽ bấm Xác Nhận của nó)";
                     else out += up[i].control ? " (sẽ bấm nút X của nó)" : " (sẽ bấm ESC nếu không có gì khác)";
                 }

@@ -920,7 +920,60 @@ void* AutoLogin::over(void* window) {
     if (target == nullptr || !GetClientRect(target, &client)) return nullptr;
     POINT tl{ 0, 0 }, br{ client.right, client.bottom };
     if (!ClientToScreen(target, &tl) || !ClientToScreen(target, &br)) return nullptr;
+    return over_area(window, Box{ tl.x, tl.y, br.x, br.y });
+}
+
+bool AutoLogin::on_screens(const Box& area, const std::vector<Box>& screens) {
+    if (nowhere(area)) return false;
+    // Screens never overlap one another, so the part of `area` on each adds
+    // up to all of it exactly when none of it is off them.
+    long long seen = 0;
+    for (const Box& screen : screens) {
+        const Box part = meet(area, screen);
+        if (!nowhere(part))
+            seen += static_cast<long long>(part.right - part.left) * (part.bottom - part.top);
+    }
+    return seen >= static_cast<long long>(area.right - area.left) * (area.bottom - area.top);
+}
+
+bool AutoLogin::part_seen(void* window, const ScreenRect& part, std::string* in_the_way) {
+    if (in_the_way) in_the_way->clear();
+    const HWND target = static_cast<HWND>(window);
+    if (target == nullptr || !IsWindow(target) || IsIconic(target)) return false;
+    // A window not shown -- hidden, or on another of Windows' desktops -- has
+    // whatever lies under it on the screen where it would be.
+    DWORD cloaked = 0;
+    if (!IsWindowVisible(target) ||
+        (SUCCEEDED(DwmGetWindowAttribute(target, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked))
+        return false;
+    RECT client{};
+    if (!GetClientRect(target, &client)) return false;
+    const long x0 = std::max<long>(0, part.x), y0 = std::max<long>(0, part.y);
+    const long x1 = std::min<long>(client.right, part.right()), y1 = std::min<long>(client.bottom, part.bottom());
+    if (x1 <= x0 || y1 <= y0) return false;
+    POINT tl{ x0, y0 }, br{ x1, y1 };
+    if (!ClientToScreen(target, &tl) || !ClientToScreen(target, &br)) return false;
     const Box area{ tl.x, tl.y, br.x, br.y };
+
+    // All of it on a screen: what lies past the edge is read as black, and
+    // black is no HUD and no party panel -- a look would take it for none.
+    std::vector<Box> screens;
+    EnumDisplayMonitors(nullptr, nullptr, add_screen, reinterpret_cast<LPARAM>(&screens));
+    if (!screens.empty() && !on_screens(area, screens)) {
+        if (in_the_way) *in_the_way = "off the screen";
+        return false;
+    }
+    if (void* const w = over_area(window, area)) {
+        const HWND hw = static_cast<HWND>(w);
+        if (in_the_way) *in_the_way = is_taskbar(hw) ? std::string("taskbar") : program_of(hw);
+        return false;
+    }
+    return true;
+}
+
+void* AutoLogin::over_area(void* window, const Box& area) {
+    const HWND target = static_cast<HWND>(window);
+    if (target == nullptr || nowhere(area)) return nullptr;
 
     // Only what is on a screen. Past every screen's edge nothing is seen,
     // the game's frame included: a window kept on top there, or the rest of

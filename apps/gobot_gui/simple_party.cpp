@@ -9,6 +9,7 @@
 #include "gui_app.hpp"
 #include "simple_ui.hpp"
 
+#include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
@@ -17,10 +18,14 @@
 
 #include "imgui.h"
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <mutex>
 #include <string>
+
+#include <windows.h>
+#include <dwmapi.h>
 
 namespace gobot {
 namespace {
@@ -30,6 +35,47 @@ using namespace simple_ui;
 /// How often the party worker reads the HUD for the Tổ đội tab, at most. The
 /// read is a search of the left of the screen, a tenth of a second or so.
 constexpr std::uint64_t kHudEveryMs = 10'000;
+
+/// GoBot's own window in front, and over the part of the game the party is
+/// read from (PartyHudReader::kArea): what keeps a frame read off the screen
+/// from being trusted for the party while the player looks at this tab.
+bool gobot_over_party(void* game, void* self) {
+    const HWND g = static_cast<HWND>(game), s = static_cast<HWND>(self);
+    if (g == nullptr || s == nullptr || !IsWindowVisible(s) || IsIconic(s) || GetForegroundWindow() != s)
+        return false;
+    RECT client{};
+    if (!GetClientRect(g, &client)) return false;
+    const ScreenRect& a = PartyHudReader::kArea;
+    POINT tl{ a.x, a.y };
+    POINT br{ std::min<LONG>(client.right, a.right()), std::min<LONG>(client.bottom, a.bottom()) };
+    if (br.x <= tl.x || br.y <= tl.y || !ClientToScreen(g, &tl) || !ClientToScreen(g, &br)) return false;
+    // Where it is drawn, not its rectangle: its invisible resizing border
+    // reaches past what is seen of it, and beside the game is not over it.
+    RECT mine{};
+    if (FAILED(DwmGetWindowAttribute(s, DWMWA_EXTENDED_FRAME_BOUNDS, &mine, sizeof mine)) &&
+        !GetWindowRect(s, &mine))
+        return false;
+    const RECT part{ tl.x, tl.y, br.x, br.y };
+    RECT hit{};
+    return IntersectRect(&hit, &part, &mine) != FALSE;
+}
+
+/// This program's own file name, as AutoLogin::part_seen names the program
+/// of a window over the game.
+std::string own_program() {
+    wchar_t path[MAX_PATH]{};
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    const std::wstring full(path, n);
+    const std::wstring file = full.substr(full.find_last_of(L"\\/") + 1);
+    const int size = WideCharToMultiByte(CP_UTF8, 0, file.c_str(), static_cast<int>(file.size()), nullptr, 0,
+                                         nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(std::max(0, size)), '\0');
+    if (size > 0)
+        WideCharToMultiByte(CP_UTF8, 0, file.c_str(), static_cast<int>(file.size()), out.data(), size, nullptr,
+                            nullptr);
+    return out;
+}
 
 } // namespace
 
@@ -93,7 +139,14 @@ bool GuiApp::party_may_invite(const std::string& who, const Frame& frame, bool f
         return true;
     }
     const PartyGate gate = party_invite_gate(hud, always_leader);
-    if (gate.allowed) return true;
+    if (gate.allowed) {
+        // A party whose leader could not be read, with the tick on: invited,
+        // as before the HUD was read -- and the log says why it was not held.
+        if (!gate.note_en.empty())
+            GB_INFO("Party: %s asked; inviting, though %s -- %s", who.c_str(), gate.note_en.c_str(),
+                    party_hud_text(hud).c_str());
+        return true;
+    }
     GB_INFO("Party: %s asked; not invited: %s -- %s", who.c_str(), gate.reason_en.c_str(),
             party_hud_text(hud).c_str());
     say_party(who + " asked; not invited: " + gate.reason_en);
@@ -150,13 +203,27 @@ void GuiApp::simple_party_hud_line() {
             if (!reader.load(pictures, &missing)) return "Thiếu hình khung tổ đội (" + missing + ").";
             ScreenCapture capture;
             Frame f;
-            if (!capture.grab(input_.target_window(), f) || !f.valid())
-                return std::string("Không chụp được màn hình game.");
-            const PartyHud hud = reader.read(f, party_frame_trusted(capture.from_screen(), input_.target_window()));
-            GB_INFO("Party: Thử xem -- the party HUD reads %s", party_hud_text(hud).c_str());
+            void* const game = input_.target_window();
+            if (!capture.grab(game, f) || !f.valid()) return std::string("Không chụp được màn hình game.");
+            // Trusted as party_frame_trusted trusts one -- and when not, what
+            // lies over the party's part of the game, to say so.
+            std::string who;
+            const bool trusted = !capture.from_screen() ||
+                                 (game != nullptr && AutoLogin::part_seen(game, PartyHudReader::kArea, &who));
+            const PartyHud hud = reader.read(f, trusted);
+            GB_INFO("Party: Thử xem -- the party HUD reads %s%s", party_hud_text(hud).c_str(),
+                    trusted || who.empty() ? "" : (" -- in the way: " + who).c_str());
             std::string said = party_hud_line_vi(hud) + ".";
-            if (hud.state == PartyState::Unknown)
-                said += " Cần thấy khung nhân vật ở góc trái trên màn hình game, không bị cửa sổ nào che.";
+            if (hud.state == PartyState::Unknown) {
+                if (!trusted && !who.empty() && who == own_program())
+                    said += " Cửa sổ GoBot đang che góc trái của game: dời GoBot sang bên rồi thử lại.";
+                else if (!trusted && who == "off the screen")
+                    said += " Góc trái của game nằm ngoài màn hình.";
+                else if (!trusted && !who.empty())
+                    said += " Cửa sổ " + who + " đang che góc trái của game.";
+                else
+                    said += " Cần thấy khung nhân vật ở góc trái trên màn hình game, không bị cửa sổ nào che.";
+            }
             return said + " Không bấm gì.";
         });
     }
@@ -167,6 +234,13 @@ void GuiApp::simple_party_hud_line() {
     if (!ui.probe_said.empty()) {
         ImGui::SameLine();
         hint(ui.probe_said.c_str());
+    }
+    // GoBot's own window over the game's left side, as it is whenever it is
+    // in front there: nothing read off the screen is trusted for the party
+    // then, and the card says why, as the other tabs do.
+    if (input_.window_valid() && gobot_over_party(input_.target_window(), main_hwnd_)) {
+        coloured(kBad, "Cửa sổ GoBot đang che góc trái của game, nên không đọc được khung tổ đội.");
+        if (ImGui::Button("Dời GoBot sang bên##party")) move_clear_of_game();
     }
 }
 

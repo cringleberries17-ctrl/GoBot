@@ -9,6 +9,7 @@
 // rounds are what must never read as a party. Nothing is pressed anywhere.
 
 #include "gobot/party_hud.hpp"
+#include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/screen_capture.hpp"
@@ -254,8 +255,159 @@ void test_nonsense() {
     check(!loaded && !missing.empty(), "and loading from no pictures says what is missing: " + missing);
 }
 
+void test_leader_unread() {
+    section("Party HUD: other members, and no leader's frame anywhere (R2B-3)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    // A party always has its one leader. Panels with no red frame on any of
+    // them, nor on the player's own, are a party whose leader was not seen --
+    // the player's own frame not matched, say -- never a member who does not
+    // lead: the tick must not stop a leader's invites on that.
+    Frame f = k.frame;
+    draw_member(f, 0, 112, false);
+    draw_member(f, 0, 160, false, 30, 10);
+    const PartyHud h = k.reader.read(f);
+    check(h.state == PartyState::InParty && h.size == 3 && !h.full,
+          "two plain panels and the player's own: in a party of 3, who leads not read -- " + said(h));
+    check(party_hud_line_vi(h) == "Tổ đội: đang trong tổ đội (3/6), không rõ ai làm chủ",
+          "said as " + party_hud_line_vi(h));
+    const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
+    check(ticked.allowed && ticked.reason_vi.empty() && ticked.note_vi == "không đọc được ai là chủ tổ đội",
+          "the tick on: invited all the same, the log told \"" + ticked.note_vi + "\"");
+    check(plain.allowed && plain.note_vi.empty(), "the tick off: invited, nothing to say");
+    // Tự chat's tick goes by "alone" only: a party whose leader is not known
+    // is a party.
+    check(h.state != PartyState::Alone, "and to Tự chat's tick it is a party, not alone");
+    // Full still stops it: six seen is six, whoever leads.
+    Frame six = k.frame;
+    for (int i = 0; i < 5; ++i) draw_member(six, 0, 112 + i * 46, false, 20 * i, 100 - 15 * i);
+    const PartyHud h6 = k.reader.read(six);
+    const PartyGate g6 = party_invite_gate(h6, false);
+    check(h6.state == PartyState::InParty && h6.full && !g6.allowed && g6.reason_vi == "Tổ đội đã đủ 6 người",
+          "five plain panels: full, and not invited, whoever leads -- " + said(h6));
+}
+
+/// `rect` of `from` copied into `to` at the same place: a window of the live
+/// client's laid over another frame, as the game draws it over the HUD.
+void copy_over(const Frame& from, Frame& to, const ScreenRect& rect) {
+    for (int y = std::max(0, rect.y); y < std::min({ rect.bottom(), from.height, to.height }); ++y)
+        for (int x = std::max(0, rect.x); x < std::min({ rect.right(), from.width, to.width }); ++x)
+            std::copy_n(&from.pixels[(static_cast<std::size_t>(y) * from.width + x) * 4], 4,
+                        &to.pixels[(static_cast<std::size_t>(y) * to.width + x) * 4]);
+}
+
+void test_bag_over() {
+    section("Party HUD: the bag over the panels (the 2B tester's problem 4)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    // Two frames of the live client with the bag open: where the player keeps
+    // it, its left edge at x=121 over the panels' last columns, and dragged to
+    // the screen's left edge, over all but their first few.
+    Frame kept, dragged;
+    if (!load_png(std::string(kLiveBuild) + "live\\shots\\r3_B_000.png", kept) ||
+        !load_png(std::string(kLiveBuild) + "bin\\Release\\trash_debug\\20261016_223524_0_not_in_bin.png",
+                  dragged) ||
+        kept.width != 1280 || dragged.width != 1280) {
+        std::printf("  [skip] no r3_B_000.png or the saved party frame here\n");
+        return;
+    }
+    ScreenRect kept_bag, dragged_bag;
+    check(k.reader.bag_window(kept, kept_bag) && kept_bag.x == 134 - PartyHudReader::kBagLeft &&
+              k.reader.bag_window(dragged, dragged_bag) && dragged_bag.x == 27 - PartyHudReader::kBagLeft,
+          "the bag's window found by its tab strip, where the player keeps it and dragged left");
+
+    {
+        // Two members under the bag where the player keeps it: their last
+        // nine columns hidden, the rest read.
+        Frame f = k.frame;
+        draw_member(f, 0, 112, true);
+        draw_member(f, 0, 158, false);
+        copy_over(kept, f, kept_bag);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Member && h.size == 3 && h.panels.size() == 2 && h.panels[0].leader &&
+                  !h.covered,
+              "two members, the bag where the player keeps it over their right edge: member 3/6 -- " + said(h));
+    }
+    {
+        // Nobody, and the bag where the player keeps it: alone, as ever.
+        Frame f = k.frame;
+        copy_over(kept, f, kept_bag);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Alone && !h.covered, "alone, the bag where the player keeps it: alone -- " +
+                                                              said(h));
+    }
+    {
+        // The bag dragged over the panels, none of them showing: no telling
+        // whether anybody is there, so never "alone" -- Tự chat's "only when
+        // alone" line is not sent on it.
+        Frame f = k.frame;
+        draw_member(f, 0, 160, true);
+        draw_member(f, 0, 206, false);
+        copy_over(dragged, f, dragged_bag);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Unknown && h.why.find("bag") != std::string::npos,
+              "the bag dragged over two members' panels: unknown, never alone -- " + said(h));
+        Frame g = k.frame;
+        copy_over(dragged, g, dragged_bag);
+        const PartyHud h2 = k.reader.read(g);
+        check(h2.state == PartyState::Unknown, "nor with nobody under it -- " + said(h2));
+        const PartyGate gate = party_invite_gate(h, true);
+        check(gate.allowed, "and an invite goes, as before the HUD was read");
+    }
+    {
+        // A member seen above the dragged bag, more maybe under it: a party of
+        // at least two, never full on what cannot be seen.
+        const PartyHud h = k.reader.read(dragged);
+        check(h.state == PartyState::Member && h.covered && h.size == 2 && !h.full &&
+                  party_hud_line_vi(h) == "Tổ đội: thành viên (ít nhất 2/6)",
+              "the saved party, the bag over two more panels: " + party_hud_line_vi(h) + " -- " + said(h));
+    }
+}
+
+void test_trust() {
+    section("Party HUD: a frame read off the screen, trusted by the part of the game it reads");
+    // The pure half: whether an area lies on the screens.
+    const std::vector<AutoLogin::Box> one{ { 0, 0, 1920, 1080 } };
+    const std::vector<AutoLogin::Box> two{ { 0, 0, 1920, 1080 }, { 1920, 0, 3200, 1024 } };
+    check(AutoLogin::on_screens({ 10, 10, 330, 490 }, one), "all of it on the one screen: on");
+    check(!AutoLogin::on_screens({ -40, 10, 280, 490 }, one), "40 pixels of it past the left edge: off");
+    check(!AutoLogin::on_screens({ 10, 900, 330, 1380 }, one), "its bottom past the screen's: off");
+    check(AutoLogin::on_screens({ 1800, 100, 2120, 580 }, two), "across two screens side by side: on");
+    check(!AutoLogin::on_screens({ 1800, 900, 2120, 1380 }, two),
+          "across two, its corner where neither reaches: off");
+    check(!AutoLogin::on_screens({ 10, 10, 10, 490 }, one), "nothing at all: off");
+
+    // A window of this test's own, put up off every screen and never brought
+    // forward: none of it is seen, so nothing read off the screen for it is
+    // trusted.
+    const HINSTANCE self = GetModuleHandleA(nullptr);
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = self;
+    wc.lpszClassName = "GoBotTestPartyWindow";
+    RegisterClassA(&wc);        // already there from an earlier call: the same
+    const int far_x = GetSystemMetrics(SM_XVIRTUALSCREEN) - 4000;
+    const int far_y = GetSystemMetrics(SM_YVIRTUALSCREEN) - 4000;
+    HWND w = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "GoBot test window",
+                             WS_POPUP, far_x, far_y, 400, 500, nullptr, nullptr, self, nullptr);
+    if (w == nullptr) {
+        std::printf("  [skip] could not put up a window of this test's own here\n");
+        return;
+    }
+    ShowWindow(w, SW_SHOWNOACTIVATE);
+    std::string why;
+    const bool seen = AutoLogin::part_seen(w, PartyHudReader::kArea, &why);
+    check(!seen && why == "off the screen", "the party's part of a window off every screen: not seen -- " + why);
+    check(!party_frame_trusted(true, w) && party_frame_trusted(false, w),
+          "a frame of it off the screen: not trusted; one it drew itself: trusted");
+    check(!AutoLogin::part_seen(w, ScreenRect{ 500, 600, 50, 50 }) &&
+              !AutoLogin::part_seen(nullptr, PartyHudReader::kArea),
+          "a part outside the window, or no window: not seen");
+    DestroyWindow(w);
+}
+
 void test_real_frames() {
-    section("Party HUD: the saved live frames, none with a party (PH-A3, PH-A4)");
+    section("Party HUD: the saved live frames, and the one with a party (PH-A3, PH-A4)");
     if (skip_without_kit()) return;
     const Kit& k = kit();
     {
@@ -263,17 +415,82 @@ void test_real_frames() {
         // game: its Level plate still shows, and the left of the screen, where
         // panels would be, is the terminal. No look at pixels can tell that
         // from a player alone; the capture can -- it came off the screen with
-        // the game not in front -- and such a frame is never trusted.
+        // a window over that part of the game -- and such a frame is never
+        // trusted.
         Frame covered;
         if (load_png(std::string(kLiveBuild) + "live\\shots\\r2_B_000.png", covered)) {
             const PartyHud h = k.reader.read(covered, party_frame_trusted(true, nullptr));
             check(h.state == PartyState::Unknown, "r2_B_000.png, the game covered: unknown -- " + said(h));
+            // And by its pixels alone, read as though it had been trusted:
+            // the terminal's plain ground down the panels' column is no
+            // reading either (the round 2 tester's problem 2).
+            const PartyHud by_pixels = k.reader.read(covered, true);
+            check(by_pixels.state == PartyState::Unknown && by_pixels.why.find("plain") != std::string::npos,
+                  "the same read as trusted: unknown by its pixels -- " + said(by_pixels));
+            // The others read off the screen with a window over the game,
+            // the HUD's plate still showing above it: the same.
+            int plain = 0, plated = 0;
+            for (const char* name : { "r1_before", "r1_pre", "r2_before", "r2_B_001", "r3_D_000", "r3_D_001",
+                                      "r3_D_002", "r3_D_003", "r3_pre" }) {
+                Frame f;
+                if (!load_png(std::string(kLiveBuild) + "live\\shots\\" + name + ".png", f)) continue;
+                ++plated;
+                plain += k.reader.read(f, true).state == PartyState::Unknown ? 1 : 0;
+            }
+            check(plated > 0 && plain == plated,
+                  std::to_string(plain) + " of " + std::to_string(plated) +
+                      " more frames with a program's window over the game, read as trusted: unknown");
         } else {
             std::printf("  [skip] no live\\shots\\r2_B_000.png here\n");
         }
         check(party_frame_trusted(false, nullptr) && !party_frame_trusted(true, nullptr),
-              "a frame the game drew itself is trusted; one off the screen of a game not in front is not");
+              "a frame the game drew itself is trusted; one off the screen with no game window to look at "
+              "is not");
     }
+    // Saved frames that do show a party: read as what they show, and left out
+    // of the count below. The first came on 2026-10-16, after the frames below
+    // had been gathered all alone: the trash cleaner kept it in a party that
+    // another player led. A frame saved since that reads as a party is
+    // to be looked at by eye -- named here if it shows one, a wrong reading to
+    // fix if it does not.
+    struct PartyFrame {
+        const char* path;       ///< under kLiveBuild
+        PartyState  state;
+        int         size;       ///< as many as are seen
+        bool        covered;    ///< the bag over some of the panels
+    };
+    // The first has two more panels under the bag, dragged to the screen's
+    // left edge, only their left ends showing: "at least" two. The other
+    // three, kept by the quick quest's look an hour later, are a party of two
+    // with nothing over its panels, another member leading.
+    const PartyFrame party_frames[] = {
+        { "bin\\Release\\trash_debug\\20261016_223524_0_not_in_bin.png", PartyState::Member, 2, true },
+        { "bin\\Release\\quest_debug\\probe_20261016_234019_00.png", PartyState::Member, 2, false },
+        { "bin\\Release\\quest_debug\\probe_20261016_234032_01.png", PartyState::Member, 2, false },
+        { "bin\\Release\\quest_debug\\probe_20261016_234045_02.png", PartyState::Member, 2, false },
+    };
+    const auto shows_a_party = [&](const std::string& path) {
+        for (const PartyFrame& p : party_frames)
+            if (path == std::string(kLiveBuild) + p.path) return true;
+        return false;
+    };
+    for (const PartyFrame& p : party_frames) {
+        Frame f;
+        if (!load_png(std::string(kLiveBuild) + p.path, f)) {
+            std::printf("  [skip] no %s here\n", p.path);
+            continue;
+        }
+        const PartyHud h = k.reader.read(f);
+        // One leader in a party, whoever it is: the player's own panel or one
+        // of the others'.
+        int leaders = h.own_leader ? 1 : 0;
+        for (const PartyPanel& panel : h.panels) leaders += panel.leader ? 1 : 0;
+        check(h.state == p.state && h.size == p.size && !h.full && leaders == 1 && h.covered == p.covered,
+              std::string(p.path) + ", saved live in a party: " + party_state_name(p.state) + ", " +
+                  (p.covered ? "at least " : "") + std::to_string(p.size) + " of " + std::to_string(kPartyMax) +
+                  ", one leader -- " + said(h));
+    }
+
     // Every eighth frame; GOBOT_PARTY_ALL=1 for every one of them.
     char all[8] = {};
     const bool every = GetEnvironmentVariableA("GOBOT_PARTY_ALL", all, sizeof all) > 0 && all[0] == '1';
@@ -289,6 +506,7 @@ void test_real_frames() {
     std::string first_party;
     for (std::size_t i = 0; i < frames.size(); ++i) {
         if (!every && i % 8 != 0 && i + 2 < frames.size()) continue;
+        if (shows_a_party(frames[i])) continue;     // read above, as what it shows
         Frame f;
         if (!load_png(frames[i], f) || f.width < 640 || f.height < 480) continue;
         ++looked;
@@ -304,10 +522,12 @@ void test_real_frames() {
         std::printf("  [skip] no saved frames of the live client here\n");
         return;
     }
-    check(party == 0, std::to_string(looked) + " saved frames: " + std::to_string(alone) + " alone, " +
-                          std::to_string(unknown) + " unknown, " + std::to_string(party) +
-                          " in a party: never a member, leader or full" +
-                          (first_party.empty() ? std::string() : " -- first: " + first_party));
+    // PH-A4 as the saved frames have it now: those that show a party are read
+    // as one above; every other is never read as one -- not a member, not a
+    // leader, never full.
+    check(party == 0, std::to_string(looked) + " saved frames that show no party: " + std::to_string(alone) +
+                          " alone, " + std::to_string(unknown) + " unknown, " + std::to_string(party) +
+                          " read as a party" + (first_party.empty() ? std::string() : " -- first: " + first_party));
 }
 
 void test_gate() {
@@ -401,6 +621,9 @@ void test_party_hud(void (*check_fn)(bool, const std::string&), void (*section_f
     test_panel_picture();
     test_reading();
     test_nonsense();
+    test_leader_unread();
+    test_bag_over();
+    test_trust();
     test_gate();
     test_worker_step();
     test_real_frames();

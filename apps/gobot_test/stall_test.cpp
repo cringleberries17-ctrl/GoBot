@@ -3,7 +3,8 @@
 //
 // Scripted looks on a pretend clock for the rule; frames saved from the live
 // client, and frames drawn here, for what a look can tell. No game is looked
-// at, and nothing is ended, started or clicked.
+// at -- a window of the test's own, off every screen, stands in for the
+// game's where one is needed -- and nothing is ended, started or clicked.
 
 #include "gobot/stall_watch.hpp"
 #include "gobot/alerts.hpp"
@@ -11,7 +12,9 @@
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/crash_watch.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/glyph_font.hpp"
+#include "gobot/input_manager.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -253,6 +256,15 @@ void test_eyes() {
           "off the screen with another window in front, or over it: blind");
     check(!stall_frame_trusted(false, false, false, true) && !stall_frame_trusted(true, true, false, true),
           "no frame, or the window minimised: blind");
+    // What "nothing over it" is, as the grab decides it: in front, nothing
+    // over its client area, and the HUD's corner on a screen -- all three.
+    check(stall_screen_clear(true, true, true), "in front, nothing over it, the HUD's corner on a screen: clear");
+    check(!stall_screen_clear(false, true, true) && !stall_screen_clear(true, false, true),
+          "another window in front, or one over the game: not clear");
+    check(!stall_screen_clear(true, true, false) &&
+              !stall_frame_trusted(true, false, true, stall_screen_clear(true, true, false)),
+          "in front with nothing over it, but the HUD's corner past the screen's edge: not clear, so blind "
+          "(the 2A tester's problem 11)");
 
     Frame a = plain_frame(60);
     StallEyes eyes;
@@ -389,7 +401,7 @@ void test_keeper() {
         CrashWatch::Look out;
         bool any = false;
         for (std::uint64_t t = t0; t <= t0 + 30 * kMinute; t += kLookMs)
-            any = any || k.check(nullptr, false, login, no_pages, t, out, {});
+            any = any || k.check(nullptr, "Game.exe", false, login, no_pages, t, out, {});
         check(!any, "switched off: never, and no game is even looked at");
     }
 
@@ -426,11 +438,24 @@ void test_keeper() {
         check(asked.find("a question with Xác Nhận at") != std::string::npos,
               "the bin's question drawn: a question -- " + asked);
     }
+    // The revive question too, which the tester saw logged as a notice.
+    Frame revive;
+    if (TemplateStore::load_one("hoisinh_confirm", exe_relative("configs/templates.ini"), revive)) {
+        Frame q = plain_frame(30);
+        blit(q, revive, 500, 300);
+        const std::string asked = looker.ok_popup(q);
+        check(asked.find("a question with Xác Nhận at") != std::string::npos,
+              "the revive question drawn: a question, not a notice -- " + asked + " (WD-R5)");
+    }
     Frame live;
     if (load_png(std::string(kLiveBuild) + "frozen\\live\\shots\\p5_probe_050.png", live)) {
         const std::string asked = looker.ok_popup(live);
         check(asked.find("a question with Xác Nhận at") != std::string::npos,
               "the live bin's question (p5_probe_050): a question, not a notice -- " + asked);
+        // Its words read where a question has them, no longer from a notice's
+        // place beside them: "Bạn có thật sự muốn bỏ vào thùng rác không".
+        check(asked.find("Bạn có") != std::string::npos && asked.find("rác") != std::string::npos,
+              "and its words read from where they are, not garbage (WD-R5, WD-A9)");
     } else {
         std::printf("  [skip] no frozen\\live\\shots\\p5_probe_050.png here\n");
     }
@@ -479,6 +504,94 @@ void test_texts() {
 #endif
 }
 
+void test_games_window() {
+    section("Watchdog: only the game's own window is looked at (GameInstall)");
+    // The window GoBot follows can be any window -- picked by hand from a
+    // list, or found by its title alone -- and one that is not the game never
+    // shows the HUD: counted, its looks would end a healthy game. So only a
+    // window of the game's own program, by where it runs from, is looked at.
+    // This test's own program stands in for the game, as in the crash watch's
+    // tests, and a folder of the test's own for anywhere else.
+    wchar_t self_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self_path, MAX_PATH);
+    GameInstall here_too;
+    here_too.programs = { wide_to_utf8(self_path) };
+    GameInstall elsewhere;
+    elsewhere.programs = { temp_path("gobot_test.exe") };
+    const std::uint64_t t0 = 9'000'000;
+    const AutoLogin::Settings login;
+    const TemplateStore no_pages;
+
+    check(!stall_window_is_the_games(nullptr, "gobot_test.exe", here_too), "no window: none of the game's");
+
+    // A window of this test's own, put up off every screen and never brought
+    // forward, for the game's.
+    const HINSTANCE self = GetModuleHandleA(nullptr);
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = self;
+    wc.lpszClassName = "GoBotTestStallWindow";
+    RegisterClassA(&wc);        // already there from an earlier call: the same
+    const int far_x = GetSystemMetrics(SM_XVIRTUALSCREEN) - 4000;
+    const int far_y = GetSystemMetrics(SM_YVIRTUALSCREEN) - 4000;
+    HWND w = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "GoBot test window",
+                             WS_POPUP, far_x, far_y, 200, 100, nullptr, nullptr, self, nullptr);
+    if (w) ShowWindow(w, SW_SHOWNOACTIVATE);
+    bool listed = false;
+    for (const InputManager::WindowInfo& info : InputManager::windows_of("gobot_test.exe"))
+        listed = listed || (w != nullptr && info.hwnd == w);
+    if (!listed) {
+        std::printf("  [skip] could not put up a window of this test's own here\n");
+    } else {
+        check(stall_window_is_the_games(w, "gobot_test.exe", here_too),
+              "a window of the program installed as the game: the game's own");
+        check(!stall_window_is_the_games(w, "gobot_test.exe", elsewhere),
+              "the same window with the game installed elsewhere: only called what the game is called, "
+              "so not the game's");
+        check(!stall_window_is_the_games(w, "Game.exe", here_too),
+              "nor when the game's program has another name");
+
+        // The keeper's side: a window that is not the game's is not looked at,
+        // and its looks count for nothing however long it shows no HUD.
+        StallKeeper other;
+        other.set_settings(on(1), exe_relative("configs/templates.ini"));
+        other.set_install(elsewhere);
+        other.restart(t0);
+        CrashWatch::Look out;
+        bool any = false, looked = false;
+        for (std::uint64_t t = t0; t <= t0 + 3 * kMinute; t += kLookMs) {
+            any = any || other.check(w, "gobot_test.exe", false, login, no_pages, t, out, {});
+            looked = looked || other.looking_at_the_game();
+        }
+        check(!any && !looked,
+              "a window that is not the game's, for three times stall_min: never looked at, never stalled");
+
+        StallKeeper game;
+        game.set_settings(on(1), exe_relative("configs/templates.ini"));
+        game.set_install(here_too);
+        game.restart(t0);
+        game.check(w, "gobot_test.exe", false, login, no_pages, t0, out, {});
+        check(game.looking_at_the_game(), "the game's own window: looked at");
+        game.check(nullptr, "gobot_test.exe", false, login, no_pages, t0 + kLookMs, out, {});
+        check(!game.looking_at_the_game(), "and no window at all: nothing looked at");
+
+        // Off every screen, its HUD's corner is not seen: read off the screen
+        // it would be black, which is no HUD, and the look is blind instead.
+        std::string why;
+        const bool seen = AutoLogin::part_seen(w, StallLooker::kHudCorner, &why);
+        check(!seen && why == "off the screen", "the HUD's corner of a window off the screen: not seen, so blind -- " +
+                                                    why + " (the 2A tester's problem 11)");
+        // And the look the grab's word makes of a frame read off the screen,
+        // with the game taken to be in front and nothing over it: blind.
+        StallLooker looker;
+        looker.load(exe_relative("configs/templates.ini"));
+        const bool trusted = stall_frame_trusted(true, false, true, stall_screen_clear(true, true, seen));
+        const StallLook l = looker.look_at(plain_frame(30), trusted, false, false, login, no_pages);
+        check(!trusted && l.blind, "so its frame, read off the screen, is a blind look, which counts for nothing");
+    }
+    if (w) DestroyWindow(w);
+}
+
 } // namespace
 
 void test_stall(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -488,5 +601,6 @@ void test_stall(void (*check_fn)(bool, const std::string&), void (*section_fn)(c
     test_pauses();
     test_eyes();
     test_keeper();
+    test_games_window();
     test_texts();
 }

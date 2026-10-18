@@ -6,7 +6,9 @@
 // the test sets. Nothing is typed or pressed anywhere.
 
 #include "gobot/auto_chat.hpp"
+#include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/template_matcher.hpp"
 
 #include <windows.h>
 
@@ -14,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -232,6 +235,131 @@ void test_turns() {
     }
 }
 
+void test_unseen_party() {
+    section("Tự chat: a ticked line with the party's panels out of view (F-RF-1)");
+    check(alone_look(true, true) == AloneLook::Read, "the game in front, its party's panels in view: read");
+    check(alone_look(false, true) == AloneLook::Unread,
+          "in front, a window over the panels or the game past the screen's edge: no reading, as a HUD not read");
+    check(alone_look(true, false) == AloneLook::KeepTurn && alone_look(false, false) == AloneLook::KeepTurn,
+          "behind another window: the turn kept, as every line waits then");
+
+    // [A ticked, B], a line every 30 s, as chat_loop takes the turns: a
+    // ticked line's look first, then the gate every line goes through -- the
+    // game in front -- then sent.
+    struct Seen {
+        bool trusted = true, focused = true, alone = true;
+    };
+    const auto run = [](const std::function<Seen(std::uint64_t)>& seen, std::uint64_t for_ms) {
+        ChatSettings s;
+        s.interval_s = 30;
+        s.jitter_pct = 0;
+        s.first_delay_s = 0;
+        s.lines = { "A", "B" };
+        s.only_alone = { true, false };
+        const std::vector<bool> typeable = { true, true };
+        ChatSchedule schedule(7);
+        const std::uint64_t start = 1'000'000;
+        std::uint64_t now = start;
+        schedule.start(now, s);
+        std::string sent;
+        for (const std::uint64_t until = now + for_ms; now < until; now += 100) {
+            if (!schedule.due(now)) continue;
+            const int index = schedule.turn();
+            const Seen w = seen(now - start);
+            if (s.alone_only(index)) {
+                const AloneLook look = alone_look(w.trusted, w.focused);
+                if (look == AloneLook::KeepTurn) {
+                    schedule.postpone(now, 5000);
+                    continue;
+                }
+                const AloneTurn turn = alone_turn(s.only_alone, typeable, index, look == AloneLook::Read && w.alone);
+                if (turn == AloneTurn::Skip) { schedule.skip(now); continue; }
+                if (turn == AloneTurn::Wait) { schedule.postpone(now, kAloneWaitMs); continue; }
+            }
+            if (!w.focused) {           // chat_gate: no line with the game behind another window
+                schedule.postpone(now, 5000);
+                continue;
+            }
+            sent += s.lines[static_cast<std::size_t>(index)];
+            schedule.sent(now);
+        }
+        return sent;
+    };
+    {
+        // The game in front, and a window kept on top over its left side the
+        // whole time: B goes at every turn of its own, A is passed over. Its
+        // turn kept instead, nothing at all would go.
+        const std::string went = run([](std::uint64_t) { return Seen{ false, true, true }; }, 200'000);
+        check(went.find('A') == std::string::npos && went.size() >= 3 && went.find_first_not_of('B') ==
+                                                                              std::string::npos,
+              "the panels never in view with the game in front: A passed over, B sent -- sent " + went);
+    }
+    {
+        // Behind another window for a minute, then in front with the panels
+        // in view and the player alone: nothing went meanwhile, and A, whose
+        // turn it was, goes first.
+        const std::string went = run(
+            [](std::uint64_t t) { return t < 60'000 ? Seen{ false, false, true } : Seen{ true, true, true }; },
+            100'000);
+        check(!went.empty() && went.front() == 'A',
+              "the game behind another window: nothing sent, A's turn kept, A sent first once it is in front -- "
+              "sent " + went);
+    }
+}
+
+/// Draw `pic` onto `f` at `x`, `y`, its see-through pixels left out.
+void blit(Frame& f, const Frame& pic, int x, int y) {
+    for (int py = 0; py < pic.height; ++py)
+        for (int px = 0; px < pic.width; ++px) {
+            const int fx = x + px, fy = y + py;
+            if (fx < 0 || fy < 0 || fx >= f.width || fy >= f.height) continue;
+            const std::uint8_t* s = &pic.pixels[(static_cast<std::size_t>(py) * pic.width + px) * 4];
+            if (s[3] < TemplateMatcher::kOpaque) continue;
+            std::uint8_t* d = &f.pixels[(static_cast<std::size_t>(fy) * f.width + fx) * 4];
+            std::copy_n(s, 3, d);
+            d[3] = 255;
+        }
+}
+
+void test_dialog_names() {
+    section("Tự chat: what a dialog that keeps Enter back is called (the 2A tester's problem 14)");
+    TemplateStore store;
+    if (!store.load_best(exe_relative("configs/templates.ini")) || !ChatDialogs::can_check(store)) {
+        std::printf("  [skip] the dialogs' pictures are not installed here\n");
+        return;
+    }
+    Frame plain;
+    plain.width = 1280;
+    plain.height = 720;
+    plain.pixels.assign(static_cast<std::size_t>(1280) * 720 * 4, 255);
+    for (std::size_t i = 0; i < plain.pixels.size(); i += 4) plain.pixels[i] = plain.pixels[i + 1] = 30;
+    const ChatDialogs dialogs;
+    // The invitation's picture is only the pair of buttons every question
+    // wears: the revive question was told the player an invitation was up.
+    struct Case {
+        const char* picture;
+        const char* called;
+    };
+    for (const Case& c : { Case{ "grabbed/hoisinh_confirm", "hồi sinh" },
+                           Case{ "grabbed/del_item_confirm_1", "thùng rác" } }) {
+        const Frame* pic = store.get(c.picture);
+        if (pic == nullptr) {
+            std::printf("  [skip] no %s here\n", c.picture);
+            continue;
+        }
+        Frame f = plain;
+        blit(f, *pic, 500, 300);
+        const std::string said = dialogs.up(f, store);
+        check(said == c.called, std::string(c.picture) + " up: \"" + said + "\", never an invitation");
+    }
+    if (const Frame* pair = store.get("grabbed/party_invite_buttons")) {
+        Frame f = plain;
+        blit(f, *pair, 540, 560);
+        const std::string said = dialogs.up(f, store);
+        check(!said.empty(), "the invitation's buttons alone: still keep Enter back -- \"" + said + "\"");
+    }
+}
+
 } // namespace
 
 void test_chat_alone(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -240,4 +368,6 @@ void test_chat_alone(void (*check_fn)(bool, const std::string&), void (*section_
     test_file();
     test_carry();
     test_turns();
+    test_unseen_party();
+    test_dialog_names();
 }

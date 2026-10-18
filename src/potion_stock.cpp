@@ -75,6 +75,71 @@ bool label_score(const Frame& f, const ScreenRect& s, const Frame& pic, int row,
     return true;
 }
 
+/// The worst of the four sides of the bar's own frame round the slot at
+/// `row`, `col`: on each, the mean difference in grey between `f` and the
+/// picture over the picture's frame pixels in the kRingBand pixels next to
+/// the slot. 0 where the frame is as the picture has it; 1000 for a side
+/// that is off the frame.
+double ring_worst(const Frame& f, const HotbarSpot& bar, const Frame& pic, int row, int col) {
+    const int ox = bar.x - kSlotDx, oy = bar.y - kSlotDy;
+    const int sx = kSlotDx + col * kPitch, sy = kSlotDy + row * kPitch;
+    const auto side = [&](int x0, int y0, int x1, int y1) {
+        long sum = 0, n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                if (x < 0 || y < 0 || x >= pic.width || y >= pic.height) continue;
+                const std::size_t i = (static_cast<std::size_t>(y) * pic.width + static_cast<std::size_t>(x)) * 4;
+                if (pic.pixels[i + 3] != 255) continue;
+                const int fx = ox + x, fy = oy + y;
+                if (fx < 0 || fy < 0 || fx >= f.width || fy >= f.height) return 1000.0;
+                const int want = (pic.pixels[i] + pic.pixels[i + 1] + pic.pixels[i + 2]) / 3;
+                sum += std::abs(lum_at(f, fx, fy) - want);
+                ++n;
+            }
+        return n ? static_cast<double>(sum) / static_cast<double>(n) : 0.0;
+    };
+    return std::max({ side(sx - 1, sy - kRingBand, sx + kCell + 1, sy),
+                      side(sx - 1, sy + kCell, sx + kCell + 1, sy + kCell + kRingBand),
+                      side(sx - kRingBand, sy, sx, sy + kCell),
+                      side(sx + kCell, sy, sx + kCell + kRingBand, sy + kCell) });
+}
+
+/// Whether the count of slot `s` -- nothing white in its corner, an icon in
+/// it -- is one that something lies over inside the slot, where the bar's own
+/// frame round it shows nothing: the corner all one colour, as a window's body
+/// is and nothing the game draws there ever is; or digits that read once the
+/// corner is brightened back up to white, as a dark shade seen through leaves
+/// a count -- grey, too dim to be taken for white.
+bool count_covered(const Frame& f, const ScreenRect& s, const CountReader& digits) {
+    int lo = 255, hi = 0;
+    for (int y = 0; y < kCountH; ++y)
+        for (int x = 0; x < kCountW; ++x) {
+            const int v = lum_at(f, s.x + x, s.y + y);
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    if (hi - lo <= kPlainSpread) return true;
+    if (!digits.loaded() || hi <= 0) return false;
+    // The slot again, every colour scaled so that the corner's brightest is
+    // white: a count under a shade reads as itself, an icon's own corner as
+    // no number.
+    Frame lit;
+    lit.width = kCell;
+    lit.height = kCell;
+    lit.pixels.assign(static_cast<std::size_t>(kCell) * kCell * 4, 255);
+    for (int y = 0; y < kCell; ++y)
+        for (int x = 0; x < kCell; ++x) {
+            std::uint8_t r, g, b;
+            f.get(s.x + x, s.y + y, r, g, b);
+            std::uint8_t* p = &lit.pixels[(static_cast<std::size_t>(y) * kCell + static_cast<std::size_t>(x)) * 4];
+            p[0] = static_cast<std::uint8_t>(std::min(255, b * 250 / hi));
+            p[1] = static_cast<std::uint8_t>(std::min(255, g * 250 / hi));
+            p[2] = static_cast<std::uint8_t>(std::min(255, r * 250 / hi));
+        }
+    const int n = digits.read(lit, ScreenRect{ 0, 0, kCell, kCell });
+    return n != CountReader::kUnreadable && n >= 2;
+}
+
 } // namespace
 
 HotbarSpot find_hotbar(const Frame& f, const Frame& picture, const HotbarSpot* last) {
@@ -144,6 +209,16 @@ SlotReading read_slot(const Frame& f, const HotbarSpot& bar, std::uint32_t vk,
         return r;
     }
 
+    // The bar's own frame round the slot, as the picture has it on all four
+    // sides: whatever lies over part of the slot lies over its frame on that
+    // side too. A dark window's edge over the top of slot 1 hid the count and
+    // left an icon with no number, "one left" -- or, over half a count, would
+    // leave the other half of it to be read.
+    if (ring_worst(f, bar, picture, r.row, r.col) > kRingDiff) {
+        r.state = SlotState::Unreadable;
+        return r;
+    }
+
     // The slot has to say it is the key's: a hotbar whose keys the player
     // has changed in the game's settings puts another key's label there, and
     // the number under it is then some other slot's.
@@ -167,8 +242,18 @@ SlotReading read_slot(const Frame& f, const HotbarSpot& bar, std::uint32_t vk,
             for (int x = 0; x < kCell; ++x)
                 if (x < kCell - kLabelCorner || y < kCell - kLabelCorner)
                     brightest = std::max(brightest, lum_at(f, s.x + x, s.y + y));
-        r.state = brightest <= kEmptyBrightest ? SlotState::Empty : SlotState::Single;
-        r.count = r.state == SlotState::Single ? 1 : 0;
+        if (brightest <= kEmptyBrightest) {
+            r.state = SlotState::Empty;
+            return r;
+        }
+        // An icon and no number: one left -- unless the number is there under
+        // something inside the slot, which the frame round it does not show.
+        if (count_covered(f, s, digits)) {
+            r.state = SlotState::Unreadable;
+            return r;
+        }
+        r.state = SlotState::Single;
+        r.count = 1;
         return r;
     }
 

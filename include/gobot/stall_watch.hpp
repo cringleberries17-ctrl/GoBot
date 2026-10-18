@@ -3,6 +3,7 @@
 #include "gobot/auto_login.hpp"
 #include "gobot/config.hpp"
 #include "gobot/crash_watch.hpp"
+#include "gobot/game_install.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/reviver.hpp"
@@ -30,10 +31,11 @@ namespace gobot {
 ///
 /// What it never restarts: a dead character (the reviver or the player's own
 /// stop rule deals with that), a screen that cannot be seen (the game behind
-/// another window, minimised), the minutes when GoBot itself holds the game
-/// (a trash pass, a chat line, a quest round, a crossing), and the first
-/// minute after getting into the world. A screen that keeps changing and is
-/// not a login page is taken for a map loading, and is given longer.
+/// another window, minimised, or a window followed that is not the game's
+/// own by where its program runs from), the minutes when GoBot itself holds
+/// the game (a trash pass, a chat line, a quest round, a crossing), and the
+/// first minute after getting into the world. A screen that keeps changing
+/// and is not a login page is taken for a map loading, and is given longer.
 ///
 /// No captcha is looked for, waited on or treated specially, by the player's
 /// decision.
@@ -42,7 +44,8 @@ namespace gobot {
 struct StallLook {
     /// Nothing can be told from it: the window minimised, the grab failed, or
     /// the frame came off the screen while another window was in front of the
-    /// game or over it -- whatever covers the game is in it.
+    /// game or over it -- whatever covers the game is in it -- or with the
+    /// HUD's corner dragged past the screen's edge, where it reads black.
     bool blind = false;
     bool hud = false;           ///< the character's HUD is up: in the world
     bool death = false;         ///< the death panel or the revive question is up
@@ -163,6 +166,22 @@ private:
 /// (PrintWindow) is good wherever the game is.
 bool stall_frame_trusted(bool grabbed, bool minimised, bool from_screen, bool clear);
 
+/// Whether the game was `clear` for stall_frame_trusted when a frame was read
+/// off the screen: in front, nothing over its client area (AutoLogin::
+/// uncovered), and the HUD's corner -- StallLooker::kHudCorner -- all on a
+/// screen (AutoLogin::part_seen). The crossing lets a window part off the
+/// screen be looked at; here a HUD dragged past the edge reads black, black is
+/// no HUD, and the healthy game would be ended.
+bool stall_screen_clear(bool foreground, bool uncovered, bool hud_corner_seen);
+
+/// Whether `window` is one of the game's own: a window of a program called
+/// `game_process` that runs from where the game is installed (GameInstall).
+/// Never one taken for the game by its title, its class or its program's
+/// name alone, nor one picked by hand from a list -- which is how the window
+/// GoBot follows can be somebody else's.
+bool stall_window_is_the_games(void* window, const std::string& game_process,
+                               const GameInstall& install);
+
 /// One of the crossing's own pages that the game draws -- Kết Nối, the channel
 /// list, the character select -- is on `f`, by the pictures `login` names for
 /// them, found in `pages`.
@@ -182,6 +201,11 @@ public:
     /// wherever every other picture comes from -- the staged ones first. A few
     /// small pictures, not the whole set: a keeper runs for hours.
     void load(const std::string& templates_ini);
+
+    /// The HUD's corner of the game's client area: the player's own panel,
+    /// with the Level plate and the bars. A frame read off the screen is
+    /// trusted only with all of it on a screen (AutoLogin::part_seen).
+    static constexpr ScreenRect kHudCorner{ 0, 0, 290, 44 };
 
     /// One capture of the game's `window`, and whether it can be trusted, by
     /// stall_frame_trusted. False when there is no frame at all.
@@ -231,13 +255,28 @@ public:
     void set_settings(const StallSettings& s, const std::string& templates_ini);
     const StallSettings& settings() const { return watch_.settings(); }
 
+    /// Where the game is installed, which tells its windows from other
+    /// programs'. Found afresh on every look unless set: a test sets one of
+    /// its own, so that a window of its own can stand in for the game's.
+    void set_install(GameInstall install) {
+        install_ = std::move(install);
+        install_set_ = true;
+    }
+
     /// One call for each of the keeper's looks while the client is fine: a
     /// capture of `window` every kLookMs, judged. True when nobody has been in
     /// the world for too long: `out` is then the look to end the client by --
     /// Trouble::Stalled, its minutes and what was on the screen -- and the
     /// frame is kept in `debug_dir` when one is given.
-    bool check(void* window, bool held, const AutoLogin::Settings& login, const TemplateStore& pages,
-               std::uint64_t now_ms, CrashWatch::Look& out, const std::string& debug_dir = {});
+    ///
+    /// `window` is looked at only while it is one of the game's own, a
+    /// window of `game_process` running from where the game is installed
+    /// (stall_window_is_the_games). Any other window never shows the HUD, so
+    /// counting its looks would end a healthy game stall_min minutes later:
+    /// a look at it is blind instead, which counts for nothing.
+    bool check(void* window, const std::string& game_process, bool held,
+               const AutoLogin::Settings& login, const TemplateStore& pages, std::uint64_t now_ms,
+               CrashWatch::Look& out, const std::string& debug_dir = {});
     /// The judging half of check(), on a frame already taken: for the tests,
     /// which have no game to capture.
     bool judge(const Frame& frame, bool trusted, bool held, const AutoLogin::Settings& login,
@@ -250,12 +289,22 @@ public:
 
     const StallWatch::Verdict& last() const { return watch_.last(); }
 
+    /// Whether the window the last look was handed was the game's own, and
+    /// so looked at. False before any look.
+    bool looking_at_the_game() const { return looking_at_the_game_; }
+
 private:
     StallWatch    watch_;
     StallLooker   looker_;
     bool          loaded_ = false;
     std::uint64_t next_ms_ = 0;
     int           logged_minute_ = -1;
+    GameInstall   install_;
+    bool          install_set_ = false;
+    /// The last look's window was the game's own; the first that is not is
+    /// said once, not every few seconds.
+    bool          looking_at_the_game_ = false;
+    bool          said_not_the_game_ = false;
 };
 
 } // namespace gobot

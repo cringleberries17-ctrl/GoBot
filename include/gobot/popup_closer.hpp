@@ -137,8 +137,11 @@ public:
     /// "Thử xem" too, which then says what else is up with blockers().
     /// Without `with_menu` the ESC menu is not looked for: it is closed only
     /// straight after GoBot's own ESC, and the look made every second of a
-    /// run is the cheaper for leaving it out.
-    std::vector<PopupSeen> popups(const Frame& f, bool with_menu = true) const;
+    /// run is the cheaper for leaving it out. With `only_at`, the notice and
+    /// the book are looked for only round that rectangle, a few pixels either
+    /// way: a popup's own place, looked at again under the hold, in a few
+    /// milliseconds rather than a search of the whole screen.
+    std::vector<PopupSeen> popups(const Frame& f, bool with_menu = true, const ScreenRect* only_at = nullptr) const;
     /// What else is up, given the popups found on the frame, in English for
     /// the log -- and in Vietnamese into `vi`, for the screen, when given.
     std::vector<std::string> blockers(const Frame& f, const std::vector<PopupSeen>& popups,
@@ -194,6 +197,20 @@ public:
     /// How long a click or an ESC is given to close it.
     static constexpr int kCheckMs = 1500;
     static constexpr int kCheckLookMs = 250;
+    /// The longest the game is held for one close -- the potion keys with it,
+    /// since a hold refuses the macro's presses: from asking for the hold to
+    /// letting it go, at most this long (PU-R5).
+    static constexpr std::uint64_t kHoldMs = 2000;
+    /// Nothing is pressed later than this into the hold: a look before the
+    /// press that took longer, on a busy machine, puts the popup off instead.
+    /// A click lets go of the hold straight after; an ESC keeps it a little
+    /// longer, to close the ESC menu it may have brought up.
+    static constexpr std::uint64_t kPressByMs = 1500;
+    static constexpr std::uint64_t kEscPressByMs = 1200;
+    /// What one look after an ESC is allowed to take -- the capture, the look
+    /// and a click on the menu's X -- before it would run past kHoldMs: the
+    /// hold is let go rather than started on another.
+    static constexpr std::uint64_t kLookAllowMs = 350;
     /// Tries for one kind in any kTriesWindowMs; after them it is left alone.
     static constexpr int kTries = 2;
     static constexpr std::uint64_t kTriesWindowMs = 600'000;
@@ -216,10 +233,15 @@ public:
     /// What has to hold before anything is pressed. `gates` says why not now
     /// in English -- empty when it may -- and `take` takes the hold and the
     /// mouse and checks that nobody is at the machine, false when not now;
-    /// `done` lets them go. `stopped` is asked the moment before the press and
-    /// before the ESC menu's X: a stop -- F12, DỪNG, Ctrl+C -- that came while
-    /// the fresh frame was looked at presses nothing more. Unset, everything
-    /// is allowed: for tests.
+    /// `done` lets them go: straight after a click, and after an ESC once the
+    /// ESC menu it may have brought up is dealt with -- within kHoldMs of
+    /// `take` being asked, whatever happens. That menu, when it is first seen
+    /// only once the game was let go, is closed under a second hold, asked for
+    /// with `gates` and `take` as the first was and let go at its click: left
+    /// up, it would be taken for the player's. `stopped` is asked the moment
+    /// before the press and before the ESC menu's X: a stop -- F12, DỪNG,
+    /// Ctrl+C -- that came while the fresh frame was looked at presses nothing
+    /// more. Unset, everything is allowed: for tests.
     struct Guard {
         std::function<std::string()> gates;
         std::function<bool()>        take;

@@ -7,6 +7,7 @@
 
 #include "gobot/hotkeys.hpp"
 #include "gobot/config.hpp"
+#include "gobot/logger.hpp"
 
 #include <windows.h>
 
@@ -260,6 +261,65 @@ void test_login_key() {
           "key 0: never a crossing");
 }
 
+void test_taken() {
+    section("Hotkeys: a one-job key GoBot presses itself is never heard (S-RS2-2)");
+    // The trash key set, in the full screen's macro table, to a skill's key
+    // too: the macro's own presses go down as the player's would.
+    HotkeyState s = state(HotkeyFront::Game);
+    s.trash_key_use = "phím kỹ năng";
+    const HotkeyActions a = hotkey_action(press_once(kTrashKey), s);
+    check(!a.trash && a.trash_taken && a.trash_note_vi.empty(),
+          "the trash key that is a skill's key too, the game in front: no pass, and taken");
+    {
+        // The macro pressing it for a tenth of a second every 3 s for a
+        // minute, the game in front: never a pass.
+        HotkeyEdgeTracker tracker;
+        Keyboard kb;
+        int passes = 0, taken = 0;
+        for (int tick = 0; tick < 60 * 60; ++tick) {
+            kb.held.clear();
+            if (tick % 180 < 6) kb.held.insert(kTrashKey);
+            const HotkeyActions x = hotkey_action(tracker.update(keys(), kb.down()), s);
+            passes += x.trash ? 1 : 0;
+            taken += x.trash_taken ? 1 : 0;
+        }
+        check(passes == 0 && taken == 20,
+              "pressed by the macro every 3 s for a minute: " + std::to_string(passes) + " passes, " +
+                  std::to_string(taken) + " presses not heard");
+    }
+    // The login key as a potion's key: no crossing -- nor a cancel of one
+    // the key started, which every potion would otherwise be.
+    HotkeyState l = state(HotkeyFront::Game);
+    l.login_key_use = "bình HP";
+    const HotkeyActions b = hotkey_action(press_once(kLoginKey), l);
+    check(b.login == HotkeyActions::Login::None && b.login_taken && b.login_note_vi.empty(),
+          "the login key that is a potion's key too: no crossing, and taken");
+    l.crossing = l.key_crossing = true;
+    check(hotkey_action(press_once(kLoginKey), l).login == HotkeyActions::Login::None,
+          "nor a cancel of the crossing it started");
+    // F10 written into app.ini by hand as the trash key, which no box checks:
+    // F10 still starts and stops the bot, and the trash key is not heard.
+    {
+        HotkeySet same = keys();
+        same.trash_now = kF10;
+        HotkeyEdgeTracker tracker;
+        Keyboard kb;
+        kb.held.insert(kF10);
+        HotkeyState f10 = state(HotkeyFront::Game);
+        f10.trash_key_use = "bật/tắt bot";
+        const HotkeyActions c = hotkey_action(tracker.update(same, kb.down()), f10);
+        check(c.toggle && !c.trash && c.trash_taken,
+              "F10 as the trash key too, by hand: start/stop as ever, no pass (the 2A tester's problem 15)");
+    }
+    check(hotkey_action(press_once(kTrashKey), state(HotkeyFront::Game)).trash &&
+              !hotkey_action(press_once(kTrashKey), state(HotkeyFront::Game)).trash_taken,
+          "a key GoBot does not press itself: a pass, as before");
+    check(hotkey_text::key_taken_vi("F5", "phím kỹ năng", true) ==
+              "Phím F5 cũng là phím GoBot tự bấm (phím kỹ năng), nên không dùng làm phím dọn ngay được. Hãy "
+              "chọn phím khác.",
+          "and the screen says why: " + hotkey_text::key_taken_vi("F5", "phím kỹ năng", true));
+}
+
 void test_clashes() {
     section("Hotkeys: no key does two jobs (HK-A5)");
     // The new boxes refuse every key GoBot presses or watches: the window
@@ -337,14 +397,33 @@ void test_config() {
     IniFile typed;
     HotkeyConfig t;
     typed.load(path);
+    // And the log says so, each key by its name: a key that does nothing is
+    // otherwise a fault to the player.
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(50);
+    log.clear_ring();
+    log.set_level(LogLevel::Warn);
     t.load(typed);
+    log.set_level(was);
+    int said = 0;
+    for (const LogLine& l : log.ring())
+        said += l.text.find("not an F-key") != std::string::npos &&
+                        (l.text.find("trash_now=75") != std::string::npos ||
+                         l.text.find("login_now=49") != std::string::npos)
+                    ? 1
+                    : 0;
+    log.set_ring_capacity(0);
     check(t.trash_now == 0 && t.login_now == 0, "K and 1 written in by hand: no key (R2A-1)");
+    check(said == 2, "and a line in the log for each: " + std::to_string(said) + " of 2 (R2A-1)");
     DeleteFileA(path.c_str());
 
-    // What the two boxes take: function keys only, or none.
+    // What the two boxes take: F1 to F12 only, as their notes say, or none.
     check(one_job_key_allowed(0) && one_job_key_allowed(VK_F1) && one_job_key_allowed(VK_F9) &&
-              one_job_key_allowed(VK_F12) && one_job_key_allowed(VK_F24),
-          "no key, F1, F9, F12 and F24 may be a one-job key");
+              one_job_key_allowed(VK_F12),
+          "no key, F1, F9 and F12 may be a one-job key");
+    check(!one_job_key_allowed(VK_F13) && !one_job_key_allowed(VK_F24),
+          "F13 and F24 may not: the boxes and the notes say F1 to F12 (the round 2 tester's problem 7)");
     bool text_refused = true;
     for (const std::uint32_t vk : { std::uint32_t('K'), std::uint32_t('1'), std::uint32_t(VK_SPACE),
                                     std::uint32_t(VK_OEM_1), std::uint32_t(VK_OEM_PERIOD),
@@ -376,6 +455,7 @@ void test_hotkeys(void (*check_fn)(bool, const std::string&), void (*section_fn)
     test_switches();
     test_trash_key();
     test_login_key();
+    test_taken();
     test_clashes();
     test_config();
 }

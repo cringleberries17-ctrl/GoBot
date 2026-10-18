@@ -680,6 +680,16 @@ AloneTurn alone_turn(const std::vector<bool>& only_alone, const std::vector<bool
     return AloneTurn::Wait;
 }
 
+AloneLook alone_look(bool trusted, bool focused) {
+    // The game behind another window: chat_gate holds every line until it is
+    // in front again, and the ticked one keeps its turn like the rest. In
+    // front, the turn is never kept for want of a look at the party -- a
+    // window kept on top over the game's left side would otherwise hold back
+    // every line after it for as long as it stays there.
+    if (!focused) return AloneLook::KeepTurn;
+    return trusted ? AloneLook::Read : AloneLook::Unread;
+}
+
 // -------------------------------------------------------------------- text
 
 ChatText prepare_chat(const std::string& line, ChatMethod method, bool strip, int max_length) {
@@ -942,12 +952,15 @@ std::string ChatDialogs::up(const Frame& f, const TemplateStore& store) const {
     const bool asking = invited.get();
     const bool died = dead.get();
 
-    // In the order they were always looked at in: the most particular first.
+    // The most particular first. The invitation's picture is only the
+    // [Xác Nhận][Hủy Bỏ] pair every question wears -- the revive question's,
+    // a shop's -- so it names an invitation only where no other look found a
+    // dialog with those buttons; it keeps Enter back all the same.
     for (const bag::Dialog& d : dialogs)
         if (d.ours()) return "thùng rác";
-    if (asking) return "lời mời tổ đội";
     if (died) return "hồi sinh";
     if (!dialogs.empty()) return "hộp thoại có nút Xác Nhận";
+    if (asking) return "lời mời tổ đội";
     if (v.found && !v.bin_empty) return "thùng rác đang giữ đồ";
     return {};
 }
