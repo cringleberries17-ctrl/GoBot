@@ -298,6 +298,7 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
    - Why: GoC has both tiers (data/guide/4.png; bot_s0_default.ini:133-141). The simple row drives only the first key of each kind (simple_view.cpp:750).
    - Done when: Offline: - The GUI shows four rows, and a changed Lv2 key or % round-trips through macro.ini. - Macro test: at 40% HP only Lv1 fires; at 25% Lv2 fires, with Lv1 on its own cooldown. Live (optional, during the P1-10 test): both thresholds drink.
    - GoC's rule (decompile): when HP is under both thresholds, GoC presses only the tier with the lower threshold, and presses MP 20 ms after HP. The Done-when above has Lv2 fire at 25% with Lv1 on its own cooldown, which can press both. Following GoC means Lv2 only; see the question for the player at the end.
+   - The player's decision (2026-10-18): follow GoC. Only the more urgent tier is pressed, so at 25% only Lv2 fires. Potions also come before skills: a potion that is due is pressed before any skill key.
 8. **P1-8 Attack styles for the hunter: presets, keep distance, up/down reach, the right jump key. - (a) A 'Kiểu đánh' picker: class + weapon chooses one of GoC's four presets (sample_config.ini). The preset sets hunter max reach, min distance, up reach and down reach; the hunter uses separate up and down values instead of one height_tolerance (hunter.cpp:286-287). - (b) 'Giữ khoảng cách': if the target is closer than the min distance, step away before attacking, with a bounded number of steps in a row. - (c) A jump-key box next to 'Phím đánh', with a 'Thử' button and a checklist warning when the jump key equals the game's attack key. - (d) Make the facing tolerance configurable (hunter.cpp:295).** — effort M (live test).
    - Why: The player's GoC config uses backing_away=true and min 120 / max 200 (bot_s0_default.ini:8,18-19). GoBot's hunter has reach 150 and height 60, and the presets feed only the packet bot (gui_app.cpp:1775-1844). The hunter jumps with Space (hunt.ini:40), which GoC lists as the default normal-attack key (0x180788; bot_s0_default.ini:170).
    - Done when: Offline (hunter unit tests on scripted plates): - Target at dx=80 with min distance 120: one step away, then attack. - Target 100 px above with up-reach 131: reachable. Target 100 px below with down-reach 80: not reachable. - Each preset writes its six numbers to hunt.ini. - 'Thử' presses the jump key exactly once. Live, for each class the player plays (one melee, one ranged), 10 kills each: - The ranged character keeps at least the min distance in 8 of 10 fights. - The character visibly jumps on 'Thử' and when a target is above.
@@ -412,6 +413,7 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
    - Why: GoC has it (bot_s0_default.ini:142-148; FillCashShopHpFeature).
    - Done when: Live: the cash potion bar is refilled from the chosen item when it drops below the set %, and is checked every N s.
    - Depends on: P2-11
+   - Not now (the player's decision, 2026-10-18): the player does not use cash-shop potions. Left out until asked for.
 9. **P3-9 Profiles and several clients. - Named profiles per character covering macro, hunt, party, trash, login and chat, switchable on the simple screen. - A --profile flag so a second GoBot copy can drive another game window.** — effort M (live test).
    - Why: GoC has bot and party profiles (config.ini last_bot_config; 0x180d78-0x180dd8). GoBot keeps one set of files beside the exe.
    - Done when: Offline: switching profiles restores every key and list. Live: two GoBot copies drive two clients with different profiles for 30 minutes, with no cross-talk in the logs or configs.
@@ -424,6 +426,7 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
    - Why: GoC has remote control (0x17f8a0; DecodeCommandChatRemote / DecodeCommandPartyRemote).
    - Done when: Offline: a mock shows commands from another chat id are ignored and logged. Live: /dung stops the run within 5 s, and /trangthai reports state and HP.
    - Depends on: P2-1
+   - The player's decision (2026-10-18): commands come through a Discord bot, not Telegram, accepted only from the player's own channel. The webhook alerts can move to the bot later.
 12. **P3-12 EXP meter and level: read 'Level' on the HUD and the EXP bar, then show EXP %/h and time to the next level.** — effort M (live test).
    - Why: GoC has 'Đo EXP' (0x1763d8-0x1764bc).
    - Done when: Offline: level digits and bar fill read correctly on cut frames. Live: over 30 minutes, EXP %/h is within 10% of the tester's own reading.
@@ -470,14 +473,23 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
   the Discord app), plus a local sound/Windows notification; a Zalo bot may follow later for two-way
   control, after a BA checks Zalo's Bot Platform. The webhook URL is stored with DPAPI and never logged.
 
-## Questions for the player (2026-10-17)
+## Decisions by the player (2026-10-18)
 
-- **Potion tiers (P1-7):** when HP is under both thresholds, GoC presses only the more urgent tier. The current P1-7 can press both, the second on its own cooldown. Follow GoC, which saves potions, or keep both?
-- **Recording for P0-2:** about five minutes with the game running and the character on a quiet map. GoBot only records; it sends nothing to the game. When suits?
+- **Potion tiers (P1-7):** follow GoC: press only the more urgent tier. Potions come before skills: a potion that is due is pressed before any skill key.
+- **P0-2 recording:** weekdays after 21:00.
+- **Cash-shop HP/MP fill (P3-8):** not needed now; the player does not use cash-shop potions.
+- **Remote commands (P3-11):** through a Discord bot rather than Telegram. The webhook alerts can move to the bot later.
+
+## Questions for the player (2026-10-17), answered 2026-10-18
+
+- **Potion tiers (P1-7):** when HP is under both thresholds, GoC presses only the more urgent tier. The current P1-7 can press both, the second on its own cooldown. Follow GoC, which saves potions, or keep both? Answered: follow GoC, and potions before skills.
+- **Recording for P0-2:** about five minutes with the game running and the character on a quiet map. GoBot only records; it sends nothing to the game. When suits? Answered: weekdays after 21:00.
 
 ## Order of work from here
 
 As of 2026-10-17: main is 79856fe and the 2026.10.17 package is the current test release. Rounds stay small and run one at a time, to pace the weekly usage.
+
+Revised 2026-10-18: two housekeeping items from step 8 move into the first round, beside P0-1: the gobot_test "no real input" switch and the one rule for the game's image path. On 2026-10-15 a gobot_test run drove a real login crossing on the player's PC for about three minutes, and team 2's batch adds a watchdog that ends the game client. Its tests should only ever run under the guard.
 
 1. **P0-1**, offline. One coder and one reviewer; the item text above is the spec. It touches only the framing and its tests, so it cannot collide with either team's work.
 2. **Team 2's Phase 2 batch** (P2-3, P2-4, P2-5, P2-8, P2-9, P2-10, P2-11; uncommitted in the GoBot-chat worktree, branch team2-phase2): fix the two critical P2-11 bugs from its review, then its final check. P2-11 stays off until a live picture of the use dialog exists.
