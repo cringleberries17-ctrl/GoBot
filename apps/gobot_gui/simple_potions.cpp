@@ -1,6 +1,7 @@
 // Potion stock -- "Còn N bình" -- as the GUI does it: a look at the potion
 // keys' hotbar slots every few seconds of a run, on the frames the HP reader
-// has taken already, and the line under each potion row on the Đánh quái tab.
+// has taken already, and the line under each potion key -- each tier of each
+// potion row -- on the Đánh quái tab.
 //
 // What a slot says, and when that is worth a message, is the library's
 // (gobot/potion_stock.hpp). Here is what only the window knows: which keys are
@@ -254,52 +255,49 @@ void GuiApp::potions_tick() {
     });
 }
 
-void GuiApp::simple_potion_stock(MacroKeyKind kind) {
+void GuiApp::simple_potion_stock(const MacroKey& key) {
     if (!potions_ui_) return;           // made by potions_tick, which runs first
     PotionsUi& ui = *potions_ui_;
 
-    // The row's key: the first of its kind that is switched on, as
-    // potions_tick reads only those. A row switched off has no line: its
-    // slot is not read, and "not read yet" would look like a fault.
-    const MacroKey* key = nullptr;
-    for (const MacroKey& k : macro_config_.keys)
-        if (macro_key_kind(k) == kind && k.keycode != 0 && k.enabled) {
-            key = &k;
-            break;
-        }
-    if (key != nullptr) {
-        const std::string name = InputManager::key_name(key->keycode);
-        SlotReading r;
-        int row = -1, col = -1;
-        std::string line;
-        ImVec4 colour = kDim;
-        if (!hotbar_slot_of(key->keycode, row, col)) {
-            r.state = SlotState::NotOnBar;
-            line = potion_line_vi(r, name);
-        } else if (!ui.trouble.empty()) {
-            line = ui.trouble;
-            colour = kWait;
-        } else if (!simple_running()) {
-            // Read only during a run: the last run's count, left up after
-            // DỪNG, would look like today's.
-            line = "Số bình được đọc khi bot chạy.";
-        } else if (ui.watch.believed(key->keycode, r)) {
-            line = potion_line_vi(r, name);
-            if (r.state == SlotState::Empty) colour = kBad;
-            else if (r.has_count() && ui.settings.warn_below > 0 && r.count < ui.settings.warn_below)
-                colour = kWait;
-            else if (r.has_count())
-                colour = kGood;
-        } else {
-            line = "Chưa đọc được số bình";
-        }
-        ImGui::PushFont(nullptr, kSmall);
-        coloured(colour, line.c_str());
-        ImGui::PopFont();
-    }
+    // Only a key that is switched on, as potions_tick reads only those. A
+    // tier switched off has no line: its slot is not read, and "not read
+    // yet" would look like a fault.
+    if (!key.enabled || key.keycode == 0) return;
 
-    // One box for both rows, under the last.
-    if (kind != MacroKeyKind::MpPotion) return;
+    const std::string name = InputManager::key_name(key.keycode);
+    SlotReading r;
+    int row = -1, col = -1;
+    std::string line;
+    ImVec4 colour = kDim;
+    if (!hotbar_slot_of(key.keycode, row, col)) {
+        r.state = SlotState::NotOnBar;
+        line = potion_line_vi(r, name);
+    } else if (!ui.trouble.empty()) {
+        line = ui.trouble;
+        colour = kWait;
+    } else if (!simple_running()) {
+        // Read only during a run: the last run's count, left up after
+        // DỪNG, would look like today's.
+        line = "Số bình được đọc khi bot chạy.";
+    } else if (ui.watch.believed(key.keycode, r)) {
+        line = potion_line_vi(r, name);
+        if (r.state == SlotState::Empty) colour = kBad;
+        else if (r.has_count() && ui.settings.warn_below > 0 && r.count < ui.settings.warn_below)
+            colour = kWait;
+        else if (r.has_count())
+            colour = kGood;
+    } else {
+        line = "Chưa đọc được số bình";
+    }
+    ImGui::PushFont(nullptr, kSmall);
+    coloured(colour, line.c_str());
+    ImGui::PopFont();
+}
+
+void GuiApp::simple_potion_warn_box() {
+    if (!potions_ui_) return;           // made by potions_tick, which runs first
+    PotionsUi& ui = *potions_ui_;
+
     label("Báo khi còn dưới");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(80);

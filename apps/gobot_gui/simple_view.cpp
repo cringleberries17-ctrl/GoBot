@@ -46,6 +46,9 @@ const ImVec4 kBad  (0.92f, 0.35f, 0.35f, 1.0f);
 const ImVec4 kWait (0.95f, 0.72f, 0.25f, 1.0f);
 const ImVec4 kDim  (0.62f, 0.64f, 0.68f, 1.0f);
 const ImVec4 kInk  (0.05f, 0.05f, 0.05f, 1.0f);
+/// A skill's key box when the skill keeps its own timer (simple_skills.cpp
+/// has the same).
+const ImVec4 kOwnTimer(0.28f, 0.40f, 0.62f, 1.0f);
 
 constexpr float kBody    = 18.0f;
 constexpr float kSmall   = 15.0f;
@@ -156,6 +159,11 @@ std::string key_label(std::uint32_t vk) {
         case VK_END:        return "End";
         case VK_PRIOR:      return "PgUp";
         case VK_NEXT:       return "PgDn";
+        // The arrows as arrows: the jump key is most likely one.
+        case VK_UP:         return "↑";
+        case VK_DOWN:       return "↓";
+        case VK_LEFT:       return "←";
+        case VK_RIGHT:      return "→";
         default: break;
     }
     if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return "Num " + std::to_string(vk - VK_NUMPAD0);
@@ -433,6 +441,9 @@ void GuiApp::draw_simple_view() {
     }
 
     simple_window_list();
+    simple_monster_lists();     // "Danh sách quái", when asked for: simple_lists.cpp
+    simple_style_popups();      // "Tầm đánh", when asked for: simple_style.cpp
+    simple_skills_popup();      // "Kỹ năng", when asked for: simple_skills.cpp
 
     ImGui::EndChild();
     ImGui::PopFont();
@@ -546,6 +557,9 @@ void GuiApp::simple_checklist() {
         ImGui::Unindent(mark_indent());
     }
 
+    // ---- the jump key, while fighting is ticked ----
+    simple_jump_checklist();    // simple_style.cpp
+
     // ---- HP and MP ----
     {
         const bool hp = vitals_running_ && vitals_.hp_percent() >= 0.0f;
@@ -655,12 +669,7 @@ void GuiApp::simple_jobs() {
     heading(strong_font_, "Bot sẽ làm gì");
 
     auto& keys = macro_config_.keys;
-    const auto of_kind = [&](MacroKeyKind kind) {
-        std::vector<std::size_t> out;
-        for (std::size_t i = 0; i < keys.size(); ++i)
-            if (macro_key_kind(keys[i]) == kind) out.push_back(i);
-        return out;
-    };
+    const auto of_kind = [&](MacroKeyKind kind) { return macro_keys_of_kind(keys, kind); };
     const auto any_on = [&](const std::vector<std::size_t>& which) {
         for (std::size_t i : which)
             if (keys[i].enabled && keys[i].keycode != 0) return true;
@@ -671,19 +680,12 @@ void GuiApp::simple_jobs() {
             keys[i].enabled = on && keys[i].keycode != 0;
     };
 
-    // Empty boxes go once nothing is waiting to fill them. A box with no key
-    // does nothing, and Delete on a key is how a player takes it off.
+    // Empty boxes go once nothing is waiting to fill them -- a skill's, a
+    // buff's, a potion row's Lv2. A box with no key does nothing, and Delete
+    // on a key is how a player takes it off.
     constexpr std::size_t kNone = static_cast<std::size_t>(-1);
-    if (simple_listening_ == 0 && simple_listen_key_ == kNone) {
-        const auto empty = [](const MacroKey& k) {
-            const MacroKeyKind kind = macro_key_kind(k);
-            return k.keycode == 0 && (kind == MacroKeyKind::Skill || kind == MacroKeyKind::Buff);
-        };
-        if (std::any_of(keys.begin(), keys.end(), empty)) {
-            keys.erase(std::remove_if(keys.begin(), keys.end(), empty), keys.end());
-            simple_changed();
-        }
-    }
+    if (simple_listening_ == 0 && simple_listen_key_ == kNone && drop_empty_keys(keys))
+        simple_changed();
 
     if (!ImGui::BeginTable("##jobtable", 2, ImGuiTableFlags_SizingFixedFit)) {
         end_card();
@@ -720,8 +722,16 @@ void GuiApp::simple_jobs() {
                 simple_listening_ = ImGui::GetID("##box");
                 ImGui::PopID();
             }
-            const std::string tip = show_interval
-                ? "Bấm mỗi " + seconds_text(k.interval_ms) + " giây." : std::string();
+            // A skill's box says its cooldown -- and, keeping its own timer
+            // while the others follow the fight, is a colour of its own.
+            const bool own_timer = show_interval && k.always_timer;
+            std::string tip;
+            if (show_interval)
+                tip = macro_config_.skills_follow_fight && !k.always_timer
+                          ? "Hồi chiêu " + seconds_text(k.interval_ms) + " giây; bấm khi đang đánh quái."
+                          : "Bấm mỗi " + seconds_text(k.interval_ms) + " giây.";
+            if (own_timer) tip += "\nLuôn bấm theo giờ, kể cả khi không đánh quái.";
+            if (own_timer) ImGui::PushStyleColor(ImGuiCol_Button, kOwnTimer);
             const std::uint32_t before = k.keycode;
             if (simple_key_box(id, k.keycode, true, !k.enabled,
                                tip.empty() ? nullptr : tip.c_str())) {
@@ -730,6 +740,7 @@ void GuiApp::simple_jobs() {
                 if (k.keycode == 0) k.enabled = false;
                 simple_changed();
             }
+            if (own_timer) ImGui::PopStyleColor();
             if (after) after(k);
             ImGui::PopID();
         }
@@ -746,13 +757,17 @@ void GuiApp::simple_jobs() {
     ImGui::SameLine();
     if (simple_key_box("attack", hunt_config_.attack_key, false, false, nullptr))
         simple_changed();
-    ImGui::SameLine(0, 18);
+    simple_jump_box();          // "Phím nhảy [k] [Thử]" beside it: simple_style.cpp
+    simple_style_line();        // "Kiểu đánh [▼] (?) [Tầm đánh…]": simple_style.cpp
     if (ImGui::Checkbox("Đứng yên một chỗ", &hunt_config_.stay_put)) simple_changed();
     ImGui::SetItemTooltip("Không đi đâu cả: chỉ đánh con quái nào tới trong tầm đánh.\n"
                           "Hợp với chỗ quái tự kéo tới.");
+    simple_keep_distance_tick();    // "Giữ khoảng cách" beside it: simple_style.cpp
     hint(hunt_config_.stay_put ? "Đứng yên tại chỗ, đánh con quái nào tới trong tầm đánh."
                                : "Tự đi tới con quái gần nhất và đánh nó.");
+    simple_style_hints();
     row_gap();
+    simple_monster_row();       // "Lọc quái", simple_lists.cpp
 
     // ---- skills ----
     {
@@ -778,7 +793,7 @@ void GuiApp::simple_jobs() {
         }
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Thêm một phím kỹ năng: bấm + rồi nhấn phím (bấm mỗi 3 giây).");
-        hint("Bấm các phím kỹ năng liên tục, mỗi phím theo giờ hồi chiêu của nó.");
+        simple_skills_line();   // "Chi tiết…", "Chỉ khi đang đánh quái": simple_skills.cpp
         row_gap();
     }
 
@@ -815,11 +830,16 @@ void GuiApp::simple_jobs() {
     }
 
     // ---- potions ----
-    const auto potion_row = [&](MacroKeyKind kind, const char* job, const char* bar,
-                                const char* what) {
+    //
+    // Two tiers on each row, as GoC has them: Lv1, the first key of its kind
+    // in key order, and Lv2 under it, the second -- a bigger potion further
+    // down, say. With the reading under both, only the one with the lower %
+    // drinks, and each has its own cooldown (MacroEngine, as GoC). A third or
+    // more, made on the full screen, are kept and only counted here.
+    const auto potion_row = [&](MacroKeyKind kind, const char* job, const char* vital,
+                                const char* bar, const char* what) {
         const auto which = of_kind(kind);
         if (which.empty()) return;          // there was no room left to add one
-        MacroKey& k = keys[which.front()];
         ImGui::PushID(job);
 
         bool on = any_on(which);
@@ -830,24 +850,103 @@ void GuiApp::simple_jobs() {
             simple_changed();
         }
         ImGui::TableNextColumn();
+
+        // "khi HP dưới [n%]", after a key box.
+        const auto below = [&](const char* id, int& pct) {
+            ImGui::SameLine();
+            label(bar);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(150);
+            if (ImGui::SliderInt(id, &pct, kPotionMinPct, kPotionMaxPct, "%d%%",
+                                 ImGuiSliderFlags_AlwaysClamp)) {
+                pct = clamp_potion_pct(pct);
+                apply_macro_config();
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) simple_changed();
+        };
+        const auto lv2_tip = [&](const std::string& seconds) {
+            return std::string("Bình thứ hai (ví dụ bình lớn hơn). Khi ") + vital +
+                   " xuống dưới cả hai mức, chỉ bình có mức % thấp hơn được uống (như GoC); "
+                   "bình kia chờ " + vital + " lên lại. Mỗi bình chờ " + seconds +
+                   " giây giữa hai lần uống. Để trống nếu không dùng.";
+        };
+        const auto small_note = [](const ImVec4& colour, const std::string& text) {
+            ImGui::PushFont(nullptr, kSmall);
+            coloured(colour, text.c_str());
+            ImGui::PopFont();
+        };
+
+        // Lv1, as the row has always been. It cannot be emptied: the row is it.
+        MacroKey& k = keys[which[0]];
         label("Phím");
         ImGui::SameLine();
         if (simple_key_box("potion", k.keycode, false, !k.enabled, nullptr)) simple_changed();
+        below("##below", k.threshold_pct);
+        simple_potion_stock(k);         // "Còn N bình", simple_potions.cpp
+        // Kept by value: a Lv2 made below may move every key.
+        const std::uint32_t lv1_key = k.enabled ? k.keycode : 0;
+        const int           lv1_pct = k.threshold_pct;
+
+        // Lv2: the second key of the kind, or an empty box that makes one.
+        // Emptied with Delete it is off, and gone from macro.ini once nothing
+        // is waiting for a key (drop_empty_keys).
+        label("Lv2: Phím");
         ImGui::SameLine();
-        label(bar);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(150);
-        if (ImGui::SliderInt("##below", &k.threshold_pct, 5, 95, "%d%%"))
-            apply_macro_config();
-        if (ImGui::IsItemDeactivatedAfterEdit()) simple_changed();
-        hint(what);
-        simple_potion_stock(kind);      // "Còn N bình", simple_potions.cpp
+        if (which.size() >= 2) {
+            MacroKey& k2 = keys[which[1]];
+            const std::string tip = lv2_tip(seconds_text(k2.interval_ms));
+            const std::uint32_t before = k2.keycode;
+            if (simple_key_box("potion2", k2.keycode, true, !k2.enabled, tip.c_str())) {
+                // Filling in an empty box means "use this one".
+                if (before == 0 && k2.keycode != 0) k2.enabled = true;
+                if (k2.keycode == 0) k2.enabled = false;
+                simple_changed();
+            }
+            below("##below2", k2.threshold_pct);
+            // On Lv1's key it is Lv1's slot, whose count is said above.
+            if (k2.keycode != lv1_key) simple_potion_stock(k2);
+            // Only the lower % drinks while the reading is under both, so a
+            // Lv2 not under its Lv1 changes which one does: said here.
+            if (k2.keycode != 0 && k2.threshold_pct == lv1_pct)
+                small_note(kWait, "Lv1 và Lv2 cùng mức %: chỉ Lv1 được uống.");
+            else if (k2.keycode != 0 && k2.threshold_pct > lv1_pct)
+                small_note(kWait, std::string("Lv2 đang cao hơn Lv1: khi ") + vital +
+                                      " dưới cả hai mức, chỉ Lv1 (mức thấp hơn) được uống.");
+        } else {
+            // Nothing there yet: the box makes the key once one is pressed,
+            // with what the second potion starts at shown greyed beside it.
+            MacroKey fresh = macro_potion_key(kind, 0, 2);
+            const bool room = keys.size() < MacroConfig::kMaxKeys;
+            const std::string tip = room ? lv2_tip("3")
+                                         : "Đã đủ " + std::to_string(MacroConfig::kMaxKeys) +
+                                               " phím: bỏ bớt một phím kỹ năng hoặc buff trước.";
+            ImGui::BeginDisabled(!room);
+            const bool made = simple_key_box("potion2", fresh.keycode, true, true, tip.c_str()) &&
+                              fresh.keycode != 0 && room;
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled();
+            below("##below2", fresh.threshold_pct);
+            ImGui::EndDisabled();
+            // Last: `k` and `which` point into `keys`, which this may move.
+            if (made) {
+                keys.push_back(macro_potion_key(kind, fresh.keycode, 2));
+                simple_changed();
+            }
+        }
+
+        std::string about = what;
+        if (which.size() > 2)
+            about += " Lv1, Lv2 và " + std::to_string(which.size() - 2) +
+                     " phím khác (màn hình Nâng cao).";
+        hint(simple_ui::trial_hint(simple_ui::kTrialPotionTiers, about.c_str()).c_str());
+        // One box for both rows, under the last.
+        if (kind == MacroKeyKind::MpPotion) simple_potion_warn_box();
         row_gap();
         ImGui::PopID();
     };
-    potion_row(MacroKeyKind::HpPotion, "Tự uống bình HP", "khi HP dưới",
+    potion_row(MacroKeyKind::HpPotion, "Tự uống bình HP", "HP", "khi HP dưới",
                "Uống bình khi máu xuống thấp.");
-    potion_row(MacroKeyKind::MpPotion, "Tự uống bình MP", "khi MP dưới",
+    potion_row(MacroKeyKind::MpPotion, "Tự uống bình MP", "MP", "khi MP dưới",
                "Uống bình khi mana xuống thấp.");
 
     // ---- buffs ----
@@ -1073,13 +1172,26 @@ void GuiApp::simple_start_block() {
         coloured(kWait, "Đang chờ: hãy bấm vào cửa sổ game. Bot chỉ bấm phím khi game ở "
                         "phía trước.");
     } else if (hunting_ && hunter_) {
-        switch (hunter_->status().state) {
-            case Hunter::State::Attacking:   coloured(kGood, "Đang đánh quái."); break;
+        const Hunter::Status hs = hunter_->status();
+        switch (hs.state) {
+            case Hunter::State::Attacking:
+                // With skills following the fight: whether MP holds them.
+                coloured(kGood, ("Đang đánh quái." + simple_skills_note(false)).c_str());
+                break;
             case Hunter::State::Approaching: coloured(kGood, "Đang đi tới quái."); break;
-            case Hunter::State::NoTargets:   coloured(kWait, "Không thấy quái nào quanh đây."); break;
+            case Hunter::State::NoTargets:
+                // Monsters in view, every one of them ruled out by the lists.
+                if (hs.only_skipped)
+                    coloured(kWait, hunt_config_.first_only
+                                        ? "Không thấy con nào trong danh sách Đánh trước (đang chỉ "
+                                          "đánh những con đó)."
+                                        : "Chỉ thấy quái trong danh sách Không đánh.");
+                else
+                    coloured(kWait, "Không thấy quái nào quanh đây.");
+                break;
             case Hunter::State::NoPlayer:
-                coloured(kBad, "Không thấy nhân vật của bạn trên màn hình. Kiểm tra lại tên "
-                               "nhân vật ở trên.");
+                coloured(kBad, ("Không thấy nhân vật của bạn trên màn hình. Kiểm tra lại tên "
+                                "nhân vật ở trên." + simple_skills_note(true)).c_str());
                 break;
             case Hunter::State::Unfocused:
                 coloured(kWait, "Đang chờ: hãy bấm vào cửa sổ game.");
@@ -1144,29 +1256,51 @@ void GuiApp::simple_start_block() {
         const std::uint64_t until = running ? now_ms() : simple_stopped_ms_;
         const std::uint64_t elapsed = until > simple_started_ms_ ? until - simple_started_ms_ : 0;
 
-        std::uint64_t hp = 0, mp = 0, buffs = 0;
+        // Each potion row's Lv2 -- its second key in key order -- also on its
+        // own, when there is one: whether the second tier ever drinks is the
+        // thing to know about it.
+        std::uint64_t hp = 0, mp = 0, buffs = 0, hp2 = 0, mp2 = 0, skills = 0;
+        int hp_keys = 0, mp_keys = 0;
         const auto ms = macro_->stats();
-        for (std::size_t i = 0; i < macro_config_.keys.size() && i < ms.key_presses.size(); ++i) {
-            const std::uint64_t base = i < simple_base_presses_.size() ? simple_base_presses_[i] : 0;
-            const std::uint64_t n = ms.key_presses[i] > base ? ms.key_presses[i] - base : 0;
+        // Each key's count from where it stood at the start, found by which
+        // key it is: a key added or taken out during the run -- the macro
+        // keeps each key's count with it -- moves no other key's count.
+        const std::vector<int> started = macro_key_match(simple_base_keys_, macro_config_.keys);
+        for (std::size_t i = 0; i < macro_config_.keys.size(); ++i) {
+            const int j = i < started.size() ? started[i] : -1;
+            const std::uint64_t base = j >= 0 && static_cast<std::size_t>(j) < simple_base_presses_.size()
+                                           ? simple_base_presses_[static_cast<std::size_t>(j)]
+                                           : 0;
+            const std::uint64_t got = i < ms.key_presses.size() ? ms.key_presses[i] : 0;
+            const std::uint64_t n = got > base ? got - base : 0;
             switch (macro_key_kind(macro_config_.keys[i])) {
-                case MacroKeyKind::HpPotion: hp += n; break;
-                case MacroKeyKind::MpPotion: mp += n; break;
+                case MacroKeyKind::HpPotion: hp += n; if (++hp_keys == 2) hp2 = n; break;
+                case MacroKeyKind::MpPotion: mp += n; if (++mp_keys == 2) mp2 = n; break;
                 case MacroKeyKind::Buff:     buffs += n; break;
-                case MacroKeyKind::Skill:    break;
+                case MacroKeyKind::Skill:    skills += n; break;
             }
         }
+        // The sequence's steps are skills too: what tells whether they
+        // follow the fight is this count standing still while nothing is.
+        if (ms.sequence_presses > simple_base_seq_presses_)
+            skills += ms.sequence_presses - simple_base_seq_presses_;
+        const auto potions = [](std::uint64_t all, std::uint64_t lv2, bool tiers) {
+            std::string s = std::to_string(all);
+            if (tiers) s += " (Lv2: " + std::to_string(lv2) + ")";
+            return s;
+        };
         const std::uint64_t finished = hunter_ ? hunter_->status().targets_finished : 0;
         const std::uint64_t kills =
             finished > simple_base_finished_ ? finished - simple_base_finished_ : 0;
 
-        char line[256];
+        char line[400];
         std::snprintf(line, sizeof line,
-                      "%s %s   ·   Hạ được %llu quái   ·   Bình HP: %llu   ·   Bình MP: %llu"
-                      "   ·   Buff: %llu lần",
+                      "%s %s   ·   Hạ được %llu quái   ·   Bình HP: %s   ·   Bình MP: %s"
+                      "   ·   Buff: %llu lần   ·   Kỹ năng: %llu",
                       running ? "Đã chạy" : "Lần chạy vừa rồi:", clock_text(elapsed).c_str(),
-                      static_cast<unsigned long long>(kills), static_cast<unsigned long long>(hp),
-                      static_cast<unsigned long long>(mp), static_cast<unsigned long long>(buffs));
+                      static_cast<unsigned long long>(kills), potions(hp, hp2, hp_keys >= 2).c_str(),
+                      potions(mp, mp2, mp_keys >= 2).c_str(), static_cast<unsigned long long>(buffs),
+                      static_cast<unsigned long long>(skills));
         hint(line);
     }
 
@@ -1385,6 +1519,8 @@ void GuiApp::simple_track_run(bool running) {
         // this run rather than everything since GoBot was opened.
         simple_base_presses_ = macro_ ? macro_->stats().key_presses
                                       : std::vector<std::uint64_t>{};
+        simple_base_keys_ = macro_ ? macro_->config().keys : std::vector<MacroKey>{};
+        simple_base_seq_presses_ = macro_ ? macro_->stats().sequence_presses : 0;
         simple_base_finished_ = hunter_ ? hunter_->status().targets_finished : 0;
         simple_started_ms_ = now_ms();
     } else {

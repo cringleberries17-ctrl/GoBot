@@ -235,11 +235,15 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
 - **Attack loop** (`AttackThread`). Runs only while the server reports state 5
   (attacking). It presses each enabled attack skill once, 300 ms apart, and
   idles for 100 ms when there is none.
-- **Server skill command** (`HandleUseSkill`, command `0x10`):
+- **Server skill command** (`HandleUseSkill`, command `0x10`, GhostCore
+  0x180046A80). In this order: the jump attacks, the MP check, keep distance,
+  facing, then the skills -- or the normal attack when no skill went out.
   - Skipped in two player states, inferred to be dead and loading. While a chat
     line is being typed, it waits 500 ms instead.
-  - Below 10% MP it presses no attack keys at all, and logs this at most every
-    5 s. The 10% is fixed in code.
+  - Below 10% MP it presses no attack keys at all -- no skill, and no normal
+    attack -- and logs this at most every 5 s. The 10% is fixed in code. Only
+    the jump attacks come before this check: keep distance, facing and the
+    skills all come after it.
   - **Keep distance** (`backing_away`, never in `lazy_mode`). When the target
     is closer than `min_range` (50 px if unset), it steps back
     (min_range − distance) + 20 px. The step is clipped to the platform's ends
@@ -248,11 +252,18 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
   - **Facing** (`face_target`). It taps toward the target when the target is
     more than `facing_tolerance` px to the side. With facing off, it turns back
     to the direction it started in.
-  - **Skills**, not sequential. It presses every enabled skill whose cooldown
-    has passed and whose `skill_N_aoe_max_x` covers the horizontal distance
-    (0 means any distance). A press stays pending until the server confirms it
-    (`OnAttackConfirmed`, `OnSpellBaseConfirmed`). With `sequential_skill` on,
-    it presses them in list order, 50 ms apart.
+  - **Skills**, sequential (`sequential_skill` on, as in the player's config).
+    It presses every enabled skill in list order, each a random 60–131 ms press
+    and then 50 ms, with no cooldown check in the client: ZTeam's server paces
+    them. A skill is skipped when its `skill_N_aoe_max_x` is set and smaller
+    than the horizontal distance (0 means any distance).
+  - **Skills**, not sequential. It presses only the first enabled skill in range
+    whose cooldown, in seconds, has passed.
+  - Either way, when no skill went out it presses the normal attack
+    (`key_normal_attack`). A press stays pending until the server confirms it
+    (`OnAttackConfirmed`, `OnSpellBaseConfirmed`). GoBot's "Chỉ khi đang đánh
+    quái" follows this, with a cooldown of its own on every skill in both
+    modes, since no server paces GoBot's presses.
   - **Jump attack** (mode 1). A target more than `higher_threshold` px off
     vertically, and within that + 132 px, gets one jump. Further than that gets
     a double jump.

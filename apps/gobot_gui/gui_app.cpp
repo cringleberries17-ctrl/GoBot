@@ -107,6 +107,8 @@ const char* const kTrashWaitsForChat = "Chờ: ô chat trong game có thể đan
 GuiApp::GuiApp() = default;
 
 GuiApp::~GuiApp() {
+    // A jump key's "Thử" under way presses nothing more: GoBot is closing.
+    simple_style_stop();
     if (calibrator_) calibrator_->stop();
     if (mapper_) mapper_->stop();
     if (navigator_) navigator_->stop();
@@ -315,6 +317,18 @@ void GuiApp::initialise() {
     hunt_config_.load(exe_relative("configs/hunt.ini"));
     hunter_ = std::make_unique<Hunter>(input_, coord_, detector_);
     hunter_->set_config(hunt_config_);
+    // Skills that follow the fight ask the hunter, from the macro's own
+    // threads, whether it is fighting: only its atomics are read there. No
+    // hunter running is no hunter, and every key keeps its timer.
+    macro_->set_fight([this] {
+        MacroEngine::Fight f;
+        if (!hunter_ || !hunter_->running()) return f;
+        f.mode = hunter_->engaged() ? MacroEngine::Fight::Mode::Fighting
+                                    : MacroEngine::Fight::Mode::Idle;
+        f.dx = hunter_->engaged_dx();
+        f.attack_key = hunter_->attack_key();
+        return f;
+    });
     load_simple_options();
     alerts_init();
     load_hotkeys();
@@ -376,6 +390,7 @@ void GuiApp::tick() {
         stop_quest();
         stop_popups();
         stop_keeper();
+        simple_style_stop();    // a jump key's "Thử" under way presses nothing
         input_.release_all();
         set_status("Panic stop -- all input released", 5000);
         GB_WARN("Panic key pressed: everything stopped");
@@ -469,6 +484,8 @@ void GuiApp::tick() {
     refocus_if_idle();
     alerts_tick();
     potions_tick();
+    simple_lists_tick();    // "Quái đang thấy", and the end of a look (simple_lists.cpp)
+    simple_style_tick();    // a jump key's "Thử" that has finished (simple_style.cpp)
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -5218,12 +5235,21 @@ void GuiApp::draw_local_radar(const Nameplate* me, const std::vector<Nameplate>&
                 IM_COL32(50, 56, 68, 255));
 
     // The band the hunter will attack from, so "reach" is a thing you can see
-    // rather than a number you guess at.
+    // rather than a number you guess at: up and down apart, as a style sets
+    // them. Inside it, shaded, the distance kept with "Giữ khoảng cách" --
+    // or a style's minimum, which is that distance once it is ticked.
     const float reach = hunt_config_.reach * sx;
-    const float tall = hunt_config_.height_tolerance * sy;
-    dl->AddRect(ImVec2(centre.x - reach, centre.y - tall),
-                ImVec2(centre.x + reach, centre.y + tall),
+    const float up = hunt_config_.up() * sy;
+    const float down = hunt_config_.down() * sy;
+    dl->AddRect(ImVec2(centre.x - reach, centre.y - up),
+                ImVec2(centre.x + reach, centre.y + down),
                 IM_COL32(255, 190, 40, 70));
+    if (hunt_config_.keep_distance || hunt_config_.min_distance > 0) {
+        const float keep = static_cast<float>(Hunter::keep_away_px(hunt_config_)) * sx;
+        dl->AddRectFilled(ImVec2(centre.x - keep, centre.y - up),
+                          ImVec2(centre.x + keep, centre.y + down),
+                          IM_COL32(255, 120, 40, 30));
+    }
 
     for (const Nameplate& n : plates) {
         if (&n == me) continue;
@@ -5570,12 +5596,28 @@ void GuiApp::draw_hunt_settings() {
                 "Set this to about how far your attack actually reaches -- the "
                 "boxes in the view above are in the same pixels.");
 
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160);
-    changed |= ImGui::SliderInt("Height (px)", &hunt_config_.height_tolerance, 10, 200);
-    help_marker("How far above or below a monster may be and still count as "
-                "reachable. Too large and the bot swings at things on other "
-                "platforms.");
+    // The band apart, above and below, as GoC has it: following
+    // height_tolerance both ways until one of them is moved.
+    {
+        int up = hunt_config_.up();
+        int down = hunt_config_.down();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140);
+        bool band = ImGui::SliderInt("Up (px)", &up, 0, 400);
+        help_marker("How far above a monster may be and still count as reachable "
+                    "-- GoC's highest hit. Too large and the bot swings at things "
+                    "on the platform above. The simple screen's \"Kiểu đánh\" sets "
+                    "it with the rest.");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140);
+        band |= ImGui::SliderInt("Down (px)", &down, 0, 400);
+        help_marker("How far below a monster may be and still count as reachable "
+                    "-- GoC's lowest hit.");
+        if (band) {
+            hunt_config_.set_band(up, down);
+            changed = true;
+        }
+    }
 
     int attack_ms = static_cast<int>(hunt_config_.attack_interval_ms);
     ImGui::SetNextItemWidth(160);
@@ -5990,6 +6032,10 @@ void GuiApp::draw_macro_panel() {
 
     float live_hp, live_mp;
     macro_->current_vitals(live_hp, live_mp);
+    // Of the potions under their mark, the one that drinks: only the more
+    // urgent tier does (macro_urgent_potion), and the others wait.
+    const int urgent_hp = macro_urgent_potion(macro_config_.keys, MacroKeyKind::HpPotion, live_hp);
+    const int urgent_mp = macro_urgent_potion(macro_config_.keys, MacroKeyKind::MpPotion, live_mp);
 
     if (ImGui::BeginTable("##keys", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
         ImGui::TableSetupColumn("On",      ImGuiTableColumnFlags_WidthFixed, 34);
@@ -6069,10 +6115,20 @@ void GuiApp::draw_macro_panel() {
                 // several times a second. What matters is whether the trigger
                 // can be evaluated at all, and how close it is.
                 const float v = (k.trigger == MacroTrigger::HpBelow) ? live_hp : live_mp;
+                const int urgent = (k.trigger == MacroTrigger::HpBelow) ? urgent_hp : urgent_mp;
                 if (v < 0.0f) {
                     ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
                     ImGui::TextUnformatted("no reading");
                     ImGui::PopStyleColor();
+                } else if (v <= static_cast<float>(k.threshold_pct) && urgent >= 0 &&
+                           static_cast<int>(i) != urgent) {
+                    // Under its mark too, but another of its kind sits lower:
+                    // that one drinks, and this one waits for the bar to rise.
+                    text_dim("waits (%.0f%%)", v);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Under this mark too, but a potion of the same kind with a "
+                                          "lower mark is the one that drinks: only the more urgent tier "
+                                          "does, as in GoC.");
                 } else if (v <= static_cast<float>(k.threshold_pct)) {
                     ImGui::PushStyleColor(ImGuiCol_Text, kGreen);
                     ImGui::Text("firing (%.0f%%)", v);

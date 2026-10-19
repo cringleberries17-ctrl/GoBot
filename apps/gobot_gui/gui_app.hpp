@@ -943,6 +943,9 @@ private:
     std::uint64_t simple_stopped_ms_ = 0;
     std::uint64_t simple_base_finished_ = 0;     ///< the hunter's tally when the run began
     std::vector<std::uint64_t> simple_base_presses_;   ///< the macro's, per key
+    /// The keys those were counted against, so a key added or taken out
+    /// during the run is matched by which key it is (macro_key_match).
+    std::vector<MacroKey> simple_base_keys_;
 
     // ---- alerts ----
     /// When something needs a person -- the character died, the game went,
@@ -1063,7 +1066,8 @@ private:
     /// run, and the "Sắp hết bình" and "Hết bình" alerts. Look only. Lives in
     /// simple_potions.cpp.
     void potions_tick();                            ///< from tick()
-    void simple_potion_stock(MacroKeyKind kind);    ///< under that potion row
+    void simple_potion_stock(const MacroKey& key);  ///< under that key's tier of a potion row
+    void simple_potion_warn_box();                  ///< "Báo khi còn dưới", once, under the MP row
     struct PotionsUi;
     struct PotionsUiFree { void operator()(PotionsUi* ui) const; };
     std::unique_ptr<PotionsUi, PotionsUiFree> potions_ui_;
@@ -1137,6 +1141,70 @@ private:
     bool simple_use_cut_option(const ScreenRect& at);
     /// " Đã dùng N món." for the trash worker's line about a pass.
     static std::string trash_use_said_vi(const BagCleaner::Result& r, bool look_only);
+
+    // ---- the monster lists ----
+    /// "Lọc quái" on the Đánh quái tab: which monsters are never attacked and
+    /// which go first (HunterConfig's skip_names / first_names, matched by
+    /// gobot/monster_list.hpp), picked from "Quái đang thấy" -- the names the
+    /// detector reads -- or typed. Look only: "Nhìn quanh" starts the
+    /// detector, which reads the screen and presses nothing. Lives in
+    /// simple_lists.cpp.
+    void simple_monster_row();          ///< its row, under "Tự đánh quái"
+    void simple_monster_lists();        ///< the "Danh sách quái" window, when asked for
+    /// From tick(): the names read lately, and the end of a look -- here
+    /// rather than in the window, which is not drawn while the game covers it.
+    void simple_lists_tick();
+    struct ListsUi;
+    struct ListsUiFree { void operator()(ListsUi* ui) const; };
+    std::unique_ptr<ListsUi, ListsUiFree> lists_ui_;
+
+    // ---- skills that follow the fight ----
+    /// "Chỉ khi đang đánh quái" and "Chi tiết…" on the "Tự dùng kỹ năng" row,
+    /// the "Kỹ năng" window, and the key sequence said where a player sees it
+    /// (MacroConfig::skills_follow_fight). Lives in simple_skills.cpp.
+    void simple_skills_line();          ///< after the row's "+"
+    void simple_skills_popup();         ///< the "Kỹ năng" window, when asked for
+    void simple_sequence_note();        ///< "Chuỗi phím … đang bật", with its "Tắt"
+    /// What the state card adds about the skills: held for MP while
+    /// attacking, or waiting until the character is seen.
+    std::string simple_skills_note(bool no_player);
+    /// Whether "Phím đánh" is also an enabled skill key.
+    bool attack_key_is_skill() const;
+    struct SkillsUi;
+    struct SkillsUiFree { void operator()(SkillsUi* ui) const; };
+    std::unique_ptr<SkillsUi, SkillsUiFree> skills_ui_;
+    SkillsUi& skills_ui();
+    /// The sequence's presses when the run began, as simple_base_presses_.
+    std::uint64_t simple_base_seq_presses_ = 0;
+
+    // ---- Kiểu đánh, Giữ khoảng cách, the jump key ----
+    /// The attack style (gobot/attack_style.hpp), keeping distance, and the
+    /// jump key with its "Thử" (gobot/jump_check.hpp) on the Đánh quái tab.
+    /// "Thử" presses one key in the game, on the player's click only, off
+    /// the drawing thread. Lives in simple_style.cpp.
+    void simple_jump_box();             ///< "Phím nhảy [k] [Thử]", beside "Phím đánh"
+    void simple_style_line();           ///< "Kiểu đánh [▼] (?) [Tầm đánh…]"
+    void simple_keep_distance_tick();   ///< "Giữ khoảng cách", beside "Đứng yên một chỗ"
+    void simple_style_hints();          ///< their lines under the row
+    void simple_jump_checklist();       ///< the jump key's line in "Trước khi bắt đầu"
+    void simple_style_popups();         ///< the "Tầm đánh" window, when asked for
+    void simple_jump_try();             ///< "Thử": the one press, on a thread of its own
+    /// Whether the keeper is getting into the game -- the one-shot "vào game
+    /// ngay", a cold start, a crossing under way: it takes no hold while it
+    /// clicks through the login pages, so "Thử" asks this as well.
+    bool keeper_entering();
+    /// From tick(): a "Thử" that has finished -- what it saw, and the
+    /// detector stopped again if it was started for it.
+    void simple_style_tick();
+    /// F12, and closing GoBot: a "Thử" under way presses nothing more.
+    void simple_style_stop();
+    /// Declared after everything a "Thử" uses, so it goes before them: one
+    /// under way is waited for while the detector and the keyboard are still
+    /// there.
+    struct StyleUi;
+    struct StyleUiFree { void operator()(StyleUi* ui) const; };
+    std::unique_ptr<StyleUi, StyleUiFree> style_ui_;
+    StyleUi& style_ui();
 
     // ---- status ----
     std::string status_message_;

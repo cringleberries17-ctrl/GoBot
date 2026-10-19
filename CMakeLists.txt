@@ -187,6 +187,9 @@ add_library(gobot_core STATIC
     src/navigator.cpp
     src/minimap_tracker.cpp
     src/hunter.cpp
+    src/monster_list.cpp
+    src/attack_style.cpp
+    src/jump_check.cpp
     src/map_mapper.cpp
     src/map_file.cpp
     src/map_table.cpp
@@ -324,6 +327,9 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/simple_party.cpp
         apps/gobot_gui/simple_chat_alone.cpp
         apps/gobot_gui/simple_trash_use.cpp
+        apps/gobot_gui/simple_lists.cpp
+        apps/gobot_gui/simple_style.cpp
+        apps/gobot_gui/simple_skills.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"
@@ -386,7 +392,10 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/quest_test.cpp apps/gobot_test/hotkey_test.cpp
                           apps/gobot_test/potion_test.cpp apps/gobot_test/popup_test.cpp
                           apps/gobot_test/stall_test.cpp apps/gobot_test/party_hud_test.cpp
-                          apps/gobot_test/chat_alone_test.cpp apps/gobot_test/use_test.cpp)
+                          apps/gobot_test/chat_alone_test.cpp apps/gobot_test/use_test.cpp
+                          apps/gobot_test/hunter_test.cpp apps/gobot_test/macro_fight_test.cpp
+                          apps/gobot_test/style_test.cpp apps/gobot_test/jump_test.cpp
+                          apps/gobot_test/skills_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

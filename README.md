@@ -189,6 +189,27 @@ a name, **Tự đánh quái** does not start (nor does F11): the box under
 BẮT ĐẦU says why, and while it is ticked the name's row on the checklist has
 a red cross.
 
+The **Tự đánh quái** row reads, line by line: *Phím đánh* and *Phím nhảy*
+with its **Thử**; *Kiểu đánh*, GoC's class-and-weapon presets with a
+**Tầm đánh…** window for the numbers (reach, minimum distance, up and down);
+*Đứng yên một chỗ* and **Giữ khoảng cách**, which steps back from a monster
+closer than the minimum, at most three steps in a row and never off the
+character's level. Under it, **Lọc quái** opens *Danh sách quái*: monsters
+never attacked (*Không đánh*) and monsters gone for first (*Đánh trước*),
+picked from the names being read (*Quái đang thấy*; **Nhìn quanh** reads the
+screen for up to a minute and presses nothing) or typed. **Tự dùng kỹ năng**
+has **Chỉ khi đang đánh quái** -- skills only while a monster in reach is
+being attacked, each on its own cooldown, none under 10% MP -- and
+**Chi tiết…** for each skill's cooldown, range and *Luôn bấm theo giờ*; a key
+sequence left on in macro.ini is shown there with a **Tắt**. Each potion row
+has a second tier, *Lv2*: under both marks only the lower one drinks, and a
+potion due goes before any other key. All of these are *Thử nghiệm*, and
+each ships off or as the bot fought before: *Như trước*, both ticks off,
+empty lists, and no jump key until the player sets one (an existing
+hunt.ini keeps its own). **Thử** beside the jump key is the one button here
+that presses a key in the game: the jump key, once, with the game brought
+to the front.
+
 The version is in the window's title and at the bottom left of the simple
 screen: the one `package.ps1` wrote into `VERSION.txt`, or *bản tự build* for
 a build of your own. Whatever has passed every test here but never run on the

@@ -4360,6 +4360,23 @@ void test_shipped_macro_works() {
     for (MacroKey& k : ticked.keys) k.enabled = true;
     check(ticked.needs_vitals(),
           "ticked, the potion keys need a reading, so starting the macro brings the reader up");
+
+    // Skills following the fight change how a setup fights: off, as it ships,
+    // with GoC's numbers ready for the tick -- and the file says each key.
+    IniFile raw;
+    bool every_key = raw.load(path);
+    for (std::size_t i = 0; every_key && i < cfg.keys.size(); ++i) {
+        const std::string p = "key_" + std::to_string(i) + "_";
+        every_key = raw.has_key("Keys", p + "always_timer") && raw.has_key("Keys", p + "range_px");
+    }
+    check(!cfg.skills_follow_fight && cfg.sequential_skills && cfg.skill_mp_floor_pct == 10 &&
+              cfg.skill_gap_ms == 50 && raw.has_key("Macro", "skills_follow_fight") &&
+              raw.has_key("Macro", "sequential_skills") && raw.has_key("Macro", "skill_mp_floor_pct") &&
+              raw.has_key("Macro", "skill_gap_ms"),
+          "skills_follow_fight=false, sequential_skills=true, skill_mp_floor_pct=10, skill_gap_ms=50");
+    bool timers = every_key;
+    for (const MacroKey& k : cfg.keys) timers = timers && !k.always_timer && k.range_px == 0;
+    check(timers, "and every key has always_timer=false and range_px=0 written");
 }
 
 /// Everything else that ships: whatever acts on the game, off, and nothing of
@@ -4395,6 +4412,27 @@ void test_shipped_configs() {
     check(hunt.load(dir + "hunt.ini") && !hunt.enabled && !hunt.loot && !hunt.stay_put,
           "hunt.ini: hunting, looting and standing still are off");
     check(hunt.character_name.empty(), "hunt.ini: no character's name");
+    IniFile hunt_ini;
+    check(hunt_ini.load(dir + "hunt.ini") && hunt_ini.has_key("Hunt", "skip_monsters") &&
+              hunt_ini.has_key("Hunt", "first_monsters") && hunt_ini.has_key("Hunt", "first_only") &&
+              hunt.skip_names.empty() && hunt.first_names.empty() && !hunt.first_only,
+          "hunt.ini: the monster lists are there, empty, and 'only Đánh trước' is off");
+    // What fights differently is the player's to choose: no style, no
+    // stepping back, and no jump key -- a key that acts on the game.
+    bool style_keys = true;
+    for (const char* key : { "style", "min_distance", "up_reach", "down_reach", "up_no_jump",
+                             "down_no_jump", "keep_distance", "keep_distance_steps",
+                             "facing_tolerance", "no_damage_ms", "jump_key", "jump_checked" })
+        style_keys = style_keys && hunt_ini.has_key("Hunt", key);
+    check(style_keys && hunt.style.empty() && !hunt.goc_rules() && hunt.min_distance == 0 &&
+              hunt.up_reach == -1 && hunt.down_reach == -1 && hunt.up_no_jump == -1 &&
+              hunt.down_no_jump == -1 && hunt.reach == 150 && hunt.height_tolerance == 60,
+          "hunt.ini: Kiểu đánh is 'Như trước' -- no style, the band it always had");
+    check(!hunt.keep_distance && hunt.keep_distance_steps == 3 && hunt.facing_tolerance == 12 &&
+              hunt.no_damage_ms == 15000,
+          "hunt.ini: keep_distance=false, 3 steps, facing_tolerance=12");
+    check(hunt.jump_key == 0 && !hunt.jump_checked,
+          "hunt.ini: jump_key=0 -- no jump key until the player sets one -- and not tried");
 
     Party::Settings party;
     check(party.load(dir + "party.ini") && !party.auto_accept && !party.auto_invite,
@@ -13913,6 +13951,16 @@ void test_party_hud(void (*check)(bool, const std::string&), void (*section)(con
 void test_chat_alone(void (*check)(bool, const std::string&), void (*section)(const char*));
 // "Dùng" in Dọn rác, in use_test.cpp.
 void test_use(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The hunter on scripted plates and the monster lists, in hunter_test.cpp.
+void test_hunter_fight(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The potion tiers, potions first, and Quái đang thấy, in macro_fight_test.cpp.
+void test_macro_fight(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Kiểu đánh, Giữ khoảng cách, facing and the fight the skills follow, in style_test.cpp.
+void test_hunter_style(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The jump key's Thử and what else the key is, in jump_test.cpp.
+void test_jump(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Skills that follow the fight, in skills_test.cpp.
+void test_skills(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -14012,6 +14060,11 @@ int main() {
     test_party_hud(check, section);
     test_chat_alone(check, section);
     test_use(check, section);
+    test_hunter_fight(check, section);
+    test_macro_fight(check, section);
+    test_hunter_style(check, section);
+    test_jump(check, section);
+    test_skills(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();

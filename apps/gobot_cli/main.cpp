@@ -34,8 +34,10 @@
 #include "gobot/camera_tracker.hpp"
 #include "gobot/field_finder.hpp"
 #include "gobot/hunter.hpp"
+#include "gobot/jump_check.hpp"
 #include "gobot/minimap_tracker.hpp"
 #include "gobot/mob_detector.hpp"
+#include "gobot/monster_list.hpp"
 #include "gobot/macro.hpp"
 #include "gobot/map_file.hpp"
 #include "gobot/map_locator.hpp"
@@ -376,6 +378,20 @@ UNATTENDED RUNNING
                       whole bag -- as the Đánh quái tab reads it. On the
                       screenshot named, or one capture of the game. Presses
                       nothing.
+  --jumptest          The Đánh quái tab's "Thử" beside the jump key: the game
+                      brought to the front, the jump_key of configs/hunt.ini
+                      pressed exactly ONCE, and the character's name plate
+                      watched for 1.5 s. Nothing at all is pressed while a
+                      hold is on or with no jump key. The last line is
+                        JUMP RESULT outcome=<name> key=<key> pressed=<0|1>
+                                    rose=<px> reads=<n>
+                      and it exits 0 when the character was seen to jump.
+  --hunt <n>          Hunt for n seconds with configs/hunt.ini: walks and
+                      presses keys in the game. With
+  --with-macro        it runs configs/macro.ini beside it, as the GUI's BẮT
+                      ĐẦU does: the HP/MP reader, potions, buffs, and the
+                      skills following the fight when skills_follow_fight is
+                      on. Ends with what the macro pressed and held.
   --method <m>        With --chat-once or --chat: type with vk (a key per
                       character, GoC's way), unicode, wmchar or imechar
                       instead of chat.ini's method. Every method but vk keeps
@@ -444,6 +460,8 @@ struct Options {
     bool keytest = false;
     bool inputcheck = false;
     int  hunt_seconds = 0;
+    bool with_macro = false;        ///< --with-macro, beside --hunt
+    bool jumptest = false;          ///< --jumptest: the jump key once, watched
     std::string press_key;
     std::string click_spec;
     std::string analyse_path;
@@ -539,6 +557,8 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--keytest")   o.keytest = true;
         else if (a == "--inputcheck") o.inputcheck = true;
         else if (a == "--hunt")      o.hunt_seconds = std::stoi(next("--hunt"));
+        else if (a == "--with-macro") o.with_macro = true;
+        else if (a == "--jumptest")  o.jumptest = true;
         else if (a == "--press")     o.press_key = next("--press");
         else if (a == "--analyse")   o.analyse_path = next("--analyse");
         else if (a == "--dump")      o.dump_opcode_arg = next("--dump");
@@ -717,6 +737,8 @@ bool attach_window(InputManager& input, const Options& o, const AppConfig& app) 
         return input.find_game_window(InputManager::parse_spec(o.window));
     return input.find_game_window(app.window_title, app.window_class, app.process_name);
 }
+
+void print_utf8(const char* text);
 
 /// One look at the game window, printed.
 ///
@@ -954,6 +976,31 @@ int run_see(const Options& o, const AppConfig& app) {
             std::printf("\"%s\" is not on screen. Check the spelling against what "
                         "the game writes under your feet.\n",
                         hc.character_name.c_str());
+        }
+    }
+
+    // What the monster lists ("Lọc quái", hunt.ini) make of each monster read
+    // here, as the hunter matches them: a name on both lists is skipped, and
+    // with first_only nothing else is attacked. Players are no business of
+    // the lists. Looking only.
+    {
+        std::printf("\nMonster lists in configs/hunt.ini: %zu to skip, %zu first%s\n",
+                    hc.skip_names.size(), hc.first_names.size(),
+                    hc.first_only ? ", only those first" : "");
+        for (const Nameplate& n : plates) {
+            if (n.is_player) continue;
+            std::string verdict = "\xE2\x80\x94";      // an em dash: the lists say nothing
+            if (n.name.empty())
+                verdict += "  (no name read)";
+            else if (monster_on_list(hc.skip_names, n.name))
+                verdict = "Không đánh";
+            else if (monster_on_list(hc.first_names, n.name))
+                verdict = "Đánh trước";
+            else if (hc.first_only)
+                verdict = "Không đánh (chỉ đánh Đánh trước)";
+            char where[48];
+            std::snprintf(where, sizeof where, "  %-6d %-6d ", n.x(), n.y());
+            print_utf8((std::string(where) + "\"" + n.name + "\"  " + verdict + "\n").c_str());
         }
     }
 
@@ -4648,12 +4695,57 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
     hunter.set_config(cfg);
     hunter.start();
 
+    // --with-macro: macro.ini beside the hunt, as the GUI's BẮT ĐẦU runs it --
+    // its HP/MP reader, the potions and buffs, and the skills following the
+    // fight when the file says so. The hunter is asked, from the macro's own
+    // threads, whether it is fighting, through its atomics alone.
+    std::unique_ptr<VitalsReader> reader;
+    std::unique_ptr<MacroEngine> macro;
+    if (o.with_macro) {
+        MacroConfig mc;
+        mc.load(resolve("configs/macro.ini"));
+        reader = std::make_unique<VitalsReader>();
+        reader->set_target_window(input.target_window());
+        reader->set_hp_bar(mc.hp_bar);
+        reader->set_mp_bar(mc.mp_bar);
+        reader->start();
+        macro = std::make_unique<MacroEngine>(input, coord);
+        macro->set_config(mc);
+        macro->set_fight([&hunter] {
+            MacroEngine::Fight f;
+            if (!hunter.running()) return f;
+            f.mode = hunter.engaged() ? MacroEngine::Fight::Mode::Fighting
+                                      : MacroEngine::Fight::Mode::Idle;
+            f.dx = hunter.engaged_dx();
+            f.attack_key = hunter.attack_key();
+            return f;
+        });
+        macro->start();
+        std::printf("With the macro: %zu keys, skills %s.\n", mc.keys.size(),
+                    mc.skills_follow_fight ? "following the fight" : "on their own timers");
+    }
+
     std::printf("Hunting for %d seconds with %s. Ctrl+C to stop early.\n\n",
                 seconds, InputManager::key_name(cfg.attack_key).c_str());
 
+    // With the macro, the readings go to it ten times a second, as the GUI's
+    // tick hands them over; the line below is written every half second.
+    const int every_ms = macro ? 100 : 500;
+    const int per_line = 500 / every_ms;
+    int looks = 0;
     const std::uint64_t until = now_ms() + static_cast<std::uint64_t>(seconds) * 1000;
     while (now_ms() < until && !g_stop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(every_ms));
+        if (macro) {
+            const float hp = reader->hp_percent();
+            macro->set_vitals(hp, reader->mp_percent());
+            // Out of the world -- no HUD -- every key holds, as in the GUI.
+            const bool in_world = hp >= 0.0f;
+            if (in_world == macro->suspended())
+                macro->set_suspended(!in_world, in_world ? std::string{}
+                                                         : "the character is not in the world");
+        }
+        if (++looks % per_line != 0) continue;
 
         // Keep the game in front. The GUI deliberately does not do this -- if
         // you alt-tab away it should wait, not fight you for the desktop --
@@ -4676,6 +4768,10 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
         std::fflush(stdout);
     }
 
+    if (macro) {
+        macro->stop();
+        reader->stop();
+    }
     hunter.stop();
     detector.stop();
     input.release_all();
@@ -4685,12 +4781,106 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
     std::printf("\n\n%llu frames looked at, character seen: %s\n",
                 static_cast<unsigned long long>(ds.frames),
                 ds.player_seen ? "yes" : "no");
-    std::printf("%llu attacks thrown, %llu walking steps, %llu targets given up on\n",
+    std::printf("%llu attacks thrown, %llu walking steps, %llu targets given up on, %llu steps "
+                "back\n",
                 static_cast<unsigned long long>(hs.attacks),
                 static_cast<unsigned long long>(hs.steps),
-                static_cast<unsigned long long>(hs.targets_dropped));
+                static_cast<unsigned long long>(hs.targets_dropped),
+                static_cast<unsigned long long>(hs.backsteps));
     std::printf("the view moved %.0f px while it worked\n", camera.travelled());
+    if (macro) {
+        const auto ms = macro->stats();
+        std::printf("the macro pressed %llu keys and %llu sequence steps; skills held: %llu not "
+                    "fighting, %llu MP under the floor, %llu down, %llu out of range\n",
+                    static_cast<unsigned long long>(ms.presses),
+                    static_cast<unsigned long long>(ms.sequence_presses),
+                    static_cast<unsigned long long>(ms.held_not_fighting),
+                    static_cast<unsigned long long>(ms.held_low_mp),
+                    static_cast<unsigned long long>(ms.held_dead),
+                    static_cast<unsigned long long>(ms.held_range));
+    }
     return 0;
+}
+
+/// GoC-style outcome names for the runner's JUMP RESULT line.
+const char* jump_outcome_word(JumpCheck::Outcome o) {
+    switch (o) {
+        case JumpCheck::Outcome::Jumped:     return "jumped";
+        case JumpCheck::Outcome::NoJump:     return "no-jump";
+        case JumpCheck::Outcome::Unsure:     return "unsure";
+        case JumpCheck::Outcome::NoPlate:    return "no-plate";
+        case JumpCheck::Outcome::Held:       return "held";
+        case JumpCheck::Outcome::Busy:       return "busy";
+        case JumpCheck::Outcome::NotInFront: return "not-in-front";
+        case JumpCheck::Outcome::Stopped:    return "stopped";
+        case JumpCheck::Outcome::Unchecked:  return "unchecked";
+        case JumpCheck::Outcome::NoKey:      break;
+    }
+    return "no-key";
+}
+
+/// The Đánh quái tab's "Thử" beside the jump key, from a console: the game in
+/// front, the jump key of configs/hunt.ini pressed exactly once, and the
+/// character's plate watched -- JumpCheck, as the GUI runs it. For the live
+/// runner, which reads the last line.
+int run_jumptest(const Options& o, const AppConfig& app) {
+    InputManager input;
+    const std::string title = o.window.empty() ? app.window_title : o.window;
+    if (!attach_window(input, o, app)) {
+        std::fprintf(stderr, "No window matching '%s'. Is the game running?\n", title.c_str());
+        return 1;
+    }
+    HunterConfig cfg;
+    cfg.load(resolve("configs/hunt.ini"));
+    if (cfg.jump_key == 0) {
+        std::printf("No jump_key in configs/hunt.ini: there is nothing to try.\n");
+        std::printf("JUMP RESULT outcome=no-key key=- pressed=0 rose=0 reads=0\n");
+        return 1;
+    }
+
+    // The plate is read the way the hunter reads it: the detector, with the
+    // game's font and the character's name. Declared before the detector so
+    // it outlives the detector's thread.
+    GlyphFont font;
+    const std::string font_dir = GlyphFont::default_dir();
+    const bool have_font = !font_dir.empty() && font.load(font_dir);
+    DetectorTuning tuning = DetectorTuning::defaults();
+    {
+        IniFile hunt_ini;
+        if (hunt_ini.load(resolve("configs/hunt.ini"))) tuning.load(hunt_ini);
+    }
+    MobDetector detector;
+    detector.set_target_window(input.target_window());
+    detector.set_tuning(tuning);
+    if (have_font) detector.set_font(&font);
+    detector.set_character_name(cfg.character_name);
+    if (!have_font || cfg.character_name.empty())
+        std::printf("%s: the key is still pressed once, but the jump cannot be seen.\n",
+                    have_font ? "No character_name in configs/hunt.ini" : "No glyph set installed");
+    detector.start();
+
+    ExecutionCoordinator coord;
+    JumpCheck check(coord);
+    JumpCheck::Eyes eyes;
+    eyes.player = [&detector](Nameplate& out, bool* fresh) { return detector.player(out, fresh); };
+    check.set_eyes(eyes);
+    JumpCheck::Hands hands;
+    hands.focus = [&input] { return input.window_focused() || input.focus_window(); };
+    hands.focused = [&input] { return input.window_focused(); };
+    hands.key = [&input](std::uint32_t vk, int hold) { return input.key_press(vk, hold); };
+    check.set_hands(hands);
+
+    const std::string key = InputManager::key_name(cfg.jump_key);
+    std::printf("Pressing %s once and watching the character's name plate. Ctrl+C before the "
+                "press presses nothing.\n", key.c_str());
+    const JumpCheck::Result r = check.run(cfg.jump_key, &g_stop);
+    detector.stop();
+    input.release_all();
+
+    std::printf("%s\n", JumpCheck::outcome_name(r.outcome));
+    std::printf("JUMP RESULT outcome=%s key=%s pressed=%d rose=%d reads=%d\n",
+                jump_outcome_word(r.outcome), key.c_str(), r.pressed ? 1 : 0, r.rose_px, r.reads);
+    return r.outcome == JumpCheck::Outcome::Jumped ? 0 : 2;
 }
 
 /// Print a patch of the frame as characters, so what the reader is looking at
@@ -5479,6 +5669,7 @@ int main(int argc, char** argv) {
     if (opt.templates) return run_templates(opt, app, opt.template_name);
     if (opt.whereami) return run_whereami(opt, app);
     if (opt.anchor_seconds > 0) return run_anchor(opt, app, opt.anchor_seconds);
+    if (opt.jumptest) return run_jumptest(opt, app);
     if (opt.hunt_seconds > 0) return run_hunt(opt, app, opt.hunt_seconds);
     if (opt.keytest) return run_keytest(opt, app);
     if (opt.calibrate_seconds > 0) {

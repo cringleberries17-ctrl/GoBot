@@ -97,6 +97,26 @@ hoặc ở đầu dòng giải thích dưới ô.
   GoBot chỉ nhận ra nhân vật của bạn khi thấy đúng và đủ tên đã gõ, nên
   không còn lấy người chơi khác đứng gần làm mình, kể cả người có tên dài
   hơn chứa tên bạn (ví dụ TuanAnh khi bạn là Anh).
+- Đánh quái, các phần mới (thử nghiệm). Phần nào cũng TẮT, hoặc giữ cách
+  đánh cũ, cho tới khi bạn chọn:
+  + Bình HP và MP hai bậc: mỗi dòng bình có thêm "Lv2" (bình thứ hai, ví dụ
+    bình lớn hơn). Khi HP dưới cả hai mức, chỉ bình có mức % thấp hơn được
+    uống, như GoC. Bình đến lúc uống được bấm trước mọi kỹ năng và buff.
+  + Lọc quái: "Không đánh" (bot không bao giờ đánh) và "Đánh trước" (bot
+    đánh trước những con khác). Chọn tên từ "Quái đang thấy" hoặc gõ tên.
+    Tên quái đọc từ màn hình nên được so gần đúng.
+  + Kiểu đánh: chọn lớp nhân vật và vũ khí, như "Config Mẫu" của GoC; nút
+    "Tầm đánh…" để sửa các số. "Như trước" là cách đánh cũ.
+  + Giữ khoảng cách: lùi lại khi quái gần hơn khoảng cách tối thiểu của
+    Kiểu đánh, tối đa 3 bước liền nhau. GoBot không thấy mép bục.
+  + Phím nhảy và nút "Thử": đặt phím nhảy của game (thường là ↑). Bản này
+    không đặt sẵn phím nhảy; hunt.ini cũ giữ phím của nó, thường là Space,
+    mà trong game Space là phím Tấn công: GoBot sẽ nhắc.
+  + Kỹ năng "Chỉ khi đang đánh quái": phím kỹ năng chỉ được bấm lúc bot
+    đang đánh một con quái trong tầm, mỗi phím chờ hồi chiêu của nó, và
+    không bấm khi MP dưới 10%. Nút "Chi tiết…" mở cửa sổ Kỹ năng.
+  + Chuỗi phím: nếu macro.ini của bạn còn bật chuỗi phím Z, X, C (màn hình
+    Nâng cao), dòng "Tự dùng kỹ năng" nay báo điều đó, kèm nút "Tắt".
 - Tổ đội, "Tự mời người chat từ khoá" (thử nghiệm): nay đọc được khung
   chat và danh sách người chơi ở cả cửa sổ 1280x720.
 - Tự đăng nhập (thử nghiệm): không còn ô tài khoản, mật khẩu. VTCZone tự
@@ -116,6 +136,15 @@ hoặc ở đầu dòng giải thích dưới ô.
 6. THỬ TỪNG PHẦN CHO AN TOÀN
 
 Thử từng phần một, ở chỗ an toàn, và ngồi xem. Thấy gì lạ: bấm F12.
+
+Nút nào bấm vào game, nút nào không:
+- Chỉ nhìn, không bấm gì trong game: "Nhìn quanh (60 giây)" (Lọc quái),
+  "Kiểm tra ô chat" (Tự chat), và các nút "Thử xem": chụp màn hình game
+  rồi nói thấy gì.
+- Chỉ gửi tin, không đụng tới game: "Gửi thử" (Thông báo).
+- Bấm vào game ngay khi bạn bấm nút: "Thử" cạnh Phím nhảy (phím nhảy, một
+  lần), "Gửi thử 1 câu" (gõ một câu chat), "Thử tìm (không xoá)" (mở túi
+  đồ và xem, không xoá gì), "Dọn ngay", "Làm ngay 1 lần", và BẮT ĐẦU.
 
 - Dọn rác: chọn món cần bỏ, rồi bấm "Thử tìm (không xoá)". GoBot mở túi đồ,
   xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. Chỉ khi danh
@@ -146,6 +175,22 @@ Thử từng phần một, ở chỗ an toàn, và ngồi xem. Thấy gì lạ: 
   mình; rồi thử khi có người chơi khác hay người trong tổ đội đứng gần:
   nhân vật phải đi và đánh từ chỗ của chính nó. Nếu nó đi lung tung hay
   đánh nhầm hướng, bấm F12 và báo lại.
+- Đánh quái, các phần mới: thử theo thứ tự này, từ an toàn tới can thiệp
+  nhiều hơn.
+  1. Mở GoBot, chưa bấm BẮT ĐẦU: xem các dòng Lọc quái, Kiểu đánh, Phím
+     nhảy, Giữ khoảng cách, Chỉ khi đang đánh quái. Chưa có gì được bấm.
+  2. "Sửa danh sách…" rồi "Nhìn quanh (60 giây)": GoBot chỉ đọc màn hình
+     game, tối đa 60 giây, không bấm phím nào và không đưa game lên trước.
+     Tên con quái bạn đứng gần phải hiện ở "Quái đang thấy".
+  3. Nút "Thử" cạnh Phím nhảy: GoBot đưa game lên trước và BẤM PHÍM NHẢY
+     MỘT LẦN trong game. Đứng chỗ trống, xa cổng dịch chuyển và dây leo.
+     Nếu nhân vật đánh chứ không nhảy, phím đó là phím Tấn công: đổi phím
+     nhảy rồi thử lại.
+  4. Đánh vài trận đầu với Kiểu đánh "Như trước", bỏ dấu "Giữ khoảng cách"
+     và "Chỉ khi đang đánh quái": bot đánh như bản trước.
+  5. Rồi bật từng phần một và xem: Không đánh / Đánh trước; một Kiểu đánh;
+     Giữ khoảng cách (ở chỗ bằng phẳng trước, xem nhân vật có lùi tới mép
+     bục không); bình Lv2; Chỉ khi đang đánh quái.
 - Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
   xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
 - Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
@@ -208,8 +253,16 @@ Thử từng phần một, ở chỗ an toàn, và ngồi xem. Thấy gì lạ: 
   Đánh quái. Nếu lỡ chép rồi, xem lại ô "Tên nhân vật": phải là tên nhân
   vật của chính bạn.
 - Phím kỹ năng, bình và buff cũng đặt lại trên màn hình mới: macro.ini của
-  bản cũ có bật sẵn một chuỗi phím Z, X, C tự lặp mà màn hình mới không
-  hiện.
+  bản cũ có bật sẵn một chuỗi phím Z, X, C tự lặp. Bản này báo chuỗi đó ở
+  dòng "Tự dùng kỹ năng", kèm nút "Tắt".
+- macro.ini của bản này giữ tới 16 phím (để có bình Lv2). GoBot bản cũ hơn
+  chỉ đọc 12 phím đầu (key_0 tới key_11) và bỏ các phím sau khi lưu: đừng
+  mở thư mục configs của bản này bằng GoBot cũ, kẻo mất bình Lv2.
+- Bình: nay khi HP (hay MP) dưới cả hai mức, chỉ bình có mức % thấp hơn
+  được uống; bình đến lúc uống được bấm trước mọi kỹ năng và buff, kể cả
+  ngay lúc bấm BẮT ĐẦU. Bình chưa bấm được (bot đang bấm phím khác, đang
+  tạm dừng, game không ở phía trước) được bấm lại ngay khi được, không
+  phải chờ 3 giây như trước.
 - party.ini của các bản cũ (trước 15/10/2026) bật sẵn "Tự nhận lời mời
   vào tổ đội" và "Tự mời người chat từ khoá". Chép nó sang rồi thì mở thẻ
   Tổ đội trước khi bấm BẮT ĐẦU, và bỏ đánh dấu những việc bạn không muốn:
