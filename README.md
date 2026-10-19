@@ -52,15 +52,19 @@ Measured, not assumed. The detail and the evidence are in
 - **The server stream parses cleanly** — 100% coverage, zero resyncs — and the
   monster world model matches the commercial client exactly: 42 creatures
   against its 43.
-- **`0x0038` is the entity update.** `id@8`, `x@80`, `y@82` are confirmed. It
-  carries a **sub-type at offset 4**: 0 and 1 restate a creature where it
-  already is, 9 relocates it and carries the move parameters. Reading a field
-  without splitting on that first averages three layouts together.
-- **Your own position is not transmitted in either direction.** The server
-  broadcasts every other actor and says nothing about you. Memory reading is
-  closed off by XIGNCODE3, and the on-screen `WorldAnchor` never converges.
-  Dead reckoning from the bot's own issued commands is the remaining route,
-  and it is what ZTeam's server must have been doing too.
+- **`0x0038` is a monster's state event**, sent for every monster on the map
+  whenever it stops, starts walking or turns, or is hit. Its **sub-type at
+  offset 4** says which: 0, 1 or 9. The monster's slot is at `@8` and its
+  position at `@24`, `@26`, not at the `@80`, `@82` that `[Packet.0x0038]`
+  still reads, which is a stale point beside it; a hit carries the damage and
+  the HP left, below zero for a kill. With the map's monster table at each map
+  load, that is every monster's position and HP on the whole map, as GoC has
+  them (protocol-findings §4f). Nothing uses this yet: plan item P0-3.
+- **Your own position is sent by the client, over UDP**, whenever a walk
+  starts, stops or turns, a jump starts or lands, and with each skill cast;
+  the server sends it only at a map entry (protocol-findings §4e). Memory
+  reading is closed off by XIGNCODE3, and the on-screen `WorldAnchor` never
+  converges, so these packets are the route; nothing uses them yet (P0-3).
 - **Map geometry needs no protocol work at all.** The game ships 781 `.map`
   collision files and `MapFile` already reads them; that is what ZTeam's server
   was parsing and charging for.
@@ -70,16 +74,21 @@ Measured, not assumed. The detail and the evidence are in
 Two things here will cost a day each if met without warning, and both are
 configured correctly now:
 
-- **Opcode `0x0081` carries twelve bytes past its declared length.** Miss it and
-  the scanner resyncs, slides a byte at a time and swallows real frames — one
-  such packet every few hundred frames hid 73% of the stream. Those twelve bytes
-  are the end of a whole frame wrapped inside it, from its byte 13, which is how
-  GoC's own parser reads it. GoBot hands that inner frame out too, right after
-  the wrapper and marked as found inside it; the bot does not act on it yet
-  (`docs/protocol-findings.md` §4d).
-- **The two directions are framed differently.** The opcode sits at offset 2
-  coming down and offset 6 going up, so a capture given only `[Framing]`
-  decodes the server and grinds the client's half into noise.
+- **Opcode `0x0081` takes twelve bytes more than its declared length.** Miss it
+  and the scanner resyncs, slides a byte at a time and swallows real frames —
+  one such packet every few hundred frames hid 73% of the stream. The twelve
+  bytes are not a trailer: an `0x0081` wraps one frame packed with liblzf, and
+  they are its own 8-byte header and four unused bytes, its length field
+  counting the packed bytes after them (`docs/protocol-findings.md` §4e).
+  GoBot hands out the frame inside too, right after the wrapper and marked as
+  found inside it: from byte 13, still packed, as GoC's own parser takes it,
+  or unpacked whole by the tools that read recordings. The bot does not act on
+  it yet (P0-3).
+- **Both directions are framed with `[Framing]`'s layout.** Every frame the
+  client sends over TCP is an `0x0081` wrapper with ciphered content, and what
+  `[FramingClient]` reads at offset 6 as an opcode is its check word; the
+  client's UDP is plain frames in the same layout (`docs/protocol-findings.md`
+  §4e).
 
 ---
 

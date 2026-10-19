@@ -95,7 +95,8 @@ public:
     /// Framing for UDP datagrams, in both directions. Unset, datagrams take
     /// set_framing()'s spec both ways -- never the client's, for what the
     /// client sends is in the server's layout: the P0-2 recordings
-    /// (2026-10-18) tile 100% so, and 2 to 14% under [FramingClient]
+    /// (2026-10-18) tile 100% so, and under [FramingClient] read 1.8% of
+    /// shop's bytes, 10.5% of walk's, and the fight's as 7 false frames
     /// (load_udp_framing).
     void set_udp_framing(const FramingSpec& spec);
 
