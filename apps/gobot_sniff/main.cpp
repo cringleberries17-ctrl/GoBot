@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -80,27 +81,44 @@ USAGE
   gobot_sniff_files <command> [options]
 
 COMMANDS
-  --verify <file>            Tile a recording with the configured framing --
-                             [FramingClient] for a .c2s file, [Framing] for
-                             any other -- and say how well it fits, including
-                             the frames found inside 0x0081.
+  --verify <file>            Tile a recording, framed as the --from commands
+                             frame it (see NOTES), and say how well it fits:
+                             its frames, the bytes in no frame and where they
+                             are, and the frames found inside 0x0081. Exit
+                             status 1 when the framing does not describe it.
   --detect <file>            Brute-force the framing of a recorded stream.
   --dump <opcode>            Hexdump every frame of one opcode in --from.
   --diff <opcode>            Show which byte offsets change between successive
                              frames of one opcode in --from: how coordinate,
                              HP and id fields are found. With --versus, compare
                              two recordings.
+  --rows <opcode>            One opcode's frames in --from as rows of numbers:
+                             a row per frame, in order, a column per body
+                             offset (--as, --step). Offsets that never change
+                             are listed once above the table, a * marks a value
+                             that differs from the frame before, and below it
+                             each column's changes, rises, falls and range.
+                             With --at, one field's values in order.
   --decode                   Decode --from with the layouts in the config.
   --analyze                  Infer what each opcode in --from means. Same
                              engine the GUI's automatic setup uses.
 
 OPTIONS
-  --from <file>              The recording --dump, --diff, --decode and
-                             --analyze read: one file --record wrote, such as
-                             walk.flow0.s2c, walk.c2s or walk.udp.s2c. A name
-                             ending .s2c or .c2s says which half it holds;
-                             with neither, both framings are tried and the one
-                             that tiles is used.
+  --from <file>              The recording --dump, --diff, --rows, --decode
+                             and --analyze read: one file --record wrote, such
+                             as walk.flow0.s2c, walk.c2s or walk.udp.c2s. A
+                             name ending .s2c or .c2s says which half it holds;
+                             with neither, the half follows the framing that
+                             reads more of it.
+  --framing <block>          Frame the file with this block of the config --
+                             Framing, FramingClient or FramingUdp -- instead
+                             of the one chosen for it (see NOTES).
+  --as <type>                For --rows: read u8 (the default), i8, u16, i16,
+                             u32, i32 or f32, little-endian.
+  --at <offset>              For --rows: only the number at this body offset,
+                             frame by frame.
+  --step <n>                 For --rows: a column every n bytes (default: the
+                             number's own size; 1 for every offset).
   --versus <file>            For --diff: the recording to compare --from with.
                              Record one standing still and one walking, and
                              the position fields are the ones quiet in the
@@ -108,17 +126,35 @@ OPTIONS
   --inner                    Take the frames found inside 0x0081 instead of
                              those read straight off the stream. The same
                              opcode number need not mean the same thing in
-                             both, so the two are never mixed.
+                             both, so the two are never mixed. Each of the
+                             server's wrappers holds one frame packed with
+                             liblzf, and is unpacked here, so @N reads that
+                             frame's own field. The client's do not unpack --
+                             they are ciphered -- and stay shut.
   --udp                      Say the file holds UDP. <name>.udp.s2c and
                              <name>.udp.c2s do, and are read as UDP with or
                              without it; with any other file it is an error.
   --config <path>            Protocol config (default: configs/protocol.ini).
-  --max <n>                  For --dump: stop after n frames.
+  --max <n>                  For --dump: stop after n frames. For --rows:
+                             print n rows; the figures below still count all.
   --verbose                  Debug logging.
 
 NOTES
+  How a file is framed, unless --framing says otherwise:
+    <name>.udp.s2c, <name>.udp.c2s  [FramingUdp], or [Framing] when the config
+                                    has none: the client sends its datagrams
+                                    in the server's layout.
+    <name>.s2c, <name>.flowN.s2c    [Framing].
+    <name>.c2s, <name>.flowN.c2s    whichever of [Framing] and [FramingClient]
+                                    reads more of it, which is said. In the
+                                    recordings of 2026-10-18 that is [Framing]:
+                                    [FramingClient]'s opcode at 6 is
+                                    [Framing]'s check word.
   A .udp file holds the game's datagrams one after another, read as one run
   of frames -- which is what datagrams that hold whole frames read as.
+  Offsets are body offsets, past the 8-byte header: body @N is frame byte N+8.
+  An 0x0081 that does not unpack (liblzf, protocol-findings 4e) is left shut
+  and counted: nothing inside it is taken for a frame.
   Refused here, because they capture: --list, --discover, --record, --watch,
   and --dump, --diff, --decode and --analyze without --from.
 )");
@@ -137,16 +173,23 @@ COMMANDS
   --record <name>            Record the raw traffic, both directions, TCP and
                              UDP apart: <name>.s2c and <name>.c2s for the TCP
                              stream, <name>.udp.s2c and <name>.udp.c2s for UDP
-                             datagrams, <name>.flowN.s2c for each connection.
+                             datagrams, and <name>.flowN.s2c and
+                             <name>.flowN.c2s for each connection's two halves.
                              Nothing is framed, filtered or dropped. Refused
                              unless --process, --host, --port or --filter says
                              what to record: with none, it would record every
                              program's traffic on the machine.
   --detect <file>            Brute-force the framing of a recorded stream.
-  --verify <file>            Tile a recording with the configured framing --
-                             [FramingClient] for a .c2s file, [Framing] for
-                             any other -- and say how well it fits, including
-                             the frames found inside 0x0081.
+  --verify <file>            Tile a recording, framed as the --from commands
+                             frame it (see NOTES), and say how well it fits:
+                             its frames, the bytes in no frame and where they
+                             are, and the frames found inside 0x0081. Exit
+                             status 1 when the framing does not describe it.
+  --rows <opcode>            With --from only: one opcode's frames as rows of
+                             numbers, a row per frame and a column per body
+                             offset (--as, --step), what never changes listed
+                             once, a * on each value that differs from the
+                             frame before; with --at, one field in order.
   --watch                    Live opcode histogram (needs framing configured).
                              Frames found inside 0x0081, and frames over UDP,
                              are counted in tables of their own.
@@ -176,28 +219,40 @@ OPTIONS
                              Without it the filter takes TCP and UDP both.
   --config <path>            Protocol config (default: configs/protocol.ini).
   --seconds <n>              Stop after n seconds (default: run until Ctrl+C).
-  --max <n>                  For --dump/--diff: stop after n packets.
+  --max <n>                  For --dump/--diff: stop after n packets. For
+                             --rows: print n rows; the figures still count all.
   --inner                    For --dump/--diff/--decode/--analyze: take the
                              frames found inside 0x0081 instead of those read
                              straight off the stream. The same opcode number
                              need not mean the same thing in both, so the two
-                             are never mixed. Works with --from too.
+                             are never mixed. Works with --from too, where
+                             each server wrapper is unpacked (liblzf) and the
+                             client's, ciphered, stay shut. Live they are not
+                             unpacked yet: past its first body byte a frame
+                             inside is packed, so no offset there is a field.
   --udp                      For --dump/--diff/--decode/--analyze, live: take
                              frames that came over UDP instead of TCP. (With
                              --from the file says it: <name>.udp.s2c and
                              <name>.udp.c2s hold UDP, any other file TCP.)
-  --from <capture>           For --diff, --dump, --decode and --analyze:
+  --from <capture>           For --diff, --dump, --rows, --decode and --analyze:
                              analyse a file written by --record instead of
                              capturing. Needs no game running and nothing
                              happening in front of you, and the same bytes can
                              be re-read when a hypothesis changes -- which is
                              the difference between measuring and remembering.
                              A name ending .s2c or .c2s says which direction it
-                             holds; otherwise both framings are tried and the
-                             one that tiles is used.
+                             holds; otherwise the half follows the framing
+                             that reads more of it.
                              (Still prompts for Administrator: this program
                              asks for it up front because capture needs it.
                              gobot_sniff_files reads recordings without it.)
+  --framing <block>          With a file: frame it with this block of the
+                             config -- Framing, FramingClient or FramingUdp --
+                             instead of the one chosen for it (see NOTES).
+  --as <type>, --at <offset>, --step <n>
+                             For --rows: u8 (default), i8, u16, i16, u32, i32
+                             or f32; one body offset only; a column every n
+                             bytes (default: the number's size).
   --versus <capture>         For --diff --from: compare the two recordings
                              rather than describing one. Record one capture
                              standing still and one walking, and the position
@@ -214,6 +269,13 @@ NOTES
   Capture is read-only: nothing is injected, rewritten or blocked.
   GoC throws away opcodes 0x002E and 0x0031 when they come over UDP. Nothing
   here does: a recording keeps every byte, and --watch counts every frame.
+  UDP is framed with [FramingUdp], or [Framing] when the config has none, in
+  both directions: the client sends its datagrams in the server's layout.
+  A recording's files are framed the same way; a .c2s file with whichever of
+  [Framing] and [FramingClient] reads more of it, which is said. Offsets are
+  body offsets, past the 8-byte header: body @N is frame byte N+8. In a
+  recording each 0x0081 is unpacked (liblzf, protocol-findings 4e), or left
+  shut and counted when it does not unpack; live, not yet.
   gobot_sniff_files runs the commands that read recordings, without asking
   for administrator.
 )");
@@ -237,6 +299,10 @@ struct Options {
     bool verbose = false;
     bool inner = false;      ///< --inner: frames found inside 0x0081
     bool udp = false;        ///< --udp: frames that came over UDP
+    std::string framing;     ///< --framing: the config block to frame a file with
+    std::string number;      ///< --as: what --rows reads its numbers as
+    long long   at = -1;     ///< --at: the one body offset --rows reads, or -1
+    long long   step = 0;    ///< --step: --rows's column spacing; 0 = the number's size
 };
 
 /// Whether a command takes this frame: by default those read straight off
@@ -265,6 +331,18 @@ std::string where_label(bool udp, std::uint8_t depth) {
     const std::string w = where_found(g);
     return w.empty() ? "TCP stream" : w;
 }
+
+/// Said before a live command takes the frames inside 0x0081 (--inner). The
+/// live capture takes them as GoC's parser does, from byte 13, and does not
+/// unpack them yet, so past their first body byte they hold no field.
+void say_live_inner(const Options& o) {
+    if (!o.inner) return;
+    std::printf("!! Live, the frames inside 0x0081 are not unpacked yet (plan item P0-3).\n"
+                "   Past its first body byte a server frame inside is packed with liblzf,\n"
+                "   and a client one is ciphered, so no offset past @0 is a field. Record\n"
+                "   with --record, then read the file with --from and --inner: the server's\n"
+                "   frames are unpacked there.\n\n");
+}
 #endif
 
 bool parse_args(int argc, char** argv, Options& o) {
@@ -276,6 +354,19 @@ bool parse_args(int argc, char** argv, Options& o) {
                 std::exit(2);
             }
             return argv[++i];
+        };
+        // A number of 0 or more, decimal or 0x hex. Anything else stops here,
+        // rather than reading as 0 and showing offset 0 as if asked for.
+        auto count = [&](const char* what) -> long long {
+            const std::string v = next(what);
+            char* end = nullptr;
+            const long long n = std::strtoll(v.c_str(), &end, 0);
+            if (v.empty() || end == nullptr || *end != '\0' || n < 0) {
+                std::fprintf(stderr, "error: %s takes a number, 0 or more, not '%s'\n",
+                             what, v.c_str());
+                std::exit(2);
+            }
+            return n;
         };
 
         if (a == "--list")          { o.command = "list"; }
@@ -291,6 +382,12 @@ bool parse_args(int argc, char** argv, Options& o) {
                                       o.opcode = static_cast<std::uint16_t>(std::strtoul(next("--dump").c_str(), nullptr, 0)); }
         else if (a == "--diff")     { o.command = "diff";
                                       o.opcode = static_cast<std::uint16_t>(std::strtoul(next("--diff").c_str(), nullptr, 0)); }
+        else if (a == "--rows")     { o.command = "rows";
+                                      o.opcode = static_cast<std::uint16_t>(std::strtoul(next("--rows").c_str(), nullptr, 0)); }
+        else if (a == "--framing")  { o.framing = next("--framing"); }
+        else if (a == "--as")       { o.number = next("--as"); }
+        else if (a == "--at")       { o.at = count("--at"); }
+        else if (a == "--step")     { o.step = count("--step"); }
         else if (a == "--iface")    { o.iface = next("--iface"); }
         else if (a == "--host")     { o.host = next("--host"); }
         else if (a == "--port")     { o.port = static_cast<std::uint16_t>(std::stoi(next("--port"))); }
@@ -375,31 +472,35 @@ CaptureConfig make_capture_config(const Options& o) {
 }
 #endif
 
-// The [Framing] and [FramingClient] blocks are read by gobot::load_framing
-// (framing.hpp), the one reader shared with gobot_cli and the tests.
+// The [Framing], [FramingClient] and [FramingUdp] blocks are read by
+// gobot::load_framing (framing.hpp), the one reader shared with gobot_cli and
+// the tests.
 
 #if !GOBOT_SNIFF_FILES_ONLY
-/// Also hand the capture the client-side framing.
+/// Also hand the capture the framings besides [Framing]: the client's, for
+/// its half of the TCP stream, and [FramingUdp] for datagrams when the config
+/// has one.
 ///
-/// The two directions are framed differently in this game -- the opcode sits at
-/// offset 2 coming down and offset 6 going up -- so a capture told only about
-/// `[Framing]` decodes the server's half and grinds the client's half into
-/// resync noise, a byte at a time. Every tool here was doing that, which is why
-/// the client half never appeared in --watch or --diff and had to be analysed
-/// out of band.
+/// [FramingClient] reads the opcode at offset 6 where [Framing] reads it at 2.
+/// The P0-2 recordings (2026-10-18) show the client's TCP half in the
+/// server's layout as well, every frame an 0x0081, with [FramingClient]'s
+/// "opcode" its check word; live capture still frames it as the config says.
 ///
-/// A missing `[FramingClient]` is not fatal, just half-blind, so say so rather
-/// than failing.
-void attach_client_framing(PacketCapture& cap, const std::string& config) {
+/// Without [FramingUdp] the capture frames datagrams with [Framing], both
+/// directions, which is what the same recordings show.
+void attach_framings(PacketCapture& cap, const std::string& config) {
     bool found = false;
     const FramingSpec client = load_framing(config, found, "FramingClient");
     if (found) {
         cap.set_client_framing(client);
     } else {
-        std::printf("note: no [FramingClient] in %s -- what the client sends\n"
-                    "      cannot be decoded, and counts as resyncs.\n",
+        std::printf("note: no [FramingClient] in %s -- the client's half of the TCP\n"
+                    "      stream is framed with [Framing].\n",
                     config.c_str());
     }
+    bool udp_found = false;
+    const FramingSpec udp = load_framing(config, udp_found, "FramingUdp");
+    if (udp_found) cap.set_udp_framing(udp);
 }
 
 void wait_for_stop(int seconds) {
@@ -586,29 +687,24 @@ int cmd_record(const Options& o) {
     std::atomic<std::uint64_t> bytes_c2s{0};
     std::mutex write_mutex;
 
-    // Keep connections apart. A game commonly holds more than one socket open,
-    // and writing them all to one file interleaves two unrelated byte streams:
-    // the result cannot tile under any framing, so detection either fails or
-    // latches onto something meaningless. The per-flow buffers are what get
-    // analysed; the combined file is kept only for reference.
-    std::map<std::uint64_t, Bytes>       per_flow;
-    std::map<std::uint64_t, std::string> flow_names;
+    // Keep connections apart, both halves of each. A game commonly holds more
+    // than one socket open, and writing them all to one file interleaves two
+    // unrelated byte streams: the result cannot tile under any framing, so
+    // detection either fails or latches onto something meaningless. The
+    // per-connection files are what get analysed; the combined ones are kept
+    // for reference. The client's half was once written combined only, and
+    // the P0-2 recordings' .c2s files hold 18-byte runs that are not frames
+    // of the game's stream, whose connection they cannot tell.
+    capture_file::FlowHalves halves;
 
     cap.set_raw_tap([&](const FlowKey& key, Direction dir,
                         const std::uint8_t* data, std::size_t size) {
         std::lock_guard<std::mutex> lock(write_mutex);
-        if (dir == Direction::ToClient) {
-            out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
-            bytes.fetch_add(size);
-
-            const std::uint64_t id = FlowKeyHash{}(key);
-            auto& buf = per_flow[id];
-            if (flow_names.find(id) == flow_names.end()) flow_names[id] = key.to_string();
-            buf.insert(buf.end(), data, data + size);
-        } else {
-            out_c2s.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
-            bytes_c2s.fetch_add(size);
-        }
+        const bool to_client = (dir == Direction::ToClient);
+        std::ofstream& to = to_client ? out : out_c2s;
+        to.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+        (to_client ? bytes : bytes_c2s).fetch_add(size);
+        halves.add(FlowKeyHash{}(key), key.to_string(), to_client, data, size);
     });
 
     // Every datagram whole, in the order it arrived. Nothing is dropped:
@@ -714,27 +810,25 @@ int cmd_record(const Options& o) {
         }
     }
 
-    // Write each connection separately and point at the busiest, which is the
-    // one worth running detection on.
+    // Write each connection's halves separately and point at the busiest
+    // server half, which is the one worth running detection on.
     std::string busiest;
     std::size_t busiest_size = 0;
-    int index = 0;
 
-    if (per_flow.size() > 1)
-        std::printf("\n%zu separate connections were captured. Detection must run on one\n"
-                    "of them alone -- interleaved streams do not tile.\n\n", per_flow.size());
+    if (halves.connections() > 1)
+        std::printf("\n%zu separate connections were captured. Detection, and reading the\n"
+                    "client's half, must run on one of them alone -- interleaved streams do\n"
+                    "not tile -- so each connection's halves are written apart:\n\n",
+                    halves.connections());
+    else
+        std::printf("\n");
 
-    for (const auto& [id, buf] : per_flow) {
-        const std::string path = o.file + ".flow" + std::to_string(index++) + ".s2c";
-        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
-            std::fwrite(buf.data(), 1, buf.size(), f);
-            std::fclose(f);
-        }
-        std::printf("  %-8zu bytes  %-40s  %s\n",
-                    buf.size(), flow_names[id].c_str(), path.c_str());
-        if (buf.size() > busiest_size) {
-            busiest_size = buf.size();
-            busiest = path;
+    for (const auto& file : halves.files(o.file, true)) {
+        std::printf("  %-8zu bytes  %-40s  %s%s\n", file.bytes, file.connection.c_str(),
+                    file.path.c_str(), file.written ? "" : "  -- could NOT be written");
+        if (file.to_client && file.bytes > busiest_size) {
+            busiest_size = file.bytes;
+            busiest = file.path;
         }
     }
 
@@ -757,6 +851,8 @@ int cmd_record(const Options& o) {
     }
     if (udp_bytes.load() > 0)
         std::printf("And the UDP the server sent: gobot_sniff --verify %s\n", udp_s2c_path.c_str());
+    if (udp_bytes_c2s.load() > 0)
+        std::printf("And the UDP the client sent: gobot_sniff --verify %s\n", udp_c2s_path.c_str());
     std::printf("gobot_sniff_files runs --verify, --detect and the --from commands on these\n"
                 "files without asking for administrator.\n");
     return 0;
@@ -884,7 +980,7 @@ int cmd_watch(const Options& o) {
 
     PacketCapture cap;
     cap.set_framing(spec);
-    attach_client_framing(cap, o.config);
+    attach_framings(cap, o.config);
 
     std::mutex counts_mutex;
     std::map<std::uint16_t, std::uint64_t> counts;
@@ -965,7 +1061,10 @@ int cmd_watch(const Options& o) {
                 else                      udp_total   += r.count;
             }
             if (inner_total > 0 || s.unwrap.unopened || s.unwrap.unreadable || s.unwrap.too_deep) {
-                std::printf("\n--- inside 0x0081: %llu frames (counted only; the bot does not use them) ---\n",
+                // Live, as GoC's parser takes them: from byte 13, still packed
+                // past their first body byte, so "last" is not a frame's size.
+                std::printf("\n--- inside 0x0081: %llu frames (counted only, still packed; "
+                            "the bot does not use them) ---\n",
                             static_cast<unsigned long long>(inner_total));
                 std::printf("%-10s %-10s %-8s %s\n", "opcode", "count", "last", "found");
                 std::size_t shown = 0;
@@ -982,8 +1081,10 @@ int cmd_watch(const Options& o) {
                             static_cast<unsigned long long>(s.unwrap.unreadable),
                             static_cast<unsigned>(kMaxWrapDepth),
                             static_cast<unsigned long long>(s.unwrap.too_deep));
-                std::printf("  own length not the room they fill: %llu | header check word off: %llu\n",
+                std::printf("  own length not the room they fill: %llu (claiming more: %llu) | "
+                            "header check word off: %llu\n",
                             static_cast<unsigned long long>(s.unwrap.length_differs),
+                            static_cast<unsigned long long>(s.unwrap.length_longer),
                             static_cast<unsigned long long>(s.unwrap.checksum_bad));
             }
             if (s.udp_datagrams > 0) {
@@ -1038,7 +1139,7 @@ int cmd_dump(const Options& o) {
 
     PacketCapture cap;
     cap.set_framing(spec);
-    attach_client_framing(cap, o.config);
+    attach_framings(cap, o.config);
     cap.set_opcode_filter({ o.opcode });
 
     std::atomic<int> seen{0};
@@ -1057,6 +1158,7 @@ int cmd_dump(const Options& o) {
     if (!cap.start(make_capture_config(o))) return 1;
 
     std::printf("Dumping opcode 0x%04X, %s. Ctrl+C to stop.\n", o.opcode, kind_taken(o).c_str());
+    say_live_inner(o);
     wait_for_stop(o.seconds);
     cap.stop();
 
@@ -1070,57 +1172,185 @@ int cmd_dump(const Options& o) {
 }
 #endif
 
+/// `part` of `whole` as a percentage, 0 for nothing.
+double percent(std::size_t part, std::size_t whole) {
+    return whole ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0;
+}
+
+/// --framing as a block of the config, when it is given: false, and said, for
+/// a name that is none of the three. Brackets and case do not matter.
+bool forced_spec(const Options& o, std::optional<capture_file::Spec>& out) {
+    out.reset();
+    if (o.framing.empty()) return true;
+    std::string s;
+    for (char c : o.framing) {
+        if (c == '[' || c == ']') continue;
+        s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (s == "framing")            out = capture_file::Spec::Server;
+    else if (s == "framingclient") out = capture_file::Spec::Client;
+    else if (s == "framingudp")    out = capture_file::Spec::Udp;
+    else {
+        std::fprintf(stderr, "error: --framing %s: say Framing, FramingClient or FramingUdp\n",
+                     o.framing.c_str());
+        return false;
+    }
+    return true;
+}
+
+/// The config's blocks as a recording is read with them: each unpacking the
+/// 0x0081 wrappers it opens (FramingSpec::unpack). An 0x0081 holds one frame
+/// packed with liblzf (protocol-findings 4e), and the frame GoC's parser
+/// takes from its byte 13 is packed past its first body byte, so whatever a
+/// --from reader showed of it as fields was not. The server's wrappers
+/// unpack; the client's are ciphered and stay shut, counted.
+capture_file::Framings framings_for_files(const std::string& config, bool& have_server) {
+    capture_file::Framings f = capture_file::load_framings(config, have_server);
+    f.server.unpack = true;
+    if (f.client) f.client->unpack = true;
+    if (f.udp) f.udp->unpack = true;
+    return f;
+}
+
+/// What came of the wrappers in a recording, said after its frames: how many
+/// frames came out of them, and how many did not unpack -- a client half's
+/// because its wrappers are ciphered. `inner` is whether --inner asked for
+/// those frames, which then gets a warning when there are none.
+void say_inside(const capture_file::Reading& r, bool inner) {
+    const UnwrapCounts& u = r.unwrap;
+    if (r.inner > 0)
+        std::printf("  and %zu frame(s) inside 0x0081, each unpacked whole -- %s\n", r.inner,
+                    inner ? "the ones taken here (--inner)" : "--inner takes those instead");
+    if (u.unpack_failed > 0)
+        std::printf("  %zu 0x0081 wrapper(s) did not unpack, and are left shut: nothing inside\n"
+                    "  them is read%s\n", u.unpack_failed,
+                    r.half == capture_file::Half::Client
+                        ? ". The client's wrappers are ciphered (protocol-findings 4e)." : ".");
+    if (u.too_deep > 0)
+        std::printf("  %zu wrapper(s) inside wrappers past depth %u were not opened\n", u.too_deep,
+                    static_cast<unsigned>(kMaxWrapDepth));
+    if (inner && r.inner == 0)
+        std::printf("  !! --inner, but there is no frame inside 0x0081 to take in this file\n");
+}
+
+/// A block's name as the config spells it. What UDP is framed with is
+/// [Framing] when the config has no [FramingUdp].
+const char* block_name(capture_file::Spec s, const capture_file::Framings& f) {
+    switch (s) {
+    case capture_file::Spec::Client: return "[FramingClient]";
+    case capture_file::Spec::Udp:    return f.udp ? "[FramingUdp]" : "[Framing]";
+    default:                         return "[Framing]";
+    }
+}
+
+/// How a recording was framed, and why, as --verify and the --from commands
+/// say it: a file read with the wrong block yields plausible nonsense rather
+/// than an obvious failure, so the choice is never silent.
+void say_framed(const capture_file::Reading& r, const capture_file::Framings& f,
+                const std::string& path, bool forced) {
+    using capture_file::Half;
+    using capture_file::HalfSource;
+    using capture_file::Spec;
+    const bool udp = capture_file::udp_from_name(path);
+    const char* half = (r.half == Half::Client) ? "the client's half, client -> server"
+                                                : "the server's half, server -> client";
+    if (r.decided_by == HalfSource::Name)
+        std::printf("  named %s%s: %s%s\n", udp ? ".udp" : "",
+                    (r.half == Half::Client) ? ".c2s" : ".s2c", udp ? "UDP, " : "", half);
+    else if (r.decided_by == HalfSource::Forced)
+        std::printf("  no .s2c/.c2s in the name: taken as %s, for the block --framing names\n",
+                    half);
+    else
+        std::printf("  no .s2c/.c2s in the name: taken as %s, for the block that reads\n"
+                    "  more of it\n", half);
+    if (udp)
+        std::printf("  UDP: the game's datagrams, one after another\n");
+
+    const char* block = block_name(r.spec, f);
+    if (forced)
+        std::printf("  framed with %s, as --framing says\n", block);
+    else if (r.spec == Spec::Udp)
+        std::printf("  framed with %s, as UDP is in both directions%s\n", block,
+                    f.udp ? "" : " (the config has no [FramingUdp])");
+    else if (r.measured && r.frames == r.other_frames && r.unread() == r.other_unread)
+        std::printf("  framed with %s. %s reads as much of it -- %zu frames,\n"
+                    "  %zu bytes in none -- and [Framing]'s check word proves each header\n",
+                    block, r.spec == Spec::Client ? "[Framing]" : "[FramingClient]",
+                    r.frames, r.unread());
+    else if (r.measured)
+        std::printf("  framed with %s, which reads more of it: %zu frames and %zu bytes\n"
+                    "  in none, against %zu and %zu under %s\n",
+                    block, r.frames, r.unread(), r.other_frames, r.other_unread,
+                    r.spec == Spec::Client ? "[Framing]" : "[FramingClient]");
+    else if (r.half == Half::Client)
+        std::printf("  framed with [Framing]: the config has no [FramingClient]\n");
+    else
+        std::printf("  framed with %s\n", block);
+}
+
 /// Read every frame of a recorded stream, and say how it was read.
 ///
-/// A recording's name usually says which direction it holds, and the two are
-/// framed differently; when it says neither, both specs are tried and the one
-/// that tiles is used. That choice is reported: a file analysed under the
-/// wrong spec yields plausible nonsense rather than an obvious failure. The
-/// frames of a .udp recording are UDP ones. `ok` is false when the file could
-/// not be read, which has been said; end_reading() finishes what is said.
+/// The block that frames it is chosen by capture_file::tile_named -- by its
+/// name, and for a client half by what reads more of it -- or named by
+/// --framing, and said either way. The frames of a .udp recording are UDP
+/// ones. Each 0x0081 is unpacked, or left shut when it does not unpack
+/// (framings_for_files). `ok` is false when the file could not be read,
+/// which has been said; end_reading() finishes what is said.
 capture_file::Reading read_recording(const std::string& path, const Options& o,
                                      std::vector<GamePacket>& out) {
     capture_file::Reading r;
     if (!udp_fits(o, path)) return r;
-    bool have_server = false, have_client = false;
-    const FramingSpec server = load_framing(o.config, have_server);
-    const FramingSpec client = load_framing(o.config, have_client, "FramingClient");
+    std::optional<capture_file::Spec> force;
+    if (!forced_spec(o, force)) return r;
+    bool have_server = false;
+    const capture_file::Framings f = framings_for_files(o.config, have_server);
     if (!have_server) {
         std::fprintf(stderr, "error: no [Framing] section in %s\n", o.config.c_str());
         return r;
     }
 
-    r = capture_file::read_all(path, server, have_client ? client : FramingSpec{}, out);
+    r = capture_file::read_all(path, f, out, force);
     if (!r.ok) {
         std::fprintf(stderr, "error: %s\n", r.error.c_str());
         return r;
     }
 
-    const char* half = (r.half == capture_file::Half::Client)
-                           ? "[FramingClient] (client -> server)"
-                           : "[Framing] (server -> client)";
-    if (r.decided_by == capture_file::HalfSource::Name)
-        std::printf("  named %s, so reading it as %s\n",
-                    (r.half == capture_file::Half::Client) ? ".c2s" : ".s2c", half);
-    else
-        std::printf("  no .s2c/.c2s in the name; read as %s\n", half);
-    if (capture_file::udp_from_name(path))
-        std::printf("  UDP: the game's datagrams, one after another\n");
-    std::printf("  %-36s %5zu frames, %6zu resync bytes\n",
-                half, r.frames, r.resyncs);
+    say_framed(r, f, path, force.has_value());
+    std::printf("  %zu frames, %zu resync bytes; %zu of %zu bytes in no frame (%.1f%%)\n",
+                r.frames, r.resyncs, r.unread(), r.size, percent(r.unread(), r.size));
 
     // Frames inside 0x0081 are taken with --inner and never mixed with the
-    // others: say what was there either way.
-    if (r.inner > 0)
-        std::printf("  and %zu frame(s) inside 0x0081 -- %s\n", r.inner,
-                    o.inner ? "the ones taken here (--inner)" : "--inner takes those instead");
+    // others: say what was there either way, and what could not be read.
+    say_inside(r, o.inner);
     return r;
 }
 
 /// The end of what read_recording() says: a warning when the reading looks
-/// wrong.
+/// wrong. The bytes in no frame count as well as the resyncs: a scan that
+/// trusts a false length stops early, reads little, and resyncs nothing.
 void end_reading(const capture_file::Reading& r) {
     std::printf("\n");
+    switch (capture_file::judge(r)) {
+    case capture_file::Fit::Empty:
+    case capture_file::Fit::NothingRead:
+        std::printf("  !! not one frame was read from it. Either this framing does not fit\n"
+                    "     the file, or it holds no frames at all.\n\n");
+        return;
+    case capture_file::Fit::TooMuchUnread:
+        std::printf("  !! %zu of %zu bytes (%.1f%%) are in no frame. Either this framing does\n"
+                    "     not fit the file, the capture lost packets, or the file holds\n"
+                    "     another connection's bytes too. Treat anything below with\n"
+                    "     suspicion; --verify shows where those bytes are.\n\n",
+                    r.unread(), r.size, percent(r.unread(), r.size));
+        return;
+    case capture_file::Fit::Oversized:
+        std::printf("  !! its frames average %zu bytes: a length field that is not one, read\n"
+                    "     as a few huge frames that swallow the real ones. Treat anything\n"
+                    "     below with suspicion.\n\n", (r.size - r.unread()) / r.frames);
+        return;
+    case capture_file::Fit::Described:
+        break;
+    }
     if (r.resyncs > r.frames) {
         std::printf("  !! more resync bytes than frames. Either this is the other\n"
                     "     direction, the framing is wrong, or the capture lost\n"
@@ -1308,7 +1538,7 @@ int cmd_diff(const Options& o) {
 
         PacketCapture cap;
         cap.set_framing(spec);
-        attach_client_framing(cap, o.config);
+        attach_framings(cap, o.config);
         cap.set_opcode_filter({ o.opcode });
 
         std::mutex mutex;
@@ -1331,6 +1561,7 @@ int cmd_diff(const Options& o) {
                     kind_taken(o).c_str());
         std::printf("Do one thing at a time in game — walk left and right, then\n"
                     "stand still and take damage. Ctrl+C when done.\n\n");
+        say_live_inner(o);
 
         std::thread reporter([&] {
             while (!g_stop.load()) {
@@ -1456,6 +1687,167 @@ int cmd_diff(const Options& o) {
     return 0;
 }
 
+/// --rows --from: one opcode's frames as rows of numbers, a row per frame in
+/// order and a column per body offset -- or, with --at, one field's values
+/// in order. Either way it says what changes between frames: a * on each
+/// value that differs from the frame before, and for each column how often
+/// it changed, rose and fell, how many values it took and their range. The
+/// recordings carry no clock, so the order of the frames is all there is.
+int rows_file(const Options& o) {
+    capture_file::Number n = capture_file::Number::U8;
+    if (!o.number.empty() && !capture_file::number_from_name(o.number, n)) {
+        std::fprintf(stderr, "error: --as %s: say u8, i8, u16, i16, u32, i32 or f32\n",
+                     o.number.c_str());
+        return 2;
+    }
+
+    std::printf("Reading %s\n", o.from.c_str());
+    std::vector<Bytes> bodies;
+    if (!samples_from_file(o.from, o, bodies)) return 1;
+    const Options taken = as_read(o, o.from);
+    if (bodies.empty()) {
+        std::printf("No frames of opcode 0x%04X among the %s.\n", o.opcode,
+                    kind_taken(taken).c_str());
+        return 1;
+    }
+
+    std::size_t shortest = bodies.front().size(), longest = 0;
+    for (const Bytes& b : bodies) {
+        shortest = std::min(shortest, b.size());
+        longest  = std::max(longest, b.size());
+    }
+    const char* frames_word = bodies.size() == 1 ? "frame" : "frames";
+    if (shortest == longest)
+        std::printf("0x%04X, %s: %zu %s, bodies of %zu bytes.\n", o.opcode,
+                    kind_taken(taken).c_str(), bodies.size(), frames_word, shortest);
+    else
+        std::printf("0x%04X, %s: %zu %s, bodies of %zu to %zu bytes.\n", o.opcode,
+                    kind_taken(taken).c_str(), bodies.size(), frames_word, shortest, longest);
+    if (taken.inner)
+        std::printf("Each frame was unpacked from its wrapper whole. Offsets are its body\n"
+                    "offsets: @N is byte N+8 of the frame, past its 8-byte header.\n");
+    else
+        std::printf("Offsets are body offsets: @N is frame byte N+8, past the 8-byte header.\n");
+
+    const char* unit = capture_file::number_name(n);
+    const std::size_t size = capture_file::number_size(n);
+    // Wide enough for the longest each prints: -2147483648, -9999999.99,
+    // -32768, -128.
+    const int width = (size == 4) ? 11 : (size == 2) ? 6 : 4;
+    const auto text = [n](double v) { return capture_file::format_number(v, n); };
+    const auto figures = [&](const capture_file::Column& c) {
+        return std::to_string(c.changes) + " changes (" + std::to_string(c.rises) + " up, " +
+               std::to_string(c.falls) + " down), " + std::to_string(c.distinct) +
+               " distinct, " + text(c.min) + " to " + text(c.max) + ", first " +
+               text(c.first) + ", last " + text(c.last);
+    };
+    const auto rows_shown = [&o](std::size_t frames) {
+        return o.max > 0 ? std::min<std::size_t>(frames, static_cast<std::size_t>(o.max)) : frames;
+    };
+
+    if (o.at >= 0) {
+        // One field, frame by frame, several to a line, each line led by the
+        // number of its first frame among this opcode's.
+        const auto off = static_cast<std::size_t>(o.at);
+        const capture_file::Column c = capture_file::column(bodies, n, off);
+        if (c.frames == 0) {
+            std::printf("No body reaches @%zu with a %s.\n", off, unit);
+            return 1;
+        }
+        std::printf("\n@%zu (frame byte %zu) as %s, frame by frame%s.\n"
+                    "A * marks a value that differs from the one before.\n\n",
+                    off, off + 8, unit,
+                    c.frames < bodies.size() ? ", leaving out the bodies too short for it" : "");
+        const std::size_t per_line = std::max<std::size_t>(4, 72 / static_cast<std::size_t>(width + 1));
+        const std::size_t limit = rows_shown(c.frames);
+        std::size_t printed = 0;
+        bool have_prev = false;
+        std::uint32_t prev = 0;
+        for (std::size_t i = 0; i < bodies.size(); ++i) {
+            double v = 0.0;
+            std::uint32_t raw = 0;
+            if (!capture_file::read_number(bodies[i], off, n, v, &raw)) continue;
+            const bool changed = have_prev && raw != prev;
+            have_prev = true;
+            prev = raw;
+            if (printed >= limit) continue;
+            if (printed % per_line == 0) std::printf("%s%6zu:", printed ? "\n" : "", i + 1);
+            std::printf(" %*s%c", width, text(v).c_str(), changed ? '*' : ' ');
+            ++printed;
+        }
+        std::printf("\n");
+        if (printed < c.frames)
+            std::printf("  ... the first %zu of %zu shown (--max)\n", printed, c.frames);
+        std::printf("\n@%zu over %zu frames: %s\n", off, c.frames, figures(c).c_str());
+        return 0;
+    }
+
+    const std::size_t step = o.step > 0 ? static_cast<std::size_t>(o.step) : size;
+    const std::vector<capture_file::Column> cols = capture_file::columns(bodies, n, 0, step);
+    if (cols.empty()) {
+        std::printf("Every body is shorter than one %s.\n", unit);
+        return 1;
+    }
+    std::printf("\nRead as %s every %zu byte%s, @0 to @%zu%s.\n", unit, step,
+                step == 1 ? "" : "s", cols.back().offset,
+                shortest < longest ? ", as far as every body reaches" : "");
+
+    // What never changes is said once, so that the table holds only what does.
+    std::vector<const capture_file::Column*> moving;
+    std::size_t used = 0;
+    for (const capture_file::Column& c : cols) {
+        if (!c.constant()) {
+            moving.push_back(&c);
+            continue;
+        }
+        const std::string item = "@" + std::to_string(c.offset) + "=" + text(c.first);
+        if (used == 0) {
+            std::printf("The same in every frame:");
+            used = 24;
+        }
+        if (used + 1 + item.size() > 78) {
+            std::printf("\n ");
+            used = 1;
+        }
+        std::printf(" %s", item.c_str());
+        used += 1 + item.size();
+    }
+    if (used > 0) std::printf("\n");
+    if (moving.empty()) {
+        std::printf("Nothing at these offsets changes from frame to frame.\n");
+        return 0;
+    }
+
+    std::printf("\nA * marks a value that differs from the frame before.\n\n%7s", "#");
+    for (const capture_file::Column* c : moving) {
+        const std::string head = "@" + std::to_string(c->offset);
+        std::printf(" %*s ", width, head.c_str());
+    }
+    std::printf("\n");
+    const std::size_t limit = rows_shown(bodies.size());
+    for (std::size_t i = 0; i < limit; ++i) {
+        std::printf("%7zu", i + 1);
+        for (const capture_file::Column* c : moving) {
+            // Every body reaches every column (columns()).
+            double v = 0.0, before = 0.0;
+            std::uint32_t raw = 0, raw_before = 0;
+            capture_file::read_number(bodies[i], c->offset, n, v, &raw);
+            const bool changed =
+                i > 0 && capture_file::read_number(bodies[i - 1], c->offset, n, before, &raw_before) &&
+                raw != raw_before;
+            std::printf(" %*s%c", width, text(v).c_str(), changed ? '*' : ' ');
+        }
+        std::printf("\n");
+    }
+    if (limit < bodies.size())
+        std::printf("  ... the first %zu of %zu frames shown (--max)\n", limit, bodies.size());
+
+    std::printf("\nOver all %zu frames:\n", bodies.size());
+    for (const capture_file::Column* c : moving)
+        std::printf("  @%-5zu %s\n", c->offset, figures(*c).c_str());
+    return 0;
+}
+
 /// One frame into what the inference reads: per opcode, which way it went,
 /// and its first 256 bodies.
 void observe(std::map<std::uint16_t, OpcodeObservations>& obs, const GamePacket& p) {
@@ -1482,7 +1874,7 @@ int cmd_analyze(const Options& o) {
 
     PacketCapture cap;
     cap.set_framing(spec);
-    attach_client_framing(cap, o.config);
+    attach_framings(cap, o.config);
 
     std::mutex mutex;
     std::map<std::uint16_t, OpcodeObservations> obs;
@@ -1505,6 +1897,7 @@ int cmd_analyze(const Options& o) {
     std::printf("Capturing for %ds. Play normally: walk about, fight something,\n"
                 "take damage and spend mana. The inference reads how the numbers\n"
                 "move, so it needs to see them move.\n\n", seconds);
+    say_live_inner(o);
 
     std::thread reporter([&] {
         while (!g_stop.load()) {
@@ -1664,126 +2057,203 @@ int report_analysis(const Options& o, const std::map<std::uint16_t, OpcodeObserv
 
 /// Apply the framing from protocol.ini to a recorded file and report exactly
 /// what happens. Answers "is this spec right?" directly, instead of leaving it
-/// to be inferred from where the search ranked it.
+/// to be inferred from where the search ranked it: 0 when it describes the
+/// file, 1 when it does not.
 int cmd_verify(const Options& o) {
     if (!udp_fits(o, o.file)) return 1;
-    bool have = false, have_client = false;
-    const FramingSpec server = load_framing(o.config, have);
-    const FramingSpec client = load_framing(o.config, have_client, "FramingClient");
+    std::optional<capture_file::Spec> force;
+    if (!forced_spec(o, force)) return 2;
+    bool have = false;
+    const capture_file::Framings f = framings_for_files(o.config, have);
     if (!have) {
         std::fprintf(stderr, "error: no [Framing] section in %s\n", o.config.c_str());
         return 1;
     }
 
-    // The client's half is framed differently -- its opcode at offset 6, not
-    // 2 -- so a .c2s recording, TCP or UDP, is tiled with [FramingClient], as
-    // --from reads it. Under [Framing] it would be nothing but resyncs.
-    capture_file::Half half = capture_file::Half::Server;
-    const bool client_half =
-        capture_file::half_from_name(o.file, half) && half == capture_file::Half::Client;
-    if (client_half && !have_client)
-        std::printf("note: no [FramingClient] in %s, so this client half is read with\n"
-                    "      [Framing], which frames it wrong.\n", o.config.c_str());
-    const bool as_client = client_half && have_client;
-    const FramingSpec& spec = as_client ? client : server;
-
-    std::ifstream in(o.file, std::ios::binary);
+    std::ifstream in(utf8_to_wide(o.file).c_str(), std::ios::binary);
     if (!in) {
         std::fprintf(stderr, "error: cannot read %s\n", o.file.c_str());
         return 1;
     }
-    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)),
-                                    std::istreambuf_iterator<char>());
+    const Bytes data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
-    std::printf("\nSpec : %s %s\n", as_client ? "[FramingClient]" : "[Framing]",
-                spec.describe().c_str());
-    std::printf("File : %s (%zu bytes)%s\n\n", o.file.c_str(), data.size(),
-                capture_file::udp_from_name(o.file) ? ", UDP datagrams one after another" : "");
+    const bool udp = capture_file::udp_from_name(o.file);
+    std::printf("\nFile : %s (%zu bytes)%s\n", o.file.c_str(), data.size(),
+                udp ? ", UDP datagrams one after another" : "");
     if (data.empty()) {
         // Not a framing that fails: nothing was recorded in this file at all,
         // which for a .udp file is what a game that sends no UDP leaves.
-        std::printf("Nothing to tile: the file is empty.%s\n",
-                    capture_file::udp_from_name(o.file)
-                        ? " The recording caught no UDP in this direction." : "");
+        std::printf("\nNothing to tile: the file is empty.%s\n",
+                    udp ? " The recording caught no UDP in this direction." : "");
         return 1;
     }
 
-    // The same reading the tests check a real capture with.
-    const FrameScanResult scan = capture_file::tile(
-        data, spec, as_client ? Direction::ToServer : Direction::ToClient);
+    // Framed as the --from commands frame it -- a .udp file as UDP is, both
+    // ways; a .c2s one with whichever of [Framing] and [FramingClient] reads
+    // more of it -- and the same reading the tests check a real capture with.
+    const capture_file::Tiling t = capture_file::tile_named(data, o.file, f, force);
+    if (!t.reading.ok) {
+        std::fprintf(stderr, "error: %s\n", t.reading.error.c_str());
+        return 1;
+    }
+    const capture_file::Reading& r = t.reading;
+    const FrameScanResult& scan = t.scan;
+    const FramingSpec& spec = t.spec;
+    std::printf("Spec : %s %s\n", block_name(r.spec, f), spec.describe().c_str());
+    say_framed(r, f, o.file, force.has_value());
+    std::printf("\n");
 
     // Frames off the stream, as this has always listed them; those found
     // inside 0x0081 are listed apart, by depth and opcode, below.
     std::size_t body = 0;
-    std::map<std::uint16_t, std::size_t> ops;
-    struct Inner { std::size_t count = 0, min_size = SIZE_MAX, max_size = 0; };
-    std::map<std::pair<std::uint8_t, std::uint16_t>, Inner> inner;
+    struct Row { std::size_t count = 0, min_size = SIZE_MAX, max_size = 0; };
+    std::map<std::uint16_t, Row> ops;
+    std::map<std::pair<std::uint8_t, std::uint16_t>, Row> inner;
     for (const auto& p : scan.packets) {
-        if (p.depth > 0) {
-            Inner& row = inner[{ p.depth, p.opcode }];
-            ++row.count;
-            row.min_size = std::min(row.min_size, p.payload.size());
-            row.max_size = std::max(row.max_size, p.payload.size());
-            continue;
-        }
-        body += p.payload.size();
-        ++ops[p.opcode];
+        Row& row = (p.depth > 0) ? inner[{ p.depth, p.opcode }] : ops[p.opcode];
+        ++row.count;
+        row.min_size = std::min(row.min_size, p.payload.size());
+        row.max_size = std::max(row.max_size, p.payload.size());
+        if (p.depth == 0) body += p.payload.size();
     }
+    const auto sizes = [](const Row& row) {
+        return row.min_size == row.max_size
+                   ? std::to_string(row.max_size)
+                   : std::to_string(row.min_size) + "-" + std::to_string(row.max_size);
+    };
 
+    // The bytes in frames first: the scan's "consumed" takes in the resync
+    // bytes it slid past on the way, and so reads 100% for a file that is
+    // read to its end with bytes in no frame.
+    const std::size_t in_frames = r.size - r.unread();
     std::printf("frames        : %zu\n", scan.outer_frames());
-    std::printf("consumed      : %zu / %zu  (%.1f%%)\n", scan.consumed, data.size(),
-                data.size() ? 100.0 * scan.consumed / data.size() : 0.0);
-    std::printf("resync bytes  : %zu  (%.1f%%)\n", scan.resyncs,
-                data.size() ? 100.0 * scan.resyncs / data.size() : 0.0);
+    std::printf("in frames     : %zu / %zu bytes  (%.1f%%)\n", in_frames, r.size,
+                percent(in_frames, r.size));
+    std::printf("scanned       : %zu / %zu bytes  (%.1f%%), the resync bytes included\n",
+                r.consumed, r.size, percent(r.consumed, r.size));
+    std::printf("resync bytes  : %zu  (%.1f%%)\n", r.resyncs, percent(r.resyncs, r.size));
+
+    // The bytes in no frame: the resyncs, and what lies past the point where
+    // the scan stopped, which the resync count leaves out. Where each run is,
+    // and how it starts, says what it is -- a lost packet, another
+    // connection's bytes, or a message of some other kind.
+    std::printf("in no frame   : %zu  (%.1f%%)%s\n", r.unread(), percent(r.unread(), r.size),
+                r.unread_runs.empty() ? "" : ", in these runs, with their first bytes:");
+    constexpr std::size_t kRunsShown = 12;
+    for (std::size_t i = 0; i < r.unread_runs.size() && i < kRunsShown; ++i) {
+        const ByteRun& run = r.unread_runs[i];
+        std::string head;
+        for (std::size_t k = 0; k < std::min<std::size_t>(run.length, 8); ++k) {
+            char hex[4];
+            std::snprintf(hex, sizeof(hex), "%02X ", data[run.offset + k]);
+            head += hex;
+        }
+        const bool tail = r.consumed < r.size && run.offset + run.length == r.size;
+        std::printf("                @%-8zu %7zu bytes   %s%s\n", run.offset, run.length,
+                    head.c_str(), tail ? " (to the end: never reached)" : "");
+    }
+    if (r.unread_runs.size() > kRunsShown)
+        std::printf("                and %zu more runs\n", r.unread_runs.size() - kRunsShown);
+    std::printf("largest frame : %zu bytes\n", r.largest);
     std::printf("distinct ops  : %zu\n", ops.size());
-    std::printf("inside 0x0081 : %zu frames%s\n\n", scan.unwrap.inner,
-                spec.unwraps() ? "" : "  (this spec does not look inside wrappers)");
+    if (!spec.unwraps())
+        std::printf("inside 0x0081 : %zu frames  (this spec does not look inside wrappers)\n",
+                    scan.unwrap.inner);
+    else if (spec.unpack)
+        std::printf("inside 0x0081 : %zu frames, unpacked from %zu wrappers; %zu did not unpack%s\n",
+                    scan.unwrap.inner, scan.unwrap.unpacked, scan.unwrap.unpack_failed,
+                    scan.unwrap.unpack_failed > 0 && r.half == capture_file::Half::Client
+                        ? " (ciphered)" : "");
+    else
+        std::printf("inside 0x0081 : %zu frames, from byte 13 as GoC takes them\n",
+                    scan.unwrap.inner);
+    if (r.measured)
+        std::printf("also tried    : %s -- %zu frames, %zu bytes in no frame (%.1f%%)\n",
+                    r.spec == capture_file::Spec::Client ? "[Framing]" : "[FramingClient]",
+                    r.other_frames, r.other_unread, percent(r.other_unread, r.size));
+    std::printf("\n");
 
     if (scan.packets.empty()) {
         std::printf("Nothing parsed. This spec does not describe this stream.\n");
         return 1;
     }
 
-    std::vector<std::pair<std::uint16_t, std::size_t>> sorted(ops.begin(), ops.end());
+    std::vector<std::pair<std::uint16_t, Row>> sorted(ops.begin(), ops.end());
     std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+              [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
 
+    constexpr std::size_t kOpsShown = 30;
     std::printf("%-9s %-8s %s\n", "opcode", "count", "body size");
-    for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 15); ++i) {
-        std::size_t sz = 0;
-        for (const auto& p : scan.packets) {
-            if (p.depth == 0 && p.opcode == sorted[i].first) { sz = p.payload.size(); break; }
-        }
-        std::printf("0x%04X    %-8zu %zu\n", sorted[i].first, sorted[i].second, sz);
-    }
+    for (std::size_t i = 0; i < std::min(sorted.size(), kOpsShown); ++i)
+        std::printf("0x%04X    %-8zu %s\n", sorted[i].first, sorted[i].second.count,
+                    sizes(sorted[i].second).c_str());
+    if (sorted.size() > kOpsShown)
+        std::printf("and %zu more opcodes\n", sorted.size() - kOpsShown);
 
     const UnwrapCounts& u = scan.unwrap;
-    if (!inner.empty() || u.unopened || u.unreadable || u.too_deep) {
-        std::printf("\nInside 0x0081 (each wrapper also counted above, as itself):\n");
+    if (spec.unpack && (!inner.empty() || u.unpack_failed || u.too_deep)) {
+        // Each wrapper unpacked into its one frame, whole: the sizes are the
+        // frames' own, and every field of them can be read (--rows --inner).
+        std::printf("\nInside 0x0081, unpacked (each wrapper also counted above, as itself):\n");
+        if (!inner.empty())
+            std::printf("%-9s %-6s %-8s %s\n", "opcode", "depth", "count", "body size");
+        for (const auto& [key, row] : inner)
+            std::printf("0x%04X    %-6u %-8zu %s\n", key.second,
+                        static_cast<unsigned>(key.first), row.count, sizes(row).c_str());
+        std::printf("unpacked                    : %zu wrappers\n", u.unpacked);
+        std::printf("did not unpack, left shut   : %zu%s\n", u.unpack_failed,
+                    u.unpack_failed > 0 && r.half == capture_file::Half::Client
+                        ? "  -- the client's wrappers are ciphered (protocol-findings 4e)" : "");
+        std::printf("not opened, past depth %u    : %zu\n",
+                    static_cast<unsigned>(kMaxWrapDepth), u.too_deep);
+    } else if (!inner.empty() || u.unopened || u.unreadable || u.too_deep) {
+        // GoC's reading, from byte 13: the opcode and length are right, the
+        // body past its first byte is packed.
+        std::printf("\nInside 0x0081, from byte 13 as GoC takes them, still packed past\n"
+                    "their first body byte (each wrapper also counted above, as itself):\n");
         std::printf("%-9s %-6s %-8s %s\n", "opcode", "depth", "count", "body size");
-        for (const auto& [key, row] : inner) {
-            if (row.min_size == row.max_size)
-                std::printf("0x%04X    %-6u %-8zu %zu\n", key.second,
-                            static_cast<unsigned>(key.first), row.count, row.max_size);
-            else
-                std::printf("0x%04X    %-6u %-8zu %zu-%zu\n", key.second,
-                            static_cast<unsigned>(key.first), row.count, row.min_size, row.max_size);
-        }
+        for (const auto& [key, row] : inner)
+            std::printf("0x%04X    %-6u %-8zu %s\n", key.second,
+                        static_cast<unsigned>(key.first), row.count, sizes(row).c_str());
         std::printf("left shut, marker 0x0020    : %zu\n", u.unopened);
         std::printf("unreadable insides          : %zu\n", u.unreadable);
         std::printf("not opened, past depth %u    : %zu\n",
                     static_cast<unsigned>(kMaxWrapDepth), u.too_deep);
-        std::printf("own length not their room   : %zu\n", u.length_differs);
+        std::printf("own length not their room   : %zu, %zu of them claiming more than it holds\n",
+                    u.length_differs, u.length_longer);
         std::printf("header check word off       : %zu of %zu\n", u.checksum_bad, u.inner);
     }
 
-    const double pct = data.size() ? 100.0 * scan.resyncs / data.size() : 100.0;
-    std::printf("\n%s\n", pct < 25.0
-        ? "This spec describes the stream. Occasional resync is normal -- packets\n"
-          "get missed, and not every body is described by its length field."
-        : "Too much of the stream fails to parse for this spec to be right.");
+    // The verdict counts the bytes in no frame, not the resyncs alone: a scan
+    // that trusts a false length stops early, reads little and resyncs
+    // nothing, and was once called a description of the stream (R1b-REV-1).
+    const capture_file::Fit fit = capture_file::judge(r);
+    switch (fit) {
+    case capture_file::Fit::Described:
+        if (r.unread() == 0)
+            std::printf("\nThis spec describes the stream: every byte is in a frame.\n");
+        else
+            std::printf("\nThis spec describes the stream: %zu bytes (%.1f%%) are in no frame. A\n"
+                        "few are normal -- packets get missed, and not every body is described\n"
+                        "by its length field -- and where they are is listed above.\n",
+                        r.unread(), percent(r.unread(), r.size));
+        break;
+    case capture_file::Fit::TooMuchUnread:
+        std::printf("\n%zu of %zu bytes (%.1f%%) are in no frame: too much of the file fails to\n"
+                    "parse for this spec to describe it, whatever the resync count says.\n",
+                    r.unread(), r.size, percent(r.unread(), r.size));
+        break;
+    case capture_file::Fit::Oversized:
+        std::printf("\nIts frames average %zu bytes: a length field that is not one, read as a\n"
+                    "few huge frames that swallow the real ones. This spec does not describe\n"
+                    "the stream.\n", (r.size - r.unread()) / r.frames);
+        break;
+    default:
+        std::printf("\nNothing parsed. This spec does not describe this stream.\n");
+        break;
+    }
     (void)body;
-    return 0;
+    return fit == capture_file::Fit::Described ? 0 : 1;
 }
 
 /// The [Packet.*] layouts in the config, for --decode: false, and said, when
@@ -1841,7 +2311,7 @@ int cmd_decode(const Options& o) {
 
     PacketCapture cap;
     cap.set_framing(spec);
-    attach_client_framing(cap, o.config);
+    attach_framings(cap, o.config);
 
     std::atomic<std::uint64_t> decoded{0}, skipped{0}, passed_by{0};
 
@@ -1862,6 +2332,7 @@ int cmd_decode(const Options& o) {
     std::printf("Decoding %s with %zu known layouts. Ctrl+C to stop.\n\n",
                 kind_taken(o).c_str(), registry.size());
     say_not_for_the_bot(o);
+    say_live_inner(o);
     wait_for_stop(o.seconds);
     cap.stop();
 
@@ -1934,9 +2405,22 @@ int main(int argc, char** argv) {
                           (o.config[1] == ':' || o.config[0] == '\\' || o.config[0] == '/');
     if (!absolute) o.config = exe_relative(o.config);
 
+    // A --framing that names no block is refused before anything is read.
+    {
+        std::optional<capture_file::Spec> named;
+        if (!forced_spec(o, named)) return 2;
+    }
+
     // What reads files, in both programs.
     if (o.command == "detect") return cmd_detect(o);
     if (o.command == "verify") return cmd_verify(o);
+    if (o.command == "rows") {
+        if (o.from.empty()) {
+            std::fprintf(stderr, "error: --rows reads a recording: add --from <file>.\n");
+            return 2;
+        }
+        return rows_file(o);
+    }
     if (!o.from.empty()) {
         if (o.command == "dump")    return dump_file(o);
         if (o.command == "diff")    return cmd_diff(o);
@@ -1952,7 +2436,7 @@ int main(int argc, char** argv) {
         "error: --%s%s works on the live network, and gobot_sniff_files reads\n"
         "       recordings only. Use gobot_sniff for it: it asks for administrator, as\n"
         "       capturing needs. Here: --verify <file>, --detect <file>, or --dump,\n"
-        "       --diff, --decode or --analyze with --from <recording>.\n",
+        "       --diff, --rows, --decode or --analyze with --from <recording>.\n",
         o.command.c_str(), has_file_form ? " without --from" : "");
     return 2;
 #else
