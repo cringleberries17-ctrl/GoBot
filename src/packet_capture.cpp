@@ -180,6 +180,12 @@ void PacketCapture::set_client_framing(const FramingSpec& spec) {
     has_client_framing_ = spec.plausible();
 }
 
+void PacketCapture::set_udp_framing(const FramingSpec& spec) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    udp_framing_ = spec;
+    has_udp_framing_ = spec.plausible();
+}
+
 void PacketCapture::set_opcode_filter(const std::vector<std::uint16_t>& opcodes) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (opcodes.empty()) {
@@ -714,8 +720,9 @@ void PacketCapture::on_datagram(const Endpoint& src, const Endpoint& dst,
     std::vector<bool> allowed;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        spec      = (dir == Direction::ToServer && has_client_framing_)
-                        ? client_framing_ : framing_;
+        // One spec for both directions, and never the client's TCP one: the
+        // client's datagrams are in the server's layout (set_udp_framing).
+        spec      = has_udp_framing_ ? udp_framing_ : framing_;
         filtering = filter_active_;
         if (filtering) allowed = opcode_allowed_;
     }

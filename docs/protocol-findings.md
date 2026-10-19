@@ -262,7 +262,13 @@ Earlier negative results about s2c were taken under the broken parse and should
 be re-run — including "the spawn position is not in there", which was never
 properly tested.
 
-## 4c. Re-run after the framing fix — own position is genuinely not sent
+## 4c. Re-run after the framing fix — own position not found over TCP
+
+**Corrected 2026-10-19:** this section's conclusion was wrong. Your own position
+is sent, by the client, over UDP, which none of these captures included; and the
+server sends your spawn position at every map entry. See
+[§4e](#4e-what-the-p0-2-recordings-show-2026-10-18). The searches below stand for
+what they searched: the server's plain TCP frames and the client's TCP half.
 
 Everything in §4b was measured through the broken parse, so it was all re-run on
 captures that tile at 100% with zero resyncs, against ground truth read directly
@@ -312,14 +318,30 @@ monsters die in the same places), sit a median 82 units from the nearest monster
 against 218 for random points in the same box, and arrive occasionally rather
 than continuously. Not confirmed; nothing depends on it.
 
-**Conclusion, now well-founded: the character's own absolute position is not
+**P0-2, 2026-10-18:** probably not item drops. In the P0-2 fight `0x003F` came
+122 times, exactly as often as the loot lists (`0x004A`, which name the items
+dropped and your id as their owner) and `0x005B`, and it carries a monster slot
+number (0–23, the slots of `0x0038`) at frame byte 32. So it belongs to a kill,
+most likely the dead monster's record (likely, not confirmed); the drops
+themselves are in `0x004A`. See [§4e](#4e-what-the-p0-2-recordings-show-2026-10-18).
+
+**Conclusion at the time: the character's own absolute position is not
 transmitted in either direction.** The server broadcasts every *other* actor —
 monsters in `0x0038`, players in `0x003F` — and says nothing about you. The
 client sends inputs, not coordinates. Both sides integrate from an anchor.
 
+**Wrong, as P0-2 showed (§4e).** The client sends its own x, y as floats over UDP
+whenever a walk starts, stops or turns, when it leaves the ground and lands, and
+with every skill cast; and the server sends your spawn x, y in `0x0086` at every
+map entry. None of the captures here held UDP. And the one other actor seen
+moving in P0-2 came from the server in the same frame layouts as the client's
+own reports (`0x0027`, `0x0029`, `0x002A`).
+
 This is the same conclusion §4b reached, but it was an artifact there and is
 evidence here: 15 server opcodes and every client opcode, correctly framed,
-against real ground truth.
+against real ground truth. (Corrected: those "client opcodes" were the check
+words of `0x0081` wrappers whose content is ciphered, so the client's TCP half
+was never readable; §4e.)
 
 **Caveat, 2026-10-17:** none of these searches looked inside `0x0081`. The
 trailer fix keeps the framing aligned but discards what GoC's own parser treats
@@ -328,7 +350,7 @@ as a wrapped game frame ([§4d](#4d-what-gocs-own-parser-does-2026-10-17)).
 capture included UDP either, and GoC's client reads your position from two
 opcodes, `0x0027` and `0x002A`, that never appear in GoBot's captures (§4d). So
 the conclusion holds for the opcodes that were searched, not yet for the stream
-as a whole.
+as a whole. P0-2 settled it the other way: §4e.
 
 ### Useful by-product
 
@@ -337,6 +359,12 @@ currently finds them by OCR of the player list, which `START-HERE.txt` records
 as unreliable ("ExampleWin" → "Exampley in"). Mapping `0x003F` retires that for
 anything positional, and is worth doing regardless of the position question.
 
+**P0-2, 2026-10-18:** `0x003F` turned out to come once per kill (above), so it
+is probably not other players. Another actor's moves did come from the server,
+as plain `0x0027`, `0x0029` and `0x002A` frames in the client's own layouts,
+naming that actor's id instead of yours (8 frames, one other id, in the fight).
+That is the better lead for other players' positions; see §4e.
+
 ## 4d. What GoC's own parser does (2026-10-17)
 
 From a full decompile of `GhostCore.dll`: `PacketCapture::ProcessPacket`,
@@ -344,13 +372,20 @@ From a full decompile of `GhostCore.dll`: `PacketCapture::ProcessPacket`,
 was run. The rest of the decompile is summarised in
 [goc-reference.md](goc-reference.md#code-level-findings-full-decompile-2026-10-17).
 
+**The P0-2 results** — own position, HP/MP, fury, level and EXP, avatar time and
+pet HP, one by one — are in [§4e](#4e-what-the-p0-2-recordings-show-2026-10-18),
+which also corrects this section where the recordings disagree with it.
+
 **Frame header, as GoC reads it.** It reads the marker u16 at 0 (`0x0005` in
 `configs/protocol.ini`), the opcode as a u16 at 2, and the total frame length
 (header included) as a u16 at 4. It does not check the checksum at 6 that
 GoBot's spec verifies. GoC captures TCP and UDP on the server's port range and
 parses each segment or datagram from its first byte. It sets aside a partial
 frame for the next segment, but on a second reading (2026-10-18, below) it
-throws that away again before it parses the next one.
+throws that away again before it parses the next one. (P0-2: the first word
+reads `0x0105`, bytes `05 01`, not `0x0005`, on every frame that is not an
+`0x0081`: 2,860 of 2,860, server TCP and UDP both ways. In an `0x0081` it is not
+a marker at all but a length; see below.)
 
 ### `0x0081` is a wrapper
 
@@ -366,8 +401,22 @@ any other frame:
 If the inner opcode is `0x0081` again, GoC unwraps that too. Its log strings
 call these "sub-packets".
 
+**What the bytes are (P0-2, §4e).** GoC's reading takes the right bytes but
+misnames them. An `0x0081` is one frame **compressed with liblzf**: its first
+word is the length of that frame unpacked, its length field counts the packed
+bytes, bytes 8–11 mean nothing, and the packed stream runs from byte 12. That
+stream always opens with a run of nine literal bytes, the frame's 8-byte header
+and its first body byte, so bytes 13–20 do hold a valid header (opcode, length
+= the unpacked length, check word); everything after them is packed. No room
+held a second frame or padding, and none nested (616 server wrappers). The
+client's own `0x0081` wrappers are ciphered as well and do not unpack.
+
 One rule GoC applies is not understood: when an `0x0081` frame's marker reads
 `0x0020` instead of `0x0005`, it stops parsing the rest of that TCP segment.
+(P0-2 explains the number: that first word is the unpacked length, so the rule
+leaves shut every wrapper holding a 32-byte frame. In the fight those were the
+server's two `0x005A` frames, a buff's effect, and 406 of the client's 794
+wrappers, all holding a 32-byte message. Why GoC skips them is still not known.)
 
 GoBot keeps bytes 8 to the declared length as the payload (its header is 8
 bytes) and drops the last 12. So for every `0x0081` it reads a payload that
@@ -377,7 +426,12 @@ still hands out that payload unchanged, and right after it the inner frame as a
 frame of its own, with its own opcode, marked by depth (`GamePacket::depth`;
 `FramingSpec::inner_offset`, `inner_frame_offset=13` in `configs/protocol.ini`).
 What acts on the game ignores inner frames until P0-3; `gobot_sniff --watch`,
-`--verify` and `--inner` show them.
+`--verify` and `--inner` show them. (P0-2: the inner frame's opcode and length
+are right, but its body is still packed past the first byte, so no field can be
+read from it. Since round 3 the tools that read recordings unpack each wrapper
+instead, so `--verify` and `--inner` on a recording show the frames inside
+whole; the live capture does not unpack yet, which is the first step of P0-3,
+§4e.)
 
 **Checked again, 2026-10-18** (`ProcessPacketStream` at `0x180040a10` in this
 GhostCore.dll):
@@ -388,9 +442,12 @@ GhostCore.dll):
 - GoC never reads the inner frame's own length. It reads its marker and opcode,
   needs at least 6 bytes, and forwards all L − 1 bytes as the frame. GoBot takes
   the same room, and counts how often the inner length field disagrees with it.
+  (P0-2: it disagrees whenever compression shrank the frame, because it is the
+  unpacked length: 32 of 38 server wrappers in shop, 459 of 576 opened in the
+  fight. It never claims less than the room.)
 - An inner `0x0081` goes back through the whole parser, so its room is read as
   a run of frames, each by its own length, any `0x0081` among them opened in
-  turn. GoBot does the same, to a depth of 4.
+  turn. GoBot does the same, to a depth of 4. (P0-2: no wrapper held another.)
 - The `0x0020` rule is checked only once a whole `0x0081` frame is in the
   buffer: GoC then forwards nothing from it and stops reading the rest of that
   TCP segment or UDP datagram. GoBot skips only the wrapper's inside and counts
@@ -407,7 +464,8 @@ GhostCore.dll):
 looking inside any of them. GoC's server shows your position, HP/MP, fury, level,
 EXP and avatar time, all derived from the frames GoC uploads. Any of those not
 found in the plain opcodes may be inside `0x0081`. That is an inference, not
-confirmed.
+confirmed. (P0-2: HP and MP are inside it, in `0x0051`; your position is not, it
+comes from the client over UDP. §4e.)
 
 ### GoC also captures UDP
 
@@ -416,6 +474,13 @@ GoC's capture filter is `(tcp or udp)` on the server's port range (the strings
 and it frames UDP payloads the same way as TCP. It drops `0x002E` and `0x0031`
 when they arrive over UDP. GoBot's filter was `tcp` only, so no GoBot capture has
 ever contained the game's UDP traffic, if there is any.
+
+P0-2 found plenty. The client sends its moves, jumps and skill casts over UDP,
+plain, in the server's frame layout: 686 frames in the 123-second fight, none
+while standing still. The server sent UDP only during the fight: 88 frames of
+`0x02F0`, carrying MP. The `0x002E` and `0x0031` that GoC drops are the
+client's own frames: `0x0031` is a skill cast and `0x002E` follows each buff
+cast (§4e).
 
 Since 2026-10-18 GoBot's filter is `(tcp or udp)` on the same address and ports;
 an explicit `--filter` or `bpf_filter` still replaces it. With `--process`, UDP
@@ -440,16 +505,22 @@ handles two of them and writes the result straight into your position
 
 It is not known whether those offsets count the 8-byte frame header. If they do,
 the floats sit at payload offsets 8 and 12 (move) or 12 and 16 (jump).
+(P0-2: they do. The floats are at frame bytes 16 and 20, and 20 and 24; the
+minimum sizes end with the move's facing byte at 28 and the jump's vertical
+speed at 32–35.)
 
 Neither opcode appears in any capture GoBot has made: not in the client-side
 inventory of §2, and not in the server table of §4b. So they travel somewhere
 GoBot has not looked. They could be inside `0x0081`: if §4b's 16–28 B are
 payload sizes, its inner frames are about 23–35 bytes, the right size. Or they
-could come over UDP.
+could come over UDP. (P0-2: over UDP, from the client, together with two more
+position frames, `0x0029` and `0x0028`. The server sent `0x0027`, `0x0029` and
+`0x002A` in the same layouts for another actor. §4e.)
 
 The map-change message GoC receives (`0x12`) also carries your x, y on the new
 map as floats. So the game's own map-load packet holds an absolute position as
-well.
+well. (P0-2: it is the server's plain `0x0086`, with x, y as u16 at frame bytes
+20 and 22. §4e.)
 
 ### Other opcodes GoC names in code
 
@@ -463,6 +534,11 @@ well.
 
 `0x0038` is also the monster `EntityUpdate` of §6. GoC's hook fires on it only
 during auto login, where the first one means the world has loaded.
+
+What P0-2 showed of the others (§4e): `0x0042` and `0x0051` come inside
+`0x0081` at every map load; `0x0042` is the map's 24-slot monster table and
+`0x0051` carries HP and MP. `0x0031` is the client's skill cast and `0x002E`
+follows each buff cast. `0x005B` comes inside `0x0081` once per kill.
 
 ### Text encodings
 
@@ -490,6 +566,482 @@ Checked on 2026-10-17. The only capture still on disk,
 ×25) and no `0x0081` at all. The `probe`, `walk`, `track`, `stand` and
 `hunt.flow0` captures are gone. Testing the lead needs one new recording that
 includes UDP, which is plan item P0-2 in [goc-parity-plan.md](goc-parity-plan.md).
+It was made on 2026-10-18; the results are in §4e.
+
+## 4e. What the P0-2 recordings show (2026-10-18)
+
+Plan item P0-2: four passive recordings, made by the player on 2026-10-18 with
+`gobot_sniff --record --process Game.exe`, TCP and UDP, both directions. GoBot
+sent nothing to the game.
+
+| Run | Clock | Length | What the player did |
+|---|---|---|---|
+| still | 22:15:57–22:16:29 | 32 s | stood still |
+| walk | 22:17:04–22:17:36 | 32 s | walked left, into the map's left edge |
+| shop | 22:18:01–22:19:03 | 62 s | went through doors: six map loads |
+| fight | 22:21:18–22:23:21 | 123 s | fought monsters; took one potion and cast one buff by hand |
+
+The files keep the order of the frames but no times. A time below ("t = 20") is
+seconds into the run: the server sends a tick once a second (`0x03C6`), and the
+client's UDP frames are placed against it through the skill casts, each of which
+costs MP the moment it lands. That is good to about a second. The player noted
+no HUD figures, so nothing here has been compared with the screen yet.
+
+The BA worked these results out of the bytes, and a skeptic then re-derived each
+claim with separate scripts. Only what held up is written here, in the skeptic's
+corrected form where it corrected one. **Found** means the bytes show it.
+**Likely** means the evidence points one way but is not proof. A **candidate**
+is a field that is there as described, but whose meaning needs a reading of the
+HUD. No chat, names or other players' ids are quoted.
+
+**Offsets** in this section count from a frame's first byte, header included,
+as GoC's do. GoBot's payload offsets (the `@N` of `[Packet.*]` blocks and of
+`gobot_sniff_files --rows`) start after the 8-byte header, so they are 8 less:
+the x float at frame byte 16 is payload `@8`. Every value is little-endian.
+`gobot_sniff_files --rows` reads the UDP and plain frames as they are, and with
+`--inner` the frames inside the server's `0x0081`, which the tools that read
+recordings unpack (below). The live capture does not unpack them yet.
+
+### The six values
+
+| Value | Result | Where it is | Type |
+|---|---|---|---|
+| Own position | **Found** | Client → server over UDP, plain: `0x0027` (x, y at bytes 16, 20), `0x002A` (20, 24), `0x0029` (24, 28), `0x0028` (20, 24), and every skill cast `0x0031` (16, 18). An absolute fix at every map entry: server → client `0x0086` (20, 22). | f32 world pixels; u16 in `0x0031` and `0x0086` |
+| HP and MP | **Found** | Server → client over TCP, inside `0x0081`: `0x0051` (HP at 12, MP at 16) and `0x0050` (max HP at 68, max MP at 76). MP also over server UDP, plain: `0x02F0` (MP at 12). | u32 |
+| Fury | **Candidate** | `0x0051` bytes 20 and 22: 3600 and 3600, never changed | u16 pair |
+| Level and EXP | Level: **candidate**, 88 at `0x001E` byte 408. EXP: **not found** | inside `0x0081` | u32 |
+| Avatar time | **Two candidates**, not told apart: `0x0244` byte 24 (about 20 minutes left) and `0x01BD` byte 16 (about 20 hours left) | plain TCP | u32 seconds |
+| Pet HP | **Not found** | — | — |
+
+### `0x0081`: one frame, compressed with liblzf
+
+Found. An `0x0081` frame is laid out like this:
+
+| Frame bytes | Content |
+|---|---|
+| 0–1 | **w0**: the length of the frame inside, unpacked. Not a marker. |
+| 2–3 | `0x0081` |
+| 4–5 | **L**: how many packed bytes follow byte 11 |
+| 6–7 | check word: w0 + `0x0081` + L |
+| 8–11 | no meaning: zero in 420 of 616, otherwise leftovers that look like memory addresses |
+| 12 to L + 11 | the frame, packed with plain liblzf |
+
+So a wrapper takes L + 12 bytes, which is where §4b's "twelve bytes past the
+declared length" come from: the 8-byte header and the 4 unused bytes.
+
+All 616 server wrappers in the recordings (38 in shop, 578 in the fight) unpack
+to exactly w0 bytes and use up all L. Each gives **one** ordinary frame: first
+word `0x0105`, its own opcode, a length field equal to w0, and a check word that
+holds. No room held a second frame or padding, and none nested. The packed
+stream always opens with control byte `0x08`, a run of nine literal bytes: the
+8-byte header of the frame inside and its first body byte. That is why reading
+from byte 13 finds a valid header. The rest is packed: in the fight, 297,256
+bytes of frames came in 67,017 packed bytes, and in shop 50,588 in 3,660. Where
+liblzf cannot shrink a frame, L = w0 + 1 (125 wrappers; `0x0051` is 24 bytes
+unpacked and 25 packed).
+
+**Unpacking** (plain liblzf; `unpack_wrapper()` in `src/framing.cpp` does this
+since round 3). Read a control byte c. If c < 32, copy the next c + 1 bytes.
+Otherwise the length is c >> 5, plus the next byte when that is 7; the distance
+is ((c & 31) << 8) + the next byte; copy length + 2 bytes, one at a time so that
+they may overlap, starting distance + 1 bytes back from the end of the output.
+Back-references can reach into the header, so the output must keep it. Accept
+the result only when it is exactly w0 bytes, all L bytes were used, it begins
+`05 01`, its length field is w0 and its check word holds; otherwise leave the
+wrapper shut and count it. Only the server's wrappers unpack: the client's do
+not (below), and no UDP frame was a wrapper (0 of 865).
+
+**What GoBot does today.** Since P0-1, the live capture hands out bytes 13 to
+L + 12 as the inner frame, as GoC's own parser does. Its opcode, length and check
+word are right, but its body is packed past the first byte, so no body field can
+be read from it. The counters `length_differs` and `length_longer` count
+compression, not second frames. GoC's client does not unpack either, so its
+server must (an inference).
+
+Since round 3 (2026-10-19) GoBot can unpack: `FramingSpec::unpack` makes each
+wrapper give its one frame, whole, or be left shut and counted when it does not
+unpack. No config key sets it. The tools that read recordings do, so
+`gobot_sniff_files --verify` lists the frames inside whole (578 of 578 wrappers
+in fight.s2c, 38 of 38 in shop.s2c; none of the client's) and `--rows <opcode>
+--inner` reads their fields, at payload offsets as everywhere in this section.
+The live capture does not set it yet: turning it on, and handing the frames to
+what acts on the game, is the first step of P0-3.
+
+**GoC's `0x0020` rule** is w0 = 32: GoC leaves shut every wrapper holding a
+32-byte frame. In the fight that was the server's two `0x005A` frames (a buff's
+effect) and 406 of the client's 794 wrappers.
+
+### The client's TCP half: ciphered wrappers
+
+Found. Every frame the client sent over TCP is an `0x0081` in the layout above
+(794 of 794 in the fight), but none unpacks (0 of 963 in the four runs).
+
+- w0 is the unpacked length: 32 (406 in the fight), 24 (197), 52 (149), 256
+  (25), 16 (13), 28 (3) and 2572 (1). L is the packed length.
+- Bytes 8–11 are a sequence number that grows by exactly 8 per wrapper: 793 of
+  793 steps in the fight, and the same in still, walk and shop. The client's UDP
+  `0x0028` and `0x0026` carry the sequence number of a wrapper, which ties a UDP
+  moment to a TCP one.
+- The L bytes from 12 are ciphered. Their first bytes are the same for every
+  message of one L all session (L = 36 opens `55 43 1D` in all four runs), and
+  key bytes worked out at two positions agree between two different messages of
+  the same L. It is probably liblzf under an XOR key chosen by L (likely; not
+  decoded). Nothing needed for the six values is in it.
+
+Three classes of message line up with what the player did (likely, by count and
+timing only):
+
+| w0, L | In the fight | Probably |
+|---|---|---|
+| 16, 21 | 11, each within about 1.5 s of one of the 11 potions; none in still or walk | using a potion |
+| 24, 28 or 29 | 197, following the 195 pickups second by second | picking up |
+| 32, 28–37 (mostly 36 or 37) | 406 in the 123-s fight (about 3 a second); one a second standing or walking (32 in 32 s) | a regular report whose rate follows what the character does, and which probably also carries the position: its packed length changed once the character stood at the wall in the walk |
+
+The one 2572-byte message follows the server's one 2572-byte `0x0342`; the pair
+looks like a challenge and its answer, probably an integrity check. Nothing the
+bot needs.
+
+**AA55 units** (found). shop.c2s and fight.c2s also hold eight 18-byte units
+that are not frames (six and two): `AA 55`, u16 10, u16 0, a u16 counter that
+runs on across the session (`0x5C` to `0x63`), 8 bytes, `55 AA`. They sit
+between wrappers, and each of the shop's six and the fight's first comes right
+before the wrapper whose sequence number that map entry's `0x0028` carries (7 of
+7). They are what derails `[FramingClient]` on fight.c2s (82.9%): not mixed
+connections, and not large frames. Whether they travel on the game connection,
+the per-connection `.flowN.c2s` files of the next recording will show.
+
+### Own position: sent by the client over UDP
+
+Found. The client's UDP datagrams hold plain frames in the server's layout:
+first word `0x0105`, check word holding, 100% tiled under `[Framing]` (walk 3
+frames, shop 88, fight 686). Five types carry the character's position:
+
+| Opcode | Size | Sent | Fields (frame bytes) |
+|---|---|---|---|
+| `0x0027` move | 48 | when a walk starts, stops or turns | your id u32 at 8 and 12; **x f32 at 16, y f32 at 20**; speed f32 at 24 (9.0 walking, 0.0 stopped); facing u8 at 28 (`0x01` toward larger x, `0xFF` toward smaller x) |
+| `0x002A` air | 40 | on leaving the ground, jumping in the air and landing | your id at 8 and 12; state u32 at 16; **x at 20, y at 24**; speed at 28; vertical speed f32 at 32 |
+| `0x0029` | 44 | not settled | your id at 8 and 12; facing u32 at 16 (1 or 255); speed at 20; **x at 24, y at 28** |
+| `0x0028` | 36 | four identical copies at every map entry; five more in the fight | a TCP wrapper's sequence number at 8; your id at 12 and 16; **x at 20, y at 24**; speed at 28; flags u32 at 32 (`0x024600xx`, low byte = facing) |
+| `0x0031` skill cast | 92 | with every cast | **x u16 at 16, y u16 at 18** (whole pixels); skill id u32 at 20 |
+
+`0x002A`'s state, as read from the vertical speed that comes with it: 0 landed;
+1 left the ground (vertical speed −20 for a jump, +1.4 or +12.2 for walking off
+an edge); 6 a second jump in the air (−20); 3 a vertical speed of −10; 2 a high
+jump (−36).
+
+Evidence:
+
+- GoC's client reads x, y at bytes 16 and 20 of `0x0027` and 20 and 24 of
+  `0x002A` (§4d). Confirmed, and those offsets count the header.
+- The facing byte agrees with the direction of the next x change in 84 of 84
+  cases (shop 5, fight 79): each moving `0x0027` (speed 9) against the next
+  position frame after it, when that is an `0x0027`, `0x002A` or `0x0029` with
+  another x. Left out: the walk's one, which no position frame follows; 4
+  followed by the same x; and 5 followed by an `0x0028`, of which 3 agree and 2
+  cross a map change, where x jumps.
+- Units: speed 9.0, jump −20 and high jump −36 make 360, 800 and 1440 px/s at
+  one step per 25 ms, which are GoC's walking, jump and high-jump speeds exactly
+  ([goc-reference.md](goc-reference.md#movement)). No stretch between two skill
+  casts implies more than 360 px/s. So the speeds are pixels per 25 ms step (an
+  inference from those matches), and y grows downward. Take the speed from the
+  frame rather than as a constant: another actor's frames read 9.5.
+- At all 7 map entries the client's four `0x0028` hold the server's spawn
+  position (below).
+- The skill cast's pair is within 2 px of a neighbouring position frame in 47 of
+  63 casts, and otherwise at a point the character had walked to.
+
+**Sent on events, not on a clock.** Standing still, the client sent no UDP at
+all (0 bytes in 32 s). The walk sent a single `0x0027`, the start (x 3288.0,
+y 1155.4, speed 9, facing left), and **no stop**: the character walked into the
+map's left edge with the key held. Elsewhere a stop comes as an `0x0027` with
+speed 0. In the 123-second fight: 123 `0x0027`, 87 `0x002A`, 34 `0x0029` and 9
+`0x0028`, about two a second, plus 63 casts. So between events the position has
+to be worked out from the last one (its speed along its facing), and that dead
+reckoning must stop at walls and platform ends from the map, because walking
+into a wall sends nothing. In 39 of the fight's 123 `0x0027`, bytes 29–31 read
+`FF C0 00` and more words follow; what that second form means is untested.
+
+**An absolute fix at every map entry** comes from the server: plain `0x0086`
+(24 B) with map u16 at 16, area u16 at 18, **x u16 at 20, y u16 at 22**. The
+same x, y are u16 at 60 and 62 of your own record `0x001E` (inside `0x0081`), and
+the f32 pair of the client's `0x0028`. All 7 map entries agree:
+
+| Run | (map, area) | Spawn x, y |
+|---|---|---|
+| shop | (10, 60) | 325, 220 |
+| shop | (10, 4) | 690, 1145 |
+| shop | (10, 5) | 350, 2430 |
+| shop | (10, 4) | 2600, 1120 |
+| shop | (10, 5) | 350, 2430 |
+| shop | (10, 4) | 2600, 1120 |
+| fight | (11, 1) | 4690, 1180 |
+
+**Not the character: `0x010D` and `0x0117` are the pet** (likely, on strong
+evidence).
+
+- `0x010D` (52 B; 318 in the fight, 14 in shop, 2 in walk): state u8 at 16 (0
+  idle, 1 following with your id at 20, 4 fighting); x, y f32 at 24 and 28;
+  speed at 32; an offset pair f32 at 40 and 44: (50, −70) following, (1, −10)
+  fighting, (0, 0) at a map entry. It appears at the spawn + (60, −50) on every
+  map entry and comes to rest exactly 50 px to the side and 70 px above where
+  the character stopped.
+- `0x0117` (28 B; 21 in the fight, in bursts of three) moves that point from
+  540–1068 px away to near the character: a teleport back.
+- `0x0026` (124 B, the fight's first UDP frame: a sequence number at 8, your id
+  at 12) holds the character's last point on the previous map (x, y at 16 and
+  20) and two of the pet's (at 52, 56 and at 92, 96).
+- Your record `0x001E` holds item 9210052 at byte 116, one of GoC's pet icons
+  (`data\images\pet\pet\9210052.png`).
+
+The walk's other two frames are the pet's, so the character's end point in the
+walk is known only through it: the pet came to rest at x = 75, which puts the
+character within about 50–100 px of the left edge.
+
+**The server does not echo your moves.** During still and walk it sent nothing
+but its tick. It does send another actor's moves in the client's layouts: the
+fight's server stream holds plain `0x0027` (4), `0x0029` (2) and `0x002A` (2),
+all naming one other id and none naming yours. So your position comes from what
+the client sends, and from the server only at a map entry.
+
+### HP and MP
+
+Found.
+
+| Value | Frame | Frame bytes | Type |
+|---|---|---|---|
+| HP | `0x0051`, inside `0x0081` (24 B unpacked) | 12 | u32 |
+| MP | `0x0051` | 16 | u32 |
+| the fury candidate | `0x0051` | 20, 22 | u16, u16 |
+| max HP, HP, max MP, MP | `0x0050`, inside `0x0081` (200 B unpacked, the stat sheet) | 68, 72, 76, 80 | u32 |
+| MP | `0x02F0`, server UDP, plain (16 B) | 12 | u32 |
+
+Byte 8 is 0 in every `0x0051` and every `0x02F0`. `0x0051` comes at every map
+load and after HP or MP changes (116 in the fight), though small drains of 2 are
+folded into the next one. `0x0050` comes at every map load and after a buff
+lands (3 in the fight). `0x02F0` came only in the fight, 88 times, and samples
+more thinly: 44 large drops for 63 casts, 15 rises and 26 drains of 2. In these
+recordings max HP was 9232 and max MP 8902.
+
+Evidence: the 63 skill casts the client sent (`0x0031`) match the 63 MP drops of
+more than 400 in `0x0051`, in order, at a fixed cost per skill: each of the 63
+drops lies in the cost range below of the skill cast in the same place. Put in
+a random order, the same drops match 14.5 of the casts on average, and 30 or
+more with a chance of about 6 in a million (counted exactly over every order).
+
+| Skill id | Casts | MP cost |
+|---|---|---|
+| 51102 | 21 | 1200–1204 |
+| 51105 | 17 | 1229–1235 |
+| 51103 | 9 | 1223–1227 |
+| 31111 | 8 | 502–506 |
+| 31110 | 2 | 502 |
+| 13101 | 3 | 432–434 |
+| 13104 | 1 | 760 |
+| 13111 | 2 | 1299–1303 |
+
+MP never went above 8902 and HP never above 9232, and the three `0x0050` repeat
+the `0x0051` values of the same moment. MP is proven by the casts. HP is the
+other pool by elimination and by GoC's own order for the game state (HP, MP,
+fury). **Check max HP 9232 and max MP 8902 once on the HUD.**
+
+What the fight did to them, which is not what the plan expected:
+
+- **MP** fell with every cast and rose 15 times: 11 MP potions and 4 drops that
+  act when picked up (see *Drops that act when picked up* below). The potions
+  were item 8810121 in bag slot 6, its count going from 71 to 60, each worth
+  about 5,000 MP (less when it hit the maximum), at t = 20, 38, 50, 61, 71, 87,
+  95, 98, 108, 115 and 120. The player took one by hand, so the other ten were
+  used automatically; by what, the recordings cannot tell.
+- **HP** moved 8 times: down 1 seven times (t = 15, 56, 57, 62, 77, 86 and 100)
+  and up 4 once (t = 74), back to its maximum, when a pickup of item 9900005
+  filled HP and MP together. No HP potion was drunk: the HP potion stacks (item
+  8820141) never changed. No hit on the character shows in any frame.
+
+### Fury, level and EXP, avatar time, pet HP
+
+**Fury: a candidate.** The u16 pair 3600, 3600 at bytes 20 and 22 of `0x0051`
+(and 104 and 106 of `0x0050`) never changed: 122 of 122 samples in shop and
+fight, 9 of 9 in `0x0050`, and the pair is in no other frame or datagram. For
+it: it is the third pool after HP and MP, GoC's own order, and 3600 = 30 × 120
+fits GoC's fury rule (SP ≥ (n + 10) × 120). Against it: no fury was used, so any
+resource sitting at its maximum would look the same.
+
+**Level: a candidate. EXP: not found.** 88 is a u32 at byte 408 of your record
+`0x001E` (inside `0x0081`, 416 bytes unpacked, one per map load; 7 of 7) and at
+byte 196 of `0x0050`. That is odd for a level, which other players can normally
+see: the same `0x001E` field reads `0xFFFFFFFF` in another player's record. For
+EXP, three u32 at bytes 160, 164 and 168 of `0x001E` (and 1512, 1516 and 1520 of
+the snapshot `0x0065`) read 616, 179,986 and 885,300. 179,986 is 20.3% of
+885,300, the shape of "EXP and EXP to the next level"; but they never changed
+across 7 records and 5 snapshots spanning about 122 kills, and another player's
+record holds 100, 100 and 0 there, which does not fit. Searched: every changing
+u16 and u32 field of every server frame type in the fight, wrapped ones
+unpacked. What moves is counters, gold, bag counts, timers and positions. Three
+per-kill counters are untested: `0x005B` u32 at 16 (+3 per kill, 29 to 392),
+`0x03A0` at 460 (+1 every two kills, 362 to 423) and `0x0065` u16 at 398 (798 to
+812). Either the fight earned no EXP (a level cap, or monsters far below the
+character), or EXP travels in a frame these recordings do not hold.
+
+**Avatar time: two candidates.** Two exact countdowns in seconds, both falling
+one second per second of clock:
+
+| | A | B |
+|---|---|---|
+| Frame | `0x0244`, plain, 44 B | `0x01BD`, plain, 20 B |
+| Sent | once per map load (7 times) | every 60 s |
+| Seconds left | u32 at 24 | u32 at 16 |
+| Beside it | item id 6810004 at 16; the same item in `0x001E` at 308 and in `0x0242` | a fixed word `0x23726374` at 8, your id at 12; the same count in `0x001E` at 208 and `0x0065` at 1564 |
+| Read | 1428 down to 1393 in the shop run, 1226 at the fight's start (167 s later by count, 166 s by the clock) | 71,767 in shop, 71,587 and 71,527 in the fight: a countdown from exactly 72,000 (20 hours) that began at 22:15:00, ±1 s |
+
+Which one is the avatar's is open. GoC presses the avatar key at
+`avatar_reset_threshold_minutes` (2) left, and ZTeam relays the time as an i16.
+That holds A's 1226 seconds but not B's 71,600, unless ZTeam relays minutes, in
+which case B fits too. B's once-a-minute update suits a threshold in minutes;
+A came only at map loads here. GoC's window of `avatar_reset_start_hour` 17 to
+`avatar_reset_end_hour` 24 fits neither. Plain `0x0077` (24 B: skill id at 12,
+72,000 at 16) follows the buffs 13104 and 13111; its unit is unproven (25 ms
+steps, milliseconds and seconds all fit), and 72,000 is also where B started.
+
+**Pet HP: not found.** The pet was out in every run (`0x010D`, above), but none
+of its fields is HP-like (byte 36 is a float of 3.3–5.5 or about 151, byte 48
+never changes), no server frame holds a second HP-like pool, and nothing fired
+once the way a death would. Searched: every server frame of shop and fight
+(wrapped ones unpacked), every u16 and u32 field with at least four values or a
+step pattern, and the client's `0x010D`, `0x0117` and `0x0026`. The pet item
+9210052 at byte 116 of `0x001E` (and 2120 of `0x0065`) never changed.
+
+### Other findings for P0-3 and Phase 3
+
+- **Your id** is one small number, the same all session. It is in all 777 of
+  the client's UDP frames: at bytes 8 and 12, except in `0x0028` and `0x0026`,
+  where byte 8 is a sequence number and the id is at 12. The server uses it in
+  your record `0x001E` (12), pickups `0x004D` (12), loot lists `0x004A` (96),
+  monster frames aimed at you `0x0038` (48), `0x01BD` (12) and `0x0109` (16). It
+  is not in the monsters' slot space (0–23).
+- **A map load** carries only (map, area, spawn x, y), in `0x0086`: no collision
+  grid and no map data. Within about a second come wrapped `0x001E` (your
+  record), `0x004F` (5,016 bytes of zeros), `0x0042`, `0x0051`, `0x024E` (16 B,
+  the same in all 7 loads) and `0x0050`; plain `0x0244` and `0x0242` (the timed
+  item, A above), `0x0263`, `0x0739`, `0x03D6` (zeros), `0x073F` (your skills,
+  as pairs of skill id and slot << 16 | level) and `0x0727` (zeros); a second
+  later, plain `0x0109`. `0x0042` (2,568 B unpacked) is **the map's 24-slot
+  monster table**: monster slot numbers 0–23 as u16 from byte 316, `0xFFFF`
+  where empty. It was empty on the shop run's maps and filled on the fight map.
+  With each map entry the client sends over UDP one or two `0x002C`, three
+  `0x0024`, four `0x0028` and one `0x0113`. A table from (map, area) to the
+  game's `.map` files is still to be made.
+- **Pickups** are plain `0x004D` (40 B), not combat events: your id at 12, a bag
+  index at 16, item id at 20, and a u32 amount at 32 (the gold amount; 0 for
+  items). Gold is item 9800002: 106 pickups in the fight, 166–223 each. Before
+  each gold pickup comes a wrapped `0x006B` (28 B) whose u32 at 12 is your
+  running gold total (105 of 105 increments equal the next pickup). Before each
+  of the 89 item pickups comes the list it changed: `0x0068` (38), `0x0069`
+  (40), `0x0066` (2), `0x0065` (5) or `0x0051` (4).
+- **The bag** is wrapped `0x0068` (1,528 B unpacked): 72 slots, item id u32 at
+  12 + 4j and count u16 at 300 + 2j for slot j. Its loot slots match the pickup
+  tallies exactly. After each potion an `0x0068` shows that slot one lower, and
+  its u16 at 1238 reads 3571 in those 11 frames only (perhaps a cooldown). So
+  the potion count can come from packets: the count of the slot holding the
+  potion's item id.
+- **Drops that act when picked up** (items 99000xx): 9900002 gave MP +6230
+  (t = 30), 9900001 filled MP (t = 52 and 73), 9900005 filled HP and MP (t = 74).
+  Plain `0x038E` (24 B) comes before all 9 pickups of 99000xx items, and each of
+  the 5 pickups of 9900004 comes right after a wrapped `0x0065`, a full snapshot
+  of your character. So HP and MP can rise without a potion.
+- **A skill cast** is the client's UDP `0x0031` (92 B): your x, y as u16 at 16
+  and 18; skill id u32 at 20; from 24 the targets (four bytes, the third a
+  count, then monster slot numbers as u16, padded with `0xFFFF`); and an action
+  counter u32 at 88 that steps by 2 per attack cast and by 1 per buff cast and
+  per `0x002E`.
+- **Buffs.** Skills 13104, 13101 and 13111 were cast at t = 17–19 (13101 again
+  at 44 and 86, 13111 at 84; the player cast one buff by hand), each followed by
+  a client `0x002E` (72 B). The
+  server answered each with an `0x0051` for the MP cost. For 13104 and 13111 it
+  also sent wrapped `0x005A` (skill id at 12, change i32 at 20, new value at 24:
+  −1002 to 2150, then +1060 to 4212, which replaces the first), a new `0x0050`
+  (a stat u32 at 136 going 3152, 2150, 4212; the u32 at 92 going 26 to 35),
+  plain `0x0263`, `0x0739`, `0x03D6`, `0x073F`, and `0x0077` (skill id,
+  72,000). 13101 changed only MP; the recast of 13111 brought only `0x0077`.
+  The client's `0x002D` (76 B) carries the same stat as u16 at 20 (3152 before,
+  4212 after); what `0x002D` is, is not known.
+- **Kills:** about 122 in the fight, from 122 each of plain `0x004A`, plain
+  `0x003F` and wrapped `0x005B`. `0x004A` (144 B) is the loot list: up to seven
+  drops, item id u32 at 40 + 4j, x u16 at 68 + 2j and y u16 at 82 + 2j for
+  j = 0–6, all three 0 in an empty slot (854 of 854 slots read so: 207 filled,
+  647 empty; gold, 9800002, at 64 in 108 of the 122), and your id as owner at
+  96. `0x003F` (52 B): x, y u16 at 20 and 22 (84–4568 and 1151–1456, the map's
+  range; bytes 24–27 are 0 in every one) and a monster slot u16 at 32 (0–23).
+- **Monsters chasing you** (likely): the 122 plain `0x0038` that name your id
+  at byte 48 (sub-type 9, speed 7.0) carry a destination as u16 at 32 and 34, a
+  median 63 px from you: a rough hint of your position, not a feed. Before
+  Phase 3 relies on `[Packet.0x0038]` in protocol.ini (id at payload 8, x at 80,
+  y at 82), check it on these recordings: per slot, the u16 pairs at payload 24
+  and 80 jump between frames of different sub-types, so it may mix actors.
+- **The tick:** plain `0x03C6` (12 B, empty body) once a second: 32, 32, 62 and
+  122 in the four runs. With no monsters about, it is all the server sent.
+
+### What P0-3 can build on
+
+In this order:
+
+1. Unpack the server's `0x0081` (above). HP, MP, the bag, gold and the map-load
+   records are all inside it. The unpacking is written and tested
+   (`FramingSpec::unpack`, used by the tools that read recordings); the live
+   capture has to turn it on, and what acts on the game to take its frames.
+2. Own position from the client's UDP `0x0027`, `0x002A`, `0x0029` and `0x0028`,
+   and the pair in `0x0031`; never from `0x010D` or `0x0117`, which are the pet.
+   Snap to every event, dead-reckon between events at the frame's speed along
+   its facing (jumps at their vertical speed), and stop at walls and platform
+   ends, since a walk into a wall sends no stop. `read_own_position()` in
+   `include/gobot/own_position.hpp` reads one such frame; nothing uses it yet.
+3. Plain `0x0086` for each map change and its spawn x, y.
+4. `0x0051` and `0x0050` for HP, MP and their maxima; plain `0x02F0` as a quick
+   MP update. Rises also come from drops that act when picked up, not only from
+   potions.
+5. `0x006B` for gold and `0x0068` for bag counts, the potion count among them.
+6. The timers `0x0244` and `0x01BD`, once it is known which is the avatar's.
+
+Live capture must keep UDP in both directions; today everything that acts on
+the game takes plain TCP frames only (`GamePacket::plain()`). The wrapped frames
+need the unpacking; the UDP ones need nothing.
+
+### What this corrects outside §4c and §4d
+
+Those two sections are corrected in place. These are left as they were written,
+with the correction here:
+
+- **§1**, "The client half is not encrypted": over TCP it is. Every frame the
+  client sends there is an `0x0081` whose content does not unpack, and the
+  constant bytes §1 measured are what a fixed key per length leaves on repeated
+  messages. The client's UDP is plain, and that is where the position is.
+- **§2**: `0x00C5`, `0x01A5`, `0x00C4`, `0x00BF` and the rest are not opcodes
+  but the wrappers' check words, w0 + `0x0081` + L: `0x00C5` = `0x20` + `0x81` +
+  `0x24`, and `0x01A5` = `0x100` + `0x81` + `0x24`. The "8-byte trailer" is the
+  end of the ciphered content.
+- **§4b**: the twelve bytes are the wrapper's 8-byte header and its four unused
+  bytes, and the length field counts the packed bytes after them. The framing it
+  gave stays right.
+- **configs/protocol.ini**, in comments: `[Framing]`'s "constant 0x0005" is
+  `0x0105`. In the `0x0081` comment, bytes 8–12 are four unused bytes and the
+  packed stream's first control byte, and the "inner frame" from byte 13 is
+  packed. `[FramingClient]`'s opcode at 6 is the wrapper's check word. The
+  commented-out `[Packet.0x004D]` is a pickup, not damage: payload `@8` is a bag
+  index and payload `@24` the gold amount.
+- **README.md**, "The two directions are framed differently": both directions
+  use `[Framing]`'s layout. `[FramingClient]` reads the client's wrappers by
+  their check words.
+
+### What the next recording needs
+
+Each candidate needs the HUD read at a known second. The next recording should
+note, with the clock time of each reading: HP and MP (to check 9232 and 8902),
+fury, level, EXP percent and the avatar time left. It should include one fury
+use, one kill that gives EXP (or a level-up), the avatar put on or renewed, the
+pet hurt and then killed, and the character hit by a stronger monster (for HP
+loss and the death frames). A long walk with GoC's `Nhân vật:` line read during
+it would check the dead reckoning and show whether UDP datagrams are ever lost.
+`--record` now writes each connection's client half to its own
+`<name>.flowN.c2s`, which will show where the AA55 units travel.
 
 ## 5. The capture that settles it
 

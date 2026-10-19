@@ -88,7 +88,16 @@ public:
     /// header, but the opcode sits at offset 2 coming down and offset 6 going
     /// up, so one spec decodes half the conversation and throws the other half
     /// away as noise. Unset, both directions use set_framing().
+    ///
+    /// The TCP stream only. Datagrams take set_udp_framing() both ways.
     void set_client_framing(const FramingSpec& spec);
+
+    /// Framing for UDP datagrams, in both directions. Unset, datagrams take
+    /// set_framing()'s spec both ways -- never the client's, for what the
+    /// client sends is in the server's layout: the P0-2 recordings
+    /// (2026-10-18) tile 100% so, and 2 to 14% under [FramingClient]
+    /// (load_udp_framing).
+    void set_udp_framing(const FramingSpec& spec);
 
     /// Only these opcodes are forwarded. Empty = forward everything.
     void set_opcode_filter(const std::vector<std::uint16_t>& opcodes);
@@ -160,8 +169,8 @@ public:
         std::uint64_t udp_fragments    = 0;
         /// Datagrams whose direction only their port numbers decided: no
         /// known server at either end, and this machine's own address at
-        /// both ends or neither. Each may be in the wrong .udp file, framed
-        /// with the other direction's spec (datagram_direction).
+        /// both ends or neither. Each may be in the wrong .udp file, and its
+        /// frames labelled with the wrong direction (datagram_direction).
         std::uint64_t udp_by_port      = 0;
 
         /// Looking inside 0x0081, over TCP and UDP together.
@@ -253,6 +262,8 @@ private:
     FramingSpec        framing_;
     FramingSpec        client_framing_;
     bool               has_client_framing_ = false;
+    FramingSpec        udp_framing_;
+    bool               has_udp_framing_ = false;
     std::vector<bool>  opcode_allowed_;     ///< indexed by opcode; empty = allow all
     bool               filter_active_ = false;
 
