@@ -487,6 +487,11 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
 
 - **Party leader (P2-4):** tell who leads the way GoC does, from the crown it draws on a party slot: GoC's inven/0 and inven/1 Party_King_My.spr (your slot: you lead) and Party_King_Other.spr (another member leads). With "Chỉ mời khi đang làm chủ party" ticked, invite only when your own crown is seen, and log why when no crown is seen at all.
 - **Thử tìm (`gobot_cli --trash --dry`):** stays as it is. It opens the bag with the bag key, pages through it with the bag's own buttons, reads every slot and says what a pass would do. It never drags to the bin, right-clicks or confirms anything.
+- **Alone with the leader tick on (P2-4):** invite, to start a party, as GoC does. Only when GoBot is sure you are alone: a member whose leader's panel is hidden must not read as alone.
+- **Jumping (P1-8, P2-7, P3-2):** the game's jump is the Up arrow; a double jump is Up twice; a high jump is Ctrl + Up.
+- **Characters for the live fight tests:** one warrior (melee) and one mage (ranged).
+- **Self-name match, fix round 4:** parked. Your own position now comes from packets (P0-2), so P0-3 replaces finding your name plate on screen; the parked branch stays for reference.
+- **The live runner** may run fight commands for the tests: `gobot_cli --hunt N`, a one-press jump test, and a hunt with the macro.
 
 ## Questions for the player (2026-10-17), answered 2026-10-18
 
