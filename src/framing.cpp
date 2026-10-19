@@ -61,7 +61,8 @@ std::string FramingSpec::describe() const {
         std::snprintf(t, sizeof(t), " 0x%04X+%u", static_cast<unsigned>(trailer_opcode),
                       static_cast<unsigned>(trailer_bytes));
         os << t;
-        if (unwraps()) os << " inner@" << inner_offset;
+        if (unwraps() && unpack) os << " unpacked";
+        else if (unwraps())      os << " inner@" << inner_offset;
     }
     return os.str();
 }
@@ -98,8 +99,108 @@ UnwrapCounts& UnwrapCounts::operator+=(const UnwrapCounts& o) {
     unreadable     += o.unreadable;
     too_deep       += o.too_deep;
     length_differs += o.length_differs;
+    length_longer  += o.length_longer;
     checksum_bad   += o.checksum_bad;
+    unpacked       += o.unpacked;
+    unpack_failed  += o.unpack_failed;
     return *this;
+}
+
+// ------------------------------------------------------------- unpacking
+
+namespace {
+
+/// Where an 0x0081 wrapper's packed stream starts: after its 8-byte header
+/// and four bytes that mean nothing (protocol-findings 4e).
+constexpr std::size_t kPackedFrom = 12;
+
+/// The first word of every frame that is not a wrapper, in the P0-2
+/// recordings: 2,860 of 2,860, both directions, TCP and UDP.
+constexpr std::uint64_t kFrameMarker = 0x0105;
+
+} // namespace
+
+bool lzf_unpack(const std::uint8_t* in, std::size_t n, std::size_t limit, Bytes& out) {
+    out.clear();
+    if (in == nullptr && n != 0) return false;
+    std::size_t i = 0;
+    while (i < n) {
+        const unsigned ctrl = in[i++];
+        if (ctrl < 32) {
+            // A run of ctrl + 1 bytes, copied as they are.
+            const std::size_t len = ctrl + 1u;
+            if (len > n - i || len > limit - out.size()) {
+                out.clear();
+                return false;
+            }
+            out.insert(out.end(), in + i, in + i + len);
+            i += len;
+            continue;
+        }
+        // A copy of bytes already out: (ctrl >> 5) + 2 of them, the next
+        // byte adding to the count when ctrl >> 5 is 7, from as far back as
+        // the low five bits and the byte after say.
+        std::size_t len = ctrl >> 5;
+        if (len == 7) {
+            if (i >= n) { out.clear(); return false; }
+            len += in[i++];
+        }
+        if (i >= n) { out.clear(); return false; }
+        const std::size_t back = (static_cast<std::size_t>(ctrl & 31u) << 8) + in[i++] + 1;
+        len += 2;
+        if (back > out.size() || len > limit - out.size()) {
+            out.clear();
+            return false;
+        }
+        // One byte at a time: a copy from close behind runs on into the
+        // bytes it has just written, which is how liblzf repeats a byte.
+        const std::size_t from = out.size() - back;
+        for (std::size_t k = 0; k < len; ++k) {
+            const std::uint8_t b = out[from + k];
+            out.push_back(b);
+        }
+    }
+    return true;
+}
+
+bool unpack_wrapper(const FramingSpec& spec, const std::uint8_t* w, std::size_t span,
+                    Bytes& frame) {
+    frame.clear();
+    if (w == nullptr || !spec.has_trailer() || span <= kPackedFrom) return false;
+
+    // The wrapper's own words: the unpacked length, the opcode, and the
+    // length field, which counts the packed bytes from byte 12 to its end.
+    std::uint64_t unpacked = 0, op = 0, packed = 0;
+    if (!read_uint_at(w, span, 0, 2, true, unpacked) ||
+        !read_uint_at(w, span, spec.opcode_offset, static_cast<int>(spec.opcode_size),
+                      spec.opcode_le, op) ||
+        !read_uint_at(w, span, spec.length_offset, static_cast<int>(spec.length_size),
+                      spec.length_le, packed))
+        return false;
+    if (op != spec.trailer_opcode || packed != span - kPackedFrom ||
+        unpacked < spec.header_size)
+        return false;
+
+    if (!lzf_unpack(w + kPackedFrom, span - kPackedFrom, static_cast<std::size_t>(unpacked),
+                    frame) ||
+        frame.size() != unpacked) {
+        frame.clear();
+        return false;
+    }
+
+    // What came out must be one whole frame, proven by its own header.
+    std::uint64_t first = 0, inner_op = 0, inner_len = 0;
+    const bool ok =
+        read_uint_at(frame.data(), frame.size(), 0, 2, true, first) &&
+        read_uint_at(frame.data(), frame.size(), spec.opcode_offset,
+                     static_cast<int>(spec.opcode_size), spec.opcode_le, inner_op) &&
+        read_uint_at(frame.data(), frame.size(), spec.length_offset,
+                     static_cast<int>(spec.length_size), spec.length_le, inner_len) &&
+        spec.total_size_for(inner_len, inner_op) == frame.size() &&
+        spec.checksum_ok(frame.data(), frame.size()) &&
+        (first == kFrameMarker || inner_op == spec.trailer_opcode);
+    if (!ok) frame.clear();
+    return ok;
 }
 
 // ------------------------------------------------------------ unwrapping
@@ -144,6 +245,33 @@ bool marked_shut(const std::uint8_t* w, std::size_t span) {
 void open_wrapper(const FramingSpec& spec, const std::uint8_t* w, std::size_t span,
                   Direction dir, std::uint64_t timestamp_ms, std::uint8_t depth,
                   FrameScanResult& out) {
+    if (spec.unpack) {
+        // Unpacked, the wrapper gives its one frame whole, or nothing. GoC's
+        // 0x0020 rule is left out: that first word is the unpacked length.
+        if (depth >= kMaxWrapDepth) {
+            ++out.unwrap.too_deep;
+            return;
+        }
+        Bytes frame;
+        if (!unpack_wrapper(spec, w, span, frame)) {
+            ++out.unwrap.unpack_failed;
+            return;
+        }
+        ++out.unwrap.unpacked;
+        std::uint64_t op = 0;
+        read_uint_at(frame.data(), frame.size(), spec.opcode_offset,
+                     static_cast<int>(spec.opcode_size), spec.opcode_le, op);
+        out.packets.push_back(make_packet(spec, frame.data(), body_end(spec, frame.size(), op),
+                                          op, dir, timestamp_ms,
+                                          static_cast<std::uint8_t>(depth + 1)));
+        ++out.unwrap.inner;
+        // A wrapper inside, whole, is opened in turn.
+        if (op == spec.trailer_opcode)
+            open_wrapper(spec, frame.data(), frame.size(), dir, timestamp_ms,
+                         static_cast<std::uint8_t>(depth + 1), out);
+        return;
+    }
+
     // Checked first, as GoC checks it. Whatever such a wrapper holds is not
     // taken for a frame here either, and the count says how often it happens.
     if (marked_shut(w, span)) {
@@ -188,8 +316,12 @@ void read_inside(const FramingSpec& spec, const std::uint8_t* in, std::size_t n,
         // length. Whether that length agrees is worth knowing, so it is counted.
         out.packets.push_back(make_packet(spec, in, n, op, dir, timestamp_ms, depth));
         ++out.unwrap.inner;
-        if (spec.total_size_for(raw, op) != n) ++out.unwrap.length_differs;
-        if (!spec.checksum_ok(in, n))          ++out.unwrap.checksum_bad;
+        const std::size_t own = spec.total_size_for(raw, op);
+        if (own != n) {
+            ++out.unwrap.length_differs;
+            if (own > n) ++out.unwrap.length_longer;
+        }
+        if (!spec.checksum_ok(in, n)) ++out.unwrap.checksum_bad;
         return;
     }
 
@@ -270,6 +402,18 @@ FrameScanResult extract_frames(const FramingSpec& spec,
     // here: its first bytes are as untrustworthy as post-garbage ones.
     bool resyncing = !locked;
 
+    // One byte slid past: counted, and placed -- in one run with the bytes
+    // slid past just before it -- so that a tool can show where they were.
+    auto skip_byte = [&] {
+        if (!result.skipped.empty() &&
+            result.skipped.back().offset + result.skipped.back().length == pos)
+            ++result.skipped.back().length;
+        else
+            result.skipped.push_back(ByteRun{ pos, 1 });
+        ++pos;
+        ++result.resyncs;
+    };
+
     while (pos + spec.header_size <= size) {
         std::uint64_t raw_len = 0;
         if (!read_uint_at(buf + pos, size - pos, spec.length_offset,
@@ -289,8 +433,7 @@ FrameScanResult extract_frames(const FramingSpec& spec,
         if (!header_valid || total < spec.min_frame || total > spec.max_frame) {
             // Lost alignment. Slide one byte and try again. Doing this
             // silently would hide a wrong FramingSpec, so it's counted.
-            ++pos;
-            ++result.resyncs;
+            skip_byte();
             resyncing = true;
             continue;
         }
@@ -302,8 +445,7 @@ FrameScanResult extract_frames(const FramingSpec& spec,
             // would stall the scanner until that many bytes arrive, which may
             // be never. Keep sliding instead.
             if (!resyncing) break;
-            ++pos;
-            ++result.resyncs;
+            skip_byte();
             continue;
         }
 
@@ -318,8 +460,7 @@ FrameScanResult extract_frames(const FramingSpec& spec,
                                || (next + spec.header_size > size)        // can't tell yet
                                || (declared_at(next) != 0);               // next parses
             if (!chain_ok) {
-                ++pos;
-                ++result.resyncs;
+                skip_byte();
                 continue;
             }
             resyncing = false;
@@ -328,8 +469,7 @@ FrameScanResult extract_frames(const FramingSpec& spec,
         std::uint64_t opcode = 0;
         if (!read_uint_at(buf + pos, size - pos, spec.opcode_offset,
                           static_cast<int>(spec.opcode_size), spec.opcode_le, opcode)) {
-            ++pos;
-            ++result.resyncs;
+            skip_byte();
             continue;
         }
 
@@ -361,7 +501,15 @@ FrameScanResult extract_datagram(const FramingSpec& spec,
 
     // Whatever the scanner would have kept for the next call has no next call
     // to wait for. It is counted rather than dropped quietly.
-    if (data != nullptr && r.consumed < size) r.resyncs += size - r.consumed;
+    if (data != nullptr && r.consumed < size) {
+        const std::size_t left = size - r.consumed;
+        if (!r.skipped.empty() &&
+            r.skipped.back().offset + r.skipped.back().length == r.consumed)
+            r.skipped.back().length += left;
+        else
+            r.skipped.push_back(ByteRun{ r.consumed, left });
+        r.resyncs += left;
+    }
     r.consumed = size;
     return r;
 }
@@ -392,6 +540,11 @@ FramingSpec load_framing(const std::string& path, bool& found, const char* secti
     // replaced by a build, and it was written before this key existed.
     spec.inner_offset   = static_cast<std::uint32_t>(ini.get_int(S, "inner_frame_offset", 13));
     return spec;
+}
+
+FramingSpec load_udp_framing(const std::string& path, const FramingSpec& server, bool& found) {
+    const FramingSpec udp = load_framing(path, found, "FramingUdp");
+    return found ? udp : server;
 }
 
 std::string where_found(const GamePacket& p) {

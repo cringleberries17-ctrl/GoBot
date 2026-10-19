@@ -111,6 +111,28 @@ struct FramingSpec {
 
     bool unwraps() const { return has_trailer() && inner_offset >= header_size; }
 
+    /// Unpack each wrapper, instead of taking GoC's frame at inner_offset.
+    ///
+    /// The P0-2 recordings (2026-10-18) showed what an 0x0081 holds: one
+    /// frame, packed with liblzf. Its first word is that frame's length
+    /// unpacked, its length field counts the packed bytes, bytes 8-11 mean
+    /// nothing, and the packed stream runs from byte 12 to the end
+    /// (protocol-findings 4e). The stream opens with nine literal bytes, the
+    /// frame's header and its first body byte, which is why a whole header
+    /// sits at byte 13; past it the body is packed. So the frame GoC takes
+    /// from byte 13 has the right opcode and length, and no field after its
+    /// first body byte.
+    ///
+    /// With this set, each wrapper unwraps() would open is unpacked instead
+    /// (unpack_wrapper): its one frame comes out whole, at the next depth,
+    /// and a wrapper that does not unpack is left shut and counted
+    /// (UnwrapCounts::unpack_failed). GoC's 0x0020 rule does not apply: that
+    /// first word is the unpacked length, and 0x0020 a frame of 32 bytes.
+    ///
+    /// No config key sets it: it is false unless code sets it. The tools
+    /// that read recordings set it; the live capture does not yet (P0-3).
+    bool unpack = false;
+
     /// Total frame size, given the opcode that header carries.
     std::uint32_t total_size_for(std::uint64_t raw_length, std::uint64_t opcode) const {
         const std::uint32_t t = total_size(raw_length);
@@ -160,14 +182,58 @@ struct UnwrapCounts {
 
     /// Frames whose own length field does not match the room they fill. The
     /// frame is still taken as the whole room, as GoC takes it; this says
-    /// how often the two readings would differ, which no capture has shown yet.
+    /// how often the two readings would differ.
     std::size_t length_differs = 0;
+
+    /// Of those, the frames whose own length claims MORE than the room holds.
+    /// The others claim less, which is what a room holding a second frame
+    /// after the first would look like. In the P0-2 recordings (2026-10-18)
+    /// every inner frame that disagreed claimed more; none claimed less.
+    std::size_t length_longer = 0;
 
     /// Frames whose header check word does not hold. GoC never checks it, so
     /// neither does unwrapping; the count says whether inner frames carry one.
     std::size_t checksum_bad = 0;
 
+    /// Wrappers unpacked (FramingSpec::unpack), each into its one frame.
+    /// Unpacking counts here, in unpack_failed, inner and too_deep, and
+    /// leaves the counts above at 0: they belong to GoC's reading from
+    /// inner_offset.
+    std::size_t unpacked = 0;
+
+    /// Wrappers that did not unpack (FramingSpec::unpack), left shut: nothing
+    /// inside them is taken for a frame. Every wrapper the client sent over
+    /// TCP in the P0-2 recordings does not: their content is ciphered.
+    std::size_t unpack_failed = 0;
+
     UnwrapCounts& operator+=(const UnwrapCounts& o);
+};
+
+/// Plain liblzf decompression of the `n` bytes at `in` into `out`, which it
+/// replaces. A control byte c below 32 is followed by c + 1 bytes to copy as
+/// they are. Any other copies (c >> 5) + 2 bytes -- with the next byte added
+/// to c >> 5 when that is 7 -- from ((c & 31) << 8) + the byte after it, + 1,
+/// bytes back from the end of what is out so far, one byte at a time, so that
+/// a copy may run on into the bytes it is writing. False, with `out` empty,
+/// when the bytes are not a whole stream of that form, a copy reaches back
+/// before the start, or the result would pass `limit` bytes.
+bool lzf_unpack(const std::uint8_t* in, std::size_t n, std::size_t limit, Bytes& out);
+
+/// The one frame inside an 0x0081 wrapper `w` of `span` bytes -- its declared
+/// length plus the trailer, as framing reads one -- unpacked into `frame`; or
+/// false, with `frame` empty, when that is not what `w` holds. Taken only as
+/// protocol-findings 4e says: the bytes from 12 to the end are as many as the
+/// wrapper's length field says, they unpack with none left over to exactly
+/// as many bytes as its first word says, and those are a frame whose own
+/// length field agrees, whose check word holds, and whose first word is
+/// 0x0105 -- or which is a wrapper itself, whose first word is a length.
+bool unpack_wrapper(const FramingSpec& spec, const std::uint8_t* w, std::size_t span,
+                    Bytes& frame);
+
+/// A run of bytes in a buffer: where it starts, and how long it is.
+struct ByteRun {
+    std::size_t offset = 0;
+    std::size_t length = 0;
 };
 
 /// Outcome of pulling frames off the front of a stream buffer.
@@ -180,6 +246,11 @@ struct FrameScanResult {
     std::size_t resyncs  = 0;        ///< bytes discarded hunting for alignment
     bool        locked   = false;    ///< pass back as `locked` on the next call
     UnwrapCounts unwrap;             ///< see FramingSpec::inner_offset
+
+    /// Where the resync bytes were, run by run, in the order they came; their
+    /// lengths add up to `resyncs`. Not what lies past `consumed`, which was
+    /// never reached. For the tools that show what a spec could not read.
+    std::vector<ByteRun> skipped;
 
     /// Frames read straight off the buffer, leaving out those found inside
     /// wrappers: the count every caller had before anything was unwrapped.
@@ -218,6 +289,10 @@ struct FrameScanResult {
 /// The inner frames carry the wrapper's direction and timestamp, and their
 /// payload starts after their own header_size bytes. Their header check word
 /// is not required, since GoC requires none; whether it holds is counted.
+///
+/// When the spec also unpacks (FramingSpec::unpack), each wrapper is
+/// unpacked instead: its one frame comes straight after it, whole, or
+/// nothing does and the wrapper is counted as one that did not unpack.
 FrameScanResult extract_frames(const FramingSpec& spec,
                                const std::uint8_t* buf,
                                std::size_t size,
@@ -232,7 +307,8 @@ FrameScanResult extract_frames(const FramingSpec& spec,
 /// as extract_frames would give them, marked `udp`, wrappers opened the same
 /// way. Nothing carries over to the next datagram. Bytes no frame accounts
 /// for -- a frame cut short at the end, or a datagram that is not frames at
-/// all -- are counted in `resyncs`, and `consumed` is always the whole size.
+/// all -- are counted in `resyncs` and placed in `skipped`, and `consumed` is
+/// always the whole size.
 ///
 /// GoC also throws away opcodes 0x002E and 0x0031 when they come over UDP.
 /// This keeps them: what they are is for a recording to show.
@@ -252,6 +328,21 @@ FrameScanResult extract_datagram(const FramingSpec& spec,
 /// frame a stream the same way.
 FramingSpec load_framing(const std::string& path, bool& found,
                          const char* section = "Framing");
+
+/// How the game's UDP datagrams are framed, both directions: by a
+/// [FramingUdp] block when the config has one -- a whole block, with the keys
+/// of [Framing] -- and otherwise by `server`, the [Framing] block the caller
+/// read. `found` says whether there was a [FramingUdp].
+///
+/// Never by [FramingClient], not even what the client sends. In the P0-2
+/// recordings (2026-10-18) the client's datagrams carry the server's header
+/// -- opcode at 2, the whole frame's length at 4, a check word at 6 that
+/// holds on every frame -- and tile 100% that way. Under [FramingClient] 1.8%
+/// of shop's and 10.5% of walk's bytes are in a frame; the fight's 79.6% is 7
+/// false frames, one of them 17,602 bytes. The server's datagrams tile like
+/// the client's. So a config written before the block existed frames UDP
+/// right without it.
+FramingSpec load_udp_framing(const std::string& path, const FramingSpec& server, bool& found);
 
 /// Where a frame was found, for tools that list frames: "" for a frame off
 /// the TCP stream, otherwise e.g. "inside 0x0081", "inside 0x0081 x2", "UDP",

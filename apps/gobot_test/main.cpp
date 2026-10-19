@@ -19,6 +19,8 @@
 #include "gobot/macro.hpp"
 #include "gobot/map_file.hpp"
 #include "gobot/opcode_registry.hpp"
+#include "gobot/own_position.hpp"
+#include "gobot/monster_frames.hpp"
 #include "gobot/net_discovery.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/pathfinder.hpp"
@@ -786,7 +788,33 @@ void test_unwrap() {
         check(scan.packets.size() == 2 && scan.packets[1].opcode == 0x0027 &&
                   scan.packets[1].payload.size() == body27.size() + 3,
               "an inner frame that declares less than its room still fills the room");
-        check(scan.unwrap.length_differs == 1, "and the difference is counted");
+        check(scan.unwrap.length_differs == 1 && scan.unwrap.length_longer == 0,
+              "and the difference is counted, as one that claims less");
+    }
+
+    // One that declares more than its room -- every disagreeing inner frame
+    // of the P0-2 recordings does -- is taken as the room too, and counted
+    // apart: so the tools can say no room held a second frame.
+    {
+        Bytes claims = move;                      // declares 29 bytes; the room holds 29
+        const auto more = static_cast<std::uint16_t>(claims.size() + 40);
+        claims[4] = static_cast<std::uint8_t>(more & 0xFF);
+        claims[5] = static_cast<std::uint8_t>(more >> 8);
+        const auto sum = static_cast<std::uint16_t>((0x0005 + 0x0027 + more) & 0xFFFF);
+        claims[6] = static_cast<std::uint8_t>(sum & 0xFF);
+        claims[7] = static_cast<std::uint8_t>(sum >> 8);
+        const Bytes w = wrapped(claims);
+        const auto scan = extract_frames(spec, w.data(), w.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 2 && scan.packets[1].payload == body27 &&
+                  scan.unwrap.checksum_bad == 0,
+              "an inner frame that declares more than its room is still the room");
+        check(scan.unwrap.length_differs == 1 && scan.unwrap.length_longer == 1,
+              "and is counted as one claiming more than the room holds");
+        UnwrapCounts sum_of;
+        sum_of += scan.unwrap;
+        sum_of += scan.unwrap;
+        check(sum_of.length_longer == 2 && sum_of.length_differs == 2,
+              "counts claiming more add up as the others do");
     }
 
     // A wrapper inside that claims more room than there is: not read, counted.
@@ -1070,6 +1098,271 @@ void test_udp_datagrams() {
         else
             check(!right && dirs.size() == 2 && rec.stats().udp_by_port == 2,
                   "and without it, both are filed by port alone, the wrong way round, and counted");
+    }
+}
+
+/// The client framing the shipped config carries: opcode at 6, and a length
+/// that counts the body + 4.
+FramingSpec client_spec() {
+    FramingSpec client;
+    client.header_size = 8;
+    client.length_offset = 4; client.length_size = 2; client.length_le = true;
+    client.length_includes_header = false; client.length_adjust = 4;
+    client.opcode_offset = 6; client.opcode_size = 2; client.opcode_le = true;
+    client.min_frame = 8; client.max_frame = 32768;
+    return client;
+}
+
+/// The P0-2 recordings hold the client's datagrams in the server's layout,
+/// tiling 100% so. Under [FramingClient] 1.8% of shop's bytes and 10.5% of
+/// walk's are in a frame, and the fight's 79.6% is 7 false frames, one of
+/// them 17,602 bytes. A live capture framed a client-to-server datagram with
+/// [FramingClient] whenever the config had one, and so read none of it.
+void test_udp_framing() {
+    section("UDP framed in the server's layout both ways, never with [FramingClient]");
+
+    const FramingSpec server = unwrapping_spec();
+    const FramingSpec client = client_spec();
+    const Bytes body27 = move_body();
+    const Bytes body10d = some_body(44, 5);
+    const Bytes up = joined({ game_frame(0x0027, body27), game_frame(0x010D, body10d) });
+    constexpr std::uint32_t kServer = 0x0A000002, kClient = 0x0A000001;
+
+    {
+        PacketCapture cap;
+        cap.set_framing(server);
+        cap.set_client_framing(client);
+        std::vector<GamePacket> got;
+        cap.set_packet_callback([&](const std::vector<GamePacket>& v) {
+            got.insert(got.end(), v.begin(), v.end());
+        });
+        const Bytes pkt = udp_packet(kClient, 50000, kServer, 15101, up);
+        check(cap.replay(pkt.data(), pkt.size(), 1), "a client-to-server datagram runs through the capture");
+        check(got.size() == 2 && got[0].opcode == 0x0027 && got[0].payload == body27 &&
+                  got[1].opcode == 0x010D && got[1].payload == body10d,
+              "and its frames, in the server's layout, decode with [Framing] though a client "
+              "framing is set");
+        check(got.size() == 2 && !got[0].from_server && got[0].udp && !got[1].from_server,
+              "labelled client to server, over UDP");
+        const auto s = cap.stats();
+        check(s.udp_frames == 2 && s.udp_unread_bytes == 0 && s.resync_bytes == 0,
+              "every byte of it read");
+    }
+
+    // A frame whose check word is off: [Framing] refuses it, and a
+    // [FramingUdp] without a check word reads it -- both ways.
+    FramingSpec loose = server;
+    loose.checksum_offset = FramingSpec::kNoChecksum;
+    Bytes off = game_frame(0x0027, body27);
+    off[6] ^= 0x5A;
+    {
+        PacketCapture cap;
+        cap.set_framing(server);
+        cap.set_client_framing(client);
+        std::vector<GamePacket> got;
+        cap.set_packet_callback([&](const std::vector<GamePacket>& v) {
+            got.insert(got.end(), v.begin(), v.end());
+        });
+        const Bytes pkt = udp_packet(kClient, 50000, kServer, 15101, off);
+        cap.replay(pkt.data(), pkt.size(), 1);
+        check(got.empty() && cap.stats().udp_unread_bytes == off.size(),
+              "without a UDP framing, [Framing]'s check word refuses a frame that fails it");
+    }
+    {
+        PacketCapture cap;
+        cap.set_framing(server);
+        cap.set_client_framing(client);
+        cap.set_udp_framing(loose);
+        std::vector<GamePacket> got;
+        cap.set_packet_callback([&](const std::vector<GamePacket>& v) {
+            got.insert(got.end(), v.begin(), v.end());
+        });
+        const Bytes to_server = udp_packet(kClient, 50000, kServer, 15101, off);
+        const Bytes to_client = udp_packet(kServer, 15101, kClient, 50000, off);
+        cap.replay(to_server.data(), to_server.size(), 1);
+        cap.replay(to_client.data(), to_client.size(), 2);
+        check(got.size() == 2 && got[0].opcode == 0x0027 && !got[0].from_server &&
+                  got[1].opcode == 0x0027 && got[1].from_server && got[1].payload == body27,
+              "set_udp_framing frames datagrams both ways, the client's included");
+    }
+
+    // [FramingUdp] in a config, and without it.
+    {
+        const std::string path = temp_file("udp_framing.ini");
+        {
+            std::ofstream out(path, std::ios::binary);
+            out << server.to_ini();
+        }
+        bool have = false, found = true;
+        const FramingSpec s = load_framing(path, have);
+        const FramingSpec u = load_udp_framing(path, s, found);
+        check(have && !found && u.opcode_offset == 2 && u.checksum_offset == 6 &&
+                  u.header_size == s.header_size && u.trailer_bytes == 12,
+              "a config with no [FramingUdp] frames UDP with [Framing]");
+
+        std::string block = loose.to_ini();
+        block.replace(0, std::strlen("[Framing]"), "[FramingUdp]");
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::app);
+            out << "\n" << block;
+        }
+        const FramingSpec u2 = load_udp_framing(path, s, found);
+        check(found && !u2.has_checksum() && u2.opcode_offset == 2,
+              "and one with a [FramingUdp] block frames UDP with that");
+        std::remove(path.c_str());
+    }
+
+    // What a datagram leaves unread is placed, as well as counted.
+    {
+        const Bytes d = joined({ game_frame(0x0027, body27), game_frame(0x010D, body10d) });
+        const std::size_t cut = d.size() - 5;
+        const auto r = extract_datagram(server, d.data(), cut, Direction::ToClient, 0);
+        const std::size_t first = 8 + body27.size();
+        check(r.packets.size() == 1 && r.resyncs == cut - first && r.skipped.size() == 1 &&
+                  r.skipped[0].offset == first && r.skipped[0].length == cut - first,
+              "a datagram's frame cut short is in one unread run, from where it starts");
+    }
+}
+
+/// Your own position, as the P0-2 recordings show the client sending it: over
+/// UDP, in the server's layout, at the frame bytes docs/protocol-findings.md §4e
+/// gives. Hand-built frames whose answer is known; the id, the sequence number
+/// and the values are made up, not taken from a recording.
+void test_own_position() {
+    section("Your own position, read from the client's UDP reports");
+
+    // A frame of `size` bytes, header included, its first word 0x0105 as the
+    // game's frames have it. Fields are written at frame bytes.
+    struct Frame {
+        std::uint16_t opcode;
+        Bytes         body;
+        Frame(std::uint16_t op, std::size_t size) : opcode(op), body(size - 8, 0) {}
+        void u8(std::size_t at, std::uint8_t v)   { body[at - 8] = v; }
+        void u16(std::size_t at, std::uint16_t v) { std::memcpy(body.data() + at - 8, &v, 2); }
+        void u32(std::size_t at, std::uint32_t v) { std::memcpy(body.data() + at - 8, &v, 4); }
+        void f32(std::size_t at, float v)         { std::memcpy(body.data() + at - 8, &v, 4); }
+        Bytes bytes() const { return game_frame(opcode, body, 0x0105); }
+    };
+    // As the client sent it, read straight off a datagram.
+    auto sent = [](const Frame& f) {
+        GamePacket p;
+        p.opcode = f.opcode;
+        p.payload = f.body;
+        p.from_server = false;
+        p.udp = true;
+        return p;
+    };
+    constexpr std::uint32_t kId = 4321;
+
+    Frame move(0x0027, 48);
+    move.u32(8, kId); move.u32(12, kId);
+    move.f32(16, 3288.0f); move.f32(20, 1155.4f); move.f32(24, 9.0f); move.u8(28, 0xFF);
+
+    Frame air(0x002A, 40);
+    air.u32(8, kId); air.u32(12, kId); air.u32(16, 1);
+    air.f32(20, 4335.4f); air.f32(24, 1210.0f); air.f32(28, 9.0f); air.f32(32, -20.0f);
+
+    Frame other(0x0029, 44);
+    other.u32(8, kId); other.u32(12, kId); other.u32(16, 1);
+    other.f32(20, 9.0f); other.f32(24, 3805.9f); other.f32(28, 1399.4f);
+
+    Frame here(0x0028, 36);
+    here.u32(8, 1000008); here.u32(12, kId); here.u32(16, kId);
+    here.f32(20, 4690.0f); here.f32(24, 1180.0f); here.f32(28, 0.0f); here.u32(32, 0x024600FFu);
+
+    Frame cast(0x0031, 92);
+    cast.u32(8, kId); cast.u32(12, kId);
+    cast.u16(16, 4216); cast.u16(18, 1267); cast.u32(20, 51102);
+
+    Frame pet(0x010D, 52);      // the pet's position, not yours
+    pet.u32(8, kId); pet.u32(12, kId); pet.f32(24, 2660.0f); pet.f32(28, 1070.0f);
+    Frame hop(0x0117, 28);      // the pet's teleport
+    hop.u32(8, kId); hop.u32(12, kId); hop.f32(16, 2660.0f); hop.f32(20, 1070.0f);
+
+    // One datagram from the client, framed as the capture frames it.
+    const Bytes datagram = joined({ move.bytes(), air.bytes(), other.bytes(), here.bytes(),
+                                    cast.bytes(), pet.bytes(), hop.bytes() });
+    const auto up = extract_datagram(unwrapping_spec(), datagram.data(), datagram.size(),
+                                     Direction::ToServer, 0);
+    check(up.packets.size() == 7 && up.resyncs == 0,
+          "seven frames off one client datagram, every byte read");
+    if (up.packets.size() != 7) return;
+    std::vector<std::optional<OwnPosition>> got;
+    for (const GamePacket& p : up.packets) got.push_back(read_own_position(p));
+
+    const auto& m = got[0];
+    check(m && m->kind == OwnReport::Move && m->id == kId && m->x == 3288.0f && m->y == 1155.4f &&
+              m->speed == 9.0f && m->facing == -1 && !m->air_state && !m->vertical_speed,
+          "0x0027, a move: x, y at 16 and 20, speed at 24, and facing byte 0xFF at 28, "
+          "toward smaller x");
+    const auto& a = got[1];
+    check(a && a->kind == OwnReport::Air && a->id == kId && a->x == 4335.4f && a->y == 1210.0f &&
+              a->speed == 9.0f && a->air_state == 1u && a->vertical_speed == -20.0f &&
+              a->facing == 0,
+          "0x002A, in the air: state at 16, x, y at 20 and 24, speed at 28, vertical speed at 32, "
+          "and no facing");
+    const auto& o = got[2];
+    check(o && o->kind == OwnReport::Other && o->x == 3805.9f && o->y == 1399.4f &&
+              o->speed == 9.0f && o->facing == 1,
+          "0x0029: facing at 16 (1, toward larger x), speed at 20, x, y at 24 and 28");
+    const auto& h = got[3];
+    check(h && h->kind == OwnReport::Here && h->id == kId && h->x == 4690.0f && h->y == 1180.0f &&
+              h->speed == 0.0f && h->facing == -1,
+          "0x0028, at a map entry: the id from 12, not the sequence number at 8; x, y at 20 "
+          "and 24; the facing in the low byte of the flags at 32");
+    const auto& c = got[4];
+    check(c && c->kind == OwnReport::Cast && c->id == kId && c->x == 4216.0f && c->y == 1267.0f &&
+              !c->speed && c->facing == 0,
+          "0x0031, a skill cast: the caster's x, y as u16 at 16 and 18, with no speed or facing");
+    check(!got[5] && !got[6], "0x010D and 0x0117, the pet's position and its teleport, are not yours");
+
+    // The server sends these layouts for other actors' moves.
+    const auto down = extract_datagram(unwrapping_spec(), datagram.data(), datagram.size(),
+                                       Direction::ToClient, 0);
+    bool none = down.packets.size() == 7;
+    for (const GamePacket& p : down.packets) none = none && !read_own_position(p);
+    check(none, "the same frames from the server are another actor's moves, never yours");
+
+    GamePacket tcp = sent(move);
+    tcp.udp = false;
+    check(!read_own_position(tcp), "nor a move off the TCP stream");
+    GamePacket inner = sent(move);
+    inner.depth = 1;
+    check(!read_own_position(inner), "nor one found inside a wrapper");
+
+    // GoC's client wants 29 bytes of an 0x0027 and 36 of an 0x002A: up to the
+    // facing byte and to the end of the vertical speed. One byte less is short.
+    {
+        Frame least(0x0027, 29);
+        least.f32(16, 100.0f); least.f32(20, 200.0f); least.u8(28, 0x01);
+        GamePacket p = sent(least);
+        const auto r = read_own_position(p);
+        check(r && r->x == 100.0f && r->y == 200.0f && r->facing == 1,
+              "a 29-byte 0x0027, the least GoC's client reads, gives its position");
+        p.payload.pop_back();
+        check(!read_own_position(p), "one byte shorter gives nothing");
+
+        Frame jump(0x002A, 36);
+        jump.f32(20, 300.0f); jump.f32(24, 400.0f); jump.f32(32, -36.0f);
+        GamePacket q = sent(jump);
+        const auto s = read_own_position(q);
+        check(s && s->x == 300.0f && s->vertical_speed == -36.0f,
+              "a 36-byte 0x002A, the least GoC's client reads, gives its position");
+        q.payload.pop_back();
+        check(!read_own_position(q), "and one byte shorter gives nothing");
+    }
+
+    // Values that cannot be a position, and a facing byte that says neither.
+    {
+        Frame lost = move;
+        lost.f32(16, std::nanf(""));
+        check(!read_own_position(sent(lost)), "an x that is not a number gives nothing");
+
+        Frame odd = move;
+        odd.u8(28, 0x07);
+        const auto r = read_own_position(sent(odd));
+        check(r && r->facing == 0 && r->x == 3288.0f,
+              "a facing byte other than 0x01 or 0xFF leaves the facing unknown");
     }
 }
 
@@ -1655,6 +1948,9 @@ void test_capture_file() {
     check(r.half == capture_file::Half::Client,
           "a .c2s file is read as the client half -- this is the bug that was "
           "silent: both framings tile it, so a scan picks whichever is first");
+    check(r.spec == capture_file::Spec::Client && r.measured,
+          "framed with [FramingClient], which reads more of a file in its layout than "
+          "[Framing] does");
     check(got.size() == 6, "every packet of the opcode comes back -- got " +
                            std::to_string(got.size()));
     if (!got.empty())
@@ -1681,6 +1977,918 @@ void test_capture_file() {
                                                client, 0x0038, none);
         check(!bad.ok && !bad.error.empty(), "a missing file reports an error");
     }
+}
+
+// ------------------------------- recordings: which block frames a file
+
+/// The client's TCP half as the P0-2 recordings hold it, in shape only: a
+/// frame in the server's layout, opcode 0x0081, with a first word that
+/// varies, the declared length, and a check word equal to the sum of the
+/// three words before it. The 12 bytes past its declared length are what
+/// [FramingClient] reads as "body + 4", and the check word what it reads as
+/// an opcode.
+Bytes client_wrapper(std::uint16_t first, std::size_t total, std::uint8_t seed) {
+    Bytes f;
+    const auto declared = static_cast<std::uint16_t>(total - 12);
+    put16le(f, first);
+    put16le(f, 0x0081);
+    put16le(f, declared);
+    put16le(f, static_cast<std::uint16_t>((first + 0x0081 + declared) & 0xFFFF));
+    for (std::size_t i = 8; i < total; ++i) f.push_back(static_cast<std::uint8_t>(seed + i * 13));
+    return f;
+}
+
+void write_bytes(const std::string& path, const Bytes& bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+/// A recording's file is framed with the block that fits it: a .udp one as
+/// UDP is, both ways; a .c2s one with whichever of [Framing] and
+/// [FramingClient] reads more of it. And a reading that leaves much of its
+/// file in no frame is never called a description of it, whatever its resync
+/// count (round 1b review, R1b-REV-1).
+void test_capture_file_framings() {
+    section("Which block frames a recording, and how much of it is read");
+
+    capture_file::Framings f;
+    f.server = unwrapping_spec();
+    f.client = client_spec();
+
+    // Twelve client frames in the server's layout, and 18 bytes in the middle
+    // that are no frame of either layout. Read as [FramingClient] reads a
+    // header, those bytes declare 0x7000 bytes -- more than the file holds --
+    // so a scan locked onto the frames before them stops there.
+    Bytes first_six, last_six;
+    const std::uint16_t words[] = { 0x0020, 0x0100, 0x0018 };
+    for (std::size_t i = 0; i < 6; ++i) {
+        const Bytes a = client_wrapper(words[i % 3], 41 + i, static_cast<std::uint8_t>(i));
+        first_six.insert(first_six.end(), a.begin(), a.end());
+        const Bytes b = client_wrapper(words[(i + 1) % 3], 48 - i, static_cast<std::uint8_t>(40 + i));
+        last_six.insert(last_six.end(), b.begin(), b.end());
+    }
+    const Bytes foreign = { 0x11, 0x22, 0x33, 0x44, 0x00, 0x70, 0x55, 0x66, 0x77,
+                            0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77 };
+    const Bytes rec = joined({ first_six, foreign, last_six });
+
+    // A .c2s file: [Framing] reads more of it, and is kept.
+    {
+        const capture_file::Tiling t = capture_file::tile_named(rec, "p.c2s", f);
+        const capture_file::Reading& r = t.reading;
+        check(r.ok && r.spec == capture_file::Spec::Server && r.measured,
+              "a .c2s file is framed with [Framing] when [Framing] reads more of it");
+        check(r.half == capture_file::Half::Client && r.decided_by == capture_file::HalfSource::Name,
+              "and is still the client's half, as its name says");
+        bool labelled = r.frames == 12;
+        for (const auto& p : t.scan.packets)
+            if (p.depth == 0) labelled = labelled && !p.from_server && p.opcode == 0x0081;
+        check(labelled, "its 12 frames read as 0x0081, labelled client to server");
+        check(r.resyncs == 18 && r.unread() == 18 && r.unread_runs.size() == 1 &&
+                  r.unread_runs[0].offset == first_six.size() && r.unread_runs[0].length == 18,
+              "the 18 bytes that are no frame are the only ones unread, placed where they are");
+        check(r.other_frames == 6 && r.other_unread == foreign.size() + last_six.size(),
+              "[FramingClient], tried too, stops at them: 6 frames and the rest unread");
+        check(capture_file::judge(r) == capture_file::Fit::Described && r.largest == 48,
+              "so the reading describes the file; its longest frame is 48 bytes, whole");
+        check(r.resyncs > r.frames && capture_file::reading_warning(r).empty(),
+              "and the --from readers warn of nothing, as --verify finds nothing wrong, though "
+              "its 18 resync bytes outnumber its 12 frames (R3-REV2-1)");
+    }
+
+    // The same file forced through [FramingClient]: the scan stops at the
+    // false length with no resync at all, and the rest is never read. Once,
+    // that was called a description of the stream.
+    {
+        const capture_file::Tiling t =
+            capture_file::tile_named(rec, "p.c2s", f, capture_file::Spec::Client);
+        const capture_file::Reading& r = t.reading;
+        check(r.ok && r.spec == capture_file::Spec::Client && !r.measured && r.frames == 6 &&
+                  r.resyncs == 0,
+              "forced through [FramingClient]: 6 frames, and not one resync byte");
+        check(r.consumed == first_six.size() && r.unread() == rec.size() - first_six.size() &&
+                  r.unread_runs.size() == 1 && r.unread_runs[0].offset == first_six.size() &&
+                  r.unread_runs[0].length == rec.size() - first_six.size(),
+              "but everything from the false length on is unread, counted and placed");
+        check(capture_file::judge(r) == capture_file::Fit::TooMuchUnread,
+              "so it is not called a description of the file");
+        const std::string warning = capture_file::reading_warning(r);
+        check(warning.rfind("  !! ", 0) == 0 && warning.find("are in no frame") != std::string::npos &&
+                  warning.back() == '\n',
+              "and the --from readers warn of the bytes in no frame, from the same verdict");
+        check(!t.scan.packets.empty() &&
+                  t.scan.packets.front().opcode == ((0x0020 + 0x0081 + (41 - 12)) & 0xFFFF),
+              "and the opcode it reads at offset 6 is [Framing]'s check word");
+    }
+
+    // A name that says neither: the block that reads more, and the half it
+    // stands for -- or the one --framing names.
+    {
+        const auto t = capture_file::tile_named(rec, "capture.bin", f);
+        check(t.reading.ok && t.reading.spec == capture_file::Spec::Server &&
+                  t.reading.decided_by == capture_file::HalfSource::Scan &&
+                  t.reading.half == capture_file::Half::Server,
+              "a name that says no half: the block that reads more, and its half");
+        const auto forced = capture_file::tile_named(rec, "capture.bin", f, capture_file::Spec::Client);
+        check(forced.reading.ok && forced.reading.half == capture_file::Half::Client &&
+                  forced.reading.decided_by == capture_file::HalfSource::Forced,
+              "or the block --framing names, and its half");
+    }
+
+    // With no [FramingClient] in the config.
+    {
+        capture_file::Framings only = f;
+        only.client.reset();
+        const auto e = capture_file::tile_named(rec, "p.c2s", only, capture_file::Spec::Client);
+        check(!e.reading.ok && !e.reading.error.empty(),
+              "forcing [FramingClient] with none in the config is an error, not a quiet [Framing]");
+        const auto n = capture_file::tile_named(rec, "p.c2s", only);
+        check(n.reading.ok && n.reading.spec == capture_file::Spec::Server && !n.reading.measured &&
+                  n.reading.frames == 12,
+              "and without one a .c2s file is framed with [Framing]");
+    }
+
+    // The client's datagrams: framed as UDP is, never with [FramingClient].
+    {
+        const Bytes body27 = move_body();
+        const Bytes dgrams = joined({ game_frame(0x0027, body27), game_frame(0x002A, some_body(32, 2)),
+                                      game_frame(0x0027, body27) });
+        const auto t = capture_file::tile_named(dgrams, "p.udp.c2s", f);
+        check(t.reading.ok && t.reading.spec == capture_file::Spec::Udp && !t.reading.measured &&
+                  t.reading.frames == 3 && t.reading.unread() == 0 &&
+                  t.reading.half == capture_file::Half::Client && t.spec.checksum_offset == 6,
+              "a .udp.c2s file is framed as UDP is -- [Framing], with no [FramingUdp] -- and "
+              "not with [FramingClient]");
+
+        const std::string path = temp_file("p.udp.c2s");
+        write_bytes(path, dgrams);
+        std::vector<GamePacket> got;
+        const auto r = capture_file::read_all(path, f, got);
+        check(r.ok && got.size() == 3 && got[0].udp && !got[0].from_server &&
+                  got[0].opcode == 0x0027 && got[0].payload == body27,
+              "read from the file: its frames, client to server, marked UDP");
+        got.clear();
+        const auto old = capture_file::read_all(path, f.server, *f.client, got);
+        check(old.ok && old.spec == capture_file::Spec::Udp && got.size() == 3,
+              "and the same through the two-spec read_all");
+        std::remove(path.c_str());
+
+        capture_file::Framings with_udp = f;
+        FramingSpec loose = f.server;
+        loose.checksum_offset = FramingSpec::kNoChecksum;
+        with_udp.udp = loose;
+        const auto u = capture_file::tile_named(dgrams, "p.udp.s2c", with_udp);
+        check(u.reading.ok && u.reading.spec == capture_file::Spec::Udp && !u.spec.has_checksum() &&
+                  u.reading.half == capture_file::Half::Server,
+              "with a [FramingUdp], that block frames it");
+    }
+
+    // The other verdicts.
+    {
+        const auto e = capture_file::tile_named(Bytes{}, "p.s2c", f);
+        check(!e.reading.ok && capture_file::judge(e.reading) == capture_file::Fit::Empty,
+              "an empty file is an error, and judged empty");
+        const auto junk = capture_file::tile_named(Bytes(50, 0xEE), "p.s2c", f);
+        check(junk.reading.ok && junk.reading.frames == 0 && junk.reading.unread() == 50 &&
+                  capture_file::judge(junk.reading) == capture_file::Fit::NothingRead,
+              "a file of no frames at all: all of it unread, judged so");
+        Bytes big;
+        for (std::uint8_t i = 0; i < 3; ++i) {
+            const Bytes one = game_frame(0x0042, some_body(2000, i));
+            big.insert(big.end(), one.begin(), one.end());
+        }
+        const auto o = capture_file::tile_named(big, "p.s2c", f);
+        check(o.reading.ok && o.reading.frames == 3 && o.reading.unread() == 0 &&
+                  capture_file::judge(o.reading) == capture_file::Fit::Oversized,
+              "frames that average over 512 bytes are judged a length field that is not one");
+        check(capture_file::reading_warning(e.reading).find("not one frame") != std::string::npos &&
+                  capture_file::reading_warning(junk.reading).find("not one frame") != std::string::npos &&
+                  capture_file::reading_warning(o.reading).find("frames average 2008 bytes") !=
+                      std::string::npos,
+              "and each verdict but a description has its warning for the --from readers");
+    }
+
+    // The three blocks out of a config.
+    {
+        const std::string path = temp_file("framings.ini");
+        {
+            std::ofstream out(path, std::ios::binary);
+            out << f.server.to_ini();
+        }
+        bool have = false;
+        const capture_file::Framings g = capture_file::load_framings(path, have);
+        check(have && !g.client && !g.udp && g.for_udp().checksum_offset == 6,
+              "load_framings: [Framing] alone, and UDP framed with it");
+        std::remove(path.c_str());
+    }
+}
+
+// ------------------------------------------ unpacking 0x0081 (liblzf)
+
+/// `raw` as a liblzf stream of literal runs only, 32 bytes at most each: what
+/// liblzf writes for bytes it cannot shrink, and unpacks back to `raw`.
+Bytes lzf_literals(const Bytes& raw) {
+    Bytes out;
+    for (std::size_t i = 0; i < raw.size(); i += 32) {
+        const std::size_t n = std::min<std::size_t>(32, raw.size() - i);
+        out.push_back(static_cast<std::uint8_t>(n - 1));
+        out.insert(out.end(), raw.begin() + static_cast<std::ptrdiff_t>(i),
+                   raw.begin() + static_cast<std::ptrdiff_t>(i + n));
+    }
+    return out;
+}
+
+/// An 0x0081 wrapper as the server sends one (protocol-findings 4e): its
+/// first word the length of the frame inside unpacked, the packed length, a
+/// check word over those three words, four bytes that mean nothing, and the
+/// packed frame.
+Bytes packed_wrapper(std::size_t unpacked, const Bytes& packed) {
+    Bytes w;
+    const auto first = static_cast<std::uint16_t>(unpacked);
+    const auto len = static_cast<std::uint16_t>(packed.size());
+    put16le(w, first);
+    put16le(w, 0x0081);
+    put16le(w, len);
+    put16le(w, static_cast<std::uint16_t>((first + 0x0081 + len) & 0xFFFF));
+    for (int b : { 0x18, 0xBE, 0xEF, 0x0D }) w.push_back(static_cast<std::uint8_t>(b));
+    w.insert(w.end(), packed.begin(), packed.end());
+    return w;
+}
+
+/// A frame as the game's frames are, first word 0x0105.
+Bytes plain_frame(std::uint16_t opcode, const Bytes& body) {
+    return game_frame(opcode, body, 0x0105);
+}
+
+/// An 0x0081 holds one frame packed with liblzf, not a frame from byte 13
+/// (protocol-findings 4e), so a field read past the first body byte of
+/// GoC's inner frame was never a field. The tools that read recordings
+/// unpack it, so that what they show inside one is the frame's own; one that
+/// does not unpack -- every wrapper the client sends is ciphered -- is left
+/// shut and counted, not read as packed bytes. Hand-built streams whose
+/// answer is known.
+void test_unpack() {
+    section("Unpacking 0x0081 (liblzf)");
+
+    // liblzf itself.
+    {
+        Bytes out;
+        const Bytes lit = { 0x02, 0x61, 0x62, 0x63 };
+        check(lzf_unpack(lit.data(), lit.size(), 100, out) && out == Bytes{ 0x61, 0x62, 0x63 },
+              "a control byte under 32 is followed by that many bytes + 1, copied as they are");
+        const Bytes copy = { 0x02, 0x61, 0x62, 0x63, 0x20, 0x02 };
+        check(lzf_unpack(copy.data(), copy.size(), 100, out) &&
+                  out == Bytes{ 0x61, 0x62, 0x63, 0x61, 0x62, 0x63 },
+              "any other copies (c >> 5) + 2 bytes from as far back as the next byte + 1");
+        const Bytes run = { 0x00, 0x61, 0x60, 0x00 };
+        check(lzf_unpack(run.data(), run.size(), 100, out) && out == Bytes(6, 0x61),
+              "a copy from one byte back runs on into what it writes: a run of one byte");
+        const Bytes longest = { 0x01, 0x61, 0x62, 0xE0, 0xFF, 0x01 };
+        bool alternates = lzf_unpack(longest.data(), longest.size(), 1000, out) && out.size() == 266;
+        for (std::size_t i = 0; alternates && i < out.size(); ++i)
+            alternates = out[i] == ((i % 2 == 0) ? 0x61 : 0x62);
+        check(alternates, "a count of 7 adds the byte after: 264 bytes, liblzf's longest copy");
+        const Bytes first300 = some_body(300, 5);
+        // (Not called "far": windows.h makes that word mean nothing.)
+        Bytes distant = lzf_literals(first300);
+        distant.push_back(0x21);    // copy 3 bytes from 256 + ...
+        distant.push_back(0x2B);    // ... 43 + 1 = 300 back: the very first
+        check(lzf_unpack(distant.data(), distant.size(), 1000, out) && out.size() == 303 &&
+                  std::equal(first300.begin(), first300.end(), out.begin()) &&
+                  out[300] == first300[0] && out[301] == first300[1] && out[302] == first300[2],
+              "the control byte's low five bits reach 256 bytes further back each");
+        check(lzf_unpack(nullptr, 0, 10, out) && out.empty(), "no bytes unpack to none");
+    }
+
+    // What is not a whole stream is refused, and leaves nothing out.
+    {
+        Bytes out = { 0x99 };
+        const Bytes before_start = { 0x20, 0x00 };
+        check(!lzf_unpack(before_start.data(), before_start.size(), 100, out) && out.empty(),
+              "a copy from before the first byte is refused, with nothing out");
+        const Bytes short_run = { 0x05, 0x61 };
+        check(!lzf_unpack(short_run.data(), short_run.size(), 100, out),
+              "so is a run of bytes the stream does not hold");
+        const Bytes no_distance = { 0x00, 0x61, 0x20 };
+        const Bytes no_count = { 0x00, 0x61, 0xE0 };
+        check(!lzf_unpack(no_distance.data(), no_distance.size(), 100, out) &&
+                  !lzf_unpack(no_count.data(), no_count.size(), 100, out),
+              "and a copy cut off before its distance byte, or its count byte");
+        const Bytes five = { 0x04, 1, 2, 3, 4, 5 };
+        check(!lzf_unpack(five.data(), five.size(), 4, out) &&
+                  lzf_unpack(five.data(), five.size(), 5, out) && out.size() == 5,
+              "and a stream that would pass the limit; reaching it is fine");
+    }
+
+    const FramingSpec shipped = unwrapping_spec();
+    FramingSpec spec = shipped;
+    spec.unpack = true;
+
+    // HP 9232 and MP 8902 at frame bytes 12 and 16 of an 0x0051, as P0-2
+    // found them: 24 bytes liblzf cannot shrink, so 25 packed.
+    Bytes body51(16, 0);
+    const std::uint32_t hp = 9232, mp = 8902;
+    std::memcpy(body51.data() + 4, &hp, 4);
+    std::memcpy(body51.data() + 8, &mp, 4);
+    const Bytes f51 = plain_frame(0x0051, body51);
+    const Bytes w51 = packed_wrapper(f51.size(), lzf_literals(f51));
+
+    // 600 bytes of zeros after a header, as liblzf packs them: nine bytes as
+    // they are -- the header and the first body byte -- then copies of the
+    // byte before: 264, 264 and 71.
+    const Bytes f4f = plain_frame(0x004F, Bytes(600, 0));
+    Bytes zeros = { 0x08 };
+    zeros.insert(zeros.end(), f4f.begin(), f4f.begin() + 9);
+    for (int b : { 0xE0, 0xFF, 0x00, 0xE0, 0xFF, 0x00, 0xE0, 0x3E, 0x00 })
+        zeros.push_back(static_cast<std::uint8_t>(b));
+    const Bytes w4f = packed_wrapper(f4f.size(), zeros);
+
+    // One wrapper at a time.
+    {
+        Bytes frame;
+        check(unpack_wrapper(spec, w51.data(), w51.size(), frame) && frame == f51,
+              "an 0x0081 unpacks to the one frame inside it, whole");
+        check(unpack_wrapper(spec, w4f.data(), w4f.size(), frame) && frame == f4f && w4f.size() == 31,
+              "608 bytes out of 19 packed: nine as they are, then copies of the byte before");
+
+        const auto with_first = [](Bytes w, std::uint16_t first) {
+            const auto len = static_cast<std::uint16_t>(w[4] | (w[5] << 8));
+            const auto sum = static_cast<std::uint16_t>((first + 0x0081 + len) & 0xFFFF);
+            w[0] = static_cast<std::uint8_t>(first & 0xFF);
+            w[1] = static_cast<std::uint8_t>(first >> 8);
+            w[6] = static_cast<std::uint8_t>(sum & 0xFF);
+            w[7] = static_cast<std::uint8_t>(sum >> 8);
+            return w;
+        };
+        check(!unpack_wrapper(spec, with_first(w51, 25).data(), w51.size(), frame) && frame.empty() &&
+                  !unpack_wrapper(spec, with_first(w51, 23).data(), w51.size(), frame),
+              "refused when the first word is not the length it unpacks to, either way");
+
+        Bytes bad_check = f51;
+        bad_check[6] = static_cast<std::uint8_t>(bad_check[6] + 1);
+        const Bytes w_bad = packed_wrapper(bad_check.size(), lzf_literals(bad_check));
+        const Bytes old_marker = game_frame(0x0051, body51);         // first word 0x0005
+        const Bytes w_old = packed_wrapper(old_marker.size(), lzf_literals(old_marker));
+        check(!unpack_wrapper(spec, w_bad.data(), w_bad.size(), frame) &&
+                  !unpack_wrapper(spec, w_old.data(), w_old.size(), frame),
+              "and when what comes out is not a frame: its check word off, or a first word not 0x0105");
+
+        const Bytes ciphered = client_wrapper(0x0020, 48, 7);
+        check(!unpack_wrapper(spec, ciphered.data(), ciphered.size(), frame),
+              "a client wrapper's ciphered bytes do not unpack");
+        check(!unpack_wrapper(spec, w51.data(), w51.size() - 1, frame) &&
+                  !unpack_wrapper(client_spec(), w51.data(), w51.size(), frame),
+              "nor does a wrapper cut short, or any under a spec that has no wrapper opcode");
+    }
+
+    // Off a stream: each wrapper as before, and straight after it its frame.
+    {
+        const Bytes p38 = game_frame(0x0038, some_body(88, 3));
+        const Bytes stream = joined({ p38, w51, p38, w4f, p38 });
+        const auto on  = extract_frames(spec, stream.data(), stream.size(), Direction::ToClient, 5, false);
+        const auto off = extract_frames(shipped, stream.data(), stream.size(), Direction::ToClient, 5, false);
+        check(on.packets.size() == 7 && on.consumed == stream.size() && on.resyncs == 0,
+              "two wrappers in a stream: five frames off it, two inside, every byte read");
+        if (on.packets.size() == 7) {
+            const GamePacket& in51 = on.packets[2];
+            check(in51.opcode == 0x0051 && in51.depth == 1 && in51.payload == body51 &&
+                      in51.from_server && in51.timestamp_ms == 5 && !in51.udp,
+                  "the first one's frame right after it, unpacked: its own body, at depth 1");
+            std::uint32_t got_hp = 0, got_mp = 0;
+            if (in51.payload.size() >= 12) {
+                std::memcpy(&got_hp, in51.payload.data() + 4, 4);
+                std::memcpy(&got_mp, in51.payload.data() + 8, 4);
+            }
+            check(got_hp == 9232 && got_mp == 8902,
+                  "HP and MP read back at body @4 and @8: frame bytes 12 and 16");
+            check(on.packets[5].opcode == 0x004F && on.packets[5].payload == Bytes(600, 0),
+                  "and the second one's 600 bytes of zeros, whole");
+        }
+        check(on.unwrap.unpacked == 2 && on.unwrap.inner == 2 && on.unwrap.unpack_failed == 0 &&
+                  on.unwrap.length_differs == 0 && on.unwrap.checksum_bad == 0,
+              "counted: two wrappers unpacked, two frames inside, none disagreeing");
+        std::vector<GamePacket> outer_on, outer_off;
+        for (const auto& p : on.packets)
+            if (p.depth == 0) outer_on.push_back(p);
+        for (const auto& p : off.packets)
+            if (p.depth == 0) outer_off.push_back(p);
+        check(same_frames(outer_on, outer_off) && on.consumed == off.consumed && off.resyncs == 0,
+              "the frames off the stream are the same as without unpacking");
+        check(off.packets.size() == 7 && off.packets[5].opcode == 0x004F &&
+                  off.packets[5].depth == 1 && off.packets[5].payload != Bytes(600, 0),
+              "GoC's frame from byte 13 has the opcode right and the zeros still packed");
+    }
+
+    // One that does not unpack: left shut, counted, and the stream goes on.
+    {
+        const Bytes p38 = game_frame(0x0038, some_body(88, 3));
+        const Bytes stream = joined({ client_wrapper(0x0020, 48, 7), p38 });
+        const auto scan = extract_frames(spec, stream.data(), stream.size(), Direction::ToServer, 0, false);
+        check(scan.packets.size() == 2 && scan.packets[0].opcode == 0x0081 &&
+                  scan.packets[1].opcode == 0x0038 && scan.packets[1].depth == 0,
+              "a wrapper that does not unpack comes out as itself, and the next frame after it");
+        check(scan.unwrap.unpack_failed == 1 && scan.unwrap.inner == 0 && scan.unwrap.unopened == 0 &&
+                  scan.consumed == stream.size() && scan.resyncs == 0,
+              "nothing inside it is read, which is counted, and nothing after it is lost");
+    }
+
+    // GoC's 0x0020 rule is a frame of 32 bytes: unpacked like any other.
+    {
+        const Bytes f5a = plain_frame(0x005A, some_body(24, 9));
+        const Bytes w5a = packed_wrapper(f5a.size(), lzf_literals(f5a));
+        const auto on  = extract_frames(spec, w5a.data(), w5a.size(), Direction::ToClient, 0, false);
+        const auto off = extract_frames(shipped, w5a.data(), w5a.size(), Direction::ToClient, 0, false);
+        check(w5a[0] == 0x20 && w5a[1] == 0x00 && on.packets.size() == 2 &&
+                  on.packets[1].opcode == 0x005A && on.unwrap.unopened == 0,
+              "a wrapper whose first word is 0x0020, a 32-byte frame, is unpacked");
+        check(off.packets.size() == 1 && off.unwrap.unopened == 1,
+              "where GoC's reading leaves it shut, as GoC does");
+    }
+
+    // Wrappers inside wrappers, and the depth limit.
+    {
+        const Bytes outer = packed_wrapper(w51.size(), lzf_literals(w51));
+        const auto scan = extract_frames(spec, outer.data(), outer.size(), Direction::ToClient, 0, false);
+        check(scan.packets.size() == 3 && scan.packets[1].opcode == 0x0081 &&
+                  scan.packets[1].depth == 1 && scan.packets[2].opcode == 0x0051 &&
+                  scan.packets[2].depth == 2 && scan.packets[2].payload == body51 &&
+                  scan.unwrap.unpacked == 2,
+              "a wrapper packed inside a wrapper is unpacked in turn");
+        Bytes deep = f51;
+        for (int i = 0; i <= kMaxWrapDepth; ++i) deep = packed_wrapper(deep.size(), lzf_literals(deep));
+        const auto limit = extract_frames(spec, deep.data(), deep.size(), Direction::ToClient, 0, false);
+        std::uint8_t deepest = 0;
+        for (const auto& p : limit.packets) deepest = std::max(deepest, p.depth);
+        check(deepest == kMaxWrapDepth && limit.unwrap.too_deep == 1 &&
+                  limit.consumed == deep.size(),
+              "down to kMaxWrapDepth, the wrapper at the limit counted and not opened");
+    }
+
+    // A datagram is read the same way.
+    {
+        const auto d = extract_datagram(spec, w51.data(), w51.size(), Direction::ToClient, 0);
+        check(d.packets.size() == 2 && d.packets[1].udp && d.packets[1].payload == body51 &&
+                  d.unwrap.unpacked == 1,
+              "a wrapper in a datagram is unpacked too, its frame marked UDP");
+    }
+
+    // A recording, read with every block unpacking, as the --from readers read one.
+    {
+        capture_file::Framings f;
+        f.server = spec;
+        f.client = client_spec();
+        f.client->unpack = true;
+        const Bytes rec = joined({ game_frame(0x0038, some_body(88, 3)), w51, w4f });
+        const auto t = capture_file::tile_named(rec, "p.s2c", f);
+        check(t.reading.ok && t.reading.inner == 2 && t.reading.unwrap.unpacked == 2 &&
+                  t.reading.unwrap.unpack_failed == 0 && t.reading.unread() == 0,
+              "a server recording: each wrapper unpacked");
+        Bytes c2s;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto first = static_cast<std::uint16_t>(i % 2 == 0 ? 0x0020 : 0x0018);
+            const Bytes w = client_wrapper(first, 44 + i, static_cast<std::uint8_t>(i));
+            c2s.insert(c2s.end(), w.begin(), w.end());
+        }
+        const auto c = capture_file::tile_named(c2s, "p.c2s", f);
+        check(c.reading.ok && c.reading.frames == 4 && c.reading.inner == 0 &&
+                  c.reading.unwrap.unpack_failed == 4 && c.reading.half == capture_file::Half::Client,
+              "a client recording: its ciphered wrappers left shut, every one counted");
+    }
+
+    // Off unless code turns it on: no config sets it.
+    {
+        check(!FramingSpec{}.unpack && !shipped.unpack, "a spec does not unpack unless told to");
+        const std::string path = temp_file("unpack.ini");
+        {
+            std::ofstream out(path, std::ios::binary);
+            out << spec.to_ini();
+        }
+        bool found = false;
+        const FramingSpec loaded = load_framing(path, found);
+        check(found && loaded.unwraps() && !loaded.unpack && spec.to_ini() == shipped.to_ini(),
+              "nor does one read from a config: the setting is neither written nor read");
+        std::remove(path.c_str());
+        check(spec.describe().find("unpacked") != std::string::npos &&
+                  shipped.describe().find("inner@13") != std::string::npos,
+              "a spec says how it reads a wrapper");
+        UnwrapCounts one, sum;
+        one.unpacked = 2;
+        one.unpack_failed = 3;
+        sum += one;
+        sum += one;
+        check(sum.unpacked == 4 && sum.unpack_failed == 6, "unpacked and failed counts add up");
+    }
+}
+
+// ----------------------------------------- monsters, from the server's frames
+
+/// The map's monsters as the P0-2 fight showed the server sending them
+/// (docs/protocol-findings.md §4f): the table at a map load, a monster
+/// spawning in a slot, and a monster's state events -- a stop, a walk, a
+/// hit -- at the frame bytes given there. Hand-built frames whose answer is
+/// known; every slot, id, position and HP is made up, none taken from a
+/// recording.
+void test_monster_frames() {
+    section("Monsters, read from the server's frames");
+
+    // A frame of `size` bytes, header included, its first word 0x0105 as the
+    // game's frames have it. Fields are written at frame bytes.
+    struct Frame {
+        std::uint16_t opcode;
+        Bytes         body;
+        Frame(std::uint16_t op, std::size_t size) : opcode(op), body(size - 8, 0) {}
+        void u8(std::size_t at, std::uint8_t v)   { body[at - 8] = v; }
+        void u16(std::size_t at, std::uint16_t v) { std::memcpy(body.data() + at - 8, &v, 2); }
+        void u32(std::size_t at, std::uint32_t v) { std::memcpy(body.data() + at - 8, &v, 4); }
+        void i32(std::size_t at, std::int32_t v)  { std::memcpy(body.data() + at - 8, &v, 4); }
+        void f32(std::size_t at, float v)         { std::memcpy(body.data() + at - 8, &v, 4); }
+        Bytes bytes() const { return plain_frame(opcode, body); }
+    };
+    // As the server sent it, straight off the TCP stream; or found inside a
+    // wrapper, unpacked.
+    const auto sent = [](const Frame& f) {
+        GamePacket p;
+        p.opcode = f.opcode;
+        p.payload = f.body;
+        p.from_server = true;
+        return p;
+    };
+    const auto inside = [&sent](const Frame& f) {
+        GamePacket p = sent(f);
+        p.depth = 1;
+        return p;
+    };
+    // The same frame from the client, and over UDP: `reader` takes neither.
+    const auto never = [](const GamePacket& p, const auto& reader) {
+        GamePacket up = p;
+        up.from_server = false;
+        GamePacket dgram = p;
+        dgram.udp = true;
+        return !reader(up) && !reader(dgram);
+    };
+
+    // ---- 0x0042: the map's table, three monsters, slot 0 among them.
+    struct Entry {
+        std::uint16_t slot;
+        std::uint32_t type;
+        std::uint8_t  level;
+        std::int8_t   facing;
+        std::uint16_t x, y;
+        float         speed;
+        std::uint32_t hp, max_hp;
+    };
+    const Entry entries[] = {
+        { 0, 2000501, 50, -1, 1500, 900, 3.0f, 420, 600 },        // walking, hurt
+        { 7, 2000301, 30, 1, 80, 1210, 0.0f, 2000, 2000 },        // standing
+        { 12, 2000501, 50, 1, 3333, 640, 3.0f, 600, 600 },
+    };
+    const auto table_of = [&entries](std::size_t n) {
+        Frame t(0x0042, 2568);
+        t.u32(12, static_cast<std::uint32_t>(n));
+        for (std::size_t k = 0; k < 50; ++k) t.u16(316 + 2 * k, 0xFFFF);
+        for (std::size_t k = 0; k < n; ++k) {
+            const Entry& e = entries[k];
+            t.u8(16 + k, static_cast<std::uint8_t>(e.speed != 0.0f ? 1 : 0));    // moving
+            t.u8(66 + k, e.level);
+            t.u8(166 + k, static_cast<std::uint8_t>(e.facing));
+            t.u8(216 + k, 1);
+            t.u16(316 + 2 * k, e.slot);
+            t.u16(416 + 2 * k, e.x);
+            t.u16(516 + 2 * k, e.y);
+            t.u32(1516 + 4 * k, e.type);
+            t.f32(1716 + 4 * k, e.speed);
+            t.u32(2016 + 4 * k, e.hp);
+            t.u32(2216 + 4 * k, e.max_hp);
+        }
+        return t;
+    };
+    const Frame table = table_of(3);
+    const Bytes wrapper = packed_wrapper(table.bytes().size(), lzf_literals(table.bytes()));
+    FramingSpec unpacking = unwrapping_spec();
+    unpacking.unpack = true;
+    {
+        const auto scan = extract_frames(unpacking, wrapper.data(), wrapper.size(), Direction::ToClient,
+                                         0, false);
+        const bool whole = scan.packets.size() == 2 && scan.packets[1].opcode == 0x0042 &&
+                           scan.packets[1].depth == 1 && scan.packets[1].payload == table.body;
+        check(whole, "the table, packed into an 0x0081, comes out of it whole");
+        const auto got = whole ? read_map_monsters(scan.packets[1]) : std::nullopt;
+        check(got && got->size() == 3, "and gives the three monsters its count says");
+        bool fields = got && got->size() == 3;
+        for (std::size_t k = 0; fields && k < 3; ++k) {
+            const MapMonster& m = (*got)[k];
+            const Entry& e = entries[k];
+            fields = m.slot == e.slot && m.type_id == e.type && m.level == e.level &&
+                     m.facing == e.facing && m.x == e.x && m.y == e.y && m.speed == e.speed &&
+                     m.hp == e.hp && m.max_hp == e.max_hp;
+        }
+        check(fields, "each with its slot, type id, level, facing, x, y, speed, HP and max HP from "
+                      "its columns; slot 0 a monster like the others, and HP below max as the "
+                      "table had it");
+
+        // Taken from byte 13, as the live capture takes it until P0-3 turns
+        // unpacking on: the opcode is right, the body still packed.
+        const auto goc = extract_frames(unwrapping_spec(), wrapper.data(), wrapper.size(),
+                                        Direction::ToClient, 0, false);
+        check(goc.packets.size() == 2 && goc.packets[1].opcode == 0x0042 &&
+                  !read_map_monsters(goc.packets[1]),
+              "taken from byte 13, still packed, it gives nothing");
+    }
+    {
+        const auto none = read_map_monsters(inside(table_of(0)));
+        check(none && none->empty(), "a table of none, a map without monsters, gives an empty list");
+
+        Frame over = table_of(3);
+        over.u32(12, 51);
+        check(!read_map_monsters(inside(over)), "a count past the table's 50 entries gives nothing");
+
+        Frame gap = table_of(3);
+        gap.u16(316 + 2 * 1, 0xFFFF);
+        Frame lost = table_of(3);
+        lost.f32(1716 + 4 * 2, std::nanf(""));
+        const auto g = read_map_monsters(inside(gap));
+        const auto l = read_map_monsters(inside(lost));
+        check(g && g->size() == 2 && (*g)[1].slot == 12 && l && l->size() == 2 && (*l)[1].slot == 7,
+              "an entry marked no monster (slot 0xFFFF), or whose speed is no number, is left out");
+
+        GamePacket cut = inside(table);
+        cut.payload.pop_back();
+        check(!read_map_monsters(cut), "a table one byte short is not the table");
+        check(!read_map_monsters(sent(table)), "nor is one straight off the stream, never seen so");
+        check(never(inside(table), [](const GamePacket& p) { return read_map_monsters(p).has_value(); }),
+              "nor one from the client, or over UDP");
+    }
+
+    // ---- 0x003F: a monster spawning in slot 7.
+    Frame spawn(0x003F, 52);
+    spawn.u32(12, 2000301);
+    spawn.u8(16, 30);
+    spawn.u8(18, 0xFF);
+    spawn.u8(19, 1);
+    spawn.u16(20, 2468);
+    spawn.u16(22, 1300);
+    spawn.u32(28, 2000);
+    spawn.u16(32, 7);
+    spawn.u8(44, 1);
+    {
+        const auto s = read_monster_spawn(sent(spawn));
+        check(s && s->slot == 7 && s->type_id == 2000301 && s->level == 30 && s->facing == -1 &&
+                  s->x == 2468 && s->y == 1300 && s->max_hp == 2000,
+              "0x003F: type id at 12, level 16, facing 18, x, y at 20 and 22, max HP 28, slot 32");
+        check(s && s->hp == s->max_hp && s->speed == 0.0f,
+              "the new monster full of HP, and standing");
+        GamePacket least = sent(spawn);
+        least.payload.resize(34 - 8);
+        GamePacket shorter = least;
+        shorter.payload.pop_back();
+        check(read_monster_spawn(least) && !read_monster_spawn(shorter),
+              "a frame that ends with the slot is enough; one byte shorter gives nothing");
+        check(!read_monster_spawn(inside(spawn)) &&
+                  never(sent(spawn), [](const GamePacket& p) { return read_monster_spawn(p).has_value(); }),
+              "nor does one inside a wrapper, from the client, or over UDP");
+    }
+
+    // ---- 0x0038: slot 12 stands, walks, and is killed.
+    const auto state_frame = [](std::uint8_t state, std::uint32_t slot) {
+        Frame f(0x0038, 96);
+        f.u8(12, state);
+        f.u32(16, slot);
+        f.u32(48, 0xFFFFFFFFu);
+        f.u16(88, 3100);    // the pair [Packet.0x0038] reads as x, y: not the position
+        f.u16(90, 560);
+        return f;
+    };
+    Frame stop = state_frame(0, 12);
+    stop.u8(24, 0x01);
+    stop.u16(32, 3400);
+    stop.u16(34, 640);
+    stop.i32(64, 600);
+    Frame walk = state_frame(1, 12);
+    walk.u8(24, 0xFF);
+    walk.f32(28, 3.0f);
+    walk.u16(32, 3400);
+    walk.u16(34, 640);
+    walk.i32(64, 600);
+    Frame hit = state_frame(9, 12);
+    hit.u8(24, 0x01);
+    hit.f32(28, 7.0f);
+    hit.u16(32, 3310);
+    hit.u16(34, 640);
+    hit.u32(48, 4321);
+    hit.u32(52, 5600);
+    hit.i32(64, 600 - 5600);
+    {
+        const auto s = read_monster_state(sent(stop));
+        check(s && s->event == MonsterEvent::Stop && s->slot == 12 && s->x == 3400 && s->y == 640 &&
+                  s->facing == 1 && s->speed == 0.0f && s->hp == 600,
+              "0x0038, a stop: state 0 at 12, slot 16, facing 24, speed 28, x, y at 32 and 34, HP 64");
+        check(s && !s->attacker && s->damage == 0 && !s->killed(),
+              "no attacker (0xFFFFFFFF), no damage, nothing killed");
+        const auto w = read_monster_state(sent(walk));
+        check(w && w->event == MonsterEvent::Walk && w->facing == -1 && w->speed == 3.0f &&
+                  w->x == 3400 && w->hp == 600,
+              "a walk: state 1, facing -1 toward smaller x, its speed per 25 ms step");
+        const auto h = read_monster_state(sent(hit));
+        check(h && h->event == MonsterEvent::Hit && h->attacker == 4321u && h->damage == 5600 &&
+                  h->hp == -5000 && h->killed() && h->x == 3310,
+              "a hit: state 9, the attacker at 48, the damage at 52, and HP after it at 64, below "
+              "zero: killed");
+        check(h && s && s->hp - static_cast<std::int32_t>(h->damage) == h->hp,
+              "HP before less the damage is HP after");
+        check(s && h && s->x != 3100 && h->y != 560,
+              "the pair at 88 and 90 is never taken for the position");
+
+        Frame grazed = hit;
+        grazed.i32(64, 100);
+        const auto g = read_monster_state(sent(grazed));
+        check(g && g->event == MonsterEvent::Hit && !g->killed(),
+              "a hit that leaves HP above zero has not killed (never seen: every hit of the fight "
+              "killed)");
+
+        const auto zero = read_monster_state(sent(state_frame(0, 0)));
+        check(zero && zero->slot == 0, "slot 0 is read like any other");
+    }
+    {
+        check(!read_monster_state(sent(state_frame(2, 12))) &&
+                  !read_monster_state(sent(state_frame(8, 12))),
+              "a state other than 0, 1 or 9 gives nothing: none was seen");
+        Frame odd = walk;
+        odd.f32(28, std::nanf(""));
+        check(!read_monster_state(sent(odd)), "nor does a speed that is no number");
+        GamePacket least = sent(hit);
+        least.payload.resize(68 - 8);
+        GamePacket shorter = least;
+        shorter.payload.pop_back();
+        check(read_monster_state(least) && !read_monster_state(shorter),
+              "a frame that ends with the HP is enough; one byte shorter gives nothing");
+        check(!read_monster_state(inside(stop)) &&
+                  never(sent(stop), [](const GamePacket& p) { return read_monster_state(p).has_value(); }),
+              "nor does one inside a wrapper, from the client, or over UDP");
+        check(!read_monster_state(sent(spawn)) && !read_monster_spawn(sent(stop)) &&
+                  !read_map_monsters(sent(stop)) && !read_monster_state(inside(table)),
+              "each reader takes its own opcode only");
+    }
+
+    // ---- One stream from the server, framed and unpacked as a recording is
+    // read: each reader finds its own frames in it.
+    {
+        const Bytes stream = joined({ stop.bytes(), wrapper, walk.bytes(), hit.bytes(), spawn.bytes() });
+        const auto scan = extract_frames(unpacking, stream.data(), stream.size(), Direction::ToClient,
+                                         0, false);
+        std::size_t tables = 0, spawns = 0, states = 0, kills = 0;
+        for (const GamePacket& p : scan.packets) {
+            if (const auto t = read_map_monsters(p); t && t->size() == 3) ++tables;
+            if (read_monster_spawn(p)) ++spawns;
+            if (const auto s = read_monster_state(p)) {
+                ++states;
+                if (s->killed()) ++kills;
+            }
+        }
+        check(scan.packets.size() == 6 && scan.resyncs == 0 && tables == 1 && spawns == 1 &&
+                  states == 3 && kills == 1,
+              "a stream of a stop, the table, a walk, a kill and a respawn: one table, three "
+              "events, one of them a kill, and one respawn");
+    }
+}
+
+// ------------------------------------- one opcode's frames as numbers
+
+void test_frame_numbers() {
+    section("One opcode's frames as numbers (--rows)");
+    using capture_file::Number;
+
+    Number n = Number::U8;
+    check(capture_file::number_from_name("F32", n) && n == Number::F32 &&
+              capture_file::number_from_name("i16", n) && n == Number::I16 &&
+              !capture_file::number_from_name("f64", n) && !capture_file::number_from_name("", n),
+          "a number's type is read by name, in any case, and an unknown one refused");
+    check(capture_file::number_size(Number::I8) == 1 && capture_file::number_size(Number::U16) == 2 &&
+              capture_file::number_size(Number::F32) == 4 &&
+              std::string(capture_file::number_name(Number::I32)) == "i32",
+          "with its size and name");
+
+    // FE FF 34 12 00 00 80 3F: u16 0xFFFE, then 0x1234, then 1.0f.
+    const Bytes b = { 0xFE, 0xFF, 0x34, 0x12, 0x00, 0x00, 0x80, 0x3F };
+    double v = 0.0;
+    std::uint32_t raw = 0;
+    check(capture_file::read_number(b, 0, Number::U8, v) && v == 254.0 &&
+              capture_file::read_number(b, 0, Number::I8, v) && v == -2.0,
+          "u8 and i8");
+    check(capture_file::read_number(b, 0, Number::U16, v) && v == 65534.0 &&
+              capture_file::read_number(b, 0, Number::I16, v) && v == -2.0 &&
+              capture_file::read_number(b, 2, Number::U16, v) && v == 0x1234,
+          "u16 and i16, little-endian");
+    check(capture_file::read_number(b, 0, Number::U32, v) && v == static_cast<double>(0x1234FFFEu) &&
+              capture_file::read_number(b, 0, Number::I32, v) && v == static_cast<double>(0x1234FFFE),
+          "u32 and i32");
+    check(capture_file::read_number(b, 4, Number::F32, v, &raw) && v == 1.0 && raw == 0x3F800000u,
+          "f32, with its raw bits");
+    check(!capture_file::read_number(b, 6, Number::U32, v) &&
+              !capture_file::read_number(b, 8, Number::U8, v) &&
+              !capture_file::read_number(b, 1000, Number::U8, v),
+          "a number past the end of the body is not read");
+    check(capture_file::format_number(1155.4f, Number::F32) == "1155.40" &&
+              capture_file::format_number(0.0, Number::F32) == "0.00" &&
+              capture_file::format_number(1e-45f, Number::F32) == "1.4e-45" &&
+              capture_file::format_number(-2.0, Number::I16) == "-2" &&
+              capture_file::format_number(4294967295.0, Number::U32) == "4294967295" &&
+              capture_file::format_number(std::nan(""), Number::F32) == "nan",
+          "numbers print as integers, or floats with two decimals or an exponent");
+
+    // A float at 0 that goes 1, 2, 2, 0.5, and a byte at 4 that stays 7.
+    const auto body_with = [](float x, std::uint8_t k) {
+        Bytes body(8, 0);
+        std::memcpy(body.data(), &x, sizeof(x));
+        body[4] = k;
+        return body;
+    };
+    std::vector<Bytes> bodies = { body_with(1.0f, 7), body_with(2.0f, 7), body_with(2.0f, 7),
+                                  body_with(0.5f, 7) };
+    const capture_file::Column c = capture_file::column(bodies, Number::F32, 0);
+    check(c.frames == 4 && c.changes == 2 && c.rises == 1 && c.falls == 1 && c.distinct == 3,
+          "a column counts its changes, rises, falls and distinct values, in frame order");
+    check(c.first == 1.0 && c.last == 0.5 && c.min == 0.5 && c.max == 2.0 && !c.constant(),
+          "and its first, last, least and greatest");
+    const capture_file::Column k = capture_file::column(bodies, Number::U8, 4);
+    check(k.constant() && k.distinct == 1 && k.first == 7.0, "a byte that never changes is constant");
+
+    bodies.push_back(body_with(std::nanf(""), 7));
+    const capture_file::Column with_nan = capture_file::column(bodies, Number::F32, 0);
+    check(with_nan.changes == 3 && with_nan.distinct == 4 && with_nan.min == 0.5 &&
+              with_nan.max == 2.0,
+          "a NaN is a value of its own, left out of the range");
+
+    const std::vector<Bytes> four(bodies.begin(), bodies.begin() + 4);
+    const auto f32s = capture_file::columns(four, Number::F32, 0, 0);
+    const auto every = capture_file::columns(four, Number::F32, 0, 1);
+    check(f32s.size() == 2 && f32s[0].offset == 0 && f32s[1].offset == 4 && every.size() == 5,
+          "columns go every number's size by default, or every byte");
+    bodies.push_back(Bytes{ 1, 2 });
+    const auto shortest = capture_file::columns(bodies, Number::U8, 0, 0);
+    check(shortest.size() == 2 && capture_file::column(bodies, Number::F32, 0).frames == 5,
+          "columns stop where every body ends; a body too short is left out of a column");
+
+    // --at and --step take their numbers so (R3-REV2-5).
+    std::size_t at = 99;
+    check(capture_file::parse_count("12", at) && at == 12 && capture_file::parse_count("012", at) &&
+              at == 12 && capture_file::parse_count("08", at) && at == 8 &&
+              capture_file::parse_count("0", at) && at == 0,
+          "an offset is decimal, and a leading zero leaves it decimal: 012 is twelve, not ten");
+    check(capture_file::parse_count("0x1C", at) && at == 28 && capture_file::parse_count("0X0a", at) &&
+              at == 10,
+          "or hex after 0x");
+    at = 99;
+    check(!capture_file::parse_count("", at) && !capture_file::parse_count("-1", at) &&
+              !capture_file::parse_count("+1", at) && !capture_file::parse_count(" 1", at) &&
+              !capture_file::parse_count("12a", at) && !capture_file::parse_count("0x", at) &&
+              !capture_file::parse_count("0x1G", at) && !capture_file::parse_count("1e3", at) &&
+              !capture_file::parse_count("99999999999999999999", at) && at == 99,
+          "and anything else is refused, the number left as it was");
+}
+
+// ----------------------------------------- recordings, per connection
+
+void test_flow_halves() {
+    section("--record keeps each connection's two halves apart");
+
+    const Bytes a1 = some_body(10, 1), a2 = some_body(5, 2), b1 = some_body(7, 3);
+    const Bytes c1 = some_body(4, 4), c2 = some_body(3, 5);
+    capture_file::FlowHalves h;
+    // Connection 200 carries only the client's half; 100 and 300 carry the
+    // server's, and 100 the client's as well.
+    h.add(200, "c", false, c1.data(), c1.size());
+    h.add(100, "a", true,  a1.data(), a1.size());
+    h.add(100, "a, renamed", false, a2.data(), a2.size());
+    h.add(300, "b", true,  b1.data(), b1.size());
+    h.add(200, "c", false, c2.data(), c2.size());
+    h.add(100, "a", true,  a2.data(), a2.size());
+
+    const std::string base = temp_file("rec");
+    const auto files = h.files(base, false);
+    check(h.connections() == 3 && files.size() == 4, "three connections, four halves that carried anything");
+    if (files.size() == 4) {
+        check(files[0].path == base + ".flow0.s2c" && files[0].to_client && files[0].bytes == 15 &&
+                  files[0].connection == "a",
+              "the server halves are numbered first, as they always were, under the first name given");
+        check(files[1].path == base + ".flow0.c2s" && !files[1].to_client && files[1].bytes == 5,
+              "and a connection's client half takes the same number");
+        check(files[2].path == base + ".flow1.s2c" && files[2].bytes == 7,
+              "the next connection the next number");
+        check(files[3].path == base + ".flow2.c2s" && files[3].bytes == 7 && files[3].connection == "c",
+              "and one that carried only the client's half is numbered after them");
+        check(!files[0].written, "nothing is written unless asked");
+    }
+
+    const auto written = h.files(base, true);
+    bool all = written.size() == 4;
+    for (const auto& file : written) all = all && file.written;
+    const auto read_back = [](const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        return Bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    check(all && read_back(base + ".flow0.s2c") == joined({ a1, a2 }) &&
+              read_back(base + ".flow0.c2s") == a2 && read_back(base + ".flow2.c2s") == joined({ c1, c2 }),
+          "written, each half's bytes in the order they came");
+    for (const auto& file : written) std::remove(file.path.c_str());
 }
 
 // ------------------------------------------------------------- reassembly
@@ -12731,6 +13939,8 @@ int main() {
     test_frame_trailer();
     test_unwrap();
     test_udp_datagrams();
+    test_udp_framing();
+    test_own_position();
     test_watchdog_clock();
     test_capture_filters();
     test_socket_owners();
@@ -12739,6 +13949,11 @@ int main() {
     test_protocol_handler_holds_back();
     test_real_capture();
     test_capture_file();
+    test_capture_file_framings();
+    test_unpack();
+    test_monster_frames();
+    test_frame_numbers();
+    test_flow_halves();
     test_both_framings_configured();
     test_reassembler();
     test_stream_tap();
