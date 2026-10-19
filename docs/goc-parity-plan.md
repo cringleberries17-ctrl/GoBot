@@ -492,6 +492,7 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
 - **Characters for the live fight tests:** one warrior (melee) and one mage (ranged).
 - **Self-name match, fix round 4:** parked. Your own position now comes from packets (P0-2), so P0-3 replaces finding your name plate on screen; the parked branch stays for reference.
 - **The live runner** may run fight commands for the tests: `gobot_cli --hunt N`, a one-press jump test, and a hunt with the macro.
+- **Skipped: buying potions, bag buffs and junk, pet care, avatar, and the EXP meter** (P3-4, P3-7, P3-5, P3-6 and P3-12). They are not built unless the player asks for them again. P3-8 was already left out. The rest of Phase 3 stays: working area, return to the spot, waypoints, the previous map and the map attribute byte (P3-1, P3-2, P3-3, P3-16), then party extras, follow, profiles, remote commands and the language and theme (P3-10, P3-13, P3-9, P3-11, P3-15).
 
 ## Questions for the player (2026-10-17), answered 2026-10-18
 
