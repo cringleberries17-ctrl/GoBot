@@ -1,12 +1,17 @@
 // gobot_test -- the party HUD read off the game's screen, and whether an
 // invite can work by it.
 //
-// No saved frame of the live client has a party on it, so the parties here
-// are drawn: GoC's own pictures of the game's member panel and of its two
-// leader frames, onto frame.png from the live client, with the bars, a name
-// and a face in the panels as a live party would have them -- and the other
-// helper's one live picture of a leader's panel. The saved frames of the live
-// rounds are what must never read as a party. Nothing is pressed anywhere.
+// Who leads goes by the crown the game draws on the corner of the leader's
+// panel (the player's decision of 2026-10-19). Four saved frames of the live
+// client have a party on them, another member leading with the crown on that
+// member's panel; the rest are of a player alone, and must never read as a
+// party. The other states are drawn: GoC's own pictures of the game's member
+// panel and of the leader's mark -- the red frame with the crown on its
+// corner, or either of the two alone -- onto frame.png and the live party's
+// frames, with the bars, a name and a face in the panels as a live party has
+// them; the other helper's one live picture of a leader's panel; and GoC's
+// seal icons in the HUD's seal slot, over the player's own crown. Nothing is
+// pressed anywhere.
 
 #include "gobot/party_hud.hpp"
 #include "gobot/auto_login.hpp"
@@ -21,7 +26,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
+#include <initializer_list>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -35,7 +43,27 @@ void (*g_section)(const char*) = nullptr;
 void check(bool cond, const std::string& what) { g_check(cond, what); }
 void section(const char* name) { g_section(name); }
 
+template <typename... Args>
+std::string fmt(const char* f, Args... args) {
+    char buf[512];
+    std::snprintf(buf, sizeof buf, f, args...);
+    return buf;
+}
+
+std::string read_all(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 const char* const kLiveBuild = "C:\\Users\\player\\source\\GoBot\\build\\";
+
+/// The saved frames of the live party, under kLiveBuild. Another member
+/// leads: that member's panel at 0,106, the crown on its corner. The first is
+/// the quick quest's look, nothing over the panels; the second the trash
+/// cleaner's, the bag dragged over two more panels below it.
+const char* const kPartyProbe = "bin\\Release\\quest_debug\\probe_20261016_234019_00.png";
+const char* const kPartyUnderBag = "bin\\Release\\trash_debug\\20261016_223524_0_not_in_bin.png";
+constexpr int kLiveLeaderY = 106;
 
 /// Draw `pic` onto `f` at `x`, `y`, its see-through pixels left out.
 void blit(Frame& f, const Frame& pic, int x, int y) {
@@ -43,6 +71,24 @@ void blit(Frame& f, const Frame& pic, int x, int y) {
         for (int px = 0; px < pic.width; ++px) {
             const int fx = x + px, fy = y + py;
             if (fx < 0 || fy < 0 || fx >= f.width || fy >= f.height) continue;
+            const std::uint8_t* s = &pic.pixels[(static_cast<std::size_t>(py) * pic.width + px) * 4];
+            if (s[3] < TemplateMatcher::kOpaque) continue;
+            std::uint8_t* d = &f.pixels[(static_cast<std::size_t>(fy) * f.width + fx) * 4];
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = 255;
+        }
+}
+
+/// `pic` drawn in the middle of `box` of `f` and cut to it, its see-through
+/// pixels left out: an icon in its slot.
+void blit_in(Frame& f, const Frame& pic, const ScreenRect& box) {
+    const int x0 = box.x + (box.w - pic.width) / 2, y0 = box.y + (box.h - pic.height) / 2;
+    for (int py = 0; py < pic.height; ++py)
+        for (int px = 0; px < pic.width; ++px) {
+            const int fx = x0 + px, fy = y0 + py;
+            if (!box.contains(fx, fy) || fx >= f.width || fy >= f.height) continue;
             const std::uint8_t* s = &pic.pixels[(static_cast<std::size_t>(py) * pic.width + px) * 4];
             if (s[3] < TemplateMatcher::kOpaque) continue;
             std::uint8_t* d = &f.pixels[(static_cast<std::size_t>(fy) * f.width + fx) * 4];
@@ -80,11 +126,50 @@ Frame plain_frame(int w = 1280, int h = 720) {
     return f;
 }
 
+/// `r` of `f`, as a picture of its own.
+Frame cut_of(const Frame& f, const ScreenRect& r) {
+    Frame out;
+    out.width = r.w;
+    out.height = r.h;
+    out.pixels.resize(static_cast<std::size_t>(r.w) * r.h * 4);
+    for (int y = 0; y < r.h; ++y)
+        std::copy_n(&f.pixels[(static_cast<std::size_t>(r.y + y) * f.width + r.x) * 4],
+                    static_cast<std::size_t>(r.w) * 4, &out.pixels[static_cast<std::size_t>(y) * r.w * 4]);
+    return out;
+}
+
+/// `f` with `r` of it see-through.
+Frame without(const Frame& f, const ScreenRect& r) {
+    Frame out = f;
+    for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) out.pixels[(static_cast<std::size_t>(y) * out.width + x) * 4 + 3] = 0;
+    return out;
+}
+
+/// The first of `names` that `store` holds.
+const Frame* first_in(const TemplateStore& store, std::initializer_list<const char*> names) {
+    for (const char* n : names)
+        if (const Frame* f = store.get(n)) return f;
+    return nullptr;
+}
+
+bool same_pixels(const Frame& a, const Frame& b) {
+    if (a.width != b.width || a.height != b.height) return false;
+    for (std::size_t i = 0; i < a.pixels.size(); i += 4) {
+        const std::uint8_t al = a.pixels[i + 3];
+        if (al != b.pixels[i + 3]) return false;
+        if (al != 0 && !std::equal(&a.pixels[i], &a.pixels[i] + 3, &b.pixels[i])) return false;
+    }
+    return true;
+}
+
 struct Kit {
     TemplateStore pictures;
     PartyHudReader reader;
     Frame panel, other, mine, live_leader;
-    Frame frame;                ///< frame.png, 1280x720, from the live client
+    Frame other_crown, own_crown;   ///< the crowns alone: kCrown of the two marks
+    Frame other_frame, own_frame;   ///< the red frames alone, their crowns left out
+    Frame frame;                    ///< frame.png, 1280x720, from the live client
     bool ok = false;
     std::string why;
 };
@@ -98,9 +183,17 @@ Kit& kit() {
             k.why = "a picture of the party HUD is not installed here: " + missing;
             return true;
         }
-        k.panel = *k.pictures.get("inven/1/Dialog_PartyInfo.spr/0");
-        k.other = *k.pictures.get("inven/1/Party_King_Other.spr/0");
-        k.mine = *k.pictures.get("inven/1/Party_King_My.spr/0");
+        // Under whichever of their names load_pictures found them.
+        k.panel = *first_in(k.pictures, { "inven/1/Dialog_PartyInfo.spr/0", "inven/0/Dialog_PartyInfo.spr/0",
+                                          "dialog_party_info" });
+        k.other = *first_in(k.pictures, { "grabbed/party_crown_other", "inven/1/Party_King_Other.spr/0",
+                                          "inven/0/Party_King_Other.spr/0" });
+        k.mine = *first_in(k.pictures, { "grabbed/party_crown_mine", "inven/1/Party_King_My.spr/0",
+                                         "inven/0/Party_King_My.spr/0" });
+        k.other_crown = cut_of(k.other, PartyHudReader::kCrown);
+        k.own_crown = cut_of(k.mine, PartyHudReader::kCrown);
+        k.other_frame = without(k.other, PartyHudReader::kCrown);
+        k.own_frame = without(k.mine, PartyHudReader::kCrown);
         TemplateStore::load_one("grabbed/party_leader_key2", exe_relative("configs/templates.ini"), k.live_leader);
         for (const std::string& p : { exe_relative("frame.png"), std::string(kLiveBuild) + "bin\\Release\\frame.png" })
             if (!k.frame.valid() && load_png(p, k.frame) && (k.frame.width != 1280 || k.frame.height != 720))
@@ -122,20 +215,49 @@ bool skip_without_kit() {
     return true;
 }
 
+/// What of the leader's mark is drawn: none of it; the whole of it, as the
+/// game draws it -- the red frame with the crown on its corner; the crown
+/// alone; or the red frame alone.
+enum class Mark { None, Whole, Crown, Frame };
+
+/// `m` of the mark on the player's own panel, at the top-left corner.
+void mark_own(Frame& f, Mark m) {
+    const Kit& k = kit();
+    if (m == Mark::Whole) blit(f, k.mine, 0, 0);
+    if (m == Mark::Crown) blit(f, k.own_crown, PartyHudReader::kCrown.x, PartyHudReader::kCrown.y);
+    if (m == Mark::Frame) blit(f, k.own_frame, 0, 0);
+}
+
 /// A member's panel as a live party shows it: the game's panel, its HP and MP
-/// bars part full, a name in white, a face -- and the leader's red frame over
-/// it when `leads`.
-void draw_member(Frame& f, int x, int y, bool leads, int hp = 60, int mp = 80) {
+/// bars part full, a name in white, a face -- and `m` of the leader's mark
+/// over it.
+void draw_member(Frame& f, int x, int y, Mark m = Mark::None, int hp = 60, int mp = 80) {
     const Kit& k = kit();
     blit(f, k.panel, x, y);
     fill(f, x + 7, y + 27, hp * 80 / 100, 3, 220, 40, 40);
     fill(f, x + 7, y + 33, mp * 80 / 100, 3, 40, 120, 220);
     for (int i = 0; i < 9; ++i) fill(f, x + 14 + i * 7, y + 10, 4, 8, 250, 250, 250);   // a name
     fill(f, x + 93, y + 8, 28, 26, 200, 150, 90);                                     // a face
-    if (leads) blit(f, k.other, x, y);
+    if (m == Mark::Whole) blit(f, k.other, x, y);
+    if (m == Mark::Crown) blit(f, k.other_crown, x + PartyHudReader::kCrown.x, y + PartyHudReader::kCrown.y);
+    if (m == Mark::Frame) blit(f, k.other_frame, x, y);
+}
+
+/// The crown on the corner of a panel at `x`, `y` painted over in the name
+/// box's grey, as though the game had not drawn it.
+void paint_out_crown(Frame& f, int x, int y) {
+    fill(f, x + PartyHudReader::kCrown.x, y + PartyHudReader::kCrown.y, PartyHudReader::kCrown.w,
+         PartyHudReader::kCrown.h, 52, 56, 66);
 }
 
 std::string said(const PartyHud& h) { return party_hud_text(h); }
+
+/// The panel nearest `y` among those read, or null.
+const PartyPanel* panel_at(const PartyHud& h, int y) {
+    for (const PartyPanel& p : h.panels)
+        if (std::abs(p.at.y - y) <= 2) return &p;
+    return nullptr;
+}
 
 void test_reading() {
     section("Party HUD: alone, a member, the leader, full (PH-A1, PH-A2)");
@@ -143,54 +265,55 @@ void test_reading() {
     const Kit& k = kit();
     {
         const PartyHud h = k.reader.read(k.frame);
-        check(h.state == PartyState::Alone && h.size == 1 && !h.full && h.panels.empty(),
+        check(h.state == PartyState::Alone && h.size == 1 && !h.full && h.panels.empty() && !h.covered,
               "frame.png as it is: alone -- " + said(h));
     }
     {
         // A member of two: the other member's panel down the left, wearing
-        // the leader's frame.
+        // the leader's mark.
         Frame f = k.frame;
-        draw_member(f, 0, 112, true);
+        draw_member(f, 0, 112, Mark::Whole);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Member && h.size == 2 && !h.full && h.panels.size() == 1 &&
                   h.panels[0].leader && std::abs(h.panels[0].at.x) <= 1 && std::abs(h.panels[0].at.y - 112) <= 1,
-              "another member's panel with the leader's frame: member 2/6 -- " + said(h));
+              "another member's panel with the leader's crown: member 2/6 -- " + said(h));
         check(party_hud_line_vi(h) == "Tổ đội: thành viên (2/6)", "said as " + party_hud_line_vi(h));
     }
     {
-        // Leading three: the player's own panel in red, two members.
+        // Leading three: the player's own panel with the mark, two members.
         Frame f = k.frame;
-        blit(f, k.mine, 0, 0);
-        draw_member(f, 0, 112, false);
-        draw_member(f, 0, 160, false, 30, 10);
+        mark_own(f, Mark::Whole);
+        draw_member(f, 0, 112);
+        draw_member(f, 0, 160, Mark::None, 30, 10);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Leader && h.own_leader && h.size == 3 && !h.full,
-              "the own panel in red and two members: leader 3/6 -- " + said(h));
+              "the crown on the own panel and two members: leader 3/6 -- " + said(h));
         check(party_hud_line_vi(h) == "Tổ đội: chủ tổ đội (3/6)", "said as " + party_hud_line_vi(h));
     }
     {
         Frame f = k.frame;
-        blit(f, k.mine, 0, 0);
-        for (int i = 0; i < 5; ++i) draw_member(f, 0, 112 + i * 46, false, 20 * i, 100 - 15 * i);
+        mark_own(f, Mark::Whole);
+        for (int i = 0; i < 5; ++i) draw_member(f, 0, 112 + i * 46, Mark::None, 20 * i, 100 - 15 * i);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Leader && h.size == 6 && h.full,
-              "the own panel in red and five members: leader 6/6, full -- " + said(h));
+              "the crown on the own panel and five members: leader 6/6, full -- " + said(h));
     }
     {
         // A full party the player does not lead.
         Frame f = k.frame;
-        for (int i = 0; i < 5; ++i) draw_member(f, 0, 112 + i * 46, i == 2);
+        for (int i = 0; i < 5; ++i) draw_member(f, 0, 112 + i * 46, i == 2 ? Mark::Whole : Mark::None);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Member && h.size == 6 && h.full,
-              "five members, one leading: member 6/6, full -- " + said(h));
+              "five members, one wearing the crown: member 6/6, full -- " + said(h));
     }
     if (k.live_leader.valid()) {
         // The other helper's own picture of a leader's panel, cut off the
-        // live client a pixel above the panel: found, and found leading.
+        // live client a pixel above the panel: found, and its crown with it.
         Frame f = k.frame;
         blit(f, k.live_leader, 0, 120);
         const PartyHud h = k.reader.read(f);
-        check(h.state == PartyState::Member && h.panels.size() == 1 && h.panels[0].leader,
+        check(h.state == PartyState::Member && h.panels.size() == 1 && h.panels[0].leader &&
+                  !h.panels[0].hidden,
               "the helper's live picture of a leader's panel: a member, led by that panel -- " + said(h));
     } else {
         std::printf("  [skip] no grabbed/party_leader_key2 here\n");
@@ -200,15 +323,227 @@ void test_reading() {
         Frame shot;
         if (load_png(std::string(kLiveBuild) + "bin\\Release\\playerlist.png", shot) && shot.width == 1024) {
             check(k.reader.read(shot).state == PartyState::Alone, "playerlist.png (1024x768) as it is: alone");
-            draw_member(shot, 0, 112, false);
-            draw_member(shot, 0, 158, true);
-            const PartyHud h = k.reader.read(shot);
+            Frame member = shot;
+            draw_member(member, 0, 112);
+            draw_member(member, 0, 158, Mark::Whole);
+            const PartyHud h = k.reader.read(member);
             check(h.state == PartyState::Member && h.size == 3,
-                  "and two members drawn on it: member 3/6 -- " + said(h));
+                  "and two members drawn on it, the second crowned: member 3/6 -- " + said(h));
+            Frame leading = shot;
+            mark_own(leading, Mark::Whole);
+            draw_member(leading, 0, 112);
+            const PartyHud l = k.reader.read(leading);
+            check(l.state == PartyState::Leader && l.size == 2 && l.own_crown >= 0.99f,
+                  "and the crown on the own panel, one member: leader 2/6 -- " + said(l));
         } else {
             std::printf("  [skip] no playerlist.png from the live client here\n");
         }
     }
+}
+
+void test_crowns() {
+    section("Party HUD: who leads, by the crown (P2-4, the player's rule of 2026-10-19)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    {
+        // The crown decides, on the player's own panel: the crown without
+        // its red frame is the player leading; the red frame without its
+        // crown is not, and the log says the two do not agree.
+        Frame crowned = k.frame;
+        mark_own(crowned, Mark::Crown);
+        draw_member(crowned, 0, 112);
+        const PartyHud c = k.reader.read(crowned);
+        check(c.state == PartyState::Leader && c.own_leader && c.own_crown >= 0.99f && c.size == 2,
+              "the own crown alone, one member: leader 2/6 -- " + said(c));
+        Frame framed = k.frame;
+        mark_own(framed, Mark::Frame);
+        draw_member(framed, 0, 112);
+        const PartyHud f = k.reader.read(framed);
+        check(f.state == PartyState::InParty && !f.own_leader && f.own_crown < PartyHudReader::kCrownScore &&
+                  f.own_frame >= PartyHudReader::kFrameScore &&
+                  said(f).find("does not agree") != std::string::npos,
+              "the own red frame without its crown, one member: in a party, no crown seen -- " + said(f));
+    }
+    {
+        // And on a member's panel.
+        Frame crowned = k.frame;
+        draw_member(crowned, 0, 112, Mark::Crown);
+        const PartyHud c = k.reader.read(crowned);
+        check(c.state == PartyState::Member && c.panels.size() == 1 && c.panels[0].leader &&
+                  c.panels[0].crown_score >= 0.99f,
+              "a member's panel with the crown alone: member 2/6 -- " + said(c));
+        Frame framed = k.frame;
+        draw_member(framed, 0, 112, Mark::Frame);
+        const PartyHud f = k.reader.read(framed);
+        check(f.state == PartyState::InParty && f.panels.size() == 1 && !f.panels[0].leader &&
+                  f.panels[0].frame_score >= PartyHudReader::kFrameScore,
+              "a member's panel with the red frame alone: in a party, no crown seen -- " + said(f));
+    }
+    {
+        // Neither: two plain panels and the player's own.
+        Frame f = k.frame;
+        draw_member(f, 0, 112);
+        draw_member(f, 0, 160, Mark::None, 30, 10);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::InParty && h.size == 3 && !h.covered,
+              "two members and no crown anywhere: in a party of 3 -- " + said(h));
+        check(party_hud_line_vi(h) == "Tổ đội: đang trong tổ đội (3/6), không thấy vương miện chủ tổ đội",
+              "said as " + party_hud_line_vi(h));
+    }
+    {
+        // Covered: a window over a crowned member's panel but for its first
+        // twenty columns. The panel is not found; its crown is, so that
+        // member is there and leads -- and there may be more under it.
+        Frame f = k.frame;
+        draw_member(f, 0, 112, Mark::Whole);
+        draw_member(f, 0, 158);
+        fill(f, 20, 100, 300, 50, 200, 200, 210);
+        const PartyHud h = k.reader.read(f);
+        const PartyPanel* hidden = panel_at(h, 112);
+        check(h.state == PartyState::Member && h.covered && h.size == 3 && hidden != nullptr && hidden->hidden &&
+                  hidden->leader && party_hud_line_vi(h) == "Tổ đội: thành viên (ít nhất 3/6)",
+              "a window over a crowned panel but for its crown: " + party_hud_line_vi(h) + " -- " + said(h));
+        const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
+        check(!ticked.allowed && ticked.reason_vi == party_text::kNotLeader && plain.allowed,
+              "and with the tick, not invited: \"" + ticked.reason_vi + "\"; without it, invited");
+        // A crown with nothing at all under it but the window's own colour
+        // is the same reading: nobody is taken for alone.
+        Frame g = k.frame;
+        draw_member(g, 0, 112, Mark::Whole);
+        fill(g, 20, 100, 300, 50, 200, 200, 210);
+        const PartyHud h2 = k.reader.read(g);
+        check(h2.state == PartyState::Member && h2.covered && h2.size == 2,
+              "the same with no other member: member, at least 2 -- " + said(h2));
+    }
+
+    // The live party, as saved: read as before, and the crown and the red
+    // frame agree on it.
+    Frame live;
+    if (!load_png(std::string(kLiveBuild) + kPartyProbe, live) || live.width != 1280) {
+        std::printf("  [skip] no saved frame of the live party here\n");
+        return;
+    }
+    {
+        const PartyHud h = k.reader.read(live);
+        const PartyPanel* p = panel_at(h, kLiveLeaderY);
+        check(h.state == PartyState::Member && h.size == 2 && !h.covered && p != nullptr && p->leader &&
+                  !p->hidden && p->crown_score >= 0.99f && p->frame_score >= PartyHudReader::kFrameScore &&
+                  !h.own_leader && h.own_crown < PartyHudReader::kCrownScore &&
+                  h.own_frame < PartyHudReader::kFrameScore,
+              "the live party as saved: member 2/6, the crown and the red frame on the panel at 0,106 and on "
+              "neither the own -- " + said(h));
+    }
+    {
+        // Its crown painted over: the red frame is still round the panel, and
+        // is no proof of who leads.
+        Frame f = live;
+        paint_out_crown(f, 0, kLiveLeaderY);
+        const PartyHud h = k.reader.read(f);
+        const PartyPanel* p = panel_at(h, kLiveLeaderY);
+        check(h.state == PartyState::InParty && h.size == 2 && p != nullptr && !p->leader &&
+                  p->frame_score >= PartyHudReader::kFrameScore,
+              "the live party, the crown painted over: in a party, no crown seen -- " + said(h));
+        const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
+        check(!ticked.allowed && ticked.reason_vi == party_text::kNoCrown && !ticked.reason_en.empty() &&
+                  plain.allowed,
+              "and with the tick, not invited: \"" + ticked.reason_vi + "\"; without it, invited");
+        // And the player's own crown drawn on it: the player leads.
+        Frame g = f;
+        mark_own(g, Mark::Whole);
+        const PartyHud l = k.reader.read(g);
+        check(l.state == PartyState::Leader && l.size == 2 && l.own_crown >= 0.99f &&
+                  party_invite_gate(l, true).allowed,
+              "and the own crown drawn on it: leader 2/6, invited with the tick -- " + said(l));
+    }
+    {
+        // The own crown drawn on it as it is: two crowns, which no party has.
+        Frame f = live;
+        mark_own(f, Mark::Whole);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Unknown && h.why.find("crowns") != std::string::npos,
+              "the live party with a second crown, the player's own: unknown -- " + said(h));
+    }
+}
+
+void test_crown_pictures() {
+    section("Party HUD: the crowns GoBot ships (P2-4)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    // One crown in both of GoC's pictures: the same medallion, but for the
+    // shading of the red frame down the left edge under it.
+    int drawn = 0, differ = 0, differ_off_edge = 0;
+    for (int y = 0; y < k.own_crown.height; ++y)
+        for (int x = 0; x < k.own_crown.width; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * k.own_crown.width + x) * 4;
+            const bool a = k.own_crown.pixels[i + 3] >= TemplateMatcher::kOpaque;
+            drawn += a ? 1 : 0;
+            const bool same = a == (k.other_crown.pixels[i + 3] >= TemplateMatcher::kOpaque) &&
+                              std::equal(&k.own_crown.pixels[i], &k.own_crown.pixels[i] + 3,
+                                         &k.other_crown.pixels[i]);
+            differ += same ? 0 : 1;
+            differ_off_edge += !same && x >= 4 ? 1 : 0;
+        }
+    check(k.own_crown.width == 19 && k.own_crown.height == 20 && drawn >= 300 && differ <= 16 &&
+              differ_off_edge == 0,
+          fmt("the crown, 19x20, %d pixels drawn; the two marks' differ in %d, all on the frame's left edge", drawn,
+              differ));
+
+    // GoBot's own copies are GoC's pictures, pixel for pixel, and the
+    // shipped templates.ini names them, so that a package keeps them.
+    const std::string ini = exe_relative("configs/templates.ini");
+    const struct {
+        const char* ours;
+        const char* gocs;
+    } copies[] = { { "grabbed/party_crown_mine", "inven/1/Party_King_My.spr/0" },
+                   { "grabbed/party_crown_other", "inven/1/Party_King_Other.spr/0" } };
+    for (const auto& c : copies) {
+        Frame ours, gocs;
+        std::string from;
+        if (!TemplateStore::load_one(c.ours, ini, ours, &from)) {
+            std::printf("  [skip] no %s.png staged beside this test\n", c.ours);
+            continue;
+        }
+        if (!TemplateStore::load_one(c.gocs, ini, gocs)) {
+            std::printf("  [skip] no %s.png here to compare %s with\n", c.gocs, c.ours);
+            continue;
+        }
+        check(same_pixels(ours, gocs), std::string("the staged ") + c.ours + ".png is GoC's " + c.gocs +
+                                           ".png, pixel for pixel (" + from + ")");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    const std::string names = read_all(std::string(GOBOT_SOURCE_DIR) + "/configs/templates.ini");
+    check(names.find("party_crown_mine               = grabbed/party_crown_mine") != std::string::npos &&
+              names.find("party_crown_other              = grabbed/party_crown_other") != std::string::npos,
+          "templates.ini names both crowns, so that the package keeps them");
+#endif
+
+    // The reader takes them under GoBot's names or the game's, either skin.
+    const Frame* plate = first_in(k.pictures, { "hpmp_indicator2", "grabbed/hpmp_indicator2" });
+    const Frame* strip = first_in(k.pictures, { "grabbed/inventory", "inventory" });
+    if (plate == nullptr || strip == nullptr) {
+        std::printf("  [skip] the Level plate or the bag's strip is not among the loaded pictures\n");
+        return;
+    }
+    const auto store_with = [&](const char* other_name, const Frame& other, const char* mine_name,
+                                const Frame& mine) {
+        TemplateStore s;
+        s.put("inven/0/Dialog_PartyInfo.spr/0", k.panel);
+        s.put("hpmp_indicator2", *plate);
+        s.put("grabbed/inventory", *strip);
+        s.put(other_name, other);
+        s.put(mine_name, mine);
+        return s;
+    };
+    PartyHudReader ours, skin0, crownless;
+    std::string missing;
+    check(ours.load(store_with("grabbed/party_crown_other", k.other, "grabbed/party_crown_mine", k.mine)) &&
+              skin0.load(store_with("inven/0/Party_King_Other.spr/0", k.other, "inven/0/Party_King_My.spr/0", k.mine)),
+          "the reader loads from GoBot's copies alone, and from skin 0's pictures alone");
+    const bool loaded = crownless.load(store_with("grabbed/party_crown_other", without(k.other, PartyHudReader::kCrown),
+                                                  "grabbed/party_crown_mine", k.mine),
+                                       &missing);
+    check(!loaded && missing == "grabbed/party_crown_other",
+          "and refuses a mark with no crown on its corner: missing " + missing);
 }
 
 void test_nonsense() {
@@ -217,22 +552,26 @@ void test_nonsense() {
     const Kit& k = kit();
     {
         Frame f = k.frame;
-        for (int i = 0; i < 6; ++i) draw_member(f, 0, 104 + i * 44, false);
+        for (int i = 0; i < 6; ++i) draw_member(f, 0, 104 + i * 44);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Unknown && !h.full && h.size == 0,
               "six other panels, seven in all, more than a party holds: unknown, never full -- " + said(h));
     }
     {
         Frame f = k.frame;
-        blit(f, k.mine, 0, 0);
-        draw_member(f, 0, 112, true);
+        mark_own(f, Mark::Whole);
+        draw_member(f, 0, 112, Mark::Whole);
         const PartyHud h = k.reader.read(f);
-        check(h.state == PartyState::Unknown, "two leaders' frames: unknown -- " + said(h));
+        check(h.state == PartyState::Unknown, "two leaders' crowns: unknown -- " + said(h));
+        Frame g = k.frame;
+        draw_member(g, 0, 112, Mark::Crown);
+        draw_member(g, 0, 160, Mark::Crown);
+        check(k.reader.read(g).state == PartyState::Unknown, "two members' crowns: unknown");
     }
     {
         // The HUD gone: a member's panel on its own says nothing.
         Frame f = plain_frame();
-        draw_member(f, 0, 112, true);
+        draw_member(f, 0, 112, Mark::Whole);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Unknown && h.why.find("HUD") != std::string::npos,
               "no HUD on screen: unknown -- " + said(h));
@@ -241,8 +580,8 @@ void test_nonsense() {
         // A panel half covered by a window is not counted, so a covered party
         // never reads as fuller than it is.
         Frame f = k.frame;
-        blit(f, k.mine, 0, 0);
-        for (int i = 0; i < 5; ++i) draw_member(f, 0, 112 + i * 46, false);
+        mark_own(f, Mark::Whole);
+        for (int i = 0; i < 5; ++i) draw_member(f, 0, 112 + i * 46);
         fill(f, 60, 112 + 2 * 46, 300, 60, 200, 200, 210);
         const PartyHud h = k.reader.read(f);
         check(!h.full && h.size < kPartyMax, "five members with one panel covered: not full -- " + said(h));
@@ -256,31 +595,31 @@ void test_nonsense() {
 }
 
 void test_leader_unread() {
-    section("Party HUD: other members, and no leader's frame anywhere (R2B-3)");
+    section("Party HUD: other members, and no crown anywhere (R2B-3, under the crown rule)");
     if (skip_without_kit()) return;
     const Kit& k = kit();
-    // A party always has its one leader. Panels with no red frame on any of
-    // them, nor on the player's own, are a party whose leader was not seen --
-    // the player's own frame not matched, say -- never a member who does not
-    // lead: the tick must not stop a leader's invites on that.
+    // A party always has its one leader. Panels with no crown on any of them,
+    // nor on the player's own, are a party whose leader was not seen: never a
+    // member who does not lead, and never the leader either. Round 2 let the
+    // tick invite on it, with a note; by the crown rule it does not.
     Frame f = k.frame;
-    draw_member(f, 0, 112, false);
-    draw_member(f, 0, 160, false, 30, 10);
+    draw_member(f, 0, 112);
+    draw_member(f, 0, 160, Mark::None, 30, 10);
     const PartyHud h = k.reader.read(f);
     check(h.state == PartyState::InParty && h.size == 3 && !h.full,
-          "two plain panels and the player's own: in a party of 3, who leads not read -- " + said(h));
-    check(party_hud_line_vi(h) == "Tổ đội: đang trong tổ đội (3/6), không rõ ai làm chủ",
-          "said as " + party_hud_line_vi(h));
+          "two plain panels and the player's own: in a party of 3, no crown seen -- " + said(h));
     const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
-    check(ticked.allowed && ticked.reason_vi.empty() && ticked.note_vi == "không đọc được ai là chủ tổ đội",
-          "the tick on: invited all the same, the log told \"" + ticked.note_vi + "\"");
-    check(plain.allowed && plain.note_vi.empty(), "the tick off: invited, nothing to say");
+    check(!ticked.allowed && ticked.reason_vi == "Đang trong tổ đội nhưng không thấy vương miện chủ tổ đội ở ô nào" &&
+              ticked.reason_en.find("crown") != std::string::npos,
+          "the tick on: not invited, the tab told \"" + ticked.reason_vi + "\", the log \"" + ticked.reason_en +
+              "\"");
+    check(plain.allowed && plain.reason_vi.empty(), "the tick off: invited, as before");
     // Tự chat's tick goes by "alone" only: a party whose leader is not known
     // is a party.
     check(h.state != PartyState::Alone, "and to Tự chat's tick it is a party, not alone");
     // Full still stops it: six seen is six, whoever leads.
     Frame six = k.frame;
-    for (int i = 0; i < 5; ++i) draw_member(six, 0, 112 + i * 46, false, 20 * i, 100 - 15 * i);
+    for (int i = 0; i < 5; ++i) draw_member(six, 0, 112 + i * 46, Mark::None, 20 * i, 100 - 15 * i);
     const PartyHud h6 = k.reader.read(six);
     const PartyGate g6 = party_invite_gate(h6, false);
     check(h6.state == PartyState::InParty && h6.full && !g6.allowed && g6.reason_vi == "Tổ đội đã đủ 6 người",
@@ -305,9 +644,8 @@ void test_bag_over() {
     // the screen's left edge, over all but their first few.
     Frame kept, dragged;
     if (!load_png(std::string(kLiveBuild) + "live\\shots\\r3_B_000.png", kept) ||
-        !load_png(std::string(kLiveBuild) + "bin\\Release\\trash_debug\\20261016_223524_0_not_in_bin.png",
-                  dragged) ||
-        kept.width != 1280 || dragged.width != 1280) {
+        !load_png(std::string(kLiveBuild) + kPartyUnderBag, dragged) || kept.width != 1280 ||
+        dragged.width != 1280) {
         std::printf("  [skip] no r3_B_000.png or the saved party frame here\n");
         return;
     }
@@ -318,10 +656,10 @@ void test_bag_over() {
 
     {
         // Two members under the bag where the player keeps it: their last
-        // nine columns hidden, the rest read.
+        // nine columns hidden, the rest read, the crown on the first.
         Frame f = k.frame;
-        draw_member(f, 0, 112, true);
-        draw_member(f, 0, 158, false);
+        draw_member(f, 0, 112, Mark::Whole);
+        draw_member(f, 0, 158);
         copy_over(kept, f, kept_bag);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Member && h.size == 3 && h.panels.size() == 2 && h.panels[0].leader &&
@@ -337,12 +675,13 @@ void test_bag_over() {
                                                               said(h));
     }
     {
-        // The bag dragged over the panels, none of them showing: no telling
-        // whether anybody is there, so never "alone" -- Tự chat's "only when
-        // alone" line is not sent on it.
+        // The bag dragged over the panels, none of them showing but their
+        // first eleven columns -- too little of a crown to be one: no telling
+        // whether anybody is there, so never "alone", and Tự chat's "only
+        // when alone" line is not sent on it.
         Frame f = k.frame;
-        draw_member(f, 0, 160, true);
-        draw_member(f, 0, 206, false);
+        draw_member(f, 0, 160, Mark::Whole);
+        draw_member(f, 0, 206);
         copy_over(dragged, f, dragged_bag);
         const PartyHud h = k.reader.read(f);
         check(h.state == PartyState::Unknown && h.why.find("bag") != std::string::npos,
@@ -351,8 +690,13 @@ void test_bag_over() {
         copy_over(dragged, g, dragged_bag);
         const PartyHud h2 = k.reader.read(g);
         check(h2.state == PartyState::Unknown, "nor with nobody under it -- " + said(h2));
-        const PartyGate gate = party_invite_gate(h, true);
-        check(gate.allowed, "and an invite goes, as before the HUD was read");
+        // Unread, the player's own crown is not seen: with the tick, no
+        // invite; without it, an invite, as before the HUD was read.
+        const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
+        check(!ticked.allowed && ticked.reason_vi == party_text::kUnreadNoCrown &&
+                  ticked.reason_en.find("bag") != std::string::npos && plain.allowed,
+              "and with the tick, not invited: \"" + ticked.reason_vi + "\" (" + ticked.reason_en +
+                  "); without it, invited");
     }
     {
         // A member seen above the dragged bag, more maybe under it: a party of
@@ -362,6 +706,125 @@ void test_bag_over() {
                   party_hud_line_vi(h) == "Tổ đội: thành viên (ít nhất 2/6)",
               "the saved party, the bag over two more panels: " + party_hud_line_vi(h) + " -- " + said(h));
     }
+}
+
+void test_party_under_window() {
+    section("Party HUD: a party under a window reads as alone, so alone never invites with the tick (R5-1)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    Frame live;
+    if (!load_png(std::string(kLiveBuild) + kPartyProbe, live) || live.width != 1280) {
+        std::printf("  [skip] no saved frame of the live party here\n");
+        return;
+    }
+    {
+        // The live party of two, another member leading, with a window that
+        // is not the bag -- one of the game's own, or its tooltip -- over the
+        // leader's panel from the screen's left edge, crown and all. Nothing
+        // of the party shows, and no tab strip says a bag hides it: it reads
+        // as a player alone does.
+        Frame f = live;
+        fill(f, 0, 100, 150, 55, 200, 200, 210);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Alone && h.panels.empty() && !h.own_leader,
+              "the live party, a window over the leader's panel and its crown: alone -- " + said(h));
+        // So alone is no proof that the player could lead: with the tick,
+        // nobody is invited, and the tab and the log say why; without it,
+        // invited as before.
+        const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
+        check(!ticked.allowed && ticked.reason_vi == party_text::kAloneNoCrown &&
+                  ticked.reason_en.find("hidden") != std::string::npos && plain.allowed,
+              "and with the tick, not invited: \"" + ticked.reason_vi + "\" (" + ticked.reason_en +
+                  "); without it, invited");
+    }
+    {
+        // The same window from twenty pixels in, the crown left showing: the
+        // member who leads is seen by the crown, and the tick invites nobody.
+        Frame f = live;
+        fill(f, 20, 100, 130, 55, 200, 200, 210);
+        const PartyHud h = k.reader.read(f);
+        const PartyPanel* p = panel_at(h, kLiveLeaderY);
+        check(h.state == PartyState::Member && h.covered && p != nullptr && p->hidden && p->leader &&
+                  !party_invite_gate(h, true).allowed,
+              "the window from x=20, the crown showing: a member, not invited with the tick -- " + said(h));
+    }
+}
+
+void test_own_crown_under_slot() {
+    section("Party HUD: the player's own crown with the HUD's seal slot drawn over it (R5-2)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    const ScreenRect& slot = PartyHudReader::kSealSlot;
+    // No saved frame shows whether the game draws the slot's icon over the
+    // player's own crown or under it; over it, the crown still says the
+    // player leads. First the slot as the live client drew it, its ground and
+    // this player's own seal, over the whole mark, at both client sizes.
+    Frame small;
+    load_png(std::string(kLiveBuild) + "bin\\Release\\playerlist.png", small);
+    const Frame* const shots[] = { &k.frame, &small };
+    for (const Frame* shot : shots) {
+        if (!shot->valid() || shot->width < 1024) continue;
+        Frame f = *shot;
+        mark_own(f, Mark::Whole);
+        copy_over(*shot, f, slot);
+        draw_member(f, 0, 112);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Leader && h.own_crown >= 0.99f && h.size == 2,
+              fmt("the slot as the live client drew it (%dx%d), over the own crown: leader 2/6 -- ", shot->width,
+                  shot->height) + said(h));
+    }
+
+    // Then each of GoC's seals, what the slot holds, over the crown and
+    // alone in the slot: staged beside this test, else in GoC's own folder.
+    std::string dir;
+    for (const std::string& d : { TemplateStore::default_dir(), TemplateStore::client_images() })
+        if (dir.empty() && !d.empty() && !files_in(d + "\\seal\\", "*.png").empty()) dir = d + "\\seal\\";
+    if (dir.empty()) {
+        std::printf("  [skip] no seal icons here, staged or in GoC's folder\n");
+        return;
+    }
+    std::vector<std::string> names = files_in(dir, "*.png");
+    std::sort(names.begin(), names.end());
+    int seals = 0, led = 0, bare_alone = 0;
+    float least = 2.0f, most_bare = -1.0f;
+    std::string least_at, first_wrong, lowest_said;
+    bool lowest_led = false;
+    for (const std::string& n : names) {
+        Frame icon;
+        if (!load_png(dir + n, icon) || !icon.valid()) continue;
+        ++seals;
+        Frame over = k.frame;
+        mark_own(over, Mark::Whole);
+        blit_in(over, icon, slot);
+        draw_member(over, 0, 112);
+        const PartyHud h = k.reader.read(over);
+        if (h.state == PartyState::Leader) ++led;
+        else if (first_wrong.empty()) first_wrong = n + ": " + said(h);
+        if (h.own_crown < least) {
+            least = h.own_crown;
+            least_at = n;
+        }
+        // The seal that took the whole crown lowest, to 0.63.
+        if (n == "8590004.png") {
+            lowest_said = said(h);
+            lowest_led = h.state == PartyState::Leader && h.size == 2;
+        }
+        // And alone in the slot, no crown: nobody leads.
+        Frame bare = k.frame;
+        blit_in(bare, icon, slot);
+        const PartyHud b = k.reader.read(bare);
+        bare_alone += b.state == PartyState::Alone && !b.own_leader ? 1 : 0;
+        most_bare = std::max(most_bare, b.own_crown);
+    }
+    check(seals > 0 && led == seals,
+          fmt("%d of %d seals drawn over the own crown: leader, the crown %.2f at least (%s)", led, seals,
+              static_cast<double>(least), least_at.c_str()) +
+              (first_wrong.empty() ? std::string() : " -- first not: " + first_wrong));
+    if (!lowest_said.empty())
+        check(lowest_led, "seal 8590004 over the own crown: leader 2/6 -- " + lowest_said);
+    check(seals > 0 && bare_alone == seals && most_bare < PartyHudReader::kCrownScore,
+          fmt("%d of %d seals alone in the slot, no crown: alone, the own corner %.2f at most", bare_alone, seals,
+              static_cast<double>(most_bare)));
 }
 
 void test_trust() {
@@ -407,7 +870,7 @@ void test_trust() {
 }
 
 void test_real_frames() {
-    section("Party HUD: the saved live frames, and the one with a party (PH-A3, PH-A4)");
+    section("Party HUD: the saved live frames, and the ones with a party (PH-A3, PH-A4)");
     if (skip_without_kit()) return;
     const Kit& k = kit();
     {
@@ -462,10 +925,11 @@ void test_real_frames() {
     // The first has two more panels under the bag, dragged to the screen's
     // left edge, only their left ends showing: "at least" two. The other
     // three, kept by the quick quest's look an hour later, are a party of two
-    // with nothing over its panels, another member leading.
+    // with nothing over its panels. In all four another member leads: the
+    // crown on that member's panel at 0,106, and the red frame round it.
     const PartyFrame party_frames[] = {
-        { "bin\\Release\\trash_debug\\20261016_223524_0_not_in_bin.png", PartyState::Member, 2, true },
-        { "bin\\Release\\quest_debug\\probe_20261016_234019_00.png", PartyState::Member, 2, false },
+        { kPartyUnderBag, PartyState::Member, 2, true },
+        { kPartyProbe, PartyState::Member, 2, false },
         { "bin\\Release\\quest_debug\\probe_20261016_234032_01.png", PartyState::Member, 2, false },
         { "bin\\Release\\quest_debug\\probe_20261016_234045_02.png", PartyState::Member, 2, false },
     };
@@ -481,14 +945,19 @@ void test_real_frames() {
             continue;
         }
         const PartyHud h = k.reader.read(f);
-        // One leader in a party, whoever it is: the player's own panel or one
-        // of the others'.
+        // One leader in a party, by the crown: here another member, on the
+        // panel at 0,106 -- and the red frame agrees, round that panel and
+        // not round the player's own.
         int leaders = h.own_leader ? 1 : 0;
         for (const PartyPanel& panel : h.panels) leaders += panel.leader ? 1 : 0;
-        check(h.state == p.state && h.size == p.size && !h.full && leaders == 1 && h.covered == p.covered,
+        const PartyPanel* lead = panel_at(h, kLiveLeaderY);
+        const bool agree = lead != nullptr && lead->leader && !lead->hidden && lead->crown_score >= 0.99f &&
+                           lead->frame_score >= PartyHudReader::kFrameScore &&
+                           h.own_crown < PartyHudReader::kCrownScore && h.own_frame < PartyHudReader::kFrameScore;
+        check(h.state == p.state && h.size == p.size && !h.full && leaders == 1 && h.covered == p.covered && agree,
               std::string(p.path) + ", saved live in a party: " + party_state_name(p.state) + ", " +
                   (p.covered ? "at least " : "") + std::to_string(p.size) + " of " + std::to_string(kPartyMax) +
-                  ", one leader -- " + said(h));
+                  ", led by the crowned panel at 0,106, the red frame agreeing -- " + said(h));
     }
 
     // Every eighth frame; GOBOT_PARTY_ALL=1 for every one of them.
@@ -502,7 +971,7 @@ void test_real_frames() {
     }
     frames.push_back(std::string(kLiveBuild) + "bin\\Release\\frame.png");
     frames.push_back(std::string(kLiveBuild) + "bin\\Release\\playerlist.png");
-    int looked = 0, alone = 0, unknown = 0, party = 0;
+    int looked = 0, alone = 0, unknown = 0, party = 0, crowned = 0;
     std::string first_party;
     for (std::size_t i = 0; i < frames.size(); ++i) {
         if (!every && i % 8 != 0 && i + 2 < frames.size()) continue;
@@ -511,6 +980,7 @@ void test_real_frames() {
         if (!load_png(frames[i], f) || f.width < 640 || f.height < 480) continue;
         ++looked;
         const PartyHud h = k.reader.read(f);
+        if (h.own_crown >= PartyHudReader::kCrownScore) ++crowned;
         if (h.state == PartyState::Alone) ++alone;
         else if (h.state == PartyState::Unknown) ++unknown;
         else {
@@ -524,15 +994,17 @@ void test_real_frames() {
     }
     // PH-A4 as the saved frames have it now: those that show a party are read
     // as one above; every other is never read as one -- not a member, not a
-    // leader, never full.
-    check(party == 0, std::to_string(looked) + " saved frames that show no party: " + std::to_string(alone) +
-                          " alone, " + std::to_string(unknown) + " unknown, " + std::to_string(party) +
-                          " read as a party" + (first_party.empty() ? std::string() : " -- first: " + first_party));
+    // leader, never full -- and nowhere on them is a crown.
+    check(party == 0 && crowned == 0,
+          std::to_string(looked) + " saved frames that show no party: " + std::to_string(alone) + " alone, " +
+              std::to_string(unknown) + " unknown, " + std::to_string(party) + " read as a party, " +
+              std::to_string(crowned) + " with the own crown" +
+              (first_party.empty() ? std::string() : " -- first: " + first_party));
 }
 
 void test_gate() {
-    section("Party HUD: an invite only when it can work (PH-A5)");
-    PartyHud alone, member, leader, full_lead, full_member, unknown;
+    section("Party HUD: an invite only when it can work (PH-A5), with the tick by the crown");
+    PartyHud alone, member, leader, in_party, unknown, full_lead, full_member, full_in_party;
     alone.state = PartyState::Alone;
     alone.size = 1;
     member.state = PartyState::Member;
@@ -540,27 +1012,60 @@ void test_gate() {
     leader.state = PartyState::Leader;
     leader.size = 3;
     leader.own_leader = true;
+    in_party.state = PartyState::InParty;
+    in_party.size = 3;
+    unknown.why = "the HUD is not on screen";
     full_lead = leader;
     full_lead.size = 6;
     full_lead.full = true;
     full_member = member;
     full_member.size = 6;
     full_member.full = true;
-    for (const bool tick : { false, true }) {
-        const std::string with = tick ? " (ticked)" : " (not ticked)";
-        check(party_invite_gate(alone, tick).allowed, "alone: yes" + with);
-        check(party_invite_gate(leader, tick).allowed, "leading, not full: yes" + with);
-        const PartyGate fl = party_invite_gate(full_lead, tick), fm = party_invite_gate(full_member, tick);
-        check(!fl.allowed && fl.reason_vi == "Tổ đội đã đủ 6 người" && !fm.allowed &&
-                  fm.reason_vi == "Tổ đội đã đủ 6 người",
-              "full, leading or not: no, \"" + fl.reason_vi + "\"" + with);
-        const PartyGate u = party_invite_gate(unknown, tick);
-        check(u.allowed && u.reason_vi.empty(), "not read: yes, as before the HUD was read" + with);
-    }
-    const PartyGate m = party_invite_gate(member, true);
-    check(!m.allowed && m.reason_vi == "Đang trong tổ đội nhưng không phải chủ tổ đội",
-          "a member, ticked: no, \"" + m.reason_vi + "\"");
-    check(party_invite_gate(member, false).allowed, "a member, not ticked: yes, as the plan says");
+    full_in_party = in_party;
+    full_in_party.size = 6;
+    full_in_party.full = true;
+    struct Row {
+        const char*     what;
+        const PartyHud* hud;
+        bool            off;            ///< invited with the tick off
+        const char*     off_vi;         ///< and why not
+        bool            on;             ///< with the tick on
+        const char*     on_vi;
+    };
+    // Alone, ticked, is not invited: no crown is seen at all, and alone is
+    // what a party under a window looks like too (the round 5 review's R5-1).
+    const Row rows[] = {
+        { "alone", &alone, true, "", false, party_text::kAloneNoCrown },
+        { "leading, the own crown seen", &leader, true, "", true, "" },
+        { "a member, another's crown seen", &member, true, "", false, party_text::kNotLeader },
+        { "in a party, no crown seen", &in_party, true, "", false, party_text::kNoCrown },
+        { "the HUD not read", &unknown, true, "", false, party_text::kUnreadNoCrown },
+        { "full, leading", &full_lead, false, party_text::kFull, false, party_text::kFull },
+        { "full, a member", &full_member, false, party_text::kFull, false, party_text::kFull },
+        { "full, no crown seen", &full_in_party, false, party_text::kFull, false, party_text::kFull },
+    };
+    for (const Row& r : rows)
+        for (const bool tick : { false, true }) {
+            const PartyGate g = party_invite_gate(*r.hud, tick);
+            const bool want = tick ? r.on : r.off;
+            const std::string want_vi = tick ? r.on_vi : r.off_vi;
+            check(g.allowed == want && g.reason_vi == want_vi && g.reason_en.empty() == want,
+                  std::string(r.what) + (tick ? ", ticked: " : ", not ticked: ") +
+                      (g.allowed ? "invited" : "not invited, \"" + g.reason_vi + "\" / \"" + g.reason_en + "\""));
+        }
+    check(party_invite_gate(unknown, true).reason_en.find("not on screen") != std::string::npos,
+          "the HUD not read, ticked: the log says why it was not read");
+    const PartyGate alone_ticked = party_invite_gate(alone, true);
+    check(alone_ticked.reason_en == "no crown is seen (alone, or the party's panels are hidden)",
+          "alone, ticked: the log says \"" + alone_ticked.reason_en + "\"");
+    check(std::string(party_text::kNotLeader) == "Đang trong tổ đội nhưng không phải chủ tổ đội" &&
+              std::string(party_text::kNoCrown) ==
+                  "Đang trong tổ đội nhưng không thấy vương miện chủ tổ đội ở ô nào" &&
+              std::string(party_text::kUnreadNoCrown) ==
+                  "Không đọc được khung tổ đội nên không thấy vương miện của bạn" &&
+              std::string(party_text::kAloneNoCrown) ==
+                  "Không thấy vương miện chủ tổ đội của bạn (chưa có tổ đội, hoặc khung tổ đội bị che)",
+          "the tab's words for each");
     check(party_hud_line_vi(unknown) == "Tổ đội: không đọc được" && party_hud_line_vi(alone) == "Tổ đội: một mình",
           "the state card: \"" + party_hud_line_vi(unknown) + "\", \"" + party_hud_line_vi(alone) + "\"");
 }
@@ -573,27 +1078,43 @@ void test_worker_step() {
     // the gate on the frame it already has, and only then the player list
     // and the invite -- which here only count.
     int opened = 0, invited = 0;
-    const auto step = [&](const Frame& f, bool always_leader) {
-        const PartyGate g = party_invite_gate(k.reader.read(f), always_leader);
+    const auto step = [&](const Frame& f, bool always_leader, bool trusted = true) {
+        const PartyGate g = party_invite_gate(k.reader.read(f, trusted), always_leader);
         if (!g.allowed) return g.reason_en;
         ++opened;           // the player list's ensure_open
         ++invited;          // its invite
         return std::string();
     };
     Frame full = k.frame;
-    blit(full, k.mine, 0, 0);
-    for (int i = 0; i < 5; ++i) draw_member(full, 0, 112 + i * 46, false);
+    mark_own(full, Mark::Whole);
+    for (int i = 0; i < 5; ++i) draw_member(full, 0, 112 + i * 46);
     const std::string why = step(full, false);
     check(opened == 0 && invited == 0 && !why.empty(),
           "a full party: the list never opened, nobody invited -- " + why);
     Frame member = k.frame;
-    draw_member(member, 0, 112, true);
+    draw_member(member, 0, 112, Mark::Whole);
     step(member, true);
     check(opened == 0 && invited == 0, "a member with the tick on: still nothing");
+    Frame no_crown = k.frame;
+    draw_member(no_crown, 0, 112);
+    step(no_crown, true);
+    check(opened == 0 && invited == 0, "in a party with no crown seen, the tick on: still nothing");
+    step(k.frame, true, false);
+    check(opened == 0 && invited == 0, "the HUD not read, the tick on: still nothing");
+    const std::string alone_why = step(k.frame, true);
+    check(opened == 0 && invited == 0 && !alone_why.empty(),
+          "alone, the tick on: still nothing, no crown being seen -- " + alone_why);
     step(member, false);
     check(opened == 1 && invited == 1, "a member with the tick off: the list opened and the invite sent, as today");
-    step(k.frame, true);
-    check(opened == 2 && invited == 2, "alone: invited, as today");
+    step(k.frame, false);
+    check(opened == 2 && invited == 2, "alone, the tick off: invited, as today");
+    Frame leading = k.frame;
+    mark_own(leading, Mark::Whole);
+    draw_member(leading, 0, 112);
+    step(leading, true);
+    check(opened == 3 && invited == 3, "leading, the own crown seen, the tick on: invited");
+    step(k.frame, false, false);
+    check(opened == 4 && invited == 4, "the HUD not read, the tick off: invited, as before");
 }
 
 void test_panel_picture() {
@@ -619,10 +1140,14 @@ void test_party_hud(void (*check_fn)(bool, const std::string&), void (*section_f
     g_check = check_fn;
     g_section = section_fn;
     test_panel_picture();
+    test_crown_pictures();
     test_reading();
+    test_crowns();
     test_nonsense();
     test_leader_unread();
     test_bag_over();
+    test_party_under_window();
+    test_own_crown_under_slot();
     test_trust();
     test_gate();
     test_worker_step();

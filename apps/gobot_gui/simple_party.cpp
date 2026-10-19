@@ -104,7 +104,9 @@ bool reader_ready(PartyHudReader& reader, bool& loaded, const TemplateStore& sto
         loaded = true;
         std::string missing;
         if (!reader.load(store, &missing))
-            GB_WARN("Party: the party HUD cannot be read -- %s is missing; inviting as before", missing.c_str());
+            GB_WARN("Party: the party HUD cannot be read -- %s is missing; inviting as before, but nobody while "
+                    "\"only while leading\" is ticked, as the player's own crown cannot be seen",
+                    missing.c_str());
     }
     return reader.ready();
 }
@@ -124,32 +126,28 @@ bool GuiApp::party_may_invite(const std::string& who, const Frame& frame, bool f
         say_party(who + " asked while GoBot was busy (" + held + "); not invited");
         return false;
     }
-    if (!reader_ready(ui.reader, ui.loaded, store)) return true;
-
+    // Without its pictures the reader reads nothing at all, which the gate
+    // takes as a HUD not read.
+    reader_ready(ui.reader, ui.loaded, store);
     const PartyHud hud = ui.reader.read(frame, party_frame_trusted(from_screen, input_.target_window()));
-    {
+    if (ui.reader.ready()) {
         std::lock_guard<std::mutex> lock(worker_mutex_);
         ui.line_vi = party_hud_line_vi(hud);
     }
     ui.read_ms = now_ms();
-    if (hud.state == PartyState::Unknown) {
-        // Invited as before the HUD was read: only a party seen stops one.
-        GB_INFO("Party: %s asked; the party HUD could not be read (%s) -- inviting as before", who.c_str(),
-                hud.why.c_str());
-        return true;
-    }
     const PartyGate gate = party_invite_gate(hud, always_leader);
     if (gate.allowed) {
-        // A party whose leader could not be read, with the tick on: invited,
-        // as before the HUD was read -- and the log says why it was not held.
-        if (!gate.note_en.empty())
-            GB_INFO("Party: %s asked; inviting, though %s -- %s", who.c_str(), gate.note_en.c_str(),
-                    party_hud_text(hud).c_str());
+        // A HUD not read lets an invite through only with the tick off, as
+        // before the HUD was read; the log says so.
+        if (hud.state == PartyState::Unknown)
+            GB_INFO("Party: %s asked; the party HUD could not be read (%s) -- inviting as before", who.c_str(),
+                    hud.why.c_str());
         return true;
     }
+    // Why, in English for the log and in Vietnamese on the Tổ đội tab.
     GB_INFO("Party: %s asked; not invited: %s -- %s", who.c_str(), gate.reason_en.c_str(),
             party_hud_text(hud).c_str());
-    say_party(who + " asked; not invited: " + gate.reason_en);
+    say_party("Không mời " + who + ". " + gate.reason_vi + ".");
     return false;
 }
 
@@ -174,8 +172,12 @@ void GuiApp::simple_party_leader_option() {
                                    simple_party_.always_leader ? "true" : "false"))
             simple_note("Không lưu được configs/party.ini.", 8000);
     }
-    ImGui::SetItemTooltip("Chỉ tự động mời khi bạn đang làm chủ tổ đội. GoBot nhìn khung tổ đội trên màn "
-                          "hình game; khi không đọc được thì vẫn mời như trước.");
+    // Not when alone either: alone looks the same as a party whose panels
+    // are under a window, so only the player's own crown lets one through.
+    ImGui::SetItemTooltip("Chỉ tự động mời khi thấy vương miện chủ tổ đội ở ô của bạn (góc trái trên màn hình "
+                          "game). Không thấy vương miện của bạn thì không mời, kể cả khi chưa có tổ đội hoặc "
+                          "không đọc được khung tổ đội; thẻ này ghi lý do. Muốn mời cả khi chưa có tổ đội thì "
+                          "bỏ dấu ô này.");
     hint(trial_hint(kTrialPartyHud, "Tổ đội đã đủ 6 người thì không mời, dù có đánh dấu ô này hay không.")
              .c_str());
 }

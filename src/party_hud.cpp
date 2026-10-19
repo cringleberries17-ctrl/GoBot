@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <unordered_map>
 
@@ -17,8 +18,15 @@ namespace {
 /// which this client draws, then skin 0, whose copies are the same pixels.
 const char* const kPanelNames[] = { "inven/1/Dialog_PartyInfo.spr/0", "inven/0/Dialog_PartyInfo.spr/0",
                                     "dialog_party_info" };
-const char* const kOtherNames[] = { "inven/1/Party_King_Other.spr/0", "inven/0/Party_King_Other.spr/0" };
-const char* const kMineNames[]  = { "inven/1/Party_King_My.spr/0", "inven/0/Party_King_My.spr/0" };
+/// The leader's mark with the crown on it, GoC's Party_King_Other and
+/// Party_King_My: GoBot's own copies first, then either skin's. The copies by
+/// their files, which need no name map -- a player's own templates.ini, from
+/// before them, does not name them. The shipped one does (party_crown_other,
+/// party_crown_mine), so that a package keeps them.
+const char* const kOtherNames[] = { "grabbed/party_crown_other", "inven/1/Party_King_Other.spr/0",
+                                    "inven/0/Party_King_Other.spr/0" };
+const char* const kMineNames[]  = { "grabbed/party_crown_mine", "inven/1/Party_King_My.spr/0",
+                                    "inven/0/Party_King_My.spr/0" };
 const char* const kPlateNames[] = { "hpmp_indicator2", "grabbed/hpmp_indicator2" };
 /// The bag's tab strip, by the names bag::find looks it up by.
 const char* const kStripNames[] = { "grabbed/inventory", "inventory" };
@@ -35,10 +43,14 @@ constexpr ScreenRect kBars{ 6, 26, 83, 11 };
 constexpr ScreenRect kName{ 8, 7, 78, 14 };
 constexpr ScreenRect kFace{ 90, 5, 34, 32 };
 
-/// How far from where it is expected a leader's frame may be found: the
-/// player's own panel sits at the screen's top-left corner on both client
-/// sizes, a member's red frame over that member's panel.
+/// How far from where it is expected a crown or a red frame may be found:
+/// the player's own panel sits at the screen's top-left corner on both client
+/// sizes, a member's mark on that member's panel.
 constexpr int kSlack = 3;
+
+/// At least this many of the crown's pixels are drawn: anything with fewer
+/// in its corner is some other picture.
+constexpr int kCrownPixels = 300;
 
 const Frame* first_of(const TemplateStore& store, const char* const* names, std::size_t n) {
     for (std::size_t i = 0; i < n; ++i)
@@ -57,6 +69,25 @@ ScreenRect clamp_to(const Frame& f, const ScreenRect& r) {
     const int x0 = std::max(0, r.x), y0 = std::max(0, r.y);
     const int x1 = std::min(f.width, r.right()), y1 = std::min(f.height, r.bottom());
     return ScreenRect{ x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0) };
+}
+
+/// `r` of `f`, as a picture of its own, see-through where `f` is.
+Frame cut(const Frame& f, const ScreenRect& r) {
+    Frame out;
+    out.width = r.w;
+    out.height = r.h;
+    out.pixels.resize(static_cast<std::size_t>(r.w) * r.h * 4);
+    for (int y = 0; y < r.h; ++y)
+        std::copy_n(&f.pixels[(static_cast<std::size_t>(r.y + y) * f.width + r.x) * 4],
+                    static_cast<std::size_t>(r.w) * 4, &out.pixels[static_cast<std::size_t>(y) * r.w * 4]);
+    return out;
+}
+
+/// How many of `f`'s pixels are drawn.
+int drawn(const Frame& f) {
+    int n = 0;
+    for (std::size_t i = 3; i < f.pixels.size(); i += 4) n += f.pixels[i] >= TemplateMatcher::kOpaque ? 1 : 0;
+    return n;
 }
 
 /// How much of `area` of `f` is its one commonest colour, exactly, 0 to 1.
@@ -110,16 +141,20 @@ bool PartyHudReader::load(const TemplateStore& store, std::string* missing) {
     if (panel == nullptr || panel->width != kPanelW || panel->height != kPanelH)
         return lacks("inven/1/Dialog_PartyInfo.spr/0");
     if (other == nullptr || other->width != kPanelW || other->height != kPanelH)
-        return lacks("inven/1/Party_King_Other.spr/0");
+        return lacks(kOtherNames[0]);
     if (mine == nullptr || mine->width != kOwnW || mine->height != kOwnH)
-        return lacks("inven/1/Party_King_My.spr/0");
+        return lacks(kMineNames[0]);
     if (plate == nullptr || !plate->valid()) return lacks("hpmp_indicator2");
     if (strip == nullptr || !strip->valid()) return lacks("grabbed/inventory");
+    // The crowns, cut from the corners of the two marks.
+    const Frame other_crown = cut(*other, kCrown), own_crown = cut(*mine, kCrown);
+    if (drawn(other_crown) < kCrownPixels) return lacks(kOtherNames[0]);
+    if (drawn(own_crown) < kCrownPixels) return lacks(kMineNames[0]);
 
     // The member panel by its frame: what the game draws the same for every
     // member. Not the bars, the name or the face, nor the band the leader's
-    // red frame covers, so that a leader's panel is found as a member's is;
-    // nor its last columns, which the bag lies over where the player keeps it.
+    // mark covers, so that a leader's panel is found as a member's is; nor
+    // its last columns, which the bag lies over where the player keeps it.
     panel_ = *panel;
     for (int y = 0; y < kPanelH; ++y)
         for (int x = 0; x < kPanelW; ++x) {
@@ -128,12 +163,23 @@ bool PartyHudReader::load(const TemplateStore& store, std::string* missing) {
             const bool shown = alpha(panel_, x, y) >= TemplateMatcher::kOpaque && x < kPanelMatchW;
             alpha(panel_, x, y) = shown && !changes && !under_frame ? 255 : 0;
         }
-    // The red frame over a member's panel the same way: those columns of it
-    // under the bag would take a leader's frame for none.
+    // The red frames without their crowns, so that what they say is apart
+    // from what the crown says. A member's the same way as the panel: those
+    // columns of it under the bag would take a leader's frame for none.
     other_ = *other;
+    mine_ = *mine;
+    for (int y = kCrown.y; y < kCrown.bottom(); ++y)
+        for (int x = kCrown.x; x < kCrown.right(); ++x) alpha(other_, x, y) = alpha(mine_, x, y) = 0;
     for (int y = 0; y < kPanelH; ++y)
         for (int x = kPanelMatchW; x < kPanelW; ++x) alpha(other_, x, y) = 0;
-    mine_ = *mine;
+    other_crown_ = other_crown;
+    // The player's own crown without its part over the HUD's seal slot,
+    // whose icon may be drawn over it: what is left of it is still the
+    // crown, and nothing in the slot can take it below kCrownScore.
+    own_crown_ = own_crown;
+    for (int y = 0; y < own_crown_.height; ++y)
+        for (int x = 0; x < own_crown_.width; ++x)
+            if (kSealSlot.contains(kCrown.x + x, kCrown.y + y)) alpha(own_crown_, x, y) = 0;
     landmark_ = *plate;
     strip_ = *strip;
     ready_ = true;
@@ -141,14 +187,27 @@ bool PartyHudReader::load(const TemplateStore& store, std::string* missing) {
 }
 
 bool PartyHudReader::load_pictures(TemplateStore& into, const std::string& templates_ini, std::string* missing) {
-    const char* const wanted[] = { kPanelNames[0], kOtherNames[0], kMineNames[0], kPlateNames[0], kStripNames[0] };
-    for (const char* name : wanted) {
-        Frame f;
-        if (!TemplateStore::load_one(name, templates_ini, f)) {
-            if (missing) *missing = name;
+    struct Wanted {
+        const char* const* names;
+        std::size_t        n;
+    };
+    const Wanted wanted[] = { { kPanelNames, std::size(kPanelNames) }, { kOtherNames, std::size(kOtherNames) },
+                              { kMineNames, std::size(kMineNames) },   { kPlateNames, std::size(kPlateNames) },
+                              { kStripNames, std::size(kStripNames) } };
+    for (const Wanted& w : wanted) {
+        // The first of its names that is there: GoBot's own copy of a crown
+        // before the game's, which a build without GoC's pictures lacks.
+        bool found = false;
+        for (std::size_t i = 0; i < w.n && !found; ++i) {
+            Frame f;
+            if (!TemplateStore::load_one(w.names[i], templates_ini, f)) continue;
+            into.put(w.names[i], f);
+            found = true;
+        }
+        if (!found) {
+            if (missing) *missing = w.names[0];
             return false;
         }
-        into.put(name, f);
     }
     return true;
 }
@@ -206,20 +265,52 @@ PartyHud PartyHudReader::read(const Frame& f, bool trusted) const {
         return hud;
     }
 
-    // The player's own panel, at the top-left corner: the red frame over it
-    // says the player leads.
-    hud.own_score = frame_at(f, ScreenRect{ 0, 0, kOwnW, kOwnH }, mine_, -1.0f);
-    hud.own_leader = hud.own_score >= kLeaderScore;
+    // The player's own panel, at the top-left corner: the crown on its corner
+    // says the player leads. The red frame round it is for the log.
+    const ScreenRect own{ 0, 0, kOwnW, kOwnH };
+    hud.own_crown = frame_at(f, ScreenRect{ own.x + kCrown.x, own.y + kCrown.y, kCrown.w, kCrown.h }, own_crown_,
+                             -1.0f);
+    hud.own_frame = frame_at(f, own, mine_, -1.0f);
+    hud.own_leader = hud.own_crown >= kCrownScore;
 
-    // The other members' panels, down the left of the screen.
+    // The other members' panels, down the left of the screen, and the crown
+    // on the corner of whichever of them leads.
     const ScreenRect area = clamp_to(f, ScreenRect{ 0, kSearchTop, kSearchRight, kSearchBottom - kSearchTop });
     if (area.w >= panel_.width && area.h >= panel_.height) {
         for (const auto& m : TemplateMatcher::find_all(f, area, panel_, kPanelScore, kPartyMax + 2)) {
             PartyPanel p;
             p.at = m.at;
             p.score = m.score;
-            p.leader_score = frame_at(f, m.at, other_, -1.0f);
-            p.leader = p.leader_score >= kLeaderScore;
+            p.crown_score = frame_at(f, ScreenRect{ m.at.x + kCrown.x, m.at.y + kCrown.y, kCrown.w, kCrown.h },
+                                     other_crown_, -1.0f);
+            p.frame_score = frame_at(f, m.at, other_, -1.0f);
+            p.leader = p.crown_score >= kCrownScore;
+            hud.panels.push_back(p);
+        }
+        // A crown where a member's panel goes, with no panel found under it:
+        // that member's panel under a window but for its corner. That member
+        // is there, and leads -- a crown is in no other picture on the HUD
+        // -- and there may be more under the same window.
+        for (const auto& c : TemplateMatcher::find_all(f, area, other_crown_, kCrownScore, kPartyMax + 2,
+                                                       TemplateMatcher::Tone::Colour)) {
+            const ScreenRect at{ c.at.x - kCrown.x, c.at.y - kCrown.y, kPanelW, kPanelH };
+            const auto on = std::find_if(hud.panels.begin(), hud.panels.end(), [&](const PartyPanel& p) {
+                return !p.hidden && std::abs(p.at.x - at.x) <= kSlack && std::abs(p.at.y - at.y) <= kSlack;
+            });
+            if (on != hud.panels.end()) {
+                // The crown its panel's corner was looked at for: the two
+                // looks never disagree about it.
+                on->crown_score = std::max(on->crown_score, c.score);
+                on->leader = true;
+                continue;
+            }
+            PartyPanel p;
+            p.at = at;
+            p.score = -1.0f;
+            p.crown_score = c.score;
+            p.frame_score = frame_at(f, at, other_, -1.0f);
+            p.leader = true;
+            p.hidden = true;
             hud.panels.push_back(p);
         }
     }
@@ -228,7 +319,7 @@ PartyHud PartyHudReader::read(const Frame& f, bool trusted) const {
 
     int leaders = hud.own_leader ? 1 : 0;
     for (const PartyPanel& p : hud.panels) leaders += p.leader ? 1 : 0;
-    // What no party looks like: more panels than one holds, or two leaders.
+    // What no party looks like: more panels than one holds, or two crowns.
     // Something else on the screen is being taken for panels, and a reading
     // built on that would say "full" of a party that is not.
     if (static_cast<int>(hud.panels.size()) + 1 > kPartyMax) {
@@ -238,27 +329,32 @@ PartyHud PartyHudReader::read(const Frame& f, bool trusted) const {
         return hud;
     }
     if (leaders > 1) {
-        hud.why = "two leaders' frames";
+        hud.why = "two leaders' crowns";
         hud.panels.clear();
         hud.own_leader = false;
         return hud;
     }
 
-    // The bag over the panels' column hides whoever is under it: the party is
-    // then at least what is seen, and nobody seen is no proof of nobody there.
+    // The bag over the panels' column hides whoever is under it, as a window
+    // over a panel whose crown alone was seen may hide more: the party is
+    // then at least what is seen, and nobody seen under the bag is no proof
+    // of nobody there.
     ScreenRect bag;
     const ScreenRect column{ 0, kSearchTop, kPanelMatchW, kSearchBottom - kSearchTop };
-    hud.covered = bag_window(f, bag) && bag.overlaps(column);
-    if (hud.covered && hud.panels.empty() && !hud.own_leader) {
+    const bool under_bag = bag_window(f, bag) && bag.overlaps(column);
+    const bool hidden =
+        std::any_of(hud.panels.begin(), hud.panels.end(), [](const PartyPanel& p) { return p.hidden; });
+    hud.covered = under_bag || hidden;
+    if (under_bag && hud.panels.empty() && !hud.own_leader) {
         hud.why = "the bag is open over where the party's panels are drawn";
         return hud;
     }
     hud.size = static_cast<int>(hud.panels.size()) + 1;
     hud.full = hud.size >= kPartyMax;
-    // A party has its one leader. Panels with no leader's frame on any of
-    // them, nor on the player's own, are a party whose leader was not seen:
-    // the player's own red frame not matched, or the leader's panel under a
-    // window -- never proof that somebody else leads.
+    // A party has its one leader. Panels with no crown on any of them, nor on
+    // the player's own, are a party whose leader was not seen: the crown not
+    // matched, or the leader's panel under a window -- proof neither that the
+    // player leads nor that somebody else does.
     const bool led_by_other = leaders == 1 && !hud.own_leader;
     hud.state = hud.own_leader      ? PartyState::Leader
               : hud.panels.empty()  ? PartyState::Alone
@@ -269,23 +365,45 @@ PartyHud PartyHudReader::read(const Frame& f, bool trusted) const {
 
 PartyGate party_invite_gate(const PartyHud& hud, bool always_leader) {
     PartyGate g;
-    if (hud.state == PartyState::Unknown) return g;     // as before it was read
+    // Six seen is six, whoever leads. Never said of a HUD that could not be
+    // read, which has no size.
     if (hud.full) {
         g.allowed = false;
         g.reason_vi = party_text::kFull;
         g.reason_en = "the party is full (6/6)";
         return g;
     }
-    if (hud.state == PartyState::Member && always_leader) {
-        g.allowed = false;
-        g.reason_vi = party_text::kNotLeader;
-        g.reason_en = "in a party but not its leader";
-    } else if (hud.state == PartyState::InParty && always_leader) {
-        // Only a party seen to be led by somebody else is refused for the
-        // tick: this may well be the player's own.
-        g.note_vi = party_text::kLeaderUnread;
-        g.note_en = "who leads the party could not be read";
+    if (!always_leader) return g;       // as before the HUD was read
+    // The tick, by the crown: only with the player's own crown seen.
+    switch (hud.state) {
+        case PartyState::Leader:
+            return g;
+        case PartyState::Alone:
+            // No crown at all. Truly alone, an invite would start a party
+            // the player leads -- but a member whose party's panels are under
+            // a window that is not the bag reads as alone too, and would
+            // invite while somebody else leads.
+            g.allowed = false;
+            g.reason_vi = party_text::kAloneNoCrown;
+            g.reason_en = "no crown is seen (alone, or the party's panels are hidden)";
+            return g;
+        case PartyState::Member:
+            g.allowed = false;
+            g.reason_vi = party_text::kNotLeader;
+            g.reason_en = "in a party, and another member's crown is on their panel";
+            return g;
+        case PartyState::InParty:
+            g.allowed = false;
+            g.reason_vi = party_text::kNoCrown;
+            g.reason_en = "in a party, and no leader's crown is seen on any panel";
+            return g;
+        case PartyState::Unknown:
+            break;
     }
+    g.allowed = false;
+    g.reason_vi = party_text::kUnreadNoCrown;
+    g.reason_en = "the party HUD could not be read" + (hud.why.empty() ? std::string() : " (" + hud.why + ")") +
+                  ", so the player's own crown was not seen";
     return g;
 }
 
@@ -296,24 +414,41 @@ std::string party_hud_line_vi(const PartyHud& hud) {
         case PartyState::Alone:   return "Tổ đội: một mình";
         case PartyState::Member:  return "Tổ đội: thành viên" + of;
         case PartyState::Leader:  return "Tổ đội: chủ tổ đội" + of;
-        case PartyState::InParty: return "Tổ đội: đang trong tổ đội" + of + ", không rõ ai làm chủ";
+        case PartyState::InParty: return "Tổ đội: đang trong tổ đội" + of + ", không thấy vương miện chủ tổ đội";
         case PartyState::Unknown: break;
     }
     return "Tổ đội: không đọc được";
 }
 
+namespace {
+
+/// A crown's score and the red frame's beside it, and whether they differ
+/// on whether the mark is there -- the frame's say being only evidence.
+std::string mark_text(float crown, float frame) {
+    const bool crowned = crown >= PartyHudReader::kCrownScore, framed = frame >= PartyHudReader::kFrameScore;
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "crown %.2f, red frame %.2f%s", static_cast<double>(crown),
+                  static_cast<double>(frame), crowned == framed ? "" : " (the frame does not agree)");
+    return buf;
+}
+
+} // namespace
+
 std::string party_hud_text(const PartyHud& hud) {
     std::string s = party_state_name(hud.state);
     if (hud.state == PartyState::Unknown) return s + (hud.why.empty() ? std::string() : " (" + hud.why + ")");
     char buf[96];
-    std::snprintf(buf, sizeof buf, " %s%d/%d%s; own frame %.2f", hud.covered ? "at least " : "", hud.size,
-                  kPartyMax, hud.full ? ", full" : "", static_cast<double>(hud.own_score));
+    std::snprintf(buf, sizeof buf, " %s%d/%d%s", hud.covered ? "at least " : "", hud.size, kPartyMax,
+                  hud.full ? ", full" : "");
     s += buf;
-    if (hud.covered) s += "; the bag over the panels";
+    s += "; own panel: " + mark_text(hud.own_crown, hud.own_frame) + (hud.own_leader ? ", leads" : "");
+    if (hud.covered) s += "; some of the panels hidden";
     for (const PartyPanel& p : hud.panels) {
-        std::snprintf(buf, sizeof buf, "; panel at %d,%d (%.2f%s)", p.at.x, p.at.y, static_cast<double>(p.score),
-                      p.leader ? ", leads" : "");
-        s += buf;
+        if (p.hidden)
+            std::snprintf(buf, sizeof buf, "; a crown at %d,%d, its panel hidden (", p.at.x, p.at.y);
+        else
+            std::snprintf(buf, sizeof buf, "; panel at %d,%d (%.2f; ", p.at.x, p.at.y, static_cast<double>(p.score));
+        s += buf + mark_text(p.crown_score, p.frame_score) + (p.leader ? "), leads" : ")");
     }
     return s;
 }

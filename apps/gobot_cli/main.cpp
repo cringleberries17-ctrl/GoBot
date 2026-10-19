@@ -2332,19 +2332,25 @@ int run_party_hud(const Options& o, const AppConfig& app) {
     if (hud.state == PartyState::Unknown) {
         std::printf(" -- %s\n", hud.why.c_str());
     } else {
+        // Who leads goes by the crown; the red frame is shown beside it as
+        // evidence only.
         std::printf(", %s%d of %d%s%s\n", hud.covered ? "at least " : "", hud.size, kPartyMax,
-                    hud.full ? ", full" : "", hud.covered ? " -- the bag lies over some of the panels" : "");
-        std::printf("own panel   leader's frame %.3f%s\n", static_cast<double>(hud.own_score),
-                    hud.own_leader ? " -- leads" : "");
-        for (const PartyPanel& p : hud.panels)
-            std::printf("member      panel at %d,%d (%.3f), leader's frame %.3f%s\n", p.at.x, p.at.y,
-                        static_cast<double>(p.score), static_cast<double>(p.leader_score),
-                        p.leader ? " -- leads" : "");
+                    hud.full ? ", full" : "",
+                    hud.covered ? " -- some of the panels are hidden (the bag, or a window over a panel)" : "");
+        std::printf("own panel   crown %.3f, red frame %.3f%s\n", static_cast<double>(hud.own_crown),
+                    static_cast<double>(hud.own_frame), hud.own_leader ? " -- leads" : "");
+        for (const PartyPanel& p : hud.panels) {
+            if (p.hidden)
+                std::printf("member      crown at %d,%d, its panel hidden", p.at.x, p.at.y);
+            else
+                std::printf("member      panel at %d,%d (%.3f)", p.at.x, p.at.y, static_cast<double>(p.score));
+            std::printf(", crown %.3f, red frame %.3f%s\n", static_cast<double>(p.crown_score),
+                        static_cast<double>(p.frame_score), p.leader ? " -- leads" : "");
+        }
     }
     for (const bool always : { false, true }) {
         const PartyGate g = party_invite_gate(hud, always);
-        const std::string said = g.allowed ? (g.note_en.empty() ? "yes" : "yes, though " + g.note_en)
-                                           : "no -- " + g.reason_en;
+        const std::string said = g.allowed ? std::string("yes") : "no -- " + g.reason_en;
         std::printf("invite      %s: %s\n", always ? "with \"only while leading\" ticked" : "as shipped",
                     said.c_str());
     }
