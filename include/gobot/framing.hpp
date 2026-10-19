@@ -337,9 +337,11 @@ FramingSpec load_framing(const std::string& path, bool& found,
 /// Never by [FramingClient], not even what the client sends. In the P0-2
 /// recordings (2026-10-18) the client's datagrams carry the server's header
 /// -- opcode at 2, the whole frame's length at 4, a check word at 6 that
-/// holds on every frame -- and tile 100% that way, against 2 to 14% under
-/// [FramingClient]; the server's datagrams the same. So a config written
-/// before the block existed frames UDP right without it.
+/// holds on every frame -- and tile 100% that way. Under [FramingClient] 1.8%
+/// of shop's and 10.5% of walk's bytes are in a frame; the fight's 79.6% is 7
+/// false frames, one of them 17,602 bytes. The server's datagrams tile like
+/// the client's. So a config written before the block existed frames UDP
+/// right without it.
 FramingSpec load_udp_framing(const std::string& path, const FramingSpec& server, bool& found);
 
 /// Where a frame was found, for tools that list frames: "" for a frame off

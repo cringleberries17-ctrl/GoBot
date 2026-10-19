@@ -106,6 +106,16 @@ enum class Fit {
 /// huge frames that swallow the real ones (protocol-findings section 4).
 Fit judge(const Reading& r);
 
+/// The warning the --from readers print before what they show: judge()'s
+/// verdict in words, and nothing when judge() calls the reading a description
+/// of its file. No other rule adds one, so the readers and --verify always
+/// agree about a reading. A resync count set against the frame count was such
+/// a rule once, and warned on shop.c2s -- six 18-byte runs, 108 resync bytes
+/// against 92 frames, 2.5% of the file -- while --verify called the same
+/// reading a description (round 3 review, R3-REV2-1). Each line is indented,
+/// the first starts "!!", and the text ends in a newline.
+std::string reading_warning(const Reading& r);
+
 /// The direction a recording's name implies, if its name implies one.
 ///
 /// `--record` writes `<name>.s2c` and `<name>.c2s`, and `<name>.flowN.s2c` and
@@ -214,6 +224,14 @@ bool read_number(const Bytes& body, std::size_t offset, Number n, double& value,
 /// decimals from 0.01 up to ten million, and 0 as 0.00, otherwise in
 /// exponent form.
 std::string format_number(double value, Number n);
+
+/// An offset or a count as --at and --step take one: decimal digits, read as
+/// decimal even after a leading zero ("012" is twelve, "08" eight), or hex
+/// digits after 0x or 0X. False for anything else -- a sign, a space, no
+/// digits, a number too big for `out` -- rather than a number misread. Read
+/// the way C reads a literal, "012" was ten and "08" was refused (round 3
+/// review, R3-REV2-5).
+bool parse_count(const std::string& text, std::size_t& out);
 
 /// What the number at one offset does over a run of frames, in their order.
 struct Column {

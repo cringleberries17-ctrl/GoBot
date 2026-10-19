@@ -45,6 +45,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -85,7 +86,8 @@ COMMANDS
                              frame it (see NOTES), and say how well it fits:
                              its frames, the bytes in no frame and where they
                              are, and the frames found inside 0x0081. Exit
-                             status 1 when the framing does not describe it.
+                             status 1 when the framing does not describe it;
+                             an empty file is said to be empty, with status 0.
   --detect <file>            Brute-force the framing of a recorded stream.
   --dump <opcode>            Hexdump every frame of one opcode in --from.
   --diff <opcode>            Show which byte offsets change between successive
@@ -119,6 +121,8 @@ OPTIONS
                              frame by frame.
   --step <n>                 For --rows: a column every n bytes (default: the
                              number's own size; 1 for every offset).
+                             Both are decimal, a leading zero included, or hex
+                             after 0x.
   --versus <file>            For --diff: the recording to compare --from with.
                              Record one standing still and one walking, and
                              the position fields are the ones quiet in the
@@ -184,7 +188,8 @@ COMMANDS
                              frame it (see NOTES), and say how well it fits:
                              its frames, the bytes in no frame and where they
                              are, and the frames found inside 0x0081. Exit
-                             status 1 when the framing does not describe it.
+                             status 1 when the framing does not describe it;
+                             an empty file is said to be empty, with status 0.
   --rows <opcode>            With --from only: one opcode's frames as rows of
                              numbers, a row per frame and a column per body
                              offset (--as, --step), what never changes listed
@@ -252,7 +257,9 @@ OPTIONS
   --as <type>, --at <offset>, --step <n>
                              For --rows: u8 (default), i8, u16, i16, u32, i32
                              or f32; one body offset only; a column every n
-                             bytes (default: the number's size).
+                             bytes (default: the number's size). Offsets and
+                             counts are decimal, a leading zero included, or
+                             hex after 0x.
   --versus <capture>         For --diff --from: compare the two recordings
                              rather than describing one. Record one capture
                              standing still and one walking, and the position
@@ -355,18 +362,19 @@ bool parse_args(int argc, char** argv, Options& o) {
             }
             return argv[++i];
         };
-        // A number of 0 or more, decimal or 0x hex. Anything else stops here,
-        // rather than reading as 0 and showing offset 0 as if asked for.
+        // A number of 0 or more, decimal -- a leading zero too, never octal --
+        // or hex after 0x. Anything else stops here, rather than reading as 0
+        // and showing offset 0 as if asked for.
         auto count = [&](const char* what) -> long long {
             const std::string v = next(what);
-            char* end = nullptr;
-            const long long n = std::strtoll(v.c_str(), &end, 0);
-            if (v.empty() || end == nullptr || *end != '\0' || n < 0) {
+            std::size_t n = 0;
+            if (!capture_file::parse_count(v, n) ||
+                n > static_cast<std::size_t>(std::numeric_limits<long long>::max())) {
                 std::fprintf(stderr, "error: %s takes a number, 0 or more, not '%s'\n",
                              what, v.c_str());
                 std::exit(2);
             }
-            return n;
+            return static_cast<long long>(n);
         };
 
         if (a == "--list")          { o.command = "list"; }
@@ -1326,36 +1334,14 @@ capture_file::Reading read_recording(const std::string& path, const Options& o,
 }
 
 /// The end of what read_recording() says: a warning when the reading looks
-/// wrong. The bytes in no frame count as well as the resyncs: a scan that
-/// trusts a false length stops early, reads little, and resyncs nothing.
+/// wrong -- judge()'s verdict, the one --verify gives, in words, and no other
+/// rule (capture_file::reading_warning). The bytes in no frame count as well
+/// as the resyncs: a scan that trusts a false length stops early, reads
+/// little, and resyncs nothing.
 void end_reading(const capture_file::Reading& r) {
     std::printf("\n");
-    switch (capture_file::judge(r)) {
-    case capture_file::Fit::Empty:
-    case capture_file::Fit::NothingRead:
-        std::printf("  !! not one frame was read from it. Either this framing does not fit\n"
-                    "     the file, or it holds no frames at all.\n\n");
-        return;
-    case capture_file::Fit::TooMuchUnread:
-        std::printf("  !! %zu of %zu bytes (%.1f%%) are in no frame. Either this framing does\n"
-                    "     not fit the file, the capture lost packets, or the file holds\n"
-                    "     another connection's bytes too. Treat anything below with\n"
-                    "     suspicion; --verify shows where those bytes are.\n\n",
-                    r.unread(), r.size, percent(r.unread(), r.size));
-        return;
-    case capture_file::Fit::Oversized:
-        std::printf("  !! its frames average %zu bytes: a length field that is not one, read\n"
-                    "     as a few huge frames that swallow the real ones. Treat anything\n"
-                    "     below with suspicion.\n\n", (r.size - r.unread()) / r.frames);
-        return;
-    case capture_file::Fit::Described:
-        break;
-    }
-    if (r.resyncs > r.frames) {
-        std::printf("  !! more resync bytes than frames. Either this is the other\n"
-                    "     direction, the framing is wrong, or the capture lost\n"
-                    "     packets. Treat anything below with suspicion.\n\n");
-    }
+    const std::string warning = capture_file::reading_warning(r);
+    if (!warning.empty()) std::printf("%s\n", warning.c_str());
 }
 
 /// Read a recorded stream and pull out every payload of one opcode, of the
@@ -2058,7 +2044,8 @@ int report_analysis(const Options& o, const std::map<std::uint16_t, OpcodeObserv
 /// Apply the framing from protocol.ini to a recorded file and report exactly
 /// what happens. Answers "is this spec right?" directly, instead of leaving it
 /// to be inferred from where the search ranked it: 0 when it describes the
-/// file, 1 when it does not.
+/// file, 1 when it does not. An empty file is said to be empty, with 0: no
+/// framing fails on it.
 int cmd_verify(const Options& o) {
     if (!udp_fits(o, o.file)) return 1;
     std::optional<capture_file::Spec> force;
@@ -2082,10 +2069,12 @@ int cmd_verify(const Options& o) {
                 udp ? ", UDP datagrams one after another" : "");
     if (data.empty()) {
         // Not a framing that fails: nothing was recorded in this file at all,
-        // which for a .udp file is what a game that sends no UDP leaves.
-        std::printf("\nNothing to tile: the file is empty.%s\n",
+        // which for a .udp file is what a game that sends no UDP leaves. So
+        // it is said, and the status is 0: a script that checks every file a
+        // recording wrote must not take an empty one for one misframed.
+        std::printf("\nEmpty: nothing to tile.%s\n",
                     udp ? " The recording caught no UDP in this direction." : "");
-        return 1;
+        return 0;
     }
 
     // Framed as the --from commands frame it -- a .udp file as UDP is, both

@@ -20,6 +20,13 @@ both directions, which is why they are the most useful thing here.
 
 ## 1. The client half is not encrypted
 
+**Corrected 2026-10-19:** over TCP it is ciphered after all. Every frame the
+client sends there is an `0x0081` wrapper whose content does not unpack; the
+"opcodes" below are the wrappers' check words, and the "8-byte trailer" is the
+end of their ciphered content. The client's UDP is plain, and carries your
+position. See [§4e](#4e-what-the-p0-2-recordings-show-2026-10-18), *The
+client's TCP half* and *What this corrects outside §4c and §4d*.
+
 **`protocol.ini:201` is wrong and should be corrected.** It says:
 
 > Your own position is not in the client's half either — that stream is
@@ -53,6 +60,12 @@ bytes. It reads a field and ignores a trailer.
 `WorldAnchor`'s landmark inference is not the only route.
 
 ## 2. The client→server command family
+
+**Corrected 2026-10-19:** these are not opcodes. Each number below is the
+check word of one of the client's `0x0081` wrappers, w0 + `0x0081` + L
+(`0x00C5` = `0x20` + `0x81` + `0x24`), so the table sorts ciphered messages by
+their two lengths, and its "trailer" column is the end of their ciphered
+content ([§4e](#4e-what-the-p0-2-recordings-show-2026-10-18)).
 
 Discounting framing false positives (see §4), the real inventory:
 
@@ -135,6 +148,12 @@ once with a 192-byte payload.
 
 ## 4b. Live session results — 2026-10-06
 
+**Corrected 2026-10-19:** the client "opcodes" this section names (`0x00C5`,
+`0x00C6`, `0x00EA` and the rest) are the check words of ciphered `0x0081`
+wrappers, and the twelve bytes it calls a trailer are a wrapper's header and
+four unused bytes ([§4e](#4e-what-the-p0-2-recordings-show-2026-10-18)). Its
+server-side results stand.
+
 Four fresh captures taken with the game and GoC both running, on the gameplay
 socket only (`103.82.30.42:15101`; the game's second socket, `103.82.30.35:15112`,
 sent nothing in 20 s and is the idle auth connection).
@@ -199,6 +218,12 @@ arrives. That was listed as a fallback in [overhaul.md](overhaul.md); it should
 now be the primary plan.
 
 ### FIXED: opcode 0x0081 carries 12 bytes past its declared length
+
+**Corrected 2026-10-19:** not a trailer. An `0x0081` is one frame packed with
+liblzf: the twelve bytes are its 8-byte header and four unused bytes, and its
+length field counts the packed bytes after them
+([§4e](#4e-what-the-p0-2-recordings-show-2026-10-18)). The framing below stays
+right.
 
 The server stream used to resync constantly — 512 to 829 times per capture,
 against **zero** in the older `last_capture.s2c`. Two hypotheses were wrong
@@ -281,7 +306,10 @@ readings taken during it.
 `id@8` gives **43 distinct ids — exactly the `Quái: 43` GoC displayed**. Not one
 id's trajectory passes within 6 units of any of the eight readings. The layout
 also now reads sensibly: ids 28–42 are stationary (zero span), ids 19–21 and
-39–41 patrol.
+39–41 patrol. (Corrected 2026-10-19: the x, y read here, payload `@80` and
+`@82`, is a stale point beside each monster, not where it is, so "stationary"
+and "patrol" say nothing about the monsters; the position is payload `@24`,
+`@26`. [§4f](#4f-monsters-and-kills-in-the-stream-2026-10-18-recordings).)
 
 **`0x003F` is not the character, and not another player either** — there were no
 other players on the map. It was one of the opcodes the `0x0081` bug was hiding.
@@ -324,18 +352,22 @@ dropped and your id as their owner) and `0x005B`, and it carries a monster slot
 number (0–23, the slots of `0x0038`) at frame byte 32. So it belongs to a kill,
 most likely the dead monster's record (likely, not confirmed); the drops
 themselves are in `0x004A`. See [§4e](#4e-what-the-p0-2-recordings-show-2026-10-18).
+**Found since (§4f):** it is a new monster spawning in the dead one's slot,
+2–4 s after the kill, at one of the map's spawn points: its type id at 12, x, y
+at 20 and 22, max HP at 28. So the two "entity ids" above were likely that
+map's two monster types.
 
 **Conclusion at the time: the character's own absolute position is not
 transmitted in either direction.** The server broadcasts every *other* actor —
 monsters in `0x0038`, players in `0x003F` — and says nothing about you. The
 client sends inputs, not coordinates. Both sides integrate from an anchor.
 
-**Wrong, as P0-2 showed (§4e).** The client sends its own x, y as floats over UDP
-whenever a walk starts, stops or turns, when it leaves the ground and lands, and
-with every skill cast; and the server sends your spawn x, y in `0x0086` at every
-map entry. None of the captures here held UDP. And the one other actor seen
-moving in P0-2 came from the server in the same frame layouts as the client's
-own reports (`0x0027`, `0x0029`, `0x002A`).
+**Wrong, as P0-2 showed (§4e).** The client sends its own x, y over UDP: as
+floats whenever a walk starts, stops or turns and when it leaves the ground and
+lands, and as whole-pixel u16 with every skill cast; and the server sends your
+spawn x, y in `0x0086` at every map entry. None of the captures here held UDP.
+And the one other actor seen moving in P0-2 came from the server in the same
+frame layouts as the client's own reports (`0x0027`, `0x0029`, `0x002A`).
 
 This is the same conclusion §4b reached, but it was an artifact there and is
 evidence here: 15 server opcodes and every client opcode, correctly framed,
@@ -359,11 +391,11 @@ currently finds them by OCR of the player list, which `START-HERE.txt` records
 as unreliable ("ExampleWin" → "Exampley in"). Mapping `0x003F` retires that for
 anything positional, and is worth doing regardless of the position question.
 
-**P0-2, 2026-10-18:** `0x003F` turned out to come once per kill (above), so it
-is probably not other players. Another actor's moves did come from the server,
-as plain `0x0027`, `0x0029` and `0x002A` frames in the client's own layouts,
-naming that actor's id instead of yours (8 frames, one other id, in the fight).
-That is the better lead for other players' positions; see §4e.
+**P0-2, 2026-10-18:** `0x003F` turned out to come once per kill (above): it is a
+monster spawning (§4f), not other players. Another actor's moves did come from
+the server, as plain `0x0027`, `0x0029` and `0x002A` frames in the client's own
+layouts, naming that actor's id instead of yours (8 frames, one other id, in the
+fight). That is the better lead for other players' positions; see §4e.
 
 ## 4d. What GoC's own parser does (2026-10-17)
 
@@ -597,7 +629,9 @@ HUD. No chat, names or other players' ids are quoted.
 **Offsets** in this section count from a frame's first byte, header included,
 as GoC's do. GoBot's payload offsets (the `@N` of `[Packet.*]` blocks and of
 `gobot_sniff_files --rows`) start after the 8-byte header, so they are 8 less:
-the x float at frame byte 16 is payload `@8`. Every value is little-endian.
+the x float at frame byte 16 is payload `@8`, and HP, frame byte 12 of
+`0x0051`, is `--rows 0x0051 --inner` `@4`. Where this section means a payload
+offset, it says so. Every value is little-endian.
 `gobot_sniff_files --rows` reads the UDP and plain frames as they are, and with
 `--inner` the frames inside the server's `0x0081`, which the tools that read
 recordings unpack (below). The live capture does not unpack them yet.
@@ -663,9 +697,8 @@ wrapper give its one frame, whole, or be left shut and counted when it does not
 unpack. No config key sets it. The tools that read recordings do, so
 `gobot_sniff_files --verify` lists the frames inside whole (578 of 578 wrappers
 in fight.s2c, 38 of 38 in shop.s2c; none of the client's) and `--rows <opcode>
---inner` reads their fields, at payload offsets as everywhere in this section.
-The live capture does not set it yet: turning it on, and handing the frames to
-what acts on the game, is the first step of P0-3.
+--inner` reads their fields. The live capture does not set it yet: turning it
+on, and handing the frames to what acts on the game, is the first step of P0-3.
 
 **GoC's `0x0020` rule** is w0 = 32: GoC leaves shut every wrapper holding a
 32-byte frame. In the fight that was the server's two `0x005A` frames (a buff's
@@ -682,11 +715,14 @@ Found. Every frame the client sent over TCP is an `0x0081` in the layout above
   793 steps in the fight, and the same in still, walk and shop. The client's UDP
   `0x0028` and `0x0026` carry the sequence number of a wrapper, which ties a UDP
   moment to a TCP one.
-- The L bytes from 12 are ciphered. Their first bytes are the same for every
-  message of one L all session (L = 36 opens `55 43 1D` in all four runs), and
-  key bytes worked out at two positions agree between two different messages of
-  the same L. It is probably liblzf under an XOR key chosen by L (likely; not
-  decoded). Nothing needed for the six values is in it.
+- The L bytes from 12 are ciphered. Bytes 13 and 14 are the same for every
+  message of one L all session (963 of 963), and byte 12 nearly so: 81 of the
+  963 open with a byte other than the one most common for their L. L = 36
+  opens `55 43 1D` in 324 of 325 messages; L = 37 opens `F0 E6 B8` 115 times
+  and `EC E6 B8` 66 times. Key bytes worked out at two positions agree between
+  two different messages of the same L. It is probably liblzf under an XOR key
+  chosen by L, its first control byte varying (likely; not decoded). Nothing
+  needed for the six values is in it.
 
 Three classes of message line up with what the player did (likely, by count and
 timing only):
@@ -714,7 +750,9 @@ the per-connection `.flowN.c2s` files of the next recording will show.
 
 Found. The client's UDP datagrams hold plain frames in the server's layout:
 first word `0x0105`, check word holding, 100% tiled under `[Framing]` (walk 3
-frames, shop 88, fight 686). Five types carry the character's position:
+frames, shop 88, fight 686). Under `[FramingClient]` 1.8% of shop's bytes and
+10.5% of walk's are in a frame, and the fight's 79.6% is 7 false frames, one of
+them 17,602 bytes. Five types carry the character's position:
 
 | Opcode | Size | Sent | Fields (frame bytes) |
 |---|---|---|---|
@@ -868,19 +906,26 @@ resource sitting at its maximum would look the same.
 
 **Level: a candidate. EXP: not found.** 88 is a u32 at byte 408 of your record
 `0x001E` (inside `0x0081`, 416 bytes unpacked, one per map load; 7 of 7) and at
-byte 196 of `0x0050`. That is odd for a level, which other players can normally
-see: the same `0x001E` field reads `0xFFFFFFFF` in another player's record. For
+byte 196 of `0x0050`, and at no other aligned place in shop or fight (§4f).
+That is odd for a level, which other players can normally see: the same
+`0x001E` field reads `0xFFFFFFFF` in another player's record. For
 EXP, three u32 at bytes 160, 164 and 168 of `0x001E` (and 1512, 1516 and 1520 of
 the snapshot `0x0065`) read 616, 179,986 and 885,300. 179,986 is 20.3% of
 885,300, the shape of "EXP and EXP to the next level"; but they never changed
 across 7 records and 5 snapshots spanning about 122 kills, and another player's
-record holds 100, 100 and 0 there, which does not fit. Searched: every changing
-u16 and u32 field of every server frame type in the fight, wrapped ones
-unpacked. What moves is counters, gold, bag counts, timers and positions. Three
-per-kill counters are untested: `0x005B` u32 at 16 (+3 per kill, 29 to 392),
-`0x03A0` at 460 (+1 every two kills, 362 to 423) and `0x0065` u16 at 398 (798 to
-812). Either the fight earned no EXP (a level cap, or monsters far below the
-character), or EXP travels in a frame these recordings do not hold.
+record holds 100, 100 and 0 there, which does not fit. Nor does the game's own
+EXP table (`zVietnam\Chart\tb_Exp.tbl` in its install folder): it gives
+21,653,866 for level 88 and has no row of 885,300 or 179,986, so the triple is
+not "EXP and EXP to the next level" for a level-88 character (§4f). Searched:
+every changing u16 and u32 field of every server frame type in the fight,
+wrapped ones unpacked. What moves is counters, gold, bag counts, timers and
+positions. The three per-kill counters are tested in §4f, and none is EXP:
+`0x005B` u32 at 16 steps +3 on every kill, the same for both monster types
+(29 to 392); `0x03A0` at 460 counts the kills of one type only (+1 each, 362 to
+423); and `0x0065` u16 at 398 reads 798, 804, 805, 806 and 812 in snapshots
+taken after 3, 5, 18, 63 and 112 kills, not one step per kill. Either the fight
+earned no EXP (a level cap, or monsters far below the character), or EXP
+travels in a frame these recordings do not hold.
 
 **Avatar time: two candidates.** Two exact countdowns in seconds, both falling
 one second per second of clock:
@@ -916,27 +961,29 @@ step pattern, and the client's `0x010D`, `0x0117` and `0x0026`. The pet item
   the client's UDP frames: at bytes 8 and 12, except in `0x0028` and `0x0026`,
   where byte 8 is a sequence number and the id is at 12. The server uses it in
   your record `0x001E` (12), pickups `0x004D` (12), loot lists `0x004A` (96),
-  monster frames aimed at you `0x0038` (48), `0x01BD` (12) and `0x0109` (16). It
-  is not in the monsters' slot space (0–23).
+  your hits on monsters `0x0038` (48, the attacker; §4f), `0x01BD` (12) and
+  `0x0109` (16). It is not in the monsters' slot space (0–23).
 - **A map load** carries only (map, area, spawn x, y), in `0x0086`: no collision
   grid and no map data. Within about a second come wrapped `0x001E` (your
   record), `0x004F` (5,016 bytes of zeros), `0x0042`, `0x0051`, `0x024E` (16 B,
   the same in all 7 loads) and `0x0050`; plain `0x0244` and `0x0242` (the timed
   item, A above), `0x0263`, `0x0739`, `0x03D6` (zeros), `0x073F` (your skills,
   as pairs of skill id and slot << 16 | level) and `0x0727` (zeros); a second
-  later, plain `0x0109`. `0x0042` (2,568 B unpacked) is **the map's 24-slot
-  monster table**: monster slot numbers 0–23 as u16 from byte 316, `0xFFFF`
-  where empty. It was empty on the shop run's maps and filled on the fight map.
+  later, plain `0x0109`. `0x0042` (2,568 B unpacked) is **the map's monster
+  table**: every monster on the map, with its slot, type id, position, HP and
+  max HP, in columns of 50 entries (§4f). It held 24 on the fight's map and
+  none on the shop run's.
   With each map entry the client sends over UDP one or two `0x002C`, three
   `0x0024`, four `0x0028` and one `0x0113`. A table from (map, area) to the
   game's `.map` files is still to be made.
-- **Pickups** are plain `0x004D` (40 B), not combat events: your id at 12, a bag
-  index at 16, item id at 20, and a u32 amount at 32 (the gold amount; 0 for
-  items). Gold is item 9800002: 106 pickups in the fight, 166–223 each. Before
-  each gold pickup comes a wrapped `0x006B` (28 B) whose u32 at 12 is your
-  running gold total (105 of 105 increments equal the next pickup). Before each
-  of the 89 item pickups comes the list it changed: `0x0068` (38), `0x0069`
-  (40), `0x0066` (2), `0x0065` (5) or `0x0051` (4).
+- **Pickups** are plain `0x004D` (40 B), not combat events: your id at 12, the
+  drop's id at 16 (the one the loot list gave it; §4f), item id at 20, the bag
+  slot the item went to at byte 28 (`0xFF` for gold), and a u32 amount at 32
+  (the gold amount; 0 for items). Gold is item 9800002: 106 pickups in the
+  fight, 166–223 each. Before each gold pickup comes a wrapped `0x006B` (28 B)
+  whose u32 at 12 is your running gold total (105 of 105 increments equal the
+  next pickup). Before each of the 89 item pickups comes the list it changed:
+  `0x0068` (38), `0x0069` (40), `0x0066` (2), `0x0065` (5) or `0x0051` (4).
 - **The bag** is wrapped `0x0068` (1,528 B unpacked): 72 slots, item id u32 at
   12 + 4j and count u16 at 300 + 2j for slot j. Its loot slots match the pickup
   tallies exactly. After each potion an `0x0068` shows that slot one lower, and
@@ -949,10 +996,11 @@ step pattern, and the client's `0x010D`, `0x0117` and `0x0026`. The pet item
   the 5 pickups of 9900004 comes right after a wrapped `0x0065`, a full snapshot
   of your character. So HP and MP can rise without a potion.
 - **A skill cast** is the client's UDP `0x0031` (92 B): your x, y as u16 at 16
-  and 18; skill id u32 at 20; from 24 the targets (four bytes, the third a
-  count, then monster slot numbers as u16, padded with `0xFFFF`); and an action
-  counter u32 at 88 that steps by 2 per attack cast and by 1 per buff cast and
-  per `0x002E`.
+  and 18; skill id u32 at 20; byte 24 is 1 for an attack and 2 for a buff;
+  byte 26 is 2 when the cast names a target monster (4 of 63 casts), whose slot
+  follows as u16 at 28, padded with `0xFFFF` (§4f); and an action counter u32
+  at 88 that steps by 2 per attack cast and by 1 per buff cast and per
+  `0x002E`.
 - **Buffs.** Skills 13104, 13101 and 13111 were cast at t = 17–19 (13101 again
   at 44 and 86, 13111 at 84; the player cast one buff by hand), each followed by
   a client `0x002E` (72 B). The
@@ -964,21 +1012,24 @@ step pattern, and the client's `0x010D`, `0x0117` and `0x0026`. The pet item
   72,000). 13101 changed only MP; the recast of 13111 brought only `0x0077`.
   The client's `0x002D` (76 B) carries the same stat as u16 at 20 (3152 before,
   4212 after); what `0x002D` is, is not known.
-- **Kills:** about 122 in the fight, from 122 each of plain `0x004A`, plain
-  `0x003F` and wrapped `0x005B`. `0x004A` (144 B) is the loot list: up to seven
-  drops, item id u32 at 40 + 4j, x u16 at 68 + 2j and y u16 at 82 + 2j for
-  j = 0–6, all three 0 in an empty slot (854 of 854 slots read so: 207 filled,
-  647 empty; gold, 9800002, at 64 in 108 of the 122), and your id as owner at
-  96. `0x003F` (52 B): x, y u16 at 20 and 22 (84–4568 and 1151–1456, the map's
-  range; bytes 24–27 are 0 in every one) and a monster slot u16 at 32 (0–23).
-- **Monsters chasing you** (likely): the 122 plain `0x0038` that name your id
-  at byte 48 (sub-type 9, speed 7.0) carry a destination as u16 at 32 and 34, a
-  median 63 px from you: a rough hint of your position, not a feed. Before
-  Phase 3 relies on `[Packet.0x0038]` in protocol.ini (id at payload 8, x at 80,
-  y at 82), check it on these recordings: per slot, the u16 pairs at payload 24
-  and 80 jump between frames of different sub-types, so it may mix actors.
-- **The tick:** plain `0x03C6` (12 B, empty body) once a second: 32, 32, 62 and
-  122 in the four runs. With no monsters about, it is all the server sent.
+- **Kills:** 122 in the fight, each a plain `0x0038` hit that leaves the
+  monster's HP below zero, with a wrapped `0x005B` right before it (§4f).
+  `0x004A` (144 B) is the loot list: up to seven drops, item id u32 at 40 + 4j,
+  x u16 at 68 + 2j and y u16 at 82 + 2j for j = 0–6, all three 0 in an empty
+  slot (854 of 854 slots read so: 207 filled, 647 empty; gold, 9800002, at 64
+  in 108 of the 122), and your id as owner at 96; each drop also has an id, u32
+  at 12 + 4j (§4f). `0x003F` (52 B), which came as often, is not part of the
+  kill: it is the next monster spawning in the dead one's slot, 2–4 s later
+  (§4f).
+- **Not monsters chasing you** (corrected, §4f): the 122 plain `0x0038` that
+  name your id at byte 48 all have sub-type 9, with speed 7.0 in 112 of them
+  and 18.0 in 10. They are your hits, each with its damage and the monster's HP
+  after it, and their u16 pair at 32 and 34 is where the monster is, as in
+  every `0x0038`. `[Packet.0x0038]` in protocol.ini reads x, y at payload `@80`
+  and `@82` instead: a stale point beside the monster.
+- **The tick:** plain `0x03C6` (12 B: a 4-byte body, zero in every tick) once a
+  second: 32, 32, 62 and 122 in the four runs. With no monsters about, it is
+  all the server sent.
 
 ### What P0-3 can build on
 
@@ -1000,6 +1051,7 @@ In this order:
    potions.
 5. `0x006B` for gold and `0x0068` for bag counts, the potion count among them.
 6. The timers `0x0244` and `0x01BD`, once it is known which is the avatar's.
+7. Every monster of the map, from `0x0042`, `0x003F` and `0x0038`: §4f.
 
 Live capture must keep UDP in both directions; today everything that acts on
 the game takes plain TCP frames only (`GamePacket::plain()`). The wrapped frames
@@ -1007,8 +1059,9 @@ need the unpacking; the UDP ones need nothing.
 
 ### What this corrects outside §4c and §4d
 
-Those two sections are corrected in place. These are left as they were written,
-with the correction here:
+Those two sections are corrected in place. Since 2026-10-19 the places below
+carry a short correction in place too, pointing here; this is what each got
+wrong:
 
 - **§1**, "The client half is not encrypted": over TCP it is. Every frame the
   client sends there is an `0x0081` whose content does not unpack, and the
@@ -1025,11 +1078,12 @@ with the correction here:
   `0x0105`. In the `0x0081` comment, bytes 8–12 are four unused bytes and the
   packed stream's first control byte, and the "inner frame" from byte 13 is
   packed. `[FramingClient]`'s opcode at 6 is the wrapper's check word. The
-  commented-out `[Packet.0x004D]` is a pickup, not damage: payload `@8` is a bag
-  index and payload `@24` the gold amount.
+  commented-out `[Packet.0x004D]` is a pickup, not damage: payload `@8` is the
+  drop's id (§4f) and payload `@24` the gold amount.
 - **README.md**, "The two directions are framed differently": both directions
   use `[Framing]`'s layout. `[FramingClient]` reads the client's wrappers by
-  their check words.
+  their check words. Its `0x0081` warning: the twelve bytes are the wrapper's
+  header and four unused bytes, and the frame inside is packed.
 
 ### What the next recording needs
 
@@ -1042,6 +1096,388 @@ loss and the death frames). A long walk with GoC's `Nhân vật:` line read duri
 it would check the dead reckoning and show whether UDP datagrams are ever lost.
 `--record` now writes each connection's client half to its own
 `<name>.flowN.c2s`, which will show where the AA55 units travel.
+
+## 4f. Monsters and kills in the stream (2026-10-18 recordings)
+
+The player asked whether GoBot can know every monster's position and HP on the
+whole map, as GoC does. GoC has them from ZTeam's messages
+([goc-reference.md](goc-reference.md#how-goc-knows-about-monsters)): a
+snapshot with every monster as id, type id, HP, max HP, x, y, a distance and a
+flag; updates that carry the name and stats; removals; and batched positions.
+Those are ZTeam's own messages, which its server makes out of the game stream.
+This section says which of the **game's** frames carry the same facts.
+
+It rests on the P0-2 fight (§4e): 123 seconds on a map with monsters, and 122
+kills. The other three runs had no monster activity. As in §4e, the BA worked
+the results out of the bytes, and a skeptic re-derived each one with separate
+scripts and its own liblzf decoder; both count the fight as
+`gobot_sniff_files --verify` does (2,392 server frames, 578 of 578 wrappers
+unpacked). Only what held up is written here, in the skeptic's corrected form
+where it corrected one, and **found** and **likely** mean what they mean in
+§4e. Offsets are frame bytes, as in §4e. Times are counted in the server's
+one-second ticks, so they are good to about a second. The type ids, skill ids
+and item ids below are the game's own numbers; no name, chat or other player's
+id is quoted.
+
+### The answer
+
+**Yes, all of it but the name.** Every fact GoC's snapshot carries, except a
+monster's name, is in the game's own server frames, for every monster on the
+map, near the character or not:
+
+- At each map load, `0x0042` (inside `0x0081`) is a table of every monster on
+  the map, with its slot, type id, position, facing, speed, HP and max HP.
+- Plain `0x0038` is one monster's state event, sent at each change: it stops,
+  it starts walking or turns, or it is hit. It carries the monster's position
+  and HP. The fight held 1,050 of them, about 8.6 a second, for all 24 monsters.
+- A kill is a `0x0038` hit that leaves the HP below zero. No other frame
+  removes the monster.
+- Plain `0x003F` brings a new monster into the dead one's slot 2–4 s later.
+
+ZTeam's messages to GoC match these frames by what each carries (likely: its
+server cannot be seen). The distance is worked out from your own position, and
+the name does not come from the game stream:
+
+| ZTeam's message | The game's frames |
+|---|---|
+| snapshot (`0x11`) | the table `0x0042`, then the `0x0038` events |
+| monster update (`0x16`) | `0x003F` for a new monster, and `0x0038` |
+| monster removed (`0x17`) | the `0x0038` hit that kills |
+| batched positions (`0x21`) | the `0x0038` events |
+
+### The eight questions
+
+| | Question | Answer |
+|---|---|---|
+| M1 | What tells monsters apart? | **Found.** The slot, a monster's place on the map (0–23 on the fight's map): u32 at 16 of `0x0038`, u16 at 32 of `0x003F`, a u16 column of `0x0042`. A new monster takes a dead one's slot, so a slot is not one monster for good, though it keeps its type (122 respawns of 122). The **type id**, a u32, is in `0x0042` and `0x003F` only. The **name** is in no frame: not found. |
+| M2 | Where is each monster, live? | **Found.** x and y, u16 at 32 and 34 of `0x0038`, at every event; between events, worked out from the last one (*How monsters move*). |
+| M3 | HP and max HP? | **Found.** HP at 64 of `0x0038` and in the table; max HP in the table and in `0x003F`. A hit carries its damage and the HP it left. |
+| M4 | How does a monster die, go and come back? | **Found.** It dies in a `0x0038` hit, state 9, that leaves its HP below zero. No frame removes it: its slot falls silent until `0x003F` brings the next monster, 2–4 s later. |
+| M5 | Is the whole map sent at once? | **Found.** The table `0x0042`, at every map load: every monster on the map, as it stands at that moment. |
+| M6 | Do monsters target or chase you? | **Not found.** No frame shows it, and no monster hurt the character; likely because they were far below its level (*Monsters and the character*). |
+| M7 | What lies on the ground? | **Found.** Plain `0x004A` after each kill lists the drops, each with an id; the pickup `0x004D` and the expiry `0x004B` name that id. |
+| M8 | EXP? | **Not found.** Nothing that changed with the kills can be EXP (*Names, EXP, level and fury*). |
+
+### `0x0038`: a monster's state event
+
+Plain, 96 bytes; 1,050 in the fight, naming all 24 slots and no others. One is
+sent whenever a monster's state changes; for one slot they came a median 2.0 s
+apart (p90 5.0 s, at most 5.6 s).
+
+| Bytes | Type | Content |
+|---|---|---|
+| 12 | u8 | the state: 0 a stop (409), 1 a walk starting or turning (519), 9 a hit (122) |
+| 16 | u32 | the slot (bytes 17–19 are 0 in all 1,050) |
+| 24 | i8 | facing: +1 toward larger x, −1 toward smaller x |
+| 28 | f32 | speed in pixels per 25 ms step: 2.6 walking, 0 stopped; in a hit 7.0 (112 of 122) or 18.0 (10, all by skill 51103) |
+| 32, 34 | u16 | **x and y of the monster now**, in world pixels with y growing downward: the space of your own position |
+| 40 | f32 | not understood, and not the length of a walk (*How monsters move*) |
+| 48 | u32 | the attacker: your id in all 122 hits, `0xFFFFFFFF` (none) in all 928 stops and walks |
+| 52 | u32 | in a hit, its damage (30,431 to 96,450); otherwise 0 |
+| 56 | u8 | in a hit, an effect (likely; its meaning needs the HUD): 0 in 87 hits, 1 in 8 (all by skill 51102), 11 in 27 (all by skill 51105) |
+| 60 | u32 | 162 with effect 11, otherwise 0 |
+| 64 | u32 | **HP now**; in a hit, the HP it left, read as an i32: below zero for a kill (−25,648 to −93,406) |
+| 68 | u32 | 200 with effects 1 and 11, otherwise 0 |
+| 88, 90 | u16 | **not the position**: a point 1–44 px to the side of the monster and up to 102 px above it, rewritten when the monster is attacked and stale otherwise. `[Packet.0x0038]` in protocol.ini reads this pair as x, y (payload `@80`, `@82`) |
+| 92 | u8 | a byte that goes with the monster's type: 1 or 2 on this map, as in `0x0042` and `0x003F` |
+| 93 | u8 | in a hit, 1 in 17 of the 122, whose mean damage was 1.40–1.53 times that of the same skill's other hits: likely a critical hit |
+
+In a hit, bytes 57–59 are bytes 1–3 of the monster's type id, left over in
+memory with the low byte lost, so even there the type cannot be read. The table
+leaves out the bytes that held no field the analysis could find.
+
+Evidence:
+
+- The position: after a stop, the slot's next event has the same x, y (402 of
+  402). After a walk, x has moved along the facing (499 of 502; the other 3 by
+  0 px), at a median 102 px/s, against 2.6 × 40 = 104. The table's 5 standing
+  monsters started their first walk from the table's x, y, and its 19 walking
+  ones walked on along the table's facing.
+- HP: counting from the table and from each respawn, every stop and walk
+  carries exactly the HP so far (928 of 928), and in every hit the HP before
+  less the damage is the HP after (122 of 122), the three monsters already hurt
+  when the map loaded included.
+- The pair at 88, 90 keeps its value from one event to the next except at a
+  hit (121 of 122) and in 17 frames right after a respawn, in which the monster
+  was struck without damage (*Monsters and the character*).
+
+### `0x0042`: every monster of the map, at each map load
+
+Inside `0x0081`, 2,568 bytes unpacked; one per map load. The fight's map had
+24 monsters; all six loads of the shop run had none. The table is laid out in
+columns of 50 entries, the room it has: entry k is a monster for k below the
+count, and the slot column reads `0xFFFF` past it. It is the map as it stands
+at that moment: each HP equals the slot's first `0x0038` HP (24 of 24), three
+monsters were already hurt, and the walking ones were mid-walk.
+
+| Bytes | Type | Content |
+|---|---|---|
+| 12 | u32 | the count of monsters (24, or 0) |
+| 16 + k | u8 | 1 walking (19), 0 standing (5) |
+| 66 + k | u8 | 44 or 39: likely the level (the middle digits of the type ids, below) |
+| 116 + k | u8 | 3 for one type, 0 for the other: not understood |
+| 166 + k | i8 | facing |
+| 216 + k | u8 | 1 for every monster |
+| 266 + k | u8 | the type's byte, as at 92 of `0x0038` |
+| 316 + 2k | u16 | the slot (`0xFFFF` past the count) |
+| 416 + 2k, 516 + 2k | u16 | **x, y** |
+| 616 to 1015 | u16, four columns | 0 in every table |
+| 1016 + 2k, 1116 + 2k, 1216 + 2k | u16 | three numbers, likely stats: not understood |
+| 1316 + 4k | u32 | a fourth one |
+| 1516 + 4k | u32 | **the type id** |
+| 1716 + 4k | f32 | speed: 2.6 walking, 0 standing |
+| 1916 + 2k | u16 | not understood (under 20,000, different for each monster) |
+| 2016 + 4k | u32 | **HP** |
+| 2216 + 4k | u32 | **max HP** |
+
+Bytes 2416 to the end are 0. The fight's map had two types, 12 slots each:
+1004401 (level 44, max HP 7,676) and 1003901 (level 39, max HP 3,044). An
+older capture from another map (`last_capture.s2c`, 2026-10-04) used slots
+0–16 and 27–37 in `0x0038`, so other maps use more of the 50.
+
+### `0x003F`: a monster spawns
+
+Plain, 52 bytes; 122 in the fight, one 2–4 s after each kill (by the ticks: 2 s
+50 times, 3 s 69 times, 4 s 3 times), in the dead monster's slot and of its
+type (122 of 122).
+
+| Bytes | Type | Content |
+|---|---|---|
+| 12 | u32 | **the type id** |
+| 16 | u8 | likely the level, as in the table |
+| 18 | i8 | facing |
+| 20, 22 | u16 | **x, y**: one of the map's spawn points |
+| 28 | u32 | **max HP**; the monster spawns with it full |
+| 32 | u16 | **the slot** |
+| 34 to 41 | u16, four | four numbers, likely stats: not understood |
+| 44 | u8 | the type's byte, as at 92 of `0x0038` |
+
+The slot's next `0x0038` is a stop at the same x, with the same facing and type
+byte and HP equal to max HP (122 of 122); its y is 9–36 px lower, as the
+monster settles on the ground. The new monster appears at one of the map's
+spawn points, not where the last one died: the 122 respawns used 77 different
+points, none more than 4 times.
+
+### How monsters move
+
+A monster's position at any moment follows from its last event, to within
+about 25 px (p5 −27, median 0, p95 +22 px over about 1,026 events; that
+includes up to a second of guessing at times, as the files keep none):
+
+- A stopped monster stays where it is until its next event.
+- A walking monster moves speed × 40 px a second along its facing (104 px/s at
+  speed 2.6; a median of 102 measured).
+- A walk lasts about 200 steps of 25 ms (a median of 5.1 s) and covers speed
+  × 200 px: about 525 px at speed 2.6 (517–534 px, p10 to p90, over 249 walks).
+  A turn is another walk frame with the facing flipped (136 of 136), and the
+  200 steps count from the start of the walk, not from the turn. An older
+  capture from another map gives the same: 202 steps (median) at speeds 1.5 to
+  1.7.
+- A walk that reaches the map's wall ends there at once, with a stop frame (10
+  walks at x 47–50).
+- After a stop, the next walk starts a median 2.0 s later (p10 0.9 s, p90
+  3.0 s).
+- y changes by about 60–69 px with no event where a monster walks over a ledge
+  or a slope, up or down, so y is exact only at events.
+- The f32 at 40, shaped like a length in seconds in about 230 of the 519 walk
+  frames, is not one: it follows neither the distance walked nor the time it
+  took (correlations 0.16 and 0.12 over 96 walks).
+
+The events cover the whole map: 62% of the 928 stops and walks were more than
+1,000 px from the character and the farthest about 4,400 px. The map is only
+about 4,700 px wide, so this map cannot tell the whole map from a radius above
+4,400 px; the table, though, holds every monster on it.
+
+### Kills
+
+All 122 hits killed: the HP after was below zero every time. A kill comes as:
+
+1. Most often (94 of 122) a step of the counter `0x0723` just before (below).
+2. For a level-39 monster only, two identical `0x03A0` (62 pairs for its 62
+   kills, none for the 60 level-44 kills).
+3. A wrapped `0x005B`, directly before the hit every time (122 of 122); the
+   frame after each `0x005B` is a hit (122 of 122).
+4. The `0x0038` hit: state 9, the attacker, the damage, the HP after.
+5. The loot list `0x004A`, in kill order (*Drops*).
+6. 2–4 s later, `0x003F` in the same slot, then the slot's `0x0038` stop.
+   Between the hit and the respawn no frame names the slot.
+
+HP never changed without a hit (928 of 928), so no monster was seen to
+regenerate. The other frames:
+
+| Frame | Size | Content |
+|---|---|---|
+| `0x005B`, wrapped | 40 B | u32 at 16 steps +3 on every kill, for both types (29 to 392, 121 of 121 steps); the rest never changes |
+| `0x03A0`, wrapped | 1,016 B | u32 at 460 steps +1 per pair (362 to 423): likely a count of that type's kills. Bytes 12–211 are the characters `0` and `1`; the rest never changes |
+| `0x0723`, plain | 16 B | u32 at 12 steps +1 (likely once per monster struck) and goes back to 0 3.0–3.8 s after its last step (6 times); 149 steps for 122 kills |
+
+### Monsters and the character
+
+No targeting or aggro by monsters is visible:
+
+- `0x0038` has only the states 0, 1 and 9;
+- byte 48 names your id only in the 122 hits, which are yours;
+- walks do not lean toward the character at any distance (within 300 px, 28
+  walks toward it and 25 away; at 300–1,000 px, 56 and 79; at 1,000–2,000 px,
+  93 and 91);
+- nothing hurt the character: its HP fell only by 1, seven times (§4e).
+
+Limits: every monster died at the first hit, and the monsters (levels 39 and 44)
+were far below the character (88, if the level candidate is right), so a monster
+that survives and turns on the character was never seen.
+
+Targeting is the character's. Each attack cast killed 0–4 monsters, all within
+−511 to +525 px in x and −161 to +148 px in y of where the cast was made. 4 of
+the 63 casts named a target: byte 26 of the client's UDP `0x0031` is 2, and the
+slot follows as a u16 at 28. Three of those four slots were killed in that
+cast's window.
+
+**Attacks that do no damage** (likely). The 27 steps of `0x0723` beyond the 122
+kills fall in 17 casts, and the same 17 casts hold the only 17 frames whose
+pair at 88, 90 changed without a hit: each the first or second `0x0038` of a
+monster that had just spawned, with its HP still full. So a monster struck just
+after it spawns sends no state-9 frame at all (likely spawn protection). Three
+casts of skill 51102 showed 5 contacts each this way, for one kill. A reader
+that counts state-9 frames as the attacks that landed misses these.
+
+### Drops
+
+| Frame | Bytes | Content |
+|---|---|---|
+| `0x004A`, plain, 144 B: the drops of one kill | 12 + 4j | u32 drop id of drop j = 0–6 (0 to 19 seen; 0 is an id too, so an empty place is told by its item id) |
+| | 40 + 4j | u32 item id; 0 for an empty place. Gold, 9800002, always at j = 6 |
+| | 68 + 2j, 82 + 2j | u16 x, y: one x, y for the whole list |
+| | 96 | u32 the owner: your id |
+| | 100 + 4j | u32 1 where there is a drop |
+| | 128 | f32 3.0 to 5.6: not understood |
+| `0x004D`, plain, 40 B: a pickup | 12 | u32 your id |
+| | 16 | u32 the drop id |
+| | 20 | u32 the item id |
+| | 28 | u8 the bag slot the item went to; `0xFF` for gold and for items that act when picked up |
+| | 32 | u32 the gold amount; 0 for items |
+| `0x004B`, plain, 20 B: a drop expires | 12, 16 | u32 the drop id, u32 the item id |
+
+- One list per kill, in kill order: 122 lists, 3 of them empty, 207 drops.
+- The drops lie at the dead monster's x − 78 × its facing, exact to 1 px in 95
+  of the 119 lists with drops, and 15–23 px above its y. Kills by skill 51103
+  (hit speed 18) and kills at the wall land elsewhere, likely because the blow
+  throws the monster back.
+- Kept by drop id, the books balance: each of the 195 pickups names a drop on
+  the ground with the same item (195 of 195); 2 drops expired by `0x004B`, each
+  30 s after it fell (likely the rule, from 2 cases); and the other 10 were all
+  dropped less than 30 s before the end. No id was used again while its drop
+  lay on the ground.
+- Byte 28 of `0x004D` is the slot holding that item in the bag frame that comes
+  just before it (78 of 78 for `0x0068` and `0x0069`). Which bag frame comes
+  before each pickup is as §4e says.
+
+### Names, EXP, level and fury
+
+**Names: not in the stream.** No server frame and no client datagram of the
+recordings holds a monster's name. Text appears only in your own records, a
+challenge (`0x0342`), and runs of numbers that happen to be printable. The
+stream gives the type id, so a name has to come from the game client's own
+data, keyed by type id. The game's install folder (here
+`C:\VTCZone\Games\Ghost_Online_PC_VTC`) holds it in `zVietnam\table`:
+
+- `mob.mdd` is a u32 count, 554, and then 554 u32 type ids, the fight's two
+  among them;
+- `Mon_Data.etb` (66,017 bytes) is encoded: it starts with the u32s 2, 6334, 0
+  and 156,035, and is neither zlib nor plain liblzf. It is the likely table of
+  names and stats; it is not decoded yet.
+
+**EXP: not found**, as §4e said. A scan of every server frame type for u16 and
+u32 fields that move one way only found counters, bag counts, gold, MP and
+timers, and nothing that could be EXP: `0x005B` steps +3 on every kill, the
+same for both types, where EXP would differ by monster; `0x03A0` counts one
+type's kills; and `0x0065`'s u16 at 398 reads 798, 804, 805, 806 and 812 in
+snapshots taken after 3, 5, 18, 63 and 112 kills, not one step per kill. The
+triple 616, 179,986 and 885,300 of §4e is not EXP for a level-88 character
+either: the game's EXP table (`zVietnam\Chart\tb_Exp.tbl`, 200 levels) gives
+21,653,866 for level 88 and has no row of 885,300 or 179,986. Likely the kills
+paid nothing, the monsters being 44–49 levels below the character; or EXP comes
+in a frame these recordings do not hold. The same table can test any EXP field
+a later recording turns up.
+
+**Level, fury and avatar time:** as §4e. An aligned u32 of 88 is still only at
+byte 408 of `0x001E` and 196 of `0x0050`; the fury candidate 3600, 3600 never
+changed (122 of 122 `0x0051`, 9 of 9 `0x0050`); and both avatar-time
+countdowns stand (`0x0065`'s u32 at 1564 runs with B, within a second of
+`0x01BD`'s).
+
+### What a reader gets without unpacking `0x0081`
+
+Plain: `0x0038` (1,050 in the fight), `0x003F` (122), `0x004A` (122), `0x004D`
+(195), `0x0723` (155) and `0x004B` (2). That is the position, HP and death of
+every monster, each one heard from within a few seconds of the map load (the
+longest gap between one slot's events was 5.6 s), and the drops on the ground.
+Wrapped: the table `0x0042`, `0x005B` and `0x03A0`, and the bag and gold frames.
+So without unpacking, a reader lacks the type id, level and max HP of the
+monsters already there at the load until each one dies and respawns. The type
+byte at 92 of `0x0038` happens to tell this map's two types apart, but it
+cannot stand in for the type id.
+
+### What it means for GoBot
+
+**Whole-map targeting, as GoC does it.** GoBot can keep the list GoC keeps,
+from the game's own frames and with no screen reading: every monster on the
+map by slot, with its type id, x, y, HP and max HP, the dead ones marked until
+they respawn, the distance worked out from your own position (§4e). GoC's
+"Loại mob" filter is a type id. A monster's name needs `Mon_Data.etb` decoded,
+or a table of type ids made by hand.
+
+**P0-3** gets one more part, after unpacking `0x0081` in the live capture
+(§4e), which the table needs:
+
+1. Build the monster list on `include/gobot/monster_frames.hpp`:
+   `read_map_monsters` (`0x0042`), `read_monster_spawn` (`0x003F`) and
+   `read_monster_state` (`0x0038`). They are written and tested on hand-built
+   frames, and nothing calls them yet. Replace the list at each table; set a
+   slot at each spawn; at each event set the position, facing, speed and HP,
+   and mark the monster dead at a kill until its slot's next spawn. Between
+   events, move each walker as *How monsters move* says.
+2. Mend what reads `0x0038` today. `[Packet.0x0038]` in protocol.ini reads x, y
+   at payload `@80`, `@82`, the stale pair; the position is at payload `@24`,
+   `@26`. `src/protocol_handler.cpp` drops every monster in slot 0 (lines 238
+   and 244), and its death test (line 231: HP 0 with a max HP over 0) never
+   fires on `0x0038`, whose killing hit leaves HP below zero and which carries
+   no max HP: a dead monster would stay listed, with HP below zero, until its
+   respawn. Until this is done, the x, y GoBot holds for a monster is a stale
+   point beside it, not where it is.
+3. Take state-9 frames for kills and damage, not for every attack that landed:
+   a monster struck just after it spawns sends none.
+
+**P3-1.** Your position comes from the client's UDP (§4e), so P3-1 shrinks to
+wiring and checking, as P0-3 says. Its candidate (b), plates on screen matched
+to the passive `0x0038` positions, would have been matched against the stale
+pair. With the right x, y, a monster's plate on screen and its world x, y give
+where the screen sits on the map: a check on the position from UDP (an
+inference, not tested).
+
+### What this corrects
+
+In place: §4c (`0x0038`'s grouping, `0x003F`), §4e (*Other findings*: your id,
+the map load, pickups, the skill cast, kills, the frames that were read as
+monsters chasing you, and the tick; *Level and EXP*) and §6 (`0x0038`'s fields
+and the `id == 0` rejection). Also the `[Packet.0x0038]` and `[Packet.0x004D]`
+comments in configs/protocol.ini, and README.md.
+
+### What the next recording needs
+
+- Hits that do not kill: monsters with much HP (a boss, or monsters of the
+  character's level), to see an HP after above zero, a chase, regeneration and
+  any state besides 0, 1 and 9. Standing next to such monsters would show
+  whether and how they attack.
+- Another player hitting monsters: whether their hits use the same frame with
+  their id, and whether their kills bring `0x005B` and `0x0723` too.
+- EXP: a kill that pays some, with the HUD's EXP read at known times; the
+  game's EXP table can then check the field.
+- The HUD's damage numbers for skills 51102 and 51105, for the effects (bytes
+  56, 60 and 68) and the critical-hit flag (93).
+- A map with more than 24 monsters, for the table's other columns and the
+  numbers not understood.
+- Per-frame arrival times in `--record`, which would take the second of
+  guessing out of every figure here.
 
 ## 5. The capture that settles it
 
@@ -1081,20 +1517,37 @@ capture rather than after.
 ~170 samples each, small integers; `x` 676..6112 and `y` 395..1120, constant per
 id, i.e. static spawn points.
 
+**Corrected 2026-10-19 ([§4f](#4f-monsters-and-kills-in-the-stream-2026-10-18-recordings)):**
+the id (the monster's slot) and the speed are right, x and y are not. Payload
+`@80`, `@82` is a point beside the monster, rewritten when it is attacked and
+stale otherwise, which is why it looked constant per id. The monster's position
+is payload `@24`, `@26`, restated at every change of its state. The offsets
+below are payload offsets, as measured then; §4f gives each field.
+
 Bytes 9–11 are constant, so `id` is effectively a u8 in a u32 slot.
 
 Never-varying offsets: 0–3, 9–15, 28–33, 36–39, **64–79**, 84–87.
 Live data: 4–8, 16–27, 34–35, 40–45, 48–52, 56–60, 80–83.
 Two-valued flag candidates: 16, 40–43, 48, 52 — one of these is plausibly
-`alive`, which would serve as a cheap `monster_remove`.
+`alive`, which would serve as a cheap `monster_remove`. (§4f: 16 is the facing,
+40–43 the attacker, 48 a hit's effect and 52 its number. No flag says alive: a
+monster dies in a hit, sub-type 9 at `@4`, that leaves its HP, `@56`, at 0 or
+below.)
 High entropy: 24 (256 distinct), 26 (174), 34 (99).
 
 `0x03C6` — 4-byte payload, ~511 samples, fires steadily. Likely a tick or ack.
+(§4e: the server's tick, once a second; its 4 bytes are 0 in every tick.)
 
 ### The `id == 0` rejection
 
-`src/protocol_handler.cpp:242` logs `Monster packet 0x%04X has no usable id
-field` and returns whenever `m.id == 0`. It fired 109 times. Since ids here are
+`src/protocol_handler.cpp:244` (line 242 when this was written) logs `Monster
+packet 0x%04X has no usable id field` and returns whenever `m.id == 0`; line
+238 drops id 0 the same way from a list. It fired 109 times. Since ids here are
 small integers starting near zero, slot 0 is probably a legitimate entity being
 silently dropped. Use a separate "field present" signal rather than treating 0
 as absent. It is `GB_DEBUG`, so this is a suspicion, not a confirmed fault.
+
+**Confirmed 2026-10-19 (§4f):** slot 0 is a monster like any other: 52 of the
+fight's 1,050 `0x0038` and 7 of its 122 kills. And the death test at line 231
+(HP 0 with a max HP over 0) never fires on `0x0038`, whose killing hit leaves HP
+below zero and which carries no max HP.

@@ -61,6 +61,35 @@ Fit judge(const Reading& r) {
     return Fit::Described;
 }
 
+std::string reading_warning(const Reading& r) {
+    char buf[512];
+    switch (judge(r)) {
+    case Fit::Described:
+        return {};
+    case Fit::Empty:
+    case Fit::NothingRead:
+        return "  !! not one frame was read from it. Either this framing does not fit\n"
+               "     the file, or it holds no frames at all.\n";
+    case Fit::TooMuchUnread:
+        std::snprintf(buf, sizeof(buf),
+                      "  !! %zu of %zu bytes (%.1f%%) are in no frame. Either this framing does\n"
+                      "     not fit the file, the capture lost packets, or the file holds\n"
+                      "     another connection's bytes too. Treat anything below with\n"
+                      "     suspicion; --verify shows where those bytes are.\n",
+                      r.unread(), r.size,
+                      100.0 * static_cast<double>(r.unread()) / static_cast<double>(r.size));
+        return buf;
+    case Fit::Oversized:
+        std::snprintf(buf, sizeof(buf),
+                      "  !! its frames average %zu bytes: a length field that is not one, read\n"
+                      "     as a few huge frames that swallow the real ones. Treat anything\n"
+                      "     below with suspicion.\n",
+                      (r.size - r.unread()) / r.frames);
+        return buf;
+    }
+    return {};
+}
+
 FrameScanResult tile(const Bytes& recording, const FramingSpec& spec, Direction dir) {
     // Unlocked: a recording may begin part-way through a frame, and the
     // scanner must slide past that rather than wait for it.
@@ -297,6 +326,28 @@ std::string format_number(double value, Number n) {
     if (a == 0.0 || (a >= 0.01 && a < 1e7)) std::snprintf(buf, sizeof(buf), "%.2f", value);
     else                                    std::snprintf(buf, sizeof(buf), "%.3g", value);
     return buf;
+}
+
+bool parse_count(const std::string& text, std::size_t& out) {
+    std::size_t i = 0, base = 10;
+    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        i = 2;
+        base = 16;
+    }
+    if (i >= text.size()) return false;
+    std::size_t value = 0;
+    for (; i < text.size(); ++i) {
+        const char c = text[i];
+        std::size_t digit = 0;
+        if (c >= '0' && c <= '9')                    digit = static_cast<std::size_t>(c - '0');
+        else if (base == 16 && c >= 'a' && c <= 'f') digit = static_cast<std::size_t>(c - 'a' + 10);
+        else if (base == 16 && c >= 'A' && c <= 'F') digit = static_cast<std::size_t>(c - 'A' + 10);
+        else return false;
+        if (value > (SIZE_MAX - digit) / base) return false;
+        value = value * base + digit;
+    }
+    out = value;
+    return true;
 }
 
 Column column(const std::vector<Bytes>& bodies, Number n, std::size_t offset) {

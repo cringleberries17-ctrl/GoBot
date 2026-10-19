@@ -20,6 +20,7 @@
 #include "gobot/map_file.hpp"
 #include "gobot/opcode_registry.hpp"
 #include "gobot/own_position.hpp"
+#include "gobot/monster_frames.hpp"
 #include "gobot/net_discovery.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/pathfinder.hpp"
@@ -1113,9 +1114,10 @@ FramingSpec client_spec() {
 }
 
 /// The P0-2 recordings hold the client's datagrams in the server's layout,
-/// tiling 100% so and 2 to 14% under [FramingClient]. A live capture framed a
-/// client-to-server datagram with [FramingClient] whenever the config had
-/// one, and so read none of it.
+/// tiling 100% so. Under [FramingClient] 1.8% of shop's bytes and 10.5% of
+/// walk's are in a frame, and the fight's 79.6% is 7 false frames, one of
+/// them 17,602 bytes. A live capture framed a client-to-server datagram with
+/// [FramingClient] whenever the config had one, and so read none of it.
 void test_udp_framing() {
     section("UDP framed in the server's layout both ways, never with [FramingClient]");
 
@@ -2048,6 +2050,9 @@ void test_capture_file_framings() {
               "[FramingClient], tried too, stops at them: 6 frames and the rest unread");
         check(capture_file::judge(r) == capture_file::Fit::Described && r.largest == 48,
               "so the reading describes the file; its longest frame is 48 bytes, whole");
+        check(r.resyncs > r.frames && capture_file::reading_warning(r).empty(),
+              "and the --from readers warn of nothing, as --verify finds nothing wrong, though "
+              "its 18 resync bytes outnumber its 12 frames (R3-REV2-1)");
     }
 
     // The same file forced through [FramingClient]: the scan stops at the
@@ -2066,6 +2071,10 @@ void test_capture_file_framings() {
               "but everything from the false length on is unread, counted and placed");
         check(capture_file::judge(r) == capture_file::Fit::TooMuchUnread,
               "so it is not called a description of the file");
+        const std::string warning = capture_file::reading_warning(r);
+        check(warning.rfind("  !! ", 0) == 0 && warning.find("are in no frame") != std::string::npos &&
+                  warning.back() == '\n',
+              "and the --from readers warn of the bytes in no frame, from the same verdict");
         check(!t.scan.packets.empty() &&
                   t.scan.packets.front().opcode == ((0x0020 + 0x0081 + (41 - 12)) & 0xFFFF),
               "and the opcode it reads at offset 6 is [Framing]'s check word");
@@ -2151,6 +2160,11 @@ void test_capture_file_framings() {
         check(o.reading.ok && o.reading.frames == 3 && o.reading.unread() == 0 &&
                   capture_file::judge(o.reading) == capture_file::Fit::Oversized,
               "frames that average over 512 bytes are judged a length field that is not one");
+        check(capture_file::reading_warning(e.reading).find("not one frame") != std::string::npos &&
+                  capture_file::reading_warning(junk.reading).find("not one frame") != std::string::npos &&
+                  capture_file::reading_warning(o.reading).find("frames average 2008 bytes") !=
+                      std::string::npos,
+              "and each verdict but a description has its warning for the --from readers");
     }
 
     // The three blocks out of a config.
@@ -2465,6 +2479,277 @@ void test_unpack() {
     }
 }
 
+// ----------------------------------------- monsters, from the server's frames
+
+/// The map's monsters as the P0-2 fight showed the server sending them
+/// (docs/protocol-findings.md §4f): the table at a map load, a monster
+/// spawning in a slot, and a monster's state events -- a stop, a walk, a
+/// hit -- at the frame bytes given there. Hand-built frames whose answer is
+/// known; every slot, id, position and HP is made up, none taken from a
+/// recording.
+void test_monster_frames() {
+    section("Monsters, read from the server's frames");
+
+    // A frame of `size` bytes, header included, its first word 0x0105 as the
+    // game's frames have it. Fields are written at frame bytes.
+    struct Frame {
+        std::uint16_t opcode;
+        Bytes         body;
+        Frame(std::uint16_t op, std::size_t size) : opcode(op), body(size - 8, 0) {}
+        void u8(std::size_t at, std::uint8_t v)   { body[at - 8] = v; }
+        void u16(std::size_t at, std::uint16_t v) { std::memcpy(body.data() + at - 8, &v, 2); }
+        void u32(std::size_t at, std::uint32_t v) { std::memcpy(body.data() + at - 8, &v, 4); }
+        void i32(std::size_t at, std::int32_t v)  { std::memcpy(body.data() + at - 8, &v, 4); }
+        void f32(std::size_t at, float v)         { std::memcpy(body.data() + at - 8, &v, 4); }
+        Bytes bytes() const { return plain_frame(opcode, body); }
+    };
+    // As the server sent it, straight off the TCP stream; or found inside a
+    // wrapper, unpacked.
+    const auto sent = [](const Frame& f) {
+        GamePacket p;
+        p.opcode = f.opcode;
+        p.payload = f.body;
+        p.from_server = true;
+        return p;
+    };
+    const auto inside = [&sent](const Frame& f) {
+        GamePacket p = sent(f);
+        p.depth = 1;
+        return p;
+    };
+    // The same frame from the client, and over UDP: `reader` takes neither.
+    const auto never = [](const GamePacket& p, const auto& reader) {
+        GamePacket up = p;
+        up.from_server = false;
+        GamePacket dgram = p;
+        dgram.udp = true;
+        return !reader(up) && !reader(dgram);
+    };
+
+    // ---- 0x0042: the map's table, three monsters, slot 0 among them.
+    struct Entry {
+        std::uint16_t slot;
+        std::uint32_t type;
+        std::uint8_t  level;
+        std::int8_t   facing;
+        std::uint16_t x, y;
+        float         speed;
+        std::uint32_t hp, max_hp;
+    };
+    const Entry entries[] = {
+        { 0, 2000501, 50, -1, 1500, 900, 3.0f, 420, 600 },        // walking, hurt
+        { 7, 2000301, 30, 1, 80, 1210, 0.0f, 2000, 2000 },        // standing
+        { 12, 2000501, 50, 1, 3333, 640, 3.0f, 600, 600 },
+    };
+    const auto table_of = [&entries](std::size_t n) {
+        Frame t(0x0042, 2568);
+        t.u32(12, static_cast<std::uint32_t>(n));
+        for (std::size_t k = 0; k < 50; ++k) t.u16(316 + 2 * k, 0xFFFF);
+        for (std::size_t k = 0; k < n; ++k) {
+            const Entry& e = entries[k];
+            t.u8(16 + k, static_cast<std::uint8_t>(e.speed != 0.0f ? 1 : 0));    // moving
+            t.u8(66 + k, e.level);
+            t.u8(166 + k, static_cast<std::uint8_t>(e.facing));
+            t.u8(216 + k, 1);
+            t.u16(316 + 2 * k, e.slot);
+            t.u16(416 + 2 * k, e.x);
+            t.u16(516 + 2 * k, e.y);
+            t.u32(1516 + 4 * k, e.type);
+            t.f32(1716 + 4 * k, e.speed);
+            t.u32(2016 + 4 * k, e.hp);
+            t.u32(2216 + 4 * k, e.max_hp);
+        }
+        return t;
+    };
+    const Frame table = table_of(3);
+    const Bytes wrapper = packed_wrapper(table.bytes().size(), lzf_literals(table.bytes()));
+    FramingSpec unpacking = unwrapping_spec();
+    unpacking.unpack = true;
+    {
+        const auto scan = extract_frames(unpacking, wrapper.data(), wrapper.size(), Direction::ToClient,
+                                         0, false);
+        const bool whole = scan.packets.size() == 2 && scan.packets[1].opcode == 0x0042 &&
+                           scan.packets[1].depth == 1 && scan.packets[1].payload == table.body;
+        check(whole, "the table, packed into an 0x0081, comes out of it whole");
+        const auto got = whole ? read_map_monsters(scan.packets[1]) : std::nullopt;
+        check(got && got->size() == 3, "and gives the three monsters its count says");
+        bool fields = got && got->size() == 3;
+        for (std::size_t k = 0; fields && k < 3; ++k) {
+            const MapMonster& m = (*got)[k];
+            const Entry& e = entries[k];
+            fields = m.slot == e.slot && m.type_id == e.type && m.level == e.level &&
+                     m.facing == e.facing && m.x == e.x && m.y == e.y && m.speed == e.speed &&
+                     m.hp == e.hp && m.max_hp == e.max_hp;
+        }
+        check(fields, "each with its slot, type id, level, facing, x, y, speed, HP and max HP from "
+                      "its columns; slot 0 a monster like the others, and HP below max as the "
+                      "table had it");
+
+        // Taken from byte 13, as the live capture takes it until P0-3 turns
+        // unpacking on: the opcode is right, the body still packed.
+        const auto goc = extract_frames(unwrapping_spec(), wrapper.data(), wrapper.size(),
+                                        Direction::ToClient, 0, false);
+        check(goc.packets.size() == 2 && goc.packets[1].opcode == 0x0042 &&
+                  !read_map_monsters(goc.packets[1]),
+              "taken from byte 13, still packed, it gives nothing");
+    }
+    {
+        const auto none = read_map_monsters(inside(table_of(0)));
+        check(none && none->empty(), "a table of none, a map without monsters, gives an empty list");
+
+        Frame over = table_of(3);
+        over.u32(12, 51);
+        check(!read_map_monsters(inside(over)), "a count past the table's 50 entries gives nothing");
+
+        Frame gap = table_of(3);
+        gap.u16(316 + 2 * 1, 0xFFFF);
+        Frame lost = table_of(3);
+        lost.f32(1716 + 4 * 2, std::nanf(""));
+        const auto g = read_map_monsters(inside(gap));
+        const auto l = read_map_monsters(inside(lost));
+        check(g && g->size() == 2 && (*g)[1].slot == 12 && l && l->size() == 2 && (*l)[1].slot == 7,
+              "an entry marked no monster (slot 0xFFFF), or whose speed is no number, is left out");
+
+        GamePacket cut = inside(table);
+        cut.payload.pop_back();
+        check(!read_map_monsters(cut), "a table one byte short is not the table");
+        check(!read_map_monsters(sent(table)), "nor is one straight off the stream, never seen so");
+        check(never(inside(table), [](const GamePacket& p) { return read_map_monsters(p).has_value(); }),
+              "nor one from the client, or over UDP");
+    }
+
+    // ---- 0x003F: a monster spawning in slot 7.
+    Frame spawn(0x003F, 52);
+    spawn.u32(12, 2000301);
+    spawn.u8(16, 30);
+    spawn.u8(18, 0xFF);
+    spawn.u8(19, 1);
+    spawn.u16(20, 2468);
+    spawn.u16(22, 1300);
+    spawn.u32(28, 2000);
+    spawn.u16(32, 7);
+    spawn.u8(44, 1);
+    {
+        const auto s = read_monster_spawn(sent(spawn));
+        check(s && s->slot == 7 && s->type_id == 2000301 && s->level == 30 && s->facing == -1 &&
+                  s->x == 2468 && s->y == 1300 && s->max_hp == 2000,
+              "0x003F: type id at 12, level 16, facing 18, x, y at 20 and 22, max HP 28, slot 32");
+        check(s && s->hp == s->max_hp && s->speed == 0.0f,
+              "the new monster full of HP, and standing");
+        GamePacket least = sent(spawn);
+        least.payload.resize(34 - 8);
+        GamePacket shorter = least;
+        shorter.payload.pop_back();
+        check(read_monster_spawn(least) && !read_monster_spawn(shorter),
+              "a frame that ends with the slot is enough; one byte shorter gives nothing");
+        check(!read_monster_spawn(inside(spawn)) &&
+                  never(sent(spawn), [](const GamePacket& p) { return read_monster_spawn(p).has_value(); }),
+              "nor does one inside a wrapper, from the client, or over UDP");
+    }
+
+    // ---- 0x0038: slot 12 stands, walks, and is killed.
+    const auto state_frame = [](std::uint8_t state, std::uint32_t slot) {
+        Frame f(0x0038, 96);
+        f.u8(12, state);
+        f.u32(16, slot);
+        f.u32(48, 0xFFFFFFFFu);
+        f.u16(88, 3100);    // the pair [Packet.0x0038] reads as x, y: not the position
+        f.u16(90, 560);
+        return f;
+    };
+    Frame stop = state_frame(0, 12);
+    stop.u8(24, 0x01);
+    stop.u16(32, 3400);
+    stop.u16(34, 640);
+    stop.i32(64, 600);
+    Frame walk = state_frame(1, 12);
+    walk.u8(24, 0xFF);
+    walk.f32(28, 3.0f);
+    walk.u16(32, 3400);
+    walk.u16(34, 640);
+    walk.i32(64, 600);
+    Frame hit = state_frame(9, 12);
+    hit.u8(24, 0x01);
+    hit.f32(28, 7.0f);
+    hit.u16(32, 3310);
+    hit.u16(34, 640);
+    hit.u32(48, 4321);
+    hit.u32(52, 5600);
+    hit.i32(64, 600 - 5600);
+    {
+        const auto s = read_monster_state(sent(stop));
+        check(s && s->event == MonsterEvent::Stop && s->slot == 12 && s->x == 3400 && s->y == 640 &&
+                  s->facing == 1 && s->speed == 0.0f && s->hp == 600,
+              "0x0038, a stop: state 0 at 12, slot 16, facing 24, speed 28, x, y at 32 and 34, HP 64");
+        check(s && !s->attacker && s->damage == 0 && !s->killed(),
+              "no attacker (0xFFFFFFFF), no damage, nothing killed");
+        const auto w = read_monster_state(sent(walk));
+        check(w && w->event == MonsterEvent::Walk && w->facing == -1 && w->speed == 3.0f &&
+                  w->x == 3400 && w->hp == 600,
+              "a walk: state 1, facing -1 toward smaller x, its speed per 25 ms step");
+        const auto h = read_monster_state(sent(hit));
+        check(h && h->event == MonsterEvent::Hit && h->attacker == 4321u && h->damage == 5600 &&
+                  h->hp == -5000 && h->killed() && h->x == 3310,
+              "a hit: state 9, the attacker at 48, the damage at 52, and HP after it at 64, below "
+              "zero: killed");
+        check(h && s && s->hp - static_cast<std::int32_t>(h->damage) == h->hp,
+              "HP before less the damage is HP after");
+        check(s && h && s->x != 3100 && h->y != 560,
+              "the pair at 88 and 90 is never taken for the position");
+
+        Frame grazed = hit;
+        grazed.i32(64, 100);
+        const auto g = read_monster_state(sent(grazed));
+        check(g && g->event == MonsterEvent::Hit && !g->killed(),
+              "a hit that leaves HP above zero has not killed (never seen: every hit of the fight "
+              "killed)");
+
+        const auto zero = read_monster_state(sent(state_frame(0, 0)));
+        check(zero && zero->slot == 0, "slot 0 is read like any other");
+    }
+    {
+        check(!read_monster_state(sent(state_frame(2, 12))) &&
+                  !read_monster_state(sent(state_frame(8, 12))),
+              "a state other than 0, 1 or 9 gives nothing: none was seen");
+        Frame odd = walk;
+        odd.f32(28, std::nanf(""));
+        check(!read_monster_state(sent(odd)), "nor does a speed that is no number");
+        GamePacket least = sent(hit);
+        least.payload.resize(68 - 8);
+        GamePacket shorter = least;
+        shorter.payload.pop_back();
+        check(read_monster_state(least) && !read_monster_state(shorter),
+              "a frame that ends with the HP is enough; one byte shorter gives nothing");
+        check(!read_monster_state(inside(stop)) &&
+                  never(sent(stop), [](const GamePacket& p) { return read_monster_state(p).has_value(); }),
+              "nor does one inside a wrapper, from the client, or over UDP");
+        check(!read_monster_state(sent(spawn)) && !read_monster_spawn(sent(stop)) &&
+                  !read_map_monsters(sent(stop)) && !read_monster_state(inside(table)),
+              "each reader takes its own opcode only");
+    }
+
+    // ---- One stream from the server, framed and unpacked as a recording is
+    // read: each reader finds its own frames in it.
+    {
+        const Bytes stream = joined({ stop.bytes(), wrapper, walk.bytes(), hit.bytes(), spawn.bytes() });
+        const auto scan = extract_frames(unpacking, stream.data(), stream.size(), Direction::ToClient,
+                                         0, false);
+        std::size_t tables = 0, spawns = 0, states = 0, kills = 0;
+        for (const GamePacket& p : scan.packets) {
+            if (const auto t = read_map_monsters(p); t && t->size() == 3) ++tables;
+            if (read_monster_spawn(p)) ++spawns;
+            if (const auto s = read_monster_state(p)) {
+                ++states;
+                if (s->killed()) ++kills;
+            }
+        }
+        check(scan.packets.size() == 6 && scan.resyncs == 0 && tables == 1 && spawns == 1 &&
+                  states == 3 && kills == 1,
+              "a stream of a stop, the table, a walk, a kill and a respawn: one table, three "
+              "events, one of them a kill, and one respawn");
+    }
+}
+
 // ------------------------------------- one opcode's frames as numbers
 
 void test_frame_numbers() {
@@ -2541,6 +2826,23 @@ void test_frame_numbers() {
     const auto shortest = capture_file::columns(bodies, Number::U8, 0, 0);
     check(shortest.size() == 2 && capture_file::column(bodies, Number::F32, 0).frames == 5,
           "columns stop where every body ends; a body too short is left out of a column");
+
+    // --at and --step take their numbers so (R3-REV2-5).
+    std::size_t at = 99;
+    check(capture_file::parse_count("12", at) && at == 12 && capture_file::parse_count("012", at) &&
+              at == 12 && capture_file::parse_count("08", at) && at == 8 &&
+              capture_file::parse_count("0", at) && at == 0,
+          "an offset is decimal, and a leading zero leaves it decimal: 012 is twelve, not ten");
+    check(capture_file::parse_count("0x1C", at) && at == 28 && capture_file::parse_count("0X0a", at) &&
+              at == 10,
+          "or hex after 0x");
+    at = 99;
+    check(!capture_file::parse_count("", at) && !capture_file::parse_count("-1", at) &&
+              !capture_file::parse_count("+1", at) && !capture_file::parse_count(" 1", at) &&
+              !capture_file::parse_count("12a", at) && !capture_file::parse_count("0x", at) &&
+              !capture_file::parse_count("0x1G", at) && !capture_file::parse_count("1e3", at) &&
+              !capture_file::parse_count("99999999999999999999", at) && at == 99,
+          "and anything else is refused, the number left as it was");
 }
 
 // ----------------------------------------- recordings, per connection
@@ -13635,6 +13937,7 @@ int main() {
     test_capture_file();
     test_capture_file_framings();
     test_unpack();
+    test_monster_frames();
     test_frame_numbers();
     test_flow_halves();
     test_both_framings_configured();
