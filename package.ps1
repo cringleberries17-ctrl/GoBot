@@ -374,19 +374,155 @@ THE SIMPLE SCREEN
   F11              hunting on and off
   F12              stop everything at once and let go of every key
 
+  F10 and F11 act only while the game or GoBot is the window in front; F12
+  acts from anywhere.
+
   The version is in the window's title and at the bottom left of the simple
   screen. "Nang cao" is the old full screen, in English; testers do not need
-  it.
+  it. Two optional keys ship with no key: Phim don ngay (Don rac tab: one
+  bag pass now) and Phim vao game ngay (Tu dang nhap tab: log in now, when
+  the character is not in the game). F1 to F12 only; they act only while
+  the game is the window in front, and the key reaches the game too, so
+  pick an F key the game does not use.
 
 EXPERIMENTAL
-  Marked "Thu nghiem" on the screen -- passed every test here, never run on
-  the real game yet: revive with an item (Tu hoi sinh), per-key buff timers
-  (Tu buff), inviting whoever types the keyword (at 1280x720), logging in
-  without an account (Tu dang nhap), Tu chat, quick quest (Nhiem vu) and
-  the Discord alerts (Thong bao). Try one at a time, on a spare character,
-  and watch. Bag cleaning (Don rac) has run on the real game.
+  Marked "Thu nghiem" on the screen -- passed every test here, not yet
+  proven on the real game: revive with an item (Tu hoi sinh), per-key buff
+  timers (Tu buff), inviting whoever types the keyword (at 1280x720) and,
+  with it, inviting only while leading (Chi moi khi dang lam chu to doi),
+  logging in without an account (Tu dang nhap) with its new options (Cung
+  vao lai khi game van chay ma khong thay nhan vat qua N phut, and Phim vao
+  game ngay), Tu chat with its tick Chi khi chua co to doi, quick quest
+  (Nhiem vu), the Discord alerts (Thong bao) with the new Sap het binh and
+  Het binh, and on Danh quai: the second potion tier (Lv2), potion counts
+  (Con N binh), monster lists (Loc quai), attack styles (Kieu danh),
+  keeping distance (Giu khoang cach), the jump key (Phim nhay and Thu),
+  skills only while fighting (Chi khi dang danh quai) and closing notices
+  (Tu dong thong bao); on Don rac, registering monster fragments (Dung manh
+  ghep) and the key Phim don ngay. Try one at a time, on a spare character,
+  and watch. Bag cleaning (Don rac) has run on the real game; registering
+  fragments has not. Only one live run, of about 15 minutes, has tried
+  any of the rest: hunting with the macro keys, potions with Con N binh,
+  Tu chat, the keyword invite (it read the chat; no invite went out) and
+  one death with Tu hoi sinh. See KNOWN ISSUES.
+
+  Two ticks among those are worth knowing. Chi danh nhung con trong danh
+  sach Danh truoc (under Sua danh sach... on the Loc quai line, off as
+  shipped) attacks only the monsters on that list, so nothing at all
+  while it is empty. Dung skill tuan tu (in the Ky nang window, opened by
+  Chi tiet... on the Tu dung ky nang line; ticked as shipped, as in GoC)
+  presses every skill whose cooldown is over, one after the other, rather
+  than one at a time; it counts only with Chi khi dang danh quai ticked.
 
   There is no captcha handling, by decision: the player answers one.
+
+KNOWN ISSUES
+  Entries 1 to 5 were found in that live run (hunting with the macro keys,
+  potions and skills, a timed chat line, the keyword invite on); entry 6 in
+  the checks here. Later packages fix them. Testers need not report these
+  symptoms again, but should follow entries 2, 5 and 6, and report with
+  the log, when those say so.
+
+  1. Potion counts. The line under a potion row, Con N binh, and the alert
+     Sap het binh read a count without its last 1 when it ends in 1: 61 as
+     6, 51 as 5, 41 as 4, 21 as 2 (seen on the HP potion key; the MP key
+     read such counts right). Each one raises a false low-potion alert --
+     in the log, ALERT potion_low: Sap het binh HP: o phim 1 con 6 binh.
+     (with accents there) -- and the next read, 10 seconds later, is right.
+     Potions are drunk by the HP and MP percentages, never by this count,
+     so only what is shown and alerted is wrong, never what is drunk:
+     ignore an alert that the next read contradicts, and look at the
+     number on the hotbar. The folder potion_debug keeps a screenshot of
+     the game only when a count goes up or a slot empties, so it holds the
+     read after a misread (the count going back up), not the misread
+     itself. It shows the slot: ask for it with the log.
+
+  2. A death with the HP potion on (Tu uong binh HP, khi HP duoi 60%). The
+     potion count did not change in the 36 seconds before it and the log
+     has no HP readings, so the cause is not known: the potion may not have
+     been pressed, or one or two big hits may have taken HP from above 60%
+     to zero. GoBot's revive clicked the revive-item button at once. Ask
+     testers to watch the HP bar when trying potions: Binh HP: N in the
+     line under BAT DAU counts the presses of the HP potion key, and Doc
+     duoc HP va MP on Danh quai must be green (with no HP reading the
+     potion keys hold instead of firing). If HP is under the mark and
+     neither that figure nor Con N binh moves: F12, drink by hand, note the
+     time, send gobot_gui.log and gobot_gui.old.log at once. In the log,
+     ALERT death marks the moment and ALERT revived or ALERT revive_failed
+     what came of the revive; a line Potions: key 1 at slot 7 row 1 reads
+     N (was M) is written each time the believed count changes. Potions,
+     like every key, are pressed only while the game is the window in
+     front: a click on GoBot or another window during a fight holds them
+     until the game is in front again (the line under BAT DAU then says
+     Dang cho: hay bam vao cua so game...). Tu chat holds the potions
+     while it types (entry 3): try potions with it off first.
+
+  3. Tu chat. 4 of 8 timed lines were not sent: either the chat box did not
+     open after Enter twice (log: Khong mo duoc o chat (da bam Enter 2 lan)
+     -- bo qua cau nay.) or it opened and the game did not take the typed
+     text (log: Game khong nhan chu go vao o chat (cach go vk) -- cau chua
+     gui.). At such a moment the log also says O chat co the dang mo: danh
+     quai, binh va buff tam dung den khi thay o chat dong (gone in about 2
+     seconds in the run; the log has the accents). A failed line keeps its
+     turn and is tried again after 30 seconds; 3 in a row stop Tu chat
+     (alert Tu chat tu dung). While a line is typed GoBot holds fighting,
+     skills, potions and buffs, and the bag cleaner, quest rounds and
+     notice closer too: a sent line took 4.5 seconds and held the bot 5.5
+     (ca cau mat 4.5 giay, bot bi giu 5.5 giay); a line is meant to take
+     10 seconds at most. A line starts only when HP is at least 10 points
+     over the HP potion's percentage (95% at most, 60% at least) and waits
+     2 seconds if it is lower (Mau thap -- cho 2 giay roi chat.); a line
+     being typed is dropped if HP falls under the HP potion's percentage,
+     or under 50% when that is lower (Mau thap -- dung cau dang go.).
+     Advice: keep the chat box (bottom left of the game) uncovered;
+     Unikey/EVKey on English (E) and the Windows keyboard on English
+     (US) -- the tab warns in amber when not; no mouse or keyboard while a
+     line is typed; keep chat_debug (a screenshot of each failed step) and
+     ask for it.
+
+  4. Keyword invite and Tu chat. GoBot ignores what it reads back from the
+     chat when it matches a line Tu chat typed in the last 30 minutes --
+     but only for lines of 3 or more letters or digits, and only when 8 in
+     a row (or all of a shorter line) are read back right. A Tu chat line
+     that is just the keyword (pt by default) is therefore taken for
+     somebody asking: after 3 reads it passes the same checks and then
+     GoBot opens the player list and looks for that name. In the live run
+     it did not invite only because it was busy typing: Party: <name>
+     asked while GoBot was busy (auto chat); not invited, in the log.
+     Advice: do not make a Tu chat line the keyword; or keep the keyword
+     invite (Tu moi nguoi chat tu khoa) off, or change its keyword, while
+     such a line runs. Anybody who asks while GoBot is busy is not invited
+     then and is not looked at again for 30 seconds.
+
+  5. Hunting. About 110 fights in 11 minutes, about 1 in 7 given up, no
+     back-steps. With Kieu danh "Nhu truoc" (the shipped setting) a monster
+     still alive 4 seconds after it was picked is given up and one is
+     picked again (usually the same); the log counts them once a minute
+     (Hunter: N fights, ... G given up). A chosen Kieu danh gives up only
+     after 4 seconds out of reach or 15 seconds without the monster's bar
+     going down. Back-steps happen only with Giu khoang cach ticked, which
+     ships off. Nothing to do unless the character stands still or walks
+     away from the monsters: then F12 and report with the time.
+
+  6. Chi moi khi dang lam chu to doi (To doi tab) is not finished. Ticked,
+     GoBot invites from no party only when it is sure you have none: the
+     whole game picture visible (GoBot's window beside the game, taskbar
+     hidden), no game window open, no tooltip over the left side. Some
+     screens can still make a member of a party look alone: a game window
+     or box without an X button over the party panels (for example the
+     shop or the party menu; a question box or a notice) and a window
+     whose X is under a tooltip, both found by laying pictures of the
+     game's own windows over saved screenshots; and the moments just after
+     an invitation is accepted, by GoBot or by hand, before the game draws
+     the party panels, found by reading the code. None has been seen live
+     yet. With such a window up, Thu xem says To doi: mot minh too. The
+     tick Chi khi chua co to doi on Tu chat lines needs the party panels
+     only to look alone, not to be surely alone, so any game window or
+     tooltip over them fools it, not only the screens above. Advice: test
+     with a second character, close every game window at the left first,
+     untick Tu moi nguoi chat tu khoa when you may be in somebody's party,
+     and if an invite goes out while you are a member, F12 and report with
+     the time.
 
 REPORTING A PROBLEM
   Send gobot_gui.log, beside gobot_gui.exe, with the version, the game's
@@ -395,21 +531,28 @@ REPORTING A PROBLEM
   was closed and opened again after the problem -- and older ones are gone.
   The logs can hold the character name that was typed, the names of other
   players GoBot invited to a party (and of those who joined, with "Kem ten
-  nguoi choi khac" ticked on Thong bao), folder paths with the Windows user
-  name, a home network address and the chat lines that were said -- never a
-  password or the webhook. The *_debug folders are screenshots of the game:
-  only on request.
+  nguoi choi khac" ticked on Thong bao) and of players who typed the party
+  keyword, invited or not (the tester's own name too, when a Tu chat line
+  was taken for a request), folder paths with the Windows user name, a
+  home network address and the chat lines that were said -- never a
+  password or the webhook. The *_debug folders (chat_debug, trash_debug,
+  revive_debug, quest_debug, potion_debug, keeper_debug) are screenshots
+  of the game: only on request.
 
 UPDATING
   Unzip a new version into a NEW folder. Copy party.ini (and trash.ini with
   the trash folder) from the old configs folder if wanted -- but a party.ini
-  from an older package has both party switches on: open To doi and untick
-  them before BAT DAU. Do not copy hunt.ini: one from a package before
+  from a package before 15/10/2026 has both party switches on, and any
+  copied party.ini keeps what was ticked: open To doi and look at both
+  switches before BAT DAU. Do not copy hunt.ini: one from a package before
   15/10/2026 may hold another player's character name. Type the name and the
   attack key again on Danh quai; if hunt.ini was copied anyway, check that
-  "Ten nhan vat" there shows the tester's own name. Set the other keys again
-  on the screen rather than copying an older macro.ini, which may have a
-  hidden key sequence switched on.
+  "Ten nhan vat" there shows the tester's own name. A hunt.ini copied anyway
+  keeps its own jump keys, often Space, the game's attack: Danh quai warns
+  ("Phim nhay dang la Space", "Phim nhay khi di toi diem da luu la Space:
+  se danh chu khong nhay"); GoBot never changes the file. Set the other
+  keys again on the screen rather than copying an older macro.ini, which
+  may have a hidden key sequence switched on.
 
 THE DISCORD WEBHOOK
   Kept encrypted for the Windows user in %LOCALAPPDATA%\GoBot, never in this
@@ -417,7 +560,11 @@ THE DISCORD WEBHOOK
 
 WHAT IS IN HERE
   gobot_gui.exe     the app
-  gobot_cli.exe     command-line tools, such as gobot_cli --doctor
+  gobot_cli.exe     command-line tools, such as gobot_cli --doctor; and
+                    look-only checks that press nothing: --potions (the
+                    potion counts it reads on the hotbar), --party-hud (what
+                    it reads of the party), --popups (which notices it
+                    would close)
   configs\          the settings, written by the app as they change
   templates\        the game's own dialogs and buttons, used to recognise them
   bitmap_font\      the game's own glyphs, used to read numbers and names
