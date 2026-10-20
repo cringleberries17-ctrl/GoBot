@@ -1,6 +1,7 @@
 // gobot_test -- "Thử" beside the jump key (gobot/jump_check.hpp): the key
 // pressed exactly once, and what the character's plate did after; and what
-// else the key is already used for.
+// else the key is already used for. And the walker's jump key, hunt.ini's
+// [Move] one: shipped as Up, and said when it would attack.
 //
 // Nothing here goes near the game: the plate is scripted, the keyboard is
 // pretend and writes down every press, and the clock is the test's own.
@@ -9,11 +10,14 @@
 #include "gobot/hotkeys.hpp"
 #include "gobot/jump_check.hpp"
 #include "gobot/mob_detector.hpp"
+#include "gobot/navigator.hpp"
 
 #include <windows.h>
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -218,6 +222,51 @@ void test_jump_advice() {
     check(is(VK_UP, 'Z', JumpCheck::Advice::Clean, ""), "Up with nothing else on it: clean");
 }
 
+/// A file of the test's own, in the temp folder, holding `text`.
+std::string temp_ini(const char* name, const std::string& text) {
+    char dir[MAX_PATH]{};
+    const DWORD n = GetTempPathA(MAX_PATH, dir);
+    const std::string path = (n == 0 || n > MAX_PATH ? std::string() : std::string(dir)) + "gobot_test_" +
+                             std::to_string(GetCurrentProcessId()) + "_" + name;
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+    return path;
+}
+
+void test_walk_key() {
+    section("Phím nhảy khi đi tới điểm đã lưu: hunt.ini [Move] ships Up, and a key that attacks is said");
+    const auto npos = std::string::npos;
+    check(JumpCheck::walk_key_warning_vi(VK_UP, 'Z').empty() && JumpCheck::walk_key_warning_vi(0, 'Z').empty(),
+          "Up, or no key at all: nothing to say");
+    const std::string space = JumpCheck::walk_key_warning_vi(VK_SPACE, 'Z');
+    check(space.find("Space") != npos && space.find("Tấn công") != npos && space.find("jump_key=38") != npos,
+          "Space, the attack key on Z: said, Space being the game's attack -- " + space);
+    const std::string same = JumpCheck::walk_key_warning_vi('Z', 'Z');
+    const std::string both = JumpCheck::walk_key_warning_vi(VK_SPACE, VK_SPACE);
+    check(same.find("trùng phím đánh") != npos && both.find("trùng phím đánh") != npos,
+          "the attack key itself, Z or Space: said as the same key as the attack -- " + same);
+#ifdef GOBOT_SOURCE_DIR
+    NavigatorConfig shipped;
+    check(shipped.load(std::string(GOBOT_SOURCE_DIR) + "/configs/hunt.ini") && shipped.jump_key == VK_UP &&
+              JumpCheck::walk_key_warning_vi(shipped.jump_key, 'Z').empty(),
+          "the shipped hunt.ini: [Move] jump_key=38, Up, the game's jump -- nothing to say");
+#else
+    std::printf("  [skip] no source folder\n");
+#endif
+    // A player's own file from before: Space, kept as it is, and said.
+    const std::string old = temp_ini("walk_old.ini", "[Move]\nleft_key=37\nright_key=39\njump_key=32\n");
+    NavigatorConfig before;
+    check(before.load(old) && before.jump_key == VK_SPACE &&
+              !JumpCheck::walk_key_warning_vi(before.jump_key, 'Z').empty(),
+          "a file of the player's with jump_key=32: read as Space, as it says, and the warning shown");
+    // A file without the key: Space, as every file before said -- and said.
+    const std::string bare = temp_ini("walk_bare.ini", "[Move]\nleft_key=37\n");
+    NavigatorConfig none;
+    check(none.load(bare) && none.jump_key == VK_SPACE && !JumpCheck::walk_key_warning_vi(none.jump_key, 'Z').empty(),
+          "a file without the key: Space, as before, and the warning shown");
+    DeleteFileA(old.c_str());
+    DeleteFileA(bare.c_str());
+}
+
 } // namespace
 
 void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -225,4 +274,5 @@ void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(co
     g_section = section_fn;
     test_jump_check();
     test_jump_advice();
+    test_walk_key();
 }

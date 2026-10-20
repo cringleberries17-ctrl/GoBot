@@ -1861,6 +1861,9 @@ void GuiApp::simple_trash_tab() {
             put(kTabKeys[t], simple_clean_.tabs[t] ? "true" : "false");
         ImGui::PopID();
     }
+    // "Dùng" for the fragments on the Dùng list: its own switch, off as
+    // shipped (simple_trash_use.cpp).
+    simple_use_switch(put);
     end_card();
 
     // ---- what, chosen beforehand ----

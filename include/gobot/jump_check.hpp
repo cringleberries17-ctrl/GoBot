@@ -117,6 +117,14 @@ public:
     static KeyAdvice advice(std::uint32_t jump, std::uint32_t attack_key,
                             const std::vector<NamedKey>& others);
 
+    /// The walker's jump key, [Move] jump_key in hunt.ini: what it presses to
+    /// get up to a saved place above it ("Go", "Patrol these"). No box sets
+    /// it, so it is only said: a warning in Vietnamese when it is the attack
+    /// key -- `attack_key`, the hunter's, or Space, the game's own attack --
+    /// which pressed to jump attacks instead; empty when it is not. hunt.ini
+    /// ships it as Up, the game's jump; a player's own file is never changed.
+    static std::string walk_key_warning_vi(std::uint32_t walk_jump, std::uint32_t attack_key);
+
 private:
     std::uint64_t clock_now() const;
     void          pause(std::uint32_t ms) const;

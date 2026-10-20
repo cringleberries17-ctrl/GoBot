@@ -193,6 +193,9 @@ bool PopupEyes::close_button_in(const Frame& f, const ScreenRect& area, int& x, 
 }
 
 bool PopupEyes::book_title_in(const Frame& f, const ScreenRect& area) const {
+    // The live client's book by its first tab, where a book with that window
+    // has it (bag::find_book).
+    if (store_ != nullptr && bag::find_book(f, *store_, &area).found) return true;
     if (!book_key_.valid()) return false;
     const ScreenRect a = clamp_to(f, area);
     return a.w >= book_key_.width && a.h >= book_key_.height &&
@@ -235,9 +238,34 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
         }
     }
 
+    // The monster book as the live client draws it, by its first tab and its
+    // X where the tab puts it (bag::find_book): the page a fragment's
+    // right-click opens it on is a monster's, which GoC's picture below is
+    // not, and the tab is on every page. Round `only_at`, where it was a
+    // moment ago, when given. With its X it is the book, and that is that;
+    // without, GoC's picture of the first page is looked for as well, which
+    // looks for its X round its top-right corner -- and failing that it is
+    // the book without its X.
+    const bag::Book live = store_ != nullptr ? bag::find_book(f, *store_, only_at) : bag::Book{};
+    const auto add_live = [&] {
+        PopupSeen p;
+        p.kind = PopupKind::MonsterBook;
+        p.at = live.window;
+        p.score = live.score;
+        p.control = live.has_x;
+        p.x = live.x.cx();
+        p.y = live.x.cy();
+        out.push_back(p);
+    };
+    bool book_seen = false;
+    if (live.found && live.has_x) {
+        add_live();
+        book_seen = true;
+    }
+
     // The monster book, by GoC's picture of it: its title box anywhere, then
-    // the whole picture where that puts it. Its X is not measured yet: looked
-    // for round the top-right corner of where the whole picture sits.
+    // the whole picture where that puts it. Its X is looked for round the
+    // top-right corner of where the whole picture sits.
     const auto book_at = [&]() {
         TemplateMatcher::Match none;
         if (!book_.valid() || !book_key_.valid()) return none;
@@ -250,7 +278,7 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
         if (around.w < book_.width || around.h < book_.height) return none;
         return TemplateMatcher::find(f, around, book_, kBookScore);
     };
-    {
+    if (!book_seen) {
         const auto m = book_at();
         if (m.found) {
             PopupSeen p;
@@ -262,8 +290,10 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
                                                        2 * kBookXSlack, 2 * kBookXSlack },
                                         p.x, p.y);
             out.push_back(p);
+            book_seen = true;
         }
     }
+    if (!book_seen && live.found) add_live();
 
     // The ESC menu, and its X where the live client draws it.
     if (with_menu && menu_.valid()) {

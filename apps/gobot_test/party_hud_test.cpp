@@ -15,6 +15,7 @@
 
 #include "gobot/party_hud.hpp"
 #include "gobot/auto_login.hpp"
+#include "gobot/bag.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/screen_capture.hpp"
@@ -708,8 +709,53 @@ void test_bag_over() {
     }
 }
 
+/// Where the cuts of the live frames are (round 7: the HUD's tooltip, the ESC
+/// menu): beside this test, else the copy handed over with them.
+std::string live_cuts_dir() {
+    for (const std::string& d : { exe_relative("testdata\\round7"),
+                                  std::string(kLiveBuild) + "handoff\\round7\\coder\\testdata" })
+        if (!files_in(d, "*.png").empty()) return d;
+    return {};
+}
+
+/// The cut `what` of a live frame (<what>_<x>_<y>.png), as a picture.
+Frame live_cut(const std::string& what) {
+    Frame f;
+    const std::string dir = live_cuts_dir();
+    if (dir.empty()) return f;
+    for (const std::string& name : files_in(dir, what + "_*.png"))
+        if (load_png(dir + "\\" + name, f)) break;
+    return f;
+}
+
+/// A window of the game over `body` of `f`: a busy ground -- no one colour,
+/// no tooltip's border, nothing like a member's panel -- and the client's
+/// close button `x` at its top-right corner, where the game puts one. Where
+/// that button is.
+ScreenRect game_window(Frame& f, const ScreenRect& body, const Frame& x) {
+    for (int y = body.y; y < body.bottom(); ++y)
+        for (int px = body.x; px < body.right(); ++px) {
+            const int dx = px - body.x, dy = y - body.y;
+            fill(f, px, y, 1, 1, static_cast<std::uint8_t>(60 + (dx * 7 + dy * 3) % 90),
+                 static_cast<std::uint8_t>(50 + (dx * 3 + dy * 11) % 70), static_cast<std::uint8_t>(40 + (dx * dy) % 60));
+        }
+    const ScreenRect at{ body.right() - x.width - 6, body.y + 6, x.width, x.height };
+    blit(f, x, at.x, at.y);
+    return at;
+}
+
+/// Another program's window over `r` of `f` -- GoBot's own, or a browser --
+/// as a frame read off the screen has it: a dark ground, rows of light text,
+/// a few blue rules.
+void other_program(Frame& f, const ScreenRect& r) {
+    fill(f, r.x, r.y, r.w, r.h, 37, 37, 38);
+    for (int y = r.y + 20; y < r.bottom(); y += 22) fill(f, r.x + 12, y, std::max(0, r.w - 40), 9, 200, 200, 200);
+    for (int y = r.y + 10; y < r.bottom(); y += 66) fill(f, r.x + 8, y, std::max(0, r.w - 16), 2, 66, 150, 250);
+}
+
 void test_party_under_window() {
-    section("Party HUD: a party under a window reads as alone, so alone never invites with the tick (R5-1)");
+    section("Party HUD: a party under a window reads as alone, but never surely, so it never invites with the "
+            "tick (R5-1)");
     if (skip_without_kit()) return;
     const Kit& k = kit();
     Frame live;
@@ -718,24 +764,98 @@ void test_party_under_window() {
         return;
     }
     {
-        // The live party of two, another member leading, with a window that
-        // is not the bag -- one of the game's own, or its tooltip -- over the
-        // leader's panel from the screen's left edge, crown and all. Nothing
-        // of the party shows, and no tab strip says a bag hides it: it reads
-        // as a player alone does.
+        // The live party of two, another member leading, with something
+        // plain over the leader's panel from the screen's left edge, crown
+        // and all. Nothing of the party shows, and no tab strip says a bag
+        // hides it: it reads as a player alone does -- but not surely.
         Frame f = live;
         fill(f, 0, 100, 150, 55, 200, 200, 210);
         const PartyHud h = k.reader.read(f);
-        check(h.state == PartyState::Alone && h.panels.empty() && !h.own_leader,
-              "the live party, a window over the leader's panel and its crown: alone -- " + said(h));
-        // So alone is no proof that the player could lead: with the tick,
-        // nobody is invited, and the tab and the log say why; without it,
-        // invited as before.
+        check(h.state == PartyState::Alone && h.panels.empty() && !h.own_leader && !h.sure_alone &&
+                  h.alone_doubt_vi == party_text::kDoubtPlain,
+              "the live party, something plain over the leader's panel and its crown: alone, not surely -- " +
+                  said(h));
+        // So with the tick nobody is invited, and the tab and the log say
+        // why; without it, invited as before.
         const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
-        check(!ticked.allowed && ticked.reason_vi == party_text::kAloneNoCrown &&
-                  ticked.reason_en.find("hidden") != std::string::npos && plain.allowed,
+        check(!ticked.allowed && ticked.reason_vi.rfind(party_text::kAloneUnsure, 0) == 0 &&
+                  ticked.reason_en.find("not surely") != std::string::npos && plain.allowed,
               "and with the tick, not invited: \"" + ticked.reason_vi + "\" (" + ticked.reason_en +
                   "); without it, invited");
+    }
+    // The game's own tooltip (the live client's, cut from a saved frame) and
+    // one of its windows (the live ESC menu, its X with it) laid over the
+    // leader's panel from the left edge, as R5-1 found them: alone, never
+    // surely, never invited with the tick.
+    const Frame tip = live_cut("tooltip"), menu = live_cut("esc_menu");
+    if (tip.valid() && menu.valid()) {
+        // The tooltip's own box starts 4 pixels into its cut.
+        for (const int dx : { 0, 5, 10 }) {
+            Frame f = live;
+            blit(f, tip, dx - 4, 66);
+            const PartyHud h = k.reader.read(f);
+            const PartyGate g = party_invite_gate(h, true);
+            check(!g.allowed && !h.sure_alone &&
+                      (h.state != PartyState::Alone || h.alone_doubt_vi == party_text::kDoubtTooltip),
+                  fmt("the live tooltip from x=%d over the leader's panel: ", dx) + said(h) + " -- not invited");
+        }
+        Frame f = live;
+        blit(f, menu, 0, 92);
+        const PartyHud h = k.reader.read(f);
+        check(!party_invite_gate(h, true).allowed && !h.sure_alone &&
+                  (h.state != PartyState::Alone || h.alone_doubt_vi == party_text::kDoubtWindow),
+              "the live ESC menu over the leader's panel: " + said(h) + " -- not invited");
+    } else {
+        std::printf("  [skip] no cuts of the live tooltip and ESC menu here (testdata\\round7)\n");
+    }
+    if (const Frame* x = k.pictures.get(bag::kCloseButtons[0])) {
+        // A window of the game as wide as the quest window over the leader's
+        // panel, its X at its top right -- far right of the part the party is
+        // read from (kArea) -- and another program's window over the right of
+        // the game, the X under it, as the round 7 review found it: the frame
+        // read off the screen has no X on it, and the panels' part of the
+        // game is all in view, so the frame is trusted.
+        Frame f = live;
+        const ScreenRect at = game_window(f, ScreenRect{ 0, 90, 700, 420 }, *x);
+        const PartyHud seen = k.reader.read(f);
+        check(at.x >= PartyHudReader::kArea.right() && seen.state == PartyState::Alone && !seen.sure_alone &&
+                  seen.alone_doubt_vi == party_text::kDoubtWindow && !party_invite_gate(seen, true).allowed,
+              fmt("the live party under a window of the game, its X at %d,%d: alone, not surely, not invited -- ",
+                  at.x, at.y) + said(seen));
+        other_program(f, ScreenRect{ 400, 0, f.width - 400, f.height });
+        // By its pixels alone it now looks like a player alone with nothing
+        // open: only the capture can tell that part of it is not the game.
+        const PartyHud by_pixels = k.reader.read(f, true, true);
+        check(by_pixels.state == PartyState::Alone && by_pixels.sure_alone,
+              "and another program over x>=400, the X under it: by its pixels alone, surely alone -- " +
+                  said(by_pixels));
+        const PartyHud h = k.reader.read(f, true, false);
+        const PartyGate ticked = party_invite_gate(h, true), plain = party_invite_gate(h, false);
+        check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtHidden &&
+                  !ticked.allowed &&
+                  ticked.reason_vi == std::string(party_text::kAloneUnsure) + " (" + party_text::kDoubtHidden + ")" &&
+                  plain.allowed,
+              "so, read as the capture has it, part of the game not seen: alone, not surely, and with the tick "
+              "not invited: \"" + ticked.reason_vi + "\" (" + ticked.reason_en + "); without it, invited");
+    } else {
+        std::printf("  [skip] no picture of the client's close button here\n");
+    }
+    // A window wearing the close box over the panels, the pointer resting on
+    // its X, or the button held down on it: the X drawn in that state, which
+    // the drawing at rest misses, is a window open all the same.
+    for (const char* name : { "inven/1/btn_CloseBox.spr/1", "inven/1/btn_CloseBox.spr/2" }) {
+        const Frame* x = k.pictures.get(name);
+        if (x == nullptr) {
+            check(false, std::string(name) + " is among the pictures the reader loads");
+            continue;
+        }
+        Frame f = live;
+        const ScreenRect at = game_window(f, ScreenRect{ 0, 90, 300, 310 }, *x);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtWindow &&
+                  !party_invite_gate(h, true).allowed,
+              std::string("the live party under a window wearing ") + name +
+                  fmt(" at %d,%d: alone, not surely, not invited -- ", at.x, at.y) + said(h));
     }
     {
         // The same window from twenty pixels in, the crown left showing: the
@@ -866,6 +986,15 @@ void test_trust() {
     check(!AutoLogin::part_seen(w, ScreenRect{ 500, 600, 50, 50 }) &&
               !AutoLogin::part_seen(nullptr, PartyHudReader::kArea),
           "a part outside the window, or no window: not seen");
+    // All of it, for telling alone for sure: the same answers, and the frame
+    // the game drew itself is whole whatever lies over the window.
+    const Frame f = plain_frame(400, 500);
+    std::string hides;
+    const bool whole = party_frame_whole(true, w, f, &hides);
+    check(!whole && hides == "off the screen" && party_frame_whole(false, w, f) &&
+              !party_frame_whole(true, nullptr, f) && party_frame_whole(false, nullptr, f),
+          "the whole of a frame of it off the screen: not the game's own (" + hides +
+              "); one it drew itself: the game's own");
     DestroyWindow(w);
 }
 
@@ -971,7 +1100,8 @@ void test_real_frames() {
     }
     frames.push_back(std::string(kLiveBuild) + "bin\\Release\\frame.png");
     frames.push_back(std::string(kLiveBuild) + "bin\\Release\\playerlist.png");
-    int looked = 0, alone = 0, unknown = 0, party = 0, crowned = 0;
+    int looked = 0, alone = 0, sure = 0, by_window = 0, by_tooltip = 0, by_plain = 0, unknown = 0, party = 0,
+        crowned = 0;
     std::string first_party;
     for (std::size_t i = 0; i < frames.size(); ++i) {
         if (!every && i % 8 != 0 && i + 2 < frames.size()) continue;
@@ -981,9 +1111,15 @@ void test_real_frames() {
         ++looked;
         const PartyHud h = k.reader.read(f);
         if (h.own_crown >= PartyHudReader::kCrownScore) ++crowned;
-        if (h.state == PartyState::Alone) ++alone;
-        else if (h.state == PartyState::Unknown) ++unknown;
-        else {
+        if (h.state == PartyState::Alone) {
+            ++alone;
+            sure += h.sure_alone ? 1 : 0;
+            by_window += h.alone_doubt_vi == party_text::kDoubtWindow ? 1 : 0;
+            by_tooltip += h.alone_doubt_vi == party_text::kDoubtTooltip ? 1 : 0;
+            by_plain += h.alone_doubt_vi == party_text::kDoubtPlain ? 1 : 0;
+        } else if (h.state == PartyState::Unknown) {
+            ++unknown;
+        } else {
             ++party;
             if (first_party.empty()) first_party = frames[i] + ": " + said(h);
         }
@@ -1000,13 +1136,28 @@ void test_real_frames() {
               std::to_string(unknown) + " unknown, " + std::to_string(party) + " read as a party, " +
               std::to_string(crowned) + " with the own crown" +
               (first_party.empty() ? std::string() : " -- first: " + first_party));
+    // Of those alone, how many surely: the rest each with what may be over
+    // the panels. Every one is one or the other.
+    check(sure + by_window + by_tooltip + by_plain == alone,
+          fmt("of the %d alone: %d surely; not surely, %d with a window open, %d with a tooltip over the panels, "
+              "%d with something plain over the first member's place",
+              alone, sure, by_window, by_tooltip, by_plain));
 }
 
 void test_gate() {
-    section("Party HUD: an invite only when it can work (PH-A5), with the tick by the crown");
-    PartyHud alone, member, leader, in_party, unknown, full_lead, full_member, full_in_party;
+    section("Party HUD: an invite only when it can work (PH-A5), with the tick by the crown, or surely alone");
+    PartyHud alone, sure_alone, window_alone, hidden_alone, member, leader, in_party, unknown, full_lead, full_member,
+        full_in_party;
     alone.state = PartyState::Alone;
     alone.size = 1;
+    sure_alone = alone;
+    sure_alone.sure_alone = true;
+    window_alone = alone;
+    window_alone.alone_doubt = "a window of the game is open";
+    window_alone.alone_doubt_vi = party_text::kDoubtWindow;
+    hidden_alone = alone;
+    hidden_alone.alone_doubt = "part of the game's picture is under another window";
+    hidden_alone.alone_doubt_vi = party_text::kDoubtHidden;
     member.state = PartyState::Member;
     member.size = 3;
     leader.state = PartyState::Leader;
@@ -1032,10 +1183,17 @@ void test_gate() {
         bool            on;             ///< with the tick on
         const char*     on_vi;
     };
-    // Alone, ticked, is not invited: no crown is seen at all, and alone is
-    // what a party under a window looks like too (the round 5 review's R5-1).
+    // Alone, ticked, is invited only when surely alone -- an invite then
+    // starts a party, as GoC's does (the player's decision of 2026-10-19).
+    // Alone and not surely is what a party under a window looks like too
+    // (the round 5 review's R5-1): not invited.
+    const std::string window_vi = std::string(party_text::kAloneUnsure) + " (" + party_text::kDoubtWindow + ")";
+    const std::string hidden_vi = std::string(party_text::kAloneUnsure) + " (" + party_text::kDoubtHidden + ")";
     const Row rows[] = {
-        { "alone", &alone, true, "", false, party_text::kAloneNoCrown },
+        { "alone, surely", &sure_alone, true, "", true, "" },
+        { "alone, not surely", &alone, true, "", false, party_text::kAloneUnsure },
+        { "alone, a window open", &window_alone, true, "", false, window_vi.c_str() },
+        { "alone, part of the game not seen", &hidden_alone, true, "", false, hidden_vi.c_str() },
         { "leading, the own crown seen", &leader, true, "", true, "" },
         { "a member, another's crown seen", &member, true, "", false, party_text::kNotLeader },
         { "in a party, no crown seen", &in_party, true, "", false, party_text::kNoCrown },
@@ -1055,16 +1213,15 @@ void test_gate() {
         }
     check(party_invite_gate(unknown, true).reason_en.find("not on screen") != std::string::npos,
           "the HUD not read, ticked: the log says why it was not read");
-    const PartyGate alone_ticked = party_invite_gate(alone, true);
-    check(alone_ticked.reason_en == "no crown is seen (alone, or the party's panels are hidden)",
-          "alone, ticked: the log says \"" + alone_ticked.reason_en + "\"");
+    const PartyGate alone_ticked = party_invite_gate(window_alone, true);
+    check(alone_ticked.reason_en == "read as alone, but not surely: a window of the game is open",
+          "alone with a window open, ticked: the log says \"" + alone_ticked.reason_en + "\"");
     check(std::string(party_text::kNotLeader) == "Đang trong tổ đội nhưng không phải chủ tổ đội" &&
               std::string(party_text::kNoCrown) ==
                   "Đang trong tổ đội nhưng không thấy vương miện chủ tổ đội ở ô nào" &&
               std::string(party_text::kUnreadNoCrown) ==
                   "Không đọc được khung tổ đội nên không thấy vương miện của bạn" &&
-              std::string(party_text::kAloneNoCrown) ==
-                  "Không thấy vương miện chủ tổ đội của bạn (chưa có tổ đội, hoặc khung tổ đội bị che)",
+              std::string(party_text::kAloneUnsure) == "Có vẻ chưa có tổ đội, nhưng chưa chắc",
           "the tab's words for each");
     check(party_hud_line_vi(unknown) == "Tổ đội: không đọc được" && party_hud_line_vi(alone) == "Tổ đội: một mình",
           "the state card: \"" + party_hud_line_vi(unknown) + "\", \"" + party_hud_line_vi(alone) + "\"");
@@ -1078,8 +1235,8 @@ void test_worker_step() {
     // the gate on the frame it already has, and only then the player list
     // and the invite -- which here only count.
     int opened = 0, invited = 0;
-    const auto step = [&](const Frame& f, bool always_leader, bool trusted = true) {
-        const PartyGate g = party_invite_gate(k.reader.read(f, trusted), always_leader);
+    const auto step = [&](const Frame& f, bool always_leader, bool trusted = true, bool whole = true) {
+        const PartyGate g = party_invite_gate(k.reader.read(f, trusted, whole), always_leader);
         if (!g.allowed) return g.reason_en;
         ++opened;           // the player list's ensure_open
         ++invited;          // its invite
@@ -1101,9 +1258,18 @@ void test_worker_step() {
     check(opened == 0 && invited == 0, "in a party with no crown seen, the tick on: still nothing");
     step(k.frame, true, false);
     check(opened == 0 && invited == 0, "the HUD not read, the tick on: still nothing");
-    const std::string alone_why = step(k.frame, true);
-    check(opened == 0 && invited == 0 && !alone_why.empty(),
-          "alone, the tick on: still nothing, no crown being seen -- " + alone_why);
+    // Alone with a window of the game open -- a close button anywhere: not
+    // surely alone, so not with the tick.
+    Frame window_open = k.frame;
+    if (const Frame* x = k.pictures.get(bag::kCloseButtons[0])) blit(window_open, *x, 900, 200);
+    const std::string alone_why = step(window_open, true);
+    check(opened == 0 && invited == 0 && alone_why.find("not surely") != std::string::npos,
+          "alone, a window open somewhere, the tick on: still nothing -- " + alone_why);
+    // Alone with nothing open on the frame, but part of the game under
+    // another program's window: not surely alone either.
+    const std::string hidden_why = step(k.frame, true, true, false);
+    check(opened == 0 && invited == 0 && hidden_why.find("not surely") != std::string::npos,
+          "alone, part of the game not seen, the tick on: still nothing -- " + hidden_why);
     step(member, false);
     check(opened == 1 && invited == 1, "a member with the tick off: the list opened and the invite sent, as today");
     step(k.frame, false);
@@ -1115,6 +1281,152 @@ void test_worker_step() {
     check(opened == 3 && invited == 3, "leading, the own crown seen, the tick on: invited");
     step(k.frame, false, false);
     check(opened == 4 && invited == 4, "the HUD not read, the tick off: invited, as before");
+    // Surely alone -- frame.png as it is, nothing open over the game -- with
+    // the tick: invited, to start a party, as GoC does.
+    const std::string sure_why = step(k.frame, true);
+    check(opened == 5 && invited == 5 && sure_why.empty(),
+          "surely alone, the tick on: the list opened and the invite sent, to start a party");
+}
+
+void test_sure_alone() {
+    section("Party HUD: alone, and surely so -- no window, no tooltip, nothing plain over the panels "
+            "(the player's decision of 2026-10-19)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    {
+        const PartyHud h = k.reader.read(k.frame);
+        check(h.state == PartyState::Alone && h.sure_alone && party_invite_gate(h, true).allowed,
+              "frame.png, nothing over the game: surely alone, invited with the tick -- " + said(h));
+    }
+    Frame small;
+    if (load_png(std::string(kLiveBuild) + "bin\\Release\\playerlist.png", small) && small.width == 1024) {
+        // A clear sky where the first member's panel would be: plain enough
+        // to look twice at, not plain enough to be a window.
+        const PartyHud h = k.reader.read(small);
+        check(h.state == PartyState::Alone && h.sure_alone, "playerlist.png, 1024x768, a clear sky under the "
+                                                            "HUD: surely alone -- " + said(h));
+    }
+    if (k.pictures.get(bag::kCloseButtons[0]) == nullptr) {
+        std::printf("  [skip] no pictures of the game's close buttons here\n");
+        return;
+    }
+    {
+        // Part of the game not seen -- read off the screen with another
+        // program's window over some of it, or past the screen's edge: what
+        // is there could be the X of a window over the panels.
+        const PartyHud h = k.reader.read(k.frame, true, false);
+        const PartyGate g = party_invite_gate(h, true);
+        check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtHidden &&
+                  !g.allowed && g.reason_vi == std::string(party_text::kAloneUnsure) + " (" +
+                                                   party_text::kDoubtHidden + ")" &&
+                  party_invite_gate(h, false).allowed,
+              "frame.png, part of the game not seen: alone, not surely -- \"" + g.reason_vi + "\" (" + g.reason_en +
+                  "); the tick off: invited, as before");
+    }
+    {
+        // A close button anywhere -- here the bag's own, from the client's
+        // pictures, far from the panels: a window is open, and could be
+        // over them.
+        Frame f = k.frame;
+        blit(f, *k.pictures.get(bag::kCloseButtons[0]), 1100, 600);
+        const PartyHud h = k.reader.read(f);
+        const PartyGate g = party_invite_gate(h, true);
+        check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtWindow &&
+                  !g.allowed && g.reason_vi == std::string(party_text::kAloneUnsure) + " (" +
+                                                   party_text::kDoubtWindow + ")",
+              "a close button at 1100,600: alone, not surely -- \"" + g.reason_vi + "\"");
+    }
+    {
+        // The client's close buttons as it draws them under the pointer and
+        // held down: a window over the panels with the pointer resting on
+        // its X. The box's X then scores under kWindowXScore against its
+        // drawing at rest, so each state is looked for by its own picture.
+        for (const char* name : kCloseButtonStates) {
+            const Frame* x = k.pictures.get(name);
+            if (x == nullptr) {
+                check(false, std::string(name) + " is among the pictures the reader loads");
+                continue;
+            }
+            std::string rest_name = name;
+            rest_name.back() = '0';
+            const Frame* rest = k.pictures.get(rest_name);
+            Frame f = k.frame;
+            blit(f, *x, 900, 200);
+            const float vs_rest =
+                rest != nullptr
+                    ? TemplateMatcher::find(f, ScreenRect{ 890, 190, x->width + 20, x->height + 20 }, *rest, -1.0f).score
+                    : -1.0f;
+            const PartyHud h = k.reader.read(f);
+            check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtWindow &&
+                      !party_invite_gate(h, true).allowed,
+                  std::string(name) + fmt(" at 900,200 (its drawing at rest scores %.3f on it): alone, not surely -- ",
+                                          static_cast<double>(vs_rest)) +
+                      said(h));
+        }
+    }
+    {
+        // Something of one colour over the first member's place.
+        Frame f = k.frame;
+        const ScreenRect& slot = PartyHudReader::kFirstSlot;
+        fill(f, slot.x, slot.y, slot.w, slot.h, 90, 90, 100);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtPlain,
+              "one plain colour over the first member's place: alone, not surely -- " + said(h));
+    }
+    const Frame tip = live_cut("tooltip");
+    if (tip.valid()) {
+        // The game's tooltip over the panels' column, where the live client
+        // drew it -- and the same nearer the left edge.
+        for (const int x : { 16, 0 }) {
+            Frame f = k.frame;
+            blit(f, tip, x, 66);
+            const PartyHud h = k.reader.read(f);
+            ScreenRect at;
+            const bool edge = PartyHudReader::tooltip_edge(f, PartyHudReader::kTooltipArea, &at);
+            check(h.state == PartyState::Alone && !h.sure_alone && h.alone_doubt_vi == party_text::kDoubtTooltip &&
+                      edge,
+                  fmt("the live tooltip at %d,66: alone, not surely -- its edge at %d,%d -- ", x, at.x, at.y) +
+                      said(h));
+        }
+        // And nowhere near the panels: no doubt from it.
+        Frame f = k.frame;
+        blit(f, tip, 700, 300);
+        const PartyHud h = k.reader.read(f);
+        check(h.state == PartyState::Alone && h.sure_alone, "the same tooltip at 700,300, nowhere near the panels: "
+                                                            "surely alone -- " + said(h));
+    } else {
+        std::printf("  [skip] no cut of the live tooltip here (testdata\\round7)\n");
+    }
+    {
+        // Without the close buttons' pictures no window can be ruled out.
+        TemplateStore pictures = k.pictures;
+        TemplateStore without;
+        for (const std::string& name : pictures.names()) {
+            bool close = false;
+            for (const char* x : bag::kCloseButtons) close = close || name == x;
+            if (!close) without.put(name, *pictures.get(name));
+        }
+        PartyHudReader reader;
+        const bool loaded = reader.load(without);
+        const PartyHud h = reader.read(k.frame);
+        check(loaded && h.state == PartyState::Alone && !h.sure_alone &&
+                  h.alone_doubt_vi == party_text::kDoubtNoPictures && !party_invite_gate(h, true).allowed,
+              "without the close buttons' pictures: alone, never surely -- " + said(h));
+        // Nor with all but one: the box's X under the pointer, not looked
+        // for, is a window that may be open.
+        TemplateStore all_but_one;
+        for (const std::string& name : pictures.names())
+            if (name != "inven/1/btn_CloseBox.spr/1") all_but_one.put(name, *pictures.get(name));
+        PartyHudReader short_one;
+        const bool loaded_short = short_one.load(all_but_one);
+        const PartyHud s = short_one.read(k.frame);
+        check(loaded_short && s.state == PartyState::Alone && !s.sure_alone &&
+                  s.alone_doubt_vi == party_text::kDoubtNoPictures,
+              "nor without the picture of the box's X under the pointer alone -- " + said(s));
+    }
+    // The four live party frames are never alone at all, and a member whose
+    // leader's panel is under the bag is no reading: see test_party_under_window
+    // and test_bag_over for the rest.
 }
 
 void test_panel_picture() {
@@ -1147,6 +1459,7 @@ void test_party_hud(void (*check_fn)(bool, const std::string&), void (*section_f
     test_leader_unread();
     test_bag_over();
     test_party_under_window();
+    test_sure_alone();
     test_own_crown_under_slot();
     test_trust();
     test_gate();

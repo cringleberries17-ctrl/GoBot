@@ -617,7 +617,13 @@ The files keep the order of the frames but no times. A time below ("t = 20") is
 seconds into the run: the server sends a tick once a second (`0x03C6`), and the
 client's UDP frames are placed against it through the skill casts, each of which
 costs MP the moment it lands. That is good to about a second. The player noted
-no HUD figures, so nothing here has been compared with the screen yet.
+no HUD figures during the recordings. Since then the HUD has been read off the
+live client's own frames (2026-10-19, `build\live\shots\fragq_A_085.png`, HP
+and MP full): Level 162, HP 9232/9232, MP 8902/8902. The two maxima are the
+packets' (*HP and MP*, below); the level is not the candidate this section
+first named, 88 (*Fury, level and EXP*). The HUD reads Level 162 on the saved
+live frames of 2026-10-09 and 2026-10-16 as well, so the character was level
+162 when these recordings were made.
 
 The BA worked these results out of the bytes, and a skeptic then re-derived each
 claim with separate scripts. Only what held up is written here, in the skeptic's
@@ -641,9 +647,9 @@ recordings unpack (below). The live capture does not unpack them yet.
 | Value | Result | Where it is | Type |
 |---|---|---|---|
 | Own position | **Found** | Client → server over UDP, plain: `0x0027` (x, y at bytes 16, 20), `0x002A` (20, 24), `0x0029` (24, 28), `0x0028` (20, 24), and every skill cast `0x0031` (16, 18). An absolute fix at every map entry: server → client `0x0086` (20, 22). | f32 world pixels; u16 in `0x0031` and `0x0086` |
-| HP and MP | **Found** | Server → client over TCP, inside `0x0081`: `0x0051` (HP at 12, MP at 16) and `0x0050` (max HP at 68, max MP at 76). MP also over server UDP, plain: `0x02F0` (MP at 12). | u32 |
+| HP and MP | **Found** | Server → client over TCP, inside `0x0081`: `0x0051` (HP at 12, MP at 16) and `0x0050` (max HP at 68, max MP at 76). MP also over server UDP, plain: `0x02F0` (MP at 12). The maxima, 9232 and 8902, are the HUD's own 9232/9232 and 8902/8902. | u32 |
 | Fury | **Candidate** | `0x0051` bytes 20 and 22: 3600 and 3600, never changed | u16 pair |
-| Level and EXP | Level: **candidate**, 88 at `0x001E` byte 408. EXP: **not found** | inside `0x0081` | u32 |
+| Level and EXP | Level: **not found**. The HUD reads Level 162, so the 88 at `0x001E` byte 408, once the candidate, is not the level. EXP: **not found** | inside `0x0081` | u32 |
 | Avatar time | **Two candidates**, not told apart: `0x0244` byte 24 (about 20 minutes left) and `0x01BD` byte 16 (about 20 hours left) | plain TCP | u32 seconds |
 | Pet HP | **Not found** | — | — |
 
@@ -880,7 +886,8 @@ more with a chance of about 6 in a million (counted exactly over every order).
 MP never went above 8902 and HP never above 9232, and the three `0x0050` repeat
 the `0x0051` values of the same moment. MP is proven by the casts. HP is the
 other pool by elimination and by GoC's own order for the game state (HP, MP,
-fury). **Check max HP 9232 and max MP 8902 once on the HUD.**
+fury). **Checked on the HUD (2026-10-19):** with both full it reads 9232/9232
+and 8902/8902 (`build\live\shots\fragq_A_085.png`), the maxima here.
 
 What the fight did to them, which is not what the plan expected:
 
@@ -904,19 +911,23 @@ it: it is the third pool after HP and MP, GoC's own order, and 3600 = 30 × 120
 fits GoC's fury rule (SP ≥ (n + 10) × 120). Against it: no fury was used, so any
 resource sitting at its maximum would look the same.
 
-**Level: a candidate. EXP: not found.** 88 is a u32 at byte 408 of your record
+**Level: not found. EXP: not found.** 88 is a u32 at byte 408 of your record
 `0x001E` (inside `0x0081`, 416 bytes unpacked, one per map load; 7 of 7) and at
 byte 196 of `0x0050`, and at no other aligned place in shop or fight (§4f).
-That is odd for a level, which other players can normally see: the same
-`0x001E` field reads `0xFFFFFFFF` in another player's record. For
+It was this section's level candidate, but it is not the level: the HUD reads
+Level 162 (2026-10-19, and on the saved frames of 2026-10-09 and 2026-10-16),
+so what the 88 is stays open. It was odd for a level from the start, which
+other players can normally see: the same `0x001E` field reads `0xFFFFFFFF` in
+another player's record. The level is a field of 162 that these notes have not
+found yet; the next search looks for that value. For
 EXP, three u32 at bytes 160, 164 and 168 of `0x001E` (and 1512, 1516 and 1520 of
 the snapshot `0x0065`) read 616, 179,986 and 885,300. 179,986 is 20.3% of
 885,300, the shape of "EXP and EXP to the next level"; but they never changed
 across 7 records and 5 snapshots spanning about 122 kills, and another player's
 record holds 100, 100 and 0 there, which does not fit. Nor does the game's own
-EXP table (`zVietnam\Chart\tb_Exp.tbl` in its install folder): it gives
-21,653,866 for level 88 and has no row of 885,300 or 179,986, so the triple is
-not "EXP and EXP to the next level" for a level-88 character (§4f). Searched:
+EXP table (`zVietnam\Chart\tb_Exp.tbl` in its install folder), which has no row
+of 885,300 or 179,986 at any of its levels, so the triple is not "EXP and EXP
+to the next level" (§4f). Searched:
 every changing u16 and u32 field of every server frame type in the fight,
 wrapped ones unpacked. What moves is counters, gold, bag counts, timers and
 positions. The three per-kill counters are tested in §4f, and none is EXP:
@@ -924,8 +935,8 @@ positions. The three per-kill counters are tested in §4f, and none is EXP:
 (29 to 392); `0x03A0` at 460 counts the kills of one type only (+1 each, 362 to
 423); and `0x0065` u16 at 398 reads 798, 804, 805, 806 and 812 in snapshots
 taken after 3, 5, 18, 63 and 112 kills, not one step per kill. Either the fight
-earned no EXP (a level cap, or monsters far below the character), or EXP
-travels in a frame these recordings do not hold.
+earned no EXP (a level cap, or monsters far below the character: levels 39 and
+44 to its 162), or EXP travels in a frame these recordings do not hold.
 
 **Avatar time: two candidates.** Two exact countdowns in seconds, both falling
 one second per second of clock:
@@ -1088,8 +1099,10 @@ wrong:
 ### What the next recording needs
 
 Each candidate needs the HUD read at a known second. The next recording should
-note, with the clock time of each reading: HP and MP (to check 9232 and 8902),
-fury, level, EXP percent and the avatar time left. It should include one fury
+note, with the clock time of each reading: fury, EXP percent and the avatar
+time left. HP and MP need no more checking (the maxima are the HUD's own), and
+the level is known, 162: what is wanted is the field that holds it, so 162 is
+the value to look for. It should include one fury
 use, one kill that gives EXP (or a level-up), the avatar put on or renewed, the
 pet hurt and then killed, and the character hit by a stronger monster (for HP
 loss and the death frames). A long walk with GoC's `Nhân vật:` line read during
@@ -1323,7 +1336,7 @@ No targeting or aggro by monsters is visible:
 - nothing hurt the character: its HP fell only by 1, seven times (§4e).
 
 Limits: every monster died at the first hit, and the monsters (levels 39 and 44)
-were far below the character (88, if the level candidate is right), so a monster
+were far below the character (level 162 on its HUD), so a monster
 that survives and turns on the character was never seen.
 
 Targeting is the character's. Each attack cast killed 0–4 monsters, all within
@@ -1392,15 +1405,15 @@ timers, and nothing that could be EXP: `0x005B` steps +3 on every kill, the
 same for both types, where EXP would differ by monster; `0x03A0` counts one
 type's kills; and `0x0065`'s u16 at 398 reads 798, 804, 805, 806 and 812 in
 snapshots taken after 3, 5, 18, 63 and 112 kills, not one step per kill. The
-triple 616, 179,986 and 885,300 of §4e is not EXP for a level-88 character
-either: the game's EXP table (`zVietnam\Chart\tb_Exp.tbl`, 200 levels) gives
-21,653,866 for level 88 and has no row of 885,300 or 179,986. Likely the kills
-paid nothing, the monsters being 44–49 levels below the character; or EXP comes
-in a frame these recordings do not hold. The same table can test any EXP field
-a later recording turns up.
+triple 616, 179,986 and 885,300 of §4e is not EXP either: the game's EXP table
+(`zVietnam\Chart\tb_Exp.tbl`, 200 levels) has no row of 885,300 or 179,986.
+Likely the kills paid nothing, the monsters being 118–123 levels below the
+character (162 on its HUD); or EXP comes in a frame these recordings do not
+hold. The same table can test any EXP field a later recording turns up.
 
 **Level, fury and avatar time:** as §4e. An aligned u32 of 88 is still only at
-byte 408 of `0x001E` and 196 of `0x0050`; the fury candidate 3600, 3600 never
+byte 408 of `0x001E` and 196 of `0x0050`, and it is not the level: the HUD
+reads 162 (§4e); the fury candidate 3600, 3600 never
 changed (122 of 122 `0x0051`, 9 of 9 `0x0050`); and both avatar-time
 countdowns stand (`0x0065`'s u32 at 1564 runs with B, within a second of
 `0x01BD`'s).

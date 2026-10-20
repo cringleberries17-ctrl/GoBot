@@ -32,7 +32,9 @@ namespace gobot {
 ///   whose words match the notice's at 0.90 -- every other dialog's words
 ///   score below 0 against them;
 /// - Yêu Quái Bách Khoa, the monster book: its X, or ESC when its X cannot be
-///   found and nothing else is up;
+///   found and nothing else is up. Told by its first tab and its X, both cut
+///   from the live client (bag::find_book) -- or by GoC's own picture of its
+///   first page;
 /// - the game's ESC menu, only when GoBot's own ESC brought it up a moment
 ///   before: its X. The player's own ESC menu may be on its way to Thoát Game.
 ///
@@ -93,15 +95,18 @@ public:
     /// has them (bag.cpp's words panel), and how alike they have to be.
     static constexpr int   kWordsX = 20, kWordsY = 12, kWordsW = 158, kWordsH = 28;
     static constexpr float kWordsScore = 0.90f;
-    /// The monster book, GoC's inven/1/monsterf, its rounded edge left off.
+    /// The monster book, GoC's inven/1/monsterf, its rounded edge left off:
+    /// the book's first page, "Về Yêu Quái Bách Khoa". The live client opens
+    /// it from a fragment on that monster's page, which this does not match;
+    /// that one is told by bag::find_book, first.
     static constexpr float kBookScore = 0.85f;
     static constexpr int   kBookInset = 5;
     /// Where it is looked for first: its title box, "Từ Điển Bách Khoa Yêu
     /// Quái", a sixth of the picture and a tenth of the cost of a search with
     /// all of it; the whole picture is then matched only where that says.
     static constexpr int   kBookKeyX = 60, kBookKeyY = 20, kBookKeyW = 56, kBookKeyH = 196;
-    /// Where its X is looked for: not measured on the live client yet, so
-    /// round the book's top-right corner.
+    /// Where GoC's first page has its X looked for: round its top-right
+    /// corner. The live book's X is where bag::find_book measures it.
     static constexpr int   kBookXSlack = 40;
     /// The ESC menu (grabbed/client_menu_dialog) and its X -- inven/1's
     /// btn_CloseDialog -- measured on the live client: 156,7 from the menu's
@@ -147,8 +152,10 @@ public:
     std::vector<std::string> blockers(const Frame& f, const std::vector<PopupSeen>& popups,
                                       std::vector<std::string>* vi = nullptr) const;
 
-    /// The monster book's title box is somewhere in `area`: some of the book
-    /// is still up there, even with something drawn over the rest of it.
+    /// The monster book's title box is somewhere in `area` -- or the live
+    /// book's first tab where a book with the window `area` has it: some of
+    /// the book is still up there, even with something drawn over the rest of
+    /// it.
     bool book_title_in(const Frame& f, const ScreenRect& area) const;
 
 private:

@@ -37,7 +37,14 @@ const char* const kConfirm = "grabbed/confirm_button";
 /// never answered.
 const char* const kNotice = "grabbed/dialog_ok";
 
-/// The bin's two dialogs, and where the pair of buttons sits in each picture.
+/// The dark panel of words in the bin's pictures, from their top-left. Every
+/// dialog's frame and buttons are the same, so the words are what tells them
+/// apart: matched here, the bin's question scores 0.24 at most against any
+/// other dialog's words and 1.000 against itself on the live client.
+constexpr ScreenRect kBinWords{ 20, 12, 158, 28 };
+
+/// The bin's two dialogs, where the pair of buttons sits in each picture, and
+/// its panel of words.
 ///
 /// The question for one item, and the quantity for a stack -- which a single
 /// item of a kind that stacks gets as well. The game fills the box in itself
@@ -50,17 +57,24 @@ struct DialogPicture {
     const char* name;
     int         pair_dx, pair_dy;   ///< the pair, from the picture's top-left
     bool        quantity;
+    ScreenRect  words;              ///< the panel of words, from the picture's top-left
 };
 const DialogPicture kBinDialogs[] = {
-    { "grabbed/del_item_confirm_1", 101, 51, false },   // bag::kAskDialog
-    { "grabbed/del_item_confirm_2", 100, 50, true },    // bag::kCountDialog
+    { "grabbed/del_item_confirm_1", 101, 51, false, kBinWords },   // bag::kAskDialog
+    { "grabbed/del_item_confirm_2", 100, 50, true, kBinWords },    // bag::kCountDialog
 };
 
-/// The question a fragment's right-click brings up, laid out as the bin's
-/// question is -- the game's one dialog frame -- until a picture of it cut
-/// from the live client says otherwise: see bag::kRegisterDialog. Never one
-/// of the bin's dialogs.
-const DialogPicture kRegisterPicture = { bag::kRegisterDialog, 101, 51, false };
+/// The question a fragment's right-click brings up, as the live client draws
+/// it (bag::kRegisterDialog): the game's dialog frame a line taller than the
+/// bin's question, its three lines of words in the panel's inside, 168x41 from
+/// 17,11 of the picture, and its two buttons at 105,56, drawn as the bin's
+/// question draws its own pair -- found there at 1.000 on the 96 frames of the
+/// live client with the question and its buttons at rest or under the
+/// pointer. On those its words, looked for there, score 1.000; on the 137
+/// other frames with a dialog's two buttons, under 0.3; and in the other
+/// questions' pictures (kOtherQuestions) 0.30 at most. Never one of the bin's
+/// dialogs.
+const DialogPicture kRegisterPicture = { bag::kRegisterDialog, 105, 56, false, ScreenRect{ 17, 11, 168, 41 } };
 
 /// Every other question GoBot has a picture of, all in the game's one dialog
 /// frame over [Xác Nhận][Hủy Bỏ]: the bin's two, the revive question -- "Bạn
@@ -86,16 +100,36 @@ constexpr int kUseLateMs = 1500;
 constexpr float kCloseScore = 0.90f;
 constexpr int kCloseSlack = 4;
 
-/// The dark panel of words in those pictures, from their top-left. Every
-/// dialog's frame and buttons are the same, so the words are what tells them
-/// apart: matched here, the bin's question scores 0.24 at most against any
-/// other dialog's words and 1.000 against itself on the live client.
-constexpr int kWordsX = 20, kWordsY = 12, kWordsW = 158, kWordsH = 28;
 /// Bright pixels a panel needs to be words at all. The pictures of the drop
 /// question and of the notice have an empty panel -- ten or so -- and would
 /// pass for any dialog.
 constexpr int kWordsAtLeast = 100;
 constexpr float kWordsScore = 0.90f;
+/// How alike the registration question's words have to be for Xác Nhận:
+/// stricter than the bin's pictures are held to. Its words are the same for
+/// every piece and are all there is to tell it by, and the player's rule is
+/// that only this question, with these words, is confirmed. On every frame of
+/// the live client with the question up its words score 1.000, while the same
+/// box with one letter taken out scores 0.988, its third line gone 0.945, and
+/// a short word of its first line in other letters 0.947 -- all of which
+/// kWordsScore would take for it.
+constexpr float kRegisterWordsScore = 0.99f;
+
+/// The monster book (bag::find_book): how alike its tab has to be, and its X.
+/// The tab scores 1.00 on every saved frame with the book open and 0.58 at
+/// most anywhere on the rest; the X 1.00 where the tab says, and 0.94 with
+/// the pointer over it.
+constexpr float kBookScore = 0.90f;
+constexpr float kBookXScore = 0.85f;
+/// How far from where it is expected the X may be found, and how far from
+/// where it was a book looked at again may be.
+constexpr int kBookSlack = 3;
+/// How long a click on the book's X is given to close it, and how often it is
+/// looked at meanwhile; and how many looks the X itself is looked for in
+/// before the book counts as one that cannot be closed.
+constexpr int kBookCloseMs = 1500;
+constexpr int kBookLookMs = 150;
+constexpr int kBookXLooks = 3;
 
 /// How alike the strip has to be. Lower than a fixed button: whichever tab is
 /// selected is drawn differently, and the picture was taken with the first.
@@ -182,15 +216,15 @@ float words_at(const Frame& f, const TemplateStore& store, const ScreenRect& at,
                const DialogPicture& pic, float least) {
     const Frame* t = store.get(pic.name);
     if (t == nullptr) return -1.0f;
-    const Frame words = crop(*t, ScreenRect{ kWordsX, kWordsY, kWordsW, kWordsH });
+    const Frame words = crop(*t, pic.words);
     if (!words.valid()) return -1.0f;
     if (bright_words(words) < kWordsAtLeast) return -1.0f;     // no words: tells nothing apart
 
     // Right where they sit relative to the buttons, give or take two pixels,
     // and nowhere else.
-    const ScreenRect place = clamp_to(f, ScreenRect{ at.x - pic.pair_dx + kWordsX - 2,
-                                                     at.y - pic.pair_dy + kWordsY - 2,
-                                                     kWordsW + 4, kWordsH + 4 });
+    const ScreenRect place = clamp_to(f, ScreenRect{ at.x - pic.pair_dx + pic.words.x - 2,
+                                                     at.y - pic.pair_dy + pic.words.y - 2,
+                                                     pic.words.w + 4, pic.words.h + 4 });
     if (place.w < words.width || place.h < words.height) return -1.0f;
     const auto m = TemplateMatcher::find(f, place, words, least);
     return m.found ? m.score : -1.0f;
@@ -911,6 +945,9 @@ bool CleanSettings::load(const std::string& path) {
     min_score        = std::clamp(ini.get_float("Trash", "min_score", min_score), 0.85f, 0.99f);
     max_per_run      = std::clamp(ini.get_int("Trash", "max_per_run", max_per_run), 1, 500);
     max_uses_per_run = std::clamp(ini.get_int("Trash", "max_uses_per_run", max_uses_per_run), 1, 100);
+    // Read as the file has it, or off: never left as an earlier reading had
+    // it, which would keep it on after the line was taken out of the file.
+    use_fragments    = ini.get_bool("Trash", "use_fragments", false);
     click_to_move    = ini.get_bool("Trash", "click_to_move", click_to_move);
     catalog_score    = std::clamp(ini.get_float("Trash", "catalog_score", catalog_score), 0.85f, 0.99f);
 
@@ -1317,12 +1354,17 @@ std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store) {
         }
         if (d.quantity)
             d.box = ScreenRect{ at.x + kBoxDx, at.y + kBoxDy, kBoxW, std::max(4, at.h - 6) };
-        // The registration question, by its words -- and never a dialog the
-        // bin's pictures took for one of the bin's: a dialog is one thing.
+        // The registration question, by its words, at kRegisterWordsScore --
+        // the best place within two pixels looked for at that score, so that
+        // a nearer miss found first is not taken for the answer -- and never
+        // a dialog the bin's pictures took for one of the bin's: a dialog is
+        // one thing. How near words that fall short came, from kWordsScore,
+        // is kept for the log and the tests.
         if (can_register && !d.ours()) {
-            const float words = words_at(f, store, at, kRegisterPicture, kWordsScore);
-            d.register_words = std::max(0.0f, words);
-            d.registers = words >= kWordsScore;
+            const float words = words_at(f, store, at, kRegisterPicture, kRegisterWordsScore);
+            d.registers = words >= kRegisterWordsScore;
+            d.register_words =
+                d.registers ? words : std::max(0.0f, words_at(f, store, at, kRegisterPicture, kWordsScore));
         }
         out.push_back(d);
     }
@@ -1359,11 +1401,11 @@ bool can_check(const TemplateStore& store, TrashList::Action a) {
     if (a != TrashList::Action::Use) return true;
 
     // The registration question: a picture with words to tell it by, and its
-    // two buttons where the bin's question has them -- or its words would be
+    // two buttons where its own layout has them -- or its words would be
     // looked for in the wrong place, and never match.
     const Frame* ask = store.get(kRegisterPicture.name);
     if (ask == nullptr) return false;
-    const Frame words = crop(*ask, ScreenRect{ kWordsX, kWordsY, kWordsW, kWordsH });
+    const Frame words = crop(*ask, kRegisterPicture.words);
     if (!words.valid()) return false;
     if (bright_words(words) < kWordsAtLeast) {
         GB_INFO("Trash: %s is not used: too few words are left in it to tell a question by", kRegisterPicture.name);
@@ -1419,7 +1461,7 @@ bool can_see_windows(const TemplateStore& store) {
 }
 
 bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& v, const BagLayout& l,
-                     ScreenRect* at) {
+                     ScreenRect* at, const ScreenRect* also_own) {
     if (!can_see_windows(store) || !f.valid()) return true;
     // Each drawing on its own thread: matched through their see-through
     // corners, these are the dearest searches of a look, and the game is held
@@ -1434,17 +1476,57 @@ bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& 
         }));
     }
     // The bag's own X, where it always is: any other is a window's that a
-    // right-click might hand the item to.
+    // right-click might hand the item to -- but for `also_own`, which the
+    // caller knows for one that is not.
     bool other = false;
     for (auto& look : looks)
         for (const TemplateMatcher::Match& m : look.get()) {
-            const bool own = v.found && std::abs(m.at.x - (v.strip.x + l.close_dx)) <= kCloseSlack &&
-                             std::abs(m.at.y - (v.strip.y + l.close_dy)) <= kCloseSlack;
+            const bool own = (v.found && std::abs(m.at.x - (v.strip.x + l.close_dx)) <= kCloseSlack &&
+                              std::abs(m.at.y - (v.strip.y + l.close_dy)) <= kCloseSlack) ||
+                             (also_own != nullptr && std::abs(m.at.x - also_own->x) <= kCloseSlack &&
+                              std::abs(m.at.y - also_own->y) <= kCloseSlack);
             if (own || other) continue;
             other = true;
             if (at) *at = m.at;
         }
     return other;
+}
+
+bool can_see_book(const TemplateStore& store) {
+    return store.get(kBookTitle) != nullptr && store.get(kBookClose) != nullptr;
+}
+
+Book find_book(const Frame& f, const TemplateStore& store, const ScreenRect* window) {
+    Book b;
+    const Frame* title = store.get(kBookTitle);
+    const Frame* x = store.get(kBookClose);
+    if (title == nullptr || x == nullptr || !f.valid()) return b;
+    // The tab anywhere, or where a book with `window` has it.
+    const ScreenRect look =
+        window == nullptr
+            ? ScreenRect{ 0, 0, f.width, f.height }
+            : clamp_to(f, ScreenRect{ window->x - kBookWindow.x - kBookSlack, window->y - kBookWindow.y - kBookSlack,
+                                      title->width + 2 * kBookSlack, title->height + 2 * kBookSlack });
+    if (look.w < title->width || look.h < title->height) return b;
+    const auto t = TemplateMatcher::find(f, look, *title, kBookScore);
+    if (!t.found) return b;
+    b.found = true;
+    b.score = t.score;
+    b.title = t.at;
+    b.window = ScreenRect{ t.at.x + kBookWindow.x, t.at.y + kBookWindow.y, kBookWindow.w, kBookWindow.h };
+    // Its X where the tab says, and nowhere else: every close button of the
+    // client is one drawing, so an X is the book's only by where it is.
+    const ScreenRect around = clamp_to(f, ScreenRect{ t.at.x + kBookXDx - kBookSlack, t.at.y + kBookXDy - kBookSlack,
+                                                      x->width + 2 * kBookSlack, x->height + 2 * kBookSlack });
+    if (around.w >= x->width && around.h >= x->height) {
+        const auto m = TemplateMatcher::find(f, around, *x, kBookXScore);
+        if (m.found) {
+            b.has_x = true;
+            b.x_score = m.score;
+            b.x = m.at;
+        }
+    }
+    return b;
 }
 
 } // namespace bag
@@ -1733,8 +1815,10 @@ BagCleaner::Result BagCleaner::run() {
         // On Tiêu Dùng, the items on the Dùng list are registered before
         // anything there is deleted, as GoC orders its pass: an item to be
         // used and then deleted is registered first. Not on a look-only pass,
-        // and not without the picture to tell the registration question by.
-        if (tab == kUseTab && any_use && can_use && !dry_run_) {
+        // not without the picture to tell the registration question by, and
+        // not unless [Trash] use_fragments says so: the picture is shipped,
+        // and its being there is no say-so.
+        if (tab == kUseTab && any_use && can_use && settings_.use_fragments && !dry_run_) {
             use_sweep(tab, v, res, stop, used, no_use, uses, registered);
             if (stop || cancelled_) break;
             scroll_to_top(v);
@@ -1872,6 +1956,8 @@ BagCleaner::Result BagCleaner::run() {
                     const char* why_not = !item.fragment()
                                               ? "hình này không giống mảnh ghép nào, mà chuột phải vào món "
                                                 "khác là dùng luôn món đó"
+                                        : !settings_.use_fragments
+                                              ? "Dùng đang tắt (use_fragments=false trong configs\\trash.ini)"
                                         : !can_use ? "GoBot chưa có hình hộp thoại đăng ký mảnh ghép của "
                                                      "game để kiểm tra"
                                         : tab != kUseTab ? "chỉ dùng đồ ở ngăn Tiêu Dùng"
@@ -2519,6 +2605,19 @@ BagCleaner::UseResult BagCleaner::use_one(const Frame& f, const BagView& v, int 
     }
     if (again.size() != 1 || !again.front().registers || !same_place(again.front().pair, d.pair))
         return refuse("lúc sắp bấm Xác Nhận thì trên màn hình không chỉ có hộp thoại đăng ký", k, "use_changed");
+    // Nor any window but the bag and the book the right-click opened with
+    // its question: a window that came up since the look before the
+    // right-click -- a shop, a trade -- may have been what asked.
+    {
+        const bag::Book book = bag::find_book(k, store_);
+        const BagView kv = bag::find(k, store_, l);
+        ScreenRect other;
+        if (bag::other_window_up(k, store_, kv, l, &other, book.has_x ? &book.x : nullptr)) {
+            GB_INFO("Trash: a close button that is neither the bag's nor the book's at %d,%d -- Hủy Bỏ", other.x,
+                    other.y);
+            return refuse("lúc sắp bấm Xác Nhận thì có một cửa sổ khác đang mở, nên không bấm", k, "use_other_window");
+        }
+    }
     if (!mouse_ok(d.confirm_x(), d.y())) return refuse("không bấm được Xác Nhận", k, "use_blocked");
     click(d.confirm_x(), d.y());
 
@@ -2665,6 +2764,53 @@ BagCleaner::SlotNow BagCleaner::slot_now(const BagView& v, int index, const Fram
     return first;
 }
 
+bool BagCleaner::shut_book(std::string& why, Frame& shot) {
+    // The book and its X on a fresh look, a few looks at most: a frame caught
+    // while the game redraws can lose the X for one look.
+    bag::Book book;
+    for (int look = 0; look < kBookXLooks; ++look) {
+        if (look > 0) pause_ms(kBookLookMs);
+        Frame f;
+        if (!grab_ || !grab_(f) || !f.valid()) continue;
+        shot = f;
+        book = bag::find_book(f, store_);
+        if (!book.found) return true;           // not open: nothing to close
+        // A click goes to whatever is up first: never with a dialog up, nor
+        // a message with only Xác Nhận, which the player is to read.
+        if (!bag::find_dialogs(f, store_).empty() || bag::notice_up(f, store_)) {
+            why = "Yêu Quái Bách Khoa đang mở cùng một hộp thoại, nên không bấm nút X của nó";
+            return false;
+        }
+        if (book.has_x) break;
+    }
+    if (!shot.valid()) {
+        why = "không chụp được màn hình game";
+        return false;
+    }
+    if (!book.found) return true;
+    if (!book.has_x) {
+        why = "thấy Yêu Quái Bách Khoa đang mở mà không thấy nút X của nó, nên không đóng được";
+        return false;
+    }
+    const int x = book.x.cx(), y = book.x.cy();
+    if (!mouse_ok(x, y)) {
+        why = "không bấm được nút X của Yêu Quái Bách Khoa";
+        return false;
+    }
+    say("đóng Yêu Quái Bách Khoa bằng nút X của nó");
+    click(x, y);
+    // Gone, where it was: its tab no longer there.
+    for (int waited = 0; waited < kBookCloseMs; waited += kBookLookMs) {
+        pause_ms(kBookLookMs);
+        Frame g;
+        if (!grab_ || !grab_(g) || !g.valid()) continue;
+        shot = g;
+        if (!bag::find_book(g, store_, &book.window).found) return true;
+    }
+    why = "Yêu Quái Bách Khoa không đóng lại khi bấm nút X của nó";
+    return false;
+}
+
 void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::set<int>& used,
                            std::set<int>& no_use, int& uses, Registrations& registered) {
     const BagLayout& l = settings_.layout;
@@ -2679,6 +2825,12 @@ void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::se
     if (!bag::can_see_windows(store_)) {
         say("không có hình nút đóng cửa sổ của game để biết có cửa sổ khác đang mở cạnh túi đồ không, nên không "
             "dùng món nào");
+        return;
+    }
+    // Nor without the book's pictures: every right-click opens Yêu Quái Bách
+    // Khoa, and it has to be closed again, and seen closed, before the next.
+    if (!bag::can_see_book(store_)) {
+        say("không có hình Yêu Quái Bách Khoa để đóng nó lại sau mỗi lần bấm chuột phải, nên không dùng món nào");
         return;
     }
     // A dialog up after one of this sweep's own right-clicks, which use_one
@@ -2789,6 +2941,14 @@ void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::se
             // Kho Cash, a shop, a storage or trade window -- which may take
             // the item without a question: any close button but the bag's own
             // says one is. Looked for on this same frame, the moment before.
+            // The book among them: one this sweep opened it has shut already,
+            // so one open now is the player's, or one a pass that stopped
+            // left, and it is not closed for them.
+            if (bag::find_book(f, store_).found) {
+                say("Yêu Quái Bách Khoa đang mở, nên không dùng món nào; đóng nó rồi thử lại");
+                keep(f, "use_book_up");
+                return;
+            }
             ScreenRect other;
             if (bag::other_window_up(f, store_, v, l, &other)) {
                 say("đang có cửa sổ khác mở cạnh túi đồ (kho, cửa hàng…), nên không dùng món nào; đóng nó rồi "
@@ -2868,6 +3028,25 @@ void BagCleaner::use_sweep(int tab, BagView& v, Result& res, bool& stop, std::se
                     res.trouble = u.why;
                     stop = true;
                     break;
+            }
+            // The book the right-click opened stays open whatever the answer
+            // was, and while it is, nothing else is right-clicked: shut by its
+            // X, and seen shut, before the next slot -- after a registration,
+            // a Hủy Bỏ, or a right-click that brought nothing up. The pass
+            // stops when it will not shut. A pass that stops anyway leaves it
+            // as it is, as it leaves everything else after a surprise; and a
+            // stop presses nothing more.
+            const bool goes_on = u.outcome == UseOutcome::Used || u.outcome == UseOutcome::Refused ||
+                                 u.outcome == UseOutcome::Nothing;
+            if (goes_on && !stop && !cancelled_) {
+                std::string why;
+                Frame shot;
+                if (!shut_book(why, shot)) {
+                    keep(shot, "use_book_open");
+                    say("dừng sau món ở " + std::string(where) + ": " + why);
+                    res.trouble = why;
+                    stop = true;
+                }
             }
             break;
         }

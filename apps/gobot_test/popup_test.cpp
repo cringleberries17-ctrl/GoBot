@@ -268,6 +268,30 @@ void add_notice(Pretend& g, int x = 542, int y = 320) {
           ScreenRect{ x + PopupEyes::kNoticeOkDx, y + PopupEyes::kNoticeOkDy, 36, 16 });
 }
 
+/// The monster book as the live client draws it, by the two pictures cut from
+/// it (bag::find_book): its first tab at `x`, `y` -- 306,156 on the live
+/// client -- and, with `with_x`, its X where the live client has it from the
+/// tab. False when the pictures are not here.
+bool add_live_book(Pretend& g, bool with_x, int x = 306, int y = 156) {
+    const Kit& k = kit();
+    const Frame* tab = k.get(bag::kBookTitle);
+    const Frame* cross = k.get(bag::kBookClose);
+    if (tab == nullptr || cross == nullptr) return false;
+    // One picture holding both, the X where it is from the tab.
+    Frame book;
+    book.width = bag::kBookXDx + cross->width;
+    book.height = std::max(tab->height, bag::kBookXDy + cross->height);
+    book.pixels.assign(static_cast<std::size_t>(book.width) * book.height * 4, 0);
+    blit(book, *tab, 0, 0);
+    ScreenRect control;
+    if (with_x) {
+        blit(book, *cross, bag::kBookXDx, bag::kBookXDy);
+        control = ScreenRect{ x + bag::kBookXDx, y + bag::kBookXDy, cross->width, cross->height };
+    }
+    g.add("book", book, x, y, control, /*esc_closes=*/true);
+    return true;
+}
+
 /// The monster book; with `with_x`, its X near the top-right corner.
 void add_book(Pretend& g, bool with_x, int x = 300, int y = 120) {
     const Kit& k = kit();
@@ -412,6 +436,52 @@ void test_book() {
         check(r.game.escs == 0, "the book without its X, and the notice up too: no ESC, for a minute");
         check(r.game.clicks == 2 && r.game.missed == 2,
               "the notice clicked twice -- at 3 s and after 30 s -- and then left alone");
+    }
+}
+
+void test_live_book() {
+    section("Popups: Yêu Quái Bách Khoa as the live client draws it, by its tab and its X (PU-R7)");
+    if (skip_without_kit()) return;
+    {
+        Rig r;
+        if (!add_live_book(r.game, true)) {
+            std::printf("  [skip] no pictures of the live book here\n");
+            return;
+        }
+        const auto seen = kit().eyes.popups(r.game.render(), false);
+        check(seen.size() == 1 && seen[0].kind == PopupKind::MonsterBook && seen[0].control && seen[0].x == 816 &&
+                  seen[0].y == 169 && seen[0].at.x == 303 && seen[0].at.y == 153,
+              fmt("the live book seen, its X at %d,%d", seen.empty() ? -1 : seen[0].x, seen.empty() ? -1 : seen[0].y));
+        r.run(5);
+        check(r.game.clicks == 1 && r.game.missed == 0 && r.game.escs == 0 && !r.game.has("book") &&
+                  r.said("closed Yêu Quái Bách Khoa at 303,153"),
+              "closed with one click, on its X");
+    }
+    {
+        // Its X not to be seen -- the mouse button held down on it draws it
+        // dark -- and nothing else up: one ESC, as for GoC's picture of it.
+        Rig r;
+        add_live_book(r.game, false);
+        r.run(5);
+        check(r.game.escs == 1 && r.game.clicks == 0 && !r.game.has("book"), "its X not seen, nothing else up: one ESC");
+    }
+    {
+        // Beside the bag -- where a fragment's right-click leaves it -- or
+        // under the registration question: nothing pressed.
+        Rig r;
+        add_live_book(r.game, true);
+        r.game.add("bag", *kit().get("grabbed/inventory"), 14, 393);
+        r.run(8);
+        check(r.game.clicks == 0 && r.game.escs == 0 && r.game.has("book"), "the bag open beside it: nothing");
+        Rig q;
+        add_live_book(q.game, true);
+        Frame ask;
+        if (TemplateStore::load_one(bag::kRegisterDialog, exe_relative("configs/templates.ini"), ask)) {
+            q.game.add("question", ask, 538, 317);
+            q.run(8);
+            check(q.game.clicks == 0 && q.game.escs == 0 && q.game.has("book"),
+                  "the registration question over it: nothing -- never Xác Nhận or Hủy Bỏ, and not the book either");
+        }
     }
 }
 
@@ -776,21 +846,44 @@ void test_real_frames() {
     }
     const PopupEyes& eyes = kit().eyes;
     int quiet = 0, looked = 0;
+    // The recordings of 2026-10-19 with the monster book open, a fragment
+    // right-clicked: the book is up on many of their frames, and the bag
+    // beside it, or its question over it, on every one of those.
+    int book_frames = 0, books = 0, books_blocked = 0;
     std::string loud;
     for (const std::string& p : frames) {
         Frame f;
         if (!load_png(p, f)) continue;
-        ++looked;
+        const std::string name = p.substr(p.find_last_of('\\') + 1);
         // As the worker looks every second: the ESC menu is only looked for
         // straight after GoBot's own ESC.
         const std::vector<PopupSeen> up = eyes.popups(f, false);
+        if (name.rfind("fragq_A_", 0) == 0 || name.rfind("book_A_", 0) == 0 || name.rfind("frag_A_", 0) == 0) {
+            ++book_frames;
+            const bool book = std::any_of(up.begin(), up.end(),
+                                          [](const PopupSeen& s) { return s.kind == PopupKind::MonsterBook; });
+            const bool notice = std::any_of(up.begin(), up.end(),
+                                            [](const PopupSeen& s) { return s.kind != PopupKind::MonsterBook; });
+            if (notice && loud.empty()) loud = name;
+            if (book) {
+                ++books;
+                if (!eyes.blockers(f, up).empty()) ++books_blocked;
+            }
+            continue;
+        }
+        ++looked;
         const bool none = up.empty();
         if (none) ++quiet;
-        else if (loud.empty()) loud = p.substr(p.find_last_of('\\') + 1);
+        else if (loud.empty()) loud = name;
     }
-    check(looked > 100 && quiet == looked,
+    check(looked > 100 && quiet == looked && loud.empty(),
           fmt("%d of %d saved frames: neither the notice nor the book taken to be up", quiet, looked) +
               (loud.empty() ? std::string{} : " -- not " + loud));
+    if (book_frames > 0)
+        check(books > 0 && books_blocked == books,
+              fmt("the book recordings: the live book seen on %d of %d frames looked at, and on every one the bag "
+                  "or its question is up beside it, so nothing would be closed (%d)",
+                  books, book_frames, books_blocked));
     // A few of them on the pretend game, a turn a second, as the worker does.
     int pressed = 0, run = 0;
     for (std::size_t i = 0; i < frames.size() && run < 8; i += frames.size() / 8 + 1) {
@@ -834,6 +927,7 @@ void test_popups(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_notice();
     test_board_not_listed();
     test_book();
+    test_live_book();
     test_menu_not_ours();
     test_blockers();
     test_gates();

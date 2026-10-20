@@ -35,17 +35,23 @@ void take_out(std::vector<std::string>& ids, const std::string& id) {
     ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
 }
 
-/// Whether the registration question can be told from the others here, asked
-/// once: the few pictures can_check(Use) wants, loaded one by one rather than
-/// the thousand others -- and the registration's only when it is a file
-/// beside GoBot, never looked for in another program's assembly.
+/// The file of picture `name` beside GoBot, never looked for elsewhere.
+bool beside_gobot(const char* name) {
+    std::string file = TemplateStore::default_dir() + "\\" + name + ".png";
+    std::replace(file.begin(), file.end(), '/', '\\');
+    return path_exists(file);
+}
+
+/// Whether the registration question can be told from the others here, and
+/// the monster book it opens closed again, asked once: the few pictures
+/// can_check(Use) wants, loaded one by one rather than the thousand others --
+/// and the registration's and the book's only when they are files beside
+/// GoBot, never looked for in another program's assembly.
 bool can_register() {
     static int known = -1;
     if (known < 0) {
         known = 0;
-        std::string file = TemplateStore::default_dir() + "\\" + bag::kRegisterDialog + ".png";
-        std::replace(file.begin(), file.end(), '/', '\\');
-        if (path_exists(file)) {
+        if (beside_gobot(bag::kRegisterDialog) && beside_gobot(bag::kBookTitle) && beside_gobot(bag::kBookClose)) {
             // The other questions too, which can_check makes sure the
             // registration's words are none of.
             TemplateStore pictures;
@@ -101,8 +107,10 @@ bool GuiApp::simple_use_options(const std::string& id, const char* folder) {
     coloured(kDim, "Bỏ phần còn lại: chỉ xoá số mảnh còn lại ở đúng ô vừa đăng ký. Ô khác cùng hình (thường là "
                    "mảnh cùng số của một ma vật khác) được để lại cho tới lượt chính nó được đăng ký.");
     if (!can_register())
-        coloured(kDim, "GoBot chưa có hình hộp thoại đăng ký mảnh ghép của game, nên lúc này chỉ báo chỗ có "
-                       "mảnh, chưa dùng.");
+        coloured(kDim, "GoBot chưa có hình hộp thoại đăng ký mảnh ghép hoặc hình Yêu Quái Bách Khoa của game, "
+                       "nên lúc này chỉ báo chỗ có mảnh, chưa dùng.");
+    else if (!simple_clean_.use_fragments)
+        coloured(kDim, "Ô \"Dùng mảnh ghép\" ở đầu thẻ này đang tắt, nên lúc này chỉ báo chỗ có mảnh, chưa dùng.");
     ImGui::PopFont();
     if (how == 0) return false;
 
@@ -159,6 +167,24 @@ bool GuiApp::simple_use_cut_option(const ScreenRect& at) {
                 8000);
     ImGui::CloseCurrentPopup();
     return true;
+}
+
+void GuiApp::simple_use_switch(const std::function<void(const char*, const std::string&)>& put) {
+    // Off as shipped, and the picture of the question being there switches
+    // nothing on: only this does. Shown with the tab's other settings, on its
+    // own line, whether or not anything is on the Dùng list yet.
+    if (ImGui::Checkbox("Dùng mảnh ghép", &simple_clean_.use_fragments))
+        put("use_fragments", simple_clean_.use_fragments ? "true" : "false");
+    ImGui::SetItemTooltip("%s", trial_hint(kTrialUse,
+                                           "Đăng ký vào Yêu Quái Bách Khoa các mảnh ghép trong danh sách Dùng: chuột "
+                                           "phải vào mảnh, Xác Nhận đúng câu hỏi đăng ký của game, rồi đóng Yêu Quái "
+                                           "Bách Khoa bằng nút X. Mảnh đã đăng ký không lấy lại được. Tắt thì chỉ báo "
+                                           "chỗ có mảnh, không bấm gì.")
+                                    .c_str());
+    if (simple_clean_.use_fragments && !can_register()) {
+        ImGui::SameLine();
+        coloured(kWait, "GoBot chưa có hình của game để làm việc này, nên chưa dùng.");
+    }
 }
 
 std::string GuiApp::trash_use_said_vi(const BagCleaner::Result& r, bool look_only) {

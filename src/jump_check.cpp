@@ -1,5 +1,6 @@
 #include "gobot/jump_check.hpp"
 #include "gobot/common.hpp"
+#include "gobot/input_manager.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -209,6 +210,15 @@ JumpCheck::KeyAdvice JumpCheck::advice(std::uint32_t jump, std::uint32_t attack_
     // GoC's own key map has Space as "Tấn công": pressed to jump, it attacks.
     if (jump == kSpace) a.kind = Advice::SpaceIsAttack;
     return a;
+}
+
+std::string JumpCheck::walk_key_warning_vi(std::uint32_t walk_jump, std::uint32_t attack_key) {
+    if (walk_jump == 0) return {};
+    const bool attack = attack_key != 0 && walk_jump == attack_key;
+    if (!attack && walk_jump != kSpace) return {};
+    return "Phím nhảy khi đi tới điểm đã lưu (jump_key trong phần [Move] của configs\\hunt.ini) là " +
+           InputManager::key_name(walk_jump) + (attack ? ", trùng phím đánh" : ", mà trong game Space là phím Tấn công") +
+           ": bot sẽ đánh chứ không nhảy. Phím nhảy trong game là ↑ (jump_key=38).";
 }
 
 } // namespace gobot

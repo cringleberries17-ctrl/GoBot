@@ -312,6 +312,13 @@ struct CleanSettings {
     /// one slot only, and only once the registration has been seen through.
     std::vector<std::string> use_ids;
 
+    /// [Trash] use_fragments: whether a pass registers anything at all. Off
+    /// unless the file says so, and it ships off: a registration cannot be
+    /// undone, and the picture of the question being there is no say-so --
+    /// with it shipped, every build has it. Off, the pieces on the Dùng list
+    /// are only said, as Thử tìm says them, and never right-clicked.
+    bool use_fragments = false;
+
     /// A bound on one pass, so a mistake costs a handful of items at most.
     int max_per_run = 40;
     /// The same for registering, [Trash] max_uses_per_run: a registration
@@ -532,9 +539,11 @@ struct Dialog {
 
     /// The question a fragment's right-click brings up, to register it in
     /// Yêu Quái Bách Khoa: its words match the picture of it (kRegisterDialog)
-    /// at 0.90, where they sit for these buttons. Never one of the bin's --
-    /// ours() is false for it -- and only true when that picture is there.
+    /// at 0.99, where that picture has them for these buttons -- the same box
+    /// with a line or a word of other words is not it. Never one of the bin's
+    /// -- ours() is false for it -- and only true when that picture is there.
     bool       registers = false;
+    /// How alike its words are to that picture's: from 0.90, else 0.
     float      register_words = 0.0f;
 
     bool ours() const { return kind >= 0; }
@@ -549,20 +558,24 @@ constexpr int kCountDialog = 1;     ///< "Vui lòng nhập số lượng cần x
 const char* dialog_name(int kind);
 
 /// The picture of the question a fragment's right-click brings up, under its
-/// name in templates\: the whole dialog, its words and its two buttons, cut
-/// from the live client. Not named in templates.ini and not shipped until it
-/// has been: no saved frame shows it. Until then nothing is registered --
-/// can_check(Use) is false -- and a fragment on the Dùng list is only said to
-/// be there. Its words are looked for where the bin's question has them, from
-/// its two buttons (both are the game's one dialog frame); a picture whose
-/// buttons are not at that place is not used.
+/// name in templates\: the whole box, its words and its two buttons, cut from
+/// the live client on 2026-10-19 (live\shots\fragq_A_085: 204x86 from 538,317,
+/// see-through outside its rounded outline) and named in templates.ini.
 ///
-/// The game names each piece after its monster -- "Mảnh Địa Quỷ Tâm Hỏa 6" in
-/// the bag's tooltip -- and the question may well name it too. Then a picture
-/// cut from one piece's question matches that piece's question alone, and
-/// every other piece's gets Hủy Bỏ. The name can be made see-through in the
-/// picture: only what is left is compared, so long as enough words are left
-/// and those words are none of another question's (see can_check).
+/// "Bạn có muốn đăng ký mảnh quái vật vào Bách Khoa Quái Vật không?", on three
+/// lines: the same words for every piece -- the question does not name the
+/// piece or its monster -- so one picture tells them all. The box is the
+/// game's dialog frame a line taller than the bin's question, so its words and
+/// its two buttons are looked for where this picture has them, not where the
+/// bin's has them; a picture whose buttons are not there is not used.
+///
+/// A part of the picture can still be made see-through -- only what is left
+/// is compared -- so long as enough words are left and those words are none of
+/// another question's (see can_check).
+///
+/// The picture is no switch: a pass right-clicks nothing unless [Trash]
+/// use_fragments is on as well (CleanSettings::use_fragments), and it ships
+/// off.
 inline const char* const kRegisterDialog = "grabbed/fragment_register";
 
 /// Every dialog with the two buttons on screen, the bin's own marked.
@@ -617,9 +630,57 @@ bool can_see_windows(const TemplateStore& store);
 /// client Kho Cash was seen open beside Tiêu Dùng with every other check a use
 /// sweep makes passing. `at` gets where the first such button is. True as
 /// well without every one of the pictures in `store`: what cannot be ruled
-/// out is taken to be there.
+/// out is taken to be there. `also_own`, when given, is one more close button
+/// that is no other window's: the monster book's own X where find_book put
+/// it, for the moment its question is up, which the right-click opened with
+/// it.
 bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& v, const BagLayout& l,
-                     ScreenRect* at = nullptr);
+                     ScreenRect* at = nullptr, const ScreenRect* also_own = nullptr);
+
+/// Yêu Quái Bách Khoa, the monster book, as the live client draws it: the
+/// window a fragment's right-click opens together with its question, and
+/// leaves open once the question is answered, Xác Nhận or Hủy Bỏ.
+///
+/// Found by its first tab, "Yêu Quái Bách Khoa", with the rounded corner of
+/// the window's frame round it -- drawn the same on every page of the book --
+/// and its X, the client's own drawing of one, where it is from the tab on
+/// every frame of the live client that shows the book. Both are cut from the
+/// live client (live\shots\fragq_A_085): the tab 50x45 from 306,156, inside
+/// the frame's outer line, and the X 18x18 from 807,160, drawn only where
+/// GoC's inven/1/monster-close is drawn, so whatever page is behind it does
+/// not count. On the 1,870 saved frames, the tab scores 1.00 on all 299 that
+/// show the book and 0.58 at most anywhere on the rest; the X 1.00 where the
+/// tab says, 0.94 with the pointer over it, and nothing like it while the
+/// mouse button is held down on it, which draws it dark.
+inline const char* const kBookTitle = "grabbed/monster_book_title";
+inline const char* const kBookClose = "grabbed/monster_book_close";
+
+/// The book's X from the top-left of its tab, and its whole window round the
+/// tab: measured on the live client, the window's outer edge included.
+constexpr int kBookXDx = 501, kBookXDy = 4;
+constexpr ScreenRect kBookWindow{ -3, -3, 534, 414 };
+
+/// The book on one frame.
+struct Book {
+    bool       found = false;       ///< its tab, at 0.90
+    float      score = 0.0f;        ///< how alike the tab is
+    ScreenRect title;               ///< the tab as found
+    ScreenRect window;              ///< the whole window, from the tab
+    /// Its X where the tab says, give or take three pixels, at 0.85: what a
+    /// click closes the book with.
+    bool       has_x = false;
+    float      x_score = -1.0f;
+    ScreenRect x;
+};
+
+/// Both of the book's pictures are in `store`.
+bool can_see_book(const TemplateStore& store);
+
+/// The book on `f`, by its tab -- anywhere, or with `window` only where a
+/// book with that window would have its tab, give or take a few pixels: a
+/// book looked at again where it was a moment ago -- and its X where the tab
+/// says.
+Book find_book(const Frame& f, const TemplateStore& store, const ScreenRect* window = nullptr);
 
 } // namespace bag
 
@@ -636,15 +697,19 @@ bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& 
 /// this is the one feature that destroys things.
 ///
 /// On Tiêu Dùng the items on the Dùng list -- fragments -- are registered in
-/// Yêu Quái Bách Khoa first, before anything there is deleted, as GoC does it:
-/// a right-click on the slot, and Xác Nhận on the question that brings up only
-/// when its words are the registration question's and nothing else is up; any
-/// other dialog gets Hủy Bỏ, a message with only Xác Nhận stops the pass with
-/// nothing pressed, and nothing is ever typed. A registration cannot be undone
-/// either, so it is held to the same rules as a deletion. It counts only when
-/// the slot is seen to come out of it as a registration does -- empty, or one
-/// less in place -- and anything else stops the pass; what is left of a stack
-/// to be deleted after is deleted from that very slot and from no other.
+/// Yêu Quái Bách Khoa first, before anything there is deleted, as GoC does it,
+/// when [Trash] use_fragments is on: a right-click on the slot, and Xác Nhận on
+/// the question that brings up only when its words are the registration
+/// question's and nothing else is up; any other dialog gets Hủy Bỏ, a message
+/// with only Xác Nhận stops the pass with nothing pressed, and nothing is ever
+/// typed. A registration cannot be undone either, so it is held to the same
+/// rules as a deletion. It counts only when the slot is seen to come out of it
+/// as a registration does -- empty, or one less in place -- and anything else
+/// stops the pass; what is left of a stack to be deleted after is deleted from
+/// that very slot and from no other. The right-click opens the monster book
+/// with its question, and the book stays open whatever the answer: it is
+/// closed with its own X, and seen closed, before anything else is
+/// right-clicked -- or the pass stops there.
 class BagCleaner {
 public:
     using Grab = std::function<bool(Frame&)>;
@@ -845,9 +910,11 @@ private:
 
     /// Register the item in slot `index` of `v`: one right-click on it; then
     /// its question, Xác Nhận only when its words are the registration's, on a
-    /// fresh look, with nothing else up; and whatever else comes up Hủy Bỏ.
-    /// Only gone, or one less in the stack, in that very slot, counts. `count`
-    /// is the stack count read off the slot.
+    /// fresh look, with nothing else up -- no other dialog, and no window but
+    /// the bag and the book the right-click opened; and whatever else comes up
+    /// Hủy Bỏ. Only gone, or one less in the stack, in that very slot, counts.
+    /// `count` is the stack count read off the slot. The book is left as it
+    /// is: use_sweep shuts it.
     UseResult use_one(const Frame& f, const BagView& v, int index, int count);
 
     /// What slot `index` of the page `v` holds now, against `before`, its look
@@ -889,9 +956,20 @@ private:
     /// Nothing is right-clicked with another of the game's windows open
     /// (bag::other_window_up); and a dialog up after one of the sweep's own
     /// right-clicks -- its question come late -- is answered Hủy Bỏ, never
-    /// Xác Nhận, and the pass stops.
+    /// Xác Nhận, and the pass stops. After a right-click the pass goes on
+    /// from -- registered, answered Hủy Bỏ, or nothing come of it -- the book
+    /// it opened is shut (shut_book) before the next one, or the pass stops.
     void use_sweep(int tab, BagView& v, Result& res, bool& stop, std::set<int>& used,
                    std::set<int>& no_use, int& uses, Registrations& registered);
+
+    /// Close Yêu Quái Bách Khoa when it is open: one click on its own X, on a
+    /// look with no dialog up, and then looks until it is seen gone. True
+    /// when it is not open, or seen gone after the click; false, with `why` in
+    /// Vietnamese and `shot` the last look, when it is open and was not seen
+    /// to close -- its X not seen, the mouse not to be had there, a dialog up,
+    /// or the click did nothing. ESC is never pressed for it: with the bag
+    /// open as well, which of the two an ESC closes is the game's to choose.
+    bool shut_book(std::string& why, Frame& shot);
 
     /// Answer the bin's dialog that is up -- the question, or the quantity,
     /// confirmed only when the number the game put in the box is the stack's

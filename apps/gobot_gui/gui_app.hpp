@@ -1141,6 +1141,9 @@ private:
     bool simple_use_cut_option(const ScreenRect& at);
     /// " Đã dùng N món." for the trash worker's line about a pass.
     static std::string trash_use_said_vi(const BagCleaner::Result& r, bool look_only);
+    /// "Dùng mảnh ghép", [Trash] use_fragments: the one switch registering
+    /// goes by, off as shipped. `put` writes a [Trash] key of trash.ini.
+    void simple_use_switch(const std::function<void(const char*, const std::string&)>& put);
 
     // ---- the monster lists ----
     /// "Lọc quái" on the Đánh quái tab: which monsters are never attacked and

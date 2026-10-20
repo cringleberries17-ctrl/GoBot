@@ -1,6 +1,7 @@
 #include "gui_app.hpp"
 #include "gobot/alerts.hpp"
 #include "gobot/auto_login.hpp"
+#include "gobot/jump_check.hpp"
 #include "gobot/reviver.hpp"
 #include "gobot/routine.hpp"
 #include "gobot/screen_layout.hpp"
@@ -5381,6 +5382,18 @@ void GuiApp::draw_movement_section() {
 
     // ---- going places ----
     ImGui::Dummy(ImVec2(0, 4));
+    // The walk's jump key, hunt.ini's [Move] one, which nothing here sets: a
+    // file from before it shipped as Up has Space, the game's attack, and a
+    // walk up to a place above would attack instead. Said; never changed in
+    // the player's file.
+    {
+        const std::string walk = JumpCheck::walk_key_warning_vi(nav_config_.jump_key, hunt_config_.attack_key);
+        if (!walk.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+            ImGui::TextWrapped("%s", walk.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
     ImGui::BeginDisabled(here.size() < 2 || !have_pos);
     if (ImGui::Button("Patrol these", ImVec2(150, 0)) && keys_may_start())
         navigator_->patrol(here);

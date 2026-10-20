@@ -3,6 +3,7 @@
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -48,9 +49,12 @@ namespace gobot {
 /// column leaves a party at least as big as what is seen, and nobody seen
 /// under it is no reading at all. Another window over all of the panels and
 /// their crowns -- one of the game's own, or its tooltip, which has no tab
-/// strip to be found by -- looks like no party at all, and reads as alone:
-/// alone is never taken as proof that the player could lead
-/// (party_invite_gate).
+/// strip to be found by -- looks like no party at all, and reads as alone.
+/// So alone is said to be sure (PartyHud::sure_alone) only on a frame that is
+/// the game's own pixels all over, and only when nothing that could hide a
+/// panel is up on it: no window of the game, no tooltip over the panels'
+/// column, and the first member's place not one plain colour. Only then does
+/// alone count for an invite with the tick (party_invite_gate).
 ///
 /// Read only: nothing here clicks or presses anything.
 
@@ -107,10 +111,31 @@ struct PartyHud {
     /// has, and a reading of nobody under the bag is Unknown, never Alone.
     bool covered = false;
     std::string why;                ///< when Unknown, why, in English for the log
+
+    /// Alone, and surely so: nothing that could hide a member's panel is up
+    /// (PartyHudReader::read says what is looked for). Only ever true with
+    /// the state Alone. When Alone and not sure, what may be hiding one: in
+    /// English for the log, and in Vietnamese for the Tổ đội tab.
+    bool sure_alone = false;
+    std::string alone_doubt;
+    std::string alone_doubt_vi;
 };
 
 /// The most a party holds, the player included.
 constexpr int kPartyMax = 6;
+
+/// The client's two drawings of a window's close button in their other
+/// states, by the names the template store gives them: under the pointer (/1)
+/// and held down (/2). "Surely alone" looks for these as well as for the
+/// buttons at rest (bag::kCloseButtons), each by its own picture: with the
+/// pointer resting on it, the box's X (btn_CloseBox) scores 0.798 against its
+/// drawing at rest, and held down 0.729 -- under what a close button is taken
+/// at (PartyHudReader::kWindowXScore) -- so a window over the panels with the
+/// pointer on its X would otherwise pass for none. The dialog's X
+/// (btn_CloseDialog) scores 0.998 and 0.971 against its own, and is looked
+/// for in each state all the same.
+inline const char* const kCloseButtonStates[] = { "inven/1/btn_CloseDialog.spr/1", "inven/1/btn_CloseDialog.spr/2",
+                                                  "inven/1/btn_CloseBox.spr/1", "inven/1/btn_CloseBox.spr/2" };
 
 /// Reads the party HUD with the game's own pictures of it.
 class PartyHudReader {
@@ -189,13 +214,74 @@ public:
     /// with nothing over it (party_frame_trusted).
     static constexpr ScreenRect kArea{ 0, 0, kSearchRight, kSearchBottom };
 
+    // ---- alone, for sure (PartyHud::sure_alone) ----
+    //
+    // The player's decision of 2026-10-19: with "Chỉ mời khi đang làm chủ tổ
+    // đội" ticked, a player alone invites, to start a party, as GoC does --
+    // only when GoBot is sure the player is alone. A member whose panels are
+    // all hidden reads as alone too, and what hides them is the bag (read()
+    // sees it by its tab strip), a window of the game, the game's tooltip, or
+    // something laid over them in one colour. So a frame read as alone is
+    // sure only when all of it is the game's own pixels -- drawn by the game
+    // itself, or read off the screen with the whole of the game on a screen
+    // and nothing over any of it (party_frame_whole): a window of the game
+    // over the panels may reach far right of them, and the frame read off the
+    // screen has none of what lies under another program's window or past
+    // the screen's edge, its X perhaps among it -- and when, on it:
+    //  - no close button is anywhere on the frame, in any of the client's
+    //    drawings of one, at rest (bag::kCloseButtons), under the pointer or
+    //    held down (kCloseButtonStates), at kWindowXScore: every window of
+    //    the game wears one -- the bag, Kho Cash, a shop, the monster book,
+    //    the ESC menu, the quest window -- and one over the panels shows its;
+    //  - no edge of a tooltip is over the panels' column (kTooltipArea): the
+    //    game draws every tooltip with a border three pixels thick in fixed
+    //    colours, kTooltipOuter, kTooltipMiddle, kTooltipInner from the
+    //    outside in, and a run of it at least kTooltipRun long, down or
+    //    across, is a tooltip's edge;
+    //  - the first member's place (kFirstSlot) is not one plain colour: its
+    //    commonest colour is under kFirstSlotPlain of it. A party has its
+    //    first other member there, so it is where anything over the party has
+    //    to be.
+    // Without every one of the close buttons' pictures none of it can be
+    // ruled out, and alone is never sure.
+
+    /// A close button, as the trash pass and the popup closer find one. The
+    /// pointer over a window's X draws it a little dimmer, and the monster
+    /// book's then scores 0.84 on GoC's picture of it, so lower than theirs.
+    /// The two buttons the client draws in other states are each looked for
+    /// by their own pictures of those states (kCloseButtonStates).
+    static constexpr float kWindowXScore = 0.80f;
+    /// The tooltip's border, outside in, as red, green, blue; how far a
+    /// pixel may be from each in any channel; and how long a run of it is an
+    /// edge. On the 1,870 saved frames of the live client the border is on
+    /// 60, each time a whole tooltip, all four edges -- over the bag, the
+    /// hotbar and the HUD -- and nowhere else in runs of 12 or more.
+    static constexpr std::uint32_t kTooltipOuter = 0x838383, kTooltipMiddle = 0x22223F, kTooltipInner = 0x353557;
+    static constexpr int kTooltipTolerance = 6;
+    static constexpr int kTooltipRun = 12;
+    /// Where a tooltip's edge says one is over the panels: the panels' column
+    /// down to the bottom of where they are looked for, and a little right of
+    /// it, so that a tooltip whose left edge is just inside the column is
+    /// found by that edge.
+    static constexpr ScreenRect kTooltipArea{ 0, kSearchTop, 134, kSearchBottom - kSearchTop };
+    /// The first other member's place: where the game draws that panel at
+    /// both client sizes, give or take a few pixels.
+    static constexpr ScreenRect kFirstSlot{ 0, 100, kPanelMatchW, 56 };
+    /// How much of kFirstSlot one exact colour may be. The world there is
+    /// never that plain on a saved frame read as alone: at most 0.62, a clear
+    /// sky at 1024x768.
+    static constexpr float kFirstSlotPlain = 0.90f;
+
     /// Takes what it needs from `store`: the game's member panel, the two
     /// pictures of the leader's mark with the crown on them -- GoBot's own
     /// copies, grabbed/party_crown_other and grabbed/party_crown_mine, or
     /// either skin's (the pictures are the same) -- the HUD's Level plate,
     /// which says the HUD is up at all, and the bag's tab strip, which says
     /// where the bag's window is. False, with what is missing in `missing`,
-    /// when one of them is not there.
+    /// when one of them is not there. And the client's close buttons, at rest
+    /// and in their other states (bag::kCloseButtons, kCloseButtonStates),
+    /// when they are all there: without any one of them every reading is made
+    /// as before, and alone is never sure.
     bool load(const TemplateStore& store, std::string* missing = nullptr);
     bool ready() const { return ready_; }
 
@@ -209,7 +295,14 @@ public:
     /// `trusted`: the frame is the game's own picture of itself -- not read
     /// off the screen with something over the game, which would be read as
     /// the game. An untrusted frame is Unknown: see party_frame_trusted.
-    PartyHud read(const Frame& f, bool trusted = true) const;
+    /// `whole_seen`: all of the frame is the game's own pixels, not only the
+    /// part the party is read from (party_frame_whole). Alone is never sure
+    /// without it: a window of the game over the panels is ruled out by its
+    /// close button being nowhere on the frame, and a close button under
+    /// another program's window, or past the screen's edge, is not on the
+    /// frame to be found. A frame read off the screen is to be given what
+    /// party_frame_whole says of it; a saved frame is taken for the game's own.
+    PartyHud read(const Frame& f, bool trusted = true, bool whole_seen = true) const;
 
     /// The member panel as it is matched: the game's picture with the bars,
     /// the name box, the portrait box and the band the leader's frame covers
@@ -220,7 +313,18 @@ public:
     /// read() goes by to tell a party it cannot see all of. For tests.
     bool bag_window(const Frame& f, ScreenRect& out) const;
 
+    /// A tooltip's edge somewhere in `area` of `f`: where its run starts, in
+    /// `at`. For tests, and read() asks it of kTooltipArea.
+    static bool tooltip_edge(const Frame& f, const ScreenRect& area, ScreenRect* at = nullptr);
+
 private:
+    /// Whether a frame read as alone is surely so: `hud.sure_alone`, or why
+    /// not in `hud.alone_doubt` and `hud.alone_doubt_vi`. `whole_seen` as
+    /// read() takes it.
+    void judge_alone(const Frame& f, bool whole_seen, PartyHud& hud) const;
+
+    /// The client's close buttons, bag::kCloseButtons and kCloseButtonStates.
+    std::vector<Frame> close_x_;
     Frame panel_;       ///< Dialog_PartyInfo, what changes made see-through
     Frame other_;       ///< Party_King_Other's red frame round a member's panel, its crown left out
     Frame mine_;        ///< Party_King_My's red frame round the player's own, its crown left out
@@ -240,22 +344,31 @@ private:
 /// as a player alone; past a screen's edge reads black, which is no panel.
 bool party_frame_trusted(bool from_screen, void* window);
 
+/// Whether all of frame `f` of `window` is the game's own pixels, as
+/// PartyHudReader::read takes `whole_seen`: one the game drew itself always;
+/// one read off the screen only when the whole of the game's picture -- `f`,
+/// its client area -- is on a screen with nothing over any of it, GoBot's own
+/// window included. Being only beside the game, GoBot's window is no matter.
+/// `in_the_way` names the program over it, "taskbar", or "off the screen",
+/// as AutoLogin::part_seen does.
+bool party_frame_whole(bool from_screen, void* window, const Frame& f, std::string* in_the_way = nullptr);
+
 /// Whether an invite can work now, by what the HUD says, as GoC's chat
 /// invites go by its party list ("Bỏ qua: Party đã đầy (6/6).", "Đang trong
 /// party nhưng không phải chủ party."):
 ///
 /// - a party seen full: no, ticked or not;
 /// - with `always_leader` ("Chỉ mời khi đang làm chủ tổ đội") ticked, by the
-///   crown, as the player decided on 2026-10-19: yes only when the player's
-///   own crown is seen. No for a member under another member's crown, for a
-///   party with no crown seen on any panel, for a HUD that could not be
-///   read, and for a player read as alone: no crown is seen there at all,
-///   and a member whose party's panels are under another window reads as
-///   alone too -- the screen cannot tell the two apart. Each says why;
+///   crown, as the player decided on 2026-10-19: yes when the player's own
+///   crown is seen, and yes for a player surely alone (PartyHud::sure_alone)
+///   -- the invite starts a party the player leads, as GoC's does. No for a
+///   member under another member's crown, for a party with no crown seen on
+///   any panel, for a HUD that could not be read, and for a player read as
+///   alone but not surely: a member whose party's panels are all hidden
+///   reads as alone too. Each says why;
 /// - with the tick off, anything but full -- alone, leading, a member, a
 ///   party whose leader could not be told, or a HUD that could not be read --
-///   yes, as GoBot invited before it read the HUD. An invite from alone,
-///   which starts a party the player leads, goes only with the tick off.
+///   yes, as GoBot invited before it read the HUD.
 struct PartyGate {
     bool        allowed = true;
     std::string reason_vi;          ///< why not, for the screen; empty when allowed
@@ -272,10 +385,15 @@ inline const char* const kUnread = "không đọc được khung tổ đội";
 inline const char* const kNoCrown = "Đang trong tổ đội nhưng không thấy vương miện chủ tổ đội ở ô nào";
 /// Ticked, and the HUD not read: the player's own crown was not seen.
 inline const char* const kUnreadNoCrown = "Không đọc được khung tổ đội nên không thấy vương miện của bạn";
-/// Ticked, and read as alone: no crown at all, and no telling alone from a
-/// party whose panels are under a window.
-inline const char* const kAloneNoCrown =
-    "Không thấy vương miện chủ tổ đội của bạn (chưa có tổ đội, hoặc khung tổ đội bị che)";
+/// Ticked, and read as alone but not surely: something up could be hiding a
+/// party's panels. Followed by what, in brackets.
+inline const char* const kAloneUnsure = "Có vẻ chưa có tổ đội, nhưng chưa chắc";
+/// What, for each of the things PartyHudReader::read looks for.
+inline const char* const kDoubtHidden = "một phần màn hình game bị cửa sổ khác che hoặc nằm ngoài màn hình";
+inline const char* const kDoubtWindow = "đang có một cửa sổ mở trong game, có thể che khung tổ đội";
+inline const char* const kDoubtTooltip = "có khung chú thích che bên trái màn hình";
+inline const char* const kDoubtPlain = "chỗ khung tổ đội đầu tiên bị một mảng một màu che";
+inline const char* const kDoubtNoPictures = "thiếu hình nút đóng cửa sổ của game để biết có cửa sổ nào đang mở không";
 } // namespace party_text
 
 /// "Tổ đội: một mình", "Tổ đội: thành viên (3/6)", "Tổ đội: chủ tổ đội (3/6)",

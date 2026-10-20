@@ -1,10 +1,12 @@
 #include "gobot/party_hud.hpp"
 #include "gobot/auto_login.hpp"
+#include "gobot/bag.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <iterator>
 #include <unordered_map>
 
@@ -182,6 +184,16 @@ bool PartyHudReader::load(const TemplateStore& store, std::string* missing) {
             if (kSealSlot.contains(kCrown.x + x, kCrown.y + y)) alpha(own_crown_, x, y) = 0;
     landmark_ = *plate;
     strip_ = *strip;
+    // The close buttons, at rest and in their other states, for telling a
+    // player alone for sure: not needed for anything else, so a store without
+    // them reads as before. All of them or none: a drawing not looked for is
+    // a window that may be open.
+    close_x_.clear();
+    for (const char* name : bag::kCloseButtons)
+        if (const Frame* x = store.get(name)) close_x_.push_back(*x);
+    for (const char* name : kCloseButtonStates)
+        if (const Frame* x = store.get(name)) close_x_.push_back(*x);
+    if (close_x_.size() != std::size(bag::kCloseButtons) + std::size(kCloseButtonStates)) close_x_.clear();
     ready_ = true;
     return true;
 }
@@ -209,6 +221,14 @@ bool PartyHudReader::load_pictures(TemplateStore& into, const std::string& templ
             return false;
         }
     }
+    // The close buttons as well, when they are there: only for telling a
+    // player alone for sure, which is never said without them.
+    const auto load_if_there = [&](const char* name) {
+        Frame f;
+        if (TemplateStore::load_one(name, templates_ini, f)) into.put(name, f);
+    };
+    for (const char* name : bag::kCloseButtons) load_if_there(name);
+    for (const char* name : kCloseButtonStates) load_if_there(name);
     return true;
 }
 
@@ -218,6 +238,16 @@ bool party_frame_trusted(bool from_screen, void* window) {
     // with GoBot's own window beside the game, or in front of it but over
     // another part, the panels down the left are the game's own pixels.
     return window != nullptr && AutoLogin::part_seen(window, PartyHudReader::kArea);
+}
+
+bool party_frame_whole(bool from_screen, void* window, const Frame& f, std::string* in_the_way) {
+    if (in_the_way) in_the_way->clear();
+    if (!from_screen) return true;
+    // All of it, not only the panels' part: a window of the game over the
+    // panels has its close button somewhere right of them -- as far right as
+    // the window is wide -- and the frame has to show it wherever it is.
+    return window != nullptr && f.valid() &&
+           AutoLogin::part_seen(window, ScreenRect{ 0, 0, f.width, f.height }, in_the_way);
 }
 
 bool PartyHudReader::bag_window(const Frame& f, ScreenRect& out) const {
@@ -233,7 +263,7 @@ bool PartyHudReader::bag_window(const Frame& f, ScreenRect& out) const {
     return true;
 }
 
-PartyHud PartyHudReader::read(const Frame& f, bool trusted) const {
+PartyHud PartyHudReader::read(const Frame& f, bool trusted, bool whole_seen) const {
     PartyHud hud;
     if (!ready_) {
         hud.why = "the party pictures are not loaded";
@@ -360,7 +390,124 @@ PartyHud PartyHudReader::read(const Frame& f, bool trusted) const {
               : hud.panels.empty()  ? PartyState::Alone
               : led_by_other        ? PartyState::Member
                                     : PartyState::InParty;
+    if (hud.state == PartyState::Alone) judge_alone(f, whole_seen, hud);
     return hud;
+}
+
+bool PartyHudReader::tooltip_edge(const Frame& f, const ScreenRect& area, ScreenRect* at) {
+    const ScreenRect a = clamp_to(f, area);
+    if (a.w < 3 || a.h < 3) return false;
+    // Which of the border's three colours each pixel is, if any: 1 outer,
+    // 2 middle, 3 inner, 0 none.
+    const auto is_colour = [](const std::uint8_t* p, std::uint32_t rgb) {
+        const int r = static_cast<int>((rgb >> 16) & 0xFF), g = static_cast<int>((rgb >> 8) & 0xFF),
+                  b = static_cast<int>(rgb & 0xFF);
+        return std::abs(p[2] - r) <= kTooltipTolerance && std::abs(p[1] - g) <= kTooltipTolerance &&
+               std::abs(p[0] - b) <= kTooltipTolerance;
+    };
+    std::vector<std::uint8_t> kind(static_cast<std::size_t>(a.w) * a.h, 0);
+    for (int y = 0; y < a.h; ++y)
+        for (int x = 0; x < a.w; ++x) {
+            const std::uint8_t* p = &f.pixels[(static_cast<std::size_t>(a.y + y) * f.width + a.x + x) * 4];
+            kind[static_cast<std::size_t>(y) * a.w + x] = is_colour(p, kTooltipOuter)    ? 1
+                                                        : is_colour(p, kTooltipMiddle) ? 2
+                                                        : is_colour(p, kTooltipInner)  ? 3
+                                                                                       : 0;
+        }
+    const auto k = [&](int x, int y) { return kind[static_cast<std::size_t>(y) * a.w + x]; };
+    // The three colours in a row from (x, y), a step of (dx, dy) apart, outer
+    // to inner or inner to outer: the border's width, crossed.
+    const auto border_at = [&](int x, int y, int dx, int dy) {
+        const int c1 = k(x, y), c2 = k(x + dx, y + dy), c3 = k(x + 2 * dx, y + 2 * dy);
+        return (c1 == 1 && c2 == 2 && c3 == 3) || (c1 == 3 && c2 == 2 && c3 == 1);
+    };
+    // A left or right edge: the border crossed side to side, down a run of
+    // rows at least kTooltipRun long.
+    for (int x = 0; x + 2 < a.w; ++x) {
+        int run = 0;
+        for (int y = 0; y < a.h; ++y) {
+            run = border_at(x, y, 1, 0) ? run + 1 : 0;
+            if (run >= kTooltipRun) {
+                if (at) *at = ScreenRect{ a.x + x, a.y + y - run + 1, 3, run };
+                return true;
+            }
+        }
+    }
+    // A top or bottom edge: the border crossed top to bottom, along a run of
+    // columns as long.
+    for (int y = 0; y + 2 < a.h; ++y) {
+        int run = 0;
+        for (int x = 0; x < a.w; ++x) {
+            run = border_at(x, y, 0, 1) ? run + 1 : 0;
+            if (run >= kTooltipRun) {
+                if (at) *at = ScreenRect{ a.x + x - run + 1, a.y + y, run, 3 };
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void PartyHudReader::judge_alone(const Frame& f, bool whole_seen, PartyHud& hud) const {
+    hud.sure_alone = false;
+    hud.alone_doubt.clear();
+    hud.alone_doubt_vi.clear();
+    const auto doubt = [&](const std::string& en, const char* vi) {
+        hud.alone_doubt = en;
+        hud.alone_doubt_vi = vi;
+    };
+    if (close_x_.empty()) {
+        doubt("no pictures of the game's close buttons, so no window can be ruled out", party_text::kDoubtNoPictures);
+        return;
+    }
+    // Part of the frame is not the game: another program's window over it,
+    // or the screen's edge. A window of the game over the panels could have
+    // its close button there, where nothing below would find it.
+    if (!whole_seen) {
+        doubt("part of the game's picture is under another window or off the screen, where the close button of "
+              "a window of the game could be",
+              party_text::kDoubtHidden);
+        return;
+    }
+    // Something in one colour laid over the first member's place: the
+    // cheapest look, first.
+    const ScreenRect slot = clamp_to(f, kFirstSlot);
+    if (!slot.valid() || plain_share(f, slot) >= kFirstSlotPlain) {
+        doubt("the first member's place is one plain colour: something over it", party_text::kDoubtPlain);
+        return;
+    }
+    ScreenRect at;
+    if (tooltip_edge(f, kTooltipArea, &at)) {
+        doubt("a tooltip's edge at " + std::to_string(at.x) + "," + std::to_string(at.y) +
+                  ", over where the party's panels go",
+              party_text::kDoubtTooltip);
+        return;
+    }
+    // Any window of the game, anywhere: each drawing of a close button, at
+    // rest, under the pointer and held down, on its own thread, as the trash
+    // pass looks for them.
+    std::vector<std::future<TemplateMatcher::Match>> looks;
+    const ScreenRect all{ 0, 0, f.width, f.height };
+    for (const Frame& x : close_x_)
+        looks.push_back(std::async(std::launch::async, [&f, all, &x] {
+            return f.width >= x.width && f.height >= x.height ? TemplateMatcher::find(f, all, x, kWindowXScore)
+                                                              : TemplateMatcher::Match{};
+        }));
+    bool window = false;
+    for (auto& look : looks) {
+        const TemplateMatcher::Match m = look.get();
+        if (m.found && !window) {
+            window = true;
+            at = m.at;
+        }
+    }
+    if (window) {
+        doubt("a window of the game is open (a close button at " + std::to_string(at.x) + "," + std::to_string(at.y) +
+                  "), which could be over the party's panels",
+              party_text::kDoubtWindow);
+        return;
+    }
+    hud.sure_alone = true;
 }
 
 PartyGate party_invite_gate(const PartyHud& hud, bool always_leader) {
@@ -379,13 +526,18 @@ PartyGate party_invite_gate(const PartyHud& hud, bool always_leader) {
         case PartyState::Leader:
             return g;
         case PartyState::Alone:
-            // No crown at all. Truly alone, an invite would start a party
-            // the player leads -- but a member whose party's panels are under
-            // a window that is not the bag reads as alone too, and would
-            // invite while somebody else leads.
+            // Surely alone: the invite starts a party the player leads, as
+            // GoC's does (the player's decision of 2026-10-19). Read as alone
+            // and not surely, it may be a member whose party's panels are all
+            // hidden -- under a window, a tooltip, or a window whose X lies
+            // where the frame does not show the game -- who would invite while
+            // somebody else leads.
+            if (hud.sure_alone) return g;
             g.allowed = false;
-            g.reason_vi = party_text::kAloneNoCrown;
-            g.reason_en = "no crown is seen (alone, or the party's panels are hidden)";
+            g.reason_vi = std::string(party_text::kAloneUnsure) +
+                          (hud.alone_doubt_vi.empty() ? std::string() : " (" + hud.alone_doubt_vi + ")");
+            g.reason_en = "read as alone, but not surely" +
+                          (hud.alone_doubt.empty() ? std::string() : ": " + hud.alone_doubt);
             return g;
         case PartyState::Member:
             g.allowed = false;
@@ -441,6 +593,8 @@ std::string party_hud_text(const PartyHud& hud) {
     std::snprintf(buf, sizeof buf, " %s%d/%d%s", hud.covered ? "at least " : "", hud.size, kPartyMax,
                   hud.full ? ", full" : "");
     s += buf;
+    if (hud.state == PartyState::Alone)
+        s += hud.sure_alone ? std::string(", surely") : "; not surely alone: " + hud.alone_doubt;
     s += "; own panel: " + mark_text(hud.own_crown, hud.own_frame) + (hud.own_leader ? ", leads" : "");
     if (hud.covered) s += "; some of the panels hidden";
     for (const PartyPanel& p : hud.panels) {

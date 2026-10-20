@@ -340,6 +340,22 @@ void GuiApp::simple_style_popups() {
 // ------------------------------------------------------- the checklist
 
 void GuiApp::simple_jump_checklist() {
+    // The walker's jump key, hunt.ini's [Move] one: no box here sets it, and
+    // a file from before it shipped as ↑ has Space, the game's attack. Said
+    // whenever it would attack rather than jump, fighting ticked or not; the
+    // player's file is left as it is.
+    {
+        const std::string walk = JumpCheck::walk_key_warning_vi(nav_config_.jump_key, hunt_config_.attack_key);
+        if (!walk.empty()) {
+            mark(Mark::Wait);
+            ImGui::SameLine();
+            label(("Phím nhảy khi đi tới điểm đã lưu là " + key_text(nav_config_.jump_key) + ": sẽ đánh chứ không "
+                   "nhảy").c_str());
+            ImGui::Indent(mark_indent());
+            hint(walk.c_str());
+            ImGui::Unindent(mark_indent());
+        }
+    }
     // Only where it matters: fighting ticked, and the hop wanted.
     if (!hunt_config_.enabled || !hunt_config_.jump_to_reach) return;
     StyleUi& ui = style_ui();

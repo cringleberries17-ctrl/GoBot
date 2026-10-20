@@ -2,12 +2,20 @@
 // with the trash pass, before anything on Tiêu Dùng is deleted.
 //
 // On a pretend game: the bag on Tiêu Dùng with items in it, the bin, and what a
-// right-click on a slot brings up -- the registration question, which here is
-// a picture made for the test (no frame of the live one exists yet), the bin's
-// question, the revive question, a question with other words, a message with
-// only Xác Nhận, or nothing. Every click, right-click, drag and key goes to the
-// pretend game and is counted; nothing reaches the desktop, and the time is the
-// pretend game's own.
+// right-click on a slot brings up -- the registration question, the live
+// client's own picture of it (grabbed/fragment_register, cut on 2026-10-19),
+// with the monster book it opens with it, drawn from the book's two pictures;
+// or the bin's question, the revive question, the same box with other words, a
+// message with only Xác Nhận, or nothing. The book stays open after the
+// question is answered, as on the live client, until its X is clicked. Every
+// click, right-click, drag and key goes to the pretend game and is counted;
+// nothing reaches the desktop, and the time is the pretend game's own.
+//
+// On cuts of the live client's frames (testdata\round7 beside this test: the
+// question box, the book's tab and X, the ESC menu, the bin's own dialog --
+// small parts, never a whole frame, none with a name in it), each put back
+// where it was on a frame of the client's size: what the pass goes by, read
+// off what the live client drew.
 //
 // And on real frames of the player's bag, for which slots are fragments: the
 // only things the pass right-clicks, and the only cuts the tab offers "Dùng"
@@ -132,11 +140,15 @@ void print_number(Frame& f, int x, int y, const std::string& text, const std::st
     }
 }
 
+/// The panel of words in the bin's pictures, and in the registration
+/// question's -- the live box a line taller -- as bag.cpp measures them.
+const ScreenRect kBinPanel{ 20, 12, 158, 28 };
+const ScreenRect kRegisterPanel{ 17, 11, 168, 41 };
+
 /// Words of a question, as white strokes on the panel's dark ground: a
 /// different pattern for each `seed`, so that one question's words are not
 /// another's.
-void write_words(Frame& pic, int seed) {
-    const ScreenRect panel{ 20, 12, 158, 28 };
+void write_words(Frame& pic, int seed, const ScreenRect& panel = kRegisterPanel) {
     fill(pic, panel, 33, 35, 41);
     for (int i = 0; i < 26; ++i) {
         const int x = panel.x + 3 + i * 6 + (i * seed) % 3;
@@ -190,9 +202,10 @@ struct Clock {
 
 struct Kit {
     TemplateStore bare;         ///< the pictures a pass needs, without the registration question's
-    TemplateStore store;        ///< the same with it: a picture made for the test
-    Frame question, other;      ///< the registration question, and a question with other words
+    TemplateStore store;        ///< the same with it: the live client's, as it ships
+    Frame question, other;      ///< the registration question, and the same box with other words
     Frame close_x;              ///< the client's close button, as the bag and Kho Cash wear it
+    Frame book_tab, book_x;     ///< the monster book's first tab and its X, as they ship
     CountReader counts;
     std::string font_dir;
     bool ok = false;
@@ -206,7 +219,7 @@ Kit& kit() {
         for (const char* name : { "grabbed/inventory", "inven/0/trash_can", "grabbed/confirm_button",
                                   "grabbed/del_item_confirm_1", "grabbed/del_item_confirm_2", "grabbed/dialog_ok",
                                   "grabbed/hoisinh_confirm", bag::kCloseButtons[0], bag::kCloseButtons[1],
-                                  bag::kCloseButtons[2] }) {
+                                  bag::kCloseButtons[2], bag::kBookTitle, bag::kBookClose }) {
             Frame f;
             if (!TemplateStore::load_one(name, ini, f)) {
                 k.why = name;
@@ -216,16 +229,21 @@ Kit& kit() {
             k.store.put(name, f);
         }
         k.close_x = *k.store.get(bag::kCloseButtons[0]);
+        k.book_tab = *k.store.get(bag::kBookTitle);
+        k.book_x = *k.store.get(bag::kBookClose);
         k.font_dir = GlyphFont::default_dir();
         if (k.font_dir.empty() || !k.counts.load(k.font_dir)) {
             k.why = "the game's digits";
             return true;
         }
-        // The registration question as the game's one dialog frame draws a
-        // question: the bin's question with other words in its panel.
-        k.question = *k.store.get("grabbed/del_item_confirm_1");
-        write_words(k.question, 1);
-        k.other = *k.store.get("grabbed/del_item_confirm_1");
+        // The registration question as the live client draws it, and the
+        // same box with other words in its panel: a question GoBot has no
+        // picture of.
+        if (!TemplateStore::load_one(bag::kRegisterDialog, ini, k.question)) {
+            k.why = bag::kRegisterDialog;
+            return true;
+        }
+        k.other = k.question;
         write_words(k.other, 4);
         k.store.put(bag::kRegisterDialog, k.question);
         k.ok = true;
@@ -291,6 +309,12 @@ struct Pretend {
     /// back one slot -- which the live client is not known to do, and which a
     /// pass must not be fooled by if it does.
     bool compacts = false;
+    /// A right-click that brings up a question opens the monster book with
+    /// it, as on the live client, and the book stays open, whatever the
+    /// answer, until a click on its X -- one that does nothing with
+    /// `book_sticks`.
+    bool book_opens = true;
+    bool book_sticks = false;
     Clock time;
 
     // What is up.
@@ -298,15 +322,28 @@ struct Pretend {
     int about = -1;             ///< the item the question or the bin is about
     Frame shown;                ///< the question's picture
     ScreenRect shown_pair;      ///< its two buttons, where they are on the screen
+    bool book = false;          ///< the monster book is open
+    bool book_without_x = false;    ///< drawn without its X, as with the mouse held down on it
+    /// Whether the book was open at each right-click, in order.
+    std::vector<bool> book_at_right_click;
 
     static constexpr int kQX = 600, kQY = 120;      ///< where questions come up
     static constexpr int kBX = 600, kBY = 330;      ///< where the bin's quantity dialog comes up
+    /// Where the book's tab is drawn: clear of the bag, its X and the
+    /// questions, its X where the live client has it from the tab.
+    static constexpr int kTabX = 40, kTabY = 10;
+    static ScreenRect book_x_rect() {
+        const Frame& x = kit().book_x;
+        return ScreenRect{ kTabX + bag::kBookXDx, kTabY + bag::kBookXDy, x.width, x.height };
+    }
 
     // What was done to it.
     int right_clicks = 0, confirms = 0, cancels = 0, wrong_confirms = 0, notice_clicks = 0;
     int drags = 0, bin_confirms = 0, keys = 0, slot_clicks = 0;
+    int book_clicks = 0, book_closes = 0;
     std::vector<std::pair<int, int>> right_at;
     std::string events;         ///< R: a right-click, U: a registration, D: a drag, X: a deletion
+    std::string seq;            ///< the same, and B where the book was closed
 
     ScreenRect slot_rect(int s) const { return v.slots(l)[static_cast<std::size_t>(s)]; }
     /// A question shown where questions come up, and where its two buttons
@@ -360,6 +397,11 @@ struct Pretend {
             if (it.smudged) fill(f, ScreenRect{ s.x + 4, s.y + 4, 7, 6 }, 250, 250, 250);
         }
         if (up == Up::InBin || up == Up::BinAsking) paint_item(f, ScreenRect{ v.trash.x - 4, v.trash.y - 2, 24, 26 }, 6);
+        if (book) {
+            blit(f, k.book_tab, kTabX, kTabY);
+            const ScreenRect x = book_x_rect();
+            if (!book_without_x) blit(f, k.book_x, x.x, x.y);
+        }
         if (up == Up::Question || up == Up::Notice) blit(f, shown, kQX, kQY);
         if (up == Up::BinAsking) {
             blit(f, *k.store.get("grabbed/del_item_confirm_2"), kBX, kBY);
@@ -385,7 +427,9 @@ struct Pretend {
         h.right_click = [this](int x, int y) {
             ++right_clicks;
             right_at.emplace_back(x, y);
+            book_at_right_click.push_back(book);
             events += 'R';
+            seq += 'R';
             Item* it = at(x, y);
             if (it == nullptr || up != Up::None) return true;
             const Kit& k = kit();
@@ -402,10 +446,21 @@ struct Pretend {
                     left(static_cast<std::size_t>(about));
                     break;
             }
+            if (up == Up::Question && book_opens) book = true;
             return true;
         };
         h.click = [this](int x, int y) {
             if (at(x, y) != nullptr) ++slot_clicks;
+            // The book's X, with nothing in front of it: the book closes.
+            if (book && !book_without_x && up == Up::None && book_x_rect().contains(x, y)) {
+                ++book_clicks;
+                if (!book_sticks) {
+                    book = false;
+                    ++book_closes;
+                    seq += 'B';
+                }
+                return true;
+            }
             if (up == Up::Notice) {
                 const ScreenRect n{ kQX, kQY, shown.width, shown.height };
                 if (n.contains(x, y)) ++notice_clicks;
@@ -420,6 +475,7 @@ struct Pretend {
                         if (registers) {
                             --items[static_cast<std::size_t>(about)].count;
                             events += 'U';
+                            seq += 'U';
                             left(static_cast<std::size_t>(about));
                         }
                     } else {
@@ -444,6 +500,7 @@ struct Pretend {
                     ++bin_confirms;
                     items[static_cast<std::size_t>(about)].count = 0;
                     events += 'X';
+                    seq += 'X';
                     left(static_cast<std::size_t>(about));
                 }
                 up = Up::None;
@@ -453,6 +510,7 @@ struct Pretend {
         h.drag = [this](int fx, int fy, int tx, int ty) {
             ++drags;
             events += 'D';
+            seq += 'D';
             const ScreenRect near_bin{ v.trash.x - 4, v.trash.y - 4, v.trash.w + 8, v.trash.h + 8 };
             Item* it = at(fx, fy);
             if (up == Up::None && it != nullptr && near_bin.contains(tx, ty)) {
@@ -496,6 +554,9 @@ struct Pass {
     Pass() {
         settings.tabs[0] = settings.tabs[1] = settings.tabs[3] = settings.tabs[4] = false;
         settings.tabs[kUseTab] = true;
+        // What these tests try is the pass with registering switched on;
+        // off, as it ships, is tried on its own (test_switch).
+        settings.use_fragments = true;
     }
     /// An item in slot `slot` with `count` in its stack, on the list for
     /// `action`. Its picture is taken to be drawn like a fragment icon, as
@@ -546,15 +607,19 @@ void test_pictures() {
     // A picture with no words, or its buttons elsewhere, is no use.
     {
         TemplateStore s = k.bare;
-        Frame blank = *k.bare.get("grabbed/del_item_confirm_1");
-        fill(blank, ScreenRect{ 20, 12, 158, 28 }, 33, 35, 41);
+        Frame blank = k.question;
+        fill(blank, kRegisterPanel, 33, 35, 41);
         s.put(bag::kRegisterDialog, blank);
         check(!bag::can_check(s, TrashList::Action::Use), "a picture with nothing in its panel of words: not used");
-        Frame moved = scene(199, 77, 30);
-        blit(moved, k.question, 0, 0);
-        fill(moved, ScreenRect{ 95, 45, 104, 32 }, 216, 216, 216);
+        Frame moved = k.question;
+        fill(moved, ScreenRect{ 100, 52, 100, 30 }, 216, 216, 216);
         s.put(bag::kRegisterDialog, moved);
         check(!bag::can_check(s, TrashList::Action::Use), "nor one whose two buttons are not where a question has them");
+        // The bin's own question in the registration's place: its buttons
+        // are not where the registration question's are, so its words
+        // would be looked for in the wrong place.
+        s.put(bag::kRegisterDialog, *k.bare.get("grabbed/del_item_confirm_1"));
+        check(!bag::can_check(s, TrashList::Action::Use), "nor a picture laid out as the bin's question is");
     }
     Frame f = scene(1024, 768, 60);
     blit(f, k.question, 100, 100);
@@ -1444,7 +1509,9 @@ void test_named_questions() {
     section("Dùng: a question that names the piece, and the name see-through in its picture (R2B-6)");
     if (skip_without_kit()) return;
     const Kit& k = kit();
-    const Frame& frame = *k.store.get("grabbed/del_item_confirm_1");
+    // The live question names no piece; one that did -- as a later client
+    // might -- is drawn in its box, a name in its words.
+    const Frame& frame = k.question;
     const Frame a = named_question(frame, 1), b = named_question(frame, 2);
     {
         // The picture cut from piece A's question, name and all: only A's
@@ -1499,26 +1566,27 @@ void test_named_questions() {
     {
         // Too little left to tell a question by: not used.
         TemplateStore s = k.bare;
-        s.put(bag::kRegisterDialog, see_through(a, ScreenRect{ 20, 12, 150, 28 }));
+        s.put(bag::kRegisterDialog, see_through(a, ScreenRect{ 17, 11, 162, 41 }));
         check(!bag::can_check(s, TrashList::Action::Use), "nearly all the words see-through: not used");
     }
     {
-        // Words that another question has: the bin's own question as the
-        // registration's picture, and the registration's frame with the
-        // revive question's words in it -- what a cut down to "Bạn có muốn"
-        // and little else could match. Neither is used.
-        TemplateStore s = k.bare;
-        s.put(bag::kRegisterDialog, frame);
-        check(!bag::can_check(s, TrashList::Action::Use), "the bin's own question as the picture: not used");
-        const Frame& revive = *k.store.get("grabbed/hoisinh_confirm");
-        Frame mixed = k.question;
-        for (int y = 12; y < 40; ++y)
-            for (int x = 20; x < 178; ++x)
-                for (int c = 0; c < 4; ++c)
-                    mixed.pixels[(static_cast<std::size_t>(y) * mixed.width + x) * 4 + c] =
-                        revive.pixels[(static_cast<std::size_t>(y) * revive.width + x) * 4 + c];
-        s.put(bag::kRegisterDialog, mixed);
-        check(!bag::can_check(s, TrashList::Action::Use), "words the revive question has: not used");
+        // Words that another question has: the registration's box with the
+        // revive question's own pixels where its words are looked for, and
+        // the same with the bin's -- what a cut down to "Bạn có muốn" and
+        // little else could match. Neither is used.
+        for (const char* name : { "grabbed/hoisinh_confirm", "grabbed/del_item_confirm_1" }) {
+            TemplateStore s = k.bare;
+            const Frame& other = *k.store.get(name);
+            Frame mixed = k.question;
+            const ScreenRect& p = kRegisterPanel;
+            for (int y = p.y; y < p.bottom() && y < other.height; ++y)
+                for (int x = p.x; x < p.right() && x < other.width; ++x)
+                    for (int c = 0; c < 4; ++c)
+                        mixed.pixels[(static_cast<std::size_t>(y) * mixed.width + x) * 4 + c] =
+                            other.pixels[(static_cast<std::size_t>(y) * other.width + x) * 4 + c];
+            s.put(bag::kRegisterDialog, mixed);
+            check(!bag::can_check(s, TrashList::Action::Use), std::string("words ") + name + " has: not used");
+        }
     }
 }
 
@@ -1659,6 +1727,8 @@ void test_settings() {
     check(shipped.load(std::string(GOBOT_SOURCE_DIR) + "/configs/trash.ini") && shipped.use_ids.empty() &&
               shipped.max_uses_per_run == 20 && text.find("\nuse=") == std::string::npos,
           "the shipped trash.ini uses nothing, at most 20 a pass");
+    check(!shipped.use_fragments && text.find("\nuse_fragments=false\n") != std::string::npos,
+          "and ships registering off: use_fragments=false");
 #endif
 
     // The list: an id on both lists is one item, used and then deleted; a
@@ -1694,6 +1764,463 @@ void test_settings() {
     check(!hp_used, "a potion on the Dùng list is not one to use, nor anything drawn like a fragment that is not one");
 }
 
+// ---------------------------------------------------- round 7: the live question
+
+/// Where the cuts of the live frames are: beside this test, else the copy
+/// handed over with them. Empty when neither is here.
+std::string live_cuts_dir() {
+    for (const std::string& d : { exe_relative("testdata\\round7"),
+                                  std::string("C:\\Users\\player\\source\\GoBot\\build\\handoff\\round7\\coder\\testdata") })
+        if (!files_in(d, "*.png").empty()) return d;
+    return {};
+}
+
+/// The cut `what` of a live frame put back where it was, on `canvas`: its
+/// place is in its file name, <what>_<x>_<y>.png. False when it is not there.
+bool put_back(Frame& canvas, const std::string& dir, const std::string& what, ScreenRect* where = nullptr) {
+    for (const std::string& name : files_in(dir, (what + "_*.png").c_str())) {
+        int x = 0, y = 0;
+        // The two numbers after what_, before .png.
+        if (std::sscanf(name.c_str() + what.size() + 1, "%d_%d.png", &x, &y) != 2) continue;
+        Frame cut;
+        if (!load_png(dir + "\\" + name, cut) || !cut.valid()) return false;
+        blit(canvas, cut, x, y);
+        if (where) *where = ScreenRect{ x, y, cut.width, cut.height };
+        return true;
+    }
+    return false;
+}
+
+void test_live_question() {
+    section("Dùng: the live client's registration question and monster book, on cuts of its frames");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    check(k.question.width == 204 && k.question.height == 86 && bag::can_check(k.store, TrashList::Action::Use),
+          "the shipped picture, 204x86, tells the registration question from the bin's, the revive question, "
+          "dropping and selling");
+    const std::string dir = live_cuts_dir();
+    if (dir.empty()) {
+        std::printf("  [skip] no cuts of the live frames here (testdata\\round7)\n");
+        return;
+    }
+    // Each cut back where the live client drew it, on a frame of its size.
+    const struct {
+        const char* what;
+        std::size_t dialogs;
+        bool        registers;
+        const char* said;
+    } cases[] = {
+        { "question_rest", 1, true, "the question, its buttons at rest (fragq_A_085)" },
+        { "question_hover", 1, true, "the question, the pointer on Hủy Bỏ (fragq_A_030)" },
+        { "question_book", 1, true, "the question in the second recording (book_A_144)" },
+        { "question_pressed", 0, false, "the question, the mouse button down on Hủy Bỏ: no pair, no dialog "
+                                        "(fragq_A_108)" },
+        { "bin_question", 1, false, "the bin's own quantity dialog (r1_B_022): the bin's, never the registration's" },
+        { "esc_menu", 0, false, "the ESC menu (book_A_104): no dialog" },
+    };
+    for (const auto& c : cases) {
+        Frame f = scene(1280, 720, 40);
+        if (!put_back(f, dir, c.what)) {
+            std::printf("  [skip] no %s cut here\n", c.what);
+            continue;
+        }
+        const auto dialogs = bag::find_dialogs(f, k.store);
+        std::size_t registers = 0;
+        float words = 0.0f;
+        for (const bag::Dialog& d : dialogs) {
+            registers += d.registers ? 1 : 0;
+            words = std::max(words, d.register_words);
+        }
+        check(dialogs.size() == c.dialogs && (registers == 1) == c.registers,
+              std::string(c.said) + ": " + std::to_string(dialogs.size()) + " dialog(s), " +
+                  std::to_string(registers) + " the registration's, its words " + fixed3(words));
+        if (c.registers) {
+            const bag::Dialog& d = dialogs.front();
+            check(!d.ours() && d.pair.x == 643 && d.pair.y == 373 && words >= 0.99f,
+                  std::string("  its pair at 643,373 and its words at 0.99 or more -- pair at ") +
+                      std::to_string(d.pair.x) + "," + std::to_string(d.pair.y));
+            // Without the picture, the same dialog is nobody's.
+            const auto bare = bag::find_dialogs(f, k.bare);
+            check(bare.size() == 1 && !bare.front().registers && !bare.front().ours(),
+                  "  and without the picture it is no question GoBot answers");
+        }
+        if (std::string(c.what) == "bin_question")
+            check(dialogs.size() == 1 && dialogs.front().ours() && dialogs.front().kind == bag::kCountDialog,
+                  "  taken for the bin's quantity dialog, by its words");
+    }
+
+    // The book: its tab and X back where the live client drew them.
+    {
+        Frame f = scene(1280, 720, 40);
+        const bool drawn = put_back(f, dir, "book_tab") && put_back(f, dir, "book_x_rest");
+        if (!drawn) {
+            std::printf("  [skip] no cuts of the book here\n");
+            return;
+        }
+        const bag::Book b = bag::find_book(f, k.store);
+        check(b.found && b.score >= 0.99f && b.title.x == 306 && b.title.y == 156 && b.has_x && b.x.x == 807 &&
+                  b.x.y == 160 && b.x_score >= 0.99f && b.window.x == 303 && b.window.y == 153,
+              "the book's tab at 306,156 (" + fixed3(b.score) + ") and its X at 807,160 (" + fixed3(b.x_score) +
+                  "), the window from 303,153 -- found at " + std::to_string(b.title.x) + "," +
+                  std::to_string(b.title.y) + ", X at " + std::to_string(b.x.x) + "," + std::to_string(b.x.y));
+        // Looked for again where it was, and not elsewhere.
+        const ScreenRect elsewhere{ 100, 100, b.window.w, b.window.h };
+        check(bag::find_book(f, k.store, &b.window).found && !bag::find_book(f, k.store, &elsewhere).found,
+              "looked for again round its own window: found; round another place: not");
+        // The X is the book's own: no other window.
+        check(!bag::other_window_up(f, k.store, BagView{}, BagLayout{}, nullptr, &b.x) &&
+                  bag::other_window_up(f, k.store, BagView{}, BagLayout{}),
+              "its X is no other window's when it is the book's own, and is one when nothing says so");
+    }
+    for (const char* x : { "book_x_hover", "book_x_pressed" }) {
+        Frame f = scene(1280, 720, 40);
+        if (!put_back(f, dir, "book_tab") || !put_back(f, dir, x)) continue;
+        const bag::Book b = bag::find_book(f, k.store);
+        const bool hover = std::string(x) == "book_x_hover";
+        check(b.found && b.has_x == hover && (!hover || (b.x.x == 807 && b.x.y == 160)),
+              std::string(hover ? "the pointer over its X (book_A_090): the X still found, "
+                                : "the mouse button down on its X (book_A_154): the book, and no X to click, ") +
+                  fixed3(b.x_score));
+    }
+    {
+        // The question up over the book, as a right-click brings them: the
+        // registration question, and no window but the book's own.
+        Frame f = scene(1280, 720, 40);
+        put_back(f, dir, "book_tab");
+        put_back(f, dir, "book_x_rest");
+        put_back(f, dir, "question_rest");
+        const auto dialogs = bag::find_dialogs(f, k.store);
+        const bag::Book b = bag::find_book(f, k.store);
+        check(dialogs.size() == 1 && dialogs.front().registers && b.found && b.has_x &&
+                  !bag::other_window_up(f, k.store, BagView{}, BagLayout{}, nullptr, &b.x),
+              "the question over the book: the registration question, and the book's X the only close button");
+        // The ESC menu beside them: another window.
+        put_back(f, dir, "esc_menu");
+        ScreenRect at;
+        const bool other = bag::other_window_up(f, k.store, BagView{}, BagLayout{}, &at, &b.x);
+        check(other, "and with the ESC menu up as well, another window: its X at " + std::to_string(at.x) + "," +
+                         std::to_string(at.y));
+    }
+    {
+        Frame f = scene(1280, 720, 40);
+        put_back(f, dir, "esc_menu");
+        check(!bag::find_book(f, k.store).found, "the ESC menu is not taken for the book");
+    }
+}
+
+void test_switch() {
+    section("Dùng: its own switch, [Trash] use_fragments, off as shipped -- the picture alone is no switch");
+    if (skip_without_kit()) return;
+    {
+        CleanSettings fresh;
+        check(!fresh.use_fragments, "off unless a file says otherwise");
+    }
+    {
+        // The picture there, the Dùng list filled, the switch off: nothing
+        // right-clicked, and the deletion beside it as ever.
+        Pass p;
+        make_bag(p.game);
+        p.settings.use_fragments = false;
+        p.item(0, 2, 5, TrashList::Action::Use);
+        p.item(3, 7, 2, TrashList::Action::Delete);
+        const auto r = p.run();
+        check(bag::can_check(kit().store, TrashList::Action::Use) && p.game.right_clicks == 0 &&
+                  p.game.confirms == 0 && r.used == 0 && p.game.items[0].count == 5 && p.game.items[1].gone() &&
+                  !p.game.book && p.says("nhưng sẽ không dùng: Dùng đang tắt"),
+              "the picture there and the switch off: no right-click, the piece as it was, the item to delete "
+              "deleted -- " + p.last());
+        Pass q;
+        make_bag(q.game);
+        q.settings.use_fragments = false;
+        q.item(0, 2, 5, TrashList::Action::Use);
+        const auto rq = q.run(true);
+        check(rq.use_matched == 1 && q.game.right_clicks == 0 && q.says("Dùng đang tắt"),
+              "Thử tìm says it would use it, and that the switch is off -- " + q.last());
+    }
+    {
+        // Read from the file: off without the line, on with it, and off again
+        // once the line is gone -- never kept from an earlier reading.
+        const std::string path = temp_path("gobot_use_switch.ini");
+        CleanSettings s;
+        write_all(path, "[Trash]\nenabled=false\n[Items]\nuse=spend/fragment/1103013\n");
+        const bool without = s.load(path) && !s.use_fragments;
+        write_all(path, "[Trash]\nuse_fragments=true\n");
+        const bool on = s.load(path) && s.use_fragments;
+        write_all(path, "[Trash]\nenabled=true\n");
+        const bool off_again = s.load(path) && !s.use_fragments;
+        check(without && on && off_again,
+              "trash.ini without use_fragments: off; use_fragments=true: on; the line taken out again: off");
+        DeleteFileA(path.c_str());
+    }
+}
+
+void test_whole_sequence() {
+    section("Dùng: right-click, the question, Xác Nhận, one less, the book shut, and only then the next slot");
+    if (skip_without_kit()) return;
+    {
+        Pass p;
+        make_bag(p.game);
+        p.item(0, 2, 5, TrashList::Action::Use);        // a stack of five
+        p.item(3, 4, 1, TrashList::Action::Use);        // a single piece, another drawing
+        p.item(5, 7, 2, TrashList::Action::Delete);     // something to delete after
+        const auto r = p.run();
+        check(r.used == 2 && r.deleted == 1 && p.game.items[0].count == 4 && p.game.items[1].gone() &&
+                  p.game.items[2].gone() && r.trouble.empty() && !r.stuck,
+              "both registered -- five to four, the single piece gone -- and the item to delete deleted -- " +
+                  p.last());
+        check(p.game.seq == "RUBRUBDX",
+              "in order: right-click, registered, book shut; right-click, registered, book shut; then the "
+              "deletion -- " + p.game.seq);
+        check(p.game.confirms == 2 && p.game.cancels == 0 && p.game.book_clicks == 2 && p.game.book_closes == 2 &&
+                  !p.game.book && p.game.book_at_right_click == std::vector<bool>{ false, false },
+              "two Xác Nhận, two clicks on the book's X, and no right-click with the book open");
+        check(p.says("đóng Yêu Quái Bách Khoa bằng nút X của nó"), "and it says it shut the book");
+    }
+    {
+        // Each question answered Hủy Bỏ -- words GoBot has no picture of: the
+        // book shut after each, as after a registration, and nothing taken.
+        Pass p;
+        make_bag(p.game);
+        p.game.reply = Pretend::Reply::Other;
+        p.item(0, 2, 5, TrashList::Action::Use);
+        p.item(3, 4, 2, TrashList::Action::Use);
+        const auto r = p.run();
+        check(p.game.seq == "RBRB" && p.game.cancels == 2 && p.game.confirms == 0 && p.game.wrong_confirms == 0 &&
+                  r.used == 0 && r.failed == 2 && p.game.items[0].count == 5 && p.game.items[1].count == 2 &&
+                  !p.game.book,
+              "a question that does not match: Hủy Bỏ, the book shut, the next piece; nothing registered -- " +
+                  p.game.seq);
+    }
+}
+
+void test_book_will_not_close() {
+    section("Dùng: a book that will not close stops the pass, nothing more right-clicked or deleted");
+    if (skip_without_kit()) return;
+    for (const bool no_x : { false, true }) {
+        Pass p;
+        make_bag(p.game);
+        p.debug_dir = temp_path(no_x ? "use_book_no_x" : "use_book_sticks");
+        if (no_x) p.game.book_without_x = true;
+        else      p.game.book_sticks = true;
+        p.item(0, 2, 5, TrashList::Action::Use);
+        p.item(3, 4, 2, TrashList::Action::Use);
+        p.item(5, 7, 2, TrashList::Action::Delete);
+        const auto r = p.run();
+        const std::string want = no_x ? "không thấy nút X" : "không đóng lại khi bấm nút X";
+        check(r.used == 1 && p.game.items[0].count == 4 && p.game.right_clicks == 1 && p.game.items[1].count == 2 &&
+                  p.game.drags == 0 && p.game.items[2].count == 2 && p.game.book &&
+                  r.trouble.find(want) != std::string::npos &&
+                  p.game.book_clicks == (no_x ? 0 : 1) && !files_in(p.debug_dir, "*use_book_open*.png").empty(),
+              std::string(no_x ? "the book's X not to be seen" : "a click on the book's X that does nothing") +
+                  ": the piece registered stays registered, the pass stops, the frame kept, nothing more "
+                  "right-clicked or deleted -- " + r.trouble);
+    }
+    {
+        // A stop just after the registration: the book is left as it is.
+        Pass p;
+        make_bag(p.game);
+        p.item(0, 2, 5, TrashList::Action::Use);
+        p.during = [&p](BagCleaner& c) {
+            if (p.game.confirms == 1) c.cancel();
+        };
+        p.run();
+        check(p.game.book_clicks == 0 && p.game.right_clicks == 1,
+              "a stop after Xác Nhận: nothing more pressed, the book's X neither");
+    }
+}
+
+void test_book_or_window_up() {
+    section("Dùng: the book open beforehand, or a window come up with the question");
+    if (skip_without_kit()) return;
+    {
+        // The book open before the sweep -- the player's, or left by a pass
+        // that stopped: nothing right-clicked, and it is not closed for them.
+        Pass p;
+        make_bag(p.game);
+        p.game.book = true;
+        p.item(0, 2, 5, TrashList::Action::Use);
+        p.item(3, 7, 2, TrashList::Action::Delete);
+        const auto r = p.run();
+        check(p.game.right_clicks == 0 && p.game.book_clicks == 0 && p.game.book && p.game.items[0].count == 5 &&
+                  p.game.items[1].gone() && r.used == 0 && p.says("Yêu Quái Bách Khoa đang mở"),
+              "the book already open: no right-click, the book left open, the deletion as ever -- " + p.last());
+    }
+    {
+        // A window of the game comes up with the question -- its close
+        // button beside the bag: never Xác Nhận, Hủy Bỏ.
+        Pass p;
+        make_bag(p.game);
+        p.item(0, 2, 5, TrashList::Action::Use);
+        bool drawn = false;
+        p.during = [&](BagCleaner&) {
+            if (drawn || p.game.right_clicks != 1) return;
+            drawn = true;
+            blit(p.game.base, kit().close_x, 760, 330);
+        };
+        const auto r = p.run();
+        check(p.game.confirms == 0 && p.game.cancels == 1 && r.used == 0 && p.game.items[0].count == 5 &&
+                  p.says("có một cửa sổ khác đang mở"),
+              "a window come up with the question: Hủy Bỏ, nothing registered -- " + p.last());
+    }
+}
+
+// ------------------------------------- round 7 review: the live question edited
+
+/// The live question's first and third lines of words, in the shipped
+/// picture's own pixels: "Bạn có muốn đăng ký mảnh quái vật vào" and "ng?",
+/// clear of the panel's corner ornaments.
+const ScreenRect kLineOne{ 30, 12, 140, 13 };
+const ScreenRect kLineThree{ 40, 42, 120, 10 };
+
+/// The commonest colour of `r` of `pic`, as red, green, blue: a panel's
+/// ground.
+void ground_of(const Frame& pic, const ScreenRect& r, int& red, int& green, int& blue) {
+    std::vector<std::pair<std::uint32_t, int>> seen;
+    for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) {
+            const std::uint8_t* p = &pic.pixels[(static_cast<std::size_t>(y) * pic.width + x) * 4];
+            const std::uint32_t c = (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[1]) << 8) | p[0];
+            auto it = std::find_if(seen.begin(), seen.end(), [c](const auto& s) { return s.first == c; });
+            if (it == seen.end()) seen.emplace_back(c, 1);
+            else ++it->second;
+        }
+    const auto most = std::max_element(seen.begin(), seen.end(),
+                                       [](const auto& a, const auto& b) { return a.second < b.second; });
+    const std::uint32_t c = most == seen.end() ? 0 : most->first;
+    red = static_cast<int>((c >> 16) & 0xFF);
+    green = static_cast<int>((c >> 8) & 0xFF);
+    blue = static_cast<int>(c & 0xFF);
+}
+
+/// Bright pixels -- the words' strokes -- in `r` of `pic`.
+int bright_in(const Frame& pic, const ScreenRect& r) {
+    int n = 0;
+    for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) {
+            const std::uint8_t* p = &pic.pixels[(static_cast<std::size_t>(y) * pic.width + x) * 4];
+            n += (p[0] + p[1] + p[2]) / 3 > 150 ? 1 : 0;
+        }
+    return n;
+}
+
+/// `r` of `from` copied, as it is, to `tx`, `ty` of `to`.
+void copy_block(const Frame& from, const ScreenRect& r, Frame& to, int tx, int ty) {
+    for (int y = 0; y < r.h; ++y)
+        std::copy_n(&from.pixels[(static_cast<std::size_t>(r.y + y) * from.width + r.x) * 4],
+                    static_cast<std::size_t>(r.w) * 4,
+                    &to.pixels[(static_cast<std::size_t>(ty + y) * to.width + tx) * 4]);
+}
+
+/// The live question with its words changed in place, its frame and buttons
+/// as they were: what another question in the same box would look like -- the
+/// one for a piece already registered, or another book's -- each of which the
+/// round 7 review found taken for the registration question at 0.90.
+std::vector<std::pair<std::string, Frame>> edited_questions(const Frame& q) {
+    std::vector<std::pair<std::string, Frame>> out;
+    int r = 0, g = 0, b = 0;
+    ground_of(q, kRegisterPanel, r, g, b);
+    {
+        Frame e = q;
+        fill(e, kLineThree, r, g, b);
+        out.emplace_back("its third line, \"ng?\", gone", e);
+    }
+    {
+        // The eight columns of its first line with the most strokes in them,
+        // blanked: a letter, or a little more.
+        int best_x = kLineOne.x, best = -1;
+        for (int x = kLineOne.x; x + 8 <= kLineOne.right(); ++x) {
+            const int n = bright_in(q, ScreenRect{ x, kLineOne.y, 8, kLineOne.h });
+            if (n > best) {
+                best = n;
+                best_x = x;
+            }
+        }
+        Frame e = q;
+        fill(e, ScreenRect{ best_x, kLineOne.y, 8, kLineOne.h }, r, g, b);
+        out.emplace_back("a letter of its first line taken out (" + std::to_string(best) + " strokes' pixels)", e);
+    }
+    {
+        // 24 columns of its first line over another 24 of it: a short word in
+        // other letters of the same font.
+        Frame e = q;
+        copy_block(q, ScreenRect{ 45, kLineOne.y, 24, kLineOne.h }, e, 120, kLineOne.y);
+        out.emplace_back("a short word of its first line in other letters", e);
+    }
+    {
+        // Two pieces of its first line changing places: the same letters in
+        // another order.
+        Frame e = q;
+        copy_block(q, ScreenRect{ 40, kLineOne.y, 16, kLineOne.h }, e, 120, kLineOne.y);
+        copy_block(q, ScreenRect{ 120, kLineOne.y, 16, kLineOne.h }, e, 40, kLineOne.y);
+        out.emplace_back("two pieces of its first line swapped", e);
+    }
+    return out;
+}
+
+void test_edited_question() {
+    section("Dùng: the live question with its words changed in place gets Hủy Bỏ -- only this question, with these "
+            "words (R7-2)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    {
+        Frame f = scene(1024, 768, 60);
+        blit(f, k.question, 100, 100);
+        const auto ds = bag::find_dialogs(f, k.store);
+        check(ds.size() == 1 && ds.front().registers && ds.front().register_words >= 0.99f,
+              "the question as the live client drew it: the registration question, its words " +
+                  fixed3(ds.empty() ? -1.0f : ds.front().register_words));
+    }
+    // 0.90, what the bin's pictures are taken at, and the registration's was
+    // before the review.
+    int would_have = 0;
+    for (const auto& [what, pic] : edited_questions(k.question)) {
+        Frame f = scene(1024, 768, 60);
+        blit(f, pic, 100, 100);
+        const auto ds = bag::find_dialogs(f, k.store);
+        const bool one = ds.size() == 1;
+        const float words = one ? ds.front().register_words : -1.0f;
+        would_have += one && words >= 0.90f ? 1 : 0;
+        check(one && !ds.front().registers && !ds.front().ours(),
+              what + ": a dialog, not the registration question -- its words " + fixed3(words));
+        // A pass on it: Hủy Bỏ, nothing registered, and the book the
+        // right-click opened shut after it, as after any Hủy Bỏ.
+        Pass p;
+        make_bag(p.game);
+        p.item(2, 3, 4, TrashList::Action::Use);
+        p.game.items[0].ask = pic;
+        const auto r = p.run();
+        check(p.game.cancels == 1 && p.game.confirms == 0 && p.game.wrong_confirms == 0 && r.used == 0 &&
+                  r.failed == 1 && p.game.items[0].count == 4 && p.game.seq == "RB" && !p.game.book && !r.stuck,
+              "  and a pass on it: Hủy Bỏ, nothing registered, the stack of four as it was, the book shut -- " +
+                  p.game.seq + " -- " + p.last());
+    }
+    check(would_have >= 1, std::to_string(would_have) +
+                               " of the four with words at 0.90 or more, which would have been confirmed before");
+
+    // The same on the live frame: the cut of the question at rest put back
+    // where the live client drew it, its third line taken out there.
+    const std::string dir = live_cuts_dir();
+    Frame f = scene(1280, 720, 40);
+    ScreenRect where;
+    if (dir.empty() || !put_back(f, dir, "question_rest", &where)) {
+        std::printf("  [skip] no cut of the live question here (testdata\\round7)\n");
+        return;
+    }
+    // The picture's top-left is 8,8 into the cut.
+    const ScreenRect line{ where.x + 8 + kLineThree.x, where.y + 8 + kLineThree.y, kLineThree.w, kLineThree.h };
+    int r = 0, g = 0, b = 0;
+    ground_of(f, ScreenRect{ where.x + 8 + kRegisterPanel.x, where.y + 8 + kRegisterPanel.y, kRegisterPanel.w,
+                             kRegisterPanel.h },
+              r, g, b);
+    const int strokes = bright_in(f, line);
+    fill(f, line, r, g, b);
+    const auto ds = bag::find_dialogs(f, k.store);
+    check(strokes > 20 && ds.size() == 1 && !ds.front().registers && !ds.front().ours(),
+          "the live cut, its third line taken out where the client drew it (" + std::to_string(strokes) +
+              " strokes' pixels): a dialog, not the registration question -- its words " +
+              fixed3(ds.empty() ? -1.0f : ds.front().register_words));
+}
+
 } // namespace
 
 void test_use(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1717,4 +2244,10 @@ void test_use(void (*check_fn)(bool, const std::string&), void (*section_fn)(con
     test_fragments_only();
     test_save_order();
     test_settings();
+    test_live_question();
+    test_switch();
+    test_whole_sequence();
+    test_book_will_not_close();
+    test_book_or_window_up();
+    test_edited_question();
 }

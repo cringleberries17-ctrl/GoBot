@@ -2296,9 +2296,18 @@ int run_player_list(const Options& o, const AppConfig& app) {
     return 0;
 }
 
+/// Where a look-only command's frame came from: read off the screen or not,
+/// and the game's window it is a picture of -- none for a screenshot named.
+struct FrameFrom {
+    bool  from_screen = false;
+    void* window = nullptr;
+};
+
 /// The frame a look-only command looks at: the screenshot named, or else one
 /// capture of the game. Nothing is pressed and nothing is brought forward.
-bool look_frame(const Options& o, const AppConfig& app, const std::string& png, Frame& f) {
+bool look_frame(const Options& o, const AppConfig& app, const std::string& png, Frame& f,
+                FrameFrom* from = nullptr) {
+    if (from) *from = FrameFrom{};
     if (!png.empty()) {
         if (load_png(png, f) && f.valid()) return true;
         std::fprintf(stderr, "Could not read %s\n", png.c_str());
@@ -2314,6 +2323,7 @@ bool look_frame(const Options& o, const AppConfig& app, const std::string& png, 
         std::fprintf(stderr, "Could not capture the game window.\n");
         return false;
     }
+    if (from) *from = FrameFrom{ capture.from_screen(), input.target_window() };
     if (capture.from_screen() && !input.window_focused())
         std::printf("(read off the screen with the game behind another window: what covers it is "
                     "what is read)\n");
@@ -2373,8 +2383,19 @@ int run_party_hud(const Options& o, const AppConfig& app) {
         return 1;
     }
     Frame f;
-    if (!look_frame(o, app, o.party_hud_image, f)) return 1;
-    const PartyHud hud = reader.read(f);
+    FrameFrom from;
+    if (!look_frame(o, app, o.party_hud_image, f, &from)) return 1;
+    // Trusted, and whole, as the party worker takes a frame of the game: a
+    // screenshot named is taken for the game's own picture of itself.
+    std::string hides;
+    const bool trusted = party_frame_trusted(from.from_screen, from.window);
+    const bool whole = party_frame_whole(from.from_screen, from.window, f, &hides);
+    if (!whole)
+        std::printf("(read off the screen with part of the game %s: alone is never sure on it)\n",
+                    hides == "off the screen" ? "off the screen"
+                                              : ("under " + (hides.empty() ? std::string("another window") : hides))
+                                                    .c_str());
+    const PartyHud hud = reader.read(f, trusted, whole);
     std::printf("party       %s", party_state_name(hud.state));
     if (hud.state == PartyState::Unknown) {
         std::printf(" -- %s\n", hud.why.c_str());
@@ -2394,6 +2415,12 @@ int run_party_hud(const Options& o, const AppConfig& app) {
             std::printf(", crown %.3f, red frame %.3f%s\n", static_cast<double>(p.crown_score),
                         static_cast<double>(p.frame_score), p.leader ? " -- leads" : "");
         }
+        // Alone counts for an invite with the tick only when it is sure.
+        if (hud.state == PartyState::Alone)
+            std::printf("alone       %s\n", hud.sure_alone
+                                                ? "surely: all of the game seen, no window, no tooltip, nothing "
+                                                  "plain over the panels"
+                                                : ("not surely -- " + hud.alone_doubt).c_str());
     }
     for (const bool always : { false, true }) {
         const PartyGate g = party_invite_gate(hud, always);
@@ -2753,7 +2780,10 @@ int run_trash(const Options& o, const AppConfig& app) {
     for (const TrashList::Item& item : list.items) to_use += item.action == TrashList::Action::Use ? 1 : 0;
     if (to_use > 0)
         say(std::to_string(to_use) + " on the Dùng list, registered on Tiêu Dùng before anything there is "
-            "deleted" + (bag::can_check(store, TrashList::Action::Use)
+            "deleted" + (!settings.use_fragments
+                             ? std::string(" -- not this time: [Trash] use_fragments is off in configs/trash.ini, so "
+                                           "they are only said")
+                         : bag::can_check(store, TrashList::Action::Use)
                              ? std::string(", at most ") + std::to_string(settings.max_uses_per_run)
                              : std::string(" -- not this time: there is no picture of the registration "
                                            "question (grabbed/fragment_register), so they are only said")));
