@@ -527,104 +527,147 @@ void test_skills_config() {
     std::remove(path.c_str());
 }
 
-// ---------------------------------------------------- the sequence, threaded
+// ------------------------------------------------------------ the sequence
 
-/// The sequence on its own thread, on the real clock, with a pretend
-/// keyboard and a pretend hunter.
+/// The sequence on a clock of the test's own, with a pretend keyboard and a
+/// pretend hunter: each turn its thread would take, taken by step() when it
+/// is due by that clock, a step every 10 ms. What the checks count is the
+/// test's time, never how much of a loaded CPU a thread got.
 struct SeqRig {
     InputManager         input;
     ExecutionCoordinator coord;
     MacroEngine          engine{ input, coord };
-    std::mutex           m;
-    std::vector<std::uint32_t> pressed;
-    std::atomic<int>     mode{ static_cast<int>(Mode::Idle) };
+    std::uint64_t        t = 21'000'000;
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> pressed;
+    Mode                 mode = Mode::Idle;
 
     SeqRig(bool follow, bool with_hunter) {
+        MacroEngine::Clock c;
+        c.now_ms = [this] { return t; };
+        c.sleep_ms = [this](std::uint32_t ms) { t += ms; };
+        engine.set_clock(c);
         MacroEngine::Hands h;
         h.focused = [] { return true; };
         h.key = [this](std::uint32_t vk, int) {
-            std::lock_guard<std::mutex> lock(m);
-            pressed.push_back(vk);
+            pressed.emplace_back(vk, t);
             return true;
         };
         engine.set_hands(h);
         if (with_hunter)
             engine.set_fight([this] {
                 MacroEngine::Fight f;
-                f.mode = static_cast<Mode>(mode.load());
+                f.mode = mode;
                 f.dx = 80;
                 f.attack_key = VK_SPACE;
                 return f;
             });
+        engine.set_config(config(follow));
+        engine.start_stepped();
+    }
+    ~SeqRig() { engine.stop(); }
+
+    /// X then C, each with 100 ms after it -- 92 to 108 with the step's own
+    /// jitter -- looping.
+    static MacroConfig config(bool follow) {
         MacroConfig cfg;
         cfg.apply_defaults();
         cfg.keys.clear();
         cfg.sequence = { MacroStep{ 'X', 0, 100, "X" }, MacroStep{ 'C', 0, 100, "C" } };
         cfg.sequence_enabled = true;
+        cfg.global_jitter_pct = 0;
         cfg.skills_follow_fight = follow;
-        engine.set_config(cfg);
+        return cfg;
     }
-    ~SeqRig() { engine.stop(); }
 
-    std::vector<std::uint32_t> keys() {
-        std::lock_guard<std::mutex> lock(m);
-        return pressed;
+    /// `ms` of the test's time: a step every 10 ms, as the timer thread beats.
+    void run(std::uint64_t ms) {
+        for (const std::uint64_t until = t + ms; t < until; t += 10) engine.step();
     }
-    void wait(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+    /// Up to `ms` of it, until one more key has gone: when it went, or 0.
+    std::uint64_t run_until_key(std::uint64_t ms) {
+        const std::size_t had = pressed.size();
+        for (const std::uint64_t until = t + ms; t < until && pressed.size() == had; t += 10) engine.step();
+        return pressed.size() > had ? pressed.back().second : 0;
+    }
+    std::string keys(std::size_t from = 0) const {
+        std::string s;
+        for (std::size_t i = from; i < pressed.size(); ++i) s += static_cast<char>(pressed[i].first);
+        return s;
+    }
 };
 
 void test_sequence_follows() {
     section("Skills follow the fight: the key sequence is held with them");
 
+    // A step every 100 ms, give or take its 8%, on a clock that a step of
+    // the test winds on 10 ms: each step 100 or 110 ms after the last, so
+    // 0.7 s holds exactly seven of them -- X first, and none held.
     {
         SeqRig rig(false, true);        // the tick off: the sequence as ever
-        rig.engine.start();
-        rig.wait(700);
-        rig.engine.stop();
-        check(rig.keys().size() >= 4,
+        const std::uint64_t from = rig.t;
+        rig.run(700);
+        bool paced = rig.pressed.size() == 7 && rig.pressed.front().second == from;
+        for (std::size_t i = 1; i < rig.pressed.size(); ++i) {
+            const std::uint64_t gap = rig.pressed[i].second - rig.pressed[i - 1].second;
+            paced = paced && (gap == 100 || gap == 110);
+        }
+        check(paced && rig.keys() == "XCXCXCX" && rig.engine.stats().held_not_fighting == 0 &&
+                  rig.engine.stats().sequence_presses == 7,
               "the tick off, the hunter not fighting: the sequence presses as it always has -- " +
-                  std::to_string(rig.keys().size()) + " steps in 0.7 s");
+                  std::to_string(rig.pressed.size()) + " steps in 0.7 s of the test's clock (" + rig.keys() +
+                  "), each 100 or 110 ms after the last, none held");
     }
     {
         SeqRig rig(true, false);        // the tick on, no hunter
-        rig.engine.start();
-        rig.wait(700);
-        rig.engine.stop();
-        check(rig.keys().size() >= 4, "the tick on but no hunter: as it always has too");
+        rig.run(700);
+        check(rig.keys() == "XCXCXCX" && rig.engine.stats().held_not_fighting == 0,
+              "the tick on but no hunter: as it always has too -- " + rig.keys() + " in 0.7 s");
     }
     {
         SeqRig rig(true, true);         // the tick on, not fighting
-        rig.engine.start();
-        rig.wait(700);
-        const bool none = rig.keys().empty() && rig.engine.sequence_position() == 0;
-        // A fight: the sequence goes, from where it was.
-        rig.mode = static_cast<int>(Mode::Fighting);
-        std::vector<std::uint32_t> got;
-        for (int i = 0; i < 100 && got.empty(); ++i) {
-            rig.wait(5);
-            got = rig.keys();
-        }
-        rig.mode = static_cast<int>(Mode::Idle);
-        check(none && !got.empty() && got[0] == 'X',
-              "the tick on, not fighting: no step for 0.7 s and the sequence where it was; a fight, "
-              "and it starts from there");
-        // Stopped mid-way: X out, C waiting.
-        rig.wait(400);
-        const std::size_t at = rig.engine.sequence_position();
-        const std::size_t before = rig.keys().size();
-        rig.wait(500);
-        const bool waited = rig.keys().size() == before;
-        rig.mode = static_cast<int>(Mode::Fighting);
-        std::vector<std::uint32_t> after;
-        for (int i = 0; i < 100 && after.size() <= before; ++i) {
-            rig.wait(5);
-            after = rig.keys();
-        }
-        rig.engine.stop();
-        const std::uint32_t next = at == 1 ? 'C' : 'X';
-        check(waited && after.size() > before && after[before] == next &&
-                  rig.engine.stats().held_not_fighting > 0,
-              "held again: nothing for 0.5 s, and the next step is the one it stopped at");
+        rig.run(700);
+        const bool none = rig.pressed.empty() && rig.engine.sequence_position() == 0 &&
+                          rig.engine.stats().held_not_fighting > 0;
+        // A fight: the sequence goes, from where it was -- at its next look,
+        // 50 ms at most.
+        rig.mode = Mode::Fighting;
+        const std::uint64_t fought = rig.t;
+        const std::uint64_t x_at = rig.run_until_key(200);
+        rig.mode = Mode::Idle;
+        check(none && x_at != 0 && x_at - fought <= 50 && rig.keys() == "X",
+              "the tick on, not fighting: no step for 0.7 s and the sequence where it was; a fight, and it "
+              "starts from there -- " + rig.keys() + ", " + std::to_string(x_at - fought) + " ms after the fight");
+        // Stopped mid-way: X out, C waiting where it is, held, for as long
+        // as there is no fight; then C, the step it stopped at.
+        const std::uint64_t held_before = rig.engine.stats().held_not_fighting;
+        rig.run(900);
+        const bool waited = rig.keys() == "X" && rig.engine.sequence_position() == 1 &&
+                            rig.engine.stats().held_not_fighting > held_before;
+        rig.mode = Mode::Fighting;
+        const std::uint64_t again = rig.t;
+        const std::uint64_t c_at = rig.run_until_key(200);
+        check(waited && c_at != 0 && c_at - again <= 50 && rig.keys() == "XC",
+              "held again: nothing for 0.9 s, and the next step is the one it stopped at -- " + rig.keys());
+    }
+    {
+        // The thread takes the same turns on the real clock: started, a step
+        // goes out -- waited for as long as a loaded machine needs.
+        InputManager input;
+        ExecutionCoordinator coord;
+        MacroEngine engine(input, coord);
+        std::atomic<int> pressed{ 0 };
+        MacroEngine::Hands h;
+        h.focused = [] { return true; };
+        h.key = [&pressed](std::uint32_t, int) {
+            ++pressed;
+            return true;
+        };
+        engine.set_hands(h);
+        engine.set_config(SeqRig::config(false));
+        engine.start();
+        for (int i = 0; i < 1000 && pressed.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        engine.stop();
+        check(pressed.load() > 0, "and on its own thread, on the real clock, the sequence presses too");
     }
 }
 

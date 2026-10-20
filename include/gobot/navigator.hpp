@@ -50,7 +50,10 @@ private:
 struct NavigatorConfig {
     std::uint32_t left_key = 0x25;
     std::uint32_t right_key = 0x27;
-    std::uint32_t jump_key = 0x20;
+    /// The game's jump, pressed to get up to a place above: the Up arrow, as
+    /// the shipped hunt.ini has it -- and what a hunt.ini without [Move]
+    /// jump_key gets. Space is this game's attack.
+    std::uint32_t jump_key = 0x26;
 
     /// Close enough to have arrived, in level pixels.
     int arrive_tolerance = 40;

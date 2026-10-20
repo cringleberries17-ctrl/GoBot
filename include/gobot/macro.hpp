@@ -427,9 +427,22 @@ public:
 
     /// For tests, which drive the timers by hand on a clock of their own:
     /// set the timers up as start() does, with no threads, and run one pass
-    /// of them at the clock's time with each step(). stop() ends it.
+    /// of them at the clock's time with each step() -- and the sequence's
+    /// turn too, whenever it is due by that clock: the very turn its thread
+    /// takes (sequence_turn), so a test of the sequence counts on the test's
+    /// time, not on how much of the real CPU its thread got. stop() ends it.
     void start_stepped();
     void step();
+    /// The two halves of a step(), for a test that stands in for the two
+    /// threads itself, each where its thread would be: one pass of the
+    /// timers at the clock's time -- what the timer thread does each time it
+    /// wakes -- and the sequence's turn when it is due by the clock, the next
+    /// one counted from the end of this one, as its thread sleeps after it.
+    /// A test that runs one of them from inside the other's press or pause
+    /// -- the clock's sleep_ms, the hands' key -- has the two meet as the
+    /// threads do: a press while the other holds the keys is refused.
+    void step_timers();
+    void step_sequence();
 
     struct Stats {
         std::uint64_t presses = 0;
@@ -523,7 +536,16 @@ private:
     void arm(std::uint64_t now);
     /// recast_buffs, now, the character being in the world.
     bool apply_recast(const std::string& why);
+    /// The sequence's thread: one turn after another, each followed by the
+    /// wait it asks for, slept in slices so that a stop is quick.
     void sequence_loop_fn();
+    /// One turn of the sequence at `now`: the step whose turn it is pressed,
+    /// or held where it is -- a potion due first, a skill that follows the
+    /// fight with no fight -- and how long until the next turn, in ms: the
+    /// step's own pause after it once it has gone, the wait before the next
+    /// look while it is held. The thread sleeps that; step() waits that much
+    /// of the test's clock.
+    std::uint32_t sequence_turn(std::uint64_t now);
 
     /// Why a press did not go out.
     enum class Refused { None, Suspended, Unfocused, Busy, Held, Failed };
@@ -588,6 +610,14 @@ private:
     Clock             clock_;
     Hands             hands_;
     std::atomic<bool> stepped_{false};      ///< started by start_stepped: no threads
+    /// The sequence's turns: its thread's alone, or step()'s when stepped.
+    /// When step() next takes a turn, on clock_now(); since when a potion
+    /// found due has been waited for, by the step whose turn it is (0: none);
+    /// and whether the round now under way was counted when the last step
+    /// came round to the first, which may wait a while before it goes.
+    std::uint64_t     seq_next_ms_ = 0;
+    std::uint64_t     seq_noticed_ = 0;
+    bool              seq_wrapped_ = false;
     /// When the current suspension began, on clock_now(); guarded by mutex_.
     std::uint64_t     suspended_at_ms_ = 0;
     /// When the buffs were last re-cast; guarded by mutex_. Valid once

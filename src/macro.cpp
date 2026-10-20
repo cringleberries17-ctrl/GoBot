@@ -618,6 +618,9 @@ void MacroEngine::start() {
     stepped_ = false;
     arm(clock_now());
     seq_pos_.store(0);
+    seq_next_ms_ = 0;
+    seq_noticed_ = 0;
+    seq_wrapped_ = false;
 
     timer_thread_ = std::thread(&MacroEngine::timer_loop, this);
     seq_thread_   = std::thread(&MacroEngine::sequence_loop_fn, this);
@@ -634,10 +637,33 @@ void MacroEngine::start_stepped() {
     stepped_ = true;
     arm(clock_now());
     seq_pos_.store(0);
+    seq_next_ms_ = 0;
+    seq_noticed_ = 0;
+    seq_wrapped_ = false;
 }
 
 void MacroEngine::step() {
-    if (running_.load() && stepped_.load()) run_timers(clock_now());
+    if (!running_.load() || !stepped_.load()) return;
+    run_timers(clock_now());
+    // The sequence's turn, when its wait is over by the clock: what its
+    // thread does between its sleeps.
+    const std::uint64_t now = clock_now();
+    if (now >= seq_next_ms_) seq_next_ms_ = now + sequence_turn(now);
+}
+
+void MacroEngine::step_timers() {
+    if (!running_.load() || !stepped_.load()) return;
+    run_timers(clock_now());
+}
+
+void MacroEngine::step_sequence() {
+    if (!running_.load() || !stepped_.load()) return;
+    const std::uint64_t now = clock_now();
+    if (now < seq_next_ms_) return;
+    // Its wait from the end of the turn, as the thread sleeps it after the
+    // turn: a step's press may take some of the clock.
+    const std::uint32_t wait = sequence_turn(now);
+    seq_next_ms_ = clock_now() + wait;
 }
 
 void MacroEngine::stop() {
@@ -1312,103 +1338,90 @@ void MacroEngine::log_skills(std::uint64_t now) {
 
 void MacroEngine::sequence_loop_fn() {
     while (running_.load()) {
-        MacroConfig cfg;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            cfg = config_;
-        }
-
-        if (!cfg.sequence_enabled || cfg.sequence.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-
-        std::size_t pos = seq_pos_.load();
-        if (pos >= cfg.sequence.size()) {
-            if (!cfg.sequence_loop) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                continue;
-            }
-            pos = 0;
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.sequence_loops;
-        }
-
-        const MacroStep step = cfg.sequence[pos];
-
-        // A potion that is due goes first: the step waits where it is, for a
-        // moment at most (see kPotionFirstMs), rather than being pressed over
-        // it or skipped.
-        //
-        // With skills following the fight and a hunter running, a step is
-        // one of the skills: it waits where it is too -- the sequence does
-        // not move on -- while there is no fight, MP is under the floor or
-        // the character is down, looked at again every 50 ms. A step on the
-        // hunter's own attack key is its swing, not the sequence's to press:
-        // passed over, with its pause kept.
-        bool pass_over = false;
-        bool given_up = false;
-        std::uint64_t noticed = 0;
-        while (step.keycode != 0 && running_.load()) {
-            const std::uint64_t t = clock_now();
-            if (potion_first(t)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            // A potion due that the timer pass has not taken up yet -- a
-            // reading come in a moment ago, a cooldown just over: the pass
-            // comes within 10 ms, and a step pressed meanwhile held the keys
-            // while the potion was tried. It is waited for, kPotionNoticeMs at
-            // most, should the pass not take it up after all.
-            if (potion_waiting_since_.load() == 0 && potion_due(t)) {
-                if (noticed == 0) noticed = t;
-                if (t - noticed < kPotionNoticeMs) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    continue;
-                }
-            } else {
-                noticed = 0;
-            }
-            bool follow, enabled;
-            int mp_floor;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                follow = config_.skills_follow_fight;
-                enabled = config_.sequence_enabled;
-                mp_floor = config_.skill_mp_floor_pct;
-            }
-            // Switched off while it waited: nothing of it goes.
-            if (!enabled) {
-                given_up = true;
-                break;
-            }
-            const Fight fight = follow ? fight_now() : Fight{};
-            if (!follow || fight.mode == Fight::Mode::NoHunter) break;
-            if (fight.attack_key != 0 && step.keycode == fight.attack_key) {
-                pass_over = true;
-                break;
-            }
-            const SkillGate gate = skill_gate(mp_floor, fight);
-            if (gate == SkillGate::Pass) break;
-            count_held(gate, 1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        if (!running_.load()) break;
-        if (given_up) continue;
-
-        seq_pos_.store(pos + 1);
-
-        if (step.keycode != 0 && !pass_over &&
-            press(step.keycode, step.hold_ms, "macro-sequence")) {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.sequence_presses;
-        }
-
+        const std::uint32_t wait = sequence_turn(clock_now());
         // Sleep in slices so stopping is responsive even behind a long delay.
-        const std::uint32_t wait = jittered(step.delay_after_ms, 8);
         for (std::uint32_t slept = 0; slept < wait && running_.load(); slept += 20)
             std::this_thread::sleep_for(std::chrono::milliseconds(std::min<std::uint32_t>(20, wait - slept)));
     }
+}
+
+std::uint32_t MacroEngine::sequence_turn(std::uint64_t now) {
+    MacroConfig cfg;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cfg = config_;
+    }
+
+    // Off, or switched off while a step waited: nothing of it goes, and a
+    // potion waited for then is waited for afresh once it is on again.
+    if (!cfg.sequence_enabled || cfg.sequence.empty()) {
+        seq_noticed_ = 0;
+        return 50;
+    }
+
+    // Round from the last step to the first: counted once, however long that
+    // first step then waits before it goes.
+    std::size_t pos = seq_pos_.load();
+    if (seq_wrapped_) {
+        pos = 0;
+    } else if (pos >= cfg.sequence.size()) {
+        if (!cfg.sequence_loop) return 50;
+        pos = 0;
+        seq_wrapped_ = true;
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stats_.sequence_loops;
+    }
+
+    const MacroStep step = cfg.sequence[pos];
+
+    // A potion that is due goes first: the step waits where it is, for a
+    // moment at most (see kPotionFirstMs), rather than being pressed over it
+    // or skipped -- looked at again 10 ms on.
+    //
+    // With skills following the fight and a hunter running, a step is one of
+    // the skills: it waits where it is too -- the sequence does not move on --
+    // while there is no fight, MP is under the floor or the character is
+    // down, looked at again every 50 ms. A step on the hunter's own attack
+    // key is its swing, not the sequence's to press: passed over, with its
+    // pause kept.
+    bool pass_over = false;
+    if (step.keycode != 0) {
+        if (potion_first(now)) return 10;
+        // A potion due that the timer pass has not taken up yet -- a reading
+        // come in a moment ago, a cooldown just over: the pass comes within
+        // 10 ms, and a step pressed meanwhile held the keys while the potion
+        // was tried. It is waited for, kPotionNoticeMs at most, should the
+        // pass not take it up after all: looked at again every 2 ms.
+        if (potion_waiting_since_.load() == 0 && potion_due(now)) {
+            if (seq_noticed_ == 0) seq_noticed_ = std::max<std::uint64_t>(now, 1);
+            if (now - seq_noticed_ < kPotionNoticeMs) return 2;
+        } else {
+            seq_noticed_ = 0;
+        }
+        const Fight fight = cfg.skills_follow_fight ? fight_now() : Fight{};
+        if (cfg.skills_follow_fight && fight.mode != Fight::Mode::NoHunter) {
+            if (fight.attack_key != 0 && step.keycode == fight.attack_key) {
+                pass_over = true;
+            } else {
+                const SkillGate gate = skill_gate(cfg.skill_mp_floor_pct, fight);
+                if (gate != SkillGate::Pass) {
+                    count_held(gate, 1);
+                    return 50;
+                }
+            }
+        }
+    }
+    if (!running_.load()) return 0;
+
+    seq_noticed_ = 0;
+    seq_wrapped_ = false;
+    seq_pos_.store(pos + 1);
+
+    if (step.keycode != 0 && !pass_over && press(step.keycode, step.hold_ms, "macro-sequence")) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stats_.sequence_presses;
+    }
+    return jittered(step.delay_after_ms, 8);
 }
 
 std::vector<std::uint64_t> MacroEngine::next_due_ms() const {

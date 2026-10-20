@@ -150,7 +150,8 @@ bool NavigatorConfig::load(const std::string& path) {
     if (!ini.load(path)) return false;
     left_key         = static_cast<std::uint32_t>(ini.get_int("Move", "left_key", 0x25));
     right_key        = static_cast<std::uint32_t>(ini.get_int("Move", "right_key", 0x27));
-    jump_key         = static_cast<std::uint32_t>(ini.get_int("Move", "jump_key", 0x20));
+    // Up, the game's jump, when the file has no key: as the shipped file says.
+    jump_key         = static_cast<std::uint32_t>(ini.get_int("Move", "jump_key", 0x26));
     arrive_tolerance = ini.get_int("Move", "arrive_tolerance", 40);
     step_ms          = static_cast<std::uint32_t>(ini.get_int("Move", "step_ms", 180));
     leg_timeout_ms   = static_cast<std::uint32_t>(ini.get_int("Move", "leg_timeout_ms", 20000));

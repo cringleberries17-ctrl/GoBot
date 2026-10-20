@@ -29,6 +29,7 @@
 #include "gobot/crash_watch.hpp"
 #include "gobot/party.hpp"
 #include "gobot/party_chat.hpp"
+#include "gobot/party_hud.hpp"
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
 #include "gobot/vitals_reader.hpp"
@@ -1097,13 +1098,21 @@ private:
     /// while anything else holds the game; the Tổ đội tab says what it saw.
     /// Lives in simple_party.cpp.
     /// One asker, on the party worker's thread, before the mouse is touched:
-    /// false, and said why, when the invite is not to go. `from_screen`: the
-    /// frame was read off the screen (ScreenCapture::from_screen).
-    bool party_may_invite(const std::string& who, const Frame& frame, bool from_screen,
-                          const TemplateStore& store, bool always_leader);
-    /// Every few seconds of the party worker, the HUD read off its frame for
+    /// false, and said why, when the invite is not to go. `look`: the
+    /// worker's look at the game this pass, with what was so of it when it
+    /// was grabbed (take_party_look), held up against party_events().
+    bool party_may_invite(const std::string& who, const PartyLook& look, const TemplateStore& store,
+                          bool always_leader);
+    /// Every few seconds of the party worker, the HUD read off its look for
     /// the Tổ đội tab.
-    void party_hud_tick(const Frame& frame, bool from_screen, const TemplateStore& store);
+    void party_hud_tick(const PartyLook& look, const TemplateStore& store);
+    /// What has changed the party, or may have, and when: the party worker's
+    /// own answers and invites, and an invitation seen on screen. Read by
+    /// every decision on "alone" -- the worker's, Tự chat's, "Thử xem".
+    PartyEvents& party_events();
+    /// The party by the game's own word, for those same decisions: the one
+    /// place P0-3 fills from the game's packets. Nothing reads it yet.
+    PartyMembership party_from_game() const;
     void simple_party_leader_option();      ///< "Chỉ mời khi đang làm chủ tổ đội"
     void simple_party_hud_line();           ///< "Tổ đội: …" on the state card, and "Thử xem"
     struct PartyHudUi;
@@ -1114,10 +1123,14 @@ private:
 
     // ---- Tự chat's "Chỉ khi chưa có tổ đội" ----
     /// On Tự chat's thread, for the line whose turn it is: when that line is
-    /// ticked and the party HUD, read on a fresh frame, does not show the
-    /// player alone, it is passed over for the next -- or, with no other line
-    /// to go instead, put off a minute -- and true comes back, with nothing
-    /// held or pressed for it. Lives in simple_chat_alone.cpp.
+    /// ticked and the party HUD, read on a fresh look -- and, when that one
+    /// is surely alone, on one more kSettleMs later, with the game looked at
+    /// for an invitation in between (PartyEvents::invitation) -- does not
+    /// show the player surely alone -- by the rule the tick's invite goes by
+    /// (read_party, alone_for_chat) -- it is passed over for the next -- or,
+    /// with no other line to go instead, put off a minute -- and true comes
+    /// back, with nothing held or pressed for it. Lives in
+    /// simple_chat_alone.cpp.
     bool chat_alone_put_off(const ChatSettings& s, int index, const TemplateStore& store,
                             ChatSchedule& schedule, std::uint64_t now);
     /// The tick after preview row `i` of the Tự chat tab, `lines` being the

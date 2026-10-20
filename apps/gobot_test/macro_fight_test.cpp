@@ -4,9 +4,11 @@
 //
 // Nothing here goes near the game. The engine is driven a step at a time on a
 // clock of the test's own, with a pretend keyboard that writes down every key
-// and when -- as the buff tests drive it -- except for one check of the
-// sequence's own thread, which runs on the real clock with the same pretend
-// keyboard.
+// and when -- as the buff tests drive it; where the potions meet the key
+// sequence, its two threads' turns are taken on that clock as well, each
+// where its thread would be (Threads) -- except for a few checks of the
+// engine's own threads, which run on the real clock with the same pretend
+// keyboard and count only what a loaded machine cannot put out of order.
 
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
@@ -991,31 +993,104 @@ void test_keys_change_mid_press() {
     }
 }
 
-/// The key sequence on its own thread, on the real clock, through a hold:
-/// the potion that came due under the hold goes first once it is over.
+/// The macro's two threads, stood in for on a clock of the test's own, a
+/// millisecond at a time -- where the timer thread and the sequence's thread
+/// each wake, every turn of theirs is taken, by the engine's own code
+/// (MacroEngine::step_timers, step_sequence): the timer thread 10 ms after
+/// its last pass ended, as its loop sleeps first; the sequence's whenever its
+/// own wait is over, from the moment the macro starts. While one of them is
+/// inside a press -- the pretend keyboard holds each key for its hold, or for
+/// `press_ms` when it has none -- or the timer pass waits between the HP and
+/// the MP potion, the clock goes on and the other takes its turns as it would
+/// on its own thread: a press of its own then finds the keys taken and is
+/// refused, as on the real threads. Where both are due at one moment the
+/// timers go first, which the real threads leave to chance. What the checks
+/// count is the test's time, never how much of a loaded CPU a thread got --
+/// the readings are handed over every millisecond.
+struct Threads {
+    InputManager         input;
+    ExecutionCoordinator coord;
+    MacroEngine          engine{ input, coord };
+    std::uint64_t        t = 9'000'000;
+    std::uint64_t        timer_wake = 0;
+    bool                 in_timer = false, in_seq = false;
+    float                hp = 100.0f, mp = 100.0f;
+    std::uint64_t        press_ms = 40;
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> got;
+
+    explicit Threads(const MacroConfig& cfg) {
+        MacroEngine::Clock c;
+        c.now_ms = [this] { return t; };
+        c.sleep_ms = [this](std::uint32_t ms) { pass(ms); };
+        engine.set_clock(c);
+        MacroEngine::Hands h;
+        h.focused = [] { return true; };
+        h.key = [this](std::uint32_t vk, int hold) {
+            got.emplace_back(vk, t);
+            pass(hold > 0 ? static_cast<std::uint64_t>(hold) : press_ms);
+            return true;
+        };
+        engine.set_hands(h);
+        engine.set_config(cfg);
+    }
+    ~Threads() { engine.stop(); }
+
+    /// BẮT ĐẦU: the timer thread sleeps its first 10 ms, the sequence's takes
+    /// its first turn at once.
+    void start() {
+        engine.set_vitals(hp, mp);
+        engine.start_stepped();
+        timer_wake = t + 10;
+        wake();
+    }
+    /// Whichever of the two is due now and not inside a press of its own.
+    void wake() {
+        if (!in_timer && t >= timer_wake) {
+            in_timer = true;
+            engine.step_timers();
+            in_timer = false;
+            timer_wake = t + 10;
+        }
+        if (!in_seq) {
+            in_seq = true;
+            engine.step_sequence();
+            in_seq = false;
+        }
+    }
+    /// `ms` of the clock, a millisecond at a time, with the readings as they
+    /// are now handed over at each.
+    void pass(std::uint64_t ms) {
+        for (const std::uint64_t until = t + ms; t < until;) {
+            ++t;
+            engine.set_vitals(hp, mp);
+            wake();
+        }
+    }
+    /// When `vk` first went down at `from` or after; 0 for never.
+    std::uint64_t first(std::uint32_t vk, std::uint64_t from) const {
+        for (const auto& p : got)
+            if (p.first == vk && p.second >= from) return p.second;
+        return 0;
+    }
+    /// Steps of the sequence -- any key but the potions -- that went down in
+    /// [from, to).
+    int steps_between(std::uint64_t from, std::uint64_t to) const {
+        int n = 0;
+        for (const auto& p : got)
+            if (p.first != '1' && p.first != '2' && p.second >= from && p.second < to) ++n;
+        return n;
+    }
+};
+
+/// The key sequence through a hold, the two threads' turns on the test's
+/// clock: the potion that came due under the hold goes first once it is over.
 void test_potion_after_hold_threaded() {
-    section("Potions: after a hold, before the key sequence's next step (threads)");
+    section("Potions: after a hold, before the key sequence's next step (the two threads' turns)");
 
     const int runs = 4;
     int good = 0;
     std::string bad;
     for (int run = 0; run < runs; ++run) {
-        InputManager input;
-        ExecutionCoordinator coord;
-        MacroEngine engine(input, coord);
-        std::mutex m;
-        std::vector<std::pair<std::uint32_t, std::uint64_t>> got;
-        MacroEngine::Hands h;
-        h.focused = [] { return true; };
-        h.key = [&](std::uint32_t vk, int) {
-            {
-                std::lock_guard<std::mutex> lock(m);
-                got.emplace_back(vk, now_ms());
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            return true;
-        };
-        engine.set_hands(h);
         MacroConfig cfg;
         cfg.apply_defaults();
         cfg.keys = { hp_key('1', 50) };
@@ -1023,42 +1098,44 @@ void test_potion_after_hold_threaded() {
                          MacroStep{ 'C', 0, 120, "C" } };
         cfg.sequence_enabled = true;
         cfg.require_focus = true;
-        engine.set_config(cfg);
-        engine.start();
-        const auto feed = [&](int ms, float hp) {
-            for (int i = 0; i < ms / 20; ++i) {
-                engine.set_vitals(hp, 90.0f);
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            }
-        };
-        feed(300, 90.0f);
-        coord.engage_critical("đóng thông báo");
-        feed(1000 + run * 37, 30.0f);
+        Threads th(cfg);
+        th.press_ms = 25;
+        th.hp = 90.0f;
+        th.mp = 90.0f;
+        th.start();
+        th.pass(300);
+        th.coord.engage_critical("đóng thông báo");
+        const std::uint64_t held = th.t;
+        th.hp = 30.0f;
+        th.pass(1000 + static_cast<std::uint64_t>(run) * 37);
         // Taken before the hold ends: nothing goes out under it, so every key
         // from here on is after it.
-        const std::uint64_t over = now_ms();
-        coord.disengage_critical();
-        feed(400, 30.0f);
-        engine.stop();
+        const std::uint64_t over = th.t;
+        th.coord.disengage_critical();
+        th.pass(400);
 
-        std::lock_guard<std::mutex> lock(m);
         std::uint32_t first = 0;
         std::uint64_t potion = 0;
-        for (const auto& p : got) {
-            if (p.second < over) continue;
+        bool under = false;
+        for (const auto& p : th.got) {
+            if (p.second < over) {
+                under = under || p.second >= held;
+                continue;
+            }
             if (first == 0) first = p.first;
             if (p.first == '1' && potion == 0) potion = p.second;
         }
-        if (first == '1' && potion - over <= 100) {
+        if (first == '1' && potion - over <= 100 && !under) {
             ++good;
         } else if (bad.empty()) {
             bad = std::string(" (first after the hold: ") +
-                  (first ? std::string(1, static_cast<char>(first)) : std::string("none")) + ")";
+                  (first ? std::string(1, static_cast<char>(first)) : std::string("none")) +
+                  (under ? ", and a key under it" : "") + ")";
         }
     }
-    check(good == runs, "a hold of a second over HP low, the sequence on: the potion is the first key "
-                        "after the hold, within 100 ms, in " + std::to_string(good) + " of " +
-                            std::to_string(runs) + " runs" + bad);
+    check(good == runs, "a hold of a second over HP low, the sequence on: nothing under the hold, and the potion "
+                        "is the first key after it, within 100 ms of the test's clock, in " +
+                            std::to_string(good) + " of " + std::to_string(runs) + " runs" + bad);
 }
 
 /// The sequence on its own thread, on the real clock: a step that comes up
@@ -1119,14 +1196,17 @@ void test_sequence_waits_for_potion() {
 
 /// The engine on its own two threads and the real clock, as BẮT ĐẦU runs it:
 /// a pretend keyboard that holds each key for its hold -- 40 ms when it has
-/// none -- and writes down when it went down, and the readings handed over
+/// none -- and writes down what went down, and the readings handed over
 /// every 5 ms from the test's thread, as the GUI hands them over each frame.
+/// Only for whether the threads press at all: what goes before what is
+/// counted on the test's clock (Threads), as a loaded CPU may hold either
+/// thread back for a tenth of a second or more.
 struct Live {
     InputManager         input;
     ExecutionCoordinator coord;
     MacroEngine          engine{ input, coord };
     std::mutex           m;
-    std::vector<std::pair<std::uint32_t, std::uint64_t>> got;
+    std::vector<std::uint32_t> got;
 
     explicit Live(const MacroConfig& cfg) {
         MacroEngine::Hands h;
@@ -1134,7 +1214,7 @@ struct Live {
         h.key = [this](std::uint32_t vk, int hold) {
             {
                 std::lock_guard<std::mutex> lock(m);
-                got.emplace_back(vk, now_ms());
+                got.push_back(vk);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(hold > 0 ? hold : 40));
             return true;
@@ -1144,29 +1224,10 @@ struct Live {
     }
     ~Live() { engine.stop(); }
 
-    void feed(std::uint64_t ms, float hp, float mp) {
-        for (const std::uint64_t until = now_ms() + ms; now_ms() < until;) {
-            engine.set_vitals(hp, mp);
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    }
-    std::vector<std::pair<std::uint32_t, std::uint64_t>> presses() {
+    /// Whether `vk` has gone down.
+    bool pressed(std::uint32_t vk) {
         std::lock_guard<std::mutex> lock(m);
-        return got;
-    }
-    /// When `vk` first went down at `from` or after; 0 for never.
-    std::uint64_t first(std::uint32_t vk, std::uint64_t from) {
-        for (const auto& p : presses())
-            if (p.first == vk && p.second >= from) return p.second;
-        return 0;
-    }
-    /// Steps of the sequence -- any key but the potions -- that went down in
-    /// [from, to).
-    int steps_between(std::uint64_t from, std::uint64_t to) {
-        int n = 0;
-        for (const auto& p : presses())
-            if (p.first != '1' && p.first != '2' && p.second >= from && p.second < to) ++n;
-        return n;
+        return std::find(got.begin(), got.end(), vk) != got.end();
     }
 };
 
@@ -1176,17 +1237,18 @@ std::vector<MacroStep> quick_sequence() {
     return { MacroStep{ 'Z', 5, 10, "Z" }, MacroStep{ 'X', 5, 10, "X" }, MacroStep{ 'C', 5, 10, "C" } };
 }
 
-/// The potions before the key sequence, on the threads BẮT ĐẦU starts: at the
-/// start, between the HP and the MP potion, and between a reading and the
-/// pass that acts on it.
+/// The potions before the key sequence, the turns of the two threads BẮT ĐẦU
+/// starts taken on the test's clock (Threads): at the start, between the HP
+/// and the MP potion, and between a reading and the pass that acts on it --
+/// and, on the real threads, that both press at all.
 void test_potions_before_sequence_threads() {
-    section("Potions: before the key sequence's steps, on the macro's own threads");
+    section("Potions: before the key sequence's steps, the two threads' turns on the test's clock");
 
     {
         // BẮT ĐẦU with HP and MP under their marks, on the player's layout --
         // every skill key off, the sequence Z, X, C on. The sequence's thread
         // starts with the timers' and pressed Z before the first look at the
-        // potions, in every run.
+        // potions. Each run with keys held down a different while.
         MacroConfig cfg;
         cfg.apply_defaults();
         cfg.keys = player_keys();
@@ -1200,34 +1262,38 @@ void test_potions_before_sequence_threads() {
         cfg.sequence_enabled = true;
         cfg.require_focus = true;
         cfg.global_jitter_pct = 0;
-        const int runs = 5;
+        const std::uint64_t holds[] = { 40, 25, 33, 50, 61 };
         int good = 0;
         std::string bad;
-        for (int run = 0; run < runs; ++run) {
-            Live live(cfg);
-            live.feed(30, 40.0f, 40.0f);
-            const std::uint64_t t0 = now_ms();
-            live.engine.start();
-            live.feed(400, 40.0f, 40.0f);
-            live.engine.stop();
-            const auto got = live.presses();
+        for (const std::uint64_t hold : holds) {
+            Threads th(cfg);
+            th.press_ms = hold;
+            th.hp = 40.0f;
+            th.mp = 40.0f;
+            const std::uint64_t t0 = th.t;
+            th.start();
+            th.pass(400);
+            const auto& got = th.got;
             std::string order;
             for (std::size_t i = 0; i < got.size() && i < 4; ++i)
                 order += (order.empty() ? "" : ", ") + std::string(1, static_cast<char>(got[i].first)) + "@" +
                          std::to_string(got[i].second - t0);
             const bool ok = got.size() >= 3 && got[0].first == '1' && got[1].first == '2' &&
-                            got[2].first == 'Z' && got[1].second >= got[0].second + 40 + MacroEngine::kPotionGapMs;
+                            got[2].first == 'Z' &&
+                            got[1].second >= got[0].second + hold + MacroEngine::kPotionGapMs;
             if (ok) ++good;
-            else if (bad.empty()) bad = " (" + order + ")";
+            else if (bad.empty()) bad = " (held " + std::to_string(hold) + " ms: " + order + ")";
         }
-        check(good == runs, "BẮT ĐẦU at HP 40% and MP 40%, the sequence on: the HP potion, the MP potion 20 ms "
-                            "after it came up, then Z -- in " + std::to_string(good) + " of " +
-                                std::to_string(runs) + " runs" + bad);
+        check(good == static_cast<int>(std::size(holds)),
+              "BẮT ĐẦU at HP 40% and MP 40%, the sequence on: the HP potion, the MP potion 20 ms after it came "
+              "up, then Z -- with keys held 25 to 61 ms, in " + std::to_string(good) + " of " +
+                  std::to_string(std::size(holds)) + " runs" + bad);
     }
     {
         // HP and MP read low together while the sequence steps: nothing
         // between the HP potion and the MP one, which waits 20 ms after the
-        // HP key comes up.
+        // HP key comes up -- whatever step the sequence is at, whatever ms of
+        // it the readings come in.
         MacroConfig cfg;
         cfg.apply_defaults();
         cfg.keys = { hp_key('1', 60), mp_key('2', 58) };
@@ -1238,18 +1304,22 @@ void test_potions_before_sequence_threads() {
         int between = 0, missing = 0;
         std::string example;
         for (int run = 0; run < runs; ++run) {
-            Live live(cfg);
-            live.engine.start();
-            live.feed(150 + static_cast<std::uint64_t>(run * 23 % 120), 90.0f, 90.0f);
-            const std::uint64_t low = now_ms();
-            live.feed(300, 40.0f, 40.0f);
-            live.engine.stop();
-            const std::uint64_t hp = live.first('1', low), mp = live.first('2', low);
+            Threads th(cfg);
+            th.hp = 90.0f;
+            th.mp = 90.0f;
+            th.start();
+            th.pass(150 + static_cast<std::uint64_t>(run * 23 % 120));
+            th.hp = 40.0f;
+            th.mp = 40.0f;
+            th.engine.set_vitals(th.hp, th.mp);
+            const std::uint64_t low = th.t;
+            th.pass(300);
+            const std::uint64_t hp = th.first('1', low), mp = th.first('2', low);
             if (hp == 0 || mp == 0) {
                 ++missing;
                 continue;
             }
-            const int n = live.steps_between(hp + 1, mp);
+            const int n = th.steps_between(hp + 1, mp);
             if (n > 0) {
                 ++between;
                 if (example.empty())
@@ -1277,14 +1347,16 @@ void test_potions_before_sequence_threads() {
         std::uint64_t worst = 0;
         std::string example;
         for (int run = 0; run < runs; ++run) {
-            Live live(cfg);
-            live.engine.start();
-            live.feed(150 + static_cast<std::uint64_t>(run * 29 % 120), 90.0f, 90.0f);
-            live.engine.set_vitals(40.0f, 90.0f);
-            const std::uint64_t low = now_ms();
-            live.feed(300, 40.0f, 90.0f);
-            live.engine.stop();
-            const std::uint64_t hp = live.first('1', low);
+            Threads th(cfg);
+            th.hp = 90.0f;
+            th.mp = 90.0f;
+            th.start();
+            th.pass(150 + static_cast<std::uint64_t>(run * 29 % 120));
+            th.hp = 40.0f;
+            th.engine.set_vitals(th.hp, th.mp);
+            const std::uint64_t low = th.t;
+            th.pass(300);
+            const std::uint64_t hp = th.first('1', low);
             if (hp == 0) {
                 ++missing;
                 continue;
@@ -1292,7 +1364,7 @@ void test_potions_before_sequence_threads() {
             worst = std::max<std::uint64_t>(worst, hp - low);
             // From 2 ms on: a step whose thread looked at the potions just
             // before the reading came in may go down a moment after it.
-            const int n = live.steps_between(low + 2, hp);
+            const int n = th.steps_between(low + 2, hp);
             if (n > 0) {
                 ++before;
                 if (example.empty())
@@ -1304,6 +1376,29 @@ void test_potions_before_sequence_threads() {
               "HP read low while the sequence steps: no step between the reading and the potion in " +
                   std::to_string(runs - before - missing) + " of " + std::to_string(runs) +
                   " runs, the potion at most " + std::to_string(worst) + " ms after the reading" + example);
+    }
+    {
+        // And on the real threads, as BẮT ĐẦU starts them: HP and MP low, the
+        // sequence on -- both potions and a step of the sequence go out,
+        // waited for as long as a loaded machine needs.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys = { hp_key('1', 60), mp_key('2', 58) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Live live(cfg);
+        live.engine.set_vitals(40.0f, 40.0f);
+        live.engine.start();
+        bool all = false;
+        for (int i = 0; i < 1000 && !all; ++i) {
+            live.engine.set_vitals(40.0f, 40.0f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            all = live.pressed('1') && live.pressed('2') &&
+                  (live.pressed('Z') || live.pressed('X') || live.pressed('C'));
+        }
+        live.engine.stop();
+        check(all, "and on the macro's own threads, on the real clock, both potions and the sequence press");
     }
 }
 

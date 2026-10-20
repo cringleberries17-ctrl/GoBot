@@ -1,6 +1,7 @@
 #include "gobot/party_hud.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/bag.hpp"
+#include "gobot/common.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -116,6 +117,36 @@ float frame_at(const Frame& f, const ScreenRect& at, const Frame& tpl, float lea
     return m.found ? m.score : -1.0f;
 }
 
+/// A picture to look for anywhere on a frame -- from row `from_y` down, and
+/// `right_margin` or more left of its right edge -- and how alike it has to
+/// be.
+struct Look {
+    const Frame* picture;
+    float        score;
+    int          from_y = 0;
+    int          right_margin = 0;
+};
+
+/// Each of `looks` over all of `f`, each on a thread of its own -- matched
+/// through their see-through corners, these are the dearest searches of a
+/// read -- and what each found, in their order.
+std::vector<TemplateMatcher::Match> find_each(const Frame& f, const std::vector<Look>& looks) {
+    std::vector<std::future<TemplateMatcher::Match>> running;
+    running.reserve(looks.size());
+    for (const Look& l : looks)
+        running.push_back(std::async(std::launch::async, [&f, l] {
+            const ScreenRect area =
+                clamp_to(f, ScreenRect{ 0, l.from_y, f.width - l.right_margin, f.height - l.from_y });
+            return area.w >= l.picture->width && area.h >= l.picture->height
+                       ? TemplateMatcher::find(f, area, *l.picture, l.score)
+                       : TemplateMatcher::Match{};
+        }));
+    std::vector<TemplateMatcher::Match> found;
+    found.reserve(running.size());
+    for (auto& r : running) found.push_back(r.get());
+    return found;
+}
+
 } // namespace
 
 const char* party_state_name(PartyState s) {
@@ -184,16 +215,47 @@ bool PartyHudReader::load(const TemplateStore& store, std::string* missing) {
             if (kSealSlot.contains(kCrown.x + x, kCrown.y + y)) alpha(own_crown_, x, y) = 0;
     landmark_ = *plate;
     strip_ = *strip;
-    // The close buttons, at rest and in their other states, for telling a
-    // player alone for sure: not needed for anything else, so a store without
-    // them reads as before. All of them or none: a drawing not looked for is
-    // a window that may be open.
+    // The close buttons, at rest and in their other states, and the dialogs'
+    // signs, for telling a player alone for sure: not needed for anything
+    // else, so a store without them reads as before. All of them or none: a
+    // drawing not looked for is a window or a dialog that may be open.
     close_x_.clear();
     for (const char* name : bag::kCloseButtons)
         if (const Frame* x = store.get(name)) close_x_.push_back(*x);
     for (const char* name : kCloseButtonStates)
         if (const Frame* x = store.get(name)) close_x_.push_back(*x);
     if (close_x_.size() != std::size(bag::kCloseButtons) + std::size(kCloseButtonStates)) close_x_.clear();
+    const auto load_signs = [&store](const DialogSign* signs, std::size_t n, std::vector<Sign>& out) {
+        out.clear();
+        for (std::size_t i = 0; i < n; ++i) {
+            const DialogSign& sign = signs[i];
+            const Frame* p = store.get(sign.name);
+            if (p == nullptr || !p->valid()) break;
+            // The part of it, when it is one; a part not inside the picture
+            // is some other picture under that name.
+            const ScreenRect part = sign.part.valid() ? sign.part : ScreenRect{ 0, 0, p->width, p->height };
+            if (part.x < 0 || part.y < 0 || part.right() > p->width || part.bottom() > p->height) break;
+            Sign s;
+            s.picture = sign.part.valid() ? cut(*p, part) : *p;
+            s.score = sign.score;
+            s.what = sign.what;
+            s.from_y = sign.from_y;
+            s.right_margin = sign.right_margin;
+            // The panel of words' dark, which is 56 grey, left see-through;
+            // the frame's light grey, the knot's black and the outline stay.
+            if (sign.words_out)
+                for (std::size_t px = 0; px + 3 < s.picture.pixels.size(); px += 4) {
+                    const std::uint8_t* q = &s.picture.pixels[px];
+                    const int grey = (114 * q[0] + 587 * q[1] + 299 * q[2]) / 1000;
+                    if (grey > 20 && grey < 120) s.picture.pixels[px + 3] = 0;
+                }
+            if (drawn(s.picture) < 64) break;
+            out.push_back(std::move(s));
+        }
+        if (out.size() != n) out.clear();
+    };
+    load_signs(kWindowSigns, std::size(kWindowSigns), windows_);
+    load_signs(kDialogSigns, std::size(kDialogSigns), dialogs_);
     ready_ = true;
     return true;
 }
@@ -221,14 +283,17 @@ bool PartyHudReader::load_pictures(TemplateStore& into, const std::string& templ
             return false;
         }
     }
-    // The close buttons as well, when they are there: only for telling a
-    // player alone for sure, which is never said without them.
+    // The close buttons and the dialogs' pictures as well, when they are
+    // there: only for telling a player alone for sure, which is never said
+    // without them.
     const auto load_if_there = [&](const char* name) {
         Frame f;
         if (TemplateStore::load_one(name, templates_ini, f)) into.put(name, f);
     };
     for (const char* name : bag::kCloseButtons) load_if_there(name);
     for (const char* name : kCloseButtonStates) load_if_there(name);
+    for (const DialogSign& sign : kWindowSigns) load_if_there(sign.name);
+    for (const DialogSign& sign : kDialogSigns) load_if_there(sign.name);
     return true;
 }
 
@@ -248,6 +313,199 @@ bool party_frame_whole(bool from_screen, void* window, const Frame& f, std::stri
     // the window is wide -- and the frame has to show it wherever it is.
     return window != nullptr && f.valid() &&
            AutoLogin::part_seen(window, ScreenRect{ 0, 0, f.width, f.height }, in_the_way);
+}
+
+PartySight party_sight(ScreenCapture& capture, void* window) {
+    PartySight s;
+    s.grab = [&capture, window](Frame& out, bool& from_screen) {
+        from_screen = false;
+        if (window == nullptr || !capture.grab(window, out) || !out.valid()) return false;
+        from_screen = capture.from_screen();
+        return true;
+    };
+    s.seen = [window](const ScreenRect& part, std::string* in_the_way) {
+        if (in_the_way) in_the_way->clear();
+        return window != nullptr && AutoLogin::part_seen(window, part, in_the_way);
+    };
+    s.now = [] { return now_ms(); };
+    return s;
+}
+
+bool take_party_look(const PartySight& sight, PartyLook& out) {
+    out = PartyLook{};
+    if (!sight.grab || !sight.seen || !sight.now) return false;
+    // All of the client area, whatever its size: part_seen keeps a part to
+    // the client area. Asked before the grab as well as after it, the frame's
+    // size not known yet.
+    constexpr ScreenRect all{ 0, 0, 1 << 15, 1 << 15 };
+    std::string area_before, all_before;
+    const bool area0 = sight.seen(PartyHudReader::kArea, &area_before);
+    const bool all0 = sight.seen(all, &all_before);
+    // The moment the grab begins: whatever happens after this is after the
+    // frame.
+    out.grabbed_ms = sight.now();
+    bool from_screen = false;
+    if (!sight.grab(out.frame, from_screen) || !out.frame.valid()) {
+        out = PartyLook{};
+        return false;
+    }
+    out.from_screen = from_screen;
+    if (!from_screen) {
+        // The game's own picture of itself: whatever lay over its window is
+        // not in it.
+        out.trusted = out.whole = true;
+        return true;
+    }
+    std::string area_after, all_after;
+    const bool area1 = sight.seen(PartyHudReader::kArea, &area_after);
+    const bool all1 = sight.seen(all, &all_after);
+    out.trusted = area0 && area1;
+    out.whole = all0 && all1;
+    for (const std::string* w : { &area_before, &area_after, &all_before, &all_after })
+        if (out.in_the_way.empty() && !w->empty()) out.in_the_way = *w;
+    return true;
+}
+
+namespace {
+
+/// `e` into `slot` when it is the later: an event told late is no later than
+/// it happened.
+void note(PartyEvents::Event& slot, const PartyEvents::Event& e) {
+    if (e.at_ms >= slot.at_ms) slot = e;
+}
+
+} // namespace
+
+void PartyEvents::changed(std::uint64_t at_ms, std::string en, std::string vi) {
+    const Event e{ at_ms, std::move(en), std::move(vi) };
+    std::lock_guard<std::mutex> lock(mutex_);
+    note(change_, e);
+    note(any_, e);
+}
+
+void PartyEvents::joined(std::uint64_t at_ms, std::string en, std::string vi) {
+    const Event e{ at_ms, std::move(en), std::move(vi) };
+    std::lock_guard<std::mutex> lock(mutex_);
+    note(change_, e);
+    note(join_, e);
+    note(any_, e);
+}
+
+void PartyEvents::seen(std::uint64_t at_ms, std::string en, std::string vi) {
+    const Event e{ at_ms, std::move(en), std::move(vi) };
+    std::lock_guard<std::mutex> lock(mutex_);
+    note(any_, e);
+}
+
+void PartyEvents::invitation(std::uint64_t at_ms, bool up) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (up) {
+        // The one GoBot has answered since, on an older look: nothing new.
+        if (answered_ms_ != 0 && at_ms <= answered_ms_) return;
+        invitation_up_ = true;
+        invitation_seen_ms_ = std::max(invitation_seen_ms_, at_ms);
+        note(any_, Event{ at_ms, "an invitation was on screen", party_text::kEventInvitation });
+        return;
+    }
+    // Gone: only after a look that saw it up, and only on a newer one. When
+    // it went is not known -- any time since that look -- and the game may
+    // not have drawn the party yet, so the wait counts from this look.
+    if (!invitation_up_ || at_ms <= invitation_seen_ms_) return;
+    invitation_up_ = false;
+    const Event e{ at_ms,
+                   "an invitation went from the screen without GoBot answering it -- the player may have accepted "
+                   "it by hand",
+                   party_text::kEventInvitationGone };
+    note(change_, e);
+    note(join_, e);
+    note(any_, e);
+}
+
+void PartyEvents::answered(std::uint64_t at_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    answered_ms_ = std::max(answered_ms_, at_ms);
+    invitation_up_ = false;
+}
+
+PartyEvents::Event PartyEvents::last_change() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return change_;
+}
+
+PartyEvents::Event PartyEvents::last_any() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return any_;
+}
+
+PartyEvents::Event PartyEvents::last_join() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return join_;
+}
+
+static_assert(PartyEvents::kJoinWaitMs == 20'000, "party_text::kDoubtJoined says 20 seconds");
+
+bool watch_invitations(const PartySight& sight, const std::function<bool(const Frame&)>& up,
+                       const std::function<void(std::uint32_t)>& sleep_ms, const std::function<bool()>& stopped,
+                       PartyEvents& events, std::uint64_t until, std::uint32_t every_ms) {
+    if (!sight.grab || !sight.now || !up || !sleep_ms) return false;
+    const auto cut_short = [&] { return stopped && stopped(); };
+    while (sight.now() < until) {
+        if (cut_short()) return false;
+        sleep_ms(every_ms);
+        // When this look began: whatever it shows is so from then on.
+        const std::uint64_t at = sight.now();
+        Frame f;
+        bool from_screen = false;
+        if (!sight.grab(f, from_screen) || !f.valid()) return false;
+        events.invitation(at, up(f));
+    }
+    return !cut_short();
+}
+
+PartyHud read_party(const PartyHudReader& reader, const PartyLook& look, const PartyEvents& events,
+                    const PartyMembership& game) {
+    PartyHud hud = reader.read(look.frame, look.trusted, look.whole);
+    // Grabbed before GoBot's last change to the party -- before it began,
+    // that is: a grab under way while the change was made may show either.
+    const PartyEvents::Event change = events.last_change();
+    if (change.at_ms != 0 && look.grabbed_ms <= change.at_ms) {
+        hud.stale = true;
+        hud.stale_en = change.en;
+        hud.stale_vi = change.vi;
+    }
+    if (hud.state != PartyState::Alone || !hud.sure_alone) return hud;
+    // A party perhaps joined -- GoBot's own accept, or an invitation gone
+    // with no answer from GoBot -- and the game not drawn it yet, however
+    // long it takes: alone only once kJoinWaitMs have gone by with no party
+    // drawn. A party drawn meanwhile reads as one, not as alone.
+    const PartyEvents::Event join = events.last_join();
+    if (join.at_ms != 0 && look.grabbed_ms < join.at_ms + PartyEvents::kJoinWaitMs) {
+        hud.sure_alone = false;
+        const std::uint64_t ago = look.grabbed_ms > join.at_ms ? look.grabbed_ms - join.at_ms : 0;
+        hud.alone_doubt = "the player may have joined a party (" + join.en + ", " + std::to_string(ago) +
+                          " ms before this look) that the game has not drawn yet: not alone for sure until " +
+                          std::to_string(PartyEvents::kJoinWaitMs / 1000) + " s after it";
+        hud.alone_doubt_vi = std::string(party_text::kDoubtJoined) + ": " + join.vi;
+        return hud;
+    }
+    // Alone by the frame: surely so only long enough after the last event of
+    // any kind for the game to have drawn it.
+    const PartyEvents::Event any = events.last_any();
+    if (any.at_ms != 0 && look.grabbed_ms < any.at_ms + PartyEvents::kSettleMs) {
+        hud.sure_alone = false;
+        const std::uint64_t ago = look.grabbed_ms > any.at_ms ? look.grabbed_ms - any.at_ms : 0;
+        hud.alone_doubt = "the party may have just changed (" + any.en + ", " + std::to_string(ago) +
+                          " ms before this look): the game may not have drawn it yet";
+        hud.alone_doubt_vi = std::string(party_text::kDoubtChanged) + ": " + any.vi;
+        return hud;
+    }
+    // And the game's own word, once something reads it (P0-3).
+    if (game.known && game.in_party) {
+        hud.sure_alone = false;
+        hud.alone_doubt = "the game says the player is in a party";
+        hud.alone_doubt_vi = party_text::kDoubtGameSays;
+    }
+    return hud;
 }
 
 bool PartyHudReader::bag_window(const Frame& f, ScreenRect& out) const {
@@ -456,8 +714,9 @@ void PartyHudReader::judge_alone(const Frame& f, bool whole_seen, PartyHud& hud)
         hud.alone_doubt = en;
         hud.alone_doubt_vi = vi;
     };
-    if (close_x_.empty()) {
-        doubt("no pictures of the game's close buttons, so no window can be ruled out", party_text::kDoubtNoPictures);
+    if (close_x_.empty() || windows_.empty() || dialogs_.empty()) {
+        doubt("no pictures of the game's close buttons or dialogs, so no window or dialog can be ruled out",
+              party_text::kDoubtNoPictures);
         return;
     }
     // Part of the frame is not the game: another program's window over it,
@@ -476,42 +735,70 @@ void PartyHudReader::judge_alone(const Frame& f, bool whole_seen, PartyHud& hud)
         doubt("the first member's place is one plain colour: something over it", party_text::kDoubtPlain);
         return;
     }
+    // A tooltip anywhere: it is drawn over everything, a window's X among it
+    // wherever that X is.
+    const ScreenRect all{ 0, 0, f.width, f.height };
     ScreenRect at;
-    if (tooltip_edge(f, kTooltipArea, &at)) {
+    if (tooltip_edge(f, all, &at)) {
         doubt("a tooltip's edge at " + std::to_string(at.x) + "," + std::to_string(at.y) +
-                  ", over where the party's panels go",
+                  ", and a tooltip can be over the close button of a window over the party's panels",
               party_text::kDoubtTooltip);
         return;
     }
-    // Any window of the game, anywhere: each drawing of a close button, at
-    // rest, under the pointer and held down, on its own thread, as the trash
-    // pass looks for them.
-    std::vector<std::future<TemplateMatcher::Match>> looks;
-    const ScreenRect all{ 0, 0, f.width, f.height };
-    for (const Frame& x : close_x_)
-        looks.push_back(std::async(std::launch::async, [&f, all, &x] {
-            return f.width >= x.width && f.height >= x.height ? TemplateMatcher::find(f, all, x, kWindowXScore)
-                                                              : TemplateMatcher::Match{};
-        }));
-    bool window = false;
-    for (auto& look : looks) {
-        const TemplateMatcher::Match m = look.get();
-        if (m.found && !window) {
-            window = true;
-            at = m.at;
-        }
-    }
-    if (window) {
-        doubt("a window of the game is open (a close button at " + std::to_string(at.x) + "," + std::to_string(at.y) +
-                  "), which could be over the party's panels",
+    // Any window of the game, anywhere -- each drawing of a close button, at
+    // rest, under the pointer and held down, as the trash pass looks for
+    // them, and the windows told by something else -- and any dialog, by
+    // each of its signs: all at once.
+    std::vector<Look> looks;
+    for (const Frame& x : close_x_) looks.push_back(Look{ &x, kWindowXScore });
+    for (const Sign& s : windows_) looks.push_back(Look{ &s.picture, s.score, s.from_y, s.right_margin });
+    for (const Sign& s : dialogs_) looks.push_back(Look{ &s.picture, s.score, s.from_y, s.right_margin });
+    const std::vector<TemplateMatcher::Match> found = find_each(f, looks);
+    for (std::size_t i = 0; i < close_x_.size() + windows_.size(); ++i) {
+        if (!found[i].found) continue;
+        const std::string by = i < close_x_.size() ? std::string("a close button") : windows_[i - close_x_.size()].what;
+        doubt("a window of the game is open (" + by + " at " + std::to_string(found[i].at.x) + "," +
+                  std::to_string(found[i].at.y) + "), which could be over the party's panels",
               party_text::kDoubtWindow);
+        return;
+    }
+    for (std::size_t i = 0; i < dialogs_.size(); ++i) {
+        const TemplateMatcher::Match& m = found[close_x_.size() + windows_.size() + i];
+        if (!m.found) continue;
+        doubt("a dialog of the game is up (" + std::string(dialogs_[i].what) + " at " + std::to_string(m.at.x) + "," +
+                  std::to_string(m.at.y) + "), which could be over the party's panels",
+              party_text::kDoubtDialog);
         return;
     }
     hud.sure_alone = true;
 }
 
+bool PartyHudReader::dialog_up(const Frame& f, ScreenRect* at, std::string* what) const {
+    if (dialogs_.empty() || !f.valid()) return false;
+    std::vector<Look> looks;
+    for (const Sign& s : dialogs_) looks.push_back(Look{ &s.picture, s.score, s.from_y, s.right_margin });
+    const std::vector<TemplateMatcher::Match> found = find_each(f, looks);
+    for (std::size_t i = 0; i < found.size(); ++i) {
+        if (!found[i].found) continue;
+        if (at) *at = found[i].at;
+        if (what) *what = dialogs_[i].what;
+        return true;
+    }
+    return false;
+}
+
 PartyGate party_invite_gate(const PartyHud& hud, bool always_leader) {
     PartyGate g;
+    // A frame from before GoBot's last change to the party says nothing of
+    // the party now, whatever it shows: an invitation just accepted, it still
+    // shows the player alone.
+    if (hud.stale) {
+        g.allowed = false;
+        g.reason_vi = std::string(party_text::kStale) + (hud.stale_vi.empty() ? std::string() : " (" + hud.stale_vi + ")");
+        g.reason_en = "the party may have changed since this frame was grabbed" +
+                      (hud.stale_en.empty() ? std::string() : " (" + hud.stale_en + ")");
+        return g;
+    }
     // Six seen is six, whoever leads. Never said of a HUD that could not be
     // read, which has no size.
     if (hud.full) {
@@ -529,8 +816,9 @@ PartyGate party_invite_gate(const PartyHud& hud, bool always_leader) {
             // Surely alone: the invite starts a party the player leads, as
             // GoC's does (the player's decision of 2026-10-19). Read as alone
             // and not surely, it may be a member whose party's panels are all
-            // hidden -- under a window, a tooltip, or a window whose X lies
-            // where the frame does not show the game -- who would invite while
+            // hidden -- under a window, a dialog, a tooltip, or a window whose
+            // X lies where the frame does not show the game -- or who joined a
+            // party a moment ago, not drawn yet, and would invite while
             // somebody else leads.
             if (hud.sure_alone) return g;
             g.allowed = false;
@@ -563,7 +851,8 @@ std::string party_hud_line_vi(const PartyHud& hud) {
     const std::string of = " (" + std::string(hud.covered ? "ít nhất " : "") + std::to_string(hud.size) + "/" +
                            std::to_string(kPartyMax) + ")";
     switch (hud.state) {
-        case PartyState::Alone:   return "Tổ đội: một mình";
+        case PartyState::Alone:
+            return std::string("Tổ đội: một mình") + (hud.sure_alone ? "" : party_text::kCardUnsure);
         case PartyState::Member:  return "Tổ đội: thành viên" + of;
         case PartyState::Leader:  return "Tổ đội: chủ tổ đội" + of;
         case PartyState::InParty: return "Tổ đội: đang trong tổ đội" + of + ", không thấy vương miện chủ tổ đội";
@@ -588,6 +877,7 @@ std::string mark_text(float crown, float frame) {
 
 std::string party_hud_text(const PartyHud& hud) {
     std::string s = party_state_name(hud.state);
+    if (hud.stale) s += " (grabbed before the party last changed: " + hud.stale_en + ")";
     if (hud.state == PartyState::Unknown) return s + (hud.why.empty() ? std::string() : " (" + hud.why + ")");
     char buf[96];
     std::snprintf(buf, sizeof buf, " %s%d/%d%s", hud.covered ? "at least " : "", hud.size, kPartyMax,

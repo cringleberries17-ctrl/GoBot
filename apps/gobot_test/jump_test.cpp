@@ -258,11 +258,17 @@ void test_walk_key() {
     check(before.load(old) && before.jump_key == VK_SPACE &&
               !JumpCheck::walk_key_warning_vi(before.jump_key, 'Z').empty(),
           "a file of the player's with jump_key=32: read as Space, as it says, and the warning shown");
-    // A file without the key: Space, as every file before said -- and said.
+    // A file without the key, or no file at all: Up, as the shipped file has
+    // it -- never Space, this game's attack -- and nothing to say.
     const std::string bare = temp_ini("walk_bare.ini", "[Move]\nleft_key=37\n");
     NavigatorConfig none;
-    check(none.load(bare) && none.jump_key == VK_SPACE && !JumpCheck::walk_key_warning_vi(none.jump_key, 'Z').empty(),
-          "a file without the key: Space, as before, and the warning shown");
+    check(none.load(bare) && none.jump_key == VK_UP && JumpCheck::walk_key_warning_vi(none.jump_key, 'Z').empty(),
+          "a file without the key: Up, as the shipped file says, and no warning");
+    const std::string no_move = temp_ini("walk_no_move.ini", "[Hunt]\nattack_key=90\n");
+    NavigatorConfig unset, other_section;
+    check(unset.jump_key == VK_UP && other_section.load(no_move) && other_section.jump_key == VK_UP,
+          "no [Move] section, and the walker's own default: Up");
+    DeleteFileA(no_move.c_str());
     DeleteFileA(old.c_str());
     DeleteFileA(bare.c_str());
 }

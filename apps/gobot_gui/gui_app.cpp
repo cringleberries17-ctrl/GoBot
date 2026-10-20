@@ -2738,20 +2738,39 @@ void GuiApp::party_loop() {
             continue;
         }
 
-        Frame frame;
+        // One look this pass, and what was so of it as it was grabbed: whether
+        // the game was all in view is asked right before the grab and right
+        // after it, not when the look is read -- a second or more later, an
+        // invitation answered meanwhile (simple_party.cpp, take_party_look).
+        PartyLook look;
         if (!input_.window_valid() ||
-            !capture.grab(input_.target_window(), frame) || !frame.valid()) {
+            !take_party_look(party_sight(capture, input_.target_window()), look)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
+        const Frame& frame = look.frame;
         // "Tổ đội: …" on the tab, every few seconds (simple_party.cpp).
-        const bool frame_from_screen = capture.from_screen();
-        party_hud_tick(frame, frame_from_screen, store);
+        party_hud_tick(look, store);
+
+        // An invitation on screen may be answered by the player's own hand,
+        // and the party change a moment later: "alone" waits for the game to
+        // draw it, and one gone without GoBot's answer may have been accepted
+        // that way -- a party joined, which the game may take a while to draw
+        // (PartyEvents::invitation). Looked for on every pass whenever the
+        // tick's invite could go from alone, answered or not. The footer
+        // picture is the two buttons every dialog has: the trash bin's own
+        // dialogs, told apart by bag::bin_asking, are no invitation; any other
+        // dialog with them is taken for one, the safe way round.
+        PartyInvite::Seen seen;
+        bool bin = false;
+        if (rules.auto_accept || (rules.auto_invite && rules.always_leader)) {
+            seen = answering.look(frame, store, rules.auto_accept && have_font ? &font : nullptr);
+            bin = seen.up && bag::bin_asking(frame, store);
+            party_events().invitation(look.grabbed_ms, seen.up && !bin);
+        }
 
         // ---- somebody is asking us ----
         if (rules.auto_accept) {
-            const auto seen = answering.look(frame, store,
-                                             have_font ? &font : nullptr);
             if (!seen.up) {
                 answered.clear();
                 refused.clear();
@@ -2767,7 +2786,7 @@ void GuiApp::party_loop() {
                 // -- and never a dialog whose line does not read as an
                 // invitation's, "Yêu cầu của <name>.", whatever accept_all says.
                 std::string why_not;
-                if (bag::bin_asking(frame, store))
+                if (bin)
                     why_not = "it is the trash bin's own dialog";
                 else if (seen.who.empty())
                     why_not = have_font ? "its line does not read as an invitation's"
@@ -2805,10 +2824,24 @@ void GuiApp::party_loop() {
                     refused = key;
                 } else if (name_matters && !rules.may_accept(seen.who)) {
                     if (answer(false)) {
+                        // This pass's look is from before it: no invite goes
+                        // on it (read_party, PartyHud::stale). And the
+                        // invitation's going is GoBot's own doing.
+                        const std::uint64_t at = now_ms();
+                        party_events().answered(at);
+                        party_events().changed(at, "an invitation was declined", party_text::kEventDeclined);
                         say_party("declined " + seen.who);
                         answered = seen.who;
                     }
                 } else if (answer(true)) {
+                    // A member of somebody else's party from now on, though
+                    // this pass's look still shows the player alone: no invite
+                    // goes on it, and none from "alone" until the party has
+                    // been drawn -- a member then -- or kJoinWaitMs have gone
+                    // by without it (PartyEvents::joined).
+                    const std::uint64_t at = now_ms();
+                    party_events().answered(at);
+                    party_events().joined(at, "an invitation was accepted", party_text::kEventAccepted);
                     say_party("accepted " + seen.who);
                     answered = seen.who;
                     ++party_accepted_;
@@ -2848,9 +2881,24 @@ void GuiApp::party_loop() {
                     say_party(who + " asked, and the rules say no");
                     continue;
                 }
-                // Only when an invite can work, by the party HUD on this
-                // frame, and nothing else holds the game (simple_party.cpp).
-                if (!party_may_invite(who, frame, frame_from_screen, store, rules.always_leader)) continue;
+                // A reading used for an invite comes from a look grabbed after
+                // the last change to the party: an invitation answered, or an
+                // invite sent, earlier in this pass leaves this pass's look
+                // from before it -- so a new one is taken. (A look from before
+                // a change is never used anyway: read_party marks it stale.)
+                if (party_events().last_change().at_ms >= look.grabbed_ms) {
+                    PartyLook fresh;
+                    if (!input_.window_valid() ||
+                        !take_party_look(party_sight(capture, input_.target_window()), fresh)) {
+                        say_party(who + " asked; no new look at the game after the last change to the party, "
+                                        "not invited");
+                        continue;
+                    }
+                    look = std::move(fresh);
+                }
+                // Only when an invite can work, by the party HUD on that
+                // look, and nothing else holds the game (simple_party.cpp).
+                if (!party_may_invite(who, look, store, rules.always_leader)) continue;
 
                 // The mouse to itself for the whole of it -- opening the list,
                 // finding the row, the invite -- so a trash pass that starts
@@ -2883,7 +2931,12 @@ void GuiApp::party_loop() {
                 for (const auto& r : rows) if (r.index == at) row = &r;
                 if (row == nullptr) continue;
 
-                if (!list.invite(input_, capture, store, *row, &why)) {
+                // Whatever it says, the row and perhaps Req Party were
+                // clicked: the party may change from here, and the next asker
+                // of this pass is not invited on this pass's look.
+                const bool sent = list.invite(input_, capture, store, *row, &why);
+                party_events().changed(now_ms(), "an invite was sent", party_text::kEventInvited);
+                if (!sent) {
                     say_party("invite to " + who + " did not go: " + why);
                     continue;
                 }

@@ -2382,20 +2382,41 @@ int run_party_hud(const Options& o, const AppConfig& app) {
         std::fprintf(stderr, "A picture of the party HUD is missing: %s\n", missing.c_str());
         return 1;
     }
-    Frame f;
-    FrameFrom from;
-    if (!look_frame(o, app, o.party_hud_image, f, &from)) return 1;
-    // Trusted, and whole, as the party worker takes a frame of the game: a
+    // One look, as the party worker takes one: trusted, and whole, as they
+    // were at the grab -- asked right before it and right after it. A
     // screenshot named is taken for the game's own picture of itself.
-    std::string hides;
-    const bool trusted = party_frame_trusted(from.from_screen, from.window);
-    const bool whole = party_frame_whole(from.from_screen, from.window, f, &hides);
-    if (!whole)
+    PartyLook look;
+    if (!o.party_hud_image.empty()) {
+        if (!load_png(o.party_hud_image, look.frame) || !look.frame.valid()) {
+            std::fprintf(stderr, "Could not read %s\n", o.party_hud_image.c_str());
+            return 1;
+        }
+        look.trusted = look.whole = true;
+        look.grabbed_ms = now_ms();
+    } else {
+        InputManager input;
+        if (!attach_window(input, o, app)) {
+            std::fprintf(stderr, "No game window.\n");
+            return 1;
+        }
+        ScreenCapture capture;
+        if (!take_party_look(party_sight(capture, input.target_window()), look)) {
+            std::fprintf(stderr, "Could not capture the game window.\n");
+            return 1;
+        }
+        if (look.from_screen && !input.window_focused())
+            std::printf("(read off the screen with the game behind another window: what covers it is "
+                        "what is read)\n");
+    }
+    const std::string& hides = look.in_the_way;
+    if (look.trusted && !look.whole)
         std::printf("(read off the screen with part of the game %s: alone is never sure on it)\n",
                     hides == "off the screen" ? "off the screen"
                                               : ("under " + (hides.empty() ? std::string("another window") : hides))
                                                     .c_str());
-    const PartyHud hud = reader.read(f, trusted, whole);
+    // Nothing GoBot did to the party is known to a look of its own.
+    const PartyEvents none;
+    const PartyHud hud = read_party(reader, look, none);
     std::printf("party       %s", party_state_name(hud.state));
     if (hud.state == PartyState::Unknown) {
         std::printf(" -- %s\n", hud.why.c_str());
@@ -2418,8 +2439,8 @@ int run_party_hud(const Options& o, const AppConfig& app) {
         // Alone counts for an invite with the tick only when it is sure.
         if (hud.state == PartyState::Alone)
             std::printf("alone       %s\n", hud.sure_alone
-                                                ? "surely: all of the game seen, no window, no tooltip, nothing "
-                                                  "plain over the panels"
+                                                ? "surely: all of the game seen, no window, dialog or tooltip, "
+                                                  "nothing plain over the panels"
                                                 : ("not surely -- " + hud.alone_doubt).c_str());
     }
     for (const bool always : { false, true }) {
