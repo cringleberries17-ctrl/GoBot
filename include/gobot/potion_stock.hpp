@@ -13,7 +13,11 @@
 namespace gobot {
 
 /// How many potions are left: the number the game prints on the hotbar slot
-/// of each potion key, read the way CountReader reads a bag slot's count.
+/// of each potion key, read the way CountReader reads a bag slot's count --
+/// in the client's own digit cells, 5 pixels wide and 6 apart, a 1 too, by
+/// each digit's strokes and the ring round them, so that a bright icon under
+/// the count is not taken for part of it (on 2026-10-20 the boiled egg's rim
+/// took the 1 off 61, 51, 41 and 21 in slot 7).
 ///
 /// GoC has nothing like it -- it buys potions on a timer and never looks at
 /// the hotbar -- so this is GoBot's own. Without it a long run ends the same
@@ -177,38 +181,81 @@ struct PotionSettings {
     void load(const IniFile& ini);
 };
 
-/// Decides when a potion key's slot is worth a message, from one reading at
-/// a time. Pure logic: no clock, no frames.
+/// Decides when a potion key's slot is worth a message, from one look at a
+/// time. Pure logic: no clock, no frames.
 ///
-/// A reading is believed only when the one before it said the same, so a
-/// digit misread on one frame says nothing; the window reads each slot twice
-/// in quick succession for that, every few seconds.
+/// The window looks at the slots every few seconds, and each look reads every
+/// slot twice, 400 ms apart: the two readings make one (look_of), the look's,
+/// and that is what is fed -- once per look. A misread is seldom a one-frame
+/// flicker: an icon that makes a digit read wrong makes it read wrong on both
+/// frames of a look, and on the next look too. So:
 ///
-/// - Low: a believed count under warn_below, once. Not again until re-armed:
-///   by a reading of warn_below + 5 or more, by one 20 or more above the last
-///   believed count -- the next stack -- or by a new run. A slot with an icon
-///   and no number is not warned of: that is how a skill on the key looks
-///   too, and a stack running down was warned of at its numbers.
-/// - Out: the slot believed empty, once, until a believed count or single or
-///   a new run.
+/// - A count, or an icon with no number, is believed at once -- the two frames
+///   of the look agreed on it. Anything else (empty, unreadable, no hotbar) is
+///   believed when the look before said the same.
+/// - A wild drop is not believed: a count a fifth or less of the last count
+///   believed (kWildFloor or more), which no drinking does in one look. It is
+///   held -- the tab and believed() keep the old count, and nothing is warned
+///   of -- for up to kWildLooks looks that read it or less. A count back above
+///   a fifth ends it: a misread (Event::Misread). The kWildLooks-th look is
+///   believed after all (Event::WildBelieved): potions given away or traded.
+///   Each look held is Event::Wild, so that its frame can be kept. Looks that
+///   are no count -- the slot covered, unreadable, its key off the bar --
+///   neither confirm a wild drop nor clear it, believed so or not, and keep
+///   the last count believed to tell the next count from: 62, 6, covered,
+///   covered, 60 is a misread, and 62, covered, covered, 6, 6 a drop held.
+///   The slot believed empty, or holding one, ends both.
+/// - Low: the count under warn_below on two looks in a row -- not the two
+///   frames of one -- once. A look in between that is no count (covered,
+///   unreadable, the frames not agreeing) breaks the pair. Not again until
+///   re-armed: by a reading of warn_below + 5 or more, by one 20 or more above
+///   the last believed count -- the next stack -- or by a new run. A slot with
+///   an icon and no number is not warned of: that is how a skill on the key
+///   looks too, and a stack running down was warned of at its numbers.
+/// - Out: the slot empty on two looks in a row, once, until a count or single
+///   or a new run.
 class PotionWatch {
 public:
+    /// The least believed count a wild drop is told from: below it a fifth is
+    /// a potion or two, which drinking does.
+    static constexpr int kWildFloor = 10;
+    /// Looks in a row a wild drop is held for before it is believed.
+    static constexpr int kWildLooks = 3;
+
     struct Event {
-        enum class Kind { Low, Out };
+        enum class Kind {
+            Low,            ///< "Sắp hết bình": `count` left
+            Out,            ///< the slot empty
+            Wild,           ///< a look read `count`, a wild drop from `was`: not believed, held
+            Misread,        ///< the wild `count` came back to `back`: it was a misread of `was`
+            WildBelieved,   ///< the wild drop to `count` read kWildLooks looks running: believed
+        };
         Kind          kind = Kind::Low;
         std::uint32_t vk = 0;
-        int           count = 0;    ///< for Low
+        int           count = 0;
+        int           was = 0;      ///< Wild, Misread, WildBelieved: the believed count before
+        int           back = 0;     ///< Misread: the count read when it came back
     };
 
     void set_warn_below(int n) { warn_below_ = n < 0 ? 0 : n; }
     int  warn_below() const { return warn_below_; }
 
-    /// One reading of key `vk`'s slot; the messages it calls for, at most one.
+    /// One look's reading of a slot from its two frames: the reading when
+    /// they agree (SlotReading::same), otherwise Unreadable -- the slot
+    /// changed between them, or one frame misread it.
+    static SlotReading look_of(const SlotReading& first, const SlotReading& second);
+
+    /// One look's reading of key `vk`'s slot (look_of); the messages and
+    /// events it calls for.
     std::vector<Event> feed(std::uint32_t vk, const SlotReading& r);
 
-    /// The last reading of `vk` that two looks agreed on. False when there is
-    /// none yet.
+    /// The last reading of `vk` that is believed. False when there is none
+    /// yet.
     bool believed(std::uint32_t vk, SlotReading& out) const;
+
+    /// Whether a wild drop of `vk` is held: read, not believed, and not come
+    /// back yet -- so that the frame of its look is still worth keeping.
+    bool holding(std::uint32_t vk) const;
 
     /// A new run: every key may warn again, and nothing seen before counts.
     void reset();
@@ -218,11 +265,17 @@ public:
 private:
     struct Key {
         bool        have_last = false;
-        SlotReading last;
+        SlotReading last;           ///< the last look that was not held as wild
         bool        have_believed = false;
         SlotReading believed;
         bool        low_armed = true;
         bool        out_armed = true;
+        bool        under_before = false;   ///< the look before was a count under warn_below
+        int         wild_count = 0;         ///< the wild drop held: the least it read
+        int         wild_looks = 0;         ///< count looks that read it; 0 when none is held
+        /// The last count believed, kept while the slot is believed covered
+        /// or unreadable: what a wild drop is told from. -1 for none.
+        int         ref = -1;
     };
     std::map<std::uint32_t, Key> keys_;
     int warn_below_ = 20;

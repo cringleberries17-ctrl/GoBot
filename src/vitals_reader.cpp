@@ -398,8 +398,12 @@ void VitalsReader::loop() {
         if (!hwnd) continue;
 
         if (!capture.grab(hwnd, frame)) {
+            // The values stay as they were read last, and last_read_ms()
+            // with them: whoever acts on them can tell how old they are.
             std::lock_guard<std::mutex> lock(stats_mutex_);
             ++stats_.failures;
+            failed_at_.push_back(now_ms());
+            while (failed_at_.size() > kFailuresKept) failed_at_.pop_front();
             continue;
         }
 
@@ -509,6 +513,7 @@ void VitalsReader::loop() {
 
         hp_.store(hp_pct);
         mp_.store(mp_pct);
+        read_at_ms_.store(now_ms());
 
         // Notice when the bars stop being where they were put.
         //
@@ -1003,6 +1008,19 @@ int VitalsReader::find_bars(const Frame& f, BarSpec& hp, BarSpec& mp) {
 VitalsReader::Stats VitalsReader::stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
+}
+
+float VitalsReader::if_fresh(float pct, std::uint64_t read_at_ms, std::uint64_t at_ms, std::uint64_t within_ms) {
+    if (read_at_ms == 0) return -1.0f;          // never read
+    // A read stored after `at_ms` was taken is as fresh as can be.
+    if (at_ms <= read_at_ms) return pct;
+    return at_ms - read_at_ms <= within_ms ? pct : -1.0f;
+}
+
+std::size_t VitalsReader::failures_since(std::uint64_t since_ms) const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return static_cast<std::size_t>(
+        std::count_if(failed_at_.begin(), failed_at_.end(), [since_ms](std::uint64_t t) { return t >= since_ms; }));
 }
 
 } // namespace gobot

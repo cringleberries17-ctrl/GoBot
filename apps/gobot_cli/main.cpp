@@ -1961,12 +1961,32 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
         return 1;
     }
 
+    // The party HUD, read before every invite as the GUI's party worker reads
+    // it, and the same gate: "Chỉ mời khi đang làm chủ tổ đội" ticked, only
+    // with the player's own crown seen or no party shown at all; ticked or
+    // not, never into a full party, nor on a look from before this run's own
+    // last invite. Without its pictures nothing reads, which the gate takes
+    // as a HUD not read.
+    PartyHudReader hud_reader;
+    std::string hud_missing;
+    if (!hud_reader.load(store, &hud_missing))
+        std::printf("The party HUD cannot be read (%s is missing)%s.\n", hud_missing.c_str(),
+                    rules.always_leader ? ": with \"only while leading\" ticked nobody is invited" : "");
+    PartyEvents events;
+    // The player's own lines are never somebody asking (PartyChat::without_own):
+    // the character named in hunt.ini, whatever the line says.
+    HunterConfig hunt;
+    hunt.load(resolve("configs/hunt.ini"));
+    const std::string own_name = hunt.character_name;
+
     std::printf("Inviting on '%s' for %d seconds.\n\n"
                 "  seen this often  %d times, %dms apart\n"
                 "  cooldown         %ds per player\n"
+                "  only while leading  %s\n"
                 "  chat read        %s, %d line(s)\n\n",
                 chat_rules.keyword.c_str(), seconds,
                 chat_rules.votes, chat_rules.vote_gap_ms, chat_rules.cooldown_s,
+                rules.always_leader ? "yes: the player's own crown, or no party shown" : "no",
                 chat_place.fixed ? "where party.ini [Chat] says (place = fixed)"
                                  : "above the chat bar, wherever it is",
                 chat_place.lines);
@@ -2006,6 +2026,11 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
 
+        // The player's own lines, whatever their length, are not asking: as
+        // the GUI's party worker takes them out, with nothing typed here.
+        const std::vector<std::pair<std::string, std::uint64_t>> nothing_typed;
+        lines = chat.without_own(lines, own_name, nothing_typed, now);
+
         for (const std::string& who : chat.saw(lines, now)) {
             ++asked;
             std::printf("  '%s' asked to join\n", who.c_str());
@@ -2016,6 +2041,19 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
             }
             if (!rules.may_invite(who)) {
                 std::printf("    -> left alone: the rules say no\n");
+                continue;
+            }
+            // A fresh look at the party for this asker, and the gate on it.
+            PartyLook look;
+            if (!take_party_look(party_sight(capture, input.target_window()), look)) {
+                std::printf("    -> left alone: no look at the game for the party\n");
+                continue;
+            }
+            const PartyHud hud = read_party(hud_reader, look, events);
+            const PartyGate gate = party_invite_gate(hud, rules.always_leader);
+            std::printf("    party: %s\n", party_hud_text(hud).c_str());
+            if (!gate.allowed) {
+                std::printf("    -> left alone: %s\n", gate.reason_en.c_str());
                 continue;
             }
 
@@ -2040,7 +2078,11 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
             for (const auto& r : rows) if (r.index == at) row = &r;
             if (row == nullptr) continue;
 
-            if (!list.invite(input, capture, store, *row, &why)) {
+            const bool sent = list.invite(input, capture, store, *row, &why);
+            // Whatever it says, the party may change from here: a look from
+            // before this is no reading for the next asker (read_party).
+            events.changed(now_ms(), "an invite was sent", party_text::kEventInvited);
+            if (!sent) {
                 std::printf("    -> the invite did not go: %s\n", why.c_str());
                 continue;
             }
@@ -2382,16 +2424,16 @@ int run_party_hud(const Options& o, const AppConfig& app) {
         std::fprintf(stderr, "A picture of the party HUD is missing: %s\n", missing.c_str());
         return 1;
     }
-    // One look, as the party worker takes one: trusted, and whole, as they
-    // were at the grab -- asked right before it and right after it. A
-    // screenshot named is taken for the game's own picture of itself.
+    // One look, as the party worker takes one: trusted as it was at the grab
+    // -- asked right before it and right after it. A screenshot named is
+    // taken for the game's own picture of itself.
     PartyLook look;
     if (!o.party_hud_image.empty()) {
         if (!load_png(o.party_hud_image, look.frame) || !look.frame.valid()) {
             std::fprintf(stderr, "Could not read %s\n", o.party_hud_image.c_str());
             return 1;
         }
-        look.trusted = look.whole = true;
+        look.trusted = true;
         look.grabbed_ms = now_ms();
     } else {
         InputManager input;
@@ -2408,12 +2450,6 @@ int run_party_hud(const Options& o, const AppConfig& app) {
             std::printf("(read off the screen with the game behind another window: what covers it is "
                         "what is read)\n");
     }
-    const std::string& hides = look.in_the_way;
-    if (look.trusted && !look.whole)
-        std::printf("(read off the screen with part of the game %s: alone is never sure on it)\n",
-                    hides == "off the screen" ? "off the screen"
-                                              : ("under " + (hides.empty() ? std::string("another window") : hides))
-                                                    .c_str());
     // Nothing GoBot did to the party is known to a look of its own.
     const PartyEvents none;
     const PartyHud hud = read_party(reader, look, none);
@@ -2436,12 +2472,9 @@ int run_party_hud(const Options& o, const AppConfig& app) {
             std::printf(", crown %.3f, red frame %.3f%s\n", static_cast<double>(p.crown_score),
                         static_cast<double>(p.frame_score), p.leader ? " -- leads" : "");
         }
-        // Alone counts for an invite with the tick only when it is sure.
+        // Alone is what the game shows: no member's panel, no crown.
         if (hud.state == PartyState::Alone)
-            std::printf("alone       %s\n", hud.sure_alone
-                                                ? "surely: all of the game seen, no window, dialog or tooltip, "
-                                                  "nothing plain over the panels"
-                                                : ("not surely -- " + hud.alone_doubt).c_str());
+            std::printf("alone       the game shows no party: no member's panel, no crown\n");
     }
     for (const bool always : { false, true }) {
         const PartyGate g = party_invite_gate(hud, always);
@@ -3201,6 +3234,20 @@ int run_chat(const Options& o, const AppConfig& app) {
         last_out << static_cast<long long>(std::time(nullptr)) << "\n";
     }
 
+    // chat.ini's quiet before the first Enter, as the GUI waits it -- nothing
+    // pressed meanwhile -- for the live test of its setting.
+    say(std::string("keys: ") + (settings.inject == InputManager::KeyInject::Scancode ? "scancode" : "vk") +
+        ", holds " +
+        (settings.hold_max_ms > 0 ? std::to_string(settings.hold_min_ms) + "-" + std::to_string(settings.hold_max_ms) +
+                                        " ms"
+                                  : std::string("as always")) +
+        ", quiet " + std::to_string(settings.quiet_before_ms) + " ms, watch an Enter " +
+        std::to_string(settings.enter_gap_ms) + " ms, up to " + std::to_string(settings.max_enters) + " Enters, " +
+        std::to_string(settings.type_tries) + " typing tries, " + std::to_string(settings.type_wait_ms) +
+        " ms before the first letter");
+    for (int slept = 0; slept < settings.quiet_before_ms && !g_stop; slept += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, settings.quiet_before_ms - slept)));
+
     // Ctrl+C stops the line at its next key, as the GUI's DỪNG does. What was
     // typed is rubbed out if the game is in front -- which, with this console
     // brought forward by the Ctrl+C, it may well not be. Watched from beside
@@ -3212,9 +3259,16 @@ int run_chat(const Options& o, const AppConfig& app) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     });
-    const ChatSender::Result r = sender.send(line);
+    if (g_stop) sender.cancel();
+    ChatSender::Result r = sender.send(line);
     sending = false;
     watch.join();
+    // What it pressed and saw: each Enter's hold and the bar after it, the
+    // ink as it was typed -- what the live test reads.
+    if (!r.trace.enters.empty()) {
+        if (r.trace.outcome == "no_text") r.trace.machine = chat_machine_note(input.target_window());
+        say(chat_trace_line(r.trace));
+    }
 
     if (r.sent) say("Đã gửi: \"" + line.typed + "\"");
     if (!r.trouble.empty()) say((r.sent ? "" : "Không gửi được: ") + r.trouble);
@@ -4789,7 +4843,12 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(every_ms));
         if (macro) {
             const float hp = reader->hp_percent();
-            macro->set_vitals(hp, reader->mp_percent());
+            // As no reading once the bars have not been read for as long as
+            // the macro trusts a reading, as in the GUI: a reader whose grabs
+            // fail keeps its last values.
+            const std::uint64_t read_at = reader->last_read_ms(), at = now_ms();
+            macro->set_vitals(VitalsReader::if_fresh(hp, read_at, at, MacroEngine::kVitalsStaleMs),
+                              VitalsReader::if_fresh(reader->mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
             // Out of the world -- no HUD -- every key holds, as in the GUI.
             const bool in_world = hp >= 0.0f;
             if (in_world == macro->suspended())

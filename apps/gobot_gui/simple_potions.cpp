@@ -23,9 +23,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
 #include <future>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -37,8 +39,9 @@ namespace {
 using namespace simple_ui;
 
 /// The newest frames kept in potion_debug: what a slot did when its count went
-/// up -- the next stack -- or it went empty. The evidence for whether the
-/// game moves the next stack in by itself.
+/// up -- the next stack -- or it went empty, the evidence for whether the game
+/// moves the next stack in by itself; and the frame of a count read wild and
+/// then back again (PotionWatch::Event::Misread), the evidence of a misread.
 constexpr std::size_t kKeptFrames = 20;
 /// The second look of a pair, after this long: soon enough that the stack has
 /// not moved in between, late enough that the reader has a new frame.
@@ -58,6 +61,9 @@ struct PotionLook {
     /// Each key's two readings, in the order taken.
     std::vector<std::pair<std::uint32_t, std::vector<SlotReading>>> readings;
     std::string kept;               ///< a frame kept in potion_debug, by name
+    /// The look's last frame: held in memory while a key's count read wild,
+    /// and written to potion_debug if that turns out a misread.
+    Frame frame;
 };
 
 std::string stamp() {
@@ -86,6 +92,21 @@ std::string said(const SlotReading& r) {
     return r.has_count() ? std::to_string(r.count) : std::string(slot_state_name(r.state));
 }
 
+/// "key 1 at slot 7 row 1", or "key Q" for one not on the hotbar.
+std::string key_at(std::uint32_t vk, const std::string& key) {
+    SlotReading r;
+    if (!hotbar_slot_of(vk, r.row, r.col)) return "key " + key;
+    return "key " + key + " at " + where(r);
+}
+
+/// A key's name as it can go in a file's name: its letters and digits.
+std::string file_part(const std::string& key) {
+    std::string out;
+    for (const char c : key)
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) out += c;
+    return out.empty() ? std::string("key") : out;
+}
+
 } // namespace
 
 /// Everything the GUI keeps for potion stock.
@@ -104,6 +125,13 @@ struct GuiApp::PotionsUi {
     bool           was_running = false;
     std::map<std::uint32_t, SlotReading> logged;    ///< what the log last said, per key
     std::string    trouble;                 ///< why nothing can be read, in Vietnamese
+    /// Per key, the frame of the newest look that read its count wild: held
+    /// until the count comes back (a misread: written to potion_debug) or the
+    /// drop is believed (dropped).
+    std::map<std::uint32_t, Frame> wild_frames;
+    /// Misread frames being written to potion_debug, off this thread: each
+    /// comes back with its line for the log.
+    std::vector<std::future<std::string>> saving;
     /// The look under way. Last, so that it is the first thing to go: a look
     /// still running is waited for while the pictures it reads are still here.
     std::future<PotionLook> look;
@@ -127,32 +155,103 @@ void GuiApp::potions_tick() {
     if (running && !ui.was_running) {
         ui.watch.reset();
         ui.logged.clear();
+        ui.wild_frames.clear();
         ui.next_ms = now_ms() + 3000;
+        std::lock_guard<std::mutex> lock(potion_slots_mutex_);
+        potion_slots_.clear();
     }
     ui.was_running = running;
 
+    // Misread frames written meanwhile: their lines for the log.
+    for (auto it = ui.saving.begin(); it != ui.saving.end();) {
+        if (it->wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        GB_INFO("%s", it->get().c_str());
+        it = ui.saving.erase(it);
+    }
+
     // A look that has come back.
     if (ui.look.valid() && ui.look.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        const PotionLook got = ui.look.get();
+        PotionLook got = ui.look.get();
         if (got.spot.found) ui.spot = got.spot;
+        const std::uint64_t looked = now_ms();
         for (const auto& [vk, readings] : got.readings) {
             bool hp = true;
             for (const MacroKey& k : macro_config_.keys)
                 if (k.keycode == vk && macro_key_kind(k) == MacroKeyKind::MpPotion) hp = false;
             const std::string key = InputManager::key_name(vk);
-            for (const SlotReading& r : readings)
-                for (const PotionWatch::Event& ev : ui.watch.feed(vk, r)) {
-                    if (ev.kind == PotionWatch::Event::Kind::Low) {
+            // One reading per look, from its two frames: a look that got one
+            // frame only says nothing.
+            if (readings.size() < 2) continue;
+            const SlotReading r = PotionWatch::look_of(readings[0], readings[1]);
+            for (const PotionWatch::Event& ev : ui.watch.feed(vk, r)) {
+                using Kind = PotionWatch::Event::Kind;
+                switch (ev.kind) {
+                    case Kind::Low:
                         GB_INFO("Potions: key %s is low -- %d left in its slot", key.c_str(), ev.count);
                         alert("potion_low", alert_text::potion_low(hp, key, ev.count));
-                    } else {
+                        break;
+                    case Kind::Out:
                         GB_WARN("Potions: key %s's slot is empty, and the key is still pressed", key.c_str());
                         alert("potion_out", alert_text::potion_out(hp, key));
+                        break;
+                    case Kind::Wild:
+                        // Not believed yet: the frame is held, in case the
+                        // count comes back -- the newest look's.
+                        if (got.frame.valid()) ui.wild_frames[vk] = got.frame;
+                        break;
+                    case Kind::WildBelieved:
+                        ui.wild_frames.erase(vk);
+                        GB_INFO("Potions: %s read %d %d looks running (was %d) -- believed, the stack is that low",
+                                key_at(vk, key).c_str(), ev.count, PotionWatch::kWildLooks, ev.was);
+                        break;
+                    case Kind::Misread: {
+                        const std::string text = "Potions: " + key_at(vk, key) + " read " + std::to_string(ev.count) +
+                                                 " (was " + std::to_string(ev.was) + "), then " +
+                                                 std::to_string(ev.back) + " -- a misread, not believed";
+                        const auto held = ui.wild_frames.find(vk);
+                        if (held == ui.wild_frames.end() || !held->second.valid()) {
+                            GB_INFO("%s", text.c_str());
+                            break;
+                        }
+                        // Written off this thread, as the look's own keep is.
+                        Frame f = std::move(held->second);
+                        ui.wild_frames.erase(held);
+                        const std::string name = stamp() + "_" + file_part(key) + "_misread.png";
+                        ui.saving.push_back(std::async(std::launch::async, [f = std::move(f), name, text] {
+                            const std::string dir = exe_relative("potion_debug");
+                            if (!make_folder(dir) || !save_png(f, dir + "\\" + name))
+                                return text + "; the frame could not be kept";
+                            prune(dir, kKeptFrames);
+                            return text + "; kept the frame as potion_debug\\" + name;
+                        }));
+                        break;
                     }
                 }
+            }
+            // No wild drop held any more -- come back, believed, or ended by
+            // the slot emptied -- no frame of it either. A slot covered for a
+            // while holds both: the count that comes back after is a misread
+            // all the same, and its frame is kept then.
+            if (!ui.watch.holding(vk)) ui.wild_frames.erase(vk);
             // The log: only when what is believed changes.
             SlotReading now;
             if (!ui.watch.believed(vk, now)) continue;
+            {
+                // For the black box after a death: what the slot was last
+                // believed to hold, and when it was read.
+                std::lock_guard<std::mutex> lock(potion_slots_mutex_);
+                const auto seen = std::find_if(potion_slots_.begin(), potion_slots_.end(),
+                                               [&](const PotionSlotSeen& s) { return s.key == key; });
+                if (seen != potion_slots_.end()) {
+                    seen->said = said(now);
+                    seen->read_ms = looked;
+                } else {
+                    potion_slots_.push_back(PotionSlotSeen{ key, said(now), looked });
+                }
+            }
             const auto was = ui.logged.find(vk);
             if (was != ui.logged.end() && was->second.same(now)) continue;
             const std::string before = was == ui.logged.end() ? std::string{} : " (was " + said(was->second) + ")";
@@ -251,8 +350,23 @@ void GuiApp::potions_tick() {
                 prune(dir, kKeptFrames);
             }
         }
+        out.frame = std::move(last);
         return out;
     });
+}
+
+std::string GuiApp::potion_slots_line(std::uint64_t now) const {
+    std::lock_guard<std::mutex> lock(potion_slots_mutex_);
+    if (potion_slots_.empty()) return {};
+    std::string line = "Potion slots:";
+    for (std::size_t i = 0; i < potion_slots_.size(); ++i) {
+        const PotionSlotSeen& s = potion_slots_[i];
+        const std::uint64_t ago = now > s.read_ms ? now - s.read_ms : 0;
+        char buf[48];
+        std::snprintf(buf, sizeof buf, " (read %.0f s earlier)", static_cast<double>(ago) / 1000.0);
+        line += (i ? ", key " : " key ") + s.key + " " + s.said + buf;
+    }
+    return line;
 }
 
 void GuiApp::simple_potion_stock(const MacroKey& key) {

@@ -118,6 +118,10 @@ void paint_item(Frame& f, const ScreenRect& s, int seed) {
         }
 }
 
+/// How far the client prints a digit after the one before: its digits are 5
+/// pixels wide and 6 apart, a 1 included.
+constexpr int kDigitStep = 6;
+
 /// A number in the client's own digits, white with a dark outline.
 void print_number(Frame& f, int x, int y, const std::string& text, const std::string& font_dir) {
     for (const char c : text) {
@@ -136,7 +140,7 @@ void print_number(Frame& f, int x, int y, const std::string& text, const std::st
                         put_px(f, x + gx, y + gy, 250, 250, 250);
                     }
                 }
-        x += g.width + 1;
+        x += kDigitStep;
     }
 }
 

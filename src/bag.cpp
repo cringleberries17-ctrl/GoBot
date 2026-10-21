@@ -575,12 +575,30 @@ void CountReader::set_digit(int d, int w, int h, const std::vector<std::uint8_t>
     g.on = on;
     g.lit = 0;
     for (const auto v : on) g.lit += v ? 1 : 0;
+    // The ring over the digit's cell: an unlit pixel next to a lit one, side
+    // or corner.
+    const int cw = std::max(w, kCellW);
+    const auto lit_at = [&](int x, int y) {
+        return x >= 0 && y >= 0 && x < w && y < h && on[static_cast<std::size_t>(y) * w + x] != 0;
+    };
+    g.ring.assign(static_cast<std::size_t>(cw) * h, 0);
+    g.ring_n = 0;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < cw; ++x) {
+            if (lit_at(x, y)) continue;
+            bool next_to = false;
+            for (int dy = -1; dy <= 1 && !next_to; ++dy)
+                for (int dx = -1; dx <= 1 && !next_to; ++dx) next_to = lit_at(x + dx, y + dy);
+            if (!next_to) continue;
+            g.ring[static_cast<std::size_t>(y) * cw + x] = 1;
+            ++g.ring_n;
+        }
     loaded_ = true;
     for (const Glyph& each : digits_)
         if (each.w == 0) loaded_ = false;
 }
 
-int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool caret,
+int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool caret, bool cells,
                       int& white, int& stray) const {
     white = stray = 0;
     const int kW = area.w, kH = area.h;
@@ -621,15 +639,23 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool 
     // caret over a 2 hides a fifth of its box and three of its nineteen
     // strokes. How well a hidden digit fits what can be seen is still
     // measured, for telling whether another digit read there is sure.
+    //
+    // In `cells` the box is the digit's cell, and of it only the digit's
+    // strokes and the ring round them count: what else is in the cell is
+    // the icon under the count, which may be white. A 1 is 3 pixels of a
+    // 5-pixel cell; over its own 3 columns alone it had room for two stray
+    // white pixels, and the egg's rim put three there.
     const auto fit = [&](int d, int x, int y, double& agree, double& strokes, bool& hidden) {
         const Glyph& g = digits_[d];
         agree = strokes = 0.0;
         hidden = false;
-        if (x + g.w > kW || y + g.h > kH || g.lit == 0) return;
+        const int cw = cells ? std::max(g.w, kCellW) : g.w;
+        if (x + cw > kW || y + g.h > kH || g.lit == 0) return;
         int seen = 0, seen_lit = 0, same = 0, hit = 0;
         for (int gy = 0; gy < g.h; ++gy)
-            for (int gx = 0; gx < g.w; ++gx) {
-                const bool want = g.on[static_cast<std::size_t>(gy) * g.w + gx] != 0;
+            for (int gx = 0; gx < cw; ++gx) {
+                const bool want = gx < g.w && g.on[static_cast<std::size_t>(gy) * g.w + gx] != 0;
+                if (cells && !want && g.ring[static_cast<std::size_t>(gy) * cw + gx] == 0) continue;
                 const std::uint8_t have = map[static_cast<std::size_t>(y + gy) * kW + x + gx];
                 if (have == kUnknown) continue;
                 ++seen;
@@ -637,11 +663,16 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool 
                 if (want == (have == kStroke)) ++same;
                 if (want && have == kStroke) ++hit;
             }
-        hidden = seen * 4 < g.w * g.h * 3 || seen_lit * 4 < g.lit * 3;
+        const int box = cells ? g.lit + g.ring_n : g.w * g.h;
+        hidden = seen * 4 < box * 3 || seen_lit * 4 < g.lit * 3;
         if (seen == 0 || seen_lit == 0) return;
         agree = static_cast<double>(same) / seen;
         strokes = static_cast<double>(hit) / seen_lit;
     };
+    // What a digit's box has to agree by. In cells a little less: the ring
+    // is the outline's own pixels, where the client's soft edge now and then
+    // lifts one into white -- the strokes are held to as much as ever.
+    const double agree_least = cells ? 0.85 : 0.88;
 
     // Left to right along each starting row; the row that reads the most
     // digits wins. Where each digit was read is kept, to tell afterwards
@@ -670,7 +701,7 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool 
                 double agree = 0.0, strokes = 0.0;
                 bool hidden = false;
                 fit(d, x, y, agree, strokes, hidden);
-                if (agree < 0.88 || strokes < 0.88) continue;
+                if (agree < agree_least || strokes < 0.88) continue;
                 if (hidden) {
                     hidden_fits = true;
                 } else if (agree > found_agree) {
@@ -682,7 +713,9 @@ int CountReader::scan(const Frame& f, const ScreenRect& area, int max_top, bool 
                 line.text += static_cast<char>('0' + found);
                 line.at.push_back(x);
                 line.unsure = line.unsure || hidden_fits;
-                x += digits_[found].w + 1;
+                // The next cell: the client's digits are kCellW + 1 apart, a
+                // 1 too, in a slot's corner.
+                x += (cells ? std::max(digits_[found].w, kCellW) : digits_[found].w) + 1;
                 misses = 0;
             } else {
                 if (!line.text.empty() && ++misses > 2) break;
@@ -717,7 +750,7 @@ int CountReader::read(const Frame& f, const ScreenRect& slot) const {
     // White the digits leave over says nothing in a slot's corner: the item
     // under the count can be white itself.
     int white = 0, stray = 0;
-    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, false, white, stray);
+    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, false, true, white, stray);
     if (white == 0) return 1;                 // nothing printed: a stack of one
     if (n <= 0 || n > 9999) return kUnreadable;
     return n;
@@ -726,7 +759,7 @@ int CountReader::read(const Frame& f, const ScreenRect& slot) const {
 int CountReader::read_field(const Frame& f, const ScreenRect& area) const {
     if (!loaded_ || !f.valid()) return kUnreadable;
     int white = 0, stray = 0;
-    const int n = scan(f, area, std::max(0, area.h - 8), true, white, stray);
+    const int n = scan(f, area, std::max(0, area.h - 8), true, false, white, stray);
     if (white == 0) return 0;                 // the caret alone is an empty box
     // Nothing in a box is white but its number, so white the digits read
     // leave over is a digit that did not read -- most of it under the caret

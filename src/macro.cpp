@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <random>
 #include <thread>
 
@@ -517,6 +519,279 @@ void MacroEngine::set_vitals(float hp_pct, float mp_pct) {
     vit_mp_.store(mp_pct);
     vit_at_ms_.store(now);
     if (hp_pct >= 0.0f && hp_pct < kDownHpPct) down_ms_.store(now);
+    box_vitals(now, hp_pct, mp_pct);
+}
+
+// ------------------------------------------------------------- black box
+
+const char* MacroEngine::potion_why_name(PotionWhy why) {
+    switch (why) {
+        case PotionWhy::Pressed:    return "pressed";
+        case PotionWhy::AboveMark:  return "above the mark";
+        case PotionWhy::NoReading:  return "no reading";
+        case PotionWhy::Cooling:    return "cooling";
+        case PotionWhy::OtherTier:  return "other tier";
+        case PotionWhy::NotInFront: return "game not in front";
+        case PotionWhy::NotInWorld: return "not in the world";
+        case PotionWhy::KeysHeld:   return "keys held";
+        case PotionWhy::KeysBusy:   return "keys busy";
+        case PotionWhy::KeyFailed:  return "key failed";
+        case PotionWhy::BehindHp:   return "behind the HP potion";
+    }
+    return "?";
+}
+
+namespace {
+
+/// A percent as the black box keeps it: rounded, -1 for no reading.
+int box_pct(float pct) { return pct < 0.0f ? -1 : static_cast<int>(pct + 0.5f); }
+
+/// A vitals record changes so seldom that one at most this often is plenty:
+/// the reader pushes every frame of the window.
+constexpr std::uint64_t kBoxVitalsEveryMs = 200;
+
+} // namespace
+
+void MacroEngine::box_vitals(std::uint64_t t, float hp_pct, float mp_pct) {
+    const BoxVitals v{ t, box_pct(hp_pct), box_pct(mp_pct) };
+    std::lock_guard<std::mutex> lock(box_mutex_);
+    if (box_have_vitals_) {
+        const BoxVitals& last = box_last_vitals_;
+        if (v.hp == last.hp && v.mp == last.mp) return;
+        if (t < last.t + kBoxVitalsEveryMs) return;
+    }
+    box_last_vitals_ = v;
+    box_have_vitals_ = true;
+    box_vitals_.push_back(v);
+    box_trim(t);
+}
+
+void MacroEngine::box_decide(std::uint64_t t, std::uint64_t key, const MacroKey& k, bool hp, PotionWhy why,
+                             const std::string& text) {
+    std::lock_guard<std::mutex> lock(box_mutex_);
+    // The minute's tally: the reason that ends now had lasted since it began.
+    PotionMinute& m = potion_minute_[key];
+    m.keycode = k.keycode;
+    m.mark = k.threshold_pct;
+    m.hp = hp;
+    if (m.since == 0) m.since = t;
+    const auto last = box_last_.find(key);
+    const bool same = last != box_last_.end() && last->second.first == why && last->second.second == text;
+    if (why == PotionWhy::Pressed) ++m.presses;
+    if (why != PotionWhy::AboveMark) m.active = true;
+    if (why == PotionWhy::KeysHeld && !text.empty()) m.held_by = text;
+    if (same && why != PotionWhy::Pressed) return;
+    m.ms[static_cast<int>(m.why)] += t > m.since ? t - m.since : 0;
+    m.why = why;
+    m.text = text;
+    m.since = t;
+    box_last_[key] = { why, text };
+    box_decisions_.push_back(BoxDecision{ t, key, k.keycode, k.threshold_pct, hp, why, text });
+    box_trim(t);
+}
+
+void MacroEngine::box_trim(std::uint64_t now) {
+    // Older than kBlackBoxKeepMs goes -- but not the newest such record of
+    // the vitals, nor of each key: what was so when the window opens. HP above
+    // the mark for a minute before a burst is one record a minute old.
+    const std::uint64_t cut = now > kBlackBoxKeepMs ? now - kBlackBoxKeepMs : 0;
+    while (box_vitals_.size() >= 2 && box_vitals_[1].t < cut) box_vitals_.pop_front();
+    if (!box_decisions_.empty() && box_decisions_.front().t < cut) {
+        std::map<std::uint64_t, std::size_t> newest_old;      // key -> the newest record before the cut
+        for (std::size_t i = 0; i < box_decisions_.size() && box_decisions_[i].t < cut; ++i)
+            newest_old[box_decisions_[i].key] = i;
+        std::deque<BoxDecision> kept;
+        for (std::size_t i = 0; i < box_decisions_.size(); ++i) {
+            const BoxDecision& d = box_decisions_[i];
+            if (d.t >= cut || newest_old[d.key] == i) kept.push_back(std::move(box_decisions_[i]));
+        }
+        box_decisions_.swap(kept);
+    }
+    // And never more than kBlackBoxMax records: the oldest go first.
+    while (box_vitals_.size() + box_decisions_.size() > kBlackBoxMax) {
+        const bool vitals_older = !box_vitals_.empty() &&
+                                  (box_decisions_.empty() || box_vitals_.front().t <= box_decisions_.front().t);
+        if (vitals_older) box_vitals_.pop_front();
+        else              box_decisions_.pop_front();
+    }
+}
+
+std::size_t MacroEngine::black_box_size() const {
+    std::lock_guard<std::mutex> lock(box_mutex_);
+    return box_vitals_.size() + box_decisions_.size();
+}
+
+std::vector<std::string> MacroEngine::black_box_lines() const {
+    const std::uint64_t now = clock_now();
+    std::deque<BoxVitals> vitals;
+    std::deque<BoxDecision> decisions;
+    {
+        std::lock_guard<std::mutex> lock(box_mutex_);
+        vitals = box_vitals_;
+        decisions = box_decisions_;
+    }
+    // The keys in the order of the config, HP's first; one taken out since
+    // goes after them.
+    std::vector<std::uint64_t> ids;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const bool hp : { true, false })
+            for (std::size_t i = 0; i < config_.keys.size() && i < key_ids_.size(); ++i) {
+                const MacroKeyKind kind = macro_key_kind(config_.keys[i]);
+                if (kind == (hp ? MacroKeyKind::HpPotion : MacroKeyKind::MpPotion)) ids.push_back(key_ids_[i]);
+            }
+    }
+    for (const bool hp : { true, false })
+        for (const BoxDecision& d : decisions)
+            if (d.hp == hp && std::find(ids.begin(), ids.end(), d.key) == ids.end()) ids.push_back(d.key);
+
+    std::vector<std::string> lines;
+    if (vitals.empty() && decisions.empty()) return lines;
+    const std::uint64_t start = now > kBlackBoxMs ? now - kBlackBoxMs : 0;
+    const auto ago = [&](std::uint64_t t) {
+        char buf[24];
+        std::snprintf(buf, sizeof buf, "-%.1f s", static_cast<double>(now - std::min(now, std::max(t, start))) / 1000.0);
+        return std::string(buf);
+    };
+    const auto seconds = [](std::uint64_t ms) {
+        char buf[24];
+        std::snprintf(buf, sizeof buf, "%.1f s", static_cast<double>(ms) / 1000.0);
+        return std::string(buf);
+    };
+    // Entries joined, the newest kept when they do not all fit.
+    const auto fit = [](const std::string& head, const std::vector<std::string>& parts) {
+        std::size_t from = 0, len = head.size();
+        for (const std::string& p : parts) len += p.size() + 2;
+        while (len > kBlackBoxLineChars && from < parts.size()) len -= parts[from++].size() + 2;
+        std::string line = head + (from > 0 ? "..., " : "");
+        for (std::size_t i = from; i < parts.size(); ++i) line += (i > from ? ", " : "") + parts[i];
+        if (line.size() > kBlackBoxLineChars) line.resize(kBlackBoxLineChars);
+        return line;
+    };
+
+    // ---- HP and MP as read ----
+    {
+        const auto point = [&](const BoxVitals& v) {
+            const auto pct = [](int p) { return p < 0 ? std::string("?") : std::to_string(p); };
+            return ago(v.t) + " " + (v.hp < 0 && v.mp < 0 ? std::string("no read") : pct(v.hp) + "/" + pct(v.mp));
+        };
+        std::vector<std::string> parts;
+        // What was read when the window opened, then the lowest HP of each
+        // 2 s up to the last 5 s -- no reading lowest of all -- then every
+        // change.
+        const BoxVitals* before = nullptr;
+        for (const BoxVitals& v : vitals)
+            if (v.t < start) before = &v;
+        if (before) parts.push_back(point(*before));
+        const std::uint64_t close = now > 5000 ? now - 5000 : 0;
+        const BoxVitals* low = nullptr;
+        std::uint64_t bucket = 0;
+        const auto lower = [](const BoxVitals& a, const BoxVitals& b) { return a.hp < b.hp; };
+        for (const BoxVitals& v : vitals) {
+            if (v.t < start) continue;
+            if (v.t >= close) {
+                if (low) parts.push_back(point(*low));
+                low = nullptr;
+                parts.push_back(point(v));
+                continue;
+            }
+            const std::uint64_t b = (v.t - start) / 2000;
+            if (low && b != bucket) {
+                parts.push_back(point(*low));
+                low = nullptr;
+            }
+            if (!low || lower(v, *low)) low = &v;
+            bucket = b;
+        }
+        if (low) parts.push_back(point(*low));
+        if (parts.empty()) parts.push_back("none pushed");
+        lines.push_back(fit("Black box, the last 30 s: HP/MP read (%): ", parts));
+    }
+
+    // ---- each potion key ----
+    std::string presses_line;
+    for (const std::uint64_t id : ids) {
+        if (lines.size() + 2 > kBlackBoxLines) break;      // room for the presses' line
+        const BoxDecision* before = nullptr;
+        std::vector<const BoxDecision*> mine;
+        for (const BoxDecision& d : decisions) {
+            if (d.key != id) continue;
+            if (d.t < start) before = &d;
+            else mine.push_back(&d);
+        }
+        if (before) mine.insert(mine.begin(), before);
+        if (mine.empty()) continue;
+        const BoxDecision& k = *mine.back();
+        const std::string name = InputManager::key_name(k.keycode);
+        std::vector<std::string> parts;
+        int pressed = 0;
+        for (std::size_t i = 0; i < mine.size(); ++i) {
+            const BoxDecision& d = *mine[i];
+            if (d.why == PotionWhy::Pressed) {
+                if (d.t >= start) ++pressed;
+                parts.push_back(ago(d.t) + " PRESSED");
+                continue;
+            }
+            const std::uint64_t from = std::max(d.t, start);
+            const std::uint64_t until = i + 1 < mine.size() ? mine[i + 1]->t : now;
+            parts.push_back(ago(d.t) + " " + potion_why_name(d.why) + (d.text.empty() ? "" : " (" + d.text + ")") +
+                            " " + seconds(until > from ? until - from : 0));
+        }
+        lines.push_back(fit(std::string(k.hp ? "HP" : "MP") + " potion key " + name + " (under " +
+                                std::to_string(k.mark) + "%): ",
+                            parts));
+        presses_line += (presses_line.empty() ? "" : ", ") + std::string(k.hp ? "HP" : "MP") + " key " + name + " " +
+                        std::to_string(pressed);
+    }
+    if (!presses_line.empty()) lines.push_back(fit("Potion presses in those 30 s: ", { presses_line }));
+    return lines;
+}
+
+void MacroEngine::log_potions(std::uint64_t now) {
+    std::string line;
+    bool any = false;
+    {
+        std::lock_guard<std::mutex> lock(box_mutex_);
+        if (potion_log_ms_ == 0) {
+            potion_log_ms_ = std::max<std::uint64_t>(now, 1);
+            return;
+        }
+        if (now < potion_log_ms_ + 60'000) return;
+        potion_log_ms_ = now;
+        // HP's keys first, each in the order it was first seen.
+        for (const bool hp : { true, false })
+            for (auto& [id, m] : potion_minute_) {
+                if (m.hp != hp) continue;
+                m.ms[static_cast<int>(m.why)] += now > m.since ? now - m.since : 0;
+                m.since = now;
+                // A press's moment is its cooldown's first.
+                m.ms[static_cast<int>(PotionWhy::Cooling)] += m.ms[static_cast<int>(PotionWhy::Pressed)];
+                m.ms[static_cast<int>(PotionWhy::Pressed)] = 0;
+                any = any || m.active;
+                std::string part = std::string(hp ? "HP" : "MP") + " key " + InputManager::key_name(m.keycode) +
+                                   " (under " + std::to_string(m.mark) + "%): " + std::to_string(m.presses) +
+                                   " pressed";
+                std::string held;
+                for (int w = 0; w <= static_cast<int>(PotionWhy::BehindHp); ++w) {
+                    if (m.ms[w] < 50) continue;
+                    char buf[32];
+                    std::snprintf(buf, sizeof buf, "%.1f s ", static_cast<double>(m.ms[w]) / 1000.0);
+                    held += (held.empty() ? "" : ", ") + std::string(buf) +
+                            potion_why_name(static_cast<PotionWhy>(w)) +
+                            (static_cast<PotionWhy>(w) == PotionWhy::KeysHeld && !m.held_by.empty()
+                                 ? " (" + m.held_by + ")"
+                                 : "");
+                }
+                if (!held.empty()) part += "; " + held;
+                line += (line.empty() ? "" : " | ") + part;
+                // The next minute starts from here, in the reason it is in.
+                m.presses = 0;
+                std::fill(std::begin(m.ms), std::end(m.ms), 0);
+                m.active = m.why != PotionWhy::AboveMark;
+                m.held_by = m.why == PotionWhy::KeysHeld ? m.text : std::string();
+            }
+    }
+    if (any && !line.empty()) GB_INFO("Potions: %s", line.c_str());
 }
 
 void MacroEngine::current_vitals(float& hp_pct, float& mp_pct) const {
@@ -621,6 +896,14 @@ void MacroEngine::start() {
     seq_next_ms_ = 0;
     seq_noticed_ = 0;
     seq_wrapped_ = false;
+    {
+        // The black box goes on across runs; each key's reasons and minute
+        // start afresh.
+        std::lock_guard<std::mutex> lock(box_mutex_);
+        box_last_.clear();
+        potion_minute_.clear();
+        potion_log_ms_ = 0;
+    }
 
     timer_thread_ = std::thread(&MacroEngine::timer_loop, this);
     seq_thread_   = std::thread(&MacroEngine::sequence_loop_fn, this);
@@ -640,6 +923,12 @@ void MacroEngine::start_stepped() {
     seq_next_ms_ = 0;
     seq_noticed_ = 0;
     seq_wrapped_ = false;
+    {
+        std::lock_guard<std::mutex> lock(box_mutex_);
+        box_last_.clear();
+        potion_minute_.clear();
+        potion_log_ms_ = 0;
+    }
 }
 
 void MacroEngine::step() {
@@ -931,8 +1220,10 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
         // keys may have changed since this pass took its copy of them.
         float hp_now, mp_now;
         current_vitals(hp_now, mp_now);
-        const float v = kind == MacroKeyKind::HpPotion ? hp_now : mp_now;
+        const bool hp_kind = kind == MacroKeyKind::HpPotion;
+        const float v = hp_kind ? hp_now : mp_now;
         const int chosen = macro_urgent_potion(cfg.keys, kind, v);
+        const auto id_of = [&](std::size_t i) { return i < pass_ids_.size() ? pass_ids_[i] : 0; };
         std::uint64_t held_condition = 0, held_no_reading = 0, held_tier = 0;
         bool ready = false;
         for (std::size_t i = 0; i < cfg.keys.size(); ++i) {
@@ -953,6 +1244,12 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
             else if (g == Gate::Blocked)           { if (cooled) ++held_condition; }
             else if (static_cast<int>(i) == chosen) ready = cooled;
             else if (cooled)                        ++held_tier;
+            // The black box: why this key does not drink on this look. The
+            // one that may has its press's outcome recorded below.
+            if (g == Gate::NoReading)                    box_decide(now, id_of(i), k, hp_kind, PotionWhy::NoReading);
+            else if (g == Gate::Blocked)                 box_decide(now, id_of(i), k, hp_kind, PotionWhy::AboveMark);
+            else if (static_cast<int>(i) != chosen)      box_decide(now, id_of(i), k, hp_kind, PotionWhy::OtherTier);
+            else if (!cooled)                            box_decide(now, id_of(i), k, hp_kind, PotionWhy::Cooling);
         }
         if (count) {
             std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -980,6 +1277,8 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
             const PotionKind& hp = potion_kind_[0];
             if (hp.waiting && hp.refused == Refused::Busy) {
                 pk.waiting = true;
+                box_decide(now, id_of(static_cast<std::size_t>(chosen)), cfg.keys[static_cast<std::size_t>(chosen)],
+                           false, PotionWhy::BehindHp);
                 continue;
             }
             const std::uint64_t t = clock_now();
@@ -991,7 +1290,16 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
         const MacroKey& k = cfg.keys[i];
         const std::uint64_t at = clock_now();
         Refused why = Refused::None;
-        if (press(k.keycode, k.hold_ms, "macro-potion", &why)) {
+        const bool went = press(k.keycode, k.hold_ms, "macro-potion", &why);
+        switch (went ? Refused::None : why) {
+            case Refused::None:      box_decide(at, id_of(i), k, hp_kind, went ? PotionWhy::Pressed : PotionWhy::KeyFailed); break;
+            case Refused::Suspended: box_decide(at, id_of(i), k, hp_kind, PotionWhy::NotInWorld); break;
+            case Refused::Unfocused: box_decide(at, id_of(i), k, hp_kind, PotionWhy::NotInFront); break;
+            case Refused::Held:      box_decide(at, id_of(i), k, hp_kind, PotionWhy::KeysHeld, coord_.critical_reason()); break;
+            case Refused::Busy:      box_decide(at, id_of(i), k, hp_kind, PotionWhy::KeysBusy); break;
+            case Refused::Failed:    box_decide(at, id_of(i), k, hp_kind, PotionWhy::KeyFailed); break;
+        }
+        if (went) {
             if (kind == MacroKeyKind::HpPotion) hp_up_ms_ = clock_now();
             pk.waiting = false;
             pk.look_ms = at + kGatePollMs;
@@ -1038,6 +1346,10 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
     else if (restart || potion_since_provisional_ || potion_waiting_since_.load() == 0)
         potion_waiting_since_.store(std::max<std::uint64_t>(now, 1));
     potion_since_provisional_ = false;
+
+    // The minute's line, on every pass that looks at the potions: a pass that
+    // goes no further -- a potion waiting -- still writes it.
+    log_potions(clock_now());
 }
 
 void MacroEngine::timer_loop() {

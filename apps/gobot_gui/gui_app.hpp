@@ -498,8 +498,9 @@ private:
     /// A line Tự chat has just said, for the party worker: read back off the
     /// chat it is our own words, not somebody asking for an invitation.
     void remember_said(const std::string& typed);
-    /// The lines said in the last half hour.
-    std::vector<std::string> recently_said();
+    /// The lines said in the last half hour, each with when, on now_ms()'s
+    /// clock: for PartyChat::without_own.
+    std::vector<std::pair<std::string, std::uint64_t>> said_lately();
     /// When the last line was said, a Gửi thử's among them, on now_ms()'s
     /// clock; 0 for none yet.
     std::uint64_t last_said_ms();
@@ -958,6 +959,10 @@ private:
     /// rest to the alert service, which neither waits nor touches the network
     /// on the caller's thread. `event` is one of alert_events()' keys.
     void alert(const char* event, const std::string& text_vi);
+    /// Right after "ALERT death": the macro's black box -- HP and MP as read
+    /// and each potion key's decisions over the last 30 s -- and what the
+    /// potion slots last showed, with the HP and MP figures, into the log.
+    void log_black_box();
     /// A party joined or a player invited: the name goes only when the
     /// Thông báo tab allows other players' names.
     void alert_party(bool joined, const std::string& who);
@@ -1072,6 +1077,20 @@ private:
     struct PotionsUi;
     struct PotionsUiFree { void operator()(PotionsUi* ui) const; };
     std::unique_ptr<PotionsUi, PotionsUiFree> potions_ui_;
+    /// For the black box written after a death (alert): what each potion
+    /// key's slot was last believed to hold, and how long before `now` it was
+    /// read -- "Potion slots: key 1 16 (read 31 s earlier), key 2 40 (read 1
+    /// s earlier)". A press the black box shows with the count unchanged is
+    /// one the game did not drink. Empty when nothing was read this run. From
+    /// any thread.
+    std::string potion_slots_line(std::uint64_t now) const;
+    struct PotionSlotSeen {
+        std::string   key;          ///< the key's name, as the log writes it
+        std::string   said;         ///< what its slot was believed to hold
+        std::uint64_t read_ms = 0;  ///< when that look came back, on now_ms()'s clock
+    };
+    mutable std::mutex          potion_slots_mutex_;
+    std::vector<PotionSlotSeen> potion_slots_;      ///< under potion_slots_mutex_
 
     // ---- closing stray popups ----
     /// "Tự đóng thông báo": during a run, the few popups on a fixed list --
@@ -1106,9 +1125,10 @@ private:
     /// Every few seconds of the party worker, the HUD read off its look for
     /// the Tổ đội tab.
     void party_hud_tick(const PartyLook& look, const TemplateStore& store);
-    /// What has changed the party, or may have, and when: the party worker's
-    /// own answers and invites, and an invitation seen on screen. Read by
-    /// every decision on "alone" -- the worker's, Tự chat's, "Thử xem".
+    /// What GoBot itself has done to the party, and when: the party worker's
+    /// own answers and invites. A frame grabbed before the last of them is
+    /// stale for every decision on the party -- the worker's, Tự chat's,
+    /// "Thử xem".
     PartyEvents& party_events();
     /// The party by the game's own word, for those same decisions: the one
     /// place P0-3 fills from the game's packets. Nothing reads it yet.
@@ -1123,13 +1143,11 @@ private:
 
     // ---- Tự chat's "Chỉ khi chưa có tổ đội" ----
     /// On Tự chat's thread, for the line whose turn it is: when that line is
-    /// ticked and the party HUD, read on a fresh look -- and, when that one
-    /// is surely alone, on one more kSettleMs later, with the game looked at
-    /// for an invitation in between (PartyEvents::invitation) -- does not
-    /// show the player surely alone -- by the rule the tick's invite goes by
-    /// (read_party, alone_for_chat) -- it is passed over for the next -- or,
-    /// with no other line to go instead, put off a minute -- and true comes
-    /// back, with nothing held or pressed for it. Lives in
+    /// ticked and the party HUD, read on a fresh look, does not show the
+    /// player alone -- no member's panel, no crown, by the rule the tick's
+    /// invite goes by (read_party, alone_for_chat) -- it is passed over for
+    /// the next -- or, with no other line to go instead, put off a minute --
+    /// and true comes back, with nothing held or pressed for it. Lives in
     /// simple_chat_alone.cpp.
     bool chat_alone_put_off(const ChatSettings& s, int index, const TemplateStore& store,
                             ChatSchedule& schedule, std::uint64_t now);

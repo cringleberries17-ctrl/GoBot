@@ -14,9 +14,11 @@
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/input_manager.hpp"
+#include "gobot/logger.hpp"
 #include "gobot/macro.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/monster_list.hpp"
+#include "gobot/vitals_reader.hpp"
 
 #include <windows.h>
 
@@ -24,8 +26,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -41,6 +47,13 @@ void (*g_section)(const char*) = nullptr;
 
 void check(bool cond, const std::string& what) { g_check(cond, what); }
 void section(const char* name) { g_section(name); }
+
+template <typename... Args>
+std::string fmt(const char* f, Args... args) {
+    char buf[512];
+    std::snprintf(buf, sizeof buf, f, args...);
+    return buf;
+}
 
 /// A file in this run's own temp folder, which main.cpp makes and removes:
 /// see temp_file there.
@@ -1017,6 +1030,9 @@ struct Threads {
     float                hp = 100.0f, mp = 100.0f;
     std::uint64_t        press_ms = 40;
     std::vector<std::pair<std::uint32_t, std::uint64_t>> got;
+    /// Something else of GoBot's on its own thread -- the hunter, say -- that
+    /// takes its turn every millisecond of the clock, before the macro's.
+    std::function<void(std::uint64_t)> other;
 
     explicit Threads(const MacroConfig& cfg) {
         MacroEngine::Clock c;
@@ -1062,6 +1078,7 @@ struct Threads {
     void pass(std::uint64_t ms) {
         for (const std::uint64_t until = t + ms; t < until;) {
             ++t;
+            if (other) other(t);
             engine.set_vitals(hp, mp);
             wake();
         }
@@ -1402,6 +1419,358 @@ void test_potions_before_sequence_threads() {
     }
 }
 
+// ------------------------------------- the HP potion's turn, and the black box
+
+/// The player's macro of 2026-10-20, its keys and timings only: six skills,
+/// three buffs, the HP potion on 1 under 60% and the MP potion on 2 under 58%,
+/// each at most every 3 s give or take 15%, and the key sequence Z, X, C.
+MacroConfig player_macro() {
+    MacroConfig cfg;
+    cfg.apply_defaults();
+    cfg.keys = player_keys();
+    for (MacroKey& k : cfg.keys) {
+        k.jitter_pct = k.conditional() ? 15 : 10;
+        if (k.conditional()) k.start_delay_ms = 900;
+    }
+    cfg.sequence = { MacroStep{ 'Z', 0, 250, "Z" }, MacroStep{ 'X', 0, 400, "X" }, MacroStep{ 'C', 0, 600, "C" } };
+    cfg.sequence_enabled = true;
+    cfg.require_focus = true;
+    return cfg;
+}
+
+/// The gaps between `vk`'s presses from `from` on, the worst, and how many.
+struct Gaps {
+    std::size_t   n = 0;
+    std::uint64_t first = 0, worst = 0;
+};
+Gaps gaps_of(const std::vector<std::pair<std::uint32_t, std::uint64_t>>& got, std::uint32_t vk, std::uint64_t from) {
+    Gaps g;
+    std::uint64_t last = 0;
+    for (const auto& p : got) {
+        if (p.first != vk || p.second < from) continue;
+        if (g.n == 0) g.first = p.second - from;
+        else          g.worst = std::max(g.worst, p.second - last);
+        last = p.second;
+        ++g.n;
+    }
+    return g;
+}
+
+/// The line of the log, while `run` ran, that has every one of `words`;
+/// empty when none has.
+std::string logged_line(const std::function<void()>& run, std::initializer_list<const char*> words) {
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(4000);
+    log.clear_ring();
+    log.set_level(LogLevel::Info);
+    run();
+    std::string found;
+    for (const LogLine& l : log.ring()) {
+        bool all = true;
+        for (const char* w : words) all = all && l.text.find(w) != std::string::npos;
+        if (all && found.empty()) found = l.text;
+    }
+    log.set_level(was);
+    log.set_ring_capacity(0);
+    return found;
+}
+
+/// The black box's line for the potion on `key` ("HP potion key 1 ..."), and
+/// its last entry -- the reason it is in now.
+std::string box_line(const MacroEngine& e, const std::string& head) {
+    for (const std::string& l : e.black_box_lines())
+        if (l.rfind(head, 0) == 0) return l;
+    return {};
+}
+std::string last_entry(const std::string& line) {
+    const std::size_t at = line.rfind(", ");
+    const std::size_t colon = line.find("): ");
+    if (at != std::string::npos) return line.substr(at + 2);
+    return colon == std::string::npos ? line : line.substr(colon + 3);
+}
+
+void test_hp_potion_never_starved() {
+    section("Potions: the HP potion never loses its turn to the skills or the MP potion (round 8, the death of "
+            "2026-10-20)");
+    // Five minutes of the test's clock on the player's macro, HP and MP both
+    // under their marks the whole time, the key sequence on, and something
+    // else of GoBot's -- the hunter's attack -- holding the keys 60 ms of
+    // every 100: the HP potion still goes on every turn of its cooldown, as
+    // does the MP potion. On the two threads' turns (Threads).
+    {
+        Threads th(player_macro());
+        th.hp = 40.0f;
+        th.mp = 30.0f;
+        std::unique_ptr<ExecutionCoordinator::Token> hunter;
+        std::uint64_t t0 = th.t;
+        th.other = [&](std::uint64_t now) {
+            const bool wants = (now - t0) % 100 < 60;
+            if (wants && !hunter) {
+                auto tok = std::make_unique<ExecutionCoordinator::Token>(th.coord, "hunt-attack", Priority::Combat);
+                if (tok->ok()) hunter = std::move(tok);
+            } else if (!wants && hunter) {
+                hunter.reset();
+            }
+        };
+        const std::uint64_t start = th.t;
+        th.start();
+        th.pass(5 * 60'000);
+        th.other = nullptr;
+        hunter.reset();
+        // A cooldown of 3000 ms + 15% at most, a press, and a pass or two.
+        const std::uint64_t bound = 3450 + th.press_ms + 150;
+        const Gaps hp = gaps_of(th.got, '1', start), mp = gaps_of(th.got, '2', start);
+        check(hp.n >= 90 && hp.first <= 100 && hp.worst <= bound,
+              fmt("the HP potion, the keys held 60 ms of every 100 by another job: %zu presses in 5 min, the first "
+                  "%llu ms in, the longest gap %llu ms (at most %llu)",
+                  hp.n, static_cast<unsigned long long>(hp.first), static_cast<unsigned long long>(hp.worst),
+                  static_cast<unsigned long long>(bound)));
+        // The MP potion goes after the HP one, kPotionGapMs after its key
+        // came up -- and the other job may take the keys in that gap, once.
+        const std::uint64_t mp_first = hp.first + th.press_ms + MacroEngine::kPotionGapMs + 100;
+        check(mp.n >= 90 && mp.first <= mp_first && mp.worst <= bound,
+              fmt("and the MP potion: %zu presses, the first %llu ms in (after the HP potion's, at most %llu), the "
+                  "longest gap %llu ms",
+                  mp.n, static_cast<unsigned long long>(mp.first), static_cast<unsigned long long>(mp_first),
+                  static_cast<unsigned long long>(mp.worst)));
+    }
+    // With nobody else at the keys, the skills keep their pace meanwhile.
+    {
+        Threads th(player_macro());
+        th.hp = 40.0f;
+        th.mp = 30.0f;
+        const std::uint64_t start = th.t;
+        th.start();
+        th.pass(60'000);
+        std::size_t skills = 0;
+        for (const auto& p : th.got)
+            if (p.second >= start && std::strchr("12ASF", static_cast<int>(p.first)) == nullptr) ++skills;
+        const Gaps hp = gaps_of(th.got, '1', start);
+        check(skills >= 150 && hp.n >= 18,
+              fmt("nobody else at the keys: %zu skill and step presses in the minute, and the HP potion %zu times",
+                  skills, hp.n));
+    }
+}
+
+void test_black_box() {
+    section("Potions: the black box -- what HP read, and why each potion key did or did not drink (round 8)");
+    using Why = MacroEngine::PotionWhy;
+    // The HP key's reason on its last look, after 1.2 s of the test's clock,
+    // case by case.
+    struct Case {
+        const char* what;
+        Why         why;
+        std::function<void(Rig&)> set;
+        std::vector<MacroKey> keys;
+    };
+    const auto hp50 = [] { return std::vector<MacroKey>{ hp_key('1', 50) }; };
+    const std::vector<Case> cases = {
+        { "HP 90: above the mark", Why::AboveMark, [](Rig& r) { r.hp = 90.0f; }, hp50() },
+        { "no reading of HP", Why::NoReading, [](Rig& r) { r.hp = -1.0f; }, hp50() },
+        { "HP 40, just after a press: cooling", Why::Cooling, [](Rig& r) { r.hp = 40.0f; }, hp50() },
+        { "two HP keys at 50 and 30, HP 25: the 50 one -- other tier", Why::OtherTier,
+          [](Rig& r) { r.hp = 25.0f; }, std::vector<MacroKey>{ hp_key('1', 50), hp_key(VK_F1, 30) } },
+        { "the game not in front", Why::NotInFront,
+          [](Rig& r) {
+              r.focused = false;
+              r.hp = 40.0f;
+          },
+          hp50() },
+        { "the character not in the world", Why::NotInWorld,
+          [](Rig& r) {
+              r.engine.set_suspended(true, "x");
+              r.hp = 40.0f;
+          },
+          hp50() },
+        { "the keys held for a chat line", Why::KeysHeld,
+          [](Rig& r) {
+              r.coord.engage_critical("auto chat");
+              r.hp = 40.0f;
+          },
+          hp50() },
+        { "the keys busy with another job", Why::KeysBusy,
+          [](Rig& r) {
+              r.coord.request("hunt-face", Priority::Combat);
+              r.hp = 40.0f;
+          },
+          hp50() },
+        { "the key did not go out", Why::KeyFailed,
+          [](Rig& r) {
+              r.broken = '1';
+              r.hp = 40.0f;
+          },
+          hp50() },
+    };
+    for (const Case& c : cases) {
+        Rig rig(c.keys);
+        c.set(rig);
+        rig.run(1200);
+        const std::string line = box_line(rig.engine, "HP potion key 1 (under 50%): ");
+        const std::string last = last_entry(line);
+        std::string want = MacroEngine::potion_why_name(c.why);
+        if (c.why == Why::KeysHeld) want += " (auto chat)";
+        check(!line.empty() && last.find(want) != std::string::npos,
+              std::string(c.what) + ": its last look says \"" + want + "\" -- " + (line.empty() ? "no line" : last));
+    }
+    {
+        // The MP potion behind an HP potion waiting for the keys.
+        Rig rig({ hp_key('1', 50), mp_key('2', 50) });
+        rig.coord.request("hunt-face", Priority::Combat);
+        rig.hp = 40.0f;
+        rig.mp = 40.0f;
+        rig.run(1200);
+        const std::string last = last_entry(box_line(rig.engine, "MP potion key 2 (under 50%): "));
+        check(last.find("behind the HP potion") != std::string::npos,
+              "the MP potion while the HP potion waits for the keys: behind the HP potion -- " + last);
+    }
+    {
+        // Each press is marked, with its time before now.
+        Rig rig({ hp_key('1', 50) });
+        rig.hp = 40.0f;
+        rig.run(1200);
+        const auto at = rig.when('1');
+        const std::string line = box_line(rig.engine, "HP potion key 1 (under 50%): ");
+        char want[48] = "";
+        if (!at.empty())
+            std::snprintf(want, sizeof want, "-%.1f s PRESSED", static_cast<double>(rig.t - at[0]) / 1000.0);
+        check(at.size() == 1 && line.find(want) != std::string::npos,
+              std::string("a press, marked with when it went: ") + want + " -- " + line);
+        const std::vector<std::string> lines = rig.engine.black_box_lines();
+        check(!lines.empty() && lines.front().rfind("Black box, the last 30 s: HP/MP read (%): ", 0) == 0 &&
+                  lines.front().find("40/100") != std::string::npos &&
+                  lines.back().find("HP key 1 1") != std::string::npos,
+              "the first line HP and MP as read (40/100), the last the presses of each key -- " + lines.front() +
+                  " / " + lines.back());
+    }
+    // Ninety seconds with HP changing every second: only the last 30 s, in
+    // eight lines at most, none over 600 characters, and the box itself kept
+    // to 600 records.
+    {
+        Rig rig({ hp_key('1', 50), mp_key('2', 40), timer_key('Z', 700, "Skill 1") });
+        for (int s = 0; s < 90; ++s) {
+            rig.hp = static_cast<float>(s % 2 ? 35 + s % 7 : 70 + s % 11);
+            rig.mp = static_cast<float>(30 + s % 23);
+            rig.run(1000);
+        }
+        const std::vector<std::string> lines = rig.engine.black_box_lines();
+        double oldest = 0.0;
+        std::size_t longest = 0;
+        for (const std::string& l : lines) {
+            longest = std::max(longest, l.size());
+            for (std::size_t at = l.find(" -"); at != std::string::npos; at = l.find(" -", at + 1)) {
+                char* end = nullptr;
+                const double v = std::strtod(l.c_str() + at + 2, &end);
+                if (end != l.c_str() + at + 2 && std::strncmp(end, " s", 2) == 0) oldest = std::max(oldest, v);
+            }
+        }
+        check(lines.size() >= 3 && lines.size() <= MacroEngine::kBlackBoxLines &&
+                  longest <= MacroEngine::kBlackBoxLineChars && oldest <= 30.0 && oldest >= 25.0 &&
+                  rig.engine.black_box_size() <= MacroEngine::kBlackBoxMax,
+              fmt("90 s of HP going up and down: %zu lines, the longest %zu characters, nothing older than %.1f s, "
+                  "%zu records kept",
+                  lines.size(), longest, oldest, rig.engine.black_box_size()));
+    }
+    // The minute's line: presses, and the seconds spent in each reason.
+    {
+        const std::string line = logged_line(
+            [] {
+                Rig rig({ hp_key('1', 50), mp_key('2', 50) });
+                rig.hp = 40.0f;
+                rig.mp = 90.0f;
+                rig.run(61'000);
+            },
+            { "Potions: HP key 1 (under 50%): ", " | MP key 2 (under 50%): 0 pressed; " });
+        const std::size_t at = line.find("(under 50%): ");
+        const int pressed = at == std::string::npos ? -1 : std::atoi(line.c_str() + at + 13);
+        check(pressed >= 19 && pressed <= 21 && line.find("60.0 s above the mark") != std::string::npos,
+              "once a minute, HP 40 and MP 90: the HP potion's presses (" + std::to_string(pressed) +
+                  ") and the MP potion's minute above the mark -- " + line);
+        const std::string none = logged_line(
+            [] {
+                Rig rig({ timer_key('Z', 1000, "Skill 1") });
+                rig.run(61'000);
+            },
+            { "Potions: " });
+        check(none.empty(), "and no line for a macro with no potion keys");
+    }
+    // Nothing the player typed: a key's label is not in the box.
+    {
+        MacroKey hp = hp_key('1', 50), mp = mp_key('2', 50);
+        hp.label = "zq-label-typed-by-the-player";
+        mp.label = "zq-label-typed-by-the-player";
+        Rig rig({ hp, mp });
+        rig.hp = 40.0f;
+        rig.run(2000);
+        bool clean = true;
+        for (const std::string& l : rig.engine.black_box_lines()) clean = clean && l.find("zq-label") == std::string::npos;
+        check(clean, "no line of the box has a key's label in it: the key's name and mark only");
+    }
+    // A reader whose grabs stop working keeps its last values. Handed on as
+    // they are, every frame, they read as a steady HP above the mark -- the HP
+    // potion held as "above the mark", the MP potion pressed on an MP nobody
+    // read, the box showing one reading for 30 s (R8R-3). The window hands
+    // them on as no reading once they are older than the macro trusts a
+    // reading (VitalsReader::if_fresh), so the box says so.
+    {
+        const std::uint64_t stale = MacroEngine::kVitalsStaleMs;
+        check(VitalsReader::if_fresh(72.0f, 0, 5000, stale) < 0.0f &&
+                  VitalsReader::if_fresh(72.0f, 5000, 5000 + stale, stale) == 72.0f &&
+                  VitalsReader::if_fresh(72.0f, 5000, 5001 + stale, stale) < 0.0f &&
+                  VitalsReader::if_fresh(72.0f, 5200, 5000, stale) == 72.0f,
+              "a reading is itself while 1.5 s old or less, no reading after, and none before the first read");
+        // The player's own pair: HP potion under 60, MP potion under 58; HP
+        // 72 and MP 45 as last read, then the reader's grabs fail 5 s in.
+        Rig rig({ hp_key('1', 60), mp_key('2', 58) });
+        rig.push_vitals = false;
+        const std::uint64_t stalls_at = rig.t + 5000;
+        std::uint64_t read_at = 0;
+        for (const std::uint64_t until = rig.t + 40'000; rig.t < until; rig.t += 10) {
+            // A read every 150 ms until the grabs fail; the window's push on
+            // every frame, as GuiApp::tick makes it.
+            if (rig.t < stalls_at && (read_at == 0 || rig.t - read_at >= 150)) read_at = rig.t;
+            rig.engine.set_vitals(VitalsReader::if_fresh(72.0f, read_at, rig.t, stale),
+                                  VitalsReader::if_fresh(45.0f, read_at, rig.t, stale));
+            rig.engine.step();
+        }
+        const std::vector<std::string> lines = rig.engine.black_box_lines();
+        const std::string hp_last = last_entry(box_line(rig.engine, "HP potion key 1 (under 60%): "));
+        const std::string mp_last = last_entry(box_line(rig.engine, "MP potion key 2 (under 58%): "));
+        std::size_t mp_after = 0;
+        for (const std::uint64_t at : rig.when('2')) mp_after += at > stalls_at + stale ? 1 : 0;
+        check(!lines.empty() && lines.front().find("no read") != std::string::npos &&
+                  lines.front().find("72/45") == std::string::npos && hp_last.find("no reading") != std::string::npos &&
+                  mp_last.find("no reading") != std::string::npos && mp_after == 0 && !rig.when('2').empty(),
+              "the reader stalled: the box reads \"no read\", both potions \"no reading\", no MP potion on an MP "
+              "nobody read -- " + (lines.empty() ? std::string("no lines") : lines.front()) + " / " + hp_last);
+    }
+#ifdef GOBOT_SOURCE_DIR
+    // And the window hands the reader's values on so.
+    {
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::size_t tick = src.find("macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at");
+        check(tick != std::string::npos && src.find("macro_->set_vitals(vitals_.hp_percent()") == std::string::npos,
+              "gui_app.cpp: the reader's values go to the macro through VitalsReader::if_fresh");
+    }
+#endif
+#ifdef GOBOT_SOURCE_DIR
+    // And the window writes it after the death's alert line.
+    {
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/simple_alerts.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::size_t alert = src.find("void GuiApp::alert(");
+        const std::size_t box = src.find("void GuiApp::log_black_box(");
+        const std::size_t hook = src.find("if (std::strcmp(event, \"death\") == 0) log_black_box();", alert);
+        const std::size_t warn = src.find("GB_WARN(\"ALERT %s: %s\"", alert);
+        check(alert != std::string::npos && box != std::string::npos && hook != std::string::npos &&
+                  warn != std::string::npos && warn < hook && hook < box &&
+                  src.find("black_box_lines()", box) != std::string::npos,
+              "simple_alerts.cpp: alert() writes the black box right after \"ALERT death\"");
+    }
+#endif
+}
+
 // ------------------------------------------------------ Quái đang thấy
 
 void test_monster_sightings() {
@@ -1486,5 +1855,7 @@ void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section
     test_potion_after_hold_threaded();
     test_sequence_waits_for_potion();
     test_potions_before_sequence_threads();
+    test_hp_potion_never_starved();
+    test_black_box();
     test_monster_sightings();
 }

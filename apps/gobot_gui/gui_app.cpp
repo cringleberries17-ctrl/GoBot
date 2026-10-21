@@ -559,7 +559,14 @@ void GuiApp::tick() {
     }
 
     if (vitals_running_) {
-        macro_->set_vitals(vitals_.hp_percent(), vitals_.mp_percent());
+        // As no reading once the reader has not read the bars for as long as
+        // the macro trusts a reading: its grabs failing, it keeps its last
+        // values, and pushed on as fresh every frame they would hold the HP
+        // potion back as above its mark, and fill the black box with an HP
+        // nobody read (R8R-3). The macro holds a potion on no reading.
+        const std::uint64_t read_at = vitals_.last_read_ms(), at = now_ms();
+        macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
+                           VitalsReader::if_fresh(vitals_.mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
 
         // The reader works the bars out again by itself when the game's HUD is
         // resized under it. Take the new geometry so the panel shows it and a
@@ -2752,21 +2759,14 @@ void GuiApp::party_loop() {
         // "Tổ đội: …" on the tab, every few seconds (simple_party.cpp).
         party_hud_tick(look, store);
 
-        // An invitation on screen may be answered by the player's own hand,
-        // and the party change a moment later: "alone" waits for the game to
-        // draw it, and one gone without GoBot's answer may have been accepted
-        // that way -- a party joined, which the game may take a while to draw
-        // (PartyEvents::invitation). Looked for on every pass whenever the
-        // tick's invite could go from alone, answered or not. The footer
-        // picture is the two buttons every dialog has: the trash bin's own
-        // dialogs, told apart by bag::bin_asking, are no invitation; any other
-        // dialog with them is taken for one, the safe way round.
+        // An invitation on screen, to answer. The footer picture is the two
+        // buttons every dialog has: the trash bin's own dialogs, told apart by
+        // bag::bin_asking, are no invitation.
         PartyInvite::Seen seen;
         bool bin = false;
-        if (rules.auto_accept || (rules.auto_invite && rules.always_leader)) {
-            seen = answering.look(frame, store, rules.auto_accept && have_font ? &font : nullptr);
+        if (rules.auto_accept) {
+            seen = answering.look(frame, store, have_font ? &font : nullptr);
             bin = seen.up && bag::bin_asking(frame, store);
-            party_events().invitation(look.grabbed_ms, seen.up && !bin);
         }
 
         // ---- somebody is asking us ----
@@ -2824,24 +2824,18 @@ void GuiApp::party_loop() {
                     refused = key;
                 } else if (name_matters && !rules.may_accept(seen.who)) {
                     if (answer(false)) {
-                        // This pass's look is from before it: no invite goes
-                        // on it (read_party, PartyHud::stale). And the
-                        // invitation's going is GoBot's own doing.
-                        const std::uint64_t at = now_ms();
-                        party_events().answered(at);
-                        party_events().changed(at, "an invitation was declined", party_text::kEventDeclined);
+                        // This pass's look is from before it: nothing goes
+                        // on it (read_party, PartyHud::stale).
+                        party_events().changed(now_ms(), "an invitation was declined", party_text::kEventDeclined);
                         say_party("declined " + seen.who);
                         answered = seen.who;
                     }
                 } else if (answer(true)) {
                     // A member of somebody else's party from now on, though
-                    // this pass's look still shows the player alone: no invite
-                    // goes on it, and none from "alone" until the party has
-                    // been drawn -- a member then -- or kJoinWaitMs have gone
-                    // by without it (PartyEvents::joined).
-                    const std::uint64_t at = now_ms();
-                    party_events().answered(at);
-                    party_events().joined(at, "an invitation was accepted", party_text::kEventAccepted);
+                    // this pass's look still shows the player alone: no
+                    // invite goes on it (read_party, PartyHud::stale), and the
+                    // next look shows the party as the game draws it.
+                    party_events().changed(now_ms(), "an invitation was accepted", party_text::kEventAccepted);
                     say_party("accepted " + seen.who);
                     answered = seen.who;
                     ++party_accepted_;
@@ -2858,18 +2852,17 @@ void GuiApp::party_loop() {
                 if (!text.empty()) lines.push_back(text);
             }
 
-            // Tự chat's own lines, read back off the chat, are not somebody
-            // asking: an advert with the keyword in it would otherwise have
-            // the player try to invite himself after every one.
-            const std::vector<std::string> ours = recently_said();
-            if (!ours.empty())
-                lines.erase(std::remove_if(lines.begin(), lines.end(),
-                                           [&](const std::string& l) {
-                                               for (const std::string& s : ours)
-                                                   if (PartyChat::echoes(l, s)) return true;
-                                               return false;
-                                           }),
-                            lines.end());
+            // The player's own lines, read back off the chat, are never
+            // somebody asking, whatever their length (PartyChat::without_own):
+            // said by the character named on Đánh quái, a line Tự chat said,
+            // or the keyword GoBot itself typed -- for as long as that line
+            // stays on the chat, by the speaker it was read with in its first
+            // minute. A Tự chat line that was the keyword alone was taken for
+            // the player asking on 2026-10-20, 193 s after it was typed; an
+            // advert with the keyword in it would have the player try to
+            // invite himself after every one. The name through the detector's
+            // own lock, not the Đánh quái tab's copy.
+            lines = chat.without_own(lines, detector_.character_name(), said_lately(), now_ms());
 
             const std::uint64_t now = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3893,6 +3886,7 @@ struct OnExit {
 
 const char* const kStopped = "Đã dừng.";
 const char* const kUserActive = "Bạn đang dùng chuột hoặc bàn phím — chat sau.";
+const char* const kChatLowHp = "Máu thấp — chat sau.";
 
 /// How far over the HP potion's mark HP has to be for a line to start, and the
 /// most that asks for, so that a potion set high still lets a full bar chat.
@@ -3996,12 +3990,12 @@ void GuiApp::remember_said(const std::string& typed) {
         chat_said_.erase(chat_said_.begin());
 }
 
-std::vector<std::string> GuiApp::recently_said() {
+std::vector<std::pair<std::string, std::uint64_t>> GuiApp::said_lately() {
     std::lock_guard<std::mutex> lock(chat_said_mutex_);
     const std::uint64_t now = now_ms();
-    std::vector<std::string> out;
+    std::vector<std::pair<std::string, std::uint64_t>> out;
     for (const auto& [text, when] : chat_said_)
-        if (now - when <= 30 * 60'000ull) out.push_back(text);
+        if (now - when <= 30 * 60'000ull) out.emplace_back(text, when);
     return out;
 }
 
@@ -4171,11 +4165,21 @@ void GuiApp::chat_loop() {
         return !chat_quit_;
     };
 
+    // HP under the potion's mark. A line under way -- its hold taken, the
+    // potions held off -- ends at once on it, wherever it is: in the pause
+    // before it, waiting for a key to finish, between its keys, in any of its
+    // waits (R8R-2).
+    const auto hp_low = [this] {
+        const float hp = vitals_.hp_percent();
+        return hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());
+    };
+
     // Under the hold: a key going down as the hold began finishes first --
     // nothing else gets the coordinator's token while the hold lasts -- and
-    // nothing is left held down.
+    // nothing is left held down. For a line, not while HP is under the
+    // potion's mark: the line waits, not the potion.
     const auto settle = [&](bool for_doubt) {
-        const auto stopped = [&] { return chat_quit_ || (!for_doubt && chat_stop_); };
+        const auto stopped = [&] { return chat_quit_ || (!for_doubt && (chat_stop_ || hp_low())); };
         for (int i = 0; i < 40 && coord_.held() && !stopped(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         if (stopped() || coord_.held()) return false;
@@ -4312,13 +4316,31 @@ void GuiApp::chat_loop() {
         const std::uint64_t held_at = now_ms();
         bool keep_hold = false;
         OnExit hold{ [&] { if (!keep_hold) end_hold(kChatHold); } };
-        if (!settle(false)) return wait(5000, chat_stop_ ? kStopped : "Bot đang bấm phím — chat sau.");
+        if (!settle(false)) {
+            if (chat_stop_ || chat_quit_) return wait(5000, kStopped);
+            if (hp_low()) return wait(2000, kChatLowHp);
+            return wait(5000, "Bot đang bấm phím — chat sau.");
+        }
         // GoBot presses nothing from here until the line, so any input
         // Windows counts from now on is a person's -- maybe typing in the
         // chat. Taken at once, so that the whole of the pause below counts,
-        // and asked again just before the first Enter.
+        // and asked again just before the first Enter. The pause is
+        // chat.ini's quiet_before_ms, 300 as shipped and up to 5 s, with the
+        // potions held off: HP under the potion's mark, or the hold taken
+        // over, ends it at once, and the hold with it (OnExit above).
         const DWORD quiet = last_input();
-        if (!nap(300)) return wait(0, kStopped);
+        const std::string quiet_why = chat_quiet_pause(
+            settings.quiet_before_ms,
+            [&]() -> std::string {
+                if (chat_stop_ || chat_quit_) return kStopped;
+                if (hp_low()) return kChatLowHp;
+                const std::string reason = coord_.critical_reason();
+                if (reason != kChatHold) return "Bot đang tạm dừng (" + reason + ") — chat sau.";
+                return {};
+            },
+            [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); });
+        if (quiet_why == kStopped) return wait(0, kStopped);
+        if (!quiet_why.empty()) return wait(quiet_why == kChatLowHp ? 2000 : 10000, quiet_why);
 
         Frame frame;
         if (!grab(frame) || !frame.valid()) return wait(5000, "Chưa chụp được màn hình game.");
@@ -4340,13 +4362,12 @@ void GuiApp::chat_loop() {
         sender.set_ready_check([&]() -> std::string {
             return touched_since(quiet) ? kUserActive : std::string();
         });
-        // Between keys: HP falling under the potion's mark ends the line, so
-        // the potion is not held off for the rest of it; so does the hold
-        // being anything but this line's own, whoever took it over.
-        sender.set_guard([this]() -> std::string {
-            const float hp = vitals_.hp_percent();
-            if (hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()))
-                return "Máu thấp — dừng câu đang gõ.";
+        // Between keys and through every wait of the line: HP falling under
+        // the potion's mark ends the line, so the potion is not held off for
+        // the rest of it; so does the hold being anything but this line's
+        // own, whoever took it over.
+        sender.set_guard([this, hp_low]() -> std::string {
+            if (hp_low()) return "Máu thấp — dừng câu đang gõ.";
             const std::string reason = coord_.critical_reason();
             if (reason != kChatHold) return "Bot đang tạm dừng (" + reason + ").";
             return {};
@@ -4364,6 +4385,14 @@ void GuiApp::chat_loop() {
         if (chat_stop_ || chat_quit_) sender.cancel();
 
         ChatSender::Result r = sender.send(line);
+        // What it pressed and saw, whenever it pressed anything: each Enter's
+        // hold and the bar after it, the ink as it was typed -- for telling a
+        // key the game dropped from one it took late. With a line the game
+        // showed nothing of, what on this machine can swallow typed letters.
+        if (!r.trace.enters.empty()) {
+            if (r.trace.outcome == "no_text") r.trace.machine = chat_machine_note(input_.target_window());
+            GB_INFO("%s", chat_trace_line(r.trace).c_str());
+        }
 
         // A dialog came up with the line open: what was typed is rubbed out
         // and no Enter pressed. The mouse is let go so that whoever answers
@@ -4398,6 +4427,8 @@ void GuiApp::chat_loop() {
         chat_sent_ = 0;
         put_off_in_row = 0;
         stopped_self = false;
+        // What on this machine can swallow typed letters, once a run.
+        GB_INFO("Chat: %s", chat_machine_note(input_.target_window()).c_str());
         tell(settings.lines.empty()
                  ? std::string("Danh sách câu đang trống.")
                  : "Bắt đầu: câu đầu tiên sau " + std::to_string(settings.first_delay_s) +

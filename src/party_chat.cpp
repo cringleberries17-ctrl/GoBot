@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <iterator>
 #include <vector>
 
 namespace gobot {
@@ -166,6 +168,118 @@ bool PartyChat::echoes(const std::string& read, const std::string& said) {
     return run >= need;
 }
 
+namespace {
+
+/// A name with what split_read takes off the front of a line read taken off
+/// it too -- the reader's leftovers of "[Kênh]" are l's, I's and bars, and so
+/// is the first letter of a name that starts with one -- as letters and
+/// digits, lowercased.
+std::string speaker_key(std::string s) {
+    while (!s.empty() && (s.front() == 'l' || s.front() == 'I' || s.front() == 'L' || s.front() == '|' ||
+                          s.front() == ' ' || s.front() == '[' || s.front() == ']'))
+        s.erase(s.begin());
+    return canonical(s);
+}
+
+/// Whether speaker `who` is `mine`, both as speaker_key makes them: the same,
+/// or for a name of five or more, within one of it in length and alike
+/// kOwnNameAlike or more -- the reader drops or doubles a letter now and then.
+/// A name of four or fewer only exactly: "TuanAnh" holds "Anh" and is not it.
+bool same_speaker(const std::string& who, const std::string& mine) {
+    if (mine.size() < 2) return false;
+    if (who == mine) return true;
+    const std::size_t longer = std::max(who.size(), mine.size()), shorter = std::min(who.size(), mine.size());
+    return mine.size() >= 5 && longer - shorter <= 1 && PartyChat::alike(who, mine) >= PartyChat::kOwnNameAlike;
+}
+
+} // namespace
+
+bool PartyChat::own_line(const std::string& read, const std::string& own_name,
+                         const std::vector<std::pair<std::string, std::uint64_t>>& typed, std::uint64_t now_ms,
+                         const Settings& s) {
+    Line line;
+    const bool split = split_read(read, line);
+
+    // a. Said by the player's own character.
+    if (split && same_speaker(speaker_key(line.who), speaker_key(own_name))) return true;
+
+    // b. Nothing but the keyword, which GoBot typed itself a moment ago.
+    const std::string keyword = canonical(s.keyword);
+    if (split && !keyword.empty() && canonical(line.said) == keyword)
+        for (const auto& [text, when] : typed)
+            if (now_ms >= when && now_ms - when <= kOwnKeywordMs && canonical(text) == keyword) return true;
+
+    // c. A line of ours read back, as before: an advert, its wrapped rows.
+    for (const auto& [text, when] : typed)
+        if (now_ms >= when && now_ms - when <= kOwnLineMs && echoes(read, text)) return true;
+    return false;
+}
+
+std::vector<std::string> PartyChat::without_own(const std::vector<std::string>& lines, const std::string& own_name,
+                                                const std::vector<std::pair<std::string, std::uint64_t>>& typed,
+                                                std::uint64_t now_ms) {
+    std::vector<std::string> out;
+    // Nothing read -- the chat out of sight, or empty: nothing is learned or
+    // forgotten, and the time does not count towards forgetting.
+    if (lines.empty()) return out;
+    if (last_look_ms_ != 0 && now_ms > last_look_ms_ && now_ms - last_look_ms_ <= kLookGapMs)
+        reading_ms_ += now_ms - last_look_ms_;
+    last_look_ms_ = now_ms;
+    for (auto it = own_speakers_.begin(); it != own_speakers_.end();)
+        it = reading_ms_ - it->second > kOwnGoneMs ? own_speakers_.erase(it) : std::next(it);
+
+    // The keyword as GoBot typed it last, in the last kOwnLineMs.
+    const std::string keyword = canonical(settings_.keyword);
+    bool have_typed = false;
+    std::uint64_t last_typed = 0;
+    if (!keyword.empty())
+        for (const auto& [text, when] : typed)
+            if (now_ms >= when && now_ms - when <= kOwnLineMs && canonical(text) == keyword &&
+                (!have_typed || when > last_typed)) {
+                have_typed = true;
+                last_typed = when;
+            }
+    const bool first_minute = have_typed && now_ms - last_typed <= kOwnKeywordMs;
+    const std::string mine = speaker_key(own_name);
+
+    for (const std::string& raw : lines) {
+        Line line;
+        const bool bare = !keyword.empty() && split_read(raw, line) && canonical(line.said) == keyword;
+        const std::string who = bare ? speaker_key(line.who) : std::string();
+        // Its first minute: the line of the keyword GoBot typed is on the
+        // chat, read as the reader reads it. With a name set, a speaker not at
+        // all like it is somebody else's.
+        if (bare && first_minute && who.size() >= 2 && (mine.size() < 2 || alike(who, mine) >= kLearnAlike)) {
+            own_speakers_[who] = reading_ms_;
+            learned_ = true;
+            learned_from_ = last_typed;
+        }
+        if (own_line(raw, own_name, typed, now_ms, settings_)) continue;
+        if (bare) {
+            // Said by a speaker taken for the player's: for as long as such a
+            // line is on the chat, however long ago GoBot typed it -- a quiet
+            // channel keeps a line for half an hour.
+            const auto known = std::find_if(own_speakers_.begin(), own_speakers_.end(),
+                                            [&](const auto& s) { return same_speaker(who, s.first); });
+            if (known != own_speakers_.end()) {
+                known->second = reading_ms_;
+                continue;
+            }
+            // Nothing learned from the keyword GoBot typed last: nothing to
+            // tell the player's line from another's by.
+            if (have_typed && !(learned_ && learned_from_ == last_typed)) continue;
+        }
+        out.push_back(raw);
+    }
+    return out;
+}
+
+std::vector<std::string> PartyChat::own_speakers() const {
+    std::vector<std::string> out;
+    for (const auto& [who, seen] : own_speakers_) out.push_back(who);
+    return out;
+}
+
 std::vector<std::string> PartyChat::saw(const std::vector<std::string>& raw_lines,
                                         std::uint64_t now_ms) {
     std::vector<std::string> ready;
@@ -231,6 +345,11 @@ std::vector<std::string> PartyChat::saw(const std::vector<std::string>& raw_line
 void PartyChat::reset() {
     counting_.clear();
     invited_at_.clear();
+    own_speakers_.clear();
+    reading_ms_ = 0;
+    last_look_ms_ = 0;
+    learned_ = false;
+    learned_from_ = 0;
 }
 
 std::map<std::string, int> PartyChat::cooling(std::uint64_t now_ms) const {

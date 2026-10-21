@@ -11,6 +11,7 @@
 #include <functional>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gobot {
@@ -110,6 +111,45 @@ struct ChatSettings {
     /// What gobot_cli --chat-once types: something short and plain, for the
     /// live test, set here so that the test cannot be handed other words.
     std::string test_line = "test";
+
+    // How the keys of a line go, for the live test of why the game took about
+    // half of them on 2026-10-20 -- 7 of 13 Enters, 4 of 6 typed lines. The
+    // log's "Chat trace" line says what each attempt pressed and saw. As
+    // shipped, every one is what GoBot has always done.
+
+    /// The hold of every key of a line, in ms -- the Enters, Backspace, the
+    /// letters -- a random one from hold_min_ms to hold_max_ms. 0 and 0, as
+    /// shipped: each key its own hold, as before -- the Enter that opens the
+    /// line 60 to 130, the one that sends it 50, a letter 50, Backspace 40 to
+    /// 70 clearing the line and 25 rubbing out. (GoC holds every key 60 to
+    /// 131.)
+    int         hold_min_ms = 0;
+    int         hold_max_ms = 0;
+    /// How long an Enter pressed to open the line is watched for the line to
+    /// open, a look every 250 ms, before another is pressed: 750, three looks.
+    int         enter_gap_ms = 750;
+    /// Nothing pressed for this long, with everything else of the bot held
+    /// off, before the first Enter of a line: 300.
+    int         quiet_before_ms = 300;
+    /// From the line seen cleared to its first letter: 0.
+    int         type_wait_ms = 0;
+    /// Enters pressed to open the line before it is given up as not opened:
+    /// 2, from 1 to 4. A game that takes Enters late shuts, with the next
+    /// one, what the last opened: more only once the trace shows Enters the
+    /// game dropped, not ones it took late.
+    int         max_enters = 2;
+    /// Times the line is typed into the open, empty line before "the game
+    /// does not take the text": 1, or 2. The second only after every look at
+    /// the first said nothing came, into a line still open and as empty as it
+    /// was -- never twice into one that took the first.
+    int         type_tries = 1;
+    /// How each key goes to the game: vk, as GoBot always has, or scancode,
+    /// as GoC sends keys (InputManager::KeyInject).
+    InputManager::KeyInject inject = InputManager::KeyInject::Vk;
+
+    static constexpr int kMaxHold = 500;
+    static constexpr int kMaxEnters = 4;
+    static constexpr int kMaxTypeTries = 2;
     /// What to say, as written, in order. Empty lines are not kept.
     std::vector<std::string> lines;
     /// For each line, whether it is ticked "Chỉ khi chưa có tổ đội": not said
@@ -379,6 +419,56 @@ struct ChatGate {
 };
 ChatGate chat_gate(const ChatGateInput& in);
 
+/// The pause before a line's first Enter -- chat.ini's quiet_before_ms, up to
+/// 5 s -- with everything else of the bot held off for the line, the potions
+/// too: `ms` long, `stop` asked every kQuietStepMs and at the end, and over at
+/// once with its reason -- a stop, HP under the potion's mark, the hold taken
+/// over -- which it returns. Empty when the whole pause went by. `sleep` waits
+/// that long; a test's moves its own clock. Whoever runs it lets the hold go
+/// as soon as it returns a reason, so that the potion goes.
+std::string chat_quiet_pause(int ms, const std::function<std::string()>& stop,
+                             const std::function<void(int)>& sleep);
+constexpr int kQuietStepMs = 50;
+
+/// What one attempt at a line pressed and saw, for the log's "Chat trace"
+/// line: whether the game drops a key or takes it late, and how long each key
+/// was held. No word of the line and no name are in it: how many characters,
+/// the holds, and how far the field showed ink.
+struct ChatTrace {
+    struct Enter {
+        int hold_ms = 0;
+        /// The looks after it: ms after the Enter, and what the bar showed.
+        std::vector<std::pair<int, ChatBarState>> looks;
+    };
+    std::vector<Enter> enters;          ///< those pressed to open the line
+    int  cleared_ink = -1;              ///< the field once cleared; -1 when not got that far
+    int  backspace_min = 0, backspace_max = 0;  ///< the clearing Backspaces' holds
+    int  letters = 0;                   ///< characters typed, every try
+    int  letter_min = 0, letter_max = 0;        ///< their holds
+    /// The field on the look before each typed key, from the second on: how
+    /// far the characters before it reached.
+    std::vector<int> inks;
+    /// After the last key of the last try: ms after it, and the field's ink.
+    std::vector<std::pair<int, int>> after;
+    int  tries = 0;                     ///< times the line was typed
+    int  send_hold = 0;                 ///< the Enter that sent it; 0 when none
+    InputManager::KeyInject inject = InputManager::KeyInject::Vk;
+    std::string outcome;                ///< sent, not_opened, no_text, ...
+    /// The typing programs running and the game's keyboard layout, when the
+    /// one running the sender adds them.
+    std::string machine;
+};
+/// One line for the log, in English: "Chat trace: Enter 1 held 95 ms: +0.30 s
+/// shut, +0.55 s shut, +0.80 s shut; Enter 2 held 72 ms: +0.30 s open;
+/// cleared (Backspace held 40-70 ms), ink 4; 4 keys typed in 1 try, held 50
+/// ms (vk), ink before each next key: 9 14 19; after the last key: +0.20 s ink
+/// 24; Enter to send held 50 ms; sent".
+std::string chat_trace_line(const ChatTrace& t);
+/// "typing programs running: none; the game's keyboard layout 0409": what
+/// can make the game not take typed letters, said when Tự chat starts and
+/// with a line the game showed nothing of.
+std::string chat_machine_note(void* game_window);
+
 /// One line into the game's chat: open it, check, type, check, send, check.
 ///
 /// Every Enter is pressed only on a fresh look at the screen that shows no
@@ -404,7 +494,8 @@ public:
     using Report = std::function<void(const std::string&)>;
     /// The dialog up on this frame, by name, in Vietnamese; empty when none.
     using DialogCheck = std::function<std::string(const Frame&)>;
-    /// Asked between keys: a reason to stop the line now, or empty.
+    /// Asked between keys, and every 20 ms of every wait of the line: a
+    /// reason to stop the line now, or empty.
     using Guard = std::function<std::string()>;
     /// Asked once, just before the first Enter: a reason not to start the
     /// line after all -- somebody touched the mouse or keyboard since the
@@ -482,6 +573,9 @@ public:
         int         empty_ink = -1;
         std::string trouble;            ///< why it was not sent, in Vietnamese
         ChatBar     last;               ///< the last look at the bar
+        /// What it pressed and saw, for chat_trace_line. Empty of Enters and
+        /// keys when nothing was pressed (not_now).
+        ChatTrace   trace;
     };
 
     /// Say `line`. It has to have come from prepare_chat with this sender's
@@ -509,7 +603,12 @@ public:
     void keep(const Frame& f, const char* what, const ChatBar* bar = nullptr);
 
 private:
+    /// send(), but for the trace's outcome and how the keys went.
+    Result send_line(const ChatText& line);
     bool key(std::uint32_t vk, bool shift, int hold_ms);
+    /// A key's hold: chat.ini's hold_min_ms to hold_max_ms when they are set,
+    /// otherwise `lo` to `hi`, the key's own.
+    int hold(int lo, int hi);
     /// Enter, with when it went and whether it was pressed to open the line
     /// -- on a line not seen open -- for believe_shut.
     bool enter(bool opening, int hold_ms);
@@ -517,7 +616,11 @@ private:
     bool focused();
     bool caps_lock();
     std::uint64_t clock_ms();
-    /// Waits, a little at a time; false when cancelled meanwhile.
+    /// Waits, a little at a time; false when cancelled meanwhile, or when the
+    /// guard gave a reason to stop (kept in halted_). The potions are held
+    /// off for as long as the line lasts, and chat.ini's waits run to
+    /// seconds: the guard is asked through every one of them, as between
+    /// keys.
     bool wait(int ms);
     /// Waits whether cancelled or not: for rubbing out and closing, which a
     /// stop needs done.
@@ -568,6 +671,7 @@ private:
     bool                 opening_enter_ = false;    ///< the last, on a line not seen open
     std::uint64_t        enter_ms_ = 0;         ///< when, on clock_ms()
     std::uint64_t        held_since_ = 0;       ///< see set_held_since; 0 for not given
+    std::string          halted_;               ///< the guard's reason that ended a wait
 };
 
 /// A chat line that may have been left open, held on to until it is seen shut.

@@ -174,7 +174,22 @@ public:
     /// and the key go down in one SendInput call, which nothing can get
     /// between, and come up in another, sent whether or not the game is still
     /// in front, so that neither is left held.
-    bool type_key(std::uint32_t vk, bool shift, int hold_ms);
+    ///
+    /// `how` is how each key goes: as its key code with its scan code (Vk),
+    /// as typed keys always have; or as GoC's own client sends them, the scan
+    /// code alone (Scancode: no key code, KEYEVENTF_SCANCODE) -- chat.ini's
+    /// inject, for the live test of why the game took about half of the chat
+    /// line's keys on 2026-10-20.
+    enum class KeyInject { Vk, Scancode };
+    bool type_key(std::uint32_t vk, bool shift, int hold_ms, KeyInject how = KeyInject::Vk);
+    /// One event of type_key's, in SendInput's own terms: the key code, the
+    /// scan code and the flags it is sent with. For tests.
+    struct KeyEvent {
+        std::uint16_t vk = 0;
+        std::uint16_t scan = 0;
+        std::uint32_t flags = 0;
+    };
+    static KeyEvent typed_key_event(std::uint32_t vk, bool down, KeyInject how);
 
     /// One UTF-16 unit as Unicode input (KEYEVENTF_UNICODE), down and up, only
     /// while the game is in front.

@@ -291,34 +291,54 @@ Frame hotbar_picture_from(const Frame& f, int x, int y) {
             out.pixels[at(px, py) + 3] = 255;
         }
 
+    // What is made see-through keeps nothing of the frame under it: no
+    // colour, only alpha 0. Nothing reads those pixels -- the search masks
+    // by alpha, read_slot looks at the frame and the labels -- but a picture
+    // cut from a player's screen would otherwise carry the items in their
+    // slots, and the scenery round the corners, wherever it is copied.
+    const auto clear = [&](int px, int py) { std::fill_n(out.pixels.begin() + static_cast<std::ptrdiff_t>(at(px, py)), 4, 0); };
+
     // The four corners are rounded: the scenery shows through outside them.
     for (const auto& c : { std::pair{ 0, 0 }, std::pair{ kPictureW - 3, 0 },
                            std::pair{ 0, kPictureH - 3 }, std::pair{ kPictureW - 3, kPictureH - 3 } })
         for (int dy = 0; dy < 3; ++dy)
-            for (int dx = 0; dx < 3; ++dx) out.pixels[at(c.first + dx, c.second + dy) + 3] = 0;
+            for (int dx = 0; dx < 3; ++dx) clear(c.first + dx, c.second + dy);
 
     for (int row = 0; row < kRows; ++row)
         for (int col = 0; col < kCols; ++col) {
             const int sx = kSlotDx + col * kPitch, sy = kSlotDy + row * kPitch;
-            // The slot: whatever is in it is the player's, not the bar's.
-            for (int dy = 0; dy < kCell; ++dy)
-                for (int dx = 0; dx < kCell; ++dx) out.pixels[at(sx + dx, sy + dy) + 3] = 0;
+            const int fx = x + col * kPitch, fy = y + row * kPitch;     // the slot in the frame
 
             // Its label: the white strokes in the corner and the dark outline
             // round them, at the alpha that marks a label. Only where a label
             // sits, a pixel in from the label's corner, so the item under it
             // -- white itself, sometimes -- is not taken for part of it.
+            // Told from the frame before the slot is cleared.
             const auto stroke = [&](int dx, int dy) {
                 return dx >= kLabelX + 1 && dx < kLabelX + kLabelW - 1 && dy >= kLabelY + 1 &&
-                       dy < kLabelY + kLabelH - 1 && white_at(f, x + col * kPitch + dx, y + row * kPitch + dy);
+                       dy < kLabelY + kLabelH - 1 && white_at(f, fx + dx, fy + dy);
             };
+            bool label[kLabelH][kLabelW] = {};
             for (int dy = kLabelY; dy < kLabelY + kLabelH; ++dy)
                 for (int dx = kLabelX; dx < kLabelX + kLabelW; ++dx) {
                     bool mark = stroke(dx, dy);
-                    if (!mark && lum_at(f, x + col * kPitch + dx, y + row * kPitch + dy) < 70)
+                    if (!mark && lum_at(f, fx + dx, fy + dy) < 70)
                         for (int ny = -1; ny <= 1 && !mark; ++ny)
                             for (int nx = -1; nx <= 1 && !mark; ++nx) mark = stroke(dx + nx, dy + ny);
-                    if (mark) out.pixels[at(sx + dx, sy + dy) + 3] = kLabelAlpha;
+                    label[dy - kLabelY][dx - kLabelX] = mark;
+                }
+
+            // The slot: whatever is in it is the player's, not the bar's.
+            for (int dy = 0; dy < kCell; ++dy)
+                for (int dx = 0; dx < kCell; ++dx) clear(sx + dx, sy + dy);
+
+            // And the label back over it: the game's own, the frame's colours.
+            for (int dy = kLabelY; dy < kLabelY + kLabelH; ++dy)
+                for (int dx = kLabelX; dx < kLabelX + kLabelW; ++dx) {
+                    if (!label[dy - kLabelY][dx - kLabelX]) continue;
+                    std::uint8_t* p = &out.pixels[at(sx + dx, sy + dy)];
+                    f.get(fx + dx, fy + dy, p[2], p[1], p[0]);
+                    p[3] = kLabelAlpha;
                 }
         }
     return out;
@@ -327,6 +347,14 @@ Frame hotbar_picture_from(const Frame& f, int x, int y) {
 void PotionSettings::load(const IniFile& ini) {
     warn_below = std::clamp(ini.get_int("Potions", "warn_below", 20), 0, kMaxWarn);
     read_every_s = std::clamp(ini.get_int("Potions", "read_every_s", 10), kMinEvery, kMaxEvery);
+}
+
+SlotReading PotionWatch::look_of(const SlotReading& first, const SlotReading& second) {
+    if (first.same(second)) return second;
+    SlotReading r = second;
+    r.state = SlotState::Unreadable;
+    r.count = 0;
+    return r;
 }
 
 std::vector<PotionWatch::Event> PotionWatch::feed(std::uint32_t vk, const SlotReading& r) {
@@ -341,23 +369,75 @@ std::vector<PotionWatch::Event> PotionWatch::feed(std::uint32_t vk, const SlotRe
          (k.have_believed && k.believed.has_count() && r.count >= k.believed.count + 20)))
         k.low_armed = true;
 
-    const bool agreed = k.have_last && k.last.same(r);
-    k.last = r;
-    k.have_last = true;
-    if (!agreed) return out;
-    k.believed = r;
-    k.have_believed = true;
+    // A wild drop: a fifth or less of the count believed. On 2026-10-20 every
+    // misread of the run was one -- 62 read as 6, 52 as 5, 42 as 4 -- for two
+    // looks, and then the count came back; each raised "Sắp hết bình". Held,
+    // not believed, until it comes back (a misread) or has been read
+    // kWildLooks looks running (a real drop).
+    // Told from the last count believed, which looks at a covered or
+    // unreadable slot -- believed so when two say it -- do not take away: the
+    // stack is still there, out of sight.
+    const bool counted = r.state == SlotState::Count;
+    const int was = k.ref;
+    const bool wild = counted && was >= kWildFloor && r.count * 5 <= was;
+    if (wild) {
+        // Drinking only takes the count down: a higher wild reading is
+        // another misread, and starts the run again.
+        if (k.wild_looks > 0 && r.count <= k.wild_count) ++k.wild_looks;
+        else k.wild_looks = 1;
+        k.wild_count = r.count;
+        if (k.wild_looks < kWildLooks) {
+            k.under_before = false;
+            out.push_back(Event{ Event::Kind::Wild, vk, r.count, was, 0 });
+            return out;
+        }
+        // Read that low look after look: so it is, and the looks agreed under
+        // the mark, so the warning need not wait another.
+        k.wild_looks = 0;
+        k.under_before = warn_below_ > 0 && r.count < warn_below_;
+        out.push_back(Event{ Event::Kind::WildBelieved, vk, r.count, was, 0 });
+    } else if (k.wild_looks > 0 && counted && was >= 0 && r.count * 5 > was) {
+        out.push_back(Event{ Event::Kind::Misread, vk, k.wild_count, was, r.count });
+        k.wild_looks = 0;
+    }
+    // A look that is no count neither confirms a wild drop nor clears it.
 
+    // Believed: a count or a single at once, the two frames of the look
+    // having agreed on it; anything else when the look before said the same.
+    if (r.has_count() || (k.have_last && k.last.same(r))) {
+        k.believed = r;
+        k.have_believed = true;
+    }
+    // The count a wild drop is told from: the last one believed. The slot
+    // covered, unreadable or its key off the bar for a while keeps it, and a
+    // wild drop held with it -- 62, 6, covered, covered, 60 is a misread of
+    // 62 all the same, and 62, covered, covered, 6, 6 a drop not believed
+    // yet. The slot believed empty, or holding one, ends both: that stack has
+    // gone, and what comes next is a new one.
+    if (k.believed.state == SlotState::Count) {
+        k.ref = k.believed.count;
+    } else if (k.believed.state == SlotState::Empty || k.believed.state == SlotState::Single) {
+        k.ref = -1;
+        k.wild_looks = 0;
+    }
+
+    // Low: under the mark on this look and on the one before.
+    const bool under = counted && warn_below_ > 0 && r.count < warn_below_;
+    if (under && k.under_before && k.low_armed) {
+        k.low_armed = false;
+        out.push_back(Event{ Event::Kind::Low, vk, r.count, 0, 0 });
+    }
+    k.under_before = under;
+
+    // Out: empty on this look and on the one before.
     if (r.has_count()) {
         k.out_armed = true;
-        if (r.state == SlotState::Count && warn_below_ > 0 && r.count < warn_below_ && k.low_armed) {
-            k.low_armed = false;
-            out.push_back(Event{ Event::Kind::Low, vk, r.count });
-        }
-    } else if (r.state == SlotState::Empty && k.out_armed) {
+    } else if (r.state == SlotState::Empty && k.have_last && k.last.state == SlotState::Empty && k.out_armed) {
         k.out_armed = false;
-        out.push_back(Event{ Event::Kind::Out, vk, 0 });
+        out.push_back(Event{ Event::Kind::Out, vk, 0, 0, 0 });
     }
+    k.last = r;
+    k.have_last = true;
     return out;
 }
 
@@ -366,6 +446,11 @@ bool PotionWatch::believed(std::uint32_t vk, SlotReading& out) const {
     if (it == keys_.end() || !it->second.have_believed) return false;
     out = it->second.believed;
     return true;
+}
+
+bool PotionWatch::holding(std::uint32_t vk) const {
+    const auto it = keys_.find(vk);
+    return it != keys_.end() && it->second.wild_looks > 0;
 }
 
 void PotionWatch::reset() { keys_.clear(); }

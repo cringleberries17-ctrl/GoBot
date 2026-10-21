@@ -201,7 +201,39 @@ void GuiApp::alert(const char* event, const std::string& text_vi) {
     // The only place an ALERT line is written. The log says what was raised
     // whatever the tab says should be sent where -- with alerts off too.
     GB_WARN("ALERT %s: %s", event, text_vi.c_str());
+    // A death: what led up to it, right after it -- whichever thread saw it,
+    // the reviver's or the watch's here.
+    if (std::strcmp(event, "death") == 0) log_black_box();
     if (alerts_ui_) alerts_ui_->service.raise(event, text_vi, now_ms());
+}
+
+void GuiApp::log_black_box() {
+    // The macro's last 30 s: HP and MP as read, and why each potion key did
+    // or did not drink. Key names and marks only -- nothing the player typed,
+    // no name.
+    if (macro_)
+        for (const std::string& line : macro_->black_box_lines()) GB_INFO("%s", line.c_str());
+    // What the slots showed, and when: a press with the count unchanged is
+    // one the game did not drink. And the figures on the bars, as last read.
+    const std::uint64_t now = now_ms();
+    std::string slots = potion_slots_line(now);
+    if (slots.empty()) slots = "Potion slots: not read this run";
+    const VitalsReader::Vitals v = vitals_.values();
+    const auto figure = [](int cur, int max) {
+        return cur >= 0 && max > 0 ? std::to_string(cur) + "/" + std::to_string(max) : std::string("not read");
+    };
+    // And how fresh the HP/MP reader was: its grabs failing, it keeps its
+    // last values, which the macro is handed as no reading after 1.5 s.
+    const std::uint64_t read_at = vitals_.last_read_ms();
+    char reader[120];
+    if (read_at == 0)
+        std::snprintf(reader, sizeof reader, "the bars not read this run");
+    else
+        std::snprintf(reader, sizeof reader, "the bars last read %.1f s before, %zu grabs failed in the last 30 s",
+                      static_cast<double>(now - std::min(now, read_at)) / 1000.0,
+                      vitals_.failures_since(now > MacroEngine::kBlackBoxMs ? now - MacroEngine::kBlackBoxMs : 0));
+    GB_INFO("%s; HP %s, MP %s; %s", slots.c_str(), figure(v.hp, v.hp_max).c_str(), figure(v.mp, v.mp_max).c_str(),
+            reader);
 }
 
 void GuiApp::alert_party(bool joined, const std::string& who) {

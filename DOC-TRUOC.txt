@@ -96,8 +96,9 @@ Bản này mới chạy trên game thật một lần, khoảng 15 phút: đánh
 phím kỹ năng và bình, "Còn N bình", Tự chat, "Tự mời người chat từ khoá"
 (đọc khung chat, chưa mời ai), và một lần chết thật với Tự hồi sinh. Các
 phần đó vẫn giữ chữ "Thử nghiệm" (màn hình vẫn ghi "Thử nghiệm: phần này
-chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7, Lỗi 1 tới Lỗi 5.
-Các phần "Thử nghiệm" khác chưa được thử trên game thật.
+chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2, Lỗi 3 và
+Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
+khác chưa được thử trên game thật.
 
 - Dọn rác: bỏ đồ vào thùng rác ("Tự dọn rác", "Dọn ngay") đã chạy tốt trên
   game thật. Hai phần mới dưới đây thì chưa:
@@ -150,11 +151,15 @@ Các phần "Thử nghiệm" khác chưa được thử trên game thật.
     phím: A S D F G H 1 2 3 và Z X C V B N 4 5 6). Trước khi chạy thì ghi
     "Số bình được đọc khi bot chạy." Đây là chồng bình đang dùng, không
     phải mọi bình trong túi. Ô "Báo khi còn dưới [20] bình (0 = không
-    báo)" (một ô, dưới dòng bình MP) đặt mức báo "Sắp hết bình": mỗi lần
-    tụt dưới mức chỉ báo một lần. Ô phím trống thì luôn báo "Hết bình"
-    (GoBot vẫn bấm phím). Hai tin này được gửi đi nếu bạn bật Thông báo, và
-    luôn được ghi vào log dạng "ALERT ...". Số bình có thể đọc sai: xem
-    Lỗi 1 ở mục 7.
+    báo)" (một ô, dưới dòng bình MP) đặt mức báo "Sắp hết bình": chỉ báo
+    khi hai lần đọc liền nhau (cách nhau khoảng 10 giây) đều dưới mức, và
+    mỗi lần tụt dưới mức chỉ báo một lần. Ô phím trống hai lần đọc liền thì
+    báo "Hết bình" (GoBot vẫn bấm phím). Hai tin này được gửi đi nếu bạn bật
+    Thông báo, và luôn được ghi vào log dạng "ALERT ...". Số tụt còn một
+    phần năm hay ít hơn (ví dụ 62 thành 6) thì chưa tin, cho tới khi đọc
+    thấy như vậy 3 lần (lần nào thanh phím bị che thì không tính); tụt rồi
+    lại trở về thì log ghi "a misread" và ảnh lúc đọc sai được giữ trong
+    thư mục potion_debug.
   + Lọc quái: "Không đánh" (bot không bao giờ đánh) và "Đánh trước" (bot
     đánh trước những con khác). Chọn tên từ "Quái đang thấy" hoặc gõ tên.
     Tên quái đọc từ màn hình nên được so gần đúng. Ô "Chỉ đánh những con
@@ -217,22 +222,29 @@ Các phần "Thử nghiệm" khác chưa được thử trên game thật.
   chat và danh sách người chơi ở cả cửa sổ 1280x720. Mới (thử nghiệm):
   + Ô "Chỉ mời khi đang làm chủ tổ đội" (mặc định TẮT). Có dấu thì GoBot
     chỉ mời khi thấy vương miện chủ tổ đội ở ô của bạn (góc trái trên màn
-    hình game), hoặc khi CHẮC CHẮN bạn chưa có tổ đội (lời mời đó lập tổ
-    đội mới do bạn làm chủ). Không mời khi: bạn là thành viên tổ đội người
-    khác ("Đang trong tổ đội nhưng không phải chủ tổ đội"); không thấy
-    vương miện ở ô nào; không đọc được khung tổ đội; chưa chắc bạn chỉ có
-    một mình ("Có vẻ chưa có tổ đội, nhưng chưa chắc (...)", kèm lý do).
-    Để chắc chắn, GoBot cần: thấy cả màn hình game, không cửa sổ nào che
-    bất kỳ chỗ nào của game (kể cả GoBot), không phần nào nằm ngoài màn
-    hình, thanh tác vụ không che game (cho nó tự ẩn); trong game không mở
-    cửa sổ nào, không có khung chú thích nào ở bên trái. Ô này chưa xong:
-    xem Lỗi 6 ở mục 7.
+    hình game), hoặc khi bạn chưa có tổ đội: khung tổ đội của game không có
+    ô thành viên nào, không có vương miện (lời mời đó lập tổ đội mới do bạn
+    làm chủ). Không mời khi: bạn là thành viên tổ đội người khác ("Đang
+    trong tổ đội nhưng không phải chủ tổ đội"); không thấy vương miện ở ô
+    nào; không đọc được khung tổ đội. "Chưa có tổ đội" là game không cho
+    thấy tổ đội nào: một cửa sổ của game che các ô tổ đội (hay lúc vừa vào
+    tổ đội mà game chưa kịp vẽ khung) thì GoBot cũng đọc là một mình dù bạn
+    đang trong tổ đội, nên khi cần, đóng các cửa sổ đó.
   + Có dấu hay không, GoBot không mời khi tổ đội đã đủ 6 người ("Tổ đội đã
     đủ 6 người"), và không mời khi đang bận việc khác trong game (gõ câu
     chat, dọn rác, làm nhiệm vụ, hồi sinh, đóng thông báo). Người gõ từ
     khoá lúc đó không được mời, và GoBot không xét lại người đó trong 30
     giây; sau đó, nếu dòng đó vẫn còn trong khung chat, GoBot đọc lại và
     mời như thường (người đó không cần gõ lại).
+  + Câu Tự chat của chính bạn không bao giờ bị coi là lời xin vào tổ đội,
+    dài hay ngắn: câu mà người nói là tên nhân vật đã gõ ở thẻ Đánh quái,
+    và câu chỉ có từ khoá mà GoBot đã gõ, chừng nào dòng đó còn trong khung
+    chat (GoBot nhớ người nói của dòng đó từ phút đầu sau khi gõ). Câu chỉ
+    có từ khoá của người khác trong phút đầu đó cũng bị bỏ qua (chưa gõ tên
+    ở thẻ Đánh quái thì tới khi dòng của họ trôi khỏi khung chat được một
+    phút); gõ thêm chữ ("cho pt") thì vẫn được mời. Phần tổ đội bật sau
+    phút đầu đó thì mọi câu chỉ có từ khoá bị bỏ qua tới lần sau GoBot gõ
+    từ khoá. Nhân vật có tên hơn kém tên bạn một chữ cũng bị coi là bạn.
   + Thẻ Tổ đội nay ghi GoBot đọc được gì: "Tổ đội: một mình", "Tổ đội:
     thành viên (N/6)", "Tổ đội: chủ tổ đội (N/6)", "Tổ đội: đang trong tổ
     đội (N/6), không thấy vương miện chủ tổ đội" hay "Tổ đội: không đọc
@@ -260,13 +272,13 @@ Các phần "Thử nghiệm" khác chưa được thử trên game thật.
     trong lúc đang vào thì dừng lần vào đó.
 - Tự chat (thử nghiệm): nói các câu của bạn trong khung chat game, theo giờ.
   Mới (thử nghiệm): trong danh sách "Sẽ gõ:" dưới ô các câu, mỗi câu có ô
-  "Chỉ khi chưa có tổ đội" (mặc định không có dấu). Câu có dấu thì không
-  gửi khi bạn đang trong tổ đội (GoBot nhìn khung tổ đội trên màn hình game
-  trước), và câu tiếp theo được gửi thay; không còn câu nào khác thì chờ
-  một phút. Không đọc được khung tổ đội thì cũng không gửi. "Gửi thử 1 câu"
-  vẫn gửi câu đầu dù có dấu. Ô này chỉ cần khung tổ đội trông như
-  "một mình", không cần chắc chắn như ô "Chỉ mời khi đang làm chủ tổ đội",
-  nên một cửa sổ che khung tổ đội vẫn có thể lừa nó: xem Lỗi 6 ở mục 7.
+  "Chỉ khi chưa có tổ đội" (mặc định không có dấu). Câu có dấu chỉ được
+  gửi khi khung tổ đội của game cho thấy bạn chưa có tổ đội (GoBot nhìn
+  trước, như ô "Chỉ mời khi đang làm chủ tổ đội"); đang trong tổ đội, hay
+  không đọc được khung tổ đội, thì câu tiếp theo được gửi thay; không còn
+  câu nào khác thì chờ một phút. "Gửi thử 1 câu" vẫn gửi câu đầu dù có
+  dấu. Một cửa sổ của game che các ô tổ đội thì GoBot cũng thấy như chưa
+  có tổ đội: khi cần, đóng cửa sổ đó.
 - Nhiệm vụ (thử nghiệm): làm nhiệm vụ nhanh như GoC: cứ vài phút GoBot mở
   cửa sổ Nhiệm Vụ, sang thẻ NV Phụ, bật ô "Tự Động" của game nếu đang tắt,
   rồi đóng cửa sổ.
@@ -373,15 +385,13 @@ Nút nào bấm vào game, nút nào không:
   đọc từ màn hình nên đôi khi sai một hai chữ.
   "Chỉ mời khi đang làm chủ tổ đội": trước hết bấm "Thử xem" ở thẻ Tổ đội
   (chỉ nhìn, dùng được cả trước khi bấm BẮT ĐẦU) và đọc "Tổ đội: một mình",
-  "thành viên" hay "chủ tổ đội". Thử mời với một nhân vật thứ hai của bạn;
-  cửa sổ GoBot nằm cạnh game (không che chỗ nào của game), thanh tác vụ tự
-  ẩn, trong game không mở cửa sổ nào, không có khung chú thích ở bên trái.
-  Thẻ ghi "Có vẻ chưa có tổ đội, nhưng chưa chắc (...)" thì bỏ thứ được nêu
-  trong ngoặc rồi thử lại. Thử xong, nếu bạn sẽ vào tổ đội của người khác
-  thì bỏ dấu "Tự mời người chat từ khoá".
+  "thành viên" hay "chủ tổ đội". Thử mời với một nhân vật thứ hai của bạn,
+  cửa sổ GoBot nằm cạnh game, trong game không mở cửa sổ nào ở bên trái
+  (cửa sổ che các ô tổ đội thì GoBot đọc là một mình). Thử xong, nếu bạn
+  sẽ vào tổ đội của người khác thì bỏ dấu "Tự mời người chat từ khoá".
 - Còn N bình: đánh dấu "Tự uống bình HP", bấm BẮT ĐẦU, chờ khoảng 10 giây
-  rồi so "Còn N bình (ô phím K)" với số trên thanh phím của game. Số này có
-  thể sai: xem Lỗi 1 ở mục 7.
+  rồi so "Còn N bình (ô phím K)" với số trên thanh phím của game. Thấy số
+  sai thì ghi giờ và báo lại, kèm gobot_gui.log và thư mục potion_debug.
 - Tự đóng thông báo: lúc trong game đang có thông báo, bấm "Thử xem" cạnh
   ô này (chỉ nhìn). Chỉ đánh dấu khi nó nói đúng thông báo đó.
 - Phím dọn ngay, Phím vào game ngay: để trống nếu không cần. Muốn đặt thì
@@ -410,67 +420,47 @@ Nút nào bấm vào game, nút nào không:
 
 7. KHI GẶP LỖI
 
-Lỗi đã biết của bản này: Lỗi 1 tới Lỗi 5 thấy trong một lần chạy trên game
-thật, khoảng 15 phút; Lỗi 6 thấy khi kiểm tra trên máy. Các bản sau sẽ
-sửa. Chỉ thấy đúng những lỗi này thì bạn không cần báo lại. Nhưng nếu gặp
-trường hợp mà phần "Làm" của Lỗi 2, Lỗi 5 hay Lỗi 6 nói tới, hãy làm như ở
-đó và báo lại, kèm gobot_gui.log.
+Lỗi đã biết của bản này: Lỗi 2, Lỗi 3 và Lỗi 5 thấy trong một lần chạy
+trên game thật, khoảng 15 phút (Lỗi 1, số bình đọc sai, và Lỗi 4, câu Tự
+chat là từ khoá tổ đội, đã sửa ở bản này). Các bản sau sẽ sửa. Chỉ thấy
+đúng những lỗi này thì bạn không cần báo lại. Nhưng nếu gặp trường hợp mà
+phần "Làm" của Lỗi 2, Lỗi 3 hay Lỗi 5 nói tới, hãy làm như ở đó và báo
+lại, kèm gobot_gui.log.
 
-- Lỗi 1, số bình đọc sai.
-  Thấy: số bình tận cùng bằng 1 bị đọc mất số 1 cuối (61 thành 6, 51 thành
-  5, 41 thành 4, 21 thành 2), ở dòng "Còn N bình (ô phím K)" và trong tin
-  "Sắp hết bình HP: ô phím 1 còn 6 bình." (log, Thông báo). Thấy ở phím
-  bình HP (phím 1); phím bình MP đọc đúng. Lần đọc sau, 10 giây sau, lại
-  đúng.
-  Làm: bỏ qua tin sắp hết bình mà lần đọc sau nói khác; hãy tin con số trên
-  thanh phím của game. Bình vẫn được uống theo "khi HP dưới", "khi MP
-  dưới", không theo số này. Tin sai làm phiền thì bỏ dấu "Sắp hết bình" ở
-  "Báo khi" (thẻ Thông báo), hoặc đặt "Báo khi còn dưới" là 0 (mất cả tin
-  sắp hết thật; ô trống vẫn báo "Hết bình").
 - Lỗi 2, chết khi đang bật bình HP.
   Thấy: nhân vật chết một lần lúc đánh quái, "Tự uống bình HP" bật ở "khi
-  HP dưới" 60%. Số bình không đổi trong 36 giây trước đó và log không ghi
-  HP, nên chưa biết vì sao: có thể bình không được bấm, hoặc một hai đòn
-  mạnh đưa HP từ trên 60% về 0. GoBot bấm "Sử dụng vật phẩm hồi sinh" ngay.
-  Làm: khi thử bình, ngồi xem thanh HP. "Bình HP: N" ở khung dưới nút BẮT
-  ĐẦU là số lần đã bấm phím bình HP. HP dưới mức mà số đó và "Còn N bình"
-  đều đứng yên: bấm F12, tự uống bình, ghi giờ, gửi ngay gobot_gui.log (và
-  gobot_gui.old.log). "Đọc được HP và MP" (thẻ Đánh quái) phải có dấu xanh:
-  không đọc được HP thì phím bình không bấm. Bình, như mọi phím của bot,
-  chỉ được bấm khi cửa sổ game ở trên cùng: lúc đánh quái đừng bấm vào cửa
-  sổ GoBot hay cửa sổ khác. Dòng dưới nút BẮT ĐẦU ghi "Đang chờ: hãy bấm
-  vào cửa sổ game…" hay "Tạm dừng: …" thì bot không bấm bình. Tự chat giữ
-  bình lại lúc gõ (Lỗi 3): thử bình khi tắt Tự chat trước. Đừng để bot
-  chạy một mình với nhân vật quý.
+  HP dưới" 60%. Số bình không đổi trong 36 giây trước đó và log lúc đó
+  không ghi HP, nên chưa biết vì sao: có thể bình không được bấm, hoặc một
+  hai đòn mạnh đưa HP từ trên 60% về 0. Nay ngay sau dòng "ALERT death",
+  log ghi thêm vài dòng "Black box": HP và MP đọc được trong 30 giây trước
+  đó ("no read" khi không đọc được, lúc đó bình chờ), mỗi phím bình bấm
+  lúc nào và vì sao chưa bấm, số bình trên thanh phím, lần cuối đọc được
+  thanh HP/MP; và mỗi phút log có một dòng "Potions:" về các phím bình.
+  Làm: chết khi đang bật bình HP thì gửi ngay gobot_gui.log (và
+  gobot_gui.old.log), kèm giờ. Khi thử bình, ngồi xem thanh HP: "Bình HP:
+  N" ở khung dưới nút BẮT ĐẦU là số lần đã bấm phím bình HP; HP dưới mức
+  mà số đó và "Còn N bình" đều đứng yên thì bấm F12 và tự uống bình. "Đọc
+  được HP và MP" (thẻ Đánh quái) phải có dấu xanh. Bình, như mọi phím của
+  bot, chỉ được bấm khi cửa sổ game ở trên cùng; Tự chat giữ bình lại lúc
+  gõ (Lỗi 3). Đừng để bot chạy một mình với nhân vật quý.
 - Lỗi 3, Tự chat không gửi hết câu.
   Thấy: 4 trong 8 câu không được gửi: "Không mở được ô chat (đã bấm Enter
   2 lần) — bỏ qua câu này.", hoặc ô mở mà "Game không nhận chữ gõ vào ô
-  chat". Lúc đó log còn ghi "Ô chat có thể đang mở: đánh quái, bình và
-  buff tạm dừng..." trong khoảng 2 giây. Câu lỗi được thử lại sau 30 giây;
-  3 lần liền thì Tự chat tự dừng. Lúc gõ, GoBot giữ đánh quái, kỹ năng,
-  bình và buff (một câu: khoảng 5,5 giây). Câu chỉ bắt đầu khi HP cao hơn
-  mức của bình HP ít nhất 10 (không cần quá 95%), và bị bỏ dở khi HP xuống
-  dưới mức của bình. Mức này tính ít nhất 50%: bình ở 60% thì câu bắt đầu
-  từ 70%, bỏ dở dưới 60%; bình dưới 50% hay không bật bình thì bắt đầu từ
-  60%, bỏ dở dưới 50%.
-  Làm: đừng để gì che ô chat (góc trái dưới game); Unikey/EVKey để gõ tiếng
-  Anh (E), bàn phím Windows ở English (US); đừng đụng chuột, bàn phím lúc
-  GoBot gõ; thử bình riêng trước. Ô chat cứ mở mãi thì bạn tự đóng nó: xoá
-  chữ rồi bấm Enter (nút "Để tôi tự đóng ô chat" ở thẻ Tự chat dừng bot để
-  bạn làm việc này; xong thì bấm BẮT ĐẦU). Gửi thư mục chat_debug khi được
-  hỏi.
-- Lỗi 4, câu Tự chat là từ khoá tổ đội.
-  Thấy: một câu Tự chat chỉ gồm từ khoá tổ đội (mặc định "pt") được đọc lại
-  từ khung chat và bị coi là có người xin vào tổ đội. GoBot không mời chỉ
-  vì lúc đó đang bận gõ chat (log: "Party: <tên> asked while GoBot was busy
-  (auto chat); not invited"). Lúc không bận (kể cả 30 giây sau, nếu câu đó
-  vẫn còn trong khung chat), GoBot có thể mở danh sách người chơi để tìm
-  tên nhân vật của bạn. GoBot chỉ nhận ra câu của chính nó (gõ trong 30
-  phút qua) khi câu có từ 3 chữ cái hoặc số trở lên và đọc lại được 8 chữ
-  cái hoặc số liền nhau (hay cả câu, nếu ngắn hơn); không nhận ra thì câu
-  đó được xét như lời xin của người khác.
-  Làm: đừng để câu Tự chat là từ khoá. Khi bật "Tự mời người chat từ khoá",
-  câu có từ khoá thì nên dài hơn 8 chữ cái, hoặc đổi từ khoá ở thẻ Tổ đội.
+  chat". Ảnh trong chat_debug cho thấy GoBot đọc ô chat đúng (ô đóng, hay
+  ô mở mà trống): chính game đã không nhận phím. Nay mỗi câu có một dòng
+  "Chat trace" trong log: mỗi lần bấm Enter giữ bao lâu, ô chat sau đó ra
+  sao, và (khi game không hiện chữ) Unikey/EVKey có đang chạy không. Trước
+  khi báo "Game không nhận chữ", GoBot nhìn ô chat ba lần, tới khoảng 0,65
+  giây sau phím cuối. Câu lỗi được thử lại sau 30 giây; 3 lần liền thì Tự
+  chat tự dừng. Lúc gõ, GoBot giữ đánh quái, kỹ năng, bình và buff (một
+  câu: khoảng 5,5 giây); HP xuống dưới mức của bình HP thì câu dừng ngay,
+  cả lúc đang chờ, để bình được bấm.
+  Làm: Unikey/EVKey để gõ tiếng Anh (E), bàn phím Windows ở English (US);
+  đừng để gì che ô chat (góc trái dưới game); đừng đụng chuột, bàn phím lúc
+  GoBot gõ. Ô chat cứ mở mãi thì bạn tự đóng nó: xoá chữ rồi bấm Enter.
+  Gửi thư mục chat_debug và các dòng "Chat" của log khi được hỏi.
+  configs\chat.ini có thêm vài số để thử cách bấm phím (hold_min_ms,
+  max_enters, inject...): chỉ đổi khi được hỏi.
 - Lỗi 5, đánh quái: nhiều trận bị bỏ.
   Thấy: khoảng 110 trận trong 11 phút, khoảng 1 trong 7 trận bị bỏ, không
   lùi bước nào. Với Kiểu đánh "Như trước" (mặc định), con quái còn sống 4
@@ -481,22 +471,6 @@ trường hợp mà phần "Làm" của Lỗi 2, Lỗi 5 hay Lỗi 6 nói tới,
   định tắt).
   Làm: không cần làm gì, trừ khi nhân vật đứng yên hay đi xa đám quái: khi
   đó bấm F12 và báo lại, kèm giờ.
-- Lỗi 6, "Chỉ mời khi đang làm chủ tổ đội" chưa xong.
-  Thấy: có dấu ô này mà chưa có tổ đội, GoBot chỉ mời khi chắc bạn chỉ có
-  một mình (xem mục 5). Nhưng vài cảnh vẫn làm thành viên một tổ đội bị đọc
-  là "một mình" (cả "Thử xem" cũng ghi "Tổ đội: một mình"), và GoBot có thể
-  mời trong khi người khác làm chủ: cửa sổ hay hộp của game không có nút X
-  nằm trên khung tổ đội (cửa hàng, menu tổ đội, hộp hỏi Xác Nhận / Hủy Bỏ,
-  thông báo chỉ có Xác Nhận); cửa sổ có nút X bị khung chú thích che (hai
-  trường hợp này thấy khi dán hình cửa sổ của game lên ảnh chụp); và lúc
-  ngay sau khi nhận lời mời vào tổ đội, dù GoBot nhận hay bạn tự bấm nhận,
-  trước khi game vẽ khung tổ đội (thấy khi đọc mã nguồn). Cả ba trường hợp
-  đều chưa gặp trong game. Ô "Chỉ khi chưa có tổ đội" của Tự chat còn dễ
-  bị lừa hơn.
-  Làm: đóng mọi cửa sổ game ở bên trái trước khi dựa vào ô này; thử với
-  nhân vật thứ hai; có thể vào tổ đội người khác thì bỏ dấu "Tự mời người
-  chat từ khoá"; thấy GoBot mời khi bạn đang là thành viên thì bấm F12 và
-  báo lại, kèm giờ.
 
 Gặp lỗi khác:
 - Ghi lại: phiên bản GoBot, cỡ cửa sổ game, bạn đã làm gì, GoBot đã làm
@@ -508,15 +482,15 @@ Gặp lỗi khác:
   cả gobot_gui.old.log. Hai file này có thể có: tên nhân vật bạn đã gõ,
   tên những người chơi khác mà GoBot đã mời vào tổ đội (và tên người vào
   tổ đội, nếu bạn bật "Kèm tên người chơi khác" ở thẻ Thông báo), tên
-  những người đã gõ từ khoá tổ đội, được mời hay không (kể cả tên nhân vật
-  của chính bạn, khi một câu Tự chat bị coi là lời xin), đường dẫn thư mục
+  những người đã gõ từ khoá tổ đội, được mời hay không, đường dẫn thư mục
   trên máy (có tên người dùng Windows), địa chỉ mạng trong nhà (dạng
   192.168.x.x), và các câu Tự chat đã gõ. File không có mật khẩu hay
   webhook. Bạn có thể mở bằng Notepad để xem trước, và thay các tên bằng
   chữ khác nếu muốn.
 - Các thư mục trash_debug, revive_debug, quest_debug, chat_debug là ảnh
   chụp màn hình game lúc có lỗi. potion_debug giữ tới 20 ảnh cả màn hình
-  game, chụp khi một ô bình hết hoặc số bình tăng lên; keeper_debug giữ
+  game, chụp khi một ô bình hết, khi số bình tăng lên, hoặc khi một lần
+  đọc số bình tụt bất thường rồi trở lại; keeper_debug giữ
   tới 20 ảnh game, chụp khi GoBot tắt game vì không thấy nhân vật. Trong
   các ảnh đó thấy tên nhân vật, khung chat và người chơi khác. Chỉ gửi khi
   được hỏi, và xem trước khi gửi.

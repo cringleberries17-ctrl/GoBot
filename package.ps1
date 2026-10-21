@@ -414,85 +414,83 @@ EXPERIMENTAL
   presses every skill whose cooldown is over, one after the other, rather
   than one at a time; it counts only with Chi khi dang danh quai ticked.
 
+  The party, by the player's rule: alone means the game shows no party.
+  Chi moi khi dang lam chu to doi (To doi tab, off as shipped) invites only
+  when the game shows the player's own crown, or no party at all -- no
+  member's panel, no crown, the bag not over where the panels go -- and
+  the tick Chi khi chua co to doi on Tu chat lines goes by the same
+  reading. A game window over the party panels can make GoBot read alone
+  while the player is in a party, so close such windows when it matters;
+  so can the moment just after joining one, before the game draws the
+  panels. A look taken before GoBot's own last accept, decline or invite
+  is never used. Thu xem on To doi says what it reads: To doi: mot minh,
+  thanh vien, chu to doi. GoBot never takes the player's own Tu chat lines
+  for somebody asking to be invited, however short: a line said by the
+  character name typed on Danh quai, or a line of just the keyword that
+  GoBot itself typed, for as long as that line stays on the chat (GoBot
+  remembers its speaker as read in the first minute after typing it).
+  Somebody else's bare keyword in that first minute is passed over too
+  (with no name typed on Danh quai, until their line has been off the
+  chat for a minute); with more words ("cho pt") it counts. With the
+  party part started after that minute, every bare keyword is passed over
+  until GoBot types the keyword again. A character whose name is the
+  player's give or take one letter counts as the player.
+
+  Potion counts (Con N binh): Sap het binh needs two reads in a row under
+  the mark, about 10 seconds apart. A count that falls to a fifth or less
+  at once (62 to 6) is not believed until it is read 3 times (reads with
+  the hotbar covered do not count); one that comes back is logged as a
+  misread, and its screenshot is kept in potion_debug.
+
   There is no captcha handling, by decision: the player answers one.
 
 KNOWN ISSUES
-  Entries 1 to 5 were found in that live run (hunting with the macro keys,
-  potions and skills, a timed chat line, the keyword invite on); entry 6 in
-  the checks here. Later packages fix them. Testers need not report these
-  symptoms again, but should follow entries 2, 5 and 6, and report with
+  Entries 2, 3 and 5 were found in that live run (hunting with the macro
+  keys, potions and skills, a timed chat line, the keyword invite on);
+  entries 1 (potion counts misread) and 4 (a Tu chat line of just the
+  keyword taken for somebody asking) of that run are fixed in this
+  package. Later packages fix the rest. Testers need not report these
+  symptoms again, but should follow entries 2, 3 and 5, and report with
   the log, when those say so.
-
-  1. Potion counts. The line under a potion row, Con N binh, and the alert
-     Sap het binh read a count without its last 1 when it ends in 1: 61 as
-     6, 51 as 5, 41 as 4, 21 as 2 (seen on the HP potion key; the MP key
-     read such counts right). Each one raises a false low-potion alert --
-     in the log, ALERT potion_low: Sap het binh HP: o phim 1 con 6 binh.
-     (with accents there) -- and the next read, 10 seconds later, is right.
-     Potions are drunk by the HP and MP percentages, never by this count,
-     so only what is shown and alerted is wrong, never what is drunk:
-     ignore an alert that the next read contradicts, and look at the
-     number on the hotbar. The folder potion_debug keeps a screenshot of
-     the game only when a count goes up or a slot empties, so it holds the
-     read after a misread (the count going back up), not the misread
-     itself. It shows the slot: ask for it with the log.
 
   2. A death with the HP potion on (Tu uong binh HP, khi HP duoi 60%). The
      potion count did not change in the 36 seconds before it and the log
-     has no HP readings, so the cause is not known: the potion may not have
-     been pressed, or one or two big hits may have taken HP from above 60%
-     to zero. GoBot's revive clicked the revive-item button at once. Ask
-     testers to watch the HP bar when trying potions: Binh HP: N in the
-     line under BAT DAU counts the presses of the HP potion key, and Doc
-     duoc HP va MP on Danh quai must be green (with no HP reading the
-     potion keys hold instead of firing). If HP is under the mark and
-     neither that figure nor Con N binh moves: F12, drink by hand, note the
-     time, send gobot_gui.log and gobot_gui.old.log at once. In the log,
-     ALERT death marks the moment and ALERT revived or ALERT revive_failed
-     what came of the revive; a line Potions: key 1 at slot 7 row 1 reads
-     N (was M) is written each time the believed count changes. Potions,
-     like every key, are pressed only while the game is the window in
-     front: a click on GoBot or another window during a fight holds them
-     until the game is in front again (the line under BAT DAU then says
-     Dang cho: hay bam vao cua so game...). Tu chat holds the potions
-     while it types (entry 3): try potions with it off first.
+     then had no HP readings, so the cause is not known: the potion may not
+     have been pressed, or one or two big hits may have taken HP from above
+     60% to zero. GoBot's revive clicked the revive-item button at once.
+     Now, right after ALERT death, the log has a few Black box lines: HP
+     and MP as read over the last 30 seconds (no read when the bars could
+     not be read, and then the potions wait), each potion key's presses and
+     why it held otherwise (above the mark, cooling, keys held...), what
+     the potion slots last showed and when the bars were last read; and
+     once a minute a Potions: line.
+     Ask for gobot_gui.log and gobot_gui.old.log at once after any death
+     with the HP potion on, with the time. When trying potions, watch the
+     HP bar: Binh HP: N in the line under BAT DAU counts the presses of the
+     HP potion key, and Doc duoc HP va MP on Danh quai must be green.
+     Potions, like every key, go only while the game is the window in
+     front; Tu chat holds them while it types (entry 3).
 
   3. Tu chat. 4 of 8 timed lines were not sent: either the chat box did not
-     open after Enter twice (log: Khong mo duoc o chat (da bam Enter 2 lan)
-     -- bo qua cau nay.) or it opened and the game did not take the typed
-     text (log: Game khong nhan chu go vao o chat (cach go vk) -- cau chua
-     gui.). At such a moment the log also says O chat co the dang mo: danh
-     quai, binh va buff tam dung den khi thay o chat dong (gone in about 2
-     seconds in the run; the log has the accents). A failed line keeps its
-     turn and is tried again after 30 seconds; 3 in a row stop Tu chat
-     (alert Tu chat tu dung). While a line is typed GoBot holds fighting,
-     skills, potions and buffs, and the bag cleaner, quest rounds and
-     notice closer too: a sent line took 4.5 seconds and held the bot 5.5
-     (ca cau mat 4.5 giay, bot bi giu 5.5 giay); a line is meant to take
-     10 seconds at most. A line starts only when HP is at least 10 points
-     over the HP potion's percentage (95% at most, 60% at least) and waits
-     2 seconds if it is lower (Mau thap -- cho 2 giay roi chat.); a line
-     being typed is dropped if HP falls under the HP potion's percentage,
-     or under 50% when that is lower (Mau thap -- dung cau dang go.).
-     Advice: keep the chat box (bottom left of the game) uncovered;
-     Unikey/EVKey on English (E) and the Windows keyboard on English
-     (US) -- the tab warns in amber when not; no mouse or keyboard while a
-     line is typed; keep chat_debug (a screenshot of each failed step) and
-     ask for it.
-
-  4. Keyword invite and Tu chat. GoBot ignores what it reads back from the
-     chat when it matches a line Tu chat typed in the last 30 minutes --
-     but only for lines of 3 or more letters or digits, and only when 8 in
-     a row (or all of a shorter line) are read back right. A Tu chat line
-     that is just the keyword (pt by default) is therefore taken for
-     somebody asking: after 3 reads it passes the same checks and then
-     GoBot opens the player list and looks for that name. In the live run
-     it did not invite only because it was busy typing: Party: <name>
-     asked while GoBot was busy (auto chat); not invited, in the log.
-     Advice: do not make a Tu chat line the keyword; or keep the keyword
-     invite (Tu moi nguoi chat tu khoa) off, or change its keyword, while
-     such a line runs. Anybody who asks while GoBot is busy is not invited
-     then and is not looked at again for 30 seconds.
+     open after Enter twice (log: Khong mo duoc o chat (da bam Enter 2 lan))
+     or it opened and the game did not take the typed text (log: Game khong
+     nhan chu go vao o chat (cach go vk) -- cau chua gui.). The chat_debug
+     screenshots show GoBot read the bar right -- shut, or open and empty:
+     the game did not take the keys. Each line tried now leaves a Chat
+     trace line in the log: how long each Enter was held, what the bar
+     showed after it, and, when nothing showed, whether Unikey, EVKey or
+     OpenKey runs and the keyboard layout. Before Game khong nhan chu GoBot
+     now looks at the bar three times, up to about 0.65 seconds after the
+     last key. A failed line is tried again after 30 seconds; 3 in a row
+     stop Tu chat. A line holds fighting, skills, potions and buffs (5.5
+     seconds in the run); HP falling under the HP potion's mark ends it at
+     once, in any of its waits too, and the potion goes. configs\chat.ini
+     has new settings for the live test of key delivery (hold_min_ms,
+     max_enters, inject...), each at what GoBot has always done: change
+     them only when asked. Advice:
+     Unikey/EVKey on English (E), the Windows keyboard on English (US), the
+     chat box uncovered, hands off while a line is typed; ask for chat_debug
+     and the Chat lines.
 
   5. Hunting. About 110 fights in 11 minutes, about 1 in 7 given up, no
      back-steps. With Kieu danh "Nhu truoc" (the shipped setting) a monster
@@ -504,26 +502,6 @@ KNOWN ISSUES
      ships off. Nothing to do unless the character stands still or walks
      away from the monsters: then F12 and report with the time.
 
-  6. Chi moi khi dang lam chu to doi (To doi tab) is not finished. Ticked,
-     GoBot invites from no party only when it is sure you have none: the
-     whole game picture visible (GoBot's window beside the game, taskbar
-     hidden), no game window open, no tooltip over the left side. Some
-     screens can still make a member of a party look alone: a game window
-     or box without an X button over the party panels (for example the
-     shop or the party menu; a question box or a notice) and a window
-     whose X is under a tooltip, both found by laying pictures of the
-     game's own windows over saved screenshots; and the moments just after
-     an invitation is accepted, by GoBot or by hand, before the game draws
-     the party panels, found by reading the code. None has been seen live
-     yet. With such a window up, Thu xem says To doi: mot minh too. The
-     tick Chi khi chua co to doi on Tu chat lines needs the party panels
-     only to look alone, not to be surely alone, so any game window or
-     tooltip over them fools it, not only the screens above. Advice: test
-     with a second character, close every game window at the left first,
-     untick Tu moi nguoi chat tu khoa when you may be in somebody's party,
-     and if an invite goes out while you are a member, F12 and report with
-     the time.
-
 REPORTING A PROBLEM
   Send gobot_gui.log, beside gobot_gui.exe, with the version, the game's
   window size, and what happened when. It holds the last time GoBot was
@@ -532,8 +510,7 @@ REPORTING A PROBLEM
   The logs can hold the character name that was typed, the names of other
   players GoBot invited to a party (and of those who joined, with "Kem ten
   nguoi choi khac" ticked on Thong bao) and of players who typed the party
-  keyword, invited or not (the tester's own name too, when a Tu chat line
-  was taken for a request), folder paths with the Windows user name, a
+  keyword, invited or not, folder paths with the Windows user name, a
   home network address and the chat lines that were said -- never a
   password or the webhook. The *_debug folders (chat_debug, trash_debug,
   revive_debug, quest_debug, potion_debug, keeper_debug) are screenshots
@@ -550,9 +527,12 @@ UPDATING
   "Ten nhan vat" there shows the tester's own name. A hunt.ini copied anyway
   keeps its own jump keys, often Space, the game's attack: Danh quai warns
   ("Phim nhay dang la Space", "Phim nhay khi di toi diem da luu la Space:
-  se danh chu khong nhay"); GoBot never changes the file. Set the other
-  keys again on the screen rather than copying an older macro.ini, which
-  may have a hidden key sequence switched on.
+  se danh chu khong nhay"); GoBot never changes the file. The walker's
+  jump key (the Radar tab of the full screen, used only when walking to
+  saved points) now ships as the Up arrow; a hunt.ini without it gets Up
+  too; one copied from an older package keeps its own. Set the other keys
+  again on the screen rather than copying an older macro.ini, which may
+  have a hidden key sequence switched on.
 
 THE DISCORD WEBHOOK
   Kept encrypted for the Windows user in %LOCALAPPDATA%\GoBot, never in this
@@ -654,6 +634,78 @@ if (Test-Path $grabbed) {
     }
 }
 
+# 3b. No cut-out carries what was on screen under it: no picture of
+# templates\grabbed -- cut out of live captures -- whose fully transparent
+# pixels (alpha 0) hold any colour. The bot never reads them (every picture is
+# matched with its alpha as a mask), but a cut of a player's screen would carry
+# the items in its slots, or the scenery round it, wherever it is copied. The
+# rest of templates\ is the game's own art, extracted as it is. GDI+ keeps that
+# colour both ways, so System.Drawing sees it; counted in C#, as a PowerShell
+# loop over a million pixels is slow.
+Add-Type -AssemblyName System.Drawing
+if (-not ('UnderTransparent' -as [type])) {
+    Add-Type -ReferencedAssemblies 'System.Drawing' -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+public static class UnderTransparent {
+    // Pixels that are fully transparent (alpha 0) and still hold a colour (any of R, G, B not 0).
+    public static int Count(string path) {
+        using (Bitmap bmp = new Bitmap(path)) {
+            Rectangle all = new Rectangle(0, 0, bmp.Width, bmp.Height);
+            BitmapData data = bmp.LockBits(all, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try {
+                int stride = Math.Abs(data.Stride);
+                byte[] buf = new byte[stride * bmp.Height];
+                Marshal.Copy(data.Scan0, buf, 0, buf.Length);
+                int n = 0;
+                for (int y = 0; y < bmp.Height; y++) {
+                    int row = y * stride;
+                    for (int x = 0; x < bmp.Width; x++) {
+                        int i = row + x * 4;                    // B, G, R, A
+                        if (buf[i + 3] == 0 && (buf[i] | buf[i + 1] | buf[i + 2]) != 0) n++;
+                    }
+                }
+                return n;
+            } finally { bmp.UnlockBits(data); }
+        }
+    }
+}
+'@
+}
+# The check has to be able to see it: one pixel with colour under alpha 0 is
+# counted, one without is not.
+$selfPng = Join-Path ([System.IO.Path]::GetTempPath()) 'gobot_alpha0_selftest.png'
+$selfBmp = New-Object System.Drawing.Bitmap(2, 2, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$selfBmp.SetPixel(0, 0, [System.Drawing.Color]::FromArgb(0, 10, 20, 30))
+$selfBmp.SetPixel(1, 1, [System.Drawing.Color]::FromArgb(0, 0, 0, 0))
+$selfBmp.Save($selfPng, [System.Drawing.Imaging.ImageFormat]::Png)
+$selfBmp.Dispose()
+$selfSeen = [UnderTransparent]::Count($selfPng)
+Remove-Item -LiteralPath $selfPng -Force
+if ($selfSeen -ne 1) {
+    $problems += "the check for colour under transparent pixels cannot see it (counted $selfSeen of 1)"
+} else {
+    # Allowed to hold colour under alpha 0, each with its reason: none. (The
+    # monster book's X and the fragment registration question held the game's
+    # parchment there until round 8; both are matched with alpha as a mask,
+    # and were blanked.)
+    $transparentOk = @()
+    if (Test-Path $grabbed) {
+        foreach ($png in (Get-ChildItem $grabbed -File -Filter *.png)) {
+            if ($transparentOk -contains $png.Name) { continue }
+            $n = [UnderTransparent]::Count($png.FullName)
+            if ($n -gt 0) {
+                $problems += "templates\grabbed\$($png.Name) holds colour under $n of its transparent pixels: a cut-out can carry what was on screen under it"
+            }
+        }
+    }
+    if (-not ($problems | Where-Object { $_ -like '*transparent pixels*' })) {
+        Ok "no cut-out holds colour under its transparent pixels"
+    }
+}
+
 # 4. The crossing's pages, by name, resolved out of the package alone.
 $loginIni = Join-Path $stage 'configs\login.ini'
 $pages = Get-Content $loginIni | Where-Object { $_ -match '^\s*(?:signin_)?picture\s*=\s*(\S+)' } |
@@ -728,7 +780,12 @@ $mustBeOff = @(
     @('trash.ini', 'Trash', 'enabled'),
     @('chat.ini', 'Chat', 'enabled'),
     @('quest.ini', 'Quest', 'enabled'),
-    @('alerts.ini', 'Alerts', 'enabled')
+    @('alerts.ini', 'Alerts', 'enabled'),
+    @('app.ini', 'Crash', 'stall_enabled'),
+    @('app.ini', 'Simple', 'close_popups'),
+    @('trash.ini', 'Trash', 'use_fragments'),
+    @('macro.ini', 'Macro', 'skills_follow_fight'),
+    @('hunt.ini', 'Hunt', 'keep_distance')
 )
 foreach ($m in $mustBeOff) {
     $v = Get-IniValue (Join-Path $cfg $m[0]) $m[1] $m[2]
@@ -740,7 +797,21 @@ foreach ($pair in (Get-IniSection (Join-Path $cfg 'macro.ini') 'Keys')) {
         $problems += "macro.ini: $($pair[0])=$($pair[1]) -- every key must ship off"
     }
 }
-if (-not ($problems | Where-Object { $_ -like '*ship off*' -or $_ -like '*to be off*' })) {
+# Keys that press something whenever they are not 0: a hotkey a tester would
+# hit by chance, and the hunter's hop. (hunt.ini's [Move] jump_key, the
+# walker's, ships as Up by decision: only [Hunt]'s is checked.)
+$mustBeZero = @(
+    @('app.ini', 'Hotkeys', 'trash_now'),
+    @('app.ini', 'Hotkeys', 'login_now'),
+    @('hunt.ini', 'Hunt', 'jump_key')
+)
+foreach ($m in $mustBeZero) {
+    $v = Get-IniValue (Join-Path $cfg $m[0]) $m[1] $m[2]
+    if ($null -eq $v) { $problems += "$($m[0]): [$($m[1])] $($m[2]) is not there to be 0" }
+    elseif ($v -ne '0') { $problems += "$($m[0]): [$($m[1])] $($m[2])=$v -- it must ship as 0 (no key)" }
+}
+if (-not ($problems | Where-Object { $_ -like '*ship off*' -or $_ -like '*to be off*' -or
+                                     $_ -like '*ship as 0*' -or $_ -like '*to be 0*' })) {
     Ok "everything that acts on the game is off"
 }
 

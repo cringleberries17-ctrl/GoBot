@@ -6,7 +6,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -275,6 +277,10 @@ public:
     /// from one more ask about the last return: see recast_buffs.
     void set_vitals(float hp_pct, float mp_pct);
     static constexpr float kDownHpPct = 0.5f;
+    /// A reading older than this is treated as absent: pushed this long ago,
+    /// or -- by whoever pushes it, with VitalsReader::if_fresh -- read off
+    /// the bars this long ago.
+    static constexpr std::uint64_t kVitalsStaleMs = 1500;
 
     /// What the engine is currently acting on: the last pushed values, or -1
     /// each once they have gone stale.
@@ -492,6 +498,55 @@ public:
     /// Index of the sequence step about to run.
     std::size_t sequence_position() const { return seq_pos_.load(); }
 
+    // ---- the black box ----
+    //
+    // On 2026-10-20 the character died with the HP potion on, the slot's count
+    // standing still for the 36 s before while the MP potion's fell: nothing in
+    // the log said what HP read, nor why the HP potion did not go. So the
+    // engine keeps the last kBlackBoxKeepMs of both, on its own clock: each
+    // vitals reading pushed, and each potion key's decision on each look at
+    // it -- recorded when the reason changes, and at every press.
+
+    /// What a look at a potion key decided.
+    enum class PotionWhy {
+        Pressed,        ///< the press went out
+        AboveMark,      ///< the reading is above the key's mark: nothing to drink
+        NoReading,      ///< no reading of its bar: none pushed, or older than 1.5 s
+        Cooling,        ///< at or under the mark, its interval (with jitter) not over since its last press
+        OtherTier,      ///< another key of its kind sits lower and is under its mark too: that one drinks
+        NotInFront,     ///< the game is not the window in front (require_focus)
+        NotInWorld,     ///< the macro is suspended: the character is not in the world
+        KeysHeld,       ///< something of GoBot's holds the game -- a chat line, a revive: which, with it
+        KeysBusy,       ///< another job had the keys that moment (tried again 30 ms on)
+        KeyFailed,      ///< the key did not go out
+        BehindHp,       ///< an MP potion waiting while the HP potion waits for the keys
+    };
+    /// "pressed", "above the mark", "no reading", "cooling", "other tier",
+    /// "game not in front", "not in the world", "keys held", "keys busy",
+    /// "key failed", "behind the HP potion".
+    static const char* potion_why_name(PotionWhy why);
+
+    /// The black box, for the log right after "ALERT death": the last
+    /// kBlackBoxMs up to now on the engine's clock, in at most kBlackBoxLines
+    /// lines of at most kBlackBoxLineChars characters, times in seconds before
+    /// now. The first line is HP and MP as read -- every change of the last
+    /// 5 s, and before that the lowest HP of each 2 s; then a line for each
+    /// potion key, HP's first, of its decisions -- each run of one reason with
+    /// how long it lasted, every press marked; and a last line of the presses
+    /// of each. A key by its name and mark only, never a label the player
+    /// typed. Empty when nothing was recorded. From any thread.
+    std::vector<std::string> black_box_lines() const;
+    static constexpr std::uint64_t kBlackBoxMs = 30'000;
+    /// Kept for longer than it says: a death is alerted up to 3 s after HP
+    /// read 0.
+    static constexpr std::uint64_t kBlackBoxKeepMs = 45'000;
+    /// At most this many records are kept, vitals and decisions together.
+    static constexpr std::size_t kBlackBoxMax = 600;
+    static constexpr std::size_t kBlackBoxLines = 8;
+    static constexpr std::size_t kBlackBoxLineChars = 600;
+    /// Records in the black box now, for tests.
+    std::size_t black_box_size() const;
+
 private:
     void timer_loop();
     /// One pass over the timed keys at `now`: the timer thread's, and step()'s.
@@ -532,6 +587,12 @@ private:
     /// Once a minute while anything was pressed or held: one line of what the
     /// skills did. From the keys as they are now, which the tallies follow.
     void log_skills(std::uint64_t now);
+    /// Once a minute while a potion key was pressed, or held for anything but
+    /// its reading being above the mark: one line of what each potion key did
+    /// -- presses, and the seconds spent in each reason, which add up to the
+    /// minute. "Potions: HP key 1 (under 60%): 5 pressed; 48.3 s above the
+    /// mark, 11.7 s cooling | MP key 2 (under 58%): ...".
+    void log_potions(std::uint64_t now);
     /// Every key's first due time, from `now`.
     void arm(std::uint64_t now);
     /// recast_buffs, now, the character being in the world.
@@ -586,9 +647,6 @@ private:
     /// cooldown, not its reaction time. Also the beat at which the held
     /// counters count, and a skill held by a gate is looked at again.
     static constexpr std::uint32_t kGatePollMs = 100;
-
-    /// A reading older than this is treated as absent.
-    static constexpr std::uint64_t kVitalsStaleMs = 1500;
 
     InputManager&         input_;
     ExecutionCoordinator& coord_;
@@ -700,6 +758,52 @@ private:
 
     mutable std::mutex stats_mutex_;
     Stats              stats_;
+
+    // ---- the black box: under box_mutex_, which is taken with no other lock
+    // of the engine's held, and holds none of them ----
+    struct BoxVitals {
+        std::uint64_t t = 0;
+        int           hp = -1, mp = -1;     ///< rounded percent; -1 no reading
+    };
+    struct BoxDecision {
+        std::uint64_t t = 0;
+        std::uint64_t key = 0;              ///< which key (key_ids_)
+        std::uint32_t keycode = 0;
+        int           mark = 0;             ///< its threshold, percent
+        bool          hp = true;            ///< an HP potion, or an MP one
+        PotionWhy     why = PotionWhy::AboveMark;
+        std::string   text;                 ///< for KeysHeld: what holds the game
+    };
+    /// A potion key's minute, for log_potions: its presses, and how long it
+    /// spent in each reason, from its decisions as they change.
+    struct PotionMinute {
+        std::uint32_t keycode = 0;
+        int           mark = 0;
+        bool          hp = true;
+        std::uint64_t presses = 0;
+        std::uint64_t ms[static_cast<int>(PotionWhy::BehindHp) + 1] = {};
+        PotionWhy     why = PotionWhy::AboveMark;     ///< the reason now, since `since`
+        std::string   text;
+        std::string   held_by;          ///< what last held the keys, for KeysHeld
+        std::uint64_t since = 0;
+        bool          active = false;   ///< pressed, or held for anything but above the mark, this minute
+    };
+    /// Records a vitals reading pushed at `t`, when it says something new.
+    void box_vitals(std::uint64_t t, float hp_pct, float mp_pct);
+    /// Records a potion key's decision at `t`: when its reason or its text
+    /// changed since its last, and every press.
+    void box_decide(std::uint64_t t, std::uint64_t key, const MacroKey& k, bool hp, PotionWhy why,
+                    const std::string& text = {});
+    void box_trim(std::uint64_t now);   ///< box_mutex_ held
+    mutable std::mutex       box_mutex_;
+    std::deque<BoxVitals>    box_vitals_;
+    std::deque<BoxDecision>  box_decisions_;
+    BoxVitals                box_last_vitals_;
+    bool                     box_have_vitals_ = false;
+    /// Each key's last decision recorded, and its minute so far.
+    std::map<std::uint64_t, std::pair<PotionWhy, std::string>> box_last_;
+    std::map<std::uint64_t, PotionMinute> potion_minute_;
+    std::uint64_t            potion_log_ms_ = 0;
 };
 
 } // namespace gobot

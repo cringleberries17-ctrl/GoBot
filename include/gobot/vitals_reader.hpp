@@ -5,7 +5,9 @@
 #include "gobot/screen_capture.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -56,6 +58,24 @@ public:
     /// and from the length of the coloured part when they are not.
     float hp_percent() const { return hp_.load(); }
     float mp_percent() const { return mp_.load(); }
+
+    /// When the bars were last read, on now_ms()'s clock; 0 before the first
+    /// read. A grab that fails, or no game window, leaves it where it was --
+    /// and hp_percent() and mp_percent() with it, at what they read then.
+    std::uint64_t last_read_ms() const { return read_at_ms_.load(); }
+
+    /// `pct`, read at `read_at_ms`, as it is to be acted on at `at_ms`:
+    /// itself while it is `within_ms` old or less, otherwise -1, no reading.
+    /// A reader whose grabs have stopped working keeps its last values; pushed
+    /// on to the macro as fresh, they hold the HP potion back as above its
+    /// mark on a number nobody read, and the black box shows a steady HP that
+    /// was not read at all (R8R-3).
+    static float if_fresh(float pct, std::uint64_t read_at_ms, std::uint64_t at_ms, std::uint64_t within_ms);
+
+    /// Grabs that failed at `since_ms` or after, on now_ms()'s clock -- of the
+    /// last kFailuresKept -- for the log after a death.
+    std::size_t failures_since(std::uint64_t since_ms) const;
+    static constexpr std::size_t kFailuresKept = 256;
 
     /// The figures the game prints across its bars. -1 for any it could not
     /// read, which is also what they are before the first successful read.
@@ -193,6 +213,7 @@ private:
     std::atomic<bool>  auto_relocate_{true};
     std::atomic<float> hp_{-1.0f};
     std::atomic<float> mp_{-1.0f};
+    std::atomic<std::uint64_t> read_at_ms_{0};
     std::thread        thread_;
 
     int           disagreements_ = 0;
@@ -247,6 +268,9 @@ private:
 
     mutable std::mutex stats_mutex_;
     Stats              stats_;
+    /// When each of the last kFailuresKept grabs that failed did, under
+    /// stats_mutex_.
+    std::deque<std::uint64_t> failed_at_;
 };
 
 } // namespace gobot

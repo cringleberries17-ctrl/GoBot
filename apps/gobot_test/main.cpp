@@ -4002,7 +4002,220 @@ void test_party_chat() {
         check(!PartyChat::echoes("[Kenh]Someone : tuyen thu pt", "tim pt"),
               "while a long line holding its letters in order is not it");
         check(!PartyChat::echoes("[Kenh]Someone : pt", "pt"),
-              "and a line of ours that is only the keyword cannot be told from a request");
+              "and echoes alone cannot tell a line of ours that is only the keyword from a request -- own_line can");
+    }
+
+    // The player's own lines, whatever their length, are never requests
+    // (PartyChat::own_line): on 2026-10-20 a Tự chat line that was just the
+    // keyword came back as the player asking. An invented name, MyChar.
+    {
+        PartyChat::Settings s;      // keyword "pt"
+        const std::string me = "MyChar";
+        using Typed = std::vector<std::pair<std::string, std::uint64_t>>;
+        const Typed none;
+        const std::uint64_t now = 10'000'000;
+        const Typed pt30 = { { "pt", now - 30'000 } }, pt61 = { { "pt", now - 61'000 } };
+        check(PartyChat::own_line("[Kenh]MyChar : pt", me, none, now, s) &&
+                  PartyChat::own_line("[Kenh]MyChar : tim pt lv 50", me, none, now, s),
+              "said by the player's own character: ours, the keyword alone or a longer line, nothing typed on record");
+        check(PartyChat::own_line("l l KenhlMyChar pt", me, none, now, s),
+              "and with the colon lost and the reader's mess in front");
+        check(PartyChat::own_line("[Kenh]MyCha : pt", me, none, now, s),
+              "and with a letter of the name dropped by the reader");
+        check(!PartyChat::own_line("[Kenh]Someone : pt", me, none, now, s),
+              "somebody else's keyword, nothing typed: a request");
+        check(!PartyChat::own_line("[Kenh]TuanAnh : pt", "Anh", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Anh2 : pt", "Anh", none, now, s) &&
+                  PartyChat::own_line("[Kenh]Anh : pt", "Anh", none, now, s),
+              "a short name only exactly: TuanAnh and Anh2 are not Anh, Anh is");
+        check(PartyChat::own_line("[Kenh]anh : pt", "lanh", none, now, s),
+              "a name that starts with l, whose l the reader's cleaning ate, is still the player's");
+        check(!PartyChat::own_line("[Kenh]Someone : pt", "", none, now, s),
+              "no name set on Đánh quái: the speaker never makes a line ours");
+        check(PartyChat::own_line("[Kenh]Someone : pt", "", pt30, now, s) &&
+                  !PartyChat::own_line("[Kenh]Someone : pt", "", pt61, now, s),
+              "the keyword typed by GoBot 30 s ago: a line of just the keyword is ours, whoever it reads as; "
+              "61 s ago, one line on its own no longer says so -- without_own carries it on (below)");
+        check(!PartyChat::own_line("[Kenh]Someone : cho pt voi", "", pt30, now, s),
+              "but a sentence with the keyword in it is a request all the same");
+        const std::string advert = "tuyen pt lv 50 ban do gia re";
+        check(PartyChat::own_line("[Kenh]Someone : tuyen pt lv 50 ban do gia re", "",
+                                  Typed{ { advert, now - 20 * 60'000ull } }, now, s) &&
+                  !PartyChat::own_line("[Kenh]Someone : tuyen pt lv 50 ban do gia re", "",
+                                       Typed{ { advert, now - 31 * 60'000ull } }, now, s),
+              "a long advert of ours read back: ours 20 minutes on, not 31");
+        check(PartyChat::own_line("[Kenh]MyChar2 : pt", me, none, now, s),
+              "the cost, as told to the player: a name ours give or take one letter counts as ours");
+        // End to end: what reaches the votes. The player's own keyword line,
+        // seen on three looks, never makes a requester; somebody else's does.
+        PartyChat chat;
+        std::vector<std::string> asked;
+        for (int i = 0; i < 3; ++i) {
+            const std::uint64_t t = now + 150ull * static_cast<std::uint64_t>(i);
+            const auto lines = chat.without_own({ "[Kenh]MyChar : pt", "[Kenh]Someone : pt" }, me, none, t);
+            for (const std::string& who : chat.saw(lines, t)) asked.push_back(who);
+        }
+        check(asked.size() == 1 && asked[0] == "Someone",
+              "three looks at both lines: Someone asks, the player's own line never");
+#ifdef GOBOT_SOURCE_DIR
+        // The party worker goes by it, not by echoes alone.
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::size_t loop = src.find("void GuiApp::party_loop()");
+        const std::size_t own = src.find("chat.without_own(lines", loop);
+        const std::size_t saw = src.find("chat.saw(lines", loop);
+        check(loop != std::string::npos && own != std::string::npos && saw != std::string::npos && own < saw,
+              "gui_app.cpp: party_loop takes the player's own lines out (without_own) before the votes");
+#endif
+    }
+
+    // The keyword GoBot typed stays on the chat for minutes: on 2026-10-20 it
+    // was still the top line 2 and 3 minutes after it was typed, and was taken
+    // for the player asking 193 s after (R8R-1). Through the party worker's
+    // steps on every look -- without_own, then the votes -- a look every
+    // 200 ms. Invented names.
+    {
+        PartyChat::Settings s;      // keyword "pt", 3 votes, 30 s cooldown
+        using Typed = std::vector<std::pair<std::string, std::uint64_t>>;
+        const std::uint64_t typed_at = 50'000'000;
+        const Typed typed = { { "pt", typed_at } };
+        // The first look, in ms after the keyword was typed, at which somebody
+        // is taken for asking -- and who; -1 never. `on_chat` is what the chat
+        // shows at a time.
+        struct Asked {
+            long long at = -1;
+            std::string who;
+        };
+        const auto first_ask = [&](PartyChat& chat, const std::function<std::vector<std::string>(std::uint64_t)>& on_chat,
+                                   const std::string& own, const Typed& said, std::uint64_t from_ms,
+                                   std::uint64_t to_ms) {
+            Asked a;
+            for (std::uint64_t t = typed_at + from_ms; t < typed_at + to_ms; t += 200) {
+                const auto lines = chat.without_own(on_chat(t), own, said, t);
+                const auto who = chat.saw(lines, t);
+                if (!who.empty()) {
+                    a.at = static_cast<long long>(t - typed_at);
+                    a.who = who[0];
+                    return a;
+                }
+            }
+            return a;
+        };
+        const auto fresh = [&] {
+            PartyChat c;
+            c.set_settings(s);
+            return c;
+        };
+        const auto only = [](const char* line) {
+            return [line](std::uint64_t) { return std::vector<std::string>{ line }; };
+        };
+        {
+            PartyChat chat = fresh();
+            const Asked a = first_ask(chat, only("[Kenh]MyChar : pt"), "", typed, 1000, 240'000);
+            check(a.at < 0, "no name set: the player's own keyword line on the chat from 1 s to 240 s after GoBot "
+                            "typed it is never taken for asking" +
+                                (a.at < 0 ? std::string() : " -- taken at " + std::to_string(a.at) + " ms"));
+        }
+        {
+            PartyChat chat = fresh();
+            const Asked a = first_ask(chat, only("[Kenh]Mlnh : pt"), "Minh", typed, 1000, 240'000);
+            PartyChat other = fresh();
+            const Asked b = first_ask(other, only("[Kenh]MvChor : pt"), "MyChar", typed, 1000, 240'000);
+            check(a.at < 0 && b.at < 0,
+                  "nor with a four-letter name read a letter wrong, nor a six-letter one read two letters wrong");
+        }
+        {
+            // A quiet channel: nothing said after it for 40 minutes, the line
+            // still the last on the chat.
+            PartyChat chat = fresh();
+            const Asked a = first_ask(chat, only("[Kenh]MyChar : pt"), "", typed, 1000, 40 * 60'000);
+            check(a.at < 0, "nor 40 minutes on, in a channel where nothing else was said");
+        }
+        {
+            // Somebody else's bare keyword after the first minute is asking:
+            // the player's line is told by the speaker it was read with.
+            PartyChat chat = fresh();
+            const auto shows = [](std::uint64_t t) {
+                std::vector<std::string> lines = { "[Kenh]MyChar : pt" };
+                if (t >= typed_at + 90'000) lines.push_back("[Kenh]Someone : pt");
+                return lines;
+            };
+            const Asked a = first_ask(chat, shows, "", typed, 1000, 240'000);
+            check(a.who == "Someone" && a.at >= 90'000 && a.at < 91'000,
+                  "somebody else's keyword alone, 90 s after GoBot typed it, the player's still on the chat: "
+                  "Someone asks, on the third look");
+        }
+        {
+            // The party worker started 2 minutes after the line was typed: it
+            // never saw the line's first minute, and has nothing to tell the
+            // player's line by -- so a bare keyword is passed over, until GoBot
+            // types it again and the worker sees that line in its first minute.
+            PartyChat chat = fresh();
+            const auto before = [](std::uint64_t t) {
+                std::vector<std::string> lines = { "[Kenh]MyChar : pt" };
+                if (t >= typed_at + 150'000) lines.push_back("[Kenh]Someone : pt");
+                return lines;
+            };
+            const Asked late = first_ask(chat, before, "", typed, 120'000, 300'000);
+            const Typed again = { { "pt", typed_at }, { "pt", typed_at + 300'000 } };
+            const auto after_it = [](std::uint64_t t) {
+                std::vector<std::string> lines = { "[Kenh]MyChar : pt" };
+                if (t >= typed_at + 380'000) lines.push_back("[Kenh]Someone : pt");
+                return lines;
+            };
+            const Asked after = first_ask(chat, after_it, "", again, 300'200, 480'000);
+            check(late.at < 0 && after.who == "Someone" && after.at >= 380'000 && after.at < 381'000,
+                  "the worker started 2 minutes late: nobody's bare keyword taken for asking until GoBot typed the "
+                  "keyword again and saw its line; then Someone saying it asks");
+        }
+        {
+            // Somebody saying the keyword alone in the first minute is taken
+            // for the player too, while that line stays on the chat; once it
+            // has been off the chat a minute of looks, they ask as anybody.
+            PartyChat chat = fresh();
+            const auto shows = [](std::uint64_t t) {
+                if (t < typed_at + 40'000) return std::vector<std::string>{ "[Kenh]MyChar : pt", "[Kenh]Someone : pt" };
+                if (t < typed_at + 200'000) return std::vector<std::string>{ "[Kenh]Other : hello", "[Kenh]Other : hi" };
+                return std::vector<std::string>{ "[Kenh]Other : hi", "[Kenh]Someone : pt" };
+            };
+            const Asked a = first_ask(chat, shows, "", typed, 1000, 300'000);
+            check(a.who == "Someone" && a.at >= 200'000 && a.at < 201'000,
+                  "somebody's bare keyword in the first minute: passed over while it is on the chat, and asking "
+                  "when they say it again after it has been gone a minute");
+        }
+        {
+            // The chat out of sight -- nothing read -- for three minutes does
+            // not make the player's line forgotten.
+            PartyChat chat = fresh();
+            const auto shows = [](std::uint64_t t) {
+                if (t >= typed_at + 5'000 && t < typed_at + 200'000) return std::vector<std::string>{};
+                return std::vector<std::string>{ "[Kenh]MyChar : pt" };
+            };
+            const Asked a = first_ask(chat, shows, "", typed, 1000, 300'000);
+            check(a.at < 0 && chat.own_speakers().size() == 1,
+                  "the chat out of sight for three minutes: the player's line, back in view, is still the player's");
+        }
+        {
+            // With a name set, a bare keyword from a speaker nothing like it is
+            // passed over in the first minute only, and not remembered.
+            PartyChat chat = fresh();
+            const auto both = [](std::uint64_t) {
+                return std::vector<std::string>{ "[Kenh]MyChar : pt", "[Kenh]Someone : pt" };
+            };
+            const Asked a = first_ask(chat, both, "MyChar", typed, 1000, 240'000);
+            const auto kept = chat.own_speakers();
+            check(a.who == "Someone" && a.at >= 60'000 && a.at < 61'000 && kept.size() == 1 && kept[0] == "mychar",
+                  "a name set: somebody unlike it saying the keyword alone in the first minute is passed over then, "
+                  "not remembered, and asking after");
+        }
+        {
+            // reset() forgets what was learned.
+            PartyChat chat = fresh();
+            chat.without_own({ "[Kenh]MyChar : pt" }, "", typed, typed_at + 1000);
+            const bool learned = chat.own_speakers().size() == 1;
+            chat.reset();
+            check(learned && chat.own_speakers().empty(), "the speaker taken for the player is forgotten by reset()");
+        }
     }
 
     // The voting. One reading is not enough; three agreeing is.
@@ -8973,7 +9186,13 @@ void test_hunter() {
     hunter.start();
     check(hunter.running(), "start() runs it");
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(220));
+    // Waited for, up to 5 s, rather than read after a fixed sleep: on a
+    // loaded machine its thread may not have had a turn in 220 ms.
+    const auto idle = [&] {
+        const auto s = hunter.status();
+        return s.state == Hunter::State::Unfocused || s.state == Hunter::State::NoPlayer;
+    };
+    for (int i = 0; i < 250 && !idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     const auto st = hunter.status();
     check(!st.has_target, "no target without a detector running");
     check(st.state == Hunter::State::Unfocused || st.state == Hunter::State::NoPlayer,
@@ -9049,6 +9268,12 @@ void fill(Frame& f, const ScreenRect& r, int red, int green, int blue) {
         for (int x = r.x; x < r.right(); ++x) put_px(f, x, y, red, green, blue);
 }
 
+/// How far the client prints a digit after the one before: its digits are 5
+/// pixels wide and 6 apart, a 1 included (3 pixels of ink at the left of its
+/// cell). Measured after a 1 on every saved bag and hotbar slot of the live
+/// client.
+constexpr int kDigitStep = 6;
+
 /// A number in the client's own digits, white with a dark outline, the way
 /// the game prints stack counts and quantity boxes.
 void print_number(Frame& f, int x, int y, const std::string& text, const std::string& font_dir) {
@@ -9069,7 +9294,7 @@ void print_number(Frame& f, int x, int y, const std::string& text, const std::st
                         put_px(f, x + gx, y + gy, 250, 250, 250);
                     }
                 }
-        x += g.width + 1;
+        x += kDigitStep;
     }
 }
 
@@ -9508,7 +9733,7 @@ void test_bag_counts() {
                             put_px(f, x + gx, s.y + 3 + gy, 250, 250, 250);
                         }
                     }
-            x += g.width + 1;
+            x += kDigitStep;
         }
         return std::make_pair(f, s);
     };
@@ -9583,14 +9808,9 @@ void test_bag_counts() {
         // where the client never draws it here -- over the middle of a digit,
         // or over a 6's first column, which leaves a 6 looking like a 3.
         // `column` is from the digit's left edge.
-        const auto digit_x = [&](const std::string& text, std::size_t i) {
-            int x = box.x + 7;                       // as box_with prints it
-            for (std::size_t k = 0; k < i; ++k) {
-                Frame g;
-                load_png(font_dir + "\\lower\\" + std::string(1, text[k]) + ".png", g);
-                x += g.width + 1;
-            }
-            return x;
+        const auto digit_x = [&](const std::string& /*text*/, std::size_t i) {
+            // As box_with prints it: kDigitStep from digit to digit.
+            return box.x + 7 + kDigitStep * static_cast<int>(i);
         };
         const auto caret_over = [&](const std::string& text, std::size_t digit, int column) {
             Frame f = box_with(text, false);
@@ -11713,6 +11933,35 @@ void test_screen_layout() {
     }
 }
 
+/// A macro engine on a clock of the test's own, with no game window to type
+/// into: never in front, so every press is refused at the focus check, as the
+/// real input with no window refuses it. `run(ms)` takes a pass of the timers
+/// every 10 ms of that clock, as the timer thread does -- so a check counts
+/// the test's time, never how much of a loaded CPU a thread got (R7b2-5: one
+/// of these failed once under heavy load, on the real threads and a 200-ms
+/// sleep).
+struct SteppedMacro {
+    InputManager         input;
+    ExecutionCoordinator coord;
+    MacroEngine          engine{ input, coord };
+    std::uint64_t        t = 5'000'000;
+
+    SteppedMacro() {
+        MacroEngine::Clock clock;
+        clock.now_ms = [this] { return t; };
+        clock.sleep_ms = [this](std::uint32_t ms) { t += ms; };
+        engine.set_clock(clock);
+        MacroEngine::Hands hands;
+        hands.focused = [] { return false; };
+        hands.key = [](std::uint32_t, int) { return true; };
+        engine.set_hands(hands);
+    }
+    ~SteppedMacro() { engine.stop(); }
+    void run(std::uint64_t ms) {
+        for (const std::uint64_t until = t + ms; t < until; t += 10) engine.step();
+    }
+};
+
 /// The gate between a reading and a key press.
 ///
 /// Runs with require_focus on, so nothing is actually typed anywhere: what is
@@ -11720,9 +11969,8 @@ void test_screen_layout() {
 void test_macro_triggers() {
     section("Macro triggers");
 
-    InputManager input;
-    ExecutionCoordinator coord;
-    MacroEngine engine(input, coord);
+    SteppedMacro rig;
+    MacroEngine& engine = rig.engine;
 
     MacroConfig cfg;
     cfg.apply_defaults();
@@ -11742,10 +11990,10 @@ void test_macro_triggers() {
     engine.current_vitals(hp, mp);
     check(hp < 0.0f && mp < 0.0f, "no reading before any is pushed");
 
-    engine.start();
+    engine.start_stepped();
 
     // 1. No reading at all: hold, and say which kind of hold it was.
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    rig.run(200);
     auto st = engine.stats();
     check(st.held_no_reading > 0, "holds when there is no reading");
     check(st.held_condition == 0, "does not call that a false condition");
@@ -11754,7 +12002,7 @@ void test_macro_triggers() {
     // 2. A reading above the threshold: hold, for the other reason.
     engine.set_vitals(90.0f, 90.0f);
     const std::uint64_t no_reading_before = st.held_no_reading;
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    rig.run(200);
     st = engine.stats();
     check(st.held_condition > 0, "holds while HP is above the threshold");
     check(st.held_no_reading == no_reading_before, "stops counting it as missing");
@@ -11764,7 +12012,7 @@ void test_macro_triggers() {
     //    the press is refused, which is exactly the counter that proves the
     //    gate opened.
     engine.set_vitals(20.0f, 90.0f);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    rig.run(200);
     st = engine.stats();
     check(st.skipped_unfocused > 0, "fires once HP drops below the threshold");
     check(st.presses == 0, "and still sends nothing without a focused window");
@@ -11776,13 +12024,15 @@ void test_macro_triggers() {
     //    drinking against a figure from a minute ago, so after the staleness
     //    window the engine reports no reading and goes back to holding.
     const std::uint64_t unfocused_before = st.skipped_unfocused;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+    const std::uint64_t t_before = rig.t;
+    rig.run(1800);
+    check(rig.t - t_before >= 1800, "(the pretend clock moved 1800 ms)");
     engine.current_vitals(hp, mp);
     check(hp < 0.0f, "a reading older than the staleness window is discarded");
 
     st = engine.stats();
     const std::uint64_t no_reading_at_expiry = st.held_no_reading;
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    rig.run(200);
     st = engine.stats();
     check(st.held_no_reading > no_reading_at_expiry, "and the key goes back to holding");
     check(st.skipped_unfocused > unfocused_before, "after having fired while fresh");
@@ -11795,9 +12045,9 @@ void test_macro_triggers() {
     cfg.keys[0].threshold_pct = 30;
     engine.set_config(cfg);
     engine.reset_stats();
-    engine.start();
+    engine.start_stepped();
     engine.set_vitals(20.0f, 90.0f);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    rig.run(200);
     st = engine.stats();
     check(st.held_condition > 0, "an MP key ignores HP");
     check(st.skipped_unfocused == 0, "and does not fire on it");
@@ -11806,13 +12056,11 @@ void test_macro_triggers() {
 
 /// The engine drives real SendInput, so these exercise what can be checked
 /// without a window to type into: that it starts and stops cleanly, and that
-/// it refuses to press anything when focus is required and absent.
+/// it refuses to press anything when focus is required and absent. What it
+/// counts is counted on the test's own clock (SteppedMacro); starting and
+/// stopping on the real threads, which assert no timing.
 void test_macro_engine() {
     section("Macro engine");
-
-    InputManager input;
-    ExecutionCoordinator coord;
-    MacroEngine engine(input, coord);
 
     MacroConfig cfg;
     cfg.apply_defaults();
@@ -11822,55 +12070,69 @@ void test_macro_engine() {
         k.enabled = true;
         k.interval_ms = 20;            // fire often, so the window is short
     }
-    engine.set_config(cfg);
 
-    check(!engine.running(), "starts stopped");
-    engine.start();
-    check(engine.running(), "start() runs it");
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(220));
-
-    const auto st = engine.stats();
-    check(st.presses == 0, "presses nothing with no focused window");
-    check(st.skipped_unfocused > 0, "counts the skipped presses instead of failing silently");
-
-    const auto due = engine.next_due_ms();
-    check(due.size() == cfg.keys.size(), "reports a due time per key");
-
-    // Suspending holds every key without stopping, and says so in the tally
-    // rather than letting an hour of nothing look like an hour of working.
-    //
-    // This is what stands between an overnight run and six hours of potion
-    // keys pressed at a disconnect dialog, so it is worth a test that does not
-    // depend on a window: with focus required and absent, nothing presses
-    // either way, but which counter moves says which rule did the holding.
     {
-        // Suspended first, and counted from a moment later: a press the
-        // timer thread had already taken past the suspend check when it was
-        // set still ends at the focus check, and counted from before, that
-        // one press read as the rule not holding.
-        engine.set_suspended(true, "testing");
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        engine.reset_stats();
-        check(engine.suspended(), "suspends");
-        check(engine.suspended_reason() == "testing", "and remembers why");
+        SteppedMacro rig;
+        MacroEngine& engine = rig.engine;
+        engine.set_config(cfg);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(220));
-        const auto held = engine.stats();
-        check(held.presses == 0, "presses nothing while suspended");
-        check(held.held_suspended > 0, "counts what it held back");
-        check(held.skipped_unfocused == 0,
-              "and holds before it ever gets as far as the focus check");
+        check(!engine.running(), "starts stopped");
+        engine.start_stepped();
+        check(engine.running(), "start() runs it");
 
-        engine.set_suspended(false);
-        check(!engine.suspended() && engine.suspended_reason().empty(),
-              "resumes, and forgets why it stopped");
+        rig.run(220);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(220));
-        check(engine.stats().skipped_unfocused > held.skipped_unfocused,
-              "and is trying again afterwards");
+        const auto st = engine.stats();
+        check(st.presses == 0, "presses nothing with no focused window");
+        check(st.skipped_unfocused > 0, "counts the skipped presses instead of failing silently");
+
+        const auto due = engine.next_due_ms();
+        check(due.size() == cfg.keys.size(), "reports a due time per key");
+
+        // Suspending holds every key without stopping, and says so in the
+        // tally rather than letting an hour of nothing look like an hour of
+        // working.
+        //
+        // This is what stands between an overnight run and six hours of
+        // potion keys pressed at a disconnect dialog, so it is worth a test
+        // that does not depend on a window: with focus required and absent,
+        // nothing presses either way, but which counter moves says which rule
+        // did the holding.
+        {
+            // Suspended first, and counted from a moment later, as on the
+            // real threads: a pass under way when it was set ends at the
+            // focus check.
+            engine.set_suspended(true, "testing");
+            rig.run(250);
+            engine.reset_stats();
+            check(engine.suspended(), "suspends");
+            check(engine.suspended_reason() == "testing", "and remembers why");
+
+            rig.run(220);
+            const auto held = engine.stats();
+            check(held.presses == 0, "presses nothing while suspended");
+            check(held.held_suspended > 0, "counts what it held back");
+            check(held.skipped_unfocused == 0,
+                  "and holds before it ever gets as far as the focus check");
+
+            engine.set_suspended(false);
+            check(!engine.suspended() && engine.suspended_reason().empty(),
+                  "resumes, and forgets why it stopped");
+
+            rig.run(220);
+            check(engine.stats().skipped_unfocused > held.skipped_unfocused,
+                  "and is trying again afterwards");
+        }
+        engine.stop();
     }
 
+    // On the real threads: nothing here waits on them to have done anything.
+    InputManager input;
+    ExecutionCoordinator coord;
+    MacroEngine engine(input, coord);
+    engine.set_config(cfg);
+    engine.start();
+    check(engine.running(), "start() runs it, on its own threads");
     engine.stop();
     check(!engine.running(), "stop() halts it");
 
@@ -12386,6 +12648,16 @@ struct PretendChat {
     int  stuck_ink = 0;        ///< something drawn this far into the open field that Backspace does not remove
     int  lag = 0;              ///< ms from a key's press to the game acting on it
     int  dialog_ms = 0;        ///< ms a look for the dialogs takes
+    int  draw_lag = 0;         ///< ms from a character going into the line to the game drawing it
+    int  drop_first = 0;       ///< the first this many Enters on the shut line do nothing
+    int  drop_every = 0;       ///< and every this many-th, from the first: 2 drops the 1st, 3rd, ...
+    int  ignore_first_letters = 0; ///< the first this many letters go in as nothing
+    int  caret_shift = 0;      ///< with ignore_text: each letter moves the caret this far, nothing more
+    int  px_per_char = 5;      ///< how far each character reaches in the field
+    int  shut_enters = 0;      ///< Enters that came to the shut line
+    int  caret_moved = 0;
+    std::vector<std::uint64_t> letter_at;              ///< when each character went in, for draw_lag
+    std::vector<std::pair<std::uint32_t, int>> holds;  ///< every key pressed, and its hold
     /// The pretend clock at which `to_cancel` is told to stop: DỪNG at a moment.
     std::uint64_t cancel_at = ~0ull;
     ChatSender*   to_cancel = nullptr;
@@ -12406,21 +12678,38 @@ struct PretendChat {
             if (!dialog.empty()) {
                 ++enters_with_dialog;
             } else if (state == State::Shut) {
-                if (!deaf) { state = State::Open; typed = draft; }
+                ++shut_enters;
+                const bool dropped = deaf || shut_enters <= drop_first ||
+                                     (drop_every > 0 && (shut_enters - 1) % drop_every == 0);
+                if (!dropped) { state = State::Open; typed = draft; }
             } else {
                 if (typed > 0) sent.push_back(typed);
                 typed = 0;
+                letter_at.clear();
+                caret_moved = 0;
                 if (!stays_open) state = State::Shut;
             }
             if (hide_after_enters >= 0 && enters >= hide_after_enters) hidden = true;
         } else if (vk == VK_BACK) {
             ++backspaces;
-            if (state == State::Open) { if (typed > 0) --typed; }
-            else ++keys_while_shut;
+            if (state == State::Open) {
+                if (typed > 0) --typed;
+                if (!letter_at.empty()) letter_at.pop_back();
+                caret_moved = 0;
+            } else {
+                ++keys_while_shut;
+            }
         } else {
             ++letters;
             if (state == State::Open) {
-                if (!ignore_text) ++typed;
+                if (ignore_first_letters > 0) {
+                    --ignore_first_letters;
+                } else if (!ignore_text) {
+                    ++typed;
+                    letter_at.push_back(clock);
+                } else {
+                    caret_moved += caret_shift;
+                }
                 if (shut_after >= 0 && letters >= shut_after) {
                     state = State::Shut;
                     if (hide_on_shut) hidden = true;
@@ -12466,10 +12755,18 @@ struct PretendChat {
             if (field_grey != 49)
                 fill(f, ScreenRect{ bx + 84, by + 3, 308, 15 }, field_grey, field_grey, field_grey);
             // A caret, and a mark for each character, so the field shows ink
-            // that grows with what was typed -- as far as the field goes.
-            for (int i = 0; i <= typed && 88 + i * 5 < 84 + 308; ++i)
+            // that grows with what was typed -- as far as the field goes. A
+            // character the game has not drawn yet (draw_lag) is not there.
+            int shown = typed;
+            if (draw_lag > 0)
+                for (const std::uint64_t at : letter_at)
+                    if (at + static_cast<std::uint64_t>(draw_lag) > clock) --shown;
+            shown = std::max(0, shown);
+            for (int i = 0; i <= shown && 88 + i * px_per_char < 84 + 308; ++i)
                 for (int y = by + 4; y < by + 17; ++y)
-                    put_px(f, bx + 88 + i * 5, y, 0, 0, 0);
+                    put_px(f, bx + 88 + i * px_per_char, y, 0, 0, 0);
+            if (caret_moved > 0 && 88 + caret_moved < 84 + 308)
+                for (int y = by + 4; y < by + 17; ++y) put_px(f, bx + 88 + caret_moved, y, 0, 0, 0);
             if (stuck_ink > 0)
                 for (int y = by + 4; y < by + 17; ++y) put_px(f, bx + 84 + stuck_ink - 1, y, 0, 0, 0);
         }
@@ -12485,6 +12782,7 @@ struct PretendChat {
         ChatSender::Hands h;
         h.key = [this](std::uint32_t vk, bool, int hold) -> bool {
             if (!focused) return false;
+            holds.emplace_back(vk, hold);
             if (lag > 0) queue.emplace_back(clock + static_cast<std::uint64_t>(lag), vk);
             else act(vk);
             if (after_key) after_key(vk);
@@ -12800,6 +13098,66 @@ void test_auto_chat() {
         std::remove(path.c_str());
     }
 
+    // ---- round 8: how the keys of a line go, set in chat.ini for the live
+    //      test of why the game took half of them on 2026-10-20 ----
+    {
+        const std::string path = temp_file("gobot_chat_keys.ini");
+        const auto write = [&](const std::string& bytes) {
+            std::ofstream o(path, std::ios::binary | std::ios::trunc);
+            o << bytes;
+        };
+        ChatSettings shipped_like;
+        check(shipped_like.hold_min_ms == 0 && shipped_like.hold_max_ms == 0 && shipped_like.enter_gap_ms == 750 &&
+                  shipped_like.quiet_before_ms == 300 && shipped_like.type_wait_ms == 0 &&
+                  shipped_like.max_enters == 2 && shipped_like.type_tries == 1 &&
+                  shipped_like.inject == InputManager::KeyInject::Vk,
+              "as shipped: each key its own hold, an Enter watched 750 ms, 300 ms quiet, no wait before typing, "
+              "2 Enters, 1 typing, vk -- what GoBot has always done");
+        write("[Chat]\nhold_min_ms=150\nhold_max_ms=250\nenter_gap_ms=1000\nquiet_before_ms=1500\n"
+              "type_wait_ms=200\nmax_enters=3\ntype_tries=2\ninject=scancode\n");
+        ChatSettings set;
+        check(set.load(path) && set.hold_min_ms == 150 && set.hold_max_ms == 250 && set.enter_gap_ms == 1000 &&
+                  set.quiet_before_ms == 1500 && set.type_wait_ms == 200 && set.max_enters == 3 &&
+                  set.type_tries == 2 && set.inject == InputManager::KeyInject::Scancode,
+              "each read back as written");
+        write("[Chat]\nhold_min_ms=5\nhold_max_ms=9000\nenter_gap_ms=10\nquiet_before_ms=-3\n"
+              "type_wait_ms=99999\nmax_enters=9\ntype_tries=0\ninject=paste\n");
+        ChatSettings wild;
+        check(wild.load(path) && wild.hold_min_ms == 10 && wild.hold_max_ms == ChatSettings::kMaxHold &&
+                  wild.enter_gap_ms == 250 && wild.quiet_before_ms == 0 && wild.type_wait_ms == 3000 &&
+                  wild.max_enters == ChatSettings::kMaxEnters && wild.type_tries == 1 &&
+                  wild.inject == InputManager::KeyInject::Vk,
+              "out of range: brought into range, and an inject it does not know is vk");
+        write("[Chat]\nhold_min_ms=200\n");
+        ChatSettings one;
+        check(one.load(path) && one.hold_min_ms == 200 && one.hold_max_ms == 200, "one hold set alone: a fixed hold");
+        write("[Chat]\nenabled=false\n");
+        ChatSettings none;
+        check(none.load(path) && none.hold_max_ms == 0 && none.enter_gap_ms == 750 && none.quiet_before_ms == 300 &&
+                  none.max_enters == 2 && none.type_tries == 1 && none.inject == InputManager::KeyInject::Vk,
+              "absent: as shipped");
+        std::remove(path.c_str());
+#ifdef GOBOT_SOURCE_DIR
+        ChatSettings file;
+        check(file.load(std::string(GOBOT_SOURCE_DIR) + "/configs/chat.ini") && file.hold_min_ms == 0 &&
+                  file.hold_max_ms == 0 && file.enter_gap_ms == 750 && file.quiet_before_ms == 300 &&
+                  file.type_wait_ms == 0 && file.max_enters == 2 && file.type_tries == 1 &&
+                  file.inject == InputManager::KeyInject::Vk,
+              "the shipped chat.ini names each, at what GoBot has always done");
+#endif
+        // The scan code alone, as GoC sends keys -- built, not sent.
+        const InputManager::KeyEvent sd = InputManager::typed_key_event('A', true, InputManager::KeyInject::Scancode);
+        const InputManager::KeyEvent su = InputManager::typed_key_event('A', false, InputManager::KeyInject::Scancode);
+        const InputManager::KeyEvent vd = InputManager::typed_key_event('A', true, InputManager::KeyInject::Vk);
+        const std::uint16_t scan = static_cast<std::uint16_t>(MapVirtualKeyA('A', MAPVK_VK_TO_VSC));
+        check(sd.vk == 0 && sd.scan == scan && scan != 0 && (sd.flags & KEYEVENTF_SCANCODE) != 0 &&
+                  (sd.flags & KEYEVENTF_KEYUP) == 0 && su.vk == 0 && (su.flags & KEYEVENTF_SCANCODE) != 0 &&
+                  (su.flags & KEYEVENTF_KEYUP) != 0,
+              "inject=scancode: no key code, the scan code, KEYEVENTF_SCANCODE, down and up");
+        check(vd.vk == 'A' && vd.scan == scan && (vd.flags & KEYEVENTF_SCANCODE) == 0,
+              "inject=vk: the key code with its scan code, as always");
+    }
+
     // ---- the method names round-trip, and paste is not one ----
     {
         bool all = true;
@@ -12923,19 +13281,19 @@ void test_auto_chat() {
     }
 
     // Stopped in the middle of typing: what was typed is rubbed out and the
-    // line closed, never sent.
+    // line closed, never sent. (The guard by what the pretend game has seen,
+    // not by how often it is asked: it is asked through every wait too.)
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
         auto sender = make_sender(g);
-        int calls = 0;
-        sender->set_guard([&calls]() -> std::string {
-            return ++calls > 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
+        sender->set_guard([&g]() -> std::string {
+            return g.letters >= 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
         });
         const ChatText line = prepare_chat("abcdefghij", ChatMethod::Vk, true, 60);
         const ChatSender::Result r = sender->send(line);
-        check(!r.sent && !r.left_open && g.sent.empty(),
-              "stopped mid-line: nothing sent and the line not left open");
+        check(!r.sent && !r.left_open && g.sent.empty() && g.letters == 3,
+              "stopped mid-line, three letters in: nothing sent and the line not left open");
         check(g.state == PretendChat::State::Shut && g.typed == 0,
               "what was typed is rubbed out and the line closed");
     }
@@ -13234,9 +13592,8 @@ void test_auto_chat() {
         PretendChat g;
         g.store = &store; g.settings = &settings;
         auto sender = make_sender(g);
-        int calls = 0;
-        sender->set_guard([&calls]() -> std::string {
-            return ++calls > 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
+        sender->set_guard([&g]() -> std::string {
+            return g.letters >= 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
         });
         const ChatSender::Result r = sender->send(line_of("abcdefghij"));
         check(!r.sent && r.aborted && r.wait_ms > 0, "HP falling mid-line: put off, not failed");
@@ -13465,6 +13822,289 @@ void test_auto_chat() {
         check(s->check_left_open(&why) == ChatSender::LeftOpen::Unseen && !why.empty(), "out of sight: unseen");
         check(g.enters == 0 && g.backspaces == 0 && g.letters == 0, "and looking presses nothing");
     }
+
+    // ---- round 8: a game that takes the keys late, or drops them -- Tự chat
+    //      on 2026-10-20 got 7 of 13 Enters and 4 of 6 typed lines through ----
+    const auto sender_with = [&](PretendChat& g, const ChatSettings& s) {
+        auto sender = make_sender(g);
+        sender->set_settings(s);
+        return sender;
+    };
+    {
+        // Drawn 400 ms after it went in: the field is looked at again before
+        // it is called empty, and the line goes.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.draw_lag = 400;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && g.sent.size() == 1 && g.sent[0] == 4 && r.trace.after.size() >= 2,
+              "the game drawing the typed text 400 ms late: looked at again, and sent -- " + chat_trace_line(r.trace));
+    }
+    {
+        // Nothing drawn at all: given up a little over a second after the
+        // last key, the line rubbed out and shut, no Backspace into it shut.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.ignore_text = true;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        const int waited = r.trace.after.empty() ? -1 : r.trace.after.back().first;
+        check(!r.sent && g.sent.empty() && g.state == PretendChat::State::Shut && g.keys_while_shut == 0 &&
+                  r.trace.outcome == "no_text" && r.trace.after.size() == 3 && waited > 0 && waited <= 1200,
+              "nothing drawn: three looks, the last " + std::to_string(waited) +
+                  " ms after the last key, then not sent, rubbed out and shut, nothing pressed into it shut");
+    }
+    {
+        // Narrow letters: i and l are a pixel wide with one between them.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.px_per_char = 2;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("lil"));
+        check(r.sent && g.sent.size() == 1 && g.sent[0] == 3, "'lil', two pixels a letter, is taken for text and sent");
+    }
+    {
+        // A caret moving 4 px is no letter.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.ignore_text = true;
+        g.caret_shift = 4;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("a"));
+        check(!r.sent && g.sent.empty() && r.trace.outcome == "no_text",
+              "one letter that shows only as the caret 4 px on: not taken for text, not sent");
+    }
+    {
+        // The trace of a line that needed a second Enter: each Enter's hold
+        // and the looks after it, and none of the line's words.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.drop_first = 1;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("hello there"));
+        const std::string t = chat_trace_line(r.trace);
+        bool first_shut = r.trace.enters.size() == 2 && r.trace.enters[0].looks.size() >= 3;
+        if (first_shut)
+            for (const auto& look : r.trace.enters[0].looks) first_shut = first_shut && look.second == ChatBarState::Closed;
+        check(r.sent && first_shut && !r.trace.enters[1].looks.empty() &&
+                  r.trace.enters[1].looks.back().second == ChatBarState::Open && t.rfind("Chat trace: Enter 1 held ", 0) == 0 &&
+                  t.find("; Enter 2 held ") != std::string::npos && t.find(" shut") != std::string::npos &&
+                  t.find(" open") != std::string::npos && t.find("11 keys typed in 1 try, held 50 ms (vk)") != std::string::npos &&
+                  t.find("; sent") != std::string::npos && t.find("hello") == std::string::npos &&
+                  t.find("there") == std::string::npos,
+              "the trace of a line that took two Enters: " + t);
+        PretendChat d;
+        d.store = &store; d.settings = &settings;
+        d.ignore_text = true;
+        auto deaf_sender = make_sender(d);
+        const ChatSender::Result n = deaf_sender->send(line_of("hello there"));
+        const std::string nt = chat_trace_line(n.trace);
+        check(!n.sent && nt.find("after the last key: +") != std::string::npos &&
+                  nt.find("; no_text") != std::string::npos && nt.find("hello") == std::string::npos,
+              "and of one the game showed nothing of: " + nt);
+    }
+    {
+        // Every key held as chat.ini says, letters and Backspace too; as
+        // shipped, each its own.
+        ChatSettings s = settings;
+        s.hold_min_ms = 150;
+        s.hold_max_ms = 250;
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.ignore_first_letters = 4;     // so that rubbing out and a second Enter come into it too
+        auto sender = sender_with(g, s);
+        sender->send(line_of("test"));
+        bool in = !g.holds.empty();
+        bool letters = false, backspaces = false;
+        for (const auto& [key_vk, held] : g.holds) {
+            in = in && held >= 150 && held <= 250;
+            letters = letters || (key_vk != VK_RETURN && key_vk != VK_BACK);
+            backspaces = backspaces || key_vk == VK_BACK;
+        }
+        check(in && letters && backspaces,
+              "hold_min_ms=150, hold_max_ms=250: every one of " + std::to_string(g.holds.size()) +
+                  " keys held 150-250 ms, Enter, Backspace and letters alike");
+        PretendChat d;
+        d.store = &store; d.settings = &settings;
+        auto plain = make_sender(d);
+        plain->send(line_of("test"));
+        bool as_ever = !d.holds.empty();
+        for (std::size_t i = 0; i < d.holds.size(); ++i) {
+            const auto [key_vk, held] = d.holds[i];
+            if (key_vk == VK_RETURN) as_ever = as_ever && (i == 0 ? held >= 60 && held <= 130 : held == 50);
+            else if (key_vk == VK_BACK) as_ever = as_ever && ((held >= 40 && held <= 70) || held == 25);
+            else as_ever = as_ever && held == 50;
+        }
+        check(as_ever, "as shipped: the opening Enter 60-130 ms, letters and the sending Enter 50, Backspace 40-70");
+    }
+    {
+        // An Enter dropped every other press: opens with the second.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.drop_every = 2;
+        auto sender = make_sender(g);
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && r.trace.enters.size() == 2 && g.sent.size() == 1,
+              "the game dropping every other Enter: opened with the second, and sent");
+        // Deaf to Enter: two pressed, as shipped, then not opened.
+        PretendChat d;
+        d.store = &store; d.settings = &settings;
+        d.deaf = true;
+        auto deaf_sender = make_sender(d);
+        const ChatSender::Result n = deaf_sender->send(line_of("test"));
+        check(!n.sent && n.left_open && n.typed == 0 && d.enters == 2 && n.trace.outcome == "not_opened" &&
+                  n.trouble.find("2 lần") != std::string::npos,
+              "deaf to Enter: two pressed, nothing typed, not opened -- " + n.trouble);
+        // max_enters 3, the first two dropped: opens with the third.
+        ChatSettings three = settings;
+        three.max_enters = 3;
+        PretendChat t;
+        t.store = &store; t.settings = &settings;
+        t.drop_first = 2;
+        auto third = sender_with(t, three);
+        const ChatSender::Result r3 = third->send(line_of("test"));
+        check(r3.sent && r3.trace.enters.size() == 3, "max_enters=3, the first two Enters dropped: opened with the third");
+        // max_enters 1, the first dropped: not opened after the one.
+        ChatSettings one = settings;
+        one.max_enters = 1;
+        PretendChat o;
+        o.store = &store; o.settings = &settings;
+        o.drop_first = 1;
+        auto single = sender_with(o, one);
+        const ChatSender::Result r1 = single->send(line_of("test"));
+        check(!r1.sent && o.enters == 1 && r1.trouble.find("1 lần") != std::string::npos,
+              "max_enters=1, the first dropped: not opened after one Enter -- " + r1.trouble);
+    }
+    {
+        // A game that takes nothing of the first typing: with type_tries 1
+        // the line is not sent; with 2 it goes on the second -- once.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.ignore_first_letters = 4;
+        auto once = make_sender(g);
+        const ChatSender::Result r = once->send(line_of("test"));
+        check(!r.sent && g.sent.empty() && r.trace.outcome == "no_text",
+              "the first typing taken as nothing, type_tries=1: not sent");
+        ChatSettings two = settings;
+        two.type_tries = 2;
+        PretendChat h;
+        h.store = &store; h.settings = &settings;
+        h.ignore_first_letters = 4;
+        auto twice = sender_with(h, two);
+        const ChatSender::Result r2 = twice->send(line_of("test"));
+        check(r2.sent && h.sent.size() == 1 && h.sent[0] == 4 && r2.trace.tries == 2,
+              "type_tries=2: typed again into the empty line, and the line goes with the text once");
+        // Deaf to text for good: two tries, then not sent, tidied.
+        PretendChat d;
+        d.store = &store; d.settings = &settings;
+        d.ignore_text = true;
+        auto deaf_sender = sender_with(d, two);
+        const ChatSender::Result n = deaf_sender->send(line_of("test"));
+        check(!n.sent && n.trace.tries == 2 && d.sent.empty() && d.state == PretendChat::State::Shut &&
+                  d.keys_while_shut == 0,
+              "type_tries=2, nothing ever drawn: two tries, not sent, the line shut, nothing pressed into it shut");
+        // Drawn late, with a second try allowed: the late text is taken, and
+        // there is no second try to double it.
+        PretendChat l;
+        l.store = &store; l.settings = &settings;
+        l.draw_lag = 400;
+        auto late = sender_with(l, two);
+        const ChatSender::Result rl = late->send(line_of("test"));
+        check(rl.sent && rl.trace.tries == 1 && l.sent.size() == 1 && l.sent[0] == 4,
+              "type_tries=2 and the text drawn 400 ms late: taken on a later look, never typed twice");
+    }
+
+    // ---- round 8 (R8R-2): chat.ini's waits are spent with the potions held
+    //      off -- the pause before a line up to 5 s, the Enter's watch and the
+    //      type wait up to 3 s each. HP falling under the potion's mark ends
+    //      each at once, as it does between keys ----
+    {
+        std::uint64_t t = 0;
+        const auto sleep = [&t](int ms) { t += static_cast<std::uint64_t>(std::max(0, ms)); };
+        const auto low_from = [&t](std::uint64_t at) {
+            return [&t, at]() -> std::string { return t >= at ? std::string("Máu thấp") : std::string(); };
+        };
+        const std::string why = chat_quiet_pause(5000, low_from(1000), sleep);
+        check(why == "Máu thấp" && t >= 1000 && t <= 1000 + 100,
+              "quiet_before_ms=5000, HP under the mark 1 s in: the pause, and the hold with it, ends " +
+                  std::to_string(t >= 1000 ? t - 1000 : 0) + " ms after");
+        t = 0;
+        check(chat_quiet_pause(5000, low_from(~0ull), sleep).empty() && t == 5000,
+              "nothing in the way: the whole 5 s");
+        t = 0;
+        check(chat_quiet_pause(300, low_from(0), sleep) == "Máu thấp" && t == 0,
+              "HP under the mark already: not a moment of the pause");
+        t = 0;
+        check(chat_quiet_pause(0, low_from(~0ull), sleep).empty() && t == 0, "quiet_before_ms=0: no pause at all");
+    }
+    {
+        // The Enter's watch, 3 s, on a game that does not open the line: HP
+        // under the mark 1 s into it.
+        ChatSettings s = settings;
+        s.enter_gap_ms = 3000;
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.deaf = true;
+        bool entered = false;           // the pretend clock starts at 0: the first Enter may go at 0
+        std::uint64_t enter_at = 0;
+        g.after_key = [&](std::uint32_t key_vk) {
+            if (key_vk == VK_RETURN && !entered) {
+                entered = true;
+                enter_at = g.clock;
+            }
+        };
+        auto sender = sender_with(g, s);
+        sender->set_guard([&]() -> std::string {
+            return entered && g.clock >= enter_at + 1000 ? std::string("Máu thấp — dừng câu đang gõ.")
+                                                         : std::string();
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        const long long after = static_cast<long long>(g.clock) - static_cast<long long>(enter_at + 1000);
+        check(!r.sent && r.aborted && r.wait_ms >= 5000 && g.enters == 1 && r.trouble.rfind("Máu thấp", 0) == 0 &&
+                  entered && after >= 0 && after <= 300 && g.state == PretendChat::State::Shut,
+              "enter_gap_ms=3000, HP under the mark 1 s into the Enter's watch: the line ends " +
+                  std::to_string(after) + " ms after, one Enter pressed, put off");
+    }
+    {
+        // The type wait, 3 s, the line open and cleared: HP under the mark
+        // 1 s into it. Not a letter goes; the line is rubbed out and shut.
+        ChatSettings s = settings;
+        s.type_wait_ms = 3000;
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        bool cleared = false;
+        std::uint64_t cleared_at = 0;
+        auto sender = sender_with(g, s);
+        sender->on_report([&](const std::string& said) {
+            if (!cleared && said.rfind("ô chat đã xoá", 0) == 0) {
+                cleared = true;
+                cleared_at = g.clock;
+            }
+        });
+        sender->set_guard([&]() -> std::string {
+            return cleared && g.clock >= cleared_at + 1000 ? std::string("Máu thấp — dừng câu đang gõ.")
+                                                           : std::string();
+        });
+        const ChatSender::Result r = sender->send(line_of("test"));
+        const long long after = static_cast<long long>(g.clock) - static_cast<long long>(cleared_at + 1000);
+        check(!r.sent && r.aborted && g.letters == 0 && g.sent.empty() && g.state == PretendChat::State::Shut &&
+                  cleared && after >= 0 && after <= 1000,
+              "type_wait_ms=3000, HP under the mark 1 s into it: no letter typed, the line rubbed out and shut " +
+                  std::to_string(after) + " ms after");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    {
+        // The GUI's pause before a line goes by it, with the HP check.
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::size_t loop = src.find("void GuiApp::chat_loop()");
+        const std::size_t quiet = loop == std::string::npos ? loop : src.find("chat_quiet_pause(", loop);
+        const std::size_t low = quiet == std::string::npos ? quiet : src.find("if (hp_low()) return kChatLowHp;", quiet);
+        check(low != std::string::npos && src.find("nap(settings.quiet_before_ms)") == std::string::npos,
+              "gui_app.cpp: the pause before a line is chat_quiet_pause's, ended by HP under the potion's mark");
+    }
+#endif
 
     // ---- the dialogs, looked for side by side, are still seen: none on a
     //      clear screen, one with the death dialog up ----

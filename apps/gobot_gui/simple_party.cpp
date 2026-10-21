@@ -90,9 +90,8 @@ struct GuiApp::PartyHudUi {
     // "Thử xem": one capture and one read, off the drawing thread.
     std::future<std::string> probe;
     std::string    probe_said;
-    // What has changed the party, or may have: the worker's own answers and
-    // invites, an invitation seen. Shared with Tự chat's thread and "Thử
-    // xem", and safe to be.
+    // What GoBot itself has done to the party: the worker's own answers and
+    // invites. Shared with Tự chat's thread and "Thử xem", and safe to be.
     PartyEvents    events;
 };
 
@@ -104,7 +103,7 @@ PartyEvents& GuiApp::party_events() { return party_hud_ui_->events; }
 PartyMembership GuiApp::party_from_game() const {
     // P0-3: the party as the game's packets give it -- joined, left, who
     // leads -- goes here, and a change in it to party_events() as it comes.
-    // Until then nothing reads it, and the screen decides alone (read_party).
+    // Until then nothing reads it, and the screen decides (read_party).
     return PartyMembership{};
 }
 
@@ -140,12 +139,10 @@ bool GuiApp::party_may_invite(const std::string& who, const PartyLook& look, con
         return false;
     }
     // Without its pictures the reader reads nothing at all, which the gate
-    // takes as a HUD not read. The look as it was grabbed -- trusted, and
-    // whole, then -- and held up against what has changed the party since:
-    // a look from before GoBot's last answer or invite is no reading for an
-    // invite at all, and alone is sure only well after the last change, with
-    // all of the frame the game's own and nothing on it that could hide a
-    // panel (read_party).
+    // takes as a HUD not read. The look as it was grabbed -- trusted, then --
+    // and held up against what GoBot has done to the party since: a look
+    // from before GoBot's last answer or invite is no reading for an invite
+    // at all (read_party).
     reader_ready(ui.reader, ui.loaded, store);
     const PartyHud hud = read_party(ui.reader, look, ui.events, party_from_game());
     if (ui.reader.ready()) {
@@ -163,8 +160,8 @@ bool GuiApp::party_may_invite(const std::string& who, const PartyLook& look, con
         // With the tick, an invite from alone starts a party: said, so that
         // the log shows what it went by.
         if (always_leader && hud.state == PartyState::Alone)
-            GB_INFO("Party: %s asked; surely alone -- inviting, to start a party -- %s", who.c_str(),
-                    party_hud_text(hud).c_str());
+            GB_INFO("Party: %s asked; the game shows no party, so alone -- inviting, to start a party -- %s",
+                    who.c_str(), party_hud_text(hud).c_str());
         return true;
     }
     // Why, in English for the log and in Vietnamese on the Tổ đội tab.
@@ -195,17 +192,14 @@ void GuiApp::simple_party_leader_option() {
                                    simple_party_.always_leader ? "true" : "false"))
             simple_note("Không lưu được configs/party.ini.", 8000);
     }
-    // Alone only when that is sure: alone looks the same as a party whose
-    // panels are all under a window, a dialog or a tooltip, or one joined a
-    // moment ago and not drawn yet (PartyHud::sure_alone, read_party).
+    // Alone is what the game shows (the player's rule of 2026-10-21): no
+    // member's panel, no crown (read_party, party_invite_gate).
     ImGui::SetItemTooltip("Chỉ tự động mời khi thấy vương miện chủ tổ đội ở ô của bạn (góc trái trên màn hình "
-                          "game), hoặc khi chắc chắn là chưa có tổ đội: lời mời đó lập tổ đội mới do bạn làm chủ, "
-                          "như GoC. Chỉ chắc là chưa có tổ đội khi thấy được cả màn hình game (không bị cửa sổ "
-                          "nào khác che, kể cả GoBot, và không nằm ngoài màn hình), trên màn hình game không có "
-                          "cửa sổ, menu, hộp thoại hay khung chú thích nào, vài giây trước đó không vừa từ chối "
-                          "hay gửi lời mời vào tổ đội, và 20 giây trước đó không vừa nhận lời mời (GoBot nhận, "
-                          "hoặc lời mời tắt mà GoBot không trả lời). Còn lại thì không mời: đang là thành viên, "
-                          "không đọc được khung tổ đội, hoặc chưa chắc là chưa có tổ đội; thẻ này ghi lý do.");
+                          "game), hoặc khi chưa có tổ đội: khung tổ đội của game không có ô thành viên nào, không "
+                          "có vương miện. Lời mời lúc chưa có tổ đội lập tổ đội mới do bạn làm chủ, như GoC. Một "
+                          "cửa sổ của game che các ô tổ đội thì GoBot cũng thấy như chưa có tổ đội: khi cần, đóng "
+                          "cửa sổ đó. Đang là thành viên, hoặc không đọc được khung tổ đội, thì không mời; thẻ "
+                          "này ghi lý do.");
     hint(trial_hint(kTrialPartyHud, "Tổ đội đã đủ 6 người thì không mời, dù có đánh dấu ô này hay không.")
              .c_str());
 }
@@ -231,10 +225,10 @@ void GuiApp::simple_party_hud_line() {
                 return "Thiếu hình khung tổ đội (" + missing + ").";
             PartyHudReader reader;
             if (!reader.load(pictures, &missing)) return "Thiếu hình khung tổ đội (" + missing + ").";
-            // One look, trusted and whole as they were at the grab -- what lies
-            // over the game then, to say so -- and held up against what has
-            // changed the party since: as the party worker takes and reads
-            // its own (take_party_look, read_party).
+            // One look, trusted as it was at the grab -- what lies over the
+            // game then, to say so -- and held up against what GoBot has done
+            // to the party since: as the party worker takes and reads its own
+            // (take_party_look, read_party).
             ScreenCapture capture;
             PartyLook look;
             void* const game = input_.target_window();
@@ -245,14 +239,6 @@ void GuiApp::simple_party_hud_line() {
             GB_INFO("Party: Thử xem -- the party HUD reads %s%s", party_hud_text(hud).c_str(),
                     who.empty() ? "" : (" -- in the way: " + who).c_str());
             std::string said = party_hud_line_vi(hud) + ".";
-            // Alone: whether surely, which is what the tick "Chỉ mời khi đang
-            // làm chủ tổ đội" goes by -- and when GoBot's own window is what
-            // keeps it from being sure, how to clear it.
-            if (hud.state == PartyState::Alone && !hud.sure_alone) {
-                said += " " + party_invite_gate(hud, true).reason_vi + ".";
-                if (look.trusted && !look.whole && !who.empty() && who == own_program())
-                    said += " Cửa sổ GoBot đang che một phần màn hình game: dời GoBot sang bên rồi thử lại.";
-            }
             if (hud.state == PartyState::Unknown) {
                 if (!look.trusted && !who.empty() && who == own_program())
                     said += " Cửa sổ GoBot đang che góc trái của game: dời GoBot sang bên rồi thử lại.";

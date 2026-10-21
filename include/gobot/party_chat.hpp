@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gobot {
@@ -106,8 +107,82 @@ public:
     /// The line read has the channel and the speaker's name in front, and one
     /// too long for the chat box goes on in a line of its own; so it is
     /// enough that the two have eight letters and digits in a row in common,
-    /// or the whole of a shorter line.
+    /// or the whole of a shorter line. A line of ours under three letters and
+    /// digits never echoes: alone, "pt" is everybody's -- own_line tells it.
     static bool echoes(const std::string& read, const std::string& said);
+
+    /// Whether a line read off the chat is the player's own: never somebody
+    /// asking to be invited, whatever it says, however short. On 2026-10-20 a
+    /// Tự chat line that was the keyword alone came back off the chat as the
+    /// player asking, and only a hold that happened to be on kept the party
+    /// worker from inviting the player's own character. True when:
+    ///  a. its speaker is `own_name`, the character's name set on Đánh quái:
+    ///     the same letters and digits -- with a leading l, I, L or | taken
+    ///     off both, as split_read takes the reader's leftovers of "[Kênh]"
+    ///     off the line -- or, for a name of five or more, within one of it in
+    ///     length and alike() kOwnNameAlike or more: the reader drops or
+    ///     doubles a letter now and then. A name of four or fewer only
+    ///     exactly; one that merely holds it ("TuanAnh" for "Anh") is not it.
+    ///     The price: another character named as ours give or take a letter
+    ///     counts as ours too, and is never invited by its keyword.
+    ///  b. it says nothing but the keyword, and GoBot typed the keyword itself
+    ///     in the last kOwnKeywordMs -- whoever the speaker reads as, which
+    ///     may be nothing. Somebody else's bare keyword in that minute is
+    ///     passed over too; they say it again.
+    ///  c. it echoes() a line GoBot typed in the last kOwnLineMs.
+    /// `typed` is what GoBot typed, and when, on `now_ms`'s clock.
+    /// One line on its own: rule b ends after a minute, while the line can
+    /// stay on the chat for minutes. The party worker goes by without_own,
+    /// which carries rule b on for as long as the line is there.
+    static bool own_line(const std::string& read, const std::string& own_name,
+                         const std::vector<std::pair<std::string, std::uint64_t>>& typed,
+                         std::uint64_t now_ms, const Settings& s);
+    static constexpr double        kOwnNameAlike = 0.8;
+    static constexpr std::uint64_t kOwnKeywordMs = 60'000;
+    static constexpr std::uint64_t kOwnLineMs = 30 * 60'000;
+
+    /// One look's lines without the player's own, for the votes: those
+    /// own_line finds, and the keyword GoBot typed still on the chat after
+    /// rule b's minute. On 2026-10-20 the player's Tự chat line that was the
+    /// keyword alone was still the top line of the chat more than three
+    /// minutes after it was typed, and was taken for the player asking 193 s
+    /// after; with no name set on Đánh quái -- as shipped -- or a short one
+    /// read a letter wrong, nothing but rule b tells that line, and rule b
+    /// lets it go after a minute.
+    ///
+    /// So the speakers of the lines that are only the keyword in the first
+    /// minute after GoBot typed it -- its own line, read as the reader reads
+    /// it, letters wrong and all -- are remembered as the player's: any
+    /// speaker with no name set, and with one set, a speaker that reads
+    /// alike() kLearnAlike or more to it. A line that is only the keyword is
+    /// then the player's own too when
+    ///  - its speaker is one remembered -- the same letters and digits, or
+    ///    for five or more within one of it in length and alike()
+    ///    kOwnNameAlike or more, as for the name -- however long ago GoBot
+    ///    typed it: a quiet channel keeps a line for half an hour. Each is
+    ///    forgotten once kOwnGoneMs of looks that read the chat have gone by
+    ///    without it saying the keyword (a look that reads nothing, the chat
+    ///    out of sight, counts for nothing);
+    ///  - or GoBot typed the keyword in the last kOwnLineMs and nothing was
+    ///    remembered in the first minute of the last time it did -- the chat
+    ///    not read then, the party worker not running yet: with nothing to
+    ///    tell the player's line from another's, another's is passed over,
+    ///    the cheaper mistake.
+    /// The price: somebody else's bare keyword in that first minute is
+    /// remembered too, and passed over while it stays on the chat and
+    /// kOwnGoneMs after. The same player saying more than the keyword
+    /// ("cho pt") is asking, as ever. `typed` and `now_ms` as for own_line;
+    /// the keyword is this one's settings'.
+    std::vector<std::string> without_own(const std::vector<std::string>& lines, const std::string& own_name,
+                                         const std::vector<std::pair<std::string, std::uint64_t>>& typed,
+                                         std::uint64_t now_ms);
+    static constexpr double        kLearnAlike = 0.5;
+    static constexpr std::uint64_t kOwnGoneMs = 60'000;
+    /// Looks further apart than this leave the time between them out of
+    /// kOwnGoneMs: the worker was busy, or saw nothing.
+    static constexpr std::uint64_t kLookGapMs = 5'000;
+    /// The speakers remembered as the player's, for tests and the log.
+    std::vector<std::string> own_speakers() const;
 
     void set_settings(const Settings& s) { settings_ = s; }
     Settings settings() const { return settings_; }
@@ -120,7 +195,8 @@ public:
     std::vector<std::string> saw(const std::vector<std::string>& raw_lines,
                                  std::uint64_t now_ms);
 
-    /// Forget everything: who has been counted, and who is on cooldown.
+    /// Forget everything: who has been counted, who is on cooldown, and the
+    /// speakers without_own remembered.
     void reset();
 
     /// Who is waiting on their cooldown, and for how much longer.
@@ -134,6 +210,17 @@ private:
     struct Tally { int votes = 0; std::uint64_t last_ms = 0; };
     std::map<std::string, Tally>         counting_;
     std::map<std::string, std::uint64_t> invited_at_;
+
+    /// without_own's memory: each speaker taken for the player's, by its
+    /// letters and digits, with the reading clock when it was last seen
+    /// saying the keyword; the reading clock, which runs only while looks
+    /// read the chat; and the keyword GoBot typed whose first minute gave a
+    /// speaker, by when it was typed.
+    std::map<std::string, std::uint64_t> own_speakers_;
+    std::uint64_t reading_ms_ = 0;
+    std::uint64_t last_look_ms_ = 0;
+    bool          learned_ = false;
+    std::uint64_t learned_from_ = 0;
 };
 
 } // namespace gobot

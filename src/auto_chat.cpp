@@ -36,7 +36,9 @@ const char* const kLowHp      = "Máu thấp — chờ 2 giây rồi chat.";
 const char* const kBarOpen    = "Ô chat đang mở — có thể bạn đang gõ, để sau 15 giây.";
 const char* const kNoBar      = "Chưa thấy ô chat ở góc trái dưới màn hình game. Đừng để cửa sổ nào che "
                                 "khung chat.";
-const char* const kNotOpened  = "Không mở được ô chat (đã bấm Enter 2 lần) — bỏ qua câu này.";
+std::string not_opened(int enters) {
+    return "Không mở được ô chat (đã bấm Enter " + std::to_string(enters) + " lần) — bỏ qua câu này.";
+}
 const char* const kNotClosed  = "Không đóng được ô chat sau khi gửi — Tự chat đã dừng.";
 const char* const kNotKnown   = "Bấm Enter xong thì ô chat không giống hình ô chat đang mở hay đang đóng — "
                                 "Tự chat đã dừng. Ảnh màn hình lúc đó ở thư mục chat_debug.";
@@ -90,10 +92,10 @@ constexpr int kKeysPerLook = 12;
 /// The commercial client's gap between keys, which the look before each key
 /// is taken in.
 constexpr int kKeyGap = 33;
-/// Enters pressed to open the line. Two, not the commercial client's three: a
-/// game slow enough to take them all late ends up with the line as it found
-/// it -- shut -- after an even number.
-constexpr int kOpenPresses = 2;
+// The Enters pressed to open the line are ChatSettings::max_enters: two as
+// shipped, not the commercial client's three -- a game slow enough to take
+// them all late ends up with the line as it found it, shut, after an even
+// number.
 /// Long enough for the game to draw the keys just pressed before the field is
 /// looked at again.
 constexpr int kDrawnMs = 150;
@@ -497,6 +499,23 @@ bool ChatSettings::load(const std::string& path) {
     s.max_failures     = std::clamp(read_int(ini, C, "max_failures", s.max_failures), 1, 20);
     const std::string test = trim(ini.get(C, "test_line"));
     if (!test.empty()) s.test_line = test;
+    // How the keys go. Both holds 0, each key keeps its own; otherwise every
+    // key from the one to the other, each 10 to kMaxHold ms, the second no
+    // less than the first -- one alone set is a fixed hold.
+    s.hold_min_ms = std::clamp(read_int(ini, C, "hold_min_ms", s.hold_min_ms), 0, kMaxHold);
+    s.hold_max_ms = std::clamp(read_int(ini, C, "hold_max_ms", s.hold_max_ms), 0, kMaxHold);
+    if (s.hold_min_ms > 0 || s.hold_max_ms > 0) {
+        if (s.hold_min_ms == 0) s.hold_min_ms = s.hold_max_ms;
+        s.hold_min_ms = std::clamp(s.hold_min_ms, 10, kMaxHold);
+        s.hold_max_ms = std::clamp(std::max(s.hold_max_ms, s.hold_min_ms), 10, kMaxHold);
+    }
+    s.enter_gap_ms    = std::clamp(read_int(ini, C, "enter_gap_ms", s.enter_gap_ms), 250, 3000);
+    s.quiet_before_ms = std::clamp(read_int(ini, C, "quiet_before_ms", s.quiet_before_ms), 0, 5000);
+    s.type_wait_ms    = std::clamp(read_int(ini, C, "type_wait_ms", s.type_wait_ms), 0, 3000);
+    s.max_enters      = std::clamp(read_int(ini, C, "max_enters", s.max_enters), 1, kMaxEnters);
+    s.type_tries      = std::clamp(read_int(ini, C, "type_tries", s.type_tries), 1, kMaxTypeTries);
+    s.inject = lower(trim(ini.get(C, "inject", "vk"))) == "scancode" ? InputManager::KeyInject::Scancode
+                                                                      : InputManager::KeyInject::Vk;
 
     for (int i = 1; i <= kMaxLines; ++i) {
         const std::string key = "line" + std::to_string(i);
@@ -997,6 +1016,20 @@ ChatGate chat_gate(const ChatGateInput& in) {
     return g;
 }
 
+std::string chat_quiet_pause(int ms, const std::function<std::string()>& stop,
+                             const std::function<void(int)>& sleep) {
+    for (int slept = 0;; slept += kQuietStepMs) {
+        if (stop) {
+            std::string why = stop();
+            if (!why.empty()) return why;
+        }
+        if (slept >= ms) return {};
+        const int step = std::min(kQuietStepMs, ms - slept);
+        if (sleep) sleep(step);
+        else std::this_thread::sleep_for(std::chrono::milliseconds(step));
+    }
+}
+
 // ------------------------------------------------------------------ sender
 
 namespace {
@@ -1008,14 +1041,95 @@ const char* const kLeftNeither = "Ô chat không giống hình ô chat đang m�
                                  "đã đóng chưa.";
 const char* const kLeftAway    = "Ô chat đang mở mà game không ở trên cùng, nên chưa đóng được.";
 
+const char* trace_state(ChatBarState s) {
+    switch (s) {
+        case ChatBarState::Open:    return "open";
+        case ChatBarState::Closed:  return "shut";
+        case ChatBarState::Unknown: break;
+    }
+    return "unseen";
+}
+
+std::string trace_secs(int ms) {
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "+%.2f s", static_cast<double>(std::max(0, ms)) / 1000.0);
+    return buf;
+}
+
+std::string trace_range(int lo, int hi) {
+    return lo == hi ? std::to_string(lo) : std::to_string(lo) + "-" + std::to_string(hi);
+}
+
 } // namespace
+
+std::string chat_trace_line(const ChatTrace& t) {
+    std::string s = "Chat trace:";
+    std::string sep = " ";
+    for (std::size_t i = 0; i < t.enters.size(); ++i) {
+        const ChatTrace::Enter& e = t.enters[i];
+        s += sep + "Enter " + std::to_string(i + 1) + " held " + std::to_string(e.hold_ms) + " ms:";
+        if (e.looks.empty()) s += " no look";
+        for (std::size_t k = 0; k < e.looks.size(); ++k)
+            s += std::string(k ? ", " : " ") + trace_secs(e.looks[k].first) + " " + trace_state(e.looks[k].second);
+        sep = "; ";
+    }
+    if (t.cleared_ink >= 0) {
+        s += sep + "cleared";
+        if (t.backspace_max > 0) s += " (Backspace held " + trace_range(t.backspace_min, t.backspace_max) + " ms)";
+        s += ", ink " + std::to_string(t.cleared_ink);
+        sep = "; ";
+    }
+    if (t.letters > 0) {
+        s += sep + std::to_string(t.letters) + " keys typed in " + std::to_string(t.tries) +
+             (t.tries == 1 ? " try" : " tries");
+        if (t.letter_max > 0)
+            s += ", held " + trace_range(t.letter_min, t.letter_max) + " ms (" +
+                 (t.inject == InputManager::KeyInject::Scancode ? "scancode" : "vk") + ")";
+        if (!t.inks.empty()) {
+            s += ", ink before each next key:";
+            for (const int ink : t.inks) s += " " + std::to_string(ink);
+        }
+        sep = "; ";
+    }
+    if (!t.after.empty()) {
+        s += sep + "after the last key:";
+        for (std::size_t k = 0; k < t.after.size(); ++k)
+            s += std::string(k ? ", " : " ") + trace_secs(t.after[k].first) + " ink " + std::to_string(t.after[k].second);
+        sep = "; ";
+    }
+    if (t.send_hold > 0) {
+        s += sep + "Enter to send held " + std::to_string(t.send_hold) + " ms";
+        sep = "; ";
+    }
+    s += sep + (t.outcome.empty() ? std::string("not sent") : t.outcome);
+    if (!t.machine.empty()) s += "; " + t.machine;
+    return s;
+}
+
+std::string chat_machine_note(void* game_window) {
+    std::string s = "typing programs running: ";
+    const std::vector<std::string> typers = vietnamese_typers_running();
+    if (typers.empty()) s += "none";
+    for (std::size_t i = 0; i < typers.size(); ++i) s += (i ? ", " : "") + typers[i];
+    const std::uint16_t layout = window_keyboard_layout(game_window);
+    char hex[48];
+    if (layout != 0) std::snprintf(hex, sizeof hex, "; the game's keyboard layout %04X", layout);
+    else std::snprintf(hex, sizeof hex, "; the game's keyboard layout not known");
+    return s + hex;
+}
 
 ChatSender::ChatSender(InputManager& input, const TemplateStore& store, Grab grab)
     : input_(input), store_(store), grab_(std::move(grab)) {}
 
 bool ChatSender::key(std::uint32_t vk, bool shift, int hold_ms) {
     if (hands_.key) return hands_.key(vk, shift, hold_ms);
-    return input_.type_key(vk, shift, hold_ms);
+    return input_.type_key(vk, shift, hold_ms, settings_.inject);
+}
+
+int ChatSender::hold(int lo, int hi) {
+    // chat.ini's holds, when set, for every key alike.
+    if (settings_.hold_min_ms > 0 && settings_.hold_max_ms > 0) return jitter(settings_.hold_min_ms, settings_.hold_max_ms);
+    return jitter(lo, hi);
 }
 
 bool ChatSender::enter(bool opening, int hold_ms) {
@@ -1059,6 +1173,16 @@ void ChatSender::pause(int ms) {
 bool ChatSender::wait(int ms) {
     for (int slept = 0; slept < ms; slept += 20) {
         if (cancelled_) return false;
+        // HP under the potion's mark, or another hold: the line ends now,
+        // not when the wait does -- the Enter watch, the type wait and the
+        // looks after typing run to seconds as chat.ini can set them (R8R-2).
+        if (guard_) {
+            std::string why = guard_();
+            if (!why.empty()) {
+                halted_ = std::move(why);
+                return false;
+            }
+        }
         pause(std::min(20, ms - slept));
     }
     return !cancelled_;
@@ -1144,7 +1268,7 @@ bool ChatSender::believe_shut(ChatBar& bar) {
 
 bool ChatSender::rub_out(int n) {
     for (int i = 0; i < n; ++i) {
-        if (!key(VK_BACK, false, 25)) return false;
+        if (!key(VK_BACK, false, hold(25, 25))) return false;
         pause(15);
     }
     return true;
@@ -1218,7 +1342,7 @@ void ChatSender::tidy(Result& r, int rub) {
         if (shows_empty(bar) || (armed && bar.ink <= caret)) {
             // Twice at most, and each time waited on: an Enter the game is
             // slow to take, pressed again, opens the line it shut.
-            if (enters >= 2 || !focused() || !enter(false, 50)) break;
+            if (enters >= 2 || !focused() || !enter(false, hold(50, 50))) break;
             ++enters;
             armed = false;
             for (int k = 0; k < 3; ++k) {
@@ -1279,9 +1403,24 @@ ChatSender::LeftOpen ChatSender::check_left_open(std::string* why) {
 }
 
 ChatSender::Result ChatSender::send(const ChatText& line) {
+    Result r = send_line(line);
+    // What the trace says it came to, when it does not say already.
+    r.trace.inject = settings_.inject;
+    if (r.trace.outcome.empty())
+        r.trace.outcome = r.sent        ? "sent"
+                        : r.not_now     ? "not started"
+                        : r.stop        ? "not sent, Tu chat stops"
+                        : r.aborted     ? "put off"
+                        : r.left_open   ? "not sent, the line may be open"
+                                        : "not sent";
+    return r;
+}
+
+ChatSender::Result ChatSender::send_line(const ChatText& line) {
     Result r;
     empty_ink_ = -1;
     entered_ = false;
+    halted_.clear();
     const std::uint64_t began = clock_ms();
     const ChatMethod how = settings_.method;
     const int clear = settings_.clear_backspaces;
@@ -1344,32 +1483,58 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
         put_off(ms);
         return give_up(std::move(why), rub);
     };
+    // A wait ended early (wait): a stop, or the guard's reason -- HP under
+    // the potion's mark, another hold -- which ends the line as it does
+    // between keys: rubbed out, closed, put off.
+    const auto halt = [&](int rub) {
+        if (cancelled_ || halted_.empty()) return abort_line(kStopped, rub, 0);
+        return abort_line(halted_, rub, 5000);
+    };
     // Up to `looks` looks at the bar alone, a quarter of a second apart,
     // until one shows it open; what they saw, the last of them in r.last. The
     // dialogs do not matter yet: nothing but Backspace goes into the line
     // before a look that takes them in as well. False when a stop came
     // meanwhile.
+    // Each look after an Enter pressed to open the line goes in the trace,
+    // with how long after the Enter it was.
+    const auto traced = [&](const ChatBar& now) {
+        if (r.trace.enters.empty()) return;
+        r.trace.enters.back().looks.emplace_back(static_cast<int>(clock_ms() - enter_ms_), now.state);
+    };
     const auto watch = [&](int looks, bool& saw_open, bool& saw_shut, bool& saw_neither) {
         for (int i = 0; i < looks && !saw_open; ++i) {
             if (!wait(250)) return false;
             ChatBar now;
             look_bar(now, &shot);
             r.last = now;
+            traced(now);
             if (now.state == ChatBarState::Open) saw_open = true;
             else if (now.state == ChatBarState::Closed) saw_shut = true;
             else if (now.found) saw_neither = true;
         }
         return true;
     };
+    // An Enter pressed to open the line: its hold, as chat.ini says or its
+    // own, and its place in the trace.
+    const auto open_enter = [&]() {
+        const int held = hold(60, 130);
+        if (!enter(true, held)) return false;
+        r.trace.enters.push_back(ChatTrace::Enter{ held, {} });
+        return true;
+    };
 
     // ---- open it ------------------------------------------------------------
     // Enter, each time on a look just taken that shows the line shut and no
     // dialog. Pressed again only when the line was seen still shut after it,
-    // so the presses never get out of step with the line -- and twice at most:
-    // a game slow enough to take both late is left as it was found, shut, and
-    // the line is reported as maybe open, for whoever watches it after.
+    // so the presses never get out of step with the line -- and max_enters
+    // at most, as shipped two: a game slow enough to take both late is left
+    // as it was found, shut, and the line is reported as maybe open, for
+    // whoever watches it after. Each is watched enter_gap_ms for the line to
+    // open, a look every 250 ms.
+    const int max_enters = std::clamp(settings_.max_enters, 1, ChatSettings::kMaxEnters);
+    const int enter_looks = std::max(1, (settings_.enter_gap_ms + 125) / 250);
     bool opened = false;
-    for (int press = 1; press <= kOpenPresses && !opened; ++press) {
+    for (int press = 1; press <= max_enters && !opened; ++press) {
         if (cancelled_) {
             // Before the first Enter nothing has been pressed and the line is
             // as it was, shut. After it, whether the game took it is looked
@@ -1383,6 +1548,7 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
         std::string dialog;
         const bool looked = look_both(bar, dialog, &shot);
         r.last = bar;
+        if (press > 1) traced(bar);
         if (press > 1 && bar.state == ChatBarState::Open) {
             opened = true;      // it did open, just later than it was looked for
             break;
@@ -1408,7 +1574,7 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
                 put_off(0);
                 return r;
             }
-            if (!focused() || !enter(true, jitter(60, 130))) return not_now(5000, kNotFront);
+            if (!focused() || !open_enter()) return not_now(5000, kNotFront);
         } else {
             // One Enter in already, the line seen shut after it -- which the
             // game may yet take, late.
@@ -1424,7 +1590,7 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
                 put_off(bar.state != ChatBarState::Closed && dialog.empty() ? 10000 : 5000);
                 return r;
             }
-            if (!enter(true, jitter(60, 130))) {
+            if (!open_enter()) {
                 r.trouble = kNotFront;
                 put_off(5000);
                 return r;
@@ -1434,9 +1600,8 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
         // Looked at a few times: a game that is slow to draw the line open is
         // not pressed again, which would shut it.
         bool saw_open = false, saw_shut = false, saw_neither = false;
-        if (!watch(3, saw_open, saw_shut, saw_neither)) return abort_line(kStopped, clear, 0);
-        if (!saw_open && !saw_shut && !watch(2, saw_open, saw_shut, saw_neither))
-            return abort_line(kStopped, clear, 0);
+        if (!watch(enter_looks, saw_open, saw_shut, saw_neither)) return halt(clear);
+        if (!saw_open && !saw_shut && !watch(2, saw_open, saw_shut, saw_neither)) return halt(clear);
         if (saw_open) {
             opened = true;
             break;
@@ -1448,6 +1613,7 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
             std::string d;
             const bool seen = look_both(now, d, &shot);
             r.last = now;
+            traced(now);
             if (seen && now.state == ChatBarState::Open) {
                 opened = true;      // late, but open
                 break;
@@ -1473,7 +1639,7 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
                 r.stop = true;
                 r.trouble = kNotKnown;
                 if (seen && now.found && now.state == ChatBarState::Unknown && d.empty() &&
-                    stop_why().empty() && focused() && enter(true, jitter(60, 130))) {
+                    stop_why().empty() && focused() && open_enter()) {
                     bool open_again = false, shut_again = false, neither_again = false;
                     watch(3, open_again, shut_again, neither_again);
                     ChatBar last = r.last;
@@ -1484,11 +1650,12 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
             }
             // Shut after all: as if it had been seen so.
         }
-        if (press < kOpenPresses) say("ô chat chưa mở, bấm Enter lần nữa");
+        if (press < max_enters) say("ô chat chưa mở, bấm Enter lần nữa");
     }
     if (!opened) {
         keep(shot, "not_opened", &r.last);
-        r.trouble = kNotOpened;
+        r.trouble = not_opened(static_cast<int>(r.trace.enters.size()));
+        r.trace.outcome = "not_opened";
         r.left_open = true;     // either Enter may yet be taken, late
         return r;
     }
@@ -1512,12 +1679,15 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
     // while each takes something away, up to kMostRubbed in all. If the field
     // still shows more than a caret, nothing is typed: what is left of a line
     // the player shut without sending would go out in front of this one.
-    if (!wait(200)) return abort_line(kStopped, clear, 0);
+    if (!wait(200)) return halt(clear);
     for (int i = 0; i < clear; ++i) {
-        if (!key(VK_BACK, false, jitter(40, 70))) return lost_front(clear);
-        if (!wait(30)) return abort_line(kStopped, clear, 0);
+        const int held = hold(40, 70);
+        r.trace.backspace_min = i == 0 ? held : std::min(r.trace.backspace_min, held);
+        r.trace.backspace_max = std::max(r.trace.backspace_max, held);
+        if (!key(VK_BACK, false, held)) return lost_front(clear);
+        if (!wait(30)) return halt(clear);
     }
-    if (!wait(50)) return abort_line(kStopped, clear, 0);
+    if (!wait(50)) return halt(clear);
 
     ChatBar before;
     std::string dialog;
@@ -1553,7 +1723,7 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
         shown_before = before.ink;
         if (!rub_out(more)) return lost_front(more + clear);
         rubbed += more;
-        if (!wait(kDrawnMs)) return abort_line(kStopped, rubbed + clear, 0);
+        if (!wait(kDrawnMs)) return halt(rubbed + clear);
         look_both(before, dialog, &shot);
         r.last = before;
     }
@@ -1581,110 +1751,146 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
     // by: no wider than a caret, or the rounds above would not have ended.
     empty_ink_ = before.ink <= settings_.empty_ink ? before.ink : -1;
     r.empty_ink = empty_ink_;
+    r.trace.cleared_ink = before.ink;
     say("ô chat đã xoá (vết chữ " + std::to_string(before.ink) + " điểm)");
+    // chat.ini's type_wait_ms between the line cleared and its first letter:
+    // none as shipped.
+    if (settings_.type_wait_ms > 0 && !wait(settings_.type_wait_ms)) return halt(clear);
 
     // ---- type it ------------------------------------------------------------
     // A key at a time, as the commercial client types: 33 ms apart, each held
-    // for 50 ms. Asked between keys whether to go on. The gap before each key
-    // is spent looking at the bar, and the key goes only if it still shows
-    // the line open: a line shut under it -- a click in the game, a map
-    // change -- makes every key after that a skill key or a potion. Every
-    // dozen keys the look takes in the dialogs as well.
+    // for 50 ms (or as chat.ini's holds say). Asked between keys whether to
+    // go on. The gap before each key is spent looking at the bar, and the key
+    // goes only if it still shows the line open: a line shut under it -- a
+    // click in the game, a map change -- makes every key after that a skill
+    // key or a potion. Every dozen keys the look takes in the dialogs as well.
+    //
+    // Then the field has to show the text: past where the caret was, about as
+    // far as that many characters reach -- two pixels for each that is not a
+    // space, five at least: the narrowest letters the game draws, i and l, are
+    // a pixel wide with one between them, and a caret blinking on is four.
+    // Looked at kDrawnMs after the last key and, nothing there yet, twice
+    // more a quarter of a second apart: a game that draws late is not taken
+    // for one that took nothing. Nothing at all, the line still open and as
+    // empty as it was, and chat.ini's type_tries allowing: typed once more.
+    // Never into a line that took any of it, which would hold it twice.
     const std::size_t count = how == ChatMethod::Vk ? keys.size() : units.size();
-    for (std::size_t i = 0; i < count; ++i) {
-        const std::string why = stop_why();
-        if (!why.empty()) return abort_line(why, r.typed + 2, 5000);
-        const std::uint64_t started = clock_ms();
-        ChatBar mid;
-        std::string d;
-        const bool looked = i > 0 && i % kKeysPerLook == 0 ? look_both(mid, d, &shot)
-                                                           : look_bar(mid, &shot);
-        r.last = mid;
-        if (!d.empty()) {
-            // What was typed rubbed out at once -- an Enter the player
-            // presses for the dialog could send it -- but only into a line
-            // still seen open; and a line seen shut believed so only on a
-            // second look.
-            const bool shut = mid.state == ChatBarState::Closed && believe_shut(mid);
-            r.last = mid;
-            if (mid.state == ChatBarState::Open) rub_out(r.typed + clear);
-            r.dialog = d;
-            r.left_open = !shut;
-            r.trouble = dialog_wait(d) + " Câu chưa gửi.";
-            put_off(5000);
-            return r;
-        }
-        if (looked && mid.state == ChatBarState::Closed) {
-            // Looked at once more, a frame later, before it is believed --
-            // a line wrongly taken for shut would be left open with its
-            // half a line in it -- and with no key pressed meanwhile.
-            pause(kKeyGap);
-            ChatBar again;
-            if (look_bar(again, &shot)) mid = again;
-            r.last = mid;
-        }
-        if (looked && mid.state == ChatBarState::Closed) {
-            // Not one key more, a Backspace least of all: with the line
-            // shut it is the game's.
-            keep(shot, "shut_while_typing", &mid);
-            r.trouble = kShutTyping;
-            return r;
-        }
-        if (!looked || mid.state != ChatBarState::Open) {
-            // Out of sight: rubbed out only once a look shows it open again.
-            keep(shot, "lost_while_typing", &mid);
-            return abort_line(kLostTyping, r.typed + 2, 10000);
-        }
-        const auto spent = static_cast<int>(clock_ms() - started);
-        if (!wait(std::max(0, kKeyGap - spent))) return abort_line(kStopped, r.typed + 2, 0);
-        const bool went = how == ChatMethod::Vk ? key(keys[i].vk, keys[i].shift, 50)
-                                                : text(std::wstring(1, units[i]), how);
-        if (!went) return lost_front(r.typed + 2);
-        ++r.typed;
-    }
-
-    // ---- check it arrived, then send ---------------------------------------
-    if (!wait(kDrawnMs)) return abort_line(kStopped, r.typed + 2, 0);
+    int marks = 0;
+    for (const char c : line.typed)
+        if (c != ' ' && (static_cast<unsigned char>(c) & 0xC0) != 0x80) ++marks;
+    const int need = std::min(60, std::max(5, 2 * marks));
+    const int tries = std::clamp(settings_.type_tries, 1, ChatSettings::kMaxTypeTries);
     ChatBar shown;
-    look_both(shown, dialog, &shot);
-    r.last = shown;
-    if (!dialog.empty()) {
-        // Enter now would answer the dialog. What was typed is rubbed out,
-        // with the line seen open, and the line waits for it to go.
-        if (shown.state == ChatBarState::Open) rub_out(r.typed + clear);
-        r.dialog = dialog;
-        r.left_open = !(shown.state == ChatBarState::Closed && believe_shut(shown));
-        r.trouble = dialog_wait(dialog) + " Câu chưa gửi.";
-        put_off(5000);
-        return r;
-    }
-    if (shown.state != ChatBarState::Open) {
-        keep(shot, "lost_before_send", &shown);
-        if (shown.state == ChatBarState::Closed && believe_shut(shown)) {
-            r.last = shown;
-            r.trouble = "Ô chat tự đóng lại trước khi gửi — câu chưa gửi.";
-            return r;
+    for (int attempt = 1;; ++attempt) {
+        r.trace.tries = attempt;
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::string why = stop_why();
+            if (!why.empty()) return abort_line(why, r.typed + 2, 5000);
+            const std::uint64_t started = clock_ms();
+            ChatBar mid;
+            std::string d;
+            const bool looked = i > 0 && i % kKeysPerLook == 0 ? look_both(mid, d, &shot)
+                                                               : look_bar(mid, &shot);
+            r.last = mid;
+            if (i > 0) r.trace.inks.push_back(mid.ink);
+            if (!d.empty()) {
+                // What was typed rubbed out at once -- an Enter the player
+                // presses for the dialog could send it -- but only into a line
+                // still seen open; and a line seen shut believed so only on a
+                // second look.
+                const bool shut = mid.state == ChatBarState::Closed && believe_shut(mid);
+                r.last = mid;
+                if (mid.state == ChatBarState::Open) rub_out(r.typed + clear);
+                r.dialog = d;
+                r.left_open = !shut;
+                r.trouble = dialog_wait(d) + " Câu chưa gửi.";
+                put_off(5000);
+                return r;
+            }
+            if (looked && mid.state == ChatBarState::Closed) {
+                // Looked at once more, a frame later, before it is believed --
+                // a line wrongly taken for shut would be left open with its
+                // half a line in it -- and with no key pressed meanwhile.
+                pause(kKeyGap);
+                ChatBar again;
+                if (look_bar(again, &shot)) mid = again;
+                r.last = mid;
+            }
+            if (looked && mid.state == ChatBarState::Closed) {
+                // Not one key more, a Backspace least of all: with the line
+                // shut it is the game's.
+                keep(shot, "shut_while_typing", &mid);
+                r.trouble = kShutTyping;
+                return r;
+            }
+            if (!looked || mid.state != ChatBarState::Open) {
+                // Out of sight: rubbed out only once a look shows it open again.
+                keep(shot, "lost_while_typing", &mid);
+                return abort_line(kLostTyping, r.typed + 2, 10000);
+            }
+            const auto spent = static_cast<int>(clock_ms() - started);
+            if (!wait(std::max(0, kKeyGap - spent))) return halt(r.typed + 2);
+            const int held = hold(50, 50);
+            const bool went = how == ChatMethod::Vk ? key(keys[i].vk, keys[i].shift, held)
+                                                    : text(std::wstring(1, units[i]), how);
+            if (!went) return lost_front(r.typed + 2);
+            if (how == ChatMethod::Vk) {
+                r.trace.letter_min = r.trace.letters == 0 ? held : std::min(r.trace.letter_min, held);
+                r.trace.letter_max = std::max(r.trace.letter_max, held);
+            }
+            ++r.trace.letters;
+            ++r.typed;
         }
-        // Out of sight: not a key into a game that cannot be seen, a
-        // Backspace least of all. Left to whoever watches the line after,
-        // which rubs it out once a look shows it open.
-        r.last = shown;
-        r.left_open = true;
-        r.trouble = "Không thấy ô chat trước khi gửi — câu chưa gửi.";
-        put_off(10000);
-        return r;
-    }
-    // Something has to show in the field past where the caret was, about as
-    // far as that many characters reach -- three pixels each is less than any
-    // letter the game draws. If not, the game did not take the keys as text,
-    // and nothing is sent.
-    const int need = std::max(4, std::min(3 * r.typed, 60));
-    if (shown.ink < before.ink + need) {
+
+        // ---- check it arrived ------------------------------------------------
+        const std::uint64_t last_key = clock_ms();
+        r.trace.after.clear();
+        bool arrived = false;
+        for (int look = 0; look < 3 && !arrived; ++look) {
+            if (!wait(look == 0 ? kDrawnMs : 250)) return halt(r.typed + 2);
+            look_both(shown, dialog, &shot);
+            r.last = shown;
+            r.trace.after.emplace_back(static_cast<int>(clock_ms() - last_key), shown.ink);
+            if (!dialog.empty()) {
+                // Enter now would answer the dialog. What was typed is rubbed
+                // out, with the line seen open, and the line waits for it to go.
+                if (shown.state == ChatBarState::Open) rub_out(r.typed + clear);
+                r.dialog = dialog;
+                r.left_open = !(shown.state == ChatBarState::Closed && believe_shut(shown));
+                r.trouble = dialog_wait(dialog) + " Câu chưa gửi.";
+                put_off(5000);
+                return r;
+            }
+            if (shown.state != ChatBarState::Open) {
+                keep(shot, "lost_before_send", &shown);
+                if (shown.state == ChatBarState::Closed && believe_shut(shown)) {
+                    r.last = shown;
+                    r.trouble = "Ô chat tự đóng lại trước khi gửi — câu chưa gửi.";
+                    return r;
+                }
+                // Out of sight: not a key into a game that cannot be seen, a
+                // Backspace least of all. Left to whoever watches the line
+                // after, which rubs it out once a look shows it open.
+                r.last = shown;
+                r.left_open = true;
+                r.trouble = "Không thấy ô chat trước khi gửi — câu chưa gửi.";
+                put_off(10000);
+                return r;
+            }
+            arrived = shown.ink >= before.ink + need;
+        }
+        if (arrived) break;
+        if (attempt < tries && shown.ink <= before.ink + 2) {
+            say("ô chat không hiện chữ vừa gõ (vết chữ " + std::to_string(shown.ink) + " điểm) — gõ lại lần " +
+                std::to_string(attempt + 1));
+            continue;
+        }
         keep(shot, "no_text", &shown);
         say("ô chat không hiện chữ vừa gõ (vết chữ " + std::to_string(before.ink) + " -> " +
             std::to_string(shown.ink) + " điểm, cần thêm " + std::to_string(need) + ")");
-        return give_up(std::string("Game không nhận chữ gõ vào ô chat (cách gõ ") +
-                           chat_method_name(how) + ") — câu chưa gửi.",
+        r.trace.outcome = "no_text";
+        return give_up(std::string("Game không nhận chữ gõ vào ô chat (cách gõ ") + chat_method_name(how) +
+                           ") — câu chưa gửi.",
                        r.typed + clear);
     }
     // A stop, or the guard, asked once more: the look just taken, with its
@@ -1697,7 +1903,8 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
     }
     // On the look just taken, which shows the line open with the text in it
     // and no dialog.
-    if (!focused() || !enter(false, 50)) return lost_front(r.typed + 2);
+    r.trace.send_hold = hold(50, 50);
+    if (!focused() || !enter(false, r.trace.send_hold)) return lost_front(r.typed + 2);
 
     // ---- closed? -------------------------------------------------------------
     // Watched for a second whatever a stop says: the line has gone, and what

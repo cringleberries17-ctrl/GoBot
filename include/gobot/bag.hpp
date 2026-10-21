@@ -196,6 +196,15 @@ public:
     /// of a kind that stacks still gets the quantity box, with 1 in it; or
     /// kUnreadable when something white is in the corner but no number reads,
     /// or when the digits are not loaded.
+    ///
+    /// Read the way the client prints it: each digit in a cell 5 pixels wide
+    /// and 8 high, the next cell 6 pixels on -- after a 1 too, which is 3
+    /// pixels of ink at the left of its cell. In a cell only the digit's own
+    /// strokes and the ring of pixels round them are compared; the rest of
+    /// the cell is the item's icon showing through, white or not. A 1 judged
+    /// over its 3-pixel box alone, as it was, lost to three white pixels of an
+    /// icon's rim under it: on the live hotbar 61 read as 6 over the boiled
+    /// egg, slot after slot.
     int read(const Frame& f, const ScreenRect& slot) const;
 
     /// A number written in `area`: 0 when there is nothing white in it at all,
@@ -217,19 +226,31 @@ public:
     /// Give a digit its shape directly. For tests.
     void set_digit(int d, int w, int h, const std::vector<std::uint8_t>& on);
 
+    /// The client's digit cell: 5 pixels wide, a 1 included, and the next
+    /// digit kCellW + 1 pixels on.
+    static constexpr int kCellW = 5;
+
 private:
     /// Digits in `area`, left to right, the line starting no lower than
     /// `max_top`: the number, or -1 when none reads. `white` gets how many
     /// pixels there were white enough to be part of a digit, and `stray` how
     /// many of those lie outside every digit read. With `caret`, the caret's
-    /// yellow pixels are unknown rather than ground.
-    int scan(const Frame& f, const ScreenRect& area, int max_top, bool caret, int& white,
+    /// yellow pixels are unknown rather than ground. With `cells`, digits are
+    /// read in the client's fixed cells, by their strokes and the ring round
+    /// them (read); without, each over its own box, a column at a time
+    /// (read_field, the quantity box and its caret).
+    int scan(const Frame& f, const ScreenRect& area, int max_top, bool caret, bool cells, int& white,
              int& stray) const;
 
     struct Glyph {
         int w = 0, h = 0;
         std::vector<std::uint8_t> on;   ///< 1 where the digit is drawn
         int lit = 0;
+        /// Over the digit's cell, max(w, kCellW) wide and h high: 1 where a
+        /// pixel the digit leaves unlit touches one it lights, side or
+        /// corner -- the outline the client draws round its digits.
+        std::vector<std::uint8_t> ring;
+        int ring_n = 0;
     };
     Glyph digits_[10];
     bool  loaded_ = false;

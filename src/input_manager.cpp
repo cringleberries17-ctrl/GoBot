@@ -580,29 +580,44 @@ bool InputManager::send_chat(const std::string& text, std::uint32_t chat_key) {
 
 // ------------------------------------------------------------------- typing
 
+InputManager::KeyEvent InputManager::typed_key_event(std::uint32_t vk, bool down, KeyInject how) {
+    KeyEvent e;
+    e.scan  = scan_code(vk);
+    e.flags = down ? 0 : KEYEVENTF_KEYUP;
+    if (is_extended(vk)) e.flags |= KEYEVENTF_EXTENDEDKEY;
+    if (how == KeyInject::Scancode) {
+        // As GoC sends keys: the scan code alone, which the game reads the
+        // way a keyboard's own key is read.
+        e.flags |= KEYEVENTF_SCANCODE;
+    } else {
+        e.vk = static_cast<std::uint16_t>(vk);
+    }
+    return e;
+}
+
 namespace {
 
-INPUT key_event(std::uint32_t vk, bool down) {
+INPUT key_event(std::uint32_t vk, bool down, InputManager::KeyInject how) {
+    const InputManager::KeyEvent e = InputManager::typed_key_event(vk, down, how);
     INPUT in{};
     in.type       = INPUT_KEYBOARD;
-    in.ki.wVk     = static_cast<WORD>(vk);
-    in.ki.wScan   = InputManager::scan_code(vk);
-    in.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-    if (is_extended(vk)) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    in.ki.wVk     = e.vk;
+    in.ki.wScan   = e.scan;
+    in.ki.dwFlags = e.flags;
     return in;
 }
 
 } // namespace
 
-bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms) {
+bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms, KeyInject how) {
     if (vk == 0 || hwnd_.load() == nullptr) return false;
     if (refuse_real_input("type a key")) return false;
     if (!window_focused()) return false;
 
     INPUT down[2]{};
     UINT n = 0;
-    if (shift) down[n++] = key_event(VK_SHIFT, true);
-    down[n++] = key_event(vk, true);
+    if (shift) down[n++] = key_event(VK_SHIFT, true, how);
+    down[n++] = key_event(vk, true, how);
     const UINT went = inject(down, n, "type a key");
     if (went == n) std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, hold_ms)));
 
@@ -610,8 +625,8 @@ bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms) {
     // never came up is held in the game from then on.
     INPUT up[2]{};
     UINT m = 0;
-    up[m++] = key_event(vk, false);
-    if (shift) up[m++] = key_event(VK_SHIFT, false);
+    up[m++] = key_event(vk, false, how);
+    if (shift) up[m++] = key_event(VK_SHIFT, false, how);
     inject(up, m, "let go of a typed key");
 
     if (went != n) {

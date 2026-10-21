@@ -111,6 +111,10 @@ std::string said(const SlotReading& r) {
     return r.state == SlotState::Count ? std::to_string(r.count) : slot_state_name(r.state);
 }
 
+/// How far the client prints a digit after the one before: its digits are 5
+/// pixels wide and 6 apart, a 1 included.
+constexpr int kDigitStep = 6;
+
 /// The digits as the game prints them -- white, with a dark outline -- drawn
 /// into `f` with their top-left at `x`, `y`.
 void draw_number(Frame& f, int x, int y, const std::string& digits) {
@@ -136,7 +140,7 @@ void draw_number(Frame& f, int x, int y, const std::string& digits) {
                     for (int dx = -1; dx <= 1 && !edge; ++dx) edge = lit(gx + dx, gy + dy);
                 if (edge) set(x + gx, y + gy, 0);
             }
-        x += g.width + 1;
+        x += kDigitStep;
     }
 }
 
@@ -145,6 +149,42 @@ void copy_rect(const Frame& from, int fx, int fy, Frame& to, int tx, int ty, int
         for (int x = 0; x < w; ++x)
             std::copy_n(&from.pixels[(static_cast<std::size_t>(fy + y) * from.width + fx + x) * 4], 4,
                         &to.pixels[(static_cast<std::size_t>(ty + y) * to.width + tx + x) * 4]);
+}
+
+/// The digits as the client draws them over an icon, by its own font: lit
+/// pixels white; the outline round them a soft darkening of what is under it,
+/// a fifth of its colour, and so is the rest of a 1's 5-pixel cell; 6 pixels
+/// from digit to digit. What the two live misreads look like on the saved
+/// frames -- draw_number's hard black ring does not reproduce them.
+void draw_game_number(Frame& f, int x, int y, const std::string& digits) {
+    const std::string dir = GlyphFont::default_dir() + "\\lower\\";
+    for (const char c : digits) {
+        Frame g;
+        if (!load_png(dir + c + ".png", g) || !g.valid()) return;
+        const auto lit = [&](int gx, int gy) {
+            if (gx < 0 || gy < 0 || gx >= g.width || gy >= g.height) return false;
+            const std::uint8_t* p = &g.pixels[(static_cast<std::size_t>(gy) * g.width + gx) * 4];
+            return (p[0] + p[1] + p[2]) / 3 > 128;
+        };
+        const auto at = [&](int px, int py) -> std::uint8_t* {
+            if (px < 0 || py < 0 || px >= f.width || py >= f.height) return nullptr;
+            return &f.pixels[(static_cast<std::size_t>(py) * f.width + px) * 4];
+        };
+        for (int gy = -1; gy <= g.height; ++gy)
+            for (int gx = -1; gx <= 5; ++gx) {
+                if (lit(gx, gy)) continue;
+                bool edge = false;
+                for (int dy = -1; dy <= 1 && !edge; ++dy)
+                    for (int dx = -1; dx <= 1 && !edge; ++dx) edge = lit(gx + dx, gy + dy);
+                if (!edge && g.width < 5 && gx >= g.width && gx < 5 && gy >= 0 && gy < g.height) edge = true;
+                if (std::uint8_t* p = edge ? at(x + gx, y + gy) : nullptr)
+                    for (int k = 0; k < 3; ++k) p[k] = static_cast<std::uint8_t>(p[k] / 5);
+            }
+        for (int gy = 0; gy < g.height; ++gy)
+            for (int gx = 0; gx < g.width; ++gx)
+                if (std::uint8_t* p = lit(gx, gy) ? at(x + gx, y + gy) : nullptr) p[0] = p[1] = p[2] = 255;
+        x += kDigitStep;
+    }
 }
 
 // ---------------------------------------------------------------- the frames
@@ -211,6 +251,92 @@ void test_picture() {
                 ms(t1 - t0), ms(t2 - t1));
     check(full.found && again.found && again.x == full.x && again.y == full.y,
           "found where it was, as along the bottom");
+}
+
+void test_picture_blank() {
+    section("Potions: the hotbar's picture keeps nothing of the screen under its see-through pixels (round 8)");
+    // A frame of loud colour, nothing like the bar's, with a label drawn into
+    // each slot's corner -- a white stroke and a dark ring round it -- so
+    // that the picture has labels to keep.
+    Frame f;
+    f.width = 1280;
+    f.height = 720;
+    f.pixels.assign(static_cast<std::size_t>(f.width) * f.height * 4, 255);
+    const auto px = [&](int x, int y) { return &f.pixels[(static_cast<std::size_t>(y) * f.width + x) * 4]; };
+    for (int y = 0; y < f.height; ++y)
+        for (int x = 0; x < f.width; ++x) {
+            std::uint8_t* p = px(x, y);
+            p[2] = static_cast<std::uint8_t>(200 + x % 50);    // red
+            p[1] = static_cast<std::uint8_t>(30 + y % 90);     // green
+            p[0] = 90;                                         // blue
+        }
+    constexpr int kSlotX = 475, kSlotY = 631;
+    int label_px = 0;
+    for (int row = 0; row < hotbar::kRows; ++row)
+        for (int col = 0; col < hotbar::kCols; ++col) {
+            const int sx = kSlotX + col * hotbar::kPitch, sy = kSlotY + row * hotbar::kPitch;
+            for (int y = 23; y <= 29; ++y)
+                for (int x = 26; x <= 30; ++x) {
+                    const bool stroke = x >= 27 && x <= 29 && y >= 24 && y <= 28;
+                    std::uint8_t* p = px(sx + x, sy + y);
+                    p[0] = p[1] = p[2] = stroke ? 250 : 20;
+                    ++label_px;
+                }
+        }
+    const Frame pic = hotbar_picture_from(f, kSlotX, kSlotY);
+    check(pic.width == hotbar::kPictureW && pic.height == hotbar::kPictureH, "the picture is cut");
+    if (!pic.valid()) return;
+    int clear = 0, coloured_clear = 0, labels = 0, frame_px = 0, wrong_rgb = 0, wrong_alpha = 0;
+    const int x0 = kSlotX - hotbar::kSlotDx, y0 = kSlotY - hotbar::kSlotDy;
+    for (int y = 0; y < pic.height; ++y)
+        for (int x = 0; x < pic.width; ++x) {
+            const std::uint8_t* q = &pic.pixels[(static_cast<std::size_t>(y) * pic.width + x) * 4];
+            const std::uint8_t* s = px(x0 + x, y0 + y);
+            // What the alpha is to be: the rounded corners and the slots
+            // see-through, the labels at kLabelAlpha, the rest the frame.
+            const bool corner = (x < 3 || x >= pic.width - 3) && (y < 3 || y >= pic.height - 3);
+            const int sx = x - hotbar::kSlotDx, sy = y - hotbar::kSlotDy;
+            const bool in_slot = sx >= 0 && sy >= 0 && sx % hotbar::kPitch < hotbar::kCell &&
+                                 sy % hotbar::kPitch < hotbar::kCell && sx / hotbar::kPitch < hotbar::kCols &&
+                                 sy / hotbar::kPitch < hotbar::kRows;
+            const int lx = in_slot ? sx % hotbar::kPitch : -1, ly = in_slot ? sy % hotbar::kPitch : -1;
+            const bool label = in_slot && lx >= 26 && lx <= 30 && ly >= 23 && ly <= 29;
+            const std::uint8_t want = corner || (in_slot && !label) ? 0 : label ? hotbar::kLabelAlpha : 255;
+            wrong_alpha += q[3] != want ? 1 : 0;
+            if (q[3] == 0) {
+                ++clear;
+                coloured_clear += q[0] || q[1] || q[2] ? 1 : 0;
+            } else {
+                labels += q[3] == hotbar::kLabelAlpha ? 1 : 0;
+                frame_px += q[3] == 255 ? 1 : 0;
+                wrong_rgb += std::equal(q, q + 3, s) ? 0 : 1;
+            }
+        }
+    const int slots = hotbar::kRows * hotbar::kCols * hotbar::kCell * hotbar::kCell;
+    check(wrong_alpha == 0 && labels == label_px,
+          fmt("its alpha as ever: the corners and slots see-through, %d label pixels at %d (%d wrong)", labels,
+              hotbar::kLabelAlpha, wrong_alpha));
+    check(coloured_clear == 0 && clear == 36 + slots - label_px,
+          fmt("every see-through pixel black -- %d of them, the 36 of the corners and the slots' but the "
+              "labels' -- %d with colour",
+              clear, coloured_clear));
+    check(wrong_rgb == 0 && frame_px > 6000,
+          fmt("the frame round the slots and the labels keep the screen's colours (%d of %d differ)", wrong_rgb,
+              frame_px + labels));
+    check(!hotbar_picture_from(f, 2, 2).valid() && !hotbar_picture_from(f, 1270, 700).valid(),
+          "a frame the picture would not fit in gives none");
+    // And the one that ships has nothing under its see-through pixels either.
+    Frame staged;
+    if (TemplateStore::load_one(hotbar::kPicture, exe_relative("configs/templates.ini"), staged)) {
+        int coloured = 0;
+        for (std::size_t i = 0; i + 3 < staged.pixels.size(); i += 4)
+            coloured += staged.pixels[i + 3] == 0 && (staged.pixels[i] || staged.pixels[i + 1] || staged.pixels[i + 2])
+                            ? 1
+                            : 0;
+        check(coloured == 0, fmt("the staged grabbed/hotbar_frame.png: %d see-through pixels with colour", coloured));
+    } else {
+        std::printf("  [skip] no grabbed/hotbar_frame.png staged beside this test\n");
+    }
 }
 
 void test_frame_png() {
@@ -547,6 +673,123 @@ void test_drawn() {
           "the key table: 1 at row 0 column 6, 6 at row 1 column 8, A at the start");
 }
 
+void test_game_digits() {
+    section("Potions: every slot, the game's potion icons and digits -- a 1 over a bright icon (round 8)");
+    // No saved frame: black, the shipped picture of the bar drawn at its
+    // place on 1280 x 720 -- its frame and labels -- and an empty slot's dark
+    // gradient in every slot.
+    Frame picture;
+    if (!TemplateStore::load_one(hotbar::kPicture, exe_relative("configs/templates.ini"), picture) ||
+        picture.width != hotbar::kPictureW || picture.height != hotbar::kPictureH) {
+        std::printf("  [skip] no grabbed/hotbar_frame.png staged beside this test\n");
+        return;
+    }
+    CountReader digits;
+    if (!digits.load(GlyphFont::default_dir())) {
+        std::printf("  [skip] no digits of the game's font here\n");
+        return;
+    }
+    const std::string images = ItemCatalog::default_dir();
+    std::vector<std::string> icons;
+    for (const char* folder : { "\\spend\\hp\\", "\\spend\\mana\\" })
+        for (const std::string& p : pngs_in(images + folder, "*.png")) icons.push_back(p);
+    if (images.empty() || icons.empty()) {
+        std::printf("  [skip] the game's potion icons are not installed here\n");
+        return;
+    }
+    constexpr int kPicX = 469, kPicY = 625;
+    Frame base;
+    base.width = 1280;
+    base.height = 720;
+    base.pixels.assign(static_cast<std::size_t>(base.width) * base.height * 4, 0);
+    for (std::size_t i = 3; i < base.pixels.size(); i += 4) base.pixels[i] = 255;
+    for (int y = 0; y < picture.height; ++y)
+        for (int x = 0; x < picture.width; ++x) {
+            const std::uint8_t* p = &picture.pixels[(static_cast<std::size_t>(y) * picture.width + x) * 4];
+            std::uint8_t* d = &base.pixels[(static_cast<std::size_t>(kPicY + y) * base.width + kPicX + x) * 4];
+            const int sx = x - hotbar::kSlotDx, sy = y - hotbar::kSlotDy;
+            const bool in_slot = sx >= 0 && sy >= 0 && sx % hotbar::kPitch < hotbar::kCell &&
+                                 sy % hotbar::kPitch < hotbar::kCell && sx / hotbar::kPitch < hotbar::kCols &&
+                                 sy / hotbar::kPitch < hotbar::kRows;
+            if (p[3] >= hotbar::kLabelAlpha) {
+                std::copy_n(p, 3, d);
+            } else if (in_slot) {
+                d[0] = d[1] = d[2] = static_cast<std::uint8_t>(6 + sy % hotbar::kPitch);   // 6 .. 39
+            }
+        }
+    const HotbarSpot bar = find_hotbar(base, picture);
+    check(bar.found && bar.x == kPicX + hotbar::kSlotDx && bar.y == kPicY + hotbar::kSlotDy,
+          fmt("the bar drawn from its picture is found at %d,%d (%.3f)", bar.x, bar.y, bar.score));
+    if (!bar.found) return;
+
+    const int counts[] = { 2, 7, 11, 21, 31, 41, 51, 61, 71, 81, 91, 99, 100, 101, 107, 110, 111, 117, 121, 211, 311,
+                           999, 1000 };
+    Frame f = base;
+    int used = 0, reads = 0, wrong = 0, lone_counts = 0, blank_counts = 0, egg_reads = 0, egg_wrong = 0;
+    std::string first_wrong, egg_said;
+    for (const std::string& path : icons) {
+        Frame icon;
+        if (!load_png(path, icon) || !icon.valid() || icon.width > hotbar::kCell || icon.height > hotbar::kCell)
+            continue;
+        ++used;
+        const std::string name = path.substr(path.find_last_of('\\') + 1);
+        const bool egg = name == "8820141.png";     // the boiled egg: slot 7's HP potion on 2026-10-20
+        for (int row = 0; row < hotbar::kRows; ++row)
+            for (int col = 0; col < hotbar::kCols; ++col) {
+                const ScreenRect s = bar.slot(row, col);
+                const std::uint32_t vk = hotbar::kKeys[row][col];
+                // The icon at the slot's 2,2, centred when smaller, its
+                // opaque pixels, the label's corner left as it is.
+                const int ox = 2 + (30 - icon.width) / 2, oy = 2 + (30 - icon.height) / 2;
+                for (int y = 0; y < icon.height; ++y)
+                    for (int x = 0; x < icon.width; ++x) {
+                        const std::uint8_t* p = &icon.pixels[(static_cast<std::size_t>(y) * icon.width + x) * 4];
+                        const int sx = ox + x, sy = oy + y;
+                        if (p[3] < TemplateMatcher::kOpaque || sx >= hotbar::kCell || sy >= hotbar::kCell ||
+                            (sx >= hotbar::kCell - hotbar::kLabelCorner && sy >= hotbar::kCell - hotbar::kLabelCorner))
+                            continue;
+                        std::copy_n(p, 3, &f.pixels[(static_cast<std::size_t>(s.y + sy) * f.width + s.x + sx) * 4]);
+                    }
+                Frame with_icon;
+                with_icon.width = with_icon.height = hotbar::kCell;
+                with_icon.pixels.assign(static_cast<std::size_t>(hotbar::kCell) * hotbar::kCell * 4, 255);
+                copy_rect(f, s.x, s.y, with_icon, 0, 0, hotbar::kCell, hotbar::kCell);
+
+                // Nothing printed is never a count; nor is a lone 1, which
+                // the client never prints.
+                blank_counts += read_slot(f, bar, vk, digits, picture).state == SlotState::Count ? 1 : 0;
+                draw_game_number(f, s.x + 2, s.y + 4, "1");
+                lone_counts += read_slot(f, bar, vk, digits, picture).state == SlotState::Count ? 1 : 0;
+                copy_rect(with_icon, 0, 0, f, s.x, s.y, hotbar::kCell, hotbar::kCell);
+
+                for (const int n : counts) {
+                    draw_game_number(f, s.x + 2, s.y + 4, std::to_string(n));
+                    const SlotReading r = read_slot(f, bar, vk, digits, picture);
+                    copy_rect(with_icon, 0, 0, f, s.x, s.y, hotbar::kCell, hotbar::kCell);
+                    ++reads;
+                    const bool right = r.state == SlotState::Count && r.count == n;
+                    if (egg && row == 0 && col == 6 && (n == 61 || n == 51 || n == 41 || n == 21 || n == 11)) {
+                        ++egg_reads;
+                        egg_wrong += right ? 0 : 1;
+                        egg_said += (egg_said.empty() ? "" : ", ") + std::to_string(n) + " " + said(r);
+                    }
+                    if (right) continue;
+                    ++wrong;
+                    if (first_wrong.empty())
+                        first_wrong = fmt(" -- e.g. %s in slot %d row %d: %d read %s", name.c_str(), col + 1, row + 1, n,
+                                          said(r).c_str());
+                }
+                copy_rect(base, s.x, s.y, f, s.x, s.y, hotbar::kCell, hotbar::kCell);
+            }
+    }
+    check(used >= 20, fmt("%d of the game's potion icons drawn into every slot", used));
+    if (egg_reads > 0)
+        check(egg_wrong == 0, "slot 7 (key 1) with the boiled egg: " + egg_said + " (61 read as 6 on 2026-10-20)");
+    check(wrong == 0, fmt("%d counts read over %d icons in all 18 slots: %d wrong", reads, used, wrong) + first_wrong);
+    check(lone_counts == 0, fmt("a lone 1 drawn over each: never a count (%d were)", lone_counts));
+    check(blank_counts == 0, fmt("nothing printed over each: never a count (%d were)", blank_counts));
+}
+
 // ------------------------------------------------------------- the warnings
 
 SlotReading count(int n) {
@@ -562,11 +805,54 @@ SlotReading empty() {
     return r;
 }
 
+/// Each reading is one look's (PotionWatch::look_of), fed once.
 int feed(PotionWatch& w, std::uint32_t vk, const std::vector<SlotReading>& seq, PotionWatch::Event::Kind kind) {
     int n = 0;
     for (const SlotReading& r : seq)
         for (const auto& ev : w.feed(vk, r)) n += ev.kind == kind ? 1 : 0;
     return n;
+}
+
+/// Every event of a run of looks, and on which look (0 on) each came.
+struct Fed {
+    std::vector<PotionWatch::Event> events;
+    std::vector<int>                look;
+    std::vector<int>                shown;      ///< what believed() said after each look; -1 none or no count
+
+    int of(PotionWatch::Event::Kind k) const {
+        return static_cast<int>(std::count_if(events.begin(), events.end(),
+                                              [&](const PotionWatch::Event& e) { return e.kind == k; }));
+    }
+    /// The look the first event of kind `k` came on; -1 none.
+    int first(PotionWatch::Event::Kind k) const {
+        for (std::size_t i = 0; i < events.size(); ++i)
+            if (events[i].kind == k) return look[i];
+        return -1;
+    }
+    const PotionWatch::Event* find(PotionWatch::Event::Kind k) const {
+        for (const auto& e : events)
+            if (e.kind == k) return &e;
+        return nullptr;
+    }
+};
+
+Fed run_looks(PotionWatch& w, std::uint32_t vk, const std::vector<int>& counts) {
+    Fed f;
+    for (std::size_t i = 0; i < counts.size(); ++i) {
+        for (const auto& ev : w.feed(vk, count(counts[i]))) {
+            f.events.push_back(ev);
+            f.look.push_back(static_cast<int>(i));
+        }
+        SlotReading b;
+        f.shown.push_back(w.believed(vk, b) && b.has_count() ? b.count : -1);
+    }
+    return f;
+}
+
+std::string seq_text(const std::vector<int>& counts) {
+    std::string s;
+    for (const int n : counts) s += (s.empty() ? "" : ",") + std::to_string(n);
+    return s;
 }
 
 void test_watch() {
@@ -581,7 +867,10 @@ void test_watch() {
         check(got.size() == 1 && got[0].kind == Kind::Low && got[0].count == 19 && got[0].vk == '1',
               "25, 22, 19, 19, 18, 17: exactly one 'sắp hết', at 19");
         check(feed(w, '1', { count(100) }, Kind::Low) == 0, "100: the next stack, nothing said");
-        check(feed(w, '1', { count(15), count(15) }, Kind::Low) == 1, "then 15, 15: a second one");
+        // 100 straight to 15 is a wild drop now (a fifth or less), so the
+        // stack is taken down a way it can go.
+        check(feed(w, '1', { count(60), count(30), count(15), count(15) }, Kind::Low) == 1,
+              "then 60, 30, 15, 15: a second one");
         check(feed(w, '1', { count(14), count(14), count(13), count(13) }, Kind::Low) == 0,
               "and not again while it goes on down");
         check(feed(w, '1', { count(22), count(16), count(16) }, Kind::Low) == 0,
@@ -631,6 +920,200 @@ void test_watch() {
         w.reset();
         check(feed(w, '1', { count(10), count(10) }, Kind::Low) == 1, "a new run: warned again");
         check(feed(w, '2', { count(10), count(10) }, Kind::Low) == 1, "each key on its own");
+    }
+}
+
+void test_wild() {
+    section("Potions: a misread is not believed -- one reading per look, wild drops held (round 8)");
+    using Kind = PotionWatch::Event::Kind;
+    // The five misreads of 2026-10-20, as the looks read them -- a trailing 1
+    // lost, 61 read as 6 for two looks, and then the count back: each raised
+    // "Sắp hết bình" then. Now nothing is said, the old count is shown
+    // meanwhile, and the misread is told once, with what it read and when.
+    for (const std::vector<int>& seq : { std::vector<int>{ 62, 6, 6, 60 }, std::vector<int>{ 52, 5, 5, 50 },
+                                         std::vector<int>{ 42, 4, 4, 40 }, std::vector<int>{ 32, 3, 3, 28 },
+                                         std::vector<int>{ 22, 2, 2, 19, 19 } }) {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', seq);
+        const PotionWatch::Event* mis = f.find(Kind::Misread);
+        const bool shown_old = f.shown[1] == seq[0] && f.shown[2] == seq[0];
+        const bool last_low = seq.size() == 5;      // 22,2,2,19,19: under the mark twice at the end
+        check(f.of(Kind::Wild) == 2 && f.of(Kind::Misread) == 1 && mis && mis->count == seq[1] &&
+                  mis->was == seq[0] && mis->back == seq[3] && f.first(Kind::Misread) == 3 && shown_old &&
+                  f.of(Kind::WildBelieved) == 0 &&
+                  (last_low ? f.of(Kind::Low) == 1 && f.first(Kind::Low) == 4 && f.find(Kind::Low)->count == 19
+                            : f.of(Kind::Low) == 0),
+              "the live misread " + seq_text(seq) + ": two looks held, " + std::to_string(seq[0]) +
+                  " still shown, one misread told on the look it came back" +
+                  (last_low ? ", and 'sắp hết' only at the second 19" : ", no 'sắp hết'"));
+    }
+    // A real drop -- potions given away -- is believed on the third look that
+    // reads it, and warned of then: the three looks agreed under the mark.
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 62, 6, 6, 6 });
+        const PotionWatch::Event* wb = f.find(Kind::WildBelieved);
+        check(wb && wb->count == 6 && wb->was == 62 && f.first(Kind::WildBelieved) == 3 &&
+                  f.of(Kind::Low) == 1 && f.first(Kind::Low) == 3 && f.shown[3] == 6 && f.shown[2] == 62,
+              "62, 6, 6, 6: believed on the third 6, and 'sắp hết' with it");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 62, 6, 5, 4 });
+        check(f.of(Kind::WildBelieved) == 1 && f.first(Kind::WildBelieved) == 3 && f.shown[3] == 4,
+              "62, 6, 5, 4 -- drinking on: believed on the third look, at 4");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 62, 6, 7, 6 });
+        check(f.of(Kind::WildBelieved) == 0 && f.of(Kind::Low) == 0 && f.shown[3] == 62,
+              "62, 6, 7, 6: the 7 starts the run again, nothing believed");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 62, 6, 6, 62 });
+        check(f.of(Kind::Misread) == 1 && f.of(Kind::Low) == 0 && f.shown[3] == 62,
+              "62, 6, 6, 62: a misread, no 'sắp hết'");
+    }
+    // An ordinary run down: the warning needs two looks under the mark, and
+    // does not need them to read the same -- the count falls while the
+    // player drinks.
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 25, 22, 19, 18, 17 });
+        check(f.of(Kind::Low) == 1 && f.first(Kind::Low) == 3 && f.find(Kind::Low)->count == 18,
+              "25, 22, 19, 18, 17: one 'sắp hết', at 18 -- no two looks the same");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 62, 6, 62 });
+        check(f.of(Kind::Misread) == 1 && f.of(Kind::Wild) == 1 && f.events.size() == 2 && f.shown[2] == 62,
+              "62, 6, 62: one look held, then a misread, and nothing else");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 24, 5, 24 });
+        check(f.of(Kind::Low) == 0 && f.of(Kind::Wild) == 0 && f.shown[2] == 24,
+              "24, 5, 24: not a fifth (25 > 24), so believed, but one look under the mark is no 'sắp hết'");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        const Fed f = run_looks(w, '1', { 8, 1, 1 });
+        check(f.of(Kind::Wild) == 0 && f.of(Kind::Low) == 1 && f.first(Kind::Low) == 1 &&
+                  f.find(Kind::Low)->count == 1,
+              "8, then 1: under 10 nothing is a wild drop -- 8 and 1 are two looks under the mark, one 'sắp hết'");
+    }
+    // A look that is no count neither confirms a wild drop nor clears it --
+    // not when the slot has been covered long enough to be believed so
+    // either: the stack is still there, out of sight, and the last count
+    // believed is what the next is told from (BA rule 4; the round 8
+    // tester's C3 and C5).
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        SlotReading covered;
+        covered.state = SlotState::NoHotbar;
+        std::vector<PotionWatch::Event> got;
+        bool held_through = true;
+        int look = 0;
+        for (const SlotReading& r : { count(62), count(6), covered, covered, count(60) }) {
+            for (const auto& ev : w.feed('1', r)) got.push_back(ev);
+            ++look;
+            if (look >= 2 && look <= 4) held_through = held_through && w.holding('1');
+        }
+        int wild = 0, misread = 0;
+        const PotionWatch::Event* mis = nullptr;
+        for (const auto& ev : got) {
+            wild += ev.kind == Kind::Wild ? 1 : 0;
+            if (ev.kind == Kind::Misread) {
+                ++misread;
+                mis = &ev;
+            }
+        }
+        SlotReading b;
+        check(wild == 1 && misread == 1 && mis && mis->count == 6 && mis->was == 62 && mis->back == 60 &&
+                  held_through && !w.holding('1') && w.believed('1', b) && b.state == SlotState::Count &&
+                  b.count == 60 && got.size() == 2,
+              "62, 6, the bar covered on two looks, 60: the 6 held through the cover, then told as a misread of 62");
+    }
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        SlotReading covered;
+        covered.state = SlotState::NoHotbar;
+        std::vector<PotionWatch::Event> got;
+        for (const SlotReading& r : { count(62), covered, covered, count(6), count(6) })
+            for (const auto& ev : w.feed('1', r)) got.push_back(ev);
+        int wild = 0, low = 0;
+        for (const auto& ev : got) {
+            wild += ev.kind == Kind::Wild ? 1 : 0;
+            low += ev.kind == Kind::Low ? 1 : 0;
+        }
+        check(wild == 2 && low == 0 && w.holding('1'),
+              "62, the bar covered on two looks, 6, 6: a drop from 62 all the same -- held, no 'sắp hết'");
+        std::vector<PotionWatch::Event> third = w.feed('1', count(6));
+        SlotReading b;
+        check(third.size() == 2 && third[0].kind == Kind::WildBelieved && third[0].was == 62 &&
+                  third[1].kind == Kind::Low && w.believed('1', b) && b.count == 6,
+              "and a third 6: believed, with 'sắp hết'");
+        SlotReading unread;
+        unread.state = SlotState::Unreadable;
+        PotionWatch u;
+        u.set_warn_below(20);
+        int misreads = 0;
+        for (const SlotReading& r : { count(41), count(4), unread, unread, unread, count(40) })
+            for (const auto& ev : u.feed('1', r)) misreads += ev.kind == Kind::Misread ? 1 : 0;
+        check(misreads == 1, "41, 4, three unreadable looks, 40: a misread too");
+    }
+    {
+        // The slot believed empty -- two looks -- is a stack gone: the next
+        // count is a new stack, believed at once.
+        PotionWatch w;
+        w.set_warn_below(20);
+        std::vector<PotionWatch::Event> got;
+        for (const SlotReading& r : { count(62), empty(), empty(), count(6), count(6) })
+            for (const auto& ev : w.feed('1', r)) got.push_back(ev);
+        int wild = 0, low = 0, out = 0;
+        for (const auto& ev : got) {
+            wild += ev.kind == Kind::Wild ? 1 : 0;
+            low += ev.kind == Kind::Low ? 1 : 0;
+            out += ev.kind == Kind::Out ? 1 : 0;
+        }
+        SlotReading b;
+        check(wild == 0 && out == 1 && low == 1 && w.believed('1', b) && b.count == 6,
+              "62, empty, empty, 6, 6: 'hết bình', then a new stack of 6 believed at once, and 'sắp hết' on the second");
+    }
+    // A look that is no count between two under the mark breaks the pair.
+    {
+        PotionWatch w;
+        w.set_warn_below(20);
+        SlotReading covered;
+        covered.state = SlotState::NoHotbar;
+        check(feed(w, '1', { count(25), count(18), covered, count(17) }, Kind::Low) == 0,
+              "18, the hotbar covered, 17: not two looks in a row, no 'sắp hết'");
+        check(feed(w, '1', { count(16) }, Kind::Low) == 1, "and 16 on the next look: now");
+    }
+    // A look's two frames make its one reading.
+    {
+        const SlotReading a = count(27), b = count(27), c = count(26);
+        SlotReading single;
+        single.state = SlotState::Single;
+        single.count = 1;
+        check(PotionWatch::look_of(a, b).state == SlotState::Count && PotionWatch::look_of(a, b).count == 27,
+              "two frames that agree: their reading");
+        check(PotionWatch::look_of(a, c).state == SlotState::Unreadable &&
+                  PotionWatch::look_of(empty(), single).state == SlotState::Unreadable,
+              "two that do not: unreadable -- the slot changed between them, or one misread it");
+        check(PotionWatch::look_of(empty(), empty()).state == SlotState::Empty, "two empties: empty");
     }
 }
 
@@ -748,12 +1231,15 @@ void test_potions(void (*check_fn)(bool, const std::string&), void (*section_fn)
     g_check = check_fn;
     g_section = section_fn;
     test_picture();
+    test_picture_blank();
     test_frame_png();
     test_1024();
     test_rounds();
     test_covered();
     test_part_covered();
     test_drawn();
+    test_game_digits();
     test_watch();
+    test_wild();
     test_texts_and_settings();
 }
