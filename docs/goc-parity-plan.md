@@ -487,11 +487,23 @@ BA → coder → reviewer → tester, with a live test on the player's client wh
 
 - **Party leader (P2-4):** tell who leads the way GoC does, from the crown it draws on a party slot: GoC's inven/0 and inven/1 Party_King_My.spr (your slot: you lead) and Party_King_Other.spr (another member leads). With "Chỉ mời khi đang làm chủ party" ticked, invite only when your own crown is seen, and log why when no crown is seen at all.
 - **Thử tìm (`gobot_cli --trash --dry`):** stays as it is. It opens the bag with the bag key, pages through it with the bag's own buttons, reads every slot and says what a pass would do. It never drags to the bin, right-clicks or confirms anything.
-- **Alone with the leader tick on (P2-4):** invite, to start a party, as GoC does. Only when GoBot is sure you are alone: a member whose leader's panel is hidden must not read as alone.
+- **Alone with the leader tick on (P2-4):** invite, to start a party, as GoC does. Only when GoBot is sure you are alone: a member whose leader's panel is hidden must not read as alone. *(Simplified on 2026-10-21, below.)*
 - **Jumping (P1-8, P2-7, P3-2):** the game's jump is the Up arrow; a double jump is Up twice; a high jump is Ctrl + Up.
 - **Characters for the live fight tests:** one warrior (melee) and one mage (ranged).
 - **Self-name match, fix round 4:** parked. Your own position now comes from packets (P0-2), so P0-3 replaces finding your name plate on screen; the parked branch stays for reference.
 - **The live runner** may run fight commands for the tests: `gobot_cli --hunt N`, a one-press jump test, and a hunt with the macro.
+- **Skipped: buying potions, bag buffs and junk, pet care, avatar, and the EXP meter** (P3-4, P3-7, P3-5, P3-6 and P3-12). They are not built unless the player asks for them again. P3-8 was already left out. The rest of Phase 3 stays: working area, return to the spot, waypoints, the previous map and the map attribute byte (P3-1, P3-2, P3-3, P3-16), then party extras, follow, profiles, remote commands and the language and theme (P3-10, P3-13, P3-9, P3-11, P3-15).
+
+## Decisions by the player (2026-10-21)
+
+- **Alone with the leader tick on (P2-4), simplified:** "you are alone when you are not in a party, it's that simple". The game shows a party with the members' panels (GoC's Dialog_PartyInfo) and the crowns.
+  - Alone means no member panel and no crown.
+  - With "Chỉ mời khi đang làm chủ tổ đội" ticked, GoBot invites when it reads Alone or sees your own crown.
+  - Tự chat's "Chỉ khi chưa có tổ đội" sends when it reads Alone.
+  - This replaces the "only when sure" rule of 2026-10-19. GoBot no longer tries to guess whether a game window hides the panels, so a window over them can make it read Alone while you are in a party. That is accepted.
+- **Revive with no ticket:** no extra warning when Tự hồi sinh is on and the bag has no revive ticket. Revive stays as built:
+  - it uses only the middle option, the ticket, then Xác Nhận;
+  - with no ticket, it tries 3 times, then stops the bot and leaves the character for you.
 
 ## Questions for the player (2026-10-17), answered 2026-10-18
 
