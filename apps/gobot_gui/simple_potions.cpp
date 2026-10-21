@@ -238,20 +238,17 @@ void GuiApp::potions_tick() {
             if (!ui.watch.holding(vk)) ui.wild_frames.erase(vk);
             // The log: only when what is believed changes.
             SlotReading now;
-            if (!ui.watch.believed(vk, now)) continue;
+            const bool have = ui.watch.believed(vk, now);
             {
                 // For the black box after a death: what the slot was last
-                // believed to hold, and when it was read.
+                // believed to hold, and when a look last read it so. A look
+                // that read something else -- the hotbar covered, the slot
+                // unreadable, a wild drop held -- leaves that time as it was,
+                // and is told beside it (R8R-4).
                 std::lock_guard<std::mutex> lock(potion_slots_mutex_);
-                const auto seen = std::find_if(potion_slots_.begin(), potion_slots_.end(),
-                                               [&](const PotionSlotSeen& s) { return s.key == key; });
-                if (seen != potion_slots_.end()) {
-                    seen->said = said(now);
-                    seen->read_ms = looked;
-                } else {
-                    potion_slots_.push_back(PotionSlotSeen{ key, said(now), looked });
-                }
+                potion_slots_.note(key, r, have, now, looked);
             }
+            if (!have) continue;
             const auto was = ui.logged.find(vk);
             if (was != ui.logged.end() && was->second.same(now)) continue;
             const std::string before = was == ui.logged.end() ? std::string{} : " (was " + said(was->second) + ")";
@@ -357,16 +354,7 @@ void GuiApp::potions_tick() {
 
 std::string GuiApp::potion_slots_line(std::uint64_t now) const {
     std::lock_guard<std::mutex> lock(potion_slots_mutex_);
-    if (potion_slots_.empty()) return {};
-    std::string line = "Potion slots:";
-    for (std::size_t i = 0; i < potion_slots_.size(); ++i) {
-        const PotionSlotSeen& s = potion_slots_[i];
-        const std::uint64_t ago = now > s.read_ms ? now - s.read_ms : 0;
-        char buf[48];
-        std::snprintf(buf, sizeof buf, " (read %.0f s earlier)", static_cast<double>(ago) / 1000.0);
-        line += (i ? ", key " : " key ") + s.key + " " + s.said + buf;
-    }
-    return line;
+    return potion_slots_.line(now);
 }
 
 void GuiApp::simple_potion_stock(const MacroKey& key) {

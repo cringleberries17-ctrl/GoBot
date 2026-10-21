@@ -281,6 +281,45 @@ private:
     int warn_below_ = 20;
 };
 
+/// For the black box written after a death: what each potion key's slot was
+/// last believed to hold, and when a look last read it so -- "Potion slots:
+/// key 1 16 (read 31 s earlier; last look 2 s earlier: no hotbar), key 2 40
+/// (read 1 s earlier)". A press the black box shows with the count unchanged
+/// is one the game did not drink -- unless the count is old: a look that did
+/// not read what is believed (the hotbar covered, the slot unreadable, a wild
+/// drop held) leaves that and its time as they were, and is told beside them
+/// (R8R-4). No clock of its own, and not thread-safe: the GUI keeps it under
+/// its own lock.
+class PotionSlotLog {
+public:
+    /// One look at key `key`'s slot, back at `now` (any steady clock, the one
+    /// line() is asked on): `look` is what the look itself read
+    /// (PotionWatch::look_of), `have_believed` and `believed` what the watch
+    /// believes of the key once that look was fed to it
+    /// (PotionWatch::believed). What is believed counts as read at `now` only
+    /// when the look says the same (SlotReading::same). A key with nothing
+    /// believed yet is left out.
+    void note(const std::string& key, const SlotReading& look, bool have_believed, const SlotReading& believed,
+              std::uint64_t now);
+    /// The line: each key in the order it was first believed, "key 1 16
+    /// (read 31 s earlier)", and "; last look 2 s earlier: no hotbar" inside
+    /// the brackets when a newer look read something else. Empty when nothing
+    /// is believed of any key.
+    std::string line(std::uint64_t now) const;
+    /// A new run: nothing read yet.
+    void clear() { keys_.clear(); }
+
+private:
+    struct Seen {
+        std::string   key;          ///< the key's name, as the log writes it
+        std::string   said;         ///< what its slot is believed to hold
+        std::uint64_t read_ms = 0;  ///< when a look last read it so
+        std::string   last;         ///< what a newer look read instead; empty when none did
+        std::uint64_t last_ms = 0;  ///< when
+    };
+    std::vector<Seen> keys_;
+};
+
 /// What the Đánh quái tab says under a potion row, in Vietnamese: "Còn 27
 /// bình (ô phím 1)", "Ô phím 1 đang trống", "Chưa đọc được số bình", "Phím Q
 /// không có trên thanh phím". `key` is the key as the tab writes it.

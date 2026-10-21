@@ -32,6 +32,7 @@
 #include "gobot/party_hud.hpp"
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
+#include "gobot/potion_stock.hpp"
 #include "gobot/vitals_reader.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/hotkeys.hpp"
@@ -495,14 +496,20 @@ private:
     void stop_chat(bool quit = true, bool wait = true);
     void chat_loop();
     void say_chat(const std::string& line);
-    /// A line Tự chat has just said, for the party worker: read back off the
-    /// chat it is our own words, not somebody asking for an invitation.
+    /// A line whose sending Enter Tự chat is about to press -- said, or on
+    /// its way however late the game takes that Enter -- for the party worker
+    /// (ChatSender::on_send_pressed): read back off the chat it is our own
+    /// words, not somebody asking for an invitation. Kept in memory, and in
+    /// SaidLately's file for a party watcher in another process: this GoBot
+    /// started again, gobot_cli --autoparty (R8bR-1).
     void remember_said(const std::string& typed);
     /// The lines said in the last half hour, each with when, on now_ms()'s
-    /// clock: for PartyChat::without_own.
+    /// clock: for PartyChat::without_own. This run's, and those in
+    /// SaidLately's file -- a run of GoBot before this one, gobot_cli --chat.
     std::vector<std::pair<std::string, std::uint64_t>> said_lately();
-    /// When the last line was said, a Gửi thử's among them, on now_ms()'s
-    /// clock; 0 for none yet.
+    /// When the last of those lines' sending Enter went down, a Gửi thử's and
+    /// another process's among them, on now_ms()'s clock; 0 for none in the
+    /// last half hour.
     std::uint64_t last_said_ms();
 
     std::thread              chat_thread_;
@@ -1078,19 +1085,14 @@ private:
     struct PotionsUiFree { void operator()(PotionsUi* ui) const; };
     std::unique_ptr<PotionsUi, PotionsUiFree> potions_ui_;
     /// For the black box written after a death (alert): what each potion
-    /// key's slot was last believed to hold, and how long before `now` it was
-    /// read -- "Potion slots: key 1 16 (read 31 s earlier), key 2 40 (read 1
-    /// s earlier)". A press the black box shows with the count unchanged is
-    /// one the game did not drink. Empty when nothing was read this run. From
-    /// any thread.
+    /// key's slot was last believed to hold, and how long before `now` a look
+    /// read it so -- "Potion slots: key 1 16 (read 31 s earlier; last look 2 s
+    /// earlier: no hotbar), key 2 40 (read 1 s earlier)" (PotionSlotLog). A
+    /// press the black box shows with the count unchanged is one the game did
+    /// not drink. Empty when nothing was read this run. From any thread.
     std::string potion_slots_line(std::uint64_t now) const;
-    struct PotionSlotSeen {
-        std::string   key;          ///< the key's name, as the log writes it
-        std::string   said;         ///< what its slot was believed to hold
-        std::uint64_t read_ms = 0;  ///< when that look came back, on now_ms()'s clock
-    };
     mutable std::mutex          potion_slots_mutex_;
-    std::vector<PotionSlotSeen> potion_slots_;      ///< under potion_slots_mutex_
+    PotionSlotLog               potion_slots_;      ///< under potion_slots_mutex_, on now_ms()'s clock
 
     // ---- closing stray popups ----
     /// "Tự đóng thông báo": during a run, the few popups on a fixed list --

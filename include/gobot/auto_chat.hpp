@@ -488,6 +488,12 @@ std::string chat_machine_note(void* game_window);
 /// have shown it. Whenever the sender cannot show the line shut and empty, it
 /// says so (Result::left_open), and whoever runs it keeps everything else
 /// that presses keys held off until a look does: see ChatDoubt.
+///
+/// A line not seen sent may still go: a game that takes the sending Enter a
+/// second or two late sends the line after the looks have given up on it.
+/// So whoever must know what GoBot itself said -- the party worker, which
+/// reads the chat -- is told just before that Enter goes down
+/// (on_send_pressed), not by the result.
 class ChatSender {
 public:
     using Grab = std::function<bool(Frame&)>;
@@ -509,6 +515,22 @@ public:
     void set_guard(Guard g) { guard_ = std::move(g); }
     void set_ready_check(Ready r) { ready_ = std::move(r); }
     void on_report(Report r) { report_ = std::move(r); }
+    /// Called once a line, just before the Enter that sends it goes down --
+    /// on the look that shows the text in the open line and no dialog, with
+    /// the game in front: the line is on its way to the chat from that key,
+    /// however late the game takes it and whether or not a look sees it go
+    /// (Result::sent). Before the key, not after it: a game that acts on the
+    /// key-down shows the line while the key is still held, and chat.ini's
+    /// holds go up to half a second. Never for an Enter that opens the line or
+    /// closes an empty one. Called even when that Enter then does not go in
+    /// (the game lost the front at that moment): a line told of that was never
+    /// said costs the party worker no more than one the game drops. The GUI
+    /// remembers the line then, in its memory and in SaidLately's file, for
+    /// the party worker (PartyChat::without_own), which may read it off the
+    /// chat before send() returns; gobot_cli --chat puts it in the file. Kept
+    /// quick: the Enter waits for it.
+    using SendPressed = std::function<void()>;
+    void on_send_pressed(SendPressed p) { send_pressed_ = std::move(p); }
     /// What an empty line showed when another sender cleared it (its
     /// Result::empty_ink), for closing that line later. -1 for not known.
     void set_empty_ink(int px) { empty_ink_ = px; }
@@ -543,7 +565,16 @@ public:
     void set_hands(Hands h) { hands_ = std::move(h); }
 
     struct Result {
+        /// The line went, as far as the looks after its sending Enter could
+        /// tell: the line shut, or stayed open emptied -- or, with the bar out
+        /// of sight, most likely (left_open with it). What sends and failures
+        /// are counted by.
         bool        sent = false;
+        /// The Enter that sends the line went in (on_send_pressed was called
+        /// just before it): the game may send the line, even late, whether or
+        /// not a look saw it go (`sent`). False when that Enter was never
+        /// pressed -- nothing pressed, or the line ended before it.
+        bool        send_pressed = false;
         /// Nothing was pressed: the screen was not ready for the first Enter.
         /// `wait_ms` says when to look again, `trouble` why.
         bool        not_now = false;
@@ -659,6 +690,7 @@ private:
     Guard                guard_;
     Ready                ready_;
     Report               report_;
+    SendPressed          send_pressed_;
     std::string          debug_dir_;
     Hands                hands_;
     std::atomic<bool>    cancelled_{false};
@@ -731,6 +763,81 @@ private:
     std::uint64_t next_ms_ = 0;
     int           empty_ink_ = -1;  ///< what the line showed once cleared, if measured
     int           rub_ = 0;
+};
+
+/// The system clock, in ms since 1970: for SaidLately.
+std::uint64_t wall_ms();
+
+/// What GoBot has typed into the chat lately, kept in a small file --
+/// %LOCALAPPDATA%\GoBot\said_lately.txt, where the GUI and gobot_cli both
+/// keep it -- for whatever reads the chat for somebody asking to be invited
+/// (PartyChat::without_own) in a process that did not type the line: the GUI
+/// started again while a line of the run before is still on the chat -- a
+/// new version, unzipped into a new folder, among them -- or started after
+/// gobot_cli --chat; gobot_cli --autoparty beside the GUI's Tự chat or
+/// gobot_cli --chat (R8bR-1). Taken for somebody asking, the player's own
+/// "pt" would have the party worker invite the player's own row, or a player
+/// whose name is like it. The GUI keeps this run's lines in memory as well,
+/// for a file it cannot write.
+///
+/// A row a line, written just before its sending Enter goes down
+/// (ChatSender::on_send_pressed): the steady clock then (now_ms(), which runs
+/// from the machine's start and is the same in every process on it), the
+/// system clock then, in ms, and the text. Readers go by the steady time; the
+/// system clock tells only whether the machine has been started again since,
+/// which makes the steady time another start's and the line long gone from
+/// the game. A row that does not read, or is not finished, is passed over.
+/// Rows are appended -- quick, with the Enter waiting -- and the file is cut
+/// down to the rows still of use once it has grown past kCutAt.
+class SaidLately {
+public:
+    struct Line {
+        std::string   text;
+        std::uint64_t steady_ms = 0;    ///< now_ms() at the sending Enter
+        std::uint64_t wall_ms = 0;      ///< wall_ms() then
+    };
+    /// Each text with when it was typed, on now_ms()'s clock: what
+    /// PartyChat::without_own takes.
+    using Said = std::vector<std::pair<std::string, std::uint64_t>>;
+
+    explicit SaidLately(std::string path) : path_(std::move(path)) {}
+    /// %LOCALAPPDATA%\GoBot\said_lately.txt, outside the program folder as
+    /// SecretStore's file is: a new version unzipped into a new folder finds
+    /// it. chat_debug\said_lately.txt beside the executable when this Windows
+    /// user's folder is not known.
+    static std::string default_path();
+    const std::string& path() const { return path_; }
+
+    /// A line whose sending Enter goes down now: `steady` on now_ms()'s
+    /// clock, `wall` on wall_ms()'s. False when it could not be written.
+    bool add(const std::string& typed, std::uint64_t steady, std::uint64_t wall) const;
+    /// What was typed in the last kKeepMs, on this start of the machine, the
+    /// newest kKeep at most, oldest first. Empty when there is no file.
+    Said read(std::uint64_t steady_now, std::uint64_t wall_now) const;
+
+    static constexpr std::size_t   kKeep = 20;
+    /// Half an hour, as PartyChat::kOwnLineMs.
+    static constexpr std::uint64_t kKeepMs = 30 * 60'000;
+    /// Two readings of when the steady clock started, each the system clock
+    /// less the steady clock, this close together are the same start of the
+    /// machine; further apart, a restart (or the system clock set by hand).
+    static constexpr std::int64_t  kSameStartMs = 10'000;
+    /// The file is cut down once it has grown past this many bytes.
+    static constexpr long          kCutAt = 8 * 1024;
+    /// The most of a line's text kept: more than the longest line has.
+    static constexpr std::size_t   kLongestText = 400;
+
+    // The parts, for tests.
+    /// One row, with its line end; a line end in the text becomes a space.
+    static std::string format(const Line& l);
+    /// The rows that read, in the order written; an unfinished last row is
+    /// left out.
+    static std::vector<Line> parse(const std::string& text);
+    /// The rows still of use at `steady_now`/`wall_now`, as read() keeps them.
+    static std::vector<Line> kept(const std::vector<Line>& lines, std::uint64_t steady_now, std::uint64_t wall_now);
+
+private:
+    std::string path_;
 };
 
 /// Programs that turn typed letters into Vietnamese -- Unikey, EVKey, OpenKey

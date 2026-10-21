@@ -1407,12 +1407,14 @@ ChatSender::Result ChatSender::send(const ChatText& line) {
     // What the trace says it came to, when it does not say already.
     r.trace.inject = settings_.inject;
     if (r.trace.outcome.empty())
-        r.trace.outcome = r.sent        ? "sent"
-                        : r.not_now     ? "not started"
-                        : r.stop        ? "not sent, Tu chat stops"
-                        : r.aborted     ? "put off"
-                        : r.left_open   ? "not sent, the line may be open"
-                                        : "not sent";
+        r.trace.outcome = r.sent         ? "sent"
+                        : r.not_now      ? "not started"
+                        : r.send_pressed ? (r.stop ? "not seen sent (the game may send it late), Tu chat stops"
+                                                   : "not seen sent (the game may send it late)")
+                        : r.stop         ? "not sent, Tu chat stops"
+                        : r.aborted      ? "put off"
+                        : r.left_open    ? "not sent, the line may be open"
+                                         : "not sent";
     return r;
 }
 
@@ -1904,7 +1906,18 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     // On the look just taken, which shows the line open with the text in it
     // and no dialog.
     r.trace.send_hold = hold(50, 50);
-    if (!focused() || !enter(false, r.trace.send_hold)) return lost_front(r.typed + 2);
+    if (!focused()) return lost_front(r.typed + 2);
+    // The line is on its way to the chat from this key, and whoever runs the
+    // sender is told before it goes down -- not after its hold, nor when the
+    // looks below end: a game that acts on the key-down shows the line while
+    // the key is held, chat.ini's hold up to half a second, and a game that
+    // takes the key a second or two late shows it while the looks are still
+    // going, or after they have given up on it (R8R2-1, R8bR-4). An Enter
+    // that then does not go in leaves a line told of that was never said,
+    // which costs no more than one the game drops.
+    if (send_pressed_) send_pressed_();
+    if (!enter(false, r.trace.send_hold)) return lost_front(r.typed + 2);
+    r.send_pressed = true;
 
     // ---- closed? -------------------------------------------------------------
     // Watched for a second whatever a stop says: the line has gone, and what
@@ -1947,9 +1960,11 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
             r.sent = true;
             tidy(r, 0);
         } else {
-            // The text is still there: the Enter did not take. Rubbed out and
-            // closed rather than pressed again, which could send it twice.
-            r.trouble = "Bấm Enter mà câu chưa đi — đã xoá câu.";
+            // The text is still there: the Enter has not taken -- dropped, or
+            // to be taken late, which sends the line all the same. Rubbed out
+            // and closed rather than pressed again, which could send it twice.
+            r.trouble = "Bấm Enter mà chưa thấy câu đi — đã xoá chữ còn trong ô chat. Game nhận Enter trễ thì "
+                        "câu vẫn được gửi.";
             tidy(r, r.typed + clear);
         }
         if (r.left_open) {
@@ -2031,6 +2046,140 @@ bool ChatDoubt::step(ChatSender& sender, std::uint64_t now) {
 void ChatDoubt::end(const std::string& why) {
     active_ = false;
     if (hooks_.release) hooks_.release(why);
+}
+
+// ------------------------------------------------------------ said lately
+
+std::uint64_t wall_ms() {
+    using namespace std::chrono;
+    return static_cast<std::uint64_t>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
+}
+
+namespace {
+
+/// A whole number from `at` up to the space after it, which is passed too;
+/// false for anything else.
+bool said_number(const std::string& row, std::size_t& at, std::uint64_t& out) {
+    const std::size_t from = at;
+    std::uint64_t n = 0;
+    while (at < row.size() && row[at] >= '0' && row[at] <= '9') {
+        if (n > (~0ull - 9) / 10) return false;
+        n = n * 10 + static_cast<std::uint64_t>(row[at] - '0');
+        ++at;
+    }
+    if (at == from || at >= row.size() || row[at] != ' ') return false;
+    ++at;
+    out = n;
+    return true;
+}
+
+/// The whole of a small file; empty when there is none. A megabyte at most.
+std::string said_file_text(const std::string& path) {
+    std::string text;
+    std::FILE* f = open_file(path, "rb");
+    if (f == nullptr) return text;
+    char buf[4096];
+    for (std::size_t n = 0; text.size() < (1u << 20) && (n = std::fread(buf, 1, sizeof buf, f)) > 0;)
+        text.append(buf, n);
+    std::fclose(f);
+    return text;
+}
+
+} // namespace
+
+std::string SaidLately::default_path() {
+    // Outside the program folder, as the webhook's SecretStore keeps its file:
+    // a new version is unzipped into a new folder (START-HERE, UPDATING), and
+    // the line the old one typed is still on the chat when it starts. Beside
+    // the executable only when this Windows user's folder is not known.
+    static const std::string path = [] {
+        wchar_t env[MAX_PATH * 2] = {};
+        const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", env, static_cast<DWORD>(std::size(env)));
+        if (n > 0 && n < std::size(env)) return wide_to_utf8(std::wstring(env) + L"\\GoBot\\said_lately.txt");
+        return exe_relative("chat_debug\\said_lately.txt");
+    }();
+    return path;
+}
+
+std::string SaidLately::format(const Line& l) {
+    std::string text = l.text.substr(0, kLongestText);
+    for (char& c : text)
+        if (c == '\r' || c == '\n') c = ' ';
+    return std::to_string(l.steady_ms) + " " + std::to_string(l.wall_ms) + " " + text + "\n";
+}
+
+std::vector<SaidLately::Line> SaidLately::parse(const std::string& text) {
+    std::vector<Line> out;
+    // A row is finished by its line end: one without, being written as this
+    // reads, may hold half its text.
+    for (std::size_t start = 0, end = 0; (end = text.find('\n', start)) != std::string::npos; start = end + 1) {
+        std::string row = text.substr(start, end - start);
+        if (!row.empty() && row.back() == '\r') row.pop_back();
+        Line l;
+        std::size_t at = 0;
+        if (!said_number(row, at, l.steady_ms) || !said_number(row, at, l.wall_ms)) continue;
+        l.text = row.substr(at);
+        if (!l.text.empty()) out.push_back(std::move(l));
+    }
+    return out;
+}
+
+std::vector<SaidLately::Line> SaidLately::kept(const std::vector<Line>& lines, std::uint64_t steady_now,
+                                               std::uint64_t wall_now) {
+    // When the steady clock started, by the system clock: now, and as each
+    // row saw it.
+    const auto start_of = [](std::uint64_t wall, std::uint64_t steady) {
+        return static_cast<std::int64_t>(wall) - static_cast<std::int64_t>(steady);
+    };
+    const std::int64_t start_now = start_of(wall_now, steady_now);
+    std::vector<Line> out;
+    for (const Line& l : lines) {
+        if (l.steady_ms > steady_now || steady_now - l.steady_ms > kKeepMs) continue;
+        const std::int64_t apart = start_of(l.wall_ms, l.steady_ms) - start_now;
+        if (apart > kSameStartMs || apart < -kSameStartMs) continue;     // another start of the machine
+        out.push_back(l);
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Line& a, const Line& b) { return a.steady_ms < b.steady_ms; });
+    if (out.size() > kKeep) out.erase(out.begin(), out.end() - static_cast<std::ptrdiff_t>(kKeep));
+    return out;
+}
+
+bool SaidLately::add(const std::string& typed, std::uint64_t steady, std::uint64_t wall) const {
+    if (path_.empty() || typed.empty()) return false;
+    const std::size_t slash = path_.find_last_of("\\/");
+    if (slash != std::string::npos) make_folder(path_.substr(0, slash));
+    std::FILE* f = open_file(path_, "ab");
+    if (f == nullptr) return false;
+    const std::string row = format(Line{ typed, steady, wall });
+    bool ok = std::fwrite(row.data(), 1, row.size(), f) == row.size();
+    const long size = ok ? std::ftell(f) : -1;
+    ok = std::fclose(f) == 0 && ok;
+    if (!ok) return false;
+    if (size > kCutAt) {
+        // Cut down to the rows still of use, written beside it -- a name of
+        // this process's own, two may be at it -- and moved over it, so that
+        // a reader never finds half of it. A reader that has it open at that
+        // moment makes the move fail: it is cut on a later line instead. A
+        // row another process appends meanwhile is lost with the old file;
+        // two processes typing at once is what gobot_cli refuses.
+        std::string text;
+        for (const Line& l : kept(parse(said_file_text(path_)), steady, wall)) text += format(l);
+        const std::string fresh = path_ + "." + std::to_string(GetCurrentProcessId()) + ".tmp";
+        std::FILE* o = open_file(fresh, "wb");
+        if (o != nullptr) {
+            const bool wrote = std::fwrite(text.data(), 1, text.size(), o) == text.size();
+            const bool closed = std::fclose(o) == 0;
+            if (!(wrote && closed && move_file(fresh, path_))) remove_file(fresh);
+        }
+    }
+    return true;
+}
+
+SaidLately::Said SaidLately::read(std::uint64_t steady_now, std::uint64_t wall_now) const {
+    Said out;
+    if (path_.empty()) return out;
+    for (const Line& l : kept(parse(said_file_text(path_)), steady_now, wall_now)) out.emplace_back(l.text, l.steady_ms);
+    return out;
 }
 
 // ---------------------------------------------------------------- machine

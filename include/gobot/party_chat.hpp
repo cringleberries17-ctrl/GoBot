@@ -123,8 +123,9 @@ public:
     ///     length and alike() kOwnNameAlike or more: the reader drops or
     ///     doubles a letter now and then. A name of four or fewer only
     ///     exactly; one that merely holds it ("TuanAnh" for "Anh") is not it.
-    ///     The price: another character named as ours give or take a letter
-    ///     counts as ours too, and is never invited by its keyword.
+    ///     The price: with a name of five or more, another character named as
+    ///     ours give or take a letter counts as ours too, and is never invited
+    ///     by its keyword.
     ///  b. it says nothing but the keyword, and GoBot typed the keyword itself
     ///     in the last kOwnKeywordMs -- whoever the speaker reads as, which
     ///     may be nothing. Somebody else's bare keyword in that minute is

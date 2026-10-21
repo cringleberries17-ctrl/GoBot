@@ -1117,6 +1117,73 @@ void test_wild() {
     }
 }
 
+// ------------------------------------------- the death record's potion slots (round 8b, R8R-4)
+
+SlotReading shows(SlotState s) {
+    SlotReading r;
+    r.state = s;
+    return r;
+}
+
+void test_slot_log() {
+    section("Potions: the death record's \"Potion slots\" line keeps when a slot was last READ, "
+            "not last looked at (R8R-4)");
+    // As the GUI's potions_tick does it: the look is fed to the watch, what is believed is asked, and both go
+    // to the log with the time the look came back.
+    PotionWatch watch;
+    PotionSlotLog slots;
+    const auto look = [&](std::uint32_t vk, const char* name, const SlotReading& r, std::uint64_t at) {
+        watch.feed(vk, r);
+        SlotReading believed;
+        const bool have = watch.believed(vk, believed);
+        slots.note(name, r, have, believed, at);
+    };
+    const auto line_is = [&](std::uint64_t now, const std::string& want, const std::string& what) {
+        const std::string got = slots.line(now);
+        check(got == want, what + (got == want ? std::string() : " -- got \"" + got + "\", wanted \"" + want + "\""));
+    };
+    const std::uint32_t k1 = '1', k2 = '2', k3 = '3';
+
+    line_is(1'000, "", "nothing read yet: no line (the black box says so in its own words)");
+    look(k1, "1", count(16), 1'000);
+    look(k1, "1", count(16), 11'000);
+    line_is(12'000, "Potion slots: key 1 16 (read 1 s earlier)", "a count read on two looks: the newest look's time");
+    look(k1, "1", shows(SlotState::NoHotbar), 21'000);
+    line_is(22'000, "Potion slots: key 1 16 (read 11 s earlier; last look 1 s earlier: no hotbar)",
+            "the hotbar covered on one look: the count stays, with the time it was read, and the look is told "
+            "beside it");
+    look(k1, "1", shows(SlotState::NoHotbar), 31'000);
+    line_is(32'000, "Potion slots: key 1 no hotbar (read 1 s earlier)",
+            "covered on two looks running is what is believed then, read on the newest of them");
+    look(k1, "1", count(62), 41'000);
+    line_is(42'000, "Potion slots: key 1 62 (read 1 s earlier)",
+            "a count back: believed at once, and the covered look forgotten");
+    look(k1, "1", shows(SlotState::Unreadable), 51'000);
+    line_is(52'000, "Potion slots: key 1 62 (read 11 s earlier; last look 1 s earlier: unreadable)",
+            "an unreadable slot on one look: the old count and its old time, and what the look saw");
+    look(k1, "1", count(62), 61'000);
+    look(k1, "1", count(6), 71'000);
+    line_is(72'000, "Potion slots: key 1 62 (read 11 s earlier; last look 1 s earlier: 6, not believed)",
+            "a wild drop held (62 read as 6): the believed count and its time, the held reading told");
+    look(k1, "1", count(60), 81'000);
+    line_is(82'000, "Potion slots: key 1 60 (read 1 s earlier)", "and when the count comes back: the new reading");
+    look(k2, "2", count(40), 81'000);
+    look(k3, "3", shows(SlotState::Unreadable), 81'000);
+    line_is(82'000, "Potion slots: key 1 60 (read 1 s earlier), key 2 40 (read 1 s earlier)",
+            "a second key in the order it was first believed; a key never believed is not in the line");
+    look(k2, "2", empty(), 91'000);
+    line_is(92'000,
+            "Potion slots: key 1 60 (read 11 s earlier), key 2 40 (read 11 s earlier; last look 1 s earlier: "
+            "empty)",
+            "an empty slot on one look is not believed yet: the count stays");
+    look(k2, "2", empty(), 101'000);
+    line_is(102'000, "Potion slots: key 1 60 (read 21 s earlier), key 2 empty (read 1 s earlier)",
+            "empty on two looks running is believed");
+    watch.reset();
+    slots.clear();
+    line_is(110'000, "", "a new run: nothing");
+}
+
 /// A pretend Discord that counts what it is sent.
 class CountingChannel final : public AlertChannel {
 public:
@@ -1241,5 +1308,6 @@ void test_potions(void (*check_fn)(bool, const std::string&), void (*section_fn)
     test_game_digits();
     test_watch();
     test_wild();
+    test_slot_log();
     test_texts_and_settings();
 }

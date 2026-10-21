@@ -239,12 +239,28 @@ khác chưa được thử trên game thật.
   + Câu Tự chat của chính bạn không bao giờ bị coi là lời xin vào tổ đội,
     dài hay ngắn: câu mà người nói là tên nhân vật đã gõ ở thẻ Đánh quái,
     và câu chỉ có từ khoá mà GoBot đã gõ, chừng nào dòng đó còn trong khung
-    chat (GoBot nhớ người nói của dòng đó từ phút đầu sau khi gõ). Câu chỉ
-    có từ khoá của người khác trong phút đầu đó cũng bị bỏ qua (chưa gõ tên
-    ở thẻ Đánh quái thì tới khi dòng của họ trôi khỏi khung chat được một
-    phút); gõ thêm chữ ("cho pt") thì vẫn được mời. Phần tổ đội bật sau
-    phút đầu đó thì mọi câu chỉ có từ khoá bị bỏ qua tới lần sau GoBot gõ
-    từ khoá. Nhân vật có tên hơn kém tên bạn một chữ cũng bị coi là bạn.
+    chat (GoBot nhớ người nói của dòng đó từ phút đầu sau khi gõ). GoBot
+    nhớ các câu nó gõ trong 30 phút gần nhất, kể cả câu gõ trước khi mở
+    lại GoBot (bản mới giải nén vào thư mục mới cũng vậy) và câu gõ bằng
+    gobot_cli, trong file %LOCALAPPDATA%\GoBot\said_lately.txt.
+    Câu chỉ có từ khoá của người khác trong phút đầu đó cũng bị bỏ qua
+    (chưa gõ tên ở thẻ Đánh quái thì tới khi dòng của họ trôi khỏi khung
+    chat được một phút); gõ thêm chữ ("cho pt") thì vẫn được mời.
+    Nếu trong phút đầu sau khi GoBot gõ từ khoá mà GoBot không thấy dòng
+    đó trong khung chat (game bỏ qua phím Enter gửi câu, không đọc được
+    khung chat, phần tổ đội bật sau phút đó, hay GoBot vừa mở lại) thì mọi
+    câu chỉ có từ khoá, của ai cũng vậy, bị bỏ qua tới khi GoBot gõ từ khoá
+    lần sau và thấy dòng đó trong khung chat, nhưng không quá 30 phút kể
+    từ lần GoBot gõ từ khoá gần nhất; có gõ tên ở thẻ Đánh quái hay không
+    cũng vậy.
+    Tên người nói được so với tên của bạn (tên gõ ở thẻ Đánh quái, hay tên
+    người nói mà GoBot đã nhớ) theo chữ cái và chữ số, không kể hoa thường.
+    Chỉ chữ cái không dấu (a-z) và chữ số được tính: chữ có dấu tiếng Việt
+    (cả chữ đ), mọi chữ khác, và các chữ l, I, L ở đầu tên bị bỏ qua khi
+    so tên, và không tính vào số chữ. Tên của bạn còn từ 5 chữ trở lên thì
+    tên giống từ 80% trở lên, dài hơn hay ngắn hơn không quá một chữ, cũng
+    bị coi là bạn; còn 2 đến 4 chữ thì phải giống hệt; còn dưới 2 chữ (như
+    Đức, Lộc, Lý) thì tên không được so, như khi chưa gõ tên.
   + Thẻ Tổ đội nay ghi GoBot đọc được gì: "Tổ đội: một mình", "Tổ đội:
     thành viên (N/6)", "Tổ đội: chủ tổ đội (N/6)", "Tổ đội: đang trong tổ
     đội (N/6), không thấy vương miện chủ tổ đội" hay "Tổ đội: không đọc

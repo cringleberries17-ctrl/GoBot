@@ -208,7 +208,11 @@ UNATTENDED RUNNING
                       chat. Reads the chat, waits for the same line to be
                       seen a few times over, then opens the player list and
                       presses Req Party on that name. --verbose prints every
-                      chat line as it is read.
+                      chat line as it is read. The player's own lines are
+                      left out: the character named in hunt.ini, and what
+                      GoBot typed in the last half hour, which the GUI's Tự
+                      chat and --chat keep in
+                      %%LOCALAPPDATA%%\GoBot\said_lately.txt.
   --invite <name>     Invite that player: open the list of players on the
                       map, find their row, pick it, press Req Party. Add
                       --dry to see where it would click without clicking.
@@ -316,7 +320,7 @@ UNATTENDED RUNNING
                                    dark=<n> closed=<score> ink=<n> dialog=<..>
                                    hud=<0|1> focused=<0|1>
                       and it exits 0 when the bar was found open or shut.
-  --chat-once         Say configs/chat.ini's test_line once in the game's chat,
+)" R"(  --chat-once         Say configs/chat.ini's test_line once in the game's chat,
                       the way the Tự chat tab says its lines: the game brought
                       to the front, Enter only on a screen showing the line
                       shut and no dialog, typing only once the line is seen
@@ -325,14 +329,22 @@ UNATTENDED RUNNING
                       last line is
                         CHAT RESULT sent=<0|1> left_open=<0|1> method=<m>
                                     typed="<text>" trouble=<text>
-                      and it exits 0 only when the line was sent. It refuses
+                      and it exits 0 only when the line was sent. sent=0
+                      with the Enter that sends pressed says only that no
+                      look saw the line go: a game that takes that Enter
+                      late sends the line all the same, as a line printed
+                      before the result says. It refuses
                       while gobot_gui runs (that one's keys cannot be held off
                       from here), and within 30 seconds of the last line it
-                      typed. It keeps the frame it judged the screen by, and
-                      any frame where a step went wrong, in chat_debug. Ctrl+C
-                      stops it at the next key -- but brings this console to
-                      the front, not the game, so what was typed may be left
-                      in the game's chat line: look before pressing a key there.
+                      typed. Just before the Enter that sends, the line goes
+                      into %%LOCALAPPDATA%%\GoBot\said_lately.txt, where a
+                      party watcher started later (the GUI, --autoparty)
+                      finds it is the player's own. It keeps the frame it
+                      judged the screen by, and any frame where a step went
+                      wrong, in chat_debug. Ctrl+C stops it at the next
+                      key -- but brings this console to the front, not the
+                      game, so what was typed may be left in the game's
+                      chat line: look before pressing a key there.
                       When the line may have been left open, it looks a few
                       times more, pressing nothing, and says what it saw;
                       left_open=1 says those looks still could not see it
@@ -1974,10 +1986,13 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
                     rules.always_leader ? ": with \"only while leading\" ticked nobody is invited" : "");
     PartyEvents events;
     // The player's own lines are never somebody asking (PartyChat::without_own):
-    // the character named in hunt.ini, whatever the line says.
+    // the character named in hunt.ini, whatever the line says, and what GoBot
+    // typed in the last half hour -- the GUI's Tự chat beside this, or
+    // gobot_cli --chat -- as SaidLately's file has it (R8bR-1).
     HunterConfig hunt;
     hunt.load(resolve("configs/hunt.ini"));
     const std::string own_name = hunt.character_name;
+    const SaidLately said_file(SaidLately::default_path());
 
     std::printf("Inviting on '%s' for %d seconds.\n\n"
                 "  seen this often  %d times, %dms apart\n"
@@ -2027,9 +2042,11 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
                 std::chrono::steady_clock::now().time_since_epoch()).count());
 
         // The player's own lines, whatever their length, are not asking: as
-        // the GUI's party worker takes them out, with nothing typed here.
-        const std::vector<std::pair<std::string, std::uint64_t>> nothing_typed;
-        lines = chat.without_own(lines, own_name, nothing_typed, now);
+        // the GUI's party worker takes them out. Nothing is typed here; what
+        // another process typed is read from the file on every look, so that
+        // a line the GUI's Tự chat or gobot_cli --chat types while this runs
+        // counts from its sending Enter. On the same steady clock as now_ms().
+        lines = chat.without_own(lines, own_name, said_file.read(now, wall_ms()), now);
 
         for (const std::string& who : chat.saw(lines, now)) {
             ++asked;
@@ -3222,6 +3239,15 @@ int run_chat(const Options& o, const AppConfig& app) {
     sender.set_dialog_check([&](const Frame& f) { return dialogs.up(f, store); });
     sender.set_debug_dir(debug_dir);
     sender.on_report(say);
+    // Just before its sending Enter goes down, the line goes into the file
+    // every party watcher reads for what GoBot typed -- the GUI started
+    // after this while the line is still on the chat, a gobot_cli
+    // --autoparty beside it -- so that the player's own line is never taken
+    // for somebody asking to be invited (R8bR-1). Said after the line when it
+    // could not be written: the Enter waits on this.
+    const SaidLately said_file(SaidLately::default_path());
+    bool said_kept = true;
+    sender.on_send_pressed([&] { said_kept = said_file.add(line.typed, now_ms(), wall_ms()); });
     // The screen this was judged by, whatever it showed, for the live test.
     sender.keep(frame, "chat_before", &bar);
 
@@ -3272,6 +3298,16 @@ int run_chat(const Options& o, const AppConfig& app) {
 
     if (r.sent) say("Đã gửi: \"" + line.typed + "\"");
     if (!r.trouble.empty()) say((r.sent ? "" : "Không gửi được: ") + r.trouble);
+    if (!said_kept)
+        say("could not keep the line in " + said_file.path() +
+            ": a party watcher started after this will not know it for the player's own");
+    // The Enter that sends went in, and no look saw the line go: a game that
+    // takes that Enter late sends the line all the same, so sent=0 below is
+    // not "nothing was said". The party watchers know it from the file all
+    // the same: it went in before that Enter (R8R2-1, R8bR-1).
+    if (r.send_pressed && !r.sent)
+        say("Đã bấm Enter để gửi: sent=0 ở dòng CHAT RESULT chỉ là chưa thấy câu đi — game nhận Enter trễ "
+            "thì câu vẫn được gửi. Xem khung chat trong game.");
     bool still_doubt = r.left_open;
     if (still_doubt) {
         // Nothing here can hold the GUI's keys off, and nothing more is

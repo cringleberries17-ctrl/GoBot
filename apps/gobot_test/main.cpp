@@ -4045,7 +4045,37 @@ void test_party_chat() {
                                        Typed{ { advert, now - 31 * 60'000ull } }, now, s),
               "a long advert of ours read back: ours 20 minutes on, not 31");
         check(PartyChat::own_line("[Kenh]MyChar2 : pt", me, none, now, s),
-              "the cost, as told to the player: a name ours give or take one letter counts as ours");
+              "the cost, as told to the player: a name of five or more, ours with one letter more, counts as ours");
+        // The notes' claims about names (DOC-TRUOC.txt, START-HERE), as the code does it: only plain letters
+        // a-z and digits are compared, case aside -- a letter with a Vietnamese mark, and a leading l, I or
+        // L, are left out of both names, and out of the count. With five or more left, a name a letter
+        // longer or shorter at most and 80% alike counts as the player's; with two to four, only exactly;
+        // with fewer than two, the name is not compared at all, as if none were set. Made-up names.
+        check(PartyChat::own_line("[Kenh]Kopa : pt", "Kopra", none, now, s) &&
+                  PartyChat::own_line("[Kenh]Kopra2 : pt", "Kopra", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Kxxra : pt", "Kopra", none, now, s),
+              "a name of five letters: one letter short or over is the player's, two letters wrong is not");
+        check(PartyChat::own_line("[Kenh]Zemo : pt", "Zemo", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Zemo2 : pt", "Zemo", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Zmo : pt", "Zemo", none, now, s),
+              "a name of four letters: only exactly");
+        check(PartyChat::own_line("[Kenh]Bọxar : pt", "Bọxar", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Bọxar2 : pt", "Bọxar", none, now, s) &&
+                  PartyChat::own_line("[Kenh]Boxar2 : pt", "Boxar", none, now, s),
+              "a letter with a Vietnamese mark does not count towards the five: Bọxar is four letters, Boxar five");
+        check(PartyChat::own_line("[Kenh]Bẫxar : pt", "Bấxar", none, now, s),
+              "and two names that differ only in a letter with a mark are the same name");
+        check(PartyChat::own_line("[Kenh]Kopa8 : pt", "Kopa9", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Lopa8 : pt", "Lopa9", none, now, s) &&
+                  PartyChat::own_line("[Kenh]Lopa9 : pt", "Lopa9", none, now, s),
+              "a leading L does not count towards the five either (R8bR-3): Kopa8 is Kopa9's, while Lopa9 is four "
+              "letters and digits, and only Lopa9 itself is the player's");
+        check(PartyChat::own_line("[Kenh]Xo : pt", "Xo", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Xo2 : pt", "Xo", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Lq : pt", "Lq", none, now, s) &&
+                  !PartyChat::own_line("[Kenh]Ẩq : pt", "Ẩq", none, now, s),
+              "two letters left: only exactly; fewer than two (Lq, Ẩq) and the name is not compared at all, as if "
+              "none were set (R8bR-3)");
         // End to end: what reaches the votes. The player's own keyword line,
         // seen on three looks, never makes a requester; somebody else's does.
         PartyChat chat;
@@ -4169,6 +4199,15 @@ void test_party_chat() {
                   "keyword again and saw its line; then Someone saying it asks");
         }
         {
+            // How long that lasts, as the notes say (DOC-TRUOC.txt, START-HERE): until GoBot types the
+            // keyword again, and 30 minutes at most from the last time it did.
+            PartyChat chat = fresh();
+            const Asked a = first_ask(chat, only("[Kenh]Someone : pt"), "", typed, 120'000, 40 * 60'000);
+            check(a.who == "Someone" && a.at >= 30 * 60'000 && a.at < 30 * 60'000 + 1000,
+                  "nothing learned in the first minute: a bare keyword is passed over for 30 minutes after GoBot typed "
+                  "it, and asks after (at +" + std::to_string(a.at) + " ms)");
+        }
+        {
             // Somebody saying the keyword alone in the first minute is taken
             // for the player too, while that line stays on the chat; once it
             // has been off the chat a minute of looks, they ask as anybody.
@@ -4209,6 +4248,19 @@ void test_party_chat() {
                   "not remembered, and asking after");
         }
         {
+            // A name with fewer than two plain letters and digits left -- marked letters and a leading l, I
+            // or L taken off -- is as none set (R8bR-3): every speaker of the keyword alone in the first
+            // minute is taken for the player's.
+            PartyChat chat = fresh();
+            const auto both = [](std::uint64_t) {
+                return std::vector<std::string>{ "[Kenh]MyChar : pt", "[Kenh]Someone : pt" };
+            };
+            const Asked a = first_ask(chat, both, "Ẩq", typed, 1000, 240'000);
+            check(a.at < 0 && chat.own_speakers().size() == 2,
+                  "a name of fewer than two plain letters and digits (Ẩq) is as none: both speakers of the keyword "
+                  "alone in the first minute are taken for the player's");
+        }
+        {
             // reset() forgets what was learned.
             PartyChat chat = fresh();
             chat.without_own({ "[Kenh]MyChar : pt" }, "", typed, typed_at + 1000);
@@ -4216,6 +4268,168 @@ void test_party_chat() {
             chat.reset();
             check(learned && chat.own_speakers().empty(), "the speaker taken for the player is forgotten by reset()");
         }
+    }
+
+    // ---- round 8b (R8bR-1): a party watcher in a process that did not type the line -- the GUI started
+    //      again while the player's line is still on the chat, or started after gobot_cli --chat; gobot_cli
+    //      --autoparty beside the GUI's Tự chat -- knows it from SaidLately's file, written just before
+    //      every sending Enter. Invented names, a made-up clock, and a file of this run's own. ----
+    {
+        using Line = SaidLately::Line;
+        // A machine started at `started` by the system clock: now_ms() counts from then.
+        const std::uint64_t started = 1'790'000'000'000ull;
+        const std::uint64_t now = 7'200'000;        // two hours on
+        const auto wall_at = [started](std::uint64_t steady) { return started + steady; };
+
+        // The rows.
+        const Line pt{ "pt", now - 20'000, wall_at(now - 20'000) };
+        const std::vector<Line> back = SaidLately::parse(SaidLately::format(pt));
+        check(back.size() == 1 && back[0].text == "pt" && back[0].steady_ms == pt.steady_ms &&
+                  back[0].wall_ms == pt.wall_ms,
+              "said_lately.txt: a row reads back as it was written");
+        const std::vector<Line> odd = SaidLately::parse(SaidLately::format(Line{ "two\nrows", 5, 6 }) + "junk\n" +
+                                                        "12 x pt\n" + "12 34\n" + "1 2 ok\r\n" + "3 4 half");
+        check(odd.size() == 2 && odd[0].text == "two rows" && odd[1].text == "ok" && odd[1].steady_ms == 1 &&
+                  odd[1].wall_ms == 2,
+              "a line end in the text becomes a space; rows that do not read, and an unfinished last one, are passed "
+              "over");
+
+        // Which rows are still of use: of the last half hour, on this start of the machine.
+        const std::vector<Line> rows = {
+            { "old", now - 31 * 60'000ull, wall_at(now - 31 * 60'000ull) },
+            { "pt", now - 20'000, wall_at(now - 20'000) },
+            // Written on the start before this one, five hours earlier, near its own two-hour mark.
+            { "before", now - 60'000, started - 5 * 3'600'000ull + (now - 60'000) },
+            { "ahead", now + 5'000, wall_at(now + 5'000) },
+            { "drift", now - 30'000, wall_at(now - 30'000) + 9'000 },
+            { "set", now - 40'000, wall_at(now - 40'000) + 15'000 },
+        };
+        const std::vector<Line> kept = SaidLately::kept(rows, now, wall_at(now));
+        check(kept.size() == 2 && kept[0].text == "drift" && kept[1].text == "pt",
+              "rows kept: those of the last half hour on this start of the machine, oldest first -- not one over "
+              "half an hour old, one from before the machine was started again, one ahead of the clock, nor one "
+              "whose system clock was 15 s off (9 s is the same start)");
+        std::vector<Line> many;
+        for (int i = 0; i < 25; ++i)
+            many.push_back(Line{ "l" + std::to_string(i), now - 25'000 + 1000ull * i, wall_at(now - 25'000 + 1000ull * i) });
+        const std::vector<Line> newest = SaidLately::kept(many, now, wall_at(now));
+        check(newest.size() == SaidLately::kKeep && newest.front().text == "l5" && newest.back().text == "l24",
+              "and the newest 20 of them at most");
+
+        // The file.
+        const std::string path = temp_file("said_lately_test.txt");
+        remove_file(path);
+        const SaidLately file(path);
+        check(file.read(now, wall_at(now)).empty(), "no file: nothing typed on record");
+        const std::string advert = "tuyen pt lv 50 ban do gia re";
+        const bool added = file.add("pt", now - 20'000, wall_at(now - 20'000)) &&
+                           file.add(advert, now - 10'000, wall_at(now - 10'000));
+        const SaidLately::Said got = file.read(now, wall_at(now));
+        check(added && got.size() == 2 && got[0].first == "pt" && got[0].second == now - 20'000 &&
+                  got[1].first == advert && got[1].second == now - 10'000,
+              "two lines added, and read back each with its time on the steady clock");
+        bool all_added = true;
+        for (int i = 0; i < 300; ++i)
+            all_added = file.add("line " + std::to_string(i), now - 300 + static_cast<std::uint64_t>(i),
+                                 wall_at(now - 300 + static_cast<std::uint64_t>(i))) &&
+                        all_added;
+        std::ifstream sized(path, std::ios::binary | std::ios::ate);
+        const long long size = static_cast<long long>(sized.tellg());
+        sized.close();
+        const SaidLately::Said last = file.read(now, wall_at(now));
+        check(all_added && size > 0 && size <= SaidLately::kCutAt + 200 && last.size() == SaidLately::kKeep &&
+                  last.back().first == "line 299",
+              "300 lines more: the file is cut down as it grows (" + std::to_string(size) +
+                  " bytes), and reads the newest 20");
+        remove_file(path);
+        {
+            // Where the GUI and gobot_cli keep it: outside the program folder, as the webhook's file is -- a
+            // new version unzipped into a new folder finds it. Only the name is looked at here.
+            wchar_t env[MAX_PATH * 2] = {};
+            const DWORD room = static_cast<DWORD>(MAX_PATH * 2);
+            const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", env, room);
+            const std::string where = SaidLately::default_path();
+            check(n > 0 && n < room && where == wide_to_utf8(std::wstring(env) + L"\\GoBot\\said_lately.txt") &&
+                      where.rfind(exe_relative(""), 0) != 0,
+                  "the file is %LOCALAPPDATA%\\GoBot\\said_lately.txt, outside the program folder");
+        }
+
+        // End to end: the watcher of a process started 20 s, 90 s or 5 minutes after the line was typed in
+        // another, looking every 150 ms (party.ini's vote_gap_ms as shipped), no name set (as shipped),
+        // with what was typed read from the file on every look as the GUI and gobot_cli --autoparty read
+        // it -- and (control) with nothing typed on record, as before this round.
+        struct Asked {
+            long long at = -1;
+            std::string who;
+        };
+        const auto watch = [&](const std::function<std::vector<std::string>(std::uint64_t)>& on_chat,
+                               const SaidLately* said, std::uint64_t from, std::uint64_t to) {
+            PartyChat chat;
+            chat.set_settings(PartyChat::Settings{});
+            Asked a;
+            for (std::uint64_t t = from; t < to; t += 150) {
+                const SaidLately::Said typed = said != nullptr ? said->read(t, wall_at(t)) : SaidLately::Said{};
+                const auto who = chat.saw(chat.without_own(on_chat(t), "", typed, t), t);
+                if (!who.empty()) {
+                    a.at = static_cast<long long>(t - from);
+                    a.who = who[0];
+                    return a;
+                }
+            }
+            return a;
+        };
+        const std::string e2e_path = temp_file("said_lately_e2e.txt");
+        const SaidLately e2e(e2e_path);
+        struct Kind {
+            const char* said;
+            const char* on_chat;
+        };
+        const Kind kinds[] = { { "pt", "[Kenh]MyChar : pt" },
+                               { "tuyen pt lv 50 ban do gia re", "[Kenh]MyChar : tuyen pt lv 50 ban do gia re" } };
+        const std::uint64_t typed_at = 9'000'000;
+        for (const Kind& kind : kinds)
+            for (const std::uint64_t later : { 20'000ull, 90'000ull, 5 * 60'000ull }) {
+                remove_file(e2e_path);
+                const bool wrote = e2e.add(kind.said, typed_at, wall_at(typed_at));
+                const std::uint64_t start = typed_at + later;
+                const std::string own = kind.on_chat;
+                const auto own_only = [&own](std::uint64_t) {
+                    return std::vector<std::string>{ "[Kenh]Other : hello all", own };
+                };
+                const std::string tag = std::string("\"") + kind.said + "\" typed by another process " +
+                                        std::to_string(later / 1000) + " s before the watcher's first look: ";
+                const Asked with = watch(own_only, &e2e, start, start + 240'000);
+                check(wrote && with.at < 0, tag + "with the file, the player's own line is never taken for asking" +
+                                                (with.at < 0 ? std::string()
+                                                             : " -- taken at +" + std::to_string(with.at) + " ms"));
+                const Asked without = watch(own_only, nullptr, start, start + 240'000);
+                check(without.who == "MyChar" && without.at >= 0 && without.at <= 300,
+                      tag + "(control) without it, the same line is taken for the player asking, at +" +
+                          std::to_string(without.at) + " ms");
+                // Somebody else's keyword alone, 90 s into the watch, still asks where the watcher could tell the
+                // player's line by its speaker (the keyword's first minute seen) or by its words (the advert).
+                if (later == 20'000 || kind.said != std::string("pt")) {
+                    const Asked other = watch(
+                        [&own, start](std::uint64_t t) {
+                            std::vector<std::string> lines = { "[Kenh]Other : hello all", own };
+                            if (t >= start + 90'000) lines.push_back("[Kenh]Someone : pt");
+                            return lines;
+                        },
+                        &e2e, start, start + 240'000);
+                    check(other.who == "Someone" && other.at >= 90'000 && other.at < 91'000,
+                          tag + "and somebody else's keyword alone, 90 s into the watch, asks (at +" +
+                              std::to_string(other.at) + " ms)");
+                }
+            }
+        // A row from before the machine was started again does not count: that line is long gone from the
+        // game.
+        remove_file(e2e_path);
+        const bool wrote_before = e2e.add("pt", typed_at - 10'000, started - 5 * 3'600'000ull + typed_at - 10'000);
+        const auto mine = [](std::uint64_t) { return std::vector<std::string>{ "[Kenh]MyChar : pt" }; };
+        const Asked stale = watch(mine, &e2e, typed_at, typed_at + 60'000);
+        check(wrote_before && stale.who == "MyChar" && stale.at >= 0 && stale.at <= 300,
+              "a row of the machine's start before this one is not on record: its line is taken as anybody's");
+        remove_file(e2e_path);
     }
 
     // The voting. One reading is not enough; three agreeing is.
@@ -12622,7 +12836,9 @@ namespace {
 ///
 /// It keeps a clock of its own, which waits and key holds move on. A key acts
 /// `lag` ms after it is pressed, as the live game takes a key a frame or more
-/// later; a look shows the game as it is when it is taken.
+/// later -- the Enter that sends the line `send_lag` ms after, when that is
+/// set, and every key behind a late one waits for it; a look shows the game
+/// as it is when it is taken.
 struct PretendChat {
     const TemplateStore* store = nullptr;
     const ChatSettings*  settings = nullptr;
@@ -12647,6 +12863,7 @@ struct PretendChat {
     int  hide_after_enters = -1;   ///< the bar goes out of sight once this many Enters have acted
     int  stuck_ink = 0;        ///< something drawn this far into the open field that Backspace does not remove
     int  lag = 0;              ///< ms from a key's press to the game acting on it
+    int  send_lag = 0;         ///< and for the Enter that sends the open line (text in it): this instead of `lag`
     int  dialog_ms = 0;        ///< ms a look for the dialogs takes
     int  draw_lag = 0;         ///< ms from a character going into the line to the game drawing it
     int  drop_first = 0;       ///< the first this many Enters on the shut line do nothing
@@ -12665,6 +12882,8 @@ struct PretendChat {
     std::function<void(std::uint32_t)> after_key;
 
     std::vector<int> sent;     ///< how many characters each sent line had
+    std::vector<std::uint64_t> sent_at;    ///< the pretend clock at which the game sent each line
+    std::uint64_t acted_at = 0;            ///< the clock a key is acted on at: when it was due, not when the wait ended
     int enters_with_dialog = 0;    ///< Enter pressed with a dialog up -- must stay 0
     int keys_while_shut = 0;       ///< a letter or Backspace with the line shut
     int enters = 0, backspaces = 0, letters = 0;
@@ -12683,7 +12902,10 @@ struct PretendChat {
                                      (drop_every > 0 && (shut_enters - 1) % drop_every == 0);
                 if (!dropped) { state = State::Open; typed = draft; }
             } else {
-                if (typed > 0) sent.push_back(typed);
+                if (typed > 0) {
+                    sent.push_back(typed);
+                    sent_at.push_back(acted_at);
+                }
                 typed = 0;
                 letter_at.clear();
                 caret_moved = 0;
@@ -12724,6 +12946,7 @@ struct PretendChat {
         clock += ms;
         while (!queue.empty() && queue.front().first <= clock) {
             const std::uint32_t vk = queue.front().second;
+            acted_at = queue.front().first;
             queue.erase(queue.begin());
             act(vk);
         }
@@ -12783,8 +13006,17 @@ struct PretendChat {
         h.key = [this](std::uint32_t vk, bool, int hold) -> bool {
             if (!focused) return false;
             holds.emplace_back(vk, hold);
-            if (lag > 0) queue.emplace_back(clock + static_cast<std::uint64_t>(lag), vk);
-            else act(vk);
+            // The Enter that sends the open line is late by send_lag when that
+            // is set; every key behind a late one waits for it (keys keep
+            // their order).
+            const bool sending = vk == VK_RETURN && state == State::Open && typed > 0;
+            const int delay = sending && send_lag > 0 ? send_lag : lag;
+            if (delay > 0 || !queue.empty()) {
+                queue.emplace_back(clock + static_cast<std::uint64_t>(delay), vk);
+            } else {
+                acted_at = clock;
+                act(vk);
+            }
             if (after_key) after_key(vk);
             advance(static_cast<std::uint64_t>(std::max(0, hold)));
             return true;
@@ -14015,6 +14247,189 @@ void test_auto_chat() {
               "type_tries=2 and the text drawn 400 ms late: taken on a later look, never typed twice");
     }
 
+    // ---- round 8b (R8R2-1): the Enter that sends is taken late. The game sends the line a second or two
+    //      after the Enter -- after ChatSender's looks have seen the text still in the open line ("not
+    //      sent"), or after send() has returned altogether -- and the party worker, looking at the chat the
+    //      moment the line is on it, has to know already that the line is the player's own. The GUI
+    //      remembers a line just before its sending Enter goes down (ChatSender::on_send_pressed ->
+    //      remember_said), as the hook below does. Invented names. ----
+    {
+        using Typed = std::vector<std::pair<std::string, std::uint64_t>>;
+        struct Asked {
+            long long at = -1;
+            std::string who;
+        };
+        // The party worker's steps on every look -- without_own, then the votes -- a look every `gap` ms,
+        // 100 unless said, faster than the worker's own, from `begin`. The memory a look has is what had
+        // been remembered by then (an entry counts from its own time on).
+        const auto first_ask = [](const std::function<std::vector<std::string>(std::uint64_t)>& on_chat,
+                                  const Typed& said, std::uint64_t begin, std::uint64_t to_ms,
+                                  std::uint64_t gap = 100) {
+            PartyChat chat;
+            chat.set_settings(PartyChat::Settings{});       // keyword "pt", 3 votes; no name set, as shipped
+            Asked a;
+            for (std::uint64_t t = begin; t < begin + to_ms; t += gap) {
+                Typed known;
+                for (const auto& s : said)
+                    if (s.second <= t) known.push_back(s);
+                const auto who = chat.saw(chat.without_own(on_chat(t), "", known, t), t);
+                if (!who.empty()) {
+                    a.at = static_cast<long long>(t - begin);
+                    a.who = who[0];
+                    break;
+                }
+            }
+            return a;
+        };
+        // What Tự chat says: the keyword alone, and an advert with the keyword in it. Each is read back off
+        // the chat with the player's character in front of it.
+        struct Kind {
+            const char* said;
+            const char* on_chat;
+        };
+        const Kind kinds[] = { { "pt", "[Kenh]MyChar : pt" },
+                               { "tuyen pt lv 50 ban do gia re", "[Kenh]MyChar : tuyen pt lv 50 ban do gia re" } };
+        const auto run = [&](const Kind& kind, int dialog_ms, int late) {
+            const std::string own_line = kind.on_chat;
+            const auto own_only = [&own_line](std::uint64_t) { return std::vector<std::string>{ own_line }; };
+            PretendChat g;
+            g.store = &store; g.settings = &settings;
+            g.clock = 50'000'000;
+            g.send_lag = late;
+            // Each look for the dialogs takes this long, which keeps send() from returning for that much
+            // longer once the line is on the chat.
+            g.dialog_ms = dialog_ms;
+            std::uint64_t pressed_at = 0;       // the clock at the Enter that sends: letters are in
+            g.after_key = [&](std::uint32_t key_vk) {
+                if (key_vk == VK_RETURN && g.letters > 0 && pressed_at == 0) pressed_at = g.clock;
+            };
+            auto sender = make_sender(g);
+            const ChatText line = line_of(kind.said);
+            Typed said;                         // what the GUI's remember_said keeps
+            int calls = 0;
+            sender->on_send_pressed([&] {
+                ++calls;
+                said.emplace_back(line.typed, g.clock);
+            });
+            const ChatSender::Result r = sender->send(line);
+            const std::uint64_t returned_at = g.clock;
+            g.advance(5000);                    // whatever is still on its way lands
+            const std::string tag = std::string("\"") + kind.said + "\", the Enter that sends taken " +
+                                    std::to_string(late) + " ms late (dialog look " + std::to_string(dialog_ms) +
+                                    " ms): ";
+            check(g.sent.size() == 1 && g.sent_at.size() == 1, tag + "the game sent the line, once");
+            check(r.send_pressed && calls == 1, tag + "send_pressed, and the hook called once");
+            if (late == 0) check(r.sent && !r.left_open, tag + "seen sent");
+            else check(!r.sent && r.trace.outcome.rfind("not seen sent (the game may send it late)", 0) == 0,
+                       tag + "not seen sent: r.sent says so, as it did, and the trace says the game may send it late");
+            if (late == 2500 && std::string(kind.said) == "pt")
+                check(r.left_open, tag + "and left open, for the doubt");
+            check(pressed_at != 0 && !said.empty() && said[0].second <= pressed_at &&
+                      pressed_at - said[0].second <= 50,
+                  tag + "remembered just before the Enter that sends went down, not after its hold nor when send() "
+                        "returns (" + std::to_string(returned_at - pressed_at) + " ms after it)");
+            if (g.sent_at.empty() || said.empty()) return;
+            const std::uint64_t begin = g.sent_at[0];       // the looks begin the moment the game sends it
+            const Asked own = first_ask(own_only, said, begin, 240'000);
+            check(own.at < 0, tag + "the player's own line, on the chat for 4 minutes, is never taken for asking" +
+                                  (own.at < 0 ? std::string() : " -- taken at +" + std::to_string(own.at) + " ms"));
+            const Asked other = first_ask(
+                [begin, &own_line](std::uint64_t t) {
+                    std::vector<std::string> lines = { own_line };
+                    if (t >= begin + 90'000) lines.push_back("[Kenh]Someone : pt");
+                    return lines;
+                },
+                said, begin, 240'000);
+            check(other.who == "Someone" && other.at >= 90'000 && other.at < 91'000,
+                  tag + "and somebody else's keyword alone, 90 s on, still asks, on the third look (at +" +
+                      std::to_string(other.at) + " ms)");
+            if (late > 0) {
+                const Asked none = first_ask(own_only, Typed{}, begin, 240'000);
+                check(none.at >= 0 && none.at <= 400,
+                      tag + "(control) with nothing remembered the same line is taken for asking, at +" +
+                          std::to_string(none.at) + " ms");
+            }
+        };
+        for (const Kind& kind : kinds)
+            for (const int dialog_ms : { 0, 100 })
+                for (const int late : { 0, 1500, 2500 }) run(kind, dialog_ms, late);
+
+        // chat.ini's holds go up to half a second, every key alike, and a game that acts on the key-down
+        // shows the line while the sending Enter is still held: remembered before that key goes down, the
+        // line is the player's from the moment it is on the chat, whatever the hold (R8bR-4). A worker
+        // looking every 50 ms -- three looks in 100 ms -- from the moment the game sends it.
+        for (const int hold_ms : { 131, 500 }) {
+            ChatSettings held = settings;
+            held.hold_min_ms = hold_ms;
+            held.hold_max_ms = hold_ms;
+            PretendChat g;
+            g.store = &store; g.settings = &settings;
+            g.clock = 60'000'000;
+            std::uint64_t pressed_at = 0;       // the clock as the Enter that sends went down
+            g.after_key = [&](std::uint32_t key_vk) {
+                if (key_vk == VK_RETURN && g.letters > 0 && pressed_at == 0) pressed_at = g.clock;
+            };
+            auto sender = sender_with(g, held);
+            const ChatText line = line_of("pt");
+            Typed said;
+            sender->on_send_pressed([&] { said.emplace_back(line.typed, g.clock); });
+            const ChatSender::Result r = sender->send(line);
+            g.advance(3000);
+            const std::string tag = "chat.ini's holds at " + std::to_string(hold_ms) +
+                                    " ms, the game sending on the key-down: ";
+            check(r.sent && r.send_pressed && g.sent_at.size() == 1 && pressed_at != 0 && g.sent_at[0] == pressed_at,
+                  tag + "the line goes as the Enter that sends goes down");
+            check(said.size() == 1 && said[0].second <= pressed_at,
+                  tag + "remembered before that key went down, not once its hold was over");
+            if (g.sent_at.empty() || said.empty()) continue;
+            const std::uint64_t begin = g.sent_at[0];
+            const auto own_only = [](std::uint64_t) { return std::vector<std::string>{ "[Kenh]MyChar : pt" }; };
+            const Asked own = first_ask(own_only, said, begin, 240'000, 50);
+            check(own.at < 0, tag + "the player's own line, looked at every 50 ms from the moment it is on the chat, "
+                                    "is never taken for asking" +
+                                  (own.at < 0 ? std::string() : " -- taken at +" + std::to_string(own.at) + " ms"));
+            // (control) Remembered once the key's hold was over, as before this round: taken for asking
+            // before that.
+            const Asked late = first_ask(own_only, Typed{ { line.typed, pressed_at + hold_ms } }, begin, 240'000, 50);
+            check(late.at >= 0 && late.at < hold_ms,
+                  tag + "(control) remembered after the hold, the same line is taken for asking at +" +
+                      std::to_string(late.at) + " ms, before the hold is over");
+        }
+
+        // No Enter to send, no line remembered: nothing pressed, or the line ended before its sending Enter.
+        const auto not_sent = [&](const char* what, const std::function<void(PretendChat&)>& set) {
+            PretendChat g;
+            g.store = &store; g.settings = &settings;
+            set(g);
+            auto sender = make_sender(g);
+            int calls = 0;
+            sender->on_send_pressed([&] { ++calls; });
+            const ChatSender::Result r = sender->send(line_of("test"));
+            g.advance(3000);
+            check(calls == 0 && !r.send_pressed && g.sent.empty(),
+                  std::string(what) + ": no Enter to send, nothing remembered");
+        };
+        not_sent("the line already open (the player typing)",
+                 [](PretendChat& g) { g.state = PretendChat::State::Open; });
+        not_sent("the game not in front", [](PretendChat& g) { g.focused = false; });
+        not_sent("a dialog up", [](PretendChat& g) { g.dialog = "thùng rác"; });
+        not_sent("deaf to Enter", [](PretendChat& g) { g.deaf = true; });
+        not_sent("the game showing nothing of the typed text", [](PretendChat& g) { g.ignore_text = true; });
+        {
+            PretendChat g;
+            g.store = &store; g.settings = &settings;
+            auto sender = make_sender(g);
+            int calls = 0;
+            sender->on_send_pressed([&] { ++calls; });
+            sender->set_guard([&g]() -> std::string {
+                return g.letters >= 3 ? std::string("Máu thấp — dừng câu đang gõ.") : std::string();
+            });
+            const ChatSender::Result r = sender->send(line_of("abcdefghij"));
+            check(calls == 0 && !r.send_pressed && r.aborted && g.sent.empty(),
+                  "stopped mid-line by the guard: rubbed out, no Enter to send, nothing remembered");
+        }
+    }
+
     // ---- round 8 (R8R-2): chat.ini's waits are spent with the potions held
     //      off -- the pause before a line up to 5 s, the Enter's watch and the
     //      type wait up to 3 s each. HP falling under the potion's mark ends
@@ -14103,6 +14518,64 @@ void test_auto_chat() {
         const std::size_t low = quiet == std::string::npos ? quiet : src.find("if (hp_low()) return kChatLowHp;", quiet);
         check(low != std::string::npos && src.find("nap(settings.quiet_before_ms)") == std::string::npos,
               "gui_app.cpp: the pause before a line is chat_quiet_pause's, ended by HP under the potion's mark");
+    }
+    {
+        // R8R2-1: the GUI remembers a line for the party worker just before its sending Enter goes down
+        // (ChatSender::on_send_pressed), in attempt() -- once, and nowhere after the result, where a line
+        // the game takes late was missed.
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp", std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::size_t attempt = src.find("const auto attempt = [&](const ChatText& line, bool asked)");
+        const std::size_t hook = attempt == std::string::npos ? attempt : src.find("sender.on_send_pressed(", attempt);
+        const std::size_t said = hook == std::string::npos ? hook : src.find("remember_said(line.typed)", hook);
+        const std::size_t sends = hook == std::string::npos ? hook : src.find("sender.send(line)", hook);
+        std::size_t calls = 0;
+        for (std::size_t at = src.find("remember_said("); at != std::string::npos;
+             at = src.find("remember_said(", at + 1))
+            ++calls;
+        check(hook != std::string::npos && said != std::string::npos && sends != std::string::npos && said < sends &&
+                  calls == 2,
+              "gui_app.cpp: attempt() remembers the line when its sending Enter goes down, before it sends, and "
+              "nothing else does (remember_said: its definition and that one call)");
+    }
+    {
+        // R8bR-1: what GoBot typed is kept where a party watcher of another process reads it. The GUI's
+        // remember_said puts the line in SaidLately's file as well as in memory, and said_lately() -- what
+        // its party worker and its 30-second floor go by -- reads the file; gobot_cli --chat puts its line
+        // there just before the sending Enter, and gobot_cli --autoparty reads the file on every look.
+        const auto npos = std::string::npos;
+        const auto text_of = [](const char* rel) {
+            std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const std::string gui = text_of("/apps/gobot_gui/gui_app.cpp");
+        const std::size_t remember = gui.find("void GuiApp::remember_said(const std::string& typed) {");
+        const std::size_t lately = gui.find("GuiApp::said_lately() {");
+        const std::size_t last = gui.find("std::uint64_t GuiApp::last_said_ms() {");
+        const std::size_t adds =
+            remember == npos ? npos : gui.find("SaidLately(SaidLately::default_path()).add(typed, now, wall_ms())", remember);
+        const std::size_t reads =
+            lately == npos ? npos : gui.find("SaidLately(SaidLately::default_path()).read(now, wall_ms())", lately);
+        const std::size_t by_both = last == npos ? npos : gui.find("said_lately()", last);
+        check(remember != npos && lately != npos && last != npos && adds != npos && adds < lately && reads != npos &&
+                  reads < last && by_both != npos,
+              "gui_app.cpp: remember_said keeps the line in SaidLately's file too, and said_lately() -- and with it "
+              "last_said_ms() -- reads the file");
+        const std::string cli = text_of("/apps/gobot_cli/main.cpp");
+        const std::size_t chat = cli.find("int run_chat(const Options& o, const AppConfig& app) {");
+        const std::size_t hook =
+            chat == npos ? npos
+                         : cli.find("sender.on_send_pressed([&] { said_kept = said_file.add(line.typed, now_ms(), "
+                                    "wall_ms()); });",
+                                    chat);
+        const std::size_t sends = hook == npos ? npos : cli.find("sender.send(line)", hook);
+        const std::size_t party = cli.find("int run_auto_party(const Options& o, const AppConfig& app, int seconds) {");
+        const std::size_t own =
+            party == npos ? npos : cli.find("chat.without_own(lines, own_name, said_file.read(now, wall_ms()), now)", party);
+        const std::size_t votes = own == npos ? npos : cli.find("chat.saw(lines, now)", own);
+        check(hook != npos && sends != npos && own != npos && votes != npos,
+              "gobot_cli: --chat keeps its line in SaidLately's file before its sending Enter, and --autoparty reads "
+              "the file on every look before the votes");
     }
 #endif
 

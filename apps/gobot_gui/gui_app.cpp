@@ -2860,8 +2860,11 @@ void GuiApp::party_loop() {
             // minute. A Tự chat line that was the keyword alone was taken for
             // the player asking on 2026-10-20, 193 s after it was typed; an
             // advert with the keyword in it would have the player try to
-            // invite himself after every one. The name through the detector's
-            // own lock, not the Đánh quái tab's copy.
+            // invite himself after every one. What was typed is this run's
+            // and, read from SaidLately's file on every look, any other
+            // process's: this GoBot before it was started again, gobot_cli
+            // --chat (R8bR-1). The name through the detector's own lock, not
+            // the Đánh quái tab's copy.
             lines = chat.without_own(lines, detector_.character_name(), said_lately(), now_ms());
 
             const std::uint64_t now = static_cast<std::uint64_t>(
@@ -3982,26 +3985,46 @@ void GuiApp::stop_chat(bool quit, bool wait) {
 }
 
 void GuiApp::remember_said(const std::string& typed) {
-    std::lock_guard<std::mutex> lock(chat_said_mutex_);
     const std::uint64_t now = now_ms();
-    chat_said_.emplace_back(typed, now);
-    while (!chat_said_.empty() &&
-           (chat_said_.size() > 20 || now - chat_said_.front().second > 30 * 60'000ull))
-        chat_said_.erase(chat_said_.begin());
+    {
+        std::lock_guard<std::mutex> lock(chat_said_mutex_);
+        chat_said_.emplace_back(typed, now);
+        while (!chat_said_.empty() &&
+               (chat_said_.size() > SaidLately::kKeep || now - chat_said_.front().second > SaidLately::kKeepMs))
+            chat_said_.erase(chat_said_.begin());
+    }
+    // And in the file every party watcher reads, with the same time: a GoBot
+    // started again while this line is on the chat, or a gobot_cli
+    // --autoparty beside this one, knows it for the player's (R8bR-1). An
+    // append, quick, with the sending Enter waiting on it.
+    if (!SaidLately(SaidLately::default_path()).add(typed, now, wall_ms()))
+        GB_WARN("Chat: could not keep the line in %s -- a party watcher in another process will not know it",
+                SaidLately::default_path().c_str());
 }
 
 std::vector<std::pair<std::string, std::uint64_t>> GuiApp::said_lately() {
-    std::lock_guard<std::mutex> lock(chat_said_mutex_);
     const std::uint64_t now = now_ms();
-    std::vector<std::pair<std::string, std::uint64_t>> out;
-    for (const auto& [text, when] : chat_said_)
-        if (now - when <= 30 * 60'000ull) out.emplace_back(text, when);
+    // The file's -- this run's lines, and those of any other process: a run
+    // of GoBot before this one, gobot_cli --chat -- and this run's from
+    // memory, for a file that could not be written. A line in both is there
+    // twice, with the same time, which changes nothing for without_own.
+    std::vector<std::pair<std::string, std::uint64_t>> out =
+        SaidLately(SaidLately::default_path()).read(now, wall_ms());
+    std::lock_guard<std::mutex> lock(chat_said_mutex_);
+    for (const auto& said : chat_said_)
+        if (now >= said.second && now - said.second <= SaidLately::kKeepMs &&
+            std::find(out.begin(), out.end(), said) == out.end())
+            out.push_back(said);
     return out;
 }
 
 std::uint64_t GuiApp::last_said_ms() {
-    std::lock_guard<std::mutex> lock(chat_said_mutex_);
-    return chat_said_.empty() ? 0 : chat_said_.back().second;
+    // Another process's lines too: two lines are never closer together than
+    // the shortest interval, whoever typed the first -- this GoBot before it
+    // was started again, or gobot_cli --chat.
+    std::uint64_t last = 0;
+    for (const auto& said : said_lately()) last = std::max(last, said.second);
+    return last;
 }
 
 void GuiApp::update_executor_pause() {
@@ -4359,6 +4382,18 @@ void GuiApp::chat_loop() {
         sender.set_debug_dir(exe_relative("chat_debug"));
         sender.set_held_since(held_at);
         sender.on_report([](const std::string& s) { GB_INFO("Chat: %s", s.c_str()); });
+        // The line is remembered for the party worker (PartyChat::without_own)
+        // just before its sending Enter goes down, not by the result: a game
+        // that acts on the key-down shows it while the key is held, one that
+        // takes that Enter a second or two late sends the line after the looks
+        // have given up on it (r.sent false), and the worker can read a line
+        // off the chat before send() returns. One remembered per Enter, sent
+        // or not; Gửi thử and the timed lines alike -- in memory, and in the
+        // file a party watcher of another process reads (remember_said). A
+        // line the game dropped has keyword-only lines passed over a while
+        // longer: until a later keyword line of GoBot's shows on the chat, 30
+        // minutes at most, when nothing was learned from it (DOC-TRUOC.txt).
+        sender.on_send_pressed([this, &line] { remember_said(line.typed); });
         sender.set_ready_check([&]() -> std::string {
             return touched_since(quiet) ? kUserActive : std::string();
         });
@@ -4511,7 +4546,6 @@ void GuiApp::chat_loop() {
                     if (r.not_now) {
                         tell("Chưa gửi thử được: " + r.trouble);
                     } else if (r.sent) {
-                        remember_said(line.typed);
                         GB_INFO("Chat: gửi thử (%s): \"%s\"", chat_method_name(settings.method),
                                 line.typed.c_str());
                         say_chat("Đã gửi thử: \"" + line.typed + "\"");
@@ -4590,7 +4624,6 @@ void GuiApp::chat_loop() {
                 schedule.sent(end);
                 ++chat_sent_;
                 put_off_in_row = 0;
-                remember_said(line.typed);
                 GB_INFO("Chat: gửi câu %d/%d (%s): \"%s\"", index + 1, count,
                         chat_method_name(settings.method), line.typed.c_str());
                 say_chat("Đã gửi câu " + std::to_string(index + 1) + "/" + std::to_string(count) +

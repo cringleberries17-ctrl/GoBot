@@ -429,12 +429,27 @@ EXPERIMENTAL
   character name typed on Danh quai, or a line of just the keyword that
   GoBot itself typed, for as long as that line stays on the chat (GoBot
   remembers its speaker as read in the first minute after typing it).
+  GoBot remembers what it typed in the last 30 minutes, lines typed
+  before GoBot was started again (a new version in a new folder too) and
+  gobot_cli's lines included, in %LOCALAPPDATA%\GoBot\said_lately.txt.
   Somebody else's bare keyword in that first minute is passed over too
   (with no name typed on Danh quai, until their line has been off the
-  chat for a minute); with more words ("cho pt") it counts. With the
-  party part started after that minute, every bare keyword is passed over
-  until GoBot types the keyword again. A character whose name is the
-  player's give or take one letter counts as the player.
+  chat for a minute); with more words ("cho pt") it counts. If GoBot
+  does not see its keyword line on the chat in the first minute after
+  typing it -- the game dropped the Enter that sends it, the chat could
+  not be read, the party part was started after that minute, or GoBot
+  was started again -- every bare keyword, anybody's, is passed over
+  until GoBot types the keyword again and sees that line, 30 minutes at
+  most after the last time it typed it; with a name typed on Danh quai
+  or not. A speaker's name is compared with the player's (the one typed
+  on Danh quai, or the speaker GoBot remembered) by plain letters a-z
+  and digits alone, ignoring case: a letter with a Vietnamese mark (d
+  with a stroke too), any other letter, and a leading l, I or L are left
+  out, and do not count towards the length either. With 5 or more left,
+  a name 80% alike and at most one letter longer or shorter counts as
+  the player's too; with 2 to 4, only the same name does; with fewer
+  than 2 (such as Duc, Loc or Ly with their Vietnamese marks), the name
+  is not compared at all, as if none were typed.
 
   Potion counts (Con N binh): Sap het binh needs two reads in a row under
   the mark, about 10 seconds apart. A count that falls to a fifth or less

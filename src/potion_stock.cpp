@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 namespace gobot {
 
@@ -296,7 +298,9 @@ Frame hotbar_picture_from(const Frame& f, int x, int y) {
     // by alpha, read_slot looks at the frame and the labels -- but a picture
     // cut from a player's screen would otherwise carry the items in their
     // slots, and the scenery round the corners, wherever it is copied.
-    const auto clear = [&](int px, int py) { std::fill_n(out.pixels.begin() + static_cast<std::ptrdiff_t>(at(px, py)), 4, 0); };
+    const auto clear = [&](int px, int py) {
+        std::fill_n(out.pixels.begin() + static_cast<std::ptrdiff_t>(at(px, py)), 4, std::uint8_t{ 0 });
+    };
 
     // The four corners are rounded: the scenery shows through outside them.
     for (const auto& c : { std::pair{ 0, 0 }, std::pair{ kPictureW - 3, 0 },
@@ -454,6 +458,61 @@ bool PotionWatch::holding(std::uint32_t vk) const {
 }
 
 void PotionWatch::reset() { keys_.clear(); }
+
+namespace {
+
+/// What a slot holds, as the log writes it: the count, or the state's name.
+std::string slot_said(const SlotReading& r) {
+    return r.has_count() ? std::to_string(r.count) : std::string(slot_state_name(r.state));
+}
+
+double seconds_before(std::uint64_t now, std::uint64_t then) {
+    return static_cast<double>(now > then ? now - then : 0) / 1000.0;
+}
+
+} // namespace
+
+void PotionSlotLog::note(const std::string& key, const SlotReading& look, bool have_believed,
+                         const SlotReading& believed, std::uint64_t now) {
+    if (!have_believed) return;
+    const auto at = std::find_if(keys_.begin(), keys_.end(), [&](const Seen& s) { return s.key == key; });
+    const bool read_now = look.same(believed);
+    if (at == keys_.end()) {
+        // The first reading a key has believed is the look's own that made it
+        // so; a look that is not it has nothing to be told beside.
+        if (read_now) keys_.push_back(Seen{ key, slot_said(believed), now, {}, 0 });
+        return;
+    }
+    if (read_now) {
+        at->said = slot_said(believed);
+        at->read_ms = now;
+        at->last.clear();
+        at->last_ms = 0;
+        return;
+    }
+    // Covered, unreadable, or a count not believed (a wild drop held): what
+    // is believed keeps its time, and this look is told beside it.
+    at->last = look.has_count() ? std::to_string(look.count) + ", not believed" : slot_said(look);
+    at->last_ms = now;
+}
+
+std::string PotionSlotLog::line(std::uint64_t now) const {
+    if (keys_.empty()) return {};
+    std::string out = "Potion slots:";
+    for (std::size_t i = 0; i < keys_.size(); ++i) {
+        const Seen& s = keys_[i];
+        char read_ago[48];
+        std::snprintf(read_ago, sizeof read_ago, "read %.0f s earlier", seconds_before(now, s.read_ms));
+        std::string told = std::string(" (") + read_ago;
+        if (!s.last.empty()) {
+            char look_ago[48];
+            std::snprintf(look_ago, sizeof look_ago, "; last look %.0f s earlier: ", seconds_before(now, s.last_ms));
+            told += look_ago + s.last;
+        }
+        out += (i ? ", key " : " key ") + s.key + " " + s.said + told + ")";
+    }
+    return out;
+}
 
 std::string potion_line_vi(const SlotReading& r, const std::string& key) {
     switch (r.state) {
