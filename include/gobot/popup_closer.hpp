@@ -311,6 +311,9 @@ private:
     std::uint64_t    own_esc_ms_ = 0;
     std::string      last_vi_;
     int              closed_ = 0;
+    /// A turn's look, kept from turn to turn so that its 3 MB are grabbed
+    /// into again rather than made anew every turn.
+    Frame            turn_frame_;
 };
 
 } // namespace gobot

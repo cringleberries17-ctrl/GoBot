@@ -1035,7 +1035,9 @@ struct Threads {
     std::uint64_t        t = 9'000'000;
     std::uint64_t        timer_wake = 0;
     bool                 in_timer = false, in_seq = false;
-    float                hp = 100.0f, mp = 100.0f;
+    float                hp = 100.0f, mp = 100.0f, pet = -1.0f;
+    /// Off: no reading handed over -- the read a start woke not in yet.
+    bool                 push = true;
     std::uint64_t        press_ms = 40;
     std::vector<std::pair<std::uint32_t, std::uint64_t>> got;
     /// Something else of GoBot's on its own thread -- the hunter, say -- that
@@ -1062,7 +1064,7 @@ struct Threads {
     /// BẮT ĐẦU: the timer thread sleeps its first 10 ms, the sequence's takes
     /// its first turn at once.
     void start() {
-        engine.set_vitals(hp, mp);
+        engine.set_vitals(hp, mp, pet);
         engine.start_stepped();
         timer_wake = t + 10;
         wake();
@@ -1087,7 +1089,7 @@ struct Threads {
         for (const std::uint64_t until = t + ms; t < until;) {
             ++t;
             if (other) other(t);
-            engine.set_vitals(hp, mp);
+            if (push) engine.set_vitals(hp, mp, pet);
             wake();
         }
     }
@@ -1097,13 +1099,20 @@ struct Threads {
             if (p.first == vk && p.second >= from) return p.second;
         return 0;
     }
-    /// Steps of the sequence -- any key but the potions -- that went down in
-    /// [from, to).
+    /// Steps of the sequence -- any key but the potions, 1, 2 and the pet's
+    /// 7 -- that went down in [from, to).
+    static bool potion(std::uint32_t vk) { return vk == '1' || vk == '2' || vk == '7'; }
     int steps_between(std::uint64_t from, std::uint64_t to) const {
         int n = 0;
         for (const auto& p : got)
-            if (p.first != '1' && p.first != '2' && p.second >= from && p.second < to) ++n;
+            if (!potion(p.first) && p.second >= from && p.second < to) ++n;
         return n;
+    }
+    /// When the first step of the sequence went down; 0 for never.
+    std::uint64_t first_step() const {
+        for (const auto& p : got)
+            if (!potion(p.first)) return p.second;
+        return 0;
     }
 };
 
@@ -1401,6 +1410,155 @@ void test_potions_before_sequence_threads() {
               "HP read low while the sequence steps: no step between the reading and the potion in " +
                   std::to_string(runs - before - missing) + " of " + std::to_string(runs) +
                   " runs, the potion at most " + std::to_string(worst) + " ms after the reading" + example);
+    }
+    {
+        // BẮT ĐẦU on a reading pushed before it -- HP 30%, read at the idle
+        // pace, and the player has since drunk back up to 95% -- with the
+        // read the start woke 40 ms on: no potion, and the first step waits
+        // for that read rather than going on no reading.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys = { hp_key('1', 50) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Threads th(cfg);
+        th.hp = 30.0f;
+        th.mp = 90.0f;
+        const std::uint64_t t0 = th.t;
+        th.push = false;
+        th.start();                 // hands over the old 30% first, as tick() did
+        th.pass(40);
+        th.hp = 95.0f;
+        th.push = true;
+        th.pass(400);
+        const std::uint64_t step = th.first_step();
+        check(th.first('1', t0) == 0 && step >= t0 + 40 && step <= t0 + 75,
+              "BẮT ĐẦU on an HP of 30% read before it, 95% by the read the start woke 40 ms on: no potion, "
+              "the first step at +" + std::to_string(step - t0) + " ms (40 to 75)");
+    }
+    {
+        // The other way: 95% before it, 30% by the read the start woke --
+        // the potion on that read, before the first step.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys = { hp_key('1', 50) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Threads th(cfg);
+        th.hp = 95.0f;
+        th.mp = 90.0f;
+        const std::uint64_t t0 = th.t;
+        th.push = false;
+        th.start();
+        th.pass(40);
+        th.hp = 30.0f;
+        th.push = true;
+        th.pass(400);
+        const std::uint64_t potion = th.first('1', t0);
+        check(potion >= t0 + 40 && potion <= t0 + 75 && th.steps_between(t0, potion) == 0,
+              "BẮT ĐẦU on 95% read before it, 30% by the read the start woke 40 ms on: the potion at +" +
+                  std::to_string(potion - t0) + " ms, before any step (" +
+                  std::to_string(th.steps_between(t0, potion)) + " before it)");
+    }
+    {
+        // Read before the start, and nothing after it -- the grabs failing:
+        // the start's wait runs its kStartReadMs and the sequence goes on,
+        // and only then is the key held for no reading.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys = { hp_key('1', 50) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Threads th(cfg);
+        th.hp = 90.0f;
+        th.mp = 90.0f;
+        th.push = false;
+        const std::uint64_t t0 = th.t;
+        th.start();
+        th.pass(MacroEngine::kStartReadMs - 10);
+        const std::uint64_t held_in_wait = th.engine.stats().held_no_reading;
+        th.pass(300);
+        const std::uint64_t step = th.first_step();
+        check(th.first('1', t0) == 0 && held_in_wait == 0 && th.engine.stats().held_no_reading > 0 &&
+                  step >= t0 + MacroEngine::kStartReadMs && step <= t0 + MacroEngine::kStartReadMs + 25,
+              "BẮT ĐẦU read before it, never after: the first step at +" + std::to_string(step - t0) +
+                  " ms (the start's wait), held for no reading only after it (" +
+                  std::to_string(held_in_wait) + " in it)");
+    }
+    {
+        // No reading before the start either -- the bars not found, no
+        // packets: nothing says one is coming, so no wait.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys = { hp_key('1', 50) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Threads th(cfg);
+        th.hp = -1.0f;
+        th.mp = -1.0f;
+        const std::uint64_t t0 = th.t;
+        th.start();
+        th.pass(200);
+        const std::uint64_t step = th.first_step();
+        check(th.first('1', t0) == 0 && step != 0 && step <= t0 + 20 && th.engine.stats().held_no_reading > 0,
+              "BẮT ĐẦU with no reading before it or after: no wait, the first step at +" +
+                  std::to_string(step - t0) + " ms");
+    }
+    {
+        // HP read low, MP never read -- its bar not found -- and the HP
+        // potion's cooldown short: the step right after the potion, and
+        // more between the potions, not one held off by the start.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        MacroKey hp = hp_key('1', 50);
+        hp.interval_ms = 100;
+        cfg.keys = { hp, mp_key('2', 50) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Threads th(cfg);
+        th.hp = 30.0f;
+        th.mp = -1.0f;
+        const std::uint64_t t0 = th.t;
+        th.start();
+        th.pass(MacroEngine::kStartReadMs);
+        const std::uint64_t potion = th.first('1', t0), step = th.first_step();
+        const int steps = th.steps_between(t0, t0 + MacroEngine::kStartReadMs);
+        check(potion != 0 && potion <= t0 + 20 && step > potion && step <= potion + th.press_ms + 25 && steps >= 3,
+              "BẮT ĐẦU at HP 30%, MP never read, the HP potion every 100 ms: the potion at +" +
+                  std::to_string(potion - t0) + ", the first step at +" + std::to_string(step - t0) + " ms, " +
+                  std::to_string(steps) + " steps in the first " + std::to_string(MacroEngine::kStartReadMs) +
+                  " ms");
+    }
+    {
+        // The pet's HP read before the start, not yet after it -- HP and MP
+        // from the packets come at once -- and under its mark by the read the
+        // start woke, 40 ms on: the pet's potion before the first step.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys = { hp_key('1', 50), pet_key('7', 50) };
+        cfg.sequence = quick_sequence();
+        cfg.sequence_enabled = true;
+        cfg.require_focus = true;
+        Threads th(cfg);
+        th.hp = 90.0f;
+        th.mp = 90.0f;
+        th.pet = 90.0f;
+        const std::uint64_t t0 = th.t;
+        th.start();
+        th.pet = -1.0f;
+        th.pass(40);
+        th.pet = 30.0f;
+        th.pass(400);
+        const std::uint64_t pet = th.first('7', t0);
+        check(pet >= t0 + 40 && pet <= t0 + 75 && th.steps_between(t0, pet) == 0,
+              "BẮT ĐẦU with the pet's HP read 30% by the read the start woke 40 ms on: the pet's potion at +" +
+                  std::to_string(pet - t0) + " ms, before any step (" +
+                  std::to_string(th.steps_between(t0, pet)) + " before it)");
     }
     {
         // And on the real threads, as BẮT ĐẦU starts them: HP and MP low, the

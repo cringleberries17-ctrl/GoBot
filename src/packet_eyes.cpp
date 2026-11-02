@@ -13,10 +13,11 @@ namespace gobot {
 
 // A walk held from one look to the next is let go of and taken up again --
 // a stop and a start report -- before the packets stop following it; and a
-// step back, held 800 ms at most, is followed as long as it was before.
+// step back, held 800 ms at most and the turn's tap more (Hunter::kTurnTapMs),
+// is followed as long as it was before.
 static_assert(Hunter::kWalkRenewMs + Hunter::kWalkRenewGapMs + 200 <= PacketWorld::kOwnReckonMs,
               "a held walk is renewed well inside the time a walk is followed with no report");
-static_assert(PacketWorld::kOwnStepReckonMs + PacketHealth::kReportLateMs >= 800,
+static_assert(PacketWorld::kOwnStepReckonMs + PacketHealth::kReportLateMs >= 800 + Hunter::kTurnTapMs,
               "the longest step back stays on the packets until its stop comes");
 
 namespace {
@@ -95,7 +96,7 @@ bool foreign_lately(const PacketWorld::Stats& s, std::uint64_t now) {
 /// holds, 0.6 s for any other -- is held where the working-out stopped
 /// (uncertain); but the report that ends it comes a moment after the key is
 /// up, so only once that report is kReportLateMs late. That moment matters at
-/// a step back held 800 ms, past the 0.6 s of a walk the hunter does not
+/// a step back held 860 ms, past the 0.6 s of a walk the hunter does not
 /// hold; at the landing of a jump past kAirReckonMs; and at a held walk let
 /// go of near its 3 s.
 bool you_lost(const PacketWorld::View& v, std::uint64_t now) {
@@ -216,6 +217,8 @@ WorldFix world_fix(const PacketWorld::View& v, const PacketWorld::Stats& s, cons
     f.rx = v.me.report_x;
     f.ry = v.me.report_y;
     f.report_ms = v.me.report_ms;
+    f.facing = v.me.said_facing;
+    f.facing_ms = v.me.facing_ms;
     f.airborne = v.me.airborne;
     f.moving = v.me.moving;
     f.uncertain = v.me.uncertain;

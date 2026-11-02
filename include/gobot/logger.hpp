@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <deque>
 #include <mutex>
@@ -42,6 +44,11 @@ public:
 
     void write(LogLevel lvl, const std::string& msg);
 
+    /// Lines written since the start, every sink's, and their bytes with the
+    /// newline: the Load line's "log N lines/min" (gobot/load_meter.hpp).
+    std::uint64_t lines_written() const { return lines_.load(std::memory_order_relaxed); }
+    std::uint64_t bytes_written() const { return bytes_.load(std::memory_order_relaxed); }
+
     /// Retain the last `max` lines in memory for the GUI's log panel. Zero
     /// disables retention. Console and file sinks are unaffected.
     void set_ring_capacity(std::size_t max);
@@ -49,6 +56,13 @@ public:
     /// Snapshot of retained lines, oldest first.
     std::vector<LogLine> ring() const;
     void clear_ring();
+
+    /// Moves on at every change to the retained lines: a line kept, the ring
+    /// cleared or cut shorter. The full screen's Log tab copies ring() again
+    /// only when this has moved -- copying up to 2000 lines on every frame,
+    /// under the mutex every logging thread waits on, was most of what that
+    /// tab cost. Read without the lock.
+    std::uint64_t ring_sequence() const { return ring_seq_.load(std::memory_order_relaxed); }
 
     template <typename... Args>
     void logf(LogLevel lvl, const char* fmt, Args&&... args) {
@@ -68,6 +82,10 @@ private:
 
     std::deque<LogLine> ring_;
     std::size_t         ring_capacity_ = 0;
+
+    std::atomic<std::uint64_t> lines_{ 0 };
+    std::atomic<std::uint64_t> bytes_{ 0 };
+    std::atomic<std::uint64_t> ring_seq_{ 0 };   ///< see ring_sequence; moved under mutex_
 };
 
 } // namespace gobot

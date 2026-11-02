@@ -53,6 +53,7 @@ void MapMapper::stop() {
 
 void MapMapper::loop() {
     ScreenCapture capture;
+    capture.set_label("mapper");
     Frame frame;
 
     while (running_.load()) {

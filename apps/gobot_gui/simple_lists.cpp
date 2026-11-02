@@ -42,6 +42,8 @@ struct GuiApp::ListsUi {
 
 void GuiApp::ListsUiFree::operator()(ListsUi* ui) const { delete ui; }
 
+bool GuiApp::monster_look_running() const { return lists_ui_ && lists_ui_->look_until_ms != 0; }
+
 namespace {
 
 using namespace simple_ui;

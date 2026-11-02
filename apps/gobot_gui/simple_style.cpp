@@ -41,7 +41,6 @@ struct GuiApp::StyleUi {
 
     std::future<JumpCheck::Result> jump;
     std::atomic<bool> jump_stop{ false };
-    bool              jump_started_detector = false;
     std::uint32_t     jump_key = 0;        ///< the key the check pressed
     std::string       jump_said;           ///< what the last check said
     /// The key a check pressed this session and saw no jump on: "đã thử,
@@ -64,6 +63,8 @@ void GuiApp::StyleUiFree::operator()(StyleUi* ui) const {
     if (ui) ui->jump_stop = true;
     delete ui;
 }
+
+bool GuiApp::jump_test_running() const { return style_ui_ && style_ui_->jump.valid(); }
 
 namespace {
 
@@ -179,8 +180,7 @@ void GuiApp::simple_style_line() {
             simple_changed();
         }
         ImGui::SetItemTooltip("Như GoBot từ trước tới giờ: tầm đánh 150 px, cao thấp 60 px, chọn lại "
-                              "mục tiêu mỗi 4 giây, quay người mỗi lần đánh (có dấu Đứng yên một chỗ "
-                              "hay Giữ khoảng cách thì chỉ quay khi chưa quay về phía quái).");
+                              "mục tiêu mỗi 4 giây; chỉ quay người khi chưa quay về phía quái.");
         const auto& styles = attack_styles();
         for (std::size_t i = 0; i < styles.size(); ++i) {
             const AttackStyle& s = styles[i];
@@ -510,15 +510,15 @@ void GuiApp::simple_jump_try() {
     const std::uint32_t key = hunt_config_.jump_key;
 
     // The character's plate is what is watched, and the detector reads it.
-    // Started here it only looks, and it is stopped again afterwards.
-    ui.jump_started_detector = false;
+    // Started here it only looks, and it is stopped again afterwards unless
+    // something else looks through it by then (simple_style_tick). Kept
+    // meanwhile, by a hunt's end as well (jump_test_running).
     if (!detector_running_) {
         start_detector();
         if (!detector_running_) {
             simple_note("Không đọc được màn hình game nên chưa thử phím nhảy.");
             return;
         }
-        ui.jump_started_detector = true;
     }
     ui.jump_stop = false;
     ui.jump_key = key;
@@ -560,12 +560,10 @@ void GuiApp::simple_style_tick() {
             r.pressed ? "pressed" : "did not press", InputManager::key_name(ui.jump_key).c_str(),
             JumpCheck::outcome_name(r.outcome), r.rose_px, r.reads);
 
-    // The detector as it was: stopped again, if the test started it and
-    // nothing has taken it up since.
-    if (ui.jump_started_detector && detector_running_ && !hunting_ &&
-        !(navigator_ && navigator_->running()))
-        stop_detector();
-    ui.jump_started_detector = false;
+    // The detector stopped again unless something else looks through it:
+    // the test started it, or kept it past a hunt's end (release_detector --
+    // a hunt, a walk, "Quái đang thấy" and the full screen's Radar keep it).
+    release_detector();
 
     // "Đã thử" by what was seen, on the key that was pressed -- and, for the
     // checklist, that it was pressed and not seen to jump.

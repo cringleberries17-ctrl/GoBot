@@ -469,7 +469,9 @@ public:
     ///   thread of its own, waits too: from BẮT ĐẦU until the potions have
     ///   first been looked at, from the moment one is found due until the HP
     ///   potion, then the MP one, then the pet's have gone, and in the moment
-    ///   between a reading and the pass that acts on it.
+    ///   between a reading and the pass that acts on it. And at BẮT ĐẦU, every
+    ///   key waits for HP, MP and the pet's HP read afresh -- each that had a
+    ///   reading before -- kStartReadMs at most (start_read_until_).
     /// - A potion press that does not go out never starts its cooldown. It is
     ///   tried again kPotionRetryMs later when another job held the keys, and
     ///   the moment a hold, the game being behind another window or the
@@ -490,6 +492,10 @@ public:
     /// frames. (20 ms before: the second was lost now and then.)
     static constexpr std::uint32_t kPotionGapMs = 60;
     static constexpr std::uint64_t kPotionFirstMs = 300;
+    /// How long a start waits for HP and MP read afresh (start_read_until_):
+    /// the read the start woke, whose grab can take 60 ms and more in a
+    /// VMware guest, and the GUI's next frame to hand it over.
+    static constexpr std::uint64_t kStartReadMs = 500;
 
     /// What the hunter is doing, for skills that follow the fight
     /// (MacroConfig::skills_follow_fight). Asked on the macro's own threads,
@@ -908,6 +914,17 @@ private:
     /// and the sequence's first step went before it. The first look sets the
     /// time afresh, or clears it. The timer pass's, and arm()'s.
     bool              potion_since_provisional_ = false;
+    /// Until when the start waits for HP, MP and the pet's HP read afresh:
+    /// each that had a reading pushed before the start, which arm() drops
+    /// (start_unread_). The first potion, skill, buff or step waits for the
+    /// read the start woke, kStartReadMs at most (potion_first); 0 once all
+    /// are read. Never moved on: a potion that goes meanwhile ends no wait,
+    /// and holds the rest no later than kStartReadMs from the start either.
+    /// Written by arm() and the timer pass, read by the sequence too.
+    std::atomic<std::uint64_t> start_read_until_{0};
+    /// HP's, MP's and the pet's: had a reading before the start and has had
+    /// none since. arm()'s, then the timer pass's alone.
+    bool              start_unread_[3] = { false, false, false };
 
     std::function<Fight()> fight_;
     /// When the skills that follow the fight are next looked at -- the gap

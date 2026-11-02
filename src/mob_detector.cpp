@@ -1,6 +1,7 @@
 ﻿#include "gobot/mob_detector.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/camera_tracker.hpp"
 #include "gobot/glyph_font.hpp"
@@ -213,7 +214,13 @@ void MobDetector::start() {
 }
 
 void MobDetector::stop() {
-    if (!running_.exchange(false)) return;
+    {
+        // Under the wait's lock, so that the loop cannot look at running_ and
+        // then start its wait just after the wake-up below has gone.
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        if (!running_.exchange(false)) return;
+    }
+    wake_.notify_all();
     if (thread_.joinable()) thread_.join();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -506,12 +513,20 @@ std::vector<Nameplate> MobDetector::detect(const Frame& f, const DetectorTuning&
 }
 
 void MobDetector::loop() {
+    name_this_thread("detector");
     ScreenCapture capture;
+    capture.set_label("detector");
     Frame frame;
 
     while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(140));
-        if (!running_.load()) break;
+        {
+            // kLookGapMs between looks, cut short by stop(): it is stopped by
+            // GoBot's own thread at every hunt's end, and a plain sleep held
+            // the window -- and F12 -- until it was out.
+            std::unique_lock<std::mutex> lock(wake_mutex_);
+            if (wake_.wait_for(lock, std::chrono::milliseconds(kLookGapMs), [this] { return !running_.load(); }))
+                break;
+        }
 
         const std::uint64_t generation = generation_.load();   // before the window: see set_target_window()
         void* hwnd = hwnd_.load();
@@ -531,6 +546,9 @@ void MobDetector::loop() {
             t = tuning_;
         }
 
+        // The look at the frame timed for the Load line, from here to the
+        // camera fed below: the plates, the name, the minimap and the camera.
+        const std::uint64_t look_from = load_clock_us();
         const GlyphFont* font = font_.load();
         std::vector<Nameplate> found = detect(frame, t, font);
 
@@ -568,6 +586,7 @@ void MobDetector::loop() {
             // camera's reference. Made again, so the new window starts afresh.
             if (cam && generation_.load() != generation) cam->reset();
         }
+        load_meters().detect.add_since(look_from);
 
         // Seen means your own character, by its name: another player in view
         // is not you, and said "your character is there" when it was not.
@@ -584,7 +603,9 @@ void MobDetector::loop() {
             // look at what was there, not at what is.
             if (generation_.load() != generation) continue;
             plates_ = std::move(found);
-            frame_ = frame;
+            // Swapped in, not copied: the old frame_ comes back as `frame`,
+            // for the next grab to fill -- 3 MB less copied every look.
+            std::swap(frame_, frame);
 
             Nameplate me;
             if (pick_player(plates_, frame_.width, me)) {

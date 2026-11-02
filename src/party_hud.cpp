@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <iterator>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <windows.h>
 
@@ -238,7 +240,12 @@ PartySight party_sight(ScreenCapture& capture, void* window) {
 }
 
 bool take_party_look(const PartySight& sight, PartyLook& out) {
+    // Nothing of the last look kept but its frame's buffer, which the grab
+    // fills again: the party worker keeps one look across its passes, and
+    // made 3 MB anew at each.
+    std::vector<std::uint8_t> buffer = std::move(out.frame.pixels);
     out = PartyLook{};
+    out.frame.pixels = std::move(buffer);
     if (!sight.grab || !sight.seen || !sight.now) return false;
     std::string before;
     const bool area0 = sight.seen(PartyHudReader::kArea, &before);

@@ -79,6 +79,8 @@ void Logger::write(LogLevel lvl, const std::string& msg) {
     if (lvl < level_) return;
 
     const std::string line = wall_clock() + " [" + level_tag(lvl) + "] " + msg;
+    lines_.fetch_add(1, std::memory_order_relaxed);
+    bytes_.fetch_add(line.size() + 1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(mutex_);
     std::fprintf(stderr, "%s\n", line.c_str());
@@ -92,6 +94,9 @@ void Logger::write(LogLevel lvl, const std::string& msg) {
     if (ring_capacity_ > 0) {
         ring_.push_back({ lvl, line });
         while (ring_.size() > ring_capacity_) ring_.pop_front();
+        // Moved after the line is in and before the lock is let go: a reader
+        // that sees the new count and then asks for ring() gets the line.
+        ring_seq_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -100,6 +105,7 @@ void Logger::set_ring_capacity(std::size_t max) {
     ring_capacity_ = max;
     while (ring_.size() > ring_capacity_) ring_.pop_front();
     if (max == 0) ring_.clear();
+    ring_seq_.fetch_add(1, std::memory_order_relaxed);
 }
 
 std::vector<LogLine> Logger::ring() const {
@@ -110,6 +116,7 @@ std::vector<LogLine> Logger::ring() const {
 void Logger::clear_ring() {
     std::lock_guard<std::mutex> lock(mutex_);
     ring_.clear();
+    ring_seq_.fetch_add(1, std::memory_order_relaxed);
 }
 
 const char* to_string(LogLevel l) { return level_tag(l); }

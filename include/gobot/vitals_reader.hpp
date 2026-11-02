@@ -5,13 +5,16 @@
 #include "gobot/screen_capture.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace gobot {
 
@@ -57,6 +60,10 @@ public:
     void stop();
     bool running() const { return running_.load(); }
 
+    /// Frames come from the window, through ScreenCapture, unless this is
+    /// set; a test sets its own. Set it before start(), never while running.
+    void set_grab(std::function<bool(void* window, Frame& out)> grab) { grab_ = std::move(grab); }
+
     /// 0..100, or -1 when the bar has not been set up or cannot be read.
     ///
     /// Worked out from the figures printed on the bar when those are legible,
@@ -79,6 +86,46 @@ public:
     /// read. A grab that fails, or no game window, leaves it where it was --
     /// and hp_percent() and mp_percent() with it, at what they read then.
     std::uint64_t last_read_ms() const { return read_at_ms_.load(); }
+
+    /// How far apart the reads are: the reader's wait between one and the
+    /// next. Said in the Load line (gobot/load_meter.hpp). kReadGapMs until
+    /// set_period_ms says otherwise, as it always was.
+    static constexpr int kReadGapMs = 150;
+    int period_ms() const { return period_ms_.load(); }
+
+    /// The wait between reads from now on, held to kMinPeriodMs..kMaxPeriodMs.
+    /// GoBot's window asks for the run's pace (150 ms, 250 in light mode)
+    /// while anything that acts on HP and MP is alive and a second otherwise,
+    /// on every pass of its loop: the same period asked again changes
+    /// nothing. A shorter one than the reader waits on takes effect at once --
+    /// the next read is taken now, not when the longer wait would have ended
+    /// -- so a job started reads fresh figures before its first key; a longer
+    /// one from the next wait. Any thread.
+    void set_period_ms(int ms);
+    static constexpr int kMinPeriodMs = 50;
+    static constexpr int kMaxPeriodMs = 10000;
+
+    /// When the pace was last cut from an idle one to a run's -- to half of
+    /// what it was or less (set_period_ms), a job starting -- on now_ms()'s
+    /// clock; 0 never. A read before it was taken at the idle pace and may be
+    /// a second old: HP read low a second ago, a potion drunk by hand since,
+    /// and the macro's first look would drink again on it. GoBot's window
+    /// hands the macro no reading until a read lands after this, tens of ms
+    /// on, as the shorter pace wakes the reader at once. A smaller cut --
+    /// 250 to 150, light mode unticked in a fight -- leaves it where it was.
+    std::uint64_t paced_from_ms() const { return paced_from_ms_.load(); }
+
+    /// How long the printed figures may go unread before they are forgotten,
+    /// and the landmark looked for again: twelve reads at kReadGapMs, as it
+    /// always was -- about two seconds.
+    static constexpr int kForgetAfterMs = 1800;
+    /// Reads in a row without the figures that make kForgetAfterMs, at reads
+    /// `period_ms` apart: the fewest whose gaps add up to it, never fewer
+    /// than two -- one unreadable read is ordinary, a damage number across
+    /// the caption. 12 at 150 ms, exactly as before; 8 at 250 (2.0 s); 2 at
+    /// a second. Counted in reads, not measured on the clock, so that 150
+    /// gives the same 12 however long each read's own work takes.
+    static int forget_after_misses(int period_ms);
 
     /// When HP last read as a figure -- 0..100, not -1 -- on now_ms()'s clock;
     /// 0 before the first. A read that made out neither the figures nor the
@@ -342,6 +389,15 @@ private:
 
     std::atomic<void*> hwnd_{nullptr};
     std::atomic<bool>  running_{false};
+    std::function<bool(void*, Frame&)> grab_;   ///< see set_grab; empty for the real window
+
+    /// The wait between reads (set_period_ms), and what cuts it short: stop(),
+    /// and a shorter period asked for (wake_now_, under wake_mutex_).
+    std::atomic<int>        period_ms_{kReadGapMs};
+    std::atomic<std::uint64_t> paced_from_ms_{0};   ///< see paced_from_ms
+    std::mutex              wake_mutex_;
+    std::condition_variable wake_;
+    bool                    wake_now_ = false;
     std::atomic<bool>  auto_relocate_{true};
     std::atomic<float> hp_{-1.0f};
     std::atomic<float> mp_{-1.0f};
@@ -395,9 +451,9 @@ private:
     /// that point rather than left standing: a reading that quietly stops
     /// updating looks exactly like one that is working, which is how a bar
     /// measured at the wrong width sat there reading 87% of a figure that had
-    /// not changed in a minute.
+    /// not changed in a minute. "Enough" is forget_after_misses at the pace
+    /// the reads are asked at: about two seconds, whatever the pace.
     int hp_misses_ = 0, mp_misses_ = 0;
-    static constexpr int kForgetAfterMisses = 12;   ///< about two seconds
 
     /// Find the landmark again when it has been lost, but not every frame:
     /// it does not move while the HUD is up, so re-finding it constantly is
@@ -410,6 +466,9 @@ private:
     BarSpec            hp_spec_;
     BarSpec            mp_spec_;
     BarSpec            pet_bar_;
+    /// The newest frame. Written by the reader's thread alone, under mutex_,
+    /// by swapping the frame just grabbed in; that thread reads it without
+    /// the lock, every other one with it.
     Frame              frame_;
     GlyphFont          font_;
     Vitals             values_;

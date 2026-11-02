@@ -181,6 +181,18 @@ struct PotionSettings {
     void load(const IniFile& ini);
 };
 
+/// The second frame of a look at the slots, this long after the first:
+/// soon enough that the stack has not moved in between, late enough that the
+/// HP/MP reader, whose frames they are, has taken a new one -- two looks at
+/// the same frame would agree with each other whatever is on it. 400 ms
+/// (kPotionPairGapMs) while the reader reads every 150 ms, as it always was,
+/// and every 250 ms, as it does in light mode while a job runs; one read and
+/// kPotionPairSlackMs more for its work when the reads are further apart
+/// than that ([Performance] vitals_run_ms set by hand).
+constexpr int kPotionPairGapMs = 400;
+constexpr int kPotionPairSlackMs = 150;
+int potion_pair_gap_ms(int read_period_ms);
+
 /// Decides when a potion key's slot is worth a message, from one look at a
 /// time. Pure logic: no clock, no frames.
 ///

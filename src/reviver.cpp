@@ -286,7 +286,8 @@ void Reviver::end_death(bool came_back) {
 
 Reviver::Turn Reviver::turn() {
     if (stop_now()) return Turn::Stopped;
-    Frame frame;
+    // The turn's look, grabbed into the same buffer turn after turn (turn_frame_).
+    Frame& frame = turn_frame_;
     Seen s;
     if (!fresh(frame, s)) return stop_now() ? Turn::Stopped : Turn::Blind;
 

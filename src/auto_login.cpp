@@ -1222,7 +1222,11 @@ std::size_t AutoLogin::resume_from(const std::vector<Page>& pages, bool client_u
 
 // ------------------------------------------------------------------ the flow
 
-AutoLogin::AutoLogin() = default;
+AutoLogin::AutoLogin() {
+    // The crossing's own looks at VTCZone, the launcher and the game, counted
+    // together in the Load line's grabs.
+    for (ScreenCapture& c : capture_) c.set_label("auto login");
+}
 
 void AutoLogin::set_settings(const Settings& s) { settings_ = s; }
 

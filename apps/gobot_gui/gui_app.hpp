@@ -9,6 +9,8 @@
 #include "gobot/command_executor.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
+#include "gobot/file_watch.hpp"
+#include "gobot/frame_pacer.hpp"
 #include "gobot/framing.hpp"
 #include "gobot/front_keeper.hpp"
 #include "gobot/game_state.hpp"
@@ -17,9 +19,12 @@
 #include "gobot/input_manager.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/macro.hpp"
+#include "gobot/load_meter.hpp"
+#include "gobot/logger.hpp"
 #include "gobot/map_file.hpp"
 #include "gobot/map_mapper.hpp"
 #include "gobot/map_table.hpp"
+#include "gobot/machine_info.hpp"
 #include "gobot/minimap_tracker.hpp"
 #include "gobot/net_discovery.hpp"
 #include "gobot/opcode_registry.hpp"
@@ -90,8 +95,58 @@ public:
     /// Null keeps the default. Set before the first draw.
     void set_fonts(ImFont* text, ImFont* strong) { text_font_ = text; strong_font_ = strong; }
 
+    /// The Direct3D device the window is drawn with, as main.cpp made it.
+    /// Logged at the start ("GUI:"), and one of light mode's signals: WARP or
+    /// the Basic Render Driver is a PC drawing on its CPU. Set before
+    /// initialise().
+    void set_renderer(const RendererInfo& r) { renderer_ = r; }
+
     /// Load configs, find the game window. Call once before the first draw.
     void initialise();
+
+    /// How main.cpp's loop paces its frames (gobot/frame_pacer.hpp), asked on
+    /// every pass: light mode ("Nhẹ máy") can be ticked at any time.
+    struct Pacing {
+        bool       pacer_on = true;          ///< [Performance] gui_pacer; off is the loop before the pacer
+        FrameRates rates;                    ///< light mode's or everybody's
+        bool       want_interactive = false; ///< a key box waits for its key, or "Tự tìm" looks for the bars
+    };
+    Pacing pacing() const;
+
+    /// One frame soon, from any thread: something on the screen changed with
+    /// nobody touching the window -- a status line, a job started or stopped
+    /// by a key pressed in the game.
+    void request_redraw() { redraw_.store(true); }
+    /// Whether a frame was asked for since the last call -- by request_redraw,
+    /// or by a job that started or stopped since -- and forget it. For
+    /// main.cpp's loop.
+    bool take_redraw();
+
+    /// What main.cpp's loop did, counted as it goes, for the Load line: on
+    /// GoBot's own thread alone. The counts are never reset -- two read a
+    /// minute apart give a rate -- and the longest times start again at each
+    /// Load line (load_snapshot).
+    struct LoopCounters {
+        std::uint64_t passes = 0;           ///< passes of the loop: one tick() each
+        std::uint64_t frames = 0;           ///< frames drawn
+        std::uint64_t occluded_skips = 0;   ///< passes with the window minimised or covered
+        double        build_ms = 0.0;       ///< NewFrame to RenderDrawData, all frames together
+        double        build_max_ms = 0.0;   ///< and the longest one since the last Load line
+        double        present_ms = 0.0;     ///< Present, all frames together
+        double        present_max_ms = 0.0;
+        void frame(double build, double present) {
+            ++frames;
+            build_ms += build;
+            present_ms += present;
+            if (build > build_max_ms) build_max_ms = build;
+            if (present > present_max_ms) present_max_ms = present;
+        }
+    };
+    LoopCounters& loop_counters() { return loop_counters_; }
+
+    /// Light mode ("Nhẹ máy (máy ảo / máy yếu)") is on: set, or turned on by
+    /// "auto" on a VMware guest or a PC with no real graphics card.
+    bool light_mode() const { return light_.on; }
 
     /// Draw one frame.
     void draw();
@@ -173,6 +228,18 @@ private:
     std::vector<Routine> routines_cache_;
     std::uint64_t        routines_mtime_ = 0;       ///< last write time seen
     std::uint64_t        routines_checked_ms_ = 0;  ///< when it was last stat'd
+
+    /// The party and keeper panels' files, likewise re-read when they change
+    /// rather than on every frame the panel is open (gobot/file_watch.hpp):
+    /// party.ini for the party panel, app.ini's [Crash] and whether login.ini
+    /// has every page identified for the keeper's.
+    FileWatch            party_panel_watch_;
+    Party::Settings      party_panel_rules_;
+    bool                 party_panel_have_ = false;   ///< party.ini read at the last try
+    FileWatch            keeper_panel_app_watch_;
+    CrashWatch::Settings keeper_panel_crash_;
+    FileWatch            keeper_panel_login_watch_;
+    bool                 keeper_panel_can_login_ = false;
 
     void draw_session_panel();     ///< the watcher, auto-login, and stopping
     void draw_keys_panel();        ///< the keys the game itself is set to
@@ -706,6 +773,33 @@ private:
     void stop_vitals();
     void autodetect_bar(BarSpec& bar, const char* which);
 
+    /// The full screen's FIND THE BARS, as "Tự tìm" on the simple one: it
+    /// asks for a read at once (vitals_for_job) and searches the first frame
+    /// read after the click, not one up to a second old while nothing runs
+    /// (vitals_idle_ms), taken maybe with GoBot's window still over the game.
+    /// Run from tick() (full_find_bars_tick), so that it finishes though the
+    /// tab is left.
+    bool          full_find_bars_ = false;
+    std::uint64_t full_find_bars_since_ms_ = 0;
+    void full_find_bars_tick();
+
+    /// Whether anything is alive that acts on HP and MP or presses a key: the
+    /// hunt, the macro, the party, the revive, the popups, the keeper, the
+    /// trash and charms and shop, Tự chat, the quest -- runs and one-shot
+    /// passes alike ("Dọn ngay", "Gửi thử", a quest round) -- "Tự tìm" and
+    /// FIND THE BARS, a critical hold, a jump key's "Thử", and on the full
+    /// screen the packet bot, Autopilot, the calibration and a walk to a place.
+    bool any_job_alive() const;
+    /// HP and MP read at the run's pace, [Performance] vitals_run_ms --
+    /// automatic: 150 ms, 250 in light mode -- (vitals_run_period), and never
+    /// slower than vitals_idle_ms.
+    int  vitals_run_period() const;
+    /// The run's pace from now on, at once: called at the top of every start,
+    /// before its thread can press a key, so that it acts on figures read at
+    /// that pace from its first. tick() sets the pace every pass as well --
+    /// vitals_idle_ms once nothing is alive (any_job_alive).
+    void vitals_for_job();
+
     // ---- radar: seeing the monsters and going after them ----
 
     /// The game's own bitmap font, so plates are read rather than guessed at.
@@ -768,7 +862,44 @@ private:
 
     void draw_radar_panel();
     void start_detector();
+    /// Stops the hunt and the walk as well -- nothing to hunt or walk by with
+    /// the eyes shut -- marked stopped first, so that the hunt's own end finds
+    /// nothing left to stop (release_detector): once, never through a call of
+    /// itself.
     void stop_detector();
+    /// The detector stopped unless something still looks through it
+    /// (detector_wanted): at the hunt's end, F11, DỪNG, F12 or the hunter
+    /// ending by itself, and when a jump key's "Thử" is over. 7 grabs a
+    /// second, and their CPU, for nothing once nothing reads them.
+    void release_detector();
+    /// What keeps the detector running with no hunt: "Quái đang thấy"
+    /// (simple_lists.cpp), a jump key's "Thử" under way (simple_style.cpp), a
+    /// walk to a place, the full screen's START WATCHING, and its Radar and
+    /// movement panels open.
+    bool detector_wanted() const;
+    /// START WATCHING pressed on the full screen's Radar: the player's, until
+    /// STOP WATCHING.
+    bool detector_by_player_ = false;
+    /// "Nhìn quanh (60 giây)" under way (simple_lists.cpp).
+    bool monster_look_running() const;
+    /// A jump key's "Thử" under way, whoever started the detector for it
+    /// (simple_style.cpp).
+    bool jump_test_running() const;
+
+    /// The camera tracker -- the search for how far the view moved, 3 to 10
+    /// million samples a frame -- fed from the detector's frames only while
+    /// something uses it: a walk to a place (the navigator goes by it), or
+    /// the full screen's Radar and movement panels, which show where you are
+    /// by it. Nothing on the simple screen does. tick() feeds it, afresh, as
+    /// soon as one does (camera_.reset(), then set_camera), and stops when
+    /// none does.
+    bool camera_wanted() const;
+    bool camera_fed_ = false;
+    /// The Radar or movement panels drawn on this frame or the one before:
+    /// the frame count stands still while the window is minimised, so a
+    /// panel left open stays open. Set as they are drawn.
+    bool camera_panels_open() const;
+    int  camera_panel_frame_ = -10;
     /// Refuses, and says why, while no character name is typed: the hunter
     /// finds you by your name alone, so without one there is no "you" to
     /// walk from -- F11, BẮT ĐẦU and the full screen's switch alike.
@@ -1031,6 +1162,23 @@ private:
     int  log_level_filter_ = 2;      ///< index into the level combo
     bool log_autoscroll_ = true;
 
+    /// The panel's copy of the log's ring: taken again only when a line has
+    /// gone in (Logger::ring_sequence) and at most every kLogCopyGapMs, then
+    /// cut at its line breaks into rows of one line each -- the Load line is
+    /// several -- so ImGuiListClipper, which wants every row the same height,
+    /// can draw only the rows in view.
+    static constexpr std::uint64_t kLogCopyGapMs = 250;
+    struct LogRow {
+        std::size_t line = 0;                ///< in log_copy_
+        std::size_t begin = 0, end = 0;      ///< the row's bytes in that line's text
+    };
+    std::vector<LogLine> log_copy_;
+    std::vector<LogRow>  log_rows_;
+    std::uint64_t        log_copied_seq_ = 0;
+    std::uint64_t        log_copied_ms_ = 0;
+    bool                 log_copied_ = false;   ///< a copy has been taken
+    int                  log_rows_level_ = -1;  ///< the filter log_rows_ were cut for
+
     // ---- the simple screen ----
     //
     // What a player sees first. One screen, in Vietnamese, in the order things
@@ -1116,6 +1264,52 @@ private:
     SimpleOptions simple_opts_;
     void load_simple_options();
     void save_simple_option(const char* key, bool value);
+    void save_simple_option(const char* key, const char* value);
+
+    // ---- how heavy GoBot is on the machine ----
+    //
+    // [Performance] in configs/app.ini, and light mode ("Nhẹ máy"), worked
+    // out once at the start from the machine and the window's renderer
+    // (gobot/machine_info.hpp), and changed by its tick on the simple screen.
+    RendererInfo        renderer_;
+    MachineSignals      machine_;
+    LightSignals        light_signals_;
+    PerformanceSettings performance_;
+    LightDecision       light_;
+    /// Read [Performance] and light_mode, look at the machine, and log both
+    /// ("GUI:", "Machine:"). Once, from initialise().
+    void load_performance(const IniFile& app_ini);
+    /// The player's tick: "on" or "off" from now on, written to [Simple].
+    void set_light_mode(bool on);
+    /// The simple screen's tick, under "Luôn đưa game lên trước", and why
+    /// "auto" turned it on.
+    void simple_light_row();
+    std::atomic<bool>   redraw_{false};
+    unsigned            redraw_jobs_ = 0;     ///< the jobs running at the last take_redraw()
+    LoopCounters        loop_counters_;
+
+    // ---- the Load line (gobot/load_meter.hpp) ----
+    /// From the end of tick(): every [Performance] load_log_s seconds, an
+    /// entry in the log saying how hard GoBot works the PC -- CPU thread by
+    /// thread, frames, grabs, reads, packets, memory, what runs. The first
+    /// call only takes the snapshot the next one is measured from. A clock
+    /// read on every other call.
+    void load_tick();
+    /// The snapshot: the process-wide part, then this window's loop, readers,
+    /// capture and jobs. The loop's longest times start again.
+    LoadSnapshot load_snapshot();
+    /// What runs, for the line: "hunt+macro+popups", one-shot passes marked.
+    std::string load_jobs() const;
+    /// The one the next line is measured from; at_ms 0 before the first.
+    LoadSnapshot load_last_;
+    /// When the last pass's tick() ended, on load_clock_us(); the longest
+    /// time between two since the last line; and how many came late
+    /// (kLatePassMs) since the start. F12 is read once a pass.
+    std::uint64_t load_pass_at_us_ = 0;
+    double        load_pass_gap_max_ms_ = 0.0;
+    std::uint64_t load_passes_late_ = 0;
+    /// The simple screen's tab open at its last frame, for the line.
+    const char*  simple_tab_shown_ = "";
 
     /// Bring the game back to the front during a run whenever something else
     /// has taken it -- at once, GoBot's own window included, but never in the
@@ -1163,10 +1357,24 @@ private:
     /// before they are.
     TemplateStore            login_store_;
     bool                     login_store_loaded_ = false;   ///< by the look
+    /// The look's capture of VTCZone, one for every look rather than a new
+    /// one each time: a new capture asked PrintWindow afresh at its first
+    /// grabs, every 4 s, of a window that may have refused it already. Only
+    /// the look uses it, one look at a time. Declared before the look, for
+    /// the same reason as the pictures.
+    ScreenCapture            login_capture_;
     std::future<LoginLook>   login_look_;
     /// The tab has tried to write a missing configs/login.ini, and not tried
     /// again since: cleared once there is a file.
     bool                     login_file_tried_ = false;
+    /// The tab's configs/login.ini, re-read when the file changes rather than
+    /// on every frame (gobot/file_watch.hpp), and whether it was read; where
+    /// VTCZone is (launcher_found), asked once a second and after each read.
+    FileWatch                login_tab_watch_;
+    AutoLogin::Settings      login_tab_;
+    bool                     login_tab_have_ = false;
+    bool                     login_tab_launcher_ok_ = false;
+    std::uint64_t            login_tab_launcher_ms_ = 0;    ///< when it was asked; 0: ask now
 
     /// Notice a run starting or stopping, however it happened -- the button,
     /// the keys, the panic key, the full screen -- and start or freeze the
@@ -1521,7 +1729,8 @@ private:
     /// clicks through the login pages, so "Thử" asks this as well.
     bool keeper_entering();
     /// From tick(): a "Thử" that has finished -- what it saw, and the
-    /// detector stopped again if it was started for it.
+    /// detector stopped again unless something else looks through it
+    /// (release_detector).
     void simple_style_tick();
     /// F12, DỪNG, a failed revive and closing GoBot (stop_jobs): a "Thử" under
     /// way presses nothing more.

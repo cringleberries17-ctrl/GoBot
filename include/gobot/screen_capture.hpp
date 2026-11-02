@@ -1,10 +1,14 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace gobot {
+
+struct GrabOwner;
 
 /// A captured frame: 32-bit BGRA, top-down, tightly packed.
 struct Frame {
@@ -84,6 +88,154 @@ private:
     int  countdown_ = 0;
 };
 
+/// One verdict per window on PrintWindow, for the whole process.
+///
+/// Every capture used to judge PrintWindow for itself: the vitals reader's,
+/// the detector's, and every short-lived one a job or a look makes -- the
+/// shop's, the bag's, the keeper's, "Thử xem", the login tab's every few
+/// seconds -- asked it on its first three grabs and more of a window that had
+/// refused it all session, and once in 60 grabs ever after. And while the
+/// game was covered by another window, or black on a loading screen, there
+/// was nothing to judge it by: every grab of every capture asked it, each
+/// with up to 120 ms of copies after, at 6 to 22 grabs a second. Here, window
+/// by window:
+///
+/// - Refused: some capture's rule gave PrintWindow up on it (refuse). Every
+///   capture of it, new ones too, copies the screen, and it is asked again --
+///   a probe -- once every kReprobeMs for the whole process; never in light
+///   mode ("Nhẹ máy"), where the verdict this session reached stands. Light
+///   mode refuses nothing by itself: a window this session has not seen
+///   refuse is tried as ever. A probe that draws has it tried again
+///   everywhere (drew).
+/// - Not refused, and the last ask found nothing to judge PrintWindow by -- a
+///   blank picture, and the window covered where it would be seen, or one
+///   flat colour (unclear): asked once every kUnclearAskMs for the whole
+///   process until an ask settles it; otherwise on every grab, as before.
+///   Not so a window PrintWindow has drawn within the last kDrewTrustMs: a
+///   blank picture of that is the game's own black frame -- a loading screen
+///   after a map change -- and every grab asks, as before, so that the first
+///   grab after the game draws again has its picture. Gated, it would read
+///   the window covering the game for up to 3 s after every loading screen:
+///   HP unread, the potions held, the hunter looking at GoBot's own window.
+///
+/// A window is its handle and the process that owns it: a handle Windows
+/// gives again to another program's window is another window. Pure -- the
+/// time is the caller's, so that the tests give their own -- and
+/// thread-safe.
+class PrintWindowVerdicts {
+public:
+    static constexpr std::uint64_t kReprobeMs = 300'000;
+    static constexpr std::uint64_t kUnclearAskMs = 3000;
+    /// PrintWindow drew the window this recently: a blank picture of it is
+    /// not held to kUnclearAskMs. Longer than any loading screen; a window
+    /// that drew once and has been blank and covered since is gated again
+    /// after it, which is the costly case the gate is for.
+    static constexpr std::uint64_t kDrewTrustMs = 30'000;
+    /// Windows remembered; past this the one longest unasked is forgotten.
+    static constexpr std::size_t kMaxWindows = 64;
+
+    struct Window {
+        const void*   handle = nullptr;
+        std::uint32_t process = 0;
+        bool operator==(const Window& o) const { return handle == o.handle && process == o.process; }
+        bool operator!=(const Window& o) const { return !(*this == o); }
+    };
+
+    /// One grab's turn: whether it asks PrintWindow, and whether the window
+    /// stands refused.
+    struct Turn {
+        bool ask = false;
+        bool refused = false;
+    };
+    /// A grab of `w` at `now`. An ask allowed by the time -- a probe of a
+    /// window refused, or a window with nothing to judge by asked again -- is
+    /// this grab's: the next capture to come waits its full time.
+    Turn turn(const Window& w, std::uint64_t now);
+
+    /// PrintWindow drew `w` at `now`: it is tried again everywhere, and a
+    /// blank picture of it for kDrewTrustMs after is asked on every grab.
+    /// True when it had been refused.
+    bool drew(const Window& w, std::uint64_t now);
+    /// A blank picture of `w`, with the screen showing it drawn: counted
+    /// against PrintWindow, so the next grab asks again at once.
+    void judged(const Window& w);
+    /// A blank picture of `w` with nothing to judge it by: the window covered
+    /// where it would be seen, or one flat colour.
+    void unclear(const Window& w, std::uint64_t now);
+    /// A capture gave PrintWindow up on `w`. True when it had not been
+    /// refused already: said once for the process.
+    bool refuse(const Window& w, std::uint64_t now);
+
+    bool        refused(const Window& w) const;
+    std::size_t windows() const;
+
+    /// Light mode: a window refused is never asked again this session.
+    void set_light(bool on) { light_.store(on); }
+    bool light() const { return light_.load(); }
+
+private:
+    struct Entry {
+        Window        window;
+        bool          refused = false;
+        bool          unclear = false;
+        std::uint64_t probe_ms = 0;     ///< refused: when it was last asked, or refused
+        std::uint64_t unclear_ms = 0;   ///< unclear: when it was last asked
+        std::uint64_t drew_ms = 0;      ///< when PrintWindow last drew it; 0 never
+        std::uint64_t used_ms = 0;      ///< the last grab's turn
+    };
+    /// Under mutex_: the entry for `w`, or null.
+    Entry*       find(const Window& w);
+    const Entry* find(const Window& w) const;
+    /// Under mutex_: found, or made -- in place of the one longest unasked
+    /// when kMaxWindows are kept.
+    Entry&       entry(const Window& w, std::uint64_t now);
+
+    mutable std::mutex mutex_;
+    std::vector<Entry> entries_;
+    std::atomic<bool>  light_{ false };
+};
+
+/// The process's own, which every ScreenCapture asks. GoBot's window tells it
+/// whether light mode is on.
+PrintWindowVerdicts& print_window_verdicts();
+
+/// What ScreenCapture::grab asks, grab by grab: whether to ask PrintWindow,
+/// and what came of it. Its own PrintWindowRule counts the window's blank
+/// pictures -- three running, with the screen showing it drawn, give it up --
+/// inside the process-wide verdict on the window (PrintWindowVerdicts), which
+/// decides first: a window refused is asked only by the verdict's probe, and
+/// one with nothing to judge it by no more often than the verdict allows.
+/// Before any window is attached it is the rule alone.
+class PrintWindowAsk {
+public:
+    /// The window this grab is of, and the time: before ask(). Another
+    /// window than the last starts this capture's own count afresh.
+    void attach(const PrintWindowVerdicts::Window& w, std::uint64_t now);
+    /// Whether to ask PrintWindow this grab.
+    bool ask();
+    /// What it gave when asked: a picture, or nothing. True when it is back
+    /// after being refused.
+    bool printed(bool drew);
+    /// After a picture of nothing: whether the screen showed the window
+    /// itself drawn. True when PrintWindow is given up on the window now --
+    /// for the whole process, and said once.
+    bool screen(bool drawn);
+    /// Still being tried for this window: not refused, and not given up.
+    bool trying() const;
+    /// The verdicts asked: the process's unless set, as tests do.
+    void set_verdicts(PrintWindowVerdicts* v) { verdicts_ = v; }
+
+private:
+    PrintWindowVerdicts& verdicts() { return verdicts_ != nullptr ? *verdicts_ : print_window_verdicts(); }
+
+    PrintWindowRule             rule_;
+    PrintWindowVerdicts*        verdicts_ = nullptr;
+    PrintWindowVerdicts::Window window_;
+    bool                        attached_ = false;
+    bool                        refused_ = false;   ///< as this grab's turn found the window
+    std::uint64_t               now_ = 0;
+};
+
 /// While one is alive, no ScreenCapture in the process asks PrintWindow --
 /// the vitals reader's, the mob detector's and every other's read the screen
 /// instead: for the shop's purchase, which has the game in front throughout.
@@ -113,6 +265,14 @@ public:
     /// grab just as the shop's quantity box came up, and the digits typed then
     /// never reached the box -- whether it was the cause is not known.
     void set_screen_only(bool on) { screen_only_ = on; }
+
+    /// Whose frames these are, for the Load line's grabs owner by owner
+    /// (gobot/load_meter.hpp): "vitals", "detector", "shop" ... "other" until
+    /// set. A literal, or a string that outlives the capture.
+    void set_label(const char* label) {
+        label_ = label;
+        owner_ = nullptr;
+    }
 
     /// Frames captured and how many fell back.
     std::uint64_t grabs() const { return grabs_; }
@@ -144,13 +304,18 @@ private:
     int           cached_w_ = 0;
     int           cached_h_ = 0;
 
-    /// Whether PrintWindow is worth trying for this window: see PrintWindowRule.
-    PrintWindowRule print_rule_;
+    /// Whether PrintWindow is worth trying for this window: this capture's
+    /// PrintWindowRule, inside the process's verdict on the window
+    /// (PrintWindowAsk).
+    PrintWindowAsk print_rule_;
 
     bool          from_screen_ = false;
     bool          screen_only_ = false;
     std::uint64_t grabs_ = 0;
     std::uint64_t fallbacks_ = 0;
+
+    const char*   label_ = "other";
+    GrabOwner*    owner_ = nullptr;       ///< label_'s counts, looked up at the first grab
 };
 
 } // namespace gobot

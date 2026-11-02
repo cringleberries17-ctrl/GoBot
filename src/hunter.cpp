@@ -2,6 +2,7 @@
 #include "gobot/attack_style.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/monster_list.hpp"
 
@@ -363,8 +364,12 @@ void Hunter::fresh_run() {
     switched_ = false;
     skip_spots_.clear();
     said_skipped_.clear();
-    // Nothing is known of which way the character faces, nor of any fight.
+    // Nothing is known of which way the character faces, nor of any fight --
+    // but for what the packets say, any report of theirs being newer than a
+    // key of this run's.
     facing_ = Facing::Unknown;
+    facing_key_ms_ = 0;
+    facing_key_way_ = Facing::Unknown;
     held_before_ = false;
     walk_vk_ = 0;
     walk_until_ms_.store(0);
@@ -388,6 +393,7 @@ void Hunter::fresh_run() {
     minute_from_ms_ = 0;
     minute_fights_ = minute_far_ = minute_backsteps_ = 0;
     minute_returns_ = minute_return_give_ups_ = 0;
+    minute_turns_ = minute_packet_facings_ = minute_missed_keys_ = 0;
     last_engaged_ms_ = 0;
     // The frame of reference the run starts in: a change from here on is a
     // change, and the one before the start is not.
@@ -641,7 +647,11 @@ void Hunter::walk(const HunterConfig& cfg, int dx, int dy, std::uint64_t now, Wa
         let_go(other);
         if (!cfg.hold_walk) {
             stepped = press(go, static_cast<int>(cfg.step_ms));
-            if (stepped) facing_ = way;
+            if (stepped) {
+                facing_ = way;
+                facing_key_ms_ = clock_now();
+                facing_key_way_ = way;
+            }
         } else {
             if (walking) {
                 let_go(go);
@@ -658,6 +668,8 @@ void Hunter::walk(const HunterConfig& cfg, int dx, int dy, std::uint64_t now, Wa
                 walk_adx_ = adx;
                 walk_progress_ms_ = walk_since_ms_;
                 facing_ = way;
+                facing_key_ms_ = walk_since_ms_;
+                facing_key_way_ = way;
             }
         }
         hop(cfg, dy, now, what);
@@ -1034,19 +1046,79 @@ void Hunter::minute_log(const HunterConfig& cfg, std::uint64_t now) {
         minute_dropped_ = status_.targets_dropped;
     }
     // With the hunting spot on, the walks back to it and those given up on too.
+    // Last, the turns to a target the hunter tapped, and the times the
+    // packets put right which way it took the character to face -- Left or
+    // Right it had, the other way they said; not the Unknown a hold, the game
+    // out of focus or the character unseen leaves, which they fill in at
+    // every one of those. With a turn tapped only when it is not facing the
+    // target already, put right is a character turned by something else, or
+    // a key of the hunter's own the game never took -- which the last number
+    // counts on its own (kFacingMissedMs).
+    const bool turned = minute_turns_ > 0 || minute_packet_facings_ > 0;
     if (cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || minute_returns_ > 0 ||
-                     minute_return_give_ups_ > 0))
+                     minute_return_give_ups_ > 0 || turned))
         GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up, "
-                "%d walks back to the spot, %d of them given up",
+                "%d walks back to the spot, %d of them given up, "
+                "%d turns (%d facings put right by the packets, %d of them keys the game missed)",
                 minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
-                static_cast<unsigned long long>(dropped), minute_returns_, minute_return_give_ups_);
-    else if (!cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0))
-        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up",
+                static_cast<unsigned long long>(dropped), minute_returns_, minute_return_give_ups_,
+                minute_turns_, minute_packet_facings_, minute_missed_keys_);
+    else if (!cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || turned))
+        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up, "
+                "%d turns (%d facings put right by the packets, %d of them keys the game missed)",
                 minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
-                static_cast<unsigned long long>(dropped));
+                static_cast<unsigned long long>(dropped), minute_turns_, minute_packet_facings_,
+                minute_missed_keys_);
     minute_from_ms_ = now;
     minute_fights_ = minute_far_ = minute_backsteps_ = 0;
     minute_returns_ = minute_return_give_ups_ = 0;
+    minute_turns_ = minute_packet_facings_ = minute_missed_keys_ = 0;
+}
+
+void Hunter::face_from_packets(const HunterConfig& cfg) {
+    // Only with the packets steering. Watched only, the screen fights, as
+    // hunt.ini says of packet_positions=watch: the hunter's own idea of the
+    // facing stands, as with no capture at all.
+    if (!eyes_.where || cfg.packet_positions != PacketPositions::On) return;
+    // With the spot on, the fix track_spot took at the start of this pass --
+    // not asked again, and fix_ left as the spot has it. Off, asked here.
+    WorldFix f;
+    if (cfg.spot) f = fix_;
+    else if (!eyes_.where(f)) return;
+    // Only a fix that knows the character, with a report that said which way
+    // it faces. Lost, or nothing said yet, and the hunter's own idea stands --
+    // the screen's memory, with its resets.
+    if (f.state != WorldFix::State::Known || f.facing == 0) return;
+    const Facing said = f.facing > 0 ? Facing::Right : Facing::Left;
+    if (said == facing_) return;
+    // Taken at once when the report came more than kFacingTrustMs after the
+    // hunter's own last key that turned the character: the character as that
+    // key left it, or as something since turned it. Sooner, it may have been
+    // sent before the key reached the game -- taken all the same when it says
+    // the way the key went, which is so either way: the key's own report, the
+    // last there is when a hold has left facing_ not known. Saying the other
+    // way, it is the character as it faced before the key; and with no report
+    // since for kFacingMissedMs, the game never took the key, which would
+    // have sent one -- facing_ goes back, and the next pass turns it again.
+    const bool after_key = f.facing_ms > facing_key_ms_ + kFacingTrustMs;
+    const bool as_key = said == facing_key_way_;
+    const bool missed = !after_key && !as_key && clock_now() > facing_key_ms_ + kFacingMissedMs;
+    if (!after_key && !as_key && !missed) return;
+    GB_DEBUG("Hunter: the packets have the character facing %s -- the hunter %s; %s",
+             said == Facing::Right ? "right" : "left",
+             facing_ == Facing::Unknown  ? "did not know which way"
+             : facing_ == Facing::Right ? "took it to face right"
+                                        : "took it to face left",
+             after_key ? "a report since its last turning key"
+             : as_key  ? "the way its last turning key went"
+                       : "the game never took its last turning key");
+    // Counted only where the hunter had it Left or Right: filling in a facing
+    // not known is no mistake put right.
+    if (facing_ != Facing::Unknown) {
+        ++minute_packet_facings_;
+        if (missed) ++minute_missed_keys_;
+    }
+    facing_ = said;
 }
 
 // ---------------------------------------------------------------- the spot
@@ -1486,6 +1558,7 @@ void Hunter::publish_spot() {
 // ---------------------------------------------------------------- the loop
 
 void Hunter::loop() {
+    name_this_thread("hunter");
     // A thin wrapper: the pass is the same one step() runs, so the tests and
     // the thread cannot drift apart.
     while (running_.load()) {
@@ -1923,7 +1996,11 @@ void Hunter::pass() {
         // "Giữ khoảng cách": too close, so a step back first, as GoC's
         // backing_away does -- the arrow away from the target, held as long
         // as walking takes to get to keep_away px, then a moment for the
-        // game. The next pass turns to the target and attacks. Never standing
+        // game. The next pass turns to the target and attacks -- a tap of
+        // kTurnTapMs, which walks the character back in about 21 px, so the
+        // step is held as much longer than GoC's sum: held only that, the
+        // turn left it a pixel inside keep_away, and it stepped back and
+        // turned again until keep_distance_steps ran out. Never standing
         // still (GoC's lazy mode does not either) and never from a target off
         // the character's own level: GoBot cannot see where a platform ends,
         // and stepping back off one is the worst this could do. So too never
@@ -1938,7 +2015,8 @@ void Hunter::pass() {
         const int most = std::clamp(cfg.keep_distance_steps, 1, 10);
         // With the hunting spot, never past the edge of its area: the step is
         // cut to the room left that way, and with too little for one -- a
-        // step is held 50 ms at the least -- none is taken.
+        // step is held 50 ms at the least, and the turn after it walks
+        // kTurnTapMs of that back (kSpotStepRoomPx) -- none is taken.
         const bool in_area = spot_mode_ == SpotMode::Use;
         int room_ms = 0;
         if (in_area) {
@@ -1946,7 +2024,7 @@ void Hunter::pass() {
             const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
             const double room = back_way == 1 ? area.x + area.half_w - fix_.x : fix_.x - (area.x - area.half_w);
             const int ms = room < kSpotStepRoomPx ? 0 : static_cast<int>(std::lround(room / scale * 1000.0 / kWalkPxPerS));
-            room_ms = ms < 50 ? 0 : ms;
+            room_ms = ms < 50 + kTurnTapMs ? 0 : ms;
         }
         if (cfg.keep_distance && !still && !just_stepped_ && adx < away && !held &&
             !retreat.blocked && !back_.judge && retreat.in_row < most &&
@@ -1954,7 +2032,7 @@ void Hunter::pass() {
             // Off before the key goes out: no skill is thrown as the step
             // starts.
             disengage();
-            int hold = backstep_ms(away, adx);
+            int hold = backstep_ms(away, adx) + kTurnTapMs;
             if (in_area) hold = std::min(hold, room_ms);
             bool stepped = false;
             if (auto token = coord_.acquire("hunt-move", Priority::Movement)) {
@@ -1967,6 +2045,8 @@ void Hunter::pass() {
             if (stepped) {
                 // GoC takes itself to be facing the way it stepped.
                 facing_ = dx < 0 ? Facing::Right : Facing::Left;
+                facing_key_ms_ = clock_now();
+                facing_key_way_ = facing_;
                 if (++retreat.in_row == most)
                     GB_INFO("Hunter: %d steps back to the %s -- no more that way until the character "
                             "has walked the other way; it fights where it stands",
@@ -1990,22 +2070,34 @@ void Hunter::pass() {
         }
         just_stepped_ = false;
 
-        // Face it. A tap turns the character without moving it far, and a
-        // skill thrown the wrong way hits nothing at all. With a style or
-        // keep_distance, as GoC: only when it is not facing that way already,
-        // then a moment for the game to turn it -- a tap on every pass walked
-        // the character in on the target ten pixels at a time. So too
-        // standing still, which those taps took off its spot -- standing for
-        // want of a hunting spot to go by among it. Without any of them, a
-        // tap on every pass, as it always was.
-        const bool memory = cfg.goc_rules() || cfg.keep_distance || still;
+        // Which way the character faces, by the packets where they steer and
+        // know, over what the hunter took it to be: a turn its key missed
+        // (kFacingMissedMs), one something else made (kFacingTrustMs), or the
+        // Unknown a hold, the game out of focus or the character unseen left.
+        face_from_packets(cfg);
+
+        // Face it. A tap turns the character, and a skill thrown the wrong
+        // way hits nothing at all -- but only when it is not facing that way
+        // already, as GoC turns, and then a moment for the game to turn it.
+        // Every setup, a style or none: a tap on every pass, as the hunter
+        // turned without a style, keep_distance or stay_put, walked the
+        // character in on the target a few pixels at a time -- 40 of the 62
+        // fights in the player's log, a ranged character with a reach of 150,
+        // were fought from under 50 px, and from the 450 px it is to shoot
+        // from it would have walked in all the way. Standing still, those taps
+        // took it off its spot too. The tap is kTurnTapMs: one the game
+        // misses is not tried again at the next pass -- only once the packets
+        // show it missed.
         bool tapped = false;
-        if (adx > cfg.facing_tolerance && (!memory || facing_ != toward)) {
+        if (adx > cfg.facing_tolerance && facing_ != toward) {
             if (auto token = coord_.acquire("hunt-face", Priority::Combat))
-                tapped = press(dx < 0 ? cfg.left_key : cfg.right_key, 30);
+                tapped = press(dx < 0 ? cfg.left_key : cfg.right_key, kTurnTapMs);
             if (tapped) {
                 facing_ = toward;
-                if (memory) pause(kSettleMs);
+                facing_key_ms_ = clock_now();
+                facing_key_way_ = toward;
+                ++minute_turns_;
+                pause(kSettleMs);
             }
         }
 

@@ -277,10 +277,11 @@ closer than the minimum, never from one off the character's level, and at
 most three steps one way -- from whichever monsters -- until the character
 has walked back the other way; then it fights where it stands. GoBot cannot
 see where a platform ends, so the first step past an edge is not prevented.
-With *Đứng yên một chỗ* the character turns to a monster only when it is not
-facing it already. A hurt monster is gone for first only when it is within
-reach, and one chased for `give_up_ms` (4 s) without coming within reach --
-behind a wall, up on a ledge -- is passed over for twice as long, one on
+With any *Kiểu đánh*, *Như trước* included, the character turns to a monster
+only when it is not facing it already. A hurt monster is gone for first only
+when it is within reach, and one chased for `give_up_ms` (4 s) without coming
+within reach -- behind a wall, up on a ledge -- is passed over for twice as
+long, one on
 *Đánh trước* too; the box under BẮT ĐẦU says so while nothing else is in
 view. Under it, **Lọc quái** opens *Danh sách quái*: monsters
 never attacked (*Không đánh*) and monsters gone for first (*Đánh trước*),
@@ -763,7 +764,7 @@ still be running 5 s after a Ctrl+C, a second one ends it at once.
 
 | file | holds |
 |---|---|
-| `configs/app.ini` | the game's window, the client keeper, the simple screen's switches; capture interface and server address; whether `gobot_gui.log` starts afresh each session (`new_log_each_start`, on as shipped: the session before is kept as `gobot_gui.old.log`) |
+| `configs/app.ini` | the game's window, the client keeper, the simple screen's switches (light mode among them: `[Simple] light_mode`); how hard GoBot works the PC (`[Performance]`, below); capture interface and server address; whether `gobot_gui.log` starts afresh each session (`new_log_each_start`, on as shipped: the session before is kept as `gobot_gui.old.log`) |
 | `configs/macro.ini` | the macro's keys -- skills, potions, buffs -- and the sequence |
 | `configs/hunt.ini` | hunting: your character's name, the attack and pick-up keys, the reach; where positions come from (`packet_positions`: off, watch, on) and how the packets lie over the screen (`packet_scale`, `packet_dy`); the hunting spot (`spot`, its area and when it walks back) |
 | `configs/party.ini` | party: accepting, inviting by keyword, the lists of names |
@@ -791,6 +792,56 @@ port with minimal editing.
 Field syntax for `protocol.ini` is documented inline in the file itself:
 `name:type[@offset][*scale]`, with `@` pinning an absolute offset and `*`
 applying a fixed-point scale.
+
+### How hard it works the PC
+
+Since 2026.11.02b `gobot_gui` draws its window only when there is something
+to show (the frame pacer, `gobot/frame_pacer.hpp`): at once on a click or a
+key, then up to 30 frames a second while the window is used, 5 while it is in
+front and nobody touches it, 2 while another window -- the game -- is in
+front, and none while it is minimised or covered. It used to build and present
+a frame on every pass, about 60 a second, every one of them drawn by the CPU
+in a VMware guest without 3D. The loop itself never waits more than 10 ms, so
+it still comes round on every Windows clock tick (about 15.6 ms), and F10,
+F11, F12 and the potions are looked after exactly as before, whatever the
+frame rate. HP and MP are
+read once a second while nothing runs, and as before while anything does. A
+start reads them at once, and the macro does not take a reading from before
+it: its first potion, skill, buff or step waits for the new one, 500 ms at
+most -- for each bar that had a reading before the start; one never read is
+not waited for.
+
+**Light mode** (`[Simple] light_mode=auto|on|off`; the *Nhẹ máy (máy ảo / máy
+yếu)* box on the simple screen, which writes `on` or `off`) is for a VMware
+guest or a PC with no real graphics card. It lowers the frame rates to 20, 3
+and 1; never asks PrintWindow again of a window this process has already seen
+refuse it (otherwise once every 5 minutes); and reads HP and MP every 250 ms
+instead of 150 while anything runs. `auto`, as shipped, turns it on when any
+of these is seen: GoBot's Direct3D device is WARP, or the adapter is the
+Microsoft Basic Render Driver (vendor 0x1414) or VMware SVGA (0x15AD); SMBIOS
+names VMware (`HKLM\HARDWARE\DESCRIPTION\System\BIOS`); CPUID's hypervisor leaf
+says `VMwareVMware` with the hypervisor bit set. The hypervisor bit alone does
+not count: a Hyper-V or VBS host sets it too. The `Machine:` line near the top
+of `gobot_gui.log` says what was seen and which signals fired.
+
+`[Performance]`, read when `gobot_gui` starts:
+
+| key | shipped | what |
+|---|---|---|
+| `gui_pacer` | `on` | `off`: a frame on every pass with vsync, as before 2026.11.02b |
+| `vitals_idle_ms` | `1000` | how often HP and MP are read while nothing runs, 150 to 5000 ms; 150 is as before |
+| `vitals_run_ms` | `0` | the same while anything runs -- the bot, a job, a one-off pass, *Tự tìm*: 0 is 150 ms, or 250 ms in light mode; anything else is held to 100 to 1000; never slower than `vitals_idle_ms` |
+| `load_log_s` | `60` | how often the Load line is written, 10 to 3600 s; 0 writes none |
+
+**The Load line.** Every `load_log_s` seconds, and once at exit, `gobot_gui.log`
+gets a `Load:` entry: the process's CPU and each named thread's (gui, vitals,
+detector, hunter...), the window's frames and loop passes -- with the longest
+gap between passes, so a quick F12 tap that could have gone unseen shows --
+screen grabs per owner with BitBlt and PrintWindow times, the readers' rates,
+packets, log volume, memory and handles, the front keeper, and which jobs ran.
+It spans several lines; the ones after the first are indented and carry no
+timestamp. A log with a few of these, and the `GUI:` and `Machine:` lines from
+the top, is what to ask for when a player says GoBot makes the PC heavy.
 
 ---
 

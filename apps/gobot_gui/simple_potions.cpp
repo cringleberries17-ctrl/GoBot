@@ -43,9 +43,6 @@ using namespace simple_ui;
 /// moves the next stack in by itself; and the frame of a count read wild and
 /// then back again (PotionWatch::Event::Misread), the evidence of a misread.
 constexpr std::size_t kKeptFrames = 20;
-/// The second look of a pair, after this long: soon enough that the stack has
-/// not moved in between, late enough that the reader has a new frame.
-constexpr int kPairGapMs = 400;
 
 /// A key to read, and what it was believed to hold before, for telling what
 /// is worth keeping a frame of.
@@ -309,12 +306,16 @@ void GuiApp::potions_tick() {
     const HotbarSpot was = ui.spot;
     const Frame* picture = &ui.picture;
     const CountReader* digits = &ui.digits;
-    ui.look = std::async(std::launch::async, [this, keys, was, picture, digits] {
+    // The second look of a pair, after this long: soon enough that the stack
+    // has not moved in between, late enough that the reader has a new frame
+    // at the pace it reads at now -- 400 ms at 150 and at 250 alike.
+    const int pair_gap_ms = potion_pair_gap_ms(vitals_.period_ms());
+    ui.look = std::async(std::launch::async, [this, keys, was, picture, digits, pair_gap_ms] {
         PotionLook out;
         HotbarSpot spot = was;
         Frame last;
         for (int look = 0; look < 2; ++look) {
-            if (look == 1) std::this_thread::sleep_for(std::chrono::milliseconds(kPairGapMs));
+            if (look == 1) std::this_thread::sleep_for(std::chrono::milliseconds(pair_gap_ms));
             Frame f;
             if (!vitals_.latest_frame(f)) break;
             const HotbarSpot found = find_hotbar(f, *picture, spot.found ? &spot : nullptr);

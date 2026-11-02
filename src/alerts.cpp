@@ -1,6 +1,7 @@
 #include "gobot/alerts.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -1836,6 +1837,7 @@ AlertStatus AlertService::status() const {
 }
 
 void AlertService::run() {
+    name_this_thread("alerts");
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stopping_) {
         const std::uint64_t seen = work_;

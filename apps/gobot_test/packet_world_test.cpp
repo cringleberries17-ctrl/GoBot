@@ -192,6 +192,17 @@ Built air_frame(std::uint32_t state, float x, float y, float speed, float rise) 
     return f;
 }
 
+/// 0x0029, the third report of yours: your id at 8 and 12, the facing as a
+/// word at 16 (1 toward larger x, 0xFF toward smaller), the speed at 20, x, y
+/// at 24 and 28.
+Built other_frame(float x, float y, float speed, int facing) {
+    Built f(0x0029, 44);
+    f.u32(8, kId); f.u32(12, kId);
+    f.u32(16, facing > 0 ? 0x01u : 0xFFu);
+    f.f32(20, speed); f.f32(24, x); f.f32(28, y);
+    return f;
+}
+
 /// 0x0028, one of the four at a map entry: a wrapper's sequence number at 8,
 /// your id at 12 and 16, the facing in the low byte of the flags at 32.
 Built here_frame(float x, float y, std::uint32_t seq, std::uint32_t id = kId) {
@@ -391,6 +402,65 @@ void test_own_cast() {
     check(standing.me.x == 1251.0f && standing.me.y == 502.0f && !standing.me.moving && !standing.me.uncertain,
           "a cast while standing puts you there, and standing you stay");
     check(w.stats().own(OwnReport::Cast) == 2, "both casts counted as reports of yours");
+}
+
+/// Which way you face, and which way and since when a 0x0027 said so
+/// (Me::said_facing, Me::facing_ms). The facing a walk is followed by is set
+/// by a 0x0027, 0x0029 or 0x0028 -- each says it; the one the hunter turns
+/// the character by only by a 0x0027, whose facing byte is the one checked
+/// against the game. A cast or a jump says nothing of it and leaves all three
+/// as they were, though it is the last report; a map entry makes the facing
+/// not known again, and so does a reset. What the hunter weighs its own last
+/// turning key against (WorldFix::facing, Hunter::kFacingTrustMs).
+void test_own_facing() {
+    section("Packet world: which way you face, and when a report last said so");
+
+    PacketWorld w;
+    const std::uint64_t t = kT0;
+    w.on_packets({ from_server(entry_frame(11, 1, 4690, 1180), t) });
+    PacketWorld::View v = w.view(t + 10);
+    check(v.me.known && v.me.facing == 0 && v.me.said_facing == 0 && v.me.facing_ms == 0,
+          "a map entry alone: you are known, the way you face is not, and nothing has said it");
+
+    w.on_packets({ from_client(move_frame(4690.0f, 1180.0f, 0.0f, 1), t + 100) });
+    v = w.view(t + 150);
+    check(v.me.facing == 1 && v.me.said_facing == 1 && v.me.facing_ms == t + 100,
+          "a 0x0027 facing right: right, as of its own time");
+
+    w.on_packets({ from_client(cast_frame(4690, 1180), t + 300) });
+    w.on_packets({ from_client(air_frame(1, 4690.0f, 1180.0f, 0.0f, -20.0f), t + 400) });
+    w.on_packets({ from_client(air_frame(0, 4690.0f, 1180.0f, 0.0f, 0.0f), t + 1000) });
+    w.on_packets({ from_client(cast_frame(4690, 1180), t + 1050) });
+    v = w.view(t + 1100);
+    check(v.me.facing == 1 && v.me.said_facing == 1 && v.me.facing_ms == t + 100 && v.me.report_ms == t + 1050 &&
+              v.me.kind == OwnReport::Cast,
+          "a cast, a jump, its landing and another cast: still right, as of the 0x0027 -- though the last report "
+          "is the cast's");
+
+    w.on_packets({ from_client(other_frame(4690.0f, 1180.0f, 0.0f, -1), t + 1200) });
+    v = w.view(t + 1250);
+    check(v.me.facing == -1 && v.me.said_facing == 1 && v.me.facing_ms == t + 100 &&
+              v.me.kind == OwnReport::Other,
+          "a 0x0029 facing left: followed as left, but what a 0x0027 said -- right, as of its time -- stands");
+
+    w.on_packets({ from_client(move_frame(4690.0f, 1180.0f, 0.0f, 1), t + 1400) });
+    w.on_packets({ from_client(here_frame(4690.0f, 1180.0f, 1000008), t + 1500) });
+    v = w.view(t + 1550);
+    check(v.me.facing == -1 && v.me.said_facing == 1 && v.me.facing_ms == t + 1400 &&
+              v.me.kind == OwnReport::Here,
+          "right again by a 0x0027, then a 0x0028 facing left: followed as left, said right as of the 0x0027");
+
+    w.on_packets({ from_server(entry_frame(11, 2, 900, 600), t + 2000) });
+    v = w.view(t + 2050);
+    check(v.me.known && v.me.facing == 0 && v.me.said_facing == 0 && v.me.facing_ms == 0,
+          "a map entry: the way you face not known again, nor when");
+
+    w.on_packets({ from_client(move_frame(900.0f, 600.0f, 0.0f, 1), t + 2100) });
+    const bool said = w.view(t + 2150).me.facing_ms == t + 2100;
+    w.reset();
+    v = w.view(t + 2200);
+    check(said && !v.me.known && v.me.facing == 0 && v.me.said_facing == 0 && v.me.facing_ms == 0,
+          "said again after it, then a reset: forgotten with the rest of you");
 }
 
 /// Your jumps by kind and your casts in the air, for the log's "Positions"
@@ -987,6 +1057,7 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_map_entry();
     test_own_walk();
     test_own_cast();
+    test_own_facing();
     test_own_jump();
     test_air_counts();
     test_not_yours();

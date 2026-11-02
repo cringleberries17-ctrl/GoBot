@@ -1,4 +1,5 @@
 #include "gobot/packet_capture.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/net_discovery.hpp"
 #include "gobot/util.hpp"
@@ -462,6 +463,7 @@ bool PacketCapture::switch_interface(const std::string& interface_name) {
 // ----------------------------------------------------------------- capture
 
 void PacketCapture::capture_loop() {
+    name_this_thread("capture");
     while (running_.load() && !stopping_.load()) {
         pcap_pkthdr* header = nullptr;
         const std::uint8_t* data = nullptr;
@@ -817,6 +819,7 @@ void PacketCapture::flush_batch() {
 }
 
 void PacketCapture::watchdog_loop() {
+    name_this_thread("capture watchdog");
     // A live game connection is never silent for long — there is always a
     // heartbeat or a position update. Prolonged silence means the game closed
     // or the adapter changed, and the bot should stop pressing keys.

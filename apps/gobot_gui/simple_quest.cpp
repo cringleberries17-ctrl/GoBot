@@ -122,15 +122,19 @@ struct GuiApp::QuestUi {
 void GuiApp::QuestUiFree::operator()(QuestUi* ui) const { delete ui; }
 
 void GuiApp::say_quest(const std::string& line) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    std::vector<std::string>& log = quest_ui_->log;
-    log.push_back(line);
-    if (log.size() > 200) log.erase(log.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        std::vector<std::string>& log = quest_ui_->log;
+        log.push_back(line);
+        if (log.size() > 200) log.erase(log.begin());
+    }
+    request_redraw();       // shown at once, as say_party's
 }
 
 // ------------------------------------------------------------------ worker
 
 void GuiApp::start_quest() {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     if (!quest_ui_) quest_ui_.reset(new QuestUi);
     set_own_keys(quest_ui_->own_keys, macro_config_, hunt_config_, hotkeys_);
     {
@@ -159,6 +163,7 @@ void GuiApp::start_quest() {
 }
 
 void GuiApp::request_quest(bool look_only) {
+    vitals_for_job();       // a one-shot round watches HP too: at the run's pace before any key
     if (!quest_ui_) quest_ui_.reset(new QuestUi);
     set_own_keys(quest_ui_->own_keys, macro_config_, hunt_config_, hotkeys_);
     {
@@ -194,6 +199,7 @@ void GuiApp::stop_quest(bool wait) {
 
 /// The timed rounds, and the ones asked for.
 void GuiApp::quest_loop() {
+    name_this_thread("quest");
     QuestUi& ui = *quest_ui_;
     const auto tell = [this](const std::string& vi) { say_quest(vi); };
     const auto leave = [&](const std::string& why) {
@@ -227,6 +233,7 @@ void GuiApp::quest_loop() {
     GB_INFO("Quest: pictures from %s", from.c_str());
 
     ScreenCapture capture;
+    capture.set_label("quest");
     const auto grab = [&](Frame& f) {
         return input_.window_valid() && capture.grab(input_.target_window(), f) && f.valid();
     };

@@ -83,13 +83,18 @@ struct HunterConfig {
 
     /// "Kiểu đánh": the attack style whose numbers these are, by its id in
     /// gobot/attack_style.hpp -- a class and weapon, or one of GoC's four
-    /// sets. Empty is "Như trước": the hunter as it always was.
+    /// sets. Empty is "Như trước": the hunter as it always was, but for the
+    /// turn to a target.
     ///
     /// A style turns GoC's own fighting rules on (goc_rules): a target in
     /// reach is kept until it dies instead of being picked afresh every
-    /// give_up_ms, one whose bar never moves is given up on (no_damage_ms),
-    /// and the character turns only when it is not facing the target already.
-    /// Opt-in, the player's rule: a setup that chose none fights as before.
+    /// give_up_ms, and one whose bar never moves is given up on
+    /// (no_damage_ms). Opt-in, the player's rule: a setup that chose none
+    /// fights as before. Turning is no longer among them: every setup, a style
+    /// or none, turns to the target only when it is not facing it already
+    /// (Hunter::kTurnTapMs). The player asked for that -- a tap on every pass,
+    /// as "Như trước" turned, walked a ranged character in on its monsters a
+    /// few pixels at a time while it shot.
     std::string style;
     bool goc_rules() const { return !style.empty(); }
 
@@ -213,8 +218,7 @@ struct HunterConfig {
     /// Stand still: attack whatever comes within reach and never walk to
     /// anything. For a spot the monsters come to. The commercial client's
     /// "Chế độ lười". It turns to a target only when not facing it already,
-    /// as with a style: a turn's tap on every pass walked it in on the
-    /// monsters a little at a time.
+    /// as every setup does (Hunter::kTurnTapMs).
     bool stay_put = false;
 
     /// "Chỗ đánh quái": hunt round one spot and walk back to it when there is
@@ -312,9 +316,10 @@ struct HunterConfig {
 
 /// Where the game's packets put your character in their world, for the
 /// hunting spot (HunterConfig::spot): world pixels, y growing downward, the
-/// same whatever the view shows. PacketEyes works one out at every pass from
-/// the same PacketWorld view the pass's plates come from, whether the packets
-/// steer or are only watched.
+/// same whatever the view shows -- and which way it faces, for the turn to a
+/// target (Hunter::kFacingTrustMs). PacketEyes works one out at every pass
+/// from the same PacketWorld view the pass's plates come from, whether the
+/// packets steer or are only watched.
 struct WorldFix {
     enum class State : std::uint8_t {
         NoCapture,      ///< no Npcap, no capture running, or no game TCP for 3 s: nothing to go by
@@ -329,6 +334,13 @@ struct WorldFix {
     /// sends nothing: x runs on, and this stays.
     float         rx = 0.0f, ry = 0.0f;
     std::uint64_t report_ms = 0;
+    /// Which way your last 0x0027 had you facing: +1 toward larger x -- to
+    /// the right -- -1 to the left, 0 not known; and when that report came, on
+    /// the frames' clock (PacketWorld::Me::said_facing, facing_ms). Only a
+    /// 0x0027's, the one report whose facing was checked against the game: a
+    /// 0x0029, a 0x0028, a cast or a jump moves neither.
+    int           facing = 0;
+    std::uint64_t facing_ms = 0;
     bool airborne = false;          ///< off the ground, by your last 0x002A
     bool moving = false;            ///< going sideways
     bool uncertain = false;         ///< followed past the time a move is followed with no report
@@ -383,8 +395,12 @@ public:
         /// where things stood (forget_positions), and of nothing else.
         std::function<std::uint32_t()>          view;
         /// Where the packets put the character in their world (WorldFix):
-        /// asked once a pass, after `view`, only with HunterConfig::spot on.
-        /// Unset, or false, there is no capture to say: NoCapture.
+        /// asked once a pass, after `view`, with HunterConfig::spot on. Off,
+        /// it is asked only at a pass with a target in reach, for which way
+        /// the character faces (WorldFix::facing), and then only with the
+        /// packets steering (packet_positions=on) -- never twice a pass.
+        /// Unset, or false, there is no capture to say: NoCapture, and the
+        /// hunter's own idea of the facing stands.
         std::function<bool(WorldFix&)>          where;
     };
     struct Hands {
@@ -456,6 +472,41 @@ public:
     /// the ground the steps back the other way gave up -- about 100 px at a
     /// walk -- and they are counted afresh (keep_distance_steps).
     static constexpr std::uint64_t kRegainWalkMs = 300;
+    /// How long the tap that turns the character to a target in reach holds
+    /// the arrow down -- the turn's tap alone: not a step back, a hop, a walk
+    /// or an attack. The game reads its keyboard once a frame, and a press
+    /// shorter than a frame is missed now and then (MacroConfig's
+    /// key_hold_min_ms says the same). The 30 ms it was got by while the tap
+    /// went out at every pass, a missed one made up for at the next; now the
+    /// character is turned only when the hunter does not take it to be facing
+    /// the target already, and a turn missed is not tried again at the next
+    /// pass -- only once the packets show it missed (kFacingMissedMs). The
+    /// attack's own press is as long. It walks the character about 21 px,
+    /// but once a turn, so they do not add up; and a step back
+    /// (keep_distance), which a turn always follows, is held as much longer
+    /// than backstep_ms, so that turn walks it no nearer than the step meant.
+    static constexpr int kTurnTapMs = 60;
+    /// A report of yours that says which way you face (WorldFix::facing) is
+    /// taken over the hunter's own idea of it at once when it came more than
+    /// this long after the last key of the hunter's own that turned the
+    /// character -- a turn's tap, a walk, a step back: it shows the character
+    /// as that key left it, or as something since turned it. One stamped
+    /// sooner may have been sent before the key reached the game; it is
+    /// taken at once only when it says the way the key went, which is so
+    /// whichever it was -- after a hold, say, with the key's own report the
+    /// last. Both on the steady clock, now_ms(), in the GUI: the frames'
+    /// stamps and the hunter's own.
+    static constexpr std::uint64_t kFacingTrustMs = 150;
+    /// A key that turns the character -- a walk starting, stopping or turning
+    /// -- has the game send a report of it (0x0027), within a frame or two
+    /// and the capture's moment. So when, this long after the hunter's own
+    /// last turning key, the last report still says the other way and came
+    /// no more than kFacingTrustMs after the key, the game never took the
+    /// key -- a press it read no frame of, under a load, or in an animation
+    /// -- and the report is taken: the hunter turns the character again. A
+    /// report the capture lost costs a tap more, and the wait is long enough
+    /// for a game at a few frames a second.
+    static constexpr std::uint64_t kFacingMissedMs = 500;
     /// How far to the side the target was, in pixels, on that pass.
     int engaged_dx() const { return engaged_dx_.load(); }
     /// The attack key of the config in use, for any thread.
@@ -615,8 +666,12 @@ public:
     /// was.
     static constexpr int kSpotBackPx = 150;
     /// Room left before the area's edge that a step back needs: a step is
-    /// held 50 ms at the least, about 18 px.
-    static constexpr int kSpotStepRoomPx = 18;
+    /// held 50 ms at the least, about 18 px, and the turn back to the target
+    /// after it walks about 21 px of that back in (kTurnTapMs). With room for
+    /// less, a step to the edge and the turn after it left room for another,
+    /// and the character stepped out and turned in again until
+    /// keep_distance_steps ran out.
+    static constexpr int kSpotStepRoomPx = 39;
 
     static const char* to_string(State s);
 
@@ -638,7 +693,8 @@ public:
 
     /// How long a step back from a target `dx` to the side is held to get to
     /// `away` px from it: GoC's (away - |dx| + 20) px at 355 px a second,
-    /// from 50 to 800 ms.
+    /// from 50 to 800 ms. The step is held kTurnTapMs longer than this, for
+    /// the turn back to the target that follows it.
     static int backstep_ms(int away, int dx);
 
     /// What the monster lists make of a plate.
@@ -790,6 +846,17 @@ private:
     void forget_positions();
     /// Once a minute while hunting, one line of how the fights went.
     void minute_log(const HunterConfig& cfg, std::uint64_t now);
+    /// Before the turn to a target in reach, with the packets steering
+    /// (packet_positions=on): which way they have the character facing
+    /// (WorldFix::facing), taken over facing_ when a report said so more than
+    /// kFacingTrustMs after the hunter's own last key that set it
+    /// (facing_key_ms_), when it says the way that key went
+    /// (facing_key_way_), or, saying the other way, once kFacingMissedMs show
+    /// the game never took the key. The fix this pass's track_spot took with
+    /// the spot on; with it off, Eyes::where asked here. With none to be had,
+    /// the packets not knowing the character, or watched only, facing_ stays
+    /// as it is.
+    void face_from_packets(const HunterConfig& cfg);
 
     // ---- the hunting spot (HunterConfig::spot)
 
@@ -881,11 +948,20 @@ private:
     /// Which way the character faces, as far as the hunter knows: set by its
     /// own steps and turns, unknown at a start, with the game out of focus or
     /// the character out of sight, and once a hold is over -- whatever ran in
-    /// it may have turned the character. With a style, keep_distance or
-    /// stay_put the character turns only when this says it is not facing the
-    /// target.
+    /// it may have turned the character. The character turns only when this
+    /// says it is not facing the target, whatever the setup. Where the
+    /// packets steer and know better, they put it right (face_from_packets):
+    /// a turn the hunter's key missed, or one something else made -- and
+    /// fill it in where it is not known.
     enum class Facing { Unknown, Left, Right };
     Facing facing_ = Facing::Unknown;
+    /// When the last key of the hunter's own that set facing_ went out -- a
+    /// turn's tap, a walk put down or stepped, a step back -- on the hunter's
+    /// clock, 0 for none this run; and which way it went, Unknown for none.
+    /// What a report of yours is weighed against (kFacingTrustMs,
+    /// kFacingMissedMs).
+    std::uint64_t facing_key_ms_ = 0;
+    Facing        facing_key_way_ = Facing::Unknown;
     bool   held_before_ = false;        ///< a hold was on at the last pass
     /// The direction key held down for a walk (hold_walk), 0 for none, and
     /// since when -- or since its last renewal; how far off the target was at
@@ -1005,6 +1081,12 @@ private:
     std::uint64_t minute_dropped_ = 0;      ///< targets_dropped when the minute began
     int           minute_returns_ = 0;      ///< walks back to the spot begun
     int           minute_return_give_ups_ = 0;
+    int           minute_turns_ = 0;        ///< turn taps sent (kTurnTapMs)
+    /// A facing_ of Left or Right the packets put the other way
+    /// (face_from_packets) -- not one filled in where it was not known; and
+    /// of those, the ones for a key the game never took (kFacingMissedMs).
+    int           minute_packet_facings_ = 0;
+    int           minute_missed_keys_ = 0;
 
     /// The hunting spot, and what the other threads ask of it: under mutex_.
     Spot spot_;

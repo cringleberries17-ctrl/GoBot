@@ -171,6 +171,7 @@ bool GuiApp::keeper_key_crossing(CrashWatch& watch, const CrashWatch::Settings& 
         const bool have_landmark =
             TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"), landmark);
         ScreenCapture capture;
+        capture.set_label("keeper");
         Frame f;
         if (capture.grab(input_.target_window(), f) && f.valid() &&
             AutoLogin::in_world(f, have_landmark ? &landmark : nullptr)) {

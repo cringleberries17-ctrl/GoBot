@@ -2908,9 +2908,12 @@ bag::Dialog BagCleaner::wait_for_dialog(int ms, bool& foreign, Frame* last,
     int others = 0;
     bool gone_seen = false;
     std::chrono::steady_clock::time_point gone_at{};
+    // One frame for every look, grabbed into again rather than 3 MB made anew
+    // every 150 ms. The newest goes to `last` by a swap, which hands its old
+    // buffer back for the next grab.
+    Frame f;
     for (int waited = 0; waited < ms; waited += 150) {
         if (!wait_ms(150)) break;
-        Frame f;
         if (!grab_ || !grab_(f) || !f.valid()) continue;
         const auto dialogs = bag::find_dialogs(f, store_);
         for (const bag::Dialog& d : dialogs)
@@ -2927,13 +2930,13 @@ bag::Dialog BagCleaner::wait_for_dialog(int ms, bool& foreign, Frame* last,
                 gone_at = now();
             } else if (now() - gone_at >= std::chrono::milliseconds(kDoneApartMs)) {
                 answered_early_ = true;
-                if (last) *last = std::move(f);
+                if (last) std::swap(*last, f);
                 break;
             }
         } else {
             gone_seen = false;
         }
-        if (last) *last = std::move(f);
+        if (last) std::swap(*last, f);
     }
     foreign = others >= 2;
     return bag::Dialog{};

@@ -133,6 +133,7 @@ bool SessionManager::hud_present(const Frame& f) {
 
 void SessionManager::loop() {
     ScreenCapture capture;
+    capture.set_label("session");
     InputManager  finder;
     Frame         frame;
 

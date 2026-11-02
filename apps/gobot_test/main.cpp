@@ -20216,6 +20216,23 @@ void test_packet_world(void (*check)(bool, const std::string&), void (*section)(
 // steer, the two views laid over each other, and keeping the capture
 // attached, in packet_eyes_test.cpp.
 void test_packet_eyes(void (*check)(bool, const std::string&), void (*section)(const char*));
+// How often GoBot's window draws (FramePacer), and light mode ("Nhẹ máy"):
+// a VMware guest's signals and [Performance], in pacer_test.cpp.
+void test_pacer(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The Load line (gobot/load_meter.hpp): its report from made-up snapshots,
+// its counters, the named threads on pretend ones, and its wiring, in
+// load_test.cpp.
+void test_load(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The heavy tabs made lighter: a config file read again only when it changes
+// (gobot/file_watch.hpp), the log's change count the Log tab copies by, and
+// where Dọn rác, Tự đăng nhập, Log and the party and keeper panels use them,
+// in tabs_test.cpp.
+void test_tabs(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Watching the game for less: the HP/MP reader's pace and what counted its
+// reads, the detector stopped at once and with the hunt, PrintWindow judged
+// once per window, the camera fed only when used, frames kept -- in
+// capture_load_test.cpp.
+void test_capture_load(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -20357,6 +20374,10 @@ int main() {
     test_skills(check, section);
     test_packet_world(check, section);
     test_packet_eyes(check, section);
+    test_pacer(check, section);
+    test_load(check, section);
+    test_tabs(check, section);
+    test_capture_load(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();

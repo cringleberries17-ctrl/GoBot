@@ -261,6 +261,10 @@ add_library(gobot_core STATIC
     src/packet_world.cpp
     src/packet_eyes.cpp
     src/window_focus.cpp
+    src/frame_pacer.cpp
+    src/machine_info.cpp
+    src/load_meter.cpp
+    src/file_watch.cpp
     src/no_real_input.cpp
     src/game_install.cpp
     src/input_manager.cpp
@@ -436,7 +440,9 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/hunter_test.cpp apps/gobot_test/macro_fight_test.cpp
                           apps/gobot_test/style_test.cpp apps/gobot_test/jump_test.cpp
                           apps/gobot_test/skills_test.cpp apps/gobot_test/packet_world_test.cpp
-                          apps/gobot_test/packet_eyes_test.cpp)
+                          apps/gobot_test/packet_eyes_test.cpp apps/gobot_test/pacer_test.cpp
+                          apps/gobot_test/load_test.cpp apps/gobot_test/tabs_test.cpp
+                          apps/gobot_test/capture_load_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

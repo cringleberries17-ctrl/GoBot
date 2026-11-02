@@ -192,7 +192,9 @@ bool login_page_up(const Frame& f, const AutoLogin::Settings& login, const Templ
     return false;
 }
 
-StallLooker::StallLooker() = default;
+StallLooker::StallLooker() {
+    capture_.set_label("stall look");     // the keeper's looks at a hung game, for the Load line
+}
 StallLooker::~StallLooker() = default;
 
 void StallLooker::load(const std::string& templates_ini) {

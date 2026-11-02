@@ -230,6 +230,7 @@ void GuiApp::simple_party_hud_line() {
             // to the party since: as the party worker takes and reads its own
             // (take_party_look, read_party).
             ScreenCapture capture;
+            capture.set_label("party");
             PartyLook look;
             void* const game = input_.target_window();
             if (!take_party_look(party_sight(capture, game), look))

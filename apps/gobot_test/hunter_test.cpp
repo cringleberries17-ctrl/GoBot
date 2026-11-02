@@ -146,6 +146,16 @@ struct World {
     int           lead = 0;             ///< how far the working-out has run past the character
     float         report_x = 0.0f, report_y = 0.0f;
     std::uint64_t report_ms = 0;
+    /// Which way the packets say the character faces (WorldFix::facing), and
+    /// when a report said so -- set by the test: 0, as here unless set, the
+    /// packets do not know, and nothing of the hunter's turning changes.
+    /// With `turn_reports`, a direction key that goes out sets them too, as
+    /// the client reports the walk it starts at once: a game that takes every
+    /// key. Without, the keys say nothing: a game that took none of them, as
+    /// far as the packets show.
+    int           facing = 0;
+    std::uint64_t facing_ms = 0;
+    bool          turn_reports = false;
     int           wheres = 0;           ///< how often the hunter asked
     /// A report of where the character is: what the client sends as a walk
     /// starts or stops.
@@ -199,6 +209,8 @@ struct HuntRig {
                 f.rx = w.report_x;
                 f.ry = w.report_y;
                 f.report_ms = w.report_ms;
+                f.facing = w.facing;
+                f.facing_ms = w.facing_ms;
                 f.airborne = w.airborne;
                 f.moving = walking || w.lead != 0;
                 f.uncertain = w.uncertain;
@@ -247,6 +259,10 @@ struct HuntRig {
                 if (vk == VK_LEFT)  w.me_x -= w.step_px;
                 if (vk == VK_RIGHT) w.me_x += w.step_px;
             }
+            if (w.turn_reports && (vk == VK_LEFT || vk == VK_RIGHT)) {
+                w.facing = vk == VK_LEFT ? -1 : 1;
+                w.facing_ms = w.t;
+            }
             return true;
         };
         // A walk's start and stop are reported (World::report), as the client
@@ -255,6 +271,10 @@ struct HuntRig {
             w.presses.push_back(World::Press{ w.t, vk, World::kHeld });
             w.held.insert(vk);
             if (vk == VK_LEFT || vk == VK_RIGHT) w.report();
+            if (w.turn_reports && (vk == VK_LEFT || vk == VK_RIGHT)) {
+                w.facing = vk == VK_LEFT ? -1 : 1;
+                w.facing_ms = w.t;
+            }
             return true;
         };
         hands.key_up = [this](std::uint32_t vk) {
@@ -354,15 +374,13 @@ void test_hunter_seam() {
                   st.dx == 260 && st.dy == 0,
               "walking to it, one step counted, 260 px off");
 
-        // Now within reach.
+        // Now within reach -- and facing it already, from the step right.
         r.w.presses.clear();
         r.w.mobs = { plate(700, 400, "TrungXanh") };
         const std::uint64_t t0 = r.w.t;
         r.pass();
-        check(r.w.presses.size() == 2 && r.w.presses[0].vk == VK_RIGHT &&
-                  r.w.presses[0].hold == 30 && r.w.presses[1].vk == 'Z' &&
-                  r.w.presses[1].hold == 60,
-              "60 px away: a 30-ms tap to face it, then the attack key");
+        check(r.w.presses.size() == 1 && r.w.presses[0].vk == 'Z' && r.w.presses[0].hold == 60,
+              "60 px away, the step having turned the character right: no tap to face it, only the attack key");
         check(r.hunter.status().state == Hunter::State::Attacking, "and it says it is attacking");
 
         r.run(2040);    // passes up to 2040 ms after the first swing
@@ -373,10 +391,10 @@ void test_hunter_seam() {
         check(spaced && swings[0].at == t0,
               "the attack key once per attack_interval_ms: 3 swings in 2.04 s, 700+ ms apart -- " +
                   std::to_string(swings.size()));
-        // As before: a tap toward it on every pass while it is more than 12 px
-        // off, which is what creeps the character in.
-        check(r.w.of(VK_RIGHT).size() == 35 && r.hunter.status().attacks == 3,
-              "and, as before, a face tap on every one of the 35 passes");
+        // No tap toward it on every pass while it is more than 12 px off, as
+        // there was without a style: that crept the character in on it.
+        check(r.w.of(VK_RIGHT).empty() && r.hunter.status().attacks == 3,
+              "and no face tap at any of the 35 passes: it faces the target already");
 
         // The keys it lets go of, from here on: only a direction that is
         // down. release_all() here once let go of whatever another thread
@@ -1119,6 +1137,8 @@ void test_spot_off() {
         }
         a.run(8000);
         b.run(8000);
+        // Watched only (packet_positions=watch, as hunt.ini ships): not even
+        // for which way the character faces.
         check(same_keys(a.w, b.w) && !a.w.presses.empty() && b.w.wheres == 0 && !b.hunter.spot().set,
               "spot=false, the packets' fix there to be had: every key, held as long, at the same moment as a "
               "hunter with none -- and the fix never asked for");
@@ -2154,6 +2174,222 @@ void test_hunter_spot() {
     test_spot_hop_regains();
 }
 
+// ------------------------------------------------------------- turning
+
+/// How a ranged character turns to its target -- no style, the walk held,
+/// the packets steering, as the player hunts -- where it was seen "nhích từng
+/// chút khi đang bắn": without a style, keep_distance or stay_put a tap
+/// toward the target went out at every pass, and each walked it in a few
+/// pixels. Now, for every setup, one tap of kTurnTapMs when the hunter does
+/// not take it to be facing the target already; and where the packets steer
+/// and know better which way it faces -- a report more than kFacingTrustMs
+/// after the hunter's own last turning key, one that says the way the key
+/// went, or a key kFacingMissedMs old the game never reported -- they put
+/// the hunter's idea right.
+void test_hunter_turns() {
+    section("Hunter: a turn only when not facing the target -- every setup -- and the packets putting it right");
+
+    HunterConfig ranged;        // no style, hold_walk, keep_distance and stay_put off
+    ranged.reach = 450;         // half the 1024-px frame, as the player means to set it
+    {
+        HuntRig r(ranged);
+        r.w.step_px = 20;
+        r.w.mobs = { plate(640 + 400, 400, "Xa") };       // 400 px right: in reach
+        r.pass();
+        const bool first = r.w.presses.size() == 2 && r.w.presses[0].vk == VK_RIGHT &&
+                           r.w.presses[0].hold == Hunter::kTurnTapMs && r.w.presses[1].vk == 'Z';
+        r.run(100 * 60);
+        check(Hunter::kTurnTapMs == 60 && first && r.w.of(VK_RIGHT).size() == 1 && r.w.of(VK_LEFT).empty() &&
+                  r.w.of('Z').size() >= 8 && r.w.held.empty() && r.w.me_x == 640 && r.hunter.engaged(),
+              "no style, a target 400 px right within a reach of 450, which way it faces not known: one 60-ms tap "
+              "right, then the attack -- and over 100 passes no other tap and never a step, " +
+                  std::to_string(r.w.of('Z').size()) + " attacks from where it stood");
+
+        // The target the other side now: one tap left. Back on the right: one
+        // tap right.
+        r.w.mobs = { plate(640 - 300, 400, "Xa") };
+        r.run(30 * 60);
+        const auto lefts = r.w.of(VK_LEFT);
+        const bool left_once = lefts.size() == 1 && lefts[0].hold == Hunter::kTurnTapMs;
+        r.w.mobs = { plate(640 + 200, 400, "Xa") };
+        r.run(30 * 60);
+        const auto rights = r.w.of(VK_RIGHT);
+        check(left_once && r.w.of(VK_LEFT).size() == 1 && rights.size() == 2 &&
+                  rights[1].hold == Hunter::kTurnTapMs && r.w.held.empty() && r.w.me_x == 640,
+              "a target on the other side: one tap left over 30 passes; back on the right, one tap right -- " +
+                  std::to_string(r.w.of(VK_LEFT).size()) + " left, " + std::to_string(rights.size()) + " right");
+    }
+
+    HunterConfig steered = ranged;
+    steered.packet_positions = PacketPositions::On;
+    {
+        // The packets' fix (Eyes::where), from a game that takes every key:
+        // the client reports the hunter's tap as it goes out, and more
+        // reports as the test sets them.
+        HuntRig r(steered, false, true);
+        r.w.turn_reports = true;
+        r.w.mobs = { plate(640 + 300, 400, "Xa") };
+        r.run(100 * 60);
+        const auto taps = [&r] { return r.w.of(VK_RIGHT).size(); };
+        check(taps() == 1 && r.w.facing == 1 && r.w.of(VK_LEFT).empty() && r.w.me_x == 640,
+              "the packets steering, the game reporting the hunter's turn: one tap over 100 passes, the report of "
+              "it taken for what it says -- " + std::to_string(taps()) + " taps");
+
+        // Something else turned the character away -- a report says it faces
+        // left, long after the hunter's turn: turned back at the next pass.
+        r.w.facing = -1;
+        r.w.facing_ms = r.w.t;
+        r.pass();
+        const bool at_once = taps() == 2;
+        const std::uint64_t second = at_once ? r.w.of(VK_RIGHT)[1].at : 0;
+
+        // Then one saying left again, no more than kFacingTrustMs after that
+        // tap -- one that may have been sent before the tap reached the game:
+        // not taken at once. With no report since for kFacingMissedMs, the
+        // game never took the tap, and the character faces left: turned
+        // again, once.
+        r.w.facing = -1;
+        r.w.facing_ms = r.w.t;
+        const bool soon = r.w.facing_ms <= second + Hunter::kFacingTrustMs;
+        bool waited = true;
+        while (r.w.t <= second + Hunter::kFacingMissedMs) {
+            r.pass();
+            waited = waited && taps() == 2;
+        }
+        r.run(10 * 60);
+        check(at_once && soon && waited && taps() == 3 && r.w.facing == 1,
+              "a report long after the tap saying the character faces away: one tap back at the next pass; one "
+              "within 150 ms of that tap saying the same: no tap for 500 ms, then one -- " +
+                  std::to_string(taps()) + " taps");
+
+        // The packets not knowing the character: whatever the fix says of
+        // the facing changes nothing. Known again, it does.
+        r.w.fix_state = WorldFix::State::Lost;
+        r.w.facing = -1;
+        r.w.facing_ms = r.w.t;
+        r.run(10 * 60);
+        const bool lost_ignored = taps() == 3;
+        r.w.fix_state = WorldFix::State::Known;
+        r.run(10 * 60);
+        check(lost_ignored && taps() == 4 && r.w.of(VK_LEFT).empty(),
+              "the fix Lost, saying the character faces away: no tap; Known again, saying the same: one -- " +
+                  std::to_string(taps()) + " taps");
+    }
+    {
+        // A tap the game does not take -- a press it read no frame of -- and
+        // so never reports: the last report, from before it, still says the
+        // character faces left. Tapped again once kFacingMissedMs show it,
+        // not sooner; and once the game takes one, no more.
+        HuntRig r(steered, false, true);
+        r.w.facing = -1;
+        r.w.facing_ms = r.w.t;
+        r.w.mobs = { plate(640 + 300, 400, "Xa") };
+        r.run(20 * 60);
+        const std::vector<World::Press> missed = r.w.of(VK_RIGHT);
+        bool spaced = missed.size() == 3;
+        for (std::size_t i = 1; spaced && i < missed.size(); ++i)
+            spaced = missed[i].at - missed[i - 1].at > Hunter::kFacingMissedMs &&
+                     missed[i].at - missed[i - 1].at < Hunter::kFacingMissedMs + 120;
+        r.w.turn_reports = true;
+        r.run(30 * 60);
+        check(spaced && r.w.of(VK_RIGHT).size() == missed.size() + 1 && r.w.of(VK_LEFT).empty() &&
+                  r.w.facing == 1,
+              "taps the game never reports: one, and another each 500 ms and a pass after the last; once one is "
+              "reported, no more -- " + std::to_string(missed.size()) + " unreported, " +
+                  std::to_string(r.w.of(VK_RIGHT).size()) + " in all");
+    }
+    {
+        // A hold over: on the screen, which way the character faces is not
+        // known, and it is turned once more. With the packets, the report of
+        // the hunter's own tap -- sent with it, and the last there is, as
+        // while the character stands and shoots -- says it faces the way the
+        // tap went: no tap.
+        std::size_t taps[2] = {};
+        for (const bool packets : { false, true }) {
+            HuntRig r(steered, false, packets);
+            r.w.turn_reports = true;
+            r.w.mobs = { plate(640 + 300, 400, "Xa") };
+            r.run(10 * 60);
+            r.coord.engage_critical("trash cleaning");
+            r.run(300);
+            r.coord.disengage_critical();
+            r.run(10 * 60);
+            taps[packets ? 1 : 0] = r.w.of(VK_RIGHT).size();
+        }
+        check(taps[0] == 2 && taps[1] == 1,
+              "a hold over: turned once more on the screen alone; not with the packets, the report of the hunter's "
+              "own tap the last saying it faces the target -- " + std::to_string(taps[0]) + " and " +
+                  std::to_string(taps[1]) + " taps");
+    }
+    {
+        // Watched only (packet_positions=watch, as hunt.ini ships): the
+        // screen fights, and the packets have no say in the turning -- not
+        // even asked, with the spot off.
+        HuntRig r(ranged, false, true);
+        r.w.mobs = { plate(640 + 300, 400, "Xa") };
+        r.run(10 * 60);
+        r.w.facing = -1;
+        r.w.facing_ms = r.w.t;
+        r.run(20 * 60);
+        check(ranged.packet_positions == PacketPositions::Watch && r.w.of(VK_RIGHT).size() == 1 &&
+                  r.w.wheres == 0,
+              "packet_positions=watch, a report saying the character faces away: no tap for it, the fix never "
+              "asked -- " + std::to_string(r.w.of(VK_RIGHT).size()) + " taps");
+    }
+    {
+        // The spot on: the fix the pass took for it is the one gone by, not
+        // asked again -- once a pass. Off: asked only at a pass with a target
+        // in reach. Here it says from the start that the character faces the
+        // target: never a tap.
+        HunterConfig with_spot = steered;
+        with_spot.spot = true;
+        HuntRig on(with_spot, false, true), off(steered, false, true);
+        for (HuntRig* r : { &on, &off }) {
+            r->w.facing = 1;
+            r->w.facing_ms = r->w.t;
+            r->w.mobs = { plate(640 + 200, 400, "Xa") };
+            r->run(20 * 60);
+        }
+        check(on.w.wheres == 20 && off.w.wheres == 20 && on.w.of(VK_RIGHT).empty() && off.w.of(VK_RIGHT).empty() &&
+                  on.w.of('Z').size() >= 2 && off.w.of('Z').size() >= 2,
+              "the spot on or off: the fix asked once a pass, and saying the character faces the target already, "
+              "no tap at all -- asked " + std::to_string(on.w.wheres) + " and " + std::to_string(off.w.wheres) +
+                  " times in 20 passes");
+    }
+    {
+        // Once a minute: the turns tapped, the facings the packets put right
+        // and, of those, the keys the game missed -- with a style, so that
+        // nothing else (a fight ended, a give-up) has the line said, and a
+        // minute with none of them says none. The packets filling in a facing
+        // not known, at the start, is not counted.
+        HunterConfig styled = steered;
+        styled.style = "near_wide";
+        const std::vector<std::string> log = info_lines([&] {
+            HuntRig r(styled, false, true);
+            r.w.facing = -1;                    // the character faces left, by a report from before
+            r.w.facing_ms = r.w.t;
+            r.w.mobs = { plate(640 + 300, 400, "Xa") };
+            // Hurt a little at a time: never given up on for taking no
+            // damage, never killed in the two minutes and more.
+            const auto hurt = [&r] { r.w.mobs[0].hp = std::max(0.2f, r.w.mobs[0].hp - 0.0003f); };
+            // A first tap the game misses, never reported; the one tried
+            // again it takes.
+            r.pass();
+            r.w.turn_reports = true;
+            r.run(10'000, hurt);
+            // Then something else turns the character away.
+            r.w.facing = -1;
+            r.w.facing_ms = r.w.t;
+            r.run(115'000, hurt);
+        });
+        check(lines_with(log, "Hunter: ", " turns (") == 1 &&
+                  lines_with(log, "Hunter: 0 fights, ",
+                             ", 3 turns (2 facings put right by the packets, 1 of them keys the game missed)") == 1,
+              "the minute's line: 3 turns, 2 facings put right by the packets, 1 a key the game missed -- and the "
+              "minute after, with none, no line");
+    }
+}
+
 /// The player's own frame, as it was saved: the monster on it is "NgạQuỷ",
 /// and the glyph sets have no ỷ.
 void test_monster_on_frame() {
@@ -2209,9 +2445,10 @@ void test_hunter_held_walk() {
               "goes on, a step counted a look");
         r.w.mobs = { plate(r.w.me_x + 60, 400, "TrungXanh") };
         r.pass();
-        check(r.w.held.empty() && r.w.ups.size() == 2 && r.w.ups[1] == VK_RIGHT && r.w.presses.size() == 3 &&
-                  r.w.presses[1].vk == VK_RIGHT && r.w.presses[1].hold == 30 && r.w.presses[2].vk == 'Z',
-              "within reach: the walk let go of, then the tap to face it and the attack, as ever");
+        check(r.w.held.empty() && r.w.ups.size() == 2 && r.w.ups[1] == VK_RIGHT && r.w.presses.size() == 2 &&
+                  r.w.presses[1].vk == 'Z',
+              "within reach: the walk let go of, then the attack -- no tap to face it, the walk right having "
+              "turned the character to it");
     }
     {
         // The character walks, a step_px a look, and stops where it can hit.
@@ -2222,10 +2459,12 @@ void test_hunter_held_walk() {
         r.run(3000, [&] {
             if (!reached && r.hunter.status().state == Hunter::State::Attacking) reached = true;
         });
-        check(reached && r.w.of(VK_RIGHT).size() >= 2 && r.w.of(VK_RIGHT)[0].hold == World::kHeld &&
+        // One press of the right arrow: the walk, held. Turned right by it,
+        // the character needs no tap to face the target once there.
+        check(reached && r.w.of(VK_RIGHT).size() == 1 && r.w.of(VK_RIGHT)[0].hold == World::kHeld &&
                   r.w.held.empty() && std::abs(1040 - r.w.me_x) <= 150 && std::abs(1040 - r.w.me_x) >= 130,
               "400 px off: walked to it with the key held, and let go of within reach -- at " +
-                  std::to_string(1040 - r.w.me_x) + " px");
+                  std::to_string(1040 - r.w.me_x) + " px -- with no tap to face it after");
     }
     {
         // It turns: the held key let go of at once, the other put down.
@@ -2440,5 +2679,6 @@ void test_hunter_fight(void (*check_fn)(bool, const std::string&), void (*sectio
     test_monster_lists_hunting();
     test_hunter_view_change();
     test_hunter_spot();
+    test_hunter_turns();
     test_monster_on_frame();
 }

@@ -127,6 +127,15 @@ public:
         float         x = 0.0f;         ///< world pixels
         float         y = 0.0f;         ///< world pixels, growing downward
         int           facing = 0;       ///< +1 toward larger x, -1 toward smaller x, 0 not known
+        /// Which way the last 0x0027 said you face (+1, -1; 0 while none has
+        /// since the start, a reset or a map entry), and when it came. Only a
+        /// 0x0027's: its facing byte is the one checked against the game, and
+        /// this is what the hunter turns the character by (WorldFix::facing),
+        /// while `facing`, which a 0x0029 or a 0x0028 sets too, is only what a
+        /// walk is followed by. A cast or a jump's 0x002A says nothing of it,
+        /// and leaves both as they were.
+        int           said_facing = 0;
+        std::uint64_t facing_ms = 0;
         float         speed = 0.0f;     ///< pixels per step, from the last report that gives one
         bool          moving = false;   ///< going sideways, on the ground or in the air: speed above 0
         /// Off the ground, by the state of the last 0x002A. A report of another

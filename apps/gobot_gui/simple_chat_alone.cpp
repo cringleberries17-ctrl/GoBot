@@ -54,7 +54,11 @@ struct GuiApp::ChatAloneUi {
     std::string    missing;
 };
 
-GuiApp::ChatAloneUi* GuiApp::make_chat_alone_ui() { return new ChatAloneUi; }
+GuiApp::ChatAloneUi* GuiApp::make_chat_alone_ui() {
+    ChatAloneUi* ui = new ChatAloneUi;
+    ui->capture.set_label("chat");     // Tự chat's thread's, for the Load line
+    return ui;
+}
 void GuiApp::ChatAloneUiFree::operator()(ChatAloneUi* ui) const { delete ui; }
 
 bool GuiApp::chat_alone_put_off(const ChatSettings& s, int index, const TemplateStore& store,

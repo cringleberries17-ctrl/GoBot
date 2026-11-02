@@ -27,8 +27,9 @@ const char* const kAttackStyleGuideVi =
     "\n"
     "Khi đã chọn một kiểu, bot đánh theo luật của GoC: tầm trên và tầm dưới riêng, "
     "đánh một con tới khi nó chết (chỉ bỏ khi nó ở ngoài tầm quá lâu, hoặc đánh 15 "
-    "giây mà không thấy mất máu), và chỉ quay người khi chưa quay về phía quái.\n"
-    "Như trước: đánh như GoBot từ trước tới giờ.";
+    "giây mà không thấy mất máu).\n"
+    "Như trước: đánh như GoBot từ trước tới giờ.\n"
+    "Kiểu nào, kể cả Như trước, cũng chỉ quay người khi chưa quay về phía quái.";
 
 const std::vector<AttackStyle>& attack_styles() {
     static const std::vector<AttackStyle> kStyles = {

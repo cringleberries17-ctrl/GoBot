@@ -1,4 +1,5 @@
 #include "gobot/screen_capture.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -42,6 +43,32 @@ bool looks_blank(const void* bits, int w, int h) {
     return true;
 }
 
+/// The points drawn_where_seen has looked up on this thread, for the Load
+/// line: up to 48x48 WindowFromPoint calls a grab while the game is covered.
+thread_local std::uint64_t t_points_looked = 0;
+
+/// Whether one window lies over the whole of a client area -- `origin`, `w` x
+/// `h` on the screen, of the window whose root is `root` -- as WindowFromPoint
+/// sees it: the window at the area's middle, when that is another window and
+/// a plain rectangle to the mouse -- enabled, neither layered nor see-through
+/// to it, no window region of its own -- and its rectangle holds the whole
+/// area. Then no point of the area is this window's, as drawn_where_seen
+/// would find point by point, up to 2,352 look-ups a grab while the game is
+/// covered. Anything less plain says nothing, and the look-up goes ahead.
+bool covered_whole(HWND root, POINT origin, int w, int h) {
+    ++t_points_looked;
+    const HWND at = WindowFromPoint(POINT{ origin.x + w / 2, origin.y + h / 2 });
+    if (at == nullptr) return false;
+    const HWND over = GetAncestor(at, GA_ROOT);
+    if (over == nullptr || over == root || !IsWindowEnabled(over)) return false;
+    if ((GetWindowLongW(over, GWL_EXSTYLE) & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) != 0) return false;
+    RECT shape{};
+    if (GetWindowRgnBox(over, &shape) != ERROR) return false;     // shaped: it may have holes
+    RECT r{};
+    if (!GetWindowRect(over, &r)) return false;
+    return r.left <= origin.x && r.top <= origin.y && r.right >= origin.x + w && r.bottom >= origin.y + h;
+}
+
 /// Whether a copy of the screen over a window's client area shows the window
 /// itself drawn: two sampled points of different colour, both where the
 /// screen shows this window and not something over it. Only the points of a
@@ -49,6 +76,9 @@ bool looks_blank(const void* bits, int w, int h) {
 /// blank. `seen`, when asked: whether any sampled point showed the window.
 bool drawn_where_seen(HWND hwnd, POINT origin, const void* bits, int w, int h, bool* seen = nullptr) {
     const HWND root = GetAncestor(hwnd, GA_ROOT);
+    // Covered whole by one plain window: not seen anywhere, said with one
+    // look-up rather than one a sampled point.
+    if (covered_whole(root, origin, w, h)) return false;
     const auto* px = static_cast<const std::uint32_t*>(bits);
     const int sx = std::max(1, w / 48);
     const int sy = std::max(1, h / 48);
@@ -59,6 +89,7 @@ bool drawn_where_seen(HWND hwnd, POINT origin, const void* bits, int w, int h, b
         for (int x = 0; x < w; x += sx) {
             const std::uint32_t c = row[x] & 0x00FFFFFFu;
             if (have && c == first) continue;
+            ++t_points_looked;
             const HWND at = WindowFromPoint(POINT{ origin.x + x, origin.y + y });
             if (at == nullptr || GetAncestor(at, GA_ROOT) != root) continue;   // covered, or off every screen
             if (seen != nullptr) *seen = true;
@@ -97,6 +128,157 @@ bool PrintWindowRule::screen(bool drawn) {
     trying_ = false;
     countdown_ = kProbeEvery;
     return true;
+}
+
+// ---- the process's verdict, window by window ----
+
+PrintWindowVerdicts::Entry* PrintWindowVerdicts::find(const Window& w) {
+    for (Entry& e : entries_)
+        if (e.window == w) return &e;
+    return nullptr;
+}
+
+const PrintWindowVerdicts::Entry* PrintWindowVerdicts::find(const Window& w) const {
+    for (const Entry& e : entries_)
+        if (e.window == w) return &e;
+    return nullptr;
+}
+
+PrintWindowVerdicts::Entry& PrintWindowVerdicts::entry(const Window& w, std::uint64_t now) {
+    if (Entry* e = find(w)) return *e;
+    if (entries_.size() >= kMaxWindows) {
+        // The one longest unasked: a window long closed, most likely.
+        auto oldest = std::min_element(entries_.begin(), entries_.end(),
+                                       [](const Entry& a, const Entry& b) { return a.used_ms < b.used_ms; });
+        entries_.erase(oldest);
+    }
+    Entry e;
+    e.window = w;
+    e.used_ms = now;
+    entries_.push_back(e);
+    return entries_.back();
+}
+
+PrintWindowVerdicts::Turn PrintWindowVerdicts::turn(const Window& w, std::uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& e = entry(w, now);
+    e.used_ms = now;
+    Turn t;
+    t.refused = e.refused;
+    if (e.refused) {
+        // A probe, at most once every kReprobeMs; none in light mode.
+        if (light_.load() || now < e.probe_ms + kReprobeMs) return t;
+        e.probe_ms = now;
+        t.ask = true;
+        return t;
+    }
+    // A window PrintWindow drew lately is not gated: its blank picture is the
+    // game's own black frame (a loading screen), and the first grab after the
+    // game draws again must ask, or the screen's copy -- the window covering
+    // the game -- is read until the gate's time is up.
+    const bool drew_lately = e.drew_ms != 0 && now < e.drew_ms + kDrewTrustMs;
+    if (e.unclear && !drew_lately) {
+        if (now < e.unclear_ms + kUnclearAskMs) return t;
+        e.unclear_ms = now;
+    }
+    t.ask = true;
+    return t;
+}
+
+bool PrintWindowVerdicts::drew(const Window& w, std::uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry* e = find(w);
+    if (e == nullptr) return false;
+    const bool was = e->refused;
+    e->refused = false;
+    e->unclear = false;
+    e->drew_ms = now;
+    return was;
+}
+
+void PrintWindowVerdicts::judged(const Window& w) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (Entry* e = find(w)) e->unclear = false;
+}
+
+void PrintWindowVerdicts::unclear(const Window& w, std::uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& e = entry(w, now);
+    if (e.refused) return;      // a probe that showed nothing: still refused
+    e.unclear = true;
+    e.unclear_ms = now;
+}
+
+bool PrintWindowVerdicts::refuse(const Window& w, std::uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Entry& e = entry(w, now);
+    if (e.refused) return false;
+    e.refused = true;
+    e.unclear = false;
+    e.probe_ms = now;
+    return true;
+}
+
+bool PrintWindowVerdicts::refused(const Window& w) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Entry* e = find(w);
+    return e != nullptr && e->refused;
+}
+
+std::size_t PrintWindowVerdicts::windows() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return entries_.size();
+}
+
+PrintWindowVerdicts& print_window_verdicts() {
+    static PrintWindowVerdicts verdicts;
+    return verdicts;
+}
+
+void PrintWindowAsk::attach(const PrintWindowVerdicts::Window& w, std::uint64_t now) {
+    // A capture that grabs another window now -- the auto login's, looking
+    // at VTCZone and then the launcher -- counts that window's blank
+    // pictures from nothing; the verdict on each is the process's anyway.
+    if (!attached_ || w != window_) rule_ = PrintWindowRule{};
+    window_ = w;
+    now_ = now;
+    attached_ = true;
+}
+
+bool PrintWindowAsk::ask() {
+    if (!attached_) return rule_.ask();
+    const PrintWindowVerdicts::Turn t = verdicts().turn(window_, now_);
+    refused_ = t.refused;
+    if (refused_) return t.ask;     // the verdict's probe, or nothing
+    // Not refused, though this capture gave it up itself: another capture's
+    // probe has seen it draw since. Tried again, from nothing.
+    if (!rule_.trying()) rule_ = PrintWindowRule{};
+    return t.ask && rule_.ask();
+}
+
+bool PrintWindowAsk::printed(bool drew) {
+    if (!attached_) return rule_.printed(drew);
+    rule_.printed(drew);
+    // Back once the window had been refused, whoever refused it: said once.
+    return drew && verdicts().drew(window_, now_);
+}
+
+bool PrintWindowAsk::screen(bool drawn) {
+    if (!attached_) return rule_.screen(drawn);
+    if (!drawn) {
+        // Covered where it would be seen, or one flat colour: nothing said
+        // about PrintWindow, and not asked again for a while.
+        verdicts().unclear(window_, now_);
+        return false;
+    }
+    verdicts().judged(window_);
+    if (!rule_.screen(true)) return false;
+    return verdicts().refuse(window_, now_);
+}
+
+bool PrintWindowAsk::trying() const {
+    if (!attached_) return rule_.trying();
+    return !refused_ && rule_.trying();
 }
 
 bool save_png(const Frame& f, const std::string& path) {
@@ -219,11 +401,27 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
 
     HDC mem = static_cast<HDC>(dc_);
 
+    // What this grab costs, counted under the capture's label for the Load
+    // line (gobot/load_meter.hpp): PrintWindow and BitBlt timed, the copies
+    // made again and the points looked up, and the frame handed out.
+    if (owner_ == nullptr) owner_ = &grab_owners().owner(label_);
+    GrabOwner& counted = *owner_;
+
     // Ask the window to draw itself. Works when it is covered, which matters
     // because our own window is usually sitting on top of it.
     from_screen_ = false;
     BOOL ok = FALSE;
     bool printed = false;     // PrintWindow was asked this grab, and drew nothing
+
+    // Which window this is, for the process's verdict on it, which the rule
+    // goes by first: one that refused PrintWindow is not asked by every
+    // capture of it, nor one with nothing to judge it by on every grab
+    // (PrintWindowVerdicts).
+    {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        print_rule_.attach(PrintWindowVerdicts::Window{ hwnd, static_cast<std::uint32_t>(pid) }, GetTickCount64());
+    }
 
     if (!screen_only_ && !PrintWindowPause::active() && print_rule_.ask()) {
         // Clear first. PrintWindow can return success having painted nothing
@@ -238,13 +436,16 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
         // below starts at the client origin and does not. Every saved
         // rectangle would then mean two different things depending on which
         // path the frame happened to come from.
+        const std::uint64_t print_from = load_clock_us();
         ok = PrintWindow(hwnd, mem, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
+        counted.print_window.add_since(print_from);
         if (ok && looks_blank(bits_, w, h)) ok = FALSE;
         printed = !ok;
 
         if (print_rule_.printed(ok != FALSE))
-            GB_INFO("PrintWindow draws this window again -- reading it from its own "
-                    "picture, whatever lies over it");
+            GB_INFO("PrintWindow draws this window again (seen by the %s capture) -- every capture reads "
+                    "it from its own picture, whatever lies over it",
+                    label_);
     }
 
     if (!ok) {
@@ -269,7 +470,9 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
                 origin.x + w > vx + GetSystemMetrics(SM_CXVIRTUALSCREEN) ||
                 origin.y + h > vy + GetSystemMetrics(SM_CYVIRTUALSCREEN))
                 std::memset(bits_, 0, static_cast<std::size_t>(w) * h * 4);
+            const std::uint64_t copy_from = load_clock_us();
             const BOOL copied = BitBlt(mem, 0, 0, w, h, screen, origin.x, origin.y, SRCCOPY);
+            counted.bitblt.add_since(copy_from);
             ReleaseDC(nullptr, screen);
             return copied;
         };
@@ -286,13 +489,16 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
         // later, a few times, while the window is one flat colour where it can
         // be seen; never on a grab that did not ask PrintWindow, nor with the
         // window seen nowhere -- covered whole, nothing to wait for.
+        const std::uint64_t points_before = t_points_looked;
         bool seen = false;
         bool drawn = printed && ok && drawn_where_seen(hwnd, origin, bits_, w, h, &seen);
         for (int again = 0; printed && ok && !drawn && seen && again < kRecopies; ++again) {
             Sleep(kRecopyGapMs);
+            counted.recopies.fetch_add(1, std::memory_order_relaxed);
             ok = copy();
             drawn = ok && drawn_where_seen(hwnd, origin, bits_, w, h);
         }
+        counted.points.fetch_add(t_points_looked - points_before, std::memory_order_relaxed);
 
         // A blank picture is PrintWindow's fault only when the screen shows the
         // window itself drawn: Direct3D windows can do this. One that is as
@@ -301,10 +507,15 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
         // PrintWindow. See PrintWindowRule.
         if (printed && ok && print_rule_.trying() && print_rule_.screen(drawn)) {
             // Direct3D windows routinely do this. Say so once rather than
-            // leaving a silent per-frame fallback for someone to discover.
-            GB_INFO("PrintWindow returns a blank frame for this window -- "
-                    "reading pixels off the screen instead; keep the game "
-                    "unobscured and fully on screen");
+            // leaving a silent per-frame fallback for someone to discover:
+            // once for the whole process, which goes by it from now on.
+            GB_INFO("PrintWindow returns a blank frame for this window (seen by the %s capture) -- every "
+                    "capture reads pixels off the screen instead; keep the game unobscured and fully on "
+                    "screen. %s",
+                    label_,
+                    print_window_verdicts().light()
+                        ? "Light mode: it is not asked again this session."
+                        : "It is asked again once every 5 minutes.");
         }
     }
     if (!ok) return false;
@@ -315,6 +526,7 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
     std::memcpy(out.pixels.data(), bits_, out.pixels.size());
 
     ++grabs_;
+    counted.grabs.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 

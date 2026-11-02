@@ -99,9 +99,10 @@ struct PacketHealth {
     /// How much longer than PacketWorld follows a move of yours with no
     /// report (View::own_follow_ms, kAirReckonMs) it may go before the packets
     /// are let go of: the report that ends a move comes a moment after the key
-    /// is up, and the hunter asks the moment it is. A step back held 800 ms
-    /// is past the 600 ms a walk the hunter does not hold is followed; a jump
-    /// can be past kAirReckonMs; a held walk let go of near its 3 s.
+    /// is up, and the hunter asks the moment it is. A step back held 860 ms
+    /// -- GoC's longest, and the turn's tap -- is past the 600 ms a walk the
+    /// hunter does not hold is followed; a jump can be past kAirReckonMs; a
+    /// held walk let go of near its 3 s.
     static constexpr std::uint64_t kReportLateMs = 300;
 };
 
@@ -142,7 +143,8 @@ PacketHealth packet_health(const PacketWorld::View& v, const PacketWorld::Stats&
 ///
 /// x and y are worked out to `now`; rx and ry are the last report's own. The
 /// map entries ever (View::map_epoch) and the last one's spawn (View::entry_x,
-/// entry_y) come with it, through a capture started again too.
+/// entry_y) come with it, through a capture started again too; and which way
+/// you face, with when a 0x0027 last said so (Me::said_facing, Me::facing_ms).
 WorldFix world_fix(const PacketWorld::View& v, const PacketWorld::Stats& s, const PacketLink& link,
                    std::uint64_t now);
 

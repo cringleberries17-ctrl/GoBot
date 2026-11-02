@@ -109,10 +109,12 @@ Logged logged(LogLevel level, const std::function<void()>& run) {
 
 // ------------------------------------------------------------------ the rig
 
-/// The pretend game. A direction held 50 ms or more -- a walking step or a
-/// step back, not a 30-ms turn -- moves the character at 355 px a second,
-/// unless there is a wall; with `follow` the monsters keep their distance by
-/// walking after it, and `ledge` drops it that far with the next step.
+/// The pretend game. A direction held 50 ms or more -- a walking step, a
+/// step back, or a turn's tap of Hunter::kTurnTapMs, which walks the real
+/// character 21 px as a key held that long does -- moves the character at
+/// 355 px a second, unless there is a wall; with `follow` the monsters keep
+/// their distance by walking after it, and `ledge` drops it that far with the
+/// next step.
 ///
 /// With `view_follows` the game's view moves with the character, as the real
 /// one does: the character's plate stays where it is on the screen and the
@@ -205,10 +207,22 @@ struct World {
             if (p.vk == vk && p.hold >= min_hold && p.hold <= max_hold) out.push_back(p);
         return out;
     }
-    /// Steps back or walking steps: a direction held 50 ms or more.
-    std::size_t steps(std::uint32_t vk) const { return of(vk, 50).size(); }
-    /// Turns: a direction tapped for 30 ms.
-    std::size_t taps(std::uint32_t vk) const { return of(vk, 30, 30).size(); }
+    /// Whether a direction held `hold` ms is a turn: the hunter's tap of
+    /// Hunter::kTurnTapMs. No step here is held that long -- a step back is
+    /// held backstep_ms and kTurnTapMs more, 110 ms at the least where no
+    /// hunting spot's edge cuts it, a walking step step_ms -- so a turn and a
+    /// step are never taken for each other.
+    static bool turn(int hold) { return hold == Hunter::kTurnTapMs; }
+    /// Steps back or walking steps: a direction held 50 ms or more, a turn
+    /// not among them.
+    std::size_t steps(std::uint32_t vk) const {
+        std::size_t n = 0;
+        for (const Press& p : of(vk, 50))
+            if (!turn(p.hold)) ++n;
+        return n;
+    }
+    /// Turns: a direction tapped for kTurnTapMs.
+    std::size_t taps(std::uint32_t vk) const { return of(vk, Hunter::kTurnTapMs, Hunter::kTurnTapMs).size(); }
 };
 
 struct Rig {
@@ -700,17 +714,20 @@ void test_keep_distance() {
         Rig r(keeping());
         r.w.mobs = { plate(720, 400, "Moc") };        // 80 px to the right
         r.pass();
+        // GoC's 169 ms, and the turn's 60 more: the turn after it walks the
+        // character back in as far.
         const bool stepped = r.w.presses.size() == 1 && r.w.presses[0].vk == VK_LEFT &&
-                             r.w.presses[0].hold >= 159 && r.w.presses[0].hold <= 179;
+                             r.w.presses[0].hold >= 219 && r.w.presses[0].hold <= 239;
         r.pass();
         check(stepped && r.w.presses.size() == 3 && r.w.presses[1].vk == VK_RIGHT &&
-                  r.w.presses[1].hold == 30 && r.w.presses[2].vk == 'Z',
+                  r.w.presses[1].hold == Hunter::kTurnTapMs && r.w.presses[2].vk == 'Z',
               "min 120, a target at dx=80: a step back held " +
                   std::to_string(r.w.presses.empty() ? 0 : r.w.presses[0].hold) +
-                  " ms, then one 30-ms turn toward it, then the attack");
+                  " ms, then one 60-ms turn toward it, then the attack");
         r.run(3000);
-        check(r.w.steps(VK_LEFT) == 1 && r.w.taps(VK_RIGHT) == 1 && r.st().backsteps == 1,
-              "far enough after it: no more steps back, and no more turns");
+        check(r.w.steps(VK_LEFT) == 1 && r.w.taps(VK_RIGHT) == 1 && r.st().backsteps == 1 && r.st().dx == 140,
+              "far enough after it, the turn having walked it 21 px back in: 140 px off, 20 past the minimum as "
+              "GoC's step means, no more steps back, and no more turns -- " + std::to_string(r.st().dx) + " px");
     }
     {
         HunterConfig cfg = keeping();
@@ -719,8 +736,8 @@ void test_keep_distance() {
         r.w.mobs = { plate(670, 400, "Moc") };        // 30 px
         r.pass();
         check(r.w.presses.size() == 1 && r.w.presses[0].vk == VK_LEFT &&
-                  std::abs(r.w.presses[0].hold - 113) <= 5,
-              "no minimum set and dx=30: GoC's 50 px, a step held about 113 ms");
+                  std::abs(r.w.presses[0].hold - 113 - Hunter::kTurnTapMs) <= 5,
+              "no minimum set and dx=30: GoC's 50 px, a step held about 113 ms -- and the turn's 60 more");
     }
     {
         // One that follows: dx stays 80 however far it steps.
@@ -1029,7 +1046,9 @@ void test_keep_distance_log() {
     section("Giữ khoảng cách: how far each fight was fought from, in the log");
 
     // One monster after another turning up 80 px off: each stepped back from
-    // once and fought to its death from ~139 px, for a minute and a second.
+    // once and fought to its death from 140 px -- the minimum and GoC's 20,
+    // the turn after the step having walked back in what the step was held
+    // longer for -- for a minute and a second.
     int fights = 0;
     const Logged log = logged(LogLevel::Debug, [&] {
         Rig r(keeping());
@@ -1044,8 +1063,8 @@ void test_keep_distance_log() {
             }
         });
     });
-    check(fights >= 10 && log.has({ "Hunter: fight over (finished)", "median 139 px", "1 back-steps" }),
-          "each fight's line: the distance it was fought from (median 139 px) and its one step "
+    check(fights >= 10 && log.has({ "Hunter: fight over (finished)", "median 140 px", "1 back-steps" }),
+          "each fight's line: the distance it was fought from (median 140 px) and its one step "
           "back -- " + std::to_string(fights) + " fights");
     check(log.has({ "Hunter: ", " fights, ", " with attacks at >= 120 px, ", " back-steps, ",
                     " 0 given up" }),
@@ -1056,7 +1075,7 @@ void test_keep_distance_log() {
 // ------------------------------------------------------------------ facing
 
 void test_facing() {
-    section("Facing: with a style or keep_distance, a turn only when needed");
+    section("Facing: a turn only when needed, with a style or without");
 
     {
         Rig r(styled("near_wide"));
@@ -1105,9 +1124,10 @@ void test_facing() {
         b.w.mobs = { plate(700, 400, "Moc") };
         b.run(600);
         check(zero.facing_tolerance == 0 && a.w.taps(VK_RIGHT) == 1 && forty.facing_tolerance == 40 &&
-                  within == 0 && b.w.taps(VK_RIGHT) == 10,
+                  within == 0 && b.w.taps(VK_RIGHT) == 1,
               "facing_tolerance 0 and 40 from hunt.ini: a turn at 5 px with 0; none at 30 px with 40, "
-              "and, with no style, one a pass at 60 px as before");
+              "and, with no style, one at 60 px -- not one a pass, as it was -- " +
+                  std::to_string(b.w.taps(VK_RIGHT)));
     }
     {
         // Standing still with no style: a tap on every pass walked the
@@ -1203,12 +1223,14 @@ void test_engaged() {
         check(unfocused && !r.hunter.engaged(), "the game out of focus, and a stop: not fighting");
     }
     {
-        // No style: turned to it by a tap on every pass, as before -- fighting.
+        // No style: turned to it by one tap, as with one -- fighting, from
+        // where that tap walked the character: 21 px nearer.
         Rig r(HunterConfig{});
         r.w.mobs = { plate(700, 400, "Moc") };
         r.run(600);
-        check(r.hunter.engaged() && r.hunter.engaged_dx() == 60,
-              "with no style too: attacking and turned to it is fighting");
+        check(r.hunter.engaged() && r.hunter.engaged_dx() == 60 - 21,
+              "with no style too: attacking and turned to it is fighting -- " +
+                  std::to_string(r.hunter.engaged_dx()) + " px off");
     }
 }
 
@@ -1235,8 +1257,17 @@ void test_spot_keep_distance() {
         const std::vector<World::Press> steps = r.w.of(VK_RIGHT, 50);
         check(steps.size() == 1 && steps[0].hold == 113 && Hunter::backstep_ms(120, 80) == 169 &&
                   r.w.world_x == 4940,
-              "40 px from the area's right edge: the step back held 113 ms, as far as the edge, not 169 -- " +
+              "40 px from the area's right edge: the step back held 113 ms, as far as the edge, not 169 and the "
+              "turn's 60 -- " +
                   std::to_string(steps.empty() ? 0 : steps[0].hold) + " ms");
+        // The turn back to it walks the character 21 px in from the edge:
+        // room for a step of 59 ms, but the turn after that one would walk
+        // all of it back -- none, and the monster fought from there.
+        r.run(3000);
+        check(r.w.steps(VK_RIGHT) == 1 && r.w.taps(VK_LEFT) == 1 && r.w.world_x == 4919 && r.st().backsteps == 1 &&
+                  !r.w.of('Z').empty(),
+              "then one turn back, 21 px in from the edge: too little room for another step, so none -- " +
+                  std::to_string(r.w.steps(VK_RIGHT)) + " step(s), at world " + std::to_string(r.w.world_x));
     }
     {
         Rig r(keeping_spot(), false, true);
@@ -1301,7 +1332,8 @@ void test_spot_view_follows() {
 // ------------------------------------------------- what an old setup does
 
 void test_old_setup() {
-    section("An existing hunt.ini fights as before, until a style or keep_distance is chosen");
+    section("An existing hunt.ini fights as before, until a style or keep_distance is chosen -- but for the turn, "
+            "now only when needed");
 
     const std::string path = temp_path("gobot_old_hunt.ini");
     write_file(path,
@@ -1327,7 +1359,8 @@ void test_old_setup() {
           "saved without a change: every new key at what it was before, the band left unwritten");
 
     // The same scene on the old file and on no file at all: the same keys at
-    // the same moments, a face tap on every pass among them.
+    // the same moments -- one face tap among them, where there was one on
+    // every pass before the player asked for none.
     HunterConfig fresh;
     fresh.character_name = old.character_name;
     fresh.enabled = old.enabled;
@@ -1341,9 +1374,11 @@ void test_old_setup() {
     for (std::size_t i = 0; same && i < a.w.presses.size(); ++i)
         same = a.w.presses[i].vk == b.w.presses[i].vk && a.w.presses[i].hold == b.w.presses[i].hold &&
                a.w.presses[i].at == b.w.presses[i].at;
-    check(same && a.w.taps(VK_RIGHT) + a.w.taps(VK_LEFT) > 20 && a.st().backsteps == 0,
-          "the old file and the defaults press the same keys at the same moments, with a turn on "
-          "every pass and no step back");
+    check(same && a.w.taps(VK_RIGHT) == 1 && a.w.taps(VK_LEFT) == 0 && a.w.of('Z').size() > 10 &&
+              a.st().backsteps == 0,
+          "the old file and the defaults press the same keys at the same moments: one turn to the monster, "
+          "not one a pass, attacks all along, and no step back -- " +
+              std::to_string(a.w.taps(VK_RIGHT) + a.w.taps(VK_LEFT)) + " turns");
 
     // The new keys survive a round trip.
     HunterConfig set;

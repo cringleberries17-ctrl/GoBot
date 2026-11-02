@@ -1,5 +1,6 @@
 #include "gobot/command_executor.hpp"
 #include "gobot/common.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -253,6 +254,7 @@ bool CommandExecutor::held_by_pause() {
 // ------------------------------------------------------------- main dispatch
 
 void CommandExecutor::execution_loop() {
+    name_this_thread("executor");
     while (running_.load()) {
         Command cmd;
         {
@@ -445,6 +447,7 @@ std::vector<PathStep> CommandExecutor::current_path() const {
 }
 
 void CommandExecutor::pathfinding_loop() {
+    name_this_thread("executor path");
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
         if (!pathfinding_.load() || paused_.load()) continue;

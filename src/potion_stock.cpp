@@ -353,6 +353,10 @@ void PotionSettings::load(const IniFile& ini) {
     read_every_s = std::clamp(ini.get_int("Potions", "read_every_s", 10), kMinEvery, kMaxEvery);
 }
 
+int potion_pair_gap_ms(int read_period_ms) {
+    return std::max(kPotionPairGapMs, read_period_ms + kPotionPairSlackMs);
+}
+
 SlotReading PotionWatch::look_of(const SlotReading& first, const SlotReading& second) {
     if (first.same(second)) return second;
     SlotReading r = second;

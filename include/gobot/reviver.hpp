@@ -311,6 +311,10 @@ private:
     /// GoC's two corners, cut once from the panel's picture; empty without it.
     Frame anchor1_, anchor2_;
 
+    /// A turn's look, kept from turn to turn so that its 3 MB are grabbed
+    /// into again rather than made anew a little under once a second.
+    Frame turn_frame_;
+
     int  tries_ = 0;
     int  revived_ = 0;
     bool said_waiting_ = false;

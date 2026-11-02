@@ -4,7 +4,10 @@
 // swap chain, pump messages, draw. The application logic lives in GuiApp.
 
 #include "gui_app.hpp"
+#include "gobot/common.hpp"
 #include "gobot/dpi.hpp"
+#include "gobot/frame_pacer.hpp"
+#include "gobot/machine_info.hpp"
 #include "gobot/util.hpp"
 
 #include "imgui.h"
@@ -14,6 +17,7 @@
 #include <d3d11.h>
 #include <tchar.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <initializer_list>
 #include <string>
@@ -30,6 +34,19 @@ IDXGISwapChain*         g_swapchain = nullptr;
 ID3D11RenderTargetView* g_rtv = nullptr;
 bool                    g_occluded = false;
 UINT                    g_resize_w = 0, g_resize_h = 0;
+/// The device made, for GoBot's log ("GUI:"): create_device fills it.
+gobot::RendererInfo     g_renderer;
+/// What reached the window since the loop last looked, for the FramePacer:
+/// someone using it (gobot::is_interactive_message), and WM_PAINT. Noted in
+/// wnd_proc rather than in the loop's PeekMessageW, because much of it --
+/// activation, focus, size, the cursor, DPI -- is sent, not posted, and
+/// never comes out of the queue. All on this one thread.
+bool                    g_input = false;
+bool                    g_paint = false;
+/// A combo or popup was open at the end of the last frame.
+bool                    g_popup_open = false;
+
+void cleanup_device();
 
 void create_rtv() {
     ID3D11Texture2D* back = nullptr;
@@ -60,7 +77,7 @@ bool create_device(HWND hwnd) {
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
-    D3D_FEATURE_LEVEL got;
+    D3D_FEATURE_LEVEL got = D3D_FEATURE_LEVEL_10_0;
 
     HRESULT hr = D3D11CreateDeviceAndSwapChain(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
@@ -68,17 +85,59 @@ bool create_device(HWND hwnd) {
         &sd, &g_swapchain, &g_device, &got, &g_context);
 
     // Fall back to WARP: some VMs and remote sessions have no usable GPU, and
-    // a software device beats refusing to start.
-    if (hr == DXGI_ERROR_UNSUPPORTED) {
+    // a software device beats refusing to start. On any failure, not only
+    // DXGI_ERROR_UNSUPPORTED: a VM's 3D driver that is there but broken fails
+    // in other ways, and GoBot then would not start at all.
+    bool warp = false;
+    if (FAILED(hr)) {
+        cleanup_device();       // whatever the failed attempt left
         hr = D3D11CreateDeviceAndSwapChain(
             nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
             levels, 2, D3D11_SDK_VERSION,
             &sd, &g_swapchain, &g_device, &got, &g_context);
+        warp = SUCCEEDED(hr);
     }
     if (FAILED(hr)) return false;
 
     create_rtv();
+
+    // What was made, for the log: a VMware guest with no 3D gets the
+    // hardware device of the Basic Render Driver, which draws on the CPU just
+    // as WARP does, and every frame of this window is then the CPU's work.
+    g_renderer = gobot::RendererInfo{};
+    g_renderer.known = true;
+    g_renderer.warp = warp;
+    g_renderer.feature_level = static_cast<unsigned>(got);
+    g_renderer.swap_effect = "DISCARD";
+    IDXGIDevice* dxgi = nullptr;
+    if (SUCCEEDED(g_device->QueryInterface(IID_PPV_ARGS(&dxgi))) && dxgi) {
+        IDXGIAdapter* adapter = nullptr;
+        if (SUCCEEDED(dxgi->GetAdapter(&adapter)) && adapter) {
+            DXGI_ADAPTER_DESC desc{};
+            if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                g_renderer.adapter = gobot::wide_to_utf8(desc.Description);
+                g_renderer.vendor_id = desc.VendorId;
+                g_renderer.device_id = desc.DeviceId;
+                g_renderer.dedicated_mb = static_cast<std::uint64_t>(desc.DedicatedVideoMemory) / (1024u * 1024u);
+            }
+            adapter->Release();
+        }
+        dxgi->Release();
+    }
+    RECT client{};
+    if (GetClientRect(hwnd, &client)) {
+        g_renderer.client_w = client.right - client.left;
+        g_renderer.client_h = client.bottom - client.top;
+    }
     return true;
+}
+
+/// Waits up to `ms` for anything for this thread: input, or a message posted
+/// or sent. Input in the queue that was looked at but not taken counts too
+/// (MWMO_INPUTAVAILABLE), so a click never waits for the timeout.
+void wait_for_input(std::uint32_t ms) {
+    if (ms == 0) return;
+    MsgWaitForMultipleObjectsEx(0, nullptr, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
 }
 
 void cleanup_device() {
@@ -89,6 +148,9 @@ void cleanup_device() {
 }
 
 LRESULT WINAPI wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (gobot::is_interactive_message(msg)) g_input = true;
+    else if (msg == WM_PAINT) g_paint = true;
+
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
 
     switch (msg) {
@@ -294,6 +356,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     // itself into a bitmap, so frames come off the screen and anything covering
     // the game is read instead of it.
     app.set_main_window(hwnd);
+    // The device just made, for the start's "GUI:" line and light mode's
+    // look at the machine: GoBot's log opens only once it starts.
+    app.set_renderer(g_renderer);
     {
         const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
         app.initialise();
@@ -302,7 +367,25 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     const ImVec4 clear(0.06f, 0.06f, 0.07f, 1.00f);
     bool done = false;
 
+    // When a frame is drawn (gobot/frame_pacer.hpp), and what the loop did,
+    // counted for the Load line (GuiApp::LoopCounters).
+    gobot::FramePacer pacer;
+    gobot::GuiApp::LoopCounters& counters = app.loop_counters();
+    LARGE_INTEGER qpc_hz{};
+    QueryPerformanceFrequency(&qpc_hz);
+    const auto ms_since = [&qpc_hz](const LARGE_INTEGER& from) {
+        LARGE_INTEGER to{};
+        QueryPerformanceCounter(&to);
+        return qpc_hz.QuadPart > 0 ? static_cast<double>(to.QuadPart - from.QuadPart) * 1000.0 /
+                                         static_cast<double>(qpc_hz.QuadPart)
+                                   : 0.0;
+    };
+
     while (!done) {
+        // When this pass began: the pacer's wait is counted from here, so the
+        // loop comes round within FramePacer::kMaxWaitMs of it however long
+        // the pass took.
+        const std::uint64_t woke = gobot::now_ms();
         MSG msg;
         // The W versions, by name. The window is a Unicode one (RegisterClassExW,
         // CreateWindowW), but UNICODE is not defined, so the bare names were the
@@ -327,14 +410,51 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
             app.tick();
         }
+        ++counters.passes;
+
+        // How frames are paced, asked every pass: "Nhẹ máy" can be ticked
+        // meanwhile. With [Performance] gui_pacer=off, the loop as it was
+        // before the pacer: a frame every pass, held to the screen's refresh
+        // by vsync.
+        const gobot::GuiApp::Pacing pacing = app.pacing();
 
         // Minimised or fully covered: stop rendering, which is all that is
         // actually wasted when nobody can see the window.
         if (g_occluded && g_swapchain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
-            Sleep(10);
+            ++counters.occluded_skips;
+            if (pacing.pacer_on)
+                wait_for_input(gobot::FramePacer::tick_wait_ms(woke, gobot::now_ms()));
+            else
+                Sleep(10);
             continue;
         }
         g_occluded = false;
+
+        // Draw only when a frame is due. Whatever the answer, the pass above
+        // has run, and the wait below is never longer than
+        // FramePacer::kMaxWaitMs: the keys tick() reads are read as often at
+        // 1 frame a second as at 30.
+        if (pacing.pacer_on) {
+            gobot::FramePacer::Pass pass;
+            pass.now_ms = woke;
+            pass.input = g_input;
+            pass.paint = g_paint;
+            g_input = g_paint = false;
+            pass.foreground = GetForegroundWindow() == hwnd;
+            // Only with GoBot in front: ImGui keeps a text box active and a
+            // combo open when the window loses the focus, and one left so
+            // behind the game would hold the interactive rate for as long as
+            // the bot runs.
+            pass.want_interactive = pass.foreground && (pacing.want_interactive || io.WantTextInput ||
+                                                        g_popup_open || ImGui::IsAnyMouseDown());
+            pass.minimised = IsIconic(hwnd) != FALSE;
+            pass.redraw = app.take_redraw();
+            pass.rates = pacing.rates;
+            if (!pacer.decide(pass)) {
+                wait_for_input(pacer.wait_ms(gobot::now_ms()));
+                continue;
+            }
+        }
 
         if (g_resize_w != 0 && g_resize_h != 0) {
             release_rtv();
@@ -343,6 +463,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             create_rtv();
         }
 
+        LARGE_INTEGER built_from{};
+        QueryPerformanceCounter(&built_from);
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -353,18 +475,27 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
             app.draw();
         }
+        g_popup_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
 
         ImGui::Render();
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
         const float rgba[4] = { clear.x, clear.y, clear.z, clear.w };
         g_context->ClearRenderTargetView(g_rtv, rgba);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        const double build_ms = ms_since(built_from);
 
-        // vsync on: this is a control panel, not a game. Spinning the GPU at
-        // hundreds of frames a second would steal time from the machine
-        // running the actual game.
-        const HRESULT hr = g_swapchain->Present(1, 0);
+        // This is a control panel, not a game: spinning the GPU at hundreds of
+        // frames a second would steal time from the machine running the
+        // actual game. With the pacer, it sets the pace and Present does not
+        // wait for the screen; without it, vsync holds the loop to the
+        // screen's refresh.
+        LARGE_INTEGER presented_from{};
+        QueryPerformanceCounter(&presented_from);
+        const HRESULT hr = g_swapchain->Present(pacing.pacer_on ? 0 : 1, 0);
+        counters.frame(build_ms, ms_since(presented_from));
         g_occluded = (hr == DXGI_STATUS_OCCLUDED);
+
+        if (pacing.pacer_on) wait_for_input(pacer.wait_ms(gobot::now_ms()));
     }
 
     ImGui_ImplDX11_Shutdown();

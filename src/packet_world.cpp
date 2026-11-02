@@ -286,8 +286,20 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
     me.report_ms = t;
     me.kind = r->kind;
     // Only 0x0027, 0x0029 and 0x0028 say which way you face: a jump goes on
-    // the way you were facing.
-    if (r->facing != 0) me.facing = r->facing;
+    // the way you were facing. A 0x0027's is also kept apart, with its time
+    // -- what the hunter weighs against its own last key and turns the
+    // character by (WorldFix::facing). Only a 0x0027's: its facing byte is the
+    // one checked against the game (84 of 84), while what sends a 0x0029 is
+    // not settled and a 0x0028's facing is only assumed to be its flags' low
+    // byte -- good enough to follow a walk by, not to press a key over. A cast
+    // or a jump, saying nothing of it, leaves both as they were.
+    if (r->facing != 0) {
+        me.facing = r->facing;
+        if (r->kind == OwnReport::Move) {
+            me.said_facing = r->facing;
+            me.facing_ms = t;
+        }
+    }
     // A cast says nothing of how you move, so a walk goes on from where you
     // cast, at the speed it had.
     if (r->kind != OwnReport::Cast) me.speed = *r->speed;
@@ -361,6 +373,8 @@ PacketWorld::Taken PacketWorld::take_entry(const GamePacket& p) {
     me.report_x = me.x;
     me.report_y = me.y;
     me.facing = 0;
+    me.said_facing = 0;
+    me.facing_ms = 0;
     me.speed = 0.0f;
     me.moving = false;
     me.airborne = false;

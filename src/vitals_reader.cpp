@@ -1,6 +1,7 @@
 ﻿#include "gobot/vitals_reader.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -10,6 +11,7 @@
 #include <ctime>
 #include <map>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace gobot {
@@ -217,7 +219,14 @@ void VitalsReader::start() {
 }
 
 void VitalsReader::stop() {
-    if (!running_.exchange(false)) return;
+    {
+        // Under the wait's lock, so that the loop cannot look at running_ and
+        // then start its wait just after the wake-up below has gone: a wait
+        // of a second, or five, would hold whoever stops it that long.
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        if (!running_.exchange(false)) return;
+    }
+    wake_.notify_all();
     if (thread_.joinable()) thread_.join();
     hp_.store(-1.0f);
     mp_.store(-1.0f);
@@ -227,6 +236,28 @@ void VitalsReader::stop() {
         values_ = Vitals{};
     }
     GB_INFO("Vitals reader stopped");
+}
+
+void VitalsReader::set_period_ms(int ms) {
+    ms = std::clamp(ms, kMinPeriodMs, kMaxPeriodMs);
+    const int was = period_ms_.exchange(ms);
+    if (ms >= was) return;      // the same, asked again every pass; or longer, from the next wait
+    // From an idle pace to a run's: what was read before now is as old as the
+    // idle pace let it get (paced_from_ms). Stamped before the wake-up, so
+    // the read it wakes is stamped after it.
+    if (was >= 2 * ms) paced_from_ms_.store(now_ms());
+    {
+        // Under the wait's lock, as stop() does it: the loop either sees
+        // wake_now_ before it waits, or is waiting when the wake-up comes.
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        wake_now_ = true;
+    }
+    wake_.notify_all();
+}
+
+int VitalsReader::forget_after_misses(int period_ms) {
+    const int gap = std::max(1, period_ms);
+    return std::max(2, (kForgetAfterMs + gap - 1) / gap);
 }
 
 void VitalsReader::set_anchor(const Frame& anchor) {
@@ -526,17 +557,38 @@ float VitalsReader::measure(const Frame& f, const BarSpec& spec) {
 }
 
 void VitalsReader::loop() {
+    name_this_thread("vitals");
     ScreenCapture capture;
-    Frame frame;
+    capture.set_label("vitals");
+    // What the next grab fills: the frame before last, handed back by the swap
+    // that makes each new one frame_. The same two buffers over and over,
+    // rather than 3 MB copied into frame_ at every read.
+    Frame spare;
+    // This read's frame, as everything below reads it: frame_ itself, which
+    // only this thread writes -- under mutex_, for the threads that read it
+    // under mutex_ -- so this one reads it without the lock.
+    const Frame& frame = frame_;
 
     while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        {
+            // period_ms_ between reads, cut short by stop() and by a shorter
+            // period asked for (set_period_ms).
+            std::unique_lock<std::mutex> lock(wake_mutex_);
+            wake_.wait_for(lock, std::chrono::milliseconds(period_ms_.load()),
+                           [this] { return wake_now_ || !running_.load(); });
+            wake_now_ = false;
+        }
         if (!running_.load()) break;
 
         void* hwnd = hwnd_.load();
         if (!hwnd) continue;
 
-        if (!capture.grab(hwnd, frame)) {
+        // The figures forgotten, and the landmark looked for again, after as
+        // many reads without them as make about two seconds at the pace the
+        // reads are asked at now: twelve at 150 ms, as always.
+        const int forget_at = forget_after_misses(period_ms_.load());
+
+        if (!(grab_ ? grab_(hwnd, spare) : capture.grab(hwnd, spare))) {
             // The values stay as they were read last, and last_read_ms()
             // with them: whoever acts on them can tell how old they are.
             std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -551,7 +603,9 @@ void VitalsReader::loop() {
         bool recoloured = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            frame_ = frame;
+            // The new frame in, and the one it replaces out to be grabbed into
+            // next: `frame` is this one from here on.
+            std::swap(frame_, spare);
 
             // Find the landmark the first time, and again whenever the figures
             // have stopped being readable -- which is the only evidence that
@@ -567,10 +621,11 @@ void VitalsReader::loop() {
                 const bool on_slot = in_slot_frame(frame, hp_spec_.x, hp_spec_.y + hp_spec_.height / 2) ||
                                      in_slot_frame(frame, mp_spec_.x, mp_spec_.y + mp_spec_.height / 2);
                 const bool lost = !anchor_found_ ||
-                                  hp_misses_ >= kForgetAfterMisses ||
-                                  mp_misses_ >= kForgetAfterMisses || on_slot;
+                                  hp_misses_ >= forget_at ||
+                                  mp_misses_ >= forget_at || on_slot;
                 if (lost) {
                     const bool had = anchor_found_;
+                    load_meters().anchor_searches.fetch_add(1, std::memory_order_relaxed);
                     if (locate_anchor(frame, &recoloured) && !had)
                         GB_INFO("Vitals: HUD landmark at %d,%d -- bars at %d,%d and %d,%d",
                                 anchor_at_.x, anchor_at_.y,
@@ -644,7 +699,7 @@ void VitalsReader::loop() {
                         // a wrong reading usually looks wrong, but a stale one
                         // looks exactly like a working one. Given a few
                         // seconds of failure, say so instead.
-                        if (++bar.misses >= kForgetAfterMisses) {
+                        if (++bar.misses >= forget_at) {
                             bar.value = -1;
                             bar.max = -1;
                             bar.pending = -1;

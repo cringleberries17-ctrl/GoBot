@@ -471,7 +471,8 @@ const PopupSeen* PopupCloser::same(const PopupScene& scene, PopupKind want, cons
 
 PopupCloser::Turn PopupCloser::turn() {
     const std::uint64_t t = now();
-    Frame f;
+    // Grabbed into the same buffer turn after turn (turn_frame_).
+    Frame& f = turn_frame_;
     if (!grab_ || !grab_(f) || !f.valid()) {
         last_vi_ = "Không chụp được màn hình game.";
         return Turn::Blind;

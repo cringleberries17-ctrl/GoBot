@@ -166,6 +166,11 @@ TemplateStore keeper_pictures(const AutoLogin::Settings& for_these) {
 GuiApp::GuiApp() = default;
 
 GuiApp::~GuiApp() {
+    // The last Load line, over the time since the one before -- ten seconds
+    // of it at least -- while everything still runs as it ran.
+    if (performance_.load_log_s > 0 && load_last_.at_ms != 0 && now_ms() - load_last_.at_ms >= 10'000)
+        Logger::instance().write(LogLevel::Info, load_report(load_last_, load_snapshot(), "Load at exit"));
+
     // Everything that acts on the game, told at once and then waited for, as
     // F12 stops it (stop_jobs) -- the hunter and the macro waited for first,
     // not last: they went on pressing skills and potions into the game while
@@ -209,6 +214,8 @@ void GuiApp::join_pumping(std::thread& t) {
 }
 
 void GuiApp::initialise() {
+    // GoBot's own thread, the window's: it draws, and tick() reads the keys.
+    name_this_thread("gui");
     Logger::instance().set_ring_capacity(2000);
 
     // A windowed app has no console, so stderr goes nowhere. Without a file
@@ -246,6 +253,12 @@ void GuiApp::initialise() {
     // Which matcher is live. Linked statically, so there is no DLL in the
     // build folder to see it by, and "no DLLs" looks exactly like "not used".
     GB_INFO("Template matching: %s", TemplateMatcher::backend().c_str());
+
+    // How GoBot's own window is drawn and what kind of PC this is, said once,
+    // and light mode ("Nhẹ máy") worked out from them: a VMware guest, or a
+    // PC with no real graphics card, draws every frame of this window on its
+    // CPU, beside the game. A tester's log then says which it was.
+    load_performance(app_ini);
 
     app_config_.load(exe_relative("configs/app.ini"));
     bot_config_.load(exe_relative(app_config_.bot_config_path));
@@ -526,8 +539,22 @@ void GuiApp::tick() {
         if (keys.hunt) toggle_hunt();
     }
 
-    if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
+    if (hunting_ && hunter_ && !hunter_->running()) {
+        hunting_ = false;
+        // The hunter ended by itself: its eyes go with it, as at F11, unless
+        // something else still looks through them.
+        release_detector();
+    }
     simple_track_run(simple_running());
+    // HP and MP at the run's pace while anything that acts on them, or
+    // presses a key, is alive, and at vitals_idle_ms -- a second -- once
+    // nothing is: 6.7 grabs a second down to 1 with GoBot open and idle.
+    // Every start sets the run's pace itself, before its thread can press
+    // anything (vitals_for_job); this keeps it, and lets it go. The same
+    // period asked again changes nothing.
+    vitals_.set_period_ms(any_job_alive() ? vitals_run_period() : performance_.vitals_idle_ms);
+    // The full screen's FIND THE BARS, once a frame read after its click is in.
+    full_find_bars_tick();
     // A calibration that has ended by itself -- finished, or given up when the
     // game lost focus -- lets its hold go, and its thread is joined.
     if (calib_held_ && calibrator_ && !calibrator_->running()) stop_calibration();
@@ -638,6 +665,15 @@ void GuiApp::tick() {
     positions_tick();       // the capture for positions, and its log line
 
     if (detector_running_) {
+        // The camera tracker fed only while something uses it (camera_wanted):
+        // afresh from the frame it is given again, not from where it was left.
+        const bool feed = camera_wanted();
+        if (feed != camera_fed_) {
+            camera_fed_ = feed;
+            if (feed) camera_.reset();
+            detector_.set_camera(feed ? &camera_ : nullptr);
+        }
+
         // A new map invalidates everything about where we were: the old level's
         // scenery has nothing to do with the new one's, and carrying a position
         // across would put every saved place a map's width out.
@@ -753,7 +789,14 @@ void GuiApp::tick() {
         // potion back as above its mark, and fill the black box with an HP
         // nobody read (R8R-3). The macro holds a potion on no reading. The
         // pet's HP, off the same frames, likewise.
-        const std::uint64_t read_at = vitals_.last_read_ms(), at = now_ms();
+        //
+        // And no reading from a read taken before a job cut the pace from
+        // vitals_idle_ms to the run's (paced_from_ms): up to a second old,
+        // it would pass as fresh, and a potion due at the macro's first look
+        // drinks on an HP the player has since drunk back up. The read the
+        // job woke lands tens of ms on.
+        const std::uint64_t last = vitals_.last_read_ms();
+        const std::uint64_t read_at = last >= vitals_.paced_from_ms() ? last : 0, at = now_ms();
         if (from_packets)
             macro_->set_vitals(
                 packets.hp >= 0.0f ? packets.hp
@@ -796,6 +839,8 @@ void GuiApp::tick() {
 
     auto_step();
     check_framing_health();
+    // Last: the Load line, once every [Performance] load_log_s seconds.
+    load_tick();
 }
 
 void GuiApp::check_framing_health() {
@@ -832,8 +877,167 @@ void GuiApp::check_framing_health() {
 }
 
 void GuiApp::set_status(const std::string& msg, std::uint32_t ms) {
+    // Shown at once, though nobody is touching the window (the panic key's
+    // line, pressed in the game): a frame for it. Not for the same line said
+    // again while it shows, which some callers do on every tick.
+    if (msg != status_message_ || now_ms() >= status_until_ms_) request_redraw();
     status_message_ = msg;
     status_until_ms_ = now_ms() + ms;
+}
+
+// =========================================================================
+//                       HOW HEAVY GOBOT IS ON THE PC
+// =========================================================================
+
+void GuiApp::load_performance(const IniFile& app_ini) {
+    performance_ = performance_settings(app_ini);
+    machine_ = read_machine(renderer_);
+    light_signals_ = judge_machine(machine_);
+    light_ = resolve_light_mode(performance_.light, light_signals_);
+    GB_INFO("%s", describe_renderer(renderer_).c_str());
+    GB_INFO("%s", describe_machine(machine_, light_signals_, performance_.light, light_).c_str());
+    // The pace in use, not only the setting: never slower than vitals_idle_ms
+    // (vitals_run_period), so 500 with vitals_idle_ms=300 reads every 300 ms,
+    // as the Load line says.
+    std::string run = performance_.vitals_run_ms == 0 ? "auto (" + std::to_string(vitals_run_period()) + ")"
+                                                      : std::to_string(performance_.vitals_run_ms);
+    if (performance_.vitals_run_ms != 0 && vitals_run_period() != performance_.vitals_run_ms)
+        run += " (" + std::to_string(vitals_run_period()) + " in use)";
+    GB_INFO("Performance: gui_pacer %s, vitals_idle_ms %d, vitals_run_ms %s, load_log_s %d",
+            performance_.gui_pacer ? "on" : "off", performance_.vitals_idle_ms, run.c_str(), performance_.load_log_s);
+    // Light mode never asks PrintWindow again of a window this session has
+    // seen refuse it (PrintWindowVerdicts).
+    print_window_verdicts().set_light(light_.on);
+}
+
+bool GuiApp::any_job_alive() const {
+    // One-shot passes count: a "Dọn ngay", a shop's purchase, a "Gửi thử", a
+    // quest round each watch HP while they hold the potions off, and the
+    // keeper's "Vào game ngay" presses keys. Whatever presses a key goes at
+    // the run's pace; so does "Tự tìm", which takes the next frame.
+    const bool autopilot = auto_stage_ != Auto::Idle && auto_stage_ != Auto::Done && auto_stage_ != Auto::Failed;
+    return simple_running() || macro_running_ || (macro_ && macro_->running()) || hunting_ || party_running_ ||
+           revive_running_ || popups_running() || keeper_running_ || trash_running_ || chat_running_ ||
+           quest_running_ || simple_find_bars_ || full_find_bars_ || coord_.critical_active() || jump_test_running() ||
+           bot_running_ || autopilot || (calibrator_ && calibrator_->running()) ||
+           (navigator_ && navigator_->running());
+}
+
+int GuiApp::vitals_run_period() const {
+    // Never slower than with nothing running: vitals_idle_ms=150, "as before",
+    // with light mode's 250 would read faster idle than in a fight.
+    return std::min(gobot::vitals_run_period(performance_.vitals_run_ms, light_.on), performance_.vitals_idle_ms);
+}
+
+void GuiApp::vitals_for_job() { vitals_.set_period_ms(vitals_run_period()); }
+
+GuiApp::Pacing GuiApp::pacing() const {
+    Pacing p;
+    p.pacer_on = performance_.gui_pacer;
+    p.rates = light_.on ? FramePacer::light_rates() : FramePacer::normal_rates();
+    // Waiting on the player: a key box listens for its key, and "Tự tìm"
+    // and FIND THE BARS finish on a frame (simple_checklist,
+    // full_find_bars_tick), so they get the interactive rate for as long as
+    // they last.
+    p.want_interactive = simple_listening_ != 0 || simple_find_bars_ || full_find_bars_;
+    return p;
+}
+
+void GuiApp::load_tick() {
+    // How long since the pass before: the keys are read once a pass, so a gap
+    // over two of Windows' clock ticks is a quick tap of F12 that could have
+    // gone unseen. A clock read a pass.
+    const std::uint64_t at = load_clock_us();
+    if (load_pass_at_us_ != 0 && at > load_pass_at_us_) {
+        const double gap_ms = static_cast<double>(at - load_pass_at_us_) / 1000.0;
+        if (gap_ms > load_pass_gap_max_ms_) load_pass_gap_max_ms_ = gap_ms;
+        if (gap_ms > kLatePassMs) ++load_passes_late_;
+    }
+    load_pass_at_us_ = at;
+
+    const int every_s = performance_.load_log_s;
+    if (every_s <= 0) return;
+    // This is the thread that reads F12, so nothing between two lines but a
+    // clock read; the line itself is a lock, a GetThreadTimes per named
+    // thread and a few cheap queries (take_load_snapshot), once a minute.
+    if (load_last_.at_ms != 0 && now_ms() - load_last_.at_ms < static_cast<std::uint64_t>(every_s) * 1000u) return;
+    LoadSnapshot now = load_snapshot();
+    // Written whole, not through GB_INFO, whose line stops at 2 KB.
+    if (load_last_.at_ms != 0) Logger::instance().write(LogLevel::Info, load_report(load_last_, now));
+    load_last_ = std::move(now);
+}
+
+LoadSnapshot GuiApp::load_snapshot() {
+    LoadSnapshot s;
+    take_load_snapshot(s);
+
+    s.gui = true;
+    LoopCounters& loop = loop_counters_;
+    s.passes = loop.passes;
+    s.pass_gap_max_ms = load_pass_gap_max_ms_;
+    s.passes_late = load_passes_late_;
+    load_pass_gap_max_ms_ = 0.0;
+    s.frames = loop.frames;
+    s.occluded_skips = loop.occluded_skips;
+    s.build_ms = loop.build_ms;
+    s.build_max_ms = loop.build_max_ms;
+    s.present_ms = loop.present_ms;
+    s.present_max_ms = loop.present_max_ms;
+    loop.build_max_ms = 0.0;
+    loop.present_max_ms = 0.0;
+
+    s.vitals_running = vitals_running_;
+    s.vitals_reads = vitals_.stats().reads;
+    s.vitals_period_ms = vitals_.period_ms();
+    s.detector_running = detector_running_;
+    s.detector_frames = detector_.stats().frames;
+    s.capture_running = capture_.running();
+    const PacketCapture::Stats packets = capture_.stats();
+    s.packets = packets.packets_seen;
+    s.pcap_dropped = packets.pcap_dropped;
+
+    s.jobs = load_jobs();
+    s.tab = simple_view_ ? simple_tab_shown_ : "Nâng cao";
+    s.light = light_.on;
+    return s;
+}
+
+std::string GuiApp::load_jobs() const {
+    std::string out;
+    const auto add = [&out](bool on, const char* name) {
+        if (!on) return;
+        if (!out.empty()) out += '+';
+        out += name;
+    };
+    add(hunting_, "hunt");
+    add(macro_running_, "macro");
+    add(bot_running_, "packet bot");
+    add(party_running_, "party");
+    add(revive_running_, "revive");
+    add(popups_running(), "popups");
+    add(keeper_running_, keeper_oneshot_ ? "keeper(once)" : "keeper");
+    add(trash_running_, trash_oneshot_ ? "trash(once)" : "trash");
+    add(chat_running_, chat_oneshot_ ? "chat(once)" : "chat");
+    add(quest_running_, quest_oneshot_ ? "quest(once)" : "quest");
+    add(navigator_ && navigator_->running(), "walk");
+    add(simple_find_bars_ || full_find_bars_, "find bars");
+    add(coord_.critical_active(), "hold");
+    return out;
+}
+
+bool GuiApp::take_redraw() {
+    // A job started or stopped however it happened -- F10, F11 or F12 with
+    // the game in front, which sends GoBot's window nothing, or a worker that
+    // ended by itself -- shows on the next frame, not at the background
+    // rate's.
+    const unsigned jobs = (hunting_ ? 1u : 0u) | (macro_running_ ? 2u : 0u) | (party_running_ ? 4u : 0u) |
+                          (keeper_running_ ? 8u : 0u) | (revive_running_ ? 16u : 0u) |
+                          (trash_running_ ? 32u : 0u) | (chat_running_ ? 64u : 0u) | (quest_running_ ? 128u : 0u) |
+                          (popups_running() ? 256u : 0u) | (bot_running_ ? 512u : 0u);
+    const bool changed = jobs != redraw_jobs_;
+    redraw_jobs_ = jobs;
+    const bool asked = redraw_.exchange(false);
+    return asked || changed;
 }
 
 // =========================================================================
@@ -1861,13 +2065,23 @@ void GuiApp::draw_party_panel() {
     ImGui::Dummy(ImVec2(0, 4));
 
     const std::string path = exe_relative("configs/party.ini");
-    Party::Settings rules;
-    if (!rules.load(path)) {
+    // Read again when the file changes -- the simple screen's Tổ đội tab and
+    // a text editor write it too -- rather than on every frame the panel is
+    // open (gobot/file_watch.hpp). What this panel writes, it forgets below,
+    // so the next frame reads it back as before.
+    if (party_panel_watch_.due(path)) {
+        Party::Settings fresh;
+        party_panel_have_ = fresh.load(path);
+        if (party_panel_have_) party_panel_rules_ = std::move(fresh);
+        else                   party_panel_watch_.retry();
+    }
+    if (!party_panel_have_) {
         ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
         ImGui::Text("No %s yet.", path.c_str());
         ImGui::PopStyleColor();
         return;
     }
+    Party::Settings& rules = party_panel_rules_;
 
     bool changed = false;
     bool accept = rules.auto_accept;
@@ -1914,6 +2128,7 @@ void GuiApp::draw_party_panel() {
                                   rules.use_blacklist ? "true" : "false") &&
             IniFile::set_in_place(path, "Chat", "keyword", rules.magic_word);
         if (!wrote) set_status("Could not write " + path, 6000);
+        party_panel_watch_.forget();
         if (party_running_)
             set_status("Changed. Switch Auto party off and on to pick it up.", 6000);
     }
@@ -1951,11 +2166,18 @@ void GuiApp::draw_keeper_panel() {
         "answering, or put up a message box?");
     ImGui::Dummy(ImVec2(0, 6));
 
-    IniFile ini;
+    // Both files read again when they change, not on every frame the panel is
+    // open (gobot/file_watch.hpp): the simple screen writes app.ini at every
+    // switch, and a person writes both by hand.
     const std::string path = exe_relative("configs/app.ini");
-    ini.load(path);
-    CrashWatch::Settings s;
-    s.load(ini);
+    if (keeper_panel_app_watch_.due(path)) {
+        IniFile ini;
+        if (!ini.load(path)) keeper_panel_app_watch_.retry();
+        CrashWatch::Settings fresh;
+        fresh.load(ini);
+        keeper_panel_crash_ = fresh;
+    }
+    const CrashWatch::Settings& s = keeper_panel_crash_;
 
     ImGui::Text("Watching   %s, and %s behind it",
                 s.game_process.c_str(), s.launcher_process.c_str());
@@ -1970,9 +2192,13 @@ void GuiApp::draw_keeper_panel() {
     ImGui::Dummy(ImVec2(0, 6));
 
     // With no file, the table that ships, which the keeper writes out.
-    AutoLogin::Settings login;
-    login.load(exe_relative("configs/login.ini"));
-    const bool can_login = login.unidentified().empty();
+    const std::string login_path = exe_relative("configs/login.ini");
+    if (keeper_panel_login_watch_.due(login_path)) {
+        AutoLogin::Settings login;
+        if (!login.load(login_path)) keeper_panel_login_watch_.retry();
+        keeper_panel_can_login_ = login.unidentified().empty();
+    }
+    const bool can_login = keeper_panel_can_login_;
     if (!can_login) {
         ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
         ImGui::TextWrapped(
@@ -2845,6 +3071,7 @@ bool GuiApp::focus_game_to_start(const char* what) {
 }
 
 void GuiApp::start_macro() {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     if (macro_running_) return;
     if (!input_.window_valid()) {
         set_status("Pick the game window first -- the list is at the top of this tab", 6000);
@@ -2917,27 +3144,77 @@ void GuiApp::stop_vitals() {
     if (macro_) macro_->set_vitals(-1.0f, -1.0f, -1.0f);
 }
 
+void GuiApp::full_find_bars_tick() {
+    if (!full_find_bars_) return;
+    // The first frame the reader has read since the click, which asked for a
+    // read at once (vitals_for_job) -- as "Tự tìm" does. The full screen keeps
+    // find_bars' fallback, the topmost red and blue anywhere: its panel shows
+    // the bars it took, and tells the player to check them before a Save.
+    Frame frame;
+    if (vitals_.last_read_ms() >= full_find_bars_since_ms_ && vitals_.latest_frame(frame) && frame.valid()) {
+        full_find_bars_ = false;
+        BarSpec hp_found = macro_config_.hp_bar;
+        BarSpec mp_found = macro_config_.mp_bar;
+        const int n = VitalsReader::find_bars(frame, hp_found, mp_found);
+        if (n == 0) {
+            set_status("Could not find either bar -- is the game visible and "
+                       "not covered by this window?", 8000);
+        } else {
+            macro_config_.hp_bar = hp_found;
+            macro_config_.mp_bar = mp_found;
+            apply_vitals_config();
+            char msg[128];
+            std::snprintf(msg, sizeof(msg),
+                          "Found %d bar%s -- check the percentages against the game",
+                          n, n == 1 ? "" : "s");
+            set_status(msg, 7000);
+        }
+    } else if (now_ms() - full_find_bars_since_ms_ > 4000) {
+        full_find_bars_ = false;
+        set_status("Could not get a fresh picture of the game -- is it visible, and is "
+                   "the HP/MP reader running?", 8000);
+    }
+}
+
 // ------------------------------------------------------------------ parties
 
+// A worker's line, like set_status's, asks for a frame: with the game in front
+// GoBot draws at the background rate, a frame a second in light mode, and the
+// line would wait for it. request_redraw is an atomic store, safe from any
+// thread; the pacer holds asked-for frames to the interactive rate, so a
+// chatty worker cannot draw more than that.
 void GuiApp::say_party(const std::string& line) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    party_log_.push_back(line);
-    if (party_log_.size() > 200) party_log_.erase(party_log_.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        party_log_.push_back(line);
+        if (party_log_.size() > 200) party_log_.erase(party_log_.begin());
+    }
+    request_redraw();
 }
 
 void GuiApp::say_keeper(const std::string& line) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    keeper_log_.push_back(line);
-    if (keeper_log_.size() > 200) keeper_log_.erase(keeper_log_.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        keeper_log_.push_back(line);
+        if (keeper_log_.size() > 200) keeper_log_.erase(keeper_log_.begin());
+    }
+    request_redraw();
 }
 
 void GuiApp::say_keeper_vi(const std::string& now, const std::string& problem) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    keeper_vi_ = now;
-    if (!problem.empty()) keeper_problem_vi_ = problem;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        // Said again on every poll of a crossing: a frame only for new words.
+        changed = now != keeper_vi_ || (!problem.empty() && problem != keeper_problem_vi_);
+        keeper_vi_ = now;
+        if (!problem.empty()) keeper_problem_vi_ = problem;
+    }
+    if (changed) request_redraw();
 }
 
 void GuiApp::start_party() {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     if (party_running_) return;
     if (!input_.window_valid()) {
         set_status("Pick the game window first", 6000);
@@ -2969,6 +3246,7 @@ void GuiApp::stop_party(bool wait) {
 /// thread: an invitation costs several seconds of clicking and waiting for the
 /// client to catch up.
 void GuiApp::party_loop() {
+    name_this_thread("party");
     const std::string config = exe_relative("configs/party.ini");
 
     // Never on the code's own defaults. A file that cannot be read says
@@ -3028,6 +3306,7 @@ void GuiApp::party_loop() {
                   "that need no name will be answered.");
 
     ScreenCapture capture;
+    capture.set_label("party");
     PartyInvite answering;
     answering.set_settings(accept_geometry);
     PartyChat chat;
@@ -3055,6 +3334,10 @@ void GuiApp::party_loop() {
     std::string answered;
     std::string refused;            // the dialog last left alone, and why
     std::uint64_t rules_read_ms = now_ms();
+    // One look this pass, taken afresh each pass; kept across them so that
+    // its frame's 3 MB are grabbed into again rather than made anew at up to
+    // 6.7 looks a second (take_party_look keeps the buffer).
+    PartyLook look;
 
     while (!party_stop_) {
         // Pick up changes made while it runs. The simple screen writes the
@@ -3086,7 +3369,6 @@ void GuiApp::party_loop() {
         // the game was all in view is asked right before the grab and right
         // after it, not when the look is read -- a second or more later, an
         // invitation answered meanwhile (simple_party.cpp, take_party_look).
-        PartyLook look;
         if (!input_.window_valid() ||
             !take_party_look(party_sight(capture, input_.target_window()), look)) {
             nap(500);
@@ -3313,6 +3595,7 @@ void GuiApp::party_loop() {
 // -------------------------------------------------------- keeping it alive
 
 void GuiApp::start_keeper(bool oneshot) {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     // A keeper started for "Vào game ngay" alone becomes the run's own.
     if (keeper_running_) {
         if (!oneshot) keeper_oneshot_ = false;
@@ -3359,6 +3642,7 @@ void GuiApp::stop_keeper(bool wait) {
 
 /// Notice the client has fallen over, end it, and cross back in.
 void GuiApp::keeper_loop() {
+    name_this_thread("keeper");
     IniFile app_ini;
     app_ini.load(exe_relative("configs/app.ini"));
     CrashWatch::Settings watch_settings;
@@ -3690,12 +3974,16 @@ bool GuiApp::reattach_game() {
 // ----------------------------------------------------------------- reviving
 
 void GuiApp::say_revive(const std::string& line) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    revive_log_.push_back(line);
-    if (revive_log_.size() > 200) revive_log_.erase(revive_log_.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        revive_log_.push_back(line);
+        if (revive_log_.size() > 200) revive_log_.erase(revive_log_.begin());
+    }
+    request_redraw();       // shown at once, as say_party's
 }
 
 void GuiApp::start_revive() {
+    vitals_for_job();       // HP and MP at the run's pace before any click
     if (revive_running_) return;
     join_pumping(revive_thread_);
     revive_stop_ = false;
@@ -3721,6 +4009,7 @@ void GuiApp::stop_revive(bool wait) {
 /// walking would be worse. When the tries run out the player's rule is that
 /// the bot stops; tick() does that, since stopping joins this thread.
 void GuiApp::revive_loop() {
+    name_this_thread("revive");
     const auto tell = [this](const std::string& line) {
         GB_INFO("Revive: %s", line.c_str());
         say_revive(line);
@@ -3736,6 +4025,7 @@ void GuiApp::revive_loop() {
         return;
     }
     ScreenCapture capture;
+    capture.set_label("revive");
     const auto grab = [&](Frame& f) {
         return input_.window_valid() && capture.grab(input_.target_window(), f) && f.valid();
     };
@@ -3862,12 +4152,16 @@ void GuiApp::stop_after_revive() {
 // ------------------------------------------------------------ trash cleaning
 
 void GuiApp::say_trash(const std::string& line) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    trash_log_.push_back(line);
-    if (trash_log_.size() > 200) trash_log_.erase(trash_log_.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        trash_log_.push_back(line);
+        if (trash_log_.size() > 200) trash_log_.erase(trash_log_.begin());
+    }
+    request_redraw();       // shown at once, as say_party's
 }
 
 void GuiApp::start_trash() {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     if (trash_running_) {
         trash_oneshot_ = false;          // a one-off pass in progress becomes a run
         return;
@@ -3880,6 +4174,7 @@ void GuiApp::start_trash() {
 }
 
 void GuiApp::request_trash(bool look_only) {
+    vitals_for_job();       // a one-shot pass watches HP too: at the run's pace before any key
     trash_request_ = look_only ? 2 : 1;
     if (trash_running_) return;
     join_pumping(trash_thread_);
@@ -3890,6 +4185,7 @@ void GuiApp::request_trash(bool look_only) {
 }
 
 void GuiApp::request_charms() {
+    vitals_for_job();       // a one-shot pass watches HP too: at the run's pace before any key
     trash_request_ = 3;
     if (trash_running_) return;
     join_pumping(trash_thread_);
@@ -3900,6 +4196,7 @@ void GuiApp::request_charms() {
 }
 
 void GuiApp::request_shop(bool dry) {
+    vitals_for_job();       // a one-shot pass watches HP too: at the run's pace before any key
     trash_request_ = dry ? 5 : 4;
     if (trash_running_) return;
     join_pumping(trash_thread_);
@@ -3978,6 +4275,7 @@ bool GuiApp::bin_looks_clear(const TemplateStore& store, std::string* why) {
         return no("Không có hình giao diện của game, nên không xem được hộp thoại của thùng rác "
                   "đã đóng chưa.");
     ScreenCapture capture;
+    capture.set_label("bag");
     Frame frame;
     if (!input_.window_valid() || !capture.grab(input_.target_window(), frame) || !frame.valid())
         return no("Chưa chụp được màn hình game để xem hộp thoại của thùng rác đã đóng chưa. Để "
@@ -4165,6 +4463,7 @@ bool GuiApp::stop_jobs(bool with_bot) {
 /// hunter walking off with the bag open drags it out of reach, and a potion key
 /// pressed while a quantity box has the keyboard types a number into it.
 void GuiApp::trash_loop() {
+    name_this_thread("trash");
     // What the worker says for itself goes to the log as well as the screen;
     // what the cleaner reports it logs on its own.
     const auto tell = [this](const std::string& line) {
@@ -4187,6 +4486,7 @@ void GuiApp::trash_loop() {
     ItemCatalog catalog;
     catalog.load(ItemCatalog::default_dir());
     ScreenCapture capture;
+    capture.set_label("trash");
     const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
 
     // Kept from one look at the file to the next, and replaced only by a
@@ -4583,6 +4883,7 @@ void GuiApp::trash_loop() {
         // ScreenCapture::set_screen_only.
         ScreenCapture shop_capture;
         shop_capture.set_screen_only(true);
+        shop_capture.set_label("shop");
         const auto shop_grab = [&](Frame& f) { return shop_capture.grab(input_.target_window(), f); };
         BagCleaner cleaner(input_, store, shop_grab);
         cleaner.set_settings(settings);
@@ -4811,6 +5112,7 @@ void GuiApp::trash_loop() {
         // (ScreenCapture::set_screen_only, PrintWindowPause below).
         ScreenCapture pass_capture;
         pass_capture.set_screen_only(true);
+        pass_capture.set_label("bag");
         const auto pass_grab = [&](Frame& f) { return pass_capture.grab(input_.target_window(), f); };
         BagCleaner cleaner(input_, store, pass_grab);
         cleaner.set_settings(settings);
@@ -4972,12 +5274,16 @@ std::string bar_numbers(const ChatBar& bar) {
 } // namespace
 
 void GuiApp::say_chat(const std::string& line) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    chat_log_.push_back(line);
-    if (chat_log_.size() > 200) chat_log_.erase(chat_log_.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        chat_log_.push_back(line);
+        if (chat_log_.size() > 200) chat_log_.erase(chat_log_.begin());
+    }
+    request_redraw();       // shown at once, as say_party's
 }
 
 void GuiApp::start_chat() {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     {
         // A worker here already -- for a one-off look or line, or stopping
         // because Tự chat was unticked and waiting to see the chat line shut
@@ -5009,6 +5315,7 @@ void GuiApp::start_chat() {
 }
 
 void GuiApp::request_chat(bool send_one) {
+    vitals_for_job();       // "Gửi thử" watches HP too: at the run's pace before any key
     {
         std::lock_guard<std::mutex> lock(chat_life_mutex_);
         if (chat_running_ && !chat_quit_) {
@@ -5113,6 +5420,7 @@ bool GuiApp::chat_line_looks_shut(const TemplateStore& store, int looks, std::st
     if (!can_look_for_chat(store, settings))
         return no("Không có hình ô chat của game, nên không biết ô chat trong game đã đóng chưa.");
     ScreenCapture capture;
+    capture.set_label("chat");
     for (int i = 0; i < looks; ++i) {
         // A frame or two apart: one odd frame does not decide it.
         if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -5175,6 +5483,7 @@ void GuiApp::watch_chat_doubt() {
 /// with it shut the line's own letters are skill keys. And held off for as
 /// long after as the line may still be open: until a look shows it shut.
 void GuiApp::chat_loop() {
+    name_this_thread("chat");
     const auto tell = [this](const std::string& line) {
         GB_INFO("Chat: %s", line.c_str());
         say_chat(line);
@@ -5232,6 +5541,7 @@ void GuiApp::chat_loop() {
     // seen, which puts a line off and keeps a doubt, never the other way.
     ScreenCapture capture;
     capture.set_screen_only(true);
+    capture.set_label("chat");
     const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
 
     // Each reason for waiting said once a minute at most, not every look.
@@ -5828,7 +6138,15 @@ GuiApp::FrameView GuiApp::draw_frame_region(const Frame& f, int x0, int y0,
     int step = 1;
     while ((static_cast<long long>(w) / step) * (h / step) > kRectBudget) ++step;
 
-    for (int y = 0; y < h; y += step) {
+    // And nothing at all where it cannot be seen. Dọn rác's catalog lays out
+    // every icon of every group -- a thousand-odd rects each -- and plotted
+    // all of them on every frame, scrolled into view or not. Only the
+    // plotting is skipped: the button below is made all the same, with the
+    // same id and size, so the layout, the clicks and the tooltips are what
+    // they were, and so is what this returns.
+    const bool visible = ImGui::IsRectVisible(ImVec2(w * scale, h * scale));
+
+    for (int y = 0; visible && y < h; y += step) {
         int run_start = 0;
         std::uint32_t run_col = 0;
         bool have_run = false;
@@ -6047,24 +6365,15 @@ void GuiApp::draw_vitals_panel() {
     // The one button that should be enough. Typing eight coordinates is the
     // step that makes this hard to use, and a bar is a shape a machine can
     // recognise: a long flat run of one saturated colour.
-    ImGui::BeginDisabled(!have_frame);
-    if (ImGui::Button("FIND THE BARS", ImVec2(200, 32))) {
-        BarSpec hp_found = macro_config_.hp_bar;
-        BarSpec mp_found = macro_config_.mp_bar;
-        const int n = VitalsReader::find_bars(frame, hp_found, mp_found);
-        if (n == 0) {
-            set_status("Could not find either bar -- is the game visible and "
-                       "not covered by this window?", 8000);
-        } else {
-            macro_config_.hp_bar = hp_found;
-            macro_config_.mp_bar = mp_found;
-            apply_vitals_config();
-            char msg[128];
-            std::snprintf(msg, sizeof(msg),
-                          "Found %d bar%s -- check the percentages against the game",
-                          n, n == 1 ? "" : "s");
-            set_status(msg, 7000);
-        }
+    //
+    // Searched on a frame read after the click (full_find_bars_tick), not on
+    // this one: up to a second old while nothing runs (vitals_idle_ms), maybe
+    // grabbed while this window still covered the game. The time first.
+    ImGui::BeginDisabled(!have_frame || full_find_bars_);
+    if (ImGui::Button(full_find_bars_ ? "FINDING..." : "FIND THE BARS", ImVec2(200, 32))) {
+        full_find_bars_since_ms_ = now_ms();
+        vitals_for_job();
+        full_find_bars_ = true;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -6339,7 +6648,12 @@ void GuiApp::start_detector() {
     detector_.set_target_window(input_.target_window());
     detector_.set_tuning(detect_tuning_);
     detector_.set_minimap(&minimap_);
-    detector_.set_camera(&camera_);
+    // The camera tracker only while a walk or the full screen's Radar and
+    // movement panels use it (camera_wanted): its search over every frame is
+    // most of the detector's CPU, and nothing on the simple screen reads it.
+    // tick() feeds it from the moment one does; reset below either way.
+    camera_fed_ = camera_wanted();
+    detector_.set_camera(camera_fed_ ? &camera_ : nullptr);
 
     // Read the name plates rather than guessing at them, when the game's own
     // font is available to read them with. Loaded once, on the first start.
@@ -6514,6 +6828,8 @@ void GuiApp::save_places() {
 }
 
 void GuiApp::draw_movement_section() {
+    // Open: the camera tracker is fed, and the detector kept (camera_wanted).
+    camera_panel_frame_ = ImGui::GetFrameCount();
     const CameraTracker::Fix fx = camera_.fix();
     const std::uint64_t map = minimap_.fingerprint();
 
@@ -6671,6 +6987,7 @@ void GuiApp::draw_movement_section() {
 }
 
 void GuiApp::draw_map_section() {
+    camera_panel_frame_ = ImGui::GetFrameCount();     // open (camera_panels_open)
     const std::uint64_t fp = minimap_.fingerprint();
 
     // Pick up the stored name when the map changes under us.
@@ -6725,13 +7042,37 @@ void GuiApp::draw_map_section() {
 
 void GuiApp::stop_detector() {
     if (!detector_running_) return;
+    // Marked stopped first. The hunt's end below lets the detector go by
+    // itself (release_detector), and finds it stopped already: it is stopped
+    // once, here, and never through a call of this from in there.
+    detector_running_ = false;
+    detector_by_player_ = false;
     stop_hunt();                  // nothing to hunt with the eyes shut
     if (navigator_) navigator_->stop();   // nor anywhere to walk to
     detector_.stop();
-    detector_running_ = false;
+}
+
+void GuiApp::release_detector() {
+    if (!detector_running_ || detector_wanted()) return;
+    GB_INFO("Mob detector: nothing looks through it now -- stopped until the next hunt or look");
+    stop_detector();
+}
+
+bool GuiApp::detector_wanted() const {
+    return hunting_ || detector_by_player_ || monster_look_running() || jump_test_running() ||
+           (navigator_ && navigator_->running()) || camera_panels_open();
+}
+
+bool GuiApp::camera_wanted() const {
+    return (navigator_ && navigator_->running()) || camera_panels_open();
+}
+
+bool GuiApp::camera_panels_open() const {
+    return ImGui::GetCurrentContext() != nullptr && camera_panel_frame_ + 1 >= ImGui::GetFrameCount();
 }
 
 void GuiApp::start_hunt() {
+    vitals_for_job();       // HP and MP at the run's pace before any key
     if (hunting_) return;
     spot_refused_vi_.clear();
     if (!input_.window_valid()) {
@@ -6802,6 +7143,10 @@ void GuiApp::stop_hunt() {
     hunter_->stop();
     hunting_ = false;
     stop_position_capture();
+    // And its eyes, unless something else still looks through them: the
+    // detector's 7 grabs a second, and its CPU, went on to the end of the
+    // session after the first F11. Quick: its wait is cut short as it stops.
+    release_detector();
 }
 
 void GuiApp::toggle_hunt() {
@@ -7448,6 +7793,8 @@ void GuiApp::draw_hunt_settings() {
 }
 
 void GuiApp::draw_radar_panel() {
+    // Open: the detector kept after a hunt, and the camera fed (camera_panels_open).
+    camera_panel_frame_ = ImGui::GetFrameCount();
     ImGui::TextWrapped(
         "Finds monsters by their name plates. Every creature on screen wears a "
         "dark name box with a red health bar under it; players have a blue mana "
@@ -7462,7 +7809,13 @@ void GuiApp::draw_radar_panel() {
     ImGui::PushStyleColor(ImGuiCol_Button, detector_running_ ? kRed : kGreen);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
     if (ImGui::Button(detector_running_ ? "STOP WATCHING" : "START WATCHING", ImVec2(190, 34))) {
-        if (detector_running_) stop_detector(); else start_detector();
+        if (detector_running_) {
+            stop_detector();
+        } else {
+            start_detector();
+            // The player's: it watches on after a hunt ends, until STOP WATCHING.
+            detector_by_player_ = detector_running_;
+        }
     }
     ImGui::PopStyleColor(2);
 
@@ -10183,7 +10536,10 @@ void GuiApp::draw_log_panel() {
     ImGui::SameLine();
     ImGui::Checkbox("Auto-scroll", &log_autoscroll_);
     ImGui::SameLine();
-    if (ImGui::Button("Clear")) Logger::instance().clear_ring();
+    if (ImGui::Button("Clear")) {
+        Logger::instance().clear_ring();
+        log_copied_ = false;        // shown empty at once, not up to 250 ms later
+    }
     ImGui::SameLine();
     if (ImGui::Button("Verbose logging"))
         Logger::instance().set_level(LogLevel::Debug);
@@ -10192,17 +10548,57 @@ void GuiApp::draw_log_panel() {
     ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_HorizontalScrollbar);
 
-    const auto lines = Logger::instance().ring();
-    for (const auto& l : lines) {
-        if (static_cast<int>(l.level) < log_level_filter_) continue;
-        ImVec4 col = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
-        if (l.level == LogLevel::Warn)  col = kAmber;
-        if (l.level == LogLevel::Error) col = kRed;
-        if (l.level == LogLevel::Debug || l.level == LogLevel::Trace) col = kDim;
-        ImGui::PushStyleColor(ImGuiCol_Text, col);
-        ImGui::TextUnformatted(l.text.c_str());
-        ImGui::PopStyleColor();
+    // The ring copied again only when a line has gone into it -- or it was
+    // cleared -- and no more than four times a second. It used to be copied
+    // whole on every frame, up to 2000 lines under the mutex every logging
+    // thread waits on, and every one of them drawn whether in view or not.
+    // The count is read before the copy: a line landing between the two is
+    // in the copy, and only makes the next frame copy once more.
+    Logger& logs = Logger::instance();
+    const std::uint64_t seq = logs.ring_sequence();
+    const std::uint64_t now = now_ms();
+    if (!log_copied_ || (seq != log_copied_seq_ && now - log_copied_ms_ >= kLogCopyGapMs)) {
+        log_copied_ = true;
+        log_copied_seq_ = seq;
+        log_copied_ms_ = now;
+        log_copy_ = logs.ring();
+        log_rows_level_ = -1;
     }
+    // One row for each line of each kept line that passes the filter: rows of
+    // one height, so the clipper can skip straight to the ones in view.
+    if (log_rows_level_ != log_level_filter_) {
+        log_rows_level_ = log_level_filter_;
+        log_rows_.clear();
+        for (std::size_t i = 0; i < log_copy_.size(); ++i) {
+            if (static_cast<int>(log_copy_[i].level) < log_level_filter_) continue;
+            const std::string& text = log_copy_[i].text;
+            std::size_t begin = 0;
+            for (;;) {
+                const std::size_t nl = text.find('\n', begin);
+                const std::size_t end = nl == std::string::npos ? text.size() : nl;
+                log_rows_.push_back({ i, begin, end });
+                if (nl == std::string::npos) break;
+                begin = nl + 1;
+            }
+        }
+    }
+
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(log_rows_.size()));
+    while (clipper.Step()) {
+        for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+            const LogRow& row = log_rows_[static_cast<std::size_t>(r)];
+            const LogLine& l = log_copy_[row.line];
+            ImVec4 col = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
+            if (l.level == LogLevel::Warn)  col = kAmber;
+            if (l.level == LogLevel::Error) col = kRed;
+            if (l.level == LogLevel::Debug || l.level == LogLevel::Trace) col = kDim;
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::TextUnformatted(l.text.data() + row.begin, l.text.data() + row.end);
+            ImGui::PopStyleColor();
+        }
+    }
+    clipper.End();
 
     if (log_autoscroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
         ImGui::SetScrollHereY(1.0f);

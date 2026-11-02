@@ -3,6 +3,7 @@
 #include "gobot/screen_capture.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -184,8 +185,14 @@ public:
     void set_camera(CameraTracker* c) { camera_.store(c); }
 
     void start();
+    /// Returns at once, give or take a look under way: the wait between two
+    /// looks is cut short (wake_). It is GoBot's own thread that stops it, at
+    /// every F11, DỪNG and F12.
     void stop();
     bool running() const { return running_.load(); }
+
+    /// The wait between two looks.
+    static constexpr int kLookGapMs = 140;
 
     /// Monsters, nearest first (nearest_first) from your own character: from
     /// its plate in this frame, or, while that is covered for a moment, from
@@ -318,6 +325,9 @@ private:
     std::atomic<const GlyphFont*> font_{nullptr};
     std::atomic<bool>             running_{false};
     std::thread                   thread_;
+    /// What cuts the wait between looks short: stop().
+    std::mutex                    wake_mutex_;
+    std::condition_variable       wake_;
     std::atomic<MinimapTracker*> minimap_{nullptr};
     std::atomic<CameraTracker*>  camera_{nullptr};
     std::function<bool(void*, Frame&)> grab_;   ///< see set_grab; empty for the real window

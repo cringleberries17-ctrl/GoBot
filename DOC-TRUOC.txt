@@ -128,6 +128,72 @@ chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2
 Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
 khác chưa được thử trên game thật.
 
+- Mới trong bản 2026.11.02c (đánh quái, chưa thử trên game thật):
+  + Nhân vật không còn nhích lên từng chút khi đang bắn. Với mọi Kiểu
+    đánh, kể cả "Như trước", GoBot chỉ quay người khi nhân vật chưa quay
+    về phía quái. Trước đây "Như trước" bấm mũi tên về phía quái mỗi lần
+    đánh, và mỗi lần nhân vật bước vào thêm một chút.
+  + Lần quay giữ phím 60 ms. Game bỏ lỡ phím đó thì GoBot bấm lại sau
+    0,5 giây. Khi có dấu "Vị trí từ gói tin", GoBot biết nhân vật đang
+    quay về hướng nào nhờ gói tin của game, nên ít quay thừa hơn.
+  + Dòng "Hunter:" mỗi phút trong gobot_gui.log ghi thêm số lần quay
+    ("turns"), số lần gói tin sửa lại hướng, và số phím game bỏ lỡ.
+  + Nên đặt Tầm đánh tối đa đúng tầm bắn thật của nhân vật (bắn xa
+    khoảng nửa màn hình game thì khoảng 450). Nếu tung kỹ năng làm nhân
+    vật đứng lại giữa lúc đi, đánh dấu "Chỉ khi đang đánh quái".
+- Mới trong bản 2026.11.02b (GoBot nhẹ máy hơn): bot vẫn đánh quái, bơm
+  máu, buff và nghe F10, F11, F12 như cũ.
+  + Cửa sổ GoBot chỉ vẽ lại khi cần: ngay khi bạn bấm chuột hay gõ phím vào
+    nó, rồi tối đa 30 lần mỗi giây lúc bạn đang dùng, 5 lần mỗi giây khi
+    GoBot ở trên cùng mà không ai đụng tới, 2 lần mỗi giây khi game (hay
+    cửa sổ khác) ở trên cùng, và không vẽ gì khi GoBot bị thu nhỏ. Trước
+    đây GoBot vẽ lại liên tục, khoảng 60 lần mỗi giây.
+  + Lúc không chạy gì, GoBot đọc HP/MP mỗi giây một lần, thay vì 6-7 lần
+    mỗi giây. Khi có việc đang chạy (bot, Dọn ngay, Gửi thử, Tự tìm...)
+    GoBot vẫn đọc mỗi 0,15 giây như cũ (0,25 giây khi bật Nhẹ máy). Lúc
+    bấm BẮT ĐẦU, GoBot đọc HP/MP ngay rồi mới bấm bình hay kỹ năng đầu
+    tiên (chờ tối đa 0,5 giây), không dùng số đọc từ lúc rảnh.
+  + Dừng đánh quái (DỪNG LẠI, F11 hay F12) thì GoBot thôi nhận diện quái
+    trên màn hình. Trước đây phần này chạy mãi tới khi tắt GoBot.
+  + GoBot ít thử cách chụp hình game bằng PrintWindow hơn (game này từ chối
+    cách đó, GoBot đọc thẳng từ màn hình): mỗi cửa sổ chỉ thử lại 5 phút
+    một lần, thay vì liên tục.
+  + Mỗi phút gobot_gui.log có một dòng "Load:" (và một dòng nữa khi tắt
+    GoBot) ghi GoBot đang làm máy nặng cỡ nào: CPU, số lần vẽ cửa sổ, số
+    lần chụp hình game, bộ nhớ... Khi máy nặng hay giật, hãy gửi file này
+    kèm khi báo lỗi.
+  + Ô mới "Nhẹ máy (máy ảo / máy yếu)", ngay dưới ô "Luôn đưa game lên
+    trước khi bot đang chạy". Khi có dấu: cửa sổ GoBot vẽ lại ít hơn nữa
+    (20, 3 và 1 lần mỗi giây thay vì 30, 5 và 2), GoBot không thử lại
+    PrintWindow với cửa sổ game đã từ chối, và khi bot chạy GoBot đọc HP/MP
+    mỗi 0,25 giây thay vì 0,15 giây. Lúc đầu ô này ở chế độ tự động: GoBot
+    tự đánh dấu khi thấy máy ảo VMware hoặc máy không có card đồ hoạ thật,
+    và ghi lý do bằng chữ mờ ngay dưới ô (dòng "Machine:" ở đầu
+    gobot_gui.log ghi GoBot đã thấy gì). Bạn bấm vào ô thì GoBot làm theo
+    lựa chọn của bạn từ đó về sau; muốn trở lại tự động, sửa light_mode=auto
+    trong phần [Simple] của configs\app.ini.
+  + Phần [Performance] mới trong configs\app.ini (thường không cần sửa;
+    sửa xong thì tắt rồi mở lại GoBot): gui_pacer=on (off: vẽ cửa sổ liên
+    tục như bản cũ), vitals_idle_ms=1000 (bao nhiêu mili giây đọc HP/MP một
+    lần khi không chạy gì, 150 tới 5000; 150 là như bản cũ), vitals_run_ms=0
+    (khi bot chạy; 0 là GoBot tự chọn 150, hoặc 250 khi bật Nhẹ máy; số
+    khác từ 100 tới 1000; không chậm hơn vitals_idle_ms), load_log_s=60
+    (bao nhiêu giây ghi một dòng "Load:", 10 tới 3600; 0 là không ghi).
+- Nếu chạy GoBot trong máy ảo VMware:
+  + Bấm BẮT ĐẦU rồi thu nhỏ cửa sổ GoBot xuống thanh tác vụ: lúc thu nhỏ
+    GoBot không vẽ gì, mà trong game vẫn dùng được F10, F11 và F12.
+  + Đừng để cửa sổ nào che game, kể cả GoBot. Màn hình máy ảo nên đủ rộng
+    để đặt game và GoBot cạnh nhau (khoảng 2000x1080); không đủ thì thu nhỏ
+    GoBot như trên.
+  + Lúc bot chạy, đừng để mở thẻ Dọn rác hay Tự đăng nhập, và đừng mở thẻ
+    Log, Radar hay phần xem HP/MP ở màn hình Nâng cao: đó là các thẻ nặng.
+  + Cài đặt máy ảo: 2 nhân CPU (4 nếu máy thật có từ 8 luồng trở lên, đừng
+    cho máy ảo hết nhân của máy thật), RAM ít nhất 4 GB, VMware Tools bản
+    mới nhất. Thử một lần bật, một lần tắt "Accelerate 3D graphics" (phần
+    Display) xem lần nào mượt hơn.
+  + Vẫn nặng hay giật: để bot chạy khoảng 10 phút rồi gửi gobot_gui.log
+    (có các dòng "Load:" và dòng "Machine:"), ghi thêm máy ảo có mấy nhân,
+    bao nhiêu RAM, 3D bật hay tắt.
 - Mới trong bản 2026.11.02 (đánh quái):
   + Chỗ đánh quái (ô mới trên dòng Tự đánh quái, mặc định không có dấu,
     thử nghiệm): bot chỉ đi tới quái trong một vùng quanh chỗ đánh quái

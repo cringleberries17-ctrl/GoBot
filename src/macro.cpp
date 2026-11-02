@@ -1,6 +1,7 @@
 #include "gobot/macro.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 
 #include <algorithm>
@@ -1017,6 +1018,22 @@ void MacroEngine::arm(std::uint64_t now) {
         if (k.conditional() && k.enabled && k.keycode != 0 && k.interval_ms != 0) potions = true;
     potion_since_provisional_ = potions && config_.timers_enabled;
     potion_waiting_since_.store(potion_since_provisional_ ? std::max<std::uint64_t>(now, 1) : 0);
+    // Nor is a reading pushed before the start taken: one read at the idle
+    // pace (vitals_idle_ms) is up to a second old, pushed on as fresh every
+    // frame, and the first look comes 10 ms in -- an HP potion due at BẮT ĐẦU
+    // drank on an HP the player had since drunk back up. The caller's next
+    // push is of a read the start woke (VitalsReader::set_period_ms), waited
+    // for -- kStartReadMs at most -- by each of HP, MP and the pet's HP that
+    // had a reading. One that had none, a bar never found or no pet out, is
+    // not: nothing says one is coming.
+    const std::uint64_t pushed = vit_at_ms_.load();
+    const bool fresh = pushed != 0 && now >= pushed && now - pushed <= kVitalsStaleMs;
+    start_unread_[0] = fresh && vit_hp_.load() >= 0.0f;
+    start_unread_[1] = fresh && vit_mp_.load() >= 0.0f;
+    start_unread_[2] = fresh && vit_pet_.load() >= 0.0f;
+    const bool wait = potion_since_provisional_ && (start_unread_[0] || start_unread_[1] || start_unread_[2]);
+    start_read_until_.store(wait ? now + kStartReadMs : 0);
+    vit_at_ms_.store(0);
     // So are the skills that follow the fight; their minute starts on the
     // first pass.
     skill_look_ms_ = 0;
@@ -1323,7 +1340,10 @@ void MacroEngine::pause_ms(std::uint32_t ms) {
 
 bool MacroEngine::potion_first(std::uint64_t now) const {
     const std::uint64_t since = potion_waiting_since_.load();
-    return since != 0 && now < since + kPotionFirstMs;
+    if (since != 0 && now < since + kPotionFirstMs) return true;
+    // Or the start, waiting for HP and MP read afresh (arm).
+    const std::uint64_t until = start_read_until_.load();
+    return until != 0 && now < until;
 }
 
 bool MacroEngine::potion_cooled(const MacroKey& k, int s, float v, std::uint64_t now,
@@ -1360,6 +1380,13 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
     if (count) potion_count_ms_ = now + kGatePollMs;
 
     bool restart = false;     // refused as every key is: the wait begins again
+    // At a start, HP, MP or the pet's HP not read afresh yet is the read the
+    // start woke, tens of ms on (arm): waited for, as a potion due on it would
+    // be (start_read_until_) -- and no key held or boxed for no reading
+    // meanwhile, or every start showed "held: no HP/MP reading".
+    const std::uint64_t until = start_read_until_.load();
+    const bool start_wait = until != 0 && now < until;
+    bool unread = false;
     for (std::size_t n = 0; n < std::size(kPotionKinds); ++n) {
         const MacroKeyKind kind = kPotionKinds[n];
         PotionKind& pk = potion_kind_[n];
@@ -1431,6 +1458,7 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
         float hp_now, mp_now, pet_now;
         current_vitals(hp_now, mp_now, pet_now);
         const float v = kind == MacroKeyKind::HpPotion ? hp_now : kind == MacroKeyKind::MpPotion ? mp_now : pet_now;
+        if (v >= 0.0f) start_unread_[n] = false;
         const int chosen = macro_urgent_potion(cfg.keys, kind, v);
         const auto id_of = [&](std::size_t i) { return i < pass_ids_.size() ? pass_ids_[i] : 0; };
         std::uint64_t held_condition = 0, held_no_reading = 0, held_tier = 0;
@@ -1446,6 +1474,10 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
                 cooled = potion_cooled(k, s, v, now, cfg.potion_urgent_ms);
             }
             const Gate g = check_gate(k, v);
+            if (g == Gate::NoReading && start_wait && start_unread_[n]) {
+                unread = true;
+                continue;
+            }
             // Counted as before: only for a key that would otherwise have
             // been free to drink.
             if (g == Gate::NoReading)              { if (cooled) ++held_no_reading; }
@@ -1572,6 +1604,8 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
     else if (restart || potion_since_provisional_ || potion_waiting_since_.load() == 0)
         potion_waiting_since_.store(std::max<std::uint64_t>(now, 1));
     potion_since_provisional_ = false;
+    // All the start waited for read afresh, or the wait over.
+    if (!unread) start_read_until_.store(0);
 
     // The minute's line, on every pass that looks at the potions: a pass that
     // goes no further -- a potion waiting -- still writes it.
@@ -1579,6 +1613,7 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
 }
 
 void MacroEngine::timer_loop() {
+    name_this_thread("macro timer");
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if (!running_.load()) break;
@@ -1605,6 +1640,7 @@ void MacroEngine::run_timers(std::uint64_t now) {
         // sequence either.
         potion_waiting_since_.store(0);
         potion_since_provisional_ = false;
+        start_read_until_.store(0);
         return;
     }
 
@@ -1946,6 +1982,7 @@ void MacroEngine::log_skills(std::uint64_t now) {
 }
 
 void MacroEngine::sequence_loop_fn() {
+    name_this_thread("macro sequence");
     while (running_.load()) {
         const std::uint32_t wait = sequence_turn(clock_now());
         // Sleep in slices so stopping is responsive even behind a long delay.

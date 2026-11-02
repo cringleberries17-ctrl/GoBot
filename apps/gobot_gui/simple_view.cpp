@@ -400,12 +400,14 @@ void GuiApp::draw_simple_view() {
     // whichever of them is switched on. A dot on a tab says it is running.
     ImGui::Dummy(ImVec2(0, 4));
     if (ImGui::BeginTabBar("##simpletabs")) {
-        const auto tab = [](const char* name, bool running, const char* id) {
+        const auto tab = [this](const char* name, bool running, const char* id) {
             std::string text = name;
             if (running) text += "  ●";
             text += "###";
             text += id;
-            return ImGui::BeginTabItem(text.c_str());
+            const bool open = ImGui::BeginTabItem(text.c_str());
+            if (open) simple_tab_shown_ = name;     // for the Load line
+            return open;
         };
         if (tab("Đánh quái", macro_running_ || hunting_ || revive_running_, "fight")) {
             ImGui::Dummy(ImVec2(0, 4));
@@ -662,9 +664,12 @@ void GuiApp::simple_checklist() {
             ImGui::SameLine();
             ImGui::BeginDisabled(simple_find_bars_);
             if (ImGui::Button(simple_find_bars_ ? "Đang tìm…" : "Tự tìm")) {
+                // A frame read at once, at the run's pace (vitals_for_job),
+                // and searched once it has been read: the time first.
+                simple_find_bars_since_ms_ = now_ms();
+                vitals_for_job();
                 if (!vitals_running_) start_vitals();
                 simple_find_bars_ = true;
-                simple_find_bars_since_ms_ = now_ms();
             }
             ImGui::EndDisabled();
             ImGui::Indent(mark_indent());
@@ -673,11 +678,14 @@ void GuiApp::simple_checklist() {
             ImGui::Unindent(mark_indent());
         }
 
-        // The search runs on the first frame the reader has, since the button
-        // may have been what started it.
+        // The search runs on the first frame the reader has read since the
+        // button -- which may have been what started it, and asked for a read
+        // at once -- not on one from before it: up to a second old while
+        // nothing runs (vitals_idle_ms), with the game maybe still covered.
         if (simple_find_bars_) {
             Frame frame;
-            if (vitals_.latest_frame(frame) && frame.valid()) {
+            if (vitals_.last_read_ms() >= simple_find_bars_since_ms_ && vitals_.latest_frame(frame) &&
+                frame.valid()) {
                 simple_find_bars_ = false;
                 BarSpec hp_found = macro_config_.hp_bar;
                 BarSpec mp_found = macro_config_.mp_bar;
@@ -1354,6 +1362,7 @@ void GuiApp::simple_start_block() {
                               "vào game. Bỏ chọn khi cần dùng máy lúc bot chạy.\nBấm vào một ô phím để "
                               "đổi phím thì GoBot chờ bạn nhấn phím tối đa 10 giây (máu dưới mức của bình HP, "
                               "hoặc 50%% nếu cao hơn, thì đưa game lên ngay để bình được bấm).");
+        simple_light_row();
         ImGui::PopFont();
     }
 
@@ -1719,6 +1728,8 @@ void GuiApp::simple_start_jobs() {
     // The tallies start here, before anything can press a key, rather than
     // when the tick next notices the bot is running.
     simple_track_run(true);
+    // And HP and MP at the run's pace, likewise (vitals_for_job).
+    vitals_for_job();
 
     // The reader first. Every potion rule depends on it, and so does knowing
     // that the character has left the world and the keys should hold.
@@ -1816,6 +1827,9 @@ void GuiApp::simple_changed() {
 }
 
 void GuiApp::simple_note(const std::string& msg, std::uint32_t ms) {
+    // A frame for it at once, though nobody is touching the window -- a key
+    // pressed in the game -- and the window is drawn a few times a second.
+    if (msg != simple_note_ || now_ms() >= simple_note_until_ms_) request_redraw();
     simple_note_ = msg;
     simple_note_until_ms_ = now_ms() + ms;
 }
@@ -1834,6 +1848,44 @@ void GuiApp::save_simple_option(const char* key, bool value) {
     if (!IniFile::set_in_place(exe_relative("configs/app.ini"), "Simple", key,
                                value ? "true" : "false"))
         simple_note("Không lưu được cài đặt vào configs/app.ini.", 8000);
+}
+
+void GuiApp::save_simple_option(const char* key, const char* value) {
+    if (!IniFile::set_in_place(exe_relative("configs/app.ini"), "Simple", key, value))
+        simple_note("Không lưu được cài đặt vào configs/app.ini.", 8000);
+}
+
+void GuiApp::set_light_mode(bool on) {
+    // The player's choice from now on, whatever "auto" saw: on a VM hidden
+    // from the game's anti-cheat nothing may give it away, and a fast PC
+    // with a VM's name may want every frame.
+    performance_.light = on ? LightSetting::On : LightSetting::Off;
+    light_ = resolve_light_mode(performance_.light, light_signals_);
+    // PrintWindow not asked again of a window refused this session, or asked
+    // every 5 minutes again (PrintWindowVerdicts). The HP/MP reader's pace
+    // follows at the next tick.
+    print_window_verdicts().set_light(light_.on);
+    save_simple_option("light_mode", light_setting_name(performance_.light));
+    GB_INFO("Light mode %s by the player (light_mode=%s)", on ? "on" : "off", light_setting_name(performance_.light));
+}
+
+void GuiApp::simple_light_row() {
+    bool light = light_.on;
+    if (ImGui::Checkbox("Nhẹ máy (máy ảo / máy yếu)", &light)) set_light_mode(light);
+    ImGui::SetItemTooltip("%s",
+                          "Cho máy ảo (VMware) và máy yếu: cửa sổ GoBot vẽ lại ít lần hơn (20, 3 và 1 lần mỗi giây\n"
+                          "thay vì 30, 5 và 2), và GoBot không thử lại cách chụp hình mà game đã từ chối.\n"
+                          "Máy đỡ nặng, đỡ giật.\n"
+                          "Bot vẫn đánh quái, bơm máu và nghe phím tắt như thường; khi bot chạy, HP/MP được đọc\n"
+                          "mỗi 0,25 giây thay vì 0,15 giây.\n"
+                          "Lúc đầu GoBot tự bật ô này khi thấy máy ảo VMware hoặc máy không có card đồ hoạ thật.\n"
+                          "Bạn bấm vào ô thì GoBot làm theo lựa chọn của bạn từ đó về sau.");
+    // Why it is on when nobody ticked it: the player may wonder.
+    if (light_.by_auto && !light_.why_vi.empty()) {
+        ImGui::Indent(mark_indent());
+        hint(light_.why_vi.c_str());
+        ImGui::Unindent(mark_indent());
+    }
 }
 
 bool GuiApp::keeper_crossing() {
@@ -1927,7 +1979,9 @@ void GuiApp::keep_game_in_front() {
     // counts is whether Windows took the request: a game slow to come forward
     // comes forward by itself, and that is no refusal.
     bool accepted = false;
+    const std::uint64_t focus_from = load_clock_us();
     input_.focus_window(InputManager::kFocusMinMs, &accepted);
+    load_meters().front_focus.add_since(focus_from);   // the Load line's tries, and how long this thread was held
     front_keeper_.tried(accepted, now);
     // Tried with a box waiting -- its hold over, or GoBot not in front -- the
     // keyboard has left GoBot, or never was there: answered or not, the game
@@ -2504,6 +2558,7 @@ void GuiApp::simple_trash_tab() {
             simple_store_.load_best(exe_relative("configs/templates.ini"));
         }
         ScreenCapture capture;
+        capture.set_label("bag");
         Frame frame;
         if (!capture.grab(input_.target_window(), frame) || !frame.valid()) {
             simple_note("Không chụp được màn hình game.", 7000);
@@ -2889,6 +2944,10 @@ void GuiApp::simple_login_look() {
     // Counted from when the last one began, so an answer that waited while
     // the tab was not up is followed by a fresh look at once.
     if (login_seen_.done && now_ms() - login_looked_ms_ < 4000) return;
+    // Nor while GoBot is minimised: nobody is reading the tab, and each look
+    // is two lists of the running programs and a picture of VTCZone. The
+    // first frame back starts one.
+    if (main_hwnd_ != nullptr && IsIconic(static_cast<HWND>(main_hwnd_))) return;
     login_looked_ms_ = now_ms();
 
     // One look at a time, so the pictures loaded here are only ever the
@@ -2910,7 +2969,11 @@ void GuiApp::simple_login_look() {
         if (!SessionManager::process_running("VTCZone.exe")) {
             out.vtczone = VtcZone::NotRunning;
         } else if (void* hwnd = AutoLogin::window_of(login, AutoLogin::On::Publisher)) {
-            ScreenCapture capture;
+            // The same capture every look (login_capture_), so what it and
+            // the process have learnt of VTCZone's window -- PrintWindow
+            // refused, say -- is not asked again from scratch every 4 s.
+            ScreenCapture& capture = login_capture_;
+            capture.set_label("login look");
             Frame frame;
             if (capture.grab(hwnd, frame)) {
                 AutoLogin::Publisher seen = AutoLogin::look_at_publisher(frame, login_store_, login);
@@ -2937,23 +3000,36 @@ void GuiApp::simple_login_tab() {
     simple_ui::trial_line(simple_ui::kTrialLogin);
     const std::string path = exe_relative("configs/login.ini");
 
-    // Read every time, as the full screen does: the command line tool and a
-    // person with a text editor write this file too.
+    // Read again whenever it changes: the command line tool and a person with
+    // a text editor write this file too. Not on every frame, though, as it
+    // was -- some 14 KB of pages and comments parsed sixty times a second for
+    // as long as the tab was open. Its last-write time is asked once a second
+    // (gobot/file_watch.hpp), and the tab's own writes below forget the copy,
+    // so the next frame shows them.
     //
     // With no file at all, the one that ships is written out, so there is a
     // file to pick a channel in and to put right by hand. Once, until there is
     // a file again, so a folder that cannot be written to is not tried every
     // frame -- and only when there is truly none: a file that is there and
-    // will not open for a moment is the player's, and is never replaced.
-    AutoLogin::Settings login;
-    bool have = login.load(path);
-    if (have) {
-        login_file_tried_ = false;
-    } else if (!login_file_tried_ && AutoLogin::Settings::file_missing(path)) {
-        login_file_tried_ = true;
-        have = login.save(path);
-        if (have) GB_INFO("Wrote %s with the pages that ship", path.c_str());
+    // will not open for a moment is the player's, and is never replaced. Not
+    // read, it is tried again a second later.
+    if (login_tab_watch_.due(path)) {
+        AutoLogin::Settings fresh;
+        bool loaded = fresh.load(path);
+        if (loaded) {
+            login_file_tried_ = false;
+        } else if (!login_file_tried_ && AutoLogin::Settings::file_missing(path)) {
+            login_file_tried_ = true;
+            loaded = fresh.save(path);
+            if (loaded) GB_INFO("Wrote %s with the pages that ship", path.c_str());
+        }
+        if (!loaded) login_tab_watch_.retry();
+        login_tab_ = std::move(fresh);
+        login_tab_have_ = loaded;
+        login_tab_launcher_ms_ = 0;      // where VTCZone is, asked again below
     }
+    AutoLogin::Settings& login = login_tab_;
+    const bool have = login_tab_have_;
 
     if (!begin_card("##login")) { end_card(); return; }
     heading(strong_font_, "Tự vào lại game");
@@ -3015,6 +3091,7 @@ void GuiApp::simple_login_tab() {
                                                  AutoLogin::Settings{}.save(path))) &&
                                        IniFile::set_in_place(path, "Login", key, i);
                     if (!wrote) simple_note("Không lưu được configs/login.ini.", 8000);
+                    login_tab_watch_.forget();      // the next frame shows what is in the file now
                 }
                 ImGui::EndCombo();
             }
@@ -3037,8 +3114,17 @@ void GuiApp::simple_login_tab() {
         ImGui::Unindent(mark_indent());
     };
 
-    login.adopt_running_launcher(false);     // seen running elsewhere: that one
-    const bool launcher_ok = login.launcher_found();
+    // Where VTCZone is: a look at the disk, so once a second and straight
+    // after the file was read, not every frame. adopt_running_launcher only
+    // goes by what the look (simple_login_look) last saw running; it asks no
+    // process itself.
+    const std::uint64_t asked_ms = now_ms();
+    if (login_tab_launcher_ms_ == 0 || asked_ms - login_tab_launcher_ms_ >= FileWatch::kGapMs) {
+        login_tab_launcher_ms_ = asked_ms;
+        login.adopt_running_launcher(false);     // seen running elsewhere: that one
+        login_tab_launcher_ok_ = login.launcher_found();
+    }
+    const bool launcher_ok = login_tab_launcher_ok_;
     mark(launcher_ok ? Mark::Good : Mark::Bad);
     ImGui::SameLine();
     label(launcher_ok ? "Đã thấy VTCZone" : "Không thấy VTCZone");

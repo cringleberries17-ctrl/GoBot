@@ -101,6 +101,15 @@ Built move_frame(float x, float y, float speed, int facing, std::uint32_t id = k
     return f;
 }
 
+/// 0x0031: a skill cast of yours, where you cast it in whole pixels -- and
+/// nothing of which way you face.
+Built cast_frame(std::uint16_t x, std::uint16_t y) {
+    Built f(0x0031, 92);
+    f.u32(8, kId); f.u32(12, kId);
+    f.u16(16, x); f.u16(18, y); f.u32(20, 51102);
+    return f;
+}
+
 /// 0x0086 from the server: you enter (map, area) at its spawn point.
 Built entry_frame(std::uint16_t map, std::uint16_t area, std::uint16_t x, std::uint16_t y) {
     Built f(0x0086, 24);
@@ -1174,19 +1183,22 @@ void test_eyes_backstep() {
 }
 
 /// The longest step back, on the packets, with keys that take the time they
-/// are held: the hunter asks for its picture the moment the key is up, 800 ms
+/// are held: the hunter asks for its picture the moment the key is up, 860 ms
 /// after the walk's report -- past the 600 ms a walk of yours was followed
 /// before the held walk, inside the 3 s it is now -- and the report of the
 /// stop comes a moment later. Back on the screen there and then, the hunter
 /// would forget the step it had just taken, and the packets would be lost for
-/// 2 s at every long step back.
+/// 2 s at every long step back. The turn back to the monster after it, a tap
+/// of Hunter::kTurnTapMs, walks you 21.6 px in again here, as a key held that
+/// long walks you: the step is held as much longer than GoC's 800 ms, so the
+/// turn leaves you as far out as GoC's step meant, and there is no second.
 void test_eyes_long_backstep() {
     section("Vị trí từ gói tin: the longest step back stays on the packets");
 
     HunterConfig cfg = packets_on();
     cfg.keep_distance = true;
     cfg.reach = 400;
-    cfg.min_distance = 300;                 // from 20 px: a step back held 800 ms, the longest there is
+    cfg.min_distance = 300;                 // from 20 px: GoC's longest step, 800 ms, and the turn's 60
     EyesRig r(cfg);
     r.g.holds_take_time = true;
     r.enter({ monster(9, 2000) });          // far off, outside the box: nothing to fight yet
@@ -1200,12 +1212,15 @@ void test_eyes_long_backstep() {
     const Hunter::Status st = r.hunter.status();
     const bool stayed = r.eyes.source() == PacketEyes::Source::Packets && r.eyes.view() == view &&
                         r.eyes.stats().switches == switches;
-    check(steering && steps.size() == 1 && steps.front().hold == 800 && st.backsteps == 1,
-          "one step back from the monster 20 px away, held 800 ms -- " + std::to_string(steps.size()) +
-              " step(s)");
+    const std::vector<Game::Press> turns = r.g.of(VK_RIGHT, 50);
+    check(steering && steps.size() == 1 && steps.front().hold == 800 + Hunter::kTurnTapMs && st.backsteps == 1 &&
+              turns.size() == 1 && turns.front().hold == Hunter::kTurnTapMs,
+          "one step back from the monster 20 px away, held 860 ms, and one turn back to it -- no second step "
+          "after the turn -- " + std::to_string(steps.size()) + " step(s), " + std::to_string(turns.size()) +
+              " turn(s)");
     check(stayed && st.state == Hunter::State::Attacking && st.dx == 308,
           "the packets the source throughout, the view never moved, and the monster attacked from where the "
-          "stop's report put you, " + std::to_string(st.dx) + " px from it");
+          "reports put you: 330 px from it after the step, 308 after the turn -- " + std::to_string(st.dx) + " px");
 }
 
 /// A walk held longer than Hunter::kWalkRenewMs, on the packets: the client
@@ -1282,6 +1297,29 @@ void test_eyes_where() {
         check(f.map_known && f.map == 11 && f.area == 1 && f.epoch == 1 && f.entry_x == 4690.0f &&
                   f.entry_y == 1180.0f,
               "on 11/1, after the first map entry ever, whose spawn was 4690,1180");
+    }
+    {
+        // Which way you face, for the hunter's turn: the last 0x0027 that
+        // said so, and when it came. A cast after it moves neither; a map
+        // entry makes it not known.
+        PacketWorld w;
+        healthy_world(w);       // its report of yours faces right, at kT0 + 400
+        const WorldFix right = fix_of(w, now);
+        w.on_packets({ from_client(move_frame(4690.0f, 1180.0f, 0.0f, -1), kT0 + 12'000) });
+        const WorldFix left = fix_of(w, kT0 + 12'100);
+        w.on_packets({ from_client(cast_frame(4690, 1180), kT0 + 12'500) });
+        const WorldFix cast = fix_of(w, kT0 + 12'600);
+        check(right.state == WorldFix::State::Known && right.facing == 1 && right.facing_ms == kT0 + 400 &&
+                  left.facing == -1 && left.facing_ms == kT0 + 12'000,
+              "the fix says which way you face, and when a report said so: right as of the first report, then left "
+              "as of a 0x0027 facing left");
+        check(cast.state == WorldFix::State::Known && cast.facing == -1 && cast.facing_ms == kT0 + 12'000 &&
+                  cast.report_ms == kT0 + 12'500,
+              "a cast after it: still left, as of the 0x0027, though the cast is the last report");
+        w.on_packets({ from_server(entry_frame(11, 2, 900, 600), kT0 + 13'000) });
+        const WorldFix entered = fix_of(w, kT0 + 13'100);
+        check(entered.state == WorldFix::State::Known && entered.facing == 0 && entered.facing_ms == 0,
+              "a map entry: Known at its spawn, the way you face not known, nor when");
     }
     {
         PacketWorld w;

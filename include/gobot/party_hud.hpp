@@ -303,6 +303,8 @@ PartySight party_sight(ScreenCapture& capture, void* window);
 /// Takes one look with `sight`: whether the party's part of the game
 /// (PartyHudReader::kArea) is seen, asked right before the grab and right
 /// after it, and kept with the frame. False when nothing was grabbed.
+/// Nothing of what `out` held before is kept but its frame's buffer, grabbed
+/// into again: one PartyLook kept across looks makes no 3 MB anew for each.
 bool take_party_look(const PartySight& sight, PartyLook& out);
 
 /// What GoBot itself has done to the party, and when -- what a look is held

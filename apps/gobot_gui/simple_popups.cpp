@@ -78,10 +78,13 @@ void GuiApp::PopupsUiFree::operator()(PopupsUi* ui) const { delete ui; }
 bool GuiApp::popups_running() const { return popups_ui_ && popups_ui_->running; }
 
 void GuiApp::say_popups(const std::string& vi) {
-    std::lock_guard<std::mutex> lock(worker_mutex_);
-    std::vector<std::string>& log = popups_ui_->log;
-    log.push_back(vi);
-    if (log.size() > 100) log.erase(log.begin());
+    {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        std::vector<std::string>& log = popups_ui_->log;
+        log.push_back(vi);
+        if (log.size() > 100) log.erase(log.begin());
+    }
+    request_redraw();       // shown at once, as say_party's
 }
 
 void GuiApp::popups_load() {
@@ -98,6 +101,7 @@ void GuiApp::start_popups() {
     PopupsUi& ui = *popups_ui_;
     // Ticked or not on the Đánh quái tab: unticked, as it ships, nothing runs.
     if (!ui.enabled || ui.running) return;
+    vitals_for_job();       // HP and MP at the run's pace before any click
     join_pumping(ui.thread);
     ui.stop = false;
     ui.running = true;
@@ -114,6 +118,7 @@ void GuiApp::stop_popups(bool wait) {
 }
 
 void GuiApp::popup_loop() {
+    name_this_thread("popups");
     PopupsUi& ui = *popups_ui_;
     const auto leave = [&](const std::string& why) {
         if (!why.empty()) say_popups(why);
@@ -138,6 +143,7 @@ void GuiApp::popup_loop() {
         TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"), landmark);
 
     ScreenCapture capture;
+    capture.set_label("popups");
     Frame last;                         // the closer's last look, for the HUD gate
     const auto grab = [&](Frame& f) {
         if (!capture.grab(input_.target_window(), f) || !f.valid()) return false;
@@ -266,6 +272,7 @@ void GuiApp::simple_popups_row() {
                 std::string why;
                 if (!eyes.ready(&why)) return "Thiếu hình để nhận ra thông báo: " + why + ".";
                 ScreenCapture capture;
+                capture.set_label("popups");
                 Frame f;
                 if (!capture.grab(input_.target_window(), f) || !f.valid())
                     return std::string("Không chụp được màn hình game.");
