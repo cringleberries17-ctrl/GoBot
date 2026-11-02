@@ -11,10 +11,12 @@ GoBot là chương trình tự chơi Ghost Online (bản VTC) trên máy của b
 quái, dùng kỹ năng, uống bình, buff, hồi sinh, tự vào lại game khi bị văng,
 tổ đội, dọn rác, tự chat, làm nhiệm vụ nhanh và báo tin về điện thoại.
 
-GoBot chỉ nhìn màn hình game rồi bấm phím, bấm chuột như người chơi. GoBot
-không đọc hay sửa bộ nhớ game, không sửa gói tin, không hỏi tài khoản hay
-mật khẩu, không cần bản quyền, và không gửi gì đi đâu, trừ tin "Thông báo"
-vào kênh Discord của chính bạn khi bạn bật.
+GoBot nhìn màn hình game rồi bấm phím, bấm chuột như người chơi. Khi đánh
+quái, nếu máy có Npcap, GoBot còn đọc gói tin mạng của game để biết nhân vật
+và quái đang ở đâu (xem "Vị trí từ gói tin" ở mục 5): chỉ đọc, không sửa hay
+gửi gói tin nào. GoBot không đọc hay sửa bộ nhớ game, không hỏi tài khoản
+hay mật khẩu, không cần bản quyền, và không gửi gì đi đâu, trừ tin "Thông
+báo" vào kênh Discord của chính bạn khi bạn bật.
 
 Đây là bản thử. Một số phần chưa từng chạy trên game thật (xem mục 5). Hãy
 thử trên nhân vật phụ, và ngồi xem khi thử.
@@ -22,26 +24,46 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
 
 2. CÀI VÀ CHẠY
 
-- Giải nén cả file zip ra một thư mục mới, tốt nhất có đường dẫn không dấu,
-  ví dụ C:\GoBot. Thư mục có tên tiếng Việt có dấu (ví dụ Desktop của tài
-  khoản Windows có dấu) chưa được thử trên nhiều máy: nếu GoBot không đọc
-  được hình hay chữ của game, hãy chuyển sang thư mục không dấu và báo lại.
-  Đừng chạy GoBot từ bên trong file zip.
+- Giải nén cả file zip ra một thư mục mới trong C:\Program Files, ví dụ
+  C:\Program Files\GoBot. Windows sẽ hỏi quyền quản trị khi tạo thư mục hay
+  giải nén vào đó: bấm "Tiếp tục" (Continue). Nếu WinRAR hay 7-Zip báo không
+  ghi được vào đó, hãy giải nén ra chỗ khác rồi kéo cả thư mục vào
+  C:\Program Files. GoBot chạy bằng quyền quản trị, nên thư mục của nó phải
+  là nơi chỉ quản trị viên mới sửa được:
+  chương trình nào trên máy cũng ghi được vào C:\GoBot, Desktop hay
+  Downloads, và thứ nó để lại ở đó sẽ chạy bằng quyền của GoBot. Đặt tên
+  thư mục không dấu, như GoBot: thư mục có dấu chưa được thử trên nhiều
+  máy. Đừng chạy GoBot từ bên trong file zip. Muốn tự sửa một file trong
+  thư mục configs, hãy mở Notepad bằng "Run as administrator" ("Chạy với tư
+  cách quản trị viên" trên Windows tiếng Việt): bấm chuột phải vào Notepad
+  trong menu Start.
 - Chạy gobot_gui.exe. Windows sẽ hỏi quyền quản trị (Administrator): bấm
   "Có" (Yes). GoBot phải có quyền này vì game chạy bằng quyền quản trị;
   thiếu nó, phím của bot không tới được game.
 - Nếu Windows hiện "Windows protected your PC": bấm "More info" rồi
   "Run anyway" (GoBot chưa có chữ ký số). Nếu phần mềm diệt virus chặn hay
   xoá file, đừng tắt diệt virus: hãy báo lại cho người gửi bạn bản này.
-- Không cần cài thêm gì, không cần GoC.
+- Không cần cài thêm gì, không cần GoC. Npcap (máy đã có nếu từng chạy
+  GoC) chỉ cần cho "Vị trí từ gói tin" và "Chỗ đánh quái". Không có Npcap
+  thì GoBot đọc màn hình như cũ, và Tự đánh quái không chạy khi ô Chỗ đánh
+  quái có dấu.
 
 
 3. CỬA SỔ GAME
 
 - Để game ở chế độ cửa sổ (không toàn màn hình), cỡ 1024x768 hoặc
   1280x720. GoBot đã được kiểm tra với hai cỡ này; cỡ khác chưa thử.
-- Để tỉ lệ hiển thị của Windows (Scale, trong Settings > Display) ở 100%,
-  như GoC cũng khuyên.
+- Tỉ lệ hiển thị của Windows (Scale, trong Settings > Display) để bao
+  nhiêu cũng được, trên Windows 10 (bản 1607 trở lên) và Windows 11. Nhưng
+  khi Scale lớn hơn 100%, Windows có thể phóng to game lên, và GoBot không
+  đọc được game bị phóng to. Nếu GoBot báo "Windows đang phóng to game",
+  bấm "Sửa cho game", rồi tắt game và mở lại. Hoặc đặt Scale về 100%.
+- Nếu GoBot báo "Windows đang phóng to chính GoBot", bấm "Sửa cho GoBot"
+  rồi tắt GoBot và mở lại. Windows cũ hơn (Windows 7, 8, 8.1): để Scale ở
+  100%.
+- Tự đăng nhập / Tự vào lại game nhận ra VTCZone và cửa sổ START của game
+  bằng hình chụp ở Scale 100%. Nếu VTCZone tự vẽ to hơn theo Scale, GoBot
+  không nhận ra nó (GoBot sẽ báo khi bỏ cuộc): khi đó để Scale ở 100%.
 - GoBot nhìn màn hình để đọc game, nên game phải hiện rõ. Đừng để cửa sổ
   GoBot, thanh tác vụ (taskbar) của Windows hay cửa sổ nào khác che game.
   Nếu GoBot báo "Cửa sổ GoBot đang che game", bấm "Dời GoBot sang bên".
@@ -69,6 +91,8 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
     bot chỉ không nhảy lên chỗ cao. Muốn đặt thì bấm "Đặt phím nhảy" rồi
     nhấn phím nhảy của game (thường là ↑). Phần này là thử nghiệm: đặt
     xong, thử nút "Thử" trước (xem mục 6).
+  + Có Npcap (chỉ hiện khi đánh dấu Tự đánh quái và Chỗ đánh quái): dấu
+    đỏ thì Tự đánh quái không chạy. Cài Npcap, hoặc bỏ dấu Chỗ đánh quái.
 - Phần "Bot sẽ làm gì": lúc mới giải nén, mọi việc đều TẮT. Đánh dấu việc
   bạn muốn. Muốn đổi phím: bấm vào ô phím rồi nhấn phím bạn dùng trong game.
 - Bấm "BẮT ĐẦU" (hoặc F10 trong game). BẮT ĐẦU chạy mọi việc đã đánh dấu ở
@@ -78,10 +102,14 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
   F10 và F11 chỉ có tác dụng khi cửa sổ game hay cửa sổ GoBot ở trên cùng;
   F12 thì có tác dụng ở mọi nơi.
 - Cài đặt tự lưu ngay khi bạn đổi.
-- Ô "Tự đưa game lên trước khi bạn không dùng máy 30 giây" (dưới nút
-  BẮT ĐẦU) đang bật: khi bot chạy mà bạn để yên máy 30 giây, GoBot đưa game
-  lên trên cùng (game không ở trên cùng thì bot không bấm phím nào, kể cả
-  bình). Bỏ đánh dấu nếu bạn không thích.
+- Ô "Luôn đưa game lên trước khi bot đang chạy" (dưới nút BẮT ĐẦU) đang
+  bật: khi bot chạy, cửa sổ nào chiếm chỗ game (kể cả GoBot) thì GoBot đưa
+  game lên trên cùng ngay khi bạn ngừng bấm chuột, gõ phím (game không ở trên
+  cùng thì bot không bấm phím nào, kể cả bình). Chữ bạn gõ tiếp vào cửa sổ
+  khác sẽ vào game. Bỏ đánh dấu khi cần dùng máy lúc bot chạy. Bấm vào một
+  ô phím để đổi phím lúc bot chạy thì GoBot chờ bạn nhấn phím tối đa 10
+  giây; máu xuống dưới mức của bình HP (hoặc 50%, nếu cao hơn) thì GoBot đưa
+  game lên ngay để bình được bấm.
 - "Nâng cao ►" là màn hình chi tiết bằng tiếng Anh, cho người rành. Bạn
   không cần dùng tới.
 
@@ -100,8 +128,111 @@ chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2
 Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
 khác chưa được thử trên game thật.
 
+- Mới trong bản 2026.11.02 (đánh quái):
+  + Chỗ đánh quái (ô mới trên dòng Tự đánh quái, mặc định không có dấu,
+    thử nghiệm): bot chỉ đi tới quái trong một vùng quanh chỗ đánh quái
+    (mặc định 300 px mỗi bên, 100 px cao thấp), và hết quái thì tự đi bộ
+    về chỗ. Chỗ đánh quái là chỗ nhân vật đứng yên trên mặt đất khi gói
+    tin của game lần đầu báo được vị trí, sau khi bắt đầu đánh quái; nút
+    "Đặt chỗ này" đặt lại ở chỗ đang đứng. Bản này chỉ nhớ chỗ trong lần
+    chạy này: mỗi lần bấm BẮT ĐẦU lấy chỗ mới, chưa lưu cho lần sau. Cần
+    Npcap: không có Npcap thì GoBot không bật Tự đánh quái khi ô này có
+    dấu, và ghi lý do. GoBot không bao giờ bấm ↓, nên chỗ thấp hơn chỉ về
+    được bằng cách đi rơi xuống từ mép bục, nếu bục cho làm vậy. Đổi bản
+    đồ thì bot đứng yên, chỉ đánh quái tới trong tầm, tới khi nhân vật qua
+    cửa quay về gần chỗ đã rời đi. Vào lại game (Tự đăng nhập hay Tìm lại)
+    thì bot đứng yên tới khi nhân vật đứng yên cách chỗ đánh quái, hoặc chỗ
+    nó đứng trước khi vào lại, không quá 150 px (sau bước đi hay kỹ năng
+    đầu tiên). Không thì bấm "Đặt chỗ này". Xem "Chỗ đánh quái" ở dưới.
+- Mới trong bản 2026.11.01e:
+  + GoBot không bao giờ bấm phím ↓, dù phím nào trong cài đặt được đặt là
+    ↓: đứng trên cửa mà bấm ↓ là sang bản đồ khác. Ô chọn phím không nhận
+    ↓ nữa; dòng Phím nhảy báo đỏ nếu phím nhảy đang là ↓.
+  + Khi đi tới con quái ở chỗ cao, bot chỉ nhảy lại sau khi lần nhảy trước
+    đã xong (khoảng 0,8 giây). Trước đây bot có thể bấm nhảy lần nữa lúc
+    nhân vật còn trên không, thành nhảy hai lần.
+  + gobot_gui.log gọn hơn: dòng "Cannot find <tên nhân vật> on screen" chỉ
+    ghi khi tên nhân vật mất khỏi màn hình hơn 1,5 giây, không ghi mỗi lần
+    tên chập chờn.
+  + Dòng "map entry" và "Positions" trong log ghi thêm tên bản đồ theo game
+    (ví dụ t11_s1 "BìnhNguyênMinhChâu[1]") và nhân vật có đứng trong bản
+    đồ đó không. Đây là để kiểm tra cách GoBot nhận ra bản đồ, chuẩn bị cho
+    "Chỗ đánh quái".
+- Mới trong bản 2026.11.01d (đánh quái):
+  + Giữ khoảng cách: lùi tối đa 3 bước về một phía (số trong ô "Lùi tối
+    đa"), dù là trước con quái nào, rồi đứng đánh tại chỗ. Chỉ khi nhân vật
+    tự đi bộ về phía ngược lại (khoảng 0,3 giây trở lên) thì mới được lùi
+    tiếp. Trước đây mỗi lần đánh từ đủ xa, hay mỗi con quái mới, lại được
+    lùi thêm 3 bước, nên nhân vật có thể lùi dần ra tới mép bục.
+  + Đứng yên một chỗ: nhân vật chỉ quay người khi chưa quay về phía con
+    quái, không bấm phím mũi tên mỗi lần đánh nữa (những lần bấm đó làm
+    nhân vật nhích dần khỏi chỗ đứng).
+  + Chọn quái: con quái bị mất máu chỉ được ưu tiên khi nó ở trong tầm
+    đánh. Trước đây một con ở xa bị mất chút máu cũng được ưu tiên hơn con
+    đang đứng sát bên.
+  + Con quái đuổi 4 giây liền mà không vào được tầm đánh (sau tường, trên
+    bục cao) thì GoBot tạm bỏ qua 8 giây, kể cả con trong danh sách "Đánh
+    trước", rồi mới thử lại. Trong lúc đó, nếu không còn con nào khác, dưới
+    nút BẮT ĐẦU ghi "Đang tạm bỏ qua con quái không tới được…".
+  + gobot_gui.log có thêm vài dòng để đo, không đổi cách bot đánh: dòng
+    "Positions" ghi toạ độ nhân vật và số lần nhảy theo gói tin; một dòng
+    mỗi khi vào bản đồ ("map entry"), sau mỗi lần hồi sinh và sau khi Tự
+    đăng nhập vào lại game; một dòng mỗi khi bỏ qua con quái không tới
+    được, ghi nó ở xa bao nhiêu, cao hay thấp hơn.
+- Mới trong bản 2026.11.01c:
+  + Bấm DỪNG LẠI hay F12 lúc Tự chat đang gõ một câu: GoBot thôi bấm phím
+    ngay, không xoá chữ, không bấm Enter, và để nguyên câu gõ dở trong ô
+    chat. Bạn tự xoá chữ trong ô chat rồi bấm Enter để đóng nó. Đánh quái,
+    bình và buff chưa chạy lại cho tới khi GoBot thấy ô chat đã đóng; rồi
+    bấm BẮT ĐẦU.
+  + Tổ đội: hai danh sách "Chỉ nhận từ những người này" và "Chỉ mời người
+    có tên trong danh sách" nay so tên chặt hơn, để người đặt tên gần giống
+    bạn bè không lọt vào. Tên được so không kể hoa thường, dấu và khoảng
+    trắng (Nguyễn Văn A cũng là NguyenVanA), chỉ tính chữ cái và chữ số. Tên
+    từ 4 chữ trở xuống phải đọc đúng hệt; tên dài hơn được sai, thiếu hay
+    thừa một chữ (GoBot đọc chữ trên màn hình đôi khi sai một chữ), không
+    hơn. Danh sách đen vẫn so lỏng như trước: chặn nhầm an toàn hơn nhận
+    nhầm.
+  + Tự đăng nhập: mỗi lần game phải đóng rồi vào lại (game văng, treo, hiện
+    bảng lỗi, không thấy nhân vật quá số phút đã chọn, hay GoBot phải tắt
+    game kẹt giữa chừng lúc đang vào, kể cả lần vào bằng "Phím vào game
+    ngay") đều tính là một lần vào lại. Quá số lần tối đa (5, max_restarts
+    trong configs/app.ini) thì GoBot dừng và chờ bạn. Số này đếm lại từ đầu
+    mỗi lần bấm BẮT ĐẦU hay bật lại ô "Tự vào lại game".
+  + Không phím nào trong game cần giữ lâu: ô "Hold (ms)" riêng của từng phím
+    và từng bước của chuỗi phím (màn hình Nâng cao, thẻ Macro) nay tối đa
+    500 ms. Để 0 như mặc định là bấm một lần bình thường.
+  + Màn hình Nâng cao, bot gói tin: không còn bình và buff riêng trong
+    bot_default.ini. Bot gói tin dùng bình và buff của macro (các dòng bình
+    và Tự buff trên màn hình chính), khi macro đang chạy. Bảng điều khiển
+    không còn ghi "F10" cho bot gói tin: F10 là phím của macro.
+- Mới trong bản 2026.11.01:
+  + "Tốc độ bấm kỹ năng" (dòng Tự dùng kỹ năng, và trong "Chi tiết…"): 50
+    (mặc định, như GoC), 60, 80, 100 hoặc 150 ms nghỉ giữa hai lần bấm kỹ năng
+    liền nhau, từ lúc nhả phím trước tới lúc bấm phím sau. Game hay bỏ sót kỹ
+    năng thì chọn số lớn hơn. Hồi chiêu của từng kỹ năng, bình và buff không
+    đổi theo; phím vẫn được giữ 70-110 ms mỗi lần bấm như trước.
+  + "Tốc độ bấm nút" (thẻ Dọn rác): 60, 80 (mặc định), 100 hoặc 150 ms nghỉ
+    giữa các lần GoBot bấm chuột, kéo đồ và gõ phím khi dọn rác, dùng bùa và
+    mua bình. Máy hay game chậm, hay bấm trượt thì chọn 100 hoặc 150. Các
+    bước kiểm tra (đọc số lượng, chờ hộp thoại) không đổi theo.
+  + Khi nhiều việc tới giờ cùng lúc, GoBot làm lần lượt: Tự chat, rồi Dọn
+    rác, rồi Dùng bùa, rồi Tự mua bình. Nút bấm tay ("Dọn ngay", "Mua
+    ngay"...) thì làm ngay.
+  + Dọn rác, Tự mua bình và Tự chat nhanh hơn: bớt các lần chờ không cần
+    (đã thấy món đồ biến mất thì thôi chờ, đọc ô số lượng nhanh hơn...).
+    Ba việc này đọc game thẳng từ màn hình, nên cửa sổ game phải nằm trọn
+    trong màn hình; nếu cửa sổ lớn hơn màn hình hoặc bị kéo lệch ra ngoài,
+    GoBot báo và không làm. Túi đồ bị kéo xuống thấp tới mức thùng rác nằm
+    ngoài cửa sổ game thì Dọn rác cũng báo và không làm.
+  + Dọn rác dừng giữa hai món nếu máu xuống dưới mốc bình máu (trong lúc
+    dọn bot không uống bình), và chờ tới khi máu cao hơn mốc đó 10% mới bắt
+    đầu một lượt dọn theo giờ.
+  + Tự mua bình không cần chụp hình món Người Giữ Sân nữa: chỉ cần đánh dấu
+    "Tự mua bình". Nếu cửa hàng mở đè lên túi đồ (cửa sổ game nhỏ), GoBot
+    đóng cửa hàng, đếm bình rồi mở lại.
 - Dọn rác: bỏ đồ vào thùng rác ("Tự dọn rác", "Dọn ngay") đã chạy tốt trên
-  game thật. Hai phần mới dưới đây thì chưa:
+  game thật. Ba phần mới dưới đây thì chưa:
   + "Dùng mảnh ghép" (thử nghiệm, mặc định TẮT): đăng ký mảnh ghép (mảnh
     quái vật) ở ngăn Tiêu Dùng vào Yêu Quái Bách Khoa thay vì xoá. Ở phần
     "Chọn đồ cần bỏ", bấm vào mảnh rồi chọn "Dùng — đăng ký vào Yêu Quái
@@ -118,6 +249,72 @@ khác chưa được thử trên game thật.
     "Dọn ngay" và "Tự dọn rác" không dùng mảnh, chỉ báo chỗ có mảnh ("N ô
     có món để dùng mà chưa dùng."). "Thử tìm (không xoá)" thì không bao giờ
     dùng mảnh, có dấu hay không: nó chỉ báo "Thấy N ô sẽ dùng."
+  + "Dùng bùa" (thử nghiệm, mặc định TẮT): dùng các loại Bùa ở ngăn Tiêu Dùng
+    như dùng mảnh ghép. Ở "Chọn đồ cần bỏ" (nhóm bùa) hoặc trên ảnh túi đồ
+    đã chụp, bấm vào bùa rồi chọn "Dùng bùa (chuột phải trong ngăn Tiêu
+    Dùng, mỗi giờ một cái)". Khi ô "Dùng bùa" có dấu, GoBot bấm chuột phải
+    vào bùa, game hiện câu hỏi xác nhận, và GoBot chỉ bấm Xác Nhận khi hộp
+    thoại có cùng khung và nút như hộp thoại đăng ký mảnh ghép (độ giống
+    tối thiểu "charm_frame_score", mặc định 0.92 trong trash.ini), và lời
+    trong hộp không phải của câu hỏi thùng rác, hồi sinh hay bán. GoBot
+    CHƯA có ảnh thật của câu hỏi dùng bùa, nên cách nhận này là cách loại
+    trừ: câu hỏi "vứt" không có chữ trong ảnh mẫu, nên chỉ được phân biệt
+    bằng khung, không bằng lời. Ngay trước khi bấm, GoBot nhìn lại màn hình
+    lần cuối, và chỉ bấm khi hộp thoại vẫn đúng chỗ và không có cửa sổ nào
+    khác của game đang mở. Mỗi lần dùng mất 1 cái bùa và có hiệu lực 1 giờ,
+    nên mỗi loại bùa chỉ dùng MỘT cái rồi chờ hết giờ ("dùng lại sau", từ 60
+    phút, mặc định 60) mới dùng cái tiếp theo; giờ này lưu trong
+    %LOCALAPPDATA%\GoBot\charm_clock.txt, được ghi TRƯỚC khi bấm chuột phải
+    nên tắt hay sập GoBot rồi mở lại cũng không dùng thêm cái nữa; không
+    ghi được file này thì GoBot không dùng bùa. Sau khi đã bấm Xác Nhận mà
+    không chắc bùa có dùng được không (chồng bùa không giảm sau vài giây,
+    game hiện thêm thông báo hoặc câu hỏi khác), GoBot vẫn coi là đã dùng
+    và chờ hết giờ, vì một bùa dùng hai lần là mất một bùa; chỉ khi chưa
+    bấm Xác Nhận (không có câu hỏi, hoặc hộp thoại không đạt và đã Hủy Bỏ)
+    thì mới thử lại sau 10 phút. Việc
+    dùng bùa chạy riêng, nhanh (vài giây, tối đa 20 giây), và trong lúc đó
+    kỹ năng, bình và buff đều tạm dừng; nó không chạy trong lượt dọn rác
+    chậm (lượt dọn chỉ báo chỗ có bùa). Nút "Dùng bùa ngay" dùng mỗi loại
+    một cái ngay, không chờ giờ (kể cả loại vừa dùng, nên đừng bấm khi bùa
+    còn hiệu lực). GoBot để bùa lại sau khi máu thấp hơn mốc bình máu cao
+    nhất cộng 10% (ít nhất 60%), khi chưa đọc được máu (ở màn hình đăng
+    nhập), khi đang chat hoặc có việc khác giữ game; máu rơi xuống dưới mốc
+    bình trong lúc dùng thì dừng ngay. Hộp thoại nào không đạt thì GoBot
+    bấm Hủy Bỏ và thử loại bùa tiếp theo, quá 3 lần thì dừng, và lưu ảnh
+    vào thư mục trash_debug (charm_question, charm_wrong_dialog...). Hãy
+    gửi các ảnh đó sau lần thử đầu để siết chặt cách nhận câu hỏi bằng một
+    ảnh mẫu thật (grabbed/charm_use). Chọn một bùa cũng chọn các bùa cùng
+    hình khác màu; mỗi giờ chỉ dùng một cái trong số đó.
+  + "Tự mua bình" (thử nghiệm, mặc định TẮT; thẻ riêng trong Dọn rác): mua
+    Thịt bò khô (HP) và Rượu lá tre (MP) ở cửa hàng mà món "Người Giữ Sân"
+    trong ngăn Khác của túi đồ mở ra. Mỗi "kiểm tra mỗi N phút" (mặc định 60;
+    lần đầu ngay sau khi bấm BẮT ĐẦU khoảng 45 giây) GoBot mở túi đồ, đếm số ô
+    Thịt bò khô và Rượu lá tre ở ngăn Tiêu Dùng. Món nào có ít ô hơn mức "dưới"
+    bạn đặt thì GoBot bấm chuột phải vào Người Giữ Sân, BẤM ĐÚP vào món trong
+    cửa hàng (Rượu lá tre bên trái, Thịt bò khô bên phải; không bấm Mua), gõ 100
+    vào hộp số lượng (game để sẵn số 1 nên gõ thêm "00"), ĐỌC LẠI hộp thấy
+    đúng 100 mới bấm Xác Nhận, rồi bấm ESC đóng cửa hàng (ESC không đóng thì
+    bấm nút Thoát). Lần đầu GoBot chỉ mua thử MỘT lần mỗi loại, đếm lại ô và
+    thấy đúng loại bình đó tăng thêm một ô rồi mới mua phần còn lại cho tới
+    đủ số ô "tới" (tối đa 40 lần mua, 4 vòng, 240 giây một lượt). Mỗi lần mua
+    100 được cho là đầy một ô, nhưng điều đó CHƯA kiểm chứng trên game thật:
+    nếu mua mà ô không tăng thì GoBot dừng và KHÔNG tự mua nữa cho tới khi bạn
+    bấm "Mua ngay" hoặc tắt rồi bật lại ô "Tự mua bình". Túi đầy (game báo
+    "Túi đồ [Tiêu thụ] đã đầy") thì dừng.
+    Hộp số lượng chưa có ảnh mẫu, nên GoBot nhận nó bằng khung giống hộp "bán"
+    của game (tối thiểu "buy_frame_score", mặc định 0.85) mà lời không phải của
+    hộp bán, thùng rác hay hồi sinh (hộp "vứt" không có chữ trong ảnh mẫu nên
+    chỉ phân biệt bằng khung, không bằng lời); hộp nào khác thì bấm Hủy Bỏ và dừng,
+    ảnh giữ ở trash_debug (shop_question, shop_wrong_dialog...). Trong lúc mua,
+    kỹ năng, bình và buff đều TẠM DỪNG (có thể vài chục giây), chứ không chỉ
+    chậm lại: nếu không, phím bình (số) sẽ gõ lẫn vào hộp số lượng. Không mua
+    khi máu thấp hơn mốc bình máu cộng 10% (tối đa 95%), khi chưa đọc được máu, đang chat,
+    hay bot đang bận việc khác. Nút "Thử mua (không mua gì)" đi tới hộp số
+    lượng của từng món rồi bấm Hủy Bỏ: không gõ, không mua, giữ ảnh ở
+    trash_debug; nút "Mua ngay" mua ngay không chờ giờ. Món Người Giữ Sân
+    được nhận theo hình trong catalog (mặc định other/8950604, chân dung một
+    người đội mũ); nếu hình trong túi khác thì GoBot báo "không thấy món Người
+    Giữ Sân" và bạn đổi buy_opener trong trash.ini.
   + "Phím dọn ngay" (thử nghiệm, mặc định không có phím): bấm phím này là
     dọn túi một lần ngay, như nút "Dọn ngay". Chỉ nhận F1 tới F12 (phím chữ
     hay số cũng là chữ gõ vào ô chat của game); phím GoBot đã tự bấm thì
@@ -131,17 +328,66 @@ khác chưa được thử trên game thật.
   túi. GoBot không bao giờ hồi sinh tại làng (mất 2% EXP) và không dùng
   Cash. Thử 3 lần không được thì GoBot dừng cả bot, ghi lý do bằng chữ đỏ,
   và để nhân vật nằm tại chỗ chờ bạn.
-- Tự buff (thử nghiệm): mỗi phím buff có thời gian riêng, từ 60 đến 7200
-  giây. Sau khi chết, hồi sinh hoặc vào lại game, GoBot buff lại tất cả.
+- Tự buff (thử nghiệm): mỗi phím buff có thời gian riêng, từ 0 đến 7200
+  giây; 0 là bấm lại sớm nhất có thể, mỗi 5 giây như GoC. Sau khi chết, hồi
+  sinh hoặc vào lại game, GoBot buff lại tất cả.
+- Phím bấm mà game không nhận (mới): game đọc bàn phím mỗi khung hình, nên
+  một phím giữ quá ngắn thỉnh thoảng bị bỏ lỡ -- phím được bấm mà không có
+  gì xảy ra, nhất là khi bot bấm nhiều phím liền nhau. Nay mỗi phím của
+  macro được giữ 70 tới 110 ms (trước là 25 tới 60 ms) và hai bình cách nhau
+  60 ms (trước là 20 ms). Thêm nữa: nếu 1 giây sau khi bấm bình mà thanh HP
+  (hay MP, hay máu pet) chưa tăng và vẫn dưới mức, GoBot bấm bình lại ngay,
+  không chờ hết 3 giây; mỗi lần bấm chỉ kiểm tra một lần, và log ghi dòng
+  "Potion check: ...". Nếu bình của game tác dụng chậm hơn 1 giây thì có thể
+  tốn thêm một viên. Chỉnh ở màn hình Nâng cao, thẻ Macro, mục Options ("Key
+  hold, shortest/longest" và "Re-press a potion", 0 là cách cũ), hay
+  key_hold_min_ms, key_hold_max_ms, potion_recheck_ms trong
+  configs/macro.ini. Ghi lại cho tôi nếu vẫn còn phím bị bỏ.
+- Kỹ năng hút MP nhanh hơn bình bổ sung (mới): trước đây mỗi bình chỉ được
+  bấm lại sau 3 giây, dù thanh MP đã gần cạn. Nay khi thanh HP (hay MP, hay
+  máu pet) xuống dưới NỬA mức của bình (bình MP ở 59% thì dưới 29%), bình
+  được bấm lại sau 1 giây (potion_urgent_ms trong configs/macro.ini; thanh
+  "Potion when far below" ở màn hình Nâng cao, thẻ Macro, mục Options; 0 là
+  cách cũ). Giữa mức bình và nửa mức đó vẫn là 3 giây. Muốn mạnh hơn nữa,
+  thêm dòng bình Lv2 (bình lớn hơn, mức thấp hơn).
+- Buff lúc được lúc không (mới): game thỉnh thoảng bỏ một lần bấm, và buff
+  bị bỏ thì mất cả khoảng thời gian của nó (một phút, năm phút). GoC bấm
+  mỗi buff 4 lần, cách nhau 200 ms; nay GoBot cũng vậy. Số lần bấm và khoảng
+  cách chỉnh ở màn hình Nâng cao, thẻ Macro, mục Options ("Buff presses per
+  cast"), hay buff_presses và buff_press_gap_ms trong configs/macro.ini (1
+  là bấm một lần như trước). Log ghi dòng "Buff: key ... cast" mỗi lần buff,
+  và lý do khi chưa buff được (game không ở trên cùng, nhân vật chưa vào
+  thế giới...). Nếu buff vẫn lúc có lúc không, gửi các dòng "Buff:" đó.
 - Tự đánh quái: vùng tìm quái nay theo cỡ cửa sổ game (1024x768, 1280x720).
   GoBot chỉ nhận ra nhân vật của bạn khi thấy đúng và đủ tên đã gõ, nên
   không còn lấy người chơi khác đứng gần làm mình, kể cả người có tên dài
   hơn chứa tên bạn (ví dụ TuanAnh khi bạn là Anh).
+- Tự đánh quái, đi tới quái (mới, mặc định BẬT): bot giữ phím mũi tên cho
+  tới khi tới gần quái, như người chơi, thay vì bấm từng bước ngắn (nhân
+  vật dừng lại sau mỗi bước, vài lần mỗi giây). Bot nhả phím khi tới tầm
+  đánh, khi quái ở phía bên kia, khi nhặt đồ, khi game không ở trên cùng
+  và khi Dọn rác, chat, hồi sinh... cần bàn phím. Đi mà không tới gần hơn
+  thì bot nhả phím rồi bấm lại. Muốn đi kiểu cũ: trên màn hình Nâng cao, thẻ
+  Features, mục Attack, bỏ dấu "Hold the walk key" rồi bấm Save của mục đó
+  (không bấm Save thì lần sau lại bật); hoặc khi GoBot đã đóng, ghi
+  hold_walk=false trong configs/hunt.ini.
 - Đánh quái, các phần mới (thử nghiệm). Phần nào cũng TẮT, hoặc giữ cách
-  đánh cũ, cho tới khi bạn chọn, trừ "Còn N bình" (chỉ nhìn):
+  đánh cũ, cho tới khi bạn chọn, trừ "Còn N bình" (chỉ nhìn) và cách đi giữ
+  phím ở trên:
   + Bình HP và MP hai bậc: mỗi dòng bình có thêm "Lv2" (bình thứ hai, ví dụ
     bình lớn hơn). Khi HP dưới cả hai mức, chỉ bình có mức % thấp hơn được
     uống, như GoC. Bình đến lúc uống được bấm trước mọi kỹ năng và buff.
+  + Bơm máu pet ("Tự bơm máu pet"): dòng bình thứ ba, cho pet, như dòng
+    bình HP. Lúc đầu dòng này chưa có phím: đánh dấu thì GoBot hỏi phím
+    (bấm phím của bình máu pet trên thanh phím). Máu pet bằng hay dưới mức
+    "khi máu pet dưới" thì GoBot bấm phím đó, cách nhau khoảng 3 giây;
+    bình HP và MP luôn được bấm trước bình pet. Máu pet được đọc từ thanh
+    ĐỎ trong ô của pet ở góc trên bên trái màn hình game (ô rộng có hai
+    hình và ô "Thức Ăn", dưới thanh HP và MP); thanh tím bên dưới không
+    phải máu pet. GoBot tự tìm thanh đó và giữ chỗ của nó cả khi máu pet
+    về 0. Không có pet ở ngoài thì dòng này ghi "Chưa thấy thanh máu của
+    pet trên màn hình game" và không bấm gì. Số bình của pet không được
+    đọc ("Còn N bình" chỉ có ở bình HP và MP).
   + "Còn N bình" (chỉ nhìn, không bấm gì; không có ô riêng, luôn chạy khi
     bot chạy với dòng bình có dấu): dưới mỗi dòng bình (Lv1 và Lv2 của
     "Tự uống bình HP", "Tự uống bình MP") có một dòng nhỏ ghi số in trên ô
@@ -174,10 +420,88 @@ khác chưa được thử trên game thật.
   + Giữ khoảng cách: lùi lại khi quái gần hơn khoảng cách tối thiểu của
     Kiểu đánh; với "Như trước" là 50 px ("Chưa chọn Kiểu đánh: bot lùi khi
     quái gần hơn 50 px."). Không lùi khi có dấu "Đứng yên một chỗ" (khi đó
-    ô Giữ khoảng cách mờ đi), không lùi trước con quái ở tầng khác, tối đa
-    3 bước liền nhau (1 tới 10, ô "Lùi tối đa" trong "Tầm đánh…"), và sau
-    một bước đụng tường hay rơi xuống bục dưới thì thôi lùi trước con quái
-    đó. GoBot không thấy mép bục.
+    ô Giữ khoảng cách mờ đi), không lùi trước con quái ở tầng khác. Lùi tối
+    đa 3 bước về một phía (1 tới 10, ô "Lùi tối đa" trong "Tầm đánh…"), dù
+    là trước con quái nào, rồi đứng đánh tại chỗ, tới khi nhân vật đi bộ về
+    phía ngược lại mới lùi tiếp. Sau một bước đụng tường hay rơi xuống bục
+    dưới thì thôi lùi về phía đó, cũng tới khi đi bộ về phía ngược lại.
+    GoBot không thấy mép bục, nên bước lùi đầu tiên ra khỏi mép bục thì
+    không chặn được.
+  + Vị trí từ gói tin (ô mới cạnh "Giữ khoảng cách", mặc định không có
+    dấu): lấy vị trí nhân vật và quái từ gói tin mạng của game, thay vì đọc
+    tên trên màn hình (tên nhân vật trên màn hình hay bị mất một lúc). Cần
+    Npcap. Mỗi khi bắt đầu đánh quái, GoBot tự bắt gói tin của game (chỉ
+    đọc). Không có dấu: bot vẫn đánh theo màn hình, chỉ ghi một dòng
+    "Positions" vào gobot_gui.log mỗi 10 giây, so gói tin với màn hình. Có
+    dấu: bot đánh theo gói tin khi gói tin dùng được, không thì tự đọc màn
+    hình như cũ; gói tin dùng được lại 2 giây thì bot mới đổi sang gói tin.
+    Dưới nút BẮT ĐẦU có dòng "Vị trí: từ gói tin" hoặc "Vị trí: từ màn hình
+    — <lý do>", ví dụ "chưa cài Npcap, hoặc dịch vụ Npcap chưa chạy",
+    "đang bắt gói tin nhưng không thấy gói tin của game", "nhân vật chưa di
+    chuyển từ lúc bắt gói tin (đi một bước hoặc dùng một kỹ năng)", "vừa đổi
+    bản đồ", "đang dùng Lọc quái, mà gói tin không có tên quái", "thấy gói
+    tin của một nhân vật khác". Bot chỉ đánh quái trong khoảng màn hình thấy
+    được, không đi khắp bản đồ. Gói tin chưa từng được so với màn hình trên
+    game thật, nên hunt.ini có thêm hai số packet_scale (1) và packet_dy (0)
+    để chỉnh khi được hỏi; dòng "Positions" ghi số đo được bên cạnh hai số
+    đó. Bấm "Stop capture" ở màn hình Nâng cao trong lúc đánh quái thì GoBot
+    ngừng bắt gói tin cho tới lần đánh quái sau, và đánh theo màn hình (dòng
+    "Vị trí:" khi đó ghi lý do "GoBot không bắt gói tin (chưa bật được, hoặc
+    đã bấm Stop capture)"). Muốn GoBot không bắt gói tin nữa:
+    packet_positions=off trong hunt.ini, hoặc "Positions from packets: Off"
+    ở màn hình Nâng cao.
+  + Chỗ đánh quái (ô cạnh "Vị trí từ gói tin", mặc định không có dấu):
+    bot chỉ đi tới quái trong một vùng quanh chỗ đánh quái: mặc định 300
+    px mỗi bên và 100 px cao thấp (sửa ở "Tầm đánh…", phần "Chỗ đánh
+    quái"). Con quái đã ở trong tầm đánh thì vẫn đánh, dù đứng ngoài vùng.
+    Con đang đi tới mà ra ngoài vùng quá 60 px thì bot bỏ nó. Hết quái
+    khoảng 1,5 giây mà nhân vật cách chỗ hơn 48 px theo chiều ngang (ô "Đi
+    về khi cách chỗ hơn") thì bot đi bộ về chỗ; có con quái vào tầm đánh
+    hay vào vùng thì bot đánh nó ngay. Dưới nút BẮT ĐẦU có dòng "Đang về
+    chỗ đánh quái (còn N px)" khi đi về, và một dòng "Chỗ đánh quái: ..."
+    cho biết chỗ ở đâu, nhân vật cách bao xa, hay vì sao bot đang đứng
+    yên. Vùng đánh và khoảng cách đo bằng điểm ảnh của bản đồ trong gói
+    tin của game.
+    Chỗ đánh quái là chỗ nhân vật đứng yên trên mặt đất, lần đầu gói tin
+    của game báo được vị trí sau khi bấm BẮT ĐẦU. Lúc mới bắt gói tin,
+    nhân vật phải đi một bước hay dùng một kỹ năng thì gói tin mới báo vị
+    trí; tới lúc đó bot đánh như thường. Vì vậy chỗ có thể là nơi nhân vật
+    dừng lại sau lần đi tới quái đầu tiên, không đúng chỗ lúc bấm BẮT ĐẦU.
+    Đứng yên ở chỗ đúng ý rồi bấm "Đặt chỗ này" (cạnh ô Chỗ đánh quái) để
+    đặt lại ở đó. Khi bot đang chạy với chỗ đánh quái, hết quái khoảng 1,5
+    giây là bot tự đi về chỗ, nên đừng tự đi bộ đi chỗ khác. Muốn đưa nhân
+    vật sang chỗ khác khi bot đang chạy: bỏ dấu Chỗ đánh quái, đi tới chỗ
+    mới, đánh dấu lại rồi bấm Đặt chỗ này. (Bỏ dấu thì bot thôi đi về ngay
+    và quên chỗ cũ; đánh dấu lại thì chỗ được lấy ở chỗ nhân vật đứng yên.)
+    Bản này chỉ nhớ chỗ trong lần chạy này: bấm DỪNG LẠI rồi BẮT ĐẦU là lấy
+    chỗ mới ở chỗ nhân vật đang đứng. Số mới của vùng đánh dùng từ chỗ đặt
+    sau; số "Đi về khi cách chỗ hơn" dùng ngay.
+    Cần Npcap (vị trí lấy từ gói tin của game, có dấu "Vị trí từ gói tin"
+    hay không). Không có Npcap, hoặc packet_positions=off trong hunt.ini,
+    thì GoBot không bật Tự đánh quái khi ô này có dấu (các việc khác vẫn
+    chạy) và ghi lý do dưới nút BẮT ĐẦU; "Trước khi bắt đầu" có dòng Npcap.
+    Khi ô này có dấu, bot không nhảy theo quái (nhảy có thể đưa nhân vật
+    lên bục trên rồi kẹt ở đó), và GoBot không bao giờ bấm ↓. Khi đi về:
+    chỗ cao hơn nhân vật thì bot nhảy lên (cần Phím nhảy; chỉ tới khoảng
+    120 px, một lần nhảy; cao hơn thì bot không đi về mà đứng đánh ở đó);
+    chỗ thấp hơn thì bot chỉ đi bộ về phía chỗ đó, nên chỉ về được nếu bục
+    cho nhân vật đi rơi xuống từ mép bục; bục có tường chắn thì không.
+    Đi về mà 4 giây không tới gần hơn (vướng tường, vướng bục), bot thôi và
+    30 giây sau thử lại; 3 lần liền không được thì thôi hẳn, tới khi bấm
+    "Đặt chỗ này" hay nhân vật tự về tới chỗ.
+    Đổi bản đồ hay vào lại game: chỗ đánh quái tạm gác lại, bot đứng yên
+    và chỉ đánh quái tới trong tầm. Đổi bản đồ (qua cửa) thì bot đứng yên
+    tới khi nhân vật qua cửa quay về gần chỗ đã rời đi (ví dụ qua cửa rồi
+    quay lại ngay). Vào lại game (Tự đăng nhập, hay mở lại game rồi bấm Tìm
+    lại) thì bot đứng yên tới khi nhân vật đứng yên cách chỗ đánh quái,
+    hoặc chỗ nó đứng trước khi vào lại, không quá 150 px, mà gói tin không
+    báo là bản đồ khác (gói tin báo chỗ đứng sau bước đi hay kỹ năng đầu
+    tiên trong game mới). Đã qua cửa sang bản đồ khác rồi mới vào lại game
+    thì vẫn phải qua cửa quay về. Không thì bấm "Đặt chỗ này" để đặt chỗ
+    mới ở chỗ đang đứng. Khi
+    gói tin tạm không biết nhân vật ở đâu, bot cũng đứng yên và chỉ đánh
+    quái tới trong tầm, tới khi biết lại. Có dấu cả "Đứng yên một chỗ": bot
+    đứng đánh quái tới trong tầm, bị đẩy ra xa thì đi về chỗ.
   + Phím nhảy và nút "Thử": ô "Phím nhảy" cạnh "Phím đánh" là phím bot dùng
     để nhảy lên chỗ cao khi đánh quái (thường là ↑). Bản này không đặt sẵn
     phím cho ô này; không đặt thì bot chỉ không nhảy (dòng "Chưa đặt phím
@@ -328,9 +652,14 @@ Nút nào bấm vào game, nút nào không:
   trên cùng.
 - Ô đánh dấu làm GoBot bấm thêm vào game: "Dùng mảnh ghép" (trong "Dọn
   ngay" và "Tự dọn rác": bấm chuột phải vào mảnh ghép rồi xác nhận đăng
-  ký, không lấy lại được), "Tự đóng thông báo" (bấm Xác Nhận, nút X hoặc
+  ký, không lấy lại được), "Dùng bùa" (và nút "Dùng bùa ngay": bấm chuột
+  phải vào bùa rồi xác nhận, mỗi lần mất một cái), "Tự mua bình" (bấm chuột
+  phải Người Giữ Sân, mua bằng tiền của nhân vật và GÕ số 100 vào game),
+  "Tự đóng thông báo" (bấm Xác Nhận, nút X hoặc
   ESC khi bot chạy), "Giữ khoảng cách" (bấm phím mũi tên để lùi, mặc định
-  tối đa 3 bước liền nhau; GoBot không thấy mép bục), và "Cũng vào lại
+  tối đa 3 bước về một phía; GoBot không thấy mép bục), "Chỗ đánh quái"
+  (giữ phím mũi tên, và phím nhảy khi chỗ ở cao hơn, để đi về chỗ đánh
+  quái), và "Cũng vào lại
   khi game vẫn chạy mà không thấy nhân vật quá ... phút" (TẮT game rồi vào
   lại).
 
@@ -341,7 +670,9 @@ Nút nào bấm vào game, nút nào không:
 - Nhiệm vụ: mở cửa sổ Nhiệm Vụ bằng tay ở thẻ NV Phụ, rồi bấm "Thử xem
   (không bấm gì)": GoBot chỉ nhìn và cho biết nó thấy gì. Thấy đúng rồi mới
   bấm "Làm ngay 1 lần" và nhìn theo. Ngay sau khi bấm, GoBot đưa game lên
-  trước; nếu phải chờ lâu hơn vài giây, GoBot chờ bạn tự đưa game lên. Chưa
+  trước; nếu phải chờ lâu hơn vài giây, GoBot chờ bạn tự đưa game lên (ô
+  "Luôn đưa game lên trước khi bot đang chạy" thì vẫn đưa game lên khi bot
+  chạy). Chưa
   ai biết chắc ô "Tự Động" của game làm gì (có thể game tự nhận, trả nhiệm
   vụ, hoặc cho nhân vật tự đi): nếu nhân vật tự đi chỗ khác, bấm F12, bỏ
   đánh dấu "Làm nhiệm vụ nhanh" và báo lại. Phím mở cửa sổ Nhiệm Vụ mặc
@@ -358,7 +689,9 @@ Nút nào bấm vào game, nút nào không:
   vào ô "Các câu sẽ gửi", bấm "Kiểm tra ô chat" (chỉ xem, không bấm phím
   nào), rồi bấm "Gửi thử 1 câu": câu đầu tiên được gõ thật vào game, không
   dấu. Đừng ghi điều riêng tư vào câu chat; để cách nhau ít nhất 30 giây
-  và đừng spam.
+  và đừng spam. Bấm DỪNG LẠI hay F12 lúc GoBot đang gõ một câu thì GoBot
+  thôi bấm phím ngay và để nguyên câu gõ dở trong ô chat: bạn tự xoá chữ
+  trong đó rồi bấm Enter.
 - Tự đánh quái: gõ đúng tên nhân vật trước. Lần đầu thử ở chỗ vắng, một
   mình; rồi thử khi có người chơi khác hay người trong tổ đội đứng gần:
   nhân vật phải đi và đánh từ chỗ của chính nó. Nếu nó đi lung tung hay
@@ -371,16 +704,43 @@ Nút nào bấm vào game, nút nào không:
      game, tối đa 60 giây, không bấm phím nào và không đưa game lên trước.
      Tên con quái bạn đứng gần phải hiện ở "Quái đang thấy".
   3. Nút "Thử" cạnh Phím nhảy: GoBot đưa game lên trước và BẤM PHÍM NHẢY
-     MỘT LẦN trong game. Đứng chỗ trống, xa cổng dịch chuyển và dây leo.
+     MỘT LẦN trong game. Đứng chỗ trống.
      Nếu nhân vật đánh chứ không nhảy, phím đó là phím Tấn công: đổi phím
      nhảy rồi thử lại.
   4. Đánh vài trận đầu với Kiểu đánh "Như trước", bỏ dấu "Giữ khoảng cách"
-     và "Chỉ khi đang đánh quái": bot đánh như bản trước, trừ một điều: nếu
-     đã đặt Phím nhảy (bước 3), khi đi tới con quái ở chỗ cao ngoài tầm,
-     bot bấm phím đó để nhảy lên.
+     và "Chỉ khi đang đánh quái": bot đánh như bản trước, trừ hai điều: bot
+     giữ phím mũi tên khi đi tới quái (xem mục 5); và nếu đã đặt Phím nhảy
+     (bước 3), khi đi tới con quái ở chỗ cao ngoài tầm, bot bấm phím đó để
+     nhảy lên.
   5. Rồi bật từng phần một và xem: Không đánh / Đánh trước; một Kiểu đánh;
      Giữ khoảng cách (ở chỗ bằng phẳng trước, xem nhân vật có lùi tới mép
      bục không); bình Lv2; Chỉ khi đang đánh quái.
+  6. Vị trí từ gói tin: lần đầu để KHÔNG có dấu, đánh quái khoảng 10 phút ở
+     bản đồ có quái như thường (bot vẫn đánh theo màn hình). Trong lúc đó
+     một lần đi vào tường rồi thả phím, và nếu được thì để quái đánh trúng
+     nhân vật một lần. Rồi gửi gobot_gui.log. Sau đó mới đánh dấu, đánh
+     thêm khoảng 10 phút, ngồi xem, và gửi log lần nữa. Thấy nhân vật đi
+     về phía không có quái, hay đánh vào chỗ trống: bấm F12, bỏ dấu và báo
+     lại kèm giờ.
+  7. Chỗ đánh quái (cần Npcap): đứng ở chỗ bằng phẳng, có quái quanh, đánh
+     dấu ô này rồi bấm BẮT ĐẦU. Xem dòng "Chỗ đánh quái: ..." dưới nút BẮT
+     ĐẦU: chỗ được đặt khi gói tin báo được vị trí (sau bước đi hay kỹ
+     năng đầu tiên). Đánh khoảng 10 phút và xem nhân vật có đi về chỗ khi
+     hết quái, có bỏ con quái ở xa ngoài vùng không. Rồi thử đổi chỗ: bỏ
+     dấu Chỗ đánh quái, đi tới chỗ khác, đánh dấu lại rồi bấm "Đặt chỗ
+     này"; dòng "Chỗ đánh quái: ..." phải ghi chỗ mới, và bot không đi về
+     chỗ cũ.
+     Thử qua cửa, một lần riêng: bấm DỪNG LẠI, đánh dấu "Đứng yên một chỗ"
+     và Chỗ đánh quái, đứng ngay TRÊN một cửa, không có quái ở gần, rồi bấm
+     BẮT ĐẦU. Chờ dòng "Chỗ đánh quái: ..." ghi chỗ (nếu dòng đó bảo chờ
+     nhân vật đi một bước, thì dùng một kỹ năng tại chỗ). Bấm ↓ để qua cửa,
+     chờ vào hẳn bản đồ bên kia (dòng đó báo nhân vật đã sang bản đồ khác),
+     rồi bấm ↓ lần nữa để quay về. Dòng "Chỗ đánh quái: ..." phải lại ghi
+     chỗ đang dùng, chữ xanh, "nhân vật cách chỗ N px". Xong thì bỏ dấu
+     "Đứng yên một chỗ" nếu bạn không dùng nó.
+     Gửi gobot_gui.log (các dòng "Hunter:" và "Positions" ghi chỗ đánh quái
+     và những lần đi về). Thấy nhân vật đi lung tung hay kẹt ở mép bục: bấm
+     F12, bỏ dấu và báo lại kèm giờ.
 - Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
   xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
 - Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
@@ -394,7 +754,16 @@ Nút nào bấm vào game, nút nào không:
   VTCZone bằng tay: thấy VTCZone đang chạy, GoBot nhớ chỗ của nó cho tới khi
   tắt GoBot. GoBot không bao giờ gõ tài khoản, mật khẩu: nếu VTCZone hiện
   màn hình đăng nhập, GoBot dừng và báo. Gặp hộp "Security Alert" của game,
-  GoBot cũng dừng, để bạn tự quyết.
+  GoBot cũng dừng, để bạn tự quyết. Ở màn hình chọn kênh, GoBot tìm chính
+  bảng kênh (khung các dòng "Kênh 1" tới "Kênh 8") và bấm vào giữa dòng kênh
+  đã chọn, thay vì đo từ chữ "Chọn Kênh" như trước (cách đo đó chỉ đúng ở
+  1024x768). Bấm xong GoBot xem bảng đã đóng hoặc dòng đó đã sáng lên chưa,
+  chưa thì bấm lại, tối đa 3 lần; game vẫn không nhận thì lần thử đó tính là
+  không được (GoBot KHÔNG bấm Kết Nối, vì sẽ vào kênh khác), và như mọi lần,
+  thử 3 lần không được thì dừng. Nếu không tìm thấy bảng kênh, GoBot bấm theo
+  vị trí đo ở 1024x768 như trước. Nếu vẫn kẹt, thử để game ở 1024x768, và gửi
+  gobot_gui.log, gobot_gui.old.log, kèm độ phân giải đang chọn trong game;
+  thư mục login_debug thì gửi khi được hỏi, xem trước khi gửi.
 - Tổ đội: thử với người quen. "Tự nhận lời mời vào tổ đội" nhận lời mời của
   mọi người trừ danh sách đen, hoặc chỉ của những tên bạn ghi. "Tự mời
   người chat từ khoá" mời người gõ đúng từ khoá (mặc định "pt"). Tên được
@@ -408,6 +777,13 @@ Nút nào bấm vào game, nút nào không:
 - Còn N bình: đánh dấu "Tự uống bình HP", bấm BẮT ĐẦU, chờ khoảng 10 giây
   rồi so "Còn N bình (ô phím K)" với số trên thanh phím của game. Thấy số
   sai thì ghi giờ và báo lại, kèm gobot_gui.log và thư mục potion_debug.
+- Bơm máu pet: gọi pet ra, mở GoBot (chưa bấm BẮT ĐẦU) và xem dòng "Pet"
+  dưới thanh HP và MP: phải có % máu của pet, khớp với thanh đỏ trong ô của
+  pet. Rồi đặt phím bình máu pet. Mức "khi máu pet dưới" chỉ lên tới 95%,
+  nên trước hết để pet bị đánh một chút cho máu pet xuống dưới 95%, rồi kéo
+  mức đó lên cao hơn máu pet lúc đó một chút, bấm BẮT ĐẦU và xem GoBot bấm
+  phím đó, cách nhau khoảng 3 giây. Thấy % sai, hay GoBot bấm khi không cần,
+  thì báo lại kèm gobot_gui.log (có dòng "Vitals: the pet's HP bar at ...").
 - Tự đóng thông báo: lúc trong game đang có thông báo, bấm "Thử xem" cạnh
   ô này (chỉ nhìn). Chỉ đánh dấu khi nó nói đúng thông báo đó.
 - Phím dọn ngay, Phím vào game ngay: để trống nếu không cần. Muốn đặt thì
@@ -425,6 +801,21 @@ Nút nào bấm vào game, nút nào không:
   xem lại danh sách đó trước. Rồi đánh dấu "Dùng mảnh ghép", bấm "Dọn
   ngay" một lần và nhìn theo. Nếu Yêu Quái Bách Khoa vẫn mở, tự đóng nó
   bằng nút X.
+- Dùng bùa: chọn MỘT loại bùa ở nhóm bùa (hoặc chụp túi đồ), đánh dấu
+  "Dùng bùa" và bấm "Dùng bùa ngay" MỘT lần, nhìn theo: bùa phải mất
+  đúng một cái và game hiện hiệu lực 1 giờ. "Thử tìm (không xoá)" chỉ ghi
+  một dòng "bùa được dùng riêng" cho mỗi ô bùa thấy được, không bấm gì. Nếu GoBot
+  không bấm Xác Nhận vì "hộp thoại lạ", gửi các ảnh trong trash_debug và
+  các dòng "Trash: charm" trong log. Đừng thử bằng bùa quý khi chưa chắc.
+- Tự mua bình: bấm "Thử mua (không mua gì)" TRƯỚC, khi nhân vật đứng yên ở
+  chỗ an toàn có Người Giữ Sân trong ngăn Khác. Xem nhật ký: GoBot đếm bình,
+  mở cửa hàng, bấm đúp từng món, thấy hộp số lượng rồi Hủy Bỏ. Gửi các
+  ảnh trong trash_debug (shop_question, shop_not_seen...) và các dòng "Trash:"
+  của log, nhất là khi báo "không thấy cửa hàng" hay "không thấy hộp nhập số
+  lượng". Sau đó đặt "dưới" và "tới" cao hơn số ô bình đang có đúng 1-2 ô (ví
+  dụ đang có 3 ô thì đặt dưới 4, tới 5) để thử mua thật vài lần, nhìn theo:
+  hộp phải hiện 1 rồi 100 trước khi Xác Nhận, mỗi lần đầy đúng một ô. Cẩn
+  thận với tiền của nhân vật khi chưa chắc.
 
 Đừng:
 - bật nhiều phần thử nghiệm cùng lúc khi chưa thử từng phần;
@@ -500,14 +891,18 @@ Gặp lỗi khác:
   tổ đội, nếu bạn bật "Kèm tên người chơi khác" ở thẻ Thông báo), tên
   những người đã gõ từ khoá tổ đội, được mời hay không, đường dẫn thư mục
   trên máy (có tên người dùng Windows), địa chỉ mạng trong nhà (dạng
-  192.168.x.x), và các câu Tự chat đã gõ. File không có mật khẩu hay
+  192.168.x.x), địa chỉ máy chủ game và số bản đồ (khi bắt gói tin), và
+  các câu Tự chat đã gõ. File không có mật khẩu hay
   webhook. Bạn có thể mở bằng Notepad để xem trước, và thay các tên bằng
-  chữ khác nếu muốn.
+  chữ khác nếu muốn: lưu bản đã sửa ra chỗ khác (ví dụ Desktop) rồi gửi
+  bản đó, vì Notepad mở bình thường không ghi được vào thư mục GoBot.
 - Các thư mục trash_debug, revive_debug, quest_debug, chat_debug là ảnh
   chụp màn hình game lúc có lỗi. potion_debug giữ tới 20 ảnh cả màn hình
   game, chụp khi một ô bình hết, khi số bình tăng lên, hoặc khi một lần
   đọc số bình tụt bất thường rồi trở lại; keeper_debug giữ
-  tới 20 ảnh game, chụp khi GoBot tắt game vì không thấy nhân vật. Trong
+  tới 20 ảnh game, chụp khi GoBot tắt game vì không thấy nhân vật;
+  login_debug giữ tới 20 ảnh game, chụp mỗi lần Tự đăng nhập thử không
+  được ở một màn hình của game (ví dụ kẹt ở màn hình chọn kênh). Trong
   các ảnh đó thấy tên nhân vật, khung chat và người chơi khác. Chỉ gửi khi
   được hỏi, và xem trước khi gửi.
 - Đừng gửi: thư mục configs, file alerts_webhook.bin, webhook, tài khoản,
@@ -516,12 +911,14 @@ Gặp lỗi khác:
 
 8. CẬP NHẬT TỪ BẢN GOBOT CŨ
 
-- Giải nén bản mới ra một thư mục MỚI; đừng giải nén đè lên bản cũ.
+- Giải nén bản mới ra một thư mục MỚI trong C:\Program Files (xem mục 2);
+  đừng giải nén đè lên bản cũ.
 - Đơn giản nhất: đặt lại phím, tên nhân vật và danh sách tổ đội trên màn
   hình mới (vài phút).
 - Muốn giữ cài đặt cũ: đóng GoBot, rồi chép party.ini (tổ đội) từ thư mục
-  configs cũ sang thư mục configs mới. Nếu bản cũ đã có Dọn rác, chép thêm
-  trash.ini và thư mục trash. Đừng chép các file khác: bản mới đã khác.
+  configs cũ sang thư mục configs mới (Windows hỏi quyền quản trị thì bấm
+  "Tiếp tục"). Nếu bản cũ đã có Dọn rác, chép thêm trash.ini và thư mục
+  trash. Đừng chép các file khác: bản mới đã khác.
 - Đừng chép hunt.ini: hunt.ini của các bản cũ (trước 15/10/2026) có thể có
   sẵn tên nhân vật của người khác. Gõ lại tên nhân vật và phím đánh ở thẻ
   Đánh quái. Nếu lỡ chép rồi, xem lại ô "Tên nhân vật": phải là tên nhân
@@ -534,9 +931,15 @@ Gặp lỗi khác:
 - Phím kỹ năng, bình và buff cũng đặt lại trên màn hình mới: macro.ini của
   bản cũ có bật sẵn một chuỗi phím Z, X, C tự lặp. Bản này báo chuỗi đó ở
   dòng "Tự dùng kỹ năng", kèm nút "Tắt".
-- macro.ini của bản này giữ tới 16 phím (để có bình Lv2). GoBot bản cũ hơn
-  chỉ đọc 12 phím đầu (key_0 tới key_11) và bỏ các phím sau khi lưu: đừng
-  mở thư mục configs của bản này bằng GoBot cũ, kẻo mất bình Lv2.
+- macro.ini của bản này giữ tới 16 phím (để có bình Lv2). Một GoBot cũ hơn
+  có thể chỉ đọc 12 phím đầu (key_0 tới key_11) và bỏ các phím sau khi lưu,
+  làm mất bình Lv2: đừng mở thư mục configs của bản này bằng GoBot cũ. Lưu
+  bằng GoBot cũ cũng biến bình máu pet thành một phím bấm theo giờ (cứ 3 giây
+  bấm một lần), và bản này đọc lại đúng như vậy. GoBot cũ cũng không biết dấu buff
+  (key_N_buff): phím buff dưới 60 giây thành phím kỹ năng (không buff lại
+  sau khi chết), phím buff 0 giây không bao giờ được bấm, và khi lưu GoBot
+  cũ bỏ dấu đó -- mở lại bằng bản này thì đặt lại các phím buff ngắn ở dòng
+  Tự buff.
 - Bình: nay khi HP (hay MP) dưới cả hai mức, chỉ bình có mức % thấp hơn
   được uống; bình đến lúc uống được bấm trước mọi kỹ năng và buff, kể cả
   ngay lúc bấm BẮT ĐẦU. Bình chưa bấm được (bot đang bấm phím khác, đang

@@ -280,7 +280,6 @@ private:
     /// Click a client point of the game; false, and `why_not` says why, when
     /// the click did not go out.
     bool click(int x, int y, const char* what, std::string* why_not = nullptr);
-    bool mouse_ok(int x, int y, std::string* why_not);
     void bring_forward();
     bool stop_now() const;
     bool wait_ms(int ms);

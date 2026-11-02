@@ -156,6 +156,9 @@ inline constexpr bool kTrialStyles  = true;  ///< Kiểu đánh: tầm đánh v�
 inline constexpr bool kTrialKeepDistance = true; ///< Giữ khoảng cách: lùi lại, có giới hạn
 inline constexpr bool kTrialJump    = true;  ///< Phím nhảy và nút Thử
 inline constexpr bool kTrialSkills  = true;  ///< Kỹ năng chỉ khi đang đánh quái
+inline constexpr bool kTrialPetPotion = true; ///< Tự bơm máu pet: thanh máu pet tự tìm trên HUD
+inline constexpr bool kTrialPacketPositions = true; ///< Vị trí từ gói tin: vị trí nhân vật và quái từ gói tin
+inline constexpr bool kTrialSpot    = true;  ///< Chỗ đánh quái: vùng đánh quanh chỗ đứng, tự đi về chỗ
 
 inline constexpr const char* kTrialTabText =
     "Thử nghiệm: phần này chưa chạy trên game thật. Thử từng bước và ngồi xem; thấy lạ thì bấm F12.";

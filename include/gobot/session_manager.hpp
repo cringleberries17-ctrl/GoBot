@@ -142,8 +142,9 @@ public:
     /// than calling the API directly, for one reason: that gives a visible
     /// countdown the person can call off with `shutdown /a`. An unattended bot
     /// turning a machine off is the single most annoying thing in this file if
-    /// it is ever wrong, so it had better be interruptible. Refused under the
-    /// "no real input" switch.
+    /// it is ever wrong, so it had better be interruptible. The command is
+    /// System32's shutdown.exe, started by its full path, never one found
+    /// beside GoBot. Refused under the "no real input" switch.
     static bool request_shutdown(int delay_s, const std::string& why);
 
 private:

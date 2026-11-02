@@ -416,8 +416,15 @@ bool QuestSettings::load(const std::string& path) {
     get_int("quest", "interval_min", s.interval_min, kMinInterval, kMaxInterval);
     get_int("quest", "first_delay_s", s.first_delay_s, 0, 600);
     if (value("quest", "quest_key", v)) {
-        // A number, as the other files keep keys, or a key's name.
-        const std::uint32_t vk = InputManager::parse_key(trim(v));
+        // A number, as the other files keep keys, or a key's name. A lone
+        // digit is read as GoBot wrote it before it saved names: the key's
+        // code, so 9 is Tab. Read as the 9 key, a Tab chosen then pressed
+        // hotbar slot 9 every round. The digit keys are written as 0x30-0x39
+        // (key_text), and 1-7, mouse buttons as codes, are refused below.
+        const std::string t = trim(v);
+        const std::uint32_t vk = t.size() == 1 && t[0] >= '0' && t[0] <= '9'
+                                     ? static_cast<std::uint32_t>(t[0] - '0')
+                                     : InputManager::parse_key(t);
         if (usable_key(vk)) s.quest_key = vk;
     }
     get_int("quest", "max_failures", s.max_failures, 1, 20);
@@ -471,6 +478,15 @@ bool QuestSettings::load(const std::string& path) {
 
     *this = std::move(s);
     return true;
+}
+
+std::string QuestSettings::key_text(std::uint32_t vk) {
+    if (vk >= '0' && vk <= '9') {
+        char hex[8];
+        std::snprintf(hex, sizeof hex, "0x%02X", static_cast<unsigned>(vk));
+        return hex;
+    }
+    return InputManager::key_name(vk);
 }
 
 bool QuestSettings::save_key(const std::string& path, const std::string& section,

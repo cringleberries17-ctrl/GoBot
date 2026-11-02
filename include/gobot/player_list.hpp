@@ -88,8 +88,8 @@ public:
         ///
         /// Not an exact match, because these names are read off the screen,
         /// and lower here than elsewhere because this list reads worse than
-        /// the invitation dialog does: the same player came back as
-        /// "Mag cTo h n", which is seven of ten letters in the right order.
+        /// the invitation dialog does: the same player's ten-letter name came
+        /// back with three letters lost or misread, the other seven in order.
         double min_name_match = 0.6;
 
         /// The level column, the first of the three.
@@ -120,6 +120,13 @@ public:
         std::string name;
     };
 
+    /// Asked between the steps of ensure_open() and invite() and all through
+    /// their waits; true there stops it with nothing more clicked, and `why`
+    /// says "stopped". F12 or DỪNG in the middle of an invite used to wait out
+    /// all of it -- some eight seconds of the row and Req Party clicked -- with
+    /// the window that reads F12 frozen behind it. Empty: never stopped.
+    using Stop = std::function<bool()>;
+
     void set_settings(const Settings& s) {
         settings_ = s;
         placed_ = s;
@@ -141,7 +148,8 @@ public:
     /// clicked. Outside it is the play field, or another panel.
     bool in_panel(int x, int y) const;
 
-    /// For tests: the clicks go here instead of to the game.
+    /// For tests: the clicks go here instead of to the game -- the button
+    /// that opens the list, the row and Req Party.
     void set_click(std::function<bool(int, int)> fn) { click_ = std::move(fn); }
 
     /// Whether the three-button menu is drawn over the list, below this row.
@@ -156,9 +164,11 @@ public:
     bool open(const Frame& frame, const TemplateStore& store) const;
 
     /// Open it if it is not already, and place it from its button. False,
-    /// with a reason, if the button that opens it is not on screen.
+    /// with a reason, if the button that opens it is not on screen -- or when
+    /// `stop` said so.
     bool ensure_open(InputManager& input, ScreenCapture& capture,
-                     const TemplateStore& store, std::string* why);
+                     const TemplateStore& store, std::string* why,
+                     const Stop& stop = {});
 
     /// Every row that has a name on it -- none until the list is placed.
     std::vector<Row> read(const Frame& frame, const GlyphFont& font) const;
@@ -168,13 +178,18 @@ public:
     int find(const std::vector<Row>& rows, const std::string& who) const;
 
     /// Pick a row and press "Req Party". The caller has already decided this
-    /// player should be invited.
+    /// player should be invited. `stop` as for ensure_open.
     bool invite(InputManager& input, ScreenCapture& capture,
                 const TemplateStore& store, const Row& row,
-                std::string* why) const;
+                std::string* why, const Stop& stop = {}) const;
 
 private:
-    bool click(InputManager& input, int x, int y) const;
+    /// A click on the game, with the caller's `stop` asked again after the
+    /// pointer's pause, just before the button goes down.
+    bool click(InputManager& input, int x, int y, const Stop& stop) const;
+    /// Sleep `ms` in short slices, asking `stop` between them: false once it
+    /// says stop.
+    static bool nap(int ms, const Stop& stop);
 
     Settings settings_;
     Settings placed_;

@@ -38,6 +38,37 @@ bool is_loopback(std::uint32_t ip)   { return (ip >> 24) == 127; }
 bool is_linklocal(std::uint32_t ip)  { return (ip >> 16) == 0xA9FE; }   // 169.254/16
 bool is_unspecified(std::uint32_t ip) { return ip == 0; }
 
+/// The local ports of the UDP sockets whose owning process `takes` says yes
+/// to, lowest first, each once: one walk of Windows' UDP table for both ways
+/// of naming the process, by its file name and by its id.
+std::vector<std::uint16_t> udp_ports_where(const std::function<bool(std::uint32_t)>& takes) {
+    std::vector<std::uint16_t> out;
+
+    ULONG size = 0;
+    if (GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER) {
+        return out;     // no UDP sockets at all, or no table to read
+    }
+
+    std::vector<std::uint8_t> buf(size);
+    auto* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buf.data());
+    if (GetExtendedUdpTable(table, &size, FALSE, AF_INET,
+                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR) {
+        GB_WARN("GetExtendedUdpTable failed");
+        return out;
+    }
+
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const MIB_UDPROW_OWNER_PID& row = table->table[i];
+        if (!takes(row.dwOwningPid)) continue;
+        out.push_back(static_cast<std::uint16_t>(ntohs(static_cast<u_short>(row.dwLocalPort))));
+    }
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 } // namespace
 
 std::string ip_to_string(std::uint32_t ip) {
@@ -210,35 +241,20 @@ std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name) {
 }
 
 std::vector<std::uint16_t> udp_ports_for_process(SocketOwners& owners) {
-    std::vector<std::uint16_t> out;
-
-    ULONG size = 0;
-    if (GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET,
-                            UDP_TABLE_OWNER_PID, 0) != ERROR_INSUFFICIENT_BUFFER) {
-        return out;     // no UDP sockets at all, or no table to read
-    }
-
-    std::vector<std::uint8_t> buf(size);
-    auto* table = reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(buf.data());
-    if (GetExtendedUdpTable(table, &size, FALSE, AF_INET,
-                            UDP_TABLE_OWNER_PID, 0) != NO_ERROR) {
-        GB_WARN("GetExtendedUdpTable failed");
-        return out;
-    }
-
-    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
-        const MIB_UDPROW_OWNER_PID& row = table->table[i];
-        if (!owners.takes(row.dwOwningPid)) continue;
-        out.push_back(static_cast<std::uint16_t>(ntohs(static_cast<u_short>(row.dwLocalPort))));
-    }
-
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-    return out;
+    return udp_ports_where([&owners](std::uint32_t pid) { return owners.takes(pid); });
 }
 
-std::string build_filter_for(const std::vector<ProcessConnection>& conns,
-                             const std::vector<std::uint16_t>& udp_ports) {
+std::vector<std::uint16_t> udp_ports_for_pid(std::uint32_t pid) {
+    // Pid 0 is the System Idle Process, and no window's: no game to ask for.
+    if (pid == 0) return {};
+    return udp_ports_where([pid](std::uint32_t owner) { return owner == pid; });
+}
+
+namespace {
+
+/// build_filter_for, or with `own` build_own_filter_for.
+std::string filter_for(const std::vector<ProcessConnection>& conns,
+                       const std::vector<std::uint16_t>& udp_ports, bool own) {
     // UDP as well as TCP, as GoC captures it: nothing GoBot has recorded can
     // say whether the game uses UDP, and a filter that leaves it out cannot
     // find out.
@@ -246,13 +262,17 @@ std::string build_filter_for(const std::vector<ProcessConnection>& conns,
 
     // Match each connection by its remote endpoint. Pinning the port as well
     // as the host keeps a busy server's other services out of the sample.
+    // Its own end's port too, for one game's traffic alone: a second client
+    // on this PC talks to the same host and port, from a port of its own.
     std::ostringstream servers;
     if (!conns.empty()) {
-        servers << "(tcp or udp) and (";
+        servers << (own ? "tcp and (" : "(tcp or udp) and (");
         for (std::size_t i = 0; i < conns.size(); ++i) {
             if (i) servers << " or ";
             servers << "(host " << ip_to_string(conns[i].remote.ip)
-                    << " and port " << conns[i].remote.port << ")";
+                    << " and port " << conns[i].remote.port;
+            if (own && conns[i].local.port != 0) servers << " and port " << conns[i].local.port;
+            servers << ")";
         }
         servers << ")";
     }
@@ -265,9 +285,13 @@ std::string build_filter_for(const std::vector<ProcessConnection>& conns,
     //   - the servers' ports, as GoC's own "(tcp or udp) and port 15101"
     //     takes them, with no host: a datagram from another of the game's
     //     hosts, to a socket the game opened after this filter was built --
-    //     on a map load, say -- is still let in.
+    //     on a map load, say -- is still let in. Not for one game's traffic
+    //     alone: a second client's datagrams go to those ports as well, and
+    //     whoever builds that filter builds it again for a socket opened
+    //     later (the GUI's capture for positions: should_reattach).
     std::vector<std::uint16_t> ports = udp_ports;
-    for (const auto& c : conns) ports.push_back(c.remote.port);
+    if (!own)
+        for (const auto& c : conns) ports.push_back(c.remote.port);
     std::sort(ports.begin(), ports.end());
     ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
     ports.erase(std::remove(ports.begin(), ports.end(), std::uint16_t{0}), ports.end());
@@ -285,6 +309,18 @@ std::string build_filter_for(const std::vector<ProcessConnection>& conns,
     if (ports.empty()) return servers.str();
     if (conns.empty()) return udp.str();
     return "(" + servers.str() + ") or (" + udp.str() + ")";
+}
+
+} // namespace
+
+std::string build_filter_for(const std::vector<ProcessConnection>& conns,
+                             const std::vector<std::uint16_t>& udp_ports) {
+    return filter_for(conns, udp_ports, false);
+}
+
+std::string build_own_filter_for(const std::vector<ProcessConnection>& conns,
+                                 const std::vector<std::uint16_t>& udp_ports) {
+    return filter_for(conns, udp_ports, true);
 }
 
 } // namespace gobot

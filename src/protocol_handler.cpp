@@ -59,11 +59,14 @@ void ProtocolHandler::on_packet(const GamePacket& pkt) {
     auto decoded = registry_.decode(pkt);
 
     if (!decoded) {
+        // Registered but wouldn't parse — the layout is wrong or the packet
+        // is a variant. Worth distinguishing from truly unmapped. Asked before
+        // stats_mutex_ is taken, so no lock of ours is ever held while the
+        // registry takes its own.
+        const bool registered = registry_.known(pkt.opcode);
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
-            if (registry_.known(pkt.opcode)) {
-                // Registered but wouldn't parse — the layout is wrong or the
-                // packet is a variant. Worth distinguishing from truly unmapped.
+            if (registered) {
                 ++stats_.malformed;
             } else {
                 ++stats_.unknown;
@@ -97,11 +100,16 @@ void ProtocolHandler::apply(const DecodedPacket& d, const GamePacket& raw) {
             handle_self_hpmp(d);
             break;
 
-        case Semantic::SelfDead:
+        case Semantic::SelfDead: {
+            // Once per death: an HP reading of 0 may have reported it already.
+            const bool was_dead = state_.self().dead;
             state_.set_self_dead(true);
-            GB_INFO("Player died");
-            if (on_death_) on_death_();
+            if (!was_dead) {
+                GB_INFO("Player died");
+                if (on_death_) on_death_();
+            }
             break;
+        }
 
         case Semantic::SelfRevive:
             state_.set_self_dead(false);
@@ -179,8 +187,17 @@ void ProtocolHandler::handle_self_state(const DecodedPacket& d) {
     }
 
     if (d.has("hp")) {
+        // HP at or below 0 is a death, and with no self_dead mapped -- the
+        // layouts the tools write have none -- the only sign of one. It used
+        // to mark the character dead without calling on_death_, so a bot set
+        // to stop at a death never stopped. Once per death, on the way down.
+        const bool was_dead = state_.self().dead;
         state_.update_self_hp(static_cast<std::int32_t>(first_int(d, { "hp" })),
                               static_cast<std::int32_t>(first_int(d, { "max_hp", "hp_max" })));
+        if (!was_dead && state_.self().dead) {
+            GB_INFO("Player died (HP read 0)");
+            if (on_death_) on_death_();
+        }
     }
     if (d.has("mp")) {
         state_.update_self_mp(static_cast<std::int32_t>(first_int(d, { "mp" })),
@@ -193,8 +210,13 @@ void ProtocolHandler::handle_self_state(const DecodedPacket& d) {
 
 void ProtocolHandler::handle_self_hpmp(const DecodedPacket& d) {
     if (d.has("hp")) {
+        const bool was_dead = state_.self().dead;     // once per death, as in handle_self_state
         state_.update_self_hp(static_cast<std::int32_t>(first_int(d, { "hp" })),
                               static_cast<std::int32_t>(first_int(d, { "max_hp", "hp_max" })));
+        if (!was_dead && state_.self().dead) {
+            GB_INFO("Player died (HP read 0)");
+            if (on_death_) on_death_();
+        }
     }
     if (d.has("mp")) {
         state_.update_self_mp(static_cast<std::int32_t>(first_int(d, { "mp" })),

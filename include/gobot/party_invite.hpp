@@ -2,12 +2,16 @@
 
 #include "gobot/config.hpp"
 #include "gobot/glyph_font.hpp"
+#include "gobot/party.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
+#include <functional>
 #include <string>
 
 namespace gobot {
+
+class InputManager;   // gobot/input_manager.hpp
 
 /// Somebody has asked you to join their party, and there is nobody there to
 /// answer.
@@ -77,6 +81,38 @@ public:
         int accept_x = 0, accept_y = 0;
         int decline_x = 0, decline_y = 0;
     };
+
+    /// What to do about a dialog, and why, in words for the log.
+    enum class Answer { LeaveAlone, Decline, Accept };
+    struct Verdict {
+        Answer      answer = Answer::LeaveAlone;
+        std::string why;
+    };
+
+    /// The decision and nothing else, by the GUI's party worker's own rules.
+    ///
+    /// The footer picture is the two buttons every dialog has, so never one of
+    /// the trash bin's dialogs -- Xác Nhận there deletes an item -- and never a
+    /// dialog whose line names nobody, whatever accept_all says. The name is
+    /// checked whenever a rule turns on it. `rules.auto_accept` is not looked
+    /// at: whether to answer at all is the caller's.
+    static Verdict decide(const Seen& seen, bool bin_asking, const Party::Settings& rules);
+
+    /// Whether the look taken just before the click still shows the same
+    /// invitation from the same player: up, not the bin's, the same name read
+    /// on both, and the footer within a few pixels of where it was.
+    static bool same_invitation(const Seen& first, const Seen& again, bool bin_asking_again);
+
+    /// Answer `seen`: wait settle_ms when accepting, look again through
+    /// `grab`, and click only if that look shows the same invitation. Needs
+    /// the font, because the second look compares names. Never brings the
+    /// game forward -- that is the caller's, which knows whether it may take
+    /// the foreground. `stop` is asked through the pause and by the click.
+    /// True when the click went out; `why`, when given, says why not.
+    bool answer(InputManager& input, const std::function<bool(Frame&)>& grab,
+                const TemplateStore& store, const GlyphFont* font, const Seen& seen,
+                bool accept, const std::function<bool()>& stop = {},
+                std::string* why = nullptr) const;
 
     void set_settings(const Settings& s) { settings_ = s; }
     Settings settings() const { return settings_; }

@@ -72,19 +72,6 @@ struct SkillSlot {
     int           targets = 1;      ///< minimum targets in range before casting
 };
 
-struct BuffSlot {
-    std::string   key;
-    std::uint32_t keycode = 0;
-    std::uint32_t cooldown_sec = 1600;
-    bool          enabled = false;
-};
-
-struct HealRule {
-    bool          enabled = false;
-    std::uint32_t keycode = 0;
-    int           trigger_pct = 50;
-};
-
 enum class TargetMode {
     Nearest = 0,
     LowestHp = 1,
@@ -106,7 +93,6 @@ struct BotConfig {
     bool  ignore_fly_monster = true;
     bool  allow_attack_while_jumping = false;
     bool  enable_tile_pathfinding = false;
-    bool  auto_buff = true;
     bool  sequential_skill = true;
     bool  priority_boss = false;
     bool  overcome_obstacles = false;
@@ -135,12 +121,10 @@ struct BotConfig {
     bool  fix_location_after_login = false;
 
     static constexpr std::size_t kSkillSlots = 8;
-    static constexpr std::size_t kBuffSlots  = 6;
     SkillSlot skills[kSkillSlots];
-    BuffSlot  buffs[kBuffSlots];
 
-    // --- sustain ---
-    HealRule hp_heal1, hp_heal2, mp_heal1;
+    // --- revive --- (potions and buffs are the macro's, macro.ini: an
+    // engine of their own here drank beside the macro's for the same HP drop)
     bool     player_auto_revive = false;
     int      revive_max_attempts = 3;
 
@@ -154,7 +138,8 @@ struct BotConfig {
     std::uint32_t key_down = 40;
     std::uint32_t key_loot = 90;            // 'Z'
 
-    // --- hotkeys ---
+    // --- gobot_cli's on/off key for the packet bot (hotkey_loop). gobot_gui
+    // does not read it: its F10 is macro.ini's toggle_key. ---
     std::uint32_t key_start_stop = 121;     // F10
 
     // --- patrol ---
@@ -172,6 +157,13 @@ struct BotConfig {
     bool load(const std::string& path);
     bool save(const std::string& path) const;
     void apply_defaults();
+
+    /// Whether a started bot will attack or cast at all: the attack with its
+    /// key, or a skill (skills go only with the attack). With neither -- as
+    /// bot_default.ini ships -- it does neither; only the movement settings
+    /// can still move the character. Its potions and buffs are not this
+    /// config's but the macro's.
+    bool any_action_on() const;
 };
 
 // --------------------------------------------------------------- app config

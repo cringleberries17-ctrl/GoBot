@@ -21,6 +21,9 @@ constexpr int kNameDx = -161;
 constexpr int kClickDx = -94;
 constexpr int kFirstRowDy = 33;
 
+/// What `why` says when the stop predicate ended it.
+constexpr const char* kStopped = "stopped";
+
 } // namespace
 
 PlayerList::Settings PlayerList::Settings::at_button(int bx, int by) const {
@@ -47,8 +50,26 @@ bool PlayerList::in_panel(int x, int y) const {
     return panel.contains(x, y) && x >= 0 && y >= 0 && x < frame_w_ && y < frame_h_;
 }
 
-bool PlayerList::click(InputManager& input, int x, int y) const {
-    return click_ ? click_(x, y) : input.click_at(x, y);
+bool PlayerList::click(InputManager& input, int x, int y, const Stop& stop) const {
+    // Only with the game in front and the game itself under the point, both
+    // asked again as the button goes down: the frames come from PrintWindow,
+    // which shows the game even when it is covered. So is the stop: one that
+    // comes in the pointer's pause clicks nothing.
+    return click_ ? click_(x, y) : input.click_on_game(x, y, false, stop);
+}
+
+bool PlayerList::nap(int ms, const Stop& stop) {
+    // Against the clock rather than by adding up the slices: Windows rounds
+    // each sleep up to its 15.6 ms tick, and 50 ms slices made a wait of a
+    // second a quarter longer.
+    using clock = std::chrono::steady_clock;
+    const auto until = clock::now() + std::chrono::milliseconds(ms);
+    for (;;) {
+        if (stop && stop()) return false;
+        const auto left = until - clock::now();
+        if (left <= clock::duration::zero()) return true;
+        std::this_thread::sleep_for(std::min<clock::duration>(left, std::chrono::milliseconds(50)));
+    }
 }
 
 void PlayerList::Settings::load(const IniFile& ini) {
@@ -175,17 +196,20 @@ bool PlayerList::open(const Frame& frame, const TemplateStore& store) const {
 }
 
 bool PlayerList::ensure_open(InputManager& input, ScreenCapture& capture,
-                             const TemplateStore& store, std::string* why) {
+                             const TemplateStore& store, std::string* why,
+                             const Stop& stop) {
     auto fail = [&](const std::string& text) {
         if (why) *why = text;
         return false;
     };
+    const auto stopped = [&] { return stop && stop(); };
+    if (stopped()) return fail(kStopped);
 
     // Input goes to whatever has the foreground, not to the window the
     // coordinates were worked out against.
     if (!input.window_focused()) {
         input.focus_window();
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (!nap(250, stop)) return fail(kStopped);
     }
 
     auto showing = [&](Frame& into) {
@@ -227,15 +251,18 @@ bool PlayerList::ensure_open(InputManager& input, ScreenCapture& capture,
     // do it; the second covers the case where the first arrives while the
     // panel is busy with something else.
     for (int press = 0; press < 2; ++press) {
-        input.click_at(bx, by);
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        if (stopped()) return fail(kStopped);
+        click(input, bx, by, stop);
+        if (!nap(800, stop)) return fail(kStopped);
         if (showing(frame)) return true;
     }
 
     // Nothing worked, and the presses may have left the panel somewhere it
-    // was not. Put it back.
-    input.click_at(bx, by);
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    // was not. Put it back -- unless stopped meanwhile: a stop clicks nothing
+    // more.
+    if (stopped()) return fail(kStopped);
+    if (!click(input, bx, by, stop) && stopped()) return fail(kStopped);
+    if (!nap(400, stop)) return fail(kStopped);
 
     return fail("the player list did not come up, or nobody else is on this map");
 }
@@ -267,7 +294,9 @@ int PlayerList::find(const std::vector<Row>& rows, const std::string& who) const
 
 bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
                         const TemplateStore& /*store*/, const Row& row,
-                        std::string* why) const {
+                        std::string* why, const Stop& stop) const {
+    const auto stopped = [&] { return stop && stop(); };
+
     // Both clicks inside the list as placed from its button, or neither.
     // Outside it is the play field -- where the 1024x768 numbers put them on
     // a 1280x720 client -- or another panel, and a click there is a walk or
@@ -286,13 +315,30 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
         if (why) *why = "that row, or its Req Party, is outside the list";
         return false;
     }
+    if (stopped()) {
+        if (why) *why = kStopped;
+        return false;
+    }
 
     if (!input.window_focused()) {
         input.focus_window();
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (!nap(250, stop)) {
+            if (why) *why = kStopped;
+            return false;
+        }
     }
 
-    click(input, placed_.click_x, row.y);
+    // A row click that did not go -- the game not in front, or something over
+    // the list -- is the end of it: Req Party is only ever pressed on a row
+    // that was picked.
+    if (!click(input, placed_.click_x, row.y, stop)) {
+        if (why) {
+            if (stopped()) *why = kStopped;
+            else *why = "the click on the row was refused -- the game is not in front, or "
+                        "something covers the list";
+        }
+        return false;
+    }
 
     // Wait for the menu to be drawn before pressing anything on it.
     //
@@ -300,15 +346,20 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
     // where "Req Party" was going to be, the menu came up afterwards, and the
     // run reported "Invited" with the menu still sitting on screen untouched.
     // The same click a moment later worked perfectly.
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(settings_.menu_wait_ms));
+    if (!nap(settings_.menu_wait_ms, stop)) {
+        // The row is picked and its menu may be up: left as it is. A stop
+        // presses nothing more, and the menu goes with the next click on the
+        // game.
+        if (why) *why = kStopped;
+        return false;
+    }
 
     // "Req Party" sits between a private message and a trade offer, and it is
     // reached by offset from the row rather than by looking for a lone button
     // -- there are three of them, they look alike, and clicking either of the
     // others is not a quiet failure.
-    if (!click(input, x, y)) {
-        if (why) *why = "the invite click was refused";
+    if (!click(input, x, y, stop)) {
+        if (why) *why = stopped() ? kStopped : "the invite click was refused";
         return false;
     }
 
@@ -326,14 +377,19 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
     // the server then makes of it is a separate question.
     bool pressed = false;
     for (int i = 0; i < 10 && !pressed; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        if (!nap(400, stop)) break;
         Frame after;
         if (!capture.grab(input.target_window(), after) || !after.valid()) continue;
         pressed = !menu_up(after, row.y);
     }
     if (!pressed) {
-        if (why) *why = "the menu is still up after four seconds, so that press "
-                        "did not land";
+        if (why) {
+            if (stopped())
+                *why = "stopped before the press could be seen to land";
+            else
+                *why = "the menu is still up after four seconds, so that press "
+                       "did not land";
+        }
         return false;
     }
 

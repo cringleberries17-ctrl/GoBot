@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -128,6 +129,36 @@ void heading(ImFont* strong, const char* text) {
 /// Indent a hint so it lines up with the text after a checklist mark.
 float mark_indent() {
     return ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+}
+
+/// What to do when Windows scales the game (gobot/dpi.hpp), under its line.
+const char* scale_hint(ScaleCure cure) {
+    switch (cure) {
+        case ScaleCure::SetOverride:
+            return "Tỉ lệ hiển thị của Windows lớn hơn 100% nên Windows phóng to game, mà bot đọc màn hình "
+                   "theo từng điểm ảnh nên không đọc được gì. Bấm Sửa cho game rồi tắt game và mở lại. "
+                   "Hoặc đặt tỉ lệ hiển thị (Settings > Display > Scale) về 100%.";
+        case ScaleCure::SetOverrideOrMove:
+            return "Màn hình đang có game có tỉ lệ hiển thị lớn hơn 100% nên Windows phóng to game, mà bot "
+                   "đọc màn hình theo từng điểm ảnh nên không đọc được gì. Kéo game sang màn hình có tỉ lệ "
+                   "100%, hoặc bấm Sửa cho game rồi tắt game và mở lại.";
+        case ScaleCure::RestartGame:
+            return "Đã sửa: tắt game và mở lại.";
+        case ScaleCure::OverrideIgnored:
+            return "Đã sửa và game đã mở lại, nhưng Windows vẫn phóng to game: cài đặt không có tác dụng. "
+                   "Tự đặt: chuột phải vào file chạy game > Properties > Compatibility > Change high DPI "
+                   "settings > đánh dấu Override high DPI scaling behavior, chọn Application. Hoặc đặt tỉ lệ "
+                   "hiển thị (Settings > Display > Scale) về 100%.";
+        case ScaleCure::MoveToMainScreen:
+            return "Game đang ở màn hình có tỉ lệ hiển thị khác màn hình chính. Kéo game sang màn hình "
+                   "chính, hoặc đặt hai màn hình cùng một tỉ lệ (Settings > Display > Scale).";
+        case ScaleCure::RestartOrSignIn:
+            return "Tỉ lệ hiển thị của màn hình chính đã đổi sau khi mở game. Tắt game và mở lại; nếu "
+                   "vẫn thế, đăng xuất Windows (Sign out) rồi đăng nhập lại.";
+        case ScaleCure::None:
+            break;
+    }
+    return "";
 }
 
 /// A key's name as a player would write it.
@@ -316,7 +347,10 @@ void GuiApp::draw_simple_view() {
     // The keys a player is most likely to look for are the potion ones, and
     // a config whose potion keys were deleted on the full screen would leave
     // those rows with nothing to show. Put them back, switched off; nothing is
-    // written to disk unless something is changed.
+    // written to disk unless something is changed. Not the pet's: which of
+    // the hotbar's keys its potion is on, only its player knows, and a key
+    // kept with none would take one of the 16 for nothing. Its row makes its
+    // key when it is given one (simple_jobs).
     if (!simple_seeded_) {
         simple_seeded_ = true;
         const struct { MacroKeyKind kind; MacroTrigger trigger; std::uint32_t vk;
@@ -479,10 +513,8 @@ void GuiApp::simple_checklist() {
         if (ImGui::Button("Tìm lại")) {
             windows_ = InputManager::enumerate_windows();
             window_list_loaded_ = true;
-            input_.find_game_window(app_config_.window_title, app_config_.window_class,
-                                    app_config_.process_name);
-            if (input_.window_valid()) {
-                apply_vitals_config();
+            if (find_and_retarget(app_config_.window_title, app_config_.window_class,
+                                  app_config_.process_name)) {
                 simple_reader_tried_ = false;     // look at the bars again
                 simple_note("Đã tìm thấy game.");
             } else {
@@ -515,6 +547,59 @@ void GuiApp::simple_checklist() {
         ImGui::Indent(mark_indent());
         hint("Bot nhìn màn hình game để đọc HP/MP và tìm quái, nên game phải hiện rõ, "
              "không bị gì che.");
+        ImGui::Unindent(mark_indent());
+    }
+
+    // ---- Windows scaling it ----
+    //
+    // Above 100% display scale Windows enlarges a game that does not handle DPI
+    // itself, and frames of it read off the screen are blurred and the wrong
+    // size: nothing the readers look for is found, and every line below fails
+    // with it. Only shown when it is happening.
+    if (have_game && game_scaling_.stretched()) {
+        mark(Mark::Bad);
+        ImGui::SameLine();
+        const std::string scaled = (game_scaling_.percent >= 100 ? "Windows đang phóng to game lên "
+                                                                 : "Windows đang thu nhỏ game còn ") +
+                                   std::to_string(game_scaling_.percent) + "%";
+        label(scaled.c_str());
+        if (game_scaling_cure_ == ScaleCure::SetOverride || game_scaling_cure_ == ScaleCure::SetOverrideOrMove) {
+            ImGui::SameLine();
+            if (ImGui::Button("Sửa cho game")) simple_note(fix_game_scaling(), 12000);
+        }
+        ImGui::Indent(mark_indent());
+        hint(scale_hint(game_scaling_cure_));
+        if (game_scaling_cure_ == ScaleCure::OverrideIgnored && !game_scaling_program_.empty())
+            hint(("File chạy game: " + game_scaling_program_).c_str());
+        ImGui::Unindent(mark_indent());
+    }
+
+    // ---- Windows scaling GoBot itself ----
+    //
+    // Then nothing GoBot reads off the screen is the screen's real pixels,
+    // whatever the game does: before Windows 10 1607 above 100%, or with a
+    // high-DPI override on GoBot's own exe. Only shown when it is so.
+    if (threads_view_percent() > 100) {
+        mark(Mark::Bad);
+        ImGui::SameLine();
+        const std::string own = "Windows đang phóng to chính GoBot lên " + std::to_string(threads_view_percent()) + "%";
+        label(own.c_str());
+        const bool can_fix = real_pixels_possible() && own_override_found_ && !own_scaling_fixed_;
+        if (can_fix) {
+            ImGui::SameLine();
+            if (ImGui::Button("Sửa cho GoBot")) simple_note(fix_own_scaling(), 12000);
+        }
+        ImGui::Indent(mark_indent());
+        hint(!real_pixels_possible()
+                 ? "Bản Windows này cũ hơn Windows 10 bản 1607, nên khi tỉ lệ hiển thị lớn hơn 100% GoBot không "
+                   "đọc được game. Hãy đặt tỉ lệ hiển thị của Windows về 100%."
+             : own_scaling_fixed_ ? "Đã sửa: tắt GoBot và mở lại."
+             : can_fix ? "GoBot đang có cài đặt Override high DPI scaling behavior (trong Properties > "
+                         "Compatibility) nên Windows phóng to GoBot, và GoBot không đọc được game. Bấm Sửa cho "
+                         "GoBot rồi tắt GoBot và mở lại."
+                       : "Windows đang phóng to GoBot, nên GoBot không đọc được game. Chuột phải vào "
+                         "gobot_gui.exe > Properties > Compatibility > Change high DPI settings > bỏ dấu Override "
+                         "high DPI scaling behavior, rồi tắt GoBot và mở lại. Hoặc đặt tỉ lệ hiển thị về 100%.");
         ImGui::Unindent(mark_indent());
     }
 
@@ -560,6 +645,9 @@ void GuiApp::simple_checklist() {
     // ---- the jump key, while fighting is ticked ----
     simple_jump_checklist();    // simple_style.cpp
 
+    // ---- Npcap, while fighting and Chỗ đánh quái are ticked ----
+    simple_spot_checklist();    // simple_spot.cpp
+
     // ---- HP and MP ----
     {
         const bool hp = vitals_running_ && vitals_.hp_percent() >= 0.0f;
@@ -593,17 +681,21 @@ void GuiApp::simple_checklist() {
                 simple_find_bars_ = false;
                 BarSpec hp_found = macro_config_.hp_bar;
                 BarSpec mp_found = macro_config_.mp_bar;
+                // Only HP over MP as the game draws them (bars_paired). This
+                // screen shows no rectangles and saves at once, and find_bars'
+                // fallback -- the topmost red and the topmost blue anywhere --
+                // took the server list's sky for the bars on 2026-10-27, its
+                // colours with it.
                 const int n = VitalsReader::find_bars(frame, hp_found, mp_found);
-                if (n == 0) {
-                    simple_note("Không tìm thấy thanh HP/MP. Để game hiện rõ, không bị cửa "
-                                "sổ nào che, rồi thử lại.");
+                if (n != 2 || !VitalsReader::bars_paired(hp_found, mp_found)) {
+                    simple_note("Không tìm thấy thanh HP/MP. Vào game (thấy nhân vật), để game hiện rõ, "
+                                "không bị cửa sổ nào che, rồi thử lại.");
                 } else {
                     macro_config_.hp_bar = hp_found;
                     macro_config_.mp_bar = mp_found;
                     apply_vitals_config();
                     simple_changed();
-                    simple_note(n == 2 ? "Đã tìm thấy thanh HP và MP."
-                                       : "Mới tìm thấy một thanh. Kiểm tra lại số HP/MP bên dưới.");
+                    simple_note("Đã tìm thấy thanh HP và MP.");
                 }
             } else if (now_ms() - simple_find_bars_since_ms_ > 4000) {
                 simple_find_bars_ = false;
@@ -660,6 +752,22 @@ void GuiApp::simple_vitals() {
                            ImVec2(-1, ImGui::GetFrameHeight()), text);
         ImGui::PopStyleColor();
     }
+
+    // The pet's, once its bar is found or its potion is on: a percentage
+    // only, as the game prints no figures on that bar.
+    const float pet = vitals_running_ ? vitals_.pet_percent() : -1.0f;
+    const bool pet_on = std::any_of(macro_config_.keys.begin(), macro_config_.keys.end(), [](const MacroKey& k) {
+        return k.enabled && k.keycode != 0 && macro_key_kind(k) == MacroKeyKind::PetPotion;
+    });
+    if (pet < 0.0f && !pet_on) return;
+    label("Pet");
+    ImGui::SameLine(58);
+    char text[64];
+    if (pet < 0.0f) std::snprintf(text, sizeof text, "chưa thấy thanh máu pet");
+    else            std::snprintf(text, sizeof text, "%.0f%%", pet);
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.90f, 0.50f, 0.30f, 1.0f));
+    ImGui::ProgressBar(pet < 0.0f ? 0.0f : pet / 100.0f, ImVec2(-1, ImGui::GetFrameHeight()), text);
+    ImGui::PopStyleColor();
 }
 
 // ------------------------------------------------------------------- jobs
@@ -760,12 +868,47 @@ void GuiApp::simple_jobs() {
     simple_jump_box();          // "Phím nhảy [k] [Thử]" beside it: simple_style.cpp
     simple_style_line();        // "Kiểu đánh [▼] (?) [Tầm đánh…]": simple_style.cpp
     if (ImGui::Checkbox("Đứng yên một chỗ", &hunt_config_.stay_put)) simple_changed();
-    ImGui::SetItemTooltip("Không đi đâu cả: chỉ đánh con quái nào tới trong tầm đánh.\n"
-                          "Hợp với chỗ quái tự kéo tới.");
+    ImGui::SetItemTooltip("Không đi tới quái: chỉ đánh con quái nào tới trong tầm đánh.\n"
+                          "Hợp với chỗ quái tự kéo tới.\n"
+                          "Có dấu cả Chỗ đánh quái: bị đẩy ra xa chỗ thì đi bộ về chỗ.");
     simple_keep_distance_tick();    // "Giữ khoảng cách" beside it: simple_style.cpp
+    // "Vị trí từ gói tin" beside them, or under them when the row is full.
+    // Ticked, the packets steer whenever they are healthy (On); unticked they
+    // are only watched and written to the log (Watch) -- the capture starts
+    // with the hunting either way. Off is the full window's alone.
+    {
+        const char* const kPackets = "Vị trí từ gói tin";
+        const float wide = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+                           ImGui::CalcTextSize(kPackets).x;
+        ImGui::SameLine(0, 18);
+        if (ImGui::GetContentRegionAvail().x < wide) ImGui::NewLine();
+        bool packets = hunt_config_.packet_positions == PacketPositions::On;
+        if (ImGui::Checkbox(kPackets, &packets)) {
+            hunt_config_.packet_positions = packets ? PacketPositions::On : PacketPositions::Watch;
+            simple_changed();
+        }
+        // Marked as the keep-distance tick's is, ticked or not: unticked, the
+        // capture still starts with every hunt.
+        const std::string tip = simple_ui::trial_hint(
+            simple_ui::kTrialPacketPositions,
+            "Lấy vị trí của nhân vật và của quái từ gói tin của game, thay vì đọc\n"
+            "tên trên màn hình. Cần Npcap (GoBot đã chạy bằng quyền quản trị).\n"
+            "Khi gói tin chưa dùng được (chưa có Npcap, vừa đổi bản đồ, đang dùng\n"
+            "Lọc quái...), bot tự đọc màn hình như cũ. Không đánh dấu: GoBot chỉ\n"
+            "theo dõi gói tin và ghi vào gobot_gui.log, vẫn đánh theo màn hình.");
+        ImGui::SetItemTooltip("%s", tip.c_str());
+    }
+    simple_spot_tick();         // "Chỗ đánh quái [Đặt chỗ này]" after them: simple_spot.cpp
     hint(hunt_config_.stay_put ? "Đứng yên tại chỗ, đánh con quái nào tới trong tầm đánh."
                                : "Tự đi tới con quái gần nhất và đánh nó.");
     simple_style_hints();
+    if (hunt_config_.packet_positions == PacketPositions::On)
+        hint(simple_ui::trial_hint(simple_ui::kTrialPacketPositions,
+                                   "Vị trí nhân vật và quái lấy từ gói tin của game khi dùng được; không thì "
+                                   "đọc màn hình như cũ. Dòng \"Vị trí:\" dưới nút BẮT ĐẦU cho biết đang "
+                                   "dùng cách nào.")
+                 .c_str());
+    simple_spot_hint();
     row_gap();
     simple_monster_row();       // "Lọc quái", simple_lists.cpp
 
@@ -836,19 +979,41 @@ void GuiApp::simple_jobs() {
     // down, say. With the reading under both, only the one with the lower %
     // drinks, and each has its own cooldown (MacroEngine, as GoC). A third or
     // more, made on the full screen, are kept and only counted here.
+    //
+    // HP's, MP's, and the pet's -- the pet's HP read off its own bar on the
+    // HUD, which the reader finds by itself. The slot counts ("Còn N bình")
+    // are HP's and MP's only.
     const auto potion_row = [&](MacroKeyKind kind, const char* job, const char* vital,
                                 const char* bar, const char* what) {
         const auto which = of_kind(kind);
-        if (which.empty()) return;          // there was no room left to add one
+        // HP's and MP's rows have their Lv1 always, put back if need be: none
+        // is no room left to add one. The pet's has no key until it is given
+        // one, and is drawn without one till then (`unset`).
+        const bool unset = which.empty();
+        if (unset && kind != MacroKeyKind::PetPotion) return;
         ImGui::PushID(job);
+        const bool stock = kind != MacroKeyKind::PetPotion;
+        const bool room = keys.size() < MacroConfig::kMaxKeys;
+        const std::string full = "Đã đủ " + std::to_string(MacroConfig::kMaxKeys) +
+                                 " phím: bỏ bớt một phím kỹ năng hoặc buff trước.";
 
         bool on = any_on(which);
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
+        ImGui::BeginDisabled(unset && !room);
         if (ImGui::Checkbox(job, &on)) {
             set_all(which, on);
-            simple_changed();
+            // Ticked with no key yet -- the pet's row starts with none: ask
+            // for it straight away, as the loot row does.
+            if (on && (unset || keys[which[0]].keycode == 0)) {
+                ImGui::PushID("potion");
+                simple_listening_ = ImGui::GetID("##box");
+                ImGui::PopID();
+            }
+            if (!unset) simple_changed();
         }
+        if (unset && !room) ImGui::SetItemTooltip("%s", full.c_str());
+        ImGui::EndDisabled();
         ImGui::TableNextColumn();
 
         // "khi HP dưới [n%]", after a key box.
@@ -876,61 +1041,82 @@ void GuiApp::simple_jobs() {
             ImGui::PopFont();
         };
 
-        // Lv1, as the row has always been. It cannot be emptied: the row is it.
-        MacroKey& k = keys[which[0]];
         label("Phím");
         ImGui::SameLine();
-        if (simple_key_box("potion", k.keycode, false, !k.enabled, nullptr)) simple_changed();
-        below("##below", k.threshold_pct);
-        simple_potion_stock(k);         // "Còn N bình", simple_potions.cpp
-        // Kept by value: a Lv2 made below may move every key.
-        const std::uint32_t lv1_key = k.enabled ? k.keycode : 0;
-        const int           lv1_pct = k.threshold_pct;
-
-        // Lv2: the second key of the kind, or an empty box that makes one.
-        // Emptied with Delete it is off, and gone from macro.ini once nothing
-        // is waiting for a key (drop_empty_keys).
-        label("Lv2: Phím");
-        ImGui::SameLine();
-        if (which.size() >= 2) {
-            MacroKey& k2 = keys[which[1]];
-            const std::string tip = lv2_tip(seconds_text(k2.interval_ms));
-            const std::uint32_t before = k2.keycode;
-            if (simple_key_box("potion2", k2.keycode, true, !k2.enabled, tip.c_str())) {
-                // Filling in an empty box means "use this one".
-                if (before == 0 && k2.keycode != 0) k2.enabled = true;
-                if (k2.keycode == 0) k2.enabled = false;
-                simple_changed();
-            }
-            below("##below2", k2.threshold_pct);
-            // On Lv1's key it is Lv1's slot, whose count is said above.
-            if (k2.keycode != lv1_key) simple_potion_stock(k2);
-            // Only the lower % drinks while the reading is under both, so a
-            // Lv2 not under its Lv1 changes which one does: said here.
-            if (k2.keycode != 0 && k2.threshold_pct == lv1_pct)
-                small_note(kWait, "Lv1 và Lv2 cùng mức %: chỉ Lv1 được uống.");
-            else if (k2.keycode != 0 && k2.threshold_pct > lv1_pct)
-                small_note(kWait, std::string("Lv2 đang cao hơn Lv1: khi ") + vital +
-                                      " dưới cả hai mức, chỉ Lv1 (mức thấp hơn) được uống.");
-        } else {
-            // Nothing there yet: the box makes the key once one is pressed,
-            // with what the second potion starts at shown greyed beside it.
-            MacroKey fresh = macro_potion_key(kind, 0, 2);
-            const bool room = keys.size() < MacroConfig::kMaxKeys;
-            const std::string tip = room ? lv2_tip("3")
-                                         : "Đã đủ " + std::to_string(MacroConfig::kMaxKeys) +
-                                               " phím: bỏ bớt một phím kỹ năng hoặc buff trước.";
+        if (unset) {
+            // The pet's, with no key yet. None is kept until it has one: a
+            // key with none would take one of the 16 for nothing. Its box
+            // makes it, on, with what it starts at shown greyed beside it;
+            // the Lv2 box comes once it is there.
+            MacroKey fresh = macro_potion_key(kind, 0, 1);
             ImGui::BeginDisabled(!room);
-            const bool made = simple_key_box("potion2", fresh.keycode, true, true, tip.c_str()) &&
+            const bool made = simple_key_box("potion", fresh.keycode, false, true, room ? nullptr : full.c_str()) &&
                               fresh.keycode != 0 && room;
             ImGui::EndDisabled();
             ImGui::BeginDisabled();
-            below("##below2", fresh.threshold_pct);
+            below("##below", fresh.threshold_pct);
             ImGui::EndDisabled();
-            // Last: `k` and `which` point into `keys`, which this may move.
             if (made) {
-                keys.push_back(macro_potion_key(kind, fresh.keycode, 2));
+                keys.push_back(macro_potion_key(kind, fresh.keycode, 1));
                 simple_changed();
+            }
+        } else {
+            // Lv1, as the row has always been. It cannot be emptied: the row is it.
+            MacroKey& k = keys[which[0]];
+            const std::uint32_t lv1_before = k.keycode;
+            if (simple_key_box("potion", k.keycode, false, !k.enabled, nullptr)) {
+                // Filling in an empty box means "use this one".
+                if (lv1_before == 0 && k.keycode != 0) k.enabled = true;
+                simple_changed();
+            }
+            below("##below", k.threshold_pct);
+            if (stock) simple_potion_stock(k);      // "Còn N bình", simple_potions.cpp
+            // Kept by value: a Lv2 made below may move every key.
+            const std::uint32_t lv1_key = k.enabled ? k.keycode : 0;
+            const int           lv1_pct = k.threshold_pct;
+
+            // Lv2: the second key of the kind, or an empty box that makes one.
+            // Emptied with Delete it is off, and gone from macro.ini once nothing
+            // is waiting for a key (drop_empty_keys).
+            label("Lv2: Phím");
+            ImGui::SameLine();
+            if (which.size() >= 2) {
+                MacroKey& k2 = keys[which[1]];
+                const std::string tip = lv2_tip(seconds_text(k2.interval_ms));
+                const std::uint32_t before = k2.keycode;
+                if (simple_key_box("potion2", k2.keycode, true, !k2.enabled, tip.c_str())) {
+                    // Filling in an empty box means "use this one".
+                    if (before == 0 && k2.keycode != 0) k2.enabled = true;
+                    if (k2.keycode == 0) k2.enabled = false;
+                    simple_changed();
+                }
+                below("##below2", k2.threshold_pct);
+                // On Lv1's key it is Lv1's slot, whose count is said above.
+                if (stock && k2.keycode != lv1_key) simple_potion_stock(k2);
+                // Only the lower % drinks while the reading is under both, so a
+                // Lv2 not under its Lv1 changes which one does: said here.
+                if (k2.keycode != 0 && k2.threshold_pct == lv1_pct)
+                    small_note(kWait, "Lv1 và Lv2 cùng mức %: chỉ Lv1 được uống.");
+                else if (k2.keycode != 0 && k2.threshold_pct > lv1_pct)
+                    small_note(kWait, std::string("Lv2 đang cao hơn Lv1: khi ") + vital +
+                                          " dưới cả hai mức, chỉ Lv1 (mức thấp hơn) được uống.");
+            } else {
+                // Nothing there yet: the box makes the key once one is pressed,
+                // with what the second potion starts at shown greyed beside it.
+                MacroKey fresh = macro_potion_key(kind, 0, 2);
+                const std::string tip = room ? lv2_tip("3") : full;
+                ImGui::BeginDisabled(!room);
+                const bool made = simple_key_box("potion2", fresh.keycode, true, true, tip.c_str()) &&
+                                  fresh.keycode != 0 && room;
+                ImGui::EndDisabled();
+                ImGui::BeginDisabled();
+                below("##below2", fresh.threshold_pct);
+                ImGui::EndDisabled();
+                // Last: `k` and `which` point into `keys`, which this may move.
+                if (made) {
+                    keys.push_back(macro_potion_key(kind, fresh.keycode, 2));
+                    simple_changed();
+                }
             }
         }
 
@@ -938,8 +1124,15 @@ void GuiApp::simple_jobs() {
         if (which.size() > 2)
             about += " Lv1, Lv2 và " + std::to_string(which.size() - 2) +
                      " phím khác (màn hình Nâng cao).";
-        hint(simple_ui::trial_hint(simple_ui::kTrialPotionTiers, about.c_str()).c_str());
-        // One box for both rows, under the last.
+        hint(simple_ui::trial_hint(stock ? simple_ui::kTrialPotionTiers : simple_ui::kTrialPetPotion,
+                                   about.c_str())
+                 .c_str());
+        // The pet's bar is found on the HUD by itself; until it is, the row
+        // cannot drink, and says so under it.
+        if (kind == MacroKeyKind::PetPotion && vitals_running_ && any_on(which) && vitals_.pet_percent() < 0.0f)
+            small_note(kWait, "Chưa thấy thanh máu của pet trên màn hình game. Gọi pet ra: bot tự tìm thanh "
+                              "máu đỏ trong ô của pet (ô có hai hình và ô Thức Ăn, dưới thanh HP và MP).");
+        // One box for both rows' counts, under the MP row.
         if (kind == MacroKeyKind::MpPotion) simple_potion_warn_box();
         row_gap();
         ImGui::PopID();
@@ -948,6 +1141,9 @@ void GuiApp::simple_jobs() {
                "Uống bình khi máu xuống thấp.");
     potion_row(MacroKeyKind::MpPotion, "Tự uống bình MP", "MP", "khi MP dưới",
                "Uống bình khi mana xuống thấp.");
+    potion_row(MacroKeyKind::PetPotion, "Tự bơm máu pet", "máu pet", "khi máu pet dưới",
+               "Bấm phím bình máu cho pet khi máu pet xuống thấp. Máu pet đọc từ thanh đỏ trong ô của pet "
+               "trên màn hình game.");
 
     // ---- buffs ----
     {
@@ -961,9 +1157,11 @@ void GuiApp::simple_jobs() {
         }
         ImGui::TableNextColumn();
         // Each buff on its own clock, in seconds, as GoC has them: the
-        // player's run 60 s and 1600 s, which no one interval suits. From
-        // 60 s, where a key stops being a buff and would jump to the skills
-        // row, to two hours.
+        // player's run 60 s and 1600 s, which no one interval suits. From 0
+        // to two hours: a key edited here is marked as a buff, so a short one
+        // stays in this row rather than turning into a skill; at 0 it goes
+        // as often as a buff may, every 5 s, as GoC casts one whose cooldown
+        // is 0.
         constexpr float kSecondsBox = 110.0f;
         const float seconds_w = 4.0f + kSecondsBox + 4.0f + ImGui::CalcTextSize("giây").x;
         const auto seconds_box = [&](MacroKey& k) {
@@ -973,10 +1171,17 @@ void GuiApp::simple_jobs() {
             if (ImGui::InputInt("##seconds", &secs, 10, 60)) {
                 secs = clamp_buff_seconds(secs);
                 k.interval_ms = static_cast<std::uint32_t>(secs) * 1000u;
+                k.buff = true;
                 simple_changed();
             }
-            ImGui::SetItemTooltip("Bấm lại phím này sau mỗi %d giây (%d–%d).", secs,
-                                  kBuffMinSeconds, kBuffMaxSeconds);
+            const unsigned soonest = kBuffRepeatMinMs / 1000;
+            if (secs < static_cast<int>(soonest))
+                ImGui::SetItemTooltip("Bấm lại phím này sớm nhất có thể: mỗi %u giây, như GoC (%d–%d).",
+                                      soonest, kBuffMinSeconds, kBuffMaxSeconds);
+            else
+                ImGui::SetItemTooltip("Bấm lại phím này sau mỗi %d giây (%d–%d; 0 là sớm nhất có thể, mỗi %u "
+                                      "giây).",
+                                      secs, kBuffMinSeconds, kBuffMaxSeconds, soonest);
             ImGui::SameLine(0, 4);
             label("giây");
         };
@@ -987,6 +1192,7 @@ void GuiApp::simple_jobs() {
             MacroKey k;
             k.label = "Buff " + std::to_string(buffs.size() + 1);
             k.interval_ms = 300000;
+            k.buff = true;
             k.jitter_pct = 5;
             k.start_delay_ms = static_cast<std::uint32_t>(keys.size()) * 150;
             keys.push_back(std::move(k));
@@ -995,8 +1201,8 @@ void GuiApp::simple_jobs() {
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Thêm một phím buff: bấm + rồi nhấn phím (bấm mỗi 300 giây).");
         hint(simple_ui::trial_hint(simple_ui::kTrialBuffs,
-                                   "Mỗi phím buff có thời gian riêng (giây). Sau khi chết, hồi "
-                                   "sinh hoặc vào lại game, GoBot buff lại tất cả.").c_str());
+                                   "Mỗi phím buff có thời gian riêng (giây; 0 là bấm lại mỗi 5 giây). Sau "
+                                   "khi chết, hồi sinh hoặc vào lại game, GoBot buff lại tất cả.").c_str());
         row_gap();
     }
 
@@ -1037,13 +1243,23 @@ bool GuiApp::simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, b
             simple_listening_ = 0;
         } else if (const std::uint32_t got = pressed_vk()) {
             // The bot's own switches cannot double as game keys: pressing a
-            // potion key would stop the bot (simple_hotkeys.cpp).
-            if (const std::string clash = own_key_clash_vi(got, vk); !clash.empty()) {
+            // potion key would stop the bot (simple_hotkeys.cpp). Nor can ↓,
+            // which GoBot never presses (InputManager::never_pressed).
+            if (InputManager::never_pressed(got)) {
+                simple_note("GoBot không bấm phím ↓: đứng trên cửa mà bấm ↓ là sang bản đồ khác. Chọn phím "
+                            "khác.");
+                // Still a key down under the player's finger: the game is not
+                // brought to the front until it is up (keep_game_in_front).
+                front_key_ = got;
+                front_key_ms_ = now_ms();
+            } else if (const std::string clash = own_key_clash_vi(got, vk); !clash.empty()) {
                 simple_note(clash);
             } else {
                 changed = got != vk;
                 vk = got;
                 simple_listening_ = 0;
+                front_key_ = got;
+                front_key_ms_ = now_ms();
             }
         }
     }
@@ -1128,13 +1344,16 @@ void GuiApp::simple_start_block() {
         ImGui::PopStyleColor();
 
         bool refocus = simple_opts_.refocus;
-        if (ImGui::Checkbox("Tự đưa game lên trước khi bạn không dùng máy 30 giây", &refocus)) {
+        if (ImGui::Checkbox("Luôn đưa game lên trước khi bot đang chạy", &refocus)) {
             simple_opts_.refocus = refocus;
             save_simple_option("refocus", refocus);
         }
-        ImGui::SetItemTooltip("Bot chỉ bấm phím được khi game ở phía trước. Nếu một cửa sổ khác "
-                              "chiếm chỗ\n(thông báo, tin nhắn...) trong lúc bot chạy mà không ai "
-                              "đụng chuột, bàn phím\n30 giây, GoBot đưa game lên lại.");
+        ImGui::SetItemTooltip("Bot chỉ bấm phím được khi game ở phía trước. Khi bot đang chạy, cửa sổ "
+                              "nào chiếm chỗ\n(thông báo, tin nhắn, cả GoBot) thì GoBot đưa game lên lại "
+                              "ngay khi bạn ngừng bấm chuột, gõ phím.\nChữ bạn gõ tiếp vào cửa sổ khác sẽ "
+                              "vào game. Bỏ chọn khi cần dùng máy lúc bot chạy.\nBấm vào một ô phím để "
+                              "đổi phím thì GoBot chờ bạn nhấn phím tối đa 10 giây (máu dưới mức của bình HP, "
+                              "hoặc 50%% nếu cao hơn, thì đưa game lên ngay để bình được bấm).");
         ImGui::PopFont();
     }
 
@@ -1179,9 +1398,26 @@ void GuiApp::simple_start_block() {
                 coloured(kGood, ("Đang đánh quái." + simple_skills_note(false)).c_str());
                 break;
             case Hunter::State::Approaching: coloured(kGood, "Đang đi tới quái."); break;
+            case Hunter::State::Returning:
+                // Along the ground: what the walk back lets go of within
+                // spot_tolerance (Chỗ đánh quái, simple_spot.cpp).
+                coloured(kGood, ("Đang về chỗ đánh quái (còn " +
+                                 std::to_string(std::lround(std::abs(hs.spot_dx))) + " px).")
+                                    .c_str());
+                break;
             case Hunter::State::NoTargets:
+                // A monster in view given up on a moment ago -- out of reach,
+                // or not losing health -- first: with it, any the lists rule
+                // out are not all there is.
+                if (hs.passed_over)
+                    coloured(kWait, "Đang tạm bỏ qua con quái không tới được (hoặc đánh không mất máu), "
+                                    "lát nữa thử lại.");
+                // Monsters in view, only outside the hunting spot's area:
+                // not walked to (Chỗ đánh quái).
+                else if (hs.outside_area)
+                    coloured(kWait, "Chỉ thấy quái ở ngoài vùng đánh: không đi theo.");
                 // Monsters in view, every one of them ruled out by the lists.
-                if (hs.only_skipped)
+                else if (hs.only_skipped)
                     coloured(kWait, hunt_config_.first_only
                                         ? "Không thấy con nào trong danh sách Đánh trước (đang chỉ "
                                           "đánh những con đó)."
@@ -1190,8 +1426,14 @@ void GuiApp::simple_start_block() {
                     coloured(kWait, "Không thấy quái nào quanh đây.");
                 break;
             case Hunter::State::NoPlayer:
-                coloured(kBad, ("Không thấy nhân vật của bạn trên màn hình. Kiểm tra lại tên "
-                                "nhân vật ở trên." + simple_skills_note(true)).c_str());
+                // "trên màn hình" only while the screen is where the hunter
+                // looks: from the packets the name plays no part.
+                coloured(kBad, ((packet_eyes_ && packet_eyes_->source() == PacketEyes::Source::Packets
+                                     ? std::string("Không biết nhân vật của bạn đang ở đâu.")
+                                     : std::string("Không thấy nhân vật của bạn trên màn hình. Kiểm tra lại "
+                                                   "tên nhân vật ở trên.")) +
+                                simple_skills_note(true))
+                                   .c_str());
                 break;
             case Hunter::State::Unfocused:
                 coloured(kWait, "Đang chờ: hãy bấm vào cửa sổ game.");
@@ -1201,6 +1443,16 @@ void GuiApp::simple_start_block() {
                 break;
             case Hunter::State::Idle:        coloured(kDim, "Đang khởi động…"); break;
         }
+        // Where the hunter's positions come from, and why not the packets
+        // when they are not: "Vị trí từ gói tin".
+        if (packet_eyes_) {
+            const PacketWhy why = packet_eyes_->why();
+            if (why == PacketWhy::InUse) coloured(kGood, position_line_vi(why).c_str());
+            else                         hint(position_line_vi(why).c_str());
+        }
+        // And the hunting spot, when "Chỗ đánh quái" is ticked: where it is
+        // and how far off, or why it does not steer (simple_spot.cpp).
+        simple_spot_state(hs);
     } else if (macro_running_) {
         coloured(kGood, "Đang chạy: tự bấm phím theo giờ và tự uống bình.");
     } else {
@@ -1212,6 +1464,9 @@ void GuiApp::simple_start_block() {
     if (running && hunt_config_.enabled && !hunting_ && !hunt_named())
         coloured(kBad, "Tự đánh quái chưa chạy: chưa gõ tên nhân vật ở phần \"Trước khi bắt "
                        "đầu\". Gõ tên rồi bấm ra ngoài ô, Tự đánh quái sẽ chạy.");
+    // Likewise for "Chỗ đánh quái" with no packets to go by (start_hunt).
+    else if (running && hunt_config_.enabled && !hunting_ && hunt_config_.spot && !spot_refused_vi_.empty())
+        coloured(kBad, ("Tự đánh quái chưa chạy: " + spot_refused_vi_).c_str());
 
     // ---- the parts that run beside it ----
     if (party_running_)
@@ -1259,8 +1514,8 @@ void GuiApp::simple_start_block() {
         // Each potion row's Lv2 -- its second key in key order -- also on its
         // own, when there is one: whether the second tier ever drinks is the
         // thing to know about it.
-        std::uint64_t hp = 0, mp = 0, buffs = 0, hp2 = 0, mp2 = 0, skills = 0;
-        int hp_keys = 0, mp_keys = 0;
+        std::uint64_t hp = 0, mp = 0, buffs = 0, hp2 = 0, mp2 = 0, skills = 0, pet = 0, pet2 = 0;
+        int hp_keys = 0, mp_keys = 0, pet_keys = 0;
         const auto ms = macro_->stats();
         // Each key's count from where it stood at the start, found by which
         // key it is: a key added or taken out during the run -- the macro
@@ -1274,10 +1529,16 @@ void GuiApp::simple_start_block() {
             const std::uint64_t got = i < ms.key_presses.size() ? ms.key_presses[i] : 0;
             const std::uint64_t n = got > base ? got - base : 0;
             switch (macro_key_kind(macro_config_.keys[i])) {
-                case MacroKeyKind::HpPotion: hp += n; if (++hp_keys == 2) hp2 = n; break;
-                case MacroKeyKind::MpPotion: mp += n; if (++mp_keys == 2) mp2 = n; break;
-                case MacroKeyKind::Buff:     buffs += n; break;
-                case MacroKeyKind::Skill:    skills += n; break;
+                case MacroKeyKind::HpPotion:  hp += n; if (++hp_keys == 2) hp2 = n; break;
+                case MacroKeyKind::MpPotion:  mp += n; if (++mp_keys == 2) mp2 = n; break;
+                case MacroKeyKind::PetPotion:
+                    // The row's Lv1 is there with no key until one is set.
+                    if (macro_config_.keys[i].keycode == 0) break;
+                    pet += n;
+                    if (++pet_keys == 2) pet2 = n;
+                    break;
+                case MacroKeyKind::Buff:      buffs += n; break;
+                case MacroKeyKind::Skill:     skills += n; break;
             }
         }
         // The sequence's steps are skills too: what tells whether they
@@ -1293,13 +1554,15 @@ void GuiApp::simple_start_block() {
         const std::uint64_t kills =
             finished > simple_base_finished_ ? finished - simple_base_finished_ : 0;
 
-        char line[400];
+        // The pet's potions only once the pet's row has a key.
+        const std::string pet_part = pet_keys > 0 ? "   ·   Bình pet: " + potions(pet, pet2, pet_keys >= 2) : "";
+        char line[480];
         std::snprintf(line, sizeof line,
-                      "%s %s   ·   Hạ được %llu quái   ·   Bình HP: %s   ·   Bình MP: %s"
+                      "%s %s   ·   Hạ được %llu quái   ·   Bình HP: %s   ·   Bình MP: %s%s"
                       "   ·   Buff: %llu lần   ·   Kỹ năng: %llu",
                       running ? "Đã chạy" : "Lần chạy vừa rồi:", clock_text(elapsed).c_str(),
                       static_cast<unsigned long long>(kills), potions(hp, hp2, hp_keys >= 2).c_str(),
-                      potions(mp, mp2, mp_keys >= 2).c_str(), static_cast<unsigned long long>(buffs),
+                      potions(mp, mp2, mp_keys >= 2).c_str(), pet_part.c_str(), static_cast<unsigned long long>(buffs),
                       static_cast<unsigned long long>(skills));
         hint(line);
     }
@@ -1342,10 +1605,9 @@ void GuiApp::simple_window_list() {
                 (w.title.empty() ? "(" + w.window_class + ")" : w.title) + "   —   " + w.process;
             ImGui::PushID(static_cast<int>(i));
             if (ImGui::Selectable(shown.c_str(), w.hwnd == input_.target_window())) {
-                input_.set_target_window(w.hwnd);
+                retarget(w.hwnd);
                 app_config_.window_title = w.title;
                 app_config_.process_name = w.process;
-                apply_vitals_config();
                 simple_reader_tried_ = false;
                 simple_note("Đã chọn: " + (w.title.empty() ? w.process : w.title));
                 ImGui::CloseCurrentPopup();
@@ -1368,7 +1630,7 @@ void GuiApp::simple_start() {
     const bool party = party_rules.load(exe_relative("configs/party.ini")) &&
                        (party_rules.auto_accept || party_rules.auto_invite);
     CleanSettings clean;
-    const bool trash = clean.load(exe_relative("configs/trash.ini")) && clean.enabled;
+    const bool trash = clean.load(exe_relative("configs/trash.ini")) && (clean.enabled || clean.use_charms || clean.buy_potions);
     ChatSettings chat_rules;
     const bool chat = chat_rules.load(exe_relative("configs/chat.ini")) && chat_rules.enabled;
     QuestSettings quest_rules;
@@ -1387,9 +1649,8 @@ void GuiApp::simple_start() {
 
     // Opened since GoBot last looked? Then there is nothing to open.
     if (!input_.window_valid() &&
-        input_.find_game_window(app_config_.window_title, app_config_.window_class,
-                                app_config_.process_name)) {
-        apply_vitals_config();
+        find_and_retarget(app_config_.window_title, app_config_.window_class,
+                          app_config_.process_name)) {
         simple_reader_tried_ = false;
     }
 
@@ -1442,7 +1703,7 @@ void GuiApp::simple_start_jobs() {
     const bool party = party_rules.load(exe_relative("configs/party.ini")) &&
                        (party_rules.auto_accept || party_rules.auto_invite);
     CleanSettings clean;
-    const bool trash = clean.load(exe_relative("configs/trash.ini")) && clean.enabled;
+    const bool trash = clean.load(exe_relative("configs/trash.ini")) && (clean.enabled || clean.use_charms || clean.buy_potions);
     // Read again here rather than handed over from simple_start: after a cold
     // start this runs minutes later, and the tab may have changed it since.
     ChatSettings chat_rules;
@@ -1465,11 +1726,15 @@ void GuiApp::simple_start_jobs() {
     apply_macro_config();
     if (any_key) start_macro();
 
-    // The name-plate hunter, always. The packet bot needs your own position
-    // and the server does not send one; the full screen's Attack switch makes
-    // the same choice for the same reason. Not without your character's
-    // name, which is how it finds you: the rest starts, and the card says
-    // in red why the fighting did not.
+    // The hunter, always, never the packet bot: that one goes by protocol.ini's
+    // layouts, and none of them can place your character (your position comes
+    // only in the client's own UDP reports); the full screen's Attack switch
+    // makes the same choice. The hunter sees by the name plates, or -- with
+    // "Vị trí từ gói tin" ticked and the packets healthy -- by the game's own
+    // frames (PacketEyes), whose capture start_hunt starts by itself. Not
+    // without your character's name, which the screen finds you by and which
+    // the screen is the fallback for: the rest starts, and the card says in
+    // red why the fighting did not.
     const bool unnamed = hunt_config_.enabled && !hunt_named();
     if (hunt_config_.enabled && !unnamed) {
         if (hunter_) hunter_->set_config(hunt_config_);
@@ -1486,27 +1751,25 @@ void GuiApp::simple_start_jobs() {
     start_popups();             // when "Tự đóng thông báo" is ticked
     if (unnamed)
         simple_note("Đã bắt đầu, nhưng chưa bật Tự đánh quái: chưa gõ tên nhân vật.", 12000);
+    // Refused for "Chỗ đánh quái" with no packets to go by (start_hunt): its
+    // reason, not "Đã bắt đầu" over it -- nor at all, when it was the only job.
+    else if (hunt_config_.enabled && !hunting_ && !spot_refused_vi_.empty())
+        simple_note((simple_running() ? "Đã bắt đầu, nhưng chưa bật Tự đánh quái: " : "Chưa bật Tự đánh quái: ") +
+                        spot_refused_vi_,
+                    15000);
     else
         simple_note("Đã bắt đầu.");
 }
 
 void GuiApp::simple_stop() {
     simple_cold_start_ = false;     // nothing is started after a stop
-    // The chat first: a line half typed is rubbed out and closed as it stops,
-    // under its hold, which keeps everything else off until it is done. Not
-    // waited for here: that takes a few seconds for a long line, and the
-    // window would freeze meanwhile. The player has taken over: a chat line
-    // still in doubt after that is handed over to tick(), not waited on.
-    stop_chat(true, false);
-    stop_hunt();
-    stop_macro();
-    stop_party();
-    stop_revive();
-    stop_quest();
-    stop_popups();
+    // Every job told at once and then waited for (stop_jobs). Tự chat is told
+    // and not waited for: a line half typed stops at its next key and is left
+    // in the chat line, and the look at it takes up to a second, which the
+    // window would freeze for. The player has taken over: a chat
+    // line still in doubt after that is handed over to tick(), not waited on.
     // Not said over the word that the bin's dialog may still be open.
-    const bool bin_note = stop_trash();
-    stop_keeper();
+    const bool bin_note = stop_jobs(false);
     simple_track_run(false);
     if (!bin_note) simple_note("Đã dừng.");
 }
@@ -1573,25 +1836,123 @@ void GuiApp::save_simple_option(const char* key, bool value) {
         simple_note("Không lưu được cài đặt vào configs/app.ini.", 8000);
 }
 
-void GuiApp::refocus_if_idle() {
-    if (!simple_opts_.refocus) return;
-    if (!macro_running_ && !hunting_) return;     // only the keys need the game in front
-    if (!input_.window_valid() || input_.window_focused()) return;
+bool GuiApp::keeper_crossing() {
+    if (keeper_key_crossing_.load()) return true;
+    std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+    return keeper_flow_ != nullptr;
+}
 
-    // One try every so often, not a tug of war with whatever took the focus.
-    const std::uint64_t now = now_ms();
-    if (now - last_refocus_ms_ < 15000) return;
+void GuiApp::keep_game_in_front() {
+    // A key box hears its key only through GoBot's own window, and while it
+    // waits F10 and F11 are not heard (hotkeys.cpp). With the game in front
+    // -- clicked by the player, brought by a worker or below -- it would wait
+    // for nothing and leave both deaf, so it gives up. A key just added with
+    // + goes with it (drop_empty_keys).
+    const auto give_up_key_wait = [this] {
+        simple_listening_ = 0;
+        simple_note("Đã thôi chờ phím vì game đã lên trước. Muốn chọn phím: bấm lại vào ô phím (hay nút + "
+                    "nếu bạn đang thêm phím).", 8000);
+    };
+    if (simple_listening_ != 0 && input_.window_focused()) give_up_key_wait();
 
+    FrontKeeper::Look look;
+    look.on = simple_opts_.refocus;
+    // Whatever DỪNG LẠI would stop, and the full screen's packet bot: the
+    // keys need the game in front, and the chat, the quest and the bag wait
+    // for it.
+    look.running = simple_running() || bot_running_;
+    look.window = look.on && look.running && input_.window_valid();
+    look.in_front = look.window && input_.window_focused();
+    const HWND fg = GetForegroundWindow();
+    // A window of the game's own in front -- a dialog it opened -- is the
+    // game's business: never pulled from under the game itself.
+    if (look.window && !look.in_front) {
+        DWORD fg_pid = 0, game_pid = 0;
+        if (fg != nullptr) GetWindowThreadProcessId(fg, &fg_pid);
+        GetWindowThreadProcessId(static_cast<HWND>(input_.target_window()), &game_pid);
+        look.in_front = fg_pid != 0 && fg_pid == game_pid;
+    }
+    const auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    look.mouse_down = down(VK_LBUTTON) || down(VK_RBUTTON) || down(VK_MBUTTON);
+    // The key a key box took is down until it reads up -- for kSettleMaxMs at
+    // most, so that a key stuck in Windows' state cannot hold the game back.
+    if (front_key_ != 0 && (!down(static_cast<int>(front_key_)) ||
+                            now_ms() - front_key_ms_ >= FrontKeeper::kSettleMaxMs))
+        front_key_ = 0;
+    look.key_down = front_key_ != 0;
+    // And how long the mouse and keyboard have been still, anywhere: a click
+    // that has just come up is let land first (FrontKeeper::kSettleMs).
     LASTINPUTINFO last{};
     last.cbSize = sizeof last;
-    if (!GetLastInputInfo(&last)) return;
-    const DWORD idle_ms = GetTickCount() - last.dwTime;
-    if (idle_ms < 30000) return;
+    if (GetLastInputInfo(&last)) look.input_age_ms = GetTickCount() - last.dwTime;
+    // A key box waiting for a key hears it only through GoBot's own window --
+    // but HP under the HP potion's mark, or 50% if that is higher, comes
+    // first, as for the chat line and the quest round: a potion goes with the
+    // game in front.
+    const float hp = vitals_.hp_percent();
+    const bool hp_low = vitals_running_ && hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());
+    look.listening = !hp_low && simple_listening_ != 0 && fg != nullptr && fg == static_cast<HWND>(main_hwnd_);
+    look.crossing = look.window && !look.in_front && keeper_crossing();
 
-    last_refocus_ms_ = now;
-    if (input_.focus_window())
-        GB_INFO("Brought the game back to the front: it lost focus during a run and the "
-                "machine has been idle %lus", static_cast<unsigned long>(idle_ms / 1000));
+    const std::uint64_t now = now_ms();
+    if (look.in_front) {
+        front_refusal_said_ = false;
+        front_hung_said_ = false;
+    }
+    if (!front_keeper_.due(look, now)) return;
+
+    // Which program had it, for the log: GoBot's own window too.
+    std::string had = "another window";
+    if (fg != nullptr) {
+        const std::string exe = window_program(fg);
+        const std::size_t slash = exe.find_last_of("\\/");
+        if (!exe.empty()) had = slash == std::string::npos ? exe : exe.substr(slash + 1);
+    }
+    // A game that has stopped answering -- hung, or crashed with Windows'
+    // report box up -- cannot take a key, and is not pulled over that box,
+    // nor handed the player's typing. A program in front that has stopped
+    // answering is not attached to (focus_window), so Windows would only
+    // refuse. Either is left alone: no refusal of Windows'.
+    const bool game_hung = InputManager::window_hung(input_.target_window());
+    if (game_hung || InputManager::window_hung(fg)) {
+        front_keeper_.skipped(now);
+        if (!front_hung_said_) {
+            front_hung_said_ = true;
+            GB_WARN("Not bringing the game to the front while %s is not answering",
+                    game_hung ? "the game" : had.c_str());
+        }
+        return;
+    }
+    // The least wait: this is the UI thread, which reads F12 by polling. What
+    // counts is whether Windows took the request: a game slow to come forward
+    // comes forward by itself, and that is no refusal.
+    bool accepted = false;
+    input_.focus_window(InputManager::kFocusMinMs, &accepted);
+    front_keeper_.tried(accepted, now);
+    // Tried with a box waiting -- its hold over, or GoBot not in front -- the
+    // keyboard has left GoBot, or never was there: answered or not, the game
+    // may come forward a moment later, and the box would wait for nothing.
+    if (simple_listening_ != 0) give_up_key_wait();
+    if (accepted) {
+        front_hung_said_ = false;
+        // Said once a minute at most, with how often since: a player clicking
+        // about while the bot runs would otherwise fill the log.
+        ++front_brought_;
+        if (front_said_ms_ == 0 || now - front_said_ms_ >= 60'000) {
+            const std::string times =
+                front_brought_ > 1 ? " (" + std::to_string(front_brought_) + " times since the last line)" : "";
+            GB_INFO("Brought the game back to the front -- %s had taken it%s", had.c_str(), times.c_str());
+            front_said_ms_ = now;
+            front_brought_ = 0;
+        }
+        front_refusal_said_ = false;
+    } else if (front_keeper_.refusals() >= FrontKeeper::kRefusalsBeforeBackoff && !front_refusal_said_) {
+        front_refusal_said_ = true;
+        GB_WARN("Cannot bring the game to the front -- Windows refused %d times in a row with %s in "
+                "front; trying again every %llu s, and no key goes to the game meanwhile",
+                front_keeper_.refusals(), had.c_str(),
+                static_cast<unsigned long long>(FrontKeeper::kBackoffMs / 1000));
+    }
 }
 
 // ------------------------------------------------------------------ party
@@ -1692,7 +2053,8 @@ void GuiApp::simple_party_tab() {
                                   ImVec2(-1, 84));
         if (ImGui::IsItemDeactivatedAfterEdit())
             put("party_accept_only", names_line(simple_accept_list_));
-        hint("Mỗi dòng một tên.");
+        hint("Mỗi dòng một tên. Tên từ 4 chữ trở xuống phải được đọc đúng hệt; tên dài hơn được "
+             "sai, thiếu hay thừa một chữ, không hơn.");
     }
     ImGui::EndDisabled();
     ImGui::Unindent(mark_indent());
@@ -1725,7 +2087,8 @@ void GuiApp::simple_party_tab() {
                                   ImVec2(-1, 84));
         if (ImGui::IsItemDeactivatedAfterEdit())
             put("party_whitelist", names_line(simple_invite_list_));
-        hint("Mỗi dòng một tên.");
+        hint("Mỗi dòng một tên. Tên từ 4 chữ trở xuống phải được đọc đúng hệt; tên dài hơn được "
+             "sai, thiếu hay thừa một chữ, không hơn.");
     }
     ImGui::EndDisabled();
     ImGui::Unindent(mark_indent());
@@ -1821,7 +2184,7 @@ void GuiApp::simple_trash_tab() {
     if (ImGui::Checkbox("Tự dọn rác", &simple_clean_.enabled)) {
         put("enabled", simple_clean_.enabled ? "true" : "false");
         if (simple_clean_.enabled && simple_running()) start_trash();
-        if (!simple_clean_.enabled && trash_running_ && !trash_oneshot_) stop_trash();
+        if (!simple_clean_.enabled && !simple_clean_.use_charms && !simple_clean_.buy_potions && trash_running_ && !trash_oneshot_) stop_trash();
     }
     ImGui::SameLine(0, 16);
     label("mỗi");
@@ -1845,6 +2208,31 @@ void GuiApp::simple_trash_tab() {
          "đó rồi đóng túi lại: lần đầu ngay sau khi bấm BẮT ĐẦU, sau đó theo giờ ở trên. "
          "Đánh quái, bình và buff tạm dừng trong lúc dọn.");
 
+    // How fast GoBot presses in the bag jobs: one value for Dọn rác, Dùng bùa
+    // and Tự mua bình (CleanSettings::press_ms).
+    ImGui::Dummy(ImVec2(0, 4));
+    label("Tốc độ bấm nút");
+    ImGui::SameLine();
+    {
+        static const int kPress[] = { 60, 80, 100, 150 };
+        const std::string shown = std::to_string(simple_clean_.press_ms) + " ms";
+        ImGui::SetNextItemWidth(150);
+        if (ImGui::BeginCombo("##pressms", shown.c_str())) {
+            for (const int ms : kPress) {
+                const std::string item =
+                    std::to_string(ms) + " ms" + (ms == CleanSettings::kPressDefaultMs ? " (mặc định)" : "");
+                if (ImGui::Selectable(item.c_str(), ms == simple_clean_.press_ms)) {
+                    simple_clean_.press_ms = ms;
+                    put("press_ms", std::to_string(ms));
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("Khoảng nghỉ giữa các lần GoBot bấm chuột, kéo đồ và gõ phím khi dọn rác, dùng bùa và "
+                              "mua bình. 60 ms nhanh nhất; máy hay game chậm, hay bấm trượt thì chọn 100 hoặc 150 ms. "
+                              "Các bước kiểm tra (đọc số lượng, chờ hộp thoại) không đổi theo.");
+    }
+
     ImGui::Dummy(ImVec2(0, 4));
     label("Phím mở túi đồ");
     ImGui::SameLine();
@@ -1864,6 +2252,8 @@ void GuiApp::simple_trash_tab() {
     // "Dùng" for the fragments on the Dùng list: its own switch, off as
     // shipped (simple_trash_use.cpp).
     simple_use_switch(put);
+    // And "Dùng bùa", the charms' own (simple_trash_use.cpp).
+    simple_charm_switch(put);
     end_card();
 
     // ---- what, chosen beforehand ----
@@ -1877,7 +2267,8 @@ void GuiApp::simple_trash_tab() {
         hint("Không tìm thấy hình các món đồ của game.");
     } else {
         hint("Bấm vào món muốn bỏ. Viền đỏ: bỏ vào thùng rác, mất hẳn. Viền vàng: vứt xuống "
-             "đất. Viền xanh: dùng (đăng ký mảnh ghép). Không cần món đó đang có trong túi. Món "
+             "đất. Viền xanh: dùng (đăng ký mảnh ghép, hoặc dùng bùa mỗi giờ một cái). Không cần "
+             "món đó đang có trong túi. Món "
              "được nhận theo hình vẽ, không theo màu: mảnh ghép trong túi đổi màu liên tục, và "
              "món cùng hình khác màu (viền đỏ mảnh) cũng bị xoá theo.");
         // Icons on the delete or drop list drawn like a picture on the Dùng
@@ -1941,6 +2332,8 @@ void GuiApp::simple_trash_tab() {
                 else
                     ImGui::SetItemTooltip("%s", use && del ? "Sẽ đăng ký vào Yêu Quái Bách Khoa, rồi bỏ phần còn "
                                                              "lại vào thùng rác. Bấm để đổi."
+                                              : use && group.folder == "spend/buff"
+                                                    ? "Sẽ dùng bùa này mỗi giờ một cái. Bấm để đổi."
                                               : use  ? "Sẽ đăng ký vào Yêu Quái Bách Khoa. Bấm để đổi."
                                               : del  ? "Sẽ bỏ vào thùng rác. Bấm để đổi."
                                               : drop ? "Sẽ vứt xuống đất. Bấm để đổi."
@@ -1970,8 +2363,10 @@ void GuiApp::simple_trash_tab() {
                     }
                     if (!simple_pick_kin_.empty()) {
                         ImGui::PushFont(nullptr, kSmall);
-                        coloured(kWait, "Chọn món này thì cũng xoá luôn các món cùng hình, "
-                                        "khác màu:");
+                        coloured(kWait, group.folder == "spend/buff"
+                                            ? "Bùa cùng hình, khác màu: nếu chọn \"Dùng bùa\" thì cũng dùng những cái này, "
+                                              "nhưng mỗi giờ chỉ một cái trong số đó, cái nào gặp trước trong túi đồ:"
+                                            : "Chọn món này thì cũng xoá luôn các món cùng hình, khác màu:");
                         ImGui::PopFont();
                         for (std::size_t k = 0; k < simple_pick_kin_.size(); ++k) {
                             const ItemCatalog::Entry* same = simple_catalog_.find(simple_pick_kin_[k]);
@@ -2183,6 +2578,7 @@ void GuiApp::simple_trash_tab() {
                 // On Tiêu Dùng only (simple_trash_use.cpp).
                 if (simple_pick_slot_ >= 0 && static_cast<std::size_t>(simple_pick_slot_) < slots.size())
                     simple_use_cut_option(slots[static_cast<std::size_t>(simple_pick_slot_)]);
+
                 ImGui::Separator();
                 if (ImGui::Selectable("Thôi")) ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
@@ -2195,9 +2591,12 @@ void GuiApp::simple_trash_tab() {
     }
     end_card();
 
+    // ---- potions from the shop (simple_shop.cpp) ----
+    simple_shop_card(put);
+
     // ---- now ----
     if (!begin_card("##trashrun")) { end_card(); return; }
-    const bool busy = trash_running_ && (trash_oneshot_ || trash_request_ != 0);
+    const bool busy = trash_running_ && (trash_oneshot_ || trash_request_ != 0 || trash_pass_);
     // Not while the game's chat line may be open: a pass presses the bag key,
     // which would be a letter in it. The worker waits for that as well.
     const bool chat_open = chat_doubt_;
@@ -2206,6 +2605,20 @@ void GuiApp::simple_trash_tab() {
     ImGui::SameLine();
     if (ImGui::Button("Dọn ngay")) request_trash(false);
     ImGui::EndDisabled();
+    // Charms now, whatever the clock says: a run of its own, quick, with the
+    // skills held (GuiApp::trash_loop). Only with a charm on the Dùng list.
+    bool charm_listed = false;
+    for (const auto& item : simple_trash_.items)
+        if (item.action == TrashList::Action::Use && item.charm()) charm_listed = true;
+    ImGui::SameLine();
+    ImGui::BeginDisabled(busy || chat_open || !input_.window_valid() || !charm_listed || !simple_clean_.use_charms);
+    if (ImGui::Button("Dùng bùa ngay")) request_charms();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("%s", !charm_listed ? "Chưa có bùa nào trong danh sách Dùng."
+                                : !simple_clean_.use_charms ? "Bật ô \"Dùng bùa\" ở đầu thẻ trước."
+                                : "Dùng mỗi loại bùa trong danh sách một cái ngay bây giờ, không chờ giờ. "
+                                  "Kỹ năng, bình và buff tạm dừng vài giây (tối đa 20 giây nếu nhiều loại bùa). "
+                                  "Không dùng khi máu thấp, đang chat hay bot đang bận việc khác.");
     ImGui::SameLine(0, 18);
     simple_hotkey_box(true);
     if (chat_open)
@@ -2441,7 +2854,7 @@ void GuiApp::simple_chat_tab() {
     }
     if (chat_running_ && chat_stop_) {
         coloured(kWait, chat_doubt_watched_ ? "Đang dừng: chờ thấy ô chat đóng…"
-                                            : "Đang dừng: xoá câu đang gõ dở và đóng ô chat…");
+                                            : "Đang dừng…");
     } else if (chat_running_ && !chat_oneshot_) {
         const std::uint64_t next = chat_next_ms_.load();
         std::string state = "Đang chạy: đã gửi " + std::to_string(chat_sent_.load()) + " câu";
@@ -2555,7 +2968,9 @@ void GuiApp::simple_login_tab() {
     hint("GoBot theo dõi game. Nếu game tắt, bị treo hoặc hiện bảng lỗi, GoBot đóng game, bấm "
          "Chơi game trong VTCZone rồi vào đúng kênh và nhân vật dưới đây. VTCZone phải đang mở "
          "(hoặc mở được) và đã đăng nhập sẵn — GoBot không cần, không hỏi và không lưu tên đăng "
-         "nhập hay mật khẩu.");
+         "nhập hay mật khẩu. Mỗi lần game phải đóng rồi vào lại được tính một lần, kể cả khi GoBot "
+         "phải tắt game kẹt giữa chừng lúc đang vào (cả khi vào bằng phím vào game ngay); quá số lần "
+         "tối đa (max_restarts trong configs/app.ini, mặc định 5) thì GoBot dừng và chờ bạn.");
     hint("Game đang tắt? Bật ô này rồi bấm BẮT ĐẦU: GoBot mở game và vào nhân vật trước, rồi "
          "mới chạy đánh quái, bình và buff.");
     simple_stall_option();

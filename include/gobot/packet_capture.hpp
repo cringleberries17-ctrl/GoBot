@@ -5,6 +5,7 @@
 #include "gobot/tcp_reassembler.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -77,8 +78,18 @@ public:
     /// Adapter carrying the default route — the usual right answer.
     static std::string default_interface();
 
-    /// True if the Npcap service is present and running.
+    /// True if the Npcap service is running and its wpcap.dll is loaded
+    /// (load_wpcap). Ask it before any pcap call: wpcap.dll is delay-loaded,
+    /// and a pcap call it cannot be found for ends the process.
     static bool npcap_available();
+
+    /// Load Npcap's wpcap.dll by its full path, and keep it: System32\Npcap
+    /// first, then System32, where WinPcap API-compatible Mode puts a copy.
+    /// The delay-load stub then binds to that copy. By its bare name, Windows
+    /// looked beside the program first and never in Npcap's own folder. True
+    /// when it is loaded, now or before. Thread-safe, never unloaded, logs
+    /// only the load.
+    static bool load_wpcap();
 
     void set_framing(const FramingSpec& spec);
     FramingSpec framing() const;
@@ -284,6 +295,11 @@ private:
     std::thread       watchdog_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
+    /// What the watchdog waits on between its looks, a second apart, so that
+    /// stop() -- on the GUI's thread, at every hunt's end -- wakes it rather
+    /// than waiting out the rest of its second.
+    std::mutex              watchdog_mutex_;
+    std::condition_variable watchdog_wake_;
 
     mutable std::mutex stats_mutex_;
     Stats              stats_;

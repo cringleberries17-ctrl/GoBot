@@ -76,14 +76,33 @@ public:
         bool load(const std::string& path);
         bool save(const std::string& path) const;
 
-        /// Whether a name may be invited, by the rules above.
+        /// Whether a name may be invited, by the rules above: the blacklist
+        /// matched loosely, the invite and priority lists by allowed_name.
         bool may_invite(const std::string& who) const;
 
         /// Whether an invitation from this name may be taken. Not the same
         /// question: inviting goes by the invite list, accepting by
-        /// `accept_only`, and the blacklist wins over both.
+        /// `accept_only`, and the blacklist wins over both. `accept_only` is
+        /// matched by allowed_name, the blacklist loosely.
         bool may_accept(const std::string& who) const;
     };
+
+    /// Whether `read`, a name read off the screen, is `listed`, a name on one
+    /// of the lists that let somebody in: accept_only, the invite list and
+    /// the priority list. Both are folded (PartyInvite::fold: case, accents
+    /// and spaces off) and kept to letters and digits, and then:
+    ///  - the same, always;
+    ///  - a listed name of kAllowExactUpTo letters or fewer, only that:
+    ///    "Anh" is not "Anh1" or "xAnh";
+    ///  - a longer one also with one letter off -- wrong, missing or extra,
+    ///    never two: the reader gets a letter wrong now and then ("ExampleWin"
+    ///    came back as "Exampley in").
+    /// Not the blacklist's 70%: a false hit there turns somebody away, here it
+    /// lets a stranger in. The price: a name one letter off a listed one of
+    /// five letters or more -- Friend2 for Friend -- is let in too; the
+    /// reader's one wrong letter looks just the same.
+    static bool allowed_name(const std::string& listed, const std::string& read);
+    static constexpr std::size_t kAllowExactUpTo = 4;
 
     /// What the helper's detector made of the screen, plus where to click.
     struct State {

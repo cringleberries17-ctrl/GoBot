@@ -43,6 +43,14 @@ void BotBrain::start() {
     // reap it before starting another.
     if (thread_.joinable()) thread_.join();
 
+    // A death that ended the last run is not this one's. Stopped while dead
+    // (the death callback does that with continue_auto_after_death off) and
+    // started again once revived, the first tick took the character being up
+    // for the end of that death and stopped the bot again. With dead now read
+    // off HP, that is every death, not only one a self_revive packet ended.
+    // Written before the new thread exists, so nothing races it.
+    was_dead_ = false;
+
     {
         std::lock_guard<std::mutex> lock(origin_mutex_);
         if (!origin_set_) {
@@ -53,6 +61,11 @@ void BotBrain::start() {
 
     running_.store(true);
     set_phase(BotPhase::Idle);
+    // The executor's threads run from launch and press nothing until this:
+    // the queue and the route are the bot's, and
+    // start and stop with it (stop() halts them again). Before the thread is
+    // created, or the first tick's commands are refused.
+    executor_.arm();
     thread_ = std::thread(&BotBrain::tick_loop, this);
     GB_INFO("BotBrain started");
 }
@@ -61,6 +74,14 @@ void BotBrain::stop() {
     std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
 
     running_.store(false);
+
+    // The character first, before the tick still under way is waited for.
+    // halt() empties the queue, drops the route and lets go of every key, and
+    // from its return the executor presses nothing until start(). This used
+    // to set a flag nothing read and queue a StopMove, which gobot_cli's F10
+    // then cleared away with the queue: the arrow stayed held after BOT
+    // DISABLED, and the route went on being walked every 80 ms.
+    executor_.halt();
 
     // Join on `joinable`, not on the old value of running_: tick() can clear
     // running_ on its own, and keying the join off that flag would leave a
@@ -76,9 +97,11 @@ void BotBrain::stop() {
         }
     }
 
+    // What that last tick queued goes too. The executor would refuse it now
+    // anyway, and arm() drops it.
+    executor_.clear_queue();
+
     set_phase(BotPhase::Stopped);
-    executor_.set_auto_attack(false);
-    executor_.enqueue(Command::stop_move());
     GB_INFO("BotBrain stopped");
 }
 
@@ -160,7 +183,10 @@ void BotBrain::tick() {
             GB_WARN("Character died");
         }
         set_phase(BotPhase::Recovering);
-        executor_.set_auto_attack(false);
+        // A route under way when the character fell is dropped: the path
+        // thread would otherwise go on pressing toward its end, into the death
+        // screen, until its stuck timer gave up.
+        executor_.stop_pathfinding();
         executor_.enqueue(Command::stop_move());
         recover(me);
         return;
@@ -171,7 +197,13 @@ void BotBrain::tick() {
         GB_INFO("Character back up");
         if (!cfg_.continue_auto_after_death) {
             GB_INFO("continue_auto_after_death is off -- stopping");
+            // As stop() does, from this thread: nothing is waited for here,
+            // but the executor is halted, or its queue and route would go on
+            // with the bot reported stopped. running_ first, so a
+            // start() racing this joins this thread, and arms only after it.
             running_.store(false);
+            executor_.halt();
+            set_phase(BotPhase::Stopped);
             return;
         }
     }

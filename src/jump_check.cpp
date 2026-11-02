@@ -45,6 +45,12 @@ JumpCheck::Result JumpCheck::run(std::uint32_t jump_key, const std::atomic<bool>
         r.outcome = Outcome::NoKey;
         return r;
     }
+    // ↓ would not go out anyway (InputManager::never_pressed), and a press
+    // refused would read as one that may have gone out.
+    if (InputManager::never_pressed(jump_key)) {
+        r.outcome = Outcome::NeverPressed;
+        return r;
+    }
     // A hold refuses every key, and whatever holds it is at work on the game:
     // nothing is pressed, nor is the game pulled to the front under it.
     if (coord_.critical_active()) {
@@ -153,6 +159,7 @@ const char* JumpCheck::outcome_name(Outcome o) {
         case Outcome::NotInFront: return "game not in front";
         case Outcome::Stopped:    return "stopped";
         case Outcome::Unchecked:  return "not checked: the game lost focus during the press";
+        case Outcome::NeverPressed: return "not pressed: Down is never pressed";
         case Outcome::NoKey:      break;
     }
     return "no jump key";
@@ -184,6 +191,9 @@ std::string JumpCheck::said_vi(const Result& r, const std::string& key) {
         case Outcome::Unchecked:
             return "Có thể đã bấm " + key + ": game không còn ở phía trước ngay lúc bấm nên không "
                    "kiểm tra được. Hãy nhìn trong game rồi thử lại.";
+        case Outcome::NeverPressed:
+            return "Chưa bấm: GoBot không bấm ↓ (đứng trên cửa mà bấm ↓ là sang bản đồ khác). Đặt phím "
+                   "nhảy khác, thường là ↑.";
         case Outcome::NoKey:
             break;
     }
@@ -195,6 +205,11 @@ JumpCheck::KeyAdvice JumpCheck::advice(std::uint32_t jump, std::uint32_t attack_
     KeyAdvice a;
     if (jump == 0) {
         a.kind = Advice::NotSet;
+        return a;
+    }
+    // Before anything else it may clash with: it is never pressed at all.
+    if (InputManager::never_pressed(jump)) {
+        a.kind = Advice::DownChangesMap;
         return a;
     }
     if (attack_key != 0 && jump == attack_key) {

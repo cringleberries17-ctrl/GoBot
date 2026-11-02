@@ -37,11 +37,15 @@ struct Routine {
     ///
     ///     [Routine.buy_fishing_rod]
     ///     1.find    = rod_in_shop
-    ///     1.confirm = ngs_buy_button
+    ///     1.check   = false
     ///     2.find    = ngs_buy_button
     ///     2.confirm = confirm_button
     ///     3.find    = confirm_button
     ///     3.gone    = true
+    ///
+    /// Step 1 says check = false: the shop's Mua is up whether or not the rod
+    /// was picked, so nothing on screen can show that click landed, and a run
+    /// says it was not checked.
     ///
     /// Numbers run from one and stop at the first gap, so commenting a step out
     /// truncates the routine rather than silently shifting the rest up.

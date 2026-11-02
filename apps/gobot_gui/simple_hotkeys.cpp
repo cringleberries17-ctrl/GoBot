@@ -83,6 +83,10 @@ HotkeyActions GuiApp::hotkeys_tick() {
     }
 
     const HotkeyActions a = hotkey_action(edges, s);
+    // The panic key, pressed with another of GoBot's keys in the same tick, is
+    // the only one acted on: no trash pass and no crossing is started in the
+    // tick everything stops.
+    if (a.panic) return a;
     // Said once, and again only ten minutes on: GoBot's own presses of the key
     // come every few seconds.
     const auto say_taken = [&](bool trash) {
@@ -187,10 +191,11 @@ std::vector<NamedKey> GuiApp::game_keys_in_use() {
         if (m.keycode == 0) continue;
         const char* what = "phím kỹ năng";
         switch (macro_key_kind(m)) {
-            case MacroKeyKind::HpPotion: what = "bình HP"; break;
-            case MacroKeyKind::MpPotion: what = "bình MP"; break;
-            case MacroKeyKind::Buff:     what = "buff"; break;
-            case MacroKeyKind::Skill:    what = "phím kỹ năng"; break;
+            case MacroKeyKind::HpPotion:  what = "bình HP"; break;
+            case MacroKeyKind::MpPotion:  what = "bình MP"; break;
+            case MacroKeyKind::PetPotion: what = "bình máu pet"; break;
+            case MacroKeyKind::Buff:      what = "buff"; break;
+            case MacroKeyKind::Skill:     what = "phím kỹ năng"; break;
         }
         k.push_back({ m.keycode, what });
     }
@@ -238,7 +243,11 @@ void GuiApp::simple_hotkey_box(bool trash) {
     std::uint32_t key = vk;
     // The box itself refuses GoBot's own switches and the other new key.
     if (simple_key_box(key_name, key, true, false, kOnlyInGame)) {
-        const NamedKey* clash = key_taken(key, game_keys_in_use());
+        // Kept for as long as what key_taken finds in it is read: it answers
+        // with a pointer into the list, and a list made inside the call was
+        // gone by the next line, so the note was written from freed memory.
+        const std::vector<NamedKey> taken = game_keys_in_use();
+        const NamedKey* clash = key_taken(key, taken);
         if (clash != nullptr) {
             simple_note("Phím " + InputManager::key_name(key) + " đang dùng cho " + clash->what_vi +
                         ". Hãy chọn phím khác.", 8000);

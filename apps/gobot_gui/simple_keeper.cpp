@@ -7,7 +7,8 @@
 // (gobot/stall_watch.hpp). Here is what only the window knows: the key's
 // request and its cancel, the one-shot keeper the key starts when no keeper
 // is watching, the holds the watchdog waits out, and the option on the Tự
-// đăng nhập tab.
+// đăng nhập tab. The crossing itself is keeper_loop's run_crossing
+// (gui_app.cpp).
 
 #include "gui_app.hpp"
 #include "simple_ui.hpp"
@@ -54,7 +55,7 @@ void GuiApp::keeper_stall_restart() {
 
 GuiApp::KeeperWake GuiApp::keeper_wake(CrashWatch::Move move, CrashWatch& watch,
                                        const CrashWatch::Settings& watch_settings,
-                                       const AutoLogin::Settings& login, TemplateStore& store,
+                                       AutoLogin::Settings& login, TemplateStore& store,
                                        CrashWatch::Look& seen) {
     if (!keeper_ui_) {
         keeper_ui_.reset(new KeeperUi);
@@ -157,14 +158,7 @@ void GuiApp::simple_stall_option() {
 }
 
 bool GuiApp::keeper_key_crossing(CrashWatch& watch, const CrashWatch::Settings& watch_settings,
-                                 const AutoLogin::Settings& login, TemplateStore& store) {
-    // Stopping for a person, as keeper_loop does: the English for the log and
-    // the panel, the Vietnamese for the simple screen, kept after it stops.
-    const auto give_up = [this](const std::string& english, const std::string& vi) {
-        GB_WARN("Keeper: %s", english.c_str());
-        say_keeper(english);
-        say_keeper_vi(vi, vi);
-    };
+                                 AutoLogin::Settings& login, TemplateStore& store) {
     // What comes after: a one-shot keeper ends, one that watches goes on.
     // Asked each time, not once: BẮT ĐẦU pressed meanwhile turns a one-shot
     // keeper into the run's own (start_keeper).
@@ -180,104 +174,25 @@ bool GuiApp::keeper_key_crossing(CrashWatch& watch, const CrashWatch::Settings& 
         Frame f;
         if (capture.grab(input_.target_window(), f) && f.valid() &&
             AutoLogin::in_world(f, have_landmark ? &landmark : nullptr)) {
-            GB_INFO("Keeper: login key -- the character is in the world already");
-            say_keeper("login key: the character is in the world already");
+            keeper_note("login key: the character is in the world already");
             say_keeper_vi(hotkey_text::kInWorld);
             return watching();
         }
     }
 
-    // The keeper's own checks, as for any crossing; login.ini read afresh,
-    // as keeper_loop reads it for every crossing.
-    AutoLogin::Settings fresh = login;
-    {
-        AutoLogin::Settings again;
-        if (again.load(exe_relative("configs/login.ini"))) fresh = again;
+    // The crossing, as keeper_loop makes one (run_crossing) -- without ending
+    // the client first: nothing fell over, so it is no restart by itself. A
+    // client the crossing ends on a screen it does not know is one, counted
+    // as any other.
+    switch (run_crossing(Crossing::Key, watch, watch_settings, login, store)) {
+        case Crossed::In:
+        case Crossed::Cancelled:
+            return watching();
+        case Crossed::Stopped:
+        case Crossed::GaveUp:
+            break;
     }
-    if (!fresh.unidentified().empty()) {
-        std::string pages;
-        for (const AutoLogin::Page* page : fresh.unidentified())
-            pages += (pages.empty() ? "" : ", ") + page->key;
-        give_up("the login key's crossing is not set up -- see configs/login.ini",
-                AutoLogin::advice(AutoLogin::Why::NotSetUp, pages));
-        return false;
-    }
-    if (!elevated_) {
-        give_up("GoBot is not running as administrator, so its clicks cannot reach VTCZone or the game",
-                "GoBot không chạy bằng quyền Administrator nên không bấm được vào VTCZone/game.");
-        return false;
-    }
-    // Pictures named since the keeper loaded its own: these, for this one.
-    TemplateStore own;
-    TemplateStore* pictures = &store;
-    if (AutoLogin::picture_names(fresh) != AutoLogin::picture_names(login)) {
-        TemplateStore all;
-        AutoLogin::load_pictures(all, exe_relative("configs/templates.ini"));
-        own = AutoLogin::pictures_for(fresh, all);
-        pictures = &own;
-    }
-
-    // The crossing, as keeper_loop makes one -- without ending the client
-    // first, or counting it as a restart: nothing fell over. Only if the
-    // crossing itself ends a client stuck on a screen it does not know is
-    // that a restart -- and only by a keeper the player ticked "Tự vào lại
-    // game" for. A keeper started for the key alone never ends the game: the
-    // player asked for a crossing, not for the client to be closed, and a
-    // stuck attempt there simply fails.
-    GB_INFO("Keeper: the login key -- crossing now");
-    say_keeper("login key: crossing now");
-    AutoLogin flow;
-    flow.set_settings(fresh);
-    flow.set_templates(pictures);
-    if (watching())
-        flow.set_end_client(
-            [this, &watch] {
-                ++keeper_restarts_;
-                return watch.shut_down(CrashWatch::Look{});
-            },
-            watch_settings.cooldown_s);
-    const std::string doing = "Đang vào game (phím vào game ngay): ";
-    flow.on_step([this, doing, &flow](AutoLogin::Step s, const std::string& detail) {
-        say_keeper(std::string(AutoLogin::step_name(s)) + ": " + detail);
-        if (s == AutoLogin::Step::Blocked || s == AutoLogin::Step::InWorld) return;
-        std::string vi = doing + AutoLogin::step_name_vi(s) + "…";
-        if (flow.holding())
-            vi += " " + (flow.hiding() ? AutoLogin::hidden_advice(flow.held_by())
-                                       : AutoLogin::advice(AutoLogin::Why::Covered, flow.held_by()));
-        say_keeper_vi(vi);
-    });
-    {
-        std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
-        keeper_flow_ = &flow;
-        keeper_key_crossing_ = true;
-        // Pressed again in the moment between asking and this: stopped.
-        if (keeper_key_cancel_) flow.cancel();
-    }
-    const bool in = !keeper_stop_ && flow.run();
-    {
-        std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
-        keeper_flow_ = nullptr;
-        keeper_key_crossing_ = false;
-    }
-    if (keeper_stop_) return false;
-    if (keeper_key_cancel_.exchange(false)) {
-        GB_INFO("Keeper: the login key's crossing was cancelled by the key");
-        say_keeper("login key: cancelled");
-        say_keeper_vi("Đã huỷ vào game.");
-        return watching();
-    }
-    if (!in) {
-        // As any crossing that gave up: its tries are used, and the next is
-        // for a person to decide.
-        give_up("could not get in: " + flow.trouble(), flow.advice());
-        alert("keeper_gave_up", alert_text::gave_up_crossing(flow.attempts_made(), flow.why()));
-        return false;
-    }
-    GB_INFO("Keeper: in the world, by the login key");
-    say_keeper("login key: in the world");
-    say_keeper_vi(watching() ? "Đã vào game. Đang theo dõi game." : "Đã vào game.");
-    keeper_reattach_ = true;
-    return watching();
+    return false;
 }
 
 } // namespace gobot

@@ -2,3 +2,8 @@
 # UTF-8 with a BOM, and CRLF, so that Notepad on any Windows shows its
 # Vietnamese. No clone may convert its line endings.
 DOC-TRUOC.txt -text
+
+# The Npcap SDK is held to the hashes in third_party/npcap-sdk.sha256, byte for
+# byte: no clone may convert its line endings.
+third_party/npcap-sdk/** -text
+third_party/npcap-sdk.sha256 -text

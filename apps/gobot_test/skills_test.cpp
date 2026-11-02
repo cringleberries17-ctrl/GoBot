@@ -467,6 +467,38 @@ void test_skills_off_as_before() {
           "and nothing counted as held for want of a fight");
 }
 
+void test_skills_timed_gap() {
+    section("Skills on their own timers: two due together go skill_gap_ms apart (Tốc độ bấm kỹ năng)");
+
+    // Z and X due at the same moment, no fight to follow: X waits the gap
+    // after Z's key came up, never pressed with it -- at each step offered.
+    bool all = true;
+    std::string seen;
+    for (const std::uint32_t gap : MacroConfig::kSkillGapSteps) {
+        Rig rig({ skill('Z', 1000), skill('X', 1000) }, false, false);
+        MacroConfig cfg = rig.engine.config();
+        cfg.skill_gap_ms = gap;
+        rig.engine.set_config(cfg);
+        rig.run(600);
+        const auto z = rig.when('Z');
+        const auto x = rig.when('X');
+        // The rig takes no time for a key with no hold of its own, so Z's
+        // key-up is its press: X the gap after it, within a step of 10 ms.
+        const bool spaced = !z.empty() && !x.empty() && x[0] >= z[0] + gap && x[0] <= z[0] + gap + 10;
+        all = all && spaced;
+        seen += (seen.empty() ? "" : ", ") + std::to_string(gap) + ": X +" +
+                std::to_string(!z.empty() && !x.empty() ? static_cast<long long>(x[0] - z[0]) : -1);
+    }
+    check(all, "the second skill the gap after the first's key-up, at 50, 60, 80, 100 and 150 ms -- " + seen);
+
+    // And each still on its own cooldown afterwards.
+    Rig rig({ skill('Z', 1000), skill('X', 1000) }, false, false);
+    rig.run(10'000);
+    check(rig.count('Z') >= 9 && rig.count('X') >= 9, "each still pressed about every second: " +
+                                                          std::to_string(rig.count('Z')) + " and " +
+                                                          std::to_string(rig.count('X')) + " in 10 s");
+}
+
 // ------------------------------------------------------------ macro.ini
 
 void test_skills_config() {
@@ -687,6 +719,7 @@ void test_skills(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_skills_keys_change_mid_press();
     test_skills_log();
     test_skills_off_as_before();
+    test_skills_timed_gap();
     test_skills_config();
     test_sequence_follows();
 }

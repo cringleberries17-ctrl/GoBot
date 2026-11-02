@@ -73,15 +73,26 @@ DialogDriver::Result DialogDriver::run(const Step& step) {
         return out;
     }
 
-    // A step has to be able to say it worked. Clicking and hoping is what makes
-    // a sequence walk itself into nothing and report success.
-    if (step.confirm.empty() && !step.gone) {
+    // check = false says in the file that nothing on screen can show this
+    // click landed. One that names a confirmation as well is a half-made edit.
+    if (!step.check && (!step.confirm.empty() || step.gone)) {
+        out.trouble = "the step on '" + step.find +
+                      "' says check = false and also names a way to check it -- keep one";
+        return out;
+    }
+    // A step has to be able to say it worked, or say plainly that it cannot
+    // (check = false). Clicking and hoping is what makes a sequence walk
+    // itself into nothing and report success.
+    if (step.check && step.confirm.empty() && !step.gone) {
         out.trouble = "the step on '" + step.find +
                       "' has no way of telling whether the click landed";
         return out;
     }
 
     const int attempts = std::clamp(step.attempts, 1, 10);
+    // Whether a click of this step's has been asked for yet: a confirmation
+    // up before the first proves nothing, one up before a retry came after it.
+    bool tried = false;
     for (int attempt = 1; attempt <= attempts; ++attempt) {
         if (cancelled_) { out.trouble = "cancelled"; return out; }
         out.attempts_used = attempt;
@@ -91,6 +102,8 @@ DialogDriver::Result DialogDriver::run(const Step& step) {
         // not take, the page is already there or it is not.
         const int wait = attempt == 1 ? step.wait_ms : std::min(step.wait_ms, 1500);
         if (!wait_for(step.find, step.score, wait, at)) {
+            // A stop during the wait is not "not there, which is allowed".
+            if (cancelled_) { out.trouble = "cancelled"; return out; }
             if (step.optional) {
                 out.ok = true;
                 out.trouble = "'" + step.find + "' was not there, which is allowed";
@@ -101,9 +114,82 @@ DialogDriver::Result DialogDriver::run(const Step& step) {
         }
         out.at = at;
 
-        const int cx = at.x + (step.click_dx >= 0 ? step.click_dx : at.w / 2);
-        const int cy = at.y + (step.click_dy >= 0 ? step.click_dy : at.h / 2);
-        input_.click_at(cx, cy);
+        int cx = 0, cy = 0;
+        click_point(at, step, cx, cy);
+        if (step.click_dx >= at.w || step.click_dy >= at.h)
+            GB_WARN("DialogDriver: the offset %d,%d on '%s' is past its %dx%d -- "
+                    "clicking at its edge",
+                    step.click_dx, step.click_dy, step.find.c_str(), at.w, at.h);
+        if (cancelled_) { out.trouble = "cancelled"; return out; }
+
+        // The confirmation has to be something this click brings up, so it is
+        // looked for first. One on screen already proves nothing: the shop's
+        // Mua is up whether or not an item was picked, and the bin's Xac Nhan
+        // would answer for a shop's. Up before the first click, the step is
+        // refused with nothing clicked. Up before a retry, it came after an
+        // earlier click it was slow to answer: that click landed, and another
+        // would do it twice.
+        if (step.check && !step.gone) {
+            Frame before;
+            ScreenRect up;
+            if (!look(before)) {
+                out.trouble = "could not look at the screen before clicking '" + step.find + "'";
+                GB_WARN("DialogDriver: attempt %d of %d -- %s",
+                        attempt, attempts, out.trouble.c_str());
+                continue;
+            }
+            if (find_now(before, step.confirm, step.score, up)) {
+                if (!tried) {
+                    out.trouble = "'" + step.confirm + "' was already on screen before the click, "
+                                  "so it could not show whether the click landed -- nothing was clicked";
+                    GB_WARN("DialogDriver: %s", out.trouble.c_str());
+                    return out;
+                }
+                out.ok = true;
+                out.trouble.clear();
+                say("'" + step.find + "' done: '" + step.confirm +
+                    "' came up late, after the last click -- not clicked again");
+                return out;
+            }
+        }
+
+        // Only with the game in front and the game itself under the point: the
+        // frames come from PrintWindow, which shows the game even when it is
+        // covered, and a click goes to whatever is at that point of the
+        // screen. The confirmation is looked for all the same when the click
+        // was refused, because the screen is the judge -- the player may have
+        // clicked it -- and a pretend game in the tests answers without one.
+        InputManager::GameClick how = InputManager::GameClick::Failed;
+        const bool clicked =
+            input_.click_on_game(cx, cy, false, [this] { return cancelled_.load(); }, &how);
+        tried = true;
+        const std::string point = std::to_string(cx) + "," + std::to_string(cy);
+
+        // Nothing on screen can show this click landed (check = false): it is
+        // made once and said to be unchecked, never reported as confirmed.
+        // Only a click that was refused, which sent nothing, is made again.
+        if (!step.check) {
+            if (clicked) {
+                out.ok = true;
+                out.trouble.clear();
+                GB_INFO("DialogDriver: clicked '%s' at %s -- not checked (check = false)",
+                        step.find.c_str(), point.c_str());
+                say("clicked '" + step.find + "' at " + point +
+                    " -- NOT CHECKED: nothing on screen shows whether this click landed");
+                // The moment a checked step spends on its first look for the
+                // confirmation, so the game has the click before the next
+                // step makes its own.
+                std::this_thread::sleep_for(std::chrono::milliseconds(kLookEveryMs));
+                return out;
+            }
+            if (cancelled_) { out.trouble = "cancelled"; return out; }
+            out.trouble = "the click on '" + step.find + "' at " + point + " was refused (" +
+                          InputManager::game_click_name(how) +
+                          "), and with check = false nothing on screen can show it was done";
+            GB_WARN("DialogDriver: attempt %d of %d -- %s",
+                    attempt, attempts, out.trouble.c_str());
+            continue;
+        }
 
         const bool landed = step.gone
             ? wait_gone(step.find, step.score, step.confirm_ms)
@@ -112,14 +198,21 @@ DialogDriver::Result DialogDriver::run(const Step& step) {
         if (landed) {
             out.ok = true;
             out.trouble.clear();
-            say("clicked '" + step.find + "' at " + std::to_string(cx) + "," +
-                std::to_string(cy));
+            say(clicked ? "clicked '" + step.find + "' at " + point
+                        : "'" + step.find + "' done at " + point +
+                              " without a click of GoBot's: it was refused (" +
+                              InputManager::game_click_name(how) + ")");
             return out;
         }
+        if (cancelled_) { out.trouble = "cancelled"; return out; }
 
-        out.trouble = step.gone
-            ? "clicked '" + step.find + "' and it is still there"
-            : "clicked '" + step.find + "' and '" + step.confirm + "' never appeared";
+        const std::string outcome = step.gone
+            ? std::string("it is still there")
+            : "'" + step.confirm + "' never appeared";
+        out.trouble = clicked
+            ? "clicked '" + step.find + "' and " + outcome
+            : "the click on '" + step.find + "' at " + point + " was refused (" +
+                  InputManager::game_click_name(how) + ") and " + outcome;
         GB_WARN("DialogDriver: attempt %d of %d -- %s",
                 attempt, attempts, out.trouble.c_str());
     }
@@ -140,63 +233,11 @@ std::size_t DialogDriver::run_all(const std::vector<Step>& steps, std::string* t
     return steps.size();
 }
 
-int DialogDriver::close_popups(int budget) {
-    // Every way this game offers to dismiss something.
-    //
-    // All eight close buttons, because the game has eight. The first version of
-    // this listed four -- 2, 4, 6 and 8 -- copied from the commercial client's
-    // own strings rather than checked against the set actually in hand. A
-    // survey against the live client then found `close_1` on screen at a score
-    // of 1.000, which is to say: the one dialog that happened to be open was
-    // closed by a button this did not know about.
-    //
-    // Plain closes before the confirmations, because clicking a confirm when a
-    // close would have done agrees to something nobody asked about.
-    static const char* kButtons[] = {
-        "close_ic/close_1", "close_ic/close_2", "close_ic/close_3",
-        "close_ic/close_4", "close_ic/close_5", "close_ic/close_6",
-        "close_ic/close_7", "close_ic/close_8",
-        "dialog_ok", "confirm_button",
-    };
-
-    int closed = 0;
-    Frame frame;
-    for (int round = 0; round < std::clamp(budget, 1, 16); ++round) {
-        if (cancelled_) break;
-        if (!look(frame)) break;
-
-        bool clicked = false;
-        for (const char* button : kButtons) {
-            ScreenRect at;
-            if (!find_now(frame, button, 0.85f, at)) continue;
-
-            input_.click_at(at.x + at.w / 2, at.y + at.h / 2);
-            clicked = true;
-
-            // Check it actually went, and stop if it did not.
-            //
-            // This counted clicks before, not closures, and that made it lie.
-            // Run against the live client it found close_1 at 828,164, clicked
-            // it six times in a row at the same place while nothing on screen
-            // changed, and reported "closed 6". Every other step in this file
-            // has to prove it worked; there is no reason this one should not,
-            // and it was the one actually being run.
-            if (wait_gone(button, 0.85f, 1200)) {
-                ++closed;
-                GB_INFO("DialogDriver: closed '%s' at %d,%d", button, at.x, at.y);
-            } else {
-                GB_WARN("DialogDriver: clicked '%s' at %d,%d and it is still "
-                        "there -- the click is not reaching the game. Check it "
-                        "is the foreground window and that GoBot is running "
-                        "elevated.", button, at.x, at.y);
-                return closed;
-            }
-            break;
-        }
-        if (!clicked) break;          // nothing left in the way
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
-    return closed;
+void DialogDriver::click_point(const ScreenRect& at, const Step& step, int& x, int& y) {
+    const int last_x = std::max(0, at.w - 1);
+    const int last_y = std::max(0, at.h - 1);
+    x = at.x + (step.click_dx >= 0 ? std::min(step.click_dx, last_x) : at.w / 2);
+    y = at.y + (step.click_dy >= 0 ? std::min(step.click_dy, last_y) : at.h / 2);
 }
 
 } // namespace gobot

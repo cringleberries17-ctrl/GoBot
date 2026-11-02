@@ -188,6 +188,10 @@ struct NamedKey {
 /// What `vk` is already used for among `taken`, or null when it is free. A
 /// key of 0 is never taken, and never takes anything.
 const NamedKey* key_taken(std::uint32_t vk, const std::vector<NamedKey>& taken);
+/// Never with a list made in the call: the answer points into the list, which
+/// is gone at the end of that statement -- simple_hotkey_box read a note out of
+/// freed memory that way. Keep the list in a variable first.
+const NamedKey* key_taken(std::uint32_t vk, std::vector<NamedKey>&& taken) = delete;
 
 /// Which of GoBot's own keys `got` is -- start/stop, the panic stop, hunting,
 /// and the two one-job keys -- as the simple screen's key boxes refuse them

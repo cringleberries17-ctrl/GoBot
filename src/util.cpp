@@ -1,6 +1,7 @@
 #include "gobot/common.hpp"
 #include "gobot/byte_reader.hpp"
 #include "gobot/config.hpp"
+#include "gobot/util.hpp"
 
 #include <windows.h>
 
@@ -207,6 +208,53 @@ std::string hexdump(const std::uint8_t* data, std::size_t size,
         out += '\n';
     }
     return out;
+}
+
+// ---------------------------------------------------------------- System32
+
+std::string system32_path(const std::string& name) {
+    wchar_t buf[MAX_PATH] = {};
+    const UINT n = GetSystemDirectoryW(buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    std::string out = wide_to_utf8(std::wstring(buf, n));
+    if (out.empty()) return {};
+    if (out.back() == '\\' || out.back() == '/') out.pop_back();
+    return name.empty() ? out : out + "\\" + name;
+}
+
+bool harden_dll_search() {
+    // Nothing is logged: this runs before any log file is set. Nor is Npcap's
+    // DLL named here: gobot_sniff_files is linked with this file, and
+    // cmake/check_files_only.cmake removes that program when the name is in it.
+    static const bool narrowed = [] {
+        // The working folder out of the older search, which Windows still
+        // makes for a DLL loaded by its full path with
+        // LOAD_WITH_ALTERED_SEARCH_PATH -- how COM loads its servers. On
+        // every Windows, as what follows may not be there.
+        SetDllDirectoryW(L"");
+        // Asked for by name rather than imported: a Windows 7 without
+        // KB2533623 has neither, and importing them stopped these programs
+        // starting at all there. Without them the search stays as it was.
+        const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        using SetDirs = BOOL(WINAPI*)(DWORD);
+        using AddDir = DLL_DIRECTORY_COOKIE(WINAPI*)(PCWSTR);
+        const auto set_dirs =
+            kernel ? reinterpret_cast<SetDirs>(GetProcAddress(kernel, "SetDefaultDllDirectories")) : nullptr;
+        const auto add_dir =
+            kernel ? reinterpret_cast<AddDir>(GetProcAddress(kernel, "AddDllDirectory")) : nullptr;
+        // The program's folder and the working folder, out of the search for
+        // every DLL loaded by its name alone, and for what such a DLL imports.
+        if (set_dirs == nullptr || !set_dirs(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS))
+            return false;
+        // Npcap's folder, where its DLL lives when it was installed without
+        // WinPcap API-compatible Mode. Folders added here are searched before
+        // System32, so the one asked for by name is Npcap's own. Nothing is
+        // added without Npcap: AddDllDirectory refuses a folder that is not there.
+        const std::string npcap = system32_path("Npcap");
+        if (add_dir != nullptr && is_folder(npcap)) add_dir(utf8_to_wide(npcap).c_str());
+        return true;
+    }();
+    return narrowed;
 }
 
 } // namespace gobot

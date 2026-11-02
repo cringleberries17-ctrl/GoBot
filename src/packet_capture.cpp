@@ -1,6 +1,7 @@
 #include "gobot/packet_capture.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/net_discovery.hpp"
+#include "gobot/util.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -70,17 +71,48 @@ bool PacketCapture::npcap_available() {
         CloseServiceHandle(svc);
     }
     CloseServiceHandle(scm);
-    return running;
+    // The service is half of it. The other half is the DLL every pcap call
+    // goes through, loaded from where Npcap put it -- asked for here because
+    // that DLL is delay-loaded.
+    return running && load_wpcap();
+}
+
+bool PacketCapture::load_wpcap() {
+    if (GetModuleHandleW(L"wpcap.dll") != nullptr) return true;
+    const std::wstring system32 = utf8_to_wide(system32_path());
+    if (system32.empty()) return false;
+
+    // Npcap's own folder first: a copy in System32 is there only in WinPcap
+    // API-compatible Mode, or is an old WinPcap's. DLL_LOAD_DIR takes the
+    // Packet.dll it needs from beside it.
+    const wchar_t* const places[] = { L"\\Npcap\\wpcap.dll", L"\\wpcap.dll" };
+    for (const wchar_t* where : places) {
+        const std::wstring path = system32 + where;
+        HMODULE dll = LoadLibraryExW(path.c_str(), nullptr,
+                                     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        // A Windows 7 without KB2533623 knows neither flag and refuses the
+        // call itself; the older way also takes Packet.dll from beside it.
+        if (dll == nullptr && GetLastError() == ERROR_INVALID_PARAMETER)
+            dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (dll != nullptr) {
+            GB_INFO("Npcap: loaded %s", wide_to_utf8(path).c_str());
+            return true;
+        }
+    }
+    // Nothing logged: the GUI asks npcap_available() every frame its Capture
+    // panel is open.
+    return false;
 }
 
 std::vector<Interface> PacketCapture::list_interfaces() {
     std::vector<Interface> out;
 
-    // wpcap.dll is delay-loaded, so touching any pcap function without Npcap
-    // present would fault. The service check reaches the SCM rather than the
-    // library, making it safe to ask first.
+    // wpcap.dll is delay-loaded, so touching any pcap function without it
+    // loaded would fault. npcap_available() asks the SCM for the service and
+    // then loads the DLL by its full path, which makes it safe to ask first.
     if (!npcap_available()) {
-        GB_WARN("Npcap is not installed or not running; no capture interfaces");
+        GB_WARN("Npcap is not installed, not running, or its DLL would not load; "
+                "no capture interfaces");
         return out;
     }
 
@@ -313,7 +345,8 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
     }
 
     if (!npcap_available()) {
-        GB_ERROR("Npcap service is not running. Install Npcap and start the service.");
+        GB_ERROR("Npcap is not installed, its service is not running, or its DLL would not "
+                 "load. Install Npcap and start the service.");
         return false;
     }
 
@@ -387,7 +420,13 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
 void PacketCapture::stop() {
     if (!running_.exchange(false)) return;
 
-    stopping_.store(true);
+    {
+        // Under the watchdog's lock, so that it cannot look at stopping_ and
+        // then start its wait just after the wake-up below has gone.
+        std::lock_guard<std::mutex> lock(watchdog_mutex_);
+        stopping_.store(true);
+    }
+    watchdog_wake_.notify_all();
 
     // breakloop makes pcap_dispatch return promptly; the handle itself is
     // closed on the capture thread to avoid a use-after-free race.
@@ -788,7 +827,13 @@ void PacketCapture::watchdog_loop() {
     bool reported = false;
 
     while (running_.load() && !stopping_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        {
+            // A second between looks, cut short by stop().
+            std::unique_lock<std::mutex> lock(watchdog_mutex_);
+            if (watchdog_wake_.wait_for(lock, std::chrono::milliseconds(1000),
+                                        [this] { return stopping_.load(); }))
+                break;
+        }
 
         std::uint64_t silent = 0;
         {

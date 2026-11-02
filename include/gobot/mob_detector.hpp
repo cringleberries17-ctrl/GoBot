@@ -4,9 +4,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace gobot {
@@ -155,7 +157,23 @@ public:
     MobDetector(const MobDetector&) = delete;
     MobDetector& operator=(const MobDetector&) = delete;
 
+    /// The window to look at. A different one from the window it had -- the
+    /// game found again, one picked from a list, or none -- forgets all that
+    /// was seen in the old one at once (forget()).
     void set_target_window(void* hwnd);
+
+    /// Forget every plate, where your character was last, the last frame and
+    /// the counts stats() gives; a look already under way is thrown away
+    /// rather than published. set_target_window() does this when the window
+    /// changes, and so does a grab that fails: serving the last look of a
+    /// closed or restarted game kept the hunter walking and attacking towards
+    /// monsters where they stood in the old window, on the login pages too.
+    void forget();
+
+    /// Frames come from the window, through ScreenCapture, unless this is
+    /// set; a test sets its own. Set it before start(), never while running.
+    void set_grab(std::function<bool(void* window, Frame& out)> grab) { grab_ = std::move(grab); }
+
     void set_tuning(const DetectorTuning& t);
     DetectorTuning tuning() const;
 
@@ -169,8 +187,18 @@ public:
     void stop();
     bool running() const { return running_.load(); }
 
-    /// Monsters, nearest-first relative to the player when one was found.
+    /// Monsters, nearest first (nearest_first) from your own character: from
+    /// its plate in this frame, or, while that is covered for a moment, from
+    /// where player() still remembers it. In the order they were found when
+    /// there is neither.
     std::vector<Nameplate> mobs() const;
+
+    /// Put `list` nearest first from `px`, `py`, a height counting three times
+    /// its distance: something level with you is reachable, something the
+    /// same distance away but two platforms up is not. Two the same distance
+    /// away keep the order they came in. The order mobs() serves; exposed for
+    /// tests, and for whatever else hands the hunter monsters.
+    static void nearest_first(std::vector<Nameplate>& list, int px, int py);
 
     /// Every plate found, players included. For the tuning view.
     std::vector<Nameplate> plates() const;
@@ -190,6 +218,18 @@ public:
 
     /// How long a remembered position stays usable.
     static constexpr std::uint64_t kPlayerMemoryMs = 1500;
+
+    /// What the log says of the searches for your character: "found" once it
+    /// is found, and "cannot find" only once it has gone unfound for longer
+    /// than `grace_ms` -- not at every look the plate drops out for, which it
+    /// does several times a minute: 213 lines each way in five minutes of
+    /// the hunt of 2026-11-01. One search's answer at `now` goes in; +1 is a
+    /// "found" to say, -1 a "cannot find", 0 nothing.
+    struct PlayerSightings {
+        bool          said_found = false;
+        std::uint64_t missing_since_ms = 0;     ///< 0 while found
+        int note(bool got, std::uint64_t now, std::uint64_t grace_ms);
+    };
 
     bool latest_frame(Frame& out) const;
 
@@ -271,8 +311,8 @@ private:
     void find_character(const Frame& f, const DetectorTuning& t, const GlyphFont& font,
                         const std::string& want, std::vector<Nameplate>& out);
 
-    std::string character_name_;
-    bool        said_player_ = false;   ///< whether the last search found it
+    std::string     character_name_;
+    PlayerSightings sightings_;         ///< what the log has said of the searches
 
     std::atomic<void*>            hwnd_{nullptr};
     std::atomic<const GlyphFont*> font_{nullptr};
@@ -280,6 +320,10 @@ private:
     std::thread                   thread_;
     std::atomic<MinimapTracker*> minimap_{nullptr};
     std::atomic<CameraTracker*>  camera_{nullptr};
+    std::function<bool(void*, Frame&)> grab_;   ///< see set_grab; empty for the real window
+    /// Counted up by forget(). A look begun under an older count was of a
+    /// window no longer followed, and is not published.
+    std::atomic<std::uint64_t>   generation_{0};
 
     mutable std::mutex     mutex_;
     Nameplate              last_player_;

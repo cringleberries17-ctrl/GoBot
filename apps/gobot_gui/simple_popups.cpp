@@ -98,17 +98,18 @@ void GuiApp::start_popups() {
     PopupsUi& ui = *popups_ui_;
     // Ticked or not on the Đánh quái tab: unticked, as it ships, nothing runs.
     if (!ui.enabled || ui.running) return;
-    if (ui.thread.joinable()) ui.thread.join();
+    join_pumping(ui.thread);
     ui.stop = false;
     ui.running = true;
     ui.thread = std::thread([this] { popup_loop(); });
 }
 
-void GuiApp::stop_popups() {
+void GuiApp::stop_popups(bool wait) {
     if (!popups_ui_) return;
     PopupsUi& ui = *popups_ui_;
     ui.stop = true;
-    if (ui.thread.joinable()) ui.thread.join();
+    if (!wait) return;      // told, not waited for: stop_jobs
+    join_pumping(ui.thread);
     ui.running = false;
 }
 

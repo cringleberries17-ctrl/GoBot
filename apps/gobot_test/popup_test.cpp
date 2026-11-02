@@ -3,9 +3,9 @@
 //
 // The pictures are the ones the build stages: GoC's own and the grabbed set
 // (copied beside this test from the main checkout's build). The scenes are
-// frame.png from the live client -- a plain dark frame where it is not here --
-// with popups and dialogs drawn onto it, and the saved frames of the live
-// rounds for what must never be touched. Nothing is pressed anywhere: the
+// frame.png from the live client as it was saved -- a plain dark frame where
+// that is not here -- with popups and dialogs drawn onto it, and the saved
+// frames of the live rounds for what must never be touched. Nothing is pressed anywhere: the
 // clicks and the ESC go to a pretend game, and nothing reaches the desktop.
 
 #include "gobot/popup_closer.hpp"
@@ -15,6 +15,7 @@
 #include "gobot/quick_quest.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -52,7 +53,15 @@ std::string read_all(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-const char* const kLiveBuild = "C:\\Users\\player\\source\\GoBot\\build\\";
+/// The build tree of the checkout these tests were built from, where the live
+/// tests saved their rounds (live\shots, frozen\...). Never committed, and
+/// never written by GoBot as it plays; what GoBot writes is read beside this
+/// test, and only as saved (load_live_frame).
+#ifdef GOBOT_SOURCE_DIR
+const char* const kLiveBuild = GOBOT_SOURCE_DIR "/build/";
+#else
+const char* const kLiveBuild = "";
+#endif
 
 /// Draw `pic` onto `f` at `x`, `y`, its see-through pixels left out.
 void blit(Frame& f, const Frame& pic, int x, int y) {
@@ -123,12 +132,13 @@ void load_kit(Kit& x) {
             x.why = name;
             return;
         }
+    // frame.png beside this test, only as it was saved: gobot_cli --read
+    // rewrites it.
     Frame frame;
-    for (const std::string& p : { exe_relative("frame.png"), std::string(kLiveBuild) + "bin\\Release\\frame.png" })
-        if (!x.live_base && exists(p) && load_png(p, frame) && frame.width == 1280 && frame.height == 720) {
-            x.base = frame;
-            x.live_base = true;
-        }
+    if (load_live_frame(exe_relative("frame.png"), frame) && frame.width == 1280 && frame.height == 720) {
+        x.base = frame;
+        x.live_base = true;
+    }
     if (!x.live_base) x.base = plain_frame();
     x.ok = true;
 }
@@ -309,14 +319,14 @@ void add_book(Pretend& g, bool with_x, int x = 300, int y = 120) {
 bool skip_without_kit() {
     Kit& k = kit();
     if (k.ok) return false;
-    std::printf("  [skip] the pictures are not all installed here: %s\n", k.why.c_str());
+    skip("the pictures are not all installed here: %s\n", k.why.c_str());
     return true;
 }
 
 void test_notice() {
     section("Popups: the check-in notice, by its own Xác Nhận (PU-A1)");
     if (skip_without_kit()) return;
-    if (!kit().live_base) std::printf("  [info] no frame.png here: drawn on a plain frame\n");
+    if (!kit().live_base) std::printf("  [info] no frame.png here, as saved: drawn on a plain frame\n");
     Rig r;
     add_notice(r.game);
     const auto early = r.run(3);
@@ -445,7 +455,7 @@ void test_live_book() {
     {
         Rig r;
         if (!add_live_book(r.game, true)) {
-            std::printf("  [skip] no pictures of the live book here\n");
+            skip("no pictures of the live book here\n");
             return;
         }
         const auto seen = kit().eyes.popups(r.game.render(), false);
@@ -515,7 +525,7 @@ void test_menu_not_ours() {
         check(real.game.clicks == 0 && real.game.escs == 0,
               "grabbed/after_invite.png, the live ESC menu: nothing (PU-A6)");
     } else {
-        std::printf("  [skip] no grabbed/after_invite.png here\n");
+        skip("no grabbed/after_invite.png here\n");
     }
 }
 
@@ -564,7 +574,7 @@ void test_blockers() {
             r.run(8);
             check(r.game.clicks == 0 && r.game.escs == 0, "the notice with the Nhiệm Vụ window open: nothing");
         } else {
-            std::printf("  [skip] no Dlg_Quest_Neo picture here\n");
+            skip("no Dlg_Quest_Neo picture here\n");
         }
     }
     {
@@ -579,7 +589,7 @@ void test_blockers() {
             r.run(8);
             check(r.game.clicks == 0 && r.game.escs == 0, "the notice with the chat line open: nothing");
         } else {
-            std::printf("  [skip] no chat bar picture here\n");
+            skip("no chat bar picture here\n");
         }
     }
     {
@@ -841,7 +851,7 @@ void test_real_frames() {
         for (std::size_t i = 0; i < these.size(); i += 6) frames.push_back(these[i]);
     }
     if (frames.empty()) {
-        std::printf("  [skip] no live round frames here\n");
+        skip("no live round frames here\n");
         return;
     }
     const PopupEyes& eyes = kit().eyes;
@@ -911,15 +921,54 @@ void test_settings() {
               src.find("type_text") == std::string::npos && src.find("captcha") == std::string::npos,
           "popup_closer.cpp clicks no generic close_ic button and no blank dialog_ok, types nothing, "
           "and has nothing to do with a captcha");
+    // The frames come from PrintWindow, which shows the game even when it is
+    // covered: whether the game is in front and on top at the point is asked
+    // as the button goes down, by click_on_game, not a moment before.
+    check(src.find("input_.click_on_game(x, y, false, guard_.stopped)") != std::string::npos &&
+              src.find("click_at(") == std::string::npos &&
+              src.find("WindowFromPoint") == std::string::npos && src.find("GA_ROOT") == std::string::npos,
+          "and its one click goes through click_on_game, the stop asked again before the press, with no "
+          "check of its own before it");
     const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/simple_popups.cpp");
     check(!gui.empty() && gui.find("if (!ui.enabled || ui.running) return;") != std::string::npos,
           "the worker does not start while \"Tự đóng thông báo\" is unticked");
 #else
-    std::printf("  [skip] no source folder\n");
+    skip("no source folder\n");
 #endif
 }
 
 } // namespace
+
+/// For main.cpp's test of the no-real-input switch, which counts what is
+/// refused: a closer with no hands of its own, aimed at `window`, on a
+/// check-in notice -- its turns at 0, 1, 2 and 3 s on the pretend clock, the
+/// last the one that clicks. What that turn came to, and all the closer said.
+/// False, with nothing done, when the pictures are not here.
+bool popup_turn_with_no_hands(void* window, std::string& turn, std::string& said) {
+    Kit& k = kit();
+    if (!k.ok) return false;
+    InputManager aimed;
+    aimed.set_target_window(window);
+    Pretend game;
+    game.base = k.base;
+    add_notice(game);
+    PopupCloser closer(aimed, k.eyes, [&game](Frame& f) {
+        f = game.render();
+        return true;
+    });
+    PopupCloser::Clock c;
+    c.now_ms = [&game] { return game.t; };
+    c.sleep = [&game](int ms) { game.t += static_cast<std::uint64_t>(ms); };
+    closer.set_clock(c);
+    closer.on_report([&said](const std::string& line) { said += line + "\n"; });
+    PopupCloser::Turn last = PopupCloser::Turn::Blind;
+    for (int i = 0; i < 4; ++i) {
+        last = closer.turn();
+        game.t += 1000;
+    }
+    turn = PopupCloser::turn_name(last);
+    return true;
+}
 
 void test_popups(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
     g_check = check_fn;

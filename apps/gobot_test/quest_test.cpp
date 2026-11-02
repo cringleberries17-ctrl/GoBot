@@ -11,6 +11,7 @@
 #include "gobot/input_manager.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -135,6 +136,10 @@ void scribble(Frame& f, const ScreenRect& r, std::uint32_t seed) {
 
 /// The frames saved from the live client beside this test -- where the package
 /// puts it, beside gobot_gui: frame.png and the trash cleaner's debug folder.
+/// Only those the checks were written against, frame.png and the trash
+/// cleaner's seventeen as they were saved (known_live_frame, in main.cpp),
+/// are counted on, each looked at and showing no quest window: any other, the
+/// player's own after quick quest has run, may well show the window.
 std::vector<std::string> saved_frames(bool trash_debug) {
     std::vector<std::string> out;
     const std::string dir = exe_relative("");
@@ -149,35 +154,6 @@ std::vector<std::string> saved_frames(bool trash_debug) {
     while (FindNextFileA(h, &fd));
     FindClose(h);
     return out;
-}
-
-/// FNV-1a over a file's bytes.
-std::uint64_t file_hash(const std::string& path) {
-    const std::string bytes = read_all(path);
-    std::uint64_t h = 0xcbf29ce484222325ull;
-    for (const char c : bytes) {
-        h ^= static_cast<unsigned char>(c);
-        h *= 0x100000001b3ull;
-    }
-    return h;
-}
-
-/// Whether `path` is one of the live frames this test was written against --
-/// frame.png and the trash cleaner's seventeen, as they were saved -- each
-/// looked at and showing no quest window. Only these are counted on: any
-/// other frame beside the test, the player's own after quick quest has run,
-/// may well show the window, so it is looked at and reported, not counted.
-bool known_frame(const std::string& path) {
-    static const std::uint64_t kKnown[] = {
-        0x55f4d65f3cc529c7ull,      // frame.png
-        0x4a4b30a67d3a4c04ull, 0xe8be9a147ccf183aull, 0x00b1e5b2447e43a3ull, 0xb9c07a06947287faull,
-        0x2b3daeec725beb4aull, 0x34e0c99b37961fa5ull, 0x2bb38db54d5417baull, 0xaf08d5f618f0f6feull,
-        0xf26e1a095d3b2214ull, 0x4dc52622d875ebd3ull, 0x9b5aa22a75664aedull, 0xc711011d0e74439bull,
-        0x47f2f607802468b7ull, 0xdd5798f68bc6261eull, 0xe29edc96c0df073full, 0x091afd231122f428ull,
-        0xc8f5b8e97bc14b87ull,      // the trash cleaner's, 9 to 13 October
-    };
-    const std::uint64_t h = file_hash(path);
-    return std::find(std::begin(kKnown), std::end(kKnown), h) != std::end(kKnown);
 }
 
 /// Everything a pretend game needs to draw the window, from GoC's pictures.
@@ -215,7 +191,7 @@ const Art& art() {
 
 bool have_art() {
     if (art().ok) return true;
-    std::printf("  [skip] GoC's quest pictures are not installed here\n");
+    skip("GoC's quest pictures are not installed here\n");
     return false;
 }
 
@@ -359,7 +335,7 @@ void test_settings() {
     const std::string shipped = std::string(GOBOT_SOURCE_DIR) + "/configs/quest.ini";
     const std::string bytes = read_all(shipped);
     if (bytes.empty()) {
-        std::printf("  [skip] the source tree's configs/quest.ini is not here\n");
+        skip("the source tree's configs/quest.ini is not here\n");
     } else {
         QuestSettings s;
         check(s.load(shipped), "the shipped configs/quest.ini loads");
@@ -458,9 +434,53 @@ void test_settings() {
         write_all(path, "[Quest]\nquest_key=Esc\n");
         QuestSettings esc;
         check(esc.load(path) && esc.quest_key == 85, "Esc is refused as the quest key");
+        // A lone digit is read as the code GoBot wrote before it saved names:
+        // 9 is Tab, as a Tab chosen then was saved; 1, the left mouse button
+        // as a code, is refused and the quest key left as U. Never a digit
+        // key -- that is a hotbar slot.
+        write_all(path, "[Quest]\nquest_key=9\n");
+        QuestSettings nine;
+        check(nine.load(path) && nine.quest_key == VK_TAB, "quest_key=9 is Tab, as the old GoBot saved it");
+        write_all(path, "[Quest]\nquest_key=1\n");
+        QuestSettings one;
+        check(one.load(path) && one.quest_key == 85, "quest_key=1 is a mouse button's code: refused, U kept");
+        write_all(path, "[Quest]\nquest_key=0\n");
+        QuestSettings nought;
+        check(nought.load(path) && nought.quest_key == 85, "quest_key=0 is no key: U kept");
+        write_all(path, "[Quest]\nquest_key=0x39\n");
+        QuestSettings digit;
+        check(digit.load(path) && digit.quest_key == '9', "and the 9 key is written 0x39");
+        write_all(path, "[Quest]\nquest_key=0x09\n");
+        QuestSettings tab;
+        check(tab.load(path) && tab.quest_key == 9, "and quest_key=0x09, a key code, is Tab (9)");
         write_all(path, "# nothing\n[Other]\nenabled=true\n");
         QuestSettings other;
         check(!other.load(path), "a file without [Quest] is not taken");
+        DeleteFileA(path.c_str());
+    }
+
+    // Written as the Nhiệm vụ tab writes it (QuestSettings::key_text) and read
+    // back as the same key: by name, and the digit keys by their code in hex.
+    {
+        const std::string path = temp_path("gobot_test_quest_key.ini");
+        std::string wrong;
+        for (const std::uint32_t vk : { std::uint32_t(VK_TAB), std::uint32_t(VK_BACK), std::uint32_t('0'),
+                                        std::uint32_t('9'), std::uint32_t('U'), std::uint32_t(VK_F5),
+                                        std::uint32_t(VK_F13), std::uint32_t(VK_NUMPAD3), std::uint32_t(VK_SPACE),
+                                        std::uint32_t(VK_OEM_1), std::uint32_t(VK_OEM_3) }) {
+            DeleteFileA(path.c_str());
+            QuestSettings back;
+            if (!QuestSettings::save_key(path, "Quest", "quest_key", QuestSettings::key_text(vk)) ||
+                !back.load(path) || back.quest_key != vk)
+                wrong += " " + InputManager::key_name(vk);
+        }
+        check(wrong.empty(), "a quest key saved as the tab saves it reads back as that key: Tab, Backspace, 0, 9, "
+                             "U, F5, F13, Numpad3, Space and two punctuation keys" +
+                                 (wrong.empty() ? std::string() : " -- not:" + wrong));
+        QuestSettings::save_key(path, "Quest", "quest_key", QuestSettings::key_text(VK_TAB));
+        check(contains(read_all(path), "quest_key=Tab"), "Tab is written as Tab, not as its code");
+        QuestSettings::save_key(path, "Quest", "quest_key", QuestSettings::key_text('9'));
+        check(contains(read_all(path), "quest_key=0x39"), "and the 9 key as 0x39, never as a lone 9");
         DeleteFileA(path.c_str());
     }
     check(QuestSettings::clamp_interval(0) == 1 && QuestSettings::clamp_interval(61) == 60 &&
@@ -549,10 +569,10 @@ void test_window() {
     Frame shot;
     bool shot_known = false;
     if (!frames.empty() && load_png(frames.front(), shot) && shot.width == 1280 && shot.height == 720) {
-        shot_known = known_frame(frames.front());
+        shot_known = known_live_frame(frames.front());
         // Looked at alone first: one of the player's own may show the window
         // itself, which is no failure of anything, and no base to paste
-        // another into either.
+        // another into either. Only the saved frame.png is a base at all.
         const QuestWindow alone = find_quest_window(shot, p, s);
         if (shot_known) {
             check(!alone.found, fmt("frame.png alone: no window (best title bar %.3f)",
@@ -561,10 +581,11 @@ void test_window() {
             std::printf("  [info] frame.png is not one this test knows: %s (best title bar %.3f)\n",
                         alone.found ? "a quest window is in it" : "no quest window in it",
                         static_cast<double>(alone.best_title));
+            skip("frame.png is not the one these checks were written against; a pretend scene only");
         }
-        if (!alone.found) bases.emplace_back("frame.png", shot);
+        if (shot_known && !alone.found) bases.emplace_back("frame.png", shot);
     } else {
-        std::printf("  [skip] no frame.png from the live client here; a pretend scene only\n");
+        skip("no frame.png from the live client here; a pretend scene only\n");
     }
 
     for (const auto& [name, base] : bases) {
@@ -602,16 +623,14 @@ void test_window() {
                   static_cast<double>(one.tabs), static_cast<double>(two.tabs)));
     }
 
-    // Not the window.
+    // Not the window. frame.png is a base only when it is the saved one.
     if (bases.size() > 1) {
         Frame f = bases[1].second;
         paste(f, a.title_bar, 300, 120);
         const QuestWindow bar = find_quest_window(f, p, s);
-        const std::string what = fmt("GoC's inven/0/quest.png title bar pasted alone into frame.png: not "
-                                     "taken for the window (title %.3f)",
-                                     static_cast<double>(bar.best_title));
-        if (shot_known) check(!bar.found, what);
-        else std::printf("  [info] %s: %s\n", what.c_str(), bar.found ? "taken for one" : "so");
+        check(!bar.found, fmt("GoC's inven/0/quest.png title bar pasted alone into frame.png: not taken for the "
+                              "window (title %.3f)",
+                              static_cast<double>(bar.best_title)));
     }
     {
         Frame f = bases.front().second;
@@ -627,7 +646,7 @@ void test_window() {
     }
     const auto debug = saved_frames(true);
     if (debug.empty()) {
-        std::printf("  [skip] no trash_debug frames from the live client here\n");
+        skip("no trash_debug frames from the live client here\n");
     } else {
         // Counted on for the frames this test knows; any others reported.
         int found = 0, read = 0, other = 0, other_found = 0;
@@ -636,7 +655,7 @@ void test_window() {
             Frame f;
             if (!load_png(path, f)) continue;
             const QuestWindow w = find_quest_window(f, p, s);
-            if (!known_frame(path)) {
+            if (!known_live_frame(path)) {
                 ++other;
                 if (w.found) ++other_found;
                 continue;
@@ -649,6 +668,8 @@ void test_window() {
             check(found == 0, fmt("%d trash_debug frames from the live client: no window in any (best title "
                                   "bar %.3f)",
                                   read, static_cast<double>(best)));
+        else
+            skip("no trash_debug frame these checks were written against here (%d others)", other);
         if (other > 0)
             std::printf("  [info] %d other trash_debug frames, not ones this test knows: a quest window in "
                         "%d\n",
@@ -1808,12 +1829,12 @@ void test_texts() {
     const std::string src = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/quick_quest.cpp");
     if (src.empty()) {
         // Only where this was built: the source tree is not on a tester's machine.
-        std::printf("  [skip] the source tree's src/quick_quest.cpp is not here\n");
+        skip("the source tree's src/quick_quest.cpp is not here\n");
     } else {
         check(!contains(src, "close_popups") && !contains(src, "DialogDriver") &&
                   !contains(src, "QuestCancel") && !contains(src, "btn_LQuest") &&
                   !contains(src, "type_text"),
-              "quick_quest.cpp uses no DialogDriver::close_popups, loads no Hủy Nhiệm Vụ or "
+              "quick_quest.cpp uses no DialogDriver and closes no popups, loads no Hủy Nhiệm Vụ or "
               "Accept/Complete picture, and types nothing");
     }
 }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
 
 #include <windows.h>
@@ -268,9 +269,21 @@ std::vector<std::string> IniFile::keys(const std::string& section) const {
 
 // ----------------------------------------------------------------- BotConfig
 
+bool BotConfig::any_action_on() const {
+    // Skills are cast only as part of the attack (BotBrain::engage), so they
+    // count only with it -- and the attack only with something to press.
+    if (auto_attack) {
+        if (key_normal_attack != 0) return true;
+        for (const SkillSlot& s : skills)
+            if (s.enabled && s.keycode != 0) return true;
+    }
+    // Potions and buffs are the macro's, not this config's.
+    return false;
+}
+
 void BotConfig::apply_defaults() {
-    // Mirrors a typical melee setup: four skills on ZXCV, buffs on 3/4/6,
-    // potions on 1/2. Everything is overridable from the INI.
+    // Mirrors a typical melee setup: four skills on ZXCV. Everything is
+    // overridable from the INI. Potions and buffs are the macro's (macro.ini).
     const std::uint32_t skill_keys[] = { 'Z', 'X', 'C', 'V', VK_SPACE, 'N', 0, 0 };
     for (std::size_t i = 0; i < kSkillSlots; ++i) {
         skills[i].keycode     = skill_keys[i];
@@ -282,17 +295,6 @@ void BotConfig::apply_defaults() {
         skills[i].hits        = 1;
         skills[i].targets     = 1;
     }
-
-    const std::uint32_t buff_keys[] = { '3', '4', '6', 0, 0, 0 };
-    const std::uint32_t buff_cds[]  = { 1600, 1600, 60, 0, 0, 0 };
-    for (std::size_t i = 0; i < kBuffSlots; ++i) {
-        buffs[i].keycode      = buff_keys[i];
-        buffs[i].cooldown_sec = buff_cds[i];
-        buffs[i].enabled      = buff_keys[i] != 0;
-    }
-
-    hp_heal1 = { true, '1', 50 };
-    mp_heal1 = { true, '2', 50 };
 }
 
 bool BotConfig::load(const std::string& path) {
@@ -321,8 +323,7 @@ bool BotConfig::load(const std::string& path) {
     ignore_fly_monster         = B("ignore_fly_monster", ignore_fly_monster);
     allow_attack_while_jumping = B("allow_attack_while_jumping", allow_attack_while_jumping);
     enable_tile_pathfinding    = B("enable_tile_pathfinding", enable_tile_pathfinding);
-    auto_buff                  = B("auto_buff", auto_buff);
-    sequential_skill           = B("sequential_skill", sequential_skill);
+    sequential_skill          = B("sequential_skill", sequential_skill);
     priority_boss              = B("priority_boss", priority_boss);
     overcome_obstacles         = B("overcome_obstacles", overcome_obstacles);
 
@@ -367,27 +368,11 @@ bool BotConfig::load(const std::string& path) {
             skills[i].cooldown_ms *= 1000;
     }
 
-    for (std::size_t i = 0; i < kBuffSlots; ++i) {
-        const std::string p = "buff_" + std::to_string(i) + "_";
-        buffs[i].keycode      = static_cast<std::uint32_t>(ini.get_int("Bot", p + "keycode", buffs[i].keycode));
-        buffs[i].key          = ini.get("Bot", p + "key", buffs[i].key);
-        buffs[i].cooldown_sec = static_cast<std::uint32_t>(ini.get_int("Bot", p + "cooldown", static_cast<int>(buffs[i].cooldown_sec)));
-        buffs[i].enabled      = ini.get_bool("Bot", p + "enabled", buffs[i].enabled);
-    }
-
-    hp_heal1.enabled     = ini.get_bool("Heal", "hp_heal1_enabled", hp_heal1.enabled);
-    hp_heal1.keycode     = static_cast<std::uint32_t>(ini.get_int("Heal", "hp_heal1_keycode", static_cast<int>(hp_heal1.keycode)));
-    hp_heal1.trigger_pct = ini.get_int("Heal", "hp_heal1_trigger", hp_heal1.trigger_pct);
-
-    hp_heal2.enabled     = ini.get_bool("Heal", "hp_heal2_enabled", hp_heal2.enabled);
-    hp_heal2.keycode     = static_cast<std::uint32_t>(ini.get_int("Heal", "hp_heal2_keycode", static_cast<int>(hp_heal2.keycode)));
-    hp_heal2.trigger_pct = ini.get_int("Heal", "hp_heal2_trigger", hp_heal2.trigger_pct);
-
-    mp_heal1.enabled     = ini.get_bool("Heal", "mp_heal1_enabled", mp_heal1.enabled);
-    mp_heal1.keycode     = static_cast<std::uint32_t>(ini.get_int("Heal", "mp_heal1_keycode", static_cast<int>(mp_heal1.keycode)));
-    mp_heal1.trigger_pct = ini.get_int("Heal", "mp_heal1_trigger", mp_heal1.trigger_pct);
-
-    player_auto_revive  = ini.get_bool("Heal", "player_auto_revive_enabled", player_auto_revive);
+    // A file from before 2026.11.01c may still have [Bot] auto_buff and
+    // buff_N_*, and [Heal] hp_heal1/hp_heal2/mp_heal1_*: passed over. The
+    // packet bot's potions and buffs are the macro's (macro.ini), and the next
+    // save leaves them out.
+    player_auto_revive = ini.get_bool("Heal", "player_auto_revive_enabled", player_auto_revive);
     revive_max_attempts = ini.get_int("Heal", "player_revive_max_attempts", revive_max_attempts);
 
     key_jump          = static_cast<std::uint32_t>(ini.get_int("KeyConfig", "key_jump", static_cast<int>(key_jump)));
@@ -431,7 +416,6 @@ bool BotConfig::save(const std::string& path) const {
     ini.set_bool("Bot", "ignore_fly_monster", ignore_fly_monster);
     ini.set_bool("Bot", "allow_attack_while_jumping", allow_attack_while_jumping);
     ini.set_bool("Bot", "enable_tile_pathfinding", enable_tile_pathfinding);
-    ini.set_bool("Bot", "auto_buff", auto_buff);
     ini.set_bool("Bot", "sequential_skill", sequential_skill);
     ini.set_bool("Bot", "priority_boss", priority_boss);
     ini.set_bool("Bot", "overcome_obstacles", overcome_obstacles);
@@ -468,23 +452,6 @@ bool BotConfig::save(const std::string& path) const {
         ini.set_int  ("Bot", p + "targets", skills[i].targets);
     }
 
-    for (std::size_t i = 0; i < kBuffSlots; ++i) {
-        const std::string p = "buff_" + std::to_string(i) + "_";
-        ini.set     ("Bot", p + "key", buffs[i].key);
-        ini.set_int ("Bot", p + "keycode", static_cast<int>(buffs[i].keycode));
-        ini.set_int ("Bot", p + "cooldown", static_cast<int>(buffs[i].cooldown_sec));
-        ini.set_bool("Bot", p + "enabled", buffs[i].enabled);
-    }
-
-    ini.set_bool("Heal", "hp_heal1_enabled", hp_heal1.enabled);
-    ini.set_int ("Heal", "hp_heal1_keycode", static_cast<int>(hp_heal1.keycode));
-    ini.set_int ("Heal", "hp_heal1_trigger", hp_heal1.trigger_pct);
-    ini.set_bool("Heal", "hp_heal2_enabled", hp_heal2.enabled);
-    ini.set_int ("Heal", "hp_heal2_keycode", static_cast<int>(hp_heal2.keycode));
-    ini.set_int ("Heal", "hp_heal2_trigger", hp_heal2.trigger_pct);
-    ini.set_bool("Heal", "mp_heal1_enabled", mp_heal1.enabled);
-    ini.set_int ("Heal", "mp_heal1_keycode", static_cast<int>(mp_heal1.keycode));
-    ini.set_int ("Heal", "mp_heal1_trigger", mp_heal1.trigger_pct);
     ini.set_bool("Heal", "player_auto_revive_enabled", player_auto_revive);
     ini.set_int ("Heal", "player_revive_max_attempts", revive_max_attempts);
 

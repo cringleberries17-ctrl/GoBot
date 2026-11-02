@@ -23,11 +23,19 @@
 
 .PARAMETER SkipBuild
     Package whatever is already in build\bin\Release.
+
+.PARAMETER SourceCommit
+    The commit the source was taken from, for VERSION.txt when git cannot
+    tell -- a tree that is no git checkout, such as a source zip with the
+    fixes copied over it -- as a hash of 7 to 40 hex digits (a short one, as
+    git prints it, is best), with a + when it carries changes, as git's is.
+    Without it such a tree says "unknown". Ignored when git can tell.
 #>
 [CmdletBinding()]
 param(
     [string]$Version = (Get-Date -Format 'yyyy.MM.dd'),
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$SourceCommit = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +47,21 @@ $stage = Join-Path $dist "GoBot-$Version-win64"
 function Step { param($m) Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Ok   { param($m) Write-Host "    $m" -ForegroundColor Green }
 function Warn2{ param($m) Write-Host "    $m" -ForegroundColor Yellow }
+
+# Visual Studio 2022's folders, whichever editions are installed -- the Build
+# Tools that bootstrap.ps1 puts in, or Community, Professional, Enterprise --
+# under either Program Files. Its cmake and dumpbin are on no PATH.
+function Get-VsDirs {
+    # ProgramW6432 is the 64-bit Program Files, which a 32-bit PowerShell does
+    # not see in ProgramFiles.
+    foreach ($pf in (@(${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramFiles) | Select-Object -Unique)) {
+        if (-not $pf) { continue }
+        foreach ($edition in 'BuildTools', 'Community', 'Professional', 'Enterprise') {
+            $d = Join-Path $pf "Microsoft Visual Studio\2022\$edition"
+            if (Test-Path -LiteralPath $d) { $d }
+        }
+    }
+}
 
 # A value out of an ini file, by section and key, both in any case; $null when
 # it is not there. Comments and blank lines are passed over, and a BOM in
@@ -96,10 +119,13 @@ if (-not $SkipBuild) {
     }
 
     $cmake = Get-Command cmake -ErrorAction SilentlyContinue
-    if (-not $cmake) {
-        $bundled = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-        if (Test-Path $bundled) { $cmake = $bundled } else { throw "cmake not found. Run .\bootstrap.ps1" }
-    } else { $cmake = $cmake.Source }
+    if ($cmake) { $cmake = $cmake.Source }
+    else {
+        $cmake = Get-VsDirs |
+                 ForEach-Object { Join-Path $_ 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' } |
+                 Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $cmake) { throw "cmake not found. Run .\bootstrap.ps1" }
+    }
 
     & $cmake --build (Join-Path $root 'build') --config Release --parallel
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
@@ -119,12 +145,39 @@ foreach ($exe in 'gobot_gui.exe','gobot_cli.exe','gobot_test.exe') {
 # person who unzips into Program Files, and a gate that only holds on the
 # build machine is not a gate. The test program itself is not shipped: it
 # checks the source tree too, which a tester does not have.
+#
+# The exit code says whether a check failed; the last line, how many parts
+# were skipped -- left out because what they need is not on this machine (the
+# game's pictures, its glyphs, a saved frame of the client or one GoBot has
+# rewritten since, the source tree). Those do not stop the package, but they
+# are named, so that a build whose tests mostly did not run is not packaged
+# without a word. The tests log to stderr as they go -- refusals they provoke
+# on purpose among it -- and under 'Stop' a host that hands a program's stderr
+# to PowerShell (ISE, or this script's output redirected) took the first such
+# line for a failure of this script.
 Push-Location ([System.IO.Path]::GetTempPath())
 try {
-    & (Join-Path $rel 'gobot_test.exe') | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Self-tests failed -- not packaging" }
-} finally { Pop-Location }
-Ok "self-tests pass"
+    $ErrorActionPreference = 'Continue'
+    $testsOut = @(& (Join-Path $rel 'gobot_test.exe') 2>$null)
+    $testsExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = 'Stop'
+    Pop-Location
+}
+if ($testsExit -ne 0) { throw "Self-tests failed -- not packaging" }
+$summary = $testsOut | Where-Object { $_ -match '^\d+ passed, \d+ failed, \d+ skipped$' } | Select-Object -Last 1
+if (-not $summary) {
+    throw "The self-tests did not say how many passed, failed and were skipped -- a gobot_test older than this script? Build it again."
+}
+$null = $summary -match '^(\d+) passed, (\d+) failed, (\d+) skipped$'
+$passed = [int]$Matches[1]
+$skipped = [int]$Matches[3]
+if ($skipped -gt 0) {
+    Warn2 "self-tests pass ($passed checks), but $skipped part(s) were SKIPPED -- they did not run here:"
+    $testsOut | Where-Object { $_ -match '^\s*\[skip\] ' } | ForEach-Object { Warn2 "  $($_.Trim())" }
+} else {
+    Ok "self-tests pass ($passed checks, none skipped)"
+}
 
 # ---------------------------------------------------------------- stage
 Step "Staging"
@@ -155,14 +208,31 @@ Copy-Item -LiteralPath (Join-Path $root 'DOC-TRUOC.txt') -Destination $stage
 $commit = 'unknown'
 $git = Get-Command git -ErrorAction SilentlyContinue
 if ($git) {
-    $hash = (& $git.Source -C $root rev-parse --short HEAD 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $hash) {
-        $commit = "$hash".Trim()
-        $dirty = (& $git.Source -C $root status --porcelain --untracked-files=no 2>$null)
-        if ($dirty) {
-            $commit += '+'
-            Warn2 "the tree has changes that are not committed: VERSION.txt says commit $commit"
+    # git complains on stderr when the tree is no checkout, and under 'Stop'
+    # Windows PowerShell 5.1 turns the first complaint into a failure of this
+    # script. Only the exit code says how it went.
+    $ErrorActionPreference = 'Continue'
+    try {
+        $hash = (& $git.Source -C $root rev-parse --short HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $hash) {
+            $commit = "$hash".Trim()
+            $dirty = (& $git.Source -C $root status --porcelain --untracked-files=no 2>$null)
+            if ($dirty) {
+                $commit += '+'
+                Warn2 "the tree has changes that are not committed: VERSION.txt says commit $commit"
+            }
         }
+    } finally { $ErrorActionPreference = 'Stop' }
+}
+# Given by hand for a tree that is no checkout. Shortened as git shortens it:
+# the log and --doctor keep only the first 40 characters of the line, and a
+# full hash with its + would be cut off.
+if ($commit -eq 'unknown' -and $SourceCommit) {
+    if ($SourceCommit.Trim() -match '^([0-9a-fA-F]{7,40})(\+?)$') {
+        $full = $Matches[1]
+        $commit = $full.Substring(0, [Math]::Min(12, $full.Length)) + $Matches[2]
+    } else {
+        throw "-SourceCommit must be 7 to 40 hex digits of a commit, with an optional +: '$SourceCommit'"
     }
 }
 [System.IO.File]::WriteAllText((Join-Path $stage 'VERSION.txt'),
@@ -227,11 +297,17 @@ if (Test-Path $tpl) {
     # its data\bitmap_font, has no F, J, W or w, and a name with one of those
     # in it was never found on a tester's machine.
     $glyphSrc = Join-Path $stage 'templates\bitmap_font'
+    # Or already beside the programs, where a package has them: a build
+    # folder set up from a package's pictures and glyphs has them there.
+    $glyphBeside = Join-Path $rel 'bitmap_font'
     if (Test-Path $glyphSrc) {
         Move-Item -LiteralPath $glyphSrc -Destination (Join-Path $stage 'bitmap_font')
         Ok "bitmap font staged ($((Get-ChildItem (Join-Path $stage 'bitmap_font') -Recurse -File).Count) glyphs)"
+    } elseif (Test-Path $glyphBeside) {
+        Copy-Item -LiteralPath $glyphBeside -Destination (Join-Path $stage 'bitmap_font') -Recurse
+        Ok "bitmap font staged from beside the programs ($((Get-ChildItem (Join-Path $stage 'bitmap_font') -Recurse -File).Count) glyphs)"
     } else {
-        Warn2 "no templates\bitmap_font in the build -- HP/MP figures, names, chat and the player list will be unreadable"
+        Warn2 "no bitmap_font in the build, in templates\ or beside the programs -- HP/MP figures, names, chat and the player list will be unreadable"
     }
     Ok "templates staged"
 } else {
@@ -339,22 +415,36 @@ version for whoever looks after the testers.
 
 WHAT IT IS
   GoBot plays Ghost Online (the VTC client) by looking at the screen and
-  pressing keys and clicking as a player would: fighting, skills, potions,
-  buffs, reviving with a revive item, logging back in, party invitations,
-  cleaning the bag, timed chat lines, quick quest, and alerts to Discord.
-  It reads no game memory, sends no packets of its own and asks for no
-  account or password. Nothing is sent anywhere except the alerts, to the
-  player's own Discord channel, when they switch them on.
+  pressing keys and clicking as a player would: fighting, skills, potions
+  (the pet's too), buffs, reviving with a revive item, logging back in,
+  party invitations, cleaning the bag, timed chat lines, quick quest, and
+  alerts to Discord. When hunting on a machine with Npcap it also reads the
+  game's own network traffic, to know where the character and the monsters
+  are (Vi tri tu goi tin): it only reads it. It reads no game memory, sends
+  no packets of its own and asks for no account or password. Nothing is
+  sent anywhere except the alerts, to the player's own Discord channel,
+  when they switch them on.
 
 STARTING
-  1. Unzip everything into a new folder, preferably one whose path has no
-     Vietnamese letters, such as C:\GoBot. Not inside the zip.
+  1. Unzip everything into a new folder under C:\Program Files, such as
+     C:\Program Files\GoBot -- Windows asks for administrator to make it.
+     GoBot runs as administrator, so its folder must be one only an
+     administrator can change: any program can write into C:\GoBot, the
+     Desktop or Downloads, and what it left there would run with GoBot's
+     rights. Not inside the zip. To change a file in configs\ by hand, run
+     Notepad as administrator.
   2. Run gobot_gui.exe. It asks for administrator, and it has to: the game
      runs elevated, and Windows drops the keys of a program that is not.
      SmartScreen may say "Windows protected your PC" -- More info, Run
      anyway: GoBot is not signed.
-  3. The game in a window, 1024x768 or 1280x720, with Windows' display
-     scale at 100%. Keep every window, GoBot's included, off the game: it
+  3. The game in a window, 1024x768 or 1280x720. Windows' display scale
+     can be anything on Windows 10 (1607 or later) and 11; on an older
+     Windows keep it at 100%. Above 100% Windows may enlarge the game, and
+     an enlarged game cannot be read: when GoBot says Windows dang phong to
+     game, press Sua cho game and start the game again (or set the scale to
+     100%); Windows dang phong to chinh GoBot has Sua cho GoBot. Tu dang
+     nhap knows VTCZone by pictures taken at 100%: if VTCZone draws itself
+     bigger, use 100%. Keep every window, GoBot's included, off the game: it
      is read off the screen. On a screen 768 pixels high a 1024x768 game
      does not fit: use 1280x720, with the taskbar set to hide itself.
      Where GoBot cannot sit beside the game, press BAT DAU and minimise
@@ -377,6 +467,52 @@ THE SIMPLE SCREEN
   F10 and F11 act only while the game or GoBot is the window in front; F12
   acts from anywhere.
 
+  GoBot's keys reach the game only while it is the window in front. So
+  Luon dua game len truoc khi bot dang chay (under BAT DAU, ticked as
+  shipped) brings the game back whenever another window takes the front
+  while the bot runs -- GoBot's own too -- a moment (0.2 s) after the
+  player's last click or key. Whatever they then type into another window
+  goes to the game: untick it to use the PC while the bot runs. A key box
+  clicked to change a key waits up to 10 seconds for the key -- less when
+  HP falls under the HP potion's mark, or under 50% if that is higher, so
+  that the potion can go.
+
+  Keys the game does not see. The game reads its keyboard once a frame, so
+  a key held too briefly is now and then lost: pressed, and nothing
+  happens. The macro holds each key 70 to 110 ms (key_hold_min_ms and
+  key_hold_max_ms in configs\macro.ini; 25 to 60 before), keeps two potions
+  60 ms apart, and presses a potion again after potion_recheck_ms (1000)
+  when its bar has not risen and still wants the drink: once per press, and
+  the log says "Potion check: ...". 0 in the file is the old behaviour. If
+  the game's potion takes longer than a second to show, that can cost one
+  extra potion. The full screen's Macro tab, Options, has the three
+  numbers.
+
+  Skills that drain MP faster than the potions make up. A potion's bar
+  under HALF its mark (a 59% MP potion: under 29%) lets it drink again
+  potion_urgent_ms (1000) after its last press, not after its whole
+  interval (3 s); between the mark and half of it the interval stands.
+  potion_urgent_ms in configs\macro.ini, 0 for the plain interval; the
+  full screen's Macro tab, Options, has it. A second, bigger potion row
+  (Lv2) at a lower mark helps further.
+
+  Buffs that work sometimes. A buff is cast the way GoC casts it: its key
+  pressed 4 times, 200 ms apart (buff_presses and buff_press_gap_ms in
+  configs\macro.ini; 1 is the old single press). The game drops a single
+  press now and then, and a buff dropped is gone for its whole interval. The
+  log has a "Buff: key ... cast" line for each cast, and the reason when one
+  cannot be cast (the game not in front, the character not in the world...):
+  send those lines if buffs still come and go.
+
+  Walking to a monster, the hunter holds the arrow key down as a player
+  does, rather than tapping it (the character stopped after every step).
+  It lets go in reach, when the monster is behind, to loot, when the game
+  is not in front, and when another job needs the keys. To bring the old
+  steps back: on the full screen (Nang cao), the Features tab, the Attack
+  panel, untick "Hold the walk key" and press that panel's Save (without
+  Save it is ticked again next time); or, with GoBot closed, set
+  hold_walk=false in configs\hunt.ini.
+
   The version is in the window's title and at the bottom left of the simple
   screen. "Nang cao" is the old full screen, in English; testers do not need
   it. Two optional keys ship with no key: Phim don ngay (Don rac tab: one
@@ -388,20 +524,27 @@ THE SIMPLE SCREEN
 EXPERIMENTAL
   Marked "Thu nghiem" on the screen -- passed every test here, not yet
   proven on the real game: revive with an item (Tu hoi sinh), per-key buff
-  timers (Tu buff), inviting whoever types the keyword (at 1280x720) and,
+  timers from 0 seconds (Tu buff; 0 is every 5 seconds, as GoC casts a buff
+  whose cooldown is 0), inviting whoever types the keyword (at 1280x720) and,
   with it, inviting only while leading (Chi moi khi dang lam chu to doi),
   logging in without an account (Tu dang nhap) with its new options (Cung
   vao lai khi game van chay ma khong thay nhan vat qua N phut, and Phim vao
   game ngay), Tu chat with its tick Chi khi chua co to doi, quick quest
   (Nhiem vu), the Discord alerts (Thong bao) with the new Sap het binh and
-  Het binh, and on Danh quai: the second potion tier (Lv2), potion counts
-  (Con N binh), monster lists (Loc quai), attack styles (Kieu danh),
-  keeping distance (Giu khoang cach), the jump key (Phim nhay and Thu),
+  Het binh, and on Danh quai: the second potion tier (Lv2), the pet's
+  potion (Tu bom mau pet), potion counts (Con N binh), monster lists (Loc
+  quai), attack styles (Kieu danh), keeping distance (Giu khoang cach),
+  positions from packets (Vi tri tu goi tin), the hunting spot (Cho danh
+  quai, with Dat cho nay), the jump key (Phim nhay and Thu),
   skills only while fighting (Chi khi dang danh quai) and closing notices
   (Tu dong thong bao); on Don rac, registering monster fragments (Dung manh
-  ghep) and the key Phim don ngay. Try one at a time, on a spare character,
+  ghep), using charms once an hour (Dung bua, and the button Dung bua ngay),
+  buying potions from the shop of the Nguoi Giu San item (Tu mua binh, with
+  the trial Thu mua; it TYPES 100 into the game, so try the trial first)
+  and the key Phim don ngay. Try one at a time, on a spare character,
   and watch. Bag cleaning (Don rac) has run on the real game; registering
-  fragments has not. Only one live run, of about 15 minutes, has tried
+  fragments and using charms have not (a charm costs one each time, so try
+  it with one spare charm first). Only one live run, of about 15 minutes, has tried
   any of the rest: hunting with the macro keys, potions with Con N binh,
   Tu chat, the keyword invite (it read the chat; no invite went out) and
   one death with Tu hoi sinh. See KNOWN ISSUES.
@@ -456,6 +599,23 @@ EXPERIMENTAL
   at once (62 to 6) is not believed until it is read 3 times (reads with
   the hotbar covered do not count); one that comes back is logged as a
   misread, and its screenshot is kept in potion_debug.
+
+  The pet's potion (Tu bom mau pet, a third potion row): ticked, it asks
+  for the key of the pet's potion on the hotbar, and presses it about every
+  3 seconds while the pet's HP is at or under its mark; HP and MP potions
+  always go first. The pet's HP is read from the RED bar in the pet's box
+  at the top left of the game, under HP and MP -- the purple bar under it
+  is not HP. With no pet out the row says so and presses nothing.
+
+  Vi tri tu goi tin (on Danh quai, next to Giu khoang cach; off as
+  shipped) takes the character's and the monsters' places from the game's
+  own network traffic rather than from the names on screen, which drop out
+  now and then. It needs Npcap. Unticked, GoBot still captures the traffic
+  when hunting starts and writes a Positions line to the log every 10
+  seconds, comparing it with the screen, which does the fighting. The line
+  under BAT DAU says which is used: Vi tri: tu goi tin, or tu man hinh and
+  why. Testers: hunt 10 minutes unticked and send the log, then tick it,
+  hunt 10 minutes more, watch, and send the log again.
 
   There is no captcha handling, by decision: the player answers one.
 
@@ -526,15 +686,19 @@ REPORTING A PROBLEM
   players GoBot invited to a party (and of those who joined, with "Kem ten
   nguoi choi khac" ticked on Thong bao) and of players who typed the party
   keyword, invited or not, folder paths with the Windows user name, a
-  home network address and the chat lines that were said -- never a
+  home network address, the game server's address and map numbers (when
+  capturing packets) and the chat lines that were said -- never a
   password or the webhook. The *_debug folders (chat_debug, trash_debug,
-  revive_debug, quest_debug, potion_debug, keeper_debug) are screenshots
-  of the game: only on request.
+  revive_debug, quest_debug, potion_debug, keeper_debug, login_debug) are
+  screenshots of the game: only on request. login_debug holds the game's
+  screen each time Tu dang nhap fails on it (only when nothing else was over
+  the game), for when logging back in gets stuck.
 
 UPDATING
-  Unzip a new version into a NEW folder. Copy party.ini (and trash.ini with
-  the trash folder) from the old configs folder if wanted -- but a party.ini
-  from a package before 15/10/2026 has both party switches on, and any
+  Unzip a new version into a NEW folder under C:\Program Files.
+  Copy party.ini (and trash.ini with the trash folder) from the old
+  configs folder if wanted -- but a party.ini from a package before
+  15/10/2026 has both party switches on, and any
   copied party.ini keeps what was ticked: open To doi and look at both
   switches before BAT DAU. Do not copy hunt.ini: one from a package before
   15/10/2026 may hold another player's character name. Type the name and the
@@ -547,7 +711,11 @@ UPDATING
   saved points) now ships as the Up arrow; a hunt.ini without it gets Up
   too; one copied from an older package keeps its own. Set the other keys
   again on the screen rather than copying an older macro.ini, which may
-  have a hidden key sequence switched on.
+  have a hidden key sequence switched on. Never open this version's
+  configs folder with an older GoBot: an older build may drop the keys past
+  the 12th (the Lv2 potions among them), a save from it turns the pet's
+  potion into a plain timed key -- which this version then reads the same
+  way -- and it drops the mark that keeps a short buff a buff.
 
 THE DISCORD WEBHOOK
   Kept encrypted for the Windows user in %LOCALAPPDATA%\GoBot, never in this
@@ -573,8 +741,10 @@ WHAT IS IN HERE
 
 NOTHING ELSE TO INSTALL
   No VC++ redistributable: the runtime is linked in.
-  No Npcap: that only matters to the unfinished packet-capture bot, which
-  testers do not use.
+  Npcap is optional -- it is there if GoC ever ran, otherwise from
+  npcap.com: only Vi tri tu goi tin and Cho danh quai use it. Without it
+  GoBot reads the screen, and both programs start all the same -- but Tu
+  danh quai does not start while Cho danh quai is ticked.
 
   Botting is against GhostOnline's terms of service. Your account, your call.
 "@
@@ -598,8 +768,8 @@ $textFiles = @(Get-ChildItem $stage -Recurse -File |
 # gobot_cli.exe would not launch on a machine without Npcap -- and that is the
 # program somebody runs first, to see what is wrong with --doctor. It is
 # delay-loaded now; this is what stops that silently coming back.
-$dumpbin = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" `
-            -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+$dumpbin = Get-VsDirs |
+           ForEach-Object { Get-ChildItem (Join-Path $_ 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue } |
            Where-Object { $_.FullName -like '*Hostx64\x64*' } | Select-Object -First 1
 if ($dumpbin) {
     foreach ($exe in Get-ChildItem $stage -Filter *.exe) {
@@ -611,10 +781,33 @@ if ($dumpbin) {
                 $problems += "$($exe.Name) statically imports $($Matches[1]).dll -- it will not start without Npcap"
             }
         }
+        # Both run as administrator, so neither may take a DLL from its own
+        # folder: the flag that holds their imports to System32 has to have
+        # survived the link. A dumpbin that does not show it only warns.
+        $loadFlag = $null
+        foreach ($l in (& $dumpbin.FullName /loadconfig $exe.FullName 2>&1)) {
+            if ("$l" -match '^\s*([0-9A-Fa-f]+)\s+Dependent Load Flag') { $loadFlag = [Convert]::ToInt32($Matches[1], 16); break }
+        }
+        if ($null -eq $loadFlag) {
+            Warn2 "$($exe.Name): dumpbin /loadconfig shows no Dependent Load Flag -- not checked"
+        } elseif (($loadFlag -band 0x800) -eq 0) {
+            $problems += "$($exe.Name) runs as administrator and may load a DLL from its own folder -- link it with /DEPENDENTLOADFLAG:0x800 (gobot_require_admin in CMakeLists.txt)"
+        }
     }
     Ok "no executable needs anything that is not in the package"
 } else {
     Warn2 "dumpbin not found -- could not check what the executables need"
+}
+
+# 1b. Nor may they look for OpenCV's parallel plugins. OpenCV loads one by
+# its full path from beside the exe, where no load flag reaches, and both run
+# as administrator. CMakeLists.txt builds OpenCV without them; this is what
+# stops that silently coming back.
+foreach ($exe in Get-ChildItem $stage -Filter *.exe) {
+    $hay = $latin1.GetString([System.IO.File]::ReadAllBytes($exe.FullName))
+    if ($hay.IndexOf('opencv_core_parallel_', [System.StringComparison]::Ordinal) -ge 0) {
+        $problems += "$($exe.Name) looks beside itself for OpenCV's parallel plugins and would run one as administrator -- build OpenCV with PARALLEL_ENABLE_PLUGINS off (CMakeLists.txt)"
+    }
 }
 
 # 2. The glyphs, without which names, figures and chat go unread -- the full
@@ -781,7 +974,8 @@ Get-ChildItem $stage -Recurse -File | ForEach-Object {
 
 # 7. Everything that acts on the game ships switched off. A tester presses
 # BAT DAU before reading a word, and what is on in a file here is a key
-# pressed, an invitation taken or a line said in their game.
+# pressed, an invitation taken or a line said in their game. The packet
+# bot's bot_default.ini is held to the same, switch by switch.
 $cfg = Join-Path $stage 'configs'
 $mustBeOff = @(
     @('macro.ini', 'Macro', 'sequence_enabled'),
@@ -799,9 +993,29 @@ $mustBeOff = @(
     @('app.ini', 'Crash', 'stall_enabled'),
     @('app.ini', 'Simple', 'close_popups'),
     @('trash.ini', 'Trash', 'use_fragments'),
+    @('trash.ini', 'Trash', 'use_charms'),
+    @('trash.ini', 'Trash', 'buy_potions'),
     @('macro.ini', 'Macro', 'skills_follow_fight'),
-    @('hunt.ini', 'Hunt', 'keep_distance')
+    @('hunt.ini', 'Hunt', 'keep_distance'),
+    @('hunt.ini', 'Hunt', 'spot'),
+    @('bot_default.ini', 'Bot', 'auto_attack'),
+    @('bot_default.ini', 'Bot', 'auto_fury'),
+    @('bot_default.ini', 'Bot', 'backing_away'),
+    @('bot_default.ini', 'Bot', 'face_target'),
+    @('bot_default.ini', 'Bot', 'auto_loot'),
+    @('bot_default.ini', 'Bot', 'double_jump'),
+    @('bot_default.ini', 'Bot', 'enable_tile_pathfinding'),
+    @('bot_default.ini', 'Bot', 'return_to_original_location'),
+    @('bot_default.ini', 'Bot', 'return_to_previous_map'),
+    @('bot_default.ini', 'Bot', 'continue_auto_after_death'),
+    @('bot_default.ini', 'Heal', 'player_auto_revive_enabled'),
+    @('bot_default.ini', 'Patrol', 'patrol_use_waypoints')
 )
+# The packet bot's skill slots, every one written down and off: a slot the
+# file leaves out is switched on by BotConfig's own defaults (four skills), so
+# a missing one is as bad as one left on. Its potions and buffs are
+# macro.ini's, whose keys are checked below.
+foreach ($i in 0..7) { $mustBeOff += ,@('bot_default.ini', 'Bot', "skill_${i}_enabled") }
 foreach ($m in $mustBeOff) {
     $v = Get-IniValue (Join-Path $cfg $m[0]) $m[1] $m[2]
     if ($null -eq $v) { $problems += "$($m[0]): [$($m[1])] $($m[2]) is not there to be off" }
@@ -860,6 +1074,8 @@ if ((Get-IniValue (Join-Path $cfg 'login.ini') 'Login' 'channel_index') -ne '0' 
     $problems += "login.ini: channel_index and character_index must ship as 0"
 }
 if (Test-Path (Join-Path $cfg 'trash')) { $problems += "configs\trash\ is in the package -- somebody's photographed items" }
+# The Nguoi Giu San item as one player's bag draws it (Tu mua binh): theirs alone.
+if (Test-Path (Join-Path $cfg 'shop')) { $problems += "configs\shop\ is in the package -- somebody's photographed item" }
 # And a tester's log starts afresh each session, keeping the one before: sent
 # with a problem, it holds two sessions, not weeks of names and chat lines.
 if ((Get-IniValue (Join-Path $cfg 'app.ini') 'Paths' 'new_log_each_start') -notmatch '^(true|1|yes|on)$') {
@@ -909,7 +1125,7 @@ Get-ChildItem $stage -Recurse -File | Where-Object {
     $_.Extension -in '.log', '.bin', '.s2c', '.c2s' -or
     $_.Name -in 'frame.png', 'region.png', 'gobot_gui.ini' -or $_.Name -like 'playerlist*.png'
 } | ForEach-Object { $problems += "$($_.FullName.Substring($stage.Length + 1)) is something a run left behind" }
-foreach ($d in 'maps', 'trash_debug', 'revive_debug', 'quest_debug', 'chat_debug', 'templates\seen', 'templates\captcha') {
+foreach ($d in 'maps', 'trash_debug', 'revive_debug', 'quest_debug', 'chat_debug', 'potion_debug', 'keeper_debug', 'login_debug', 'templates\seen', 'templates\captcha') {
     if (Test-Path (Join-Path $stage $d)) { $problems += "$d\ is in the package -- something a run, or this machine, left behind" }
 }
 
@@ -936,6 +1152,16 @@ foreach ($k in 'open_picture', 'closed_picture') {
 Get-Content (Join-Path $cfg 'party.ini') | Where-Object { $_ -match '^\s*\w*picture\s*=\s*(\S+)' } |
     ForEach-Object { $wanted += ($Matches[1] + '.png') }
 $wanted += 'inven/0/dialog_Panic.spr/0.png'
+# Tu dang nhap clicks the channel rows on the game's own channel panel
+# (AutoLogin::kChannelPanel, templates.ini channel_dialog); without it every
+# game of a size other than 1024x768 falls back to offsets measured on that one.
+$wanted += 'login/1/Img_Dlg_Channel.spr/0.png'
+# Tu mua binh counts the two potions and finds the Nguoi Giu San item by their
+# catalog icons (CleanSettings::kBuyHpId, kBuyMpId, buy_opener), and its shop
+# by pictures that templates.ini names under grabbed/ (checked above).
+$wanted += 'spend/hp/8820131.png'
+$wanted += 'spend/mana/8810111.png'
+$wanted += 'other/8950604.png'
 foreach ($w in ($wanted | Sort-Object -Unique)) {
     if (-not (Test-Path -LiteralPath (Join-Path $tdir ($w -replace '/', '\')))) {
         $problems += "templates\$($w -replace '/', '\') is not in the package"

@@ -22,4 +22,15 @@ struct BarSpec {
     int  bottom() const { return y + height; }
 };
 
+/// The game's own fill colours, across the middle rows of its bars at every
+/// HUD size seen: HP's red and MP's blue, matched within kFillTolerance --
+/// the colours a bar starts from, and goes back to when it holds one that
+/// is no fill colour at all (VitalsReader::reads_as_fill).
+struct FillColour {
+    std::uint8_t r, g, b;
+};
+inline constexpr FillColour kHpFill{ 239, 0, 0 };
+inline constexpr FillColour kMpFill{ 0, 49, 206 };
+inline constexpr int        kFillTolerance = 80;
+
 } // namespace gobot

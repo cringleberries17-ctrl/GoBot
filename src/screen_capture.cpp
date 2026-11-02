@@ -2,6 +2,7 @@
 #include "gobot/logger.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include <windows.h>
@@ -41,7 +42,62 @@ bool looks_blank(const void* bits, int w, int h) {
     return true;
 }
 
+/// Whether a copy of the screen over a window's client area shows the window
+/// itself drawn: two sampled points of different colour, both where the
+/// screen shows this window and not something over it. Only the points of a
+/// new colour are looked up, and only on a grab whose PrintWindow came back
+/// blank. `seen`, when asked: whether any sampled point showed the window.
+bool drawn_where_seen(HWND hwnd, POINT origin, const void* bits, int w, int h, bool* seen = nullptr) {
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    const auto* px = static_cast<const std::uint32_t*>(bits);
+    const int sx = std::max(1, w / 48);
+    const int sy = std::max(1, h / 48);
+    bool have = false;
+    std::uint32_t first = 0;
+    for (int y = 0; y < h; y += sy) {
+        const std::uint32_t* row = px + static_cast<std::size_t>(y) * w;
+        for (int x = 0; x < w; x += sx) {
+            const std::uint32_t c = row[x] & 0x00FFFFFFu;
+            if (have && c == first) continue;
+            const HWND at = WindowFromPoint(POINT{ origin.x + x, origin.y + y });
+            if (at == nullptr || GetAncestor(at, GA_ROOT) != root) continue;   // covered, or off every screen
+            if (seen != nullptr) *seen = true;
+            if (have) return true;
+            have = true;
+            first = c;
+        }
+    }
+    return false;   // one flat colour where it can be seen, or not seen at all
+}
+
 } // namespace
+
+namespace {
+std::atomic<int> print_paused{ 0 };
+}  // namespace
+
+PrintWindowPause::PrintWindowPause() { ++print_paused; }
+PrintWindowPause::~PrintWindowPause() { --print_paused; }
+bool PrintWindowPause::active() { return print_paused.load() > 0; }
+
+bool PrintWindowRule::printed(bool drew) {
+    if (drew) {
+        const bool back = !trying_;
+        trying_ = true;
+        misses_ = 0;
+        return back;
+    }
+    // A probe that drew nothing waits its turn again.
+    if (!trying_) countdown_ = kProbeEvery;
+    return false;
+}
+
+bool PrintWindowRule::screen(bool drawn) {
+    if (!trying_ || !drawn || ++misses_ < kMissesBeforeScreen) return false;
+    trying_ = false;
+    countdown_ = kProbeEvery;
+    return true;
+}
 
 bool save_png(const Frame& f, const std::string& path) {
     if (!f.valid() || path.empty()) return false;
@@ -84,8 +140,21 @@ bool save_png(const Frame& f, const std::string& path) {
 ScreenCapture::~ScreenCapture() { release(); }
 
 void ScreenCapture::release() {
-    if (bitmap_) { DeleteObject(static_cast<HBITMAP>(bitmap_)); bitmap_ = nullptr; }
-    if (dc_)     { DeleteDC(static_cast<HDC>(dc_)); dc_ = nullptr; }
+    HDC dc = static_cast<HDC>(dc_);
+    // The DC's own bitmap back in first, so the DIB is in no DC when it is
+    // deleted; and the DC deleted before the DIB, so it is in none even
+    // should that have failed.
+    if (dc && old_bitmap_) SelectObject(dc, static_cast<HGDIOBJ>(old_bitmap_));
+    if (dc) DeleteDC(dc);
+    if (bitmap_ && !DeleteObject(static_cast<HGDIOBJ>(bitmap_))) {
+        // Said once: short-lived captures are made every few seconds.
+        static std::atomic<bool> said{ false };
+        if (!said.exchange(true))
+            GB_WARN("ScreenCapture: a frame bitmap could not be freed -- GDI handles are being lost");
+    }
+    dc_ = nullptr;
+    bitmap_ = nullptr;
+    old_bitmap_ = nullptr;
     bits_ = nullptr;
     cached_w_ = cached_h_ = 0;
 }
@@ -128,9 +197,21 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
             return false;
         }
 
-        SelectObject(mem, bmp);
+        // Keep the bitmap the DC came with, to put back before the DIB is
+        // deleted. One still selected into a DC cannot be deleted at all --
+        // DeleteObject refuses it and DeleteDC does not free it -- so every
+        // capture torn down or resized used to leave its DIB behind, 3.7 MB
+        // and a GDI handle at 1280x720, until the 10,000-handle quota ran out
+        // and every grab failed.
+        HGDIOBJ old = SelectObject(mem, bmp);
+        if (!old) {
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            return false;
+        }
         dc_ = mem;
         bitmap_ = bmp;
+        old_bitmap_ = old;
         bits_ = bits;
         cached_w_ = w;
         cached_h_ = h;
@@ -142,8 +223,9 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
     // because our own window is usually sitting on top of it.
     from_screen_ = false;
     BOOL ok = FALSE;
+    bool printed = false;     // PrintWindow was asked this grab, and drew nothing
 
-    if (try_print_window_ || --print_probe_countdown_ <= 0) {
+    if (!screen_only_ && !PrintWindowPause::active() && print_rule_.ask()) {
         // Clear first. PrintWindow can return success having painted nothing
         // at all, in which case the bitmap would still hold the previous
         // frame and the blank check below would be fooled by it.
@@ -158,42 +240,72 @@ bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {
         // path the frame happened to come from.
         ok = PrintWindow(hwnd, mem, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
         if (ok && looks_blank(bits_, w, h)) ok = FALSE;
+        printed = !ok;
 
-        if (!ok && try_print_window_) {
-            // Direct3D windows routinely do this. Say so once rather than
-            // leaving a silent per-frame fallback for someone to discover.
-            GB_INFO("PrintWindow returns a blank frame for this window -- "
-                    "reading pixels off the screen instead; keep the game "
-                    "unobscured and fully on screen");
-        }
-        try_print_window_ = (ok != FALSE);
-
-        // Re-probe occasionally: a window that renders nothing while loading
-        // may well cooperate once it is up.
-        if (!ok) print_probe_countdown_ = 600;
+        if (print_rule_.printed(ok != FALSE))
+            GB_INFO("PrintWindow draws this window again -- reading it from its own "
+                    "picture, whatever lies over it");
     }
 
     if (!ok) {
         // Fall back to lifting pixels off the screen. Only correct while the
         // window is actually visible; reported via from_screen().
         POINT origin{ 0, 0 };
-        ClientToScreen(hwnd, &origin);
-        HDC screen = GetDC(nullptr);
-        if (!screen) return false;
-        // Black, rather than whatever the last frame left, wherever the copy
-        // does not reach: the part of a window dragged off the screen. An old
-        // picture of a page there would read as that page still being up.
-        // Only then: a window wholly on the screen is copied whole.
-        const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        if (origin.x < vx || origin.y < vy ||
-            origin.x + w > vx + GetSystemMetrics(SM_CXVIRTUALSCREEN) ||
-            origin.y + h > vy + GetSystemMetrics(SM_CYVIRTUALSCREEN))
-            std::memset(bits_, 0, static_cast<std::size_t>(w) * h * 4);
-        ok = BitBlt(mem, 0, 0, w, h, screen, origin.x, origin.y, SRCCOPY);
-        ReleaseDC(nullptr, screen);
+        const auto copy = [&]() -> BOOL {
+            // Asked again on every copy: a copy made after a pause may find the
+            // window gone or minimised meanwhile.
+            if (!IsWindow(hwnd) || IsIconic(hwnd)) return FALSE;
+            origin = POINT{ 0, 0 };
+            if (!ClientToScreen(hwnd, &origin)) return FALSE;
+            HDC screen = GetDC(nullptr);
+            if (!screen) return FALSE;
+            // Black, rather than whatever the last frame left, wherever the copy
+            // does not reach: the part of a window dragged off the screen. An old
+            // picture of a page there would read as that page still being up.
+            // Only then: a window wholly on the screen is copied whole.
+            const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            if (origin.x < vx || origin.y < vy ||
+                origin.x + w > vx + GetSystemMetrics(SM_CXVIRTUALSCREEN) ||
+                origin.y + h > vy + GetSystemMetrics(SM_CYVIRTUALSCREEN))
+                std::memset(bits_, 0, static_cast<std::size_t>(w) * h * 4);
+            const BOOL copied = BitBlt(mem, 0, 0, w, h, screen, origin.x, origin.y, SRCCOPY);
+            ReleaseDC(nullptr, screen);
+            return copied;
+        };
+        ok = copy();
         from_screen_ = true;
         ++fallbacks_;
+
+        // Right after PrintWindow was asked, the screen can show the game black
+        // until it draws its next frame: on the live client (2026-10-30) a copy
+        // black but for the corners Windows rounds came once in every
+        // kProbeEvery grabs, and for seconds on end while PrintWindow was being
+        // tried -- every grab asked it, every copy after it was black, and so it
+        // was never seen to be drawn and never given up. Copied again a moment
+        // later, a few times, while the window is one flat colour where it can
+        // be seen; never on a grab that did not ask PrintWindow, nor with the
+        // window seen nowhere -- covered whole, nothing to wait for.
+        bool seen = false;
+        bool drawn = printed && ok && drawn_where_seen(hwnd, origin, bits_, w, h, &seen);
+        for (int again = 0; printed && ok && !drawn && seen && again < kRecopies; ++again) {
+            Sleep(kRecopyGapMs);
+            ok = copy();
+            drawn = ok && drawn_where_seen(hwnd, origin, bits_, w, h);
+        }
+
+        // A blank picture is PrintWindow's fault only when the screen shows the
+        // window itself drawn: Direct3D windows can do this. One that is as
+        // blank where it can be seen -- the game's black loading screen, with a
+        // toast or the taskbar over a corner of it -- says nothing about
+        // PrintWindow. See PrintWindowRule.
+        if (printed && ok && print_rule_.trying() && print_rule_.screen(drawn)) {
+            // Direct3D windows routinely do this. Say so once rather than
+            // leaving a silent per-frame fallback for someone to discover.
+            GB_INFO("PrintWindow returns a blank frame for this window -- "
+                    "reading pixels off the screen instead; keep the game "
+                    "unobscured and fully on screen");
+        }
     }
     if (!ok) return false;
 

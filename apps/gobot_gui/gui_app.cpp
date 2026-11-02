@@ -15,6 +15,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -98,8 +99,65 @@ void copy_to(char* dst, std::size_t cap, const std::string& src) {
 /// may be open, by name.
 const char* const kChatHold = "auto chat";
 
+/// The hold everything is stopped under (stop_jobs), by name.
+const char* const kStopHold = "stopping";
+
+/// The hold a protocol calibration runs under, by name.
+const char* const kCalibHold = "calibrating";
+
 /// What a trash pass says while it waits for the chat line to be seen shut.
 const char* const kTrashWaitsForChat = "Chờ: ô chat trong game có thể đang mở, dọn rác sau.";
+/// The longest the trash worker holds its timed jobs back for a Tự chat line,
+/// and how soon a line put off for a trash job asks again: that job's end is
+/// its turn. A job held off by a line (its hold) is tried again as soon.
+constexpr std::uint64_t kChatFirstMaxMs = 30'000;
+constexpr std::uint64_t kChatAfterTrashMs = 1'000;
+constexpr std::uint64_t kAfterChatLineMs = 3'000;
+
+/// Whether the whole of the game's client area lies on some screen. The bag
+/// jobs read the game off the screen, which shows nothing of a part that is
+/// not: a game window as large as the screen, or dragged partly off it.
+bool client_on_screen(void* window) {
+    const HWND h = static_cast<HWND>(window);
+    RECT rc{};
+    if (h == nullptr || !GetClientRect(h, &rc) || rc.right <= 4 || rc.bottom <= 4) return false;
+    const POINT corners[] = { { 2, 2 }, { rc.right - 3, 2 }, { 2, rc.bottom - 3 }, { rc.right - 3, rc.bottom - 3 } };
+    for (POINT p : corners) {
+        if (!ClientToScreen(h, &p) || MonitorFromPoint(p, MONITOR_DEFAULTTONULL) == nullptr) return false;
+    }
+    return true;
+}
+const char* const kGameOffScreen =
+    "Cửa sổ game có phần nằm ngoài màn hình (cửa sổ lớn hơn màn hình, hoặc bị kéo lệch ra ngoài): GoBot đọc game "
+    "từ màn hình nên không thấy phần đó. Kéo cửa sổ game vào trong màn hình hoặc chọn độ phân giải nhỏ hơn.";
+
+/// The game's process `pid`, its server connections and its own UDP ports,
+/// as Windows' socket tables have them now: what the capture for positions
+/// is built from. `conns` gets the connections themselves.
+GameLink game_link_of(std::uint32_t pid, std::vector<ProcessConnection>& conns) {
+    GameLink link;
+    link.pid = pid;
+    conns = pid != 0 ? game_connection_candidates(pid) : std::vector<ProcessConnection>{};
+    for (const ProcessConnection& c : conns) link.servers.push_back(c.remote);
+    link.udp_ports = udp_ports_for_pid(pid);
+    return link;
+}
+
+/// `v` with `places` decimals, for the log.
+std::string decimals(double v, int places) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.*f", places, v);
+    return buf;
+}
+
+/// The crossing's own pictures, from the same place as the command line's
+/// crossing. Only those: the whole set is some sixty megabytes, of which a
+/// keeper that runs for hours needs seven.
+TemplateStore keeper_pictures(const AutoLogin::Settings& for_these) {
+    TemplateStore all;
+    AutoLogin::load_pictures(all, exe_relative("configs/templates.ini"));
+    return AutoLogin::pictures_for(for_these, all);
+}
 
 } // namespace
 
@@ -108,25 +166,19 @@ const char* const kTrashWaitsForChat = "Chờ: ô chat trong game có thể đan
 GuiApp::GuiApp() = default;
 
 GuiApp::~GuiApp() {
-    // A jump key's "Thử" under way presses nothing more: GoBot is closing.
-    simple_style_stop();
-    if (calibrator_) calibrator_->stop();
-    if (mapper_) mapper_->stop();
-    if (navigator_) navigator_->stop();
-    stop_hunt();
-    stop_detector();
-    // These own a thread that clicks the game or types into it. Joined before
-    // anything else goes away: a worker still running while the things it
-    // reads are torn down is a worker clicking at a target that is no longer
-    // there. The chat first: a line half typed is rubbed out and closed as it
-    // stops, and it holds everything else off until then.
+    // Everything that acts on the game, told at once and then waited for, as
+    // F12 stops it (stop_jobs) -- the hunter and the macro waited for first,
+    // not last: they went on pressing skills and potions into the game while
+    // the workers were waited for one by one. The workers own a thread that
+    // clicks the game or types into it, and are joined before anything they
+    // read goes away: a worker still running while the things it reads are
+    // torn down is a worker clicking at a target that is no longer there.
+    stop_jobs(true);
+    // Tự chat waited for this time: a line half typed is left in the chat line
+    // as it stops, and its thread has to be gone before what it reads is.
     stop_chat();
-    stop_party();
-    stop_keeper();
-    stop_revive();
-    stop_trash();
-    stop_quest();
-    stop_popups();
+    if (mapper_) mapper_->stop();
+    stop_detector();
     // A look at the game for the bin, or for the chat line, may still be under
     // way; it reads the window handle and its own pictures, which go away
     // below. So may the login tab's look at VTCZone, with pictures of its own.
@@ -134,12 +186,26 @@ GuiApp::~GuiApp() {
     if (chat_doubt_look_.valid()) chat_doubt_look_.wait();
     if (login_look_.valid()) login_look_.wait();
     stop_vitals();
-    stop_macro();
-    stop_bot();
     stop_capture();
     // Last, once nothing is left to raise an alert: it ends a request under
     // way and forgets the webhook's address.
     alerts_shutdown();
+}
+
+void GuiApp::join_pumping(std::thread& t) {
+    if (!t.joinable()) return;
+    // The thread's own handle, signalled when it ends. reinterpret_cast: it is
+    // a HANDLE with MSVC's library, an integer with some others.
+    const HANDLE h = reinterpret_cast<HANDLE>(t.native_handle());
+    for (;;) {
+        // What was sent meanwhile is answered before each wait; nothing posted
+        // is taken off the queue.
+        MSG msg;
+        PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        const DWORD r = MsgWaitForMultipleObjects(1, &h, FALSE, INFINITE, QS_SENDMESSAGE);
+        if (r != WAIT_OBJECT_0 + 1) break;      // it ended -- or the wait failed: join() below
+    }
+    t.join();
 }
 
 void GuiApp::initialise() {
@@ -163,6 +229,19 @@ void GuiApp::initialise() {
     if (build.empty()) build = "(not packaged: no VERSION.txt)";
     if (!package_commit().empty()) build += " (" + package_commit() + ")";
     GB_INFO("GoBot GUI %s starting (elevated: %s)", build.c_str(), elevated_ ? "yes" : "no");
+    // The pixels GoBot works in (gobot/dpi.hpp), said once: real ones, or a
+    // view Windows scales, which no reader can work on.
+    if (threads_view_percent() > 100)
+        GB_WARN("Display scale: Windows shows GoBot itself the screen scaled to %d%%, so nothing it reads off "
+                "the screen is the screen's real pixels -- %s",
+                threads_view_percent(),
+                real_pixels_possible()
+                    ? "Windows holds it to that, most likely by a high-DPI override on gobot_gui.exe's "
+                      "Compatibility tab: take it off (the main screen's button) and start GoBot again"
+                    : "this Windows is older than 10 1607: set Windows' display scale to 100%");
+    else
+        GB_INFO("Display scale: GoBot works in %s",
+                become_dpi_aware() ? "real screen pixels" : "the screen's own pixels, which Windows does not scale here");
 
     // Which matcher is live. Linked statically, so there is no DLL in the
     // build folder to see it by, and "no DLLs" looks exactly like "not used".
@@ -199,6 +278,9 @@ void GuiApp::initialise() {
             ini.get_int("Framing", "inner_frame_offset", 13));
         framing_verified_      = ini.get_bool("Framing", "verified", false);
     }
+    // Kept as read: a framing applied later -- Autopilot's, detected, has no
+    // 0x0081 rule -- gets the rule back from it (push_framings).
+    configured_framing_ = framing_;
 
     // The client's half of the conversation is framed differently and needs its
     // own spec, or it is discarded as noise.
@@ -233,9 +315,9 @@ void GuiApp::initialise() {
         pathfinder_.set_double_jump(bot_config_.double_jump);
         pathfinder_.init(map);
     });
-    protocol_->set_death_callback([this] {
-        if (!bot_config_.continue_auto_after_death) stop_bot();
-    });
+    // On the capture thread, once for each death: tick() stops the bot, or
+    // not, as "Keep botting after death" says (bot_died_).
+    protocol_->set_death_callback([this] { bot_died_ = true; });
 
     capture_.set_packet_callback([this](const std::vector<GamePacket>& p) { on_packets(p); });
     capture_.set_raw_tap([this](const FlowKey& key, Direction dir,
@@ -269,7 +351,7 @@ void GuiApp::initialise() {
     });
     capture_.set_disconnect_callback([this] {
         GB_WARN("Traffic stopped -- disabling bot");
-        stop_bot();
+        traffic_lost_ = true;       // on the watchdog's thread: tick() stops it
     });
 
     copy_to(server_ip_,    sizeof(server_ip_),    app_config_.server_ip_start);
@@ -281,15 +363,18 @@ void GuiApp::initialise() {
     refresh_interfaces();
 
     // Only auto-select a window when the config names something specific.
-    // A bare title substring is too loose to act on unprompted — it will pick
-    // an editor or browser tab named after the game — so otherwise we just
-    // load the list and let the user choose on the Capture tab.
+    // A title on its own is too loose to act on unprompted — a folder or a
+    // browser tab named after the game can carry that whole title — so
+    // otherwise we just load the list and let the user choose on the Capture tab.
     windows_ = InputManager::enumerate_windows();
     window_list_loaded_ = true;
     if (!app_config_.process_name.empty() || !app_config_.window_class.empty()) {
         input_.find_game_window(app_config_.window_title, app_config_.window_class,
                                 app_config_.process_name);
     }
+    // What retarget() compares against: the reader is pointed at it below, and
+    // nothing else looks at the game yet.
+    followed_window_ = input_.target_window();
 
     macro_config_.load(exe_relative("configs/macro.ini"));
     macro_ = std::make_unique<MacroEngine>(input_, coord_);
@@ -318,6 +403,36 @@ void GuiApp::initialise() {
     hunt_config_.load(exe_relative("configs/hunt.ini"));
     hunter_ = std::make_unique<Hunter>(input_, coord_, detector_);
     hunter_->set_config(hunt_config_);
+    // Its eyes, set once before any start: the detector's plates, passed
+    // through untouched, or -- with "Vị trí từ gói tin" ticked and the packets
+    // healthy -- you and the monsters from the packet world. Everything here
+    // is asked from the hunter's thread: the capture's flag and stats, the
+    // window's size and the hunter's config are each under their own lock,
+    // and pass() asks for its eyes holding none of the hunter's.
+    {
+        PacketEyes::Screen screen;
+        screen.player = [this](Nameplate& out, bool* fresh) { return detector_.player(out, fresh); };
+        screen.mobs = [this] { return detector_.mobs(); };
+        screen.frame = [this] { return detector_.stats().frames; };
+        PacketEyes::Inputs in;
+        in.link = [this] {
+            PacketLink link;
+            link.capturing = capture_.running();
+            // A capture running is Npcap working, whoever started it. The
+            // flag is only what the last start for positions found, and one
+            // that found the service stopped is looked at again only when
+            // none runs -- not while the Protocol tab's or Autopilot's does.
+            link.npcap = link.capturing || position_npcap_ok_.load();
+            link.last_tcp_ms = capture_.stats().last_tcp_ms;
+            return link;
+        };
+        in.now = [] { return now_ms(); };
+        in.view_size = [this](int& w, int& h) { return input_.window_size(w, h); };
+        in.config = [this] { return hunter_->config(); };
+        in.walk_held_until = [this] { return hunter_->walk_held_until_ms(); };
+        packet_eyes_ = std::make_unique<PacketEyes>(packet_world_, std::move(screen), std::move(in));
+        hunter_->set_eyes(packet_eyes_->eyes());
+    }
     // Skills that follow the fight ask the hunter, from the macro's own
     // threads, whether it is fighting: only its atomics are read there. No
     // hunter running is no hunter, and every key keeps its timer.
@@ -354,6 +469,23 @@ void GuiApp::initialise() {
 }
 
 void GuiApp::tick() {
+    // The game losing the foreground lets go of every key GoBot holds down. A
+    // key held when the player clicked another window stayed down in Windows
+    // until whatever held it let go -- with the jump key on Ctrl, their typing
+    // there turned into shortcuts -- though the README says losing focus lets
+    // go of held keys. On the change only: nothing goes down with the game
+    // behind, and every tick would cut short what is pressed the moment it is
+    // back.
+    {
+        const bool front = input_.window_focused();
+        if (game_was_front_ && !front) input_.release_all();
+        game_was_front_ = front;
+    }
+
+    // How Windows shows the game, every few seconds: the display scale can be
+    // changed under a running GoBot, and a game started again is shown afresh.
+    if (now_ms() - game_scaling_looked_ms_ > 3000) check_game_scaling();
+
     // GoBot's own keys, read whether or not the GUI has focus, so the bot can
     // be toggled from inside the game. GetAsyncKeyState rather than
     // RegisterHotKey: a registered hotkey is swallowed and never reaches the
@@ -362,48 +494,43 @@ void GuiApp::tick() {
     // game or GoBot there -- the panic key alone from anywhere -- and never
     // while a key box is waiting for a key: binding something to it would
     // otherwise start the bot as a side effect. See simple_hotkeys.cpp.
-    //
-    // On the simple screen the key is that screen's one button, which starts
-    // the fighting and the potions along with the timers.
     const HotkeyActions keys = hotkeys_tick();
-    if (keys.toggle) {
-        if (simple_view_) simple_toggle();
-        else              toggle_macro();
-    }
 
     // Panic key: stop everything and let go of every held key, unconditionally.
     // Worth a dedicated binding — when a macro misbehaves the useful response
     // is always "stop now", and hunting for the window to click is exactly
     // what you cannot do while keys are being pressed into the game.
+    //
+    // Acted on alone: a toggle or hunting key caught in the same tick -- the
+    // same key in a file edited by hand, or F11 pressed with F12 -- would
+    // start again straight after everything stopped.
     if (keys.panic) {
-        if (navigator_) navigator_->stop();
-        stop_hunt();
-        stop_macro();
-        stop_bot();
-        // These click the game too, and the keeper can start it. The chat
-        // rubs out a line half typed and closes it, under its hold, on its own
-        // thread: not waited for, as that can take a few seconds. A chat line
-        // it still cannot show shut is handed over below.
-        stop_chat(true, false);
-        stop_party();
-        stop_revive();
-        stop_trash();
-        stop_quest();
-        stop_popups();
-        stop_keeper();
-        simple_style_stop();    // a jump key's "Thử" under way presses nothing
-        input_.release_all();
+        // Every job told at once, every key let go of, and only then each
+        // waited for (stop_jobs). The chat stops a line half typed at its
+        // next key and leaves it in the chat line, on its own thread: not
+        // waited for. A chat line it cannot show shut is handed over below.
+        stop_jobs(true);
         set_status("Panic stop -- all input released", 5000);
         GB_WARN("Panic key pressed: everything stopped");
-    }
+    } else {
+        // On the simple screen the key is that screen's one button, which
+        // starts the fighting and the potions along with the timers.
+        if (keys.toggle) {
+            if (simple_view_) simple_toggle();
+            else              toggle_macro();
+        }
 
-    // Hunting gets its own toggle. It presses movement keys, which the macro
-    // never does, so being able to stop just that without stopping the skill
-    // timers is worth a key of its own.
-    if (keys.hunt) toggle_hunt();
+        // Hunting gets its own toggle. It presses movement keys, which the
+        // macro never does, so being able to stop just that without stopping
+        // the skill timers is worth a key of its own.
+        if (keys.hunt) toggle_hunt();
+    }
 
     if (hunting_ && hunter_ && !hunter_->running()) hunting_ = false;
     simple_track_run(simple_running());
+    // A calibration that has ended by itself -- finished, or given up when the
+    // game lost focus -- lets its hold go, and its thread is joined.
+    if (calib_held_ && calibrator_ && !calibrator_->running()) stop_calibration();
 
     // A chat line waits while HP is under what the HP potion fires at, or 50:
     // the potion is held off while a line is typed. The macro's settings are
@@ -416,9 +543,10 @@ void GuiApp::tick() {
         chat_hp_floor_ = floor;
     }
 
-    // A stop that left the bin's dialog in doubt paused the executor's buffs
-    // and potions; with no trash worker to look, they come back once the game
-    // shows nothing waiting.
+    // A stop that left the bin's dialog in doubt holds the quest rounds and
+    // the popup closer back, and the executor paused; with no trash worker to
+    // look, that ends once the game shows nothing waiting. The executor
+    // presses only while the packet bot runs, and the stop stopped that.
     watch_left_held();
 
     // The revive ran out of tries. The player's rule: stop the bot, never
@@ -440,6 +568,7 @@ void GuiApp::tick() {
             stop_hunt();
             stop_macro();
             stop_bot();
+            stop_calibration();
             const std::string note = "Ô chat trong game có thể vẫn đang mở, nên GoBot dừng cả đánh "
                                      "quái, bình và buff để không gõ phím vào đó. Đóng ô chat trong game "
                                      "(xoá chữ trong đó rồi bấm Enter), rồi bấm BẮT ĐẦU.";
@@ -450,14 +579,33 @@ void GuiApp::tick() {
         }
         end_hold(kChatHold);
     }
-    // The same doubt, with no worker to watch it: the executor comes back by
-    // itself once the game shows the line shut.
+    // The same doubt, with no worker to watch it: it ends by itself once the
+    // game shows the line shut, and the executor's pause with it. The packet
+    // bot stopped above waits to be started again.
     watch_chat_doubt();
     // A worker that has finished is joined here, rather than at the next start.
-    if (!chat_running_ && chat_thread_.joinable()) chat_thread_.join();
+    if (!chat_running_) join_pumping(chat_thread_);
 
     if (keeper_reattach_.exchange(false)) {
         const bool found = reattach_game();
+        // Where the character came back: said once the capture follows the
+        // new game and has it (positions_tick) -- the capture may still be on
+        // the old game's process now, with the old session's place. Its
+        // sockets looked at on the next tick, not up to 5 s on, so the new
+        // game's map entry is not missed for that.
+        if (found) {
+            where_pending_ms_ = now_ms();
+            position_checked_ms_ = 0;
+        }
+        // Logged back in, the character may stand anywhere -- and the capture
+        // that placed it is on the old game's process still -- so the hunting
+        // spot ("Chỗ đánh quái") stands aside until the character stands
+        // within 150 px of where it was last known, or "Đặt chỗ này" sets one
+        // anew (Hunter::suspend_spot). retarget() has asked so already when
+        // the game's window is a new one; this is for a log in in the same
+        // window. Only a hunter that runs: one a cold start begins below takes
+        // its spot afresh.
+        if (hunter_ && hunter_->running()) hunter_->suspend_spot();
         // Logged back in: every buff came off with the old session. Nothing
         // for a cold start's first login, whose jobs start below and cast
         // every buff as they start.
@@ -482,11 +630,12 @@ void GuiApp::tick() {
         simple_cold_start_ = false;
         keeper_cold_start_ = false;
     }
-    refocus_if_idle();
+    keep_game_in_front();
     alerts_tick();
     potions_tick();
     simple_lists_tick();    // "Quái đang thấy", and the end of a look (simple_lists.cpp)
     simple_style_tick();    // a jump key's "Thử" that has finished (simple_style.cpp)
+    positions_tick();       // the capture for positions, and its log line
 
     if (detector_running_) {
         // A new map invalidates everything about where we were: the old level's
@@ -500,8 +649,8 @@ void GuiApp::tick() {
 
         // Watch for the map running out. The character crossing the screen
         // while the view stays put is the one moment the level itself gives a
-        // coordinate away, and catching it is what makes a saved position mean
-        // the same thing tomorrow.
+        // coordinate away. Nothing applies what it catches to the positions
+        // yet (M27): lasting places are to come from the packets instead.
         Nameplate me;
         if (detector_.player(me)) {
             const auto fx = camera_.fix();
@@ -529,8 +678,23 @@ void GuiApp::tick() {
     //
     // A suspension of ten seconds or more re-casts every buff as it ends: the
     // engine sees to that itself (see MacroEngine::set_suspended).
+    //
+    // By how long HP has gone unread, not by the latest read: one unreadable
+    // frame held the macro and let go of every key, eight times in 3 s while
+    // the character died on 2026-10-26, and 29 times in 76 s of hunting at full
+    // health, each costing the skill that fell due. The potions are not held by
+    // this -- an unread HP holds them by itself, as no reading.
+    //
+    // At the reader's last read, not at the clock: grabs that fail -- the game
+    // minimised -- leave it as the last frame had it, as hp_percent() always
+    // did. Judged at the clock, a game minimised was out of the world, and its
+    // return cast every buff again as after a death. last_read_ms() before
+    // hp_seen_ms(), the reverse of the order the reader stores them in, so a
+    // new read is never paired with an old sight of HP. A game gone is out.
     if (vitals_running_ && macro_ && macro_->running()) {
-        const bool in_world = vitals_.hp_percent() >= 0.0f;
+        const std::uint64_t frame_at = vitals_.last_read_ms();
+        const bool in_world = input_.window_valid() &&
+                              VitalsReader::in_world(vitals_.hp_seen_ms(), frame_at, MacroEngine::kOutOfWorldAfterMs);
         if (in_world == macro_->suspended())
             macro_->set_suspended(!in_world,
                                   in_world ? std::string{}
@@ -545,6 +709,7 @@ void GuiApp::tick() {
         if (revived != revive_seen_) {
             if (revived > revive_seen_ && macro_ && macro_->running())
                 macro_->recast_buffs("a revive");
+            if (revived > revive_seen_ && capture_.running()) note_where("revived");
             revive_seen_ = revived;
         }
         const float hp = vitals_running_ ? vitals_.hp_percent() : -1.0f;
@@ -558,15 +723,48 @@ void GuiApp::tick() {
         }
     }
 
+    // The packet bot's potions and buffs are the macro's. While it runs, the
+    // packets' HP and MP go to the macro -- exact, and with no frame to wait
+    // for, as the bot's own potion thread drank on them -- and the bars read
+    // off the screen fill in what they do not give: MP with no MP mapped, the
+    // pet's HP always. No reading once the game's traffic has been silent
+    // longer than the macro trusts one.
+    SelfVitals packets;
+    if (bot_running_)
+        packets = packet_vitals(state_.self(), PacketCapture::silent_for_ms(capture_.stats(), now_ms()),
+                                MacroEngine::kVitalsStaleMs);
+    const bool from_packets = packets.hp >= 0.0f || packets.mp >= 0.0f;
+    // With no reader of the bars to say the character is out of the world, a
+    // death read from the packets holds the macro instead: no potion, buff or
+    // timed skill on the death panel. Let go once it is over, or the bot or
+    // the reader takes over.
+    if (macro_ && macro_->running()) {
+        const bool down = bot_running_ && !vitals_running_ && (state_.self().dead || packets.hp == 0.0f);
+        if (down != packet_dead_hold_) {
+            packet_dead_hold_ = down;
+            macro_->set_suspended(down, down ? "the character is dead" : std::string{});
+        }
+    }
+
     if (vitals_running_) {
         // As no reading once the reader has not read the bars for as long as
         // the macro trusts a reading: its grabs failing, it keeps its last
         // values, and pushed on as fresh every frame they would hold the HP
         // potion back as above its mark, and fill the black box with an HP
-        // nobody read (R8R-3). The macro holds a potion on no reading.
+        // nobody read (R8R-3). The macro holds a potion on no reading. The
+        // pet's HP, off the same frames, likewise.
         const std::uint64_t read_at = vitals_.last_read_ms(), at = now_ms();
-        macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
-                           VitalsReader::if_fresh(vitals_.mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
+        if (from_packets)
+            macro_->set_vitals(
+                packets.hp >= 0.0f ? packets.hp
+                                   : VitalsReader::if_fresh(vitals_.hp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
+                packets.mp >= 0.0f ? packets.mp
+                                   : VitalsReader::if_fresh(vitals_.mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
+                VitalsReader::if_fresh(vitals_.pet_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
+        else
+            macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
+                               VitalsReader::if_fresh(vitals_.mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
+                               VitalsReader::if_fresh(vitals_.pet_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
 
         // The reader works the bars out again by itself when the game's HUD is
         // resized under it. Take the new geometry so the panel shows it and a
@@ -580,7 +778,15 @@ void GuiApp::tick() {
             set_status("The game's HP/MP bars moved -- found them again. "
                        "Save on the HP / MP tab to keep it.", 9000);
         }
+    } else if (from_packets && macro_) {
+        macro_->set_vitals(packets.hp, packets.mp);
     }
+
+    // A death, or the traffic gone quiet, as the capture's threads asked: the
+    // bot stopped here, on the thread that starts and stops it, so a stop
+    // cannot land in the middle of a start and be lost (bot_died_).
+    if (bot_died_.exchange(false) && !bot_config_.continue_auto_after_death) stop_bot();
+    if (traffic_lost_.exchange(false)) stop_bot();
 
     if (bot_running_ && brain_ && !brain_->running()) {
         // The brain stopped itself (death with continue-after-death off).
@@ -717,8 +923,8 @@ void GuiApp::auto_step() {
             window_list_loaded_ = true;
 
             if (!input_.window_valid()) {
-                input_.find_game_window(app_config_.window_title, app_config_.window_class,
-                                        app_config_.process_name);
+                find_and_retarget(app_config_.window_title, app_config_.window_class,
+                                  app_config_.process_name);
             }
             if (!input_.window_valid()) {
                 fail("Could not find the game window. Start the game, then pick it "
@@ -774,7 +980,10 @@ void GuiApp::auto_step() {
                 if (interfaces_[i].name == iface) { selected_interface_ = static_cast<int>(i); break; }
             }
 
-            const std::string filter = build_filter_for(game_connections_);
+            // The game's own UDP sockets as well, by its process: its reports of
+            // where your character is go over UDP, to wherever they go, and a
+            // filter of its connections alone may never see them.
+            const std::string filter = build_filter_for(game_connections_, udp_ports_for_pid(game_pid_));
             copy_to(bpf_filter_, sizeof(bpf_filter_), filter);
             copy_to(server_ip_, sizeof(server_ip_),
                     ip_to_string(game_connections_.front().remote.ip));
@@ -792,6 +1001,9 @@ void GuiApp::auto_step() {
             push_framings();
             capture_.set_opcode_filter({});
             capture_.set_batch_interval_ms(app_config_.batch_interval_ms);
+            // A new capture: the packet world starts from nothing, as it
+            // hears nothing of what went before.
+            packet_world_.reset();
 
             if (!capture_.start(cfg)) {
                 fail("Capture would not start. Npcap may need Administrator rights — "
@@ -1004,12 +1216,93 @@ void GuiApp::find_game_window() {
     windows_ = InputManager::enumerate_windows();
     window_list_loaded_ = true;
 
-    if (input_.find_game_window(window_title_, app_config_.window_class,
-                                app_config_.process_name)) {
+    if (find_and_retarget(window_title_, app_config_.window_class, app_config_.process_name)) {
         set_status("Game window found -- confirm it is the right one on the Capture tab", 6000);
     } else {
         set_status("Game window not found -- pick it manually on the Capture tab", 6000);
     }
+}
+
+void GuiApp::retarget(void* hwnd) {
+    const bool changed = hwnd != followed_window_;
+    followed_window_ = hwnd;
+    input_.set_target_window(hwnd);
+    apply_vitals_config();                   // the reader: this window, and the bars
+    // Whether it runs or not: start_detector sets it again anyway. Another
+    // window than the one it had makes it forget all it saw in the old one.
+    detector_.set_target_window(hwnd);
+    if (mapper_) mapper_->set_target_window(hwnd);
+    check_game_scaling();
+    if (!changed) return;
+    // Another game window while hunting -- a game opened again by hand and
+    // found with "Tìm lại", or the keeper's after a log in: the character may
+    // stand anywhere now, and the capture is on the old game's process until
+    // it follows the new one. The hunting spot stands aside as at a log in
+    // (Hunter::suspend_spot), until the character stands within 150 px of
+    // where it was, or "Đặt chỗ này" sets one anew.
+    if (hunter_ && hunter_->running()) hunter_->suspend_spot();
+    // Where the view was, the map's edge, and a walk steered by them mean
+    // nothing in another window.
+    camera_.reset();
+    anchor_.reset();
+    if (navigator_ && navigator_->running()) navigator_->stop();
+    GB_INFO("Following game window %p: keys, the HP/MP reader, the monster detector and the mapper",
+            hwnd);
+}
+
+bool GuiApp::find_and_retarget(const std::string& title, const std::string& window_class,
+                               const std::string& process) {
+    if (!input_.find_game_window(title, window_class, process)) return false;
+    retarget(input_.target_window());
+    return true;
+}
+
+void GuiApp::check_game_scaling() {
+    game_scaling_looked_ms_ = now_ms();
+    const ScaleCure was = game_scaling_cure_;
+    void* const game = input_.target_window();
+    game_scaling_ = input_.window_valid() ? window_scaling(game) : WindowScaling{};
+    game_scaling_cure_ = cure_for(game, game_scaling_);
+    game_scaling_program_ = game_scaling_cure_ == ScaleCure::None ? std::string() : window_program(game);
+    // GoBot's own exe, while Windows holds GoBot to its scaling.
+    own_override_found_ = threads_view_percent() > 100 && has_any_dpi_override(own_exe_path());
+    if (game_scaling_cure_ != was && game_scaling_cure_ != ScaleCure::None)
+        GB_WARN("Windows shows the game %s to %d%% (drawn %dx%d, shown %dx%d), and GoBot cannot read it "
+                "like this: %s",
+                game_scaling_.percent >= 100 ? "enlarged" : "shrunk", game_scaling_.percent,
+                game_scaling_.own_w, game_scaling_.own_h, game_scaling_.real_w, game_scaling_.real_h,
+                cure_advice(game_scaling_cure_));
+}
+
+std::string GuiApp::fix_game_scaling() {
+    const std::string exe = window_program(input_.target_window());
+    if (exe.empty()) {
+        GB_WARN("Display scale: Windows would not say which program the game's window belongs to");
+        return "Không biết game chạy từ file nào nên không sửa được. Tự sửa: chuột phải vào file chạy "
+               "game (Game.exe trong thư mục game) > Properties > Compatibility > Change high DPI settings "
+               "> đánh dấu Override high DPI scaling behavior, chọn Application.";
+    }
+    std::string why;
+    if (!set_high_dpi_override(exe, &why)) {
+        GB_WARN("Display scale: could not set the high-DPI override for %s: %s", exe.c_str(), why.c_str());
+        return "Windows không cho lưu cài đặt này. Tự sửa: chuột phải vào " + exe + " > Properties > "
+               "Compatibility > Change high DPI settings > đánh dấu Override high DPI scaling behavior, "
+               "chọn Application.";
+    }
+    game_scaling_cure_ = ScaleCure::RestartGame;
+    return "Đã sửa. Tắt game và mở lại: từ lần mở sau Windows không phóng to game nữa.";
+}
+
+std::string GuiApp::fix_own_scaling() {
+    const std::string exe = own_exe_path();
+    std::string why;
+    if (!clear_dpi_override(exe, &why)) {
+        GB_WARN("Display scale: could not take the high-DPI override off %s: %s", exe.c_str(), why.c_str());
+        return "Windows không cho sửa. Tự sửa: chuột phải vào " + exe + " > Properties > Compatibility > "
+               "Change high DPI settings > bỏ dấu Override high DPI scaling behavior, rồi tắt GoBot và mở lại.";
+    }
+    own_scaling_fixed_ = true;
+    return "Đã sửa. Tắt GoBot và mở lại.";
 }
 
 void GuiApp::start_capture() {
@@ -1039,6 +1332,8 @@ void GuiApp::start_capture() {
     // Manual start still benefits from whatever the discovery step found.
     for (const auto& c : game_connections_) cfg.known_servers.push_back(c.remote);
 
+    // A new capture: the packet world starts from nothing.
+    packet_world_.reset();
     if (capture_.start(cfg)) {
         capture_running_ = true;
         set_status("Capture started");
@@ -1052,6 +1347,11 @@ void GuiApp::stop_capture() {
     capture_.stop();
     capture_running_ = false;
     recording_ = false;
+    // Whoever started it -- the hunting's included -- a capture stopped here
+    // stays stopped: the hunter goes back to the screen at its next pass, and
+    // the capture for positions is not started again until the next hunt.
+    position_capture_ = false;
+    position_capture_off_ = true;
     set_status("Capture stopped");
 }
 
@@ -1079,19 +1379,33 @@ void GuiApp::start_bot() {
     brain_->update_config(bot_config_);
     executor_->update_config(bot_config_);
     brain_->reanchor_origin();
+    // Arms the executor as well: it presses nothing but from here to the
+    // bot's stop.
     brain_->start();
-    executor_->set_auto_attack(true);
     bot_running_ = true;
     GB_INFO("=== BOT ENABLED ===");
+    // As bot_default.ini ships, everything it would press is off: said, or a
+    // bot shown running that only stands there looks like one that is broken.
+    // Its potions and buffs are the macro's, and go only while the macro runs.
+    if (!bot_config_.any_action_on()) {
+        set_status("The packet bot is on, but its attack is off (skills go with the attack): it will not "
+                   "attack or cast. Switch it on under Attack, or in configs/bot_default.ini. Its potions "
+                   "and buffs are the macro's, and go only while the macro runs.", 12000);
+        GB_WARN("Packet bot started with its attack off");
+    } else if (!macro_running_) {
+        set_status("The packet bot is on. Its potions and buffs are the macro's, and the macro is off: "
+                   "start it under Features > Timed keys, or with the macro's key (" +
+                       InputManager::key_name(macro_config_.toggle_key) + "), for them to go.",
+                   12000);
+        GB_WARN("Packet bot started with the macro off: no potions, no buffs");
+    }
 }
 
 void GuiApp::stop_bot() {
     if (!bot_running_) return;
+    // Halts the executor as well: its queue and route dropped, its keys let
+    // go of, and nothing pressed again until the next start.
     if (brain_) brain_->stop();
-    if (executor_) {
-        executor_->set_auto_attack(false);
-        executor_->clear_queue();
-    }
     input_.release_all();
     bot_running_ = false;
     GB_INFO("=== BOT DISABLED ===");
@@ -1102,12 +1416,18 @@ void GuiApp::toggle_bot() {
 }
 
 void GuiApp::on_packets(const std::vector<GamePacket>& all) {
+    // Every frame to the packet world first, UDP and unpacked ones included:
+    // your own position comes only over UDP, and the map's monster table only
+    // from inside an 0x0081. It reads each opcode from one side and of one
+    // size only (PacketWorld::opcodes), and passes over the rest.
+    packet_world_.on_packets(all);
+
     // Frames found inside 0x0081, and frames that came over UDP, are counted
-    // and go no further. The tables here key everything by opcode, the same
-    // opcode number need not mean the same thing in those places, and the
-    // analyzer's suggestions become layouts the bot acts on -- so what the
-    // bot sees, and what this screen suggests, stays what it was until plan
-    // item P0-3 decides what those frames are. gobot_sniff --watch lists them.
+    // and go no further than that. The tables here key everything by opcode,
+    // the same opcode number need not mean the same thing in those places,
+    // and the analyzer's suggestions become layouts the bot acts on -- so
+    // what the packet bot sees, and what this screen suggests, stays what it
+    // was. gobot_sniff --watch lists them.
     std::uint64_t held_back = 0;
     for (const auto& p : all)
         if (!p.plain()) ++held_back;
@@ -1176,7 +1496,27 @@ void GuiApp::run_detection() {
 }
 
 void GuiApp::push_framings() {
-    capture_.set_framing(framing_);
+    FramingSpec f = framing_;
+    // Autopilot applies the framing it detected, and detection never finds
+    // the 0x0081 rule (detect_framing reads no trailers): every wrapper then
+    // costs twelve bytes of resync, and nothing inside one -- the map's table
+    // of monsters -- is ever read. With protocol.ini's header, the rule is
+    // protocol.ini's.
+    const FramingSpec& c = configured_framing_;
+    const bool same_header = f.header_size == c.header_size && f.length_offset == c.length_offset &&
+                             f.length_size == c.length_size && f.opcode_offset == c.opcode_offset &&
+                             f.opcode_size == c.opcode_size;
+    if (!f.has_trailer() && c.has_trailer() && same_header) {
+        f.trailer_opcode = c.trailer_opcode;
+        f.trailer_bytes = c.trailer_bytes;
+        f.inner_offset = c.inner_offset;
+    }
+    // Each wrapper unpacked, so that its one frame comes out whole for the
+    // packet world. What else reads frames takes only those off the stream
+    // (on_packets), and those come out the same either way; a wrapper that
+    // does not unpack -- the client's are ciphered -- is left shut and counted.
+    f.unpack = f.unwraps();
+    capture_.set_framing(f);
     if (has_client_framing_) capture_.set_client_framing(client_framing_);
 }
 
@@ -1390,7 +1730,9 @@ void GuiApp::draw_feature_list() {
     bool attacking = engaged;
     draw_feature("Attack", &attacking,
                  via_packets ? "picks a target and fights it -- from packets"
-                             : "picks a target and fights it -- by name plates",
+                 : hunt_config_.packet_positions == PacketPositions::On
+                     ? "picks a target and fights it -- by the game's packets while healthy, by name plates otherwise"
+                     : "picks a target and fights it -- by name plates",
                  [this] { draw_attack_panel(); });
     if (attacking != engaged) {
         if (via_packets) { if (attacking) start_bot();  else stop_bot();  }
@@ -1401,10 +1743,19 @@ void GuiApp::draw_feature_list() {
                  "how far to stand, from the weapon",
                  [this] { draw_profile_panel(); });
 
-    if (draw_feature("Buffs", &bot_config_.auto_buff,
-                     "re-casts each on its own timer",
-                     [this] { draw_buff_panel(); }))
-        apply_bot_config();
+    // Buffs are the macro's keys marked as buffs, as Healing's are its potion
+    // keys: bot_default.ini has none any more. The switch turns each on or off.
+    {
+        const std::vector<std::size_t> buffs = macro_keys_of_kind(macro_config_.keys, MacroKeyKind::Buff);
+        bool buffing = false;
+        for (const std::size_t i : buffs)
+            if (macro_config_.keys[i].enabled) { buffing = true; break; }
+        if (draw_feature("Buffs", &buffing, "re-casts each on its own timer",
+                         [this] { draw_buff_panel(); })) {
+            for (const std::size_t i : buffs) macro_config_.keys[i].enabled = buffing;
+            apply_macro_config();
+        }
+    }
 
     // Healing is the potion keys, not a flag of its own.
     //
@@ -1418,7 +1769,7 @@ void GuiApp::draw_feature_list() {
             if (key.conditional() && key.enabled) { healing = true; break; }
 
         if (draw_feature("Healing", &healing,
-                         "drinks when HP or MP drops",
+                         "drinks when HP, MP or the pet's HP drops",
                          [this] { draw_heal_panel(); })) {
             for (auto& key : macro_config_.keys)
                 if (key.conditional()) key.enabled = healing;
@@ -1609,7 +1960,9 @@ void GuiApp::draw_keeper_panel() {
     ImGui::Text("Watching   %s, and %s behind it",
                 s.game_process.c_str(), s.launcher_process.c_str());
     ImGui::Text("Gives up   after %d restart(s)", s.max_restarts);
-    text_dim("A client that falls over that often is not failing at random, "
+    text_dim("A restart is every time the game had to be closed and entered again: found gone, hung or "
+             "stalled, or ended by a crossing stuck part way in -- the login key's included. "
+             "A client that falls over that often is not failing at random, "
              "and a program that keeps reconnecting to a server which is "
              "refusing it is indistinguishable from an attack on it. Change "
              "these in [Crash] in configs/app.ini.");
@@ -1675,7 +2028,7 @@ void GuiApp::draw_not_built_list() {
         { "Party sharing",  "exp and loot sharing, always leading, held slots" },
         { "Items",          "bag monitor, use, drop, sell, shop" },
         { "Party advert",   "a chat line said only while not in a party" },
-        { "Pet and avatar",  "pet healing, looting, avatar reset window" },
+        { "Pet and avatar",  "pet looting and revive, avatar reset window" },
         { "TDO exchange",   "sixteen items, traded in a priority order" },
         { "Raid boss run",  "travel on a schedule and fight" },
         { "Profiles",       "named config sets, exportable" },
@@ -1749,7 +2102,7 @@ void GuiApp::draw_routines_panel() {
             ImGui::TableNextColumn();
             for (const DialogDriver::Step& s : r.steps)
                 text_dim("%s -> %s%s", s.find.c_str(),
-                         s.gone ? "(gone)" : s.confirm.c_str(),
+                         !s.check ? "(not checked)" : s.gone ? "(gone)" : s.confirm.c_str(),
                          s.optional ? "  [optional]" : "");
         }
         ImGui::EndTable();
@@ -1797,7 +2150,7 @@ void GuiApp::draw_run_bar() {
     ImGui::SetItemTooltip("Starts the keyboard macro and the HP/MP reader.\n"
                           "The packet-driven bot is started from Tools; it "
                           "needs a decoded protocol, which this one has only "
-                          "in part.");
+                          "in part. Its potions and buffs are this macro's.");
 
     ImGui::SameLine();
     ImGui::BeginGroup();
@@ -2033,10 +2386,11 @@ void GuiApp::draw_attack_panel() {
     if (!packet_bot_can_see_self()) {
         ImGui::TextWrapped(
             "Fighting by name plates: monsters are found on screen by their red "
-            "health bars, and your character by its name. The packet bot takes "
-            "over by itself once the protocol map can say where you are standing "
-            "-- the server does not send that, so for now this is the engine "
-            "that can fight.");
+            "health bars, and your character by its name -- or, with Positions "
+            "from packets On and the packets healthy, you and the monsters from "
+            "the game's own traffic. The packet bot takes over by itself once the "
+            "protocol map can say where you are standing; its layouts cannot, so "
+            "for now this is the engine that can fight.");
         ImGui::Dummy(ImVec2(0, 4));
 
         const Hunter::Status hs = hunter_->status();
@@ -2073,52 +2427,19 @@ void GuiApp::draw_attack_panel() {
 }
 
 void GuiApp::draw_buff_panel() {
-    ImGui::Checkbox("Auto buff", &bot_config_.auto_buff);
-    ImGui::Dummy(ImVec2(0, 6));
-
-    if (ImGui::BeginTable("##buffs", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
-        ImGui::TableSetupColumn("On",    ImGuiTableColumnFlags_WidthFixed, 34);
-        ImGui::TableSetupColumn("Key",   ImGuiTableColumnFlags_WidthFixed, 110);
-        ImGui::TableSetupColumn("Every", ImGuiTableColumnFlags_WidthFixed, 130);
-        ImGui::TableSetupColumn("Label");
-        ImGui::TableHeadersRow();
-
-        for (std::size_t i = 0; i < BotConfig::kBuffSlots; ++i) {
-            BuffSlot& slot = bot_config_.buffs[i];
-            ImGui::PushID(static_cast<int>(i));
-            ImGui::TableNextRow();
-
-            ImGui::TableNextColumn();
-            ImGui::Checkbox("##on", &slot.enabled);
-
-            ImGui::TableNextColumn();
-            int vk = static_cast<int>(slot.keycode);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##vk", &vk, 0))
-                slot.keycode = static_cast<std::uint32_t>(std::clamp(vk, 0, 255));
-            if (slot.keycode)
-                ImGui::SetItemTooltip("%s", InputManager::key_name(slot.keycode).c_str());
-
-            ImGui::TableNextColumn();
-            int seconds = static_cast<int>(slot.cooldown_sec);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##cd", &seconds, 10))
-                slot.cooldown_sec = static_cast<std::uint32_t>(std::max(1, seconds));
-            ImGui::SetItemTooltip("Seconds between casts.");
-
-            ImGui::TableNextColumn();
-            char label[64] = {};
-            std::snprintf(label, sizeof label, "%s", slot.key.c_str());
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputText("##label", label, sizeof label)) slot.key = label;
-
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
+    // The macro's buff keys, the only buffs there are: the packet bot's own,
+    // in bot_default.ini, cast beside them.
+    ImGui::TextWrapped("Buffs are the macro's keys set to \"a buff\" under Timed keys, or the Tu buff row on "
+                       "the simple screen -- set them there. They go while the macro runs, the packet bot's "
+                       "included.");
+    ImGui::Dummy(ImVec2(0, 4));
+    const auto buffs = macro_keys_of_kind(macro_config_.keys, MacroKeyKind::Buff);
+    if (buffs.empty()) text_dim("No buff keys yet.");
+    for (const std::size_t i : buffs) {
+        const MacroKey& k = macro_config_.keys[i];
+        text_dim("%s: key %s, every %u s%s", k.label.c_str(), InputManager::key_name(k.keycode).c_str(),
+                 static_cast<unsigned>(macro_timer_interval_ms(k) / 1000), k.enabled ? "" : "  (off)");
     }
-
-    ImGui::Dummy(ImVec2(0, 8));
-    if (ImGui::Button("Save", ImVec2(110, 0))) save_bot_config();
 }
 
 void GuiApp::draw_waypoints_panel() {
@@ -2381,7 +2702,6 @@ void GuiApp::draw_keys_panel() {
         { "Right",         &bot_config_.key_right,         nullptr },
         { "Up",            &bot_config_.key_up,            nullptr },
         { "Down",          &bot_config_.key_down,          nullptr },
-        { "Start / stop",  &bot_config_.key_start_stop,    "Works while the game is in front." },
     };
 
     for (const auto& key : kKeys) {
@@ -2594,7 +2914,7 @@ void GuiApp::stop_vitals() {
 
     // Drop the engine's reading immediately. Without this, a conditional key
     // would keep acting on the last value for another second.
-    if (macro_) macro_->set_vitals(-1.0f, -1.0f);
+    if (macro_) macro_->set_vitals(-1.0f, -1.0f, -1.0f);
 }
 
 // ------------------------------------------------------------------ parties
@@ -2625,7 +2945,7 @@ void GuiApp::start_party() {
     }
     // A loop that ended by itself leaves its thread to be joined. Assigning
     // over a thread that still wants joining ends the program.
-    if (party_thread_.joinable()) party_thread_.join();
+    join_pumping(party_thread_);
     party_stop_ = false;
     party_running_ = true;
     party_accepted_ = 0;
@@ -2633,11 +2953,12 @@ void GuiApp::start_party() {
     party_thread_ = std::thread([this] { party_loop(); });
 }
 
-void GuiApp::stop_party() {
+void GuiApp::stop_party(bool wait) {
+    party_stop_ = true;
+    if (!wait) return;
     // Joined even when it is no longer running: a loop that stopped by itself
     // still has a thread, and destroying that unjoined ends the program.
-    party_stop_ = true;
-    if (party_thread_.joinable()) party_thread_.join();
+    join_pumping(party_thread_);
     party_running_ = false;
 }
 
@@ -2714,6 +3035,22 @@ void GuiApp::party_loop() {
     PlayerList list;
     list.set_settings(list_geometry);
 
+    // F12, DỪNG, unticking: asked in every wait of an answer or an invite, and
+    // before each of their clicks. Against the clock, as the player list's own
+    // waits are: Windows rounds each sleep up to its tick, and short slices
+    // added up made a wait a quarter longer.
+    const auto stopped = [this] { return party_stop_.load(); };
+    const auto nap = [&](int ms) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+        for (;;) {
+            if (stopped()) return false;
+            const auto left = until - std::chrono::steady_clock::now();
+            if (left <= std::chrono::steady_clock::duration::zero()) return true;
+            std::this_thread::sleep_for(
+                std::min<std::chrono::steady_clock::duration>(left, std::chrono::milliseconds(50)));
+        }
+    };
+
     say_party("watching");
     std::string answered;
     std::string refused;            // the dialog last left alone, and why
@@ -2741,7 +3078,7 @@ void GuiApp::party_loop() {
         // nothing clicked while a trash pass has the bag open: an invitation
         // answered in the middle of a drag drops the item wherever it is.
         if ((!rules.auto_accept && !rules.auto_invite) || trash_pass_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            nap(500);
             continue;
         }
 
@@ -2752,7 +3089,7 @@ void GuiApp::party_loop() {
         PartyLook look;
         if (!input_.window_valid() ||
             !take_party_look(party_sight(capture, input_.target_window()), look)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            nap(500);
             continue;
         }
         const Frame& frame = look.frame;
@@ -2797,22 +3134,45 @@ void GuiApp::party_loop() {
                 // bin's: the screen a second later is not this one.
                 const auto answer = [&](bool accept) {
                     std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);
-                    if (!mouse.owns_lock() || trash_pass_) return false;
+                    if (!mouse.owns_lock() || trash_pass_ || stopped()) return false;
                     if (!input_.window_focused()) {
                         input_.focus_window();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                        if (!nap(250)) return false;
                     }
-                    if (accept)
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(accept_geometry.settle_ms));
+                    if (accept && !nap(accept_geometry.settle_ms)) return false;
                     Frame now;
                     if (!capture.grab(input_.target_window(), now) || !now.valid()) return false;
                     const auto again = answering.look(now, store, have_font ? &font : nullptr);
                     if (!again.up || again.who.empty() || bag::bin_asking(now, store) ||
                         std::abs(again.at.x - seen.at.x) > 3 || std::abs(again.at.y - seen.at.y) > 3)
                         return false;
-                    return accept ? input_.click_at(again.accept_x, again.accept_y)
-                                  : input_.click_at(again.decline_x, again.decline_y);
+                    // Still the same player's: the decision was made on seen.who,
+                    // and another invitation can come up in the same place
+                    // during the focus and the settle.
+                    if (PartyInvite::fold(again.who) != PartyInvite::fold(seen.who)) return false;
+                    if (stopped()) return false;
+                    // Only with the game in front and the game itself under the
+                    // button, both asked again as the button goes down, and a
+                    // stop asked once more after the pointer's pause there: the
+                    // frame comes from PrintWindow, which shows the game even
+                    // when it is covered, and a click lands on whatever is on
+                    // top there.
+                    InputManager::GameClick how = InputManager::GameClick::Clicked;
+                    const bool clicked =
+                        accept ? input_.click_on_game(again.accept_x, again.accept_y, false, stopped, &how)
+                               : input_.click_on_game(again.decline_x, again.decline_y, false, stopped, &how);
+                    // A click refused leaves the invitation up, tried again on
+                    // every look: why is said once for each dialog, or the
+                    // player sees it sit there with nothing in the log.
+                    if (!clicked && how != InputManager::GameClick::Stopped) {
+                        const std::string line = std::string(accept ? "could not accept " : "could not decline ") +
+                                                 seen.who + ": " + InputManager::game_click_name(how);
+                        const std::string key = std::to_string(seen.at.x) + "," +
+                                                std::to_string(seen.at.y) + line;
+                        if (key != refused) say_party(line);
+                        refused = key;
+                    }
+                    return clicked;
                 };
 
                 if (!why_not.empty()) {
@@ -2907,7 +3267,8 @@ void GuiApp::party_loop() {
                 }
 
                 std::string why;
-                if (!list.ensure_open(input_, capture, store, &why)) {
+                if (!list.ensure_open(input_, capture, store, &why, stopped)) {
+                    if (stopped()) break;
                     say_party(who + " asked, but the list would not open: " + why);
                     continue;
                 }
@@ -2930,7 +3291,7 @@ void GuiApp::party_loop() {
                 // Whatever it says, the row and perhaps Req Party were
                 // clicked: the party may change from here, and the next asker
                 // of this pass is not invited on this pass's look.
-                const bool sent = list.invite(input_, capture, store, *row, &why);
+                const bool sent = list.invite(input_, capture, store, *row, &why, stopped);
                 party_events().changed(now_ms(), "an invite was sent", party_text::kEventInvited);
                 if (!sent) {
                     say_party("invite to " + who + " did not go: " + why);
@@ -2942,8 +3303,7 @@ void GuiApp::party_loop() {
             }
         }
 
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(chat_rules.vote_gap_ms));
+        nap(chat_rules.vote_gap_ms);
     }
 
     say_party("stopped");
@@ -2958,13 +3318,14 @@ void GuiApp::start_keeper(bool oneshot) {
         if (!oneshot) keeper_oneshot_ = false;
         return;
     }
-    if (keeper_thread_.joinable()) keeper_thread_.join();
+    join_pumping(keeper_thread_);
     keeper_ui_.reset();                         // the watchdog starts afresh
     keeper_oneshot_ = oneshot;
     if (!oneshot) keeper_login_now_ = false;    // a key's request the last keeper never took
     keeper_stop_ = false;
     keeper_running_ = true;
     keeper_restarts_ = 0;
+    keeper_closed_counted_ = false;
     {
         // A new start, so whatever stopped the last one is old news.
         std::lock_guard<std::mutex> lock(worker_mutex_);
@@ -2974,7 +3335,7 @@ void GuiApp::start_keeper(bool oneshot) {
     keeper_thread_ = std::thread([this] { keeper_loop(); });
 }
 
-void GuiApp::stop_keeper() {
+void GuiApp::stop_keeper(bool wait) {
     // A cold start waiting on this keeper has nothing left to wait for. Every
     // way of stopping it comes through here -- the panic key, DỪNG LẠI,
     // unticking "Tự vào lại game", the full screen -- and none of them should
@@ -2987,27 +3348,17 @@ void GuiApp::stop_keeper() {
         std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
         if (keeper_flow_) keeper_flow_->cancel();
     }
-    if (keeper_thread_.joinable()) keeper_thread_.join();
+    if (!wait) return;
+    join_pumping(keeper_thread_);
     keeper_running_ = false;
+    // A "Vào game ngay" asked for and not yet taken up goes with the keeper
+    // that was to take it: left set, the next press of the key was read as
+    // withdrawing it, and only a third press logged in.
+    keeper_login_now_ = false;
 }
 
 /// Notice the client has fallen over, end it, and cross back in.
 void GuiApp::keeper_loop() {
-    // Its own lines go to gobot.log as well as to the panel. The crossing's
-    // steps are logged by the crossing itself, so those only go to the panel.
-    const auto note = [this](const std::string& line) {
-        GB_INFO("Keeper: %s", line.c_str());
-        say_keeper(line);
-    };
-    // Stopping for a person: in English for the log and the panel, and in
-    // Vietnamese for the simple screen, where it stays after the keeper has
-    // gone so the reason is still there to read.
-    const auto give_up = [this](const std::string& english, const std::string& vi) {
-        GB_WARN("Keeper: %s", english.c_str());
-        say_keeper(english);
-        say_keeper_vi(vi, vi);
-    };
-
     IniFile app_ini;
     app_ini.load(exe_relative("configs/app.ini"));
     CrashWatch::Settings watch_settings;
@@ -3022,10 +3373,10 @@ void GuiApp::keeper_loop() {
     const std::string login_path = exe_relative("configs/login.ini");
     if (!login.load(login_path)) {
         if (!AutoLogin::Settings::file_missing(login_path))
-            note("could not read " + login_path + " -- crossing with the pages that ship, "
-                 "and leaving the file as it is");
+            keeper_note("could not read " + login_path + " -- crossing with the pages that ship, "
+                        "and leaving the file as it is");
         else if (login.save(login_path))
-            note("wrote " + login_path + " with the pages that ship");
+            keeper_note("wrote " + login_path + " with the pages that ship");
     }
     if (!login.game_process.empty())
         watch_settings.game_process = login.game_process;
@@ -3037,23 +3388,23 @@ void GuiApp::keeper_loop() {
     // which does not carry that file -- had nothing to match any page against.
     // Only the crossing's own are kept: this runs for hours, and the whole set
     // is some sixty megabytes of which it needs seven pictures. Loaded again
-    // only if the file comes to name others; see below.
-    const auto load_store = [](const AutoLogin::Settings& for_these) {
-        TemplateStore all;
-        AutoLogin::load_pictures(all, exe_relative("configs/templates.ini"));
-        return AutoLogin::pictures_for(for_these, all);
-    };
-    TemplateStore store = load_store(login);
-    std::vector<std::string> kept = AutoLogin::picture_names(login);
+    // only if the file comes to name others; see run_crossing.
+    TemplateStore store = keeper_pictures(login);
 
     CrashWatch watch(watch_settings);
-    note("watching");
+    keeper_note("watching");
     bool seen_running = false;      // the client has been up since this started
     bool crossed_in = false;        // this keeper has logged in at least once
     bool said_found = false;        // the cold start's game was found up, and said so
 
     while (!keeper_stop_) {
         CrashWatch::Look seen = watch.look();
+        // Stopped while it looked -- F12, DỪNG, unticking: nothing more. Not the
+        // watchdog's verdict, and above all no client ended or crossed into
+        // after the player asked for everything to stop.
+        if (keeper_stop_) break;
+        // The game seen up again: a closing counted earlier is behind it.
+        if (!seen.bad()) keeper_closed_counted_ = false;
         {
             std::lock_guard<std::mutex> lock(worker_mutex_);
             keeper_state_ = seen.bad() ? CrashWatch::trouble_name(seen.what)
@@ -3078,8 +3429,8 @@ void GuiApp::keeper_loop() {
             // happened, in case its window is not found the first time.
             if (move == CrashWatch::Move::Follow) {
                 if (!crossed_in && !said_found) {
-                    note("the game is already running -- following it and starting the "
-                         "ticked jobs");
+                    keeper_note("the game is already running -- following it and starting the "
+                                "ticked jobs");
                     say_keeper_vi("Game đã mở sẵn. Đang theo dõi game.");
                     said_found = true;
                 }
@@ -3090,8 +3441,8 @@ void GuiApp::keeper_loop() {
             continue;
         }
 
-        note(seen.detail);
-        if (!seen.code.empty()) note("error code " + seen.code);
+        keeper_note(seen.detail);
+        if (!seen.code.empty()) keeper_note("error code " + seen.code);
 
         // Never up since this started -- BẮT ĐẦU with the game closed. That is
         // a start, not a restart, the way GoC treats a missing window: there
@@ -3100,22 +3451,27 @@ void GuiApp::keeper_loop() {
         // open is left for the crossing to carry on from. It is one crossing
         // either way, and one that fails stops this.
         const bool cold = move == CrashWatch::Move::Start;
-        if (!cold)
+        // A client gone because a crossing ended it -- the login key's, then
+        // cancelled by the key -- was counted as it was ended: the same
+        // closing is not a second restart, nor a disconnect to tell of.
+        const bool counted = !cold && keeper_closed_counted_ && seen.what == CrashWatch::Trouble::Gone;
+        keeper_closed_counted_ = false;
+        if (!cold && !counted)
             alert("disconnect", alert_text::disconnect(seen.what, seen.code,
                                                        keeper_restarts_ < watch_settings.max_restarts &&
                                                        elevated_ && login.unidentified().empty(),
                                                        seen.minutes));
 
-        if (!cold && keeper_restarts_ >= watch_settings.max_restarts) {
-            const std::string n = std::to_string(keeper_restarts_.load());
-            give_up("that is " + n + " restarts and it has gone again -- stopping, a person "
-                    "is needed",
-                    "Game văng " + n + " lần liền — GoBot ngừng tự vào lại. Cần người kiểm tra.");
-            alert("keeper_gave_up", alert_text::gave_up_restarts(keeper_restarts_));
-            break;
-        }
+        // This client gone is a restart, counted before anything is ended
+        // (keeper_take_restart): at max_restarts it is said and alerted
+        // there, and nothing is ended.
+        if (!cold && !counted && !keeper_take_restart(watch_settings)) break;
 
         if (!cold) {
+            // The last moment a stop keeps the client from being ended. One
+            // already being shut down is not cut short: CrashWatch::shut_down
+            // takes no stop yet.
+            if (keeper_stop_) break;
             say_keeper_vi(CrashWatch::trouble_vi(seen) + " — GoBot đóng game rồi vào lại sau " +
                           std::to_string(watch_settings.cooldown_s) + " giây.");
             watch.shut_down(seen);
@@ -3124,96 +3480,13 @@ void GuiApp::keeper_loop() {
             if (keeper_stop_) break;
         }
 
-        // Read again for every crossing. A channel or a character picked on
-        // the tab while this runs is meant for the next one -- the tab says
-        // GoBot goes to the one shown there -- and a file that will not read
-        // just now leaves the last copy that did.
-        {
-            AutoLogin::Settings fresh;
-            if (fresh.load(login_path)) login = fresh;
-        }
-        // A page given another picture since then is a picture not kept.
-        if (AutoLogin::picture_names(login) != kept) {
-            note("configs/login.ini names other pictures now -- loading them");
-            store = load_store(login);
-            kept = AutoLogin::picture_names(login);
-        }
-
-        if (!login.unidentified().empty()) {
-            std::string pages;
-            for (const AutoLogin::Page* page : login.unidentified())
-                pages += (pages.empty() ? "" : ", ") + page->key;
-            give_up("the client is down and the crossing is not set up, so it cannot be "
-                    "started again -- see configs/login.ini",
-                    AutoLogin::advice(AutoLogin::Why::NotSetUp, pages));
-            alert("keeper_gave_up", alert_text::gave_up_not_set_up());
-            break;
-        }
-
-        // The game and VTCZone run as administrator, and Windows drops clicks
-        // sent to them from a program that does not.
-        if (!elevated_) {
-            give_up("GoBot is not running as administrator, so its clicks cannot reach "
-                    "VTCZone or the game",
-                    "GoBot không chạy bằng quyền Administrator nên không bấm được vào "
-                    "VTCZone/game.");
-            alert("keeper_gave_up", alert_text::gave_up_not_elevated());
-            break;
-        }
-
-        if (cold) {
-            note("starting the game -- it was not running when this began");
-        } else {
-            ++keeper_restarts_;
-            note("logging back in (" + std::to_string(keeper_restarts_.load()) + " of " +
-                 std::to_string(watch_settings.max_restarts) + ")");
-        }
-
-        AutoLogin flow;
-        flow.set_settings(login);
-        flow.set_templates(&store);
-        // A game that comes up part way and stays on a screen the crossing
-        // does not know is ended the way a crashed one is, and the next
-        // attempt starts from VTCZone.
-        flow.set_end_client([&watch] { return watch.shut_down(CrashWatch::Look{}); },
-                            watch_settings.cooldown_s);
-        const std::string doing = cold ? "Đang mở game và vào nhân vật: " : "Đang vào lại game: ";
-        flow.on_step([this, doing, &flow](AutoLogin::Step s, const std::string& detail) {
-            say_keeper(std::string(AutoLogin::step_name(s)) + ": " + detail);
-            if (s == AutoLogin::Step::Blocked || s == AutoLogin::Step::InWorld) return;
-            std::string vi = doing + AutoLogin::step_name_vi(s) + "…";
-            // Waiting on a window in the way, not stuck: said while it waits,
-            // so the player at the screen knows what to move.
-            if (flow.holding())
-                vi += " " + (flow.hiding() ? AutoLogin::hidden_advice(flow.held_by())
-                                           : AutoLogin::advice(AutoLogin::Why::Covered,
-                                                               flow.held_by()));
-            say_keeper_vi(vi);
-        });
-        {
-            std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
-            keeper_flow_ = &flow;
-        }
-        const bool in = !keeper_stop_ && flow.run();
-        {
-            std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
-            keeper_flow_ = nullptr;
-        }
-        if (keeper_stop_) break;
-        if (!in) {
-            // Stop and ask, as before: the crossing has already used its
-            // attempts, and the next try is for a person to decide.
-            give_up("could not get back in: " + flow.trouble(), flow.advice());
-            alert("keeper_gave_up", alert_text::gave_up_crossing(flow.attempts_made(), flow.why()));
-            break;
-        }
+        // The crossing, the login key's too (run_crossing): login.ini read
+        // afresh, the keeper's checks, and every client it ends a restart.
+        if (run_crossing(cold ? Crossing::Cold : Crossing::Restart, watch, watch_settings, login, store) !=
+            Crossed::In)
+            break;      // stopped, or a person is needed: said and alerted there
         seen_running = true;
         crossed_in = true;
-        note("back in the world");
-        if (!cold) alert("back_in", alert_text::back_in(keeper_restarts_, watch_settings.max_restarts));
-        say_keeper_vi(cold ? "Đã vào game. Đang theo dõi game."
-                           : "Đã vào lại game. Đang theo dõi game.");
-        keeper_reattach_ = true;
         keeper_stall_restart();
     }
 
@@ -3223,6 +3496,171 @@ void GuiApp::keeper_loop() {
     }
     say_keeper("stopped");
     keeper_running_ = false;
+}
+
+void GuiApp::keeper_note(const std::string& line) {
+    GB_INFO("Keeper: %s", line.c_str());
+    say_keeper(line);
+}
+
+void GuiApp::keeper_give_up(const std::string& english, const std::string& vi) {
+    GB_WARN("Keeper: %s", english.c_str());
+    say_keeper(english);
+    say_keeper_vi(vi, vi);
+}
+
+bool GuiApp::keeper_take_restart(const CrashWatch::Settings& watch_settings) {
+    if (keeper_restarts_ < watch_settings.max_restarts) {
+        ++keeper_restarts_;
+        return true;
+    }
+    const std::string n = std::to_string(keeper_restarts_.load());
+    keeper_give_up("that is " + n + " restarts and the game needs another -- stopping, a person is needed",
+                   "Đã phải vào lại game " + n + " lần — GoBot ngừng tự vào lại. Cần người kiểm tra.");
+    alert("keeper_gave_up", alert_text::gave_up_restarts(keeper_restarts_));
+    return false;
+}
+
+/// One crossing for the keeper, whichever way it began -- see Crossing.
+GuiApp::Crossed GuiApp::run_crossing(Crossing how, CrashWatch& watch,
+                                     const CrashWatch::Settings& watch_settings,
+                                     AutoLogin::Settings& login, TemplateStore& store) {
+    const bool key = how == Crossing::Key;
+
+    // Read again for every crossing. A channel or a character picked on the
+    // tab while the keeper runs is meant for the next one -- the tab says
+    // GoBot goes to the one shown there -- and a file that will not read
+    // just now leaves the last copy that did. Kept as the keeper's own, for
+    // the watchdog and the crossings after this one.
+    bool other_pictures = false;
+    {
+        AutoLogin::Settings fresh;
+        if (fresh.load(exe_relative("configs/login.ini"))) {
+            other_pictures = AutoLogin::picture_names(fresh) != AutoLogin::picture_names(login);
+            login = fresh;
+        }
+    }
+    if (!login.unidentified().empty()) {
+        std::string pages;
+        for (const AutoLogin::Page* page : login.unidentified())
+            pages += (pages.empty() ? "" : ", ") + page->key;
+        keeper_give_up("the crossing is not set up, so it cannot be made -- see configs/login.ini",
+                       AutoLogin::advice(AutoLogin::Why::NotSetUp, pages));
+        alert("keeper_gave_up", alert_text::gave_up_not_set_up());
+        return Crossed::GaveUp;
+    }
+    // The game and VTCZone run as administrator, and Windows drops clicks
+    // sent to them from a program that does not.
+    if (!elevated_) {
+        keeper_give_up("GoBot is not running as administrator, so its clicks cannot reach VTCZone or the game",
+                       "GoBot không chạy bằng quyền Administrator nên không bấm được vào VTCZone/game.");
+        alert("keeper_gave_up", alert_text::gave_up_not_elevated());
+        return Crossed::GaveUp;
+    }
+    // A page given another picture since then is a picture not kept.
+    if (other_pictures) {
+        keeper_note("configs/login.ini names other pictures now -- loading them");
+        store = keeper_pictures(login);
+    }
+
+    switch (how) {
+        case Crossing::Cold:
+            keeper_note("starting the game -- it was not running when this began");
+            break;
+        case Crossing::Restart:
+            keeper_note("logging back in (" + std::to_string(keeper_restarts_.load()) + " of " +
+                        std::to_string(watch_settings.max_restarts) + ")");
+            break;
+        case Crossing::Key:
+            keeper_note("login key: crossing now");
+            break;
+    }
+
+    AutoLogin flow;
+    flow.set_settings(login);
+    flow.set_templates(&store);
+    flow.set_debug_dir(exe_relative("login_debug"));
+    // A game that comes up part way and stays on a screen the crossing does
+    // not know is ended the way a crashed one is, and the next attempt starts
+    // from VTCZone: the game closed to be entered again, so a restart however
+    // this crossing began. Out of them, nothing is ended and the crossing
+    // stops for a person. Only by a keeper the player ticked "Tự vào lại
+    // game" for: one started for the login key alone never ends the game --
+    // the player asked for a crossing, not for the client to be closed -- and
+    // a stuck attempt there simply fails.
+    bool out_of_restarts = false;
+    if (!keeper_oneshot_)
+        flow.set_end_client(
+            [this, &watch, &watch_settings, &flow, &out_of_restarts] {
+                // Not after a stop: the crossing may be on its way out when F12
+                // comes, and still judge the game stuck.
+                if (keeper_stop_) return false;
+                if (!keeper_take_restart(watch_settings)) {
+                    out_of_restarts = true;
+                    flow.cancel();
+                    return false;
+                }
+                keeper_note("ending a game stuck part way in (" + std::to_string(keeper_restarts_.load()) +
+                            " of " + std::to_string(watch_settings.max_restarts) + ")");
+                const bool ended = watch.shut_down(CrashWatch::Look{});
+                // Counted already: keeper_loop does not count it again if the
+                // crossing is cancelled and the next look finds it gone.
+                if (ended) keeper_closed_counted_ = true;
+                return ended;
+            },
+            watch_settings.cooldown_s);
+    const std::string doing = how == Crossing::Cold ? "Đang mở game và vào nhân vật: "
+                            : key                   ? "Đang vào game (phím vào game ngay): "
+                                                    : "Đang vào lại game: ";
+    flow.on_step([this, doing, &flow](AutoLogin::Step s, const std::string& detail) {
+        say_keeper(std::string(AutoLogin::step_name(s)) + ": " + detail);
+        if (s == AutoLogin::Step::Blocked || s == AutoLogin::Step::InWorld) return;
+        std::string vi = doing + AutoLogin::step_name_vi(s) + "…";
+        // Waiting on a window in the way, not stuck: said while it waits,
+        // so the player at the screen knows what to move.
+        if (flow.holding())
+            vi += " " + (flow.hiding() ? AutoLogin::hidden_advice(flow.held_by())
+                                       : AutoLogin::advice(AutoLogin::Why::Covered, flow.held_by()));
+        say_keeper_vi(vi);
+    });
+    {
+        std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+        keeper_flow_ = &flow;
+        // The login key pressed again in the moment between asking and this:
+        // stopped. A crossing the keeper began is not the key's to stop.
+        if (key && keeper_key_cancel_) flow.cancel();
+    }
+    const bool in = !keeper_stop_ && flow.run();
+    {
+        std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+        keeper_flow_ = nullptr;
+    }
+    if (keeper_stop_) return Crossed::Stopped;
+    // Said and alerted by keeper_take_restart; the game is left as it is.
+    if (out_of_restarts) return Crossed::GaveUp;
+    if (key && keeper_key_cancel_.exchange(false)) {
+        keeper_note("login key: cancelled");
+        say_keeper_vi("Đã huỷ vào game.");
+        return Crossed::Cancelled;
+    }
+    if (!in) {
+        // Stop and ask: the crossing has already used its attempts, and the
+        // next try is for a person to decide.
+        keeper_give_up((how == Crossing::Restart ? "could not get back in: " : "could not get in: ") +
+                           flow.trouble(),
+                       flow.advice());
+        alert("keeper_gave_up", alert_text::gave_up_crossing(flow.attempts_made(), flow.why()));
+        return Crossed::GaveUp;
+    }
+    keeper_closed_counted_ = false;
+    keeper_note(key ? "login key: in the world" : "back in the world");
+    if (how == Crossing::Restart)
+        alert("back_in", alert_text::back_in(keeper_restarts_, watch_settings.max_restarts));
+    say_keeper_vi(how == Crossing::Restart ? "Đã vào lại game. Đang theo dõi game."
+                  : keeper_oneshot_        ? "Đã vào game."
+                                           : "Đã vào game. Đang theo dõi game.");
+    keeper_reattach_ = true;
+    return Crossed::In;
 }
 
 /// Point everything at the game window again, after the keeper logged back in
@@ -3235,8 +3673,8 @@ void GuiApp::keeper_loop() {
 bool GuiApp::reattach_game() {
     windows_ = InputManager::enumerate_windows();
     window_list_loaded_ = true;
-    if (!input_.find_game_window(app_config_.window_title, app_config_.window_class,
-                                 app_config_.process_name)) {
+    if (!find_and_retarget(app_config_.window_title, app_config_.window_class,
+                           app_config_.process_name)) {
         // Said once: a cold start waiting on the window asks every few seconds.
         if (!reattach_missed_)
             GB_WARN("The game is up, but its window could not be found -- looking again");
@@ -3244,8 +3682,6 @@ bool GuiApp::reattach_game() {
         return false;
     }
     reattach_missed_ = false;
-    apply_vitals_config();
-    if (detector_running_) detector_.set_target_window(input_.target_window());
     GB_INFO("Following the game window the keeper found");
     set_status("Following the game window", 6000);
     return true;
@@ -3261,15 +3697,16 @@ void GuiApp::say_revive(const std::string& line) {
 
 void GuiApp::start_revive() {
     if (revive_running_) return;
-    if (revive_thread_.joinable()) revive_thread_.join();
+    join_pumping(revive_thread_);
     revive_stop_ = false;
     revive_running_ = true;
     revive_thread_ = std::thread([this] { revive_loop(); });
 }
 
-void GuiApp::stop_revive() {
+void GuiApp::stop_revive(bool wait) {
     revive_stop_ = true;
-    if (revive_thread_.joinable()) revive_thread_.join();
+    if (!wait) return;
+    join_pumping(revive_thread_);
     revive_running_ = false;
 }
 
@@ -3405,10 +3842,10 @@ void GuiApp::stop_after_revive() {
     }
     // Everything, as the panic key does -- with the trash pass giving its
     // item back on the way -- and the cold start that may be waiting.
-    if (navigator_) navigator_->stop();
-    simple_stop();
-    stop_bot();
-    input_.release_all();
+    simple_cold_start_ = false;
+    const bool bin_note = stop_jobs(true);
+    simple_track_run(false);
+    if (!bin_note) simple_note("Đã dừng.");
     end_hold("reviving");
 
     const std::string vi = Reviver::out_of_tries_vi();
@@ -3435,7 +3872,7 @@ void GuiApp::start_trash() {
         trash_oneshot_ = false;          // a one-off pass in progress becomes a run
         return;
     }
-    if (trash_thread_.joinable()) trash_thread_.join();
+    join_pumping(trash_thread_);
     trash_stop_ = false;
     trash_oneshot_ = false;
     trash_running_ = true;
@@ -3445,14 +3882,34 @@ void GuiApp::start_trash() {
 void GuiApp::request_trash(bool look_only) {
     trash_request_ = look_only ? 2 : 1;
     if (trash_running_) return;
-    if (trash_thread_.joinable()) trash_thread_.join();
+    join_pumping(trash_thread_);
     trash_stop_ = false;
     trash_oneshot_ = true;
     trash_running_ = true;
     trash_thread_ = std::thread([this] { trash_loop(); });
 }
 
-bool GuiApp::stop_trash() {
+void GuiApp::request_charms() {
+    trash_request_ = 3;
+    if (trash_running_) return;
+    join_pumping(trash_thread_);
+    trash_stop_ = false;
+    trash_oneshot_ = true;
+    trash_running_ = true;
+    trash_thread_ = std::thread([this] { trash_loop(); });
+}
+
+void GuiApp::request_shop(bool dry) {
+    trash_request_ = dry ? 5 : 4;
+    if (trash_running_) return;
+    join_pumping(trash_thread_);
+    trash_stop_ = false;
+    trash_oneshot_ = true;
+    trash_running_ = true;
+    trash_thread_ = std::thread([this] { trash_loop(); });
+}
+
+bool GuiApp::stop_trash(bool wait) {
     trash_stop_ = true;
     {
         std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
@@ -3465,7 +3922,9 @@ bool GuiApp::stop_trash() {
             trash_cleaner_->cancel();
         }
     }
-    if (trash_thread_.joinable()) trash_thread_.join();
+    // Told, and not waited for: stop_jobs tells every job first.
+    if (!wait) return false;
+    join_pumping(trash_thread_);
     trash_running_ = false;
 
     // A pass that could not give its item back -- the game covered where Hủy
@@ -3477,15 +3936,16 @@ bool GuiApp::stop_trash() {
     // So nothing that presses keys starts until the game has been looked at;
     // see keys_may_start.
     //
-    // The executor is not stopped by any of that: it runs from launch, and
-    // its buff timer and potions ask only the coordinator, whose hold ends
-    // below. It is paused before then, until the bin is seen with nothing
-    // waiting -- looked for every couple of seconds, by watch_left_held when
-    // no trash worker runs: see bin_seen_clear.
+    // The executor presses only while the packet bot runs, and stop_bot()
+    // stops it with the bot. It is paused as well, before the hold ends below,
+    // until the bin is seen with nothing waiting -- looked for every couple of
+    // seconds, by watch_left_held when no trash worker runs: see
+    // bin_seen_clear.
     if (trash_hold_.exchange(false)) {
         stop_hunt();
         stop_macro();
         stop_bot();
+        stop_calibration();
         if (navigator_ && navigator_->running()) navigator_->stop();
         ++left_held_gen_;
         trash_left_held_ = true;
@@ -3537,11 +3997,16 @@ bool GuiApp::keys_may_start() {
         GB_WARN("Not started: %s", why.c_str());
         return false;
     };
-    // A Tự chat worker told to stop with a line under way rubs it out and
-    // shuts it first, and may yet hand over a line it cannot show shut: what
-    // started meanwhile would type into it.
+    // A protocol calibration walks the character itself for its twenty
+    // seconds. Anything started meanwhile -- the hunter, a walk, the packet
+    // bot -- lets go of the arrow it holds and spoils what it measures.
+    if (calibrator_ && calibrator_->running())
+        return refuse("Đang chạy Calibrate (dò giao thức): chờ nó xong, hoặc bấm Abort, rồi bấm lại.");
+    // A Tự chat worker told to stop with a line under way looks at the line
+    // it leaves, and may yet hand it over as maybe open: what started
+    // meanwhile would type into it.
     if (chat_running_ && chat_quit_)
-        return refuse("Đang dừng Tự chat: xoá câu đang gõ dở và đóng ô chat. Chờ một chút rồi bấm lại.");
+        return refuse("Đang dừng Tự chat. Chờ một chút rồi bấm lại.");
     if ((chat_doubt_ && !chat_doubt_watched_) || trash_left_held_) {
         if (!simple_store_loaded_) {
             simple_store_loaded_ = true;
@@ -3578,9 +4043,9 @@ bool GuiApp::keys_may_start() {
 
 void GuiApp::watch_left_held() {
     // With a trash worker running, its own look does this (see trash_loop).
-    // Without one, nothing else would look until BẮT ĐẦU, and the executor's
-    // buffs and potions -- paused by the stop -- would stay off all session
-    // for a player who answered the bin's dialog and went on by hand.
+    // Without one, nothing else would look until BẮT ĐẦU, and whatever waits
+    // on the doubt would wait all session for a player who answered the bin's
+    // dialog and went on by hand: a quest round, the popup closer.
     if (left_held_look_.valid()) {
         if (left_held_look_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
         const bool clear = left_held_look_.get();
@@ -3593,8 +4058,8 @@ void GuiApp::watch_left_held() {
                                  "buff chạy lại.";
         simple_note(note, 12000);
         if (!simple_view_) set_status(note, 12000);
-        GB_INFO("Trash: the game shows nothing waiting in the bin any more; the executor's buffs "
-                "and potions go on");
+        GB_INFO("Trash: the game shows nothing waiting in the bin any more; the executor's pause "
+                "for it ends");
         return;
     }
     if (!trash_left_held_ || trash_running_) return;
@@ -3622,7 +4087,76 @@ bool GuiApp::take_hold(const std::string& reason) {
 
 void GuiApp::end_hold(const std::string& reason) {
     std::lock_guard<std::mutex> lock(hold_mutex_);
-    if (coord_.critical_active() && coord_.critical_reason() == reason) coord_.disengage_critical();
+    if (!coord_.critical_active() || coord_.critical_reason() != reason) return;
+    // A hold let go of while everything is being stopped passes to the stop,
+    // with no moment free in between. A quest round, a popup's close or a
+    // revive told to stop ends its own within a fraction of a second, and the
+    // hunter and the macro, waited for only later, would otherwise be free to
+    // press skills and potions after F12.
+    if (stopping_ && reason != kStopHold) {
+        GB_INFO("Hold '%s' let go of during a stop: kept on as the stop's", reason.c_str());
+        coord_.engage_critical(kStopHold);
+    } else {
+        coord_.disengage_critical();
+    }
+}
+
+bool GuiApp::stop_jobs(bool with_bot) {
+    // Everything that presses keys through the coordinator -- the hunter, the
+    // macro, a walk to a place, the packet bot's executor, the jump key's
+    // "Thử" -- refused from this moment to the end. The hunter and the macro
+    // cannot be told to stop without being waited for, and while the others
+    // were waited for they went on swinging and drinking. Not over a hold that
+    // is somebody else's, which refuses them just the same -- and which, let
+    // go of by its owner as it winds down, is the stop's from then on
+    // (end_hold).
+    {
+        std::lock_guard<std::mutex> lock(hold_mutex_);
+        stopping_ = true;
+    }
+    take_hold(kStopHold);
+
+    // ---- every one told, and nothing waited for ----
+    if (with_bot && navigator_) navigator_->request_stop();
+    if (calibrator_) calibrator_->request_stop();
+    stop_chat(true, false);
+    stop_party(false);
+    stop_revive(false);
+    stop_trash(false);
+    stop_quest(false);
+    stop_popups(false);
+    stop_keeper(false);
+    simple_style_stop();
+    // The packet bot's executor: its queue and its route dropped, and nothing
+    // more pressed. The bot itself is stopped below, with the rest.
+    if (with_bot && executor_) executor_->halt();
+    input_.release_all();
+
+    // ---- then each one waited for: the engines first ----
+    if (with_bot && navigator_) navigator_->stop();
+    stop_hunt();
+    stop_macro();
+    if (with_bot) stop_bot();
+    stop_calibration();
+    stop_party();
+    stop_revive();
+    const bool bin_note = stop_trash();
+    stop_quest();
+    stop_popups();
+    stop_keeper();
+
+    // What went down while they wound down -- a press under way when they
+    // were told -- let go of as well.
+    input_.release_all();
+    // The stop's hold ends. One its owner keeps beyond the stop is left on: the
+    // revive's that ran out of tries, which stop_after_revive ends, and a chat
+    // line in doubt handed over to tick().
+    {
+        std::lock_guard<std::mutex> lock(hold_mutex_);
+        stopping_ = false;
+    }
+    end_hold(kStopHold);
+    return bin_note;
 }
 
 /// The timed passes, and the ones asked for.
@@ -3672,6 +4206,10 @@ void GuiApp::trash_loop() {
     // as numbers -- until the game shows nothing waiting: the player answered
     // it, or a later pass did.
     bool held = trash_hold_;
+    // The hold kept by a potion purchase that left something up: let go only
+    // once the shop, its message and its question are gone too, not only the
+    // bin's dialogs -- see bag::shop_left_up.
+    bool shop_held = false;
     std::uint64_t held_looked_ms = 0;
     // The same from the start when the game already shows the bin asking, or
     // something waiting in it -- left by a pass a stop cut short, or by hand:
@@ -3680,7 +4218,7 @@ void GuiApp::trash_loop() {
         Frame f;
         if (grab(f) && f.valid()) {
             const BagView v = bag::find(f, store, settings.layout);
-            if ((bag::bin_asking(f, store) || (v.found && !v.bin_empty)) &&
+            if ((bag::bin_asking(f, store) || (v.found && !v.bin_empty && v.bin_on_frame)) &&
                 take_hold("trash cleaning")) {
                 held = true;
                 trash_hold_ = true;
@@ -3700,9 +4238,11 @@ void GuiApp::trash_loop() {
         held_looked_ms = now_ms();
         Frame f;
         if (!grab(f) || !f.valid() || !bag::nothing_held(f, store, settings.layout)) return;
+        if (shop_held && bag::shop_left_up(f, store)) return;
         const bool was_held = held;
         if (held) {
             held = false;
+            shop_held = false;
             trash_hold_ = false;
             end_hold("trash cleaning");
         }
@@ -3713,6 +4253,437 @@ void GuiApp::trash_loop() {
         else if (was_held || !trash_left_held_)
             tell("Không còn gì chờ trong thùng rác.");
     };
+    // Tự chat's line before any timed job here -- the player's order: chat,
+    // then the bag (the pass, then the charms), then the potions. None starts
+    // while a line is due, its attempt included, or waits only for this
+    // worker's last job. Not while this worker holds the game for something
+    // left in the bin (the line waits on that, and only a pass ends it), not
+    // over a line in doubt (the jobs refuse that anyway), and never past
+    // kChatFirstMaxMs: a line that cannot go holds nothing up for long.
+    const auto chat_first = [&] {
+        if (held || trash_left_held_ || chat_doubt_) return false;
+        const std::uint64_t now = now_ms();
+        const std::uint64_t waits = chat_waits_trash_ms_.load();
+        if (waits != 0 && now < waits + kChatFirstMaxMs) return true;
+        const std::uint64_t due = chat_next_ms_.load();
+        return due != 0 && now >= due && now < due + kChatFirstMaxMs;
+    };
+    // ---- charms (Bùa) ----
+    // A job of its own beside the timed passes and the ones asked for: the
+    // charms on the Dùng list that are due -- one of each kind an hour, by
+    // CharmClock -- used in a quick run that opens the bag on Tiêu Dùng and
+    // nothing else, with everything that presses keys held off for the few
+    // seconds it takes (the macro's skills, potions and buffs, the hunter's
+    // attack). Never inside the slow pass that clears the bag. `forced` is the
+    // button "Dùng bùa ngay": the clock is not asked, and what stops it is
+    // said instead of waited out.
+    CharmClock charm_clock;
+    charm_clock.load();
+    std::uint64_t charm_check_ms = now_ms() + 8'000;
+    std::vector<std::string> charm_listed;       // clock ids of the charms on the list, as last built
+    std::uint64_t charm_listed_ms = 0;
+    bool charm_listed_built = false;
+    const auto wall_s = [] {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::system_clock::now().time_since_epoch()).count());
+    };
+    const auto run_charms = [&](bool forced) {
+        // The file again: the tab writes it as boxes are ticked.
+        for (int i = 0; i < 5; ++i) {
+            CleanSettings fresh;
+            if (fresh.load(config)) { settings = fresh; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        read_ms = now_ms();
+        const auto not_now = [&](const std::string& why) {
+            if (forced) tell(why);
+            charm_check_ms = now_ms() + (forced ? 0 : 5'000);
+        };
+        if (!settings.use_charms) {
+            if (forced) tell("Dùng bùa đang tắt. Đánh dấu \"Dùng bùa\" ở đầu thẻ này.");
+            return;
+        }
+        // Which charms are on the list, asked of the files only now and then:
+        // building the list reads every picture and weighs it against the
+        // catalog, too much to do every five seconds to learn nothing is due.
+        // The whole list is built below, when a charm is.
+        TrashList list;
+        std::vector<std::string>& listed = charm_listed;
+        if (forced || now_ms() >= charm_listed_ms + 30'000) {
+            list.build(exe_relative("configs/trash"), settings, catalog);
+            listed.clear();
+            for (const TrashList::Item& it : list.items)
+                if (it.action == TrashList::Action::Use && it.charm() &&
+                    std::find(listed.begin(), listed.end(), it.clock_id()) == listed.end())
+                    listed.push_back(it.clock_id());
+            charm_listed_ms = now_ms();
+            charm_listed_built = true;
+        } else {
+            charm_listed_built = false;
+        }
+        if (listed.empty()) {
+            if (forced)
+                tell("Chưa chọn bùa nào trong danh sách Dùng. Bấm vào một bùa ở phần \"Chọn đồ cần bỏ\", rồi "
+                     "chọn \"Dùng bùa\".");
+            return;
+        }
+        charm_clock.load();      // another GoBot may have used one since
+        bool any_due = forced;
+        for (const std::string& id : listed) any_due = any_due || charm_clock.due(id, wall_s());
+        if (!any_due) return;
+        // What the run cannot be done without, before it takes the hold: a
+        // run that stops for want of it would hold the bot off every few
+        // seconds for nothing.
+        if (!bag::can_check_charm(store)) {
+            charm_check_ms = now_ms() + 60'000;
+            if (forced) tell("Thiếu hình của game để dùng bùa (xem thẻ Dọn rác).");
+            return;
+        }
+        if (!input_.window_valid()) return not_now("Chưa thấy cửa sổ game.");
+        if (chat_doubt_) return not_now(kTrashWaitsForChat);
+        if (coord_.critical_active() && coord_.critical_reason() != "trash cleaning")
+            return not_now("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dùng bùa sau.");
+        // Only with the character in the world: nothing is read of its HP at
+        // the login or the character screen, and the bag key pressed there is
+        // a letter in a form.
+        if (keeper_cold_start_) return not_now("Chờ: GoBot đang vào lại game, dùng bùa sau.");
+        {
+            std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+            if (keeper_flow_ != nullptr) return not_now("Chờ: GoBot đang qua màn hình khác, dùng bùa sau.");
+        }
+        // Not while HP is near what the HP potion drinks at: the potion is
+        // held off with everything else for the length of the run.
+        {
+            const float hp = vitals_.hp_percent();
+            if (hp < 0.0f) return not_now("Chưa đọc được máu của nhân vật, dùng bùa sau.");
+            if (hp < static_cast<float>(chat_hp_floor_.load() + 10)) return not_now("Máu đang thấp, dùng bùa sau.");
+        }
+        // The clock has to be writable: a charm used and not written down is a
+        // charm used again after a restart, and the next charm after it. Asked
+        // now, before anything is right-clicked.
+        charm_clock.load();
+        if (!charm_clock.save()) {
+            charm_check_ms = now_ms() + 300'000;
+            tell("Không ghi được " + CharmClock::default_path() + ", nên không dùng bùa (một bùa đã dùng mà không ghi "
+                 "lại sẽ bị dùng thêm lần nữa).");
+            return;
+        }
+        if (!charm_listed_built) list.build(exe_relative("configs/trash"), settings, catalog);
+
+        BagCleaner cleaner(input_, store, grab);
+        cleaner.set_settings(settings);
+        cleaner.set_trash(&list);
+        cleaner.set_counts(&counts);
+        cleaner.set_debug_dir(exe_relative("trash_debug"));
+        cleaner.set_mode(BagCleaner::Mode::CharmsOnly);
+        cleaner.set_charm_due([&](const std::string& id) { return forced || charm_clock.due(id, wall_s()); });
+        // Everything the bot presses is held off while this runs; if that
+        // hold is taken from it, it stops there.
+        // And HP not fallen under the potion's mark, which is held off as well:
+        // the run stops there and gives the keys back.
+        cleaner.set_guard([this] {
+            if (!(coord_.critical_active() && coord_.critical_reason() == "trash cleaning")) return false;
+            const float hp = vitals_.hp_percent();
+            return !(hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()));
+        });
+        // Each charm written down as used the moment before it is right-clicked
+        // -- the time it had is kept, to give back if nothing came of it -- so
+        // that a GoBot closed or killed in the middle has not forgotten it.
+        std::map<std::string, std::int64_t> claimed_before;
+        cleaner.set_charm_claim([&](const std::string& id) {
+            claimed_before[id] = charm_clock.next(id);
+            if (!charm_clock.set_next(id, CharmClock::next_after(CharmClock::How::MaybeUsed,
+                                                                 settings.charm_every_minutes, wall_s())))
+                cleaner.cancel();       // not written down: nothing more is right-clicked
+        });
+        cleaner.on_report([this](const std::string& line) { say_trash(line); });
+        {
+            std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+            trash_cleaner_ = &cleaner;
+        }
+        if (trash_stop_) cleaner.cancel();
+
+        BagCleaner::Result r;
+        bool passed = false;
+        const std::uint64_t asked_ms = now_ms();
+        std::uint64_t held_ms = 0;
+        {
+            // The mouse, as a pass takes it, waited for a little at a time:
+            // a charm job is quick and not wanted late.
+            std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
+            const std::uint64_t give_up = now_ms() + 5'000;
+            while (!trash_stop_ && now_ms() < give_up && !mouse.try_lock())
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (mouse.owns_lock() && !trash_stop_ && !chat_doubt_ && take_hold("trash cleaning")) {
+                passed = true;
+                trash_pass_ = true;
+                held_ms = now_ms();
+                tell("Dùng bùa...");
+                // What is mid-press when the hold comes is let finish, and
+                // whatever is still down let go of.
+                for (int i = 0; i < 30 && coord_.held(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                input_.release_all();
+                if (!input_.window_focused()) {
+                    input_.focus_window();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                }
+                cleaner.set_deadline_ms(20'000);
+                r = cleaner.run();
+                held = r.keeps_hold(held);
+                trash_hold_ = held;
+                if (!held) end_hold("trash cleaning");
+                trash_pass_ = false;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+            trash_cleaner_ = nullptr;
+        }
+        if (!passed) {
+            if (!trash_stop_) not_now("Chờ: bot đang bận (" + (coord_.critical_active() ? coord_.critical_reason()
+                                                                                      : std::string("chuột đang dùng")) +
+                                      "), dùng bùa sau.");
+            return;
+        }
+
+        // The clock: every charm right-clicked, by how it came out -- a charm
+        // perhaps used counts as used, for one used twice is lost -- and every
+        // due charm the bag was searched for and not found, to be looked for
+        // again in ten minutes rather than every few seconds.
+        const std::int64_t done_s = wall_s();
+        std::set<std::string> tried;
+        bool unsaved = false;
+        for (const BagCleaner::Result::CharmTry& t : r.charm_tries) {
+            tried.insert(t.id);
+            std::int64_t at = CharmClock::next_after(t.how, settings.charm_every_minutes, done_s);
+            // Not used: tried again soon -- but never sooner than the time it
+            // had before this run claimed it.
+            if (t.how == CharmClock::How::NotUsed) at = std::max(at, claimed_before[t.id]);
+            unsaved = !charm_clock.set_next(t.id, at) || unsaved;
+        }
+        // Claimed and never right-clicked (the run stopped first): as it was.
+        for (const auto& c : claimed_before)
+            if (tried.count(c.first) == 0) unsaved = !charm_clock.set_next(c.first, c.second) || unsaved;
+        if (r.ran) {
+            // Due and not found in the bag: looked for again in ten minutes,
+            // not every few seconds -- and never earlier than a time it has.
+            for (const std::string& id : listed)
+                if (tried.count(id) == 0 && claimed_before.count(id) == 0 && (forced || charm_clock.due(id, done_s)) &&
+                    r.trouble.empty())
+                    unsaved = !charm_clock.set_next(id, std::max(charm_clock.next(id),
+                                                                 CharmClock::next_after(CharmClock::How::NotUsed, 0,
+                                                                                        done_s))) || unsaved;
+        }
+        // A run that stopped with something wrong and tried no charm, or never
+        // found the bag: not again every few seconds, which would hold the bot
+        // off each time.
+        if (!forced && (!r.ran || (!r.trouble.empty() && r.charm_tries.empty()))) charm_check_ms = now_ms() + 60'000;
+        if (unsaved)
+            tell("Không ghi được " + CharmClock::default_path() + ": giờ dùng bùa chỉ nhớ đến khi tắt GoBot.");
+
+        std::string line;
+        if (r.charms_used > 0) line = "Đã dùng " + std::to_string(r.charms_used) + " bùa.";
+        else if (r.charms_seen == 0 && r.trouble.empty()) line = "Không thấy bùa nào trong ngăn Tiêu Dùng của túi đồ.";
+        else if (r.charm_tries.empty() && r.trouble.empty()) line = "Bùa chưa tới giờ dùng lại.";
+        if (!r.trouble.empty()) line += (line.empty() ? "" : " ") + std::string("Dừng: ") + r.trouble + ".";
+        if (!line.empty()) tell(line);
+        GB_INFO("Trash: charm job: asked at %llu ms, hold taken after %llu ms, took %llu ms, %d used, %d seen, %d not due",
+                static_cast<unsigned long long>(asked_ms), static_cast<unsigned long long>(held_ms - asked_ms),
+                static_cast<unsigned long long>(now_ms() - held_ms), r.charms_used, r.charms_seen, r.charms_waiting);
+        if (held) {
+            held_looked_ms = now_ms();
+            tell("Món đồ có thể vẫn đang ở trong một hộp thoại. Bấm Hủy Bỏ trong game; đánh quái, bình và buff "
+                 "tạm dừng đến khi không còn gì chờ.");
+        }
+    };
+
+    // ---- the potion shop ----
+    // The bag looked at every buy_every_minutes -- the first time soon after
+    // the start -- and, when Thịt bò khô or Rượu lá tre fill fewer slots of
+    // Tiêu Dùng than the player wants, more bought from the shop the Người
+    // Giữ Sân item opens: BagCleaner::Mode::ShopBuy. Everything that presses
+    // keys is held off for as long as it takes -- the skills too, which would
+    // otherwise press into the quantity box and the shop -- which is a few
+    // dozen seconds at the most; the potion keys wait with them, so a run
+    // starts only with HP well over the potion's mark and stops when it falls.
+    // `forced` is the button "Mua ngay" (the time is not asked), `dry` the
+    // button "Thử mua": everything up to the quantity box, answered Hủy Bỏ.
+    std::uint64_t shop_due_ms = now_ms() + 45'000;
+    // A purchase that added no slot is not tried again by the clock: the next one
+    // is the player's, the button or the switch ticked again.
+    bool shop_blocked = false, shop_was_on = settings.buy_potions;
+    const auto run_shop = [&](bool forced, bool dry) {
+        const std::uint64_t due_before = shop_due_ms;
+        for (int i = 0; i < 5; ++i) {
+            CleanSettings fresh;
+            if (fresh.load(config)) { settings = fresh; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        read_ms = now_ms();
+        const auto minutes = [&](int m) { return now_ms() + static_cast<std::uint64_t>(m) * 60'000ull; };
+        const auto not_now = [&](const std::string& why, std::uint64_t again_ms = 5'000) {
+            if (forced || dry) tell(why);
+            shop_due_ms = forced || dry ? due_before : now_ms() + again_ms;
+        };
+        if (!settings.buy_potions && !dry) {
+            if (forced) tell("Tự mua bình đang tắt. Đánh dấu \"Tự mua bình\" ở thẻ Dọn rác.");
+            shop_due_ms = minutes(1);
+            return;
+        }
+        if (!bag::can_check_shop(store) || !counts.loaded()) {
+            shop_due_ms = minutes(5);
+            tell("Thiếu hình hoặc bộ chữ số của game để mua bình (xem thẻ Dọn rác).");
+            return;
+        }
+        if (!input_.window_valid()) return not_now("Chưa thấy cửa sổ game.");
+        if (!client_on_screen(input_.target_window())) return not_now(kGameOffScreen, 60'000);
+        if (chat_doubt_) return not_now(kTrashWaitsForChat);
+        if (coord_.critical_active() && coord_.critical_reason() != "trash cleaning")
+            return not_now("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), mua bình sau.",
+                           coord_.critical_reason() == kChatHold ? kAfterChatLineMs : 15'000);
+        if (keeper_cold_start_) return not_now("Chờ: GoBot đang vào lại game, mua bình sau.");
+        {
+            std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+            if (keeper_flow_ != nullptr) return not_now("Chờ: GoBot đang qua màn hình khác, mua bình sau.");
+        }
+        {
+            const float hp = vitals_.hp_percent();
+            if (hp < 0.0f) return not_now("Chưa đọc được máu của nhân vật, mua bình sau.", 15'000);
+            // Over the potion's mark by a margin -- never more than 95%, or a mark at
+            // 91% and over would never let a run start.
+            if (hp < static_cast<float>(std::min(95, chat_hp_floor_.load() + 10)))
+                return not_now("Máu đang thấp, mua bình sau.", 15'000);
+        }
+
+        // The two potions and the Người Giữ Sân item, as catalog icons -- the
+        // live client's bag draws the item as its icon at 1.000, so no picture
+        // of the player's is asked for -- and the rest of the catalog to tell
+        // them from: nothing here is ever deleted.
+        const std::vector<std::string> icons{ CleanSettings::kBuyHpId, CleanSettings::kBuyMpId, settings.buy_opener };
+        for (const std::string& id : icons)
+            if (catalog.find(id) == nullptr) {
+                shop_due_ms = minutes(5);
+                tell("Không có hình \"" + id + "\" trong bộ hình món đồ của game, nên không mua bình được.");
+                return;
+            }
+        TrashList list;
+        list.add_catalog(catalog, icons, TrashList::Action::Delete, settings.catalog_score);
+        list.add_rivals(catalog);
+        if (list.items.size() < 3) {
+            shop_due_ms = minutes(5);
+            tell("Không có hình món đồ để đếm bình hoặc tìm món Người Giữ Sân (" + settings.buy_opener +
+                 ") trong bộ hình của game.");
+            return;
+        }
+
+        // Its own capture, off the screen only: the game is in front for every
+        // click of it anyway, and PrintWindow was being tried grab after grab
+        // on the live client just as the quantity box came up -- see
+        // ScreenCapture::set_screen_only.
+        ScreenCapture shop_capture;
+        shop_capture.set_screen_only(true);
+        const auto shop_grab = [&](Frame& f) { return shop_capture.grab(input_.target_window(), f); };
+        BagCleaner cleaner(input_, store, shop_grab);
+        cleaner.set_settings(settings);
+        cleaner.set_trash(&list);
+        cleaner.set_counts(&counts);
+        cleaner.set_debug_dir(exe_relative("trash_debug"));
+        cleaner.set_mode(BagCleaner::Mode::ShopBuy);
+        cleaner.set_dry_run(dry);
+        // The hold must stay ours, and HP not fall under the potion's mark,
+        // which is held off as well: the run stops there and gives the keys back.
+        cleaner.set_guard([this] {
+            if (!(coord_.critical_active() && coord_.critical_reason() == "trash cleaning")) return false;
+            const float hp = vitals_.hp_percent();
+            return !(hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()));
+        });
+        cleaner.on_report([this](const std::string& line) { say_trash(line); });
+        {
+            std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+            trash_cleaner_ = &cleaner;
+        }
+        if (trash_stop_) cleaner.cancel();
+
+        BagCleaner::Result r;
+        bool passed = false;
+        const std::uint64_t asked_ms = now_ms();
+        std::uint64_t held_ms = 0;
+        {
+            std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
+            const std::uint64_t give_up = now_ms() + 5'000;
+            while (!trash_stop_ && now_ms() < give_up && !mouse.try_lock())
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (mouse.owns_lock() && !trash_stop_ && !chat_doubt_ && take_hold("trash cleaning")) {
+                passed = true;
+                trash_pass_ = true;
+                held_ms = now_ms();
+                tell(dry ? "Thử mua bình (không mua)..." : "Mua bình...");
+                for (int i = 0; i < 30 && coord_.held(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                input_.release_all();
+                if (!input_.window_focused()) {
+                    input_.focus_window();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                }
+                cleaner.set_deadline_ms(240'000);
+                {
+                    // No PrintWindow anywhere in GoBot meanwhile, the vitals
+                    // reader's included: see ScreenCapture::set_screen_only.
+                    const PrintWindowPause no_print;
+                    r = cleaner.run();
+                }
+                held = r.keeps_hold(held);
+                shop_held = held && (shop_held || r.stuck);
+                trash_hold_ = held;
+                if (!held) end_hold("trash cleaning");
+                trash_pass_ = false;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
+            trash_cleaner_ = nullptr;
+        }
+        if (!passed) {
+            if (!trash_stop_)
+                not_now("Chờ: bot đang bận (" + (coord_.critical_active() ? coord_.critical_reason()
+                                                                         : std::string("chuột đang dùng")) +
+                        "), mua bình sau.",
+                        coord_.critical_reason() == kChatHold ? kAfterChatLineMs : 15'000);
+            return;
+        }
+
+        // The next look: the interval after one that went through, ten
+        // minutes after one that stopped on something -- not every few seconds,
+        // which would hold the bot off each time.
+        shop_due_ms = r.trouble.empty() && r.ran ? minutes(settings.buy_every_minutes) : minutes(10);
+        if (dry) shop_due_ms = due_before;        // a trial does not move the real one
+        if (r.shop_no_gain && !dry) shop_blocked = true;
+        else if (forced && r.shop_bought > 0 && !r.shop_no_gain) shop_blocked = false;
+        std::string line;
+        if (r.shop_hp_before >= 0)
+            line = "Bình trong túi trước khi mua: " + std::to_string(r.shop_hp_before) + " ô Thịt bò khô, " +
+                   std::to_string(r.shop_mp_before) + " ô Rượu lá tre.";
+        if (r.shop_bought > 0)
+            line += " Đã mua " + std::to_string(r.shop_bought) + " lần " + std::to_string(CleanSettings::kBuyQuantity) +
+                    "; còn " + std::to_string(r.shop_hp_after) + " ô Thịt bò khô, " + std::to_string(r.shop_mp_after) +
+                    " ô Rượu lá tre.";
+        if (r.shop_full) line += " Túi đồ (ngăn Tiêu Dùng) đã đầy nên dừng mua.";
+        if (r.shop_no_gain && !dry)
+            line += " GoBot không tự mua nữa cho tới khi bạn bấm Mua ngay, hoặc tắt rồi bật lại ô Tự mua bình.";
+        if (!r.trouble.empty()) line += " Dừng: " + r.trouble + ".";
+        if (!line.empty()) tell(line);
+        GB_INFO("Trash: shop job: asked at %llu ms, hold taken after %llu ms, took %llu ms, %d bought, hp %d->%d, mp %d->%d",
+                static_cast<unsigned long long>(asked_ms), static_cast<unsigned long long>(held_ms - asked_ms),
+                static_cast<unsigned long long>(now_ms() - held_ms), r.shop_bought, r.shop_hp_before,
+                r.shop_hp_after, r.shop_mp_before, r.shop_mp_after);
+        if (held) {
+            held_looked_ms = now_ms();
+            tell("Còn một hộp thoại hoặc cửa hàng đang mở trong game. Đóng nó (Hủy Bỏ, rồi ESC); đánh quái, bình "
+                 "và buff tạm dừng đến khi không còn hộp thoại nào.");
+        }
+    };
+
     while (!trash_stop_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if ((held || trash_left_held_) && now_ms() - held_looked_ms > 1500) look_for_clear();
@@ -3721,6 +4692,39 @@ void GuiApp::trash_loop() {
             CleanSettings fresh;
             if (fresh.load(config)) settings = fresh;
             read_ms = now_ms();
+        }
+        // The potion shop, asked for with a button (4: buy now, 5: a trial) or
+        // due by its time: a job of its own, like the charms'.
+        // Switched off and on again: the next look is the clock's again.
+        if (settings.buy_potions != shop_was_on) {
+            shop_was_on = settings.buy_potions;
+            if (shop_was_on) {
+                shop_blocked = false;
+                shop_due_ms = now_ms() + 45'000;
+            }
+        }
+        // What is due by its own clock, and in the player's order when several
+        // are: Tự chat's line, then the pass, then the charms, then the shop.
+        // A button (requests 1 to 5) is now, and waits for nothing.
+        const bool timed = request == 0 && !trash_oneshot_;
+        const bool pass_due = timed && settings.enabled && now_ms() >= next;
+        const bool charm_due = timed && !held && settings.use_charms && now_ms() >= charm_check_ms;
+        const bool shop_due = timed && !held && settings.buy_potions && !shop_blocked &&
+                              now_ms() >= shop_due_ms;
+        if ((pass_due || charm_due || shop_due) && chat_first()) continue;
+        if (request == 4 || request == 5 || (shop_due && !pass_due && !charm_due)) {
+            if (request == 0) shop_due_ms = now_ms() + 5'000;
+            run_shop(request == 4, request == 5);
+            if (trash_oneshot_ && !held) break;
+            continue;
+        }
+        // The charms, asked for with a button or due by their clock: a job of
+        // their own, and the timed pass is looked at again after it.
+        if (request == 3 || (charm_due && !pass_due)) {
+            charm_check_ms = now_ms() + 5'000;
+            run_charms(request == 3);
+            if (trash_oneshot_ && !held) break;
+            continue;
         }
         if (request == 0) {
             // A pass asked for by a button ends here -- unless it left the
@@ -3763,7 +4767,8 @@ void GuiApp::trash_loop() {
         if (held_by_other()) {
             tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
             if (trash_oneshot_ && !held) break;
-            next = now_ms() + 30'000;
+            // Right after a Tự chat line: the bag is next in the player's order.
+            next = now_ms() + (coord_.critical_reason() == kChatHold ? kAfterChatLineMs : 30'000);
             continue;
         }
         next = now_ms() + static_cast<std::uint64_t>(settings.interval_minutes) * 60'000ull;
@@ -3780,15 +4785,47 @@ void GuiApp::trash_loop() {
             if (trash_oneshot_ && !held) break;
             continue;
         }
+        if (!client_on_screen(input_.target_window())) {
+            tell(kGameOffScreen);
+            if (trash_oneshot_ && !held) break;
+            next = now_ms() + 60'000;
+            continue;
+        }
+
+        // Not with HP near the potion's mark: the potions are held off for the
+        // length of the pass. A timed pass waits a little; one asked for with a
+        // button goes, and stops between items should HP fall (the guard).
+        if (request == 0 && !held) {
+            const float hp = vitals_.hp_percent();
+            if (hp >= 0.0f && hp < static_cast<float>(std::min(95, chat_hp_floor_.load() + 10))) {
+                tell("Máu đang thấp, dọn rác sau.");
+                next = now_ms() + 15'000;
+                continue;
+            }
+        }
 
         const bool look_only = request == 2;
-        BagCleaner cleaner(input_, store, grab);
+        // Its own capture, off the screen only, as the potion shop's: every
+        // click of a pass needs the game in front and on top where it lands
+        // anyway, and PrintWindow is not asked anywhere in GoBot while it runs
+        // (ScreenCapture::set_screen_only, PrintWindowPause below).
+        ScreenCapture pass_capture;
+        pass_capture.set_screen_only(true);
+        const auto pass_grab = [&](Frame& f) { return pass_capture.grab(input_.target_window(), f); };
+        BagCleaner cleaner(input_, store, pass_grab);
         cleaner.set_settings(settings);
         cleaner.set_trash(&list);
         cleaner.set_counts(&counts);
         cleaner.set_debug_dir(exe_relative("trash_debug"));
         cleaner.set_dry_run(look_only);
         cleaner.on_report([this](const std::string& line) { say_trash(line); });
+        // The hold must stay this pass's, and HP not fall under the potion's
+        // mark: the pass stops between items and gives the keys back.
+        cleaner.set_guard([this] {
+            if (!(coord_.critical_active() && coord_.critical_reason() == "trash cleaning")) return false;
+            const float hp = vitals_.hp_percent();
+            return !(hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()));
+        });
         {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
             trash_cleaner_ = &cleaner;
@@ -3805,18 +4842,37 @@ void GuiApp::trash_loop() {
             // mouse: a revive that began while this waited for it keeps its
             // own, and the pass waits instead. The chat line is asked about
             // again with the mouse in hand: a line left in doubt since the
-            // look above was under Tự chat's hold until then.
-            std::lock_guard<std::mutex> mouse(game_mouse_mutex_);
-            if (!chat_doubt_ && take_hold("trash cleaning")) {
+            // look above was under Tự chat's hold until then. Waited for a
+            // little at a time, as the revive waits for a pass, and given up
+            // on a stop: an invite holding the mouse when F12 came handed it
+            // to this pass the moment it ended.
+            std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
+            while (!trash_stop_ && !mouse.try_lock())
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (mouse.owns_lock() && !trash_stop_ && !chat_doubt_ && take_hold("trash cleaning")) {
                 passed = true;
                 trash_pass_ = true;
                 tell(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
+                const std::uint64_t pass_from = now_ms();
+                // A key half pressed by a skill let finish first, as the shop's
+                // and the charms' do; then the game in front, looked at every
+                // 20 ms rather than waited a fixed 350 for.
+                for (int i = 0; i < 30 && coord_.held(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 input_.release_all();
                 if (!input_.window_focused()) {
                     input_.focus_window();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+                    for (int i = 0; i < 18 && !input_.window_focused(); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(60));
                 }
-                r = cleaner.run();
+                {
+                    const PrintWindowPause no_print;
+                    r = cleaner.run();
+                }
+                GB_INFO("Trash: pass took %llu ms: %d deleted, %d failed%s",
+                        static_cast<unsigned long long>(now_ms() - pass_from), r.deleted, r.failed,
+                        r.trouble.empty() ? "" : " (stopped)");
                 // Kept while the bin may still hold the item, and by a pass
                 // that never got to a clean screen -- a look-only one, or one
                 // that met a dialog it would not answer -- since it saw
@@ -3833,11 +4889,15 @@ void GuiApp::trash_loop() {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
             trash_cleaner_ = nullptr;
         }
+        // Stopped while it waited for the mouse: nothing was touched, and there
+        // is nothing to say or to try again.
+        if (!passed && trash_stop_) break;
         if (!passed) {
+            const bool chat_line = !chat_doubt_ && coord_.critical_reason() == kChatHold;
             if (chat_doubt_) tell(kTrashWaitsForChat);
             else tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
             if (trash_oneshot_ && !held) break;
-            next = now_ms() + 30'000;
+            next = now_ms() + (chat_line ? kAfterChatLineMs : 30'000);
             continue;
         }
 
@@ -3874,6 +4934,10 @@ void GuiApp::trash_loop() {
         if (!held && trash_left_held_) look_for_clear();
         if (trash_oneshot_ && !held) break;
     }
+    // A button pressed as the worker was stopping asked for nothing the next
+    // worker should do: a "Dùng bùa ngay" left over would use charms the
+    // clock has not let go.
+    trash_request_ = 0;
     trash_running_ = false;
 }
 
@@ -3931,7 +4995,7 @@ void GuiApp::start_chat() {
     }
     // A worker told to quit finishes rubbing out its line first: a few
     // seconds at most, as it never waits on a line left in doubt.
-    if (chat_thread_.joinable()) chat_thread_.join();
+    join_pumping(chat_thread_);
     chat_stop_ = false;
     chat_quit_ = false;
     chat_restart_ = false;
@@ -3952,7 +5016,7 @@ void GuiApp::request_chat(bool send_one) {
             return;
         }
     }
-    if (chat_thread_.joinable()) chat_thread_.join();
+    join_pumping(chat_thread_);
     chat_request_ = send_one ? 2 : 1;
     chat_stop_ = false;
     chat_quit_ = false;
@@ -3967,18 +5031,15 @@ void GuiApp::stop_chat(bool quit, bool wait) {
     if (quit) chat_quit_ = true;
     {
         std::lock_guard<std::mutex> lock(chat_sender_mutex_);
-        if (chat_sender_) {
-            // A line under way is rubbed out and closed as it stops, which
-            // needs the game in front -- and a stop is mostly pressed in this
-            // window. Brought forward from here, by the thread that has the
-            // foreground to give, rather than by the line meanwhile.
-            if (!input_.window_focused()) input_.focus_window();
-            chat_sender_->cancel();
-        }
+        // A line under way stops at its next key and is left in the chat
+        // line as it is (ChatSender::cancel): nothing more is pressed into
+        // it, so the game is not brought forward for it either.
+        if (chat_sender_) chat_sender_->cancel();
     }
     chat_next_ms_ = 0;
+    chat_waits_trash_ms_ = 0;
     if (!wait) return;
-    if (chat_thread_.joinable()) chat_thread_.join();
+    join_pumping(chat_thread_);
     chat_running_ = false;
     // Asked for while it ran and never answered: not for the next run.
     chat_request_ = 0;
@@ -4073,9 +5134,9 @@ bool GuiApp::chat_line_looks_shut(const TemplateStore& store, int looks, std::st
 void GuiApp::watch_chat_doubt() {
     // With a Tự chat worker watching it, the doubt is the worker's, and it
     // looks every second. Without one -- it was stopped with the line maybe
-    // open -- nothing would look until BẮT ĐẦU, and the executor's buffs and
-    // potions would stay paused all session for a player who shut the line by
-    // hand and went on.
+    // open -- nothing would look until BẮT ĐẦU, and whatever waits on the
+    // doubt would wait all session for a player who shut the line by hand and
+    // went on: a trash pass, a quest round, the popup closer.
     if (chat_doubt_look_.valid()) {
         if (chat_doubt_look_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
         const bool shut = chat_doubt_look_.get();
@@ -4088,7 +5149,7 @@ void GuiApp::watch_chat_doubt() {
                                  "chạy lại.";
         simple_note(note, 12000);
         if (!simple_view_) set_status(note, 12000);
-        GB_INFO("Chat: the game shows the chat line shut; the executor's buffs and potions go on");
+        GB_INFO("Chat: the game shows the chat line shut; the executor's pause for it ends");
         return;
     }
     if (!chat_doubt_ || chat_doubt_watched_) return;
@@ -4124,6 +5185,7 @@ void GuiApp::chat_loop() {
         std::lock_guard<std::mutex> lock(chat_life_mutex_);
         if (chat_restart_ && !chat_quit_) return true;
         chat_next_ms_ = 0;
+        chat_waits_trash_ms_ = 0;
         chat_running_ = false;
         return false;
     };
@@ -4131,6 +5193,7 @@ void GuiApp::chat_loop() {
         tell(why);
         std::lock_guard<std::mutex> lock(chat_life_mutex_);
         chat_next_ms_ = 0;
+        chat_waits_trash_ms_ = 0;
         chat_running_ = false;
     };
 
@@ -4161,7 +5224,14 @@ void GuiApp::chat_loop() {
                  exe_relative("configs/routines.ini"));
     const auto dialog_up = [&](const Frame& f) { return dialogs.up(f, store); };
 
+    // Off the screen only, as the bag jobs: a line is typed only with the game
+    // in front (chat_gate), and PrintWindow -- asked now and then, and by the
+    // other workers -- is not asked anywhere in GoBot while one is typed
+    // (PrintWindowPause below): the shop's quantity box took no digits while
+    // it was. A look while the game is behind something reads the bar as not
+    // seen, which puts a line off and keeps a doubt, never the other way.
     ScreenCapture capture;
+    capture.set_screen_only(true);
     const auto grab = [&](Frame& f) { return capture.grab(input_.target_window(), f); };
 
     // Each reason for waiting said once a minute at most, not every look.
@@ -4278,14 +5348,21 @@ void GuiApp::chat_loop() {
             closer->set_settings(settings);
             closer->set_dialog_check(dialog_up);
             closer->set_debug_dir(exe_relative("chat_debug"));
+            // DỪNG, F12, a close: not one key more, as for a line under way.
+            // Unticking leaves it at work, waiting for nobody at the keys.
+            closer->set_stop([this] { return chat_quit_.load(); });
         }
         doubt.note(r, r.typed + settings.clear_backspaces + 2, now_ms());
     };
 
+    // Whether the last attempt was put off only for a job of the trash worker:
+    // asked again in a second, and that worker starts nothing new meanwhile.
+    bool for_trash = false;
     // One line: what can be told without a look, then the mouse and the hold,
     // then a look, then the line. Nothing has been pressed when the result
     // says not_now. A line that may have been left open keeps the hold.
     const auto attempt = [&](const ChatText& line, bool asked) {
+        for_trash = false;
         ChatSender::Result none;
         none.not_now = true;
         const auto wait = [&](std::uint64_t ms, std::string why) {
@@ -4323,15 +5400,23 @@ void GuiApp::chat_loop() {
         };
         fill();
         ChatGate gate = chat_gate(in);
-        if (!gate.send) return wait(gate.wait_ms, gate.why);
+        if (!gate.send) {
+            // A trash job under way, nothing of it stuck: asked again every
+            // second, and the trash worker starts nothing new until this line
+            // has gone.
+            for_trash = in.window && !in.keeper && trash_pass_ && !trash_hold_ && !trash_left_held_;
+            return wait(for_trash ? kChatAfterTrashMs : gate.wait_ms, gate.why);
+        }
 
         // Not while the trash cleaner, the revive sequence or the party worker
         // is clicking, nor they while this types: a click can shut the line,
         // and a trash pass has the mouse for the whole of it.
         std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);
-        if (!mouse.owns_lock() || trash_pass_)
-            return wait(5000, trash_pass_ ? "Đang dọn rác — chat sau."
-                                          : "Bot đang bấm chuột trong game — chat sau.");
+        if (!mouse.owns_lock() || trash_pass_) {
+            for_trash = trash_running_ && !trash_hold_ && !trash_left_held_;
+            return wait(for_trash ? kChatAfterTrashMs : 5000,
+                        trash_pass_ ? "Đang dọn rác — chat sau." : "Bot đang bấm chuột trong game — chat sau.");
+        }
         if (!take_hold(kChatHold))
             return wait(10000, "Bot đang tạm dừng (" + coord_.critical_reason() + ") — chat sau.");
         // How long everything else waits for this line, which the line's
@@ -4348,7 +5433,7 @@ void GuiApp::chat_loop() {
         // Windows counts from now on is a person's -- maybe typing in the
         // chat. Taken at once, so that the whole of the pause below counts,
         // and asked again just before the first Enter. The pause is
-        // chat.ini's quiet_before_ms, 300 as shipped and up to 5 s, with the
+        // chat.ini's quiet_before_ms, 150 as shipped and up to 5 s, with the
         // potions held off: HP under the potion's mark, or the hold taken
         // over, ends it at once, and the hold with it (OnExit above).
         const DWORD quiet = last_input();
@@ -4370,7 +5455,8 @@ void GuiApp::chat_loop() {
         fill();
         in.looked = true;
         in.hud = SessionManager::hud_present(frame);
-        in.dialog = dialog_up(frame);
+        // No dialog look here: the line's own first look, a moment later on a
+        // fresher frame, refuses on a dialog with the same wait (send_line).
         in.bar = look_chat_bar(frame, store, settings).state;
         in.user_active = touched_since(quiet);
         gate = chat_gate(in);
@@ -4419,7 +5505,11 @@ void GuiApp::chat_loop() {
         // cancel; it is passed on now instead.
         if (chat_stop_ || chat_quit_) sender.cancel();
 
-        ChatSender::Result r = sender.send(line);
+        ChatSender::Result r;
+        {
+            const PrintWindowPause no_print;
+            r = sender.send(line);
+        }
         // What it pressed and saw, whenever it pressed anything: each Enter's
         // hold and the bar after it, the ink as it was typed -- for telling a
         // key the game dropped from one it took late. With a line the game
@@ -4566,18 +5656,21 @@ void GuiApp::chat_loop() {
 
             if (doubt.active()) {
                 chat_next_ms_ = 0;
+                chat_waits_trash_ms_ = 0;
                 doubt.step(*closer, now_ms());
                 if (doubt.active()) continue;   // nothing else while the line may be open
             }
             if (chat_stop_ || stopped_self || chat_oneshot_) break;
             if (!settings.enabled || settings.lines.empty()) {
                 chat_next_ms_ = 0;
+                chat_waits_trash_ms_ = 0;
                 if (settings.enabled) tell_now_and_then("Danh sách câu đang trống.");
                 continue;
             }
             chat_next_ms_ = schedule.due_at();
             const std::uint64_t now = now_ms();
             if (!schedule.due(now)) continue;
+            chat_waits_trash_ms_ = 0;   // due: chat_next_ms_ speaks for the line now
 
             const int index = schedule.turn();
             const int count = static_cast<int>(settings.lines.size());
@@ -4616,6 +5709,7 @@ void GuiApp::chat_loop() {
 
             const ChatSender::Result r = attempt(line, false);
             const std::uint64_t end = now_ms();
+            if (r.not_now && for_trash) chat_waits_trash_ms_ = end;
             note_doubt(r);
             if (r.not_now) {
                 schedule.postpone(end, r.wait_ms);
@@ -4644,7 +5738,16 @@ void GuiApp::chat_loop() {
                 const std::uint64_t wait_ms =
                     put_off_in_row >= 3 ? 60'000 : std::max<std::uint64_t>(r.wait_ms, 3000);
                 schedule.postpone(end, wait_ms);
-                tell_now_and_then("Câu " + std::to_string(index + 1) + " để sau: " + r.trouble);
+                // Unticked part way: the worker stays, and closes the line
+                // itself once nobody is at the mouse or keyboard -- not what
+                // kLeftAsIs says, which is DỪNG's and F12's.
+                if (r.left_open && chat_stop_ && !chat_quit_)
+                    tell_now_and_then("Câu " + std::to_string(index + 1) +
+                                      ": đã dừng giữa chừng, ô chat có thể còn mở. Đóng ô chat trong game (xoá "
+                                      "chữ rồi bấm Enter); GoBot cũng tự xoá và đóng khi không ai dùng chuột hay "
+                                      "bàn phím.");
+                else
+                    tell_now_and_then("Câu " + std::to_string(index + 1) + " để sau: " + r.trouble);
             } else {
                 // Its turn kept, tried again after a pause; and stopped for good
                 // after a few in a row, which is not bad luck.
@@ -4815,10 +5918,9 @@ void GuiApp::draw_window_picker_inline() {
             std::snprintf(id, sizeof(id), "%s##wp%zu", shown.c_str(), i);
             if (ImGui::Selectable(id, w.hwnd == input_.target_window(),
                                   ImGuiSelectableFlags_SpanAllColumns)) {
-                input_.set_target_window(w.hwnd);
+                retarget(w.hwnd);
                 app_config_.window_title = w.title;
                 app_config_.process_name = w.process;
-                apply_vitals_config();
                 set_status("Target window: " + shown);
             }
             ImGui::TableNextColumn();
@@ -4877,6 +5979,7 @@ void GuiApp::draw_vitals_panel() {
     // fill, so a percentage with no number beside it is the one to distrust.
     ImGui::Dummy(ImVec2(0, 6));
     const auto vals = vitals_.values();
+    // And the pet's, which has no figures printed on it.
     const struct {
         const char* name; float pct; ImVec4 col; int value; int max;
     } kShow[] = {
@@ -4884,6 +5987,7 @@ void GuiApp::draw_vitals_panel() {
           vals.have_hp() ? vals.hp : -1, vals.hp_max },
         { "MP", mp, ImVec4(0.25f, 0.45f, 0.90f, 1.0f),
           vals.have_mp() ? vals.mp : -1, vals.mp_max },
+        { "Pet", vitals_.pet_percent(), ImVec4(0.90f, 0.50f, 0.30f, 1.0f), -1, -1 },
     };
     for (const auto& s : kShow) {
         ImGui::Text("%s", s.name);
@@ -4903,6 +6007,15 @@ void GuiApp::draw_vitals_panel() {
             ImGui::ProgressBar(s.pct / 100.0f, ImVec2(300, 20), lbl);
             ImGui::PopStyleColor();
         }
+    }
+    if (vitals_running_) {
+        // Where the pet's bar is: found on the HUD by itself, not set here.
+        const BarSpec pet = vitals_.pet_bar();
+        if (pet.valid())
+            text_dim("pet's bar at %d,%d, %d wide -- found by itself%s", pet.x, pet.y, pet.width,
+                     vitals_.pet_percent() < 0.0f ? ", not there now" : "");
+        else
+            text_dim("pet's bar not found: summon the pet -- its HP is the red bar in its slot under HP and MP");
     }
 
     if (vitals_running_ && !vitals_.has_font()) {
@@ -5194,11 +6307,16 @@ void GuiApp::move_clear_of_game() {
         best_room = s.room; best_x = s.x; best_y = s.y;
     }
 
-    if (best_room >= 360) {
-        const int want_w = std::min(w, best_room - 8);
-        const int want_h = std::min(h, screen_h - best_y - 8);
+    // The least GoBot's window is made is in its own layout's pixels, and
+    // Windows shows that window larger above 100% display scale: everything
+    // else here is in real ones.
+    const WindowScaling own = window_scaling(self);
+    const auto shown = [&](int layout) { return own.known ? layout * own.percent / 100 : layout; };
+    if (best_room >= shown(360)) {
+        const int want_w = std::min(w, best_room - shown(8));
+        const int want_h = std::min(h, screen_h - best_y - shown(8));
         SetWindowPos(self, nullptr, best_x, best_y,
-                     std::max(360, want_w), std::max(320, want_h),
+                     std::max(shown(360), want_w), std::max(shown(320), want_h),
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
@@ -5427,10 +6545,12 @@ void GuiApp::draw_movement_section() {
                  camera_.travelled(), fx.confidence * 100.0f);
     }
 
-    if (!anchor_.anchored()) {
-        text_dim("Origin not pinned yet: walk into the left-hand edge of the map "
-                 "once and these numbers become the same tomorrow as today.");
-    }
+    // These numbers start wherever the view was when tracking began, and
+    // start again at every map change or restart: places saved by them hold
+    // for this session only. The lasting kind is to be by the game's own
+    // coordinates from its packets (M27); the edge anchor never pinned them.
+    text_dim("These numbers start from where tracking began, and start again at every map change "
+             "or when watching starts again: places saved here hold only until then.");
 
     // ---- saved places ----
     ImGui::Dummy(ImVec2(0, 4));
@@ -5613,6 +6733,7 @@ void GuiApp::stop_detector() {
 
 void GuiApp::start_hunt() {
     if (hunting_) return;
+    spot_refused_vi_.clear();
     if (!input_.window_valid()) {
         set_status("Pick the game window first", 6000);
         return;
@@ -5630,6 +6751,20 @@ void GuiApp::start_hunt() {
         GB_WARN("Hunting not started: no character name typed, so there is no 'you' to walk from");
         return;
     }
+    // "Chỗ đánh quái" is where the game's packets put the character. With no
+    // packets to be had -- no Npcap, or the positions switched off -- there is
+    // no spot to take or walk back to, and the hunter would only ever stand:
+    // refused, and said why, as the missing name is. The rest that was ticked
+    // starts all the same, and the card under BẮT ĐẦU says it in red.
+    if (const char* why = spot_refusal(spot_refused_vi_)) {
+        simple_note("Chưa bật Tự đánh quái: " + spot_refused_vi_, 15000);
+        if (!simple_view_)
+            set_status("The hunting spot (spot=true) needs the game's packets: Npcap installed and running, and "
+                       "positions from packets not Off",
+                       12000);
+        GB_WARN("Hunting not started: the hunting spot (spot=true) needs the game's packets, and %s", why);
+        return;
+    }
     if (!keys_may_start()) return;
     if (!detector_running_) start_detector();
     if (!detector_running_) return;
@@ -5643,18 +6778,463 @@ void GuiApp::start_hunt() {
     // the game in front rather than of this window on top of it.
     if (hunt_config_.focus_on_start) focus_game_to_start("hunting");
 
+    // Every hunt starts on the screen: the packets earn their two seconds of
+    // health afresh. Before the start, which reads the eyes' frame of
+    // reference as its own.
+    if (packet_eyes_) packet_eyes_->restart();
     hunter_->start();
     hunting_ = true;
+
+    // The capture the positions come from, unless they are switched off. A
+    // capture that will not start leaves the hunter on the screen, said once.
+    position_capture_off_ = false;
+    position_start_failed_ = false;
+    position_backoff_ms_ = GameLink::kReattachEveryMs;
+    packet_looks_.clear();
+    packet_target_gaps_.clear();
+    packet_watch_ms_ = 0;
+    if (packet_eyes_) packet_eyes_seen_ = packet_eyes_->stats();
+    if (hunt_config_.packet_positions != PacketPositions::Off) start_position_capture();
 }
 
 void GuiApp::stop_hunt() {
     if (!hunting_) return;
     hunter_->stop();
     hunting_ = false;
+    stop_position_capture();
 }
 
 void GuiApp::toggle_hunt() {
     if (hunting_) stop_hunt(); else start_hunt();
+}
+
+// ------------------------------------------------- positions from the packets
+
+void GuiApp::position_say(const std::string& what) {
+    if (what == position_said_) return;
+    position_said_ = what;
+    GB_WARN("Positions: %s", what.c_str());
+}
+
+bool GuiApp::capture_shared() {
+    bool recording = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        recording = recording_;
+    }
+    const bool autopilot = auto_stage_ != Auto::Idle && auto_stage_ != Auto::Done && auto_stage_ != Auto::Failed;
+    return bot_running_ || autopilot || recording || (calibrator_ && calibrator_->running());
+}
+
+void GuiApp::start_position_capture() {
+    position_tried_ms_ = now_ms();
+    // A capture already running is used as it is -- the Protocol tab's,
+    // Autopilot's, the packet bot's, or this one's from before -- and never
+    // stopped or started again from here. Only its wrappers are opened now.
+    if (capture_.running()) {
+        push_framings();
+        return;
+    }
+    // Asked here, not on every pass: it is a look at Npcap's service.
+    const bool npcap = PacketCapture::npcap_available();
+    position_npcap_ok_ = npcap;
+    if (!npcap) {
+        position_say("no capture: Npcap is not installed, or its service is not running -- the hunter goes "
+                     "by the screen");
+        return;
+    }
+    // The game by its window, and its traffic by its process: its connections
+    // to the server, and its own UDP sockets, which its reports of where your
+    // character is go out of, to wherever they go.
+    const std::uint32_t pid = pid_for_window(input_.target_window());
+    std::vector<ProcessConnection> conns;
+    position_link_ = game_link_of(pid, conns);
+    if (conns.empty()) {
+        position_say(pid == 0 ? "no capture yet: no game window -- the hunter goes by the screen"
+                              : "no capture yet: the game has no connection to its server open -- the hunter "
+                                "goes by the screen, and it is tried again every 10 s");
+        return;
+    }
+    CaptureConfig cfg;
+    // The adapter the game's own socket is bound to: no default route guessed.
+    cfg.interface_name = PacketCapture::find_interface_by_ip(ip_to_string(conns.front().local.ip));
+    if (cfg.interface_name.empty()) cfg.interface_name = PacketCapture::default_interface();
+    // This game's traffic and no other's: a second client on this PC talks
+    // to the same server, and its map entries and monsters would be taken
+    // for this one's. A socket the game opens later is let in by the
+    // re-attach (position_reattach).
+    cfg.bpf_filter = build_own_filter_for(conns, position_link_.udp_ports);
+    // Read straight out of the game's socket table: direction labelled
+    // exactly rather than guessed.
+    for (const ProcessConnection& c : conns) cfg.known_servers.push_back(c.remote);
+    // A short read timeout and short batches: a frame reaches the hunter
+    // within about 40 ms of arriving, some 15 px at walking speed.
+    cfg.read_timeout_ms = 20;
+
+    push_framings();
+    capture_.set_opcode_filter({});
+    capture_.set_batch_interval_ms(20);
+    packet_world_.reset();
+    if (!capture_.start(cfg)) {
+        // Refused by the capture itself -- an adapter it cannot use, no
+        // rights. The same sockets would be refused the same way, the
+        // capture's own lines in the log again: tried again at once only for
+        // a new process, connection or UDP port, and otherwise after twice as
+        // long each time (position_reattach).
+        position_start_failed_ = true;
+        position_backoff_ms_ = std::min<std::uint64_t>(position_backoff_ms_ * 2, kPositionBackoffMaxMs);
+        position_say("the capture for positions would not start (the lines above say why) -- the hunter goes "
+                     "by the screen");
+        return;
+    }
+    position_start_failed_ = false;
+    position_backoff_ms_ = GameLink::kReattachEveryMs;
+    capture_running_ = true;
+    position_capture_ = true;
+    position_said_.clear();
+    std::string ports;
+    for (const std::uint16_t p : position_link_.udp_ports) ports += (ports.empty() ? "" : ",") + std::to_string(p);
+    GB_INFO("Positions: capturing the game's own traffic for positions -- pid %u, %zu connection(s), UDP ports %s, "
+            "on %s",
+            static_cast<unsigned>(pid), conns.size(), ports.empty() ? "none" : ports.c_str(),
+            cfg.interface_name.c_str());
+}
+
+void GuiApp::stop_position_capture() {
+    if (!position_capture_) return;
+    if (!capture_.running()) {
+        position_capture_ = false;
+        capture_running_ = false;
+        return;
+    }
+    // Another part may be reading it now: it stays, and positions_tick stops
+    // it once they are done.
+    if (capture_shared()) return;
+    capture_.stop();
+    capture_running_ = false;
+    position_capture_ = false;
+    GB_INFO("Positions: the capture for positions stopped with the hunting");
+}
+
+void GuiApp::positions_tick() {
+    if (!hunting_ || hunt_config_.packet_positions == PacketPositions::Off) {
+        // Hunting over, or the positions switched off: the capture started
+        // for them goes, once nothing else is reading it -- and a line owed
+        // since logging back in with it.
+        if (position_capture_) stop_position_capture();
+        where_pending_ms_ = 0;
+        return;
+    }
+    const std::uint64_t now = now_ms();
+    if (now - packet_sample_ms_ >= 1000) {
+        packet_sample_ms_ = now;
+        note_map_entries();
+        // The line owed since logging back in: once the capture is on the
+        // game's process of now and has the character -- the world starts
+        // afresh with each start of it, so nothing of the old session is in
+        // it -- or a minute on, with whatever it has.
+        if (where_pending_ms_ != 0) {
+            const bool on_game = capture_.running() && position_capture_ && position_link_.pid != 0 &&
+                                 position_link_.pid == pid_for_window(input_.target_window());
+            const bool placed = on_game && packet_world_.view(now).me.known;
+            if (placed || now - where_pending_ms_ >= kWherePendingMs) {
+                note_where(placed    ? "logged in"
+                           : on_game ? "a minute after logging in, the character not placed yet"
+                                     : "a minute after logging in, the capture not on the new game");
+                where_pending_ms_ = 0;
+            }
+        }
+        packet_watch_sample(now);
+    }
+    if (packet_watch_ms_ == 0) {
+        packet_watch_ms_ = now;
+    } else if (now - packet_watch_ms_ >= 10'000) {
+        packet_watch_ms_ = now;
+        packet_watch_tick();
+    }
+    if (now - position_checked_ms_ >= 5'000) {
+        position_checked_ms_ = now;
+        position_reattach(now);
+    }
+}
+
+void GuiApp::packet_watch_sample(std::uint64_t now) {
+    if (!capture_.running() || packet_looks_.size() >= 64) return;
+    // Your plate seen in this very frame, or nothing is compared: one only
+    // remembered is where you were.
+    Nameplate me;
+    bool fresh = false;
+    ViewComparison c;
+    if (detector_.player(me, &fresh) && fresh) {
+        const std::vector<Nameplate> plates = detector_.mobs();
+        int w = 0, h = 0;
+        input_.window_size(w, h);
+        // A walk followed as PacketEyes follows it: 3 s while the hunter holds it.
+        const std::uint64_t follow = hunter_ && now <= hunter_->walk_held_until_ms() ? PacketWorld::kOwnReckonMs
+                                                                                       : PacketWorld::kOwnStepReckonMs;
+        c = compare_views(packet_world_.view(now, follow), now, me, plates, detect_tuning_.resolved(w, h).area);
+    }
+    // While the packets steer: how far the target's dx, as the hunter goes by
+    // it, is from its dx on the screen. The target is found among the pairs
+    // by where the packets put it for the hunter.
+    const Hunter::Status hs = hunter_ ? hunter_->status() : Hunter::Status{};
+    if (c.valid && hs.has_target && packet_eyes_ && packet_eyes_->source() == PacketEyes::Source::Packets) {
+        const double scale = hunt_config_.packet_scale > 0.0f ? static_cast<double>(hunt_config_.packet_scale) : 1.0;
+        const double you_x = me.x() + static_cast<double>(c.offset_x);
+        const double you_y = me.y() + static_cast<double>(c.offset_y);
+        int gap = -1, best = 0;
+        for (const ViewComparison::Pair& p : c.pairs) {
+            const long x = std::lround((you_x + p.world_dx) / scale);
+            const long y = std::lround((you_y + p.world_dy) / scale) + hunt_config_.packet_dy;
+            const int d = static_cast<int>(std::labs(x - hs.target.x()) + std::labs(y - hs.target.y()));
+            if (d > 40 || (gap >= 0 && d >= best)) continue;
+            best = d;
+            gap = static_cast<int>(std::labs(std::lround(p.world_dx / scale) - p.screen_dx));
+        }
+        if (gap >= 0) packet_target_gaps_.push_back(gap);
+    }
+    packet_looks_.push_back(std::move(c));
+}
+
+void GuiApp::note_map_entries() {
+    // By its time, not the count: a capture started again counts from 0.
+    const PacketWorld::Stats ws = packet_world_.stats();
+    if (ws.entry_ms == 0 || ws.entry_ms == packet_entry_said_ms_) return;
+    packet_entry_said_ms_ = ws.entry_ms;
+    // Put somewhere off the file the place is taken for: the two numbers are
+    // not its theme and stage, or not always.
+    const int on = on_place(ws.entry_map, ws.entry_area, ws.entry_x, ws.entry_y);
+    GB_INFO("Positions: map entry %u/%u = %s -- you at %ld,%ld%s (%llu map entries since the capture began)",
+            static_cast<unsigned>(ws.entry_map), static_cast<unsigned>(ws.entry_area),
+            place_text(ws.entry_map, ws.entry_area).c_str(), std::lround(ws.entry_x), std::lround(ws.entry_y),
+            on == 0 ? ", OFF that map's file" : "", static_cast<unsigned long long>(ws.map_entries));
+}
+
+std::string GuiApp::place_text(std::uint16_t map, std::uint16_t area) {
+    if (!map_table_tried_) {
+        map_table_tried_ = true;
+        const std::string path = MapTable::default_path();
+        if (path.empty() || !map_table_.load(path))
+            GB_INFO("Positions: the game's list of places (zVietnam\\Chart\\tb_Map.tbl) was not found -- a map "
+                    "is said by its numbers only");
+    }
+    char stem[32];
+    std::snprintf(stem, sizeof stem, "t%u_s%u", static_cast<unsigned>(map), static_cast<unsigned>(area));
+    std::string out = stem;
+    for (const MapTable::Entry& e : map_table_.entries())
+        if (e.theme == map && e.stage == area) {
+            out += " \"" + e.name + "\"";
+            break;
+        }
+    on_place(map, area, 0.0f, 0.0f);        // its size, looked up once
+    const auto size = place_sizes_.find(stem);
+    if (size != place_sizes_.end() && size->second.first > 0)
+        out += " " + std::to_string(size->second.first) + "x" + std::to_string(size->second.second) + " px";
+    return out;
+}
+
+int GuiApp::on_place(std::uint16_t map, std::uint16_t area, float x, float y) {
+    char stem[32];
+    std::snprintf(stem, sizeof stem, "t%u_s%u", static_cast<unsigned>(map), static_cast<unsigned>(area));
+    auto it = place_sizes_.find(stem);
+    if (it == place_sizes_.end()) {
+        // Read once, the whole file for its size: a few hundred KB, at a map
+        // entry or the 10-s line.
+        std::pair<int, int> size{ 0, 0 };
+        const std::string dir = MapFile::default_map_dir();
+        const std::string path = dir.empty() ? std::string() : MapFile::find(dir, stem);
+        MapFile file;
+        if (!path.empty() && file.load(path)) size = { file.width_px(), file.height_px() };
+        it = place_sizes_.emplace(stem, size).first;
+    }
+    const auto [w, h] = it->second;
+    if (w <= 0 || h <= 0) return -1;
+    constexpr float kSlack = 64.0f;     // as MapLocator allows
+    return x >= -kSlack && y >= -kSlack && x <= w + kSlack && y <= h + kSlack ? 1 : 0;
+}
+
+void GuiApp::note_where(const char* when) {
+    if (!capture_.running()) {
+        GB_INFO("Positions: %s -- no capture", when);
+        return;
+    }
+    const std::uint64_t now = now_ms();
+    const PacketWorld::View v = packet_world_.view(now);
+    std::ostringstream line;
+    line << "Positions: " << when << " -- you " << (!v.me.known ? "not known" : v.me.uncertain ? "uncertain" : "known");
+    if (v.me.known) line << " at " << std::lround(v.me.x) << "," << std::lround(v.me.y);
+    line << ", map ";
+    if (v.map_since_ms == 0)
+        line << "not known (no map entry since the capture began)";
+    else
+        line << v.map << "/" << v.area << " = " << place_text(v.map, v.area) << " (entered "
+             << decimals(static_cast<double>(now > v.map_since_ms ? now - v.map_since_ms : 0) / 1000.0, 1)
+             << " s ago)";
+    GB_INFO("%s", line.str().c_str());
+}
+
+void GuiApp::packet_watch_tick() {
+    const std::uint64_t now = now_ms();
+    const auto ago = [now](std::uint64_t at) {
+        return decimals(static_cast<double>(now > at ? now - at : 0) / 1000.0, 1) + " s ago";
+    };
+    const PacketWorld::Stats ws = packet_world_.stats();
+    const PacketWorld::View v = packet_world_.view(
+        now, hunter_ && now <= hunter_->walk_held_until_ms() ? PacketWorld::kOwnReckonMs : PacketWorld::kOwnStepReckonMs);
+    const ViewSummary sum = summarize_views(packet_looks_);
+    const PacketEyes::Stats es = packet_eyes_ ? packet_eyes_->stats() : PacketEyes::Stats{};
+    const PacketEyes::Stats& was = packet_eyes_seen_;
+
+    std::ostringstream line;
+    line << "Positions (" << packet_positions_name(hunt_config_.packet_positions) << "): ";
+
+    // The capture.
+    if (!capture_.running()) {
+        line << "no capture";
+    } else {
+        const PacketCapture::Stats cs = capture_.stats();
+        line << "capture " << (position_capture_ ? "for positions" : "shared") << ", game TCP "
+             << (cs.last_tcp_ms == 0 ? std::string("none yet") : ago(cs.last_tcp_ms)) << ", UDP "
+             << cs.udp_datagrams << " datagrams, wrappers " << cs.unwrap.unpacked << " unpacked "
+             << cs.unwrap.unpack_failed << " not";
+    }
+
+    // You.
+    line << "; you: " << (!v.me.known ? "not known" : v.me.uncertain ? "uncertain" : "known");
+    if (v.me.known) line << " at " << std::lround(v.me.x) << "," << std::lround(v.me.y);
+    if (v.me.airborne) line << " (in the air)";
+    // The jumps by kind, and the casts made in the air: what a jump attack or
+    // a double jump would show.
+    line << ", reports 0027:" << ws.own(OwnReport::Move) << " 002A:" << ws.own(OwnReport::Air) << " (jumps "
+         << ws.air_jumps << ", second " << ws.air_second << ", high " << ws.air_high << ", landed " << ws.air_landed
+         << ", other " << ws.air_other << ")"
+         << " 0029:" << ws.own(OwnReport::Other) << " 0028:" << ws.own(OwnReport::Here)
+         << " 0031:" << ws.own(OwnReport::Cast) << " (" << ws.casts_in_air << " in the air), foreign " << ws.foreign
+         << ", walks " << ws.own_walks
+         << " (" << ws.own_walks_stopped << " stopped within " << PacketWorld::kStopWithinMs / 1000 << " s, "
+         << ws.own_walks_unstopped << " not)";
+    if (ws.last_own_ms != 0) line << ", last " << ago(ws.last_own_ms);
+
+    // The map and its monsters.
+    std::size_t alive = 0;
+    for (const PacketWorld::Mob& m : v.mobs)
+        if (!m.dead) ++alive;
+    std::uint64_t wrong_size = 0;
+    for (const PacketWorld::Stats::Frames& f : ws.frames) wrong_size += f.wrong_size;
+    line << "; map " << v.map << "/" << v.area;
+    // Which place, and whether you stand on its file: a check, hunt after
+    // hunt, that the numbers are the game's theme and stage.
+    if (v.map_since_ms != 0) {
+        line << " = " << place_text(v.map, v.area);
+        if (v.me.known) {
+            const int on = on_place(v.map, v.area, v.me.x, v.me.y);
+            if (on >= 0) line << (on ? " (you on it)" : " (you OFF it)");
+        }
+    }
+    line << ", monsters " << alive << " alive of " << v.mobs.size()
+         << (v.table_seen ? ", table seen" : ", no table") << ", events: stops " << ws.stops << " walks "
+         << ws.walks << " hits " << ws.hits << " kills " << ws.kills << " spawns " << ws.spawns << " tables "
+         << ws.tables << " map entries " << ws.map_entries << ", unknown states " << ws.unknown_states;
+    // Which, and how many of them put their monster where they said.
+    if (ws.unknown_states != 0) {
+        line << " (";
+        const char* sep = "";
+        for (const PacketWorld::Stats::Kind& k : ws.unknown_kinds) {
+            if (k.count == 0) continue;
+            line << sep << "state " << static_cast<unsigned>(k.state) << ": " << k.count << ", " << k.placed
+                 << " placed";
+            // How far off where the monster was worked out to be: steady and
+            // small, those bytes are its place.
+            if (k.judged != 0)
+                line << ", " << decimals(k.off_px / static_cast<double>(k.judged), 0) << " px off on average";
+            sep = "; ";
+        }
+        line << ")";
+    }
+    line << ", wrong size " << wrong_size;
+
+    // What the packets say beside what the screen shows -- and, next to what
+    // was measured, what hunt.ini has, so the two can be set from this line.
+    line << "; vs screen: " << sum.compared << " of " << sum.looks << " looks compared, " << sum.pairs << " pairs";
+    if (sum.median_x && sum.median_y)
+        line << ", residual x " << decimals(*sum.median_x, 0) << " y " << decimals(*sum.median_y, 0)
+             << " px (y spread " << decimals(sum.spread_y, 0) << "), packet_dy that fits "
+             << decimals(-*sum.median_y, 0) << " (packet_dy=" << hunt_config_.packet_dy << ")";
+    line << ", scale " << (sum.scale ? decimals(*sum.scale, 2) : std::string("-")) << " (packet_scale="
+         << decimals(hunt_config_.packet_scale, 2) << "), screen only " << sum.screen_only << ", packets only "
+         << sum.packets_only;
+    if (!packet_target_gaps_.empty()) {
+        std::vector<int> gaps = packet_target_gaps_;
+        std::sort(gaps.begin(), gaps.end());
+        line << ", target |dx| packets vs screen: median " << gaps[gaps.size() / 2] << " px over " << gaps.size();
+    }
+
+    // Where the hunter's positions came from.
+    const std::uint64_t spent = (es.packets_ms - was.packets_ms) + (es.screen_ms - was.screen_ms);
+    const auto share = [spent](std::uint64_t ms) {
+        return spent == 0 ? 0ull : static_cast<unsigned long long>((100 * ms + spent / 2) / spent);
+    };
+    line << "; source: packets " << share(es.packets_ms - was.packets_ms) << "% of the time, healthy "
+         << share(es.healthy_ms - was.healthy_ms) << "%, switches " << (es.switches - was.switches) << ", now "
+         << (packet_eyes_ ? packet_why_name(packet_eyes_->why()) : "?");
+
+    // The hunting spot ("Chỗ đánh quái"), when it is switched on: where it
+    // is, how far off the character is, the walks back (simple_spot.cpp).
+    if (hunt_config_.spot) line << "; " << spot_positions_text();
+
+    GB_INFO("%s", line.str().c_str());
+    packet_looks_.clear();
+    packet_target_gaps_.clear();
+    packet_eyes_seen_ = es;
+}
+
+void GuiApp::position_reattach(std::uint64_t now) {
+    // Stopped by hand: it stays stopped until the next hunt. Somebody else's
+    // capture is theirs, as it is; and one another part is reading now is
+    // not pulled from under it.
+    if (position_capture_off_) return;
+    if (capture_.running() && (!position_capture_ || capture_shared())) return;
+    const std::uint64_t since_try = now > position_tried_ms_ ? now - position_tried_ms_ : 0;
+    if (since_try < GameLink::kReattachEveryMs) return;
+    if (!capture_.running()) {
+        // None runs. The last start found no game, no connection or no
+        // Npcap, which logs nothing new: said once, and tried again every
+        // 10 s, to attach soon after the game connects. Or the capture itself
+        // refused it, and every try puts its lines in the log again: then at
+        // once only for a new process, connection or UDP port, and otherwise
+        // less and less often.
+        if (position_start_failed_) {
+            std::vector<ProcessConnection> conns;
+            const GameLink link = game_link_of(pid_for_window(input_.target_window()), conns);
+            if (!should_reattach(position_link_, link, 0, since_try) && since_try < position_backoff_ms_) return;
+        }
+        start_position_capture();
+        return;
+    }
+    std::vector<ProcessConnection> conns;
+    const GameLink link = game_link_of(pid_for_window(input_.target_window()), conns);
+    // Silent since its last segment: the game's traffic has gone somewhere
+    // else -- another adapter, a connection the table does not show yet. One
+    // that has heard none since it started is not started again for that
+    // alone: the same sockets would give the same capture, every 10 s.
+    const PacketCapture::Stats st = capture_.stats();
+    const std::uint64_t silent = st.last_tcp_ms != 0 && now > st.last_tcp_ms ? now - st.last_tcp_ms : 0;
+    const char* why = nullptr;
+    if (!should_reattach(position_link_, link, silent, since_try, &why)) return;
+    // Soon after a map entry: a door opening new sockets, which the start
+    // again costs the map just learned (the world starts afresh).
+    const PacketWorld::Stats ws = packet_world_.stats();
+    const std::uint64_t since_entry = ws.entry_ms != 0 && now > ws.entry_ms ? now - ws.entry_ms : UINT64_MAX;
+    if (since_entry <= 30'000)
+        GB_INFO("Positions: starting the capture again -- %s -- %.1f s after a map entry (%u/%u), which it forgets",
+                why ? why : "?", static_cast<double>(since_entry) / 1000.0, static_cast<unsigned>(ws.entry_map),
+                static_cast<unsigned>(ws.entry_area));
+    else
+        GB_INFO("Positions: starting the capture again -- %s", why ? why : "?");
+    capture_.stop();
+    capture_running_ = false;
+    position_capture_ = false;
+    start_position_capture();
 }
 
 void GuiApp::save_hunt_config() {
@@ -5757,11 +7337,19 @@ void GuiApp::draw_hunt_settings() {
     }
 
     ImGui::SameLine();
-    int step_ms = static_cast<int>(hunt_config_.step_ms);
-    ImGui::SetNextItemWidth(160);
-    if (ImGui::SliderInt("Step (ms)", &step_ms, 40, 500)) {
-        hunt_config_.step_ms = static_cast<std::uint32_t>(step_ms);
-        changed = true;
+    changed |= ImGui::Checkbox("Hold the walk key##hunt", &hunt_config_.hold_walk);
+    help_marker("Walk to a monster with the arrow held down until the walk is over, as "
+                "a player walks. Off, every look presses a step of the length beside "
+                "it and lets go -- the character stops between steps, several times a "
+                "second.");
+    if (!hunt_config_.hold_walk) {
+        ImGui::SameLine();
+        int step_ms = static_cast<int>(hunt_config_.step_ms);
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::SliderInt("Step (ms)", &step_ms, 40, 500)) {
+            hunt_config_.step_ms = static_cast<std::uint32_t>(step_ms);
+            changed = true;
+        }
     }
 
     ImGui::SameLine();
@@ -5784,8 +7372,21 @@ void GuiApp::draw_hunt_settings() {
                                &hunt_config_.focus_on_start);
     help_marker("Clicking START HUNTING takes focus off the game, and the hunter "
                 "will not send anything to an unfocused window -- so without this "
-                "it starts and waits forever. Only on the way on: it never grabs "
-                "the foreground back while running.");
+                "it starts and waits forever. Keeping it in front while running is "
+                "the next box.");
+    {
+        bool keep = simple_opts_.refocus;
+        if (ImGui::Checkbox("Keep it in front while running##hunt", &keep)) {
+            simple_opts_.refocus = keep;
+            save_simple_option("refocus", keep);
+        }
+        help_marker("While anything runs -- the hunter, the macro, the packet bot, or whatever else the "
+                    "simple screen's stop button would stop -- the game is brought back to the front "
+                    "at once whenever another window takes it -- GoBot's own too -- a moment (0.2 s) "
+                    "after the last click or key, so a click lands first. Anything typed into another "
+                    "window after that goes to the game. The same switch as the box under the simple "
+                    "screen's start button.");
+    }
 
 
     // ---- what counts as dead, and what to finish first ----
@@ -5805,6 +7406,42 @@ void GuiApp::draw_hunt_settings() {
         help_marker("Among monsters it can already reach, go for the most hurt "
                     "instead of the nearest. Kills come sooner, and damage is not "
                     "spread across a whole screen of monsters killing none of them.");
+    }
+
+    // ---- where your position and the monsters' come from ----
+    {
+        // In the order of PacketPositions: Off, Watch, On.
+        const char* const kModes[] = { "Off: the screen only", "Watch: log the packets, fight from the screen",
+                                       "On: the packets steer while healthy" };
+        int mode = static_cast<int>(hunt_config_.packet_positions);
+        ImGui::SetNextItemWidth(330);
+        if (ImGui::Combo("Positions from packets", &mode, kModes, IM_ARRAYSIZE(kModes))) {
+            hunt_config_.packet_positions = static_cast<PacketPositions>(mode);
+            changed = true;
+            // While hunting: the capture follows at once rather than at the
+            // next start. Watch and On both capture; Off stops it.
+            if (hunting_) {
+                if (hunt_config_.packet_positions == PacketPositions::Off) {
+                    stop_position_capture();
+                } else if (!capture_.running()) {
+                    position_capture_off_ = false;
+                    start_position_capture();
+                }
+            }
+        }
+        help_marker("Your own position and the monsters', from the game's packets instead of the name "
+                    "plates on screen. Needs Npcap (GoBot already runs as Administrator): a capture of the "
+                    "game's own traffic starts with the hunting, unless this is Off. Watch only writes a "
+                    "\"Positions\" line to gobot_gui.log every 10 s, comparing the packets with the screen; "
+                    "On fights from the packets whenever they are healthy and from the screen whenever "
+                    "they are not -- no Npcap, no traffic, a map just changed, a monster list in use. "
+                    "packet_scale and packet_dy in hunt.ini lay the packets over the screen.");
+        if (hunting_ && packet_eyes_) {
+            ImGui::SameLine();
+            text_dim("%s", packet_eyes_->source() == PacketEyes::Source::Packets
+                               ? "from the packets now"
+                               : (std::string("from the screen: ") + packet_why_name(packet_eyes_->why())).c_str());
+        }
     }
 
     if (changed) hunter_->set_config(hunt_config_);
@@ -5880,6 +7517,12 @@ void GuiApp::draw_radar_panel() {
 
     // ---- what the hunter is doing ----
     const Hunter::Status hs = hunter_->status();
+    // The target is drawn on the picture only while the hunter goes by the
+    // screen: from the packets it is in world pixels, and nothing yet maps
+    // those back onto the screen.
+    const bool target_on_screen =
+        hunting_ && hs.has_target &&
+        (!packet_eyes_ || packet_eyes_->source() == PacketEyes::Source::Screen);
     if (hunting_) {
         ImGui::Dummy(ImVec2(0, 2));
         const bool good = hs.state == Hunter::State::Attacking ||
@@ -5914,7 +7557,7 @@ void GuiApp::draw_radar_panel() {
             if (have_me && n.plate.x == me.plate.x && n.plate.y == me.plate.y) me_ptr = &n;
 
         draw_local_radar(me_ptr, all,
-                         (hunting_ && hs.has_target) ? &hs.target : nullptr,
+                         target_on_screen ? &hs.target : nullptr,
                          have_frame ? frame.width : 0,
                          have_frame ? frame.height : 0);
         ImGui::SameLine();
@@ -5963,7 +7606,7 @@ void GuiApp::draw_radar_panel() {
                 r.y -= 2; r.h = (n.bar.bottom() - r.y) + 2;
 
                 const bool is_me = have_me && n.plate.x == me.plate.x && n.plate.y == me.plate.y;
-                const bool is_target = hunting_ && hs.has_target && !n.is_player &&
+                const bool is_target = target_on_screen && !n.is_player &&
                                        std::abs(n.x() - hs.target.x()) < 6 &&
                                        std::abs(n.y() - hs.target.y()) < 6;
 
@@ -5989,7 +7632,7 @@ void GuiApp::draw_radar_panel() {
             }
 
             // The line the bot is about to walk along.
-            if (have_me && hunting_ && hs.has_target) {
+            if (have_me && target_on_screen) {
                 dl->AddLine(ImVec2(view.ox + me.x() * view.scale,
                                    view.oy + me.y() * view.scale),
                             ImVec2(view.ox + hs.target.x() * view.scale,
@@ -6136,6 +7779,14 @@ void GuiApp::draw_macro_panel() {
                         static_cast<unsigned long long>(st.held_no_reading));
             ImGui::PopStyleColor();
         }
+        // The pet's apart: no pet out holds its key all along, HP and MP read.
+        if (st.held_no_pet_reading) {
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+            ImGui::Text("(%llu held: no pet HP reading)",
+                        static_cast<unsigned long long>(st.held_no_pet_reading));
+            ImGui::PopStyleColor();
+        }
     }
 
     // Holding because the character is not in the world. Said plainly and in
@@ -6160,12 +7811,13 @@ void GuiApp::draw_macro_panel() {
 
     const auto due = macro_->next_due_ms();
 
-    float live_hp, live_mp;
-    macro_->current_vitals(live_hp, live_mp);
+    float live_hp, live_mp, live_pet;
+    macro_->current_vitals(live_hp, live_mp, live_pet);
     // Of the potions under their mark, the one that drinks: only the more
     // urgent tier does (macro_urgent_potion), and the others wait.
     const int urgent_hp = macro_urgent_potion(macro_config_.keys, MacroKeyKind::HpPotion, live_hp);
     const int urgent_mp = macro_urgent_potion(macro_config_.keys, MacroKeyKind::MpPotion, live_mp);
+    const int urgent_pet = macro_urgent_potion(macro_config_.keys, MacroKeyKind::PetPotion, live_pet);
 
     if (ImGui::BeginTable("##keys", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
         ImGui::TableSetupColumn("On",      ImGuiTableColumnFlags_WidthFixed, 34);
@@ -6179,7 +7831,11 @@ void GuiApp::draw_macro_panel() {
         ImGui::TableSetupColumn("Next");
         ImGui::TableHeadersRow();
 
-        static const char* const kWhen[] = { "on a timer", "HP below", "MP below" };
+        // In the order of MacroTrigger, which the choice is an index into --
+        // and last a buff: on a timer, and marked as a buff (MacroKey::buff),
+        // so it stays one whatever its interval, 0 included.
+        static const char* const kWhen[] = { "on a timer", "HP below", "MP below", "pet HP below", "a buff" };
+        constexpr int kWhenBuff = 4;
 
         for (std::size_t i = 0; i < macro_config_.keys.size(); ++i) {
             auto& k = macro_config_.keys[i];
@@ -6204,10 +7860,24 @@ void GuiApp::draw_macro_panel() {
             }
 
             ImGui::TableNextColumn();
-            int when = static_cast<int>(k.trigger);
+            int when = !k.conditional() && k.buff ? kWhenBuff : static_cast<int>(k.trigger);
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::Combo("##when", &when, kWhen, 3))
-                k.trigger = static_cast<MacroTrigger>(when);
+            if (ImGui::Combo("##when", &when, kWhen, static_cast<int>(std::size(kWhen)))) {
+                k.buff = when == kWhenBuff;
+                k.trigger = k.buff ? MacroTrigger::Always : static_cast<MacroTrigger>(when);
+                // A buff at 0 made anything else: 0 is off for a potion and a
+                // skill, so it gets a potion's 3-s cooldown, not 0.
+                if (!k.buff && k.interval_ms == 0) k.interval_ms = 3000;
+            }
+            if (k.trigger == MacroTrigger::PetHpBelow && ImGui::IsItemHovered())
+                ImGui::SetTooltip("The pet's HP, off the red bar in the pet's slot under the HP and MP "
+                                  "bars -- found on the HUD by itself while HP and MP are read.");
+            if (!k.conditional() && ImGui::IsItemHovered())
+                ImGui::SetTooltip("On a timer, a key is a buff at a minute or more and a skill under "
+                                  "it. \"a buff\" makes it one whatever its interval: cast on its own "
+                                  "clock, fight or no fight, and again after a death -- at 0, every %u s, "
+                                  "as GoC casts a buff whose cooldown is 0.",
+                                  static_cast<unsigned>(kBuffRepeatMinMs / 1000));
 
             ImGui::TableNextColumn();
             if (k.conditional()) {
@@ -6221,7 +7891,17 @@ void GuiApp::draw_macro_panel() {
             ImGui::TableNextColumn();
             int iv = static_cast<int>(k.interval_ms);
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##iv", &iv, 0, 0)) k.interval_ms = static_cast<std::uint32_t>(std::max(10, iv));
+            // A buff may be 0: as often as a buff goes, every kBuffRepeatMinMs.
+            // One by its interval, unmarked as in a file from before the mark,
+            // is marked as it is edited, as the simple screen's seconds box
+            // does: typed under a minute it stays a buff, and not a skill
+            // pressed every 10 ms.
+            const bool is_buff = !k.conditional() && macro_key_kind(k) == MacroKeyKind::Buff;
+            const int least = is_buff ? 0 : 10;
+            if (ImGui::InputInt("##iv", &iv, 0, 0)) {
+                if (is_buff) k.buff = true;
+                k.interval_ms = static_cast<std::uint32_t>(std::max(least, iv));
+            }
             if (k.conditional() && ImGui::IsItemHovered())
                 ImGui::SetTooltip("For a conditional key this is the cooldown: "
                                   "the shortest gap between two firings. It does "
@@ -6230,7 +7910,12 @@ void GuiApp::draw_macro_panel() {
             ImGui::TableNextColumn();
             int hold = static_cast<int>(k.hold_ms);
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##hold", &hold, 0, 0)) k.hold_ms = static_cast<std::uint32_t>(std::max(0, hold));
+            if (ImGui::InputInt("##hold", &hold, 0, 0))
+                k.hold_ms = static_cast<std::uint32_t>(std::clamp(hold, 0, static_cast<int>(MacroConfig::kHoldMostMs)));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("This key's own hold, at most %u ms: no key of the game is held down. 0 is the "
+                                  "Key hold range under Options (70-110 ms as shipped).",
+                                  static_cast<unsigned>(MacroConfig::kHoldMostMs));
 
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-1);
@@ -6244,8 +7929,12 @@ void GuiApp::draw_macro_panel() {
                 // A conditional key's countdown is meaningless -- it re-checks
                 // several times a second. What matters is whether the trigger
                 // can be evaluated at all, and how close it is.
-                const float v = (k.trigger == MacroTrigger::HpBelow) ? live_hp : live_mp;
-                const int urgent = (k.trigger == MacroTrigger::HpBelow) ? urgent_hp : urgent_mp;
+                const float v = k.trigger == MacroTrigger::HpBelow   ? live_hp
+                                : k.trigger == MacroTrigger::MpBelow ? live_mp
+                                                                     : live_pet;
+                const int urgent = k.trigger == MacroTrigger::HpBelow   ? urgent_hp
+                                   : k.trigger == MacroTrigger::MpBelow ? urgent_mp
+                                                                        : urgent_pet;
                 if (v < 0.0f) {
                     ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
                     ImGui::TextUnformatted("no reading");
@@ -6267,9 +7956,8 @@ void GuiApp::draw_macro_panel() {
                     text_dim("armed (%.0f%%)", v);
                 }
             } else if (macro_running_ && i < due.size()) {
-                const float frac = k.interval_ms
-                    ? 1.0f - static_cast<float>(due[i]) / static_cast<float>(k.interval_ms)
-                    : 0.0f;
+                const std::uint32_t every = macro_timer_interval_ms(k);
+                const float frac = every ? 1.0f - static_cast<float>(due[i]) / static_cast<float>(every) : 0.0f;
                 char lbl[32];
                 std::snprintf(lbl, sizeof(lbl), "%llums",
                               static_cast<unsigned long long>(due[i]));
@@ -6291,6 +7979,17 @@ void GuiApp::draw_macro_panel() {
                            "keys hold rather than fire.");
         ImGui::PopStyleColor();
         if (ImGui::Button("Start reading HP / MP", ImVec2(220, 0))) start_vitals();
+    }
+    // A pet potion's own: HP read, and no pet's bar -- no pet out, or its
+    // slot not on the HUD. It holds meanwhile, as any key with no reading.
+    const bool pet_keys = std::any_of(macro_config_.keys.begin(), macro_config_.keys.end(), [](const MacroKey& m) {
+        return m.enabled && m.keycode != 0 && macro_key_kind(m) == MacroKeyKind::PetPotion;
+    });
+    if (pet_keys && live_pet < 0.0f && live_hp >= 0.0f) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+        ImGui::TextWrapped("A key above waits on the pet's HP, but no pet's bar is being read. Summon the pet: "
+                           "its HP is the red bar in its slot under the HP and MP bars, which is found by itself.");
+        ImGui::PopStyleColor();
     }
 
     if (macro_config_.keys.size() < MacroConfig::kMaxKeys) {
@@ -6350,7 +8049,12 @@ void GuiApp::draw_macro_panel() {
                 ImGui::TableNextColumn();
                 int hold = static_cast<int>(s.hold_ms);
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::InputInt("##h", &hold, 0, 0)) s.hold_ms = static_cast<std::uint32_t>(std::max(0, hold));
+                if (ImGui::InputInt("##h", &hold, 0, 0))
+                    s.hold_ms = static_cast<std::uint32_t>(std::clamp(hold, 0, static_cast<int>(MacroConfig::kHoldMostMs)));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("This step's own hold, at most %u ms: no key of the game is held down. 0 is "
+                                      "the Key hold range under Options.",
+                                      static_cast<unsigned>(MacroConfig::kHoldMostMs));
 
                 ImGui::TableNextColumn();
                 int d = static_cast<int>(s.delay_after_ms);
@@ -6379,13 +8083,102 @@ void GuiApp::draw_macro_panel() {
                     &macro_config_.focus_on_start);
     help_marker("Clicking START MACRO takes focus away from the game, and keys only "
                 "ever go to a focused window -- so without this the macro starts and "
-                "immediately holds. Only on the way on: it will not pull focus back "
-                "while you are doing something else.");
+                "immediately holds. Keeping it in front while running is the next box.");
+    {
+        bool keep = simple_opts_.refocus;
+        if (ImGui::Checkbox("Keep the game in front while running##macro", &keep)) {
+            simple_opts_.refocus = keep;
+            save_simple_option("refocus", keep);
+        }
+        help_marker("While anything runs -- the macro, the hunter, the packet bot, or whatever else "
+                    "the simple screen's stop button would stop -- the game is brought back to the "
+                    "front at once whenever another window takes it -- GoBot's own too -- a moment "
+                    "(0.2 s) after the last click or key, so a click lands first. Anything typed into "
+                    "another window after that goes to the game.");
+    }
 
     ImGui::SetNextItemWidth(220);
     ImGui::SliderInt("Extra jitter %", &macro_config_.global_jitter_pct, 0, 50);
     help_marker("Added on top of each key's own jitter. Perfectly regular timing is "
                 "the clearest sign a client is automated.");
+
+    {
+        // The game reads its keyboard once a frame, and a press shorter than a
+        // frame is lost now and then: the key goes down and up and nothing
+        // happens. 0 and 0 keep the input manager's own short 25-60 ms.
+        int hmin = static_cast<int>(macro_config_.key_hold_min_ms);
+        int hmax = static_cast<int>(macro_config_.key_hold_max_ms);
+        bool edited = false;
+        ImGui::SetNextItemWidth(110);
+        edited |= ImGui::InputInt("Key hold, shortest (ms)", &hmin, 0, 0);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        edited |= ImGui::InputInt("longest##hold", &hmax, 0, 0);
+        help_marker("How long each key of the macro is held down: a random time between the two, "
+                    "for a key with no hold of its own (the Hold columns, at most 500 ms: no key of the "
+                    "game is held down). Too short and the game "
+                    "now and then does not see the press: the key is pressed and nothing happens. "
+                    "70 and 110 by default. 0 and 0: the short 25-60 ms of before.");
+        if (edited) {
+            if (hmin <= 0 && hmax <= 0) {
+                macro_config_.key_hold_min_ms = macro_config_.key_hold_max_ms = 0;
+            } else {
+                const int lo = std::clamp(hmin, static_cast<int>(MacroConfig::kHoldLeastMs),
+                                          static_cast<int>(MacroConfig::kHoldMostMs));
+                macro_config_.key_hold_min_ms = static_cast<std::uint32_t>(lo);
+                macro_config_.key_hold_max_ms = static_cast<std::uint32_t>(
+                    std::clamp(std::max(hmax, lo), lo, static_cast<int>(MacroConfig::kHoldMostMs)));
+            }
+        }
+
+        int recheck = static_cast<int>(macro_config_.potion_recheck_ms);
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::SliderInt("Re-press a potion (ms, 0 = off)", &recheck, 0,
+                             static_cast<int>(MacroConfig::kRecheckMostMs))) {
+            macro_config_.potion_recheck_ms =
+                recheck <= 0 ? 0u
+                             : static_cast<std::uint32_t>(std::max(recheck, static_cast<int>(MacroConfig::kRecheckLeastMs)));
+        }
+        help_marker("A potion whose bar has not risen this long after it was pressed, while it still "
+                    "wants to drink, is pressed again at once instead of after its cooldown: the game "
+                    "may have ignored the press. Once per press. 1000 by default; 0 is the plain "
+                    "cooldown. The log says \"Potion check: ...\" each time.");
+
+        int urgent = static_cast<int>(macro_config_.potion_urgent_ms);
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::SliderInt("Potion when far below (ms, 0 = off)", &urgent, 0,
+                             static_cast<int>(MacroConfig::kUrgentMostMs))) {
+            macro_config_.potion_urgent_ms =
+                urgent <= 0 ? 0u
+                            : static_cast<std::uint32_t>(std::max(urgent, static_cast<int>(MacroConfig::kUrgentLeastMs)));
+        }
+        help_marker("A potion whose bar is under half of its mark -- skills draining MP, or blows "
+                    "taking HP, faster than one potion per cooldown makes up -- may drink again this "
+                    "long after its last press, not after its whole interval (3 s). Between the "
+                    "mark and half of it the interval stands. 1000 by default; 0 is the plain "
+                    "cooldown.");
+
+        // A buff is cast by pressing its key several times, as GoC does (4, 200 ms apart).
+        int presses = static_cast<int>(macro_config_.buff_presses);
+        int apart = static_cast<int>(macro_config_.buff_press_gap_ms);
+        ImGui::SetNextItemWidth(110);
+        const bool presses_edited = ImGui::InputInt("Buff presses per cast", &presses, 0, 0);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        const bool apart_edited = ImGui::InputInt("apart (ms)##buff", &apart, 0, 0);
+        help_marker("Each buff is cast by pressing its key this many times, this far apart: the game "
+                    "drops a single press now and then, and a buff dropped is gone for its whole "
+                    "interval. GoC presses 4 times, 200 ms apart, which is the default; 1 is a single "
+                    "press. The log says \"Buff: key ... cast\" each time, and why when a buff cannot "
+                    "be cast.");
+        if (presses_edited)
+            macro_config_.buff_presses = static_cast<std::uint32_t>(
+                std::clamp(presses, 1, static_cast<int>(MacroConfig::kBuffPressesMost)));
+        if (apart_edited)
+            macro_config_.buff_press_gap_ms = static_cast<std::uint32_t>(
+                std::clamp(apart, static_cast<int>(MacroConfig::kBuffPressGapLeastMs),
+                           static_cast<int>(MacroConfig::kBuffPressGapMostMs)));
+    }
 
     for (auto* hk : { &macro_config_.toggle_key, &macro_config_.panic_key }) {
         char buf[24];
@@ -6418,13 +8211,74 @@ void GuiApp::apply_findings() {
     for (const auto& s : specs) registry_.add(s);
 
     // The capture filter was limited to opcodes we already understood; the
-    // newly mapped ones have to be let through or nothing changes.
-    capture_.set_opcode_filter(registry_.mapped_opcodes());
+    // newly mapped ones have to be let through or nothing changes. And the
+    // packet world's, which are no layout's: without them your reports, the
+    // map entry and the monster table would go, and the positions with them.
+    std::vector<std::uint16_t> allowed = registry_.mapped_opcodes();
+    const std::vector<std::uint16_t>& positions = PacketWorld::opcodes();
+    allowed.insert(allowed.end(), positions.begin(), positions.end());
+    capture_.set_opcode_filter(allowed);
 
     save_protocol();
     char msg[128];
     std::snprintf(msg, sizeof(msg), "Applied %zu packet layout(s)", specs.size());
     set_status(msg, 6000);
+}
+
+bool GuiApp::start_calibration() {
+    if (!calibrator_ || calibrator_->running()) return false;
+    if (!input_.window_valid()) {
+        set_status("Pick the game window on the Capture tab first", 6000);
+        return false;
+    }
+    if (!keys_may_start()) return false;
+    // It walks the character itself: the hunter and a walk to a place let go
+    // of the arrow it holds on every pass, and the packet bot steers too.
+    if (hunting_ || bot_running_ || (navigator_ && navigator_->running())) {
+        set_status("Stop hunting, walking to a place and the packet bot first -- the calibration "
+                   "walks the character itself", 8000);
+        return false;
+    }
+    if (const std::uint32_t vk = InputManager::parse_key(calib_cast_key_))
+        calibrator_->set_cast_key(vk);
+    // Everything else that presses keys held off for its twenty seconds: a
+    // potion or a buff pressed meanwhile would be read as a field responding.
+    if (!take_hold(kCalibHold)) {
+        set_status("Something else has the game just now (" + coord_.critical_reason() +
+                   ") -- start the calibration once it is done", 8000);
+        return false;
+    }
+    calib_held_ = true;
+
+    // The fields we are hunting for are in opcodes that are not mapped
+    // yet, so a filter built from the known ones would discard exactly
+    // the packets this needs to see.
+    capture_.set_opcode_filter({});
+
+    // Clicking the button put GoBot's own window in front, and the run
+    // refuses a game that is not there.
+    if (!input_.window_focused() && !input_.focus_window()) {
+        stop_calibration();
+        set_status("Could not bring the game to the front -- click the game once, then press "
+                   "Start calibration again", 8000);
+        return false;
+    }
+    if (!calibrator_->start()) {
+        stop_calibration();
+        set_status(calibrator_->status(), 8000);
+        return false;
+    }
+    calib_ran_ = false;
+    findings_.clear();
+    return true;
+}
+
+void GuiApp::stop_calibration() {
+    if (calibrator_) calibrator_->stop();
+    if (calib_held_) {
+        calib_held_ = false;
+        end_hold(kCalibHold);
+    }
 }
 
 void GuiApp::draw_calibrate_panel() {
@@ -6444,7 +8298,7 @@ void GuiApp::draw_calibrate_panel() {
     ImGui::SeparatorText("Before you start");
     ImGui::BulletText("Stand somewhere you can walk a few steps both ways and jump.");
     ImGui::BulletText("Somewhere quiet -- monsters knocking you about add noise.");
-    ImGui::BulletText("Click the game window. It drives your character for ~20 seconds.");
+    ImGui::BulletText("It brings the game to the front and drives your character for ~20 seconds.");
 
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::SetNextItemWidth(120);
@@ -6468,7 +8322,7 @@ void GuiApp::draw_calibrate_panel() {
 
     if (running) {
         ImGui::PushStyleColor(ImGuiCol_Button, kRed);
-        if (ImGui::Button("Abort", ImVec2(240, 40))) calibrator_->stop();
+        if (ImGui::Button("Abort", ImVec2(240, 40))) stop_calibration();
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 6));
@@ -6484,29 +8338,17 @@ void GuiApp::draw_calibrate_panel() {
         if (!capture_running_) ImGui::BeginDisabled();
         ImGui::PushStyleColor(ImGuiCol_Button, kGreen);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.05f, 0.05f, 1.0f));
-        if (ImGui::Button(calib_ran_ ? "Run again" : "Start calibration", ImVec2(240, 40)) &&
-            keys_may_start()) {
-            if (const std::uint32_t vk = InputManager::parse_key(calib_cast_key_))
-                calibrator_->set_cast_key(vk);
-
-            // The fields we are hunting for are in opcodes that are not mapped
-            // yet, so a filter built from the known ones would discard exactly
-            // the packets this needs to see.
-            capture_.set_opcode_filter({});
-
-            if (calibrator_->start()) {
-                calib_ran_ = false;
-                findings_.clear();
-            } else {
-                set_status(calibrator_->status(), 8000);
-            }
-        }
+        if (ImGui::Button(calib_ran_ ? "Run again" : "Start calibration", ImVec2(240, 40)))
+            start_calibration();
         ImGui::PopStyleColor(2);
         if (!capture_running_) ImGui::EndDisabled();
     }
 
-    // Collect the result once the run completes.
-    if (!running && phase == CalibPhase::Done && !calib_ran_) {
+    // Collect the result once the run completes. Asked again rather than read
+    // off `running` and `phase` above: a run the button has just started still
+    // reads there as the last one, Done, and would be taken as finished --
+    // analysed at once, with nothing in it, and never again.
+    if (!calibrator_->running() && calibrator_->phase() == CalibPhase::Done && !calib_ran_) {
         findings_ = calibrator_->analyse();
         calib_ran_ = true;
     }
@@ -6943,8 +8785,6 @@ void GuiApp::draw_dashboard() {
     if (!can_run && !bot_running_) ImGui::EndDisabled();
 
     ImGui::PopStyleColor(3);
-    text_dim("Hotkey: %s (works while the game has focus)",
-             InputManager::key_name(bot_config_.key_start_stop).c_str());
 
     // ---- blockers ----
     if (!can_run && !bot_running_) {
@@ -7053,8 +8893,8 @@ void GuiApp::draw_dashboard() {
         if (executor_) {
             const auto es = executor_->stats();
             ImGui::Text("Skills    %llu", static_cast<unsigned long long>(es.skills_cast));
-            ImGui::Text("Heals     %llu", static_cast<unsigned long long>(es.heals));
         }
+        text_dim("Potions   the macro's -- see Timed keys");
         ImGui::EndTable();
     }
 
@@ -7118,8 +8958,8 @@ void GuiApp::draw_capture_panel() {
 
     if (!PacketCapture::npcap_available()) {
         ImGui::PushStyleColor(ImGuiCol_Text, kRed);
-        ImGui::TextWrapped("Npcap service is not running. Install it from https://npcap.com "
-                           "with 'WinPcap API-compatible Mode' ticked.");
+        ImGui::TextWrapped("Npcap is not installed, or not running. Install it from "
+                           "https://npcap.com -- 'WinPcap API-compatible Mode' is not needed.");
         ImGui::PopStyleColor();
     }
 
@@ -7167,9 +9007,10 @@ void GuiApp::draw_capture_panel() {
 
     ImGui::SeparatorText("Game window");
     ImGui::TextWrapped(
-        "Pick the game window explicitly. Matching on a title substring alone will "
-        "happily select an editor or browser tab that happens to be named after the "
-        "game, and the bot would then type combat keys into it.");
+        "Pick the game window explicitly. Auto-find takes a title on its own only "
+        "when it is a window's whole title, and a folder, editor or browser tab "
+        "named after the game can have that title too -- the bot would then type "
+        "combat keys into it.");
     ImGui::Dummy(ImVec2(0, 4));
 
     if (ImGui::Button("Refresh list")) {
@@ -7207,7 +9048,7 @@ void GuiApp::draw_capture_panel() {
             char id[600];
             std::snprintf(id, sizeof(id), "%s##w%zu", shown.c_str(), i);
             if (ImGui::Selectable(id, selected, ImGuiSelectableFlags_SpanAllColumns)) {
-                input_.set_target_window(w.hwnd);
+                retarget(w.hwnd);
                 app_config_.window_title = w.title;
                 app_config_.process_name = w.process;
                 set_status("Target window: " + shown);
@@ -7224,10 +9065,56 @@ void GuiApp::draw_capture_panel() {
                     input_.window_focused() ? "yes" : "no");
         ImGui::PopStyleColor();
         text_dim("Input is only ever sent while that window has focus.");
+        // Above 100% display scale Windows enlarges a game that does not handle
+        // DPI itself, and frames of it read off the screen are blurred and the
+        // wrong size: nothing the readers look for is found.
+        if (game_scaling_.stretched()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+            ImGui::TextWrapped("Windows shows this window %s to %d%% (drawn %dx%d, shown %dx%d), and the "
+                               "screen readers cannot work on it: %s.",
+                               game_scaling_.percent >= 100 ? "enlarged" : "shrunk", game_scaling_.percent,
+                               game_scaling_.own_w, game_scaling_.own_h, game_scaling_.real_w,
+                               game_scaling_.real_h, cure_advice(game_scaling_cure_));
+            ImGui::PopStyleColor();
+            if (game_scaling_cure_ == ScaleCure::SetOverride || game_scaling_cure_ == ScaleCure::SetOverrideOrMove) {
+                if (ImGui::Button("Set the game to draw at its own size")) {
+                    const std::string vi = fix_game_scaling();
+                    set_status(game_scaling_cure_ == ScaleCure::RestartGame
+                                   ? "Set -- close the game and start it again"
+                                   : "Could not set it -- see the log", 8000);
+                    simple_note(vi, 12000);
+                }
+                ImGui::SameLine();
+                text_dim("(its high-DPI override, as on the Compatibility tab)");
+            } else if (!game_scaling_program_.empty() && game_scaling_cure_ == ScaleCure::OverrideIgnored) {
+                text_dim("The game's program: %s", game_scaling_program_.c_str());
+            }
+        }
     } else {
         ImGui::PushStyleColor(ImGuiCol_Text, kRed);
         ImGui::TextUnformatted("No target window selected");
         ImGui::PopStyleColor();
+    }
+    // GoBot itself held to Windows' scaling: nothing it reads is right, whatever
+    // the game does.
+    if (threads_view_percent() > 100) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kAmber);
+        ImGui::TextWrapped("Windows shows GoBot itself the screen scaled to %d%%, so nothing it reads off the "
+                           "screen is the screen's real pixels: %s.",
+                           threads_view_percent(),
+                           real_pixels_possible()
+                               ? "Windows holds it to that, most likely by a high-DPI override on gobot_gui.exe's "
+                                 "Compatibility tab -- take it off and start GoBot again"
+                               : "this Windows is older than 10 1607 -- set its display scale to 100%");
+        ImGui::PopStyleColor();
+        if (own_scaling_fixed_) {
+            text_dim("Taken off: close GoBot and start it again.");
+        } else if (own_override_found_ && ImGui::Button("Take the high-DPI override off GoBot")) {
+            const std::string vi = fix_own_scaling();
+            set_status(own_scaling_fixed_ ? "Taken off -- close GoBot and start it again"
+                                          : "Could not take it off -- see the log", 8000);
+            simple_note(vi, 12000);
+        }
     }
 
     ImGui::Dummy(ImVec2(0, 10));
@@ -8100,7 +9987,6 @@ void GuiApp::draw_layout_editor() {
 void GuiApp::draw_bot_panel() {
     ImGui::SeparatorText("Combat");
     ImGui::Checkbox("Auto attack", &bot_config_.auto_attack);
-    ImGui::Checkbox("Auto buff", &bot_config_.auto_buff);
     ImGui::Checkbox("Auto loot", &bot_config_.auto_loot);
 
     ImGui::Checkbox("Lazy mode", &bot_config_.lazy_mode);
@@ -8232,48 +10118,7 @@ void GuiApp::draw_skills_panel() {
         ImGui::EndTable();
     }
 
-    ImGui::SeparatorText("Buffs");
-    text_dim("Cooldown is in seconds here -- buff durations are minutes, not milliseconds.");
-    ImGui::Dummy(ImVec2(0, 4));
-
-    if (ImGui::BeginTable("##buffs", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
-        ImGui::TableSetupColumn("On",   ImGuiTableColumnFlags_WidthFixed, 36);
-        ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 46);
-        ImGui::TableSetupColumn("Key",  ImGuiTableColumnFlags_WidthFixed, 110);
-        ImGui::TableSetupColumn("Cooldown (s)");
-        ImGui::TableHeadersRow();
-
-        for (std::size_t i = 0; i < BotConfig::kBuffSlots; ++i) {
-            auto& b = bot_config_.buffs[i];
-            ImGui::PushID(static_cast<int>(100 + i));
-            ImGui::TableNextRow();
-
-            ImGui::TableNextColumn();
-            ImGui::Checkbox("##en", &b.enabled);
-            ImGui::TableNextColumn();
-            ImGui::Text("%zu", i);
-
-            ImGui::TableNextColumn();
-            char key[32];
-            copy_to(key, sizeof(key), InputManager::key_name(b.keycode));
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputText("##key", key, sizeof(key))) {
-                if (const std::uint32_t vk = InputManager::parse_key(key)) {
-                    b.keycode = vk;
-                    b.key = InputManager::key_name(vk);
-                }
-            }
-
-            ImGui::TableNextColumn();
-            int cd = static_cast<int>(b.cooldown_sec);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputInt("##cd", &cd, 0, 0))
-                b.cooldown_sec = static_cast<std::uint32_t>(std::max(0, cd));
-
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
-    }
+    text_dim("Buffs and potions are the macro's: Features > Buffs, Healing.");
 
     ImGui::SeparatorText("Movement keys");
     struct KeyRow { const char* label; std::uint32_t* vk; };
@@ -8285,7 +10130,6 @@ void GuiApp::draw_skills_panel() {
         { "Jump",        &bot_config_.key_jump },
         { "Attack",      &bot_config_.key_normal_attack },
         { "Loot",        &bot_config_.key_loot },
-        { "Start/stop",  &bot_config_.key_start_stop },
     };
     for (const auto& k : keys) {
         char buf[32];
@@ -8306,33 +10150,20 @@ void GuiApp::draw_skills_panel() {
 
 void GuiApp::draw_heal_panel() {
     ImGui::SeparatorText("Potions");
-    text_dim("Healing pre-empts combat -- dying with a full potion belt is the one");
-    text_dim("failure mode that ends a session.");
-    ImGui::Dummy(ImVec2(0, 6));
-
-    struct Row { const char* label; HealRule* rule; };
-    const Row rows[] = {
-        { "HP potion 1", &bot_config_.hp_heal1 },
-        { "HP potion 2", &bot_config_.hp_heal2 },
-        { "MP potion",   &bot_config_.mp_heal1 },
-    };
-
-    for (const auto& r : rows) {
-        ImGui::PushID(r.label);
-        ImGui::SeparatorText(r.label);
-        ImGui::Checkbox("Enabled", &r.rule->enabled);
-
-        char key[32];
-        copy_to(key, sizeof(key), InputManager::key_name(r.rule->keycode));
-        ImGui::SetNextItemWidth(140);
-        if (ImGui::InputText("Key", key, sizeof(key))) {
-            if (const std::uint32_t vk = InputManager::parse_key(key)) r.rule->keycode = vk;
+    // The macro's potion keys are the only potions: the packet bot's own, in
+    // bot_default.ini's [Heal], drank beside them for the same HP drop.
+    ImGui::TextWrapped("Potions are the macro's keys: \"HP below\", \"MP below\" or \"pet HP below\" under "
+                       "Timed keys, or the potion rows on the simple screen -- set them there. They drink "
+                       "while the macro runs; with the packet bot running, on the HP and MP its packets give.");
+    bool any = false;
+    for (const MacroKeyKind kind : { MacroKeyKind::HpPotion, MacroKeyKind::MpPotion, MacroKeyKind::PetPotion })
+        for (const std::size_t i : macro_keys_of_kind(macro_config_.keys, kind)) {
+            const MacroKey& k = macro_config_.keys[i];
+            any = true;
+            text_dim("%s: key %s, under %d%%%s", k.label.c_str(), InputManager::key_name(k.keycode).c_str(),
+                     k.threshold_pct, k.enabled ? "" : "  (off)");
         }
-
-        ImGui::SetNextItemWidth(240);
-        ImGui::SliderInt("Use below %", &r.rule->trigger_pct, 1, 99);
-        ImGui::PopID();
-    }
+    if (!any) text_dim("No potion keys yet.");
 
     ImGui::SeparatorText("Revive");
     ImGui::Checkbox("Auto revive", &bot_config_.player_auto_revive);

@@ -49,6 +49,9 @@ const char* const kLostTyping = "Không thấy ô chat khi đang gõ — câu ch
 const char* const kMaybeLeft  = "Ô chat có thể còn chữ chưa gửi.";
 const char* const kNoShot     = "Chưa chụp được màn hình game.";
 const char* const kStopped    = "Đã dừng giữa chừng.";
+const char* const kLeftAsIs   = "Đã dừng giữa chừng: GoBot không bấm thêm phím nào, ô chat để nguyên như lúc dừng "
+                                "— có thể còn mở, còn chữ đang gõ dở. Hãy tự xoá chữ trong ô chat rồi bấm Enter "
+                                "để đóng nó.";
 const char* const kNothing    = "Câu không còn chữ nào gõ được.";
 
 std::string dialog_wait(const std::string& which) {
@@ -99,6 +102,11 @@ constexpr int kKeyGap = 33;
 /// Long enough for the game to draw the keys just pressed before the field is
 /// looked at again.
 constexpr int kDrawnMs = 150;
+/// How often the bar is looked at while something is waited for that a look
+/// itself confirms -- the line open after an Enter, the text arrived, the line
+/// shut after the sending Enter: what is waited for is no shorter, and seen
+/// that much sooner.
+constexpr int kWatchStepMs = 100;
 /// How long after an Enter that may have opened the line a look showing it
 /// shut is believed. The game takes a key a frame or more after it is pressed
 /// and draws what it did a frame after that, so a look taken sooner can show
@@ -1268,6 +1276,8 @@ bool ChatSender::believe_shut(ChatBar& bar) {
 
 bool ChatSender::rub_out(int n) {
     for (int i = 0; i < n; ++i) {
+        // A stop, and not one Backspace more: what is left is the player's.
+        if (stopped()) return false;
         if (!key(VK_BACK, false, hold(25, 25))) return false;
         pause(15);
     }
@@ -1322,6 +1332,8 @@ void ChatSender::tidy(Result& r, int rub) {
     int rounds = 0, enters = 0;
     int rubbed_at = -1;     // what the field showed before the last round rubbed out
     for (int i = 0; i < 8; ++i) {
+        // A stop meanwhile: not one key more, and the line left as it is.
+        if (stopped()) break;
         if (!look_both(bar, dialog)) { pause(250); continue; }
         r.last = bar;
         if (bar.state == ChatBarState::Closed) {
@@ -1342,7 +1354,7 @@ void ChatSender::tidy(Result& r, int rub) {
         if (shows_empty(bar) || (armed && bar.ink <= caret)) {
             // Twice at most, and each time waited on: an Enter the game is
             // slow to take, pressed again, opens the line it shut.
-            if (enters >= 2 || !focused() || !enter(false, hold(50, 50))) break;
+            if (stopped() || enters >= 2 || !focused() || !enter(false, hold(50, 50))) break;
             ++enters;
             armed = false;
             for (int k = 0; k < 3; ++k) {
@@ -1374,6 +1386,8 @@ void ChatSender::tidy(Result& r, int rub) {
 }
 
 bool ChatSender::close_left_open(int rub_out_count) {
+    // Stopped: nothing is pressed, and the line is not shown shut.
+    if (stopped()) return false;
     // Only a line seen open is rubbed out: with the line shut, Backspace goes
     // to the game itself.
     ChatBar bar;
@@ -1458,12 +1472,32 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
         if (cancelled_) return kStopped;
         return guard_ ? guard_() : std::string();
     };
+    // A stop -- DỪNG, F12, gobot_cli's Ctrl+C -- part way: the player has
+    // taken over, and may be typing in the line by now. Not one key more, a
+    // Backspace or an Enter least of all: whatever is in the line is left
+    // there for the player. Only looked at -- on two looks, and after an
+    // Enter that may have opened it only once the game has had time to show
+    // it -- and reported as maybe open unless it shows shut, for whoever
+    // watches it after (ChatDoubt; the GUI's tick() once handed over).
+    const auto leave = [&]() {
+        put_off(0);
+        ChatBar bar;
+        const bool shut = look_bar(bar) && bar.state == ChatBarState::Closed && believe_shut(bar);
+        r.last = bar;
+        r.left_open = !shut;
+        r.trouble = shut ? kStopped : kLeftAsIs;
+        r.trace.outcome = shut ? "stopped" : "stopped, the line left as it was";
+        return r;
+    };
     // The game lost the front: the keys go nowhere from then on. Waited for
-    // a while, and rubbed out and closed if it comes back.
+    // a while, and rubbed out and closed if it comes back -- unless a stop
+    // came, before or meanwhile: then left as it is (leave).
     const auto lost_front = [&](int rub) {
+        if (cancelled_) return leave();
         if (r.trouble.empty()) r.trouble = kNotFront;
         put_off(5000);
         for (int i = 0; i < 100 && !focused() && !cancelled_; ++i) pause(100);
+        if (cancelled_) return leave();
         if (focused()) {
             tidy(r, rub);
         } else {
@@ -1474,7 +1508,9 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     };
     // Given up part way with the line open, or perhaps open: rubbed out and
     // closed, never sent -- or, not seen open, left to whoever watches it.
+    // After a stop, left as it is (leave): the player has taken over.
     const auto give_up = [&](std::string why, int rub) {
+        if (cancelled_) return leave();
         r.trouble = std::move(why);
         if (!focused()) return lost_front(rub);
         tidy(r, rub);
@@ -1485,11 +1521,12 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
         put_off(ms);
         return give_up(std::move(why), rub);
     };
-    // A wait ended early (wait): a stop, or the guard's reason -- HP under
-    // the potion's mark, another hold -- which ends the line as it does
-    // between keys: rubbed out, closed, put off.
+    // A wait ended early (wait): a stop, which leaves the line as it is
+    // (leave), or the guard's reason -- HP under the potion's mark, another
+    // hold -- which ends the line as it does between keys: rubbed out,
+    // closed, put off.
     const auto halt = [&](int rub) {
-        if (cancelled_ || halted_.empty()) return abort_line(kStopped, rub, 0);
+        if (cancelled_ || halted_.empty()) return leave();
         return abort_line(halted_, rub, 5000);
     };
     // Up to `looks` looks at the bar alone, a quarter of a second apart,
@@ -1505,7 +1542,7 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     };
     const auto watch = [&](int looks, bool& saw_open, bool& saw_shut, bool& saw_neither) {
         for (int i = 0; i < looks && !saw_open; ++i) {
-            if (!wait(250)) return false;
+            if (!wait(kWatchStepMs)) return false;
             ChatBar now;
             look_bar(now, &shot);
             r.last = now;
@@ -1532,16 +1569,17 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     // at most, as shipped two: a game slow enough to take both late is left
     // as it was found, shut, and the line is reported as maybe open, for
     // whoever watches it after. Each is watched enter_gap_ms for the line to
-    // open, a look every 250 ms.
+    // open, a look every kWatchStepMs: the line shows open a frame or two
+    // after the Enter, and is seen so that much sooner.
     const int max_enters = std::clamp(settings_.max_enters, 1, ChatSettings::kMaxEnters);
-    const int enter_looks = std::max(1, (settings_.enter_gap_ms + 125) / 250);
+    const int enter_looks = std::max(1, (settings_.enter_gap_ms + kWatchStepMs / 2) / kWatchStepMs);
     bool opened = false;
     for (int press = 1; press <= max_enters && !opened; ++press) {
         if (cancelled_) {
             // Before the first Enter nothing has been pressed and the line is
-            // as it was, shut. After it, whether the game took it is looked
-            // for before anything else.
-            if (press > 1) return abort_line(kStopped, 0, 0);
+            // as it was, shut. After it, nothing more is pressed: the line is
+            // looked at and left as it is (leave).
+            if (press > 1) return leave();
             r.trouble = kStopped;
             put_off(0);
             return r;
@@ -1603,7 +1641,8 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
         // not pressed again, which would shut it.
         bool saw_open = false, saw_shut = false, saw_neither = false;
         if (!watch(enter_looks, saw_open, saw_shut, saw_neither)) return halt(clear);
-        if (!saw_open && !saw_shut && !watch(2, saw_open, saw_shut, saw_neither)) return halt(clear);
+        if (!saw_open && !saw_shut && !watch(500 / kWatchStepMs, saw_open, saw_shut, saw_neither))
+            return halt(clear);
         if (saw_open) {
             opened = true;
             break;
@@ -1681,15 +1720,20 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     // while each takes something away, up to kMostRubbed in all. If the field
     // still shows more than a caret, nothing is typed: what is left of a line
     // the player shut without sending would go out in front of this one.
-    if (!wait(200)) return halt(clear);
-    for (int i = 0; i < clear; ++i) {
+    // A line that showed no more than its caret on the look that saw it open
+    // gets a caret's width more in this same round, and is taken as armed: the
+    // round of its own that used to follow, a look and a pause, is saved.
+    const bool caret_only = r.last.state == ChatBarState::Open && r.last.ink <= settings_.empty_ink;
+    const int first = caret_only ? std::max(clear, rub_for(settings_.empty_ink)) : clear;
+    if (!wait(100)) return halt(first);
+    for (int i = 0; i < first; ++i) {
         const int held = hold(40, 70);
         r.trace.backspace_min = i == 0 ? held : std::min(r.trace.backspace_min, held);
         r.trace.backspace_max = std::max(r.trace.backspace_max, held);
-        if (!key(VK_BACK, false, held)) return lost_front(clear);
-        if (!wait(30)) return halt(clear);
+        if (!key(VK_BACK, false, held)) return lost_front(first);
+        if (!wait(30)) return halt(first);
     }
-    if (!wait(50)) return halt(clear);
+    if (!wait(50)) return halt(first);
 
     ChatBar before;
     std::string dialog;
@@ -1697,7 +1741,7 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     r.last = before;
     int rubbed = 0;             // Backspaces past the commercial client's
     int shown_before = -1;      // what the field showed before the last round
-    bool armed = false;         // a caret's width rubbed since a look showed no more
+    bool armed = caret_only;    // a caret's width rubbed since a look showed no more
     while (dialog.empty() && before.state == ChatBarState::Open && before.ink > 0 &&
            !(armed && before.ink <= settings_.empty_ink)) {
         int more;
@@ -1849,7 +1893,7 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
         r.trace.after.clear();
         bool arrived = false;
         for (int look = 0; look < 3 && !arrived; ++look) {
-            if (!wait(look == 0 ? kDrawnMs : 250)) return halt(r.typed + 2);
+            if (!wait(look == 0 ? kWatchStepMs : 250)) return halt(r.typed + 2);
             look_both(shown, dialog, &shot);
             r.last = shown;
             r.trace.after.emplace_back(static_cast<int>(clock_ms() - last_key), shown.ink);
@@ -1897,8 +1941,8 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     }
     // A stop, or the guard, asked once more: the look just taken, with its
     // dialog check, takes a quarter of a second, and a DỪNG or a hold that
-    // came meanwhile is not followed by the line going out. Rubbed out and
-    // closed, as one stopped between keys is.
+    // came meanwhile is not followed by the line going out. A DỪNG is left in
+    // the line as it is (leave), a hold rubbed out and closed, as between keys.
     {
         const std::string why = stop_why();
         if (!why.empty()) return abort_line(why, r.typed + 2, 5000);
@@ -1925,8 +1969,8 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     // nothing more is pressed unless it shows open.
     ChatBarState seen = ChatBarState::Unknown;
     ChatBar after, open_look;
-    for (int i = 0; i < 4 && seen != ChatBarState::Closed; ++i) {
-        pause(250);
+    for (int i = 0; i < 1000 / kWatchStepMs && seen != ChatBarState::Closed; ++i) {
+        pause(kWatchStepMs);
         look_bar(after, &shot);
         if (after.state == ChatBarState::Closed && believe_shut(after)) seen = ChatBarState::Closed;
         if (after.state == ChatBarState::Open) {
@@ -1954,6 +1998,15 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
     }
     if (seen == ChatBarState::Open) {
         keep(shot, "still_open", &open_look);
+        // A stop meanwhile: the line has gone, or may yet, and the open line
+        // is left as it is -- no Enter to shut it, which would send what it
+        // still holds, and no Backspace.
+        if (cancelled_) {
+            if (open_look.ink <= before.ink + 2) r.sent = true;
+            r.left_open = true;
+            r.trouble = kLeftAsIs;
+            return r;
+        }
         if (open_look.ink <= before.ink + 2) {
             // Empty and open: the line went, and the line stayed open. Shut
             // with another Enter, which sends nothing from an empty line.
@@ -1969,7 +2022,7 @@ ChatSender::Result ChatSender::send_line(const ChatText& line) {
         }
         if (r.left_open) {
             r.stop = true;
-            r.trouble = kNotClosed;
+            r.trouble = cancelled_ ? kLeftAsIs : kNotClosed;
         }
         return r;
     }

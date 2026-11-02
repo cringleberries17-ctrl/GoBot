@@ -73,7 +73,14 @@ public:
     /// Begin. Returns false if the game window is not focused, since driving
     /// input into the wrong window is both useless and rude.
     bool start();
+    /// Stop, and wait for the run to end. Joined whenever there is a thread --
+    /// a run that finished by itself, or gave up when the game lost focus, has
+    /// one still to be joined -- and keys let go of when it was running.
     void stop();
+    /// Tell the run to stop, and return at once: it lets go of its keys on the
+    /// way out, and stop() then waits for it. For stopping everything at once,
+    /// where nothing is waited for until every job has been told.
+    void request_stop() { running_.store(false); }
     bool running() const { return running_.load(); }
 
     /// Feed packets in from the capture callback for the whole run.

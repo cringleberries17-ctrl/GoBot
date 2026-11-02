@@ -77,6 +77,9 @@ void ProtocolCalibrator::set_phase(CalibPhase p) {
 
 bool ProtocolCalibrator::start() {
     if (running_.load()) return false;
+    // A run that ended by itself -- finished, or gave up when the game lost
+    // focus -- still has its thread: joined first, before anything is set.
+    if (thread_.joinable()) thread_.join();
 
     if (!input_.window_valid()) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -101,16 +104,23 @@ bool ProtocolCalibrator::start() {
     total_ms_.store(total);
     started_ms_.store(now_ms());
 
+    // The first step's phase from here, not the thread's first moment: left
+    // at the last run's Done, a run started again read as finished, and its
+    // first packets were dropped as a finished run's.
+    phase_.store(kSchedule[0].phase);
     running_.store(true);
-    if (thread_.joinable()) thread_.join();
     thread_ = std::thread(&ProtocolCalibrator::run, this);
     return true;
 }
 
 void ProtocolCalibrator::stop() {
-    if (!running_.exchange(false)) return;
+    // Joined whenever there is a thread, as Navigator::stop does. A run that
+    // finished by itself -- or gave up when the game lost focus -- has cleared
+    // running_ already, and returning on that left its thread unjoined:
+    // destroying it, as GoBot closed, ended the program.
+    const bool was_running = running_.exchange(false);
     if (thread_.joinable()) thread_.join();
-    input_.release_all();
+    if (was_running) input_.release_all();
 }
 
 void ProtocolCalibrator::run() {
@@ -148,7 +158,9 @@ void ProtocolCalibrator::run() {
 
                 case CalibPhase::Cast:
                     input_.use_skill(cast_key_);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+                    // In slices, so a stop is not kept waiting for the rest of it.
+                    for (int i = 0; i < 7 && running_.load(); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     continue;
 
                 case CalibPhase::Idle:
@@ -168,11 +180,16 @@ void ProtocolCalibrator::run() {
     }
 
     input_.release_all();
-    set_phase(CalibPhase::Done);
-    running_.store(false);
+    // Stopped part way -- Abort, F12, DỪNG -- is no run to conclude anything
+    // from: the phases it never reached would read as fields that never
+    // responded. Said so, and not offered for analysis: the Calibrate tab
+    // analyses a run that ended Done, and nothing else.
+    const bool completed = running_.exchange(false);
+    set_phase(completed ? CalibPhase::Done : CalibPhase::Failed);
 
     std::lock_guard<std::mutex> lock(mutex_);
-    status_ = "Finished with " + std::to_string(samples_.size()) + " packets.";
+    status_ = completed ? "Finished with " + std::to_string(samples_.size()) + " packets."
+                        : std::string("Stopped before the end -- nothing to analyse. Run it again.");
 }
 
 void ProtocolCalibrator::on_packets(const std::vector<GamePacket>& packets) {

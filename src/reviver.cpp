@@ -9,8 +9,6 @@
 #include <ctime>
 #include <thread>
 
-#include <windows.h>
-
 namespace gobot {
 namespace {
 
@@ -55,6 +53,17 @@ ScreenRect on_frame(const Frame& f, const ScreenRect& r) {
     const int x0 = std::max(0, r.x), y0 = std::max(0, r.y);
     const int x1 = std::min(f.width, r.right()), y1 = std::min(f.height, r.bottom());
     return ScreenRect{ x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0) };
+}
+
+/// Why a click on the game was not made, in the words the log has always had
+/// for the game behind, its window gone and something over it.
+std::string not_clicked(InputManager::GameClick why, int x, int y) {
+    switch (why) {
+        case InputManager::GameClick::NotInFront: return "the game is not in front";
+        case InputManager::GameClick::NoWindow:   return "the game's window is gone";
+        case InputManager::GameClick::Covered:    return "another window is over the game at " + at(x, y);
+        default:                                  return InputManager::game_click_name(why);
+    }
 }
 
 } // namespace
@@ -496,14 +505,24 @@ bool Reviver::fresh(Frame& f, Seen& s) {
 
 bool Reviver::click(int x, int y, const char* what, std::string* why_not) {
     if (stop_now()) return false;
-    if (!hands_.click) {
+    bool ok = false;
+    if (hands_.click) {
+        ok = hands_.click(x, y);
+    } else {
         bring_forward();
-        if (!mouse_ok(x, y, why_not)) return false;
-        // Asked once more at the last moment: bringing the game forward
-        // takes a while, and a stop pressed meanwhile means no click.
-        if (stop_now()) return false;
+        // A click goes to whatever is under the pointer, and the game is read
+        // off the screen or drawn by itself whatever is over it: the game has
+        // to be in front, and the point on it, as the button goes down. The
+        // stop is asked there too: bringing the game forward takes a while,
+        // and a stop pressed meanwhile means no click.
+        InputManager::GameClick why = InputManager::GameClick::Failed;
+        ok = input_.click_on_game(x, y, false, [this] { return stop_now(); }, &why);
+        // Not made at all: nothing reached the game, and whoever asked says why.
+        if (!ok && why != InputManager::GameClick::Failed) {
+            if (why_not) *why_not = not_clicked(why, x, y);
+            return false;
+        }
     }
-    const bool ok = hands_.click ? hands_.click(x, y) : input_.click_at(x, y);
     if (ok) {
         say(std::string("clicked ") + what + " at " + at(x, y));
     } else {
@@ -511,24 +530,6 @@ bool Reviver::click(int x, int y, const char* what, std::string* why_not) {
         if (why_not) *why_not = "the click did not go out";
     }
     return ok;
-}
-
-bool Reviver::mouse_ok(int x, int y, std::string* why_not) {
-    // A click goes to whatever is under the pointer, and the game is read
-    // off the screen or drawn by itself whatever is over it: the game has to
-    // be in front, and the point on it.
-    const auto no = [why_not](const std::string& why) {
-        if (why_not) *why_not = why;
-        return false;
-    };
-    if (!input_.window_focused()) return no("the game is not in front");
-    HWND game = static_cast<HWND>(input_.target_window());
-    POINT p{ x, y };
-    if (game == nullptr || !ClientToScreen(game, &p)) return no("the game's window is gone");
-    HWND under = WindowFromPoint(p);
-    if (under == nullptr || (under != game && GetAncestor(under, GA_ROOT) != game))
-        return no("another window is over the game at " + at(x, y));
-    return true;
 }
 
 void Reviver::bring_forward() {

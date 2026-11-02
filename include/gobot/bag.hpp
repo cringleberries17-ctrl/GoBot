@@ -92,6 +92,9 @@ const char* bag_tab_name(int tab);
 /// Tiêu Dùng, the tab of things that are used: the only one where anything is
 /// right-clicked.
 constexpr int kUseTab = 2;
+/// Khác, where the Người Giữ Sân item lies: right-clicked there by the shop
+/// run, and by nothing else.
+constexpr int kOtherTab = 3;
 
 /// The bag as found in one frame.
 struct BagView {
@@ -102,6 +105,10 @@ struct BagView {
     /// The can is showing. Not the same as nothing waiting: while the bin's
     /// own dialog is open the dialog holds the item and the can is back.
     bool       bin_empty = false;
+    /// The bin lies inside the frame. A bag dragged low -- easy in a small game
+    /// window -- puts it out of sight: no can is seen there, and that says
+    /// nothing of the bin holding anything, nor can GoBot click it.
+    bool       bin_on_frame = true;
 
     /// Rows on show that are rows of slots, from the top; -1 for all of them.
     /// The last row of a tab is the button for buying more room, once it is
@@ -340,6 +347,78 @@ struct CleanSettings {
     /// are only said, as Thử tìm says them, and never right-clicked.
     bool use_fragments = false;
 
+    /// [Trash] use_charms: whether the charms (Bùa) on the Dùng list are used:
+    /// a right-click on the slot in Tiêu Dùng, and Xác Nhận on the question
+    /// that brings up. One charm of each kind lasts an hour and costs one of
+    /// the stack, so each is used once and not again until
+    /// charm_every_minutes are over. Off unless the file says so, and it
+    /// ships off. Charms are used by a pass of their own (BagCleaner::Mode::
+    /// CharmsOnly), quick and with nothing else pressed: never inside the slow
+    /// pass that clears the bag.
+    bool use_charms = false;
+    /// [Trash] charm_every_minutes: how long a charm lasts, and so how soon
+    /// after one is used another of the same kind may be. A charm used with
+    /// no sign of whether it took waits as long: a charm used twice is lost.
+    int  charm_every_minutes = 60;
+    static constexpr int kCharmEveryLeast = 5;
+    static constexpr int kCharmEveryMost = 1440;
+    /// [Trash] charm_wait_ms: how long a right-click on a charm is watched for
+    /// its question, or for the stack to change, before the pass gives up on
+    /// that charm. A tuning knob for the real game.
+    int  charm_wait_ms = 1000;
+    static constexpr int kCharmWaitLeast = 300;
+    static constexpr int kCharmWaitMost = 3000;
+    /// [Trash] charm_frame_score: how much of the registration question's box,
+    /// under its words, a dialog has to show to be taken for the question of a
+    /// charm (bag::charm_question). The questions GoBot knows score up to 0.89
+    /// against it; the game's own box in the same frame near 1. Lower it only
+    /// with the frames the run saves in trash_debug (charm_question).
+    static constexpr float kCharmFrameDefault = 0.92f;
+    float charm_frame_score = kCharmFrameDefault;
+    static constexpr float kCharmFrameLeast = 0.85f;
+    static constexpr float kCharmFrameMost = 0.99f;
+
+    /// [Trash] buy_potions: whether the bag is looked at every
+    /// buy_every_minutes for the potions of Tiêu Dùng and, when there are
+    /// fewer slots of them than the player wants, more are bought from the
+    /// shop the Người Giữ Sân item in Khác opens: a right-click on it, the
+    /// item, a double-click on the potion, 100 into the box, Xác Nhận
+    /// (BagCleaner::Mode::ShopBuy). Off
+    /// unless the file says so, and it ships off: it spends the character's
+    /// money, and types into the game for the first time.
+    bool buy_potions = false;
+    int  buy_every_minutes = 60;
+    static constexpr int kBuyEveryLeast = 5;
+    static constexpr int kBuyEveryMost = 1440;
+    /// Slots of Thịt bò khô (HP) and of Rượu lá tre (MP) in Tiêu Dùng: under
+    /// `below` of them more are bought, up to `to`. `below` 0 leaves that
+    /// potion alone; `to` is never under `below`.
+    int  buy_hp_below = 3;
+    int  buy_hp_to = 6;
+    int  buy_mp_below = 3;
+    int  buy_mp_to = 6;
+    static constexpr int kBuySlotsMost = 60;
+    /// How many of a potion one purchase asks for: always this, typed into the
+    /// quantity box and read back before Xác Nhận.
+    static constexpr int kBuyQuantity = 100;
+    /// The catalog id of the Người Giữ Sân item of Khác: the portrait the
+    /// other helper names (other/8950604). Another id here if the live icon is
+    /// another.
+    std::string buy_opener = "other/8950604";
+    /// The potions bought, by catalog id: what the game's shop sells under the
+    /// names Thịtbòkhô and Rượulátre, matched pixel for pixel by the icons in
+    /// its first row (grabbed/ngs_hpmp).
+    static constexpr const char* kBuyHpId = "spend/hp/8820131";
+    static constexpr const char* kBuyMpId = "spend/mana/8810111";
+    /// [Trash] buy_frame_score: how much of the sell question's box the shop's
+    /// quantity box has to show to be taken for one of the game's own, with
+    /// its own words (bag::shop_question). Lower it only with the frames the
+    /// run keeps in trash_debug (shop_question).
+    static constexpr float kBuyFrameDefault = 0.85f;
+    float buy_frame_score = kBuyFrameDefault;
+    static constexpr float kBuyFrameLeast = 0.70f;
+    static constexpr float kBuyFrameMost = 0.99f;
+
     /// A bound on one pass, so a mistake costs a handful of items at most.
     int max_per_run = 40;
     /// The same for registering, [Trash] max_uses_per_run: a registration
@@ -348,6 +427,16 @@ struct CleanSettings {
 
     /// Click the item and then the target, instead of dragging it there.
     bool click_to_move = false;
+
+    /// [Trash] press_ms: how fast GoBot presses in its bag jobs (Dọn rác, Dùng
+    /// bùa, Tự mua bình) -- the gap after a key typed into the shop's box, and
+    /// the pauses of its clicks and drags, scaled from what they are at 80.
+    /// Never the waits for the game to answer, the read-backs, nor how long a
+    /// key is held. The steps the screen offers: 60, 80, 100, 150.
+    static constexpr int kPressDefaultMs = 80;
+    static constexpr int kPressLeastMs = 60;
+    static constexpr int kPressMostMs = 150;
+    int press_ms = kPressDefaultMs;
 
     BagLayout layout;
 
@@ -369,6 +458,69 @@ struct CleanSettings {
     /// and every id it will hold, then delete= and drop=, and use= as it now
     /// is last. `between`, when set, is called between two writes: for tests.
     bool save_items(const std::string& path, const std::function<void()>& between = {}) const;
+};
+
+/// What a right-click on a Tiêu Dùng item is allowed to be, as a pass decides
+/// it for an item on the Dùng list. Anything else is never right-clicked: a
+/// right-click on a potion drinks it, on a box opens it, on a scroll reads it.
+enum class UseKind {
+    None,
+    Fragment,   ///< registered in Yêu Quái Bách Khoa: use_sweep, [Trash] use_fragments
+    Charm,      ///< a Bùa, used for an hour: charm_sweep, [Trash] use_charms
+};
+
+namespace bag {
+/// By the catalog id: spend/fragment/... a fragment, spend/buff/... a charm,
+/// everything else -- potions, mana, craft items, seals -- none.
+UseKind use_kind_of(const std::string& id);
+} // namespace bag
+
+/// When each charm may be used next, by catalog id, in wall-clock seconds, kept
+/// in a small file: a charm used an hour ago and a GoBot started again -- or a
+/// new version unzipped into a new folder -- must not use another while the
+/// first still works. Each charm costs one of the stack, and a charm used twice
+/// is a charm lost.
+class CharmClock {
+public:
+    /// How a try came out.
+    enum class How {
+        Used,       ///< seen taken: the stack one less, or gone
+        MaybeUsed,  ///< right-clicked and the slot could not be told afterwards: taken for used
+        NotUsed,    ///< nothing came of it: refused, or the stack as it was
+    };
+
+    /// %LOCALAPPDATA%\GoBot\charm_clock.txt, as the webhook and the lines
+    /// Tự chat said are kept; beside the program when that folder is not known.
+    static std::string default_path();
+
+    explicit CharmClock(std::string path = default_path()) : path_(std::move(path)) {}
+
+    /// Read the file. False when it is not there or cannot be read: nothing is
+    /// known then, and every charm is due.
+    bool load();
+    /// Whether `id` may be used at `now_s`: it never was, or its time has come.
+    bool due(const std::string& id, std::int64_t now_s) const;
+    /// When `id` is next due; 0 for one never used.
+    std::int64_t next(const std::string& id) const;
+    /// Set and written. False when the file cannot be written; the time is kept
+    /// in memory all the same.
+    bool set_next(const std::string& id, std::int64_t at_s);
+    /// Everything known, written as set_next writes: False when it cannot be.
+    /// A run asks it before it right-clicks anything -- a charm used and not
+    /// written down is a charm used again after a restart.
+    bool save();
+
+    /// When the next try is due after one that came out `how` at `now_s`: a
+    /// charm used, or perhaps used, after `every_minutes`; one not used after
+    /// kRetryMinutes.
+    static std::int64_t next_after(How how, int every_minutes, std::int64_t now_s);
+    static constexpr int kRetryMinutes = 10;
+
+    const std::map<std::string, std::int64_t>& all() const { return next_; }
+
+private:
+    std::string path_;
+    std::map<std::string, std::int64_t> next_;
 };
 
 /// What to get rid of: pictures of items, cut from the player's own bag and
@@ -434,14 +586,31 @@ struct TrashList {
         /// deleted before a registration of its own.
         bool then_delete = false;
 
-        /// A fragment, and so something a pass may right-click when it is on
-        /// the Dùng list: one of the client's fragment icons, or a picture cut
-        /// from the bag that add_rivals found drawn like fragment icons and
-        /// like nothing else in the catalog. A right-click on anything else
-        /// uses it or equips it there and then -- a potion drunk, a box
-        /// opened, a scroll read -- so a picture of that on the Dùng list is
-        /// only ever said, never right-clicked.
+        /// What a right-click on it may be, and so whether a pass may
+        /// right-click it when it is on the Dùng list: one of the client's
+        /// fragment icons or charm icons, or a picture cut from the bag that
+        /// add_rivals found drawn like icons of one kind and like nothing else
+        /// in the catalog. A right-click on anything else uses it or equips
+        /// it there and then -- a potion drunk, a box opened, a scroll read --
+        /// so a picture of that on the Dùng list is only ever said, never
+        /// right-clicked. Icons of both kinds drawn alike give none.
+        UseKind use_kind() const;
+
+        /// A fragment: use_kind() is Fragment.
         bool fragment() const;
+        /// A charm (Bùa): use_kind() is Charm.
+        bool charm() const;
+        /// What a charm's clock (CharmClock) goes by: the icon that was chosen
+        /// -- not the same drawing in another colour that came along with it,
+        /// which is one charm -- or the picture's file for one cut from the bag.
+        /// A picture is named by its file name alone: the folder it lies in
+        /// changes with every version unzipped, the charm does not.
+        std::string clock_id() const {
+            if (!via.empty()) return via;
+            if (!id.empty()) return id;
+            const std::size_t slash = file.find_last_of("\\/");
+            return slash == std::string::npos ? file : file.substr(slash + 1);
+        }
     };
     std::vector<Item> items;
 
@@ -631,9 +800,114 @@ bool can_check(const TemplateStore& store, TrashList::Action a);
 /// is offered for.
 bool fragment_cut(const Frame& cut, const BagLayout& l, const ItemCatalog& catalog);
 
+/// The same for a charm (TrashList::Item::charm): drawn like the catalog's
+/// charm icons, and like nothing else in it. What the bag picture's "Dùng" is
+/// offered for on Tiêu Dùng, besides fragments.
+bool charm_cut(const Frame& cut, const BagLayout& l, const ItemCatalog& catalog);
+
+/// `d` is one of the questions GoBot has a picture of other than the
+/// registration's and the bin's: the revive question, dropping and selling,
+/// found by their words where those pictures put them for these buttons. A
+/// charm's question is none of these.
+bool other_question_up(const Frame& f, const TemplateStore& store, const Dialog& d);
+
+/// Whether `d` is taken for the question a charm's right-click brings up: a
+/// dialog with the two buttons that is not the bin's, not the fragment
+/// registration's and not one of the other questions GoBot has a picture of
+/// (other_question_up). The player's rule: a question of the game's own, drawn
+/// like the registration's, asked of a right-click on a charm, is confirmed.
+/// The rest of what makes a confirmation safe is not in the picture: the slot
+/// right-clicked is a charm's, on Tiêu Dùng, with no other window of the
+/// game's open, and the stack has to be seen one less afterwards.
+bool charm_question(const Frame& f, const TemplateStore& store, const Dialog& d,
+                    float frame_score = CleanSettings::kCharmFrameDefault);
+
+/// Whether the pictures a charm pass needs are there: the two buttons, the
+/// bin's two questions, and the revive, drop and sell questions -- everything
+/// it must tell a question apart from; a question it has no picture of cannot
+/// be told from a charm's -- and the client's close buttons, to know of another
+/// window open beside the bag.
+bool can_check_charm(const TemplateStore& store);
+
 /// A message with only Xác Nhận under it is up, and no dialog with two buttons:
 /// what the client shows when it refuses something. Never answered.
 bool notice_up(const Frame& f, const TemplateStore& store);
+
+// ---------------------------------------------------------------- the shop
+
+/// The pictures of the shop the Người Giữ Sân item opens, cut from the live
+/// client: the first row of its list, Rượu lá tre on the left and Thịt bò khô
+/// on the right (294x21); its Mua | Thoát buttons (119x21); and the message
+/// that the bag is full. And the sell question, the one picture of the game's
+/// quantity box there is, which a purchase's own is taken to be drawn like.
+inline const char* const kShopRow = "grabbed/ngs_hpmp";
+inline const char* const kShopButtons = "grabbed/ngs_buy_button";
+inline const char* const kShopFull = "grabbed/nguoi_giu_san_full_hpmp";
+inline const char* const kSellQuestion = "grabbed/sell_confirm";
+
+/// Where things are from the top-left of kShopRow, measured on the client's
+/// shop sprite (inven/0/Dialog_Shop.spr: the row at 11,92, the buttons at
+/// 197,391) and the live grab: the icon box of each cell, to click an item
+/// by, and the buttons.
+constexpr int kShopMpX = 17, kShopHpX = 169, kShopItemY = 12;
+constexpr int kShopButtonsDx = 186, kShopButtonsDy = 299;
+/// The shop's whole window from its buttons' top-left (Dialog_Shop.spr: the
+/// buttons 197,391 into a window of about 330x420).
+constexpr ScreenRect kShopWindowFromButtons{ -197, -391, 330, 420 };
+constexpr int kShopMuaX = 27, kShopThoatX = 91, kShopButtonY = 10;
+/// Where Xác Nhận is on the full-bag message, from its top-left.
+constexpr int kShopFullOkX = 166, kShopFullOkY = 67;
+
+/// The shop as one look finds it: the potions' row, and its buttons in that
+/// row's column below it, no lower than kShopButtonsDy -- the two together,
+/// never one alone. The row is the list's first in the client's sprite, but
+/// the live shop has shown two other items above it, its buttons 257 under it.
+struct Shop {
+    bool       found = false;
+    ScreenRect row;                 ///< kShopRow as found
+    ScreenRect buttons;             ///< kShopButtons as found
+    float      row_score = 0.0f;
+    float      buttons_score = 0.0f;
+    int mp_x() const { return row.x + kShopMpX; }
+    int hp_x() const { return row.x + kShopHpX; }
+    int item_y() const { return row.y + kShopItemY; }
+    int mua_x() const { return buttons.x + kShopMuaX; }
+    int thoat_x() const { return buttons.x + kShopThoatX; }
+    int button_y() const { return buttons.y + kShopButtonY; }
+};
+Shop find_shop(const Frame& f, const TemplateStore& store);
+
+/// The message that the bag has no room, on `f`: where it is, or not found.
+bool shop_full_up(const Frame& f, const TemplateStore& store, ScreenRect* at = nullptr);
+
+/// Whether anything of a potion purchase may still be up on `f`: the shop, its
+/// buttons alone, its full-bag message, or either button of a question -- one
+/// find_dialogs does not see with a button drawn pressed. True on no frame or a
+/// black one. What a hold kept for a purchase is let go only without.
+bool shop_left_up(const Frame& f, const TemplateStore& store);
+
+/// The shop's row of potions anywhere on `f`, its buttons or not: a shop
+/// whose Mua | Thoát an item's description lies over is still up.
+bool shop_row_up(const Frame& f, const TemplateStore& store);
+
+/// Whether `d` is taken for the quantity question a shop's Mua brings up: a
+/// dialog with the two buttons that is not the bin's, not the registration's
+/// and not another question GoBot has a picture of -- the sell question
+/// included, by its words -- whose box under its words is drawn like the sell
+/// question's, the box's own digits left out, at `frame_score` or more, and
+/// that has a box with a number or nothing in it: one that reads. There is no
+/// picture of the buy question itself. The rest of what makes it safe is not
+/// in the picture: it came up within seconds of the one double-click on a
+/// potion, with no
+/// other dialog up, and the number is read back before Xác Nhận.
+bool shop_question(const Frame& f, const TemplateStore& store, const Dialog& d, const CountReader& counts,
+                   float frame_score = CleanSettings::kBuyFrameDefault, bool check_box = true);
+
+/// Whether the pictures a purchase needs are there: the shop's row and
+/// buttons, the sell question, the bin's questions and the revive and drop
+/// questions it is told from, the full-bag message, and the close buttons, to
+/// know of another window open beside the bag.
+bool can_check_shop(const TemplateStore& store);
 
 /// The client's close buttons, every drawing it has for one -- the bag's own X
 /// among them, and those of Kho Cash, a shop and the monster book -- by the
@@ -737,6 +1011,9 @@ public:
     using Report = std::function<void(const std::string&)>;
 
     BagCleaner(InputManager& input, const TemplateStore& store, Grab grab);
+    /// Neither copied nor moved: its grab_ calls back into it.
+    BagCleaner(const BagCleaner&) = delete;
+    BagCleaner& operator=(const BagCleaner&) = delete;
 
     void set_settings(const CleanSettings& s) { settings_ = s; }
     void set_trash(const TrashList* t) { trash_ = t; }
@@ -780,6 +1057,11 @@ public:
         std::function<bool(int, int, int, int)>      drag;
         std::function<bool(std::uint32_t)>           key;
         std::function<bool(int, int)>                right_click;
+        /// A key sent as its scan code alone, GoC's way (InputManager::KeyInject::
+        /// Scancode); `key` when unset.
+        std::function<bool(std::uint32_t)>           scan_key;
+        /// A double-click; two of `click` when unset.
+        std::function<bool(int, int)>                double_click;
     };
     void set_hands(Hands h) { hands_ = std::move(h); skip_focus_check_ = true; }
 
@@ -795,6 +1077,44 @@ public:
         std::function<void(int)>                                 sleep;     ///< milliseconds
     };
     void set_clock(Clock c) { clock_ = std::move(c); }
+
+    /// What a run is for. Pass: all of it -- every tab ticked, the fragments
+    /// registered, the delete sweep. CharmsOnly: only the charms on the Dùng
+    /// list that are due (set_charm_due), and nothing else: the bag opened if
+    /// it is shut, Tiêu Dùng, one right-click and one question for each, the
+    /// bag shut again if it was opened here. Quick, with no tab but Tiêu Dùng,
+    /// and nothing deleted. A Pass leaves the charms to it: it says where it
+    /// sees one and never right-clicks it.
+    ///
+    /// ShopBuy: the potions of Tiêu Dùng counted, and -- when fewer slots of
+    /// Thịt bò khô or Rượu lá tre are there than the settings want -- bought
+    /// from the Người Giữ Sân item's shop (see shop_buy); with set_dry_run
+    /// everything but the typing and the Xác Nhận. The list it goes by holds
+    /// the two potions and the item as catalog icons (the settings' ids), and
+    /// nothing in it is ever deleted.
+    enum class Mode { Pass, CharmsOnly, ShopBuy };
+    void set_mode(Mode m) { mode_ = m; }
+
+    /// Which charms are due, by TrashList::Item::clock_id: a charm used or
+    /// perhaps used less than charm_every_minutes ago is not (CharmClock).
+    /// Unset, every charm is.
+    void set_charm_due(std::function<bool(const std::string&)> due) { charm_due_ = std::move(due); }
+
+    /// Asked before the bag key and before every right-click of a charm run:
+    /// false -- whatever holds everything else of the bot off is gone -- stops
+    /// it there, with nothing more pressed.
+    void set_guard(std::function<bool()> still_held) { guard_ = std::move(still_held); }
+
+    /// Called with the clock id of a charm just before it is right-clicked --
+    /// before anything that cannot be taken back: whoever keeps the clock
+    /// writes it down as used then, and corrects it from the outcome when the
+    /// run is over. A GoBot closed or killed in between has still not used it
+    /// twice.
+    void set_charm_claim(std::function<void(const std::string&)> claim) { charm_claim_ = std::move(claim); }
+
+    /// The most a run may take from here on, in milliseconds: it stops, with
+    /// nothing more right-clicked, when it has. 0: no limit.
+    void set_deadline_ms(int ms);
 
     struct Result {
         bool ran = false;           ///< the bag was found and searched
@@ -812,6 +1132,32 @@ public:
         /// or no question at all and the stack gone down anyway. Never counted
         /// as used, nothing of it deleted, and the pass stops at the first.
         int  use_unsure = 0;
+
+        /// Charms (Bùa), apart from the fragments above: every right-click of
+        /// the run and how it came out, for CharmClock -- a charm perhaps used
+        /// is never right-clicked again before its hour is over.
+        struct CharmTry {
+            std::string      id;        ///< TrashList::Item::clock_id
+            CharmClock::How  how = CharmClock::How::NotUsed;
+            std::string      why;       ///< in Vietnamese, when it was not seen used
+        };
+        std::vector<CharmTry> charm_tries;
+        int  charms_used = 0;           ///< seen taken
+        int  charms_seen = 0;           ///< on the Dùng list and found in the bag
+        int  charms_waiting = 0;        ///< of those, not due yet
+
+        /// The shop (Mode::ShopBuy): slots of each potion in Tiêu Dùng when
+        /// the run began and when it ended (-1: not counted), purchases
+        /// confirmed, whether the shop was seen open, and whether the game
+        /// said the bag has no room.
+        int  shop_hp_before = -1, shop_mp_before = -1;
+        int  shop_hp_after = -1, shop_mp_after = -1;
+        int  shop_bought = 0;
+        bool shop_opened = false;
+        bool shop_full = false;
+        /// Bought a potion and the slots of it did not grow: not bought again,
+        /// and whoever runs the job does not run it again by itself.
+        bool shop_no_gain = false;
         std::string trouble;        ///< why it stopped early, in Vietnamese
 
         /// An item went towards the bin and was never seen given back or
@@ -881,6 +1227,16 @@ private:
     bool cancel_all(int tries);
 
     bool grab_view(Frame& f, BagView& v);
+    /// A look at the game through the grab it was made with -- what every
+    /// look of a run is, by way of grab_: a black frame is looked at again, a
+    /// moment apart, for up to kBlackLooks looks, and one black still is no
+    /// look at all: false, `f` left empty, as on every false. A frame black
+    /// where the game is shows nothing of what is up, and was taken on the live
+    /// client for a quantity box gone (2026-10-30). One stretch is waited out
+    /// once: after it, black gives up at once until a look is not black.
+    bool see(Frame& f);
+    static constexpr int kBlackLooks = 20;
+    static constexpr int kBlackGapMs = 200;
 
     /// The screen is in a state to start on an item: the bag found, the can
     /// in the bin and no dialog with the two buttons anywhere.
@@ -951,7 +1307,108 @@ private:
         Unknown,    ///< anything else; `why` says what, in Vietnamese
     };
     SlotNow slot_now(const BagView& v, int index, const Frame& before, int count, Frame& look,
-                     Frame& shot, std::string& why);
+                     Frame& shot, std::string& why, int gap_ms = 150);
+
+    /// A charm: one right-click on the slot, then what the game asks. Its
+    /// question is confirmed with Xác Nhận only when bag::charm_question says
+    /// so on a fresh look the moment before, with nothing else up and no other
+    /// window open -- else Hủy Bỏ -- and counts only when the slot is seen
+    /// empty or one less, the same on two looks. A right-click that brings no
+    /// question and takes the stack down is not taken for a use: it may be a
+    /// shop's or a storage window's doing (UsedUnasked), and the run stops.
+    /// Quicker than use_one all the way: it watches in short steps, has no
+    /// monster book to look for or shut, and looks at the slot again after
+    /// charm_gap_ms rather than 150. `count` is the stack count read off the
+    /// slot.
+    UseResult charm_one(const Frame& f, const BagView& v, int index, int count);
+
+    /// The charm sweep of tab `tab` -- Tiêu Dùng -- for Mode::CharmsOnly: every
+    /// slot judged a charm on the Dùng list that is due, once each, in the
+    /// order they lie, at most kMaxCharms a run. `res.charm_tries` gets each.
+    /// Nothing is right-clicked with another of the game's windows open, nor
+    /// with the guard saying no, nor past the deadline. A stop after the first
+    /// thing that is not as expected: nothing more is right-clicked.
+    void charm_sweep(int tab, BagView& v, Result& res, bool& stop);
+    static constexpr int kMaxCharms = 10;
+
+    /// The guard says the hold is gone, or the deadline has passed: said and
+    /// `stop` set. False when the run may go on.
+    bool charm_must_stop(Result& res, bool& stop);
+
+    /// Mode::ShopBuy, after the bag has been found: count the potions' slots
+    /// in Tiêu Dùng; when some potion is under its threshold, open the shop --
+    /// a right-click on the Người Giữ Sân item of Khác -- and buy that potion
+    /// up to its limit, 100 at a time, the number typed into the quantity box
+    /// and read back before Xác Nhận; close the shop (ESC, seen to work, else
+    /// its Thoát) and count again, never more than kShopRounds times over.
+    /// Every step is seen to have happened before the next, and anything not as
+    /// expected stops it with Hủy Bỏ on whatever is up and a picture kept.
+    void shop_buy(BagView& v, Result& res, bool& stop);
+    /// The slots of the HP and MP potions in tab `tab`, the whole tab from its
+    /// top, each once. False, with `res.trouble` saying why, when the tab could
+    /// not be counted to its end.
+    bool shop_count(int tab, BagView& v, Result& res, bool& stop, int& hp, int& mp);
+    /// The page on show with its scroll bar read: the pointer is moved off the
+    /// bar and the page looked at again a few times when the thumb is not
+    /// readable. False when the bag is not found at all.
+    bool look_page(Frame& f, BagView& v);
+    /// One click on the scroll bar's arrow -- down, or up -- that moved the
+    /// page, tried again a pixel aside and waited for longer when it did not,
+    /// up to four times. `v` is the page after. False when it never moved.
+    bool scroll_arrow(bool down, BagView& v);
+    /// Click tab `tab` and look until it is the one chosen.
+    bool select_tab(int tab, BagView& v, Result& res);
+    /// find_dialogs, without the shop's own Mua | Thoát buttons, which a pair
+    /// of buttons can pass for; and Hủy Bỏ on what is left, as cancel_all.
+    std::vector<bag::Dialog> dialogs_here(const Frame& f, const TemplateStore& store) const;
+    bool shop_cancel(int tries);
+    /// Where the shop's buttons are while it is open: set by shop_open and
+    /// every purchase, empty when it is not.
+    ScreenRect shop_buttons_;
+    /// How far under the shop's row its buttons were when both were last seen.
+    int shop_row_dy_ = bag::kShopButtonsDy;
+    /// The shop's quantity question's two buttons while it is taken to be up:
+    /// set when it is recognised, emptied when a look shows it gone.
+    ScreenRect shop_q_;
+    /// The run's purchases type as scan codes, clicked into the box first: the
+    /// way that put the number in the box once the plain way had not.
+    bool shop_scan_ = false;
+    /// Whether `f` shows that question still where it was: its Xác Nhận where
+    /// it was. Its Hủy Bỏ is not asked -- on the live client (2026-10-31) the
+    /// box drew it pressed after keys it did not take, and the pair as a whole
+    /// then matched at 0.69, so find_dialogs saw no dialog at all.
+    bool question_still(const Frame& f) const;
+    /// Whether the game itself is on top over `r` -- its middle and two corners
+    /// -- so that a copy of the screen there shows the game's. Nothing is taken
+    /// for gone where it is not: the shop's frames come off the screen only.
+    bool seen_at(const ScreenRect& r);
+    /// The number in the box of the dialog at `pair`, looked at over a whole
+    /// blink of its caret: the number every look agrees on, kBoxMixed,
+    /// kUnreadable, or kBoxGone when the dialog was no longer where it was.
+    int  shop_box(const ScreenRect& pair, Frame& last, int min_ms = 0);
+    int  shop_box_once(const ScreenRect& pair, Frame& last, int min_ms = 0);
+    /// Open the shop: a right-click on the opener, which has to be on the tab
+    /// on show, confidently, with no other window open, and the shop seen open
+    /// -- its row and buttons -- within a few seconds. False with `res.trouble`.
+    /// `clicked`: the item was right-clicked -- a shop may come even when this
+    /// gave up waiting for it, and is then waited for once more and shut.
+    bool shop_open(BagView& v, Result& res, Frame& shot, bag::Shop& shop, bool& clicked);
+    /// One purchase of potion `hp` (else MP): its cell double-clicked -- never
+    /// Mua, which brings up a box that takes no keys (the player's own way,
+    /// 2026-10-31) -- the quantity question seen, 100 typed and read back,
+    /// Xác Nhận. kShopBought,
+    /// or kShopFullBag when the game said no room, or kShopStopped with
+    /// `res.trouble`. Dry: stops at the question, which is answered Hủy Bỏ.
+    enum { kShopStopped = 0, kShopBought = 1, kShopFullBag = 2, kShopProbed = 3 };
+    int  shop_purchase(bool hp, Result& res);
+    /// The shop on `f`: bag::find_shop, or -- with its first row hidden -- its
+    /// buttons alone, where they were last seen.
+    bag::Shop shop_now(const Frame& f) const;
+    /// Close the shop with ESC -- looked at, and its Thoát clicked when it is
+    /// still there -- and nothing else pressed. False when it is still open.
+    bool shop_close(const bag::Shop& shop, Result& res);
+    static constexpr int kShopRounds = 4;
+    static constexpr int kShopMaxBuys = 40;
 
     /// A slot this pass registered from, with some of its stack still in it,
     /// by tab, row of the tab and column -- kept only where the scroll bar
@@ -998,7 +1455,11 @@ private:
     /// when the last one has closed, kFailed on anything else, and then
     /// trash_one backs out.
     enum { kFailed = 0, kDone = 1 };
-    int  answer(const bag::Dialog& first, int count);
+    /// `done`, when given, says from a look that the item is gone -- its slot
+    /// empty, the can back, nothing up -- which ends the wait for a question
+    /// after Xác Nhận early (answered_early_).
+    int  answer(const bag::Dialog& first, int count, const std::function<bool(const Frame&)>& done = {});
+    bool answered_early_ = false;
 
     /// What the box of the bin's quantity dialog `d` holds, looked at again
     /// and again for a whole blink of its caret: the number every look that
@@ -1013,7 +1474,19 @@ private:
     /// A dialog of the bin's on screen within `ms`, or one with kind -1 and
     /// an empty pair. `foreign` is set when another dialog came up instead,
     /// and `last` gets the last frame looked at, to keep when that is wrong.
-    bag::Dialog wait_for_dialog(int ms, bool& foreign, Frame* last = nullptr);
+    /// Waits up to `ms` for one of the bin's dialogs; `done`, when given and
+    /// true on two looks at least kDoneApartMs apart with nothing up, ends the
+    /// wait early with no dialog, and answered_early_ says so.
+    bag::Dialog wait_for_dialog(int ms, bool& foreign, Frame* last = nullptr,
+                                const std::function<bool(const Frame&)>& done = {});
+    /// The pointer moved off the bag's slots and buttons -- right of the bag,
+    /// else above it, else left of it, the first of these inside the game's
+    /// window and clear of a shop open beside the bag -- so no item's
+    /// description lies over the grid, the bin or a dialog. A move, never a
+    /// click; nothing with pretend hands.
+    void park_pointer(bool title_first = false);
+    /// Where the bag's strip was on the last look that found it.
+    ScreenRect last_strip_;
 
     void keep(const Frame& f, const char* what);
     void scroll_to_top(BagView& v);
@@ -1024,15 +1497,32 @@ private:
     std::chrono::steady_clock::time_point now() const;
     void sleep(int ms);
 
-    // Through the hands when they are set, else the game's input.
-    bool click(int x, int y);
+    // Through the hands when they are set, else the game's input. A click on
+    // the game goes only where the game is on top as the button goes down,
+    // and only with the game in front unless `need_front` is false -- for
+    // giving an item back, as with mouse_ok. That one goes even once
+    // cancelled, being what a stop needs; any other does not.
+    bool click(int x, int y, bool need_front = true);
+    /// A double-click on the game, as click: see InputManager::click_on_game.
+    bool double_click(int x, int y);
     bool drag(int fx, int fy, int tx, int ty);
     bool press(std::uint32_t vk);
+    /// A key as its scan code alone: see Hands::scan_key.
+    bool press_scan(std::uint32_t vk);
     bool right_click(int x, int y);
+    /// The game's own click, for click and right_click: says why not when it
+    /// is not made.
+    bool click_game(int x, int y, bool right_button, bool need_front, int presses = 1);
+    /// Why a click or a drag on the game was not made, said as the trash
+    /// screen says it.
+    void say_not_made(InputManager::GameClick why, int x, int y);
 
     InputManager&        input_;
     const TemplateStore& store_;
-    Grab                 grab_;
+    Grab                 raw_grab_;     ///< the grab as given
+    Grab                 grab_;         ///< see(), or empty with no grab given
+    bool                 black_said_ = false;
+    bool                 blacked_out_ = false;  ///< the last look gave up on a whole black stretch
     CleanSettings        settings_;
     const TrashList*     trash_ = nullptr;
     const CountReader*   counts_ = nullptr;
@@ -1051,6 +1541,13 @@ private:
     /// taken for it -- see run().
     bool                 late_ask_ = false;
     std::atomic<bool>    cancelled_{false};
+    Mode                 mode_ = Mode::Pass;
+    std::function<bool(const std::string&)> charm_due_;
+    std::function<bool()> guard_;
+    std::function<void(const std::string&)> charm_claim_;
+    /// The deadline of a run, on now()'s clock; unset when deadline_set_ is not.
+    std::chrono::steady_clock::time_point deadline_;
+    bool                 deadline_set_ = false;
 };
 
 } // namespace gobot

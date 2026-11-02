@@ -3,6 +3,7 @@
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/no_real_input.hpp"
+#include "gobot/util.hpp"
 #include "gobot/vitals_reader.hpp"
 
 #include <algorithm>
@@ -295,20 +296,39 @@ bool SessionManager::request_shutdown(int delay_s, const std::string& why) {
     if (refuse_real_input("shut the machine down")) return false;
     delay_s = std::clamp(delay_s, 10, 3600);
 
+    // Windows' own shutdown.exe, by its full path. Named bare, CreateProcess
+    // looks first in the folder GoBot was started from -- one any program may
+    // write to -- and would start whatever was left there as shutdown.exe,
+    // with GoBot's administrator rights. Worked out before the warning below,
+    // so the log never announces a shut-down that cannot start.
+    const std::wstring program = utf8_to_wide(system32_path("shutdown.exe"));
+    if (program.empty()) {
+        GB_WARN("Could not ask Windows to shut down: it would not say where its own programs are");
+        return false;
+    }
+
     // Loud, and in the log, because somebody will come back to a machine that
     // is off and want to know what turned it off.
     GB_WARN("SHUTTING DOWN in %d seconds: %s.  Run `shutdown /a` to call it off.",
             delay_s, why.c_str());
 
-    char command[512];
-    std::snprintf(command, sizeof command,
-                  "shutdown.exe /s /t %d /c \"GoBot: %.200s\"", delay_s, why.c_str());
+    // The reason, cut to 200 UTF-16 units between two characters. Cut as
+    // UTF-8 bytes, it could end halfway through a Vietnamese letter, and the
+    // whole command line would then be read in the ANSI code page.
+    std::wstring reason = utf8_to_wide(why);
+    if (reason.size() > 200) {
+        reason.resize(200);
+        // Not the first half of a surrogate pair whose second half was cut.
+        if (reason.back() >= 0xD800 && reason.back() <= 0xDBFF) reason.pop_back();
+    }
+    std::wstring command = L"\"" + program + L"\" /s /t " + std::to_wstring(delay_s) +
+                           L" /c \"GoBot: " + reason + L"\"";   // CreateProcessW writes into it
 
-    STARTUPINFOA si{};
+    STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                        nullptr, nullptr, &si, &pi)) {
+    if (!CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         GB_WARN("Could not ask Windows to shut down (error %lu)", GetLastError());
         return false;
     }

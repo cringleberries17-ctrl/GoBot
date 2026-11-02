@@ -51,7 +51,14 @@ public:
     BotBrain(const BotBrain&) = delete;
     BotBrain& operator=(const BotBrain&) = delete;
 
+    /// Starts the tick loop and arms the executor (CommandExecutor::arm),
+    /// whose threads press nothing until then.
     void start();
+    /// Stops the tick loop and halts the executor (CommandExecutor::halt): on
+    /// return nothing is queued, the route is dropped, every held key is up,
+    /// and nothing is pressed until start(). Safe to call when already
+    /// stopped. The destructor calls it, so declare the executor before the
+    /// brain, to outlive it.
     void stop();
     bool running() const { return running_.load(); }
 

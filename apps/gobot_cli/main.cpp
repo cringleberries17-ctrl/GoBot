@@ -19,16 +19,19 @@
 #include "gobot/auto_login.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/crash_watch.hpp"
+#include "gobot/dpi.hpp"
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
 #include "gobot/party_chat.hpp"
 #include "gobot/bot_brain.hpp"
 #include "gobot/command_executor.hpp"
 #include "gobot/common.hpp"
+#include "gobot/util.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/game_state.hpp"
 #include "gobot/glyph_font.hpp"
+#include "gobot/hotkeys.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/camera_tracker.hpp"
@@ -67,7 +70,6 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -96,7 +98,119 @@ std::atomic<double> g_walk_lo{1e18};
 std::atomic<double> g_walk_hi{-1e18};
 std::atomic<double> g_walk_span{0.0};
 
-void on_signal(int) { g_stop.store(true); }
+// When the first Ctrl+C, Ctrl+Break or close came, on now_ms()'s clock; 0 before.
+std::atomic<std::uint64_t> g_stop_asked_ms{0};
+// Set as main() returns: what a closing console waits for.
+HANDLE g_main_done = nullptr;
+// Windows ends a closing console's program about five seconds after the
+// close, whatever its handler does.
+constexpr DWORD kCloseWaitMs = 4000;
+// A Ctrl+C this long after the first one ends the program at once.
+constexpr std::uint64_t kForceAfterMs = 5000;
+
+/// Ctrl+C, Ctrl+Break and closing the console set g_stop, and the command
+/// running stops the way it stops by itself.
+///
+/// std::signal caught the first Ctrl+C alone, never Ctrl+Break or the close,
+/// and a program ended by one of those finished nothing: gobot_cli let go of
+/// no key or button -- --keytest's LCtrl stayed down for the whole machine, a
+/// --trash drag kept the mouse button -- and gobot_sniff --record wrote none
+/// of its per-connection files. This runs on a thread Windows starts for it,
+/// so it touches the atomics, stderr and the event and nothing else: never
+/// the log, which can be torn down under it as main() returns. A close ends
+/// the program as soon as this returns, so a close waits for main() first.
+BOOL WINAPI on_console_event(DWORD event) {
+    switch (event) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT: {
+        const std::uint64_t now = now_ms();
+        std::uint64_t first = 0;
+        g_stop.store(true);
+        if (g_stop_asked_ms.compare_exchange_strong(first, now)) {
+            std::fputs("\nStopping... (should it still be running 5 s from now, "
+                       "Ctrl+C again ends it at once)\n", stderr);
+            return TRUE;
+        }
+        // A sum, not now - first: should two of these ever run at once, the
+        // one that read the clock first can come second, and that would wrap.
+        if (now < first + kForceAfterMs) {
+            std::fputs("\nStill stopping...\n", stderr);
+            return TRUE;
+        }
+        std::fputs("\nIt has not stopped by itself: ending it now.\n", stderr);
+        return FALSE;
+    }
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT: {
+        std::uint64_t none = 0;
+        g_stop_asked_ms.compare_exchange_strong(none, now_ms());
+        g_stop.store(true);
+        std::fputs("\nStopping...\n", stderr);
+        if (g_main_done != nullptr) WaitForSingleObject(g_main_done, kCloseWaitMs);
+        else Sleep(kCloseWaitMs);
+        return TRUE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
+/// Ends a closing console's wait. main() declares one first, so it goes last:
+/// after the command is done with all it held -- keys, the mouse button, a
+/// capture, files.
+struct MainDone {
+    ~MainDone() {
+        // Flushed first: once the event is set, Windows may end the program
+        // before the C runtime would have flushed anything.
+        std::fflush(nullptr);
+        if (g_main_done != nullptr) SetEvent(g_main_done);
+    }
+};
+
+/// Calls cancel() on `target` once Ctrl+C has set g_stop, from beside it, for
+/// as long as this lives: for a flow that knows nothing of g_stop and would
+/// otherwise go on clicking after the player asked it to stop.
+template <typename T>
+class CancelOnStop {
+public:
+    explicit CancelOnStop(T& target) : target_(target) {
+        if (g_stop.load()) target_.cancel();
+        watch_ = std::thread([this] {
+            while (watching_.load()) {
+                if (g_stop.load()) {
+                    target_.cancel();
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
+    }
+    ~CancelOnStop() {
+        watching_.store(false);
+        watch_.join();
+    }
+    CancelOnStop(const CancelOnStop&) = delete;
+    CancelOnStop& operator=(const CancelOnStop&) = delete;
+
+private:
+    T&                target_;
+    std::atomic<bool> watching_{ true };
+    std::thread       watch_;
+};
+
+/// Sleeps `ms`, waking within a tenth of a second once Ctrl+C has set g_stop.
+/// False when it did.
+bool nap_unless_stopped(long long ms) {
+    using clock = std::chrono::steady_clock;
+    const auto until = clock::now() + std::chrono::milliseconds(ms);
+    while (!g_stop.load()) {
+        const auto left = until - clock::now();
+        if (left <= clock::duration::zero()) return true;
+        std::this_thread::sleep_for(std::min<clock::duration>(left, std::chrono::milliseconds(100)));
+    }
+    return false;
+}
 
 /// Whether this process is elevated. Decides more than it looks: Windows will
 /// not let a process inject input while a window of higher integrity has the
@@ -115,6 +229,17 @@ bool running_as_admin() {
     return elevated != FALSE;
 }
 
+/// Whether this program's console is the window in front: the console's own
+/// window, or the window hosting it. Windows Terminal draws the console in a
+/// window of its own, and the window GetConsoleWindow names is a hidden one
+/// that window owns.
+bool console_in_front() {
+    const HWND console = GetConsoleWindow();
+    const HWND front = GetForegroundWindow();
+    if (console == nullptr || front == nullptr) return false;
+    return front == console || front == GetAncestor(console, GA_ROOTOWNER);
+}
+
 void print_usage() {
     // In more than one piece: MSVC refuses any one string literal over 16 KB.
     std::printf(R"(gobot_cli — GhostOnline packet-capture bot
@@ -129,14 +254,18 @@ OPTIONS
   --iface <name>      Capture interface (overrides app config)
   --host <ip>         Game server IP
   --port <n>          Game server port
-  --window <spec>     Which window to aim at. A plain string is a piece of
-                      its title. For a window with no title -- the game's
+  --window <spec>     Which window to aim at. A plain string is its whole
+                      title, as --windows prints it: a part of the title
+                      finds nothing. For a window with no title -- the game's
                       launcher is one -- name it by class and program instead:
                         --window "class=#32770,proc=GhostOnlineVTC.exe"
                       See --windows for what is on screen.
   --status            Print state every second instead of running the bot.
                       Use this to confirm capture and decoding work before
-                      letting it press any keys.
+                      letting it press any keys. Nothing at all is pressed:
+                      the bot's key threads are not even started. It runs
+                      while [Framing] is not yet confirmed, when the bot
+                      will not.
   --see               Look at the game window once and print every name plate
                       found, then exit. No packets, no keys pressed — this is
                       how to check what the radar can actually see, from a
@@ -221,11 +350,21 @@ UNATTENDED RUNNING
                       modal disappears, so an unattended run accepts none of
                       them otherwise. The inviter's name is read off the
                       dialog and checked against configs/party.ini before
-                      anything is clicked.
+                      anything is clicked. Only a dialog whose line names the
+                      inviter is answered, never one of the trash bin's, and
+                      only if a second look just before the click shows the
+                      same invitation.
   --doctor            Check everything GoBot needs on this machine and say
                       what is wrong: elevation, pictures, glyphs, configs,
                       the game window, screen capture, the launcher path.
                       Run this first when something does not work.
+  --fix-dpi           Above 100%% display scale Windows enlarges a game that
+                      does not handle it, and GoBot cannot read it then. This
+                      sets the game's program (or --window's) to draw at its
+                      own size, as its Compatibility tab would. Start the game
+                      again afterwards. A high-DPI override on gobot_cli's own
+                      Compatibility tab, which keeps it from real pixels, is
+                      taken off first.
   --crashcheck        Say whether the client has fallen over, and how: exited,
                       stopped answering, or showing a message box. When it is a
                       box, the box's text is printed and the error code is read
@@ -266,7 +405,10 @@ UNATTENDED RUNNING
                       question, three tries, never the village or Cash, and
                       nothing while the trash bin's dialog is up. With --dry
                       it only looks, and prints both points it would click;
-                      nothing is focused and nothing is clicked.
+                      nothing is focused and nothing is clicked. A step
+                      whose confirmation is up before its click is refused;
+                      one marked check = false is clicked unchecked, and the
+                      run says so.
   --bag <png>         Find the bag in a screenshot and say what the trash
                       cleaner would see: where the tab strip is, the trash
                       can, and which slots hold something. Writes the
@@ -342,9 +484,9 @@ UNATTENDED RUNNING
                       finds it is the player's own. It keeps the frame it
                       judged the screen by, and any frame where a step went
                       wrong, in chat_debug. Ctrl+C stops it at the next
-                      key -- but brings this console to the front, not the
-                      game, so what was typed may be left in the game's
-                      chat line: look before pressing a key there.
+                      key and presses nothing more, so what was typed is
+                      left in the game's chat line: look before pressing a
+                      key there.
                       When the line may have been left open, it looks a few
                       times more, pressing nothing, and says what it saw;
                       left_open=1 says those looks still could not see it
@@ -394,16 +536,24 @@ UNATTENDED RUNNING
                       brought to the front, the jump_key of configs/hunt.ini
                       pressed exactly ONCE, and the character's name plate
                       watched for 1.5 s. Nothing at all is pressed while a
-                      hold is on or with no jump key. The last line is
+                      hold is on, with no jump key, or with Down (never
+                      pressed: on a gate it changes the map). The last line is
                         JUMP RESULT outcome=<name> key=<key> pressed=<0|1>
                                     rose=<px> reads=<n>
                       and it exits 0 when the character was seen to jump.
   --hunt <n>          Hunt for n seconds with configs/hunt.ini: walks and
-                      presses keys in the game. With
+                      presses keys in the game, and brings the game back in
+                      front of anything but this console. F12 and F11
+                      (macro.ini panic_key, hunt.ini toggle_key) end it from
+                      any window. With
   --with-macro        it runs configs/macro.ini beside it, as the GUI's BẮT
                       ĐẦU does: the HP/MP reader, potions, buffs, and the
                       skills following the fight when skills_follow_fight is
-                      on. Ends with what the macro pressed and held.
+                      on. Ends with what the macro pressed and held. Without
+                      --hunt, it runs beside the packet bot, on and off with
+                      it (F10), on the HP and MP its packets give: the packet
+                      bot's potions and buffs are macro.ini's, and go only
+                      with this.
   --method <m>        With --chat-once or --chat: type with vk (a key per
                       character, GoC's way), unicode, wmchar or imechar
                       instead of chat.ini's method. Every method but vk keeps
@@ -441,13 +591,18 @@ UNATTENDED RUNNING
   --help              This text.
 
 HOTKEYS (while running)
-  F10                 Toggle the bot on/off
-  Ctrl+C              Quit
+  F10                 Toggle the bot on/off -- and, with --with-macro, the
+                      macro with it. It is switched on only with the game or
+                      this console in front.
+  Ctrl+C, Ctrl+Break  Stop, letting go of every key. Closing the console
+                      does the same.
 
 BEFORE THIS WORKS
-  configs/protocol.ini must contain a [Framing] block and at least the
-  packet layouts the bot reads: self position, self HP, and monster
-  positions. Derive them with gobot_sniff — see README.md.
+  configs/protocol.ini must contain a [Framing] block, marked verified=true
+  once checked (until then the bot will not start; --status still runs),
+  and at least the packet layouts the bot reads: self position, self HP,
+  and monster positions.
+  Derive them with gobot_sniff — see README.md.
 
   Run as Administrator; Npcap requires it.
 )");
@@ -472,7 +627,7 @@ struct Options {
     bool keytest = false;
     bool inputcheck = false;
     int  hunt_seconds = 0;
-    bool with_macro = false;        ///< --with-macro, beside --hunt
+    bool with_macro = false;        ///< --with-macro, beside --hunt or the packet bot
     bool jumptest = false;          ///< --jumptest: the jump key once, watched
     std::string press_key;
     std::string click_spec;
@@ -494,6 +649,7 @@ struct Options {
     int  keepalive_minutes = 0;
     bool crash_check = false;
     bool doctor = false;
+    bool fix_dpi = false;
     int  invite_seconds = 0;
     std::string invite_who;
     int  auto_party_seconds = 0;
@@ -584,6 +740,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (a == "--keepalive") o.keepalive_minutes = std::stoi(next("--keepalive"));
         else if (a == "--crashcheck") o.crash_check = true;
         else if (a == "--doctor")   o.doctor = true;
+        else if (a == "--fix-dpi")  o.fix_dpi = true;
         else if (a == "--invites")  o.invite_seconds = std::stoi(next("--invites"));
         else if (a == "--invite")   o.invite_who = next("--invite");
         else if (a == "--autoparty") o.auto_party_seconds = std::stoi(next("--autoparty"));
@@ -704,7 +861,12 @@ std::string resolve(const std::string& path) {
 
 /// Global hotkey thread. Uses GetAsyncKeyState rather than RegisterHotKey so
 /// the key still reaches the game — a registered hotkey is swallowed.
-void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, CommandExecutor& exec) {
+///
+/// The bot is switched on only with the game or this console in front: an F10
+/// pressed in another program -- a menu key, a debugger's Step Over -- used to
+/// switch it on unseen, and it walked and attacked the moment the game came
+/// back. Off from anywhere: stopping is never the wrong thing to do.
+void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, const InputManager& input) {
     bool was_down = false;
 
     while (!g_stop.load()) {
@@ -713,22 +875,61 @@ void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, CommandExecutor& exec
         const bool down = (GetAsyncKeyState(static_cast<int>(toggle_vk)) & 0x8000) != 0;
         if (down && !was_down) {
             const bool enable = !g_bot_enabled.load();
-            g_bot_enabled.store(enable);
 
-            if (enable) {
+            if (enable && !input.window_focused() && !console_in_front()) {
+                GB_INFO("%s pressed with neither the game nor this console in front -- "
+                        "the bot stays off", InputManager::key_name(toggle_vk).c_str());
+            } else if (enable) {
+                g_bot_enabled.store(true);
                 brain.reanchor_origin();
+                // Arms the executor too: until now its threads pressed nothing,
+                // whatever HP the packets said.
                 brain.start();
-                exec.set_auto_attack(true);
                 GB_INFO("=== BOT ENABLED ===");
             } else {
+                g_bot_enabled.store(false);
+                // Halts the executor too, before it returns: nothing queued, no
+                // route, every key up. The clear_queue() that used to follow
+                // threw away the StopMove the brain had queued, and the arrow
+                // stayed down.
                 brain.stop();
-                exec.set_auto_attack(false);
-                exec.clear_queue();
                 GB_INFO("=== BOT DISABLED ===");
             }
         }
         was_down = down;
     }
+}
+
+/// Says so, once a run, when Windows shows the window scaled (gobot/dpi.hpp):
+/// above 100% display scale it enlarges a program that does not handle DPI
+/// itself, and nothing GoBot looks for in a window shown like that is found.
+void warn_if_scaled(void* hwnd) {
+    static bool said = false;
+    if (said) return;
+    // gobot_cli itself first: held to Windows' scaling, it reads nothing right,
+    // whatever the window does.
+    if (threads_view_percent() > 100) {
+        said = true;
+        std::fprintf(stderr,
+                     "\nWindows shows gobot_cli the screen scaled to %d%%, so nothing it reads off the screen is\n"
+                     "the screen's real pixels: %s.\n\n",
+                     threads_view_percent(),
+                     real_pixels_possible()
+                         ? "Windows holds it to that, most likely by a high-DPI override on its Compatibility\n"
+                           "tab -- gobot_cli --fix-dpi takes it off"
+                         : "this Windows is older than 10 1607 -- set its display scale to 100%");
+        return;
+    }
+    const WindowScaling s = window_scaling(hwnd);
+    if (!s.stretched()) return;
+    said = true;
+    const ScaleCure cure = cure_for(hwnd, s);
+    const bool fixable = cure == ScaleCure::SetOverride || cure == ScaleCure::SetOverrideOrMove;
+    std::fprintf(stderr,
+                 "\nWindows shows this window %s to %d%% (drawn %dx%d, shown %dx%d), and GoBot cannot read it\n"
+                 "like this: %s.%s\n\n",
+                 s.percent >= 100 ? "enlarged" : "shrunk", s.percent, s.own_w, s.own_h, s.real_w, s.real_h,
+                 cure_advice(cure), fixable ? "\ngobot_cli --fix-dpi gives it the override, with it open." : "");
 }
 
 /// Attach to the window these options point at.
@@ -745,9 +946,67 @@ void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, CommandExecutor& exec
 /// `InputManager::parse_spec`. The game's launcher has no title, so it is the
 /// only way to aim at it.
 bool attach_window(InputManager& input, const Options& o, const AppConfig& app) {
-    if (!o.window.empty())
-        return input.find_game_window(InputManager::parse_spec(o.window));
-    return input.find_game_window(app.window_title, app.window_class, app.process_name);
+    const bool found = !o.window.empty()
+                           ? input.find_game_window(InputManager::parse_spec(o.window))
+                           : input.find_game_window(app.window_title, app.window_class, app.process_name);
+    // --doctor and --fix-dpi say it themselves, in their own words.
+    if (found && !o.doctor && !o.fix_dpi) warn_if_scaled(input.target_window());
+    return found;
+}
+
+/// The game's program -- or with --window, that window's -- set to draw at its
+/// own size: Windows' per-program high-DPI override, as on its Compatibility
+/// tab. Above 100% display scale Windows enlarges a game that does not handle
+/// DPI itself, and nothing GoBot looks for in it is found.
+int run_fix_dpi(const Options& o, const AppConfig& app) {
+    // gobot_cli's own first: held to Windows' scaling by an override on its
+    // exe, it reads nothing right, whatever the game does.
+    const std::string me = own_exe_path();
+    if (threads_view_percent() > 100 && has_any_dpi_override(me)) {
+        std::string why;
+        if (!clear_dpi_override(me, &why)) {
+            std::fprintf(stderr, "Could not take the high-DPI override off %s: %s\n", me.c_str(), why.c_str());
+            return 1;
+        }
+        std::printf("Took the high-DPI override off %s: it works in real pixels from its next start.\n",
+                    me.c_str());
+    }
+    InputManager input;
+    if (!attach_window(input, o, app)) {
+        std::fprintf(stderr, "No game window. Start the game, then run this again.\n");
+        return 1;
+    }
+    const WindowScaling s = window_scaling(input.target_window());
+    if (s.known && !s.stretched()) {
+        std::printf("Windows shows the window pixel for pixel already (client %dx%d): nothing to set.\n",
+                    s.real_w, s.real_h);
+        return 0;
+    }
+    // A program that handles DPI is scaled for another reason, and one whose
+    // override Windows does not take is past what setting it again can do.
+    const ScaleCure cure = cure_for(input.target_window(), s);
+    if ((s.stretched() && s.handles_dpi) || cure == ScaleCure::OverrideIgnored) {
+        std::fprintf(stderr, "Windows shows the window %s to %d%%, and setting the override cannot help: %s.\n",
+                     s.percent >= 100 ? "enlarged" : "shrunk", s.percent, cure_advice(cure));
+        return 1;
+    }
+    const std::string exe = window_program(input.target_window());
+    if (exe.empty()) {
+        std::fprintf(stderr, "Windows would not say which program the window belongs to.\n");
+        return 1;
+    }
+    if (has_high_dpi_override(exe)) {
+        std::printf("%s is set already: close it and start it again.\n", exe.c_str());
+        return 0;
+    }
+    std::string why;
+    if (!set_high_dpi_override(exe, &why)) {
+        std::fprintf(stderr, "Could not set it for %s: %s\n", exe.c_str(), why.c_str());
+        return 1;
+    }
+    std::printf("Set for %s.\nClose it and start it again: from then on Windows shows it pixel for pixel.\n",
+                exe.c_str());
+    return 0;
 }
 
 void print_utf8(const char* text);
@@ -1366,11 +1625,13 @@ int run_survey(const TemplateStore& store, const Frame& frame) {
 int run_list_windows() {
     const auto windows = InputManager::enumerate_windows();
     std::printf("%zu windows\n\n", windows.size());
-    std::printf("  %-34s %-22s %-24s %s\n", "title", "class", "program", "at");
-    std::printf("  %-34s %-22s %-24s %s\n",
-                "----------------------------------",
+    // The title last and whole: --window wants all of it, so it has to be
+    // there to copy, with nothing padded after it.
+    std::printf("  %-22s %-24s %-21s %s\n", "class", "program", "at", "title");
+    std::printf("  %-22s %-24s %-21s %s\n",
                 "----------------------",
-                "------------------------", "---------------------");
+                "------------------------",
+                "---------------------", "----------------------------------");
 
     for (const auto& w : windows) {
         RECT r{};
@@ -1381,17 +1642,18 @@ int run_list_windows() {
                           static_cast<int>(r.right - r.left),
                           static_cast<int>(r.bottom - r.top));
 
-        std::string title = w.title.empty() ? "(untitled)" : w.title;
-        if (title.size() > 34) title = title.substr(0, 31) + "...";
+        const std::string title = w.title.empty() ? "(untitled)" : w.title;
 
-        std::printf("  %-34s %-22s %-24s %s\n", title.c_str(),
-                    w.window_class.c_str(), w.process.c_str(), where);
+        std::printf("  %-22s %-24s %-21s %s\n", w.window_class.c_str(),
+                    w.process.c_str(), where, title.c_str());
     }
 
-    std::printf("\nTo aim at one of these, give --window a piece of its title,\n"
-                "or -- for an untitled one -- put its class and program in the\n"
-                "config that needs it. configs/login.ini does exactly that for\n"
-                "the launcher: client_class and client_process.\n");
+    std::printf("\nTo aim at one of these, give --window its whole title, as\n"
+                "printed above -- a part of it finds nothing. For an untitled\n"
+                "one give its class and program instead,\n"
+                "  --window \"class=#32770,proc=GhostOnlineVTC.exe\"\n"
+                "or put them in the config that needs it. configs/login.ini does\n"
+                "exactly that for the launcher: client_class and client_process.\n");
     return 0;
 }
 
@@ -1560,7 +1822,7 @@ int run_vitals(const Options& o, const AppConfig& app, int seconds) {
 
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     int ticks = 0;
-    while (std::chrono::steady_clock::now() < until) {
+    while (!g_stop.load() && std::chrono::steady_clock::now() < until) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         const auto v = reader.values();
         std::printf("  %4ds  ", ++ticks / 2);
@@ -1688,68 +1950,80 @@ int run_invites(const Options& o, const AppConfig& app, int seconds) {
 
     std::printf("Watching for invitations for %d seconds.\n\n"
                 "  accept           %s\n"
-                "  only from        %s\n"
+                "  from             %s\n"
                 "  blacklist        %s (%zu names)\n\n",
                 seconds, rules.auto_accept ? "yes" : "no",
-                rules.accept_only.empty()
-                    ? "anyone" : std::to_string(rules.accept_only.size()).c_str(),
+                rules.accept_all ? "anyone not on the blacklist"
+                    : rules.accept_only.empty()
+                        ? "no one: the accept-only list is empty"
+                        : (std::to_string(rules.accept_only.size()) +
+                           " name(s) on the accept-only list").c_str(),
                 rules.use_blacklist ? "on" : "off", rules.blacklist.size());
 
     ScreenCapture capture;
     PartyInvite watcher;
     watcher.set_settings(geometry);
 
+    const auto grab = [&](Frame& f) {
+        return capture.grab(input.target_window(), f) && f.valid();
+    };
+    const GlyphFont* reader = have_font ? &font : nullptr;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
-    std::string answered;
+    // The dialog last described and the one last clicked, each by where it is
+    // and the name on it. By the name alone, a dialog whose name could not be
+    // read matched nothing, and was described and counted again on every look,
+    // back to back, for as long as it stayed up.
+    std::string described, answered;
     int seen = 0, accepted = 0;
 
-    while (std::chrono::steady_clock::now() < until) {
+    while (std::chrono::steady_clock::now() < until && !g_stop.load()) {
         Frame frame;
-        if (!capture.grab(input.target_window(), frame) || !frame.valid()) {
+        if (!grab(frame)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        const auto look = watcher.look(frame, store, have_font ? &font : nullptr);
+        const auto look = watcher.look(frame, store, reader);
         if (!look.up) {
+            described.clear();
             answered.clear();
             std::this_thread::sleep_for(std::chrono::milliseconds(400));
             continue;
         }
 
         // The same dialog stays up for ten seconds; answer it once.
-        if (!look.who.empty() && look.who == answered) {
+        const bool bin = bag::bin_asking(frame, store);
+        const std::string which = std::to_string(look.at.x) + "," +
+                                  std::to_string(look.at.y) + " " +
+                                  PartyInvite::fold(look.who) + (bin ? " bin" : "");
+        if (which == answered) {
             std::this_thread::sleep_for(std::chrono::milliseconds(400));
             continue;
         }
 
-        ++seen;
-        std::printf("  invitation at %d,%d (%.3f)\n", look.at.x, look.at.y,
-                    static_cast<double>(look.score));
-        std::printf("    line read   \"%s\"\n", look.line.c_str());
-        std::printf("    from        %s\n",
-                    look.who.empty() ? "(could not read a name)" : look.who.c_str());
+        const bool fresh = which != described;
+        described = which;
+        if (fresh) {
+            ++seen;
+            std::printf("  invitation at %d,%d (%.3f)\n", look.at.x, look.at.y,
+                        static_cast<double>(look.score));
+            std::printf("    line read   \"%s\"\n", look.line.c_str());
+            std::printf("    from        %s\n",
+                        look.who.empty() ? "(could not read a name)" : look.who.c_str());
+        }
 
         if (!rules.auto_accept) {
-            std::printf("    -> left alone: accepting is off\n\n");
-            answered = look.who;
+            if (fresh) std::printf("    -> left alone: accepting is off\n\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
             continue;
         }
-        // The name is only needed when a rule turns on it.
-        //
-        // Refusing to answer an unreadable name sounds careful and is not: a
-        // live invitation read as "Exampley in" was declined on those grounds
-        // while the settings said accept from anyone, so nothing happened and
-        // the one rule actually in force was ignored. Ask for a name when
-        // there is a list to check it against, and not otherwise.
-        const bool name_matters =
-            !rules.accept_only.empty() ||
-            (rules.use_blacklist && !rules.blacklist.empty());
-
-        if (look.who.empty() && name_matters) {
-            std::printf("    -> left alone: there is a list to check against and "
-                        "the name could not be read\n\n");
-            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        const PartyInvite::Verdict verdict = PartyInvite::decide(look, bin, rules);
+        if (verdict.answer == PartyInvite::Answer::LeaveAlone) {
+            if (fresh)
+                std::printf("    -> left alone: %s%s\n\n", verdict.why.c_str(),
+                            !have_font && !bin && look.who.empty()
+                                ? " (there is no bitmap font to read it with)" : "");
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
             continue;
         }
         // Bring the game up before clicking anything.
@@ -1765,18 +2039,23 @@ int run_invites(const Options& o, const AppConfig& app, int seconds) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
 
-        if (name_matters && !rules.may_invite(look.who)) {
-            std::printf("    -> declined: the rules say no\n\n");
-            input.click_at(look.decline_x, look.decline_y);
-            answered = look.who;
+        // Clicked only with the game in front and the button itself under the
+        // point, and only if a second look shows the same invitation.
+        const bool accept = verdict.answer == PartyInvite::Answer::Accept;
+        std::string why;
+        if (!watcher.answer(input, grab, store, reader, look, accept,
+                            [] { return g_stop.load(); }, &why)) {
+            std::printf("    -> not %s: %s%s\n", accept ? "accepted" : "declined",
+                        why.c_str(), g_stop.load() ? "" : "; looking again");
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
             continue;
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(geometry.settle_ms));
-        const bool sent = input.click_at(look.accept_x, look.accept_y);
-        std::printf("    -> clicked %d,%d%s%s\n", look.accept_x, look.accept_y,
-                    sent ? "" : "  (SendInput refused it)",
-                    input.window_focused() ? "" : "  (the game was NOT in front)");
+        answered = which;
+        if (!accept) {
+            std::printf("    -> declined: %s\n\n", verdict.why.c_str());
+            continue;
+        }
+        std::printf("    -> clicked %d,%d\n", look.accept_x, look.accept_y);
 
         // Check the dialog actually went away.
         //
@@ -1804,7 +2083,6 @@ int run_invites(const Options& o, const AppConfig& app, int seconds) {
                                 shot.c_str());
             }
         }
-        answered = look.who;
     }
 
     std::printf("%d invitation(s) seen, %d accepted.\n", seen, accepted);
@@ -1873,8 +2151,10 @@ int run_invite_player(const Options& o, const AppConfig& app,
     PlayerList list;
     list.set_settings(geometry);
 
+    // Ctrl+C: nothing more is clicked, and the waits end.
+    const auto stop = [] { return g_stop.load(); };
     std::string why;
-    if (!list.ensure_open(input, capture, store, &why)) {
+    if (!list.ensure_open(input, capture, store, &why, stop)) {
         std::fprintf(stderr, "Could not open the player list: %s\n", why.c_str());
         return 1;
     }
@@ -1915,7 +2195,7 @@ int run_invite_player(const Options& o, const AppConfig& app,
         return 0;
     }
 
-    if (!list.invite(input, capture, store, *row, &why)) {
+    if (!list.invite(input, capture, store, *row, &why, stop)) {
         std::fprintf(stderr, "The invite did not go: %s\n", why.c_str());
         return 1;
     }
@@ -2015,8 +2295,9 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     int asked = 0, invited = 0;
     std::string last_seen;
+    const PlayerList::Stop stopped = [] { return g_stop.load(); };
 
-    while (std::chrono::steady_clock::now() < until) {
+    while (!g_stop.load() && std::chrono::steady_clock::now() < until) {
         Frame frame;
         if (!capture.grab(input.target_window(), frame) || !frame.valid()) {
             std::this_thread::sleep_for(
@@ -2075,7 +2356,7 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
             }
 
             std::string why;
-            if (!list.ensure_open(input, capture, store, &why)) {
+            if (!list.ensure_open(input, capture, store, &why, stopped)) {
                 std::printf("    -> could not open the list: %s\n", why.c_str());
                 continue;
             }
@@ -2095,7 +2376,7 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
             for (const auto& r : rows) if (r.index == at) row = &r;
             if (row == nullptr) continue;
 
-            const bool sent = list.invite(input, capture, store, *row, &why);
+            const bool sent = list.invite(input, capture, store, *row, &why, stopped);
             // Whatever it says, the party may change from here: a look from
             // before this is no reading for the next asker (read_party).
             events.changed(now_ms(), "an invite was sent", party_text::kEventInvited);
@@ -2236,7 +2517,20 @@ int run_player_list(const Options& o, const AppConfig& app) {
     std::printf("opener at %d,%d %dx%d (%.3f)\n", found.at.x, found.at.y,
                 found.at.w, found.at.h, static_cast<double>(found.score));
 
-    input.click_at(found.at.x + found.at.w / 2, found.at.y + found.at.h / 2);
+    // Every click here only with the game in front and the game itself under
+    // the point: the frames come from PrintWindow, which shows the game even
+    // when it is covered, and a click goes to whatever is at that point of
+    // the screen.
+    const auto stop = [] { return g_stop.load(); };
+    InputManager::GameClick how = InputManager::GameClick::Failed;
+    if (!input.click_on_game(found.at.x + found.at.w / 2, found.at.y + found.at.h / 2,
+                             false, stop, &how)) {
+        std::fprintf(stderr, "Did not click the players-on-map button: %s.%s\n",
+                     InputManager::game_click_name(how),
+                     how == InputManager::GameClick::Stopped
+                         ? "" : " Bring the game up and run this again.");
+        return 1;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(900));
 
     Frame after;
@@ -2320,7 +2614,11 @@ int run_player_list(const Options& o, const AppConfig& app) {
             return 1;
         }
         std::printf("\nselecting row %d at %d,%d\n", o.pick_row, click_x, row_y);
-        input.click_at(click_x, row_y);
+        if (!input.click_on_game(click_x, row_y, false, stop, &how)) {
+            std::fprintf(stderr, "Did not click row %d: %s.\n", o.pick_row,
+                         InputManager::game_click_name(how));
+            return 1;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(900));
 
         Frame picked;
@@ -3274,10 +3572,9 @@ int run_chat(const Options& o, const AppConfig& app) {
     for (int slept = 0; slept < settings.quiet_before_ms && !g_stop; slept += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, settings.quiet_before_ms - slept)));
 
-    // Ctrl+C stops the line at its next key, as the GUI's DỪNG does. What was
-    // typed is rubbed out if the game is in front -- which, with this console
-    // brought forward by the Ctrl+C, it may well not be. Watched from beside
-    // the line, which knows nothing of g_stop.
+    // Ctrl+C stops the line at its next key, as the GUI's DỪNG does, and
+    // nothing more is pressed: what was typed is left in the game's chat line.
+    // Watched from beside the line, which knows nothing of g_stop.
     std::atomic<bool> sending{true};
     std::thread watch([&] {
         while (sending) {
@@ -3456,16 +3753,11 @@ int run_quest_once(const Options& o, const AppConfig& app) {
     hands.key = [&](std::uint32_t vk, int hold_ms) {
         return input.window_focused() && input.key_press(vk, hold_ms);
     };
-    // Only with the game in front and the game itself under the point: the
-    // frames come from PrintWindow, which shows the game even when covered.
+    // Only with the game in front and the game itself under the point, as
+    // InputManager::click_on_game clicks: the frames come from PrintWindow,
+    // which shows the game even when covered.
     hands.click = [&](int x, int y) {
-        if (!input.window_focused()) return false;
-        HWND game = static_cast<HWND>(input.target_window());
-        POINT p{ x, y };
-        if (game == nullptr || !ClientToScreen(game, &p)) return false;
-        HWND under = WindowFromPoint(p);
-        if (under == nullptr || (under != game && GetAncestor(under, GA_ROOT) != game)) return false;
-        return input.click_at(x, y);
+        return input.click_on_game(x, y, false, [] { return g_stop.load(); });
     };
     hands.move = [&](int x, int y) { return input.move_pointer(x, y); };
     hands.now = [] { return now_ms(); };
@@ -3525,7 +3817,7 @@ int run_routines(const Options& o, const AppConfig& app) {
                         r.steps.size() == 1 ? "" : "s");
             for (const DialogDriver::Step& s : r.steps)
                 std::printf("      %-24s -> %s%s\n", s.find.c_str(),
-                            s.gone ? "(it goes away)" : s.confirm.c_str(),
+                            !s.check ? "(not checked)" : s.gone ? "(it goes away)" : s.confirm.c_str(),
                             s.optional ? "   [optional]" : "");
         }
         const auto missing = Routine::missing_pictures(routines, store);
@@ -3580,16 +3872,38 @@ int run_routines(const Options& o, const AppConfig& app) {
                 continue;
             }
             ++found;
-            const int cx = hit.at.x + (step.click_dx >= 0 ? step.click_dx : hit.at.w / 2);
-            const int cy = hit.at.y + (step.click_dy >= 0 ? step.click_dy : hit.at.h / 2);
-            std::printf("at %d,%d (%.2f) -- would click %d,%d\n",
-                        hit.at.x, hit.at.y, static_cast<double>(hit.score), cx, cy);
+            int cx = 0, cy = 0;
+            DialogDriver::click_point(hit.at, step, cx, cy);
+            std::printf("at %d,%d (%.2f) -- would click %d,%d%s\n",
+                        hit.at.x, hit.at.y, static_cast<double>(hit.score), cx, cy,
+                        step.click_dx >= hit.at.w || step.click_dy >= hit.at.h
+                            ? "  (its offset is past the picture's edge: at the edge)" : "");
+            if (!step.check) {
+                std::printf("      not checked (check = false): clicked once, with nothing on "
+                            "screen to show it landed\n");
+            } else if (!step.gone && !step.confirm.empty()) {
+                // A run refuses a step whose confirmation is up before its
+                // click. Up now, it may well be up then.
+                const Frame* proof = store.get(step.confirm);
+                if (proof && TemplateMatcher::find(frame, ScreenRect{ 0, 0, frame.width, frame.height },
+                                                   *proof, step.score).found)
+                    std::printf("      its confirmation '%s' is on screen already: a run refuses "
+                                "this step if it still is when the step comes\n", step.confirm.c_str());
+            }
         }
 
-        std::printf("\n%d of %zu steps are on screen right now. That is expected to "
-                    "be one:\na routine is a sequence, so only its first step can be "
-                    "up before it runs.\n", found, routine->steps.size());
+        std::printf("\n%d of %zu steps are on screen right now. The first has to be; later "
+                    "ones mostly come up\nas the routine runs, though some -- a shop's Mua -- "
+                    "are up from the start.\n", found, routine->steps.size());
         return 0;
+    }
+
+    // Every click is made only with the game in front. Saying so now beats
+    // three refused attempts at every step.
+    if (!input.window_focused()) {
+        std::fprintf(stderr, "The game is not in front, so no click would be let through. "
+                             "Click the game and run this again.\n");
+        return 1;
     }
 
     DialogDriver driver(input, store, grab);
@@ -3598,14 +3912,39 @@ int run_routines(const Options& o, const AppConfig& app) {
         std::fflush(stdout);
     });
 
+    // Ctrl+C stops the routine at its next look, before any further click.
+    // Watched from beside the driver, which knows nothing of g_stop.
+    if (g_stop.load()) driver.cancel();
+    std::atomic<bool> driving{true};
+    std::thread watch([&] {
+        while (driving.load()) {
+            if (g_stop.load()) driver.cancel();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    });
     std::string trouble;
     const std::size_t done = driver.run_all(routine->steps, &trouble);
+    driving.store(false);
+    watch.join();
+    // The steps that ran with nothing to check them, said again at the end,
+    // so "finished" is not read as every click having been seen to land.
+    std::string unchecked;
+    for (std::size_t i = 0; i < done && i < routine->steps.size(); ++i)
+        if (!routine->steps[i].check)
+            unchecked += (unchecked.empty() ? "" : ", ") + std::to_string(i + 1);
     if (done == routine->steps.size()) {
         std::printf("\n'%s' finished.\n", routine->name.c_str());
+        if (!unchecked.empty())
+            std::printf("Not checked: step %s -- nothing on screen shows whether its click "
+                        "landed (check = false in routines.ini). Look in the game.\n",
+                        unchecked.c_str());
         return 0;
     }
     std::fprintf(stderr, "\nStopped after %zu of %zu steps: %s\n",
                  done, routine->steps.size(), trouble.c_str());
+    if (!unchecked.empty())
+        std::fprintf(stderr, "Step %s was not checked: if its click missed, that may be why.\n",
+                     unchecked.c_str());
     return 1;
 }
 
@@ -3709,10 +4048,12 @@ int run_revive(const Options& o, const AppConfig& app) {
         std::printf("  %s\n", line.c_str());
         std::fflush(stdout);
     });
+    // Ctrl+C stops a try between its steps, before any further click.
+    reviver.set_stop([] { return g_stop.load(); });
     // One death: until it is up again, or its tries have run out -- a minute
     // and a half at most, three tries of thirteen seconds with time to spare.
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(90);
-    while (std::chrono::steady_clock::now() < until) {
+    while (!g_stop.load() && std::chrono::steady_clock::now() < until) {
         const Reviver::Turn turn = reviver.turn();
         if (turn == Reviver::Turn::Alive) {
             std::printf(reviver.revived() > 0 ? "\nUp again.\n"
@@ -3727,7 +4068,11 @@ int run_revive(const Options& o, const AppConfig& app) {
             print_utf8(("\n" + Reviver::out_of_tries_vi() + "\n").c_str());
             return 2;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        if (turn == Reviver::Turn::Stopped || !nap_unless_stopped(1200)) break;
+    }
+    if (g_stop.load()) {
+        std::fprintf(stderr, "\nStopped (Ctrl+C).\n");
+        return 1;
     }
     std::fprintf(stderr, "\nStill dead after 90 s.\n");
     return 1;
@@ -3925,6 +4270,7 @@ int run_login(const Options& o, const AppConfig& app) {
     AutoLogin flow;
     flow.set_settings(settings);
     flow.set_templates(&store);
+    flow.set_debug_dir(exe_relative("login_debug"));
     // A game that comes up part way and then sits on a screen the crossing
     // does not know is ended the way --keepalive ends a crashed one, with
     // the same [Crash] settings, and the next attempt starts from VTCZone.
@@ -3957,7 +4303,12 @@ int run_login(const Options& o, const AppConfig& app) {
         std::fflush(stdout);
     });
 
-    const bool ok = flow.run();
+    bool ok = false;
+    {
+        // Ctrl+C ends the crossing at its next step, before any further click.
+        CancelOnStop<AutoLogin> on_stop(flow);
+        ok = flow.run();
+    }
     if (!ok) std::fprintf(stderr, "\nStopped: %s\n", flow.trouble().c_str());
     return ok ? 0 : 1;
 }
@@ -4016,6 +4367,18 @@ int run_doctor(const Options& o, const AppConfig& app) {
         if (elevated) good("administrator", "yes");
         else bad("administrator", "NO -- keys and clicks will go nowhere");
     }
+
+    // ---- the pixels GoBot works in (gobot/dpi.hpp) ----
+    if (threads_view_percent() > 100)
+        bad("GoBot's pixels", "Windows shows gobot_cli the screen scaled to " + std::to_string(threads_view_percent()) +
+                                  "%, so nothing it reads is the screen's real pixels -- " +
+                                  (real_pixels_possible()
+                                       ? "Windows holds it to that, most likely by a high-DPI override on its "
+                                         "Compatibility tab (--fix-dpi takes it off)"
+                                       : "this Windows is older than 10 1607: set its display scale to 100%"));
+    else
+        good("GoBot's pixels", become_dpi_aware() ? "real screen pixels"
+                                                  : "the screen's own: Windows does not scale them here");
 
     // ---- the pictures ----
     TemplateStore store;
@@ -4081,6 +4444,17 @@ int run_doctor(const Options& o, const AppConfig& app) {
             note("", "the monster box, the chat lines, the player list and the HP/MP "
                      "landmark follow the client's size -- see --see for where each "
                      "looks");
+            const WindowScaling scale = window_scaling(input.target_window());
+            if (scale.stretched()) {
+                const ScaleCure cure = cure_for(input.target_window(), scale);
+                const bool fixable = cure == ScaleCure::SetOverride || cure == ScaleCure::SetOverrideOrMove;
+                bad("display scale", std::string("Windows shows the game ") +
+                                         (scale.percent >= 100 ? "enlarged" : "shrunk") + " to " +
+                                         std::to_string(scale.percent) + "% -- " + cure_advice(cure) +
+                                         (fixable ? " (--fix-dpi)" : ""));
+            } else if (scale.known) {
+                good("display scale", "the game is shown pixel for pixel");
+            }
 
             ScreenCapture cap;
             Frame frame;
@@ -4099,7 +4473,7 @@ int run_doctor(const Options& o, const AppConfig& app) {
             // window may be named differently on another build, or its process
             // name may not be readable at all. Printing both sides turns a
             // round of guessing into one answer.
-            std::printf("         looking for   title~'%s' class='%s' process='%s'\n",
+            std::printf("         looking for   title='%s' class='%s' process='%s'\n",
                         app.window_title.c_str(), app.window_class.c_str(),
                         app.process_name.c_str());
             std::printf("         on screen now:\n");
@@ -4139,10 +4513,13 @@ int run_doctor(const Options& o, const AppConfig& app) {
 
     // ---- the optional things ----
     {
-        const HMODULE wpcap = LoadLibraryA("wpcap.dll");
-        if (wpcap) { note("npcap", "installed (only the protocol tools use it)");
-                     FreeLibrary(wpcap); }
-        else note("npcap", "not installed -- fine, nothing that plays the game needs it");
+        // Loaded as capturing loads it, by its full path from where Npcap
+        // puts it, and kept. By its bare name it was looked for beside this
+        // program first.
+        if (PacketCapture::load_wpcap())
+            note("npcap", "installed (only the protocol tools use it)");
+        else
+            note("npcap", "not installed -- fine, nothing that plays the game needs it");
 
         note("dotnet", ClrBridge::runtime_dir().empty()
                            ? "not installed -- fine, only the party-status "
@@ -4240,7 +4617,7 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
     bool said_fine = false;
     bool seen_running = false;      // the client has been up at some point
 
-    while (std::chrono::steady_clock::now() < until) {
+    while (!g_stop.load() && std::chrono::steady_clock::now() < until) {
         CrashWatch::Look seen = watch.look();
 
         if (!seen.bad()) {
@@ -4260,10 +4637,13 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
             if (!stall.settings().enabled ||
                 !stall.check(game.target_window(), watch_settings.game_process, false, settings, store,
                              now_ms(), seen, resolve("keeper_debug"))) {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
+                nap_unless_stopped(3000);
                 continue;
             }
         }
+        // Stopped while it looked: nothing is ended or started -- a player who
+        // pressed Ctrl+C to take over a stalled client keeps it.
+        if (g_stop.load()) break;
         said_fine = false;
 
         std::printf("\n  [%-22s] %s\n", CrashWatch::trouble_name(seen.what),
@@ -4298,7 +4678,8 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
             watch.shut_down(seen);
             std::printf("  [%-22s] %ds\n", "cooling down", watch_settings.cooldown_s);
             std::fflush(stdout);
-            std::this_thread::sleep_for(std::chrono::seconds(watch_settings.cooldown_s));
+            // Stopped while it cooled down: the client is not started again.
+            if (!nap_unless_stopped(watch_settings.cooldown_s * 1000LL)) break;
 
             ++restarts;
             std::printf("  [%-22s] %d of %d\n\n", "logging back in", restarts,
@@ -4309,13 +4690,38 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
         AutoLogin flow;
         flow.set_settings(settings);
         flow.set_templates(&store);
-        flow.set_end_client([&watch] { return watch.shut_down(CrashWatch::Look{}); },
-                            watch_settings.cooldown_s);
+        flow.set_debug_dir(exe_relative("login_debug"));
+        // A client the crossing ends, stuck part way in, is a restart as well,
+        // as in the window's keeper: closed to be entered again. Out of them,
+        // nothing is ended and the crossing stops.
+        bool out_of_restarts = false;
+        flow.set_end_client(
+            [&] {
+                if (restarts >= watch_settings.max_restarts) {
+                    out_of_restarts = true;
+                    flow.cancel();
+                    return false;
+                }
+                ++restarts;
+                return watch.shut_down(CrashWatch::Look{});
+            },
+            watch_settings.cooldown_s);
         flow.on_step([](AutoLogin::Step s, const std::string& detail) {
             std::printf("  [%-22s] %s\n", AutoLogin::step_name(s), detail.c_str());
             std::fflush(stdout);
         });
-        if (!flow.run()) {
+        bool back_in = false;
+        {
+            // Ctrl+C ends the crossing at its next step, before any further click.
+            CancelOnStop<AutoLogin> on_stop(flow);
+            back_in = flow.run();
+        }
+        if (g_stop.load()) break;
+        if (out_of_restarts) {
+            std::fprintf(stderr, "\nThat is %d restart(s) and the game needs another. Stopping.\n", restarts);
+            return 1;
+        }
+        if (!back_in) {
             std::fprintf(stderr, "\nCould not get back in: %s\n",
                          flow.trouble().c_str());
             return 1;
@@ -4325,7 +4731,8 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
         std::printf("\n");
     }
 
-    std::printf("\n%d minute(s) up. %d restart(s).\n", minutes, restarts);
+    if (g_stop.load()) std::printf("\nStopped (Ctrl+C) after %d restart(s).\n", restarts);
+    else std::printf("\n%d minute(s) up. %d restart(s).\n", minutes, restarts);
     return 0;
 }
 
@@ -4366,7 +4773,7 @@ int run_session(const Options& o, const AppConfig& app, int seconds) {
                 seconds, settings.poll_ms, settings.lost_grace_s);
 
     session.start();
-    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    nap_unless_stopped(seconds * 1000LL);
     const auto st = session.stats();
     const auto final_state = session.state();
     session.stop();
@@ -4601,7 +5008,10 @@ int run_anchor(const Options& o, const AppConfig& app, int seconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         if (!cap.grab(input.target_window(), frame) || !frame.valid()) continue;
 
-        camera.update(frame);
+        // The view is the eyes thread's to track. Fed from here as well, the
+        // tracker got frames from two threads out of order, which counted
+        // movement and breaks that never happened -- the very numbers this
+        // watches.
         const auto view = camera.fix();
 
         const std::vector<Monster> world = state.monsters();
@@ -4682,6 +5092,10 @@ int run_anchor(const Options& o, const AppConfig& app, int seconds) {
         std::fflush(stdout);
     }
 
+    // The eyes first: a thread still joinable when this returns ends the
+    // program (std::terminate), and it reads the window and the camera.
+    watching.store(false);
+    eyes.join();
     capture.stop();
     return 0;
 }
@@ -4866,17 +5280,48 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
                     mc.skills_follow_fight ? "following the fight" : "on their own timers");
     }
 
-    std::printf("Hunting for %d seconds with %s. Ctrl+C to stop early.\n\n",
-                seconds, InputManager::key_name(cfg.attack_key).c_str());
+    // F12 and F11 end the run from any window, as they stop the GUI's: the
+    // game is kept in front here, and the console could not hold the keyboard
+    // long enough for a Ctrl+C.
+    MacroConfig macro_keys;
+    macro_keys.load(resolve("configs/macro.ini"));
+    HotkeySet stop_keys;
+    stop_keys.panic = macro_keys.panic_key != 0 ? macro_keys.panic_key : VK_F12;
+    stop_keys.hunt = cfg.toggle_key != 0 ? cfg.toggle_key : VK_F11;
+
+    std::printf("Hunting for %d seconds with %s. %s or %s ends it from any window; "
+                "Ctrl+C here too.\n\n",
+                seconds, InputManager::key_name(cfg.attack_key).c_str(),
+                InputManager::key_name(stop_keys.panic).c_str(),
+                InputManager::key_name(stop_keys.hunt).c_str());
 
     // With the macro, the readings go to it ten times a second, as the GUI's
     // tick hands them over; the line below is written every half second.
     const int every_ms = macro ? 100 : 500;
     const int per_line = 500 / every_ms;
     int looks = 0;
+    // The two keys are watched as the GUI watches them. One already down as
+    // the run starts is not a press of it.
+    HotkeyEdgeTracker stop_edges;
+    const auto is_down = [](std::uint32_t vk) {
+        return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+    };
+    stop_edges.update(stop_keys, is_down);
     const std::uint64_t until = now_ms() + static_cast<std::uint64_t>(seconds) * 1000;
     while (now_ms() < until && !g_stop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(every_ms));
+        // In 50 ms slices, with the two keys looked at after each.
+        std::uint32_t stopped_by = 0;
+        for (int slept = 0; slept < every_ms && stopped_by == 0 && !g_stop.load(); slept += 50) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            const HotkeyEdges went = stop_edges.update(stop_keys, is_down);
+            if (went.panic) stopped_by = stop_keys.panic;
+            else if (went.hunt) stopped_by = stop_keys.hunt;
+        }
+        if (stopped_by != 0) {
+            std::printf("\n%s pressed: stopping.\n", InputManager::key_name(stopped_by).c_str());
+            break;
+        }
+        if (g_stop.load()) break;
         if (macro) {
             const float hp = reader->hp_percent();
             // As no reading once the bars have not been read for as long as
@@ -4884,20 +5329,27 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
             // fail keeps its last values.
             const std::uint64_t read_at = reader->last_read_ms(), at = now_ms();
             macro->set_vitals(VitalsReader::if_fresh(hp, read_at, at, MacroEngine::kVitalsStaleMs),
-                              VitalsReader::if_fresh(reader->mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
-            // Out of the world -- no HUD -- every key holds, as in the GUI.
-            const bool in_world = hp >= 0.0f;
+                              VitalsReader::if_fresh(reader->mp_percent(), read_at, at, MacroEngine::kVitalsStaleMs),
+                              VitalsReader::if_fresh(reader->pet_percent(), read_at, at, MacroEngine::kVitalsStaleMs));
+            // Out of the world -- no HUD -- every key holds, as in the GUI: HP
+            // unread for kOutOfWorldAfterMs of reads, not one unreadable frame;
+            // at the last read, so a game minimised keeps its last frame's say.
+            const bool in_world = input.window_valid() &&
+                                  VitalsReader::in_world(reader->hp_seen_ms(), read_at, MacroEngine::kOutOfWorldAfterMs);
             if (in_world == macro->suspended())
                 macro->set_suspended(!in_world, in_world ? std::string{}
                                                          : "the character is not in the world");
         }
         if (++looks % per_line != 0) continue;
 
-        // Keep the game in front. The GUI deliberately does not do this -- if
-        // you alt-tab away it should wait, not fight you for the desktop --
-        // but a headless run was started for no other purpose, and whatever
-        // stole the foreground (this console, as often as not) is in the way.
-        if (!input.window_focused()) input.focus_window();
+        // Keep the game in front, every half second, over anything but this
+        // console -- the CLI's own rule, not the GUI's FrontKeeper, and not
+        // switched off by [Simple] refocus: a headless run was started for no
+        // other purpose, and whatever stole the foreground is in the way.
+        // Never this console, though: that is the player, come to type Ctrl+C
+        // or read the output, and taking the keyboard back from them within
+        // half a second left no way to stop the run but closing the window.
+        if (!input.window_focused() && !console_in_front()) input.focus_window(InputManager::kFocusMinMs);
 
         const auto ds = detector.stats();
         const auto hs = hunter.status();
@@ -4960,6 +5412,7 @@ const char* jump_outcome_word(JumpCheck::Outcome o) {
         case JumpCheck::Outcome::NotInFront: return "not-in-front";
         case JumpCheck::Outcome::Stopped:    return "stopped";
         case JumpCheck::Outcome::Unchecked:  return "unchecked";
+        case JumpCheck::Outcome::NeverPressed: return "never-pressed";
         case JumpCheck::Outcome::NoKey:      break;
     }
     return "no-key";
@@ -4981,6 +5434,13 @@ int run_jumptest(const Options& o, const AppConfig& app) {
     if (cfg.jump_key == 0) {
         std::printf("No jump_key in configs/hunt.ini: there is nothing to try.\n");
         std::printf("JUMP RESULT outcome=no-key key=- pressed=0 rose=0 reads=0\n");
+        return 1;
+    }
+    // Down: never pressed, so not said to be.
+    if (InputManager::never_pressed(cfg.jump_key)) {
+        std::printf("jump_key in configs/hunt.ini is Down, which GoBot never presses: standing on a gate it "
+                    "takes the character to another map.\n");
+        std::printf("JUMP RESULT outcome=never-pressed key=Down pressed=0 rose=0 reads=0\n");
         return 1;
     }
 
@@ -5451,6 +5911,10 @@ int run_keytest(const Options& o, const AppConfig& app) {
                 "Leave the game in front.\n\n%-14s %8s %8s\n", "key", "max dx", "max dy");
 
     for (const auto& k : kKeys) {
+        // Ctrl+C lets go of the key being tried and tries no more. Killed
+        // instead, this left LCtrl down for the whole machine.
+        if (g_stop.load()) break;
+
         // Let the view settle, and establish where we are starting from.
         double x0 = 0.0, y0 = 0.0;
         bool have = false;
@@ -5462,7 +5926,7 @@ int run_keytest(const Options& o, const AppConfig& app) {
 
         double max_dx = 0.0, max_dy = 0.0;
         input.key_down(k.vk);
-        for (int i = 0; i < 16; ++i) {
+        for (int i = 0; i < 16 && !g_stop.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(90));
             double x = 0.0, y = 0.0;
             if (!where(x, y)) continue;
@@ -5480,6 +5944,16 @@ int run_keytest(const Options& o, const AppConfig& app) {
     std::printf("\nIf nothing moved at all, the game is not accepting synthetic\n"
                 "keystrokes -- which is a different problem from the wrong key.\n");
     return 0;
+}
+
+/// key_press(vk, ms), let go of as soon as Ctrl+C comes. A closing console
+/// allows a few seconds, and a six-second hold outlasted them, leaving the
+/// arrow down.
+void hold_unless_stopped(InputManager& input, std::uint32_t vk, int ms) {
+    if (!input.key_down(vk)) return;
+    for (int held = 0; held < ms && !g_stop.load(); held += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    input.key_up(vk);
 }
 
 /// Work out which bytes of which packet carry the character's position.
@@ -5654,8 +6128,8 @@ int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
             // pixels is a far weaker claim than one over a thousand.
             if (!input.window_focused()) input.focus_window();
             switch (leg % 4) {
-                case 0: input.key_press(input.right_key(), 6000); break;
-                case 2: input.key_press(input.left_key(), 6000); break;
+                case 0: hold_unless_stopped(input, input.right_key(), 6000); break;
+                case 2: hold_unless_stopped(input, input.left_key(), 6000); break;
                 default:
                     // Jump, then swing, without moving on.
                     //
@@ -5666,11 +6140,11 @@ int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
                     // keeping all the fighting until the end produced attacks
                     // from one spot, to be correlated against a measurement
                     // that never moved, which can say nothing about anything.
-                    for (int j = 0; j < 3; ++j) {
+                    for (int j = 0; j < 3 && !g_stop.load(); ++j) {
                         input.key_press(hunt.jump_key, 90);
                         std::this_thread::sleep_for(std::chrono::milliseconds(650));
                     }
-                    for (int swing = 0; swing < 7 && now_ms() < until; ++swing) {
+                    for (int swing = 0; swing < 7 && now_ms() < until && !g_stop.load(); ++swing) {
                         input.key_press(hunt.attack_key, 60);
                         std::this_thread::sleep_for(std::chrono::milliseconds(360));
                     }
@@ -5742,8 +6216,23 @@ int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    // Before anything loads a DLL. GoBot runs as administrator from a folder a
+    // player made, and Windows looked for a DLL named without its path in the
+    // program's own folder first: a wpcap.dll left beside gobot_cli.exe ran as
+    // administrator. From here on such DLLs come from System32 and Npcap's
+    // folder alone.
+    gobot::harden_dll_search();
+    // Real screen pixels (gobot/dpi.hpp): at 125% display scale Windows handed
+    // GoBot resampled frames and scaled sizes, and nothing it looked for was
+    // found. This program has no window of its own to keep scaled.
+    gobot::become_dpi_aware();
+
+    // What a closing console waits for (on_console_event). Declared first, so
+    // that it goes last: after the command has let go of its keys, its mouse
+    // button and its files.
+    g_main_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    MainDone main_done;
+    SetConsoleCtrlHandler(on_console_event, TRUE);
 
     Options opt;
     if (!parse_args(argc, argv, opt)) {
@@ -5777,6 +6266,7 @@ int main(int argc, char** argv) {
     // Looking at the screen needs none of the protocol machinery below.
     if (opt.list_windows) return run_list_windows();
     if (opt.doctor) return run_doctor(opt, app);
+    if (opt.fix_dpi) return run_fix_dpi(opt, app);
     if (opt.crash_check) return run_crash_check(opt);
     if (opt.see_only) return run_see(opt, app);
     if (opt.readself) return run_readself(opt.readself_text);
@@ -5851,21 +6341,34 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Framing confirmation is deliberately not a hard gate here. Whether the
-    // framing is right is measurable at runtime — the capture reports resync
-    // bytes against frames decoded, and a wrong spec resyncs constantly — and
-    // gating on a config flag only stranded people who had derived the format
-    // correctly. The real gate below is having packet layouts, which is the
-    // part that genuinely needs human confirmation.
+    // An unconfirmed framing stops the bot here, as GoBot's window will not
+    // START BOT on one: a wrong framing does not fail loudly, it gives
+    // plausible nonsense, and a bot acting on nonsense is worse than one that
+    // will not start. --status alone still runs -- it presses nothing, and it
+    // is how the framing is checked: the resync count against frames decoded.
+    // The packet layouts below are the other gate, the part only a person can
+    // confirm.
     {
         IniFile ini;
         ini.load(protocol_path);
         if (!ini.get_bool("Framing", "verified", false)) {
+            if (!opt.status_only) {
+                std::fprintf(stderr,
+                    "\n[Framing] in %s is not marked confirmed (verified=false),\n"
+                    "so the bot will not start: on a wrong framing it acts on nonsense.\n\n"
+                    "Check it first, with nothing pressed:\n\n"
+                    "  gobot_cli --status      more than a couple of resync bytes per frame\n"
+                    "                          decoded means the framing is wrong\n"
+                    "  gobot_sniff --decode    the packets read through it\n\n"
+                    "Then set verified=true in [Framing] -- or let GoBot's window confirm\n"
+                    "it from live traffic and save protocol.ini on its Protocol tab.\n",
+                    protocol_path.c_str());
+                return 1;
+            }
             std::fprintf(stderr,
                 "\nNote: [Framing] in %s is not marked confirmed.\n"
-                "Watch the resync count once running -- more than a couple of bytes\n"
-                "per frame means the framing is wrong, and the bot will be acting on\n"
-                "nonsense. Check with: gobot_sniff --decode\n\n",
+                "Watch the resync count -- more than a couple of bytes per frame means\n"
+                "the framing is wrong. Check with: gobot_sniff --decode\n\n",
                 protocol_path.c_str());
         }
     }
@@ -5886,7 +6389,7 @@ int main(int argc, char** argv) {
     // ---- wiring ----
     // Declaration order is destruction order reversed. PathFinder must outlive
     // the executor and brain that hold pointers to it, so it is declared
-    // first; executor must outlive brain, whose destructor enqueues a stop.
+    // first; executor must outlive brain, whose destructor halts it.
     GameState state;
     ProtocolHandler protocol(registry, state);
     InputManager input;
@@ -5897,6 +6400,19 @@ int main(int argc, char** argv) {
 
     executor.set_pathfinder(&pathfinder);
     brain.set_pathfinder(&pathfinder);
+
+    // --with-macro: configs/macro.ini beside the bot, as the GUI's macro runs
+    // beside its START BOT. Its potions and buffs are the bot's only ones:
+    // bot_default.ini has none. Started and stopped with the bot by the status
+    // loop below, and given the character's HP and MP from the packets: there
+    // is no reader of the bars here. Never in --status.
+    std::unique_ptr<MacroEngine> macro;
+    if (opt.with_macro && !opt.status_only) {
+        MacroConfig mc;
+        mc.load(resolve("configs/macro.ini"));
+        macro = std::make_unique<MacroEngine>(input, coord);
+        macro->set_config(mc);
+    }
 
     protocol.set_map_data_callback([&](const MapData& map) {
         pathfinder.set_double_jump(bot.double_jump);
@@ -5968,24 +6484,58 @@ int main(int argc, char** argv) {
 
     if (!capture.start(ccfg)) {
         std::fprintf(stderr, "\nCapture failed to start. Running as Administrator?\n");
+        // The focus listener holds `input`, which goes when this returns.
+        WindowFocusMonitor::instance().stop();
         return 1;
     }
 
-    executor.update_config(bot);
-    executor.start();
-
     std::thread hotkeys;
     if (!opt.status_only) {
-        hotkeys = std::thread(hotkey_loop, bot.key_start_stop, std::ref(brain), std::ref(executor));
+        // Not in --status, which starts none of the bot's threads, nor the
+        // macro's. Started, it presses nothing until F10 starts the brain,
+        // which arms it.
+        executor.update_config(bot);
+        executor.start();
+        hotkeys = std::thread(hotkey_loop, bot.key_start_stop, std::ref(brain), std::cref(input));
         std::printf("\nReady. Press %s in game to toggle the bot. Ctrl+C to quit.\n\n",
                     InputManager::key_name(bot.key_start_stop).c_str());
+        // As bot_default.ini ships, everything the bot presses is off.
+        if (!bot.any_action_on())
+            std::printf("Note: the attack is off in %s (skills go with the attack), so the bot will not "
+                        "attack or cast. Switch it on there first.\n\n", app.bot_config_path.c_str());
+        if (!macro)
+            std::printf("Note: the bot's potions and buffs are configs/macro.ini's, and go only with "
+                        "--with-macro.\n\n");
     } else {
         std::printf("\nStatus mode — no input will be sent. Ctrl+C to quit.\n\n");
     }
 
     // ---- status loop ----
     while (!g_stop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        // A second, in slices: a closing console allows a few seconds for
+        // everything below to be stopped, and this was a whole one of them.
+        // With --with-macro, each slice keeps the macro on and off with the
+        // bot -- from this thread alone: F10, a death and the traffic going
+        // quiet all say so through g_bot_enabled, and the brain stops itself
+        // after a death -- and hands it the packets' HP and MP.
+        for (int slept = 0; slept < 1000 && !g_stop.load(); slept += 50) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (!macro) continue;
+            const bool on = g_bot_enabled.load() && brain.running();
+            if (on && !macro->running()) macro->start();
+            else if (!on && macro->running()) macro->stop();
+            const Self me = state.self();
+            const SelfVitals v = packet_vitals(me, PacketCapture::silent_for_ms(capture.stats(), now_ms()),
+                                               MacroEngine::kVitalsStaleMs);
+            if (v.hp >= 0.0f || v.mp >= 0.0f) macro->set_vitals(v.hp, v.mp);
+            // Dead, by the packets: held, as the window's reader holds it out
+            // of the world -- no potion, buff or timed skill on the death
+            // panel, and the buffs cast again once it is over.
+            const bool down = me.dead || v.hp == 0.0f;
+            if (macro->running() && down != macro->suspended())
+                macro->set_suspended(down, down ? "the character is dead" : std::string{});
+        }
+        if (g_stop.load()) break;
 
         const auto cs = capture.stats();
         const auto ps = protocol.stats();
@@ -6010,6 +6560,7 @@ int main(int argc, char** argv) {
     g_stop.store(true);
     if (hotkeys.joinable()) hotkeys.join();
 
+    if (macro) macro->stop();
     brain.stop();
     executor.stop();
     capture.stop();

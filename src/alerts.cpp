@@ -670,6 +670,7 @@ const char* crossing_reason(AutoLogin::Why why) {
         case W::GameWindow:       return "đã bấm START nhưng cửa sổ game không mở";
         case W::Connect:          return "không thấy nút Kết Nối trong game";
         case W::Channel:          return "không thấy danh sách kênh";
+        case W::ChannelNotTaken:  return "game không nhận kênh đã chọn";
         case W::Character:        return "không thấy màn hình chọn nhân vật";
         case W::World:            return "đã chọn nhân vật nhưng chưa vào được game";
         case W::Covered:          return "có cửa sổ khác che chỗ cần bấm";
@@ -726,7 +727,7 @@ std::string back_in(int restart, int max_restarts) {
 }
 
 std::string gave_up_restarts(int restarts) {
-    return gave_up("game văng " + std::to_string(restarts) + " lần liền");
+    return gave_up("đã phải vào lại " + std::to_string(restarts) + " lần");
 }
 
 std::string gave_up_not_set_up() { return gave_up("chưa cài đặt đủ các màn hình đăng nhập"); }

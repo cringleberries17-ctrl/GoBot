@@ -38,30 +38,59 @@ std::string file_name(const std::string& path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+// A window's text and class, UTF-8, without asking the window anything.
+//
+// GetWindowText sends WM_GETTEXT to a window of this process and waits for
+// the thread that owns it -- for GoBot's own window, the UI thread. For
+// another program's window it reads the text Windows keeps, which
+// InternalGetWindowText reads for every window, with no message at all. Wide,
+// so a Vietnamese title arrives as UTF-8 rather than in the code page. Never
+// GetWindowTextLength here: it sends WM_GETTEXTLENGTH to GoBot's own windows.
+std::string text_of(HWND hwnd) {
+    wchar_t text[1024]{};
+    const int n = InternalGetWindowText(hwnd, text, 1024);
+    if (n <= 0) return {};
+    return wide_to_utf8(std::wstring(text, static_cast<std::size_t>(std::min(n, 1023))));
+}
+
+std::string class_of(HWND hwnd) {
+    wchar_t cls[256]{};
+    const int n = GetClassNameW(hwnd, cls, 256);
+    if (n <= 0) return {};
+    return wide_to_utf8(std::wstring(cls, static_cast<std::size_t>(std::min(n, 255))));
+}
+
+/// Whether a window's thread takes a message within 100 ms. Attaching to a
+/// thread pools the two threads' input, and one that has stopped answering
+/// then holds the one that attached -- GoBot's UI thread, F12 and all.
+bool answers(HWND hwnd) {
+    DWORD_PTR ignored = 0;
+    return SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_NORMAL | SMTO_ABORTIFHUNG, 100, &ignored) != 0;
+}
+
 BOOL CALLBACK collect_proc(HWND hwnd, LPARAM param) {
     auto* list = reinterpret_cast<std::vector<InputManager::WindowInfo>*>(param);
 
     if (!IsWindowVisible(hwnd)) return TRUE;
 
-    // An untitled window is still a window.
-    //
-    // This used to drop them, which cost a day: the game's launcher -- the one
-    // with the purple start button on it -- has no title at all. It is a bare
-    // #32770 dialog put up by GhostOnlineVTC.exe, and because it was never in
-    // this list, nothing could find it, and the login flow sat waiting out a
-    // whole minute for a window that was on the screen in front of it. The
-    // size and visibility tests below are what actually keep the junk out.
-    char title[512]{};
-    GetWindowTextA(hwnd, title, sizeof(title) - 1);
+    // Never this process's own windows, and passed over before anything is
+    // read off them. The keeper lists windows from its own thread, and reading
+    // GoBot's own title sent WM_GETTEXT to the UI thread, which may be waiting
+    // in join() for the keeper after F12, DỪNG or unticking: GoBot then showed
+    // Not Responding, and the rest of the stop, release_all() included, never
+    // ran.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId()) return TRUE;
 
     // Tool windows and tiny shells are never the game.
     RECT r{};
     if (!GetWindowRect(hwnd, &r)) return TRUE;
     if ((r.right - r.left) < 200 || (r.bottom - r.top) < 150) return TRUE;
 
-    // Never offer our own window: sending input to ourselves does nothing
-    // useful and makes the list confusing.
-    const std::string path = path_of(hwnd);
+    // Nor another copy of GoBot: sending input to one does nothing useful and
+    // makes the list confusing.
+    const std::string path = program_path(pid);
     const std::string proc = file_name(path);
     static const std::string self = [] {
         wchar_t p[MAX_PATH]{};
@@ -70,13 +99,18 @@ BOOL CALLBACK collect_proc(HWND hwnd, LPARAM param) {
     }();
     if (!proc.empty() && _stricmp(proc.c_str(), self.c_str()) == 0) return TRUE;
 
-    char cls[256]{};
-    GetClassNameA(hwnd, cls, sizeof(cls) - 1);
-
+    // An untitled window is still a window.
+    //
+    // This used to drop them, which cost a day: the game's launcher -- the one
+    // with the purple start button on it -- has no title at all. It is a bare
+    // #32770 dialog put up by GhostOnlineVTC.exe, and because it was never in
+    // this list, nothing could find it, and the login flow sat waiting out a
+    // whole minute for a window that was on the screen in front of it. The
+    // size and visibility tests above are what actually keep the junk out.
     InputManager::WindowInfo info;
     info.hwnd         = hwnd;
-    info.title        = title;
-    info.window_class = cls;
+    info.title        = text_of(hwnd);
+    info.window_class = class_of(hwnd);
     info.process      = proc;
     info.path         = path;
     list->push_back(std::move(info));
@@ -136,15 +170,10 @@ BOOL CALLBACK hunt_proc(HWND hwnd, LPARAM param) {
     const std::string path = path_of(hwnd);
     if (to_lower(file_name(path)) != hunt->want) return TRUE;
 
-    char title[512]{};
-    GetWindowTextA(hwnd, title, sizeof(title) - 1);
-    char cls[256]{};
-    GetClassNameA(hwnd, cls, sizeof(cls) - 1);
-
     InputManager::WindowInfo info;
     info.hwnd         = hwnd;
-    info.title        = title;
-    info.window_class = cls;
+    info.title        = text_of(hwnd);
+    info.window_class = class_of(hwnd);
     info.process      = hunt->want;
     info.path         = path;
     hunt->out->push_back(std::move(info));
@@ -153,8 +182,8 @@ BOOL CALLBACK hunt_proc(HWND hwnd, LPARAM param) {
 
 BOOL CALLBACK gather_text(HWND child, LPARAM param) {
     auto* out = reinterpret_cast<std::string*>(param);
-    char text[1024]{};
-    if (GetWindowTextA(child, text, sizeof(text) - 1) > 0) {
+    const std::string text = text_of(child);
+    if (!text.empty()) {
         if (!out->empty()) out->push_back('\n');
         out->append(text);
     }
@@ -176,9 +205,7 @@ std::string InputManager::window_text(void* hwnd) {
     if (hwnd == nullptr) return {};
     HWND h = static_cast<HWND>(hwnd);
 
-    std::string out;
-    char title[1024]{};
-    if (GetWindowTextA(h, title, sizeof(title) - 1) > 0) out = title;
+    std::string out = text_of(h);
 
     EnumChildWindows(h, gather_text, reinterpret_cast<LPARAM>(&out));
     return out;
@@ -219,10 +246,10 @@ InputManager::WindowSpec InputManager::parse_spec(const std::string& text) {
     return spec;
 }
 
-bool InputManager::find_game_window(const std::string& title_substr,
+bool InputManager::find_game_window(const std::string& title,
                                     const std::string& window_class,
                                     const std::string& process_name) {
-    const std::string want_title = to_lower(title_substr);
+    const std::string want_title = to_lower(title);
     const std::string want_class = to_lower(window_class);
     const std::string want_proc  = to_lower(process_name);
 
@@ -281,17 +308,16 @@ bool InputManager::find_game_window(const std::string& title_substr,
         }
 
         if (!want_title.empty()) {
+            // Only the whole title is strong. Its start or a piece of it
+            // stays under kStrong on its own, and only ranks the windows a
+            // program or a class has already let in.
             const std::string t = to_lower(w.title);
             if (t == want_title)                              score += kStrong;
             else if (t.rfind(want_title, 0) == 0)             score += 2;
             else if (t.find(want_title) != std::string::npos) score += 1;
         }
 
-        // Nothing asked for at all: anything visible will do, and the caller
-        // is choosing from a list.
-        if (want_proc.empty() && want_class.empty() && want_title.empty())
-            score = 1;
-
+        // Nothing asked for at all finds nothing: no window gets a score.
         if (score < kStrong) continue;
 
         if (score > best_rank) {
@@ -301,21 +327,14 @@ bool InputManager::find_game_window(const std::string& title_substr,
     }
 
     if (!best) {
-        GB_WARN("Game window not found (title~'%s' class='%s' process='%s')",
-                title_substr.c_str(), window_class.c_str(), process_name.c_str());
+        GB_WARN("Game window not found (title='%s' class='%s' process='%s')",
+                title.c_str(), window_class.c_str(), process_name.c_str());
         return false;
     }
 
     hwnd_.store(best->hwnd);
     GB_INFO("Game window: '%s' [%s] (hwnd %p)",
             best->title.c_str(), best->process.c_str(), best->hwnd);
-
-    if (best_rank <= 1 && !want_title.empty()) {
-        // A bare substring hit is exactly how an editor or browser tab named
-        // after the game gets picked. Worth saying out loud.
-        GB_WARN("Matched on a loose title substring -- confirm this is the game "
-                "and not an editor or browser window with a similar title.");
-    }
     return true;
 }
 
@@ -332,7 +351,8 @@ bool InputManager::window_focused() const {
     return GetForegroundWindow() == static_cast<HWND>(h);
 }
 
-bool InputManager::focus_window() {
+bool InputManager::focus_window(long long wait_ms, bool* accepted) {
+    if (accepted) *accepted = false;
     void* h = hwnd_.load();
     if (!h) return false;       // no window to bring: nothing to refuse either
     // Asked before the window is looked at, so that a test aiming at a window
@@ -341,25 +361,73 @@ bool InputManager::focus_window() {
     if (!IsWindow(static_cast<HWND>(h))) return false;
 
     HWND target = static_cast<HWND>(h);
-    if (GetForegroundWindow() == target) return true;
+    const HWND fg = GetForegroundWindow();
+    if (fg == target) {
+        if (accepted) *accepted = true;
+        return true;
+    }
 
     // Windows refuses SetForegroundWindow from a process that doesn't own the
     // foreground. Attaching to the foreground thread's input queue is the
-    // documented way around it.
-    const DWORD fg_thread  = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    // documented way around it, for another program's window. When the window
+    // in front is GoBot's own, this process owns the foreground and may hand
+    // it on as it is, and attaching would do harm: it ties a worker's
+    // SetForegroundWindow to GoBot's UI thread taking the activation messages,
+    // and that thread may be waiting in join() for this very worker -- which
+    // is what happens when DỪNG is pressed while the party, trash, revive or
+    // login worker brings the game forward. Nor to a program that has stopped
+    // answering (answers): Windows then likely refuses, and that is a refusal.
+    DWORD fg_process = 0;
+    const DWORD fg_thread  = fg != nullptr ? GetWindowThreadProcessId(fg, &fg_process) : 0;
     const DWORD our_thread = GetCurrentThreadId();
 
     bool attached = false;
-    if (fg_thread != our_thread) attached = AttachThreadInput(our_thread, fg_thread, TRUE) != 0;
+    if (may_attach_to_foreground(static_cast<std::uint32_t>(fg_thread),
+                                 static_cast<std::uint32_t>(fg_process),
+                                 static_cast<std::uint32_t>(our_thread),
+                                 static_cast<std::uint32_t>(GetCurrentProcessId())) &&
+        answers(fg))
+        attached = AttachThreadInput(our_thread, fg_thread, TRUE) != 0;
 
-    if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
-    SetForegroundWindow(target);
-    BringWindowToTop(target);
+    // Neither of these waits for the game's thread. ShowWindow and
+    // BringWindowToTop do, and a game that has stopped answering -- hung, or
+    // crashed with Windows' report box up -- held the caller until it
+    // answered: GoBot's UI thread, which brings the game back during a run.
+    if (IsIconic(target)) ShowWindowAsync(target, SW_RESTORE);
+    const bool asked = SetForegroundWindow(target) != FALSE;
+    SetWindowPos(target, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS);
 
     if (attached) AttachThreadInput(our_thread, fg_thread, FALSE);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    return GetForegroundWindow() == target;
+    // So the game's own thread does all of it, at its next look at its
+    // queue: a game minimised, or busy for a moment, comes forward later than
+    // one fixed wait. Looked at every 10 ms -- never waited on -- for
+    // wait_ms at most, and kFocusMinMs at least, as ever, before the keys
+    // come. A request Windows refused outright is not waited out.
+    const auto start = std::chrono::steady_clock::now();
+    const auto waited = [&] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+            .count();
+    };
+    const long long most = asked ? std::max(wait_ms, kFocusMinMs) : kFocusMinMs;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const long long ms = waited();
+        const bool in_front = GetForegroundWindow() == target;
+        if (ms >= kFocusMinMs && in_front) {
+            if (accepted) *accepted = true;
+            return true;
+        }
+        if (ms >= most) {
+            if (accepted) *accepted = in_front || asked;
+            return in_front;
+        }
+    }
+}
+
+bool InputManager::may_attach_to_foreground(std::uint32_t fg_thread, std::uint32_t fg_process,
+                                            std::uint32_t our_thread, std::uint32_t our_process) {
+    return fg_thread != 0 && fg_thread != our_thread && fg_process != our_process;
 }
 
 bool InputManager::window_size(int& width, int& height) const {
@@ -378,18 +446,37 @@ std::uint16_t InputManager::scan_code(std::uint32_t vk) {
     return static_cast<std::uint16_t>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC));
 }
 
-bool InputManager::send_key(std::uint32_t vk, bool down) {
+bool InputManager::send_key(std::uint32_t vk, bool down, bool owed) {
     // No key, or no window to send it to: nothing to do, and nothing to refuse.
     if (vk == 0 || hwnd_.load() == nullptr) return false;
+
+    // ↓ on a gate changes the map. Never down, whichever setting asked for it
+    // -- a key box set to it before it refused it, the packet bot's drop --
+    // and said once. Its key-up is let through: it lets go of nothing GoBot
+    // holds.
+    if (down && never_pressed(vk)) {
+        if (!said_never_.exchange(true))
+            GB_WARN("Not pressing Down (vk 0x28): standing on a gate it takes the character to another map "
+                    "-- a key set to it presses nothing");
+        return false;
+    }
 
     // Before the focus gate: refused for being a key at all, not for the game
     // happening to be behind something.
     if (refuse_real_input(down ? "press a key" : "let go of a key")) return false;
 
-    // Input goes to the focused window, whatever it is. Sending while the game
-    // is not foreground types into the user's other applications, so this is a
-    // hard gate rather than a warning.
-    if (!window_focused()) return false;
+    // A key goes down only into the game. Input goes to the focused window,
+    // whatever it is, and a key sent while the game is not foreground types
+    // into the user's other applications, so that is a hard gate rather than
+    // a warning. Key-ups were refused the same way, which left a key down in
+    // Windows whenever focus moved in the middle of a press -- the player
+    // clicking another window during a potion's 40 ms -- and a key down in
+    // Windows is down for whatever is in front: the default jump key, Ctrl,
+    // turned the player's typing into shortcuts. So a key-up that is owed goes
+    // out whatever is in front, and one that is not still goes only to the
+    // game.
+    const bool focused = window_focused();
+    if (!key_event_allowed(down, focused, owed || (!down && !focused && held(vk)))) return false;
 
     INPUT in{};
     in.type       = INPUT_KEYBOARD;
@@ -414,6 +501,11 @@ bool InputManager::send_key(std::uint32_t vk, bool down) {
 
 bool InputManager::key_down(std::uint32_t vk) { return send_key(vk, true); }
 bool InputManager::key_up(std::uint32_t vk)   { return send_key(vk, false); }
+
+// Down only into the game in front; up there too, or wherever focus is when owed.
+bool InputManager::key_event_allowed(bool down, bool focused, bool owed) {
+    return focused || (!down && owed);
+}
 
 bool InputManager::injection_works() {
     // F7 for the probe: unbound in this game, harmless elsewhere, and not a
@@ -452,7 +544,8 @@ bool InputManager::key_press(std::uint32_t vk, int hold_ms) {
     const int hold = hold_ms >= 0 ? hold_ms : jitter(25, 60);
     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
 
-    return send_key(vk, false);
+    // Owed: its down went out above, so it comes up wherever focus has gone.
+    return send_key(vk, false, true);
 }
 
 bool InputManager::held(std::uint32_t vk) const {
@@ -533,7 +626,7 @@ bool InputManager::jump_down() {
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     const bool ok = key_press(key_jump_);
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    key_up(key_down_);
+    send_key(key_down_, false, true);
     return ok;
 }
 
@@ -542,14 +635,14 @@ bool InputManager::face_left() {
     // A tap short enough to turn the character without displacing it.
     if (!key_down(key_left_)) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(18));
-    return key_up(key_left_);
+    return send_key(key_left_, false, true);
 }
 
 bool InputManager::face_right() {
     if (block_movement_.load()) return false;
     if (!key_down(key_right_)) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(18));
-    return key_up(key_right_);
+    return send_key(key_right_, false, true);
 }
 
 // ------------------------------------------------------------------ actions
@@ -611,6 +704,13 @@ INPUT key_event(std::uint32_t vk, bool down, InputManager::KeyInject how) {
 
 bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms, KeyInject how) {
     if (vk == 0 || hwnd_.load() == nullptr) return false;
+    // As send_key: never ↓.
+    if (never_pressed(vk)) {
+        if (!said_never_.exchange(true))
+            GB_WARN("Not pressing Down (vk 0x28): standing on a gate it takes the character to another map "
+                    "-- a key set to it presses nothing");
+        return false;
+    }
     if (refuse_real_input("type a key")) return false;
     if (!window_focused()) return false;
 
@@ -665,6 +765,36 @@ bool InputManager::caps_lock_on() {
 
 // ------------------------------------------------------------------ pointer
 
+namespace {
+
+/// The pace of this thread's clicks and drags on the game: see Pace. 0 is as
+/// ever.
+thread_local int t_press_ms = 0;
+
+/// `ms`, the pause as it is at 80, at this thread's pace -- never under
+/// `floor_ms`, under which the game is known to miss a press.
+int paced(int ms, int floor_ms) {
+    return t_press_ms > 0 ? std::max(floor_ms, ms * t_press_ms / 80) : ms;
+}
+
+// SendInput works in a 0..65535 grid across the whole virtual desktop, not
+// in pixels, so the conversion has to account for monitors left of or above
+// the primary one -- where the origin is negative and a naive scaling puts
+// every click on the wrong screen.
+void to_absolute(POINT at, LONG& dx, LONG& dy) {
+    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int vw = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+    const int vh = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    dx = static_cast<LONG>((at.x - vx) * 65535LL / vw);
+    dy = static_cast<LONG>((at.y - vy) * 65535LL / vh);
+}
+
+} // namespace
+
+InputManager::Pace::Pace(int press_ms) : was_(t_press_ms) { t_press_ms = press_ms; }
+InputManager::Pace::~Pace() { t_press_ms = was_; }
+
 bool InputManager::move_pointer(int x, int y) {
     HWND hwnd = static_cast<HWND>(hwnd_.load());
     if (!hwnd) return false;    // no window to aim at: nothing to refuse either
@@ -676,40 +806,153 @@ bool InputManager::move_pointer(int x, int y) {
     POINT at{ x, y };
     if (!ClientToScreen(hwnd, &at)) return false;
 
-    // SendInput works in a 0..65535 grid across the whole virtual desktop, not
-    // in pixels, so the conversion has to account for monitors left of or above
-    // the primary one -- where the origin is negative and a naive scaling puts
-    // every click on the wrong screen.
-    const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int vw = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
-    const int vh = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
-
     INPUT in{};
     in.type = INPUT_MOUSE;
     in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-    in.mi.dx = static_cast<LONG>((at.x - vx) * 65535LL / vw);
-    in.mi.dy = static_cast<LONG>((at.y - vy) * 65535LL / vh);
+    to_absolute(at, in.mi.dx, in.mi.dy);
     return inject(&in, 1, "move the pointer") == 1;
 }
 
 bool InputManager::click_at(int x, int y, bool right_button) {
-    if (hwnd_.load() == nullptr) return false;
+    HWND hwnd = static_cast<HWND>(hwnd_.load());
+    if (hwnd == nullptr) return false;
     if (refuse_real_input("click")) return false;
     if (!move_pointer(x, y)) return false;
     // A pause between arriving and pressing. Several of these buttons light up
     // on hover and ignore a click that lands in the same instant as the move.
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(40, 90)));
 
+    // The press and the release carry the point, so a hand on the mouse in
+    // that pause does not take them somewhere else.
+    POINT at{ x, y };
+    if (!ClientToScreen(hwnd, &at)) return false;
+
     INPUT in[2]{};
     in[0].type = INPUT_MOUSE;
-    in[0].mi.dwFlags = right_button ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+    in[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK |
+                       (right_button ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN);
+    to_absolute(at, in[0].mi.dx, in[0].mi.dy);
     in[1] = in[0];
-    in[1].mi.dwFlags = right_button ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+    in[1].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK |
+                       (right_button ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP);
 
     if (inject(&in[0], 1, "press a mouse button") != 1) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(30, 70)));
     return inject(&in[1], 1, "let go of a mouse button") == 1;
+}
+
+const char* InputManager::game_click_name(GameClick c) {
+    switch (c) {
+        case GameClick::Clicked:    return "clicked";
+        case GameClick::NoWindow:   return "no game window";
+        case GameClick::Refused:    return "no real input in this process";
+        case GameClick::OffClient:  return "the point is outside the game's window";
+        case GameClick::OffScreen:  return "the point is on no screen";
+        case GameClick::NotInFront: return "the game is not in front";
+        case GameClick::Covered:    return "another window is over the game there";
+        case GameClick::Moved:      return "the game's window moved";
+        case GameClick::Stopped:    return "stopped";
+        case GameClick::Failed:     return "Windows did not take the click";
+    }
+    return "?";
+}
+
+bool InputManager::would_reach_game(void* game, int x, int y, GameClick* why, bool need_front) {
+    const auto no = [why](GameClick c) {
+        if (why) *why = c;
+        return false;
+    };
+    const HWND g = static_cast<HWND>(game);
+    if (g == nullptr || !IsWindow(g)) return no(GameClick::NoWindow);
+    if (IsIconic(g)) return no(GameClick::NotInFront);
+    RECT client{};
+    if (!GetClientRect(g, &client)) return no(GameClick::NoWindow);
+    if (x < 0 || y < 0 || x >= client.right || y >= client.bottom) return no(GameClick::OffClient);
+    POINT at{ x, y };
+    if (!ClientToScreen(g, &at)) return no(GameClick::NoWindow);
+    if (MonitorFromPoint(at, MONITOR_DEFAULTTONULL) == nullptr) return no(GameClick::OffScreen);
+    if (need_front && GetForegroundWindow() != g) return no(GameClick::NotInFront);
+    // The game under the point, by its top-level window: a child of the game
+    // is the game, and anything else there is what the click would land on.
+    const HWND there = WindowFromPoint(at);
+    if (there == nullptr || GetAncestor(there, GA_ROOT) != GetAncestor(g, GA_ROOT))
+        return no(GameClick::Covered);
+    return true;
+}
+
+// A click on the game, only where it lands on the game.
+//
+// The frames come from PrintWindow, which shows the game even when it is
+// covered, so a point worked out from one says nothing about what is on top
+// of it now. Everything is asked again after the pause on arrival, just
+// before the button goes down. The press and the release carry the point, so
+// a hand on the mouse cannot move them. And the release always goes out once
+// the press has, because a button left down is a drag.
+bool InputManager::click_on_game(int x, int y, bool right_button,
+                                 const std::function<bool()>& stop, GameClick* why,
+                                 bool need_front, int presses) {
+    const auto came_to = [why](GameClick c) {
+        if (why) *why = c;
+        return c == GameClick::Clicked;
+    };
+    const HWND game = static_cast<HWND>(hwnd_.load());
+    // No game aimed at: nothing to do, and nothing to refuse.
+    if (game == nullptr) return came_to(GameClick::NoWindow);
+    if (refuse_real_input("click on the game")) return came_to(GameClick::Refused);
+    if (stop && stop()) return came_to(GameClick::Stopped);
+
+    GameClick not_there = GameClick::Failed;
+    if (!would_reach_game(game, x, y, &not_there, need_front)) return came_to(not_there);
+    POINT at{ x, y };
+    if (!ClientToScreen(game, &at)) return came_to(GameClick::NoWindow);
+
+    INPUT move{};
+    move.type = INPUT_MOUSE;
+    move.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    to_absolute(at, move.mi.dx, move.mi.dy);
+    if (inject(&move, 1, "move the pointer") != 1) return came_to(GameClick::Failed);
+    // The pause click_at has too: buttons that light up on hover ignore a
+    // press in the same instant as the move.
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(40, 35), paced(90, 45))));
+
+    if (stop && stop()) return came_to(GameClick::Stopped);
+    if (!would_reach_game(game, x, y, &not_there, need_front)) return came_to(not_there);
+    POINT now{ x, y };
+    if (!ClientToScreen(game, &now)) return came_to(GameClick::NoWindow);
+    if (now.x != at.x || now.y != at.y) return came_to(GameClick::Moved);
+
+    INPUT down = move;
+    down.mi.dwFlags |= right_button ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+    INPUT up = move;
+    up.mi.dwFlags |= right_button ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+    for (int press = 0; press < std::max(1, presses); ++press) {
+        if (press > 0) {
+            // The next press of a double-click: soon after the release, well
+            // inside the double-click time, and only where it still lands on
+            // the game.
+            std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(50, 40), paced(90, 60))));
+            GameClick cut = GameClick::Clicked;
+            POINT again{ x, y };
+            if (stop && stop()) cut = GameClick::Stopped;
+            else if (!would_reach_game(game, x, y, &not_there, need_front)) cut = not_there;
+            else if (!ClientToScreen(game, &again)) cut = GameClick::NoWindow;
+            else if (again.x != at.x || again.y != at.y) cut = GameClick::Moved;
+            if (cut != GameClick::Clicked) {
+                // The first click went out: said, as it is not "no click".
+                GB_INFO("Input: a double-click at %d,%d cut after %d of %d clicks -- %s", x, y, press, presses,
+                        game_click_name(cut));
+                return came_to(cut);
+            }
+        }
+        if (inject(&down, 1, "press a mouse button") != 1) return came_to(GameClick::Failed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(30, 25), paced(70, 40))));
+        if (inject(&up, 1, "let go of a mouse button") != 1) {
+            GB_WARN("SendInput failed to let go of the mouse button at %d,%d (err %lu)", x, y,
+                    GetLastError());
+            return came_to(GameClick::Failed);
+        }
+    }
+    return came_to(GameClick::Clicked);
 }
 
 bool InputManager::drag(int from_x, int from_y, int to_x, int to_y) {
@@ -739,6 +982,75 @@ bool InputManager::drag(int from_x, int from_y, int to_x, int to_y) {
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(80, 130)));
     const bool released = inject(&up, 1, "let go of a mouse button") == 1;
     return moved && released;
+}
+
+// A drag on the game, only where it lands on the game -- for the reasons
+// click_on_game gives. The press is what picks an item up, so it is the one
+// asked about again just before it goes down; and it carries its point, so a
+// hand on the mouse in the pause cannot pick up the item next to it.
+bool InputManager::drag_on_game(int from_x, int from_y, int to_x, int to_y,
+                                const std::function<bool()>& stop, GameClick* why) {
+    const auto came_to = [why](GameClick c) {
+        if (why) *why = c;
+        return c == GameClick::Clicked;
+    };
+    const HWND game = static_cast<HWND>(hwnd_.load());
+    // No game aimed at: nothing to do, and nothing to refuse.
+    if (game == nullptr) return came_to(GameClick::NoWindow);
+    if (refuse_real_input("drag on the game")) return came_to(GameClick::Refused);
+    if (stop && stop()) return came_to(GameClick::Stopped);
+
+    GameClick not_there = GameClick::Failed;
+    if (!would_reach_game(game, from_x, from_y, &not_there) ||
+        !would_reach_game(game, to_x, to_y, &not_there))
+        return came_to(not_there);
+    POINT from{ from_x, from_y };
+    if (!ClientToScreen(game, &from)) return came_to(GameClick::NoWindow);
+
+    INPUT move{};
+    move.type = INPUT_MOUSE;
+    move.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    to_absolute(from, move.mi.dx, move.mi.dy);
+    if (inject(&move, 1, "move the pointer") != 1) return came_to(GameClick::Failed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(60, 45), paced(110, 80))));
+
+    if (stop && stop()) return came_to(GameClick::Stopped);
+    if (!would_reach_game(game, from_x, from_y, &not_there)) return came_to(not_there);
+    POINT now{ from_x, from_y };
+    if (!ClientToScreen(game, &now)) return came_to(GameClick::NoWindow);
+    if (now.x != from.x || now.y != from.y) return came_to(GameClick::Moved);
+
+    INPUT down = move;
+    down.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
+    if (inject(&down, 1, "press a mouse button") != 1) return came_to(GameClick::Failed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(90, 70), paced(140, 100))));
+
+    // From here it is finished whatever happens: a button left held down is
+    // an item stuck to the pointer, and the next click drops it somewhere.
+    constexpr int kSteps = 10;
+    bool moved = true;
+    for (int i = 1; i <= kSteps && moved; ++i) {
+        moved = move_pointer(from_x + (to_x - from_x) * i / kSteps,
+                             from_y + (to_y - from_y) * i / kSteps);
+        std::this_thread::sleep_for(std::chrono::milliseconds(jitter(18, 30)));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(80, 60), paced(130, 95))));
+    // Let go at the end point; where the pointer is, should the window have
+    // gone meanwhile.
+    INPUT up{};
+    up.type = INPUT_MOUSE;
+    up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    POINT to{ to_x, to_y };
+    if (ClientToScreen(game, &to)) {
+        up.mi.dwFlags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        to_absolute(to, up.mi.dx, up.mi.dy);
+    }
+    if (inject(&up, 1, "let go of a mouse button") != 1) {
+        GB_WARN("SendInput failed to let go of the mouse button at %d,%d (err %lu)", to_x, to_y,
+                GetLastError());
+        return came_to(GameClick::Failed);
+    }
+    return came_to(moved ? GameClick::Clicked : GameClick::Failed);
 }
 
 bool InputManager::type_text(const std::string& utf8) {
@@ -789,23 +1101,38 @@ void InputManager::sleep_jitter(int base_ms) const {
 // ---------------------------------------------------------------- key names
 
 std::uint32_t InputManager::parse_key(const std::string& text) {
-    if (text.empty()) return 0;
-
     std::string s = to_lower(text);
-    s.erase(0, s.find_first_not_of(" \t"));
-    if (s.empty()) return 0;
+    const std::size_t first = s.find_first_not_of(" \t");
+    if (first == std::string::npos) return 0;
+    s = s.substr(first, s.find_last_not_of(" \t") - first + 1);
 
-    // Numeric forms: "90", "0x5A".
-    if (std::isdigit(static_cast<unsigned char>(s[0]))) {
-        char* end = nullptr;
-        const unsigned long v = std::strtoul(s.c_str(), &end, 0);
-        if (end && *end == '\0' && v <= 0xFF) return static_cast<std::uint32_t>(v);
-    }
-
+    // One character is that key, before anything is read as a key code. Read
+    // as codes, "1" to "9" were the mouse buttons, Backspace and Tab, and "0"
+    // was no key at all, so a potion typed as 1 was never drunk.
     if (s.size() == 1) {
         const char c = s[0];
         if (c >= 'a' && c <= 'z') return static_cast<std::uint32_t>('A' + (c - 'a'));
         if (c >= '0' && c <= '9') return static_cast<std::uint32_t>(c);
+        return 0;
+    }
+
+    // A key code: 0x and hex digits, or two or more decimal digits. Decimal is
+    // read as written, never as octal: "010" is ten.
+    const auto only = [&s](std::size_t from, bool hex) {
+        if (from >= s.size()) return false;
+        for (std::size_t i = from; i < s.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(s[i]);
+            if (hex ? !std::isxdigit(c) : !std::isdigit(c)) return false;
+        }
+        return true;
+    };
+    if (s.size() > 2 && s[0] == '0' && s[1] == 'x' && only(2, true)) {
+        const unsigned long v = std::strtoul(s.c_str() + 2, nullptr, 16);
+        return v <= 0xFF ? static_cast<std::uint32_t>(v) : 0;
+    }
+    if (only(0, false)) {
+        const unsigned long v = std::strtoul(s.c_str(), nullptr, 10);
+        return v <= 0xFF ? static_cast<std::uint32_t>(v) : 0;
     }
 
     if (s.size() >= 2 && s[0] == 'f' && std::isdigit(static_cast<unsigned char>(s[1]))) {

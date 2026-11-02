@@ -174,7 +174,26 @@ bool DetectorTuning::save(const std::string& path) const {
 MobDetector::MobDetector() { tuning_ = DetectorTuning::defaults(); }
 MobDetector::~MobDetector() { stop(); }
 
-void MobDetector::set_target_window(void* hwnd) { hwnd_.store(hwnd); }
+void MobDetector::set_target_window(void* hwnd) {
+    // The window first, the new generation after it (forget()); the loop reads
+    // them the other way round, so a look that read the new generation is a
+    // look at the new window, and one begun before is thrown away.
+    if (hwnd_.exchange(hwnd) != hwnd) forget();
+}
+
+void MobDetector::forget() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++generation_;      // under the lock the loop publishes under: a publish after this sees it
+        plates_.clear();
+        last_player_ = Nameplate{};
+        last_player_ms_ = 0;
+        frame_ = Frame{};
+    }
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.last_mobs = 0;
+    stats_.player_seen = false;
+}
 
 void MobDetector::set_tuning(const DetectorTuning& t) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -494,10 +513,13 @@ void MobDetector::loop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(140));
         if (!running_.load()) break;
 
+        const std::uint64_t generation = generation_.load();   // before the window: see set_target_window()
         void* hwnd = hwnd_.load();
         if (!hwnd) continue;
 
-        if (!capture.grab(hwnd, frame)) {
+        const bool grabbed = grab_ ? grab_(hwnd, frame) : capture.grab(hwnd, frame);
+        if (!grabbed) {
+            forget();   // no picture is nothing seen
             std::lock_guard<std::mutex> lock(stats_mutex_);
             ++stats_.failures;
             continue;
@@ -534,9 +556,18 @@ void MobDetector::loop() {
 
         // Fed from the same frame rather than capturing its own: the screen
         // grab is by far the expensive part and there is no reason to pay for
-        // it twice.
-        if (MinimapTracker* mm = minimap_.load()) mm->update(frame);
-        if (CameraTracker* cam = camera_.load()) cam->update(frame);
+        // it twice. Not once the window has changed under this look, though:
+        // the camera is reset on a change of window, and an old frame fed to
+        // it after that is one from somewhere else.
+        if (generation_.load() == generation) {
+            if (MinimapTracker* mm = minimap_.load()) mm->update(frame);
+            CameraTracker* cam = camera_.load();
+            if (cam) cam->update(frame);
+            // The window changed while it was being fed: the reset made for the
+            // change may have come first, leaving the old window's frame as the
+            // camera's reference. Made again, so the new window starts afresh.
+            if (cam && generation_.load() != generation) cam->reset();
+        }
 
         // Seen means your own character, by its name: another player in view
         // is not you, and said "your character is there" when it was not.
@@ -549,6 +580,9 @@ void MobDetector::loop() {
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // The window changed while this look was being taken: it is a
+            // look at what was there, not at what is.
+            if (generation_.load() != generation) continue;
             plates_ = std::move(found);
             frame_ = frame;
 
@@ -561,8 +595,12 @@ void MobDetector::loop() {
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             ++stats_.frames;
-            stats_.last_mobs = mobs;
-            stats_.player_seen = saw_player;
+            // Not over a forget() that came after the plates went out: its
+            // counts are the ones that stand until the next look.
+            if (generation_.load() == generation) {
+                stats_.last_mobs = mobs;
+                stats_.player_seen = saw_player;
+            }
             stats_.capture_from_screen = capture.from_screen();
         }
     }
@@ -597,16 +635,30 @@ void MobDetector::find_character(const Frame& f, const DetectorTuning& t,
     const bool got = find_self(f, t, font, want, me, &sure, last.valid() ? &last : nullptr);
 
     // Said once each way round, so a character that cannot be found says so
-    // instead of the bot silently standing still.
-    if (got != said_player_) {
-        said_player_ = got;
-        if (got) GB_INFO("Found your character \"%s\" at %d,%d", want.c_str(),
+    // instead of the bot silently standing still -- but not for a plate gone
+    // a moment, as it is several times a minute: for one gone longer than
+    // the detector remembers it.
+    const int say = sightings_.note(got, now_ms(), kPlayerMemoryMs);
+    if (say > 0) GB_INFO("Found your character \"%s\" at %d,%d", want.c_str(),
                          me.plate.cx(), me.plate.y);
-        else     GB_WARN("Cannot find \"%s\" on screen -- check it against the "
-                         "name the game writes under your feet", want.c_str());
-    }
+    if (say < 0) GB_WARN("Cannot find \"%s\" on screen for over %.1f s -- check it against the "
+                         "name the game writes under your feet",
+                         want.c_str(), static_cast<double>(kPlayerMemoryMs) / 1000.0);
     if (!got) return;
     out.push_back(me);
+}
+
+int MobDetector::PlayerSightings::note(bool got, std::uint64_t now, std::uint64_t grace_ms) {
+    if (got) {
+        missing_since_ms = 0;
+        if (said_found) return 0;
+        said_found = true;
+        return 1;
+    }
+    if (missing_since_ms == 0) missing_since_ms = now;
+    if (!said_found || now <= missing_since_ms || now - missing_since_ms <= grace_ms) return 0;
+    said_found = false;
+    return -1;
 }
 
 bool MobDetector::find_self(const Frame& f, const DetectorTuning& t, const GlyphFont& font,
@@ -673,6 +725,16 @@ std::vector<Nameplate> MobDetector::mobs() const {
         std::lock_guard<std::mutex> lock(mutex_);
         all = plates_;
         have_me = pick_player(plates_, frame_.width, me);
+        // Your plate is not in this frame, but player() still serves it from
+        // memory, so the monsters are sorted from there too: by its rule and
+        // under the same lock, so the two cannot disagree. Left in the order
+        // they were found, the hunter's "nearest" was the topmost plate on
+        // screen whenever the pet, a casting glow or the grass covered yours,
+        // several times a fight.
+        if (!have_me && last_player_ms_ != 0 && now_ms() - last_player_ms_ <= kPlayerMemoryMs) {
+            me = last_player_;
+            have_me = true;
+        }
     }
 
     std::vector<Nameplate> out;
@@ -680,21 +742,26 @@ std::vector<Nameplate> MobDetector::mobs() const {
     for (const Nameplate& n : all)
         if (!n.is_player) out.push_back(n);
 
-    if (have_me) {
-        // Nearest first, with height counting for more than distance along the
-        // ground: something level with you is reachable, something the same
-        // distance away but two platforms up is not.
-        const int px = me.x(), py = me.y();
-        std::sort(out.begin(), out.end(), [px, py](const Nameplate& a, const Nameplate& b) {
-            const auto cost = [px, py](const Nameplate& n) {
-                const int dx = n.x() - px;
-                const int dy = (n.y() - py) * 3;
-                return dx * dx + dy * dy;
-            };
-            return cost(a) < cost(b);
-        });
-    }
+    if (have_me) nearest_first(out, me.x(), me.y());
     return out;
+}
+
+void MobDetector::nearest_first(std::vector<Nameplate>& list, int px, int py) {
+    // Nearest first, with height counting for more than distance along the
+    // ground: something level with you is reachable, something the same
+    // distance away but two platforms up is not.
+    //
+    // Stable, so two the same distance away -- one either side of you -- keep
+    // the order they came in instead of trading places from one look to the
+    // next. Worked out wide: world pixels from the packets run to 65535, and
+    // their squares do not fit an int.
+    const auto cost = [px, py](const Nameplate& n) {
+        const long long dx = static_cast<long long>(n.x()) - px;
+        const long long dy = (static_cast<long long>(n.y()) - py) * 3;
+        return dx * dx + dy * dy;
+    };
+    std::stable_sort(list.begin(), list.end(),
+                     [&cost](const Nameplate& a, const Nameplate& b) { return cost(a) < cost(b); });
 }
 
 bool MobDetector::pick_player(const std::vector<Nameplate>& plates, int frame_width,

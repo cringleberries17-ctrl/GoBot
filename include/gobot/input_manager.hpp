@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <random>
 #include <string>
@@ -15,9 +16,12 @@ namespace gobot {
 /// Uses SendInput with hardware scan codes rather than PostMessage: the game
 /// reads input through DirectInput/raw-input, which ignores posted window
 /// messages. That means input goes to whatever window has focus, so every
-/// send is gated on the target window actually being foreground — a focus
-/// check is the difference between a key press landing in the game and
-/// landing in the user's browser.
+/// key that goes down is gated on the target window actually being
+/// foreground -- a focus check is the difference between a key press landing
+/// in the game and landing in the user's browser. A key-up is the exception:
+/// one this manager owes, for a key it put down, goes out whatever is in
+/// front, because a key left down in Windows stays down for every program
+/// until something lets it go.
 ///
 /// Every key, click, pointer move, posted character and change of focus asks
 /// the "no real input" switch (gobot/no_real_input.hpp) and refuses while it
@@ -32,8 +36,8 @@ public:
     /// A candidate top-level window.
     struct WindowInfo {
         void*       hwnd = nullptr;
-        std::string title;
-        std::string window_class;
+        std::string title;          ///< UTF-8, read without asking the window anything
+        std::string window_class;   ///< UTF-8, likewise
         std::string process;        ///< executable file name, e.g. "game.exe"
         /// The full path of that program, UTF-8 -- what tells the game from
         /// another program of the same name (gobot/game_install.hpp). Empty
@@ -41,7 +45,9 @@ public:
         std::string path;
     };
 
-    /// Every visible top-level window of a usable size, excluding our own.
+    /// Every visible top-level window of a usable size, excluding this
+    /// process's own -- skipped by process before anything is read off them --
+    /// and other copies of GoBot, by name.
     ///
     /// Untitled ones are in here too -- the game's launcher is one. Find those
     /// by class and process instead; see `find_game_window`.
@@ -52,16 +58,21 @@ public:
     /// GUI shows this list and lets the user choose.
     static std::vector<WindowInfo> enumerate_windows();
 
-    /// Locate the game window by title substring and/or window class.
-    /// Either may be empty. Returns false if nothing matched.
+    /// Locate the game window by its title, window class and/or program.
+    /// Any may be empty; with all three empty nothing is found. Returns false
+    /// if nothing matched.
     ///
-    /// Prefers, in order: exact title match, title starting with the string,
-    /// then a plain substring hit — and never matches our own process.
+    /// A title on its own must be the window's whole title (ASCII letters in
+    /// any case): a part of it finds nothing, because an editor or browser tab
+    /// named after the game contains it just as well. A program or a class
+    /// lets a window in by itself; among the windows they let in, the whole
+    /// title is preferred, then a title starting with the string, then one
+    /// containing it. Never matches our own process.
     ///
     /// A program asked for by the game's name -- Game.exe -- is matched only
     /// when it is the game, by where it runs from (GameInstall), never by the
     /// name alone: plenty of other programs are called Game.exe.
-    bool find_game_window(const std::string& title_substr,
+    bool find_game_window(const std::string& title,
                           const std::string& window_class = {},
                           const std::string& process_name = {});
 
@@ -74,7 +85,8 @@ public:
     /// it is showing is a message box, which is small by definition.
     static std::vector<WindowInfo> windows_of(const std::string& process_name);
 
-    /// A window's text, and its children's, joined with newlines.
+    /// A window's text, and its children's, joined with newlines: UTF-8, read
+    /// without sending any window anything.
     ///
     /// A dialog's title says almost nothing ("Error"); what matters is the
     /// static control inside it, which is a child window with its own text.
@@ -97,8 +109,9 @@ public:
 
     /// Read a window spec out of one string.
     ///
-    /// A plain string is a title substring, which is how this has always
-    /// worked. But a window need not have a title -- the game's launcher does
+    /// A plain string is a title -- the window's whole title, which is all
+    /// find_game_window takes a title on its own for. But a window need not
+    /// have a title -- the game's launcher does
     /// not, it is a bare #32770 dialog from GhostOnlineVTC.exe -- and the only
     /// way to name one of those is by its class and the program that put it
     /// up. So a spec may instead be comma-separated terms:
@@ -119,16 +132,44 @@ public:
 
     bool window_valid() const;
     bool window_focused() const;
-    bool focus_window();
+    /// Bring the game to the front. Attaches to the input of the thread whose
+    /// window is in front only when that window is another program's (see
+    /// may_attach_to_foreground) and answers. Never waits for the game's own
+    /// thread: one that has hung cannot hold the caller. True once the game
+    /// is in front: looked for every 10 ms, kFocusMinMs at least and
+    /// `wait_ms` at most -- kFocusMinMs when Windows refused outright. The
+    /// UI thread, which reads F12 by polling, asks for the least. `accepted`,
+    /// when given, says whether Windows took the request: false for no window
+    /// to bring, a refusal, or a test forbidding real input; true when the game
+    /// is in front, or Windows took the request and the game was not yet shown
+    /// in front when the wait ran out -- a slow game comes forward by itself.
+    bool focus_window(long long wait_ms = kFocusWaitMs, bool* accepted = nullptr);
+    static constexpr long long kFocusMinMs = 50;
+    static constexpr long long kFocusWaitMs = 300;
+    /// Whether focus_window may attach this thread's input to the thread of
+    /// the window in front: only when there is one, it is not this thread's
+    /// and not this process's. For tests.
+    static bool may_attach_to_foreground(std::uint32_t fg_thread, std::uint32_t fg_process,
+                                         std::uint32_t our_thread, std::uint32_t our_process);
 
     /// Client-area size of the target window; false if unavailable.
     bool window_size(int& width, int& height) const;
 
-    // ---- key primitives (all no-op unless the window is focused) ----
+    // ---- key primitives ----
+    // A key goes down only while the game is in front. A key-up goes out with
+    // the game in front, and whatever is in front when it is owed (send_key).
+    // ↓ never goes down at all (never_pressed).
     bool key_down(std::uint32_t vk);
     bool key_up(std::uint32_t vk);
     /// Press and release, holding for a randomised human-ish duration.
     bool key_press(std::uint32_t vk, int hold_ms = -1);
+    /// Whether one key event goes out, by the rule every key here keeps: down
+    /// only into the game in front; up into the game in front, and wherever
+    /// focus has gone when it is owed -- the key is down by this manager's
+    /// doing, recorded as held or half way through a press of its own. For
+    /// tests: in gobot_test the switch refuses every real key before this is
+    /// asked.
+    static bool key_event_allowed(bool down, bool focused, bool owed);
 
     bool is_held(std::uint32_t vk) const;
 
@@ -220,9 +261,51 @@ public:
     /// Move the pointer to a client-area point of the target window.
     bool move_pointer(int x, int y);
 
-    /// Move there and click. Not gated on focus: these are the windows that
-    /// are being brought to the front, and a click is how they get there.
+    /// Move there and click, checking nothing -- neither focus nor what is
+    /// under the point. For the publisher's windows, which are being brought
+    /// to the front, and a click is how they get there. A point of the game
+    /// goes through click_on_game.
     bool click_at(int x, int y, bool right_button = false);
+
+    /// How a click on the game went.
+    enum class GameClick {
+        Clicked,        ///< down and up went out on the game
+        NoWindow,       ///< no game aimed at, or its window gone
+        Refused,        ///< the "no real input" switch is on
+        OffClient,      ///< the point is outside the client area
+        OffScreen,      ///< the point is on no screen
+        NotInFront,     ///< the game is not in front
+        Covered,        ///< another window is over the game there
+        Moved,          ///< the game's window moved while the pointer went there
+        Stopped,        ///< the caller's stop said so
+        Failed,         ///< Windows did not take the input
+    };
+    /// A few words for the log: "the game is not in front".
+    static const char* game_click_name(GameClick c);
+
+    /// Whether a click at client point `x`,`y` of `game` would land on the
+    /// game: its window there and not minimised, the point inside the client
+    /// area and on a screen, the game in front unless `need_front` is false,
+    /// and the game itself under the point. Only asks the desktop. `why`,
+    /// when given, is set only when it would not.
+    static bool would_reach_game(void* game, int x, int y, GameClick* why = nullptr,
+                                 bool need_front = true);
+
+    /// Click a client-area point of the game, only where it lands on the game.
+    ///
+    /// would_reach_game is asked before the pointer moves and again after the
+    /// pause on arrival, and `stop` before each; the press and the release
+    /// carry the point. It brings nothing forward. `need_front` false is only
+    /// for the bag's back-out, where the game on top at that point is enough.
+    /// With the "no real input" switch on it is refused once, as soon as a
+    /// window is aimed at; with no window it does nothing and refuses nothing.
+    /// False unless the press and the release both went out; `why`, when
+    /// given, says how it went. `presses` 2 is a double-click: a second press
+    /// and release at the same point, well inside the double-click time, the
+    /// game asked about again before it.
+    bool click_on_game(int x, int y, bool right_button = false,
+                       const std::function<bool()>& stop = {}, GameClick* why = nullptr,
+                       bool need_front = true, int presses = 1);
 
     /// Press at one point, move to another with the button held, let go.
     ///
@@ -231,6 +314,16 @@ public:
     /// moves it is sent, and one that teleports from slot to target looks like
     /// a click in two places. Coordinates are client-area, like `click_at`.
     bool drag(int from_x, int from_y, int to_x, int to_y);
+
+    /// drag(), only where it lands on the game, as click_on_game clicks: both
+    /// points asked of would_reach_game before the pointer moves, the first
+    /// again after the pause on arrival, and `stop` before each. The press
+    /// carries the first point and the release the second. Once the button
+    /// is down nothing stops it: it always ends with the release. Refused
+    /// once with a window aimed at and the "no real input" switch on; with no
+    /// window it does nothing and refuses nothing.
+    bool drag_on_game(int from_x, int from_y, int to_x, int to_y,
+                      const std::function<bool()>& stop = {}, GameClick* why = nullptr);
 
     /// Type a string into whatever has focus, one character at a time.
     ///
@@ -259,6 +352,22 @@ public:
     void set_delay_range(int min_ms, int max_ms);
     int  random_delay() const;
 
+    /// While one is alive on a thread, that thread's clicks and drags on the
+    /// game (click_on_game, drag_on_game) pause as `press_ms` says -- the
+    /// pauses as they are at 80, scaled, each with a floor under which the
+    /// game is known to miss a press. 0 or 80: as ever. Per thread, so the
+    /// hunter's, the revive's and every other worker's clicks keep their own
+    /// pace: the bag jobs' "Tốc độ bấm nút" (CleanSettings::press_ms).
+    class Pace {
+    public:
+        explicit Pace(int press_ms);
+        ~Pace();
+        Pace(const Pace&) = delete;
+        Pace& operator=(const Pace&) = delete;
+    private:
+        int was_;
+    };
+
     /// Hard gates used by higher layers (e.g. suspend combat during a dialog).
     void set_block_movement(bool b) { block_movement_ = b; if (b) stop_move(); }
     void set_block_attack(bool b)   { block_attack_ = b; }
@@ -282,12 +391,28 @@ public:
 
     /// Map a VK to its scan code via the active keyboard layout.
     static std::uint16_t scan_code(std::uint32_t vk);
-    /// Parse "F10", "Z", "SPACE", "0x5A", "90" into a VK. 0 on failure.
+
+    /// A key GoBot never presses, whatever setting asks for it: ↓, which
+    /// standing on a gate takes the character to another map -- the one key
+    /// in this game that does (the player, 2026-11-01). A key box asked for
+    /// it refuses it; one already set to it presses nothing. By the low byte,
+    /// which is all of a key code that reaches the game: a file's 0x10028 is
+    /// Down too.
+    static bool never_pressed(std::uint32_t vk) { return (vk & 0xFFu) == 0x28u; }
+    /// Parse a key as a person or a file writes it into a VK, 0 for none. One
+    /// letter or digit is that key ("Z"; "1" is the 1 key, not key code 1); a
+    /// name ("F10", "Space", "Numpad3"); or a key code, as 0x and hex ("0x5A")
+    /// or as two or more decimal digits ("90"). Whatever key_name() writes
+    /// reads back as the same key.
     static std::uint32_t parse_key(const std::string& text);
     static std::string   key_name(std::uint32_t vk);
 
 private:
-    bool send_key(std::uint32_t vk, bool down);
+    /// One key event, under key_event_allowed's rule. `owed`: this key-up
+    /// ends a press or tap begun here (key_press, face_left/right, jump_down),
+    /// so it goes out even when another thread's release_all() crossed the key
+    /// off the held list in between.
+    bool send_key(std::uint32_t vk, bool down, bool owed = false);
     bool held(std::uint32_t vk) const;
     void sleep_jitter(int base_ms) const;
     /// Thread-safe uniform draw from [min_ms, max_ms]. Every use of rng_ goes
@@ -295,6 +420,7 @@ private:
     int  jitter(int min_ms, int max_ms) const;
 
     std::atomic<void*> hwnd_{nullptr};
+    std::atomic<bool>  said_never_{false};     ///< a ↓ refused has been said in the log
 
     std::uint32_t key_left_   = 37;
     std::uint32_t key_right_  = 39;

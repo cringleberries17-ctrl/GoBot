@@ -21,6 +21,7 @@ enum class MacroTrigger {
     Always,     ///< a plain repeating timer
     HpBelow,    ///< only while HP is at or under the threshold
     MpBelow,
+    PetHpBelow, ///< only while the pet's HP is at or under the threshold: "pet_hp_below"
 };
 
 const char*  to_string(MacroTrigger t);
@@ -39,14 +40,12 @@ struct MacroKey {
     bool          enabled = false;
 
     std::uint32_t interval_ms = 1000;
-    std::uint32_t hold_ms = 0;          ///< 0 = InputManager's own default
+    /// This key's own hold, in ms: at most MacroConfig::kHoldMostMs -- no key
+    /// of the game is held down, every one is a press. 0, as almost every key
+    /// has, is the config's key_hold_min_ms..key_hold_max_ms.
+    std::uint32_t hold_ms = 0;
     std::uint32_t start_delay_ms = 0;   ///< stagger, so timers don't all align
     int           jitter_pct = 10;      ///< +/- this much on each interval
-
-    /// Skip firing while another key is mid-press, rather than queueing up
-    /// behind it. A macro that catches up on missed presses produces bursts,
-    /// which is both useless in game and conspicuous.
-    bool drop_if_busy = true;
 
     /// Gate the key on a vital.
     ///
@@ -71,33 +70,58 @@ struct MacroKey {
     /// pixels; 0 is any distance. GoC's skill_N_aoe_max_x. Only when skills
     /// follow the fight.
     int range_px = 0;
+
+    /// A buff, whatever its interval: "Tự buff" on the simple screen, "a
+    /// buff" on the full one. Cast on its own clock, fight or no fight, and
+    /// again after a death, a revive or logging back in -- every interval_ms,
+    /// 0 included, which is as often as a buff may go (macro_timer_interval_ms).
+    /// Not set, as in a file written before it, a key on a timer of
+    /// kBuffMinIntervalMs or more is a buff and a shorter one a skill.
+    bool buff = false;
 };
 
 /// What a key is for, worked out from how it is set up.
 ///
-/// Keys carry no role of their own: a potion is a key with a trigger on it,
-/// and a buff is a key on a long timer. The simple screen groups them by this,
-/// so a player sees "HP potion, key 1" rather than a table of nine columns.
+/// A potion is a key with a trigger on it, and a buff a key marked as one
+/// (MacroKey::buff) or, unmarked, on a long timer. The simple screen groups
+/// them by this, so a player sees "HP potion, key 1" rather than a table of
+/// nine columns.
 enum class MacroKeyKind {
     Skill,      ///< a short timer: fired over and over while fighting
-    Buff,       ///< a long timer: cast again every few minutes
+    Buff,       ///< on its own clock, fight or no fight, and again after a death
     HpPotion,   ///< drinks when HP drops
     MpPotion,   ///< drinks when MP drops
+    PetPotion,  ///< heals the pet when the pet's HP drops
 };
 
-/// Timers at least this long are buffs, anything shorter a skill. A minute
-/// sits well clear of both: skill cooldowns here run to seconds, buffs to
-/// minutes.
+/// A key on a timer that is not marked as a buff is one at this interval or
+/// longer, and a skill under it. A minute sits well clear of both: skill
+/// cooldowns here run to seconds, buffs to minutes -- but for the buffs a
+/// player marks, which may be anything (MacroKey::buff).
 constexpr std::uint32_t kBuffMinIntervalMs = 60'000;
 
 MacroKeyKind macro_key_kind(const MacroKey& k);
 
-/// A buff's interval as the simple screen takes it, in seconds: from the
-/// shortest that is still a buff -- shorter, and the key would turn into a
-/// skill and jump rows -- to two hours.
-constexpr int kBuffMinSeconds = static_cast<int>(kBuffMinIntervalMs / 1000);
+/// A buff's interval as the simple screen takes it, in seconds: 0 to two
+/// hours. Its keys are marked as buffs, so a short one stays in its row; at
+/// 0 it goes as often as a buff may (kBuffRepeatMinMs).
+constexpr int kBuffMinSeconds = 0;
 constexpr int kBuffMaxSeconds = 7200;
 int clamp_buff_seconds(int seconds);
+
+/// No buff is cast again sooner than this after its last cast, whatever its
+/// interval: one at 0 s goes every 5 s. GoC's rule -- a buff is queued once
+/// its cooldown is over and 5 s have passed since it last was -- which the
+/// player chose for a buff at 0 (2026-10-27).
+constexpr std::uint32_t kBuffRepeatMinMs = 5'000;
+
+/// How long after its press a key on a timer is due again: its interval,
+/// and for a buff never under kBuffRepeatMinMs.
+std::uint32_t macro_timer_interval_ms(const MacroKey& k);
+
+/// Whether a key on a timer (no trigger) is pressed at all: on, with a key,
+/// and an interval above 0 -- or a buff, which at 0 goes as often as it may.
+bool macro_timer_on(const MacroKey& k);
 
 /// A skill's cooldown as the "Kỹ năng" window takes it: half a second to 59 s,
 /// in tenths. A minute or more and the key would be a buff, and leave the
@@ -126,16 +150,19 @@ int clamp_potion_pct(int pct);
 /// screen shows as "firing".
 int macro_urgent_potion(const std::vector<MacroKey>& keys, MacroKeyKind kind, float pct);
 
-/// A potion key as the simple screen makes one: tier 1 or 2 of the HP or MP
-/// row, on, drinking at most every 3 s. Lv1 drinks under 50% HP or 30% MP --
-/// what the screen has always put back when a row had no key -- and Lv2,
-/// the second potion, lower: 30% HP, 20% MP, labelled "HP potion 2" and "MP
-/// potion 2". Anything but a potion kind gives a key with no keycode.
+/// A potion key as the simple screen makes one: tier 1 or 2 of the HP, MP or
+/// pet row, on, drinking at most every 3 s. Lv1 drinks under 50% HP or 30% MP
+/// -- what the screen has always put back when a row had no key -- or 50% of
+/// the pet's HP, and Lv2, the second potion, lower: 30% HP, 20% MP, 30% of the
+/// pet's, labelled "HP potion 2", "MP potion 2" and "Pet potion 2". Anything
+/// but a potion kind gives a key with no keycode.
 MacroKey macro_potion_key(MacroKeyKind kind, std::uint32_t keycode, int tier);
 
 /// Take out the keys the simple screen has emptied: a skill or buff whose box
-/// was cleared, and a potion row's Lv2 or later likewise. A row's Lv1 stays,
-/// key or none -- the row is drawn from it. True if anything went.
+/// was cleared, and a potion row's Lv2 or later likewise. The HP and MP rows'
+/// Lv1 stays, key or none -- the row is drawn from it. The pet's row keeps no
+/// key without one, Lv1 or not: it is drawn without one until it is given one.
+/// True if anything went.
 bool drop_empty_keys(std::vector<MacroKey>& keys);
 
 /// Which of `was` each of `now` is: the same keycode, trigger and kind, the
@@ -148,7 +175,7 @@ std::vector<int> macro_key_match(const std::vector<MacroKey>& was, const std::ve
 /// One entry in an ordered sequence.
 struct MacroStep {
     std::uint32_t keycode = 0;          ///< 0 = pure delay
-    std::uint32_t hold_ms = 0;
+    std::uint32_t hold_ms = 0;          ///< as MacroKey::hold_ms
     std::uint32_t delay_after_ms = 100;
     std::string   label;
 };
@@ -187,12 +214,72 @@ struct MacroConfig {
     int skill_mp_floor_pct = 10;
     static constexpr int kSkillMaxMpFloor = 50;
 
-    /// The gap after one skill's key comes up before the next goes down, in
-    /// a burst. GoC's is 50 ms; kept in the file so a live test can widen it
-    /// should the game drop presses that close.
+    /// The gap after one skill's key comes up before the next skill's goes
+    /// down: in a burst of the skills that follow the fight, and between skills
+    /// on their own timers that come due together. GoC's is 50 ms. The simple
+    /// screen's "Tốc độ bấm kỹ năng" sets it: kSkillGapSteps; the file takes
+    /// anything from kSkillGapMinMs to kSkillGapMaxMs.
     std::uint32_t skill_gap_ms = 50;
     static constexpr std::uint32_t kSkillGapMinMs = 30;
     static constexpr std::uint32_t kSkillGapMaxMs = 1000;
+    static constexpr std::uint32_t kSkillGapSteps[] = { 50, 60, 80, 100, 150 };
+
+    /// How long a key of the macro is held down: a random time between these,
+    /// for a key with no hold of its own. 0 for both: the input manager's own
+    /// 25-60 ms, which is what a config built in code gets. A game that reads
+    /// its keyboard once a frame misses a press shorter than a frame now and
+    /// then -- the key goes "down and up" and nothing happens -- so a file
+    /// that does not say gets kDefaultHoldMinMs to kDefaultHoldMaxMs.
+    /// kHoldMostMs is also the most a key's or a step's own hold_ms is taken
+    /// at, from the file and on the full screen: a key's hold keeps the timer
+    /// thread, and a potion due waits it out.
+    std::uint32_t key_hold_min_ms = 0;
+    std::uint32_t key_hold_max_ms = 0;
+    static constexpr std::uint32_t kHoldLeastMs = 20;
+    static constexpr std::uint32_t kHoldMostMs = 500;
+    static constexpr std::uint32_t kDefaultHoldMinMs = 70;
+    static constexpr std::uint32_t kDefaultHoldMaxMs = 110;
+
+    /// A potion whose bar has not risen this long after its press, while it
+    /// still wants to drink, is pressed again at once -- not after the rest of
+    /// its cooldown: the game may have ignored the press. Once per press. 0:
+    /// never, the plain cooldown, which is what a config built in code gets; a
+    /// file that does not say gets kDefaultRecheckMs. A potion shows on the
+    /// bar a moment after it is drunk (about half a second on the live game),
+    /// so the least is kRecheckLeastMs.
+    std::uint32_t potion_recheck_ms = 0;
+    static constexpr std::uint32_t kRecheckLeastMs = 500;
+    static constexpr std::uint32_t kRecheckMostMs = 3000;
+    static constexpr std::uint32_t kDefaultRecheckMs = 1000;
+    /// How much the bar has to have risen, in percent of the bar, to count.
+    static constexpr float kRecheckRisePct = 2.0f;
+
+    /// A potion whose bar is under half of its mark -- the character in
+    /// trouble: skills that drain MP, or blows that take HP, faster than one
+    /// potion in interval_ms makes up -- may drink again this long after its
+    /// last press, instead of after the interval. Between the two marks it
+    /// is still the interval. 0, which is what a config built in code gets:
+    /// never, the plain cooldown; a file that does not say gets
+    /// kDefaultUrgentMs. A press the game refuses for its own cooldown costs
+    /// no potion, as GoC, which presses every 100 ms while low, shows.
+    std::uint32_t potion_urgent_ms = 0;
+    static constexpr std::uint32_t kUrgentLeastMs = 500;
+    static constexpr std::uint32_t kUrgentMostMs = 5000;
+    static constexpr std::uint32_t kDefaultUrgentMs = 1000;
+
+    /// A buff is cast by pressing its key this many times, buff_press_gap_ms
+    /// apart. GoC presses each buff 4 times, 200 ms apart, and counts the cast
+    /// only once the server confirms it: a single press is lost by the game
+    /// now and then, and a lost buff is not tried again for a whole interval.
+    /// 1, which is what a config built in code gets, is the single press; a
+    /// file that does not say gets kDefaultBuffPresses.
+    std::uint32_t buff_presses = 1;
+    std::uint32_t buff_press_gap_ms = 200;
+    static constexpr std::uint32_t kBuffPressesMost = 6;
+    static constexpr std::uint32_t kBuffPressGapLeastMs = 100;
+    static constexpr std::uint32_t kBuffPressGapMostMs = 500;
+    static constexpr std::uint32_t kDefaultBuffPresses = 4;
+    static constexpr std::uint32_t kDefaultBuffPressGapMs = 200;
 
     /// Only send input while the target window has focus. Off means keys go
     /// to whatever is in front, which will eventually be something you did not
@@ -203,8 +290,9 @@ struct MacroConfig {
     ///
     /// Without this, pressing START MACRO leaves the game behind the GoBot
     /// window and the macro sits there holding, which reads as "it does not
-    /// work". Only on the way on: re-focusing whenever attention wanders would
-    /// mean fighting the user for their own desktop.
+    /// work". Only on the way on. Keeping it in front while running is a
+    /// separate switch, refocus in [Simple] in app.ini
+    /// (GuiApp::keep_game_in_front, FrontKeeper), on by default.
     bool focus_on_start = true;
 
     /// Applies on top of each key's own jitter.
@@ -215,7 +303,8 @@ struct MacroConfig {
 
     /// Where HP and MP are drawn on screen. Kept with the macro rather than in
     /// a config of their own: they exist to make the conditional keys above
-    /// work, and one Save should cover a key and its trigger together.
+    /// work, and one Save should cover a key and its trigger together. The
+    /// pet's bar is not kept: the reader finds it on the HUD by itself.
     bool    vitals_enabled = false;
     BarSpec hp_bar;
     BarSpec mp_bar;
@@ -275,16 +364,29 @@ public:
     /// HP read at nothing (under kDownHpPct) is also the character down --
     /// dead, at the death panel -- which tells a re-cast asked for afterwards
     /// from one more ask about the last return: see recast_buffs.
-    void set_vitals(float hp_pct, float mp_pct);
+    ///
+    /// `pet_pct` is the pet's HP likewise (VitalsReader::pet_percent), -1
+    /// when there is no reading of it -- as from a caller that reads none:
+    /// the pet's potions then hold, as HP's do with no HP read.
+    void set_vitals(float hp_pct, float mp_pct, float pet_pct = -1.0f);
     static constexpr float kDownHpPct = 0.5f;
     /// A reading older than this is treated as absent: pushed this long ago,
     /// or -- by whoever pushes it, with VitalsReader::if_fresh -- read off
     /// the bars this long ago.
     static constexpr std::uint64_t kVitalsStaleMs = 1500;
+    /// HP unread this long is the character out of the world, and the macro
+    /// is held (VitalsReader::in_world). One unreadable frame is not: they
+    /// come every few seconds off the screen, and every other read as a
+    /// character dies -- 8 holds and let-gos in 3 s on 2026-10-26, each one
+    /// a skill lost. About six reads.
+    static constexpr std::uint64_t kOutOfWorldAfterMs = 1000;
+    static_assert(kOutOfWorldAfterMs <= kVitalsStaleMs,
+                  "never in the world on a reading the macro would not act on");
 
     /// What the engine is currently acting on: the last pushed values, or -1
     /// each once they have gone stale.
     void current_vitals(float& hp_pct, float& mp_pct) const;
+    void current_vitals(float& hp_pct, float& mp_pct, float& pet_pct) const;
 
     /// Hold every key without stopping, and say why.
     ///
@@ -355,8 +457,10 @@ public:
     ///   that kind went out: GoC's "every HP update, at most once in 100 ms
     ///   after a press".
     /// - The HP potion goes first, then the MP potion no sooner than
-    ///   kPotionGapMs after the HP key came up, and both before any other key
-    ///   due in the same pass.
+    ///   kPotionGapMs after the HP key came up, then the pet's no sooner than
+    ///   kPotionGapMs after the later of those two -- never while the HP or
+    ///   the MP potion waits for the keys: the character's own come first --
+    ///   and all of them before any other key due in the same pass.
     /// - While a potion is due and has not gone out, no other key of the
     ///   macro is started -- for at most kPotionFirstMs of time in which it
     ///   could have gone, so a potion that cannot be pressed does not starve
@@ -364,8 +468,8 @@ public:
     ///   world refuse every key alike, and do not count. The sequence, on a
     ///   thread of its own, waits too: from BẮT ĐẦU until the potions have
     ///   first been looked at, from the moment one is found due until the HP
-    ///   potion and then the MP one have gone, and in the moment between a
-    ///   reading and the pass that acts on it.
+    ///   potion, then the MP one, then the pet's have gone, and in the moment
+    ///   between a reading and the pass that acts on it.
     /// - A potion press that does not go out never starts its cooldown. It is
     ///   tried again kPotionRetryMs later when another job held the keys, and
     ///   the moment a hold, the game being behind another window or the
@@ -381,7 +485,10 @@ public:
     /// every 150 ms, and a potion shows on it a moment after it is drunk, so
     /// drinking that often would waste potions.
     static constexpr std::uint32_t kPotionRetryMs = 30;
-    static constexpr std::uint32_t kPotionGapMs = 20;
+    /// Between the keys of two potions, from one coming up to the next going
+    /// down: a game that reads its keyboard once a frame gets them in two
+    /// frames. (20 ms before: the second was lost now and then.)
+    static constexpr std::uint32_t kPotionGapMs = 60;
     static constexpr std::uint64_t kPotionFirstMs = 300;
 
     /// What the hunter is doing, for skills that follow the fight
@@ -419,8 +526,9 @@ public:
     /// itself. The game's keyboard unless set. `held` says whether a key is
     /// down now, and `release_all` lets go of every key whatever has focus:
     /// for a press whose key went down and could not come up again, the game
-    /// having lost focus during it. With `key` set and `held` not, no press
-    /// is taken for one of those.
+    /// having lost focus during it, and as the macro is held for the
+    /// character out of the world (set_suspended). With `key` set and `held`
+    /// not, no press is taken for one of those.
     struct Hands {
         std::function<bool()>                    focused;
         std::function<bool(std::uint32_t, int)>  key;    ///< keycode, hold ms (-1 = default)
@@ -462,6 +570,9 @@ public:
         /// is a bar that needs setting up.
         std::uint64_t held_condition = 0;
         std::uint64_t held_no_reading = 0;
+        /// The pet's potions held for no reading of the pet's HP, apart from
+        /// HP's and MP's: no pet out is no bar that needs setting up.
+        std::uint64_t held_no_pet_reading = 0;
 
         /// A potion whose condition held, and whose cooldown was over, kept
         /// from drinking because another of its kind sits lower and is low
@@ -470,6 +581,11 @@ public:
 
         /// Presses held because the character was not in the world.
         std::uint64_t held_suspended = 0;
+
+        /// Potions pressed again early because the bar had not risen
+        /// (MacroConfig::potion_recheck_ms), and the checks made.
+        std::uint64_t potion_repressed = 0;
+        std::uint64_t potion_checks = 0;
 
         /// Skills that follow the fight, held back while ready: no fight, MP
         /// under the floor, the character down, or the target further than
@@ -519,22 +635,25 @@ public:
         KeysHeld,       ///< something of GoBot's holds the game -- a chat line, a revive: which, with it
         KeysBusy,       ///< another job had the keys that moment (tried again 30 ms on)
         KeyFailed,      ///< the key did not go out
-        BehindHp,       ///< an MP potion waiting while the HP potion waits for the keys
+        BehindHp,       ///< an MP or pet potion waiting while the HP potion waits for the keys
+        BehindMp,       ///< a pet potion waiting while the MP potion waits for the keys
     };
     /// "pressed", "above the mark", "no reading", "cooling", "other tier",
     /// "game not in front", "not in the world", "keys held", "keys busy",
-    /// "key failed", "behind the HP potion".
+    /// "key failed", "behind the HP potion", "behind the MP potion".
     static const char* potion_why_name(PotionWhy why);
 
     /// The black box, for the log right after "ALERT death": the last
     /// kBlackBoxMs up to now on the engine's clock, in at most kBlackBoxLines
     /// lines of at most kBlackBoxLineChars characters, times in seconds before
-    /// now. The first line is HP and MP as read -- every change of the last
-    /// 5 s, and before that the lowest HP of each 2 s; then a line for each
-    /// potion key, HP's first, of its decisions -- each run of one reason with
-    /// how long it lasted, every press marked; and a last line of the presses
-    /// of each. A key by its name and mark only, never a label the player
-    /// typed. Empty when nothing was recorded. From any thread.
+    /// now. The first line is HP and MP as read -- and the pet's HP, "HP/MP/
+    /// pet", once a reading of it or a decision of a pet potion is in the box
+    /// -- every change of the last 5 s, and before that the lowest HP of each
+    /// 2 s; then a line for each potion key, HP's first, then MP's, then the
+    /// pet's, of its decisions -- each run of one reason with how long it
+    /// lasted, every press marked; and a last line of the presses of each. A
+    /// key by its name and mark only, never a label the player typed. Empty
+    /// when nothing was recorded. From any thread.
     std::vector<std::string> black_box_lines() const;
     static constexpr std::uint64_t kBlackBoxMs = 30'000;
     /// Kept for longer than it says: a death is alerted up to 3 s after HP
@@ -591,7 +710,8 @@ private:
     /// its reading being above the mark: one line of what each potion key did
     /// -- presses, and the seconds spent in each reason, which add up to the
     /// minute. "Potions: HP key 1 (under 60%): 5 pressed; 48.3 s above the
-    /// mark, 11.7 s cooling | MP key 2 (under 58%): ...".
+    /// mark, 11.7 s cooling | MP key 2 (under 58%): ... | Pet key 4 (under
+    /// 50%): ...".
     void log_potions(std::uint64_t now);
     /// Every key's first due time, from `now`.
     void arm(std::uint64_t now);
@@ -620,14 +740,23 @@ private:
     /// Whether that is still so, asked without trying a press.
     bool still_refused(const MacroConfig& cfg, Refused why) const;
 
-    /// One kind of potion's part of the timer pass, HP's or MP's: when it is
-    /// next looked at -- kGatePollMs after a press, kPotionRetryMs after
-    /// another job kept the keys -- why its last try did not go out, and
-    /// whether one of its keys is due and has not gone out.
+    /// One kind of potion's part of the timer pass, HP's, MP's or the pet's:
+    /// when it is next looked at -- kGatePollMs after a press, kPotionRetryMs
+    /// after another job kept the keys -- why its last try did not go out,
+    /// and whether one of its keys is due and has not gone out.
     struct PotionKind {
         std::uint64_t look_ms = 0;
         Refused       refused = Refused::None;
         bool          waiting = false;
+        /// The last press that went out, to see whether the bar rose
+        /// (MacroConfig::potion_recheck_ms): when, the reading it was
+        /// pressed at, the key, and whether it is itself the early press
+        /// that a check asked for -- which is not checked again.
+        std::uint64_t check_at = 0;
+        float         check_before = 0.0f;
+        std::uint32_t check_keycode = 0;
+        bool          check_is_repress = false;
+        bool          repress_next = false;   ///< the next press of this kind is the early one
     };
     std::uint32_t jittered(std::uint32_t base, int pct) const;
     std::uint64_t clock_now() const;
@@ -653,6 +782,7 @@ private:
 
     std::atomic<float>         vit_hp_{-1.0f};
     std::atomic<float>         vit_mp_{-1.0f};
+    std::atomic<float>         vit_pet_{-1.0f};
     std::atomic<std::uint64_t> vit_at_ms_{0};
 
     mutable std::mutex mutex_;
@@ -692,6 +822,33 @@ private:
     std::uint64_t     last_buff_ms_ = 0;
     bool              buff_pressed_ = false;
 
+    /// The presses of a buff's cast still to come after the first
+    /// (MacroConfig::buff_presses): the key, its hold, how many are left, when
+    /// the next is due and how far apart, and when they are given up on.
+    /// Guarded by mutex_.
+    struct BuffRepeat {
+        std::uint32_t keycode = 0;
+        std::uint32_t hold_ms = 0;
+        std::uint32_t left = 0;
+        std::uint32_t gap_ms = 0;
+        std::uint64_t at = 0;
+        std::uint64_t until = 0;
+    };
+    std::vector<BuffRepeat> buff_repeats_;
+    /// The buff key whose refusal the log last said, so that a buff refused
+    /// every 2 s for minutes is said once. 0 for none; the timer pass's.
+    std::uint32_t buff_refused_said_ = 0;
+    /// One due repeat of a buff's cast, if any is: at most one a pass.
+    void run_buff_repeats(std::uint64_t now);
+    /// Whether the potion key `k`, in place `s` of the due times, may drink at
+    /// `now` with its bar at `v`: its cooldown is over, or the bar is under
+    /// half its mark and urgent_ms (MacroConfig::potion_urgent_ms) have passed
+    /// since its last press. With mutex_ held.
+    bool potion_cooled(const MacroKey& k, int s, float v, std::uint64_t now, std::uint32_t urgent_ms) const;
+    /// Buffs go out no closer than this: kBuffGapMs, or the whole of a cast
+    /// and a little over, if that is longer.
+    static std::uint64_t buff_spacing(const MacroConfig& cfg);
+
     /// Absolute time each key is next due. Parallel to config_.keys.
     std::vector<std::uint64_t> due_ms_;
     /// When each key's press last went out, or 0; parallel to config_.keys,
@@ -724,15 +881,21 @@ private:
     /// stands now; none for a key taken out meanwhile.
     void count_press(std::size_t i);
 
-    /// HP's and MP's potions; the timer pass's alone.
-    PotionKind        potion_kind_[2];
+    /// The kinds of potion, in the order a pass looks at them: HP's, MP's,
+    /// the pet's. potion_kind_ is in that order too.
+    static constexpr MacroKeyKind kPotionKinds[3] = { MacroKeyKind::HpPotion, MacroKeyKind::MpPotion,
+                                                      MacroKeyKind::PetPotion };
+    /// HP's, MP's and the pet's potions; the timer pass's alone.
+    PotionKind        potion_kind_[3];
     /// When the held counters of the potions next count: once a
     /// kGatePollMs, as when the gates were looked at only that often -- what
     /// the counters have always counted. The timer pass's alone.
     std::uint64_t     potion_count_ms_ = 0;
-    /// When an HP potion's key last came up, for the gap before an MP one;
-    /// the timer pass's alone. 0: none yet.
+    /// When an HP potion's key last came up, for the gap before an MP one --
+    /// and with mp_up_ms_, an MP one's, before a pet one; the timer pass's
+    /// alone. 0: none yet.
     std::uint64_t     hp_up_ms_ = 0;
+    std::uint64_t     mp_up_ms_ = 0;
     /// Since when a potion has been due without going out, on clock_now() --
     /// begun again while every key is refused alike; 0 when none is. Set as
     /// one is found due, before it is pressed, and cleared once none waits:
@@ -751,6 +914,9 @@ private:
     /// after the last one's key came up, a chance's beat, a retry; the timer
     /// pass's alone.
     std::uint64_t     skill_look_ms_ = 0;
+    /// Before this no skill on its own timer goes down: skill_gap_ms after the
+    /// last such skill's key came up.
+    std::uint64_t     skill_free_ms_ = 0;
     /// The minute's line: when it was last written, and the counts then.
     std::uint64_t     skill_log_ms_ = 0;
     std::uint64_t     skill_log_pressed_ = 0;
@@ -764,24 +930,27 @@ private:
     struct BoxVitals {
         std::uint64_t t = 0;
         int           hp = -1, mp = -1;     ///< rounded percent; -1 no reading
+        int           pet = -1;             ///< the pet's HP, likewise
     };
     struct BoxDecision {
         std::uint64_t t = 0;
         std::uint64_t key = 0;              ///< which key (key_ids_)
         std::uint32_t keycode = 0;
         int           mark = 0;             ///< its threshold, percent
-        bool          hp = true;            ///< an HP potion, or an MP one
+        MacroKeyKind  kind = MacroKeyKind::HpPotion;    ///< an HP, MP or pet potion
         PotionWhy     why = PotionWhy::AboveMark;
         std::string   text;                 ///< for KeysHeld: what holds the game
     };
+    /// How many reasons there are, for a tally of each.
+    static constexpr int kPotionWhys = static_cast<int>(PotionWhy::BehindMp) + 1;
     /// A potion key's minute, for log_potions: its presses, and how long it
     /// spent in each reason, from its decisions as they change.
     struct PotionMinute {
         std::uint32_t keycode = 0;
         int           mark = 0;
-        bool          hp = true;
+        MacroKeyKind  kind = MacroKeyKind::HpPotion;
         std::uint64_t presses = 0;
-        std::uint64_t ms[static_cast<int>(PotionWhy::BehindHp) + 1] = {};
+        std::uint64_t ms[kPotionWhys] = {};
         PotionWhy     why = PotionWhy::AboveMark;     ///< the reason now, since `since`
         std::string   text;
         std::string   held_by;          ///< what last held the keys, for KeysHeld
@@ -789,10 +958,10 @@ private:
         bool          active = false;   ///< pressed, or held for anything but above the mark, this minute
     };
     /// Records a vitals reading pushed at `t`, when it says something new.
-    void box_vitals(std::uint64_t t, float hp_pct, float mp_pct);
+    void box_vitals(std::uint64_t t, float hp_pct, float mp_pct, float pet_pct);
     /// Records a potion key's decision at `t`: when its reason or its text
-    /// changed since its last, and every press.
-    void box_decide(std::uint64_t t, std::uint64_t key, const MacroKey& k, bool hp, PotionWhy why,
+    /// changed since its last, and every press. `kind` is the key's.
+    void box_decide(std::uint64_t t, std::uint64_t key, const MacroKey& k, MacroKeyKind kind, PotionWhy why,
                     const std::string& text = {});
     void box_trim(std::uint64_t now);   ///< box_mutex_ held
     mutable std::mutex       box_mutex_;

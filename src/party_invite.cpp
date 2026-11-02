@@ -1,7 +1,12 @@
 #include "gobot/party_invite.hpp"
+#include "gobot/bag.hpp"
+#include "gobot/input_manager.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 
 namespace gobot {
 namespace {
@@ -57,6 +62,20 @@ char base_letter(unsigned int cp) {
     if (cp >= 0x00F9 && cp <= 0x00FC) return 'u';
     if (cp == 0x00DD || cp == 0x00FD || cp == 0x00FF) return 'y';
     return 0;
+}
+
+/// Wait `ms`, asking `stop` every 50 ms; false when it said stop. Against the
+/// clock rather than by adding up the slices, which Windows rounds up to its
+/// tick each.
+bool nap(int ms, const std::function<bool()>& stop) {
+    using clock = std::chrono::steady_clock;
+    const auto until = clock::now() + std::chrono::milliseconds(std::max(0, ms));
+    for (;;) {
+        if (stop && stop()) return false;
+        const auto left = until - clock::now();
+        if (left <= clock::duration::zero()) return true;
+        std::this_thread::sleep_for(std::min<clock::duration>(left, std::chrono::milliseconds(50)));
+    }
 }
 
 } // namespace
@@ -219,6 +238,77 @@ PartyInvite::Seen PartyInvite::look(const Frame& frame, const TemplateStore& sto
     out.line = font->read_line(frame, box);
     out.who  = name_in(out.line, settings_.prefix);
     return out;
+}
+
+PartyInvite::Verdict PartyInvite::decide(const Seen& seen, bool bin_asking,
+                                         const Party::Settings& rules) {
+    Verdict v;
+    if (!seen.up) {
+        v.why = "no invitation on screen";
+        return v;
+    }
+    // The footer picture matches the bin's quantity dialog at 0.90, and the
+    // drop and revive questions at 0.86. A line with no name after the prefix
+    // ("của") is no invitation's, whatever accept_all says.
+    if (bin_asking) {
+        v.why = "it is the trash bin's own dialog";
+        return v;
+    }
+    if (seen.who.empty()) {
+        v.why = "its line does not read as an invitation's";
+        return v;
+    }
+
+    const bool name_matters =
+        !rules.accept_all || (rules.use_blacklist && !rules.blacklist.empty());
+    if (name_matters && !rules.may_accept(seen.who)) {
+        v.answer = Answer::Decline;
+        v.why = "the rules in party.ini say no";
+        return v;
+    }
+    v.answer = Answer::Accept;
+    v.why = "the rules in party.ini allow it";
+    return v;
+}
+
+bool PartyInvite::same_invitation(const Seen& first, const Seen& again,
+                                  bool bin_asking_again) {
+    if (!first.up || !again.up || bin_asking_again) return false;
+    if (first.who.empty() || again.who.empty()) return false;
+    if (fold(first.who) != fold(again.who)) return false;
+    return std::abs(again.at.x - first.at.x) <= 3 && std::abs(again.at.y - first.at.y) <= 3;
+}
+
+bool PartyInvite::answer(InputManager& input, const std::function<bool(Frame&)>& grab,
+                         const TemplateStore& store, const GlyphFont* font, const Seen& seen,
+                         bool accept, const std::function<bool()>& stop,
+                         std::string* why) const {
+    const auto said = [why](const std::string& text) {
+        if (why) *why = text;
+        return false;
+    };
+    // The pause before accepting, which a stop cuts short.
+    if (!nap(accept ? settings_.settle_ms : 0, stop)) return said("stopped before the click");
+    if (font == nullptr || !font->loaded())
+        return said("there is no bitmap font to read the name again with");
+
+    // The screen a moment later is not the one this was decided on. Answered
+    // only if a new look shows the same invitation, from the same player, and
+    // the bin has not put up a dialog of its own meanwhile.
+    Frame now;
+    if (!grab || !grab(now) || !now.valid()) return said("no new look at the game");
+    const Seen again = look(now, store, font);
+    const bool bin = again.up && bag::bin_asking(now, store);
+    if (!same_invitation(seen, again, bin))
+        return said("the dialog changed, moved or went before the click");
+
+    InputManager::GameClick how = InputManager::GameClick::Failed;
+    const bool sent = accept
+        ? input.click_on_game(again.accept_x, again.accept_y, false, stop, &how)
+        : input.click_on_game(again.decline_x, again.decline_y, false, stop, &how);
+    if (!sent)
+        return said(std::string("the click was not made: ") + InputManager::game_click_name(how));
+    return true;
 }
 
 } // namespace gobot

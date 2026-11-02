@@ -65,7 +65,8 @@ struct OwnPosition {
 /// included, as docs/protocol-findings.md §4e and GoC count them. A payload
 /// starts after the 8-byte header, so each is read 8 bytes earlier in it.
 ///
-/// Nothing calls this yet: P0-3 wires it into the world model.
+/// Only PacketWorld (gobot/packet_world.hpp) calls this, and nothing live
+/// feeds that yet: P0-3 wires it in.
 inline std::optional<OwnPosition> read_own_position(const GamePacket& p) {
     if (p.from_server || !p.udp || p.depth != 0) return std::nullopt;
 
@@ -126,6 +127,44 @@ inline std::optional<OwnPosition> read_own_position(const GamePacket& p) {
     if (out.speed && !std::isfinite(*out.speed)) out.speed.reset();
     if (out.vertical_speed && !std::isfinite(*out.vertical_speed)) out.vertical_speed.reset();
     return out;
+}
+
+/// Where the server puts you as a map loads.
+///
+/// It is the one fix of your position the server sends: it never echoes your
+/// moves. All seven map entries of the P0-2 recordings had one, and its x, y
+/// were the spawn point that the client's four 0x0028 then reported, and the
+/// u16 pair at 60 and 62 of your own record 0x001E (§4e). A map load carries
+/// nothing else of the map: no grid, and no name of the game's .map file the
+/// place is drawn from.
+struct MapEntry {
+    std::uint16_t map  = 0;   ///< with the area, one place: (10, 4) and (10, 5) are two
+    std::uint16_t area = 0;
+    std::uint16_t x    = 0;   ///< the spawn point, world pixels
+    std::uint16_t y    = 0;   ///< world pixels, growing downward
+};
+
+/// A map entry: plain 0x0086, from the server; nothing for any other frame.
+///
+///   map u16 at 16      area u16 at 18      x, y u16 at 20 and 22
+///
+/// Read only a frame of exactly 24 bytes straight off the TCP stream, as all
+/// seven were. Whether the server sends one when another player enters a map
+/// is not known.
+inline std::optional<MapEntry> read_map_entry(const GamePacket& p) {
+    constexpr std::size_t kFrame = 24, kHeader = 8;
+    if (p.opcode != 0x0086 || !p.from_server || p.udp || p.depth != 0) return std::nullopt;
+    if (p.payload.size() != kFrame - kHeader) return std::nullopt;
+
+    ByteReader r(p.payload);
+    auto u16_at = [&](std::size_t at) { r.seek(at - kHeader); return r.u16(); };
+    MapEntry e;
+    e.map  = u16_at(16);
+    e.area = u16_at(18);
+    e.x    = u16_at(20);
+    e.y    = u16_at(22);
+    if (!r.ok()) return std::nullopt;
+    return e;
 }
 
 } // namespace gobot

@@ -17,6 +17,7 @@
 #include "gobot/input_manager.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -47,8 +48,6 @@ std::string fmt(const char* f, Args... args) {
     return buf;
 }
 
-bool exists(const std::string& path) { return GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
-
 std::string read_all(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -63,7 +62,15 @@ std::string temp_path(const char* name) {
     return std::string(dir) + "gobot_test_" + std::to_string(GetCurrentProcessId()) + "\\" + name;
 }
 
-const char* const kLiveBuild = "C:\\Users\\player\\source\\GoBot\\build\\";
+/// The build tree of the checkout these tests were built from, where the live
+/// tests saved their rounds (live\shots, frozen\...). Never committed, and
+/// never written by GoBot as it plays; what GoBot writes is read beside this
+/// test, and only as saved (load_live_frame).
+#ifdef GOBOT_SOURCE_DIR
+const char* const kLiveBuild = GOBOT_SOURCE_DIR "/build/";
+#else
+const char* const kLiveBuild = "";
+#endif
 
 constexpr std::uint64_t kLookMs = 5000;
 constexpr std::uint64_t kMinute = 60'000;
@@ -291,10 +298,11 @@ void test_eyes() {
     looker.load(exe_relative("configs/templates.ini"));
     const AutoLogin::Settings login;
     const TemplateStore no_pages;
+    // frame.png beside this test, only as it was saved: gobot_cli --read
+    // rewrites it.
     Frame frame;
-    const std::string frame_png = std::string(kLiveBuild) + "bin\\Release\\frame.png";
-    if (!(load_png(exe_relative("frame.png"), frame) || (exists(frame_png) && load_png(frame_png, frame)))) {
-        std::printf("  [skip] no frame.png from the live client here\n");
+    if (!load_live_frame(exe_relative("frame.png"), frame)) {
+        skip("no frame.png from the live client, as saved, here\n");
         return;
     }
     check(looker.look_at(frame, true, false, false, login, no_pages).hud, "frame.png: in the world");
@@ -313,7 +321,7 @@ void test_eyes() {
         FindClose(h);
     }
     if (rounds.empty()) {
-        std::printf("  [skip] no live round frames here\n");
+        skip("no live round frames here\n");
         return;
     }
     std::sort(rounds.begin(), rounds.end());
@@ -414,7 +422,7 @@ void test_keeper() {
     GlyphFont font;
     if (!TemplateStore::load_one("grabbed/dialog_ok", exe_relative("configs/templates.ini"), dialog) ||
         !font.load(GlyphFont::default_dir())) {
-        std::printf("  [skip] no grabbed/dialog_ok or no glyphs here\n");
+        skip("no grabbed/dialog_ok or no glyphs here\n");
         return;
     }
     Frame shot = plain_frame(30);
@@ -457,7 +465,7 @@ void test_keeper() {
         check(asked.find("Bạn có") != std::string::npos && asked.find("rác") != std::string::npos,
               "and its words read from where they are, not garbage (WD-R5, WD-A9)");
     } else {
-        std::printf("  [skip] no frozen\\live\\shots\\p5_probe_050.png here\n");
+        skip("no frozen\\live\\shots\\p5_probe_050.png here\n");
     }
 }
 
@@ -498,8 +506,9 @@ void test_texts() {
     check(!src.empty() && lower.find("captcha\"") == std::string::npos &&
               lower.find("captcha/") == std::string::npos,
           "stall_watch.cpp looks for no captcha picture (WD-R7)");
-    check(src.find("click_at") == std::string::npos && src.find("key_press") == std::string::npos &&
-              src.find("type_text") == std::string::npos && src.find("focus_window") == std::string::npos,
+    check(src.find("click_at") == std::string::npos && src.find("click_on_game") == std::string::npos &&
+              src.find("key_press") == std::string::npos && src.find("type_text") == std::string::npos &&
+              src.find("focus_window") == std::string::npos,
           "and clicks, presses and brings forward nothing: the in-game dialog is only read");
 #endif
 }
@@ -541,7 +550,7 @@ void test_games_window() {
     for (const InputManager::WindowInfo& info : InputManager::windows_of("gobot_test.exe"))
         listed = listed || (w != nullptr && info.hwnd == w);
     if (!listed) {
-        std::printf("  [skip] could not put up a window of this test's own here\n");
+        skip("could not put up a window of this test's own here\n");
     } else {
         check(stall_window_is_the_games(w, "gobot_test.exe", here_too),
               "a window of the program installed as the game: the game's own");

@@ -1,12 +1,15 @@
 #include "gobot/hunter.hpp"
+#include "gobot/attack_style.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/monster_list.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <string>
 #include <thread>
 
 namespace gobot {
@@ -47,6 +50,10 @@ constexpr std::uint32_t kSettleMs = 50;
 /// After a step back the view may still be catching up for a look or two.
 constexpr std::uint64_t kStepSlackMs = 400;
 
+/// With the walk held, the most a kill's pick-ups are stood for: three
+/// presses 220 ms apart, and some to spare for an input that is busy.
+constexpr std::uint64_t kLootStandMs = 1500;
+
 /// A step back is judged on the picture this many on from the one there is
 /// as it ends: the detector puts a picture out a moment after taking it, so
 /// the next one may have been taken during the step -- and a picture from
@@ -76,6 +83,25 @@ int band_value(int v) { return v < 0 ? -1 : std::min(v, 1000); }
 
 // ---------------------------------------------------------------- config
 
+const char* packet_positions_name(PacketPositions p) {
+    switch (p) {
+        case PacketPositions::Off:   return "off";
+        case PacketPositions::On:    return "on";
+        case PacketPositions::Watch: break;
+    }
+    return "watch";
+}
+
+PacketPositions packet_positions_from(const std::string& word) {
+    std::string w;
+    for (const char c : word)
+        if (!std::isspace(static_cast<unsigned char>(c)))
+            w += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (w == "off") return PacketPositions::Off;
+    if (w == "on") return PacketPositions::On;
+    return PacketPositions::Watch;
+}
+
 bool HunterConfig::load(const std::string& path) {
     IniFile ini;
     if (!ini.load(path)) {
@@ -95,6 +121,14 @@ bool HunterConfig::load(const std::string& path) {
     // distance and the band following height_tolerance -- the hunter as it
     // was. Likewise the keep-distance and facing keys below.
     style              = ini.get("Hunt", "style", "");
+    // One this GoBot does not know -- typed by hand, or from a newer one --
+    // is none: the picker shows "Như trước" for it, and GoC's rules must not
+    // be on behind that.
+    if (!style.empty() && find_attack_style(style) == nullptr) {
+        GB_WARN("HunterConfig: unknown style \"%s\" in %s -- fighting as with none (Như trước)",
+                style.c_str(), path.c_str());
+        style.clear();
+    }
     min_distance       = std::clamp(ini.get_int("Hunt", "min_distance", 0), 0, std::max(0, reach));
     up_reach           = band_value(ini.get_int("Hunt", "up_reach", -1));
     down_reach         = band_value(ini.get_int("Hunt", "down_reach", -1));
@@ -108,6 +142,10 @@ bool HunterConfig::load(const std::string& path) {
     give_up_ms         = static_cast<std::uint32_t>(ini.get_int("Hunt", "give_up_ms", 4000));
     dead_below         = ini.get_float("Hunt", "dead_below", 0.05f);
     finish_wounded     = ini.get_bool("Hunt", "finish_wounded", true);
+    // Missing from a file written before it: held, as a player walks. The
+    // steps of old are a word away, should the game ever take a held key
+    // amiss.
+    hold_walk          = ini.get_bool("Hunt", "hold_walk", true);
     step_ms            = static_cast<std::uint32_t>(ini.get_int("Hunt", "step_ms", 180));
     attack_interval_ms = static_cast<std::uint32_t>(ini.get_int("Hunt", "attack_interval_ms", 700));
     jump_to_reach      = ini.get_bool("Hunt", "jump_to_reach", true);
@@ -115,6 +153,21 @@ bool HunterConfig::load(const std::string& path) {
     loot_key           = static_cast<std::uint32_t>(ini.get_int("Hunt", "loot_key", 0));
     loot_interval_ms   = static_cast<std::uint32_t>(ini.get_int("Hunt", "loot_interval_ms", 2000));
     stay_put           = ini.get_bool("Hunt", "stay_put", false);
+    // Missing from a file written before "Chỗ đánh quái": off, and the area
+    // and its timings GoC's, within reason -- a slip of the keyboard must not
+    // make an area of the whole map, nor one too small to stand in.
+    spot               = ini.get_bool("Hunt", "spot", false);
+    spot_half_w        = std::clamp(ini.get_int("Hunt", "spot_half_w", 300), 50, 2000);
+    spot_half_h        = std::clamp(ini.get_int("Hunt", "spot_half_h", 100), 20, 500);
+    spot_tolerance     = std::clamp(ini.get_int("Hunt", "spot_tolerance", 48), 10, 1000);
+    spot_return_delay_ms = static_cast<std::uint32_t>(
+        std::clamp(ini.get_int("Hunt", "spot_return_delay_ms", 1500), 0, 60000));
+    // Not under 3 s: a walk on a clear floor is reported only as it starts and
+    // at the stop of its renewal, 2.5 s on (Hunter::kWalkRenewMs).
+    spot_give_up_ms    = static_cast<std::uint32_t>(
+        std::clamp(ini.get_int("Hunt", "spot_give_up_ms", 4000), 3000, 60000));
+    spot_retry_ms      = static_cast<std::uint32_t>(
+        std::clamp(ini.get_int("Hunt", "spot_retry_ms", 30000), 1000, 600000));
     // Missing from a file written before the lists: both empty and "only
     // those" off, which is the hunter as it was.
     skip_names         = split_monster_names(ini.get("Hunt", "skip_monsters", ""));
@@ -122,6 +175,15 @@ bool HunterConfig::load(const std::string& path) {
     first_only         = ini.get_bool("Hunt", "first_only", false);
     require_focus      = ini.get_bool("Hunt", "require_focus", true);
     focus_on_start     = ini.get_bool("Hunt", "focus_on_start", true);
+    // Missing from a file written before "Vị trí từ gói tin": Watch, as an
+    // unknown word is -- the capture only watches, and the screen fights as
+    // it did. The two numbers that lay the packets over the screen likewise
+    // read as one to one, kept within reason: a slip of the keyboard must not
+    // send the hunter after monsters a whole map away.
+    packet_positions   = packet_positions_from(ini.get("Hunt", "packet_positions", "watch"));
+    const float scale  = ini.get_float("Hunt", "packet_scale", 1.0f);
+    packet_scale       = std::isfinite(scale) ? std::clamp(scale, 0.25f, 4.0f) : 1.0f;
+    packet_dy          = std::clamp(ini.get_int("Hunt", "packet_dy", 0), -200, 200);
     toggle_key         = static_cast<std::uint32_t>(ini.get_int("Hunt", "toggle_key", 122));
     return true;
 }
@@ -159,6 +221,7 @@ bool HunterConfig::save(const std::string& path) const {
     ini.set_int ("Hunt", "give_up_ms", static_cast<int>(give_up_ms));
     ini.set_float("Hunt", "dead_below", dead_below);
     ini.set_bool("Hunt", "finish_wounded", finish_wounded);
+    ini.set_bool("Hunt", "hold_walk", hold_walk);
     ini.set_int ("Hunt", "step_ms", static_cast<int>(step_ms));
     ini.set_int ("Hunt", "attack_interval_ms", static_cast<int>(attack_interval_ms));
     ini.set_bool("Hunt", "jump_to_reach", jump_to_reach);
@@ -166,11 +229,21 @@ bool HunterConfig::save(const std::string& path) const {
     ini.set_int ("Hunt", "loot_key", static_cast<int>(loot_key));
     ini.set_int ("Hunt", "loot_interval_ms", static_cast<int>(loot_interval_ms));
     ini.set_bool("Hunt", "stay_put", stay_put);
+    ini.set_bool("Hunt", "spot", spot);
+    ini.set_int ("Hunt", "spot_half_w", spot_half_w);
+    ini.set_int ("Hunt", "spot_half_h", spot_half_h);
+    ini.set_int ("Hunt", "spot_tolerance", spot_tolerance);
+    ini.set_int ("Hunt", "spot_return_delay_ms", static_cast<int>(spot_return_delay_ms));
+    ini.set_int ("Hunt", "spot_give_up_ms", static_cast<int>(spot_give_up_ms));
+    ini.set_int ("Hunt", "spot_retry_ms", static_cast<int>(spot_retry_ms));
     ini.set     ("Hunt", "skip_monsters", join_monster_names(skip_names));
     ini.set     ("Hunt", "first_monsters", join_monster_names(first_names));
     ini.set_bool("Hunt", "first_only", first_only);
     ini.set_bool("Hunt", "require_focus", require_focus);
     ini.set_bool("Hunt", "focus_on_start", focus_on_start);
+    ini.set     ("Hunt", "packet_positions", packet_positions_name(packet_positions));
+    ini.set_float("Hunt", "packet_scale", packet_scale);
+    ini.set_int ("Hunt", "packet_dy", packet_dy);
     ini.set_int ("Hunt", "toggle_key", static_cast<int>(toggle_key));
     return ini.save(path, "GoBot hunting");
 }
@@ -194,6 +267,7 @@ const char* Hunter::to_string(State s) {
         case State::Attacking:   return "attacking";
         case State::Unfocused:   return "waiting for the game to have focus";
         case State::Waiting:     return "standing still, waiting for a monster to come within reach";
+        case State::Returning:   return "walking back to the hunting spot";
         case State::Idle:        break;
     }
     return "idle";
@@ -224,6 +298,24 @@ HunterConfig Hunter::config() const {
 Hunter::Status Hunter::status() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return status_;
+}
+
+Hunter::Spot Hunter::spot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return spot_;
+}
+
+// Asked from the GUI's thread, done at the hunter's next pass: the spot is
+// the hunter's own, and a change made beside a pass would be written over.
+void Hunter::retake_spot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    retake_asked_ = true;
+    suspend_asked_ = false;
+}
+
+void Hunter::suspend_spot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    suspend_asked_ = true;
 }
 
 bool Hunter::level_with(const HunterConfig& cfg, int dy) {
@@ -274,20 +366,88 @@ void Hunter::fresh_run() {
     // Nothing is known of which way the character faces, nor of any fight.
     facing_ = Facing::Unknown;
     held_before_ = false;
+    walk_vk_ = 0;
+    walk_until_ms_.store(0);
+    walk_since_ms_ = 0;
+    walk_adx_ = 0;
+    walk_progress_ms_ = 0;
+    last_hop_ms_ = 0;
+    loot_since_ms_ = 0;
     just_stepped_ = false;
     step_slack_px_ = 0;
     step_slack_until_ms_ = 0;
     fight_ = FightLog{};
     watch_ = DamageWatch{};
     back_ = BackSteps{};
+    retreat_[0] = retreat_[1] = Retreat{};
+    walk_side_ = 0;
+    walk_run_ms_ = 0;
+    walk_pass_ = 0;
+    walk_at_ms_ = 0;
     gave_up_.clear();
     minute_from_ms_ = 0;
     minute_fights_ = minute_far_ = minute_backsteps_ = 0;
+    minute_returns_ = minute_return_give_ups_ = 0;
     last_engaged_ms_ = 0;
+    // The frame of reference the run starts in: a change from here on is a
+    // change, and the one before the start is not.
+    view_ = eyes_.view ? eyes_.view() : 0;
+    // A new start, a new hunting spot: taken where the character stands at
+    // the first look that has it settled, and the map entries counted from
+    // that look's. Nothing fought yet, so the idle time counts from here.
+    fix_ = WorldFix{};
+    spot_mode_ = SpotMode::Off;
+    spot_why_ = SpotWhy::None;
+    epoch_seen_on_ = false;
+    known_x_ = known_y_ = 0.0f;
+    login_gap_ = false;
+    login_report_ms_ = 0;
+    spot_busy_ms_ = clock_now();
+    return_on_ = returning_ = returned_last_ = false;
+    return_quiet_ms_ = 0;
+    return_pass_ = 0;
+    return_strikes_ = 0;
+    return_retry_ms_ = 0;
+    said_too_high_ = false;
     disengage();
     std::lock_guard<std::mutex> lock(mutex_);
+    spot_ = Spot{};
+    retake_asked_ = suspend_asked_ = false;
     status_.only_skipped = false;
+    status_.passed_over = false;
+    status_.outside_area = false;
     status_.no_target_since_ms = 0;
+    status_.spot_set = false;
+    status_.spot_suspended = false;
+    status_.spot_login = false;
+    status_.spot_why = SpotWhy::None;
+    status_.spot_dx = status_.spot_dy = 0.0f;
+    // This run's walks back: the card and the Positions line show them
+    // beside this run's spot, never an earlier run's.
+    status_.returns = 0;
+    status_.return_give_ups = 0;
+}
+
+void Hunter::forget_positions() {
+    // Not loot_left_ = 3, as a target gone from where it was is: the target
+    // is not gone, only seen from elsewhere, and three presses of the pick-up
+    // key at every switch would be three for nothing.
+    have_target_ = false;
+    target_first_ = false;
+    switched_ = false;
+    skip_spots_.clear();
+    gave_up_.clear();
+    end_fight("view changed");
+    watch_ = DamageWatch{};
+    // The step back still to be judged goes, being judged by where things
+    // stand; the steps counted each way (retreat_) stay -- the character
+    // took them, wherever anything is seen from.
+    back_ = BackSteps{};
+    step_slack_px_ = 0;
+    step_slack_until_ms_ = 0;
+    just_stepped_ = false;
+    // The hunting spot and the walk back to it stay: they are in the
+    // packets' world pixels, whichever frame the plates are in.
 }
 
 void Hunter::stop() {
@@ -302,6 +462,8 @@ void Hunter::stop() {
         status_.state = State::Idle;
         status_.has_target = false;
         status_.only_skipped = false;
+        status_.passed_over = false;
+        status_.outside_area = false;
     }
     GB_INFO("=== HUNT OFF ===");
 }
@@ -323,6 +485,10 @@ bool Hunter::focused() const {
 
 bool Hunter::press(std::uint32_t vk, int hold_ms) {
     return hands_.key ? hands_.key(vk, hold_ms) : input_.key_press(vk, hold_ms);
+}
+
+bool Hunter::hold_down(std::uint32_t vk) {
+    return hands_.key_down ? hands_.key_down(vk) : input_.key_down(vk);
 }
 
 void Hunter::let_go(std::uint32_t vk) {
@@ -374,18 +540,159 @@ void Hunter::release_movement() {
     // the key-up regardless, and is a no-op when nothing is held.
     if (hands_.release_all) hands_.release_all();
     else                    input_.release_all();
+    set_walk(0);
+}
+
+void Hunter::set_walk(std::uint32_t vk) {
+    // Followed by the packets while held, and kWalkStopGraceMs after it is let
+    // go of, for the stop the game reports a moment after the key comes up.
+    if (vk != 0)            walk_until_ms_.store(UINT64_MAX);
+    else if (walk_vk_ != 0) walk_until_ms_.store(clock_now() + kWalkStopGraceMs);
+    walk_vk_ = vk;
 }
 
 void Hunter::let_go_of_moves(const HunterConfig& cfg) {
     // Every key the hunter presses is down and up again inside its own pass,
-    // so between passes it holds nothing -- unless a key-up did not go out,
-    // the game having lost focus during the hold, which leaves that key down.
-    // Only the direction keys, then, and only when down. This used to be
+    // but for a held walk's -- and a key-up that did not go out, the game
+    // having lost focus during the hold, leaves a key down too. Only the
+    // direction keys, then, and only when down. This used to be
     // release_all() on every pass, which let go of whatever any thread was
     // holding: a potion pressed by the macro was cut off mid-press by the
     // hunter's 60-ms rhythm.
     for (const std::uint32_t vk : { cfg.left_key, cfg.right_key })
         if (vk != 0 && is_down(vk)) let_go(vk);
+    set_walk(0);
+}
+
+void Hunter::hop(const HunterConfig& cfg, int dy, std::uint64_t now, WalkFor what) {
+    // Up and out of reach: a hop is the cheapest thing that might help, and
+    // the give-up timer catches the case where it does not. Higher than the
+    // band it can hit without jumping -- half of height_tolerance without a
+    // style -- and only with a jump key: with none set it never hops.
+    //
+    // With a hunting spot, never toward a monster: a hop may land the
+    // character on the platform above, and it has no way back down to its
+    // spot. Toward the spot, when it is more than a floor's slope above.
+    if (!cfg.jump_to_reach || cfg.jump_key == 0) return;
+    if (what == WalkFor::Target && (cfg.spot || dy >= -cfg.up_nj())) return;
+    if (what == WalkFor::Spot) {
+        const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+        if (dy >= -static_cast<int>(std::lround(kSpotFloorPx / scale))) return;
+    }
+    if (InputManager::never_pressed(cfg.jump_key)) return;     // ↓: would not go out anyway
+    // Not again while the last one is still in the air, walking held or
+    // stepping: there it is a second jump.
+    if (in_air(now)) return;
+    if (press(cfg.jump_key, 50)) last_hop_ms_ = now;
+}
+
+void Hunter::walk(const HunterConfig& cfg, int dx, int dy, std::uint64_t now, WalkFor what) {
+    const std::uint32_t go = dx < 0 ? cfg.left_key : cfg.right_key;
+    const std::uint32_t other = dx < 0 ? cfg.right_key : cfg.left_key;
+    const Facing way = dx < 0 ? Facing::Left : Facing::Right;
+
+    // The other way already, with the key still held from the last look: let
+    // go of it now, input free or not. Letting go takes nothing from anyone,
+    // and walking on the wrong way until the input is free would.
+    if (walk_vk_ != 0 && walk_vk_ != go) {
+        let_go(walk_vk_);
+        set_walk(0);
+    }
+
+    // Held from one look to the next and still down: on it goes, with nothing
+    // to press -- but with the packets to steer by, a walk held kWalkRenewMs
+    // is let go of a moment and taken up again, below, for the stop and the
+    // start the game then reports. Without them nothing reads those, and the
+    // walk goes on unbroken. Down no longer -- the macro let go of every key
+    // as the character left the world, the game lost focus a moment -- it is
+    // pressed again as a new walk.
+    //
+    // And taken up again at once when it is getting no closer: kWalkStuckMs
+    // with the target never kWalkProgressPx nearer. A walk start the capture
+    // missed leaves the packets' you standing, and never uncertain, while the
+    // character walks -- 900 px past the target by the renewal; the stop and
+    // the start of a renewal put it right inside half a second. A target
+    // further off than at the last mark -- another one, or one walking away
+    // -- is a new mark.
+    //
+    // A walk back to the hunting spot is renewed the same way with the
+    // packets only watched too: its give-up goes by where the reports put
+    // the character, and the packets follow it no further than kOwnReckonMs.
+    const int adx = std::abs(dx);
+    const bool walking = cfg.hold_walk && walk_vk_ == go && is_down(go);
+    if (walking && (adx + kWalkProgressPx <= walk_adx_ || adx > walk_adx_)) {
+        walk_adx_ = adx;
+        walk_progress_ms_ = now;
+    }
+    const bool stuck = walking && now - walk_progress_ms_ >= kWalkStuckMs;
+    const bool steered = cfg.packet_positions == PacketPositions::On || what == WalkFor::Spot;
+    const bool renew = stuck || (steered && now - walk_since_ms_ >= kWalkRenewMs);
+    const int side = dx < 0 ? 0 : 1;
+    if (walking && !renew) {
+        if (auto token = coord_.acquire("hunt-move", Priority::Movement)) hop(cfg, dy, now, what);
+        note_walk(side, true, now);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++status_.steps;
+        return;
+    }
+
+    bool stepped = false;
+    if (auto token = coord_.acquire("hunt-move", Priority::Movement)) {
+        let_go(other);
+        if (!cfg.hold_walk) {
+            stepped = press(go, static_cast<int>(cfg.step_ms));
+            if (stepped) facing_ = way;
+        } else {
+            if (walking) {
+                let_go(go);
+                pause(kWalkRenewGapMs);
+            }
+            set_walk(0);
+            // Not again into a hold begun in that pause -- the trash pass or a
+            // revive lets go of every key as it starts, and would have the
+            // arrow down again under it -- nor into a game no longer in front.
+            const bool may = !walking || (!coord_.critical_active() && focused());
+            if (may && hold_down(go)) {
+                set_walk(go);
+                walk_since_ms_ = clock_now();
+                walk_adx_ = adx;
+                walk_progress_ms_ = walk_since_ms_;
+                facing_ = way;
+            }
+        }
+        hop(cfg, dy, now, what);
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++status_.steps;
+    }
+    // Held, the walk is the key still down -- the input busy leaves a held
+    // one down, and one let go of the other way is none.
+    note_walk(side, cfg.hold_walk ? walk_vk_ == go : stepped, now);
+}
+
+void Hunter::note_walk(int side, bool moved, std::uint64_t now) {
+    if (!moved) {
+        walk_pass_ = 0;
+        return;
+    }
+    // Looks in a row, the same way: the time between them is walked -- no
+    // more than a look and a step take, whatever the clock did meanwhile.
+    if (walk_pass_ != 0 && walk_pass_ + 1 == passes_ && walk_side_ == side && now > walk_at_ms_)
+        walk_run_ms_ += std::min<std::uint64_t>(now - walk_at_ms_, 250);
+    else
+        walk_run_ms_ = 0;
+    walk_side_ = side;
+    walk_pass_ = passes_;
+    walk_at_ms_ = now;
+    // Walked back this far: the steps back the other way gave up ground this
+    // has won back, and a wall or a ledge met that way is not behind it now.
+    Retreat& r = retreat_[1 - side];
+    if (walk_run_ms_ >= kRegainWalkMs && (r.in_row != 0 || r.blocked)) {
+        GB_DEBUG("Hunter: walked %s for %llu ms -- steps back to the %s counted afresh (%d taken%s)",
+                 side == 0 ? "left" : "right", static_cast<unsigned long long>(walk_run_ms_),
+                 side == 0 ? "right" : "left", r.in_row, r.blocked ? ", one met a wall or a ledge" : "");
+        r = Retreat{};
+    }
 }
 
 bool Hunter::press_loot(const HunterConfig& cfg) {
@@ -426,11 +733,17 @@ int Hunter::choose_target(const HunterConfig& cfg, const std::vector<Nameplate>&
             if (n.hp <= cfg.dead_below) continue;    // already finished
             if (out(i)) continue;                    // the lists say no
             const int at = static_cast<int>(i);
+            // Hurt, and within reach of where the character stands: one
+            // across the screen at 90% -- or a bar misread at 0.97 -- beat a
+            // whole one in reach, and the character turned its back on what
+            // was hitting it.
+            const bool hurt_here =
+                cfg.finish_wounded && in_reach(cfg, n.x() - me->x(), n.y() - me->y());
             if (nearest < 0) nearest = at;
-            if (cfg.finish_wounded && (wounded < 0 || n.hp < hp_of(wounded))) wounded = at;
+            if (hurt_here && (wounded < 0 || n.hp < hp_of(wounded))) wounded = at;
             if (first(i)) {
                 if (first_nearest < 0) first_nearest = at;
-                if (cfg.finish_wounded && (first_wounded < 0 || n.hp < hp_of(first_wounded)))
+                if (hurt_here && (first_wounded < 0 || n.hp < hp_of(first_wounded)))
                     first_wounded = at;
             }
         }
@@ -440,8 +753,8 @@ int Hunter::choose_target(const HunterConfig& cfg, const std::vector<Nameplate>&
         }
         target = nearest;
         // Finish something already hurt instead of starting afresh. Only
-        // among those it could reach anyway, so this never sends it chasing
-        // across the screen.
+        // among those it can reach from where it stands, so this never sends
+        // it chasing across the screen.
         if (wounded >= 0 && hp_of(wounded) < 1.0f) target = wounded;
     }
 
@@ -593,7 +906,8 @@ void Hunter::mark_gave_up(const std::vector<Nameplate>& mobs, std::uint64_t now,
         const std::size_t i = static_cast<std::size_t>(to);
         s.x = mobs[i].x();
         s.y = mobs[i].y();
-        if (listed[i] == Listed::Free) listed[i] = Listed::GaveUp;
+        if (listed[i] == Listed::Free || (s.beyond && listed[i] == Listed::First))
+            listed[i] = Listed::GaveUp;
     }
 }
 
@@ -638,11 +952,10 @@ void Hunter::fight_unseen(std::uint64_t now, const char* why) {
     if (fight_.on && now - fight_.seen_ms > MobDetector::kPlayerMemoryMs) end_fight(why);
 }
 
-void Hunter::note_attack(int dx, int away) {
+void Hunter::note_attack(int dx) {
+    // An attack from far enough is no ground won back, so the steps back are
+    // not counted afresh here -- only by a walk the other way (note_walk).
     const int adx = std::abs(dx);
-    // Attacking from far enough at last: the steps back in a row count
-    // afresh -- but a wall or a ledge met stays behind the character.
-    if (adx >= away) back_.in_row = 0;
     ++watch_.attacks;
     FightLog& f = fight_;
     if (!f.on) return;
@@ -654,8 +967,9 @@ void Hunter::follow_back_steps(const Nameplate& target, std::uint64_t now, int s
     BackSteps& b = back_;
     // Somewhere other than where the monster stepped back from was, or not
     // seen for longer than the character goes unseen for a moment: another
-    // monster, and its own count. A fight ended and begun again on the same
-    // one -- its bar misread as empty -- is not.
+    // monster, by which the step cannot be judged. A fight ended and begun
+    // again on the same one -- its bar misread as empty -- is not. The steps
+    // counted each way go on either way (retreat_).
     if (b.seen_ms != 0 && !same_monster(target, b.x, b.y, b.seen_ms, now, slack)) b = BackSteps{};
     b.x = target.x();
     b.y = target.y();
@@ -719,12 +1033,454 @@ void Hunter::minute_log(const HunterConfig& cfg, std::uint64_t now) {
         dropped = status_.targets_dropped - minute_dropped_;
         minute_dropped_ = status_.targets_dropped;
     }
-    if (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0)
+    // With the hunting spot on, the walks back to it and those given up on too.
+    if (cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || minute_returns_ > 0 ||
+                     minute_return_give_ups_ > 0))
+        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up, "
+                "%d walks back to the spot, %d of them given up",
+                minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
+                static_cast<unsigned long long>(dropped), minute_returns_, minute_return_give_ups_);
+    else if (!cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0))
         GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up",
                 minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
                 static_cast<unsigned long long>(dropped));
     minute_from_ms_ = now;
     minute_fights_ = minute_far_ = minute_backsteps_ = 0;
+    minute_returns_ = minute_return_give_ups_ = 0;
+}
+
+// ---------------------------------------------------------------- the spot
+
+void Hunter::track_spot(const HunterConfig& cfg) {
+    fix_ = WorldFix{};
+    if (!eyes_.where || !eyes_.where(fix_)) fix_ = WorldFix{};
+    const WorldFix& f = fix_;
+
+    Spot spot;
+    bool retake = false, suspend = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spot = spot_;
+        retake = retake_asked_;
+        suspend = suspend_asked_;
+        retake_asked_ = suspend_asked_ = false;
+    }
+
+    // "Đặt chỗ này": taken again below, at the first settled look -- this one
+    // if it is. Whatever stood in the way of the old one goes with it.
+    if (retake) {
+        spot = Spot{};
+        return_strikes_ = 0;
+        return_retry_ms_ = 0;
+        said_too_high_ = false;
+        end_return();
+        GB_INFO("Hunter: Đặt chỗ này -- the hunting spot is taken again where the character stands");
+    }
+    // Logged back in -- by the keeper, or a game opened again and found: it
+    // may be anywhere now. Aside as a log in: back in use once the character
+    // stands near where it was, below. One a map entry set aside already
+    // stays as that entry left it: the character was on another map before
+    // the log in, and only coming back through the door brings it back --
+    // standing near where it left from, on that other map, would not.
+    if (suspend && spot.set) {
+        if (!spot.suspended) {
+            spot.suspended = true;
+            spot.login = true;
+            spot.left_x = known_x_;
+            spot.left_y = known_y_;
+            login_gap_ = false;
+            login_report_ms_ = f.report_ms;
+            end_return();
+            GB_INFO("Hunter: logged back in -- the hunting spot (%d,%d) waits until the character stands within "
+                    "%d px of %d,%d, where it was last known, or of the spot",
+                    static_cast<int>(std::lround(spot.x)), static_cast<int>(std::lround(spot.y)), kSpotBackPx,
+                    static_cast<int>(std::lround(spot.left_x)), static_cast<int>(std::lround(spot.left_y)));
+        } else if (!spot.login) {
+            GB_INFO("Hunter: logged back in -- the hunting spot stays aside after its map entry, until the "
+                    "character comes back through a door near %d,%d",
+                    static_cast<int>(std::lround(spot.left_x)), static_cast<int>(std::lround(spot.left_y)));
+        }
+    }
+    // Whether the packets put the character on a place that cannot be the
+    // spot's: another than the spot's own, or the one the entry that set it
+    // aside led to. A place they do not know is not judged.
+    const auto elsewhere = [&f](const Spot& s) {
+        if (!f.map_known) return false;
+        if (s.map_known) return s.map != f.map || s.area != f.area;
+        return s.away_known && s.away_map == f.map && s.away_area == f.area;
+    };
+    // Back in use, on the place the packets say it is when they know it.
+    const auto back_in_use = [this, &f](Spot& s) {
+        s.suspended = false;
+        s.login = false;
+        s.epoch = f.epoch;
+        if (f.map_known) {
+            s.map_known = true;
+            s.map = f.map;
+            s.area = f.area;
+        }
+        return_strikes_ = 0;
+        return_retry_ms_ = 0;
+        said_too_high_ = false;
+    };
+
+    // Map entries since the last pass. Only a fix from a capture counts them:
+    // with none, the number means nothing. The first such look is where the
+    // count starts, not an entry.
+    if (f.state != WorldFix::State::NoCapture) {
+        if (!epoch_seen_on_) {
+            epoch_seen_on_ = true;
+            epoch_seen_ = f.epoch;
+        } else if (f.epoch != epoch_seen_) {
+            epoch_seen_ = f.epoch;
+            const int ex = static_cast<int>(std::lround(f.entry_x)), ey = static_cast<int>(std::lround(f.entry_y));
+            if (spot.set && !spot.suspended && spot.epoch != f.epoch) {
+                // Through a door, or put somewhere by the server: the spot's
+                // world pixels may be another map's now. Where it was last
+                // known is where it left from, and where the entry led is a
+                // place it is not.
+                spot.suspended = true;
+                spot.login = false;
+                spot.left_x = known_x_;
+                spot.left_y = known_y_;
+                spot.away_known = f.map_known;
+                spot.away_map = f.map;
+                spot.away_area = f.area;
+                end_return();
+                GB_INFO("Hunter: map entry %u/%u at %d,%d -- the hunting spot waits until the character is back "
+                        "near %d,%d, where it left from",
+                        static_cast<unsigned>(f.map), static_cast<unsigned>(f.area), ex, ey,
+                        static_cast<int>(std::lround(spot.left_x)), static_cast<int>(std::lround(spot.left_y)));
+            } else if (spot.set && spot.suspended) {
+                // A later entry: back where it left from -- the door there
+                // and back -- or somewhere else. Set aside by a log in, an
+                // entry is a look from after it either way.
+                if (spot.login) login_gap_ = true;
+                const double off = std::hypot(static_cast<double>(f.entry_x - spot.left_x),
+                                              static_cast<double>(f.entry_y - spot.left_y));
+                if (off <= kSpotBackPx && !elsewhere(spot)) {
+                    back_in_use(spot);
+                    GB_INFO("Hunter: map entry %u/%u at %d,%d, %d px from where the character left -- the "
+                            "hunting spot is in use again",
+                            static_cast<unsigned>(f.map), static_cast<unsigned>(f.area), ex, ey,
+                            static_cast<int>(std::lround(off)));
+                } else {
+                    // Somewhere else, or nowhere the packets can tell is the
+                    // spot's: from now on only a door back where it left from
+                    // brings it back -- even one a log in had set aside:
+                    // standing near where it was, here, is another map's
+                    // pixels. On the spot's own map, known so, a log in's
+                    // rule stands: it may walk back.
+                    if (!(spot.map_known && f.map_known && spot.map == f.map && spot.area == f.area)) {
+                        spot.login = false;
+                        spot.away_known = f.map_known;
+                        spot.away_map = f.map;
+                        spot.away_area = f.area;
+                    }
+                    GB_INFO("Hunter: map entry %u/%u at %d,%d, %d px from where the character left -- the "
+                            "hunting spot stays aside (Đặt chỗ này sets one here)",
+                            static_cast<unsigned>(f.map), static_cast<unsigned>(f.area), ex, ey,
+                            static_cast<int>(std::lround(off)));
+                }
+            }
+        }
+    }
+    if (f.state == WorldFix::State::Known) {
+        known_x_ = f.x;
+        known_y_ = f.y;
+    }
+
+    // Set aside by a log in: back in use once the character stands, settled,
+    // within kSpotBackPx of where it was or of the spot -- it came back where
+    // it was -- with the fix's count of map entries for its own. Only by a
+    // look from after the log in (login_gap_): the new game's capture begins
+    // knowing nothing of the character, and a fix from before it is the old
+    // game's -- but a report newer than the last before it is the same game's
+    // own, found again with its capture going on. Never on a place the
+    // packets know is another.
+    if (spot.set && spot.suspended && spot.login) {
+        if (f.state != WorldFix::State::Known || (f.report_ms != 0 && f.report_ms > login_report_ms_))
+            login_gap_ = true;
+        if (f.state == WorldFix::State::Known && login_gap_ && f.settled() && !elsewhere(spot)) {
+            const double off = std::min(
+                std::hypot(static_cast<double>(f.x - spot.left_x), static_cast<double>(f.y - spot.left_y)),
+                std::hypot(static_cast<double>(f.x - spot.x), static_cast<double>(f.y - spot.y)));
+            if (off <= kSpotBackPx) {
+                back_in_use(spot);
+                GB_INFO("Hunter: logged back in, the character stands at %d,%d, %d px from where it was or from the "
+                        "spot -- the hunting spot is in use again",
+                        static_cast<int>(std::lround(f.x)), static_cast<int>(std::lround(f.y)),
+                        static_cast<int>(std::lround(off)));
+            }
+        }
+    }
+
+    // None yet: where the character stands, once it stands there -- not in
+    // mid-jump, where y holds at the top, nor mid-walk, worked out.
+    if (cfg.spot && !spot.set && f.settled()) {
+        spot = Spot{};
+        spot.set = true;
+        spot.x = f.x;
+        spot.y = f.y;
+        spot.half_w = cfg.spot_half_w;
+        spot.half_h = cfg.spot_half_h;
+        spot.epoch = f.epoch;
+        spot.map_known = f.map_known;
+        spot.map = f.map;
+        spot.area = f.area;
+        return_strikes_ = 0;
+        return_retry_ms_ = 0;
+        said_too_high_ = false;
+        GB_INFO("Hunter: hunting spot set where the character stands: %d,%d (+-%d / +-%d)",
+                static_cast<int>(std::lround(spot.x)), static_cast<int>(std::lround(spot.y)), spot.half_w,
+                spot.half_h);
+    }
+
+    // What the pass makes of it. With no report of yours since the capture
+    // began the packets cannot place the character, and standing would never
+    // send one: hunted as without a spot, the first walk's report places it.
+    // Lost, no capture, suspended, or none to be had yet: standing, attacking
+    // what comes within reach, as stay_put does.
+    if (f.state == WorldFix::State::FirstReport && !spot.suspended) {
+        spot_mode_ = SpotMode::Free;
+        spot_why_ = SpotWhy::WaitingFirst;
+    } else if (f.state == WorldFix::State::NoCapture) {
+        spot_mode_ = SpotMode::Stand;
+        spot_why_ = SpotWhy::NoFix;
+    } else if (f.state == WorldFix::State::Lost) {
+        spot_mode_ = SpotMode::Stand;
+        spot_why_ = SpotWhy::Paused;
+    } else if (spot.suspended) {
+        spot_mode_ = SpotMode::Stand;
+        spot_why_ = SpotWhy::Suspended;
+    } else if (!spot.set) {
+        spot_mode_ = SpotMode::Stand;
+        spot_why_ = SpotWhy::Settling;
+    } else {
+        spot_mode_ = SpotMode::Use;
+        // In use -- with what the walk back last met still said through a
+        // fight, where go_home is not reached to say it: given up on, to be
+        // tried again, or too high. A spot set or back in use again has all
+        // three cleared, and is None.
+        spot_why_ = return_strikes_ >= kSpotMaxTries                         ? SpotWhy::GaveUp
+                    : return_retry_ms_ != 0 && clock_now() < return_retry_ms_ ? SpotWhy::Retrying
+                    : said_too_high_                                          ? SpotWhy::TooHigh
+                                                                              : SpotWhy::None;
+    }
+    if (spot_mode_ != SpotMode::Use) end_return();
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spot_ = spot;
+        // Not to a suspended one: its pixels may be another map's.
+        status_.spot_dx = status_.spot_dy = 0.0f;
+        if (spot.set && !spot.suspended && f.state == WorldFix::State::Known) {
+            status_.spot_dx = spot.x - f.x;
+            status_.spot_dy = spot.y - f.y;
+        }
+    }
+    publish_spot();
+}
+
+void Hunter::mark_out_of_area(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                              int target_at, std::vector<Listed>& listed) const {
+    Spot spot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spot = spot_;
+    }
+    // A plate's place in the packets' world: the fix, and the plate's
+    // distance from yours laid back over the world's pixels -- what
+    // PacketEyes made of it, undone (packet_scale both ways, packet_dy on
+    // the height); the screen's plates are taken as the packets' are.
+    const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+    for (std::size_t i = 0; i < mobs.size() && i < listed.size(); ++i) {
+        const Nameplate& n = mobs[i];
+        // Within reach it is fought where it stands: the area bounds walking.
+        if (in_reach(cfg, n.x() - me.x(), n.y() - me.y())) continue;
+        // The current target too when its name did not read this look: with
+        // only "Đánh trước" to be attacked, that makes it NotFirst, and it is
+        // kept as the one it was (pass()) -- walked after past the edge for as
+        // long as its name did not read. Marked, it is let go of as outside.
+        const bool nameless_target =
+            static_cast<int>(i) == target_at && listed[i] == Listed::NotFirst && n.name.empty();
+        if (!nameless_target && listed[i] != Listed::Free && listed[i] != Listed::First &&
+            listed[i] != Listed::GaveUp)
+            continue;
+        const double wx = fix_.x + (n.x() - me.x()) * scale;
+        const double wy = fix_.y + (n.y() - me.y() - cfg.packet_dy) * scale;
+        const double keep = static_cast<int>(i) == target_at ? kSpotKeepPx : 0;
+        if (std::abs(wx - spot.x) > spot.half_w + keep || std::abs(wy - spot.y) > spot.half_h + keep)
+            listed[i] = Listed::OutOfArea;
+    }
+}
+
+void Hunter::spot_busy(std::uint64_t now) {
+    spot_busy_ms_ = now;
+    end_return();
+}
+
+void Hunter::end_return() {
+    return_on_ = false;
+    return_quiet_ms_ = 0;
+}
+
+bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
+    if (spot_mode_ != SpotMode::Use) return false;
+    Spot spot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spot = spot_;
+    }
+    const WorldFix& f = fix_;
+    const float sdx = spot.x - f.x, sdy = spot.y - f.y;
+    const float reported = std::abs(spot.x - f.rx);
+    const float tol = static_cast<float>(cfg.spot_tolerance);
+    const bool held = coord_.critical_active();
+
+    // The give-up clock of a walk back under way: the time walking -- or
+    // standing a moment between walks, for the report of where a walk that
+    // took the character there by the working-out really ended -- that the
+    // reports put it no kSpotProgressPx nearer. Passes in a row only: a hold,
+    // the game out of focus or the character unseen in between are not
+    // counted, as they are not for a target.
+    if (return_on_ && !held) {
+        if (reported + kSpotProgressPx <= return_mark_px_) {
+            return_mark_px_ = reported;
+            return_quiet_ms_ = 0;
+        } else if (return_pass_ + 1 == passes_ && now > return_seen_ms_) {
+            return_quiet_ms_ += std::min<std::uint64_t>(now - return_seen_ms_, 250);
+        }
+        return_pass_ = passes_;
+        return_seen_ms_ = now;
+    }
+
+    // Home: let go of the walk -- the working-out says so. Over only once a
+    // report says so too: a walk into a wall works out to anywhere, and its
+    // stop's report puts the character back where it is.
+    if (std::abs(sdx) <= tol) {
+        if (return_on_ && reported <= tol) {
+            GB_DEBUG("Hunter: back at the hunting spot, %d px off",
+                     static_cast<int>(std::lround(std::abs(sdx))));
+            end_return();
+        }
+        // Back by itself -- pushed there, or walked there by a fight: tries
+        // given up on are tried again.
+        if (reported <= tol) {
+            return_strikes_ = 0;
+            return_retry_ms_ = 0;
+        }
+        said_too_high_ = false;
+        spot_why_ = SpotWhy::None;
+        publish_spot();
+        return false;
+    }
+
+    if (return_strikes_ >= kSpotMaxTries) {
+        spot_why_ = SpotWhy::GaveUp;
+        publish_spot();
+        return false;
+    }
+    if (return_retry_ms_ != 0 && now < return_retry_ms_) {
+        spot_why_ = SpotWhy::Retrying;
+        publish_spot();
+        return false;
+    }
+    // More than one jump above: no walk gets there. Said once.
+    if (sdy < -static_cast<float>(kOneJumpPx)) {
+        if (!said_too_high_) {
+            said_too_high_ = true;
+            GB_INFO("Hunter: the hunting spot is %d px above -- higher than one jump; not walking back to it",
+                    static_cast<int>(std::lround(-sdy)));
+        }
+        end_return();
+        spot_why_ = SpotWhy::TooHigh;
+        publish_spot();
+        return false;
+    }
+    said_too_high_ = false;
+    spot_why_ = SpotWhy::None;
+    publish_spot();
+
+    // Not under a hold, which wants the character standing; not with a
+    // kill's pick-ups owed; not before the delay -- a monster on its way
+    // would have it walk off and straight back.
+    if (held || (cfg.loots() && loot_left_ > 0)) return false;
+    if (now - spot_busy_ms_ < cfg.spot_return_delay_ms) return false;
+    // In the air -- by the packets, or by the hunter's own last hop: a walk
+    // back already held goes on as it is, with no key pressed or let go of;
+    // none starts.
+    if (f.airborne || in_air(now)) {
+        if (returned_last_ && walk_vk_ != 0) {
+            // Walking that way still, through the hop: a walk back that hops
+            // all the way counts the steps back the other way afresh as one
+            // along the ground does (note_walk), not once a jump.
+            note_walk(walk_vk_ == cfg.left_key ? 0 : 1, true, now);
+            returning_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    if (!return_on_) {
+        return_on_ = true;
+        return_mark_px_ = reported;
+        return_quiet_ms_ = 0;
+        return_pass_ = passes_;
+        return_seen_ms_ = now;
+        ++minute_returns_;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++status_.returns;
+        }
+        GB_INFO("Hunter: walking back to the hunting spot: %d px %s, %d px %s",
+                static_cast<int>(std::lround(std::abs(sdx))), sdx < 0 ? "left" : "right",
+                static_cast<int>(std::lround(std::abs(sdy))), sdy < 0 ? "up" : "down");
+    } else if (return_quiet_ms_ >= cfg.spot_give_up_ms) {
+        // Nowhere, by the reports, in spot_give_up_ms: a wall, a ledge it
+        // cannot climb, a gap. Tried again a while later; kSpotMaxTries in a
+        // row, and not again until the spot is set again or the character is
+        // back at it.
+        end_return();
+        ++return_strikes_;
+        ++minute_return_give_ups_;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++status_.return_give_ups;
+        }
+        if (return_strikes_ >= kSpotMaxTries) {
+            spot_why_ = SpotWhy::GaveUp;
+            GB_INFO("Hunter: the walk back to the hunting spot got nowhere in %u s, %d times in a row -- no more "
+                    "tries; reported %d px off",
+                    cfg.spot_give_up_ms / 1000, return_strikes_, static_cast<int>(std::lround(reported)));
+        } else {
+            return_retry_ms_ = now + cfg.spot_retry_ms;
+            spot_why_ = SpotWhy::Retrying;
+            GB_INFO("Hunter: the walk back to the hunting spot got nowhere in %u s -- reported %d px off; trying "
+                    "again in %u s",
+                    cfg.spot_give_up_ms / 1000, static_cast<int>(std::lround(reported)), cfg.spot_retry_ms / 1000);
+        }
+        publish_spot();
+        return false;
+    }
+
+    const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+    walk(cfg, static_cast<int>(std::lround(sdx / scale)), static_cast<int>(std::lround(sdy / scale)), now,
+         WalkFor::Spot);
+    returning_ = true;
+    return true;
+}
+
+void Hunter::publish_spot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    status_.spot_set = spot_.set;
+    status_.spot_x = spot_.x;
+    status_.spot_y = spot_.y;
+    status_.spot_half_w = spot_.half_w;
+    status_.spot_half_h = spot_.half_h;
+    status_.spot_suspended = spot_.suspended;
+    status_.spot_login = spot_.suspended && spot_.login;
+    status_.spot_why = spot_why_;
 }
 
 // ---------------------------------------------------------------- the loop
@@ -752,11 +1508,66 @@ void Hunter::pass() {
     ++passes_;
     const std::uint64_t pic = picture();
 
-    const auto set_state = [this](State s, bool only_skipped) {
+    // The plates in another frame of reference than the last pass's -- the
+    // packets taken over from the screen, or the screen back from them: what
+    // was held by where it stood is let go of before anything is looked at.
+    // The target was followed by its spot, and its spot in the other frame is
+    // somewhere else, so it would read as gone -- a kill, and three loot
+    // presses -- at every switch.
+    if (eyes_.view) {
+        const std::uint32_t view = eyes_.view();
+        if (view != view_) {
+            view_ = view;
+            forget_positions();
+        }
+    }
+
+    // The hunting spot: where the packets put the character, the map entries
+    // since the last pass, and what the spot makes of this one -- every pass,
+    // a hold on or not. Switched off, nothing of it is asked, and nothing
+    // below changes.
+    returned_last_ = returning_;
+    returning_ = false;
+    if (cfg.spot) {
+        track_spot(cfg);
+    } else if (spot_mode_ != SpotMode::Off) {
+        // Switched off mid-run: the walk back stops this pass -- nothing below
+        // goes home now -- and the spot is dropped with what its walks back
+        // met. Switched on again, it is taken afresh where the character then
+        // stands: the player who unticked it to walk somewhere else wants the
+        // new place, not a walk back to the old one.
+        spot_mode_ = SpotMode::Off;
+        spot_why_ = SpotWhy::None;
+        end_return();
+        return_strikes_ = 0;
+        return_retry_ms_ = 0;
+        said_too_high_ = false;
+        login_gap_ = false;
+        bool had = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            had = spot_.set;
+            spot_ = Spot{};
+            retake_asked_ = suspend_asked_ = false;
+            status_.spot_dx = status_.spot_dy = 0.0f;
+        }
+        if (had)
+            GB_INFO("Hunter: Chỗ đánh quái switched off -- the hunting spot is dropped; switched on again, it is "
+                    "taken where the character stands");
+        publish_spot();
+    }
+    // No spot to go by: standing, as stay_put does -- attacking only what is
+    // within reach, never walking, never stepping back.
+    const bool still = cfg.stay_put || spot_mode_ == SpotMode::Stand;
+
+    const auto set_state = [this](State s, bool only_skipped, bool passed_over = false, bool outside = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         status_.state = s;
         status_.only_skipped = only_skipped;
-        if (s == State::NoTargets && status_.no_target_since_ms == 0)
+        status_.passed_over = passed_over;
+        status_.outside_area = outside;
+        // Walking back to the hunting spot is for want of a monster too.
+        if ((s == State::NoTargets || s == State::Returning) && status_.no_target_since_ms == 0)
             status_.no_target_since_ms = clock_now();
     };
 
@@ -767,12 +1578,25 @@ void Hunter::pass() {
     const bool held = coord_.critical_active();
     if (held_before_ && !held) facing_ = Facing::Unknown;
     held_before_ = held;
-    if (held) disengage();
+    // And a walk held from the last look is let go of: whatever holds the
+    // keys wants the character standing, and the game free of a held arrow.
+    // Time it cannot walk is no time spent failing to reach the target: not
+    // counted toward passing it over (reach_ms_).
+    if (held) {
+        disengage();
+        let_go_of_moves(cfg);
+        reach_ms_ = clock_now();
+    }
+
+    // A held walk with the game no longer in front is let go of whatever
+    // require_focus says: the arrow would be down in whatever is.
+    if (walk_vk_ != 0 && !focused()) let_go_of_moves(cfg);
 
     if (cfg.require_focus && !focused()) {
         release_movement();
         facing_ = Facing::Unknown;
         disengage();
+        reach_ms_ = clock_now();
         set_state(State::Unfocused, false);
         return;
     }
@@ -781,9 +1605,29 @@ void Hunter::pass() {
     // What the last kill dropped. A few presses, spaced so the game sees
     // each one, before anything else is chased -- walking off to the next
     // monster first leaves the drop behind.
-    if (cfg.loots() && loot_left_ > 0 && clock_now() - last_loot_ms_ >= 220) {
-        if (press_loot(cfg)) --loot_left_;
-        return;
+    if (cfg.loots() && loot_left_ > 0) {
+        const std::uint64_t t = clock_now();
+        if (!cfg.hold_walk) {
+            if (t - last_loot_ms_ >= 220) {
+                if (press_loot(cfg)) --loot_left_;
+                return;
+            }
+        } else {
+            // Standing until they are done: a walk taken up between the
+            // presses carried the character off the drop and back, a stop
+            // and a start each time, after every kill. For kLootStandMs at
+            // most, so a pick-up key the input will not take cannot hold the
+            // hunter still.
+            if (loot_since_ms_ == 0) loot_since_ms_ = t;
+            if (t - loot_since_ms_ <= kLootStandMs) {
+                let_go_of_moves(cfg);
+                if (t - last_loot_ms_ >= 220 && press_loot(cfg)) --loot_left_;
+                if (loot_left_ == 0) loot_since_ms_ = 0;
+                return;
+            }
+            loot_left_ = 0;
+            loot_since_ms_ = 0;
+        }
     }
 
     Nameplate me;
@@ -803,15 +1647,18 @@ void Hunter::pass() {
 
     const std::vector<Nameplate> mobs = see_mobs();
     if (mobs.empty()) {
-        let_go_of_moves(cfg);
-        disengage();
-        set_state(State::NoTargets, false);
         // The last one in view has just gone, and the likeliest reason is
         // that it died. Or its plate dropped out for a look, which they do
         // all the time: the fight is over once it has not come back where it
         // was for a moment, not at once.
         if (have_target_) loot_left_ = 3;
         have_target_ = false;
+        // Nothing to fight: back to the hunting spot, if there is one and
+        // the character is away from it -- or the keys let go of, as ever.
+        const bool home = go_home(cfg, clock_now());
+        if (!home) let_go_of_moves(cfg);
+        disengage();
+        set_state(home ? State::Returning : State::NoTargets, false);
         fight_unseen(clock_now(), "gone");
         return;
     }
@@ -825,8 +1672,26 @@ void Hunter::pass() {
     // What the monster lists make of each plate. With both lists empty they
     // make nothing of any of them, and what follows is the hunter as it was.
     std::vector<Listed> listed = judge(cfg, mobs, now);
-    // With a style: those given up on a moment ago for taking no damage.
+    // Those given up on a moment ago: for taking no damage (with a style), or
+    // for staying out of reach.
     if (!gave_up_.empty()) mark_gave_up(mobs, now, listed);
+    // Outside the hunting spot's area and out of reach: not walked to. The
+    // current target -- the plate nearest where it was, as below -- only
+    // once kSpotKeepPx past the edge.
+    if (spot_mode_ == SpotMode::Use) {
+        int target_at = -1, target_d = 0;
+        if (have_target_) {
+            for (std::size_t i = 0; i < mobs.size(); ++i) {
+                const int d = std::abs(mobs[i].x() - target_x_) + std::abs(mobs[i].y() - target_y_);
+                if (target_at < 0 || d < target_d) {
+                    target_at = static_cast<int>(i);
+                    target_d = d;
+                }
+            }
+            if (target_d > kSameTargetPx + slack) target_at = -1;
+        }
+        mark_out_of_area(cfg, mobs, me, target_at, listed);
+    }
 
     // Stay on the current target while it is still there. Re-picking the
     // nearest every frame makes the bot oscillate between two monsters a
@@ -866,30 +1731,56 @@ void Hunter::pass() {
         // is nameless where one of those stands, or it is not on "Đánh trước"
         // with only those to be attacked. Let go at once. Not a failure to
         // reach it, so not counted as one. A target of "only those" whose
-        // name merely did not read this time is still the one it was.
+        // name merely did not read this time is still the one it was. So
+        // too one gone kSpotKeepPx outside the hunting spot's area, out of
+        // reach: not walked after, and no kill.
         if (target && refused(listed[at]) &&
             !(listed[at] == Listed::NotFirst && target->name.empty())) {
+            const bool outside = listed[at] == Listed::OutOfArea;
+            if (outside)
+                GB_INFO("Hunter: letting go of %s -- it is outside the hunting area",
+                        target->name.empty() ? "a monster" : target->name.c_str());
             target = nullptr;
-            end_fight("the lists");
+            end_fight(outside ? "outside the area" : "the lists");
             watch_ = DamageWatch{};
         }
 
         // With a style, as GoC: the give-up clock runs only while the target
         // is out of reach, and one within reach is fought until it dies.
         // Without one it runs from the pick, in reach or not, and every fight
-        // is picked afresh this often -- as it always was.
-        if (target && cfg.goc_rules() &&
-            in_reach(cfg, target->x() - me.x(), target->y() - me.y()))
-            target_since_ms_ = now;
+        // is picked afresh this often -- as it always was. When it was last in
+        // reach is kept either way.
+        const bool reach_now = target && in_reach(cfg, target->x() - me.x(), target->y() - me.y());
+        if (reach_now) reach_ms_ = now;
+        if (reach_now && cfg.goc_rules()) target_since_ms_ = now;
         if (target && now - target_since_ms_ > cfg.give_up_ms) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++status_.targets_dropped;
             }
+            // Out of reach for the whole of give_up_ms: passed over for twice
+            // as long, on "Đánh trước" or not -- picked again at once, one
+            // behind a wall or up on a ledge held the bot under it for good.
+            // In reach at any look in that time -- every fight is given up on
+            // every give_up_ms without a style, one that has just stepped out
+            // of reach among them -- it is picked straight back, as it always
+            // was. Said, with where it was, for what a jump could reach.
+            const int gdx = target->x() - me.x(), gdy = target->y() - me.y();
+            if (now - reach_ms_ > cfg.give_up_ms) {
+                GB_INFO("Hunter: gave up on %s out of reach after %u s: %d px %s, %d px %s -- passed "
+                        "over for %u s",
+                        target->name.empty() ? "a monster" : target->name.c_str(), cfg.give_up_ms / 1000,
+                        std::abs(gdx), gdx < 0 ? "left" : "right", std::abs(gdy), gdy < 0 ? "up" : "down",
+                        2 * cfg.give_up_ms / 1000);
+                if (gave_up_.size() < 16)
+                    gave_up_.push_back(
+                        GaveUpSpot{ target->x(), target->y(), now + 2ull * cfg.give_up_ms, true });
+                listed[at] = Listed::GaveUp;
+            }
             target = nullptr;
             // Without a style the same monster is usually picked straight
-            // back, and that is the same fight still: its steps back are not
-            // counted afresh. With one, out of reach this long is a fight
+            // back, and that is the same fight still: its log goes on. With
+            // one, out of reach this long is a fight
             // given up -- and the watch on it with it, so that whatever is
             // fought next where it stood is watched from nothing.
             if (cfg.goc_rules()) {
@@ -917,6 +1808,7 @@ void Hunter::pass() {
                     target = &n;
                     target_first_ = true;
                     target_since_ms_ = now;
+                    reach_ms_ = now;
                     last_switch_ms_ = now;
                     switched_ = true;
                     break;
@@ -934,15 +1826,20 @@ void Hunter::pass() {
         // hunter in place while something living walks past.
         if (pick < 0) {
             // Ruled out by the lists, that is: one given up on a moment ago
-            // is not the lists' doing.
-            bool ruled_out = false;
-            for (std::size_t i = 0; i < mobs.size(); ++i)
-                if (refused(listed[i]) && listed[i] != Listed::GaveUp &&
-                    mobs[i].hp > cfg.dead_below)
-                    ruled_out = true;
-            let_go_of_moves(cfg);
+            // is not the lists' doing -- it is passed over, and said apart;
+            // nor is one outside the hunting spot's area.
+            bool ruled_out = false, passed_over = false, outside = false;
+            for (std::size_t i = 0; i < mobs.size(); ++i) {
+                if (mobs[i].hp <= cfg.dead_below) continue;
+                if (listed[i] == Listed::GaveUp)         passed_over = true;
+                else if (listed[i] == Listed::OutOfArea) outside = true;
+                else if (refused(listed[i]))             ruled_out = true;
+            }
+            // Nothing to fight: back to the spot, as with no monster at all.
+            const bool home = go_home(cfg, now);
+            if (!home) let_go_of_moves(cfg);
             disengage();
-            set_state(State::NoTargets, ruled_out);
+            set_state(home ? State::Returning : State::NoTargets, ruled_out, passed_over, outside);
             have_target_ = false;
             // A target whose plate dropped out for this look, with only
             // monsters that may not be attacked left in view: as with no
@@ -954,6 +1851,7 @@ void Hunter::pass() {
         target = &mobs[static_cast<std::size_t>(pick)];
         target_first_ = listed[static_cast<std::size_t>(pick)] == Listed::First;
         target_since_ms_ = now;
+        reach_ms_ = now;
     }
 
     target_x_ = target->x();
@@ -971,8 +1869,10 @@ void Hunter::pass() {
     if (back_.judge && me_fresh && pic >= back_.judge_from) {
         back_.judge = false;
         if (const char* wrong = step_went_wrong(me, *target)) {
-            back_.no_more = true;
-            GB_INFO("Hunter: no more steps back from this target -- the last one met %s", wrong);
+            retreat_[back_.way].blocked = true;
+            GB_INFO("Hunter: no more steps back to the %s -- the last one met %s; none that way until "
+                    "the character has walked the other way",
+                    back_.way == 0 ? "left" : "right", wrong);
         }
     }
 
@@ -990,6 +1890,7 @@ void Hunter::pass() {
 
     if (in_reach(cfg, dx, dy)) {
         let_go_of_moves(cfg);
+        spot_busy(now);
         const int adx = std::abs(dx);
         const Facing toward = dx < 0 ? Facing::Left : Facing::Right;
 
@@ -1026,18 +1927,35 @@ void Hunter::pass() {
         // still (GoC's lazy mode does not either) and never from a target off
         // the character's own level: GoBot cannot see where a platform ends,
         // and stepping back off one is the worst this could do. So too never
-        // more than keep_distance_steps steps in a row from one monster, never
-        // before the last step has been seen on the screen, nor again after a
-        // step that met a wall or went down a ledge.
+        // more than keep_distance_steps steps one way, from whichever
+        // monsters, until the character has walked back the other way (an
+        // attack from far enough wins no ground back); never before the last
+        // step has been seen on the screen, nor that way again after a step
+        // that met a wall or went down a ledge.
         const int away = keep_away_px(cfg);
-        if (cfg.keep_distance && !cfg.stay_put && !just_stepped_ && adx < away && !held &&
-            !back_.no_more && !back_.judge &&
-            back_.in_row < std::clamp(cfg.keep_distance_steps, 1, 10) &&
-            std::abs(dy) <= std::max(cfg.up_nj(), cfg.down_nj())) {
+        const int back_way = dx < 0 ? 1 : 0;        // away from the target
+        Retreat& retreat = retreat_[back_way];
+        const int most = std::clamp(cfg.keep_distance_steps, 1, 10);
+        // With the hunting spot, never past the edge of its area: the step is
+        // cut to the room left that way, and with too little for one -- a
+        // step is held 50 ms at the least -- none is taken.
+        const bool in_area = spot_mode_ == SpotMode::Use;
+        int room_ms = 0;
+        if (in_area) {
+            const Spot area = spot();
+            const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+            const double room = back_way == 1 ? area.x + area.half_w - fix_.x : fix_.x - (area.x - area.half_w);
+            const int ms = room < kSpotStepRoomPx ? 0 : static_cast<int>(std::lround(room / scale * 1000.0 / kWalkPxPerS));
+            room_ms = ms < 50 ? 0 : ms;
+        }
+        if (cfg.keep_distance && !still && !just_stepped_ && adx < away && !held &&
+            !retreat.blocked && !back_.judge && retreat.in_row < most &&
+            std::abs(dy) <= std::max(cfg.up_nj(), cfg.down_nj()) && (!in_area || room_ms > 0)) {
             // Off before the key goes out: no skill is thrown as the step
             // starts.
             disengage();
-            const int hold = backstep_ms(away, adx);
+            int hold = backstep_ms(away, adx);
+            if (in_area) hold = std::min(hold, room_ms);
             bool stepped = false;
             if (auto token = coord_.acquire("hunt-move", Priority::Movement)) {
                 back_.from_me_x = me.x();
@@ -1049,7 +1967,11 @@ void Hunter::pass() {
             if (stepped) {
                 // GoC takes itself to be facing the way it stepped.
                 facing_ = dx < 0 ? Facing::Right : Facing::Left;
-                ++back_.in_row;
+                if (++retreat.in_row == most)
+                    GB_INFO("Hunter: %d steps back to the %s -- no more that way until the character "
+                            "has walked the other way; it fights where it stands",
+                            most, back_way == 0 ? "left" : "right");
+                back_.way = back_way;
                 back_.judge = true;
                 back_.judge_from = picture() + kJudgeAfterPictures;
                 ++fight_.backsteps;
@@ -1072,9 +1994,11 @@ void Hunter::pass() {
         // skill thrown the wrong way hits nothing at all. With a style or
         // keep_distance, as GoC: only when it is not facing that way already,
         // then a moment for the game to turn it -- a tap on every pass walked
-        // the character in on the target ten pixels at a time. Without
-        // either, a tap on every pass, as it always was.
-        const bool memory = cfg.goc_rules() || cfg.keep_distance;
+        // the character in on the target ten pixels at a time. So too
+        // standing still, which those taps took off its spot -- standing for
+        // want of a hunting spot to go by among it. Without any of them, a
+        // tap on every pass, as it always was.
+        const bool memory = cfg.goc_rules() || cfg.keep_distance || still;
         bool tapped = false;
         if (adx > cfg.facing_tolerance && (!memory || facing_ != toward)) {
             if (auto token = coord_.acquire("hunt-face", Priority::Combat))
@@ -1095,7 +2019,7 @@ void Hunter::pass() {
             if (auto token = coord_.acquire("hunt-attack", Priority::Combat)) {
                 press(cfg.attack_key, 60);
                 last_attack_ms_ = now;
-                note_attack(dx, away);
+                note_attack(dx);
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++status_.attacks;
             }
@@ -1112,43 +2036,38 @@ void Hunter::pass() {
 
     // Standing still: never walk. Take whatever is already within reach
     // instead, and attack it next time round; with nothing in reach, wait
-    // for something to come. The lists hold here as everywhere.
-    if (cfg.stay_put) {
-        let_go_of_moves(cfg);
+    // for something to come -- or, pushed off the hunting spot, walk back to
+    // it. The lists hold here as everywhere.
+    if (still) {
         const int in = choose_in_reach(cfg, mobs, me, listed);
+        bool home = false;
         if (in >= 0) {
             const std::size_t i = static_cast<std::size_t>(in);
             target_x_ = mobs[i].x();
             target_y_ = mobs[i].y();
             target_first_ = listed[i] == Listed::First;
             target_since_ms_ = now;
+            reach_ms_ = now;
+            spot_busy(now);
         } else {
             have_target_ = false;
+            home = go_home(cfg, now);
         }
-        set_state(State::Waiting, false);
+        if (!home) let_go_of_moves(cfg);
+        set_state(home ? State::Returning : State::Waiting, false);
         return;
     }
 
-    // Walk towards it.
+    // Walk towards it -- but not with a kill's pick-ups still owed, which the
+    // next pass stands for (hold_walk): walked off now, it would be let go of
+    // at once.
+    spot_busy(now);
     set_state(State::Approaching, false);
-    if (auto token = coord_.acquire("hunt-move", Priority::Movement)) {
-        const std::uint32_t go = dx < 0 ? cfg.left_key : cfg.right_key;
-        const std::uint32_t other = dx < 0 ? cfg.right_key : cfg.left_key;
-        let_go(other);
-        if (press(go, static_cast<int>(cfg.step_ms)))
-            facing_ = dx < 0 ? Facing::Left : Facing::Right;
-
-        // Up and out of reach: a hop is the cheapest thing that might help,
-        // and the give-up timer catches the case where it does not. Higher
-        // than the band it can hit without jumping -- half of
-        // height_tolerance without a style -- and only with a jump key: with
-        // none set it never hops.
-        if (cfg.jump_to_reach && cfg.jump_key != 0 && dy < -cfg.up_nj())
-            press(cfg.jump_key, 50);
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++status_.steps;
+    if (cfg.hold_walk && cfg.loots() && loot_left_ > 0) {
+        let_go_of_moves(cfg);
+        return;
     }
+    walk(cfg, dx, dy, now);
 }
 
 } // namespace gobot

@@ -144,7 +144,7 @@ void GuiApp::start_quest() {
             return;
         }
     }
-    if (quest_thread_.joinable()) quest_thread_.join();
+    join_pumping(quest_thread_);
     {
         // A new run, so whatever stopped the last one is old news.
         std::lock_guard<std::mutex> lock(worker_mutex_);
@@ -168,7 +168,7 @@ void GuiApp::request_quest(bool look_only) {
             return;
         }
     }
-    if (quest_thread_.joinable()) quest_thread_.join();
+    join_pumping(quest_thread_);
     quest_request_ = look_only ? 2 : 1;
     quest_stop_ = false;
     quest_oneshot_ = true;
@@ -177,7 +177,7 @@ void GuiApp::request_quest(bool look_only) {
     quest_thread_ = std::thread([this] { quest_loop(); });
 }
 
-void GuiApp::stop_quest() {
+void GuiApp::stop_quest(bool wait) {
     quest_stop_ = true;
     if (quest_ui_) {
         // A round under way stops at its next key or click, and presses
@@ -185,7 +185,9 @@ void GuiApp::stop_quest() {
         std::lock_guard<std::mutex> lock(quest_ui_->round_mutex);
         if (quest_ui_->round) quest_ui_->round->cancel();
     }
-    if (quest_thread_.joinable()) quest_thread_.join();
+    // Told, and not waited for: stop_jobs tells every job first.
+    if (!wait) return;
+    join_pumping(quest_thread_);
     quest_running_ = false;
     quest_request_ = 0;
 }
@@ -243,24 +245,18 @@ void GuiApp::quest_loop() {
     // The game's own input, each checked first. A click lands on whatever is
     // on top at that point, and the frames come from PrintWindow, which shows
     // the game even when it is covered: so only with the game in front and
-    // the game itself under the point. And asked about a stop once more, as
-    // the very last thing before it goes: the round asks before each step,
-    // and a stop that came between its asking and the key going down still
-    // let that one key or click through.
+    // the game itself under the point -- click_on_game asks both, and asks
+    // them again after the pointer's pause there. And asked about a stop once
+    // more, as the very last thing before it goes: the round asks before each
+    // step, and a stop that came between its asking and the key going down
+    // still let that one key or click through.
     QuestRound::Hands hands;
     hands.grab = grab;
     hands.key = [this, halted](std::uint32_t vk, int hold_ms) {
         return !halted() && input_.window_focused() && input_.key_press(vk, hold_ms);
     };
     hands.click = [this, halted](int x, int y) {
-        if (halted() || !input_.window_focused()) return false;
-        HWND game = static_cast<HWND>(input_.target_window());
-        POINT p{ x, y };
-        if (game == nullptr || !ClientToScreen(game, &p)) return false;
-        HWND under = WindowFromPoint(p);
-        if (under == nullptr || (under != game && GetAncestor(under, GA_ROOT) != game)) return false;
-        if (halted()) return false;
-        return input_.click_at(x, y);
+        return !halted() && input_.click_on_game(x, y, false, halted);
     };
     hands.move = [this, halted](int x, int y) { return !halted() && input_.move_pointer(x, y); };
     hands.now = [] { return now_ms(); };
@@ -544,7 +540,10 @@ void GuiApp::simple_quest_tab() {
                         "trong game.", 8000);
         } else {
             ui.settings.quest_key = key;
-            put("Quest", "quest_key", std::to_string(key));
+            // By its name, and the digit keys by their code in hex: a lone
+            // digit in the file is the code GoBot wrote before it saved names
+            // (9 was Tab), so neither may be written as one.
+            put("Quest", "quest_key", QuestSettings::key_text(key));
         }
     }
     ImGui::SameLine(0, 12);

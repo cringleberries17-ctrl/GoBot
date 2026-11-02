@@ -11,6 +11,7 @@
 #include "gobot/crash_watch.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/reviver.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -435,7 +436,7 @@ void test_texts() {
           "disconnect: an error box with no code");
     check(alert_text::back_in(1, 5) == "Đã vào lại game (lần 1/5). Bot chạy tiếp.", "back_in");
     check(alert_text::gave_up_restarts(5) ==
-              "GoBot ngừng tự vào lại game: game văng 5 lần liền. Cần người kiểm tra.",
+              "GoBot ngừng tự vào lại game: đã phải vào lại 5 lần. Cần người kiểm tra.",
           "keeper_gave_up: max restarts");
     check(alert_text::gave_up_not_set_up() ==
               "GoBot ngừng tự vào lại game: chưa cài đặt đủ các màn hình đăng nhập. Cần người kiểm tra.",
@@ -1086,7 +1087,7 @@ void test_privacy() {
 #ifdef GOBOT_SOURCE_DIR
     // Only where this was built: the source tree is not on a tester's machine.
     if (read_all(std::string(GOBOT_SOURCE_DIR) + "/src/alerts.cpp").empty()) {
-        std::printf("  [skip] the source tree is not here, so its files are not read for captchas\n");
+        skip("the source tree is not here, so its files are not read for captchas\n");
     } else {
         bool none = true;
         for (const char* file : { "/include/gobot/alerts.hpp", "/src/alerts.cpp",
@@ -1275,7 +1276,7 @@ void test_settings() {
     // code page, so it still works. Only where the code page is not UTF-8;
     // there both read the same.
     if (GetACP() == CP_UTF8) {
-        std::printf("  [skip] this machine's code page is UTF-8, where a path reads the same both ways\n");
+        skip("this machine's code page is UTF-8, where a path reads the same both ways\n");
     } else {
         const std::wstring wdir = wide(temp_path("gobot_test_\xC3\xA9t\xC3\xA9"));
         char ansi[MAX_PATH] = {};
@@ -1283,7 +1284,7 @@ void test_settings() {
         const int n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, wdir.c_str(), -1, ansi,
                                           MAX_PATH, nullptr, &lossy);
         if (n <= 0 || lossy) {
-            std::printf("  [skip] this machine's code page cannot write that folder's name\n");
+            skip("this machine's code page cannot write that folder's name\n");
         } else {
             CreateDirectoryW(wdir.c_str(), nullptr);
             const std::wstring wfile = wdir + L"\\alerts.ini";
@@ -1309,7 +1310,7 @@ void test_settings() {
     const std::string shipped = std::string(GOBOT_SOURCE_DIR) + "/configs/alerts.ini";
     if (read_all(shipped).empty()) {
         // Only where this was built: the source tree is not on a tester's machine.
-        std::printf("  [skip] the source tree's configs/alerts.ini is not here\n");
+        skip("the source tree's configs/alerts.ini is not here\n");
         return;
     }
     AlertSettings ship;

@@ -6,10 +6,15 @@
 // with synthetic data whose correct answer is known in advance.
 
 #include "gobot/byte_reader.hpp"
+#include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/capture_file.hpp"
 #include "gobot/framing.hpp"
+#include "gobot/front_keeper.hpp"
+#include "gobot/bot_brain.hpp"
+#include "gobot/calibrator.hpp"
 #include "gobot/command_executor.hpp"
+#include "gobot/execution_coordinator.hpp"
 #include "gobot/game_state.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
@@ -23,6 +28,7 @@
 #include "gobot/monster_frames.hpp"
 #include "gobot/net_discovery.hpp"
 #include "gobot/packet_capture.hpp"
+#include "gobot/packet_world.hpp"
 #include "gobot/pathfinder.hpp"
 #include "gobot/protocol_analyzer.hpp"
 #include "gobot/minimap_tracker.hpp"
@@ -49,7 +55,11 @@
 #include "gobot/reviver.hpp"
 #include "gobot/screen_layout.hpp"
 #include "gobot/session_manager.hpp"
+#include "gobot/screen_capture.hpp"
+#include "gobot/util.hpp"
+#include "gobot/dpi.hpp"
 #include "gobot/vitals_reader.hpp"
+#include "test_support.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -57,25 +67,39 @@
 #include <windows.h>
 #include <winioctl.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
+#include <cstdlib>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <iterator>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace gobot;
+
+// popup_test.cpp's, where the popup closer's pretend game is: one turn of a
+// closer with no hands of its own, aimed at `window` -- for
+// test_no_real_input, which counts what the switch refuses.
+bool popup_turn_with_no_hands(void* window, std::string& turn, std::string& said);
 
 namespace {
 
 int g_passed = 0;
 int g_failed = 0;
+int g_skipped = 0;     // parts left out, by skip() (test_support.hpp)
 
 void check(bool cond, const std::string& what) {
     if (cond) {
@@ -123,6 +147,54 @@ std::wstring run_temp_dir() {
     if (n == 0 || n > MAX_PATH) return {};
     return std::wstring(dir) + L"gobot_test_" + std::to_wstring(GetCurrentProcessId());
 }
+
+#ifdef GOBOT_SOURCE_DIR
+/// One of GoBot's source files, by its path in the source tree, as text: ""
+/// when it cannot be read. For what is checked by reading the code -- GoBot's
+/// window, the command line, a run that needs the game in front.
+std::string source_text(const std::string& rel) {
+    std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+/// Whether the source tree this was built from is here to be read, as
+/// source_text reads it. A copy of the tests run anywhere else has none, which
+/// says nothing about the code.
+bool sources_here() {
+    std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/CMakeLists.txt", std::ios::binary);
+    return in.good();
+}
+
+/// A function's definition in `src`, from `head` to the brace that closes it
+/// -- the first at the start of a line, as every definition here ends -- or ""
+/// when there is none. A check scoped to it is not met by the same words
+/// somewhere else in the file.
+std::string body_of(const std::string& src, const std::string& head) {
+    const std::size_t from = src.find(head);
+    if (from == std::string::npos) return {};
+    const std::size_t end = src.find("\n}", from);
+    return end == std::string::npos ? std::string() : src.substr(from, end + 2 - from);
+}
+
+/// How many times `part` is in `text`.
+int count_of(const std::string& text, const std::string& part) {
+    int n = 0;
+    for (std::size_t at = text.find(part); at != std::string::npos; at = text.find(part, at + 1)) ++n;
+    return n;
+}
+
+/// Whether `text` holds nothing but blank lines and // comments.
+bool only_comments(const std::string& text) {
+    for (std::size_t at = 0; at < text.size();) {
+        std::size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        const std::size_t first = text.find_first_not_of(" \t\r", at);
+        if (first != std::string::npos && first < end && text.compare(first, 2, "//") != 0) return false;
+        at = end + 1;
+    }
+    return true;
+}
+#endif
 
 // ---------------------------------------------------------------- ByteReader
 
@@ -1463,6 +1535,26 @@ void test_capture_filters() {
           "the game's own UDP sockets alone, with no connection");
     check(build_filter_for({}) == "(tcp or udp)", "with no connection at all, TCP and UDP");
 
+    // The GUI's capture for positions: one game's traffic and no other's. A
+    // second client on this PC talks to the same server on the same port,
+    // from ports of its own.
+    ProcessConnection mine = c;
+    mine.local.port = 50999;
+    ProcessConnection mine_too = d;
+    mine_too.local.port = 51000;
+    const std::string pinned = build_own_filter_for({ mine }, { 50123 });
+    check(pinned == "(tcp and ((host 203.0.113.10 and port 15101 and port 50999))) or (udp and (port 50123))",
+          "the capture for positions takes the game's connection by its own port as well, and UDP on the game's "
+          "own sockets alone -- not on the server's port from any host: " + pinned);
+    const std::string pinned_two = build_own_filter_for({ mine, mine_too }, {});
+    check(pinned_two == "tcp and ((host 203.0.113.10 and port 15101 and port 50999) or "
+                        "(host 203.0.113.11 and port 15112 and port 51000))",
+          "each connection by its own two ports, and with no UDP socket yet no UDP at all: " + pinned_two);
+    const std::string unpinned = build_filter_for({ mine }, { 50123 });
+    check(unpinned == "((tcp or udp) and ((host 203.0.113.10 and port 15101))) or "
+                      "(udp and (port 15101 or port 50123))",
+          "while build_filter_for -- Autopilot's, gobot_sniff's -- is as it was: " + unpinned);
+
     // What gobot_sniff --record refuses: a capture that nothing narrows,
     // which would write every program's traffic on the machine to the files.
     CaptureConfig port_only;
@@ -1625,7 +1717,7 @@ void test_framing_config() {
         const FramingSpec c = load_framing(shipped, c_found, "FramingClient");
         check(c_found && !c.unwraps(), "and the client's half, which has no wrapper, unwraps nothing");
     } else {
-        std::printf("  [skip] the source tree's configs/protocol.ini is not here\n");
+        skip("the source tree's configs/protocol.ini is not here\n");
     }
 #endif
 }
@@ -1772,8 +1864,8 @@ void test_real_capture() {
     const DWORD n = GetEnvironmentVariableW(L"GOBOT_TEST_CAPTURE", buf,
                                             static_cast<DWORD>(std::size(buf)));
     if (n == 0 || n >= std::size(buf)) {
-        std::printf("  [skip] SKIPPED: GOBOT_TEST_CAPTURE is not set, so there is no "
-                    "real capture to tile\n");
+        skip("SKIPPED: GOBOT_TEST_CAPTURE is not set, so there is no "
+             "real capture to tile\n");
         return;
     }
     const std::string path = wide_to_utf8(std::wstring(buf, n));
@@ -1813,6 +1905,145 @@ void test_real_capture() {
     check(same_frames(before.packets, outer) && before.consumed == scan.consumed &&
               before.resyncs == scan.resyncs,
           "reading the same frames off the stream as it did with unwrapping off");
+}
+
+/// The frames the vitals reader kept when it could not make out HP (its
+/// vitals_debug folder) read now, by the landmark and the shipped colours:
+/// what each holds, for whoever is working out why a read failed. Kept frames
+/// stay out of the repository -- they show a character -- so the folder is
+/// named by GOBOT_TEST_VITALS_DIR.
+void test_saved_vitals_frames() {
+    section("Saved unreadable frames (GOBOT_TEST_VITALS_DIR)");
+
+    wchar_t buf[1024]{};
+    const DWORD n = GetEnvironmentVariableW(L"GOBOT_TEST_VITALS_DIR", buf,
+                                            static_cast<DWORD>(std::size(buf)));
+    if (n == 0 || n >= std::size(buf)) {
+        skip("SKIPPED: GOBOT_TEST_VITALS_DIR is not set, so there are no "
+             "kept frames to read\n");
+        return;
+    }
+    // Quotes kept from cmd's `set VAR="..."` are no part of the path.
+    std::wstring named(buf, n);
+    if (named.size() >= 2 && named.front() == L'"' && named.back() == L'"') named = named.substr(1, named.size() - 2);
+    const std::filesystem::path dir(named);
+
+    Frame landmark;
+    GlyphFont font;
+    if (!TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"), landmark) ||
+        !font.load(exe_relative("bitmap_font"))) {
+        skip("no HUD landmark or bitmap font beside this test\n");
+        return;
+    }
+
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (e.path().extension() == L".png") files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    // Said, not left blank: a folder that cannot be read and one with nothing
+    // kept in it would otherwise read the same as no failure at all.
+    if (ec) {
+        skip("cannot read %s: %s\n", wide_to_utf8(dir.wstring()).c_str(), ec.message().c_str());
+        return;
+    }
+    if (files.empty()) {
+        skip("no .png in %s\n", wide_to_utf8(dir.wstring()).c_str());
+        return;
+    }
+
+    const VitalsReader::HudLayout layout;
+    for (const auto& file : files) {
+        Frame f;
+        if (!load_png(wide_to_utf8(file.wstring()), f) || !f.valid()) {
+            std::printf("         %s: not a picture this can read\n", wide_to_utf8(file.filename().wstring()).c_str());
+            continue;
+        }
+        const auto hit = TemplateMatcher::find(
+            f, ScreenRect{ 0, 0, std::min(f.width, 560), std::min(f.height, 280) }, landmark, 0.75f);
+        std::printf("         %s %dx%d: landmark %s", wide_to_utf8(file.filename().wstring()).c_str(),
+                    f.width, f.height, hit.found ? "" : "not found\n");
+        if (!hit.found) continue;
+        std::printf("at %d,%d (%.2f)\n", hit.at.x, hit.at.y, hit.score);
+
+        BarSpec hp, mp;
+        hp.x = mp.x = hit.at.x + layout.hp_dx;
+        hp.y = hit.at.y + layout.hp_dy;
+        mp.y = hit.at.y + layout.mp_dy;
+        hp.width = mp.width = layout.bar_w;
+        hp.height = mp.height = layout.bar_h;
+        hp.r = 239; hp.g = 0; hp.b = 0; hp.tolerance = 80;
+        mp.r = 0; mp.g = 49; mp.b = 206; mp.tolerance = 80;
+        for (const auto& [name, spec] : { std::pair{ "HP", hp }, std::pair{ "MP", mp } }) {
+            int cur = 0, max = 0;
+            const bool read = VitalsReader::read_numbers(f, spec, font, cur, max);
+            const ScreenRect box = VitalsReader::caption_box(spec);
+            std::printf("           %s: figures %s%d/%d, box %d,%d %dx%d, measured %.1f\n", name,
+                        read ? "" : "unread ", cur, max, box.x, box.y, box.w, box.h,
+                        static_cast<double>(VitalsReader::measure(f, spec)));
+        }
+    }
+}
+
+/// The frames saved from the live client -- frame.png, playerlist.png, the
+/// trash cleaner's and quick quest's debug frames -- are read only as they
+/// were when the checks on them were written (load_live_frame). gobot_cli
+/// --read and --playerlist rewrite the first two, and GoBot writes and prunes
+/// the folders as it plays: a check judged on whatever is there now could fail
+/// for nothing in the code.
+void test_live_frames() {
+    section("Frames saved from the live client: only the ones the checks were written against");
+    const std::string fake = temp_file("frame.png");
+    {
+        std::ofstream out(fake, std::ios::binary);
+        out << "a frame GoBot rewrote";
+    }
+    Frame f;
+    check(!known_live_frame(fake) && !load_live_frame(fake, f) && !f.valid(),
+          "a frame.png that is not the saved one is not read");
+    const std::string picture = temp_file("playerlist.png");
+    Frame drawn;
+    drawn.width = drawn.height = 8;
+    drawn.pixels.assign(static_cast<std::size_t>(8 * 8 * 4), 255);
+    Frame back;
+    check(save_png(drawn, picture) && load_png(picture, back) && back.valid() && !known_live_frame(picture) &&
+              !load_live_frame(picture, f) && !f.valid(),
+          "nor one that is a picture, and reads as one");
+    check(!known_live_frame(temp_file("nowhere.png")), "and none at all is not one either");
+    std::remove(fake.c_str());
+    std::remove(picture.c_str());
+}
+
+/// A part a suite leaves out is said through skip(), which counts it for the
+/// run's last line, and package.ps1 warns of it from there. A "[skip]" line
+/// printed by hand is not counted, so not warned of either.
+void test_skips_counted() {
+    section("gobot_test: every part left out is counted (its source)");
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    std::string bare;
+    int read = 0;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(
+             std::filesystem::path(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_test"), ec)) {
+        if (e.path().extension() != L".cpp") continue;
+        std::ifstream in(e.path(), std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        ++read;
+        if (src.find("printf(\"  [skip]") != std::string::npos)
+            bare += (bare.empty() ? "" : ", ") + wide_to_utf8(e.path().filename().wstring());
+    }
+    check(read > 0 && bare.empty(),
+          "none of the " + std::to_string(read) + " files of gobot_test prints a [skip] line of its own" +
+              (bare.empty() ? std::string() : ": " + bare));
+    check(count_of(source_text("/apps/gobot_test/main.cpp"), "\"%d passed, %d failed, %d skipped\\n\"") == 2,
+          "and the run's last line says how many were skipped: at its end, and when a hang ends it");
+#else
+    skip("no source folder\n");
+#endif
 }
 
 /// Each direction needs its own framing, and the shipped config must carry both.
@@ -2750,6 +2981,125 @@ void test_monster_frames() {
     }
 }
 
+/// The capture GoBot hunts by, end to end ("Vị trí từ gói tin"): a datagram
+/// from the client holding a report of yours, and the server's TCP stream
+/// holding a map entry, the map's table packed into an 0x0081 and cut across
+/// two segments, a monster's stop and a spawn -- through PacketCapture with
+/// unpacking on, as GuiApp::push_framings sets it, into a PacketWorld. And
+/// what the opcode filter Apply set, the mapped opcodes alone, did to them,
+/// before it let the packet world's through as well.
+void test_packet_world_capture() {
+    section("The capture for positions: the client's UDP and the server's TCP into the packet world");
+
+    constexpr std::uint32_t kServer = 0x0A000002, kClient = 0x0A000001;
+    constexpr std::uint16_t kServerPort = 15101, kClientPort = 50000;
+    constexpr std::uint32_t kId = 4321;
+
+    // A frame written at its frame bytes, its first word 0x0105 as the game's
+    // frames have it.
+    struct Frame {
+        std::uint16_t opcode;
+        Bytes         body;
+        Frame(std::uint16_t op, std::size_t size) : opcode(op), body(size - 8, 0) {}
+        void u8(std::size_t at, std::uint8_t v)   { body[at - 8] = v; }
+        void u16(std::size_t at, std::uint16_t v) { std::memcpy(body.data() + at - 8, &v, 2); }
+        void u32(std::size_t at, std::uint32_t v) { std::memcpy(body.data() + at - 8, &v, 4); }
+        void i32(std::size_t at, std::int32_t v)  { std::memcpy(body.data() + at - 8, &v, 4); }
+        void f32(std::size_t at, float v)         { std::memcpy(body.data() + at - 8, &v, 4); }
+        Bytes bytes() const { return plain_frame(opcode, body); }
+    };
+
+    Frame entry(0x0086, 24);                // you enter (11, 1) at 4690, 1180
+    entry.u16(16, 11); entry.u16(18, 1); entry.u16(20, 4690); entry.u16(22, 1180);
+    Frame report(0x0027, 48);               // and stop a few pixels on: yours, over UDP
+    report.u32(8, kId); report.u32(12, kId);
+    report.f32(16, 4700.0f); report.f32(20, 1180.0f); report.f32(24, 0.0f); report.u8(28, 0x01);
+    // The map's table: three standing monsters, slot 0 among them.
+    struct Entry { std::uint16_t slot; std::uint32_t type; std::uint16_t x, y; std::uint32_t hp; };
+    const Entry entries[] = { { 0, 2000501, 1500, 900, 600 }, { 7, 2000301, 80, 1210, 2000 },
+                              { 12, 2000501, 3333, 640, 600 } };
+    Frame table(0x0042, 2568);
+    table.u32(12, 3);
+    for (std::size_t k = 0; k < 50; ++k) table.u16(316 + 2 * k, 0xFFFF);
+    for (std::size_t k = 0; k < 3; ++k) {
+        const Entry& e = entries[k];
+        table.u8(66 + k, 44);
+        table.u8(166 + k, 1);
+        table.u8(216 + k, 1);
+        table.u16(316 + 2 * k, e.slot);
+        table.u16(416 + 2 * k, e.x);
+        table.u16(516 + 2 * k, e.y);
+        table.u32(1516 + 4 * k, e.type);
+        table.u32(2016 + 4 * k, e.hp);
+        table.u32(2216 + 4 * k, e.hp);
+    }
+    Frame stop(0x0038, 96);                 // slot 12 stops further on
+    stop.u8(12, 0); stop.u32(16, 12); stop.u8(24, 0x01);
+    stop.u16(32, 3400); stop.u16(34, 640); stop.u32(48, 0xFFFFFFFFu); stop.i32(64, 600);
+    Frame spawn(0x003F, 52);                // a new monster of another type in slot 7
+    spawn.u32(12, 2000999); spawn.u8(16, 30); spawn.u8(18, 0xFF);
+    spawn.u16(20, 2468); spawn.u16(22, 1300); spawn.u32(28, 2500); spawn.u16(32, 7); spawn.u8(44, 1);
+
+    const Bytes wrapper = packed_wrapper(table.bytes().size(), lzf_literals(table.bytes()));
+    const Bytes stream = joined({ entry.bytes(), wrapper, stop.bytes(), spawn.bytes() });
+    const std::size_t cut = entry.bytes().size() + 1000;     // inside the packed table
+    const Bytes first(stream.begin(), stream.begin() + static_cast<std::ptrdiff_t>(cut));
+    const Bytes second(stream.begin() + static_cast<std::ptrdiff_t>(cut), stream.end());
+
+    FramingSpec spec = unwrapping_spec();
+    spec.unpack = true;
+    // The server's first segment, the client's datagram, the second segment.
+    const auto replay = [&](const std::vector<std::uint16_t>& filter, PacketWorld& world) {
+        PacketCapture cap;
+        cap.set_framing(spec);
+        cap.set_opcode_filter(filter);
+        cap.set_local_addresses({ "10.0.0.1" });
+        cap.set_packet_callback([&world](const std::vector<GamePacket>& v) { world.on_packets(v); });
+        const Bytes seg1 = tcp_packet(kServer, kServerPort, kClient, kClientPort, 1000, first);
+        const Bytes dgram = udp_packet(kClient, kClientPort, kServer, kServerPort, report.bytes());
+        const Bytes seg2 = tcp_packet(kServer, kServerPort, kClient, kClientPort,
+                                      1000 + static_cast<std::uint32_t>(cut), second);
+        cap.replay(seg1.data(), seg1.size(), 1000);
+        cap.replay(dgram.data(), dgram.size(), 1100);
+        cap.replay(seg2.data(), seg2.size(), 1200);
+        return cap.stats();
+    };
+
+    PacketWorld world;
+    const PacketCapture::Stats st = replay({}, world);
+    const PacketWorld::View v = world.view(1300);
+    check(st.udp_datagrams == 1 && st.unwrap.unpacked == 1 && st.unwrap.unpack_failed == 0 && st.resync_bytes == 0,
+          "one datagram, and the table's wrapper unpacked whole across the two segments, no byte resynced");
+    check(v.me.known && v.me.x == 4700.0f && v.me.y == 1180.0f && v.me.id == kId && v.map == 11 && v.area == 1 &&
+              v.me.kind == OwnReport::Move,
+          "you: in (11, 1), where the client's datagram put you after the map entry, under your id");
+    const PacketWorld::Mob* zero = v.mob(0);
+    const PacketWorld::Mob* seven = v.mob(7);
+    const PacketWorld::Mob* twelve = v.mob(12);
+    check(v.table_seen && v.mobs.size() == 3 && zero && zero->type_id == 2000501 && zero->x == 1500.0f &&
+              zero->max_hp_known,
+          "the table's three monsters, slot 0 among them, from inside the 0x0081");
+    check(twelve && twelve->x == 3400.0f && seven && seven->type_id == 2000999 && seven->x == 2468.0f &&
+              seven->hp == 2500 && !seven->dead,
+          "slot 12's stop and slot 7's spawn applied after it");
+
+    // Apply set the filter to the mapped opcodes alone: 0x0038.
+    PacketWorld narrow;
+    replay({ 0x0038 }, narrow);
+    const PacketWorld::View n = narrow.view(1300);
+    check(!n.me.known && !n.table_seen && n.map_since_ms == 0 && n.mobs.size() == 1 && n.mobs[0].slot == 12,
+          "the mapped opcodes alone let only the monster's event through: your report, the map entry, the table "
+          "and the spawn are dropped in the capture");
+    std::vector<std::uint16_t> with = { 0x0038 };
+    with.insert(with.end(), PacketWorld::opcodes().begin(), PacketWorld::opcodes().end());
+    PacketWorld wide;
+    replay(with, wide);
+    const PacketWorld::View w = wide.view(1300);
+    check(w.me.known && w.me.x == 4700.0f && w.table_seen && w.mobs.size() == 3 && w.mob(7) &&
+              w.mob(7)->type_id == 2000999,
+          "with PacketWorld::opcodes() let through as well, as Apply now does, all of it arrives");
+}
+
 // ------------------------------------- one opcode's frames as numbers
 
 void test_frame_numbers() {
@@ -3134,6 +3484,378 @@ void test_opcode_registry() {
     }
 }
 
+/// Run `body` on a thread of its own and wait for it, `limit_ms` at most.
+///
+/// For a test whose failure is a hang rather than a wrong answer: without its
+/// lock the opcode registry was seen spinning in its own corrupted tree for
+/// ten minutes, and a callback called under that lock waits on itself for
+/// ever. A thread stuck like that can be neither joined nor stopped, so the
+/// run is failed and ended there -- package.ps1 goes by the exit code --
+/// rather than left hanging.
+void finish_within(int limit_ms, const std::string& what, const std::function<void()>& body) {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    std::thread worker([&] {
+        body();
+        std::lock_guard<std::mutex> lock(m);
+        done = true;
+        cv.notify_all();
+    });
+    bool in_time = false;
+    {
+        std::unique_lock<std::mutex> lock(m);
+        in_time = cv.wait_for(lock, std::chrono::milliseconds(limit_ms), [&done] { return done; });
+    }
+    if (!in_time) {
+        check(false, what + " -- not back after " + std::to_string(limit_ms) +
+                         " ms: a hang, so the run ends here");
+        std::printf("%d passed, %d failed, %d skipped\n", g_passed, g_failed, g_skipped);
+        std::fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), 1);
+    }
+    worker.join();
+}
+
+/// A text file of `lines`, one to a line, for the registry's load() tests.
+void write_lines(const std::string& path, std::initializer_list<const char*> lines) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    for (const char* line : lines) out << line << std::endl;
+}
+
+static_assert(!std::is_copy_constructible_v<OpcodeRegistry> &&
+                  !std::is_move_constructible_v<OpcodeRegistry> &&
+                  std::is_default_constructible_v<OpcodeRegistry>,
+              "the registry is held by reference and locks itself: made in place, never copied");
+
+/// load() reads the whole file and swaps it in at once, and leaves the table
+/// alone when the file cannot be read, as it always did.
+void test_opcode_registry_load() {
+    section("Opcode registry: load() swaps the table in whole");
+
+    OpcodeRegistry reg;
+    PacketSpec stale;
+    stale.opcode   = 0x0999;
+    stale.name     = "Stale";
+    stale.semantic = Semantic::Chat;
+    reg.add(stale);
+
+    check(!reg.load(temp_file("registry_missing.ini")) && reg.size() == 1 && reg.known(0x0999),
+          "a file that cannot be read leaves the layouts as they were");
+
+    const std::string path = temp_file("registry_load.ini");
+    write_lines(path, { "[Framing]", "header_size=4",
+                        "[Packet.0x0405]", "name=MonsterUpdate", "semantic=monster_update",
+                        "fields=id:u32,x:f32,y:f32,hp:i32",
+                        "[Packet.zz]", "name=BadOpcode",
+                        "[Packet.0x0406]", "name=BadFields", "fields=a:nosuchtype" });
+    check(reg.load(path) && reg.size() == 1 && reg.known(0x0405) && !reg.known(0x0999) &&
+              !reg.known(0x0406),
+          "a file that reads replaces every layout at once, keeping only its own good ones");
+
+    const auto copy = reg.find_copy(0x0405);
+    check(copy && copy->name == "MonsterUpdate" && copy->semantic == Semantic::MonsterUpdate &&
+              copy->fields.size() == 4,
+          "find_copy hands back the layout");
+    check(!reg.find_copy(0x7777).has_value(), "and nothing for an opcode with none");
+
+    reg.clear();
+    check(reg.size() == 0 && !reg.known(0x0405), "clear() empties it");
+    std::remove(path.c_str());
+}
+
+/// The body of test_opcode_registry_threads, run under finish_within.
+void registry_rewritten_under_decodes() {
+    // Two layouts for one opcode, of different lengths, that read the same id
+    // and hp out of the same bytes: whichever one a decode got, those agree.
+    const std::vector<FieldSpec> long_fields =
+        OpcodeRegistry::parse_field_list("id:u32,x:f32,y:f32,hp:i32", nullptr);
+    const std::vector<FieldSpec> short_fields =
+        OpcodeRegistry::parse_field_list("id:u32,pad:skip8,hp:i32", nullptr);
+
+    OpcodeRegistry reg;
+    PacketSpec base;
+    base.opcode   = 0x0405;
+    base.name     = "MonsterUpdate";
+    base.semantic = Semantic::MonsterUpdate;
+    base.fields   = long_fields;
+    reg.add(base);
+
+    GamePacket pkt;
+    pkt.opcode  = 0x0405;
+    pkt.payload = {
+        0x39, 0x30, 0x00, 0x00,              // id = 12345
+        0x00, 0x00, 0x20, 0x44,              // x  = 640.0
+        0x00, 0x00, 0xF0, 0x43,              // y  = 480.0
+        0xC8, 0x00, 0x00, 0x00,              // hp = 200
+    };
+
+    // load() as well as add() and clear(): Reload configs swaps the lot.
+    const std::string path = temp_file("registry_threads.ini");
+    write_lines(path, { "[Packet.0x0405]", "name=MonsterUpdate", "semantic=monster_update",
+                        "fields=id:u32,x:f32,y:f32,hp:i32" });
+
+    std::atomic<bool>          started{ false };
+    std::atomic<bool>          stop{ false };
+    std::atomic<std::uint64_t> decodes{ 0 };
+    std::atomic<std::uint64_t> torn{ 0 };
+    ProtocolHandler::Stats     handled;
+
+    std::thread reader([&] {
+        GameState st;
+        ProtocolHandler ph(reg, st);
+        do {
+            if (const auto d = reg.decode(pkt)) {
+                // The writer names the layout MonsterUpdate, or a run of n too
+                // long for the string to keep in place.
+                const bool name_ok = d->name == "MonsterUpdate" ||
+                                     (d->name.size() >= 16 &&
+                                      d->name.find_first_not_of('n') == std::string::npos);
+                const bool whole = name_ok && d->semantic == Semantic::MonsterUpdate &&
+                                   d->get_int("id") == 12345 && d->get_int("hp") == 200 &&
+                                   (!d->has("x") || std::abs(d->get_float("x") - 640.0) < 0.01);
+                if (!whole) torn.fetch_add(1);
+            }
+            if (const auto c = reg.find_copy(0x0405)) {
+                if (c->fields.size() != 3 && c->fields.size() != 4) torn.fetch_add(1);
+            }
+            ph.on_packet(pkt);
+            decodes.fetch_add(1);
+            started.store(true);
+        } while (!stop.load());
+        handled = ph.stats();
+    });
+
+    for (int i = 0; i < 2000 && !started.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    int rounds = 0;
+    while (rounds < 20000 && std::chrono::steady_clock::now() < until) {
+        PacketSpec s = base;
+        s.fields = (rounds % 2) ? short_fields : long_fields;    // the list a decode walks
+        s.name   = std::string(static_cast<std::size_t>(16 + rounds % 40), 'n');
+        reg.add(s);
+
+        PacketSpec other;                                        // grows the tree, which rebalances
+        other.opcode   = static_cast<std::uint16_t>(0x1000 + rounds % 512);
+        other.semantic = Semantic::MonsterSpawn;
+        other.fields   = long_fields;
+        reg.add(other);
+
+        if (rounds % 64 == 63)   reg.clear();                    // every node freed
+        if (rounds % 256 == 255) reg.load(path);                 // the table swapped whole
+        (void)reg.size();
+        (void)reg.mapped_opcodes();
+        ++rounds;
+    }
+    stop.store(true);
+    reader.join();
+    std::remove(path.c_str());
+
+    check(started.load() && decodes.load() > 0,
+          "the decoding thread ran: " + std::to_string(decodes.load()) + " decodes against " +
+              std::to_string(rounds) + " rewrites");
+    check(torn.load() == 0, "every decode read one whole layout, never half of one");
+    check(handled.total > 0 && handled.total == handled.decoded + handled.unknown + handled.malformed,
+          "the handler counted every frame once, as decoded, unknown or malformed");
+
+    reg.add(base);
+    const auto last = reg.decode(pkt);
+    check(last && std::abs(last->get_float("x") - 640.0) < 0.01 && last->get_int("hp") == 200,
+          "afterwards the layout added last is the one decoded with");
+}
+
+/// The GUI rewrites the layouts on its drawing thread -- Apply, Apply all
+/// above 70%, Apply layout, Reload configs -- while the capture thread decodes
+/// every frame through them. Here a thread decodes flat out, through decode()
+/// and through a ProtocolHandler as the capture thread does, while another
+/// swaps the layout's field list, grows and empties the table and loads it
+/// from a file. Every decode has to have read one whole layout. Before the
+/// table had its lock, a rewrite in the middle of a decode freed the field
+/// list being walked, and the elevated GUI crashed or put garbage HP and
+/// positions into GameState.
+void test_opcode_registry_threads() {
+    section("Opcode registry: rewritten while another thread decodes");
+    finish_within(30000, "the registry rewritten while another thread decodes",
+                  registry_rewritten_under_decodes);
+}
+
+/// What a layout says is what is read: offsets in decimal unless written with
+/// 0x, nothing left over after a number, and a repeat count kept to what one
+/// packet can hold. Base 0 read "@012" as octal 10 and "@08" as 0, a scale
+/// took whatever followed it on trust, and repeat=-1 grew groups until memory
+/// ran out on the capture thread.
+void test_opcode_registry_strict() {
+    section("Opcode registry: offsets, scales and repeat counts read as written");
+
+    std::string err;
+    auto f = OpcodeRegistry::parse_field_list("a:u16@012", &err);
+    check(err.empty() && f.size() == 1 && f[0].fixed_offset == 12u, "@012 is offset 12, not octal 10");
+    err.clear();
+    f = OpcodeRegistry::parse_field_list("a:u16@08", &err);
+    check(err.empty() && f.size() == 1 && f[0].fixed_offset == 8u, "@08 is offset 8, not 0");
+    err.clear();
+    f = OpcodeRegistry::parse_field_list("a:u16@0x10", &err);
+    check(err.empty() && f.size() == 1 && f[0].fixed_offset == 16u, "@0x10 is still read as hex");
+    err.clear();
+    f = OpcodeRegistry::parse_field_list("a:u16@0X1F", &err);
+    check(err.empty() && f.size() == 1 && f[0].fixed_offset == 31u, "and so is @0X1F");
+    err.clear();
+    f = OpcodeRegistry::parse_field_list("a:i16@12*0.5", &err);
+    check(err.empty() && f.size() == 1 && f[0].fixed_offset == 12u && std::abs(f[0].scale - 0.5) < 1e-9,
+          "an offset and then a scale, as documented, still reads");
+    err.clear();
+    f = OpcodeRegistry::parse_field_list("x:i16 @ 12,y:i16 * -0.25,z:i16*.5", &err);
+    check(err.empty() && f.size() == 3 && f[0].has_fixed_offset && f[0].fixed_offset == 12u &&
+              std::abs(f[1].scale + 0.25) < 1e-9 && std::abs(f[2].scale - 0.5) < 1e-9,
+          "spaces around @ and *, a negative scale and one with no leading 0 read too");
+    err.clear();
+    OpcodeRegistry::parse_field_list("a:u16@12abc", &err);
+    check(!err.empty(), "an offset with more after it is refused");
+    err.clear();
+    OpcodeRegistry::parse_field_list("a:u16@-1", &err);
+    check(!err.empty(), "a negative offset is refused");
+    err.clear();
+    OpcodeRegistry::parse_field_list("x:i16*0.125@12", &err);
+    check(!err.empty(), "an offset written after the scale is refused rather than dropped");
+    err.clear();
+    OpcodeRegistry::parse_field_list("x:i16*inf", &err);
+    check(!err.empty(), "a scale that is no finite number is refused");
+    std::string accepted;
+    for (const char* bad : { "a:u16@1f", "a:u16@0x", "a:u16@", "a:u16@+12", "a:u16@99999999999",
+                             "x:i16*", "x:i16*nan", "x:i16*1e400" }) {
+        err.clear();
+        OpcodeRegistry::parse_field_list(bad, &err);
+        if (err.empty()) accepted += std::string(accepted.empty() ? "" : ", ") + bad;
+    }
+    check(accepted.empty(),
+          "hex without 0x, 0x or @ with no number, a sign, an offset past 32 bits, no scale, nan and "
+          "a scale past a double are refused too" +
+              (accepted.empty() ? std::string() : " -- not " + accepted));
+
+    // What the GUI's layout editor and the calibrator write, read back the same.
+    err.clear();
+    const auto first = OpcodeRegistry::parse_field_list(
+        "x:i16be@12*0.125,s:strf6@0x10,:skip4,h:i32@8*-0.5", &err);
+    const std::string written = OpcodeRegistry::field_list_to_string(first);
+    std::string err2;
+    const auto again = OpcodeRegistry::parse_field_list(written, &err2);
+    bool same = err.empty() && err2.empty() && first.size() == 4 && again.size() == first.size();
+    for (std::size_t i = 0; same && i < first.size(); ++i)
+        same = first[i].name == again[i].name && first[i].type == again[i].type &&
+               first[i].count == again[i].count && first[i].little_endian == again[i].little_endian &&
+               first[i].has_fixed_offset == again[i].has_fixed_offset &&
+               first[i].fixed_offset == again[i].fixed_offset && first[i].scale == again[i].scale;
+    check(same && written.find("@16") != std::string::npos,
+          "a layout written out and read back is the same layout, @0x10 written as @16 -- " + written);
+
+    const std::string path = temp_file("registry_repeat.ini");
+    write_lines(path, { "[Packet.0x0700]", "name=Negative", "semantic=party_update", "repeat=-1",
+                        "fields=a:u8@0,b:u8@1",
+                        "[Packet.0x0701]", "name=Huge", "semantic=party_update", "repeat=100000",
+                        "fields=a:u8",
+                        "[Packet.0x0704]", "name=Zero", "semantic=party_update", "repeat=0",
+                        "fields=a:u8",
+                        "[Packet.0x0705]", "name=Words", "semantic=party_update", "repeat=abc",
+                        "fields=a:u8" });
+    OpcodeRegistry reg;
+    check(reg.load(path) && reg.size() == 4, "layouts with odd repeat counts still load");
+    const auto negative = reg.find_copy(0x0700);
+    const auto huge     = reg.find_copy(0x0701);
+    check(negative && negative->repeat == 1u, "repeat=-1 is read as 1, not as the largest number there is");
+    check(huge && huge->repeat == 4096u, "and a repeat over 4096 as 4096");
+    GamePacket flat;
+    flat.opcode  = 0x0704;
+    flat.payload = { 5, 6 };
+    const auto zero  = reg.decode(flat);
+    flat.opcode = 0x0705;
+    const auto words = reg.decode(flat);
+    check(zero && zero->groups.empty() && zero->get_int("a") == 5 && words && words->groups.empty() &&
+              words->get_int("a") == 5,
+          "repeat=0, and repeat written as no number, are read flat, as before");
+    std::remove(path.c_str());
+
+    PacketSpec pinned;
+    pinned.opcode   = 0x0702;
+    pinned.semantic = Semantic::PartyUpdate;
+    pinned.repeat   = 50;
+    pinned.fields   = OpcodeRegistry::parse_field_list("a:u8@0,b:u8@1", nullptr);
+    reg.add(pinned);
+    GamePacket p;
+    p.opcode  = 0x0702;
+    p.payload = { 7, 9 };
+    const auto d = reg.decode(p);
+    check(d && d->groups.size() == 1 && DecodedPacket::group_int(d->groups[0], "b") == 9,
+          "a repeated group of nothing but pinned fields is read once, not 50 times");
+
+    PacketSpec plain;
+    plain.opcode   = 0x0703;
+    plain.semantic = Semantic::PartyUpdate;
+    plain.repeat   = 3;
+    plain.fields   = OpcodeRegistry::parse_field_list("a:u8", nullptr);
+    reg.add(plain);
+    p.opcode  = 0x0703;
+    p.payload = { 1, 2, 3 };
+    const auto e = reg.decode(p);
+    check(e && e->groups.size() == 3 && DecodedPacket::group_int(e->groups[2], "a") == 3,
+          "an ordinary repeated group is still read every time");
+
+    // With the count in the packet, a group of pinned fields is still read
+    // once, whatever the count says; and a group of nothing but skips --
+    // which moves on, though it keeps nothing -- is read every time.
+    PacketSpec counted;
+    counted.opcode             = 0x0706;
+    counted.semantic           = Semantic::PartyUpdate;
+    counted.repeat_count_field = "count";
+    counted.fields             = OpcodeRegistry::parse_field_list("count:u8,a:u8@1,b:u8@2", nullptr);
+    reg.add(counted);
+    p.opcode  = 0x0706;
+    p.payload = { 5, 7, 9 };
+    const auto c = reg.decode(p);
+    PacketSpec skips;
+    skips.opcode   = 0x0707;
+    skips.semantic = Semantic::PartyUpdate;
+    skips.repeat   = 4;
+    skips.fields   = OpcodeRegistry::parse_field_list(":skip2", nullptr);
+    reg.add(skips);
+    p.opcode  = 0x0707;
+    p.payload = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    const auto s = reg.decode(p);
+    check(c && c->groups.size() == 1 && s && s->groups.size() == 4,
+          "pinned fields are one group with a count of five in the packet too, and four groups of "
+          "nothing but skips are four");
+    // Where a group ends is what says it read something, not what it read:
+    // three groups of zeros are three.
+    PacketSpec zeros;
+    zeros.opcode             = 0x0708;
+    zeros.semantic           = Semantic::PartyUpdate;
+    zeros.repeat_count_field = "count";
+    zeros.fields             = OpcodeRegistry::parse_field_list("count:u8,id:u32,hp:i32", nullptr);
+    reg.add(zeros);
+    p.opcode = 0x0708;
+    p.payload.assign(1 + 3 * 8, 0);
+    p.payload[0] = 3;
+    const auto z = reg.decode(p);
+    check(z && z->groups.size() == 3, "and three groups of nothing but zeros are three");
+
+#ifdef GOBOT_SOURCE_DIR
+    // The layout that ships reads as it always did under these rules.
+    OpcodeRegistry shipped;
+    const bool loaded = shipped.load(std::string(GOBOT_SOURCE_DIR) + "/configs/protocol.ini");
+    const auto own = shipped.find_copy(0x0038);
+    bool offsets = own && own->fields.size() == 4;
+    const std::size_t want[] = { 8, 20, 80, 82 };
+    for (std::size_t i = 0; offsets && i < 4; ++i)
+        offsets = own->fields[i].has_fixed_offset && own->fields[i].fixed_offset == want[i];
+    if (!loaded)
+        skip("the source tree's configs/protocol.ini is not here\n");
+    else
+        check(shipped.size() == 1 && offsets,
+              "the shipped protocol.ini still loads its one layout, 0x0038, at offsets 8, 20, 80 and 82");
+#endif
+}
+
 // ------------------------------------------------------------- world model
 
 void test_game_state() {
@@ -3189,6 +3911,34 @@ void test_game_state() {
     check(st.self().facing == Facing::Right, "facing inferred rightward");
     st.update_self_position(50, 200);
     check(st.self().facing == Facing::Left, "facing inferred leftward");
+
+    // Dead is read off every HP reading, both ways. A 0 used to set it for
+    // good, and only a self_revive packet -- which nothing maps -- cleared it:
+    // one death left the brain recovering and the potions and buffs skipping
+    // until GoBot was closed.
+    GameState life;
+    life.update_self_hp(100, 100);
+    check(!life.self().dead, "HP 100 of 100 is alive");
+    life.update_self_hp(0, 0);
+    check(life.self().dead && life.self().max_hp == 100, "HP 0 is dead, and the max already known is kept");
+    life.update_self_hp(40, 100);
+    check(!life.self().dead, "HP above 0 again is alive again, with no self_revive needed");
+    life.set_self_dead(true);
+    check(life.self().dead, "a self_dead packet still says so outright");
+    life.update_self_hp(40, 100);
+    check(!life.self().dead, "until the next reading, which says otherwise");
+    life.set_self_dead(true);
+    life.set_self_dead(false);
+    check(!life.self().dead, "and a self_revive says alive");
+    life.update_self_hp(0, 100);
+    life.set_self_dead(false);
+    check(!life.self().dead && life.self().hp == 100,
+          "a self_revive with HP still at 0 fills it from the max, as before");
+    GameState no_max;
+    no_max.update_self_hp(0, 0);
+    check(no_max.self().dead, "with no max known, HP 0 is dead, as before");
+    no_max.update_self_hp(5, 0);
+    check(!no_max.self().dead, "and HP 5 is alive");
 }
 
 // -------------------------------------------------------------- pathfinding
@@ -3741,9 +4491,12 @@ void test_vitals_reader() {
           "a shade off still reads, within tolerance");
 
     // Well outside it: a blue bar must not read as a red one, or HP and MP
-    // would be interchangeable and a potion rule meaningless.
+    // would be interchangeable and a potion rule meaningless -- nor as an
+    // empty red one, since 0% is what fires the potion. Light, and with none
+    // of the fill colour in it, it is no bar of this colour at all.
     paint_bar(f, hp, 80, 40, 90, 230);
-    check(VitalsReader::measure(f, hp) == 0.0f, "wrong colour reads 0%, not 80%");
+    check(VitalsReader::measure(f, hp) < 0.0f,
+          "a bar of another colour is unreadable -- not 80%, and not an empty bar's 0%");
 
     // The dangerous case. A capture that comes back blank -- the window
     // minimised, moved off screen, or a PrintWindow that painted nothing --
@@ -3793,20 +4546,301 @@ void test_vitals_reader() {
     check(VitalsReader::measure(f, BarSpec{}) < 0.0f, "an unset bar reads as unreadable");
     check(VitalsReader::measure(Frame{}, hp) < 0.0f, "no frame reads as unreadable");
 
+    // A row counts only when it positively looks like a bar: a fill drawn from
+    // the left edge, or a trough of one colour with at most its caption on it.
+    // Anything else with none of the fill in it read as an empty bar, and 0%
+    // fires the potion -- a loading screen, the login page's artwork, a window
+    // in front, the part of the game's window off the screen.
+    //
+    // bar_rows paints every pixel of the bar's box: paint(x, y, i), i the
+    // column along it.
+    const auto bar_rows = [&hp](const std::function<void(int, int, int)>& paint) {
+        for (int y = hp.y; y < hp.y + hp.height; ++y)
+            for (int i = 0; i < hp.width; ++i) paint(hp.x + i, y, i);
+    };
+    {
+        Frame black = make_frame(300, 60);
+        check(VitalsReader::measure(black, hp) < 0.0f,
+              "an all-black frame -- a loading screen, the window off the screen -- is unreadable, "
+              "not an empty bar");
+        bar_rows([&](int x, int y, int) { put_px(black, x, y, 2, 2, 3); });
+        check(VitalsReader::measure(black, hp) < 0.0f, "nor is black with a level of noise in it");
+        bar_rows([&](int x, int y, int i) {
+            if (i == 0) put_px(black, x, y, 200, 40, 40);
+            else        put_px(black, x, y, 0, 0, 0);
+        });
+        check(VitalsReader::measure(black, hp) < 0.0f,
+              "and a pixel of the fill's colour at its left edge does not make black a sliver of a bar");
+    }
+    {
+        // The game's own empty bar is near black at one HUD size.
+        Frame trough = make_frame(300, 60);
+        bar_rows([&](int x, int y, int) { put_px(trough, x, y, 12, 12, 12); });
+        check(VitalsReader::measure(trough, hp) == 0.0f, "an empty near-black trough still reads 0%");
+        bar_rows([&](int x, int y, int) { put_px(trough, x, y, 4, 4, 5); });
+        check(VitalsReader::measure(trough, hp) == 0.0f, "and one nearer black still, 4,4,5, too");
+    }
+    {
+        // And light grey at the other, where a sliver at the left edge is a
+        // bar nearly out. A pixel of the fill's colour anywhere else in a
+        // light row is a speck in whatever covers the bar.
+        Frame grey_bar = make_frame(300, 60);
+        bar_rows([&](int x, int y, int i) {
+            if (i == 0) put_px(grey_bar, x, y, 200, 40, 40);
+            else        put_px(grey_bar, x, y, 170, 170, 170);
+        });
+        const float sliver = VitalsReader::measure(grey_bar, hp);
+        check(std::fabs(sliver - 1.0f) < 0.01f,
+              "a light grey trough with one pixel of fill at its left edge reads that pixel: 1% of 100 -- " +
+                  std::to_string(sliver));
+        bar_rows([&](int x, int y, int i) {
+            if (i == 50) put_px(grey_bar, x, y, 200, 40, 40);
+            else         put_px(grey_bar, x, y, 170, 170, 170);
+        });
+        check(VitalsReader::measure(grey_bar, hp) < 0.0f,
+              "the same pixel half way along is a speck on something light: unreadable");
+        Frame light = make_frame(300, 60);
+        for (int y = 0; y < light.height; ++y)
+            for (int x = 0; x < light.width; ++x) put_px(light, x, y, 240, 240, 240);
+        for (const int i : { 20, 21, 50, 51, 90 })
+            put_px(light, hp.x + i, hp.y + hp.height / 2, 200, 20, 20);
+        check(VitalsReader::measure(light, hp) < 0.0f,
+              "and pairs of red pixels on a light window are no bar either");
+    }
+    {
+        // A loading screen's artwork: dark, and different from pixel to
+        // pixel. Each channel drawn into its own local, so the order the
+        // arguments are worked out in cannot change the picture.
+        Frame rough = make_frame(300, 60);
+        std::mt19937 rng(41);
+        for (int y = 0; y < rough.height; ++y)
+            for (int x = 0; x < rough.width; ++x) {
+                const auto r = static_cast<std::uint8_t>(10 + rng() % 80);
+                const auto g = static_cast<std::uint8_t>(10 + rng() % 80);
+                const auto b = static_cast<std::uint8_t>(10 + rng() % 80);
+                put_px(rough, x, y, r, g, b);
+            }
+        check(VitalsReader::measure(rough, hp) < 0.0f,
+              "a dark, busy picture -- a loading screen's artwork -- is unreadable, not an empty bar");
+        bar_rows([&](int x, int y, int i) {
+            if (i >= 60 && i <= 62) put_px(rough, x, y, 200, 40, 40);
+        });
+        check(VitalsReader::measure(rough, hp) < 0.0f,
+              "and three pixels of the fill's colour in it do not make a bar 63% full");
+    }
+    {
+        Frame window = make_frame(300, 60);
+        for (int y = 0; y < window.height; ++y)
+            for (int x = 0; x < window.width; ++x) put_px(window, x, y, 236, 236, 236);
+        for (int y = hp.y + 1; y < hp.y + hp.height - 1; ++y)
+            for (int i = 5; i < 93; i += 3) put_px(window, hp.x + i, y, 20, 20, 20);
+        check(VitalsReader::measure(window, hp) < 0.0f,
+              "a light window with writing on it -- a dialog in front -- is unreadable");
+    }
+    {
+        // What must still read: an empty bar with its figures across it, a
+        // sliver on a dark trough -- but not specks of red on one.
+        Frame empty = make_frame(300, 60);
+        paint_bar(empty, hp, 0, 200, 40, 40);
+        for (int y = hp.y + 1; y < hp.y + hp.height - 1; ++y)
+            for (int i = 60; i <= 90; i += 2) put_px(empty, hp.x + i, y, 250, 250, 250);
+        check(VitalsReader::measure(empty, hp) == 0.0f,
+              "an empty bar with its figures printed across it still reads 0%");
+        Frame sliver = make_frame(300, 60);
+        paint_bar(sliver, hp, 2, 200, 40, 40);
+        check(std::fabs(VitalsReader::measure(sliver, hp) - 2.0f) < 0.5f,
+              "a sliver of fill on an empty trough still reads as a sliver");
+        Frame specks = make_frame(300, 60);
+        paint_bar(specks, hp, 0, 200, 40, 40);
+        bar_rows([&](int x, int y, int i) {
+            if (i >= 60 && i <= 62) put_px(specks, x, y, 200, 40, 40);
+        });
+        check(VitalsReader::measure(specks, hp) < 0.0f,
+              "three red pixels out in an empty trough are no fill up to them, and not an empty bar "
+              "either");
+        // A bar placed two pixels short of its left edge still reads its fill.
+        Frame early = make_frame(300, 60);
+        bar_rows([&](int x, int y, int i) {
+            if (i < 2)      put_px(early, x, y, 24, 24, 28);
+            else if (i < 5) put_px(early, x, y, 200, 40, 40);
+            else            put_px(early, x, y, 14, 14, 16);
+        });
+        check(std::fabs(VitalsReader::measure(early, hp) - 5.0f) < 0.5f,
+              "and a bar whose box starts two pixels short of it reads its fill, 5%, not nothing");
+    }
+    {
+        // The player's own frame, when there is one here: printed, not
+        // judged, so that whoever runs this sees the real HUD still reads.
+        Frame shot;
+        if (load_png(exe_relative("frame.png"), shot) && shot.valid()) {
+            BarSpec real_hp;
+            real_hp.x = 83; real_hp.y = 8; real_hp.width = 159; real_hp.height = 5;
+            real_hp.r = 239; real_hp.g = 0; real_hp.b = 0; real_hp.tolerance = 80;
+            BarSpec real_mp = real_hp;
+            real_mp.y = 22;
+            real_mp.r = 0; real_mp.g = 49; real_mp.b = 206;
+            std::printf("  [info] frame.png reads HP %.1f%%, MP %.1f%%\n",
+                        static_cast<double>(VitalsReader::measure(shot, real_hp)),
+                        static_cast<double>(VitalsReader::measure(shot, real_mp)));
+        }
+    }
+
     // The reader itself, with no window: it must start, stop, and report
     // nothing rather than a stale or made-up figure.
     VitalsReader vr;
-    check(vr.hp_percent() < 0.0f, "reports unreadable before it runs");
+    check(vr.hp_percent() < 0.0f && vr.hp_seen_ms() == 0, "reports unreadable before it runs, HP never seen");
     vr.set_hp_bar(hp);
     check(vr.hp_bar().width == 100, "remembers the bar it was given");
     vr.start();
     check(vr.running(), "starts");
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    check(vr.hp_percent() < 0.0f, "still unreadable with no target window");
+    check(vr.hp_percent() < 0.0f && vr.hp_seen_ms() == 0 &&
+              !VitalsReader::in_world(vr.hp_seen_ms(), now_ms(), MacroEngine::kOutOfWorldAfterMs),
+          "still unreadable with no target window, and so not in the world");
     vr.stop();
     check(!vr.running(), "stops");
     vr.stop();
     check(true, "double stop is safe");
+}
+
+static_assert(!std::is_copy_constructible_v<ScreenCapture> && !std::is_copy_assignable_v<ScreenCapture> &&
+                  std::is_default_constructible_v<ScreenCapture>,
+              "a capture owns a DC and a DIB: made in place, never copied");
+
+/// A capture gives back what it made.
+///
+/// The bitmap stayed selected into the capture's own DC when the two were
+/// deleted, and a bitmap in a DC cannot be deleted, so every capture torn down
+/// or resized left its frame behind -- 3.7 MB and a GDI handle at 1280x720 --
+/// until the 10,000-handle quota ran out and every grab failed. Counted on a
+/// window of this test's own, never shown: the grab falls back to the screen
+/// and copies whatever is there, which is nothing it keeps.
+void test_screen_capture_frees() {
+    section("Screen capture: what it makes, it frees");
+
+    const HINSTANCE self = GetModuleHandleA(nullptr);
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = self;
+    wc.lpszClassName = "GoBotTestCapture";
+    RegisterClassA(&wc);        // already there from an earlier run: the same
+    HWND w = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "", WS_POPUP, 0, 0,
+                             64, 64, nullptr, nullptr, self, nullptr);
+    if (w == nullptr) {
+        skip("could not make a window to capture here\n");
+        return;
+    }
+    const auto gdi = [] { return GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS); };
+    {
+        // Whatever a first capture brings with it, once, before counting.
+        ScreenCapture warm;
+        Frame f;
+        warm.grab(w, f);
+    }
+    const DWORD before = gdi();
+    if (before == 0) {
+        skip("Windows would not count this program's GDI objects\n");
+        DestroyWindow(w);
+        return;
+    }
+    for (int i = 0; i < 40; ++i) {
+        ScreenCapture c;
+        Frame f;
+        c.grab(w, f);
+    }
+    const DWORD after = gdi();
+    check(after <= before + 4, "40 captures made and ended leave no bitmap behind -- GDI objects " +
+                                   std::to_string(before) + ", then " + std::to_string(after));
+
+    // One capture whose window keeps changing size makes a bitmap for each
+    // size, and lets the one before go.
+    ScreenCapture c;
+    Frame f;
+    c.grab(w, f);
+    const DWORD start = gdi();
+    for (int i = 0; i < 20; ++i) {
+        SetWindowPos(w, nullptr, 0, 0, 64 + (i % 2) * 16, 64, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        c.grab(w, f);
+    }
+    const DWORD resized = gdi();
+    check(resized <= start + 4,
+          "a capture whose window keeps changing size keeps one bitmap, not one per size -- GDI objects " +
+              std::to_string(start) + ", then " + std::to_string(resized));
+    DestroyWindow(w);
+
+    // When PrintWindow is worth asking (PrintWindowRule): given up only when
+    // its picture is blank while the screen shows the window itself drawn,
+    // three grabs running -- not at one blank, nor at the game's black loading
+    // screen -- and asked again every 60th grab. Given up at the first blank,
+    // it was given up for 600 grabs at a map change, and 29 frames that were
+    // not the HUD were read off the screen in 76 s of hunting (2026-10-26).
+    {
+        // One grab of a window whose picture comes back blank, as grab()
+        // drives the rule: whether PrintWindow was given up there and then.
+        const auto blank_grab = [](PrintWindowRule& rule, bool screen_drawn) {
+            if (!rule.ask()) return false;
+            rule.printed(false);
+            return rule.trying() && rule.screen(screen_drawn);
+        };
+        PrintWindowRule given;
+        const bool first = blank_grab(given, true);
+        const bool second = blank_grab(given, true);
+        const bool third = blank_grab(given, true);
+        check(!first && !second && third && !given.trying(),
+              "three blank pictures of a window the screen shows drawn give PrintWindow up -- at the third");
+
+        PrintWindowRule loading;
+        bool any = false;
+        for (int i = 0; i < 10; ++i) any = blank_grab(loading, false) || any;
+        check(!any && loading.trying(), "ten of a window as blank on the screen -- a loading screen -- give it up never");
+
+        PrintWindowRule between;
+        blank_grab(between, true);
+        blank_grab(between, true);
+        between.ask();
+        between.printed(true);
+        const bool gave_up_after = blank_grab(between, true) || blank_grab(between, true);
+        check(!gave_up_after && between.trying(),
+              "two misses, a picture, two more: kept -- a picture starts the count again");
+
+        // Given up: asked again at the 60th grab; one that draws nothing waits
+        // another 60; one that draws has it back.
+        int asked_at = 0, again_at = 0;
+        for (int i = 1; i <= 61 && asked_at == 0; ++i)
+            if (given.ask()) asked_at = i;
+        given.printed(false);
+        for (int i = 1; i <= 61 && again_at == 0; ++i)
+            if (given.ask()) again_at = i;
+        const bool back = given.printed(true);
+        check(asked_at == PrintWindowRule::kProbeEvery && again_at == PrintWindowRule::kProbeEvery && back &&
+                  given.trying(),
+              "given up, it is asked again at grab " + std::to_string(asked_at) + ", and after a probe that drew "
+              "nothing at grab " + std::to_string(again_at) + "; a picture has it back");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    // And grab() goes by the rule, judging the screen only where it shows the
+    // window itself: a toast or the taskbar over a black loading screen does
+    // not make the game drawn. The screen copied again, a moment later, only
+    // after a PrintWindow that drew nothing and while the copy shows the window
+    // one flat colour: the live client went black on the screen right after
+    // PrintWindow (2026-10-30).
+    {
+        const std::string grab = body_of(source_text("/src/screen_capture.cpp"),
+                                         "bool ScreenCapture::grab(void* hwnd_raw, Frame& out) {");
+        check(grab.find("if (!screen_only_ && !PrintWindowPause::active() && print_rule_.ask()) {") !=
+                  std::string::npos &&
+                  grab.find("if (print_rule_.printed(ok != FALSE))") != std::string::npos &&
+                  grab.find("bool drawn = printed && ok && drawn_where_seen(hwnd, origin, bits_, w, h, &seen);") !=
+                      std::string::npos &&
+                  grab.find("printed && ok && !drawn && seen && again < kRecopies;") != std::string::npos &&
+                  grab.find("if (!IsWindow(hwnd) || IsIconic(hwnd)) return FALSE;") != std::string::npos &&
+                  grab.find("drawn = ok && drawn_where_seen(hwnd, origin, bits_, w, h);") != std::string::npos &&
+                  grab.find("print_rule_.screen(drawn)") != std::string::npos && grab.find("= 600;") == std::string::npos,
+              "grab() asks PrintWindow by the rule, and counts a blank picture against it only where the screen "
+              "shows the window itself drawn, copied again a moment later after a blank PrintWindow");
+        check(PrintWindowRule::kProbeEvery == 60, "PrintWindow probed once in 60 grabs once given up");
+    }
+#endif
 }
 
 /// Finding the bars without being told where they are.
@@ -3848,7 +4882,7 @@ void test_assembly_templates() {
 
     const char* dll = "C:\\Program Files\\TH_VGO_Bot_Helper\\TungHaVGOBot.dll";
     if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES) {
-        std::printf("  [skip] the other helper is not installed here\n");
+        skip("the other helper is not installed here\n");
         return;
     }
 
@@ -4661,6 +5695,58 @@ void test_party() {
         check(s.may_accept("Stranger"), "while anyone not on it is still taken");
     }
 
+    // The lists that let somebody in are matched tightly (Party::allowed_name):
+    // case, marks and spaces aside, exactly for four letters or fewer, one
+    // letter wrong, missing or extra for longer -- never two. The blacklist
+    // stays loose: a false hit there turns somebody away. Made-up names.
+    {
+        check(Party::allowed_name("Anh", "anh") && Party::allowed_name("Anh", "\xC3\x81nh"),
+              "a short name matches itself, whatever its case or marks");
+        check(!Party::allowed_name("Anh", "Anh1") && !Party::allowed_name("Anh", "xAnh") &&
+                  !Party::allowed_name("Zemo", "Zmo") && !Party::allowed_name("Zemo", "Zema"),
+              "four letters or fewer only exactly: Anh1 and xAnh are not Anh");
+        check(Party::allowed_name("Kopra", "Kopa") && Party::allowed_name("Friend", "Fr1end") &&
+                  Party::allowed_name("TieuLong", "TieuLongs"),
+              "five letters or more: one letter missing, wrong or extra still matches");
+        check(Party::allowed_name("ExampleWin", "Exampley in"),
+              "the live misread of ExampleWin still matches it");
+        check(Party::allowed_name("NguyenVanA", "Nguy\xE1\xBB\x85n V\xC4\x83n A"),
+              "a name with its marks and spaces is the name without them");
+        check(Party::allowed_name("Friend", "Friend2") && Party::allowed_name("NguyenVanA", "NguyenVanB"),
+              "the price: one letter off a name of five or more is let in -- the reader's one wrong letter "
+              "looks the same");
+        check(!Party::allowed_name("Friend", "Frend2") && !Party::allowed_name("Friend", "Firend") &&
+                  !Party::allowed_name("NguyenVanA", "NguyenVanAnh") &&
+                  !Party::allowed_name("NguyenVanA", "NguyenVanBC") &&
+                  !Party::allowed_name("NguyenVanA", "NguyenVaBB") &&
+                  !Party::allowed_name("NguyenVanAnhTuan", "NguyenVanAnhTuxx"),
+              "but never two letters off: Frend2, Firend, NguyenVanAnh, NguyenVanBC and NguyenVaBB are not "
+              "theirs, nor two wrong in a name of sixteen");
+        check(!Party::allowed_name("", "") && !Party::allowed_name("Friend", "") &&
+                  !Party::allowed_name("", "Friend") && !Party::allowed_name("Friend", "..."),
+              "and nothing matches nothing");
+
+        Party::Settings s;
+        s.accept_all = false;
+        s.accept_only = { "Anh", "NguyenVanA" };
+        check(s.may_accept("ANH") && !s.may_accept("Anh1") && !s.may_accept("NguyenVanAnh") &&
+                  s.may_accept("NguyenVanX"),
+              "accept_only: Anh in capitals is taken, Anh1 and NguyenVanAnh are not");
+        s.by_list = true;
+        s.whitelist = { "Anh" };
+        s.priority = { "TieuLong" };
+        check(!s.may_invite("xAnh") && !s.may_invite("TieuLung2") && s.may_invite("TieuLang") &&
+                  s.may_invite("anh"),
+              "the invite and priority lists alike");
+
+        Party::Settings banned;             // accept_all, as it ships
+        banned.use_blacklist = true;
+        banned.blacklist = { "Friend", "NguyenVanA" };
+        check(!banned.may_accept("Frend2") && !banned.may_accept("Fiend") &&
+                  !banned.may_accept("NguyenVanAnh") && banned.may_accept("Stranger"),
+              "while the blacklist still turns away what is 70% like a name on it");
+    }
+
     // "Accept everyone" is a key of GoBot's own, so a file without it -- the
     // commercial client's -- has to mean what that file meant.
     {
@@ -4720,7 +5806,7 @@ void test_party() {
             check(s.magic_word == "pt",
                   "and its magic word comes through -- got '" + s.magic_word + "'");
         } else {
-            std::printf("  [skip] that client is not installed here\n");
+            skip("that client is not installed here\n");
         }
     }
 }
@@ -4747,7 +5833,7 @@ void test_shipped_macro_works() {
 #endif
     MacroConfig cfg;
     if (path.empty() || !cfg.load(path)) {
-        std::printf("  [skip] the source tree's configs/macro.ini is not here\n");
+        skip("the source tree's configs/macro.ini is not here\n");
         return;
     }
 
@@ -4824,14 +5910,14 @@ void test_shipped_configs() {
 #endif
     IniFile app;
     if (dir.empty() || !app.load(dir + "app.ini")) {
-        std::printf("  [skip] the source tree's configs are not here\n");
+        skip("the source tree's configs are not here\n");
         return;
     }
     check(!app.get_bool("Simple", "keep_alive", true) && !app.get_bool("Simple", "revive", true),
           "app.ini: the client keeper and the revive are off");
     check(!app.get_bool("Capture", "autostart", true), "app.ini: the packet bot does not start by itself");
     check(app.get_bool("Simple", "refocus", false),
-          "app.ini: bringing the game forward after 30 s idle stays on -- it presses nothing");
+          "app.ini: keeping the game in front while the bot runs is on -- it presses nothing");
     check(app.get_bool("Paths", "new_log_each_start", false),
           "app.ini: gobot_gui.log starts afresh each session, so a tester's holds two, not weeks");
 
@@ -4860,6 +5946,23 @@ void test_shipped_configs() {
           "hunt.ini: keep_distance=false, 3 steps, facing_tolerance=12");
     check(hunt.jump_key == 0 && !hunt.jump_checked,
           "hunt.ini: jump_key=0 -- no jump key until the player sets one -- and not tried");
+    // The player's choice: the capture starts by itself with the hunting, and
+    // only watches until "Vị trí từ gói tin" is ticked. A player's own hunt.ini
+    // is never replaced, and without the key the code's default decides: the
+    // same.
+    check(hunt_ini.has_key("Hunt", "packet_positions") && hunt.packet_positions == PacketPositions::Watch &&
+              HunterConfig{}.packet_positions == PacketPositions::Watch && hunt_ini.has_key("Hunt", "packet_scale") &&
+              hunt.packet_scale == 1.0f && hunt_ini.has_key("Hunt", "packet_dy") && hunt.packet_dy == 0,
+          "hunt.ini: packet_positions=watch, as the code's default -- watched and logged, the screen fights -- "
+          "and the packets laid one to one");
+    // "Chỗ đánh quái" moves the character: the player's to switch on.
+    bool spot_keys = true;
+    for (const char* key : { "spot", "spot_half_w", "spot_half_h", "spot_tolerance", "spot_return_delay_ms",
+                             "spot_give_up_ms", "spot_retry_ms" })
+        spot_keys = spot_keys && hunt_ini.has_key("Hunt", key);
+    check(spot_keys && !hunt.spot && hunt.spot_half_w == 300 && hunt.spot_half_h == 100 && hunt.spot_tolerance == 48 &&
+              hunt.spot_return_delay_ms == 1500 && hunt.spot_give_up_ms == 4000 && hunt.spot_retry_ms == 30000,
+          "hunt.ini: spot=false, and its numbers there at the code's defaults");
 
     Party::Settings party;
     check(party.load(dir + "party.ini") && !party.auto_accept && !party.auto_invite,
@@ -4896,6 +5999,31 @@ void test_shipped_configs() {
         for (const char* key : { "username", "password", "account", "user" })
             account = account || !login_ini.get("Login", key, "").empty();
     check(!account, "login.ini: no account and no password");
+
+    // bot_default.ini, the packet bot's. BotConfig::load starts from
+    // apply_defaults(), which ticks four skills, and the struct starts with
+    // attacking, fury, turning to a target, stepping back and walking a route
+    // on -- so each switch has to be written in the file, off. A key left out
+    // reads as on. Its potions and buffs are macro.ini's: none of its own.
+    BotConfig bot;
+    check(bot.load(dir + "bot_default.ini"), "bot_default.ini loads");
+    bool skill_on = false;
+    for (const SkillSlot& s : bot.skills) skill_on = skill_on || s.enabled;
+    IniFile bot_ini;
+    bool own_sustain = !bot_ini.load(dir + "bot_default.ini") || bot_ini.has_key("Bot", "auto_buff");
+    for (const char* key : { "hp_heal1_enabled", "hp_heal2_enabled", "mp_heal1_enabled" })
+        own_sustain = own_sustain || bot_ini.has_key("Heal", key);
+    for (int i = 0; i < 6; ++i)
+        own_sustain = own_sustain || bot_ini.has_key("Bot", "buff_" + std::to_string(i) + "_enabled");
+    check(!own_sustain, "bot_default.ini: no potion or buff of the packet bot's own -- they are macro.ini's");
+    check(!bot.auto_attack && !skill_on && !bot.auto_fury && !bot.face_target && !bot.backing_away,
+          "bot_default.ini: attacking, every skill, fury, turning to a target and stepping back are off");
+    check(!bot.auto_loot && !bot.double_jump && !bot.enable_tile_pathfinding && !bot.patrol_use_waypoints &&
+              !bot.return_to_original_location && !bot.return_to_previous_map &&
+              !bot.continue_auto_after_death && !bot.player_auto_revive,
+          "bot_default.ini: looting, jumping, routes, going back and reviving are off");
+    check(bot.lazy_mode,
+          "bot_default.ini: lazy_mode stays on -- it waits for monsters instead of chasing them");
 }
 
 /// Fishing and mining: the deciding half.
@@ -5108,16 +6236,22 @@ void test_routines() {
         press.find = "buy_button";
         press.gone = true;
         press.optional = true;
-        buy.steps = { pick, press };
+        DialogDriver::Step blind;
+        blind.find = "thing_row";
+        blind.check = false;
+        buy.steps = { pick, press, blind };
 
         const std::string path = temp_file("gobot_routines_test.ini");
         check(Routine::save({ buy }, path), "a routine writes");
 
         const auto back = Routine::load(path);
         check(back.size() == 1 && back[0].name == "buy_thing", "and reads back");
-        if (back.size() == 1 && back[0].steps.size() == 2) {
+        if (back.size() == 1 && back[0].steps.size() == 3) {
             const auto& a = back[0].steps[0];
             const auto& b = back[0].steps[1];
+            const auto& c = back[0].steps[2];
+            check(c.find == "thing_row" && !c.check && c.confirm.empty() && a.check && b.check,
+                  "check = false survives, and an unmarked step reads back checked");
             check(a.find == "thing_in_shop" && a.confirm == "buy_button" &&
                   a.click_dx == 12 && a.click_dy == 30 &&
                   std::fabs(a.score - 0.72f) < 0.001f &&
@@ -5147,6 +6281,28 @@ void test_routines() {
         std::remove(path.c_str());
     }
 
+    // The shipped file, as it is in the source tree: step 1 of each buy_
+    // routine -- picking the item, with the shop's Mua up either way -- says
+    // check = false and names nothing to check by, and no other step does.
+#ifdef GOBOT_SOURCE_DIR
+    if (sources_here()) {
+        const auto shipped = Routine::load(std::string(GOBOT_SOURCE_DIR) + "/configs/routines.ini");
+        int unchecked = 0;
+        std::string wrong;
+        for (const Routine& r : shipped)
+            for (std::size_t i = 0; i < r.steps.size(); ++i) {
+                const DialogDriver::Step& s = r.steps[i];
+                const bool shop_pick = r.name.rfind("buy_", 0) == 0 && i == 0;
+                if (!s.check) ++unchecked;
+                if (s.check == shop_pick || (!s.check && (!s.confirm.empty() || s.gone)))
+                    wrong += " " + r.name + "/" + std::to_string(i + 1);
+            }
+        check(unchecked == 3 && wrong.empty(),
+              "routines.ini: step 1 of each buy_ routine says check = false, with no confirm, and no other "
+              "step does" + (wrong.empty() ? std::string{} : " --" + wrong));
+    }
+#endif
+
     // The shipped table loads, and every picture it names exists.
     {
         const std::string path = exe_relative("configs/routines.ini");
@@ -5159,19 +6315,21 @@ void test_routines() {
         check(Routine::find(routines, "nothing_called_this") == nullptr,
               "and nothing that is not there");
 
-        // Every step can prove it worked. This is the rule the driver enforces
-        // at run time; checking it here means a bad table is caught by the test
+        // Every step can prove it worked, or says check = false and names
+        // nothing to check by. This is the rule the driver enforces at run
+        // time; checking it here means a bad table is caught by the test
         // suite rather than halfway through a shop visit.
         bool all_provable = true;
         std::string offender;
         for (const Routine& r : routines)
             for (const DialogDriver::Step& s : r.steps)
-                if (s.confirm.empty() && !s.gone) {
+                if (s.check ? (s.confirm.empty() && !s.gone) : (!s.confirm.empty() || s.gone)) {
                     all_provable = false;
                     offender = r.name + " / " + s.find;
                 }
         check(all_provable,
-              "every shipped step can tell whether its click landed" +
+              "every shipped step can tell whether its click landed, or says check = false and names "
+              "nothing to check by" +
                   (offender.empty() ? std::string{} : " -- " + offender + " cannot"));
 
         // And every picture they name is one the helper's assembly carries. A
@@ -5267,7 +6425,7 @@ void test_colour_templates() {
     }
 
     if (!TemplateMatcher::uses_opencv()) {
-        std::printf("  [skip] built without OpenCV, which cannot tell these apart\n");
+        skip("built without OpenCV, which cannot tell these apart\n");
         return;
     }
 
@@ -5464,7 +6622,111 @@ void test_dialog_driver() {
         check(r.attempts_used == 3, "after using its whole retry budget");
         check(r.trouble.find("after") != std::string::npos,
               "and says what it was waiting for -- got: " + r.trouble);
+        // Its click goes through click_on_game, which clicks only on the
+        // game: with no window there is none, and that is said.
+        check(r.trouble.find("was refused (no game window)") != std::string::npos,
+              "and that the click itself was refused, with no game window -- got: " + r.trouble);
     }
+
+    // ---- a confirmation already up before the click proves nothing ----
+    {
+        int served = 0;
+        DialogDriver driver(input, store, [&](Frame& f) {
+            ++served;
+            f = noise_frame(43);
+            paste(f, button, 60, 40);
+            paste(f, after, 200, 150);       // up before anything is clicked
+            return true;
+        });
+        DialogDriver::Step step;
+        step.find = "button";
+        step.confirm = "after";
+        step.wait_ms = 400;
+        step.confirm_ms = 400;
+        step.attempts = 3;
+
+        const auto r = driver.run(step);
+        check(!r.ok && r.attempts_used == 1 &&
+                  r.trouble.find("was already on screen before the click") != std::string::npos,
+              "a confirmation up before the first click: the step is refused -- got: " + r.trouble);
+        check(r.trouble.find("was refused") == std::string::npos && served == 2,
+              "with no click asked for: one look for the button, one for its confirmation");
+    }
+
+    // ---- a confirmation that comes up late is the earlier click landing ----
+    {
+        int served = 0;
+        std::string said;
+        DialogDriver driver(input, store, [&](Frame& f) {
+            f = noise_frame(47);
+            paste(f, button, 60, 40);
+            if (served++ >= 3) paste(f, after, 200, 150);
+            return true;
+        });
+        driver.on_step_report([&](const std::string& line) { said = line; });
+        DialogDriver::Step step;
+        step.find = "button";
+        step.confirm = "after";
+        step.wait_ms = 1000;
+        step.confirm_ms = 0;            // one look for the confirmation after each click
+        step.attempts = 3;
+
+        const auto r = driver.run(step);
+        check(r.ok && r.attempts_used == 2 && said.find("came up late") != std::string::npos && served == 5,
+              "a confirmation up before a retry came after the earlier click: done, not clicked again -- " + said);
+    }
+
+    // ---- check = false: nothing on screen can prove the click ----
+    {
+        DialogDriver driver(input, store, [&](Frame& f) {
+            f = noise_frame(53);
+            paste(f, button, 60, 40);
+            paste(f, after, 200, 150);
+            return true;
+        });
+        DialogDriver::Step both;
+        both.find = "button";
+        both.check = false;
+        both.confirm = "after";
+        const auto a = driver.run(both);
+        check(!a.ok && a.trouble.find("check = false") != std::string::npos,
+              "check = false with a confirmation named as well is refused -- got: " + a.trouble);
+
+        DialogDriver::Step blind;
+        blind.find = "button";
+        blind.check = false;
+        blind.wait_ms = 400;
+        blind.attempts = 2;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto b = driver.run(blind);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        check(!b.ok && b.attempts_used == 2 && b.trouble.find("whether the click landed") == std::string::npos &&
+                  b.trouble.find("was refused (no game window)") != std::string::npos && ms < 1000,
+              "check = false is not 'no way of telling'; a refused click is tried again, never taken as done, "
+              "and no confirmation is waited for -- got: " + b.trouble);
+    }
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+    } else {
+        // No click goes through in the tests, so the unchecked step's success
+        // is read off the source: said to be NOT CHECKED, and never waiting
+        // for a confirmation; and a checked one looks before its click.
+        const std::string run =
+            body_of(source_text("/src/dialog_driver.cpp"), "DialogDriver::Result DialogDriver::run(");
+        const std::size_t blind = run.find("if (!step.check) {");
+        const std::size_t said = run.find("NOT CHECKED: nothing on screen shows whether this click landed");
+        const std::size_t landed = run.find("const bool landed");
+        const std::size_t before = run.find("was already on screen before the click");
+        const std::size_t click = run.find("input_.click_on_game(");
+        check(blind != std::string::npos && said != std::string::npos && landed != std::string::npos &&
+                  before != std::string::npos && click != std::string::npos && blind < said && said < landed &&
+                  before < click,
+              "dialog_driver.cpp: a check = false step is said to be NOT CHECKED and never waits for a "
+              "confirmation; a checked one looks for its confirmation before its click");
+    }
+#endif
 
     // ---- confirmed by the button going away instead ----
     {
@@ -5515,18 +6777,22 @@ void test_dialog_driver() {
 
     // ---- a sequence stops where it breaks, and says where ----
     {
+        int served = 0;
         DialogDriver driver(input, store, [&](Frame& f) {
             f = noise_frame(23);
-            paste(f, after, 10, 10);     // step one's confirmation is always up
+            // Step one's button, for its find and its look before the click;
+            // then its confirmation, for good.
+            if (served++ < 2) paste(f, button, 10, 10);
+            else              paste(f, after, 10, 10);
             return true;
         });
         DialogDriver::Step ok_step;
-        ok_step.find = "after";
+        ok_step.find = "button";
         ok_step.confirm = "after";
         ok_step.wait_ms = 300; ok_step.confirm_ms = 300;
 
         DialogDriver::Step bad_step;
-        bad_step.find = "button";       // never on screen
+        bad_step.find = "button";       // gone for good once step one landed
         bad_step.confirm = "after";
         bad_step.wait_ms = 300; bad_step.attempts = 1;
 
@@ -5549,7 +6815,93 @@ void test_dialog_driver() {
         const auto r = driver.run(step);
         check(!r.ok && r.trouble == "cancelled", "cancelling stops it at once");
     }
+
+    // ---- cancelled from another thread, while a step waits ----
+    //
+    // gobot_cli's Ctrl+C watcher calls cancel() while a step waits: the wait
+    // ends at its next look, not when its 5 s are up, and a stop is not taken
+    // for an optional page being absent.
+    {
+        const auto cancelled_after_200ms = [](DialogDriver& d, const DialogDriver::Step& s, long long& took_ms) {
+            std::thread canceller([&d] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                d.cancel();
+            });
+            const auto t0 = std::chrono::steady_clock::now();
+            const DialogDriver::Result res = d.run(s);
+            took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                          .count();
+            canceller.join();
+            return res;
+        };
+        DialogDriver::Step step;
+        step.find = "button";
+        step.confirm = "after";
+        step.wait_ms = 5000;
+        step.confirm_ms = 5000;
+        long long ms = 0;
+        {
+            DialogDriver driver(input, store, [&](Frame& f) { f = noise_frame(31); return true; });
+            const auto r = cancelled_after_200ms(driver, step, ms);
+            check(!r.ok && r.trouble == "cancelled" && ms < 1500,
+                  "waiting up to 5 s for its page, cancelled from another thread: it ends then -- " +
+                      std::to_string(ms) + " ms");
+        }
+        {
+            DialogDriver driver(input, store, [&](Frame& f) { f = noise_frame(37); return true; });
+            DialogDriver::Step maybe = step;
+            maybe.optional = true;
+            const auto r = cancelled_after_200ms(driver, maybe, ms);
+            check(!r.ok && r.trouble == "cancelled" && ms < 1500,
+                  "an optional step cancelled while it waits is cancelled, not 'was not there, which is allowed' "
+                  "-- " + r.trouble);
+        }
+        {
+            // The page there at once and its confirmation never: cancelled
+            // while the click is waited on.
+            DialogDriver driver(input, store, [&](Frame& f) {
+                f = noise_frame(41);
+                paste(f, button, 60, 40);
+                return true;
+            });
+            const auto r = cancelled_after_200ms(driver, step, ms);
+            // At most one attempt: a loaded machine can let the cancel land
+            // before run() has made its first.
+            check(!r.ok && r.trouble == "cancelled" && r.attempts_used <= 1 && ms < 1500,
+                  "cancelled while it waits for the confirmation: it ends then, with no second attempt -- " +
+                      std::to_string(ms) + " ms");
+        }
+    }
+
+    // ---- where a step clicks: on the picture, whatever its offsets say ----
+    //
+    // From the picture's top-left, kept inside it: an offset past its right
+    // or bottom edge clicks at that edge, so a typo in routines.ini cannot
+    // send a click across the screen. A negative one is the middle that way.
+    {
+        const ScreenRect at{ 100, 80, 24, 18 };
+        const auto lands = [](const ScreenRect& on, int dx, int dy, int want_x, int want_y) {
+            DialogDriver::Step s;
+            s.click_dx = dx;
+            s.click_dy = dy;
+            int x = -1, y = -1;
+            DialogDriver::click_point(on, s, x, y);
+            return x == want_x && y == want_y;
+        };
+        check(lands(at, -1, -1, 112, 89), "no offsets: the picture's middle, 112,89");
+        check(lands(at, 12, 30, 112, 97), "an offset below its bottom edge clicks on that edge: 112,97");
+        check(lands(at, 23, 5, 123, 85) && lands(at, 24, 5, 123, 85) && lands(at, 500, 5, 123, 85),
+              "and one past its right edge on that edge: 23, 24 and 500 across all click at x 123");
+        check(lands(at, 0, 0, 100, 80), "0,0 is its top-left corner");
+        check(lands(at, -1, 5, 112, 85), "a negative offset is the middle that way alone: 112,85");
+        check(lands(ScreenRect{ 100, 80, 1, 18 }, 7, 5, 100, 85) && lands(ScreenRect{ 100, 80, 0, 18 }, 7, 5, 100, 85),
+              "a picture one pixel wide, or none, is clicked at its left edge");
+    }
 }
+
+// The cancel is atomic now, set from another thread while a step waits; a
+// driver is never copied.
+static_assert(!std::is_copy_constructible_v<DialogDriver>, "a DialogDriver is not copied");
 
 /// Finding the bars by the HUD's landmark instead of by colour.
 ///
@@ -5564,14 +6916,14 @@ void test_anchored_bars() {
 
     const char* dll = "C:\\Program Files\\TH_VGO_Bot_Helper\\TungHaVGOBot.dll";
     if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES) {
-        std::printf("  [skip] the landmark picture is not installed here\n");
+        skip("the landmark picture is not installed here\n");
         return;
     }
     TemplateStore store;
     const Frame* anchor = store.load_from_assembly(dll, {})
                         ? store.get("hpmp_indicator2") : nullptr;
     if (!anchor || !anchor->valid()) {
-        std::printf("  [skip] no landmark picture in that assembly\n");
+        skip("no landmark picture in that assembly\n");
         return;
     }
 
@@ -5956,7 +7308,7 @@ void test_auto_login() {
 #endif
         AutoLogin::Settings shipped;
         if (repo.empty() || !shipped.load(repo)) {
-            std::printf("  [skip] the source tree's configs/login.ini is not here\n");
+            skip("the source tree's configs/login.ini is not here\n");
         } else {
             const AutoLogin::Settings table;
             bool same = shipped.pages.size() == table.pages.size();
@@ -5997,7 +7349,7 @@ void test_auto_login() {
     {
         AutoLogin::Settings live;
         if (!live.load(exe_relative("configs/login.ini"))) {
-            std::printf("  [skip] there is no configs/login.ini beside this test\n");
+            skip("there is no configs/login.ini beside this test\n");
         } else {
             check(live.pages.size() == pages.size() && live.unidentified().empty(),
                   "the configs/login.ini here loads into the seven pages, each named");
@@ -6246,7 +7598,7 @@ void test_auto_login() {
         TemplateStore real;
         if (!AutoLogin::load_pictures(real, exe_relative("configs/templates.ini")) ||
             !real.get("login_page") || !real.get("start_game_page")) {
-            std::printf("  [skip] the login pictures are not installed here\n");
+            skip("the login pictures are not installed here\n");
         } else {
             const AutoLogin::Settings s;
             check(s.recognised(real) == s.pages.size(),
@@ -6259,6 +7611,86 @@ void test_auto_login() {
             paste(ready, *real.get("start_game_page"), 402, 547);
             check(AutoLogin::look_at_publisher(ready, real, s) == AutoLogin::Publisher::Ready,
                   "and the shipped Choi game as signed in");
+        }
+    }
+
+    // The channel list found by its own panel, on games of every size, and
+    // its rows clicked on it -- not at offsets from the title measured on one
+    // size of game.
+    {
+        const std::string ini = exe_relative("configs/templates.ini");
+        Frame dialog, title, goc, caption, choose;
+        if (!TemplateStore::load_one(AutoLogin::kChannelPanel, ini, dialog) ||
+            !TemplateStore::load_one("channel_first_index", ini, title) ||
+            !TemplateStore::load_one("login/1/channel", ini, goc) ||
+            !TemplateStore::load_one("login/1/ImgList_Caption.spr/0", ini, caption) ||
+            !TemplateStore::load_one("select_char_indicator", ini, choose)) {
+            skip("the channel list's pictures are not installed here\n");
+        } else {
+            using A = AutoLogin;
+            check(dialog.width == 360 && dialog.height == 320, "the channel list's panel is the dialog, 360x320");
+            const struct { int w, h, px, py, tx, ty; } games[] = {
+                { 1024, 768, 376, 202, 426, 126 },      // the title where it was measured
+                { 1280, 720, 460, 190, 530, 40 },       // the title nowhere near 140 above the rows
+                { 1366, 768, 503, 230, 553, 100 },
+                { 1600, 900, 620, 280, 670, 60 },
+                { 800, 600, 220, 140, 270, 30 },
+            };
+            for (const auto& g : games) {
+                Frame screen = backdrop(g.w, g.h);
+                paste(screen, title, g.tx, g.ty);
+                paste(screen, dialog, g.px, g.py);
+                const A::PanelHit hit = A::find_channel_panel(screen, dialog);
+                const std::string size = std::to_string(g.w) + "x" + std::to_string(g.h);
+                check(hit.found && hit.at.x == g.px && hit.at.y == g.py && hit.score > 0.95f,
+                      "on a " + size + " game the list's panel is found where it is, whatever the title's place (" +
+                          std::to_string(hit.at.x) + "," + std::to_string(hit.at.y) + ")");
+                bool on_rows = true;
+                for (int k = 0; k < A::kPanelRows; ++k) {
+                    int x = 0, y = 0;
+                    A::channel_row_point(hit.at, k, x, y);
+                    // On the "Kênh N" label, inside its row's frame.
+                    on_rows = on_rows && x >= g.px + 87 && x <= g.px + 122 && y > g.py + 51 + 31 * k &&
+                              y < g.py + 77 + 31 * k;
+                }
+                check(on_rows, "and every one of its eight rows is clicked on its own label, on " + size);
+            }
+            int x = 0, y = 0;
+            A::channel_row_point(ScreenRect{ 100, 100, 360, 320 }, 12, x, y);
+            check(y == 100 + A::kPanelRowY + A::kPanelRowStep * 7, "a ninth row asked for is the eighth");
+
+            // Lit: the chosen row's frame drawn bright, the others as the
+            // dialog draws them.
+            Frame lit = backdrop(1280, 720);
+            paste(lit, dialog, 460, 190);
+            for (int px = 460 + 55; px <= 460 + 305; ++px) put_px(lit, px, 190 + A::kPanelLineY + 31 * 3, 222, 200, 138);
+            const A::PanelHit on_lit = A::find_channel_panel(lit, dialog);
+            bool only_four = on_lit.found;
+            for (int k = 0; k < A::kPanelRows; ++k)
+                only_four = only_four && A::channel_row_lit(lit, on_lit.at, k) == (k == 3);
+            check(only_four, "the chosen row is told by its lit frame, and no other row is taken for it");
+
+            // The client's own list, as GoC captured it -- its first row
+            // chosen -- inside the dialog's frame at 25,10.
+            Frame live = backdrop(1280, 720);
+            paste(live, goc, 300, 200);
+            const A::PanelHit on_live = A::find_channel_panel(live, dialog);
+            check(on_live.found && std::abs(on_live.at.x - 275) <= 1 && std::abs(on_live.at.y - 190) <= 1 &&
+                      on_live.score >= A::kPanelScore,
+                  "the client's own list is found by the panel (score " + std::to_string(on_live.score) + ")");
+            check(on_live.found && A::channel_row_lit(live, on_live.at, 0) && !A::channel_row_lit(live, on_live.at, 1) &&
+                      !A::channel_row_lit(live, on_live.at, 7),
+                  "and its chosen first row is the lit one");
+
+            // Nothing else is taken for it.
+            Frame others = backdrop(1280, 720);
+            paste(others, title, 500, 40);
+            paste(others, caption, 100, 300);
+            paste(others, choose, 900, 500);
+            check(!A::find_channel_panel(others, dialog).found && !A::find_channel_panel(backdrop(1024, 768), dialog).found,
+                  "a title, another screen's caption or the character screen's button is not the list");
+            check(!A::find_channel_panel(live, Frame{}).found && !A::find_channel_panel(Frame{}, dialog).found,
+                  "and with no picture of either, nothing is found");
         }
     }
 
@@ -6278,14 +7710,15 @@ void test_auto_login() {
         TemplateStore every;
         for (const auto& p : shipped.pages) every.put(p.picture, blocks(3, 16, 16));
         every.put(shipped.signin_picture, blocks(4, 16, 16));
+        every.put(AutoLogin::kChannelPanel, blocks(7, 16, 16));
         every.put("inventory", blocks(5, 16, 16));
         every.put("hpmp_indicator2", blocks(6, 16, 16));
         const TemplateStore kept = AutoLogin::pictures_for(shipped, every);
-        // Six pages' pictures -- both connect steps are one button -- and the
-        // sign-in form's.
-        check(kept.size() == 7 && shipped.recognised(kept) == shipped.pages.size() &&
-                  kept.get(shipped.signin_picture) != nullptr,
-              "a keeper keeps the crossing's pictures and the sign-in form's");
+        // Six pages' pictures -- both connect steps are one button -- the
+        // sign-in form's, and the channel list's panel.
+        check(kept.size() == 8 && shipped.recognised(kept) == shipped.pages.size() &&
+                  kept.get(shipped.signin_picture) != nullptr && kept.get(AutoLogin::kChannelPanel) != nullptr,
+              "a keeper keeps the crossing's pictures, the sign-in form's and the channel list's panel");
         check(!kept.has("inventory") && !kept.has("hpmp_indicator2"),
               "and none of the rest of the set");
     }
@@ -6326,7 +7759,7 @@ void test_auto_login() {
         const HANDLE h = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                      FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            std::printf("  [skip] could not make a file with a Vietnamese name here\n");
+            skip("could not make a file with a Vietnamese name here\n");
         } else {
             CloseHandle(h);
             s.launcher_path = named;
@@ -6527,7 +7960,7 @@ void test_auto_login() {
         const HANDLE lock = CreateFileA(held.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
         if (lock == INVALID_HANDLE_VALUE) {
-            std::printf("  [skip] could not hold a file open here\n");
+            skip("could not hold a file open here\n");
         } else {
             AutoLogin::Settings s;
             const bool read = s.load(held);
@@ -6560,9 +7993,11 @@ void test_auto_login() {
     {
         const AutoLogin::Settings s;
         const auto names = AutoLogin::picture_names(s);
-        check(names.size() == 7 && std::is_sorted(names.begin(), names.end()) &&
-                  std::find(names.begin(), names.end(), "login_page") != names.end(),
-              "the shipped crossing needs seven pictures, the sign-in form's among them");
+        check(names.size() == 8 && std::is_sorted(names.begin(), names.end()) &&
+                  std::find(names.begin(), names.end(), "login_page") != names.end() &&
+                  std::find(names.begin(), names.end(), AutoLogin::kChannelPanel) != names.end(),
+              "the shipped crossing needs eight pictures, the sign-in form's and the channel list's panel among "
+              "them");
         AutoLogin::Settings picked = s;
         picked.channel_index = 5;
         picked.character_index = 2;
@@ -6573,7 +8008,7 @@ void test_auto_login() {
         check(AutoLogin::picture_names(renamed) != names, "a page given another picture does");
         AutoLogin::Settings off = s;
         off.signin_picture.clear();
-        check(AutoLogin::picture_names(off).size() == 6,
+        check(AutoLogin::picture_names(off).size() == 7,
               "and with the sign-in check off there is one fewer");
     }
 
@@ -6660,11 +8095,11 @@ void test_auto_login() {
         if (target) ShowWindow(target, SW_SHOWNOACTIVATE);
         const POINT middle{ x0 + 120, y0 + 80 };
         if (!clear) {
-            std::printf("  [skip] the game is up and no corner of the screen is clear of it: the "
-                        "click tests' windows would cover it\n");
+            skip("the game is up and no corner of the screen is clear of it: the "
+                 "click tests' windows would cover it\n");
         } else if (target == nullptr || WindowFromPoint(middle) != target) {
             // Something else kept on top there, or no desktop to show on.
-            std::printf("  [skip] a test window could not be put on top here\n");
+            skip("a test window could not be put on top here\n");
         } else {
             std::string in_way = "x";
             check(AutoLogin::lands_on(target, 120, 80, &in_way) && in_way.empty(),
@@ -6753,8 +8188,8 @@ void test_auto_login() {
             // The quarter of it left on the screen is where the screen
             // begins, which has to be clear of the game as well.
             if (over_the_game(RECT{ left, y0, left + 140, y0 + 160 }, game_windows_on_screen())) {
-                std::printf("  [skip] the game is at the screen's left edge, where the test "
-                            "window would go half off the screen\n");
+                skip("the game is at the screen's left edge, where the test "
+                     "window would go half off the screen\n");
             } else {
                 SetWindowPos(target, nullptr, left - 100, y0, 0, 0,
                              SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -6779,7 +8214,7 @@ void test_auto_login() {
                           "out there, is in nobody's way");
                     if (past) DestroyWindow(past);
                 } else {
-                    std::printf("  [skip] the test window could not be put half off the screen\n");
+                    skip("the test window could not be put half off the screen\n");
                 }
             }
 
@@ -6811,10 +8246,10 @@ void test_auto_login() {
                                  title.c_str(), x0, y0, 300, 200, nullptr)
                           : nullptr;
         if (!clear) {
-            std::printf("  [skip] the game is up and no corner of the screen is clear of it: the "
-                        "launcher's stand-in, shown again, would cover it\n");
+            skip("the game is up and no corner of the screen is clear of it: the "
+                 "launcher's stand-in, shown again, would cover it\n");
         } else if (down == nullptr) {
-            std::printf("  [skip] could not make a window to minimise here\n");
+            skip("could not make a window to minimise here\n");
         } else {
             ShowWindow(down, SW_SHOWMINNOACTIVE);
             check(IsIconic(down) && AutoLogin::minimised_window(s, me) == down,
@@ -6935,10 +8370,10 @@ void test_auto_login() {
         };
 
         if (!clear) {
-            std::printf("  [skip] the game is up and no corner of the screen is clear of it: the "
-                        "pretend crossings' game window would cover it\n");
+            skip("the game is up and no corner of the screen is clear of it: the "
+                 "pretend crossings' game window would cover it\n");
         } else if (game == nullptr || vtczone == nullptr) {
-            std::printf("  [skip] could not make the pretend game's windows here\n");
+            skip("could not make the pretend game's windows here\n");
         } else {
             {
                 Desk d;
@@ -7018,7 +8453,7 @@ void test_auto_login() {
                       "not even brought forward for one");
             }
             if (!on_top) {
-                std::printf("  [skip] the pretend game could not be put on top here\n");
+                skip("the pretend game could not be put on top here\n");
             } else {
                 // A stop asked for while the window is being brought forward
                 // for the click: the last look before the click sees it.
@@ -7058,6 +8493,26 @@ void test_auto_login() {
                 check(flow.why() == Why::Connect, "the attempt itself fails as it always did");
             }
             {
+                // An end-client that may not end one -- the keeper's restarts
+                // used up -- cancels the crossing instead: it stops there, with
+                // no second attempt on a game nobody ended.
+                Desk d;
+                d.game_shows = nowhere;
+                AutoLogin::Settings s = quick;
+                s.attempts = 2;
+                AutoLogin flow;
+                flow.set_settings(s);
+                flow.set_templates(&made_up);
+                flow.set_hands(hands_for(d));
+                int asked = 0;
+                flow.set_end_client([&] { ++asked; flow.cancel(); return false; }, 0);
+                const bool in = flow.run();
+                check(!in && asked == 1 && flow.attempts_made() == 1 && flow.why() == Why::Cancelled &&
+                          d.clicks == 0 && d.starts == 0,
+                      "an end-client refused at the restart cap cancels the crossing: no second attempt, "
+                      "nothing clicked or started");
+            }
+            {
                 Desk d;
                 d.game_shows = nowhere;
                 AutoLogin flow;
@@ -7089,15 +8544,16 @@ void test_auto_login() {
 
             // A real frame of the world with the bag open, on which the HP and
             // MP bars alone were missed: the MP bar was taken from the panel
-            // beside it. The HUD's "Level" plate is where it always is.
+            // beside it. The HUD's "Level" plate is where it always is. Read
+            // only as it was saved: GoBot prunes trash_debug as it plays.
             Frame real, landmark;
             const bool have_real =
-                load_png(exe_relative("trash_debug\\20261009_003950_0_no_dialog.png"), real) &&
+                load_live_frame(exe_relative("trash_debug\\20261009_003950_0_no_dialog.png"), real) &&
                 real.valid() &&
                 TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"),
                                         landmark);
             if (!have_real) {
-                std::printf("  [skip] no saved frame of the world, or no HUD landmark, here\n");
+                skip("no saved frame of the world these checks know, or no HUD landmark, here\n");
             } else {
                 check(AutoLogin::in_world(real, &landmark),
                       std::string("a real frame of the world with the bag open is in the world by "
@@ -7200,6 +8656,174 @@ void test_auto_login() {
                       "a game that shows its HUD on the third of three looks is in the world, "
                       "and not ended");
             }
+
+            // The channel list's own step, on a game big enough for its
+            // panel: the game's real empty channel dialog, and the real
+            // Ket Noi bar, on a window of this test's. The small pretend game
+            // is put away meanwhile, not to lie over it.
+            Frame dialog, bar;
+            const std::string names = exe_relative("configs/templates.ini");
+            POINT corner{};
+            const bool room = clear_of_the_game(480, 380, 60, corner);
+            HWND wide = room ? CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "",
+                                               WS_POPUP, corner.x, corner.y, 480, 380, nullptr, nullptr, self, nullptr)
+                             : nullptr;
+            ShowWindow(game, SW_HIDE);
+            if (wide) ShowWindow(wide, SW_SHOWNOACTIVATE);
+            const bool wide_top = wide != nullptr &&
+                                  WindowFromPoint(POINT{ corner.x + 240, corner.y + 190 }) == wide &&
+                                  WindowFromPoint(POINT{ corner.x + 20, corner.y + 20 }) == wide &&
+                                  WindowFromPoint(POINT{ corner.x + 460, corner.y + 360 }) == wide;
+            if (!wide_top || !TemplateStore::load_one(AutoLogin::kChannelPanel, names, dialog) ||
+                !TemplateStore::load_one("game_ready_indicator", names, bar)) {
+                skip("no room for the channel list's pretend game, or its pictures are not installed\n");
+            } else {
+                // The panel at 110,50; Ket Noi at 10,10; the title, when shown,
+                // at 10,300 -- nowhere near 140 above the rows.
+                const int px = 110, py = 50;
+                TemplateStore with_panel = made_up;
+                with_panel.put(AutoLogin::kChannelPanel, dialog);
+                with_panel.put("game_ready_indicator", bar);
+                const auto list = [&](bool title, bool with_bar, int lit) {
+                    Frame f = backdrop(480, 380);
+                    if (with_bar) paste(f, bar, 10, 10);
+                    if (title) paste(f, *made_up.get("channel_first_index"), 10, 300);
+                    paste(f, dialog, px, py);
+                    if (lit >= 0)
+                        for (int x = px + 55; x <= px + 305; ++x)
+                            put_px(f, x, py + AutoLogin::kPanelLineY + AutoLogin::kPanelRowStep * lit, 222, 200, 138);
+                    return f;
+                };
+                Frame at_bar = backdrop(480, 380);
+                paste(at_bar, bar, 10, 10);
+                Frame choose = backdrop(480, 380);
+                paste(choose, *made_up.get("select_char_indicator"), 20, 20);
+                AutoLogin::Settings s = quick;
+                s.channel_index = 2;
+                s.heal_on_arrival = false;
+                for (auto& p : s.pages)
+                    if (p.step == AutoLogin::Step::Character) {
+                        p.pick = AutoLogin::Pick::One;
+                        p.click_dx = p.click_dy = -1;
+                    }
+                int row_x = 0, row_y = 0;
+                AutoLogin::channel_row_point(ScreenRect{ px, py, 360, 320 }, 2, row_x, row_y);
+
+                struct Wide {
+                    Frame shows;
+                    std::vector<POINT> clicks;
+                    std::function<void(int, int)> on_click;
+                };
+                const auto hands_on = [&, wide](Wide& d) {
+                    AutoLogin::Hands h;
+                    h.find = [wide](On w) -> void* { return w == On::Game ? wide : nullptr; };
+                    h.grab = [&d](On w, void*, Frame& out) {
+                        if (w != On::Game) return false;
+                        out = d.shows;
+                        return out.valid();
+                    };
+                    h.focus = [](void*) { return true; };
+                    h.click = [&d](int x, int y) {
+                        d.clicks.push_back(POINT{ x, y });
+                        if (d.on_click) d.on_click(x, y);
+                        return true;
+                    };
+                    h.running = [](const std::string&) { return false; };
+                    h.start = [](const std::string&) { return false; };
+                    h.minimise = [](void*) {};
+                    return h;
+                };
+                const auto on_row = [&](const POINT& p) { return p.x == row_x && p.y == row_y; };
+                const auto on_bar = [&](int x, int y) { return x >= 10 && x < 10 + bar.width && y >= 10 && y < 10 + bar.height; };
+                const auto choose_at = [&](int x, int y) {
+                    return x >= 20 && x < 20 + 48 && y >= 20 && y < 20 + 32;
+                };
+
+                {
+                    // The title shown, found first, and the row clicked on the
+                    // panel all the same; the click closes the list.
+                    Wide d;
+                    d.shows = list(true, false, -1);
+                    int stage = 0;          // the list, Ket Noi, the characters, the world
+                    d.on_click = [&](int x, int y) {
+                        if (stage == 0 && on_row(POINT{ x, y })) { stage = 1; d.shows = at_bar; }
+                        else if (stage == 1 && on_bar(x, y)) { stage = 2; d.shows = choose; }
+                        else if (stage == 2 && choose_at(x, y)) { stage = 3; d.shows = hud; }
+                    };
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&with_panel);
+                    flow.set_hands(hands_on(d));
+                    const bool in = flow.run();
+                    check(in && flow.attempts_made() == 1 && d.clicks.size() == 3 && on_row(d.clicks[0]),
+                          "Kênh 3 is clicked on the list's own panel, not at the offsets from its title, and the "
+                          "crossing goes on once the list is gone (" + std::to_string(d.clicks.size()) + " clicks)");
+                }
+                {
+                    // Found by the panel alone; the click lights the row and
+                    // the list stays, Ket Noi beside it: then Ket Noi, on
+                    // its own words -- not the seam with Ket Thuc.
+                    Wide d;
+                    d.shows = list(false, true, -1);
+                    int stage = 0;          // the list, the list with the row lit, the characters, the world
+                    d.on_click = [&](int x, int y) {
+                        if (stage <= 1 && on_row(POINT{ x, y })) { stage = 1; d.shows = list(false, true, 2); }
+                        else if (stage == 1 && on_bar(x, y)) { stage = 2; d.shows = choose; }
+                        else if (stage == 2 && choose_at(x, y)) { stage = 3; d.shows = hud; }
+                    };
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&with_panel);
+                    flow.set_hands(hands_on(d));
+                    const bool in = flow.run();
+                    check(in && d.clicks.size() == 3 && on_row(d.clicks[0]) && d.clicks[1].x == 10 + 66 &&
+                              d.clicks[1].y == 10 + 21,
+                          "a row that lights and a list that stays: clicked once, then Ket Noi on its own words");
+                }
+                {
+                    // Never taken: three clicks on the row, and Ket Noi, there
+                    // beside the list all along, never pressed -- it would join
+                    // the channel the game had chosen. The attempt fails as one.
+                    Wide d;
+                    d.shows = list(false, true, 0);
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&with_panel);
+                    flow.set_hands(hands_on(d));
+                    int ended = 0;
+                    flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                    const bool in = flow.run();
+                    bool rows_only = d.clicks.size() == 3;
+                    for (const POINT& p : d.clicks) rows_only = rows_only && on_row(p);
+                    check(!in && rows_only && flow.why() == AutoLogin::Why::ChannelNotTaken && ended == 0,
+                          "a row never taken: clicked three times, Ket Noi never pressed, the attempt failed for "
+                          "it, and the game left on the list (" + std::to_string(d.clicks.size()) + " clicks)");
+                    check(flow.advice().find("không vào kênh khác") != std::string::npos,
+                          "and the player is told the game did not take the channel, and no other was joined");
+                }
+                {
+                    // The Ket Noi bar on its own, with the file's "middle":
+                    // the middle of Ket Noi, not of the bar.
+                    Wide d;
+                    d.shows = at_bar;
+                    int stage = 1;          // Ket Noi, the characters, the world
+                    d.on_click = [&](int x, int y) {
+                        if (stage == 1 && on_bar(x, y)) { stage = 2; d.shows = choose; }
+                        else if (stage == 2 && choose_at(x, y)) { stage = 3; d.shows = hud; }
+                    };
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&with_panel);
+                    flow.set_hands(hands_on(d));
+                    const bool in = flow.run();
+                    check(in && !d.clicks.empty() && d.clicks[0].x == 10 + 66 && d.clicks[0].y == 10 + 21 &&
+                              bar.width == 247 && bar.height == 42,
+                          "Ket Noi is clicked on its own words, 66,21 into the 247x42 bar -- never at its "
+                          "middle, the seam with Ket Thuc");
+                }
+            }
+            if (wide) DestroyWindow(wide);
+            ShowWindow(game, SW_SHOWNOACTIVATE);
         }
         if (vtczone) DestroyWindow(vtczone);
         if (game) DestroyWindow(game);
@@ -7273,8 +8897,10 @@ void test_party_invite() {
               "accept and decline are not the same point");
     }
 
-    // A name read off a screen is matched against the lists loosely, because
-    // an exact match is a match that never happens.
+    // A name read off a screen is matched against the blacklist loosely,
+    // because an exact match is a match that never happens -- and a false hit
+    // there only turns somebody away. The lists that let somebody in are
+    // tighter (test_party).
     {
         Party::Settings rules;
         rules.use_blacklist = true;
@@ -7285,6 +8911,250 @@ void test_party_invite() {
               "and somebody else is not");
     }
 }
+
+/// What an invitation is answered with, by the GUI's party worker's rules as
+/// gobot_cli --invites now takes them too, and the second look before the
+/// click: the screen a moment later is not the one the answer was decided on.
+void test_invite_decision() {
+    section("Party invitations: what is answered, and only on a second look that shows the same one");
+
+    using Answer = PartyInvite::Answer;
+    PartyInvite::Seen seen;
+    seen.up = true;
+    seen.at = ScreenRect{ 300, 600, 85, 21 };
+    const auto verdict_for = [&seen](const std::string& who, bool bin, const Party::Settings& rules,
+                                     std::string& said) {
+        PartyInvite::Seen s = seen;
+        s.who = who;
+        const PartyInvite::Verdict v = PartyInvite::decide(s, bin, rules);
+        said = v.why;
+        return v.answer;
+    };
+    std::string why;
+
+    // ---- the decision ----
+    {
+        Party::Settings only;
+        only.accept_all = false;
+        only.accept_only = { "Friend" };
+        check(verdict_for("Stranger", false, only, why) == Answer::Decline &&
+                  verdict_for("Friend", false, only, why) == Answer::Accept,
+              "accepting only from Friend: a stranger is declined, Friend accepted");
+        Party::Settings named = only;
+        named.accept_only = { "Anh", "ExampleWin" };
+        check(verdict_for("Anh1", false, named, why) == Answer::Decline &&
+                  verdict_for("Exampleyin", false, named, why) == Answer::Accept,
+              "a name a letter longer than a short one on the list is declined, the live misread of a long one "
+              "accepted");
+        Party::Settings nobody = only;
+        nobody.accept_only.clear();
+        check(verdict_for("Anyone", false, nobody, why) == Answer::Decline,
+              "and accepting only from a list with nobody on it, declined");
+
+        const Party::Settings anyone;       // accept_all, as it ships
+        const Answer no_name = verdict_for("", false, anyone, why);
+        check(no_name == Answer::LeaveAlone && why == "its line does not read as an invitation's",
+              "accepting from anyone, a dialog whose line names nobody is left alone -- " + why);
+        const Answer bins = verdict_for("Someone", true, anyone, why);
+        check(bins == Answer::LeaveAlone && why == "it is the trash bin's own dialog",
+              "and so is the trash bin's, whose buttons are the invitation's -- " + why);
+        check(verdict_for("Someone", false, anyone, why) == Answer::Accept,
+              "while Someone's invitation is accepted");
+
+        Party::Settings banned = anyone;
+        banned.use_blacklist = true;
+        banned.blacklist = { "ExampleWin" };
+        check(verdict_for("Exampleyin", false, banned, why) == Answer::Decline,
+              "a name on the blacklist, as the reader misreads it, is declined with everyone else accepted");
+        Party::Settings friend_banned = only;
+        friend_banned.use_blacklist = true;
+        friend_banned.blacklist = { "Friend" };
+        check(verdict_for("Friend", false, friend_banned, why) == Answer::Decline,
+              "and the blacklist wins over the accept-only list");
+        Party::Settings empty_list = anyone;
+        empty_list.use_blacklist = true;
+        check(verdict_for("Anyone", false, empty_list, why) == Answer::Accept,
+              "a blacklist ticked with nobody on it turns nobody away");
+
+        PartyInvite::Seen down = seen;
+        down.up = false;
+        down.who = "Friend";
+        check(PartyInvite::decide(down, false, only).answer == Answer::LeaveAlone,
+              "and with no invitation up there is nothing to answer");
+    }
+
+    // ---- the same invitation on the second look ----
+    {
+        PartyInvite::Seen first = seen;
+        first.who = "Someone";
+        PartyInvite::Seen again = first;
+        check(PartyInvite::same_invitation(first, again, false), "the same dialog looked at again: the same invitation");
+        again.who = "someone";
+        check(PartyInvite::same_invitation(first, again, false), "the name read in another case is the same player's");
+        again.who = "Other";
+        check(!PartyInvite::same_invitation(first, again, false),
+              "another name in the same place is another player's invitation");
+        again = first;
+        again.at.x += 3;
+        again.at.y -= 3;
+        const bool close_by = PartyInvite::same_invitation(first, again, false);
+        again = first;
+        again.at.x += 4;
+        const bool across = PartyInvite::same_invitation(first, again, false);
+        again = first;
+        again.at.y += 4;
+        const bool below = PartyInvite::same_invitation(first, again, false);
+        check(close_by && !across && !below, "3 px off is where it was; 4 px across or down is somewhere else");
+        again = first;
+        check(!PartyInvite::same_invitation(first, again, true), "the bin's dialog on the second look is not it");
+        PartyInvite::Seen nameless = first;
+        nameless.who.clear();
+        check(!PartyInvite::same_invitation(first, nameless, false) &&
+                  !PartyInvite::same_invitation(nameless, first, false),
+              "a name not read on either look is no player to answer");
+        PartyInvite::Seen gone = first;
+        gone.up = false;
+        check(!PartyInvite::same_invitation(first, gone, false) && !PartyInvite::same_invitation(gone, first, false),
+              "nor is a dialog not up on either look");
+    }
+
+    // ---- answered: the pause, the second look, the click ----
+    //
+    // With no game window, so that nothing could be clicked whatever went
+    // wrong, and no click is: not even refused.
+    {
+        InputManager no_window;
+        PartyInvite watcher;
+        PartyInvite::Settings layout;
+        layout.settle_ms = 0;
+        watcher.set_settings(layout);
+        const TemplateStore none;
+        int grabs = 0;
+        const std::function<bool(Frame&)> blind = [&grabs](Frame&) {
+            ++grabs;
+            return false;
+        };
+        PartyInvite::Seen asked = seen;
+        asked.who = "Friend";
+        const std::uint64_t refused_before = real_input_refusals();
+
+        why.clear();
+        const bool after_stop = watcher.answer(no_window, blind, none, nullptr, asked, true, [] { return true; }, &why);
+        check(!after_stop && why == "stopped before the click" && grabs == 0,
+              "a stop already asked for: no second look and no click -- " + why);
+        why.clear();
+        const bool fontless = watcher.answer(no_window, blind, none, nullptr, asked, true, {}, &why);
+        check(!fontless && why == "there is no bitmap font to read the name again with" && grabs == 0,
+              "no font to read the name again with: no second look and no click -- " + why);
+
+        layout.settle_ms = 2000;
+        watcher.set_settings(layout);
+        const auto t0 = std::chrono::steady_clock::now();
+        why.clear();
+        const bool declined = watcher.answer(no_window, blind, none, nullptr, asked, false, {}, &why);
+        const auto t1 = std::chrono::steady_clock::now();
+        std::string why_stopped;
+        const bool accepted = watcher.answer(
+            no_window, blind, none, nullptr, asked, true,
+            [t1] { return std::chrono::steady_clock::now() - t1 >= std::chrono::milliseconds(100); }, &why_stopped);
+        const auto t2 = std::chrono::steady_clock::now();
+        const auto decline_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        const auto accept_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+        check(!declined && decline_ms < 1000,
+              "with a 2 s settle, declining does not wait: only accepting pauses -- " + std::to_string(decline_ms) +
+                  " ms");
+        check(!accepted && why_stopped == "stopped before the click" && accept_ms < 1000 && grabs == 0,
+              "and a stop 0.1 s into that pause ends it then, with no look and no click -- " +
+                  std::to_string(accept_ms) + " ms");
+
+        // Through to the click, which needs the game's font for the second
+        // look: an invitation drawn with it, under a footer of the test's own.
+        GlyphFont font;
+        Frame line;
+        if (!font.load(GlyphFont::default_dir()) || !font.render_line("cua Someone", line)) {
+            skip("no glyph set installed -- the second look and the click are not reached here\n");
+        } else {
+            Frame footer = make_frame(24, 18);
+            for (int y = 0; y < footer.height; ++y)
+                for (int x = 0; x < footer.width; ++x) {
+                    const bool edge = x < 3 || y < 3 || x >= 21 || y >= 15;
+                    const bool blob = x < 11 && y < 9;
+                    const auto v = static_cast<std::uint8_t>(edge ? 20 : (blob ? 55 : 225));
+                    put_px(footer, x, y, v, v, v);
+                }
+            TemplateStore pictures;
+            pictures.put("test/invite_footer", footer);
+            PartyInvite::Settings drawn;
+            drawn.picture = "test/invite_footer";
+            drawn.prefix = "cua";
+            drawn.settle_ms = 0;
+            drawn.accept_dx = 5;
+            drawn.accept_dy = 9;
+            drawn.decline_dx = 18;
+            drawn.decline_dy = 9;
+            drawn.name_dx = 0;
+            drawn.name_dy = -(line.height + 6);
+            drawn.name_w = line.width;
+            drawn.name_h = line.height;
+            PartyInvite reader;
+            reader.set_settings(drawn);
+            const auto shot_at = [&](int fx, int fy) {
+                Frame f = make_frame(400, 200);
+                for (int y = 0; y < f.height; ++y)
+                    for (int x = 0; x < f.width; ++x) put_px(f, x, y, 0, 0, 0);
+                const auto paste = [&f](const Frame& what, int px, int py) {
+                    for (int y = 0; y < what.height; ++y)
+                        for (int x = 0; x < what.width; ++x) {
+                            std::uint8_t cr, cg, cb;
+                            what.get(x, y, cr, cg, cb);
+                            put_px(f, px + x, py + y, cr, cg, cb);
+                        }
+                };
+                paste(line, fx, fy + drawn.name_dy);
+                paste(footer, fx, fy);
+                return f;
+            };
+            const Frame shot = shot_at(150, 140);
+            const PartyInvite::Seen up = reader.look(shot, pictures, &font);
+            check(up.up && !up.who.empty(), "an invitation drawn with the game's font is found, its name read -- '" +
+                                                up.who + "'");
+            if (up.up && !up.who.empty()) {
+                int looks = 0;
+                const std::function<bool(Frame&)> unchanged = [&](Frame& f) {
+                    ++looks;
+                    f = shot;
+                    return true;
+                };
+                std::string why_yes, why_no;
+                const bool yes = reader.answer(no_window, unchanged, pictures, &font, up, true, {}, &why_yes);
+                const bool no = reader.answer(no_window, unchanged, pictures, &font, up, false, {}, &why_no);
+                check(!yes && !no && looks == 2 && why_yes == "the click was not made: no game window" &&
+                          why_no == why_yes,
+                      "the same invitation on the second look: accepting and declining each go to click_on_game, "
+                      "which makes no click with no game window -- " + why_yes);
+                const Frame moved = shot_at(160, 140);
+                const std::function<bool(Frame&)> elsewhere = [&moved](Frame& f) {
+                    f = moved;
+                    return true;
+                };
+                std::string why_moved, why_blind;
+                const bool moved_answered = reader.answer(no_window, elsewhere, pictures, &font, up, true, {}, &why_moved);
+                check(!moved_answered && why_moved == "the dialog changed, moved or went before the click",
+                      "moved 10 px before the click: not answered -- " + why_moved);
+                const bool blind_answered = reader.answer(no_window, blind, pictures, &font, up, true, {}, &why_blind);
+                check(!blind_answered && why_blind == "no new look at the game",
+                      "and no second look at all: not answered -- " + why_blind);
+            }
+        }
+        check(real_input_refusals() == refused_before, "none of it reached for the real desktop");
+    }
+}
+
+/// A turn of the reviver with no hands of its own, aimed at `window`, on the
+/// reviver's tests' pretend death -- defined with them, below. What the turn
+/// came to, the tries it counted and what it said; false when its pictures
+/// are not here. For test_no_real_input, which counts what the switch refuses.
+bool revive_with_no_hands(HWND window, Reviver::Turn& turn, int& tries, std::string& said);
 
 /// The "no real input" switch, which main() turns on before the first test.
 ///
@@ -7344,6 +9214,11 @@ void test_no_real_input() {
         check(refusals_in([&] { typed = keys.type_key(kNobodysKey, true, 1); }) == 1 && !typed &&
                   refusals_in([&] { unicode = keys.type_unit(L'x'); }) == 1 && !unicode,
               "and typing one, with Shift or as Unicode");
+        // A key-up too. One that is owed now goes out whatever is in front,
+        // past the focus gate, so the switch is asked before that rule is.
+        bool upped = true;
+        check(refusals_in([&] { upped = keys.key_up(kNobodysKey); }) == 1 && !upped,
+              "so is letting go of a key, and said once");
         check(hidden != nullptr && !keys.is_held(kNobodysKey) &&
                   (GetAsyncKeyState(static_cast<int>(kNobodysKey)) & 0x8000) == 0 &&
                   reached_it() == 0,
@@ -7359,7 +9234,7 @@ void test_no_real_input() {
 
     // ---- a click, and the pointer ----
     if (gone == nullptr || IsWindow(gone)) {
-        std::printf("  [skip] could not make a window and let it go here\n");
+        skip("could not make a window and let it go here\n");
     } else {
         // Where the pointer is, before and after: read, never set.
         POINT before{}, after{};
@@ -7372,18 +9247,34 @@ void test_no_real_input() {
               "a click is refused, left or right, and said once");
         check(refusals_in([&] { dragged = pointer.drag(5, 5, 40, 40); }) == 1 && !dragged,
               "so is a drag");
+        {
+            InputManager::GameClick how = InputManager::GameClick::Clicked;
+            bool on_game = true;
+            check(refusals_in([&] { on_game = pointer.drag_on_game(5, 5, 40, 40, {}, &how); }) == 1 &&
+                      !on_game && how == InputManager::GameClick::Refused,
+                  "and a drag on the game, once, before the window is looked at");
+        }
         check(refusals_in([&] { moved = pointer.move_pointer(5, 5); }) == 1 && !moved,
               "and the pointer is not moved");
+        // A click on the game: asked of the switch before anything is asked
+        // of the window, and once, though it looks at the window twice.
+        InputManager::GameClick why = InputManager::GameClick::Clicked;
+        bool on_game = true, on_game_right = true;
+        const auto left_n = refusals_in([&] { on_game = pointer.click_on_game(5, 5, false, {}, &why); });
+        const auto right_n = refusals_in([&] { on_game_right = pointer.click_on_game(5, 5, true); });
+        check(left_n == 1 && !on_game && why == InputManager::GameClick::Refused && right_n == 1 &&
+                  !on_game_right,
+              "a click on the game is refused, left or right, and said once");
         const bool read = read_before && GetCursorPos(&after) != FALSE;
         if (!read)
-            std::printf("  [skip] Windows would not say where the pointer is, so it was not "
-                        "compared\n");
+            skip("Windows would not say where the pointer is, so it was not "
+                 "compared\n");
         else if (after.x != before.x || after.y != before.y)
             // Each call above was refused before Windows was asked, and aimed
             // at a window that is gone: something else moved it -- a hand on
             // the mouse, most likely -- which is not this test's to judge.
-            std::printf("  [skip] the pointer moved while these ran, by a hand on the mouse most "
-                        "likely, so where it is was not compared\n");
+            skip("the pointer moved while these ran, by a hand on the mouse most "
+                 "likely, so where it is was not compared\n");
         else
             check(after.x == before.x && after.y == before.y,
                   "and Windows reads the pointer exactly where it was before them");
@@ -7398,6 +9289,41 @@ void test_no_real_input() {
               "bringing a window to the front is refused, and said once");
     }
 
+    // ---- the popup closer and the reviver, with no hands of their own ----
+    //
+    // Each clicks the game through click_on_game now, which asks the switch
+    // as the button would go down. Aimed at the window that has gone -- where
+    // neither the reviver's bringing it forward nor a click could land, guard
+    // or no guard -- each is refused, and neither says it clicked, nor counts
+    // a try it never made.
+    if (gone != nullptr && !IsWindow(gone)) {
+        std::string turn, said;
+        bool ran = false;
+        const auto n = refusals_in([&] { ran = popup_turn_with_no_hands(gone, turn, said); });
+        if (!ran)
+            skip("the popup closer's pictures are not installed here\n");
+        else
+            check(n == 1 && turn == "not closed" &&
+                      said.find("could not click the check-in notice") != std::string::npos,
+                  "the popup closer's click on a check-in notice up for 3 s is refused, once, and it says it "
+                  "could not click -- " + turn);
+    }
+    if (gone != nullptr && !IsWindow(gone)) {
+        Reviver::Turn turn = Reviver::Turn::Blind;
+        int tries = -1;
+        std::string said;
+        bool ran = false;
+        const auto n = refusals_in([&] { ran = revive_with_no_hands(gone, turn, tries, said); });
+        if (!ran)
+            skip("the death panel's or the dialogs' pictures are not installed here\n");
+        else
+            check(n == 3 && turn == Reviver::Turn::Waiting && tries == 0 &&
+                      said.find("dead, and nothing clicked: no real input in this process") != std::string::npos &&
+                      said.find("could not click") == std::string::npos,
+                  "the reviver's: bringing the game forward twice and the click, each refused; dead, no try "
+                  "counted, and no click said to have failed -- " + std::string(Reviver::turn_name(turn)));
+    }
+
     // With no window at all nothing is aimed at, as before the switch, so
     // there is nothing to refuse: a test whose pretend game has no window does
     // not fill the log with refusals that were never a reach for the desktop.
@@ -7406,7 +9332,8 @@ void test_no_real_input() {
         bool any = false;
         const auto n = refusals_in([&] {
             any = none.key_press(0x97, 1) || none.click_at(5, 5) || none.move_pointer(5, 5) ||
-                  none.drag(5, 5, 40, 40) || none.focus_window() || none.post_char(L'x', false);
+                  none.drag(5, 5, 40, 40) || none.focus_window() || none.post_char(L'x', false) ||
+                  none.click_on_game(5, 5) || none.drag_on_game(5, 5, 40, 40);
         });
         check(!any && n == 0, "aimed at no window at all, nothing happens and nothing is refused");
     }
@@ -7466,7 +9393,7 @@ void test_no_real_input() {
         GameInstall nowhere;
         nowhere.programs = { temp_file("gobot_test_no_such_game.exe") };
         if (there != nullptr) {
-            std::printf("  [skip] a process numbered 0x%lX is running here\n", nobody);
+            skip("a process numbered 0x%lX is running here\n", nobody);
         } else {
             bool ended = true;
             check(refusals_in([&] { ended = end_game_program(nobody, nowhere); }) == 1 && !ended,
@@ -7507,6 +9434,561 @@ void test_no_real_input() {
 
     if (hidden) DestroyWindow(hidden);
     check(real_input_forbidden(), "and the switch is still on: nothing turned it off");
+}
+
+/// Where DLLs come from, as in the shipped programs: System32, and Npcap's
+/// own folder, and nowhere else. They run as administrator from a folder a
+/// player made, and Windows looked in a program's folder and the working
+/// folder too, so a DLL left there by anybody ran as administrator at the
+/// next start. Run first after the guard is counted from, so the rest of the
+/// run loads its DLLs by the same rules. Npcap itself is never loaded here.
+void test_dll_search() {
+    section("DLLs: from System32 and Npcap's folder only");
+
+    const std::string sys = system32_path();
+    check(!sys.empty() && is_folder(sys) && sys.back() != '\\' && sys.back() != '/',
+          "System32 is where Windows says, a folder, no slash at the end -- " + sys);
+    const std::string shutdown_exe = system32_path("shutdown.exe");
+    check(shutdown_exe == sys + "\\shutdown.exe" && path_exists(shutdown_exe),
+          "shutdown.exe by its full path, and it is there -- " + shutdown_exe);
+    check(harden_dll_search() && harden_dll_search(),
+          "the search is narrowed, and narrowing it again is harmless");
+
+    // A copy of one of Windows' own DLLs, renamed, in this run's folder, made
+    // the working folder: Windows' ordinary search would load it by its name.
+    const std::wstring folder = run_temp_dir();
+    const std::wstring planted = folder + L"\\gobot_test_planted.dll";
+    const std::wstring original = utf8_to_wide(system32_path("version.dll"));
+    wchar_t was[MAX_PATH] = {};
+    const DWORD had = GetCurrentDirectoryW(MAX_PATH, was);
+    if (folder.empty() || had == 0 || had >= MAX_PATH ||
+        !CopyFileW(original.c_str(), planted.c_str(), FALSE) || !SetCurrentDirectoryW(folder.c_str())) {
+        skip("could not put a DLL in this run's folder and work there\n");
+        DeleteFileW(planted.c_str());
+    } else {
+        HMODULE got = LoadLibraryW(L"gobot_test_planted.dll");
+        SetCurrentDirectoryW(was);
+        if (got) FreeLibrary(got);
+        DeleteFileW(planted.c_str());
+        check(got == nullptr, "a DLL in the working folder is not loaded by its bare name");
+    }
+}
+
+/// Windows' display scale (gobot/dpi.hpp). At 125% Windows handed GoBot
+/// resampled frames and scaled sizes, and nothing it looked for was found: HP,
+/// monsters, dialogs, clicks. GoBot now works in real pixels, its own window
+/// alone left to Windows' scaling; tells when Windows enlarges the game itself;
+/// and sets the game's high-DPI override, as the Compatibility tab does.
+void test_display_scale() {
+    section("Display scale: real pixels, and the game shown pixel for pixel");
+
+    // The override's value, as the Compatibility tab writes it.
+    check(with_high_dpi_override("") == "~ HIGHDPIAWARE" &&
+              with_high_dpi_override("~ RUNASADMIN") == "~ RUNASADMIN HIGHDPIAWARE" &&
+              with_high_dpi_override("RUNASADMIN") == "~ RUNASADMIN HIGHDPIAWARE",
+          "the override is added, every other setting kept, \"~\" first");
+    check(with_high_dpi_override("~ GDIDPISCALING DPIUNAWARE WIN7RTM") == "~ WIN7RTM HIGHDPIAWARE" &&
+              with_high_dpi_override("~ dpiunaware") == "~ HIGHDPIAWARE",
+          "the tab's other two DPI choices are taken out, whatever their case");
+    check(with_high_dpi_override("~ HIGHDPIAWARE") == "~ HIGHDPIAWARE" &&
+              with_high_dpi_override(with_high_dpi_override("~ RUNASADMIN")) == "~ RUNASADMIN HIGHDPIAWARE",
+          "and set twice it is the same");
+
+    // What cures each way of being scaled -- the same on any machine.
+    {
+        WindowScaling unaware;
+        unaware.known = true;
+        unaware.real_w = 1600, unaware.real_h = 900, unaware.own_w = 1280, unaware.own_h = 720;
+        unaware.percent = 125;
+        WindowScaling same = unaware;
+        same.real_w = 1280, same.real_h = 720, same.percent = 100;
+        WindowScaling aware = unaware;
+        aware.handles_dpi = true;
+        WindowScaling elsewhere = aware;
+        elsewhere.on_main_screen = false;
+        WindowScaling unaware_elsewhere = unaware;
+        unaware_elsewhere.on_main_screen = false;
+        check(cure_for(same, false) == ScaleCure::None && cure_for(WindowScaling{}, true) == ScaleCure::None,
+              "shown pixel for pixel, or nothing known: nothing to cure");
+        check(cure_for(unaware, false) == ScaleCure::SetOverride &&
+                  cure_for(unaware, true) == ScaleCure::RestartGame,
+              "a game that does not handle DPI: the override, and once it is set, a new start");
+        check(cure_for(unaware_elsewhere, false) == ScaleCure::SetOverrideOrMove,
+              "on a scaled screen that is not the main one, with the main one's scale: the override, or a screen "
+              "at 100%");
+        WindowScaling unaware_other_scale = unaware_elsewhere;
+        unaware_other_scale.screen_like_main = false;
+        check(cure_for(unaware_other_scale, false) == ScaleCure::MoveToMainScreen,
+              "on one whose scale is not the main one's: the main screen -- the override would draw it at the main "
+              "one's scale, stretched there still");
+        check(cure_for(unaware, true, true) == ScaleCure::OverrideIgnored &&
+                  cure_for(unaware, false, true) == ScaleCure::SetOverride,
+              "set, and started since, yet not handling DPI: the override did not take -- said, not asked again");
+        check(cure_for(aware, true) == ScaleCure::RestartOrSignIn &&
+                  cure_for(elsewhere, true) == ScaleCure::MoveToMainScreen,
+              "one that does, scaled all the same: drawn for the main screen as it was, or on another screen");
+        bool said = true;
+        for (const ScaleCure c : {ScaleCure::SetOverride, ScaleCure::SetOverrideOrMove, ScaleCure::RestartGame,
+                                  ScaleCure::OverrideIgnored, ScaleCure::MoveToMainScreen, ScaleCure::RestartOrSignIn})
+            said = said && std::string(cure_advice(c)).size() > 20;
+        check(said, "and each cure is said");
+    }
+
+    // Taking the tab's high-DPI choices off a program -- GoBot's own, which one
+    // holds to Windows' scaling.
+    check(without_dpi_override("~ HIGHDPIAWARE").empty() && without_dpi_override("~ GDIDPISCALING DPIUNAWARE").empty() &&
+              without_dpi_override("").empty(),
+          "a value with only the high-DPI choice in it is left with nothing");
+    check(without_dpi_override("~ RUNASADMIN DPIUNAWARE") == "~ RUNASADMIN" &&
+              without_dpi_override("WIN7RTM dpiunaware") == "WIN7RTM",
+          "every other setting is kept, \"~\" only where it was");
+
+    // Written and read back under a key of the test's own, never the real one,
+    // and one of this run's own: two runs at once would take each other's away.
+    {
+        const std::string parent = "Software\\GoBotTest_" + std::to_string(GetCurrentProcessId());
+        const std::string key = parent + "\\Layers";
+        const std::string stamps = parent + "\\Stamps";     // never GoBot's own kDpiStampKey
+        const std::wstring wparent = utf8_to_wide(parent);
+        const std::wstring wkey = utf8_to_wide(key);
+        const std::string exe = "C:\\Games\\Ghost Online\\th\xE1\xBB\xAD.exe";   // thử.exe
+        RegDeleteTreeW(HKEY_CURRENT_USER, wparent.c_str());
+        std::string why;
+        const bool set = !has_high_dpi_override(exe, key.c_str()) &&
+                         set_high_dpi_override(exe, &why, key.c_str(), stamps.c_str()) &&
+                         has_high_dpi_override(exe, key.c_str());
+        check(set, "set for a program, and read back as set -- " + why);
+        const std::wstring wexe = utf8_to_wide(exe);
+        // And when GoBot set it, for a game started since to be told from one
+        // started before: the Layers key's own time moves with every program's.
+        ULONGLONG stamp = 0;
+        DWORD stamp_bytes = sizeof(stamp);
+        FILETIME now_ft{};
+        GetSystemTimeAsFileTime(&now_ft);
+        const ULONGLONG now_stamp = (static_cast<ULONGLONG>(now_ft.dwHighDateTime) << 32) | now_ft.dwLowDateTime;
+        const bool stamped = RegGetValueW(HKEY_CURRENT_USER, utf8_to_wide(stamps).c_str(), wexe.c_str(),
+                                          RRF_RT_REG_QWORD, nullptr, &stamp, &stamp_bytes) == ERROR_SUCCESS &&
+                             stamp != 0 && stamp <= now_stamp && now_stamp - stamp < 10ULL * 10'000'000ULL;
+        check(stamped, "and when it was set is noted beside it, as GoBot set it");
+        const std::wstring had = L"~ RUNASADMIN";
+        RegSetKeyValueW(HKEY_CURRENT_USER, wkey.c_str(), wexe.c_str(), REG_SZ, had.c_str(),
+                        static_cast<DWORD>((had.size() + 1) * sizeof(wchar_t)));
+        wchar_t back[256] = {};
+        DWORD bytes = sizeof(back) - sizeof(wchar_t);
+        const bool kept = set_high_dpi_override(exe, nullptr, key.c_str(), stamps.c_str()) &&
+                          RegGetValueW(HKEY_CURRENT_USER, wkey.c_str(), wexe.c_str(), RRF_RT_REG_SZ, nullptr, back,
+                                       &bytes) == ERROR_SUCCESS;
+        check(kept && std::wstring(back) == L"~ RUNASADMIN HIGHDPIAWARE",
+              "a program's own settings are kept beside it");
+        check(!set_high_dpi_override("", &why, key.c_str()) && !why.empty(), "and no program is refused, said why");
+
+        // Taken off again, as for GoBot's own exe: the rest stays.
+        why.clear();
+        const bool cleared = has_any_dpi_override(exe, key.c_str()) && clear_dpi_override(exe, &why, key.c_str()) &&
+                             !has_any_dpi_override(exe, key.c_str());
+        std::fill(std::begin(back), std::end(back), L'\0');
+        bytes = sizeof(back) - sizeof(wchar_t);
+        const bool rest = RegGetValueW(HKEY_CURRENT_USER, wkey.c_str(), wexe.c_str(), RRF_RT_REG_SZ, nullptr, back,
+                                       &bytes) == ERROR_SUCCESS &&
+                          std::wstring(back) == L"~ RUNASADMIN";
+        check(cleared && rest, "the override taken off a program, its other settings left -- " + why);
+        RegSetKeyValueW(HKEY_CURRENT_USER, wkey.c_str(), wexe.c_str(), REG_SZ, L"~ DPIUNAWARE",
+                        static_cast<DWORD>(sizeof(L"~ DPIUNAWARE")));
+        bytes = sizeof(back) - sizeof(wchar_t);
+        const bool gone = clear_dpi_override(exe, nullptr, key.c_str()) &&
+                          RegGetValueW(HKEY_CURRENT_USER, wkey.c_str(), wexe.c_str(), RRF_RT_REG_SZ, nullptr, back,
+                                       &bytes) == ERROR_FILE_NOT_FOUND;
+        check(gone && clear_dpi_override(exe, nullptr, key.c_str()),
+              "and with nothing else, the program's value goes; with nothing to take off, nothing is done");
+        RegDeleteTreeW(HKEY_CURRENT_USER, wparent.c_str());
+    }
+
+    if (!become_dpi_aware()) {
+        skip("this Windows cannot give one thread scaled pixels (before 10 1607), or holds this "
+             "program to its own scaling\n");
+        return;
+    }
+    check(thread_sees_real_pixels(), "this process sees real pixels, as the shipped programs do");
+    check(threads_view_percent() == 100 && real_pixels_possible(),
+          "and so do the threads it starts: the screen is not scaled for them -- " +
+              std::to_string(threads_view_percent()) + "%");
+    {
+        const DpiScope scaled(DpiScope::Mode::Scaled);
+        bool inner = true;
+        {
+            const DpiScope real(DpiScope::Mode::RealPixels);
+            inner = thread_sees_real_pixels();
+        }
+        check(inner && !thread_sees_real_pixels(),
+              "a thread can be given the scaled pixels for a while, and back, scopes inside scopes");
+    }
+    check(thread_sees_real_pixels(), "and each scope puts back what it found");
+
+    // Two windows of the test's own, never shown: one as a program that does
+    // not handle DPI, as the game, and one that does. Windows enlarges the
+    // first by the monitor's scale, and shows the second as it is.
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"GoBotDpiTest";
+    RegisterClassExW(&wc);
+    HWND unaware = nullptr;
+    {
+        const DpiScope scaled(DpiScope::Mode::Scaled);
+        unaware = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"", WS_POPUP, 100, 100, 320, 200,
+                                  nullptr, nullptr, wc.hInstance, nullptr);
+    }
+    HWND aware = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"", WS_POPUP, 100, 100, 320, 200,
+                                 nullptr, nullptr, wc.hInstance, nullptr);
+    using DpiForWindow = UINT(WINAPI*)(HWND);
+    const auto dpi_for = reinterpret_cast<DpiForWindow>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (unaware == nullptr || aware == nullptr || dpi_for == nullptr) {
+        skip("could not make the test's windows here\n");
+    } else {
+        const UINT dpi = dpi_for(aware);     // the monitor's, as a window that handles DPI sees it
+        const int expect = static_cast<int>((dpi * 100 + 48) / 96);
+        const WindowScaling game = window_scaling(unaware);
+        const WindowScaling own = window_scaling(aware);
+        check(game.known && game.stretched() == (dpi != 96) && std::abs(game.percent - expect) <= 1,
+              "a window that does not handle DPI is told enlarged exactly when the monitor is scaled -- " +
+                  std::to_string(game.percent) + "% at " + std::to_string(dpi) + " dpi, drawn " +
+                  std::to_string(game.own_w) + "x" + std::to_string(game.own_h) + ", shown " +
+                  std::to_string(game.real_w) + "x" + std::to_string(game.real_h));
+        check(own.known && !own.stretched() && own.percent == 100,
+              "one that handles it is shown pixel for pixel at any scale");
+        check(!game.handles_dpi && own.handles_dpi && game.on_main_screen && own.on_main_screen,
+              "and which of the two handles DPI itself is told, both on the main screen");
+        check(!window_scaling(nullptr).known, "and no window is nothing known");
+        check(drawn_at_percent(unaware) == 100 && std::abs(drawn_at_percent(aware) - expect) <= 1 &&
+                  drawn_at_percent(nullptr) == 0,
+              "the one that does not handle DPI draws at 100%, whatever the screen; the other at the screen's");
+
+        // A window's own pixels, as auto-login looks at VTCZone and the
+        // launcher: the scaled ones for the window that does not handle DPI.
+        bool in_unawares = true, in_awares = false;
+        {
+            const DpiScope as_it_sees(static_cast<void*>(unaware));
+            in_unawares = thread_sees_real_pixels();
+        }
+        {
+            const DpiScope as_it_sees(static_cast<void*>(aware));
+            in_awares = thread_sees_real_pixels();
+        }
+        const bool back_after = thread_sees_real_pixels();
+        bool none_changed = false;
+        {
+            const DpiScope nothing(static_cast<void*>(nullptr));
+            none_changed = thread_sees_real_pixels();
+        }
+        check(!in_unawares && in_awares && back_after && none_changed,
+              "a thread sees a window's own pixels for a while -- scaled for one that does not handle DPI -- "
+              "and its own after; for no window, nothing changes");
+
+        wchar_t me[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, me, MAX_PATH);
+        check(_stricmp(window_program(aware).c_str(), wide_to_utf8(me).c_str()) == 0,
+              "a window's program, by its full path: " + window_program(aware));
+    }
+    if (unaware) DestroyWindow(unaware);
+    if (aware) DestroyWindow(aware);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
+#ifdef GOBOT_SOURCE_DIR
+    // Where it is wired in, in the programs themselves.
+    {
+        const auto npos = std::string::npos;
+        const std::string gui = body_of(source_text("/apps/gobot_gui/main.cpp"),
+                                        "int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {");
+        const std::size_t aware_at = gui.find("gobot::become_dpi_aware();");
+        const std::size_t scaled_at = gui.find("gobot::set_thread_dpi(gobot::DpiScope::Mode::Scaled);");
+        const std::size_t window_at = gui.find("CreateWindowW(");
+        const auto real_before = [&](const char* call) {
+            const std::size_t at = gui.find(call);
+            const std::size_t scope = at == npos ? npos : gui.rfind("gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);", at);
+            return at != npos && scope != npos && at - scope < 200;
+        };
+        check(aware_at != npos && scaled_at != npos && window_at != npos && aware_at < scaled_at &&
+                  scaled_at < window_at,
+              "gobot_gui: real pixels for the process, scaled ones for the thread that makes its window, "
+              "before the window is made");
+        check(real_before("app.initialise();") && real_before("app.tick();") && real_before("app.draw();"),
+              "and its start, every tick and every frame's panels work in real pixels");
+
+        const std::string cli = body_of(source_text("/apps/gobot_cli/main.cpp"), "int main(int argc, char** argv) {");
+        check(cli.find("gobot::become_dpi_aware();") != npos, "gobot_cli works in real pixels");
+
+        const std::string view = body_of(source_text("/apps/gobot_gui/simple_view.cpp"), "void GuiApp::simple_checklist() {");
+        check(view.find("game_scaling_.stretched()") != npos && view.find("fix_game_scaling()") != npos,
+              "the main screen says when Windows enlarges the game, with the button that sets it right");
+        check(view.find("threads_view_percent() > 100") != npos && view.find("fix_own_scaling()") != npos,
+              "and when Windows scales GoBot itself, with the button that takes its override off");
+
+        const std::string start = body_of(source_text("/apps/gobot_gui/gui_app.cpp"), "void GuiApp::initialise() {");
+        check(start.find("threads_view_percent() > 100") != npos && start.find("Display scale:") != npos,
+              "gobot_gui says at its start which pixels it works in");
+        const std::string doctor = body_of(source_text("/apps/gobot_cli/main.cpp"),
+                                           "int run_doctor(const Options& o, const AppConfig& app) {");
+        check(doctor.find("\"GoBot's pixels\"") != npos, "and --doctor says which gobot_cli works in");
+
+        // The crossing pictures VTCZone and the launcher in their own pixels --
+        // their pictures are the size they draw themselves -- and only the
+        // picture: what lies over them is asked in real pixels, the pixels
+        // every window's frame is measured in, and a page's point is turned
+        // into real pixels before it is clicked, so that the click lands on
+        // every screen whatever its scale.
+        const std::string login = source_text("/src/auto_login.cpp");
+        const std::string grab = body_of(login, "bool AutoLogin::grab(On which, void* hwnd, Frame& out, bool& trusted) {");
+        const std::string click = body_of(login, "AutoLogin::Click AutoLogin::click(int x, int y) {");
+        const std::size_t own_look = grab.find("const DpiScope own(which == On::Game ? nullptr : hwnd);");
+        const std::size_t pictured = grab.find("got = capture.grab(hwnd, out) && out.valid();");
+        const std::size_t scope_over = grab.find("if (!got) return false;");
+        const std::size_t covered = grab.find("uncovered(hwnd, &over)");
+        check(own_look != npos && pictured != npos && own_look < pictured && scope_over != npos &&
+                  pictured < scope_over && covered != npos && scope_over < covered,
+              "auto-login pictures VTCZone and the launcher in their own pixels, and asks what lies over them in "
+              "real ones");
+        const std::size_t scaled = click.find("const WindowScaling s = window_scaling(input_.target_window());");
+        const std::size_t landing = click.find("landing(input_.target_window()");
+        check(scaled != npos && landing != npos && scaled < landing &&
+                  click.find("x = static_cast<int>((2LL * x + 1) * s.real_w / (2LL * s.own_w));") != npos &&
+                  click.find("DpiScope") == npos,
+              "and clicks a page's point turned into real pixels, not from inside the window's own");
+    }
+#endif
+}
+
+/// Which key events go out: down only into the game in front; up into the
+/// game in front, and wherever focus has gone when it is owed. Key-ups were
+/// held to the focus gate as well, which left a key down in Windows whenever
+/// focus moved in the middle of a press -- and a key down in Windows is down
+/// for whatever is in front: the default jump key, Ctrl, turned the player's
+/// typing into shortcuts.
+///
+/// And which thread focus_window may tie its input to: never one of GoBot's
+/// own, whose UI thread may be waiting in join() for the very worker asking.
+void test_key_rule() {
+    section("Keys: down only into the game, up wherever it is owed");
+
+    check(!InputManager::key_event_allowed(true, false, false) &&
+              !InputManager::key_event_allowed(true, false, true),
+          "a key never goes down into another window, owed or not");
+    check(InputManager::key_event_allowed(true, true, false), "a key goes down into the game in front");
+    check(InputManager::key_event_allowed(false, true, false) &&
+              InputManager::key_event_allowed(false, true, true),
+          "a key-up goes to the game in front, as before");
+    check(InputManager::key_event_allowed(false, false, true),
+          "a key-up owed goes out whatever is in front");
+    check(!InputManager::key_event_allowed(false, false, false),
+          "and one not owed is not sent to another window");
+
+    check(!InputManager::may_attach_to_foreground(0, 0, 7, 100), "no window in front: nothing to attach to");
+    check(!InputManager::may_attach_to_foreground(7, 100, 7, 100),
+          "this thread's own window in front: nothing to attach");
+    check(!InputManager::may_attach_to_foreground(8, 100, 7, 100),
+          "GoBot's own window on another thread -- its UI thread -- is never attached to");
+    check(InputManager::may_attach_to_foreground(9, 200, 7, 100),
+          "another program's window: attached, as Windows needs");
+}
+
+/// Keys as a person or a file writes them. One character is that key: read
+/// as key codes, "1" to "9" were the mouse buttons, Backspace and Tab, and
+/// "0" was no key at all, so a potion set on the 1 key was never drunk. A key
+/// code is 0x and hex, or two or more decimal digits read as written, never
+/// as octal. And whatever key_name writes reads back as the same key.
+void test_parse_key() {
+    section("Keys by name: one character is that key");
+
+    const auto key = [](const char* text) { return InputManager::parse_key(text); };
+    check(key("0") == 0x30u && key("1") == 0x31u && key("9") == 0x39u,
+          "a digit alone is that digit's key: 0 is 0x30, 1 is 0x31, 9 is 0x39");
+    check(key("a") == 'A' && key(" a ") == 'A' && key(" 1 ") == '1',
+          "a letter is its key, either case, and spaces around either are no part of it");
+    check(key("90") == 90 && key("90 ") == 90 && key("0x5A") == 90 && key("0X5a") == 90,
+          "a key code: two or more decimal digits, or 0x and hex");
+    check(key("010") == 10 && key("065") == 65 && key("08") == 8 && key("0x08") == 8,
+          "decimal is read as written, never as octal: 010 is ten");
+    check(key("") == 0 && key("0x") == 0 && key("256") == 0 && key("0x100") == 0 && key("1x") == 0 &&
+              key(",") == 0,
+          "and nothing that is not a key is one: empty, 0x alone, past 0xFF, a letter after a "
+          "digit, punctuation");
+
+    std::string wrong;
+    for (std::uint32_t vk = 1; vk <= 0xFF; ++vk)
+        if (InputManager::parse_key(InputManager::key_name(vk)) != vk && wrong.empty())
+            wrong = InputManager::key_name(vk);
+    check(wrong.empty(), "every key's name reads back as that key, 1 to 255" +
+                             (wrong.empty() ? std::string() : " -- not " + wrong));
+}
+
+/// Where a click on the game may land.
+///
+/// The frames come from PrintWindow, which shows the game even when it is
+/// covered, so a point worked out from one says nothing about what is on top
+/// of it. would_reach_game is asked before the pointer moves and again just
+/// before the button goes down. It only asks the desktop -- no switch, no
+/// input -- so it is asked here, under the guard, of windows of this test's
+/// own that are never in front.
+void test_game_click() {
+    section("A click on the game: only where it lands on the game");
+
+    using GC = InputManager::GameClick;
+    const GC all[] = { GC::Clicked,  GC::NoWindow, GC::Refused, GC::OffClient, GC::OffScreen,
+                       GC::NotInFront, GC::Covered, GC::Moved,  GC::Stopped,  GC::Failed };
+    std::vector<std::string> names;
+    bool named = true;
+    for (const GC c : all) {
+        const std::string n = InputManager::game_click_name(c);
+        named = named && !n.empty() && std::find(names.begin(), names.end(), n) == names.end();
+        names.push_back(n);
+    }
+    check(named && std::string(InputManager::game_click_name(static_cast<GC>(99))) == "?",
+          "every way a click can go has a name of its own for the log, and nothing else has one");
+
+    // Aimed at no window, nothing happens and nothing is refused: a test
+    // whose pretend game has no window, and every caller before the game is
+    // found, says why without asking the switch -- whatever else it passed.
+    {
+        InputManager none;
+        GC why = GC::Clicked, why_stopped = GC::Clicked;
+        const std::uint64_t before = real_input_refusals();
+        const bool clicked = none.click_on_game(5, 5, false, {}, &why);
+        const bool right = none.click_on_game(5, 5, true, [] { return true; }, &why_stopped);
+        check(!clicked && !right && why == GC::NoWindow && why_stopped == GC::NoWindow &&
+                  real_input_refusals() == before,
+              "a click on the game with no window: not made, said so, and nothing refused -- the "
+              "window is asked about before the stop");
+        GC reason = GC::Clicked;
+        check(!InputManager::would_reach_game(nullptr, 5, 5, &reason) && reason == GC::NoWindow,
+              "and no window would be reached");
+    }
+
+    const HINSTANCE self = GetModuleHandleA(nullptr);
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = self;
+    wc.lpszClassName = "GoBotTestGameClick";
+    RegisterClassA(&wc);        // already there from an earlier run: the same
+    const auto make = [&](int x, int y) {
+        return CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "", WS_POPUP, x, y,
+                               64, 64, nullptr, nullptr, self, nullptr);
+    };
+    HWND gone = make(0, 0);
+    if (gone != nullptr) DestroyWindow(gone);
+    HWND hidden = make(0, 0);           // never shown, so never in front, nor under any point
+    HWND off_screen =
+        make(GetSystemMetrics(SM_XVIRTUALSCREEN) - 4000, GetSystemMetrics(SM_YVIRTUALSCREEN) - 4000);
+    if (gone == nullptr || IsWindow(gone) || hidden == nullptr || off_screen == nullptr) {
+        skip("could not make the windows to aim at here\n");
+    } else {
+        const auto reason = [](HWND w, int x, int y, bool need_front) {
+            GC why = GC::Clicked;
+            InputManager::would_reach_game(w, x, y, &why, need_front);
+            return why;
+        };
+        check(!InputManager::would_reach_game(gone, 5, 5) && reason(gone, 5, 5, true) == GC::NoWindow,
+              "a window that has gone is no window");
+        check(reason(hidden, 64, 5, true) == GC::OffClient && reason(hidden, -1, 5, true) == GC::OffClient,
+              "a point just outside the client area is outside the game's window");
+        check(reason(off_screen, 5, 5, true) == GC::OffScreen,
+              "a point of a window off every screen is on no screen");
+        const POINT corner{ 5, 5 };
+        if (MonitorFromPoint(corner, MONITOR_DEFAULTTONULL) == nullptr) {
+            skip("no screen at the top-left corner here\n");
+        } else {
+            check(reason(hidden, 5, 5, true) == GC::NotInFront, "a window not in front is not clicked");
+            check(reason(hidden, 5, 5, false) == GC::Covered,
+                  "and asked not to be in front, it is still not what is under the point: covered");
+        }
+    }
+    if (hidden) DestroyWindow(hidden);
+    if (off_screen) DestroyWindow(off_screen);
+}
+
+/// WM_GETTEXT and WM_GETTEXTLENGTH that reached test_own_windows' window from
+/// its own thread: what reading a window's title the old way asked of it.
+int g_own_text_asks = 0;
+
+LRESULT CALLBACK count_text_asks(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // Only from this thread: another program reading the title -- a screen
+    // reader, say -- is not GoBot's doing.
+    if ((msg == WM_GETTEXT || msg == WM_GETTEXTLENGTH) && InSendMessageEx(nullptr) == ISMEX_NOSEND)
+        ++g_own_text_asks;
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+/// Listing windows asks nothing of this program's own.
+///
+/// The keeper lists windows from its own thread, and reading the title of
+/// GoBot's own window sent it WM_GETTEXT, which waits on the UI thread -- the
+/// one that may be waiting in join() for the keeper after F12, DỪNG or an
+/// untick. GoBot then showed Not Responding, and the rest of the stop, the
+/// keys let go of among it, never ran. Titles and classes are read now with
+/// no message at all, and in UTF-8 rather than the code page.
+void test_own_windows() {
+    section("Windows listed without asking this program's own anything");
+
+#ifdef GOBOT_SOURCE_DIR
+    // Nothing there reads a title or a class the old way -- the focus
+    // monitor among them, which reads the window in front from its own
+    // thread, GoBot's own window too when that is in front.
+    std::string asks;
+    for (const char* rel : { "/src/input_manager.cpp", "/src/window_focus.cpp" }) {
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+        std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (src.empty()) asks += std::string(" ") + rel + " not read";
+        // The one way that asks nothing, out of the way of the ones that ask.
+        const std::string quiet = "InternalGetWindowText";
+        for (std::size_t at = src.find(quiet); at != std::string::npos; at = src.find(quiet, at))
+            src.erase(at, quiet.size());
+        for (const char* call : { "GetWindowText(", "GetWindowTextA(", "GetWindowTextW(",
+                                  "GetWindowTextLength(", "GetWindowTextLengthA(", "GetWindowTextLengthW(",
+                                  "GetClassName(", "GetClassNameA(" })
+            if (src.find(call) != std::string::npos) asks += std::string(" ") + rel + ": " + call;
+    }
+    check(asks.empty(),
+          "input_manager.cpp and window_focus.cpp read titles and classes no other way" + asks);
+#endif
+
+    const HINSTANCE self = GetModuleHandleW(nullptr);
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = count_text_asks;
+    wc.hInstance = self;
+    wc.lpszClassName = L"GoBotTestOwnWindowText";
+    RegisterClassW(&wc);        // already there from an earlier run: the same
+    const std::wstring title = L"GoBot thử cửa sổ";
+    const int far_x = GetSystemMetrics(SM_XVIRTUALSCREEN) - 4000;
+    const int far_y = GetSystemMetrics(SM_YVIRTUALSCREEN) - 4000;
+    // Big enough for enumerate_windows to list, were it another program's;
+    // off every screen and never brought forward.
+    HWND ours = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, title.c_str(),
+                                WS_POPUP, far_x, far_y, 300, 200, nullptr, nullptr, self, nullptr);
+    if (ours == nullptr) {
+        skip("could not put up a window of this test's own here\n");
+        return;
+    }
+    ShowWindow(ours, SW_SHOWNOACTIVATE);
+    g_own_text_asks = 0;
+    const std::string want = wide_to_utf8(title);
+
+    bool listed = false;
+    for (const InputManager::WindowInfo& w : InputManager::enumerate_windows())
+        listed = listed || w.hwnd == ours;
+    check(!listed && g_own_text_asks == 0,
+          "listing the windows to aim at passes this program's own over, asking nothing of them");
+
+    bool found = false, named = false;
+    for (const InputManager::WindowInfo& w : InputManager::windows_of("gobot_test.exe"))
+        if (w.hwnd == ours) {
+            found = true;
+            named = w.title == want && w.window_class == "GoBotTestOwnWindowText";
+        }
+    check(found && named && g_own_text_asks == 0,
+          "a program's own windows, this one's among them, are read without a message, in UTF-8: " + want);
+    check(InputManager::window_text(ours) == want && g_own_text_asks == 0,
+          "and so is a window's text with its children's");
+    DestroyWindow(ours);
 }
 
 /// Make the folder `link` a junction to the folder `target`, as mklink /J
@@ -7763,14 +10245,14 @@ void test_game_install() {
             check(mine.is_game(wide_to_utf8(std::wstring(native, size)), here),
                   "and as the kernel names it, \\Device\\ and all, read off this machine's drives");
         else
-            std::printf("  [skip] Windows would not give this program's path in the kernel's form\n");
+            skip("Windows would not give this program's path in the kernel's form\n");
         wchar_t shorter[MAX_PATH]{};
         const DWORD n = GetShortPathNameW(self, shorter, MAX_PATH);
         if (n > 0 && n < MAX_PATH && std::wstring(shorter) != std::wstring(self))
             check(mine.is_game(wide_to_utf8(shorter), here),
                   "and by the short name this disk gives it");
         else
-            std::printf("  [skip] this disk gives this test's folder no short names\n");
+            skip("this disk gives this test's folder no short names\n");
         check(!mine.is_game(temp_file("gobot_test.exe"), here),
               "while a program of the same name in another folder is not it");
 
@@ -7821,7 +10303,7 @@ void test_game_install() {
                   "a file on this disk is known by its number there, two files by two numbers -- "
                   "and nothing across the network is ever asked");
         if (!joined) {
-            std::printf("  [skip] this disk would not take a junction here\n");
+            skip("this disk would not take a junction here\n");
         } else {
             GameInstall through;
             through.programs = { link + "\\Game.exe" };
@@ -7836,7 +10318,7 @@ void test_game_install() {
                   "another folder is not");
         }
         if (!linked) {
-            std::printf("  [skip] this disk would not take a hard link here\n");
+            skip("this disk would not take a hard link here\n");
         } else {
             GameInstall at;
             at.programs = { real + "\\Game.exe" };
@@ -7904,6 +10386,13 @@ void test_crash_watch() {
         check(CrashWatch::looks_like_a_box("Static", "Game.exe",
                                            "Game.exe has stopped working"),
               "and so is whatever Windows puts that sentence in");
+        // As a Vietnamese Windows says it. Window text arrives as UTF-8 now,
+        // and the words this looked for were misspelt, so it never matched.
+        check(CrashWatch::looks_like_a_box("Static", "Game.exe",
+                                           "Game.exe \xC4\x91\xC3\xA3 ng\xE1\xBB\xAB"
+                                           "ng ho\xE1\xBA\xA1t \xC4\x91\xE1\xBB\x99ng"),
+              "and the same sentence in Vietnamese: Game.exe \xC4\x91\xC3\xA3 ng\xE1\xBB\xAB"
+              "ng ho\xE1\xBA\xA1t \xC4\x91\xE1\xBB\x99ng");
         check(!CrashWatch::looks_like_a_box("GhostOnlineClass", "GhostOnlineVTC", ""),
               "the game's own window is not a box");
     }
@@ -8050,7 +10539,7 @@ void test_crash_watch() {
                 a_box = CrashWatch::looks_like_a_box(w.window_class, w.title,
                                                      InputManager::window_text(w.hwnd));
         if (!a_box) {
-            std::printf("  [skip] could not put up a box of this test's own here\n");
+            skip("could not put up a box of this test's own here\n");
         } else {
             CrashWatch::Settings s;
             s.game_process = "gobot_test_no_such_game.exe";
@@ -8202,6 +10691,349 @@ void test_find_bars() {
     BarSpec a, b;
     check(VitalsReader::find_bars(plain, a, b) == 0, "finds nothing in a frame with no bars");
     check(VitalsReader::find_bars(Frame{}, a, b) == 0, "no frame finds nothing");
+
+    // Only a pair drawn as the game draws HP and MP moves the bars by itself
+    // (bars_paired). On 2026-10-27 the server list, before the HUD was up,
+    // gave find_bars two strips of sky -- 112,41 77x4 and 435,5 61x5 -- and
+    // with their colours HP measured nothing for the rest of the hunt.
+    {
+        const auto bar = [](int x, int y, int w, int h) {
+            BarSpec s;
+            s.x = x; s.y = y; s.width = w; s.height = h;
+            return s;
+        };
+        check(VitalsReader::bars_paired(hp, mp) && VitalsReader::bars_paired(bar(83, 8, 159, 5), bar(83, 22, 159, 5)),
+              "bars_paired: the HUD's HP and MP, found or placed by the landmark, are a pair");
+        check(!VitalsReader::bars_paired(bar(112, 41, 77, 4), bar(435, 5, 61, 5)),
+              "the two strips of the server list's sky are not: 323 px apart, and MP above HP");
+        check(!VitalsReader::bars_paired(bar(83, 22, 159, 5), bar(83, 8, 159, 5)) &&
+                  !VitalsReader::bars_paired(bar(83, 8, 159, 5), bar(83, 60, 159, 5)) &&
+                  !VitalsReader::bars_paired(bar(83, 8, 159, 5), bar(83, 22, 70, 5)) &&
+                  !VitalsReader::bars_paired(bar(83, 8, 159, 5), BarSpec{}),
+              "nor MP above HP, MP 47 px under it, one bar over twice the other's length, or no MP bar");
+        check(VitalsReader::bars_paired(bar(82, 8, 159, 5), bar(86, 22, 150, 5)),
+              "a few pixels' difference in where they start or how long they are is still a pair");
+
+        // The reader's look a time: its bars elsewhere, the HUD's pair found.
+        BarSpec moved_hp, moved_mp;
+        const bool moves = VitalsReader::relocated(f, bar(83, 120, 159, 5), bar(83, 134, 159, 5), moved_hp, moved_mp);
+        BarSpec same_hp, same_mp;
+        const bool stays = VitalsReader::relocated(f, hp, mp, same_hp, same_mp);
+        check(moves && moved_hp.x == 82 && moved_mp.x == 82 && !stays,
+              "relocated: bars put elsewhere move to the HUD's pair; bars already there stay");
+
+        // The server list of 2026-10-27, as find_bars saw it: a red strip and
+        // a blue one, 323 px apart. find_bars answers with both -- its
+        // fallback -- and the reader is not moved by them.
+        Frame sky = make_frame(640, 300);
+        for (int y = 0; y < 120; ++y)
+            for (int x = 0; x < 600; ++x) put_px(sky, x, y, 24, 24, 28);
+        for (int y = 39; y < 45; ++y)
+            for (int x = 112; x < 189; ++x) put_px(sky, x, y, 214, 40, 40);
+        for (int y = 3; y < 9; ++y)
+            for (int x = 435; x < 496; ++x) put_px(sky, x, y, 40, 70, 220);
+        BarSpec sky_hp = bar(83, 8, 159, 5), sky_mp = bar(83, 22, 159, 5);
+        BarSpec found_hp = sky_hp, found_mp = sky_mp;
+        const int n_sky = VitalsReader::find_bars(sky, found_hp, found_mp);
+        BarSpec new_hp, new_mp;
+        check(n_sky == 2 && !VitalsReader::bars_paired(found_hp, found_mp) &&
+                  !VitalsReader::relocated(sky, sky_hp, sky_mp, new_hp, new_mp),
+              "two strips 323 px apart: find_bars answers with both, but they move nothing");
+    }
+    {
+        // A colour learned off something else is put back when the landmark
+        // places the bars (reads_as_fill): the server list's sky, cebd73 for
+        // HP and adbde7 for MP, is no fill colour; the game's own red and
+        // blue are, and so are the shades of them a bar is drawn in.
+        BarSpec c;
+        const auto colour = [&c](std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            c.r = r; c.g = g; c.b = b;
+            return c;
+        };
+        check(!VitalsReader::reads_as_fill(colour(0xce, 0xbd, 0x73), true) &&
+                  !VitalsReader::reads_as_fill(colour(0xad, 0xbd, 0xe7), false),
+              "reads_as_fill: the sky's colours are no fill colour of HP or of MP");
+        check(VitalsReader::reads_as_fill(colour(kHpFill.r, kHpFill.g, kHpFill.b), true) &&
+                  VitalsReader::reads_as_fill(colour(kMpFill.r, kMpFill.g, kMpFill.b), false) &&
+                  VitalsReader::reads_as_fill(colour(0xb5, 0, 0), true) &&
+                  VitalsReader::reads_as_fill(colour(0, 0xb5, 0xff), false) &&
+                  !VitalsReader::reads_as_fill(colour(kMpFill.r, kMpFill.g, kMpFill.b), true),
+              "the game's own red and blue are, and the shades a bar is drawn in -- but MP's blue is no HP colour");
+    }
+}
+
+// ----------------------------------------------------------- the pet's bar
+
+void hud_px(Frame& f, int x, int y, std::uint32_t rgb) {
+    put_px(f, x, y, static_cast<std::uint8_t>(rgb >> 16), static_cast<std::uint8_t>(rgb >> 8),
+           static_cast<std::uint8_t>(rgb));
+}
+
+/// A companion slot's bars, by row, as the player's client draws them: the
+/// pet's red one, the purple one, the green one, and the empty part's trough.
+constexpr std::uint32_t kPetRed[6] = { 0xff948c, 0xad0800, 0xce0800, 0xf70800, 0xff524a, 0xff1008 };
+constexpr std::uint32_t kSlotPurple[6] = { 0xde8cff, 0x7300ad, 0x8c00ce, 0xa500f7, 0xc64aff, 0xb508ff };
+constexpr std::uint32_t kSlotGreen[6] = { 0xb5ff4a, 0x315a00, 0x63ad00, 0x8cf700, 0xb5ff4a, 0x8cf700 };
+constexpr std::uint32_t kSlotTrough[6] = { 0x181818, 0x182129, 0x212129, 0x293131, 0x293131, 0x424252 };
+
+/// One of a slot's two bars, six rows from `y`: `fill` columns full, the rest
+/// its trough -- with the slots' tick marks along a lower bar's. `light`, if
+/// not 0, is a trough of that colour instead, light grey like the slot's
+/// frame, after the two black columns a fill ends in on the player's client
+/// (the purple bar's, at 192..193): the pet's bar has not been seen part
+/// empty, and its trough could be that.
+void paint_slot_bar(Frame& f, int x, int y, int width, int fill, const std::uint32_t (&rows)[6], bool ticks,
+                    std::uint32_t light = 0) {
+    for (int k = 0; k < 6; ++k) {
+        for (int i = 0; i < width; ++i) {
+            const std::uint32_t empty = light == 0 ? kSlotTrough[k] : i < fill + 2 ? 0x000000u : light;
+            hud_px(f, x + i, y + k, i < fill ? rows[k] : empty);
+        }
+        if (ticks && k >= 4)
+            for (int i = 17; i < width; i += 17)
+                if (i >= fill) hud_px(f, x + i, y + k, 0xc6c6ce);
+    }
+}
+
+/// A companion slot's two bars, its frame from column `x0` to `x1` and from
+/// row `top` 17 rows down: the light grey frame, the black border inside it,
+/// the upper bar from top + 2 and the lower from top + 10. `upper_light`: the
+/// upper bar's trough, as paint_slot_bar's `light`.
+void paint_slot(Frame& f, int x0, int x1, int top, const std::uint32_t (&upper)[6], int upper_fill,
+                const std::uint32_t (&lower)[6], int lower_fill, std::uint32_t upper_light = 0) {
+    const int bottom = top + 17;
+    for (int y = top; y <= bottom; ++y) {
+        hud_px(f, x0 - 1, y, 0x7b7b94);
+        hud_px(f, x0, y, 0xb5b5b5);
+        hud_px(f, x1, y, 0xb5b5b5);
+    }
+    for (int x = x0; x <= x1; ++x) {
+        hud_px(f, x, top, 0xb5b5b5);
+        hud_px(f, x, bottom, 0xb5b5b5);
+        hud_px(f, x, bottom + 1, 0x7b7b94);
+    }
+    for (int y = top + 1; y < bottom; ++y) {
+        hud_px(f, x0 + 1, y, 0x000000);
+        hud_px(f, x1 - 1, y, 0x000000);
+    }
+    for (int x = x0 + 1; x < x1; ++x)
+        for (const int y : { top + 1, top + 8, top + 9, bottom - 1 }) hud_px(f, x, y, 0x000000);
+    const int width = x1 - x0 - 3;
+    paint_slot_bar(f, x0 + 2, top + 2, width, upper_fill, upper, false, upper_light);
+    paint_slot_bar(f, x0 + 2, top + 10, width, lower_fill, lower, true);
+}
+
+/// One of the HUD's own bars: `rows` from row `y`, `fill` columns full and the
+/// rest dark, in a slate edge and a pale blue-grey frame.
+void paint_hud_bar(Frame& f, int x, int y, int width, int fill, const std::vector<std::uint32_t>& rows) {
+    static const std::uint32_t kTrough[10] = { 0x080808, 0x101010, 0x181818, 0x212129, 0x292931,
+                                               0x313139, 0x313942, 0x313942, 0x313942, 0x313942 };
+    const int n = static_cast<int>(std::min<std::size_t>(rows.size(), 10));
+    for (int k = 0; k < n; ++k)
+        for (int i = 0; i < width; ++i)
+            hud_px(f, x + i, y + k, i < fill ? rows[static_cast<std::size_t>(k)] : kTrough[k]);
+    for (int r = y - 1; r <= y + n; ++r) {
+        hud_px(f, x - 1, r, 0x5a6373);
+        hud_px(f, x + width, r, 0x5a6373);
+        hud_px(f, x - 2, r, 0xbdced6);
+        hud_px(f, x + width + 1, r, 0xbdced6);
+    }
+    for (int i = -1; i <= width; ++i) {
+        hud_px(f, x + i, y - 1, 0x5a6373);
+        hud_px(f, x + i, y + n, 0x5a6373);
+    }
+}
+
+/// The HUD's top-left as the player's client drew it on 2026-10-26, at
+/// 1366x768 (potion_debug\20261026_223211_hotbar.png), from the pixels
+/// measured off it, moved by `ox`, `oy`, over the game's world: up top the HP,
+/// MP and experience bars (`top`), each in its slate edge and pale frame;
+/// under them the companion slots, the first and the third a purple bar over
+/// a green one, 34 wide, and the fourth (`pet`), the pet's, a red bar over a
+/// purple one, 112 wide, `pet_fill` columns of the red one full -- the rest
+/// dark, or `pet_trough` if not 0 (paint_slot_bar's `light`).
+struct PetHud {
+    bool          top = true;
+    bool          pet = true;
+    int           pet_fill = 112;
+    std::uint32_t pet_trough = 0;
+};
+
+Frame pet_hud_frame(int ox, int oy, const PetHud& h) {
+    Frame f = make_frame(640, 300);
+    for (int y = 0; y < f.height; ++y)
+        for (int x = 0; x < f.width; ++x) hud_px(f, x, y, 0x28361e);
+    if (h.top) {
+        paint_hud_bar(f, ox + 82, oy + 5, 160, 120,
+                      { 0xffefef, 0x5a0000, 0x9c0000, 0xa50000, 0xb50000, 0xf70000, 0xff0000, 0xff0808,
+                        0xff4a4a, 0xad0000 });
+        paint_hud_bar(f, ox + 82, oy + 19, 160, 140,
+                      { 0xefffff, 0x000042, 0x00107b, 0x001884, 0x001894, 0x0039ce, 0x007bff, 0x08bdff,
+                        0x4aefff, 0x00109c });
+        paint_hud_bar(f, ox + 82, oy + 34, 160, 160, { 0xff90d0, 0xb49090, 0xe29090, 0xff9090, 0xb49090 });
+    }
+    paint_slot(f, ox + 3, ox + 40, oy + 84, kSlotPurple, 34, kSlotGreen, 14);
+    paint_slot(f, ox + 91, ox + 128, oy + 84, kSlotPurple, 33, kSlotGreen, 0);
+    if (h.pet) paint_slot(f, ox + 135, ox + 250, oy + 84, kPetRed, h.pet_fill, kSlotPurple, 55, h.pet_trough);
+    return f;
+}
+
+std::string bar_text(const BarSpec& b) {
+    return std::to_string(b.x) + "," + std::to_string(b.y) + " " + std::to_string(b.width) + "x" +
+           std::to_string(b.height);
+}
+
+/// The pet's HP: its bar found on the HUD by itself, read, and kept through 0
+/// -- and never the HP bar, nor the purple bar under it, which GoC's picture
+/// pet_hp_indicator looks like; nor taken for HP or MP.
+void test_pet_bar() {
+    section("The pet's HP bar: found on the HUD by itself, read, kept through 0");
+
+    // The HP and MP bars where the landmark at 44,4 puts them.
+    BarSpec hp;
+    hp.x = 83; hp.y = 8; hp.width = 159; hp.height = 5;
+    hp.r = 239; hp.g = 0; hp.b = 0; hp.tolerance = 80;
+    BarSpec mp = hp;
+    mp.y = 22;
+    mp.r = 0; mp.g = 49; mp.b = 206;
+    const ScreenRect band = VitalsReader::pet_band(hp, mp);
+    check(band.y > mp.bottom() && band.contains(137, 86) && band.contains(248, 91) && !band.contains(137, 110),
+          "it is looked for under the HP and MP bars, through the row of companion slots, and no further down");
+
+    // Full: the pet's slot's red bar, its rows under the paler highlight, in
+    // its own red.
+    const Frame full = pet_hud_frame(0, 0, PetHud{});
+    BarSpec pet;
+    const bool found = VitalsReader::find_pet_bar(full, band, pet);
+    check(found && pet.x == 137 && pet.y == 87 && pet.width == 112 && pet.height == 5 && pet.r == 0xce &&
+              pet.g == 0x08 && pet.b == 0x00 && pet.tolerance == VitalsReader::kPetTolerance,
+          "full: the red bar in the pet's slot, 137,87 112x5 under its highlight, in its red -- " + bar_text(pet));
+    check(std::fabs(VitalsReader::measure(full, pet) - 100.0f) < 0.01f, "and it reads 100%");
+
+    // Part full, down to a sliver: found as well, by the red at its left
+    // end, and read off its fill.
+    for (const int fill : { 84, 56, 28, 10, 2, 1 }) {
+        PetHud h;
+        h.pet_fill = fill;
+        const Frame f = pet_hud_frame(0, 0, h);
+        BarSpec at;
+        const bool there = VitalsReader::find_pet_bar(f, band, at);
+        const float reads = VitalsReader::measure(f, pet);
+        const float want = static_cast<float>(fill) * 100.0f / 112.0f;
+        check(there && at.x == pet.x && at.y == pet.y && at.width == pet.width && std::fabs(reads - want) < 0.01f,
+              std::to_string(fill) + " of 112 full: found where it was, and reads " + std::to_string(reads) + "%");
+    }
+
+    // Whatever colour its empty part: light grey like the slot's frame,
+    // after the two black columns a fill ends in, the bar is still found
+    // whole -- by the border over it, which runs to the right-hand border
+    // whatever the fill -- and read off its fill. Looked at along its own
+    // rows, it ended where the fill does: 84 of 112 found 85 wide, read 98%.
+    for (const int fill : { 84, 56, 28, 10, 2, 1 }) {
+        PetHud h;
+        h.pet_fill = fill;
+        h.pet_trough = 0xb0b0b4;
+        const Frame f = pet_hud_frame(0, 0, h);
+        BarSpec at;
+        const bool there = VitalsReader::find_pet_bar(f, band, at);
+        const float reads = VitalsReader::measure(f, at);
+        const float want = static_cast<float>(fill) * 100.0f / 112.0f;
+        check(there && at.x == pet.x && at.y == pet.y && at.width == pet.width && at.height == pet.height &&
+                  VitalsReader::pet_frame_holds(f, at) && std::fabs(reads - want) < 0.01f,
+              std::to_string(fill) + " of 112 full, the empty part light grey: the whole bar, " + bar_text(at) +
+                  ", reading " + std::to_string(reads) + "%");
+    }
+
+    // At 0 there is no red left to find it by. The bar found before is still
+    // there, framed as ever: it reads 0 -- what drinks.
+    {
+        PetHud h;
+        h.pet_fill = 0;
+        const Frame zero = pet_hud_frame(0, 0, h);
+        BarSpec none;
+        check(!VitalsReader::find_pet_bar(zero, band, none), "at 0: nothing red to find it by");
+        check(VitalsReader::pet_frame_holds(zero, pet) && VitalsReader::measure(zero, pet) == 0.0f,
+              "but the bar found before holds, and reads 0%");
+    }
+
+    // Not fooled. Looked for over the whole corner, the HP bar inside the
+    // look: the pet's still -- the HP bar, red and wider, has no slot's frame
+    // round it. With no pet's slot there: nothing -- not the HP bar, nor the
+    // experience bar, nor another slot's purple or green. And with the pet
+    // at 0: nothing either -- the purple bar under it, framed alike and as
+    // wide, is not red.
+    {
+        const ScreenRect corner{ 0, 0, 640, 300 };
+        BarSpec in_corner, none;
+        // Found first, then said: the message is made before the call
+        // otherwise, and shows the bar as it was before the look.
+        const bool found_in_corner = VitalsReader::find_pet_bar(full, corner, in_corner) && in_corner.x == 137 &&
+                                     in_corner.y == 87 && in_corner.width == 112;
+        check(found_in_corner, "the whole corner looked through, the HP bar in it: the pet's bar -- " +
+                                   bar_text(in_corner));
+        PetHud no_pet;
+        no_pet.pet = false;
+        const Frame without = pet_hud_frame(0, 0, no_pet);
+        check(!VitalsReader::find_pet_bar(without, corner, none),
+              "no pet's slot: nothing -- not the HP bar, the experience bar, nor another slot's bars");
+        check(!VitalsReader::pet_frame_holds(without, pet), "and the bar found before does not hold there");
+        PetHud zero;
+        zero.pet_fill = 0;
+        check(!VitalsReader::find_pet_bar(pet_hud_frame(0, 0, zero), corner, none),
+              "the pet at 0: nothing -- the purple bar under the red one is not the pet's HP");
+    }
+
+    // And the other way round: HP and MP are the HUD's own bars, never the
+    // pet's. On 2026-10-26 frames without the top of the HUD in them had
+    // "Tự tìm" take the pet's red and purple bars for HP and MP, and save HP
+    // at 137,86, 134 wide.
+    {
+        BarSpec fhp, fmp;
+        const bool own_bars = VitalsReader::find_bars(full, fhp, fmp) == 2 && fhp.x == 82 && fhp.y == 8 &&
+                              fmp.x == 82 && fmp.y == 22;
+        check(own_bars, "finding HP and MP takes the HUD's own bars -- HP " + bar_text(fhp) + ", MP " + bar_text(fmp));
+        PetHud no_top;
+        no_top.top = false;
+        BarSpec thp, tmp;
+        const int n = VitalsReader::find_bars(pet_hud_frame(0, 0, no_top), thp, tmp);
+        check(n == 0, "and with the top of the HUD not there, finds nothing -- not the pet's two bars, nor "
+                      "another slot's -- " + std::to_string(n) + " found");
+    }
+
+    // The reader's watch, frame by frame, as its thread reads.
+    {
+        VitalsReader::PetWatch w;
+        std::uint64_t t = 10'000;
+        check(w.read(full, hp, mp, t) == 100.0f && w.bar.x == 137 && w.bar.width == 112,
+              "the watch finds the bar on the first frame: 100%");
+        PetHud z;
+        z.pet_fill = 0;
+        t += 150;
+        check(w.read(pet_hud_frame(0, 0, z), hp, mp, t) == 0.0f && w.bar.x == 137,
+              "the pet at 0: 0%, the bar kept");
+        PetHud gone;
+        gone.pet = false;
+        t += 150;
+        check(w.read(pet_hud_frame(0, 0, gone), hp, mp, t) < 0.0f && w.bar.x == 137,
+              "the pet put away: no reading -- never an empty bar's 0% -- and the bar kept for its return");
+        // The HUD moved 30 right and 12 down, the HP and MP bars with it.
+        PetHud part;
+        part.pet_fill = 84;
+        const Frame moved = pet_hud_frame(30, 12, part);
+        BarSpec hp2 = hp, mp2 = mp;
+        hp2.x += 30; hp2.y += 12;
+        mp2.x += 30; mp2.y += 12;
+        t += 150;
+        const float before = w.read(moved, hp2, mp2, t);
+        t += VitalsReader::kPetLookMs;
+        const float after = w.read(moved, hp2, mp2, t);
+        check(before < 0.0f && std::fabs(after - 75.0f) < 0.01f && w.bar.x == 167 && w.bar.y == 99,
+              "the HUD moved: no reading where the bar was, and found again at its next look, 75% -- " +
+                  bar_text(w.bar));
+        VitalsReader::PetWatch fresh;
+        check(fresh.read(pet_hud_frame(0, 0, z), hp, mp, 5000) < 0.0f && !fresh.bar.valid(),
+              "a pet at 0 from the start: no bar to find, no reading");
+    }
 }
 
 // ------------------------------------------------------------ mob detector
@@ -8382,7 +11214,7 @@ void test_map_table() {
         // The table belongs to the game, read from wherever it is installed.
         // A machine without the game cannot run this, and the rest of the
         // suite should not start needing one.
-        std::printf("  [skip] the game is not installed here\n");
+        skip("the game is not installed here\n");
         return;
     }
     check(table.entries().size() > 500, "reads the whole table");
@@ -8502,7 +11334,7 @@ void test_glyph_font() {
         // installed, so a machine without it cannot run this. Say so rather
         // than failing: the rest of the suite has no such dependency and
         // should not start needing one.
-        std::printf("  [skip] no glyph set installed -- nothing to read with\n");
+        skip("no glyph set installed -- nothing to read with\n");
         return;
     }
     check(font.size() > 50, "the glyph set loaded");
@@ -8569,7 +11401,7 @@ void test_glyph_font() {
         // character the set does not have would test nothing but the renderer.
         Frame drawn;
         if (!font.render_line("6744 9232", drawn)) {
-            std::printf("  [skip] no glyph for the caption's characters\n");
+            skip("no glyph for the caption's characters\n");
         } else {
             Frame hud = make_frame(400, 60);
             for (int y = 0; y < hud.height; ++y)
@@ -8622,6 +11454,28 @@ void test_glyph_font() {
                       c == 6744 && m == 9232,
                       "still reads the figures with the bar measured " +
                           std::to_string(shortfall) + "px too narrow");
+            }
+
+            // With the HUD's frame under the bar, as the player's client
+            // draws it at 1366x768 and 1600x900: a light line two rows deep
+            // under the bar's last row, on its slate border, the bar's width
+            // and no more -- two thirds of the caption's box. Its top row was
+            // the lowest stroke in every column it crossed, the line's foot
+            // was taken from it, and on every frame of 2026-10-27 the HP
+            // figures came back as "Ị ụụ Ị". MP's were read where its fill
+            // was short enough, and not where it was long.
+            {
+                Frame framed = hud;
+                const int under = bar.y + bar.height + 3;     // the first row past the bar's
+                for (int x = bar.x - 2; x < bar.right() + 2; ++x) {
+                    put_px(framed, x, under, 189, 206, 214);
+                    put_px(framed, x, under + 1, 189, 206, 214);
+                    put_px(framed, x, under + 2, 90, 99, 115);
+                }
+                int c = 0, m = 0;
+                check(VitalsReader::read_numbers(framed, bar, font, c, m) && c == 6744 && m == 9232,
+                      "reads 6744/9232 with the HUD's light line under the bar" +
+                          std::string(c ? " -- got " + std::to_string(c) + "/" + std::to_string(m) : ""));
             }
 
             // A value with a '1' in it, laid out the way the game lays it out.
@@ -8807,7 +11661,7 @@ void test_mob_detector() {
         Frame name;
         const char* const who = "ThanhAmCoc";
         if (dir.empty() || !font.load(dir)) {
-            std::printf("  [skip] no glyph set installed -- no name to look for\n");
+            skip("no glyph set installed -- no name to look for\n");
         } else if (!font.render_line(who, name)) {
             check(false, "the test's name can be drawn with the glyphs");
         } else {
@@ -8994,9 +11848,11 @@ void test_mob_detector() {
         paint_plate(g, 600, 650, 50, 60, false);
         check(!found_near(600, 650), "nor one in the hotbar band");
     }
-    // On the player's own frames: nothing in the hotbar band, nothing in the
-    // icon column. What is found is not printed -- those frames have names
-    // in them.
+    // On the frames saved from the live client: nothing in the hotbar band,
+    // nothing in the icon column. Only the ones these checks were written
+    // against: the player's own, written as GoBot plays, are no measure of
+    // the code. What is found is not printed -- those frames have names in
+    // them.
     {
         std::vector<std::string> shots{ exe_relative("frame.png") };
         WIN32_FIND_DATAA fd{};
@@ -9009,7 +11865,7 @@ void test_mob_detector() {
         int looked = 0, wrong = 0;
         for (const std::string& path : shots) {
             Frame shot;
-            if (!load_png(path, shot) || !shot.valid()) continue;
+            if (!load_live_frame(path, shot) || !shot.valid()) continue;
             ++looked;
             const DetectorTuning used = t.resolved(shot.width, shot.height);
             for (const Nameplate& n : MobDetector::detect(shot, t))
@@ -9017,7 +11873,7 @@ void test_mob_detector() {
                     ++wrong;
         }
         if (looked == 0)
-            std::printf("  [skip] no saved frames of the client here\n");
+            skip("no saved frames of the client that these checks were written against here\n");
         else
             check(wrong == 0, "on " + std::to_string(looked) + " saved frames of the client, "
                               "nothing is taken from the hotbar band or the icon column");
@@ -9048,6 +11904,107 @@ void test_mob_detector() {
         check(reset.automatic() && again.get("Detect", "area") == "auto",
               "and reads back as following the client's size");
         std::remove(path.c_str());
+    }
+}
+
+/// What the detector serves is of the window it follows.
+///
+/// A closed or restarted game kept the hunter walking and attacking towards
+/// monsters where they stood in the old window -- on the login pages too --
+/// because the last look was served until another came, and none came. A
+/// change of window and a grab that fails now forget all of it, and a look
+/// taken of the old window while the window changed is not published. The
+/// frames are the test's own (set_grab); the windows are only numbers.
+void test_mob_detector_forgets() {
+    section("Mob detector: nothing kept from a window it no longer follows");
+
+    Frame scene = make_frame(1024, 768);
+    for (int y = 0; y < 768; ++y)
+        for (int x = 0; x < 1024; ++x) put_px(scene, x, y, 120, 150, 190);
+    paint_plate(scene, 300, 400, 60, 60, false);
+    check(!MobDetector::detect(scene, DetectorTuning::defaults()).empty(), "the scene has a monster in it");
+
+    void* const old_window = reinterpret_cast<void*>(std::uintptr_t{ 0x1000 });
+    void* const new_window = reinterpret_cast<void*>(std::uintptr_t{ 0x2000 });
+    const auto wait_for = [](const std::function<bool()>& cond) {
+        for (int i = 0; i < 150 && !cond(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return cond();
+    };
+    Frame seen;
+    Nameplate me;
+
+    {
+        MobDetector idle;
+        idle.forget();
+        const MobDetector::Stats s = idle.stats();
+        check(s.last_mobs == 0 && !s.player_seen && idle.plates().empty() && !idle.latest_frame(seen),
+              "forgetting needs no thread: a detector never started forgets too");
+    }
+
+    {
+        std::atomic<bool> fail{ false };        // before the detector, whose thread reads it
+        MobDetector d;
+        d.set_grab([&](void* w, Frame& out) {
+            if (fail.load() || w != old_window) return false;
+            out = scene;
+            return true;
+        });
+        d.set_target_window(old_window);
+        d.start();
+        // The plates go out first and the counts a moment later, under their
+        // own lock: both waited for, or the count read here can be the one
+        // from before the look.
+        check(wait_for([&] { return !d.mobs().empty() && d.stats().last_mobs > 0; }) &&
+                  d.latest_frame(seen),
+              "a look at the window: its monster is served, and the frame");
+        const std::size_t counted = d.stats().last_mobs;
+        d.set_target_window(old_window);
+        check(!d.mobs().empty() && d.latest_frame(seen) && d.stats().last_mobs == counted,
+              "told the same window again, nothing is forgotten");
+
+        fail.store(true);
+        // The plates and the counts are forgotten one after the other: both.
+        const bool emptied = wait_for([&] { return d.plates().empty() && d.stats().last_mobs == 0; });
+        check(emptied && d.mobs().empty() && !d.player(me) && !d.latest_frame(seen),
+              "a grab that fails: nothing from the last look is served");
+
+        fail.store(false);
+        check(wait_for([&] { return !d.mobs().empty(); }), "a grab that works again: served again");
+        d.set_target_window(new_window);
+        check(d.plates().empty() && !d.latest_frame(seen) && d.stats().last_mobs == 0,
+              "another window: what the old one showed is dropped at once");
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        check(d.plates().empty() && !d.latest_frame(seen), "and none of it comes back");
+        d.stop();
+    }
+
+    // A look of the old window under way when the window changes.
+    {
+        std::atomic<bool> in_grab{ false }, let_go{ false }, hold_new{ true };
+        MobDetector d2;
+        d2.set_grab([&](void* w, Frame& out) {
+            if (w == old_window) {
+                in_grab.store(true);
+                while (!let_go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                out = scene;
+                return true;
+            }
+            while (hold_new.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return false;
+        });
+        d2.set_target_window(old_window);
+        d2.start();
+        const bool grabbing = wait_for([&] { return in_grab.load(); });
+        d2.set_target_window(new_window);
+        let_go.store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        check(grabbing && d2.plates().empty() && !d2.latest_frame(seen),
+              "a look under way when the window changed is not published as the new window's");
+        // Whatever was found, nothing holds the thread up as it is stopped.
+        let_go.store(true);
+        hold_new.store(false);
+        d2.stop();
     }
 }
 
@@ -9379,6 +12336,49 @@ void test_hunter_config() {
     // explicitly asked it not to.
     check(!back.focus_on_start, "focus-on-start survives being switched off");
     std::remove(path.c_str());
+
+    // "Vị trí từ gói tin": Watch unless the file says otherwise -- the capture
+    // watches and logs, the screen fights -- and the packets laid one to one.
+    {
+        const HunterConfig fresh;
+        check(fresh.packet_positions == PacketPositions::Watch && fresh.packet_scale == 1.0f &&
+                  fresh.packet_dy == 0,
+              "packet positions: Watch by default, laid over the screen one to one");
+        check(std::string(packet_positions_name(PacketPositions::Off)) == "off" &&
+                  std::string(packet_positions_name(PacketPositions::Watch)) == "watch" &&
+                  std::string(packet_positions_name(PacketPositions::On)) == "on",
+              "written as off, watch and on");
+        const std::string ppath = temp_file("gobot_hunt_packets.ini");
+        bool kept = true;
+        for (const PacketPositions p : { PacketPositions::Off, PacketPositions::Watch, PacketPositions::On }) {
+            HunterConfig c;
+            c.packet_positions = p;
+            c.packet_scale = 1.25f;
+            c.packet_dy = 15;
+            HunterConfig b;
+            kept = kept && c.save(ppath) && b.load(ppath) && b.packet_positions == p && b.packet_scale == 1.25f &&
+                   b.packet_dy == 15;
+        }
+        check(kept, "off, watch and on each survive a save and a load, and packet_scale and packet_dy with them");
+        { std::ofstream(ppath) << "# an older GoBot's\n[Hunt]\nreach=150\n"; }
+        HunterConfig old;
+        old.packet_positions = PacketPositions::On;
+        old.packet_scale = 2.0f;
+        old.packet_dy = 9;
+        check(old.load(ppath) && old.packet_positions == PacketPositions::Watch && old.packet_scale == 1.0f &&
+                  old.packet_dy == 0,
+              "a hunt.ini without them reads as Watch, one to one");
+        { std::ofstream(ppath) << "[Hunt]\npacket_positions= ON \npacket_scale=9\npacket_dy=-900\n"; }
+        HunterConfig loud;
+        check(loud.load(ppath) && loud.packet_positions == PacketPositions::On && loud.packet_scale == 4.0f &&
+                  loud.packet_dy == -200,
+              "' ON ' reads as on; a scale and a dy past reason are held to 4 and -200");
+        { std::ofstream(ppath) << "[Hunt]\npacket_positions=yes\npacket_scale=nan\n"; }
+        HunterConfig odd;
+        check(odd.load(ppath) && odd.packet_positions == PacketPositions::Watch && odd.packet_scale == 1.0f,
+              "a word it does not know reads as Watch, and a scale that is no number as 1");
+        std::remove(ppath.c_str());
+    }
 }
 
 /// The hunter drives real input, so what is checked here is what can be
@@ -9771,7 +12771,7 @@ void test_bag() {
     const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
                       store.get("grabbed/inventory") && store.get("inven/0/trash_can");
     if (!have) {
-        std::printf("  [skip] the bag pictures are not installed here\n");
+        skip("the bag pictures are not installed here\n");
         return;
     }
     check(l.bin_dx == 228 && l.bin_dy == 178, "the bin is measured from the live client");
@@ -9858,11 +12858,20 @@ void test_bag() {
     cleaner.set_trash(&wanted);
     cleaner.set_dry_run(true);
     cleaner.set_skip_focus_check(true);
+    // Its clicks go through click_on_game: with no window aimed at, none is
+    // made and none refused, and nothing is said about the mouse -- a pass
+    // with no game says what it said before.
+    std::vector<std::string> told;
+    cleaner.on_report([&told](const std::string& line) { told.push_back(line); });
+    const std::uint64_t refused_before = real_input_refusals();
     const auto res = cleaner.run();
     check(res.ran, "a look-only pass searches the bag");
     check(res.matched == 1, "finds the one listed item and not the other -- found " +
                             std::to_string(res.matched));
     check(res.deleted == 0 && res.dropped == 0 && res.failed == 0, "and throws nothing away");
+    bool said_mouse = false;
+    for (const std::string& line : told) said_mouse = said_mouse || line.find("dùng chuột") != std::string::npos;
+    check(!said_mouse, "and with no game window it says nothing about not using the mouse");
 
     // Nothing is judged while the bin holds something: the slot its item came
     // from shows an enlarged copy of it, which is no item to drag. Looking
@@ -9904,6 +12913,59 @@ void test_bag() {
         early.cancel();
         check(!early.run().ran, "a pass cancelled before it starts does not run");
     }
+    check(real_input_refusals() == refused_before,
+          "none of these passes with no game window reached for the real desktop");
+
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+    } else {
+        // Click-to-move picks the item up with one click and puts it in the
+        // bin with a second, and a stop between the two left it on the
+        // pointer: once it is up, the second goes as a giving-back click --
+        // the game on top there, though not in front, and no stop asked. Any
+        // other click waits on both.
+        const auto npos = std::string::npos;
+        const std::string src = source_text("/src/bag.cpp");
+        const std::string one = body_of(src, "bool BagCleaner::trash_one(");
+        const std::string probe = body_of(src, "BagCleaner::Probe BagCleaner::probe(");
+        const std::string game = body_of(src, "bool BagCleaner::click_game(");
+        const std::size_t up = one.find("moved = click(s.cx(), s.cy());");
+        const std::size_t in_bin = one.find("moved = click(v.trash.cx(), v.trash.cy(), false);");
+        const std::size_t up2 = probe.find("if (!click(s.cx(), s.cy())) return false;");
+        const std::size_t in_bin2 = probe.find("return click(v.trash.cx(), v.trash.cy(), false);");
+        check(up != npos && in_bin != npos && up < in_bin && up2 != npos && in_bin2 != npos && up2 < in_bin2 &&
+                  one.find("wait_ms(220) &&") == npos && probe.find("wait_ms(220) &&") == npos,
+              "bag.cpp: click-to-move's second click follows the first whatever comes between, as a "
+              "giving-back click (need_front=false) -- in a pass and in a probe");
+        check(count_of(game, "cancelled_.load()") == 1 &&
+                  game.find("need_front ? input_.click_on_game(x, y, right_button, [this] { return "
+                            "cancelled_.load(); }, &why, true, presses)") != npos &&
+                  game.find(": input_.click_on_game(x, y, right_button, {}, &why, false, presses)") != npos &&
+                  src.find("click_at(") == npos,
+              "and only a click that gives nothing back waits on a stop; every click is on the game, none "
+              "through click_at");
+        {
+            // The shop's potion: one double-click on the game, two presses,
+            // each asked about before it goes.
+            const std::string dbl = body_of(src, "bool BagCleaner::double_click(");
+            const std::string buy = body_of(src, "int BagCleaner::shop_purchase(");
+            const std::string cog = body_of(source_text("/src/input_manager.cpp"), "bool InputManager::click_on_game(");
+            check(!dbl.empty() && dbl.find("return click_game(x, y, false, true, 2);") != npos &&
+                      buy.find("if (!double_click(cx, cy)) {") != npos && buy.find("mua_x()") == npos &&
+                      cog.find("for (int press = 0; press < std::max(1, presses); ++press)") != npos &&
+                      count_of(cog, "inject(&down, 1,") == 1 && count_of(cog, "would_reach_game(") == 3,
+                  "bag.cpp: the shop's potion goes out as one double-click on the game, never Mua; click_on_game "
+                  "asks again before each press");
+        }
+        // The drag that takes an item to the bin is the default move: on the
+        // game as well, asked again as the button goes down, with the stop.
+        const std::string drag = body_of(src, "bool BagCleaner::drag(");
+        check(drag.find("input_.drag_on_game(fx, fy, tx, ty, [this] { return cancelled_.load(); }, &why)") != npos &&
+                  src.find("input_.drag(") == npos,
+              "and its drag is a drag on the game, which a stop holds up before the press");
+    }
+#endif
 }
 
 void test_bag_counts() {
@@ -9915,7 +12977,7 @@ void test_bag_counts() {
     CountReader counts;
     const std::string font_dir = GlyphFont::default_dir();
     if (font_dir.empty() || !counts.load(font_dir)) {
-        std::printf("  [skip] the client's digit glyphs are not installed here\n");
+        skip("the client's digit glyphs are not installed here\n");
         return;
     }
     check(counts.loaded(), "the ten digits load");
@@ -10054,7 +13116,7 @@ void test_bag_counts() {
     // The catalog of the client's item icons.
     ItemCatalog catalog;
     if (!catalog.load(ItemCatalog::default_dir())) {
-        std::printf("  [skip] the client's item icons are not installed here\n");
+        skip("the client's item icons are not installed here\n");
         return;
     }
     check(catalog.size() >= 50, "the item icons load -- " + std::to_string(catalog.size()));
@@ -10290,7 +13352,7 @@ void test_bag_counts() {
         const Frame* roi1 = pictures.get("grabbed/manhquai_roi1");
         const Frame* roi3 = pictures.get("grabbed/manhquai_roi3");
         if (roi1 == nullptr || roi3 == nullptr || catalog.find("spend/fragment/1103093") == nullptr) {
-            std::printf("  [skip] GoC's pictures of fragments in the bag are not installed here\n");
+            skip("GoC's pictures of fragments in the bag are not installed here\n");
         } else {
             // Slots measured off the pictures: 37 apart, as in the bag, and
             // the piece each holds.
@@ -10610,7 +13672,7 @@ void test_bag_dialogs() {
                       store.get("grabbed/drop_confirm") && !font_dir.empty() &&
                       counts.load(font_dir);
     if (!have) {
-        std::printf("  [skip] the dialog pictures or the digits are not installed here\n");
+        skip("the dialog pictures or the digits are not installed here\n");
         return;
     }
 
@@ -11253,12 +14315,52 @@ struct PretendDeath {
 
 } // namespace
 
+bool revive_with_no_hands(HWND window, Reviver::Turn& turn, int& tries, std::string& said) {
+    TemplateStore store;
+    if (!store.load_best(exe_relative("configs/templates.ini")) || !store.get("grabbed/chardeadpanel"))
+        return false;
+    // The world to die in, as the reviver's tests take it: a real frame of the
+    // client when the saved one is here.
+    Frame world;
+    if (!load_live_frame(exe_relative("frame.png"), world) || world.width != 1280 || world.height != 720)
+        world = bag_scene(1280, 720, 40);
+    PretendDeath g;
+    g.store = &store;
+    g.base = bag::cut(world, ScreenRect{ 0, 0, 880, 520 });
+    InputManager aimed;
+    aimed.set_target_window(window);
+    Reviver r(aimed, store, [&g](Frame& out) {
+        out = g.look();
+        return true;
+    });
+    if (!r.ready()) return false;
+    r.set_clock(g.clock());
+    r.on_report([&said](const std::string& line) { said += line + "\n"; });
+    turn = r.turn();
+    tries = r.tries();
+    return true;
+}
+
 /// Reviving, as GoC does it: the panel found by two corners of its buttons,
 /// its revive-item button, Xác Nhận on the question -- three tries a death,
 /// never the village or Cash, and nothing while the bin's dialog is up.
 void test_reviver() {
     section("Revive: the death panel's item button, then Xác Nhận; never the village");
     const auto started = std::chrono::steady_clock::now();
+#ifdef GOBOT_SOURCE_DIR
+    if (sources_here()) {
+        // Its clicks with no hands of its own: whether the game is in front
+        // and on top at the point is asked as the button goes down, by
+        // click_on_game, and a stop with it -- the frame comes from
+        // PrintWindow, which shows the game even when it is covered.
+        const std::string src = source_text("/src/reviver.cpp");
+        check(src.find("input_.click_on_game(x, y, false, [this] { return stop_now(); }, &why)") !=
+                      std::string::npos &&
+                  src.find("click_at(") == std::string::npos && src.find("WindowFromPoint") == std::string::npos &&
+                  src.find("GA_ROOT") == std::string::npos && src.find("mouse_ok") == std::string::npos,
+              "reviver.cpp: its clicks go through click_on_game, with its stop, and no check of its own");
+    }
+#endif
 
     TemplateStore store;
     const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
@@ -11268,14 +14370,15 @@ void test_reviver() {
                       store.get("grabbed/del_item_confirm_2") && store.get("grabbed/drop_confirm") &&
                       store.get("grabbed/sell_confirm");
     if (!have) {
-        std::printf("  [skip] the death panel's or the dialogs' pictures are not installed here\n");
+        skip("the death panel's or the dialogs' pictures are not installed here\n");
         return;
     }
     const std::string font_dir = GlyphFont::default_dir();
 
-    // The world to die in: a real frame of the client when there is one.
+    // The world to die in: a real frame of the client when the saved one is
+    // here.
     Frame world;
-    if (!load_png(exe_relative("frame.png"), world) || world.width != 1280 || world.height != 720)
+    if (!load_live_frame(exe_relative("frame.png"), world) || world.width != 1280 || world.height != 720)
         world = bag_scene(1280, 720, 40);
 
     InputManager no_window;
@@ -11401,7 +14504,8 @@ void test_reviver() {
         }
     }
     {
-        // Real frames of the client: never a panel, never a question.
+        // Real frames of the client, those these checks were written against:
+        // never a panel, never a question.
         std::vector<std::string> shots{ exe_relative("frame.png") };
         const std::string dir = exe_relative("trash_debug");
         WIN32_FIND_DATAA fd{};
@@ -11416,7 +14520,7 @@ void test_reviver() {
         Reviver r(no_window, store, [](Frame&) { return false; });
         for (const std::string& path : shots) {
             Frame shot;
-            if (!load_png(path, shot) || !shot.valid()) continue;
+            if (!load_live_frame(path, shot) || !shot.valid()) continue;
             const auto t0 = std::chrono::steady_clock::now();
             const auto s = r.look(shot);
             ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -11424,7 +14528,7 @@ void test_reviver() {
             if (s.dead()) ++dead;
         }
         if (looked == 0) {
-            std::printf("  [skip] no saved frames of the client here\n");
+            skip("no saved frames of the client that these checks were written against here\n");
         } else {
             check(dead == 0, "on " + std::to_string(looked) +
                                  " real frames of the client nobody is dead: no panel, no question");
@@ -11931,7 +15035,7 @@ void test_screen_layout() {
                           store.get("inven/0/dialog_chat_res3.spr/1") != nullptr &&
                           font.load(GlyphFont::default_dir());
         if (!have) {
-            std::printf("  [skip] the chat bar's picture or the glyphs are not installed here\n");
+            skip("the chat bar's picture or the glyphs are not installed here\n");
         } else {
             const Frame& bar = *store.get("inven/0/dialog_chat_res3.spr/1");
             // A chat panel: the bar, and two lines written above it in the
@@ -12016,20 +15120,20 @@ void test_screen_layout() {
         const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
                           store.get("inven/0/dialog_chat_res3.spr/1") != nullptr &&
                           store.get("player_in_map_icon") != nullptr;
-        const bool have_wide = have && load_png(exe_relative("frame.png"), wide) &&
+        const bool have_wide = have && load_live_frame(exe_relative("frame.png"), wide) &&
                                wide.width == 1280 && wide.height == 720;
-        const bool have_small = have && load_png(exe_relative("playerlist.png"), small) &&
+        const bool have_small = have && load_live_frame(exe_relative("playerlist.png"), small) &&
                                 small.width == 1024 && small.height == 768;
         if (!have_wide && !have_small) {
-            std::printf("  [skip] no saved frames of the client here\n");
+            skip("no saved frames of the client that these checks were written against here\n");
         } else if (!have_wide || !have_small) {
             // Said, not left out quietly: `gobot_cli --read` and
-            // `--playerlist` write these two files, and one taken at another
-            // size takes these checks with it.
-            std::printf("  [skip] %s is missing here, or not the %s frame -- its checks are left "
-                        "out\n",
-                        have_wide ? "playerlist.png" : "frame.png",
-                        have_wide ? "1024x768" : "1280x720");
+            // `--playerlist` write these two files, and one taken since, or
+            // at another size, takes these checks with it.
+            skip("%s is missing here, or not the %s frame these checks were written against "
+                 "-- its checks are left out\n",
+                 have_wide ? "playerlist.png" : "frame.png",
+                 have_wide ? "1024x768" : "1280x720");
         }
         for (const Frame* f : { have_wide ? &wide : nullptr, have_small ? &small : nullptr }) {
             if (f == nullptr) continue;
@@ -12104,6 +15208,71 @@ void test_screen_layout() {
         PlayerList::Settings loaded;
         loaded.load(ini);
         check(!loaded.fixed, "and a party.ini with only the old numbers is not fixed");
+
+        // F12 or DỪNG in the middle of an invite: nothing more is clicked,
+        // and it ends then -- not after the menu's wait and the four seconds
+        // of watching it, with the window that reads F12 frozen behind it.
+        int pressed = 0;
+        bool stop = false;
+        PlayerList stoppable;
+        stoppable.set_settings(measured);
+        stoppable.place(1212, 139, 1280, 720);
+        stoppable.set_click([&](int, int) {
+            ++pressed;
+            stop = true;            // the stop comes while the row is being picked
+            return true;
+        });
+        PlayerList::Row first;
+        first.index = 0;
+        first.y = 182;
+        why.clear();
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool invited =
+            stoppable.invite(no_window, capture, TemplateStore{}, first, &why, [&] { return stop; });
+        const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - t0).count();
+        check(!invited && pressed == 1 && why == "stopped" && took < 900,
+              "stopped as the row is picked, an invite presses nothing more and ends then -- " +
+                  std::to_string(took) + " ms");
+        pressed = 0;
+        why.clear();
+        check(!stoppable.invite(no_window, capture, TemplateStore{}, first, &why, [] { return true; }) &&
+                  pressed == 0 && why == "stopped",
+              "stopped before it starts, it clicks nothing");
+        why.clear();
+        check(!stoppable.ensure_open(no_window, capture, TemplateStore{}, &why, [] { return true; }) &&
+                  pressed == 0 && why == "stopped",
+              "and nor does opening the list");
+
+        // A row click that did not go -- the game not in front, something
+        // over the list -- is the end of it: Req Party is pressed only on a
+        // row that was picked.
+        int tried = 0;
+        PlayerList unclicked;
+        unclicked.set_settings(measured);
+        unclicked.place(1212, 139, 1280, 720);
+        unclicked.set_click([&](int, int) {
+            ++tried;
+            return false;
+        });
+        why.clear();
+        const bool row_refused = !unclicked.invite(no_window, capture, TemplateStore{}, first, &why);
+        check(row_refused && tried == 1 && why.find("row") != std::string::npos,
+              "a row click refused ends the invite there, with nothing more clicked -- " + why);
+#ifdef GOBOT_SOURCE_DIR
+        {
+            // Every click of the list's goes where the game is, and only there.
+            std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/src/player_list.cpp", std::ios::binary);
+            const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const std::size_t click = src.find("bool PlayerList::click(");
+            const std::size_t on_game =
+                click == std::string::npos ? click : src.find("input.click_on_game(", click);
+            const std::size_t next = click == std::string::npos ? click : src.find("\n}", click);
+            check(on_game != std::string::npos && on_game < next &&
+                      src.find("click_at(") == std::string::npos,
+                  "player_list.cpp: its clicks go through click_on_game, and none through click_at");
+        }
+#endif
     }
 
     // ---- the HUD landmark, from the staged pictures ----
@@ -12112,7 +15281,7 @@ void test_screen_layout() {
         std::string from;
         if (!TemplateStore::load_one("hpmp_indicator2", exe_relative("configs/templates.ini"),
                                      landmark, &from)) {
-            std::printf("  [skip] no picture of the HUD landmark here\n");
+            skip("no picture of the HUD landmark here\n");
         } else {
             check(from.find("templates") != std::string::npos &&
                       from.find("hpmp_indicator2") != std::string::npos,
@@ -12133,8 +15302,8 @@ void test_screen_layout() {
             check(anchored && logged,
                   "and a started reader takes it from there, and says where it came from");
             Frame shot;
-            if (!load_png(exe_relative("frame.png"), shot) || !shot.valid()) {
-                std::printf("  [skip] no saved frame of the client here\n");
+            if (!load_live_frame(exe_relative("frame.png"), shot) || !shot.valid()) {
+                skip("no saved frame of the client these checks know here\n");
             } else {
                 const auto hit = TemplateMatcher::find(
                     shot, ScreenRect{ 0, 0, std::min(shot.width, 560), std::min(shot.height, 280) },
@@ -12384,10 +15553,11 @@ void test_macro_key_kind() {
     k.interval_ms = kBuffMinIntervalMs;
     check(macro_key_kind(k) == MacroKeyKind::Buff, "a minute is a buff");
 
-    // The simple screen's buff interval goes down to one minute, so a buff
-    // edited there must not turn into a skill and jump rows.
+    // Unmarked, as in every file before MacroKey::buff, a key on a one-minute
+    // timer is still a buff -- the shortest the buff row allowed before it
+    // marked its keys (marked buffs of 0-59 s: test_macro_short_buffs).
     k.interval_ms = 1 * 60000;
-    check(macro_key_kind(k) == MacroKeyKind::Buff, "its shortest buff interval stays a buff");
+    check(macro_key_kind(k) == MacroKeyKind::Buff, "unmarked, a key on a one-minute timer is still a buff");
 
     // A potion on a long cooldown is still a potion: the trigger decides.
     k.trigger = MacroTrigger::HpBelow;
@@ -12397,17 +15567,21 @@ void test_macro_key_kind() {
     // The shipped defaults land in the rows the simple screen shows.
     MacroConfig cfg;
     cfg.apply_defaults();
-    int skills = 0, buffs = 0, hp = 0, mp = 0;
+    int skills = 0, buffs = 0, hp = 0, mp = 0, pet = 0;
     for (const auto& key : cfg.keys) {
         switch (macro_key_kind(key)) {
-            case MacroKeyKind::Skill:    ++skills; break;
-            case MacroKeyKind::Buff:     ++buffs;  break;
-            case MacroKeyKind::HpPotion: ++hp;     break;
-            case MacroKeyKind::MpPotion: ++mp;     break;
+            case MacroKeyKind::Skill:     ++skills; break;
+            case MacroKeyKind::Buff:      ++buffs;  break;
+            case MacroKeyKind::HpPotion:  ++hp;     break;
+            case MacroKeyKind::MpPotion:  ++mp;     break;
+            case MacroKeyKind::PetPotion: ++pet;    break;
         }
     }
-    check(skills == 4 && buffs == 2 && hp == 1 && mp == 1,
-          "defaults: four skills, two buffs, a potion of each");
+    check(skills == 4 && buffs == 2 && hp == 1 && mp == 1 && pet == 0,
+          "defaults: four skills, two buffs, an HP and an MP potion -- no pet's: its key is the player's to set");
+    k.trigger = MacroTrigger::PetHpBelow;
+    k.interval_ms = 300000;
+    check(macro_key_kind(k) == MacroKeyKind::PetPotion, "a pet HP trigger is a pet potion, whatever its interval");
 
     // The per-key tally behind "Bình HP: 3". Nothing reaches a test run --
     // there is no focused game window -- so nothing may be counted against
@@ -12436,9 +15610,8 @@ void test_macro_buffs() {
     section("Macro: a clock for each buff, and every buff again after a death");
 
     // The simple screen's seconds box, and what it writes.
-    check(clamp_buff_seconds(59) == 60 && clamp_buff_seconds(9000) == 7200 &&
-              clamp_buff_seconds(1600) == 1600 && clamp_buff_seconds(60) == 60,
-          "a buff's seconds are held to 60..7200: 59 is 60, 9000 is 7200");
+    check(clamp_buff_seconds(9000) == 7200 && clamp_buff_seconds(1600) == 1600 && clamp_buff_seconds(60) == 60,
+          "a buff's seconds are held to at most 7200: 9000 is 7200 (under a minute: test_macro_short_buffs)");
     {
         MacroConfig cfg;
         cfg.apply_defaults();
@@ -12721,29 +15894,524 @@ void test_macro_buffs() {
     }
 }
 
+/// A buff of under a minute, down to 0 s: the player asked for "buff time min
+/// 0 second", and chose for 0 "as often as possible", as GoC casts a buff whose
+/// cooldown is 0 -- every 5 s (2026-10-27). A key marked as a buff stays one
+/// whatever its interval; unmarked, as in every file before the mark, a key is
+/// a buff by its interval, as it always was.
+void test_macro_short_buffs() {
+    section("Macro: buffs of 0 to 59 seconds (MacroKey::buff)");
+
+    check(clamp_buff_seconds(-5) == 0 && clamp_buff_seconds(0) == 0 && clamp_buff_seconds(30) == 30 &&
+              clamp_buff_seconds(59) == 59 && clamp_buff_seconds(9000) == 7200,
+          "the buff row's seconds are held to 0..7200: 0, 30 and 59 stay, 9000 is 7200");
+
+    {
+        MacroKey k;
+        k.keycode = 'B';
+        k.enabled = true;
+        k.buff = true;
+        bool all = true;
+        for (const std::uint32_t iv : { 0u, 1000u, 30000u, kBuffMinIntervalMs - 1, kBuffMinIntervalMs }) {
+            k.interval_ms = iv;
+            all = all && macro_key_kind(k) == MacroKeyKind::Buff && macro_timer_on(k);
+        }
+        check(all, "marked as a buff, a key is one at 0, 1, 30, 59.999 and 60 s, and on at each");
+        k.interval_ms = 0;
+        check(macro_timer_interval_ms(k) == kBuffRepeatMinMs && kBuffRepeatMinMs == 5000,
+              "a buff at 0 is due again 5 s after its press");
+        k.interval_ms = 3000;
+        const bool floored = macro_timer_interval_ms(k) == 5000;
+        k.interval_ms = 30000;
+        check(floored && macro_timer_interval_ms(k) == 30000, "at 3 s also 5 s -- none sooner -- and at 30 s, 30 s");
+        k.trigger = MacroTrigger::HpBelow;
+        check(macro_key_kind(k) == MacroKeyKind::HpPotion, "a trigger still wins over the mark");
+
+        MacroKey old;
+        old.keycode = 'S';
+        old.enabled = true;
+        old.interval_ms = 0;
+        const bool off = macro_key_kind(old) == MacroKeyKind::Skill && !macro_timer_on(old);
+        old.interval_ms = 1200;
+        check(off && macro_key_kind(old) == MacroKeyKind::Skill && macro_timer_on(old) &&
+                  macro_timer_interval_ms(old) == 1200,
+              "unmarked: a 0 interval is off, as it was, and a short one a skill on its own interval");
+    }
+
+    {
+        // Written and read back; and a file from before the mark.
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys.clear();
+        MacroKey a;
+        a.keycode = 'A';
+        a.enabled = true;
+        a.buff = true;
+        a.interval_ms = 0;
+        MacroKey s = a;
+        s.keycode = 'S';
+        s.buff = false;
+        s.interval_ms = 1200;
+        cfg.keys = { a, s };
+        const std::string path = temp_file("gobot_test_short_buffs.ini");
+        MacroConfig back;
+        IniFile raw;
+        const bool ok = cfg.save(path) && back.load(path) && raw.load(path);
+        check(ok && back.keys.size() == 2 && back.keys[0].buff && back.keys[0].interval_ms == 0 &&
+                  !back.keys[1].buff && raw.get_bool("Keys", "key_0_buff", false) &&
+                  !raw.get_bool("Keys", "key_1_buff", true),
+              "a buff at 0 s is written with buff=true and its 0, and read back a buff");
+        std::remove(path.c_str());
+
+        const std::string before = temp_file("gobot_test_unmarked.ini");
+        {
+            std::ofstream out(before);
+            out << "[Keys]\nkey_0_keycode=65\nkey_0_enabled=true\nkey_0_interval_ms=300000\n"
+                   "key_1_keycode=90\nkey_1_enabled=true\nkey_1_interval_ms=1200\n";
+        }
+        MacroConfig old;
+        check(old.load(before) && old.keys.size() == 2 && !old.keys[0].buff && !old.keys[1].buff &&
+                  macro_key_kind(old.keys[0]) == MacroKeyKind::Buff &&
+                  macro_key_kind(old.keys[1]) == MacroKeyKind::Skill,
+              "a macro.ini from before the mark: a 300-s key a buff and a 1.2-s one a skill, as they were");
+        std::remove(before.c_str());
+    }
+
+    // The engine on a clock of the test's own, as in test_macro_buffs.
+    struct Rig {
+        InputManager input;
+        ExecutionCoordinator coord;
+        MacroEngine engine{ input, coord };
+        std::uint64_t t = 7'200'000;
+        std::vector<std::pair<std::uint32_t, std::uint64_t>> pressed;
+        explicit Rig(std::vector<MacroKey> keys) {
+            MacroEngine::Clock c;
+            c.now_ms = [this] { return t; };
+            engine.set_clock(c);
+            MacroEngine::Hands h;
+            h.focused = [] { return true; };
+            h.key = [this](std::uint32_t vk, int) {
+                pressed.emplace_back(vk, t);
+                return true;
+            };
+            engine.set_hands(h);
+            MacroConfig cfg;
+            cfg.apply_defaults();
+            cfg.keys = std::move(keys);
+            cfg.sequence_enabled = false;
+            cfg.require_focus = true;
+            cfg.global_jitter_pct = 0;
+            engine.set_config(cfg);
+            engine.start_stepped();
+        }
+        ~Rig() { engine.stop(); }
+        void run(std::uint64_t ms) {
+            for (const std::uint64_t until = t + ms; t < until; t += 10) engine.step();
+        }
+        std::vector<std::uint64_t> when(std::uint32_t vk) const {
+            std::vector<std::uint64_t> out;
+            for (const auto& p : pressed)
+                if (p.first == vk) out.push_back(p.second);
+            return out;
+        }
+    };
+    const auto buff = [](std::uint32_t vk, std::uint32_t interval_ms, std::uint32_t delay = 0) {
+        MacroKey k;
+        k.keycode = vk;
+        k.label = std::string(1, static_cast<char>(vk));
+        k.enabled = true;
+        k.buff = true;
+        k.interval_ms = interval_ms;
+        k.jitter_pct = 0;
+        k.start_delay_ms = delay;
+        return k;
+    };
+    const auto gaps = [](const std::vector<std::uint64_t>& at, std::uint64_t lo, std::uint64_t hi) {
+        for (std::size_t i = 1; i < at.size(); ++i)
+            if (at[i] - at[i - 1] < lo || at[i] - at[i - 1] > hi) return false;
+        return true;
+    };
+
+    {
+        Rig rig({ buff('A', 0) });
+        const std::uint64_t t0 = rig.t;
+        rig.run(60'000);
+        const auto a = rig.when('A');
+        check(a.size() == 12 && !a.empty() && a[0] == t0 && gaps(a, 5000, 5000),
+              "a buff at 0 s goes out at the start and then every 5 s: 12 times in a minute -- " +
+                  std::to_string(a.size()));
+    }
+    {
+        Rig rig({ buff('A', 30'000) });
+        rig.run(61'000);
+        const auto a = rig.when('A');
+        check(a.size() == 3 && gaps(a, 30'000, 30'000), "a buff at 30 s: at the start, 30 s and 60 s -- " +
+                                                            std::to_string(a.size()) + " times");
+    }
+    {
+        // Two at 0 s: each every 5 s, and never closer than kBuffGapMs.
+        Rig rig({ buff('A', 0), buff('S', 0, 150) });
+        rig.run(30'000);
+        std::vector<std::uint64_t> all;
+        for (const auto& p : rig.pressed) all.push_back(p.second);
+        std::sort(all.begin(), all.end());
+        check(rig.when('A').size() == 6 && rig.when('S').size() == 6 && gaps(all, MacroEngine::kBuffGapMs, 5000),
+              "two buffs at 0 s: each every 5 s, at least 1.2 s apart -- " + std::to_string(rig.when('A').size()) +
+                  " and " + std::to_string(rig.when('S').size()));
+    }
+    {
+        // An unmarked key at 0: off, as it always was.
+        MacroKey z = buff('Z', 0);
+        z.buff = false;
+        Rig rig({ z });
+        rig.run(20'000);
+        check(rig.pressed.empty(), "an unmarked key at 0 is never pressed");
+    }
+    {
+        // Out of the world 15 s and back: cast again with the rest.
+        Rig rig({ buff('A', 0), buff('S', 600'000, 150) });
+        rig.run(20'000);
+        rig.pressed.clear();
+        rig.engine.set_suspended(true, "dead");
+        rig.run(15'000);
+        const bool held = rig.pressed.empty();
+        const std::uint64_t back = rig.t;
+        rig.engine.set_suspended(false);
+        rig.run(6'000);
+        const auto a = rig.when('A');
+        const auto s = rig.when('S');
+        check(held && !a.empty() && a[0] - back <= 5000 && s.size() == 1 && s[0] - back <= 5000,
+              "after 15 s out of the world a 0-s buff is cast again with the others, within 5 s of coming back");
+    }
+    {
+        // Jitter on a 0-s buff -- the key's own and the macro's on top -- never
+        // takes it under 5 s: the floor comes after the jitter.
+        MacroKey a = buff('A', 0);
+        a.jitter_pct = 10;
+        Rig rig({ a });
+        MacroConfig cfg = rig.engine.config();
+        cfg.global_jitter_pct = 20;
+        rig.engine.set_config(cfg);
+        rig.run(120'000);
+        const auto at = rig.when('A');
+        check(at.size() >= 18 && gaps(at, 5000, 6510),
+              "a 0-s buff at 10% jitter and 20% more on top: every gap 5 s or more -- " + std::to_string(at.size()) +
+                  " presses in 2 minutes");
+    }
+    {
+        // With only a 0-s buff, a re-cast asked for has a buff to re-cast.
+        Rig rig({ buff('A', 0) });
+        rig.run(20'000);
+        check(rig.engine.recast_buffs("a revive"), "a 0-s buff is re-cast after a revive like any other");
+    }
+    {
+        // Turned down to 0 two seconds after its press: due 5 s after it, not
+        // at once -- the interval it is armed with, a buff's at least 5 s.
+        Rig rig({ buff('F', 300'000) });
+        rig.run(2'000);
+        MacroConfig cfg = rig.engine.config();
+        cfg.keys[0].interval_ms = 0;
+        rig.engine.set_config(cfg);
+        rig.run(5'000);
+        const auto f = rig.when('F');
+        check(f.size() == 2 && f[1] - f[0] == 5'000,
+              "a buff turned down from 300 s to 0, 2 s after its press, goes out 5 s after that press -- " +
+                  std::to_string(f.size() == 2 ? f[1] - f[0] : 0) + " ms");
+    }
+    {
+        // Turned down to 0 during a run: due 5 s after its last press.
+        Rig rig({ buff('F', 300'000) });
+        rig.run(10'000);
+        const auto first = rig.when('F');
+        MacroConfig cfg = rig.engine.config();
+        cfg.keys[0].interval_ms = 0;
+        rig.engine.set_config(cfg);
+        rig.run(1'000);
+        const auto f = rig.when('F');
+        check(first.size() == 1 && f.size() == 2 && f[1] - f[0] == 10'000,
+              "a buff turned down from 300 s to 0 during a run goes out at once, its last press 10 s back "
+              "being more than 5 s ago");
+        rig.run(10'000);
+        check(gaps(rig.when('F'), 5000, 10'000) && rig.when('F').size() == 4, "and every 5 s from then on");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    // The windows mark what they set as a buff: the simple screen's seconds
+    // box and its "+", the full screen's "a buff" and its interval. Lose one
+    // and a buff set to 30 s there is saved unmarked -- a skill -- and one set
+    // to 0, off.
+    if (sources_here()) {
+        const std::string simple = source_text("/apps/gobot_gui/simple_view.cpp");
+        const std::size_t box = simple.find("\"##seconds\"");
+        const std::size_t box_end = box == std::string::npos ? box : simple.find("label(\"giây\")", box);
+        const std::size_t plus = simple.find("\"+##buff\"");
+        const std::size_t plus_end = plus == std::string::npos ? plus : simple.find("EndDisabled()", plus);
+        const bool marked_box = box_end != std::string::npos &&
+                                simple.substr(box, box_end - box).find("k.buff = true;") != std::string::npos;
+        const bool marked_plus = plus_end != std::string::npos &&
+                                 simple.substr(plus, plus_end - plus).find("k.buff = true;") != std::string::npos;
+        const std::string full = source_text("/apps/gobot_gui/gui_app.cpp");
+        check(marked_box && marked_plus && full.find("k.buff = when == kWhenBuff;") != std::string::npos &&
+                  full.find("if (is_buff) k.buff = true;") != std::string::npos &&
+                  full.find("const int least = is_buff ? 0 : 10;") != std::string::npos,
+              "the buff row's seconds box and its +, and the full screen's \"a buff\" and interval, mark the key "
+              "a buff");
+    }
+#endif
+}
+
+/// When the game is brought back to the front while the bot runs: at once,
+/// whatever took it -- the player's choice, 2026-10-27 -- but never in the
+/// middle of a click, never while the keeper is logging back in, and slower
+/// once Windows keeps refusing.
+void test_front_keeper() {
+    section("Keeping the game in front while the bot runs (FrontKeeper)");
+
+    FrontKeeper::Look behind;
+    behind.on = true;
+    behind.running = true;
+    behind.window = true;
+    const std::uint64_t t0 = 1'000'000;
+    {
+        FrontKeeper k;
+        const bool first = k.due(behind, t0);
+        k.tried(true, t0);
+        const bool soon = k.due(behind, t0 + 100);
+        const bool later = k.due(behind, t0 + FrontKeeper::kEveryMs);
+        check(first && !soon && later && FrontKeeper::kEveryMs <= 1000,
+              "behind with the bot running: brought back at the first look, and again 0.7 s later if it "
+              "is behind again -- not a tug of war at every frame");
+    }
+    {
+        FrontKeeper k;
+        FrontKeeper::Look l = behind;
+        l.on = false;
+        bool any = k.due(l, t0);
+        l = behind;
+        l.running = false;
+        any = any || k.due(l, t0);
+        l = behind;
+        l.window = false;
+        any = any || k.due(l, t0);
+        l = behind;
+        l.in_front = true;
+        any = any || k.due(l, t0);
+        l = behind;
+        l.crossing = true;
+        any = any || k.due(l, t0);
+        check(!any, "never with the box unticked, the bot stopped, no game window, the game in front, or the "
+                    "keeper logging back in");
+    }
+    {
+        FrontKeeper k;
+        FrontKeeper::Look l = behind;
+        l.mouse_down = true;
+        l.input_age_ms = 0;
+        const bool held = k.due(l, t0) || k.due(l, t0 + 5000);
+        l.mouse_down = false;
+        l.input_age_ms = 0;
+        const bool just_up = k.due(l, t0 + 5010);
+        l.input_age_ms = FrontKeeper::kSettleMs;
+        check(!held && !just_up && k.due(l, t0 + 5010 + FrontKeeper::kSettleMs),
+              "not while a mouse button is held, held 5 s or not, nor in the frame it comes up -- ImGui would "
+              "hear the release and the focus going together, and drop GoBot's own DỪNG -- but 0.2 s after the "
+              "last click or key");
+    }
+    {
+        // Something nudging the input without a pause: after 3 s of waiting
+        // for stillness it goes ahead, with no button held.
+        FrontKeeper k;
+        FrontKeeper::Look l = behind;
+        l.input_age_ms = 0;
+        const bool waits = !k.due(l, t0) && !k.due(l, t0 + FrontKeeper::kSettleMaxMs - 1);
+        check(waits && k.due(l, t0 + FrontKeeper::kSettleMaxMs) && FrontKeeper::kSettleMs <= 250,
+              "input that never pauses: it waits 3 s for 0.2 s of stillness, then goes ahead");
+    }
+    {
+        FrontKeeper k;
+        std::uint64_t t = t0;
+        for (int i = 0; i < FrontKeeper::kRefusalsBeforeBackoff; ++i) {
+            if (k.due(behind, t)) k.tried(false, t);
+            t += FrontKeeper::kEveryMs;
+        }
+        const std::uint64_t last = t - FrontKeeper::kEveryMs;
+        const bool waits = !k.due(behind, last + FrontKeeper::kEveryMs) &&
+                           !k.due(behind, last + FrontKeeper::kBackoffMs - 1) &&
+                           k.due(behind, last + FrontKeeper::kBackoffMs);
+        check(k.refusals() == FrontKeeper::kRefusalsBeforeBackoff && waits,
+              "refused 3 times in a row: then only every 3 s");
+        FrontKeeper::Look front = behind;
+        front.in_front = true;
+        (void)k.due(front, last + FrontKeeper::kBackoffMs);
+        check(k.refusals() == 0, "and back to 0.7 s once it is found in front");
+    }
+    {
+        // One of GoBot's key boxes waiting for a key, GoBot in front: the key
+        // has to reach GoBot, and F10 and F11 are not heard meanwhile.
+        FrontKeeper k;
+        FrontKeeper::Look l = behind;
+        l.listening = true;
+        const bool waits = !k.due(l, t0) && !k.due(l, t0 + FrontKeeper::kListenMaxMs - 1);
+        check(waits && k.due(l, t0 + FrontKeeper::kListenMaxMs) && FrontKeeper::kListenMaxMs <= 10'000,
+              "a key box waiting for its key, GoBot in front: held off 10 s at most -- nothing goes to the game "
+              "meanwhile -- then the game goes forward");
+    }
+    {
+        // As it happens: the click that opens the box is let go of in a look
+        // before the box waits -- its button fires on the release, after the
+        // look -- and the wait for stillness starts there. The key pressed 4 s
+        // on may still be down: the game waits for 0.2 s of stillness after
+        // it, however long the box waited.
+        FrontKeeper k;
+        FrontKeeper::Look l = behind;
+        l.input_age_ms = 0;
+        (void)k.due(l, t0 - 100);
+        l.listening = true;
+        (void)k.due(l, t0);
+        l.listening = false;
+        l.input_age_ms = 0;
+        const bool at_key = k.due(l, t0 + 4000);
+        l.input_age_ms = FrontKeeper::kSettleMs;
+        const bool after = k.due(l, t0 + 4000 + FrontKeeper::kSettleMs);
+        k.tried(true, t0 + 4000 + FrontKeeper::kSettleMs);
+        // A box clicked again later waits its own 10 s, not what is left of
+        // the first one's.
+        l.listening = true;
+        const std::uint64_t again = t0 + 30'000;
+        const bool fresh = !k.due(l, again) && !k.due(l, again + FrontKeeper::kListenMaxMs - 1) &&
+                           k.due(l, again + FrontKeeper::kListenMaxMs);
+        check(!at_key && after && fresh,
+              "the key pressed 4 s after the click: brought forward 0.2 s after it, as after any key, not while "
+              "it may still be down; and a box clicked again later has its own 10 s");
+    }
+    {
+        // A window not answering is skipped, not refused: Windows' refusals,
+        // which the warning counts, do not grow, and the looks keep their pace.
+        FrontKeeper k;
+        bool early = false;
+        std::uint64_t t = t0;
+        for (int i = 0; i < 5; ++i) {
+            if (k.due(behind, t)) k.skipped(t);
+            early = early || k.due(behind, t + FrontKeeper::kEveryMs - 1);
+            t += FrontKeeper::kEveryMs;
+        }
+        check(k.refusals() == 0 && !early && k.due(behind, t),
+              "a window not answering: skipped, no refusal counted, looked at again every 0.7 s");
+    }
+    {
+        // A key a key box took is still down: the game waits for its key-up,
+        // as for a button -- a key held past the settle time sends no input of
+        // its own until its auto-repeat.
+        FrontKeeper k;
+        FrontKeeper::Look l = behind;
+        l.key_down = true;
+        l.input_age_ms = FrontKeeper::kSettleMs;
+        const bool held = k.due(l, t0) || k.due(l, t0 + 2000);
+        l.key_down = false;
+        l.input_age_ms = 0;
+        const bool just_up = k.due(l, t0 + 2010);
+        l.input_age_ms = FrontKeeper::kSettleMs;
+        check(!held && !just_up && k.due(l, t0 + 2010 + FrontKeeper::kSettleMs),
+              "a key a key box took, still down: not brought forward; once up, 0.2 s of stillness, as after any key");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here\n");
+        return;
+    }
+    const std::string src = source_text("/apps/gobot_gui/simple_view.cpp");
+    const std::string keep = body_of(src, "void GuiApp::keep_game_in_front()");
+    check(keep.find("GetAsyncKeyState(vk)") != std::string::npos && keep.find("VK_LBUTTON") != std::string::npos &&
+              keep.find("look.input_age_ms = GetTickCount() - last.dwTime") != std::string::npos &&
+              keep.find("look.in_front = fg_pid != 0 && fg_pid == game_pid") != std::string::npos &&
+              keep.find("look.running = simple_running() || bot_running_;") != std::string::npos &&
+              keep.find("keeper_crossing()") != std::string::npos &&
+              keep.find("front_keeper_.due(") != std::string::npos &&
+              keep.find("front_keeper_.tried(") != std::string::npos,
+          "the GUI asks it with the mouse buttons and how long the input has been still, a window of the game's "
+          "own process counted as the game in front, whatever DỪNG LẠI stops and the packet bot as running, and "
+          "the keeper's crossing");
+    check(keep.find("look.listening = !hp_low && simple_listening_ != 0 && fg != nullptr && "
+                    "fg == static_cast<HWND>(main_hwnd_);") != std::string::npos &&
+              keep.find("const bool hp_low = vitals_running_ && hp >= 0.0f && "
+                        "hp < static_cast<float>(chat_hp_floor_.load());") != std::string::npos &&
+              keep.find("simple_listening_ = 0;") != std::string::npos &&
+              keep.find("if (simple_listening_ != 0 && input_.window_focused()) give_up_key_wait();") !=
+                  std::string::npos &&
+              keep.find("if (simple_listening_ != 0) give_up_key_wait();") != std::string::npos,
+          "a key box waiting for its key with GoBot in front holds it off -- not with HP under the HP potion's "
+          "mark, or 50%, if that is higher -- and gives up its wait once the game is in front, however it got "
+          "there, or a try is made: F10 and F11 are not heard while it waits");
+    check(keep.find("look.key_down = front_key_ != 0;") != std::string::npos &&
+              keep.find("if (front_key_ != 0 && (!down(static_cast<int>(front_key_)) ||") != std::string::npos &&
+              src.find("front_key_ = got;") != std::string::npos,
+          "a key a key box took is held down until it reads up, for up to 3 s: the game does not get it down");
+    {
+        const std::size_t hung = keep.find("InputManager::window_hung(input_.target_window())");
+        const std::size_t hung_fg = keep.find("InputManager::window_hung(fg)");
+        const std::size_t skipped_at = keep.find("front_keeper_.skipped(now);");
+        const std::size_t focus = keep.find("input_.focus_window(InputManager::kFocusMinMs, &accepted)");
+        check(hung != std::string::npos && hung_fg != std::string::npos && skipped_at != std::string::npos &&
+                  focus != std::string::npos && hung < focus && hung_fg < focus && skipped_at < focus &&
+                  keep.find("tried(false") == std::string::npos &&
+                  keep.find("front_keeper_.tried(accepted, now);") != std::string::npos &&
+                  keep.find("if (accepted) {") != std::string::npos,
+              "a game or a program in front that has stopped answering is left alone before any try, and is no "
+              "refusal of Windows': the game cannot take a key, and Windows would only refuse; and the try "
+              "waits the least, on the thread that reads F12 by polling");
+    }
+    {
+        // Nothing focus_window does may wait on the game's thread, and it
+        // attaches only to a thread that answers. The game's thread does the
+        // work at its own pace, so the answer is looked for, not waited on.
+        const std::string focus =
+            body_of(source_text("/src/input_manager.cpp"), "bool InputManager::focus_window(long long wait_ms, bool* accepted)");
+        check(focus.find("ShowWindowAsync(target, SW_RESTORE)") != std::string::npos &&
+                  focus.find("SWP_ASYNCWINDOWPOS") != std::string::npos &&
+                  focus.find("BringWindowToTop(") == std::string::npos &&
+                  focus.find("ShowWindow(target") == std::string::npos &&
+                  focus.find("answers(fg)") != std::string::npos &&
+                  focus.find("const long long most = asked ? std::max(wait_ms, kFocusMinMs) : kFocusMinMs;") !=
+                      std::string::npos &&
+                  focus.find("if (accepted) *accepted = in_front || asked;") != std::string::npos &&
+                  InputManager::kFocusMinMs == 50 && InputManager::kFocusWaitMs >= 200 &&
+                  InputManager::kFocusWaitMs <= 500,
+              "focus_window never waits on the game's thread, attaches only to a program in front that "
+              "answers, and looks for the game in front every 10 ms for up to 0.3 s -- 50 ms at least, as ever");
+    }
+    {
+        // On its own line: beside the three boxes before it, the row ran
+        // past the window and the box was cut off.
+        const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+        const std::size_t box = gui.find("\"Keep it in front while running##hunt\"");
+        const std::size_t before = box == std::string::npos ? box : gui.rfind("help_marker(", box);
+        check(before != std::string::npos && gui.substr(before, box - before).find("SameLine") == std::string::npos,
+              "the Hunt tab's box sits on its own line");
+    }
+    check(src.find("idle_ms < 30000") == std::string::npos && src.find("refocus_if_idle") == std::string::npos,
+          "and no longer waits for the machine to go idle for 30 s first");
+    // From tick(), which runs every pass of the window's loop -- draw() is
+    // skipped while GoBot's own window is minimised or covered, which is just
+    // when the game may need bringing back.
+    const std::string tick = body_of(source_text("/apps/gobot_gui/gui_app.cpp"), "void GuiApp::tick()");
+    check(tick.find("keep_game_in_front();") != std::string::npos, "the window's every frame asks it, from tick()");
+#endif
+}
+
 /// The executor paused, as the GUI pauses it after a stop that may have left
 /// the trash bin's quantity dialog open.
 ///
-/// Its buff and potion threads run from launch, and the only thing that kept
-/// them out of that dialog's box was the trash pass's hold on the
-/// coordinator, which the stop ends. Nothing reaches the keyboard in a test
-/// run -- there is no game window -- so what is watched is whether it asks
-/// the coordinator for the keys at all, which it does before it looks for
-/// the window: something holding them at the lowest priority loses them to
-/// a buff or a potion that asks.
+/// Its queue presses whenever the packet bot is started -- armed, as here --
+/// and the only thing that kept it out of that dialog's box was the trash
+/// pass's hold on the coordinator, which the stop ends. Nothing reaches the
+/// keyboard in a test run -- there is no game window -- so what is watched is
+/// whether it asks the coordinator for the keys at all, which it does before
+/// it looks for the window: something holding them at the lowest priority
+/// loses them to a command that asks.
 void test_executor_pause() {
     section("Executor: paused while the bin may be asking");
 
     BotConfig cfg;
-    cfg.auto_buff = true;
-    cfg.buffs[0].enabled = true;
-    cfg.buffs[0].keycode = '6';
-    cfg.buffs[0].cooldown_sec = 60;          // the live config's buff
-    cfg.hp_heal1.enabled = true;
-    cfg.hp_heal1.keycode = '1';
-    cfg.hp_heal1.trigger_pct = 50;
     GameState state;
-    state.update_self_hp(10, 100);           // a potion is due as well
     InputManager input;
     ExecutionCoordinator coord;
 
@@ -12757,69 +16425,550 @@ void test_executor_pause() {
     coord.release("buff");
 
     CommandExecutor exec(cfg, state, input, coord);
+    exec.arm();             // the packet bot started: unarmed, nothing asks, paused or not
     exec.set_paused(true);
     check(exec.paused(), "pauses");
     check(coord.request("test", Priority::Idle), "something low holds the keys");
     exec.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    exec.enqueue(Command::buff('6', 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
     const auto held = exec.stats();
     check(coord.held() && coord.current_owner() == "test",
-          "paused, neither the buff timer nor the potion asks for the keys -- held by '" +
-              coord.current_owner() + "'");
-    check(held.held_paused > 0 && held.buffs_cast == 0 && held.heals == 0,
-          "and what fell due is counted as held -- " + std::to_string(held.held_paused));
+          "paused, a queued command does not ask for the keys -- held by '" + coord.current_owner() + "'");
+    check(held.held_paused > 0 && held.buffs_cast == 0,
+          "and is counted as held -- " + std::to_string(held.held_paused));
     check(!exec.execute_now(Command::buff('6', 0)) && coord.current_owner() == "test",
           "a command is refused before it asks for the keys");
 
-    // Let go: the buff is still due, and now it asks.
+    // Let go: a command queued now asks.
     exec.set_paused(false);
+    exec.enqueue(Command::buff('6', 0));
     bool asked = false;
     for (int i = 0; i < 40 && !asked; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         asked = coord.current_owner() != "test";
     }
-    check(asked, "let go, it asks for the keys again");
+    check(asked, "let go, a queued command asks for the keys again");
     exec.stop();
-    check(exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
-          "and with no game window, still nothing is pressed");
+    check(exec.stats().buffs_cast == 0, "and with no game window, still nothing is pressed");
 }
 
-/// The packet bot's own buff timer in a run that reads the screen.
-///
-/// The executor starts with the GUI, and its buff timer used to ask for the
-/// keys -- and press bot_default.ini's buff keys whenever the game was in
-/// front -- with nothing started at all: only the buffs set on the simple
-/// screen are the player's. Its heal loop already waited for the character's
-/// own HP from packets, which a screen run never has.
-void test_executor_screen_only() {
-    section("Executor: no buffs of its own without the packets' picture of the character");
+/// No potions and no buffs of the packet bot's own: they are the macro's,
+/// given the packets' HP and MP while the bot runs (packet_vitals). Its heal
+/// and buff threads drank beside the macro's potions for the same HP drop,
+/// each with its own tiers, cooldowns and stale-reading rules.
+void test_executor_no_sustain() {
+    section("Executor: no potions or buffs of its own -- they are the macro's");
 
     BotConfig cfg;
-    cfg.auto_buff = true;
-    cfg.buffs[0].enabled = true;
-    cfg.buffs[0].keycode = '6';
-    cfg.buffs[0].cooldown_sec = 60;          // due at once
-    GameState state;                         // no HP of the character's own
+    GameState state;
+    state.update_self_hp(10, 100);           // low HP and MP from packets
+    state.update_self_mp(5, 100);
     InputManager input;
     ExecutionCoordinator coord;
     check(coord.request("test", Priority::Idle), "something low holds the keys");
 
     CommandExecutor exec(cfg, state, input, coord);
+    exec.arm();             // the packet bot started
     exec.start();
     std::this_thread::sleep_for(std::chrono::milliseconds(900));
-    check(coord.current_owner() == "test" && exec.stats().buffs_cast == 0,
-          "with no packet HP its buff timer never asks for the keys -- held by '" +
+    check(coord.current_owner() == "test" && exec.stats().heals == 0 && exec.stats().buffs_cast == 0,
+          "armed, with low packet HP and MP and nothing queued, it never asks for the keys -- held by '" +
+              coord.current_owner() + "'");
+    exec.stop();
+
+#ifdef GOBOT_SOURCE_DIR
+    if (sources_here()) {
+        const std::string exec_src = source_text("/src/command_executor.cpp");
+        const std::string config_src = source_text("/src/config.cpp");
+        check(!exec_src.empty() && exec_src.find("heal_loop") == std::string::npos &&
+                  exec_src.find("buff_loop") == std::string::npos,
+              "command_executor.cpp: no heal or buff thread");
+        // The macro's potions press at the commands' own priority: the keys
+        // are let go of for the gap after each command, or a queue fed every
+        // 80 ms never left them a moment.
+        const std::string dispatch = body_of(exec_src, "bool CommandExecutor::dispatch(const Command& cmd) {");
+        const std::size_t let_go = dispatch.find("{ ExecutionCoordinator::Token done = std::move(token); }");
+        const std::size_t gap = dispatch.find("std::this_thread::sleep_for(std::chrono::milliseconds(input_.random_delay()));");
+        check(let_go != std::string::npos && gap != std::string::npos && let_go < gap,
+              "command_executor.cpp: the keys are let go of before the gap after a command");
+        check(!config_src.empty() && config_src.find("\"auto_buff\"") == std::string::npos &&
+                  config_src.find("\"hp_heal1_enabled\"") == std::string::npos &&
+                  config_src.find("\"buff_\"") == std::string::npos,
+              "config.cpp: bot_default.ini's potions and buffs are neither read nor written");
+        const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+        const std::string tick = body_of(gui, "void GuiApp::tick() {");
+        check(tick.find("packet_vitals(state_.self(), PacketCapture::silent_for_ms(capture_.stats(), now_ms())") !=
+                      std::string::npos &&
+                  tick.find("macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at") !=
+                      std::string::npos,
+              "gui_app.cpp: while the packet bot runs the macro drinks on the packets' HP and MP, and on the "
+              "screen's otherwise");
+        check(gui.find("bot_config_.auto_buff") == std::string::npos &&
+                  gui.find("bot_config_.buffs") == std::string::npos &&
+                  gui.find("bot_config_.hp_heal") == std::string::npos,
+              "gui_app.cpp: nothing edits the packet bot's old potions or buffs");
+    }
+#endif
+}
+
+/// What the macro is given from the packets: packet_vitals.
+void test_packet_vitals() {
+    section("The macro's HP and MP from the packets");
+
+    const auto about = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
+    Self none;
+    const SelfVitals blank = packet_vitals(none, 0, 1500);
+    check(blank.hp < 0.0f && blank.mp < 0.0f, "no maximum from any packet: no reading, not 100%");
+
+    Self me;
+    me.hp = 30;
+    me.max_hp = 120;
+    const SelfVitals hp_only = packet_vitals(me, 200, 1500);
+    check(about(hp_only.hp, 25.0f) && hp_only.mp < 0.0f, "HP 30 of 120 is 25%, and no MP mapped is no MP reading");
+
+    me.mp = 50;
+    me.max_mp = 50;
+    const SelfVitals quiet = packet_vitals(me, 1501, 1500);
+    check(quiet.hp < 0.0f && quiet.mp < 0.0f, "the game's traffic silent longer than the macro trusts: no reading");
+
+    Self low = me;
+    low.hp = -5;
+    Self dead = me;
+    dead.hp = 50;
+    dead.dead = true;
+    Self over = me;
+    over.hp = 500;
+    check(about(packet_vitals(low, 0, 1500).hp, 0.0f) && about(packet_vitals(dead, 0, 1500).hp, 0.0f) &&
+              about(packet_vitals(over, 0, 1500).hp, 100.0f) && about(packet_vitals(me, 0, 1500).mp, 100.0f),
+          "HP under 0, or the character dead, reads 0; over the maximum, 100");
+}
+
+/// The executor presses nothing until the bot is started.
+///
+/// Its threads run from launch, and with nothing to hold them back they
+/// pressed before START, after STOP, F12 or the disconnect watchdog, and all
+/// through gobot_cli --status. Nothing reaches the keyboard here -- there is
+/// no game window -- so what is watched is whether it asks the coordinator for
+/// the keys at all, which it does before it looks for the window.
+void test_executor_armed() {
+    section("Executor: nothing pressed until the bot is started");
+
+    BotConfig cfg;
+    GameState state;
+    state.update_self_hp(10, 100);           // low HP from packets
+    InputManager input;
+    ExecutionCoordinator coord;
+    check(coord.request("test", Priority::Idle), "something low holds the keys");
+
+    // Whether anything took the keys off 'test' within `ms`. Nothing gives
+    // them back to it, so all through `ms` when nothing did.
+    const auto asked_within = [&coord](int ms) {
+        for (int waited = 0; waited < ms && coord.current_owner() == "test"; waited += 25)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        return coord.current_owner() != "test";
+    };
+    const auto hold_again = [&coord] {
+        bool held = false;
+        for (int i = 0; i < 40 && !held; ++i) {
+            held = coord.request("test", Priority::Idle);
+            if (!held) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return held;
+    };
+
+    CommandExecutor exec(cfg, state, input, coord);
+    check(!exec.armed(), "it starts disarmed");
+    exec.start();
+    const bool asked_unarmed = asked_within(700);
+    check(!asked_unarmed && exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
+          "running but not started, with packet HP, nothing asks for the keys -- held by '" +
               coord.current_owner() + "'");
 
-    // The packet bot running: its HP known, and the buff asks as before.
-    state.update_self_hp(100, 100);
-    bool asked = false;
-    for (int i = 0; i < 40 && !asked; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        asked = coord.current_owner() != "test";
+    exec.enqueue(Command::move_left());
+    bool dropped = false;
+    for (int i = 0; i < 40 && !dropped; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        dropped = exec.queue_size() == 0 && exec.stats().dropped_blocked >= 1;
     }
-    check(asked, "with the character's HP from packets, the buff asks for the keys as before");
+    check(dropped && coord.current_owner() == "test",
+          "a queued command is refused before it asks for the keys");
+    check(!exec.execute_now(Command::buff('6', 0)) && coord.current_owner() == "test",
+          "and so is one run at once");
+
+    exec.arm();
+    exec.enqueue(Command::buff('6', 0));
+    check(exec.armed() && asked_within(2000), "started, a queued command asks for the keys");
+
+    exec.halt();
+    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding(),
+          "halted: disarmed, nothing queued, no route");
+    // A pass that took the keys as the halt came lets them go when it finds
+    // the bot stopped; from then on nothing asks.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const bool held = hold_again();
+    const bool asked_halted = asked_within(700);
+    check(held && !asked_halted, "halted, nothing asks for the keys again -- held by '" +
+                                     coord.current_owner() + "'");
+
+    // Started again, and taking the keys off 'test' once more, before it is
+    // stopped while started.
+    exec.arm();
+    exec.enqueue(Command::buff('6', 0));
+    check(asked_within(2000), "started again, a queued command asks for the keys again");
     exec.stop();
+    check(!exec.armed(), "stopped while started, it is disarmed");
+    const bool held_after = hold_again();
+    exec.start();
+    const bool asked_restarted = asked_within(700);
+    exec.stop();
+    check(held_after && !asked_restarted && exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
+          "started again it presses nothing until armed again -- and with no game window nothing "
+          "was pressed at all");
+}
+
+/// test_pathfinder's map: two ledges with a gap between them, and a shelf.
+MapData two_ledges() {
+    MapData map;
+    map.name = "test";
+    map.width = 24;
+    map.height = 10;
+    map.tile_w = 32;
+    map.tile_h = 32;
+    map.attrs.assign(static_cast<std::size_t>(map.width) * map.height, Tile_Empty);
+    const auto set = [&map](int x, int y, std::uint8_t v) {
+        map.attrs[static_cast<std::size_t>(y) * map.width + x] = v;
+    };
+    for (int x = 0; x < 5; ++x)   set(x, 6, Tile_Ground);
+    for (int x = 7; x < 14; ++x)  set(x, 6, Tile_Ground);
+    for (int x = 16; x < 20; ++x) set(x, 3, Tile_Platform);
+    return map;
+}
+
+/// halt(), which the bot's stop now calls: synchronous, from any thread, and
+/// harmless on an executor never started, and said twice. The stop used to
+/// set a flag nothing read and queue a StopMove, which gobot_cli's F10 then
+/// cleared away with the queue: the arrow stayed held after BOT DISABLED, and
+/// the route went on being walked every 80 ms. Not started here, so nothing
+/// but halt() and arm() empties the queue.
+void test_executor_halt() {
+    section("Executor: halt() empties the queue and drops the route");
+
+    const MapData map = two_ledges();
+    PathFinder pf;
+    check(pf.init(map), "the map with a gap in it builds");
+    const Vec2 here = map.to_world(2, 5);
+    const Vec2 across = map.to_world(10, 5);
+    BotConfig cfg;
+    GameState state;
+    state.update_self_position(here.x, here.y);
+    InputManager input;
+    ExecutionCoordinator coord;
+    CommandExecutor exec(cfg, state, input, coord);
+    exec.set_pathfinder(&pf);
+
+    const std::uint64_t refused_before = real_input_refusals();
+    exec.halt();
+    exec.halt();
+    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding(),
+          "halt() on an executor never started nor armed, twice: harmless");
+
+    exec.arm();
+    exec.enqueue(Command::move_left());
+    exec.enqueue(Command::pathfind(across));
+    exec.set_path_target(across);
+    check(exec.armed() && exec.queue_size() == 2 && exec.pathfinding() && !exec.current_path().empty(),
+          "armed: two commands queued and a route across the gap");
+    exec.halt();
+    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding() && exec.current_path().empty(),
+          "halt(): disarmed, the queue empty, the route dropped");
+    exec.halt();
+    check(!exec.armed() && exec.queue_size() == 0 && real_input_refusals() == refused_before,
+          "halted again, nothing changes -- and nothing reached for the desktop");
+
+    exec.enqueue(Command::move_right());
+    exec.arm();
+    check(exec.armed() && exec.queue_size() == 0, "arm() drops what was queued before it");
+    exec.stop();
+    check(!exec.armed(), "and stop() disarms, on one never started too");
+}
+
+/// BotBrain::stop() halts the executor: on return nothing is queued -- not
+/// even a StopMove -- the route is dropped and every key is up. The executor
+/// is declared before the brain, to outlive it.
+void test_brain_stop_halts() {
+    section("Bot brain: starting arms the executor, stopping halts it");
+
+    BotConfig cfg;
+    GameState state;
+    InputManager input;
+    ExecutionCoordinator coord;
+    CommandExecutor exec(cfg, state, input, coord);     // not started: nothing drains its queue
+    BotBrain brain(cfg, state, exec);
+    check(!exec.armed(), "the executor waits, disarmed, for the brain");
+    brain.start();
+    check(exec.armed() && brain.running(), "starting the brain arms the executor");
+    // An idle tick queues a StopMove, every 80 ms.
+    for (int i = 0; i < 40 && exec.queue_size() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    const std::size_t queued = exec.queue_size();
+    brain.stop();
+    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding(),
+          "stop(): disarmed, nothing left queued, not even a StopMove, and no route -- " +
+              std::to_string(queued) + " queued before it");
+    check(brain.phase() == BotPhase::Stopped && !brain.running(), "and the brain is stopped");
+}
+
+/// A death and its end, read off HP alone: nothing maps a self_revive.
+///
+/// With continue_auto_after_death off the brain stops itself once the
+/// character is back up, and halts the executor as stop() does. And a death
+/// that ended one run is not the next one's: stopped while dead -- which the
+/// death callback does -- and started again once up, the first tick took the
+/// character being up for the end of that death and stopped the bot again.
+void test_brain_death() {
+    section("Bot brain: a death, and the character back up");
+
+    const MapData map = two_ledges();
+    PathFinder pf;
+    pf.init(map);
+    const Vec2 here = map.to_world(2, 5);
+    BotConfig cfg;
+    cfg.continue_auto_after_death = false;
+    GameState state;
+    state.update_self_position(here.x, here.y);
+    state.update_self_hp(100, 100);
+    InputManager input;
+    ExecutionCoordinator coord;
+    CommandExecutor exec(cfg, state, input, coord);     // not started
+    exec.set_pathfinder(&pf);
+    BotBrain brain(cfg, state, exec);
+    const auto wait_for = [](const std::function<bool()>& cond) {
+        for (int i = 0; i < 60 && !cond(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        return cond();
+    };
+
+    // A route under way when the character falls is dropped with it.
+    exec.set_path_target(map.to_world(10, 5));
+    const bool routed = exec.pathfinding();
+    brain.start();
+    state.update_self_hp(0, 100);
+    check(routed && wait_for([&] { return brain.stats().deaths == 1 && !exec.pathfinding(); }),
+          "HP read 0: a death, and the route under way is dropped");
+    state.update_self_hp(100, 100);
+    // running() goes false before the halt, on purpose, so that a start()
+    // racing it joins first: Stopped is what says the halt is done.
+    check(wait_for([&] { return brain.phase() == BotPhase::Stopped && !brain.running(); }),
+          "back up, read off HP with no self_revive packet, it stops itself");
+    check(!exec.armed() && exec.queue_size() == 0, "and halts the executor, as stop() does");
+    brain.stop();
+
+    brain.start();
+    state.update_self_hp(0, 100);
+    check(wait_for([&] { return brain.stats().deaths == 2; }), "started again, the next death is seen");
+    brain.stop();                                   // as the death callback does
+    state.update_self_hp(100, 100);
+    brain.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check(brain.running() && exec.armed() && brain.phase() != BotPhase::Recovering,
+          "stopped while dead and started again once up, the old death does not stop it");
+    brain.stop();
+}
+
+/// The protocol calibrator with no game: refused at the start, and stopped as
+/// often as asked -- told, waited for twice, and once more as it goes -- with
+/// nothing to join and nothing pressed. A run itself needs the game in front
+/// to drive, so what it does is read off the source: a run that ended by
+/// itself still had its thread, and returning on that left it unjoined, which
+/// ended GoBot as it closed.
+void test_calibrator() {
+    section("Calibrator: no game, no run; a run that ends by itself is still joined");
+
+    const std::uint64_t refused_before = real_input_refusals();
+    {
+        InputManager no_window;
+        ProtocolCalibrator c(no_window);
+        const bool started = c.start();
+        check(!started && c.status() == "No game window selected." && !c.running() &&
+                  c.phase() == CalibPhase::Idle,
+              "with no game window it does not start, and says so: " + c.status());
+        const auto t0 = std::chrono::steady_clock::now();
+        c.request_stop();
+        c.stop();
+        c.stop();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                            .count();
+        check(!c.running() && c.phase() == CalibPhase::Idle && ms < 1000,
+              "told to stop, then stopped twice, with nothing running: at once, and still idle");
+    }
+    check(real_input_refusals() == refused_before,
+          "and it goes away without ending the program, and nothing reached for the desktop");
+
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto npos = std::string::npos;
+    const std::string src = source_text("/src/calibrator.cpp");
+    const std::string start = body_of(src, "bool ProtocolCalibrator::start() {");
+    const std::string stop = body_of(src, "void ProtocolCalibrator::stop() {");
+    const std::string run = body_of(src, "void ProtocolCalibrator::run() {");
+    const std::size_t joined = start.find("if (thread_.joinable()) thread_.join();");
+    const std::size_t window = start.find("input_.window_valid()");
+    const std::size_t first_phase = start.find("phase_.store(kSchedule[0].phase);");
+    const std::size_t on = start.find("running_.store(true);");
+    check(joined != npos && window != npos && joined < window && first_phase != npos && on != npos &&
+              first_phase < on,
+          "calibrator.cpp: start() joins a run that ended by itself before anything else, and a new run "
+          "starts at its first step's phase, not the last run's Done");
+    check(stop.find("const bool was_running = running_.exchange(false);") != npos &&
+              stop.find("if (thread_.joinable()) thread_.join();") != npos &&
+              stop.find("if (was_running) input_.release_all();") != npos &&
+              stop.find("if (!running_.exchange(false)) return;") == npos,
+          "stop() joins whenever there is a thread, and lets go of the keys when it was running");
+    check(run.find("const bool completed = running_.exchange(false);") != npos &&
+              run.find("set_phase(completed ? CalibPhase::Done : CalibPhase::Failed);") != npos &&
+              run.find("Stopped before the end -- nothing to analyse. Run it again.") != npos &&
+              run.find("for (int i = 0; i < 7 && running_.load(); ++i)") != npos,
+          "a run stopped part way ends Failed, with nothing to analyse, and a stop cuts the cast's wait short");
+
+    // GoBot's window starts one under the 'calibrating' hold, never while
+    // something else steers the character, and stops it the one way.
+    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+    const std::string begins = body_of(gui, "bool GuiApp::start_calibration() {");
+    const std::string ends = body_of(gui, "void GuiApp::stop_calibration() {");
+    const std::string panel = body_of(gui, "void GuiApp::draw_calibrate_panel() {");
+    const std::size_t busy = begins.find("if (hunting_ || bot_running_ || (navigator_ && navigator_->running())) {");
+    const std::size_t held = begins.find("if (!take_hold(kCalibHold)) {");
+    const std::size_t go = begins.find("calibrator_->start()");
+    check(busy != npos && held != npos && go != npos && busy < held && held < go,
+          "gui_app.cpp: a calibration starts only with no hunting, walking or packet bot, under the "
+          "'calibrating' hold");
+    check(ends.find("calibrator_->stop();") != npos && ends.find("end_hold(kCalibHold);") != npos &&
+              !panel.empty() && panel.find("calibrator_->start()") == npos &&
+              panel.find("calibrator_->stop()") == npos,
+          "and stop_calibration joins it and lets the hold go -- the Calibrate tab's buttons go through "
+          "both");
+#endif
+}
+
+/// The charm job reads as it should where no pretend game reaches: the worker
+/// (gui_app.cpp) and the tab (simple_trash_use.cpp, simple_view.cpp). What the
+/// run itself does is tried in use_test.cpp.
+void test_charm_sources() {
+    section("Bùa: the worker holds everything that presses keys, and the tab offers charms and fragments only");
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+    const std::size_t from = gui.find("const auto run_charms = [&](bool forced) {");
+    // The charm job ends where the potion shop's begins, which has its own pins below.
+    const std::size_t to = gui.find("// ---- the potion shop ----", from == std::string::npos ? 0 : from);
+    const std::string job = (from == std::string::npos || to == std::string::npos) ? std::string() : gui.substr(from, to - from);
+    const std::size_t shop_from = to;
+    const std::size_t shop_to = gui.find("while (!trash_stop_) {", shop_from == std::string::npos ? 0 : shop_from);
+    const std::string shop = (shop_from == std::string::npos || shop_to == std::string::npos)
+                                 ? std::string()
+                                 : gui.substr(shop_from, shop_to - shop_from);
+    const std::size_t mouse = job.find("game_mouse_mutex_");
+    const std::size_t hold = job.find("take_hold(\"trash cleaning\")");
+    const std::size_t run = job.find("cleaner.run()");
+    const std::size_t guard = job.find("cleaner.set_guard(");
+    check(!job.empty() && mouse != npos && hold != npos && run != npos && guard != npos && guard < hold &&
+              mouse < hold && hold < run,
+          "gui_app.cpp: the charm job takes the mouse, then the 'trash cleaning' hold, and only then runs -- with "
+          "a guard that stops it the moment the hold is gone");
+    check(count_of(job, "take_hold(") == 1 && count_of(job, "set_mode(BagCleaner::Mode::CharmsOnly)") == 1 &&
+              job.find("end_hold(\"trash cleaning\")") != npos,
+          "and it takes no other hold, runs in charms-only mode, and lets the hold go unless a dialog may be open");
+    check(count_of(gui, "Mode::CharmsOnly") == 1,
+          "gui_app.cpp: no other pass is a charm run");
+    check(job.find("if (!settings.use_charms) {") != npos && gui.find("!held && settings.use_charms") != npos,
+          "and the timed job runs only with 'Dùng bùa' ticked, and not while the bin may hold something");
+
+    // The potion shop job, the same way: the mouse, then the one hold, then the
+    // run, a guard that ends it with the hold or with HP under the potion's
+    // mark, and its own mode used nowhere else.
+    {
+        const std::size_t s_mouse = shop.find("game_mouse_mutex_");
+        const std::size_t s_hold = shop.find("take_hold(\"trash cleaning\")");
+        const std::size_t s_run = shop.find("cleaner.run()");
+        const std::size_t s_guard = shop.find("cleaner.set_guard(");
+        check(!shop.empty() && s_mouse != npos && s_hold != npos && s_run != npos && s_guard != npos &&
+                  s_guard < s_hold && s_mouse < s_hold && s_hold < s_run,
+              "gui_app.cpp: the potion shop job takes the mouse, then the 'trash cleaning' hold, and only then "
+              "runs, with a guard that stops it the moment the hold is gone");
+        {
+            const std::size_t s_cap = shop.find("shop_capture.set_screen_only(true);");
+            const std::size_t s_built = shop.find("BagCleaner cleaner(input_, store, shop_grab);");
+            const std::size_t s_pause = shop.find("const PrintWindowPause no_print;");
+            check(s_cap != npos && s_built != npos && s_pause != npos && s_cap < s_built && s_pause < s_run &&
+                      shop.find("shop_capture.grab(input_.target_window(), f)") != npos &&
+                      shop.find("BagCleaner cleaner(input_, store, grab)") == npos,
+                  "gui_app.cpp: the potion shop job looks off the screen only, with its own capture, and no "
+                  "PrintWindow anywhere in GoBot while it runs");
+        }
+        check(count_of(shop, "take_hold(") == 1 && count_of(shop, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 &&
+                  count_of(gui, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 && shop.find("end_hold(\"trash cleaning\")") != npos &&
+                  shop.find("chat_hp_floor_.load()") != npos,
+              "and it takes no other hold, runs in shop mode only here, lets the hold go, and stops with HP under "
+              "the potion's mark");
+        check(shop.find("if (!settings.buy_potions && !dry) {") != npos &&
+                  gui.find("!held && settings.buy_potions && !shop_blocked &&") != npos &&
+                  shop.find("bag::can_check_shop(store)") != npos && shop.find("hp < 0.0f") != npos &&
+                  shop.find("keeper_cold_start_") != npos,
+              "and it runs only with 'Tự mua bình' ticked -- a trial apart -- with the pictures, in the world, "
+              "and not while the bin may hold something");
+        {
+            // Several jobs due at once go in the player's order: Tự chat's line,
+            // then the pass, then the charms, then the potion shop.
+            const std::size_t first = gui.find("if ((pass_due || charm_due || shop_due) && chat_first()) continue;");
+            const std::size_t shop_turn = gui.find("(shop_due && !pass_due && !charm_due)");
+            const std::size_t charm_turn = gui.find("(charm_due && !pass_due)");
+            check(first != npos && shop_turn != npos && charm_turn != npos && first < shop_turn &&
+                      shop_turn < charm_turn &&
+                      gui.find("if (r.not_now && for_trash) chat_waits_trash_ms_ = end;") != npos &&
+                      count_of(gui, "chat_waits_trash_ms_ = 0;") == count_of(gui, "chat_next_ms_ = 0;") + 1,
+                  "gui_app.cpp: chat, then the pass, then the charms, then the shop when several are due; a line "
+                  "put off for a trash job claims the next turn, and the claim is let go wherever the line is");
+        }
+        // Nothing but a Người Giữ Sân item's right-click ever happens on Khác.
+        const std::string cpp = source_text("/src/bag.cpp");
+        const std::string open = body_of(cpp, "bool BagCleaner::shop_open(");
+        check(!open.empty() && count_of(open, "right_click(") == 1 &&
+                  open.find("settings_.buy_opener") != npos && open.find("v.selected_tab != kOtherTab") != npos,
+              "bag.cpp: the one right-click of the shop run is on the item the settings name, on Khác");
+        const std::string buy = body_of(cpp, "int BagCleaner::shop_purchase(");
+        const std::size_t typed = buy.find("scan ? press_scan(vk) : press(vk)");
+        const std::size_t asked = buy.find("bag::shop_question(");
+        const std::size_t confirm = buy.find("click(q.confirm_x()");
+        const std::size_t readback = buy.find("now_has != CleanSettings::kBuyQuantity");
+        check(typed != npos && asked != npos && confirm != npos && readback != npos && asked < typed &&
+                  typed < readback && readback < confirm,
+              "bag.cpp: nothing is typed before the question is taken for the shop's, and Xác Nhận comes only "
+              "after the box has been read back as 100");
+    }
+
+    const std::string use = source_text("/apps/gobot_gui/simple_trash_use.cpp");
+    const std::string options = body_of(use, "bool GuiApp::simple_use_options(");
+    check(!options.empty() && count_of(options, "\"spend/") == 2 && options.find("\"spend/buff\"") != npos &&
+              options.find("\"spend/fragment\"") != npos,
+          "simple_trash_use.cpp: the Dùng options are offered for fragments and charms, and no other group "
+          "(potions, scrolls, boxes are drunk, read or opened by a right-click)");
+    const std::string cut = body_of(use, "bool GuiApp::simple_use_cut_option(");
+    check(cut.find("UseKind::None") != npos && cut.find("kUseTab") != npos,
+          "and a photographed slot only on Tiêu Dùng, only when it is drawn like a fragment or a charm");
+
+    const std::string view = source_text("/apps/gobot_gui/simple_view.cpp");
+    check(count_of(view, "clean.enabled || clean.use_charms") == 2 && view.find("simple_charm_switch(put);") != npos &&
+              view.find("request_charms()") != npos,
+          "simple_view.cpp: BẮT ĐẦU counts a ticked 'Dùng bùa' as a job, and the tab has its switch and button");
+#endif
 }
 
 // -------------------------------------------------------------- auto chat
@@ -12878,6 +17027,7 @@ struct PretendChat {
     /// The pretend clock at which `to_cancel` is told to stop: DỪNG at a moment.
     std::uint64_t cancel_at = ~0ull;
     ChatSender*   to_cancel = nullptr;
+    std::size_t   keys_at_cancel = 0;   ///< how many keys were pressed when `to_cancel` was told
     /// Called after every key is pressed, with its key code: a test's stop, at a moment.
     std::function<void(std::uint32_t)> after_key;
 
@@ -12950,7 +17100,10 @@ struct PretendChat {
             queue.erase(queue.begin());
             act(vk);
         }
-        if (to_cancel != nullptr && clock >= cancel_at) to_cancel->cancel();
+        if (to_cancel != nullptr && clock >= cancel_at && !to_cancel->cancelled()) {
+            keys_at_cancel = holds.size();
+            to_cancel->cancel();
+        }
     }
 
     Frame render() const {
@@ -13340,7 +17493,7 @@ void test_auto_chat() {
         };
         ChatSettings shipped_like;
         check(shipped_like.hold_min_ms == 0 && shipped_like.hold_max_ms == 0 && shipped_like.enter_gap_ms == 750 &&
-                  shipped_like.quiet_before_ms == 300 && shipped_like.type_wait_ms == 0 &&
+                  shipped_like.quiet_before_ms == 150 && shipped_like.type_wait_ms == 0 &&
                   shipped_like.max_enters == 2 && shipped_like.type_tries == 1 &&
                   shipped_like.inject == InputManager::KeyInject::Vk,
               "as shipped: each key its own hold, an Enter watched 750 ms, 300 ms quiet, no wait before typing, "
@@ -13365,14 +17518,14 @@ void test_auto_chat() {
         check(one.load(path) && one.hold_min_ms == 200 && one.hold_max_ms == 200, "one hold set alone: a fixed hold");
         write("[Chat]\nenabled=false\n");
         ChatSettings none;
-        check(none.load(path) && none.hold_max_ms == 0 && none.enter_gap_ms == 750 && none.quiet_before_ms == 300 &&
+        check(none.load(path) && none.hold_max_ms == 0 && none.enter_gap_ms == 750 && none.quiet_before_ms == 150 &&
                   none.max_enters == 2 && none.type_tries == 1 && none.inject == InputManager::KeyInject::Vk,
               "absent: as shipped");
         std::remove(path.c_str());
 #ifdef GOBOT_SOURCE_DIR
         ChatSettings file;
         check(file.load(std::string(GOBOT_SOURCE_DIR) + "/configs/chat.ini") && file.hold_min_ms == 0 &&
-                  file.hold_max_ms == 0 && file.enter_gap_ms == 750 && file.quiet_before_ms == 300 &&
+                  file.hold_max_ms == 0 && file.enter_gap_ms == 750 && file.quiet_before_ms == 150 &&
                   file.type_wait_ms == 0 && file.max_enters == 2 && file.type_tries == 1 &&
                   file.inject == InputManager::KeyInject::Vk,
               "the shipped chat.ini names each, at what GoBot has always done");
@@ -13413,7 +17566,7 @@ void test_auto_chat() {
     const bool have = store.load_best(exe_relative("configs/templates.ini")) &&
                       can_look_for_chat(store, settings);
     if (!have) {
-        std::printf("  [skip] the chat-bar pictures are not installed here\n");
+        skip("the chat-bar pictures are not installed here\n");
         return;
     }
 
@@ -13692,8 +17845,9 @@ void test_auto_chat() {
               "a field Backspace cannot clear: a failure, nothing typed or sent, left to be watched");
     }
 
-    // The same, stopped while the line is being cleared: what was left in it
-    // is rubbed out too, and the line shut empty -- never sent.
+    // The same, stopped while the line is being cleared: the player has taken
+    // over, so not one key more -- what was left in it stays, and the line is
+    // reported as maybe open. Never sent.
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
@@ -13704,7 +17858,10 @@ void test_auto_chat() {
         g.after_key = [&](std::uint32_t vk) { if (vk == VK_BACK && ++bs == 2) s->cancel(); };
         const ChatSender::Result r = sender->send(line_of("test"));
         check(!r.sent && g.sent.empty(), "a stop while the line is cleared never sends what was in it");
-        check(g.state == PretendChat::State::Shut && g.typed == 0, "the line is rubbed out and shut");
+        check(g.state == PretendChat::State::Open && g.typed == 8 && g.backspaces == 2 && g.enters == 1 &&
+                  r.left_open,
+              "a stop while the line is cleared: not one key more, the line left open with what was in it, "
+              "and said so");
         check(r.aborted, "and a stop is a line put off, not a failure");
     }
 
@@ -13726,7 +17883,7 @@ void test_auto_chat() {
     // A stop just after the first Enter, in a game that takes keys a third of
     // a second late: the line a look still shows shut opens a moment later.
     // It is not taken for shut until the Enter has had time to show, and it
-    // is closed again -- never left open with the sender saying it is shut.
+    // is left as it is, open -- never with the sender saying it is shut.
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
@@ -13736,15 +17893,16 @@ void test_auto_chat() {
         g.after_key = [s](std::uint32_t vk) { if (vk == VK_RETURN) s->cancel(); };
         const ChatSender::Result r = sender->send(line_of("test"));
         g.advance(2000);            // whatever was still on its way lands
-        check(g.state == PretendChat::State::Shut && !r.left_open && g.sent.empty(),
-              "a stop just after a late Enter: the line is seen open after all, and shut again");
+        check(g.state == PretendChat::State::Open && r.left_open && g.sent.empty() && g.enters == 1 &&
+                  g.backspaces == 0 && g.letters == 0,
+              "a stop just after a late Enter: the line seen open after all, left so and reported");
     }
     // Stops at every moment of the first second and a half of a short line,
     // in a game that takes keys 120 ms late and looks for dialogs that take a
     // tenth of a second: the line never ends open while the sender says it
     // is shut, and nothing is ever sent.
     {
-        int unreported = 0, sent = 0, runs = 0;
+        int unreported = 0, sent = 0, runs = 0, late = 0;
         for (std::uint64_t at = 0; at <= 1500; at += 100) {
             PretendChat g;
             g.store = &store; g.settings = &settings;
@@ -13754,6 +17912,7 @@ void test_auto_chat() {
             g.to_cancel = sender.get();
             g.cancel_at = at;
             const ChatSender::Result r = sender->send(line_of("test 1"));
+            if (sender->cancelled() && g.holds.size() > g.keys_at_cancel) ++late;
             g.to_cancel = nullptr;
             g.advance(2000);
             ++runs;
@@ -13763,23 +17922,29 @@ void test_auto_chat() {
         check(unreported == 0 && sent == 0,
               "a stop at any moment never leaves the line open unreported (" + std::to_string(unreported) +
                   " of " + std::to_string(runs) + " did), and sends nothing (" + std::to_string(sent) + ")");
+        check(late == 0, "and no key is pressed after the stop (" + std::to_string(late) + " runs did)");
     }
     // A stop, or the guard, that comes while the screen is looked at for the
     // last time before the sending Enter -- the dialog check alone takes a
-    // while: the line does not go out. Rubbed out, shut, and put off.
+    // while: the line does not go out. A stop leaves it as it is; the guard
+    // rubs it out and shuts it, and puts it off.
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
         auto sender = make_sender(g);
         ChatSender* const s = sender.get();
-        sender->set_dialog_check([&g, s](const Frame& f) {
-            if (g.letters == 4) s->cancel();        // every letter of "test" typed
+        std::size_t keys_then = 0;
+        sender->set_dialog_check([&g, s, &keys_then](const Frame& f) {
+            if (g.letters == 4 && !s->cancelled()) {    // every letter of "test" typed
+                s->cancel();
+                keys_then = g.holds.size();
+            }
             return g.dialog_up(f);
         });
         const ChatSender::Result r = sender->send(line_of("test"));
-        check(!r.sent && r.aborted && g.sent.empty() && g.typed == 0 &&
-                  g.state == PretendChat::State::Shut && !r.left_open,
-              "a stop during the last look before the sending Enter: not sent, rubbed out and shut");
+        check(!r.sent && r.aborted && g.sent.empty() && g.typed == 4 && g.state == PretendChat::State::Open &&
+                  r.left_open && g.enters == 1 && keys_then > 0 && g.holds.size() == keys_then,
+              "a stop during the last look before the sending Enter: not sent, not one key more, left open");
     }
     {
         PretendChat g;
@@ -13806,6 +17971,30 @@ void test_auto_chat() {
         check(closer->close_left_open(3), "a line left open with text in it is closed");
         check(g.sent.empty() && g.typed == 0 && g.state == PretendChat::State::Shut,
               "and nothing that was in it is sent, though only 3 Backspaces were asked for");
+    }
+    // The same closer, told to stop from outside (set_stop: DỪNG or F12 while
+    // it rubs out): not one key more, and the line not called shut.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.typed = 15;
+        auto closer = make_sender(g);
+        bool quit = false;
+        std::size_t keys_then = 0;
+        closer->set_stop([&quit] { return quit; });
+        g.after_key = [&](std::uint32_t vk) {
+            if (vk == VK_BACK && g.backspaces == 2 && !quit) {
+                quit = true;
+                keys_then = g.holds.size();
+            }
+        };
+        const bool closed = closer->close_left_open(3);
+        check(!closed && keys_then > 0 && g.holds.size() == keys_then && g.enters == 0 && g.typed == 13 &&
+                  g.state == PretendChat::State::Open,
+              "a closer stopped while it rubs out: not one key more, the line left open and not called shut");
+        check(!closer->close_left_open(3) && g.holds.size() == keys_then,
+              "and asked again while stopped, it presses nothing");
     }
     {
         PretendChat g;
@@ -13845,14 +18034,15 @@ void test_auto_chat() {
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
-        // Frames: the first Enter's look, the look that sees it open, two
-        // while clearing, one before each of the first twelve keys -- the
-        // seventeenth is the look before key 13, which takes in the dialogs.
-        g.flicker = 17;
+        // Frames: the first Enter's look, the look that sees it open, one
+        // after clearing (a caret's width more is rubbed in the same round),
+        // one before each of the first twelve keys -- the sixteenth is the look
+        // before key 13, which takes in the dialogs.
+        g.flicker = 16;
         g.after_key = [&g](std::uint32_t) { if (g.letters == 12) g.dialog = "lời mời tổ đội"; };
         auto sender = make_sender(g);
         const ChatSender::Result r = sender->send(line_of("abcdefghijklmnopqrstuvwxyz"));
-        check(!r.sent && r.left_open && g.typed == 0 && g.enters_with_dialog == 0 && g.frames >= 18,
+        check(!r.sent && r.left_open && g.typed == 0 && g.enters_with_dialog == 0 && g.frames >= 17,
               "a dialog on a frame wrongly showing the line shut: rubbed out, and left to be watched");
     }
     {
@@ -13875,6 +18065,27 @@ void test_auto_chat() {
         const ChatSender::Result r = sender->send(line_of("test"));
         check(r.sent && r.stop && r.left_open && g.sent.size() == 1 && g.enters == 4,
               "a line that will not shut after sending: sent, a stop, two Enters at most to shut it");
+    }
+    // The same with DỪNG just after the sending Enter: sent, and no Enter
+    // more to shut it -- the player has taken over, and it is left open.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.stays_open = true;
+        auto sender = make_sender(g);
+        ChatSender* const s = sender.get();
+        std::size_t keys_then = 0;
+        g.after_key = [&g, s, &keys_then](std::uint32_t vk) {
+            if (vk == VK_RETURN && g.letters > 0 && !s->cancelled()) {
+                s->cancel();
+                keys_then = g.holds.size();
+            }
+        };
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(r.sent && r.left_open && g.sent.size() == 1 && g.enters == 2 && keys_then > 0 &&
+                  g.holds.size() == keys_then && g.state == PretendChat::State::Open,
+              "a stop just after the sending Enter, the line staying open: sent, and no Enter more to shut it "
+              "-- left open");
     }
 
     // Somebody at the mouse or keyboard just before the first Enter: nothing
@@ -14086,6 +18297,25 @@ void test_auto_chat() {
                   r.trace.outcome == "no_text" && r.trace.after.size() == 3 && waited > 0 && waited <= 1200,
               "nothing drawn: three looks, the last " + std::to_string(waited) +
                   " ms after the last key, then not sent, rubbed out and shut, nothing pressed into it shut");
+    }
+    {
+        // The same, with DỪNG during the rubbing out: not one Backspace more.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.ignore_text = true;
+        auto sender = make_sender(g);
+        ChatSender* const s = sender.get();
+        std::size_t keys_then = 0;
+        g.after_key = [&g, s, &keys_then](std::uint32_t vk) {
+            if (vk == VK_BACK && g.letters > 0 && !s->cancelled()) {
+                s->cancel();
+                keys_then = g.holds.size();
+            }
+        };
+        const ChatSender::Result r = sender->send(line_of("test"));
+        check(!r.sent && r.left_open && keys_then > 0 && g.holds.size() == keys_then && g.sent.empty() &&
+                  g.state == PretendChat::State::Open && r.trace.outcome == "no_text",
+              "a stop while a line the game showed nothing of is rubbed out: not one Backspace more, left open");
     }
     {
         // Narrow letters: i and l are a pixel wide with one between them.
@@ -14593,8 +18823,760 @@ void test_auto_chat() {
             check(!dialogs.up(died, store).empty(), "the death dialog is seen among the four looks");
         }
     } else {
-        std::printf("  [skip] the dialogs' pictures are not installed here\n");
+        skip("the dialogs' pictures are not installed here\n");
     }
+}
+
+// ------------------------------------------------------- GoBot's window
+
+/// F12, DỪNG, a revive out of tries and closing GoBot: every job told before
+/// any is waited for, and every key let go of before the first wait and again
+/// after the last. Told and waited for one by one, the hunter and the macro
+/// went on swinging and drinking while the party worker finished an invite.
+/// GuiApp needs its window and the game to run, so this is read off its
+/// source -- all but the coordinator's half of the hold handed to the stop.
+void test_gui_stop() {
+    section("GoBot's window: a stop tells every job before it waits for one (its source)");
+
+    // A hold let go of during a stop becomes the stop's: the second engage
+    // takes over the first with no moment free between, and everything below
+    // Critical stays refused until the stop's own hold ends.
+    {
+        ExecutionCoordinator coord;
+        coord.engage_critical("quick quest");
+        coord.engage_critical("stopping");
+        const bool hunter_refused = !coord.request("hunt-attack", Priority::Combat);
+        check(coord.critical_active() && coord.critical_reason() == "stopping" && hunter_refused,
+              "a hold taken over by the stop's: still on, now the stop's, and the hunter refused");
+        coord.disengage_critical();
+        check(!coord.critical_active() && coord.request("hunt-attack", Priority::Combat),
+              "and once the stop's ends, the hunter may press again");
+    }
+
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto npos = std::string::npos;
+    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+
+    // ---- stop_jobs: tell, let go, wait, let go again ----
+    {
+        const std::string jobs = body_of(gui, "bool GuiApp::stop_jobs(bool with_bot) {");
+        bool all_told = !jobs.empty();
+        std::size_t last_told = 0;
+        for (const char* tell : { "navigator_->request_stop()", "calibrator_->request_stop()",
+                                  "stop_chat(true, false)", "stop_party(false)", "stop_revive(false)",
+                                  "stop_trash(false)", "stop_quest(false)", "stop_popups(false)",
+                                  "stop_keeper(false)", "simple_style_stop()", "executor_->halt()" }) {
+            const std::size_t at = jobs.find(tell);
+            all_told = all_told && at != npos;
+            if (at != npos) last_told = std::max(last_told, at);
+        }
+        bool all_waited = !jobs.empty();
+        std::size_t first_wait = npos, last_wait = 0;
+        for (const char* wait : { "navigator_->stop()", "stop_hunt()", "stop_macro()", "stop_bot()",
+                                  "stop_calibration()", "stop_party();", "stop_revive();",
+                                  "const bool bin_note = stop_trash();", "stop_quest();", "stop_popups();",
+                                  "stop_keeper();" }) {
+            const std::size_t at = jobs.find(wait);
+            all_waited = all_waited && at != npos;
+            if (at != npos) {
+                first_wait = std::min(first_wait, at);
+                last_wait = std::max(last_wait, at);
+            }
+        }
+        const std::size_t first_up = jobs.find("input_.release_all();");
+        const std::size_t last_up = jobs.rfind("input_.release_all();");
+        check(all_told && all_waited && first_up != npos && last_told < first_up && first_up < first_wait &&
+                  last_wait < last_up,
+              "gui_app.cpp: stop_jobs tells the walk, the calibration, Tự chat, the party, the revive, the "
+              "trash, the quest, the popups, the keeper, a Thử and the packet bot's executor, and lets go of "
+              "every key, before it waits for any -- and lets go again after the last");
+        const std::size_t stopping = jobs.find("stopping_ = true;");
+        const std::size_t hold = jobs.find("take_hold(kStopHold);");
+        const std::size_t stopped = jobs.find("stopping_ = false;");
+        const std::size_t freed = jobs.rfind("end_hold(kStopHold);");
+        check(stopping != npos && hold != npos && stopping < hold && hold < first_up && stopped != npos &&
+                  last_up < stopped && freed != npos && stopped < freed,
+              "all of it under the stop's hold, taken first and let go of last");
+        check(jobs.find("executor_->halt()") < jobs.find("stop_bot()"),
+              "the executor halted -- its queue and its route dropped -- before the bot is waited for");
+    }
+
+    // ---- each job, told, returns before it waits ----
+    {
+        const std::string quest = source_text("/apps/gobot_gui/simple_quest.cpp");
+        const std::string popups = source_text("/apps/gobot_gui/simple_popups.cpp");
+        const struct { const std::string* file; const char* head; } kStops[] = {
+            { &gui, "void GuiApp::stop_party(bool wait) {" },
+            { &gui, "void GuiApp::stop_keeper(bool wait) {" },
+            { &gui, "void GuiApp::stop_revive(bool wait) {" },
+            { &gui, "bool GuiApp::stop_trash(bool wait) {" },
+            { &gui, "void GuiApp::stop_chat(bool quit, bool wait) {" },
+            { &quest, "void GuiApp::stop_quest(bool wait) {" },
+            { &popups, "void GuiApp::stop_popups(bool wait) {" },
+        };
+        std::string waits;
+        for (const auto& s : kStops) {
+            const std::string body = body_of(*s.file, s.head);
+            const std::size_t told_only = body.find("if (!wait) return");
+            const std::size_t joins = body.find("join_pumping(");
+            if (told_only == npos || joins == npos || joins < told_only) waits += std::string(" ") + s.head;
+        }
+        check(waits.empty(), "and each job told with wait=false returns before it joins its thread" +
+                                 (waits.empty() ? std::string() : " -- not:" + waits));
+    }
+
+    // ---- F12, DỪNG, a revive out of tries, closing GoBot ----
+    {
+        const std::string tick = body_of(gui, "void GuiApp::tick() {");
+        const std::size_t panic = tick.find("if (keys.panic) {");
+        const std::size_t all_stop = panic == npos ? npos : tick.find("stop_jobs(true);", panic);
+        const std::size_t otherwise = all_stop == npos ? npos : tick.find("} else {", all_stop);
+        const std::size_t toggle = tick.find("if (keys.toggle)");
+        const std::size_t hunt = tick.find("toggle_hunt()");
+        check(otherwise != npos && toggle != npos && hunt != npos && otherwise < toggle && otherwise < hunt &&
+                  tick.find("stop_party();") == npos,
+              "tick(): F12 stops everything through stop_jobs, and alone -- F10 or F11 in the same tick is not "
+              "acted on");
+        const std::string hotkeys =
+            body_of(source_text("/apps/gobot_gui/simple_hotkeys.cpp"), "HotkeyActions GuiApp::hotkeys_tick() {");
+        const std::size_t decided = hotkeys.find("hotkey_action(edges, s)");
+        const std::size_t panic_only = hotkeys.find("if (a.panic) return a;");
+        const std::size_t trash_now = hotkeys.find("request_trash(");
+        const std::size_t login_now = hotkeys.find("login_now();");
+        check(decided != npos && panic_only != npos && trash_now != npos && login_now != npos &&
+                  decided < panic_only && panic_only < trash_now && panic_only < login_now,
+              "simple_hotkeys.cpp: and no trash pass or crossing starts from its one-job keys in that tick");
+        const std::string closing = body_of(gui, "GuiApp::~GuiApp() {");
+        const std::string after_revive = body_of(gui, "void GuiApp::stop_after_revive() {");
+        const std::string dung = body_of(source_text("/apps/gobot_gui/simple_view.cpp"), "void GuiApp::simple_stop() {");
+        const std::size_t closed = closing.find("stop_jobs(true);");
+        const std::size_t revived = after_revive.find("stop_jobs(true)");
+        check(closed != npos && closed < closing.find("stop_chat();") && revived != npos &&
+                  revived < after_revive.find("end_hold(\"reviving\")") && dung.find("stop_jobs(false)") != npos &&
+                  dung.find("stop_party()") == npos,
+              "closing GoBot and a revive out of tries stop through stop_jobs as F12 does, and DỪNG through it "
+              "without the packet bot");
+    }
+
+    // ---- the hold a stop takes over ----
+    {
+        const std::string hand = body_of(gui, "void GuiApp::end_hold(const std::string& reason) {");
+        const std::size_t kept = hand.find("if (stopping_ && reason != kStopHold)");
+        const std::size_t as_stop = hand.find("coord_.engage_critical(kStopHold)");
+        const std::size_t freed = hand.find("coord_.disengage_critical()");
+        check(kept != npos && as_stop != npos && freed != npos && kept < as_stop && as_stop < freed,
+              "end_hold: a hold let go of during a stop stays on as the stop's");
+    }
+
+    // ---- the focus, and the capture's threads ----
+    {
+        const std::string tick = body_of(gui, "void GuiApp::tick() {");
+        const std::size_t edge = tick.find("if (game_was_front_ && !front) input_.release_all();");
+        const std::size_t keys = tick.find("hotkeys_tick()");
+        check(edge != npos && keys != npos && edge < keys,
+              "tick() lets go of every key as the game stops being in front, before anything else");
+        check(tick.find("if (bot_died_.exchange(false) && !bot_config_.continue_auto_after_death) stop_bot();") !=
+                      npos &&
+                  tick.find("if (traffic_lost_.exchange(false)) stop_bot();") != npos,
+              "a death, or the traffic gone quiet, stops the bot from tick(), on the thread that starts it");
+        const std::size_t died = gui.find("protocol_->set_death_callback(");
+        const std::size_t died_end = died == npos ? npos : gui.find(");", died);
+        const std::size_t lost = gui.find("capture_.set_disconnect_callback(");
+        const std::size_t lost_end = lost == npos ? npos : gui.find("});", lost);
+        const std::string on_death = died_end == npos ? std::string() : gui.substr(died, died_end - died);
+        const std::string on_lost = lost_end == npos ? std::string() : gui.substr(lost, lost_end - lost);
+        check(on_death.find("bot_died_ = true") != npos && on_death.find("stop_bot") == npos &&
+                  on_lost.find("traffic_lost_ = true") != npos && on_lost.find("stop_bot") == npos,
+              "while the death and disconnect callbacks, on the capture's threads, only ask for it");
+    }
+
+    // ---- waited for with the window answering ----
+    {
+        const std::string pump = body_of(gui, "void GuiApp::join_pumping(std::thread& t) {");
+        check(pump.find("PM_QS_SENDMESSAGE") != npos && pump.find("MsgWaitForMultipleObjects(") != npos &&
+                  pump.find("QS_SENDMESSAGE)") != npos && pump.find("t.join();") != npos,
+              "join_pumping answers what is sent to the window while it waits for a thread");
+        // Every file of the window's: no .join() but join_pumping's own, and
+        // each worker's thread joined through it.
+        int files = 0;
+        std::string raw, all;
+        std::error_code ec;
+        for (const std::filesystem::directory_entry& e : std::filesystem::directory_iterator(
+                 std::filesystem::path(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui"), ec)) {
+            const std::filesystem::path p = e.path();
+            if (p.extension() != ".cpp" && p.extension() != ".hpp") continue;
+            std::ifstream in(p, std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            ++files;
+            const std::string own = body_of(text, "void GuiApp::join_pumping(std::thread& t) {");
+            if (!own.empty()) text.erase(text.find(own), own.size());
+            for (int i = count_of(text, ".join()"); i > 0; --i) raw += " " + p.filename().string();
+            all += text;
+        }
+        bool pumped = true;
+        for (const char* worker : { "join_pumping(party_thread_)", "join_pumping(keeper_thread_)",
+                                    "join_pumping(revive_thread_)", "join_pumping(trash_thread_)",
+                                    "join_pumping(chat_thread_)", "join_pumping(quest_thread_)",
+                                    "join_pumping(ui.thread)" })
+            pumped = pumped && all.find(worker) != npos;
+        check(files >= 10 && raw.empty() && pumped,
+              "apps/gobot_gui: no thread is joined but through join_pumping -- " + std::to_string(files) +
+                  " files read" + (raw.empty() ? std::string() : ", a .join() in:" + raw));
+        check(all.find("std::lock_guard<std::mutex> mouse(game_mouse_mutex_)") == npos,
+              "and nothing waits for the game's mouse without a stop to cut it short");
+    }
+
+    // ---- the workers, told, stop where they are ----
+    {
+        const std::string keeper = body_of(gui, "void GuiApp::keeper_loop() {");
+        const std::size_t shut = keeper.find("watch.shut_down(seen)");
+        const std::size_t guard = shut == npos ? npos : keeper.rfind("if (keeper_stop_) break;", shut);
+        const std::string between = guard == npos ? std::string() : keeper.substr(guard, shut - guard);
+        const auto ends_after_stop = [](const std::string& text) {
+            const std::size_t from = text.find("flow.set_end_client(");
+            const std::size_t asked = from == std::string::npos ? from : text.find("if (keeper_stop_) return false;", from);
+            const std::size_t counted =
+                asked == std::string::npos ? asked : text.find("keeper_take_restart(watch_settings)", asked);
+            return counted != std::string::npos &&
+                   text.find("shut_down(CrashWatch::Look{})", counted) != std::string::npos;
+        };
+        check(guard != npos && between.find("sleep") == npos && between.find("watch.") == npos &&
+                  ends_after_stop(body_of(gui, "GuiApp::Crossed GuiApp::run_crossing(")),
+              "the keeper ends no client once told to stop: asked just before it shuts the game down, and in "
+              "the one crossing's end-the-client, which counts it as a restart first");
+        const std::string trash = body_of(gui, "void GuiApp::trash_loop() {");
+        check(trash.find("while (!trash_stop_ && !mouse.try_lock())") != npos &&
+                  trash.find("if (!passed && trash_stop_) break;") != npos,
+              "and a trash pass waiting for the mouse, or for its turn, ends when told");
+    }
+
+    // ---- one crossing, and one rule for max_restarts ----
+    {
+        const std::string keeper_src = source_text("/apps/gobot_gui/simple_keeper.cpp");
+        const std::string both = gui + keeper_src;
+        const std::string loop = body_of(gui, "void GuiApp::keeper_loop() {");
+        const std::string key = body_of(keeper_src, "bool GuiApp::keeper_key_crossing(");
+        const std::string take = body_of(gui, "bool GuiApp::keeper_take_restart(");
+        const std::string crossing = body_of(gui, "GuiApp::Crossed GuiApp::run_crossing(");
+        const std::size_t taken = loop.find("!keeper_take_restart(watch_settings)");
+        // The end-client alone: refused at the cap, it cancels the crossing
+        // rather than ending the game.
+        const std::size_t ec = crossing.find("flow.set_end_client(");
+        const std::size_t ee = ec == npos ? npos : crossing.find("watch_settings.cooldown_s);", ec);
+        const std::string ender = ee == npos ? std::string() : crossing.substr(ec, ee - ec);
+        const std::size_t capped = ender.find("if (!keeper_take_restart(watch_settings)) {");
+        const std::size_t flagged = capped == npos ? npos : ender.find("out_of_restarts = true;", capped);
+        const std::size_t cancelled = flagged == npos ? npos : ender.find("flow.cancel();", flagged);
+        const std::size_t refused = cancelled == npos ? npos : ender.find("return false;", cancelled);
+        const std::size_t ended = ender.find("shut_down(CrashWatch::Look{})");
+        const bool cap_cancels = refused != npos && ended != npos && refused < ended;
+        check(count_of(both, "AutoLogin flow;") == 1 && crossing.find("AutoLogin flow;") != npos &&
+                  count_of(both, "flow.on_step(") == 1 &&
+                  loop.find("run_crossing(cold ? Crossing::Cold : Crossing::Restart") != npos &&
+                  key.find("run_crossing(Crossing::Key") != npos,
+              "keeper_loop and the login key cross through the one run_crossing");
+        check(count_of(both, "++keeper_restarts_") == 1 && take.find("++keeper_restarts_") != npos &&
+                  taken != npos && taken < loop.find("watch.shut_down(seen)") &&
+                  crossing.find("if (!keeper_oneshot_)") != npos && cap_cancels,
+              "max_restarts counted in keeper_take_restart alone: before the keeper ends a client, and for "
+              "every client the crossing ends, however it began; out of them, the crossing is cancelled");
+    }
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// "Vị trí từ gói tin" in GoBot's window: the capture the positions come
+/// from, started with the hunting, and what it shares with the Protocol tab,
+/// Autopilot and the packet bot. GuiApp needs its window and the game to run,
+/// so this is read off its source.
+void test_position_wiring() {
+    section("GoBot's window: the capture for positions, and what it shares (its source)");
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto npos = std::string::npos;
+    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+    {
+        const std::string on = body_of(gui, "void GuiApp::on_packets(const std::vector<GamePacket>& all) {");
+        const std::size_t fed = on.find("packet_world_.on_packets(all);");
+        const std::size_t plain = on.find(".plain()");
+        check(fed != npos && plain != npos && fed < plain,
+              "on_packets hands every frame -- UDP, and from inside 0x0081 -- to the packet world before any "
+              "plain() test");
+    }
+    {
+        const std::string push = body_of(gui, "void GuiApp::push_framings() {");
+        check(push.find("f.unpack = f.unwraps();") != npos && push.find("capture_.set_framing(f);") != npos &&
+                  push.find("configured_framing_") != npos && push.find("has_trailer()") != npos,
+              "push_framings unpacks every wrapper it opens, and takes the 0x0081 rule back from protocol.ini's "
+              "framing when Autopilot's has none");
+        const std::string init = body_of(gui, "void GuiApp::initialise() {");
+        check(init.find("configured_framing_ = framing_;") != npos &&
+                  init.find("hunter_->set_eyes(packet_eyes_->eyes());") != npos,
+              "protocol.ini's framing kept as read, and the hunter given the PacketEyes as GoBot starts");
+        check(init.find("link.npcap = link.capturing || position_npcap_ok_.load();") != npos,
+              "a capture running, whoever started it, is Npcap there: a start that found its service stopped "
+              "does not keep saying so once the Protocol tab or Autopilot captures");
+    }
+    {
+        const std::string apply = body_of(gui, "void GuiApp::apply_findings() {");
+        check(apply.find("PacketWorld::opcodes()") != npos && apply.find("registry_.mapped_opcodes()") != npos,
+              "Apply lets the packet world's opcodes through beside the mapped ones");
+    }
+    {
+        const std::string start = body_of(gui, "void GuiApp::start_position_capture() {");
+        const std::string link = body_of(gui, "GameLink game_link_of(");
+        check(start.find("game_link_of(pid, conns)") != npos && link.find("udp_ports_for_pid(pid)") != npos &&
+                  start.find("build_own_filter_for(conns, position_link_.udp_ports)") != npos &&
+                  start.find("capture_.set_opcode_filter({});") != npos && start.find("packet_world_.reset();") != npos &&
+                  start.find("push_framings();") != npos,
+              "the capture for positions: the game's own connections and UDP sockets by its process id and "
+              "nobody else's, every opcode let through, unpacked, and the packet world started afresh");
+        const std::size_t running = start.find("if (capture_.running()) {");
+        const std::size_t starts = start.find("capture_.start(cfg)");
+        check(running != npos && starts != npos && running < starts && start.find("capture_.stop()") == npos,
+              "a capture already running -- the Protocol tab's, Autopilot's, the packet bot's -- is used as it is, "
+              "never stopped from there");
+        const std::string autopilot = body_of(gui, "void GuiApp::auto_step() {");
+        check(autopilot.find("build_filter_for(game_connections_, udp_ports_for_pid(game_pid_))") != npos &&
+                  autopilot.find("packet_world_.reset();") != npos,
+              "Autopilot's capture takes the game's own UDP ports as well, and starts the packet world afresh");
+    }
+    {
+        const std::string hunt = body_of(gui, "void GuiApp::start_hunt() {");
+        const std::size_t restart = hunt.find("packet_eyes_->restart();");
+        const std::size_t started = hunt.find("hunter_->start();");
+        check(hunt.find("start_position_capture();") != npos && hunt.find("PacketPositions::Off") != npos &&
+                  restart != npos && started != npos && restart < started,
+              "start_hunt starts the capture unless the positions are Off, the eyes back on the screen first");
+        const std::string stop = body_of(gui, "void GuiApp::stop_hunt() {");
+        const std::string halt = body_of(gui, "void GuiApp::stop_position_capture() {");
+        const std::string shared = body_of(gui, "bool GuiApp::capture_shared() {");
+        check(stop.find("stop_position_capture();") != npos && halt.find("if (!position_capture_) return;") != npos &&
+                  halt.find("if (capture_shared()) return;") != npos && shared.find("bot_running_") != npos &&
+                  shared.find("Auto::Idle") != npos && shared.find("recording_") != npos &&
+                  shared.find("calibrator_") != npos,
+              "stop_hunt stops it -- never a capture it did not start, nor one the packet bot, Autopilot, a "
+              "recording or the calibration is reading");
+        const std::string manual = body_of(gui, "void GuiApp::stop_capture() {");
+        const std::string again = body_of(gui, "void GuiApp::position_reattach(std::uint64_t now) {");
+        check(manual.find("position_capture_off_ = true;") != npos &&
+                  again.find("if (position_capture_off_) return;") != npos && again.find("should_reattach(") != npos,
+              "a capture stopped by hand is not started again for positions until the next hunt");
+        const std::string starts = body_of(gui, "void GuiApp::start_position_capture() {");
+        const std::size_t refused = again.find("if (position_start_failed_) {");
+        const std::size_t retried = again.find("start_position_capture();");
+        check(starts.find("position_start_failed_ = true;") != npos &&
+                  starts.find("position_backoff_ms_ = std::min<std::uint64_t>(position_backoff_ms_ * 2") != npos &&
+                  refused != npos && retried != npos && refused < retried &&
+                  again.find("since_try < position_backoff_ms_") != npos &&
+                  hunt.find("position_start_failed_ = false;") != npos,
+              "a start the capture itself refused is tried again at once only for a new game link, otherwise "
+              "after twice as long each time -- not every 10 s, its lines in the log each time -- and afresh at "
+              "the next hunt");
+        const std::string tick = body_of(gui, "void GuiApp::tick() {");
+        check(tick.find("positions_tick();") != npos, "tick() keeps the capture, and writes its line every 10 s");
+    }
+    {
+        const std::string simple = source_text("/apps/gobot_gui/simple_view.cpp");
+        const std::size_t box = simple.find("ImGui::Checkbox(kPackets, &packets)");
+        const std::size_t sets =
+            box == npos ? npos
+                        : simple.find("hunt_config_.packet_positions = packets ? PacketPositions::On : PacketPositions::Watch;",
+                                      box);
+        const std::size_t saved = sets == npos ? npos : simple.find("simple_changed();", sets);
+        check(box != npos && sets != npos && saved != npos && saved - box < 400,
+              "the simple screen's \"Vị trí từ gói tin\" writes hunt_config_.packet_positions -- On, or Watch -- and "
+              "calls simple_changed()");
+        check(simple.find("position_line_vi(why)") != npos, "and its card says where the positions come from");
+        // Its tooltip is marked as the keep-distance tick's is, ticked or
+        // not: unticked, the capture still starts with every hunt.
+        const std::size_t tip = box == npos ? npos : simple.find("const std::string tip = simple_ui::trial_hint(", box);
+        const std::size_t mark = tip == npos ? npos : simple.find("simple_ui::kTrialPacketPositions", tip);
+        const std::size_t shown = tip == npos ? npos : simple.find("ImGui::SetItemTooltip(\"%s\", tip.c_str());", tip);
+        check(tip != npos && mark != npos && shown != npos && tip - box < 600 && mark < shown,
+              "and its tooltip carries the Thử nghiệm mark whether it is ticked or not");
+    }
+    {
+        // Every hunt's end stops the capture for positions on GoBot's own
+        // thread. The watchdog slept its second through, and stop() waited
+        // for it: the window held up to a second at every F11 and DỪNG.
+        const std::string cap = source_text("/src/packet_capture.cpp");
+        const std::string watch = body_of(cap, "void PacketCapture::watchdog_loop() {");
+        const std::string halt = body_of(cap, "void PacketCapture::stop() {");
+        check(watch.find("watchdog_wake_.wait_for(") != npos && watch.find("sleep_for") == npos &&
+                  halt.find("watchdog_wake_.notify_all();") != npos,
+              "the capture's watchdog waits between its looks so that stop() wakes it, and a hunt's end does not "
+              "hold GoBot's window");
+    }
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// "Chỗ đánh quái" in GoBot's window: fighting with it ticked refused with no
+/// packets to go by, the spot set aside when the keeper logs back in or
+/// another game window is found, and "Đặt chỗ này" asking the hunter for it
+/// again. GuiApp needs its window and
+/// the game to run, so this is read off its source; what the hunter does
+/// with the spot is test_hunter's.
+void test_spot_wiring() {
+    section("GoBot's window: Chỗ đánh quái -- refused with no packets, set aside at a log in, Đặt chỗ này (its "
+            "source)");
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto npos = std::string::npos;
+    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+    const std::string spot = source_text("/apps/gobot_gui/simple_spot.cpp");
+    const std::string view = source_text("/apps/gobot_gui/simple_view.cpp");
+    {
+        // Refused as a missing name is: after that check, before anything
+        // starts, and said.
+        const std::string hunt = body_of(gui, "void GuiApp::start_hunt() {");
+        const std::size_t named = hunt.find("if (!hunt_named()) {");
+        const std::size_t asked = hunt.find("if (const char* why = spot_refusal(spot_refused_vi_)) {");
+        const std::size_t said = asked == npos ? npos : hunt.find("simple_note(", asked);
+        const std::size_t back = said == npos ? npos : hunt.find("return;", said);
+        const std::size_t detector = hunt.find("start_detector();");
+        const std::size_t started = hunt.find("hunter_->start();");
+        const std::size_t capture = hunt.find("start_position_capture();");
+        check(named != npos && asked != npos && named < asked && back != npos && detector != npos && back < detector &&
+                  started != npos && back < started && capture != npos && back < capture,
+              "start_hunt refuses fighting with Chỗ đánh quái ticked and no packets to go by, and says why -- after "
+              "the name's check, before the detector, the hunter and the capture start");
+        const std::string why = body_of(spot, "const char* GuiApp::spot_refusal(std::string& vi) {");
+        const std::size_t running = why.find("if (capture_.running()) return nullptr;");
+        const std::size_t looked = why.find("PacketCapture::npcap_available()");
+        check(why.find("if (!hunt_config_.spot) return nullptr;") != npos && why.find("PacketPositions::Off") != npos &&
+                  running != npos && looked != npos && running < looked,
+              "spot_refusal: only with the spot ticked, for packet_positions=off or no Npcap -- a capture running "
+              "being Npcap there");
+        const std::string jobs = body_of(view, "void GuiApp::simple_start_jobs() {");
+        check(jobs.find("!spot_refused_vi_.empty()") != npos &&
+                  view.find("\"Tự đánh quái chưa chạy: \" + spot_refused_vi_") != npos,
+              "and BẮT ĐẦU's note says why rather than \"Đã bắt đầu\", and the card under it says so in red");
+    }
+    {
+        // The keeper back in the world: the running hunter's spot aside.
+        const std::string tick = body_of(gui, "void GuiApp::tick() {");
+        const std::size_t back = tick.find("if (keeper_reattach_.exchange(false)) {");
+        const std::size_t aside =
+            back == npos ? npos : tick.find("if (hunter_ && hunter_->running()) hunter_->suspend_spot();", back);
+        const std::size_t jobs = aside == npos ? npos : tick.find("simple_start_jobs();", aside);
+        // And a new game window found while it hunts -- "Tìm lại" after a
+        // game opened again by hand, or the keeper's: the same.
+        const std::string re = body_of(gui, "void GuiApp::retarget(void* hwnd) {");
+        const std::size_t same = re.find("if (!changed) return;");
+        const std::size_t moved =
+            same == npos ? npos : re.find("if (hunter_ && hunter_->running()) hunter_->suspend_spot();", same);
+        check(back != npos && aside != npos && jobs != npos && same != npos && moved != npos &&
+                  count_of(gui + spot + view, "suspend_spot()") == 2,
+              "tick(): logged back in by the keeper, and retarget(): another game window, a running hunter's spot "
+              "is set aside (Hunter::suspend_spot) -- before a cold start's jobs start, only for a window that "
+              "changed, and nowhere else");
+    }
+    {
+        // "Đặt chỗ này" asks the hunter for the spot again, only while it
+        // hunts.
+        const std::string row = body_of(spot, "void GuiApp::simple_spot_tick() {");
+        const std::size_t off = row.find("ImGui::BeginDisabled(!can);");
+        const std::size_t button = row.find("if (ImGui::Button(\"Đặt chỗ này\")) {");
+        const std::size_t retake = button == npos ? npos : row.find("hunter_->retake_spot();", button);
+        check(row.find("const bool can = hunting_ && hunter_ != nullptr;") != npos && off != npos && button != npos &&
+                  off < button && retake != npos && retake - button < 120 &&
+                  count_of(gui + spot + view, "retake_spot()") == 1,
+              "the \"Đặt chỗ này\" button calls Hunter::retake_spot, enabled only while hunting, and nothing else does");
+        check(view.find("simple_spot_tick();") != npos && view.find("simple_spot_state(hs);") != npos &&
+                  view.find("simple_spot_checklist();") != npos && view.find("case Hunter::State::Returning:") != npos &&
+                  view.find("else if (hs.outside_area)") != npos,
+              "the simple screen draws the tick, the card's spot line, Npcap's checklist line, the walk back and only "
+              "monsters outside the area");
+    }
+    {
+        // It moves the character, so it ships off, and the package says so.
+        const std::string pack = source_text("/package.ps1");
+        check(pack.find("@('hunt.ini', 'Hunt', 'spot'),") != npos,
+              "package.ps1 holds hunt.ini's spot to ship off, as keep_distance");
+    }
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// What GoBot's window clicks on the game with, the quest key it saves, and
+/// how it follows a new game window -- read off its source too.
+void test_gui_clicks() {
+    section("GoBot's window: clicks only on the game, the quest key by its name, one way to follow a window "
+            "(its source)");
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto npos = std::string::npos;
+    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+
+    // ---- an invitation answered ----
+    {
+        // The frame comes from PrintWindow, which shows the game even when it
+        // is covered, and a click lands on whatever is on top there; and
+        // another invitation can come up in the same place during the pause.
+        const std::string party = body_of(gui, "void GuiApp::party_loop() {");
+        const std::size_t same = party.find("PartyInvite::fold(again.who) != PartyInvite::fold(seen.who)");
+        const std::size_t yes = party.find("input_.click_on_game(again.accept_x, again.accept_y, false, stopped");
+        const std::size_t no = party.find("input_.click_on_game(again.decline_x, again.decline_y, false, stopped");
+        check(same != npos && yes != npos && no != npos && same < yes && same < no &&
+                  party.find("click_at(") == npos,
+              "gui_app.cpp: the party worker answers only the same player's invitation, through click_on_game "
+              "with its stop, and clicks nothing through click_at");
+        const std::size_t watching = party.find("say_party(\"watching\")");
+        check(party.find("list.ensure_open(input_, capture, store, &why, stopped)") != npos &&
+                  party.find("list.invite(input_, capture, store, *row, &why, stopped)") != npos &&
+                  watching != npos && party.find("std::this_thread::sleep_for", watching) == npos,
+              "and invites with its stop too, every wait of its own cut short by one");
+    }
+
+    // ---- quick quest ----
+    {
+        const std::string quest = source_text("/apps/gobot_gui/simple_quest.cpp");
+        const std::string loop = body_of(quest, "void GuiApp::quest_loop() {");
+        const std::string tab = body_of(quest, "void GuiApp::simple_quest_tab() {");
+        check(loop.find("input_.click_on_game(x, y, false, halted)") != npos && !quest.empty() &&
+                  quest.find("WindowFromPoint") == npos && quest.find("GA_ROOT") == npos &&
+                  quest.find("ClientToScreen") == npos && quest.find("click_at(") == npos,
+              "simple_quest.cpp: a quest round clicks through click_on_game, with its halt, and nothing else");
+        check(tab.find("put(\"Quest\", \"quest_key\", QuestSettings::key_text(key))") != npos &&
+                  tab.find("std::to_string(key)") == npos,
+              "and the Nhiệm vụ tab saves the quest key as key_text writes it: by name, digit keys in hex, so "
+              "nothing it saves reads back as another key");
+    }
+
+    // ---- a key box's list ----
+    {
+        const std::string hotkeys = source_text("/apps/gobot_gui/simple_hotkeys.cpp");
+        const std::string box = body_of(hotkeys, "void GuiApp::simple_hotkey_box(bool trash) {");
+        const std::size_t kept = box.find("const std::vector<NamedKey> taken = game_keys_in_use();");
+        const std::size_t asked = box.find("key_taken(key, taken)");
+        check(!hotkeys.empty() && hotkeys.find("key_taken(key, game_keys_in_use())") == npos && kept != npos &&
+                  asked != npos && kept < asked,
+              "simple_hotkeys.cpp: a key box keeps the list in a variable before asking key_taken, whose "
+              "answer points into it");
+    }
+
+    // ---- one way to follow a game window ----
+    {
+        const std::string follow = body_of(gui, "void GuiApp::retarget(void* hwnd) {");
+        const std::string view = source_text("/apps/gobot_gui/simple_view.cpp");
+        const std::string first = body_of(gui, "void GuiApp::initialise() {");
+        const std::string find_follow = body_of(gui, "bool GuiApp::find_and_retarget(");
+        const std::string reattach = body_of(gui, "bool GuiApp::reattach_game() {");
+        check(count_of(gui, "input_.set_target_window(") == 1 && follow.find("input_.set_target_window(hwnd)") != npos &&
+                  follow.find("detector_.set_target_window(hwnd)") != npos &&
+                  follow.find("mapper_->set_target_window(hwnd)") != npos &&
+                  follow.find("apply_vitals_config()") != npos && follow.find("camera_.reset()") != npos &&
+                  follow.find("anchor_.reset()") != npos,
+              "gui_app.cpp: the keys, the HP/MP reader, the detector and the mapper are pointed at a game "
+              "window in one place, retarget(), and what was seen in the old one is forgotten there");
+        check(!view.empty() && view.find("input_.set_target_window(") == npos &&
+                  view.find("input_.find_game_window(") == npos &&
+                  count_of(gui, "input_.find_game_window(") == 2 && first.find("input_.find_game_window(") != npos &&
+                  find_follow.find("input_.find_game_window(") != npos && reattach.find("find_and_retarget(") != npos,
+              "and every other way of finding the game -- Tìm lại, either list, a keeper's login -- goes "
+              "through it");
+    }
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------- gobot_cli
+
+/// gobot_cli's start, its Ctrl+C and close, F10, --status, --hunt and
+/// --invites: each acts on the real desktop when run, so it is read off the
+/// source.
+void test_cli_source() {
+    section("gobot_cli: DLLs from System32 first, Ctrl+C and the close stop it, --status presses nothing "
+            "(its source)");
+#ifdef GOBOT_SOURCE_DIR
+    if (!sources_here()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto npos = std::string::npos;
+    const std::string cli = source_text("/apps/gobot_cli/main.cpp");
+    const std::string head = "int main(int argc, char** argv) {";
+    const std::string main_body = body_of(cli, head);
+
+    // ---- before anything else ----
+    {
+        // A DLL named without its path was looked for in the program's own
+        // folder first: a wpcap.dll left beside gobot_cli.exe ran as
+        // administrator.
+        const std::size_t harden = main_body.find("gobot::harden_dll_search();");
+        const std::size_t done = main_body.find("MainDone main_done;");
+        const std::size_t handler = main_body.find("SetConsoleCtrlHandler(on_console_event, TRUE);");
+        const std::size_t options = main_body.find("Options opt;");
+        check(harden != npos && only_comments(main_body.substr(head.size(), harden - head.size())) && done != npos &&
+                  harden < done && handler != npos && done < handler && options != npos && handler < options,
+              "apps/gobot_cli/main.cpp: main() hardens where DLLs come from first of all, then puts in the "
+              "console's handler before it reads its options");
+        const std::string win_head = "int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {";
+        const std::string win_main = body_of(source_text("/apps/gobot_gui/main.cpp"), win_head);
+        const std::size_t win_harden = win_main.find("gobot::harden_dll_search();");
+        check(win_harden != npos && only_comments(win_main.substr(win_head.size(), win_harden - win_head.size())),
+              "and so does GoBot's window, first of all");
+        // gobot_sniff: its files-only build forbids real input before anything
+        // else; then the DLLs, in both; the console's handler for the live
+        // commands, which watch for it.
+        const std::string sniff_src = source_text("/apps/gobot_sniff/main.cpp");
+        const std::string sniff = body_of(sniff_src, "int main(int argc, char** argv) {");
+        const std::size_t forbid = sniff.find("forbid_real_input();");
+        const std::size_t sniff_harden = sniff.find("gobot::harden_dll_search();");
+        const std::size_t sniff_done = sniff.find("MainDone main_done;");
+        const std::size_t sniff_options = sniff.find("Options o;");
+        const std::size_t sniff_handler = sniff.find("SetConsoleCtrlHandler(on_console_event, TRUE);");
+        const std::size_t live = sniff.find("if (o.command == \"list\")");
+        check(forbid != npos && sniff_harden != npos && forbid < sniff_harden && sniff_done != npos &&
+                  sniff_harden < sniff_done && sniff_options != npos && sniff_done < sniff_options &&
+                  sniff_handler != npos && live != npos && sniff_options < sniff_handler && sniff_handler < live &&
+                  sniff_src.find("std::signal(") == npos,
+              "and gobot_sniff: the DLLs first, then the console's handler before its first live command");
+    }
+
+    // ---- Ctrl+C, Ctrl+Break and the close ----
+    {
+        // std::signal heard the first Ctrl+C alone: a Ctrl+Break or a closed
+        // console ended the program with --keytest's LCtrl still down.
+        const std::string handler = body_of(cli, "BOOL WINAPI on_console_event(DWORD event) {");
+        const auto stops_before_a_word = [&handler](const char* label) {
+            const std::size_t at = handler.find(label);
+            const std::size_t stop = at == std::string::npos ? at : handler.find("g_stop.store(true);", at);
+            const std::size_t said = at == std::string::npos ? at : handler.find("std::fputs(", at);
+            return stop != std::string::npos && said != std::string::npos && stop < said;
+        };
+        check(cli.find("std::signal(") == npos && cli.find("#include <csignal>") == npos &&
+                  stops_before_a_word("case CTRL_C_EVENT:") && stops_before_a_word("case CTRL_CLOSE_EVENT:") &&
+                  handler.find("WaitForSingleObject(g_main_done, kCloseWaitMs)") != npos,
+              "Ctrl+C, Ctrl+Break and the close each ask the command to stop before a word is written, and the "
+              "close waits for main() to let go of what it holds");
+    }
+
+    // ---- --status ----
+    {
+        // Started, the executor's threads pressed under "no input will be
+        // sent". Nor is the macro started there (--with-macro).
+        const std::size_t threads = main_body.find("std::thread hotkeys;");
+        const std::size_t not_status = threads == npos ? npos : main_body.find("if (!opt.status_only) {", threads);
+        const std::size_t started = main_body.find("executor.start();");
+        const std::size_t hotkeys = main_body.find("hotkeys = std::thread(");
+        check(count_of(main_body, "executor.start();") == 1 && not_status != npos && hotkeys != npos &&
+                  not_status < started && started < hotkeys,
+              "--status starts no executor: it is started only for the bot, with its F10 thread");
+    }
+
+    // ---- an unconfirmed [Framing] ----
+    {
+        // README: gobot_cli refuses to start while verified=false. It said so
+        // in a note and started the capture, the executor and F10 all the same.
+        const std::size_t asked = main_body.find("if (!ini.get_bool(\"Framing\", \"verified\", false)) {");
+        const std::size_t refused = asked == npos ? npos : main_body.find("if (!opt.status_only) {", asked);
+        const std::size_t out = refused == npos ? npos : main_body.find("return 1;", refused);
+        // The refusal's own return, inside its block: before the --status note.
+        const std::size_t note = refused == npos ? npos : main_body.find("Note: [Framing]", refused);
+        const std::size_t window = main_body.find("if (!attach_window(input, opt, app)) {");
+        const std::size_t capture = main_body.find("if (!capture.start(ccfg)) {");
+        check(asked != npos && refused != npos && out != npos && note != npos && out < note && window != npos &&
+                  capture != npos && out < window && window < capture,
+              "an unconfirmed [Framing] stops the bot before the game window, the capture and F10 -- all but "
+              "--status");
+    }
+
+    // ---- the packet bot's potions and buffs ----
+    {
+        // They are macro.ini's: --with-macro runs it beside the bot, on and
+        // off with it, on the packets' HP and MP -- never in --status.
+        const std::size_t made = main_body.find("if (opt.with_macro && !opt.status_only) {");
+        const std::size_t follows = main_body.find("const bool on = g_bot_enabled.load() && brain.running();");
+        // Fed the packets' HP and MP, and held while the character is dead.
+        const std::size_t fed =
+            main_body.find("packet_vitals(me, PacketCapture::silent_for_ms(capture.stats(), now_ms())");
+        const std::size_t held = fed == npos ? npos : main_body.find("macro->set_suspended(down,", fed);
+        const std::size_t stopped = main_body.find("if (macro) macro->stop();");
+        const std::size_t last_stop = main_body.rfind("brain.stop();");
+        check(made != npos && follows != npos && fed != npos && held != npos && stopped != npos &&
+                  last_stop != npos && stopped < last_stop,
+              "--with-macro runs macro.ini beside the packet bot, on and off with it, on the packets' HP and "
+              "MP, held while dead; never in --status");
+    }
+
+    // ---- F10 ----
+    {
+        const std::string loop =
+            body_of(cli, "void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, const InputManager& input) {");
+        const std::size_t gate = loop.find("if (enable && !input.window_focused() && !console_in_front()) {");
+        const std::size_t on = loop.find("brain.start();");
+        check(gate != npos && on != npos && gate < on && loop.find("brain.stop();") != npos &&
+                  cli.find("set_auto_attack") == npos && cli.find("std::ref(executor)") == npos,
+              "F10 turns the bot on only with the game or this console in front, and off from anywhere -- "
+              "through the brain, which arms and halts its executor");
+        // gobot_gui's F10 is macro.ini's toggle_key; key_start_stop is this
+        // program's alone, and the window neither shows nor edits it (M6).
+        const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
+        check(cli.find("hotkey_loop, bot.key_start_stop,") != npos && !gui.empty() &&
+                  gui.find("key_start_stop") == npos,
+              "key_start_stop is gobot_cli's F10 alone: gobot_gui neither shows it nor edits it");
+    }
+
+    // ---- --window, --windows ----
+    {
+        // A title on its own is taken only when whole (L24): the help and
+        // --windows say so, and --windows prints every title whole to copy.
+        const std::string list = body_of(cli, "int run_list_windows() {");
+        check(!list.empty() && list.find("substr(0, 31)") == npos && list.find("its whole title") != npos &&
+                  cli.find("A plain string is a piece of") == npos && cli.find("A plain string is its whole") != npos,
+              "--window takes a whole title and its help says so; --windows prints every title whole");
+    }
+
+    // ---- --hunt ----
+    {
+        const std::size_t from = cli.find("int run_hunt(");
+        const std::size_t to = from == npos ? npos : cli.find("const char* jump_outcome_word(", from);
+        const std::string hunt = to == npos ? std::string() : cli.substr(from, to - from);
+        const std::size_t primed = hunt.find("stop_edges.update(stop_keys, is_down);");
+        const std::size_t loop = hunt.find("while (now_ms() < until && !g_stop.load()) {");
+        check(primed != npos && loop != npos && primed < loop &&
+                  hunt.find("if (!input.window_focused() && !console_in_front()) input.focus_window(InputManager::kFocusMinMs);") != npos,
+              "--hunt reads its stop keys once before the run -- one held as it starts is no press -- and does "
+              "not pull the game over its own console");
+    }
+
+    // ---- --invites, and the clicks ----
+    {
+        const std::size_t from = cli.find("int run_invites(");
+        const std::size_t to = from == npos ? npos : cli.find("int run_invite_player(", from);
+        const std::string invites = to == npos ? std::string() : cli.substr(from, to - from);
+        const std::string click = body_of(cli, "int run_click(");
+        check(invites.find("PartyInvite::decide(look, bin, rules)") != npos &&
+                  invites.find("watcher.answer(input, grab, store, reader, look, accept,") != npos &&
+                  invites.find("click_at(") == npos && invites.find("may_invite") == npos,
+              "--invites decides and answers through PartyInvite, by the window's party worker's rules");
+        check(cli.find("WindowFromPoint") == npos && count_of(cli, "click_at(") == 1 &&
+                  click.find("click_at(") != npos,
+              "and nothing clicks the game but through click_on_game -- except --click, which is asked to");
+    }
+#else
+    skip("no source folder\n");
+#endif
 }
 
 // ------------------------------------------------------------------ paths
@@ -14613,7 +19595,7 @@ void test_unicode_paths() {
     wchar_t tmp[MAX_PATH]{};
     const DWORD n = GetTempPathW(MAX_PATH, tmp);
     if (n == 0 || n > MAX_PATH) {
-        std::printf("  [skip] no temp folder\n");
+        skip("no temp folder\n");
         return;
     }
     const std::string base = wide_to_utf8(std::wstring(tmp) + L"gobot_test_" +
@@ -14962,6 +19944,21 @@ void test_config() {
         check(!input.find_game_window({}, {}, "surely_nothing.exe"),
               "a process that is not running finds nothing");
     }
+#ifdef GOBOT_SOURCE_DIR
+    if (sources_here()) {
+        const std::string find =
+            body_of(source_text("/src/input_manager.cpp"), "bool InputManager::find_game_window(");
+        check(!find.empty() && find.find("if (score < kStrong) continue;") != std::string::npos &&
+                  find.find("score = 1;") == std::string::npos &&
+                  find.find("loose title substring") == std::string::npos,
+              "a title on its own counts only when whole: nothing under kStrong is taken, and no dead branch or "
+              "warning says otherwise");
+        const std::string hpp = source_text("/include/gobot/input_manager.hpp");
+        check(hpp.find("whole title") != std::string::npos &&
+                  hpp.find("then a plain substring hit") == std::string::npos,
+              "and the header says the whole title");
+    }
+#endif
 }
 
 // --------------------------------------------------------- protocol handler
@@ -15042,9 +20039,147 @@ void test_protocol_handler() {
     check(stats.decoded == 3, "decoded count");   // move, hp, combined vitals
     check(stats.unknown == 1, "unknown count");
     check(stats.unknown_opcodes.count(0x7777) == 1, "unknown opcode recorded");
+
+    // A death is said once: by the reading that takes HP to 0, not by every
+    // packet after it, and the next only after a reading above 0 between.
+    // HP at 0 was the only sign of one the layouts the tools write give, and
+    // it marked the character dead without a word, so a bot set to stop at a
+    // death never stopped.
+    int deaths = 0;
+    ph.set_death_callback([&deaths] { ++deaths; });
+    GamePacket zero;
+    zero.opcode = 0x0310;
+    zero.payload = { 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00 };     // 0 of 100
+    ph.on_packet(zero);
+    check(st.self().dead && deaths == 1, "HP read 0 is a death, and said");
+    ph.on_packet(zero);
+    check(st.self().dead && deaths == 1, "once per death, not once per packet");
+    ph.on_packet(hpp);
+    check(!st.self().dead && deaths == 1, "HP above 0 again is alive again, with no revive packet");
+    ph.on_packet(zero);
+    check(st.self().dead && deaths == 2, "and the next 0 is the next death");
+
+    // self_dead and self_revive say so outright, and a death is still one.
+    PacketSpec dead_spec;
+    dead_spec.opcode = 0x0320;
+    dead_spec.semantic = Semantic::SelfDead;
+    reg.add(dead_spec);
+    PacketSpec revive_spec;
+    revive_spec.opcode = 0x0321;
+    revive_spec.semantic = Semantic::SelfRevive;
+    reg.add(revive_spec);
+    GamePacket dead_pkt;
+    dead_pkt.opcode = 0x0320;
+    GamePacket revive_pkt;
+    revive_pkt.opcode = 0x0321;
+    ph.on_packet(dead_pkt);
+    check(deaths == 2, "a self_dead packet just after HP read 0 is the same death");
+    ph.on_packet(revive_pkt);
+    check(!st.self().dead && st.self().hp == 100,
+          "a self_revive with HP at 0 is alive, HP filled from the max");
+    ph.on_packet(dead_pkt);
+    ph.on_packet(dead_pkt);
+    check(st.self().dead && deaths == 3, "a self_dead packet while alive is a death, said once for two");
+    ph.on_packet(hpp);
+    PacketSpec state_spec;
+    state_spec.opcode = 0x0330;
+    state_spec.semantic = Semantic::SelfState;
+    state_spec.fields = OpcodeRegistry::parse_field_list("hp:i32,max_hp:i32", nullptr);
+    reg.add(state_spec);
+    GamePacket state_zero = zero;
+    state_zero.opcode = 0x0330;
+    ph.on_packet(state_zero);
+    check(st.self().dead && deaths == 4, "and HP read 0 through a self_state layout is one too");
+    ph.on_packet(revive_pkt);
+    ph.on_packet(dead_pkt);
+    ph.on_packet(zero);
+    check(st.self().dead && deaths == 5, "a self_dead packet and then HP read 0 are one death, not two");
+
+    // The callbacks are called with no lock of the registry's or the
+    // handler's held: gobot_cli's death callback stops the bot there and
+    // then, the sniffer's unknown-packet one keeps its own books, and either
+    // may touch the table. Called under decode()'s lock, a callback that adds
+    // a layout would wait on itself for ever.
+    {
+        OpcodeRegistry table;
+        table.add(hp);
+        GameState life;
+        ProtocolHandler handler(table, life);
+        const std::string path = temp_file("registry_callbacks.ini");
+        write_lines(path, { "[Packet.0x0310]", "name=SelfHpMp", "semantic=self_hpmp",
+                            "fields=hp:i32,max_hp:i32" });
+        int died = 0, strangers = 0;
+        handler.set_death_callback([&] {
+            ++died;
+            PacketSpec more;
+            more.opcode = 0x0999;
+            more.semantic = Semantic::Chat;
+            table.add(more);
+            (void)handler.stats();
+        });
+        handler.set_unknown_callback([&](const GamePacket&) {
+            ++strangers;
+            table.load(path);
+        });
+        finish_within(10000, "a callback that rewrites the opcode table", [&] {
+            handler.on_packet(zero);
+            GamePacket stranger;
+            stranger.opcode = 0x7778;
+            stranger.payload = { 1, 2 };
+            handler.on_packet(stranger);
+        });
+        check(died == 1 && strangers == 1 && table.known(0x0310) && !table.known(0x0999),
+              "a death callback that adds a layout, and an unknown-packet one that reloads the table, "
+              "both come back");
+        std::remove(path.c_str());
+    }
 }
 
 } // namespace
+
+/// See test_support.hpp. Out at once, as check()'s lines are.
+void skip(const char* format, ...) {
+    char why[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(why, sizeof why, format, args);
+    va_end(args);
+    const std::size_t n = std::strlen(why);
+    if (n > 0 && why[n - 1] == '\n') why[n - 1] = '\0';
+    ++g_skipped;
+    // Not a printf of "  [skip] ...": that is what test_skips_counted looks
+    // for in the suites, as a part left out uncounted.
+    std::fputs("  [skip] ", stdout);
+    std::puts(why);
+    std::fflush(stdout);
+}
+
+bool known_live_frame(const std::string& path) {
+    // FNV-1a over the bytes, as quest_test.cpp first recorded them: frame.png,
+    // and the trash cleaner's seventeen of 9 to 13 October, as they were saved.
+    // A frame not here -- one GoBot rewrote, or one nobody recorded -- is not
+    // counted on.
+    static const std::uint64_t kKnown[] = {
+        0x55f4d65f3cc529c7ull,      // frame.png
+        0x4a4b30a67d3a4c04ull, 0xe8be9a147ccf183aull, 0x00b1e5b2447e43a3ull, 0xb9c07a06947287faull,
+        0x2b3daeec725beb4aull, 0x34e0c99b37961fa5ull, 0x2bb38db54d5417baull, 0xaf08d5f618f0f6feull,
+        0xf26e1a095d3b2214ull, 0x4dc52622d875ebd3ull, 0x9b5aa22a75664aedull, 0xc711011d0e74439bull,
+        0x47f2f607802468b7ull, 0xdd5798f68bc6261eull, 0xe29edc96c0df073full, 0x091afd231122f428ull,
+        0xc8f5b8e97bc14b87ull,      // the trash cleaner's, 9 to 13 October
+    };
+    std::ifstream in(utf8_to_wide(path).c_str(), std::ios::binary);
+    if (!in) return false;
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    for (std::istreambuf_iterator<char> it(in), end; it != end; ++it) {
+        h ^= static_cast<unsigned char>(*it);
+        h *= 0x100000001b3ull;
+    }
+    return std::find(std::begin(kKnown), std::end(kKnown), h) != std::end(kKnown);
+}
+
+bool load_live_frame(const std::string& path, Frame& out) {
+    return known_live_frame(path) && load_png(path, out);
+}
 
 // The alerts' tests, in alerts_test.cpp, reporting through check() and section().
 void test_alerts(void (*check)(bool, const std::string&), void (*section)(const char*));
@@ -15074,6 +20209,13 @@ void test_hunter_style(void (*check)(bool, const std::string&), void (*section)(
 void test_jump(void (*check)(bool, const std::string&), void (*section)(const char*));
 // Skills that follow the fight, in skills_test.cpp.
 void test_skills(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The packet world -- you and every monster from the game's frames -- and the
+// order the screen's monsters come in, in packet_world_test.cpp.
+void test_packet_world(void (*check)(bool, const std::string&), void (*section)(const char*));
+// "Vị trí từ gói tin": the hunter's eyes on the packet world, when they may
+// steer, the two views laid over each other, and keeping the capture
+// attached, in packet_eyes_test.cpp.
+void test_packet_eyes(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -15083,6 +20225,9 @@ int main() {
     // refused, in the log as an error, instead of acting. On 2026-10-15 one
     // drove a real login crossing on the player's PC for three minutes.
     forbid_real_input();
+    // Real screen pixels, as the shipped programs work in (gobot/dpi.hpp):
+    // before any window of the tests' own exists, as Windows requires.
+    become_dpi_aware();
 
     Logger::instance().set_level(LogLevel::Error);   // keep test output readable
 
@@ -15093,6 +20238,13 @@ int main() {
     test_no_real_input();
     // Every refusal from here on is a test reaching for the real desktop.
     const std::uint64_t guard_refusals = real_input_refusals();
+    // First: from here on DLLs are looked for as the shipped programs look.
+    test_dll_search();
+    test_display_scale();
+    test_key_rule();
+    test_parse_key();
+    test_game_click();
+    test_own_windows();
     test_byte_reader();
     test_framing_extract();
     test_framing_detect();
@@ -15109,16 +20261,23 @@ int main() {
     test_capture_file_inner();
     test_protocol_handler_holds_back();
     test_real_capture();
+    test_saved_vitals_frames();
+    test_live_frames();
+    test_skips_counted();
     test_capture_file();
     test_capture_file_framings();
     test_unpack();
     test_monster_frames();
+    test_packet_world_capture();
     test_frame_numbers();
     test_flow_halves();
     test_both_framings_configured();
     test_reassembler();
     test_stream_tap();
     test_opcode_registry();
+    test_opcode_registry_load();
+    test_opcode_registry_threads();
+    test_opcode_registry_strict();
     test_game_state();
     test_pathfinder();
     test_protocol_analyzer();
@@ -15128,10 +20287,21 @@ int main() {
     test_macro_engine();
     test_macro_key_kind();
     test_macro_buffs();
+    test_macro_short_buffs();
+    test_front_keeper();
     test_executor_pause();
-    test_executor_screen_only();
+    test_executor_no_sustain();
+    test_packet_vitals();
+    test_executor_armed();
+    test_executor_halt();
+    test_brain_stop_halts();
+    test_brain_death();
+    test_calibrator();
+    test_charm_sources();
     test_vitals_reader();
+    test_screen_capture_frees();
     test_find_bars();
+    test_pet_bar();
     test_macro_triggers();
     test_template_matcher();
     test_assembly_templates();
@@ -15149,10 +20319,12 @@ int main() {
     test_game_install();
     test_crash_watch();
     test_party_invite();
+    test_invite_decision();
     test_map_table();
     test_world_anchor();
     test_glyph_font();
     test_mob_detector();
+    test_mob_detector_forgets();
     test_camera_tracker();
     test_field_finder();
     test_minimap_tracker();
@@ -15164,6 +20336,11 @@ int main() {
     test_reviver();
     test_screen_layout();
     test_auto_chat();
+    test_gui_stop();
+    test_position_wiring();
+    test_spot_wiring();
+    test_gui_clicks();
+    test_cli_source();
     test_alerts(check, section);
     test_quest(check, section);
     test_hotkeys(check, section);
@@ -15178,6 +20355,8 @@ int main() {
     test_hunter_style(check, section);
     test_jump(check, section);
     test_skills(check, section);
+    test_packet_world(check, section);
+    test_packet_eyes(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();
@@ -15186,7 +20365,8 @@ int main() {
 
     // A reach outside the switch's own test was refused, and its error is in
     // the log -- but a line in a log is what a check by hand misses, and
-    // package.ps1 goes by the exit code alone. So it fails the run.
+    // package.ps1 stops on the exit code alone -- skipped parts it reads off
+    // the last line, only to warn. So it fails the run.
     section("Nothing but the switch's own test reached for the real desktop");
     const std::uint64_t outside = real_input_refusals() - guard_refusals;
     check(outside == 0,
@@ -15199,7 +20379,7 @@ int main() {
     // Each refusal is in the log above, as an error naming what was refused.
     std::printf("%llu reach(es) for the real desktop refused\n",
                 static_cast<unsigned long long>(real_input_refusals()));
-    std::printf("%d passed, %d failed\n", g_passed, g_failed);
+    std::printf("%d passed, %d failed, %d skipped\n", g_passed, g_failed, g_skipped);
     if (!run_temp_dir().empty()) {
         std::error_code ec;
         std::filesystem::remove_all(std::filesystem::path(run_temp_dir()), ec);

@@ -41,7 +41,8 @@ std::vector<Routine> Routine::load(const std::string& path) {
             step.find       = find;
             step.confirm    = ini.get(section, key_for(n, "confirm"), {});
             step.gone       = ini.get_bool(section, key_for(n, "gone"), false);
-            step.optional   = ini.get_bool(section, key_for(n, "optional"), false);
+            step.check      = ini.get_bool(section, key_for(n, "check"), true);
+            step.optional  = ini.get_bool(section, key_for(n, "optional"), false);
             step.click_dx   = ini.get_int(section, key_for(n, "click_dx"), -1);
             step.click_dy   = ini.get_int(section, key_for(n, "click_dy"), -1);
             step.score      = ini.get_float(section, key_for(n, "score"), 0.80f);
@@ -69,6 +70,7 @@ bool Routine::save(const std::vector<Routine>& routines, const std::string& path
             ini.set(section, key_for(n, "find"), step.find);
             if (!step.confirm.empty()) ini.set(section, key_for(n, "confirm"), step.confirm);
             if (step.gone)     ini.set_bool(section, key_for(n, "gone"), true);
+            if (!step.check)   ini.set_bool(section, key_for(n, "check"), false);
             if (step.optional) ini.set_bool(section, key_for(n, "optional"), true);
             if (step.click_dx >= 0) ini.set_int(section, key_for(n, "click_dx"), step.click_dx);
             if (step.click_dy >= 0) ini.set_int(section, key_for(n, "click_dy"), step.click_dy);

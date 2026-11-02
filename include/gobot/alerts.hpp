@@ -131,6 +131,8 @@ std::string revived();
 std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool coming_back,
                        int minutes = 0);
 std::string back_in(int restart, int max_restarts);
+/// `restarts`: times the game was closed and entered again since the keeper
+/// started (max_restarts).
 std::string gave_up_restarts(int restarts);
 std::string gave_up_not_set_up();
 std::string gave_up_not_elevated();

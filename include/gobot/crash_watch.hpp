@@ -98,8 +98,13 @@ public:
 
         /// Give up after this many restarts. Beyond it, a person is needed.
         ///
+        /// A restart is every time the game was closed and had to be entered
+        /// again -- by the keeper after a crash, a hang, an error box or the
+        /// watchdog, or by a crossing ending a client stuck part way in, the
+        /// login key's included (GuiApp::keeper_take_restart).
+        ///
         /// A client that crashes once is a crash. A client that crashes five
-        /// times in a row is something that restarting will not fix -- a bad
+        /// times is something that restarting will not fix -- a bad
         /// patch, a full disk, an account that has been locked -- and a loop
         /// that keeps reconnecting to a server refusing it is indistinguishable
         /// from an attack on that server.

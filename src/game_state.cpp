@@ -13,6 +13,14 @@ float distance(const Vec2& a, const Vec2& b) {
     return std::sqrt(dx * dx + dy * dy);
 }
 
+SelfVitals packet_vitals(const Self& me, std::uint64_t silent_ms, std::uint64_t stale_ms) {
+    SelfVitals v;
+    if (silent_ms > stale_ms) return v;
+    if (me.max_hp > 0) v.hp = me.dead ? 0.0f : std::clamp(me.hp_pct(), 0.0f, 100.0f);
+    if (me.max_mp > 0) v.mp = std::clamp(me.mp_pct(), 0.0f, 100.0f);
+    return v;
+}
+
 void GameState::touch() { last_update_ms_ = now_ms(); }
 
 // ------------------------------------------------------------------- writes
@@ -31,7 +39,15 @@ void GameState::update_self_hp(std::int32_t hp, std::int32_t max_hp) {
     std::lock_guard<std::mutex> lock(mutex_);
     self_.hp = hp;
     if (max_hp > 0) self_.max_hp = max_hp;
-    if (hp <= 0) self_.dead = true;
+    // Read off every reading, both ways. A 0 used to set it for good: only a
+    // self_revive packet cleared it, and nothing maps one (not the analyzer,
+    // not the calibrator, not one example layout). So one death, or one HP
+    // packet reading 0 while a map loaded, left the brain in Recovering and
+    // the potions and buffs skipping until GoBot was closed. Read whether or
+    // not a max is known, as the 0 always was, so a layout with no max still
+    // sees a death, and now its end. self_dead and self_revive still say so
+    // outright (set_self_dead), and whichever came last stands.
+    self_.dead = hp <= 0;
     touch();
 }
 
@@ -50,6 +66,9 @@ void GameState::update_self_id(std::int32_t id) {
 
 void GameState::set_self_dead(bool dead) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // The packets that say so outright; it stands until the next HP reading.
+    // A revive with HP still at 0 fills it from the max, so no reading is
+    // needed to see the character up.
     self_.dead = dead;
     if (!dead && self_.hp <= 0 && self_.max_hp > 0) self_.hp = self_.max_hp;
     touch();

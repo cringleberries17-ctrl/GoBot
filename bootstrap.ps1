@@ -8,7 +8,9 @@
 
       * Visual Studio 2022 Build Tools (MSVC v143 + Windows SDK)  ~3 GB
       * CMake
-      * Npcap SDK  (headers + wpcap.lib)  -> third_party/npcap-sdk   ~1 MB
+
+    The Npcap SDK (headers + import libraries) is part of the tree, in
+    third_party/npcap-sdk, and is not downloaded.
 
     Already-present components are skipped. Safe to re-run.
 
@@ -88,26 +90,14 @@ if (Get-Command cmake -ErrorAction SilentlyContinue) {
 }
 
 # -------------------------------------------------------------- Npcap SDK
+# Part of this tree, never downloaded: third_party\npcap-sdk is the 1.13 SDK
+# unpacked, and the configure holds each of its headers and libraries to the
+# hash in third_party\npcap-sdk.sha256 (cmake\FindNpcap.cmake).
 Write-Step "Npcap SDK"
-$sdkDir = Join-Path $root 'third_party\npcap-sdk'
-if (Test-Path (Join-Path $sdkDir 'Include\pcap.h')) {
-    Write-Ok "already unpacked at third_party\npcap-sdk"
+if (Test-Path (Join-Path $root 'third_party\npcap-sdk\Include\pcap.h')) {
+    Write-Ok "in the tree at third_party\npcap-sdk"
 } else {
-    New-Item -ItemType Directory -Force -Path (Split-Path $sdkDir) | Out-Null
-    $zip = Join-Path $env:TEMP 'npcap-sdk.zip'
-    $url = 'https://npcap.com/dist/npcap-sdk-1.13.zip'
-    Write-Ok "downloading $url"
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-        Expand-Archive -Path $zip -DestinationPath $sdkDir -Force
-        Remove-Item $zip -Force
-        Write-Ok "unpacked to third_party\npcap-sdk"
-    } catch {
-        Write-Warn2 "Automatic download failed: $($_.Exception.Message)"
-        Write-Warn2 "Download the SDK zip from https://npcap.com/#download and unpack"
-        Write-Warn2 "it so that this path exists: $sdkDir\Include\pcap.h"
-    }
+    Write-Warn2 "third_party\npcap-sdk is missing. It is part of the source: restore it from the repository."
 }
 
 # ------------------------------------------------------- Npcap runtime check
@@ -119,7 +109,7 @@ if ($svc -and $svc.Status -eq 'Running') {
     Write-Warn2 "npcap service present but $($svc.Status). Start it with: Start-Service npcap"
 } else {
     Write-Warn2 "Npcap runtime not installed. Get it from https://npcap.com/#download"
-    Write-Warn2 "Tick 'Install Npcap in WinPcap API-compatible Mode' during setup."
+    Write-Warn2 "Its default options will do: WinPcap API-compatible Mode is not needed."
 }
 
 Write-Step "Done"

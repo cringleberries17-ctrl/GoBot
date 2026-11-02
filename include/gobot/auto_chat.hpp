@@ -126,11 +126,12 @@ struct ChatSettings {
     int         hold_min_ms = 0;
     int         hold_max_ms = 0;
     /// How long an Enter pressed to open the line is watched for the line to
-    /// open, a look every 250 ms, before another is pressed: 750, three looks.
+    /// open, a look every 100 ms, before another is pressed: 750, eight looks.
     int         enter_gap_ms = 750;
     /// Nothing pressed for this long, with everything else of the bot held
-    /// off, before the first Enter of a line: 300.
-    int         quiet_before_ms = 300;
+    /// off, before the first Enter of a line: 150 -- the keys already let go,
+    /// any key half pressed waited out before it (settle).
+    int         quiet_before_ms = 150;
     /// From the line seen cleared to its first letter: 0.
     int         type_wait_ms = 0;
     /// Enters pressed to open the line before it is given up as not opened:
@@ -476,9 +477,12 @@ std::string chat_machine_note(void* game_window);
 /// only once the line is seen open and cleared, every key goes only on a look
 /// taken just before it that still shows the line open, and the line is sent
 /// only when the field shows that what was typed arrived. Anything
-/// unexpected, a stop, or the game losing the front, and what was typed is
-/// rubbed out and the line closed again empty, rather than sent half-done or
-/// left open for the skill keys to be typed into. A line is only closed with
+/// unexpected, or the game losing the front, and what was typed is rubbed out
+/// and the line closed again empty, rather than sent half-done or left open
+/// for the skill keys to be typed into. A stop (cancel) is the player taking
+/// over: not one key more is pressed, and whatever is in the line is left
+/// there -- reported as maybe open (Result::left_open) unless a look shows it
+/// shut. A line is only closed with
 /// Enter while the field shows nothing in it but the caret: Enter sends
 /// whatever is there. Backspace goes only into a line a look has just shown
 /// open: with it shut, or out of sight, it is the game's.
@@ -542,10 +546,19 @@ public:
     /// then says how long the potions waited, which starts before the line.
     void set_held_since(std::uint64_t ms) { held_since_ = ms; }
 
-    /// Stop the line at the next key, rub out what was typed and close the
-    /// line. A sender that is cancelled stays cancelled.
+    /// Stop the line at the next key, and press nothing more -- not a
+    /// Backspace, not an Enter: the player has taken over (DỪNG, F12,
+    /// gobot_cli's Ctrl+C), and whatever was typed is left in the line for
+    /// them. The line is looked at, and reported as maybe open
+    /// (Result::left_open) unless the looks show it shut. A clean-up under
+    /// way stops too. A sender that is cancelled stays cancelled.
     void cancel() { cancelled_ = true; }
     bool cancelled() const { return cancelled_.load(); }
+    /// A stop asked from outside, for a sender that is never cancelled -- the
+    /// one that closes a line left open (close_left_open), which lives as
+    /// long as its doubt: true, and it presses nothing more, as cancel()
+    /// makes a line stop. Asked before every Backspace and every Enter.
+    void set_stop(std::function<bool()> stop) { stop_ = std::move(stop); }
 
     /// What the sender does to the game, one function each. The game's own
     /// input unless set; a test sets them to a pretend game.
@@ -581,7 +594,8 @@ public:
         /// Stopped part way for something that is not the line's own trouble:
         /// HP falling, a dialog coming up, another hold, the game losing the
         /// front, the bar going out of sight, a stop. Whatever was typed has
-        /// been rubbed out. To be tried again `wait_ms` from now, and not
+        /// been rubbed out -- but after a stop, which leaves it in the line
+        /// (left_open). To be tried again `wait_ms` from now, and not
         /// counted as a failure: in a long fight these come one after another.
         bool        aborted = false;
         std::uint64_t wait_ms = 0;
@@ -653,8 +667,8 @@ private:
     /// seconds: the guard is asked through every one of them, as between
     /// keys.
     bool wait(int ms);
-    /// Waits whether cancelled or not: for rubbing out and closing, which a
-    /// stop needs done.
+    /// Waits whether cancelled or not: for rubbing out and closing, and for
+    /// the looks a stop still takes.
     void pause(int ms);
     int  jitter(int lo, int hi);
 
@@ -670,15 +684,18 @@ private:
     /// opened the line, only on a look taken long enough after it for the
     /// game to have shown it. `bar` ends as the last look.
     bool believe_shut(ChatBar& bar);
-    /// Backspace `n` times, quickly; false when the game lost the front.
+    /// Backspace `n` times, quickly; false when the game lost the front, or a
+    /// stop came: no Backspace after it.
     bool rub_out(int n);
     /// Whether the open line shows nothing in it: nothing drawn at all, or no
     /// more than the caret did once it was cleared.
     bool shows_empty(const ChatBar& bar) const;
-    /// After a stop, a loss of focus or anything unexpected: rub out `rub`
-    /// characters -- only into a line a look has just shown open -- and close
-    /// the line with Enter if it is open, empty and no dialog is up. Sets
-    /// `r.left_open` when it could not show it shut.
+    /// After a loss of focus or anything unexpected -- not a stop, which
+    /// leaves the line as it is: rub out `rub` characters -- only into a line
+    /// a look has just shown open -- and close the line with Enter if it is
+    /// open, empty and no dialog is up. Sets `r.left_open` when it could not
+    /// show it shut. A stop that comes meanwhile ends it at once, the line
+    /// left maybe open.
     void tidy(Result& r, int rub);
     void say(const std::string& line) const { if (report_) report_(line); }
 
@@ -694,6 +711,9 @@ private:
     std::string          debug_dir_;
     Hands                hands_;
     std::atomic<bool>    cancelled_{false};
+    std::function<bool()> stop_;            ///< see set_stop
+    /// Cancelled, or the stop from outside says so.
+    bool stopped() const { return cancelled_ || (stop_ && stop_()); }
     std::mt19937         rng_{ std::random_device{}() };
     /// How far the field showed something drawn on it once cleared, before
     /// typing: an empty line's caret. Only kept when it is no more than

@@ -121,6 +121,7 @@ public:
         GameWindow,         ///< START was pressed and the game never opened
         Connect,            ///< no "Kết Nối"
         Channel,            ///< no channel list
+        ChannelNotTaken,    ///< the chosen channel clicked, and the game never took it
         Character,          ///< no character select
         World,              ///< a character was picked and never arrived
         Covered,            ///< another window stayed over the place to click
@@ -508,6 +509,54 @@ public:
     /// `landmark` may be null or empty: the bars only.
     static bool in_world(const Frame& game, const Frame* landmark);
 
+    /// The channel list, found by its own panel: the client's empty dialog of
+    /// eight "Kênh N" rows (templates.ini channel_dialog), drawn pixel for
+    /// pixel the same on every client size. The page's title, "Chọn Kênh", is
+    /// what finds the page, and the rows used to be clicked at offsets from it
+    /// -- offsets measured on a 1024x768 client, which say nothing of where the
+    /// list sits under the title on a client of another size. The rows are
+    /// clicked on the panel itself when it is found, and by the title's
+    /// offsets only when it is not.
+    static constexpr const char* kChannelPanel = "channel_dialog";
+    /// The part of that picture the panel is looked for by: its column of
+    /// labels, none of the words the channels' states are written in, which
+    /// change. Measured on the dialog's own picture, 360x320.
+    static constexpr int   kPanelAnchorX = 50;
+    static constexpr int   kPanelAnchorY = 50;
+    static constexpr int   kPanelAnchorW = 100;
+    static constexpr int   kPanelAnchorH = 251;
+    /// How alike: the client's own panel scored 0.91 against the dialog's
+    /// picture, its chosen row lit.
+    static constexpr float kPanelScore = 0.80f;
+    /// Row k of the panel, from 0: its middle at kPanelRowX, kPanelRowY +
+    /// kPanelRowStep * k from the dialog's top-left, on its "Kênh N" label;
+    /// the top line of its frame at kPanelLineY + kPanelRowStep * k, across
+    /// kPanelLineX0..kPanelLineX1, lit for the row that is chosen.
+    static constexpr int   kPanelRowX = 104;
+    static constexpr int   kPanelRowY = 64;
+    static constexpr int   kPanelRowStep = 31;
+    static constexpr int   kPanelRows = 8;
+    static constexpr int   kPanelLineY = 51;
+    static constexpr int   kPanelLineX0 = 60;
+    static constexpr int   kPanelLineX1 = 300;
+    /// How bright that line is, on average, for a lit row: about 200 lit, 40
+    /// not.
+    static constexpr int   kPanelLitGrey = 110;
+
+    /// Where the channel list's panel is in a picture of the game.
+    struct PanelHit {
+        bool       found = false;
+        ScreenRect at;          ///< the whole dialog, its top-left the rows are measured from
+        float      score = 0.0f;
+    };
+    /// `dialog` is kChannelPanel's picture; empty or too small: not found.
+    static PanelHit find_channel_panel(const Frame& game, const Frame& dialog);
+    /// The middle of row `index` (from 0, held to the eight there are) of the
+    /// panel at `panel`.
+    static void channel_row_point(const ScreenRect& panel, int index, int& x, int& y);
+    /// Whether row `index` of the panel at `panel` is lit: the one chosen.
+    static bool channel_row_lit(const Frame& game, const ScreenRect& panel, int index);
+
     /// Nothing is up. See `furthest_up`.
     static constexpr std::size_t kNone = static_cast<std::size_t>(-1);
 
@@ -597,6 +646,15 @@ public:
     };
     void set_hands(Hands h) { hands_ = std::move(h); }
 
+    /// Where to keep a picture of the game when an attempt fails on one of
+    /// its screens -- the newest few, as login_*.png -- so that a crossing that
+    /// stopped can be looked at afterwards. Only the game's, and only a
+    /// picture that is the game's: one with another window over it -- a chat,
+    /// a browser, VTCZone with its account -- is not kept. Empty, the
+    /// default, keeps none.
+    void set_debug_dir(std::string dir) { debug_dir_ = std::move(dir); }
+    static constexpr std::size_t kKeptFrames = 20;
+
     /// Cross as far as this page and stop, leaving it on the screen.
     ///
     /// For measuring. The channel list and the character select are two
@@ -664,6 +722,7 @@ private:
         Held,       ///< not clicked: something else is there; `held_by_` says what
         BadPoint,   ///< not clicked: the point is off the window's client area
         Stopped,    ///< not clicked: a stop was asked for, or a Security Alert is up
+        NotTaken,   ///< clicked, and never seen to take: a channel row (choose_channel)
     };
 
     /// The game and its launcher, as one look finds them: their windows, or
@@ -699,6 +758,28 @@ private:
     bool   up_anywhere(std::size_t index, const Frame (&frames)[3]) const;
     /// Whether any page drawn on the game is in `frame`.
     bool   game_page_in(const Frame& frame) const;
+    /// Page `index` in `frame`: its picture, or -- for the channel list -- its
+    /// panel when the title is not found.
+    struct PageHit {
+        bool       found = false;
+        ScreenRect at;
+        float      score = 0.0f;
+        bool       by_panel = false;    ///< `at` is the channel list's panel, not the page's picture
+    };
+    PageHit page_in(std::size_t index, const Frame& frame) const;
+    /// The channel list's panel in `frame`, when the pictures have it.
+    PanelHit panel_in(const Frame& frame) const;
+    /// The channel row clicked, and looked at until it took -- the list gone,
+    /// or the row lit -- clicked again if not, a few times; NotTaken when it
+    /// never did, for Kết Nối would then join whichever channel the game has
+    /// chosen, not the player's; `why_` then says which. The panel is looked
+    /// for afresh; `by_panel` says the page was found by it, not by its
+    /// picture. `x`,`y` on entry the point for the first row by the page's
+    /// offsets from its picture -- used only when there is no panel -- on
+    /// return the point last clicked or held.
+    Click  choose_channel(const Page& page, bool by_panel, int choice, int& x, int& y);
+    /// A picture of the game, kept in the debug folder as login_<stamp>_<what>.png.
+    void   keep_frame(const std::string& what);
     /// The landmark set or loaded for this crossing -- loaded the first time
     /// it is wanted -- or null when there is none.
     const Frame* landmark();
@@ -771,6 +852,9 @@ private:
     int                attempts_made_ = 0;
     std::function<void(Step, const std::string&)> report_;
     Hands              hands_;
+    std::string        debug_dir_;              ///< see set_debug_dir
+    /// The last page await() found was the channel list, found by its panel.
+    bool               found_by_panel_ = false;
     std::function<bool()> end_client_;
     int                end_cooldown_s_ = 15;
 
@@ -784,6 +868,10 @@ private:
     /// trusted -- the program in front, or over one of the points looked at
     /// -- or empty: minimised, or nothing of it on a screen.
     std::string        behind_by_[3];
+    /// For VTCZone and the launcher, the scale each was last seen drawing
+    /// itself at, in percent (gobot/dpi.hpp); 0 when not known. Over 100 their
+    /// pages, found by pictures taken at 100%, are not found.
+    int                drawn_at_[3] = {};
     /// Set when this run started VTCZone itself, for the sign-in form's grace.
     bool               started_vtczone_ = false;
     std::chrono::steady_clock::time_point vtczone_started_{};

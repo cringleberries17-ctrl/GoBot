@@ -19,6 +19,8 @@
 #include <iterator>
 #include <set>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace gobot;
@@ -134,6 +136,59 @@ void test_edges() {
           "keys set to 0 never go down, and Windows is never asked about key 0");
     check(e.toggle && e.hunt && e.panic, "while F10, F11 and F12 do");
 }
+
+/// gobot_cli --hunt's two stop keys, watched from any window as the run
+/// watches them: one look before the run, its edges thrown away, and one
+/// after every 50 ms slice.
+void test_stop_keys() {
+    section("Hotkeys: --hunt's F12 and F11 -- a key held as the run starts is no press");
+    HotkeySet stop;
+    stop.panic = kF12;
+    stop.hunt = kF11;
+    Keyboard kb;
+    kb.held.insert(kF12);
+    HotkeyEdgeTracker edges;
+    (void)edges.update(stop, kb.down());        // before the run, as run_hunt does
+    int went = 0;
+    for (int i = 0; i < 40; ++i) went += edges.update(stop, kb.down()).panic ? 1 : 0;
+    check(went == 0, "F12 held as the run starts, and for 2 s after: no stop (" + std::to_string(went) + ")");
+    kb.held.clear();
+    check(!edges.update(stop, kb.down()).any(), "let go: nothing");
+    kb.held.insert(kF12);
+    const HotkeyEdges again = edges.update(stop, kb.down());
+    int more = 0;
+    for (int i = 0; i < 40; ++i) more += edges.update(stop, kb.down()).panic ? 1 : 0;
+    check(again.panic && !again.hunt && more == 0, "pressed again: one stop, F12's, however long it is held");
+    kb.held.clear();
+    (void)edges.update(stop, kb.down());
+    kb.held.insert(kF11);
+    const HotkeyEdges hunt = edges.update(stop, kb.down());
+    check(hunt.hunt && !hunt.panic, "F11 stops it too, as the hunting key");
+
+    // The same key for both, in a file edited by hand: both go down in the
+    // one look, and the run is stopped once, by the first it reads.
+    HotkeySet same;
+    same.panic = same.hunt = kF12;
+    HotkeyEdgeTracker both;
+    Keyboard k2;
+    (void)both.update(same, k2.down());
+    k2.held.insert(kF12);
+    const HotkeyEdges e = both.update(same, k2.down());
+    check(e.panic && e.hunt, "one key for both: both edges in the same look");
+}
+
+/// key_taken answers with a pointer into the list it is given, so a list made
+/// in the call -- gone at the end of the statement -- is not taken at all:
+/// simple_hotkey_box read a note out of freed memory that way. Checked as the
+/// compiler sees it.
+template <class L, class = void>
+struct TakesList : std::false_type {};
+template <class L>
+struct TakesList<L, std::void_t<decltype(key_taken(0u, std::declval<L>()))>> : std::true_type {};
+static_assert(TakesList<const std::vector<NamedKey>&>::value, "a list kept in a variable is taken");
+static_assert(TakesList<std::vector<NamedKey>&>::value, "so is one that is not const");
+static_assert(!TakesList<std::vector<NamedKey>>::value, "a list made in the call is not");
+static_assert(!TakesList<std::vector<NamedKey>&&>::value, "nor one moved in");
 
 void test_switches() {
     section("Hotkeys: F10 and F11 with the game or GoBot in front; F12 always (HK-A1, HK-A2)");
@@ -452,6 +507,7 @@ void test_hotkeys(void (*check_fn)(bool, const std::string&), void (*section_fn)
     g_check = check_fn;
     g_section = section_fn;
     test_edges();
+    test_stop_keys();
     test_switches();
     test_trash_key();
     test_login_key();

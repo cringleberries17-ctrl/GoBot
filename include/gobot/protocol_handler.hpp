@@ -76,6 +76,10 @@ private:
     void handle_map_warp(const DecodedPacket& d);
     void handle_map_data(const DecodedPacket& d, const GamePacket& raw);
 
+    /// Read on whichever thread feeds packets in -- the capture thread --
+    /// while the GUI may rewrite it on its drawing thread. OpcodeRegistry
+    /// locks itself for that, and decode() hands back values only, so nothing
+    /// here keeps a layout or needs a lock of its own for one.
     const OpcodeRegistry& registry_;
     GameState&            state_;
 

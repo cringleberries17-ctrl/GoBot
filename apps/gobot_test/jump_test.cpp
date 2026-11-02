@@ -8,9 +8,11 @@
 
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/hotkeys.hpp"
+#include "gobot/input_manager.hpp"
 #include "gobot/jump_check.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/navigator.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -19,6 +21,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -185,6 +188,16 @@ void test_jump_check() {
         check(r.outcome == JumpCheck::Outcome::NoKey && rig.presses.empty(), "no jump key: nothing");
     }
     {
+        // ↓ on a gate changes the map: never pressed, and said as not pressed
+        // -- not as one that may have gone out.
+        JumpRig rig;
+        const JumpCheck::Result r = rig.run(VK_DOWN);
+        const std::string said = JumpCheck::said_vi(r, "↓");
+        check(r.outcome == JumpCheck::Outcome::NeverPressed && rig.presses.empty() && !r.pressed &&
+                  said.find("Chưa bấm") != std::string::npos && said.find("không bấm ↓") != std::string::npos,
+              "the jump key set to Down: nothing pressed, and said why -- " + said);
+    }
+    {
         JumpRig rig;
         std::atomic<bool> stop{ true };
         const JumpCheck::Result r = rig.check_.run(VK_UP, &stop);
@@ -220,6 +233,69 @@ void test_jump_advice() {
           "Space on Space: a clash with the attack key");
     check(is(0, 'Z', JumpCheck::Advice::NotSet, ""), "0: not set");
     check(is(VK_UP, 'Z', JumpCheck::Advice::Clean, ""), "Up with nothing else on it: clean");
+    check(is(VK_DOWN, 'Z', JumpCheck::Advice::DownChangesMap, "") &&
+              JumpCheck::advice(VK_DOWN, VK_DOWN, { { VK_DOWN, "phím kỹ năng" } }).kind ==
+                  JumpCheck::Advice::DownChangesMap,
+          "Down: never pressed, said before any clash -- on a gate it changes the map");
+}
+
+void test_never_down() {
+    section("↓ is never pressed: on a gate it changes the map");
+
+    check(InputManager::never_pressed(VK_DOWN) && !InputManager::never_pressed(VK_UP) &&
+              !InputManager::never_pressed(VK_LEFT) && !InputManager::never_pressed(VK_RIGHT) &&
+              !InputManager::never_pressed(0) && !InputManager::never_pressed('Z') &&
+              InputManager::never_pressed(0x10028u) && InputManager::never_pressed(0xFFFF0028u),
+          "Down, and only Down -- a file's 0x10028 or -65496 too, which reach the game as Down");
+#ifdef GOBOT_SOURCE_DIR
+    // Refused where every key goes out, before anything else is asked of it:
+    // a key box set to it before it refused it presses nothing either.
+    const auto read = [](const char* rel) {
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string im = read("/src/input_manager.cpp");
+    const std::size_t send = im.find("bool InputManager::send_key(");
+    const std::size_t typed = im.find("bool InputManager::type_key(");
+    const std::size_t send_guard = im.find("if (down && never_pressed(vk))", send);
+    const std::size_t send_real = im.find("refuse_real_input(down ?", send);
+    const std::size_t typed_guard = im.find("if (never_pressed(vk))", typed);
+    const std::size_t typed_real = im.find("refuse_real_input(\"type a key\")", typed);
+    check(send != std::string::npos && send_guard < send_real && typed != std::string::npos &&
+              typed_guard < typed_real,
+          "send_key and type_key refuse Down before anything else -- every press, held key and typed key");
+    const std::string view = read("/apps/gobot_gui/simple_view.cpp");
+    check(view.find("InputManager::never_pressed(got)") != std::string::npos,
+          "a key box refuses Down when it is pressed for it");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+void test_sightings() {
+    section("Your character found or not: said once each way, and not for a moment's dropout");
+
+    MobDetector::PlayerSightings s;
+    const std::uint64_t t = 1'000'000, grace = MobDetector::kPlayerMemoryMs;
+    const bool start_quiet = s.note(false, t, grace) == 0 && s.note(false, t + 5000, grace) == 0;
+    s = MobDetector::PlayerSightings{};
+    const int found = s.note(true, t, grace);
+    const int again = s.note(true, t + 100, grace);
+    // A dropout of 1.2 s, as the plate has several times a minute. One call
+    // a statement: the operands of + may go in either order.
+    int gone = s.note(false, t + 200, grace);
+    gone += s.note(false, t + 1000, grace);
+    gone += s.note(false, t + 1400, grace);
+    const int back = s.note(true, t + 1400, grace);
+    // Gone for good: said once, past the grace, and found again said once.
+    int quiet = s.note(false, t + 2000, grace);
+    quiet += s.note(false, t + 3400, grace);
+    const int lost = s.note(false, t + 3600, grace);
+    const int still = s.note(false, t + 9000, grace);
+    const int refound = s.note(true, t + 9100, grace);
+    check(start_quiet && found == 1 && again == 0 && gone == 0 && back == 0 && quiet == 0 && lost == -1 &&
+              still == 0 && refound == 1,
+          "found: said once; a 1.2-s dropout: nothing; gone past 1.5 s: said once; found again: said once");
 }
 
 /// A file of the test's own, in the temp folder, holding `text`.
@@ -250,7 +326,7 @@ void test_walk_key() {
               JumpCheck::walk_key_warning_vi(shipped.jump_key, 'Z').empty(),
           "the shipped hunt.ini: [Move] jump_key=38, Up, the game's jump -- nothing to say");
 #else
-    std::printf("  [skip] no source folder\n");
+    skip("no source folder\n");
 #endif
     // A player's own file from before: Space, kept as it is, and said.
     const std::string old = temp_ini("walk_old.ini", "[Move]\nleft_key=37\nright_key=39\njump_key=32\n");
@@ -280,5 +356,7 @@ void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(co
     g_section = section_fn;
     test_jump_check();
     test_jump_advice();
+    test_never_down();
+    test_sightings();
     test_walk_key();
 }

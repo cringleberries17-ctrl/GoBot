@@ -245,7 +245,7 @@ bool CrashWatch::looks_like_a_box(const std::string& window_class,
     const std::string all = to_lower(title + "\n" + text);
     return all.find("stopped working") != std::string::npos ||
            all.find("has stopped") != std::string::npos ||
-           all.find("ng\xC3\xABng ho\xE1\xBA\xA1t \xC4\x91\xE1\xBB\x99ng") != std::string::npos;
+           all.find("ng\xE1\xBB\xAB" "ng ho\xE1\xBA\xA1t \xC4\x91\xE1\xBB\x99ng") != std::string::npos;
 }
 
 // --------------------------------------------------------------- the one look

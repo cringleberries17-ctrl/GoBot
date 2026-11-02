@@ -141,6 +141,12 @@ struct QuestSettings {
     /// is never emptied first.
     static bool save_key(const std::string& path, const std::string& section,
                          const std::string& key, const std::string& value);
+
+    /// How quest_key is written: the key's name (U, Tab, F5), but the digit
+    /// keys as their code in hex (0x31 for the 1 key). A lone digit in the
+    /// file is read as the code GoBot wrote before it saved names -- 9 was
+    /// Tab -- so the digit keys must not be written as one.
+    static std::string key_text(std::uint32_t vk);
 };
 
 // ----------------------------------------------------------------- pictures

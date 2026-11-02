@@ -70,6 +70,31 @@ void small_note(const ImVec4& colour, const std::string& text) {
     ImGui::PopFont();
 }
 
+/// "Tốc độ bấm kỹ năng": the gap between two skills' presses
+/// (MacroConfig::skill_gap_ms), in the steps the screen offers -- a value of
+/// the file's own shown as it is. True when it was changed.
+bool skill_gap_combo(MacroConfig& cfg) {
+    bool changed = false;
+    label("Tốc độ bấm kỹ năng");
+    ImGui::SameLine();
+    const std::string shown = std::to_string(cfg.skill_gap_ms) + " ms";
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::BeginCombo("##skillgap", shown.c_str())) {
+        for (const std::uint32_t ms : MacroConfig::kSkillGapSteps) {
+            const std::string item = std::to_string(ms) + " ms" + (ms == 50 ? " (mặc định)" : "");
+            if (ImGui::Selectable(item.c_str(), ms == cfg.skill_gap_ms)) {
+                cfg.skill_gap_ms = ms;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Khoảng nghỉ giữa hai lần bấm kỹ năng liền nhau, từ lúc nhả phím trước tới lúc bấm "
+                          "phím sau. 50 ms như GoC; game hay bỏ sót kỹ năng thì chọn 80, 100 hoặc 150 ms. Không "
+                          "đổi hồi chiêu của từng kỹ năng, và không áp dụng cho bình hay buff.");
+    return changed;
+}
+
 } // namespace
 
 GuiApp::SkillsUi& GuiApp::skills_ui() {
@@ -98,6 +123,8 @@ void GuiApp::simple_skills_line() {
     if (ImGui::Checkbox("Chỉ khi đang đánh quái", &cfg.skills_follow_fight)) simple_changed();
     ImGui::SetItemTooltip("Như GoC: chỉ bấm kỹ năng khi bot đang đánh một con quái trong tầm và đã "
                           "quay về phía nó.\nBỏ dấu: bấm theo giờ như trước.");
+    ImGui::SameLine(0, 16);
+    if (skill_gap_combo(cfg)) simple_changed();
 
     if (!cfg.skills_follow_fight) {
         hint("Bấm các phím kỹ năng liên tục, mỗi phím theo giờ hồi chiêu của nó.");
@@ -168,8 +195,9 @@ void GuiApp::simple_skills_popup() {
                           "nó. Cần bật Tự đánh quái.\nBỏ dấu: mỗi phím bấm theo giờ như trước.");
     changed |= ImGui::Checkbox("Dùng skill tuần tự", &cfg.sequential_skills);
     ImGui::SetItemTooltip("Như GoC. Có dấu: mọi kỹ năng đã hồi chiêu được bấm lần lượt theo thứ tự, "
-                          "cách nhau 50 ms.\nBỏ dấu: mỗi lần chỉ bấm kỹ năng đầu tiên đã hồi chiêu, "
-                          "300 ms một lần.");
+                          "cách nhau theo Tốc độ bấm kỹ năng (50 ms như GoC).\nBỏ dấu: mỗi lần chỉ bấm kỹ "
+                          "năng đầu tiên đã hồi chiêu, 300 ms một lần.");
+    changed |= skill_gap_combo(cfg);
     label("Khi MP dưới");
     ImGui::SameLine();
     int floor_pct = cfg.skill_mp_floor_pct;

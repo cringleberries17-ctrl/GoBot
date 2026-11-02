@@ -179,6 +179,7 @@ bool GlyphFont::load_dir(const std::wstring& dir) {
         }
 
         tallest_ = std::max(tallest_, g.h);
+        widest_ = std::max(widest_, g.w);
         glyphs_.push_back(std::move(g));
         ++loaded;
     } while (FindNextFileW(h, &find));
@@ -190,6 +191,7 @@ bool GlyphFont::load_dir(const std::wstring& dir) {
 bool GlyphFont::load(const std::string& dir) {
     glyphs_.clear();
     tallest_ = 0;
+    widest_ = 0;
     cap_height_ = 0;
     if (dir.empty() || !gdiplus().ok) return false;
 
@@ -753,18 +755,38 @@ std::string GlyphFont::read_line(const Frame& f, const ScreenRect& r) const {
     // Rows lit nearly all the way across are left out of the tally. Writing is
     // sparse; a panel border, a health bar or a stretch of sky is not, and any
     // of them would otherwise outvote the text sitting above it.
+    //
+    // So is a stroke in a run longer than any glyph: one letter is never that
+    // wide, and two never join into one, their outlines standing between. A
+    // border that does not fill the row escapes the rule above -- the light
+    // line under the game's HP bar runs the bar's width, two thirds of the
+    // caption's box, and two rows under its digits. It was the lowest stroke
+    // in every column it crossed, its row was taken for the line's foot, and
+    // the figures came back as "Ị ụụ Ị" on every frame of 2026-10-27.
     std::vector<int> feet(static_cast<std::size_t>(h) + 2, 0);
     {
         std::vector<std::uint8_t> row_is_text(static_cast<std::size_t>(h), 1);
+        std::vector<std::uint8_t> in_long_run(static_cast<std::size_t>(w) * h, 0);
         for (int y = 0; y < h; ++y) {
             int lit = 0;
-            for (int x = 0; x < w; ++x) if (p.is_stroke(x, y)) ++lit;
+            for (int x = 0; x < w;) {
+                if (!p.is_stroke(x, y)) { ++x; continue; }
+                int end = x + 1;
+                while (end < w && p.is_stroke(end, y)) ++end;
+                lit += end - x;
+                if (end - x > widest_ + 2) {
+                    const auto row = in_long_run.begin() + static_cast<std::ptrdiff_t>(y) * w;
+                    std::fill(row + x, row + end, std::uint8_t{ 1 });
+                }
+                x = end;
+            }
             row_is_text[static_cast<std::size_t>(y)] = (lit * 10 <= w * 8) ? 1 : 0;
         }
         for (int x = 0; x < w; ++x) {
             for (int y = h - 1; y >= 0; --y) {
                 if (!row_is_text[static_cast<std::size_t>(y)]) continue;
                 if (!p.is_stroke(x, y)) continue;
+                if (in_long_run[static_cast<std::size_t>(y) * w + x]) continue;
                 ++feet[static_cast<std::size_t>(y) + 1];
                 break;
             }

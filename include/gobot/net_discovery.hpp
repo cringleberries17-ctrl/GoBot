@@ -106,6 +106,13 @@ std::vector<std::string> local_ipv4_addresses();
 std::vector<std::uint16_t> udp_ports_for_process(const std::string& exe_name);
 std::vector<std::uint16_t> udp_ports_for_process(SocketOwners& owners);
 
+/// The same for one process, by its id: the local ports of process `pid`'s
+/// UDP sockets, lowest first, from the same table. The GUI knows the game by
+/// its window, and the window by its process id (pid_for_window); its capture
+/// for positions lets these in, so that the client's own reports reach it
+/// whatever host they go to. Empty for pid 0, and for a process with none.
+std::vector<std::uint16_t> udp_ports_for_pid(std::uint32_t pid);
+
 /// Build a pcap filter matching the given connections, TCP and UDP both, as
 /// GoC's "(tcp or udp)" does. UDP is matched from any host on the servers'
 /// ports too, as GoC's own "(tcp or udp) and port 15101" matches it, and on
@@ -114,6 +121,18 @@ std::vector<std::uint16_t> udp_ports_for_process(SocketOwners& owners);
 /// yields "(tcp or udp)".
 std::string build_filter_for(const std::vector<ProcessConnection>& conns,
                              const std::vector<std::uint16_t>& udp_ports = {});
+
+/// The same for one game's traffic and no other's, as the GUI's capture for
+/// positions takes it: each connection by its own end's port as well as its
+/// server's address and port, over TCP, and UDP on `udp_ports` -- the game's
+/// own UDP sockets -- alone, not on the servers' ports from any host. A
+/// second game client on this PC talks to the same server on the same port
+/// from ports of its own, and nothing in a frame says whose it is: its map
+/// entries, tables and monsters would be taken for this one's. A socket the
+/// game opens later is not in it; whoever built it builds it again then.
+/// Empty input yields "(tcp or udp)", as build_filter_for.
+std::string build_own_filter_for(const std::vector<ProcessConnection>& conns,
+                                 const std::vector<std::uint16_t>& udp_ports);
 
 std::string ip_to_string(std::uint32_t ip_host_order);
 

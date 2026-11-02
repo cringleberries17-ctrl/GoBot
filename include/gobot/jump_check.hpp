@@ -62,6 +62,7 @@ public:
         NotInFront,     ///< the game was not in front: nothing pressed
         Stopped,        ///< told to stop before the press -- F12, GoBot closing: nothing pressed
         NoKey,          ///< no jump key: nothing pressed
+        NeverPressed,   ///< the key is ↓, which GoBot never presses: nothing pressed
         /// The game was in front the moment before the press, and the press
         /// did not come back as gone out: the game lost focus during it. The
         /// key may have reached the game; nothing was checked.
@@ -106,6 +107,7 @@ public:
         NotSet,         ///< 0: no hop at all
         Conflict,       ///< the attack key, the loot key, an arrow, a macro key...
         SpaceIsAttack,  ///< Space, which the game attacks with, while the attack key is another
+        DownChangesMap, ///< ↓, which on a gate changes the map: never pressed (InputManager::never_pressed)
     };
     struct KeyAdvice {
         Advice      kind = Advice::Clean;

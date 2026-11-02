@@ -26,6 +26,7 @@
 #include "gobot/party_invite.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -62,14 +63,23 @@ std::string read_all(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-const char* const kLiveBuild = "C:\\Users\\player\\source\\GoBot\\build\\";
+/// The build tree of the checkout these tests were built from, where the live
+/// tests saved their rounds (live\shots, frozen\...). Never committed, and
+/// never written by GoBot as it plays; what GoBot writes is read beside this
+/// test, and only as saved (load_live_frame).
+#ifdef GOBOT_SOURCE_DIR
+const char* const kLiveBuild = GOBOT_SOURCE_DIR "/build/";
+#else
+const char* const kLiveBuild = "";
+#endif
 
-/// The saved frames of the live party, under kLiveBuild. Another member
-/// leads: that member's panel at 0,106, the crown on its corner. The first is
-/// the quick quest's look, nothing over the panels; the second the trash
-/// cleaner's, the bag dragged over two more panels below it.
-const char* const kPartyProbe = "bin\\Release\\quest_debug\\probe_20261016_234019_00.png";
-const char* const kPartyUnderBag = "bin\\Release\\trash_debug\\20261016_223524_0_not_in_bin.png";
+/// The saved frames of the live party, beside this test, where GoBot keeps
+/// and prunes its debug frames -- read only as they were saved. Another
+/// member leads: that member's panel at 0,106, the crown on its corner. The
+/// first is the quick quest's look, nothing over the panels; the second the
+/// trash cleaner's, the bag dragged over two more panels below it.
+const char* const kPartyProbe = "quest_debug\\probe_20261016_234019_00.png";
+const char* const kPartyUnderBag = "trash_debug\\20261016_223524_0_not_in_bin.png";
 constexpr int kLiveLeaderY = 106;
 
 /// Draw `pic` onto `f` at `x`, `y`, its see-through pixels left out.
@@ -204,11 +214,11 @@ Kit& kit() {
         k.own_frame = without(k.mine, PartyHudReader::kCrown);
         TemplateStore::load_one("grabbed/party_leader_key2", exe_relative("configs/templates.ini"), k.live_leader);
         TemplateStore::load_one(bag::kCloseButtons[0], exe_relative("configs/templates.ini"), k.close_x);
-        for (const std::string& p : { exe_relative("frame.png"), std::string(kLiveBuild) + "bin\\Release\\frame.png" })
-            if (!k.frame.valid() && load_png(p, k.frame) && (k.frame.width != 1280 || k.frame.height != 720))
-                k.frame = Frame{};
+        // Only as it was saved: gobot_cli --read rewrites frame.png.
+        if (load_live_frame(exe_relative("frame.png"), k.frame) && (k.frame.width != 1280 || k.frame.height != 720))
+            k.frame = Frame{};
         if (!k.frame.valid()) {
-            k.why = "no frame.png from the live client here";
+            k.why = "no frame.png from the live client here, or not the one these checks were written against";
             return true;
         }
         k.ok = true;
@@ -220,7 +230,7 @@ Kit& kit() {
 
 bool skip_without_kit() {
     if (kit().ok) return false;
-    std::printf("  [skip] %s\n", kit().why.c_str());
+    skip("%s\n", kit().why.c_str());
     return true;
 }
 
@@ -325,12 +335,12 @@ void test_reading() {
                   !h.panels[0].hidden,
               "the helper's live picture of a leader's panel: a member, led by that panel -- " + said(h));
     } else {
-        std::printf("  [skip] no grabbed/party_leader_key2 here\n");
+        skip("no grabbed/party_leader_key2 here\n");
     }
     {
         // At 1024x768, where the HUD is the same distance from the top-left.
         Frame shot;
-        if (load_png(std::string(kLiveBuild) + "bin\\Release\\playerlist.png", shot) && shot.width == 1024) {
+        if (load_live_frame(exe_relative("playerlist.png"), shot) && shot.width == 1024) {
             check(k.reader.read(shot).state == PartyState::Alone, "playerlist.png (1024x768) as it is: alone");
             Frame member = shot;
             draw_member(member, 0, 112);
@@ -345,7 +355,7 @@ void test_reading() {
             check(l.state == PartyState::Leader && l.size == 2 && l.own_crown >= 0.99f,
                   "and the crown on the own panel, one member: leader 2/6 -- " + said(l));
         } else {
-            std::printf("  [skip] no playerlist.png from the live client here\n");
+            skip("no playerlist.png from the live client, as saved, here\n");
         }
     }
 }
@@ -428,8 +438,8 @@ void test_crowns() {
     // The live party, as saved: read as before, and the crown and the red
     // frame agree on it.
     Frame live;
-    if (!load_png(std::string(kLiveBuild) + kPartyProbe, live) || live.width != 1280) {
-        std::printf("  [skip] no saved frame of the live party here\n");
+    if (!load_live_frame(exe_relative(kPartyProbe), live) || live.width != 1280) {
+        skip("no saved frame of the live party here\n");
         return;
     }
     {
@@ -509,11 +519,11 @@ void test_crown_pictures() {
         Frame ours, gocs;
         std::string from;
         if (!TemplateStore::load_one(c.ours, ini, ours, &from)) {
-            std::printf("  [skip] no %s.png staged beside this test\n", c.ours);
+            skip("no %s.png staged beside this test\n", c.ours);
             continue;
         }
         if (!TemplateStore::load_one(c.gocs, ini, gocs)) {
-            std::printf("  [skip] no %s.png here to compare %s with\n", c.gocs, c.ours);
+            skip("no %s.png here to compare %s with\n", c.gocs, c.ours);
             continue;
         }
         check(same_pixels(ours, gocs), std::string("the staged ") + c.ours + ".png is GoC's " + c.gocs +
@@ -530,7 +540,7 @@ void test_crown_pictures() {
     const Frame* plate = first_in(k.pictures, { "hpmp_indicator2", "grabbed/hpmp_indicator2" });
     const Frame* strip = first_in(k.pictures, { "grabbed/inventory", "inventory" });
     if (plate == nullptr || strip == nullptr) {
-        std::printf("  [skip] the Level plate or the bag's strip is not among the loaded pictures\n");
+        skip("the Level plate or the bag's strip is not among the loaded pictures\n");
         return;
     }
     const auto store_with = [&](const char* other_name, const Frame& other, const char* mine_name,
@@ -653,9 +663,9 @@ void test_bag_over() {
     // the screen's left edge, over all but their first few.
     Frame kept, dragged;
     if (!load_png(std::string(kLiveBuild) + "live\\shots\\r3_B_000.png", kept) ||
-        !load_png(std::string(kLiveBuild) + kPartyUnderBag, dragged) || kept.width != 1280 ||
+        !load_live_frame(exe_relative(kPartyUnderBag), dragged) || kept.width != 1280 ||
         dragged.width != 1280) {
-        std::printf("  [skip] no r3_B_000.png or the saved party frame here\n");
+        skip("no r3_B_000.png or the saved party frame here\n");
         return;
     }
     ScreenRect kept_bag, dragged_bag;
@@ -748,8 +758,8 @@ void test_party_under_window() {
     if (skip_without_kit()) return;
     const Kit& k = kit();
     Frame live;
-    if (!load_png(std::string(kLiveBuild) + kPartyProbe, live) || live.width != 1280) {
-        std::printf("  [skip] no saved frame of the live party here\n");
+    if (!load_live_frame(exe_relative(kPartyProbe), live) || live.width != 1280) {
+        skip("no saved frame of the live party here\n");
         return;
     }
     {
@@ -801,7 +811,8 @@ void test_own_crown_under_slot() {
     // player leads. First the slot as the live client drew it, its ground and
     // this player's own seal, over the whole mark, at both client sizes.
     Frame small;
-    load_png(std::string(kLiveBuild) + "bin\\Release\\playerlist.png", small);
+    if (!load_live_frame(exe_relative("playerlist.png"), small))
+        skip("no playerlist.png the checks were written against here (none has its hash recorded yet)\n");
     const Frame* const shots[] = { &k.frame, &small };
     for (const Frame* shot : shots) {
         if (!shot->valid() || shot->width < 1024) continue;
@@ -821,7 +832,7 @@ void test_own_crown_under_slot() {
     for (const std::string& d : { TemplateStore::default_dir(), TemplateStore::client_images() })
         if (dir.empty() && !d.empty() && !files_in(d + "\\seal\\", "*.png").empty()) dir = d + "\\seal\\";
     if (dir.empty()) {
-        std::printf("  [skip] no seal icons here, staged or in GoC's folder\n");
+        skip("no seal icons here, staged or in GoC's folder\n");
         return;
     }
     std::vector<std::string> names = files_in(dir, "*.png");
@@ -895,7 +906,7 @@ void test_trust() {
     HWND w = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, "GoBot test window",
                              WS_POPUP, far_x, far_y, 400, 500, nullptr, nullptr, self, nullptr);
     if (w == nullptr) {
-        std::printf("  [skip] could not put up a window of this test's own here\n");
+        skip("could not put up a window of this test's own here\n");
         return;
     }
     ShowWindow(w, SW_SHOWNOACTIVATE);
@@ -945,7 +956,7 @@ void test_real_frames() {
                   std::to_string(plain) + " of " + std::to_string(plated) +
                       " more frames with a program's window over the game, read as trusted: unknown");
         } else {
-            std::printf("  [skip] no live\\shots\\r2_B_000.png here\n");
+            skip("no live\\shots\\r2_B_000.png here\n");
         }
         check(party_frame_trusted(false, nullptr) && !party_frame_trusted(true, nullptr),
               "a frame the game drew itself is trusted; one off the screen with no game window to look at "
@@ -954,11 +965,11 @@ void test_real_frames() {
     // Saved frames that do show a party: read as what they show, and left out
     // of the count below. The first came on 2026-10-16, after the frames below
     // had been gathered all alone: the trash cleaner kept it in a party that
-    // another player led. A frame saved since that reads as a party is
-    // to be looked at by eye -- named here if it shows one, a wrong reading to
-    // fix if it does not.
+    // another player led. Each is read only as it was saved: GoBot keeps and
+    // prunes its debug frames as it plays, and one of the player's own since
+    // is no measure of the code.
     struct PartyFrame {
-        const char* path;       ///< under kLiveBuild
+        const char* path;       ///< beside this test
         PartyState  state;
         int         size;       ///< as many as are seen
         bool        covered;    ///< the bag over some of the panels
@@ -971,18 +982,18 @@ void test_real_frames() {
     const PartyFrame party_frames[] = {
         { kPartyUnderBag, PartyState::Member, 2, true },
         { kPartyProbe, PartyState::Member, 2, false },
-        { "bin\\Release\\quest_debug\\probe_20261016_234032_01.png", PartyState::Member, 2, false },
-        { "bin\\Release\\quest_debug\\probe_20261016_234045_02.png", PartyState::Member, 2, false },
+        { "quest_debug\\probe_20261016_234032_01.png", PartyState::Member, 2, false },
+        { "quest_debug\\probe_20261016_234045_02.png", PartyState::Member, 2, false },
     };
     const auto shows_a_party = [&](const std::string& path) {
         for (const PartyFrame& p : party_frames)
-            if (path == std::string(kLiveBuild) + p.path) return true;
+            if (path == exe_relative(p.path)) return true;
         return false;
     };
     for (const PartyFrame& p : party_frames) {
         Frame f;
-        if (!load_png(std::string(kLiveBuild) + p.path, f)) {
-            std::printf("  [skip] no %s here\n", p.path);
+        if (!load_live_frame(exe_relative(p.path), f)) {
+            skip("no %s here, or not as it was saved", p.path);
             continue;
         }
         const PartyHud h = k.reader.read(f);
@@ -1004,21 +1015,30 @@ void test_real_frames() {
     // Every eighth frame; GOBOT_PARTY_ALL=1 for every one of them.
     char all[8] = {};
     const bool every = GetEnvironmentVariableA("GOBOT_PARTY_ALL", all, sizeof all) > 0 && all[0] == '1';
-    std::vector<std::string> frames;
-    for (const char* dir : { "live\\shots\\", "frozen\\live\\shots\\", "bin\\Release\\trash_debug\\" }) {
+    // Each with whether it is held to its hash: the live rounds come from the
+    // checkout's build, which GoBot never writes; the trash cleaner's frames,
+    // frame.png and playerlist.png from beside this test, only as saved.
+    std::vector<std::pair<std::string, bool>> frames;
+    for (const char* dir : { "live\\shots\\", "frozen\\live\\shots\\" }) {
         std::vector<std::string> names = files_in(std::string(kLiveBuild) + dir, "*.png");
         std::sort(names.begin(), names.end());
-        for (const std::string& n : names) frames.push_back(std::string(kLiveBuild) + dir + n);
+        for (const std::string& n : names) frames.emplace_back(std::string(kLiveBuild) + dir + n, false);
     }
-    frames.push_back(std::string(kLiveBuild) + "bin\\Release\\frame.png");
-    frames.push_back(std::string(kLiveBuild) + "bin\\Release\\playerlist.png");
+    {
+        std::vector<std::string> names = files_in(exe_relative("trash_debug\\"), "*.png");
+        std::sort(names.begin(), names.end());
+        for (const std::string& n : names) frames.emplace_back(exe_relative("trash_debug\\") + n, true);
+    }
+    frames.emplace_back(exe_relative("frame.png"), true);
+    frames.emplace_back(exe_relative("playerlist.png"), true);
     int looked = 0, alone = 0, unknown = 0, party = 0, crowned = 0;
     std::string first_party;
     for (std::size_t i = 0; i < frames.size(); ++i) {
         if (!every && i % 8 != 0 && i + 2 < frames.size()) continue;
-        if (shows_a_party(frames[i])) continue;     // read above, as what it shows
+        const auto& [path, held] = frames[i];
+        if (shows_a_party(path)) continue;     // read above, as what it shows
         Frame f;
-        if (!load_png(frames[i], f) || f.width < 640 || f.height < 480) continue;
+        if (!(held ? load_live_frame(path, f) : load_png(path, f)) || f.width < 640 || f.height < 480) continue;
         ++looked;
         const PartyHud h = k.reader.read(f);
         if (h.own_crown >= PartyHudReader::kCrownScore) ++crowned;
@@ -1028,11 +1048,11 @@ void test_real_frames() {
             ++unknown;
         } else {
             ++party;
-            if (first_party.empty()) first_party = frames[i] + ": " + said(h);
+            if (first_party.empty()) first_party = path + ": " + said(h);
         }
     }
     if (looked == 0) {
-        std::printf("  [skip] no saved frames of the live client here\n");
+        skip("no saved frames of the live client that these checks were written against here\n");
         return;
     }
     // PH-A4 as the saved frames have it now: those that show a party are read
@@ -1344,7 +1364,7 @@ void test_invite_mid_pass() {
     const Kit& k = kit();
     const Frame buttons = installed("grabbed/party_invite_buttons");
     if (!buttons.valid()) {
-        std::printf("  [skip] no picture of a party invitation's buttons here\n");
+        skip("no picture of a party invitation's buttons here\n");
         return;
     }
     // The worker's store: the reader's pictures and the invitation's, as the
@@ -1447,7 +1467,7 @@ void test_plain_alone_invites() {
               "frame.png read off the screen, the party's part in view at the grab: alone, invited -- " + said(h));
     }
     Frame small;
-    if (load_png(std::string(kLiveBuild) + "bin\\Release\\playerlist.png", small) && small.width == 1024) {
+    if (load_live_frame(exe_relative("playerlist.png"), small) && small.width == 1024) {
         std::uint64_t t = 1'000'000;
         PartyLook look;
         take_party_look(still_sight(small, t, false), look);
@@ -1455,6 +1475,8 @@ void test_plain_alone_invites() {
         const PartyHud h = read_party(k.reader, look, none);
         check(h.state == PartyState::Alone && party_invite_gate(h, true).allowed,
               "playerlist.png, 1024x768, as the game drew it: alone, invited -- " + said(h));
+    } else {
+        skip("no playerlist.png the checks were written against here");
     }
     // A window of the game, a dialog, a tooltip, anywhere on the game: the HUD
     // shows no party all the same, and alone invites. None is looked for.
@@ -1464,7 +1486,7 @@ void test_plain_alone_invites() {
         blit(f, k.close_x, 1100, 600);
         over.emplace_back("a window's X at 1100,600", f);
     } else {
-        std::printf("  [skip] no picture of the client's close button here\n");
+        skip("no picture of the client's close button here\n");
     }
     {
         Frame f = k.frame;
@@ -1489,8 +1511,8 @@ void test_look_at_grab() {
     if (skip_without_kit()) return;
     const Kit& k = kit();
     Frame live;
-    if (!load_png(std::string(kLiveBuild) + kPartyProbe, live) || live.width != 1280) {
-        std::printf("  [skip] no saved frame of the live party here\n");
+    if (!load_live_frame(exe_relative(kPartyProbe), live) || live.width != 1280) {
+        skip("no saved frame of the live party here\n");
         return;
     }
     // The live party of two, another program's window over the game's left
@@ -1667,7 +1689,7 @@ void test_chat_alone_rule() {
         blit(f, k.close_x, 900, 200);
         cases.emplace_back("a window of the game open", f);
     } else {
-        std::printf("  [skip] no picture of the client's close button here\n");
+        skip("no picture of the client's close button here\n");
     }
     for (const auto& [what, f] : cases) {
         PartyLook look;

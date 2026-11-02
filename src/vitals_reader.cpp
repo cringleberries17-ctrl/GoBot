@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <map>
 #include <thread>
 #include <vector>
@@ -16,6 +17,105 @@ namespace {
 
 bool near(std::uint8_t a, std::uint8_t b, int tol) {
     return std::abs(static_cast<int>(a) - static_cast<int>(b)) <= tol;
+}
+
+constexpr int kCaptureBlack = 3;       // typical colour's brightest channel at most this: nothing captured
+constexpr int kTroughLightAbove = 90;  // over this, with no sliver of fill: light -- the old cut-off
+constexpr int kTroughSpread = 8;       // a trough pixel's distance from that colour, per channel
+
+// A companion slot's frame round its bars, as the HUD draws it: a light grey
+// frame (b5b5b5) with a black border (000000) inside it. Black only as black
+// as the border: the darkest of a slot bar's empty part is 181818. Grey, and
+// no lighter than this: white is the writing and the pictures in the slots
+// ("Thức Ăn 7"), which, outlined in black, can look like a frame for a row.
+constexpr int kSlotBlackMax = 12;      // brightest channel at most this: the border
+constexpr int kSlotLightMin = 144;     // darkest channel at least this,
+constexpr int kSlotLightMax = 224;     //   brightest at most this,
+constexpr int kSlotGreySpread = 40;    //   and the channels this close: the frame
+constexpr int kSlotFramesAlike = 24;   // the frame either side of a bar, per channel
+constexpr int kPetMinRows = 3;         // a bar is more than a row or two of a picture
+
+bool slot_black(const Frame& f, int x, int y) {
+    std::uint8_t r, g, b;
+    f.get(x, y, r, g, b);
+    return std::max({ r, g, b }) <= kSlotBlackMax;
+}
+
+bool slot_light(const Frame& f, int x, int y) {
+    std::uint8_t r, g, b;
+    f.get(x, y, r, g, b);
+    const int mx = std::max({ r, g, b });
+    const int mn = std::min({ r, g, b });
+    return mn >= kSlotLightMin && mx <= kSlotLightMax && mx - mn <= kSlotGreySpread;
+}
+
+bool frames_alike(const Frame& f, int xa, int xb, int y) {
+    std::uint8_t ra, ga, ba, rb, gb, bb;
+    f.get(xa, y, ra, ga, ba);
+    f.get(xb, y, rb, gb, bb);
+    return near(ra, rb, kSlotFramesAlike) && near(ga, gb, kSlotFramesAlike) && near(ba, bb, kSlotFramesAlike);
+}
+
+/// The red of a fill, as the left end of the pet's bar is at any HP but 0:
+/// ad0800 to ff1008 down its rows, and ff948c along its top.
+bool pet_red(const Frame& f, int x, int y) {
+    std::uint8_t r, g, b;
+    f.get(x, y, r, g, b);
+    return r >= 128 && r >= g + 64 && r >= b + 64;
+}
+
+/// Whether a bar whose fill starts at `x` on row `y` sits in a companion
+/// slot's frame: the black border right before it, the light grey frame
+/// before that.
+bool in_slot_frame(const Frame& f, int x, int y) {
+    return x >= 2 && x < f.width && y >= 0 && y < f.height && slot_black(f, x - 1, y) &&
+           slot_light(f, x - 2, y);
+}
+
+/// Whether a row with no run of fill in it is the empty part of a bar.
+///
+/// An empty bar is its trough with at most the caption printed across it, so
+/// most of the row is one colour. Anything else with none of the fill in it
+/// would read as an empty bar too, and 0% fires the potion: a loading
+/// screen's or the login page's artwork, which changes from pixel to pixel; a
+/// window in front, which is light; and a capture with nothing in it -- the
+/// part of a window off the screen -- which is black. Black only as black as
+/// a capture is, because this game's empty bar is near black at one HUD size;
+/// and light only without a sliver of fill at the bar's left edge, because it
+/// is light grey at the other, where that sliver is a bar nearly out. A fill
+/// pixel anywhere else in a light row is a speck in whatever covers the bar.
+bool trough_row(const Frame& f, int x, int y, int n, bool sliver) {
+    if (n <= 0) return false;
+    int hist[3][256] = {};
+    for (int i = 0; i < n; ++i) {
+        std::uint8_t r, g, b;
+        f.get(x + i, y, r, g, b);
+        ++hist[0][r]; ++hist[1][g]; ++hist[2][b];
+    }
+    // Each channel's median: the trough's own colour whenever the trough is
+    // more than half the row, whatever is printed over the rest.
+    std::uint8_t typical[3] = {};
+    for (int c = 0; c < 3; ++c) {
+        int seen = 0, v = 0;
+        for (; v < 255; ++v) {
+            seen += hist[c][v];
+            if (seen * 2 > n) break;
+        }
+        typical[c] = static_cast<std::uint8_t>(v);
+    }
+    const int brightest = std::max({ typical[0], typical[1], typical[2] });
+    if (brightest <= kCaptureBlack) return false;
+    if (!sliver && brightest > kTroughLightAbove) return false;
+
+    int alike = 0;
+    for (int i = 0; i < n; ++i) {
+        std::uint8_t r, g, b;
+        f.get(x + i, y, r, g, b);
+        if (near(r, typical[0], kTroughSpread) && near(g, typical[1], kTroughSpread) &&
+            near(b, typical[2], kTroughSpread))
+            ++alike;
+    }
+    return alike * 2 > n;
 }
 
 /// Pull the whole numbers out of a line of text, ignoring everything else.
@@ -53,14 +153,19 @@ VitalsReader::~VitalsReader() { stop(); }
 
 void VitalsReader::set_target_window(void* hwnd) { hwnd_.store(hwnd); }
 
+// Each sets the landmark to be looked for again at the next read: the bars
+// given -- a save, a start, the GUI's own copy -- go where it puts them at once,
+// not after a dozen reads with the figures unread, two seconds without HP.
 void VitalsReader::set_hp_bar(const BarSpec& s) {
     std::lock_guard<std::mutex> lock(mutex_);
     hp_spec_ = s;
+    anchor_found_ = false;
 }
 
 void VitalsReader::set_mp_bar(const BarSpec& s) {
     std::lock_guard<std::mutex> lock(mutex_);
     mp_spec_ = s;
+    anchor_found_ = false;
 }
 
 BarSpec VitalsReader::hp_bar() const {
@@ -71,6 +176,11 @@ BarSpec VitalsReader::hp_bar() const {
 BarSpec VitalsReader::mp_bar() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return mp_spec_;
+}
+
+BarSpec VitalsReader::pet_bar() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pet_bar_;
 }
 
 void VitalsReader::start() {
@@ -111,6 +221,7 @@ void VitalsReader::stop() {
     if (thread_.joinable()) thread_.join();
     hp_.store(-1.0f);
     mp_.store(-1.0f);
+    pet_.store(-1.0f);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         values_ = Vitals{};
@@ -144,7 +255,15 @@ ScreenRect VitalsReader::anchor_at() const {
     return anchor_found_ ? anchor_at_ : ScreenRect{};
 }
 
-bool VitalsReader::locate_anchor(const Frame& f) {
+bool VitalsReader::reads_as_fill(const BarSpec& s, bool hp) {
+    // Its own channel strong, and well over the others: red for HP, blue for
+    // MP. MP's green runs high in the middle of the bar (0,181,255), so only
+    // red is held under blue there.
+    if (hp) return s.r >= 120 && s.r >= s.g + 80 && s.r >= s.b + 80;
+    return s.b >= 120 && s.b >= s.r + 80;
+}
+
+bool VitalsReader::locate_anchor(const Frame& f, bool* recoloured) {
     // Only the top-left corner of the window. The HUD lives there, and
     // searching the whole screen for a thirty-six pixel plate would turn up
     // every similar scrap of interface in the game.
@@ -152,6 +271,13 @@ bool VitalsReader::locate_anchor(const Frame& f) {
     const auto hit = TemplateMatcher::find(f, look, anchor_, 0.75f);
     if (!hit.found) return false;
 
+    // The pet's bar goes with the HUD, as HP and MP do: where it was against
+    // the landmark. Whether it is still there is for the next read to see
+    // (pet_frame_holds), and to look for it again if not.
+    if (anchor_found_ && pet_watch_.bar.valid()) {
+        pet_watch_.bar.x += hit.at.x - anchor_at_.x;
+        pet_watch_.bar.y += hit.at.y - anchor_at_.y;
+    }
     anchor_at_ = hit.at;
     anchor_found_ = true;
 
@@ -167,6 +293,27 @@ bool VitalsReader::locate_anchor(const Frame& f) {
         // The fill colour is left as configured. It is a property of the game's
         // artwork, not of where the bar happens to be, and sampling it from a
         // bar that might be empty would learn the colour of the trough.
+    }
+
+    // Unless what is configured is no fill colour of its bar: a colour learned
+    // off something else -- the server list's sky, on 2026-10-27, which the
+    // GUI took into its copy of the bars, and a save would have written -- and
+    // the bar measures nothing for good. The game's own instead, said once.
+    const struct { BarSpec* spec; bool hp; FillColour fill; const char* name; } kFills[] = {
+        { &hp_spec_, true, kHpFill, "HP" },
+        { &mp_spec_, false, kMpFill, "MP" },
+    };
+    for (const auto& b : kFills) {
+        if (reads_as_fill(*b.spec, b.hp)) continue;
+        GB_INFO("Vitals: the %s bar's colour %u,%u,%u is no fill colour of it -- reading it as %u,%u,%u again",
+                b.name, static_cast<unsigned>(b.spec->r), static_cast<unsigned>(b.spec->g),
+                static_cast<unsigned>(b.spec->b), static_cast<unsigned>(b.fill.r), static_cast<unsigned>(b.fill.g),
+                static_cast<unsigned>(b.fill.b));
+        b.spec->r = b.fill.r;
+        b.spec->g = b.fill.g;
+        b.spec->b = b.fill.b;
+        b.spec->tolerance = kFillTolerance;
+        if (recoloured) *recoloured = true;
     }
     return true;
 }
@@ -309,21 +456,12 @@ float VitalsReader::measure(const Frame& f, const BarSpec& spec) {
 
     float fills[3];
     int taken = 0;
-    bool any_plausible_trough = false;
 
     for (int yi = 0; yi < 3; ++yi) {
         const int y = rows[yi];
         if (y < 0 || y >= f.height) continue;
 
-        // Walk the row once, recording which pixels are the fill colour and
-        // whether the row looks like a bar at all. The second survey has to
-        // cover the whole width: a sample cut short at the end of the fill
-        // would call four pixels of anything "flat".
-        bool flat = true;
-        int  darkest = 255;
-        std::uint8_t fr = 0, fg = 0, fb = 0;
-        bool have_first = false;
-
+        // Walk the row once, recording which pixels are the fill colour.
         int width = 0;
         bool match[kMaxBarWidth];
 
@@ -333,10 +471,6 @@ float VitalsReader::measure(const Frame& f, const BarSpec& spec) {
 
             std::uint8_t r, g, b;
             f.get(x, y, r, g, b);
-
-            if (!have_first) { fr = r; fg = g; fb = b; have_first = true; }
-            else if (!near(r, fr, 8) || !near(g, fg, 8) || !near(b, fb, 8)) flat = false;
-            darkest = std::min<int>(darkest, std::max({ r, g, b }));
 
             match[width++] = near(r, spec.r, spec.tolerance) &&
                              near(g, spec.g, spec.tolerance) &&
@@ -360,28 +494,33 @@ float VitalsReader::measure(const Frame& f, const BarSpec& spec) {
             if (!match[i]) { run = 0; continue; }
             if (++run >= 3) { filled = i + run; break; }
         }
-        // A bar with only a sliver left has no room for a run of three.
-        if (filled == 0) {
+
+        // A row counts only when it positively looks like a bar. An empty bar
+        // and a region that is not a bar at all both match nothing, and
+        // reporting them the same way is the one mistake that matters here:
+        // "0%" makes a potion key fire, and firing because the reader lost the
+        // window is worse than not firing.
+        if (filled > 0) {
+            // A fill is drawn from the bar's left edge and only its caption is
+            // printed over it, so up to where it ends it is mostly fill colour.
+            // Three such pixels among others that are not -- a speck of red in
+            // some picture -- are no fill.
+            int lit = 0;
+            for (int i = 0; i < filled; ++i)
+                if (match[i]) ++lit;
+            if (lit * 2 < filled) continue;
+        } else {
+            // No fill to speak of: empty, or nearly -- or no bar at all.
+            // A bar with only a sliver left has no room for a run of three.
             for (int i = width - 1; i >= 0; --i)
                 if (match[i] && i < 4) { filled = i + 1; break; }
+            if (!trough_row(f, spec.x, y, width, filled > 0)) continue;
         }
-
-        // An empty bar and a region that is not a bar at all both match
-        // nothing, and reporting them the same way is the one mistake that
-        // matters here: "0%" makes a potion key fire, and firing because the
-        // reader lost the window is worse than not firing.
-        //
-        // They are distinguishable. An empty trough is dark. A region that is
-        // not a bar -- the window minimised, moved off screen, or a capture
-        // that came back blank -- is a flat expanse of some other colour, and
-        // usually a light one.
-        if (filled == 0 && flat && darkest > 90) continue;
-        any_plausible_trough = true;
 
         fills[taken++] = static_cast<float>(filled) / static_cast<float>(width);
     }
 
-    if (taken == 0 || !any_plausible_trough) return -1.0f;
+    if (taken == 0) return -1.0f;
     std::sort(fills, fills + taken);
     return std::clamp(fills[taken / 2] * 100.0f, 0.0f, 100.0f);
 }
@@ -407,8 +546,9 @@ void VitalsReader::loop() {
             continue;
         }
 
-        BarSpec hp, mp;
+        BarSpec hp, mp, pet_was;
         bool anchored = false;
+        bool recoloured = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             frame_ = frame;
@@ -419,12 +559,19 @@ void VitalsReader::loop() {
             // HUD is up, and looking for it costs more than reading the
             // figures does.
             if (anchor_.valid()) {
+                // And at once when HP or MP is set on a bar in a companion
+                // slot's frame -- the pet's, which "Tự tìm" saved as HP on
+                // 2026-10-26 and which a Save hands back to the reader: read
+                // there until the figures had gone unread a dozen times, the
+                // pet's HP was the character's.
+                const bool on_slot = in_slot_frame(frame, hp_spec_.x, hp_spec_.y + hp_spec_.height / 2) ||
+                                     in_slot_frame(frame, mp_spec_.x, mp_spec_.y + mp_spec_.height / 2);
                 const bool lost = !anchor_found_ ||
                                   hp_misses_ >= kForgetAfterMisses ||
-                                  mp_misses_ >= kForgetAfterMisses;
+                                  mp_misses_ >= kForgetAfterMisses || on_slot;
                 if (lost) {
                     const bool had = anchor_found_;
-                    if (locate_anchor(frame) && !had)
+                    if (locate_anchor(frame, &recoloured) && !had)
                         GB_INFO("Vitals: HUD landmark at %d,%d -- bars at %d,%d and %d,%d",
                                 anchor_at_.x, anchor_at_.y,
                                 hp_spec_.x, hp_spec_.y, mp_spec_.x, mp_spec_.y);
@@ -434,10 +581,38 @@ void VitalsReader::loop() {
 
             hp = hp_spec_;
             mp = mp_spec_;
+            // The pet's bar, moved with the landmark just now if it moved.
+            pet_bar_ = pet_watch_.bar;
+            pet_was = pet_bar_;
+        }
+        // A colour put back is counted as the bars found again: the GUI takes
+        // them into its copy, so a save writes the game's colour and not the
+        // one that was wrong.
+        if (recoloured) {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            ++stats_.relocations;
         }
 
         float hp_pct = measure(frame, hp);
         float mp_pct = measure(frame, mp);
+
+        // The pet's, off its own bar under them: looked for, kept and read
+        // by pet_watch_ (see PetWatch). Where it is goes to the window, and
+        // into the log when it is found or has moved.
+        const float pet_pct = pet_watch_.read(frame, hp, mp, now_ms());
+        {
+            const BarSpec& pet = pet_watch_.bar;
+            if (pet.x != pet_was.x || pet.y != pet_was.y || pet.width != pet_was.width ||
+                pet.height != pet_was.height) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    pet_bar_ = pet;
+                }
+                if (pet.valid() && (!pet_was.valid() || bars_differ(pet, pet_was)))
+                    GB_INFO("Vitals: the pet's HP bar at %d,%d, %d wide and %d high", pet.x, pet.y, pet.width,
+                            pet.height);
+            }
+        }
 
         // The printed figures, where they can be had. They override the bar
         // measurement rather than sitting beside it: the measurement is known
@@ -511,9 +686,23 @@ void VitalsReader::loop() {
             }
         }
 
+        // One clock for all three: a reader of hp_seen_ms() next to
+        // last_read_ms() sees the two agree. hp_seen_ms_ first, so that one who
+        // reads last_read_ms() first never pairs a new read with an old sight.
+        const std::uint64_t read_at = now_ms();
         hp_.store(hp_pct);
         mp_.store(mp_pct);
-        read_at_ms_.store(now_ms());
+        pet_.store(pet_pct);
+        hp_seen_ms_.store(hp_seen_after(hp_seen_ms_.load(), hp_pct, read_at));
+        read_at_ms_.store(read_at);
+
+        // The first read that makes out no HP after one that did: its frame is
+        // kept, for what was on it -- the HUD covered, a frame off the screen
+        // that was not the game, a bar that blinked. After the read is out,
+        // and written off this thread: every potion and the in-world hold
+        // wait on this thread's next read.
+        if (hp_pct < 0.0f && hp_was_read_) keep_unreadable_frame(frame, capture.from_screen(), mp_pct);
+        hp_was_read_ = hp_pct >= 0.0f;
 
         // Notice when the bars stop being where they were put.
         //
@@ -537,15 +726,18 @@ void VitalsReader::loop() {
                 // outline and leave almost no fill colour showing on the rows
                 // it samples -- so a bar that is plainly too short reads as
                 // perfectly fine. Finding the bars again and seeing whether the
-                // answer matches asks the question directly.
-                BarSpec new_hp = hp, new_mp = mp;
-                const bool found = find_bars(frame, new_hp, new_mp) == 2;
-                const bool differs = found && (bars_differ(new_hp, hp) ||
-                                               bars_differ(new_mp, mp));
+                // answer matches asks the question directly (relocated).
+                BarSpec new_hp, new_mp;
+                const bool differs = relocated(frame, hp, mp, new_hp, new_mp);
 
                 disagreements_ = differs ? disagreements_ + 1 : 0;
 
-                if (disagreements_ >= kDisagreements) {
+                // HP or MP set on a bar in a companion slot's frame -- the
+                // pet's, as "Tự tìm" once saved them -- is wrong on this very
+                // frame, which shows the HUD: no three looks are waited for.
+                const bool on_slot = in_slot_frame(frame, hp.x, hp.y + hp.height / 2) ||
+                                     in_slot_frame(frame, mp.x, mp.y + mp.height / 2);
+                if (disagreements_ >= kDisagreements || (differs && on_slot)) {
                     disagreements_ = 0;
                     GB_INFO("HP/MP bars moved -- found them again at "
                             "%d,%d %dx%d and %d,%d %dx%d",
@@ -572,6 +764,27 @@ bool VitalsReader::bars_differ(const BarSpec& a, const BarSpec& b) {
     return std::abs(a.x - b.x) > 3 || std::abs(a.y - b.y) > 3 ||
            std::abs(a.height - b.height) > 3 ||
            std::abs(a.width - b.width) > std::max(6, b.width / 10);
+}
+
+bool VitalsReader::relocated(const Frame& f, const BarSpec& hp, const BarSpec& mp, BarSpec& new_hp,
+                             BarSpec& new_mp) {
+    // Two bars, and drawn as the game draws HP and MP (bars_paired). find_bars
+    // falls back to the topmost of each colour when it finds no such pair --
+    // an answer for the full screen's FIND THE BARS, which draws what it found
+    // for the player to judge -- and on 2026-10-27 three looks at the server
+    // list, before the HUD was up, took two strips of sky 323 px apart for the
+    // bars. Their colours stayed with the bars when the landmark put them
+    // back, and HP measured nothing from then on.
+    new_hp = hp;
+    new_mp = mp;
+    if (find_bars(f, new_hp, new_mp) != 2 || !bars_paired(new_hp, new_mp)) return false;
+    return bars_differ(new_hp, hp) || bars_differ(new_mp, mp);
+}
+
+bool VitalsReader::bars_paired(const BarSpec& hp, const BarSpec& mp) {
+    if (!hp.valid() || !mp.valid()) return false;
+    const int narrow = std::min(hp.width, mp.width), wide = std::max(hp.width, mp.width);
+    return std::abs(hp.x - mp.x) <= 4 && mp.y > hp.y && mp.y - hp.bottom() <= 44 && wide <= narrow * 2;
 }
 
 bool VitalsReader::bar_is_stale(const Frame& f, const BarSpec& spec) {
@@ -893,6 +1106,11 @@ int VitalsReader::find_bars(const Frame& f, BarSpec& hp, BarSpec& mp) {
     std::vector<const Band*> reds, blues;
     for (const Band& band : bands) {
         if (band.rows < 4 || band.len < kMinLen) continue;
+        // Never a bar of the companion slots under the HUD: the pet's are a
+        // red one over a purple one, the shape of HP over MP, and were taken
+        // for them on 2026-10-26. They sit in a black border inside a light
+        // grey frame; HP's and MP's edge is slate.
+        if (in_slot_frame(f, band.x, band.middle())) continue;
         if (redness(band)  > 60) reds.push_back(&band);
         if (blueness(band) > 50) blues.push_back(&band);
     }
@@ -1005,6 +1223,132 @@ int VitalsReader::find_bars(const Frame& f, BarSpec& hp, BarSpec& mp) {
     return found;
 }
 
+ScreenRect VitalsReader::pet_band(const BarSpec& hp, const BarSpec& mp) {
+    const int top = std::max(hp.bottom(), mp.bottom()) + 2;
+    const int left = std::max(0, std::min(hp.x, mp.x) - kPetBandLeft);
+    const int right = std::max(hp.right(), mp.right()) + kPetBandRight;
+    return ScreenRect{ left, top, std::max(0, right - left), kPetBandDepth };
+}
+
+bool VitalsReader::find_pet_bar(const Frame& f, const ScreenRect& look, BarSpec& out) {
+    if (!f.valid()) return false;
+    const int x_from = std::max(0, look.x), x_to = std::min(f.width, look.right());
+    const int y_from = std::max(0, look.y), y_to = std::min(f.height, look.bottom());
+    if (x_to - x_from < kPetMinWidth + 4 || y_to <= y_from) return false;
+
+    // Each row's left ends of a bar in a slot's frame: the frame, the
+    // border, and red at the left end of what is inside.
+    struct End { int y, x0; };
+    std::vector<End> ends;
+    for (int y = y_from; y < y_to; ++y)
+        for (int x = x_from; x + 2 < x_to; ++x)
+            if (slot_light(f, x, y) && slot_black(f, x + 1, y) && pet_red(f, x + 2, y))
+                ends.push_back(End{ y, x + 2 });
+
+    // Left ends that line up, one under the next, are one bar's.
+    struct Bar { int x0, x1, y0, y1; };
+    std::vector<Bar> bars;
+    for (const End& e : ends) {
+        Bar* into = nullptr;
+        for (Bar& b : bars)
+            if (b.x0 == e.x0 && b.y1 + 1 == e.y) { into = &b; break; }
+        if (into) into->y1 = e.y;
+        else      bars.push_back(Bar{ e.x0, -1, e.y, e.y });
+    }
+
+    // And where each ends on the right. Not along its own rows: past the
+    // fill is the empty part, whose colour is not something to depend on --
+    // no pet's bar has been seen part empty yet, and light grey like the
+    // frame, as the HUD's own bars are at its other size, it would end the
+    // bar where the fill ends, in the two black columns that end a fill on
+    // the player's client. Along the border over the bar, or under it: black
+    // from the left-hand border to the right-hand one whatever the fill, then
+    // the frame. And on each of the bar's rows, there, the border and the
+    // frame, the frame alike with the one on the left.
+    const auto right_end = [&](const Bar& b, int y) {
+        if (y < 0 || y >= f.height || !slot_black(f, b.x0 - 1, y)) return -1;
+        for (int i = b.x0; i < x_to && i - b.x0 <= kMaxBarWidth; ++i)
+            if (!slot_black(f, i, y)) return slot_light(f, i, y) ? i - 2 : -1;
+        return -1;
+    };
+    for (Bar& b : bars) {
+        if (b.y1 - b.y0 + 1 < kPetMinRows) continue;
+        for (const int y : { b.y0 - 1, b.y1 + 1 }) {
+            const int x1 = right_end(b, y);
+            if (x1 - b.x0 + 1 < kPetMinWidth) continue;
+            bool framed = true;
+            for (int row = b.y0; framed && row <= b.y1; ++row)
+                framed = slot_black(f, x1 + 1, row) && slot_light(f, x1 + 2, row) &&
+                         frames_alike(f, b.x0 - 2, x1 + 2, row);
+            if (framed) { b.x1 = x1; break; }
+        }
+    }
+
+    // The widest -- the pet's slot is the wide one -- and of two as wide the
+    // taller. A row or two of a picture that happens to fit is no bar.
+    const Bar* best = nullptr;
+    for (const Bar& b : bars) {
+        if (b.x1 < 0) continue;
+        if (!best) { best = &b; continue; }
+        const int w = b.x1 - b.x0, bw = best->x1 - best->x0;
+        if (w > bw || (w == bw && b.y1 - b.y0 > best->y1 - best->y0)) best = &b;
+    }
+    if (!best) return false;
+
+    // Which rows to read: those the colour of the middle row at the left
+    // end, where the fill is, around it -- not the paler highlight along the
+    // top (ff948c on the player's client), which matches nothing else.
+    const int mid = (best->y0 + best->y1) / 2;
+    std::uint8_t mr, mg, mb;
+    f.get(best->x0, mid, mr, mg, mb);
+    const auto alike = [&](int y) {
+        std::uint8_t r, g, b;
+        f.get(best->x0, y, r, g, b);
+        return near(r, mr, kPetTolerance) && near(g, mg, kPetTolerance) && near(b, mb, kPetTolerance);
+    };
+    int top = mid, bottom = mid;
+    while (top > best->y0 && alike(top - 1)) --top;
+    while (bottom < best->y1 && alike(bottom + 1)) ++bottom;
+
+    out = BarSpec{};
+    out.x = best->x0;
+    out.y = top;
+    out.width = best->x1 - best->x0 + 1;
+    out.height = bottom - top + 1;
+    out.r = mr;
+    out.g = mg;
+    out.b = mb;
+    out.tolerance = kPetTolerance;
+    return true;
+}
+
+bool VitalsReader::pet_frame_holds(const Frame& f, const BarSpec& bar) {
+    if (!f.valid() || !bar.valid()) return false;
+    if (bar.x < 2 || bar.right() + 1 >= f.width || bar.y < 0 || bar.bottom() > f.height) return false;
+    for (int y = bar.y; y < bar.bottom(); ++y)
+        if (!slot_black(f, bar.x - 1, y) || !slot_light(f, bar.x - 2, y) || !slot_black(f, bar.right(), y) ||
+            !slot_light(f, bar.right() + 1, y) || !frames_alike(f, bar.x - 2, bar.right() + 1, y))
+            return false;
+    return true;
+}
+
+float VitalsReader::PetWatch::read(const Frame& f, const BarSpec& hp, const BarSpec& mp, std::uint64_t at_ms) {
+    if (!f.valid()) return -1.0f;
+    bool there = bar.valid() && pet_frame_holds(f, bar);
+    // Not where it was, or never found: looked for, every kPetLookMs at
+    // most. A bar found elsewhere replaces it; none found keeps it -- the
+    // slot may be back where it was in a moment.
+    if (!there && (looked_ms == 0 || at_ms >= looked_ms + kPetLookMs)) {
+        looked_ms = std::max<std::uint64_t>(at_ms, 1);
+        BarSpec found;
+        if (find_pet_bar(f, pet_band(hp, mp), found)) {
+            bar = found;
+            there = pet_frame_holds(f, bar);
+        }
+    }
+    return there ? measure(f, bar) : -1.0f;
+}
+
 VitalsReader::Stats VitalsReader::stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
@@ -1015,6 +1359,46 @@ float VitalsReader::if_fresh(float pct, std::uint64_t read_at_ms, std::uint64_t 
     // A read stored after `at_ms` was taken is as fresh as can be.
     if (at_ms <= read_at_ms) return pct;
     return at_ms - read_at_ms <= within_ms ? pct : -1.0f;
+}
+
+bool VitalsReader::in_world(std::uint64_t hp_seen_ms, std::uint64_t at_ms, std::uint64_t within_ms) {
+    if (hp_seen_ms == 0) return false;          // never read
+    if (at_ms <= hp_seen_ms) return true;       // read after `at_ms` was taken
+    return at_ms - hp_seen_ms <= within_ms;
+}
+
+std::uint64_t VitalsReader::hp_seen_after(std::uint64_t seen_ms, float hp_pct, std::uint64_t read_at_ms) {
+    return hp_pct >= 0.0f ? read_at_ms : seen_ms;
+}
+
+void VitalsReader::keep_unreadable_frame(const Frame& f, bool from_screen, float mp_pct) {
+    const std::uint64_t now = now_ms();
+    if (kept_frame_ms_ != 0 && now - kept_frame_ms_ < kKeepFrameGapMs) return;
+    // One still being written is left to finish, and this one goes unkept:
+    // a std::async future assigned over before it is ready waits for it here.
+    if (keeping_.valid() && keeping_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    kept_frame_ms_ = now;
+    const char* how = from_screen ? "read off the screen" : "drawn by the window itself";
+    const char* mp = mp_pct >= 0.0f ? "MP read" : "MP unreadable too";
+
+    // On a copy, off this thread: the next grab writes into `f`.
+    keeping_ = std::async(std::launch::async, [shot = f, how, mp] {
+        // Named by when it was taken, so that they sort oldest first.
+        const std::string dir = exe_relative("vitals_debug");
+        const std::time_t t = std::time(nullptr);
+        std::tm tm{};
+        localtime_s(&tm, &t);
+        char name[48];
+        std::strftime(name, sizeof name, "vitals_%Y%m%d_%H%M%S.png", &tm);
+        if (!shot.valid() || !make_folder(dir) || !save_png(shot, dir + "\\" + name)) {
+            GB_INFO("Vitals: HP unreadable on a frame %s, %s; the frame could not be kept", how, mp);
+            return;
+        }
+        std::vector<std::string> names = files_in(dir, "vitals_*.png");
+        std::sort(names.begin(), names.end());
+        for (std::size_t i = 0; i + kKeptFrames < names.size(); ++i) remove_file(dir + "\\" + names[i]);
+        GB_INFO("Vitals: HP unreadable on a frame %s, %s -- kept it as vitals_debug\\%s", how, mp, name);
+    });
 }
 
 std::size_t VitalsReader::failures_since(std::uint64_t since_ms) const {

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -122,20 +123,48 @@ public:
 /// Hand-editable on purpose: discovering the protocol is an iterative loop of
 /// capture, guess a layout, watch the decode, correct it. Making that loop
 /// require a recompile would be the wrong trade.
+///
+/// That loop runs with the capture going. The GUI rewrites the table on its
+/// drawing thread -- Apply, Apply all above 70%, Apply layout, Reload configs
+/// -- while the capture thread decodes every frame through it. So the table
+/// locks itself: a write takes the lock alone, a read shares it, and decode()
+/// keeps it for as long as it walks a layout. Before it did, a rewrite in the
+/// middle of a decode freed the field list being walked, and the elevated GUI
+/// crashed or put garbage HP and positions into GameState.
 class OpcodeRegistry {
 public:
+    OpcodeRegistry() = default;
+
+    // Nothing copies one, and its lock could not come along if it did.
+    OpcodeRegistry(const OpcodeRegistry&) = delete;
+    OpcodeRegistry& operator=(const OpcodeRegistry&) = delete;
+
+    /// Reads the whole file, then swaps it in at once: a decode on another
+    /// thread sees the old table or the new one, never half of each. False,
+    /// with the table left as it was, when the file cannot be read.
     bool load(const std::string& path);
     bool save(const std::string& path) const;
 
     void add(const PacketSpec& spec);
     void clear();
 
+    /// The layout for `opcode`, or null. It points into the table, so it is
+    /// good only until the next add(), clear() or load(): use it on the thread
+    /// that makes those calls -- the GUI's drawing thread -- or where nothing
+    /// makes them at all, and never hand it to another thread. Anywhere else,
+    /// find_copy().
     const PacketSpec* find(std::uint16_t opcode) const;
+
+    /// A copy of the layout for `opcode`, to keep, from any thread.
+    std::optional<PacketSpec> find_copy(std::uint16_t opcode) const;
+
     bool              known(std::uint16_t opcode) const { return find(opcode) != nullptr; }
 
     /// Decode using the registered layout. Returns nullopt for unmapped
     /// opcodes, or when the payload is too short for the layout (which is the
-    /// usual sign that a hand-written layout is wrong).
+    /// usual sign that a hand-written layout is wrong). Safe from any thread
+    /// while another rewrites the table: the layout is read under the lock,
+    /// and nothing returned points into the table.
     std::optional<DecodedPacket> decode(const GamePacket& pkt) const;
 
     /// Opcodes with a semantic attached — the natural capture filter.
@@ -144,7 +173,7 @@ public:
     /// Every opcode carrying this semantic.
     std::vector<std::uint16_t> opcodes_for(Semantic s) const;
 
-    std::size_t size() const { return specs_.size(); }
+    std::size_t size() const;
 
     /// Parse one `fields=` line, e.g. "id:u32,x:f32,y:f32,hp:i32@12".
     static std::vector<FieldSpec> parse_field_list(const std::string& text,
@@ -152,6 +181,14 @@ public:
     static std::string field_list_to_string(const std::vector<FieldSpec>& fields);
 
 private:
+    /// find() for a caller that already holds mutex_. Nothing in the class
+    /// takes the lock twice on one thread: a second shared lock deadlocks as
+    /// soon as a writer is waiting between the two.
+    const PacketSpec* find_locked(std::uint16_t opcode) const;
+
+    /// Guards specs_ and nothing else. No callback runs under it -- only the
+    /// logger, which calls nothing back -- so it cannot close a deadlock.
+    mutable std::shared_mutex           mutex_;
     std::map<std::uint16_t, PacketSpec> specs_;
 };
 

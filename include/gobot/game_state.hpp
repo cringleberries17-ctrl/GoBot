@@ -77,6 +77,21 @@ struct Self {
     float mp_pct() const { return max_mp > 0 ? 100.0f * mp / max_mp : 100.0f; }
 };
 
+/// The character's HP and MP from the packets, in percent, as
+/// MacroEngine::set_vitals takes them; -1 for no reading. The packet bot's
+/// potions and buffs are the macro's, and this is what they drink on while
+/// the packet bot runs.
+struct SelfVitals {
+    float hp = -1.0f;
+    float mp = -1.0f;
+};
+/// A bar no packet has given a maximum for is no reading -- Self keeps 0
+/// there, which hp_pct() calls 100% -- and so are both once the game's
+/// traffic has been silent longer than `stale_ms` (`silent_ms`:
+/// PacketCapture::silent_for_ms). HP at 0 or below, or the character dead
+/// by a self_dead packet, reads 0.
+SelfVitals packet_vitals(const Self& me, std::uint64_t silent_ms, std::uint64_t stale_ms);
+
 /// The bot's model of the world, rebuilt from sniffed packets.
 ///
 /// Written by the protocol thread, read by the brain and the UI, so every
@@ -87,9 +102,12 @@ class GameState {
 public:
     // ---- writes (protocol thread) ----
     void update_self_position(float x, float y);
+    /// Also whether the character is dead: a reading of 0 or less is, above 0
+    /// is not, and each reading says so afresh.
     void update_self_hp(std::int32_t hp, std::int32_t max_hp);
     void update_self_mp(std::int32_t mp, std::int32_t max_mp);
     void update_self_id(std::int32_t id);
+    /// For self_dead and self_revive packets: stands until the next HP reading.
     void set_self_dead(bool dead);
     void set_self_facing(Facing f);
     void set_self_exp(std::int64_t exp, std::int32_t level);

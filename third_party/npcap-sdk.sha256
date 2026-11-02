@@ -1,0 +1,29 @@
+# The Npcap SDK 1.13 (https://npcap.com/dist/npcap-sdk-1.13.zip), unpacked
+# unchanged into third_party/npcap-sdk and kept in this tree, so that a build
+# needs no network. cmake/FindNpcap.cmake holds every file below to its hash
+# at every configure. Npcap's licence: https://github.com/nmap/npcap/blob/master/LICENSE
+6aa0abc0590df65b73dddddee39b4a7a6821dca4d7b0761d7975791c2a6550b8  Include/Packet32.h
+1d133ea35591daa552a1397ae5576b24e303e0cac8f806c41222c3fd881efdb7  Include/pcap.h
+2638cf0284a583bdde5aa7bf53eb424327632d884452a4ff73a787bfcc98cd87  Include/pcap/bluetooth.h
+f487a8e740303189cbe9572fc760966648e484def73efc7850062775666d89ce  Include/pcap/bpf.h
+60e2eadcf6ca65c3153618493b88849baf8e7c778ab7fed1ac81ea1ca2bceb45  Include/pcap/can_socketcan.h
+0cceec0986c127dd5404954627db80d2e8bfcec3d06d913a639630e7e464af23  Include/pcap/compiler-tests.h
+7f643ecd316a5a2f50577b5380e35486824fdafb0c52c6c2f8d073f884625b81  Include/pcap/dlt.h
+d65dfe5184ea15c84a44d57259d3a7e15ea7d862350a0e8133f6730b53a3738c  Include/pcap/funcattrs.h
+b64e5a913efd6916f6b05abc23742514440dff146dd90a4af115741a95937e72  Include/pcap/ipnet.h
+180bc1ce8767fef6cd896c0f4d75b5ab032eedd923ce6dafad832ed3a4d36faa  Include/pcap/namedb.h
+c306d66b521175461f7f1fe51e4426381dd045cfca0fe8a9478feb2e638cdeaa  Include/pcap/nflog.h
+a9bb2080a437da831e309eb0755d41e323b75543a16a2f6f32bb5546437cfe13  Include/pcap/pcap.h
+53682ab16911dbb0f4783ca6b896fb9404b45f98d09f24a27f54c41c4b7b3ebb  Include/pcap/pcap-inttypes.h
+a92c2b179f4a38325b9e239173949e025e2ebab88d0bcedfb7841a2d2c93956c  Include/pcap/sll.h
+132d0065b6bb7294d0d5619b385ed6e7f8eb902c509b8fa126edefa97265f37f  Include/pcap/socket.h
+c7f7f680cab5c6ab2a80810d456c71bece9976688026c3090cd702fc71b29649  Include/pcap/usb.h
+8bb012b532b65e0bf89107b2732317c0f2ff309bb38adf8d06e46b17b6ee878e  Include/pcap/vlan.h
+25f0f5f67df2128991ec47d8c04d8e761014b0431dc845d10e052f5fe61bb23c  Include/pcap-bpf.h
+62481ec9f786163d4e3965bf4b60ce9704857ad24b4dfb9c4d3909fb6ed3b786  Include/pcap-namedb.h
+0cf77885db5cbd8152dd23744843bf39220372c4e961a5df79875ccf54316387  Lib/ARM64/Packet.lib
+567a2ef2d3ad99a5577bbd38b48cab0eac7a93bd2d9d5c8b52f22c3c53d4ab64  Lib/ARM64/wpcap.lib
+eb44046796f6e844f9cb268670296114bea998090d63d945bdaa5aa7aede0831  Lib/Packet.lib
+e0bcf359eb162f5b0a4903b586baa72b9126b68db35f163688fd520bf70d74cc  Lib/wpcap.lib
+03e9bf84b49c86173b9b277e6ce18ee57ccaeee218a3944bf78a27c1ab47c422  Lib/x64/Packet.lib
+db9911f85c3b56f020605b3a6da41407e2fafa237aeb3d0694fe7181d59c6602  Lib/x64/wpcap.lib

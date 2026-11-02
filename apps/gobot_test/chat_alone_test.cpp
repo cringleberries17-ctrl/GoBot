@@ -9,6 +9,7 @@
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/template_matcher.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -325,7 +326,7 @@ void test_dialog_names() {
     section("Tự chat: what a dialog that keeps Enter back is called (the 2A tester's problem 14)");
     TemplateStore store;
     if (!store.load_best(exe_relative("configs/templates.ini")) || !ChatDialogs::can_check(store)) {
-        std::printf("  [skip] the dialogs' pictures are not installed here\n");
+        skip("the dialogs' pictures are not installed here\n");
         return;
     }
     Frame plain;
@@ -344,7 +345,7 @@ void test_dialog_names() {
                            Case{ "grabbed/del_item_confirm_1", "thùng rác" } }) {
         const Frame* pic = store.get(c.picture);
         if (pic == nullptr) {
-            std::printf("  [skip] no %s here\n", c.picture);
+            skip("no %s here\n", c.picture);
             continue;
         }
         Frame f = plain;

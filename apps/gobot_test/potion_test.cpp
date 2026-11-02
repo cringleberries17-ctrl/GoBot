@@ -1,11 +1,13 @@
 // gobot_test -- potion stock: the counts on the hotbar, read off frames saved
 // from the live client, and when they are worth a message.
 //
-// The frames are the ones the live tests saved: frame.png beside this test,
-// as the package puts it, and in the main checkout's build the 1024 x 768
-// playerlist.png, the r1-r4 rounds and the trash cleaner's debug frames. A
-// test is skipped only when its frame is not there. Nothing is pressed
-// anywhere, and no game is needed.
+// The frames are the ones the live tests saved. frame.png, the 1024 x 768
+// playerlist.png and the trash cleaner's debug frames are read beside this
+// test, as the package puts them, and only as they were saved
+// (load_live_frame): gobot_cli and GoBot rewrite them. The r1-r4 rounds come
+// from the build of the checkout this was built from. A test is skipped when
+// its frame is not there, or not as saved. Nothing is pressed anywhere, and
+// no game is needed.
 
 #include "gobot/potion_stock.hpp"
 #include "gobot/alerts.hpp"
@@ -15,6 +17,7 @@
 #include "gobot/glyph_font.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
+#include "test_support.hpp"
 
 #include <windows.h>
 
@@ -53,11 +56,18 @@ std::string read_all(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-/// The main checkout's build, where the live tests saved their frames.
-const char* const kLiveBuild = "C:\\Users\\player\\source\\GoBot\\build\\";
+/// The build tree of the checkout these tests were built from, where the live
+/// tests saved their rounds (live\shots, frozen\...). Never committed, and
+/// never written by GoBot as it plays; what GoBot writes is read beside this
+/// test, and only as saved (load_live_frame).
+#ifdef GOBOT_SOURCE_DIR
+const char* const kLiveBuild = GOBOT_SOURCE_DIR "/build/";
+#else
+const char* const kLiveBuild = "";
+#endif
 
-/// A frame saved from the live client: beside this test first, as the
-/// package puts frame.png, then the main checkout's build.
+/// A round the live tests saved: beside this test first, then the
+/// checkout's build.
 bool live_frame(const std::string& rel, Frame& out) {
     const std::string name = rel.substr(rel.find_last_of('\\') + 1);
     for (const std::string& p : { exe_relative(name), std::string(kLiveBuild) + rel })
@@ -90,7 +100,7 @@ const Eyes& eyes() {
     static Eyes e = [] {
         Eyes x;
         x.digits.load(GlyphFont::default_dir());
-        if (live_frame("bin\\Release\\frame.png", x.frame) && x.frame.width == 1280 && x.frame.height == 720)
+        if (load_live_frame(exe_relative("frame.png"), x.frame) && x.frame.width == 1280 && x.frame.height == 720)
             x.picture = hotbar_picture_from(x.frame, 475, 631);
         x.ok = x.digits.loaded() && x.picture.valid();
         return x;
@@ -193,7 +203,7 @@ void test_picture() {
     section("Potions: the hotbar's picture");
     const Eyes& e = eyes();
     if (!e.ok) {
-        std::printf("  [skip] no frame.png from the live client, or no digits, here\n");
+        skip("no frame.png from the live client, as saved, or no digits, here\n");
         return;
     }
     int opaque = 0, labels = 0;
@@ -218,7 +228,7 @@ void test_picture() {
         }
         check(same, "the staged grabbed/hotbar_frame.png is that cut, pixel for pixel (" + from + ")");
     } else {
-        std::printf("  [skip] no grabbed/hotbar_frame.png staged beside this test\n");
+        skip("no grabbed/hotbar_frame.png staged beside this test\n");
     }
 #ifdef GOBOT_SOURCE_DIR
     const std::string names = read_all(std::string(GOBOT_SOURCE_DIR) + "/configs/templates.ini");
@@ -335,7 +345,7 @@ void test_picture_blank() {
                             : 0;
         check(coloured == 0, fmt("the staged grabbed/hotbar_frame.png: %d see-through pixels with colour", coloured));
     } else {
-        std::printf("  [skip] no grabbed/hotbar_frame.png staged beside this test\n");
+        skip("no grabbed/hotbar_frame.png staged beside this test\n");
     }
 }
 
@@ -343,7 +353,7 @@ void test_frame_png() {
     section("Potions: frame.png (PS-A1)");
     const Eyes& e = eyes();
     if (!e.ok) {
-        std::printf("  [skip] no frame.png from the live client, or no digits, here\n");
+        skip("no frame.png from the live client, as saved, or no digits, here\n");
         return;
     }
     HotbarSpot bar;
@@ -364,8 +374,8 @@ void test_1024() {
     section("Potions: 1024 x 768 (PS-A2)");
     const Eyes& e = eyes();
     Frame f;
-    if (!e.ok || !live_frame("bin\\Release\\playerlist.png", f)) {
-        std::printf("  [skip] no playerlist.png from the live client here\n");
+    if (!e.ok || !load_live_frame(exe_relative("playerlist.png"), f)) {
+        skip("no playerlist.png from the live client, as saved, here\n");
         return;
     }
     HotbarSpot bar;
@@ -383,7 +393,7 @@ void test_rounds() {
     const Eyes& e = eyes();
     Frame f;
     if (!e.ok || !live_frame("live\\shots\\r3_B_000.png", f)) {
-        std::printf("  [skip] no live round frames here\n");
+        skip("no live round frames here\n");
         return;
     }
     const auto r = read_keys(f, { '1', '2' }, nullptr);
@@ -421,24 +431,26 @@ void test_rounds() {
     check(read == 20 && right == read, fmt("%d of %d more round frames read 27 and 62", right, read) +
                                            (wrong.empty() ? std::string{} : " -- " + wrong));
 
-    const auto debug = pngs_in(std::string(kLiveBuild) + "bin\\Release\\trash_debug\\", "20261009_*.png");
-    int ok = 0;
+    // The trash cleaner's, beside this test: GoBot prunes the folder as it
+    // plays, so only the ones as saved.
+    const auto debug = pngs_in(exe_relative("trash_debug\\"), "20261009_*.png");
+    int ok = 0, known = 0;
     for (const std::string& p : debug) {
         Frame g;
-        if (!load_png(p, g)) continue;
+        if (!load_live_frame(p, g)) continue;
+        ++known;
         const auto k = read_keys(g, { '1', '2' }, nullptr);
         ok += k[0].count == 89 && k[1].count == 86 && k[0].state == SlotState::Count ? 1 : 0;
     }
-    if (debug.empty()) std::printf("  [skip] no trash_debug frames of 9 October here\n");
-    else check(ok == static_cast<int>(debug.size()),
-               fmt("%d of %zu trash_debug frames of 9 October read 89 and 86", ok, debug.size()));
+    if (known == 0) skip("no trash_debug frames of 9 October, as saved, here");
+    else check(ok == known, fmt("%d of %d trash_debug frames of 9 October read 89 and 86", ok, known));
 }
 
 void test_covered() {
     section("Potions: another window over the hotbar (PS-A4)");
     const Eyes& e = eyes();
     if (!e.ok) {
-        std::printf("  [skip] no frame.png from the live client, or no digits, here\n");
+        skip("no frame.png from the live client, as saved, or no digits, here\n");
         return;
     }
     const char* const kCovered[] = {
@@ -461,7 +473,7 @@ void test_covered() {
         if (!safe && wrong.empty()) wrong = std::string(rel) + ": " + said(r[0]) + "/" + said(r[1]);
     }
     if (seen == 0) {
-        std::printf("  [skip] none of the covered frames are here\n");
+        skip("none of the covered frames are here\n");
         return;
     }
     check(seen == never_a_count, fmt("%d of %d covered frames: no hotbar, or nothing readable -- never 1",
@@ -484,7 +496,7 @@ void test_part_covered() {
     section("Potions: a window over part of a slot (the 2A tester's step 9)");
     const Eyes& e = eyes();
     if (!e.ok) {
-        std::printf("  [skip] no frame.png from the live client, or no digits, here\n");
+        skip("no frame.png from the live client, as saved, or no digits, here\n");
         return;
     }
     const HotbarSpot bar = find_hotbar(e.frame, e.picture);
@@ -563,7 +575,7 @@ void test_part_covered() {
         check(v.state == SlotState::Single, "V, a skill with nothing printed, still one -- " + said(v));
         ItemCatalog catalog;
         if (!catalog.load(ItemCatalog::default_dir())) {
-            std::printf("  [skip] the item catalog is not installed here\n");
+            skip("the item catalog is not installed here\n");
             return;
         }
         const ScreenRect three = bar.slot(0, 8);
@@ -611,7 +623,7 @@ void test_drawn() {
     section("Potions: slots drawn into frame.png (PS-A5)");
     const Eyes& e = eyes();
     if (!e.ok) {
-        std::printf("  [skip] no frame.png from the live client, or no digits, here\n");
+        skip("no frame.png from the live client, as saved, or no digits, here\n");
         return;
     }
     const HotbarSpot bar = find_hotbar(e.frame, e.picture);
@@ -681,12 +693,12 @@ void test_game_digits() {
     Frame picture;
     if (!TemplateStore::load_one(hotbar::kPicture, exe_relative("configs/templates.ini"), picture) ||
         picture.width != hotbar::kPictureW || picture.height != hotbar::kPictureH) {
-        std::printf("  [skip] no grabbed/hotbar_frame.png staged beside this test\n");
+        skip("no grabbed/hotbar_frame.png staged beside this test\n");
         return;
     }
     CountReader digits;
     if (!digits.load(GlyphFont::default_dir())) {
-        std::printf("  [skip] no digits of the game's font here\n");
+        skip("no digits of the game's font here\n");
         return;
     }
     const std::string images = ItemCatalog::default_dir();
@@ -694,7 +706,7 @@ void test_game_digits() {
     for (const char* folder : { "\\spend\\hp\\", "\\spend\\mana\\" })
         for (const std::string& p : pngs_in(images + folder, "*.png")) icons.push_back(p);
     if (images.empty() || icons.empty()) {
-        std::printf("  [skip] the game's potion icons are not installed here\n");
+        skip("the game's potion icons are not installed here\n");
         return;
     }
     constexpr int kPicX = 469, kPicY = 625;
@@ -1286,7 +1298,8 @@ void test_texts_and_settings() {
         const std::string src = read_all(std::string(GOBOT_SOURCE_DIR) + file);
         check(!src.empty() && src.find("take_hold") == std::string::npos &&
                   src.find("game_mouse_mutex_") == std::string::npos && src.find("click_at") == std::string::npos &&
-                  src.find("key_press") == std::string::npos && src.find("input_.") == std::string::npos,
+                  src.find("click_on_game") == std::string::npos && src.find("key_press") == std::string::npos &&
+                  src.find("input_.") == std::string::npos,
               std::string(file) + " takes no hold and no mouse, and calls no InputManager function (PS-A8)");
     }
 #endif

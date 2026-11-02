@@ -98,9 +98,11 @@ format — there are no `.proto` files to find.
 | `sample_config.ini` | **Four named attack-geometry presets.** See [Worth taking](#worth-taking). |
 
 `bot_s0_default.ini` is worth reading in full even now — it is a thought-through
-feature list, and GoBot's `bot_default.ini` already carries its schema and
-defaults verbatim (`attack_range=350`, `facing_tolerance=12`,
-`highest_hit_y=150`, `lowest_hit_y=63`).
+feature list, and GoBot's `bot_default.ini` already carries its schema and its
+geometry defaults verbatim (`attack_range=350`, `facing_tolerance=12`,
+`highest_hit_y=150`, `lowest_hit_y=63`). Its switches are not GoC's: what acts
+on the game — attack, skills, buffs, potions — ships off, as in every GoBot
+config.
 
 ### Data: 1,334 PNGs
 
@@ -568,7 +570,7 @@ No work outstanding on any of these.
 |---|---|
 | `bitmap_font` glyph OCR | `src/glyph_font.cpp` reads GoC's path directly |
 | `data/images` template library | `GOBOT_UI_IMAGES` in `CMakeLists.txt`, staged beside the exe at build |
-| Bot config schema and defaults | `configs/bot_default.ini`, verbatim |
+| Bot config schema and defaults | `configs/bot_default.ini`: schema and geometry verbatim, every switch that acts shipped off |
 | Party config schema | `configs/party.ini`; `gobot_test` reads GoC's `party_s0_default.ini` |
 | One-input-token priority arbiter | `ExecutionCoordinator`, `command.hpp` (`Critical = 100`) |
 | Multi-thread executor split | Four threads: exec, heal, buff, pathfind |

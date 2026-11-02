@@ -100,6 +100,12 @@ public:
     void patrol(const std::vector<SavedPlace>& route);
 
     void stop();
+    /// Tell the walk to stop, and return at once: it lets go of its keys on
+    /// the way out, and stop() then waits for it. For stopping everything at
+    /// once, where nothing is waited for until every job has been told.
+    void request_stop() { running_.store(false); }
+    /// True while a walk is under way: no longer once a one-way walk has
+    /// arrived or given up, though its thread is joined only by stop().
     bool running() const { return running_.load(); }
 
     enum class State { Idle, NoPosition, Walking, Arrived, GaveUp, Unfocused };

@@ -131,9 +131,23 @@ struct World {
     bool view_follows = false;
     int  ledge = 0;
 
+    /// Where the character is in the packets' world (Hunter::Eyes::where),
+    /// for a rig made with it: moved by every step whether the view follows
+    /// or not, and reported at every look. `fix_known` false: no capture.
+    int  world_x = 4640, world_y = 1100;
+    bool fix_known = true;
+    /// The character put at screen `x`, the world following.
+    void put(int x) {
+        world_x += x - me_x;
+        me_x = x;
+    }
+
     /// The number of the picture the eyes see, for a test that numbers them
     /// itself (Rig's `own_pictures`).
     std::uint64_t picture = 0;
+    /// The frame of reference the plates are in (Hunter::Eyes::view): moved,
+    /// the hunter lets go of what it held by where things stood.
+    std::uint32_t view = 0;
     bool          frozen = false;
     int           frozen_me_x = 0, frozen_me_y = 0;
     std::vector<Nameplate> frozen_mobs;
@@ -153,6 +167,13 @@ struct World {
     std::vector<Press> presses;
     int                releases = 0;
 
+    /// Keys put down and left down (Hands::key_down): a held walk, which
+    /// moves the character a step a pass -- step_ms at 355 px a second, as a
+    /// step pressed for a pass did -- for as long as it is down. Its Press is
+    /// recorded with kHeld for a hold: a step, by steps(), and never a turn.
+    std::set<std::uint32_t> held;
+    static constexpr int kHeld = 1 << 19;
+
     void slide(int px, int py) {
         for (Nameplate& n : mobs) {
             n.bar.x += px;
@@ -162,6 +183,8 @@ struct World {
         }
     }
     void step_by(int px) {
+        world_x += px;
+        world_y += ledge;
         if (view_follows) {
             // The character stays put on the screen. A monster that does not
             // walk after it slides the other way; one that does stays where
@@ -196,8 +219,9 @@ struct Rig {
     World                w;
 
     /// `own_pictures`: the test numbers the detector's pictures itself
-    /// (World::picture); otherwise each pass is a new one.
-    explicit Rig(const HunterConfig& cfg, bool own_pictures = false) {
+    /// (World::picture); otherwise each pass is a new one. `with_where`: the
+    /// eyes say where the packets put the character (World::world_x).
+    explicit Rig(const HunterConfig& cfg, bool own_pictures = false, bool with_where = false) {
         Hunter::Eyes eyes;
         eyes.player = [this](Nameplate& out, bool* fresh) {
             if (fresh) *fresh = w.see_me;
@@ -220,6 +244,20 @@ struct Rig {
             return out;
         };
         if (own_pictures) eyes.frame = [this] { return w.picture; };
+        eyes.view = [this] { return w.view; };
+        if (with_where) {
+            eyes.where = [this](WorldFix& f) {
+                f = WorldFix{};
+                if (!w.fix_known) return false;
+                f.state = WorldFix::State::Known;
+                f.x = f.rx = static_cast<float>(w.world_x);
+                f.y = f.ry = static_cast<float>(w.world_y);
+                f.report_ms = w.t;
+                f.moving = !w.held.empty();
+                f.epoch = 1;
+                return true;
+            };
+        }
         hunter.set_eyes(eyes);
 
         Hunter::Hands hands;
@@ -230,9 +268,17 @@ struct Rig {
                 w.step_by((vk == VK_LEFT ? -1 : 1) * hold * 355 / 1000);
             return true;
         };
-        hands.key_up = [](std::uint32_t) {};
-        hands.held = [](std::uint32_t) { return false; };
-        hands.release_all = [this] { ++w.releases; };
+        hands.key_down = [this](std::uint32_t vk) {
+            w.presses.push_back(World::Press{ w.t, vk, World::kHeld });
+            w.held.insert(vk);
+            return true;
+        };
+        hands.key_up = [this](std::uint32_t vk) { w.held.erase(vk); };
+        hands.held = [this](std::uint32_t vk) { return w.held.count(vk) != 0; };
+        hands.release_all = [this] {
+            ++w.releases;
+            w.held.clear();
+        };
         hunter.set_hands(hands);
 
         Hunter::Clock clock;
@@ -240,13 +286,21 @@ struct Rig {
         clock.sleep_ms = [this](std::uint32_t ms) { w.t += ms; };
         hunter.set_clock(clock);
 
+        walk_px = static_cast<int>(cfg.step_ms) * 355 / 1000;
         hunter.set_config(cfg);
         hunter.start_stepped();
     }
     ~Rig() { hunter.stop(); }
 
+    /// How far a held walk takes the character a pass.
+    int walk_px = 0;
+
     void pass() {
         hunter.step();
+        if (!w.wall) {
+            if (w.held.count(VK_LEFT)) w.step_by(-walk_px);
+            if (w.held.count(VK_RIGHT)) w.step_by(walk_px);
+        }
         w.t += 60;
     }
     void run(std::uint64_t ms, const std::function<void()>& each = nullptr) {
@@ -599,8 +653,10 @@ void test_hop() {
         r.w.wall = true;
         r.w.mobs = { plate(900, 300, "Cao") };
         r.run(600);
-        check(r.w.of(VK_SPACE).empty() && r.w.steps(VK_RIGHT) == 10,
-              "with no jump key set: the steps, and never a hop");
+        // Against the wall the target comes no closer, so the walk is put
+        // down again each kWalkStuckMs: 2 in 600 ms.
+        check(r.w.of(VK_SPACE).empty() && r.w.steps(VK_RIGHT) == 2 && r.w.held.count(VK_RIGHT) == 1,
+              "with no jump key set: the walk, held -- put down again where it gets no closer -- and never a hop");
     }
     {
         HunterConfig cfg;
@@ -837,6 +893,138 @@ void test_keep_distance_bound() {
     }
 }
 
+void test_keep_distance_one_way() {
+    section("Giữ khoảng cách: at most N steps one way, from any monsters, until a walk back");
+
+    {
+        // It steps back to 139 px, attacks from there, and walks back in to
+        // 80 px. Each attack from far enough counted the steps afresh: the
+        // character backed across its platform without end.
+        Rig r(keeping());                               // 120 px, 3 steps
+        r.w.mobs = { plate(720, 400, "Moc", 0.9f) };
+        r.run(12'000, [&] {
+            const int dx = r.w.mobs[0].x() - r.w.me_x;
+            if (dx > 80) nudge(r, -std::min(7, dx - 80));
+        });
+        check(r.w.steps(VK_LEFT) == 3 && r.st().backsteps == 3 && r.w.of('Z').size() >= 10,
+              "a monster that walks back in after every attack from 139 px: 3 steps in all, then it is "
+              "fought where it stands -- " + std::to_string(r.w.steps(VK_LEFT)) + " steps");
+    }
+    {
+        // One after another from the right, each at 80 px: each had its own
+        // count, three steps each.
+        Rig r(keeping());
+        r.w.mobs = { plate(r.w.me_x + 80, 400, "Moc", 0.9f) };
+        int came = 1;
+        std::size_t swings = 0;
+        r.run(15'000, [&] {
+            if (r.w.of('Z').size() > swings && came < 6) {
+                swings = r.w.of('Z').size();
+                r.w.mobs = { plate(r.w.me_x + 80, 400, "Moc" + std::to_string(came), 0.9f) };
+                ++came;
+            }
+        });
+        check(came == 6 && r.w.steps(VK_LEFT) == 3,
+              "six monsters one after another from the same side: 3 steps back in all -- " +
+                  std::to_string(r.w.steps(VK_LEFT)));
+    }
+    // Three steps left from one that follows; it goes, and the next is far
+    // off -- to the right, the way back, or to the left, further the same way.
+    // Walked to, it comes in to 80 px on the right and follows.
+    const auto after_walk = [](bool next_right) {
+        Rig r(keeping());
+        r.w.follow = true;
+        r.w.mobs = { plate(720, 400, "Moc", 0.9f) };
+        r.run(6000);
+        // Steps back, not presses of the left arrow: a walk left holds it.
+        const std::uint64_t first = r.st().backsteps;
+        r.w.follow = false;
+        r.w.mobs = { plate(r.w.me_x + (next_right ? 700 : -700), 400, "Xa", 0.9f) };
+        r.run(1500);
+        r.w.mobs = { plate(r.w.me_x + 80, 400, "Gan", 0.9f) };
+        r.w.follow = true;
+        r.run(6000);
+        return std::make_pair(first, r.st().backsteps - first);
+    };
+    {
+        const auto back = after_walk(true);
+        const auto on = after_walk(false);
+        check(back.first == 3 && back.second == 3 && on.first == 3 && on.second == 0,
+              "after 3 steps left, a walk right to the next monster counts them afresh -- 3 more; a "
+              "walk further left does not -- none: " + std::to_string(back.second) + " and " +
+                  std::to_string(on.second));
+    }
+    {
+        // Walks right of one look each, an attack between them: never
+        // kRegainWalkMs held in a row, however many.
+        const auto short_walks = [](int walks) {
+            Rig r(keeping());
+            r.w.follow = true;
+            r.w.mobs = { plate(720, 400, "Moc", 0.9f) };
+            r.run(6000);
+            const std::uint64_t first = r.st().backsteps;
+            r.w.follow = false;
+            for (int i = 0; i < walks; ++i) {
+                r.w.mobs = { plate(r.w.me_x + 230, 400, "Xa", 0.9f) };     // one look's walk from reach
+                r.pass();
+                r.pass();
+            }
+            r.w.mobs = { plate(r.w.me_x + 80, 400, "Gan", 0.9f) };
+            r.w.follow = true;
+            r.run(4000);
+            return std::make_pair(first, r.st().backsteps - first);
+        };
+        const auto one = short_walks(1);
+        const auto six = short_walks(6);
+        check(one.first == 3 && one.second == 0 && six.first == 3 && six.second == 0,
+              "a walk right of one look, or six of them with an attack between each: no steps counted "
+              "afresh -- " + std::to_string(one.second) + " and " + std::to_string(six.second));
+    }
+    {
+        // A change of frame of reference -- the packets taking over from the
+        // screen -- lets go of where things stood, not of the steps taken.
+        Rig r(keeping());
+        r.w.follow = true;
+        r.w.mobs = { plate(720, 400, "Moc", 0.9f) };
+        r.run(6000);
+        const std::uint64_t first = r.st().backsteps;
+        r.w.view = 1;
+        r.run(3000);
+        check(first == 3 && r.st().backsteps == 3,
+              "3 steps left, then the view changes under a monster that follows: no more steps -- " +
+                  std::to_string(r.st().backsteps));
+    }
+    {
+        // A start, though, begins with none: the player has put the
+        // character where it is to fight.
+        Rig r(keeping());
+        r.w.wall = true;
+        r.w.mobs = { plate(720, 400, "Moc", 0.9f) };
+        r.run(3000);
+        const bool blocked = r.w.steps(VK_LEFT) == 1;
+        r.hunter.stop();
+        r.hunter.start_stepped();
+        r.run(600);
+        check(blocked && r.w.steps(VK_LEFT) == 2,
+              "a wall met stepping left, then hunting stopped and started again: a step left once more");
+    }
+    {
+        // A wall met stepping left stops the steps that way for any monster,
+        // until a walk right.
+        Rig r(keeping());
+        r.w.wall = true;
+        r.w.mobs = { plate(720, 400, "Moc", 0.9f) };
+        r.run(3000);
+        r.w.mobs.clear();                               // it died, and was gone a while
+        r.run(2000);
+        r.w.mobs = { plate(r.w.me_x + 70, 400, "Moc2", 0.9f) };
+        r.run(3000);
+        check(r.w.steps(VK_LEFT) == 1 && r.w.of('Z').size() >= 6,
+              "a step left into a wall: none that way again, from the next monster either -- it is "
+              "fought where it stands");
+    }
+}
+
 void test_keep_distance_log() {
     section("Giữ khoảng cách: how far each fight was fought from, in the log");
 
@@ -920,6 +1108,21 @@ void test_facing() {
                   within == 0 && b.w.taps(VK_RIGHT) == 10,
               "facing_tolerance 0 and 40 from hunt.ini: a turn at 5 px with 0; none at 30 px with 40, "
               "and, with no style, one a pass at 60 px as before");
+    }
+    {
+        // Standing still with no style: a tap on every pass walked the
+        // character in on the monsters a little at a time, off its spot.
+        HunterConfig cfg;
+        cfg.stay_put = true;
+        Rig r(cfg);
+        r.w.mobs = { plate(700, 400, "Moc", 0.9f) };      // 60 px: in reach
+        r.run(50 * 60);
+        const std::size_t one = r.w.taps(VK_RIGHT);
+        r.w.mobs = { plate(580, 400, "Moc2", 0.9f) };     // the other side
+        r.run(20 * 60);
+        check(one == 1 && r.w.taps(VK_RIGHT) == 1 && r.w.taps(VK_LEFT) == 1 && r.w.of('Z').size() >= 5,
+              "standing still with no style: one turn to a monster, none more over 50 passes, and one "
+              "to the next on the other side -- " + std::to_string(r.w.taps(VK_RIGHT)) + " right");
     }
 }
 
@@ -1009,6 +1212,92 @@ void test_engaged() {
     }
 }
 
+// ------------------------------------------------- with a hunting spot
+
+/// Keeping the distance (near_narrow: 120 px kept, 200 reach) round a
+/// hunting spot -- taken at world 4640, where the rig's character stands at
+/// its first look: the area runs from 4340 to 4940.
+HunterConfig keeping_spot() {
+    HunterConfig cfg = keeping();
+    cfg.spot = true;
+    return cfg;
+}
+
+void test_spot_keep_distance() {
+    section("Chỗ đánh quái: a step back goes no further than the area's edge");
+
+    {
+        Rig r(keeping_spot(), false, true);
+        r.pass();
+        r.w.put(900);                               // world 4900: 40 px from the right edge
+        r.w.mobs = { plate(820, 400, "Moc") };      // 80 px to the left: too close
+        r.pass();
+        const std::vector<World::Press> steps = r.w.of(VK_RIGHT, 50);
+        check(steps.size() == 1 && steps[0].hold == 113 && Hunter::backstep_ms(120, 80) == 169 &&
+                  r.w.world_x == 4940,
+              "40 px from the area's right edge: the step back held 113 ms, as far as the edge, not 169 -- " +
+                  std::to_string(steps.empty() ? 0 : steps[0].hold) + " ms");
+    }
+    {
+        Rig r(keeping_spot(), false, true);
+        r.pass();
+        r.w.put(380);                               // world 4380: 40 px from the left edge
+        r.w.mobs = { plate(460, 400, "Moc") };      // 80 px to the right
+        r.pass();
+        const std::vector<World::Press> steps = r.w.of(VK_LEFT, 50);
+        check(steps.size() == 1 && steps[0].hold == 113, "and the same toward the left edge");
+    }
+    {
+        Rig r(keeping_spot(), false, true);
+        r.pass();
+        r.w.put(935);                               // 5 px from the edge
+        r.w.mobs = { plate(855, 400, "Moc") };
+        r.run(1000);
+        check(r.w.steps(VK_RIGHT) == 0 && r.w.steps(VK_LEFT) == 0 && !r.w.of('Z').empty(),
+              "5 px from it, too little for a step: none, and the monster attacked from there");
+    }
+    {
+        Rig r(keeping_spot(), false, true);
+        r.w.fix_known = false;
+        r.w.mobs = { plate(720, 400, "Moc") };
+        r.run(2000);
+        check(r.w.steps(VK_LEFT) == 0 && !r.w.of('Z').empty() && r.st().spot_why == Hunter::SpotWhy::NoFix,
+              "no capture to place the character: standing, and a standing character never steps back");
+    }
+    {
+        // Room enough: as without the spot, key for key.
+        Rig a(keeping()), b(keeping_spot(), false, true);
+        for (Rig* r : { &a, &b }) {
+            r->pass();
+            r->w.mobs = { plate(720, 400, "Moc", 0.9f) };
+            r->run(3000);
+        }
+        bool same = a.w.presses.size() == b.w.presses.size() && !a.w.presses.empty();
+        for (std::size_t i = 0; same && i < a.w.presses.size(); ++i)
+            same = a.w.presses[i].vk == b.w.presses[i].vk && a.w.presses[i].hold == b.w.presses[i].hold &&
+                   a.w.presses[i].at == b.w.presses[i].at;
+        check(same && b.w.steps(VK_LEFT) >= 1, "300 px of room behind: the step back as without a spot, key for key");
+    }
+}
+
+void test_spot_view_follows() {
+    section("Chỗ đánh quái: the view following the character -- the walk back goes by the packets alone");
+
+    HunterConfig cfg;
+    cfg.spot = true;
+    Rig r(cfg, false, true);
+    r.w.view_follows = true;
+    r.pass();                                       // the spot: 4640
+    r.w.world_x = 5100;                             // pushed 460 px right; on the screen nothing moved
+    r.w.mobs = { plate(840, 400, "Ngoai") };        // 200 px right: 5300 in the world, outside the area
+    r.run(4000);
+    check(std::abs(r.w.world_x - 4640) <= 48 && r.w.me_x == 640 && r.w.held.empty() && r.w.of(VK_RIGHT).empty() &&
+              r.st().returns == 1,
+          "the character's plate never moving on the screen: walked back left by where the packets put it, let go "
+          "of within 48 px -- " + std::to_string(r.w.world_x - 4640) + " px -- and the monster outside the area "
+          "never walked to");
+}
+
 // ------------------------------------------------- what an old setup does
 
 void test_old_setup() {
@@ -1079,6 +1368,17 @@ void test_old_setup() {
     check(clamped.load(path) && clamped.keep_distance_steps == 10 && clamped.facing_tolerance == 0 &&
               clamped.min_distance == 200,
           "out of range in the file: 1-10 steps, 0-100 px, and the minimum never past the reach");
+
+    // A style this GoBot does not know: none -- the picker shows Như trước
+    // for it, and GoC's rules were on behind that.
+    write_file(path, "[Hunt]\nstyle=not_a_style\n");
+    HunterConfig unknown;
+    write_file(temp_path("gobot_known_style.ini"), "[Hunt]\nstyle=near_wide\n");
+    HunterConfig known;
+    check(unknown.load(path) && unknown.style.empty() && !unknown.goc_rules() &&
+              known.load(temp_path("gobot_known_style.ini")) && known.style == "near_wide" && known.goc_rules(),
+          "an unknown style in hunt.ini reads as none (Như trước), GoC's rules off; a known one stays");
+    std::remove(temp_path("gobot_known_style.ini").c_str());
     std::remove(path.c_str());
 }
 
@@ -1093,8 +1393,11 @@ void test_hunter_style(void (*check_fn)(bool, const std::string&), void (*sectio
     test_hop();
     test_keep_distance();
     test_keep_distance_bound();
+    test_keep_distance_one_way();
     test_keep_distance_log();
     test_facing();
     test_engaged();
+    test_spot_keep_distance();
+    test_spot_view_follows();
     test_old_setup();
 }

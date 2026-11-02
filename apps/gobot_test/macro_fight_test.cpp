@@ -88,6 +88,9 @@ MacroKey hp_key(std::uint32_t vk, int pct, int jitter = 0) {
 MacroKey mp_key(std::uint32_t vk, int pct, int jitter = 0) {
     return potion_key(MacroTrigger::MpBelow, vk, pct, "MP", jitter);
 }
+MacroKey pet_key(std::uint32_t vk, int pct, int jitter = 0) {
+    return potion_key(MacroTrigger::PetHpBelow, vk, pct, "Pet", jitter);
+}
 
 // ------------------------------------------------------- the rows' config
 
@@ -225,6 +228,7 @@ struct Rig {
     std::uint64_t        t = 7'000'000;
     const std::uint64_t  start = 7'000'000;
     float                hp = 100.0f, mp = 100.0f;
+    float                pet = -1.0f;    ///< the pet's HP: none read unless a test says
     bool                 push_vitals = true;
     bool                 focused = true;
     std::uint32_t        broken = 0;     ///< a key whose press never goes out
@@ -281,7 +285,7 @@ struct Rig {
     /// as the GUI and the timer thread do.
     void run(std::uint64_t ms) {
         for (const std::uint64_t until = t + ms; t < until; t += 10) {
-            if (push_vitals) engine.set_vitals(hp, mp);
+            if (push_vitals) engine.set_vitals(hp, mp, pet);
             engine.step();
         }
     }
@@ -617,7 +621,9 @@ void test_potion_the_moment_due() {
             rig.hp = 30.0f;
             rig.engine.set_vitals(rig.hp, rig.mp);
         };
-        rig.run(10);
+        // X, due with Z, goes the skill gap after Z's key came up -- the potion
+        // before it.
+        rig.run(200);
         check(rig.pressed.size() == 3 && rig.pressed[0].first == 'Z' && rig.pressed[1].first == '1' &&
                   rig.pressed[2].first == 'X',
               "HP read low while Z is down: the potion goes next, before X of the same pass");
@@ -700,10 +706,10 @@ void test_potion_at_start() {
     check(order && rig.pressed[0].second == rig.start &&
               rig.pressed[1].second >= rig.pressed[0].second + 40 + MacroEngine::kPotionGapMs,
           "started at HP 40% and MP 40% (marks 60% and 58%): the HP potion first, at once, the MP "
-          "potion 20 ms after it came up, then the skills -- " + got);
+          "potion kPotionGapMs after it came up, then the skills -- " + got);
 
-    // And on every cooldown after: the MP potion 20 ms after the HP one came
-    // up -- or as soon after as the key of a buff or skill already down
+    // And on every cooldown after: the MP potion kPotionGapMs after the HP one
+    // came up -- or as soon after as the key of a buff or skill already down
     // allows -- not a whole 100-ms look behind it, as when both kinds were
     // looked at together only that often.
     rig.run(9000);
@@ -711,14 +717,16 @@ void test_potion_at_start() {
     const auto mp = rig.when('2');
     bool in_step = hp.size() == 4 && mp.size() == 4;
     for (std::size_t i = 0; in_step && i < hp.size(); ++i)
-        in_step = mp[i] >= hp[i] + 40 + MacroEngine::kPotionGapMs && mp[i] <= hp[i] + 40 + 70;
-    check(in_step, "and every 3 s after it, the MP potion 20 ms after the HP one came up, a key "
+        in_step = mp[i] >= hp[i] + 40 + MacroEngine::kPotionGapMs &&
+                  mp[i] <= hp[i] + 40 + MacroEngine::kPotionGapMs + 50;
+    check(in_step, "and every 3 s after it, the MP potion kPotionGapMs after the HP one came up, a key "
                    "already down allowing -- HP at +" + ms_list(hp, rig.start) + ", MP at +" +
                        ms_list(mp, rig.start) + " ms");
 
     // With no potion due at BẮT ĐẦU, the same file starts as it always did:
     // each key at its start delay, the buffs kBuffGapMs apart (as the engine
-    // before the tiers armed them), and no potion.
+    // before the tiers armed them), and no potion -- B, due at 1200 with Z's
+    // second press, the skill gap after Z (MacroConfig::skill_gap_ms, 50).
     Rig high(keys);
     high.run(3100);
     const auto first = [&](std::uint32_t vk) {
@@ -726,7 +734,7 @@ void test_potion_at_start() {
         return at.empty() ? std::uint64_t{ 99'999 } : at[0] - high.start;
     };
     const bool as_before = first('Z') == 0 && first('X') == 150 && first('C') == 300 &&
-                           first('V') == 450 && first('A') == 600 && first('B') == 1200 &&
+                           first('V') == 450 && first('A') == 600 && first('B') == 1250 &&
                            first('N') == 1500 && first('S') == 1800 && first('F') == 3000 &&
                            high.count('1') == 0 && high.count('2') == 0;
     check(as_before, "HP and MP high at BẮT ĐẦU: every key at its start delay as before -- Z +" +
@@ -1771,6 +1779,462 @@ void test_black_box() {
 #endif
 }
 
+// ------------------------------------------------- out of the world
+
+/// The reads the window gets, one every 165 ms as the reader gave them on
+/// 2026-10-26, and what the macro did with them: held and let go of by the
+/// window's rule, its HP pushed through VitalsReader::if_fresh.
+struct OutOfWorld {
+    int holds = 0;                        ///< times the window held the macro
+    std::vector<std::uint64_t> unread;    ///< when a read made out no HP
+};
+
+/// `reads`: HP per read, -1 for one that made out nothing. `old_rule`: hold on
+/// the latest read alone, as the window did until 2026-10-27.
+OutOfWorld replay_reads(Rig& rig, const std::vector<float>& reads, bool old_rule) {
+    OutOfWorld out;
+    rig.push_vitals = false;
+    const std::uint64_t stale = MacroEngine::kVitalsStaleMs;
+    std::uint64_t read_at = 0, hp_seen = 0, next_read = rig.t;
+    float hp = -1.0f;
+    std::size_t i = 0;
+    while (i < reads.size()) {
+        if (rig.t >= next_read) {
+            hp = reads[i++];
+            read_at = rig.t;
+            next_read = rig.t + 165;
+            hp_seen = VitalsReader::hp_seen_after(hp_seen, hp, read_at);     // as the reader keeps it
+            if (hp < 0.0f) out.unread.push_back(rig.t);
+        }
+        // At the last read, as the window judges it.
+        const bool in_world = old_rule ? hp >= 0.0f
+                                       : VitalsReader::in_world(hp_seen, read_at, MacroEngine::kOutOfWorldAfterMs);
+        if (in_world == rig.engine.suspended()) {
+            if (!in_world) ++out.holds;
+            rig.engine.set_suspended(!in_world, in_world ? std::string{} : "the character is not in the world");
+        }
+        rig.engine.set_vitals(VitalsReader::if_fresh(hp, read_at, rig.t, stale),
+                              VitalsReader::if_fresh(100.0f, read_at, rig.t, stale));
+        rig.engine.step();
+        rig.t += 10;
+    }
+    return out;
+}
+
+void test_out_of_world() {
+    section("Out of the world: HP unread for a second, not one unreadable frame (the death of 2026-10-26)");
+
+    const std::uint64_t within = MacroEngine::kOutOfWorldAfterMs;
+    check(!VitalsReader::in_world(0, 5000, within) && VitalsReader::in_world(5000, 5000 + within, within) &&
+              !VitalsReader::in_world(5000, 5001 + within, within) && VitalsReader::in_world(5200, 5000, within),
+          "in the world while HP was read a second ago or less; out after, and never before the first read");
+    check(within <= MacroEngine::kVitalsStaleMs, "and never longer than the macro trusts a reading");
+
+    // The death as the reader gave it: HP 30 under the potion's mark, then 21
+    // reads with one that made out nothing every other or third read -- eight
+    // -- then reads again. The HP potion under 50, two skills on 1 s timers.
+    std::vector<float> reads(100, 30.0f);
+    const std::vector<int> bad = { 0, 2, 4, 7, 9, 12, 14, 17 };
+    for (int k = 0; k < 21; ++k)
+        reads.push_back(std::find(bad.begin(), bad.end(), k) != bad.end() ? -1.0f : 30.0f);
+    reads.insert(reads.end(), 30, 30.0f);
+    const auto keys = [] { return std::vector<MacroKey>{ hp_key('1', 50), timer_key('Z', 1000, "s1"),
+                                                          timer_key(VK_SPACE, 1000, "s2") }; };
+    {
+        Rig rig(keys());
+        const std::uint64_t from = rig.t;
+        const OutOfWorld seen = replay_reads(rig, reads, false);
+        // The burst's reads, by when they came: the first and last unreadable
+        // one bound it.
+        const std::uint64_t burst_from = seen.unread.empty() ? from : seen.unread.front();
+        const std::uint64_t burst_to = seen.unread.empty() ? from : seen.unread.back() + 165;
+        // No HP potion on a moment whose latest read made out nothing.
+        bool none_unread = true;
+        for (const std::uint64_t at : rig.when('1'))
+            for (const std::uint64_t u : seen.unread)
+                none_unread = none_unread && !(at >= u && at < u + 165);
+        const std::vector<std::uint64_t> hp_at = rig.when('1');
+        bool paced = true;
+        for (std::size_t k = 1; k < hp_at.size(); ++k) paced = paced && hp_at[k] - hp_at[k - 1] >= 2990;
+        check(seen.holds == 0 && rig.releases == 0,
+              "the death's eight unreadable reads hold nothing and let go of nothing -- " +
+                  std::to_string(seen.holds) + " holds, " + std::to_string(rig.releases) + " let-gos");
+        check(none_unread && paced && hp_at.size() >= 6,
+              "the HP potion still waits out a read that made out nothing, and keeps its cooldown -- " +
+                  std::to_string(hp_at.size()) + " presses: " + ms_list(hp_at, from));
+        check(rig.count('Z', burst_from) - rig.count('Z', burst_to) >= 2 &&
+                  rig.count(VK_SPACE, burst_from) - rig.count(VK_SPACE, burst_to) >= 2,
+              "and the skills go on through it, one a second");
+    }
+    {
+        Rig rig(keys());
+        const OutOfWorld seen = replay_reads(rig, reads, true);
+        check(seen.holds == 8 && rig.releases == 8,
+              "as the window did: eight holds and eight let-gos, one per unreadable read -- " +
+                  std::to_string(seen.holds));
+    }
+
+    // A real exit: 15 s with nothing read -- a loading screen, a disconnect --
+    // holds the macro once, a second after the last read, and the first read
+    // back lets it go.
+    {
+        std::vector<float> exit_reads(40, 70.0f);
+        exit_reads.insert(exit_reads.end(), 91, -1.0f);
+        exit_reads.insert(exit_reads.end(), 20, 30.0f);
+        Rig rig({ hp_key('1', 50) });
+        std::uint64_t held_at = 0, back_at = 0;
+        // As replay_reads, watching when the hold comes and goes. The reads
+        // land on the rig's 10-ms steps, so their times are taken as they come.
+        rig.push_vitals = false;
+        const std::uint64_t stale = MacroEngine::kVitalsStaleMs;
+        std::uint64_t read_at = 0, hp_seen = 0, next_read = rig.t, last_good = 0, back_read = 0;
+        float hp = -1.0f;
+        int holds = 0;
+        for (std::size_t i = 0; i < exit_reads.size();) {
+            if (rig.t >= next_read) {
+                hp = exit_reads[i++];
+                read_at = rig.t;
+                next_read = rig.t + 165;
+                hp_seen = VitalsReader::hp_seen_after(hp_seen, hp, read_at);
+                if (hp >= 0.0f && i <= 40) last_good = rig.t;
+                if (i == 132) back_read = rig.t;     // the first read after the 91 that made out nothing
+            }
+            const bool in_world = VitalsReader::in_world(hp_seen, read_at, within);
+            if (in_world == rig.engine.suspended()) {
+                if (!in_world) {
+                    ++holds;
+                    held_at = rig.t;
+                } else {
+                    back_at = rig.t;
+                }
+                rig.engine.set_suspended(!in_world, in_world ? std::string{} : "the character is not in the world");
+            }
+            rig.engine.set_vitals(VitalsReader::if_fresh(hp, read_at, rig.t, stale),
+                                  VitalsReader::if_fresh(100.0f, read_at, rig.t, stale));
+            rig.engine.step();
+            rig.t += 10;
+        }
+        // Judged at each read: held at the first read more than a second after
+        // the last that made out HP, one read's gap (170 ms on the rig's
+        // steps) at most past the second.
+        check(holds == 1 && held_at > last_good + within && held_at <= last_good + within + 180 &&
+                  back_at >= back_read && back_at < back_read + 20,
+              "a real exit holds the macro once, a second after the last read, and the first read back lets it "
+              "go -- held " + std::to_string(held_at - last_good) + " ms after the last read");
+        const std::size_t during = rig.count('1', last_good + 1) - rig.count('1', back_read);
+        check(during == 0 && rig.count('1', back_read) >= 1,
+              "no HP potion while nothing is read, and one as soon as HP is read again under its mark");
+    }
+
+    // The game minimised for 30 s: the reader's grabs fail, so nothing is read
+    // at all -- not a frame without HP, no frame. Judged at the last read, it
+    // is in the world as that read had it, and its return casts no buff again
+    // as after a death; the potions hold meanwhile on a reading grown stale.
+    {
+        Rig rig({ hp_key('1', 50), timer_key('B', 120000, "buff") });
+        rig.push_vitals = false;
+        const std::uint64_t stale = MacroEngine::kVitalsStaleMs;
+        std::uint64_t read_at = 0, hp_seen = 0, next_read = rig.t;
+        const std::uint64_t minimised = rig.t + 5000, restored = minimised + 30000, until = restored + 5000;
+        float hp = -1.0f;
+        int holds = 0;
+        while (rig.t < until) {
+            const bool grabbing = rig.t < minimised || rig.t >= restored;
+            if (grabbing && rig.t >= next_read) {
+                hp = 70.0f;
+                read_at = rig.t;
+                next_read = rig.t + 165;
+                hp_seen = VitalsReader::hp_seen_after(hp_seen, hp, read_at);
+            }
+            const bool in_world = VitalsReader::in_world(hp_seen, read_at, within);
+            if (in_world == rig.engine.suspended()) {
+                if (!in_world) ++holds;
+                rig.engine.set_suspended(!in_world, in_world ? std::string{} : "the character is not in the world");
+            }
+            rig.engine.set_vitals(VitalsReader::if_fresh(hp, read_at, rig.t, stale),
+                                  VitalsReader::if_fresh(100.0f, read_at, rig.t, stale));
+            rig.engine.step();
+            rig.t += 10;
+        }
+        check(holds == 0 && rig.releases == 0 && rig.count('B', restored) == 0,
+              "the game minimised for 30 s holds nothing and lets go of nothing, and its return casts no buff "
+              "again -- " + std::to_string(holds) + " holds, " + std::to_string(rig.count('B', restored)) +
+                  " buff presses after");
+    }
+
+    // The reader's own rule for when HP was last seen: a read that made out HP
+    // moves it, one that did not leaves it.
+    check(VitalsReader::hp_seen_after(5000, 42.0f, 6000) == 6000 && VitalsReader::hp_seen_after(5000, 0.0f, 6000) == 6000 &&
+              VitalsReader::hp_seen_after(5000, -1.0f, 6000) == 5000 && VitalsReader::hp_seen_after(0, -1.0f, 6000) == 0,
+          "HP last seen moves with a read that made it out, 0 included, and stays with one that did not");
+
+    // A character dead at the death panel reads 0, with an unreadable frame
+    // now and then: in the world all along, as before, the potion at 0% on
+    // its cooldown.
+    {
+        std::vector<float> dead(60, 0.0f);
+        for (std::size_t k = 3; k < dead.size(); k += 4) dead[k] = -1.0f;
+        Rig rig({ hp_key('1', 50) });
+        const OutOfWorld seen = replay_reads(rig, dead, false);
+        check(seen.holds == 0 && rig.count('1') >= 3,
+              "HP read at 0, between unreadable frames, is never held: the potion goes on its cooldown -- " +
+                  std::to_string(rig.count('1')) + " presses");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    // And both programs judge it so.
+    {
+        const auto read = [](const char* rel) {
+            std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const std::string gui = read("/apps/gobot_gui/gui_app.cpp");
+        const std::string cli = read("/apps/gobot_cli/main.cpp");
+        const std::size_t frame_at = gui.find("const std::uint64_t frame_at = vitals_.last_read_ms();");
+        const std::size_t judged =
+            gui.find("VitalsReader::in_world(vitals_.hp_seen_ms(), frame_at, MacroEngine::kOutOfWorldAfterMs)");
+        check(frame_at != std::string::npos && judged != std::string::npos && frame_at < judged &&
+                  gui.find("const bool in_world = input_.window_valid() &&") != std::string::npos &&
+                  gui.find("const bool in_world = vitals_.hp_percent() >= 0.0f") == std::string::npos,
+              "gui_app.cpp holds the macro by how long HP has gone unread, at the reader's last read");
+        check(cli.find("VitalsReader::in_world(reader->hp_seen_ms(), read_at, MacroEngine::kOutOfWorldAfterMs)") !=
+                      std::string::npos &&
+                  cli.find("const bool in_world = hp >= 0.0f") == std::string::npos,
+              "and so does gobot_cli's --hunt --with-macro");
+    }
+#endif
+}
+
+// ------------------------------------------------------ the pet's potion
+
+void test_pet_potion_config() {
+    section("The pet's potion: a third potion row, pet_hp_below in macro.ini");
+
+    const MacroKey lv1 = macro_potion_key(MacroKeyKind::PetPotion, '7', 1);
+    const MacroKey lv2 = macro_potion_key(MacroKeyKind::PetPotion, VK_F4, 2);
+    check(lv1.keycode == '7' && lv1.trigger == MacroTrigger::PetHpBelow && lv1.threshold_pct == 50 && lv1.enabled &&
+              lv1.interval_ms == 3000 && lv1.jitter_pct == 15 && lv1.label == "Pet potion" &&
+              macro_key_kind(lv1) == MacroKeyKind::PetPotion && lv1.conditional(),
+          "a pet's potion as the simple screen makes one: under 50% of the pet's HP, every 3 s at most, "
+          "'Pet potion'");
+    check(lv2.keycode == VK_F4 && lv2.threshold_pct == 30 && lv2.label == "Pet potion 2" &&
+              macro_key_kind(lv2) == MacroKeyKind::PetPotion,
+          "and its Lv2 lower down, under 30%, 'Pet potion 2'");
+    check(std::string(to_string(MacroTrigger::PetHpBelow)) == "pet_hp_below" &&
+              macro_trigger_from_string("pet_hp_below") == MacroTrigger::PetHpBelow,
+          "its trigger is pet_hp_below in macro.ini, written and read");
+
+    // Saved with the rest of the keys, and read back.
+    MacroConfig cfg;
+    cfg.apply_defaults();
+    cfg.keys.push_back(macro_potion_key(MacroKeyKind::PetPotion, '7', 1));
+    cfg.keys.back().threshold_pct = 42;
+    const std::string path = temp_path("gobot_macro_pet.ini");
+    const std::string p = "key_" + std::to_string(cfg.keys.size() - 1) + "_";
+    MacroConfig back;
+    IniFile raw;
+    check(cfg.save(path) && back.load(path) && raw.load(path) && back.keys.size() == cfg.keys.size() &&
+              back.keys.back().trigger == MacroTrigger::PetHpBelow && back.keys.back().threshold_pct == 42 &&
+              back.keys.back().keycode == '7' && back.keys.back().enabled &&
+              raw.get("Keys", p + "trigger", "") == "pet_hp_below",
+          "a pet's potion on 7 under 42% saves as " + p + "trigger=pet_hp_below and reads back so");
+    check(macro_keys_of_kind(back.keys, MacroKeyKind::PetPotion).size() == 1 &&
+              macro_keys_of_kind(back.keys, MacroKeyKind::HpPotion).size() == 1 &&
+              macro_keys_of_kind(back.keys, MacroKeyKind::MpPotion).size() == 1,
+          "the pet's row has its key, and the HP and MP rows keep theirs");
+    std::remove(path.c_str());
+
+    // The simple screen keeps no pet's key without a key -- which hotbar key
+    // the pet's potion is on, only its player knows, and a key kept with
+    // none would take one of the 16 for nothing: its row is drawn without
+    // one. An emptied pet's key goes, Lv1 as Lv2; HP's Lv1 stays, key or none.
+    std::vector<MacroKey> keys = { potion_key(MacroTrigger::HpBelow, 0, 50, "HP potion"),
+                                   potion_key(MacroTrigger::PetHpBelow, 0, 50, "Pet potion"),
+                                   potion_key(MacroTrigger::PetHpBelow, 0, 30, "Pet potion 2"), pet_key('7', 40) };
+    check(drop_empty_keys(keys) && keys.size() == 2 && keys[0].trigger == MacroTrigger::HpBelow &&
+              keys[0].keycode == 0 && keys[1].trigger == MacroTrigger::PetHpBelow && keys[1].keycode == '7' &&
+              !drop_empty_keys(keys),
+          "a pet's key with no key goes, its Lv1 too -- the row is drawn without one -- and HP's empty Lv1 stays");
+}
+
+void test_pet_potion_engine() {
+    section("The pet's potion: under its mark, on its cooldown, never on no reading, never ahead of HP's");
+
+    {
+        // On 7 under 50%, 3 s, no jitter.
+        Rig rig({ pet_key('7', 50) });
+        rig.pet = 80.0f;
+        rig.run(1000);
+        check(rig.pressed.empty(), "the pet at 80%, its mark 50%: not pressed");
+        rig.pet = 40.0f;
+        const std::uint64_t drop = rig.t;
+        rig.run(9500);
+        const auto at = rig.when('7');
+        bool beat = at.size() == 4;
+        for (std::size_t i = 0; beat && i < at.size(); ++i) beat = at[i] - drop == i * 3000;
+        check(beat, "the pet at 40%: pressed at once, then every 3 s on its cooldown -- at +" + ms_list(at, drop) +
+                        " ms");
+        rig.pet = 60.0f;
+        const std::uint64_t up = rig.t;
+        rig.run(4000);
+        check(rig.count('7', up) == 0, "back above its mark: not again");
+        rig.pet = 50.0f;
+        const std::uint64_t mark = rig.t;
+        rig.run(500);
+        check(rig.count('7', mark) == 1, "at its mark exactly: pressed");
+    }
+    {
+        // No reading of the pet's HP -- no pet out, or a caller that reads
+        // none, as gobot_cli: held, as HP's potion is with no HP read. Its
+        // tally apart from HP's and MP's, which the window shows as "no
+        // HP/MP reading": the HP potion here, HP read, is held by its mark.
+        Rig rig({ pet_key('7', 50), hp_key('1', 20) });
+        rig.hp = 30.0f;
+        rig.run(2000);
+        const std::string last = last_entry(box_line(rig.engine, "Pet potion key 7 (under 50%): "));
+        const auto st = rig.engine.stats();
+        check(rig.tried.empty() && st.held_no_pet_reading > 0 && st.held_no_reading == 0 &&
+                  st.held_condition > 0 && last.find("no reading") != std::string::npos,
+              "no reading of the pet's HP: never pressed, counted as held_no_pet_reading -- not as HP's and "
+              "MP's held_no_reading -- \"no reading\" in the black box -- " + last);
+    }
+    {
+        // HP's, MP's and the pet's all under their marks in one pass, a
+        // press taking 40 ms, a skill due with them and ahead of them in key
+        // order: HP's first, MP's 20 ms after its key came up, the pet's 20 ms
+        // after MP's -- then the skill.
+        Rig rig({ timer_key('Z', 1000, "Skill 1"), pet_key('7', 50), hp_key('1', 50), mp_key('2', 30) });
+        rig.press_takes = 40;
+        rig.hp = 40.0f;
+        rig.mp = 20.0f;
+        rig.pet = 40.0f;
+        rig.run(10);
+        const auto& p = rig.pressed;
+        std::string got;
+        for (const auto& k : p)
+            got += (got.empty() ? "" : ", ") + std::string(1, static_cast<char>(k.first)) + "@" +
+                   std::to_string(k.second - rig.start);
+        check(p.size() == 4 && p[0].first == '1' && p[1].first == '2' && p[2].first == '7' && p[3].first == 'Z' &&
+                  p[1].second >= p[0].second + 40 + MacroEngine::kPotionGapMs &&
+                  p[2].second >= p[1].second + 40 + MacroEngine::kPotionGapMs,
+              "HP, MP and the pet's due in one pass: HP's, then MP's, then the pet's, each 20 ms after the "
+              "last came up, then the skill -- " + got);
+    }
+    {
+        // Another job holds the keys as HP and the pet's fall under their
+        // marks: the pet's waits behind HP's, and HP's goes first once the
+        // keys are free.
+        Rig rig({ pet_key('7', 50), hp_key('1', 50) });
+        rig.run(1000);
+        rig.coord.request("hunt-face", Priority::Combat);
+        rig.hp = 40.0f;
+        rig.pet = 40.0f;
+        rig.run(40);
+        const bool none = rig.pressed.empty();
+        const std::string behind = last_entry(box_line(rig.engine, "Pet potion key 7 (under 50%): "));
+        rig.coord.release("hunt-face");
+        const std::uint64_t freed = rig.t;
+        rig.run(500);
+        const auto hp_at = rig.when('1');
+        const auto pet_at = rig.when('7');
+        check(none && behind.find("behind the HP potion") != std::string::npos,
+              "the keys held by another job: the pet's potion waits behind HP's -- " + behind);
+        check(hp_at.size() == 1 && pet_at.size() == 1 && hp_at[0] >= freed && hp_at[0] - freed <= 100 &&
+                  pet_at[0] >= hp_at[0] + MacroEngine::kPotionGapMs,
+              "and once they are free HP's goes first, the pet's after it -- HP at +" + ms_list(hp_at, freed) +
+                  ", the pet's at +" + ms_list(pet_at, freed) + " ms");
+    }
+    {
+        // And behind MP's likewise, HP high.
+        Rig rig({ pet_key('7', 50), mp_key('2', 50) });
+        rig.coord.request("hunt-face", Priority::Combat);
+        rig.mp = 40.0f;
+        rig.pet = 40.0f;
+        rig.run(40);
+        const std::string behind = last_entry(box_line(rig.engine, "Pet potion key 7 (under 50%): "));
+        rig.coord.release("hunt-face");
+        rig.run(500);
+        const auto mp_at = rig.when('2');
+        const auto pet_at = rig.when('7');
+        check(behind.find("behind the MP potion") != std::string::npos && mp_at.size() == 1 && pet_at.size() == 1 &&
+                  pet_at[0] >= mp_at[0] + MacroEngine::kPotionGapMs,
+              "with MP's waiting for the keys, the pet's waits behind it, and goes after it -- " + behind);
+    }
+    {
+        // The character out of the world: held, as every key is.
+        Rig rig({ pet_key('7', 50) });
+        rig.engine.set_suspended(true, "x");
+        rig.pet = 40.0f;
+        rig.run(1200);
+        const std::string last = last_entry(box_line(rig.engine, "Pet potion key 7 (under 50%): "));
+        check(rig.tried.empty() && last.find("not in the world") != std::string::npos,
+              "the character out of the world: the pet's potion is held -- " + last);
+        rig.engine.set_suspended(false);
+        const std::uint64_t back = rig.t;
+        rig.run(300);
+        const auto at = rig.when('7');
+        check(at.size() == 1 && at[0] - back <= 100, "and pressed the moment it is back -- at +" + ms_list(at, back) +
+                                                         " ms");
+    }
+    {
+        // The black box: the pet's HP among the readings, its key's line,
+        // its presses.
+        Rig rig({ hp_key('1', 50), pet_key('7', 50) });
+        rig.hp = 40.0f;
+        rig.pet = 35.0f;
+        rig.run(1200);
+        const std::vector<std::string> lines = rig.engine.black_box_lines();
+        const std::string pet_line = box_line(rig.engine, "Pet potion key 7 (under 50%): ");
+        check(!lines.empty() && lines.front().rfind("Black box, the last 30 s: HP/MP/pet read (%): ", 0) == 0 &&
+                  lines.front().find("40/100/35") != std::string::npos &&
+                  pet_line.find("PRESSED") != std::string::npos &&
+                  lines.back().find("HP key 1 1") != std::string::npos &&
+                  lines.back().find("Pet key 7 1") != std::string::npos,
+              "the black box: HP/MP/pet read 40/100/35, the pet's key's press, and its count -- " +
+                  (lines.empty() ? std::string("no lines") : lines.front() + " / " + lines.back()));
+    }
+    {
+        // The minute's line: the pet's key after HP's.
+        const std::string line = logged_line(
+            [] {
+                Rig rig({ hp_key('1', 50), pet_key('7', 50) });
+                rig.hp = 90.0f;
+                rig.pet = 40.0f;
+                rig.run(61'000);
+            },
+            { "Potions: HP key 1 (under 50%): 0 pressed; ", " | Pet key 7 (under 50%): " });
+        const std::size_t at = line.find("Pet key 7 (under 50%): ");
+        const int pressed = at == std::string::npos ? -1 : std::atoi(line.c_str() + at + 23);
+        check(pressed >= 19 && pressed <= 21 && line.find("60.0 s above the mark") != std::string::npos,
+              "once a minute, HP 90 and the pet at 40: HP's minute above the mark, then the pet's presses (" +
+                  std::to_string(pressed) + ") -- " + line);
+    }
+#ifdef GOBOT_SOURCE_DIR
+    // The window hands the pet's reading on as it does HP's and MP's, offers
+    // the pet on the full screen's trigger choice, and has the row on the
+    // simple screen.
+    {
+        const auto read = [](const char* rel) {
+            std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const std::string gui = read("/apps/gobot_gui/gui_app.cpp");
+        const std::string simple = read("/apps/gobot_gui/simple_view.cpp");
+        check(gui.find("VitalsReader::if_fresh(vitals_.pet_percent(), read_at, at, MacroEngine::kVitalsStaleMs)") !=
+                      std::string::npos &&
+                  gui.find("\"pet HP below\"") != std::string::npos,
+              "gui_app.cpp: the pet's HP goes to the macro through VitalsReader::if_fresh, and the trigger choice "
+              "has \"pet HP below\"");
+        check(simple.find("{ MacroKeyKind::PetPotion, MacroTrigger::PetHpBelow") == std::string::npos &&
+                  simple.find("keys.push_back(macro_potion_key(kind, fresh.keycode, 1));") != std::string::npos &&
+                  simple.find("potion_row(MacroKeyKind::PetPotion, \"Tự bơm máu pet\", \"máu pet\", \"khi máu pet "
+                              "dưới\",") != std::string::npos &&
+                  simple.find("Chưa thấy thanh máu của pet trên màn hình game.") != std::string::npos,
+              "simple_view.cpp: the pet's row beside HP's and MP's -- \"khi máu pet dưới\" -- not put in with no "
+              "key but made by its key box, and a line when no pet's bar is seen");
+    }
+#endif
+}
+
 // ------------------------------------------------------ Quái đang thấy
 
 void test_monster_sightings() {
@@ -1840,6 +2304,425 @@ void test_monster_sightings() {
               std::to_string(messy.spellings()) + " spellings kept");
 }
 
+// ------------------------------------- presses the game did not take
+
+/// A pretend keyboard that writes down every hold the engine asked for.
+struct HoldRig {
+    InputManager         input;
+    ExecutionCoordinator coord;
+    MacroEngine          engine{ input, coord };
+    std::uint64_t        t = 9'000'000;
+    std::vector<int>     holds;
+
+    explicit HoldRig(const MacroConfig& cfg) {
+        MacroEngine::Clock c;
+        c.now_ms = [this] { return t; };
+        c.sleep_ms = [this](std::uint32_t ms) { t += ms; };
+        engine.set_clock(c);
+        MacroEngine::Hands h;
+        h.focused = [] { return true; };
+        h.key = [this](std::uint32_t, int hold) {
+            holds.push_back(hold);
+            t += hold > 0 ? static_cast<std::uint64_t>(hold) : 0;
+            return true;
+        };
+        engine.set_hands(h);
+        engine.set_config(cfg);
+        engine.start_stepped();
+        for (int i = 0; i < 400; ++i) {
+            engine.set_vitals(100.0f, 100.0f, -1.0f);
+            engine.step();
+            t += 10;
+        }
+    }
+    ~HoldRig() { engine.stop(); }
+};
+
+void test_key_hold_and_recheck() {
+    section("Presses the game did not take: longer holds, and a potion pressed again when its bar did not rise");
+
+    // --- how long a key is held
+    const auto config_with = [](std::uint32_t lo, std::uint32_t hi) {
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.sequence_enabled = false;
+        cfg.global_jitter_pct = 0;
+        cfg.keys = { timer_key('Z', 100, "Skill 1") };
+        cfg.key_hold_min_ms = lo;
+        cfg.key_hold_max_ms = hi;
+        return cfg;
+    };
+    {
+        HoldRig rig(config_with(70, 110));
+        bool in_range = rig.holds.size() >= 10;
+        bool varied = false;
+        for (const int h : rig.holds) {
+            in_range = in_range && h >= 70 && h <= 110;
+            varied = varied || h != rig.holds[0];
+        }
+        check(in_range && varied,
+              "a config with key_hold_min_ms 70 and key_hold_max_ms 110: every key held between them, "
+              "not always the same -- " + std::to_string(rig.holds.size()) + " presses");
+    }
+    {
+        HoldRig rig(config_with(0, 0));
+        bool plain = !rig.holds.empty();
+        for (const int h : rig.holds) plain = plain && h == -1;
+        check(plain, "a config built in code (0 and 0): the hold is left to the input manager, as before");
+    }
+    {
+        MacroConfig cfg = config_with(70, 110);
+        cfg.keys[0].hold_ms = 33;
+        HoldRig rig(cfg);
+        bool own = !rig.holds.empty();
+        for (const int h : rig.holds) own = own && h == 33;
+        check(own, "a key with a hold of its own keeps it");
+    }
+    {
+        MacroConfig cfg = config_with(70, 110);
+        cfg.keys[0].hold_ms = 4000;
+        HoldRig rig(cfg);
+        bool capped = !rig.holds.empty();
+        for (const int h : rig.holds) capped = capped && h == static_cast<int>(MacroConfig::kHoldMostMs);
+        check(capped, "a hold of its own over 500 ms, built in code: held 500 -- no key of the game is held down");
+    }
+
+    // --- the file
+    {
+        const std::string path = temp_path("macro_hold.ini");
+        const auto write = [&](const char* text) {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            f << text;
+        };
+        MacroConfig c;
+        write("[Macro]\ntimers_enabled=true\n[Keys]\nkey_0_keycode=90\n");
+        const bool absent = c.load(path) && c.key_hold_min_ms == MacroConfig::kDefaultHoldMinMs &&
+                            c.key_hold_max_ms == MacroConfig::kDefaultHoldMaxMs &&
+                            c.potion_recheck_ms == MacroConfig::kDefaultRecheckMs;
+        check(absent, "a macro.ini from before them: holds of 70 to 110 ms, a potion checked after 1000 ms");
+
+        write("[Macro]\nkey_hold_min_ms=0\nkey_hold_max_ms=0\npotion_recheck_ms=0\n[Keys]\nkey_0_keycode=90\n");
+        const bool off = c.load(path) && c.key_hold_min_ms == 0 && c.key_hold_max_ms == 0 && c.potion_recheck_ms == 0;
+        check(off, "0, 0 and 0 in the file: the plain short holds and the plain cooldown");
+
+        write("[Macro]\nkey_hold_min_ms=5\nkey_hold_max_ms=9000\npotion_recheck_ms=50\n[Keys]\nkey_0_keycode=90\n");
+        const bool wild = c.load(path) && c.key_hold_min_ms == MacroConfig::kHoldLeastMs &&
+                          c.key_hold_max_ms == MacroConfig::kHoldMostMs &&
+                          c.potion_recheck_ms == MacroConfig::kRecheckLeastMs;
+        check(wild, "out-of-range numbers are brought into range");
+
+        write("[Macro]\nkey_hold_min_ms=200\nkey_hold_max_ms=100\n[Keys]\nkey_0_keycode=90\n");
+        const bool swapped = c.load(path) && c.key_hold_min_ms == 200 && c.key_hold_max_ms == 200;
+        check(swapped, "a longest under the shortest is brought up to it");
+
+        MacroConfig kept;
+        kept.apply_defaults();
+        kept.key_hold_min_ms = 80;
+        kept.key_hold_max_ms = 120;
+        kept.potion_recheck_ms = 1500;
+        MacroConfig back;
+        const bool round = kept.save(path) && back.load(path) && back.key_hold_min_ms == 80 &&
+                           back.key_hold_max_ms == 120 && back.potion_recheck_ms == 1500;
+        check(round, "saved and read back");
+
+        // A key's and a step's own hold: no key of the game is held down, so
+        // never more than kHoldMostMs, and nothing under 0 wraps round.
+        write("[Keys]\nkey_0_keycode=90\nkey_0_hold_ms=4000\nkey_1_keycode=88\nkey_1_hold_ms=-5\n"
+              "key_2_keycode=67\nkey_2_hold_ms=0\nkey_3_keycode=86\nkey_3_hold_ms=200\n"
+              "[Sequence]\nstep_0_keycode=90\nstep_0_hold_ms=4000\nstep_1_keycode=88\nstep_1_hold_ms=-1\n");
+        const bool own = c.load(path) && c.keys.size() == 4 && c.keys[0].hold_ms == MacroConfig::kHoldMostMs &&
+                         c.keys[1].hold_ms == 0 && c.keys[2].hold_ms == 0 && c.keys[3].hold_ms == 200 &&
+                         c.sequence.size() == 2 && c.sequence[0].hold_ms == MacroConfig::kHoldMostMs &&
+                         c.sequence[1].hold_ms == 0;
+        check(own, "a key's and a step's own hold from the file: 4000 read as 500, under 0 as 0, 0 and 200 as they are");
+
+        // key_N_drop_if_busy never did anything: an old file still loads,
+        // and the next save leaves it out.
+        write("[Keys]\nkey_0_keycode=90\nkey_0_interval_ms=1200\nkey_0_drop_if_busy=false\n");
+        IniFile raw;
+        const bool old = c.load(path) && c.keys.size() == 1 && c.keys[0].keycode == 90 &&
+                         c.keys[0].interval_ms == 1200 && c.save(path) && raw.load(path) &&
+                         raw.has_key("Keys", "key_0_keycode") && !raw.has_key("Keys", "key_0_drop_if_busy");
+        check(old, "a macro.ini with key_0_drop_if_busy loads as before, and a save leaves it out");
+        DeleteFileA(path.c_str());
+    }
+
+    // --- a potion that did not raise its bar
+    const auto with_recheck = [](Rig& rig, std::uint32_t ms) {
+        MacroConfig cfg = rig.engine.config();
+        cfg.potion_recheck_ms = ms;
+        rig.engine.set_config(cfg);
+    };
+    {
+        Rig rig({ hp_key('1', 50) });
+        with_recheck(rig, 1000);
+        rig.hp = 40.0f;
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 2 && at[1] - at[0] >= 1000 && at[1] - at[0] <= 1100,
+              "HP stays at 40% (mark 50%) after the press: pressed again 1 s on, not after the 3-s cooldown "
+              "-- at +" + ms_list(at, rig.start) + " ms");
+        rig.run(2000);
+        const auto later = rig.when('1');
+        // The early press is not checked in its turn (nothing at 2 s): the next
+        // is a full cooldown after it, and that one, a press of its own, is
+        // checked again -- so a bar that never rises is pressed twice in every
+        // 4 s, not once in 3.
+        check(later.size() == 4 && later[2] - later[1] >= 2900 && later[2] - later[1] <= 3100 &&
+                  later[3] - later[2] >= 1000 && later[3] - later[2] <= 1100,
+              "the early press is not checked in its turn: the next is a full cooldown after it, and is "
+              "itself checked -- at +" + ms_list(later, rig.start) + " ms");
+        const auto st = rig.engine.stats();
+        check(st.potion_repressed == 2 && st.potion_checks == 3,
+              "counted: " + std::to_string(st.potion_repressed) + " pressed again of " +
+                  std::to_string(st.potion_checks) + " checks");
+    }
+    {
+        Rig rig({ hp_key('1', 50) });
+        with_recheck(rig, 1000);
+        rig.hp = 40.0f;
+        rig.on_press = [&rig](std::uint32_t) { rig.hp = 90.0f; };
+        rig.run(4000);
+        check(rig.count('1') == 1 && rig.engine.stats().potion_repressed == 0,
+              "the bar rises to 90% after the press: pressed once, and not again");
+    }
+    {
+        Rig rig({ hp_key('1', 50) });
+        with_recheck(rig, 1000);
+        rig.hp = 20.0f;
+        rig.on_press = [&rig](std::uint32_t) { rig.hp = 35.0f; };
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 2 && at[1] - at[0] >= 2900 && rig.engine.stats().potion_repressed == 0,
+              "the bar rises to 35%, still under the mark: it worked, so the cooldown is waited out -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        Rig rig({ hp_key('1', 50) });
+        rig.hp = 40.0f;
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 2 && at[1] - at[0] >= 2900 && rig.engine.stats().potion_checks == 0,
+              "with potion_recheck_ms 0 (a config built in code): the plain 3-s cooldown, no check -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        Rig rig({ mp_key('2', 50) });
+        with_recheck(rig, 1000);
+        rig.mp = 40.0f;
+        rig.run(2500);
+        rig.push_vitals = false;      // the reading goes stale: nothing to judge by
+        const std::size_t before = rig.count('2');
+        rig.run(3000);
+        check(before == 2 && rig.count('2') == before,
+              "no reading to check by: nothing is pressed on a guess");
+    }
+}
+
+// ------------------------------------- buffs cast by several presses
+
+void test_buff_presses() {
+    section("Buffs: a cast is several presses, as GoC's is (buff_presses)");
+
+    const auto buff = [](std::uint32_t vk, std::uint32_t interval_ms) {
+        MacroKey k = timer_key(vk, interval_ms, "Buff");
+        k.buff = true;
+        return k;
+    };
+    const auto with_presses = [](Rig& rig, std::uint32_t n, std::uint32_t gap = 200) {
+        MacroConfig cfg = rig.engine.config();
+        cfg.buff_presses = n;
+        cfg.buff_press_gap_ms = gap;
+        rig.engine.set_config(cfg);
+    };
+    const auto gaps_between = [](const std::vector<std::uint64_t>& at, std::uint64_t lo, std::uint64_t hi) {
+        bool ok = at.size() >= 2;
+        for (std::size_t i = 1; i < at.size(); ++i) ok = ok && at[i] - at[i - 1] >= lo && at[i] - at[i - 1] <= hi;
+        return ok;
+    };
+
+    {
+        Rig rig({ buff('A', 60'000) });
+        with_presses(rig, 4);
+        rig.run(2000);
+        const auto at = rig.when('A');
+        check(at.size() == 4 && gaps_between(at, 200, 220),
+              "a buff with 4 presses, 200 ms apart: the key goes down 4 times, 200 ms apart -- at +" +
+                  ms_list(at, rig.start) + " ms");
+        rig.run(30'000);
+        check(rig.count('A') == 4, "and no more until its interval is over");
+        check(rig.engine.stats().key_presses.size() >= 1 && rig.engine.stats().key_presses[0] == 1,
+              "counted as one cast, not four");
+    }
+    {
+        Rig rig({ buff('A', 60'000) });
+        rig.run(2000);
+        check(rig.count('A') == 1, "a config built in code (1 press): the single press it always was");
+    }
+    {
+        Rig rig({ buff('A', 60'000), buff('B', 60'000) });
+        with_presses(rig, 4);
+        rig.run(4000);
+        const auto a = rig.when('A');
+        const auto b = rig.when('B');
+        check(a.size() == 4 && b.size() == 4 && b[0] >= a[0] + MacroEngine::kBuffGapMs && b[0] > a[3] &&
+                  gaps_between(b, 200, 220),
+              "two buffs: the second starts after the first one's cast is over, and not closer than "
+              "kBuffGapMs -- A at +" + ms_list(a, rig.start) + ", B at +" + ms_list(b, rig.start) + " ms");
+    }
+    {
+        Rig rig({ buff('A', 60'000) });
+        with_presses(rig, 4);
+        rig.on_press = [&rig](std::uint32_t) { rig.focused = false; };
+        rig.run(1500);
+        rig.focused = true;
+        rig.run(3000);
+        check(rig.count('A') == 1,
+              "the game loses the front after the first press: the rest of that cast is dropped, and none "
+              "turns up later -- " + std::to_string(rig.count('A')) + " presses");
+    }
+    {
+        Rig rig({ buff('A', 60'000) });
+        with_presses(rig, 4);
+        rig.focused = false;
+        rig.run(2500);
+        check(rig.count('A') == 0, "the game not in front: nothing is pressed");
+        rig.focused = true;
+        rig.run(4500);
+        check(rig.count('A') == 4, "and the whole cast goes once it is: 4 presses -- " +
+                                       std::to_string(rig.count('A')));
+    }
+    {
+        // The potion first: HP under its mark in the middle of a cast.
+        Rig rig({ buff('A', 60'000), hp_key('1', 50) });
+        with_presses(rig, 4);
+        rig.run(250);
+        rig.hp = 30.0f;
+        rig.run(1000);
+        const auto potion = rig.when('1');
+        check(!potion.empty() && potion[0] - rig.start <= 400,
+              "a potion that falls due in the middle of a cast goes within the next beat, not after the cast "
+              "-- at +" + ms_list(potion, rig.start) + " ms");
+    }
+
+    // --- the file
+    {
+        const std::string path = temp_path("macro_buffs.ini");
+        const auto write = [&](const char* text) {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            f << text;
+        };
+        MacroConfig c;
+        write("[Macro]\ntimers_enabled=true\n[Keys]\nkey_0_keycode=90\n");
+        check(c.load(path) && c.buff_presses == 4 && c.buff_press_gap_ms == 200,
+              "a macro.ini from before it: 4 presses, 200 ms apart, as GoC");
+        write("[Macro]\nbuff_presses=9\nbuff_press_gap_ms=5\n[Keys]\nkey_0_keycode=90\n");
+        check(c.load(path) && c.buff_presses == MacroConfig::kBuffPressesMost &&
+                  c.buff_press_gap_ms == MacroConfig::kBuffPressGapLeastMs,
+              "out-of-range numbers are brought into range");
+        write("[Macro]\nbuff_presses=0\n[Keys]\nkey_0_keycode=90\n");
+        check(c.load(path) && c.buff_presses == 1, "0 presses is the single press");
+        MacroConfig kept;
+        kept.apply_defaults();
+        kept.buff_presses = 3;
+        kept.buff_press_gap_ms = 300;
+        MacroConfig back;
+        check(kept.save(path) && back.load(path) && back.buff_presses == 3 && back.buff_press_gap_ms == 300,
+              "saved and read back");
+        DeleteFileA(path.c_str());
+    }
+}
+
+// ------------------------------------- a potion far below its mark
+
+void test_potion_urgent() {
+    section("Potions: far below the mark, a potion drinks again sooner (potion_urgent_ms)");
+
+    const auto with_urgent = [](Rig& rig, std::uint32_t ms) {
+        MacroConfig cfg = rig.engine.config();
+        cfg.potion_urgent_ms = ms;
+        rig.engine.set_config(cfg);
+    };
+    const auto gaps_between = [](const std::vector<std::uint64_t>& at, std::uint64_t lo, std::uint64_t hi) {
+        bool ok = at.size() >= 2;
+        for (std::size_t i = 1; i < at.size(); ++i) ok = ok && at[i] - at[i - 1] >= lo && at[i] - at[i - 1] <= hi;
+        return ok;
+    };
+
+    {
+        // Mark 50%, so under 25% is far below: every second, not every 3.
+        Rig rig({ hp_key('1', 50) });
+        with_urgent(rig, 1000);
+        rig.hp = 20.0f;
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 4 && gaps_between(at, 1000, 1030),
+              "HP 20% under a 50% mark: drinks every second -- at +" + ms_list(at, rig.start) + " ms");
+    }
+    {
+        Rig rig({ hp_key('1', 50) });
+        with_urgent(rig, 1000);
+        rig.hp = 40.0f;
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 2 && gaps_between(at, 3000, 3030),
+              "HP 40%, between the mark and half of it: the 3-s interval stands -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        Rig rig({ hp_key('1', 50) });
+        rig.hp = 20.0f;
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 2 && gaps_between(at, 3000, 3030),
+              "with potion_urgent_ms 0 (a config built in code): HP 20% still waits the 3-s interval -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        // MP, as the skills drain it: down to 20%, a potion lifts it to 70%,
+        // and the next second it is down to 20% again.
+        Rig rig({ mp_key('2', 59) });
+        with_urgent(rig, 1000);
+        rig.mp = 20.0f;
+        rig.on_press = [&rig](std::uint32_t) { rig.mp = 70.0f; };
+        std::uint64_t until = rig.t + 4500;
+        while (rig.t < until) {
+            rig.run(500);
+            if (rig.mp > 60.0f) rig.mp = 20.0f;      // the skills took it back down
+        }
+        const auto at = rig.when('2');
+        check(at.size() >= 4,
+              "MP drained back under 30% half a second after each potion: it keeps up, a potion a second -- "
+              "at +" + ms_list(at, rig.start) + " ms");
+    }
+
+    // --- the file
+    {
+        const std::string path = temp_path("macro_urgent.ini");
+        const auto write = [&](const char* text) {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            f << text;
+        };
+        MacroConfig c;
+        write("[Macro]\ntimers_enabled=true\n[Keys]\nkey_0_keycode=90\n");
+        check(c.load(path) && c.potion_urgent_ms == MacroConfig::kDefaultUrgentMs,
+              "a macro.ini from before it: 1000 ms");
+        write("[Macro]\npotion_urgent_ms=0\n[Keys]\nkey_0_keycode=90\n");
+        check(c.load(path) && c.potion_urgent_ms == 0, "0 in the file: never sooner");
+        write("[Macro]\npotion_urgent_ms=100\n[Keys]\nkey_0_keycode=90\n");
+        const bool low = c.load(path) && c.potion_urgent_ms == MacroConfig::kUrgentLeastMs;
+        write("[Macro]\npotion_urgent_ms=99999\n[Keys]\nkey_0_keycode=90\n");
+        check(low && c.load(path) && c.potion_urgent_ms == MacroConfig::kUrgentMostMs,
+              "out-of-range numbers are brought into range");
+        MacroConfig kept;
+        kept.apply_defaults();
+        kept.potion_urgent_ms = 1500;
+        MacroConfig back;
+        check(kept.save(path) && back.load(path) && back.potion_urgent_ms == 1500, "saved and read back");
+        DeleteFileA(path.c_str());
+    }
+}
+
 } // namespace
 
 void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1851,11 +2734,17 @@ void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section
     test_potion_the_moment_due();
     test_potion_at_start();
     test_potion_keys_change();
+    test_key_hold_and_recheck();
+    test_buff_presses();
+    test_potion_urgent();
     test_keys_change_mid_press();
     test_potion_after_hold_threaded();
     test_sequence_waits_for_potion();
     test_potions_before_sequence_threads();
     test_hp_potion_never_starved();
     test_black_box();
+    test_out_of_world();
+    test_pet_potion_config();
+    test_pet_potion_engine();
     test_monster_sightings();
 }

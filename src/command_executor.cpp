@@ -107,7 +107,6 @@ CommandExecutor::CommandExecutor(const BotConfig& config,
                                  ExecutionCoordinator& coord)
     : config_(config), state_(state), input_(input), coord_(coord) {
     skill_last_ms_.assign(BotConfig::kSkillSlots, 0);
-    buff_last_ms_.assign(BotConfig::kBuffSlots, 0);
 }
 
 CommandExecutor::~CommandExecutor() { stop(); }
@@ -138,21 +137,20 @@ void CommandExecutor::start() {
     }
 
     exec_thread_ = std::thread(&CommandExecutor::execution_loop, this);
-    heal_thread_ = std::thread(&CommandExecutor::heal_loop, this);
-    buff_thread_ = std::thread(&CommandExecutor::buff_loop, this);
     path_thread_ = std::thread(&CommandExecutor::pathfinding_loop, this);
 
     GB_INFO("CommandExecutor started");
 }
 
 void CommandExecutor::stop() {
+    // A stopped executor is a disarmed one: started again, it presses nothing
+    // until the bot is.
+    armed_.store(false);
     if (!running_.exchange(false)) return;
 
     queue_cv_.notify_all();
 
     if (exec_thread_.joinable()) exec_thread_.join();
-    if (heal_thread_.joinable()) heal_thread_.join();
-    if (buff_thread_.joinable()) buff_thread_.join();
     if (path_thread_.joinable()) path_thread_.join();
 
     clear_queue();
@@ -162,6 +160,30 @@ void CommandExecutor::stop() {
     input_.release_all();
 
     GB_INFO("CommandExecutor stopped");
+}
+
+void CommandExecutor::arm() {
+    std::lock_guard<std::mutex> gate(press_mutex_);
+    // Nothing queued before the bot was started is carried out once it is: a
+    // PathfindTo or a face command has no TTL to age it out.
+    clear_queue();
+    armed_.store(true);
+    GB_DEBUG("CommandExecutor armed");
+}
+
+void CommandExecutor::halt() {
+    // Said before the gate is waited for as well as under it: the gate does
+    // not serve its waiters in order, and the queue's or the route's thread,
+    // getting it first, then finds the bot stopped and presses nothing.
+    armed_.store(false);
+    std::lock_guard<std::mutex> gate(press_mutex_);
+    armed_.store(false);
+    clear_queue();
+    stop_pathfinding();
+    // stop_pathfinding's stop_move lets go of the two direction keys only.
+    // This lets go of every key held here, whatever window is in front.
+    input_.release_all();
+    GB_DEBUG("CommandExecutor halted");
 }
 
 void CommandExecutor::enqueue(const Command& cmd) {
@@ -264,6 +286,9 @@ void CommandExecutor::execution_loop() {
 bool CommandExecutor::execute_now(const Command& cmd) { return dispatch(cmd); }
 
 bool CommandExecutor::dispatch(const Command& cmd) {
+    // Not armed, the bot is not running: refused before the token, so nobody's
+    // keys are taken for nothing, and not counted as held by a pause.
+    if (!armed_.load()) return false;
     // Before the token is asked for: paused, nothing of this is to happen.
     if (held_by_pause()) return false;
 
@@ -277,6 +302,10 @@ bool CommandExecutor::dispatch(const Command& cmd) {
         // just don't type into whatever they switched to.
         return false;
     }
+
+    // See press_mutex_. Halted while the token was asked for: refused.
+    std::unique_lock<std::mutex> gate(press_mutex_);
+    if (!armed_.load()) return false;
 
     bool ok = false;
 
@@ -329,8 +358,9 @@ bool CommandExecutor::dispatch(const Command& cmd) {
         case CommandType::KeyUp:    ok = input_.key_up(cmd.keycode);   break;
         case CommandType::KeyPress: ok = input_.key_press(cmd.keycode, cmd.duration_ms ? static_cast<int>(cmd.duration_ms) : -1); break;
 
-        case CommandType::StartAttack: auto_attack_.store(true);  ok = true; break;
-        case CommandType::StopAttack:  auto_attack_.store(false); ok = true; break;
+        // Nothing: the bot's on and off are arm() and halt().
+        case CommandType::StartAttack:
+        case CommandType::StopAttack:  ok = true; break;
 
         case CommandType::PathfindTo:   set_path_target(cmd.position); ok = true; break;
         case CommandType::StopPathfind: stop_pathfinding();            ok = true; break;
@@ -338,6 +368,9 @@ bool CommandExecutor::dispatch(const Command& cmd) {
         case CommandType::Chat: ok = input_.send_chat(cmd.text); break;
 
         case CommandType::Wait:
+            // Presses nothing, so the gate is let go: a halt is not held up
+            // for as long as this waits.
+            gate.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(cmd.duration_ms));
             ok = true;
             break;
@@ -352,120 +385,24 @@ bool CommandExecutor::dispatch(const Command& cmd) {
             break;
     }
 
+    // The press is done: a halt may go ahead while this pauses.
+    if (gate.owns_lock()) gate.unlock();
+
     if (ok) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.executed;
     }
 
+    // The keys are let go of for the gap: the macro's potions and buffs -- the
+    // packet bot's own -- press at the same priority as these commands, and
+    // with the token held through it too, a queue fed every 80 ms never left
+    // them a moment.
+    { ExecutionCoordinator::Token done = std::move(token); }
+
     // Inter-action spacing. Uniform-rate input is the most obvious tell a bot
     // produces, so every action is followed by a randomised gap.
     std::this_thread::sleep_for(std::chrono::milliseconds(input_.random_delay()));
     return ok;
-}
-
-// ----------------------------------------------------------------- sustain
-
-void CommandExecutor::heal_loop() {
-    while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
-
-        BotConfig cfg;
-        {
-            std::lock_guard<std::mutex> lock(config_mutex_);
-            cfg = config_;
-        }
-
-        const Self me = state_.self();
-        if (me.max_hp <= 0) continue;      // no HP packet mapped yet
-        if (me.dead) continue;
-
-        // Rate-limit: potions have their own cooldown and spamming wastes them.
-        if (now_ms() - heal_last_ms_ < 800) continue;
-
-        const float hp = me.hp_pct();
-        const float mp = me.mp_pct();
-
-        std::uint32_t key = 0;
-        const char* what = nullptr;
-
-        if (cfg.hp_heal1.enabled && hp <= cfg.hp_heal1.trigger_pct) {
-            key = cfg.hp_heal1.keycode;
-            what = "HP1";
-        } else if (cfg.hp_heal2.enabled && hp <= cfg.hp_heal2.trigger_pct) {
-            key = cfg.hp_heal2.keycode;
-            what = "HP2";
-        } else if (cfg.mp_heal1.enabled && me.max_mp > 0 && mp <= cfg.mp_heal1.trigger_pct) {
-            key = cfg.mp_heal1.keycode;
-            what = "MP1";
-        }
-
-        if (key == 0) continue;
-        if (held_by_pause()) continue;
-
-        // Healing pre-empts combat: dying with a full potion belt is the one
-        // failure mode that ends a session.
-        auto token = coord_.acquire("heal", Priority::Heal);
-        if (!token) continue;
-        if (held_by_pause()) continue;     // paused while the token was asked for
-
-        if (input_.window_focused() && input_.key_press(key)) {
-            heal_last_ms_ = now_ms();
-            GB_DEBUG("Heal %s (hp %.0f%% mp %.0f%%)", what, hp, mp);
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.heals;
-        }
-    }
-}
-
-void CommandExecutor::buff_loop() {
-    while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        BotConfig cfg;
-        {
-            std::lock_guard<std::mutex> lock(config_mutex_);
-            cfg = config_;
-        }
-        if (!cfg.auto_buff) continue;
-
-        // Nothing without the packet bot's own picture of the character. A
-        // run that reads the screen never fills it, and this scheduler then
-        // pressed bot_default.ini's buff keys whenever the game was in front
-        // -- keys nobody had set on the simple screen, beside the macro's
-        // own buffs there. The heal loop beside it waits for the same thing.
-        const Self me = state_.self();
-        if (me.max_hp <= 0) continue;
-        if (me.dead) continue;
-
-        const std::uint64_t now = now_ms();
-
-        for (std::size_t i = 0; i < BotConfig::kBuffSlots; ++i) {
-            const BuffSlot& b = cfg.buffs[i];
-            if (!b.enabled || b.keycode == 0) continue;
-
-            const std::uint64_t due = buff_last_ms_[i] + static_cast<std::uint64_t>(b.cooldown_sec) * 1000ull;
-            if (buff_last_ms_[i] != 0 && now < due) continue;
-
-            // Still due once the pause is over: its time is left as it was.
-            if (held_by_pause()) break;
-
-            auto token = coord_.acquire("buff", Priority::Buff);
-            if (!token) break;      // combat is busy; try again next pass
-            if (held_by_pause()) break;     // paused while the token was asked for
-
-            if (input_.window_focused() && input_.use_skill(b.keycode)) {
-                buff_last_ms_[i] = now;
-                GB_DEBUG("Buff slot %zu (key %s)", i, InputManager::key_name(b.keycode).c_str());
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                ++stats_.buffs_cast;
-            }
-
-            // One buff per pass: casting them back to back gets them eaten by
-            // the game's global cooldown.
-            std::this_thread::sleep_for(std::chrono::milliseconds(400));
-            break;
-        }
-    }
 }
 
 // -------------------------------------------------------------- pathfinding
@@ -491,6 +428,7 @@ void CommandExecutor::set_path_target(const Vec2& target) {
         GB_DEBUG("No path to (%.0f, %.0f)", target.x, target.y);
 }
 
+// Never takes press_mutex_: halt() calls this holding it.
 void CommandExecutor::stop_pathfinding() {
     pathfinding_.store(false);
     {
@@ -515,22 +453,31 @@ void CommandExecutor::pathfinding_loop() {
 }
 
 bool CommandExecutor::step_path() {
+    // The bot was stopped, and its route went with it: false has
+    // pathfinding_loop drop it.
+    if (!armed_.load()) return false;
+
+    const Self me = state_.self();
+
     PathStep step;
+    bool stuck = false;
     {
         std::lock_guard<std::mutex> lock(path_mutex_);
         if (path_index_ >= path_.size()) return false;    // arrived
         step = path_[path_index_];
+
+        // Progress check: if we haven't moved meaningfully in a while, the
+        // route is blocked by geometry the platform graph doesn't model. Give
+        // up rather than grind against a wall. Under the lock, because
+        // set_path_target restarts this clock from the executor's thread.
+        if (distance(me.pos, stuck_ref_) > kStuckDistance) {
+            stuck_ref_ = me.pos;
+            stuck_since_ms_ = now_ms();
+        } else if (now_ms() - stuck_since_ms_ > kStuckTimeoutMs) {
+            stuck = true;
+        }
     }
-
-    const Self me = state_.self();
-
-    // Progress check: if we haven't moved meaningfully in a while, the route
-    // is blocked by geometry the platform graph doesn't model. Give up rather
-    // than grind against a wall.
-    if (distance(me.pos, stuck_ref_) > kStuckDistance) {
-        stuck_ref_ = me.pos;
-        stuck_since_ms_ = now_ms();
-    } else if (now_ms() - stuck_since_ms_ > kStuckTimeoutMs) {
+    if (stuck) {
         GB_WARN("Pathfinding stuck at (%.0f, %.0f); abandoning route", me.pos.x, me.pos.y);
         report("path stuck");
         return false;
@@ -559,6 +506,12 @@ bool CommandExecutor::step_path() {
     if (held_by_pause()) return true;
 
     if (!input_.window_focused()) return true;
+
+    // See press_mutex_. Halted while the token was asked for: the route is
+    // dropped (pathfinding_loop does that on false) and nothing is pressed.
+    // Declared after the token, so it is let go of first.
+    std::lock_guard<std::mutex> gate(press_mutex_);
+    if (!armed_.load()) return false;
 
     switch (step.kind) {
         case MoveKind::Jump:

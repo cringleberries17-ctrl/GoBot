@@ -4,6 +4,8 @@
 // swap chain, pump messages, draw. The application logic lives in GuiApp.
 
 #include "gui_app.hpp"
+#include "gobot/dpi.hpp"
+#include "gobot/util.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -207,6 +209,23 @@ Faces load_faces(ImGuiIO& io) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
+    // Before anything loads a DLL. GoBot runs as administrator from a folder a
+    // player made, and Windows looks for a DLL named without its path in the
+    // program's own folder first: an xinput1_4.dll (Dear ImGui asks for it by
+    // name) or a wpcap.dll left beside gobot_gui.exe would run as
+    // administrator. From here on such DLLs come from System32 and Npcap's
+    // folder alone. The ones this program imports load before this line;
+    // /DEPENDENTLOADFLAG in CMakeLists.txt holds those to System32.
+    gobot::harden_dll_search();
+
+    // Real screen pixels for everything GoBot does to the game (gobot/dpi.hpp):
+    // at 125% display scale Windows handed GoBot resampled frames and scaled
+    // sizes, and nothing it looks for was found. Before any window exists. This
+    // thread alone keeps the pixels Windows scales, because the window below is
+    // laid out in them; the work below switches to real ones for its length.
+    gobot::become_dpi_aware();
+    gobot::set_thread_dpi(gobot::DpiScope::Mode::Scaled);
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_CLASSDC;
@@ -275,16 +294,24 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     // itself into a bitmap, so frames come off the screen and anything covering
     // the game is read instead of it.
     app.set_main_window(hwnd);
-    app.initialise();
+    {
+        const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
+        app.initialise();
+    }
 
     const ImVec4 clear(0.06f, 0.06f, 0.07f, 1.00f);
     bool done = false;
 
     while (!done) {
         MSG msg;
-        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        // The W versions, by name. The window is a Unicode one (RegisterClassExW,
+        // CreateWindowW), but UNICODE is not defined, so the bare names were the
+        // A versions, and those pass WM_CHAR through the ANSI code page: "Tuấn"
+        // typed into Tên nhân vật became "Tu?n". ImGui takes UTF-16 from a
+        // Unicode window (IsWindowUnicode).
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            DispatchMessageW(&msg);
             if (msg.message == WM_QUIT) done = true;
         }
         if (done || app.wants_quit()) break;
@@ -296,7 +323,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         // which is exactly when the window is occluded. Skipping it there
         // meant the panic key stopped working whenever there was something to
         // panic about.
-        app.tick();
+        {
+            const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
+            app.tick();
+        }
 
         // Minimised or fully covered: stop rendering, which is all that is
         // actually wasted when nobody can see the window.
@@ -317,7 +347,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        app.draw();
+        // What the panels do to the game -- looks, clicks, finding and moving
+        // windows -- in real pixels; ImGui itself asks Windows for nothing here.
+        {
+            const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
+            app.draw();
+        }
 
         ImGui::Render();
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
@@ -339,5 +374,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     cleanup_device();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, inst);
+    // GuiApp's destructor, at the return, stops every job in real pixels too.
+    gobot::set_thread_dpi(gobot::DpiScope::Mode::RealPixels);
     return 0;
 }

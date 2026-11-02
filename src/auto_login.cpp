@@ -1,5 +1,6 @@
 ﻿#include "gobot/auto_login.hpp"
 #include "gobot/common.hpp"
+#include "gobot/dpi.hpp"
 #include "gobot/game_install.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/no_real_input.hpp"
@@ -8,7 +9,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -47,6 +50,37 @@ constexpr int kForwardEveryS = 5;
 /// crossing does not know -- which ends it.
 constexpr int kJudgeLooks = 3;
 constexpr int kJudgeGapMs = 500;
+
+/// The game's "Kết Nối | Kết Thúc" bar, 247x42, and the middle of "Kết Nối"
+/// on it: the text spans x 38..95. Its own middle, x 123, is the seam between
+/// the two buttons.
+const char* const kConnectBar = "game_ready_indicator";
+constexpr int kConnectBarW = 247;
+constexpr int kConnectBarH = 42;
+constexpr int kConnectX = 66;
+constexpr int kConnectY = 21;
+
+/// A channel row clicked: how long, in what steps, it is looked at for the
+/// list to go or the row to be lit, and how many clicks it gets before the
+/// crossing goes on to Kết Nối anyway -- which joins whatever is chosen.
+constexpr int kChannelTookMs = 2000;
+constexpr int kChannelLookMs = 250;
+constexpr int kChannelTries = 3;
+/// How many looks, kChannelLookMs apart, a clear picture of the game is
+/// waited for before the click is held; and how many a list found by its
+/// panel may be missing from before it is taken for gone.
+constexpr int kChannelClearLooks = 8;
+constexpr int kChannelMisses = 3;
+
+/// When, to the second, for the names of the pictures kept.
+std::string stamp() {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y%m%d_%H%M%S", &tm);
+    return buf;
+}
 
 /// Each window in Vietnamese, for the simple screen.
 const char* window_vi(AutoLogin::On w) {
@@ -318,6 +352,7 @@ bool AutoLogin::worth_retrying(Why why) {
         case Why::GameWindow:
         case Why::Connect:
         case Why::Channel:
+        case Why::ChannelNotTaken:
         case Why::Character:
         case Why::World:
         // A window in the way may well be gone by the next attempt, which
@@ -393,6 +428,9 @@ std::string AutoLogin::advice(Why why, const std::string& detail) {
             return "Không thấy nút Kết Nối trong game.";
         case Why::Channel:
             return "Không thấy danh sách kênh (Chọn Kênh).";
+        case Why::ChannelNotTaken:
+            return "Đã bấm vào kênh đã chọn mà game không nhận: danh sách kênh vẫn mở. GoBot không vào kênh "
+                   "khác.";
         case Why::Character:
             return "Không thấy màn hình Chọn Nhân Vật.";
         case Why::World:
@@ -442,9 +480,18 @@ std::string AutoLogin::gave_up(int attempts, Why why, const std::string& detail)
 }
 
 std::string AutoLogin::advice() const {
-    if (worth_retrying(why_) && attempts_made_ > 1)
-        return gave_up(attempts_made_, why_, why_detail_);
-    return advice(why_, why_detail_);
+    std::string said = worth_retrying(why_) && attempts_made_ > 1 ? gave_up(attempts_made_, why_, why_detail_)
+                                                                  : advice(why_, why_detail_);
+    // VTCZone or the launcher drawing itself larger than its pictures: the
+    // likely reason its page was never found, which nothing else says.
+    const int at = why_ == Why::GamePage      ? drawn_at_[static_cast<int>(On::Publisher)]
+                   : why_ == Why::ClientStart ? drawn_at_[static_cast<int>(On::Client)]
+                                              : 0;
+    if (at > 100)
+        said += std::string(why_ == Why::GamePage ? " VTCZone" : " Launcher của game") + " đang vẽ ở " +
+                std::to_string(at) + "%, mà GoBot nhận ra nó bằng hình chụp ở 100%: hãy đặt tỉ lệ hiển thị "
+                "của Windows (Settings > Display > Scale) về 100%.";
+    return said;
 }
 
 // ---------------------------------------------------------------- the table
@@ -808,8 +855,12 @@ TemplateStore AutoLogin::pictures_for(const Settings& settings, const TemplateSt
 
 std::vector<std::string> AutoLogin::picture_names(const Settings& settings) {
     std::vector<std::string> out;
-    for (const Page& page : settings.pages)
+    for (const Page& page : settings.pages) {
         if (!page.picture.empty()) out.push_back(page.picture);
+        // The channel list's panel, which its rows are clicked on when it is
+        // found: not one of the file's pictures, and not needed to cross.
+        if (page.step == Step::Channel) out.push_back(kChannelPanel);
+    }
     if (!settings.signin_picture.empty()) out.push_back(settings.signin_picture);
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -1077,6 +1128,57 @@ bool AutoLogin::in_world(const Frame& game, const Frame* landmark) {
     return plate_at(game, landmark);
 }
 
+AutoLogin::PanelHit AutoLogin::find_channel_panel(const Frame& game, const Frame& dialog) {
+    PanelHit hit;
+    if (!game.valid() || !dialog.valid() || dialog.width < kPanelAnchorX + kPanelAnchorW ||
+        dialog.height < kPanelAnchorY + kPanelAnchorH)
+        return hit;
+    // The column of labels, cut from the dialog's picture alpha and all.
+    Frame anchor;
+    anchor.width = kPanelAnchorW;
+    anchor.height = kPanelAnchorH;
+    anchor.pixels.resize(static_cast<std::size_t>(kPanelAnchorW) * kPanelAnchorH * 4);
+    for (int y = 0; y < kPanelAnchorH; ++y) {
+        const std::size_t from = (static_cast<std::size_t>(kPanelAnchorY + y) * dialog.width + kPanelAnchorX) * 4;
+        std::memcpy(&anchor.pixels[static_cast<std::size_t>(y) * kPanelAnchorW * 4], &dialog.pixels[from],
+                    static_cast<std::size_t>(kPanelAnchorW) * 4);
+    }
+    const auto m = TemplateMatcher::find(game, ScreenRect{ 0, 0, game.width, game.height }, anchor, kPanelScore);
+    if (!m.found) return hit;
+    hit.found = true;
+    hit.score = m.score;
+    hit.at = ScreenRect{ m.at.x - kPanelAnchorX, m.at.y - kPanelAnchorY, dialog.width, dialog.height };
+    return hit;
+}
+
+void AutoLogin::channel_row_point(const ScreenRect& panel, int index, int& x, int& y) {
+    const int row = std::clamp(index, 0, kPanelRows - 1);
+    x = panel.x + kPanelRowX;
+    y = panel.y + kPanelRowY + kPanelRowStep * row;
+}
+
+bool AutoLogin::channel_row_lit(const Frame& game, const ScreenRect& panel, int index) {
+    if (!game.valid() || index < 0 || index >= kPanelRows) return false;
+    // The line is one pixel thin: the brightest of it and the rows either side,
+    // so a panel found a pixel off still reads it.
+    const int line = panel.y + kPanelLineY + kPanelRowStep * index;
+    int best = 0;
+    for (int y = line - 1; y <= line + 1; ++y) {
+        if (y < 0 || y >= game.height) continue;
+        long long sum = 0;
+        int n = 0;
+        for (int x = panel.x + kPanelLineX0; x <= panel.x + kPanelLineX1; ++x) {
+            if (x < 0 || x >= game.width) continue;
+            std::uint8_t r = 0, g = 0, b = 0;
+            game.get(x, y, r, g, b);
+            sum += (r * 299 + g * 587 + b * 114) / 1000;
+            ++n;
+        }
+        if (n > 0) best = std::max(best, static_cast<int>(sum / n));
+    }
+    return best >= kPanelLitGrey;
+}
+
 std::size_t AutoLogin::furthest_up(const std::vector<Page>& pages, std::size_t first,
                                    const std::function<bool(std::size_t)>& up,
                                    const std::string& halt_at) {
@@ -1225,7 +1327,31 @@ bool AutoLogin::grab(On which, void* hwnd, Frame& out, bool& trusted) {
         return true;
     }
     ScreenCapture& capture = capture_[static_cast<int>(which)];
-    if (!capture.grab(hwnd, out) || !out.valid()) return false;
+    if (which != On::Game) {
+        // One that handles display scale draws itself larger than its
+        // pictures above 100%, and none of its pages is found: said once a size.
+        int& at = drawn_at_[static_cast<int>(which)];
+        const int now = drawn_at_percent(hwnd);
+        if (now > 100 && now != at)
+            GB_WARN("AutoLogin: %s draws itself at %d%% -- its pages are found by pictures taken at 100%%, "
+                    "so above 100%% display scale they may not be found",
+                    on_name(which), now);
+        at = now;
+    }
+    // VTCZone and the launcher pictured in their own pixels (gobot/dpi.hpp).
+    // One that does not handle display scale draws itself at its own size, the
+    // size of its pictures, while Windows shows it larger: in real pixels its
+    // picture lay in a corner of a bitmap a fifth too big at 125%, and START
+    // was clicked short of where it was found. Only the picture: what lies
+    // over the window is asked below in real pixels, the pixels every window's
+    // frame is measured in, and click() turns a page's point into real ones.
+    // The game is read off the screen, in real pixels.
+    bool got = false;
+    {
+        const DpiScope own(which == On::Game ? nullptr : hwnd);
+        got = capture.grab(hwnd, out) && out.valid();
+    }
+    if (!got) return false;
     // A window that draws itself is seen as it is, whatever lies over it.
     // One read off the screen -- the game, always, on this client -- is
     // whatever is in front of it there, so it is the window only while the
@@ -1255,14 +1381,46 @@ AutoLogin::Ahead AutoLogin::ahead_now() {
 
 bool AutoLogin::game_page_in(const Frame& frame) const {
     if (!frame.valid() || store_ == nullptr) return false;
-    for (const Page& page : settings_.pages) {
-        if (page.on != On::Game) continue;
-        const Frame* picture = store_->get(page.picture);
-        if (picture && TemplateMatcher::find(frame, ScreenRect{ 0, 0, frame.width, frame.height },
-                                             *picture, page.score).found)
-            return true;
+    for (std::size_t i = 0; i < settings_.pages.size(); ++i) {
+        if (settings_.pages[i].on != On::Game) continue;
+        if (page_in(i, frame).found) return true;
     }
     return false;
+}
+
+AutoLogin::PanelHit AutoLogin::panel_in(const Frame& frame) const {
+    const Frame* dialog = store_ ? store_->get(kChannelPanel) : nullptr;
+    if (dialog == nullptr) return PanelHit{};
+    return find_channel_panel(frame, *dialog);
+}
+
+AutoLogin::PageHit AutoLogin::page_in(std::size_t index, const Frame& frame) const {
+    PageHit hit;
+    if (!frame.valid() || store_ == nullptr || index >= settings_.pages.size()) return hit;
+    const Page& page = settings_.pages[index];
+    if (const Frame* picture = store_->get(page.picture)) {
+        const auto m = TemplateMatcher::find(frame, ScreenRect{ 0, 0, frame.width, frame.height }, *picture,
+                                             page.score);
+        if (m.found) {
+            hit.found = true;
+            hit.at = m.at;
+            hit.score = m.score;
+            return hit;
+        }
+    }
+    // The channel list by its panel when its title is not found: the title is
+    // two fifths backdrop, and a backdrop it was not cut against -- another
+    // client size, another scene behind it -- can take it under its score.
+    if (page.step == Step::Channel) {
+        const PanelHit panel = panel_in(frame);
+        if (panel.found) {
+            hit.found = true;
+            hit.at = panel.at;
+            hit.score = panel.score;
+            hit.by_panel = true;
+        }
+    }
+    return hit;
 }
 
 const Frame* AutoLogin::landmark() {
@@ -1432,6 +1590,21 @@ AutoLogin::Click AutoLogin::click(int x, int y) {
     // the player has just turned to.
     if (stop_now()) return Click::Stopped;
 
+    // A page of VTCZone or the launcher was found in that window's own pixels
+    // (see grab); everything here is in real ones. Windows shows a whole window
+    // stretched by one factor, so the point needs only that factor -- where the
+    // window's own pixels map onto the real desktop by one factor only when
+    // every screen has the same scale, so a click sent from inside them missed
+    // with a laptop's panel at 125% beside a screen at 100%. The middle of the
+    // pixel is mapped, so the last column and row stay on the window.
+    if (aimed_at_ != On::Game) {
+        const WindowScaling s = window_scaling(input_.target_window());
+        if (s.stretched()) {
+            x = static_cast<int>((2LL * x + 1) * s.real_w / (2LL * s.own_w));
+            y = static_cast<int>((2LL * y + 1) * s.real_h / (2LL * s.own_h));
+        }
+    }
+
     // In front first. A click goes to whatever window is under the pointer,
     // and the page having been found says nothing about that: a window draws
     // its picture of itself just the same with something lying over it. A
@@ -1473,6 +1646,145 @@ AutoLogin::Click AutoLogin::click(int x, int y) {
     return Click::Held;
 }
 
+AutoLogin::Click AutoLogin::choose_channel(const Page& page, bool by_panel, int choice, int& x, int& y) {
+    const int title_x = x, title_y = y;
+    void* game = input_.target_window();
+    // The game's size, said with where the row is: the offsets from the title
+    // were measured on 1024x768, and another size is the first thing to ask
+    // of a crossing that clicked beside the list.
+    int w = 0, h = 0;
+    input_.window_size(w, h);
+    const std::string size = std::to_string(w) + "x" + std::to_string(h);
+    const std::string which = "Kênh " + std::to_string(choice + 1);
+    const auto xy = [](int px, int py) { return std::to_string(px) + "," + std::to_string(py); };
+
+    // A picture that is the game's -- one with something over the game says
+    // nothing of the list -- looked for a couple of seconds at most.
+    const auto look = [&](Frame& out) {
+        for (int i = 0; i < kChannelClearLooks; ++i) {
+            bool sure = false;
+            if (grab(On::Game, game, out, sure) && sure) return true;
+            if (!nap(kChannelLookMs)) return false;
+        }
+        return false;
+    };
+
+    int clicks = 0, misses = 0;
+    for (;;) {
+        Frame f;
+        if (!look(f)) {
+            if (stop_now()) return Click::Stopped;
+            // Never a clear look at the game: held, as a click is for a window
+            // in the way -- the page is looked for again, and what is over the
+            // game named -- rather than clicked blind.
+            holding_ = true;
+            held_by_ = behind_by_[static_cast<int>(On::Game)];
+            held_where_ = Landing::Covered;
+            return Click::Held;
+        }
+        const PanelHit panel = panel_in(f);
+        if (!panel.found) {
+            // Gone after a click: the click took.
+            if (clicks > 0) {
+                say(page.step, which + " clicked, and the list is gone");
+                return Click::Done;
+            }
+            // Found by its panel a moment ago: a look or two more, then the
+            // list is taken for gone before anything was clicked on it.
+            if (by_panel) {
+                if (++misses < kChannelMisses) {
+                    if (!nap(kChannelLookMs)) return Click::Stopped;
+                    continue;
+                }
+                fail(Why::Channel, "the channel list went before " + which + " could be clicked on it", page.key);
+                return Click::NotTaken;
+            }
+            // No panel to go by -- the pictures have none, or the client draws
+            // it otherwise: the offsets from the title, as before, clicked once.
+            x = title_x;
+            y = title_y;
+            (page.row_across ? x : y) += page.row_step * choice;
+            say(page.step, "the channel list's panel is not found -- " + which + " by the offsets from '" +
+                               page.picture + "', at " + xy(x, y) + " on a " + size + " game");
+            return click(x, y);
+        }
+        // Taken: the row lit as the chosen one.
+        if (clicks > 0 && channel_row_lit(f, panel.at, choice)) {
+            say(page.step, which + " clicked, and it is the one chosen");
+            return Click::Done;
+        }
+        // Clicked as often as it gets and never taken. Kết Nối now would join
+        // whichever channel the game has chosen -- Kênh 1, as it opens -- and
+        // only the player's is ever joined: this attempt fails here, and the
+        // next goes on from the list.
+        if (clicks >= kChannelTries) {
+            fail(Why::ChannelNotTaken,
+                 which + " was clicked " + std::to_string(clicks) +
+                     " times and the game never took it: the list is still up and that row is not the chosen one",
+                 page.key);
+            say(page.step, trouble_);
+            return Click::NotTaken;
+        }
+        channel_row_point(panel.at, choice, x, y);
+        char score[16];
+        std::snprintf(score, sizeof score, "%.2f", panel.score);
+        say(page.step, std::string(clicks == 0 ? "" : "the list is still up and " + which + " is not lit -- ") +
+                           "the channel list's panel is at " + xy(panel.at.x, panel.at.y) + " (score " + score +
+                           ") on a " + size + " game -- " + which + " at " + xy(x, y));
+        const Click c = click(x, y);
+        if (c != Click::Done) return c;
+        ++clicks;
+
+        // Watched for it to take -- the list gone, or the row lit -- a while
+        // longer after the last click: a list filling in its channels a moment
+        // after it is drawn can let a click go by, and a slow server answers
+        // late. Whatever the last look shows is judged at the top.
+        const int watch_ms = clicks >= kChannelTries ? 2 * kChannelTookMs : kChannelTookMs;
+        for (int waited = 0; waited < watch_ms; waited += kChannelLookMs) {
+            if (!nap(kChannelLookMs)) return Click::Stopped;
+            Frame g;
+            bool sure = false;
+            if (!grab(On::Game, game, g, sure) || !sure) continue;
+            const PanelHit now = panel_in(g);
+            if (!now.found || channel_row_lit(g, now.at, choice)) break;
+        }
+    }
+}
+
+void AutoLogin::keep_frame(const std::string& what) {
+    if (debug_dir_.empty()) return;
+    // The game this crossing is on, else the one there is.
+    void* game = aimed_at_ == On::Game && input_.window_valid() ? input_.target_window() : find(On::Game);
+    if (game == nullptr) return;
+    Frame f;
+    bool trusted = false;
+    if (!grab(On::Game, game, f, trusted) || !f.valid()) return;
+    // A picture read off the screen with another window over the game is that
+    // window's -- a chat, a browser, VTCZone with its account -- and is not
+    // kept. The game is brought to the front once and looked at again.
+    if (!trusted) {
+        input_.set_target_window(game);
+        aimed_at_ = On::Game;
+        bring_forward();
+        brought_forward_ = std::chrono::steady_clock::now();
+        if (!nap(kSettleMs)) return;
+        if (!grab(On::Game, game, f, trusted) || !f.valid()) return;
+        if (!trusted) {
+            const std::string& by = behind_by_[static_cast<int>(On::Game)];
+            GB_INFO("AutoLogin: no picture of the game kept for '%s': %s", what.c_str(),
+                    by.empty() ? "it is minimised or off the screen" : (by + " is over it").c_str());
+            return;
+        }
+    }
+    make_folder(debug_dir_);
+    // The newest few: the oldest go first, and the names sort by time.
+    std::vector<std::string> old = files_in(debug_dir_, "login_*.png");
+    std::sort(old.begin(), old.end());
+    for (std::size_t i = 0; i + kKeptFrames <= old.size(); ++i) remove_file(debug_dir_ + "\\" + old[i]);
+    const std::string path = debug_dir_ + "\\login_" + stamp() + "_" + what + ".png";
+    if (save_png(f, path)) GB_INFO("AutoLogin: kept a picture of the game as %s", path.c_str());
+}
+
 void AutoLogin::look_around(Frame (&frames)[3], bool (&behind)[3]) {
     const auto all = hands_.find ? std::vector<InputManager::WindowInfo>{}
                                  : InputManager::enumerate_windows();
@@ -1500,21 +1812,13 @@ bool AutoLogin::up_anywhere(std::size_t index, const Frame (&frames)[3]) const {
     // In any of the three pictures look_around kept, not only its own
     // window's: a picture read off the screen while its window is in front
     // can still take in a corner of another window lying over it.
-    const Page& page = settings_.pages[index];
-    const Frame* picture = store_ ? store_->get(page.picture) : nullptr;
-    if (!picture) return false;
-    for (const Frame& f : frames) {
-        if (!f.valid()) continue;
-        if (TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *picture,
-                                  page.score).found)
-            return true;
-    }
+    for (const Frame& f : frames)
+        if (f.valid() && page_in(index, f).found) return true;
     return false;
 }
 
 AutoLogin::Seen AutoLogin::await(std::size_t index, ScreenRect& found, std::size_t& later) {
     const Page& page = settings_.pages[index];
-    const Frame* picture = store_->get(page.picture);     // run() checked it is there
 
     // The window this page is drawn on may not be up yet: the game's launcher
     // comes some seconds after "Chơi game", the game a quarter of a minute
@@ -1637,10 +1941,16 @@ AutoLogin::Seen AutoLogin::await(std::size_t index, ScreenRect& found, std::size
             // button on some other window is not VTCZone signed out either.
             const Frame& mine = frames[own];
             if (mine.valid()) {
-                const auto hit = TemplateMatcher::find(
-                    mine, ScreenRect{ 0, 0, mine.width, mine.height }, *picture, page.score);
+                const PageHit hit = page_in(index, mine);
                 if (hit.found) {
                     found = hit.at;
+                    found_by_panel_ = hit.by_panel;
+                    // Where, how alike, and on what size of window: what tells,
+                    // in a player's log, a page found somewhere it should not be.
+                    GB_INFO("AutoLogin: '%s' found at %d,%d %dx%d (score %.2f%s) in a %dx%d picture of %s",
+                            page.key.c_str(), hit.at.x, hit.at.y, hit.at.w, hit.at.h, hit.score,
+                            hit.by_panel ? ", by the channel list's panel" : "", mine.width, mine.height,
+                            on_name(page.on));
                     return Seen::Page;
                 }
                 // Signed out. Waiting will not change that and another attempt
@@ -1978,6 +2288,14 @@ bool AutoLogin::cross() {
             // player chooses.
             int cx = at.x + (page.click_dx >= 0 ? page.click_dx : at.w / 2);
             int cy = at.y + (page.click_dy >= 0 ? page.click_dy : at.h / 2);
+            // "Kết Nối | Kết Thúc" is one picture, and its middle is the seam
+            // between the two buttons -- the second of which leaves the game.
+            // A file that still says "the middle" is pointed at Kết Nối.
+            if (page.picture == kConnectBar && page.click_dx < 0 && page.click_dy < 0 &&
+                at.w == kConnectBarW && at.h == kConnectBarH) {
+                cx = at.x + kConnectX;
+                cy = at.y + kConnectY;
+            }
 
             // Every click of the page goes through click(), which clicks only
             // once the page's window is in front and the point is on it. One
@@ -1985,6 +2303,7 @@ bool AutoLogin::cross() {
             // clicked from its first click, which for a character slot is the
             // same character picked a second time.
             Click done = Click::Done;
+            bool chosen = false;            // the channel list's own click, already made
             int held_x = 0, held_y = 0;
             const auto press = [&](int x, int y) {
                 const Click c = click(x, y);
@@ -2014,7 +2333,12 @@ bool AutoLogin::cross() {
                                (page.row_count > 0 ? std::to_string(page.row_count)
                                                    : std::string("?")));
 
-                if (page.pick == Pick::Row) {
+                if (page.pick == Pick::Row && page.step == Step::Channel) {
+                    // On the list's own panel, and looked at until it took.
+                    done = choose_channel(page, found_by_panel_, choice, cx, cy);
+                    if (done == Click::Held || done == Click::BadPoint) { held_x = cx; held_y = cy; }
+                    chosen = true;
+                } else if (page.pick == Pick::Row) {
                     (page.row_across ? cx : cy) += page.row_step * choice;
                 } else if (page.pick == Pick::Slot) {
                     // Two clicks: the character where it stands, then the
@@ -2050,15 +2374,28 @@ bool AutoLogin::cross() {
                 }
             }
 
-            if (done == Click::Done) done = press(cx, cy);
+            if (done == Click::Done && !chosen) done = press(cx, cy);
             if (done == Click::Stopped) return false;
+            // The channel never taken: this attempt is over, as one whose page
+            // never came is, and choose_channel has said why. Kết Nối is not
+            // pressed -- it would join a channel the player did not choose.
+            if (done == Click::NotTaken) {
+                crossed = false;
+                failed_on_game = true;
+                break;
+            }
             if (done == Click::BadPoint) {
                 // Not a window in the way, and not something the next attempt
                 // gets past: the page's offsets put the point outside the
                 // window. Said at once, naming what to put right, rather than
                 // waited on for half a minute three times over.
+                // The size in the pixels the point is in: the window's own,
+                // for VTCZone and the launcher, as the page was found.
                 int w = 0, h = 0;
-                input_.window_size(w, h);
+                {
+                    const DpiScope own(aimed_at_ == On::Game ? nullptr : input_.target_window());
+                    input_.window_size(w, h);
+                }
                 return stop(Why::BadPoint,
                             "the point " + std::to_string(held_x) + "," + std::to_string(held_y) +
                                 " to click on '" + page.key + "' is outside " +
@@ -2178,6 +2515,9 @@ bool AutoLogin::cross() {
             // with nobody to end it: then it is left for a person to see.
             bool ended = false;
             if (failed_on_game) {
+                // What the game showed, kept for whoever looks at the log.
+                keep_frame("attempt" + std::to_string(attempt) + "_" +
+                           (index < settings_.pages.size() ? settings_.pages[index].key : std::string("world")));
                 const GameNow game = judge_game();
                 if (game == GameNow::InWorld) {
                     say(Step::InWorld, "the character is in the world after all -- its HUD is up");
@@ -2188,6 +2528,9 @@ bool AutoLogin::cross() {
                         "the game is up and none of the crossing's pages is on it -- ending "
                         "it, as GoC's KILL_GAME_PROCESS ends one");
                     end_client_();
+                    // Cancelled by it -- the keeper's restarts used up: no
+                    // next attempt to wait for, and nothing more to say.
+                    if (stop_now()) return false;
                     say(Step::EndClient, "waiting " + std::to_string(end_cooldown_s_) +
                                              "s before the next attempt");
                     if (!nap(std::max(0, end_cooldown_s_) * 1000)) return false;

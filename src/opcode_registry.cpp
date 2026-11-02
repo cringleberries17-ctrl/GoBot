@@ -5,10 +5,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
 #include <sstream>
+#include <utility>
 
 namespace gobot {
 namespace {
@@ -68,6 +72,11 @@ const char* type_name(FieldType t) {
         default:                  return "u8";
     }
 }
+
+/// The most repeat groups one packet is read as. A party or monster list
+/// is tens long; more than this is a layout gone wrong, and the count
+/// field's check in decode() has always refused it.
+constexpr std::size_t kMaxGroups = 4096;
 
 } // namespace
 
@@ -225,25 +234,48 @@ std::vector<FieldSpec> OpcodeRegistry::parse_field_list(const std::string& text,
         std::string item = raw;
 
         // Optional trailing "*scale", e.g. "x:i16*0.125" for fixed-point.
+        // All of what follows the '*' has to be the number. stod stops at the
+        // first character it cannot use, so "x:i16*0.125@12" -- the offset
+        // written after the scale -- lost its @12 without a word, and the
+        // layout editor showed the field in green.
         if (const auto star = item.find('*'); star != std::string::npos) {
+            const std::string num = trim(item.substr(star + 1));
+            std::size_t used = 0;
+            double scale = 1.0;
             try {
-                f.scale = std::stod(item.substr(star + 1));
+                scale = std::stod(num, &used);
             } catch (...) {
+                used = 0;
+            }
+            if (num.empty() || used != num.size() || !std::isfinite(scale)) {
                 if (error) *error = "bad scale in '" + raw + "'";
                 return {};
             }
+            f.scale = scale;
             item = item.substr(0, star);
         }
 
-        // Optional "@offset" pins the field to an absolute payload offset.
+        // Optional "@offset" pins the field to an absolute payload offset: in
+        // decimal, or in hex written with 0x. Base 0 read "@012" as octal 10
+        // and "@08" as 0, and took whatever followed the number on trust.
         if (const auto at = item.find('@'); at != std::string::npos) {
-            try {
-                f.fixed_offset = static_cast<std::size_t>(std::stoul(item.substr(at + 1), nullptr, 0));
-                f.has_fixed_offset = true;
-            } catch (...) {
+            const std::string num = trim(item.substr(at + 1));
+            const bool hex = num.size() > 2 && num[0] == '0' && (num[1] == 'x' || num[1] == 'X');
+            std::size_t used = 0;
+            unsigned long offset = 0;
+            if (!num.empty() && std::isdigit(static_cast<unsigned char>(num[0]))) {
+                try {
+                    offset = std::stoul(num, &used, hex ? 16 : 10);
+                } catch (...) {
+                    used = 0;
+                }
+            }
+            if (used == 0 || used != num.size()) {
                 if (error) *error = "bad offset in '" + raw + "'";
                 return {};
             }
+            f.fixed_offset = static_cast<std::size_t>(offset);
+            f.has_fixed_offset = true;
             item = item.substr(0, at);
         }
 
@@ -318,13 +350,46 @@ std::string OpcodeRegistry::field_list_to_string(const std::vector<FieldSpec>& f
 }
 
 // ------------------------------------------------------------- registry I/O
+//
+// Shared between the thread that edits the table -- the GUI's drawing thread
+// -- and the one that decodes through it, the capture thread. Every write
+// takes mutex_ alone and every read shares it. Nothing below calls a member
+// that locks while holding it (find_locked() is the lookup for that): a shared
+// lock taken twice on one thread deadlocks once a writer waits between them.
 
-void OpcodeRegistry::add(const PacketSpec& spec) { specs_[spec.opcode] = spec; }
-void OpcodeRegistry::clear() { specs_.clear(); }
+void OpcodeRegistry::add(const PacketSpec& spec) {
+    // Copied before the lock is taken, so a decode waits for an assignment
+    // and not for the copy's allocations.
+    PacketSpec copy = spec;
+    std::lock_guard<std::shared_mutex> lock(mutex_);
+    specs_[spec.opcode] = std::move(copy);
+}
 
-const PacketSpec* OpcodeRegistry::find(std::uint16_t opcode) const {
+void OpcodeRegistry::clear() {
+    std::lock_guard<std::shared_mutex> lock(mutex_);
+    specs_.clear();
+}
+
+const PacketSpec* OpcodeRegistry::find_locked(std::uint16_t opcode) const {
     auto it = specs_.find(opcode);
     return it == specs_.end() ? nullptr : &it->second;
+}
+
+const PacketSpec* OpcodeRegistry::find(std::uint16_t opcode) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return find_locked(opcode);
+}
+
+std::optional<PacketSpec> OpcodeRegistry::find_copy(std::uint16_t opcode) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    const PacketSpec* spec = find_locked(opcode);
+    if (!spec) return std::nullopt;
+    return *spec;
+}
+
+std::size_t OpcodeRegistry::size() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return specs_.size();
 }
 
 bool OpcodeRegistry::load(const std::string& path) {
@@ -334,7 +399,12 @@ bool OpcodeRegistry::load(const std::string& path) {
         return false;
     }
 
-    clear();
+    // Read into a table of its own and swapped in whole at the end. This used
+    // to clear the live table first and fill it section by section, which
+    // freed every layout under a decode on the capture thread -- Reload
+    // configs with the capture running -- and left the decodes after it
+    // reading half a file.
+    std::map<std::uint16_t, PacketSpec> loaded;
     std::size_t errors = 0;
 
     for (const std::string& section : ini.sections()) {
@@ -357,7 +427,10 @@ bool OpcodeRegistry::load(const std::string& path) {
         spec.name        = ini.get(section, "name", op_text);
         spec.semantic    = semantic_from_string(ini.get(section, "semantic", "unknown"));
         spec.from_server = ini.get_bool(section, "from_server", true);
-        spec.repeat      = static_cast<std::size_t>(ini.get_int(section, "repeat", 1));
+        // repeat=-1 used to become SIZE_MAX, and a list of nothing but pinned
+        // fields then grew groups until memory ran out on the capture thread.
+        spec.repeat      = static_cast<std::size_t>(
+            std::clamp(ini.get_int(section, "repeat", 1), 1, static_cast<int>(kMaxGroups)));
         spec.repeat_count_field = ini.get(section, "repeat_count_field", "");
 
         const std::string fields = ini.get(section, "fields", "");
@@ -371,32 +444,44 @@ bool OpcodeRegistry::load(const std::string& path) {
             }
         }
 
-        specs_[spec.opcode] = std::move(spec);
+        loaded[spec.opcode] = std::move(spec);
     }
 
+    const std::size_t count = loaded.size();
+    {
+        std::lock_guard<std::shared_mutex> lock(mutex_);
+        specs_.swap(loaded);
+    }
+    // `loaded` holds the old table now; it is freed on the way out, with the
+    // lock already let go.
+
     GB_INFO("OpcodeRegistry: %zu packet layouts from %s%s",
-            specs_.size(), path.c_str(),
+            count, path.c_str(),
             errors ? (" (" + std::to_string(errors) + " rejected)").c_str() : "");
     return true;
 }
 
 bool OpcodeRegistry::save(const std::string& path) const {
     IniFile ini;
-    for (const auto& [op, spec] : specs_) {
-        char sec[32];
-        std::snprintf(sec, sizeof(sec), "Packet.0x%04X", op);
-        ini.set     (sec, "name", spec.name);
-        ini.set     (sec, "semantic", to_string(spec.semantic));
-        ini.set_bool(sec, "from_server", spec.from_server);
-        ini.set     (sec, "fields", field_list_to_string(spec.fields));
-        if (spec.repeat != 1) ini.set_int(sec, "repeat", static_cast<int>(spec.repeat));
-        if (!spec.repeat_count_field.empty())
-            ini.set(sec, "repeat_count_field", spec.repeat_count_field);
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        for (const auto& [op, spec] : specs_) {
+            char sec[32];
+            std::snprintf(sec, sizeof(sec), "Packet.0x%04X", op);
+            ini.set     (sec, "name", spec.name);
+            ini.set     (sec, "semantic", to_string(spec.semantic));
+            ini.set_bool(sec, "from_server", spec.from_server);
+            ini.set     (sec, "fields", field_list_to_string(spec.fields));
+            if (spec.repeat != 1) ini.set_int(sec, "repeat", static_cast<int>(spec.repeat));
+            if (!spec.repeat_count_field.empty())
+                ini.set(sec, "repeat_count_field", spec.repeat_count_field);
+        }
     }
     return ini.save(path, "GoBot protocol map");
 }
 
 std::vector<std::uint16_t> OpcodeRegistry::mapped_opcodes() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<std::uint16_t> out;
     for (const auto& [op, spec] : specs_) {
         if (spec.semantic != Semantic::Unknown) out.push_back(op);
@@ -405,6 +490,7 @@ std::vector<std::uint16_t> OpcodeRegistry::mapped_opcodes() const {
 }
 
 std::vector<std::uint16_t> OpcodeRegistry::opcodes_for(Semantic s) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<std::uint16_t> out;
     for (const auto& [op, spec] : specs_) {
         if (spec.semantic == s) out.push_back(op);
@@ -459,7 +545,12 @@ bool read_field(ByteReader& r, const FieldSpec& f, FieldValue& out) {
 } // namespace
 
 std::optional<DecodedPacket> OpcodeRegistry::decode(const GamePacket& pkt) const {
-    const PacketSpec* spec = find(pkt.opcode);
+    // Shared for as long as `spec` is in use, which is to the end: it points
+    // into the table, and a rewrite on the drawing thread would free the
+    // field list walked below. What comes back is copies, so nothing of the
+    // table outlives the lock.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    const PacketSpec* spec = find_locked(pkt.opcode);
     if (!spec) return std::nullopt;
 
     DecodedPacket out;
@@ -471,7 +562,7 @@ std::optional<DecodedPacket> OpcodeRegistry::decode(const GamePacket& pkt) const
 
     // A repeat group driven by a count field needs that field read first, so
     // the leading fields are decoded into the top level either way.
-    std::size_t repeat = spec->repeat;
+    const std::size_t repeat = std::min(spec->repeat, kMaxGroups);   // add() skips load()'s clamp
 
     if (!spec->repeat_count_field.empty()) {
         // Layout: scalar prologue (including the count) then N groups. The
@@ -494,13 +585,14 @@ std::optional<DecodedPacket> OpcodeRegistry::decode(const GamePacket& pkt) const
         }
 
         const std::int64_t n = out.get_int(spec->repeat_count_field, 0);
-        if (n < 0 || n > 4096) {
+        if (n < 0 || n > static_cast<std::int64_t>(kMaxGroups)) {
             GB_WARN("Packet 0x%04X: implausible repeat count %lld", pkt.opcode,
                     static_cast<long long>(n));
             return std::nullopt;
         }
 
         for (std::int64_t g = 0; g < n; ++g) {
+            const std::size_t group_start = r.pos();
             std::unordered_map<std::string, FieldValue> group;
             for (std::size_t i = count_index + 1; i < spec->fields.size(); ++i) {
                 FieldValue v;
@@ -513,6 +605,10 @@ std::optional<DecodedPacket> OpcodeRegistry::decode(const GamePacket& pkt) const
                 if (spec->fields[i].type != FieldType::Skip)
                     group[spec->fields[i].name] = std::move(v);
             }
+            // A group that ends no further on than it began read nothing new:
+            // every field in it is pinned with @, so the next would be this one
+            // again, to the count. One is what the bytes say.
+            if (g > 0 && r.pos() <= group_start) break;
             out.groups.push_back(std::move(group));
         }
         return out;
@@ -528,6 +624,7 @@ std::optional<DecodedPacket> OpcodeRegistry::decode(const GamePacket& pkt) const
     }
 
     for (std::size_t g = 0; g < repeat; ++g) {
+        const std::size_t group_start = r.pos();
         std::unordered_map<std::string, FieldValue> group;
         for (const auto& f : spec->fields) {
             FieldValue v;
@@ -537,6 +634,7 @@ std::optional<DecodedPacket> OpcodeRegistry::decode(const GamePacket& pkt) const
             }
             if (f.type != FieldType::Skip) group[f.name] = std::move(v);
         }
+        if (g > 0 && r.pos() <= group_start) break;    // pinned fields only, as above
         out.groups.push_back(std::move(group));
     }
     return out;

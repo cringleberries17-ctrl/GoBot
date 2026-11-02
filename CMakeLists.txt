@@ -70,6 +70,15 @@ if(GOBOT_USE_OPENCV)
     # written into the build information compiled into the executables --
     # with the build machine's user name in its path.
     set(OPENCV_PYTHON_SKIP_DETECTION ON CACHE BOOL "" FORCE)
+    # No parallel plugins. With neither TBB nor OpenMP built in, OpenCV looks
+    # for them at its first parallel loop -- an opencv_core_parallel_*.dll
+    # beside the executable, or wherever OPENCV_CORE_PLUGIN_PATH in the
+    # player's own environment says -- and loads what it finds by its full
+    # path, which no DLL search order reaches. In a program that runs as
+    # administrator, that is a DLL any program could leave there to be run as
+    # administrator. Off, the loops run on the Concurrency runtime, as they
+    # always did when no plugin was found.
+    set(PARALLEL_ENABLE_PLUGINS OFF CACHE BOOL "" FORCE)
 
     foreach(_off
             BUILD_TESTS BUILD_PERF_TESTS BUILD_EXAMPLES BUILD_DOCS
@@ -91,7 +100,8 @@ if(GOBOT_USE_OPENCV)
     # unless told what to assume instead.
     set(CMAKE_POLICY_VERSION_MINIMUM 3.10 CACHE STRING "" FORCE)
 
-    # Where `cmake --install` would put GoBot, pinned. OpenCV writes it into
+    # CMAKE_INSTALL_PREFIX, pinned, though GoBot has no install rules
+    # (package.ps1 is how it is packaged). OpenCV writes it into
     # the build information it compiles into every executable, and when it is
     # still CMake's own default OpenCV puts <build tree>/install there instead
     # -- a path with the build machine's user name in it, which package.ps1's
@@ -104,7 +114,7 @@ if(GOBOT_USE_OPENCV)
     if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OR
        CMAKE_INSTALL_PREFIX STREQUAL "${CMAKE_BINARY_DIR}/install")
         set(CMAKE_INSTALL_PREFIX "C:/Program Files/GoBot" CACHE PATH
-            "Where cmake --install puts GoBot" FORCE)
+            "Not used by GoBot; pinned for the build information OpenCV compiles in" FORCE)
     endif()
     set(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OFF)
 
@@ -137,12 +147,33 @@ endif()
 # and prompting on every launch, which is why it never has the problem. Npcap
 # wants the same privilege anyway.
 #
+# And a program that runs as administrator takes no DLL from its own folder.
+# Windows looks for a DLL named without its path in the program's folder
+# before System32, and the folder players make -- C:\GoBot, their Desktop --
+# can be written by any program they run: a dwmapi.dll or winhttp.dll left
+# beside the exe would run as administrator at the next start. The DLLs a
+# program imports are loaded before main() runs, so only /DEPENDENTLOADFLAG
+# keeps those to System32. It is kept in the image's load configuration;
+# 0x800 is LOAD_LIBRARY_SEARCH_SYSTEM32, honoured from Windows 10 1607. Every
+# DLL these programs import is Windows' own and in System32 -- kernel32,
+# user32, gdi32, advapi32, shell32, ole32, ws2_32, iphlpapi, gdiplus,
+# normaliz, winhttp, crypt32 and dwmapi, and for the GUI d3d11, dxgi,
+# d3dcompiler_47 and imm32 -- and the CRT and OpenCV are linked in. wpcap.dll
+# is delay-loaded, and loaded by its full path (PacketCapture::load_wpcap).
+# What is loaded by name later is held to System32 and Npcap's folder by
+# harden_dll_search (gobot/util.hpp). And OpenCV is built without the
+# parallel plugins it would otherwise load from beside the exe by their full
+# path, where neither of those reaches (PARALLEL_ENABLE_PLUGINS, above).
+# Only gobot_cli's developer commands --bridge and --party take one from
+# there, on purpose: GoBotBridge.dll, which no package carries.
+#
 # Not applied to the test runner: it has no business asking for a prompt, and
 # the packaging script runs it unelevated as a release gate.
 function(gobot_require_admin target)
     if(MSVC)
         target_link_options(${target} PRIVATE
-            "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
+            "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+            "/DEPENDENTLOADFLAG:0x800")
     endif()
 endfunction()
 
@@ -157,6 +188,11 @@ endfunction()
 #
 # Every one of these reads the screen for a living. Npcap is for the protocol
 # tools and nothing else, and the dependency belongs to them alone.
+#
+# The copy it resolves to is Npcap's own: PacketCapture::npcap_available()
+# loads wpcap.dll by its full path from System32\Npcap (then System32) before
+# any pcap call, and the stub binds to that copy. By its bare name, Windows
+# looked beside the program first and never in Npcap's folder.
 function(gobot_delay_npcap target)
     if(MSVC)
         target_link_libraries(${target} PRIVATE delayimp)
@@ -167,6 +203,7 @@ endfunction()
 # ---------------------------------------------------------------- core library
 add_library(gobot_core STATIC
     src/util.cpp
+    src/dpi.cpp
     src/logger.cpp
     src/config.cpp
     src/framing.cpp
@@ -221,6 +258,8 @@ add_library(gobot_core STATIC
     src/opcode_registry.cpp
     src/game_state.cpp
     src/protocol_handler.cpp
+    src/packet_world.cpp
+    src/packet_eyes.cpp
     src/window_focus.cpp
     src/no_real_input.cpp
     src/game_install.cpp
@@ -280,8 +319,7 @@ gobot_delay_npcap(gobot_sniff)
 # The check after the link holds it to both, and removes a build that breaks
 # either.
 #
-# A developer's tool: package.ps1 ships gobot_gui and gobot_cli alone, and
-# it is not installed.
+# A developer's tool: package.ps1 ships gobot_gui and gobot_cli alone.
 add_executable(gobot_sniff_files apps/gobot_sniff/main.cpp)
 target_link_libraries(gobot_sniff_files PRIVATE gobot_core)
 target_compile_definitions(gobot_sniff_files PRIVATE GOBOT_SNIFF_FILES_ONLY=1)
@@ -327,8 +365,10 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/simple_party.cpp
         apps/gobot_gui/simple_chat_alone.cpp
         apps/gobot_gui/simple_trash_use.cpp
+        apps/gobot_gui/simple_shop.cpp
         apps/gobot_gui/simple_lists.cpp
         apps/gobot_gui/simple_style.cpp
+        apps/gobot_gui/simple_spot.cpp
         apps/gobot_gui/simple_skills.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
@@ -395,7 +435,8 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/chat_alone_test.cpp apps/gobot_test/use_test.cpp
                           apps/gobot_test/hunter_test.cpp apps/gobot_test/macro_fight_test.cpp
                           apps/gobot_test/style_test.cpp apps/gobot_test/jump_test.cpp
-                          apps/gobot_test/skills_test.cpp)
+                          apps/gobot_test/skills_test.cpp apps/gobot_test/packet_world_test.cpp
+                          apps/gobot_test/packet_eyes_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --
@@ -450,6 +491,9 @@ else()
                    "them at run time; without them the dialog features stay off.")
 endif()
 
-install(TARGETS gobot_cli gobot_sniff gobot_test RUNTIME DESTINATION .)
-install(DIRECTORY configs/ DESTINATION configs)
+# No install rules. package.ps1 is the one way GoBot is packaged, and what it
+# ships is checked there. `cmake --install` used to put gobot_cli, gobot_sniff
+# and gobot_test -- the test runner with this tree's path compiled in -- into
+# Program Files, past every one of those checks, and without gobot_gui, its
+# pictures or its fonts.
 

@@ -52,7 +52,8 @@ std::string join_names(const std::vector<std::string>& names) {
     return out;
 }
 
-/// Whether a name is on a list, allowing for a reader that got a letter wrong.
+/// Whether a name is on the blacklist, allowing for a reader that got a letter
+/// wrong.
 ///
 /// An exact comparison is right for a name typed by a person and wrong for one
 /// read off a screen: a live invitation from "ExampleWin" came back as
@@ -63,7 +64,9 @@ std::string join_names(const std::vector<std::string>& names) {
 /// So both sides are folded to bare lowercase letters, an exact hit wins, and
 /// otherwise a longest-common-subsequence ratio above the threshold does. That
 /// is the same measure, and the same default, the other helper uses for this
-/// exact job.
+/// exact job. Loose on purpose, and for the blacklist alone: a false hit there
+/// turns somebody away, the safe direction. The lists that let somebody in go
+/// by Party::allowed_name, where a false hit lets a stranger in.
 bool contains(const std::vector<std::string>& names, const std::string& who,
               double min_match = 0.7) {
     const std::string want = PartyInvite::fold(who);
@@ -78,7 +81,48 @@ bool contains(const std::vector<std::string>& names, const std::string& who,
     return false;
 }
 
+/// A name as the lists that let somebody in compare it: folded, then letters
+/// and digits alone. A dot or a bracket the reader picked up is no letter.
+std::string name_key(const std::string& name) {
+    std::string out;
+    for (const char c : PartyInvite::fold(name))
+        if (std::isalnum(static_cast<unsigned char>(c))) out.push_back(c);
+    return out;
+}
+
+/// Whether `a` becomes `b` with at most one letter changed, taken out or put
+/// in.
+bool one_letter_apart(const std::string& a, const std::string& b) {
+    const std::string& longer = a.size() >= b.size() ? a : b;
+    const std::string& shorter = a.size() >= b.size() ? b : a;
+    if (longer.size() - shorter.size() > 1) return false;
+    std::size_t i = 0;
+    while (i < shorter.size() && shorter[i] == longer[i]) ++i;
+    if (i == shorter.size()) return true;           // the same, or one more at the end
+    // The first letter that differs is the one off: past it, the rest must
+    // line up -- the same place for one changed, one on for one put in.
+    const std::size_t skip = longer.size() == shorter.size() ? 1 : 0;
+    return shorter.compare(i + skip, std::string::npos, longer, i + 1, std::string::npos) == 0;
+}
+
+/// Whether `who` is on a list that lets somebody in (Party::allowed_name).
+bool allows(const std::vector<std::string>& names, const std::string& who) {
+    for (const std::string& n : names)
+        if (Party::allowed_name(n, who)) return true;
+    return false;
+}
+
 } // namespace
+
+// --------------------------------------------------------------------- names
+
+bool Party::allowed_name(const std::string& listed, const std::string& read) {
+    const std::string have = name_key(listed), want = name_key(read);
+    if (have.empty() || want.empty()) return false;
+    if (have == want) return true;
+    if (have.size() <= kAllowExactUpTo) return false;
+    return one_letter_apart(have, want);
+}
 
 const char* Party::status_name(Status s) {
     switch (s) {
@@ -153,9 +197,9 @@ bool Party::Settings::may_invite(const std::string& who) const {
     // one: a name on it is never invited however else it qualifies.
     if (use_blacklist && contains(blacklist, who)) return false;
 
-    // And when invitations are restricted to a list, not being on it is the
-    // end of the matter.
-    if (by_list && !contains(whitelist, who) && !contains(priority, who))
+    // And when invitations are restricted to a list, not being on it -- as
+    // allowed_name reads it, tightly -- is the end of the matter.
+    if (by_list && !allows(whitelist, who) && !allows(priority, who))
         return false;
 
     return true;
@@ -169,8 +213,9 @@ bool Party::Settings::may_accept(const std::string& who) const {
     if (use_blacklist && contains(blacklist, who)) return false;
 
     // Accepting used to go through may_invite, which never looks at this
-    // list -- so "only accept from these" accepted everybody.
-    if (!accept_all) return contains(accept_only, who);
+    // list -- so "only accept from these" accepted everybody. Matched
+    // tightly (allowed_name): a false hit here joins a stranger's party.
+    if (!accept_all) return allows(accept_only, who);
 
     return true;
 }

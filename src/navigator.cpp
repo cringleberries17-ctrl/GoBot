@@ -365,6 +365,11 @@ void Navigator::loop() {
     }
 
     release_movement();
+    // Arrived, or given up on a one-way walk: no longer running, though nobody
+    // called stop(). Left set, "Stop moving" stayed live and the edge anchor
+    // went on being told the character walked. stop() still joins this
+    // thread, as go_to and patrol do before starting another.
+    running_.store(false);
 }
 
 } // namespace gobot

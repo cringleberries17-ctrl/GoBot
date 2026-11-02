@@ -56,9 +56,13 @@ void WindowFocusMonitor::remove_listener(int token) {
 std::string WindowFocusMonitor::foreground_title() const {
     HWND fg = GetForegroundWindow();
     if (!fg) return {};
-    char buf[512]{};
-    GetWindowTextA(fg, buf, sizeof(buf) - 1);
-    return buf;
+    // Read without a message: this runs on the monitor's thread, and
+    // GetWindowText on GoBot's own window would wait on the UI thread. Wide,
+    // because the narrow text came in the code page rather than UTF-8.
+    wchar_t buf[512]{};
+    const int n = InternalGetWindowText(fg, buf, 512);
+    return n > 0 ? wide_to_utf8(std::wstring(buf, static_cast<std::size_t>(std::min(n, 511))))
+                 : std::string();
 }
 
 void WindowFocusMonitor::emit(FocusState s) {

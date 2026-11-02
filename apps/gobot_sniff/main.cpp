@@ -27,6 +27,7 @@
 #include "gobot/byte_reader.hpp"
 #include "gobot/config.hpp"
 #include "gobot/capture_file.hpp"
+#include "gobot/common.hpp"
 #include "gobot/framing.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/net_discovery.hpp"
@@ -34,12 +35,12 @@
 #include "gobot/opcode_registry.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/protocol_analyzer.hpp"
+#include "gobot/util.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,6 +55,8 @@
 #include <tuple>
 #include <vector>
 
+#include <windows.h>
+
 using namespace gobot;
 
 // 1 for gobot_sniff_files (CMakeLists.txt): every live command is left out.
@@ -66,9 +69,79 @@ namespace {
 /// This program's name, for the commands its hints suggest.
 constexpr const char* kProgram = GOBOT_SNIFF_FILES_ONLY ? "gobot_sniff_files" : "gobot_sniff";
 
+#if !GOBOT_SNIFF_FILES_ONLY
 std::atomic<bool> g_stop{false};
 
-void on_signal(int) { g_stop.store(true); }
+// When the first Ctrl+C, Ctrl+Break or close came, on now_ms()'s clock; 0 before.
+std::atomic<std::uint64_t> g_stop_asked_ms{0};
+// Set as main() returns: what a closing console waits for.
+HANDLE g_main_done = nullptr;
+// Windows ends a closing console's program about five seconds after the
+// close, whatever its handler does.
+constexpr DWORD kCloseWaitMs = 4000;
+// A Ctrl+C this long after the first one ends the program at once.
+constexpr std::uint64_t kForceAfterMs = 5000;
+
+/// Ctrl+C, Ctrl+Break and closing the console set g_stop, and the command
+/// running stops the way it stops by itself.
+///
+/// std::signal caught the first Ctrl+C alone, never Ctrl+Break or the close,
+/// and a program ended by one of those finished nothing: gobot_cli let go of
+/// no key or button -- --keytest's LCtrl stayed down for the whole machine, a
+/// --trash drag kept the mouse button -- and gobot_sniff --record wrote none
+/// of its per-connection files. This runs on a thread Windows starts for it,
+/// so it touches the atomics, stderr and the event and nothing else: never
+/// the log, which can be torn down under it as main() returns. A close ends
+/// the program as soon as this returns, so a close waits for main() first.
+BOOL WINAPI on_console_event(DWORD event) {
+    switch (event) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT: {
+        const std::uint64_t now = now_ms();
+        std::uint64_t first = 0;
+        g_stop.store(true);
+        if (g_stop_asked_ms.compare_exchange_strong(first, now)) {
+            std::fputs("\nStopping... (should it still be running 5 s from now, "
+                       "Ctrl+C again ends it at once)\n", stderr);
+            return TRUE;
+        }
+        // A sum, not now - first: should two of these ever run at once, the
+        // one that read the clock first can come second, and that would wrap.
+        if (now < first + kForceAfterMs) {
+            std::fputs("\nStill stopping...\n", stderr);
+            return TRUE;
+        }
+        std::fputs("\nIt has not stopped by itself: ending it now.\n", stderr);
+        return FALSE;
+    }
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT: {
+        std::uint64_t none = 0;
+        g_stop_asked_ms.compare_exchange_strong(none, now_ms());
+        g_stop.store(true);
+        std::fputs("\nStopping...\n", stderr);
+        if (g_main_done != nullptr) WaitForSingleObject(g_main_done, kCloseWaitMs);
+        else Sleep(kCloseWaitMs);
+        return TRUE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
+/// Ends a closing console's wait. main() declares one first, so it goes last:
+/// after the command is done with all it held -- keys, the mouse button, a
+/// capture, files.
+struct MainDone {
+    ~MainDone() {
+        // Flushed first: once the event is set, Windows may end the program
+        // before the C runtime would have flushed anything.
+        std::fflush(nullptr);
+        if (g_main_done != nullptr) SetEvent(g_main_done);
+    }
+};
+#endif
 
 void print_usage() {
 #if GOBOT_SNIFF_FILES_ONLY
@@ -517,6 +590,13 @@ void wait_for_stop(int seconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 }
+
+/// A reporter's pause, cut short by a stop. The reporters slept two or three
+/// seconds before they saw one, which is most of what a closing console allows.
+void sleep_unless_stopped(int ms) {
+    for (int slept = 0; slept < ms && !g_stop.load(); slept += 100)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
 #endif
 
 // ------------------------------------------------------------------ commands
@@ -525,9 +605,8 @@ void wait_for_stop(int seconds) {
 int cmd_list() {
     if (!PacketCapture::npcap_available()) {
         std::fprintf(stderr,
-            "Npcap service is not running.\n"
-            "  Install from https://npcap.com/#download\n"
-            "  Tick 'WinPcap API-compatible Mode' during setup.\n");
+            "Npcap is not installed, its service is not running, or its DLL will not load.\n"
+            "  Install from https://npcap.com/#download\n");
         return 1;
     }
 
@@ -742,7 +821,7 @@ int cmd_record(const Options& o) {
 
     std::thread reporter([&] {
         while (!g_stop.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            sleep_unless_stopped(2000);
             const auto s = cap.stats();
             // Drops are shown live, not only at the end. A recording made on a
             // lossy adapter is not merely short: a missing segment leaves a
@@ -1024,7 +1103,7 @@ int cmd_watch(const Options& o) {
 
     std::thread reporter([&] {
         while (!g_stop.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            sleep_unless_stopped(3000);
 
             std::vector<std::pair<std::uint16_t, std::uint64_t>> sorted;
             std::map<std::uint16_t, std::size_t> size_copy;
@@ -1551,7 +1630,7 @@ int cmd_diff(const Options& o) {
 
         std::thread reporter([&] {
             while (!g_stop.load()) {
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                sleep_unless_stopped(2000);
                 std::lock_guard<std::mutex> lock(mutex);
                 std::printf("\r  %zu / %d collected  ", samples.size(), want);
                 std::fflush(stdout);
@@ -1887,7 +1966,7 @@ int cmd_analyze(const Options& o) {
 
     std::thread reporter([&] {
         while (!g_stop.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            sleep_unless_stopped(3000);
             std::lock_guard<std::mutex> lock(mutex);
             std::size_t total = 0;
             for (const auto& [op, e] : obs) total += e.payloads.size();
@@ -2377,8 +2456,19 @@ int main(int argc, char** argv) {
     // the focus, or start or end a program, that is refused instead.
     forbid_real_input();
 #endif
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    // Before anything loads a DLL, in both programs. gobot_sniff runs as
+    // administrator from a folder a player made, and Windows looked for a DLL
+    // named without its path in the program's own folder first: one taking
+    // Npcap's name, left beside it, ran as administrator. From here on such
+    // DLLs come from System32 and Npcap's folder alone.
+    gobot::harden_dll_search();
+#if !GOBOT_SNIFF_FILES_ONLY
+    // What a closing console waits for (on_console_event). Declared first, so
+    // that it goes last: after the command has stopped its capture and written
+    // its files.
+    g_main_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    MainDone main_done;
+#endif
 
     Options o;
     if (!parse_args(argc, argv, o)) {
@@ -2429,6 +2519,12 @@ int main(int argc, char** argv) {
         o.command.c_str(), has_file_form ? " without --from" : "");
     return 2;
 #else
+    // From here on the commands work on the live network, and the ones that
+    // run until stopped watch g_stop: Ctrl+C, Ctrl+Break and closing the
+    // console stop them cleanly, their files written. The commands above only
+    // read files, and Ctrl+C ends them on the spot, as Windows does by default
+    // -- they used to swallow the first one.
+    SetConsoleCtrlHandler(on_console_event, TRUE);
     if (o.command == "list")     return cmd_list();
     if (o.command == "discover") return cmd_discover(o);
     if (o.command == "record")   return cmd_record(o);

@@ -451,15 +451,10 @@ void PopupCloser::say(const std::string& line) {
 
 bool PopupCloser::click(int x, int y) {
     if (hands_.click) return hands_.click(x, y);
-    // The point has to be on the game, and the game in front: a click goes to
-    // whatever is under the pointer. Nothing is brought forward for this.
-    if (!input_.window_focused()) return false;
-    HWND game = static_cast<HWND>(input_.target_window());
-    POINT p{ x, y };
-    if (game == nullptr || !ClientToScreen(game, &p)) return false;
-    HWND under = WindowFromPoint(p);
-    if (under == nullptr || (under != game && GetAncestor(under, GA_ROOT) != game)) return false;
-    return input_.click_at(x, y);
+    // The point has to be on the game, and the game in front, as the button
+    // goes down: a click goes to whatever is under the pointer. Nothing is
+    // brought forward for this. A stop in the pointer's pause clicks nothing.
+    return input_.click_on_game(x, y, false, guard_.stopped);
 }
 
 bool PopupCloser::esc() {

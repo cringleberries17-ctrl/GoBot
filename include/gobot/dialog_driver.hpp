@@ -4,6 +4,7 @@
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -26,6 +27,12 @@ namespace gobot {
 /// into nothing and report success. Every step here therefore names something
 /// that must become true afterwards -- another picture appearing, or this one
 /// going away -- and a step that cannot show it worked is a step that failed.
+/// A picture that was up already did not become true: a step whose
+/// confirmation is on screen before its first click is refused, with nothing
+/// clicked. The one way round is a step marked `check = false` in
+/// routines.ini -- picking an item in a shop's list, where Mua is up either
+/// way -- which is clicked once and reported as not checked, never as
+/// confirmed.
 class DialogDriver {
 public:
     /// Where a step's frames come from. Supplied rather than captured directly
@@ -43,14 +50,27 @@ public:
 
         /// Where to click, from the picture's top-left. -1 for both means its
         /// middle, which is right for a button and wrong for a page marker --
-        /// hence the offsets.
+        /// hence the offsets. Kept inside the picture: an offset past its
+        /// right or bottom edge clicks at that edge (click_point), so a typo
+        /// in routines.ini cannot send a click across the screen.
         int click_dx = -1;
         int click_dy = -1;
 
         /// What proves the click landed. Either something that must appear, or
-        /// (when `gone` is set) `find` itself having to disappear.
+        /// (when `gone` is set) `find` itself having to disappear. Something
+        /// that must appear means something the click brings up: it is looked
+        /// for before the click as well, and one already up before the first
+        /// click gets the step refused (up before a retry, it is the earlier
+        /// click having landed late).
         std::string confirm;
         bool gone = false;
+
+        /// false for a step nothing on screen can prove -- one whose
+        /// confirmation would be up before the click as well as after, as the
+        /// shop's Mua is for the item picked in its list. It names no
+        /// `confirm` and no `gone`, is clicked once, and is said to be not
+        /// checked rather than reported as confirmed.
+        bool check = true;
 
         /// How well the pictures have to match, how long to wait for `find`,
         /// and how long to wait for the confirmation.
@@ -89,18 +109,15 @@ public:
     /// it did not finish.
     std::size_t run_all(const std::vector<Step>& steps, std::string* trouble = nullptr);
 
-    /// Close whatever is in the way.
-    ///
-    /// The game has four close buttons across its dialog styles, plus an OK and
-    /// a confirm. This tries each, repeatedly, until the screen has none of
-    /// them left or the budget runs out. Every other feature calls this when it
-    /// finds something unexpected on screen, which is why it takes no argument
-    /// about what the something is.
-    int close_popups(int budget = 4);
+    /// Where a step clicks on a picture found at `at`: the step's offsets from
+    /// its top-left, kept inside the picture, or its middle where they are
+    /// negative.
+    static void click_point(const ScreenRect& at, const Step& step, int& x, int& y);
 
-    /// Ask the driver to stop at the next opportunity.
-    void cancel() { cancelled_ = true; }
-    void resume() { cancelled_ = false; }
+    /// Ask the driver to stop at the next opportunity. From any thread: the
+    /// command line's Ctrl+C watcher calls it while a step waits.
+    void cancel() { cancelled_.store(true); }
+    void resume() { cancelled_.store(false); }
 
     /// Called as each step is attempted, for a running commentary.
     void on_step_report(std::function<void(const std::string&)> fn) {
@@ -121,7 +138,7 @@ private:
     InputManager&        input_;
     const TemplateStore& store_;
     Grab                 grab_;
-    bool                 cancelled_ = false;
+    std::atomic<bool>    cancelled_{false};
     std::function<void(const std::string&)> report_;
 };
 

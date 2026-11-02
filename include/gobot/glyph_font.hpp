@@ -35,6 +35,7 @@ public:
     bool        loaded() const { return !glyphs_.empty(); }
     std::size_t size() const { return glyphs_.size(); }
     int         tallest() const { return tallest_; }
+    int         widest() const { return widest_; }
 
     /// Where the commercial client keeps its set, if it is installed.
     static std::string default_dir();
@@ -325,6 +326,7 @@ private:
 
     std::vector<Glyph>          glyphs_;
     int                         tallest_ = 0;
+    int                         widest_ = 0;
     /// The tallest plain capital, A to Z: how high a line of names reaches
     /// even where the name sought has no capital in it.
     int                         cap_height_ = 0;

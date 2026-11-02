@@ -1,7 +1,8 @@
 // Đánh quái's attack style ("Kiểu đánh"), keeping distance ("Giữ khoảng
 // cách") and the jump key ("Phím nhảy") with its "Thử": their pieces of the
-// "Tự đánh quái" row, the "Tầm đánh" window, the jump key's line in "Trước
-// khi bắt đầu", and the one press "Thử" makes.
+// "Tự đánh quái" row, the "Tầm đánh" window -- which has the hunting spot's
+// numbers too ("Chỗ đánh quái", simple_spot.cpp) -- the jump key's line in
+// "Trước khi bắt đầu", and the one press "Thử" makes.
 //
 // What the numbers do in a fight is the hunter's (gobot/hunter.hpp), the
 // styles are gobot/attack_style.hpp, and "Thử" is gobot/jump_check.hpp. Here
@@ -114,8 +115,8 @@ void GuiApp::simple_jump_box() {
     // something: the hint under the row comes only then.
     const std::string box_tip =
         trial_hint(kTrialJump, "Phím nhảy trong game (thường là ↑). Bot nhảy khi quái ở chỗ cao hơn. Đứng "
-                               "chỗ trống, xa cổng dịch chuyển và dây leo rồi bấm Thử để xem nhân vật có "
-                               "nhảy không.");
+                               "chỗ trống rồi bấm Thử để xem nhân vật có nhảy không. Không chọn được ↓: "
+                               "trên cửa, ↓ đưa nhân vật sang bản đồ khác.");
     if (simple_key_box("jump", key, true, false, box_tip.c_str())) {
         hunt_config_.set_jump_key(key);     // a new key has not been tried
         simple_changed();
@@ -132,6 +133,8 @@ void GuiApp::simple_jump_box() {
     else if (simple_running())             why = "Bot đang chạy: dừng bot rồi hãy thử.";
     else if (keeper_entering())            why = "Đang vào game — thử lại sau.";
     else if (hunt_config_.jump_key == 0)   why = "Chưa đặt phím nhảy.";
+    else if (InputManager::never_pressed(hunt_config_.jump_key))
+        why = "GoBot không bấm ↓ (trên cửa, ↓ đưa nhân vật sang bản đồ khác). Đặt phím nhảy khác.";
     else if (coord_.critical_active())
         why = "Bot đang tạm dừng (" + coord_.critical_reason() + ") — thử lại sau.";
     ImGui::BeginDisabled(!why.empty());
@@ -139,7 +142,7 @@ void GuiApp::simple_jump_box() {
     ImGui::EndDisabled();
     const std::string try_tip =
         trial_hint(kTrialJump, "Bấm phím nhảy MỘT lần trong game rồi xem nhân vật có nhảy lên không.\nGame "
-                               "được đưa lên phía trước. Đứng chỗ trống, xa cổng dịch chuyển và dây leo.");
+                               "được đưa lên phía trước. Đứng chỗ trống.");
     ImGui::SetItemTooltip("%s", why.empty() ? try_tip.c_str() : why.c_str());
 }
 
@@ -176,7 +179,8 @@ void GuiApp::simple_style_line() {
             simple_changed();
         }
         ImGui::SetItemTooltip("Như GoBot từ trước tới giờ: tầm đánh 150 px, cao thấp 60 px, chọn lại "
-                              "mục tiêu mỗi 4 giây, quay người mỗi lần đánh.");
+                              "mục tiêu mỗi 4 giây, quay người mỗi lần đánh (có dấu Đứng yên một chỗ "
+                              "hay Giữ khoảng cách thì chỉ quay khi chưa quay về phía quái).");
         const auto& styles = attack_styles();
         for (std::size_t i = 0; i < styles.size(); ++i) {
             const AttackStyle& s = styles[i];
@@ -207,7 +211,7 @@ void GuiApp::simple_style_line() {
     ImGui::SameLine();
     if (ImGui::Button("Tầm đánh…")) ui.open_ranges = true;
     ImGui::SetItemTooltip("Các số của kiểu đánh -- tầm đánh, khoảng cách tối thiểu, cao, thấp -- "
-                          "và Giữ khoảng cách.");
+                          "Giữ khoảng cách và Chỗ đánh quái.");
 }
 
 void GuiApp::simple_keep_distance_tick() {
@@ -220,9 +224,10 @@ void GuiApp::simple_keep_distance_tick() {
         hunt_config_.stay_put
             ? std::string("Không lùi khi Đứng yên một chỗ: bỏ dấu Đứng yên trước.")
             : trial_hint(kTrialKeepDistance,
-                         ("Lùi lại khi quái gần hơn khoảng cách tối thiểu (Kiểu đánh), tối đa " +
+                         ("Lùi lại khi quái gần hơn khoảng cách tối thiểu (Kiểu đánh). Lùi tối đa " +
                           std::to_string(hunt_config_.keep_distance_steps) +
-                          " bước liền nhau. Không lùi khi Đứng yên một chỗ.")
+                          " bước về một phía rồi đứng đánh tại chỗ, tới khi nhân vật đi bộ về phía "
+                          "ngược lại mới lùi tiếp. Không lùi khi Đứng yên một chỗ.")
                              .c_str());
     ImGui::SetItemTooltip("%s", tip.c_str());
 }
@@ -243,7 +248,7 @@ void GuiApp::simple_style_hints() {
                       std::to_string(Hunter::kDefaultKeepAwayPx) + " px."
                 : "Lùi lại khi quái gần hơn " + std::to_string(hunt_config_.min_distance) +
                       " px, tối đa " + std::to_string(hunt_config_.keep_distance_steps) +
-                      " bước liền nhau.";
+                      " bước về một phía rồi đứng đánh.";
         hint(trial_hint(kTrialKeepDistance, text.c_str()).c_str());
     }
     if (!ui.jump_said.empty()) hint(trial_hint(kTrialJump, ui.jump_said.c_str()).c_str());
@@ -313,10 +318,11 @@ void GuiApp::simple_style_popups() {
         hunt_config_.keep_distance_steps = std::clamp(steps, 1, 10);
         changed = true;
     }
-    ImGui::SetItemTooltip("Bot không thấy mép bục, nên lùi có giới hạn: hết số bước này mà quái vẫn "
-                          "gần thì đánh tại chỗ (1–10).");
+    ImGui::SetItemTooltip("Bot không thấy mép bục, nên lùi có giới hạn: lùi đủ số bước này về một phía "
+                          "thì đứng đánh tại chỗ, tới khi nhân vật đi bộ về phía ngược lại mới lùi tiếp "
+                          "(1–10).");
     ImGui::SameLine();
-    label("bước liền nhau");
+    label("bước về một phía");
     int facing = hunt_config_.facing_tolerance;
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Hạn chế quay người:");
@@ -329,6 +335,53 @@ void GuiApp::simple_style_popups() {
     ImGui::SetItemTooltip("Quái lệch sang bên quá số này (0–100) thì mới quay người về phía nó.");
     ImGui::SameLine();
     label("px");
+
+    // The hunting spot's area, and how far off it the character walks back:
+    // in the packets' world pixels, clamped as hunt.ini's are. The area is
+    // the spot's own from the moment it is taken; the walk back's distance is
+    // read at every pass.
+    ImGui::Dummy(ImVec2(0, 6));
+    heading(strong_font_, "Chỗ đánh quái");
+    int half_w = hunt_config_.spot_half_w;
+    int half_h = hunt_config_.spot_half_h;
+    int tolerance = hunt_config_.spot_tolerance;
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Vùng đánh: ngang ±");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(130);
+    if (ImGui::InputInt("##spot_w", &half_w, 10, 50)) {
+        hunt_config_.spot_half_w = std::clamp(half_w, 50, 2000);
+        changed = true;
+    }
+    ImGui::SetItemTooltip("Bot chỉ đi tới quái cách chỗ đánh quái không quá số này về mỗi bên (50–2000). Quái "
+                          "trong tầm đánh thì vẫn đánh, dù ở ngoài vùng.");
+    ImGui::SameLine();
+    label("dọc ±");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(130);
+    if (ImGui::InputInt("##spot_h", &half_h, 10, 50)) {
+        hunt_config_.spot_half_h = std::clamp(half_h, 20, 500);
+        changed = true;
+    }
+    ImGui::SetItemTooltip("Và cao hơn hay thấp hơn chỗ đánh quái không quá số này (20–500).");
+    ImGui::SameLine();
+    label("px");
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Đi về khi cách chỗ hơn");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(130);
+    if (ImGui::InputInt("##spot_tolerance", &tolerance, 1, 10)) {
+        hunt_config_.spot_tolerance = std::clamp(tolerance, 10, 1000);
+        changed = true;
+    }
+    ImGui::SetItemTooltip("Hết quái mà nhân vật cách chỗ đánh quái (theo chiều ngang) hơn số này thì bot đi bộ "
+                          "về chỗ (10–1000). Bằng hay lớn hơn số ngang của vùng đánh: chỉ đi về khi bị đẩy ra "
+                          "ngoài vùng.");
+    ImGui::SameLine();
+    label("px");
+    hint(trial_hint(kTrialSpot, "Đo bằng điểm ảnh của bản đồ trong gói tin của game. Vùng đánh mới dùng từ chỗ "
+                                "đặt sau (lần bắt đầu sau, hoặc khi bấm Đặt chỗ này); số Đi về dùng ngay.")
+             .c_str());
 
     ImGui::Dummy(ImVec2(0, 6));
     if (ImGui::Button("Đóng")) ImGui::CloseCurrentPopup();
@@ -392,6 +445,12 @@ void GuiApp::simple_jump_checklist() {
             help = "Trong game Space là phím Tấn công: bot sẽ đánh chứ không nhảy. Phím nhảy trong game "
                    "thường là ↑.";
             break;
+        case JumpCheck::Advice::DownChangesMap:
+            m = Mark::Bad;
+            line = "Phím nhảy đang là ↓";
+            help = "Đứng trên cửa mà bấm ↓ là sang bản đồ khác, nên GoBot không bao giờ bấm ↓: bot sẽ không "
+                   "nhảy. Phím nhảy trong game thường là ↑.";
+            break;
         case JumpCheck::Advice::Clean: {
             // Three things it can be: tried and seen to jump; tried, pressed
             // and not seen to; not tried. The second was shown as the third.
@@ -405,7 +464,7 @@ void GuiApp::simple_jump_checklist() {
                 help = "Đã bấm " + k + " một lần nhưng không thấy nhân vật nhảy. Hãy nhìn trong game và "
                        "kiểm tra phím nhảy trong cài đặt phím của game.";
             else if (!hunt_config_.jump_checked)
-                help = "Đứng chỗ trống, xa cổng dịch chuyển và dây leo, rồi bấm Thử ở dòng Tự đánh quái.";
+                help = "Đứng chỗ trống, rồi bấm Thử ở dòng Tự đánh quái.";
             fix = not_seen;
             break;
         }

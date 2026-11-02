@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,6 +35,10 @@ namespace gobot {
 /// is three-quarters full and one that is completely full measure much the
 /// same. That is the bug this class had -- both readings were wrong, and
 /// disagreed with each other, which was the only reason anyone noticed.
+///
+/// And the pet's HP, off the red bar in the pet's slot on the HUD's row of
+/// companion slots, under the HP and MP bars (pet_percent): found there by
+/// itself, and measured from its fill, as the game prints no figures on it.
 class VitalsReader {
 public:
     VitalsReader();
@@ -59,10 +64,26 @@ public:
     float hp_percent() const { return hp_.load(); }
     float mp_percent() const { return mp_.load(); }
 
+    /// The pet's HP, 0..100, or -1: no pet's bar found on the HUD, or what is
+    /// where it was found is not its bar now -- the pet put away, the slot
+    /// covered. Measured from the length of the bar's red fill, the only way:
+    /// the game prints no figures on it. Read off the same frames as HP and
+    /// MP, so last_read_ms() is its age too. See PetWatch for how the bar is
+    /// found and kept.
+    float pet_percent() const { return pet_.load(); }
+    /// Where the pet's bar was last found, in the window's client area; not
+    /// valid() before it has been.
+    BarSpec pet_bar() const;
+
     /// When the bars were last read, on now_ms()'s clock; 0 before the first
     /// read. A grab that fails, or no game window, leaves it where it was --
     /// and hp_percent() and mp_percent() with it, at what they read then.
     std::uint64_t last_read_ms() const { return read_at_ms_.load(); }
+
+    /// When HP last read as a figure -- 0..100, not -1 -- on now_ms()'s clock;
+    /// 0 before the first. A read that made out neither the figures nor the
+    /// bar leaves it where it was, as does a grab that fails.
+    std::uint64_t hp_seen_ms() const { return hp_seen_ms_.load(); }
 
     /// `pct`, read at `read_at_ms`, as it is to be acted on at `at_ms`:
     /// itself while it is `within_ms` old or less, otherwise -1, no reading.
@@ -71,6 +92,22 @@ public:
     /// mark on a number nobody read, and the black box shows a steady HP that
     /// was not read at all (R8R-3).
     static float if_fresh(float pct, std::uint64_t read_at_ms, std::uint64_t at_ms, std::uint64_t within_ms);
+
+    /// Whether the character counts as in the world at `at_ms`: HP read
+    /// within `within_ms` of it (hp_seen_ms). Not one unreadable frame --
+    /// those come every few seconds off the screen, and every other read as a
+    /// character dies -- but HP unread that long: a loading screen, the login
+    /// pages, a game gone. Never read is not in the world.
+    ///
+    /// Asked at the reader's last read (last_read_ms), not at the clock: grabs
+    /// that fail -- the game minimised -- leave it as the last frame had it,
+    /// as hp_percent() always did. Out of the world there was a game merely
+    /// minimised, and buffs cast again on its return as after a death.
+    static bool in_world(std::uint64_t hp_seen_ms, std::uint64_t at_ms, std::uint64_t within_ms);
+
+    /// hp_seen_ms as a read at `read_at_ms` leaves it: that read's time when
+    /// it made out HP (0..100), as it was when it did not (-1).
+    static std::uint64_t hp_seen_after(std::uint64_t seen_ms, float hp_pct, std::uint64_t read_at_ms);
 
     /// Grabs that failed at `since_ms` or after, on now_ms()'s clock -- of the
     /// last kFailuresKept -- for the log after a death.
@@ -162,7 +199,73 @@ public:
     /// hard to use, and it is the step a machine is better at: a health bar is
     /// a long flat run of one saturated colour with a dark trough after it,
     /// which is a shape nothing else in the UI has.
+    ///
+    /// Nothing else but the companion slots under the HUD, whose bars sit in
+    /// a black border inside a light grey frame -- the pet's a red one over a
+    /// purple one, stacked like HP over MP. On 2026-10-26 "Tự tìm", on frames
+    /// without the top of the HUD in them, took those two for HP and MP, and
+    /// saved HP at 137,86, 134 wide: the pet's bar. A bar in such a frame is
+    /// never HP or MP here. HP's and MP's own edge is slate (5a6373), in a
+    /// pale blue-grey frame.
     static int find_bars(const Frame& f, BarSpec& hp, BarSpec& mp);
+
+    /// The pet's HP bar in a frame, looked for in `look` (pet_band): the
+    /// widest bar there -- kPetMinWidth or more -- that sits in a companion
+    /// slot's frame, a light grey frame and a black border inside it on
+    /// either side, alike on both, and has the red of a fill at its left end.
+    /// On the player's client, 1366x768, it is the slot with two portraits
+    /// and the pet's food ("Thức Ăn") beside them: its upper bar, red, 112
+    /// wide, at 137,86..91 under the landmark at 44,4. The slot's lower bar,
+    /// purple with tick marks, is not the pet's HP -- nor is the grabbed
+    /// picture GoC calls pet_hp_indicator, which looks like it -- and it is
+    /// not red; the HP bar, red and wider, has no such frame round it; and
+    /// the other slots' bars are a third as wide.
+    ///
+    /// `out` is the bar's full width -- along the black border over it, or
+    /// under it, which runs to the right-hand border whatever the fill; not
+    /// along its own rows, where past the fill is its empty part, a colour
+    /// not to depend on -- and the rows of it that are the colour of its
+    /// middle row, within kPetTolerance -- not the paler highlight along its
+    /// top -- in that colour. False, and `out` untouched, when there is none:
+    /// no pet out, or one with no HP left, which leaves no red to know the
+    /// bar by.
+    static bool find_pet_bar(const Frame& f, const ScreenRect& look, BarSpec& out);
+
+    /// Where the pet's bar is looked for, given the HP and MP bars: under
+    /// them, from just below the lower of the two down through the row of
+    /// companion slots -- kPetBandDepth rows, which stops short of the
+    /// party's panels further down -- and from kPetBandLeft left of them to
+    /// kPetBandRight right of them. It follows the bars, and so the landmark.
+    static ScreenRect pet_band(const BarSpec& hp, const BarSpec& mp);
+
+    /// Whether the pet's bar is still where `bar` says: on each of its rows
+    /// the black border and the light grey frame either side of it, alike on
+    /// both. Not its fill -- a pet with no HP left has none -- so a bar found
+    /// once is kept through 0, while a slot gone, or a window over it, is no
+    /// bar: no reading, never an empty bar's 0%.
+    static bool pet_frame_holds(const Frame& f, const BarSpec& bar);
+
+    /// The pet's bar from frame to frame, as the reader follows it: looked
+    /// for (find_pet_bar, in pet_band of the HP and MP bars) until it is
+    /// found, and again whenever it is not where it was (pet_frame_holds) --
+    /// the HUD moved, the pet put away -- at most every kPetLookMs; and kept
+    /// meanwhile, so a pet at 0 HP, with no red left to find its bar by,
+    /// still reads 0 where its bar was. Exposed for tests; the reader's
+    /// thread has one.
+    struct PetWatch {
+        BarSpec       bar;              ///< where it was last found; not valid() before
+        std::uint64_t looked_ms = 0;    ///< when it was last looked for; 0 never
+
+        /// The pet's HP in `f` at `at_ms`: 0..100, or -1 for no bar, or none
+        /// where it was. `hp` and `mp` are where the HP and MP bars are.
+        float read(const Frame& f, const BarSpec& hp, const BarSpec& mp, std::uint64_t at_ms);
+    };
+    static constexpr std::uint64_t kPetLookMs = 2000;
+    static constexpr int kPetMinWidth = 60;
+    static constexpr int kPetTolerance = 80;
+    static constexpr int kPetBandLeft = 100;
+    static constexpr int kPetBandRight = 200;
+    static constexpr int kPetBandDepth = 76;
 
     /// Whether a bar's geometry still matches what is on screen.
     ///
@@ -176,6 +279,27 @@ public:
     /// Tolerant by a few pixels, so the reader does not churn on a detector
     /// that lands one pixel left of where it did last time.
     static bool bars_differ(const BarSpec& a, const BarSpec& b);
+
+    /// Whether two bars sit as the game draws HP and MP: the same left edge,
+    /// give or take a few pixels, MP under HP and close by, and about as wide
+    /// -- the arrangement find_bars looks for first. Only such a pair moves
+    /// the bars by itself (relocated), or is taken by the simple screen's "Tự
+    /// tìm"; the fallback find_bars answers with when it finds none is for the
+    /// full screen's FIND THE BARS, which draws it for the player to judge.
+    static bool bars_paired(const BarSpec& hp, const BarSpec& mp);
+
+    /// Whether a look at `f` finds the bars somewhere else than `hp` and `mp`:
+    /// find_bars' HP and MP there, drawn as a pair (bars_paired), into
+    /// `new_hp` and `new_mp`, and different enough (bars_differ). What the
+    /// reader's auto-relocation goes by, a look at a time.
+    static bool relocated(const Frame& f, const BarSpec& hp, const BarSpec& mp, BarSpec& new_hp,
+                          BarSpec& new_mp);
+
+    /// Whether a bar's colour is a fill colour of its bar at all: HP's red
+    /// (`hp`), MP's blue, its own channel strong and well over the others.
+    /// One that is not -- learned off something else -- is put back to the
+    /// game's own (kHpFill, kMpFill) when the landmark places the bars.
+    static bool reads_as_fill(const BarSpec& s, bool hp);
 
     /// Work the bars out again when they stop matching. On by default: the
     /// game's HUD can be resized from its own settings, and the alternative is
@@ -198,7 +322,15 @@ public:
     };
     Stats stats() const;
 
-    /// Measure one bar against a frame. Exposed for tests.
+    /// Measure one bar against a frame: 0..100, or -1 when what is there is
+    /// not a bar at all. Exposed for tests.
+    ///
+    /// -1 rather than 0 for anything that is neither a fill nor an empty
+    /// trough -- the black of a capture with nothing in it, a picture that
+    /// changes from pixel to pixel, anything light with none of the fill
+    /// colour in it (a bright bar of another colour, say) -- because 0% is
+    /// what fires the potion, and a screen with no character on it (loading,
+    /// the login pages, a window in front) must not read as an empty bar.
     static float measure(const Frame& f, const BarSpec& spec);
 
     /// Longest bar this will read across. Wider specs are measured over this
@@ -213,8 +345,28 @@ private:
     std::atomic<bool>  auto_relocate_{true};
     std::atomic<float> hp_{-1.0f};
     std::atomic<float> mp_{-1.0f};
+    std::atomic<float> pet_{-1.0f};
     std::atomic<std::uint64_t> read_at_ms_{0};
+    std::atomic<std::uint64_t> hp_seen_ms_{0};
     std::thread        thread_;
+
+    /// The frame of the first read that makes out no HP after one that did,
+    /// kept in vitals_debug for what was on it -- at most one every
+    /// kKeepFrameGapMs, the newest kKeptFrames -- written off the reader's
+    /// thread (keeping_). The reader thread's alone.
+    void keep_unreadable_frame(const Frame& f, bool from_screen, float mp_pct);
+    bool          hp_was_read_ = false;
+    std::uint64_t kept_frame_ms_ = 0;
+    static constexpr std::uint64_t kKeepFrameGapMs = 10000;
+    static constexpr std::size_t   kKeptFrames = 20;
+    /// A kept frame being written; its destructor waits for the write, which
+    /// touches nothing of the reader's.
+    std::future<void> keeping_;
+
+    /// The pet's bar, followed: the reader thread's alone -- locate_anchor,
+    /// on that thread, moves it with the landmark. pet_bar_, under mutex_,
+    /// is the copy the window reads.
+    PetWatch      pet_watch_;
 
     int           disagreements_ = 0;
     std::uint64_t last_check_ms_ = 0;
@@ -250,12 +402,14 @@ private:
     /// Find the landmark again when it has been lost, but not every frame:
     /// it does not move while the HUD is up, so re-finding it constantly is
     /// work for nothing. Checked afresh when a read fails, which is the only
-    /// time the answer can have changed.
-    bool locate_anchor(const Frame& f);
+    /// time the answer can have changed. `recoloured` is set when a bar's
+    /// colour was no fill colour of it and was put back to the game's own.
+    bool locate_anchor(const Frame& f, bool* recoloured = nullptr);
 
     mutable std::mutex mutex_;
     BarSpec            hp_spec_;
     BarSpec            mp_spec_;
+    BarSpec            pet_bar_;
     Frame              frame_;
     GlyphFont          font_;
     Vitals             values_;

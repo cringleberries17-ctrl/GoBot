@@ -237,4 +237,34 @@ inline std::optional<MonsterState> read_monster_state(const GamePacket& p) {
     return s;
 }
 
+/// Where a plain 0x0038 of any state says its monster is, read where the
+/// three known states keep it: the state u8 at 12, the slot u32 at 16, x and
+/// y u16 at 32 and 34. For a state read_monster_state does not know -- which
+/// came by the thousand in a hunt where the monsters fought back, and in no
+/// recording -- nothing says that is where its place is, so whoever uses one
+/// has to judge it against where the monster was.
+struct MonsterSpot {
+    std::uint8_t  state = 0;
+    std::uint32_t slot = 0;
+    std::uint16_t x = 0;
+    std::uint16_t y = 0;
+};
+
+inline std::optional<MonsterSpot> read_monster_spot(const GamePacket& p) {
+    constexpr std::size_t kHeader = 8;
+    if (p.opcode != 0x0038 || !p.from_server || p.udp || p.depth != 0) return std::nullopt;
+
+    ByteReader r(p.payload);
+    MonsterSpot s;
+    r.seek(12 - kHeader);
+    s.state = r.u8();
+    r.seek(16 - kHeader);
+    s.slot = r.u32();
+    r.seek(32 - kHeader);
+    s.x = r.u16();
+    s.y = r.u16();
+    if (!r.ok()) return std::nullopt;
+    return s;
+}
+
 } // namespace gobot
