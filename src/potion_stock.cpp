@@ -350,7 +350,19 @@ Frame hotbar_picture_from(const Frame& f, int x, int y) {
 
 void PotionSettings::load(const IniFile& ini) {
     warn_below = std::clamp(ini.get_int("Potions", "warn_below", 20), 0, kMaxWarn);
+    warn_bag_below = std::clamp(ini.get_int("Potions", "warn_bag_below", 200), 0, kMaxWarnBag);
     read_every_s = std::clamp(ini.get_int("Potions", "read_every_s", 10), kMinEvery, kMaxEvery);
+}
+
+bool bag_low_now(int total, int warn_bag_below, bool& said) {
+    if (warn_bag_below <= 0) return false;
+    if (total < warn_bag_below) {
+        if (said) return false;
+        said = true;
+        return true;
+    }
+    if (total >= warn_bag_below + kBagLowRearm) said = false;
+    return false;
 }
 
 int potion_pair_gap_ms(int read_period_ms) {

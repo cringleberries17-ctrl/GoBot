@@ -10,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <thread>
 
@@ -31,6 +32,11 @@ constexpr std::uint64_t kSwitchGapMs = 2000;
 /// The target is followed from one look to the next by where it was: a plate
 /// further than this from it is another monster, the target having died.
 constexpr int kSameTargetPx = 120;
+
+/// A plate from the packets is followed by its slot and generation, which no
+/// other monster shares: as far as this from where it was, so that two
+/// monsters crossing are told apart without one being lost in a long look.
+constexpr int kSlotSamePx = 3 * kSameTargetPx;
 
 /// How far a health bar has to go down before the attacks count as hurting
 /// it: the reading wobbles by less than this.
@@ -66,14 +72,17 @@ bool near(int ax, int ay, int bx, int by, int px) {
     return dx * dx + dy * dy <= px * px;
 }
 
-/// Whether `target`, seen at `now`, is the monster last seen at `x`, `y` at
-/// `seen_ms`: no further from there than kSameTargetPx -- `slack` more, a
-/// step back having moved the view -- and not unseen for longer than a plate
-/// drops out for.
-bool same_monster(const Nameplate& target, int x, int y, std::uint64_t seen_ms, std::uint64_t now,
-                  int slack) {
-    return std::abs(target.x() - x) + std::abs(target.y() - y) <= kSameTargetPx + slack &&
-           now - seen_ms <= MobDetector::kPlayerMemoryMs;
+/// Whether `target`, seen at `now`, is the monster last seen at `x`, `y` --
+/// in `slot`, of `gen` -- at `seen_ms`: no further from there than
+/// kSameTargetPx -- `slack` more, a step back having moved the view -- and not
+/// unseen for longer than a plate drops out for. Both from the packets, with
+/// slots: the same slot and generation, within kSlotSamePx and `slack`.
+bool same_monster(const Nameplate& target, int x, int y, int slot, std::uint32_t gen, std::uint64_t seen_ms,
+                  std::uint64_t now, int slack) {
+    if (now - seen_ms > MobDetector::kPlayerMemoryMs) return false;
+    const int d = std::abs(target.x() - x) + std::abs(target.y() - y);
+    if (target.slot >= 0 && slot >= 0) return target.slot == slot && target.gen == gen && d <= kSlotSamePx + slack;
+    return d <= kSameTargetPx + slack;
 }
 
 /// The band numbers as hunt.ini keeps them: any negative is -1, "follow
@@ -150,6 +159,13 @@ bool HunterConfig::load(const std::string& path) {
     step_ms            = static_cast<std::uint32_t>(ini.get_int("Hunt", "step_ms", 180));
     attack_interval_ms = static_cast<std::uint32_t>(ini.get_int("Hunt", "attack_interval_ms", 700));
     jump_to_reach      = ini.get_bool("Hunt", "jump_to_reach", true);
+    // Missing from a file written before "Nhảy xuống bậc dưới": off, and its
+    // numbers the drop plan's, within reason -- a slip of the keyboard must
+    // not let a drop go a gate's width from a gate, nor past every floor.
+    drop_down          = ini.get_bool("Hunt", "drop_down", false);
+    drop_min_px        = std::clamp(ini.get_int("Hunt", "drop_min_px", 100), 60, 470);
+    drop_side_px       = std::clamp(ini.get_int("Hunt", "drop_side_px", 120), 20, 300);
+    drop_gate_px       = std::clamp(ini.get_int("Hunt", "drop_gate_px", 150), 40, 400);
     loot               = ini.get_bool("Hunt", "loot", false);
     loot_key           = static_cast<std::uint32_t>(ini.get_int("Hunt", "loot_key", 0));
     loot_interval_ms   = static_cast<std::uint32_t>(ini.get_int("Hunt", "loot_interval_ms", 2000));
@@ -226,6 +242,10 @@ bool HunterConfig::save(const std::string& path) const {
     ini.set_int ("Hunt", "step_ms", static_cast<int>(step_ms));
     ini.set_int ("Hunt", "attack_interval_ms", static_cast<int>(attack_interval_ms));
     ini.set_bool("Hunt", "jump_to_reach", jump_to_reach);
+    ini.set_bool("Hunt", "drop_down", drop_down);
+    ini.set_int ("Hunt", "drop_min_px", drop_min_px);
+    ini.set_int ("Hunt", "drop_side_px", drop_side_px);
+    ini.set_int ("Hunt", "drop_gate_px", drop_gate_px);
     ini.set_bool("Hunt", "loot", loot);
     ini.set_int ("Hunt", "loot_key", static_cast<int>(loot_key));
     ini.set_int ("Hunt", "loot_interval_ms", static_cast<int>(loot_interval_ms));
@@ -317,6 +337,9 @@ void Hunter::retake_spot() {
 void Hunter::suspend_spot() {
     std::lock_guard<std::mutex> lock(mutex_);
     suspend_asked_ = true;
+    // And the map drops go by: where the character now stands may be
+    // another map's (drop_watch).
+    drop_suspend_asked_ = true;
 }
 
 bool Hunter::level_with(const HunterConfig& cfg, int dy) {
@@ -394,6 +417,12 @@ void Hunter::fresh_run() {
     minute_fights_ = minute_far_ = minute_backsteps_ = 0;
     minute_returns_ = minute_return_give_ups_ = 0;
     minute_turns_ = minute_packet_facings_ = minute_missed_keys_ = 0;
+    minute_wounded_ = minute_slot_kept_ = minute_swaps_refused_ = minute_new_gen_ = 0;
+    minute_picks_ = minute_nearest_below_ = minute_nearest_above_ = 0;
+    minute_below_wait_ms_ = 0;
+    below_wait_pass_ = below_wait_at_ms_ = 0;
+    target_slot_ = -1;
+    target_gen_ = 0;
     last_engaged_ms_ = 0;
     // The frame of reference the run starts in: a change from here on is a
     // change, and the one before the start is not.
@@ -415,8 +444,34 @@ void Hunter::fresh_run() {
     return_strikes_ = 0;
     return_retry_ms_ = 0;
     said_too_high_ = false;
+    // The drop's run: a settle or a fall under way, the latch, the fails, the
+    // limits' counts and the back-off. The press record stays -- a map change
+    // after a press is the press's, a start between or not -- and so do the
+    // map book's memories, the files found wrong and the map trusted.
+    drop_ = DropState{};
+    drop_presses_.clear();
+    drop_targets_.clear();
+    last_press_ms_ = 0;
+    last_drop_worked_ms_ = 0;
+    settle_backoff_ms_ = 0;
+    drop_fails_row_ = drop_fails_run_ = 0;
+    drop_latch_ = DropOff::None;
+    drop_halt_ = false;
+    owed_passes_ = 0;
+    drop_stop_.store(DropStop::None);
+    drop_said_slot_ = -2;
+    drop_said_why_ = DropWhy::None;
+    minute_drops_ = minute_drop_worked_ = minute_drop_nothing_ = minute_drop_jump_ = 0;
+    minute_drop_rose_ = minute_drop_off_map_ = minute_drop_gate_ = minute_drop_unknown_ = 0;
     disengage();
     std::lock_guard<std::mutex> lock(mutex_);
+    status_.dropping = false;
+    status_.drops = status_.drops_worked = 0;
+    status_.drop_wait = DropWhy::None;
+    status_.drop_wait_px = 0;
+    status_.drop_wait_ms = 0;
+    status_.drop_off = DropOff::None;
+    status_.drop_map_changed = status_.drop_keys_stuck = false;
     spot_ = Spot{};
     retake_asked_ = suspend_asked_ = false;
     status_.only_skipped = false;
@@ -454,6 +509,12 @@ void Hunter::forget_positions() {
     just_stepped_ = false;
     // The hunting spot and the walk back to it stay: they are in the
     // packets' world pixels, whichever frame the plates are in.
+    //
+    // A drop's settle is let go of and its fall not judged; the press record
+    // and the in-air guard stay. The map drops go by is trusted again only
+    // by standing points, or a new entry (MapTrust::lose).
+    drop_hold("view changed");
+    trust_.lose("the plates' view changed");
 }
 
 void Hunter::stop() {
@@ -462,6 +523,7 @@ void Hunter::stop() {
     if (thread_.joinable()) thread_.join();
     disengage();
     end_fight("stopped");
+    drop_hold("stopped");
     release_movement();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -581,6 +643,9 @@ void Hunter::hop(const HunterConfig& cfg, int dy, std::uint64_t now, WalkFor wha
     // spot. Toward the spot, when it is more than a floor's slope above.
     if (!cfg.jump_to_reach || cfg.jump_key == 0) return;
     if (what == WalkFor::Target && (cfg.spot || dy >= -cfg.up_nj())) return;
+    // Nor toward a monster for kDropStayMs after a drop that worked: the hop
+    // would take the character back up the floor it came down from.
+    if (what == WalkFor::Target && last_drop_worked_ms_ != 0 && now - last_drop_worked_ms_ < kDropStayMs) return;
     if (what == WalkFor::Spot) {
         const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
         if (dy >= -static_cast<int>(std::lround(kSpotFloorPx / scale))) return;
@@ -720,7 +785,8 @@ bool Hunter::press_loot(const HunterConfig& cfg) {
 // ---------------------------------------------------------------- choosing
 
 int Hunter::choose_target(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
-                          const Nameplate* me, const std::vector<Listed>& listed) {
+                          const Nameplate* me, const std::vector<Listed>& listed, bool* wounded_picked,
+                          bool below_first) {
     const auto out = [&](std::size_t i) { return i < listed.size() && refused(listed[i]); };
     const auto first = [&](std::size_t i) {
         return i < listed.size() && listed[i] == Listed::First;
@@ -748,9 +814,13 @@ int Hunter::choose_target(const HunterConfig& cfg, const std::vector<Nameplate>&
             // Hurt, and within reach of where the character stands: one
             // across the screen at 90% -- or a bar misread at 0.97 -- beat a
             // whole one in reach, and the character turned its back on what
-            // was hitting it.
+            // was hitting it. A plate from the packets has its bar lowered by
+            // anyone's blows: finished first only once your id is proven the
+            // hitter's, and not while another player is hitting it -- theirs
+            // to finish, not a kill of yours.
+            const bool may_finish = n.slot < 0 || (n.actor_checked && !n.hurt_by_other);
             const bool hurt_here =
-                cfg.finish_wounded && in_reach(cfg, n.x() - me->x(), n.y() - me->y());
+                cfg.finish_wounded && may_finish && in_reach(cfg, n.x() - me->x(), n.y() - me->y());
             if (nearest < 0) nearest = at;
             if (hurt_here && (wounded < 0 || n.hp < hp_of(wounded))) wounded = at;
             if (first(i)) {
@@ -767,7 +837,26 @@ int Hunter::choose_target(const HunterConfig& cfg, const std::vector<Nameplate>&
         // Finish something already hurt instead of starting afresh. Only
         // among those it can reach from where it stands, so this never sends
         // it chasing across the screen.
-        if (wounded >= 0 && hp_of(wounded) < 1.0f) target = wounded;
+        if (wounded >= 0 && hp_of(wounded) < 1.0f) {
+            if (wounded_picked && wounded != target) *wounded_picked = true;
+            target = wounded;
+        }
+    }
+
+    // Nothing level, with a drop able to go: the nearest from the packets far
+    // enough below to be dropped to, before one above that the plates' measure
+    // -- height counted three times -- puts nearer, which a hop would chase.
+    // The player's answer 1 of 2026-11-04: a monster on the floor below is
+    // dropped to when the character's own floor has none.
+    if (target < 0 && me && below_first) {
+        for (std::size_t i = 0; i < mobs.size(); ++i) {
+            const Nameplate& n = mobs[i];
+            if (n.slot >= 0 && n.hp > cfg.dead_below && !out(i) &&
+                n.y() - me->y() > std::max(cfg.down(), cfg.drop_min_px)) {
+                target = static_cast<int>(i);
+                break;
+            }
+        }
     }
 
     // Nothing level, or no idea where we are: the nearest that still has
@@ -802,6 +891,49 @@ int Hunter::choose_in_reach(const HunterConfig& cfg, const std::vector<Nameplate
         }
     }
     return best_first >= 0 ? best_first : best;
+}
+
+int Hunter::nearest_off_level(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                              const std::vector<Listed>& listed) {
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+        const Nameplate& n = mobs[i];
+        if (n.hp <= cfg.dead_below) continue;
+        if (i < listed.size() && refused(listed[i])) continue;
+        const int dy = n.y() - me.y();
+        if (level_with(cfg, dy)) return 0;
+        return dy > 0 ? 1 : -1;
+    }
+    return 0;
+}
+
+bool Hunter::below_in_reach(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                            const std::vector<Listed>& listed) {
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+        const Nameplate& n = mobs[i];
+        if (n.hp <= cfg.dead_below) continue;
+        if (i < listed.size() && refused(listed[i]) && listed[i] != Listed::GaveUp) continue;
+        if (n.y() - me.y() > cfg.down() && std::abs(n.x() - me.x()) <= cfg.reach) return true;
+    }
+    return false;
+}
+
+void Hunter::note_pick(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                       const std::vector<Listed>& listed) {
+    ++minute_picks_;
+    const int off = nearest_off_level(cfg, mobs, me, listed);
+    if (off > 0) ++minute_nearest_below_;
+    if (off < 0) ++minute_nearest_above_;
+}
+
+void Hunter::note_wait(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                       const std::vector<Listed>& listed, std::uint64_t now) {
+    if (!below_in_reach(cfg, mobs, me, listed)) return;
+    // From the last pass that waited so to this one: a pass between that did
+    // not breaks the run, and no gap counts for more than 250 ms.
+    if (below_wait_pass_ != 0 && below_wait_pass_ + 1 == passes_ && now > below_wait_at_ms_)
+        minute_below_wait_ms_ += std::min<std::uint64_t>(now - below_wait_at_ms_, 250);
+    below_wait_pass_ = passes_;
+    below_wait_at_ms_ = now;
 }
 
 std::vector<Hunter::Listed> Hunter::judge(const HunterConfig& cfg,
@@ -930,7 +1062,7 @@ void Hunter::track_fight(const HunterConfig& cfg, const Nameplate& target, std::
     FightLog& f = fight_;
     // Somewhere other than where the target was, or after longer than the
     // character goes unseen for a moment: another monster, another fight.
-    if (f.on && !same_monster(target, f.x, f.y, f.seen_ms, now, slack)) end_fight("another target");
+    if (f.on && !same_monster(target, f.x, f.y, f.slot, f.gen, f.seen_ms, now, slack)) end_fight("another target");
     if (!f.on) {
         f = FightLog{};
         f.on = true;
@@ -938,7 +1070,54 @@ void Hunter::track_fight(const HunterConfig& cfg, const Nameplate& target, std::
     }
     f.x = target.x();
     f.y = target.y();
+    f.slot = target.slot;
+    f.gen = target.gen;
     f.seen_ms = now;
+}
+
+void Hunter::aim_at(const Nameplate& n) {
+    target_x_ = n.x();
+    target_y_ = n.y();
+    target_slot_ = n.slot;
+    target_gen_ = n.gen;
+}
+
+int Hunter::find_target(const std::vector<Nameplate>& mobs, int slack, bool* respawned, int* nearest) const {
+    // The plate nearest where the target was: the rule for the screen's
+    // plates, and what that rule would have taken.
+    int near_at = -1, near_d = 0;
+    bool slots = false;
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+        const Nameplate& n = mobs[i];
+        if (n.slot >= 0) slots = true;
+        const int d = std::abs(n.x() - target_x_) + std::abs(n.y() - target_y_);
+        if (near_at < 0 || d < near_d) {
+            near_at = static_cast<int>(i);
+            near_d = d;
+        }
+    }
+    if (nearest) *nearest = near_at;
+    if (target_slot_ < 0 || !slots) return near_at >= 0 && near_d <= kSameTargetPx + slack ? near_at : -1;
+
+    // From the packets: its slot, and in it the same monster. A plate nearer
+    // where it was is another one walking past; its slot with a new
+    // generation is the next monster, spawned where it died.
+    int at = -1, at_d = 0;
+    for (std::size_t i = 0; i < mobs.size(); ++i) {
+        const Nameplate& n = mobs[i];
+        if (n.slot != target_slot_) continue;
+        if (n.gen != target_gen_) {
+            if (respawned) *respawned = true;
+            continue;
+        }
+        const int d = std::abs(n.x() - target_x_) + std::abs(n.y() - target_y_);
+        if (d > kSlotSamePx + slack) continue;
+        if (at < 0 || d < at_d) {
+            at = static_cast<int>(i);
+            at_d = d;
+        }
+    }
+    return at;
 }
 
 void Hunter::end_fight(const char* why) {
@@ -982,9 +1161,11 @@ void Hunter::follow_back_steps(const Nameplate& target, std::uint64_t now, int s
     // monster, by which the step cannot be judged. A fight ended and begun
     // again on the same one -- its bar misread as empty -- is not. The steps
     // counted each way go on either way (retreat_).
-    if (b.seen_ms != 0 && !same_monster(target, b.x, b.y, b.seen_ms, now, slack)) b = BackSteps{};
+    if (b.seen_ms != 0 && !same_monster(target, b.x, b.y, b.slot, b.gen, b.seen_ms, now, slack)) b = BackSteps{};
     b.x = target.x();
     b.y = target.y();
+    b.slot = target.slot;
+    b.gen = target.gen;
     b.seen_ms = now;
 }
 
@@ -993,9 +1174,11 @@ void Hunter::follow_watch(const Nameplate& target, std::uint64_t now, int slack)
     // As the steps back: another monster, or this one gone too long, and the
     // watch begins again. A plate missing for a look, or a bar misread as
     // empty once, leaves it where it was.
-    if (w.seen_ms != 0 && !same_monster(target, w.x, w.y, w.seen_ms, now, slack)) w = DamageWatch{};
+    if (w.seen_ms != 0 && !same_monster(target, w.x, w.y, w.slot, w.gen, w.seen_ms, now, slack)) w = DamageWatch{};
     w.x = target.x();
     w.y = target.y();
+    w.slot = target.slot;
+    w.gen = target.gen;
     w.seen_ms = now;
 }
 
@@ -1007,6 +1190,13 @@ bool Hunter::no_damage(const HunterConfig& cfg, const Nameplate& target, std::ui
     } else if (target.hp <= w.ref_hp - kDamageStep) {
         // Hurt: the clock starts again.
         w.ref_hp = target.hp;
+        w.quiet_ms = 0;
+    }
+    // A plate from the packets says when you last hurt it: a blow of yours
+    // since the last look is damage too, though a big monster's bar moves
+    // less than kDamageStep for it. The screen's plates have only the bar.
+    if (target.slot >= 0 && target.hurt_ms > w.hurt_seen_ms) {
+        w.hurt_seen_ms = target.hurt_ms;
         w.quiet_ms = 0;
     }
     // Only time spent attacking it counts -- not walking to it, not a hold
@@ -1033,18 +1223,32 @@ const char* Hunter::step_went_wrong(const Nameplate& me, const Nameplate& target
 }
 
 void Hunter::minute_log(const HunterConfig& cfg, std::uint64_t now) {
-    std::uint64_t dropped = 0;
+    std::uint64_t dropped = 0, repicked = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (minute_from_ms_ == 0) {
             minute_from_ms_ = now;
             minute_dropped_ = status_.targets_dropped;
+            minute_repicked_ = status_.targets_repicked;
             return;
         }
         if (now - minute_from_ms_ < 60'000) return;
         dropped = status_.targets_dropped - minute_dropped_;
         minute_dropped_ = status_.targets_dropped;
+        repicked = status_.targets_repicked - minute_repicked_;
+        minute_repicked_ = status_.targets_repicked;
     }
+    // Of those given up, the ones picked straight back, in reach a moment
+    // before: said apart, or every fight's re-pick reads as a monster out of
+    // reach -- ten a minute in the farm of 2026-11-03, when none was.
+    char repicks[128] = "";
+    if (repicked > 0 && !cfg.goc_rules())
+        std::snprintf(repicks, sizeof repicks, " (%llu of them in reach: re-picked every %u s, Như trước)",
+                      static_cast<unsigned long long>(repicked), cfg.give_up_ms / 1000);
+    else if (repicked > 0)
+        std::snprintf(repicks, sizeof repicks,
+                      " (%llu of them picked straight back: a hold or the game behind, not out of reach)",
+                      static_cast<unsigned long long>(repicked));
     // With the hunting spot on, the walks back to it and those given up on too.
     // Last, the turns to a target the hunter tapped, and the times the
     // packets put right which way it took the character to face -- Left or
@@ -1055,24 +1259,57 @@ void Hunter::minute_log(const HunterConfig& cfg, std::uint64_t now) {
     // a key of the hunter's own the game never took -- which the last number
     // counts on its own (kFacingMissedMs).
     const bool turned = minute_turns_ > 0 || minute_packet_facings_ > 0;
+    // Then the most wounded taken over the nearest; and with the packets'
+    // plates, the target kept by its slot, the swaps that refused, and the
+    // respawns in its slot not taken for it.
+    const bool slotted = minute_slot_kept_ > 0 || minute_swaps_refused_ > 0 || minute_new_gen_ > 0;
+    char packets[160] = "";
+    if (slotted)
+        std::snprintf(packets, sizeof packets,
+                      "; with the packets' plates: slot kept %d, swaps refused %d, new generation %d",
+                      minute_slot_kept_, minute_swaps_refused_, minute_new_gen_);
+    // And for the drop-down to come: the picks whose nearest monster stood
+    // off the level, and the time spent waiting, nothing in reach, with one
+    // below within reach across -- each only when there was any.
+    char levels[160] = "";
+    int used = 0;
+    if (minute_nearest_below_ > 0 || minute_nearest_above_ > 0)
+        used = std::snprintf(levels, sizeof levels, "; nearest off level: below %d, above %d of %d picks",
+                             minute_nearest_below_, minute_nearest_above_, minute_picks_);
+    if (minute_below_wait_ms_ > 0 && used >= 0 && static_cast<std::size_t>(used) < sizeof levels)
+        std::snprintf(levels + used, sizeof levels - static_cast<std::size_t>(used),
+                      "; waiting while a monster below was in reach: %.1f s",
+                      static_cast<double>(minute_below_wait_ms_) / 1000.0);
+    // And the drops this minute, only when one was pressed: what came of
+    // each. Apart from the given up: a target a drop passed over is not one.
+    const std::string drops = drop_minute_text();
+    const bool more = minute_wounded_ > 0 || slotted || levels[0] != '\0' || !drops.empty();
     if (cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || minute_returns_ > 0 ||
-                     minute_return_give_ups_ > 0 || turned))
-        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up, "
+                     minute_return_give_ups_ > 0 || turned || more))
+        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up%s, "
                 "%d walks back to the spot, %d of them given up, "
-                "%d turns (%d facings put right by the packets, %d of them keys the game missed)",
+                "%d turns (%d facings put right by the packets, %d of them keys the game missed), "
+                "wounded picked %d%s%s%s",
                 minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
-                static_cast<unsigned long long>(dropped), minute_returns_, minute_return_give_ups_,
-                minute_turns_, minute_packet_facings_, minute_missed_keys_);
-    else if (!cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || turned))
-        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up, "
-                "%d turns (%d facings put right by the packets, %d of them keys the game missed)",
+                static_cast<unsigned long long>(dropped), repicks, minute_returns_, minute_return_give_ups_,
+                minute_turns_, minute_packet_facings_, minute_missed_keys_, minute_wounded_, packets, levels,
+                drops.c_str());
+    else if (!cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || turned || more))
+        GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up%s, "
+                "%d turns (%d facings put right by the packets, %d of them keys the game missed), "
+                "wounded picked %d%s%s%s",
                 minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
-                static_cast<unsigned long long>(dropped), minute_turns_, minute_packet_facings_,
-                minute_missed_keys_);
+                static_cast<unsigned long long>(dropped), repicks, minute_turns_, minute_packet_facings_,
+                minute_missed_keys_, minute_wounded_, packets, levels, drops.c_str());
     minute_from_ms_ = now;
     minute_fights_ = minute_far_ = minute_backsteps_ = 0;
     minute_returns_ = minute_return_give_ups_ = 0;
     minute_turns_ = minute_packet_facings_ = minute_missed_keys_ = 0;
+    minute_wounded_ = minute_slot_kept_ = minute_swaps_refused_ = minute_new_gen_ = 0;
+    minute_picks_ = minute_nearest_below_ = minute_nearest_above_ = 0;
+    minute_below_wait_ms_ = 0;
+    minute_drops_ = minute_drop_worked_ = minute_drop_nothing_ = minute_drop_jump_ = 0;
+    minute_drop_rose_ = minute_drop_off_map_ = minute_drop_gate_ = minute_drop_unknown_ = 0;
 }
 
 void Hunter::face_from_packets(const HunterConfig& cfg) {
@@ -1644,6 +1881,20 @@ void Hunter::pass() {
             status_.no_target_since_ms = clock_now();
     };
 
+    // "Nhảy xuống bậc dưới": the keys a drop owes, where the packets put the
+    // character for it, the map it goes by, and a map change after a press
+    // -- every pass, a hold on or not, the game in front or not. With
+    // drop_down off and no press of the last kPressWatchMs, nothing. Halted
+    // -- the map changed after a press, or a key-up stays owed -- the
+    // hunter moves nothing until GoBot's window has stopped it.
+    drop_watch(cfg, clock_now());
+    if (drop_halt_) {
+        let_go_of_moves(cfg);
+        disengage();
+        set_state(State::Idle, false);
+        return;
+    }
+
     // A hold -- a revive, a trash pass, a chat line, a popup being closed --
     // refuses every key while it is on, so there is no fight meanwhile; and
     // whatever it did may have turned the character, so which way it faces
@@ -1659,6 +1910,7 @@ void Hunter::pass() {
         disengage();
         let_go_of_moves(cfg);
         reach_ms_ = clock_now();
+        drop_hold("a hold");
     }
 
     // A held walk with the game no longer in front is let go of whatever
@@ -1670,10 +1922,14 @@ void Hunter::pass() {
         facing_ = Facing::Unknown;
         disengage();
         reach_ms_ = clock_now();
+        drop_hold("the game not in front");
         set_state(State::Unfocused, false);
         return;
     }
     minute_log(cfg, clock_now());
+    // A drop's fall judged, by this pass's fix; a settle not renewed at the
+    // last pass let go of. Nothing is pressed here.
+    drop_follow(cfg, clock_now());
 
     // What the last kill dropped. A few presses, spaced so the game sees
     // each one, before anything else is chased -- walking off to the next
@@ -1749,38 +2005,35 @@ void Hunter::pass() {
     // for staying out of reach.
     if (!gave_up_.empty()) mark_gave_up(mobs, now, listed);
     // Outside the hunting spot's area and out of reach: not walked to. The
-    // current target -- the plate nearest where it was, as below -- only
-    // once kSpotKeepPx past the edge.
+    // current target -- found as below (find_target) -- only once
+    // kSpotKeepPx past the edge.
     if (spot_mode_ == SpotMode::Use) {
-        int target_at = -1, target_d = 0;
-        if (have_target_) {
-            for (std::size_t i = 0; i < mobs.size(); ++i) {
-                const int d = std::abs(mobs[i].x() - target_x_) + std::abs(mobs[i].y() - target_y_);
-                if (target_at < 0 || d < target_d) {
-                    target_at = static_cast<int>(i);
-                    target_d = d;
-                }
-            }
-            if (target_d > kSameTargetPx + slack) target_at = -1;
-        }
+        const int target_at = have_target_ ? find_target(mobs, slack) : -1;
         mark_out_of_area(cfg, mobs, me, target_at, listed);
     }
 
     // Stay on the current target while it is still there. Re-picking the
     // nearest every frame makes the bot oscillate between two monsters a
-    // similar distance away and never reach either.
+    // similar distance away and never reach either. A plate from the packets
+    // is found by its slot and generation (find_target): another monster
+    // walking past where it was is not taken for it.
     const Nameplate* target = nullptr;
     if (have_target_) {
-        int best = 0;
+        bool respawned = false;
+        int nearest = -1;
+        const int found = find_target(mobs, slack, &respawned, &nearest);
         std::size_t at = 0;
-        for (std::size_t i = 0; i < mobs.size(); ++i) {
-            const Nameplate& n = mobs[i];
-            const int d = std::abs(n.x() - target_x_) + std::abs(n.y() - target_y_);
-            if (!target || d < best) { target = &n; best = d; at = i; }
-        }
-        // Too far from where it was: it died and this is a different one.
-        if (best > kSameTargetPx + slack) {
-            target = nullptr;
+        if (found >= 0) {
+            at = static_cast<std::size_t>(found);
+            target = &mobs[at];
+            if (target_slot_ >= 0 && target->slot >= 0) {
+                ++minute_slot_kept_;
+                if (nearest != found) ++minute_swaps_refused_;
+            }
+        } else {
+            // Too far from where it was -- or its slot empty, or holding the
+            // next monster: it died and this is a different one.
+            if (respawned) ++minute_new_gen_;
             loot_left_ = 3;
             disengage();
             end_fight("gone");
@@ -1827,9 +2080,13 @@ void Hunter::pass() {
         if (reach_now) reach_ms_ = now;
         if (reach_now && cfg.goc_rules()) target_since_ms_ = now;
         if (target && now - target_since_ms_ > cfg.give_up_ms) {
+            // In reach at a look of give_up_ms, it is picked straight back:
+            // counted apart too (targets_repicked).
+            const bool repicked = now - reach_ms_ <= cfg.give_up_ms;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++status_.targets_dropped;
+                if (repicked) ++status_.targets_repicked;
             }
             // Out of reach for the whole of give_up_ms: passed over for twice
             // as long, on "Đánh trước" or not -- picked again at once, one
@@ -1839,7 +2096,7 @@ void Hunter::pass() {
             // of reach among them -- it is picked straight back, as it always
             // was. Said, with where it was, for what a jump could reach.
             const int gdx = target->x() - me.x(), gdy = target->y() - me.y();
-            if (now - reach_ms_ > cfg.give_up_ms) {
+            if (!repicked) {
                 GB_INFO("Hunter: gave up on %s out of reach after %u s: %d px %s, %d px %s -- passed "
                         "over for %u s",
                         target->name.empty() ? "a monster" : target->name.c_str(), cfg.give_up_ms / 1000,
@@ -1889,10 +2146,18 @@ void Hunter::pass() {
             }
         }
     }
+    // A fresh pick, counted for the minute line once it is taken up (note_pick).
+    bool fresh_pick = false;
     if (!target) {
         Nameplate me_now;
         const bool have_me = see_player(me_now);
-        const int pick = choose_target(cfg, mobs, have_me ? &me_now : nullptr, listed);
+        bool wounded = false;
+        // With nothing on the level, one below that a drop could go to now
+        // before any other (choose_target): never with drops off, off for the
+        // run, the map not trusted, or the spot on but not in use.
+        const bool below_first = drop_wanted(cfg) && drop_latch_ == DropOff::None && trust_.trusted() &&
+                                 (!cfg.spot || spot_mode_ == SpotMode::Use);
+        const int pick = choose_target(cfg, mobs, have_me ? &me_now : nullptr, listed, &wounded, below_first);
 
         // Everything in view reads as finished, or the lists rule all of it
         // out. Standing still beats swinging at a corpse, which holds the
@@ -1909,6 +2174,7 @@ void Hunter::pass() {
                 else if (refused(listed[i]))             ruled_out = true;
             }
             // Nothing to fight: back to the spot, as with no monster at all.
+            note_wait(cfg, mobs, me, listed, now);
             const bool home = go_home(cfg, now);
             if (!home) let_go_of_moves(cfg);
             disengage();
@@ -1925,10 +2191,12 @@ void Hunter::pass() {
         target_first_ = listed[static_cast<std::size_t>(pick)] == Listed::First;
         target_since_ms_ = now;
         reach_ms_ = now;
+        if (wounded) ++minute_wounded_;
+        fresh_pick = true;
     }
 
-    target_x_ = target->x();
-    target_y_ = target->y();
+    // Where it is, and which it is: the next look finds it by these.
+    aim_at(*target);
     have_target_ = true;
     track_fight(cfg, *target, now, slack);
     follow_back_steps(*target, now, slack);
@@ -1960,6 +2228,10 @@ void Hunter::pass() {
         status_.dy = dy;
         status_.no_target_since_ms = 0;
     }
+
+    // Taken up: one in reach, or one walked to. Standing still, one out of
+    // reach is not -- the next pass picks afresh, at every pass it waits.
+    if (fresh_pick && (!still || in_reach(cfg, dx, dy))) note_pick(cfg, mobs, me, listed);
 
     if (in_reach(cfg, dx, dy)) {
         let_go_of_moves(cfg);
@@ -2026,7 +2298,7 @@ void Hunter::pass() {
             const int ms = room < kSpotStepRoomPx ? 0 : static_cast<int>(std::lround(room / scale * 1000.0 / kWalkPxPerS));
             room_ms = ms < 50 + kTurnTapMs ? 0 : ms;
         }
-        if (cfg.keep_distance && !still && !just_stepped_ && adx < away && !held &&
+        if (cfg.keep_distance && !still && !just_stepped_ && adx < away && !held && !drop_in_air(now) &&
             !retreat.blocked && !back_.judge && retreat.in_row < most &&
             std::abs(dy) <= std::max(cfg.up_nj(), cfg.down_nj()) && (!in_area || room_ms > 0)) {
             // Off before the key goes out: no skill is thrown as the step
@@ -2135,14 +2407,18 @@ void Hunter::pass() {
         bool home = false;
         if (in >= 0) {
             const std::size_t i = static_cast<std::size_t>(in);
-            target_x_ = mobs[i].x();
-            target_y_ = mobs[i].y();
+            // Its slot with its place: kept by the slot of the one out of
+            // reach, the next look would go back to that one, and never
+            // attack this one.
+            aim_at(mobs[i]);
             target_first_ = listed[i] == Listed::First;
             target_since_ms_ = now;
             reach_ms_ = now;
             spot_busy(now);
+            if (fresh_pick) note_pick(cfg, mobs, me, listed);
         } else {
             have_target_ = false;
+            note_wait(cfg, mobs, me, listed, now);
             home = go_home(cfg, now);
         }
         if (!home) let_go_of_moves(cfg);
@@ -2159,6 +2435,10 @@ void Hunter::pass() {
         let_go_of_moves(cfg);
         return;
     }
+    // A target below: dropped to through the platform underfoot when the
+    // rules allow (drop_rule) -- settled first, then Ctrl + ↓ -- and held
+    // still while it falls. Otherwise walked to, as ever.
+    if (drop_toward(cfg, *target, me, mobs, listed, dx, dy, now)) return;
     walk(cfg, dx, dy, now);
 }
 

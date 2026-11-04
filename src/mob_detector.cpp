@@ -229,6 +229,19 @@ void MobDetector::stop() {
     GB_INFO("Mob detector stopped");
 }
 
+void MobDetector::set_period_ms(int ms) {
+    ms = std::clamp(ms, kMinPeriodMs, kMaxPeriodMs);
+    const int was = period_ms_.exchange(ms);
+    if (ms >= was) return;      // the same, asked again every pass; or longer, from the next wait
+    {
+        // Under the wait's lock, as stop() does it: the loop either sees
+        // wake_now_ before it waits, or is waiting when the wake-up comes.
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        wake_now_ = true;
+    }
+    wake_.notify_all();
+}
+
 std::vector<Nameplate> MobDetector::detect(const Frame& f, const DetectorTuning& given,
                                            const GlyphFont* font, Cost* cost) {
     Cost spent;
@@ -520,13 +533,17 @@ void MobDetector::loop() {
 
     while (running_.load()) {
         {
-            // kLookGapMs between looks, cut short by stop(): it is stopped by
-            // GoBot's own thread at every hunt's end, and a plain sleep held
-            // the window -- and F12 -- until it was out.
+            // period_ms_ between looks -- kLookGapMs, or longer while the
+            // packets steer -- cut short by stop() and by a shorter period
+            // asked for (set_period_ms). It is stopped by GoBot's own thread at
+            // every hunt's end, and a plain sleep held the window -- and F12 --
+            // until it was out.
             std::unique_lock<std::mutex> lock(wake_mutex_);
-            if (wake_.wait_for(lock, std::chrono::milliseconds(kLookGapMs), [this] { return !running_.load(); }))
-                break;
+            wake_.wait_for(lock, std::chrono::milliseconds(period_ms_.load()),
+                           [this] { return wake_now_ || !running_.load(); });
+            wake_now_ = false;
         }
+        if (!running_.load()) break;
 
         const std::uint64_t generation = generation_.load();   // before the window: see set_target_window()
         void* hwnd = hwnd_.load();
@@ -657,16 +674,29 @@ void MobDetector::find_character(const Frame& f, const DetectorTuning& t,
 
     // Said once each way round, so a character that cannot be found says so
     // instead of the bot silently standing still -- but not for a plate gone
-    // a moment, as it is several times a minute: for one gone longer than
-    // the detector remembers it.
-    const int say = sightings_.note(got, now_ms(), kPlayerMemoryMs);
+    // a moment, as it is several times a minute: for one gone as many looks
+    // as 1.5 s is at 140 ms, which is about 6 s while the detector rests.
+    const std::uint64_t grace = sightings_grace_ms(period_ms_.load());
+    const int say = sightings_.note(got, now_ms(), grace);
     if (say > 0) GB_INFO("Found your character \"%s\" at %d,%d", want.c_str(),
                          me.plate.cx(), me.plate.y);
-    if (say < 0) GB_WARN("Cannot find \"%s\" on screen for over %.1f s -- check it against the "
-                         "name the game writes under your feet",
-                         want.c_str(), static_cast<double>(kPlayerMemoryMs) / 1000.0);
+    // While the packets steer, the hunt goes by them and not by this plate:
+    // said, the same words, and not as a warning.
+    if (say < 0 && !packets_steer_.load())
+        GB_WARN("Cannot find \"%s\" on screen for over %.1f s -- check it against the "
+                "name the game writes under your feet",
+                want.c_str(), static_cast<double>(grace) / 1000.0);
+    else if (say < 0)
+        GB_INFO("Cannot find \"%s\" on screen for over %.1f s -- the packets steer, so the hunt does not need it",
+                want.c_str(), static_cast<double>(grace) / 1000.0);
     if (!got) return;
     out.push_back(me);
+}
+
+std::uint64_t MobDetector::sightings_grace_ms(int period_ms) {
+    const std::uint64_t looks = kPlayerMemoryMs / static_cast<std::uint64_t>(kLookGapMs);
+    const std::uint64_t gap = static_cast<std::uint64_t>(period_ms > 0 ? period_ms : kLookGapMs);
+    return std::max(kPlayerMemoryMs, looks * gap);
 }
 
 int MobDetector::PlayerSightings::note(bool got, std::uint64_t now, std::uint64_t grace_ms) {

@@ -69,6 +69,20 @@ struct Nameplate {
     std::string name;
     float       name_confidence = 0.0f;
 
+    /// Which monster it is, for a plate made from the game's packets
+    /// (PacketEyes): its slot on the map, and the generation of the slot's
+    /// monster, which a respawn changes (PacketWorld::Mob::gen). -1 and 0 for
+    /// the screen's plates, which only where they stand tells apart.
+    std::int32_t  slot = -1;
+    std::uint32_t gen = 0;
+    /// A packet plate's blows: when you last hurt it (0 for never); whether
+    /// someone else has hurt it since, in the last few seconds; and whether
+    /// your id has been proven the hitter's at all -- before that, neither
+    /// of the two is to be gone by. Nothing for the screen's plates.
+    std::uint64_t hurt_ms = 0;
+    bool          hurt_by_other = false;
+    bool          actor_checked = false;
+
     /// Ground position. Taken from the plate, not the bar: the bar is anchored
     /// on its left and shrinks rightward as the creature is hurt, so its centre
     /// drifts while the plate's does not.
@@ -191,8 +205,28 @@ public:
     void stop();
     bool running() const { return running_.load(); }
 
-    /// The wait between two looks.
+    /// The wait between two looks, as it always was: kLookGapMs until
+    /// set_period_ms says otherwise.
     static constexpr int kLookGapMs = 140;
+    int period_ms() const { return period_ms_.load(); }
+
+    /// The wait between looks from now on, held to kMinPeriodMs..kMaxPeriodMs.
+    /// GoBot's window asks for a longer one while the game's packets steer the
+    /// hunter, and kLookGapMs otherwise (GuiApp::detector_pace_tick), every
+    /// pass of its loop. A shorter one than the loop waits on takes effect at
+    /// once -- the next look is taken now, not when the longer wait would have
+    /// ended -- so the screen is looked at afresh the moment it steers again;
+    /// a longer one from the next wait. Any thread.
+    void set_period_ms(int ms);
+    static constexpr int kMinPeriodMs = 50;
+    static constexpr int kMaxPeriodMs = 5000;
+
+    /// Whether the game's packets steer the hunt just now -- set with the
+    /// wait, at every pass of GoBot's window (GuiApp::detector_pace_tick).
+    /// The hunter then takes where the character is from them, not from its
+    /// plate, so a plate unfound past the grace is said, not warned of: twice
+    /// in the farm of 2026-11-03, the name right both times. Any thread.
+    void set_packets_steer(bool on) { packets_steer_.store(on); }
 
     /// Monsters, nearest first (nearest_first) from your own character: from
     /// its plate in this frame, or, while that is covered for a moment, from
@@ -225,6 +259,12 @@ public:
 
     /// How long a remembered position stays usable.
     static constexpr std::uint64_t kPlayerMemoryMs = 1500;
+
+    /// How long your plate may go unfound before "Cannot find" is said: as
+    /// many looks as kPlayerMemoryMs makes at kLookGapMs, at the wait in use
+    /// -- 1500 at 140 ms, 6000 at the resting 600 ms; never under
+    /// kPlayerMemoryMs.
+    static std::uint64_t sightings_grace_ms(int period_ms);
 
     /// What the log says of the searches for your character: "found" once it
     /// is found, and "cannot find" only once it has gone unfound for longer
@@ -325,9 +365,13 @@ private:
     std::atomic<const GlyphFont*> font_{nullptr};
     std::atomic<bool>             running_{false};
     std::thread                   thread_;
-    /// What cuts the wait between looks short: stop().
+    /// The wait between looks (set_period_ms), and what cuts it short: stop(),
+    /// and a shorter period asked for (wake_now_, under wake_mutex_).
+    std::atomic<int>              period_ms_{kLookGapMs};
+    std::atomic<bool>             packets_steer_{false};    ///< see set_packets_steer
     std::mutex                    wake_mutex_;
     std::condition_variable       wake_;
+    bool                          wake_now_ = false;
     std::atomic<MinimapTracker*> minimap_{nullptr};
     std::atomic<CameraTracker*>  camera_{nullptr};
     std::function<bool(void*, Frame&)> grab_;   ///< see set_grab; empty for the real window

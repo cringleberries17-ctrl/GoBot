@@ -171,6 +171,75 @@ std::uint64_t PacketWorld::Stats::own(OwnReport kind) const {
     return 0;
 }
 
+PacketWorld::Stats PacketWorld::Stats::since(const Stats& before) const {
+    // Started again from 0 by a reset() since: all of it, every count.
+    if (resets != before.resets) return *this;
+    // Started again from 0 meanwhile when it is lower now: then all of it.
+    const auto less = [](std::uint64_t now, std::uint64_t was) { return now >= was ? now - was : now; };
+    Stats d = *this;
+    for (std::size_t k = 0; k < frames.size(); ++k) {
+        d.frames[k].used = less(frames[k].used, before.frames[k].used);
+        d.frames[k].wrong_size = less(frames[k].wrong_size, before.frames[k].wrong_size);
+        d.frames[k].refused = less(frames[k].refused, before.frames[k].refused);
+    }
+    d.foreign = less(foreign, before.foreign);
+    d.map_entries = less(map_entries, before.map_entries);
+    d.tables = less(tables, before.tables);
+    d.spawns = less(spawns, before.spawns);
+    d.stops = less(stops, before.stops);
+    d.walks = less(walks, before.walks);
+    d.hits = less(hits, before.hits);
+    d.kills = less(kills, before.kills);
+    d.kills_yours = less(kills_yours, before.kills_yours);
+    d.kills_others = less(kills_others, before.kills_others);
+    d.kills_before_id = less(kills_before_id, before.kills_before_id);
+    d.hurts = less(hurts, before.hurts);
+    d.hurts_chained = less(hurts_chained, before.hurts_chained);
+    d.hurts_rose = less(hurts_rose, before.hurts_rose);
+    d.hurts_far = less(hurts_far, before.hurts_far);
+    d.hurts_new_slot = less(hurts_new_slot, before.hurts_new_slot);
+    d.hurts_on_dead = less(hurts_on_dead, before.hurts_on_dead);
+    d.hurts_yours = less(hurts_yours, before.hurts_yours);
+    d.hurts_others = less(hurts_others, before.hurts_others);
+    d.contacts = less(contacts, before.contacts);
+    d.contacts_yours = less(contacts_yours, before.contacts_yours);
+    d.contacts_others = less(contacts_others, before.contacts_others);
+    // Each hitter against the same id before, wherever it stood.
+    for (Hitter& h : d.hitters) {
+        if (h.hits == 0) continue;
+        for (const Hitter& b : before.hitters) {
+            if (b.hits == 0 || b.id != h.id) continue;
+            h.hits = less(h.hits, b.hits);
+            break;
+        }
+    }
+    d.unknown_states = less(unknown_states, before.unknown_states);
+    d.unknown_placed = less(unknown_placed, before.unknown_placed);
+    // Each unknown state against the same state before, wherever it stood.
+    for (Kind& k : d.unknown_kinds) {
+        if (k.count == 0) continue;
+        for (const Kind& b : before.unknown_kinds) {
+            if (b.count == 0 || b.state != k.state) continue;
+            const bool again = k.count < b.count;
+            k.count = less(k.count, b.count);
+            k.judged = less(k.judged, b.judged);
+            k.placed = less(k.placed, b.placed);
+            if (!again) k.off_px = k.off_px >= b.off_px ? k.off_px - b.off_px : 0.0;
+            break;
+        }
+    }
+    d.own_walks = less(own_walks, before.own_walks);
+    d.own_walks_stopped = less(own_walks_stopped, before.own_walks_stopped);
+    d.own_walks_unstopped = less(own_walks_unstopped, before.own_walks_unstopped);
+    d.air_jumps = less(air_jumps, before.air_jumps);
+    d.air_second = less(air_second, before.air_second);
+    d.air_high = less(air_high, before.air_high);
+    d.air_landed = less(air_landed, before.air_landed);
+    d.air_other = less(air_other, before.air_other);
+    d.casts_in_air = less(casts_in_air, before.casts_in_air);
+    return d;
+}
+
 PacketWorld::PacketWorld() { forget(); }
 
 const std::vector<std::uint16_t>& PacketWorld::opcodes() {
@@ -187,6 +256,30 @@ void PacketWorld::reset() {
     forget();
 }
 
+void PacketWorld::relink(std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // You, as forget() and a map entry forget you: the facing with the rest,
+    // so that the hunter's turning sees nothing it has not seen at every
+    // start of a capture. The next report's id is yours.
+    fix_ = Fix{};
+    slots_.clear();
+    table_seen_ = false;
+    first_monster_ms_ = 0;
+    walk_timed_ = false;
+    walk_from_ms_ = 0;
+    // Nothing of yours, nor of anyone's under another id, since the start:
+    // the packets wait for a report of yours again (packet_health).
+    stats_.last_own_ms = 0;
+    stats_.last_foreign_ms = 0;
+    stats_.last_wrong_size_ms = 0;
+    stats_.last_own_wrong_size_ms = 0;
+    // The place stays known, settled afresh from now: its monsters come back
+    // one event at a time, as at an entry with no table.
+    if (map_since_ms_ != 0) map_since_ms_ = now_ms;
+    // map_, area_, map_epoch_, entry_x_/entry_y_, stats_.entry_* and the
+    // counts are kept; so is unknown_logged_, once per game process.
+}
+
 void PacketWorld::forget() {
     fix_ = Fix{};
     slots_.clear();
@@ -197,9 +290,17 @@ void PacketWorld::forget() {
     first_monster_ms_ = 0;
     walk_timed_ = false;
     walk_from_ms_ = 0;
+    // The counts from 0, and one more reset() before them: since() tells
+    // counts taken before it from those after.
+    const std::uint64_t resets = stats_.resets;
     stats_ = Stats{};
+    stats_.resets = resets + 1;
     for (std::size_t k = 0; k < kOpcodeCount; ++k) stats_.frames[k].opcode = kKinds[k].opcode;
     unknown_logged_.fill(0);
+    first_kill_ms_ = 0;
+    never_hitter_said_ = false;
+    // gens_ goes on, so that no generation is given to two monsters; and
+    // id_said_, so that "your id is" is said only for another id.
     // updates_ goes on: a picture number taken before this is not a newer one.
     // So does map_epoch_: the map entries are ever, not since the capture --
     // and the last one's spawn with it, which the hunting spot measures an
@@ -274,6 +375,13 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
         return Taken::Foreign;
     }
     fix_.id_locked = true;
+    // What a hurt's hitter is weighed against. Said once for each id, not at
+    // every map entry that lets the next report's id be learned again.
+    if (r->id != id_said_) {
+        id_said_ = r->id;
+        GB_INFO("Positions: your id is %u (0x%04X), from your 0x%04X", static_cast<unsigned>(r->id),
+                static_cast<unsigned>(r->id), static_cast<unsigned>(p.opcode));
+    }
 
     Me& me = fix_.me;
     const bool was_moving = me.known && me.moving;
@@ -422,6 +530,7 @@ PacketWorld::Taken PacketWorld::take_table(const GamePacket& p) {
     for (const MapMonster& e : *table) {
         Slot& s = slots_[e.slot];
         s.at = mob_from(e, hp_of(e), t);
+        s.at.gen = next_gen();
         s.walk_from_ms = t;
     }
     table_seen_ = true;
@@ -438,6 +547,7 @@ PacketWorld::Taken PacketWorld::take_spawn(const GamePacket& p) {
     // spawn points; its first stop comes 9-36 px lower, as it lands.
     Slot& slot = slots_[s->slot];
     slot.at = mob_from(*s, s->hp, t);
+    slot.at.gen = next_gen();
     slot.walk_from_ms = 0;
     ++stats_.spawns;
     return Taken::Used;
@@ -452,10 +562,15 @@ PacketWorld::Taken PacketWorld::take_state(const GamePacket& p) {
     // killing blow that throws harder is a kill all the same.
     if (s->event == MonsterEvent::Walk && !within(s->speed, 0.0f, kMaxSpeed)) return Taken::Refused;
     const std::uint64_t t = p.timestamp_ms;
+    // A hurt has rules of its own: its place is taken only near where the
+    // monster was, and a dead monster's is passed over.
+    if (s->event == MonsterEvent::Hurt) return take_hurt(*s, t);
     heard_monster(t);
 
+    const bool fresh = slots_.find(s->slot) == slots_.end();
     Slot& slot = slots_[s->slot];
     Mob& m = slot.at;
+    if (fresh) m.gen = next_gen();
     // A walk that follows a walk still under way is a turn: a walk's 200
     // steps count from its start, not from the turn. One that comes after
     // the walk has run its course is a new walk.
@@ -474,11 +589,30 @@ PacketWorld::Taken PacketWorld::take_state(const GamePacket& p) {
     case MonsterEvent::Stop: ++stats_.stops; break;
     case MonsterEvent::Walk: ++stats_.walks; break;
     case MonsterEvent::Hit:  ++stats_.hits; break;
+    case MonsterEvent::Hurt: break;     // take_hurt's
+    }
+
+    // HP above 0 in the slot of a monster killed is a new monster whose spawn
+    // was not seen. A slot keeps its type over respawns (122 of 122); the
+    // monster is another, with a generation of its own and nobody's blows.
+    if (m.dead && s->hp > 0) {
+        m.dead = false;
+        m.dead_ms = 0;
+        m.gen = next_gen();
+        m.last_actor = 0;
+        m.hurt_ms = m.hurt_by_you_ms = m.hurt_by_other_ms = 0;
+        m.contact_actor = 0;
+        m.contact_ms = 0;
     }
 
     // In a hit, what the monster had before it is HP seen as well: the HP
-    // after it plus the damage, 122 of 122 in the fight.
-    if (s->event == MonsterEvent::Hit) saw_hp(m, std::int64_t{ s->hp } + s->damage);
+    // after it plus the damage, 122 of 122 in the fight. And who struck it.
+    Actor by = Actor::BeforeId;
+    if (s->event == MonsterEvent::Hit) {
+        saw_hp(m, std::int64_t{ s->hp } + s->damage);
+        by = actor_of(s->attacker);
+        note_blow(m, by, s->attacker, t);
+    }
     if (s->killed()) {
         // Dead now, and nothing more will say so: its slot falls silent until
         // a spawn brings the next monster, 2-4 s later.
@@ -486,30 +620,166 @@ PacketWorld::Taken PacketWorld::take_state(const GamePacket& p) {
         if (!m.dead) {
             m.dead = true;
             m.dead_ms = t;
-            ++stats_.kills;
+            note_kill(by, t);
         }
         return Taken::Used;
     }
     m.hp = s->hp > 0 ? static_cast<std::uint32_t>(s->hp) : 0;
     saw_hp(m, s->hp);
-    // HP above 0 in the slot of a monster killed is a new monster whose spawn
-    // was not seen. A slot keeps its type over respawns (122 of 122).
-    if (m.dead && s->hp > 0) {
-        m.dead = false;
-        m.dead_ms = 0;
-    }
     return Taken::Used;
 }
 
+PacketWorld::Taken PacketWorld::take_hurt(const MonsterState& s, std::uint64_t t) {
+    heard_monster(t);
+    ++stats_.hurts;
+    // Whose, whatever becomes of it below: the frame names its hitter either
+    // way.
+    const Actor by = actor_of(s.attacker);
+    if (by == Actor::Yours) {
+        ++stats_.hurts_yours;
+        note_yours();
+    } else if (by == Actor::Others) {
+        ++stats_.hurts_others;
+    }
+
+    const auto it = slots_.find(s.slot);
+    if (it != slots_.end() && it->second.at.dead) {
+        // A blow on a monster killed: passed over until a spawn, a stop or a
+        // walk brings one alive into the slot. Its HP is the dead one's.
+        ++stats_.hurts_on_dead;
+        return Taken::Used;
+    }
+
+    Mob* m = nullptr;
+    std::int64_t before = -1;     // the HP it had, for a monster known
+    if (it == slots_.end()) {
+        // A slot no frame has named: the monster is where the hurt says,
+        // standing there, as a stop puts one.
+        Slot& slot = slots_[s.slot];
+        m = &slot.at;
+        m->slot = s.slot;
+        m->gen = next_gen();
+        m->x = static_cast<float>(s.x);
+        m->y = static_cast<float>(s.y);
+        m->facing = s.facing;
+        m->speed = s.speed;
+        m->moving = false;
+        m->event_ms = t;
+        ++stats_.hurts_new_slot;
+    } else {
+        // Its place only near where it was worked out to be, taken then as a
+        // stop's: what the bytes at 32 and 34 are in these states was not
+        // looked at apart, and a hurt far off is counted and passed over.
+        Slot& slot = it->second;
+        m = &slot.at;
+        before = m->hp;
+        Mob now = *m;
+        follow_mob(now, slot.walk_from_ms, t);
+        const float off = std::max(std::abs(now.x - static_cast<float>(s.x)),
+                                   std::abs(now.y - static_cast<float>(s.y)));
+        if (off <= kUnknownPlacePx) {
+            m->x = static_cast<float>(s.x);
+            m->y = static_cast<float>(s.y);
+            m->facing = s.facing;
+            m->speed = s.speed;
+            m->moving = false;
+            m->event_ms = t;
+        } else {
+            ++stats_.hurts_far;
+        }
+    }
+
+    // The HP, always: the HP before less the damage is the HP after, frame
+    // after frame -- what proves the layout -- and an HP above the last is
+    // the monster healing between blows.
+    if (before >= 0) {
+        if (before - static_cast<std::int64_t>(s.damage) == s.hp) ++stats_.hurts_chained;
+        if (s.hp > before) ++stats_.hurts_rose;
+    }
+    saw_hp(*m, std::int64_t{ s.hp } + s.damage);
+    note_blow(*m, by, s.attacker, t);
+    if (s.hp <= 0) {
+        // None left: killed, as a hit that leaves none.
+        m->hp = 0;
+        m->dead = true;
+        m->dead_ms = t;
+        m->moving = false;
+        note_kill(by, t);
+        return Taken::Used;
+    }
+    m->hp = static_cast<std::uint32_t>(s.hp);
+    saw_hp(*m, s.hp);
+    return Taken::Used;
+}
+
+PacketWorld::Actor PacketWorld::actor_of(const std::optional<std::uint32_t>& actor) const {
+    // Your id from your own reports, this session's: it changes from one
+    // log in to the next, so nothing else is compared with it.
+    if (!fix_.id_locked) return Actor::BeforeId;
+    return actor && *actor == fix_.me.id ? Actor::Yours : Actor::Others;
+}
+
+void PacketWorld::note_blow(Mob& m, Actor by, const std::optional<std::uint32_t>& actor, std::uint64_t t) {
+    m.hurt_ms = t;
+    if (actor) {
+        m.last_actor = *actor;
+        // The first kHitters met, each with how many.
+        for (Stats::Hitter& h : stats_.hitters) {
+            if (h.hits != 0 && h.id != *actor) continue;
+            h.id = *actor;
+            ++h.hits;
+            break;
+        }
+    }
+    if (by == Actor::Yours) m.hurt_by_you_ms = t;
+    else if (by == Actor::Others) m.hurt_by_other_ms = t;
+}
+
+void PacketWorld::note_kill(Actor by, std::uint64_t t) {
+    ++stats_.kills;
+    switch (by) {
+    case Actor::Yours:
+        ++stats_.kills_yours;
+        note_yours();
+        break;
+    case Actor::Others:   ++stats_.kills_others; break;
+    case Actor::BeforeId: ++stats_.kills_before_id; break;
+    }
+    if (first_kill_ms_ == 0) first_kill_ms_ = t;
+    // Many kills over ten minutes, your id known throughout some of them, and
+    // not one blow of yours: the hitter is not at 48 on this server, or your
+    // id is not where the reports are read for it. Said once.
+    if (!never_hitter_said_ && fix_.id_locked && stats_.kills > 20 && stats_.hurts_yours == 0 &&
+        stats_.kills_yours == 0 && t >= first_kill_ms_ + 600'000) {
+        never_hitter_said_ = true;
+        GB_INFO("Positions: your id (%u) never seen as a hitter in %llu kills over %llu min -- kills not split by "
+                "actor",
+                static_cast<unsigned>(fix_.me.id), static_cast<unsigned long long>(stats_.kills),
+                static_cast<unsigned long long>((t - first_kill_ms_) / 60'000));
+    }
+}
+
+void PacketWorld::note_yours() {
+    // Called after each count of one, so the sum passes kActorCheckHits once:
+    // a hurt of yours that kills is counted in both.
+    if (stats_.hurts_yours + stats_.kills_yours == kActorCheckHits)
+        GB_INFO("Positions: your id (%u) seen as the hitter %llu times -- who hurt a monster is gone by from now: "
+                "one another player is hitting is not preferred as wounded",
+                static_cast<unsigned>(fix_.me.id), static_cast<unsigned long long>(kActorCheckHits));
+}
+
 PacketWorld::Taken PacketWorld::take_other_state(const GamePacket& p) {
-    // The reader knows stops, walks and hits, the only states the fight had.
-    // One of those it refused -- a speed that is no number -- stays refused.
+    // The reader knows stops, walks and hits, the only states the fight had,
+    // and the hurts of today's server. One of those it refused -- a speed
+    // that is no number -- stays refused.
     const std::optional<MonsterSpot> spot = read_monster_spot(p);
-    if (!spot || spot->state == 0 || spot->state == 1 || spot->state == 9) return Taken::Refused;
+    if (!spot || spot->state == 0 || spot->state == 1 || spot->state == 6 || spot->state == 7 ||
+        spot->state == 9)
+        return Taken::Refused;
     const std::uint64_t t = p.timestamp_ms;
 
     // Any other is counted, by its state, and its first frames written down
-    // for the next look at the protocol to explain.
+    // for the next look at the protocol to explain -- but a contact's.
     ++stats_.unknown_states;
     Stats::Kind* kind = nullptr;
     for (Stats::Kind& k : stats_.unknown_kinds) {
@@ -519,7 +789,26 @@ PacketWorld::Taken PacketWorld::take_other_state(const GamePacket& p) {
         kind = &k;
         break;
     }
-    if (unknown_logged_[spot->state] < kUnknownLogged) {
+
+    // States 3 and 11 name an actor and change nothing that is known: counted
+    // by whose they are, and kept on the monster, for the log alone. Read
+    // first: being contacts, they are no state for the log to call not known
+    // -- 601 of them in the farm of 2026-11-03, every one placed.
+    const auto it = slots_.find(spot->slot);
+    const std::optional<MonsterContact> c = read_monster_contact(p);
+    if (c) {
+        ++stats_.contacts;
+        if (c->actor) {
+            const Actor by = actor_of(c->actor);
+            if (by == Actor::Yours) ++stats_.contacts_yours;
+            else if (by == Actor::Others) ++stats_.contacts_others;
+            if (it != slots_.end() && !it->second.at.dead) {
+                it->second.at.contact_actor = *c->actor;
+                it->second.at.contact_ms = t;
+            }
+        }
+    }
+    if (!c && unknown_logged_[spot->state] < kUnknownLogged) {
         ++unknown_logged_[spot->state];
         std::string bytes;
         static const char* const kDigits = "0123456789abcdef";
@@ -534,13 +823,13 @@ PacketWorld::Taken PacketWorld::take_other_state(const GamePacket& p) {
                 static_cast<unsigned>(spot->x), static_cast<unsigned>(spot->y), bytes.c_str());
     }
 
-    // Where it says the monster is, if that is near where the monster was
-    // worked out to be: standing there, and nothing else about it changed.
-    // Bytes 32 and 34 are the monster's place in each of the three states
-    // known, and the layout is one; if they are something else here, most such
+    // Where it says the monster is -- a contact as any other -- if that is
+    // near where the monster was worked out to be: standing there, and
+    // nothing else about it changed.
+    // Bytes 32 and 34 are the monster's place in each of the states known,
+    // and the layout is one; if they are something else here, most such
     // frames land far off and are refused, and the kind's average says so.
     // Refused too: a frame for a slot with no monster known, or a dead one.
-    const auto it = slots_.find(spot->slot);
     if (it == slots_.end() || it->second.at.dead) return Taken::Refused;
     Mob now = it->second.at;
     follow_mob(now, it->second.walk_from_ms, t);
@@ -596,12 +885,37 @@ PacketWorld::View PacketWorld::view(std::uint64_t now_ms, std::uint64_t own_foll
     v.map_epoch = map_epoch_;
     v.entry_x = entry_x_;
     v.entry_y = entry_y_;
+    v.actor_checked = stats_.hurts_yours + stats_.kills_yours >= kActorCheckHits;
     return v;
 }
 
 PacketWorld::Stats PacketWorld::stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return stats_;
+}
+
+PacketWorld::Place PacketWorld::place() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Place p;
+    p.map = map_;
+    p.area = area_;
+    p.since_ms = map_since_ms_;
+    p.epoch = map_epoch_;
+    p.entries = stats_.map_entries;
+    p.entry_ms = stats_.entry_ms;
+    return p;
+}
+
+MapChangeBy map_change_by(const PacketWorld::Place& place, bool on_game, std::uint64_t last_server_ms,
+                          std::uint64_t now) {
+    if (place.entries == 0 || !on_game) return MapChangeBy::Minimap;
+    if (last_server_ms == 0 || (now > last_server_ms && now - last_server_ms > kMapByPacketsQuietMs))
+        return MapChangeBy::Minimap;
+    // An entry stamps since_ms and entry_ms alike; a relink only since_ms.
+    const bool relinked = place.since_ms != 0 && place.since_ms != place.entry_ms;
+    if (relinked && (now < place.since_ms || now - place.since_ms < kMapByPacketsSettleMs))
+        return MapChangeBy::Minimap;
+    return MapChangeBy::Packets;
 }
 
 } // namespace gobot

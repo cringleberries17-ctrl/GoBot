@@ -125,6 +125,17 @@ public:
     void stop();
     bool running() const { return running_.load(); }
 
+    /// How many times start() has got as far as starting its threads, ever:
+    /// never reset, not even by a stop. A number that moves says the capture
+    /// was started again in between -- by whoever -- and that what it saw
+    /// before is not to be joined to what it sees now (PacketSelf's epoch).
+    std::uint64_t start_count() const { return starts_.load(); }
+
+    /// Whether an opcode filter is set (set_opcode_filter with a list): then
+    /// only the listed opcodes are forwarded, and counts by opcode leave the
+    /// rest out.
+    bool filtering() const;
+
     /// The BPF filter a capture with this config uses: `bpf_filter` exactly as
     /// given when it is set, otherwise TCP and UDP to the configured server
     /// address and ports.
@@ -164,6 +175,10 @@ public:
         std::uint64_t frames_decoded   = 0;
         std::uint64_t frames_forwarded = 0;   ///< every kind, after the opcode filter
         std::uint64_t resync_bytes     = 0;   ///< TCP stream only
+        /// Of those, the server's stream's alone: bytes of it skipped, each
+        /// one a frame from the server that may have been lost (a gap, for
+        /// PacketSelf). The client's stream resyncs on its ciphered wrappers.
+        std::uint64_t server_resync_bytes = 0;
         std::uint64_t pcap_dropped     = 0;
         std::uint64_t last_packet_ms   = 0;   ///< any kind
         /// The last TCP segment: what the disconnect watchdog goes by. The
@@ -187,6 +202,10 @@ public:
 
         /// Looking inside 0x0081, over TCP and UDP together.
         UnwrapCounts  unwrap;
+
+        /// start_count() as stats() was asked: unlike everything above, not
+        /// started again from 0 by a start.
+        std::uint64_t starts = 0;
     };
     Stats stats() const;
 
@@ -293,6 +312,7 @@ private:
 
     std::thread       capture_thread_;
     std::thread       watchdog_thread_;
+    std::atomic<std::uint64_t> starts_{0};    ///< start_count()
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
     /// What the watchdog waits on between its looks, a second apart, so that

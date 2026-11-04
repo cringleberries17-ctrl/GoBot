@@ -513,6 +513,16 @@ public:
     /// Before start(), never while it runs. Unset is no hunter.
     void set_fight(std::function<Fight()> f) { fight_ = std::move(f); }
 
+    /// Told of every key the macro pressed that went out -- the key, and the
+    /// time on the engine's clock it went down -- from the macro's own
+    /// threads, once the press is over: what the game's packets say came of
+    /// it, which can come while the key is still held, is weighed
+    /// against it (a potion's bag frame, a skill's cast). Never told of a
+    /// press refused (held, out of the world, the game not in front, another
+    /// key going). Whatever it is answers at once and presses nothing. Before
+    /// start(), never while it runs; unset is nobody told.
+    void set_on_press(std::function<void(std::uint32_t vk, std::uint64_t at_ms)> f) { on_press_ = std::move(f); }
+
     /// With sequential_skills off: a skill at most this often, GoC's attack
     /// thread's beat.
     static constexpr std::uint32_t kSkillChanceMs = 300;
@@ -927,6 +937,7 @@ private:
     bool              start_unread_[3] = { false, false, false };
 
     std::function<Fight()> fight_;
+    std::function<void(std::uint32_t, std::uint64_t)> on_press_;   ///< set_on_press
     /// When the skills that follow the fight are next looked at -- the gap
     /// after the last one's key came up, a chance's beat, a retry; the timer
     /// pass's alone.

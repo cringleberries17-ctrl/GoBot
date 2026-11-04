@@ -61,7 +61,11 @@ bool remove_file(const std::string& path);
 bool move_file(const std::string& from, const std::string& to);
 /// The names (not paths) of the files in `folder` matching `pattern`, such as
 /// "*.png" -- folders left out -- in UTF-8 and in no particular order.
-std::vector<std::string> files_in(const std::string& folder, const std::string& pattern);
+/// `complete`, when given, is set false when the listing stopped short of
+/// its end -- Windows failed partway, or at the first file for another
+/// reason than there being none: what came back may be missing some.
+std::vector<std::string> files_in(const std::string& folder, const std::string& pattern,
+                                  bool* complete = nullptr);
 /// fopen, for a UTF-8 path.
 std::FILE* open_file(const std::string& path, const char* mode);
 

@@ -201,7 +201,22 @@ void GuiApp::stop_quest(bool wait) {
 void GuiApp::quest_loop() {
     name_this_thread("quest");
     QuestUi& ui = *quest_ui_;
-    const auto tell = [this](const std::string& vi) { say_quest(vi); };
+    // A round put off ("Chờ: ...") goes to the log as well, once for each
+    // change of what it waits for: only the tab had it, and the farm of
+    // 2026-11-03 had two rounds 364 s apart with nothing to say why. Anything
+    // else said -- a round, a start -- ends the wait, and the same reason
+    // after it is news again. A not-now after the hold is logged where it
+    // is made (held_not_now), and not twice.
+    std::string waited_for;
+    const auto tell = [this, &waited_for](const std::string& vi) {
+        if (vi.rfind("Chờ:", 0) != 0) {
+            waited_for.clear();
+        } else if (vi != waited_for) {
+            waited_for = vi;
+            GB_INFO("Quest: put off -- %s", vi.c_str());
+        }
+        say_quest(vi);
+    };
     const auto leave = [&](const std::string& why) {
         if (!why.empty()) tell(why);
         std::lock_guard<std::mutex> lock(quest_life_mutex_);
@@ -230,7 +245,10 @@ void GuiApp::quest_loop() {
         leave(why);
         return;
     }
-    GB_INFO("Quest: pictures from %s", from.c_str());
+    const std::string learned = pictures.box_learned.valid()
+                                    ? "; the ticked box as learned here, from " + QuestPictures::learned_file()
+                                    : std::string();
+    GB_INFO("Quest: pictures from %s%s", from.c_str(), learned.c_str());
 
     ScreenCapture capture;
     capture.set_label("quest");
@@ -273,7 +291,7 @@ void GuiApp::quest_loop() {
     // mark it ends where it is, so the potion is not kept waiting for the rest
     // of it, as Tự chat ends a line. Not known while the bars are unread.
     hands.low_hp = [this] {
-        const float hp = vitals_.hp_percent();
+        const float hp = hp_percent_now();
         return hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());
     };
     // The player gone to another window part way: not now, not a failure.
@@ -284,7 +302,7 @@ void GuiApp::quest_loop() {
         in.window = input_.window_valid();
         in.focused = input_.window_focused();
         in.keeper = crossing();
-        in.hp_pct = vitals_.hp_percent();
+        in.hp_pct = hp_percent_now();
         // Tự chat's rule: some way over what the HP potion fires at, so that
         // HP hovering at the mark in a fight does not start a round only for
         // the guard above to end it.
@@ -320,6 +338,14 @@ void GuiApp::quest_loop() {
             return not_now;
         }
         OnExit hold{ [this] { end_hold(kQuestHold); } };
+        // A not-now from here on held the keys off for a moment: said in the
+        // log with its reason, which only the tab had before.
+        const auto held_not_now = [&not_now, &waited_for](const std::string& why) {
+            not_now.why = why;
+            GB_INFO("Quest: not now -- %s", not_now.why.c_str());
+            waited_for = "Chờ: " + why + ".";       // as QuestRun::wait says it
+            return not_now;
+        };
         // A key going down as the hold began finishes first, and nothing is
         // left held down.
         for (int i = 0; i < 40 && coord_.held() && !quest_stop_; ++i)
@@ -327,42 +353,27 @@ void GuiApp::quest_loop() {
         QuestResult stopped;
         stopped.outcome = QuestOutcome::Cancelled;
         if (quest_stop_) return stopped;
-        if (coord_.held()) {
-            not_now.why = "bot đang bấm phím";
-            return not_now;
-        }
+        if (coord_.held()) return held_not_now("bot đang bấm phím");
         input_.release_all();
         const DWORD quiet = last_input();
         for (int slept = 0; slept < kQuietMs && !quest_stop_; slept += 50)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         if (quest_stop_) return stopped;
-        if (last_input() != quiet) {
-            not_now.why = "bạn đang dùng chuột hoặc bàn phím";
-            return not_now;
-        }
+        if (last_input() != quiet) return held_not_now("bạn đang dùng chuột hoặc bàn phím");
         // Looked at again with the hold on: something may have begun since.
         QuestGateInput now_in = gates();
         now_in.asked = call.asked;
         const QuestGate again = quest_gate(now_in);
-        if (!again.go) {
-            not_now.why = again.why;
-            return not_now;
-        }
+        if (!again.go) return held_not_now(again.why);
         // The game to the front only for a round a person asked for with the
         // tab's button, as the trash tab's buttons bring it. A timed round has
         // waited for the game to be in front, and one that has gone behind
         // since waits again: whoever is in another window keeps their keys.
         if (!input_.window_focused()) {
-            if (!call.asked) {
-                not_now.why = "game không ở trên cùng";
-                return not_now;
-            }
+            if (!call.asked) return held_not_now("game không ở trên cùng");
             input_.focus_window();
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
-            if (!input_.window_focused()) {
-                not_now.why = "không đưa được game lên trước";
-                return not_now;
-            }
+            if (!input_.window_focused()) return held_not_now("không đưa được game lên trước");
         }
 
         QuestRound round(pictures, settings, hands);
@@ -380,6 +391,25 @@ void GuiApp::quest_loop() {
         if (quest_stop_) round.cancel();
         QuestResult r = round.run();
         GB_INFO("Quest: %s -- %s", quest_outcome_name(r.outcome), r.log.c_str());
+        if (r.by_change) {
+            // Taken for ticked by the change GoBot's click made, no picture
+            // fitting it: the frame kept, and the look learned for the rounds
+            // after, beside the other pictures cut from the live client.
+            const std::string kept = keep_quest_frame(debug_dir, r.ticked_frame, "autotick_on", false);
+            if (r.learned_on.valid()) {
+                const std::string file = QuestPictures::learned_file();
+                const bool saved = QuestPictures::save_learned(file, r.learned_on);
+                pictures.learn(r.learned_on, settings);
+                GB_INFO("Quest: learned the ticked box%s%s; the frame kept as %s",
+                        saved ? ", saved as " : " -- could not save it as ", file.c_str(),
+                        kept.empty() ? "(none)" : kept.c_str());
+                tell(saved ? "Đã học hình ô Tự Động đã bật (lưu ở templates\\grabbed\\quest_auto_on.png)."
+                           : "Đã học hình ô Tự Động đã bật, nhưng không lưu được vào thư mục templates\\grabbed.");
+            } else {
+                GB_INFO("Quest: the ticked box not learned; the frame kept as %s",
+                        kept.empty() ? "(none)" : kept.c_str());
+            }
+        }
         if (r.failed()) {
             const std::string kept =
                 keep_quest_frame(debug_dir, r.last, quest_outcome_name(r.outcome), false);

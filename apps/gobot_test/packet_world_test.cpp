@@ -10,9 +10,12 @@
 // this machine, so a wrong offset in the docs would pass here as well.
 
 #include "gobot/common.hpp"
+#include "gobot/hunter.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/mob_detector.hpp"
+#include "gobot/monster_frames.hpp"
 #include "gobot/own_position.hpp"
+#include "gobot/packet_eyes.hpp"
 #include "gobot/packet_world.hpp"
 #include "test_support.hpp"
 
@@ -22,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -968,10 +972,10 @@ void test_unknown_states() {
 
     // A walker, worked out to be 104 px on a second into its walk.
     w.on_packets({ from_server(event_frame(1, 9, 1, 2.6f, 1000, 900, 3044), t + 1000) });
-    w.on_packets({ from_server(event_frame(7, 9, 1, 2.6f, 1290, 900, 3044), t + 2000) });
+    w.on_packets({ from_server(event_frame(4, 9, 1, 2.6f, 1290, 900, 3044), t + 2000) });
     const PacketWorld::Mob walker = slot_of(w.view(t + 3000), 9);
     check(walker.x == 1290.0f && !walker.moving && w.stats().unknown_placed == 2,
-          "a walker worked out at 1104, 1 s on: put at 1290 by state 7, 186 px on, and standing there");
+          "a walker worked out at 1104, 1 s on: put at 1290 by state 4, 186 px on, and standing there");
 
     // A dead one stays dead.
     w.on_packets({ from_server(event_frame(9, 5, 1, 7.0f, 2450, 1170, -50, 6050), t + 3000),
@@ -1000,11 +1004,11 @@ void test_unknown_states() {
             if (line.find(std::string("of state ") + state + ",") != std::string::npos) ++n;
         return n;
     };
-    check(said.size() == 4 && of_state("5") == 2 && of_state("3") == 1 && of_state("7") == 1 &&
+    check(said.size() == 3 && of_state("5") == 2 && of_state("3") == 0 && of_state("4") == 1 &&
               said.front().find("slot 5 at 2450,1170") != std::string::npos &&
               said.front().find("its bytes from 8: ") != std::string::npos,
-          "the first two frames of each such state written to the log, with their bytes -- " +
-              std::to_string(said.size()) + " line(s)");
+          "the first two frames of each such state written to the log, with their bytes -- not state 3's, a "
+          "contact -- " + std::to_string(said.size()) + " line(s)");
 
     w.reset();
     const PacketWorld::Stats after = w.stats();
@@ -1048,6 +1052,557 @@ void test_reset() {
           "after it, the next report's id is yours, whatever it was before");
 }
 
+/// The capture started again on the same game process and connections:
+/// relink() keeps what the server said of the place, and the counts, and
+/// forgets you and the monsters as every start of a capture always has --
+/// the facing with the rest, so the hunter's turning sees nothing new.
+void test_relink() {
+    section("Packet world: relink() -- the capture started again on the same game");
+
+    PacketWorld w;
+    const std::uint64_t t = kT0;
+    w.on_packets({ from_server(entry_frame(11, 1, 4690, 1180), t),
+                   wrapped(table_frame({ { 3, 1004401, 44, 1, 1500, 900, 0.0f, 7000, 7676 } }), t + 300) });
+    w.on_packets({ from_client(move_frame(4700.0f, 1180.0f, 9.0f, 1), t + 500) });
+    // Another character's report, and one of yours cut short: both stamped.
+    GamePacket cut = from_client(here_frame(4700.0f, 1180.0f, 8), t + 600);
+    cut.payload.pop_back();
+    w.on_packets({ cut, from_client(move_frame(100.0f, 100.0f, 0.0f, 1, kId + 1), t + 600) });
+    const PacketWorld::Stats before = w.stats();
+    const PacketWorld::View was = w.view(t + 700);
+    check(was.me.known && was.me.said_facing == 1 && was.me.facing_ms == t + 500 && was.table_seen &&
+              was.mob(3) != nullptr && before.last_own_ms == t + 500 && before.last_foreign_ms == t + 600 &&
+              before.last_own_wrong_size_ms == t + 600 && before.foreign == 1,
+          "before it: you known and facing right, the map's table and a monster, another character's report and "
+          "a report of yours of the wrong size");
+
+    const std::uint64_t r = t + 1000;
+    w.relink(r);
+    const PacketWorld::View v = w.view(r);
+    const PacketWorld::Stats s = w.stats();
+    check(v.map == 11 && v.area == 1 && v.map_epoch == was.map_epoch && v.entry_x == 4690.0f &&
+              v.entry_y == 1180.0f && s.entry_map == 11 && s.entry_area == 1 && s.entry_ms == t &&
+              v.map_since_ms == r,
+          "relink() keeps the map, the area, the map epoch and the entry -- the place settled again from the "
+          "relink");
+    check(v.mobs.empty() && !v.table_seen && v.first_monster_ms == 0, "and forgets the monsters and the table");
+    check(!v.me.known && v.me.id == 0 && v.me.said_facing == 0 && v.me.facing_ms == 0 && v.me.facing == 0,
+          "and you, as after reset(): not known, no id, no facing");
+    check(s.last_own_ms == 0 && s.last_foreign_ms == 0 && s.last_wrong_size_ms == 0 &&
+              s.last_own_wrong_size_ms == 0,
+          "and when the last report of yours, another's, and one of the wrong size came");
+    check(s.map_entries == before.map_entries && s.tables == before.tables &&
+              s.of(0x0027).used == before.of(0x0027).used && s.of(0x0028).wrong_size == 1 && s.foreign == 1,
+          "the counts are kept, for the session's tallies");
+
+    // What the packets may steer by, from the relink on.
+    HunterConfig on;
+    on.packet_positions = PacketPositions::On;
+    const auto health = [&w, &on](std::uint64_t at) {
+        PacketLink link;
+        link.capturing = true;
+        link.last_tcp_ms = at;
+        return packet_health(w.view(at), w.stats(), link, on, at).why;
+    };
+    check(health(r + 100) == PacketWhy::NotMoved, "no report of yours since: not to be gone by (NotMoved)");
+    w.on_packets({ from_client(move_frame(4720.0f, 1180.0f, 0.0f, -1, kId + 7), r + 200) });
+    const PacketWorld::View back = w.view(r + 200);
+    check(back.me.known && back.me.id == kId + 7 && back.me.said_facing == -1 && w.stats().foreign == 1,
+          "a report under another id than before is yours after a relink, as after a map entry");
+    check(health(r + 300) == PacketWhy::MapChanged &&
+              health(r + PacketHealth::kSettleMs + 1) == PacketWhy::InUse,
+          "then the place settles: MapChanged until kSettleMs after the relink, then the packets may steer");
+
+    // The counts since a moment: what came after it; the times and the last
+    // entry as they are.
+    w.on_packets({ from_server(event_frame(0, 3, 1, 0.0f, 1500, 900, 7000), r + 400),
+                   from_server(entry_frame(11, 2, 100, 200), r + 500) });
+    const PacketWorld::Stats d = w.stats().since(before);
+    check(d.stops == 1 && d.map_entries == 1 && d.tables == 0 && d.of(0x0027).used == 1 && d.foreign == 0 &&
+              d.of(0x0028).wrong_size == 0 && d.entry_area == 2 && d.entry_ms == r + 500 &&
+              d.last_own_ms == r + 200 && d.of(0x0027).opcode == 0x0027,
+          "since(): the counts less those before -- one stop, one entry, one report -- the times and the last "
+          "entry as they are now");
+    PacketWorld::Stats five, two;
+    five.stops = 5;
+    two.stops = 2;
+    check(five.since(two).stops == 3 && two.since(five).stops == 2,
+          "a count lower than before was started again meanwhile (reset) and is taken from 0: 5 since 2 is 3, 2 "
+          "since 5 is 2");
+    check(s.since(PacketWorld::Stats{}).tables == s.tables && s.since(PacketWorld::Stats{}).map_entries == 1,
+          "and since nothing at all is everything");
+
+    // A reset() between the two -- the keeper's log back in mid-hunt -- and
+    // more after it than there were before: all of what came since the reset,
+    // not those less the counts from before it.
+    PacketWorld again;
+    for (std::uint16_t i = 0; i < 2; ++i) again.on_packets({ from_server(entry_frame(11, i, 100, 200), t + i) });
+    const PacketWorld::Stats hunt_on = again.stats();
+    again.reset();
+    for (std::uint16_t i = 0; i < 3; ++i) again.on_packets({ from_server(entry_frame(12, i, 100, 200), t + 10 + i) });
+    const PacketWorld::Stats after_reset = again.stats();
+    check(hunt_on.map_entries == 2 && after_reset.map_entries == 3 && after_reset.resets == hunt_on.resets + 1 &&
+              after_reset.since(hunt_on).map_entries == 3 && after_reset.since(hunt_on).entry_map == 12,
+          "a reset() since: everything after it, 3 map entries -- not 3 less the 2 before it");
+}
+
+// ----------------------------------------------------- hurts, and who hits
+
+// Ten 0x0038 frames of the live logs -- gobot_gui.log lines 60, 63 and 64 of
+// 2026-11-02, gobot_gui.old.log lines 37, 178, 180, 183, 204, 205 and 207 --
+// each as its line gave its bytes from 8: the payload. Unlike everything
+// above, these are the game's own bytes. They hold no names, and are kept
+// here because the logs rotate and lose them (the packets plan's Appendix).
+//
+// In payload offsets: the state at 4, the slot at 8, the facing at 16, the
+// speed at 20, x, y at 24 and 26, the hitter at 40, the damage at 44, the HP
+// at 56.
+const char* const kLog60 =      // state 6, slot 1, hitter 0x2F7, damage 40413, HP 67668
+    "00 00 00 00 06 00 00 00 01 00 00 00 00 00 00 00 01 fb 85 98 00 00 00 40 3c 00 3d 02 00 00 00 00 00 00 66 56 "
+    "00 00 00 00 f7 02 00 00 dd 9d 00 00 00 ca a0 56 00 00 00 00 54 08 01 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 a8 00 41 02 06 00 00 00";
+const char* const kLog63 =      // state 3, slot 1, 0x2F7, damage 0, HP 67668 unchanged
+    "00 00 00 00 03 9e 94 ad 01 00 00 00 00 00 00 00 01 79 ff ff 00 00 00 00 9c 00 27 02 00 00 00 00 00 00 5c 56 "
+    "00 00 00 00 f7 02 00 00 00 00 00 00 00 02 00 00 00 00 00 00 54 08 01 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 a8 00 41 02 06 00 00 00";
+const char* const kLog64 =      // state 7, slot 1, 0x2F7, damage 24103, HP 43565
+    "00 00 00 00 07 00 00 00 01 00 00 00 00 00 00 00 01 fb 85 98 00 00 00 40 9f 00 27 02 00 00 00 00 00 00 66 56 "
+    "00 00 00 00 f7 02 00 00 27 5e 00 00 05 ca a0 56 00 00 00 00 2d aa 00 00 c8 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 e9 00 2e 02 06 00 00 00";
+const char* const kOld178 =     // state 6, slot 12, hitter 0x6F, HP 696500
+    "00 00 00 00 06 00 00 00 0c 00 00 00 00 00 00 00 01 10 76 98 00 00 00 40 f1 02 0f 01 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 6f 00 00 00 78 ff 00 00 00 6a a6 56 00 00 00 00 b4 a0 0a 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 5f 03 de 00 07 01 00 00";
+const char* const kOld180 =     // state 7, slot 12, 0x6F, damage 28695, HP 667805
+    "00 00 00 00 07 00 00 00 0c 00 00 00 00 00 00 00 01 10 76 98 00 00 00 40 0f 03 10 01 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 6f 00 00 00 17 70 00 00 00 6a a6 56 00 00 00 00 9d 30 0a 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 3f 03 c7 00 07 00 00 00";
+const char* const kOld183 =     // state 7, slot 12, 0x6F, damage 27842, HP 639963
+    "00 00 00 00 07 00 00 00 0c 00 00 00 00 00 00 00 01 10 76 98 00 00 00 40 3c 03 12 01 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 6f 00 00 00 c2 6c 00 00 00 6a a6 56 00 00 00 00 db c3 09 00 00 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 40 03 c6 00 07 00 00 00";
+const char* const kOld204 =     // state 6, slot 20, hitter 0x6F, HP 210579
+    "00 00 00 00 06 00 00 00 14 00 00 00 00 00 00 00 01 25 76 98 00 00 00 40 47 03 12 01 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 6f 00 00 00 f8 8e 00 00 05 6a a6 56 00 00 00 00 93 36 03 00 bf 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 28 03 ec 00 07 01 00 00";
+const char* const kOld205 =     // state 6, slot 20, 0x6F, damage 24663, HP 185916
+    "00 00 00 00 06 00 00 00 14 00 00 00 00 00 00 00 01 25 76 98 00 00 00 40 41 03 12 01 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 6f 00 00 00 57 60 00 00 05 6a a6 56 00 00 00 00 3c d6 02 00 c8 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 72 03 ec 00 07 00 00 00";
+const char* const kOld207 =     // state 7, slot 20, 0x6F, damage 36705, HP 149211
+    "00 00 00 00 07 00 00 00 14 00 00 00 00 00 00 00 01 25 76 98 00 00 00 40 3b 03 11 01 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 6f 00 00 00 61 8f 00 00 04 6a a6 56 00 00 00 00 db 46 02 00 c8 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 6f 03 e0 00 07 00 00 00";
+const char* const kOld37 =      // state 7, slot 21, another player's 0x55C, damage 52372, HP 426870
+    "00 00 00 00 07 00 00 00 15 00 00 00 00 00 00 00 01 27 76 98 00 00 00 40 64 06 52 03 00 00 00 00 00 00 6b 56 "
+    "00 00 00 00 5c 05 00 00 94 cc 00 00 01 6a a6 56 00 00 00 00 76 83 06 00 bf 00 00 00 00 00 00 00 00 00 00 00 "
+    "00 00 00 00 00 00 00 00 4b 06 52 03 07 00 00 00";
+
+/// One of them as the server sent it at `t`, straight off the TCP stream.
+GamePacket recorded(const char* bytes, std::uint64_t t) {
+    GamePacket p;
+    p.opcode = 0x0038;
+    p.from_server = true;
+    p.timestamp_ms = t;
+    for (const char* at = bytes; *at != '\0';) {
+        if (*at == ' ') {
+            ++at;
+            continue;
+        }
+        char* end = nullptr;
+        const unsigned long b = std::strtoul(at, &end, 16);
+        if (end == at) break;
+        p.payload.push_back(static_cast<std::uint8_t>(b));
+        at = end;
+    }
+    return p;
+}
+
+/// 0x0038 of today's server, by hand: state 6 or 7 a hurt by `actor` of
+/// `damage`, leaving `hp`; state 3 or 11 a contact, damage 0.
+Built hurt_frame(std::uint8_t state, std::uint32_t slot, std::uint16_t x, std::uint16_t y, std::uint32_t actor,
+                 std::uint32_t damage, std::int32_t hp) {
+    Built f(0x0038, 96);
+    f.u8(12, state); f.u32(16, slot);
+    f.u8(24, 0x01); f.f32(28, 2.0f);
+    f.u16(32, x); f.u16(34, y);
+    f.u32(48, actor); f.u32(52, damage); f.i32(64, hp);
+    return f;
+}
+
+/// What is said at Info while `run` runs: the lines with `text` in them.
+int said_while(const std::function<void()>& run, const char* text) {
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_level(LogLevel::Info);
+    log.set_ring_capacity(400);
+    log.clear_ring();
+    run();
+    int n = 0;
+    for (const LogLine& line : log.ring())
+        if (line.text.find(text) != std::string::npos) ++n;
+    log.set_level(was);
+    log.set_ring_capacity(0);
+    return n;
+}
+
+/// The live logs' hurts, read and chained through the world: the HP before
+/// less the damage is the HP after, slot by slot.
+void test_recorded_hurts() {
+    section("Packet world: the hurts of today's server, from the live logs (states 6 and 7)");
+
+    const auto h60 = read_monster_state(recorded(kLog60, kT0));
+    const auto h64 = read_monster_state(recorded(kLog64, kT0));
+    const auto c63 = read_monster_contact(recorded(kLog63, kT0));
+    check(recorded(kLog60, kT0).payload.size() == 88 && h60 && h60->event == MonsterEvent::Hurt && h60->state == 6 &&
+              h60->slot == 1 && h60->attacker == 0x2F7u && h60->damage == 40413 && h60->hp == 67668 &&
+              h60->x == 60 && h60->y == 573 && h60->facing == 1,
+          "log:60, state 6 of 88 bytes: slot 1, hit by 0x2F7 for 40413, 67668 left, at 60,573");
+    check(h64 && h64->event == MonsterEvent::Hurt && h64->state == 7 && h64->damage == 24103 && h64->hp == 43565 &&
+              h60 && h60->hp - static_cast<std::int32_t>(h64->damage) == h64->hp,
+          "log:64, state 7: 24103 off log:60's 67668 leaves 43565 -- the HP before less the damage is the HP after");
+    check(c63 && c63->state == 3 && c63->slot == 1 && c63->actor == 0x2F7u && c63->hp == 67668 &&
+              !read_monster_state(recorded(kLog63, kT0)),
+          "log:63, state 3: slot 1 and 0x2F7, the HP unchanged -- a contact, and no hurt");
+
+    // The three chains through the world, with nothing else known of it.
+    PacketWorld w;
+    const std::uint64_t t = kT0;
+    w.on_packets({ recorded(kLog60, t) });
+    const PacketWorld::Mob first = slot_of(w.view(t), 1);
+    check(first.slot == 1 && first.x == 60.0f && first.y == 573.0f && first.hp == 67668 &&
+              first.max_hp == 67668 + 40413 && !first.dead && !first.moving && first.gen != 0,
+          "a hurt for a slot no frame had named: the monster put where it says, standing, with the HP left and, "
+          "for max HP, what it had before");
+    w.on_packets({ recorded(kLog63, t + 100) });
+    w.on_packets({ recorded(kLog64, t + 200) });
+    w.on_packets({ recorded(kOld178, t + 300) });
+    w.on_packets({ recorded(kOld180, t + 400) });
+    w.on_packets({ recorded(kOld183, t + 500) });
+    w.on_packets({ recorded(kOld204, t + 600) });
+    w.on_packets({ recorded(kOld205, t + 700) });
+    w.on_packets({ recorded(kOld207, t + 800) });
+    const PacketWorld::View v = w.view(t + 900);
+    const PacketWorld::Stats s = w.stats();
+    check(s.hurts == 8 && s.hurts_chained == 5 && s.hurts_new_slot == 3 && s.hurts_far == 0 && s.hurts_rose == 0 &&
+              s.hurts_on_dead == 0 && s.of(0x0038).used == 9 && s.of(0x0038).refused == 0,
+          "eight hurts on three slots, the first of each a slot new to it, and the other five chained -- " +
+              std::to_string(s.hurts_chained) + " chained");
+    const PacketWorld::Mob one = slot_of(v, 1), twelve = slot_of(v, 12), twenty = slot_of(v, 20);
+    check(one.hp == 43565 && one.x == 159.0f && twelve.hp == 639963 && twelve.max_hp == 696500 + 65400 &&
+              twelve.x == 828.0f && twenty.hp == 149211 && twenty.max_hp == 210579 + 36600 && twenty.x == 827.0f &&
+              !one.dead && !twelve.dead && !twenty.dead,
+          "each slot with the HP its last hurt left, where that hurt put it -- slot 12 at 639963 of 761900");
+    check(s.unknown_states == 1 && s.contacts == 1 && one.contact_actor == 0x2F7 && one.contact_ms == t + 100,
+          "states 6 and 7 are no unknown states now; state 3 still is, and counted as a contact, kept on its "
+          "monster");
+    check(s.hurts_yours == 0 && s.hurts_others == 0 && s.contacts_yours == 0 && s.contacts_others == 0 &&
+              one.hurt_ms == t + 200 && one.hurt_by_you_ms == 0 && one.hurt_by_other_ms == 0 && !v.actor_checked,
+          "with no report of yours, whose a hurt is not said: neither yours nor another's");
+    check(s.hitters[0].id == 0x2F7 && s.hitters[0].hits == 2 && s.hitters[1].id == 0x6F &&
+              s.hitters[1].hits == 6 && s.hitters[2].hits == 0,
+          "the hitters met, each with how many: 0x2F7 twice, 0x6F six times");
+}
+
+/// Whose a blow is, once your id is known from your own report: yours or
+/// another player's, for the hurts, the kills and the contacts; and your id
+/// said in the log once for each id.
+void test_hurt_attribution() {
+    section("Packet world: whose a hurt, a kill or a contact is, by your id");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    const int id_lines = said_while(
+        [&] {
+            w.on_packets({ from_client(move_frame(100.0f, 573.0f, 0.0f, 1, 759), t) });
+            w.on_packets({ recorded(kLog60, t + 100) });
+            w.on_packets({ recorded(kLog63, t + 150) });
+            w.on_packets({ recorded(kLog64, t + 200) });
+            w.on_packets({ recorded(kOld37, t + 300) });
+            // Said once: not for the same id again, nor after a map entry
+            // that lets the next report's id be learned anew.
+            w.on_packets({ from_client(move_frame(100.0f, 573.0f, 0.0f, 1, 759), t + 400) });
+            w.on_packets({ from_server(entry_frame(10, 4, 100, 573), t + 500) });
+            w.on_packets({ from_client(move_frame(100.0f, 573.0f, 0.0f, 1, 759), t + 600) });
+        },
+        "Positions: your id is 759 (0x02F7), from your 0x0027");
+    const PacketWorld::Stats s = w.stats();
+    check(s.hurts_yours == 2 && s.hurts_others == 1 && s.contacts_yours == 1 && s.contacts_others == 0,
+          "your id 759 from your 0x0027: log:60 and log:64 are yours, old:37 another player's, log:63 a contact "
+          "of yours");
+    check(id_lines == 1, "\"your id is 759 (0x02F7)\" said once -- " + std::to_string(id_lines) + " time(s)");
+
+    {
+        PacketWorld y;
+        y.on_packets({ from_client(move_frame(100.0f, 573.0f, 0.0f, 1, 759), t) });
+        y.on_packets({ recorded(kLog64, t + 100), recorded(kOld37, t + 200) });
+        const PacketWorld::View v = y.view(t + 300);
+        const PacketWorld::Mob mine = slot_of(v, 1), theirs = slot_of(v, 21);
+        check(mine.hurt_by_you_ms == t + 100 && mine.hurt_by_other_ms == 0 && mine.last_actor == 759 &&
+                  theirs.hurt_by_other_ms == t + 200 && theirs.hurt_by_you_ms == 0 && theirs.last_actor == 0x55C &&
+                  theirs.x == 1636.0f && theirs.y == 850.0f,
+              "each monster says when you last hurt it and when someone else did");
+    }
+    {
+        // The kills split the same way, and before your id is known neither.
+        PacketWorld k;
+        k.on_packets({ from_server(event_frame(9, 3, 1, 7.0f, 500, 900, -5, 600), t) });
+        k.on_packets({ from_client(move_frame(500.0f, 900.0f, 0.0f, 1), t + 100) });
+        k.on_packets({ from_server(event_frame(0, 5, 1, 0.0f, 700, 900, 600), t + 200),
+                       from_server(event_frame(9, 5, 1, 7.0f, 700, 900, -100, 700), t + 300) });
+        k.on_packets({ from_server(event_frame(0, 6, 1, 0.0f, 900, 900, 600), t + 400),
+                       from_server(hurt_frame(7, 6, 900, 900, kId + 50, 700, -100), t + 500) });
+        const PacketWorld::Stats ks = k.stats();
+        const PacketWorld::Mob six = slot_of(k.view(t + 600), 6);
+        check(ks.kills == 3 && ks.kills_before_id == 1 && ks.kills_yours == 1 && ks.kills_others == 1 &&
+                  six.dead && six.hp == 0 && six.dead_ms == t + 500,
+              "a kill before your id is known, one of yours, and a hurt that leaves none by another player -- a "
+              "kill as well, the monster dead");
+    }
+}
+
+/// States 3 and 11 read as contacts are counted, kept on their monster and
+/// placed as before, but never written to the log as states not known: 4
+/// such lines a session, for 601 frames of yours in the farm of 2026-11-03.
+/// A state truly not known still is, its first two frames.
+void test_contacts_quiet() {
+    section("Packet world: contacts (states 3 and 11) are not logged as states not known");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    std::vector<std::string> said;
+    {
+        Logger& log = Logger::instance();
+        const LogLevel was = log.level();
+        log.set_level(LogLevel::Info);
+        log.set_ring_capacity(400);
+        log.clear_ring();
+        w.on_packets({ from_client(move_frame(2400.0f, 1180.0f, 0.0f, 1), t) });
+        w.on_packets({ from_server(event_frame(0, 5, 1, 0.0f, 2400, 1180, 6000), t + 100) });
+        for (std::uint64_t i = 0; i < 4; ++i)
+            w.on_packets({ from_server(hurt_frame(3, 5, 2405, 1180, kId, 0, 6000), t + 200 + 200 * i),
+                           from_server(hurt_frame(11, 5, 2410, 1180, kId, 0, 6000), t + 300 + 200 * i) });
+        for (std::uint64_t i = 0; i < 3; ++i)
+            w.on_packets({ from_server(event_frame(5, 5, 1, 0.0f, 2420, 1180, 6000), t + 1100 + 100 * i) });
+        for (const LogLine& line : log.ring())
+            if (line.text.find("Positions: a monster frame (0x0038) of state") != std::string::npos)
+                said.push_back(line.text);
+        log.set_level(was);
+        log.set_ring_capacity(0);
+    }
+    const PacketWorld::Stats s = w.stats();
+    const PacketWorld::Mob five = slot_of(w.view(t + 1500), 5);
+    check(s.contacts == 8 && s.contacts_yours == 8 && s.unknown_states == 11 && five.contact_actor == kId &&
+              five.contact_ms == t + 900,
+          "8 contacts of yours counted as ever, the last kept on its monster; still among the 11 other states");
+    int threes = 0, elevens = 0, fives = 0;
+    for (const std::string& line : said) {
+        if (line.find("of state 3,") != std::string::npos) ++threes;
+        if (line.find("of state 11,") != std::string::npos) ++elevens;
+        if (line.find("of state 5,") != std::string::npos) ++fives;
+    }
+    check(threes == 0 && elevens == 0 && fives == 2 && said.size() == 2,
+          "none of the 8 contact frames written down as not known; state 5, not known, its first two -- " +
+              std::to_string(said.size()) + " line(s)");
+    int placed = 0;
+    for (const PacketWorld::Stats::Kind& k : s.unknown_kinds) placed += static_cast<int>(k.placed);
+    check(s.unknown_placed == 11 && placed == 11 && five.x == 2420.0f,
+          "and each still puts the monster where it says, as any other state does");
+}
+
+/// What becomes of a hurt that is not where the monster was, of one on a
+/// monster killed, and of one that leaves more HP than the last.
+void test_hurt_rules() {
+    section("Packet world: a hurt far off, on a dead monster, and a monster healing");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    w.on_packets({ from_server(event_frame(0, 30, 1, 0.0f, 1000, 900, 500), t) });
+    w.on_packets({ from_server(hurt_frame(6, 30, 1050, 900, 777, 100, 400), t + 100) });
+    PacketWorld::Mob m = slot_of(w.view(t + 100), 30);
+    check(m.x == 1050.0f && m.hp == 400 && w.stats().hurts_chained == 1,
+          "a hurt 50 px from where the monster stood: put there, 100 off its 500, chained");
+    w.on_packets({ from_server(hurt_frame(6, 30, 1450, 900, 777, 100, 300), t + 200) });
+    m = slot_of(w.view(t + 200), 30);
+    check(m.x == 1050.0f && m.hp == 300 && w.stats().hurts_far == 1 && w.stats().hurts_chained == 2,
+          "one 400 px off: its place counted far and passed over, its HP taken all the same");
+    w.on_packets({ from_server(hurt_frame(7, 30, 1050, 900, 777, 0, 350), t + 300) });
+    check(slot_of(w.view(t + 300), 30).hp == 350 && w.stats().hurts_rose == 1 && w.stats().hurts_chained == 2,
+          "one that leaves more than the last: the monster healing -- rose, not chained");
+
+    // A kill, then a hurt on the dead monster: passed over until a stop
+    // brings one alive into the slot, a generation of its own.
+    w.on_packets({ from_server(event_frame(9, 30, 1, 7.0f, 1050, 900, -10, 360), t + 400) });
+    const std::uint32_t killed_gen = slot_of(w.view(t + 400), 30).gen;
+    w.on_packets({ from_server(hurt_frame(6, 30, 1060, 900, 777, 10, 500), t + 500) });
+    const PacketWorld::Mob still_dead = slot_of(w.view(t + 500), 30);
+    check(still_dead.dead && still_dead.hp == 0 && still_dead.x == 1050.0f && w.stats().hurts_on_dead == 1 &&
+              still_dead.gen == killed_gen,
+          "a hurt on a monster killed: passed over, counted on dead -- it stays dead where it fell");
+    w.on_packets({ from_server(event_frame(0, 30, 1, 0.0f, 1300, 900, 500), t + 2500) });
+    const PacketWorld::Mob back = slot_of(w.view(t + 2500), 30);
+    check(!back.dead && back.hp == 500 && back.gen != killed_gen && back.hurt_ms == 0 && back.last_actor == 0,
+          "a stop with HP in the slot: alive again, a new generation, nobody's blows on it");
+}
+
+/// The generation: new at each spawn, table and dead slot alive again, and
+/// never given twice, whatever starts again in between.
+void test_generations() {
+    section("Packet world: the generation of a slot's monster (Mob::gen)");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    w.on_packets({ from_server(event_frame(0, 5, 1, 0.0f, 2400, 1180, 600), t) });
+    const std::uint32_t first = slot_of(w.view(t), 5).gen;
+    w.on_packets({ from_server(event_frame(1, 5, 1, 2.6f, 2400, 1180, 600), t + 100) });
+    const std::uint32_t walked = slot_of(w.view(t + 100), 5).gen;
+    w.on_packets({ from_server(event_frame(9, 5, 1, 7.0f, 2410, 1180, -50, 650), t + 200) });
+    w.on_packets({ from_server(spawn_frame(5, 2000301, -1, 3100, 1150, 2000), t + 3000) });
+    const std::uint32_t spawned = slot_of(w.view(t + 3000), 5).gen;
+    check(first != 0 && walked == first && spawned > first,
+          "a slot first seen has a generation, a walk keeps it, and the spawn after its kill is the next one -- " +
+              std::to_string(first) + ", " + std::to_string(walked) + ", " + std::to_string(spawned));
+    w.reset();
+    w.on_packets({ wrapped(table_frame({ { 5, 1003901, 39, 1, 900, 1145, 0.0f, 3044, 3044 } }), t + 4000) });
+    check(slot_of(w.view(t + 4000), 5).gen > spawned,
+          "after a reset, the table's monster in the same slot is a newer one still: never a number given twice");
+}
+
+/// Your id proven the hitter's after kActorCheckHits blows of yours: said
+/// once, and from then on each view says so.
+void test_actor_checked() {
+    section("Packet world: your id proven the hitter's (actor_checked)");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    bool before = true;
+    const int said = said_while(
+        [&] {
+            w.on_packets({ from_client(move_frame(1000.0f, 900.0f, 0.0f, 1), t) });
+            w.on_packets({ from_server(event_frame(0, 8, 1, 0.0f, 1100, 900, 100000), t + 10) });
+            std::int32_t hp = 100000;
+            for (std::uint64_t i = 0; i < PacketWorld::kActorCheckHits; ++i) {
+                if (i + 1 == PacketWorld::kActorCheckHits) before = w.view(t + 100 * i).actor_checked;
+                hp -= 1000;
+                const std::uint8_t state = static_cast<std::uint8_t>(i % 2 != 0 ? 7 : 6);
+                w.on_packets({ from_server(hurt_frame(state, 8, 1100, 900, kId, 1000, hp), t + 100 * (i + 1)) });
+            }
+            w.on_packets({ from_server(hurt_frame(6, 8, 1100, 900, kId, 1000, hp - 1000), t + 5000) });
+        },
+        "seen as the hitter 20 times");
+    const PacketWorld::Stats s = w.stats();
+    check(!before && w.view(t + 5000).actor_checked && s.hurts_yours == 21 && s.hurts_chained == 21,
+          "19 blows of yours: not yet; the 20th proves it");
+    check(said == 1, "and that is said once in the log -- " + std::to_string(said) + " time(s)");
+    w.reset();
+    check(!w.view(t + 6000).actor_checked, "a reset -- another game, maybe another id -- proves it no longer");
+}
+
+/// The counts since a moment, for the Positions line from HUNT ON: the new
+/// ones too, and the hitters by their ids.
+void test_hurt_counts_since() {
+    section("Packet world: the hurts, kills and hitters since a moment (Stats::since)");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    w.on_packets({ from_client(move_frame(100.0f, 573.0f, 0.0f, 1, 759), t) });
+    w.on_packets({ recorded(kLog60, t + 100) });
+    const PacketWorld::Stats before = w.stats();
+    w.on_packets({ recorded(kLog63, t + 150), recorded(kLog64, t + 200), recorded(kOld37, t + 300) });
+    const PacketWorld::Stats d = w.stats().since(before);
+    check(d.hurts == 2 && d.hurts_chained == 1 && d.hurts_yours == 1 && d.hurts_others == 1 && d.contacts == 1 &&
+              d.contacts_yours == 1 && d.hurts_new_slot == 1,
+          "since(): the hurts after it -- log:64 chained and yours, old:37 another's in a slot new to it -- and "
+          "log:63's contact");
+    check(d.hitters[0].id == 759 && d.hitters[0].hits == 1 && d.hitters[1].id == 0x55C && d.hitters[1].hits == 1,
+          "and each hitter's blows since, by its id: 759 once, 0x55C once");
+}
+
+/// Who says the map has changed (map_change_by): the packets, once a map
+/// entry has been seen since the world started afresh and they are live on
+/// the game and not just relinked; the minimap otherwise, as before.
+void test_map_change_by() {
+    section("Map changes: the packets' map entries, or the minimap (map_change_by)");
+
+    const std::uint64_t now = kT0 + 60'000;
+    PacketWorld::Place p;
+    p.entries = 1;
+    p.epoch = 1;
+    p.since_ms = p.entry_ms = kT0;
+    check(map_change_by(p, true, now - 500, now) == MapChangeBy::Packets,
+          "an entry seen, on the game, the server heard half a second ago: the packets");
+    PacketWorld::Place none = p;
+    none.entries = 0;
+    check(map_change_by(none, true, now - 500, now) == MapChangeBy::Minimap,
+          "no entry since the world started afresh: the minimap");
+    check(map_change_by(p, false, now - 500, now) == MapChangeBy::Minimap, "not on the game's process: the minimap");
+    check(map_change_by(p, true, now - kMapByPacketsQuietMs, now) == MapChangeBy::Packets &&
+              map_change_by(p, true, now - kMapByPacketsQuietMs - 1, now) == MapChangeBy::Minimap &&
+              map_change_by(p, true, 0, now) == MapChangeBy::Minimap,
+          "the server quiet 5 s: still the packets; a moment longer, or never heard: the minimap");
+    PacketWorld::Place relinked = p;
+    relinked.since_ms = now - kMapByPacketsSettleMs + 1;
+    PacketWorld::Place settled = p;
+    settled.since_ms = now - kMapByPacketsSettleMs;
+    check(map_change_by(relinked, true, now - 500, now) == MapChangeBy::Minimap &&
+              map_change_by(settled, true, now - 500, now) == MapChangeBy::Packets,
+          "relinked under 10 s ago: the minimap; 10 s on: the packets");
+
+    // The world's own place, asked as the GUI asks it.
+    PacketWorld w;
+    check(w.place().entries == 0 && w.place().epoch == 0, "nothing yet: no entry, epoch 0");
+    w.on_packets({ from_server(entry_frame(10, 4, 690, 1145), kT0) });
+    const PacketWorld::Place in = w.place();
+    check(in.map == 10 && in.area == 4 && in.epoch == 1 && in.entries == 1 && in.since_ms == kT0 &&
+              in.entry_ms == kT0 && map_change_by(in, true, kT0 + 1000, kT0 + 1000) == MapChangeBy::Packets,
+          "an entry: its place, epoch 1, and the packets say");
+    w.relink(kT0 + 2000);
+    const PacketWorld::Place again = w.place();
+    check(again.epoch == 1 && again.entries == 1 && again.since_ms == kT0 + 2000 &&
+              map_change_by(again, true, kT0 + 3000, kT0 + 3000) == MapChangeBy::Minimap &&
+              map_change_by(again, true, kT0 + 12'000, kT0 + 12'000) == MapChangeBy::Packets,
+          "a relink: the minimap for 10 s, then the packets again");
+    w.reset();
+    check(map_change_by(w.place(), true, kT0 + 20'000, kT0 + 20'000) == MapChangeBy::Minimap &&
+              w.place().epoch == 1,
+          "a reset: the minimap until the next entry, the epoch kept");
+
+#ifdef GOBOT_SOURCE_DIR
+    const std::string src = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp");
+    if (src.empty()) {
+        skip("the source tree is not here, so gui_app.cpp is not read\n");
+    } else {
+        const std::string tick = body_of(src, "void GuiApp::tick() {");
+        const std::size_t npos = std::string::npos;
+        const std::size_t followed = tick.find("const bool packet_entered = packet_place.epoch != map_epoch_seen_;");
+        const std::size_t running = tick.find("if (detector_running_) {");
+        const std::size_t taken = tick.find("const bool fingerprint = minimap_.take_changed();");
+        const std::size_t asked =
+            tick.find("map_change_by(packet_place, on_game, packet_self_.link(at).last_server_ms, at)");
+        const std::size_t under = tick.find("if (by_packets ? packet_entered : fingerprint) {");
+        const std::size_t reset = under == npos ? npos : tick.find("camera_.reset();", under);
+        const std::size_t anchor = under == npos ? npos : tick.find("anchor_.reset();", under);
+        check(followed != npos && running != npos && followed < running && taken != npos && asked != npos &&
+                  under != npos && taken < under && asked < under && reset != npos && reset - under < 80 &&
+                  anchor != npos && anchor - under < 120 && tick.find("if (minimap_.take_changed()) {") == npos &&
+                  tick.find("++minimap_overruled_;") != npos,
+              "tick(): the minimap's reset sits under the packets' test -- an entry when they say, the fingerprint "
+              "otherwise -- the entries followed at every tick, and a fingerprint they overrule counted");
+        // One line a change: the tracker's own goes to the debug log, tick()
+        // says the fingerprint once -- with "ignored" when the packets overrule it.
+        const std::string tracker = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/minimap_tracker.cpp");
+        const std::size_t ignored = tick.find("-- ignored");
+        const std::size_t ignored_from = ignored == npos ? npos : tick.rfind("GB_INFO(", ignored);
+        const std::size_t acts = tick.find("if (!by_packets && fingerprint)");
+        check(!tracker.empty() && tracker.find("GB_INFO(\"Map changed") == npos &&
+                  tracker.find("GB_DEBUG(\"Map changed") != npos && ignored_from != npos &&
+                  tick.find("%016llx", ignored_from) < ignored && acts != npos && under != npos && acts < under,
+              "one \"Map changed -- minimap fingerprint\" line a change: the tracker's at debug, tick()'s with the "
+              "fingerprint, and \"ignored\" on it when the packets overrule");
+    }
+#endif
+}
+
 } // namespace
 
 void test_packet_world(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1069,4 +1624,13 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_guards();
     test_unknown_states();
     test_reset();
+    test_relink();
+    test_recorded_hurts();
+    test_hurt_attribution();
+    test_contacts_quiet();
+    test_hurt_rules();
+    test_generations();
+    test_actor_checked();
+    test_hurt_counts_since();
+    test_map_change_by();
 }

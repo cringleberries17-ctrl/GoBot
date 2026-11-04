@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -183,7 +184,7 @@ public:
     bool stop_move();
     bool jump();
     bool double_jump();
-    bool jump_down();       ///< drop through a platform
+    bool jump_down();       ///< the packet bot's old drop: ↓ held, so always refused (drop_ctrl_down is the drop)
     bool face_left();
     bool face_right();
 
@@ -231,6 +232,116 @@ public:
         std::uint32_t flags = 0;
     };
     static KeyEvent typed_key_event(std::uint32_t vk, bool down, KeyInject how);
+
+    // ---- the drop through a platform: Ctrl + ↓ ----
+
+    /// How a drop's press went (drop_ctrl_down).
+    enum class DropSent : std::uint8_t {
+        NotSent,    ///< nothing went down: no window, refused, not in front, go_on said no, keys owed
+        Aborted,    ///< Ctrl went down and up again with no ↓, or ↓ did not go out whole
+        Cut,        ///< ↓ went out inside Ctrl but was up again under kDropCutMs
+        Sent,       ///< ↓ went out inside Ctrl and was held its time
+    };
+    struct DropPress {
+        DropSent      sent = DropSent::NotSent;
+        std::uint64_t down_ms = 0;      ///< now_ms() as [Ctrl↓, ↓↓] went out; 0 when ↓ did not
+        std::uint32_t held_ms = 0;      ///< from then until ↓'s up went out
+    };
+
+    /// Ctrl + ↓: the game's drop through a platform (the player, 2026-11-03).
+    /// The ONE way ↓ ever goes down, and always inside Ctrl: it takes no key,
+    /// so no setting can make it a bare ↓.
+    ///
+    ///   1. [Ctrl↓] alone for 40-60 ms -- Ctrl alone is the game's pick-up,
+    ///      harmless;
+    ///   2. [Ctrl↓, ↓↓] in ONE SendInput array, which nothing can get
+    ///      between: Ctrl goes again with ↓, so ↓ never lands without it,
+    ///      even had the player's own Ctrl come up in the pause;
+    ///   3. ↓ held 70-110 ms, then [↓↑];
+    ///   4. 40-60 ms, then [Ctrl↑]. ↓ always comes up before Ctrl.
+    ///
+    /// The downs go only with the game in front, the ups wherever focus is.
+    /// `go_on` is asked before Ctrl goes down, again just before ↓ -- false
+    /// there: Ctrl comes up, and no ↓ goes at all -- and every 10 ms of the
+    /// hold, which it cuts short. It is asked outside any lock, and one that
+    /// throws says no.
+    ///
+    /// While it runs, and while an up it owes has not gone out, inject()
+    /// refuses every other thread's key-down and mouse-down; release_all(),
+    /// from any thread -- F12, DỪNG, HUNT OFF, the game losing focus -- sends
+    /// the owed ups at once and cuts the drop short. An up that did not go
+    /// out is owed (keys_owed) until settle_owed() or release_all() gets it
+    /// out. noexcept, with a guard that sends the ups whatever happens.
+    /// Nothing is recorded among the keys held: release_all would let them
+    /// go one at a time, in any order -- Ctrl before ↓.
+    DropPress drop_ctrl_down(const std::function<bool()>& go_on) noexcept;
+    /// Whether a drop's ↓-up or Ctrl-up has not gone out, with no drop
+    /// running to send it.
+    bool keys_owed() const noexcept;
+    /// What a drop owes, sent whatever is in front: [↓↑, Ctrl↑] while ↓ is
+    /// owed -- Ctrl↑ never alone before ↓'s -- and [Ctrl↑] once only Ctrl is.
+    /// True when nothing is owed now; false while a drop runs (it sends its
+    /// own) or an up did not go out again, counted in owed_tries.
+    bool settle_owed() noexcept;
+    /// How many times in a row settle_owed could not get the owed ups out:
+    /// 0 once nothing is owed.
+    int owed_tries() const noexcept { return owed_tries_.load(); }
+    /// That many, and ↓ or Ctrl may be stuck down: the hunt stops (GuiApp::tick).
+    static constexpr int kOwedTries = 3;
+    /// For GoBot's start and each BẮT ĐẦU with drops on: a GoBot ended
+    /// between ↓ and its up leaves both down in Windows. ↓ let go of when
+    /// Windows reads it down, then Ctrl the same way -- ups only, whatever is
+    /// in front. Nothing while a drop runs. How many ups went out.
+    int release_stray_drop_keys() noexcept;
+
+    /// The steps' fixed events, whatever the keyboard layout: Ctrl is left
+    /// Ctrl {0x11, scan 0x1D}, ↓ is {0x28, scan 0x50, extended} -- the way the
+    /// arrows already reach the game. BothUp is [↓↑, Ctrl↑]. For tests.
+    enum class DropStep { Lead, Down, DownUp, CtrlUp, BothUp };
+    static std::vector<KeyEvent> drop_batch(DropStep s);
+    static constexpr int kDropLeadMinMs = 40;
+    static constexpr int kDropLeadMaxMs = 60;
+    static constexpr int kDropHoldMinMs = 70;
+    static constexpr int kDropHoldMaxMs = 110;
+    static constexpr int kDropTailMinMs = 40;
+    static constexpr int kDropTailMaxMs = 60;
+    /// ↓ up again sooner than this after it went down: Cut.
+    static constexpr std::uint32_t kDropCutMs = 60;
+
+    /// One event of an array inject() hands to Windows, in SendInput's own
+    /// terms: a key's code, scan code and flags (KEYBDINPUT) or, with
+    /// `mouse`, a mouse event's flags (MOUSEINPUT's dwFlags).
+    struct SentEvent {
+        bool          mouse = false;
+        std::uint16_t vk = 0;
+        std::uint16_t scan = 0;
+        std::uint32_t flags = 0;
+    };
+    /// Whether an array puts ↓ down outside a drop: any key-down in it that
+    /// is ↓ -- by its key code's low byte, 0x28, or sent as a scan code by
+    /// scan 0x50, extended or not -- unless `chord` and a Ctrl-down comes
+    /// before it in the same array. inject() refuses such an array before
+    /// anything else is asked, and only drop_ctrl_down passes `chord`.
+    static bool bare_down_in(const SentEvent* events, std::size_t n, bool chord);
+
+    /// A pretend Windows, for gobot_test only, listened to only while the
+    /// "no real input" switch is on -- a real GoBot cannot be pointed at it.
+    /// Every array inject() lets through -- past the ↓ guard and the drop's
+    /// refusal of other threads, which it is there to test -- goes to `send`,
+    /// which says how many of its events were taken; SendInput is never
+    /// called. drop_ctrl_down and release_stray_drop_keys are then not
+    /// refused by the switch, and ask `focused` for the game in front (none:
+    /// in front) and `key_held` for what Windows reads down (none: nothing).
+    /// Process-wide, as the keyboard it stands in for.
+    struct PretendSender {
+        std::function<unsigned(const std::vector<SentEvent>& events, bool chord)> send;
+        std::function<bool()>                                                   focused;
+        std::function<bool(int vk)>                                             key_held;
+    };
+    static void set_pretend_sender(PretendSender* p);
+    /// An array through inject() as any key or click goes, never a drop's
+    /// chord, for a test. 0, and nothing done, without a pretend sender.
+    static unsigned pretend_inject(const std::vector<SentEvent>& events);
 
     /// One UTF-16 unit as Unicode input (KEYEVENTF_UNICODE), down and up, only
     /// while the game is in front.
@@ -397,7 +508,7 @@ public:
     /// in this game that does (the player, 2026-11-01). A key box asked for
     /// it refuses it; one already set to it presses nothing. By the low byte,
     /// which is all of a key code that reaches the game: a file's 0x10028 is
-    /// Down too.
+    /// Down too. The drop's Ctrl + ↓ is drop_ctrl_down, which takes no key.
     static bool never_pressed(std::uint32_t vk) { return (vk & 0xFFu) == 0x28u; }
     /// Parse a key as a person or a file writes it into a VK, 0 for none. One
     /// letter or digit is that key ("Z"; "1" is the 1 key, not key code 1); a
@@ -419,6 +530,19 @@ private:
     /// through here or random_delay(); the generator is shared across threads.
     int  jitter(int min_ms, int max_ms) const;
 
+    /// drop_ctrl_down's steps, which it runs in a try: `out` holds what went
+    /// out so far, for what it returns should one of them throw.
+    void drop_chord(const std::function<bool()>& go_on, DropPress& out);
+    /// The drop's guard, at its end whatever happened: with `send_ups`, what
+    /// is still owed sent; then no drop runs. Nothing when none was running.
+    void end_chord(bool send_ups) noexcept;
+    /// Under chord_mutex_: what is owed sent once, as settle_owed says. True
+    /// when nothing is owed after.
+    bool send_owed();
+    /// Under chord_mutex_: this manager counted in the process's drops
+    /// running or owing ups exactly while it is one.
+    void chord_busy_sync() noexcept;
+
     std::atomic<void*> hwnd_{nullptr};
     std::atomic<bool>  said_never_{false};     ///< a ↓ refused has been said in the log
 
@@ -435,6 +559,18 @@ private:
 
     mutable std::mutex                             held_mutex_;
     std::unordered_map<std::uint32_t, bool>        held_keys_;
+
+    // ---- the drop (drop_ctrl_down) ----
+    /// Taken for each of the drop's sends, never across a sleep, and by
+    /// release_all and settle_owed: nothing sends the owed ups in between the
+    /// drop's last look and its ↓.
+    std::mutex         chord_mutex_;
+    std::atomic<bool>  chord_in_flight_{false};
+    std::atomic<bool>  chord_cancel_{false};       ///< release_all cut it short
+    std::atomic<bool>  down_owed_{false};          ///< set before ↓ goes down, cleared once its up went out
+    std::atomic<bool>  ctrl_owed_{false};          ///< likewise for Ctrl
+    std::atomic<int>   owed_tries_{0};
+    bool               chord_counted_ = false;     ///< under chord_mutex_: see chord_busy_sync
 
     mutable std::mutex         rng_mutex_;
     mutable std::mt19937       rng_;

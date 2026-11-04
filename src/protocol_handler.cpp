@@ -46,10 +46,12 @@ void ProtocolHandler::on_packet(const GamePacket& pkt) {
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.total;
-        // The world model is what the bot acts on. A frame from inside a
-        // wrapper or from UDP is decoded by layouts written for plain frames,
-        // and one opcode number can mean something else there, so it changes
-        // nothing here until P0-3 says what these frames are.
+        // The world model is what the packet bot acts on. A frame from inside
+        // a wrapper or from UDP is decoded by layouts written for plain
+        // frames, and one opcode number can mean something else there, so it
+        // changes nothing here, on purpose. Those frames have readers of their
+        // own, which know their sides and sizes: PacketWorld's (you and the
+        // monsters) and PacketSelf's (your HP and MP, the bag).
         if (!pkt.plain()) {
             ++stats_.held_back;
             return;
@@ -225,6 +227,16 @@ void ProtocolHandler::handle_self_hpmp(const DecodedPacket& d) {
 }
 
 void ProtocolHandler::handle_monster(const DecodedPacket& d, bool spawn) {
+    // Whether the layout reads a field at all, in a group or flat: a monster
+    // is known by its id field whatever it reads -- slot 0 is a monster like
+    // any other, 0x0038's id being its slot -- and an HP read below 0 is a
+    // kill (0x0038's i32 at @56).
+    const auto reads = [&d](const std::unordered_map<std::string, FieldValue>* g,
+                            std::initializer_list<const char*> names) {
+        for (const char* n : names)
+            if (g ? g->count(n) != 0 : d.has(n)) return true;
+        return false;
+    };
     auto build = [&](const std::unordered_map<std::string, FieldValue>* g) {
         Monster m;
         if (g) {
@@ -250,23 +262,23 @@ void ProtocolHandler::handle_monster(const DecodedPacket& d, bool spawn) {
             m.boss   = first_int(d, { "boss", "is_boss" }) != 0;
             m.name   = first_string(d, { "name" });
         }
-        m.dead = (m.hp == 0 && m.max_hp > 0);
+        m.dead = (m.hp == 0 && m.max_hp > 0) || (reads(g, { "hp" }) && m.hp < 0);
         return m;
     };
 
     if (!d.groups.empty()) {
         for (const auto& g : d.groups) {
-            Monster m = build(&g);
-            if (m.id != 0) state_.upsert_monster(m);
+            if (!reads(&g, { "id", "monster_id" })) continue;
+            state_.upsert_monster(build(&g));
         }
         return;
     }
 
-    Monster m = build(nullptr);
-    if (m.id == 0) {
+    if (!reads(nullptr, { "id", "monster_id", "entity_id" })) {
         GB_DEBUG("Monster packet 0x%04X has no usable id field", d.opcode);
         return;
     }
+    Monster m = build(nullptr);
     if (m.dead) {
         state_.remove_monster(m.id);
         return;

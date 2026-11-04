@@ -170,16 +170,34 @@ struct PotionSettings {
     /// Warn when a potion key's slot shows fewer than this; 0 warns of nothing
     /// running low (the slot running empty is still said).
     int warn_below = 20;
+    /// Warn when the bag holds fewer than this of what a potion key drinks --
+    /// the packets' count of the whole bag, for a key it has been checked
+    /// against (packets_bag.cpp) -- 0 never. Its own number, not warn_below: a
+    /// bag of 20 is a minute of a farm's MP pace (19 a minute, 2026-11-03), and
+    /// 200 about ten.
+    int warn_bag_below = 200;
     /// How often the slots are read during a run, in seconds.
     int read_every_s = 10;
 
     static constexpr int kMaxWarn = 500;
+    static constexpr int kMaxWarnBag = 9999;
     static constexpr int kMinEvery = 2;
     static constexpr int kMaxEvery = 300;
 
     /// Anything missing or out of range is the default, or brought into range.
     void load(const IniFile& ini);
 };
+
+/// "Low" by the bag for one potion key is said again once the bag holds this
+/// many more than warn_bag_below: the same margin PotionWatch re-arms a slot at.
+constexpr int kBagLowRearm = 5;
+
+/// "Low" by the bag for one potion key, from the bag's `total` of what it
+/// drinks: true the one time it is to be said -- the total under
+/// `warn_bag_below`, and `said` not set, which it then sets. `said` is cleared
+/// once the total is kBagLowRearm or more over the mark, and by whoever starts
+/// a new run. A mark of 0 or less says nothing, and leaves `said` as it is.
+bool bag_low_now(int total, int warn_bag_below, bool& said);
 
 /// The second frame of a look at the slots, this long after the first:
 /// soon enough that the stack has not moved in between, late enough that the

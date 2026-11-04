@@ -877,13 +877,13 @@ void GuiApp::simple_jobs() {
     simple_style_line();        // "Kiểu đánh [▼] (?) [Tầm đánh…]": simple_style.cpp
     if (ImGui::Checkbox("Đứng yên một chỗ", &hunt_config_.stay_put)) simple_changed();
     ImGui::SetItemTooltip("Không đi tới quái: chỉ đánh con quái nào tới trong tầm đánh.\n"
-                          "Hợp với chỗ quái tự kéo tới.\n"
+                          "Hợp với chỗ quái tự kéo tới. Không bao giờ nhảy xuống bậc dưới.\n"
                           "Có dấu cả Chỗ đánh quái: bị đẩy ra xa chỗ thì đi bộ về chỗ.");
     simple_keep_distance_tick();    // "Giữ khoảng cách" beside it: simple_style.cpp
     // "Vị trí từ gói tin" beside them, or under them when the row is full.
     // Ticked, the packets steer whenever they are healthy (On); unticked they
-    // are only watched and written to the log (Watch) -- the capture starts
-    // with the hunting either way. Off is the full window's alone.
+    // are only watched and written to the log (Watch) -- the capture runs all
+    // session either way. Off is the full window's alone.
     {
         const char* const kPackets = "Vị trí từ gói tin";
         const float wide = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
@@ -896,7 +896,7 @@ void GuiApp::simple_jobs() {
             simple_changed();
         }
         // Marked as the keep-distance tick's is, ticked or not: unticked, the
-        // capture still starts with every hunt.
+        // capture still runs all session.
         const std::string tip = simple_ui::trial_hint(
             simple_ui::kTrialPacketPositions,
             "Lấy vị trí của nhân vật và của quái từ gói tin của game, thay vì đọc\n"
@@ -906,6 +906,7 @@ void GuiApp::simple_jobs() {
             "theo dõi gói tin và ghi vào gobot_gui.log, vẫn đánh theo màn hình.");
         ImGui::SetItemTooltip("%s", tip.c_str());
     }
+    simple_drop_tick();         // "Nhảy xuống bậc dưới" after it: simple_style.cpp
     simple_spot_tick();         // "Chỗ đánh quái [Đặt chỗ này]" after them: simple_spot.cpp
     hint(hunt_config_.stay_put ? "Đứng yên tại chỗ, đánh con quái nào tới trong tầm đánh."
                                : "Tự đi tới con quái gần nhất và đánh nó.");
@@ -916,6 +917,7 @@ void GuiApp::simple_jobs() {
                                    "đọc màn hình như cũ. Dòng \"Vị trí:\" dưới nút BẮT ĐẦU cho biết đang "
                                    "dùng cách nào.")
                  .c_str());
+    simple_drop_hints();        // "Nhảy xuống bậc dưới"'s, and why it stopped the hunt: simple_style.cpp
     simple_spot_hint();
     row_gap();
     simple_monster_row();       // "Lọc quái", simple_lists.cpp
@@ -1254,8 +1256,8 @@ bool GuiApp::simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, b
             // potion key would stop the bot (simple_hotkeys.cpp). Nor can ↓,
             // which GoBot never presses (InputManager::never_pressed).
             if (InputManager::never_pressed(got)) {
-                simple_note("GoBot không bấm phím ↓: đứng trên cửa mà bấm ↓ là sang bản đồ khác. Chọn phím "
-                            "khác.");
+                simple_note("GoBot không bấm phím ↓ một mình: đứng trên cửa mà bấm ↓ là sang bản đồ khác. Chọn "
+                            "phím khác.");
                 // Still a key down under the player's finger: the game is not
                 // brought to the front until it is up (keep_game_in_front).
                 front_key_ = got;
@@ -1406,7 +1408,10 @@ void GuiApp::simple_start_block() {
                 // With skills following the fight: whether MP holds them.
                 coloured(kGood, ("Đang đánh quái." + simple_skills_note(false)).c_str());
                 break;
-            case Hunter::State::Approaching: coloured(kGood, "Đang đi tới quái."); break;
+            case Hunter::State::Approaching:
+                // Settling to press Ctrl + ↓, or falling from it.
+                coloured(kGood, hs.dropping ? "Đang nhảy xuống tới quái ở bậc dưới (Ctrl + ↓)." : "Đang đi tới quái.");
+                break;
             case Hunter::State::Returning:
                 // Along the ground: what the walk back lets go of within
                 // spot_tolerance (Chỗ đánh quái, simple_spot.cpp).
@@ -1742,7 +1747,7 @@ void GuiApp::simple_start_jobs() {
     // only in the client's own UDP reports); the full screen's Attack switch
     // makes the same choice. The hunter sees by the name plates, or -- with
     // "Vị trí từ gói tin" ticked and the packets healthy -- by the game's own
-    // frames (PacketEyes), whose capture start_hunt starts by itself. Not
+    // frames (PacketEyes), whose capture runs all session by itself. Not
     // without your character's name, which the screen finds you by and which
     // the screen is the fallback for: the rest starts, and the card says in
     // red why the fighting did not.
@@ -1941,7 +1946,7 @@ void GuiApp::keep_game_in_front() {
     // but HP under the HP potion's mark, or 50% if that is higher, comes
     // first, as for the chat line and the quest round: a potion goes with the
     // game in front.
-    const float hp = vitals_.hp_percent();
+    const float hp = hp_percent_now();
     const bool hp_low = vitals_running_ && hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());
     look.listening = !hp_low && simple_listening_ != 0 && fg != nullptr && fg == static_cast<HWND>(main_hwnd_);
     look.crossing = look.window && !look.in_front && keeper_crossing();
@@ -2324,12 +2329,32 @@ void GuiApp::simple_trash_tab() {
              "đất. Viền xanh: dùng (đăng ký mảnh ghép, hoặc dùng bùa mỗi giờ một cái). Không cần "
              "món đó đang có trong túi. Món "
              "được nhận theo hình vẽ, không theo màu: mảnh ghép trong túi đổi màu liên tục, và "
-             "món cùng hình khác màu (viền đỏ mảnh) cũng bị xoá theo.");
+             "món cùng hình khác màu (viền đỏ mảnh) cũng bị xoá theo. Riêng bùa để dùng thì mỗi màu "
+             "là một loại: chỉ dùng đúng màu đã chọn.");
+        // A charm on the delete list drawn like a charm on the Dùng list that
+        // is not its colour: TrashList::judge tells its slots by their colour,
+        // so it gives way to none. Chosen there itself, its slots are deleted;
+        // brought along by another colour (via), they are left alone -- neither
+        // marked nor said to be deleted. Not where a picture cut from the bag
+        // whose colour is not sure is drawn like one chosen there itself: every
+        // slot that picture wins is left alone.
+        const auto by_colour = [&](const TrashList::Item& d) {
+            if (d.action == TrashList::Action::Use || !d.charm()) return false;
+            bool drawn = false;
+            for (const TrashList::Item& u : simple_trash_.items) {
+                if (u.action != TrashList::Action::Use || !u.charm()) continue;
+                const bool like = std::find(u.kin.begin(), u.kin.end(), d.id) != u.kin.end();
+                if (u.colour_of == d.id || (like && u.colour_of.empty() && d.via.empty())) return false;
+                drawn = drawn || like;
+            }
+            return drawn;
+        };
         // Icons on the delete or drop list drawn like a picture on the Dùng
         // list: a slot holding one is registered, not deleted (TrashList::judge).
         std::vector<std::string> gives_way_ids;
         for (const std::size_t k : simple_trash_.yielding_to_use())
-            if (!simple_trash_.items[k].id.empty()) gives_way_ids.push_back(simple_trash_.items[k].id);
+            if (!simple_trash_.items[k].id.empty() && !by_colour(simple_trash_.items[k]))
+                gives_way_ids.push_back(simple_trash_.items[k].id);
         for (const auto& group : simple_catalog_.groups) {
             ImGui::PushFont(nullptr, kSmall);
             ImGui::PushStyleColor(ImGuiCol_Text, kDim);
@@ -2359,7 +2384,7 @@ void GuiApp::simple_trash_tab() {
                 std::string via;
                 for (const auto& item : simple_trash_.items)
                     if (item.id == e.id && !item.via.empty() &&
-                        item.action == TrashList::Action::Delete)
+                        item.action == TrashList::Action::Delete && !by_colour(item))
                         via = item.via;
                 const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
                 if (use) {
@@ -2401,7 +2426,9 @@ void GuiApp::simple_trash_tab() {
                 }
                 if (ImGui::BeginPopup("##catpick")) {
                     // The same drawing in other colours goes with it, by the
-                    // player's rule: shown here, before anything is ticked.
+                    // player's rule: shown here, before anything is ticked --
+                    // but not a charm's to use, each colour of which is another
+                    // effect (TrashList::add_catalog).
                     std::string kin;
                     for (const std::string& id : simple_pick_kin_)
                         kin += (kin.empty() ? "" : ", ") + id;
@@ -2418,8 +2445,9 @@ void GuiApp::simple_trash_tab() {
                     if (!simple_pick_kin_.empty()) {
                         ImGui::PushFont(nullptr, kSmall);
                         coloured(kWait, group.folder == "spend/buff"
-                                            ? "Bùa cùng hình, khác màu: nếu chọn \"Dùng bùa\" thì cũng dùng những cái này, "
-                                              "nhưng mỗi giờ chỉ một cái trong số đó, cái nào gặp trước trong túi đồ:"
+                                            ? "Bùa cùng hình, khác màu là loại bùa khác (hiệu ứng khác). \"Dùng bùa\" chỉ "
+                                              "dùng đúng màu này; muốn dùng loại nào thì bấm vào loại đó và chọn "
+                                              "\"Dùng bùa\":"
                                             : "Chọn món này thì cũng xoá luôn các món cùng hình, khác màu:");
                         ImGui::PopFont();
                         for (std::size_t k = 0; k < simple_pick_kin_.size(); ++k) {
@@ -2450,13 +2478,25 @@ void GuiApp::simple_trash_tab() {
                         // deleted (TrashList::judge).
                         bool gives_way = false;
                         for (const std::size_t i : simple_trash_.yielding_to_use())
-                            gives_way = gives_way || simple_trash_.items[i].id == simple_pick_id_;
+                            gives_way = gives_way || (simple_trash_.items[i].id == simple_pick_id_ &&
+                                                      !by_colour(simple_trash_.items[i]));
+                        // A charm's other colours: only those the list now
+                        // deletes, not those told apart from a charm on the
+                        // Dùng list by their colour.
+                        std::string also = kin;
+                        if (group.folder == "spend/buff") {
+                            also.clear();
+                            for (const auto& item : simple_trash_.items)
+                                if (item.via == simple_pick_id_ && item.action == TrashList::Action::Delete &&
+                                    !by_colour(item))
+                                    also += (also.empty() ? "" : ", ") + item.id;
+                        }
                         if (how == 1 && gives_way)
                             simple_note("Món này cũng có trong danh sách Dùng (hình chụp từ túi đồ): ô có nó sẽ được "
                                         "đăng ký trước, không bị xoá cả chồng. Muốn xoá thì bấm × ở hình đó.",
                                         15000);
-                        else if (how == 1 && !kin.empty())
-                            simple_note("Cũng sẽ xoá: " + kin + " (cùng hình, khác màu).", 12000);
+                        else if (how == 1 && !also.empty())
+                            simple_note("Cũng sẽ xoá: " + also + " (cùng hình, khác màu).", 12000);
                         ImGui::CloseCurrentPopup();
                     };
                     if (ImGui::Selectable("Bỏ vào thùng rác (xoá hẳn)", del && !use)) set(1);
@@ -2672,8 +2712,9 @@ void GuiApp::simple_trash_tab() {
     ImGui::SetItemTooltip("%s", !charm_listed ? "Chưa có bùa nào trong danh sách Dùng."
                                 : !simple_clean_.use_charms ? "Bật ô \"Dùng bùa\" ở đầu thẻ trước."
                                 : "Dùng mỗi loại bùa trong danh sách một cái ngay bây giờ, không chờ giờ. "
-                                  "Kỹ năng, bình và buff tạm dừng vài giây (tối đa 20 giây nếu nhiều loại bùa). "
-                                  "Không dùng khi máu thấp, đang chat hay bot đang bận việc khác.");
+                                  "Kỹ năng, bình và buff tạm dừng vài giây (khoảng 3 giây mỗi loại, tối đa 20 "
+                                  "đến 40 giây), tất cả trong một lượt. Không dùng khi máu thấp, đang chat hay "
+                                  "bot đang bận việc khác.");
     ImGui::SameLine(0, 18);
     simple_hotkey_box(true);
     if (chat_open)

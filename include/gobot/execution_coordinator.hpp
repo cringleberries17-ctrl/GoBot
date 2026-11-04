@@ -25,6 +25,13 @@ public:
     /// Blocking variant, capped at `timeout_ms`.
     bool request_wait(const std::string& owner, Priority priority, std::uint32_t timeout_ms);
 
+    /// Take the token only when nobody holds it: no holder taken over,
+    /// however low, and none reclaimed, however old -- one taken over goes on
+    /// pressing. Refused below Critical in critical mode, as request() is.
+    /// For the drop's Ctrl + ↓ (InputManager::drop_ctrl_down): held at
+    /// Combat, nothing but a Critical hold can take it while Ctrl is down.
+    bool request_free(const std::string& owner, Priority priority);
+
     /// Release the token. A mismatched owner is ignored, so a late release
     /// from a pre-empted subsystem can't steal the token from its successor.
     void release(const std::string& owner);
@@ -48,6 +55,12 @@ public:
             : coord_(&c), owner_(std::move(owner)) {
             ok_ = coord_->request(owner_, p);
         }
+        /// Taken by request_free: only when nobody holds the token.
+        struct OnlyFree {};
+        Token(ExecutionCoordinator& c, std::string owner, Priority p, OnlyFree)
+            : coord_(&c), owner_(std::move(owner)) {
+            ok_ = coord_->request_free(owner_, p);
+        }
         ~Token() { if (ok_) coord_->release(owner_); }
 
         Token(const Token&) = delete;
@@ -64,6 +77,7 @@ public:
     };
 
     Token acquire(const std::string& owner, Priority p) { return Token(*this, owner, p); }
+    Token acquire_free(const std::string& owner, Priority p) { return Token(*this, owner, p, Token::OnlyFree{}); }
 
 private:
     mutable std::mutex     mutex_;

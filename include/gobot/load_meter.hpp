@@ -225,6 +225,14 @@ struct LoadSnapshot {
     std::uint64_t     log_bytes = 0;
     LoadTimer::Sample front;
 
+    /// The frames the capture handed over, by kind (FrameTally::take), for
+    /// a "frames:" line under "reads:"; empty for none in this entry -- the
+    /// window fills it every ten minutes, at a hunt's start and end, and when
+    /// what the game sends changes. `frames_filtered`: Apply's opcode filter
+    /// was on, so only the listed opcodes were counted.
+    std::string frame_kinds;
+    bool        frames_filtered = false;
+
     std::string jobs;                          ///< "hunt+macro+popups"; empty is none
     std::string tab;                           ///< the tab open in GoBot's window
     bool        light = false;                 ///< light mode ("Nhẹ máy")

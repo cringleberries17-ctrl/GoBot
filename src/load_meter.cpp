@@ -400,6 +400,11 @@ std::string load_report(const LoadSnapshot& before, const LoadSnapshot& now, con
         out += "off";
     out += " | log " + per_min(static_cast<double>(rise(before.log_lines, now.log_lines)), wall_s) + " lines/min, " +
            std::to_string(rise(before.log_bytes, now.log_bytes) / 1024u) + " KB";
+    // Which frames the game sent, by kind, when the window has asked for them
+    // in this entry.
+    if (!now.frame_kinds.empty())
+        out += indent + "frames: " + now.frame_kinds +
+               (now.frames_filtered ? " (filtered by Apply's opcode list)" : "");
 
     // ---- memory and handles; the front keeper ----
     const ProcessLoad& p = now.process;

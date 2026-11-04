@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,9 +28,16 @@ namespace gobot {
 class JumpCheck {
 public:
     /// The character's plate: MobDetector::player, which says whether it was
-    /// seen just now or only remembered.
+    /// seen just now or only remembered. And, when set, your client's own
+    /// take-offs as the packets count them (the 0x002A it sends as the
+    /// character leaves the ground, jumps again in the air or jumps high): a
+    /// running total, or nothing when the packets cannot tell -- no capture on
+    /// the game, your id not known. Asked the moment before the press and
+    /// after the watch; while it can tell, its rise decides, and the plate is
+    /// only watched beside it (GuiApp::packet_takeoffs).
     struct Eyes {
-        std::function<bool(Nameplate&, bool*)> player;
+        std::function<bool(Nameplate&, bool*)>        player;
+        std::function<std::optional<std::uint64_t>()> takeoffs;
     };
     /// `focus` brings the game to the front and says whether it is;
     /// `focused` only says whether it is, the moment before the press --
@@ -53,8 +61,8 @@ public:
     void set_clock(Clock c) { clock_ = std::move(c); }
 
     enum class Outcome {
-        Jumped,         ///< the plate rose kJumpedPx or more
-        NoJump,         ///< it stayed within kStillPx over kStillReads fresh reads
+        Jumped,         ///< the plate rose kJumpedPx or more; or, by the packets, a take-off went out
+        NoJump,         ///< it stayed within kStillPx over kStillReads fresh reads; or, by the packets, none went out
         Unsure,         ///< something in between, or too few reads to say
         NoPlate,        ///< pressed, but the character was not seen to check by
         Held,           ///< a hold is on: nothing pressed
@@ -74,13 +82,24 @@ public:
         int         rose_px = 0;       ///< the highest the plate went above where it stood
         int         reads = 0;         ///< fresh reads of the plate after the press
         std::string hold;              ///< what the hold is, for Held
+        /// Jumped or NoJump said by the packets' take-offs (Eyes::takeoffs),
+        /// and how many went out after the press; the plate's figures above
+        /// are then only what it did beside them.
+        bool        by_packets = false;
+        int         takeoffs = 0;
     };
 
     /// One check: the plate read where it stands, the game in front, the
     /// coordinator's token, `jump_key` pressed exactly once for kHoldMs, and
-    /// the plate watched for kWatchMs. Nothing at all is pressed while a hold
-    /// is on. `stop`, when set before the press, means no press at all; after
-    /// it, the looking is cut short and what has been seen is the result.
+    /// the plate watched for kWatchMs. When the packets can tell the moment
+    /// before the press and again after the watch, their take-offs decide: one
+    /// or more is Jumped, none NoJump, whatever the plate did -- on a map where
+    /// the camera follows a jump the plate hardly moves. Otherwise the plate
+    /// decides, as it always has. Nothing at all is pressed while a hold is
+    /// on. `stop`, when set before the press, means no press at all; after it,
+    /// the looking is cut short and what has been seen is the result -- the
+    /// packets then decide only for a take-off already counted, and the plate
+    /// otherwise.
     Result run(std::uint32_t jump_key, const std::atomic<bool>* stop = nullptr);
 
     /// What the result says to the player, in Vietnamese. `key` is the key's

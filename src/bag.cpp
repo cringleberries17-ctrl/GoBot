@@ -10,6 +10,7 @@
 #include <ctime>
 #include <future>
 #include <map>
+#include <mutex>
 #include <set>
 #include <thread>
 
@@ -56,8 +57,11 @@ bool black(const Frame& f) {
 }
 
 /// A message with only Xác Nhận under it: what the client says when it
-/// refuses something. Its picture has no words, so it is only ever reported,
-/// never answered.
+/// refuses something, and what it says when a charm has been used. Its
+/// picture has no words. A message right after a right-click, with no question
+/// asked, is never clicked; a charm's own message after its question's Xác
+/// Nhận is closed with its own Xác Nhận (BagCleaner::close_notice), told by the
+/// pair's label and this picture's frame round it (bag::lone_ok).
 const char* const kNotice = "grabbed/dialog_ok";
 
 /// The dark panel of words in the bin's pictures, from their top-left. Every
@@ -194,6 +198,25 @@ int lum(const Frame& f, int x, int y) {
     return (r + g + b) / 3;
 }
 
+/// The largest of the three channels' differences between two colours.
+int most_off(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t r2, std::uint8_t g2, std::uint8_t b2) {
+    return std::max({ std::abs(static_cast<int>(r) - static_cast<int>(r2)),
+                      std::abs(static_cast<int>(g) - static_cast<int>(g2)),
+                      std::abs(static_cast<int>(b) - static_cast<int>(b2)) });
+}
+
+/// Pixel (x, y) of an icon with its own transparency: false where it is
+/// see-through, or outside the icon.
+bool icon_px(const Frame& icon, int x, int y, std::uint8_t& r, std::uint8_t& g, std::uint8_t& b) {
+    if (x < 0 || y < 0 || x >= icon.width || y >= icon.height) return false;
+    const std::size_t i = (static_cast<std::size_t>(y) * icon.width + x) * 4;
+    if (icon.pixels[i + 3] < TemplateMatcher::kOpaque) return false;
+    b = icon.pixels[i];
+    g = icon.pixels[i + 1];
+    r = icon.pixels[i + 2];
+    return true;
+}
+
 std::string stamp() {
     const std::time_t t = std::time(nullptr);
     std::tm tm{};
@@ -271,6 +294,18 @@ void prune_pngs(const std::string& dir, bool probes, std::size_t keep) {
     std::sort(old.begin(), old.end());
     for (std::size_t i = 0; i + keep < old.size(); ++i)
         remove_file(dir + "\\" + old[i]);
+}
+
+/// What has been said once this GoBot start, by key: a charm run comes every
+/// few seconds to an hour, and a slot it leaves alone for the same reason
+/// each time is worth one line, not one a run.
+std::mutex g_said_mutex;
+std::set<std::string> g_said;
+
+/// True the first time `key` is asked this GoBot start.
+bool said_once(const std::string& key) {
+    std::lock_guard<std::mutex> lock(g_said_mutex);
+    return g_said.insert(key).second;
 }
 
 } // namespace
@@ -373,6 +408,7 @@ BagView find(const Frame& f, const TemplateStore& store, const BagLayout& l) {
             for (int y = inside.y; y < inside.bottom(); ++y)
                 for (int x = inside.x; x < inside.right(); ++x) sum += lum(f, x, y);
             mean[t] = static_cast<int>(sum / (static_cast<long>(inside.w) * inside.h));
+            v.tab_mean[t] = mean[t];
         }
         if (readable) {
             int darkest = 0;
@@ -572,6 +608,72 @@ float alike(const Frame& a, const Frame& b, const BagLayout& l) {
     const double va = saa - sa * sa / n, vb = sbb - sb * sb / n;
     if (va < n * 4.0 || vb < n * 4.0) return -1.0f;       // flat: nothing to compare
     return static_cast<float>((sab - sa * sb / n) / std::sqrt(va * vb));
+}
+
+IconPlace place_icon(const Frame& f, const ScreenRect& slot, const Frame& icon, const BagLayout& l) {
+    IconPlace best;
+    if (!f.valid() || !icon.valid() || !slot.valid()) return best;
+    // In colour, pixel for pixel: the bag draws a charm's icon exactly as the
+    // catalog has it -- 0 off on every one of the eight, live -- so what is
+    // measured is how far the slot is from that, not how alike in shape.
+    const int mid_x = (slot.w - icon.width) / 2, mid_y = (slot.h - icon.height) / 2;
+    for (int oy = mid_y - kBareSlack; oy <= mid_y + kBareSlack; ++oy)
+        for (int ox = mid_x - kBareSlack; ox <= mid_x + kBareSlack; ++ox) {
+            long total = 0;
+            int n = 0;
+            for (int y = l.edge; y < slot.h - l.edge; ++y)
+                for (int x = l.edge; x < slot.w - l.edge; ++x) {
+                    if (x < kCountCornerW && y < kCountCornerH) continue;                  // the count's
+                    if (x >= slot.w - l.badge_w && y >= slot.h - l.badge_h) continue;     // a badge's
+                    std::uint8_t ir, ig, ib;
+                    if (!icon_px(icon, x - ox, y - oy, ir, ig, ib)) continue;
+                    std::uint8_t r, g, b;
+                    f.get(slot.x + x, slot.y + y, r, g, b);
+                    total += most_off(r, g, b, ir, ig, ib);
+                    ++n;
+                }
+            if (n < kBareFitLeast) continue;
+            const float mean = static_cast<float>(total) / static_cast<float>(n);
+            if (!best.found || mean < best.mean) {
+                best.found = true;
+                best.x = ox;
+                best.y = oy;
+                best.mean = mean;
+            }
+        }
+    return best;
+}
+
+bool icon_fits(const Frame& f, const ScreenRect& slot, const Frame& icon, const BagLayout& l, float* fit) {
+    const IconPlace p = place_icon(f, slot, icon, l);
+    if (fit) *fit = p.mean;
+    return p.found && p.mean <= kBareFitMean;
+}
+
+bool bare_corner(const Frame& f, const ScreenRect& slot, const Frame& icon, const BagLayout& l, int* unlike,
+                 float* fit) {
+    if (unlike) *unlike = -1;
+    const IconPlace p = place_icon(f, slot, icon, l);
+    if (fit) *fit = p.mean;
+    if (!p.found || p.mean > kBareFitMean) return false;
+    // Every pixel of the corner, the edge left out -- the hover and selection
+    // highlights' -- as the icon has it there, or dark where it has none.
+    // Strokes and outline alike: a count is no white needed to be one.
+    int off = 0;
+    const int w = std::min(kCountCornerW, slot.w - l.edge), h = std::min(kCountCornerH, slot.h - l.edge);
+    for (int y = l.edge; y < h; ++y)
+        for (int x = l.edge; x < w; ++x) {
+            std::uint8_t r, g, b;
+            f.get(slot.x + x, slot.y + y, r, g, b);
+            std::uint8_t ir, ig, ib;
+            if (icon_px(icon, x - p.x, y - p.y, ir, ig, ib)) {
+                if (most_off(r, g, b, ir, ig, ib) > kBareOff) ++off;
+            } else if ((r + g + b) / 3 > kBareGround) {
+                ++off;
+            }
+        }
+    if (unlike) *unlike = off;
+    return off == 0;
 }
 
 } // namespace bag
@@ -799,6 +901,29 @@ int CountReader::read_field(const Frame& f, const ScreenRect& area) const {
     return n;
 }
 
+int CountReader::read_charm(const Frame& f, const ScreenRect& slot, const Frame* icon, const BagLayout& l,
+                            bool* bare) const {
+    if (bare) *bare = false;
+    if (!loaded_ || !f.valid()) return kUnreadable;
+    // The corner read reads, read the same way. A number printed there is
+    // from 2 up: a lone 1 is the icon's own white, read as a digit.
+    int white = 0, stray = 0;
+    const int n = scan(f, ScreenRect{ slot.x, slot.y, bag::kCountCornerW, bag::kCountCornerH }, 6, false, true,
+                       white, stray);
+    const bool number = white > 0 && n >= 2 && n <= 9999;
+    if (icon != nullptr && icon->valid()) {
+        if (number) return n;
+        // No number: a stack of one only with the corner the icon's own,
+        // nothing over it -- white there or not. A count not printed in white,
+        // or not read, over 8871081's corner, which has no white, is no one.
+        if (!bag::bare_corner(f, slot, *icon, l)) return kUnreadable;
+        if (bare) *bare = true;
+        return 1;
+    }
+    if (white == 0) return 1;                 // nothing printed: a stack of one
+    return number ? n : kUnreadable;
+}
+
 // --------------------------------------------------------------- catalog
 
 namespace {
@@ -871,10 +996,14 @@ Frame icon_picture(const ItemCatalog::Entry& e) {
 TrashList::Item catalog_item(const ItemCatalog::Entry& e, TrashList::Action a, float min_score) {
     TrashList::Item item;
     item.id = e.id;
+    item.colour_of = e.id;
     item.action = a;
     item.min_score = min_score;
     item.picture = icon_picture(e);
     item.shown = e.tile.valid() ? e.tile : slot_tile(e.icon);
+    // A charm's icon whole, listed or a rival: every colour's, for telling its
+    // stack of one by (CountReader::read_charm), chosen or not.
+    if (bag::use_kind_of(e.id) == UseKind::Charm) item.bare = e.icon;
     return item;
 }
 
@@ -921,6 +1050,166 @@ Frame cut_drawing(const Frame& cut, const BagLayout& l) {
 
 void add_kin(TrashList::Item& item, const std::string& id) {
     if (std::find(item.kin.begin(), item.kin.end(), id) == item.kin.end()) item.kin.push_back(id);
+}
+
+/// How a charm on the Dùng list is told from its drawing in another colour,
+/// each of which is another charm (TrashList::judge). Measured on the live
+/// client's slot of 8871081 (Tiêu Dùng row 1, cell 2, on 2026-11-02 and
+/// 11-03), against the catalog's five colours of that card: in grey all five
+/// score 0.93 to 0.98 there, which tells nothing; in colour its own scores
+/// 0.952 and 0.974, the best other -- blue, 8871021 -- 0.794 and 0.816, a
+/// margin of 0.158 on both days, red 0.73 to 0.75 and green 0.52 to 0.54.
+/// Its mean colour there is 164,78,192 against its icon's 166,77,196, 4 off
+/// at most in a channel; the other colours' icons are 30 to 99 off in one
+/// channel at least. Not held to more than 0.90: the right colour came to
+/// 0.952 on one of the two days, and a charm of the player's own kind left
+/// alone is a charm not used. A hue no icon has is what the mean is for.
+///
+/// The margin is over the colours whose mean is near as well: the catalog's
+/// icons are nearer one another than that slot was to the other colours --
+/// icon against icon the grey card 8871011 scores 0.911 on the green 41 and
+/// 0.906 on the red 31, the grey diamond 51 0.920 on the pink 61 -- and each
+/// of those is 39 to 97 off in its mean, which no slot of the right colour
+/// has come near.
+constexpr float kCharmColourLeast = 0.90f;
+constexpr float kCharmColourMargin = 0.10f;
+constexpr int kCharmMeanOff = 20;
+/// A picture with fewer opaque pixels than this has too few to tell a colour by.
+constexpr int kColourPixelsLeast = 100;
+
+/// How alike the frame is in colour to `pic` placed at x, y: one correlation
+/// over the picture's opaque pixels of red, green and blue as one list -- so a
+/// purple card and a blue one, one drawing, come out far apart, where one
+/// correlation each channel would take each channel's mean out and with it
+/// the very hue told by -- and how far the frame's mean colour there is from
+/// the picture's own, the largest of the three channels' differences. False
+/// for a place off the frame, a picture with fewer than kColourPixelsLeast
+/// opaque pixels, or either side flat.
+bool colour_likeness(const Frame& f, int x, int y, const Frame& pic, float& likeness, int& mean_off) {
+    if (!f.valid() || !pic.valid() || x < 0 || y < 0 || x + pic.width > f.width || y + pic.height > f.height)
+        return false;
+    double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    long long frame_sum[3] = {}, pic_sum[3] = {};
+    int n = 0;
+    for (int py = 0; py < pic.height; ++py)
+        for (int px = 0; px < pic.width; ++px) {
+            const std::size_t i = (static_cast<std::size_t>(py) * pic.width + px) * 4;
+            if (pic.pixels[i + 3] < TemplateMatcher::kOpaque) continue;
+            std::uint8_t r = 0, g = 0, b = 0;
+            f.get(x + px, y + py, r, g, b);
+            const int fc[3] = { r, g, b };
+            const int pc[3] = { pic.pixels[i + 2], pic.pixels[i + 1], pic.pixels[i] };
+            for (int c = 0; c < 3; ++c) {
+                sa += fc[c];
+                sb += pc[c];
+                saa += static_cast<double>(fc[c]) * fc[c];
+                sbb += static_cast<double>(pc[c]) * pc[c];
+                sab += static_cast<double>(fc[c]) * pc[c];
+                frame_sum[c] += fc[c];
+                pic_sum[c] += pc[c];
+            }
+            ++n;
+        }
+    if (n < kColourPixelsLeast) return false;
+    const double m = 3.0 * n;
+    const double va = saa - sa * sa / m, vb = sbb - sb * sb / m;
+    if (va <= m || vb <= m) return false;       // flat: nothing to compare
+    likeness = static_cast<float>((sab - sa * sb / m) / std::sqrt(va * vb));
+    mean_off = 0;
+    for (int c = 0; c < 3; ++c)
+        mean_off = std::max(mean_off, static_cast<int>(std::lround(
+                                          std::abs(static_cast<double>(frame_sum[c] - pic_sum[c])) / n)));
+    return true;
+}
+
+/// Which of a charm's colours -- their catalog icons in `pics` -- the frame
+/// shows where the grey match put the drawing, `at`, give or take a pixel:
+/// each icon at its best place there, anywhere it fits inside `at` -- a
+/// picture cut from the bag is a whole slot, the icon a little narrower --
+/// and a pixel beyond. Decided only when the best scores kCharmColourLeast or
+/// more and its mean colour is within kCharmMeanOff of the frame's there, and
+/// every other colour either scores kCharmColourMargin less or is more than
+/// kCharmMeanOff off in its mean. `next` is the second best, for the log.
+struct ColourCall {
+    std::string best, next;
+    float best_score = -1.0f, next_score = -1.0f;
+    int mean_off = 255;
+    bool decided = false;
+};
+ColourCall decide_colour(const Frame& f, const ScreenRect& at,
+                         const std::vector<std::pair<std::string, const Frame*>>& pics) {
+    struct Scored {
+        std::string id;
+        float score = -1.0f;
+        int   off = 255;
+    };
+    std::vector<Scored> scored;
+    for (const auto& [id, pic] : pics) {
+        if (pic == nullptr || !pic->valid()) continue;
+        Scored one;
+        one.id = id;
+        const int x1 = at.x + std::max(0, at.w - pic->width) + 1;
+        const int y1 = at.y + std::max(0, at.h - pic->height) + 1;
+        for (int y = at.y - 1; y <= y1; ++y)
+            for (int x = at.x - 1; x <= x1; ++x) {
+                float s = 0.0f;
+                int o = 0;
+                if (colour_likeness(f, x, y, *pic, s, o) && s > one.score) {
+                    one.score = s;
+                    one.off = o;
+                }
+            }
+        if (one.score > -1.0f) scored.push_back(one);
+    }
+    ColourCall c;
+    if (scored.empty()) return c;
+    std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) { return a.score > b.score; });
+    c.best = scored[0].id;
+    c.best_score = scored[0].score;
+    c.mean_off = scored[0].off;
+    if (scored.size() > 1) {
+        c.next = scored[1].id;
+        c.next_score = scored[1].score;
+    }
+    c.decided = c.best_score >= kCharmColourLeast && c.mean_off <= kCharmMeanOff &&
+                std::all_of(scored.begin() + 1, scored.end(), [&](const Scored& o) {
+                    return c.best_score - o.score >= kCharmColourMargin || o.off > kCharmMeanOff;
+                });
+    return c;
+}
+
+/// Catalog icon `id` as a slot is matched against it (icon_picture): the
+/// listed item's picture when the list has it, else the rival's. Null when
+/// neither has it.
+const Frame* icon_of(const TrashList& list, const std::string& id) {
+    for (const TrashList::Item& it : list.items)
+        if (it.id == id && it.picture.valid()) return &it.picture;
+    for (const TrashList::Item& r : list.rivals)
+        if (r.id == id && r.picture.valid()) return &r.picture;
+    return nullptr;
+}
+
+/// Charm colour `id`'s catalog icon whole (TrashList::Item::bare): the listed
+/// item's when the list has it, else the rival's. Null when neither has it --
+/// a colour not told, or not the catalog's. Never a picture cut from the bag,
+/// whose corner may have its count in it.
+const Frame* bare_of(const TrashList& list, const std::string& id) {
+    if (id.empty()) return nullptr;
+    for (const TrashList::Item& it : list.items)
+        if (it.id == id && it.bare.valid()) return &it.bare;
+    for (const TrashList::Item& r : list.rivals)
+        if (r.id == id && r.bare.valid()) return &r.bare;
+    return nullptr;
+}
+
+/// The charm colours among `kin`, each with its icon, for decide_colour.
+std::vector<std::pair<std::string, const Frame*>> charm_colours(const TrashList& list,
+                                                                const std::vector<std::string>& kin) {
+    std::vector<std::pair<std::string, const Frame*>> out;
+    for (const std::string& id : kin)
+        if (bag::use_kind_of(id) == UseKind::Charm)
+            if (const Frame* p = icon_of(list, id)) out.emplace_back(id, p);
+    return out;
 }
 
 } // namespace
@@ -1105,8 +1394,10 @@ bool TrashList::load(const std::string& dir, const BagLayout& l) {
         const std::string sub = dir + "\\" + folder(a);
         if (!path_exists(sub)) continue;
 
+        // Quietly: the charm job builds the list every half minute, and the
+        // log had a line for each folder each time (2026-11-03).
         TemplateStore store;
-        store.load(sub);
+        store.load(sub, true);
         for (const std::string& name : store.names()) {
             const Frame* picture = store.get(name);
             if (picture == nullptr || !picture->valid()) continue;
@@ -1184,8 +1475,13 @@ void TrashList::add_catalog(const ItemCatalog& catalog, const std::vector<std::s
     // its own icon is what matches it best, and the screen can say which
     // chosen icon brought it. Held to that one's group, so a drawing that is
     // only like one of these, and not like what was chosen, is a rival still.
+    // Not for a charm to use: each colour of a charm is another effect -- the
+    // purple card 8871081 is "Kinh nghiệm tăng 10" -- and only the colours
+    // chosen are used. The others are left off the list, among the rivals,
+    // and a slot of one is told by its colour and left alone (judge).
     const std::size_t chosen = items.size();
     for (std::size_t i = first; i < chosen; ++i) {
+        if (a == Action::Use && bag::use_kind_of(items[i].id) == UseKind::Charm) continue;
         const std::vector<std::string> group = items[i].kin;
         const std::string via = items[i].id;
         for (const std::string& id : group) {
@@ -1244,6 +1540,22 @@ void TrashList::add_rivals(const ItemCatalog& catalog) {
             for (const std::string& other : c->second) add_kin(it, other);
         }
     }
+
+    // A charm cut from the bag for the Dùng list: which of those colours it
+    // is, decided once, here -- by the same rule a slot's colour is told by
+    // (judge), against the same icons, which cover only the icon's own
+    // pixels. Never the cut against a slot in colour: a cut keeps the whole
+    // slot, its dark ground too, which would bring two hues nearer than was
+    // ever measured. Undecided, it stays empty, and every slot the cut takes
+    // is a doubt (Doubt::Colour) -- never right-clicked.
+    for (Item& it : items) {
+        if (!it.id.empty() || it.action != Action::Use || !it.charm()) continue;
+        it.colour_of.clear();
+        const auto pics = charm_colours(*this, it.kin);
+        if (pics.empty() || !it.shown.valid()) continue;
+        const ColourCall c = decide_colour(it.shown, ScreenRect{ 0, 0, it.shown.width, it.shown.height }, pics);
+        if (c.decided) it.colour_of = c.best;
+    }
 }
 
 void TrashList::build(const std::string& dir, const CleanSettings& s, const ItemCatalog& catalog) {
@@ -1264,6 +1576,19 @@ void TrashList::build(const std::string& dir, const CleanSettings& s, const Item
         if (it.action == Action::Use && it.fragment() && (on_delete(it.id) || on_delete(it.via)))
             it.then_delete = true;
     add_rivals(catalog);
+    // A charm cut from the bag whose colour add_rivals could not tell: never
+    // used, and said once a GoBot start -- the list is built again every
+    // half minute.
+    for (const Item& it : items) {
+        if (!it.id.empty() || it.action != Action::Use || !it.charm() || !it.colour_of.empty()) continue;
+        if (!said_once("cut colour|" + it.file)) continue;
+        const ColourCall c = decide_colour(it.shown, ScreenRect{ 0, 0, it.shown.width, it.shown.height },
+                                           charm_colours(*this, it.kin));
+        GB_INFO("Trash: the charm cut from the bag %s: colour not sure (best %s %.3f, next %s %.3f, mean off %d) -- "
+                "never right-clicked",
+                it.clock_id().c_str(), c.best.empty() ? "none" : c.best.c_str(), static_cast<double>(c.best_score),
+                c.next.empty() ? "none" : c.next.c_str(), static_cast<double>(c.next_score), c.mean_off);
+    }
 }
 
 bool TrashList::remove(std::size_t index) {
@@ -1286,6 +1611,9 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
     // its item waits in the bin 0.77 at most.
     int use = -1;                   // the best of the items on the Dùng list that match
     float use_score = 0.0f;
+    // Each item's own match, kept for the colour of a charm below: a slot is
+    // only ever another listed item's whose own drawing matched it.
+    std::vector<TemplateMatcher::Match> grey(items.size());
     for (std::size_t i = 0; i < items.size(); ++i) {
         const Item& item = items[i];
         const Frame& p = item.picture;
@@ -1293,6 +1621,7 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
         const float need = item.min_score > 0.0f ? item.min_score : min_score;
         const auto m = TemplateMatcher::find(f, area, p, need, TemplateMatcher::Tone::Grey);
         if (!m.found) continue;
+        grey[i] = m;
         if (m.score > v.score) {
             v.item = static_cast<int>(i);
             v.score = m.score;
@@ -1323,7 +1652,8 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
     // Something not on the list, drawn differently, that looks as much like
     // the slot is as good an answer, and the slot is left alone: a bag with a
     // potion beside it is not the same bag alone. The same drawing in another
-    // colour is not a rival -- by the player's rule it is the same thing.
+    // colour is not a rival -- by the player's rule it is the same thing; a
+    // charm's colour is told below.
     const Item& won = items[static_cast<std::size_t>(v.item)];
     for (const Item& rival : rivals) {
         if (std::find(won.kin.begin(), won.kin.end(), rival.id) != won.kin.end()) continue;
@@ -1341,7 +1671,78 @@ TrashList::Verdict TrashList::judge(const Frame& f, const ScreenRect& slot,
         v.score = 0.0f;
         return v;
     }
-    return v;
+
+    // A charm to use: its drawing is every colour's, and each colour is
+    // another charm. Which one the slot holds is told by its colour, where
+    // the drawing was found -- and a colour that is not sure leaves the slot
+    // alone: a charm of the player's not used is a charm used later, one
+    // used that was not chosen is gone. So too what won on the delete or drop
+    // list drawn like a charm on the Dùng list, when that charm's own drawing
+    // missed the slot: a slot of the colour ticked to use, or of one brought
+    // along to the delete list by another colour, is not deleted for it. Its
+    // kin may hold more than charms, so that is not asked of it.
+    const bool use_drawing =
+        won.action != Action::Use && std::any_of(items.begin(), items.end(), [&](const Item& u) {
+            return u.action == Action::Use && u.charm() &&
+                   std::any_of(u.kin.begin(), u.kin.end(), [&](const std::string& id) {
+                       return bag::use_kind_of(id) == UseKind::Charm &&
+                              std::find(won.kin.begin(), won.kin.end(), id) != won.kin.end();
+                   });
+        });
+    if (won.action == Action::Use ? !won.charm() : !use_drawing) return v;
+    const ColourCall c = decide_colour(f, grey[static_cast<std::size_t>(v.item)].at, charm_colours(*this, won.kin));
+    v.colour_id = c.best;
+    v.colour = c.best_score;
+    v.colour_next_id = c.next;
+    v.colour_next = c.next_score;
+    v.colour_mean_off = c.best.empty() ? -1 : c.mean_off;
+    const auto not_taken = [&](Verdict::Doubt why) {
+        v.doubt = why;
+        v.like = v.item;
+        v.like_score = v.score;
+        v.item = -1;
+        v.score = 0.0f;
+        v.passed_over = -1;
+        v.passed_over_score = 0.0f;
+        return v;
+    };
+    if (!c.decided) return not_taken(Verdict::Doubt::Colour);
+    // That colour's on the Dùng list -- the one whose drawing won, or another
+    // chosen as well -- whose own drawing matched the slot: a colour that won
+    // on another item's drawing alone is not taken for it.
+    int to = -1;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const Item& it = items[i];
+        if (!grey[i].found || it.action != Action::Use || it.colour_of != c.best || !it.charm()) continue;
+        if (to < 0 || grey[i].score > grey[static_cast<std::size_t>(to)].score) to = static_cast<int>(i);
+    }
+    if (to >= 0) {
+        v.item = to;
+        v.score = grey[static_cast<std::size_t>(to)].score;
+        return v;
+    }
+    // A picture cut from the bag whose own colour could not be told when the
+    // list was built (add_rivals): which colours the player meant to keep is
+    // not known, so nothing it wins is taken for anything else -- deleted
+    // least of all.
+    if (won.id.empty() && won.colour_of.empty()) return not_taken(Verdict::Doubt::Colour);
+    // Else that very id on the delete or drop list, chosen there itself and
+    // not brought along by another colour: Dùng the purple card and delete the
+    // grey one, and a grey one is deleted. One that came along with a colour
+    // chosen there (via), like anything not on the list, is left alone.
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const Item& it = items[i];
+        if (!grey[i].found || it.action == Action::Use || it.id != c.best || !it.via.empty()) continue;
+        if (to < 0 || grey[i].score > grey[static_cast<std::size_t>(to)].score) to = static_cast<int>(i);
+    }
+    if (to >= 0) {
+        v.item = to;
+        v.score = grey[static_cast<std::size_t>(to)].score;
+        v.passed_over = -1;
+        v.passed_over_score = 0.0f;
+        return v;
+    }
+    return not_taken(Verdict::Doubt::None);
 }
 
 int TrashList::match(const Frame& f, const ScreenRect& slot, float min_score,
@@ -1365,6 +1766,10 @@ std::vector<std::size_t> TrashList::yielding_to_use() const {
     for (std::size_t i = 0; i < items.size(); ++i) {
         const Item& it = items[i];
         if (it.action == Action::Use) continue;
+        // A charm's icon chosen to delete or drop for itself: a slot of that
+        // very colour is deleted, a charm on the Dùng list being told by its
+        // colour (judge) -- it gives way to none.
+        if (!it.id.empty() && it.via.empty() && bag::use_kind_of(it.id) == UseKind::Charm) continue;
         if ((!it.id.empty() && on_use(it.id)) || std::any_of(it.kin.begin(), it.kin.end(), on_use))
             out.push_back(i);
     }
@@ -1687,6 +2092,83 @@ bool pair_in(const Frame& pic, const TemplateStore& store, int& dx, int& dy) {
     return false;
 }
 
+/// The words "Xác Nhận" on the left button of the pair's picture (kConfirm),
+/// x 4..37 and y 4..16 from its top-left: what a message's lone button is told
+/// by. The button is 4 left of them and 4 above, and 42 wide, as each half of
+/// the pair is.
+constexpr ScreenRect kOkLabel{ 4, 4, 34, 13 };
+constexpr int kOkButtonW = 42;
+/// How alike the label, the frame right of its button and the button with the
+/// frame's corner have to be (bag::lone_ok). On the live message (2026-11-02
+/// and 11-03) each scores 1.000; the label about 0.38 on the question's Hủy Bỏ,
+/// the frame under 0.1 right of the question's Xác Nhận, and the corner about
+/// 0.86 on its Hủy Bỏ and 0.73 on its Xác Nhận.
+constexpr float kOkLabelScore = 0.95f;
+constexpr float kLoneEdgeScore = 0.90f;
+constexpr float kLoneCornerScore = 0.95f;
+/// Where a charm's message has its button, from the pair of the question that
+/// brought it: where that question's Hủy Bỏ was -- 557,397 on the live client
+/// for a pair at 514,397. Its label may be three pixels either way of that, and
+/// from 20 above to 40 below: a box taller for a longer text keeps its button
+/// at its bottom right.
+constexpr int kMessageDx = 43;
+constexpr int kMessageSlack = 3, kMessageAbove = 20, kMessageBelow = 40;
+/// The question's box from its pair, measured on the live client: 410-614 x
+/// 341-429 for a pair at 514,397.
+constexpr ScreenRect kQuestionBox{ -104, -56, 204, 88 };
+
+/// The pieces a lone Xác Nhận is told by, cut from pictures GoBot ships: the
+/// label from kConfirm; and from kNotice -- where that label is found in it, at
+/// 149,57 -- the frame right of the button and under it from 4 above the button
+/// (`edge`, 12x28), and the button with the frame's corner round it (`corner`,
+/// 58x28). Each with where it sits from the label's top-left.
+struct LonePieces {
+    Frame label, edge, corner;
+    int   edge_dx = 0, edge_dy = 0, corner_dx = 0, corner_dy = 0;
+};
+
+bool lone_pieces(const TemplateStore& store, LonePieces& out) {
+    const Frame* pair = store.get(kConfirm);
+    const Frame* notice = store.get(kNotice);
+    if (pair == nullptr || notice == nullptr) return false;
+    out.label = crop(*pair, kOkLabel);
+    if (!out.label.valid() || notice->width < out.label.width || notice->height < out.label.height) return false;
+    const auto m = TemplateMatcher::find(*notice, ScreenRect{ 0, 0, notice->width, notice->height }, out.label,
+                                         kOkLabelScore);
+    if (!m.found) return false;
+    const int bx = m.at.x - kOkLabel.x, by = m.at.y - kOkLabel.y;
+    const ScreenRect edge{ bx + kOkButtonW, by - 4, notice->width - (bx + kOkButtonW), notice->height - (by - 4) };
+    const ScreenRect corner{ bx - 4, by - 4, notice->width - (bx - 4), notice->height - (by - 4) };
+    out.edge = crop(*notice, edge);
+    out.corner = crop(*notice, corner);
+    // A frame worth the name on either side: a few pixels at least.
+    if (!out.edge.valid() || !out.corner.valid() || out.edge.width < 4 || out.edge.height < 8) return false;
+    out.edge_dx = edge.x - m.at.x;
+    out.edge_dy = edge.y - m.at.y;
+    out.corner_dx = corner.x - m.at.x;
+    out.corner_dy = corner.y - m.at.y;
+    return true;
+}
+
+/// How alike `piece` is to the frame at x, y, give or take `slack` pixels: the
+/// best there, or -1 off the frame.
+float piece_at(const Frame& f, const Frame& piece, int x, int y, int slack) {
+    const ScreenRect area = clamp_to(f, ScreenRect{ x - slack, y - slack, piece.width + 2 * slack,
+                                                    piece.height + 2 * slack });
+    if (area.w < piece.width || area.h < piece.height) return -1.0f;
+    const auto m = TemplateMatcher::find(f, area, piece, -1.0f);
+    return m.found ? m.score : -1.0f;
+}
+
+/// The frame of a message right of the button whose label is at `label`, as a
+/// lone Xác Nhận has it: what is still there with its button lit, and gone
+/// with the message.
+bool message_edge_at(const Frame& f, const TemplateStore& store, const ScreenRect& label) {
+    LonePieces p;
+    if (!f.valid() || !lone_pieces(store, p)) return false;
+    return piece_at(f, p.edge, label.x + p.edge_dx, label.y + p.edge_dy, 1) >= kLoneEdgeScore;
+}
+
 /// How much of the registration question's box has to be there, under its
 /// words, for another question to be taken for a box of the same kind. Rows
 /// from a little above its buttons to its bottom edge, the whole width: the
@@ -1753,6 +2235,10 @@ bool can_check_charm(const TemplateStore& store) {
     // missing, that question could be taken for a charm's.
     for (const char* name : kOtherQuestions)
         if (store.get(name) == nullptr) return false;
+    // And the message a charm's use brings, to close it with its own Xác Nhận:
+    // the pair's label found in its picture, with the frame round it.
+    LonePieces lone;
+    if (!lone_pieces(store, lone)) return false;
     // And the close buttons, to know of another window open beside the bag.
     return can_see_windows(store);
 }
@@ -1904,6 +2390,51 @@ bool notice_up(const Frame& f, const TemplateStore& store) {
     return TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f).found;
 }
 
+bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band, ScreenRect* at, LoneOk* how) {
+    LonePieces p;
+    if (!f.valid() || !lone_pieces(store, p)) return false;
+    const ScreenRect area = clamp_to(f, band);
+    if (area.w < p.label.width || area.h < p.label.height) return false;
+    // The label, best first -- a band the size of the frame may hold more than
+    // one -- each with the frame where a lone button's would be round it. A
+    // question's Hủy Bỏ has another label, and its Xác Nhận has Hủy Bỏ to its
+    // right, not the box's frame; a lit button fails its label and corner.
+    const auto labels = TemplateMatcher::find_all(f, area, p.label, how != nullptr ? -1.0f : kOkLabelScore, 4);
+    bool found = false;
+    for (std::size_t i = 0; i < labels.size() && !found; ++i) {
+        const TemplateMatcher::Match& m = labels[i];
+        LoneOk seen;
+        seen.label = m.at;
+        seen.label_score = m.score;
+        seen.edge_score = piece_at(f, p.edge, m.at.x + p.edge_dx, m.at.y + p.edge_dy, 1);
+        seen.corner_score = piece_at(f, p.corner, m.at.x + p.corner_dx, m.at.y + p.corner_dy, 1);
+        if (how != nullptr && i == 0) *how = seen;
+        if (m.score < kOkLabelScore || seen.edge_score < kLoneEdgeScore || seen.corner_score < kLoneCornerScore)
+            continue;
+        found = true;
+        if (how != nullptr) *how = seen;
+        if (at != nullptr) *at = m.at;
+    }
+    // And no dialog of two buttons anywhere: asked last, the dearest look.
+    return found && find_dialogs(f, store).empty();
+}
+
+ScreenRect message_band(const ScreenRect& pair) {
+    const int x = pair.x + kMessageDx + kOkLabel.x, y = pair.y + kOkLabel.y;
+    return ScreenRect{ x - kMessageSlack, y - kMessageAbove, kOkLabel.w + 2 * kMessageSlack,
+                       kOkLabel.h + kMessageAbove + kMessageBelow };
+}
+
+ScreenRect message_box(const ScreenRect& pair) {
+    return ScreenRect{ pair.x + kQuestionBox.x, pair.y + kQuestionBox.y, kQuestionBox.w,
+                       kQuestionBox.h + kMessageBelow };
+}
+
+bool message_up(const Frame& f, const TemplateStore& store) {
+    if (!f.valid()) return false;
+    return notice_up(f, store) || lone_ok(f, store, ScreenRect{ 0, 0, f.width, f.height });
+}
+
 bool can_see_windows(const TemplateStore& store) {
     for (const char* name : kCloseButtons)
         if (store.get(name) == nullptr) return false;
@@ -2028,6 +2559,8 @@ bool BagCleaner::see(Frame& f) {
         }
     }
     blacked_out_ = false;
+    last_w_ = f.width;
+    last_h_ = f.height;
     return true;
 }
 
@@ -2150,12 +2683,25 @@ bool BagCleaner::grab_view(Frame& f, BagView& v) {
     return v.found;
 }
 
-void BagCleaner::park_pointer(bool title_first) {
-    if (hands_.click || hands_.double_click || hands_.drag || hands_.key) return;
+void BagCleaner::park_pointer(bool title_first, const ScreenRect* avoid) {
+    // Pretend hands move a pretend pointer, when they have one, in a game the
+    // size of the last look; the real one is never moved by them.
+    const bool pretend = hands_.click || hands_.double_click || hands_.drag || hands_.key;
+    if (pretend && !hands_.move) return;
     if (!last_strip_.valid()) return;
     const BagLayout& l = settings_.layout;
     int w = 0, h = 0;
-    if (!input_.window_size(w, h) || w <= 0 || h <= 0) return;
+    if (pretend) {
+        w = last_w_;
+        h = last_h_;
+    } else if (!input_.window_size(w, h)) {
+        return;
+    }
+    if (w <= 0 || h <= 0) return;
+    // A box whose buttons the pointer would light, and a margin round it.
+    ScreenRect off{};
+    if (avoid != nullptr && avoid->valid())
+        off = ScreenRect{ avoid->x - 24, avoid->y - 24, avoid->w + 48, avoid->h + 48 };
     // A shop open beside the bag, from its buttons: not rested on either.
     ScreenRect shop{};
     if (shop_buttons_.valid())
@@ -2168,8 +2714,10 @@ void BagCleaner::park_pointer(bool title_first) {
     const POINT left{ s.x - 30, s.y + 100 };
     const POINT order[] = { title_first ? title : right, title_first ? right : title, left };
     for (const POINT& p : order)
-        if (p.x >= 2 && p.y >= 2 && p.x < w - 2 && p.y < h - 2 && !shop.contains(p.x, p.y)) {
-            input_.move_pointer(p.x, p.y);
+        if (p.x >= 2 && p.y >= 2 && p.x < w - 2 && p.y < h - 2 && !shop.contains(p.x, p.y) &&
+            !off.contains(p.x, p.y)) {
+            if (pretend) hands_.move(p.x, p.y);
+            else input_.move_pointer(p.x, p.y);
             return;
         }
 }
@@ -2249,7 +2797,21 @@ bool BagCleaner::scroll_arrow(bool down, BagView& v) {
     }
     return false;
 }
+
 BagCleaner::Result BagCleaner::run() {
+    Result res = run_pass();
+    // A charm run's own message not seen closed -- left by a stop, the mouse
+    // not to be had, or come too late to watch for -- is the next run's to
+    // close (set_own_notice); one two clicks did not close is the player's.
+    if (mode_ == Mode::CharmsOnly && last_asked_.valid() && !last_closed_ && !last_gave_up_) {
+        res.notice_left = true;
+        res.notice_place = last_asked_;
+        res.notice_carried = last_carried_;
+    }
+    return res;
+}
+
+BagCleaner::Result BagCleaner::run_pass() {
     // Its clicks and drags at the pace the settings ask for, on this thread only.
     const InputManager::Pace pace(settings_.press_ms);
     Result res;
@@ -2296,6 +2858,12 @@ BagCleaner::Result BagCleaner::run() {
         res.trouble = "không chụp được màn hình game";
         return res;
     }
+    // A charm run's own message from the last run is closed first, and the
+    // bag key is not pressed under anyone else's.
+    if (mode_ == Mode::CharmsOnly && !charms_start(f, v, res)) {
+        res.stuck = item_out_;      // a dialog that came up as it closed, not answered
+        return res;
+    }
     if (!v.found) {
         press(settings_.bag_key);
         opened_here = true;
@@ -2319,6 +2887,12 @@ BagCleaner::Result BagCleaner::run() {
         if (!grab_ || !grab_(g) || !g.valid()) return;
         if (!bag::find_dialogs(g, store_).empty() || question_still(g)) {
             say("để túi đồ mở, vì vẫn còn một hộp thoại đang mở");
+            return;
+        }
+        // Nor, in a charm run, over a message of the game's: the key may go to
+        // it, and the player has it to read or to close.
+        if (mode_ == Mode::CharmsOnly && bag::message_up(g, store_)) {
+            say("để túi đồ mở, vì vẫn còn một thông báo đang mở");
             return;
         }
         press(settings_.bag_key);
@@ -2413,29 +2987,17 @@ BagCleaner::Result BagCleaner::run() {
         } else if (dry_run_) {
             say("thử tìm: không bấm chuột phải vào bùa nào");
         } else {
-            int tx = 0, ty = 0;
-            v.tab_point(l, kUseTab, tx, ty);
-            if (v.selected_tab != kUseTab) {
-                if (!mouse_ok(tx, ty)) {
-                    res.trouble = "không bấm được vào túi đồ: cửa sổ game bị che hoặc không ở trên cùng";
-                } else {
-                    click(tx, ty);
-                    // Looked at in short steps until the tab is the chosen one,
-                    // not waited for as long as a pass waits.
-                    for (int i = 0; i < 10 && v.selected_tab != kUseTab; ++i) {
-                        if (!wait_ms(80)) break;
-                        grab_view(f, v);
-                    }
-                }
+            // Tiêu Dùng clicked when the strip does not show it chosen, and
+            // looked at in short steps until it does, not waited for as long
+            // as a pass waits: select_tab, as the shop's count has it.
+            if (select_tab(kUseTab, v, res, "charm_tab") && !cancelled_) {
+                scroll_to_top(v);
+                charm_sweep(kUseTab, v, res, stop);
             }
-            if (res.trouble.empty() && !cancelled_) {
-                if (v.selected_tab != kUseTab) {
-                    res.trouble = "không chuyển được sang ngăn Tiêu Dùng của túi đồ";
-                } else {
-                    scroll_to_top(v);
-                    charm_sweep(kUseTab, v, res, stop);
-                }
-            }
+            // The message of the last Xác Nhận, when it has not been seen
+            // closed: watched for and closed, however the sweep ended -- but
+            // by a stop, which ends everything.
+            finish_charms(res);
         }
         // Nothing was put in the bin, so a stop has nothing to give back: a
         // question left open is answered Hủy Bỏ where it came up (refuse).
@@ -2476,6 +3038,7 @@ BagCleaner::Result BagCleaner::run() {
     };
     int done = 0, uses = 0;
     bool stop = false;
+    bool colour_said = false;        // a charm of a colour not sure, said once a pass
     for (int tab = 0; tab < kBagTabs && !stop && !cancelled_; ++tab) {
         if (!settings_.tabs[tab]) continue;
 
@@ -2489,7 +3052,7 @@ BagCleaner::Result BagCleaner::run() {
             res.trouble = "không bấm được vào túi đồ: cửa sổ game bị che hoặc không ở trên cùng";
             break;
         }
-        if (!select_tab(tab, v, res)) {
+        if (!select_tab(tab, v, res, "pass_tab")) {
             if (cancelled_) break;
             // A strip whose chosen tab cannot be read at all -- no tab drawn
             // darker, as a client of another look may draw it -- is gone on
@@ -2498,6 +3061,7 @@ BagCleaner::Result BagCleaner::run() {
             // stops it.
             if (v.found && v.selected_tab < 0) {
                 res.trouble.clear();
+                res.tab_unsure = false;
             } else {
                 stop = true;
                 break;
@@ -2582,6 +3146,20 @@ BagCleaner::Result BagCleaner::run() {
                 std::snprintf(where, sizeof where, "%s, hàng %d ô %d", bag_tab_name(tab),
                               (v.scroll_known() ? v.first_row : 0) + r + 1, c + 1);
                 if (k.item < 0) {
+                    // A charm drawn like one on the Dùng list, of a colour
+                    // not sure: no doubt between two drawings, and a pass
+                    // never right-clicks a charm anyway. Said once a pass.
+                    if (k.doubt == TrashList::Verdict::Doubt::Colour) {
+                        seen.insert(key);
+                        if (!colour_said) {
+                            colour_said = true;
+                            char colour[24];
+                            std::snprintf(colour, sizeof colour, "%.2f", static_cast<double>(k.colour));
+                            say(std::string("bùa ở ") + where + " cùng hình với loại đã chọn nhưng không chắc màu (" +
+                                colour + "), để nguyên");
+                        }
+                        continue;
+                    }
                     if (k.doubt == TrashList::Verdict::Doubt::None || k.like < 0) continue;
                     seen.insert(key);
                     ++res.doubtful;
@@ -3454,7 +4032,8 @@ BagCleaner::UseResult BagCleaner::use_one(const Frame& f, const BagView& v, int 
 }
 
 BagCleaner::SlotNow BagCleaner::slot_now(const BagView& v, int index, const Frame& before, int count,
-                                         Frame& look, Frame& shot, std::string& why, int gap_ms) {
+                                         Frame& look, Frame& shot, std::string& why, int gap_ms,
+                                         const Frame* charm) {
     const BagLayout& l = settings_.layout;
     SlotNow first = SlotNow::Unknown;
     for (int n = 0; n < 2; ++n) {
@@ -3496,7 +4075,13 @@ BagCleaner::SlotNow BagCleaner::slot_now(const BagView& v, int index, const Fram
             why = "ô đồ giờ có hình khác";
             return SlotNow::Unknown;
         } else {
-            const int left = counts_ ? counts_->read(g, s) : CountReader::kUnreadable;
+            // A charm's read as the sweep read it: one only while the slot is
+            // still that colour's icon with nothing over its corner -- a bag
+            // that closed up its gaps would have moved another single in, and
+            // that reads as no count at all.
+            const int left = !counts_ ? CountReader::kUnreadable
+                             : charm  ? counts_->read_charm(g, s, charm, l)
+                                      : counts_->read(g, s);
             if (left == count) {
                 is = SlotNow::Same;
             } else if (count >= 2 && left == count - 1) {
@@ -3851,7 +4436,37 @@ constexpr int kCharmLateMs = 400;
 constexpr int kCharmLagLooks = 4;
 constexpr int kCharmLagMs = 250;
 
+/// The slots of Tiêu Dùng the packets' bag lists (0x0068, gobot/self_frames.hpp):
+/// twelve rows of six.
+constexpr int kPacketSlots = 72;
+
+/// After Xác Nhận on a charm's question, once the question is gone: how long
+/// the game's message is watched for -- it came about 0.36 s after the click on
+/// the live client -- and how much longer once it is first seen, for the look
+/// that has to agree.
+constexpr int kCharmNoticeMs = 1000;
+constexpr int kCharmNoticeMoreMs = 300;
+/// How long a click on the message's Xác Nhận is given to close it, and how
+/// long after it a second click may come: one sooner on the same point would
+/// be a double-click to the game.
+constexpr int kNoticeCloseMs = 1500;
+constexpr int kNoticeRetryMs = 300;
+/// How long after its Xác Nhận a message where that question puts one is taken
+/// for GoBot's own, come late: closed at the next round, before the next
+/// right-click, or at the end of the run.
+constexpr int kOwnNoticeMs = 3000;
+
+/// Milliseconds from `from` to `to`.
+int ms_between(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count());
+}
+
 } // namespace
+
+void BagCleaner::forget_said_once() {
+    std::lock_guard<std::mutex> lock(g_said_mutex);
+    g_said.clear();
+}
 
 void BagCleaner::set_deadline_ms(int ms) {
     deadline_set_ = ms > 0;
@@ -3872,7 +4487,251 @@ bool BagCleaner::charm_must_stop(Result& res, bool& stop) {
     return false;
 }
 
-BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, int index, int count) {
+void BagCleaner::set_own_notice(const ScreenRect& pair) {
+    last_asked_ = pair;
+    last_asked_at_ = now();
+    last_carried_ = pair.valid();
+    last_closed_ = false;
+    last_gave_up_ = false;
+}
+
+int BagCleaner::charm_deadline_ms(int due_kinds) {
+    return std::clamp(12'000 + 3'000 * std::max(0, due_kinds), 20'000, 40'000);
+}
+
+bool BagCleaner::charm_due_any() const {
+    if (trash_ == nullptr) return false;
+    for (const TrashList::Item& it : trash_->items)
+        if (it.action == TrashList::Action::Use && it.charm() && (!charm_due_ || charm_due_(it.clock_id())))
+            return true;
+    return false;
+}
+
+bool BagCleaner::own_message(const Frame& f, ScreenRect* at) {
+    if (!last_asked_.valid() || last_closed_ || last_gave_up_) return false;
+    // Come within a few seconds of the Xác Nhận it follows, or handed over
+    // from the last run: a message there later than that is anyone's.
+    if (!last_carried_ && ms_between(last_asked_at_, now()) >= kOwnNoticeMs) return false;
+    return bag::lone_ok(f, store_, bag::message_band(last_asked_), at);
+}
+
+BagCleaner::NoticeClose BagCleaner::close_notice(const ScreenRect& band, const ScreenRect& box, Frame& shot,
+                                                 int& clicks) {
+    clicks = 0;
+    const auto stopped = [this] { return cancelled_ || (guard_ && !guard_()); };
+    // What a look shows of the message. Lingers: its frame is still right of
+    // where the last click went, its label not to be told -- lit by the
+    // pointer, or hidden -- so it is neither gone nor to be clicked.
+    enum class Seen { Blind, Dialog, Up, Lingers, Gone };
+    ScreenRect clicked{};
+    const auto look = [&](ScreenRect& at) {
+        Frame g;
+        if (!grab_ || !grab_(g) || !g.valid()) return Seen::Blind;
+        shot = g;
+        if (!bag::find_dialogs(g, store_).empty()) return Seen::Dialog;
+        if (bag::lone_ok(g, store_, band, &at)) return Seen::Up;
+        if (clicked.valid() && bag::message_edge_at(g, store_, clicked)) return Seen::Lingers;
+        return Seen::Gone;
+    };
+    // Gone on two looks kDoneApartMs apart, within `ms`: Closed; a dialog:
+    // Dialog; else NotClosed -- Stopped as soon as the guard says no.
+    const auto watch_gone = [&](int ms) {
+        bool once = false;
+        std::chrono::steady_clock::time_point since{};
+        for (int waited = 0; waited < ms; waited += kCharmPollMs) {
+            if (stopped()) return NoticeClose::Stopped;
+            pause_ms(kCharmPollMs);
+            ScreenRect at;
+            const Seen s = look(at);
+            if (s == Seen::Dialog) return NoticeClose::Dialog;
+            if (s == Seen::Blind) continue;
+            if (s != Seen::Gone) {
+                once = false;
+            } else if (!once) {
+                once = true;
+                since = now();
+            } else if (ms_between(since, now()) >= kDoneApartMs) {
+                return NoticeClose::Closed;
+            }
+        }
+        return NoticeClose::NotClosed;
+    };
+
+    // 1. A fresh look: the message there to be clicked, or gone already --
+    //    on a second look a moment later as well.
+    ScreenRect at;
+    Seen s = look(at);
+    if (s == Seen::Dialog) return NoticeClose::Dialog;
+    if (s != Seen::Up) {
+        pause_ms(kDoneApartMs);
+        s = look(at);
+        if (s == Seen::Dialog) return NoticeClose::Dialog;
+        if (s == Seen::Blind) return NoticeClose::NotClicked;
+        if (s != Seen::Up) return NoticeClose::Closed;
+    }
+    std::chrono::steady_clock::time_point clicked_at{};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        // 2. Its Xác Nhận, in the middle of its label -- a pixel aside the
+        //    second time -- and the pointer moved off the box at once.
+        if (stopped()) return NoticeClose::Stopped;
+        const int x = at.x + at.w / 2 + attempt, y = at.y + at.h / 2;
+        if (!mouse_ok(x, y)) return NoticeClose::NotClicked;
+        if (!click(x, y)) return cancelled_ ? NoticeClose::Stopped : NoticeClose::NotClicked;
+        ++clicks;
+        clicked = at;
+        clicked_at = now();
+        park_pointer(true, &box);
+        // 3. Seen gone.
+        const NoticeClose c = watch_gone(kNoticeCloseMs);
+        if (c != NoticeClose::NotClosed || attempt == 1) return c;
+        // 4. Still up: once more, no sooner than kNoticeRetryMs after the
+        //    click, on a fresh look -- the pointer moved off, its label is not
+        //    lit -- and only with its label there to be clicked.
+        const int since = ms_between(clicked_at, now());
+        if (since < kNoticeRetryMs) pause_ms(kNoticeRetryMs - since);
+        if (stopped()) return NoticeClose::Stopped;
+        s = look(at);
+        if (s == Seen::Dialog) return NoticeClose::Dialog;
+        if (s == Seen::Gone) {
+            pause_ms(kDoneApartMs);
+            ScreenRect again;
+            s = look(again);
+            if (s == Seen::Dialog) return NoticeClose::Dialog;
+            if (s == Seen::Gone) return NoticeClose::Closed;
+        }
+        if (s != Seen::Up) break;
+    }
+    // No key is ever pressed for it.
+    return NoticeClose::NotClosed;
+}
+
+void BagCleaner::notice_trouble(NoticeClose how, const Frame& shot, Result& res) {
+    std::string why;
+    switch (how) {
+        case NoticeClose::Closed:
+            return;
+        case NoticeClose::NotClosed:
+            // The player's from now on: never clicked again, nor handed over.
+            last_gave_up_ = true;
+            keep(shot, "charm_notice_stuck");
+            why = "thông báo của game không đóng lại khi bấm Xác Nhận: đóng nó trong game";
+            break;
+        case NoticeClose::Dialog:
+            keep(shot, "charm_notice_dialog");
+            item_out_ = true;
+            if (cancel_all(5)) {
+                item_out_ = false;
+                why = "lúc đóng thông báo của game thì có một hộp thoại khác hiện ra; đã bấm Hủy Bỏ";
+            } else {
+                why = "lúc đóng thông báo của game thì có một hộp thoại khác hiện ra, và bấm Hủy Bỏ không đóng "
+                      "được: đóng nó trong game";
+            }
+            break;
+        case NoticeClose::NotClicked:
+            why = "không bấm được Xác Nhận trên thông báo của game";
+            break;
+        case NoticeClose::Stopped:
+            if (guard_ && !guard_()) {
+                bool stop = false;
+                charm_must_stop(res, stop);
+            }
+            return;
+    }
+    if (res.trouble.empty()) res.trouble = why;
+    say(why);
+}
+
+int BagCleaner::close_own(const Frame& f, Result& res, const char* when) {
+    if (!own_message(f)) {
+        // One handed over from the last run that is not up: gone.
+        if (last_carried_ && last_asked_.valid() && !last_gave_up_) last_closed_ = true;
+        return 0;
+    }
+    const int ago = ms_between(last_asked_at_, now());
+    Frame shot;
+    int clicks = 0;
+    const NoticeClose how = close_notice(bag::message_band(last_asked_), bag::message_box(last_asked_), shot, clicks);
+    if (how == NoticeClose::Closed) {
+        last_closed_ = true;
+        if (clicks > 0) ++res.charm_notices;
+        if (last_carried_)
+            GB_INFO("Trash: charm message from the use at %d,%d (last run), closed %s -- %d click(s)", last_asked_.x,
+                    last_asked_.y, when, clicks);
+        else
+            GB_INFO("Trash: charm message from the use at %d,%d (%d ms ago), closed %s -- %d click(s)", last_asked_.x,
+                    last_asked_.y, ago, when, clicks);
+        return 1;
+    }
+    GB_INFO("Trash: charm message from the use at %d,%d %s: not closed (%d click(s))", last_asked_.x, last_asked_.y,
+            when, clicks);
+    notice_trouble(how, shot, res);
+    if (res.trouble.empty()) res.trouble = "dừng giữa chừng";
+    return -1;
+}
+
+void BagCleaner::finish_charms(Result& res) {
+    if (!last_asked_.valid() || last_closed_ || last_gave_up_) return;
+    const auto stopped = [this] { return cancelled_ || (guard_ && !guard_()); };
+    if (stopped()) return;
+    const ScreenRect band = bag::message_band(last_asked_);
+    // Watched for until the time a message is given after its Xác Nhận -- the
+    // most of which has mostly passed by now.
+    while (!last_carried_ && ms_between(last_asked_at_, now()) < kCharmNoticeMs + kCharmNoticeMoreMs) {
+        if (stopped()) return;
+        pause_ms(kCharmPollMs);
+        Frame g;
+        if (grab_ && grab_(g) && g.valid() && bag::lone_ok(g, store_, band)) break;
+    }
+    if (stopped()) return;
+    Frame shot;
+    int clicks = 0;
+    const NoticeClose how = close_notice(band, bag::message_box(last_asked_), shot, clicks);
+    if (how == NoticeClose::Closed) {
+        last_closed_ = true;
+        if (clicks > 0) {
+            ++res.charm_notices;
+            GB_INFO("Trash: charm message from the use at %d,%d (%d ms ago), closed at the end of the run -- %d "
+                    "click(s)",
+                    last_asked_.x, last_asked_.y, ms_between(last_asked_at_, now()), clicks);
+        }
+        return;
+    }
+    GB_INFO("Trash: charm message from the use at %d,%d at the end of the run: not closed (%d click(s))",
+            last_asked_.x, last_asked_.y, clicks);
+    notice_trouble(how, shot, res);
+}
+
+bool BagCleaner::charms_start(Frame& f, BagView& v, Result& res) {
+    // GoBot's own, handed over from the last run, closed -- not on a look-only
+    // run, which presses nothing.
+    if (!dry_run_) {
+        const int own = close_own(f, res, v.found ? "at the start" : "before the bag key");
+        if (own < 0) return false;
+        if (own > 0) {
+            grab_view(f, v);
+            if (!f.valid()) {
+                res.trouble = "không chụp được màn hình game";
+                return false;
+            }
+        }
+    }
+    // The bag open: gone through, to use what is due or to say what waits --
+    // but not for a message handed over from the last run with nothing due,
+    // whose run is over once that message is closed: neither the bag's tab
+    // nor its scroll bar is touched for it.
+    if (v.found) return charm_due_any() || !last_carried_;
+    // Anyone else's: left, and the bag key not pressed under it -- with the
+    // bag open, the sweep's first round says the same, as it always has.
+    if (bag::message_up(f, store_)) {
+        say("đang có một thông báo trong game, nên không dùng bùa nào; đóng nó rồi thử lại");
+        return false;
+    }
+    // A run for a message to close, and nothing due: the bag left shut.
+    return charm_due_any();
+}
+
+BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, int index, int count,
+                                            const Frame& icon) {
     const BagLayout& l = settings_.layout;
     UseResult out;
     const auto slots = v.slots(l);
@@ -3896,6 +4755,7 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
     // anything that is not the question of a charm as GoBot takes it for one.
     const auto refuse = [&](const std::string& why, const Frame& shot, const char* what) {
         keep(shot, what);
+        item_out_ = true;
         if (!cancel_all(5)) return lost("hộp thoại không đóng lại khi bấm Hủy Bỏ", shot, "charm_stuck");
         item_out_ = false;
         out.outcome = UseOutcome::Refused;
@@ -3909,12 +4769,19 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
         return out;
     };
 
-    // 1. One right-click on the middle of the slot.
+    // 1. One right-click on the middle of the slot, and the pointer moved off
+    //    the middle of the game's window, where its question comes up: off the
+    //    slot, whose description would lie over the grid, and off the buttons
+    //    of what comes, which it would light.
     item_out_ = true;
     if (!right_click(s.cx(), s.cy())) {
         item_out_ = false;
         out.why = cancelled_ ? "dừng giữa chừng" : "không điều khiển được chuột trong cửa sổ game";
         return out;
+    }
+    {
+        const ScreenRect centre{ f.width / 2 - 110, f.height / 2 - 60, 220, 120 };
+        park_pointer(true, &centre);
     }
 
     // 2. What it brings up, in short steps: the question of a charm, as the
@@ -3922,24 +4789,37 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
     //    questions GoBot knows (bag::charm_question). A dialog fading in can
     //    fail its box for a frame; one that is still not a charm's a frame
     //    later is not. Watched to the end even after a stop, so that a
-    //    question coming up late is not left open.
+    //    question coming up late is not left open. A message with only Xác
+    //    Nhận instead -- no question asked -- is never clicked: it is watched
+    //    on to the end, for a dialog after it, and the stack says the rest.
     bag::Dialog d;
-    bool asked = false;
+    bool asked = false, noticed = false;
     int others = 0, notices = 0;
     Frame g;
+    // Said of a dialog after such a message: answered Hủy Bỏ, and not used --
+    // no Xác Nhận was pressed.
+    const auto after_notice = [&](UseResult r) {
+        if (r.outcome == UseOutcome::Refused) {
+            r.outcome = UseOutcome::Notice;
+            r.why = "sau khi bấm chuột phải game hiện một thông báo rồi một hộp thoại; đã bấm Hủy Bỏ, không dùng bùa";
+        }
+        return r;
+    };
     for (int waited = 0; waited < settings_.charm_wait_ms && !asked; waited += kCharmPollMs) {
         pause_ms(kCharmPollMs);
         Frame h;
         if (!grab_ || !grab_(h) || !h.valid()) continue;
         g = std::move(h);
         const auto dialogs = bag::find_dialogs(g, store_);
-        if (dialogs.size() == 1 && bag::charm_question(g, store_, dialogs.front(), settings_.charm_frame_score)) {
+        if (!noticed && dialogs.size() == 1 &&
+            bag::charm_question(g, store_, dialogs.front(), settings_.charm_frame_score)) {
             d = dialogs.front();
             asked = true;
             break;
         }
         if (!dialogs.empty()) {
             if (++others >= 2 || cancelled_) {
+                if (noticed) return after_notice(refuse("", g, "charm_notice_dialog"));
                 bool bins = false;
                 for (const bag::Dialog& each : dialogs) bins = bins || each.ours();
                 return refuse(bins ? "hiện ra hộp thoại của thùng rác chứ không phải câu hỏi dùng bùa"
@@ -3949,12 +4829,9 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
             }
             continue;
         }
-        if (bag::notice_up(g, store_) && ++notices >= 2) {
+        if (!noticed && bag::notice_up(g, store_) && ++notices >= 2) {
+            noticed = true;
             keep(g, "charm_notice");
-            item_out_ = false;
-            out.outcome = UseOutcome::Notice;
-            out.why = "sau khi bấm chuột phải game hiện một thông báo; để nguyên cho người chơi đọc";
-            return out;
         }
     }
 
@@ -3968,16 +4845,25 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
         Frame h;
         BagView w;
         if (!grab_view(h, w)) return lost("mất dấu túi đồ", h.valid() ? h : g, "charm_lost");
-        if (!bag::find_dialogs(h, store_).empty()) return refuse("một hộp thoại hiện ra muộn", h, "charm_late_dialog");
+        if (!bag::find_dialogs(h, store_).empty()) {
+            if (noticed) return after_notice(refuse("", h, "charm_notice_dialog"));
+            return refuse("một hộp thoại hiện ra muộn", h, "charm_late_dialog");
+        }
         item_out_ = false;
         Frame look, shot = h;
         std::string why;
-        switch (slot_now(v, index, before, count, look, shot, why, kCharmGapMs)) {
+        switch (slot_now(v, index, before, count, look, shot, why, kCharmGapMs, &icon)) {
             case SlotNow::Same:
+                if (noticed) {
+                    out.outcome = UseOutcome::Notice;
+                    out.why = "sau khi bấm chuột phải game hiện một thông báo; để nguyên cho người chơi đọc";
+                    return out;
+                }
                 out.outcome = UseOutcome::Nothing;
                 out.why = "bấm chuột phải mà không thấy câu hỏi nào, và số lượng không đổi";
                 return out;
             case SlotNow::Asking:
+                if (noticed) return after_notice(refuse("", shot, "charm_notice_dialog"));
                 return refuse("một hộp thoại hiện ra muộn", shot, "charm_late_dialog");
             case SlotNow::Gone:
             case SlotNow::Less:
@@ -4037,14 +4923,28 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
         if (cancelled_) return refuse("dừng giữa chừng", k, "charm_stopped");
         return refuse("không bấm được Xác Nhận", k, "charm_blocked");
     }
-    // What the game asked, kept: the first look at the question of a charm, to
-    // cut a picture of it from if it is to be told apart more closely.
-    keep(k, "charm_question");
+    // From here on the charm is at least perhaps used. The pointer off the
+    // box, so that nothing of it, or of the message after it, is lit.
+    out.asked = d.pair;
+    out.asked_at = now();
+    const ScreenRect band = bag::message_band(d.pair);
+    const ScreenRect box = bag::message_box(d.pair);
+    park_pointer(true, &box);
+    // What the game asked, kept the first time in a GoBot start: a picture of
+    // the question of a charm, to tell it apart more closely from if need be.
+    if (said_once("kept|charm_question")) keep(k, "charm_question");
+    // The guard and a stop, asked on every look of every wait from here: with
+    // either, nothing more is waited for or clicked.
+    const auto stopping = [this] { return cancelled_ || (guard_ && !guard_()); };
 
     // 4. The question gone from where it was.
     bool closed = false;
     Frame after = k;
+    // Watched for even after a stop, as the question was: whether it closed
+    // is what says if anything is left in the way of the macro's keys. Then
+    // the stop waits for nothing more.
     for (int waited = 0; waited < kCharmCloseMs && !closed; waited += kCharmPollMs) {
+        if (!out.stopped && stopping()) out.stopped = true;
         pause_ms(kCharmPollMs);
         Frame h;
         if (!grab_ || !grab_(h) || !h.valid()) continue;
@@ -4054,26 +4954,130 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
             there = there || same_place(each.pair, d.pair);
         closed = !there;
     }
-    if (!closed) return lost("câu hỏi dùng bùa không đóng lại sau khi bấm Xác Nhận", after, "charm_stuck");
-    pause_ms(kCharmSettleMs);
-    Frame h;
-    BagView w;
-    const bool bag_seen = grab_view(h, w);
-    if (h.valid() && !bag::find_dialogs(h, store_).empty()) {
-        if (!cancel_all(5)) return lost("hộp thoại không đóng lại khi bấm Hủy Bỏ", h, "charm_stuck");
+    if (!closed)
+        return lost(out.stopped ? "dừng giữa chừng, câu hỏi dùng bùa vẫn đang mở sau khi bấm Xác Nhận"
+                                : "câu hỏi dùng bùa không đóng lại sau khi bấm Xác Nhận",
+                    after, "charm_stuck");
+    // Nothing of the player's waits in a dialog any more: the question is gone.
+    if (bag::find_dialogs(after, store_).empty()) item_out_ = false;
+    // Hủy Bỏ on a dialog that comes up after Xác Nhận: no telling then whether
+    // the charm was used. Held to be in the way of the macro's keys until Hủy
+    // Bỏ is seen to close it, whatever an earlier look found.
+    const auto next_dialog = [&](const Frame& shot) {
+        item_out_ = true;
+        if (!cancel_all(5)) return lost("hộp thoại không đóng lại khi bấm Hủy Bỏ", shot, "charm_stuck");
         item_out_ = false;
         return doubt(UseOutcome::Unsure,
                      "sau khi bấm Xác Nhận game hỏi thêm một câu khác, nên bấm Hủy Bỏ; không biết bùa đã dùng "
                      "hay chưa",
-                     h, "charm_next_dialog");
+                     shot, "charm_next_dialog");
+    };
+
+    // 4b. The game's message that the charm worked: a lone Xác Nhận where the
+    //     question's Hủy Bỏ was (bag::lone_ok), on two looks at least
+    //     kDoneApartMs apart in one place -- watched for up to kCharmNoticeMs,
+    //     and a little longer once it is first seen.
+    bool told = false;
+    Frame told_frame;
+    {
+        bool seen = false;
+        ScreenRect seen_at;
+        std::chrono::steady_clock::time_point seen_since{};
+        int limit = kCharmNoticeMs;
+        const auto from = now();
+        while (ms_between(from, now()) < limit) {
+            if (stopping()) {
+                out.stopped = true;
+                break;
+            }
+            pause_ms(kCharmPollMs);
+            Frame h;
+            if (!grab_ || !grab_(h) || !h.valid()) continue;
+            if (!bag::find_dialogs(h, store_).empty()) return next_dialog(h);
+            item_out_ = false;
+            ScreenRect at;
+            if (!bag::lone_ok(h, store_, band, &at)) {
+                seen = false;
+                continue;
+            }
+            if (!seen || !same_place(at, seen_at)) {
+                seen = true;
+                seen_at = at;
+                seen_since = now();
+                if (out.notice_ms < 0) out.notice_ms = ms_between(out.asked_at, seen_since);
+                limit = std::max(limit, std::min(kCharmNoticeMs + kCharmNoticeMoreMs,
+                                                 ms_between(from, now()) + kDoneApartMs + 2 * kCharmPollMs));
+                continue;
+            }
+            if (ms_between(seen_since, now()) >= kDoneApartMs) {
+                told = true;
+                told_frame = std::move(h);
+                break;
+            }
+        }
     }
+
+    // 4c. Closed with its own Xác Nhận -- the only Xác Nhận clicked after a
+    //     charm's right-click but the question's -- before the stack is looked
+    //     at: the box may lie over the bag.
+    if (told && !out.stopped) {
+        // The first of a GoBot start kept, before it is closed: another kind's
+        // message, perhaps taller, is what the next fix would go by.
+        if (said_once("kept|charm_notice_ok")) keep(told_frame, "charm_notice_ok");
+        const auto click_from = now();
+        Frame shot;
+        int clicks = 0;
+        const NoticeClose how = close_notice(band, box, shot, clicks);
+        out.notice_clicks = clicks;
+        const int took = ms_between(click_from, now());
+        switch (how) {
+            case NoticeClose::Closed:
+                out.notice_closed = true;
+                GB_INFO("Trash: charm message after Xác Nhận at %d,%d, %d ms after the click; closed in %d ms (%d "
+                        "click(s))",
+                        d.pair.x, d.pair.y, out.notice_ms, took, clicks);
+                break;
+            case NoticeClose::Dialog:
+                GB_INFO("Trash: charm message after Xác Nhận at %d,%d: a dialog came up while it was closed",
+                        d.pair.x, d.pair.y);
+                return next_dialog(shot);
+            case NoticeClose::NotClosed:
+                keep(shot, "charm_notice_stuck");
+                out.notice_left = true;
+                out.notice_stuck = true;
+                break;
+            case NoticeClose::NotClicked:
+                out.notice_left = true;
+                break;
+            case NoticeClose::Stopped:
+                out.notice_left = true;
+                out.stopped = true;
+                break;
+        }
+        if (!out.notice_closed)
+            GB_INFO("Trash: charm message after Xác Nhận at %d,%d, %d ms after the click; left open (%s, %d click(s))",
+                    d.pair.x, d.pair.y, out.notice_ms,
+                    how == NoticeClose::NotClosed    ? "would not close"
+                    : how == NoticeClose::NotClicked ? "not clicked"
+                                                     : "stopped",
+                    clicks);
+    } else if (told) {
+        out.notice_left = true;
+    }
+
+    if (!out.stopped) pause_ms(kCharmSettleMs);
+    Frame h;
+    BagView w;
+    const bool bag_seen = grab_view(h, w);
+    if (h.valid() && !bag::find_dialogs(h, store_).empty()) return next_dialog(h);
     if (!bag_seen)
         return lost("sau khi dùng bùa, túi đồ bị che (có thể một cửa sổ khác đã mở ra): đóng nó trong game",
                     h.valid() ? h : after, "charm_covered");
     item_out_ = false;
-    if (bag::notice_up(h, store_)) {
-        // Xác Nhận is pressed: the message may be the game saying it worked, so
-        // this is a charm perhaps used, not one that was not.
+    if (!told && !out.stopped && bag::message_up(h, store_) && !bag::lone_ok(h, store_, band)) {
+        // A message, but not where the question puts the charm's own: not
+        // GoBot's to close. Xác Nhận is pressed, so this is a charm perhaps
+        // used, not one that was not.
         return doubt(UseOutcome::Unsure,
                      "sau khi bấm Xác Nhận game hiện một thông báo (để nguyên cho người chơi đọc); không biết bùa "
                      "đã dùng hay chưa",
@@ -4083,14 +5087,21 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
     // 5. Only gone, or one less in the stack, in that very slot, the same on
     //    two looks, counts as used. A stack that has not changed is watched a
     //    little longer first: the game may update it after the server's
-    //    answer, and a charm used and not seen to be is a charm used twice.
+    //    answer, and a charm used and not seen to be is a charm used twice --
+    //    but not after a stop, which waits for nothing.
     Frame look, shot = h;
     std::string why;
-    SlotNow state = slot_now(v, index, before, count, look, shot, why, kCharmGapMs);
-    for (int i = 0; i < kCharmLagLooks && state == SlotNow::Same && !cancelled_; ++i) {
+    SlotNow state = slot_now(v, index, before, count, look, shot, why, kCharmGapMs, &icon);
+    for (int i = 0; i < kCharmLagLooks && state == SlotNow::Same && !cancelled_ && !out.stopped; ++i) {
         pause_ms(kCharmLagMs);
-        state = slot_now(v, index, before, count, look, shot, why, kCharmGapMs);
+        state = slot_now(v, index, before, count, look, shot, why, kCharmGapMs, &icon);
     }
+    // A message closed, and the stack not one less: whatever the game said
+    // there is kept, for it was perhaps not that the charm worked.
+    const auto other_notice = [&] {
+        if (told) keep(told_frame, "charm_notice_other");
+    };
+    const std::string closed_said = out.notice_closed ? " (đã đóng thông báo của game, đã lưu ảnh)" : "";
     switch (state) {
         case SlotNow::Gone:
             out.outcome = UseOutcome::Used;
@@ -4101,20 +5112,18 @@ BagCleaner::UseResult BagCleaner::charm_one(const Frame& f, const BagView& v, in
             out.after = std::move(look);
             return out;
         case SlotNow::Same:
-            return doubt(UseOutcome::NotTaken, "đã bấm Xác Nhận mà số lượng bùa không giảm", shot, "charm_not_taken");
+            other_notice();
+            return doubt(UseOutcome::NotTaken, "đã bấm Xác Nhận mà số lượng bùa không giảm" + closed_said, shot,
+                         "charm_not_taken");
         case SlotNow::Asking:
-            if (!cancel_all(5)) return lost("hộp thoại không đóng lại khi bấm Hủy Bỏ", shot, "charm_stuck");
-            item_out_ = false;
-            return doubt(UseOutcome::Unsure,
-                         "sau khi bấm Xác Nhận game hỏi thêm một câu khác, nên bấm Hủy Bỏ; không biết bùa đã dùng "
-                         "hay chưa",
-                         shot, "charm_unsure");
+            return next_dialog(shot);
         case SlotNow::Unknown:
             break;
     }
+    other_notice();
     return doubt(UseOutcome::Unsure,
                  "đã bấm Xác Nhận mà không thấy ô đồ trống ra hay bớt đúng một (" + why +
-                     "), nên không biết bùa đã dùng hay chưa",
+                     "), nên không biết bùa đã dùng hay chưa" + closed_said,
                  shot, "charm_unsure");
 }
 
@@ -4143,10 +5152,94 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
         }
         stop = true;
     };
+    // A charm cut from the bag whose colour could not be told when the list
+    // was built (TrashList::add_rivals): never used, and said once a GoBot
+    // start, with what to choose instead.
+    for (const TrashList::Item& it : trash_->items)
+        if (it.id.empty() && it.action == TrashList::Action::Use && it.charm() && it.colour_of.empty() &&
+            said_once("cut colour said|" + it.clock_id()))
+            say("bùa cắt từ túi " + it.clock_id() + ": không chắc màu, không dùng; chọn bùa trong danh sách Bùa thay "
+                "cho hình cắt");
     std::set<long long> seen;
-    std::set<std::string> tried;        // by clock id: a charm, and its other colour, once a run
+    // By kind: each clock id and each colour once a run -- a picture cut from
+    // the bag and the catalog's icon of its colour are one charm.
+    std::set<std::string> tried;
+    // And so from run to run: a kind is due only when every charm on the
+    // Dùng list of its colour is. A cut and the catalog's icon of its colour
+    // each have a clock, and the one not found in a run that used the other
+    // is looked for again in ten minutes -- its colour then used early. This
+    // can only leave a charm unclicked, never click one.
+    const auto due_by_colour = [&](const TrashList::Item& it) {
+        if (!charm_due_) return true;
+        if (!charm_due_(it.clock_id())) return false;
+        if (it.colour_of.empty()) return true;
+        for (const TrashList::Item& other : trash_->items)
+            if (other.action == TrashList::Action::Use && other.charm() && other.colour_of == it.colour_of &&
+                !charm_due_(other.clock_id()))
+                return false;
+        return true;
+    };
+    // The kinds due as the run begins, by clock id with their colour: once
+    // each has been tried the run is done, and the pages below are not looked
+    // at. None due -- a run to say what waits -- goes through the bag as ever.
+    std::vector<std::pair<std::string, std::string>> due;
+    for (const TrashList::Item& it : trash_->items) {
+        if (it.action != TrashList::Action::Use || !it.charm()) continue;
+        const std::string cid = it.clock_id();
+        if (!due_by_colour(it)) continue;
+        if (std::none_of(due.begin(), due.end(), [&](const auto& d) { return d.first == cid; }))
+            due.emplace_back(cid, it.colour_of);
+    }
+    res.charms_due = static_cast<int>(due.size());
+    const auto all_tried = [&] {
+        if (due.empty()) return false;
+        for (const auto& d : due)
+            if (!tried.count(d.first) && (d.second.empty() || !tried.count(d.second))) return false;
+        return true;
+    };
+    // A run for a message handed over from the last, with nothing due: that
+    // message closed, and nothing else.
+    const bool closing_only = due.empty() && last_carried_ && last_asked_.valid();
+    // A slot drawn like a charm on the Dùng list and left alone for its
+    // colour (TrashList::judge): counted, and logged once a run; a colour not
+    // sure is said as well, once a GoBot start for that slot and kind.
+    const auto left_for_colour = [&](const TrashList::Verdict& k, int row, int col, long long key) {
+        const bool unsure = k.doubt == TrashList::Verdict::Doubt::Colour;
+        const bool other = k.doubt == TrashList::Verdict::Doubt::None && !k.colour_id.empty();
+        if ((!unsure && !other) || k.like < 0) return;
+        const TrashList::Item& like = trash_->items[static_cast<std::size_t>(k.like)];
+        if (like.action != TrashList::Action::Use || !like.charm()) return;
+        seen.insert(key);
+        const std::string drawn = like.clock_id();
+        if (other) {
+            ++res.charms_other_colour;
+            GB_INFO("Trash: charm slot row %d cell %d left alone: drawn like %s, coloured %s (%.3f, next %.3f): not "
+                    "ticked",
+                    row + 1, col + 1, drawn.c_str(), k.colour_id.c_str(), static_cast<double>(k.colour),
+                    static_cast<double>(k.colour_next));
+            return;
+        }
+        ++res.charms_colour_doubt;
+        GB_INFO("Trash: charm slot row %d cell %d left alone: drawn like %s, colour not sure: best %s %.3f, next %s "
+                "%.3f, mean off %d",
+                row + 1, col + 1, drawn.c_str(), k.colour_id.empty() ? "none" : k.colour_id.c_str(),
+                static_cast<double>(k.colour), k.colour_next_id.empty() ? "none" : k.colour_next_id.c_str(),
+                static_cast<double>(k.colour_next), k.colour_mean_off);
+        if (!said_once("colour|" + std::to_string(row) + "|" + std::to_string(col) + "|" + drawn)) return;
+        char where[96];
+        std::snprintf(where, sizeof where, "%s, hàng %d ô %d", bag_tab_name(tab), row + 1, col + 1);
+        char colour[24];
+        std::snprintf(colour, sizeof colour, "%.2f", static_cast<double>(k.colour));
+        say(std::string("bùa ở ") + where + " cùng hình với loại đã chọn nhưng màu không giống (" + colour +
+            "), không dùng");
+    };
     int uses = 0, scrolls = 0;
     bool hid_pointer = false;
+    // Looks at the strip that read no tab chosen and were looked at again --
+    // kTabRelooks a run at most -- those since the last that read Tiêu Dùng,
+    // and the first of those, for the log.
+    int unread = 0, streak = 0;
+    BagView first_unread;
     for (int round = 0; round < 200 && !stop && !cancelled_; ++round) {
         if (charm_must_stop(res, stop)) return;
         Frame f;
@@ -4165,14 +5258,43 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
             stop = true;
             return;
         }
-        if (bag::notice_up(f, store_)) {
+        // A message of the game's: GoBot's own -- the last Xác Nhận's, come
+        // late, or handed over from the last run -- closed, and the round
+        // begun again on a fresh look; anyone else's left, and nothing pressed.
+        {
+            const int own = close_own(f, res, "at the next round");
+            if (own < 0) {
+                stop = true;
+                return;
+            }
+            if (own > 0) continue;
+        }
+        if (bag::message_up(f, store_)) {
             say("đang có một thông báo trong game, nên không dùng bùa nào; đóng nó rồi thử lại");
             return;
         }
+        if (closing_only) return;
         // Only on Tiêu Dùng, by the strip: on another tab a right-click equips.
+        // A look that reads no tab chosen at all -- something drawn over the
+        // strip for a moment -- is looked at again, the pointer moved off, a
+        // few times a run; another tab read for sure stops it at once. Either
+        // way the run stops saying so, not as a bag with no charm in it.
         if (v.selected_tab != tab) {
+            if (v.found && v.selected_tab < 0 && unread < kTabRelooks) {
+                if (streak++ == 0) first_unread = v;
+                ++unread;
+                park_pointer();
+                if (!wait_ms(kTabRelookMs)) return;
+                continue;
+            }
+            tab_unsure(f, v, tab, "charm_sweep");
+            res.tab_unsure = true;
             say(std::string("không chắc túi đồ đang ở ngăn ") + bag_tab_name(tab) + ", nên không dùng bùa nào");
             return;
+        }
+        if (streak > 0) {
+            tab_read_late(first_unread, tab, streak, "charm_sweep");
+            streak = 0;
         }
         if (v.slot_rows < l.rows && !v.at_bottom(l) && !hid_pointer) {
             hid_pointer = true;
@@ -4193,7 +5315,10 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
             const long long key = static_cast<long long>(row) * 100 + c;
             if (seen.count(key) || bag::is_empty(f, slots[s], l)) continue;
             const TrashList::Verdict k = trash_->judge(f, slots[s], settings_.min_score);
-            if (k.item < 0) continue;
+            if (k.item < 0) {
+                left_for_colour(k, row, c, key);
+                continue;
+            }
             const TrashList::Item& item = trash_->items[static_cast<std::size_t>(k.item)];
             if (item.action != TrashList::Action::Use || !item.charm()) continue;
             seen.insert(key);
@@ -4202,21 +5327,88 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
             char where[96];
             std::snprintf(where, sizeof where, "%s, hàng %d ô %d", bag_tab_name(tab), row + 1, c + 1);
             const std::string cid = item.clock_id();
-            if (charm_due_ && !charm_due_(cid)) {
+            if (!due_by_colour(item)) {
                 ++res.charms_waiting;
                 say(std::string("bùa ở ") + where + " chưa tới giờ dùng lại");
                 continue;
             }
-            if (tried.count(cid)) continue;
+            if (tried.count(cid) || (!item.colour_of.empty() && tried.count(item.colour_of))) continue;
             if (uses >= kMaxCharms) {
                 say("đã dùng " + std::to_string(uses) + " bùa, đủ cho một lần");
                 return;
             }
-            const int count = counts_->read(f, slots[s]);
+            // The count, read by the catalog icon of the slot's colour -- the
+            // colour judge told, its own id for a catalog charm: a stack of
+            // one has no number printed, and is told by its corner being that
+            // icon's with nothing over it. A picture cut from the bag is never
+            // gone by: its corner may have its count in it.
+            const Frame* icon = bare_of(*trash_, item.colour_of);
+            bool bare = false;
+            const int count = counts_->read_charm(f, slots[s], icon, l, &bare);
             if (count == CountReader::kUnreadable || count <= 0) {
+                ++res.charms_unread;
+                char detail[64];
+                if (icon == nullptr) {
+                    std::snprintf(detail, sizeof detail, "no icon of its colour");
+                } else {
+                    int unlike = -1;
+                    float fit = 0.0f;
+                    bag::bare_corner(f, slots[s], *icon, l, &unlike, &fit);
+                    if (unlike < 0)
+                        std::snprintf(detail, sizeof detail, "icon does not fit (fit %.1f)", static_cast<double>(fit));
+                    else
+                        std::snprintf(detail, sizeof detail, "fit %.1f, %d pixel(s) unlike it",
+                                      static_cast<double>(fit), unlike);
+                }
+                GB_INFO("Trash: charm %s (%s) at %s row %d cell %d: no count read, and the corner is not its bare "
+                        "icon (%s) -- not right-clicked",
+                        cid.c_str(), item.colour_of.c_str(), bag_tab_name(tab), row + 1, c + 1, detail);
                 say(std::string("không dùng bùa ở ") + where +
                     ": không đọc được số lượng trên ô đồ, nên sau khi dùng không xem lại được");
                 continue;
+            }
+            // The packets' bag, read only: a slot it says holds something
+            // else -- with the count the screen reads there -- is not
+            // right-clicked; nor a stack of one, as the screen reads it, that
+            // it says holds another count, or nothing. It never decides that
+            // one is. Its slot j is Tiêu Dùng's row * 6 + cell from the top:
+            // on the live client (2026-11-03) slots 0 to 11 held the screen's
+            // counts cell for cell, and slot 1 was 8871081, 63 and then 62 --
+            // and at 19:54 slot 11 8871071 x1, a stack of one with no number.
+            // Asked only where the scroll bar says which row this is.
+            std::string packets = "not asked";
+            if (charm_packets_ && v.scroll_known() && l.cols == 6) {
+                const int j = row * l.cols + c;
+                if (j >= 0 && j < kPacketSlots) {
+                    std::string said;
+                    const PacketSays says = charm_packets_(item.colour_of, j, count, said);
+                    const bool one_differs = count == 1 && says == PacketSays::CountDiffers;
+                    if (says == PacketSays::Other || one_differs) {
+                        ++res.charms_vetoed;
+                        GB_INFO("Trash: charm %s (%s) at %s row %d cell %d left alone, count %d%s -- packets: slot %d "
+                                "holds %s: not right-clicked",
+                                cid.c_str(), item.colour_of.c_str(), bag_tab_name(tab), row + 1, c + 1, count,
+                                bare ? " (nothing printed over its icon)" : "", j, said.c_str());
+                        if (said_once("packets|" + std::to_string(j) + "|" + item.colour_of + "|" + said)) {
+                            if (one_differs)
+                                say(std::string("không dùng bùa ở ") + where + ": theo gói tin ô này " +
+                                    (said == "empty" ? std::string("trống") : "có " + said) +
+                                    ", mà màn hình thấy 1 cái");
+                            else
+                                say(std::string("không dùng bùa ở ") + where + ": theo gói tin ô này là món khác (" +
+                                    said + "), không phải loại đã chọn");
+                        }
+                        continue;
+                    }
+                    // Another count than one printed: most likely not the slot
+                    // the screen shows -- a page scrolled, a bag sorted -- and
+                    // it says nothing either way.
+                    packets = says == PacketSays::Agrees ? "slot " + std::to_string(j) + " holds " + said + ", agrees"
+                              : says == PacketSays::CountDiffers
+                                  ? "slot " + std::to_string(j) + " holds " + said + ", the screen reads " +
+                                        std::to_string(count) + ": not the same slot, not compared"
+                                  : said;
+                }
             }
             ScreenRect other;
             if (bag::other_window_up(f, store_, v, l, &other)) {
@@ -4230,23 +5422,81 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
             // Asked again the moment before the click: the hold may have gone
             // while this looked.
             if (charm_must_stop(res, stop)) return;
+            // And a message of the game's, on a fresh look: one may have come
+            // while the windows were looked for -- the last charm's, come late.
+            // GoBot's own is closed and the round begun again, nothing claimed
+            // or right-clicked; anyone else's stops the run.
+            {
+                Frame g;
+                if (!grab_ || !grab_(g) || !g.valid()) {
+                    res.trouble = "không chụp được màn hình game";
+                    stop = true;
+                    return;
+                }
+                const int own = close_own(g, res, "before the next right-click");
+                if (own < 0) {
+                    stop = true;
+                    return;
+                }
+                if (own > 0) {
+                    seen.erase(key);
+                    --res.charms_seen;
+                    acted = true;
+                    break;
+                }
+                if (bag::message_up(g, store_)) {
+                    say("đang có một thông báo trong game, nên không dùng bùa nào; đóng nó rồi thử lại");
+                    return;
+                }
+            }
 
+            GB_INFO("Trash: charm %s (%s) at %s row %d cell %d: drawing %.3f, colour %.3f, mean off %d (next %s %.3f), "
+                    "count %d%s -- packets: %s",
+                    cid.c_str(), item.colour_of.c_str(), bag_tab_name(tab), row + 1, c + 1,
+                    static_cast<double>(k.score), static_cast<double>(k.colour), k.colour_mean_off,
+                    k.colour_next_id.empty() ? "none" : k.colour_next_id.c_str(), static_cast<double>(k.colour_next),
+                    count, bare ? " (nothing printed over its icon)" : "", packets.c_str());
             clicked = true;
             tried.insert(cid);
+            if (!item.colour_of.empty()) tried.insert(item.colour_of);
             // Written down as used before anything that cannot be taken back.
             if (charm_claim_) charm_claim_(cid);
-            const UseResult u = charm_one(f, v, static_cast<int>(s), count);
+            // Looked at again after the use the way its count was read here.
+            const Frame none;
+            const UseResult u = charm_one(f, v, static_cast<int>(s), count, icon != nullptr ? *icon : none);
             acted = true;
             hid_pointer = false;
+            // The last Xác Nhận pressed on a charm question, for a message of
+            // its that comes late; none, when this one pressed none.
+            last_asked_ = u.asked;
+            last_asked_at_ = u.asked_at;
+            last_carried_ = false;
+            last_closed_ = u.notice_closed;
+            last_gave_up_ = u.notice_stuck;
+            if (u.notice_closed && u.notice_clicks > 0) ++res.charm_notices;
             const auto note = [&](CharmClock::How how, const std::string& why) {
                 res.charm_tries.push_back(Result::CharmTry{ cid, how, why });
             };
+            // The game's message after it, as it was left.
+            const std::string notice_said =
+                u.notice_closed ? " (đã đóng thông báo của game)"
+                : u.notice_stuck
+                    ? "; thông báo của game vẫn còn mở, không đóng lại khi bấm Xác Nhận: đóng nó trong game"
+                : u.notice_left ? "; thông báo của game vẫn còn mở"
+                                : "";
             switch (u.outcome) {
                 case UseOutcome::Used:
                     ++uses;
                     ++res.charms_used;
                     note(CharmClock::How::Used, "");
-                    say(std::string("đã dùng bùa ở ") + where + (u.left > 0 ? "; còn " + std::to_string(u.left) : ""));
+                    say(std::string("đã dùng bùa ở ") + where + (u.left > 0 ? "; còn " + std::to_string(u.left) : "") +
+                        notice_said);
+                    // Used, with its message left up: nothing more is
+                    // right-clicked under it.
+                    if (u.notice_left) {
+                        res.trouble = "đã dùng bùa ở " + std::string(where) + notice_said;
+                        stop = true;
+                    }
                     break;
                 case UseOutcome::NotTaken:
                     // Xác Nhận was pressed: the stack not going down in the
@@ -4260,7 +5510,7 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
                 case UseOutcome::Unsure:
                 case UseOutcome::UsedUnasked:
                     // Right-clicked, and no telling whether it took: counted as
-                    // used for the clock, for a charm used twice is a charm lost.
+                    // used for the clock, for a charm used twice is spent early.
                     note(CharmClock::How::MaybeUsed, u.why);
                     ++res.use_unsure;
                     say(std::string("dừng ở bùa ") + where + ": " + u.why);
@@ -4286,6 +5536,7 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
                     break;
                 case UseOutcome::Untouched:
                     tried.erase(cid);
+                    tried.erase(item.colour_of);
                     say(std::string("không dùng bùa ở ") + where + ": " + u.why);
                     res.trouble = u.why;
                     stop = true;
@@ -4303,6 +5554,12 @@ void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {
                     stop = true;
                     break;
             }
+            // The guard said no, or a stop came, while it waited: nothing more.
+            if (u.stopped && !stop) {
+                if (!charm_must_stop(res, stop)) stop = true;
+            }
+            // Every kind due tried: done, the pages below not looked at.
+            if (!stop && all_tried()) return;
             break;
         }
         if (acted || stop) continue;
@@ -4809,33 +6066,69 @@ bool BagCleaner::look_page(Frame& f, BagView& v) {
     return true;
 }
 
-bool BagCleaner::select_tab(int tab, BagView& v, Result& res) {
+bool BagCleaner::select_tab(int tab, BagView& v, Result& res, const char* where) {
     const BagLayout& l = settings_.layout;
     if (v.selected_tab == tab) return true;
-    int tx = 0, ty = 0;
-    v.tab_point(l, tab, tx, ty);
-    if (!mouse_ok(tx, ty)) {
-        res.trouble = "không bấm được vào túi đồ: cửa sổ game bị che hoặc không ở trên cùng";
-        return false;
-    }
-    click(tx, ty);
     Frame f;
-    // Looked at in short steps until the tab is the chosen one.
-    for (int i = 0; i < 10 && v.selected_tab != tab; ++i) {
-        if (!wait_ms(80)) return false;
-        grab_view(f, v);
+    // Clicked, the pointer moved off the strip -- left on the tab it clicked,
+    // the game lights it, and a tab lit is no tab read -- and looked at in
+    // short steps until the tab is the chosen one. A strip that then reads no
+    // tab chosen at all is looked at again a few times, a moment apart; one
+    // that reads another tab chosen, for sure, is clicked once more, a pixel
+    // aside -- the game may have let the first click go -- and no more.
+    for (int clicks = 0; clicks < 2 && v.selected_tab != tab; ++clicks) {
+        if (clicks > 0 && (!v.found || v.selected_tab < 0)) break;
+        int tx = 0, ty = 0;
+        v.tab_point(l, tab, tx, ty);
+        tx += clicks;
+        if (!mouse_ok(tx, ty)) {
+            res.trouble = "không bấm được vào túi đồ: cửa sổ game bị che hoặc không ở trên cùng";
+            return false;
+        }
+        click(tx, ty);
+        park_pointer();
+        for (int i = 0; i < 10 && v.selected_tab != tab; ++i) {
+            if (!wait_ms(80)) return false;
+            grab_view(f, v);
+        }
+        const BagView first = v;
+        int more = 0;
+        for (; more < kTabRelooks && v.found && v.selected_tab < 0; ++more) {
+            if (!wait_ms(kTabRelookMs)) return false;
+            grab_view(f, v);
+        }
+        if (more > 0 && v.selected_tab == tab) tab_read_late(first, tab, more, where);
     }
     if (v.selected_tab != tab) {
+        if (v.found) {
+            tab_unsure(f, v, tab, where);
+            res.tab_unsure = true;
+        }
         res.trouble = std::string("không chuyển được sang ngăn ") + bag_tab_name(tab) + " của túi đồ";
         return false;
     }
     return true;
 }
 
+void BagCleaner::tab_unsure(const Frame& f, const BagView& v, int tab, const char* where) {
+    GB_INFO("Trash: tab not read as %d (%s) at %s -- read %d, strip at %d,%d (%.2f), tab means %d %d %d %d %d",
+            tab, bag_tab_name(tab), where, v.selected_tab, v.strip.x, v.strip.y, static_cast<double>(v.score),
+            v.tab_mean[0], v.tab_mean[1], v.tab_mean[2], v.tab_mean[3], v.tab_mean[4]);
+    if (said_once(std::string("tab_unsure|") + where)) keep(f, (std::string("tab_unsure_") + where).c_str());
+}
+
+void BagCleaner::tab_read_late(const BagView& first, int tab, int looks, const char* where) {
+    GB_INFO("Trash: tab %d (%s) read at %s after %d more looks -- the first read %d, strip at %d,%d (%.2f), tab "
+            "means %d %d %d %d %d",
+            tab, bag_tab_name(tab), where, looks, first.selected_tab, first.strip.x, first.strip.y,
+            static_cast<double>(first.score), first.tab_mean[0], first.tab_mean[1], first.tab_mean[2],
+            first.tab_mean[3], first.tab_mean[4]);
+}
+
 bool BagCleaner::shop_count(int tab, BagView& v, Result& res, bool& stop, int& hp, int& mp) {
     const BagLayout& l = settings_.layout;
     hp = mp = 0;
-    if (!select_tab(tab, v, res)) {
+    if (!select_tab(tab, v, res, "shop_tab")) {
         stop = true;
         return false;
     }
@@ -4859,6 +6152,11 @@ bool BagCleaner::shop_count(int tab, BagView& v, Result& res, bool& stop, int& h
     }
     std::set<long long> seen;
     int scrolls = 0, doubtful = 0;
+    // Looks that read no tab chosen and were looked at again -- kTabRelooks a
+    // count at most -- those since the last that read the tab, and the first
+    // of those, for the log.
+    int unread = 0, streak = 0;
+    BagView first_unread;
     bool complete = false;
     for (int round = 0; round < 80 && !cancelled_; ++round) {
         if (charm_must_stop(res, stop)) return false;
@@ -4876,10 +6174,29 @@ bool BagCleaner::shop_count(int tab, BagView& v, Result& res, bool& stop, int& h
             stop = true;
             return false;
         }
+        // Counted only on a look that reads the tab: on another, Tiêu Dùng's
+        // potions would be counted none, and bought. A look that reads no tab
+        // chosen at all -- something drawn over the strip for a moment -- is
+        // looked at again, the pointer moved off, and the round done again from
+        // there: nothing has scrolled, and no slot is counted twice. Another
+        // tab read for sure stops it at once.
         if (v.selected_tab != tab) {
+            if (v.found && v.selected_tab < 0 && unread < kTabRelooks) {
+                if (streak++ == 0) first_unread = v;
+                ++unread;
+                park_pointer();
+                if (!wait_ms(kTabRelookMs)) break;
+                continue;
+            }
+            tab_unsure(f, v, tab, "shop_count");
+            res.tab_unsure = true;
             res.trouble = std::string("không chắc túi đồ đang ở ngăn ") + bag_tab_name(tab);
             stop = true;
             return false;
+        }
+        if (streak > 0) {
+            tab_read_late(first_unread, tab, streak, "shop_count");
+            streak = 0;
         }
         if (!v.scroll_known()) {
             keep(f, "shop_scroll_unknown");
@@ -4947,7 +6264,7 @@ bool BagCleaner::shop_open(BagView& v, Result& res, Frame& shot, bag::Shop& shop
             }
         }
     }
-    if (!select_tab(kOtherTab, v, res)) return false;
+    if (!select_tab(kOtherTab, v, res, "shop_other_tab")) return false;
     scroll_to_top(v);
 
     // The Người Giữ Sân item: the one slot of Khác the settings' icon is

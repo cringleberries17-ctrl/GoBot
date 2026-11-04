@@ -159,7 +159,7 @@ void GuiApp::popup_loop() {
     // chat's rule, which starts a line only some way over the potion's mark,
     // so that HP hovering at the mark in a fight never waits on a popup.
     const auto hp_low = [this] {
-        const float hp = vitals_.hp_percent();
+        const float hp = hp_percent_now();
         const int floor = chat_hp_floor_.load();
         return hp >= 0.0f && hp < static_cast<float>(std::max(floor, std::min(95, floor + 10)));
     };

@@ -28,6 +28,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <set>
 #include <string>
 #include <vector>
@@ -2390,6 +2391,231 @@ void test_hunter_turns() {
     }
 }
 
+/// The minute lines of a run: those that say how the fights went.
+std::vector<std::string> minute_lines(const std::vector<std::string>& all) {
+    std::vector<std::string> out;
+    for (const std::string& l : all)
+        if (l.find("Hunter: ") != std::string::npos && l.find(" fights, ") != std::string::npos) out.push_back(l);
+    return out;
+}
+
+/// The number after `after` in `line`, or -1 without one.
+double number_after(const std::string& line, const char* after) {
+    const std::size_t at = line.find(after);
+    return at == std::string::npos ? -1.0 : std::atof(line.c_str() + at + std::strlen(after));
+}
+
+/// Seconds as the minute line writes them: one place.
+std::string seconds(double s) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f", s);
+    return buf;
+}
+
+/// The minute line's counts, from the farm of 2026-11-03: the 4-s re-picks of
+/// a fight in reach without a style said apart from what was given up on
+/// (B5) -- 165 "given up" there, every one in reach -- and, for the drop-down
+/// to come, the monsters off the character's level (H6): the picks whose
+/// nearest monster stood below or above the band, and the time spent waiting
+/// with one below in reach across.
+void test_hunter_minute_counts() {
+    section("Hunter: the minute line -- re-picks in reach apart from give-ups, and monsters off the level");
+
+    HunterConfig owner;             // the owner's: Đứng yên, reach 450, no style
+    owner.stay_put = true;
+    owner.reach = 450;
+    // Hurt a little at a time, never killed in the minute.
+    const auto slow = [](HuntRig& r, const char* name) {
+        return [&r, name] {
+            if (Nameplate* m = r.w.mob(name)) m->hp = std::max(0.2f, m->hp - 0.0003f);
+        };
+    };
+    {
+        Hunter::Status st;
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(owner);
+            r.w.mobs = { plate(640 + 300, 400, "Moc") };
+            r.run(61'000, slow(r, "Moc"));
+            st = r.hunter.status();
+        }));
+        const std::string line = log.empty() ? std::string() : log.front();
+        unsigned long long n = 0, m = 0;
+        unsigned every = 0;
+        const std::size_t at = line.find(" back-steps, ");
+        const bool read =
+            at != std::string::npos &&
+            std::sscanf(line.c_str() + at + 13, "%llu given up (%llu of them in reach: re-picked every %u s", &n, &m,
+                        &every) == 3;
+        check(log.size() == 1 && read && n >= 12 && m == n && every == 4 &&
+                  line.find(" of them in reach: re-picked every 4 s, Như trước), ") != std::string::npos,
+              "Đứng yên, no style, one monster fought in reach for a minute: \"" + std::to_string(n) + " given up (" +
+                  std::to_string(m) + " of them in reach: re-picked every 4 s, Như trước)\"");
+        check(st.targets_dropped >= 12 && st.targets_repicked == st.targets_dropped,
+              "and the counts: every one given up re-picked -- the card's \"out of reach\" says " +
+                  std::to_string(st.targets_dropped - st.targets_repicked));
+        check(line.find("nearest off level") == std::string::npos &&
+                  line.find("waiting while a monster below") == std::string::npos,
+              "nothing off the level: neither count said");
+    }
+    {
+        // Behind a wall, walked at: given up on for staying out of reach,
+        // none of it a re-pick.
+        Hunter::Status st;
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(stepping());
+            r.w.mobs = { plate(900, 400, "Wall") };
+            r.run(61'000);
+            st = r.hunter.status();
+        }));
+        check(st.targets_dropped >= 4 && st.targets_repicked == 0 && log.size() == 1 &&
+                  lines_with(log, " given up, ") == 1 && lines_with(log, " given up (") == 0,
+              "one behind a wall: " + std::to_string(st.targets_dropped) +
+                  " given up for staying out of reach, none re-picked, the minute line with no \"of them in reach\"");
+    }
+    {
+        // A monster below nearer than the one fought on the level: at every
+        // pick, the nearest stood below.
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(owner);
+            r.w.mobs = { plate(640 + 300, 400, "Moc"), plate(640 + 40, 480, "Ha") };
+            r.run(61'000, slow(r, "Moc"));
+        }));
+        const std::string line = log.empty() ? std::string() : log.front();
+        int below = -1, above = -1, picks = -1;
+        const std::size_t at = line.find("; nearest off level: below ");
+        const bool read = at != std::string::npos &&
+                          std::sscanf(line.c_str() + at + 27, "%d, above %d of %d picks", &below, &above, &picks) == 3;
+        check(log.size() == 1 && read && picks >= 12 && below == picks && above == 0 &&
+                  line.find("waiting while a monster below") == std::string::npos,
+              "one fought on the level 300 px off, one 80 px below 40 px off: the nearest below at every pick -- "
+              "below " + std::to_string(below) + ", above " + std::to_string(above) + " of " + std::to_string(picks));
+    }
+    {
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(owner);
+            r.w.mobs = { plate(640 + 300, 400, "Moc"), plate(640 - 40, 320, "Tren") };
+            r.run(61'000, slow(r, "Moc"));
+        }));
+        const std::string line = log.empty() ? std::string() : log.front();
+        int below = -1, above = -1, picks = -1;
+        const std::size_t at = line.find("; nearest off level: below ");
+        const bool read = at != std::string::npos &&
+                          std::sscanf(line.c_str() + at + 27, "%d, above %d of %d picks", &below, &above, &picks) == 3;
+        check(log.size() == 1 && read && picks >= 12 && below == 0 && above == picks,
+              "and one 80 px above instead: above " + std::to_string(above) + " of " + std::to_string(picks));
+    }
+    {
+        // Standing still with only a monster below, within reach across:
+        // nothing to attack, and the time said.
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(owner);
+            r.w.mobs = { plate(640 + 100, 520, "Ha") };
+            r.run(61'000);
+        }));
+        const std::string line = log.empty() ? std::string() : log.front();
+        const double waited = number_after(line, "; waiting while a monster below was in reach: ");
+        check(log.size() == 1 && line.find("Hunter: 0 fights, ") != std::string::npos && waited >= 59.0 &&
+                  waited <= 60.0 && line.find("nearest off level") == std::string::npos,
+              "Đứng yên, one monster 120 px below and 100 px across: \"waiting while a monster below was in reach: " +
+                  seconds(waited) + " s\", and no pick counted at each pass it waits");
+    }
+    {
+        // The one on the level out of reach, the one below in reach across:
+        // picked afresh at every pass, and not a pick taken up -- waiting.
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(owner);
+            r.w.mobs = { plate(640 + 500, 400, "Xa"), plate(640 + 100, 520, "Ha") };
+            r.run(61'000);
+        }));
+        const std::string line = log.empty() ? std::string() : log.front();
+        const double waited = number_after(line, "; waiting while a monster below was in reach: ");
+        check(log.size() == 1 && waited >= 59.0 && line.find("nearest off level") == std::string::npos,
+              "one on the level 500 px off, one below 100 px across: waiting " + seconds(waited) +
+                  " s, not a thousand picks");
+    }
+    {
+        // Below but out of reach across, or on "Không đánh": nothing to say.
+        HunterConfig skipping = owner;
+        skipping.skip_names = { "Ha" };
+        const std::vector<std::string> across = minute_lines(info_lines([&] {
+            HuntRig r(owner);
+            r.w.mobs = { plate(640 + 500, 520, "Ha") };
+            r.run(61'000);
+        }));
+        const std::vector<std::string> skipped = minute_lines(info_lines([&] {
+            HuntRig r(skipping);
+            r.w.mobs = { plate(640 + 100, 520, "Ha") };
+            r.run(61'000);
+        }));
+        check(across.empty() && skipped.empty(),
+              "one below 500 px across, or one below on Không đánh: no minute line at all");
+    }
+    {
+        // Walking, a monster below given up on for staying out of reach:
+        // the time it is passed over, nothing else to attack, is waiting.
+        const std::vector<std::string> log = minute_lines(info_lines([&] {
+            HuntRig r(stepping());
+            r.w.mobs = { plate(640 + 50, 520, "Ha") };
+            r.run(61'000);
+        }));
+        const std::string line = log.empty() ? std::string() : log.front();
+        const double waited = number_after(line, "; waiting while a monster below was in reach: ");
+        check(log.size() == 1 && waited >= 25.0 && waited <= 50.0,
+              "walking, one 120 px below given up on and passed over: waiting " + seconds(waited) +
+                  " s of the minute");
+    }
+
+    // The two rules on their own.
+    {
+        HunterConfig cfg;               // height 60 both ways, reach 150
+        const Nameplate me = plate(640, 400, "Me");
+        const std::vector<Hunter::Listed> none;
+        Nameplate dead = plate(650, 500, "Chet", 0.0f);
+        check(Hunter::nearest_off_level(cfg, { plate(650, 470) }, me, none) == 1 &&
+                  Hunter::nearest_off_level(cfg, { plate(650, 330) }, me, none) == -1 &&
+                  Hunter::nearest_off_level(cfg, { plate(650, 460), plate(700, 470) }, me, none) == 0 &&
+                  Hunter::nearest_off_level(cfg, { plate(650, 340) }, me, none) == 0 &&
+                  Hunter::nearest_off_level(cfg, {}, me, none) == 0 &&
+                  Hunter::nearest_off_level(cfg, { dead, plate(700, 400) }, me, none) == 0,
+              "nearest_off_level: 70 px below +1, 70 above -1, 60 either way level, none 0, a dead one passed by");
+        check(Hunter::nearest_off_level(cfg, { plate(650, 470), plate(700, 400) }, me,
+                                        { Hunter::Listed::GaveUp, Hunter::Listed::Free }) == 0 &&
+                  Hunter::nearest_off_level(cfg, { plate(650, 470), plate(700, 400) }, me,
+                                            { Hunter::Listed::Skip, Hunter::Listed::Free }) == 0,
+              "and one refused -- given up on or on Không đánh -- is not the nearest");
+        check(Hunter::below_in_reach(cfg, { plate(790, 470) }, me, none) &&
+                  !Hunter::below_in_reach(cfg, { plate(791, 470) }, me, none) &&
+                  !Hunter::below_in_reach(cfg, { plate(700, 460) }, me, none) &&
+                  !Hunter::below_in_reach(cfg, { plate(700, 300) }, me, none) &&
+                  !Hunter::below_in_reach(cfg, { dead }, me, none),
+              "below_in_reach: 70 px below 150 across, yes; 151 across, 60 below, or above, no; a dead one no");
+        check(Hunter::below_in_reach(cfg, { plate(700, 470) }, me, { Hunter::Listed::GaveUp }) &&
+                  !Hunter::below_in_reach(cfg, { plate(700, 470) }, me, { Hunter::Listed::Skip }) &&
+                  !Hunter::below_in_reach(cfg, { plate(700, 470) }, me, { Hunter::Listed::OutOfArea }),
+              "and one given up on a moment ago counts; one on Không đánh or outside the area does not");
+    }
+
+#ifdef GOBOT_SOURCE_DIR
+    // The card and the command line show the two apart.
+    {
+        const auto read = [](const char* rel) {
+            std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const std::string gui = read("/apps/gobot_gui/gui_app.cpp");
+        const std::string cli = read("/apps/gobot_cli/main.cpp");
+        check(gui.find("hs.targets_dropped - repicked") != std::string::npos &&
+                  gui.find("\"%llu re-picked while in reach (every %u s, Như trước)\"") != std::string::npos &&
+                  gui.find("given up on (out of reach)\"") == std::string::npos,
+              "the card: given up on less the re-picks, and the re-picks on a line of their own");
+        check(cli.find("hs.targets_dropped - repicked") != std::string::npos &&
+                  cli.find("%llu fights re-picked while in reach (%s)") != std::string::npos &&
+                  cli.find("%llu dropped, %llu re-picked") != std::string::npos,
+              "the command line too, at its running line and at its end");
+    }
+#endif
+}
+
 /// The player's own frame, as it was saved: the monster on it is "NgạQuỷ",
 /// and the glyph sets have no ỷ.
 void test_monster_on_frame() {
@@ -2415,6 +2641,139 @@ void test_monster_on_frame() {
     check(found != nullptr, "frame.png: the monster plate near 325,246 is found");
     check(found && monster_on_list({ "NgaQuỷ" }, found->name),
           "and what is read of its name is on a list holding \"NgaQuỷ\", typed with its accent");
+}
+
+// ------------------------------------------------- the packets' plates
+
+/// `n` as PacketEyes makes a monster's plate: with its slot on the map and
+/// the slot's generation, which a respawn changes.
+Nameplate slotted(Nameplate n, int slot, std::uint32_t gen = 1) {
+    n.slot = slot;
+    n.gen = gen;
+    return n;
+}
+
+/// The packets' plates say which monster each is (Nameplate::slot, gen): the
+/// target is held by them -- never swapped for another walking past where it
+/// was, nor taken for the next monster spawned where it died -- and who
+/// struck a monster counts for the wounded and for the no-damage watch.
+void test_hunter_slots() {
+    section("Hunter: the packets' plates -- the target held by its slot, and who hurt it");
+
+    const HunterConfig cfg;     // no style: reach 150, height 60
+    {
+        // Slot 3 the target, 120 px to the right; slot 4 behind it. Then 3
+        // walks on to 800 and 4 comes to 770: nearer where 3 was.
+        HuntRig r(cfg);
+        r.w.mobs = { slotted(plate(760, 400, "A"), 3), slotted(plate(840, 400, "B"), 4) };
+        r.pass();
+        const std::string first = r.target();
+        r.w.mobs = { slotted(plate(800, 400, "A"), 3), slotted(plate(770, 400, "B"), 4) };
+        r.pass();
+        const Hunter::Status st = r.hunter.status();
+        check(first == "A" && r.target() == "A" && st.target.slot == 3 && st.target.x() == 800,
+              "two packet plates crossing: the target stays slot 3, though slot 4 now stands nearer where it was -- " +
+                  first + ", then " + r.target());
+    }
+    {
+        HuntRig r(cfg);
+        r.w.mobs = { plate(760, 400, "A"), plate(840, 400, "B") };
+        r.pass();
+        const std::string first = r.target();
+        r.w.mobs = { plate(800, 400, "A"), plate(770, 400, "B") };
+        r.pass();
+        check(first == "A" && r.target() == "B" && r.hunter.status().target.slot == -1,
+              "the screen's plates (slot -1): the plate nearest where the target was, as always -- " + first +
+                  ", then " + r.target());
+    }
+    {
+        // The target's slot 10 px on, the same monster or the next one
+        // spawned there: only the next one is a kill, with its pick-ups.
+        HunterConfig looting = cfg;
+        looting.loot = true;
+        looting.loot_key = 'A';
+        looting.loot_interval_ms = 600'000;     // only what a kill owes
+        for (const bool respawn : { false, true }) {
+            HuntRig r(looting);
+            r.w.mobs = { slotted(plate(700, 400, "Moc"), 3, 1) };
+            r.pass();
+            const std::size_t looted = r.w.of('A').size();
+            r.w.mobs = { slotted(plate(710, 400, "Moc"), 3, respawn ? 2u : 1u) };
+            r.run(1500);
+            const std::size_t after = r.w.of('A').size() - looted;
+            check(r.target() == "Moc" && r.hunter.status().target.gen == (respawn ? 2u : 1u) &&
+                      after == (respawn ? 3u : 0u),
+                  respawn ? "its slot with a new generation, within 360 px: not the same monster -- the target gone, "
+                            "three pick-up presses, and the new one fought -- " + std::to_string(after)
+                          : "the same slot and generation 10 px on: the same monster, no pick-up owed -- " +
+                                std::to_string(after));
+        }
+    }
+    {
+        // stay_put: slot 3 level and 160 px off, first in the list and
+        // picked; slot 5 right below the character, in reach. Standing
+        // still, the one in reach is taken -- by its slot too, or the next
+        // look would go back to slot 3 and never attack.
+        HunterConfig still = cfg;
+        still.stay_put = true;
+        HuntRig r(still);
+        r.w.mobs = { slotted(plate(800, 400, "Xa"), 3), slotted(plate(640, 455, "Gan"), 5) };
+        r.run(600);
+        const Hunter::Status st = r.hunter.status();
+        check(!r.w.of('Z').empty() && st.state == Hunter::State::Attacking && st.target.slot == 5,
+              "stay_put: the monster in reach is attacked, and the hold does not go back to the slot out of reach -- " +
+                  std::to_string(r.w.of('Z').size()) + " swing(s)");
+    }
+    {
+        // The most wounded within reach goes first -- on a packet plate only
+        // once your id is proven the hitter's, and never one another player
+        // is hitting.
+        const Nameplate me = plate(640, 400);
+        std::vector<Nameplate> mobs = { slotted(plate(700, 400, "A"), 1), slotted(plate(760, 400, "B", 0.5f), 2) };
+        const std::vector<Hunter::Listed> none(mobs.size(), Hunter::Listed::Free);
+        bool picked = false;
+        check(Hunter::choose_target(cfg, mobs, &me, none, &picked) == 0 && !picked,
+              "before your id is proven the hitter's, a packet plate at 50% is no wounded one to finish: the nearest");
+        for (Nameplate& n : mobs) n.actor_checked = true;
+        check(Hunter::choose_target(cfg, mobs, &me, none, &picked) == 1 && picked,
+              "after it, the one at 50% in reach is finished first, and said to be the wounded one picked");
+        mobs[1].hurt_by_other = true;
+        check(Hunter::choose_target(cfg, mobs, &me, none) == 0, "but not while another player is hitting it");
+        std::vector<Nameplate> two = { slotted(plate(700, 400, "Theirs", 0.4f), 1),
+                                       slotted(plate(760, 400, "Mine", 0.8f), 2) };
+        for (Nameplate& n : two) n.actor_checked = true;
+        two[0].hurt_by_other = true;
+        two[1].hurt_ms = 4'990'000;
+        check(Hunter::choose_target(cfg, two, &me, none) == 1,
+              "a monster you hurt is finished before one another player hurt, nearer and more wounded as that is");
+        const std::vector<Nameplate> screen = { plate(700, 400, "A"), plate(760, 400, "B", 0.5f) };
+        check(Hunter::choose_target(cfg, screen, &me, none) == 1,
+              "the screen's plates (slot -1): the wounded one in reach first, as before");
+    }
+    {
+        // With a style, a monster whose bar never moves is given up on --
+        // unless, on a packet plate, the packets say your blows land on it.
+        HunterConfig styled = cfg;
+        styled.style = "near_wide";
+        styled.no_damage_ms = 3000;
+        const char* const kWhat[] = { "a packet plate, no blow of yours said", "a packet plate, a blow of yours at "
+                                      "every look", "a screen plate, the same said" };
+        std::uint64_t dropped[3] = {};
+        for (int c = 0; c < 3; ++c) {
+            HuntRig r(styled);
+            Nameplate n = plate(700, 400, "Moc", 0.9f);
+            if (c < 2) n = slotted(n, 3);
+            r.w.mobs = { n };
+            r.run(5000, [&r, c] {
+                if (c != 0) r.w.mobs[0].hurt_ms = r.w.t;
+            });
+            dropped[c] = r.hunter.status().targets_dropped;
+        }
+        check(dropped[0] >= 1 && dropped[1] == 0 && dropped[2] >= 1,
+              std::string("no_damage: given up on with ") + kWhat[0] + " (" + std::to_string(dropped[0]) +
+                  "); not with " + kWhat[1] + " (" + std::to_string(dropped[1]) + "); and with " + kWhat[2] +
+                  ", whose bar alone counts (" + std::to_string(dropped[2]) + ")");
+    }
 }
 
 } // namespace
@@ -2680,5 +3039,7 @@ void test_hunter_fight(void (*check_fn)(bool, const std::string&), void (*sectio
     test_hunter_view_change();
     test_hunter_spot();
     test_hunter_turns();
+    test_hunter_minute_counts();
     test_monster_on_frame();
+    test_hunter_slots();
 }

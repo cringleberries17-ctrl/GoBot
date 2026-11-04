@@ -84,6 +84,7 @@ JumpCheck::Result JumpCheck::run(std::uint32_t jump_key, const std::atomic<bool>
     // Exactly one press, under the token like every other key -- never over
     // a hold, nor on top of another job's key, nor after a stop.
     const std::uint64_t token_until = clock_now() + kTokenWaitMs;
+    std::optional<std::uint64_t> takeoffs_before;
     for (;;) {
         if (stopped()) {
             r.outcome = Outcome::Stopped;
@@ -105,6 +106,10 @@ JumpCheck::Result JumpCheck::run(std::uint32_t jump_key, const std::atomic<bool>
                 r.outcome = Outcome::NotInFront;
                 return r;
             }
+            // Your take-offs so far, the moment before the press, when the
+            // packets can tell: a jump of the player's own a moment earlier
+            // is not counted as this press's.
+            if (eyes_.takeoffs) takeoffs_before = eyes_.takeoffs();
             r.pressed = hands_.key && hands_.key(jump_key, kHoldMs);
             break;
         }
@@ -127,19 +132,45 @@ JumpCheck::Result JumpCheck::run(std::uint32_t jump_key, const std::atomic<bool>
     // Up and down again: the highest the plate went (screen y grows downward).
     int top = base;
     const std::uint64_t watch_until = clock_now() + kWatchMs;
-    while (clock_now() < watch_until && !stopped()) {
+    bool cut = false;
+    while (clock_now() < watch_until) {
+        if (stopped()) {
+            cut = true;
+            break;
+        }
         pause(kLookEveryMs);
         int y = 0;
         if (!look(y)) continue;
         ++r.reads;
         top = std::min(top, y);
     }
+    // Your client's own take-offs since the press, when the packets could
+    // tell before it and still can. A count lower than before is a capture
+    // started afresh meanwhile: nothing to go by, and the plate decides. A
+    // watch cut short by a stop goes by them only for a take-off already
+    // counted: the frame of one may not have come yet, and none counted is no
+    // proof of no jump.
+    if (takeoffs_before && eyes_.takeoffs) {
+        const std::optional<std::uint64_t> after = eyes_.takeoffs();
+        if (after && *after >= *takeoffs_before && (!cut || *after > *takeoffs_before)) {
+            r.by_packets = true;
+            r.takeoffs = static_cast<int>(std::min<std::uint64_t>(*after - *takeoffs_before, 1000));
+        }
+    }
     if (!have_base || r.reads == 0) {
+        if (r.by_packets) {
+            r.outcome = r.takeoffs >= 1 ? Outcome::Jumped : Outcome::NoJump;
+            return r;
+        }
         r.outcome = Outcome::NoPlate;
         return r;
     }
     r.rose_px = std::max(0, base - top);
-    if (r.rose_px >= kJumpedPx)
+    // The packets decide whatever the plate did: on a map where the camera
+    // follows the jump, the plate hardly moves.
+    if (r.by_packets)
+        r.outcome = r.takeoffs >= 1 ? Outcome::Jumped : Outcome::NoJump;
+    else if (r.rose_px >= kJumpedPx)
         r.outcome = Outcome::Jumped;
     else if (r.rose_px < kStillPx && r.reads >= kStillReads)
         r.outcome = Outcome::NoJump;
@@ -168,9 +199,13 @@ const char* JumpCheck::outcome_name(Outcome o) {
 std::string JumpCheck::said_vi(const Result& r, const std::string& key) {
     switch (r.outcome) {
         case Outcome::Jumped:
+            if (r.by_packets) return "Đã bấm " + key + " một lần — nhân vật đã nhảy (theo gói tin).";
             return "Đã bấm " + key + " một lần — nhân vật đã nhảy (cao khoảng " +
                    std::to_string(r.rose_px) + " px).";
         case Outcome::NoJump:
+            if (r.by_packets)
+                return "Đã bấm " + key + " một lần nhưng nhân vật không nhảy (theo gói tin). Hãy kiểm tra "
+                       "phím nhảy trong cài đặt phím của game.";
             return "Đã bấm " + key + " một lần nhưng không thấy nhân vật nhảy trên màn hình. Hãy "
                    "nhìn trong game và kiểm tra phím nhảy trong cài đặt phím của game.";
         case Outcome::Unsure:

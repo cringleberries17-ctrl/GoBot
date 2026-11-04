@@ -187,6 +187,8 @@ std::vector<NamedKey> GuiApp::game_keys_in_use() {
         { hunt_config_.left_key, "đi sang trái" },
         { hunt_config_.right_key, "đi sang phải" },
     };
+    // The hunter's drop presses Ctrl (with ↓, which no key may be).
+    if (hunt_config_.drop_down) k.push_back({ VK_CONTROL, "nhảy xuống (Ctrl + ↓)" });
     for (const MacroKey& m : macro_config_.keys) {
         if (m.keycode == 0) continue;
         const char* what = "phím kỹ năng";

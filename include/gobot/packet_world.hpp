@@ -13,6 +13,8 @@
 
 namespace gobot {
 
+struct MonsterState;    // gobot/monster_frames.hpp
+
 /// You and every monster of the map, from the game's own frames, worked out
 /// to any moment asked for.
 ///
@@ -118,6 +120,11 @@ public:
     /// the state is: this many of each.
     static constexpr int kUnknownLogged = 2;
 
+    /// Your id seen as the hitter -- at 48 of a hurt or a kill -- this many
+    /// times proves that is where the hitter is (View::actor_checked). Before
+    /// then a hurt is not said to be yours or another's to anything that acts.
+    static constexpr std::uint64_t kActorCheckHits = 20;
+
     // ---- what it knows
 
     /// You, as worked out for one moment.
@@ -177,6 +184,23 @@ public:
         bool          dead = false;
         std::uint64_t dead_ms = 0;      ///< when it was killed, or the table came that had it dead
         std::uint64_t event_ms = 0;     ///< when its last frame came
+        /// Which monster of its slot this is: a number given afresh at each
+        /// spawn, table and dead slot alive again, and at a slot first seen,
+        /// and never given twice. A respawn in the same place is another
+        /// monster by it, which the place alone cannot say.
+        std::uint32_t gen = 0;
+        /// Who last hurt or hit it (0 for nobody yet), and when it was last
+        /// hurt -- by anyone, by you, and by someone else, each 0 for never.
+        /// Yours and someone else's only once your id is known: before that a
+        /// blow is neither.
+        std::uint32_t last_actor = 0;
+        std::uint64_t hurt_ms = 0;
+        std::uint64_t hurt_by_you_ms = 0;
+        std::uint64_t hurt_by_other_ms = 0;
+        /// The actor of its last 0x0038 of state 3 or 11, and when (0 for
+        /// none): what those states are is not known, so nothing acts on it.
+        std::uint32_t contact_actor = 0;
+        std::uint64_t contact_ms = 0;
     };
 
     /// Everything, worked out for one moment.
@@ -208,9 +232,25 @@ public:
         /// in this view: kOwnReckonMs for one the hunter holds, otherwise
         /// kOwnStepReckonMs (view()'s own_follow_ms).
         std::uint64_t    own_follow_ms = kOwnReckonMs;
+        /// Your id has been seen as the hitter kActorCheckHits times since the
+        /// start or reset(): who hurt a monster may be gone by.
+        bool             actor_checked = false;
 
         /// The monster in `slot`, or none.
         const Mob* mob(std::uint32_t slot) const;
+    };
+
+    /// The place as it stands, worked out to no moment: cheap enough to ask
+    /// at every tick, as the GUI does for a map change (map_change_by).
+    struct Place {
+        std::uint16_t map = 0;
+        std::uint16_t area = 0;
+        /// View::map_since_ms: the last entry's time -- or a relink's, which
+        /// settles the place afresh.
+        std::uint64_t since_ms = 0;
+        std::uint32_t epoch = 0;        ///< View::map_epoch: map entries ever
+        std::uint64_t entries = 0;      ///< Stats::map_entries: since the start or reset()
+        std::uint64_t entry_ms = 0;     ///< Stats::entry_ms: the last entry's time
     };
 
     /// What it was fed since the start or reset(), for the log.
@@ -236,7 +276,45 @@ public:
         std::uint64_t stops = 0;
         std::uint64_t walks = 0;            ///< walk events, turns included
         std::uint64_t hits = 0;
-        std::uint64_t kills = 0;            ///< hits that left a living monster at 0 HP or below
+        /// Hits and hurts that left a living monster at 0 HP or below: by
+        /// you, by someone else, and before your id was known.
+        std::uint64_t kills = 0;
+        std::uint64_t kills_yours = 0;
+        std::uint64_t kills_others = 0;
+        std::uint64_t kills_before_id = 0;
+
+        /// 0x0038 of states 6 and 7 (MonsterEvent::Hurt), and of them: the
+        /// HP before less the damage was the HP after (chained) -- what
+        /// proves the layout; the HP above the last (rose: the monster heals);
+        /// its place more than kUnknownPlacePx from where the monster was
+        /// worked out to be, and not taken (far); a slot no frame had named,
+        /// put where the hurt says (new slot); a monster dead, and the hurt
+        /// passed over (on dead). And whose: yours, someone else's -- before
+        /// your id is known, neither.
+        std::uint64_t hurts = 0;
+        std::uint64_t hurts_chained = 0;
+        std::uint64_t hurts_rose = 0;
+        std::uint64_t hurts_far = 0;
+        std::uint64_t hurts_new_slot = 0;
+        std::uint64_t hurts_on_dead = 0;
+        std::uint64_t hurts_yours = 0;
+        std::uint64_t hurts_others = 0;
+
+        /// 0x0038 of states 3 and 11 (read_monster_contact), and of them
+        /// those whose actor was you, or someone else, once your id is known.
+        std::uint64_t contacts = 0;
+        std::uint64_t contacts_yours = 0;
+        std::uint64_t contacts_others = 0;
+
+        /// The first kHitters actors met in hurts and hits, and how many
+        /// each: whose id the hitter at 48 is, for the log.
+        struct Hitter {
+            std::uint32_t id = 0;
+            std::uint64_t hits = 0;     ///< 0: this entry not taken yet
+        };
+        static constexpr std::size_t kHitters = 4;
+        std::array<Hitter, kHitters> hitters{};
+
         std::uint64_t unknown_states = 0;   ///< 0x0038 of a state read_monster_state does not know
         /// Of those, how many put their monster where they said: near enough
         /// to where it was worked out to be (kUnknownPlacePx). The rest are
@@ -292,6 +370,19 @@ public:
         /// game update that moved a report of yours, whose walks then go
         /// unread -- where you are is not to be gone by (world_fix).
         std::uint64_t last_own_wrong_size_ms = 0;
+
+        /// How many reset()s came before these counts: a reset() since
+        /// `before` was taken is told by this, not guessed from counts lower
+        /// than they were -- they climb past them again soon enough.
+        std::uint64_t resets = 0;
+
+        /// These counts less `before`'s -- what came since `before` was
+        /// taken, for the Positions line's counts from HUNT ON. With a
+        /// reset() between the two (`resets`), all of these: what came since
+        /// the reset. Of the same counts, one lower here than there is taken
+        /// from 0. The times, the last map entry, the unknown states' names
+        /// and the hitters' ids are this one's, as they are.
+        Stats since(const Stats& before) const;
     };
 
     PacketWorld();
@@ -309,6 +400,17 @@ public:
     /// were, and View::entry_x, entry_y stay with the last entry.
     void reset();
 
+    /// The capture started again on the same game process with no new
+    /// connection, at `now_ms`: what the server said of the place is kept
+    /// -- the map, the area, map_epoch and the last entry's spawn -- and so
+    /// are the counts, for the session's tallies. You are forgotten as at
+    /// reset() -- not known, your id unlocked, no facing -- and so are the
+    /// monsters, the table and when the last report of yours came: the
+    /// packets are then not to be gone by until a report of yours comes, and
+    /// the place is settled kSettleMs again from `now_ms` (packet_health).
+    /// Only for the same game: a new process or connection is reset().
+    void relink(std::uint64_t now_ms);
+
     /// You and every monster, worked out to `now_ms` on the clock the frames
     /// are stamped with -- a walk of yours on the ground followed for
     /// `own_follow_ms` with no report: kOwnReckonMs for a walk the hunter
@@ -316,6 +418,9 @@ public:
     View view(std::uint64_t now_ms, std::uint64_t own_follow_ms = kOwnReckonMs) const;
 
     Stats stats() const;
+
+    /// The place alone: no monster or report worked out.
+    Place place() const;
 
     /// The opcodes it reads, for a capture's opcode filter: your reports
     /// 0x0027, 0x0028, 0x0029, 0x002A and 0x0031; the monsters' 0x0038, 0x003F
@@ -336,9 +441,30 @@ private:
     Taken take_table(const GamePacket& p);
     Taken take_spawn(const GamePacket& p);
     Taken take_state(const GamePacket& p);
+    /// A hurt (states 6 and 7), at `t`: its HP always, its place only near
+    /// where the monster was, a slot never named put where it says, and a
+    /// dead one passed over until its spawn, a stop or a walk.
+    Taken take_hurt(const MonsterState& s, std::uint64_t t);
     /// A 0x0038 read_monster_state did not take: counted, and its monster
-    /// placed when its state is not one of the three known (kUnknownPlacePx).
+    /// placed when its state is not one it knows (kUnknownPlacePx).
     Taken take_other_state(const GamePacket& p);
+
+    /// Whose a blow or a contact is.
+    enum class Actor : std::uint8_t {
+        Yours,      ///< your id, while it is locked
+        Others,     ///< any other id, or none, while yours is locked
+        BeforeId,   ///< your id not known: nobody's to say
+    };
+    Actor actor_of(const std::optional<std::uint32_t>& actor) const;
+    /// `actor`'s blow on `m` at `t`: who last hurt it, and when, by whom.
+    void note_blow(Mob& m, Actor by, const std::optional<std::uint32_t>& actor, std::uint64_t t);
+    /// A kill at `t`, by `by`: counted, and said once in the log when kills
+    /// are many and none of them yours (kills not split by actor).
+    void note_kill(Actor by, std::uint64_t t);
+    /// One more blow by you: said once in the log at kActorCheckHits.
+    void note_yours();
+    /// The next number for Mob::gen.
+    std::uint32_t next_gen() { return ++gens_; }
 
     /// A monster frame was used at `t`.
     void heard_monster(std::uint64_t t);
@@ -378,6 +504,43 @@ private:
     Stats                         stats_;
     /// How many frames of each unknown state have gone to the log.
     std::array<std::uint8_t, 256> unknown_logged_{};
+    /// Mob::gen's last number: never cleared, so a number is never given to
+    /// two monsters, whatever started again in between.
+    std::uint32_t                 gens_ = 0;
+    /// The id "your id is" last said: said again only for another. Never
+    /// cleared: a map entry unlocks the id at every door.
+    std::uint32_t                 id_said_ = 0;
+    /// The first kill since the start or reset(), and whether "never seen
+    /// as a hitter" has been said since then.
+    std::uint64_t                 first_kill_ms_ = 0;
+    bool                          never_hitter_said_ = false;
 };
+
+/// Who says the map has changed, as the GUI's tick asks it.
+enum class MapChangeBy : std::uint8_t {
+    Minimap,    ///< the minimap's fingerprint, as before the packets
+    Packets,    ///< the packets' map entries (View::map_epoch)
+};
+
+/// How quiet the server may have been, and how long ago the place may have
+/// been settled afresh by a relink, for the packets to say.
+constexpr std::uint64_t kMapByPacketsQuietMs = 5'000;
+constexpr std::uint64_t kMapByPacketsSettleMs = 10'000;
+
+/// The packets, at `now`, once all of these hold; otherwise the minimap:
+///   - a map entry has been seen since the world last started afresh
+///     (`place.entries`): a capture started on another game, or a map entry
+///     missed while none ran, leaves the map not known until the next one;
+///   - the capture is on the game's own process (`on_game`);
+///   - a frame from the server came within kMapByPacketsQuietMs
+///     (`last_server_ms`, 0 for none);
+///   - no relink in the last kMapByPacketsSettleMs: an entry missed while the
+///     capture started again would leave the epoch where it was. A relink
+///     settles the place afresh, so its time is place.since_ms, not the
+///     entry's.
+/// The minimap's fingerprint changed six times in a minute and a half of one
+/// hunt with no door taken (gobot_gui.log of 2026-11-02).
+MapChangeBy map_change_by(const PacketWorld::Place& place, bool on_game, std::uint64_t last_server_ms,
+                          std::uint64_t now);
 
 } // namespace gobot

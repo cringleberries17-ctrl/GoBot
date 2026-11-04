@@ -171,7 +171,7 @@ std::string GuiApp::simple_skills_note(bool no_player) {
     if (!macro_config_.skills_follow_fight || !macro_running_) return {};
     if (no_player) return " Kỹ năng chờ cho tới khi thấy nhân vật.";
     const int floor_pct = macro_config_.skill_mp_floor_pct;
-    const float mp = vitals_running_ ? vitals_.mp_percent() : -1.0f;
+    const float mp = vitals_running_ ? mp_percent_now() : -1.0f;
     if (floor_pct > 0 && mp >= 0.0f && mp < static_cast<float>(floor_pct))
         return " (MP dưới " + std::to_string(floor_pct) + "%: không dùng kỹ năng)";
     return {};

@@ -224,6 +224,7 @@ add_library(gobot_core STATIC
     src/navigator.cpp
     src/minimap_tracker.cpp
     src/hunter.cpp
+    src/hunter_drop.cpp
     src/monster_list.cpp
     src/attack_style.cpp
     src/jump_check.cpp
@@ -231,6 +232,7 @@ add_library(gobot_core STATIC
     src/map_file.cpp
     src/map_table.cpp
     src/map_locator.cpp
+    src/map_book.cpp
     src/template_matcher.cpp
     src/template_matcher_cv.cpp
     src/session_manager.cpp
@@ -260,6 +262,12 @@ add_library(gobot_core STATIC
     src/protocol_handler.cpp
     src/packet_world.cpp
     src/packet_eyes.cpp
+    src/packet_self.cpp
+    src/frame_tally.cpp
+    src/one_worker.cpp
+    src/vitals_trust.cpp
+    src/bag_ledger.cpp
+    src/cast_match.cpp
     src/window_focus.cpp
     src/frame_pacer.cpp
     src/machine_info.cpp
@@ -374,6 +382,11 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/simple_style.cpp
         apps/gobot_gui/simple_spot.cpp
         apps/gobot_gui/simple_skills.cpp
+        apps/gobot_gui/packets_watch.cpp
+        apps/gobot_gui/packets_vitals.cpp
+        apps/gobot_gui/packets_bag.cpp
+        apps/gobot_gui/packets_more.cpp
+        apps/gobot_gui/packets_detector.cpp
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"
@@ -442,7 +455,10 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/skills_test.cpp apps/gobot_test/packet_world_test.cpp
                           apps/gobot_test/packet_eyes_test.cpp apps/gobot_test/pacer_test.cpp
                           apps/gobot_test/load_test.cpp apps/gobot_test/tabs_test.cpp
-                          apps/gobot_test/capture_load_test.cpp)
+                          apps/gobot_test/capture_load_test.cpp apps/gobot_test/packet_self_test.cpp
+                          apps/gobot_test/vitals_trust_test.cpp apps/gobot_test/bag_ledger_test.cpp
+                          apps/gobot_test/cast_match_test.cpp apps/gobot_test/drop_key_test.cpp
+                          apps/gobot_test/map_book_test.cpp apps/gobot_test/drop_hunt_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

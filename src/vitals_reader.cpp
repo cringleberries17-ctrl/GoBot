@@ -260,6 +260,18 @@ int VitalsReader::forget_after_misses(int period_ms) {
     return std::max(2, (kForgetAfterMs + gap - 1) / gap);
 }
 
+float VitalsReader::shadowed_percent(float measured, int value, int max) {
+    // The caption, printed right-aligned over the bar, paints out the fill
+    // under it: a fill that reaches it measures where it begins (56-58% for
+    // an 11-character one). There the measure says "this much or more" --
+    // the last figures, kept forget_after_misses reads, say how much more.
+    // Never more than they say, and never less than the measure: a bar that
+    // fell left of any caption measures true.
+    if (measured < kCaptionShadowPct || value < 0 || max <= 0) return measured;
+    return std::max(measured,
+                    std::clamp(static_cast<float>(value) * 100.0f / static_cast<float>(max), 0.0f, 100.0f));
+}
+
 void VitalsReader::set_anchor(const Frame& anchor) {
     std::lock_guard<std::mutex> lock(mutex_);
     anchor_ = anchor;
@@ -682,16 +694,20 @@ void VitalsReader::loop() {
                     int& value; int& max;
                     int& pending; int& seen; int& misses;
                     float& percent;
+                    bool& now;
                 } kBars[] = {
                     { hp, values_.hp, values_.hp_max, hp_max_pending_, hp_max_seen_,
-                      hp_misses_, hp_pct },
+                      hp_misses_, hp_pct, values_.hp_now },
                     { mp, values_.mp, values_.mp_max, mp_max_pending_, mp_max_seen_,
-                      mp_misses_, mp_pct },
+                      mp_misses_, mp_pct, values_.mp_now },
                 };
 
                 for (const auto& bar : kBars) {
                     int cur = 0, max = 0;
                     if (!read_numbers(frame, bar.spec, font_, cur, max)) {
+                        // Not this read's own, whatever is kept: the packets'
+                        // check holds only those against 0x0051.
+                        bar.now = false;
                         // Forget the figures rather than keep showing them.
                         //
                         // A reading that stops updating is the worst of the
@@ -704,10 +720,15 @@ void VitalsReader::loop() {
                             bar.max = -1;
                             bar.pending = -1;
                             bar.seen = 0;
+                        } else {
+                            // Until then, a measure in the caption's shadow
+                            // goes as the kept figures say, when they say more.
+                            bar.percent = shadowed_percent(bar.percent, bar.value, bar.max);
                         }
                         continue;
                     }
                     bar.misses = 0;
+                    bar.now = true;
                     any = true;
 
                     // A maximum has to be seen twice before it is believed;

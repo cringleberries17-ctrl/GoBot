@@ -70,18 +70,25 @@ bool move_file(const std::string& from, const std::string& to) {
                        MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
-std::vector<std::string> files_in(const std::string& folder, const std::string& pattern) {
+std::vector<std::string> files_in(const std::string& folder, const std::string& pattern, bool* complete) {
     std::vector<std::string> out;
+    if (complete) *complete = true;
     std::string spec = folder;
     if (!spec.empty() && spec.back() != '\\' && spec.back() != '/') spec += '\\';
     spec += pattern;
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW(utf8_to_wide(spec).c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return out;
+    if (h == INVALID_HANDLE_VALUE) {
+        // No such file, or no such folder: nothing there, the whole of it.
+        const DWORD e = GetLastError();
+        if (complete && e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) *complete = false;
+        return out;
+    }
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         out.push_back(wide_to_utf8(fd.cFileName));
     } while (FindNextFileW(h, &fd));
+    if (complete && GetLastError() != ERROR_NO_MORE_FILES) *complete = false;
     FindClose(h);
     return out;
 }

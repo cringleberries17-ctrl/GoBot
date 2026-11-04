@@ -30,6 +30,18 @@ namespace gobot {
 /// a timer. And GoC clicks the box without looking whether it is ticked
 /// already -- which may well untick one that is on, though only the live
 /// client can say; GoBot reads the box first, and leaves a ticked one alone.
+/// It clicks only a box it is sure is clear: GoC's picture of the clear box
+/// matched as a whole, and its inside -- a dark ramp a tick of a few pixels
+/// already spoils -- matched on its own where the box's frame is. Anything
+/// else is not sure, and not clicked.
+///
+/// GoC's picture of the ticked box has never been seen on the live client.
+/// So after GoBot's own click a box no picture fits counts as ticked too when
+/// the change is plain: the window and Tự Động where they were, the box's
+/// frame there, the clear box's inside gone from it, and the same on two
+/// looks with the pointer back on NV Phụ. That look is learned -- kept as
+/// templates\grabbed\quest_auto_on.png -- and from then on a box like it,
+/// and not like the clear one, reads as ticked.
 ///
 /// The window has things on it that must never be clicked: Hủy Nhiệm Vụ, which
 /// gives up the quest picked in the list, the quick quest's own Accept, Give up
@@ -87,10 +99,14 @@ struct QuestSettings {
     ScreenRect forbid_abandon{ 296, 417, 80, 30 };
     ScreenRect forbid_hide_low{ 523, 37, 14, 14 };
     /// Nor where the quick quest's Accept, Give up and Complete buttons go --
-    /// the area GoC's English-client flow clicks and reads them in, around Hủy
-    /// Nhiệm Vụ's place. GoBot never loads their pictures, so they are kept
-    /// out of by place, as Hủy Nhiệm Vụ is.
-    ScreenRect forbid_buttons{ 283, 412, 103, 41 };
+    /// the area GoC's English-client flow reads them in, round Hủy Nhiệm Vụ's
+    /// place, trimmed on the right to where Tự Động begins (+373). GoC's own
+    /// 103 px reached eleven columns into Tự Động's box, GoC's own click on it
+    /// (+384,432) among them, and refused every round on the VTC client; the
+    /// widest of the three buttons ends at +367. GoBot never loads their
+    /// pictures, so they are kept out of by place, as Hủy Nhiệm Vụ is. A
+    /// quest.ini that still says 283,412,103,41 is read as this (load).
+    ScreenRect forbid_buttons{ 283, 412, 90, 41 };
 
     // ---- [Pictures]: names in the template store.
     std::string window = "quest/1/Dlg_Quest_Neo";
@@ -114,6 +130,12 @@ struct QuestSettings {
     float auto_score = 0.80f;       ///< Tự Động
     float state_score = 0.80f;      ///< the box, ticked or not
     float state_margin = 0.10f;     ///< and by this much over the other look
+    /// After GoBot's own click, with no picture of a ticked box fitting: the
+    /// clear box's inside under this, where the box's frame still is, counts
+    /// as the box having changed. It reads 1.00 on a clear box; a tick of a
+    /// few pixels brings it under 0.40, GoC's ticked picture to 0.05. Never
+    /// over state_score - state_margin, whatever the file says.
+    float off_drop = 0.50f;
 
     // ---- [Timing], in milliseconds: GoC's own waits.
     int open_hold_ms = 50;          ///< the key held, opening
@@ -169,6 +191,17 @@ struct QuestPictures {
     /// ticked one is found as readily as one that is not.
     Frame auto_option;
     Frame box_on, box_off;
+    /// The clear box cut in two, for reading a box no picture fits: its frame
+    /// alone, the inside see-through, which finds the box whatever is in it;
+    /// and its inside alone, the dark ramp that any tick spoils.
+    Frame box_ring, box_inside;
+    /// The ticked box as this machine's client draws it, when GoC's picture
+    /// of it does not fit: learned by a round (QuestResult::learned_on), kept
+    /// as templates\grabbed\quest_auto_on.png. Empty until then.
+    Frame box_learned;
+    /// Its inside, which is what is compared: the frame is the same in every
+    /// look of the box.
+    Frame learned_inside;
     /// What was asked for and not there, by name, for saying so.
     std::vector<std::string> missing;
 
@@ -182,8 +215,26 @@ struct QuestPictures {
     /// Straight from a folder laid out like templates\: a dozen small files.
     bool load_dir(const std::string& dir, const QuestSettings& s);
     /// templates\ beside the program, else GoC's own pictures. `from` gets
-    /// the folder they came from. False when neither has them all.
+    /// the folder they came from. False when neither has them all. The
+    /// ticked box learned on this machine comes along when it is there.
     bool load_best(const QuestSettings& s, std::string* from = nullptr);
+
+    /// Whether `box` -- cut from the client where a round saw its own click
+    /// change the box -- may be taken for the ticked look: the clear box's
+    /// size, opaque, the clear box's frame round it, an inside that is not
+    /// flat, and that inside not like the clear box's. `why` gets which, in
+    /// English, when not.
+    bool learnable(const Frame& box, const QuestSettings& s, std::string* why = nullptr) const;
+    /// Take `box` as the ticked look; false, and nothing changed, when it is
+    /// not learnable.
+    bool learn(const Frame& box, const QuestSettings& s);
+    /// The learned look from `file`; false, and none kept, when it is not
+    /// there or not learnable.
+    bool load_learned(const std::string& file, const QuestSettings& s);
+    /// Keep `box` in `file`, its folder made when it is not there.
+    static bool save_learned(const std::string& file, const Frame& box);
+    /// templates\grabbed\quest_auto_on.png beside the program.
+    static std::string learned_file();
 };
 
 /// What the tab says when pictures are missing, in Vietnamese: the first one
@@ -219,14 +270,50 @@ QuestWindow find_quest_window(const Frame& f, const QuestPictures& p, const Ques
 enum class AutoState { Unknown, Off, On };
 const char* auto_state_name(AutoState s);   ///< "on", "off", "unknown"
 
+/// The box, as read in one frame.
+struct QuestBoxRead {
+    AutoState state = AutoState::Unknown;
+    /// GoC's two pictures of it, each the best within two pixels; -1 when it
+    /// could not be compared.
+    float     on = -1.0f, off = -1.0f;
+    /// The clear box's frame alone, the best within two pixels: the box is
+    /// there, whatever is inside it.
+    float     ring = -1.0f;
+    /// Where that frame is, the inside then read just within it: the clear
+    /// box's inside, and the learned ticked one's. -1 when the frame is not
+    /// there, the inside is flat, or nothing has been learned.
+    float     inside = -1.0f;
+    float     learned = -1.0f;
+    int       x = 0, y = 0;         ///< the box's top-left: its frame's, when found
+};
+
+/// The box whose top-left is at `x`, `y`, give or take two pixels.
+///
+/// On when GoC's ticked picture fits it, by `state_margin` more than the clear
+/// one, as ever -- or when its frame is there and its inside is like the
+/// ticked look learned here, by `state_margin` more than like the clear box's
+/// inside, which does not fit. Off only when all of it says so: the clear
+/// picture fits as a whole, by `state_margin` more than the ticked one, its
+/// frame is there and its inside fits on its own, by `state_margin` more than
+/// the learned ticked inside. Unknown otherwise, and an unknown box is never
+/// clicked: a ticked one clicked again is unticked.
+QuestBoxRead read_quest_box(const Frame& f, int x, int y, const QuestPictures& p,
+                            const QuestSettings& s);
+/// The same, the two scores of GoC's pictures alone given back.
+AutoState read_quest_box(const Frame& f, int x, int y, const QuestPictures& p,
+                         const QuestSettings& s, float& on, float& off);
+
 /// Tự Động, as found in one frame.
 struct AutoOption {
     bool       found = false;
     ScreenRect at;                  ///< the Tự Động picture
     float      score = 0.0f;
     AutoState  state = AutoState::Unknown;
-    /// The box against each look; -1 when it could not be compared.
+    /// The box against each look; -1 when it could not be compared. See
+    /// QuestBoxRead.
     float      on = -1.0f, off = -1.0f;
+    float      ring = -1.0f, inside = -1.0f, learned = -1.0f;
+    int        box_x = 0, box_y = 0;       ///< the box's top-left, by its frame
     int        click_x = 0, click_y = 0;   ///< GoC's point
 };
 
@@ -234,11 +321,23 @@ struct AutoOption {
 AutoOption find_auto_option(const Frame& f, const ScreenRect& window, const QuestPictures& p,
                             const QuestSettings& s);
 
-/// The box whose top-left is at `x`, `y`, give or take two pixels: on when it
-/// is like the ticked picture and by `state_margin` more than the other, off
-/// the other way round, and unknown otherwise.
-AutoState read_quest_box(const Frame& f, int x, int y, const QuestPictures& p,
-                         const QuestSettings& s, float& on, float& off);
+/// After GoBot's own click on a box it read as clear, what one frame says.
+struct QuestTickRead {
+    AutoOption  option;             ///< Tự Động as found in it, its box read as ever
+    bool        same_window = false;    ///< the window found where it was
+    bool        same_auto = false;      ///< Tự Động found where it was
+    /// Ticked by the change, no picture of a ticked box fitting: the window,
+    /// Tự Động and the box's frame where they were, and the clear box's inside
+    /// gone from it -- QuestSettings::off_drop.
+    bool        changed = false;
+    std::string why;                ///< when not: the check that failed, in English
+};
+
+/// Read `f` for that, `window` and `before` being where the window and Tự
+/// Động were when the box was read as clear. A box a picture says is ticked
+/// is option.state On, and not `changed`.
+QuestTickRead read_ticked_by_change(const Frame& f, const ScreenRect& window, const AutoOption& before,
+                                    const QuestPictures& p, const QuestSettings& s);
 
 /// How alike `tpl` is to the frame at `x`, `y`, in grey, over the picture's
 /// opaque pixels: -1 when it does not fit or either is flat. The best of
@@ -301,9 +400,20 @@ struct QuestResult {
     bool         looked = false;
     int          keys_pressed = 0;
     int          clicks = 0;
+    /// Refused because a point fell where nothing may be clicked -- GoBot
+    /// would not, rather than could not.
+    bool         refused_place = false;
     QuestWindow  window;
     AutoOption   before;            ///< Tự Động before any click
     AutoOption   after;             ///< and after the one click, when there was one
+    /// The box was taken for ticked by its change after the click, no
+    /// picture of a ticked box fitting it (read_ticked_by_change).
+    bool         by_change = false;
+    /// Then the box as the client drew it, cut where its frame is, for
+    /// QuestPictures::learn -- empty when it was not learnable -- and the
+    /// frame it was cut from, to keep.
+    Frame        learned_on;
+    Frame        ticked_frame;
     /// For NotNow and Refused: why, in Vietnamese.
     std::string  why;
     /// The whole round in one line of English, with its scores and points.
@@ -333,6 +443,12 @@ std::string quest_trouble_why(const QuestResult& r);
 /// whoever stopped it has taken over, and the potion is not kept waiting. The
 /// box is clicked at most once a round, and only once a look has shown it
 /// off. A window the player had open stays open.
+///
+/// When after the click no picture fits the box, the pointer goes back onto
+/// NV Phụ -- where it was when the box was read as clear -- and the box is
+/// read twice more, a moment apart: ticked by the change only when both say
+/// so and the box has not moved a pixel between them. Nothing is clicked for
+/// that, and a box still not sure is a failed click, never a second one.
 class QuestRound {
 public:
     /// What the round does to the game, one function each: the game's own

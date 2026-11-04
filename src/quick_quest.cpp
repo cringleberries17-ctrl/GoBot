@@ -252,7 +252,13 @@ void fill(QuestPictures& p, const QuestSettings& s, const PictureGetter& get) {
     Frame option;
     if (need(s.auto_option, option)) p.auto_option = with_hole(option, s.auto_box);
     need(s.box_on, p.box_on);
-    need(s.box_off, p.box_off);
+    if (need(s.box_off, p.box_off) && p.box_off.width >= 3 && p.box_off.height >= 3) {
+        // The frame finds the box whatever is in it; the inside says whether
+        // it is the clear one.
+        const ScreenRect within{ 1, 1, p.box_off.width - 2, p.box_off.height - 2 };
+        p.box_ring = with_hole(p.box_off, within);
+        p.box_inside = cut(p.box_off, within);
+    }
 
     Frame english;
     if (!s.window_en.empty() && may(s.window_en, english) && english.width == window.width &&
@@ -315,6 +321,58 @@ float likeness_at(const Frame& f, int x, int y, const Frame& tpl) {
     const double s = (sab - sa * sb / dn) / std::sqrt(va * vb);
     return std::isfinite(s) ? static_cast<float>(s) : -1.0f;
 }
+
+/// The best likeness of `tpl` within `radius` pixels of `x`, `y`, as
+/// quest_likeness, and the place it was first reached, from the top-left.
+float likeness_near(const Frame& f, int x, int y, const Frame& tpl, int radius, int& at_x, int& at_y) {
+    float best = -1.0f;
+    at_x = x;
+    at_y = y;
+    for (int dy = -radius; dy <= radius; ++dy)
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const float here = likeness_at(f, x + dx, y + dy, tpl);
+            if (here > best) {
+                best = here;
+                at_x = x + dx;
+                at_y = y + dy;
+            }
+        }
+    return best;
+}
+
+/// Whether `r` is the same in two frames of one size, grey for grey within
+/// `slack`: the box held still from one look to the next.
+bool same_pixels(const Frame& a, const Frame& b, const ScreenRect& r, double slack) {
+    if (!a.valid() || !b.valid() || a.width != b.width || a.height != b.height || !r.valid() ||
+        r.x < 0 || r.y < 0 || r.right() > a.width || r.bottom() > a.height)
+        return false;
+    for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * a.width + x) * 4;
+            if (std::abs(grey_at(&a.pixels[i]) - grey_at(&b.pixels[i])) > slack) return false;
+        }
+    return true;
+}
+
+/// Grey levels two looks at a box that holds still may differ by: none on the
+/// live client, which draws it the same every time; some for a capture that
+/// is not exact.
+constexpr double kStillSlack = 24.0;
+
+/// The box's inside cut from a picture of the whole box: the frame round it
+/// is one pixel.
+Frame inside_of(const Frame& box) {
+    if (!box.valid() || box.width < 3 || box.height < 3) return {};
+    return cut(box, ScreenRect{ 1, 1, box.width - 2, box.height - 2 });
+}
+
+/// The clear box's inside under this has changed: off_drop, never over the
+/// line a read takes the box for clear at, less the margin.
+float drop_line(const QuestSettings& s) { return std::min(s.off_drop, s.state_score - s.state_margin); }
+
+/// What every quest.ini said for forbid_buttons before 2026.11.03d: GoC's
+/// search area round the quick quest's buttons, which takes in Tự Động's box.
+constexpr ScreenRect kOldForbidButtons{ 283, 412, 103, 41 };
 
 /// The tab row at `window`: the worst of its tabs, each in its better look.
 float tab_row(const Frame& f, const ScreenRect& window,
@@ -448,6 +506,13 @@ bool QuestSettings::load(const std::string& path) {
     get_rect("layout", "forbid_abandon", s.forbid_abandon);
     get_rect("layout", "forbid_hide_low", s.forbid_hide_low);
     get_rect("layout", "forbid_buttons", s.forbid_buttons);
+    // The value every quest.ini had before 2026.11.03d -- GoC's search area
+    // round the buttons, which took in eleven columns of Tự Động's own box on
+    // the live client and refused every round -- is read as today's. Any
+    // other value is the player's, and kept. The file is left as it is.
+    if (s.forbid_buttons.x == kOldForbidButtons.x && s.forbid_buttons.y == kOldForbidButtons.y &&
+        s.forbid_buttons.w == kOldForbidButtons.w && s.forbid_buttons.h == kOldForbidButtons.h)
+        s.forbid_buttons = QuestSettings{}.forbid_buttons;
 
     get_name("pictures", "window", s.window);
     get_name("pictures", "window_en", s.window_en);
@@ -465,6 +530,7 @@ bool QuestSettings::load(const std::string& path) {
     get_float("scores", "auto", s.auto_score, 0.60f, 0.99f);
     get_float("scores", "state", s.state_score, 0.60f, 0.99f);
     get_float("scores", "state_margin", s.state_margin, 0.02f, 0.50f);
+    get_float("scores", "off_drop", s.off_drop, 0.10f, 0.70f);
 
     get_int("timing", "open_hold_ms", s.open_hold_ms, 10, 500);
     get_int("timing", "close_hold_ms", s.close_hold_ms, 10, 500);
@@ -551,6 +617,9 @@ bool QuestPictures::load_best(const QuestSettings& s, std::string* from) {
         if (p.load_dir(dir, s)) {
             *this = std::move(p);
             if (from) *from = dir;
+            // Learned on this machine, beside the program, whichever folder
+            // the rest came from.
+            load_learned(learned_file(), s);
             return true;
         }
         if (!tried) {
@@ -566,6 +635,50 @@ bool QuestPictures::load_best(const QuestSettings& s, std::string* from) {
         missing.push_back(s.window);
     }
     return false;
+}
+
+bool QuestPictures::learnable(const Frame& box, const QuestSettings& s, std::string* why) const {
+    const auto no = [why](const char* text) {
+        if (why) *why = text;
+        return false;
+    };
+    if (!box_off.valid() || !box_ring.valid() || !box_inside.valid())
+        return no("there is no picture of the clear box to go by");
+    if (!box.valid() || box.width != box_off.width || box.height != box_off.height)
+        return no("it is not the clear box's size");
+    for (std::size_t i = 3; i < box.pixels.size(); i += 4)
+        if (box.pixels[i] < TemplateMatcher::kOpaque) return no("part of it is see-through");
+    if (likeness_at(box, 0, 0, box_ring) < s.state_score) return no("the box's frame is not round it");
+    // Its inside matched against itself is 1 -- or -1 when it is flat, which
+    // nothing can be told by.
+    if (likeness_at(box, 1, 1, inside_of(box)) < 0.99f) return no("its inside is flat");
+    if (likeness_at(box, 1, 1, box_inside) > drop_line(s)) return no("its inside is like the clear box's");
+    return true;
+}
+
+bool QuestPictures::learn(const Frame& box, const QuestSettings& s) {
+    if (!learnable(box, s)) return false;
+    box_learned = box;
+    learned_inside = inside_of(box);
+    return true;
+}
+
+bool QuestPictures::load_learned(const std::string& file, const QuestSettings& s) {
+    box_learned = Frame{};
+    learned_inside = Frame{};
+    Frame f;
+    return !file.empty() && path_exists(file) && load_png(file, f) && learn(f, s);
+}
+
+bool QuestPictures::save_learned(const std::string& file, const Frame& box) {
+    if (file.empty() || !box.valid()) return false;
+    const auto slash = file.find_last_of("\\/");
+    if (slash != std::string::npos) make_folder(file.substr(0, slash));
+    return save_png(box, file);
+}
+
+std::string QuestPictures::learned_file() {
+    return TemplateStore::default_dir() + "\\grabbed\\quest_auto_on.png";
 }
 
 std::string quest_missing_vi(const QuestPictures& p) {
@@ -652,14 +765,64 @@ const char* auto_state_name(AutoState s) {
     }
 }
 
+QuestBoxRead read_quest_box(const Frame& f, int x, int y, const QuestPictures& p,
+                            const QuestSettings& s) {
+    QuestBoxRead b;
+    b.x = x;
+    b.y = y;
+    b.on = quest_likeness(f, x, y, p.box_on, 2);
+    b.off = quest_likeness(f, x, y, p.box_off, 2);
+    // The box by its frame alone, and its inside read just within that: the
+    // whole clear picture is mostly its frame, dark on two sides and light on
+    // two, and still scores over 0.80 with a thin tick in it, where the
+    // inside -- a dark ramp -- does not get past 0.40.
+    int fx = x, fy = y;
+    b.ring = likeness_near(f, x, y, p.box_ring, 2, fx, fy);
+    const float score = s.state_score, margin = s.state_margin;
+    const bool framed = b.ring >= score;
+    if (framed) {
+        b.x = fx;
+        b.y = fy;
+        b.inside = likeness_at(f, fx + 1, fy + 1, p.box_inside);
+        if (p.learned_inside.valid()) b.learned = likeness_at(f, fx + 1, fy + 1, p.learned_inside);
+    }
+    if (b.on >= score && b.on - b.off >= margin) {
+        b.state = AutoState::On;
+    } else if (framed && b.learned >= score && b.inside < score && b.learned - b.inside >= margin) {
+        // Like the ticked look learned on this machine, and not like the
+        // clear box.
+        b.state = AutoState::On;
+    } else if (framed && b.off >= score && b.off - b.on >= margin && b.inside >= score &&
+               b.inside - b.learned >= margin) {
+        // Clear by every measure: the only box a round clicks.
+        b.state = AutoState::Off;
+    }
+    return b;
+}
+
 AutoState read_quest_box(const Frame& f, int x, int y, const QuestPictures& p,
                          const QuestSettings& s, float& on, float& off) {
-    on = quest_likeness(f, x, y, p.box_on, 2);
-    off = quest_likeness(f, x, y, p.box_off, 2);
-    if (on >= s.state_score && on - off >= s.state_margin) return AutoState::On;
-    if (off >= s.state_score && off - on >= s.state_margin) return AutoState::Off;
-    return AutoState::Unknown;
+    const QuestBoxRead b = read_quest_box(f, x, y, p, s);
+    on = b.on;
+    off = b.off;
+    return b.state;
 }
+
+namespace {
+
+/// A box's reading into Tự Động's.
+void take_box(AutoOption& o, const QuestBoxRead& b) {
+    o.state = b.state;
+    o.on = b.on;
+    o.off = b.off;
+    o.ring = b.ring;
+    o.inside = b.inside;
+    o.learned = b.learned;
+    o.box_x = b.x;
+    o.box_y = b.y;
+}
+
+} // namespace
 
 AutoOption find_auto_option(const Frame& f, const ScreenRect& window, const QuestPictures& p,
                             const QuestSettings& s) {
@@ -677,10 +840,47 @@ AutoOption find_auto_option(const Frame& f, const ScreenRect& window, const Ques
     o.score = m.score;
     if (m.score < s.auto_score) return o;
     o.found = true;
-    o.state = read_quest_box(f, m.at.x + s.auto_box.x, m.at.y + s.auto_box.y, p, s, o.on, o.off);
+    take_box(o, read_quest_box(f, m.at.x + s.auto_box.x, m.at.y + s.auto_box.y, p, s));
     o.click_x = m.at.x + s.auto_click_x;
     o.click_y = m.at.y + s.auto_click_y;
     return o;
+}
+
+QuestTickRead read_ticked_by_change(const Frame& f, const ScreenRect& window, const AutoOption& before,
+                                    const QuestPictures& p, const QuestSettings& s) {
+    QuestTickRead t;
+    const auto no = [&t](const std::string& why) {
+        t.why = why;
+        return t;
+    };
+    if (!before.found || before.state != AutoState::Off)
+        return no("the box was not read as clear before the click");
+    // The same window, at the same place: nothing has come up over it, and
+    // nothing has moved it.
+    const QuestWindow w = find_quest_window(f, p, s);
+    if (!w.found || w.english || std::abs(w.at.x - window.x) > 1 || std::abs(w.at.y - window.y) > 1)
+        return no("the window is not where it was");
+    t.same_window = true;
+    // Tự Động where it was, found without its box: NV Phụ still up.
+    t.option = find_auto_option(f, w.at, p, s);
+    const AutoOption& o = t.option;
+    if (!o.found || std::abs(o.at.x - before.at.x) > 1 || std::abs(o.at.y - before.at.y) > 1)
+        return no(format("Tu Dong is not where it was (best %.2f)", static_cast<double>(o.score)));
+    t.same_auto = true;
+    if (o.state == AutoState::On) return no("a picture of a ticked box fits it");
+    if (o.state == AutoState::Off) return no("the box still reads clear");
+    // The box itself there, by its frame, where it was.
+    if (o.ring < s.state_score)
+        return no(format("the box's frame is not there (%.2f)", static_cast<double>(o.ring)));
+    if (std::abs(o.box_x - before.box_x) > 1 || std::abs(o.box_y - before.box_y) > 1)
+        return no("the box's frame is not where it was");
+    // And what was in it gone: the clear inside reads 1.00 on a clear box.
+    const float line = drop_line(s);
+    if (o.inside > line)
+        return no(format("its inside is still %.2f like the clear box's, over %.2f", static_cast<double>(o.inside),
+                         static_cast<double>(line)));
+    t.changed = true;
+    return t;
 }
 
 bool quest_click_ok(const ScreenRect& window, int x, int y, int client_w, int client_h,
@@ -803,7 +1003,11 @@ std::string quest_trouble_why(const QuestResult& r) {
         case QuestOutcome::NoAuto:       return "không thấy ô Tự Động trong thẻ NV Phụ";
         case QuestOutcome::UnknownState: return "không đọc được ô Tự Động đang bật hay tắt";
         case QuestOutcome::ClickFailed:  return "bấm ô Tự Động mà không thấy nó bật";
-        case QuestOutcome::Refused:      return "không bấm được vào cửa sổ Nhiệm Vụ";
+        case QuestOutcome::Refused:
+            // GoBot would not, or could not: a place it never clicks, or the
+            // input that did not go.
+            return r.refused_place ? "không dám bấm vào chỗ cần bấm trong cửa sổ Nhiệm Vụ"
+                                   : "không bấm được vào cửa sổ Nhiệm Vụ";
         case QuestOutcome::TooSlow:      return "quá lâu không xong";
         default: break;
     }
@@ -882,8 +1086,11 @@ std::string window_words(const QuestWindow& w) {
 }
 
 std::string box_words(const AutoOption& o) {
-    return format("%s (on %.2f / off %.2f)", auto_state_name(o.state), static_cast<double>(o.on),
-                  static_cast<double>(o.off));
+    std::string s = format("%s (on %.2f / off %.2f, inside %.2f, frame %.2f", auto_state_name(o.state),
+                           static_cast<double>(o.on), static_cast<double>(o.off),
+                           static_cast<double>(o.inside), static_cast<double>(o.ring));
+    if (o.learned >= -0.99f) s += format(", learned %.2f", static_cast<double>(o.learned));
+    return s + ")";
 }
 
 } // namespace
@@ -903,6 +1110,7 @@ bool QuestRound::click(QuestResult& r, const ScreenRect& window, int x, int y, c
     if (r.clicks >= 2) {
         why = "this round has clicked twice already";
         r.why = "lần này đã bấm hai lần rồi";
+        r.refused_place = true;
     } else if (quest_click_ok(window, x, y, client_w_, client_h_, settings_, &why, &why_vi)) {
         ok = hands_.click && hands_.click(x, y);
         if (!ok && halted()) {
@@ -918,6 +1126,7 @@ bool QuestRound::click(QuestResult& r, const ScreenRect& window, int x, int y, c
         }
     } else {
         r.why = "chỗ cần bấm " + why_vi;
+        r.refused_place = true;
     }
     if (ok) {
         ++r.clicks;
@@ -1013,7 +1222,13 @@ QuestResult QuestRound::run() {
     // unless a halt comes meanwhile, which is then what became of the round.
     const auto fail = [&](QuestOutcome o, const std::string& why_en) {
         if (!why_en.empty()) note(r, why_en);
-        if (!close(r)) r.outcome = o;
+        // The frame kept is the one that went wrong: close() looks again, and
+        // its frame -- the window shut -- shows nothing of it.
+        Frame wrong = r.last;
+        if (!close(r)) {
+            r.outcome = o;
+            if (wrong.valid()) r.last = std::move(wrong);
+        }
     };
 
     if (!pictures_.ready()) {
@@ -1179,15 +1394,91 @@ QuestResult QuestRound::run() {
         r.after = again;
     } else {
         r.after = r.before;
-        r.after.state = read_quest_box(f, r.before.at.x + settings_.auto_box.x,
-                                       r.before.at.y + settings_.auto_box.y, pictures_, settings_,
-                                       r.after.on, r.after.off);
+        take_box(r.after, read_quest_box(f, r.before.at.x + settings_.auto_box.x,
+                                         r.before.at.y + settings_.auto_box.y, pictures_, settings_));
+    }
+    if (r.after.state == AutoState::Unknown) {
+        // No picture fits the box now, and it no longer reads as clear: the
+        // client may draw a ticked box in a look GoC's picture does not have.
+        // Read again -- with the pointer back on NV Phụ, where it was when the
+        // box read as clear, so that nothing it hovers over changes the look
+        // -- twice, a moment apart. Only a move; nothing is clicked for it.
+        note(r, "-> " + box_words(r.after) + "; read again with the pointer on NV Phu");
+        if (!may_go_on()) return r;
+        if (hands_.move) hands_.move(win.x + settings_.tab_click_x, win.y + settings_.tab_click_y);
+        if (!wait(settings_.hover_wait_ms)) {
+            set_halted(r, "");
+            return r;
+        }
+        Frame first;
+        if (!look(first)) {
+            fail(QuestOutcome::ClickFailed, "could not capture the game after the click");
+            return r;
+        }
+        r.last = first;
+        const QuestTickRead one = read_ticked_by_change(first, win, r.before, pictures_, settings_);
+        if (one.same_auto && one.option.state == AutoState::On) {
+            // A picture fits, the pointer off it.
+            r.after = one.option;
+        } else if (!one.changed) {
+            if (one.option.found) r.after = one.option;
+            fail(QuestOutcome::ClickFailed, "-> not sure it is on: " + one.why);
+            return r;
+        } else {
+            // Changed: the same again a moment later, pixel for pixel, before
+            // it is taken for ticked -- a box caught mid-way is not.
+            if (!wait(settings_.hover_wait_ms)) {
+                set_halted(r, "");
+                return r;
+            }
+            Frame second;
+            if (!look(second)) {
+                fail(QuestOutcome::ClickFailed, "could not capture the game after the click");
+                return r;
+            }
+            r.last = second;
+            const QuestTickRead two = read_ticked_by_change(second, win, r.before, pictures_, settings_);
+            const ScreenRect box{ two.option.box_x, two.option.box_y, pictures_.box_off.width,
+                                  pictures_.box_off.height };
+            const bool still = two.changed && two.option.box_x == one.option.box_x &&
+                               two.option.box_y == one.option.box_y &&
+                               same_pixels(first, second, box, kStillSlack);
+            if (!still) {
+                if (two.option.found) r.after = two.option;
+                fail(QuestOutcome::ClickFailed,
+                     "-> not sure it is on: " +
+                         (two.changed ? std::string("the box did not hold still from one look to the next")
+                                      : two.why));
+                return r;
+            }
+            r.after = two.option;
+            r.after.state = AutoState::On;
+            r.by_change = true;
+            r.ticked_frame = second;
+            std::string why_not;
+            Frame cutout = cut(second, box);
+            // Opaque, as seen: a capture may leave the alpha byte at nought,
+            // which would read as see-through.
+            for (std::size_t i = 3; i < cutout.pixels.size(); i += 4) cutout.pixels[i] = 255;
+            if (pictures_.learnable(cutout, settings_, &why_not)) r.learned_on = std::move(cutout);
+            note(r, format("-> on by the change: the clear box's inside %.2f (it was %.2f), its frame %.2f, "
+                           "the window and Tu Dong where they were, the same on two looks",
+                           static_cast<double>(two.option.inside), static_cast<double>(r.before.inside),
+                           static_cast<double>(two.option.ring)) +
+                        (r.learned_on.valid() ? std::string("; its look learned")
+                                              : "; its look not learned: " + why_not));
+        }
     }
     if (r.after.state != AutoState::On) {
         fail(QuestOutcome::ClickFailed, "-> not on: " + box_words(r.after));
         return r;
     }
-    note(r, format("-> on (%.2f)", static_cast<double>(r.after.on)));
+    if (!r.by_change) {
+        // GoC's picture, or the look learned here.
+        const bool goc = r.after.on >= settings_.state_score && r.after.on - r.after.off >= settings_.state_margin;
+        note(r, goc ? format("-> on (%.2f)", static_cast<double>(r.after.on))
+                    : format("-> on (learned %.2f)", static_cast<double>(r.after.learned)));
+    }
     if (!close(r)) r.outcome = QuestOutcome::TurnedOn;
     return r;
 }
@@ -1246,7 +1537,9 @@ QuestProbe probe_quest(const Frame& f, const QuestPictures& p, const QuestSettin
                         : o.state == AutoState::Off ? "đang tắt"
                                                     : "không rõ bật hay tắt";
     out.vi += " Thấy ô Tự Động ở " + where(o.at) + " (giống " + percent(o.score) + "): " + state +
-              " (giống ô bật " + percent(o.on) + ", ô tắt " + percent(o.off) + ").";
+              " (giống ô bật " + percent(o.on) + ", ô tắt " + percent(o.off) + ", lòng ô tắt " +
+              percent(o.inside) +
+              (p.box_learned.valid() ? ", ô bật GoBot đã học " + percent(o.learned) : std::string()) + ").";
     out.log += format("; Tu Dong at %s (%.3f): ", where(o.at).c_str(),
                       static_cast<double>(o.score)) +
                box_words(o);

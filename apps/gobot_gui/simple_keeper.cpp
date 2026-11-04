@@ -119,6 +119,11 @@ GuiApp::KeeperWake GuiApp::keeper_wake(CrashWatch::Move move, CrashWatch& watch,
     if (!ui.stall.check(input_.target_window(), watch_settings.game_process, held, login, store, now_ms(),
                         seen, exe_relative("keeper_debug")))
         return KeeperWake::None;
+    // What the packets had of the link meanwhile, beside the screen's verdict:
+    // only written down (the packets plan, item I). After a few stalls and
+    // logins agree, a later plan may let the packets hold a restart back.
+    GB_INFO("Keeper: the screen saw nobody in the world for %d min; the packets: %s", seen.minutes,
+            packet_link_text(now_ms()).c_str());
     return KeeperWake::Stalled;
 }
 

@@ -257,6 +257,9 @@ Hunter::Eyes PacketEyes::eyes() {
     e.mobs = [this] { return mobs(); };
     e.view = [this] { return view(); };
     e.where = [this](WorldFix& out) { return where(out); };
+    // For the hunter's drops: the monsters' stops, and your take-offs.
+    e.stands = [this] { return stands(); };
+    e.takeoffs = inputs_.takeoffs;
     return e;
 }
 
@@ -266,7 +269,16 @@ bool PacketEyes::where(WorldFix& out) {
     return fix_on_;
 }
 
+std::vector<MapTrust::Mob> PacketEyes::stands() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stands_;
+}
+
 std::uint64_t PacketEyes::clock() const { return inputs_.now ? inputs_.now() : now_ms(); }
+
+// A hand-over to the screen is over long before the packets could steer again.
+static_assert(PacketEyes::kHandOverMs < PacketEyes::kHealthyForMs,
+              "a hand-over ends before the packets have been healthy long enough to take over again");
 
 std::uint64_t PacketEyes::frame() {
     // Asked before the lock: the config is the hunter's, under its own lock,
@@ -278,6 +290,10 @@ std::uint64_t PacketEyes::frame() {
     const PacketLink link = watched && inputs_.link ? inputs_.link() : PacketLink{};
     int w = 0, h = 0;
     const bool sized = watched && inputs_.view_size && inputs_.view_size(w, h) && w > 0 && h > 0;
+    // The detector's count of pictures, under its own lock, at every pass
+    // whatever steers: a switch back to the screen goes by how long ago it
+    // last moved on, and a hand-over by its moving on since (kHandOverMs).
+    const std::uint64_t pictures = screen_.frame ? screen_.frame() : 0;
 
     bool from_packets = false;
     std::uint64_t number = 0;
@@ -297,6 +313,11 @@ std::uint64_t PacketEyes::frame() {
             box_w_ = w;
             box_h_ = h;
         }
+        if (pictures != pictures_ || picture_new_ms_ == 0) {
+            if (picture_new_ms_ != 0 && pictures != pictures_) picture_gap_ms_ = age(picture_new_ms_, now);
+            pictures_ = pictures;
+            picture_new_ms_ = now;
+        }
 
         // One view of the world for the whole pass: you and the monsters from
         // the same moment, whatever the pass asks for after this. Judged as if
@@ -308,6 +329,7 @@ std::uint64_t PacketEyes::frame() {
         // the same view, the packets steering or only watched.
         fix_ = WorldFix{};
         fix_on_ = watched;
+        stands_.clear();
         if (watched) {
             // A walk of yours the hunter holds is followed 3 s with no report;
             // any other, 0.6 s, as every walk was before the held walk.
@@ -318,6 +340,18 @@ std::uint64_t PacketEyes::frame() {
             const PacketWorld::Stats s = world_.stats();
             health = packet_health(v, s, link, judged, now);
             fix_ = world_fix(v, s, link, now);
+            // The monsters standing where their frame put them: a stop's
+            // speed is 0, a walk's and a blow's are not, and a walk run out
+            // keeps its speed with a place worked out.
+            for (const PacketWorld::Mob& m : v.mobs) {
+                if (stands_.size() >= kStandsMax) break;
+                if (m.dead || m.moving || m.speed > 0.0f) continue;
+                MapTrust::Mob st;
+                st.at = { static_cast<int>(std::lround(m.x)), static_cast<int>(std::lround(m.y)) };
+                st.slot = m.slot;
+                st.at_ms = m.event_ms;
+                stands_.push_back(st);
+            }
         }
         was_healthy_ = health.ok;
 
@@ -329,12 +363,31 @@ std::uint64_t PacketEyes::frame() {
             healthy_ = false;
             if (source_.load() == Source::Packets) {
                 source_ = Source::Screen;
-                ++view_;
                 ++switches_;
+                // The detector may have been resting while the packets
+                // steered, and its last picture be as old as its rest: the
+                // hunter keeps the packets' last plates, in their view, until
+                // it has one taken since (kHandOverMs). With pictures at its
+                // own pace, the screen's plates at once, in another view. While
+                // it rests, at once only with a picture no older than one at
+                // its own pace would be: a walk moves the plates on meanwhile.
+                const std::uint64_t fresh = picture_gap_ms_ > kScreenFreshMs
+                                                ? static_cast<std::uint64_t>(MobDetector::kLookGapMs)
+                                                : kScreenFreshMs;
+                const bool hand_over = age(picture_new_ms_, now) > fresh;
+                if (hand_over) {
+                    handing_over_ = true;
+                    handover_from_ms_ = now;
+                    handover_pictures_ = pictures;
+                    ++handovers_;
+                } else {
+                    ++view_;
+                }
                 const PacketWhy reason = cfg.packet_positions == PacketPositions::On      ? health.why
                                          : cfg.packet_positions == PacketPositions::Watch ? PacketWhy::Watch
                                                                                           : PacketWhy::Off;
-                GB_INFO("Positions: from the screen now -- %s", packet_why_name(reason));
+                GB_INFO("Positions: from the screen now -- %s%s", packet_why_name(reason),
+                        hand_over ? "; the packets' last plates kept until the detector's next picture" : "");
             }
         } else {
             if (!healthy_) {
@@ -350,6 +403,26 @@ std::uint64_t PacketEyes::frame() {
             }
         }
 
+        // A hand-over ends at the detector's count two past its count at the
+        // switch -- a picture taken wholly after it -- or kHandOverMs on: the
+        // screen's plates from this pass, in another view.
+        if (handing_over_.load()) {
+            const bool newer = pictures > handover_pictures_ + 1;
+            const std::uint64_t held = age(handover_from_ms_, now);
+            if (newer || held >= kHandOverMs) {
+                handing_over_ = false;
+                ++view_;
+                handover_ms_ += held;
+                if (!newer) ++handovers_capped_;
+                if (newer)
+                    GB_INFO("Positions: the screen's plates from now -- the detector's first picture since the "
+                            "switch, %llu ms after it", static_cast<unsigned long long>(held));
+                else
+                    GB_INFO("Positions: the screen's plates from now -- no picture since the switch came within "
+                            "%llu ms", static_cast<unsigned long long>(kHandOverMs));
+            }
+        }
+
         PacketWhy reason = health.why;
         if (source_.load() == Source::Packets)                    reason = PacketWhy::InUse;
         else if (cfg.packet_positions == PacketPositions::Off)    reason = PacketWhy::Off;
@@ -362,6 +435,12 @@ std::uint64_t PacketEyes::frame() {
             make_plates(v, cfg, now);
             from_packets = true;
             number = v.updates;
+            packet_number_ = number;
+        } else if (handing_over_.load()) {
+            // The packets' last plates as they were, and their number: no new
+            // picture for the hunter until the screen has a fresh one.
+            from_packets = true;
+            number = packet_number_;
         }
     }
     // The screen's own count, outside the lock: the detector's, under its own.
@@ -416,16 +495,31 @@ void PacketEyes::make_plates(const PacketWorld::View& v, const HunterConfig& cfg
         if (std::abs(x - me_.x()) > half_w || std::abs(y - me_.y()) > half_h) continue;
         Nameplate n = packet_plate(x, y);
         n.hp = hp;
+        // Which monster it is, for the hunter's hold on its target: its slot
+        // and the slot's generation, which a respawn changes. And its blows:
+        // when you last hurt it, and whether another player has since --
+        // within kOthersHurtMs, and only once your id has been proven the
+        // hitter's (View::actor_checked).
+        constexpr std::uint64_t kOthersHurtMs = 5000;
+        n.slot = static_cast<std::int32_t>(m.slot);
+        n.gen = m.gen;
+        n.hurt_ms = m.hurt_by_you_ms;
+        n.actor_checked = v.actor_checked;
+        n.hurt_by_other = v.actor_checked && m.hurt_by_other_ms > m.hurt_by_you_ms &&
+                          age(m.hurt_by_other_ms, now) < kOthersHurtMs;
         mobs_.push_back(std::move(n));
     }
     MobDetector::nearest_first(mobs_, me_.x(), me_.y());
 }
 
 bool PacketEyes::player(Nameplate& out, bool* fresh) {
-    if (source_.load() == Source::Packets) {
+    // Through a hand-over, the packets' last plate of you: where you were a
+    // moment ago, not seen just now.
+    const bool handing = handing_over_.load();
+    if (source_.load() == Source::Packets || handing) {
         std::lock_guard<std::mutex> lock(mutex_);
         out = me_;
-        if (fresh) *fresh = me_fresh_;
+        if (fresh) *fresh = me_fresh_ && !handing;
         return true;
     }
     if (screen_.player) return screen_.player(out, fresh);
@@ -434,7 +528,7 @@ bool PacketEyes::player(Nameplate& out, bool* fresh) {
 }
 
 std::vector<Nameplate> PacketEyes::mobs() {
-    if (source_.load() == Source::Packets) {
+    if (source_.load() == Source::Packets || handing_over_.load()) {
         std::lock_guard<std::mutex> lock(mutex_);
         return mobs_;
     }
@@ -448,8 +542,10 @@ void PacketEyes::restart() {
     passed_ = false;
     mobs_.clear();
     // Another frame of reference than the hunter may last have seen: moved,
-    // so a hunter that holds anything from before lets go of it.
-    if (source_.load() == Source::Packets) {
+    // so a hunter that holds anything from before lets go of it -- the
+    // packets' plates kept through a hand-over among them.
+    const bool handing = handing_over_.exchange(false);
+    if (source_.load() == Source::Packets || handing) {
         source_ = Source::Screen;
         ++view_;
     }
@@ -461,7 +557,43 @@ PacketEyes::Stats PacketEyes::stats() const {
     s.screen_ms = screen_ms_.load();
     s.healthy_ms = healthy_ms_.load();
     s.switches = switches_.load();
+    s.handovers = handovers_.load();
+    s.handovers_capped = handovers_capped_.load();
+    s.handover_ms = handover_ms_.load();
     return s;
+}
+
+// ------------------------------------------------------ the detector's pace
+
+// While it rests, your plate is looked for every kRestMs, and a look's time
+// on top: remembered longer than that (MobDetector::player), it is not lost
+// between two looks -- which is what the first assert proves. "Cannot find"
+// waits as many looks as it did at kLookGapMs (MobDetector::sightings_grace_ms),
+// not as many seconds.
+static_assert(MobDetector::kPlayerMemoryMs > static_cast<std::uint64_t>(DetectorPace::kRestMs) + 400,
+              "your plate is remembered across the gap between a resting detector's looks");
+static_assert(DetectorPace::kRunMs == MobDetector::kLookGapMs && DetectorPace::kRestMs > DetectorPace::kRunMs &&
+                  DetectorPace::kRestMs <= MobDetector::kMaxPeriodMs,
+              "the detector rests at a longer wait than its own, and one it can be asked for");
+
+bool detector_rest(const DetectorPace& p, const char** why) {
+    const char* no = "";
+    if (!p.hunting)
+        no = "no hunt";
+    else if (p.source != PacketEyes::Source::Packets || p.why != PacketWhy::InUse)
+        no = "the screen steers again";
+    else if (p.jump_test)
+        no = "a jump key's Thử watches your plate";
+    else if (p.monster_look)
+        no = "Quái đang thấy reads the plates";
+    else if (p.camera_panels)
+        no = "the Radar or the movement panels are open";
+    else if (p.walking)
+        no = "a walk follows the camera";
+    else if (p.rest_off)
+        no = "detector_rest=off in app.ini [Packets]";
+    if (why) *why = no;
+    return *no == '\0';
 }
 
 // ------------------------------------------------------- watching the two
@@ -589,16 +721,22 @@ bool should_reattach(const GameLink& before, const GameLink& now, std::uint64_t 
         if (why) *why = reason;
         return true;
     };
-    if (since_try_ms < GameLink::kReattachEveryMs) return false;
+    if (since_try_ms < GameLink::kReattachNewMs) return false;
     // No game, or a game with no connection -- its login pages, a reconnect
     // under way: nothing to build a capture from yet.
     if (now.pid == 0 || now.servers.empty()) return false;
+    // A new game, or a new connection, a second after the last start: the
+    // map entry that comes with it is the one look at the map there is.
     if (now.pid != before.pid) return because("the game's process changed");
     // Only what is new: a connection or a socket gone is still in the filter,
     // where it does no harm, and the game's own come and go.
     for (const Endpoint& e : now.servers)
         if (std::find(before.servers.begin(), before.servers.end(), e) == before.servers.end())
             return because("the game has a connection the capture was not built with");
+    // The rest no sooner than kReattachEveryMs: a UDP socket opened later
+    // costs nothing but the reports it carries, and a quiet TCP may only be
+    // quiet.
+    if (since_try_ms < GameLink::kReattachEveryMs) return false;
     for (const std::uint16_t port : now.udp_ports)
         if (std::find(before.udp_ports.begin(), before.udp_ports.end(), port) == before.udp_ports.end())
             return because("the game has a UDP port the capture was not built with");

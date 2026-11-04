@@ -30,7 +30,10 @@
 #include "gobot/opcode_registry.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/packet_eyes.hpp"
+#include "gobot/packet_self.hpp"
 #include "gobot/packet_world.hpp"
+#include "gobot/frame_tally.hpp"
+#include "gobot/one_worker.hpp"
 #include "gobot/pathfinder.hpp"
 #include "gobot/protocol_analyzer.hpp"
 #include "gobot/protocol_handler.hpp"
@@ -55,6 +58,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -816,6 +820,11 @@ private:
     /// "Vị trí từ gói tin" is ticked and the packets are healthy. Declared
     /// before the hunter, so that it outlives it.
     std::unique_ptr<PacketEyes> packet_eyes_;
+    /// The game's own map files -- floors and gates -- for the hunter's drops
+    /// (HunterConfig::drop_down), read on its thread at a map's first need.
+    /// Not map_book_, the minimap's names typed by hand. Before the hunter,
+    /// which reads it from its thread, so that it outlives it.
+    GameMapBook             game_maps_;
     std::unique_ptr<Hunter> hunter_;
     HunterConfig            hunt_config_;
     bool                    detector_running_ = false;
@@ -985,21 +994,26 @@ private:
     void push_framings();
 
     // ---- positions from the packets ("Vị trí từ gói tin") ----
-    /// The capture the positions come from, started by start_hunt whenever
-    /// packet_positions is not Off: the game's own TCP and UDP, by its
-    /// process (its window's), with every frame unpacked and none filtered
-    /// out. A capture already running -- the Protocol tab's, Autopilot's, the
-    /// packet bot's -- is used as it is. One that will not start is said once
-    /// in the log, and the hunt goes on from the screen.
+    /// The capture the positions come from, running all session whenever
+    /// packet_positions is not Off -- asked for again by start_hunt: the
+    /// game's own TCP and UDP, by its process (its window's), with every
+    /// frame unpacked and none filtered out. A capture already running -- the
+    /// Protocol tab's, Autopilot's, the packet bot's -- is used as it is.
+    /// Otherwise the start is posted to capture_worker_ (position_job); one
+    /// that will not start is said once in the log, and the hunt goes on from
+    /// the screen.
     void start_position_capture();
-    /// Stops the capture start_position_capture started, unless the packet
-    /// bot, Autopilot, a recording or the calibration is using it now: then
-    /// it stays, and positions_tick stops it once they are done. Never one
-    /// somebody else started.
+    /// Stops the capture start_position_capture started -- on capture_worker_
+    /// -- unless the packet bot, Autopilot, a recording or the calibration is
+    /// using it now: then it stays, and positions_tick stops it once they are
+    /// done. Never one somebody else started. Only once the packets are not
+    /// wanted (packets_wanted): a hunt's end leaves it running.
     void stop_position_capture();
-    /// From tick(): while hunting with packet_positions not Off, a comparison
-    /// a second, the "Positions" line every 10 s, and the capture kept
-    /// attached; the capture stopped once hunting is not.
+    /// From tick(), all session while the packets are wanted: the capture
+    /// kept attached, its map entries and gaps said, the "Packets:" line
+    /// every minute; and while hunting, a comparison a second and the
+    /// "Positions" line every 10 s. The capture stopped once they are not
+    /// wanted.
     void positions_tick();
     /// One look at the packets beside the screen, for the next line.
     void packet_watch_sample(std::uint64_t now);
@@ -1025,9 +1039,10 @@ private:
     int on_place(std::uint16_t map, std::uint16_t area, float x, float y);
     /// The capture started again when the game's process, connections or UDP
     /// ports change, or its TCP goes quiet on it (should_reattach); one that
-    /// would not start is tried again, at most every 10 s -- and one the
+    /// would not start is tried again at the next look -- and one the
     /// capture itself refused, only for a new game link or after
-    /// position_backoff_ms_.
+    /// position_backoff_ms_. Posts a job to capture_worker_ and never waits
+    /// for it: the job looks and decides.
     void position_reattach(std::uint64_t now);
     /// Say `what` in the log, unless it was the last thing said about the
     /// capture for positions: a capture that cannot start is said once.
@@ -1039,7 +1054,7 @@ private:
 
     bool          position_capture_ = false;    ///< the running capture is the one started for positions
     /// The capture was stopped by hand (stop_capture): not started again for
-    /// positions until the next hunt starts.
+    /// positions until the next hunt starts, or the Capture tab's Start.
     bool          position_capture_off_ = false;
     /// What the last start found of Npcap, for the reason PacketEyes gives.
     std::atomic<bool> position_npcap_ok_{true};
@@ -1070,6 +1085,111 @@ private:
     std::vector<ViewComparison> packet_looks_;  ///< since the last line
     std::vector<int>            packet_target_gaps_;   ///< |dx from packets - dx from the screen|, the target's
     PacketEyes::Stats           packet_eyes_seen_{};   ///< PacketEyes' stats at the last line
+
+    // ---- the game's packets, all session (packets plan) ----
+    // Slice 1 -- gui_app.cpp, packets_watch.cpp
+    /// The capture for positions runs from GoBot's start to its close, hunt
+    /// or no hunt, unless packet_positions is Off or the capture was stopped
+    /// by hand (packets_wanted). Everything that starts or stops it, or looks
+    /// at Windows' socket tables, Npcap's service or the adapters for it, runs
+    /// on capture_worker_ (position_job), never on this thread, which reads
+    /// F10, F11 and F12; what a job found is applied here (position_started).
+    PacketSelf      packet_self_;
+    FrameTally      frame_tally_;
+    PacketsSettings packets_settings_;
+    OneWorker       capture_worker_{"capture-jobs"};     // capture starts, socket looks: never on this thread
+    /// What a job is given: the game by its window, or -- while the keeper
+    /// crosses, the window not yet the new game's -- by its process's name;
+    /// the link the running capture was built from, and how things stand.
+    struct PositionJobIn {
+        void* window = nullptr; std::string process;      // the game by its window, or by name while the keeper crosses
+        GameLink before; std::uint64_t since_try = 0, silent = 0, backoff = 0;
+        bool running = false, failed = false, stop_first = false;
+    };
+    /// What a job found and did: whether it tried a start, and how that went.
+    struct PositionJobOut {
+        bool tried = false, started = false, refused = false, kept_world = false, npcap = true;
+        GameLink link; std::size_t conns = 0; std::string iface, said, why; std::uint64_t took_ms = 0;
+    };
+    std::mutex                    position_out_mutex_;
+    std::optional<PositionJobOut> position_out_;
+    std::map<std::string, std::string> iface_by_ip_;      // the worker's only
+    std::uint64_t  npcap_absent_until_ms_ = 0;             // the worker's only
+    std::uint64_t  packets_minute_ms_ = 0, frames_line_ms_ = 0, capture_starts_seen_ = 0;
+    bool           silence_restart_armed_ = true;
+    PacketCapture::Stats capture_seen_{};
+    PacketWorld::Stats   hunt_world_seen_{};               // the Positions line counts from HUNT ON
+    std::uint16_t  entry_from_map_ = 0, entry_from_area_ = 0;
+    /// The wall-clock time the capture running now was started, as the log
+    /// writes it, for the "Packets:" line; and the last line's content, so
+    /// that a minute with nothing new writes none.
+    std::string    capture_since_, packets_said_;
+    /// Since when every look has found nothing to capture -- no Npcap, no
+    /// game, no connection -- for the game of position_idle_pid_ (0: none);
+    /// 0 while there is something. After kPositionIdleLooksMs of it the game
+    /// is looked for every five seconds, not every one (position_attaching).
+    std::uint64_t  position_idle_since_ms_ = 0;
+    std::uint32_t  position_idle_pid_ = 0;
+    static constexpr std::uint64_t kPositionIdleLooksMs = 120'000;
+    /// hunt.ini's packet_positions is Off, as GoBot's thread last read it:
+    /// nothing at all from the packets, whoever captures. The vitals' and the
+    /// bag's uses read it on any thread.
+    std::atomic<bool> packets_off_{false};
+    bool packets_wanted() const;
+    /// Whether the capture is still being attached: none runs -- for two
+    /// minutes of nothing to capture, and not while a refused start backs off
+    /// -- or none has had a report of yours within 5 min of its start, or the
+    /// keeper is crossing. The game is then looked at every second, not every
+    /// five.
+    bool position_attaching(std::uint64_t now);
+    /// A job's input as things stand now.
+    PositionJobIn position_job_in(std::uint64_t now);
+    void position_job(const PositionJobIn& in);            // on capture_worker_
+    void position_started(const PositionJobOut& out);      // on GoBot's thread
+    /// The result of the job that has finished, if one has: taken.
+    std::optional<PositionJobOut> take_position_out();
+    void packets_minute(std::uint64_t now);
+    void note_capture_gaps(std::uint64_t now);
+    std::string packet_link_text(std::uint64_t now) const;
+    void say_traffic_lost();
+    // Slice 3 -- packets_vitals.cpp
+    struct VitalsPart; struct VitalsPartFree { void operator()(VitalsPart*) const; };
+    std::unique_ptr<VitalsPart, VitalsPartFree> vitals_part_;
+    std::atomic<std::uint64_t> death_seen_ms_{0};
+    float         hp_percent_now() const;                  // any thread; the packets' when usable, else the bars'
+    float         mp_percent_now() const;                  // any thread; likewise
+    bool          capture_on_window() const;               // any thread; the positions' capture, on the game window's
+    void          vitals_check_tick(std::uint64_t now);
+    SelfVitals    gate_vitals(std::uint64_t now);          // the potions' HP and MP from the packets; -1 for none
+    bool          packet_map_loading(std::uint64_t now) const;   // a hold added while a map loads
+    std::uint64_t in_world_window_ms() const;              // kOutOfWorldAfterMs, wider while the reader rests
+    int           vitals_pace() const;                     // the reader's period: idle, the run's or resting
+    std::string   packet_vitals_text() const;
+    void          note_vitals_minute(std::uint64_t now);
+    // Slice 4 -- packets_bag.cpp
+    struct BagPart; struct BagPartFree { void operator()(BagPart*) const; };
+    std::unique_ptr<BagPart, BagPartFree> bag_part_;
+    void bag_check_tick(std::uint64_t now);
+    void bag_note_hotbar(std::uint32_t vk, int count, std::uint64_t at);
+    bool bag_low_count(std::uint32_t vk, int& total, std::uint32_t& item) const;
+    bool bag_says_enough(int hp_below, int mp_below, int& hp_slots, int& mp_slots) const;   // any thread
+    void bag_note_shop(int hp_slots_screen, int mp_slots_screen, bool skipped, std::uint64_t at);  // any thread
+    std::string bag_charm_text(const std::string& clock_id, std::uint64_t claimed_at) const;
+    // any thread; the packets' bag on a charm's slot before its right-click -- it can only stop one
+    BagCleaner::PacketSays bag_charm_slot(const std::string& colour_id, int slot, int count, std::string& said) const;
+    void note_bag_minute(std::uint64_t now);
+    // Slice 5 -- packets_more.cpp
+    struct MorePart; struct MorePartFree { void operator()(MorePart*) const; };
+    std::unique_ptr<MorePart, MorePartFree> more_part_;
+    void more_on_packets(const std::vector<GamePacket>& all);    // capture thread
+    void more_tick(std::uint64_t now);
+    void note_casts_minute(std::uint64_t now);
+    std::optional<std::uint64_t> packet_takeoffs() const;        // M; any thread
+    // Slice 2 -- gui_app.cpp tick()
+    std::uint32_t map_epoch_seen_ = 0; std::uint64_t minimap_overruled_ = 0;
+    // Slice 6 -- packets_detector.cpp
+    int  detector_period_ms_ = 0;
+    void detector_pace_tick(std::uint64_t now);
 
     // ---- UI state ----
     bool quit_ = false;
@@ -1501,6 +1621,30 @@ private:
     /// Whether the game was the window in front at the last tick: losing it
     /// lets go of every key held there (tick).
     bool              game_was_front_ = false;
+    /// When tick() last sent a drop's owed ↓-up or Ctrl-up again: at most
+    /// every 100 ms (InputManager::settle_owed).
+    std::uint64_t     owed_look_ms_ = 0;
+
+    // ---- the hunter's drop through a platform (HunterConfig::drop_down) ----
+    // Its map files are game_maps_, beside the hunter.
+    /// What GoBot says against a drop, for the hunter's thread: worked out at
+    /// every tick from what only this thread may read -- the macro held, a
+    /// navigator walk, the keeper crossing, one of GoBot's own keys on Ctrl
+    /// or ↓ -- as one of DropVeto's codes; and whether HP is being read.
+    enum DropVeto : int { kDropVetoNone, kDropVetoMacro, kDropVetoWalk, kDropVetoKeeper, kDropVetoHotkey };
+    std::atomic<int>  drop_veto_{ kDropVetoNone };
+    std::atomic<bool> drop_hp_watch_{ false };
+    /// The hunter's veto (Hunter::set_drop_veto): tick()'s code, and HP under
+    /// the chat's floor -- or not known while a HP potion key is on. Any
+    /// thread: atomics and hp_percent_now() only.
+    const char* drop_veto_now() const;
+    /// Once a tick: the veto's code, and a hunt the drop wants stopped -- the
+    /// map changed after a press (drop_down unticked and saved), or a drop's
+    /// key-up stuck -- stopped, said in red until the next start.
+    void drop_tick();
+    /// Why the drop has stopped the hunt, in red under its tick until the
+    /// next start of the hunt; "" for none.
+    std::string       drop_stopped_vi_;
     /// The last "this key is one GoBot presses itself" said, and when: said
     /// again only when it changes, or ten minutes on.
     std::string       hotkey_taken_said_;
@@ -1720,6 +1864,11 @@ private:
     void simple_jump_box();             ///< "Phím nhảy [k] [Thử]", beside "Phím đánh"
     void simple_style_line();           ///< "Kiểu đánh [▼] (?) [Tầm đánh…]"
     void simple_keep_distance_tick();   ///< "Giữ khoảng cách", beside "Đứng yên một chỗ"
+    void simple_drop_tick();            ///< "Nhảy xuống bậc dưới", after "Vị trí từ gói tin"
+    void simple_drop_hints();           ///< its lines under the row
+    /// Why "Nhảy xuống bậc dưới" cannot be ticked now, in Vietnamese: "" when
+    /// it can.
+    std::string simple_drop_refusal_vi();
     void simple_style_hints();          ///< their lines under the row
     void simple_jump_checklist();       ///< the jump key's line in "Trước khi bắt đầu"
     void simple_style_popups();         ///< the "Tầm đánh" window, when asked for

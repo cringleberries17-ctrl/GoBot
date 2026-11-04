@@ -510,11 +510,11 @@ void test_reattach() {
 
     GameLink restarted = before;
     restarted.pid = 1300;
-    const bool pid = should_reattach(before, restarted, 0, 10'000, &why);
-    check(pid && why != nullptr, std::string("the game started again, a new process: started again -- ") +
+    const bool pid = should_reattach(before, restarted, 0, 1'000, &why);
+    check(pid && why != nullptr, std::string("the game started again, a new process: started again a second on -- ") +
                                      (why ? why : "no reason"));
-    const bool early = should_reattach(before, restarted, 0, 9'999);
-    check(!early, "but not within 10 s of the last start");
+    const bool early = should_reattach(before, restarted, 0, 999);
+    check(GameLink::kReattachNewMs == 1'000 && !early, "but not within 1 s of the last start");
 
     GameLink reconnected = before;
     reconnected.servers.push_back(Endpoint{ 0xCB00710B, 15112 });
@@ -527,6 +527,14 @@ void test_reattach() {
     const bool gone = should_reattach(before, closed, 0, 10'000);
     check(conn && port && !gone,
           "a connection or a UDP port the capture was not built with: started again; one gone: no reason to");
+    // A new connection as soon as a new process; a new UDP port, and the
+    // silence below, only kReattachEveryMs on.
+    const bool conn_soon = should_reattach(before, reconnected, 0, 1'000);
+    const bool conn_early = should_reattach(before, reconnected, 0, 999);
+    const bool port_early = should_reattach(before, new_port, 0, 9'999);
+    const bool silent_early = should_reattach(before, before, 5'000, 9'999);
+    check(conn_soon && !conn_early && !port_early && !silent_early,
+          "a new connection a second after the last start; a new UDP port, or 5 s of silence, not within 10 s");
 
     const bool silent = should_reattach(before, before, 5'000, 10'000);
     const bool not_yet = should_reattach(before, before, 4'999, 10'000);
@@ -1156,6 +1164,74 @@ void test_eyes_box() {
     }
 }
 
+/// Each packet plate says which monster it is -- its slot, and the slot's
+/// generation, which a respawn changes -- and its blows: when you last hurt
+/// it, whether another player has since, and whether your id has been proven
+/// the hitter's (the hunter's slot lock and wounded preference go by these).
+void test_eyes_slots() {
+    section("Vị trí từ gói tin: each plate says which monster it is, and who hurt it");
+
+    EyesRig r(packets_on());
+    r.g.walks_report = false;
+    r.enter({ monster(5, 100), monster(6, 300) });
+    const bool steering = r.until_packets();
+    const auto plate_of = [&r](int slot) {
+        r.eyes.frame();
+        for (const Nameplate& n : r.eyes.mobs())
+            if (n.slot == slot) return n;
+        Nameplate none;
+        none.slot = -2;
+        return none;
+    };
+    // 0x0038 state 6 on slot `slot`, by `actor`, as today's server sends a hurt.
+    const auto hurt = [](std::uint32_t slot, std::uint16_t x, std::uint32_t actor, std::uint32_t damage,
+                         std::int32_t hp) {
+        Built f(0x0038, 96);
+        f.u8(12, 6); f.u32(16, slot);
+        f.u8(24, 0x01); f.f32(28, 2.0f);
+        f.u16(32, x); f.u16(34, 1100);
+        f.u32(48, actor); f.u32(52, damage); f.i32(64, hp);
+        return f;
+    };
+
+    const PacketWorld::View v = r.world.view(r.g.t);
+    const Nameplate five = plate_of(5), six = plate_of(6);
+    check(steering && v.mob(5) && v.mob(6) && five.slot == 5 && six.slot == 6 && five.gen == v.mob(5)->gen &&
+              six.gen == v.mob(6)->gen && five.gen != six.gen && five.hurt_ms == 0 && !five.hurt_by_other &&
+              !five.actor_checked,
+          "each plate carries its slot and its monster's generation, and no blow yet");
+
+    // A blow of yours on slot 6, then 19 more: your id proven the hitter's.
+    std::int32_t hp = 7676;
+    hp -= 100;
+    const std::uint64_t first = r.g.t;
+    r.feed(from_server(hurt(6, 4940, kId, 100, hp), first));
+    const Nameplate hit = plate_of(6);
+    check(hit.hurt_ms == first && !hit.hurt_by_other && !hit.actor_checked && hit.gen == six.gen,
+          "a hurt of yours: the plate says when, and not yet that your id is proven the hitter's");
+    for (int i = 1; i < 20; ++i) {
+        hp -= 100;
+        r.feed(from_server(hurt(6, 4940, kId, 100, hp), first + static_cast<std::uint64_t>(i)));
+    }
+    const Nameplate proven = plate_of(6);
+    check(proven.actor_checked && proven.hurt_ms == first + 19 && plate_of(5).actor_checked,
+          "twenty: every plate says your id is proven the hitter's");
+    r.feed(from_server(hurt(6, 4940, kId + 1, 100, hp - 100), first + 30));
+    const Nameplate theirs = plate_of(6);
+    check(theirs.hurt_by_other && theirs.hurt_ms == first + 19,
+          "another player's blow after yours: the plate says someone else is hitting it");
+
+    // Killed, and the next monster spawned in its slot: another generation.
+    r.feed(from_server(event_frame(9, 5, 1, 7.0f, 4740, 1100, -5000, 12676), first + 40));
+    Built spawn(0x003F, 52);
+    spawn.u32(12, 1004401); spawn.u8(16, 44); spawn.u8(18, 1);
+    spawn.u16(20, 4740); spawn.u16(22, 1100); spawn.u32(28, 7676); spawn.u16(32, 5);
+    r.feed(from_server(spawn, first + 50));
+    const Nameplate next = plate_of(5);
+    check(next.slot == 5 && next.gen != five.gen && next.hp == 1.0f && next.hurt_ms == 0,
+          "the monster spawned in slot 5 after its kill: the same slot, another generation, untouched");
+}
+
 /// A step back is judged on a picture taken wholly after it: from the
 /// packets, two of the packet world's updates on.
 void test_eyes_backstep() {
@@ -1495,6 +1571,261 @@ void test_eyes_spot_walk() {
     }
 }
 
+// ------------------------------------------------------ the detector's pace
+
+/// Whether the detector may look every 600 ms rather than its own 140: each
+/// of the things that keep it at its own pace, one at a time.
+void test_detector_rest() {
+    section("Detector rest: every 600 ms while the packets steer, and for nothing else (detector_rest)");
+
+    DetectorPace steering;
+    steering.hunting = true;
+    steering.source = PacketEyes::Source::Packets;
+    steering.why = PacketWhy::InUse;
+    const char* why = "unset";
+    check(detector_rest(steering, &why) && std::string(why).empty() && detector_rest(steering),
+          "hunting, the packets steering and healthy, and nothing else reading the plates: it rests, and no reason "
+          "is given not to");
+    check(DetectorPace::kRestMs == 600 && DetectorPace::kRunMs == MobDetector::kLookGapMs &&
+              MobDetector::kLookGapMs == 140,
+          "600 ms resting; otherwise the detector's own 140, as it always was");
+
+    DetectorPace no_hunt = steering;
+    no_hunt.hunting = false;
+    DetectorPace screen = steering;
+    screen.source = PacketEyes::Source::Screen;
+    screen.why = PacketWhy::Settling;
+    DetectorPace unhealthy = steering;
+    unhealthy.why = PacketWhy::NoTraffic;
+    DetectorPace jump = steering;
+    jump.jump_test = true;
+    DetectorPace look = steering;
+    look.monster_look = true;
+    DetectorPace panels = steering;
+    panels.camera_panels = true;
+    DetectorPace walk = steering;
+    walk.walking = true;
+    DetectorPace off = steering;
+    off.rest_off = true;
+    DetectorPace two = jump;
+    two.hunting = false;
+    const struct {
+        const char*         what;
+        const DetectorPace* p;
+        const char*         reason;
+    } kCases[] = {
+        { "no hunt", &no_hunt, "no hunt" },
+        { "the screen steering (settling)", &screen, "the screen steers again" },
+        { "the packets the source but not healthy", &unhealthy, "the screen steers again" },
+        { "a jump key's Thử", &jump, "a jump key's Thử watches your plate" },
+        { "Quái đang thấy", &look, "Quái đang thấy reads the plates" },
+        { "the Radar or the movement panels", &panels, "the Radar or the movement panels are open" },
+        { "a walk", &walk, "a walk follows the camera" },
+        { "[Packets] detector_rest=off", &off, "detector_rest=off in app.ini [Packets]" },
+        { "a Thử with no hunt", &two, "no hunt" },
+    };
+    for (const auto& c : kCases) {
+        const char* said = nullptr;
+        const bool rests = detector_rest(*c.p, &said);
+        check(!rests && said != nullptr && std::string(said) == c.reason && !detector_rest(*c.p),
+              std::string(c.what) + ": its own 140 ms, and the first reason said -- \"" +
+                  std::string(said ? said : "") + "\"");
+    }
+}
+
+/// PacketEyes on its own, with no hunter: a world in which the packets are
+/// healthy, with one monster 100 px to your right in slot 5, and a screen
+/// whose plates stand elsewhere and whose detector counts a picture when the
+/// test says -- at every pass at its own pace, every tenth (600 ms) while it
+/// rests.
+struct HandRig {
+    PacketWorld   world;
+    std::uint64_t t = kT0;
+    std::uint64_t pictures = 0;
+    bool          capturing = true;
+    PacketEyes    eyes;
+
+    HandRig() : eyes(world, screen(), inputs()) {
+        world.on_packets({ from_server(entry_frame(11, 1, 4640, 1100), t) });
+        world.on_packets({ wrapped(table_frame({ monster(5, 100) }), t) });
+        world.on_packets({ from_client(move_frame(4640.0f, 1100.0f, 0.0f, 1), t) });
+    }
+    HandRig(const HandRig&) = delete;
+    HandRig& operator=(const HandRig&) = delete;
+
+    PacketEyes::Screen screen() {
+        PacketEyes::Screen s;
+        s.player = [](Nameplate& out, bool* fresh) {
+            out = plate(640, 400, "Me");
+            out.is_player = true;
+            out.is_self = true;
+            if (fresh) *fresh = true;
+            return true;
+        };
+        s.mobs = [] { return std::vector<Nameplate>{ plate(700, 400, "Moc") }; };
+        s.frame = [this] { return pictures; };
+        return s;
+    }
+
+    PacketEyes::Inputs inputs() {
+        PacketEyes::Inputs in;
+        in.link = [this] {
+            PacketLink l;
+            l.capturing = capturing;
+            l.last_tcp_ms = t;
+            return l;
+        };
+        in.now = [this] { return t; };
+        in.view_size = [](int& w, int& h) {
+            w = 1280;
+            h = 720;
+            return true;
+        };
+        in.config = [] { return packets_on(); };
+        return in;
+    }
+
+    /// What one pass of the hunter's is given: frame()'s number, the view,
+    /// the source and its reason, the monsters, and you.
+    struct Seen {
+        std::uint64_t          number = 0;
+        std::uint32_t          view = 0;
+        PacketEyes::Source     source = PacketEyes::Source::Screen;
+        PacketWhy              why = PacketWhy::Off;
+        std::vector<Nameplate> mobs;
+        Nameplate              me;
+        bool                   fresh = false;
+        /// The packets' plates: slot 5 at 4740, and you at 4640.
+        bool from_packets() const {
+            return !mobs.empty() && mobs.front().slot == 5 && mobs.front().x() == 4740 && me.x() == 4640;
+        }
+        /// The screen's: its monster at 700, and you at 640.
+        bool from_screen() const {
+            return !mobs.empty() && mobs.front().slot == -1 && mobs.front().x() == 700 && me.x() == 640;
+        }
+    };
+
+    /// One pass, the detector's count moved on first when `picture`; then
+    /// 60 ms on, the hunter's own rhythm.
+    Seen pass(bool picture) {
+        if (picture) ++pictures;
+        Seen s;
+        s.number = eyes.frame();
+        s.view = eyes.view();
+        s.source = eyes.source();
+        s.why = eyes.why();
+        s.mobs = eyes.mobs();
+        eyes.player(s.me, &s.fresh);
+        t += 60;
+        return s;
+    }
+
+    /// Passes with the detector at its own pace until the packets steer;
+    /// then `resting` passes at its rest -- a picture at the first and at
+    /// every tenth after it. What the last pass was given.
+    Seen steer(int resting) {
+        Seen last;
+        for (int i = 0; i < 100 && last.source != PacketEyes::Source::Packets; ++i) last = pass(true);
+        for (int k = 0; k < resting; ++k) last = pass(k % 10 == 0);
+        return last;
+    }
+};
+
+/// Back to the screen while the detector rests: the packets' last plates,
+/// view and number kept for the hunter until the detector has counted a
+/// picture taken wholly after the switch, 300 ms at most -- and at once, as
+/// always, when its last picture is a fresh one.
+void test_eyes_hand_over() {
+    section("Detector rest: back to the screen, the packets' plates kept until a picture taken since "
+            "(PacketEyes::kHandOverMs)");
+
+    {
+        HandRig r;
+        const HandRig::Seen steering = r.steer(20);     // the last picture 9 passes back
+        const PacketEyes::Stats before = r.eyes.stats();
+        const std::uint64_t at_switch = r.pictures;
+        r.capturing = false;                            // the capture stopped: the packets may not steer
+        const HandRig::Seen kept = r.pass(false);       // 600 ms since the last picture
+        const HandRig::Seen one = r.pass(true);         // the look under way at the switch: maybe grabbed before
+        const HandRig::Seen two = r.pass(true);         // one taken wholly after it
+        const PacketEyes::Stats after = r.eyes.stats();
+        check(steering.source == PacketEyes::Source::Packets && steering.from_packets() && steering.fresh,
+              "steering, the detector resting: the packets' plates, you seen just now");
+        check(kept.source == PacketEyes::Source::Screen && kept.why == PacketWhy::NoCapture &&
+                  kept.view == steering.view && kept.from_packets() && !kept.fresh &&
+                  kept.number == steering.number,
+              "the capture stopped with the detector's last picture 600 ms old: the screen is the source, and says "
+              "why, but the hunter keeps the packets' last plates, view and number -- you remembered, not seen");
+        check(one.source == PacketEyes::Source::Screen && one.view == steering.view && one.from_packets() &&
+                  one.number == steering.number,
+              "the detector's next picture, which may have been grabbed before the switch: still the packets' plates");
+        check(two.view == steering.view + 1 && two.from_screen() && two.fresh && two.number == at_switch + 2,
+              "the one after it, taken wholly after the switch: the screen's plates and count, in another view");
+        check(after.switches == before.switches + 1 && after.handovers == before.handovers + 1 &&
+                  after.handovers_capped == 0 && after.handover_ms == 120,
+              "one switch, one hand-over of 120 ms, ended by a picture -- " + std::to_string(after.handover_ms) +
+                  " ms");
+    }
+    {
+        HandRig r;
+        const HandRig::Seen steering = r.steer(20);
+        r.capturing = false;
+        std::vector<HandRig::Seen> seen;
+        for (int i = 0; i < 6; ++i) seen.push_back(r.pass(false));     // the switch, and 60..300 ms after it
+        bool held = true;
+        for (int i = 0; i < 5; ++i) held = held && seen[i].from_packets() && seen[i].view == steering.view;
+        const PacketEyes::Stats s = r.eyes.stats();
+        check(held && seen[5].from_screen() && seen[5].view == steering.view + 1 && s.handovers == 1 &&
+                  s.handovers_capped == 1 && s.handover_ms == PacketEyes::kHandOverMs,
+              "no picture from the detector at all: the packets' plates up to 240 ms after the switch, the "
+              "screen's at 300 -- never longer");
+    }
+    {
+        // When the detector's last picture is fresh, nothing is kept: at its
+        // own pace, a picture at the very pass of the switch, or -- while it
+        // rests -- one 120 ms old, no older than one at its own pace. Resting,
+        // one 240 ms old is kept: the walk has moved the plates on since.
+        const struct {
+            const char* what;
+            int         resting;
+            bool        picture;
+            bool        kept;
+        } kCases[] = {
+            { "the detector at its own pace", 0, true, false },
+            { "resting, a picture at the very pass of the switch", 20, true, false },
+            { "resting, the last picture 120 ms old", 12, false, false },
+            { "resting, the last picture 240 ms old", 14, false, true },
+            { "resting, the last picture 300 ms old", 15, false, true },
+        };
+        for (const auto& c : kCases) {
+            HandRig r;
+            const HandRig::Seen steering = r.steer(c.resting);
+            r.capturing = false;
+            const HandRig::Seen next = r.pass(c.picture);
+            const bool at_once = next.source == PacketEyes::Source::Screen && next.from_screen() &&
+                                 next.view == steering.view + 1 && r.eyes.stats().handovers == 0;
+            const bool kept = next.source == PacketEyes::Source::Screen && next.from_packets() &&
+                              next.view == steering.view && r.eyes.stats().handovers == 1;
+            check(steering.source == PacketEyes::Source::Packets && (c.kept ? kept : at_once),
+                  std::string(c.what) + (c.kept ? ": the packets' plates kept" : ": the screen's plates at once, "
+                                                                                 "as always"));
+        }
+    }
+    {
+        HandRig r;
+        const HandRig::Seen steering = r.steer(20);
+        r.capturing = false;
+        const HandRig::Seen kept = r.pass(false);
+        r.eyes.restart();
+        const std::uint32_t view = r.eyes.view();
+        const HandRig::Seen next = r.pass(false);
+        check(kept.from_packets() && view == steering.view + 1 && next.from_screen() && next.view == view &&
+                  r.eyes.source() == PacketEyes::Source::Screen,
+              "restart() -- a hunt starting -- in the middle of a hand-over: ended, in another view, and the "
+              "screen's plates from then on");
+    }
+}
+
 } // namespace
 
 void test_packet_eyes(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1513,9 +1844,12 @@ void test_packet_eyes(void (*check_fn)(bool, const std::string&), void (*section
     test_eyes_wounded();
     test_eyes_lists();
     test_eyes_box();
+    test_eyes_slots();
     test_eyes_backstep();
     test_eyes_long_backstep();
     test_eyes_held_walk();
     test_eyes_where();
     test_eyes_spot_walk();
+    test_detector_rest();
+    test_eyes_hand_over();
 }

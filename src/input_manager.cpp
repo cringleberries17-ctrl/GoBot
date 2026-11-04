@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -132,13 +133,199 @@ bool is_extended(std::uint32_t vk) {
     }
 }
 
+// ---- the drop's keys: Ctrl + ↓ (InputManager::drop_ctrl_down) ----
+
+// Fixed, whatever the keyboard layout: left Ctrl, as GoBot's key 17 always
+// went, and ↓ as the arrows already reach the game -- scan 0x50 with the
+// extended flag is E0 50, DIK_DOWN. ↓'s two are used in drop_events alone.
+constexpr WORD kCtrlVk   = 0x11;
+constexpr WORD kCtrlScan = 0x1D;
+constexpr WORD kDownVk   = 0x28;
+constexpr WORD kDownScan = 0x50;
+/// inject()'s `chord`: only the drop's [Ctrl↓, ↓↓] is sent with it.
+constexpr bool kChord = true;
+
+/// The process's drops: how many InputManagers have one running or owe its
+/// ups, and the thread running one. While any does, inject() refuses every
+/// key-down and mouse-down from any other thread. Process-wide, as the
+/// keyboard is.
+std::atomic<int>   g_chord_busy{ 0 };
+std::atomic<DWORD> g_chord_owner{ 0 };
+std::atomic<bool>  g_said_bare_down{ false };
+std::atomic<bool>  g_said_chord_refusal{ false };
+std::atomic<InputManager::PretendSender*> g_pretend{ nullptr };
+
+/// The test's pretend Windows, only while the "no real input" switch is on.
+InputManager::PretendSender* pretend() {
+    InputManager::PretendSender* const p = g_pretend.load();
+    return p != nullptr && real_input_forbidden() ? p : nullptr;
+}
+
+/// One step's events into `out`; how many.
+UINT drop_events(InputManager::DropStep s, INPUT (&out)[2]) {
+    const auto key = [](WORD vk, WORD scan, DWORD flags) {
+        INPUT in{};
+        in.type       = INPUT_KEYBOARD;
+        in.ki.wVk     = vk;
+        in.ki.wScan   = scan;
+        in.ki.dwFlags = flags;
+        return in;
+    };
+    const INPUT ctrl_down = key(kCtrlVk, kCtrlScan, 0);
+    const INPUT ctrl_up   = key(kCtrlVk, kCtrlScan, KEYEVENTF_KEYUP);
+    const INPUT down_down = key(kDownVk, kDownScan, KEYEVENTF_EXTENDEDKEY);
+    const INPUT down_up   = key(kDownVk, kDownScan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+    switch (s) {
+        case InputManager::DropStep::Lead:   out[0] = ctrl_down; return 1;
+        case InputManager::DropStep::Down:   out[0] = ctrl_down; out[1] = down_down; return 2;
+        case InputManager::DropStep::DownUp: out[0] = down_up; return 1;
+        case InputManager::DropStep::CtrlUp: out[0] = ctrl_up; return 1;
+        case InputManager::DropStep::BothUp: out[0] = down_up; out[1] = ctrl_up; return 2;
+    }
+    return 0;
+}
+
+/// One INPUT as the guards read it.
+InputManager::SentEvent sent_event(const INPUT& in) {
+    InputManager::SentEvent e;
+    if (in.type == INPUT_MOUSE) {
+        e.mouse = true;
+        e.flags = in.mi.dwFlags;
+    } else if (in.type == INPUT_KEYBOARD) {
+        e.vk    = in.ki.wVk;
+        e.scan  = in.ki.wScan;
+        e.flags = in.ki.dwFlags;
+    }
+    return e;
+}
+
+bool key_down_event(const InputManager::SentEvent& e) {
+    return !e.mouse && (e.flags & KEYEVENTF_KEYUP) == 0;
+}
+
+/// A key-down that is ↓ to Windows: by its key code's low byte, or sent as a
+/// scan code by scan 0x50 -- E0 50 is ↓, and 50 alone is ↓ too with NumLock
+/// off. Unicode input carries a character there, never a key.
+bool down_goes_down(const InputManager::SentEvent& e) {
+    return key_down_event(e) && ((e.vk & 0xFFu) == static_cast<unsigned>(kDownVk) ||
+                                 ((e.flags & KEYEVENTF_SCANCODE) != 0 && e.scan == kDownScan));
+}
+
+/// A key-down that is Ctrl to Windows: sent as a scan code, by the scan
+/// code alone; otherwise by its key code.
+bool ctrl_goes_down(const InputManager::SentEvent& e) {
+    if (!key_down_event(e)) return false;
+    if ((e.flags & KEYEVENTF_SCANCODE) != 0) return e.scan == kCtrlScan;
+    const unsigned vk = e.vk & 0xFFu;
+    return vk == static_cast<unsigned>(kCtrlVk) || vk == static_cast<unsigned>(VK_LCONTROL) ||
+           vk == static_cast<unsigned>(VK_RCONTROL);
+}
+
+/// InputManager::bare_down_in over any array of events: `at(i)` is the i-th.
+template <class At>
+bool bare_down_among(std::size_t n, bool chord, At at) {
+    bool ctrl_before = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        const InputManager::SentEvent e = at(i);
+        if (down_goes_down(e) && !(chord && ctrl_before)) return true;
+        if (ctrl_goes_down(e)) ctrl_before = true;
+    }
+    return false;
+}
+
+/// Whether anything in the array goes down: a key or a mouse button.
+template <class At>
+bool any_down_among(std::size_t n, At at) {
+    constexpr DWORD kButtonDowns =
+        MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_MIDDLEDOWN | MOUSEEVENTF_XDOWN;
+    for (std::size_t i = 0; i < n; ++i) {
+        const InputManager::SentEvent e = at(i);
+        if (e.mouse ? (e.flags & kButtonDowns) != 0 : key_down_event(e)) return true;
+    }
+    return false;
+}
+
 /// Every input this class sends goes through here. Whichever way a key, a
 /// click or a move got this far, the "no real input" switch is asked once
 /// more just before Windows is -- the one place nothing can get round.
-UINT inject(INPUT* in, UINT count, const char* what) {
+///
+/// Before that, in this order: ↓ never goes down but inside a drop's Ctrl
+/// (`chord`, passed by drop_ctrl_down alone), whoever built the array; and
+/// while a drop runs or owes its ups, no other thread puts anything down --
+/// a skill key or a click between Ctrl and its up would be Ctrl + that. A
+/// test's pretend sender, when there is one, takes the place of Windows.
+UINT inject(INPUT* in, UINT count, const char* what, bool chord = false) {
+    if (in == nullptr || count == 0) return 0;
+    const auto at = [in](std::size_t i) { return sent_event(in[i]); };
+    if (bare_down_among(count, chord, at)) {
+        if (!g_said_bare_down.exchange(true))
+            GB_WARN("Not sending Down (vk 0x28) outside Ctrl + Down: standing on a gate it takes the character "
+                    "to another map (%s)", what != nullptr ? what : "?");
+        return 0;
+    }
+    if (g_chord_busy.load() > 0 && g_chord_owner.load() != GetCurrentThreadId() && any_down_among(count, at)) {
+        if (!g_said_chord_refusal.exchange(true))
+            GB_INFO("Input: refused to %s while Ctrl + Down is pressed or its keys are owed",
+                    what != nullptr ? what : "?");
+        return 0;
+    }
+    if (InputManager::PretendSender* const p = pretend()) {
+        std::vector<InputManager::SentEvent> events;
+        events.reserve(count);
+        for (UINT i = 0; i < count; ++i) events.push_back(at(i));
+        if (!p->send) return count;
+        return std::min(count, static_cast<UINT>(p->send(events, chord)));
+    }
     if (refuse_real_input(what)) return 0;
     return SendInput(count, in, sizeof(INPUT));
 }
+
+/// Whether Windows reads a key down now -- the pretend sender's word in a
+/// test, and nothing down when it has none.
+bool reads_down(InputManager::PretendSender* fake, int vk) {
+    if (fake != nullptr) return fake->key_held && fake->key_held(vk);
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+/// go_on, asked: a callback that throws, or none, says no.
+bool asks_yes(const std::function<bool()>& go_on) noexcept {
+    try {
+        return go_on && go_on();
+    } catch (...) {
+        return false;
+    }
+}
+
+/// The calling thread at TIME_CRITICAL while one lives, put back as it was
+/// after: ↓ is held by a sleep, and a thread a busy PC puts off holds it
+/// longer.
+class Urgent {
+public:
+    Urgent() : was_(GetThreadPriority(GetCurrentThread())) {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    }
+    ~Urgent() {
+        if (was_ != THREAD_PRIORITY_ERROR_RETURN) SetThreadPriority(GetCurrentThread(), was_);
+    }
+    Urgent(const Urgent&) = delete;
+    Urgent& operator=(const Urgent&) = delete;
+
+private:
+    int was_;
+};
+
+/// Runs `f` as it goes out of scope, however that happens.
+template <class F>
+class OnExit {
+public:
+    explicit OnExit(F f) : f_(std::move(f)) {}
+    ~OnExit() { f_(); }
+    OnExit(const OnExit&) = delete;
+    OnExit& operator=(const OnExit&) = delete;
+
+private:
+    F f_;
+};
 
 } // namespace
 
@@ -147,6 +334,14 @@ InputManager::InputManager()
 
 InputManager::~InputManager() {
     release_all();
+    // An up that would not go out is nobody's to send any more: no longer
+    // counted as owed, or every other key-down in the process would wait on
+    // it for good.
+    std::lock_guard<std::mutex> lock(chord_mutex_);
+    if (chord_counted_) {
+        chord_counted_ = false;
+        if (g_chord_busy.fetch_sub(1) == 1) g_said_chord_refusal = false;
+    }
 }
 
 // ------------------------------------------------------------------- window
@@ -557,6 +752,17 @@ bool InputManager::held(std::uint32_t vk) const {
 bool InputManager::is_held(std::uint32_t vk) const { return held(vk); }
 
 void InputManager::release_all() {
+    // A drop's Ctrl and ↓ first, in their own order -- ↓ before Ctrl, in one
+    // array -- and the drop cut short: it puts nothing down after this, as
+    // its look before ↓ and its ↓ are under the same lock. Never in
+    // held_keys_, which would let them go in any order.
+    if (chord_in_flight_.load() || down_owed_.load() || ctrl_owed_.load()) {
+        std::lock_guard<std::mutex> lock(chord_mutex_);
+        if (chord_in_flight_.load()) chord_cancel_ = true;
+        send_owed();
+        chord_busy_sync();
+    }
+
     std::vector<std::uint32_t> keys;
     {
         std::lock_guard<std::mutex> lock(held_mutex_);
@@ -620,6 +826,8 @@ bool InputManager::double_jump() {
     return key_press(key_jump_);
 }
 
+// The packet bot's old drop, ↓ held under the jump key: always refused, as
+// ↓ is never pressed (send_key). It stays so; the drop is drop_ctrl_down.
 bool InputManager::jump_down() {
     if (block_movement_.load()) return false;
     if (!key_down(key_down_)) return false;
@@ -734,6 +942,292 @@ bool InputManager::type_key(std::uint32_t vk, bool shift, int hold_ms, KeyInject
         return false;
     }
     return true;
+}
+
+// ---------------------------------------------------------- the drop: Ctrl + ↓
+
+std::vector<InputManager::KeyEvent> InputManager::drop_batch(DropStep s) {
+    INPUT in[2]{};
+    const UINT n = drop_events(s, in);
+    std::vector<KeyEvent> out;
+    for (UINT i = 0; i < n; ++i) {
+        KeyEvent e;
+        e.vk    = in[i].ki.wVk;
+        e.scan  = in[i].ki.wScan;
+        e.flags = in[i].ki.dwFlags;
+        out.push_back(e);
+    }
+    return out;
+}
+
+bool InputManager::bare_down_in(const SentEvent* events, std::size_t n, bool chord) {
+    if (events == nullptr) return false;
+    return bare_down_among(n, chord, [events](std::size_t i) { return events[i]; });
+}
+
+void InputManager::set_pretend_sender(PretendSender* p) { g_pretend.store(p); }
+
+unsigned InputManager::pretend_inject(const std::vector<SentEvent>& events) {
+    if (pretend() == nullptr || events.empty()) return 0;
+    std::vector<INPUT> in(events.size());
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        const SentEvent& e = events[i];
+        if (e.mouse) {
+            in[i].type       = INPUT_MOUSE;
+            in[i].mi.dwFlags = e.flags;
+        } else {
+            in[i].type       = INPUT_KEYBOARD;
+            in[i].ki.wVk     = e.vk;
+            in[i].ki.wScan   = e.scan;
+            in[i].ki.dwFlags = e.flags;
+        }
+    }
+    // Never a chord: a test's array meets the guards as any key or click does.
+    return inject(in.data(), static_cast<UINT>(in.size()), "send a test's input");
+}
+
+bool InputManager::keys_owed() const noexcept {
+    return (down_owed_.load() || ctrl_owed_.load()) && !chord_in_flight_.load();
+}
+
+void InputManager::chord_busy_sync() noexcept {
+    const bool owed = down_owed_.load() || ctrl_owed_.load();
+    if (!owed) owed_tries_ = 0;
+    const bool busy = owed || chord_in_flight_.load();
+    if (busy == chord_counted_) return;
+    chord_counted_ = busy;
+    if (busy) g_chord_busy.fetch_add(1);
+    else if (g_chord_busy.fetch_sub(1) == 1) g_said_chord_refusal = false;
+}
+
+bool InputManager::send_owed() {
+    INPUT b[2]{};
+    if (down_owed_.load()) {
+        // Ctrl↑ never alone while ↓ is owed: in one array, ↓'s first.
+        const UINT n = drop_events(DropStep::BothUp, b);
+        const UINT went = inject(b, n, "let go of Down and Ctrl");
+        if (went >= 1) down_owed_ = false;
+        if (went >= 2) ctrl_owed_ = false;
+    } else if (ctrl_owed_.load()) {
+        const UINT n = drop_events(DropStep::CtrlUp, b);
+        if (inject(b, n, "let go of Ctrl") == n) ctrl_owed_ = false;
+    }
+    return !down_owed_.load() && !ctrl_owed_.load();
+}
+
+bool InputManager::settle_owed() noexcept {
+    if (!down_owed_.load() && !ctrl_owed_.load()) return true;
+    try {
+        std::lock_guard<std::mutex> lock(chord_mutex_);
+        if (chord_in_flight_.load()) return false;     // the drop sends its own, in its order
+        const bool clear = send_owed();
+        if (!clear) ++owed_tries_;
+        chord_busy_sync();
+        return clear;
+    } catch (...) {
+        return false;
+    }
+}
+
+void InputManager::end_chord(bool send_ups) noexcept {
+    DWORD me = GetCurrentThreadId();
+    try {
+        std::lock_guard<std::mutex> lock(chord_mutex_);
+        if (!chord_in_flight_.load()) return;
+        if (send_ups) {
+            try {
+                send_owed();
+            } catch (...) {
+                // Left owed, for settle_owed and release_all.
+            }
+        }
+        chord_in_flight_ = false;
+        chord_cancel_ = false;
+        g_chord_owner.compare_exchange_strong(me, 0);
+        chord_busy_sync();
+    } catch (...) {
+        // The lock itself failed: no drop runs from here, whatever is owed.
+        chord_in_flight_ = false;
+        chord_cancel_ = false;
+        g_chord_owner.compare_exchange_strong(me, 0);
+    }
+}
+
+InputManager::DropPress InputManager::drop_ctrl_down(const std::function<bool()>& go_on) noexcept {
+    DropPress out;
+    try {
+        drop_chord(go_on, out);
+    } catch (...) {
+        // The guard has sent what was owed. `out` says how far it got: Ctrl
+        // down (Aborted), or ↓ too (Cut: the game may have taken it).
+        if (out.down_ms != 0) out.held_ms = static_cast<std::uint32_t>(now_ms() - out.down_ms);
+    }
+    return out;
+}
+
+// Each send under chord_mutex_, so that release_all on another thread -- F12,
+// DỪNG, HUNT OFF, the game losing focus -- comes wholly before the look and ↓,
+// or wholly after ↓: never between them. No sleep is taken under it, and
+// nothing between Ctrl's down and its up logs or takes another lock.
+void InputManager::drop_chord(const std::function<bool()>& go_on, DropPress& out) {
+    PretendSender* const fake = pretend();
+    const auto in_front = [this, fake] {
+        if (fake != nullptr) return !fake->focused || fake->focused();
+        return window_focused();
+    };
+    const auto ms_since = [](std::chrono::steady_clock::time_point from) {
+        return static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - from).count());
+    };
+
+    // ---- before anything goes down: as a key goes ----
+    if (hwnd_.load() == nullptr) return;
+    if (fake == nullptr && refuse_real_input("press Ctrl + Down to drop through a platform")) return;
+    if (block_movement_.load()) return;
+    if (!in_front()) return;
+    if (!asks_yes(go_on)) return;
+    const int lead = jitter(kDropLeadMinMs, kDropLeadMaxMs);
+    const int hold = jitter(kDropHoldMinMs, kDropHoldMaxMs);
+    const int tail = jitter(kDropTailMinMs, kDropTailMaxMs);
+
+    {
+        Urgent urgent;
+        // The steps send their own ups; whatever cuts them short -- a throw --
+        // leaves the guard to.
+        bool done = false;
+        const OnExit guard([this, &done] { end_chord(!done); });
+
+        // ---- Ctrl alone ----
+        {
+            std::lock_guard<std::mutex> lock(chord_mutex_);
+            // None while a drop runs or its ups are owed, here or on another
+            // manager: one owner at a time.
+            if (g_chord_busy.load() > 0) return;
+            DWORD nobody = 0;
+            if (!g_chord_owner.compare_exchange_strong(nobody, GetCurrentThreadId())) return;
+            chord_cancel_ = false;
+            chord_in_flight_ = true;
+            ctrl_owed_ = true;
+            chord_busy_sync();
+            INPUT b[2]{};
+            const UINT n = drop_events(DropStep::Lead, b);
+            if (inject(b, n, "press Ctrl") != n) {
+                ctrl_owed_ = false;
+                done = true;
+                return;
+            }
+            out.sent = DropSent::Aborted;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(lead));
+
+        // ---- the last look, then ↓ inside Ctrl ----
+        // go_on asked outside the lock: it may take locks of its own, or let
+        // go of every key. A release_all after it is seen under the lock.
+        const bool go = asks_yes(go_on);
+        {
+            std::lock_guard<std::mutex> lock(chord_mutex_);
+            INPUT b[2]{};
+            if (!go || chord_cancel_.load() || !in_front()) {
+                if (ctrl_owed_.load()) {
+                    const UINT n = drop_events(DropStep::CtrlUp, b);
+                    if (inject(b, n, "let go of Ctrl") == n) ctrl_owed_ = false;
+                }
+                done = true;
+                return;
+            }
+            down_owed_ = true;
+            const UINT n = drop_events(DropStep::Down, b);
+            if (inject(b, n, "press Ctrl + Down", kChord) != n) {
+                // ↓ did not go out, Ctrl may have: both let go of.
+                const UINT m = drop_events(DropStep::BothUp, b);
+                const UINT up = inject(b, m, "let go of Down and Ctrl");
+                if (up >= 1) down_owed_ = false;
+                if (up >= 2) ctrl_owed_ = false;
+                done = true;
+                return;
+            }
+            out.down_ms = now_ms();
+            out.sent = DropSent::Cut;
+        }
+
+        // ---- the hold: cut short by a no or a release_all ----
+        const auto held_from = std::chrono::steady_clock::now();
+        for (int ms = ms_since(held_from); ms < hold; ms = ms_since(held_from)) {
+            if (chord_cancel_.load() || !asks_yes(go_on)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(10, hold - ms)));
+        }
+
+        // ---- ↓ up: wherever focus is ----
+        bool stuck = false;
+        {
+            std::lock_guard<std::mutex> lock(chord_mutex_);
+            if (down_owed_.load()) {
+                INPUT b[2]{};
+                UINT n = drop_events(DropStep::DownUp, b);
+                if (inject(b, n, "let go of Down") == n) {
+                    down_owed_ = false;
+                } else {
+                    n = drop_events(DropStep::BothUp, b);
+                    const UINT up = inject(b, n, "let go of Down and Ctrl");
+                    if (up >= 1) down_owed_ = false;
+                    if (up >= 2) ctrl_owed_ = false;
+                    stuck = up == 0;
+                }
+            }
+            out.held_ms = static_cast<std::uint32_t>(now_ms() - out.down_ms);
+            out.sent = out.held_ms < kDropCutMs ? DropSent::Cut : DropSent::Sent;
+        }
+
+        // ---- Ctrl up: wherever focus is, never before ↓'s ----
+        if (!stuck && !chord_cancel_.load() && asks_yes(go_on))
+            std::this_thread::sleep_for(std::chrono::milliseconds(tail));
+        {
+            std::lock_guard<std::mutex> lock(chord_mutex_);
+            if (!stuck && ctrl_owed_.load() && !down_owed_.load()) {
+                INPUT b[2]{};
+                const UINT n = drop_events(DropStep::CtrlUp, b);
+                if (inject(b, n, "let go of Ctrl") == n || inject(b, n, "let go of Ctrl") == n)
+                    ctrl_owed_ = false;
+            }
+            done = true;
+        }
+    }
+
+    // A ↓ Windows still reads down -- the game's own up lost somewhere -- is
+    // owed, and sent again.
+    if (out.down_ms != 0 && (fake == nullptr || fake->key_held)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (reads_down(fake, VK_DOWN)) {
+            {
+                std::lock_guard<std::mutex> lock(chord_mutex_);
+                down_owed_ = true;
+                chord_busy_sync();
+            }
+            settle_owed();
+        }
+    }
+}
+
+int InputManager::release_stray_drop_keys() noexcept {
+    try {
+        PretendSender* const fake = pretend();
+        if (fake == nullptr && refuse_real_input("let go of a Down or Ctrl left down")) return 0;
+        std::lock_guard<std::mutex> lock(chord_mutex_);
+        if (chord_in_flight_.load()) return 0;
+        int went = 0;
+        INPUT b[2]{};
+        if (reads_down(fake, VK_DOWN)) {
+            const UINT n = drop_events(DropStep::DownUp, b);
+            if (inject(b, n, "let go of Down") == n) ++went;
+        }
+        if (reads_down(fake, VK_CONTROL)) {
+            const UINT n = drop_events(DropStep::CtrlUp, b);
+            if (inject(b, n, "let go of Ctrl") == n) ++went;
+        }
+        return went;
+    } catch (...) {
+        return 0;
+    }
 }
 
 bool InputManager::type_unit(wchar_t unit) {

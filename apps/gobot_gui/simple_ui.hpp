@@ -159,6 +159,7 @@ inline constexpr bool kTrialSkills  = true;  ///< Kỹ năng chỉ khi đang đ�
 inline constexpr bool kTrialPetPotion = true; ///< Tự bơm máu pet: thanh máu pet tự tìm trên HUD
 inline constexpr bool kTrialPacketPositions = true; ///< Vị trí từ gói tin: vị trí nhân vật và quái từ gói tin
 inline constexpr bool kTrialSpot    = true;  ///< Chỗ đánh quái: vùng đánh quanh chỗ đứng, tự đi về chỗ
+inline constexpr bool kTrialDrop    = true;  ///< Nhảy xuống bậc dưới: Ctrl + ↓ tới quái ở bậc dưới
 
 inline constexpr const char* kTrialTabText =
     "Thử nghiệm: phần này chưa chạy trên game thật. Thử từng bước và ngồi xem; thấy lạ thì bấm F12.";

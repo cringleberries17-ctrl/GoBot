@@ -211,6 +211,20 @@ struct PretendQuest {
     bool click_takes = true;
     bool smudged_box = false;           ///< half the box hidden under noise
     std::uint32_t key = 85;
+    /// The live client's own window drawn instead of GoC's picture of it: a
+    /// cut of a frame of it, open on NV Phụ with Tự Động clear, which the tab
+    /// click changes nothing in. Tự Động is at ax, ay in it, its box's frame
+    /// one pixel further right than GoC's picture has it.
+    const Frame* live = nullptr;
+    /// How the box is drawn ticked -- not GoC's picture, as the live client
+    /// may well draw it -- told the box frame's top-left and how many looks
+    /// there have been. Over GoC's window and the live one alike; unset, GoC's
+    /// window has GoC's ticked picture.
+    std::function<void(Frame&, int, int, int)> tick;
+    int looks = 0;
+    /// Every look handed over with its alpha byte at nought, as a capture
+    /// may leave it.
+    bool see_through = false;
 
     std::vector<std::uint32_t> keys;
     std::vector<std::pair<int, int>> clicks, moves;
@@ -223,6 +237,12 @@ struct PretendQuest {
     Frame screen() const {
         Frame f = base;
         if (!open) return f;
+        if (live != nullptr) {
+            paste(f, *live, wx, wy);
+            if (on && tick) tick(f, wx + ax + 5, wy + ay + 8, looks);
+            if (smudged_box) scribble(f, ScreenRect{ wx + ax + 5, wy + ay + 8, 7, 14 }, 5);
+            return f;
+        }
         const Art& a = art();
         paste(f, english ? a.dialog_en : a.dialog, wx, wy);
         // The tab that is picked, in its other look; the rest as the
@@ -230,7 +250,10 @@ struct PretendQuest {
         if (!english) paste(f, a.picked[static_cast<std::size_t>(tab)], wx + 10 + 76 * tab, wy + 32);
         if (tab == 3 && has_auto && !english) {
             paste(f, a.radio, wx + ax, wy + ay);
-            if (on) paste(f, a.box_on, wx + ax + 4, wy + ay + 8);
+            if (on) {
+                if (tick) tick(f, wx + ax + 4, wy + ay + 8, looks);
+                else paste(f, a.box_on, wx + ax + 4, wy + ay + 8);
+            }
             if (smudged_box) scribble(f, ScreenRect{ wx + ax + 4, wy + ay + 8, 7, 14 }, 5);
         }
         return f;
@@ -239,7 +262,10 @@ struct PretendQuest {
     QuestRound::Hands hands() {
         QuestRound::Hands h;
         h.grab = [this](Frame& f) {
+            ++looks;
             f = screen();
+            if (see_through)
+                for (std::size_t i = 3; i < f.pixels.size(); i += 4) f.pixels[i] = 0;
             return true;
         };
         h.key = [this](std::uint32_t vk, int) {
@@ -273,7 +299,41 @@ struct PretendQuest {
         QuestRound round(art().pictures, s, hands());
         return round.run();
     }
+    /// The same with other pictures: one with a ticked look learned.
+    QuestResult run_with(const QuestPictures& pictures, QuestSettings s = QuestSettings{}) {
+        QuestRound round(pictures, s, hands());
+        return round.run();
+    }
 };
+
+/// A tick as a client might draw one, rather than GoC's round blob: a V of
+/// light pixels, `thick` deep, inside the box whose frame's top-left is `bx`,
+/// `by`.
+void draw_tick(Frame& f, int bx, int by, int thick) {
+    static const int kV[][2] = { { 3, 6 }, { 4, 7 }, { 5, 8 }, { 6, 9 }, { 7, 8 },
+                                 { 8, 7 }, { 9, 6 }, { 10, 5 }, { 11, 4 } };
+    for (const auto& p : kV)
+        for (int t = 0; t < thick; ++t) {
+            const int x = bx + p[0], y = by + p[1] + t;
+            if (x < 0 || y < 0 || x >= f.width || y >= f.height) continue;
+            std::uint8_t* px = &f.pixels[(static_cast<std::size_t>(y) * f.width + x) * 4];
+            px[0] = px[1] = px[2] = 235;
+        }
+}
+
+/// The live client's Nhiệm Vụ window, cut from a frame of it (2026-11-03
+/// 22:38, a 1024x768 client, the window at 140,160 on NV Phụ, Tự Động clear
+/// at window+373,417): beside this test, else the copy handed over with it.
+/// The window alone -- no name, chat line, money, bars or map in it; never in
+/// git or the zip. Empty when neither is here.
+Frame live_window() {
+    for (const std::string& d : { exe_relative("testdata\\quest"),
+                                  std::string(GOBOT_SOURCE_DIR) + "\\build\\handoff\\quest\\testdata" }) {
+        Frame f;
+        if (load_png(d + "\\quest_window_140_160.png", f) && f.width == 672 && f.height == 460) return f;
+    }
+    return {};
+}
 
 bool near_point(const std::pair<int, int>& p, int x, int y, int slack) {
     return std::abs(p.first - x) <= slack && std::abs(p.second - y) <= slack;
@@ -301,6 +361,7 @@ bool same_settings(const QuestSettings& a, const QuestSettings& b) {
            a.box_off == b.box_off && a.tabs == b.tabs && a.window_score == b.window_score &&
            a.tab_score == b.tab_score && a.auto_score == b.auto_score &&
            a.state_score == b.state_score && a.state_margin == b.state_margin &&
+           a.off_drop == b.off_drop &&
            a.open_hold_ms == b.open_hold_ms && a.close_hold_ms == b.close_hold_ms &&
            a.open_wait_ms == b.open_wait_ms && a.open_look_ms == b.open_look_ms &&
            a.tab_wait_ms == b.tab_wait_ms && a.click_wait_ms == b.click_wait_ms &&
@@ -322,10 +383,11 @@ void test_settings() {
     check(same(d.forbid_abandon, ScreenRect{ 296, 417, 80, 30 }) &&
               same(d.forbid_hide_low, ScreenRect{ 523, 37, 14, 14 }),
           "defaults: Huy Nhiem Vu and the hide-low-level checkbox are where GoC's picture has them");
-    check(same(d.forbid_buttons, ScreenRect{ 283, 412, 103, 41 }),
-          "defaults: the quick quest's buttons kept out of where GoC reads them, window+283,412 103x41");
+    check(same(d.forbid_buttons, ScreenRect{ 283, 412, 90, 41 }),
+          "defaults: the quick quest's buttons kept out of where GoC reads them, trimmed to where Tự Động "
+          "begins: window+283,412 90x41");
     check(d.window_score == 0.85f && d.auto_score == 0.80f && d.state_score == 0.80f &&
-              d.state_margin == 0.10f && d.open_wait_ms == 500 && d.open_look_ms == 1500 &&
+              d.state_margin == 0.10f && d.off_drop == 0.50f && d.open_wait_ms == 500 && d.open_look_ms == 1500 &&
               d.tab_wait_ms == 500 && d.click_wait_ms == 300 && d.hover_wait_ms == 200 &&
               d.close_wait_ms == 1000 && d.open_hold_ms == 50 && d.close_hold_ms == 100,
           "defaults: the BA's scores and GoC's waits");
@@ -389,10 +451,47 @@ void test_settings() {
             { "Quest", "max_failures", "3" },      { "Quest", "back_off", "true" },
             { "Quest", "skin", "auto" },           { "Layout", "tab_click", "274,47" },
             { "Scores", "window", "0.85" },        { "Timing", "open_wait_ms", "500" },
-            { "Layout", "forbid_buttons", "283,412,103,41" },
+            { "Layout", "forbid_buttons", "283,412,90,41" },
         };
         for (const auto& c : kBack) QuestSettings::save_key(path, c.sec, c.key, c.value);
         check(read_all(path) == bytes, "set back key by key, the file is the shipped one, byte for byte");
+        DeleteFileA(path.c_str());
+    }
+
+    // Every quest.ini before 2026.11.03d said forbid_buttons=283,412,103,41
+    // -- the player's own among them, written out in full -- which took in
+    // Tự Động's box on the live client: read as today's, the file left as it
+    // is. Any other value is the player's own, and kept.
+    {
+        const std::string path = temp_path("gobot_test_quest_old_buttons.ini");
+        // The player's own file of 2026-10-27 as it was, its [Layout] whole.
+        const std::string old =
+            "[Quest]\nenabled=true\ninterval_min=5\nfirst_delay_s=40\nquest_key=T\nmax_failures=3\n"
+            "[Layout]\nwindow_title_rows=32\ntitle_inset=10\ntabs_area=10,32,302,28\ntab_pitch=76\n"
+            "tab_click=274,47\nauto_area=0,360,672,100\nauto_click=11,15\nauto_box=4,8,14,14\nhover_dx=14\n"
+            "forbid_abandon=296,417,80,30\nforbid_hide_low=523,37,14,14\nforbid_buttons=283,412,103,41\n"
+            "[Scores]\nstate=0.80\nstate_margin=0.10\n";
+        write_all(path, old);
+        QuestSettings was;
+        was.forbid_buttons = ScreenRect{ 1, 1, 1, 1 };
+        const bool was_read = was.load(path);
+        const bool live_click = quest_click_ok(ScreenRect{ 140, 160, 672, 460 }, 524, 592, 1024, 768, was);
+        check(was_read && same(was.forbid_buttons, ScreenRect{ 283, 412, 90, 41 }) && was.enabled &&
+                  was.quest_key == 'T' && live_click && read_all(path) == old,
+              fmt("the player's file with the old forbid_buttons=283,412,103,41: read as 283,412,90,41 "
+                  "(%d,%d,%d,%d), the live click at 524,592 allowed with it, the file untouched",
+                  was.forbid_buttons.x, was.forbid_buttons.y, was.forbid_buttons.w, was.forbid_buttons.h));
+        write_all(path, "[Quest]\n[Layout]\nforbid_buttons=280,410,110,45\n");
+        QuestSettings own;
+        check(own.load(path) && same(own.forbid_buttons, ScreenRect{ 280, 410, 110, 45 }),
+              "... any other value, 280,410,110,45, is the player's and stays as written");
+        write_all(path, "[Quest]\n[Layout]\nforbid_buttons=283,412,103,42\n");
+        QuestSettings nearly;
+        check(nearly.load(path) && same(nearly.forbid_buttons, ScreenRect{ 283, 412, 103, 42 }),
+              "... and 283,412,103,42, one pixel off the old value, too");
+        write_all(path, "[Quest]\n[Scores]\noff_drop=0.9\n");
+        QuestSettings drop;
+        check(drop.load(path) && drop.off_drop == 0.70f, "off_drop=0.9 is brought down to 0.70");
         DeleteFileA(path.c_str());
     }
 
@@ -713,6 +812,26 @@ void test_auto() {
     check(smudged.found && smudged.state == AutoState::Unknown,
           fmt("with half the box under noise: found, and read as unknown (on %.3f / off %.3f)",
               static_cast<double>(smudged.on), static_cast<double>(smudged.off)));
+    check(off.ring >= 0.99f && off.inside >= 0.99f && off.box_x == 754 && off.box_y == 508 &&
+              off.learned == -1.0f,
+          fmt("the clear box: its frame %.3f at %d,%d and its inside %.3f, nothing learned to compare",
+              static_cast<double>(off.ring), off.box_x, off.box_y, static_cast<double>(off.inside)));
+
+    // A ticked box drawn otherwise than GoC's picture -- a thin tick -- is
+    // still 0.80 like the clear picture as a whole, which is mostly its frame,
+    // and over the ticked one by the margin. Its inside is not like the clear
+    // one's: not sure, not clear, so never clicked.
+    for (const int thick : { 1, 2 }) {
+        Frame t = f;
+        draw_tick(t, 754, 508, thick);
+        const AutoOption ticked = find_auto_option(t, win, p, s);
+        check(ticked.found && ticked.state == AutoState::Unknown && ticked.ring >= 0.99f &&
+                  ticked.inside < 0.5f && (thick == 2 || ticked.off >= 0.80f),
+              fmt("a tick %d px deep drawn in it: unknown, never clear (on %.3f / off %.3f, inside %.3f, "
+                  "frame %.3f)",
+                  thick, static_cast<double>(ticked.on), static_cast<double>(ticked.off),
+                  static_cast<double>(ticked.inside), static_cast<double>(ticked.ring)));
+    }
 
     // The hide-low-level checkbox is the very same picture as the box, off.
     check(!find_auto_option(base, win, p, s).found,
@@ -755,6 +874,22 @@ void test_round() {
                   contains(r.log, "closed"),
               "the log line: " + r.log);
         check(quest_result_vi(r, "U") == "đã bật ô Tự Động", "for the tab: " + quest_result_vi(r, "U"));
+    }
+    {
+        // Where the live client puts it: the window at 140,160, Tự Động at
+        // +373,417, beside Hủy Nhiệm Vụ's slot. Every round was refused there
+        // before 2026.11.03d.
+        PretendQuest g;
+        g.wx = 140;
+        g.wy = 160;
+        g.ax = 373;
+        g.ay = 417;
+        const QuestResult r = g.run();
+        check(r.outcome == QuestOutcome::TurnedOn && g.clicks.size() == 2 && r.clicks == 2 && g.on && !g.open &&
+                  near_point(g.clicks[0], 140 + 274, 160 + 47, 0) && near_point(g.clicks[1], 140 + 384, 160 + 432, 0),
+              std::string("Tự Động where the live client draws it: ticked with exactly 2 clicks, the tab at 414,207 "
+                          "and the box at 524,592 (") +
+                  quest_outcome_name(r.outcome) + ") -- " + r.log);
     }
     {
         PretendQuest g;
@@ -878,6 +1013,12 @@ void test_round() {
         check(r.outcome == QuestOutcome::Refused && r.clicks == 0 && g.keys.size() == 2 && !g.open &&
                   quest_result_vi(r, "U") == "không bấm: game bị che hoặc không ở trên cùng",
               "a click that does not go: refused, the window closed again -- " + quest_result_vi(r, "U"));
+        check(!r.refused_place && quest_trouble_why(r) == "không bấm được vào cửa sổ Nhiệm Vụ",
+              "... the alert's words: could not click -- " + quest_trouble_why(r));
+        // The frame kept for quest_debug is the one the click was refused on,
+        // not close()'s own look at the window shut.
+        check(r.last.valid() && find_quest_window(r.last, art().pictures, QuestSettings{}).found && !g.open,
+              "... and the frame kept shows the window the click was refused on, though it is closed now");
     }
     {
         // The real waits, added up on the pretend clock: a round holds
@@ -926,7 +1067,7 @@ void test_forbidden() {
             if (!ok) continue;
             ++allowed;
             const bool forbidden = in(ScreenRect{ wx + 296, wy + 417, 80, 30 }, x, y) ||
-                                   in(ScreenRect{ wx + 283, wy + 412, 103, 41 }, x, y) ||
+                                   in(ScreenRect{ wx + 283, wy + 412, 90, 41 }, x, y) ||
                                    in(ScreenRect{ wx + 523, wy + 37, 14, 14 }, x, y) ||
                                    in(ScreenRect{ wx + 10, wy + 32, 228, 28 }, x, y) || out ||
                                    !win.contains(x, y);
@@ -943,13 +1084,13 @@ void test_forbidden() {
         const ScreenRect win{ 300, 120, 672, 460 };
         int pixels = 0, passed = 0;
         for (int y = win.y + 412; y < win.y + 412 + 41; ++y)
-            for (int x = win.x + 283; x < win.x + 283 + 103; ++x) {
+            for (int x = win.x + 283; x < win.x + 283 + 90; ++x) {
                 ++pixels;
                 if (quest_click_ok(win, x, y, 1280, 720, s)) ++passed;
             }
         std::string why, why_vi;
         quest_click_ok(win, win.x + 285, win.y + 414, 1280, 720, s, &why, &why_vi);
-        check(pixels == 4223 && passed == 0 && contains(why, "Accept") &&
+        check(pixels == 3690 && passed == 0 && contains(why, "Accept") &&
                   why_vi == "trúng chỗ các nút nhận, bỏ và trả nhiệm vụ",
               fmt("all %d pixels of the quest buttons' area refused (%d let through): %s", pixels, passed,
                   why_vi.c_str()));
@@ -964,6 +1105,45 @@ void test_forbidden() {
           "a point past the right edge is refused -- not moved to the edge: " + why);
     check(quest_click_ok(ScreenRect{ 300, 120, 672, 460 }, 574, 167, 1280, 720, s),
           "GoC's point in NV Phụ is allowed");
+
+    // The live client's layout, measured on its frames of 2026-11-03: a
+    // 1024x768 client, the window at 140,160, Tự Động drawn at +373,417, its
+    // box at +377..391 and GoC's click on it at +384,432; Accept at
+    // +306..364 x +422..441, in Hủy Nhiệm Vụ's slot (+296..375 x +417..446).
+    {
+        const ScreenRect win{ 140, 160, 672, 460 };
+        std::string live_why;
+        const bool live_ok = quest_click_ok(win, 524, 592, 1024, 768, s, &live_why);
+        check(live_ok, "the live layout: GoBot's click on Tự Động at 524,592 (window+384,432) is allowed" +
+                           (live_why.empty() ? std::string() : " -- not: " + live_why));
+        int accept = 0, accept_passed = 0, slot = 0, slot_passed = 0;
+        for (int y = win.y + 422; y <= win.y + 441; ++y)
+            for (int x = win.x + 306; x <= win.x + 364; ++x) {
+                ++accept;
+                if (quest_click_ok(win, x, y, 1024, 768, s)) ++accept_passed;
+            }
+        for (int y = win.y + 417; y < win.y + 417 + 30; ++y)
+            for (int x = win.x + 296; x < win.x + 296 + 80; ++x) {
+                ++slot;
+                if (quest_click_ok(win, x, y, 1024, 768, s)) ++slot_passed;
+            }
+        check(accept == 1180 && accept_passed == 0 && slot == 2400 && slot_passed == 0,
+              fmt("... and every pixel of the live Accept (%d) and of Hủy Nhiệm Vụ's slot (%d) still refused "
+                  "(%d and %d let through)",
+                  accept, slot, accept_passed, slot_passed));
+        // Allowed only from past the margin round Hủy Nhiệm Vụ's slot, +378:
+        // the box begins at +377, the click is at +384.
+        int first_allowed = -1;
+        for (int x = win.x + 300; x < win.x + 400 && first_allowed < 0; ++x)
+            if (quest_click_ok(win, x, win.y + 432, 1024, 768, s)) first_allowed = x - win.x;
+        check(first_allowed == 378, fmt("... on the click's row the first point allowed is window+%d", first_allowed));
+        QuestSettings old = s;
+        old.forbid_buttons = ScreenRect{ 283, 412, 103, 41 };
+        std::string old_why;
+        const bool old_ok = quest_click_ok(win, 524, 592, 1024, 768, old, &old_why);
+        check(!old_ok && contains(old_why, "Accept"),
+              "(GoC's 103 px, as every quest.ini had it, refused that click: " + old_why + ")");
+    }
 
     if (!have_art()) return;
     {
@@ -980,6 +1160,8 @@ void test_forbidden() {
                   r.log);
         check(quest_result_vi(r, "U") == "không bấm: chỗ cần bấm trúng nút Hủy Nhiệm Vụ",
               "... and the tab says which place: " + quest_result_vi(r, "U"));
+        check(r.refused_place && quest_trouble_why(r) == "không dám bấm vào chỗ cần bấm trong cửa sổ Nhiệm Vụ",
+              "... and the alert says GoBot would not click, rather than could not: " + quest_trouble_why(r));
 
         // The probe says so before any round is run: everything found is not
         // enough when a round would refuse the click (the live test's first
@@ -1016,6 +1198,338 @@ void test_forbidden() {
         check(r.outcome == QuestOutcome::NoWindow && g.clicks.empty() && g.keys.size() == 1,
               "a window off the right edge: not taken for found, nothing clicked");
     }
+}
+
+// ------------------------------------------------------------ the live window
+
+/// Part of a frame, for the learned look and its tests.
+Frame part(const Frame& f, int x, int y, int w, int h) {
+    Frame out;
+    if (!f.valid() || x < 0 || y < 0 || x + w > f.width || y + h > f.height) return out;
+    out.width = w;
+    out.height = h;
+    out.pixels.resize(static_cast<std::size_t>(w) * h * 4);
+    for (int r = 0; r < h; ++r)
+        std::copy_n(f.pixels.begin() + ((static_cast<std::size_t>(y + r) * f.width + x) * 4),
+                    static_cast<std::size_t>(w) * 4, out.pixels.begin() + static_cast<std::size_t>(r) * w * 4);
+    return out;
+}
+
+/// Whether two pictures are the same, grey for grey.
+bool same_picture(const Frame& a, const Frame& b) {
+    if (!a.valid() || a.width != b.width || a.height != b.height) return false;
+    for (std::size_t i = 0; i < a.pixels.size(); i += 4)
+        if (a.pixels[i] != b.pixels[i] || a.pixels[i + 1] != b.pixels[i + 1] || a.pixels[i + 2] != b.pixels[i + 2])
+            return false;
+    return true;
+}
+
+/// Where a pretend game's window and Tự Động's box are, for the checks of a
+/// box ticked in a look no picture has.
+struct TickedPlace {
+    std::string name;               ///< which window, for the checks' words
+    ScreenRect  win;                ///< the window on the screen
+    int box_x = 0, box_y = 0;       ///< the clear box's frame, its top-left
+    int click_x = 0, click_y = 0;   ///< GoBot's click on the box
+};
+
+/// A box ticked in a look no picture has -- a V, not GoC's round blob: read as
+/// ticked by the change after GoBot's own click, its look learned, and never
+/// clicked while not sure. `game` makes the pretend game, its window shut and
+/// the box clear. Run on GoC's window, which is always here, and again on the
+/// live client's when its cut is.
+void check_ticked_by_change(const TickedPlace& at, const std::function<PretendQuest()>& game) {
+    const QuestSettings s;
+    const QuestPictures& p = art().pictures;
+    const ScreenRect& win = at.win;
+    const std::string in = at.name + ": ";
+    const auto tick2 = [](Frame& f, int bx, int by, int) { draw_tick(f, bx, by, 2); };
+    const auto tick1 = [](Frame& f, int bx, int by, int) { draw_tick(f, bx, by, 1); };
+
+    // NV Phụ up, Tự Động clear.
+    Frame clear_frame;
+    {
+        PretendQuest g = game();
+        g.open = true;
+        g.tab = 3;
+        clear_frame = g.screen();
+    }
+    const AutoOption before = find_auto_option(clear_frame, win, p, s);
+    check(before.found && before.state == AutoState::Off && before.box_x == at.box_x &&
+              before.box_y == at.box_y && before.click_x == at.click_x && before.click_y == at.click_y,
+          in + fmt("the box clear (on %.3f / off %.3f, inside %.3f, frame %.3f at %d,%d), the click at %d,%d",
+                   static_cast<double>(before.on), static_cast<double>(before.off),
+                   static_cast<double>(before.inside), static_cast<double>(before.ring), before.box_x,
+                   before.box_y, before.click_x, before.click_y));
+
+    // The box ticked in a look no picture has.
+    QuestResult first;
+    {
+        PretendQuest g = game();
+        g.tick = tick2;
+        first = g.run();
+        check(first.outcome == QuestOutcome::TurnedOn && first.by_change && g.on && !g.open &&
+                  g.keys.size() == 2 && g.clicks.size() == 2 && near_point(g.clicks[1], at.click_x, at.click_y, 0),
+              in + fmt("a round, the box ticked in a look no picture has: ticked by the change, with one click on "
+                       "the box at %d,%d (",
+                       at.click_x, at.click_y) +
+                  quest_outcome_name(first.outcome) + ")");
+        check(g.moves.size() == 2 && near_point(g.moves[0], at.click_x + s.hover_dx, at.click_y, 0) &&
+                  near_point(g.moves[1], win.x + s.tab_click_x, win.y + s.tab_click_y, 0),
+              in + "... the pointer moved off the box as GoC moves it, then back onto NV Phụ to read it again -- "
+                   "moved only");
+        check(first.after.state == AutoState::On && first.after.inside <= 0.5f && first.after.ring >= 0.99f &&
+                  first.after.box_x == at.box_x && first.after.box_y == at.box_y,
+              in + fmt("... read on two looks: the clear box's inside %.3f (it was %.3f), its frame %.3f at %d,%d, "
+                       "GoC's ticked picture %.3f, the clear one %.3f",
+                       static_cast<double>(first.after.inside), static_cast<double>(first.before.inside),
+                       static_cast<double>(first.after.ring), first.after.box_x, first.after.box_y,
+                       static_cast<double>(first.after.on), static_cast<double>(first.after.off)));
+        check(first.learned_on.valid() && first.learned_on.width == 14 && first.learned_on.height == 14 &&
+                  first.ticked_frame.valid() && contains(first.log, "-> on by the change") &&
+                  contains(first.log, "its look learned") &&
+                  same_picture(first.learned_on, part(first.ticked_frame, at.box_x, at.box_y, 14, 14)),
+              in + "... its look cut where the frame is, 14 x 14, and the frame kept with it: " + first.log);
+    }
+
+    // Learned: that look reads ticked, the clear box still clear.
+    QuestPictures learned = p;
+    check(learned.learn(first.learned_on, s) && learned.box_learned.valid() && learned.learned_inside.valid(),
+          in + "the look learned");
+    {
+        PretendQuest g = game();
+        g.open = true;
+        g.tab = 3;
+        g.on = true;
+        g.tick = tick2;
+        const Frame f = g.screen();
+        const AutoOption o = find_auto_option(f, win, learned, s);
+        check(o.state == AutoState::On && o.learned >= 0.99f && o.inside <= 0.5f,
+              in + fmt("the ticked box, with the look learned: on (learned %.3f, the clear inside %.3f, GoC's "
+                       "ticked picture %.3f)",
+                       static_cast<double>(o.learned), static_cast<double>(o.inside), static_cast<double>(o.on)));
+        const AutoOption bare = find_auto_option(f, win, p, s);
+        check(bare.state == AutoState::Unknown,
+              in + "... without it, the same box is not sure: unknown, and so never clicked");
+        const AutoOption clear = find_auto_option(clear_frame, win, learned, s);
+        check(clear.state == AutoState::Off && clear.learned < 0.5f,
+              in + fmt("the clear box, with the look learned: still clear (learned %.3f, inside %.3f)",
+                       static_cast<double>(clear.learned), static_cast<double>(clear.inside)));
+    }
+    {
+        PretendQuest g = game();
+        g.on = true;
+        g.tick = tick2;
+        const QuestResult r = g.run_with(learned);
+        check(r.outcome == QuestOutcome::AlreadyOn && g.clicks.size() == 1 && g.on && !g.open,
+              in + "a round with the look learned, the box ticked: already on, only the tab clicked (" +
+                  quest_outcome_name(r.outcome) + ")");
+        PretendQuest h = game();
+        h.tick = tick2;
+        const QuestResult t = h.run_with(learned);
+        check(t.outcome == QuestOutcome::TurnedOn && !t.by_change && h.clicks.size() == 2 && h.moves.size() == 1 &&
+                  h.on && contains(t.log, "-> on (learned"),
+              in + "... the box clear: one click, and read as on by the learned look at once -- " + t.log);
+    }
+
+    // Not sure is never clicked.
+    {
+        PretendQuest g = game();
+        g.on = true;
+        g.tick = tick2;
+        const QuestResult r = g.run();
+        check(r.outcome == QuestOutcome::UnknownState && g.clicks.size() == 1 && g.on,
+              in + "ticked in a look not learned yet: unknown, the box never clicked");
+        PretendQuest h = game();
+        h.on = true;
+        h.tick = tick1;
+        const QuestResult t = h.run();
+        check(t.outcome == QuestOutcome::UnknownState && h.clicks.size() == 1 && h.on,
+              in + "a thin tick, the clear picture still over 0.80 as a whole: unknown, never clicked -- " + t.log);
+        PretendQuest k = game();
+        k.smudged_box = true;
+        const QuestResult u = k.run();
+        check(u.outcome == QuestOutcome::UnknownState && k.clicks.size() == 1,
+              in + "half the box under noise: unknown, never clicked");
+    }
+    {
+        // Something over the box after GoBot's click: not sure it is on --
+        // the one click, never a second -- and the round after clicks nothing
+        // on it either.
+        PretendQuest g = game();
+        g.tick = [](Frame& f, int bx, int by, int) { scribble(f, ScreenRect{ bx - 2, by - 2, 19, 18 }, 7); };
+        const QuestResult r = g.run();
+        check(r.outcome == QuestOutcome::ClickFailed && g.clicks.size() == 2 && !r.by_change &&
+                  !r.learned_on.valid() && contains(r.log, "not sure it is on"),
+              in + "covered after the click: click_failed, one click on the box and no more -- " + r.log);
+        const QuestResult next = g.run();
+        check((next.outcome == QuestOutcome::UnknownState || next.outcome == QuestOutcome::NoAuto) &&
+                  g.clicks.size() == 3 && g.on,
+              in + "... and the next round, the box still covered: not clicked (" +
+                  quest_outcome_name(next.outcome) + ")");
+    }
+    {
+        // A box that does not hold still from one look to the next.
+        PretendQuest g = game();
+        g.tick = [](Frame& f, int bx, int by, int look) { draw_tick(f, bx, by, look % 2 == 0 ? 2 : 1); };
+        const QuestResult r = g.run();
+        check(r.outcome == QuestOutcome::ClickFailed && g.clicks.size() == 2 && !r.by_change &&
+                  !r.learned_on.valid() && contains(r.log, "did not hold still"),
+              in + "a box that changes between the two looks: click_failed, nothing learned -- " + r.log);
+    }
+    {
+        // Captures that leave the alpha byte at nought, as some may: the look
+        // is learned all the same, and kept opaque.
+        PretendQuest g = game();
+        g.tick = tick2;
+        g.see_through = true;
+        const QuestResult r = g.run();
+        bool opaque = r.learned_on.valid();
+        for (std::size_t i = 3; opaque && i < r.learned_on.pixels.size(); i += 4)
+            opaque = r.learned_on.pixels[i] == 255;
+        check(r.outcome == QuestOutcome::TurnedOn && r.by_change && opaque && p.learnable(r.learned_on, s) &&
+                  same_picture(r.learned_on, first.learned_on),
+              in + "captures with the alpha at nought: ticked by the change, the look learned all the same, "
+                   "opaque -- " + r.log);
+    }
+
+    // The checks of a change one by one.
+    {
+        PretendQuest g = game();
+        g.open = true;
+        g.tab = 3;
+        g.on = true;
+        g.tick = tick2;
+        const QuestTickRead ok = read_ticked_by_change(g.screen(), win, before, p, s);
+        check(ok.changed && ok.same_window && ok.same_auto && ok.why.empty(), in + "the ticked frame: changed");
+        const QuestTickRead still = read_ticked_by_change(clear_frame, win, before, p, s);
+        check(!still.changed && contains(still.why, "still reads clear"), in + "the clear frame: " + still.why);
+        AutoOption unsure = before;
+        unsure.state = AutoState::Unknown;
+        const QuestTickRead blind = read_ticked_by_change(g.screen(), win, unsure, p, s);
+        check(!blind.changed && contains(blind.why, "not read as clear"),
+              in + "a box not read as clear before the click: never ticked by a change -- " + blind.why);
+        g.wx += 6;
+        const QuestTickRead moved = read_ticked_by_change(g.screen(), win, before, p, s);
+        check(!moved.changed && contains(moved.why, "window is not where it was"),
+              in + "the window 6 px from where it was: " + moved.why);
+        Frame goc = clear_frame;
+        paste(goc, art().box_on, at.box_x, at.box_y);
+        const QuestTickRead picture = read_ticked_by_change(goc, win, before, p, s);
+        check(!picture.changed && picture.option.state == AutoState::On && picture.same_auto,
+              in + fmt("GoC's ticked picture drawn there: on by the picture (%.3f), not by a change",
+                       static_cast<double>(picture.option.on)));
+    }
+
+    // What may be learned, and the file it is kept in.
+    {
+        std::string why_clear, why_flat, why_size;
+        const Frame clear_box = part(clear_frame, at.box_x, at.box_y, 14, 14);
+        const bool clear_taken = p.learnable(clear_box, s, &why_clear);
+        check(!clear_taken && contains(why_clear, "like the clear box"),
+              in + "the clear box is never taken for the ticked look: " + why_clear);
+        Frame flat = clear_box;
+        for (int y = 1; y < 13; ++y)
+            for (int x = 1; x < 13; ++x) {
+                std::uint8_t* px = &flat.pixels[(static_cast<std::size_t>(y) * 14 + x) * 4];
+                px[0] = px[1] = px[2] = 90;
+            }
+        const bool flat_taken = p.learnable(flat, s, &why_flat);
+        check(!flat_taken && contains(why_flat, "flat"), in + "nor a box with a flat inside: " + why_flat);
+        const bool size_taken = p.learnable(part(clear_frame, at.box_x, at.box_y, 15, 14), s, &why_size);
+        check(!size_taken && contains(why_size, "size"), in + "nor a cut of another size: " + why_size);
+        const std::string file = temp_path("gobot_test_quest_learned\\quest_auto_on.png");
+        QuestPictures back = p;
+        check(QuestPictures::save_learned(file, first.learned_on) && back.load_learned(file, s) &&
+                  same_picture(back.box_learned, first.learned_on),
+              in + "the learned look saved and read back the same, pixel for pixel");
+        QuestPictures wrong = learned;
+        check(QuestPictures::save_learned(file, clear_box) && !wrong.load_learned(file, s) &&
+                  !wrong.box_learned.valid() && !wrong.learned_inside.valid(),
+              in + "a file holding the clear box is not taken, and the look learned before goes with it");
+        DeleteFileA(file.c_str());
+        RemoveDirectoryA(temp_path("gobot_test_quest_learned").c_str());
+        QuestPictures none = learned;
+        check(!none.load_learned(file, s) && !none.box_learned.valid(), in + "no file: nothing learned");
+        const std::string kept = QuestPictures::learned_file();
+        const std::string tail = "templates\\grabbed\\quest_auto_on.png";
+        check(kept.size() > tail.size() && kept.compare(kept.size() - tail.size(), tail.size(), tail) == 0,
+              in + "kept beside the other pictures cut from the live client: " + kept);
+    }
+}
+
+/// The same on GoC's window, which is always here: the checks above that
+/// keep a second click and a wrong look learned out need no cut of the live
+/// client.
+void test_ticked_by_change() {
+    section("Quick quest: a ticked box no picture fits, on GoC's window");
+    if (!have_art()) return;
+    // Where PretendQuest opens it: Tự Động at window+450,380, its box's frame
+    // GoC's picture's 4,8 further on, GoBot's click at Tự Động+11,15.
+    PretendQuest g;
+    const ScreenRect win{ g.wx, g.wy, art().dialog.width, art().dialog.height };
+    check_ticked_by_change(TickedPlace{ "GoC's window", win, g.wx + g.ax + 4, g.wy + g.ay + 8, g.wx + g.ax + 11,
+                                        g.wy + g.ay + 15 },
+                           [] { return PretendQuest{}; });
+}
+
+void test_live_window() {
+    section("Quick quest: the live client's own window, and a ticked box no picture fits");
+    if (!have_art()) return;
+    const Frame cut = live_window();
+    if (!cut.valid()) {
+        skip("no cut of the live client's quest window here (handoff\\quest\\testdata)\n");
+        return;
+    }
+    const QuestSettings s;
+    const QuestPictures& p = art().pictures;
+    const ScreenRect win{ 140, 160, 672, 460 };
+    // A game drawn from the live window, where it was: Tự Động at +373,417,
+    // its box's frame at +378,425 -- the client draws the box a pixel wider
+    // than GoC's picture, its left edge twice.
+    const auto game = [&cut] {
+        PretendQuest g;
+        g.base = scene(1024, 768, 21);
+        g.live = &cut;
+        g.wx = 140;
+        g.wy = 160;
+        g.ax = 373;
+        g.ay = 417;
+        return g;
+    };
+
+    // As the live client showed it, Tự Động clear.
+    {
+        PretendQuest g = game();
+        g.open = true;
+        g.tab = 3;
+        const Frame clear_frame = g.screen();
+        const QuestWindow w = find_quest_window(clear_frame, p, s);
+        check(w.found && !w.english && w.at.x == 140 && w.at.y == 160,
+              fmt("the live window found at %d,%d (title %.3f, tabs %.3f)", w.at.x, w.at.y,
+                  static_cast<double>(w.score), static_cast<double>(w.tabs)));
+        const AutoOption o = find_auto_option(clear_frame, win, p, s);
+        check(o.found && std::abs(o.at.x - 513) <= 1 && std::abs(o.at.y - 577) <= 1 && o.state == AutoState::Off &&
+                  o.box_x == 518 && o.box_y == 585 && o.click_x == 524 && o.click_y == 592,
+              fmt("Tự Động in it at %d,%d (%.3f), its box clear: on %.3f / off %.3f, inside %.3f, frame %.3f at "
+                  "%d,%d; the click at %d,%d",
+                  o.at.x, o.at.y, static_cast<double>(o.score), static_cast<double>(o.on),
+                  static_cast<double>(o.off), static_cast<double>(o.inside), static_cast<double>(o.ring), o.box_x,
+                  o.box_y, o.click_x, o.click_y));
+        const QuestProbe probe = probe_quest(clear_frame, p, s);
+        check(probe.window.found && probe.option.found && probe.tab_ok && probe.click_ok &&
+                  contains(probe.log, "click 524,592 ok") && contains(probe.vi, "đang tắt"),
+              "Thử xem on it: the box clear, and GoBot's click at 524,592 allowed -- " + probe.log);
+        QuestSettings old = s;
+        old.forbid_buttons = ScreenRect{ 283, 412, 103, 41 };
+        const QuestProbe was = probe_quest(clear_frame, p, old);
+        check(!was.click_ok && contains(was.log, "click 524,592 refused") &&
+                  contains(was.vi, "GoBot sẽ không bấm vào ô Tự Động"),
+              "(with GoC's 103 px, as every quest.ini had it, the same probe said it would refuse)");
+    }
+
+    // The box ticked in a look no picture has, on the live window.
+    check_ticked_by_change(TickedPlace{ "the live window", win, 518, 585, 524, 592 }, game);
 }
 
 // --------------------------------------------------------------------- cancel
@@ -1704,6 +2218,73 @@ void test_left_open() {
     }
 }
 
+/// A round put off goes to the log as well, once for each change of what it
+/// waits for: the farm of 2026-11-03 had two rounds 364 s apart and nothing
+/// in the log to say why. The GUI's tell does it, by the words QuestRun says a
+/// wait with -- "Chờ: " and the reason and a full stop -- which a not-now
+/// after the hold copies, being logged where it is made.
+void test_postpone_log() {
+    section("Quick quest: a round put off goes to the log, once for each change of reason");
+
+    QuestSettings s;
+    s.enabled = true;
+    s.first_delay_s = 0;
+    {
+        PretendRun p;
+        p.run.start(p.now, s);
+        p.gates.hp_pct = 55.0f;
+        p.go(31'000);
+        p.gates.hp_pct = 100.0f;
+        p.gates.user_active = true;
+        p.go(31'000);
+        check(p.said.size() >= 2 && p.said[p.said.size() - 2] == "Chờ: máu thấp." &&
+                  p.said.back() == "Chờ: bạn đang dùng chuột hoặc bàn phím.",
+              "the run says each wait as \"Chờ: \", the reason and a full stop -- \"" +
+                  (p.said.empty() ? std::string() : p.said.back()) + "\"");
+    }
+    {
+        // A not-now from the round itself: the same words, its own reason.
+        QuestRun run(3);
+        std::vector<std::string> said;
+        QuestRun::Hooks h;
+        h.gates = [] {
+            QuestGateInput in;
+            in.window = in.focused = true;
+            in.hp_pct = 100.0f;
+            return in;
+        };
+        h.round = [](const QuestCall&) {
+            QuestResult r;
+            r.outcome = QuestOutcome::NotNow;
+            r.why = "bot đang bấm phím";
+            return r;
+        };
+        h.say = [&said](const std::string& line) { said.push_back(line); };
+        run.set_hooks(h);
+        run.start(1000, s);
+        run.step(1100);
+        check(!said.empty() && said.back() == "Chờ: bot đang bấm phím.",
+              "a not-now after the hold: \"Chờ: bot đang bấm phím.\" -- the words held_not_now marks as said");
+    }
+
+    const std::string src = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/simple_quest.cpp");
+    if (src.empty()) {
+        skip("the source tree's apps/gobot_gui/simple_quest.cpp is not here\n");
+        return;
+    }
+    const std::size_t tell = src.find("const auto tell = [this, &waited_for](const std::string& vi) {");
+    const std::size_t end = tell == std::string::npos ? std::string::npos : src.find("\n    };", tell);
+    const std::string body = end == std::string::npos ? std::string() : src.substr(tell, end - tell);
+    check(contains(body, "if (vi.rfind(\"Chờ:\", 0) != 0) {") && contains(body, "waited_for.clear();") &&
+              contains(body, "} else if (vi != waited_for) {") &&
+              contains(body, "GB_INFO(\"Quest: put off -- %s\", vi.c_str());") && contains(body, "say_quest(vi);"),
+          "the tell: a \"Chờ:\" line logged when it is not the last one logged; anything else said ends the wait; "
+          "the tab told every time");
+    check(contains(src, "waited_for = \"Chờ: \" + why + \".\";") &&
+              src.find("waited_for = \"Chờ: \" + why + \".\";") > src.find("GB_INFO(\"Quest: not now -- %s\""),
+          "a not-now logged after the hold is marked as said, so the wait it starts is not logged twice");
+}
+
 // --------------------------------------------------------------------- probe
 
 void test_probe_and_frames() {
@@ -1801,6 +2382,17 @@ void test_texts() {
         all = all && quest_trouble_why(x) == text && x.failed() && !x.done();
     }
     check(all, "each failure has fixed words for the alert, and counts as a failure");
+    {
+        QuestResult refused;
+        refused.outcome = QuestOutcome::Refused;
+        const std::string could_not = quest_trouble_why(refused);
+        refused.refused_place = true;
+        const std::string would_not = quest_trouble_why(refused);
+        check(could_not == "không bấm được vào cửa sổ Nhiệm Vụ" &&
+                  would_not == "không dám bấm vào chỗ cần bấm trong cửa sổ Nhiệm Vụ" && refused.failed(),
+              "refused: \"" + could_not + "\" when the input did not go, \"" + would_not +
+                  "\" when GoBot would not click there");
+    }
     QuestResult ok;
     ok.outcome = QuestOutcome::AlreadyOn;
     QuestResult stop;
@@ -1850,10 +2442,13 @@ void test_quest(void (*check_fn)(bool, const std::string&), void (*section_fn)(c
     test_auto();
     test_round();
     test_forbidden();
+    test_ticked_by_change();
+    test_live_window();
     test_cancel();
     test_schedule();
     test_low_hp();
     test_left_open();
+    test_postpone_log();
     test_probe_and_frames();
     test_texts();
 }

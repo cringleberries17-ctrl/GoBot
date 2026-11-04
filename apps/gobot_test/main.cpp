@@ -2958,6 +2958,47 @@ void test_monster_frames() {
                   !read_map_monsters(sent(stop)) && !read_monster_state(inside(table)),
               "each reader takes its own opcode only");
     }
+    // ---- 0x0038 on today's server: states 6 and 7 a hurt -- the hitter at
+    // 48, the damage at 52, the HP it left at 64 -- and 3 and 11 someone at
+    // grips with the monster, for the log alone.
+    {
+        Frame hurt = state_frame(6, 12);
+        hurt.u8(24, 0x01);
+        hurt.f32(28, 2.0f);
+        hurt.u16(32, 3300);
+        hurt.u16(34, 640);
+        hurt.u32(48, 759);
+        hurt.u32(52, 24103);
+        hurt.i32(64, 43565);
+        const auto h = read_monster_state(sent(hurt));
+        check(h && h->event == MonsterEvent::Hurt && h->state == 6 && h->slot == 12 && h->attacker == 759u &&
+                  h->damage == 24103 && h->hp == 43565 && h->x == 3300 && h->y == 640 && !h->killed(),
+              "state 6: a hurt, the hitter at 48, the damage at 52, the HP left at 64, the place at 32 and 34");
+        Frame seven = hurt;
+        seven.u8(12, 7);
+        const auto s7 = read_monster_state(sent(seven));
+        check(s7 && s7->event == MonsterEvent::Hurt && s7->state == 7, "state 7: a hurt as well");
+        Frame last = hurt;
+        last.i32(64, -12);
+        const auto k = read_monster_state(sent(last));
+        check(k && k->event == MonsterEvent::Hurt && k->killed(), "a hurt that leaves none has killed");
+        check(!read_monster_contact(sent(hurt)) && !read_monster_contact(sent(stop)) &&
+                  !read_monster_contact(sent(hit)),
+              "a hurt, a stop or a hit is no contact");
+
+        Frame touch = state_frame(3, 12);
+        touch.u32(48, 759);
+        touch.i32(64, 43565);
+        const auto c = read_monster_contact(sent(touch));
+        check(c && c->state == 3 && c->slot == 12 && c->actor == 759u && c->hp == 43565 &&
+                  !read_monster_state(sent(touch)),
+              "state 3: a contact, its actor at 48 and the HP at 64 -- and no state read_monster_state takes");
+        const auto e = read_monster_contact(sent(state_frame(11, 4)));
+        check(e && e->state == 11 && e->slot == 4 && !e->actor, "state 11 too; an actor of 0xFFFFFFFF is none");
+        check(!read_monster_contact(inside(touch)) &&
+                  never(sent(touch), [](const GamePacket& p) { return read_monster_contact(p).has_value(); }),
+              "nor one inside a wrapper, from the client, or over UDP");
+    }
 
     // ---- One stream from the server, framed and unpacked as a recording is
     // read: each reader finds its own frames in it.
@@ -3562,6 +3603,55 @@ void test_opcode_registry_load() {
     reg.clear();
     check(reg.size() == 0 && !reg.known(0x0405), "clear() empties it");
     std::remove(path.c_str());
+
+    // [Packet.0x0038] as protocol.ini had it until 2026.11.03, x, y at payload
+    // @80/@82 -- a point beside the monster -- and kept in a player's own copy,
+    // which a build never replaces: read as the shipped file reads now, with a
+    // warning, the file left as it is. A line edited since is only warned of.
+    {
+        Logger& log = Logger::instance();
+        const LogLevel was = log.level();
+        log.set_level(LogLevel::Info);
+        log.set_ring_capacity(200);
+        log.clear_ring();
+        const auto warnings = [&log] {
+            int n = 0;
+            for (const LogLine& line : log.ring())
+                if (line.text.find("OpcodeRegistry: [Packet.0x0038] in ") != std::string::npos) ++n;
+            return n;
+        };
+        const std::string old_path = temp_file("registry_0038.ini");
+        write_lines(old_path, { "[Packet.0x0038]", "name=EntityUpdate", "semantic=monster_update",
+                                "fields=id:u32@8, speed:f32@20, x:u16@80, y:u16@82" });
+        OpcodeRegistry older;
+        const bool read = older.load(old_path);
+        const auto fixed = older.find_copy(0x0038);
+        bool right = fixed && fixed->fields.size() == 5 && fixed->fields[4].name == "hp";
+        const std::size_t want[] = { 8, 20, 24, 26, 56 };
+        for (std::size_t i = 0; right && i < 5; ++i)
+            right = fixed->fields[i].has_fixed_offset && fixed->fields[i].fixed_offset == want[i];
+        const int first = warnings();
+        IniFile kept;
+        const bool untouched = kept.load(old_path) &&
+                               kept.get("Packet.0x0038", "fields", "").find("x:u16@80") != std::string::npos;
+        check(read && right && first == 1 && untouched,
+              "the old 0x0038 line, spaces and all, is read as x, y at @24/@26 and hp at @56 -- said once in the "
+              "log, and the file left as it was");
+
+        write_lines(old_path, { "[Packet.0x0038]", "name=EntityUpdate", "semantic=monster_update",
+                                "fields=id:u32@8,x:u16@80,y:u16@82" });
+        OpcodeRegistry edited;
+        const bool read_edited = edited.load(old_path);
+        const auto own = edited.find_copy(0x0038);
+        const bool as_written = own && own->fields.size() == 3 && own->fields[1].fixed_offset == 80u &&
+                                own->fields[2].fixed_offset == 82u;
+        const int second = warnings();
+        log.set_level(was);
+        log.set_ring_capacity(0);
+        check(read_edited && as_written && second == 2,
+              "a line edited since, still at @80 and @82, is read as written -- and only warned of");
+        std::remove(old_path.c_str());
+    }
 }
 
 /// The body of test_opcode_registry_threads, run under finish_within.
@@ -3840,19 +3930,20 @@ void test_opcode_registry_strict() {
     check(z && z->groups.size() == 3, "and three groups of nothing but zeros are three");
 
 #ifdef GOBOT_SOURCE_DIR
-    // The layout that ships reads as it always did under these rules.
+    // The layout that ships reads under these rules: the monster's own place
+    // and HP since 2026.11.03, not the stale point beside it at 80 and 82.
     OpcodeRegistry shipped;
     const bool loaded = shipped.load(std::string(GOBOT_SOURCE_DIR) + "/configs/protocol.ini");
     const auto own = shipped.find_copy(0x0038);
-    bool offsets = own && own->fields.size() == 4;
-    const std::size_t want[] = { 8, 20, 80, 82 };
-    for (std::size_t i = 0; offsets && i < 4; ++i)
+    bool offsets = own && own->fields.size() == 5;
+    const std::size_t want[] = { 8, 20, 24, 26, 56 };
+    for (std::size_t i = 0; offsets && i < 5; ++i)
         offsets = own->fields[i].has_fixed_offset && own->fields[i].fixed_offset == want[i];
     if (!loaded)
         skip("the source tree's configs/protocol.ini is not here\n");
     else
         check(shipped.size() == 1 && offsets,
-              "the shipped protocol.ini still loads its one layout, 0x0038, at offsets 8, 20, 80 and 82");
+              "the shipped protocol.ini loads its one layout, 0x0038, as 5 fields at offsets 8, 20, 24, 26 and 56");
 #endif
 }
 
@@ -5946,8 +6037,8 @@ void test_shipped_configs() {
           "hunt.ini: keep_distance=false, 3 steps, facing_tolerance=12");
     check(hunt.jump_key == 0 && !hunt.jump_checked,
           "hunt.ini: jump_key=0 -- no jump key until the player sets one -- and not tried");
-    // The player's choice: the capture starts by itself with the hunting, and
-    // only watches until "Vị trí từ gói tin" is ticked. A player's own hunt.ini
+    // The player's choice: the capture runs by itself all session, and only
+    // watches until "Vị trí từ gói tin" is ticked. A player's own hunt.ini
     // is never replaced, and without the key the code's default decides: the
     // same.
     check(hunt_ini.has_key("Hunt", "packet_positions") && hunt.packet_positions == PacketPositions::Watch &&
@@ -5963,6 +6054,11 @@ void test_shipped_configs() {
     check(spot_keys && !hunt.spot && hunt.spot_half_w == 300 && hunt.spot_half_h == 100 && hunt.spot_tolerance == 48 &&
               hunt.spot_return_delay_ms == 1500 && hunt.spot_give_up_ms == 4000 && hunt.spot_retry_ms == 30000,
           "hunt.ini: spot=false, and its numbers there at the code's defaults");
+    // "Nhảy xuống bậc dưới" moves the character: off, its numbers the code's.
+    check(hunt_ini.has_key("Hunt", "drop_down") && hunt_ini.has_key("Hunt", "drop_min_px") &&
+              hunt_ini.has_key("Hunt", "drop_side_px") && hunt_ini.has_key("Hunt", "drop_gate_px") && !hunt.drop_down &&
+              hunt.drop_min_px == 100 && hunt.drop_side_px == 120 && hunt.drop_gate_px == 150,
+          "hunt.ini: drop_down=false, 100, 120, 150");
 
     Party::Settings party;
     check(party.load(dir + "party.ini") && !party.auto_accept && !party.auto_invite,
@@ -9223,6 +9319,43 @@ void test_no_real_input() {
                   (GetAsyncKeyState(static_cast<int>(kNobodysKey)) & 0x8000) == 0 &&
                   reached_it() == 0,
               "and nothing is held, by GoBot or by Windows, nor reached the window aimed at");
+    }
+
+    // ---- ↓, and the drop's Ctrl + ↓ ----
+    {
+        // ↓ is refused before the switch is asked at all: never_pressed, in
+        // send_key and type_key, whatever asks for it.
+        InputManager keys;
+        keys.set_target_window(hidden);
+        bool down = true, pressed = true, typed = true, typed_high = true, dropped = true;
+        check(refusals_in([&] { down = keys.key_down(VK_DOWN); }) == 0 && !down &&
+                  refusals_in([&] { pressed = keys.key_press(VK_DOWN, 1); }) == 0 && !pressed &&
+                  refusals_in([&] { typed = keys.type_key(VK_DOWN, false, 1); }) == 0 && !typed &&
+                  refusals_in([&] { typed_high = keys.type_key(0x10028u, true, 1); }) == 0 && !typed_high &&
+                  refusals_in([&] { dropped = keys.jump_down(); }) == 0 && !dropped,
+              "↓ held, pressed, typed (0x10028 too) or under the old jump_down: false, and refused before the "
+              "switch is even asked");
+        // The drop asks the switch first of all: before the window, the
+        // game in front, or its own go_on.
+        int asked = 0;
+        InputManager::DropPress drop;
+        drop.sent = InputManager::DropSent::Sent;
+        const auto drop_n = refusals_in([&] {
+            drop = keys.drop_ctrl_down([&] {
+                ++asked;
+                return true;
+            });
+        });
+        check(drop_n == 1 && drop.sent == InputManager::DropSent::NotSent && drop.down_ms == 0 && asked == 0,
+              "Ctrl + ↓ is refused, once, before go_on or the window is asked: NotSent");
+        int ups = -1;
+        check(refusals_in([&] { ups = keys.release_stray_drop_keys(); }) == 1 && ups == 0,
+              "so is letting go of a ↓ or Ctrl left down");
+        bool settled = false;
+        check(refusals_in([&] { settled = keys.settle_owed(); }) == 0 && settled && !keys.keys_owed() &&
+                  InputManager::pretend_inject({ InputManager::SentEvent{} }) == 0,
+              "nothing owed, nothing sent; and a test's array goes nowhere with no pretend sender");
+        check(hidden != nullptr && reached_it() == 0, "and nothing reached the window aimed at");
     }
 
     // A window of this test's own that has gone: aimed at, there is nowhere
@@ -16890,6 +17023,30 @@ void test_charm_sources() {
           "gui_app.cpp: no other pass is a charm run");
     check(job.find("if (!settings.use_charms) {") != npos && gui.find("!held && settings.use_charms") != npos,
           "and the timed job runs only with 'Dùng bùa' ticked, and not while the bin may hold something");
+    {
+        // The packets' bag on each charm's slot, handed to the cleaner before
+        // it runs: read only, it can stop a right-click and never cause one.
+        const std::size_t packets = job.find("cleaner.set_charm_packets(");
+        check(packets != npos && run != npos && packets < run && job.find("return bag_charm_slot(") != npos &&
+                  count_of(gui, "set_charm_packets(") == 1,
+              "gui_app.cpp: the charm job asks the packets' bag of each slot (bag_charm_slot) -- set before the run, "
+              "and in no other job");
+    }
+    {
+        // Its deadline by the kinds due, and the message a run left up handed
+        // to the next -- for two minutes, and never renewed by a run that only
+        // found it still there.
+        const std::size_t deadline = job.find("cleaner.set_deadline_ms(BagCleaner::charm_deadline_ms(due_kinds));");
+        const std::size_t own = job.find("if (notice_kept) cleaner.set_own_notice(charm_notice_place);");
+        check(deadline != npos && run != npos && deadline < run && job.find("cleaner.set_deadline_ms(20'000);") == npos,
+              "gui_app.cpp: the charm job's deadline is 12 s and 3 s a kind due, 20 to 40 s (charm_deadline_ms)");
+        check(own != npos && run != npos && own < run && count_of(gui, "set_own_notice(") == 1 &&
+                  job.find("charm_notice_ms + 120'000") != npos &&
+                  job.find("bool any_due = forced || notice_kept;") != npos &&
+                  job.find("} else if (!r.notice_carried || charm_notice_ms == 0) {") != npos,
+              "and a message the last run left up is the next run's to close, for two minutes, a reason to run with "
+              "nothing due, in no other job");
+    }
 
     // The potion shop job, the same way: the mouse, then the one hold, then the
     // run, a guard that ends it with the hold or with HP under the potion's
@@ -19048,6 +19205,13 @@ void test_gui_stop() {
                   ends_after_stop(body_of(gui, "GuiApp::Crossed GuiApp::run_crossing(")),
               "the keeper ends no client once told to stop: asked just before it shuts the game down, and in "
               "the one crossing's end-the-client, which counts it as a restart first");
+        // Its waits in 100 ms slices, each asking the stop: a DỪNG's join
+        // waits a tenth of a second for it, not half of one.
+        const std::size_t slice = keeper.find("std::this_thread::sleep_for(std::chrono::milliseconds(100));");
+        const std::size_t sliced_from = slice == npos ? npos : keeper.rfind("for (", slice);
+        check(!keeper.empty() && keeper.find("milliseconds(500)") == npos && slice != npos && sliced_from != npos &&
+                  keeper.substr(sliced_from, slice - sliced_from).find("&& !keeper_stop_; ++i)") != npos,
+              "keeper_loop waits in 100 ms slices, each asking keeper_stop_, none of 500 ms");
         const std::string trash = body_of(gui, "void GuiApp::trash_loop() {");
         check(trash.find("while (!trash_stop_ && !mouse.try_lock())") != npos &&
                   trash.find("if (!passed && trash_stop_) break;") != npos,
@@ -19091,9 +19255,9 @@ void test_gui_stop() {
 }
 
 /// "Vị trí từ gói tin" in GoBot's window: the capture the positions come
-/// from, started with the hunting, and what it shares with the Protocol tab,
-/// Autopilot and the packet bot. GuiApp needs its window and the game to run,
-/// so this is read off its source.
+/// from, running all session and started and stopped on its worker, and what
+/// it shares with the Protocol tab, Autopilot and the packet bot. GuiApp
+/// needs its window and the game to run, so this is read off its source.
 void test_position_wiring() {
     section("GoBot's window: the capture for positions, and what it shares (its source)");
 #ifdef GOBOT_SOURCE_DIR
@@ -19110,6 +19274,13 @@ void test_position_wiring() {
         check(fed != npos && plain != npos && fed < plain,
               "on_packets hands every frame -- UDP, and from inside 0x0081 -- to the packet world before any "
               "plain() test");
+        const std::size_t self = on.find("packet_self_.on_packets(all, capture_.start_count());");
+        const std::size_t tally = on.find("frame_tally_.add(all);");
+        const std::size_t more = on.find("more_on_packets(all);");
+        check(self != npos && tally != npos && more != npos && fed < self && self < plain && tally < plain &&
+                  more < plain,
+              "and, after it, to PacketSelf under the capture's start count, to the frames' tally and to the casts' "
+              "part -- every frame, before any plain() test");
     }
     {
         const std::string push = body_of(gui, "void GuiApp::push_framings() {");
@@ -19129,21 +19300,60 @@ void test_position_wiring() {
         const std::string apply = body_of(gui, "void GuiApp::apply_findings() {");
         check(apply.find("PacketWorld::opcodes()") != npos && apply.find("registry_.mapped_opcodes()") != npos,
               "Apply lets the packet world's opcodes through beside the mapped ones");
+        check(apply.find("PacketSelf::opcodes()") != npos,
+              "and every opcode the packets plan reads of your own character, the link and the casts");
     }
     {
+        // The start itself, the socket looks and the stop before it: on the
+        // worker (position_job), never on GoBot's thread.
         const std::string start = body_of(gui, "void GuiApp::start_position_capture() {");
+        const std::string job = body_of(gui, "void GuiApp::position_job(const PositionJobIn& in) {");
         const std::string link = body_of(gui, "GameLink game_link_of(");
-        check(start.find("game_link_of(pid, conns)") != npos && link.find("udp_ports_for_pid(pid)") != npos &&
-                  start.find("build_own_filter_for(conns, position_link_.udp_ports)") != npos &&
-                  start.find("capture_.set_opcode_filter({});") != npos && start.find("packet_world_.reset();") != npos &&
+        check(job.find("game_link_of(pid, conns)") != npos && link.find("udp_ports_for_pid(pid)") != npos &&
+                  job.find("build_own_filter_for(conns, out.link.udp_ports)") != npos &&
+                  start.find("capture_.set_opcode_filter({});") != npos && job.find("packet_world_.reset();") != npos &&
                   start.find("push_framings();") != npos,
               "the capture for positions: the game's own connections and UDP sockets by its process id and "
-              "nobody else's, every opcode let through, unpacked, and the packet world started afresh");
+              "nobody else's, every opcode let through, unpacked, and the packet world started afresh for a new "
+              "game -- the sockets looked at, and the world started, by the job on the worker");
         const std::size_t running = start.find("if (capture_.running()) {");
-        const std::size_t starts = start.find("capture_.start(cfg)");
-        check(running != npos && starts != npos && running < starts && start.find("capture_.stop()") == npos,
+        const std::size_t posted = start.find("capture_worker_.post(");
+        check(running != npos && posted != npos && running < posted && start.find("capture_.stop()") == npos &&
+                  start.find("capture_.start(") == npos && start.find("game_link_of(") == npos &&
+                  job.find("capture_.start(cfg)") != npos,
               "a capture already running -- the Protocol tab's, Autopilot's, the packet bot's -- is used as it is, "
-              "never stopped from there");
+              "never stopped from there; otherwise the start is posted to capture_worker_, which looks at the "
+              "sockets and starts it");
+        const std::size_t same = job.find("if (pid == in.before.pid");
+        const std::size_t relinked = job.find("relink(");
+        const std::size_t afresh = job.find("reset();");
+        check(same != npos && relinked != npos && afresh != npos && same < relinked && same < afresh &&
+                  job.find("packet_self_.relink();") != npos && job.find("packet_self_.reset();") != npos,
+              "the job keeps the world (relink) only for the same game process with no new connection, and starts it "
+              "afresh (reset) for anything else -- PacketSelf with it");
+        const std::string attach = body_of(gui, "void GuiApp::position_reattach(std::uint64_t now) {");
+        check(attach.find("game_link_of(") == npos && attach.find("capture_worker_.post(") != npos &&
+                  attach.find("capture_.stop()") == npos && job.find("should_reattach(") != npos,
+              "position_reattach reads no socket table and stops nothing: it posts a job, which decides by "
+              "should_reattach");
+        const std::string init = body_of(gui, "void GuiApp::initialise() {");
+        const std::size_t framed = attach.find("push_framings();");
+        const std::size_t sent = attach.find("capture_worker_.post(");
+        const std::size_t batched = job.find("capture_.set_batch_interval_ms(20);");
+        const std::size_t begun = job.find("out.started = capture_.start(cfg);");
+        check(init.find("push_framings();") != npos && framed != npos && sent != npos && framed < sent &&
+                  batched != npos && begun != npos && batched < begun,
+              "every capture the worker starts frames the game's stream as protocol.ini says, from GoBot's first "
+              "tick -- not the default framing until HUNT ON -- in batches of 20 ms");
+        check(job.find("all_in(in.before.servers") == npos &&
+                  job.find("if (out.refused) iface_by_ip_.erase(") != npos && job.find("iface_by_ip_.emplace(") == npos,
+              "a connection gone since keeps the world (only a new process or connection starts it afresh); the "
+              "adapter kept only when found by the game's address, and forgotten when the capture refuses it");
+        const std::string attaching = body_of(gui, "bool GuiApp::position_attaching(std::uint64_t now) {");
+        check(attaching.find("position_start_failed_ && tried < position_backoff_ms_") != npos &&
+                  attaching.find("kPositionIdleLooksMs") != npos,
+              "with no capture, the game looked for every second only while a start is not backing off, and for two "
+              "minutes of nothing to capture -- every five seconds after");
         const std::string autopilot = body_of(gui, "void GuiApp::auto_step() {");
         check(autopilot.find("build_filter_for(game_connections_, udp_ports_for_pid(game_pid_))") != npos &&
                   autopilot.find("packet_world_.reset();") != npos,
@@ -19159,30 +19369,100 @@ void test_position_wiring() {
         const std::string stop = body_of(gui, "void GuiApp::stop_hunt() {");
         const std::string halt = body_of(gui, "void GuiApp::stop_position_capture() {");
         const std::string shared = body_of(gui, "bool GuiApp::capture_shared() {");
-        check(stop.find("stop_position_capture();") != npos && halt.find("if (!position_capture_) return;") != npos &&
-                  halt.find("if (capture_shared()) return;") != npos && shared.find("bot_running_") != npos &&
-                  shared.find("Auto::Idle") != npos && shared.find("recording_") != npos &&
-                  shared.find("calibrator_") != npos,
-              "stop_hunt stops it -- never a capture it did not start, nor one the packet bot, Autopilot, a "
-              "recording or the calibration is reading");
+        check(!stop.empty() && stop.find("stop_position_capture();") == npos &&
+                  halt.find("if (!position_capture_) return;") != npos &&
+                  halt.find("if (capture_shared()) return;") != npos && halt.find("capture_worker_.post(") != npos &&
+                  shared.find("bot_running_") != npos && shared.find("Auto::Idle") != npos &&
+                  shared.find("recording_") != npos && shared.find("calibrator_") != npos,
+              "stop_hunt keeps it: the capture runs all session, and F11, DỪNG and F12 join no thread of it. It "
+              "stops only once the positions are switched off -- on the worker, never a capture it did not start, "
+              "nor one the packet bot, Autopilot, a recording or the calibration is reading");
         const std::string manual = body_of(gui, "void GuiApp::stop_capture() {");
         const std::string again = body_of(gui, "void GuiApp::position_reattach(std::uint64_t now) {");
+        const std::string job = body_of(gui, "void GuiApp::position_job(const PositionJobIn& in) {");
+        const std::string by_hand = body_of(gui, "void GuiApp::start_capture() {");
         check(manual.find("position_capture_off_ = true;") != npos &&
-                  again.find("if (position_capture_off_) return;") != npos && again.find("should_reattach(") != npos,
-              "a capture stopped by hand is not started again for positions until the next hunt");
-        const std::string starts = body_of(gui, "void GuiApp::start_position_capture() {");
+                  again.find("if (position_capture_off_) return;") != npos && job.find("should_reattach(") != npos &&
+                  by_hand.find("position_capture_off_ = false;") != npos,
+              "a capture stopped by hand is not started again for positions until the next hunt, or the Capture "
+              "tab's Start");
+        const std::string applied = body_of(gui, "void GuiApp::position_started(const PositionJobOut& out) {");
         const std::size_t refused = again.find("if (position_start_failed_) {");
-        const std::size_t retried = again.find("start_position_capture();");
-        check(starts.find("position_start_failed_ = true;") != npos &&
-                  starts.find("position_backoff_ms_ = std::min<std::uint64_t>(position_backoff_ms_ * 2") != npos &&
-                  refused != npos && retried != npos && refused < retried &&
+        const std::size_t posted = again.find("capture_worker_.post(");
+        check(applied.find("position_start_failed_ = true;") != npos &&
+                  applied.find("position_backoff_ms_ = std::min<std::uint64_t>(position_backoff_ms_ * 2") != npos &&
+                  refused != npos && posted != npos && refused < posted &&
                   again.find("since_try < position_backoff_ms_") != npos &&
+                  job.find("in.failed && in.backoff != 0 && !should_reattach(") != npos &&
                   hunt.find("position_start_failed_ = false;") != npos,
               "a start the capture itself refused is tried again at once only for a new game link, otherwise "
-              "after twice as long each time -- not every 10 s, its lines in the log each time -- and afresh at "
+              "after twice as long each time -- not at every look, its lines in the log each time -- and afresh at "
               "the next hunt");
         const std::string tick = body_of(gui, "void GuiApp::tick() {");
         check(tick.find("positions_tick();") != npos, "tick() keeps the capture, and writes its line every 10 s");
+    }
+    {
+        // All session: the capture is wanted whatever hunts, and wanted the
+        // same in light mode; the jobs that start and stop it never run on
+        // GoBot's thread.
+        const std::string ticks = body_of(gui, "void GuiApp::positions_tick() {");
+        const std::string wanted = body_of(gui, "bool GuiApp::packets_wanted() const {");
+        const std::string job = body_of(gui, "void GuiApp::position_job(const PositionJobIn& in) {");
+        const std::string watch = source_text("/apps/gobot_gui/packets_watch.cpp");
+        check(ticks.find("packets_wanted()") != npos && ticks.find("if (!hunting_ ||") == npos &&
+                  ticks.find("take_position_out()") != npos && ticks.find("note_map_entries();") != npos &&
+                  ticks.find("packets_minute(now);") != npos,
+              "positions_tick runs while the packets are wanted, hunt or no hunt: the map entries said and the "
+              "Packets line written all session, a finished job taken in");
+        check(wanted.find("PacketPositions::Off") != npos && wanted.find("position_capture_off_") != npos,
+              "packets_wanted: unless packet_positions is Off or the capture was stopped by hand");
+        check(!ticks.empty() && !wanted.empty() && !job.empty() && !watch.empty() &&
+                  ticks.find("light_") == npos && wanted.find("light_") == npos && job.find("light_") == npos &&
+                  watch.find("light_") == npos,
+              "nothing on the capture's path asks for light mode: positions_tick, packets_wanted, position_job and "
+              "packets_watch.cpp");
+        const std::string autopilot = body_of(gui, "void GuiApp::auto_step() {");
+        const std::size_t from = autopilot.find("case Auto::StartCapture: {");
+        const std::size_t to = from == npos ? npos : autopilot.find("case Auto::Recording: {", from);
+        const std::string step = to == npos ? std::string() : autopilot.substr(from, to - from);
+        const std::size_t ours = step.find("if (position_capture_) {");
+        const std::size_t stopped = ours == npos ? npos : step.find("capture_.stop();", ours);
+        const std::size_t other = ours == npos ? npos : step.find("} else {", ours);
+        const std::size_t by_hand = other == npos ? npos : step.find("stop_capture();", other);
+        check(step.find("if (capture_worker_.busy()) return;") != npos && stopped != npos && other != npos &&
+                  stopped < other && by_hand != npos && step.find("position_capture_off_") == npos,
+              "Autopilot's StartCapture waits out a job under way, and stops the capture for positions without "
+              "stop_capture() -- the packets are not kept off after it");
+        const std::string closing = body_of(gui, "GuiApp::~GuiApp() {");
+        const std::size_t worker = closing.find("capture_worker_.stop();");
+        const std::size_t capture = closing.find("stop_capture();");
+        check(worker != npos && capture != npos && worker < capture,
+              "~GuiApp lets the worker's job finish, and starts none, before the capture is stopped");
+        const std::size_t minute = closing.find("packets_minute(");
+        const std::size_t minute_if = minute == npos ? npos : closing.rfind("if (packets_minute_ms_ != 0", minute);
+        const std::size_t jobs_stopped = closing.find("stop_jobs(true);");
+        check(minute_if != npos && closing.substr(minute_if, minute - minute_if).find("10'000") != npos &&
+                  jobs_stopped != npos && minute < jobs_stopped,
+              "~GuiApp writes the packets' minute lines -- Vitals check, Bag, Casts -- over what is left of their "
+              "minute, ten seconds of it at least, before anything is stopped");
+        const std::string start = body_of(gui, "void GuiApp::start_capture() {");
+        const std::string halt = body_of(gui, "void GuiApp::stop_capture() {");
+        check(start.rfind("capture_worker_.wait_idle();", start.find("capture_.start(")) != npos &&
+                  halt.find("capture_worker_.wait_idle();") < halt.find("capture_.stop();"),
+              "the Capture tab's Start and Stop -- a hand's, never a key's -- wait for the worker first");
+        const std::string hunt = body_of(gui, "void GuiApp::start_hunt() {");
+        const std::string line = body_of(gui, "void GuiApp::packet_watch_tick() {");
+        check(hunt.find("hunt_world_seen_ = packet_world_.stats();") != npos &&
+                  line.find("packet_world_.stats().since(hunt_world_seen_)") != npos,
+              "the Positions line counts from HUNT ON, though the capture runs all session");
+        check(line.find("<< \", others' \" << ws.contacts_others") != npos,
+              "and its contacts say the others' beside yours, as its kills and hurts do");
+        const std::string tick = body_of(gui, "void GuiApp::tick() {");
+        const std::size_t said = tick.find("if (traffic_lost_.load()) say_traffic_lost();");
+        const std::size_t lost = tick.find("if (traffic_lost_.exchange(false)) stop_bot();");
+        check(said != npos && lost != npos && said < lost && tick.find("detector_pace_tick(") != npos,
+              "tick() says what the game gone quiet means just before it stops the bot for it, and asks the "
+              "detector's pace every pass");
     }
     {
         const std::string simple = source_text("/apps/gobot_gui/simple_view.cpp");
@@ -19307,6 +19587,9 @@ void test_spot_wiring() {
         const std::string pack = source_text("/package.ps1");
         check(pack.find("@('hunt.ini', 'Hunt', 'spot'),") != npos,
               "package.ps1 holds hunt.ini's spot to ship off, as keep_distance");
+        // And the drop through a platform (Ctrl + ↓), the player's answer 8.
+        check(pack.find("@('hunt.ini', 'Hunt', 'drop_down'),") != npos,
+              "package.ps1 holds hunt.ini's drop_down to ship off too");
     }
 #else
     skip("no source folder\n");
@@ -19355,6 +19638,16 @@ void test_gui_clicks() {
                   quest.find("WindowFromPoint") == npos && quest.find("GA_ROOT") == npos &&
                   quest.find("ClientToScreen") == npos && quest.find("click_at(") == npos,
               "simple_quest.cpp: a quest round clicks through click_on_game, with its halt, and nothing else");
+        // A round that took the hold and then would not go says why in the
+        // log; the not-nows before the hold, which come every turn, do not.
+        const std::size_t round_from = loop.find("const auto one_round = [&](const QuestCall& call) -> QuestResult {");
+        const std::size_t held = round_from == npos ? npos : loop.find("if (!take_hold(kQuestHold)) {", round_from);
+        const std::size_t said = held == npos ? npos : loop.find("GB_INFO(\"Quest: not now -- %s\"", held);
+        const std::size_t ran = loop.find("QuestResult r = round.run();");
+        check(said != npos && ran != npos && said < ran && loop.find("Quest: not now --") == said + 9 &&
+                  count_of(loop.substr(held, ran - held), "return held_not_now(") == 5,
+              "one_round: each of its 5 not-nows after the hold is logged as \"Quest: not now -- <why>\", none "
+              "before it");
         check(tab.find("put(\"Quest\", \"quest_key\", QuestSettings::key_text(key))") != npos &&
                   tab.find("std::to_string(key)") == npos,
               "and the Nhiệm vụ tab saves the quest key as key_text writes it: by name, digit keys in hex, so "
@@ -20095,6 +20388,45 @@ void test_protocol_handler() {
     ph.on_packet(zero);
     check(st.self().dead && deaths == 5, "a self_dead packet and then HP read 0 are one death, not two");
 
+    // 0x0038 as the shipped layout reads it: slot 0 is a monster like any
+    // other, at x, y @24/@26, and an HP read below 0 at @56 is a kill, which
+    // takes it off the list. Its id of 0 was taken for no id at all.
+    {
+        OpcodeRegistry monsters;
+        PacketSpec spec;
+        spec.opcode = 0x0038;
+        spec.semantic = Semantic::MonsterUpdate;
+        spec.fields =
+            OpcodeRegistry::parse_field_list("id:u32@8,speed:f32@20,x:u16@24,y:u16@26,hp:i32@56", nullptr);
+        monsters.add(spec);
+        GameState world;
+        ProtocolHandler handler(monsters, world);
+        const auto event = [](std::uint32_t slot, std::uint16_t x, std::uint16_t y, std::int32_t hp) {
+            GamePacket p;
+            p.opcode = 0x0038;
+            p.from_server = true;
+            p.payload.assign(96 - 8, 0);
+            std::memcpy(p.payload.data() + 8, &slot, 4);
+            std::memcpy(p.payload.data() + 24, &x, 2);
+            std::memcpy(p.payload.data() + 26, &y, 2);
+            std::memcpy(p.payload.data() + 56, &hp, 4);
+            return p;
+        };
+        handler.on_packet(event(0, 1636, 850, 67668));
+        const auto slot0 = world.monster(0);
+        check(slot0 && std::abs(slot0->pos.x - 1636.0f) < 0.01f && std::abs(slot0->pos.y - 850.0f) < 0.01f &&
+                  slot0->hp == 67668 && !slot0->dead,
+              "0x0038 for slot 0: a monster like any other, at x, y @24/@26, with its HP @56");
+        handler.on_packet(event(0, 1640, 850, -5000));
+        check(!world.monster(0) && world.monster_count() == 0,
+              "an HP read below 0 is a kill: the monster is taken off the list");
+        PacketSpec nameless = spec;
+        nameless.fields = OpcodeRegistry::parse_field_list("x:u16@24,y:u16@26,hp:i32@56", nullptr);
+        monsters.add(nameless);
+        handler.on_packet(event(3, 100, 200, 500));
+        check(world.monster_count() == 0, "a layout with no id field still keeps no monster");
+    }
+
     // The callbacks are called with no lock of the registry's or the
     // handler's held: gobot_cli's death callback stops the bot there and
     // then, the sniffer's unknown-packet one keeps its own books, and either
@@ -20207,6 +20539,16 @@ void test_macro_fight(void (*check)(bool, const std::string&), void (*section)(c
 void test_hunter_style(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The jump key's Thử and what else the key is, in jump_test.cpp.
 void test_jump(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The drop's key, Ctrl + ↓, and inject() refusing ↓ any other way, in drop_key_test.cpp.
+void test_drop_key(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The game's own map files -- floors read planar, gates from the .prj -- and
+// which map you are on, from a map entry or named from standing points, in
+// map_book_test.cpp.
+void test_map_book(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The hunter's drop to a monster below (Ctrl + ↓): its rule, the drop on a
+// pretend game laid over made-up map files, its settings, and GoBot's window
+// around it, in drop_hunt_test.cpp.
+void test_drop_hunt(void (*check)(bool, const std::string&), void (*section)(const char*));
 // Skills that follow the fight, in skills_test.cpp.
 void test_skills(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The packet world -- you and every monster from the game's frames -- and the
@@ -20233,6 +20575,16 @@ void test_tabs(void (*check)(bool, const std::string&), void (*section)(const ch
 // once per window, the camera fed only when used, frames kept -- in
 // capture_load_test.cpp.
 void test_capture_load(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The game's packets all session: your own character's frames and what keeps
+// them (PacketSelf), the frames by kind, the capture's worker, the macro's
+// presses told, [Packets] in app.ini, and their wiring, in packet_self_test.cpp.
+void test_packet_self(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Your HP and MP from the packets, checked against the bars, in vitals_trust_test.cpp.
+void test_vitals_trust(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The bag from the packets, checked against the hotbar and the shop, in bag_ledger_test.cpp.
+void test_bag_ledger(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Your casts and buffs from the packets, paired with the macro's presses, in cast_match_test.cpp.
+void test_cast_match(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -20371,6 +20723,9 @@ int main() {
     test_macro_fight(check, section);
     test_hunter_style(check, section);
     test_jump(check, section);
+    test_drop_key(check, section);
+    test_map_book(check, section);
+    test_drop_hunt(check, section);
     test_skills(check, section);
     test_packet_world(check, section);
     test_packet_eyes(check, section);
@@ -20378,6 +20733,10 @@ int main() {
     test_load(check, section);
     test_tabs(check, section);
     test_capture_load(check, section);
+    test_packet_self(check, section);
+    test_vitals_trust(check, section);
+    test_bag_ledger(check, section);
+    test_cast_match(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();

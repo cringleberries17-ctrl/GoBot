@@ -408,6 +408,9 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
     }
 
     stopping_.store(false);
+    // Counted before the threads start, so the first frame of this capture
+    // is never handed on under the count of the one before.
+    starts_.fetch_add(1);
     running_.store(true);
     last_flush_ms_ = now_ms();
 
@@ -684,6 +687,7 @@ std::size_t PacketCapture::on_stream(const FlowKey& key, Direction dir,
         // about whether the stream is framed right.
         stats_.frames_decoded += scan.outer_frames();
         stats_.resync_bytes   += scan.resyncs;
+        if (dir == Direction::ToClient) stats_.server_resync_bytes += scan.resyncs;
         stats_.unwrap         += scan.unwrap;
     }
 
@@ -863,7 +867,14 @@ void PacketCapture::watchdog_loop() {
 
 PacketCapture::Stats PacketCapture::stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_;
+    Stats out = stats_;
+    out.starts = starts_.load();
+    return out;
+}
+
+bool PacketCapture::filtering() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return filter_active_;
 }
 
 std::uint64_t PacketCapture::silent_for_ms(const Stats& stats, std::uint64_t now) {

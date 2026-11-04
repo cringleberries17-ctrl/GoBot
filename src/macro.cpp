@@ -1295,6 +1295,10 @@ bool MacroEngine::press(std::uint32_t keycode, std::uint32_t hold_ms, const char
     } else if (hold_max != 0) {
         hold = static_cast<int>(jitter_between(hold_min, hold_max));
     }
+    // When the key went down: the game acts on it then, and what the server
+    // answers -- a drink's bag, a skill's cast -- can come before the key is
+    // up again, 70 to 500 ms later.
+    const std::uint64_t down_ms = clock_now();
     bool ok = hands_.key ? hands_.key(keycode, hold) : input_.key_press(keycode, hold);
     // The key went down, and the game lost focus before it came up -- the
     // player clicking another window in the moment it was held: the key-up
@@ -1316,6 +1320,9 @@ bool MacroEngine::press(std::uint32_t keycode, std::uint32_t hold_ms, const char
         std::lock_guard<std::mutex> lock(stats_mutex_);
         ++stats_.presses;
     }
+    // Outside the stats' lock: whoever is told takes a lock of its own. At
+    // the key-down's time.
+    if (ok && on_press_) on_press_(keycode, down_ms);
     return ok;
 }
 

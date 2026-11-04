@@ -572,7 +572,7 @@ void test_capture_wiring() {
     const std::string release = body(gui, "void GuiApp::release_detector() {");
     const std::string wanted = body(gui, "bool GuiApp::detector_wanted() const {");
     const std::string tick = body(gui, "void GuiApp::tick() {");
-    check(before(stop_hunt, "stop_position_capture();", "release_detector();") &&
+    check(has(stop_hunt, "release_detector();") && !has(stop_hunt, "stop_position_capture();") &&
               before(stop_det, "detector_running_ = false;", "stop_hunt();") &&
               has(release, "if (!detector_running_ || detector_wanted()) return;") &&
               has(wanted, "hunting_") && has(wanted, "monster_look_running()") && has(wanted, "jump_test_running()") &&
@@ -590,8 +590,10 @@ void test_capture_wiring() {
           "simple_style.cpp: a Thử under way keeps the detector, whoever started it, and lets it go when it ends");
 
     // The pace: every pass, and at the top of every start.
-    check(has(tick, "vitals_.set_period_ms(any_job_alive() ? vitals_run_period() : performance_.vitals_idle_ms);"),
-          "tick(): HP and MP at the run's pace while a job is alive, at vitals_idle_ms otherwise");
+    const std::string pace = body(source("/apps/gobot_gui/packets_vitals.cpp"), "int GuiApp::vitals_pace() const {");
+    check(has(tick, "vitals_.set_period_ms(vitals_pace());") && has(pace, "any_job_alive()") &&
+              has(pace, "vitals_run_period()") && has(pace, "performance_.vitals_idle_ms"),
+          "tick(): HP and MP at the run's pace while a job is alive, at vitals_idle_ms otherwise (vitals_pace)");
     check(before(tick, "const std::uint64_t read_at = last >= vitals_.paced_from_ms() ? last : 0, at = now_ms();",
                  "macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at"),
           "tick(): a read taken at the idle pace before a job started is handed to the macro as no reading");
@@ -685,6 +687,120 @@ void test_capture_wiring() {
 #endif
 }
 
+// ---- the detector resting while the packets steer ----
+
+void test_detector_pace() {
+    section("Mob detector: the wait between looks asked for, a shorter one at once (set_period_ms) -- it rests "
+            "while the packets steer");
+    {
+        MobDetector idle;
+        const int first = idle.period_ms();
+        idle.set_period_ms(1);
+        const int low = idle.period_ms();
+        idle.set_period_ms(10'000'000);
+        const int high = idle.period_ms();
+        check(first == MobDetector::kLookGapMs && low == MobDetector::kMinPeriodMs &&
+                  high == MobDetector::kMaxPeriodMs,
+              "140 ms until asked otherwise, as it always was; held to 50..5000 ms");
+    }
+
+    // The test's own frames, which are none: every look's grab fails, and is
+    // counted. The window is only a number.
+    void* const window = reinterpret_cast<void*>(std::uintptr_t{ 0x5000 });
+    std::atomic<int> grabs{ 0 };
+    MobDetector d;
+    d.set_grab([&grabs](void*, Frame&) {
+        grabs.fetch_add(1);
+        return false;
+    });
+    d.set_target_window(window);
+    d.set_period_ms(3000);
+    d.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const int waiting = grabs.load();
+    // GoBot's window asks for the pace on every pass of its loop.
+    for (int i = 0; i < 10; ++i) {
+        d.set_period_ms(3000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    const int same = grabs.load();
+    check(waiting == 0 && same == 0,
+          "3 s between looks: nothing looked at in the first half second, and the same wait asked again every pass "
+          "wakes nothing -- " + num(same) + " looks");
+
+    const Clock::time_point asked = Clock::now();
+    d.set_period_ms(MobDetector::kLookGapMs);
+    while (grabs.load() == 0 && ms_since(asked) < 3000) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const long long took = ms_since(asked);
+    const int woke = grabs.load();
+    check(woke > 0 && took < 1000,
+          "its own 140 ms asked for -- the screen steering again -- looks at once, not when the 3 s wait would have "
+          "ended: " + num(took) + " ms");
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    const int later = grabs.load();
+    check(later - woke >= 2, "and looks on at its own pace -- " + num(later - woke) + " looks in 0.7 s at 140 ms");
+
+    d.set_period_ms(3000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    const Clock::time_point stopping = Clock::now();
+    d.stop();
+    const long long stop_ms = ms_since(stopping);
+    check(!d.running() && stop_ms < 1000,
+          "stopped in the middle of a 3 s wait: back at once, not at its end -- " + num(stop_ms) + " ms");
+}
+
+void test_detector_pace_wiring() {
+    section("Detector rest wired in: decided at every tick, a shorter wait waking the detector, and nothing that "
+            "waits on GoBot's thread");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string mobs = source("/src/mob_detector.cpp");
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string paced = source("/apps/gobot_gui/packets_detector.cpp");
+    const std::string eyes = source("/src/packet_eyes.cpp");
+    if (mobs.empty() || gui.empty() || paced.empty() || eyes.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+
+    // The detector: its loop waits for its period, woken by a shorter one.
+    const std::string mloop = body(mobs, "void MobDetector::loop() {");
+    const std::string mset = body(mobs, "void MobDetector::set_period_ms(int ms) {");
+    check(has(mloop, "wake_.wait_for(") && has(mloop, "period_ms_.load()") && has(mloop, "wake_now_") &&
+              !has(mloop, "sleep_for") && has(mset, "if (ms >= was) return;") && has(mset, "wake_now_ = true;") &&
+              has(mset, "wake_.notify_all();"),
+          "mob_detector.cpp: the loop waits period_ms_, cut short by stop() and by a shorter period asked for");
+
+    // GoBot's window: every tick, from what the hunt and the eyes say.
+    const std::string tick = body(gui, "void GuiApp::tick() {");
+    const std::string pace = body(paced, "void GuiApp::detector_pace_tick(");
+    bool all = !pace.empty();
+    for (const char* what : { "detector_rest(", "detector_.set_period_ms(", "hunting_", "packet_eyes_->source()",
+                              "packet_eyes_->why()", "jump_test_running()", "monster_look_running()",
+                              "camera_panels_open()", "navigator_->running()", "packets_settings_.detector_rest",
+                              "detector_running_", "Detector: every %d ms while the packets steer" })
+        all = all && has(pace, what);
+    check(has(tick, "detector_pace_tick(") && all,
+          "tick(): the detector's pace decided at every tick, from the hunt, the eyes, Thử, Quái đang thấy, the "
+          "panels, a walk and [Packets] detector_rest");
+    check(!has(paced, "light_") && !has(paced, "sleep_for") && !has(paced, "Sleep(") && !has(paced, "capture_.") &&
+              !has(paced, "wait_idle"),
+          "packets_detector.cpp: nothing that waits, and nothing of the capture, on GoBot's thread");
+    check(!has(body(gui, "void GuiApp::stop_hunt() {"), "set_period_ms") &&
+              !has(body(gui, "void GuiApp::start_detector() {"), "set_period_ms"),
+          "neither the hunt's end nor the detector's start sets its pace: the next tick does");
+
+    // The hand-over in PacketEyes.
+    const std::string frame = body(eyes, "std::uint64_t PacketEyes::frame() {");
+    check(has(frame, "age(picture_new_ms_, now) > fresh") && has(frame, "picture_gap_ms_ > kScreenFreshMs") &&
+              has(frame, "MobDetector::kLookGapMs") && has(frame, "handing_over_ = true;") &&
+              has(frame, "pictures > handover_pictures_ + 1") && has(frame, "held >= kHandOverMs"),
+          "packet_eyes.cpp: back to the screen with an old picture -- older than one at the detector's own pace "
+          "while it rests -- the packets' plates kept until the detector's count is two on, or 300 ms");
+#else
+    skip("no source folder\n");
+#endif
+}
+
 } // namespace
 
 void test_capture_load(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -697,4 +813,6 @@ void test_capture_load(void (*check_fn)(bool, const std::string&), void (*sectio
     test_print_window_verdicts();
     test_print_window_ask();
     test_capture_wiring();
+    test_detector_pace();
+    test_detector_pace_wiring();
 }

@@ -126,6 +126,9 @@ struct GuiApp::PotionsUi {
     /// until the count comes back (a misread: written to potion_debug) or the
     /// drop is believed (dropped).
     std::map<std::uint32_t, Frame> wild_frames;
+    /// Per key, whether "Low" by the bag has been said: once, until the bag
+    /// holds kBagLowRearm more than warn_bag_below again, or a new run.
+    std::map<std::uint32_t, bool> bag_low_said;
     /// Misread frames being written to potion_debug, off this thread: each
     /// comes back with its line for the log.
     std::vector<std::future<std::string>> saving;
@@ -147,12 +150,18 @@ void GuiApp::potions_tick() {
     }
     ui.watch.set_warn_below(ui.settings.warn_below);
 
+    // The packets' bag kept up with the macro's presses: which bag slot each
+    // potion key drinks from, checked against the hotbar's counts read below
+    // (packets_bag.cpp). It reads PacketSelf's copies only.
+    bag_check_tick(now_ms());
+
     // A new run: every key may warn again.
     const bool running = simple_running();
     if (running && !ui.was_running) {
         ui.watch.reset();
         ui.logged.clear();
         ui.wild_frames.clear();
+        ui.bag_low_said.clear();
         ui.next_ms = now_ms() + 3000;
         std::lock_guard<std::mutex> lock(potion_slots_mutex_);
         potion_slots_.clear();
@@ -183,10 +192,21 @@ void GuiApp::potions_tick() {
             // frame only says nothing.
             if (readings.size() < 2) continue;
             const SlotReading r = PotionWatch::look_of(readings[0], readings[1]);
+            // A key the packets' bag has been checked for against this very
+            // slot: "Low" goes by the bag's total of what it drinks, and its
+            // slot's own Low is not said. "Out" is always the slot's.
+            int bag_total = -1;
+            std::uint32_t bag_item = 0;
+            const bool by_bag = bag_low_count(vk, bag_total, bag_item);
             for (const PotionWatch::Event& ev : ui.watch.feed(vk, r)) {
                 using Kind = PotionWatch::Event::Kind;
                 switch (ev.kind) {
                     case Kind::Low:
+                        if (by_bag) {
+                            GB_INFO("Potions: key %s's slot reads %d -- not said: the bag holds %d of %u (packets)",
+                                    key.c_str(), ev.count, bag_total, static_cast<unsigned>(bag_item));
+                            break;
+                        }
                         GB_INFO("Potions: key %s is low -- %d left in its slot", key.c_str(), ev.count);
                         alert("potion_low", alert_text::potion_low(hp, key, ev.count));
                         break;
@@ -244,6 +264,24 @@ void GuiApp::potions_tick() {
                 // and is told beside it (R8R-4).
                 std::lock_guard<std::mutex> lock(potion_slots_mutex_);
                 potion_slots_.note(key, r, have, now, looked);
+            }
+            // The slot's count for the packets' bag to be checked against:
+            // only a look that read what is believed -- a count, or the slot
+            // empty.
+            if (have && r.same(now)) {
+                if (now.has_count())
+                    bag_note_hotbar(vk, now.count, looked);
+                else if (now.state == SlotState::Empty)
+                    bag_note_hotbar(vk, 0, looked);
+            }
+            // "Low" by the bag: its total under warn_bag_below -- its own mark,
+            // the whole bag's, not a slot's warn_below -- said once, and not
+            // again until it is kBagLowRearm over that, or a new run.
+            if (by_bag && ui.settings.warn_bag_below > 0 &&
+                bag_low_now(bag_total, ui.settings.warn_bag_below, ui.bag_low_said[vk])) {
+                GB_INFO("Potions: key %s is low -- %d of %u left in the bag (packets), under %d", key.c_str(),
+                        bag_total, static_cast<unsigned>(bag_item), ui.settings.warn_bag_below);
+                alert("potion_low", alert_text::potion_low_bag(hp, key, bag_total));
             }
             if (!have) continue;
             const auto was = ui.logged.find(vk);
@@ -413,8 +451,17 @@ void GuiApp::simple_potion_warn_box() {
     }
     ImGui::SameLine();
     label("bình (0 = không báo)");
-    hint(trial_hint(kTrialPotions, "Số trên ô phím là chồng bình đang dùng; trong túi có thể còn chồng "
-                                   "khác. Ô phím trống thì vẫn báo \"Hết bình\".").c_str());
+    // A key the packets' bag has been checked for warns by the whole bag, at
+    // its own mark (warn_bag_below), not this box's: said here as it is set.
+    const int bag = ui.settings.warn_bag_below;
+    const std::string text =
+        std::string("Số trên ô phím là chồng bình đang dùng; trong túi có thể còn chồng khác. Ô phím trống thì "
+                    "vẫn báo \"Hết bình\". ") +
+        (bag > 0 ? "Phím mà gói tin túi đồ đã so khớp thì báo theo cả túi, khi còn dưới " + std::to_string(bag) +
+                       " bình (warn_bag_below trong configs/app.ini), không theo ô này."
+                 : std::string("Phím mà gói tin túi đồ đã so khớp thì không báo sắp hết (warn_bag_below=0 trong "
+                               "configs/app.ini)."));
+    hint(trial_hint(kTrialPotions, text.c_str()).c_str());
 }
 
 } // namespace gobot

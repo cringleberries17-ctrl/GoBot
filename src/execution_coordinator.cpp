@@ -33,6 +33,20 @@ bool ExecutionCoordinator::request(const std::string& owner, Priority priority) 
     return true;
 }
 
+bool ExecutionCoordinator::request_free(const std::string& owner, Priority priority) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (critical_.load() && priority < Priority::Critical) return false;
+    // Whoever holds it, at whatever priority and for however long: a holder
+    // taken over is not stopped, and its key would go out inside the drop's
+    // Ctrl.
+    if (held_.load()) return false;
+    held_.store(true);
+    priority_.store(priority);
+    owner_ = owner;
+    acquired_ms_ = now_ms();
+    return true;
+}
+
 bool ExecutionCoordinator::request_wait(const std::string& owner, Priority priority,
                                         std::uint32_t timeout_ms) {
     const std::uint64_t deadline = now_ms() + timeout_ms;

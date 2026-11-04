@@ -127,6 +127,21 @@ public:
     /// gives the same 12 however long each read's own work takes.
     static int forget_after_misses(int period_ms);
 
+    /// A bar's measure on a read that missed its figures, as it is handed on:
+    /// `measured` itself under kCaptionShadowPct, or with no figures kept
+    /// (`value` -1, `max` 0 or less); from there on the higher of it and the
+    /// kept figures' percentage. The caption, printed right-aligned over the
+    /// bar, paints out the fill under it, and a fill that reaches it measures
+    /// where it begins: "12643/15280" begins 56.7% along, so MP at 66-90% read
+    /// 56%, under the MP mark of 59 (2026-11-03: four such reads seen, and
+    /// three MP potions most likely pressed on one). There the measure says
+    /// "this much or more"; the figures, kept forget_after_misses reads, say
+    /// how much more.
+    static float shadowed_percent(float measured, int value, int max);
+    /// Left of where any caption begins -- an 11-character one at 56-58% --
+    /// the fill measures true (BarCheck::kBarTrueBelowPct likewise).
+    static constexpr float kCaptionShadowPct = 54.0f;
+
     /// When HP last read as a figure -- 0..100, not -1 -- on now_ms()'s clock;
     /// 0 before the first. A read that made out neither the figures nor the
     /// bar leaves it where it was, as does a grab that fails.
@@ -163,9 +178,15 @@ public:
 
     /// The figures the game prints across its bars. -1 for any it could not
     /// read, which is also what they are before the first successful read.
+    ///
+    /// Kept through a read that misses them, for forget_after_misses reads:
+    /// `hp_now` and `mp_now` say whether the last read made them out itself.
+    /// Only those are the bar's at that read -- what the packets' check
+    /// (packets_vitals.cpp) may hold against 0x0051.
     struct Vitals {
         int hp = -1, hp_max = -1;
         int mp = -1, mp_max = -1;
+        bool hp_now = false, mp_now = false;   ///< the figures made out on the last read itself
 
         bool have_hp() const { return hp >= 0 && hp_max > 0; }
         bool have_mp() const { return mp >= 0 && mp_max > 0; }

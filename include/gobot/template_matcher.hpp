@@ -110,8 +110,10 @@ private:
 class TemplateStore {
 public:
     /// Load every PNG under `dir`, recursing. A file at `buttons\ok.png`
-    /// becomes "buttons/ok".
-    bool load(const std::string& dir);
+    /// becomes "buttons/ok". How many were loaded, and from where, is logged
+    /// -- at debug only when `quiet`: for a folder read again and again, as
+    /// TrashList::load reads the trash list's every half minute.
+    bool load(const std::string& dir, bool quiet = false);
 
     /// Load the pictures embedded in a .NET assembly, in place.
     ///

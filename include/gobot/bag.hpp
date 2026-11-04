@@ -127,6 +127,11 @@ struct BagView {
     /// when no tab stands out like that. Nothing is right-clicked unless this
     /// says Tiêu Dùng: on another tab a right-click equips what it lands on.
     int selected_tab = -1;
+    /// Each tab's inside as selected_tab weighs it, its mean grey, from 0; -1
+    /// for a tab not read. For the log when the strip reads no tab chosen, or
+    /// not the one wanted: the live client's Tiêu Dùng chosen reads 105 against
+    /// 123 for Khác next to it, 18 where kChosenTabDarker asks for 10.
+    int tab_mean[kBagTabs] = { -1, -1, -1, -1, -1 };
     bool scroll_known() const { return first_row >= 0 && total_rows > 0; }
     bool at_top() const { return scroll_known() && first_row == 0; }
     bool at_bottom(const BagLayout& l) const {
@@ -176,6 +181,62 @@ bool same_page(const Frame& a, const BagView& va, const Frame& b, const BagView&
 /// count corner and the edge. For telling whether an item is still where it
 /// was; -1 when either is flat, which an empty slot nearly is.
 float alike(const Frame& a, const Frame& b, const BagLayout& l);
+
+/// The corner a stack's count is read in, from a slot's top-left, as
+/// CountReader::read reads it: the client prints the count from 2 across and
+/// 3 down, each digit 6 on.
+constexpr int kCountCornerW = 28, kCountCornerH = 16;
+
+/// How bare_corner tells a charm's slot with nothing printed over its icon --
+/// a stack of one, which the client prints no count on. Measured on the live
+/// client's bag (2026-11-03 19:54) against all eight charm icons: each slot
+/// is that colour's catalog icon pixel for pixel, a pixel right of the
+/// middle -- fit 0.00, worst channel 0, the badge corner left out. Another
+/// colour fits it at 46.4 at best, the right icon a place off at 45.6; the
+/// same slots in 16-bit colour at 5.8 at worst, with noise of 12 at 9.1.
+constexpr int   kBareSlack    = 3;      ///< where the icon may lie, either way, as judge searches
+constexpr int   kBareFitLeast = 200;    ///< the icon's pixels outside the count corner, at least
+constexpr float kBareFitMean  = 12.0f;  ///< their mean largest-channel difference, at most
+/// In the count corner: an icon pixel this near the frame's, each channel;
+/// where the icon is see-through, the ground no brighter than this grey --
+/// is_empty's 70. A count printed there puts strokes of 187 and more over
+/// it, and an outline of 136 and less. Every number from 2 to 99, and 100,
+/// 101, 110, 111, 199, 999, 1000, 1111 and 9999, drawn over the seven live
+/// stacks of one, a pixel off each way, in white, dim or a grey read takes
+/// for no white, breaks these in 11 pixels at least (33 with the client's
+/// own outline); 2 to 99 over 8871081, in grey, red or yellow, 12; the live
+/// x62 to x64 over 8871081, 81 to 88.
+constexpr int   kBareOff      = 24;
+constexpr int   kBareGround   = 70;
+
+/// Where a catalog icon fits a slot best: the top-left of its own pixels in
+/// the slot, within kBareSlack of the middle, and how well -- the mean of the
+/// largest of the three channels' differences over its opaque pixels inside
+/// the slot's edge, the count corner and the badge corner left out.
+struct IconPlace {
+    bool  found = false;        ///< kBareFitLeast pixels compared somewhere
+    int   x = 0, y = 0;
+    float mean = 255.0f;
+};
+IconPlace place_icon(const Frame& f, const ScreenRect& slot, const Frame& icon, const BagLayout& l);
+
+/// The slot shows `icon`, a catalog icon with its own transparency, outside
+/// its count corner: place_icon found it, at kBareFitMean or better. `fit`
+/// gets the mean, 255 when it was not found.
+bool icon_fits(const Frame& f, const ScreenRect& slot, const Frame& icon, const BagLayout& l,
+               float* fit = nullptr);
+
+/// The slot's count corner is `icon` with nothing printed over it: the icon
+/// fits (icon_fits), and every pixel of the corner inside the edge is the
+/// icon's own within kBareOff, or -- where the icon is see-through -- dark
+/// ground. What a charm's stack of one is told by: the client prints no
+/// count on it, and the light rim of a card or a diamond is white in that
+/// corner, so "no white there" does not tell it (CountReader::read). Not the
+/// digits it goes by, so a count in any colour fails it as one in white does.
+/// `unlike` gets the corner's pixels that fail -- -1 when the icon does not
+/// fit -- and `fit` the icon's fit.
+bool bare_corner(const Frame& f, const ScreenRect& slot, const Frame& icon, const BagLayout& l,
+                 int* unlike = nullptr, float* fit = nullptr);
 
 } // namespace bag
 
@@ -229,6 +290,22 @@ public:
     /// well, makes it kUnreadable -- never the digits that did read, as if
     /// they were the whole number.
     int read_field(const Frame& f, const ScreenRect& area) const;
+
+    /// A charm's stack count, for the charm sweep and for its look at the
+    /// slot after the use (BagCleaner::slot_now), in the same corner as read.
+    /// With `icon` -- the catalog icon of the slot's colour, its own
+    /// transparency, corner and all: the number printed there, from 2 up; 1
+    /// only when no number reads and bag::bare_corner finds the corner is
+    /// that icon with nothing printed over it -- the client prints no count
+    /// on a stack of one, and a charm card's light rim is white in that
+    /// corner, which read takes for a count it cannot read (on the live
+    /// client, 2026-11-03 19:54, all seven charms of one); kUnreadable
+    /// otherwise, no white in the corner included: a count drawn in another
+    /// colour is still a count. Without one -- `icon` null or empty -- what
+    /// read says, but never a lone 1 read in digits: the client prints counts
+    /// from 2 up. `bare` says the 1 came from bare_corner.
+    int read_charm(const Frame& f, const ScreenRect& slot, const Frame* icon, const BagLayout& l,
+                   bool* bare = nullptr) const;
 
     /// Give a digit its shape directly. For tests.
     void set_digit(int d, int w, int h, const std::vector<std::uint8_t>& on);
@@ -358,7 +435,8 @@ struct CleanSettings {
     bool use_charms = false;
     /// [Trash] charm_every_minutes: how long a charm lasts, and so how soon
     /// after one is used another of the same kind may be. A charm used with
-    /// no sign of whether it took waits as long: a charm used twice is lost.
+    /// no sign of whether it took waits as long: one used again within the
+    /// hour adds to it, up to the game's 2 hours, and is spent early.
     int  charm_every_minutes = 60;
     static constexpr int kCharmEveryLeast = 5;
     static constexpr int kCharmEveryMost = 1440;
@@ -478,8 +556,9 @@ UseKind use_kind_of(const std::string& id);
 /// When each charm may be used next, by catalog id, in wall-clock seconds, kept
 /// in a small file: a charm used an hour ago and a GoBot started again -- or a
 /// new version unzipped into a new folder -- must not use another while the
-/// first still works. Each charm costs one of the stack, and a charm used twice
-/// is a charm lost.
+/// first still works. Each charm costs one of the stack, and a charm used again
+/// while the first works only adds to its time, up to the game's 2 hours: a
+/// charm spent early.
 class CharmClock {
 public:
     /// How a try came out.
@@ -566,16 +645,32 @@ struct TrashList {
         /// for add_rivals to compare with the catalog's icons. Empty for an
         /// icon.
         Frame       drawing;
+        /// A charm's catalog icon, its own transparency, corner and all: what
+        /// its slot shows with nothing printed over it (bag::bare_corner).
+        /// Empty for anything else.
+        Frame       bare;
         float       min_score = 0.0f;   ///< 0: the caller's
 
         /// Catalog ids drawn like what was chosen: its own and the same
         /// drawing in other colours. By the player's rule they are one thing,
-        /// so none of them is a rival to this item.
+        /// so none of them is a rival to this item -- the drawing alone does
+        /// not tell them apart. For a charm on the Dùng list they are still
+        /// not one thing: each colour is another effect, and judge tells
+        /// them apart by their colour (colour_of).
         std::vector<std::string> kin;
 
         /// For an icon on the list only because it is drawn like one that was
-        /// chosen: the one that was. Empty for what was chosen itself.
+        /// chosen: the one that was. Empty for what was chosen itself, and
+        /// always for a charm on the Dùng list: no other colour comes along
+        /// with one, its colour being another charm.
         std::string via;
+
+        /// The catalog colour this item is: its own id for a catalog icon;
+        /// for a charm cut from the bag on the Dùng list, the icon among its
+        /// kin its colour was found to be when the list was built
+        /// (add_rivals), or empty when that was not sure -- and then it is
+        /// never right-clicked. Empty for anything else cut from the bag.
+        std::string colour_of;
 
         /// A Use item that is on the delete list as well: what is left of a
         /// stack a pass has just registered is deleted in that pass -- a piece
@@ -600,11 +695,11 @@ struct TrashList {
         bool fragment() const;
         /// A charm (Bùa): use_kind() is Charm.
         bool charm() const;
-        /// What a charm's clock (CharmClock) goes by: the icon that was chosen
-        /// -- not the same drawing in another colour that came along with it,
-        /// which is one charm -- or the picture's file for one cut from the bag.
-        /// A picture is named by its file name alone: the folder it lies in
-        /// changes with every version unzipped, the charm does not.
+        /// What a charm's clock (CharmClock) goes by: the icon that was chosen,
+        /// each colour its own -- no other colour comes along with a charm on
+        /// the Dùng list (via) -- or the picture's file for one cut from the
+        /// bag. A picture is named by its file name alone: the folder it lies
+        /// in changes with every version unzipped, the charm does not.
         std::string clock_id() const {
             if (!via.empty()) return via;
             if (!id.empty()) return id;
@@ -620,17 +715,21 @@ struct TrashList {
     std::vector<Item> rivals;
 
     /// Add catalog icons by id, and every icon drawn the same, as items that
-    /// say which one brought them. The count corner and the badge corner of
-    /// each are left out, as for a picture cut from the bag; ids the catalog
-    /// does not have are skipped.
+    /// say which one brought them -- but for a charm on the Dùng list, which
+    /// brings no other colour: each colour is a charm of its own, and one not
+    /// chosen is left alone. The count corner and the badge corner of each
+    /// are left out, as for a picture cut from the bag; ids the catalog does
+    /// not have are skipped.
     void add_catalog(const ItemCatalog& catalog, const std::vector<std::string>& ids,
                      Action a, float min_score);
 
     /// Every catalog icon that is not on the list becomes a rival, and each
     /// picture cut from the bag learns which icons are drawn like it: the
     /// icons it is one drawing with, the badge corner compared too, as
-    /// same_drawing compares two icons -- and those icons' own colours. Call
-    /// after everything is added.
+    /// same_drawing compares two icons -- and those icons' own colours. A
+    /// charm cut from the bag for the Dùng list then learns which of those
+    /// colours it is (colour_of), against their icons, as judge tells a
+    /// slot's. Call after everything is added.
     void add_rivals(const ItemCatalog& catalog);
 
     /// The whole list a pass goes by: the pictures under `dir`, the ids in the
@@ -666,14 +765,32 @@ struct TrashList {
 
         /// When it looks like a listed item and is still not taken for it,
         /// why: something in the catalog that is not listed, and is drawn
-        /// differently, looks as much like it. For saying so on a look-only
-        /// pass.
-        enum class Doubt { None, Rival };
+        /// differently, looks as much like it (Rival). For saying so on a
+        /// look-only pass. Or, for a charm on the Dùng list, drawn like it and
+        /// of a colour that is not sure (Colour): never right-clicked, and
+        /// not a doubt between two drawings -- a pass does not count it with
+        /// those (Result::doubtful), nor do the shop's counts.
+        enum class Doubt { None, Rival, Colour };
         Doubt       doubt = Doubt::None;
-        int         like = -1;      ///< the listed item it looks like
+        /// The listed item it looks like -- for a doubt, and for a charm of a
+        /// colour told apart from the one listed (colour_id, Doubt::None).
+        int         like = -1;
         float       like_score = 0.0f;
         std::string rival;          ///< the unlisted look-alike
         float       rival_score = 0.0f;
+
+        /// For a slot drawn like a charm on the Dùng list, its colour, for
+        /// the log: the catalog colour of that drawing it looks most like,
+        /// how alike, the next and how alike, and how far its mean colour is
+        /// from the first's, the largest of the three channels' differences
+        /// (-1: not measured). Set when the colour was not sure (Colour), and
+        /// as well when it was -- taken, or left alone as another colour
+        /// (item -1, Doubt::None).
+        std::string colour_id;
+        float       colour = 0.0f;
+        std::string colour_next_id;
+        float       colour_next = 0.0f;
+        int         colour_mean_off = -1;
     };
 
     /// Which listed item the slot holds, if any.
@@ -694,13 +811,25 @@ struct TrashList {
     /// list: a picture cut from the bag scores 1.00 on its own slot and a
     /// catalog icon 0.947 or more, so an older cut on the delete list would
     /// otherwise take every slot of a fragment chosen later to use.
+    ///
+    /// A charm on the Dùng list is told by its colour as well: the client's
+    /// charms are one drawing in several colours, each another effect, and in
+    /// grey they are all alike (0.93 to 0.98 on the live client's slot of
+    /// 8871081). So a slot it takes is then looked at in colour, against the
+    /// catalog icons of that drawing, where its drawing was found: a colour
+    /// that is not sure is Doubt::Colour; one that is another listed item's
+    /// whose own drawing matched is that item's -- another charm chosen, or
+    /// one of exactly that id on the delete or drop list; and any other is
+    /// left alone (item -1, Doubt::None, colour_id saying which).
     Verdict judge(const Frame& f, const ScreenRect& slot, float min_score) const;
 
     /// The items on the delete or drop list drawn like an item on the Dùng
     /// list, by the catalog icons each was found drawn like (kin), as indexes
     /// into `items`: a slot holding one is the Dùng item's (judge), so it is
-    /// registered rather than deleted. For the tab to say so. After
-    /// add_rivals, which is what tells a picture cut from the bag its kin.
+    /// registered rather than deleted. For the tab to say so. Not a charm's
+    /// icon chosen for itself: a charm on the Dùng list is told by its colour,
+    /// and a slot of that icon's colour is deleted. After add_rivals, which is
+    /// what tells a picture cut from the bag its kin.
     std::vector<std::size_t> yielding_to_use() const;
 
     /// judge, reduced to the item, or -1. `score` gets how alike it is -- or,
@@ -825,13 +954,53 @@ bool charm_question(const Frame& f, const TemplateStore& store, const Dialog& d,
 /// Whether the pictures a charm pass needs are there: the two buttons, the
 /// bin's two questions, and the revive, drop and sell questions -- everything
 /// it must tell a question apart from; a question it has no picture of cannot
-/// be told from a charm's -- and the client's close buttons, to know of another
-/// window open beside the bag.
+/// be told from a charm's -- the client's close buttons, to know of another
+/// window open beside the bag; and the message's picture (grabbed/dialog_ok)
+/// with the label of the pair's Xác Nhận found in it, to close the message a
+/// charm's use brings (lone_ok).
 bool can_check_charm(const TemplateStore& store);
 
 /// A message with only Xác Nhận under it is up, and no dialog with two buttons:
-/// what the client shows when it refuses something. Never answered.
+/// what the client shows when it refuses something, by the whole of its
+/// wordless picture at 0.75 -- 0.89 on the live charm message. For saying no
+/// only: nothing is ever clicked by it (lone_ok finds a button to click).
 bool notice_up(const Frame& f, const TemplateStore& store);
+
+/// How lone_ok saw a message's button: where the label of its Xác Nhận is, and
+/// how alike each piece is there. -1 for a piece not looked at.
+struct LoneOk {
+    ScreenRect label;
+    float      label_score = -1.0f;
+    float      edge_score = -1.0f;      ///< the frame right of the button and under it
+    float      corner_score = -1.0f;    ///< the button with the frame's corner round it
+};
+
+/// The one Xác Nhận of a message, within `band` (where its label may be): the
+/// label cut from the pair's picture (grabbed/confirm_button), the frame of the
+/// box right of it and under it as grabbed/dialog_ok draws them, and no dialog
+/// of two buttons up. Its words are not looked at. On the live client
+/// (2026-11-02 and 11-03) a charm's message puts it where the question's Hủy
+/// Bỏ was: the label 1.000 there against about 0.38 for that Hủy Bỏ, and the
+/// frame right of it 1.000 against under 0.1 right of a question's Xác Nhận. A
+/// button lit by the pointer over it is not taken for one. `at` gets the label;
+/// `how`, when given, the scores at the best place for the label, found or not.
+bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band, ScreenRect* at = nullptr,
+             LoneOk* how = nullptr);
+
+/// Where the label of the message a charm question at `pair` brings may be:
+/// lone_ok's band. Its button where the question's Hủy Bỏ was, give or take
+/// three pixels across, and from 20 above to 40 below, for a box made taller
+/// by a longer text. The question's own Xác Nhận lies 43 pixels left of it.
+ScreenRect message_band(const ScreenRect& pair);
+
+/// The box of the question at `pair` -- 410-614 x 341-429 on the live client,
+/// its pair at 514,397 -- with 40 more below for a taller message: what the
+/// pointer is kept off after a click there, so that no button of it is lit.
+ScreenRect message_box(const ScreenRect& pair);
+
+/// notice_up, or a lone Xác Nhận anywhere on the frame: for saying no only,
+/// never for a click.
+bool message_up(const Frame& f, const TemplateStore& store);
 
 // ---------------------------------------------------------------- the shop
 
@@ -1062,6 +1231,10 @@ public:
         std::function<bool(std::uint32_t)>           scan_key;
         /// A double-click; two of `click` when unset.
         std::function<bool(int, int)>                double_click;
+        /// The pointer moved there, no button pressed: what park_pointer does
+        /// with pretend hands. Unset, pretend hands leave the pointer where the
+        /// last click put it; the real pointer is never moved by them.
+        std::function<bool(int, int)>                move;
     };
     void set_hands(Hands h) { hands_ = std::move(h); skip_focus_check_ = true; }
 
@@ -1081,10 +1254,11 @@ public:
     /// What a run is for. Pass: all of it -- every tab ticked, the fragments
     /// registered, the delete sweep. CharmsOnly: only the charms on the Dùng
     /// list that are due (set_charm_due), and nothing else: the bag opened if
-    /// it is shut, Tiêu Dùng, one right-click and one question for each, the
-    /// bag shut again if it was opened here. Quick, with no tab but Tiêu Dùng,
-    /// and nothing deleted. A Pass leaves the charms to it: it says where it
-    /// sees one and never right-clicks it.
+    /// it is shut, Tiêu Dùng, one right-click and one question for each and
+    /// the game's message after it closed with its own Xác Nhận, the bag shut
+    /// again if it was opened here. Quick, with no tab but Tiêu Dùng, and
+    /// nothing deleted. A Pass leaves the charms to it: it says where it sees
+    /// one and never right-clicks it.
     ///
     /// ShopBuy: the potions of Tiêu Dùng counted, and -- when fewer slots of
     /// Thịt bò khô or Rượu lá tre are there than the settings want -- bought
@@ -1112,9 +1286,55 @@ public:
     /// twice.
     void set_charm_claim(std::function<void(const std::string&)> claim) { charm_claim_ = std::move(claim); }
 
+    /// What the packets' bag says of a charm's slot (set_charm_packets).
+    enum class PacketSays { Nothing, Agrees, Other, CountDiffers };
+    /// The packets' bag on a charm's slot -- row * 6 + cell of Tiêu Dùng from
+    /// the top -- for the catalog colour about to be right-clicked and the
+    /// count read on the screen. Other: the game's own list names another
+    /// item there, with the screen's count, and the slot is not
+    /// right-clicked. CountDiffers: the list has the slot with another count
+    /// than the screen's, or empty -- for a slot the screen reads as one, a
+    /// stack of one told by its bare icon, it is not right-clicked; for a
+    /// count printed it says nothing, the slot being most likely not the one
+    /// the screen shows (a page scrolled, a bag sorted). Nothing: it has
+    /// nothing current to say. `said` is for the log: the item and count the
+    /// slot holds for Agrees, Other and CountDiffers ("8871081 x63", or
+    /// "empty"), else why nothing. Only ever stops a right-click, never
+    /// causes one; unset, the screen decides.
+    void set_charm_packets(std::function<PacketSays(const std::string&, int, int, std::string&)> look) {
+        charm_packets_ = std::move(look);
+    }
+
+    /// For tests: what a charm run says once each GoBot start -- a colour it
+    /// is not sure of, a slot the packets' bag stops -- may be said again.
+    static void forget_said_once();
+
+    /// A message of GoBot's own that the last charm run left up, or may have:
+    /// the pair of the question whose Xác Nhận it followed (Result::notice_place).
+    /// This run closes it -- with its own Xác Nhận, where that pair puts it
+    /// (bag::message_band) -- before anything else, the bag key included; and
+    /// with no charm due, does nothing else. A message anywhere else, or none
+    /// handed over, is anyone's, and left alone.
+    void set_own_notice(const ScreenRect& pair);
+
+    /// The deadline of a charm run with `due_kinds` kinds due, in milliseconds:
+    /// 12 s and 3 s a kind, kept between 20 and 40 s. The bag opened, Tiêu Dùng,
+    /// its top and its pages take most of the first 20.
+    static int charm_deadline_ms(int due_kinds);
+
     /// The most a run may take from here on, in milliseconds: it stops, with
     /// nothing more right-clicked, when it has. 0: no limit.
     void set_deadline_ms(int ms);
+
+    /// A look at the bag's strip that reads no tab chosen at all -- something
+    /// drawn over it for a moment, the pointer resting on it -- is looked at
+    /// again, up to kTabRelooks times kTabRelookMs apart, before it stops the
+    /// run: after the click on a tab (select_tab), and in the shop's count and
+    /// the charm sweep, the pointer moved off first. A look that reads another
+    /// tab chosen stops those two at once. Nothing is counted, bought or
+    /// right-clicked on a look that does not read the tab wanted.
+    static constexpr int kTabRelooks = 8;
+    static constexpr int kTabRelookMs = 150;
 
     struct Result {
         bool ran = false;           ///< the bag was found and searched
@@ -1145,6 +1365,31 @@ public:
         int  charms_used = 0;           ///< seen taken
         int  charms_seen = 0;           ///< on the Dùng list and found in the bag
         int  charms_waiting = 0;        ///< of those, not due yet
+        /// Slots drawn like a charm on the Dùng list and left alone, each
+        /// slot once a run: of another colour, not chosen; of a colour that
+        /// is not sure; and of a kind chosen that the packets' bag says the
+        /// slot does not hold.
+        int  charms_other_colour = 0;
+        int  charms_colour_doubt = 0;
+        int  charms_vetoed = 0;
+        /// Slots of a kind due left alone because no count reads there --
+        /// nor its bare icon, for a stack of one (CountReader::read_charm) --
+        /// each slot once a run: after its use it could not be looked at.
+        int  charms_unread = 0;
+        /// Kinds on the Dùng list that were due when the run began, by clock
+        /// id; and the game's messages after a charm's Xác Nhận closed with
+        /// their own Xác Nhận.
+        int  charms_due = 0;
+        int  charm_notices = 0;
+        /// A Xác Nhận of this run on a charm's question -- or the one handed
+        /// over by set_own_notice -- whose message was not seen closed: it may
+        /// still be up, or come. `notice_place` is that question's pair, for
+        /// the next run's set_own_notice; `notice_carried`, that it was the one
+        /// handed over, which is not handed on for longer. Never set for a
+        /// message two clicks did not close: that one is the player's.
+        bool notice_left = false;
+        ScreenRect notice_place;
+        bool notice_carried = false;
 
         /// The shop (Mode::ShopBuy): slots of each potion in Tiêu Dùng when
         /// the run began and when it ended (-1: not counted), purchases
@@ -1158,6 +1403,13 @@ public:
         /// Bought a potion and the slots of it did not grow: not bought again,
         /// and whoever runs the job does not run it again by itself.
         bool shop_no_gain = false;
+        /// The run stopped on the bag's strip not reading as the tab it
+        /// wanted -- no tab drawn chosen after its looks again, or another --
+        /// at the tab's click (`trouble` says so) or in the charm sweep (said,
+        /// and no trouble: nothing more was right-clicked). Not "no charm
+        /// there": none was looked for. Whoever runs a charm job waits longer
+        /// before the next (gui_app.cpp).
+        bool tab_unsure = false;
         std::string trouble;        ///< why it stopped early, in Vietnamese
 
         /// An item went towards the bin and was never seen given back or
@@ -1220,6 +1472,9 @@ public:
     Probe probe(int tab, int row, int col);
 
 private:
+    /// run, but for what a charm run hands to the next (Result::notice_left).
+    Result run_pass();
+
     /// Hủy Bỏ on every dialog with the two buttons, the bin's first, until
     /// none is left or `tries` run out -- whoever's they are, since Hủy Bỏ
     /// never destroys anything. What a probe answers with; true when none is
@@ -1272,7 +1527,11 @@ private:
         UsedUnasked,    ///< no question, and its stack went down: taken -- by a shop, perhaps
         Nothing,        ///< no question, and the stack as it was: it cannot be used
         Refused,        ///< another dialog came up, answered Hủy Bỏ
-        Notice,         ///< a message with only Xác Nhận came up: left for the player
+        /// A message with only Xác Nhận right after the right-click, with no
+        /// question: never clicked, left for the player. A charm's own message
+        /// after its question's Xác Nhận is no Notice: it is closed
+        /// (close_notice), and the stack says how the use came out.
+        Notice,
         Lost,           ///< the bag went out of sight, a dialog would not close, a stop
         Untouched,      ///< nothing was pressed: the mouse could not reach the slot
     };
@@ -1283,6 +1542,22 @@ private:
         /// the slot as it was seen then -- what deleting the rest goes by.
         int         left = 0;
         Frame       after;
+
+        // A charm (charm_one) only.
+        /// The question's pair, set once its Xác Nhận is pressed -- and when.
+        ScreenRect  asked;
+        std::chrono::steady_clock::time_point asked_at{};
+        /// The game's message after it: seen and closed with its own Xác Nhận;
+        /// or seen and left up -- two clicks did not close it (`notice_stuck`),
+        /// the mouse could not be had there, or a stop came first.
+        bool        notice_closed = false;
+        bool        notice_left = false;
+        bool        notice_stuck = false;
+        int         notice_ms = -1;     ///< from the Xác Nhận to the message first seen
+        int         notice_clicks = 0;
+        /// The guard said no, or a stop came, while it waited: nothing more
+        /// was clicked, and the run is to stop.
+        bool        stopped = false;
     };
 
     /// Register the item in slot `index` of `v`: one right-click on it; then
@@ -1299,6 +1574,11 @@ private:
     /// both looks agree on -- a count misread once, or a slot caught being
     /// redrawn, is no answer. The page has to be the same by the scroll bar on
     /// both looks: a slot on a page that cannot be told is no slot to go by.
+    /// `charm`, for a charm's slot: the catalog icon of its colour, empty when
+    /// there is none, and the count read as the charm sweep read it
+    /// (CountReader::read_charm) -- a stack of one only while the slot still
+    /// shows that very icon with nothing over its corner. Null for anything
+    /// else, read as ever (CountReader::read).
     enum class SlotNow {
         Gone,       ///< empty
         Less,       ///< the same drawing, one less than `count`
@@ -1307,7 +1587,7 @@ private:
         Unknown,    ///< anything else; `why` says what, in Vietnamese
     };
     SlotNow slot_now(const BagView& v, int index, const Frame& before, int count, Frame& look,
-                     Frame& shot, std::string& why, int gap_ms = 150);
+                     Frame& shot, std::string& why, int gap_ms = 150, const Frame* charm = nullptr);
 
     /// A charm: one right-click on the slot, then what the game asks. Its
     /// question is confirmed with Xác Nhận only when bag::charm_question says
@@ -1319,15 +1599,71 @@ private:
     /// Quicker than use_one all the way: it watches in short steps, has no
     /// monster book to look for or shut, and looks at the slot again after
     /// charm_gap_ms rather than 150. `count` is the stack count read off the
-    /// slot.
-    UseResult charm_one(const Frame& f, const BagView& v, int index, int count);
+    /// slot, by CountReader::read_charm with `icon`, the catalog icon of its
+    /// colour (empty when there is none): the slot is read again the same way.
+    /// A stack of one counts only seen empty; still that icon with nothing
+    /// over it is the stack as it was, and anything else no answer.
+    ///
+    /// After Xác Nhận the game says the charm worked in a message with only
+    /// Xác Nhận under it, where the question's Hủy Bỏ was: watched for, and
+    /// closed with that Xác Nhận (close_notice) before the stack is looked at.
+    /// A message right after the right-click, with no question, is never
+    /// clicked. The pointer is moved off the buttons after every click, so
+    /// that none of them is lit for the next look. No key is ever pressed.
+    UseResult charm_one(const Frame& f, const BagView& v, int index, int count, const Frame& icon);
+
+    /// How close_notice came out. Closed: seen gone on two looks, after a
+    /// click or with none needed. NotClosed: still up after two clicks.
+    /// Dialog: a dialog of two buttons came up. NotClicked: the mouse could
+    /// not be had, or the screen not seen. Stopped: the guard said no, or a
+    /// stop came, before a click.
+    enum class NoticeClose { Closed, NotClosed, Dialog, NotClicked, Stopped };
+    /// Close a message with its own Xác Nhận, its label looked for in `band`
+    /// (bag::lone_ok): on a fresh look before each click, the pointer moved
+    /// off `box` after it. Once more, a pixel aside and no sooner than
+    /// kNoticeRetryMs after the first, when it is still up; no third time, and
+    /// no key ever. `shot` gets the last look; `clicks` how many were made.
+    NoticeClose close_notice(const ScreenRect& band, const ScreenRect& box, Frame& shot, int& clicks);
+    /// GoBot's own message on `f`: a lone Xác Nhận where the last Xác Nhận
+    /// pressed on a charm question puts one, that Xác Nhận pressed less than
+    /// kOwnNoticeMs ago -- or handed over by set_own_notice. `at` gets its label.
+    bool own_message(const Frame& f, ScreenRect* at = nullptr);
+    /// own_message closed, said as `when` says: 1 when one was up and is
+    /// closed, 0 when none is (one handed over and not up is gone), -1 when it
+    /// would not close -- `res.trouble` then says why, and nothing more is to
+    /// be pressed.
+    int  close_own(const Frame& f, Result& res, const char* when);
+    /// What a close_notice that did not close says, the picture kept and a
+    /// dialog answered Hủy Bỏ: `res.trouble`, and whether the message is the
+    /// player's from now on.
+    void notice_trouble(NoticeClose how, const Frame& shot, Result& res);
+    /// The end of a charm run, however the sweep ended but by a stop: the
+    /// message of the last Xác Nhận not yet seen closed, watched for until
+    /// kCharmNoticeMs and a little after that Xác Nhận, and closed.
+    void finish_charms(Result& res);
+    /// The first look of a charm run, before the bag key or a tab: GoBot's
+    /// own message from the last run closed (close_own); and with the bag
+    /// shut, its key not pressed under anyone else's. False, with what to say
+    /// said, when the run ends here -- also with the bag shut and no charm due,
+    /// a message to close having been all it was for.
+    bool charms_start(Frame& f, BagView& v, Result& res);
+    /// Whether any charm on the Dùng list is due (set_charm_due).
+    bool charm_due_any() const;
 
     /// The charm sweep of tab `tab` -- Tiêu Dùng -- for Mode::CharmsOnly: every
     /// slot judged a charm on the Dùng list that is due, once each, in the
     /// order they lie, at most kMaxCharms a run. `res.charm_tries` gets each.
-    /// Nothing is right-clicked with another of the game's windows open, nor
-    /// with the guard saying no, nor past the deadline. A stop after the first
-    /// thing that is not as expected: nothing more is right-clicked.
+    /// Each kind once a run, by its clock id and by its colour; and done once
+    /// every kind due has been tried, the pages below not looked at. Nothing is
+    /// right-clicked with another of the game's windows open, nor with a
+    /// message of the game's up -- GoBot's own is closed first -- nor with the
+    /// guard saying no, nor past the deadline; nor a slot of another colour or
+    /// of a colour not sure (TrashList::judge), nor one whose count does not
+    /// read -- a stack of one reads as one only by its bare icon
+    /// (CountReader::read_charm) -- nor one the packets' bag says holds
+    /// something else, or, for a stack of one, another count
+    /// (set_charm_packets). A stop after the first thing that is not as
+    /// expected: nothing more is right-clicked.
     void charm_sweep(int tab, BagView& v, Result& res, bool& stop);
     static constexpr int kMaxCharms = 10;
 
@@ -1356,8 +1692,22 @@ private:
     /// page, tried again a pixel aside and waited for longer when it did not,
     /// up to four times. `v` is the page after. False when it never moved.
     bool scroll_arrow(bool down, BagView& v);
-    /// Click tab `tab` and look until it is the one chosen.
-    bool select_tab(int tab, BagView& v, Result& res);
+    /// Click tab `tab` and look until it is the one chosen, the pointer moved
+    /// off the strip after the click: the game lights what lies under it. A
+    /// strip that reads no tab chosen is looked at again (kTabRelooks); one
+    /// that reads another, clicked once more. False with `res.trouble`, and
+    /// with `res.tab_unsure` when the strip was there and never read as `tab`.
+    /// `where` names the caller in the log and in the picture kept.
+    bool select_tab(int tab, BagView& v, Result& res, const char* where);
+    /// The strip not read as `tab` where a run stops on it: the tab read,
+    /// where the strip is, how alike, and every tab's mean grey in the log;
+    /// and the screen kept the first time at each `where` this GoBot start
+    /// (keep holds only the newest few dozen, and these are not to push the
+    /// rest out).
+    void tab_unsure(const Frame& f, const BagView& v, int tab, const char* where);
+    /// The strip read as `tab` after `looks` more looks; `first` is the first
+    /// look that read no tab chosen. For the log.
+    void tab_read_late(const BagView& first, int tab, int looks, const char* where);
     /// find_dialogs, without the shop's own Mua | Thoát buttons, which a pair
     /// of buttons can pass for; and Hủy Bỏ on what is left, as cancel_all.
     std::vector<bag::Dialog> dialogs_here(const Frame& f, const TemplateStore& store) const;
@@ -1481,12 +1831,16 @@ private:
                                 const std::function<bool(const Frame&)>& done = {});
     /// The pointer moved off the bag's slots and buttons -- right of the bag,
     /// else above it, else left of it, the first of these inside the game's
-    /// window and clear of a shop open beside the bag -- so no item's
-    /// description lies over the grid, the bin or a dialog. A move, never a
-    /// click; nothing with pretend hands.
-    void park_pointer(bool title_first = false);
-    /// Where the bag's strip was on the last look that found it.
+    /// window, clear of a shop open beside the bag and at least 24 pixels off
+    /// `avoid` -- so no item's description lies over the grid, the bin or a
+    /// dialog, and no button of a box at `avoid` is lit. A move, never a
+    /// click. With pretend hands, through Hands::move and the size of the last
+    /// look; nothing when that is unset.
+    void park_pointer(bool title_first = false, const ScreenRect* avoid = nullptr);
+    /// Where the bag's strip was on the last look that found it, and the size
+    /// of the last look.
     ScreenRect last_strip_;
+    int last_w_ = 0, last_h_ = 0;
 
     void keep(const Frame& f, const char* what);
     void scroll_to_top(BagView& v);
@@ -1545,6 +1899,16 @@ private:
     std::function<bool(const std::string&)> charm_due_;
     std::function<bool()> guard_;
     std::function<void(const std::string&)> charm_claim_;
+    std::function<PacketSays(const std::string&, int, int, std::string&)> charm_packets_;
+    /// The last Xác Nhận pressed on a charm question: its pair and when --
+    /// cleared by a charm_one that pressed none -- or the one handed over by
+    /// set_own_notice (`last_carried_`); and whether its message has been seen
+    /// closed or gone, or given up on after two clicks.
+    ScreenRect           last_asked_;
+    std::chrono::steady_clock::time_point last_asked_at_{};
+    bool                 last_carried_ = false;
+    bool                 last_closed_ = false;
+    bool                 last_gave_up_ = false;
     /// The deadline of a run, on now()'s clock; unset when deadline_set_ is not.
     std::chrono::steady_clock::time_point deadline_;
     bool                 deadline_set_ = false;

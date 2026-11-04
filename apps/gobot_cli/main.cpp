@@ -5322,6 +5322,11 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
             break;
         }
         if (g_stop.load()) break;
+        // The minimap's map changes, said here: the tracker's own line is the
+        // debug log's, as in the GUI.
+        if (minimap.take_changed())
+            GB_INFO("Map changed -- minimap fingerprint %016llx",
+                    static_cast<unsigned long long>(minimap.fingerprint()));
         if (macro) {
             const float hp = reader->hp_percent();
             // As no reading once the bars have not been read for as long as
@@ -5357,12 +5362,16 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
         // and this line, and an unsigned subtraction that goes negative prints
         // as half a billion years remaining.
         const std::uint64_t t_now = now_ms();
-        std::printf("\r  %llus | %zu monsters | %-28s | %llu attacks, %llu steps, %llu dropped   ",
+        // Given up and re-picked apart: a fight in reach picked straight
+        // back -- every give_up_ms without a style -- is no target dropped.
+        const std::uint64_t repicked = std::min(hs.targets_repicked, hs.targets_dropped);
+        std::printf("\r  %llus | %zu monsters | %-28s | %llu attacks, %llu steps, %llu dropped, %llu re-picked   ",
                     static_cast<unsigned long long>(t_now >= until ? 0 : (until - t_now) / 1000),
                     ds.last_mobs, Hunter::to_string(hs.state),
                     static_cast<unsigned long long>(hs.attacks),
                     static_cast<unsigned long long>(hs.steps),
-                    static_cast<unsigned long long>(hs.targets_dropped));
+                    static_cast<unsigned long long>(hs.targets_dropped - repicked),
+                    static_cast<unsigned long long>(repicked));
         std::fflush(stdout);
     }
 
@@ -5379,12 +5388,17 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
     std::printf("\n\n%llu frames looked at, character seen: %s\n",
                 static_cast<unsigned long long>(ds.frames),
                 ds.player_seen ? "yes" : "no");
-    std::printf("%llu attacks thrown, %llu walking steps, %llu targets given up on, %llu steps "
+    const std::uint64_t repicked = std::min(hs.targets_repicked, hs.targets_dropped);
+    std::printf("%llu attacks thrown, %llu walking steps, %llu targets given up on (%s), %llu steps "
                 "back\n",
                 static_cast<unsigned long long>(hs.attacks),
                 static_cast<unsigned long long>(hs.steps),
-                static_cast<unsigned long long>(hs.targets_dropped),
+                static_cast<unsigned long long>(hs.targets_dropped - repicked),
+                cfg.goc_rules() ? "out of reach, or no damage" : "out of reach",
                 static_cast<unsigned long long>(hs.backsteps));
+    const std::string every = "every " + std::to_string(cfg.give_up_ms / 1000) + " s without a style";
+    std::printf("%llu fights re-picked while in reach (%s)\n", static_cast<unsigned long long>(repicked),
+                cfg.goc_rules() ? "a hold or the game behind, not out of reach" : every.c_str());
     std::printf("the view moved %.0f px while it worked\n", camera.travelled());
     if (macro) {
         const auto ms = macro->stats();

@@ -761,11 +761,14 @@ std::string TemplateStore::helper_assembly() {
     return {};
 }
 
-bool TemplateStore::load(const std::string& dir) {
+bool TemplateStore::load(const std::string& dir, bool quiet) {
     by_name_.clear();
     if (dir.empty()) return false;
     load_into(to_wide(dir), {}, by_name_);
-    GB_INFO("TemplateStore: %zu templates from %s", by_name_.size(), dir.c_str());
+    if (quiet)
+        GB_DEBUG("TemplateStore: %zu templates from %s", by_name_.size(), dir.c_str());
+    else
+        GB_INFO("TemplateStore: %zu templates from %s", by_name_.size(), dir.c_str());
     return !by_name_.empty();
 }
 

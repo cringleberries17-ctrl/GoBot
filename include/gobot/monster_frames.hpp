@@ -153,11 +153,17 @@ enum class MonsterEvent : std::uint8_t {
     Stop,   ///< state 0: it stands where it is, and stays there until its next event
     Walk,   ///< state 1: it starts walking, or turns in mid-walk
     Hit,    ///< state 9: it was hit, and the HP is what the hit left
+    /// States 6 and 7: it was hurt, on today's server, by the hitter at 48:
+    /// the HP before less the damage at 52 is the HP at 64, frame after frame
+    /// (five chains of the live hunts of 2026-10-27 and 11-02). Which blow
+    /// each of the two is, nothing says.
+    Hurt,
 };
 
 /// One plain 0x0038: a monster's state at a change.
 struct MonsterState {
     MonsterEvent  event = MonsterEvent::Stop;
+    std::uint8_t  state = 0;    ///< the state byte itself: 0, 1, 6, 7 or 9
     std::uint32_t slot  = 0;
 
     /// Where the monster is at this event, world pixels (y growing
@@ -181,27 +187,30 @@ struct MonsterState {
     /// the frame) in every stop and walk.
     std::optional<std::uint32_t> attacker;
 
-    std::uint32_t damage = 0;   ///< a hit's damage: HP before - damage = HP after; 0 otherwise
+    std::uint32_t damage = 0;   ///< a hit's or a hurt's damage: HP before - damage = HP after; 0 otherwise
 
     /// The hit killed it. No other frame says so: the slot is silent until
-    /// its 0x003F brings the next monster, 2-4 s later.
-    bool killed() const { return event == MonsterEvent::Hit && hp <= 0; }
+    /// its 0x003F brings the next monster, 2-4 s later. A hurt that leaves
+    /// none is a kill as well, though none was seen to.
+    bool killed() const { return (event == MonsterEvent::Hit || event == MonsterEvent::Hurt) && hp <= 0; }
 };
 
 /// A monster's state event: plain 0x0038, from the server; nothing for any
 /// other frame.
 ///
-///   state u8 at 12 (0 stop, 1 walk, 9 hit)    slot u32 at 16
+///   state u8 at 12 (0 stop, 1 walk,           slot u32 at 16
+///     6 and 7 hurt, 9 hit)
 ///   facing i8 at 24                           speed f32 at 28
 ///   x, y u16 at 32, 34                        attacker u32 at 48
 ///   damage u32 at 52                          HP u32 at 64, i32 after a hit
 ///
 /// Sent for every monster of the map at each change: 1,050 in the 2-minute
 /// fight, at most 5.6 s apart for one slot. Not the u16 pair at 88 and 90,
-/// which protocol.ini's [Packet.0x0038] reads as x, y: that is a point beside
-/// the monster, rewritten when it is attacked and stale otherwise. A state
-/// other than 0, 1 or 9 gives nothing, since none was seen and its layout is
-/// not known; so does a speed that is not a number.
+/// which protocol.ini's [Packet.0x0038] read as x, y before 2026.11.03: that
+/// is a point beside the monster, rewritten when it is attacked and stale
+/// otherwise. A state other than 0, 1, 6, 7 or 9 gives nothing, since its
+/// layout is not known (read_monster_spot, read_monster_contact); so does a
+/// speed that is not a number.
 inline std::optional<MonsterState> read_monster_state(const GamePacket& p) {
     constexpr std::size_t kHeader = 8;
     if (p.opcode != 0x0038 || !p.from_server || p.udp || p.depth != 0) return std::nullopt;
@@ -230,11 +239,46 @@ inline std::optional<MonsterState> read_monster_state(const GamePacket& p) {
     switch (state) {
     case 0:  s.event = MonsterEvent::Stop; break;
     case 1:  s.event = MonsterEvent::Walk; break;
+    case 6:
+    case 7:  s.event = MonsterEvent::Hurt; break;
     case 9:  s.event = MonsterEvent::Hit;  break;
     default: return std::nullopt;
     }
+    s.state = state;
     if (attacker != 0xFFFFFFFFu) s.attacker = attacker;
     return s;
+}
+
+/// A 0x0038 of state 3 or 11: someone at grips with a monster, it seems --
+/// the actor at 48, no damage, the HP at 64 unchanged (the live hunts of
+/// 2026-10-27 and 11-02). What the two states mean is a guess, and nothing
+/// acts on one: they are counted, by whose they are.
+struct MonsterContact {
+    std::uint8_t                 state = 0;     ///< 3 or 11
+    std::uint32_t                slot  = 0;
+    std::optional<std::uint32_t> actor;         ///< none (0xFFFFFFFF in the frame) when it names nobody
+    std::int32_t                 hp    = 0;
+};
+
+/// state u8 at 12, slot u32 at 16, actor u32 at 48, HP i32 at 64; nothing for
+/// any other state, or any other frame.
+inline std::optional<MonsterContact> read_monster_contact(const GamePacket& p) {
+    constexpr std::size_t kHeader = 8;
+    if (p.opcode != 0x0038 || !p.from_server || p.udp || p.depth != 0) return std::nullopt;
+
+    ByteReader r(p.payload);
+    MonsterContact c;
+    r.seek(12 - kHeader);
+    c.state = r.u8();
+    r.seek(16 - kHeader);
+    c.slot = r.u32();
+    r.seek(48 - kHeader);
+    const std::uint32_t actor = r.u32();
+    r.seek(64 - kHeader);
+    c.hp = r.i32();
+    if (!r.ok() || (c.state != 3 && c.state != 11)) return std::nullopt;
+    if (actor != 0xFFFFFFFFu) c.actor = actor;
+    return c;
 }
 
 /// Where a plain 0x0038 of any state says its monster is, read where the

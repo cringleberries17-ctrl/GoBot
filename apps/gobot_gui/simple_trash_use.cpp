@@ -146,8 +146,10 @@ bool GuiApp::simple_use_options(const std::string& id, const char* folder) {
         ImGui::PopStyleColor();
         ImGui::PushFont(nullptr, kSmall);
         coloured(kWait, trial_hint(kTrialUse, "Mỗi lần dùng mất một cái bùa và có hiệu lực một giờ.").c_str());
-        coloured(kDim, "GoBot dùng mỗi loại bùa một lần rồi chờ hết giờ mới dùng lại, kể cả khi tắt rồi mở "
-                       "lại GoBot. Chỉ bấm Xác Nhận khi thấy hộp thoại giống hộp thoại mảnh ghép.");
+        coloured(kDim, "GoBot dùng mỗi loại bùa đã chọn (đúng màu này) một cái, các loại trong cùng một lượt, "
+                       "rồi chờ hết giờ mới dùng lại loại đó, kể cả khi tắt rồi mở lại GoBot. Chỉ bấm Xác Nhận "
+                       "khi thấy hộp thoại giống hộp thoại mảnh ghép; thông báo của game sau đó GoBot tự bấm Xác "
+                       "Nhận để đóng.");
         if (!simple_can_use_charm())
             coloured(kDim, "GoBot chưa có đủ hình của game để dùng bùa, nên lúc này chỉ báo chỗ có bùa, chưa dùng.");
         else if (!simple_clean_.use_charms)
@@ -278,11 +280,13 @@ void GuiApp::simple_charm_switch(const std::function<void(const char*, const std
     }
     ImGui::SetItemTooltip("%s", trial_hint(kTrialUse,
                                            "Dùng các bùa trong danh sách Dùng: chuột phải vào bùa ở ngăn Tiêu Dùng, "
-                                           "Xác Nhận đúng hộp thoại giống của mảnh ghép. Mỗi lần mất một cái, có "
-                                           "hiệu lực một giờ, nên mỗi loại chỉ dùng một cái rồi chờ hết giờ. Trong "
-                                           "lúc dùng bùa, kỹ năng, bình và buff tạm dừng vài giây (tối đa 20 giây "
-                                           "nếu nhiều loại bùa); không dùng khi máu thấp, đang chat hay bot đang "
-                                           "bận việc khác. Tắt thì chỉ báo chỗ có bùa, không bấm gì.")
+                                           "Xác Nhận đúng hộp thoại giống của mảnh ghép, rồi bấm Xác Nhận trên "
+                                           "thông báo của game để đóng nó. Mỗi màu bùa là một loại riêng. Mỗi lần "
+                                           "mất một cái, có hiệu lực một giờ, nên mỗi loại chỉ dùng một cái rồi chờ "
+                                           "hết giờ. Trong lúc dùng bùa, kỹ năng, bình và buff tạm dừng vài giây "
+                                           "(khoảng 3 giây mỗi loại, tối đa 20 đến 40 giây); không dùng khi máu "
+                                           "thấp, đang chat hay bot đang bận việc khác. Tắt thì chỉ báo chỗ có bùa, "
+                                           "không bấm gì.")
                                     .c_str());
     ImGui::SameLine(0, 12);
     label("dùng lại sau");

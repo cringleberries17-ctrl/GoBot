@@ -433,7 +433,32 @@ bool OpcodeRegistry::load(const std::string& path) {
             std::clamp(ini.get_int(section, "repeat", 1), 1, static_cast<int>(kMaxGroups)));
         spec.repeat_count_field = ini.get(section, "repeat_count_field", "");
 
-        const std::string fields = ini.get(section, "fields", "");
+        std::string fields = ini.get(section, "fields", "");
+        // [Packet.0x0038] as protocol.ini had it until 2026.11.03 reads x, y at
+        // payload @80/@82: a point beside the monster, rewritten when it is
+        // hit and stale otherwise (protocol-findings 4f). Configs are copied
+        // beside GoBot only when missing, so a player's own copy keeps that
+        // line: read here as the shipped file now reads it, the file left as
+        // it is. A line edited since is the player's own, and only said.
+        if (spec.opcode == 0x0038) {
+            static constexpr const char* kStale = "id:u32@8,speed:f32@20,x:u16@80,y:u16@82";
+            static constexpr const char* kRight = "id:u32@8,speed:f32@20,x:u16@24,y:u16@26,hp:i32@56";
+            std::string bare;
+            for (const char c : fields)
+                if (!std::isspace(static_cast<unsigned char>(c))) bare += c;
+            if (bare == kStale) {
+                fields = kRight;
+                GB_WARN("OpcodeRegistry: [Packet.0x0038] in %s read x,y at payload @80/@82, a point beside the "
+                        "monster that is stale unless it is hit -- read at @24/@26 with hp at @56 instead (the file "
+                        "is left as it is, until a layout applied on the Protocol tab saves the corrected one)",
+                        path.c_str());
+            } else if (bare.find("@80") != std::string::npos && bare.find("@82") != std::string::npos) {
+                GB_WARN("OpcodeRegistry: [Packet.0x0038] in %s reads payload @80 and @82, a point beside the "
+                        "monster that is stale unless it is hit -- the monster is at @24/@26 and its hp at @56 "
+                        "(the line has been edited, so it is read as written)",
+                        path.c_str());
+            }
+        }
         if (!fields.empty()) {
             std::string err;
             spec.fields = parse_field_list(fields, &err);

@@ -778,6 +778,11 @@ std::string potion_low(bool hp, const std::string& key, int count) {
            std::to_string(count) + " bình.";
 }
 
+std::string potion_low_bag(bool hp, const std::string& key, int total) {
+    return std::string("Sắp hết bình ") + (hp ? "HP" : "MP") + " (phím " + plain_key(key) + "): cả túi còn " +
+           std::to_string(total) + " bình (theo gói tin).";
+}
+
 std::string potion_out(bool hp, const std::string& key) {
     return std::string("Hết bình ") + (hp ? "HP" : "MP") + " ở ô phím " + plain_key(key) +
            " — GoBot vẫn bấm phím nhưng ô đã trống.";

@@ -175,6 +175,10 @@ public:
         /// walk, whose start and stop are all the client says of it. Unset: no
         /// walk is ever the hunter's.
         std::function<std::uint64_t()>  walk_held_until;
+        /// The game's count of your take-offs (GuiApp::packet_takeoffs),
+        /// handed on as the hunter's Eyes::takeoffs for its drops. Unset:
+        /// none.
+        std::function<std::optional<std::uint64_t>()> takeoffs;
     };
 
     enum class Source : std::uint8_t { Screen, Packets };
@@ -191,6 +195,22 @@ public:
     /// away, and the hunter's "nearest with health anywhere" would otherwise
     /// walk the whole map.
     static constexpr double kBoxFraction = 0.6;
+    /// The hand-over back to the screen. While the packets steer, the
+    /// detector may look only every DetectorPace::kRestMs, and its last
+    /// picture at a switch back can be that old. So when no new picture has
+    /// come for kScreenFreshMs -- twice the detector's own wait between looks
+    /// -- the switch keeps the packets' last plates, view and number for the
+    /// hunter until the detector has counted a picture taken after it (two
+    /// past its count at the switch: the look under way then may have been
+    /// grabbed before), and for kHandOverMs at most. source() and why() say
+    /// the screen from the switch on, so GoBot's window wakes the detector at
+    /// once (GuiApp::detector_pace_tick). With pictures at the detector's own
+    /// pace the switch is at once, as it always was. While it rests -- its
+    /// last two pictures more than kScreenFreshMs apart -- a picture is used
+    /// at once only up to MobDetector::kLookGapMs old, never older than one at
+    /// its own pace would be.
+    static constexpr std::uint64_t kHandOverMs = 300;
+    static constexpr std::uint64_t kScreenFreshMs = 2 * static_cast<std::uint64_t>(MobDetector::kLookGapMs);
 
     PacketEyes(const PacketWorld& world, Screen screen, Inputs inputs);
 
@@ -223,6 +243,15 @@ public:
     /// From any thread.
     bool where(WorldFix& out);
 
+    /// The monsters standing where their own frame put them, from the same
+    /// view: alive, not walking, and no speed of a walk or a blow on them --
+    /// a stop's place, never one worked out. In world pixels, with the
+    /// frame's time: standing points for the map the hunter's drops go by
+    /// (MapTrust). Every one of the map's, not only those in the box. None
+    /// with packet_positions off. From any thread.
+    std::vector<MapTrust::Mob> stands();
+    static constexpr std::size_t kStandsMax = 64;
+
     /// Back to the screen, as hunting starts: the packets earn their
     /// kHealthyForMs afresh. Called before the hunter starts.
     void restart();
@@ -241,6 +270,12 @@ public:
         std::uint64_t screen_ms = 0;
         std::uint64_t healthy_ms = 0;
         std::uint64_t switches = 0;
+        /// Switches back to the screen that kept the packets' plates a
+        /// moment (kHandOverMs): how many, how many of them ran out the
+        /// time with no newer picture, and the time spent in them all.
+        std::uint64_t handovers = 0;
+        std::uint64_t handovers_capped = 0;
+        std::uint64_t handover_ms = 0;
     };
     Stats stats() const;
 
@@ -266,6 +301,20 @@ private:
     std::vector<Nameplate> mobs_;
     WorldFix               fix_;                ///< the last frame()'s: where()
     bool                   fix_on_ = false;     ///< it was worked out: the packets watched
+    std::vector<MapTrust::Mob> stands_;         ///< the last frame()'s: stands()
+    /// The screen's pictures as the passes see them: the detector's count at
+    /// the last pass, and when it was last seen to move on.
+    std::uint64_t          pictures_ = 0;
+    std::uint64_t          picture_new_ms_ = 0;
+    /// The time between the last two times it moved on: over kScreenFreshMs,
+    /// the detector is resting.
+    std::uint64_t          picture_gap_ms_ = 0;
+    /// A hand-over under way (handing_over_): when it began, the detector's
+    /// count then, and the number the packets' last pass gave, served through
+    /// it with that pass's plates.
+    std::uint64_t          handover_from_ms_ = 0;
+    std::uint64_t          handover_pictures_ = 0;
+    std::uint64_t          packet_number_ = 0;
 
     std::atomic<Source>        source_{Source::Screen};
     std::atomic<PacketWhy>     why_{PacketWhy::Off};
@@ -274,7 +323,41 @@ private:
     std::atomic<std::uint64_t> screen_ms_{0};
     std::atomic<std::uint64_t> healthy_ms_{0};
     std::atomic<std::uint64_t> switches_{0};
+    std::atomic<bool>          handing_over_{false};
+    std::atomic<std::uint64_t> handovers_{0};
+    std::atomic<std::uint64_t> handovers_capped_{0};
+    std::atomic<std::uint64_t> handover_ms_{0};
 };
+
+// ------------------------------------------------------ the detector's pace
+
+/// What the name-plate reader's pace hangs on, as GoBot's window sees it at
+/// one tick (GuiApp::detector_pace_tick): the hunt, where the hunter's eyes
+/// are, and everything else that reads the detector's plates or the frames
+/// they come with.
+struct DetectorPace {
+    bool               hunting = false;
+    PacketEyes::Source source = PacketEyes::Source::Screen;  ///< PacketEyes::source()
+    PacketWhy          why = PacketWhy::Off;                 ///< PacketEyes::why()
+    bool               jump_test = false;       ///< a jump key's "Thử" watching your plate
+    bool               monster_look = false;    ///< "Quái đang thấy" listing what is in view
+    bool               camera_panels = false;   ///< the Radar or the movement panels open
+    bool               walking = false;         ///< a navigator walk, which follows the camera
+    bool               rest_off = false;        ///< app.ini [Packets] detector_rest=off
+
+    /// The wait between looks while the packets steer, and otherwise: the
+    /// detector's own, as it always was.
+    static constexpr int kRestMs = 600;
+    static constexpr int kRunMs = MobDetector::kLookGapMs;
+};
+
+/// Whether the detector may rest -- look every DetectorPace::kRestMs rather
+/// than kRunMs: hunting, with the packets steering and healthy (the eyes'
+/// source the packets, and why() InUse), no "Thử", no "Quái đang thấy", no
+/// Radar or movement panel, no walk, and detector_rest not off. `why`, when
+/// given, gets the first of those that does not hold, in the log's English,
+/// or "" when it may rest.
+bool detector_rest(const DetectorPace& p, const char** why = nullptr);
 
 // ------------------------------------------------------- watching the two
 
@@ -362,8 +445,14 @@ struct GameLink {
     std::vector<Endpoint>      servers;
     std::vector<std::uint16_t> udp_ports;
 
-    /// At most one start of the capture for positions in this long.
+    /// At most one start of the capture for positions in this long, for a
+    /// new UDP port or the game's TCP gone quiet.
     static constexpr std::uint64_t kReattachEveryMs = 10'000;
+    /// For a new game process or a new TCP connection -- a login, a
+    /// reconnect, a door to another server -- this soon: the map entry that
+    /// follows comes within a second or two, and missed, the map is not
+    /// known until the next door.
+    static constexpr std::uint64_t kReattachNewMs = 1'000;
     /// Game TCP silent this long on the capture for positions: start it again.
     static constexpr std::uint64_t kReattachSilentMs = 5'000;
 };
@@ -371,8 +460,9 @@ struct GameLink {
 /// Whether to start the capture for positions again: the game's process has
 /// changed (it was started again), it has a connection or a UDP port the
 /// capture was not built with (a reconnect, a socket opened later), or its
-/// TCP has been silent for kReattachSilentMs on it -- and not within
-/// kReattachEveryMs of the last start, and never with no game or no
+/// TCP has been silent for kReattachSilentMs on it -- a new process or
+/// connection not within kReattachNewMs of the last start, a new UDP port or
+/// the silence not within kReattachEveryMs, and never with no game or no
 /// connection to capture. `why`, when given, gets the reason, in the log's
 /// English.
 bool should_reattach(const GameLink& before, const GameLink& now, std::uint64_t tcp_silent_ms,

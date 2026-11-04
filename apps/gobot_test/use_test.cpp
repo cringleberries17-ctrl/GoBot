@@ -28,6 +28,7 @@
 #include "gobot/config.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/input_manager.hpp"
+#include "gobot/logger.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 #include "test_support.hpp"
@@ -43,7 +44,10 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace gobot;
@@ -341,6 +345,10 @@ struct Pretend {
         Frame icon;
         int  tab = kUseTab;     ///< which tab of the bag it lies in, with tabs_work
         bool opener = false;    ///< the Người Giữ Sân item: a right-click opens the shop
+        /// The live client's own pictures of its slot by the count in it, a
+        /// slot's size, count and all: drawn as they are, in place of `icon`
+        /// and a number printed over it, while it holds that count.
+        std::vector<std::pair<int, Frame>> drawn;
         bool gone() const { return count <= 0; }
     };
 
@@ -364,11 +372,127 @@ struct Pretend {
     bool book_sticks = false;
     Clock time;
 
+    // The game's message after a charm's question is confirmed (test_charm_notice),
+    // as on the live client: grabbed/dialog_ok, its Xác Nhận label where the
+    // question's Hủy Bỏ label was, `notice_late_ms` of the pretend game's time
+    // after the click -- the first one `notice_late_first_ms` when that is set
+    // -- and `notice_drop` taller for a longer text, its button as much lower.
+    // A click on its button closes it, but with `notice_sticks`; with
+    // `notice_takes` the stack goes down only as it shows, not at the click.
+    bool notice_after = false;
+    bool notice_sticks = false;
+    bool notice_takes = false;
+    int  notice_drop = 0;
+    int  notice_late_ms = 0;
+    int  notice_late_first_ms = -1;
+    bool msg_on = false, msg_due = false;
+    std::chrono::steady_clock::time_point msg_at{};
+    ScreenRect msg_pair;                ///< the pair of the question it follows
+    int  msg_about = -1;
+    int  messages = 0, messages_closed = 0;
+    int  notice_ok_clicks = 0, notice_other_clicks = 0;
+    std::vector<std::pair<int, int>> notice_click_at;
+    std::vector<std::chrono::steady_clock::time_point> notice_click_t;
+    std::vector<int> moves_at_notice_click;     ///< `moves` at each click on its button
+    /// What reaches the game while a message is up: keys, right-clicks.
+    int  keys_with_message = 0, right_clicks_with_message = 0;
+    /// Where the label of grabbed/dialog_ok is in that picture.
+    static ScreenRect notice_label() {
+        static const ScreenRect at = [] {
+            const Frame& pair = *kit().store.get("grabbed/confirm_button");
+            const Frame& ok = *kit().store.get("grabbed/dialog_ok");
+            Frame label;
+            label.width = 34;
+            label.height = 13;
+            for (int y = 0; y < 13; ++y)
+                for (int x = 0; x < 34; ++x) {
+                    const std::size_t i = (static_cast<std::size_t>(y + 4) * pair.width + x + 4) * 4;
+                    label.pixels.insert(label.pixels.end(), pair.pixels.begin() + static_cast<std::ptrdiff_t>(i),
+                                        pair.pixels.begin() + static_cast<std::ptrdiff_t>(i) + 4);
+                }
+            const auto m = TemplateMatcher::find(ok, ScreenRect{ 0, 0, ok.width, ok.height }, label, 0.9f);
+            return m.found ? m.at : ScreenRect{ 149, 57, 34, 13 };
+        }();
+        return at;
+    }
+    /// The message's label on the screen: 46 right of the question's pair, as
+    /// the live client's at 561,401 is of a pair find_dialogs puts at 515,397.
+    ScreenRect msg_label() const {
+        return ScreenRect{ msg_pair.x + 46, msg_pair.y + 4 + notice_drop, 34, 13 };
+    }
+    ScreenRect msg_button() const {
+        const ScreenRect label = msg_label();
+        return ScreenRect{ label.x - 4, label.y - 4, 42, 21 };
+    }
+    ScreenRect msg_rect() const {
+        const Frame& ok = *kit().store.get("grabbed/dialog_ok");
+        const ScreenRect label = msg_label();
+        const ScreenRect in = notice_label();
+        return ScreenRect{ label.x - in.x, label.y - in.y - notice_drop, ok.width, ok.height + notice_drop };
+    }
+    /// grabbed/dialog_ok `drop` rows taller: a row of its words panel drawn
+    /// again, the button and the frame under it moved down.
+    static Frame taller(const Frame& pic, int drop) {
+        if (drop <= 0) return pic;
+        constexpr int kSplit = 30;
+        Frame out;
+        out.width = pic.width;
+        out.height = pic.height + drop;
+        out.pixels.resize(static_cast<std::size_t>(out.width) * out.height * 4);
+        for (int y = 0; y < out.height; ++y) {
+            const int from = y < kSplit ? y : y < kSplit + drop ? kSplit : y - drop;
+            std::copy_n(pic.pixels.begin() + static_cast<std::ptrdiff_t>(from) * pic.width * 4, pic.width * 4,
+                        out.pixels.begin() + static_cast<std::ptrdiff_t>(y) * out.width * 4);
+        }
+        return out;
+    }
+
+    /// The pointer: where the last click, right-click or Hands::move left it.
+    /// With `lit`, a button under it is drawn lit, as the game draws one --
+    /// brighter, its letters dimmed -- which the pair and the label do not
+    /// match. `no_move`: hands with no Hands::move.
+    int  px = -1, py = -1;
+    bool lit = false;
+    bool no_move = false;
+    int  moves = 0;
+    static void light(Frame& f, const ScreenRect& r) {
+        for (int y = r.y; y < r.bottom(); ++y)
+            for (int x = r.x; x < r.right(); ++x) {
+                std::uint8_t red = 0, green = 0, blue = 0;
+                f.get(x, y, red, green, blue);
+                const int grey = (red + green + blue) / 3;
+                const int d = grey < 140 ? 60 : -80;
+                put_px(f, x, y, std::clamp(red + d, 0, 255), std::clamp(green + d, 0, 255),
+                       std::clamp(blue + d, 0, 255));
+            }
+    }
+
+    /// The bag shut, with `bag_keyed`: nothing of it drawn until a key that is
+    /// not ESC -- the bag key -- opens it; the next shuts it again.
+    bool bag_shut = false, bag_keyed = false;
+    /// A tab of `total_rows` rows (0: no more than show), `first_row` at the
+    /// top: the thumb drawn for it, the slots of the rows on show drawn and
+    /// clicked by their place on the page, and a click on the scroll bar's
+    /// arrows moving it a row.
+    int  total_rows = 0, first_row = 0, scroll_clicks = 0;
+
     // The potion shop (test_shop): tabs that can be clicked, the Người Giữ Sân
     // item on Khác, the shop's window, and a quantity question that takes
     // typed digits, with the box starting at 1 as the sell box does.
     bool tabs_work = false;
     int  cur_tab = kUseTab;
+    /// Clicks on a tab, with tabs_work; the next `tab_clicks_lost` of them do
+    /// nothing, as a click the game let go -- and with `tabs_stuck` none does.
+    int  tab_clicks = 0, tab_clicks_lost = 0;
+    bool tabs_stuck = false;
+    /// The strip drawn with no tab chosen -- what a look reads as -1, as the
+    /// live client's did on 2026-11-03 -- on the looks `unread` says, by their
+    /// number from 1; and, with `hover_unreads`, while the pointer rests on the
+    /// strip, as the game lights a control under it. `unread_seen` counts the
+    /// looks so drawn.
+    std::function<bool(int)> unread;
+    bool hover_unreads = false;
+    int  unread_seen = 0;
     bool opener_opens = true;       ///< a right-click on the item opens the shop
     /// The shop opens only this many looks after the right-click (0: at once),
     /// as on the live client once, after GoBot had stopped waiting for it.
@@ -511,6 +635,7 @@ struct Pretend {
     std::vector<bool> book_at_right_click;
 
     static constexpr int kQX = 600, kQY = 120;      ///< where questions come up
+    int notice_x = kQX, notice_y = kQY;             ///< where a message with Up::Notice is
     static constexpr int kBX = 600, kBY = 330;      ///< where the bin's quantity dialog comes up
     /// Where the book's tab is drawn: clear of the bag, its X and the
     /// questions, its X where the live client has it from the tab.
@@ -547,9 +672,18 @@ struct Pretend {
         const ScreenRect p = bin_pair();
         return ScreenRect{ p.x - 88, p.y + 3, 82, 15 };
     }
+    /// Where item `it` is drawn, when its row is on show.
+    bool on_page(const Item& it, ScreenRect& r) const {
+        const int s = it.slot - first_row * l.cols;
+        if (bag_shut || s < 0 || s >= l.rows * l.cols) return false;
+        r = slot_rect(s);
+        return true;
+    }
     Item* at(int x, int y) {
-        for (Item& it : items)
-            if (!it.gone() && (!tabs_work || it.tab == cur_tab) && slot_rect(it.slot).contains(x, y)) return &it;
+        for (Item& it : items) {
+            ScreenRect r;
+            if (!it.gone() && (!tabs_work || it.tab == cur_tab) && on_page(it, r) && r.contains(x, y)) return &it;
+        }
         return nullptr;
     }
     /// Item `i` has just gone from its slot: in a bag that closes up its
@@ -562,22 +696,36 @@ struct Pretend {
 
     Frame render() const {
         const Kit& k = kit();
-        Frame f = base;
+        Frame f = bag_shut ? scene(base.width, base.height, 60) : base;
         // The scroll bar's thumb the whole length of its track: a tab of four
         // rows at most, at its top -- what the live client shows for one.
-        if (thumb)
-            fill(f, ScreenRect{ v.strip.x + l.scroll_up_dx, v.strip.y + l.track_top_dy, 1,
-                                l.track_bottom_dy - l.track_top_dy + 1 },
-                 255, 255, 255);
+        const int span = l.track_bottom_dy - l.track_top_dy + 1;
+        if (!bag_shut && total_rows > l.rows) {
+            // Shorter, for a longer tab, and as far down its dark track as the
+            // rows above the view.
+            const int run = static_cast<int>(std::lround(static_cast<double>(span) * l.rows / total_rows));
+            const int top = static_cast<int>(
+                std::lround(static_cast<double>(span - run) * first_row / (total_rows - l.rows)));
+            fill(f, ScreenRect{ v.strip.x + l.scroll_up_dx, v.strip.y + l.track_top_dy, 1, span }, 70, 70, 70);
+            fill(f, ScreenRect{ v.strip.x + l.scroll_up_dx, v.strip.y + l.track_top_dy + top, 1, run }, 255, 255, 255);
+        } else if (!bag_shut && thumb) {
+            fill(f, ScreenRect{ v.strip.x + l.scroll_up_dx, v.strip.y + l.track_top_dy, 1, span }, 255, 255, 255);
+        }
         if (tabs_work) blit(f, strip_on(cur_tab), 300, 300);
         for (const Item& it : items) {
-            if (it.gone() || (tabs_work && it.tab != cur_tab)) continue;
-            const ScreenRect s = slot_rect(it.slot);
-            if (it.icon.valid())
-                blit(f, it.icon, s.x, s.y);
-            else
-                paint_item(f, s, it.seed);
-            if (it.count >= 2) print_number(f, s.x + 3, s.y + 3, std::to_string(it.count), k.font_dir);
+            ScreenRect s;
+            if (it.gone() || (tabs_work && it.tab != cur_tab) || !on_page(it, s)) continue;
+            const auto live = std::find_if(it.drawn.begin(), it.drawn.end(),
+                                           [&it](const std::pair<int, Frame>& d) { return d.first == it.count; });
+            if (live != it.drawn.end()) {
+                blit(f, live->second, s.x, s.y);
+            } else {
+                if (it.icon.valid())
+                    blit(f, it.icon, s.x, s.y);
+                else
+                    paint_item(f, s, it.seed);
+                if (it.count >= 2) print_number(f, s.x + 3, s.y + 3, std::to_string(it.count), k.font_dir);
+            }
             if (it.smudged) fill(f, ScreenRect{ s.x + 4, s.y + 4, 7, 6 }, 250, 250, 250);
         }
         if (up == Up::InBin || up == Up::BinAsking) paint_item(f, ScreenRect{ v.trash.x - 4, v.trash.y - 2, 24, 26 }, 6);
@@ -609,7 +757,20 @@ struct Pretend {
                         put_px(f, xx, yy, r * 2 / 5, gg * 2 / 5, b * 2 / 5);
                     }
         }
-        if (up == Up::Question || up == Up::Notice) blit(f, shown, kQX, kQY);
+        // The message after a charm's question, under any dialog that comes
+        // after it; its button lit with the pointer over it.
+        if (msg_on) {
+            const ScreenRect m = msg_rect();
+            blit(f, taller(*k.store.get("grabbed/dialog_ok"), notice_drop), m.x, m.y);
+            if (lit && msg_button().contains(px, py)) light(f, msg_button());
+        }
+        if (up == Up::Question) blit(f, shown, kQX, kQY);
+        if (up == Up::Notice) blit(f, shown, notice_x, notice_y);
+        if (lit && up == Up::Question && shown_pair.contains(px, py)) {
+            const ScreenRect p = shown_pair;
+            light(f, px < p.x + p.w / 2 ? ScreenRect{ p.x, p.y, p.w / 2, p.h }
+                                        : ScreenRect{ p.x + p.w / 2, p.y, p.w - p.w / 2, p.h });
+        }
         if (up == Up::BinAsking) {
             blit(f, *k.store.get("grabbed/del_item_confirm_2"), kBX, kBY);
             fill(f, ScreenRect{ kBX, kBY + 49, 196, 30 }, 216, 216, 216);
@@ -637,6 +798,15 @@ struct Pretend {
             shop_on = true;
             shop_due = -1;
         }
+        if (msg_due && time.t >= msg_at) {
+            msg_due = false;
+            msg_on = true;
+            ++messages;
+            if (notice_takes && msg_about >= 0) {
+                --items[static_cast<std::size_t>(msg_about)].count;
+                left(static_cast<std::size_t>(msg_about));
+            }
+        }
         if ((black_every > 0 && looks % black_every == 0) || (black_from >= 0 && looks >= black_from)) {
             ++black_looks;
             Frame f = scene(base.width, base.height, 0);
@@ -646,13 +816,21 @@ struct Pretend {
             }
             return f;
         }
-        return render();
+        Frame f = render();
+        if (!bag_shut && ((unread && unread(looks)) || (hover_unreads && v.strip.contains(px, py)))) {
+            blit(f, strip_on(0), v.strip.x, v.strip.y);
+            ++unread_seen;
+        }
+        return f;
     }
 
     BagCleaner::Hands hands() {
         BagCleaner::Hands h;
         h.right_click = [this](int x, int y) {
             ++right_clicks;
+            if (msg_on) ++right_clicks_with_message;
+            px = x;
+            py = y;
             right_at.emplace_back(x, y);
             book_at_right_click.push_back(book);
             events += 'R';
@@ -687,11 +865,52 @@ struct Pretend {
         };
         h.click = [this](int x, int y) {
             ++clicks;
+            px = x;
+            py = y;
+            // The scroll bar's arrows, on a tab longer than the view.
+            if (total_rows > l.rows && !bag_shut) {
+                const int ax = v.strip.x + l.scroll_down_dx;
+                if (std::abs(x - ax) <= 3 && std::abs(y - (v.strip.y + l.scroll_down_dy)) <= 3) {
+                    ++scroll_clicks;
+                    first_row = std::min(first_row + 1, total_rows - l.rows);
+                    return true;
+                }
+                if (std::abs(x - (v.strip.x + l.scroll_up_dx)) <= 3 && std::abs(y - (v.strip.y + l.scroll_up_dy)) <= 3) {
+                    ++scroll_clicks;
+                    first_row = std::max(first_row - 1, 0);
+                    return true;
+                }
+            }
+            // The message after a charm's question: its button closes it, but
+            // with `notice_sticks`; anywhere else on it is counted. A click on
+            // a question's buttons over it is the question's.
+            if (msg_on && msg_rect().contains(x, y) && !(up == Up::Question && shown_pair.contains(x, y))) {
+                if (msg_button().contains(x, y)) {
+                    ++notice_ok_clicks;
+                    notice_click_at.emplace_back(x, y);
+                    notice_click_t.push_back(time.t);
+                    moves_at_notice_click.push_back(moves);
+                    if (!notice_sticks) {
+                        msg_on = false;
+                        ++messages_closed;
+                        seq += 'N';
+                    }
+                } else {
+                    ++notice_other_clicks;
+                }
+                return true;
+            }
             if (tabs_work) {
                 for (int t = 0; t < kBagTabs; ++t) {
                     int tx = 0, ty = 0;
                     v.tab_point(l, t, tx, ty);
                     if (std::abs(x - tx) <= l.tab_w / 2 && std::abs(y - ty) <= 8) {
+                        ++tab_clicks;
+                        if (tabs_stuck) return true;
+                        if (tab_clicks_lost > 0) {
+                            --tab_clicks_lost;
+                            return true;
+                        }
                         cur_tab = t;
                         return true;
                     }
@@ -710,7 +929,7 @@ struct Pretend {
                 return true;
             }
             if (up == Up::Notice) {
-                const ScreenRect n{ kQX, kQY, shown.width, shown.height };
+                const ScreenRect n{ notice_x, notice_y, shown.width, shown.height };
                 if (n.contains(x, y)) ++notice_clicks;
                 return true;
             }
@@ -721,10 +940,23 @@ struct Pretend {
                     if (reply == Reply::Register || reply == Reply::Charm) {
                         ++confirms;
                         if (registers) {
-                            --items[static_cast<std::size_t>(about)].count;
+                            // With `notice_takes`, the stack goes down as the
+                            // message shows instead.
+                            if (!(reply == Reply::Charm && notice_after && notice_takes)) {
+                                --items[static_cast<std::size_t>(about)].count;
+                                left(static_cast<std::size_t>(about));
+                            }
                             events += reply == Reply::Charm ? 'C' : 'U';
                             seq += reply == Reply::Charm ? 'C' : 'U';
-                            left(static_cast<std::size_t>(about));
+                        }
+                        // The game's message that the charm worked, a while on.
+                        if (reply == Reply::Charm && notice_after) {
+                            const int late = messages == 0 && notice_late_first_ms >= 0 ? notice_late_first_ms
+                                                                                          : notice_late_ms;
+                            msg_due = true;
+                            msg_at = time.t + std::chrono::milliseconds(late);
+                            msg_pair = p;
+                            msg_about = about;
                         }
                     } else {
                         ++wrong_confirms;
@@ -780,11 +1012,23 @@ struct Pretend {
             return key_in(vk, true);
         };
         h.key = [this](std::uint32_t vk) { return key_in(vk, false); };
+        if (!no_move)
+            h.move = [this](int x, int y) {
+                ++moves;
+                px = x;
+                py = y;
+                return true;
+            };
         return h;
     }
     /// A key into the pretend game, as its key code or as its scan code alone.
     bool key_in(std::uint32_t vk, bool as_scan) {
         ++keys;
+        if (msg_on) ++keys_with_message;
+        if (bag_keyed && !qty_up && vk != VK_ESCAPE) {
+            bag_shut = !bag_shut;
+            return true;
+        }
         if (qty_up) {
             if (vk >= '0' && vk <= '9') {
                 ++digit_keys;
@@ -839,6 +1083,7 @@ struct Pass {
     std::function<bool()> guard;                    ///< the hold still on; unset: not asked
     std::function<void(const std::string&)> claim;  ///< called with a charm's id before it is right-clicked
     int deadline_ms = 0;
+    ScreenRect own_notice;                          ///< handed to set_own_notice when set
 
     Pass() {
         settings.tabs[0] = settings.tabs[1] = settings.tabs[3] = settings.tabs[4] = false;
@@ -852,11 +1097,32 @@ struct Pass {
     }
     /// A charm in slot `slot` with `count` in its stack, on the Dùng list: a
     /// picture drawn like a charm icon, named for the clock by `file`.
-    void charm(int slot, int seed, int count, const std::string& file = "",
-               std::vector<std::string> kin = { "spend/buff/8871011" }) {
+    ///
+    /// Its colour as building the list tells it (TrashList::add_rivals): the
+    /// pretend catalog's icon of a charm id of its own -- one for each seed,
+    /// unless `kin` names one -- is its own drawing, so judge tells its slot's
+    /// colour as the client's own icons would be told.
+    void charm(int slot, int seed, int count, const std::string& file = "", std::vector<std::string> kin = {}) {
+        if (kin.empty()) kin = { "spend/buff/pretend_" + std::to_string(seed) };
+        const std::string colour = kin.front();
         item(slot, seed, count, TrashList::Action::Use, false, true, std::move(kin));
-        list.items.back().file = file.empty() ? "charm_" + std::to_string(slot) : file;
+        TrashList::Item& it = list.items.back();
+        it.file = file.empty() ? "charm_" + std::to_string(slot) : file;
+        it.colour_of = colour;
+        const bool known = std::any_of(list.rivals.begin(), list.rivals.end(),
+                                       [&](const TrashList::Item& r) { return r.id == colour; });
+        if (!known) {
+            TrashList::Item icon;
+            icon.id = colour;
+            icon.colour_of = colour;
+            icon.picture = it.picture;
+            icon.shown = it.shown;
+            list.rivals.push_back(icon);
+        }
     }
+    /// The packets' bag on a charm's slot, as GoBot's window answers it
+    /// (BagCleaner::set_charm_packets); unset: not asked.
+    std::function<BagCleaner::PacketSays(const std::string&, int, int, std::string&)> packets;
     /// An item in slot `slot` with `count` in its stack, on the list for
     /// `action`. Its picture is taken to be drawn like a fragment icon, as
     /// add_rivals finds a fragment cut from the bag to be, unless `kin` says
@@ -889,7 +1155,9 @@ struct Pass {
         if (due) cleaner.set_charm_due(due);
         if (guard) cleaner.set_guard(guard);
         if (claim) cleaner.set_charm_claim(claim);
+        if (packets) cleaner.set_charm_packets(packets);
         if (deadline_ms > 0) cleaner.set_deadline_ms(deadline_ms);
+        if (own_notice.valid()) cleaner.set_own_notice(own_notice);
         if (!debug_dir.empty()) cleaner.set_debug_dir(debug_dir);
         cleaner.on_report([this](const std::string& line) { said.push_back(line); });
         result = cleaner.run();
@@ -2646,6 +2914,333 @@ void test_charm_kinds() {
     check(potion_uses == 0, "a potion on the Dùng list is still no item to use");
 }
 
+// ------------------------------------------- charms: each colour a charm of its own
+
+namespace {
+
+/// The catalog's charms: the card in five colours, the diamond in three.
+const char* const kCharmIds[] = { "spend/buff/8871011", "spend/buff/8871021", "spend/buff/8871031",
+                                  "spend/buff/8871041", "spend/buff/8871081", "spend/buff/8871051",
+                                  "spend/buff/8871061", "spend/buff/8871071" };
+const char* const kGreyCard = "spend/buff/8871011";
+const char* const kBlueCard = "spend/buff/8871021";
+const char* const kRedCard = "spend/buff/8871031";
+const char* const kPurpleCard = "spend/buff/8871081";
+
+/// The last digits of a catalog id, for a short line: "81" for 8871081.
+std::string last2(const std::string& id) { return id.size() >= 2 ? id.substr(id.size() - 2) : id; }
+
+/// `icon` with `dr`, `dg` and `db` added to its colour: a hue no icon has.
+Frame tinted(const Frame& icon, int dr, int dg, int db) {
+    Frame t = icon;
+    for (std::size_t i = 0; i < t.pixels.size(); i += 4) {
+        t.pixels[i] = static_cast<std::uint8_t>(std::clamp(t.pixels[i] + db, 0, 255));
+        t.pixels[i + 1] = static_cast<std::uint8_t>(std::clamp(t.pixels[i + 1] + dg, 0, 255));
+        t.pixels[i + 2] = static_cast<std::uint8_t>(std::clamp(t.pixels[i + 2] + dr, 0, 255));
+    }
+    return t;
+}
+
+/// Two icons of one drawing averaged pixel by pixel: a colour between theirs.
+Frame between(const Frame& a, const Frame& b) {
+    Frame t = a;
+    for (std::size_t i = 0; i < t.pixels.size() && i < b.pixels.size(); ++i)
+        t.pixels[i] = static_cast<std::uint8_t>((a.pixels[i] + b.pixels[i]) / 2);
+    return t;
+}
+
+/// An icon in a slot as the client draws it: a pixel right of the middle of
+/// the slot's dark, blended over it by its own transparency. A slot's size.
+Frame slot_tile_of(const Frame& icon) {
+    Frame t = scene(34, 34, 14);
+    const int ox = (36 - icon.width) / 2, oy = (34 - icon.height) / 2;
+    for (int y = 0; y < icon.height; ++y)
+        for (int x = 0; x < icon.width; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * icon.width + x) * 4;
+            const int a = icon.pixels[i + 3];
+            if (a == 0) continue;
+            put_px(t, ox + x, oy + y, (icon.pixels[i + 2] * a + 14 * (255 - a)) / 255,
+                   (icon.pixels[i + 1] * a + 14 * (255 - a)) / 255, (icon.pixels[i] * a + 14 * (255 - a)) / 255);
+        }
+    return t;
+}
+
+/// That tile on a frame of its own: the frame and the slot.
+std::pair<Frame, ScreenRect> charm_slot(const Frame& icon) {
+    Frame f = scene(80, 60, 60);
+    const ScreenRect s{ 10, 10, 34, 34 };
+    blit(f, slot_tile_of(icon), s.x, s.y);
+    return { f, s };
+}
+
+/// The list a pass builds with these ids chosen to use and to delete, and
+/// no picture cut from the bag.
+TrashList charm_list(const ItemCatalog& catalog, const std::vector<std::string>& use,
+                     const std::vector<std::string>& del = {}) {
+    CleanSettings s;
+    s.use_ids = use;
+    s.delete_ids = del;
+    TrashList list;
+    list.build(temp_path("no_trash_pictures"), s, catalog);
+    return list;
+}
+
+/// A verdict's colour, for a check's line.
+std::string colour_text(const TrashList::Verdict& k) {
+    return "colour " + (k.colour_id.empty() ? std::string("none") : last2(k.colour_id)) + " " + fixed3(k.colour) +
+           ", next " + (k.colour_next_id.empty() ? std::string("none") : last2(k.colour_next_id)) + " " +
+           fixed3(k.colour_next) + ", mean off " + std::to_string(k.colour_mean_off);
+}
+
+/// The item a verdict took, or "none".
+std::string taken_text(const TrashList& list, const TrashList::Verdict& k) {
+    if (k.item < 0)
+        return std::string(k.doubt == TrashList::Verdict::Doubt::Colour ? "a colour doubt"
+                           : k.doubt == TrashList::Verdict::Doubt::Rival ? "a rival doubt"
+                                                                          : "none");
+    const TrashList::Item& it = list.items[static_cast<std::size_t>(k.item)];
+    return (it.id.empty() ? std::string("the cut") : last2(it.id)) +
+           (it.action == TrashList::Action::Use ? " to use" : " to delete");
+}
+
+/// The catalog with every charm in it, or false.
+bool charm_catalog(ItemCatalog& catalog) {
+    if (!catalog.load(ItemCatalog::default_dir())) return false;
+    for (const char* id : kCharmIds)
+        if (catalog.find(id) == nullptr) return false;
+    return true;
+}
+
+} // namespace
+
+void test_charm_colours() {
+    section("Bùa: each colour of a charm is a charm of its own -- the drawing one, told by its colour");
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    const float min_score = CleanSettings{}.min_score;
+    const auto icon = [&](const char* id) { return catalog.find(id)->icon; };
+    {
+        // Purple chosen: one item, no other colour along with it, its own
+        // clock -- and the other colours of its card stay in the catalog.
+        const TrashList list = charm_list(catalog, { kPurpleCard });
+        int uses = 0;
+        const TrashList::Item* it = nullptr;
+        for (const TrashList::Item& i : list.items)
+            if (i.action == TrashList::Action::Use && i.charm()) {
+                ++uses;
+                it = &i;
+            }
+        bool rivals = true;
+        for (const char* id : { kGreyCard, kBlueCard, kRedCard, "spend/buff/8871041" })
+            rivals = rivals && std::any_of(list.rivals.begin(), list.rivals.end(),
+                                           [&](const TrashList::Item& r) { return r.id == id; });
+        check(uses == 1 && it != nullptr && it->via.empty() && it->clock_id() == kPurpleCard &&
+                  it->colour_of == kPurpleCard && list.items.size() == 1 && rivals,
+              "8871081 chosen to use: that one item, nothing brought along, its own clock and colour; 11, 21, 31 and "
+              "41 left in the catalog -- " + std::to_string(list.items.size()) + " item(s)");
+    }
+    {
+        // Each of the eight chosen alone, against a slot of each.
+        std::string wrong;
+        for (const char* ticked : kCharmIds) {
+            const TrashList list = charm_list(catalog, { ticked });
+            const std::vector<std::string> kin = catalog.same_drawing(ticked);
+            std::string line;
+            for (const char* in_bag : kCharmIds) {
+                const auto [f, s] = charm_slot(icon(in_bag));
+                const TrashList::Verdict k = list.judge(f, s, min_score);
+                const bool same_id = std::string(ticked) == in_bag;
+                const bool same_drawing = std::find(kin.begin(), kin.end(), in_bag) != kin.end();
+                bool ok = k.item < 0;
+                if (same_id)
+                    ok = k.item >= 0 && list.items[static_cast<std::size_t>(k.item)].id == ticked;
+                else if (same_drawing)
+                    ok = k.item < 0 && k.doubt == TrashList::Verdict::Doubt::None && k.colour_id == in_bag;
+                if (!ok) wrong += " | " + last2(ticked) + " chosen, a slot of " + last2(in_bag) + ": " +
+                                  taken_text(list, k) + ", " + colour_text(k);
+                if (same_id || same_drawing)
+                    line += " " + last2(in_bag) + "->" + (k.colour_id.empty() ? std::string("--") : last2(k.colour_id)) +
+                            " " + fixed3(k.colour) + "/" + std::to_string(k.colour_mean_off) + " (next " +
+                            fixed3(k.colour_next) + ")";
+            }
+            std::printf("  [info] %s chosen:%s\n", last2(ticked).c_str(), line.c_str());
+        }
+        check(wrong.empty(), "each of the 8 charms chosen alone, a slot of each: taken for its own id only; the same "
+                             "drawing in another colour left alone as that colour; another drawing left alone" + wrong);
+    }
+    {
+        // Two colours chosen: each slot is its own colour's.
+        const TrashList list = charm_list(catalog, { kPurpleCard, kBlueCard });
+        const auto taken = [&](const char* in_bag) {
+            const auto [f, s] = charm_slot(icon(in_bag));
+            const TrashList::Verdict k = list.judge(f, s, min_score);
+            return k.item < 0 ? std::string() : list.items[static_cast<std::size_t>(k.item)].id;
+        };
+        check(taken(kPurpleCard) == kPurpleCard && taken(kBlueCard) == kBlueCard && taken(kGreyCard).empty(),
+              "81 and 21 chosen: a slot of 81 is 81's, of 21 21's, and of 11 nobody's");
+    }
+    {
+        // Purple to use, grey to delete: a grey slot is deleted -- that very id
+        // was chosen for it -- and a red one, brought along to the delete list
+        // by the grey card, is left alone: the purple card's drawing won it.
+        const TrashList list = charm_list(catalog, { kPurpleCard }, { kGreyCard });
+        const auto verdict = [&](const char* in_bag) {
+            const auto [f, s] = charm_slot(icon(in_bag));
+            return list.judge(f, s, min_score);
+        };
+        const TrashList::Verdict grey = verdict(kGreyCard), red = verdict(kRedCard), purple = verdict(kPurpleCard);
+        const bool grey_deleted = grey.item >= 0 &&
+                                  list.items[static_cast<std::size_t>(grey.item)].action == TrashList::Action::Delete &&
+                                  list.items[static_cast<std::size_t>(grey.item)].id == kGreyCard;
+        const bool purple_used = purple.item >= 0 &&
+                                 list.items[static_cast<std::size_t>(purple.item)].action == TrashList::Action::Use;
+        check(grey_deleted && red.item < 0 && red.colour_id == kRedCard && purple_used,
+              "81 to use and 11 to delete: a slot of 11 is deleted (" + taken_text(list, grey) + "), of 31 left "
+              "alone (" + taken_text(list, red) + ", " + colour_text(red) + "), of 81 used");
+    }
+    {
+        // The same with the purple card's own icon held to a score no match
+        // reaches -- a frame where it misses the slot and a delete item does
+        // not: what won on the delete list is told by its colour all the same.
+        // A slot of 81 or of 21 is left alone, told as that colour; one of 11
+        // is still deleted.
+        TrashList list = charm_list(catalog, { kPurpleCard }, { kGreyCard });
+        for (TrashList::Item& it : list.items)
+            if (it.id == kPurpleCard) it.min_score = 1.5f;
+        const auto verdict = [&](const char* in_bag) {
+            const auto [f, s] = charm_slot(icon(in_bag));
+            return list.judge(f, s, min_score);
+        };
+        const TrashList::Verdict purple = verdict(kPurpleCard), blue = verdict(kBlueCard), grey = verdict(kGreyCard);
+        const bool grey_deleted = grey.item >= 0 &&
+                                  list.items[static_cast<std::size_t>(grey.item)].action == TrashList::Action::Delete &&
+                                  list.items[static_cast<std::size_t>(grey.item)].id == kGreyCard;
+        check(purple.item < 0 && purple.doubt == TrashList::Verdict::Doubt::None && purple.colour_id == kPurpleCard &&
+                  blue.item < 0 && blue.colour_id == kBlueCard && grey_deleted,
+              "81 to use missing its slot, 11 to delete: a slot of 81 left alone (" + taken_text(list, purple) + ", " +
+                  colour_text(purple) + "), of 21 left alone (" + taken_text(list, blue) + ", " + colour_text(blue) +
+                  "), of 11 deleted (" + taken_text(list, grey) + ")");
+    }
+    {
+        // A hue no icon has: the red card turned toward orange. Never taken
+        // for red -- its mean colour is far from red's.
+        const TrashList list = charm_list(catalog, { kRedCard });
+        const auto [f, s] = charm_slot(tinted(icon(kRedCard), 0, 40, -50));
+        const TrashList::Verdict k = list.judge(f, s, min_score);
+        check(k.item < 0 && k.doubt == TrashList::Verdict::Doubt::Colour,
+              "the red card in an orange no icon has: a colour doubt, never 31 -- " + taken_text(list, k) + ", " +
+                  colour_text(k));
+    }
+    {
+        // A charm cut from the bag: its colour decided once, as the list is
+        // built, against the catalog's icons.
+        const BagLayout l;
+        const auto cut_of = [&](const Frame& drawn) {
+            const auto [f, s] = charm_slot(drawn);
+            TrashList list;
+            list.add_picture(bag::cut(f, s), TrashList::Action::Use, l);
+            list.items.back().file = "item_cut.png";
+            list.add_rivals(catalog);
+            return list;
+        };
+        const TrashList purple = cut_of(icon(kPurpleCard));
+        const auto judged = [&](const TrashList& list, const char* in_bag) {
+            const auto [f, s] = charm_slot(icon(in_bag));
+            return list.judge(f, s, min_score);
+        };
+        const TrashList::Verdict own = judged(purple, kPurpleCard), blue = judged(purple, kBlueCard);
+        check(purple.items.size() == 1 && purple.items[0].charm() && purple.items[0].colour_of == kPurpleCard &&
+                  own.item == 0 && blue.item < 0 && blue.colour_id == kBlueCard,
+              "a cut of a slot of 81: its colour 81 (" + purple.items[0].colour_of + "); it takes a slot of 81, and a "
+              "slot of 21 is left alone as 21 -- " + taken_text(purple, blue));
+        const TrashList unsure = cut_of(between(icon(kBlueCard), icon(kPurpleCard)));
+        const TrashList::Verdict on_purple = judged(unsure, kPurpleCard), on_blue = judged(unsure, kBlueCard);
+        check(unsure.items.size() == 1 && unsure.items[0].charm() && unsure.items[0].colour_of.empty() &&
+                  on_purple.item < 0 && on_purple.doubt == TrashList::Verdict::Doubt::Colour && on_blue.item < 0 &&
+                  on_blue.doubt == TrashList::Verdict::Doubt::Colour,
+              "a cut halfway between 21 and 81: no colour, and every slot it takes is a colour doubt -- on 81 " +
+                  taken_text(unsure, on_purple) + ", on 21 " + taken_text(unsure, on_blue));
+    }
+    {
+        // A colour chosen whose own drawing does not match the slot is not
+        // taken for it on the colour alone (A11): 21 held to a score no match
+        // reaches, a slot of 21 won by 81's drawing is left alone.
+        TrashList list = charm_list(catalog, { kPurpleCard, kBlueCard });
+        for (TrashList::Item& it : list.items)
+            if (it.id == kBlueCard) it.min_score = 1.5f;
+        const auto [f, s] = charm_slot(icon(kBlueCard));
+        const TrashList::Verdict k = list.judge(f, s, min_score);
+        check(k.item < 0 && k.doubt == TrashList::Verdict::Doubt::None && k.colour_id == kBlueCard,
+              "a slot of 21 whose own icon does not match it: not taken for 21 on 81's drawing -- " +
+                  taken_text(list, k));
+    }
+}
+
+void test_charm_colour_runs() {
+    section("Bùa: slots of another colour, or of a colour not sure, left alone by a pass and by a charm run");
+    if (skip_without_kit()) return;
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    const auto icon = [&](const char* id) { return catalog.find(id)->icon; };
+    // A bag with a blue card in slot 1, two purple cards in a purple no icon
+    // has in slots 2 and 3, and a purple card in slot 4; the purple chosen.
+    const auto fill_bag = [&](Pass& p) {
+        make_bag(p.game);
+        p.game.book_opens = false;
+        p.game.reply = Pretend::Reply::Charm;
+        const Frame odd = tinted(icon(kPurpleCard), 0, 40, 0);
+        const std::pair<int, Frame> slots[] = { { 1, slot_tile_of(icon(kBlueCard)) }, { 2, slot_tile_of(odd) },
+                                                { 3, slot_tile_of(odd) }, { 4, slot_tile_of(icon(kPurpleCard)) } };
+        for (const auto& [slot, tile] : slots) {
+            Pretend::Item it{ slot, 1, 5 };
+            it.icon = tile;
+            p.game.items.push_back(it);
+        }
+        p.list = charm_list(catalog, { kPurpleCard });
+    };
+    BagCleaner::forget_said_once();
+    {
+        Pass p;
+        fill_bag(p);
+        const auto r = p.run();
+        const auto colour_lines = std::count_if(p.said.begin(), p.said.end(), [](const std::string& l) {
+            return l.find("không chắc màu") != std::string::npos;
+        });
+        check(r.doubtful == 0 && !p.says("khác hình") && colour_lines == 1 && p.game.right_clicks == 0 &&
+                  p.game.drags == 0 && p.says("bùa được dùng riêng"),
+              "a pass: the purple card said as a charm with a run of its own, the blue one passed over, the two "
+              "of a colour not sure said once and not counted as doubts -- " + std::to_string(colour_lines) +
+                  " line(s), " + std::to_string(r.doubtful) + " doubtful, " + p.last());
+    }
+    {
+        Pass p;
+        fill_bag(p);
+        p.mode = BagCleaner::Mode::CharmsOnly;
+        const auto r = p.run();
+        const ScreenRect four = p.game.slot_rect(4);
+        check(p.game.right_clicks == 1 && !p.game.right_at.empty() && four.contains(p.game.right_at[0].first,
+                                                                                    p.game.right_at[0].second) &&
+                  r.charms_used == 1 && p.game.items[3].count == 4 && r.charms_other_colour == 1 &&
+                  r.charms_colour_doubt == 2 && p.says("màu không giống") && p.game.keys == 0,
+              "a charm run: only the purple card is right-clicked, and used; the blue one and the two not sure "
+              "counted and left alone -- " + std::to_string(p.game.right_clicks) + " right-click(s), " +
+                  std::to_string(r.charms_other_colour) + " other colour, " + std::to_string(r.charms_colour_doubt) +
+                  " not sure");
+        // The same bag again: what was said of the colour is not said twice.
+        Pass q;
+        fill_bag(q);
+        q.mode = BagCleaner::Mode::CharmsOnly;
+        q.run();
+        check(!q.says("màu không giống"), "and a run after it does not say the colour doubt again");
+    }
+}
+
 void test_charm_question() {
     section("Bùa: the question taken for a charm's, and the questions that are not");
     if (skip_without_kit()) return;
@@ -2677,10 +3272,19 @@ void test_charm_question() {
           "the two buttons in a box that is not the game's frame: not a charm's");
     check(bag::can_check_charm(k.store) && !bag::can_check_charm(k.bare),
           "the pictures a charm run needs: the registration question's box is one");
+    {
+        // The message's picture with no Xác Nhận to be found in it: no charm
+        // run, for its message could not be closed.
+        TemplateStore blank = k.store;
+        Frame ok = *k.store.get("grabbed/dialog_ok");
+        fill(ok, ScreenRect{ 140, 50, 50, 25 }, 120, 120, 120);
+        blank.put("grabbed/dialog_ok", ok);
+        check(!bag::can_check_charm(blank), "nor with a message's picture that has no Xác Nhận in it");
+    }
     // And each of the questions it tells a charm's from: with one missing, that
     // question could be taken for a charm's.
     for (const char* missing : { "grabbed/hoisinh_confirm", "grabbed/drop_confirm", "grabbed/sell_confirm",
-                                 "grabbed/del_item_confirm_1", "grabbed/confirm_button",
+                                 "grabbed/del_item_confirm_1", "grabbed/confirm_button", "grabbed/dialog_ok",
                                  bag::kCloseButtons[0], bag::kCloseButtons[2] }) {
         TemplateStore without;
         for (const char* name : { "grabbed/inventory", "inven/0/trash_can", "grabbed/confirm_button",
@@ -2734,9 +3338,20 @@ void test_charm_run() {
               "with no book to shut, nothing dragged, no key and no click on a slot -- the bag was open and on "
               "Tiêu Dùng already");
         // The cost: the pretend game's own time -- every look at it 40 ms and
-        // every wait what it says -- not the fragment's 1.3 s of fixed sleeps.
-        std::printf("  [info] a charm used: %lld ms of the pretend game's time\n", static_cast<long long>(c.took_ms));
-        check(c.took_ms < 1200, "quickly: " + std::to_string(c.took_ms) + " ms, well under the fragment's");
+        // every wait what it says. With no message from the game, the second
+        // after Xác Nhận it is given to come in is waited out, and looked for
+        // once more at the end; with one, it is closed as soon as it is seen.
+        std::printf("  [info] a charm used, no message from the game: %lld ms of the pretend game's time\n",
+                    static_cast<long long>(c.took_ms));
+        check(c.took_ms < 2500, "quickly, its message waited for: " + std::to_string(c.took_ms) + " ms");
+        CharmRun m;
+        m.p.game.notice_after = true;
+        m.p.game.lit = true;
+        m.run();
+        std::printf("  [info] a charm used, its message closed: %lld ms of the pretend game's time\n",
+                    static_cast<long long>(m.took_ms));
+        check(m.r.charms_used == 1 && m.p.game.messages_closed == 1 && m.took_ms < c.took_ms,
+              "and quicker with the message the game shows: " + std::to_string(m.took_ms) + " ms");
     }
     {
         CharmRun c(Pretend::Reply::Charm, 1);
@@ -2762,11 +3377,11 @@ void test_charm_run() {
               "two kinds of charm: one of each");
     }
     {
-        // The same clock id twice -- a charm and its other colour: one a run.
+        // The same clock id twice -- one kind in two slots: one a run.
         CharmRun c;
         c.p.charm(5, 8, 3, "charm_3");
         c.run();
-        check(c.p.game.right_clicks == 1 && c.r.charms_used == 1, "a charm and its other colour are one: once a run");
+        check(c.p.game.right_clicks == 1 && c.r.charms_used == 1, "the same kind in two slots: once a run");
     }
     {
         CharmRun c;
@@ -2777,9 +3392,22 @@ void test_charm_run() {
         };
         c.p.charm(5, 8, 3, "charm_5");
         c.run();
+        // The one due tried, the run is done: the slot after it is not looked
+        // at, nor said to wait.
+        check(c.p.game.right_clicks == 1 && c.p.game.items[0].count == 3 && c.p.game.items[1].count == 3 &&
+                  c.r.charms_waiting == 0 && c.r.charms_due == 1,
+              "one due and one not: only the one that is due, and done with it -- " +
+                  std::to_string(c.r.charms_waiting) + " said to wait");
+    }
+    {
+        // The one not due before it: said to wait, passed over.
+        CharmRun c;
+        c.p.due = [](const std::string& id) { return id == "charm_3"; };
+        c.p.charm(1, 8, 3, "charm_1");
+        c.run();
         check(c.p.game.right_clicks == 1 && c.p.game.items[0].count == 3 && c.p.game.items[1].count == 3 &&
                   c.r.charms_waiting == 1,
-              "one due and one not: only the one that is due");
+              "one not due before the one due: passed over and said to wait, the one due used");
     }
 }
 
@@ -2831,7 +3459,21 @@ void test_charm_outcomes() {
                   std::to_string(after) + " looks after the click)");
     }
     {
-        // A message after Xác Nhận may be the game saying it worked.
+        // The game's message after Xác Nhận -- the charm worked -- where the
+        // question's Hủy Bỏ was, as on the live client.
+        CharmRun c;
+        c.p.game.notice_after = true;
+        c.p.game.lit = true;
+        c.run();
+        check(c.p.game.confirms == 1 && c.p.game.notice_ok_clicks == 1 && c.p.game.messages_closed == 1 &&
+                  c.r.charms_used == 1 && c.r.charm_tries.size() == 1 &&
+                  c.r.charm_tries[0].how == CharmClock::How::Used && c.r.trouble.empty() && c.p.game.keys == 0 &&
+                  c.r.charm_notices == 1 && !c.r.notice_left,
+              "the message after Xác Nhận is closed with its own Xác Nhận, and the charm is used -- " + c.p.game.seq +
+                  ", " + c.p.last());
+    }
+    {
+        // A message somewhere else after Xác Nhận is not GoBot's to close.
         CharmRun c;
         bool shown = false;
         c.p.during = [&](BagCleaner&) {
@@ -2840,11 +3482,13 @@ void test_charm_outcomes() {
                 c.p.game.show(*kit().store.get("grabbed/dialog_ok"), Pretend::Up::Notice);
             }
         };
+        c.p.game.notice_x = 380;
         c.run();
         check(c.p.game.confirms == 1 && c.r.charms_used == 0 && c.r.charm_tries.size() == 1 &&
                   c.r.charm_tries[0].how == CharmClock::How::MaybeUsed && c.p.game.notice_clicks == 0 &&
                   !c.r.trouble.empty(),
-              "a message after Xác Nhận: perhaps used, left for the player to read -- " + c.r.trouble);
+              "a message after Xác Nhận where the question puts none: perhaps used, left for the player to read -- " +
+                  c.r.trouble);
     }
     for (int swapped_at = 2; swapped_at <= 3; ++swapped_at) {
         // The question replaced by the revive question between the looks that
@@ -2897,9 +3541,27 @@ void test_charm_outcomes() {
     {
         CharmRun c(Pretend::Reply::Notice);
         c.run();
-        check(c.p.game.right_clicks == 1 && c.p.game.notice_clicks == 0 && c.p.game.confirms == 0 &&
-                  c.r.charms_used == 0 && !c.r.trouble.empty(),
-              "a message with only Xác Nhận: left for the player, the run stops");
+        check(c.p.game.right_clicks == 1 && c.p.game.notice_clicks == 0 && c.p.game.clicks == 0 &&
+                  c.p.game.confirms == 0 && c.r.charms_used == 0 && !c.r.trouble.empty() &&
+                  c.r.charm_tries.size() == 1 && c.r.charm_tries[0].how == CharmClock::How::NotUsed &&
+                  c.p.game.keys == 0,
+              "a message instead of a question: not clicked, not used, the run stops -- " + c.r.trouble);
+    }
+    {
+        // The same, the stack one less: taken, but not by a question GoBot saw.
+        CharmRun c(Pretend::Reply::Notice);
+        bool took = false;
+        c.p.during = [&](BagCleaner&) {
+            if (c.p.game.up == Pretend::Up::Notice && !took) {
+                took = true;
+                --c.p.game.items[0].count;
+            }
+        };
+        c.run();
+        check(c.p.game.notice_clicks == 0 && c.p.game.clicks == 0 && c.r.charms_used == 0 && c.r.use_unsure == 1 &&
+                  c.r.charm_tries.size() == 1 && c.r.charm_tries[0].how == CharmClock::How::MaybeUsed &&
+                  !c.r.trouble.empty(),
+              "and with the stack one less: perhaps used, never clicked, the run stops -- " + c.r.trouble);
     }
     {
         CharmRun c;
@@ -3020,6 +3682,40 @@ void test_charm_hold() {
                   std::to_string(c.p.game.right_clicks) + " right-clicks, " + c.r.trouble);
     }
     {
+        // The hold gone the moment Xác Nhận is pressed: the question is still
+        // seen gone, and nothing is said to be stuck in a dialog.
+        CharmRun c;
+        c.p.guard = [&] { return c.p.game.confirms == 0; };
+        c.p.debug_dir = temp_path("charm_hold_confirm");
+        c.run();
+        check(!c.r.stuck && c.r.charm_tries.size() == 1 &&
+                  c.r.trouble.find("không còn giữ phím") != std::string::npos &&
+                  files_in(c.p.debug_dir, "*_charm_stuck.png").empty() && c.p.game.notice_ok_clicks == 0 &&
+                  c.p.game.keys == 0,
+              "the hold gone at Xác Nhận: the question seen closed, nothing held as stuck -- " +
+                  std::to_string(c.r.charm_tries.size()) + " tried, " + c.r.trouble);
+    }
+    {
+        // A dialog after Xác Nhận that Hủy Bỏ does not close, the hold gone as
+        // it comes: still held to be in the way of the keys.
+        CharmRun c;
+        bool shown = false;
+        int looks = 0;
+        c.p.during = [&](BagCleaner&) {
+            if (c.p.game.confirms > 0 && !shown && ++looks == 3) {
+                shown = true;
+                c.p.game.sticky = true;
+                c.p.game.show(*kit().store.get("grabbed/hoisinh_confirm"), Pretend::Up::Question);
+            }
+        };
+        c.p.guard = [&] { return !shown; };
+        c.run();
+        check(shown && c.r.stuck && c.p.game.cancels >= 1 && c.p.game.wrong_confirms == 0 && c.p.game.keys == 0 &&
+                  c.r.charm_tries.size() == 1 && c.r.charm_tries[0].how == CharmClock::How::MaybeUsed,
+              "a dialog after Xác Nhận that will not close, the hold gone: Hủy Bỏ, perhaps used, and held as stuck "
+              "-- " + c.r.trouble);
+    }
+    {
         CharmRun c;
         c.p.deadline_ms = 1;       // the pretend game's first look is already 40 ms
         c.run();
@@ -3032,6 +3728,1599 @@ void test_charm_hold() {
         c.run();
         check(c.p.game.right_clicks == 1 && c.r.charms_used == 1, "inside the deadline: as usual");
     }
+}
+
+void test_charm_packets() {
+    section("Bùa: the packets' bag on a charm's slot can stop its right-click, never cause one");
+    if (skip_without_kit()) return;
+    BagCleaner::forget_said_once();
+    struct Asked {
+        std::string colour;
+        int slot = -1, count = -1;
+    };
+    // A charm of 4 alone in slot `slot`, the packets answering `says`.
+    const auto run_with = [](int slot, BagCleaner::PacketSays says, std::vector<Asked>& asked) {
+        auto c = std::make_unique<CharmRun>();
+        c->p.list.items.clear();
+        c->p.game.items.clear();
+        c->p.charm(slot, 5, 4);
+        c->p.packets = [&asked, says](const std::string& colour, int j, int count, std::string& said) {
+            asked.push_back(Asked{ colour, j, count });
+            said = says == BagCleaner::PacketSays::Nothing ? std::string("no current bag") : std::string("8871021 x4");
+            return says;
+        };
+        c->run();
+        return c;
+    };
+    {
+        std::vector<Asked> asked;
+        const auto c = run_with(1, BagCleaner::PacketSays::Other, asked);
+        check(c->p.game.right_clicks == 0 && c->r.charms_vetoed == 1 && c->r.charm_tries.empty() &&
+                  c->p.says("theo gói tin ô này là món khác (8871021 x4)") && asked.size() == 1 &&
+                  asked[0].slot == 1 && asked[0].count == 4 && asked[0].colour == "spend/buff/pretend_5",
+              "the packets name another item in the slot: not right-clicked, counted, said -- row 1 cell 2 asked as "
+              "slot " + (asked.empty() ? std::string("none") : std::to_string(asked[0].slot)));
+        std::vector<Asked> again;
+        const auto d = run_with(1, BagCleaner::PacketSays::Other, again);
+        check(d->p.game.right_clicks == 0 && d->r.charms_vetoed == 1 && !d->p.says("theo gói tin"),
+              "and the next run the same: left alone, and not said again");
+    }
+    for (const BagCleaner::PacketSays says : { BagCleaner::PacketSays::Agrees, BagCleaner::PacketSays::Nothing }) {
+        std::vector<Asked> asked;
+        const auto c = run_with(6, says, asked);
+        check(c->p.game.right_clicks == 1 && c->r.charms_used == 1 && c->r.charms_vetoed == 0 && asked.size() == 1 &&
+                  asked[0].slot == 6,
+              std::string(says == BagCleaner::PacketSays::Agrees ? "the packets agree" : "the packets say nothing") +
+                  ": the screen decides, and the charm is used -- row 2 cell 1 asked as slot " +
+                  (asked.empty() ? std::string("none") : std::to_string(asked[0].slot)));
+    }
+}
+
+/// A charm run whose question's Xác Nhận brings the game's message, as on the
+/// live client: its button where the question's Hủy Bỏ was, a button under
+/// the pointer drawn lit.
+struct NoticeRun : CharmRun {
+    explicit NoticeRun(int count = 4) : CharmRun(Pretend::Reply::Charm, count) {
+        p.game.notice_after = true;
+        p.game.lit = true;
+    }
+};
+
+/// Whether the debug folder `dir` holds a picture kept as `what`.
+bool kept_as(const std::string& dir, const char* what) {
+    return !files_in(dir, (std::string("*_") + what + ".png").c_str()).empty();
+}
+
+void test_charm_notice() {
+    section("Bùa: the game's message after Xác Nhận closed with its own Xác Nhận -- never a key");
+    if (skip_without_kit()) return;
+    BagCleaner::forget_said_once();
+    {
+        // 1. Two kinds, each answered with a message: one of each used, both
+        //    messages closed, nothing else pressed.
+        NoticeRun c;
+        c.p.charm(5, 8, 3, "charm_5");
+        c.run();
+        std::printf("  [info] two charms, each with its message: %lld ms of the pretend game's time\n",
+                    static_cast<long long>(c.took_ms));
+        check(c.p.game.right_clicks == 2 && c.p.game.confirms == 2 && c.p.game.notice_ok_clicks == 2 &&
+                  c.p.game.messages_closed == 2 && c.r.charms_used == 2 && c.r.trouble.empty() &&
+                  c.p.game.seq == "RCNRCN" && c.p.game.keys == 0 && c.r.charm_notices == 2 && c.r.charms_due == 2 &&
+                  c.p.says("(đã đóng thông báo của game)"),
+              "two kinds, each with its message: both used in one run, each message closed before the next "
+              "right-click -- " + c.p.game.seq + ", " + std::to_string(c.r.charms_used) + " used, " + c.r.trouble);
+        check(c.p.game.right_clicks_with_message == 0 && c.p.game.keys_with_message == 0 &&
+                  c.p.game.notice_other_clicks == 0 && c.p.game.wrong_confirms == 0 && !c.r.notice_left,
+              "and nothing right-clicked or keyed with a message up, nothing clicked on it but its button");
+    }
+    {
+        // 2. A message, and the stack as it was: closed, perhaps used, stop.
+        NoticeRun c;
+        c.p.game.registers = false;
+        c.p.debug_dir = temp_path("charm_notice_2");
+        c.run();
+        check(c.p.game.notice_ok_clicks == 1 && c.p.game.messages_closed == 1 && c.r.charms_used == 0 &&
+                  c.r.charm_tries.size() == 1 && c.r.charm_tries[0].how == CharmClock::How::MaybeUsed &&
+                  !c.r.trouble.empty() && kept_as(c.p.debug_dir, "charm_notice_other") && c.p.game.keys == 0,
+              "a message and the stack as it was: closed, perhaps used, the run stops and the message is kept -- " +
+                  c.r.trouble);
+    }
+    {
+        // 3. A message that will not close: a second click, a pixel aside and
+        //    not sooner than 300 ms, the pointer moved off it in between --
+        //    then left for the player.
+        NoticeRun c;
+        c.p.game.notice_sticks = true;
+        c.p.charm(5, 8, 3, "charm_5");
+        c.p.debug_dir = temp_path("charm_notice_3");
+        c.run();
+        const auto& t = c.p.game.notice_click_t;
+        const auto& at = c.p.game.notice_click_at;
+        const auto& mv = c.p.game.moves_at_notice_click;
+        const long long apart =
+            t.size() == 2 ? std::chrono::duration_cast<std::chrono::milliseconds>(t[1] - t[0]).count() : -1;
+        check(c.p.game.notice_ok_clicks == 2 && apart >= 300 && at.size() == 2 && at[1].first == at[0].first + 1 &&
+                  at[1].second == at[0].second && mv.size() == 2 && mv[1] > mv[0],
+              "a message that will not close: clicked twice, " + std::to_string(apart) +
+                  " ms apart, a pixel aside, the pointer moved off it between -- " +
+                  std::to_string(c.p.game.notice_ok_clicks) + " click(s)");
+        check(c.r.charms_used == 1 && c.p.game.right_clicks == 1 && c.r.trouble.find("đóng nó trong game") !=
+                  std::string::npos && c.p.game.keys == 0 && c.p.game.keys_with_message == 0 && !c.r.notice_left &&
+                  kept_as(c.p.debug_dir, "charm_notice_stuck"),
+              "used, as the stack says, and nothing more: the player is told to close it, no key pressed -- " +
+                  c.r.trouble);
+    }
+    {
+        // 4. The same with hands that cannot move the pointer: the button it
+        //    clicked stays lit, so its label is not to be told -- no second
+        //    click. Why the pointer is moved off.
+        NoticeRun c;
+        c.p.game.notice_sticks = true;
+        c.p.game.no_move = true;
+        c.run();
+        check(c.p.game.notice_ok_clicks == 1 && c.r.charms_used == 1 && !c.r.trouble.empty() && c.p.game.keys == 0,
+              "with the pointer left on the message's button: one click only, its lit label not clicked again -- " +
+                  std::to_string(c.p.game.notice_ok_clicks) + " click(s), " + c.r.trouble);
+    }
+    for (const int drop : { 13, 16 }) {
+        // 5. A taller box, for a longer text: its button lower down.
+        NoticeRun c;
+        c.p.game.notice_drop = drop;
+        c.run();
+        check(c.p.game.notice_ok_clicks == 1 && c.p.game.messages_closed == 1 && c.r.charms_used == 1 &&
+                  c.r.trouble.empty(),
+              "a message " + std::to_string(drop) + " pixels taller: closed, and used -- " + c.r.trouble);
+    }
+    {
+        // 6. The first kind's message, and its stack going down, only after
+        //    the second it is given: closed at the next round, then the
+        //    second kind used.
+        NoticeRun c;
+        c.p.game.notice_late_first_ms = 1200;
+        c.p.game.notice_takes = true;
+        c.p.charm(5, 8, 3, "charm_5");
+        c.run();
+        check(c.p.game.messages_closed == 2 && c.p.game.notice_ok_clicks == 2 && c.r.charms_used == 2 &&
+                  c.r.trouble.empty() && c.p.game.seq == "RCNRCN" && c.p.game.right_clicks_with_message == 0 &&
+                  c.p.game.keys == 0,
+              "a message come late: closed before the next right-click, and the next kind used -- " + c.p.game.seq +
+                  ", " + c.r.trouble);
+    }
+    {
+        // 7. The only kind's message 1.2 s after its Xác Nhận: closed before
+        //    the run ends.
+        NoticeRun c;
+        c.p.game.notice_late_ms = 1200;
+        c.run();
+        check(c.p.game.messages_closed == 1 && c.r.charms_used == 1 && c.r.trouble.empty() && c.r.charm_notices == 1 &&
+                  !c.r.notice_left && c.p.game.keys == 0,
+              "the last kind's message come late: closed at the end of the run -- " + c.p.game.seq + ", " +
+                  c.r.trouble);
+    }
+    {
+        // 8. The hold gone while the message is waited for: nothing clicked
+        //    on it, perhaps used, the run over at once -- and the message
+        //    handed to the next run, which closes it and opens nothing.
+        NoticeRun c;
+        c.p.game.registers = false;
+        c.p.charm(5, 8, 3, "charm_5");
+        c.p.guard = [&] { return !c.p.game.msg_on; };
+        c.run();
+        check(c.p.game.notice_ok_clicks == 0 && c.p.game.right_clicks == 1 && c.r.charm_tries.size() == 1 &&
+                  c.r.charm_tries[0].how == CharmClock::How::MaybeUsed && !c.r.trouble.empty() && c.r.notice_left &&
+                  c.r.notice_place.valid() && !c.r.notice_carried && c.p.game.keys == 0,
+              "the hold gone while the message is waited for: not clicked, perhaps used, handed to the next run -- " +
+                  c.r.trouble);
+        // The next run: the bag shut, nothing due, the message still up.
+        c.p.guard = nullptr;
+        c.p.due = [](const std::string&) { return false; };
+        c.p.own_notice = c.r.notice_place;
+        c.p.game.bag_keyed = true;
+        c.p.game.bag_shut = true;
+        c.run();
+        check(c.p.game.notice_ok_clicks == 1 && c.p.game.messages_closed == 1 && c.p.game.keys == 0 &&
+                  c.p.game.bag_shut && c.p.game.right_clicks == 1 && !c.r.notice_left && c.r.charm_notices == 1,
+              "the next run, nothing due: the message closed, the bag not opened -- " +
+                  std::to_string(c.p.game.keys) + " key(s), " + c.r.trouble);
+    }
+    for (const bool other_tab : { true, false }) {
+        // 8b. The same with the bag open for the next run, on another tab or
+        //     scrolled down: the message closed, and nothing else clicked --
+        //     neither Tiêu Dùng nor the scroll bar.
+        NoticeRun c;
+        c.p.game.registers = false;
+        c.p.charm(5, 8, 3, "charm_5");
+        c.p.guard = [&] { return !c.p.game.msg_on; };
+        c.run();
+        const bool handed = c.r.notice_left;
+        c.p.guard = nullptr;
+        c.p.due = [](const std::string&) { return false; };
+        c.p.own_notice = c.r.notice_place;
+        if (other_tab) {
+            c.p.game.tabs_work = true;
+            c.p.game.cur_tab = 1;
+        } else {
+            c.p.game.total_rows = 8;
+            c.p.game.first_row = 2;
+        }
+        const int clicks = c.p.game.clicks;
+        c.run();
+        check(handed && c.p.game.notice_ok_clicks == 1 && c.p.game.messages_closed == 1 &&
+                  c.p.game.clicks == clicks + 1 && c.p.game.scroll_clicks == 0 && c.p.game.keys == 0 &&
+                  c.p.game.cur_tab == (other_tab ? 1 : kUseTab) && c.p.game.first_row == (other_tab ? 0 : 2) &&
+                  !c.r.notice_left && c.r.charm_notices == 1,
+              std::string("the next run, nothing due, the bag open ") + (other_tab ? "on another tab" : "scrolled down") +
+                  ": the message closed, nothing else clicked -- " + std::to_string(c.p.game.clicks - clicks) +
+                  " click(s), " + std::to_string(c.p.game.scroll_clicks) + " scroll(s), " + c.r.trouble);
+    }
+    {
+        // 9. A message up before anything, not GoBot's: nothing pressed --
+        //    with the bag open, and with it shut, no bag key either.
+        for (const bool shut : { false, true }) {
+            NoticeRun c;
+            c.p.game.msg_on = true;
+            c.p.game.msg_pair = ScreenRect{ 700, 520, 85, 21 };
+            c.p.game.bag_keyed = shut;
+            c.p.game.bag_shut = shut;
+            c.run();
+            check(c.p.game.right_clicks == 0 && c.p.game.clicks == 0 && c.p.game.keys == 0 &&
+                      c.p.game.notice_ok_clicks == 0 && c.p.says("đang có một thông báo trong game"),
+                  std::string("a message up before anything, the bag ") + (shut ? "shut" : "open") +
+                      ": nothing right-clicked, clicked or keyed -- " + c.p.last());
+        }
+    }
+    {
+        // 10. A dialog of two buttons comes up as the message is closed:
+        //     Hủy Bỏ on it, not known whether used.
+        NoticeRun c;
+        bool shown = false;
+        c.p.during = [&](BagCleaner&) {
+            if (c.p.game.notice_ok_clicks > 0 && !shown) {
+                shown = true;
+                c.p.game.show(*kit().store.get("grabbed/hoisinh_confirm"), Pretend::Up::Question);
+            }
+        };
+        c.run();
+        check(shown && c.p.game.cancels >= 1 && c.p.game.wrong_confirms == 0 && c.r.charms_used == 0 &&
+                  c.r.charm_tries.size() == 1 && c.r.charm_tries[0].how == CharmClock::How::MaybeUsed &&
+                  !c.r.stuck && !c.r.trouble.empty() && c.p.game.keys == 0,
+              "a dialog as the message is closed: Hủy Bỏ, perhaps used, nothing held -- " + c.r.trouble);
+    }
+    {
+        // 12. A stop while the message is up: no click on it.
+        NoticeRun c;
+        c.p.during = [&](BagCleaner& me) {
+            if (c.p.game.msg_on) me.cancel();
+        };
+        c.run();
+        check(c.p.game.notice_ok_clicks == 0 && c.p.game.right_clicks == 1 && c.p.game.keys == 0,
+              "a stop with the message up: nothing clicked on it");
+    }
+    {
+        // 13. Every kind due tried in rows 1 and 2 of a longer tab: done, the
+        //     rows below never scrolled to.
+        NoticeRun c;
+        c.p.game.total_rows = 8;
+        c.p.charm(8, 8, 3, "charm_8");
+        c.p.charm(10, 3, 3, "charm_10");
+        c.run();
+        check(c.r.charms_used == 3 && c.p.game.scroll_clicks == 0 && c.r.trouble.empty() && c.r.charms_due == 3,
+              "three kinds due, all in the first rows of eight: all used, the scroll bar never clicked -- " +
+                  std::to_string(c.r.charms_used) + " used, " + std::to_string(c.p.game.scroll_clicks) +
+                  " scroll(s), " + c.r.trouble);
+    }
+    {
+        // 15. The bag shut at the start: opened and shut again, two keys in
+        //     all; with a message left up, left open -- one key.
+        NoticeRun c;
+        c.p.game.bag_keyed = true;
+        c.p.game.bag_shut = true;
+        c.run();
+        check(c.r.charms_used == 1 && c.p.game.messages_closed == 1 && c.p.game.keys == 2 && c.p.game.bag_shut,
+              "the bag shut at the start: opened, the charm used and its message closed, shut again -- " +
+                  std::to_string(c.p.game.keys) + " key(s)");
+        NoticeRun d;
+        d.p.game.bag_keyed = true;
+        d.p.game.bag_shut = true;
+        d.p.game.notice_sticks = true;
+        d.run();
+        check(d.r.charms_used == 1 && d.p.game.keys == 1 && !d.p.game.bag_shut && d.p.game.keys_with_message == 0 &&
+                  d.p.says("vẫn còn một thông báo đang mở"),
+              "with the message left up: the bag left open, no key over it -- " + std::to_string(d.p.game.keys) +
+                  " key(s)");
+    }
+    {
+        // 16. The deadline: 12 s and 3 s a kind, 20 to 40 s.
+        const std::pair<int, int> deadlines[] = { { 0, 20000 }, { 1, 20000 }, { 2, 20000 },
+                                                  { 3, 21000 }, { 8, 36000 }, { 10, 40000 } };
+        bool all = true;
+        std::string got;
+        for (const auto& d : deadlines) {
+            const int ms = BagCleaner::charm_deadline_ms(d.first);
+            all = all && ms == d.second;
+            got += (got.empty() ? "" : ", ") + std::to_string(d.first) + ": " + std::to_string(ms);
+        }
+        check(all, "the deadline of a charm run by kinds due -- " + got);
+        // The only kind due on the last page of a tab of twelve rows: found
+        // and used inside its deadline.
+        NoticeRun c;
+        c.p.game.total_rows = 12;
+        c.p.game.items[0].slot = 11 * 6 + 2;
+        c.p.deadline_ms = BagCleaner::charm_deadline_ms(1);
+        c.run();
+        std::printf("  [info] the only charm on the last page of twelve rows: %lld ms, %d scroll(s)\n",
+                    static_cast<long long>(c.took_ms), c.p.game.scroll_clicks);
+        check(c.r.charms_used == 1 && c.r.trouble.empty() && c.took_ms < BagCleaner::charm_deadline_ms(1) &&
+                  c.p.game.scroll_clicks == 8,
+              "the only kind on the last page of twelve rows: used inside its deadline -- " +
+                  std::to_string(c.took_ms) + " ms, " + c.r.trouble);
+    }
+}
+
+/// A charm question, its Hủy Bỏ under the pointer and lit or not, and the band
+/// its message would have: no lone Xác Nhận there. The message itself, taller
+/// or not, lit or not.
+void test_charm_notice_pictures() {
+    section("Bùa: a lone Xác Nhận is a message's, never a question's -- lit or not");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    Pretend g;
+    make_bag(g);
+    g.lit = true;
+    g.show(k.other, Pretend::Up::Question);
+    const ScreenRect p = g.shown_pair;
+    const ScreenRect band = bag::message_band(p);
+    bag::LoneOk how;
+    Frame f = g.render();
+    const bool plain = bag::lone_ok(f, k.store, band, nullptr, &how);
+    g.px = p.x + p.w * 3 / 4;
+    g.py = p.cy();
+    f = g.render();
+    bag::LoneOk lit_how;
+    const bool lit = bag::lone_ok(f, k.store, band, nullptr, &lit_how);
+    std::printf("  [info] a question's Hủy Bỏ in the band: label %s, edge %s, corner %s; lit: label %s\n",
+                fixed3(how.label_score).c_str(), fixed3(how.edge_score).c_str(), fixed3(how.corner_score).c_str(),
+                fixed3(lit_how.label_score).c_str());
+    // Unlit, the question is a dialog of two buttons, which lone_ok turns down
+    // whatever its label scores: that label is what tells it, lit or not.
+    check(p.valid() && !plain && !lit && how.label_score < 0.95f && lit_how.label_score < 0.95f,
+          "11. a charm question in the band its message would have, its Hủy Bỏ lit or not: no lone Xác Nhận -- "
+          "never clicked as a message");
+    // The message itself there, its button lit and not.
+    Pretend m;
+    make_bag(m);
+    m.lit = true;
+    m.msg_on = true;
+    m.msg_pair = p;
+    Frame n = m.render();
+    ScreenRect at;
+    bag::LoneOk seen;
+    const bool found = bag::lone_ok(n, k.store, band, &at, &seen);
+    std::printf("  [info] the pretend message: label %s, edge %s, corner %s at %d,%d\n",
+                fixed3(seen.label_score).c_str(), fixed3(seen.edge_score).c_str(), fixed3(seen.corner_score).c_str(),
+                at.x, at.y);
+    check(found && at.x == m.msg_label().x && at.y == m.msg_label().y && bag::message_up(n, k.store),
+          "the message where the question's Hủy Bỏ was: its lone Xác Nhận found, at its label");
+    m.px = m.msg_button().cx();
+    m.py = m.msg_button().cy();
+    n = m.render();
+    bag::LoneOk dim;
+    check(!bag::lone_ok(n, k.store, band, nullptr, &dim),
+          "and not with its button lit by the pointer over it -- label " + fixed3(dim.label_score) + ", corner " +
+              fixed3(dim.corner_score));
+    // Unlit again, where it is found in the band.
+    m.px = m.py = -1;
+    n = m.render();
+    check(!bag::lone_ok(n, k.store, ScreenRect{ 0, 0, 300, 300 }), "nor outside the band");
+    // A taller box: its button lower, in the band down to 40 pixels lower --
+    // the band ends 57 below the pair's top -- and not 48.
+    for (const int drop : { 13, 16, 40, 48 }) {
+        Pretend t;
+        make_bag(t);
+        t.msg_on = true;
+        t.msg_pair = p;
+        t.notice_drop = drop;
+        check(bag::lone_ok(t.render(), k.store, band) == (drop <= 40),
+              "a message " + std::to_string(drop) + " pixels taller: its button " +
+                  (drop <= 40 ? "found" : "not found") + " in the band");
+    }
+    check(bag::message_band(ScreenRect{ 514, 397, 85, 21 }).contains(561, 401) &&
+              !bag::message_band(ScreenRect{ 514, 397, 85, 21 }).contains(518, 401) &&
+              bag::message_box(ScreenRect{ 514, 397, 85, 21 }).x == 410 &&
+              bag::message_box(ScreenRect{ 514, 397, 85, 21 }).y == 341,
+          "the band of a question at 514,397 holds the live message's label at 561,401, not the question's own "
+          "Xác Nhận label at 518,401; its box from 410,341");
+}
+
+/// Where the cuts of the live client's charm frames are (2026-11-02 23:12 and
+/// 2026-11-03 06:44): beside this test, else the copy handed over with them.
+/// Empty when neither is here. Small parts, each named <what>_<x>_<y>.png by
+/// where it was -- the question box, the message box, the bag's tab strip,
+/// grid and scroll bar -- none with a name, a chat line, money or the map in
+/// it; never in git or the zip.
+std::string charm_cuts_dir() {
+    for (const std::string& d : { exe_relative("testdata\\charms"), std::string(kLiveBuild) + "handoff\\charms\\testdata" })
+        if (!files_in(d, "charm_*.png").empty()) return d;
+    return {};
+}
+
+void test_live_charm() {
+    section("Bùa: the live client's charm question, its message and its bag, on cuts of its frames");
+    if (skip_without_kit()) return;
+    const std::string dir = charm_cuts_dir();
+    if (dir.empty()) {
+        skip("no cuts of the live charm frames here (handoff\\charms\\testdata)\n");
+        return;
+    }
+    const Kit& k = kit();
+    // The question's pair as find_dialogs puts it, for the band its message
+    // is looked for in; 515,397 on the cut when it is not here.
+    ScreenRect pair{ 515, 397, 85, 21 };
+    {
+        // The question (06:44:46): "Thời gian hiệu lực tối đa là 2 giờ. Bạn có
+        // muốn sử dụng không?" over [Xác Nhận][Hủy Bỏ].
+        Frame f = scene(1024, 768, 40);
+        if (!put_back(f, dir, "charm_question")) {
+            skip("no cut of the charm question here\n");
+        } else {
+            const auto ds = bag::find_dialogs(f, k.store);
+            const bag::Dialog d = ds.size() == 1 ? ds.front() : bag::Dialog{};
+            // The frame it is told by, as charm_question compares it: the
+            // registration question's box from 6 above its buttons -- at 105,56
+            // in its picture -- to its bottom, where these buttons have it.
+            const int top = 56 - 6;
+            Frame strip;
+            strip.width = k.question.width;
+            strip.height = k.question.height - top;
+            strip.pixels.assign(k.question.pixels.begin() + static_cast<std::ptrdiff_t>(top) * k.question.width * 4,
+                                k.question.pixels.end());
+            const auto frame = TemplateMatcher::find(f, ScreenRect{ d.pair.x - 105 - 2, d.pair.y - 6 - 2,
+                                                                    strip.width + 4, strip.height + 4 },
+                                                     strip, -1.0f);
+            std::printf("  [info] the charm question: pair at %d,%d %dx%d, its frame %s\n", d.pair.x, d.pair.y,
+                        d.pair.w, d.pair.h, fixed3(frame.score).c_str());
+            check(ds.size() == 1 && !d.ours() && !d.registers && bag::charm_question(f, k.store, d, 0.92f) &&
+                      std::abs(d.pair.x - 514) <= 1 && d.pair.y == 397,
+                  "one dialog, a charm's question at charm_frame_score 0.92 (its frame " + fixed3(frame.score) +
+                      "), its buttons at 514,397 -- " + std::to_string(ds.size()) + " dialog(s), at " +
+                      std::to_string(d.pair.x) + "," + std::to_string(d.pair.y));
+            if (d.pair.valid()) pair = d.pair;
+            // No lone Xác Nhận where its message would be -- its Hủy Bỏ is
+            // there -- nor at its own Xác Nhận, which has Hủy Bỏ to its right
+            // and not the box's frame.
+            bag::LoneOk in_band, own;
+            const bool band_ok = bag::lone_ok(f, k.store, bag::message_band(pair), nullptr, &in_band);
+            bag::lone_ok(f, k.store, ScreenRect{ pair.x + 4 - 1, pair.y + 4 - 1, 34 + 2, 13 + 2 }, nullptr, &own);
+            std::printf("  [info] the charm question: in its message's band the label %s; at its own Xác Nhận the "
+                        "label %s, the frame right of it %s, the corner %s\n",
+                        fixed3(in_band.label_score).c_str(), fixed3(own.label_score).c_str(),
+                        fixed3(own.edge_score).c_str(), fixed3(own.corner_score).c_str());
+            // The question is a dialog of two buttons, which lone_ok turns down
+            // whatever its label scores: that label in the band is what tells it.
+            check(!band_ok && in_band.label_score < 0.95f && own.label_score >= 0.95f && own.edge_score <= 0.30f,
+                  "no lone Xác Nhận in its message's band; its own Xác Nhận has no box's frame right of it -- "
+                  "label " + fixed3(own.label_score) + ", frame " + fixed3(own.edge_score));
+            // Its Hủy Bỏ lit by the pointer over it: still no lone Xác Nhận.
+            Frame lit = f;
+            Pretend::light(lit, ScreenRect{ pair.x + pair.w / 2, pair.y, pair.w - pair.w / 2, pair.h });
+            check(!bag::lone_ok(lit, k.store, bag::message_band(pair)),
+                  "nor with its Hủy Bỏ lit: never taken for a message's button");
+        }
+    }
+    {
+        // The message after its Xác Nhận (06:44:47): "Bạn đã nhận được hiệu
+        // ứng Kinh nghiệm tăng 10." over a lone Xác Nhận.
+        Frame f = scene(1024, 768, 40);
+        if (!put_back(f, dir, "charm_notice")) {
+            skip("no cut of the charm message here\n");
+        } else {
+            const auto whole = TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height },
+                                                     *k.store.get("grabbed/dialog_ok"), -1.0f);
+            std::printf("  [info] the charm message: grabbed/dialog_ok whole at %d,%d, %s\n", whole.at.x, whole.at.y,
+                        fixed3(whole.score).c_str());
+            check(bag::find_dialogs(f, k.store).empty() && bag::notice_up(f, k.store),
+                  "no dialog of two buttons, and a message is up -- dialog_ok whole " + fixed3(whole.score));
+            // Its lone Xác Nhận, where the question's Hủy Bỏ was: what a run
+            // clicks to close it.
+            ScreenRect at;
+            bag::LoneOk how;
+            const bool found = bag::lone_ok(f, k.store, bag::message_band(pair), &at, &how);
+            std::printf("  [info] the charm message's Xác Nhận: label at %d,%d, %s; the frame right of it %s; the "
+                        "corner %s (pair at %d,%d)\n",
+                        at.x, at.y, fixed3(how.label_score).c_str(), fixed3(how.edge_score).c_str(),
+                        fixed3(how.corner_score).c_str(), pair.x, pair.y);
+            check(found && how.label_score >= 0.98f && how.edge_score >= 0.95f && how.corner_score >= 0.97f &&
+                      at.x == 561 && at.y == 401 && bag::message_up(f, k.store),
+                  "its lone Xác Nhận found in the band of the question's pair: label " + fixed3(how.label_score) +
+                      ", frame " + fixed3(how.edge_score) + ", corner " + fixed3(how.corner_score) + ", at " +
+                      std::to_string(at.x) + "," + std::to_string(at.y));
+            Frame lit = f;
+            Pretend::light(lit, ScreenRect{ at.x - 4, at.y - 4, 42, 21 });
+            check(!bag::lone_ok(lit, k.store, bag::message_band(pair)),
+                  "and not with the pointer over it, lit: a lit label is not clicked again");
+        }
+    }
+
+    // The bag, Tiêu Dùng: 8871081 in row 1, cell 2 -- 63 before the use at
+    // 06:44, 64 before the one at 23:12, 62 after the one at 06:44.
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    const BagLayout l;
+    const float min_score = CleanSettings{}.min_score;
+    const TrashList purple = charm_list(catalog, { kPurpleCard }), blue = charm_list(catalog, { kBlueCard });
+    const struct {
+        const char* what;
+        int         count;
+        const char* when;
+    } bags[] = { { "charm_baga", 63, "06:44:46, before its use" },
+                 { "charm_bagb", 64, "23:12:25, before its use" },
+                 { "charm_bagc", 62, "06:44:47, after it" } };
+    for (const auto& b : bags) {
+        Frame f = scene(1024, 768, 40);
+        if (!put_back(f, dir, b.what)) {
+            skip("no %s cut here\n", b.what);
+            continue;
+        }
+        const BagView v = bag::find(f, k.store, l);
+        const auto slots = v.slots(l);
+        if (!v.found || slots.size() < 2) {
+            check(false, std::string(b.when) + ": the bag found -- not found");
+            continue;
+        }
+        const ScreenRect s = slots[1];
+        const int count = k.counts.read(f, s);
+        const TrashList::Verdict kp = purple.judge(f, s, min_score), kb = blue.judge(f, s, min_score);
+        std::printf("  [info] %s: strip at %d,%d, tab %d, first row %d of %d; row 1 cell 2 at %d,%d reads %d; 81 "
+                    "chosen: drawing %s, %s; 21 chosen: %s\n",
+                    b.when, v.strip.x, v.strip.y, v.selected_tab, v.first_row, v.total_rows, s.x, s.y, count,
+                    fixed3(kp.item >= 0 ? kp.score : kp.like_score).c_str(), colour_text(kp).c_str(),
+                    taken_text(blue, kb).c_str());
+        check(v.selected_tab == kUseTab && count == b.count,
+              std::string(b.when) + ": the bag on Tiêu Dùng, row 1 cell 2 reading " + std::to_string(b.count) +
+                  " -- read " + std::to_string(count));
+        check(kp.item >= 0 && purple.items[static_cast<std::size_t>(kp.item)].id == kPurpleCard &&
+                  kp.colour_id == kPurpleCard && kp.colour >= 0.94f && kp.colour_next <= 0.85f &&
+                  kp.colour_mean_off >= 0 && kp.colour_mean_off <= 10,
+              std::string("  8871081 chosen: the slot is 8871081's, by its colour -- ") + colour_text(kp));
+        check(kb.item < 0 && kb.doubt == TrashList::Verdict::Doubt::None && kb.colour_id == kPurpleCard,
+              std::string("  8871021 chosen: the slot left alone, a charm of 8871081's colour -- ") +
+                  taken_text(blue, kb) + ", " + colour_text(kb));
+    }
+}
+
+// --------------------------------------- charms: a stack of one, no count printed
+
+namespace {
+
+/// The seven charms of one in the live client's bag of 2026-11-03 19:54, by
+/// their slot on Tiêu Dùng's first page -- row 2 cell 6, then row 3 -- each
+/// with no number printed over the light rim of its card or diamond, and each
+/// left alone by 2026.11.03b ("không đọc được số lượng trên ô đồ"), the owner
+/// having chosen all eight colours.
+struct Single {
+    int         slot;
+    const char* id;
+};
+const Single kLiveSingles[] = { { 11, "spend/buff/8871071" }, { 12, "spend/buff/8871061" },
+                                { 13, "spend/buff/8871051" }, { 14, "spend/buff/8871041" },
+                                { 15, "spend/buff/8871031" }, { 16, "spend/buff/8871021" },
+                                { 17, "spend/buff/8871011" } };
+const char* const kBlueDiamond = "spend/buff/8871071";
+const char* const kPinkDiamond = "spend/buff/8871061";
+const char* const kGreenCard = "spend/buff/8871041";
+
+/// "r2c6" for slot 11 of a page.
+std::string cell_text(int slot) { return "r" + std::to_string(slot / 6 + 1) + "c" + std::to_string(slot % 6 + 1); }
+
+std::string fixed1(float v) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f", static_cast<double>(v));
+    return buf;
+}
+
+/// A charm colour's catalog icon whole, as the list a pass builds has it
+/// (TrashList::Item::bare), chosen or a rival; null when it has none.
+const Frame* bare_in(const TrashList& list, const std::string& id) {
+    for (const TrashList::Item& it : list.items)
+        if (it.id == id && it.bare.valid()) return &it.bare;
+    for (const TrashList::Item& r : list.rivals)
+        if (r.id == id && r.bare.valid()) return &r.bare;
+    return nullptr;
+}
+
+/// The game's digits, loaded once, drawn as the client prints a count: each
+/// digit kDigitStep on, its strokes in one colour and -- `ring` 0 or more --
+/// first the pixels round them, side and corner, in that grey.
+struct Digits {
+    Frame d[10];
+    bool  ok = true;
+    explicit Digits(const std::string& font_dir) {
+        for (int i = 0; i < 10; ++i)
+            ok = load_png(font_dir + "\\lower\\" + std::to_string(i) + ".png", d[i]) && d[i].valid() && ok;
+    }
+    void draw(Frame& f, int x, int y, const std::string& text, int red, int green, int blue, int ring) const {
+        for (const char c : text) {
+            const Frame& glyph = d[c - '0'];
+            for (int pass = ring >= 0 ? 0 : 1; pass < 2; ++pass)
+                for (int gy = 0; gy < glyph.height; ++gy)
+                    for (int gx = 0; gx < glyph.width; ++gx) {
+                        std::uint8_t r = 0, g = 0, b = 0;
+                        glyph.get(gx, gy, r, g, b);
+                        if ((r + g + b) / 3 <= 128) continue;
+                        if (pass == 0) {
+                            for (int oy = -1; oy <= 1; ++oy)
+                                for (int ox = -1; ox <= 1; ++ox) put_px(f, x + gx + ox, y + gy + oy, ring, ring, ring);
+                        } else {
+                            put_px(f, x + gx, y + gy, red, green, blue);
+                        }
+                    }
+            x += kDigitStep;
+        }
+    }
+};
+
+/// The counts drawn over a stack of one's corner: every one from 2 to 99, and
+/// some of three and four digits, 1s among them.
+std::vector<std::string> printed_numbers() {
+    std::vector<std::string> out;
+    for (int n = 2; n <= 99; ++n) out.push_back(std::to_string(n));
+    for (const char* n : { "100", "101", "110", "111", "199", "999", "1000", "1111", "9999" }) out.emplace_back(n);
+    return out;
+}
+
+/// The live bag of 19:54 put back where it was on a frame of the client's
+/// size, and the bag as found there: false when its cut is not here.
+bool singles_bag(Frame& f, BagView& v, std::vector<ScreenRect>& slots) {
+    const std::string dir = charm_cuts_dir();
+    f = scene(1024, 768, 40);
+    if (dir.empty() || !put_back(f, dir, "charm_bag_singles")) return false;
+    const BagLayout l;
+    v = bag::find(f, kit().store, l);
+    slots = v.slots(l);
+    return true;
+}
+
+/// Slot `s` of `f` on a small frame of its own, a few pixels round it: that
+/// frame, and the slot on it.
+std::pair<Frame, ScreenRect> slot_alone(const Frame& f, const ScreenRect& s) {
+    constexpr int kRim = 6;
+    return { bag::cut(f, ScreenRect{ s.x - kRim, s.y - kRim, s.w + 2 * kRim, s.h + 2 * kRim }),
+             ScreenRect{ kRim, kRim, s.w, s.h } };
+}
+
+/// A charm run on a pretend bag of the client's own charm icons, each drawn as
+/// the bag draws it (slot_tile_of) and a count of 2 or more printed over it:
+/// `in_bag` what lies where, `ticked` the ids chosen -- the list a pass builds
+/// for them. The game's message after Xác Nhận comes and is closed, as on the
+/// live client; no book opens.
+struct CharmBagRun {
+    struct In {
+        int         slot;
+        const char* id;
+        int         count;
+    };
+    Pass p;
+    BagCleaner::Result r;
+    std::int64_t took_ms = 0;
+    CharmBagRun(const ItemCatalog& catalog, const std::vector<In>& in_bag, const std::vector<std::string>& ticked) {
+        make_bag(p.game);
+        p.game.book_opens = false;
+        p.game.reply = Pretend::Reply::Charm;
+        p.game.notice_after = true;
+        p.game.lit = true;
+        for (const In& in : in_bag) {
+            Pretend::Item it{ in.slot, 1, in.count };
+            it.icon = slot_tile_of(catalog.find(in.id)->icon);
+            p.game.items.push_back(it);
+        }
+        p.list = charm_list(catalog, ticked);
+        p.mode = BagCleaner::Mode::CharmsOnly;
+    }
+    BagCleaner::Result run() {
+        const auto from = p.game.time.t;
+        r = p.run();
+        took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(p.game.time.t - from).count();
+        return r;
+    }
+    /// How each try came out, in order: U used, M taken for used, N not used.
+    std::string tries() const {
+        std::string out;
+        for (const auto& t : r.charm_tries)
+            out += t.how == CharmClock::How::Used ? 'U' : t.how == CharmClock::How::MaybeUsed ? 'M' : 'N';
+        return out;
+    }
+};
+
+} // namespace
+
+void test_charm_singles_live() {
+    section("Bùa: a stack of one, nothing printed over a card's white rim, on the live client's bag (19:54)");
+    if (skip_without_kit()) return;
+    Frame f;
+    BagView v;
+    std::vector<ScreenRect> slots;
+    if (!singles_bag(f, v, slots)) {
+        skip("no cut of the live bag of 2026-11-03 19:54 here (handoff\\charms\\testdata\\charm_bag_singles_*)\n");
+        return;
+    }
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    const Kit& k = kit();
+    const BagLayout l;
+    const float min_score = CleanSettings{}.min_score;
+    check(v.found && v.strip.x == 134 && v.strip.y == 293 && v.selected_tab == kUseTab && v.first_row == 0 &&
+              slots.size() == 24,
+          "the bag found at 134,293, on Tiêu Dùng, its first row on top -- at " + std::to_string(v.strip.x) + "," +
+              std::to_string(v.strip.y) + ", tab " + std::to_string(v.selected_tab) + ", row " +
+              std::to_string(v.first_row) + ", " + std::to_string(slots.size()) + " slots");
+    if (!v.found || slots.size() < 24) return;
+    // All eight chosen, as the owner had them.
+    const TrashList list = charm_list(catalog, std::vector<std::string>(std::begin(kCharmIds), std::end(kCharmIds)));
+    int icons = 0;
+    for (const char* id : kCharmIds) icons += bare_in(list, id) != nullptr ? 1 : 0;
+    check(icons == 8, "each of the eight colours has its catalog icon whole on the list -- " + std::to_string(icons));
+    if (icons < 8) return;
+
+    {
+        // The seven of one: each its own colour's, unreadable to read as in
+        // 11.03b, and one by its bare icon -- by no other colour's.
+        std::string wrong, info;
+        float worst_fit = 0.0f, other_fit = 255.0f;
+        for (const Single& one : kLiveSingles) {
+            const ScreenRect& s = slots[static_cast<std::size_t>(one.slot)];
+            const Frame& icon = *bare_in(list, one.id);
+            const TrashList::Verdict kv = list.judge(f, s, min_score);
+            const bool judged = kv.item >= 0 && list.items[static_cast<std::size_t>(kv.item)].id == one.id;
+            const int read = k.counts.read(f, s);
+            bool bare = false;
+            const int count = k.counts.read_charm(f, s, &icon, l, &bare);
+            int unlike = -1;
+            float fit = -1.0f;
+            const bool corner = bag::bare_corner(f, s, icon, l, &unlike, &fit);
+            float own_fit = -1.0f;
+            const bool fits = bag::icon_fits(f, s, icon, l, &own_fit);
+            bool other_reads = false;
+            for (const char* other : kCharmIds) {
+                if (one.id == std::string(other)) continue;
+                float of = 255.0f;
+                bag::icon_fits(f, s, *bare_in(list, other), l, &of);
+                other_fit = std::min(other_fit, of);
+                other_reads = other_reads ||
+                              k.counts.read_charm(f, s, bare_in(list, other), l) != CountReader::kUnreadable;
+            }
+            worst_fit = std::max(worst_fit, fit);
+            info += " " + cell_text(one.slot) + " " + last2(one.id) + " fit " + fixed1(fit) + ", " +
+                    std::to_string(unlike) + " unlike;";
+            if (!judged || read != CountReader::kUnreadable || count != 1 || !bare || !corner || unlike != 0 ||
+                fit > 1.0f || !fits || own_fit != fit || other_reads)
+                wrong += " | " + cell_text(one.slot) + " " + last2(one.id) + ": " + taken_text(list, kv) + ", read " +
+                         std::to_string(read) + ", read_charm " + std::to_string(count) + (bare ? " (bare)" : "") +
+                         ", fit " + fixed1(fit) + ", " + std::to_string(unlike) + " unlike" +
+                         (other_reads ? ", another colour's icon reads" : "");
+        }
+        std::printf("  [info] the seven of one:%s another colour's icon fits one at %s at best\n", info.c_str(),
+                    fixed1(other_fit).c_str());
+        check(wrong.empty(),
+              "row 2 cell 6 and row 3 cells 1-6: each taken for its own colour; read says kUnreadable, as 11.03b "
+              "did; read_charm with that colour's icon 1, the corner bare -- 0 pixels unlike, fit " +
+                  fixed1(worst_fit) + " at worst -- and with any other colour's icon kUnreadable" + wrong);
+        check(other_fit >= 40.0f, "another colour's icon fits a stack of one at " + fixed1(other_fit) +
+                                      " at best, against kBareFitMean " + fixed1(bag::kBareFitMean));
+        // No icon to go by: no stack of one there.
+        const ScreenRect& s = slots[11];
+        const Frame none;
+        check(k.counts.read_charm(f, s, nullptr, l) == CountReader::kUnreadable &&
+                  k.counts.read_charm(f, s, &none, l) == CountReader::kUnreadable,
+              "with no icon, or an empty one, row 2 cell 6 is no stack of one: kUnreadable, as read says");
+    }
+    {
+        // 8871081 with its count printed, here and on the earlier cuts: the
+        // number, never its icon bare.
+        const Frame& purple = *bare_in(list, kPurpleCard);
+        const auto printed = [&](const Frame& g, const ScreenRect& s, int want, const char* when) {
+            bool bare = true;
+            const int count = k.counts.read_charm(g, s, &purple, l, &bare);
+            int unlike = -1;
+            float fit = -1.0f;
+            const bool corner = bag::bare_corner(g, s, purple, l, &unlike, &fit);
+            std::printf("  [info] %s, row 1 cell 2: read_charm %d; the corner %d pixel(s) unlike 8871081's icon "
+                        "(fit %s)\n",
+                        when, count, unlike, fixed1(fit).c_str());
+            check(count == want && !bare && !corner && unlike >= 60,
+                  std::string(when) + ": 8871081 x" + std::to_string(want) + " reads " + std::to_string(count) +
+                      ", not bare -- " + std::to_string(unlike) + " pixels unlike its icon, fit " + fixed1(fit));
+        };
+        printed(f, slots[1], 62, "19:54:46");
+        const std::string dir = charm_cuts_dir();
+        const struct {
+            const char* what;
+            int         count;
+            const char* when;
+        } bags[] = { { "charm_baga", 63, "06:44:46" }, { "charm_bagb", 64, "23:12:25" },
+                     { "charm_bagc", 62, "06:44:47" } };
+        for (const auto& b : bags) {
+            Frame g = scene(1024, 768, 40);
+            if (!put_back(g, dir, b.what)) {
+                skip("no %s cut here\n", b.what);
+                continue;
+            }
+            const BagView w = bag::find(g, k.store, l);
+            const auto ws = w.slots(l);
+            if (!w.found || ws.size() < 2) {
+                check(false, std::string(b.when) + ": the bag found -- not found");
+                continue;
+            }
+            printed(g, ws[1], b.count, b.when);
+        }
+    }
+    {
+        // Every count printed in this bag reads the same by read_charm,
+        // whatever charm's icon it is given -- and with none.
+        std::string wrong, read_here;
+        int numbers = 0;
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            const int n = k.counts.read(f, slots[i]);
+            if (n < 2) continue;
+            ++numbers;
+            read_here += " " + std::to_string(n);
+            for (const char* id : kCharmIds)
+                if (k.counts.read_charm(f, slots[i], bare_in(list, id), l) != n)
+                    wrong += " | " + cell_text(static_cast<int>(i)) + " with " + last2(id) + "'s icon";
+            if (k.counts.read_charm(f, slots[i], nullptr, l) != n)
+                wrong += " | " + cell_text(static_cast<int>(i)) + " with none";
+        }
+        check(numbers == 16 && wrong.empty(),
+              "the " + std::to_string(numbers) + " counts printed in the bag (" + read_here +
+                  ") read the same by read_charm with any charm's icon, or none" + wrong);
+    }
+    {
+        // The silver box of one in row 4 cell 2: white in its corner, and no
+        // charm -- no charm's icon makes it one.
+        const ScreenRect& s = slots[19];
+        bool any = false;
+        for (const char* id : kCharmIds)
+            any = any || k.counts.read_charm(f, s, bare_in(list, id), l) != CountReader::kUnreadable;
+        check(k.counts.read(f, s) == CountReader::kUnreadable && !any,
+              "row 4 cell 2, a box of one that is no charm: kUnreadable with every charm's icon");
+    }
+}
+
+void test_charm_singles_printed() {
+    section("Bùa: a count drawn over a stack of one's corner is never taken for one -- white, dim, grey or coloured");
+    if (skip_without_kit()) return;
+    Frame f;
+    BagView v;
+    std::vector<ScreenRect> slots;
+    if (!singles_bag(f, v, slots) || !v.found || slots.size() < 24) {
+        skip("no cut of the live bag of 2026-11-03 19:54 here (handoff\\charms\\testdata\\charm_bag_singles_*)\n");
+        return;
+    }
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    const Kit& k = kit();
+    const Digits digits(k.font_dir);
+    check(digits.ok, "the game's digits, to draw counts with");
+    if (!digits.ok) return;
+    const BagLayout l;
+    const TrashList list = charm_list(catalog, std::vector<std::string>(std::begin(kCharmIds), std::end(kCharmIds)));
+    const std::vector<std::string> numbers = printed_numbers();
+    {
+        // Each number over each of the seven, where the client prints it and a
+        // pixel off each way.
+        const struct {
+            const char* what;
+            int         r, g, b, ring;
+        } inks[] = { { "white, outline 10 (print_number's)", 250, 250, 250, 10 },
+                     { "white, outline 136 (the client's lightest)", 255, 255, 255, 136 },
+                     { "dim 187, no outline", 187, 187, 187, -1 },
+                     { "grey 150, no outline: read sees no white", 150, 150, 150, -1 } };
+        const int shifts[][2] = { { 0, 0 }, { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+        int least_all = 1 << 20;
+        for (const auto& ink : inks) {
+            int drawn = 0, ones = 0, bares = 0, right = 0, least = 1 << 20;
+            std::string least_at;
+            for (const Single& one : kLiveSingles) {
+                const Frame& icon = *bare_in(list, one.id);
+                const auto [alone, s] = slot_alone(f, slots[static_cast<std::size_t>(one.slot)]);
+                for (const std::string& number : numbers)
+                    for (const auto& d : shifts) {
+                        Frame g = alone;
+                        digits.draw(g, s.x + 2 + d[0], s.y + 3 + d[1], number, ink.r, ink.g, ink.b, ink.ring);
+                        ++drawn;
+                        const int n = k.counts.read_charm(g, s, &icon, l);
+                        ones += n == 1 ? 1 : 0;
+                        right += n == std::stoi(number) ? 1 : 0;
+                        int unlike = -1;
+                        bares += bag::bare_corner(g, s, icon, l, &unlike) ? 1 : 0;
+                        if (unlike >= 0 && unlike < least) {
+                            least = unlike;
+                            least_at = last2(one.id) + " " + number + " shifted " + std::to_string(d[0]) + "," +
+                                       std::to_string(d[1]);
+                        }
+                    }
+            }
+            least_all = std::min(least_all, least);
+            std::printf("  [info] %s: %d drawn, %d read as drawn, the least unlike %d (%s)\n", ink.what, drawn, right,
+                        least, least_at.c_str());
+            check(drawn == 7 * 107 * 5 && ones == 0 && bares == 0 && least >= 8,
+                  std::string(ink.what) + ": " + std::to_string(drawn) + " counts (2 to 99 and nine of 100 to 9999) over the seven, a "
+                  "pixel off each way: read_charm never 1 (" + std::to_string(ones) + "), the corner never bare (" +
+                  std::to_string(bares) + "), " + std::to_string(least) + " pixels unlike its icon at the least");
+        }
+        std::printf("  [info] every count drawn: %d pixels unlike the icon at the least\n", least_all);
+    }
+    {
+        // 8871081's corner has no white: a count there in a colour read does
+        // not take for white is still a count, never a stack of one.
+        const Frame& purple = *bare_in(list, kPurpleCard);
+        const auto [plain, s] = charm_slot(catalog.find(kPurpleCard)->icon);
+        bool bare = false;
+        const int alone = k.counts.read_charm(plain, s, &purple, l, &bare);
+        check(alone == 1 && bare, "8871081 x1 drawn as the bag draws it: read_charm 1, by its bare icon -- " +
+                                      std::to_string(alone));
+        const struct {
+            const char* what;
+            int         r, g, b;
+        } inks[] = { { "grey 150", 150, 150, 150 }, { "grey 110", 110, 110, 110 }, { "red", 220, 40, 40 },
+                     { "yellow", 230, 210, 40 } };
+        for (const auto& ink : inks) {
+            int ones = 0, least = 1 << 20;
+            for (int n = 2; n <= 99; ++n) {
+                Frame g = plain;
+                digits.draw(g, s.x + 2, s.y + 3, std::to_string(n), ink.r, ink.g, ink.b, -1);
+                ones += k.counts.read_charm(g, s, &purple, l) == 1 ? 1 : 0;
+                int unlike = -1;
+                bag::bare_corner(g, s, purple, l, &unlike);
+                if (unlike >= 0) least = std::min(least, unlike);
+            }
+            check(ones == 0 && least >= 8,
+                  std::string("8871081 with a count in ") + ink.what + ", 2 to 99: never read as one -- " +
+                      std::to_string(ones) + " were; " + std::to_string(least) + " pixels unlike at the least");
+        }
+    }
+    {
+        // The seven a little off what was measured: in 16-bit colour, with
+        // noise of 12, the whole slot a pixel right -- still bare; lit all
+        // over, as the pointer over it lights it -- refused.
+        std::string wrong, info;
+        std::uint32_t seed = 1103;
+        const auto noise = [&seed] {
+            seed = seed * 1664525u + 1013904223u;
+            return static_cast<int>((seed >> 16) % 25u) - 12;
+        };
+        float worst16 = 0.0f, worst_noise = 0.0f;
+        for (const Single& one : kLiveSingles) {
+            const Frame& icon = *bare_in(list, one.id);
+            const auto [alone, s] = slot_alone(f, slots[static_cast<std::size_t>(one.slot)]);
+            Frame dull = alone, noisy = alone, right = alone, lit = alone;
+            for (int y = s.y; y < s.bottom(); ++y)
+                for (int x = s.x; x < s.right(); ++x) {
+                    std::uint8_t r = 0, g = 0, b = 0;
+                    alone.get(x, y, r, g, b);
+                    put_px(dull, x, y, r & 0xF8, g & 0xFC, b & 0xF8);
+                    put_px(noisy, x, y, std::clamp(r + noise(), 0, 255), std::clamp(g + noise(), 0, 255),
+                           std::clamp(b + noise(), 0, 255));
+                    alone.get(x - 1, y, r, g, b);
+                    put_px(right, x, y, r, g, b);
+                }
+            Pretend::light(lit, s);
+            float fit16 = -1.0f, fit_noise = -1.0f, fit_right = -1.0f, fit_lit = -1.0f;
+            int u16 = -1, u_noise = -1, u_right = -1, u_lit = -1;
+            const bool b16 = bag::bare_corner(dull, s, icon, l, &u16, &fit16);
+            const bool b_noise = bag::bare_corner(noisy, s, icon, l, &u_noise, &fit_noise);
+            const bool b_right = bag::bare_corner(right, s, icon, l, &u_right, &fit_right);
+            const bool b_lit = bag::bare_corner(lit, s, icon, l, &u_lit, &fit_lit);
+            const int lit_reads = k.counts.read_charm(lit, s, &icon, l);
+            worst16 = std::max(worst16, fit16);
+            worst_noise = std::max(worst_noise, fit_noise);
+            info += " " + last2(one.id) + " " + fixed1(fit16) + "/" + fixed1(fit_noise) + "/" + fixed1(fit_lit);
+            if (!b16 || !b_noise || !b_right || b_lit || lit_reads == 1)
+                wrong += " | " + last2(one.id) + ": 16-bit " + std::to_string(u16) + ", noise " +
+                         std::to_string(u_noise) + ", a pixel right " + std::to_string(u_right) + ", lit " +
+                         std::to_string(u_lit) + " (" + std::to_string(lit_reads) + ")";
+        }
+        std::printf("  [info] fit in 16-bit / with noise / lit:%s\n", info.c_str());
+        check(wrong.empty() && worst16 <= bag::kBareFitMean && worst_noise <= bag::kBareFitMean,
+              "the seven in 16-bit colour (fit " + fixed1(worst16) + " at worst), with noise of 12 (" +
+                  fixed1(worst_noise) + ") and a pixel right still bare; lit all over, not -- refused" + wrong);
+    }
+}
+
+void test_charm_singles_run() {
+    section("Bùa: stacks of one used in a charm run -- the live bag of 19:54 rebuilt -- and what is not a use");
+    if (skip_without_kit()) return;
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    BagCleaner::forget_said_once();
+    const std::vector<std::string> all(std::begin(kCharmIds), std::end(kCharmIds));
+    {
+        // The live bag of 19:54: 8871081 x62 in row 1 cell 2, the seven of one
+        // in row 2 cell 6 and row 3; all eight chosen, the GUI's deadline.
+        std::vector<CharmBagRun::In> in_bag = { { 1, kPurpleCard, 62 } };
+        for (const Single& one : kLiveSingles) in_bag.push_back({ one.slot, one.id, 1 });
+        CharmBagRun c(catalog, in_bag, all);
+        const int deadline = BagCleaner::charm_deadline_ms(8);
+        c.p.deadline_ms = deadline;
+        c.run();
+        bool gone = true;
+        for (std::size_t i = 1; i < c.p.game.items.size(); ++i) gone = gone && c.p.game.items[i].gone();
+        std::set<std::string> ids;
+        for (const auto& t : c.r.charm_tries) ids.insert(t.id);
+        std::printf("  [info] the live bag of 19:54 rebuilt, eight kinds used: %lld ms of the pretend game's time, "
+                    "the deadline %d\n",
+                    static_cast<long long>(c.took_ms), deadline);
+        check(c.p.game.right_clicks == 8 && c.p.game.confirms == 8 && c.r.charms_used == 8 &&
+                  c.p.game.items[0].count == 61 && gone && c.tries() == "UUUUUUUU" && ids.size() == 8 &&
+                  c.r.charms_unread == 0 && c.r.trouble.empty() && c.p.game.messages_closed == 8 &&
+                  c.p.game.keys == 0 && c.p.game.right_clicks_with_message == 0,
+              "all eight chosen: one run right-clicks each once -- 81 to 61, the seven of one seen gone -- each "
+              "message closed, no key -- " + std::to_string(c.p.game.right_clicks) + " right-clicks, " +
+                  std::to_string(c.r.charms_used) + " used, tries " + c.tries() + ", " + c.r.trouble);
+        check(c.took_ms < deadline, "inside the deadline of eight kinds: " + std::to_string(c.took_ms) + " of " +
+                                        std::to_string(deadline) + " ms");
+    }
+    {
+        // Two kinds, x62 and x1: both in one run, the one seen gone on two looks.
+        CharmBagRun c(catalog, { { 1, kPurpleCard, 62 }, { 11, kBlueDiamond, 1 } }, { kPurpleCard, kBlueDiamond });
+        c.run();
+        check(c.p.game.right_clicks == 2 && c.r.charms_used == 2 && c.p.game.items[0].count == 61 &&
+                  c.p.game.items[1].gone() && c.tries() == "UU" && c.r.trouble.empty(),
+              "8871081 x62 and 8871071 x1: both used in one run -- tries " + c.tries() + ", " + c.r.trouble);
+    }
+    {
+        // 8871081 x1: no white in its corner, still its bare icon.
+        CharmBagRun c(catalog, { { 1, kPurpleCard, 1 } }, { kPurpleCard });
+        c.run();
+        check(c.p.game.right_clicks == 1 && c.r.charms_used == 1 && c.p.game.items[0].gone() && c.tries() == "U",
+              "8871081 x1: used, seen gone -- tries " + c.tries() + ", " + c.r.trouble);
+    }
+    {
+        // 2 to 1: the 1 read by the bare icon after the use -- one less, used.
+        CharmBagRun c(catalog, { { 17, kGreyCard, 2 } }, { kGreyCard });
+        c.run();
+        check(c.p.game.right_clicks == 1 && c.r.charms_used == 1 && c.p.game.items[0].count == 1 &&
+                  c.tries() == "U" && c.p.says("; còn 1") && c.r.use_unsure == 0,
+              "8871011 x2, a white-rim card: used, one left, seen one less (11.03b could not read the one) -- " +
+                  c.p.last());
+    }
+    {
+        // Xác Nhận and the single still there, its icon bare: the stack as it
+        // was -- taken for used, the run stopped, never tried again soon.
+        CharmBagRun c(catalog, { { 11, kBlueDiamond, 1 } }, { kBlueDiamond });
+        c.p.game.registers = false;
+        c.run();
+        check(c.p.game.right_clicks == 1 && c.p.game.confirms == 1 && c.p.game.items[0].count == 1 &&
+                  c.r.charms_used == 0 && c.tries() == "M" && c.r.failed == 1 &&
+                  c.p.says("đã bấm Xác Nhận mà số lượng bùa không giảm") && !c.r.trouble.empty(),
+              "8871071 x1 still there after Xác Nhận: perhaps used, the run stopped -- " + c.r.trouble);
+    }
+    {
+        // The bag closes up its gaps after the single is used: another single
+        // moves into its slot, drawn alike. No count of the colour used reads
+        // there -- no answer, taken for used, never the stack as it was.
+        const struct {
+            const char* used;
+            const char* next;
+        } pairs[] = { { kGreenCard, kPurpleCard }, { kBlueDiamond, kPinkDiamond } };
+        for (const auto& two : pairs) {
+            CharmBagRun c(catalog, { { 11, two.used, 1 }, { 12, two.next, 1 } }, { two.used });
+            c.p.game.compacts = true;
+            const BagLayout l;
+            const Frame drawn = c.p.game.render();
+            const float like =
+                bag::alike(bag::cut(drawn, c.p.game.slot_rect(11)), bag::cut(drawn, c.p.game.slot_rect(12)), l);
+            c.run();
+            const std::string why = c.r.charm_tries.empty() ? std::string() : c.r.charm_tries[0].why;
+            std::printf("  [info] %s x1 used, %s x1 moved into its slot: alike %s\n", last2(two.used).c_str(),
+                        last2(two.next).c_str(), fixed3(like).c_str());
+            check(like >= 0.80f && c.p.game.right_clicks == 1 && c.p.game.items[0].gone() && c.tries() == "M" &&
+                      c.r.use_unsure == 1 && c.r.failed == 0 &&
+                      why.find("không đọc lại được số lượng trên ô đồ") != std::string::npos,
+                  last2(two.used) + " x1 used and " + last2(two.next) + " x1 moved into its slot (alike " +
+                      fixed3(like) + "): no answer, taken for used -- never the stack as it was -- " + why);
+        }
+    }
+    {
+        // Something white over the corner that its icon does not have: no
+        // count read, and no stack of one -- not right-clicked.
+        CharmBagRun c(catalog, { { 11, kBlueDiamond, 1 } }, { kBlueDiamond });
+        c.p.game.items[0].smudged = true;
+        c.run();
+        check(c.p.game.right_clicks == 0 && c.r.charms_unread == 1 && c.r.charms_seen == 1 &&
+                  c.r.charm_tries.empty() && c.p.says("không đọc được số lượng trên ô đồ"),
+              "8871071 x1 with white over its corner its icon has not: left alone, counted unread -- " + c.p.last());
+    }
+    {
+        // A right-click that brings no question: the single as it was, not used.
+        CharmBagRun c(catalog, { { 11, kBlueDiamond, 1 } }, { kBlueDiamond });
+        c.p.game.reply = Pretend::Reply::Nothing;
+        c.run();
+        check(c.p.game.right_clicks == 1 && c.p.game.confirms == 0 && c.r.charms_used == 0 && c.tries() == "N" &&
+                  c.r.use_unsure == 0 && c.p.says("không thấy câu hỏi nào"),
+              "8871071 x1 and no question: not used, the stack as it was -- " + c.p.last());
+    }
+    {
+        // The game takes the first single only as its message shows, 1.2 s on:
+        // seen gone on a later look, and the second used after it.
+        CharmBagRun c(catalog, { { 11, kBlueDiamond, 1 }, { 12, kPinkDiamond, 1 } }, { kBlueDiamond, kPinkDiamond });
+        c.p.game.notice_late_first_ms = 1200;
+        c.p.game.notice_takes = true;
+        c.run();
+        check(c.r.charms_used == 2 && c.p.game.items[0].gone() && c.p.game.items[1].gone() && c.tries() == "UU" &&
+                  c.p.game.messages_closed == 2 && c.r.trouble.empty() && c.p.game.right_clicks_with_message == 0,
+              "a single taken late, as its message shows: seen gone, and the next used -- tries " + c.tries() + ", " +
+                  c.r.trouble);
+    }
+
+    // The packets' bag on a single: another count, or none, stops it.
+    struct Asked {
+        std::string colour;
+        int slot = -1, count = -1;
+    };
+    const auto with_packets = [&](const std::vector<CharmBagRun::In>& in_bag, const std::vector<std::string>& ticked,
+                                  BagCleaner::PacketSays says, const std::string& held, std::vector<Asked>& asked) {
+        auto c = std::make_unique<CharmBagRun>(catalog, in_bag, ticked);
+        c->p.packets = [&asked, says, held](const std::string& colour, int j, int count, std::string& said) {
+            asked.push_back(Asked{ colour, j, count });
+            said = held;
+            return says;
+        };
+        c->run();
+        return c;
+    };
+    using Says = BagCleaner::PacketSays;
+    {
+        std::vector<Asked> asked;
+        const auto c =
+            with_packets({ { 11, kBlueDiamond, 1 } }, { kBlueDiamond }, Says::CountDiffers, "8871071 x2", asked);
+        check(c->p.game.right_clicks == 0 && c->r.charms_vetoed == 1 && c->r.charm_tries.empty() &&
+                  c->p.says("theo gói tin ô này có 8871071 x2, mà màn hình thấy 1 cái") && asked.size() == 1 &&
+                  asked[0].slot == 11 && asked[0].count == 1 && asked[0].colour == kBlueDiamond,
+              "8871071 x1 by its bare icon, the packets' slot 11 holding 2: not right-clicked, counted, said -- " +
+                  c->p.last());
+        std::vector<Asked> again;
+        const auto d =
+            with_packets({ { 11, kBlueDiamond, 1 } }, { kBlueDiamond }, Says::CountDiffers, "8871071 x2", again);
+        check(d->p.game.right_clicks == 0 && d->r.charms_vetoed == 1 && !d->p.says("theo gói tin"),
+              "and the next run the same: left alone, not said again");
+    }
+    {
+        std::vector<Asked> asked;
+        const auto c = with_packets({ { 11, kBlueDiamond, 1 } }, { kBlueDiamond }, Says::CountDiffers, "empty", asked);
+        check(c->p.game.right_clicks == 0 && c->r.charms_vetoed == 1 &&
+                  c->p.says("theo gói tin ô này trống, mà màn hình thấy 1 cái"),
+              "the packets' slot empty: not right-clicked, said as empty -- " + c->p.last());
+    }
+    {
+        std::vector<Asked> asked;
+        const auto c = with_packets({ { 11, kBlueDiamond, 1 } }, { kBlueDiamond }, Says::Other, "8871061 x1", asked);
+        check(c->p.game.right_clicks == 0 && c->r.charms_vetoed == 1 && c->p.says("là món khác (8871061 x1)"),
+              "the packets naming another item there: not right-clicked -- " + c->p.last());
+    }
+    for (const Says says : { Says::Agrees, Says::Nothing }) {
+        std::vector<Asked> asked;
+        const auto c = with_packets({ { 11, kBlueDiamond, 1 } }, { kBlueDiamond }, says,
+                                    says == Says::Agrees ? "8871071 x1" : "no current bag", asked);
+        check(c->p.game.right_clicks == 1 && c->r.charms_used == 1 && c->r.charms_vetoed == 0 && asked.size() == 1,
+              std::string(says == Says::Agrees ? "the packets agree" : "the packets say nothing") +
+                  ": the single used, the screen deciding");
+    }
+    {
+        // A count printed, the packets' slot holding another: not compared, as
+        // in 11.03b -- most likely not the slot the screen shows.
+        std::vector<Asked> asked;
+        const auto c =
+            with_packets({ { 1, kPurpleCard, 62 } }, { kPurpleCard }, Says::CountDiffers, "8871081 x61", asked);
+        check(c->p.game.right_clicks == 1 && c->r.charms_used == 1 && c->r.charms_vetoed == 0 && asked.size() == 1 &&
+                  asked[0].count == 62,
+              "8871081 x62 printed, the packets' slot holding 61: used, the packets not compared");
+    }
+}
+
+// --------------------------------- charms: x2 used to x1, the live bag of 22:05
+
+namespace {
+
+/// The eight charms on Tiêu Dùng's first page of the live client's bag of
+/// 2026-11-03 22:05, by their slot, with the count before and after the use
+/// that 2026.11.03b stopped at: 8871081 used first, 61 to 60, then 8871071 in
+/// row 2 cell 1, 2 to 1 -- the one with no number printed over the card's
+/// light rim, which it could not read ("không thấy ô đồ trống ra hay bớt đúng
+/// một (không đọc lại được số lượng trên ô đồ)").
+struct PairSlot {
+    int         slot;
+    const char* id;
+    int         before, after;
+};
+const PairSlot kLivePair[] = { { 1, "spend/buff/8871081", 61, 60 }, { 6, "spend/buff/8871071", 2, 1 },
+                               { 7, "spend/buff/8871061", 2, 2 },   { 8, "spend/buff/8871051", 2, 2 },
+                               { 9, "spend/buff/8871041", 2, 2 },   { 10, "spend/buff/8871031", 2, 2 },
+                               { 11, "spend/buff/8871021", 2, 2 },  { 12, "spend/buff/8871011", 2, 2 } };
+
+/// A cut of the live bag of 22:05, `what`, put back where it was on a frame of
+/// the client's size, and the bag as found there: false when its cut is not
+/// here. `where` gets the cut's box.
+bool pair_bag(const char* what, Frame& f, BagView& v, std::vector<ScreenRect>& slots, ScreenRect* where = nullptr) {
+    const std::string dir = charm_cuts_dir();
+    f = scene(1024, 768, 40);
+    if (dir.empty() || !put_back(f, dir, what, where)) return false;
+    const BagLayout l;
+    v = bag::find(f, kit().store, l);
+    slots = v.slots(l);
+    return true;
+}
+
+/// The pixels of `a` and `b`, two pictures of one size, that differ at all,
+/// those in `but` left out; -1 when their sizes differ.
+int pixels_off(const Frame& a, const Frame& b, const ScreenRect& but = ScreenRect{}) {
+    if (!a.valid() || !b.valid() || a.width != b.width || a.height != b.height) return -1;
+    int n = 0;
+    for (int y = 0; y < a.height; ++y)
+        for (int x = 0; x < a.width; ++x) {
+            if (but.contains(x, y)) continue;
+            std::uint8_t ar = 0, ag = 0, ab = 0, br = 0, bg = 0, bb = 0;
+            a.get(x, y, ar, ag, ab);
+            b.get(x, y, br, bg, bb);
+            n += ar != br || ag != bg || ab != bb ? 1 : 0;
+        }
+    return n;
+}
+
+} // namespace
+
+void test_charm_pair_live() {
+    section("Bùa: x2 used to x1 on the live client's bag (22:05), where 11.03b stopped -- one less by its bare icon");
+    if (skip_without_kit()) return;
+    Frame before, after;
+    BagView vb, va;
+    std::vector<ScreenRect> sb, sa;
+    ScreenRect cut_b, cut_a;
+    if (!pair_bag("charm_pair_before", before, vb, sb, &cut_b) ||
+        !pair_bag("charm_pair_after", after, va, sa, &cut_a)) {
+        skip("no cuts of the live bag of 2026-11-03 22:05 here (handoff\\charms\\testdata\\charm_pair_*)\n");
+        return;
+    }
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    const Kit& k = kit();
+    const BagLayout l;
+    const float min_score = CleanSettings{}.min_score;
+    // Each cut the bag's tab strip, grid and scroll bar alone, as the cut of
+    // 19:54: above the money line, at about y 562 on these frames, and left
+    // of the character's name, at about x 275.
+    const auto boxed = [](const ScreenRect& c) {
+        return c.x == 11 && c.y == 382 && c.w == 258 && c.h == 176 && c.right() <= 275 && c.bottom() <= 562;
+    };
+    check(boxed(cut_b) && boxed(cut_a), "both cuts 258x176 from 11,382: above the money line, left of the name");
+    const auto at_17_383 = [](const BagView& v, const std::vector<ScreenRect>& slots) {
+        return v.found && v.strip.x == 17 && v.strip.y == 383 && v.selected_tab == kUseTab && v.first_row == 0 &&
+               slots.size() == 24;
+    };
+    check(at_17_383(vb, sb) && at_17_383(va, sa),
+          "before and after, the bag found at 17,383 -- moved from 134,293 at 19:54 -- on Tiêu Dùng, its first row on "
+          "top -- at " + std::to_string(vb.strip.x) + "," + std::to_string(vb.strip.y) + " and " +
+              std::to_string(va.strip.x) + "," + std::to_string(va.strip.y));
+    if (!at_17_383(vb, sb) || !at_17_383(va, sa)) return;
+    // All eight chosen, as the owner had them.
+    const TrashList list = charm_list(catalog, std::vector<std::string>(std::begin(kCharmIds), std::end(kCharmIds)));
+    int icons = 0;
+    for (const char* id : kCharmIds) icons += bare_in(list, id) != nullptr ? 1 : 0;
+    if (icons < 8) {
+        check(false, "each of the eight colours has its catalog icon whole on the list -- " + std::to_string(icons));
+        return;
+    }
+
+    {
+        // The eight on both looks: each taken for its own colour, its catalog
+        // icon fitting the slot outside the corner, the count printed read
+        // alike by read_charm and read -- but 8871071 after its use: nothing
+        // printed, its corner its icon's own, bare, which read cannot tell
+        // from a count it cannot read.
+        std::string wrong, info;
+        float worst_fit = 0.0f;
+        for (const PairSlot& c : kLivePair) {
+            const Frame& icon = *bare_in(list, c.id);
+            int counts[2] = { 0, 0 };
+            for (const bool used : { false, true }) {
+                const Frame& f = used ? after : before;
+                const ScreenRect& s = (used ? sa : sb)[static_cast<std::size_t>(c.slot)];
+                const int want = used ? c.after : c.before;
+                const TrashList::Verdict kv = list.judge(f, s, min_score);
+                const bool judged = kv.item >= 0 && list.items[static_cast<std::size_t>(kv.item)].id == c.id &&
+                                    kv.colour_id == c.id;
+                float fit = -1.0f;
+                const bool fits = bag::icon_fits(f, s, icon, l, &fit);
+                bool bare = false;
+                const int count = k.counts.read_charm(f, s, &icon, l, &bare);
+                const int read = k.counts.read(f, s);
+                const bool corner = bag::bare_corner(f, s, icon, l);
+                const bool one = want == 1;
+                worst_fit = std::max(worst_fit, fit);
+                counts[used ? 1 : 0] = count;
+                if (!judged || !fits || count != want || bare != one || corner != one ||
+                    read != (one ? CountReader::kUnreadable : want))
+                    wrong += " | " + std::string(used ? "after, " : "before, ") + cell_text(c.slot) + " " +
+                             last2(c.id) + ": " + taken_text(list, kv) + ", " + colour_text(kv) + ", fit " +
+                             fixed1(fit) + ", read_charm " + std::to_string(count) + (bare ? " (bare)" : "") +
+                             ", read " + std::to_string(read);
+            }
+            info += " " + cell_text(c.slot) + " " + last2(c.id) + " " + std::to_string(counts[0]) + "->" +
+                    std::to_string(counts[1]) + ";";
+        }
+        std::printf("  [info] read_charm, before -> after:%s the icons fit at %s at worst\n", info.c_str(),
+                    fixed1(worst_fit).c_str());
+        check(wrong.empty(),
+              "8871081 61 then 60, 8871071 2 then 1 by its bare icon, the six others 2 on both looks: each taken for "
+              "its own colour, its icon fitting at " + fixed1(worst_fit) + " at worst; read the same but on the one, "
+              "kUnreadable" + wrong);
+    }
+    {
+        // 8871071 after its use: what 11.03b read -- the light rim white in
+        // the corner and no number, kUnreadable -- and what 11.03c reads: its
+        // own icon bare, 0 pixels unlike; with no other colour's icon a stack
+        // of one.
+        const ScreenRect& s = sa[6];
+        const Frame& icon = *bare_in(list, kBlueDiamond);
+        int unlike = -1;
+        float fit = -1.0f;
+        const bool corner = bag::bare_corner(after, s, icon, l, &unlike, &fit);
+        bool other_reads = false;
+        float other_fit = 255.0f;
+        for (const char* other : kCharmIds) {
+            if (std::string(other) == kBlueDiamond) continue;
+            float of = 255.0f;
+            bag::icon_fits(after, s, *bare_in(list, other), l, &of);
+            other_fit = std::min(other_fit, of);
+            other_reads = other_reads ||
+                          k.counts.read_charm(after, s, bare_in(list, other), l) != CountReader::kUnreadable;
+        }
+        const int read = k.counts.read(after, s);
+        std::printf("  [info] 8871071 after, row 2 cell 1: read %d; its icon fit %s, %d pixel(s) unlike; another "
+                    "colour's icon fits at %s at best\n",
+                    read, fixed1(fit).c_str(), unlike, fixed1(other_fit).c_str());
+        check(read == CountReader::kUnreadable && corner && unlike == 0 && fit <= 1.0f && !other_reads &&
+                  other_fit >= 40.0f,
+              "8871071 x1 after its use: read kUnreadable, as 11.03b had it; its own icon bare, fit " + fixed1(fit) +
+                  ", " + std::to_string(unlike) + " pixels unlike; no other colour's icon (best " +
+                  fixed1(other_fit) + ") reads it");
+    }
+    {
+        // What slot_now goes by after a use, on these two looks: the slot
+        // alike the one before outside the count corner -- kStillThere, 0.80
+        // -- and read one less with its colour's icon: Less, used. Nothing
+        // but the two used slots changed between the looks.
+        std::string changed, wrong, info;
+        for (std::size_t i = 0; i < sb.size(); ++i)
+            if (pixels_off(bag::cut(before, sb[i]), bag::cut(after, sa[i])) != 0)
+                changed += " " + cell_text(static_cast<int>(i));
+        for (const PairSlot& c : kLivePair) {
+            if (c.before == c.after) continue;
+            const Frame& icon = *bare_in(list, c.id);
+            const std::size_t i = static_cast<std::size_t>(c.slot);
+            const float like = bag::alike(bag::cut(after, sa[i]), bag::cut(before, sb[i]), l);
+            const int was = k.counts.read_charm(before, sb[i], &icon, l);
+            const int left = k.counts.read_charm(after, sa[i], &icon, l);
+            info += " " + cell_text(c.slot) + " " + last2(c.id) + " alike " + fixed3(like) + ";";
+            if (like < 0.80f || was != c.before || left != was - 1)
+                wrong += " | " + cell_text(c.slot) + " " + last2(c.id) + ": alike " + fixed3(like) + ", " +
+                         std::to_string(was) + " then " + std::to_string(left);
+        }
+        std::printf("  [info] the used slots after, against before:%s\n", info.c_str());
+        check(changed == " r1c2 r2c1" && wrong.empty(),
+              "only row 1 cell 2 and row 2 cell 1 changed (" + changed + " ), each alike its look before and read "
+              "one less -- what slot_now takes for used" + wrong);
+    }
+    {
+        // The single left is the client's drawing of 8871071 x1 wherever it
+        // lies: row 2 cell 6's at 19:54 pixel for pixel. And each of the seven
+        // x2 here differs from its colour's x1 then only in the count corner --
+        // so those stand for the x1 the six others would turn into
+        // (test_charm_pair_run).
+        Frame g;
+        BagView w;
+        std::vector<ScreenRect> ws;
+        if (!singles_bag(g, w, ws) || !w.found || ws.size() < 24) {
+            skip("no cut of the live bag of 2026-11-03 19:54 here, to set the singles beside\n");
+        } else {
+            const int same = pixels_off(bag::cut(after, sa[6]), bag::cut(g, ws[11]));
+            std::string wrong, info;
+            for (const PairSlot& c : kLivePair) {
+                if (c.before != 2) continue;
+                for (const Single& one : kLiveSingles) {
+                    if (std::string(one.id) != c.id) continue;
+                    const Frame two = bag::cut(before, sb[static_cast<std::size_t>(c.slot)]);
+                    const Frame single = bag::cut(g, ws[static_cast<std::size_t>(one.slot)]);
+                    const int all = pixels_off(two, single);
+                    const int outside =
+                        pixels_off(two, single, ScreenRect{ 0, 0, bag::kCountCornerW, bag::kCountCornerH });
+                    info += " " + last2(c.id) + " " + std::to_string(all) + ";";
+                    if (all <= 0 || outside != 0)
+                        wrong += " | " + last2(c.id) + ": " + std::to_string(all) + " pixels differ, " +
+                                 std::to_string(outside) + " outside the corner";
+                }
+            }
+            std::printf("  [info] each x2 of 22:05 against its colour's x1 of 19:54, pixels differing:%s\n",
+                        info.c_str());
+            check(same == 0, "8871071 x1 at 22:05, row 2 cell 1, is 19:54's in row 2 cell 6 pixel for pixel -- " +
+                                 std::to_string(same) + " pixel(s) differ");
+            check(wrong.empty(), "the seven x2 differ from their x1 of 19:54 in the count corner only" + wrong);
+        }
+    }
+}
+
+void test_charm_pair_run() {
+    section("Bùa: the live bag of 22:05 rebuilt from its own slots -- x2 to x1 is one less, used, and the run goes on");
+    if (skip_without_kit()) return;
+    Frame before, after;
+    BagView vb, va;
+    std::vector<ScreenRect> sb, sa;
+    if (!pair_bag("charm_pair_before", before, vb, sb) || !pair_bag("charm_pair_after", after, va, sa) || !vb.found ||
+        !va.found || sb.size() < 24 || sa.size() < 24) {
+        skip("no cuts of the live bag of 2026-11-03 22:05 here (handoff\\charms\\testdata\\charm_pair_*)\n");
+        return;
+    }
+    ItemCatalog catalog;
+    if (!charm_catalog(catalog)) {
+        skip("the item catalog's charms are not installed here\n");
+        return;
+    }
+    BagCleaner::forget_said_once();
+    // Slot `slot` as the live client drew it, before the use or after.
+    const auto live = [&](int slot, bool used) {
+        return bag::cut(used ? after : before, (used ? sa : sb)[static_cast<std::size_t>(slot)]);
+    };
+    {
+        // As at 22:05: 8871081 x61 in row 1 cell 2 and 8871071 x2 in row 2
+        // cell 1, each drawn as the client drew it before its use and after,
+        // the packets' bag agreeing, as it did -- through charm_one and
+        // slot_now with the colour's icon, as the GUI runs them.
+        CharmBagRun c(catalog, { { 1, kPurpleCard, 61 }, { 6, kBlueDiamond, 2 } }, { kPurpleCard, kBlueDiamond });
+        c.p.game.items[0].drawn = { { 61, live(1, false) }, { 60, live(1, true) } };
+        c.p.game.items[1].drawn = { { 2, live(6, false) }, { 1, live(6, true) } };
+        std::vector<std::pair<int, int>> asked;
+        c.p.packets = [&asked](const std::string&, int j, int count, std::string& said) {
+            asked.emplace_back(j, count);
+            said = "the same";
+            return BagCleaner::PacketSays::Agrees;
+        };
+        c.run();
+        const std::vector<std::pair<int, int>> slots_asked = { { 1, 61 }, { 6, 2 } };
+        check(c.p.game.right_clicks == 2 && c.p.game.confirms == 2 && c.r.charms_used == 2 && c.tries() == "UU" &&
+                  c.p.game.items[0].count == 60 && c.p.game.items[1].count == 1 && c.p.says("; còn 60") &&
+                  c.p.says("; còn 1") && c.r.use_unsure == 0 && c.r.failed == 0 && c.r.trouble.empty() &&
+                  c.p.game.messages_closed == 2 && asked == slots_asked,
+              "8871081 x61 and 8871071 x2, the packets' slots 1 and 6 agreeing: both used -- 61 to 60, and 2 to 1 by "
+              "its bare icon, where 11.03b stopped -- tries " + c.tries() + ", " + c.r.trouble);
+    }
+    {
+        // All eight chosen, as the owner had them: 8871081 x61 and the seven
+        // x2, each turned by its use into its x1 -- 8871071's as at 22:05, the
+        // six others' as the client drew them at 19:54, which differ from
+        // their x2 only in the count corner (test_charm_pair_live).
+        Frame g;
+        BagView w;
+        std::vector<ScreenRect> ws;
+        if (!singles_bag(g, w, ws) || !w.found || ws.size() < 24) {
+            skip("no cut of the live bag of 2026-11-03 19:54 here, for the six other singles\n");
+            return;
+        }
+        std::vector<CharmBagRun::In> in_bag;
+        for (const PairSlot& one : kLivePair) in_bag.push_back({ one.slot, one.id, one.before });
+        CharmBagRun c(catalog, in_bag, std::vector<std::string>(std::begin(kCharmIds), std::end(kCharmIds)));
+        for (std::size_t i = 0; i < std::size(kLivePair); ++i) {
+            const PairSlot& one = kLivePair[i];
+            Frame used = live(one.slot, true);
+            if (one.before == one.after)
+                for (const Single& s : kLiveSingles)
+                    if (std::string(s.id) == one.id) used = bag::cut(g, ws[static_cast<std::size_t>(s.slot)]);
+            c.p.game.items[i].drawn = { { one.before, live(one.slot, false) }, { one.before - 1, used } };
+        }
+        const int deadline = BagCleaner::charm_deadline_ms(8);
+        c.p.deadline_ms = deadline;
+        c.run();
+        bool ones = true;
+        for (std::size_t i = 1; i < c.p.game.items.size(); ++i) ones = ones && c.p.game.items[i].count == 1;
+        std::set<std::string> ids;
+        for (const auto& t : c.r.charm_tries) ids.insert(t.id);
+        std::printf("  [info] the live bag of 22:05 rebuilt, eight kinds used: %lld ms of the pretend game's time, "
+                    "the deadline %d\n",
+                    static_cast<long long>(c.took_ms), deadline);
+        check(c.p.game.right_clicks == 8 && c.p.game.confirms == 8 && c.r.charms_used == 8 &&
+                  c.tries() == "UUUUUUUU" && ids.size() == 8 && c.p.game.items[0].count == 60 && ones &&
+                  c.r.use_unsure == 0 && c.r.failed == 0 && c.r.charms_unread == 0 && c.r.trouble.empty() &&
+                  c.p.game.messages_closed == 8 && c.p.game.keys == 0,
+              "all eight chosen: one run right-clicks each once -- 81 to 60, the seven x2 each seen one less -- "
+              "each message closed, no stop -- " + std::to_string(c.p.game.right_clicks) + " right-clicks, " +
+                  std::to_string(c.r.charms_used) + " used, tries " + c.tries() + ", " + c.r.trouble);
+        check(c.took_ms < deadline, "inside the deadline of eight kinds: " + std::to_string(c.took_ms) + " of " +
+                                        std::to_string(deadline) + " ms");
+    }
+}
+
+void test_charm_singles_sources() {
+    section("Bùa: a stack of one is read so only by the charm run -- the pass, fragments and the shop as before");
+#ifdef GOBOT_SOURCE_DIR
+    std::string cpp = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/bag.cpp");
+    if (cpp.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    cpp.erase(std::remove(cpp.begin(), cpp.end(), '\r'), cpp.end());
+    const auto body = [&](const std::string& head) {
+        const std::size_t from = cpp.find(head);
+        if (from == std::string::npos) return std::string();
+        const std::size_t end = cpp.find("\n}", from);
+        return end == std::string::npos ? std::string() : cpp.substr(from, end + 2 - from);
+    };
+    const auto count_in = [](const std::string& text, const std::string& part) {
+        int n = 0;
+        for (std::size_t at = text.find(part); at != std::string::npos; at = text.find(part, at + 1)) ++n;
+        return n;
+    };
+    // CountReader::read as it was: what the pass, the fragments, the shop and
+    // the potion count go by.
+    check(body("int CountReader::read(const Frame& f, const ScreenRect& slot) const {") ==
+              "int CountReader::read(const Frame& f, const ScreenRect& slot) const {\n"
+              "    if (!loaded_ || !f.valid()) return kUnreadable;\n"
+              "    // White the digits leave over says nothing in a slot's corner: the item\n"
+              "    // under the count can be white itself.\n"
+              "    int white = 0, stray = 0;\n"
+              "    const int n = scan(f, ScreenRect{ slot.x, slot.y, 28, 16 }, 6, false, true, white, stray);\n"
+              "    if (white == 0) return 1;                 // nothing printed: a stack of one\n"
+              "    if (n <= 0 || n > 9999) return kUnreadable;\n"
+              "    return n;\n"
+              "}",
+          "bag.cpp: CountReader::read is as it was");
+    const std::string sweep = body("void BagCleaner::charm_sweep(");
+    const std::string slot_now = body("BagCleaner::SlotNow BagCleaner::slot_now(");
+    const std::string charm_one = body("BagCleaner::UseResult BagCleaner::charm_one(");
+    const std::string use_one = body("BagCleaner::UseResult BagCleaner::use_one(");
+    check(count_in(cpp, "read_charm(") == 3 && count_in(sweep, "read_charm(") == 1 &&
+              count_in(slot_now, "read_charm(") == 1 && count_in(sweep, "counts_->read(") == 0,
+          "read_charm is asked by charm_sweep and slot_now only, and charm_sweep reads no count else");
+    check(count_in(cpp, ", &icon)") == 3 && count_in(charm_one, ", &icon)") == 3 &&
+              count_in(use_one, "slot_now(v, index, before, count, look, shot, why))") == 2 &&
+              count_in(use_one, "slot_now(") == 2,
+          "slot_now is handed a charm's icon by charm_one alone; use_one's two looks read as before");
+    std::string others;
+    for (const char* head : { "BagCleaner::Result BagCleaner::run_pass(", "bool BagCleaner::trash_one(",
+                              "void BagCleaner::use_sweep(", "BagCleaner::UseResult BagCleaner::use_one(",
+                              "BagCleaner::Probe BagCleaner::probe(", "bool BagCleaner::shop_count(",
+                              "void BagCleaner::shop_buy(" }) {
+        const std::string b = body(head);
+        if (b.empty() || b.find("read_charm(") != std::string::npos || b.find("bare_corner(") != std::string::npos ||
+            b.find("bare_of(") != std::string::npos)
+            others += std::string(" | ") + head;
+    }
+    check(others.empty(), "the pass, the fragments, the probe and the shop ask neither read_charm nor bare_corner" +
+                              others);
+    const std::string stock = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/potion_stock.cpp");
+    check(!stock.empty() && stock.find("read_charm(") == std::string::npos &&
+              stock.find("bare_corner(") == std::string::npos,
+          "potion_stock.cpp neither");
+    check(sweep.find("++res.charms_unread;") != std::string::npos &&
+              sweep.find("no count read, and the corner is not its bare ") != std::string::npos &&
+              count_in(sweep, "bare ? \" (nothing printed over its icon)\" : \"\"") == 2,
+          "charm_sweep counts a slot it reads no count in, and logs why; a single's lines say \"nothing printed "
+          "over its icon\"");
+#else
+    skip("no source folder\n");
+#endif
 }
 
 void test_charm_clock() {
@@ -3887,6 +6176,408 @@ void test_shop_pieces() {
     }
 }
 
+/// The log from here on, kept in memory at Info for as long as this lives:
+/// what a run says of the bag's tabs goes only there.
+struct LogLines {
+    LogLevel was = Logger::instance().level();
+    LogLines() {
+        Logger::instance().set_level(LogLevel::Info);
+        Logger::instance().set_ring_capacity(4000);
+        Logger::instance().clear_ring();
+    }
+    ~LogLines() {
+        Logger::instance().set_level(was);
+        Logger::instance().set_ring_capacity(0);
+    }
+    LogLines(const LogLines&) = delete;
+    LogLines& operator=(const LogLines&) = delete;
+    std::string line_with(const std::string& part) const {
+        for (const LogLine& l : Logger::instance().ring())
+            if (l.text.find(part) != std::string::npos) return l.text;
+        return {};
+    }
+    bool has(const std::string& part) const { return !line_with(part).empty(); }
+};
+
+/// The five numbers after "tab means " in a line of the log; none when they
+/// are not there.
+std::vector<int> means_in(const std::string& line) {
+    std::vector<int> out;
+    const std::size_t at = line.find("tab means ");
+    if (at == std::string::npos) return out;
+    int m[kBagTabs] = {};
+    if (std::sscanf(line.c_str() + at + 10, "%d %d %d %d %d", &m[0], &m[1], &m[2], &m[3], &m[4]) == kBagTabs)
+        out.assign(m, m + kBagTabs);
+    return out;
+}
+
+std::string means_of(const BagView& v) {
+    std::string out;
+    for (int t = 0; t < kBagTabs; ++t) out += (t ? " " : "") + std::to_string(v.tab_mean[t]);
+    return out;
+}
+
+/// The bag's strip read as no tab chosen -- -1 -- as on the live client in both
+/// shop runs of 2026-11-03 (farm30 report, B4): looked at again, the pointer
+/// moved off, before a run stops on it; another tab read for sure still stops
+/// it; and nothing is counted, bought or right-clicked on a look that does not
+/// read Tiêu Dùng.
+void test_tab_unsure() {
+    section("Túi đồ: a tab not read is looked at again before a stop, and never counted on (farm30 B4)");
+    if (skip_without_kit()) return;
+    {
+        // The reading itself: every tab's mean grey kept, the chosen one the
+        // darkest by kChosenTabDarker at least; with none drawn chosen, -1 and
+        // the means kept all the same.
+        Pretend g;
+        make_bag(g);
+        bool all = true, darker = true;
+        for (int t = 0; t < kBagTabs; ++t) {
+            all = all && g.v.tab_mean[t] >= 0;
+            if (t != kUseTab) darker = darker && g.v.tab_mean[t] - g.v.tab_mean[kUseTab] >= 10;
+        }
+        check(g.v.selected_tab == kUseTab && all && darker,
+              "the strip on Tiêu Dùng: read chosen, every tab's mean grey kept, Tiêu Dùng's darker than each by 10 or "
+              "more -- " + means_of(g.v));
+        g.unread = [](int) { return true; };
+        const BagView blank = bag::find(g.look(), kit().store, g.l);
+        check(blank.found && blank.selected_tab == -1 && blank.tab_mean[0] >= 0 && blank.tab_mean[kBagTabs - 1] >= 0 &&
+                  g.unread_seen == 1,
+              "drawn with no tab chosen: found, read -1, the means kept -- " + means_of(blank));
+    }
+    if (!kit().shop_ok) {
+        skip("the shop's pictures are not installed here\n");
+        return;
+    }
+    {
+        ShopRun probe(0, 0);
+        if (!probe.ok) {
+            skip("the item catalog is not installed here\n");
+            return;
+        }
+    }
+    const std::string dir = temp_path("tab_unsure_debug");
+    make_folder(dir);
+    for (const std::string& name : files_in(dir, "*.png")) remove_file(dir + "\\" + name);
+    const auto pictures = [&](const char* where) {
+        return static_cast<int>(files_in(dir, std::string("*_tab_unsure_") + where + ".png").size());
+    };
+    const auto nothing_done = [](const ShopRun& s) {
+        return s.r.shop_hp_before == -1 && s.r.shop_bought == 0 && s.p.game.right_clicks == 0 &&
+               s.p.game.opener_clicks == 0 && s.p.game.digit_keys == 0;
+    };
+
+    // ---- the click on Tiêu Dùng (select_tab)
+    {
+        // The pointer left on the tab it clicked spoils the read, as the game
+        // lights a control under it: moved off after the click, the tab is
+        // read at once.
+        ShopRun s(4, 4);
+        s.p.game.cur_tab = kOtherTab;
+        s.p.game.hover_unreads = true;
+        s.run();
+        check(s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 && !s.r.tab_unsure &&
+                  s.p.game.tab_clicks == 1 && s.p.game.unread_seen == 0 && s.p.game.moves >= 1 && s.p.says("đủ bình"),
+              "the pointer on a tab spoils its read: moved off after the click, Tiêu Dùng read at once and counted, "
+              "4 and 4 -- " + s.r.trouble + " / " + s.p.last());
+        ShopRun t(4, 4);
+        t.p.game.cur_tab = kOtherTab;
+        t.p.game.hover_unreads = true;
+        t.p.game.no_move = true;
+        t.run();
+        check(t.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos && t.r.tab_unsure &&
+                  nothing_done(t) && t.p.game.tab_clicks == 1 &&
+                  t.p.game.unread_seen >= 10 + BagCleaner::kTabRelooks,
+              "and with no way to move it, every look after the click reads no tab: looked at " +
+                  std::to_string(BagCleaner::kTabRelooks) + " more times, then a stop -- nothing counted, nothing "
+                  "right-clicked (" + std::to_string(t.p.game.unread_seen) + " looks with no tab) -- " + t.r.trouble);
+    }
+    {
+        // No tab read for the ten short looks after the click and three more:
+        // looked at again, and the shop goes on.
+        ShopRun s(4, 4);
+        s.p.game.cur_tab = kOtherTab;
+        int from = -1;
+        s.p.during = [&](BagCleaner&) {
+            if (from < 0 && s.p.game.tab_clicks > 0) from = s.p.game.looks + 1;
+        };
+        s.p.game.unread = [&](int n) { return from >= 0 && n >= from && n < from + 13; };
+        LogLines log;
+        s.run();
+        check(s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 && !s.r.tab_unsure &&
+                  s.p.game.tab_clicks == 1 && s.p.game.unread_seen == 13 &&
+                  log.has("(Tiêu Dùng) read at shop_tab after 4 more looks -- the first read -1"),
+              "-1 on the 10 looks after the click and 3 more: looked at again, Tiêu Dùng read on the 4th, one click, "
+              "counted 4 and 4 -- " + s.r.trouble + " / " + log.line_with("read at shop_tab"));
+    }
+    {
+        // No tab read on any look: one click, eight more looks, a stop -- and
+        // its picture kept once a GoBot start, its numbers in the log.
+        BagCleaner::forget_said_once();
+        LogLines log;
+        bool stopped[2] = { false, false };
+        int kept[2] = { 0, 0 };
+        for (int round = 0; round < 2; ++round) {
+            ShopRun s(4, 4);
+            s.p.game.unread = [](int) { return true; };
+            s.p.debug_dir = dir;
+            s.run();
+            stopped[round] = s.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos &&
+                             s.r.tab_unsure && nothing_done(s) && s.p.game.tab_clicks == 1;
+            kept[round] = pictures("shop_tab");
+        }
+        check(stopped[0] && stopped[1],
+              "-1 on every look: Tiêu Dùng clicked once, looked at again, then a stop -- nothing counted, bought or "
+              "right-clicked");
+        check(kept[0] == 1 && kept[1] == 1,
+              "one picture kept the first time, none the second: once a GoBot start, so the newest few dozen are not "
+              "pushed out (" + std::to_string(kept[0]) + ", " + std::to_string(kept[1]) + ")");
+        const std::string line = log.line_with("tab not read as 2 (Tiêu Dùng) at shop_tab -- read -1, strip at 300,300");
+        const std::vector<int> m = means_in(line);
+        check(m.size() == kBagTabs && *std::min_element(m.begin(), m.end()) >= 0,
+              "the log says the tab wanted, the tab read, where the strip is, how alike, and every tab's mean -- " + line);
+    }
+    {
+        // Khác read for sure on every look: Tiêu Dùng clicked once more, as
+        // the game may have let the first click go, then a stop. A first
+        // click let go: the second takes.
+        ShopRun s(4, 4);
+        s.p.game.cur_tab = kOtherTab;
+        s.p.game.tabs_stuck = true;
+        s.run();
+        check(s.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos && s.r.tab_unsure &&
+                  nothing_done(s) && s.p.game.tab_clicks == 2 && s.p.game.unread_seen == 0,
+              "Khác read for sure on every look: Tiêu Dùng clicked once more, then a stop -- nothing counted (" +
+                  std::to_string(s.p.game.tab_clicks) + " clicks) -- " + s.r.trouble);
+        ShopRun t(4, 4);
+        t.p.game.cur_tab = kOtherTab;
+        t.p.game.tab_clicks_lost = 1;
+        t.run();
+        check(t.r.trouble.empty() && t.r.shop_hp_before == 4 && t.r.shop_mp_before == 4 && t.p.game.tab_clicks == 2 &&
+                  !t.r.tab_unsure,
+              "the first click let go by the game: the second takes, and it counts as ever -- " + t.r.trouble);
+    }
+
+    // ---- the count (shop_count): the moment its first look reads no tab is
+    // found by trying, so that the test does not hang on how many looks come
+    // before it.
+    int count_look = -1;
+    for (int k = 2; k <= 16 && count_look < 0; ++k) {
+        ShopRun s(4, 4);
+        s.p.game.unread = [k](int n) { return n >= k && n < k + 3; };
+        LogLines log;
+        s.run();
+        if (!log.has("(Tiêu Dùng) read at shop_count after 3 more looks")) continue;
+        count_look = k;
+        check(s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 && s.r.shop_bought == 0 &&
+                  !s.r.tab_unsure && s.p.game.moves >= 3 && s.p.says("đủ bình"),
+              "-1 on three looks of the count: looked at again, the pointer moved off each time, and counted all the "
+              "same, 4 and 4, nothing bought (from look " + std::to_string(k) + ") -- " + s.r.trouble);
+    }
+    check(count_look > 0, "(a moment in the count with three looks that read no tab: found)");
+    if (count_look > 0) {
+        BagCleaner::forget_said_once();
+        ShopRun s(4, 4);
+        s.p.game.unread = [count_look](int n) { return n >= count_look; };
+        s.p.debug_dir = dir;
+        s.run();
+        check(s.r.trouble.find("không chắc túi đồ đang ở ngăn Tiêu Dùng") != std::string::npos && s.r.tab_unsure &&
+                  nothing_done(s) && s.p.game.moves >= BagCleaner::kTabRelooks && pictures("shop_count") == 1,
+              "no tab read for good from there: " + std::to_string(BagCleaner::kTabRelooks) +
+                  " more looks, then a stop, its picture kept -- nothing counted, bought or right-clicked -- " +
+                  s.r.trouble);
+        // Khác read there for sure: stopped at once, nothing looked at again.
+        ShopRun o(4, 4);
+        o.p.during = [&](BagCleaner&) {
+            if (o.p.game.looks + 1 == count_look) o.p.game.cur_tab = kOtherTab;
+        };
+        o.run();
+        check(o.r.trouble.find("không chắc túi đồ đang ở ngăn Tiêu Dùng") != std::string::npos && o.r.tab_unsure &&
+                  nothing_done(o) && o.p.game.moves == 0 && o.p.game.unread_seen == 0,
+              "Khác read for sure in the count: stopped at once, the pointer not moved, nothing looked at again or "
+              "counted -- " + o.r.trouble);
+    }
+
+    // ---- the charms: Tiêu Dùng's click, and the sweep.
+    {
+        BagCleaner::forget_said_once();
+        CharmRun c;
+        c.p.game.unread = [](int) { return true; };
+        c.p.debug_dir = dir;
+        c.run();
+        check(c.p.game.right_clicks == 0 && c.r.charms_used == 0 && c.r.charm_tries.empty() && c.r.tab_unsure &&
+                  c.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos &&
+                  pictures("charm_tab") == 1,
+              "charms, no tab read on any look: Tiêu Dùng clicked, looked at again, then a stop with its picture -- no "
+              "charm right-clicked -- " + c.r.trouble);
+    }
+    int sweep_look = -1;
+    for (int k = 2; k <= 12 && sweep_look < 0; ++k) {
+        CharmRun c;
+        c.p.game.unread = [k](int n) { return n >= k && n < k + 3; };
+        LogLines log;
+        c.run();
+        if (!log.has("(Tiêu Dùng) read at charm_sweep after 3 more looks")) continue;
+        sweep_look = k;
+        check(c.p.game.right_clicks == 1 && c.r.charms_used == 1 && !c.r.tab_unsure && c.r.trouble.empty(),
+              "charms, three looks of the sweep that read no tab: looked at again, and the charm used as ever (from "
+              "look " + std::to_string(k) + ") -- " + c.p.last());
+    }
+    check(sweep_look > 0, "(a moment in the charm sweep with three looks that read no tab: found)");
+    if (sweep_look > 0) {
+        BagCleaner::forget_said_once();
+        CharmRun c;
+        c.p.game.unread = [sweep_look](int n) { return n >= sweep_look; };
+        c.p.debug_dir = dir;
+        c.run();
+        check(c.p.game.right_clicks == 0 && c.r.charms_used == 0 && c.r.charm_tries.empty() && c.r.tab_unsure &&
+                  c.r.trouble.empty() && c.p.says("không chắc túi đồ đang ở ngăn Tiêu Dùng, nên không dùng bùa nào") &&
+                  pictures("charm_sweep") == 1,
+              "and no tab read for good from there: the sweep stops, says so, keeps its picture, and is flagged "
+              "tab_unsure -- not a bag with no charm in it -- with no charm right-clicked -- " + c.p.last());
+    }
+    for (const std::string& name : files_in(dir, "*.png")) remove_file(dir + "\\" + name);
+    RemoveDirectoryA(dir.c_str());
+}
+
+/// What gui_app.cpp makes of it, where no pretend game reaches: the shop waits
+/// for nobody at the mouse under its hold, the charm job says the tab was not
+/// read and waits ten minutes; and the bag's own order -- the tab read before
+/// anything is counted or right-clicked.
+void test_tab_unsure_sources() {
+    section("Túi đồ: the shop's quiet moment and the charms' tab line, in their source (farm30 B4)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp");
+    const std::string cpp = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/bag.cpp");
+    if (gui.empty() || cpp.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto has = [](const std::string& text, const std::string& part) { return text.find(part) != npos; };
+    const auto count_of = [](const std::string& text, const std::string& part) {
+        int n = 0;
+        for (std::size_t at = text.find(part); at != npos; at = text.find(part, at + 1)) ++n;
+        return n;
+    };
+    const auto slice = [&](const std::string& text, const std::string& from, const std::string& to) {
+        const std::size_t a = text.find(from);
+        const std::size_t b = a == npos ? npos : text.find(to, a);
+        return a == npos || b == npos ? std::string() : text.substr(a, b - a);
+    };
+    const auto body = [&](const std::string& text, const std::string& head) {
+        const std::size_t a = text.find(head);
+        const std::size_t b = a == npos ? npos : text.find("\n}", a);
+        return a == npos || b == npos ? std::string() : text.substr(a, b + 2 - a);
+    };
+
+    // The shop: the hold, the keys let go, a quiet second, and only then the run.
+    const std::string shop = slice(gui, "const auto run_shop = [&](bool forced, bool dry) {", "while (!trash_stop_) {");
+    const std::size_t hold = shop.find("take_hold(\"trash cleaning\")");
+    const std::size_t let_go = hold == npos ? npos : shop.find("input_.release_all();", hold);
+    const std::size_t quiet = shop.find("const DWORD quiet = last_input();");
+    const std::size_t asked = shop.find("touched = !trash_stop_ && !lost && last_input() != quiet;");
+    const std::size_t ran = shop.find("r = cleaner.run();");
+    check(hold != npos && let_go != npos && quiet != npos && asked != npos && ran != npos && hold < let_go &&
+              let_go < quiet && quiet < asked && asked < ran &&
+              has(shop, "for (int slept = 0; slept < kShopQuietMs && !trash_stop_ && !lost; slept += 50) {") &&
+              has(gui, "constexpr int kShopQuietMs = 1000;"),
+          "gui_app.cpp: run_shop takes the hold, lets the keys go, and runs only after a second with nobody at the "
+          "mouse or keyboard");
+    // A button's run looks for that second a few times under the one hold, the
+    // hold and HP watched as the run watches them; a timed run once.
+    check(has(shop, "const int tries = forced || dry ? kShopQuietTries : 1;") &&
+              has(gui, "constexpr int kShopQuietTries = 5;") && has(shop, "lost = !still_ours();") &&
+              has(shop, "cleaner.set_guard(still_ours);") &&
+              has(shop, "else if (lost && hp_under())"),
+          "gui_app.cpp: \"Mua ngay\" and \"Thử mua\" look for the quiet second up to 5 times, the hold and HP "
+          "watched; a timed run once");
+    check(has(shop, "not_now(\"Chờ: bạn đang dùng chuột hoặc bàn phím, mua bình sau.\", kShopTouchedMs);") &&
+              has(gui, "constexpr std::uint64_t kShopTouchedMs = 30'000;") &&
+              count_of(shop, "if (!held) end_hold(\"trash cleaning\");") == 2 && count_of(shop, "take_hold(") == 1,
+          "and when somebody was, it lets the hold go as it was and asks again in 30 s, saying why");
+    check(!has(gui, "line += \" Dừng: \" + r.trouble") &&
+              count_of(gui, "line += (line.empty() ? \"\" : \" \") + std::string(\"Dừng: \") + r.trouble + \".\";") == 2,
+          "gui_app.cpp: the shop's line no longer begins \"Trash:  Dừng\" with two spaces");
+
+    // The charms: the tab line instead of "no charm there", and ten minutes.
+    const std::string job = slice(gui, "const auto run_charms = [&](bool forced) {", "// ---- the potion shop ----");
+    const std::size_t tab_branch = job.find("} else if (tab_stop) {");
+    const std::size_t none = job.find("Không thấy bùa nào trong ngăn Tiêu Dùng của túi đồ.");
+    check(has(job, "const bool tab_stop = r.tab_unsure && r.trouble.empty();") && tab_branch != npos && none != npos &&
+              tab_branch < none && has(job, "không chắc túi đồ đang ở ngăn Tiêu Dùng, nên dừng dùng bùa"),
+          "gui_app.cpp: a charm sweep stopped on the strip says the tab was not sure, before \"Không thấy bùa nào\" "
+          "can be said");
+    check(has(job, "if (!forced && r.tab_unsure) charm_check_ms = now_ms() + kCharmTabRetryMs;") &&
+              has(gui, "constexpr std::uint64_t kCharmTabRetryMs = 600'000;") &&
+              has(job, "r.trouble.empty() && !r.tab_unsure)"),
+          "and the charms wait ten minutes after it, the kinds due not written down as not found");
+
+    // bag.cpp: the pointer moved off after the tab's click; nothing counted or
+    // right-clicked before the tab is read.
+    const std::string pick_tab = body(cpp, "bool BagCleaner::select_tab(");
+    const std::size_t clicked = pick_tab.find("click(tx, ty);");
+    const std::size_t parked = pick_tab.find("park_pointer();");
+    check(clicked != npos && parked != npos && clicked < parked && parked - clicked < 40 &&
+              has(pick_tab, "more < kTabRelooks && v.found && v.selected_tab < 0") &&
+              has(pick_tab, "if (clicks > 0 && (!v.found || v.selected_tab < 0)) break;"),
+          "bag.cpp: select_tab moves the pointer off right after its click, looks again only while no tab is read, "
+          "and clicks again only on another tab read for sure");
+    const std::string counting = body(cpp, "bool BagCleaner::shop_count(");
+    const std::size_t tab_check = counting.find("if (v.selected_tab != tab) {");
+    const std::size_t relook = counting.find("v.found && v.selected_tab < 0 && unread < kTabRelooks");
+    const std::size_t judged = counting.find("trash_->judge(");
+    check(tab_check != npos && relook != npos && judged != npos && tab_check < relook && relook < judged &&
+              count_of(counting, "trash_->judge(") == 1,
+          "bag.cpp: shop_count looks again on a look with no tab read, and judges a slot only after the tab is read");
+    const std::string sweep = body(cpp, "void BagCleaner::charm_sweep(");
+    const std::size_t s_check = sweep.find("if (v.selected_tab != tab) {");
+    const std::size_t s_relook = sweep.find("v.found && v.selected_tab < 0 && unread < kTabRelooks");
+    const std::size_t s_flag = sweep.find("res.tab_unsure = true;");
+    const std::size_t s_used = sweep.find("charm_one(");
+    check(s_check != npos && s_relook != npos && s_flag != npos && s_used != npos && s_check < s_relook &&
+              s_relook < s_flag && s_flag < s_used,
+          "bag.cpp: charm_sweep looks again on a look with no tab read, flags the run when it stops on the strip, and "
+          "right-clicks a charm only after the tab is read");
+#else
+    skip("built without the source tree's path\n");
+#endif
+}
+
+/// The charm job builds the trash list every half minute: its folders are
+/// read quietly, and only the start's own pictures say how many they are
+/// (farm30 report, T6: 35 lines of "TemplateStore: 0 templates" in 18 min).
+void test_trash_list_quiet() {
+    section("Dọn rác: the trash list's folders read again without a line each time (farm30 T6)");
+    const std::string dir = temp_path("quiet_trash");
+    make_folder(dir);
+    make_folder(dir + "\\delete");
+    bool quiet = false, loaded = false, said = false;
+    {
+        LogLines log;
+        TrashList list;
+        loaded = list.load(dir, BagLayout{}) && list.items.empty();
+        quiet = !log.has("TemplateStore:");
+        TemplateStore loud;
+        loud.load(dir + "\\delete");
+        said = log.has("TemplateStore: 0 templates from " + dir + "\\delete");
+    }
+    RemoveDirectoryA((dir + "\\delete").c_str());
+    RemoveDirectoryA(dir.c_str());
+    check(loaded && quiet, "TrashList::load reads its folders with no line in the log");
+    check(said, "and a TemplateStore loaded as ever still says how many pictures it has, and from where");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string cpp = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/bag.cpp");
+    const std::string tm = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/template_matcher.cpp");
+    std::size_t quiet_loads = 0;
+    for (std::size_t at = cpp.find(".load(sub, true)"); at != std::string::npos; at = cpp.find(".load(sub, true)", at + 1))
+        ++quiet_loads;
+    check(quiet_loads == 1 && tm.find("if (path_exists(staged) && load(staged))") != std::string::npos &&
+              tm.find("if (!images.empty() && load(images))") != std::string::npos,
+          "only the trash list reads quietly: the start's line (\"522 templates\") stays");
+#endif
+}
+
 void test_use(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
     g_check = check_fn;
     g_section = section_fn;
@@ -3915,13 +6606,28 @@ void test_use(void (*check_fn)(bool, const std::string&), void (*section_fn)(con
     test_book_or_window_up();
     test_edited_question();
     test_charm_kinds();
+    test_charm_colours();
+    test_charm_colour_runs();
     test_charm_question();
     test_charm_run();
     test_charm_outcomes();
     test_charm_safety();
     test_charm_hold();
+    test_charm_packets();
+    test_charm_notice_pictures();
+    test_charm_notice();
+    test_live_charm();
+    test_charm_singles_live();
+    test_charm_pair_live();
+    test_charm_singles_printed();
+    test_charm_singles_run();
+    test_charm_pair_run();
+    test_charm_singles_sources();
     test_charm_clock();
     test_charm_settings();
     test_shop_pieces();
     test_shop();
+    test_tab_unsure();
+    test_tab_unsure_sources();
+    test_trash_list_quiet();
 }

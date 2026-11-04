@@ -2149,10 +2149,18 @@ void test_out_of_world() {
         const std::string cli = read("/apps/gobot_cli/main.cpp");
         const std::size_t frame_at = gui.find("const std::uint64_t frame_at = vitals_.last_read_ms();");
         const std::size_t judged =
-            gui.find("VitalsReader::in_world(vitals_.hp_seen_ms(), frame_at, MacroEngine::kOutOfWorldAfterMs)");
+            gui.find("VitalsReader::in_world(vitals_.hp_seen_ms(), frame_at, in_world_window_ms())");
+        // How long HP may go unread: MacroEngine's floor at the run's pace,
+        // wider only while the reader rests (packets_vitals.cpp).
+        const std::string vitals = read("/apps/gobot_gui/packets_vitals.cpp");
+        const std::size_t window = vitals.find("std::uint64_t GuiApp::in_world_window_ms() const {");
+        const std::size_t window_end = window == std::string::npos ? std::string::npos : vitals.find("\n}", window);
+        const std::string window_body =
+            window_end == std::string::npos ? std::string() : vitals.substr(window, window_end - window);
         check(frame_at != std::string::npos && judged != std::string::npos && frame_at < judged &&
                   gui.find("const bool in_world = input_.window_valid() &&") != std::string::npos &&
-                  gui.find("const bool in_world = vitals_.hp_percent() >= 0.0f") == std::string::npos,
+                  gui.find("const bool in_world = vitals_.hp_percent() >= 0.0f") == std::string::npos &&
+                  window_body.find("MacroEngine::kOutOfWorldAfterMs") != std::string::npos,
               "gui_app.cpp holds the macro by how long HP has gone unread, at the reader's last read");
         check(cli.find("VitalsReader::in_world(reader->hp_seen_ms(), read_at, MacroEngine::kOutOfWorldAfterMs)") !=
                       std::string::npos &&

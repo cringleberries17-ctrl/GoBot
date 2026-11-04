@@ -535,7 +535,10 @@ EXPERIMENTAL
   potion (Tu bom mau pet), potion counts (Con N binh), monster lists (Loc
   quai), attack styles (Kieu danh), keeping distance (Giu khoang cach),
   positions from packets (Vi tri tu goi tin), the hunting spot (Cho danh
-  quai, with Dat cho nay), the jump key (Phim nhay and Thu),
+  quai, with Dat cho nay), dropping to a monster on the floor below (Nhay
+  xuong bac duoi: Ctrl + Down, off as shipped, never with Dung yen mot cho,
+  never near a gate; a map change after a drop stops hunting and unticks
+  it), the jump key (Phim nhay and Thu),
   skills only while fighting (Chi khi dang danh quai) and closing notices
   (Tu dong thong bao); on Don rac, registering monster fragments (Dung manh
   ghep), using charms once an hour (Dung bua, and the button Dung bua ngay),
@@ -998,6 +1001,7 @@ $mustBeOff = @(
     @('macro.ini', 'Macro', 'skills_follow_fight'),
     @('hunt.ini', 'Hunt', 'keep_distance'),
     @('hunt.ini', 'Hunt', 'spot'),
+    @('hunt.ini', 'Hunt', 'drop_down'),
     @('bot_default.ini', 'Bot', 'auto_attack'),
     @('bot_default.ini', 'Bot', 'auto_fury'),
     @('bot_default.ini', 'Bot', 'backing_away'),

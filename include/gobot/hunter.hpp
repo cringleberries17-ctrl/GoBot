@@ -2,12 +2,15 @@
 
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/input_manager.hpp"
+#include "gobot/map_book.hpp"
 #include "gobot/mob_detector.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -200,6 +203,25 @@ struct HunterConfig {
     /// Jump when the target is above and out of reach.
     bool jump_to_reach = true;
 
+    /// "Nhảy xuống bậc dưới": drop through the platform underfoot with Ctrl
+    /// + ↓ (InputManager::drop_ctrl_down, the player's key for it) to the
+    /// target on a floor below -- more than max(down(), drop_min_px) below,
+    /// no more than drop_side_px to the side, and nothing to fight on the
+    /// character's own level. Only with the packets steering
+    /// (packet_positions=on), never with stay_put, and with the hunting spot
+    /// on only where the character stands, lands and the target all lie
+    /// inside its area. Only on a map whose file GoBot trusts (MapTrust), and
+    /// only where that file says the fall lands on the target's floor or one
+    /// between, never past it, never through the bottom ground and never
+    /// with a gate within drop_gate_px across of where the character stands,
+    /// falls or lands: on a gate Ctrl + ↓ changes the map (the player's hand
+    /// test, 2026-11-04). A map change after a press stops the hunt and
+    /// unticks this (GuiApp). It moves the character, so it ships off.
+    bool drop_down = false;
+    int  drop_min_px = 100;     ///< 60..470
+    int  drop_side_px = 120;    ///< 20..300
+    int  drop_gate_px = 150;    ///< 40..400
+
     /// Pick up what the monsters drop, with the game's pick-up key.
     ///
     /// Pressed a few times straight after each kill, and every
@@ -290,9 +312,9 @@ struct HunterConfig {
     bool focus_on_start = true;
 
     /// "Vị trí từ gói tin": see PacketPositions. Watch when hunt.ini has none,
-    /// as every file before it: the capture starts with the hunting and only
-    /// writes what the packets say beside what the screen shows; the screen
-    /// still fights. Ticked on the simple screen it is On.
+    /// as every file before it: the capture runs all session and only writes
+    /// what the packets say beside what the screen shows; the screen still
+    /// fights. Ticked on the simple screen it is On.
     PacketPositions packet_positions = PacketPositions::Watch;
 
     /// How the packets' world pixels lie over the screen's, for when a live
@@ -399,9 +421,23 @@ public:
         /// it is asked only at a pass with a target in reach, for which way
         /// the character faces (WorldFix::facing), and then only with the
         /// packets steering (packet_positions=on) -- never twice a pass.
+        /// With drop_down on (packets On, stay_put off), also asked once at
+        /// the start of each pass -- a second time with the spot on -- and
+        /// for kPressWatchMs after a drop's key whatever the setup;
+        /// face_from_packets may then ask again in the in-reach branch, as it
+        /// does with the spot off. With drop_down off, nothing new is asked.
         /// Unset, or false, there is no capture to say: NoCapture, and the
         /// hunter's own idea of the facing stands.
         std::function<bool(WorldFix&)>          where;
+        /// The game's own count of your take-offs (GuiApp::packet_takeoffs):
+        /// asked as a drop's key goes out and while it falls, for whether
+        /// the character left the ground. Unset, or none: not known.
+        std::function<std::optional<std::uint64_t>()> takeoffs;
+        /// The monsters standing where their own frame put them, in the
+        /// packets' world pixels (PacketEyes::stands): standing points for
+        /// the map drops go by (MapTrust). Asked once a pass with drop_down
+        /// on. Unset: none.
+        std::function<std::vector<MapTrust::Mob>()> stands;
     };
     struct Hands {
         std::function<bool()>                   focused;
@@ -410,6 +446,11 @@ public:
         std::function<void(std::uint32_t)>      key_up;
         std::function<bool(std::uint32_t)>      held;         ///< whether a key is down now
         std::function<void()>                   release_all;
+        /// Ctrl + ↓ (InputManager::drop_ctrl_down), with what is asked before
+        /// each step of it; and the drop's key-ups still owed sent again
+        /// (InputManager::settle_owed): true when nothing is owed.
+        std::function<InputManager::DropPress(const std::function<bool()>&)> drop;
+        std::function<bool()>                   settle_owed;
     };
     /// `sleep_ms` is how a pass waits a moment -- GoC's 50 ms after a step
     /// back or a turn: a real sleep unless set, and a test's own clock wound
@@ -421,6 +462,18 @@ public:
     void set_eyes(Eyes e)   { eyes_ = std::move(e); }
     void set_hands(Hands h) { hands_ = std::move(h); }
     void set_clock(Clock c) { clock_ = std::move(c); }
+
+    /// The game's own map files, for drops (HunterConfig::drop_down): where
+    /// a fall lands, the bottom ground and the gates, and what this session
+    /// learned. Set before start(), never while it runs. Null -- as the
+    /// command line's hunter has it -- and nothing is ever dropped to.
+    void set_map_book(GameMapBook* book);
+    /// What GoBot outside the hunter says against a drop at this moment --
+    /// HP low or not known, the macro held, a walk, the keeper crossing, one
+    /// of GoBot's own keys on Ctrl or ↓ -- in the log's English, or null for
+    /// nothing. Asked on the hunter's thread, so it reads atomics only. Set
+    /// before start(); unset, nothing is ever dropped to.
+    void set_drop_veto(std::function<const char*()> veto);
 
     /// For tests, which drive the hunter by hand on a clock of their own:
     /// start as start() does but with no thread, and run one pass of the loop
@@ -513,6 +566,66 @@ public:
     std::uint32_t attack_key() const { return attack_key_.load(); }
     static constexpr std::uint64_t kEngagedGraceMs = 500;
 
+    // ---- the drop through a platform (HunterConfig::drop_down): the plan's 11a
+
+    /// Settled to press within drop_side_px across of the target, and pressed
+    /// within this much more.
+    static constexpr int           kDropPressSlackPx = 20;
+    /// A settle waits this long for the report that the character stands;
+    /// one given up on, or refused at the press, is not begun again for
+    /// kDropSettleBackoffMs. The coordinator's token, refused, is waited for
+    /// kDropTokenWaitMs.
+    static constexpr std::uint64_t kDropSettleMs = 600;
+    static constexpr std::uint64_t kDropSettleBackoffMs = 2000;
+    static constexpr std::uint64_t kDropTokenWaitMs = 1000;
+    /// No take-off and no landing lower this long after ↓ went down: Ctrl + ↓
+    /// did nothing there. Still in the air kDropFallMaxMs after it -- a fall
+    /// of 475 px takes about 0.63 s -- and what came of it is not known. Until
+    /// then the drop counts as in the air (in_air), unless a landing came.
+    static constexpr std::uint64_t kDropJudgeMs = 1000;
+    static constexpr std::uint64_t kDropFallMaxMs = 1800;
+    /// Landed this much lower than it stood -- or higher, a rise.
+    static constexpr int           kDropLandPx = 24;
+    /// The landing floor against the target's height, and where it landed
+    /// against where the map file said: live, 0-5 px.
+    static constexpr int           kDropFloorMatchPx = 12;
+    /// The floor landed on is the first more than kDropFeetPx below where the
+    /// character stands, at least kDropMinFallPx below it -- a floor between
+    /// is a real one -- and the same floor, kDropSameFloorPx up or down, this
+    /// far either side: at the settle and at the press.
+    static constexpr int           kDropFeetPx = 8;
+    static constexpr int           kDropMinFallPx = 60;
+    static constexpr int           kDropSameFloorPx = 6;
+    static constexpr int           kDropMarginSettlePx = 24;
+    static constexpr int           kDropMarginPressPx = 8;
+    /// A gate counts for drop_gate_px from this far above where the character
+    /// stands to this far below where it lands: the standing point, the fall
+    /// and the landing in one test.
+    static constexpr int           kDropGateSpanPx = 60;
+    /// No press sooner than kDropGapMs after the last; no more than
+    /// kDropsPerMinute in a minute, nor kDropsPerTarget for one monster --
+    /// nor a settle begun for one after kDropSettlesPerTarget let go of
+    /// without a press, each a walk held off and let go of again.
+    static constexpr std::uint64_t kDropGapMs = 1500;
+    static constexpr int           kDropsPerMinute = 4;
+    static constexpr int           kDropsPerTarget = 2;
+    static constexpr int           kDropSettlesPerTarget = 2;
+    /// After a drop that worked, no hop toward a target for this long.
+    static constexpr std::uint64_t kDropStayMs = 8000;
+    /// No drop this soon after a map entry first seen.
+    static constexpr std::uint64_t kDropAfterEntryMs = 5000;
+    /// Drops off until the next start after this many presses in a row that
+    /// did nothing or jumped in place, or this many in a run.
+    static constexpr int           kDropFailsInRow = 3;
+    static constexpr int           kDropFailsPerRun = 5;
+    /// ↓ held longer than this -- the hold is 110 ms at most -- and drops are
+    /// off until the next start.
+    static constexpr std::uint32_t kDropHeldMaxMs = 180;
+    /// A map change this long after a press is the press's.
+    static constexpr std::uint64_t kPressWatchMs = 10000;
+    /// Passes in a row a drop's key-up stays owed before the hunter halts.
+    static constexpr int           kDropOwedPasses = 3;
+
     /// What it is doing, for the UI. Plain words -- this is the panel's
     /// explanation of why nothing is happening when nothing is happening.
     enum class State { Idle, NoPlayer, NoTargets, Approaching, Attacking, Unfocused,
@@ -557,6 +670,77 @@ public:
         GaveUp,         ///< kSpotMaxTries walks back in a row got nowhere: no more
     };
 
+    /// Why the target below is not dropped to (drop_rule): the first of its
+    /// rules that does not hold, in their order. None: it goes.
+    enum class DropWhy : std::uint8_t {
+        None,
+        Off,                ///< drop_down off
+        NoPackets,          ///< packet_positions not on
+        StayPut,            ///< Đứng yên một chỗ
+        Spot,               ///< the hunting spot on, but not in use: the character stands
+        Latched,            ///< off until the next start (DropOff)
+        KeysOwed,           ///< a drop's key-up has not gone out
+        KeyClash,           ///< the jump, left, right or attack key is Ctrl
+        NotWired,           ///< no map book or no veto: the command line's hunter
+        NotPacketTarget,    ///< the target is not the packets' (a screen plate)
+        LevelMonster,       ///< one to fight on the character's own level
+        NotBelow,           ///< not more than max(down(), drop_min_px) below
+        TooFarSide,         ///< more than drop_side_px across
+        NotKnown,           ///< the packets do not know where the character is, or are unsure
+        AfterEntry,         ///< a map entry under kDropAfterEntryMs ago
+        NotSettled,         ///< not standing, with the stop of its walk reported
+        InAir,              ///< a hop, or a drop, still in the air
+        TooSoon,            ///< the last press under kDropGapMs ago
+        StepJudge,          ///< a step back not judged yet
+        Walking,            ///< a direction key still down
+        MinuteCap,          ///< kDropsPerMinute presses in the last minute
+        TargetCap,          ///< kDropsPerTarget presses, or kDropSettlesPerTarget settles, for this monster
+        Held,               ///< a hold
+        Unfocused,          ///< the game not in front
+        Loot,               ///< a kill's pick-ups still owed
+        Veto,               ///< GoBot says no (set_drop_veto)
+        MapUnknown,         ///< no map file trusted for where the character is (MapTrust)
+        OffFloor,           ///< where it stands is on no floor of that file
+        Bottom,             ///< standing on solid ground: nothing to drop through
+        NoLanding,          ///< no floor below, or not the same one either side
+        ShortFall,          ///< the floor below is under kDropMinFallPx down
+        PastMonster,        ///< the fall lands below the target's floor
+        OutsideArea,        ///< with the spot: where it stands, lands or the target outside the area
+        Gate,               ///< a gate within drop_gate_px
+        NoDropHere,         ///< Ctrl + ↓ did not drop here before (GameMapBook::no_drop_near)
+    };
+    /// In the log's English.
+    static const char* drop_why_name(DropWhy w);
+
+    /// Why drops are off until the next start.
+    enum class DropOff : std::uint8_t {
+        None,
+        Fails,          ///< kDropFailsInRow presses in a row, or kDropFailsPerRun, did not drop
+        Rose,           ///< a press had the character rise: Ctrl + ↓ acts as a jump there
+        OffMap,         ///< a fall landed where the map file did not say
+        MapChanged,     ///< a press changed the map: the hunt stops (drop_stop)
+        HeldLong,       ///< ↓ was held over kDropHeldMaxMs
+        KeysStuck,      ///< a drop's key-up stayed owed: the hunt stops (drop_stop)
+    };
+    static const char* drop_off_name(DropOff o);
+
+    /// What came of a press.
+    enum class DropVerdict : std::uint8_t {
+        None,
+        Worked,         ///< landed on the floor the map file said
+        Nothing,        ///< no take-off and no landing lower in kDropJudgeMs
+        JumpInPlace,    ///< took off and came down where it stood
+        Rose,           ///< came down higher
+        OffMap,         ///< came down lower, not where the file said
+        Gate,           ///< the map changed within kPressWatchMs
+        Unknown,        ///< cut short, a hold, the game behind, the view or the packets lost
+    };
+
+    /// What GoBot's window is to do about the drop: stop hunting -- and with
+    /// MapChanged untick drop_down and save it. Read from any thread.
+    enum class DropStop : std::uint8_t { None, MapChanged, KeysStuck };
+    DropStop drop_stop() const { return drop_stop_.load(); }
+
     struct Status {
         State      state = State::Idle;
         Nameplate  target;
@@ -567,6 +751,14 @@ public:
         /// Gave up: out of reach too long, or -- with a style -- attacked for
         /// no_damage_ms without its bar going down.
         std::uint64_t targets_dropped = 0;
+        /// Of targets_dropped, those in reach at some look of the last
+        /// give_up_ms, and so picked straight back, never passed over: without
+        /// a style, every fight at every give_up_ms, as it always was -- all
+        /// 165 "given up" of the farm of 2026-11-03; with one, a target whose
+        /// clock ran out through a hold or the game behind. targets_dropped
+        /// less these is what was given up on for staying out of reach, or
+        /// for taking no damage.
+        std::uint64_t targets_repicked = 0;
 
         /// Steps back taken to keep the distance ("Giữ khoảng cách").
         std::uint64_t backsteps = 0;
@@ -626,6 +818,27 @@ public:
         /// nowhere in spot_give_up_ms), since this run's start.
         std::uint64_t returns = 0;
         std::uint64_t return_give_ups = 0;
+
+        /// "Nhảy xuống bậc dưới" (HunterConfig::drop_down): settling to press
+        /// Ctrl + ↓, or falling from it; the presses this run, and of them
+        /// those that landed where the map file said.
+        bool          dropping = false;
+        std::uint64_t drops = 0;
+        std::uint64_t drops_worked = 0;
+        /// Why the last target below was not dropped to, with the number that
+        /// goes with it -- a gate's distance across, how far below -- and
+        /// when, on the hunter's clock: 0 for none this run.
+        DropWhy       drop_wait = DropWhy::None;
+        int           drop_wait_px = 0;
+        std::uint64_t drop_wait_ms = 0;
+        /// Drops off until the next start, and why; with MapChanged or
+        /// KeysStuck the hunt is to stop (drop_stop).
+        DropOff       drop_off = DropOff::None;
+        bool          drop_map_changed = false;
+        bool          drop_keys_stuck = false;
+        /// The map drops go by: its file, how it came to be trusted, or why
+        /// none is (MapTrust::report). With drop_down off, as it was.
+        MapTrust::Report drop_map;
     };
     Status status() const;
 
@@ -720,13 +933,104 @@ public:
     /// refuse, nor one already finished. `me` null: where the character
     /// stands is not known, and only the last rule applies. `listed` is
     /// parallel to `mobs`. An index into `mobs`, or -1.
+    ///
+    /// A plate from the packets (Nameplate::slot 0 or more) is taken for one
+    /// to finish only once your id has been proven the hitter's
+    /// (Nameplate::actor_checked), and not while another player is hitting
+    /// it: its bar falls under anyone's blows. `wounded_picked`, when given,
+    /// is set when the most wounded was taken over the nearest.
+    ///
+    /// `below_first`: a drop could go now (drop_down on, not off for the run,
+    /// the map trusted, the spot in use if on) -- with none on the level, the
+    /// nearest from the packets more than max(down(), drop_min_px) below goes
+    /// before any other, one above nearer by the plates' measure among them
+    /// (the player's answer 1 of 2026-11-04).
     static int choose_target(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
-                             const Nameplate* me, const std::vector<Listed>& listed);
+                             const Nameplate* me, const std::vector<Listed>& listed,
+                             bool* wounded_picked = nullptr, bool below_first = false);
 
     /// Standing still: of those within reach of `me` now, the nearest along
     /// the ground -- the nearest on "Đánh trước" if any is. -1 for none.
     static int choose_in_reach(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
                                const Nameplate& me, const std::vector<Listed>& listed);
+
+    /// Where the nearest of `mobs` (nearest first) that may be attacked --
+    /// living, and refused by nothing -- stands against `me`'s level: +1
+    /// below it (dy over down()), -1 above it (-dy over up()), 0 on it or
+    /// with none at all. Counted at every fresh pick for the minute line.
+    static int nearest_off_level(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
+                                 const Nameplate& me, const std::vector<Listed>& listed);
+
+    /// Whether a living monster stands below `me`'s level (dy over down())
+    /// within reach across (|dx| up to reach): one a drop could go to. One
+    /// given up on a moment ago counts; not one the lists rule out, nor one
+    /// outside the hunting spot's area.
+    static bool below_in_reach(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
+                               const Nameplate& me, const std::vector<Listed>& listed);
+
+    /// Whether one of `mobs` stands on `me`'s level to be fought instead of
+    /// dropping to a target below: from the packets (slot 0 or more),
+    /// living, refused by nothing.
+    static bool level_monster(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                              const std::vector<Listed>& listed);
+
+    /// Everything a drop to the target below is judged by at one look
+    /// (drop_rule), laid out so a test can set any one of them.
+    struct DropFacts {
+        bool          press = false;            ///< at the press -- its items too -- not as a settle begins
+        std::uint64_t now = 0;                  ///< the hunter's clock
+        bool          spot_use = false;         ///< the hunting spot in use (not standing for want of a fix)
+        Spot          area;                     ///< and where it is
+        bool          latched = false;          ///< drops off until the next start
+        bool          owed = false;             ///< a drop's key-up not out
+        bool          wired = false;            ///< a map book and a veto
+        bool          packet_target = false;    ///< the target is the packets' own (slot 0 or more)
+        int           dx = 0, dy = 0;           ///< the target from the character, as the plates have it
+        float         target_wx = 0.0f;         ///< the target in the packets' world
+        float         target_wy = 0.0f;
+        bool          level_monster = false;    ///< one to fight on the level (level_monster)
+        WorldFix      fix;                      ///< where the packets put the character
+        std::uint64_t entry_ms = 0;             ///< when the hunter first saw this map entry
+        std::uint64_t settle_from_ms = 0;       ///< when the settle began
+        bool          walk_held = false;        ///< a walk was held as it began: its stop must be reported
+        bool          in_air = false;           ///< a hop's or a drop's
+        std::uint64_t last_press_ms = 0;        ///< 0 for none this run
+        bool          step_judge = false;       ///< a step back not judged yet
+        bool          left_held = false;
+        bool          right_held = false;
+        int           presses_minute = 0;       ///< in the last minute
+        int           presses_target = 0;       ///< for this monster
+        int           settles_target = 0;       ///< for this monster, let go of without a press
+        bool          held = false;             ///< a hold
+        bool          focused = true;
+        bool          loot_owed = false;
+        const char*   veto = nullptr;
+        /// The trusted map's file -- null: none trusted -- with its gates and
+        /// those learned, and whether a no-drop point is near where it stands.
+        std::shared_ptr<const GameMapBook::Page> page;
+        std::vector<MapGate> gates;
+        bool          no_drop_here = false;
+    };
+    /// What drop_rule made of them.
+    struct DropCall {
+        DropWhy why = DropWhy::None;
+        int     px = 0;             ///< with the reason: a gate's distance, how far below or across, ...
+        int     x0 = 0, y0 = 0;     ///< where the character was judged to stand, world pixels
+        int     stand_y = -1;       ///< the floor under it, -1 not known
+        int     land_y = 0;         ///< the floor the file says the fall lands on
+        bool    direct = false;     ///< the target's own floor, not one between
+        int     gate_px = -1;       ///< the nearest gate across in the fall's band; -1 none
+        bool ok() const { return why == DropWhy::None; }
+    };
+    /// The drop plan's §3.2, in its order, with the player's answers of
+    /// 2026-11-04: the first rule that does not hold. Pure: facts in, a
+    /// reason out. `f.press` checks the items a press needs over those a
+    /// settle begins with -- the character settled, its stop reported, no
+    /// direction key down, standing on a floor of the file, the landing
+    /// read at kDropMarginPressPx either side -- and kDropPressSlackPx more
+    /// across. Where it stands is the fix worked out to now as a settle
+    /// begins, and the last report's own at the press.
+    static DropCall drop_rule(const HunterConfig& cfg, const DropFacts& f);
 
 private:
     void loop();
@@ -765,8 +1069,14 @@ private:
     /// toward the spot either.
     void hop(const HunterConfig& cfg, int dy, std::uint64_t now, WalkFor what);
     /// Whether the last jump the hunter pressed may still have the character
-    /// in the air at `now`: kJumpAirMs from it.
-    bool in_air(std::uint64_t now) const { return last_hop_ms_ != 0 && now - last_hop_ms_ < kJumpAirMs; }
+    /// in the air at `now`: kJumpAirMs from it -- or its last drop, until a
+    /// landing is reported or kDropFallMaxMs from ↓ going down.
+    bool in_air(std::uint64_t now) const {
+        return (last_hop_ms_ != 0 && now - last_hop_ms_ < kJumpAirMs) || drop_in_air(now);
+    }
+    bool drop_in_air(std::uint64_t now) const {
+        return drop_t_down_ != 0 && !drop_landed_ && (now < drop_t_down_ || now - drop_t_down_ < kDropFallMaxMs);
+    }
 
     /// One press of the pick-up key, if the input is free. True if it went.
     bool press_loot(const HunterConfig& cfg);
@@ -811,6 +1121,18 @@ private:
     /// The fight is over -- a kill, a give-up, a list, another target -- and
     /// said in the log with the distances it was fought at.
     void end_fight(const char* why);
+    /// `n` is the target from here on: where it stands, and -- a plate from
+    /// the packets -- its slot and generation, which the next look finds it
+    /// by (find_target).
+    void aim_at(const Nameplate& n);
+    /// Where among `mobs` the target is now, -1 when it is not there: by its
+    /// slot and generation when it has a slot and the plates carry slots --
+    /// within kSlotSamePx of where it was, `slack` more -- and otherwise the
+    /// plate nearest where it was, within kSameTargetPx and `slack`, as it
+    /// always was. `respawned`: its slot was there with another generation.
+    /// `nearest`: the plate nearest where it was, whatever the rule.
+    int find_target(const std::vector<Nameplate>& mobs, int slack, bool* respawned = nullptr,
+                    int* nearest = nullptr) const;
     /// A look with no target to be had -- no monster in view, or none that
     /// may be attacked: the fight goes on, unless its monster has not been
     /// seen for kPlayerMemoryMs. A plate drops out for a look or two all the
@@ -820,7 +1142,8 @@ private:
     /// An attack went out with the target `dx` to the side.
     void note_attack(int dx);
     /// With a style: whether `target` has been attacked for no_damage_ms
-    /// without its bar going down.
+    /// without its bar going down -- or, on a plate from the packets, without
+    /// a blow of yours on it (Nameplate::hurt_ms) either.
     bool no_damage(const HunterConfig& cfg, const Nameplate& target, std::uint64_t now);
     /// The step back still to be judged follows `target` as the fight does,
     /// by where it is; one somewhere else, or after kPlayerMemoryMs unseen,
@@ -844,6 +1167,13 @@ private:
     /// Which way the character faces, the loot still owed, engaged() and
     /// every count stay.
     void forget_positions();
+    /// The minute line's counts for monsters off the character's level: a
+    /// fresh pick taken up (nearest_off_level), and a pass with nothing to
+    /// attack in reach (below_in_reach), timed pass to pass as walk_run_ms_.
+    void note_pick(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                   const std::vector<Listed>& listed);
+    void note_wait(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                   const std::vector<Listed>& listed, std::uint64_t now);
     /// Once a minute while hunting, one line of how the fights went.
     void minute_log(const HunterConfig& cfg, std::uint64_t now);
     /// Before the turn to a target in reach, with the packets steering
@@ -888,6 +1218,64 @@ private:
     /// The spot's numbers into status_.
     void publish_spot();
 
+    // ---- the drop (HunterConfig::drop_down)
+
+    /// drop_down on, the packets steering, not standing still: what asks
+    /// anything new of the eyes.
+    static bool drop_wanted(const HunterConfig& cfg);
+    /// Once a pass, before a hold or the focus is looked at, with drops
+    /// wanted or a press of the last kPressWatchMs: the keys a drop still
+    /// owes sent again, where the packets put the character (drop_fix_), the
+    /// map entry's age, a map change since a press (Gate), and the map drops
+    /// go by (trust_).
+    void drop_watch(const HunterConfig& cfg, std::uint64_t now);
+    /// Once a pass, after minute_log: a fall judged, and a settle that
+    /// drop_toward did not renew at the last pass let go of. No key.
+    void drop_follow(const HunterConfig& cfg, std::uint64_t now);
+    /// In the walk branch, before walk(): a target below, dropped to when
+    /// drop_rule says -- settled first, then Ctrl + ↓. True while it settles,
+    /// presses or falls: the pass walks no further.
+    bool drop_toward(const HunterConfig& cfg, const Nameplate& target, const Nameplate& me,
+                     const std::vector<Nameplate>& mobs, const std::vector<Listed>& listed, int dx, int dy,
+                     std::uint64_t now);
+    /// The facts for drop_rule, at this look.
+    DropFacts drop_facts(const HunterConfig& cfg, const Nameplate& target, const Nameplate& me,
+                         const std::vector<Nameplate>& mobs, const std::vector<Listed>& listed, int dx, int dy,
+                         std::uint64_t now, bool press);
+    /// The key, the settle over: false when it was given up on and the pass
+    /// may walk.
+    bool press_drop(const HunterConfig& cfg, const DropCall& call, const Nameplate& target, int dx, int dy,
+                    std::uint64_t now);
+    /// A settle over without a press; with `backoff`, none again for
+    /// kDropSettleBackoffMs. Counted against kDropSettlesPerTarget, and the
+    /// give-up clock the settle held still given back what it had, with the
+    /// settle's time not counted.
+    void end_settle(const char* why, bool backoff, std::uint64_t now);
+    /// A hold, the game behind, a view change, a log in: a settle is let go
+    /// of, a fall is Unknown. The press record and the in-air guard stay.
+    void drop_hold(const char* why);
+    /// The fall judged `v` -- landed at `rx`, `ry` -- with what it learns and
+    /// counts.
+    void end_fall(const HunterConfig& cfg, DropVerdict v, std::uint64_t now, int rx, int ry, const char* why);
+    /// A map change within kPressWatchMs of a press, whatever was judged
+    /// before: undone, both ends learned as gates, drops off and the hunter
+    /// halted for GoBot's window to stop the hunt.
+    void drop_gate(std::uint64_t now);
+    /// Drops off until the next start.
+    void latch_drops(DropOff why);
+    /// Why the target `dy` below is not dropped to: into status_, and said in
+    /// the log at each change of reason -- at INFO once per target for what
+    /// the player can do something about, DEBUG otherwise.
+    void drop_refused(const HunterConfig& cfg, const DropCall& call, const Nameplate& target, int dy,
+                      std::uint64_t now);
+    /// The presses of the last minute, and for the monster `slot`, `gen`; its
+    /// settles let go of without a press.
+    int drop_presses_minute(std::uint64_t now);
+    int drop_presses_for(int slot, std::uint32_t gen) const;
+    int drop_settles_for(int slot, std::uint32_t gen) const;
+    /// The minute line's part for drops: "" with no press this minute.
+    std::string drop_minute_text() const;
+
     InputManager&         input_;
     ExecutionCoordinator& coord_;
     MobDetector&          detector_;
@@ -906,8 +1294,13 @@ private:
 
     /// Which plate we are chasing, remembered between frames by position so a
     /// jitter in the detector does not make the bot change its mind every
-    /// tick and stand still vibrating.
+    /// tick and stand still vibrating. A plate from the packets is remembered
+    /// by its slot and generation as well, -1 and 0 for the screen's: two
+    /// monsters crossing are not swapped, and a respawn where the target died
+    /// is not taken for it (aim_at, find_target).
     int           target_x_ = 0, target_y_ = 0;
+    int           target_slot_ = -1;
+    std::uint32_t target_gen_ = 0;
     bool          have_target_ = false;
     std::uint64_t target_since_ms_ = 0;
     /// The last look the target was within reach, or its pick, or a look the
@@ -991,6 +1384,8 @@ private:
     struct FightLog {
         bool             on = false;
         int              x = 0, y = 0;          ///< where the target was last seen
+        int              slot = -1;             ///< and which it was, from the packets (aim_at)
+        std::uint32_t    gen = 0;
         std::uint64_t    seen_ms = 0;
         int              keep_away = 0;         ///< keep_away_px when it began
         int              attacks = 0;
@@ -1017,7 +1412,11 @@ private:
         std::uint64_t quiet_seen_ms = 0;
         int           attacks = 0;
         int           x = 0, y = 0;         ///< where the monster was last seen
+        int           slot = -1;            ///< and which it was, from the packets
+        std::uint32_t gen = 0;
         std::uint64_t seen_ms = 0;
+        /// The last blow of yours on it the packets had said (Nameplate::hurt_ms).
+        std::uint64_t hurt_seen_ms = 0;
     };
     DamageWatch watch_;
 
@@ -1029,6 +1428,8 @@ private:
     /// MobDetector::kPlayerMemoryMs, and the step goes unjudged.
     struct BackSteps {
         int           x = 0, y = 0;         ///< where the monster was last seen
+        int           slot = -1;            ///< and which it was, from the packets
+        std::uint32_t gen = 0;
         std::uint64_t seen_ms = 0;
         bool          judge = false;
         std::uint64_t judge_from = 0;
@@ -1087,6 +1488,27 @@ private:
     /// of those, the ones for a key the game never took (kFacingMissedMs).
     int           minute_packet_facings_ = 0;
     int           minute_missed_keys_ = 0;
+    /// The most wounded taken over the nearest (choose_target); and, with the
+    /// packets' plates, the target kept by its slot, the looks at which the
+    /// plate nearest where it was was another monster (a swap refused), and
+    /// those at which its slot held a new generation (a respawn, not it).
+    int           minute_wounded_ = 0;
+    int           minute_slot_kept_ = 0;
+    int           minute_swaps_refused_ = 0;
+    int           minute_new_gen_ = 0;
+    std::uint64_t minute_repicked_ = 0;     ///< targets_repicked when the minute began
+    /// Monsters off the character's level, for the drop-down to come (the
+    /// farm of 2026-11-03 could not tell): the fresh picks taken up, and of
+    /// them those whose nearest monster stood below the level band or above
+    /// it (nearest_off_level); and the time spent with nothing in reach while
+    /// one stood below within reach across (below_in_reach), the pass it was
+    /// last seen at and when.
+    int           minute_picks_ = 0;
+    int           minute_nearest_below_ = 0;
+    int           minute_nearest_above_ = 0;
+    std::uint64_t minute_below_wait_ms_ = 0;
+    std::uint64_t below_wait_pass_ = 0;
+    std::uint64_t below_wait_at_ms_ = 0;
 
     /// The hunting spot, and what the other threads ask of it: under mutex_.
     Spot spot_;
@@ -1129,6 +1551,105 @@ private:
     int           return_strikes_ = 0;
     std::uint64_t return_retry_ms_ = 0;
     bool          said_too_high_ = false;
+
+    // ---- the drop (HunterConfig::drop_down): the hunter's own thread's
+
+    /// The game's map files and GoBot's own say against a drop: both set, or
+    /// no drop (set_map_book, set_drop_veto). Which map the character is on,
+    /// and whether its file is gone by.
+    GameMapBook*                 book_ = nullptr;
+    std::function<const char*()> drop_veto_;
+    MapTrust                     trust_;
+    /// This pass's fix for the drop -- the spot's stays fix_ -- and whether
+    /// the eyes gave one; the map entry it is in, and since when on the
+    /// hunter's clock: the first look of it, at a start too.
+    WorldFix      drop_fix_;
+    bool          drop_fix_on_ = false;
+    bool          drop_entry_on_ = false;
+    std::uint32_t drop_entry_epoch_ = 0;
+    std::uint64_t drop_entry_ms_ = 0;
+
+    /// A drop under way: settling to press -- since when, whether a walk was
+    /// held as it began, the pass that last renewed it, since when the token
+    /// was refused, and the give-up clock as it found it -- or falling: when
+    /// ↓ went down, the take-offs then, where it stood, where the file said it
+    /// lands, and the target.
+    enum class DropPhase : std::uint8_t { Idle, Settle, Fall };
+    struct DropState {
+        DropPhase     phase = DropPhase::Idle;
+        std::uint64_t settle_from_ms = 0;
+        std::uint64_t since0 = 0, reach0 = 0;   ///< target_since_ms_, reach_ms_ as the settle began
+        bool          walk_held = false;
+        std::uint64_t renewed_pass = 0;
+        std::uint64_t token_from_ms = 0;
+        int           slot = -1;
+        std::uint32_t gen = 0;
+        std::uint64_t down_ms = 0;
+        bool          takeoffs_known = false;
+        std::uint64_t takeoffs0 = 0;
+        bool          took_off = false;
+        int           x0 = 0, y0 = 0, land_y = 0;
+        std::string   stem;
+    };
+    DropState drop_;
+    /// A press, watched for kPressWatchMs for a map change whatever was
+    /// judged of it: kept apart from drop_ -- forget_positions, a start and
+    /// every verdict leave it -- with what its verdict learned and counted,
+    /// for a map change to undo.
+    struct PressRecord {
+        bool          open = false;
+        std::uint64_t down_ms = 0;
+        std::uint32_t epoch0 = 0;
+        int           x0 = 0, y0 = 0;
+        std::string   stem;
+        DropVerdict   verdict = DropVerdict::None;
+        bool          no_drop = false;
+        bool          failed = false;
+        std::uint64_t minute_from = 0;      ///< the minute its verdict was counted in
+    };
+    PressRecord press_;
+    /// The presses of the last minute, and those for each monster this run --
+    /// with its settles let go of without a press.
+    struct TargetPresses {
+        int           slot = -1;
+        std::uint32_t gen = 0;
+        int           n = 0;
+        int           settles = 0;
+    };
+    std::vector<std::uint64_t> drop_presses_;
+    std::vector<TargetPresses> drop_targets_;
+    std::uint64_t last_press_ms_ = 0;
+    /// When the last ↓ went down, on the hunter's clock, and whether a
+    /// landing since was reported: in_air.
+    std::uint64_t drop_t_down_ = 0;
+    bool          drop_landed_ = false;
+    std::uint64_t last_drop_worked_ms_ = 0;
+    std::uint64_t settle_backoff_ms_ = 0;   ///< no settle begun before this
+    int           drop_fails_row_ = 0;
+    int           drop_fails_run_ = 0;
+    DropOff       drop_latch_ = DropOff::None;
+    /// Halted for GoBot's window to stop the hunt: a map change, or a key-up
+    /// still owed (drop_stop_). Every pass lets go of the moves and returns.
+    bool          drop_halt_ = false;
+    int           owed_passes_ = 0;
+    /// A log in since the last pass (suspend_spot): under mutex_.
+    bool          drop_suspend_asked_ = false;
+    std::atomic<DropStop> drop_stop_{DropStop::None};
+    /// The refusal said for the target: the last reason, and those said at
+    /// INFO (a bit for each DropWhy).
+    int           drop_said_slot_ = -2;
+    std::uint32_t drop_said_gen_ = 0;
+    DropWhy       drop_said_why_ = DropWhy::None;
+    std::uint64_t drop_said_info_ = 0;
+    /// The minute line's: presses, and what came of them.
+    int           minute_drops_ = 0;
+    int           minute_drop_worked_ = 0;
+    int           minute_drop_nothing_ = 0;
+    int           minute_drop_jump_ = 0;
+    int           minute_drop_rose_ = 0;
+    int           minute_drop_off_map_ = 0;
+    int           minute_drop_gate_ = 0;
+    int           minute_drop_unknown_ = 0;
 };
 
 } // namespace gobot

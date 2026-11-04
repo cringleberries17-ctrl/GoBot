@@ -7,9 +7,11 @@
 // pretend and writes down every press, and the clock is the test's own.
 
 #include "gobot/execution_coordinator.hpp"
+#include "gobot/glyph_font.hpp"
 #include "gobot/hotkeys.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/jump_check.hpp"
+#include "gobot/logger.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/navigator.hpp"
 #include "test_support.hpp"
@@ -17,12 +19,16 @@
 #include <windows.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 using namespace gobot;
@@ -57,16 +63,7 @@ struct JumpRig {
 
     JumpRig() {
         JumpCheck::Eyes eyes;
-        eyes.player = [this](Nameplate& out, bool* fresh) {
-            if (fresh) *fresh = seen;
-            if (away_after_reads > 0 && ++reads >= away_after_reads) in_front = false;
-            const int up = pressed_at != 0 ? rise(t - pressed_at) : 0;
-            out.bar = ScreenRect{ 620, 400 - up, 40, 3 };
-            out.plate = ScreenRect{ 610, 386 - up, 60, 12 };
-            out.is_self = true;
-            // Remembered where it was, as the detector does, when not seen.
-            return true;
-        };
+        eyes.player = plate_eye();
         check_.set_eyes(eyes);
         JumpCheck::Hands hands;
         hands.focus = [this] { return in_front; };
@@ -84,6 +81,29 @@ struct JumpRig {
         check_.set_clock(clock);
     }
     JumpCheck::Result run(std::uint32_t key = VK_UP) { return check_.run(key); }
+
+    /// The character's plate, where `rise` has it.
+    std::function<bool(Nameplate&, bool*)> plate_eye() {
+        return [this](Nameplate& out, bool* fresh) {
+            if (fresh) *fresh = seen;
+            if (away_after_reads > 0 && ++reads >= away_after_reads) in_front = false;
+            const int up = pressed_at != 0 ? rise(t - pressed_at) : 0;
+            out.bar = ScreenRect{ 620, 400 - up, 40, 3 };
+            out.plate = ScreenRect{ 610, 386 - up, 60, 12 };
+            out.is_self = true;
+            // Remembered where it was, as the detector does, when not seen.
+            return true;
+        };
+    }
+
+    /// The packets' count of your take-offs as well, asked by the check:
+    /// `count` gives it, or nothing when the packets cannot tell.
+    void count_takeoffs(std::function<std::optional<std::uint64_t>()> count) {
+        JumpCheck::Eyes eyes;
+        eyes.player = plate_eye();
+        eyes.takeoffs = std::move(count);
+        check_.set_eyes(eyes);
+    }
 };
 
 /// A jump: up to `peak` px at 300 ms, and down again by 600.
@@ -296,6 +316,139 @@ void test_sightings() {
     check(start_quiet && found == 1 && again == 0 && gone == 0 && back == 0 && quiet == 0 && lost == -1 &&
               still == 0 && refound == 1,
           "found: said once; a 1.2-s dropout: nothing; gone past 1.5 s: said once; found again: said once");
+
+    // The grace counted in looks: as many as 1.5 s is at 140 ms, at the wait
+    // in use -- a resting detector's 600 ms waits 6 s, never under 1.5 s.
+    check(MobDetector::sightings_grace_ms(140) == 1500 && MobDetector::sightings_grace_ms(600) == 6000 &&
+              MobDetector::sightings_grace_ms(50) == 1500 && MobDetector::sightings_grace_ms(0) == 1500,
+          "the grace: 1500 ms at 140 ms and at 50, 6000 at the resting 600; a wait of 0 counts as 140");
+    // A resting detector's plate missed at every look, one every 620 ms: no
+    // "Cannot find" through 9 looks (5.58 s), said at the 10th (6.2 s).
+    {
+        MobDetector::PlayerSightings r;
+        const std::uint64_t g600 = MobDetector::sightings_grace_ms(600);
+        const int first = r.note(true, t, g600);
+        int quiet600 = 0;
+        for (std::uint64_t k = 0; k <= 9; ++k) quiet600 += r.note(false, t + 100 + 620 * k, g600) == 0 ? 0 : 1;
+        const int lost600 = r.note(false, t + 100 + 6200, g600);
+        check(first == 1 && quiet600 == 0 && lost600 == -1,
+              "resting at 600 ms, the plate missed every 620 ms: nothing through 5.58 s, \"Cannot find\" at the "
+              "first look past 6 s");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    {
+        std::ifstream in(std::string(GOBOT_SOURCE_DIR) + "/src/mob_detector.cpp", std::ios::binary);
+        const std::string md((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::size_t from = md.find("void MobDetector::find_character(");
+        const std::size_t end = from == std::string::npos ? std::string::npos : md.find("\n}", from);
+        const std::string fc = end == std::string::npos ? std::string() : md.substr(from, end - from);
+        const std::size_t warn = fc.find("Cannot find \\\"%s\\\" on screen for over %.1f s");
+        check(fc.find("const std::uint64_t grace = sightings_grace_ms(period_ms_.load());") != std::string::npos &&
+                  fc.find("sightings_.note(got, now_ms(), grace)") != std::string::npos &&
+                  warn != std::string::npos &&
+                  fc.find("static_cast<double>(grace) / 1000.0", warn) != std::string::npos &&
+                  fc.find("kPlayerMemoryMs) / 1000.0") == std::string::npos,
+              "find_character: \"Cannot find\" waits sightings_grace_ms at the detector's wait, and says that grace");
+        // The same words at Info while the packets steer, and the warning
+        // otherwise; told so by GoBot's window with the wait it sets.
+        const std::size_t steer = fc.find("if (say < 0 && !packets_steer_.load())");
+        const std::size_t info =
+            fc.find("GB_INFO(\"Cannot find \\\"%s\\\" on screen for over %.1f s -- the packets steer");
+        std::ifstream pin(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/packets_detector.cpp", std::ios::binary);
+        const std::string pd((std::istreambuf_iterator<char>(pin)), std::istreambuf_iterator<char>());
+        check(steer != std::string::npos && warn != std::string::npos && info != std::string::npos && steer < warn &&
+                  warn < info &&
+                  pd.find("detector_.set_packets_steer(p.hunting && p.source == PacketEyes::Source::Packets && "
+                          "p.why == PacketWhy::InUse);") != std::string::npos,
+              "find_character warns only while the packets do not steer, and says it at Info while they do -- set at "
+              "every pace tick from the hunt, the source and its health");
+    }
+#endif
+}
+
+/// "Cannot find" while the packets steer the hunt: the same words, at Info
+/// and not as a warning -- the hunt takes where you are from the packets
+/// then, and both times it was said in the farm of 2026-11-03 the name was
+/// right. The real detector's thread on frames the test draws (set_grab, a
+/// window that is only a number), your name in the game's own glyphs.
+void test_unfound_while_packets_steer() {
+    section("Your character not found while the packets steer: said, not warned of");
+
+    GlyphFont font;
+    const std::string dir = GlyphFont::default_dir();
+    Frame name;
+    const char* const who = "ThanhAmCoc";
+    if (dir.empty() || !font.load(dir) || !font.render_line(who, name)) {
+        skip("no glyph set installed -- no name to draw\n");
+        return;
+    }
+    Frame blank;
+    blank.width = 1024;
+    blank.height = 768;
+    blank.pixels.resize(static_cast<std::size_t>(blank.width) * blank.height * 4);
+    for (std::size_t i = 0; i < blank.pixels.size(); i += 4) {
+        blank.pixels[i] = 190;          // the sky, BGRA
+        blank.pixels[i + 1] = 150;
+        blank.pixels[i + 2] = 120;
+        blank.pixels[i + 3] = 255;
+    }
+    Frame named = blank;
+    for (int y = 0; y < name.height; ++y)
+        for (int x = 0; x < name.width; ++x) {
+            const std::size_t from = (static_cast<std::size_t>(y) * name.width + x) * 4;
+            const std::size_t to = (static_cast<std::size_t>(560 + y) * named.width + 180 + x) * 4;
+            for (int c = 0; c < 4; ++c) named.pixels[to + c] = name.pixels[from + c];
+        }
+
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_level(LogLevel::Info);
+    log.set_ring_capacity(400);
+    log.clear_ring();
+    const auto said = [&log](const char* text) {
+        std::vector<LogLine> out;
+        for (const LogLine& l : log.ring())
+            if (l.text.find(text) != std::string::npos) out.push_back(l);
+        return out;
+    };
+    const auto wait_for = [](const std::function<bool()>& cond) {
+        for (int i = 0; i < 250 && !cond(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return cond();
+    };
+
+    std::atomic<bool> show{ true };     // before the detector, whose thread reads it
+    MobDetector d;
+    d.set_grab([&](void*, Frame& out) {
+        out = show.load() ? named : blank;
+        return true;
+    });
+    d.set_tuning(DetectorTuning::defaults());
+    d.set_font(&font);
+    d.set_character_name(who);
+    d.set_period_ms(MobDetector::kMinPeriodMs);
+    d.set_target_window(reinterpret_cast<void*>(std::uintptr_t{ 0x3000 }));
+    d.start();
+    const bool found = wait_for([&] { return said("Found your character").size() == 1; });
+    d.set_packets_steer(true);
+    show.store(false);
+    const bool lost = wait_for([&] { return said("Cannot find \"ThanhAmCoc\"").size() == 1; });
+    show.store(true);
+    const bool back = wait_for([&] { return said("Found your character").size() == 2; });
+    d.set_packets_steer(false);
+    show.store(false);
+    const bool lost_again = wait_for([&] { return said("Cannot find \"ThanhAmCoc\"").size() == 2; });
+    d.stop();
+    const std::vector<LogLine> lines = said("Cannot find \"ThanhAmCoc\" on screen for over 1.5 s");
+    log.set_level(was);
+    log.set_ring_capacity(0);
+
+    check(found && lost && back && lost_again && lines.size() == 2,
+          "found, lost, found again, lost again: \"Cannot find\" said twice, after the 1.5-s grace both times");
+    check(lines.size() == 2 && lines[0].level == LogLevel::Info &&
+              lines[0].text.find("-- the packets steer, so the hunt does not need it") != std::string::npos &&
+              lines[1].level == LogLevel::Warn &&
+              lines[1].text.find("-- check it against the name the game writes under your feet") != std::string::npos,
+          "while the packets steer, at Info and saying so; with them not steering, the warning as before");
 }
 
 /// A file of the test's own, in the temp folder, holding `text`.
@@ -349,6 +502,124 @@ void test_walk_key() {
     DeleteFileA(bare.c_str());
 }
 
+/// Thử by the packets (the packets plan, item M): your client sends an 0x002A
+/// as the character leaves the ground, and while the packets can tell, how
+/// many went out after the press decides -- on a map where the camera follows
+/// a jump, the plate hardly moves.
+void test_jump_by_packets() {
+    section("Phím nhảy, Thử: by your client's own take-offs, whenever the packets can tell");
+
+    // The packets' running count of take-offs: 5 before the press, `after`
+    // once the key has gone out.
+    const auto counted = [](JumpRig& rig, std::uint64_t after) {
+        rig.count_takeoffs([&rig, after]() -> std::optional<std::uint64_t> {
+            return rig.pressed_at != 0 ? after : std::uint64_t{ 5 };
+        });
+    };
+    {
+        // A take-off went out, and the camera followed the jump: the plate
+        // never moved.
+        JumpRig rig;
+        counted(rig, 6);
+        const JumpCheck::Result r = rig.run();
+        const std::string said = JumpCheck::said_vi(r, "↑");
+        check(r.outcome == JumpCheck::Outcome::Jumped && r.by_packets && r.takeoffs == 1 && r.rose_px == 0 &&
+                  r.reads >= JumpCheck::kStillReads && rig.presses.size() == 1 &&
+                  said.find("đã nhảy (theo gói tin)") != std::string::npos,
+              "take-offs 5 -> 6 and the plate still (the camera followed): jumped, by the packets, one press -- " +
+                  said);
+    }
+    {
+        // None went out, while the plate rose 110 px.
+        JumpRig rig;
+        rig.rise = [](std::uint64_t ms) { return jump_curve(ms, 110); };
+        counted(rig, 5);
+        const JumpCheck::Result r = rig.run();
+        const std::string said = JumpCheck::said_vi(r, "↑");
+        check(r.outcome == JumpCheck::Outcome::NoJump && r.by_packets && r.takeoffs == 0 && r.rose_px >= 100 &&
+                  rig.presses.size() == 1 && said.find("không nhảy (theo gói tin)") != std::string::npos,
+              "take-offs 5 -> 5: no jump, by the packets, whatever the plate does (it rose " +
+                  std::to_string(r.rose_px) + " px) -- " + said);
+    }
+    {
+        // The character's plate not seen at all: the packets still tell.
+        JumpRig rig;
+        rig.seen = false;
+        counted(rig, 7);
+        const JumpCheck::Result r = rig.run();
+        check(r.outcome == JumpCheck::Outcome::Jumped && r.by_packets && r.takeoffs == 2 && r.reads == 0 &&
+                  rig.presses.size() == 1,
+              "the plate not seen, two take-offs after the press: jumped by the packets, not 'character not seen'");
+    }
+    {
+        // The packets cannot tell: the plate decides, as it always has.
+        JumpRig up, still;
+        up.rise = [](std::uint64_t ms) { return jump_curve(ms, 110); };
+        up.count_takeoffs([] { return std::optional<std::uint64_t>(); });
+        still.count_takeoffs([] { return std::optional<std::uint64_t>(); });
+        const JumpCheck::Result a = up.run(), b = still.run();
+        check(a.outcome == JumpCheck::Outcome::Jumped && !a.by_packets && a.rose_px >= 100 &&
+                  b.outcome == JumpCheck::Outcome::NoJump && !b.by_packets &&
+                  JumpCheck::said_vi(a, "↑").find("cao khoảng") != std::string::npos,
+              "nothing from the packets: by the plate, unchanged -- jumped at 110 px, no jump when it stays");
+    }
+    {
+        // Able to tell before the press and not after it, or a count lower
+        // after it -- a capture started afresh meanwhile: the plate decides.
+        JumpRig lost, fell;
+        lost.rise = [](std::uint64_t ms) { return jump_curve(ms, 110); };
+        lost.count_takeoffs([&lost]() -> std::optional<std::uint64_t> {
+            if (lost.pressed_at != 0) return std::nullopt;
+            return std::uint64_t{ 5 };
+        });
+        counted(fell, 0);
+        const JumpCheck::Result a = lost.run(), b = fell.run();
+        check(a.outcome == JumpCheck::Outcome::Jumped && !a.by_packets && b.outcome == JumpCheck::Outcome::NoJump &&
+                  !b.by_packets,
+              "the packets able to tell before the press but not after it, or their count lower after it: the "
+              "plate decides");
+    }
+    {
+        // F12 or DỪNG at the first look after the press: the watch cut short,
+        // the take-off's frame perhaps not in yet.
+        const auto stopped_after_press = [](JumpRig& rig, std::atomic<bool>& stop) {
+            JumpCheck::Clock clock;
+            clock.now_ms = [&rig] { return rig.t; };
+            clock.sleep_ms = [&rig, &stop](std::uint32_t ms) {
+                rig.t += ms;
+                if (rig.pressed_at != 0) stop = true;
+            };
+            rig.check_.set_clock(clock);
+            return rig.check_.run(VK_UP, &stop);
+        };
+        JumpRig none, one;
+        counted(none, 5);
+        counted(one, 6);
+        std::atomic<bool> stop_none{ false }, stop_one{ false };
+        const JumpCheck::Result a = stopped_after_press(none, stop_none);
+        const JumpCheck::Result b = stopped_after_press(one, stop_one);
+        check(a.outcome != JumpCheck::Outcome::NoJump && !a.by_packets && a.takeoffs == 0 &&
+                  none.presses.size() == 1 && b.outcome == JumpCheck::Outcome::Jumped && b.by_packets &&
+                  b.takeoffs == 1,
+              "the watch stopped right after the press: no take-off counted yet is no proof of no jump -- the plate "
+              "decides (" + std::string(JumpCheck::outcome_name(a.outcome)) + "); one counted already is a jump, "
+              "by the packets");
+    }
+    {
+        // A hold on: nothing pressed, and nothing asked of the packets.
+        JumpRig rig;
+        int asked = 0;
+        rig.count_takeoffs([&asked]() -> std::optional<std::uint64_t> {
+            ++asked;
+            return std::uint64_t{ 5 };
+        });
+        rig.coord.engage_critical("trash cleaning");
+        const JumpCheck::Result r = rig.run();
+        check(r.outcome == JumpCheck::Outcome::Held && rig.presses.empty() && !r.by_packets && asked == 0,
+              "a hold on: nothing pressed, and the packets not asked");
+    }
+}
+
 } // namespace
 
 void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -358,5 +629,7 @@ void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(co
     test_jump_advice();
     test_never_down();
     test_sightings();
+    test_unfound_while_packets_steer();
     test_walk_key();
+    test_jump_by_packets();
 }

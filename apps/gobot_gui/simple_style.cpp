@@ -135,7 +135,7 @@ void GuiApp::simple_jump_box() {
     else if (keeper_entering())            why = "Đang vào game — thử lại sau.";
     else if (hunt_config_.jump_key == 0)   why = "Chưa đặt phím nhảy.";
     else if (InputManager::never_pressed(hunt_config_.jump_key))
-        why = "GoBot không bấm ↓ (trên cửa, ↓ đưa nhân vật sang bản đồ khác). Đặt phím nhảy khác.";
+        why = "GoBot không bấm ↓ một mình (trên cửa, ↓ đưa nhân vật sang bản đồ khác). Đặt phím nhảy khác.";
     else if (coord_.critical_active())
         why = "Bot đang tạm dừng (" + coord_.critical_reason() + ") — thử lại sau.";
     ImGui::BeginDisabled(!why.empty());
@@ -230,6 +230,134 @@ void GuiApp::simple_keep_distance_tick() {
                           "ngược lại mới lùi tiếp. Không lùi khi Đứng yên một chỗ.")
                              .c_str());
     ImGui::SetItemTooltip("%s", tip.c_str());
+}
+
+// --------------------------------------------- "Nhảy xuống bậc dưới"
+
+std::string GuiApp::simple_drop_refusal_vi() {
+    // The player's answer 7: never standing still. And only with the packets
+    // steering, where the drop's every rule comes from. The hunter refuses
+    // the same at run time (Hunter::drop_rule), whatever this shows.
+    if (hunt_config_.stay_put) return "Không nhảy xuống khi Đứng yên một chỗ: bỏ dấu Đứng yên trước.";
+    if (hunt_config_.packet_positions != PacketPositions::On) return "Cần dấu Vị trí từ gói tin.";
+    // A key of the hunter's on Ctrl would be pressed with the drop's ↓; one
+    // of GoBot's own on Ctrl or ↓ would read the drop's press as the player's.
+    const auto ctrl = [](std::uint32_t vk, bool down) {
+        const std::uint32_t low = vk & 0xFFu;
+        return vk != 0 && (low == 0x11u || low == 0xA2u || low == 0xA3u || (down && low == 0x28u));
+    };
+    const struct {
+        std::uint32_t vk;
+        bool          own;
+        const char*   what;
+    } keys[] = {
+        { hunt_config_.jump_key, false, "nhảy" },
+        { hunt_config_.left_key, false, "đi sang trái" },
+        { hunt_config_.right_key, false, "đi sang phải" },
+        { hunt_config_.attack_key, false, "đánh" },
+        { macro_config_.toggle_key, true, "bật/tắt bot" },
+        { macro_config_.panic_key, true, "dừng ngay" },
+        { hunt_config_.toggle_key, true, "bật/tắt đánh quái" },
+        { hotkeys_.trash_now, true, "dọn túi ngay" },
+        { hotkeys_.login_now, true, "vào game ngay" },
+    };
+    for (const auto& k : keys)
+        if (ctrl(k.vk, k.own))
+            return std::string("Phím ") + k.what + " đang là " + ((k.vk & 0xFFu) == 0x28u ? "↓" : "Ctrl") +
+                   ": đổi phím khác trước.";
+    return {};
+}
+
+void GuiApp::simple_drop_tick() {
+    // Beside "Vị trí từ gói tin", or under it when the row is full.
+    const char* const kDrop = "Nhảy xuống bậc dưới";
+    const float wide =
+        ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(kDrop).x;
+    ImGui::SameLine(0, 18);
+    if (ImGui::GetContentRegionAvail().x < wide) ImGui::NewLine();
+    // Greyed out, with its reason, while it cannot be ticked.
+    const std::string why = simple_drop_refusal_vi();
+    ImGui::BeginDisabled(!why.empty());
+    if (ImGui::Checkbox("Nhảy xuống bậc dưới", &hunt_config_.drop_down)) simple_changed();
+    ImGui::EndDisabled();
+    const std::string tip =
+        !why.empty()
+            ? why
+            : trial_hint(kTrialDrop,
+                         "Khi con quái đang nhắm ở bậc thấp hơn và trên bậc này không còn con quái nào, bot đi tới\n"
+                         "trên chỗ con quái, đứng lại rồi bấm Ctrl + ↓ để nhảy xuống — chỉ khi bản đồ của game cho\n"
+                         "thấy nhân vật sẽ rơi xuống đúng bậc của con quái (hoặc một bậc ở giữa), không rơi quá.\n"
+                         "Chỉ nhảy trên bản đồ GoBot đã thấy nhân vật vào (qua cửa hoặc đăng nhập khi GoBot đang mở),\n"
+                         "hoặc đã nhận ra từ chỗ nhân vật và quái đứng. Không nhảy gần cửa. Có Chỗ đánh quái: chỉ\n"
+                         "nhảy trong vùng đánh. GoBot không bao giờ bấm ↓ một mình: ↓ chỉ đi ra khi đang giữ Ctrl.");
+    ImGui::SetItemTooltip("%s", tip.c_str());
+}
+
+void GuiApp::simple_drop_hints() {
+    // Why it stopped the last hunt, in red until the next start of it.
+    if (!drop_stopped_vi_.empty()) coloured(kBad, drop_stopped_vi_.c_str());
+    if (!hunt_config_.drop_down || !simple_drop_refusal_vi().empty()) return;
+    const HunterConfig& c = hunt_config_;
+    // As drop_rule has them: more than the larger of the band below and
+    // drop_min_px down, drop_side_px across at most, and no gate within
+    // drop_gate_px.
+    std::string text = "Nhảy xuống (Ctrl + ↓) khi quái thấp hơn quá " +
+                       std::to_string(std::max(c.down(), c.drop_min_px)) + " px, cách không quá " +
+                       std::to_string(c.drop_side_px) + " px theo chiều ngang; không nhảy khi có cửa trong vòng " +
+                       std::to_string(c.drop_gate_px) + " px.";
+    // The area's height said with it: at the shipped 100, a monster dropped
+    // to is already outside it.
+    if (c.spot)
+        text += " Có Chỗ đánh quái: chỉ nhảy khi chỗ đứng, chỗ rơi xuống và con quái đều ở trong vùng đánh (cao "
+                "thấp " + std::to_string(c.spot_half_h) + " px).";
+    hint(trial_hint(kTrialDrop, text.c_str()).c_str());
+    if (!hunting_ || !hunter_) return;
+
+    // While it hunts: off until the next start, or why the monster below is
+    // not dropped to just now -- for what the player can act on.
+    const Hunter::Status hs = hunter_->status();
+    using Off = Hunter::DropOff;
+    switch (hs.drop_off) {
+        case Off::Fails:
+            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: nhiều lần bấm Ctrl + ↓ không rơi xuống.");
+            return;
+        case Off::Rose:
+            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: bấm Ctrl + ↓ làm nhân vật nhảy lên.");
+            return;
+        case Off::OffMap:
+            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: nhân vật rơi xuống chỗ khác với bản đồ của game.");
+            return;
+        case Off::HeldLong:
+            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: phím ↓ bị giữ quá lâu.");
+            return;
+        case Off::MapChanged:
+        case Off::KeysStuck:
+        case Off::None:
+            break;
+    }
+    if (hs.drop_wait_ms == 0 || now_ms() - hs.drop_wait_ms > 1500) return;
+    using Why = Hunter::DropWhy;
+    std::string wait;
+    switch (hs.drop_wait) {
+        case Why::MapUnknown:
+            wait = "Nhảy xuống: chưa biết bản đồ này — qua cửa hoặc đăng nhập lại một lần khi GoBot đang mở";
+            if (hs.drop_map.why == MapTrust::Why::Naming || hs.drop_map.why == MapTrust::Why::Ambiguous ||
+                hs.drop_map.why == MapTrust::Why::Confirming)
+                wait += ", hoặc chờ GoBot nhận ra bản đồ từ chỗ nhân vật và quái đứng (" +
+                        std::to_string(hs.drop_map.points) + "/" + std::to_string(hs.drop_map.needed) + ")";
+            wait += ".";
+            break;
+        case Why::Gate:
+            wait = "Nhảy xuống: cửa ở gần (" + std::to_string(hs.drop_wait_px) + " px).";
+            break;
+        case Why::PastMonster: wait = "Nhảy xuống: rơi từ đây sẽ xuống quá bậc của quái."; break;
+        case Why::Bottom:      wait = "Nhảy xuống: đang đứng ở nền dưới cùng."; break;
+        case Why::NoDropHere:  wait = "Nhảy xuống: chỗ này bấm Ctrl + ↓ không rơi."; break;
+        case Why::OutsideArea: wait = "Nhảy xuống: sẽ ra khỏi vùng đánh."; break;
+        case Why::Veto:        wait = "Nhảy xuống: đang chờ (máu thấp, bot tạm dừng, hoặc đang vào game)."; break;
+        default:               break;
+    }
+    if (!wait.empty()) hint(wait.c_str());
 }
 
 void GuiApp::simple_style_hints() {
@@ -448,8 +576,8 @@ void GuiApp::simple_jump_checklist() {
         case JumpCheck::Advice::DownChangesMap:
             m = Mark::Bad;
             line = "Phím nhảy đang là ↓";
-            help = "Đứng trên cửa mà bấm ↓ là sang bản đồ khác, nên GoBot không bao giờ bấm ↓: bot sẽ không "
-                   "nhảy. Phím nhảy trong game thường là ↑.";
+            help = "Đứng trên cửa mà bấm ↓ là sang bản đồ khác, nên GoBot không bao giờ bấm ↓ một mình: bot sẽ "
+                   "không nhảy. Phím nhảy trong game thường là ↑.";
             break;
         case JumpCheck::Advice::Clean: {
             // Three things it can be: tried and seen to jump; tried, pressed
@@ -530,6 +658,9 @@ void GuiApp::simple_jump_try() {
         JumpCheck check(coord_);
         JumpCheck::Eyes eyes;
         eyes.player = [this](Nameplate& out, bool* fresh) { return detector_.player(out, fresh); };
+        // Your client's own take-offs, whenever the packets can tell: they
+        // decide, and the plate is watched beside them.
+        eyes.takeoffs = [this] { return packet_takeoffs(); };
         check.set_eyes(eyes);
         JumpCheck::Hands hands;
         // A key goes only to the game in front, and the plate is read off the
@@ -556,9 +687,19 @@ void GuiApp::simple_style_tick() {
         return;
     const JumpCheck::Result r = ui.jump.get();
     ui.jump_said = JumpCheck::said_vi(r, key_text(ui.jump_key));
-    GB_INFO("Jump test: %s %s -- %s; the plate rose %d px over %d reads",
-            r.pressed ? "pressed" : "did not press", InputManager::key_name(ui.jump_key).c_str(),
-            JumpCheck::outcome_name(r.outcome), r.rose_px, r.reads);
+    if (r.by_packets) {
+        // Decided by your client's take-offs: the plate only beside them.
+        const bool followed =
+            r.outcome == JumpCheck::Outcome::Jumped && r.reads > 0 && r.rose_px < JumpCheck::kStillPx;
+        GB_INFO("Jump test: %s %s -- %s (packets: %d take-off%s; the plate rose %d px over %d reads%s)",
+                r.pressed ? "pressed" : "did not press", InputManager::key_name(ui.jump_key).c_str(),
+                JumpCheck::outcome_name(r.outcome), r.takeoffs, r.takeoffs == 1 ? "" : "s", r.rose_px, r.reads,
+                followed ? " -- the camera followed" : "");
+    } else {
+        GB_INFO("Jump test: %s %s -- %s; the plate rose %d px over %d reads",
+                r.pressed ? "pressed" : "did not press", InputManager::key_name(ui.jump_key).c_str(),
+                JumpCheck::outcome_name(r.outcome), r.rose_px, r.reads);
+    }
 
     // The detector stopped again unless something else looks through it:
     // the test started it, or kept it past a hunt's end (release_detector --

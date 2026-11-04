@@ -153,6 +153,10 @@ std::string quest_trouble(int times, const std::string& why);
 /// `key` the key's name as InputManager::key_name gives it -- anything else
 /// in it is said as "?" -- and `count` the number the slot shows.
 std::string potion_low(bool hp, const std::string& key, int count);
+/// The same, said by the packets' bag: `total` is what the whole bag holds of
+/// the item the key drinks, every stack of it, not the slot's number -- the
+/// two differ (27 in the slot against 614 in the bag), so it is named so.
+std::string potion_low_bag(bool hp, const std::string& key, int total);
 std::string potion_out(bool hp, const std::string& key);
 /// With `with_name` and a name that survives cleaning, the name; otherwise none.
 std::string party_joined(const std::string& who, bool with_name);

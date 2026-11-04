@@ -234,6 +234,9 @@ void GuiApp::log_black_box() {
                       vitals_.failures_since(now > MacroEngine::kBlackBoxMs ? now - MacroEngine::kBlackBoxMs : 0));
     GB_INFO("%s; HP %s, MP %s; %s", slots.c_str(), figure(v.hp, v.hp_max).c_str(), figure(v.mp, v.mp_max).c_str(),
             reader);
+    // And what the game's packets said of HP and MP, and whether anything
+    // went by them: a later plan proves a packet HP of 0 by these lines.
+    GB_INFO("Black box: %s", packet_vitals_text().c_str());
 }
 
 void GuiApp::alert_party(bool joined, const std::string& who) {

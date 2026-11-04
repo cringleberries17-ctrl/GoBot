@@ -214,7 +214,7 @@ void MinimapTracker::update(const Frame& f) {
     if (pending_count_ >= kStableFrames && distance(h, fingerprint_) > kSameMap) {
         fingerprint_ = h;
         changed_ = true;
-        GB_INFO("Map changed -- minimap fingerprint %s", to_hex(h).c_str());
+        GB_DEBUG("Map changed -- minimap fingerprint %s", to_hex(h).c_str());
     }
 }
 

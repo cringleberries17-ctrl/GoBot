@@ -1244,6 +1244,11 @@ void test_texts_and_settings() {
           "the alert: " + alert_text::potion_out(false, "2"));
     check(alert_text::potion_low(true, "a\"b/c", 3) == "Sắp hết bình HP: ô phím ? còn 3 bình.",
           "a key name with anything but letters and digits in it is not said");
+    check(alert_text::potion_low_bag(true, "G", 18) == "Sắp hết bình HP (phím G): cả túi còn 18 bình (theo gói tin)." &&
+              alert_text::potion_low_bag(false, "a\"b/c", 3) ==
+                  "Sắp hết bình MP (phím ?): cả túi còn 3 bình (theo gói tin).",
+          "the alert by the packets' bag names the whole bag, not the key's slot: " +
+              alert_text::potion_low_bag(true, "G", 18));
     const AlertEventInfo* low = find_alert_event("potion_low");
     const AlertEventInfo* out = find_alert_event("potion_out");
     check(low && !low->critical && low->on && std::string(low->label_vi) == "Sắp hết bình",
@@ -1305,6 +1310,83 @@ void test_texts_and_settings() {
 #endif
 }
 
+/// "Low" by the packets' bag goes by a mark of its own: warn_below is a
+/// slot's 20, and a bag of 20 was a minute of MP potions at the farm's 19 a
+/// minute (farm30 report, T1); 200 is about ten.
+void test_bag_low() {
+    section("Potions: \"Low\" by the bag goes by its own mark, [Potions] warn_bag_below (farm30 T1)");
+    {
+        bool said = false;
+        const bool low = bag_low_now(199, 200, said);
+        check(low && said, "a bag of 199 under a mark of 200: Low, said");
+        check(!bag_low_now(150, 200, said) && said, "and not said again while it stays under");
+        check(!bag_low_now(204, 200, said) && said, "204, not yet kBagLowRearm over: still taken for said");
+        check(!bag_low_now(205, 200, said) && !said, "205 re-arms it");
+        check(bag_low_now(190, 200, said), "and under again: said again");
+    }
+    {
+        bool said = false;
+        check(!bag_low_now(201, 200, said) && !said, "a bag of 201: not Low");
+        check(!bag_low_now(200, 200, said) && !said, "nor 200, the mark itself");
+    }
+    {
+        bool said = false;
+        check(!bag_low_now(0, 0, said) && !bag_low_now(3, 0, said) && !bag_low_now(3, -4, said) && !said,
+              "a mark of 0 (or less): never Low");
+        bool was = true;
+        check(!bag_low_now(9000, 0, was) && was, "and what was said is left as it was");
+    }
+    {
+        // The farm's MP bowls, one a press: Low once, at 199 -- about ten
+        // minutes before the bag runs dry at 19 a minute -- where the slot's
+        // mark of 20 said it at 19, a minute before.
+        bool said = false;
+        int at = -1, times = 0;
+        for (int total = 515; total >= 0; --total)
+            if (bag_low_now(total, PotionSettings{}.warn_bag_below, said)) {
+                ++times;
+                if (at < 0) at = total;
+            }
+        check(times == 1 && at == 199, "515 drunk down to 0 one by one: Low once, at 199 (" + std::to_string(at) + ")");
+    }
+    IniFile ini;
+    ini.set("Potions", "warn_bag_below", "99999");
+    PotionSettings s;
+    s.load(ini);
+    check(s.warn_bag_below == PotionSettings::kMaxWarnBag, "warn_bag_below out of range: brought down to 9999");
+    ini.set("Potions", "warn_bag_below", "-5");
+    s.load(ini);
+    check(s.warn_bag_below == 0, "and up to 0");
+    ini.set("Potions", "warn_bag_below", "0");
+    ini.set("Potions", "warn_below", "30");
+    s.load(ini);
+    check(s.warn_bag_below == 0 && s.warn_below == 30, "0 read back as 0 -- off -- and the slot's mark apart from it");
+    IniFile blank;
+    PotionSettings d;
+    d.load(blank);
+    check(d.warn_bag_below == 200 && d.warn_below == 20, "nothing there: 200 for the bag, 20 for a slot");
+#ifdef GOBOT_SOURCE_DIR
+    IniFile shipped;
+    PotionSettings p;
+    p.warn_bag_below = -1;
+    const std::string text = read_all(std::string(GOBOT_SOURCE_DIR) + "/configs/app.ini");
+    check(shipped.load(std::string(GOBOT_SOURCE_DIR) + "/configs/app.ini") &&
+              shipped.has_key("Potions", "warn_bag_below") && text.find("\nwarn_bag_below=200") != std::string::npos,
+          "the shipped app.ini has [Potions] warn_bag_below=200");
+    p.load(shipped);
+    check(p.warn_bag_below == 200 && p.warn_below == 20, "read as 200, the slot's warn_below still 20");
+    // The window: the bag's Low by warn_bag_below with its own > 0, never by
+    // the slot's warn_below.
+    const std::string potions = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/simple_potions.cpp");
+    check(potions.find("if (by_bag && ui.settings.warn_bag_below > 0 &&") != std::string::npos &&
+              potions.find("bag_low_now(bag_total, ui.settings.warn_bag_below, ui.bag_low_said[vk])") !=
+                  std::string::npos &&
+              potions.find("bag_total < ui.settings.warn_below") == std::string::npos &&
+              potions.find("warn_below + kBagLowRearm") == std::string::npos,
+          "simple_potions.cpp: the bag's Low goes by warn_bag_below, with its own > 0 check, not by warn_below");
+#endif
+}
+
 } // namespace
 
 void test_potions(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1323,4 +1405,5 @@ void test_potions(void (*check_fn)(bool, const std::string&), void (*section_fn)
     test_wild();
     test_slot_log();
     test_texts_and_settings();
+    test_bag_low();
 }
