@@ -3,7 +3,9 @@
 // 2026-11-04): floors read planar with their attribute, gates out of the
 // .prj, what a session learns per map, and a map trusted by its entry's
 // spawn, by standing points on its floors, or named from standing points
-// when no entry was seen -- and let go of at the first point off its floors.
+// when no entry was seen -- and let go of at two points of yours off its
+// floors, half a second apart, never at a monster's (2026.11.04b: one monster
+// frame in the air, 07:59:20 on t52_s2, took the file away for the stay).
 //
 // The parsers on small made-up buffers; GameMapBook and MapTrust on made-up map
 // files written to this run's own temp folder. Then, when they are there,
@@ -12,6 +14,7 @@
 // live. Nothing here presses a key.
 
 #include "gobot/common.hpp"
+#include "gobot/logger.hpp"
 #include "gobot/map_book.hpp"
 #include "test_support.hpp"
 
@@ -164,6 +167,28 @@ std::string floors_text(std::span<const MapFloor> fl) {
     return s.empty() ? std::string("none") : s;
 }
 
+/// The lines `run` logs at INFO and above.
+std::vector<std::string> info_lines(const std::function<void()>& run) {
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(4000);
+    log.clear_ring();
+    log.set_level(LogLevel::Info);
+    run();
+    std::vector<std::string> out;
+    for (const LogLine& l : log.ring()) out.push_back(l.text);
+    log.set_level(was);
+    log.set_ring_capacity(0);
+    return out;
+}
+
+int lines_with(const std::vector<std::string>& all, const char* a, const char* b = "") {
+    int n = 0;
+    for (const std::string& l : all)
+        if (l.find(a) != std::string::npos && l.find(b) != std::string::npos) ++n;
+    return n;
+}
+
 // ------------------------------------------------------------- the parsers
 
 void test_parse_map() {
@@ -243,6 +268,68 @@ void test_parse_map() {
         std::memcpy(bad.data() + 4, &wh.second, 4);
         check(!GameMapBook::parse_map(bad), fmt("%d x %d cells: not a map", wh.first, wh.second));
     }
+}
+
+/// Whether `t` has a point at column x.
+bool trail_has(const MapTrail& t, int x) {
+    return std::any_of(t.pts.begin(), t.pts.end(), [x](const MapPoint& p) { return p.x == x; });
+}
+
+void test_follow() {
+    section("GameMapBook::Page::follow: a floor followed column by column -- holes, slopes, ends (2026.11.04d)");
+
+    // 8 x 8 cells, 256 x 256 px. A floor at 100 over 10..80 with holes of 1
+    // (x 30), 2 (40-41) and 3 (61-63) columns; a slope a pixel a column,
+    // 150 at 100 to 190 at 140, then a step 6 px down to 196 over 141..160;
+    // a floor at 50 over 100..120 with a wall (attr 4) at 121; a floor at 200
+    // over 200 to the map's right edge; the bottom at 250.
+    MapMaker m(8, 8);
+    m.flat(0, 10, 29, 100, 1);
+    m.flat(0, 31, 39, 100, 1);
+    m.flat(0, 42, 60, 100, 1);
+    m.flat(0, 64, 80, 100, 1);
+    m.floor(0, 100, 140, [](int x) { return 150 + (x - 100); }, 1);
+    m.flat(0, 141, 160, 196, 1);
+    m.flat(0, 100, 120, 50, 1);
+    m.flat(1, 121, 121, 51, 4);
+    m.flat(0, 200, 255, 200, 1);
+    m.flat(1, 0, 255, 250, 2);
+    const std::optional<MapFloors> f = GameMapBook::parse_map(m.b);
+    check(f.has_value(), "the made-up map reads");
+    if (!f) return;
+    GameMapBook::Page page;
+    page.stem = "made_up";
+    page.floors = *f;
+
+    const MapTrail right = page.follow(20, 99, 1);
+    check(right.ledge && !right.stop && right.pts.front().x == 20 && right.pts.back().x == 60 &&
+              right.pts.size() == 38 && trail_has(right, 29) && !trail_has(right, 30) && !trail_has(right, 40) &&
+              !trail_has(right, 41) && trail_has(right, 42),
+          fmt("from 20,99 right: over the 1- and 2-column holes, its end at 60 -- a hole of 3 is an end (%zu points, "
+              "last %d)",
+              right.pts.size(), right.pts.empty() ? -1 : right.pts.back().x));
+    const MapTrail left = page.follow(20, 99, -1);
+    check(left.ledge && left.pts.back().x == 10 && left.pts.size() == 11, "and left to its end at 10");
+    const MapTrail slope = page.follow(110, 159, 1);
+    check(slope.ledge && slope.pts.back().x == 140 && slope.pts.back().y == 190 && slope.pts.size() == 31,
+          "up a slope of a pixel a column: followed; a step of 6 px is its end, never kFollowLinkPx more");
+    const MapTrail edge = page.follow(210, 199, 1);
+    const MapTrail walled = page.follow(110, 49, 1);
+    check(edge.stop && !edge.ledge && edge.pts.back().x == 255 && walled.stop && !walled.ledge &&
+              walled.pts.back().x == 120,
+          "the map's edge, or a wall next, stops a walk: no end walked off");
+    check(page.follow(20, 60, 1).pts.empty() && page.follow(121, 50, -1).pts.empty() &&
+              page.floor_near(121, 50)->wall(),
+          "a point on no floor, or on a wall, follows nothing");
+    const MapTrail short_one = page.follow(110, 49, 1, 5);
+    check(short_one.pts.size() == 6 && short_one.pts.back().x == 115 && !short_one.ledge && !short_one.stop,
+          "as far as asked, and no further: neither an end nor a stop");
+    check(page.follow_to(110, 159, 135) == 185 && page.follow_to(140, 189, 100) == 150 &&
+              page.follow_to(20, 99, 20) == 100,
+          "follow_to: the floor's top at the column asked, either way");
+    check(page.follow_to(20, 99, 30) == 100 && page.follow_to(20, 99, 41) == 100 && !page.follow_to(20, 99, 61) &&
+              !page.follow_to(110, 159, 141) && !page.follow_to(20, 60, 25),
+          "into a hole: the column before it; past an end, or from no floor: none");
 }
 
 void test_parse_prj() {
@@ -422,11 +509,10 @@ void test_book_files() {
 // --------------------------------------------------------------- trust
 
 /// One pass after another of what the hunter sees: you at a new report each
-/// stand(), a monster at a new frame each.
+/// stand(), the monsters at new frames -- each frame's time the clock's.
 struct Feed {
     MapTrust::Look look;
     std::uint32_t  slot = 0;
-    std::uint64_t  frames = 0;
 
     Feed(bool known, std::uint16_t map, std::uint16_t area, std::uint32_t epoch, int ex, int ey) {
         look.now_ms = 10000;
@@ -451,16 +537,36 @@ struct Feed {
         look.report_ms = look.now_ms + 1;
         pass(t);
     }
-    /// Monsters stopped at these points, each a new frame; you as you were.
+    /// Time going by with nothing new: the next report or frame that much later.
+    void wait(std::uint64_t ms) { look.now_ms += ms; }
+    MapTrust::Mob mob(std::uint32_t s, MapPoint p, std::uint32_t gen) const {
+        MapTrust::Mob m;
+        m.at = p;
+        m.slot = s;
+        m.at_ms = look.now_ms;
+        m.gen = gen;
+        return m;
+    }
+    /// One frame of each of these monsters, every one a monster of its own:
+    /// a frame alone, which no monster stands by. You as you were.
     void mobs(MapTrust& t, std::initializer_list<MapPoint> at, std::uint32_t work = 60000) {
-        for (const MapPoint& p : at) {
-            MapTrust::Mob m;
-            m.at = p;
-            m.slot = ++slot;
-            m.at_ms = ++frames;
-            look.mobs.push_back(m);
-        }
+        for (const MapPoint& p : at) look.mobs.push_back(mob(++slot, p, 1));
         pass(t, work);
+    }
+    /// Monsters standing at these points, each a monster of its own: two of
+    /// its frames there, kMobStandMs apart -- a standing point at the second.
+    void standing(MapTrust& t, std::initializer_list<MapPoint> at, std::uint32_t work = 60000) {
+        const std::uint32_t first = slot + 1;
+        mobs(t, at, work);
+        wait(MapTrust::kMobStandMs);
+        std::uint32_t s = first;
+        for (const MapPoint& p : at) look.mobs.push_back(mob(s++, p, 1));
+        pass(t, work);
+    }
+    /// One frame of monster `s`, of generation `gen`, at x, y.
+    void frame(MapTrust& t, std::uint32_t s, int x, int y, std::uint32_t gen = 1) {
+        look.mobs.push_back(mob(s, { x, y }, gen));
+        pass(t);
     }
 };
 
@@ -494,6 +600,16 @@ void test_trust_entry() {
     GameMapBook book(dir);
 
     {
+        const std::shared_ptr<const GameMapBook::Page> p = book.get("t5_s1");
+        check(p && p->gap_text(520, 330) == "270 px above floor 600 (attr 2), 130 px below floor 200 (attr 1)" &&
+                  p->gap_text(520, 199) == "on floor 200 (attr 1)" &&
+                  p->gap_text(520, 100) == "100 px above floor 200 (attr 1), no floor above it" &&
+                  p->gap_text(520, 640) == "no floor below it, 40 px below floor 600 (attr 2)" &&
+                  p->gap_text(1100, 100) == "outside the map's 1024 px across",
+              "Page::gap_text: the floors under and over a point, from their tops -- on one; off the map");
+    }
+
+    {
         MapTrust t(&book);
         Feed f(true, 5, 1, 1, 302, 180);
         f.pass(t);
@@ -506,12 +622,65 @@ void test_trust_entry() {
         f.stand(t, 302, 180);
         check(t.trusted(), "you still at the entry's spawn -- maybe in the air -- is no standing point to miss");
         f.stand(t, 500, 199);
-        f.mobs(t, { { 700, 198 }, { 40, 202 } });
-        check(t.trusted(), "you and two monsters on its floors: still trusted");
+        f.standing(t, { { 700, 198 }, { 40, 202 } });
+        check(t.trusted() && t.report().mob_off == 0, "you and two monsters standing on its floors: still trusted");
+
+        // A monster's frames off its floors -- one alone, two monsters
+        // standing at one height off them, thirty in the air -- never let it
+        // go: counted, and said once a minute at most.
+        const std::vector<std::string> mob_log = info_lines([&] {
+            f.mobs(t, { { 600, 330 } });
+            f.standing(t, { { 650, 330 }, { 800, 100 } });
+            for (int i = 0; i < 30; ++i) f.frame(t, 900 + static_cast<std::uint32_t>(i), 520, 170);
+        });
+        check(t.trusted() && t.how() == How::Entry && t.report().why == Why::Trusted && t.report().mob_off == 35,
+              fmt("35 monster frames off its floors, 2 of them standing: still trusted by the entry (%d counted)",
+                  t.report().mob_off));
+        check(lines_with(mob_log, "Hunter: 1 monster frame(s) off t5_s1's floors ignored (0 of them standing) -- the "
+                                  "last, slot 3 at 600,330, 270 px above floor 600 (attr 2), 130 px below floor 200 "
+                                  "(attr 1); a monster's point never lets a map file go") == 1 &&
+                  lines_with(mob_log, "monster frame(s) off") == 1 && lines_with(mob_log, "does not match") == 0,
+              "said once, at the first, with the floors under and over it -- the 34 after it not within the minute");
+        const std::vector<std::string> later_log = info_lines([&] {
+            f.wait(MapTrust::kMobOffSayMs);
+            f.frame(t, 77, 30, 640);
+        });
+        check(t.trusted() &&
+                  lines_with(later_log, "Hunter: 35 monster frame(s) off t5_s1's floors ignored (2 of them standing) "
+                                        "-- the last, slot 77 at 30,640, no floor below it, 40 px below floor 600 "
+                                        "(attr 2)") == 1,
+              "a minute on, the next said with how many since: 35, 2 standing, the last under the bottom");
+
+        // Yours: one off its floors is let pass, two half a second apart let
+        // it go.
+        std::vector<std::string> own_log = info_lines([&] { f.stand(t, 520, 330); });
+        check(t.trusted() && t.report().own_off && t.report().why == Why::Trusted &&
+                  lines_with(own_log, "Hunter: you stand at 520,330, on no floor of t5_s1's file -- 270 px above "
+                                      "floor 600 (attr 2), 130 px below floor 200 (attr 1); one point is let pass") ==
+                      1,
+              "you standing at 520,330, on no floor of its file: one point -- said, let pass, still trusted");
+        f.wait(600);
+        f.stand(t, 500, 199);
+        check(t.trusted() && !t.report().own_off, "then you on its floor: the point off them forgotten");
+        f.wait(600);
         f.stand(t, 520, 330);
+        f.stand(t, 530, 330);
+        check(t.trusted() && t.report().own_off, "two of yours off its floors 60 ms apart: still trusted");
+        own_log = info_lines([&] {
+            f.wait(380);
+            f.stand(t, 540, 330);
+        });
         check(!t.trusted() && !t.page() && t.how() == How::None && t.report().why == Why::Mismatch &&
-                  t.report().miss.x == 520 && t.report().miss.y == 330,
-              "you standing at 520,330, on no floor of its file: not trusted, and the point said");
+                  t.report().miss.x == 540 && t.report().miss.y == 330 &&
+                  t.report().miss_gap == "270 px above floor 600 (attr 2), 130 px below floor 200 (attr 1)",
+              fmt("one 0.5 s after the first, none of yours on its floors between: not trusted, the point and its gap "
+                  "said (%s)",
+                  t.report().miss_gap.c_str()));
+        check(lines_with(own_log, "Hunter: the game's map file t5_s1 does not match where you stand (540,330) -- no "
+                                  "drops on it until the next map entry (270 px above floor 600 (attr 2), 130 px "
+                                  "below floor 200 (attr 1); before it, 520,330 0.5 s earlier") == 1,
+              "the WARN as before, with both points and the floors: " +
+                  (own_log.empty() ? std::string("none") : own_log.back()));
         f.stand(t, 500, 199);
         f.stand(t, 600, 199);
         f.stand(t, 700, 199);
@@ -534,12 +703,37 @@ void test_trust_entry() {
         f.stand(t, 150, 198);
         check(t.report().points == 1, "points within 64 px in x and 24 in y of one taken do not count");
         f.mobs(t, { { 164, 199 } });
-        check(t.report().points == 2, "a monster's stop on its floors counts: 2 of 3");
+        check(t.report().points == 1, "a monster's frame alone, on its floors or not, is no standing point: 1 of 3");
+        f.standing(t, { { 164, 199 } });
+        check(t.report().points == 2,
+              "a monster standing there -- two of its frames at that height, 300 ms apart -- counts: 2 of 3");
+        // 2026.11.04b review: a monster STANDING off its floors is a miss
+        // before trust, as it is to a name -- before, it was not counted.
+        const std::vector<std::string> cut_log = info_lines([&] { f.standing(t, { { 700, 330 } }); });
+        check(!t.trusted() && t.report().why == Why::Confirming && t.report().points == 0 && t.report().mob_off == 2 &&
+                  lines_with(cut_log, "Hunter: t5_s1 -- a monster stands off its floors (slot 3 at 700,330, 270 px "
+                                      "above floor 600 (attr 2), 130 px below floor 200 (attr 1)): the 2 standing "
+                                      "point(s) on them so far count no more") == 1 &&
+                  lines_with(cut_log, "count no more") == 1 && lines_with(cut_log, "does not match") == 0,
+              fmt("one standing off its floors: a miss, the points so far count no more (%d of 3); its two frames "
+                  "counted, nothing let go of",
+                  t.report().points));
+        f.stand(t, 100, 199);
+        f.standing(t, { { 164, 199 } });
+        check(t.report().points == 2, "the two again: 2 of 3");
         f.stand(t, 345, 192);
         check(t.report().points == 2, "you at the entry's spawn is not a standing point");
-        f.stand(t, 228, 199);
-        check(t.trusted() && t.how() == How::Points && t.report().why == Why::Trusted,
-              "the third, 64 px from the others: trusted by standing points");
+        f.stand(t, 400, 330);
+        f.standing(t, { { 228, 199 } });
+        check(!t.trusted() && t.report().why == Why::Confirming && t.report().points == 3 && t.report().own_off,
+              "the third, 64 px from the others -- but one of yours off its floors is let pass: not trusted until "
+              "one of yours stands on them");
+        f.standing(t, { { 500, 199 }, { 800, 199 } });
+        check(!t.trusted() && t.report().why == Why::Confirming && t.report().points == 3 && t.report().needed == 3,
+              fmt("two more standing on its floors meanwhile: still 3 of 3 shown, never more (%d)", t.report().points));
+        f.stand(t, 300, 199);
+        check(t.trusted() && t.how() == How::Points && t.report().why == Why::Trusted && !t.report().own_off,
+              "you on its floors: trusted by standing points");
         t.lose("the plates' view changed");
         f.pass(t);
         check(!t.trusted() && t.report().why == Why::Confirming && t.report().points == 0,
@@ -567,11 +761,40 @@ void test_trust_entry() {
               "back in the same entry's stay: only standing points, not the spawn again");
     }
     {
+        // 2026.11.04b review: before trust by standing points -- here after
+        // the capture lost and back -- a monster standing off the file's
+        // floors is a miss: the points so far count no more. Points on them
+        // after it bring it to 3 again.
+        MapTrust t(&book);
+        Feed f(true, 5, 1, 5, 302, 180);
+        f.pass(t);
+        check(t.trusted() && t.how() == How::Entry, "trusted by the entry");
+        f.look.capture = false;
+        f.pass(t);
+        f.look.capture = true;
+        f.pass(t);
+        check(!t.trusted() && t.report().why == Why::Confirming && t.report().points == 0,
+              "the capture lost and back in the same entry's stay: standing points wanted, 0 of 3");
+        f.standing(t, { { 100, 199 }, { 200, 199 } });
+        check(!t.trusted() && t.report().points == 2, "two monsters standing on its floors: 2 of 3");
+        const std::vector<std::string> cut = info_lines([&] { f.standing(t, { { 650, 330 } }); });
+        check(!t.trusted() && t.report().why == Why::Confirming && t.report().points == 0 &&
+                  lines_with(cut, "count no more") == 1 && lines_with(cut, "does not match") == 0,
+              fmt("a monster standing off its floors before trust: a miss -- %d of 3, said once", t.report().points));
+        f.standing(t, { { 300, 199 } });
+        f.stand(t, 400, 199);
+        f.stand(t, 500, 199);
+        check(t.trusted() && t.how() == How::Points && t.report().why == Why::Trusted,
+              "then a monster and two of yours standing on its floors: trusted by standing points");
+    }
+    {
         // Found wrong, then the capture lost and back within the same entry's
         // stay (a re-link keeps the entry): still wrong, as after lose().
         MapTrust t(&book);
         Feed f(true, 5, 1, 4, 302, 180);
         f.pass(t);
+        f.stand(t, 510, 330);
+        f.wait(500);
         f.stand(t, 520, 330);
         const bool wrong = !t.trusted() && t.report().why == Why::Mismatch;
         f.look.capture = false;
@@ -582,7 +805,8 @@ void test_trust_entry() {
         f.stand(t, 200, 199);
         f.stand(t, 300, 199);
         check(wrong && !t.trusted() && t.report().why == Why::Mismatch && t.report().miss.x == 520 &&
-                  t.report().miss.y == 330,
+                  t.report().miss.y == 330 &&
+                  t.report().miss_gap == "270 px above floor 600 (attr 2), 130 px below floor 200 (attr 1)",
               fmt("a file found wrong, the capture lost and back in the same entry's stay: 3 standing points on its "
                   "floors do not bring it back (%s)",
                   MapTrust::why_text(t.report().why)));
@@ -672,31 +896,48 @@ void test_trust_naming() {
               fmt("12 points, all left of x 512, lie on t7_s1 and t7_s2 alike: not named (%s, %d fit, %zu of %zu "
                   "files read)",
                   MapTrust::why_text(r.why), r.fit, r.read, r.files));
-        for (int i = 0; i < 5; ++i) f.mobs(t, { on_slope(540 + i * 60) });
+        // A monster's frame alone is no point: each is only seen once.
+        for (int i = 0; i < 6; ++i) f.mobs(t, { on_slope(540 + i * 60) });
+        check(!t.trusted() && t.report().why == Why::Ambiguous && t.report().points == 12,
+              "6 monsters' frames right of 512, one each: no points -- still ambiguous, 12 points");
+        for (int i = 0; i < 5; ++i) f.standing(t, { on_slope(540 + i * 60) });
         check(!t.trusted() && t.report().why == Why::Ambiguous && t.report().next_misses == 5,
-              "5 monsters' stops right of 512: t7_s2 misses 5 -- still under the margin of 6");
-        f.mobs(t, { on_slope(900) });
+              "5 monsters standing right of 512: t7_s2 misses 5 -- still under the margin of 6");
+        f.standing(t, { on_slope(900) });
         r = t.report();
         check(t.trusted() && t.how() == How::Named && t.stem() == "t7_s1" && t.page() && r.why == Why::Trusted &&
                   r.next_best == "t7_s2" && r.next_misses == 6,
               fmt("the 6th: t7_s1 named, the next best t7_s2 missing 6 of 18 (got %s, next %s missing %d)",
                   t.stem().c_str(), r.next_best.c_str(), r.next_misses));
 
-        f.mobs(t, { on_slope(1000) });
+        f.standing(t, { on_slope(1000) });
         f.stand(t, on_slope(10).x, on_slope(10).y);
         check(t.trusted() && t.stem() == "t7_s1", "more points on its floors: still named");
-        f.mobs(t, { { 600, 500 } });
+        f.standing(t, { { 600, 500 } });
+        f.mobs(t, { { 620, 480 }, { 640, 400 } });
         r = t.report();
-        check(!t.trusted() && t.stem().empty() && !t.page() && r.why == Why::Naming && r.points == 1,
-              "a monster stopped at 600,500, on no floor of t7_s1: let go of, naming again from that point");
+        check(t.trusted() && t.stem() == "t7_s1" && r.why == Why::Trusted && r.mob_off == 4,
+              "a monster standing at 600,500, two frames in the air, on no floor of t7_s1: counted, still named");
+        f.stand(t, 600, 500);
+        check(t.trusted() && t.stem() == "t7_s1" && t.report().own_off,
+              "you standing at 600,500, off its floors: one point, let pass -- still named");
+        f.stand(t, on_slope(700).x, on_slope(700).y);
+        f.stand(t, 610, 500);
+        f.wait(500);
+        f.stand(t, 640, 500);
+        r = t.report();
+        check(!t.trusted() && t.stem().empty() && !t.page() && r.why == Why::Naming && r.points == 2 && !r.own_off,
+              fmt("you on its floor, then twice off it 0.5 s apart: let go of, naming again from those two (%d "
+                  "points)",
+                  r.points));
         for (int i = 0; i < 12; ++i) f.stand(t, on_slope(15 + i * 70).x, on_slope(15 + i * 70).y);
         r = t.report();
-        check(!t.trusted() && r.why == Why::Naming && r.files == 0 && r.points == 13,
-              "13 points within 30 s of the last full read: every file is not read again yet");
+        check(!t.trusted() && r.why == Why::Naming && r.files == 0 && r.points == 14,
+              "14 points within 30 s of the last full read: every file is not read again yet");
         f.look.now_ms += MapTrust::kNameRescanMs;
         f.pass(t);
         check(!t.trusted() && t.report().why == Why::Naming && t.report().points == 0,
-              "30 s on, read again: the point off t7_s1's floors is on no file's either -- naming starts again");
+              "30 s on, read again: the points off t7_s1's floors are on no file's either -- naming starts again");
     }
     {
         // t7_s1's file held open with no sharing as the 12 points come: the
@@ -748,18 +989,33 @@ void test_trust_naming() {
         f.stand(t, 104, 326);
         f.stand(t, 100, 327);
         check(t.report().points == 1, "the same point 22 times, or 4 px and 3 px off it: one point");
-        f.mobs(t, { { 108, 326 } });
-        f.mobs(t, { { 100, 328 } });
+        f.standing(t, { { 108, 326 } });
+        f.standing(t, { { 100, 328 } });
         check(t.report().points == 3, "8 px off in x, or 4 in y: points of their own");
-        MapTrust::Mob same;
-        same.at = { 500, 424 };
-        same.slot = 77;
-        same.at_ms = 5;
+        // When a monster stands: the same monster, at the same height, in two
+        // of its frames 300 ms apart.
+        MapTrust::Mob same = f.mob(77, { 500, 424 }, 1);
         f.look.mobs = { same };
         f.pass(t);
         f.look.mobs = { same };
+        f.wait(400);
         f.pass(t);
-        check(t.report().points == 4, "a monster's frame seen twice is one point");
+        check(t.report().points == 3, "a monster's frame seen twice is one frame: it does not stand by that");
+        f.frame(t, 77, 500, 424, 2);
+        check(t.report().points == 3, "its slot's next monster (another generation) at once: its first frame");
+        f.wait(180);
+        f.frame(t, 77, 520, 426, 2);
+        check(t.report().points == 3, "its second, 2 px off in height but 240 ms on: not yet");
+        f.frame(t, 77, 540, 422, 2);
+        check(t.report().points == 4, "its third, 300 ms after the first, 2 px off the other way: it stands");
+        f.wait(1000);
+        f.frame(t, 77, 560, 460, 2);
+        f.wait(1000);
+        f.frame(t, 77, 580, 463, 2);
+        check(t.report().points == 4, "then 36 px lower, then 3 px off that: not standing again yet");
+        f.wait(1000);
+        f.frame(t, 77, 600, 461, 2);
+        check(t.report().points == 5, "and 2 px off the last a second on: a point again");
         f.look.settled = true;
         f.look.rx = 700;
         f.look.ry = 474;
@@ -767,7 +1023,7 @@ void test_trust_naming() {
         f.pass(t);
         f.look.rx = 800;
         f.pass(t);
-        check(t.report().points == 5, "a report of yours seen twice is one point");
+        check(t.report().points == 6, "a report of yours seen twice is one point");
     }
     {
         // A real map entry always wins over a name.
@@ -799,9 +1055,31 @@ void test_trust_naming() {
         MapTrust t(&book);
         Feed f(false, 0, 0, 0, 0, 0);
         for (int i = 0; i < 11; ++i) f.stand(t, on_slope(30 + i * 85).x, on_slope(30 + i * 85).y);
-        f.mobs(t, { { 990, 100 } });
+        f.standing(t, { { 990, 100 } });
         check(!t.trusted() && t.report().why == Why::Naming && t.report().points == 0,
-              "12 points, one of them on no file's floors: no file fits them all -- naming starts again");
+              "12 points, a monster standing on no file's floors among them: no file fits them all -- naming starts "
+              "again");
+    }
+    {
+        // A monster's frames alone, in the air or not, never make a name:
+        // 11 points of yours and 40 monsters each seen once on the slope.
+        GameMapBook book(dir);
+        MapTrust t(&book);
+        Feed f(false, 0, 0, 0, 0, 0);
+        for (int i = 0; i < 11; ++i) f.stand(t, on_slope(30 + i * 85).x, on_slope(30 + i * 85).y);
+        for (int i = 0; i < 40; ++i) f.mobs(t, { on_slope(5 + i * 25) });
+        check(!t.trusted() && t.stem().empty() && t.report().why == Why::Naming && t.report().points == 11,
+              fmt("11 of yours and 40 monsters' frames, one each: not named, 11 points (%d)", t.report().points));
+        // A slot's monster seen at one height twice, but a respawn between:
+        // two monsters, neither standing.
+        f.frame(t, 500, 700, 474, 1);
+        f.wait(400);
+        f.frame(t, 500, 700, 474, 2);
+        check(!t.trusted() && t.report().points == 11, "a slot's two monsters, one frame each: no point");
+        f.wait(400);
+        f.frame(t, 500, 700, 474, 2);
+        check(t.trusted() && t.stem() == "t7_s1" && t.report().points == 0,
+              "the second monster's next frame at that height: it stands -- the 12th point, t7_s1 named");
     }
     {
         // Named, but its .prj places no gate, or the session distrusts it.
@@ -924,6 +1202,59 @@ void test_game_files() {
     check(floor_is(bottom, 1120, 2) && !bottom->platform() && !s2->floor_below(2812, 1119, 8),
           "under that the bottom ground, 1120, solid, nothing under it");
 
+    // 2026.11.04d: its floors followed as a walk goes over them -- the hunt of
+    // 2026-11-04 20:39 walked down its sloping ground out of the zone.
+    {
+        const MapTrail ledge_r = s2->follow(880, 274, 1);
+        const MapTrail ledge_l = s2->follow(880, 274, -1);
+        check(ledge_r.ledge && ledge_r.pts.back().x == 1104 && ledge_r.pts.back().y == 274,
+              fmt("the spawn ledge from 880,274: right to its real end at 1104 (got %d,%d)", ledge_r.pts.back().x,
+                  ledge_r.pts.back().y));
+        check(ledge_l.ledge && ledge_l.pts.back().x == 472 && ledge_l.pts.back().y == 281 &&
+                  !trail_has(ledge_l, 711) && trail_has(ledge_l, 710) && trail_has(ledge_l, 712),
+              fmt("left over its 1-px hole at x 711 -- no floor there, 274 and 275 either side -- to its end at 472 "
+                  "(got %d)",
+                  ledge_l.pts.back().x));
+        const MapTrail small_r = s2->follow(1360, 701, 1);
+        const MapTrail small_l = s2->follow(1360, 701, -1);
+        check(small_r.ledge && small_r.pts.back().x == 1404 && small_r.pts.back().y == 691 && small_l.ledge &&
+                  small_l.pts.back().x == 1337 && small_l.pts.back().y == 701,
+              fmt("the small floor under the ramp's top: 1337 (701) to its real end at 1404 (691) (got %d..%d)",
+                  small_l.pts.back().x, small_r.pts.back().x));
+        const MapTrail ramp_l = s2->follow(1200, 437, -1);
+        check(ramp_l.ledge && ramp_l.pts.back().x == 992 && ramp_l.pts.back().y == 588 && !trail_has(ramp_l, 1056) &&
+                  trail_has(ramp_l, 1055) && trail_has(ramp_l, 1057) && s2->follow_to(1200, 437, 1056) == 543,
+              "the ramp from 1200,437 down to its foot at 992 (588), over its 1-px hole at x 1056");
+        const MapTrail ground = s2->follow(1402, 802, -1);
+        check(ground.stop && !ground.ledge && ground.pts.back().x == 0 && s2->follow_to(1402, 802, 880) == 635 &&
+                  s2->follow_to(1402, 802, 1030) == 694 && s2->follow_to(1402, 802, 1035) == 696,
+              "the ground from 1402,802 -- where that hunt ended -- climbs left to the map's edge: 694 at x 1030, "
+              "696 at 1035, 635 at 880");
+        check(!s2->floor_near(882, 616) && s2->follow_to(1159, 466, 1282) == 397,
+              "20:41:11's 882,616 stood on no floor (a y held from a walk up the slope); 20:40:01's walk up the ramp "
+              "from 1159,466 had it at 397 by x 1282, not 466");
+        // The four refused drops (PastMonster) of 20:39:43-20:40:02, as a fall
+        // and a floor followed read them: the "same floor either side" a slope
+        // asks for -- a landing floor followed 24 px each way meets what a fall
+        // there meets -- and the real edges that still refuse.
+        const auto below = [&](int x, int y) {
+            const std::optional<MapFloor> f = s2->floor_below(x, y, 8);
+            return f ? f->y : -1;
+        };
+        check(below(1094, 274) == 513 && s2->follow_to(1094, 512, 1070) == 532 && below(1070, 274) == 532 &&
+                  s2->follow_to(1094, 512, 1118) == 495 && below(1118, 274) == 495 && !s2->follow_to(1094, 274, 1118),
+              "A: from the ledge at 1094 the fall lands on the ramp at 513, its slope 532 and 495 24 px either side -- "
+              "one floor, which ±6 px calls two; the ledge itself ends before 1118");
+        check(below(968, 274) == 675 && s2->follow_to(968, 674, 992) == 682 && below(992, 274) == 588,
+              "A, as it was, at 968: lands on the ground at 675 -- and 24 px right a fall meets the small ramp at 588 "
+              "first, a floor between: a real margin still refuses");
+        check(below(1350, 380) == 702 && !s2->follow_to(1350, 701, 1326) && below(1365, 380) == 701 &&
+                  s2->follow_to(1365, 700, 1341) == 702 && s2->follow_to(1365, 700, 1389) == 697 &&
+                  below(1341, 381) == 702 && below(1389, 381) == 697,
+              "C, at 1350: the small floor's end at 1337 lies within 24 px -- refused still; D, at 1365: 702 and 697 "
+              "either side, the one floor");
+    }
+
     int on = 0, exact = 0;
     std::string off;
     for (const MapPoint& p : kT52s2Points) {
@@ -985,20 +1316,24 @@ void test_game_files() {
         Feed f(false, 0, 0, 0, 0, 0);
         for (const MapPoint& p : kT52s1Own) f.stand(t, p.x, p.y);
         f.mobs(t, kT52s1Mobs);
-        check(!t.trusted() && t.report().why == Why::Naming && t.report().points == 7,
-              fmt("but 9 reports of yours within 60 px are 4 points 8 px or 4 px apart: with the 3 monsters, %d of "
-                  "12 -- not named yet",
+        check(!t.trusted() && t.report().why == Why::Naming && t.report().points == 4,
+              fmt("9 reports of yours within 60 px are 4 points 8 px or 4 px apart, and the 3 monsters' frames, one "
+                  "each, none: %d of 12",
                   t.report().points));
+        f.standing(t, kT52s1Mobs);
+        check(!t.trusted() && t.report().why == Why::Naming && t.report().points == 7,
+              fmt("with the 3 monsters standing, %d of 12 -- not named yet", t.report().points));
     }
     // The first 12 points apart in the log of 2026-11-03 22:36, in the order
-    // they came (gobot_gui_20261103_2224.log :55-:407).
+    // they came (gobot_gui_20261103_2224.log :55-:407) -- the monsters'
+    // standing, each in two of its frames at its height (2026.11.04b).
     {
         MapTrust t(&book);
         Feed f(false, 0, 0, 0, 0, 0);
-        f.mobs(t, { { 501, 2259 }, { 413, 2260 } });
-        f.mobs(t, { { 288, 2246 } });
+        f.standing(t, { { 501, 2259 }, { 413, 2260 } });
+        f.standing(t, { { 288, 2246 } });
         f.stand(t, 434, 2266);
-        f.mobs(t, { { 779, 2271 } });
+        f.standing(t, { { 779, 2271 } });
         for (const MapPoint& p : { MapPoint{ 440, 2268 }, MapPoint{ 431, 2265 }, MapPoint{ 415, 2260 },
                                    MapPoint{ 421, 2262 }, MapPoint{ 413, 2260 }, MapPoint{ 420, 2261 },
                                    MapPoint{ 402, 2259 }, MapPoint{ 442, 2269 }, MapPoint{ 460, 2269 },
@@ -1018,8 +1353,12 @@ void test_game_files() {
                   "t23_s13, misses 6 of them -- the margin (got %s, %s missing %d)",
                   files, t.stem().c_str(), r.next_best.c_str(), r.next_misses));
         f.stand(t, 1821, 360);
-        check(!t.trusted() && t.stem().empty() && t.report().why == Why::Naming,
-              "then you at 1821,360 -- a point of t52_s2, on no floor of t52_s1: let go of");
+        check(t.trusted() && t.stem() == "t52_s1" && t.report().own_off,
+              "then you at 1821,360 -- a point of t52_s2, on no floor of t52_s1: one, let pass");
+        f.wait(500);
+        f.stand(t, 1803, 360);
+        check(!t.trusted() && t.stem().empty() && t.report().why == Why::Naming && t.report().points == 2,
+              "and at 1803,360 half a second on: let go of, naming again from the two");
     }
     {
         // t52_s2 named by its live points the same way.
@@ -1031,15 +1370,58 @@ void test_game_files() {
               fmt("t52_s2's live points name t52_s2 (next best %s missing %d)", r.next_best.c_str(), r.next_misses));
     }
     {
-        // A map entry's numbers naming the wrong file: the first point off it.
+        // 2026-11-04, the player's first hunt with drops on: map entry 52/2
+        // at 880,274, by the 피스존 gate 881,267, trusted at 07:59:20.108;
+        // 61 ms on, a monster's frame at 1929,819 -- 31 px above floor 850,
+        // most likely a spawn still in the air -- took the file away until
+        // the next entry, and four monsters below went undropped to. Now it
+        // is counted and said, and nothing more.
+        MapTrust t(&book);
+        Feed f(true, 52, 2, 1, 880, 274);
+        f.pass(t);
+        const bool entry = t.trusted() && t.how() == How::Entry && t.stem() == "t52_s2";
+        const std::vector<std::string> log = info_lines([&] { f.frame(t, 17, 1929, 819); });
+        check(entry && t.trusted() && t.how() == How::Entry && t.report().why == Why::Trusted &&
+                  t.report().mob_off == 1 &&
+                  lines_with(log, "Hunter: 1 monster frame(s) off t52_s2's floors ignored (0 of them standing) -- "
+                                  "the last, slot 17 at 1929,819, 31 px above floor 850 (attr 1), 471 px below floor "
+                                  "348 (attr 1); a monster's point never lets a map file go") == 1 &&
+                  lines_with(log, "does not match") == 0,
+              "07:59:20.169, a monster's frame at 1929,819, 31 px above floor 850: said with its floors, still "
+              "trusted by the entry");
+        f.wait(400);
+        f.frame(t, 17, 1929, 849);      // landed, 30 px lower: its first frame there
+        f.wait(2000);
+        f.frame(t, 17, 1929, 849);      // its next stop at that height: it stands, on floor 850
+        for (const MapPoint& p : kT52s2Points) f.stand(t, p.x, p.y);
+        check(t.trusted() && t.how() == How::Entry && t.report().mob_off == 1 && !t.report().own_off,
+              fmt("then on floor 850, and you settled at t52_s2's %zu live points: trusted all along",
+                  kT52s2Points.size()));
+        // A monster in the air at one height frame after frame -- standing by
+        // the frames, but off the floors: never lets it go either.
+        for (int i = 0; i < 100; ++i) {
+            f.wait(400);
+            f.frame(t, 40, 1929, 819);
+        }
+        check(t.trusted() && t.how() == How::Entry && t.report().mob_off == 101,
+              fmt("a monster at 1929,819 in 100 frames 0.4 s apart: counted (%d), never let go of",
+                  t.report().mob_off));
+    }
+    {
+        // A map entry's numbers naming the wrong file: the second point of
+        // yours off it.
         MapTrust t(&book);
         Feed f(true, 52, 2, 1, 880, 274);
         f.pass(t);
         check(t.trusted() && t.how() == How::Entry && t.stem() == "t52_s2",
               "map entry 52/2 at 880,274 -- 1 px and 7 px from the 피스존 gate: t52_s2 trusted");
         f.stand(t, 434, 2266);
-        check(!t.trusted() && t.report().why == Why::Mismatch,
-              "you at 434,2266 -- t52_s1's ground, not t52_s2's: wrong file");
+        const bool one = t.trusted() && t.report().own_off;
+        f.wait(500);
+        f.stand(t, 440, 2268);
+        check(one && !t.trusted() && t.report().why == Why::Mismatch,
+              "you at 434,2266 and 440,2268 half a second on -- t52_s1's ground, not t52_s2's: wrong file at the "
+              "second");
         const struct {
             std::uint16_t map, area;
             int           x, y;
@@ -1061,6 +1443,7 @@ void test_map_book(void (*check_fn)(bool, const std::string&), void (*section_fn
     g_check = check_fn;
     g_section = section_fn;
     test_parse_map();
+    test_follow();
     test_parse_prj();
     test_book_files();
     test_trust_entry();

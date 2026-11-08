@@ -328,6 +328,55 @@ void test_bare_down_table() {
           "and other keys do -- " + p.said());
 }
 
+// ------------------------------------------------- GoBot's last key or click
+
+/// What inject() lets go out is noted for the map-entry line (2026.11.04d):
+/// the last key-down or button-down, a key by its name, anything typed as
+/// text and never which key or character; ups, moves and what was refused
+/// or not taken are not.
+void test_last_input() {
+    section("GoBot's last key or click, for the map-entry line: key names only, never what was typed");
+    using Kind = InputManager::LastInput::Kind;
+    Pretend p;
+    const std::uint64_t t0 = now_ms();
+    InputManager::pretend_inject({ kADown });
+    const InputManager::LastInput a = InputManager::last_input();
+    check(a.kind == Kind::Key && a.vk == 'A' && a.at_ms >= t0 && std::string(a.what) == "send a test's input",
+          "a key down: noted by its code, with when and what for -- " + InputManager::last_input_text(a, a.at_ms));
+    InputManager::pretend_inject({ kAUp });
+    InputManager::pretend_inject({ mouse(MOUSEEVENTF_MOVE) });
+    InputManager::pretend_inject({ kDownDown });
+    const InputManager::LastInput same_a = InputManager::last_input();
+    check(same_a.kind == Kind::Key && same_a.vk == 'A' && same_a.at_ms == a.at_ms,
+          "a key's up, a pointer's move and a bare ↓ refused: none noted");
+    InputManager::pretend_inject({ mouse(MOUSEEVENTF_MOVE), mouse(MOUSEEVENTF_RIGHTDOWN) });
+    const InputManager::LastInput right = InputManager::last_input();
+    check(right.kind == Kind::Mouse && right.vk == 2, "a right press after a move: the right mouse button");
+    InputManager::pretend_inject({ kADown, key(0, 'q', KEYEVENTF_UNICODE) });
+    const InputManager::LastInput typed = InputManager::last_input();
+    const std::string typed_text = InputManager::last_input_text(typed, typed.at_ms + 2400);
+    check(typed.kind == Kind::Text && typed.vk == 0 &&
+              typed_text == "typed text 2.4 s before (send a test's input)" && typed_text.find('q') == std::string::npos,
+          "a Unicode character, the last down of its array: text, its code kept nowhere -- " + typed_text);
+    p.takes = [](std::size_t, const std::vector<Ev>&) { return 0u; };
+    InputManager::pretend_inject({ kADown });
+    check(InputManager::last_input().kind == Kind::Text, "an array Windows took none of: not noted");
+    InputManager::LastInput made;
+    made.kind = Kind::Key;
+    made.vk = 0x27;
+    made.at_ms = 10'000;
+    made.what = "press a key";
+    InputManager::LastInput click;
+    click.kind = Kind::Mouse;
+    click.vk = 1;
+    click.at_ms = 13'000;
+    check(InputManager::last_input_text(made, 12'400) == "key Right 2.4 s before (press a key)" &&
+              InputManager::last_input_text(click, 12'700) == "the left mouse button 0.3 s after" &&
+              InputManager::last_input_text(InputManager::LastInput{}, 5'000) == "none since GoBot started",
+          "its words: the key's name and how long before or after, the button, or none -- " +
+              InputManager::last_input_text(made, 12'400));
+}
+
 // ------------------------------------------------------------ the press
 
 /// One drop, on a manager aimed at a window that is only a number.
@@ -939,6 +988,15 @@ void test_drop_sources() {
               before(tick, "simple_note(drop_stopped_vi_, 15000);", "drop_tick();"),
           "and says so in the red line under BẮT ĐẦU, as drop_tick would: the hunt it stopped there is no longer "
           "drop_tick's to say");
+
+    // GoBot's last key or click (2026.11.04d): noted after the switch let it
+    // go, type_key's letters as text.
+    const std::string noted = "note_went_down(in, went, what, t_typing);";
+    const std::size_t sent = inject.find("SendInput(count, in, sizeof(INPUT))");
+    check(before(body(im, "bool InputManager::type_key("), "const Typing typing;", "inject(down, n, \"type a key\")") &&
+              before(inject, "p->send(events, chord)", noted) && sent != std::string::npos &&
+              inject.find(noted, sent) != std::string::npos && count(im, noted) == 2,
+          "last_input: what Windows took -- or the pretend sender -- noted, type_key's letters as text");
 #else
     skip("no source folder\n");
 #endif
@@ -951,6 +1009,7 @@ void test_drop_key(void (*check_fn)(bool, const std::string&), void (*section_fn
     g_section = section_fn;
     test_drop_events();
     test_bare_down_table();
+    test_last_input();
     test_drop_press();
     test_drop_cut_and_owed();
     test_release_stray();

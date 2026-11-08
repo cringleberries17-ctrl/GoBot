@@ -9348,6 +9348,23 @@ void test_no_real_input() {
         });
         check(drop_n == 1 && drop.sent == InputManager::DropSent::NotSent && drop.down_ms == 0 && asked == 0,
               "Ctrl + ↓ is refused, once, before go_on or the window is asked: NotSent");
+        // The jumps up (2026.11.05b): Ctrl + ↑, ↑↑ and ↑ the same way.
+        InputManager::DropPress high;
+        high.sent = InputManager::DropSent::Sent;
+        InputManager::JumpPress twice, once;
+        twice.sent = InputManager::JumpSent::Both;
+        once.sent = InputManager::JumpSent::First;
+        const auto counted = [&] {
+            ++asked;
+            return true;
+        };
+        const auto high_n = refusals_in([&] { high = keys.high_jump(counted); });
+        const auto twice_n = refusals_in([&] { twice = keys.jump_twice(VK_UP, 340, counted); });
+        const auto once_n = refusals_in([&] { once = keys.jump_once(VK_UP, counted); });
+        check(high_n == 1 && high.sent == InputManager::DropSent::NotSent && twice_n == 1 &&
+                  twice.sent == InputManager::JumpSent::NotSent && once_n == 1 &&
+                  once.sent == InputManager::JumpSent::NotSent && asked == 0,
+              "so are Ctrl + ↑, ↑↑ and ↑, once each, before go_on is asked: NotSent");
         int ups = -1;
         check(refusals_in([&] { ups = keys.release_stray_drop_keys(); }) == 1 && ups == 0,
               "so is letting go of a ↓ or Ctrl left down");
@@ -19414,6 +19431,20 @@ void test_position_wiring() {
                   ticks.find("packets_minute(now);") != npos,
               "positions_tick runs while the packets are wanted, hunt or no hunt: the map entries said and the "
               "Packets line written all session, a finished job taken in");
+        // 2026.11.04d (F13): a map entry's line says who took the character
+        // there -- your last report before it, by the 1-s sample taken after
+        // the entries are said; GoBot's last key or click by its name; the
+        // PC's last input. Nothing typed, nothing read from a file.
+        const std::string entries = body_of(gui, "void GuiApp::note_map_entries() {");
+        const std::size_t entry_said = ticks.find("note_map_entries();");
+        const std::size_t sampled = ticks.find("own_seen_.report_ms = v.me.report_ms;");
+        check(entry_said != npos && sampled != npos && entry_said < sampled &&
+                  entries.find("own_seen_.epoch < epoch") != npos &&
+                  entries.find("InputManager::last_input_text(InputManager::last_input(), ws.entry_ms)") != npos &&
+                  entries.find("GetLastInputInfo(&last)") != npos && entries.find("; the PC's last input") != npos &&
+                  entries.find("IniFile") == npos && entries.find("std::ifstream") == npos,
+              "note_map_entries: the last report before the entry, GoBot's last key or click and the PC's last "
+              "input -- the sample kept after the entries are said, no file read");
         check(wanted.find("PacketPositions::Off") != npos && wanted.find("position_capture_off_") != npos,
               "packets_wanted: unless packet_positions is Off or the capture was stopped by hand");
         check(!ticks.empty() && !wanted.empty() && !job.empty() && !watch.empty() &&
@@ -20541,6 +20572,9 @@ void test_hunter_style(void (*check)(bool, const std::string&), void (*section)(
 void test_jump(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The drop's key, Ctrl + ↓, and inject() refusing ↓ any other way, in drop_key_test.cpp.
 void test_drop_key(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The jumps' keys (2026.11.05b): Ctrl + ↑ as the drop's chord with ↑, ↑↑ timed
+// from the first ↑, ↑ alone, and a stray ↑ let go of, in jump_key_test.cpp.
+void test_jump_key(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The game's own map files -- floors read planar, gates from the .prj -- and
 // which map you are on, from a map entry or named from standing points, in
 // map_book_test.cpp.
@@ -20549,6 +20583,36 @@ void test_map_book(void (*check)(bool, const std::string&), void (*section)(cons
 // pretend game laid over made-up map files, its settings, and GoBot's window
 // around it, in drop_hunt_test.cpp.
 void test_drop_hunt(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The map tab's core: the floors drawn as runs, the gate's no-drop marks, the
+// canvas's camera, the hunting zone -- its grips, drags, checks and
+// spots.ini -- which map the tab knows and its worker's job, in map_tab_test.cpp.
+void test_map_tab(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The hunter in the map tab's hunting area against t52_s2's own floors
+// (2026.11.04d): a walk kept in the box, the way back, monsters above, the
+// stop above a target below and the drop on slopes, in zone_hunt_test.cpp.
+void test_zone_hunt(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Jumping straight up onto a floor above (2026.11.05b): the planner -- the
+// keys' peaks, the column rule, the take-off chosen, the runs over the owner's
+// boxes and the way back with jumps -- in jump_plan_test.cpp.
+void test_jump_plan(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The hunter's jumps up (2026.11.05b): the rule's refusals, the way back by
+// Ctrl + ↑, a monster on the ledge, falls back and the latches, ↑↑ on a
+// made-up staircase, and jump_up off -- in jump_hunt_test.cpp.
+void test_jump_hunt(void (*check)(bool, const std::string&), void (*section)(const char*));
+// "Tự tìm quái trong vùng" (2026.11.05b), its pure parts: where a monster is
+// placed on its floor, the box's floors got to, each monster's attack point
+// and the way back unchanged -- in hunt_seek_test.cpp.
+void test_hunt_seek(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The hunter seeking in the map tab's area (2026.11.05b): the hunt of
+// 2026-11-05 23:02 replayed, out of view, nothing reachable, a jump up for a
+// monster sought, switches, long walks, a monster not found, drops, and the
+// setups left as they were -- in seek_hunt_test.cpp.
+void test_seek_hunt(void (*check)(bool, const std::string&), void (*section)(const char*));
+// What GoBot's window says and draws of the jumps up and the seek
+// (2026.11.05b): why a tick cannot work, the card's lines, the map tab's arrow
+// and marks, and where only the window's source says it, its source -- in
+// hunt_card_test.cpp.
+void test_hunt_card(void (*check)(bool, const std::string&), void (*section)(const char*));
 // Skills that follow the fight, in skills_test.cpp.
 void test_skills(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The packet world -- you and every monster from the game's frames -- and the
@@ -20724,8 +20788,16 @@ int main() {
     test_hunter_style(check, section);
     test_jump(check, section);
     test_drop_key(check, section);
+    test_jump_key(check, section);
     test_map_book(check, section);
     test_drop_hunt(check, section);
+    test_map_tab(check, section);
+    test_zone_hunt(check, section);
+    test_jump_plan(check, section);
+    test_jump_hunt(check, section);
+    test_hunt_seek(check, section);
+    test_seek_hunt(check, section);
+    test_hunt_card(check, section);
     test_skills(check, section);
     test_packet_world(check, section);
     test_packet_eyes(check, section);

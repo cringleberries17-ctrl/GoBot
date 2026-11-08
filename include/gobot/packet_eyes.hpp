@@ -26,7 +26,9 @@
 // packet_dy in hunt.ini change how the two are laid over each other without a
 // new build, and the log line prints what was measured beside them.
 
+#include "gobot/hunt_seek.hpp"
 #include "gobot/hunter.hpp"
+#include "gobot/map_book.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/packet_world.hpp"
 #include "gobot/tcp_reassembler.hpp"
@@ -34,6 +36,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -179,6 +182,19 @@ public:
         /// handed on as the hunter's Eyes::takeoffs for its drops. Unset:
         /// none.
         std::function<std::optional<std::uint64_t>()> takeoffs;
+        /// Your take-offs and landings by kind (GuiApp::packet_air_counts)
+        /// and your own reports since a moment (GuiApp::packet_own_since),
+        /// handed on as the hunter's Eyes::air and Eyes::own_since for its
+        /// jumps up (2026.11.05b). Unset: none, and no jump up goes.
+        std::function<std::optional<PacketWorld::AirCounts>()>           air;
+        std::function<std::vector<PacketWorld::OwnTrace>(std::uint64_t)> own_since;
+        /// The map file the monsters are placed on (mob_place), asked once a
+        /// frame(): the map tab's, while the hunter goes by its area with
+        /// "Tự tìm quái trong vùng" on (2026.11.05b) -- the floors its dots
+        /// are drawn on, none for a file found off. Unset, or null: the
+        /// packets' own points, as 2026.11.05 had them, and a seek list whose
+        /// monsters stand on no floor.
+        std::function<std::shared_ptr<const GameMapBook::Page>()> floors;
     };
 
     enum class Source : std::uint8_t { Screen, Packets };
@@ -232,10 +248,37 @@ public:
     /// every blow still shows on its bar -- and a killed one at 0 for
     /// kDeadShownMs. Its number is then the world's updates. With the
     /// screen as the source, the screen's three are passed through untouched.
+    ///
+    /// With a map file (Inputs::floors) and kPlatesOnFloors, a living
+    /// monster's plate stands where mob_place puts it -- on its floor, a walk
+    /// run out followed on -- and the box is judged there (2026.11.05b);
+    /// without one, at the packets' own point, as before.
     std::uint64_t          frame();
     bool                   player(Nameplate& out, bool* fresh);
     std::vector<Nameplate> mobs();
     std::uint32_t          view() const { return view_.load(); }
+
+    /// The whole map's living monsters as the seek has them, from the last
+    /// frame()'s view: placed on the file's floors (mob_place, projected),
+    /// with no box round you -- "Tự tìm quái trong vùng" goes to any of them
+    /// inside the map tab's area. True only while the packets steer (no
+    /// hand-over) with the map tab's floors to place them on (Inputs::
+    /// floors): otherwise false, and `out` empty -- with no floors every
+    /// monster would be on none, and the seek would stand.
+    bool world(std::vector<SeekMob>& out);
+
+    /// The last frame()'s plates, for the Positions line: of the map's living
+    /// monsters, how many in view, the box, and how they were placed.
+    struct PlateCounts {
+        int  alive = 0;
+        int  in_view = 0;
+        int  half_w = 0, half_h = 0;
+        bool floors = false;    ///< placed on a map file's floors
+        int  walking = 0;       ///< plates on their floor by a walk: followed, held at its end, or projected
+        int  projected = 0;     ///< ... of them a walk run out, followed on
+        int  set_down = 0;      ///< plates set down on their floor
+    };
+    PlateCounts plates() const;
 
     /// Where the packets put you (world_fix), as the last frame() worked it
     /// out from its view -- the packets steering or only watched. False, and
@@ -243,12 +286,13 @@ public:
     /// From any thread.
     bool where(WorldFix& out);
 
-    /// The monsters standing where their own frame put them, from the same
-    /// view: alive, not walking, and no speed of a walk or a blow on them --
-    /// a stop's place, never one worked out. In world pixels, with the
-    /// frame's time: standing points for the map the hunter's drops go by
-    /// (MapTrust). Every one of the map's, not only those in the box. None
-    /// with packet_positions off. From any thread.
+    /// The monsters where their own frame put them, from the same view:
+    /// alive, not walking, and no speed of a walk or a blow on them -- a
+    /// stop's place, or a spawn's in the air above its floor, never one worked
+    /// out. In world pixels, with the frame's time and the monster's
+    /// generation: standing points for the map the hunter's drops go by once
+    /// two frames of one monster agree (MapTrust). Every one of the map's, not
+    /// only those in the box. None with packet_positions off. From any thread.
     std::vector<MapTrust::Mob> stands();
     static constexpr std::size_t kStandsMax = 64;
 
@@ -281,14 +325,16 @@ public:
 
 private:
     std::uint64_t clock() const;
-    /// The pass's plates from `v`, under the lock.
-    void make_plates(const PacketWorld::View& v, const HunterConfig& cfg, std::uint64_t now);
+    /// The pass's plates from `v`, under the lock -- on `floors` when given
+    /// -- and the seek's whole map.
+    void make_plates(const PacketWorld::View& v, const HunterConfig& cfg, std::uint64_t now,
+                     const GameMapBook::Page* floors);
 
     const PacketWorld& world_;
     Screen             screen_;
     Inputs             inputs_;
 
-    std::mutex             mutex_;              ///< what the hunter's thread works with
+    mutable std::mutex     mutex_;              ///< what the hunter's thread works with
     bool                   healthy_ = false;    ///< steering would be healthy since healthy_since_ms_
     std::uint64_t          healthy_since_ms_ = 0;
     bool                   was_healthy_ = false;   ///< at the last pass, for healthy_ms
@@ -299,6 +345,9 @@ private:
     Nameplate              me_;
     bool                   me_fresh_ = false;
     std::vector<Nameplate> mobs_;
+    std::vector<SeekMob>   seek_world_;         ///< the last packets' frame()'s: world()
+    bool                   seek_floors_ = false; ///< ... placed on the map tab's floors: world() true only then
+    PlateCounts            plates_;
     WorldFix               fix_;                ///< the last frame()'s: where()
     bool                   fix_on_ = false;     ///< it was worked out: the packets watched
     std::vector<MapTrust::Mob> stands_;         ///< the last frame()'s: stands()
@@ -328,6 +377,14 @@ private:
     std::atomic<std::uint64_t> handovers_capped_{0};
     std::atomic<std::uint64_t> handover_ms_{0};
 };
+
+/// The monsters of `v` where their own frame put them -- alive, not walking,
+/// and no speed of a walk or a blow on them -- as MapTrust's standing points
+/// are made of them: rounded to world pixels, with the frame's time and the
+/// monster's generation, in slot order, `max` at most. What stands() hands the
+/// hunter's drops, and what the map tab's own MapTrust looks at (2026.11.04c):
+/// one rule for both.
+std::vector<MapTrust::Mob> packet_stands(const PacketWorld::View& v, std::size_t max = PacketEyes::kStandsMax);
 
 // ------------------------------------------------------ the detector's pace
 

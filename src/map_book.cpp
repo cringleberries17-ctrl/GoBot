@@ -106,6 +106,98 @@ std::optional<MapFloor> GameMapBook::Page::floor_below(int x, int y, int gap) co
     return std::nullopt;
 }
 
+MapTrail GameMapBook::Page::follow(int x, int y, int dir, int max_px) const {
+    MapTrail t;
+    const std::optional<MapFloor> start = floor_near(x, y);
+    if (!start || start->wall()) return t;
+    const int step = dir < 0 ? -1 : 1;
+    const int w = floors.w_px();
+    t.pts.push_back({ x, start->y });
+    for (;;) {
+        const MapPoint last = t.pts.back();
+        if (std::abs(last.x - x) >= max_px) return t;
+        // The next column's floor nearest the last top, within kFollowLinkPx;
+        // with none, the columns after it, across a hole of kFollowHolePx.
+        const MapFloor* next = nullptr;
+        int at = last.x;
+        for (int gap = 1; gap <= kFollowHolePx + 1 && next == nullptr; ++gap) {
+            at = last.x + step * gap;
+            if (at < 0 || at >= w) {
+                t.stop = true;      // the map's edge: no walking on, nor off
+                return t;
+            }
+            for (const MapFloor& f : floors.at(at)) {
+                const int d = std::abs(f.y - last.y);
+                if (d <= kFollowLinkPx && (next == nullptr || d < std::abs(next->y - last.y))) next = &f;
+            }
+        }
+        if (next == nullptr) {
+            t.ledge = true;
+            return t;
+        }
+        if (next->wall()) {
+            t.stop = true;
+            return t;
+        }
+        t.pts.push_back({ at, next->y });
+    }
+}
+
+std::optional<int> GameMapBook::Page::follow_to(int x, int y, int to_x) const {
+    const MapTrail t = follow(x, y, to_x < x ? -1 : 1, std::abs(to_x - x));
+    // The last point not past to_x: to_x's own, or the one before its hole.
+    const MapPoint* got = nullptr;
+    bool reached = false;
+    for (const MapPoint& p : t.pts) {
+        const bool past = to_x < x ? p.x < to_x : p.x > to_x;
+        if (p.x == to_x || past) reached = true;
+        if (!past) got = &p;
+    }
+    if (!reached || got == nullptr) return std::nullopt;
+    return got->y;
+}
+
+std::string GameMapBook::Page::gap_text(int x, int y) const {
+    char text[160];
+    if (x < 0 || x >= floors.w_px()) {
+        std::snprintf(text, sizeof text, "outside the map's %d px across", floors.w_px());
+        return text;
+    }
+    const std::span<const MapFloor> column = floors.at(x);
+    if (column.empty()) return "no floor in its column";
+    if (const std::optional<MapFloor> on = floor_near(x, y)) {
+        std::snprintf(text, sizeof text, "on floor %d (attr %u)", on->y, static_cast<unsigned>(on->attr));
+        return text;
+    }
+    // Top first: the first floor lower than the point is the nearest below
+    // it, the last one not lower the nearest above.
+    const MapFloor* below = nullptr;
+    const MapFloor* above = nullptr;
+    for (const MapFloor& f : column) {
+        if (f.y > y) {
+            if (below == nullptr) below = &f;
+        } else {
+            above = &f;
+        }
+    }
+    std::string s;
+    if (below != nullptr) {
+        std::snprintf(text, sizeof text, "%d px above floor %d (attr %u)", below->y - y, below->y,
+                      static_cast<unsigned>(below->attr));
+        s = text;
+    } else {
+        s = "no floor below it";
+    }
+    if (above != nullptr) {
+        std::snprintf(text, sizeof text, ", %d px below floor %d (attr %u)", y - above->y, above->y,
+                      static_cast<unsigned>(above->attr));
+        s += text;
+    } else {
+        s += ", no floor above it";
+    }
+    return s;
+}
+
 std::optional<MapFloors> GameMapBook::parse_map(const Bytes& file) {
     if (file.size() < 8) return std::nullopt;
     const std::int32_t w = i32_at(file.data());
@@ -475,6 +567,57 @@ bool GameMapBook::distrusted(const std::string& stem) const {
     return distrusted_.count(stem) != 0;
 }
 
+void GameMapBook::learn_no_jump(const std::string& stem, const NoJump& n) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<NoJump>& v = learned_[stem].no_jump;
+    if (v.size() >= kLearnedMax) v.erase(v.begin());
+    v.push_back(n);
+}
+
+std::vector<GameMapBook::NoJump> GameMapBook::no_jumps(const std::string& stem) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = learned_.find(stem);
+    return it == learned_.end() ? std::vector<NoJump>{} : it->second.no_jump;
+}
+
+bool GameMapBook::unlearn_no_jump(const std::string& stem, MapPoint take) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = learned_.find(stem);
+    if (it == learned_.end()) return false;
+    std::vector<NoJump>& v = it->second.no_jump;
+    const auto at = std::find_if(v.begin(), v.end(), [&](const NoJump& n) {
+        return n.take.x == take.x && n.take.y == take.y;
+    });
+    if (at == v.end()) return false;
+    v.erase(at);
+    return true;
+}
+
+void GameMapBook::learn_solid(const std::string& stem, MapPoint on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<MapPoint>& v = learned_[stem].solid;
+    if (std::any_of(v.begin(), v.end(), [&](const MapPoint& q) { return q.x == on.x && q.y == on.y; })) return;
+    if (v.size() >= kLearnedMax) v.erase(v.begin());
+    v.push_back(on);
+}
+
+std::vector<MapPoint> GameMapBook::solid_floors(const std::string& stem) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = learned_.find(stem);
+    return it == learned_.end() ? std::vector<MapPoint>{} : it->second.solid;
+}
+
+bool GameMapBook::unlearn_solid(const std::string& stem, MapPoint on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = learned_.find(stem);
+    if (it == learned_.end()) return false;
+    std::vector<MapPoint>& v = it->second.solid;
+    const auto at = std::find_if(v.begin(), v.end(), [&](const MapPoint& q) { return q.x == on.x && q.y == on.y; });
+    if (at == v.end()) return false;
+    v.erase(at);
+    return true;
+}
+
 // ------------------------------------------------------------------- trust
 
 const char* MapTrust::why_text(Why w) {
@@ -486,7 +629,7 @@ const char* MapTrust::why_text(Why w) {
         case Why::NoFile:     return "no map file for this map";
         case Why::NoGates:    return "its .prj lists no gate";
         case Why::Distrusted: return "a drop found its file wrong this session";
-        case Why::Mismatch:   return "a standing point off its file's floors";
+        case Why::Mismatch:   return "two standing points of yours off its file's floors";
         case Why::Confirming: return "map entry not by a gate: standing points being checked";
         case Why::Naming:     return "map entry not seen: naming it from standing points";
         case Why::Ambiguous:  return "map entry not seen: more than one map file fits";
@@ -494,7 +637,7 @@ const char* MapTrust::why_text(Why w) {
     return "?";
 }
 
-MapTrust::MapTrust(GameMapBook* book) : book_(book) {}
+MapTrust::MapTrust(GameMapBook* book, const char* who) : book_(book), who_(who ? who : "Hunter") {}
 
 void MapTrust::set_book(GameMapBook* book) {
     book_ = book;
@@ -511,11 +654,22 @@ void MapTrust::reset() {
     entry_spent_ = false;
     mismatch_ = false;
     miss_ = {};
+    miss_gap_.clear();
     confirm_.clear();
     said_no_gate_ = false;
     said_not_by_gate_ = false;
+    own_off_ = false;
+    own_off_at_ = {};
+    own_off_ms_ = 0;
+    own_off_gap_.clear();
+    mob_off_ = 0;
+    mob_off_new_ = 0;
+    mob_off_new_standing_ = 0;
+    mob_off_last_.clear();
     clear_naming();
-    // own_seen_ms_ and mob_seen_ stay: a report is never taken twice.
+    // own_seen_ms_ and mob_seen_ stay: a report is never taken twice, and a
+    // monster's generation tells another in its slot. So do the times things
+    // were last said: never more often than they say.
 }
 
 void MapTrust::clear_naming() {
@@ -530,9 +684,11 @@ void MapTrust::clear_naming() {
 
 void MapTrust::lose(const char* why) {
     if (trusted_)
-        GB_INFO("Hunter: the game's map file %s is no longer gone by -- %s", stem_.c_str(), why ? why : "let go of");
+        GB_INFO("%s: the game's map file %s is no longer gone by -- %s", who_.c_str(), stem_.c_str(),
+                why ? why : "let go of");
     const bool mismatch = mismatch_;
     const MapPoint miss = miss_;
+    std::string miss_gap = miss_gap_;
     std::string stem = stem_;
     reset();
     // Still this entry's stay: a file found wrong stays so, and its spawn by
@@ -541,6 +697,7 @@ void MapTrust::lose(const char* why) {
         stem_ = std::move(stem);
         mismatch_ = mismatch;
         miss_ = miss;
+        miss_gap_ = std::move(miss_gap);
         entry_spent_ = true;
     }
 }
@@ -553,18 +710,102 @@ std::vector<MapTrust::Stand> MapTrust::standing_points(const Look& look) {
         // air above its floor (t1_s4, 2026-11-03: 20 px): never a standing point.
         const bool spawn = std::abs(look.rx - look.entry_x) <= kEntrySpawnPx &&
                            std::abs(look.ry - look.entry_y) <= kEntrySpawnPx;
-        if (!spawn) out.push_back({ { look.rx, look.ry }, true });
+        if (!spawn) {
+            Stand s;
+            s.at = { look.rx, look.ry };
+            s.own = true;
+            s.standing = true;
+            s.at_ms = look.report_ms;
+            out.push_back(s);
+        }
     }
+    // A monster's frame, each once: it stands once a later frame of the same
+    // monster puts it at the same height kMobStandMs on. A spawn is 9-36 px
+    // above its floor, a frame in the air anywhere: neither alone is a point.
     if (mob_seen_.size() > 1024) mob_seen_.clear();
     for (const Mob& m : look.mobs) {
-        auto [it, fresh] = mob_seen_.try_emplace(m.slot, m.at_ms);
-        if (!fresh) {
-            if (it->second == m.at_ms) continue;
-            it->second = m.at_ms;
+        auto [it, fresh] = mob_seen_.try_emplace(m.slot);
+        MobSeen& seen = it->second;
+        if (!fresh && seen.gen == m.gen && seen.last_ms == m.at_ms) continue;
+        Stand s;
+        s.at = m.at;
+        s.slot = m.slot;
+        s.at_ms = m.at_ms;
+        if (fresh || seen.gen != m.gen) {
+            // A slot first seen, or another monster in it: its first frame.
+            seen = MobSeen{ m.gen, m.at_ms, m.at.y, m.at_ms };
+        } else {
+            seen.last_ms = m.at_ms;
+            if (std::abs(m.at.y - seen.y) > kMobSameYPx) {
+                seen.y = m.at.y;
+                seen.y_ms = m.at_ms;
+            } else {
+                s.standing = m.at_ms >= seen.y_ms + kMobStandMs;
+            }
         }
-        out.push_back({ m.at, false });
+        out.push_back(s);
     }
     return out;
+}
+
+void MapTrust::note_mobs(const std::vector<Stand>& points, const GameMapBook::Page& page, const std::string& stem,
+                         std::uint64_t now) {
+    for (const Stand& s : points) {
+        if (s.own || page.on_floor(s.at)) continue;
+        ++mob_off_;
+        ++mob_off_new_;
+        if (s.standing) ++mob_off_new_standing_;
+        char text[256];
+        std::snprintf(text, sizeof text, "slot %u at %d,%d, %s", static_cast<unsigned>(s.slot), s.at.x, s.at.y,
+                      page.gap_text(s.at.x, s.at.y).c_str());
+        mob_off_last_ = text;
+    }
+    if (mob_off_new_ == 0 || (mob_off_said_ && now < mob_off_said_ms_ + kMobOffSayMs)) return;
+    GB_INFO("%s: %d monster frame(s) off %s's floors ignored (%d of them standing) -- the last, %s; a monster's "
+            "point never lets a map file go",
+            who_.c_str(), mob_off_new_, stem.c_str(), mob_off_new_standing_, mob_off_last_.c_str());
+    mob_off_said_ = true;
+    mob_off_said_ms_ = now;
+    mob_off_new_ = 0;
+    mob_off_new_standing_ = 0;
+}
+
+bool MapTrust::own_lets_go(const Stand& s, const GameMapBook::Page& page, const std::string& stem,
+                           std::uint64_t now, std::string& why) {
+    if (page.on_floor(s.at)) {
+        if (own_off_)
+            GB_DEBUG("%s: you on %s's floors again at %d,%d -- the point off them at %d,%d let pass", who_.c_str(),
+                     stem.c_str(), s.at.x, s.at.y, own_off_at_.x, own_off_at_.y);
+        own_off_ = false;
+        return false;
+    }
+    const std::string gap = page.gap_text(s.at.x, s.at.y);
+    if (own_off_ && s.at_ms >= own_off_ms_ + kOwnOffApartMs) {
+        char text[512];
+        std::snprintf(text, sizeof text,
+                      "%s; before it, %d,%d %.1f s earlier: %s; none of yours on its floors between", gap.c_str(),
+                      own_off_at_.x, own_off_at_.y, static_cast<double>(s.at_ms - own_off_ms_) / 1000.0,
+                      own_off_gap_.c_str());
+        why = text;
+        return true;
+    }
+    if (own_off_) return false;     // within kOwnOffApartMs of the first: the first is kept
+    own_off_ = true;
+    own_off_at_ = s.at;
+    own_off_ms_ = s.at_ms;
+    own_off_gap_ = gap;
+    if (!own_off_said_ || now >= own_off_said_ms_ + kOwnOffSayMs) {
+        own_off_said_ = true;
+        own_off_said_ms_ = now;
+        GB_INFO("%s: you stand at %d,%d, on no floor of %s's file -- %s; one point is let pass: only a second of "
+                "yours off its floors, %llu ms or more later with none on them between, lets the file go",
+                who_.c_str(), s.at.x, s.at.y, stem.c_str(), gap.c_str(),
+                static_cast<unsigned long long>(kOwnOffApartMs));
+    } else {
+        GB_DEBUG("%s: you stand at %d,%d, on no floor of %s's file -- %s; let pass", who_.c_str(), s.at.x, s.at.y,
+                 stem.c_str(), gap.c_str());
+    }
+    return false;
 }
 
 void MapTrust::update(const Look& look, std::uint32_t work_ms) {
@@ -574,9 +815,9 @@ void MapTrust::update(const Look& look, std::uint32_t work_ms) {
     }
     if (!look.capture) {
         if (trusted_)
-            GB_INFO("Hunter: the game's map file %s is no longer gone by -- the packets lost you (the capture stopped "
+            GB_INFO("%s: the game's map file %s is no longer gone by -- the packets lost you (the capture stopped "
                     "or started again)",
-                    stem_.c_str());
+                    who_.c_str(), stem_.c_str());
         if (epoch_set_ && entry_mode_) {
             lost_set_ = true;
             lost_epoch_ = epoch_;
@@ -585,6 +826,7 @@ void MapTrust::update(const Look& look, std::uint32_t work_ms) {
             lost_stem_ = stem_;
             lost_mismatch_ = mismatch_;
             lost_miss_ = miss_;
+            lost_miss_gap_ = miss_gap_;
         }
         reset();
         epoch_set_ = false;
@@ -595,7 +837,7 @@ void MapTrust::update(const Look& look, std::uint32_t work_ms) {
     // afresh, and so does one first seen with the map named before it.
     if (!epoch_set_ || look.epoch != epoch_ || look.map_known != entry_mode_) {
         if (trusted_ && epoch_set_)
-            GB_INFO("Hunter: the game's map file %s is no longer gone by -- %s", stem_.c_str(),
+            GB_INFO("%s: the game's map file %s is no longer gone by -- %s", who_.c_str(), stem_.c_str(),
                     look.epoch != epoch_ ? "a map entry" : "the map's entry seen");
         reset();
         epoch_set_ = true;
@@ -623,6 +865,7 @@ void MapTrust::by_entry(const Look& look, const std::vector<Stand>& points) {
         if (lost_set_ && lost_epoch_ == epoch_ && lost_mismatch_ && lost_stem_ == stem) {
             mismatch_ = true;
             miss_ = lost_miss_;
+            miss_gap_ = lost_miss_gap_;
         }
     }
     if (!entry_learned_) {
@@ -636,19 +879,27 @@ void MapTrust::by_entry(const Look& look, const std::vector<Stand>& points) {
         why_ = Why::NoFile;
         return;
     }
+    // The monsters' frames off its floors: counted and said, never more.
+    note_mobs(points, *page_, stem, look.now_ms);
     if (mismatch_) {
         why_ = Why::Mismatch;
         return;
     }
+    // Yours: a second off its floors, kOwnOffApartMs after the first with
+    // none on them between, and it is not gone by until the next entry.
     for (const Stand& s : points) {
-        if (page_->on_floor(s.at)) continue;
+        if (!s.own) continue;
+        std::string why;
+        if (!own_lets_go(s, *page_, stem, look.now_ms, why)) continue;
         mismatch_ = true;
         miss_ = s.at;
+        miss_gap_ = page_->gap_text(s.at.x, s.at.y);
+        own_off_ = false;
         trusted_ = false;
         how_ = How::None;
-        GB_WARN("Hunter: the game's map file %s does not match where %s (%d,%d) -- no drops on it until the next map "
-                "entry",
-                stem.c_str(), s.own ? "you stand" : "a monster stands", s.at.x, s.at.y);
+        GB_WARN("%s: the game's map file %s does not match where you stand (%d,%d) -- no drops on it until the "
+                "next map entry (%s)",
+                who_.c_str(), stem.c_str(), s.at.x, s.at.y, why.c_str());
         why_ = Why::Mismatch;
         return;
     }
@@ -661,7 +912,7 @@ void MapTrust::by_entry(const Look& look, const std::vector<Stand>& points) {
     if (page_->gates.empty()) {
         if (!said_no_gate_) {
             said_no_gate_ = true;
-            GB_INFO("Hunter: %s -- its .prj %s, so its file is not gone by", stem.c_str(),
+            GB_INFO("%s: %s -- its .prj %s, so its file is not gone by", who_.c_str(), stem.c_str(),
                     page_->prj_read ? "lists no gate" : "was not found");
         }
         why_ = Why::NoGates;
@@ -683,52 +934,76 @@ void MapTrust::by_entry(const Look& look, const std::vector<Stand>& points) {
             trusted_ = true;
             how_ = How::Entry;
             why_ = Why::Trusted;
-            GB_INFO("Hunter: %s from the game's files: %zu gate(s) (%s), floors %dx%d -- trusted: map entry %d,%d is "
+            GB_INFO("%s: %s from the game's files: %zu gate(s) (%s), floors %dx%d -- trusted: map entry %d,%d is "
                     "by a gate",
-                    stem.c_str(), page_->gates.size(), gates_text(page_->gates).c_str(), page_->floors.w_px(),
-                    page_->floors.h_px(), look.entry_x, look.entry_y);
+                    who_.c_str(), stem.c_str(), page_->gates.size(), gates_text(page_->gates).c_str(),
+                    page_->floors.w_px(), page_->floors.h_px(), look.entry_x, look.entry_y);
             return;
         }
         if (!said_not_by_gate_) {
             said_not_by_gate_ = true;
-            GB_INFO("Hunter: %s -- map entry %d,%d is by none of its %zu gate(s) (%s): its file is gone by after %d "
+            GB_INFO("%s: %s -- map entry %d,%d is by none of its %zu gate(s) (%s): its file is gone by after %d "
                     "standing points on its floors",
-                    stem.c_str(), look.entry_x, look.entry_y, page_->gates.size(), gates_text(page_->gates).c_str(),
-                    kTrustPoints);
+                    who_.c_str(), stem.c_str(), look.entry_x, look.entry_y, page_->gates.size(),
+                    gates_text(page_->gates).c_str(), kTrustPoints);
         }
     }
-    // (b) Standing points on its floors, spread out.
+    // (b) Standing points on its floors, spread out: yours, and the monsters'
+    // that stand -- a monster's frame alone is none. A monster that STANDS off
+    // them is a miss, as it is to a name: the points so far count no more. Only
+    // here, before trust: trust had is never touched by a monster. Not while a
+    // point of yours off them is let pass: one of yours on them first.
     for (const Stand& s : points) {
+        if (s.own || !s.standing || page_->on_floor(s.at)) continue;
+        if (!confirm_.empty() && (!confirm_cut_said_ || look.now_ms >= confirm_cut_said_ms_ + kMobOffSayMs)) {
+            confirm_cut_said_ = true;
+            confirm_cut_said_ms_ = look.now_ms;
+            GB_INFO("%s: %s -- a monster stands off its floors (slot %u at %d,%d, %s): the %zu standing "
+                    "point(s) on them so far count no more",
+                    who_.c_str(), stem.c_str(), static_cast<unsigned>(s.slot), s.at.x, s.at.y,
+                    page_->gap_text(s.at.x, s.at.y).c_str(), confirm_.size());
+        }
+        confirm_.clear();
+    }
+    for (const Stand& s : points) {
+        if (!s.standing || !page_->on_floor(s.at)) continue;
         const bool apart = std::all_of(confirm_.begin(), confirm_.end(), [&](const MapPoint& q) {
             return std::abs(q.x - s.at.x) >= kTrustSpreadXPx || std::abs(q.y - s.at.y) >= kTrustSpreadYPx;
         });
         if (apart) confirm_.push_back(s.at);
     }
-    if (static_cast<int>(confirm_.size()) >= kTrustPoints) {
+    if (static_cast<int>(confirm_.size()) >= kTrustPoints && !own_off_) {
         trusted_ = true;
         how_ = How::Points;
         why_ = Why::Trusted;
-        GB_INFO("Hunter: %s trusted by %d standing points on its floors (its gates: %s)", stem.c_str(), kTrustPoints,
-                gates_text(page_->gates).c_str());
+        GB_INFO("%s: %s trusted by %d standing points on its floors (its gates: %s)", who_.c_str(), stem.c_str(),
+                kTrustPoints, gates_text(page_->gates).c_str());
         return;
     }
     why_ = Why::Confirming;
 }
 
 void MapTrust::by_name(const Look& look, const std::vector<Stand>& points, std::uint32_t work_ms) {
-    // Named: every standing point is checked against it, and one off its
-    // floors lets it go.
+    // Named: a monster's frame off its floors is only counted and said; two
+    // of yours off them, kOwnOffApartMs apart with none on them between, let
+    // it go -- and naming starts again from those two.
     if (!stem_.empty() && page_) {
+        note_mobs(points, *page_, stem_, look.now_ms);
         for (const Stand& s : points) {
-            if (page_->on_floor(s.at)) continue;
-            GB_WARN("Hunter: %s, named from standing points, does not match where %s (%d,%d) -- no longer taken for "
-                    "the map; naming it again",
-                    stem_.c_str(), s.own ? "you stand" : "a monster stands", s.at.x, s.at.y);
+            if (!s.own) continue;
+            const MapPoint first = own_off_at_;
+            std::string why;
+            if (!own_lets_go(s, *page_, stem_, look.now_ms, why)) continue;
+            GB_WARN("%s: %s, named from standing points, does not match where you stand (%d,%d) -- no longer "
+                    "taken for the map; naming it again (%s)",
+                    who_.c_str(), stem_.c_str(), s.at.x, s.at.y, why.c_str());
             stem_.clear();
             page_.reset();
             trusted_ = false;
             how_ = How::None;
+            own_off_ = false;
             restart_naming(nullptr);
+            add_name_point(first);  // the second comes with this update's points below
             break;
         }
         if (!stem_.empty()) {
@@ -740,7 +1015,9 @@ void MapTrust::by_name(const Look& look, const std::vector<Stand>& points, std::
         why_ = Why::NoFiles;
         return;
     }
-    for (const Stand& s : points) add_name_point(s.at);
+    // Yours, every settled report; a monster's only where it stands.
+    for (const Stand& s : points)
+        if (s.standing) add_name_point(s.at);
     if (name_pts_.size() > kNameMaxPoints) restart_naming("no file was told from the rest by that many points");
     why_ = Why::Naming;
     if (static_cast<int>(name_pts_.size()) < kNamePoints) return;
@@ -767,11 +1044,11 @@ void MapTrust::restart_naming(const char* why) {
     if (why != nullptr) {
         ++restarts_;
         if (restarts_ == 1)
-            GB_INFO("Hunter: map not named from %zu standing points -- %s; naming starts again", name_pts_.size(),
-                    why);
+            GB_INFO("%s: map not named from %zu standing points -- %s; naming starts again", who_.c_str(),
+                    name_pts_.size(), why);
         else
-            GB_DEBUG("Hunter: map not named from %zu standing points -- %s; naming starts again (%d times)",
-                     name_pts_.size(), why, restarts_);
+            GB_DEBUG("%s: map not named from %zu standing points -- %s; naming starts again (%d times)",
+                     who_.c_str(), name_pts_.size(), why, restarts_);
     }
     clear_naming();
 }
@@ -792,7 +1069,8 @@ void MapTrust::scan(std::uint32_t work_ms) {
             // and nothing is named meanwhile (decide). Left out, a copy of the
             // map beside it would be the one file that fits.
             if (!c.io_fail)
-                GB_INFO("Hunter: map naming -- %s.map could not be read; nothing is named until it is", c.stem.c_str());
+                GB_INFO("%s: map naming -- %s.map could not be read; nothing is named until it is", who_.c_str(),
+                        c.stem.c_str());
             c.io_fail = true;
             if (now_ms() - t0 >= work_ms) break;
             continue;
@@ -842,9 +1120,15 @@ void MapTrust::decide() {
             return;
         }
         how_ = How::Named;
-        GB_INFO("Hunter: map named from %zu standing points: %s -- the only one of %zu map files they all lie on; the "
+        own_off_ = false;
+        mob_off_ = 0;
+        mob_off_new_ = 0;
+        mob_off_new_standing_ = 0;
+        mob_off_last_.clear();
+        GB_INFO("%s: map named from %zu standing points: %s -- the only one of %zu map files they all lie on; the "
                 "next best, %s, misses %d of them",
-                n, stem_.c_str(), cands_.size(), next_best_.empty() ? "none" : next_best_.c_str(), next_misses_);
+                who_.c_str(), n, stem_.c_str(), cands_.size(), next_best_.empty() ? "none" : next_best_.c_str(),
+                next_misses_);
         cands_.clear();
         cursor_ = 0;
         judge_named();
@@ -863,9 +1147,9 @@ void MapTrust::decide() {
             }
             fits += (listed > 1 ? ", " : "") + c.stem;
         }
-        GB_INFO("Hunter: %zu standing points all lie on %zu map file(s) (%s), and %s misses only %d of them -- not "
+        GB_INFO("%s: %zu standing points all lie on %zu map file(s) (%s), and %s misses only %d of them -- not "
                 "named until one file alone fits",
-                n, fit, fits.c_str(), next_best_.empty() ? "none" : next_best_.c_str(), next_misses_);
+                who_.c_str(), n, fit, fits.c_str(), next_best_.empty() ? "none" : next_best_.c_str(), next_misses_);
     }
 }
 
@@ -878,7 +1162,7 @@ void MapTrust::judge_named() {
     if (page_->gates.empty()) {
         if (!said_no_gate_) {
             said_no_gate_ = true;
-            GB_INFO("Hunter: %s -- its .prj %s, so its file is not gone by", stem_.c_str(),
+            GB_INFO("%s: %s -- its .prj %s, so its file is not gone by", who_.c_str(), stem_.c_str(),
                     page_->prj_read ? "lists no gate" : "was not found");
         }
         why_ = Why::NoGates;
@@ -895,11 +1179,19 @@ MapTrust::Report MapTrust::report() const {
     r.stem = stem_;
     r.epoch = epoch_;
     r.miss = miss_;
+    r.miss_gap = miss_gap_;
+    r.own_off = own_off_;
+    r.mob_off = mob_off_;
+    // how() hides a name while it is not trusted: a map with no gate (NoGates)
+    // is named all the same, and what it is called is still known.
+    r.named = !entry_mode_ && how_ == How::Named && !stem_.empty();
     r.fit = fit_;
     r.next_best = next_best_;
     r.next_misses = next_misses_;
     if (why_ == Why::Confirming) {
-        r.points = static_cast<int>(confirm_.size());
+        // Points past the needed (one of yours off the floors let pass holds
+        // trust back meanwhile) show as the needed: never 4/3.
+        r.points = std::min(static_cast<int>(confirm_.size()), kTrustPoints);
         r.needed = kTrustPoints;
     } else if (why_ == Why::Naming || why_ == Why::Ambiguous) {
         r.points = static_cast<int>(name_pts_.size());

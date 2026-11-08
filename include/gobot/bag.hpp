@@ -123,15 +123,23 @@ struct BagView {
 
     /// Which tab the strip shows chosen, from 0: the client draws it darker
     /// than the rest -- 92 to 99 of 255 against 115 to 123 for the others,
-    /// measured on the live client and on its own picture of the strip. -1
-    /// when no tab stands out like that. Nothing is right-clicked unless this
-    /// says Tiêu Dùng: on another tab a right-click equips what it lands on.
+    /// measured on the live client and on its own picture of the strip; in
+    /// the band under the labels 63 to 80 against 110 to 131. -1 when no tab
+    /// stands out like that -- by the band, or where it says nothing by the
+    /// inside -- or the two name different tabs. Nothing is right-clicked
+    /// unless this says Tiêu Dùng: on another tab a right-click equips what
+    /// it lands on.
     int selected_tab = -1;
     /// Each tab's inside as selected_tab weighs it, its mean grey, from 0; -1
     /// for a tab not read. For the log when the strip reads no tab chosen, or
     /// not the one wanted: the live client's Tiêu Dùng chosen reads 105 against
     /// 123 for Khác next to it, 18 where kChosenTabDarker asks for 10.
     int tab_mean[kBagTabs] = { -1, -1, -1, -1, -1 };
+    /// The same for the band under the labels, the strip's bottom rows
+    /// (2026.11.04d): the shop's tab on 2026-11-04, Tiêu Dùng chosen and lit
+    /// by the game's red glow, read 127 128 129 123 125 inside -- no tab -- and
+    /// 121 121 68 122 122 here.
+    int tab_band[kBagTabs] = { -1, -1, -1, -1, -1 };
     bool scroll_known() const { return first_row >= 0 && total_rows > 0; }
     bool at_top() const { return scroll_known() && first_row == 0; }
     bool at_bottom(const BagLayout& l) const {

@@ -773,9 +773,11 @@ std::string quest_trouble(int times, const std::string& why) {
     return "Làm nhiệm vụ nhanh đã tự tắt: " + std::to_string(times) + " lần liền " + why + ".";
 }
 
-std::string potion_low(bool hp, const std::string& key, int count) {
-    return std::string("Sắp hết bình ") + (hp ? "HP" : "MP") + ": ô phím " + plain_key(key) + " còn " +
-           std::to_string(count) + " bình.";
+std::string potion_low(bool hp, const std::string& key, int count, int bag_total) {
+    std::string out = std::string("Sắp hết bình ") + (hp ? "HP" : "MP") + ": ô phím " + plain_key(key) +
+                      " (chồng đang dùng) còn " + std::to_string(count) + " bình";
+    if (bag_total >= 0) out += "; cả túi còn " + std::to_string(bag_total) + " bình (theo gói tin, chưa kiểm)";
+    return out + ".";
 }
 
 std::string potion_low_bag(bool hp, const std::string& key, int total) {

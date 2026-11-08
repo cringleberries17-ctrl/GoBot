@@ -148,6 +148,7 @@ const Seg kFloors[] = {
     { 0, 2658, 2965, 633, 1 },  // the 전투존 gate's floor (625-635): 633 at 2675
     { 0, 2200, 2800, 984, 1 },  // the low floor (531-987): 984 at 2545
     { 0, 472, 1104, 275, 1 },   // the 피스존 gate's floor (271-281)
+    { 0, 1800, 2000, 850, 1 },  // under 2026-11-04 07:59:20's monster at 1929,819 (850 there)
     { 0, 0, 3199, 1120, 2 },    // the bottom ground, solid (1116-1124)
 };
 constexpr int kJeontu = 3900008;    // 전투존, 2812,622
@@ -390,13 +391,18 @@ void test_drop_rule() {
               f.press = false;
               f.fix.moving = true;
           }, Why::NoLanding },
+        // Its last report there too: as a settle begins the height is the
+        // report's floor followed (2026.11.04d), and here there is none.
         { "the floor below 52 px down, as a settle begins",
           [](HunterConfig&, Hunter::DropFacts& f) {
               f.press = false;
-              f.fix.y = 320.0f;
+              f.fix.y = f.fix.ry = 320.0f;
           }, Why::ShortFall },
-        { "the landing 13 px past the monster", [](HunterConfig&, Hunter::DropFacts& f) { f.target_wy = 620.0f; },
-          Why::PastMonster },
+        // The monster's point 113 px over the landing, no floor within 100 px
+        // under it: its point is all there is, and the landing past it.
+        { "the landing 113 px past the monster, on no floor", [](HunterConfig&, Hunter::DropFacts& f) {
+              f.target_wy = 520.0f;
+          }, Why::PastMonster },
         { "a gate in the fall", [](HunterConfig&, Hunter::DropFacts& f) { f.gates.push_back({ 2700, 500, 0 }); },
           Why::Gate },
         { "a gate where it lands", [](HunterConfig&, Hunter::DropFacts& f) { f.gates.push_back({ 2690, 690, 0 }); },
@@ -436,6 +442,17 @@ void test_drop_rule() {
           }, Why::None },
         { "the landing 12 px past the monster", [](HunterConfig&, Hunter::DropFacts& f) { f.target_wy = 621.0f; },
           Why::None },
+        // 2026.11.04d: a monster's point is often in the air -- its floor is
+        // the first under it within 100 px, the landing's.
+        { "the monster 13 px over the landing's floor, in the air", [](HunterConfig&, Hunter::DropFacts& f) {
+              f.target_wy = 620.0f;
+          }, Why::None },
+        { "the monster 90 px over it", [](HunterConfig&, Hunter::DropFacts& f) { f.target_wy = 543.0f; }, Why::None },
+        { "as a settle begins, the fix 52 px over the floor its report stood on: the floor's height",
+          [](HunterConfig&, Hunter::DropFacts& f) {
+              f.press = false;
+              f.fix.y = 320.0f;
+          }, Why::None },
         { "a gate past the landing's band",
           [](HunterConfig&, Hunter::DropFacts& f) { f.gates.push_back({ 2690, 700, 0 }); }, Why::None },
         { "a gate above the standing point's band", [](HunterConfig&, Hunter::DropFacts& f) {
@@ -459,26 +476,52 @@ void test_drop_rule() {
         Hunter::DropFacts f = base;
         f.spot_use = true;
         f.area.set = true;
-        f.area.x = 2675.0f;
-        f.area.y = 371.0f;
-        f.area.half_w = 300;
-        f.area.half_h = 300;
+        f.area.set_half(2675.0f, 371.0f, 300, 300);
         check(Hunter::drop_rule(c, f).ok(), "the spot in use, its area 300 px either way: it goes");
-        f.area.half_h = 100;
+        f.area.set_half(2675.0f, 371.0f, 300, 100);
         check(Hunter::drop_rule(c, f).why == Why::OutsideArea, "100 px up and down: the monster outside it -- refused");
-        f.area.half_h = 300;
-        f.area.x = 2400.0f;
-        f.area.half_w = 200;
+        f.area.set_half(2400.0f, 371.0f, 200, 300);
         check(Hunter::drop_rule(c, f).why == Why::OutsideArea, "standing outside its width -- refused");
-        f.area.x = 2675.0f;
-        f.area.half_w = 300;
-        f.area.half_h = 256;
+        f.area.set_half(2675.0f, 371.0f, 300, 256);
         f.target_wy = 625.0f;
         const Hunter::DropCall land_out = Hunter::drop_rule(c, f);
         check(land_out.why == Why::OutsideArea && land_out.land_y == 633,
               "the monster inside it 254 px down, the landing on 633 outside it: refused");
         f.spot_use = false;
         check(Hunter::drop_rule(c, f).why == Why::Spot, "the spot on but standing for want of a fix: refused");
+    }
+
+    // A hunting area drawn on the map tab is its own box, not even round its
+    // home: one running 50 px up and 300 down holds a 135-px drop from the
+    // small floor up right (238) to the long floor (372) -- one the spot's
+    // +-100 round where the character stands refuses.
+    {
+        HunterConfig c = cfg;
+        c.spot = true;
+        Hunter::DropFacts f = base;
+        f.fix.x = f.fix.rx = 2513.0f;
+        f.fix.y = f.fix.ry = 237.0f;
+        f.target_wx = 2520.0f;
+        f.target_wy = 371.0f;
+        f.dx = 7;
+        f.dy = 134;
+        f.spot_use = true;
+        f.area.set = true;
+        f.area.set_half(2513.0f, 237.0f, 300, 100);
+        const Hunter::DropCall even = Hunter::drop_rule(c, f);
+        check(even.why == Why::OutsideArea && even.land_y == 372,
+              fmt("the spot's +-100 round 2513,237: the landing on 372, 135 px down, outside it -- refused (%s)",
+                  Hunter::drop_why_name(even.why)));
+        f.area.from_map = true;
+        f.area.stem = "t52_s2";
+        f.area.top = 187.0f;
+        f.area.bottom = 537.0f;
+        const Hunter::DropCall tall = Hunter::drop_rule(c, f);
+        check(tall.ok() && tall.land_y == 372 && tall.direct && tall.stand_y == 238,
+              fmt("the map tab's area, 50 px up and 300 down: it goes, 238 to 372 (%s)",
+                  Hunter::drop_why_name(tall.why)));
+        f.area.bottom = 360.0f;
+        check(Hunter::drop_rule(c, f).why == Why::OutsideArea, "its bottom edge above the landing: refused");
     }
 
     // Rule 5's helper: one on the level that may be attacked, from the packets.
@@ -559,8 +602,10 @@ struct DropWorld {
     bool          focused = true;
     int           me_x = 2675, me_y = 371;
     std::vector<Nameplate> mobs;
-    /// Monsters standing beyond the plates' box: standing points only. And
-    /// whether the plates' own monsters are standing points too.
+    /// Monsters' frames beyond the plates' box: standing points only, once
+    /// two of a monster's agree (MapTrust). And whether the plates' own
+    /// monsters' frames go too -- all of one time, stand_ms: one frame each
+    /// until it moves.
     std::vector<MapTrust::Mob> far_stands;
     std::uint64_t stand_ms = 4'990'000;
     bool          mobs_stand = true;
@@ -686,8 +731,8 @@ struct DropRig {
             std::vector<MapTrust::Mob> out;
             for (const Nameplate& n : w.mobs)
                 if (n.slot >= 0 && w.mobs_stand)
-                    out.push_back(
-                        MapTrust::Mob{ MapPoint{ n.x(), n.y() }, static_cast<std::uint32_t>(n.slot), w.stand_ms });
+                    out.push_back(MapTrust::Mob{ MapPoint{ n.x(), n.y() }, static_cast<std::uint32_t>(n.slot),
+                                                 w.stand_ms, n.gen });
             for (const MapTrust::Mob& m : w.far_stands) out.push_back(m);
             return out;
         };
@@ -957,8 +1002,9 @@ void test_drop_owner_cases() {
                   x0));
     }
     // From the left: past the floors that would land past the monster and
-    // the edge of its floor, to where the file has the same floor 24 px
-    // either side.
+    // the edge of its floor -- walking, 24 px either side -- until it stands
+    // above the monster (the owner's Q6 of 04d, kDropStopAbovePx), and judged
+    // there settled, 8 px either side.
     {
         DropRig r(drop_config(120));
         r.w.step_px = 10;
@@ -966,9 +1012,11 @@ void test_drop_owner_cases() {
         r.age_entry();
         r.w.mobs = { mob_at(2690, 632, 5) };
         r.run(5000);
-        check(r.w.drops.size() == 1 && r.w.me_y == 632 && r.w.me_x >= 2658 + Hunter::kDropMarginSettlePx &&
-                  r.w.me_x < 2812 - 120,
-              fmt("from the left, 2560: one drop at %d, on 632 -- never over the floor 984 below", r.w.me_x));
+        check(r.w.drops.size() == 1 && r.w.me_y == 632 && r.w.me_x >= 2658 + Hunter::kDropMarginPressPx &&
+                  std::abs(r.w.me_x - 2690) <= Hunter::kDropStopAbovePx && r.w.me_x < 2812 - 120,
+              fmt("from the left, 2560: stood above the monster, one drop at %d, on 632 -- never over the floor 984 "
+                  "below",
+                  r.w.me_x));
     }
 
     // 06:48:26: from the small floor up right to the long floor, a moment,
@@ -986,6 +1034,40 @@ void test_drop_owner_cases() {
         check(r.w.drops.size() == 2 && r.w.drops[1] - r.w.drops[0] >= Hunter::kDropGapMs,
               "the second no sooner than 1.5 s after the first, stood for where the first landed");
         check(r.w.downs_of('Z') > 0 && r.w.drop_calls == 2, "then it fought, and pressed no third");
+    }
+
+    // 2026-11-04 07:56-08:02, the player's first hunt with drops on: map
+    // entry 52/2 at 880,274, by the 피스존 gate 881,267 -- and 61 ms after the
+    // file was trusted, a monster's frame at 1929,819, 31 px above floor 850,
+    // took it away for the stay: four monsters below, never dropped to. Now
+    // the frame is said and ignored, the monster lands and stands on 850, and
+    // the drop goes.
+    {
+        DropRig r(drop_config(136));
+        r.w.entry_x = 880.0f;
+        r.w.entry_y = 274.0f;
+        const std::vector<std::string> log = info_lines([&] {
+            r.w.far_stands = { MapTrust::Mob{ MapPoint{ 1929, 819 }, 30u, r.w.t, 1u } };
+            r.run(400);
+            r.w.far_stands = { MapTrust::Mob{ MapPoint{ 1929, 849 }, 30u, r.w.t, 1u } };
+            r.run(2000);
+            r.w.far_stands = { MapTrust::Mob{ MapPoint{ 1929, 849 }, 30u, r.w.t, 1u } };
+            r.age_entry();
+            r.w.mobs = { mob_at(2673, 632, 5) };
+            r.run(4000);
+        });
+        const Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && r.w.me_y == 632 && st.drops_worked == 1 &&
+                  st.drop_map.why == MapTrust::Why::Trusted && st.drop_map.how == MapTrust::How::Entry &&
+                  st.drop_map.mob_off == 1,
+              fmt("07:59:20's monster frame at 1929,819, then on floor 850: the entry by the 피스존 gate trusted all "
+                  "along (%s), and the drop to the monster 261 px below went (%zu, on %d)",
+                  MapTrust::why_text(st.drop_map.why), r.w.drops.size(), r.w.me_y));
+        check(lines_with(log, "monster frame(s) off t52_s2's floors ignored",
+                         "slot 30 at 1929,819, 31 px above floor 850 (attr 1)") == 1 &&
+                  lines_with(log, "does not match") == 0 && lines_with(log, "the map is not known") == 0,
+              "said once, with the floor under it -- no \"does not match\", no \"map is not known\": " +
+                  line_with(log, "monster frame(s)"));
     }
 }
 
@@ -1471,33 +1553,51 @@ void test_drop_safety() {
         r.w.map_known = false;
         r.w.map = r.w.area = 0;
         r.age_entry();
-        r.w.mobs = { mob_at(2673, 632, 5) };
-        r.run(3000);
-        const bool unknown = r.w.drop_calls == 0 && r.st().drop_wait == Why::MapUnknown;
-        // A dozen more monsters standing about the map's floors.
+        // A dozen more monsters about the map's floors: one frame each is no
+        // standing point (2026.11.04b) ...
         for (int i = 0; i < 12; ++i)
             r.w.far_stands.push_back(MapTrust::Mob{ MapPoint{ 2210 + 40 * i, 983 }, static_cast<std::uint32_t>(100 + i),
-                                                    r.w.t });
+                                                    r.w.t, 1u });
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        r.run(2000);
+        const bool unknown = r.w.drop_calls == 0 && r.st().drop_wait == Why::MapUnknown &&
+                             r.st().drop_map.why == MapTrust::Why::Naming && r.st().drop_map.points == 1;
+        // ... their next frames at the same height, two seconds on, are.
+        for (MapTrust::Mob& m : r.w.far_stands) m.at_ms = r.w.t;
         r.run(4000);
         const Hunter::Status st = r.st();
         check(unknown && st.drop_map.how == MapTrust::How::Named && st.drop_map.stem == "t52_s2" &&
                   r.w.drops.size() == 1,
-              fmt("no map entry seen: no drop (%s), until 12 standing points named t52_s2 -- then one",
-                  unknown ? "map not known" : Hunter::drop_why_name(st.drop_wait)));
+              fmt("no map entry seen: no drop (%s) on yours and 12 monsters' single frames, until the monsters stood "
+                  "and named t52_s2 -- then one (%zu)",
+                  unknown ? "map not known" : Hunter::drop_why_name(st.drop_wait), r.w.drops.size()));
     }
-    // An entry by no gate: trusted after three standing points apart.
+    // An entry by no gate: trusted after three standing points apart -- the
+    // character's, and monsters' that stand: two frames at one height.
     {
         DropRig r(drop_config(136));
         r.w.entry_x = 1000.0f;
         r.w.entry_y = 274.0f;
         r.age_entry();
         r.w.mobs = { mob_at(2673, 632, 5) };
+        r.run(1000);
+        const MapTrust::Report one = r.st().drop_map;
+        const bool waits = r.w.drop_calls == 0 && one.why == MapTrust::Why::Confirming && one.points == 1;
+        r.w.stand_ms = r.w.t;       // the monster below's next frame, where it was: it stands
+        r.run(400);
+        const MapTrust::Report two = r.st().drop_map;
+        r.w.far_stands.push_back(MapTrust::Mob{ MapPoint{ 2350, 983 }, 200u, r.w.t, 1u });
+        r.run(400);
+        const bool still = r.w.drop_calls == 0 && r.st().drop_map.why == MapTrust::Why::Confirming &&
+                           r.st().drop_map.points == 2;
+        r.w.far_stands.back().at_ms = r.w.t;
         r.run(3000);
-        const bool waits = r.w.drop_calls == 0 && r.st().drop_map.why == MapTrust::Why::Confirming;
-        r.w.far_stands.push_back(MapTrust::Mob{ MapPoint{ 2350, 983 }, 200u, r.w.t });
-        r.run(3000);
-        check(waits && r.st().drop_map.how == MapTrust::How::Points && r.w.drops.size() == 1,
-              "a map entry by no gate: no drop on two standing points, the drop after a third");
+        check(waits && two.why == MapTrust::Why::Confirming && two.points == 2 && still &&
+                  r.st().drop_map.how == MapTrust::How::Points && r.w.drops.size() == 1,
+              fmt("a map entry by no gate: no drop on you and the monster's one frame (%d point), nor on two "
+                  "standing points (%d), nor on another monster's single frame -- the drop once it stands, the third "
+                  "(%zu)",
+                  one.points, two.points, r.w.drops.size()));
     }
     // A key-up owed: no drop, then the hunter halts.
     {
@@ -1609,6 +1709,31 @@ void test_drop_spot_and_limits() {
               fmt("given up %llu ms after it was picked: the settles held the clock still, they did not start it "
                   "again",
                   static_cast<unsigned long long>(gave_at - t0)));
+    }
+    // The minute line's "refused:" counts the refusals acted on -- a settle
+    // waiting for the stop's report is none: in the air at every press, each
+    // settle is refused "not settled" once, as it ends, not at every look.
+    {
+        DropRig r(drop_config(100));
+        r.w.place(2700, 371);
+        r.age_entry();
+        r.w.airborne = true;
+        r.w.mobs = { mob_at(2702, 632, 5) };
+        const std::vector<std::string> log = info_lines([&] { r.run(56'000); });
+        const std::string m = line_with(log, " fights, ");
+        const auto number_after = [&m](const char* what) {
+            const std::size_t at = m.find(what);
+            int n = -1;
+            if (at == std::string::npos || std::sscanf(m.c_str() + at + std::strlen(what), "%d", &n) != 1) return -1;
+            return n;
+        };
+        const int settles = number_after("(settles ");
+        const int not_settled = number_after("not settled ");
+        check(settles >= 1 && not_settled >= 1 && not_settled <= settles && r.w.drop_calls == 0,
+              fmt("the minute line: %d settles, refused \"not settled\" %d times -- once a settle at most, not once a "
+                  "look (\"%s\")",
+                  settles, not_settled,
+                  m.find("; drop looks") == std::string::npos ? m.c_str() : m.substr(m.find("; drop looks")).c_str()));
     }
     // A minute's and a monster's limits, on the clock.
     {

@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -499,6 +500,85 @@ void test_air_counts() {
     check(none.entry_ms == 0 && none.air_jumps == 0 && none.casts_in_air == 0, "and none of it after a reset");
 }
 
+/// Your last reports, kept for a jump to be judged by (own_since), and the
+/// walk-offs among the jumps -- off an edge, state 1 falling -- counted
+/// beside them (2026.11.05b): what Thử of a jump's kind and the hunter's
+/// landing check go by.
+void test_own_trace() {
+    section("Packet world: your last reports kept (own_since), and the walk-offs among your jumps");
+
+    {
+        PacketWorld w;
+        const std::uint64_t t = kT0;
+        w.on_packets({ from_client(move_frame(880.0f, 634.0f, 0.0f, 1), t) });
+        w.on_packets({ from_client(air_frame(2, 880.0f, 634.0f, 0.0f, -36.0f), t + 100) });
+        w.on_packets({ from_client(cast_frame(880, 300), t + 400) });
+        w.on_packets({ from_client(air_frame(0, 880.0f, 274.0f, 0.0f, 0.0f), t + 1000) });
+        std::vector<PacketWorld::OwnTrace> tr = w.own_since(t + 100);
+        check(tr.size() == 3 && tr[0].ms == t + 100 && tr[0].kind == OwnReport::Air && tr[0].state == 2 &&
+                  tr[0].vy == -36.0f && tr[0].x == 880.0f && tr[0].y == 634.0f && tr[1].kind == OwnReport::Cast &&
+                  tr[1].state == 0 && tr[1].vy == 0.0f && tr[1].y == 300.0f && tr[2].kind == OwnReport::Air &&
+                  tr[2].state == 0 && tr[2].y == 274.0f && tr[2].ms == t + 1000,
+              "a high jump, a cast at its top and the landing on the ledge, from the press on: each as it came -- a "
+              "0x002A's state and vertical speed, a cast's none");
+        check(w.own_since(0).size() == 4 && w.own_since(t + 1001).empty(),
+              "all four from 0, the walk's stop first; none after the last");
+
+        // Another id's report is none of yours.
+        w.on_packets({ from_client(move_frame(100.0f, 100.0f, 9.0f, 1, kId + 1), t + 1100) });
+        check(w.own_since(t + 1100).empty(), "a report under another id: not kept");
+
+        // More than kOwnTraceSize: the oldest let go of.
+        const std::uint64_t n = PacketWorld::kOwnTraceSize + 8;
+        for (std::uint64_t i = 0; i < n; ++i) {
+            const float x = 900.0f + static_cast<float>(i);
+            w.on_packets({ from_client(move_frame(x, 274.0f, 0.0f, 1), t + 2000 + i * 10) });
+        }
+        tr = w.own_since(0);
+        bool ordered = tr.size() == PacketWorld::kOwnTraceSize;
+        for (std::size_t k = 1; ordered && k < tr.size(); ++k) ordered = tr[k - 1].ms < tr[k].ms;
+        check(PacketWorld::kOwnTraceSize == 32 && ordered && tr.front().ms == t + 2000 + 8 * 10 &&
+                  tr.back().ms == t + 2000 + (n - 1) * 10 && tr.back().x == 900.0f + static_cast<float>(n - 1),
+              "40 reports: the last 32 kept, oldest first");
+        check(w.own_since(t + 2000 + 30 * 10).size() == 10, "from a moment on: those at or after it");
+
+        // A capture started again on the same game: you are forgotten, your
+        // reports with you; and at a reset.
+        w.relink(t + 3000);
+        const bool relinked = w.own_since(0).empty();
+        w.on_packets({ from_client(move_frame(880.0f, 274.0f, 0.0f, 1), t + 3100) });
+        const bool again = w.own_since(0).size() == 1;
+        w.reset();
+        check(relinked && again && w.own_since(0).empty(),
+              "none after a relink, one again after it, none after a reset");
+    }
+    {
+        PacketWorld w;
+        const std::uint64_t t = kT0;
+        w.on_packets({ from_client(air_frame(1, 900.0f, 400.0f, 0.0f, 12.2f), t) });          // off an edge
+        w.on_packets({ from_client(air_frame(0, 900.0f, 600.0f, 0.0f, 30.0f), t + 500) });
+        w.on_packets({ from_client(air_frame(1, 900.0f, 600.0f, 0.0f, 1.4f), t + 1000) });    // off one, slowly
+        w.on_packets({ from_client(air_frame(0, 900.0f, 700.0f, 0.0f, 20.0f), t + 1400) });
+        w.on_packets({ from_client(air_frame(1, 900.0f, 700.0f, 0.0f, -20.0f), t + 2000) });  // a jump
+        w.on_packets({ from_client(air_frame(6, 900.0f, 600.0f, 0.0f, -20.0f), t + 2340) });  // and its second
+        w.on_packets({ from_client(air_frame(0, 900.0f, 700.0f, 0.0f, 0.0f), t + 3000) });
+        const PacketWorld::Stats before = w.stats();
+        w.on_packets({ from_client(air_frame(1, 900.0f, 700.0f, 0.0f, 0.0f), t + 4000) });    // speed 0: off one
+        const PacketWorld::Stats s = w.stats();
+        check(s.air_jumps == 4 && s.air_walkoffs == 3 && s.air_second == 1 && s.air_high == 0 && s.air_landed == 3,
+              "state 1 four times -- three going down (+12.2, +1.4, 0), one up (-20) -- all four still jumps, three "
+              "walk-offs among them; a second, three landings");
+        const PacketWorld::AirCounts c = s.air();
+        check(c.jumps == 4 && c.walkoffs == 3 && c.second == 1 && c.high == 0 && c.landed == 3 && c.other == 0 &&
+                  c.takeoffs() == s.air_jumps + s.air_second + s.air_high,
+              "the same as one (AirCounts), packet_takeoffs' total as it was");
+        const PacketWorld::Stats d = s.since(before);
+        w.reset();
+        check(d.air_jumps == 1 && d.air_walkoffs == 1 && d.air_second == 0 && w.stats().air_walkoffs == 0,
+              "counted from a moment on (since) as the others are; none after a reset");
+    }
+}
+
 /// A jump: up at its vertical speed, slowing under gravity, to its top, where
 /// y holds until the landing says where you are; sideways along the facing
 /// of the walk it left, for up to kAirReckonMs. A landing is taken whatever
@@ -959,8 +1039,9 @@ void test_unknown_states() {
     w.on_packets({ from_server(event_frame(5, 5, 1, 0.0f, 2900, 1170, 6000), t + 700) });
     s = w.stats();
     check(slot_of(w.view(t + 800), 5).x == 2450.0f && s.unknown_states == 2 && s.unknown_placed == 1 &&
-              s.of(0x0038).refused == 1,
-          "450 px off where it was: refused, and it stays where it was");
+              s.of(0x0038).refused == 1 && s.far_refused == 1 && s.far_corrections == 0,
+          "450 px off where it was: refused, and it stays where it was -- a state not known is held to "
+          "kUnknownPlacePx, whatever a contact is (kPlaceFarFrames), and counted refused far");
 
     w.on_packets({ from_server(event_frame(3, 8, 1, 0.0f, 2450, 1170, 6000), t + 800) });
     s = w.stats();
@@ -1246,6 +1327,22 @@ int said_while(const std::function<void()>& run, const char* text) {
     return n;
 }
 
+/// The same, the lines themselves.
+std::vector<std::string> lines_while(const std::function<void()>& run, const char* text) {
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_level(LogLevel::Info);
+    log.set_ring_capacity(400);
+    log.clear_ring();
+    run();
+    std::vector<std::string> lines;
+    for (const LogLine& line : log.ring())
+        if (line.text.find(text) != std::string::npos) lines.push_back(line.text);
+    log.set_level(was);
+    log.set_ring_capacity(0);
+    return lines;
+}
+
 /// The live logs' hurts, read and chained through the world: the HP before
 /// less the damage is the HP after, slot by slot.
 void test_recorded_hurts() {
@@ -1422,13 +1519,24 @@ void test_hurt_rules() {
     PacketWorld::Mob m = slot_of(w.view(t + 100), 30);
     check(m.x == 1050.0f && m.hp == 400 && w.stats().hurts_chained == 1,
           "a hurt 50 px from where the monster stood: put there, 100 off its 500, chained");
+    // Changed on purpose in 2026.11.05 (kPlaceFarFrames): a far hurt whose HP
+    // chains was passed over, and left the monster where a runaway walk had
+    // it.
     w.on_packets({ from_server(hurt_frame(6, 30, 1450, 900, 777, 100, 300), t + 200) });
     m = slot_of(w.view(t + 200), 30);
-    check(m.x == 1050.0f && m.hp == 300 && w.stats().hurts_far == 1 && w.stats().hurts_chained == 2,
-          "one 400 px off: its place counted far and passed over, its HP taken all the same");
+    check(m.x == 1450.0f && m.frame_x == 1450.0f && !m.moving && m.event_ms == t + 200 && m.hp == 300 &&
+              w.stats().hurts_far == 1 && w.stats().far_corrections == 1 && w.stats().far_refused == 0 &&
+              w.stats().hurts_chained == 2,
+          "one 400 px off whose HP chains, 400 less 100 leaving 300: counted far, and put there all the same -- a "
+          "far correction, the chain proving it is this slot's monster");
     w.on_packets({ from_server(hurt_frame(7, 30, 1050, 900, 777, 0, 350), t + 300) });
-    check(slot_of(w.view(t + 300), 30).hp == 350 && w.stats().hurts_rose == 1 && w.stats().hurts_chained == 2,
+    m = slot_of(w.view(t + 300), 30);
+    check(m.hp == 350 && w.stats().hurts_rose == 1 && w.stats().hurts_chained == 2,
           "one that leaves more than the last: the monster healing -- rose, not chained");
+    check(m.x == 1450.0f && m.frame_x == 1450.0f && w.stats().hurts_far == 2 && w.stats().far_refused == 1 &&
+              w.stats().far_corrections == 1,
+          "and, 400 px off and not chained, its place is refused as before: counted far and refused far, its HP "
+          "taken all the same");
 
     // A kill, then a hurt on the dead monster: passed over until a stop
     // brings one alive into the slot, a generation of its own.
@@ -1443,6 +1551,275 @@ void test_hurt_rules() {
     const PacketWorld::Mob back = slot_of(w.view(t + 2500), 30);
     check(!back.dead && back.hp == 500 && back.gen != killed_gen && back.hurt_ms == 0 && back.last_actor == 0,
           "a stop with HP in the slot: alive again, a new generation, nobody's blows on it");
+}
+
+/// Where the last frame that placed a monster put it (Mob::frame_x, frame_y),
+/// which the map tab follows a walker's floor from: set by every frame that
+/// places one -- the table, a spawn, a stop, a walk, a hit, a hurt, a contact,
+/// a state not known -- left by one refused, and never moved by the
+/// working-out, which moves x alone, as it did.
+void test_frame_place() {
+    section("Packet world: where a monster's last placing frame put it (Mob::frame_x, frame_y)");
+
+    const std::uint64_t t = kT0;
+    PacketWorld w;
+    w.on_packets({ wrapped(table_frame({ { 0, 1004401, 44, 1, 1500, 900, 2.6f, 7000, 7676 },
+                                         { 7, 1003901, 39, -1, 80, 1210, 0.0f, 3044, 3044 } }),
+                           t) });
+    const PacketWorld::Mob walker = slot_of(w.view(t + 1000), 0);
+    const PacketWorld::Mob held = slot_of(w.view(t + 6000), 0);
+    const PacketWorld::Mob still = slot_of(w.view(t + 1000), 7);
+    check(close_to(walker.x, 1604.0) && walker.y == 900.0f && walker.moving && walker.frame_x == 1500.0f &&
+              walker.frame_y == 900.0f && close_to(held.x, 2020.0) && held.y == 900.0f && !held.moving &&
+              held.frame_x == 1500.0f,
+          "the table's walker: worked out 104 px on after 1 s and held 520 px on after 5 s, y as the table said -- "
+          "follow_mob as it was -- and its frame where the table had it, 1500,900");
+    check(still.frame_x == 80.0f && still.frame_y == 1210.0f && still.x == 80.0f,
+          "the table's monster standing: its frame where it stands");
+
+    w.on_packets({ from_server(spawn_frame(3, 2000301, -1, 3100, 1150, 2000), t + 100) });
+    PacketWorld::Mob m = slot_of(w.view(t + 100), 3);
+    check(m.frame_x == 3100.0f && m.frame_y == 1150.0f, "a spawn: at its spawn point");
+    w.on_packets({ from_server(event_frame(0, 3, -1, 0.0f, 3100, 1172, 2000), t + 300) });
+    m = slot_of(w.view(t + 300), 3);
+    check(m.frame_x == 3100.0f && m.frame_y == 1172.0f, "its first stop, 22 px lower: there");
+    w.on_packets({ from_server(event_frame(1, 3, -1, 2.6f, 3100, 1172, 2000), t + 400) });
+    m = slot_of(w.view(t + 1400), 3);
+    check(close_to(m.x, 2996.0) && m.y == 1172.0f && m.frame_x == 3100.0f && m.frame_y == 1172.0f,
+          "a walk: worked out 104 px on after 1 s, its frame where the walk began");
+    w.on_packets({ from_server(event_frame(9, 3, -1, 7.0f, 3000, 1172, 1500, 500), t + 1400) });
+    m = slot_of(w.view(t + 1400), 3);
+    check(m.frame_x == 3000.0f && m.frame_y == 1172.0f && !m.moving, "a hit: where it was struck");
+    w.on_packets({ from_server(hurt_frame(6, 3, 3020, 1172, kId, 100, 1400), t + 1500) });
+    m = slot_of(w.view(t + 1500), 3);
+    check(m.frame_x == 3020.0f && m.frame_y == 1172.0f, "a hurt near: where it says");
+    w.on_packets({ from_server(hurt_frame(7, 40, 600, 1210, kId, 100, 900), t + 1600) });
+    const PacketWorld::Mob forty = slot_of(w.view(t + 1600), 40);
+    check(forty.frame_x == 600.0f && forty.frame_y == 1210.0f, "a hurt for a slot no frame had named: where it says");
+    w.on_packets({ from_server(hurt_frame(11, 3, 3030, 1170, kId, 0, 1400), t + 1700) });
+    m = slot_of(w.view(t + 1700), 3);
+    check(m.frame_x == 3030.0f && m.frame_y == 1170.0f, "a contact near: where it says");
+    w.on_packets({ from_server(event_frame(5, 3, 1, 0.0f, 3040, 1172, 1400), t + 1800) });
+    m = slot_of(w.view(t + 1800), 3);
+    check(m.frame_x == 3040.0f && m.frame_y == 1172.0f, "a state not known, near: where it says");
+
+    // Refused: a state not known far off, and a hurt far off whose HP does
+    // not chain -- 1400 less 100 is not 1000.
+    w.on_packets({ from_server(event_frame(5, 3, 1, 0.0f, 3500, 1172, 1400), t + 1900),
+                   from_server(hurt_frame(6, 3, 3500, 1172, kId, 100, 1000), t + 2000) });
+    m = slot_of(w.view(t + 2000), 3);
+    check(m.x == 3040.0f && m.frame_x == 3040.0f && m.frame_y == 1172.0f && m.hp == 1000,
+          "a state not known 460 px off, and a hurt as far that does not chain: refused, the frame left where the "
+          "last one taken put it -- the hurt's HP taken all the same");
+    w.on_packets({ from_server(event_frame(9, 3, 1, 18.0f, 3045, 1172, -50, 1050), t + 2100) });
+    m = slot_of(w.view(t + 2500), 3);
+    check(m.dead && m.frame_x == 3045.0f && m.frame_y == 1172.0f && m.x == 3045.0f,
+          "a kill: where it was struck, not thrown on at 18");
+}
+
+/// A frame far from where its monster was worked out to be (kPlaceFarFrames):
+/// a hurt whose HP chains and a contact put it there all the same -- a far
+/// correction -- and the working-out goes on from there; any other state, and
+/// a hurt that does not chain, are refused as before. Each is said in the log
+/// with what the slot's last placing frame was, at most once every
+/// kFarSaidEveryMs; and walks faster than a monster walks are counted.
+void test_far_frames() {
+    section("Packet world: frames far from the working-out -- a chained hurt and a contact placed (kPlaceFarFrames)");
+
+    const std::uint64_t t = kT0;
+    const char* const kFar = "Positions: a far monster frame";
+    check(PacketWorld::kPlaceFarFrames && PacketWorld::kUnknownPlacePx == 200.0f &&
+              PacketWorld::kPlausibleWalkSpeed == 4.0f && PacketWorld::kFarSaidEveryMs == 5000,
+          "far frames placed; 200 px still the gate for the rest; a walk past 4 px/step counted; the far line at "
+          "most once in 5 s");
+
+    {
+        // A walk at 7 -- a blow's speed, sent as a walk -- runs the
+        // working-out 280 px a second; 4 s on, a contact has the monster 10
+        // px from where the walk began.
+        PacketWorld w;
+        w.on_packets({ from_server(event_frame(1, 12, 1, 7.0f, 1000, 700, 3000), t),
+                       from_server(event_frame(1, 13, -1, 2.6f, 2000, 700, 3000), t),
+                       from_server(event_frame(1, 14, 1, 4.0f, 2500, 700, 3000), t) });
+        const PacketWorld::Mob ran = slot_of(w.view(t + 4000), 12);
+        check(close_to(ran.x, 2120.0) && ran.moving && ran.frame_x == 1000.0f && w.stats().walks_fast == 1 &&
+                  w.stats().walks == 3,
+              "a walk at 7 is followed as ever, 1,120 px in 4 s, and counted fast; walks at 2.6 and at 4 are not");
+        const PacketWorld::Stats before = w.stats();
+        const std::vector<std::string> said = lines_while(
+            [&] { w.on_packets({ from_server(hurt_frame(3, 12, 1010, 702, kId, 0, 3000), t + 4000) }); }, kFar);
+        const PacketWorld::Mob placed = slot_of(w.view(t + 4000), 12);
+        const PacketWorld::Stats s = w.stats();
+        check(placed.x == 1010.0f && placed.y == 702.0f && placed.frame_x == 1010.0f && placed.frame_y == 702.0f &&
+                  !placed.moving && placed.event_ms == t + 4000 && placed.hp == 3000 && s.far_corrections == 1 &&
+                  s.far_refused == 0 && s.unknown_placed == 1 && s.of(0x0038).refused == 0,
+              "a contact 1,110 px from the working-out: put where it says, standing, its HP as it was -- a far "
+              "correction");
+        const PacketWorld::Stats d = s.since(before);
+        check(d.far_corrections == 1 && d.far_refused == 0 && d.walks_fast == 0,
+              "since(): the far correction after it, and no fast walk");
+        const std::string want =
+            "a far monster frame placed -- state 3 (a contact), slot 12 gen " + std::to_string(placed.gen) +
+            " at 1010,702, worked out at 2120,700 walking, 1110 px off; its last placing frame: state 1 (a walk) at "
+            "speed 7.00, facing +1, 4.0 s before; 0 far frame(s) not said since the last such line; so far 1 placed "
+            "far, 0 refused far, 1 walk(s) faster than 4 px/step";
+        check(said.size() == 1 && said.front().find(want) != std::string::npos,
+              "said in the log: the frame, where the working-out had it, how far, and the slot's last placing frame "
+              "-- the walk at 7 that ran it off -- " +
+                  (said.empty() ? std::string("nothing said") : said.front()));
+
+        // The working-out goes on from there: standing until its next walk,
+        // then along that walk from where it began.
+        check(slot_of(w.view(t + 6000), 12).x == 1010.0f, "2 s on it is still there: the old walk is not followed on");
+        const int again = said_while(
+            [&] { w.on_packets({ from_server(event_frame(1, 12, -1, 2.6f, 1010, 702, 3000), t + 6000) }); }, kFar);
+        check(again == 0, "the line is said once: the next batch, with no far frame, says nothing -- " +
+                              std::to_string(again) + " line(s)");
+        const PacketWorld::Mob next = slot_of(w.view(t + 7000), 12);
+        check(close_to(next.x, 906.0) && next.moving && next.frame_x == 1010.0f && next.y == 702.0f,
+              "and its next walk is followed from there: 104 px back toward smaller x after 1 s");
+    }
+    {
+        // A walker at 2.6, worked out at 916 4 s in; a hurt whose HP chains has
+        // it at 2000,620.
+        PacketWorld w;
+        w.on_packets({ from_server(event_frame(1, 20, 1, 2.6f, 500, 600, 1000), t) });
+        const std::vector<std::string> said = lines_while(
+            [&] { w.on_packets({ from_server(hurt_frame(6, 20, 2000, 620, kId, 100, 900), t + 4000) }); }, kFar);
+        const PacketWorld::Mob hurt = slot_of(w.view(t + 4000), 20);
+        const PacketWorld::Stats s = w.stats();
+        check(hurt.x == 2000.0f && hurt.y == 620.0f && hurt.frame_x == 2000.0f && hurt.frame_y == 620.0f &&
+                  !hurt.moving && hurt.hp == 900 && s.hurts_far == 1 && s.hurts_chained == 1 &&
+                  s.far_corrections == 1 && s.far_refused == 0,
+              "a hurt 1,084 px from the working-out whose HP chains, 1000 less 100 leaving 900: put where it says, "
+              "standing -- counted far, and a far correction");
+        const std::string want = "a far monster frame placed -- state 6 (a hurt), slot 20 gen " +
+                                 std::to_string(hurt.gen) +
+                                 " at 2000,620, worked out at 916,600 walking, 1084 px off; its last placing frame: "
+                                 "state 1 (a walk) at speed 2.60, facing +1, 4.0 s before";
+        check(said.size() == 1 && said.front().find(want) != std::string::npos,
+              "and said: " + (said.empty() ? std::string("nothing") : said.front()));
+        check(slot_of(w.view(t + 5000), 20).x == 2000.0f, "1 s on it is still there, not walked on from 916");
+        w.on_packets({ from_server(event_frame(1, 20, -1, 2.6f, 2000, 620, 900), t + 5000) });
+        check(close_to(slot_of(w.view(t + 5500), 20).x, 1948.0),
+              "and its next walk is followed from there: 52 px in half a second");
+    }
+    {
+        // Refused, and said at most once every 5 s: a state not known 500 px
+        // off; then, within the 5 s, a contact 2,000 px off (placed) and a
+        // hurt as far whose HP does not chain (refused); then, 5 s after the
+        // first, another state not known far off -- said, with the two not.
+        PacketWorld w;
+        w.on_packets({ from_server(event_frame(0, 5, -1, 0.0f, 2400, 1180, 6000), t) });
+        const std::vector<std::string> said = lines_while(
+            [&] {
+                w.on_packets({ from_server(event_frame(5, 5, 1, 0.0f, 2900, 1170, 6000), t + 1000) });
+                w.on_packets({ from_server(hurt_frame(3, 5, 400, 1180, kId, 0, 6000), t + 2000) });
+                w.on_packets({ from_server(hurt_frame(7, 5, 2400, 1180, kId, 0, 5000), t + 3000) });
+                w.on_packets({ from_server(event_frame(5, 5, 1, 0.0f, 3000, 1180, 6000), t + 6000) });
+            },
+            kFar);
+        const PacketWorld::Mob five = slot_of(w.view(t + 6000), 5);
+        const PacketWorld::Stats s = w.stats();
+        check(five.x == 400.0f && five.frame_x == 400.0f && five.hp == 5000 && s.far_corrections == 1 &&
+                  s.far_refused == 3 && s.hurts_far == 1 && s.unknown_placed == 1,
+              "the contact 2,000 px off placed; the two states not known and the hurt that does not chain refused "
+              "-- its HP taken all the same");
+        const std::string gen = std::to_string(five.gen);
+        check(said.size() == 2 &&
+                  said.front().find("a far monster frame refused -- state 5 (not known), slot 5 gen " + gen +
+                                    " at 2900,1170, worked out at 2400,1180 standing, 500 px off; its last placing "
+                                    "frame: state 0 (a stop) at speed 0.00, facing -1, 1.0 s before; 0 far frame(s) "
+                                    "not said") != std::string::npos &&
+                  said.back().find("a far monster frame refused -- state 5 (not known), slot 5 gen " + gen +
+                                   " at 3000,1180, worked out at 400,1180 standing, 2600 px off; its last placing "
+                                   "frame: state 3 (a contact) at speed 2.00, facing +1, 4.0 s before; 2 far frame(s) "
+                                   "not said since the last such line; so far 1 placed far, 3 refused far, 0 walk(s) "
+                                   "faster than 4 px/step") != std::string::npos,
+              "two lines for four far frames: the first, and the one 5 s after it, which counts the two between -- " +
+                  std::to_string(said.size()) + " line(s)");
+    }
+    {
+        // Neither far frames nor fast walks for a monster dead or never
+        // named: refused as before, and nothing judged far.
+        PacketWorld w;
+        w.on_packets({ from_server(event_frame(9, 6, 1, 7.0f, 1000, 700, -5, 600), t) });
+        w.on_packets({ from_server(hurt_frame(3, 6, 3000, 700, kId, 0, 0), t + 100),
+                       from_server(hurt_frame(11, 8, 3000, 700, kId, 0, 500), t + 200) });
+        const PacketWorld::Stats s = w.stats();
+        check(slot_of(w.view(t + 300), 6).x == 1000.0f && !w.view(t + 300).mob(8) && s.far_corrections == 0 &&
+                  s.far_refused == 0 && s.of(0x0038).refused == 2,
+              "a contact for a monster killed, or for a slot no frame named: refused, and no far frame");
+    }
+
+#ifdef GOBOT_SOURCE_DIR
+    // The rule in one place, and nothing but the map reads a frame's place:
+    // the hunter's view is changed by the far corrections alone.
+    const std::string src = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/packet_world.cpp");
+    if (src.empty()) {
+        skip("the source tree is not here, so packet_world.cpp is not read\n");
+    } else {
+        const std::size_t npos = std::string::npos;
+        const std::string rule = body_of(src, "bool places_far(std::uint8_t state, bool chained) {");
+        const std::string hurt = body_of(src, "PacketWorld::Taken PacketWorld::take_hurt(");
+        const std::string other = body_of(src, "PacketWorld::Taken PacketWorld::take_other_state(");
+        const std::string follow = body_of(src, "void follow_mob(PacketWorld::Mob& m, std::uint64_t walk_from, "
+                                                "std::uint64_t now) {");
+        // kPlaceFarFrames in the code, not its comments.
+        int read_at = 0;
+        for (std::size_t at = 0; at < src.size();) {
+            std::size_t end = src.find('\n', at);
+            if (end == npos) end = src.size();
+            std::string code = src.substr(at, end - at);
+            const std::size_t comment = code.find("//");
+            if (comment != npos) code.resize(comment);
+            if (code.find("kPlaceFarFrames") != npos) ++read_at;
+            at = end + 1;
+        }
+        check(rule.find("return PacketWorld::kPlaceFarFrames && ((hurt && chained) || contact);") != npos &&
+                  read_at == 1 &&
+                  hurt.find("places_far(s.state, chained)") != npos &&
+                  other.find("places_far(spot->state, false)") != npos,
+              "the far rule is places_far(), and kPlaceFarFrames is read there alone -- " +
+                  std::to_string(read_at) + " line(s) read it");
+        // The far line is written with the lock let go of: the GUI's map and
+        // the hunter's look wait on it while a slow log file is written.
+        const std::string far = body_of(src, "void PacketWorld::note_far(");
+        const std::string batch = body_of(src, "void PacketWorld::on_packets(const std::vector<GamePacket>& batch) {");
+        const std::size_t locked = batch.find("std::lock_guard<std::mutex> lock(mutex_);");
+        const std::size_t swapped = batch.find("said.swap(said_);");
+        const std::size_t written = batch.find("for (const std::string& s : said) GB_INFO(\"%s\", s.c_str());");
+        check(!far.empty() && far.find("GB_INFO(") == npos && far.find("said_.emplace_back(line);") != npos &&
+                  locked != npos && swapped != npos && written != npos && locked < swapped && swapped < written &&
+                  batch.find("\n    }", swapped) < written,
+              "note_far only words its line; on_packets writes it after the block that holds mutex_");
+        check(follow.find("m.x = to_coord(m.x + static_cast<double>(m.facing) * m.speed * "
+                          "PacketWorld::kStepsPerSecond * secs);") != npos &&
+                  follow.find("m.y") == npos && follow.find("frame_") == npos &&
+                  follow.find("m.moving = now < walk_end;") != npos,
+              "follow_mob moves x alone, as it did: no floor and no frame place in the hunter's working-out");
+        // The hunter's own files: what it reads of a monster is its x and y.
+        std::string readers;
+        for (const char* dir : { "/src", "/include/gobot" }) {
+            std::error_code ec;
+            for (const auto& e : std::filesystem::directory_iterator(std::string(GOBOT_SOURCE_DIR) + dir, ec)) {
+                const std::string name = e.path().filename().string();
+                if (name.rfind("hunter", 0) != 0 && name.rfind("packet_eyes", 0) != 0 &&
+                    name.rfind("cast_match", 0) != 0)
+                    continue;
+                const std::string text = read_all(e.path().string());
+                if (text.find("frame_x") != npos || text.find("frame_y") != npos) readers += " " + name;
+            }
+        }
+        check(readers.empty(), "the hunter's files (hunter*, packet_eyes*, cast_match*) never read Mob::frame_x or "
+                               "frame_y:" + (readers.empty() ? std::string(" none do") : readers));
+        const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp");
+        const std::string line = body_of(gui, "void GuiApp::packet_watch_tick() {");
+        check(line.find("ws.far_corrections") != npos && line.find("ws.far_refused") != npos &&
+                  line.find("ws.walks_fast") != npos,
+              "the Positions line counts the far frames placed and refused, and the fast walks, from HUNT ON");
+    }
+#endif
 }
 
 /// The generation: new at each spawn, table and dead slot alive again, and
@@ -1615,6 +1992,7 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_own_facing();
     test_own_jump();
     test_air_counts();
+    test_own_trace();
     test_not_yours();
     test_monster_table();
     test_kill_respawn();
@@ -1629,6 +2007,8 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_hurt_attribution();
     test_contacts_quiet();
     test_hurt_rules();
+    test_frame_place();
+    test_far_frames();
     test_generations();
     test_actor_checked();
     test_hurt_counts_since();

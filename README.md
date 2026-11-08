@@ -198,7 +198,7 @@ parallel plugins it would look for beside them. The one exception is
 
 ## Getting started
 
-`gobot_gui.exe` opens on one simple screen, in Vietnamese, with seven tabs.
+`gobot_gui.exe` opens on one simple screen, in Vietnamese, with eight tabs.
 **Đánh quái** is laid out in the order things have to happen:
 
 1. **Trước khi bắt đầu** — a checklist: game window found, GoBot not covering
@@ -221,10 +221,13 @@ parallel plugins it would look for beside them. The one exception is
    saved place.
 
 Everything that acts on the game ships switched **off**: nothing is pressed
-until something is ticked. **Tự hồi sinh** revives on the spot with a revive
-item -- the death panel's *Sử dụng vật phẩm hồi sinh*, then Xác Nhận; never
-the village (−2% EXP), never Cash -- three tries a death, and when they fail
-the whole bot stops and says why in red. **Tự buff** gives each buff key its
+until something is ticked (*Nhảy lên bục trên* and *Tự tìm quái trong vùng*,
+2026.11.05b, ship ticked, but act only with **Tự đánh quái** and **Chỗ đánh
+quái** ticked, in an area drawn on **Bản đồ**). **Tự hồi sinh** revives on
+the spot with a revive item -- the death panel's *Sử dụng vật phẩm hồi
+sinh*, then Xác Nhận; never the village (−2% EXP), never Cash -- three
+tries a death, and when they fail the whole bot stops and says why in red.
+**Tự buff** gives each buff key its
 own time, 0–7200 seconds -- at 0 it is cast again every 5 s, as GoC casts a
 buff whose cooldown is 0 -- and casts every buff again after a death, a revive
 or logging back in. While the bot runs, **Luôn đưa game lên trước** brings the
@@ -280,15 +283,30 @@ with its **Thử**; *Kiểu đánh*, GoC's class-and-weapon presets with a
 closer than the minimum, never from one off the character's level, and at
 most three steps one way -- from whichever monsters -- until the character
 has walked back the other way; then it fights where it stands. GoBot cannot
-see where a platform ends, so the first step past an edge is not prevented.
+see where a platform ends, so the first step past an edge is not prevented --
+but with a **Bản đồ** area in use and its file, since 2026.11.04d, no step
+its floor takes out of the box is taken (`walk_stays_in`).
 With any *Kiểu đánh*, *Như trước* included, the character turns to a monster
 only when it is not facing it already. A hurt monster is gone for first only
 when it is within reach, and one chased for `give_up_ms` (4 s) without coming
 within reach -- behind a wall, up on a ledge -- is passed over for twice as
 long, one on
 *Đánh trước* too; the box under BẮT ĐẦU says so while nothing else is in
-view. Without a *Kiểu đánh* every fight still going after `give_up_ms` is
-picked again, usually the same monster still in reach: since 2026.11.04
+view. Since 2026.11.04d, with no hop to follow -- `jump_to_reach` off, no
+jump key, or the spot on (`Hunter::hops_to_targets`) -- and a map file to go
+by (a **Bản đồ** area's, or with no spot the one the drops trust; this
+run's spot with no saved area goes on as before), a monster more than
+*Cao nhất* above that does not stand on the character's own floor, followed
+to it slopes and all, is not picked once nothing on the level or below is
+left: walked under for `give_up_ms` at a time, such picks carried the
+character down a slope out of its area on 2026-11-04 (the owner's Q3,
+`Hunter::kSkipAboveUnreached`). Since 2026.11.05b, in a **Bản đồ** area
+with *Nhảy lên bục trên*, such a monster that a planned jump up reaches is
+picked last instead, and with *Tự tìm quái trong vùng* the seek's
+`Listed::NoWay` -- no standing point in the box it gets to -- takes Q3's
+place (both below). Without a *Kiểu đánh* every fight still
+going after `give_up_ms` is picked again, usually the same monster still in
+reach: since 2026.11.04
 those are counted apart -- *re-picked while in reach* in the full window,
 `(M of them in reach: re-picked every 4 s, Như trước)` in the minute's
 `Hunter:` line -- and no longer read as given up out of reach. That line
@@ -319,7 +337,10 @@ empty lists, and no jump key until the player sets one (an existing
 hunt.ini keeps its own). **Thử** beside the jump key is the one button here
 that presses a key in the game: the jump key, once, with the game brought
 to the front. A hop toward a monster above comes only once the last jump
-is over (about 0.8 s), never as a second press in the air. GoBot never
+is over (about 0.8 s), never as a second press in the air. *Nhảy lên bục
+trên* (2026.11.05b, below) needs the jump key to be ↑, and presses Ctrl + ↑
+as well; its **Thử ↑**, **Thử ↑↑** and **Thử Ctrl+↑** press one jump each.
+GoBot never
 presses Down on its own, whatever key is set to it: standing on a gate, Down
 takes the character to another map. Key boxes refuse it, and a jump key set
 to it is marked red on the checklist. The one Down GoBot sends is the drop's,
@@ -383,9 +404,15 @@ the character on the platform above -- while the walk back hops toward a spot
 up to one jump (120 px) above, with a jump key set and *Jump at things above
 you* (`jump_to_reach`) on, and does not walk back to one higher. The walk
 back never presses Down, so a spot below is reached only by walking off a
-platform's edge toward it, where the platform allows that.
-This version remembers the spot for the current run only: every BẮT ĐẦU takes
-it afresh, and nothing of it is saved. A map entry or a log back in sets the
+platform's edge toward it, where the platform allows that. An area drawn on
+**Bản đồ** goes by its map's file instead (below): its walks kept in its box,
+and its walk back along the floors, never a hop -- since 2026.11.05b with
+planned jumps up where no walk gets there (*Nhảy lên bục trên*), still
+never a hop.
+A spot taken so is for the current run only: every BẮT ĐẦU takes it afresh,
+and nothing of it is saved -- but a map with a hunting area drawn on
+**Bản đồ** (below) is hunted in that area instead, once the character stands
+in it or near it. A map entry or a log back in sets the
 spot aside, and the character stands and fights only what comes within
 reach, as with *Đứng yên một chỗ*. After a map change (a door) it stands
 until the character comes back through a door to near where it left -- a
@@ -397,7 +424,8 @@ skill, and not on a map they know is another. A log in after a door keeps
 the door's rule. Otherwise it stands until **Đặt chỗ này** is pressed. It stands as well while
 the packets have lost the character. To take the character somewhere else
 while the bot runs: untick **Chỗ đánh quái** (the walk back stops at once and
-the spot is dropped), walk there, tick it again and press **Đặt chỗ này**.
+the spot is dropped), walk there, tick it again and press **Đặt chỗ này** --
+which, on a map with an area, moves the area there and saves it.
 It needs Npcap -- the packets alone place the character, whether
 *Vị trí từ gói tin* is ticked or not -- so without Npcap, or with
 `packet_positions=off`, fighting does not start while it is ticked (the rest
@@ -415,9 +443,13 @@ larger -- and no more than `drop_side_px` (120) across, with nothing to
 fight on the character's own level, which always goes first, on *Đánh trước*
 or not. With nothing on its level and a drop able to go -- the map trusted,
 drops not off for the run -- the nearest monster below is picked before one
-above, which a hop would only chase. The hunter walks to above the monster,
-lets go of the walk, waits for the packets to report the character standing,
-and presses. The tick is greyed out, its reason in the tooltip, while *Đứng
+above, which a hop would only chase. The hunter walks toward the monster
+and, with a drop able to go, lets go of the walk once within 24 px across of
+it (`Hunter::kDropStopAbovePx`, the owner's Q6 of 2026.11.04d; before, a
+drop's settle only ever began on a look taken mid-walk, 24 px either side),
+judges the drop from where the character then stands -- the landing's floor
+8 px either side -- waits for the packets to report it standing, and
+presses. The tick is greyed out, its reason in the tooltip, while *Đứng
 yên một chỗ* is ticked (never a drop then), while *Vị trí từ gói tin* is not
 (the packets steer every drop: never in Watch, nor once the screen has taken
 over), and while a key of the hunter's -- jump, left, right, attack -- is
@@ -426,8 +458,11 @@ Down; the full window's *Drop to things below you (Ctrl+Down)* is greyed the
 same way. With the hunting spot on, a drop goes only while the spot is in
 use, and only when where the character stands, where it lands and the target
 all lie inside the area: with the shipped `spot_half_h` of 100, a monster
-more than 100 px below the spot is outside it already. The walk back never
-drops.
+more than 100 px below the spot is outside it already -- an area drawn on
+**Bản đồ** with its home on the floor below and its box run up over the one
+above lets the drop go. (04c's notes said to run the box's bottom edge below
+the floor beneath instead: that leaves most of the box red, never walked
+back from.) The walk back never drops.
 
 Where it may drop comes from the game's own files, read only:
 `data\Map\<stem>.map`, read planar -- the floors under every x, with their
@@ -435,20 +470,40 @@ attribute -- and `data\Project\<stem>.prj` -- the gates, its warp-zone and
 portal objects -- in the folder `MapFile` finds `data\Map` in. Ctrl + Down
 is pressed only when the floor a straight fall lands on is the monster's or
 one between, never one below it, and the same floor a few pixels either
-side; when the character does not stand on the bottom ground (only a
-platform is dropped through); and when no gate lies within `drop_gate_px`
+side -- since 2026.11.04d the landing's floor and the character's own each
+followed column by column as they run, sloping or flat, across holes of 1-2
+px (`GameMapBook::Page::follow`), where 04c asked for the same height either
+side and so did not drop once on t52_s2, whose floors all slope, on
+2026-11-04. The monster's floor is the one it last stood on (two of its
+frames at one height, 300 ms apart), followed to where it is now, else the
+first under its point within 100 px (`Hunter::kDropMonsterFloorPx`): its
+point alone is often in the air, a contact frame or a knock; and the landing
+is on it when the landing's floor, followed to the monster, is that floor.
+Pressed, too, only when the character does not stand on the bottom ground
+(only a platform is dropped through); and when no gate lies within `drop_gate_px`
 (150) across, from a little above where it stands to a little below where
 it lands: Ctrl + Down on a gate changes the map. The map has to be known
 and its file trusted. A map entry (`0x0086`) seen since the capture began
 names it, and is trusted at once when its spawn lies by one of the file's
 gates, or after three standing points on its floors. With GoBot opened
 mid-map ("map 0/0") the standing points name it -- your settled reports and
-the monsters' stops: at least 12, apart from each other, every one on a
+the monsters that stand: at least 12, apart from each other, every one on a
 floor of exactly one of the game's `.map` files, with every other file
-missing at least 6 of them. A real entry always wins; a later standing
-point on none of the floors lets the map go (a named one is named afresh,
-an entry's not until the next entry); a map whose `.prj` lists no gate is
-never trusted. The hint under the row says how far the naming has got.
+missing at least 6 of them. A monster stands once two of its frames (the
+same slot and generation) put it at the same height, within 2 px, 300 ms
+apart or more: a frame alone may be a spawn still in the air, or a monster
+thrown. A real entry always wins. Since 2026.11.04b only your own points
+let a map go -- two settled reports off its floors, 0.5 s apart or more,
+with none on them between (one place twice or two places: either counts;
+one alone is logged and let pass) -- and then a named one is named afresh,
+an entry's not until the next entry. A monster's frame off the floors never
+does: it is counted, and logged at most once a minute with the floors above
+and below it (in 2026.11.04 one such frame, 31 px above its floor, kept
+drops off for a whole stay). Only while an entry's file still waits for its
+three standing points does a monster count against it: one that stands off
+its floors sets that count back to 0, as a miss does to a name; a file once
+trusted it never touches. A map whose `.prj` lists no gate is never
+trusted. The hint under the row says how far the naming has got.
 
 The press is `InputManager::drop_ctrl_down`, the one way Down ever goes
 down: Ctrl alone for 40-60 ms (Ctrl alone is the game's pick-up, harmless),
@@ -464,17 +519,30 @@ game losing focus send the ups at once and cut a drop short; an up that did
 not go out is sent again every 100 ms, and after 3 failed tries the hunt
 stops with a red line (*phím ↓ hoặc Ctrl có thể vẫn đang bị giữ*). With the
 switch on, GoBot's start and every BẮT ĐẦU let go of a Down or Ctrl that
-Windows still reads down, as a GoBot ended mid-drop would leave them.
+Windows still reads down, as a GoBot ended mid-drop would leave them. Since
+2026.11.05b the jump up's Ctrl + ↑ is this chord with ↑ for its second key
+(`InputManager::high_jump`, `chord_ctrl(ChordKey::Up)`), sent without the
+drop's chord flag, so the guard on Down is as it was;
+`chord_ctrl(ChordKey::Down)` is `drop_ctrl_down`, its events unchanged.
+With either switch on, a stray ↑ is let go of too, ↑ before Ctrl. A high
+jump's ↑-up left owed stops the hunt with ↑ in the red line instead
+(*phím ↑ hoặc Ctrl có thể vẫn đang bị giữ*, `InputManager::up_owed`,
+`DropStop::JumpKeysStuck`): pressing ↓ would not let go of ↑.
 
 What came of a press is judged from the packets alone: landed on the floor
-the file gave (worked), no take-off within 1 s (did nothing), a jump in
+the file gave, followed to the column it came down at (worked; since
+2026.11.04d -- on a slope a few pixels across is as many up or down, and a
+good landing read as off the file would have turned drops off and the file
+with them), no take-off within 1 s (did nothing), a jump in
 place, a rise, or a landing elsewhere. Did nothing and a jump in place
 remember the place -- no drop within 64 px of it until GoBot closes -- and
 pass the monster over for twice `give_up_ms`; 3 in a row, or 5 in a run,
 switch drops off until the next start, as does a rise, a landing off the
 file (whose file is then not gone by again this session) or Down held over
-180 ms. At most 4 presses a minute and 2 per monster, 1.5 s apart, none
-within 5 s of a map entry, and none while a hold is on, the game is behind,
+180 ms. At most 4 presses a minute and 2 per monster, 1.5 s apart -- since
+2026.11.05b from a jump up's press too, which shares the press record, the
+map-change watch and the stuck-key halt -- none within 5 s of a map entry,
+and none while a hold is on, the game is behind,
 HP is under the HP potion's mark (50% at the least), the macro holds for a
 character out of the world, or a navigator walk or the keeper's crossing
 runs. A map change within 10 s of a press, whatever was judged of it, stops
@@ -482,9 +550,462 @@ the hunt, unticks *Nhảy xuống bậc dưới* and saves `hunt.ini`, with a WA
 (`Hunter: MAP CHANGED …`) and a red line under the tick until the next
 start; both ends are learned as gates for the session. The log has a line
 per press (`Hunter: drop (Ctrl+Down) toward …`) and per verdict, `Hunter:
-not dropping … -- <why>` once a target for what the player can act on, and
-the minute's `Hunter:` line gains `; drops N (… worked, … did nothing, …)`.
+not dropping … -- <why>` once a target for what the player can act on --
+since 2026.11.04d with where the character and the monster were judged to
+stand and their floors -- and the minute's `Hunter:` line gains `; drops N
+(… worked, … did nothing, …)` and `; drop looks N (settles N; refused: …)`,
+the looks at a target below and what refused them, most first.
 `gobot_cli`'s hunting never drops.
+
+**Bản đồ**, the second tab (*Thử nghiệm*, since 2026.11.04c; run on the game
+as 04c and as 04d, 2026.11.05's changes not yet), draws the map the
+character is on as GoC does: the platforms
+(attribute 1, green), the bottom ground (2, blue), walls and blocks, the
+gates (a pink + in a red box; those learned this session faded), you (blue,
+with a small triangle the way the packets last said you face -- read only),
+the monsters (red, with an HP bar from zoom 0.5; grey while the hunter goes
+by a spot or an area and they are outside it and out of reach -- since
+2026.11.05, outside it in reach too while the hunter walks back first) and the
+one being fought (a yellow ring). The floors and gates come from the game's
+own `.map` and `.prj`, read only, as the drop reads them; the places from the
+packets -- so it needs Npcap and `packet_positions` other than `off`, but no
+hunt and no tick of *Vị trí từ gói tin*. Which map: a map entry (`0x0086`)
+seen since the capture began (*game báo khi vào bản đồ*), or, with none, the
+tab's own `MapTrust` naming it from standing points by the drop's rule (12,
+and the same margin) (*nhận ra từ chỗ đứng*) -- only with its file trusted,
+or its `.prj` holding no gate: such a map is named, though never dropped on.
+A named file that is doubtful names nothing; an entry's file found off
+(Mismatch, Distrusted) is drawn faded. The name beside the stem is
+`tb_Map`'s. The two `MapTrust`s are apart: while the tab knows the map and
+the drop's still names it, the drop's line says so. Until the map is known
+the tab draws you and the monsters on a 100-px grid. The wheel or [-] [+]
+zoom by 1.2, a drag with any button that grips nothing pans, *Theo nhân
+vật* follows you (a double-click too), *Cả bản đồ* fits; *Chi tiết* adds,
+for the session, the fall line while airborne, the last report, the walk
+back and the hunter's monster box. Mouse only: no field takes typing, which
+the front keeper would send to the game while a run is on.
+
+Since 2026.11.05 (not yet run on the game; the owner's *lệch chỗ* and *thừa
+chấm* of 2026-11-05) the dots go where the game has them by the map's file,
+in the drawing alone (`mob_dot`, `you_dot`, `mob_dots` in
+`gobot/map_view.hpp`). Between its frames the packets give a walking
+monster's x alone and the world keeps its last frame's height
+(`follow_mob`), so on t52_s2's ramps -- 586 at x 750, 715 at x 1100, 802 at
+x 1400 -- a walker's dot floated over its floor or sank under it by 10-170
+px, and jumped back at its next frame; yours did the same between your
+reports. A walker -- its x moved off where its last placing frame put it
+(`PacketWorld::Mob::frame_x`, `frame_y`, data only: nothing in the hunter
+reads them) -- is now drawn on the floor that frame stood on, followed
+column by column across holes of 1-2 px (`GameMapBook::Page::follow`) to
+its x, at the frame's height over the floor; where that floor ends first,
+or a wall, the map's edge or `kDotFollowMaxPx` (2048) columns, it is held
+there, as the game turns a monster at a platform's end. A walker whose frame
+stood on no floor, or on a wall, is drawn where the world has it -- its x
+followed, its frame's height -- as until 04d, and so is every living monster
+on the grid, or on an entry's file found off (drawn faded), whose floors are
+not gone by (`dot_floors`); so is your dot there. A living monster standing
+on no floor -- a spawn point, 15-66 px over its floor until its first stop --
+is set down `kDotStandPx` (1) over the floor the hunter takes for it
+(`Hunter::monster_floor`: the first at or below it within 100 px).
+You, walking on the ground with the fix known, are drawn on your floor from
+your last report (`Me::report_x`, `report_y`) the same way; airborne, lost
+or standing, as the fix has you. The dead are hidden at once
+(`kMapDeadShownMs`, 0, the owner's Q1 (a), as GoC lists only HP above 0;
+until 04d the tab kept them faded for `PacketEyes::kDeadShownMs`, 1.5 s,
+where the killing blow found them, which stays the hunter's). Under *Chưa
+có gói tin của game* or *Vị trí từ gói tin đang tắt* (`map_shows_mobs`) no
+monster, ring or monster hover is drawn and the grid's box is not fitted to
+them: the world keeps its last monsters, a walker going on for 5 s, until a
+capture starts again. The grey (`mob_grey`) and the hunter's box under *Chi
+tiết* go by the world's own heights, as the hunter does -- the owner's Q2
+(a): the hunter keeps its heights until answered (since 2026.11.05b, while
+an area is in use with *Tự tìm quái trong vùng*, the hunter's plates stand
+where `mob_place` puts the dots: the seek's Q3 (a), `kPlatesOnFloors`,
+below; the grey still goes by the world's heights) -- so near the box's edge
+on a slope a dot drawn inside it may be grey, or one outside red. The one
+being fought turns grey only once `Hunter::kSpotKeepPx` (60) past the box's
+edge, where `Hunter::mark_out_of_area` lets it go. A monster's hover ends
+with where its dot is drawn, and the line over the map starts with where
+yours is (`Nhân vật: x, y`), each with `(gói tin x, y)`, where the packets
+have it, when that is elsewhere.
+
+On it each map gets one **hunting area**: a free box and its *chỗ về* (the
+home), a point on a floor inside it that the bot walks back to. It stands in
+for the spot and its ±`spot_half_w` / ±`spot_half_h`, and need not be even
+round the home: put the home on the lowest floor to be hunted and run the
+box up over the floors above it, which the bot comes back down from by
+walking off their ends, and where drops land inside. (04c's notes said to
+run the box well below the home instead; the owner's box of 2026-11-04 so
+drawn had 1068 of its 1814 floor columns red, and the bot left it for good.
+Nor is a home best made right after a door: the arrival spawn, where few
+monsters come.) *Tạo
+vùng quanh nhân vật* (with the character settled) or the right click's *Tạo
+vùng ở đây* makes one ±`spot_half_w` by ±`spot_half_h` round the home, cut to
+the map. A left drag on the home's pin moves the home, on an edge or a corner
+resizes, on the 14-px strip along the top edge moves the whole box; a drag
+anywhere else, inside the box too, pans. The camera is frozen from the press
+to the release, and only the release commits, only when the box or the home
+changed: the home is snapped to the floor at or just under where it was let
+go (else the nearest above, else the nearest within 16 columns), and a box
+under 100 x 40, off the map, with no floor, or with its home on none is
+refused with a note. Otherwise it is saved at once, with *Hoàn tác* (one
+level) and *Xoá vùng* (asked first). The right click also has *Đặt chỗ về ở
+đây*, *Dời vùng tới đây* and the copy of a coordinate; *Dời vùng tới nhân
+vật* moves the box, its size and the home's place in it kept. Worked out when
+the area (at every edit), its file, the tab's gates or the drop switch
+changes, never a frame at a time, and said and drawn: floors more than 120 px
+below the home (red: never walked back from -- since 2026.11.04d, when they
+are more than half the box's floor columns, `kZoneRedBadPercent`, said in
+red rather than amber, and every save that leaves the box so adds a red note
+and a `Map tab: hunting area for … has N of M floor columns red` line),
+floors more than 31 px above it (amber: only by walking off an edge), a home
+within 60 px of a gate, the page's or one learned (`kZoneHomeGatePx`, since
+2026.11.04d: amber, a warning never a refusal -- a map entry's spawn), and,
+with drops on, a gate or a no-drop piece in the box and a box too short for
+any drop. On a doubtful file
+or none, edges and corners only, and the right click neither makes nor moves
+one: the home is never moved without a floor to put it on, but to where the
+character stands. A left press let go under ImGui's drag threshold saves
+nothing. With drops on, the platform pieces where the drop's gate rule
+refuses are drawn pale red (`no_drop_marks`, checked against
+`Hunter::drop_rule`).
+
+The areas live in `configs/spots.ini`: a section per lowercase stem
+(`[t52_s2]`: `home_x`, `home_y`, `left`, `top`, `right`, `bottom`, `saved`),
+written by GoBot alone and never shipped; an edit never writes `hunt.ini`.
+The tab's worker writes it through `ZoneSaveQueue` -- the latest value per
+map, one batch out at a time, one that failed owed again and tried every
+5 s, what is still owed written as GoBot closes -- to `spots.ini.new`, read
+back, then moved over the file, every section and key it does not know kept
+(comments are not). A `spots.ini` that is there and does not read is never
+written over: nothing is edited that session, and a red line says why.
+
+With **Tự đánh quái** and **Chỗ đánh quái** ticked, the area of the map the
+tab knows is handed to the hunter (`Hunter::set_zone`) for the map entry it
+was known at, whether the tab was ever opened or not; a named map's only
+once a settled report of this entry lies on its floors and none of yours
+off them -- and on a named map, what is put where the character stands
+(*Tạo vùng quanh nhân vật*, *Dời vùng tới nhân vật*, **Đặt chỗ này**, this
+run's spot kept) is held to the same (`zone_here_ok`, `spot_keep_ok`). With
+the positions switched off or the capture stopped by hand no map is known:
+nothing is edited or sent. The hunter keeps it waiting until it applies,
+drops it once the entries count past it, and takes it -- `zone_take`, the
+owner's Q1 -- only
+with the character settled inside the box or within 150 px of it, or back
+within 150 px of where a spot of it was left (a door there and back, a log
+in); an edit of the area in use applies at once, wherever the character is.
+Otherwise the hunt goes on as before, round where the character stands, and
+the card says how far outside the area it is. A map entry sets an area's
+spot aside as it does any spot; when the tab no longer knows the character
+is on that map (a capture started again, a name let go of, the positions
+switched off) it is set aside (`zone_aside`) until the area is sent again,
+and the card says so; a deleted area is dropped
+(`clear_zone`) and the spot taken again where the character stands.
+**Đặt chỗ này** on a map with an area moves the area to where the character
+stands, its size kept, and saves it, with *Hoàn tác* on Bản đồ (the owner's
+Q2); elsewhere it does what it did. An area may be as large as the map (Q3).
+Each of the three answers is one constant or function in
+`gobot/hunt_zone.hpp`.
+
+Since 2026.11.04d (run on the game once, 2026-11-05) an area in use goes by its
+map's file too, wherever the file is not found wrong this session (a drop's
+landing off it, or, while drops look, two settled reports of yours off its
+floors) and the character stands on one of its floors; otherwise, and for
+this run's spot, the hunter goes as it did. The owner's answers after the first live hunt
+with an area -- 2026-11-04, when the character walked down t52_s2's sloping
+ground out of the box and never came back -- are not in yet, so each is its
+(a), in one constant or function:
+- **No walk out of the box** (Q1, `kZoneWalkStaysIn`, `kZoneFallInsideOk`).
+  Before each walk toward a monster the floor underfoot is followed ahead
+  (`walk_stays_in`), as far as the walk goes before it stops for the target
+  and `Hunter::kZoneWalkSlackPx` (48) more, 96 px at most: a standing point
+  on it further outside the box than the character is now, or a walk off its
+  end that lands further outside or on nothing -- worked out at 0, 1/3, 2/3
+  and all of GoC's 360 px/s across, under its gravity -- refuses the walk.
+  The keys are let go of, the target passed over for twice `give_up_ms`, its
+  fight ended, `Hunter: not walking …` said at most once every 5 s and every
+  one counted in the minute's `Hunter:` line (`walks stopped at the hunting
+  area's edge N`). A fall onto a floor inside the box is walked; so, from
+  outside, is any step that comes no further out. A drop refused, its target
+  walked to, goes by the same rule.
+- **The way back** (`return_point`): the floor the character stands on
+  followed both ways to its ends, across holes of 1-2 px, and off them -- at
+  most `kZoneReturnFallsMax` (3) falls, each landing inside the box at every
+  one of those speeds. It ends at the home, else at the standing point in
+  the box so reached with the fewest falls, then the nearest the home across;
+  it is walked with no hop (`WalkFor::Floor`) and never a Down, and stood at.
+  Walked past its floor's end with no landing's report, it is held no further
+  than the point it walks to; standing on none of the file's floors, the
+  walk back goes as before 04d.
+  So a home more than one jump up is walked back to when a slope leads there.
+  Since 2026.11.05b, with *Nhảy lên bục trên* able to go, up to
+  `kZoneReturnJumpsMax` (2) jumps up are legs too, fewer jumps first (below).
+  With none, a home no more than one jump above is walked toward as every
+  walk back went before, hops and all -- unless *Nhảy lên bục trên* is
+  ticked where jumps up may be planned (the jump key ↑, the packets
+  steering, the map trusted: `Hunter::jump_area`), where the old hop never
+  presses, off for the run too, and under the jumps up's rules no way is
+  none. Else the spot's state is *NoReturn*
+  (in place of *TooHigh*): it fights where it stands, says so once (`Hunter:
+  no way back into the hunting area …`), and the card says so in amber.
+- **Home by height** (`zone_at_home`): within `spot_tolerance` across and on
+  the home's own floor, followed there; off every floor, within 31 px up or
+  down. 04c went by x alone: 882,616, under the ledge's home, was "home".
+- **The walk back first** (Q2, `zone_walks_back_first`): more than
+  `kZoneOutsideBackPx` (60) outside the box with a way back the file shows,
+  monsters outside the box are let be, in reach too, and the walk back comes
+  first; within 60 px -- a slope crossing the edge -- in-reach monsters are
+  fought as before, and so they are while a walk back that got nowhere waits
+  `spot_retry_ms` to be tried again, and after `Hunter::kSpotMaxTries` (3).
+  Q4: no hop toward a monster is added (`hops_to_targets`, as it was) --
+  reversed by the owner 2026-11-05: in an area of **Bản đồ** a monster above
+  is jumped up to, the jump planned by the map's file, with *Nhảy lên bục
+  trên* (2026.11.05b, below); the hop itself still never goes toward a
+  monster with the spot on. Q3 is above, under the hunting row.
+- **Where it stands, said**: outside the box with no other reason to give,
+  the card under the map says *Nhân vật đang ở ngoài vùng N px* and the way
+  back in amber, never the green *Đang dùng vùng này* (it said that 522 px
+  off on 2026-11-04), the card under BẮT ĐẦU turns amber too, and the
+  *Positions* line adds `outside the area N px` (`walking back first, to
+  x,y`). *Tạo vùng quanh nhân vật* still puts the home where the character
+  stands (Q5, `kZoneAroundHomeLowest`; `zone_home_lowest` is ready for (b),
+  the box's lowest floor), with the red line above when most of the box
+  cannot walk back to it.
+
+Since 2026.11.05b (not yet run on the game) an area in use has two more
+switches, both ticked as shipped -- the owner's answer 5 of 2026-11-05,
+*Bật sẵn*, and the seek's Q7 (a); a `hunt.ini` without `jump_up` or
+`seek_in_zone` reads true -- and both act only while an area of **Bản đồ**
+is in use with its map's file (the jumps up only on a map `MapTrust`
+trusts), with `packet_positions=on` and *Đứng yên một chỗ* off
+(`Hunter::jumps_may_go`, `Hunter::seek_wanted`; the ticks
+are greyed with their reasons by `jump_up_tick` and `seek_tick`,
+`gobot/hunt_card.hpp`). This run's spot with no saved area and no spot hunt
+as 2026.11.05 did; in Watch neither acts, and while the screen's plates
+steer -- a *Lọc quái* list in use, the packets unhealthy -- the seek stands
+aside and no monster is jumped to.
+
+**Nhảy lên bục trên** (`jump_up`; *Jump up onto floors above (Up / Up Up /
+Ctrl+Up)* in the full window) jumps straight up -- no arrow held, no
+steering in the air -- onto the floor of a monster above, and onto the
+floors of a way back, with the jump key ↑ (0x26) and nothing else. The key
+is the cheapest the game's own map file shows landing for sure
+(`gobot/jump_plan.hpp`), by a model of the game's own 0x002A speeds -- ↑
+−800 px/s (state 1); ↑↑'s second ↑, pressed `kJumpUpSecondAtMs` (340) after
+the first went down, −800 again (state 6); Ctrl + ↑ −1440 (state 2) --
+under a gravity of 2240 to 2640 px/s² (`kJumpUpGravity`: the walk-off's 1.4
+a step, GoC's 2400, and 10% over it): peaks of 121..143, 213..286 and
+392..463 px (`jump_peak`), so a floor up to 109, 201 and 380 px above is
+landed on for sure -- `kJumpUpClearPx` (12) under the lowest peak -- with
+none in the band from there to 12 over the highest. The owner's *Theo GoC*
+of 2026-11-05 -- ↑ ~133, ↑↑ ~280, Ctrl + ↑ ~432 -- are nominal peaks within
+these ranges: upper bounds, the margins kept (answer 1). Higher floors are
+reached only by one in between, at most `kZoneReturnJumpsMax` (2) jumps: on
+a way back, and on the seek's way to a monster (`SeekRules::jumps_max`);
+without the seek a monster gets one jump (`plan_jump_to`). A take-off is
+judged at its
+column and `kJumpUpMarginPx` (24) either way every 8 px (`judge_column`): no
+floor that is not a platform in the way up (attr 2 and up stop a rise, as
+GoC's `SimulateMove` has it; an unknown one too); no floor outside the box
+within `kJumpUpCeilingPx` (650) above -- the ceiling guard, whatever the
+model says, so a jump of the owner's once-feared 600 px still lands inside;
+the same landing floor at both ends of the peak's range, linked column to
+column; the landing's standing point inside the box, and the take-off --
+or, coming back in, no further out than the character stands
+(`walk_stays_in`'s Closer); and the weaker jump -- Ctrl or the second ↑
+lost -- landing back or in the box, unblocked. The arc may pass over the
+box's top (answer 3). Runs of passing columns `kJumpUpRunMinPx` (64) wide
+are walked to `kJumpUpRunInsetPx` (32) inside their ends, the cheapest by
+key, walk and headroom (`plan_jump_to`, `jump_legs_from`). Ctrl + ↑ standing
+on a gate does not change the map -- the owner's hand test, answer 2 -- so
+no band is kept round a gate (`kJumpUpGateBand` false); the 10-s map-change
+watch after any press stays.
+
+The hunter walks to the take-off along its floor (`WalkFor::Floor`), lets
+go within `Hunter::kJumpUpLeadPx` (24), waits for the packets to report it
+standing, judges the column it stopped on -- two fine taps toward a passing
+one at most -- and presses once, no arrow held (`src/hunter_jump.cpp`). In
+the air it neither walks nor turns, but attacks and casts go out if the
+monster comes in reach (answer 4; GoC's jump attack in place is not taken).
+Ctrl + ↑ is `high_jump` (above); ↑↑ is `InputManager::jump_twice`, the
+second ↑ `kJumpUpSecondAtMs` after the first and sent only while nothing
+holds, else judged as a plain ↑; ↑ alone is `jump_once`; every ↑ is held
+`kJumpHoldMinMs`-`kJumpHoldMaxMs` (80-110) with the extended flag (E0 48).
+`InputManager::jump`, `double_jump` and `BotConfig::key_jump` are never used
+for it. What came of a press is judged from your own 0x002A by kind
+(`PacketWorld::Stats::air`) and your last reports (`PacketWorld::own_since`):
+worked -- on the planned floor, within 12 px -- and the fight goes on up
+there; fell back onto the take-off's floor, which keeps that key and the
+weaker ones off that floor within `GameMapBook::kNoJumpXPx` (48) of that x
+for the session, and a second fall onto the same floor takes it as solid
+from below; landed lower; did nothing in `kJumpUpJudgeMs` (900 ms); or the
+key's kind not seen -- Ctrl + ↑ with no state 2, ↑↑ with no state 6 --
+`kJumpUpKindMisses` (2) of which turn that key off for the run. A landing
+above the plan, outside the box or off the file, ↑ held over 250 ms, or a g
+measured outside 2100..2800 twice turns the jumps up off until the next
+start, as do `kJumpUpFailsInRow` (3) fails in a row or
+`kJumpUpFailsPerRun` (5) in a run. At most `kJumpUpsPerMinute` (4) presses
+a minute, `kJumpUpsPerTarget` (2) per monster and 2 settles let go of per
+monster; 1.5 s from any drop or jump press; none within 5 s of a map entry,
+while a hold is on, the game is behind, loot is owed or the drop's veto
+stands -- which now counts a GoBot hotkey on ↑ as well as on Ctrl or Down. A
+map change within `kPressWatchMs` (10 s) of a press stops the hunt, unticks
+*Nhảy lên bục trên* and saves `hunt.ini` (`DropStop::JumpMapChanged`), and
+both ends are learned as gates; with a drop's press still under its watch
+too, either may have done it, and both are undone, learned and unticked
+(`DropStop::BothMapChanged`). After a jump to a monster that worked, no
+drop for `kJumpUpStayMs` (8 s, `DropWhy::AfterJump`), and no jump toward a
+monster within 8 s of a drop that worked. A monster only a jump reaches is
+picked last (`kJumpUpTargetsLast`). With the switch on in an area where
+jumps up may be planned (`Hunter::jump_area`: the jump key ↑, the packets
+steering, the map trusted), the old hop never presses there, off for the
+run too: every jump is planned; anywhere else it hops as 2026.11.05 did.
+The tick, greyed for a reason, may still be unticked. `return_point`
+takes up to `kZoneReturnJumpsMax` (2) jump legs, fewer jumps first, and
+then has no blind hop: no way back is none. Off, or off for the run,
+nothing new is
+pressed: `Hunter: a jump up would go here (jump_up is off): …` says where,
+once a monster or way and every `kJumpUpSayMs` (30 s) at most, and the map
+tab draws its arrow dashed. **Thử ↑**, **Thử ↑↑** and **Thử Ctrl+↑**
+(*Đo cú nhảy*, under the row, shown where the switch can work as set) press
+one jump each with the bot stopped and measure it from the packets --
+take-off lag, flight, rise, g≈ (`JumpCheck::run_kind`) -- refused under a
+floor the map shows within 650 px; nothing waits for them.
+
+On t52_s2 with the owner's box (265..1399 × 174..694, home 880,274) the
+planner finds Ctrl + ↑ alone, onto the home's ledge: from the ground at x
+695..884 (the run 663..916) and from the ramp's foot at 1024..1048
+(992..1080). Columns 505..638 lie under ledges A and B, outside the box,
+and the ceiling guard refuses them. So the home ledge is reached from the
+ground -- from 880,634 the way back walks to about x 802 and presses Ctrl +
+↑ -- and the 04d advice to move the home down to about 1100,714 is no
+longer needed; the box stays as drawn. A bottom edge at about 810, to hunt
+the ramp's foot as well, adds Ctrl + ↑ from the ground onto the ramp at
+1161..1288. On t53_s2 no key has a usable jump in the owner's box, its top
+at 1088 or at 1020.
+
+The log: `Hunter: jump up (Ctrl+Up) toward …|on the way home: from x,y on
+floor N of t52_s2 (trusted: …), onto floor N at x N (rise N; peak 392..463,
+headroom N; no floor outside the area within 650 above), run a..b, …; Up
+held N ms`; then `Hunter: jump up worked: landed at x,y on floor N, N px up,
+N ms after the key (0x002A: high -36 at +N ms, landed +N; flight N ms,
+g≈N)`, or `jump up FELL BACK` (with *bumped from below* or *came up short*
+by its flight time), `landed LOWER`, `did nothing in N ms`, `Ctrl+Up came out
+as …`, `… OFF until the next BẮT ĐẦU`, a WARN `MAP CHANGED`; `Hunter: not
+jumping up to … -- <why>` once a monster for what the player can act on,
+the rest at DEBUG, with each own 0x002A and 0x0031 for 3 s after a key. The
+minute's `Hunter:` line gains `; jump-ups: looks N, would N, settles N,
+pressed N (Up a, Up,Up b, Ctrl+Up c), worked N, fell back N, …; g≈N (n
+flights); refused: …`, and the *Positions* line says `002A:N (jumps J
+(walk-offs W), second S, high H, landed L, other O)` -- the walk-offs, state
+1 falling, among the jumps and said apart (`air_walkoffs`; see
+[protocol-findings.md](docs/protocol-findings.md)).
+
+**Tự tìm quái trong vùng** (`seek_in_zone`; *Seek monsters anywhere in the
+area*) answers what the owner said after the hunt of 2026-11-05 23:02 on
+05 -- *đang chưa tự tìm quái ở trong ô đánh quái. Nên có thể tự tìm quái và
+di chuyển tới đánh*. Off the ledge at 23:03, the character spent five
+minutes on a strip of the ground, x 691..961; at 23:05:19 it walked back
+from 709,579, inside the box where it had just killed seven, to 880,634
+under the home; four times it walked right toward a monster and was stopped
+at 1035,695, where the box's bottom cuts the ground; and it ended standing
+22 s at 907,646 with nothing to pick. In 05 the hunter went for nothing it
+had not picked from its view, walked back to the home's floor point
+whenever nothing could be picked, even from inside the box, walked toward a
+monster's x -- down the slope into the box's bottom cut -- never climbed
+back to the ledge, and held the ramp's walkers, whose walks had run out
+with no frame since, 1,500 px off at x 2594. Now, from the packets' list of
+the whole map (`PacketEyes::world`), the box's floors the character gets to
+are worked out (`seek_map`, `gobot/hunt_seek.hpp`): its own floor, cut where
+a walk would leave the box; off a floor's end onto one inside it, every
+speed landing inside (`zone_falls`); and the jumps up when they may go. For
+each monster inside the box the cheapest standing point on those floors
+that has it in reach is its attack point (`seek_attack`):
+`kSeekReachMarginPx` (24) inside the reach and `kSeekBandMarginPx` (8)
+inside the height band, from 24 px toward it too (the turn's step), and
+`kSeekEdgeInsetPx` (48) at least inside where a floor leaves the box, so a
+walk there is never refused (`walk_kept_in`). The hunter goes there
+(`src/hunter_seek.cpp`), not toward the monster's x: from 945,666 to the
+ramp foot's monster at 1007,578 it walks left, uphill, and fights from about
+867,627. Picks go (Q2 (a), `kSeekTiered`): one in reach; then one a walk on
+the character's floor gets to; then a drop's target below, when drops go;
+then one below by a fall; then one only a jump up gets to -- cost for cost
+within each, a fall `kSeekFallCostPx` (200) and a jump `kSeekJumpCostPx`
+(600) more than their walk. The goal is kept: changed at once for one in
+reach or in a better tier, else only for one `kSeekSwitchPx` (200) cheaper
+after `kSeekCommitMs` (2 s). One that gets no `kSeekProgressPx` (40) nearer
+in `kSeekStuckMs` (4 s) of walking, or whose plate is not in reach
+`kSeekArriveMs` (1.5 s) after it is reached (*not found*), is passed over
+for `kSeekPassOverMs` (20 s); a hold (trash, charms, chat, revive, the
+shop) or the game behind counts toward neither, and both clocks start
+afresh after a fight. A monster whose jumps up are used up
+(`kJumpUpsPerTarget` presses or 2 settles for it) is planned without them
+(`SeekNo::JumpsUsed`), and a drop's target below whose Ctrl + Down is
+refused from right above it for good -- a gate near, no floor below, past
+the monster -- is gone to by its own way for 20 s (`Hunter: slot N -- no
+drop to it from above (…); its own way instead`). With no floors from the
+map tab to place the monsters on, `PacketEyes::world` says false and the
+seek stands aside. The floors are worked out again every
+`kSeekPlanEveryMs` (250 ms), so a respawn anywhere in the box is gone after
+at once. No new key: walks are `WalkFor::Floor`, falls are walk-offs, and
+jumps go through the jump up's own executor and caps (`JumpUpFor::Seek`). A
+monster with no way to it is marked (`Listed::NoWay`), greyed on the map
+tab with its reason on hover, and said once; with *Nhảy lên bục trên* off,
+one only a jump gets to stays grey and the card says to tick it.
+
+The owner's seek questions are not answered yet, so each is its (a), one
+constant each: with nothing inside the box to get to, the character stands
+where it is -- no walk back to the home; outside the box it walks back as
+before, jumps up included (Q1, `kSeekIdleHome` false); the order above (Q2,
+`kSeekTiered`); the hunter's plates of the packets' monsters stand where
+`mob_place` puts them -- the map tab's dot -- while the area is in use with
+the seek on (Q3, `kPlatesOnFloors`: this reverses 2026.11.05's Q2 (a) for
+the hunter, on purpose -- attack points are planned on floors, and a plate
+at a walk's stale height would read out of reach on arrival); a walk run
+out (`PacketWorld::kMobWalkMs`, 5 s) is followed on along its frame's floor
+at its speed and held at the floor's end, `kPlaceWalkOnMaxMs` (25 s) since
+its frame at most (Q4, `kPlaceProjectWalks`, `DotWhy::Projected`; the tab's
+own dots never project); a monster just outside the box is fought only when
+in reach already, never gone to (Q5, `kSeekOutsideHit` false); one another
+player hurt within `kSeekOthersHurtMs` (10 s) is not gone to, though fought
+in reach (Q6); and the switch is on as shipped (Q7). Off, the hunter is
+2026.11.05's with its jumps up.
+
+Its log: `Hunter: seeking slot N gen G at x,y (floor N, in view|out of
+view) -- attack from x,y: <the way> (<tier>; cost N); in the area N:
+reachable N, above with no way up N, passed over N` (INFO at most every 2
+s), `Hunter: not going for slot … -- <why>` once a monster, `Hunter: slot N
+not found at …; passed over for 20 s`, `Hunter: nothing to seek for N s at
+x,y … -- standing where it is` as it begins and every `kSeekSaidMs` (10 s),
+`Hunter: monsters at x,y …` every `kSeekSnapshotMs` (30 s) -- every monster
+inside the box where it is placed and what is made of it, those within 200
+px outside, the rest counted -- and the minute's `; seek: goals N (your floor
+a, below b, above c), reached N, switched N, not found N, stuck N, no way to
+N; nothing to seek N s; time: attacking …, approaching …, seeking …, nothing
+to seek …, walking back …` -- where the minute went -- flushed at a stop
+too (`Hunter (last N s, hunt stopped): …`). The *Positions* line adds `the
+hunter's plates: N of M living monsters in view (±W x ±H); placed on floors:
+N walking (P projected past 5 s), S set down`. On **Bản đồ**: a dashed line
+from you to the attack point (a small square) and on to the sought monster,
+a dashed ring where its place is projected; the jump's arrow from take-off
+to landing, labelled ↑, ↑↑ or Ctrl+↑, dashed for one that would have gone
+(`jump_arrow`); learned no-jump points and floors found solid from below in
+grey (`solid_marks`); and the seek's greyed monsters (`seek_grey_of`).
+
+The tab's files are its worker's (`MapViewJob`, `gobot/map_view.hpp`): the
+look and the naming, the page read and sketched once per map -- floors
+linked column to column, one attribute a run, simplified to 1 px -- the
+gates and the no-drop marks, `tb_Map`'s name, and `spots.ini`; the GUI thread
+reads no file. A capture started again, or more than 2 s between jobs, makes
+its `MapTrust` let go first (an entry's map comes back at the next look, a
+named one is named afresh); once the tab is made, the job runs every 1.5 s
+unseen, and every 0.4 s -- at once after a map entry -- while the tab is
+shown or a hunt uses the spot. After a log in (the keeper's, or **Tìm
+lại**) nothing known before it is gone by: the map is known again from the
+next entry, or named afresh. While the tab is shown the window is drawn
+`kMapTabFps` (10) times a second behind the game and in front alike -- 5
+until 2026.11.05, the owner's Q3 (a) -- and `kMapTabLightFps` (2) behind the
+game in light mode, rather than 2 and 1.
 
 The version is in the window's title and at the bottom left of the simple
 screen: the one `package.ps1` wrote into `VERSION.txt`, or *bản tự build* for
@@ -544,11 +1065,17 @@ someone is using the mouse or keyboard` and, on the clock, tries again in
 30 s, while **Mua ngay** or **Thử mua** says *Chờ: bạn đang dùng chuột hoặc
 bàn phím…* on the tab and does nothing. Nothing
 is counted, bought or right-clicked unless the bag's tab strip reads Tiêu
-Dùng chosen: after a click on a tab the pointer is moved off the strip (a
+Dùng chosen -- the chosen tab drawn darker than the rest, and far darker in
+the band of 4 rows under the labels, which since 2026.11.04d is read first:
+the game's red glow round a tab lights the rest of it (on 2026-11-04 no tab
+read chosen, and the shop stopped) but never that band. The whole tab is
+read where the band says nothing, and the two at odds read as no tab. After
+a click on a tab the pointer is moved off the strip (a
 tab under it lights up), a strip that shows no tab chosen is looked at again
 up to 8 times, 150 ms apart, and one that shows another tab for sure is
 clicked once more. Still not Tiêu Dùng, the shop and the charms stop (a bag
-pass goes on, as it always has), with a `Trash: tab not read as …` line and
+pass goes on, as it always has), with a `Trash: tab not read as …` line
+(each tab's mean grey, and the band's: `under the labels …`) and
 one picture per place each session in `trash_debug` (`tab_unsure_…`); a
 charm run stopped so says so, not "no charm found", and a timed one waits
 10 minutes. *Tốc độ bấm nút* (60, 80, 100 or 150 ms)
@@ -663,6 +1190,34 @@ found or a capture refused, everything comes from the screen as before.
   hitting it. The target is held by its slot and spawn generation, so two
   monsters crossing do not swap it, and one killed and spawned again in the
   same slot is a new monster.
+  Since 2026.11.05 (not yet run on the game) a frame more than
+  `PacketWorld::kUnknownPlacePx` (200) from where its living monster was
+  worked out to be -- the gate a hurt and a state not known were held to --
+  still places it, standing, when it proves itself: a hurt whose HP chains
+  (the HP before less the damage is the HP after), or a contact (states 3
+  and 11) on a monster known (`PacketWorld::kPlaceFarFrames`, the one rule
+  `places_far`; false turns it back). About once a minute of the hunt of
+  2026-11-05 a fought monster was worked out 1,100-1,900 px from its own
+  frames, and refused they left it there until its next stop or walk: a dot
+  where nothing was and none on the monster fighting you, for the hunter as
+  for the map tab. This is the one change of 2026.11.05 the hunter sees. A
+  hurt that does not chain, and any other state far off, are refused as
+  before. What sent the model there is not known yet, so each far frame,
+  placed or refused, is said -- `Positions: a far monster frame placed --
+  state …, slot … gen … at x,y, worked out at x,y …; its last placing frame:
+  …`, at most once every 5 s (`kFarSaidEveryMs`), the ones not said counted
+  in the next -- and the Positions line adds `far frames placed N refused N,
+  walks faster than 4 px/step N`: walks followed faster than a monster
+  walks (`kPlausibleWalkSpeed`), as the 7 a blow throws one at, sent as a
+  walk, would be followed 1,400 px in 5 s. That line counts from HUNT ON, as
+  the rest of it does; the far line's `so far` counts run from the packet
+  world's last fresh start (GoBot's start, a capture started by hand, or the
+  positions capture started on a new game process or connection; one started
+  again on the same game keeps them), so after an earlier hunt, or far frames
+  before HUNT ON, the far line's numbers are the larger. The far line is
+  worded under the world's lock and written once it is let go of
+  (`PacketWorld::on_packets`), so a slow log file holds up neither the map
+  tab nor the hunter.
 - **Your HP and MP** (wrapped `0x0051` and `0x0050`) go through a check per
   bar against the bars on the screen. A bar is trusted after 20 agreements
   over at least 3 values with no disagreement among the last 20, HP also
@@ -706,7 +1261,12 @@ found or a capture refused, everything comes from the screen as before.
   in `app.ini`, 200 as shipped (about ten minutes at a farm's 19 potions a
   minute; 0 for none), not the slot's `warn_below` -- and is said once until
   the bag holds 5 more than that again; "Out" (*Hết bình*) is always the
-  hotbar's. Once two
+  hotbar's. The slot's own "Low" names its number as the stack in use, *ô
+  phím H (chồng đang dùng) còn 5 bình*, and once the bag has learned what the
+  key drinks, before it is trusted, adds the bag's total, *cả túi còn N bình
+  (theo gói tin, chưa kiểm)*; the minute's `Bag (packets)` line gives each
+  learned key's item with its total in the bag (`key H -> slot 33 (8810121,
+  260 in the bag)`), all since 2026.11.04d. Once two
   shop runs' own counts agree with the bag, a due *Tự mua bình* look may be
   skipped while the bag holds enough -- never two due times running, never
   more than 2 h without a real look, and only when the bag has come since the
@@ -730,7 +1290,13 @@ found or a capture refused, everything comes from the screen as before.
   by the plate, as before.
 - **Log only:** casts and buffs per macro key (`Casts (packets)`,
   `Buffs (packets)`), the bag after a charm's use and beside the trash list,
-  and the link beside the keeper's stalls and log-ins (`Keeper:`).
+  and the link beside the keeper's stalls and log-ins (`Keeper:`). Since
+  2026.11.04d the hunter's own attack-key presses are paired too (the macro
+  skips that key, and its casts went to the macro's keys), and each burst of
+  a buff key's presses is judged on its own: `Buff (packets): key S -- …`,
+  a kind-2 cast of yours in its window or *maybe not cast*, and `, a kind-2
+  cast with N of its M bursts` on the minute's `Casts` line. Nothing acts on
+  it.
 - **Still the screen's:** death and revive (with the reviver's HP and the
   recast after HP comes back from 0), the pet's HP, the shop's dialogs and
   buying, the captcha, and whether the character is in the world.
@@ -754,9 +1320,14 @@ off; its check still runs and still writes its lines.
 
 What to look for in a log sent after one session: `Positions: capturing …`
 before any `HUNT ON`; `Packets: capture since …`, `Packets: first 0x…` and a
-`frames:` line under `Load:`; `Positions: map entry … (from …)` at a door; no
-`Capture stopped` at F11; `hurts … (chained …)`, `kills … (yours …)` and
-`your id` in the Positions line; `wounded picked` in the Hunter line;
+`frames:` line under `Load:`; `Positions: map entry … (from …)` at a door --
+since 2026.11.04d with `; before it: …`, your last place on the map before by
+the 1-s sample, GoBot's own last key or click (key names only; whatever was
+typed is `typed text`) and the PC's last input, each against the entry, to
+tell who took the character through; no
+`Capture stopped` at F11; `hurts … (chained …)`, `kills … (yours …)`, `far
+frames placed … refused …` and `your id` in the Positions line, and any
+`Positions: a far monster frame …`; `wounded picked` in the Hunter line;
 `Detector: every 600 ms …`; `Vitals check: …` and
 `Vitals: HP from the packets now`, or `… from the screen again` with both
 numbers; `World: map loads by packets …`; `Bag check: … agree (n of 2)`,
@@ -772,6 +1343,13 @@ while the packets do not steer the hunt, and a plain line, ending "the
 packets steer, so the hunt does not need it", while they do. Quick quest now
 logs why a round waits, `Quest: put off -- Chờ: …`, once each time the
 reason changes.
+
+Since 2026.11.04d a potion key's hotbar slot that reads as unreadable on
+two looks running has a picture of that slot alone, 3 px round it, kept in
+`potion_debug` beside GoBot, once a run per key and written off the GUI
+thread (`Potions: key … unreadable on two looks running; kept a picture of
+the slot alone as …`): on 2026-11-04 key G read nothing all session, so its
+"Low" could never be said.
 
 ## Keyboard macro
 
@@ -1031,7 +1609,8 @@ still be running 5 s after a Ctrl+C, a second one ends it at once.
 |---|---|
 | `configs/app.ini` | the game's window, the client keeper, the simple screen's switches (light mode among them: `[Simple] light_mode`); how hard GoBot works the PC (`[Performance]`, below); what it may take from the game's packets (`[Packets]`, under *Packets first (2026.11.03)*); the potion counts' warnings (`[Potions]`: `warn_below` for a hotbar slot, `warn_bag_below` for the packets' whole bag); capture interface and server address; whether `gobot_gui.log` starts afresh each session (`new_log_each_start`, on as shipped: the session before is kept as `gobot_gui.old.log`) |
 | `configs/macro.ini` | the macro's keys -- skills, potions, buffs -- and the sequence |
-| `configs/hunt.ini` | hunting: your character's name, the attack and pick-up keys, the reach; where positions come from (`packet_positions`: off, watch, on) and how the packets lie over the screen (`packet_scale`, `packet_dy`); the hunting spot (`spot`, its area and when it walks back); the drop to a floor below (`drop_down`, off as shipped, with `drop_min_px` 100, `drop_side_px` 120 and `drop_gate_px` 150) |
+| `configs/hunt.ini` | hunting: your character's name, the attack and pick-up keys, the reach; where positions come from (`packet_positions`: off, watch, on) and how the packets lie over the screen (`packet_scale`, `packet_dy`); the hunting spot (`spot`, its area and when it walks back); the drop to a floor below (`drop_down`, off as shipped, with `drop_min_px` 100, `drop_side_px` 120 and `drop_gate_px` 150); the jump up onto a floor above (`jump_up`) and the seek inside a **Bản đồ** area (`seek_in_zone`), both on as shipped and acting only in such an area |
+| `configs/spots.ini` | the hunting areas drawn on **Bản đồ**, one per map (`[t52_s2]`: the home and the box, and when it was saved); made and written by GoBot, never shipped -- copy it over to a new version's `configs` to keep them |
 | `configs/party.ini` | party: accepting, inviting by keyword, the lists of names |
 | `configs/login.ini` | logging back in: where VTCZone is, the pages, the channel and character |
 | `configs/trash.ini`, `configs/trash\` | bag cleaning: the icons picked, and the photographed items |
@@ -1042,7 +1621,9 @@ still be running 5 s after a Ctrl+C, a second one ends it at once.
 | `configs/protocol.ini` | framing + packet layouts (**you write this**) |
 | `configs/bot_default.ini` | the packet bot: combat behaviour, skills, revive, keys -- and `key_start_stop`, gobot_cli's on/off key (F10; gobot_gui does not read it). Its potions and buffs are macro.ini's |
 
-Every one ships with whatever acts on the game switched off, and with no
+Every one ships with whatever acts on the game switched off -- `jump_up` and
+`seek_in_zone` ship on, but act only inside an area drawn on **Bản đồ**
+with `spot`, which ships off -- and with no
 player's names, keys or lists in it -- `bot_default.ini` included: the packet
 bot's attack and skills are off until switched on, so **START BOT** in
 `gobot_gui` and F10 in `gobot_cli` press nothing before that (and say so).
@@ -1064,12 +1645,14 @@ Since 2026.11.02b `gobot_gui` draws its window only when there is something
 to show (the frame pacer, `gobot/frame_pacer.hpp`): at once on a click or a
 key, then up to 30 frames a second while the window is used, 5 while it is in
 front and nobody touches it, 2 while another window -- the game -- is in
-front, and none while it is minimised or covered. It used to build and present
-a frame on every pass, about 60 a second, every one of them drawn by the CPU
-in a VMware guest without 3D. The loop itself never waits more than 10 ms, so
-it still comes round on every Windows clock tick (about 15.6 ms), and F10,
-F11, F12 and the potions are looked after exactly as before, whatever the
-frame rate. HP and MP are
+front, and none while it is minimised or covered; while the **Bản đồ** tab is
+shown, 10 behind the game and in front alike (2 behind it in light mode; 5
+until 2026.11.05), so the character and the monsters move on it. It used to
+build and present a frame on every pass, about 60 a second, every one of them
+drawn by the CPU in a VMware guest without 3D. The loop itself never waits
+more than 10 ms, so it still comes round on every Windows clock tick (about
+15.6 ms), and F10, F11, F12 and the potions are looked after exactly as
+before, whatever the frame rate. HP and MP are
 read once a second while nothing runs, and as before while anything does. A
 start reads them at once, and the macro does not take a reading from before
 it: its first potion, skill, buff or step waits for the new one, 500 ms at
@@ -1194,7 +1777,11 @@ Ctrl-down before the Down in that same array; `[Ctrl↓, ↓↓]` from any other
 path is refused too. `drop_ctrl_down` is the one call that builds Down's
 events: it holds Ctrl first, sends Ctrl and Down together in one array, lets
 Down up before Ctrl wherever focus has gone, and owes any up that did not go
-out until it does.
+out until it does. The jump up's Ctrl + ↑ (2026.11.05b) is the same chord
+with ↑ in Down's place (`chord_ctrl(ChordKey::Up)`), never marked as the
+drop's, so it cannot carry a Down; while either runs or owes an up, every
+other thread's key-downs are refused, and the ups go ↑ or Down first, then
+Ctrl.
 
 ---
 
@@ -1230,9 +1817,15 @@ out until it does.
   minimap fingerprinting and reading the place name off the title bar, neither
   of which is solid — and knowing where in it you are. Since 2026.11.04
   `GameMapBook` reads those files' floors, and the `.prj` files' gates, for
-  the hunter's drop alone, and `MapTrust` names the map from where you and
-  the monsters stand when no map entry was seen -- strictly: one file alone
-  fitting at least 12 standing points, the next best missing 6.
+  the hunter's drop -- and since 2026.11.04c for the **Bản đồ** tab, and
+  since 2026.11.04d for an area's walks and its way back, each floor
+  followed as it runs (`Page::follow`), and since 2026.11.05b for the jumps
+  up (`jump_plan`) and the seek's floors and attack points (`hunt_seek`) --
+  and `MapTrust` names the map from
+  where you and the monsters stand when no map entry was seen -- strictly: one file alone
+  fitting at least 12 standing points, the next best missing 6; a monster's
+  point counts only once two of its frames agree, and only yours let a map
+  go.
 
 ---
 

@@ -225,6 +225,8 @@ add_library(gobot_core STATIC
     src/minimap_tracker.cpp
     src/hunter.cpp
     src/hunter_drop.cpp
+    src/hunter_jump.cpp
+    src/hunter_seek.cpp
     src/monster_list.cpp
     src/attack_style.cpp
     src/jump_check.cpp
@@ -233,6 +235,13 @@ add_library(gobot_core STATIC
     src/map_table.cpp
     src/map_locator.cpp
     src/map_book.cpp
+    src/map_sketch.cpp
+    src/hunt_zone.cpp
+    src/hunt_seek.cpp
+    src/hunt_card.cpp
+    src/jump_plan.cpp
+    src/map_view.cpp
+    src/mob_place.cpp
     src/template_matcher.cpp
     src/template_matcher_cv.cpp
     src/session_manager.cpp
@@ -381,6 +390,7 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/simple_lists.cpp
         apps/gobot_gui/simple_style.cpp
         apps/gobot_gui/simple_spot.cpp
+        apps/gobot_gui/simple_map.cpp
         apps/gobot_gui/simple_skills.cpp
         apps/gobot_gui/packets_watch.cpp
         apps/gobot_gui/packets_vitals.cpp
@@ -458,7 +468,11 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/capture_load_test.cpp apps/gobot_test/packet_self_test.cpp
                           apps/gobot_test/vitals_trust_test.cpp apps/gobot_test/bag_ledger_test.cpp
                           apps/gobot_test/cast_match_test.cpp apps/gobot_test/drop_key_test.cpp
-                          apps/gobot_test/map_book_test.cpp apps/gobot_test/drop_hunt_test.cpp)
+                          apps/gobot_test/map_book_test.cpp apps/gobot_test/drop_hunt_test.cpp
+                          apps/gobot_test/map_tab_test.cpp apps/gobot_test/zone_hunt_test.cpp
+                          apps/gobot_test/jump_plan_test.cpp apps/gobot_test/jump_key_test.cpp
+                          apps/gobot_test/jump_hunt_test.cpp apps/gobot_test/hunt_seek_test.cpp
+                          apps/gobot_test/seek_hunt_test.cpp apps/gobot_test/hunt_card_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

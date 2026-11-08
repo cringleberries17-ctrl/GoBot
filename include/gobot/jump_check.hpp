@@ -11,10 +11,18 @@
 // The check is a class of its own, on seams, so that it is tested offline on
 // scripted plates and never reaches for the real keyboard in a test; the GUI
 // and gobot_cli --jumptest run the same one.
+//
+// And "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑" (2026.11.05b, run_kind): one jump of
+// each kind the hunter's jumps up use, judged by your client's own take-offs
+// by kind -- a jump, a second one in the air, a high jump -- with the flight's
+// time and the gravity it shows, measured. Never under a floor the map shows
+// above: that jump may land on it.
 
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/hotkeys.hpp"
+#include "gobot/jump_plan.hpp"
 #include "gobot/mob_detector.hpp"
+#include "gobot/packet_world.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -24,6 +32,8 @@
 #include <vector>
 
 namespace gobot {
+
+class InputManager;
 
 class JumpCheck {
 public:
@@ -35,18 +45,39 @@ public:
     /// the game, your id not known. Asked the moment before the press and
     /// after the watch; while it can tell, its rise decides, and the plate is
     /// only watched beside it (GuiApp::packet_takeoffs).
+    ///
+    /// For the kinds (run_kind): your take-offs by kind, nothing when the
+    /// packets cannot tell (GuiApp::packet_air_counts); your own reports since
+    /// a moment, oldest first (GuiApp::packet_own_since); and how far above
+    /// your feet the nearest floor the map shows is, within kJumpUpCeilingPx
+    /// (floor_above) -- nothing for none, or for no map known.
     struct Eyes {
         std::function<bool(Nameplate&, bool*)>        player;
         std::function<std::optional<std::uint64_t>()> takeoffs;
+        std::function<std::optional<PacketWorld::AirCounts>()>           air;
+        std::function<std::vector<PacketWorld::OwnTrace>(std::uint64_t)> own_since;
+        std::function<std::optional<int>()>                              floor_above;
+    };
+    /// How one jump of a kind went out (Hands::jump).
+    struct Press {
+        bool          went = false;     ///< its ↑ went down
+        /// All of it: ↑↑'s second ↑ as well, Ctrl + ↑'s ↑ held its time
+        /// inside Ctrl.
+        bool          whole = false;
+        std::uint64_t down_ms = 0;      ///< its first ↑'s down, on the frames' clock (now_ms())
+        std::uint32_t held_ms = 0;      ///< the longest an ↑ of it was held
     };
     /// `focus` brings the game to the front and says whether it is;
     /// `focused` only says whether it is, the moment before the press --
     /// `focus` is asked again when it is not set; `key` presses one key for
-    /// `hold` ms and says whether it went out.
+    /// `hold` ms and says whether it went out. `jump` makes one jump of a
+    /// kind, asking `go_on` through it: ↑ InputManager::jump_once, ↑↑
+    /// jump_twice at kJumpUpSecondAtMs, Ctrl + ↑ high_jump -- always ↑.
     struct Hands {
         std::function<bool()>                   focus;
         std::function<bool()>                   focused;
         std::function<bool(std::uint32_t, int)> key;
+        std::function<Press(JumpKind, const std::function<bool()>&)> jump;
     };
     /// The steady clock and a real sleep, unless set.
     struct Clock {
@@ -118,6 +149,88 @@ public:
     static constexpr int           kJumpedPx = 25;
     static constexpr int           kStillPx = 10;
     static constexpr int           kStillReads = 4;
+
+    // ---- "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑" (2026.11.05b) ----
+
+    enum class KindOutcome {
+        /// The kind's take-off counted: ↑ a jump going up (state 1, not a
+        /// walk-off), ↑↑ that and a second jump (state 6), Ctrl + ↑ a high
+        /// jump (state 2).
+        Jumped,
+        KindMissed,     ///< a take-off, but not the kind's: ↑↑ with no second, Ctrl + ↑ a plain jump
+        NoJump,         ///< no take-off counted after the press
+        Cut,            ///< pressed in part: ↑↑'s second ↑ not sent, Ctrl + ↑'s ↑ up too soon
+        Unsure,         ///< the watch cut short with nothing counted, or the packets lost meanwhile
+        NotSent,        ///< no ↑ went down at the press: the game left the front, or a stop or a hold came
+        FloorAbove,     ///< the map shows a floor within kJumpUpCeilingPx above: nothing pressed
+        NoPackets,      ///< the packets cannot tell the kinds apart: nothing pressed
+        Held,           ///< a hold is on: nothing pressed
+        Busy,           ///< another job kept the keys: nothing pressed
+        NotInFront,     ///< the game was not in front: nothing pressed
+        Stopped,        ///< told to stop before the press: nothing pressed
+    };
+    struct KindResult {
+        JumpKind      kind = JumpKind::Up;
+        KindOutcome   outcome = KindOutcome::NoPackets;
+        bool          pressed = false;      ///< an ↑ of it went down
+        std::uint32_t held_ms = 0;          ///< the longest an ↑ was held
+        bool          held_long = false;    ///< past InputManager::kJumpHeldLongMs
+        std::string   hold;                 ///< what the hold is, for Held
+        int           floor_above_px = 0;   ///< FloorAbove: how far above the feet
+        /// The packets' counts from the press to the end of the watch: the
+        /// jumps going up (walk-offs left out), the walk-offs, the second
+        /// jumps, the high jumps and the landings.
+        int           jumps = 0;
+        int           walkoffs = 0;
+        int           second = 0;
+        int           high = 0;
+        int           landed = 0;
+        /// From your own reports since the press (flight_of), -1 for none
+        /// seen: the first take-off after the key, and from it to the
+        /// landing -- a 0x002A landed, or failing one the first report of a
+        /// walk, never a cast's.
+        int           takeoff_ms = -1;
+        int           flight_ms = -1;
+        int           rose_px = 0;          ///< how far above the take-off it landed: 0 on flat ground
+        /// g≈, px/s², from the last push up to the landing (gravity_from):
+        /// what the hunter's jumps are modelled by, kJumpUpGravity.
+        std::optional<double> gravity;
+    };
+
+    /// One jump of `kind`, always ↑, and the packets watched kKindWatchMs or
+    /// until it lands. Nothing pressed while a hold is on; nor when the map
+    /// shows a floor within kJumpUpCeilingPx above (Eyes::floor_above) -- no
+    /// gate is asked of: Ctrl + ↑ on a gate does not change the map (the
+    /// owner, 2026-11-05) -- nor when the packets cannot tell the kinds apart
+    /// (Eyes::air). The token is taken only from nobody, as the drop takes
+    /// it. `stop` as run()'s: before the press nothing goes; after it, what
+    /// was counted is the result.
+    KindResult run_kind(JumpKind kind, const std::atomic<bool>* stop = nullptr);
+    /// One jump of `kind` through `input`'s own presses, as Hands::jump has
+    /// it: ↑ InputManager::jump_once, ↑↑ jump_twice at kJumpUpSecondAtMs,
+    /// Ctrl + ↑ high_jump -- always ↑ (0x26), never ↓, never the drop's chord;
+    /// the hunter's own (Hunter::send_jump) the same way. What GoBot's "Thử
+    /// ↑", "Thử ↑↑" and "Thử Ctrl + ↑" press.
+    static Press press_with(InputManager& input, JumpKind kind, const std::function<bool()>& go_on);
+    static std::string kind_said_vi(const KindResult& r);
+    static const char* kind_outcome_name(KindOutcome o);
+    /// A kind's watch: the longest flight -- Ctrl + ↑ falling back, ↑↑ --
+    /// with its press, and more.
+    static constexpr std::uint32_t kKindWatchMs = 2500;
+
+    /// What your own reports since a key say of its jump: the first take-off
+    /// -- a 0x002A in the air going up -- the last push up before the landing
+    /// (↑↑'s second), and the landing: the first 0x002A landed after the
+    /// take-off or, failing one, the first report of a walk (0x0027, 0x0028,
+    /// 0x0029) -- never a cast, whose y holds at the top.
+    struct Flight {
+        bool                    took_off = false;
+        PacketWorld::OwnTrace   off;
+        PacketWorld::OwnTrace   push;       ///< the last push up: `off` itself for one push
+        bool                    landed = false;
+        PacketWorld::OwnTrace   land;
+    };
+    static Flight flight_of(const std::vector<PacketWorld::OwnTrace>& reports);
 
     // ---- the key, and what else it is ----
 

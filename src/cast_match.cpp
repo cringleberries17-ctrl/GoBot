@@ -207,6 +207,27 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
         k->buff = std::find(buff_keys.begin(), buff_keys.end(), p.vk) != buff_keys.end();
         ++k->pressed;
         ++k->pressed_all;
+        if (k->buff) {
+            // Its burst: joined within kBurstGapMs of the last press, else
+            // the one before judged and a new one begun.
+            const auto open = std::find_if(open_bursts_.begin(), open_bursts_.end(),
+                                           [&p](const Burst& b) { return b.vk == p.vk; });
+            if (open != open_bursts_.end() && p.at_ms <= open->last_ms + kBurstGapMs) {
+                open->last_ms = p.at_ms;
+                ++open->presses;
+            } else {
+                if (open != open_bursts_.end()) {
+                    const Burst done = *open;
+                    open_bursts_.erase(open);
+                    judge(done);
+                }
+                Burst b;
+                b.vk = p.vk;
+                b.first_ms = b.last_ms = p.at_ms;
+                b.presses = 1;
+                open_bursts_.push_back(b);
+            }
+        }
         const std::uint64_t from = p.at_ms > kEarlyMs ? p.at_ms - kEarlyMs : 0;
         const std::uint64_t to = p.at_ms + kPairMs;
         for (Cast& c : casts_) {
@@ -232,6 +253,19 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
     }
     pair_from_ = until;
 
+    // A burst no press can join any more -- every press up to `until` taken,
+    // and kBurstGapMs gone by after its last -- is judged: its casts, up to
+    // kPairMs after its last press, have come by now.
+    for (auto it = open_bursts_.begin(); it != open_bursts_.end();) {
+        if (it->last_ms + kBurstGapMs >= until) {
+            ++it;
+            continue;
+        }
+        const Burst done = *it;
+        it = open_bursts_.erase(it);
+        judge(done);
+    }
+
     // A cast every press that could have taken it has been paired by: one
     // none took came with no press of the macro's -- the hunter's attack, a
     // key pressed by hand.
@@ -240,6 +274,38 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
         c.settled = true;
         if (c.vk == 0) ++minute_.unpaired;
     }
+}
+
+void CastMatch::judge(Burst b) {
+    // Any cast of kind 2 in its window, whichever press took it: a buff key's
+    // check of its own, which takes no cast from the pairing.
+    const std::uint64_t from = b.first_ms > kEarlyMs ? b.first_ms - kEarlyMs : 0;
+    const std::uint64_t to = b.last_ms + kPairMs;
+    for (const Cast& c : casts_) {
+        if (c.frame.kind != 2 || c.at_ms < from || c.at_ms > to) continue;
+        b.seen = true;
+        b.cast_ms = c.at_ms;
+        b.skill = c.frame.skill;
+        break;
+    }
+    // Its key is kept already -- found, never added: pair() holds a pointer
+    // into keys_ meanwhile.
+    for (Key& k : keys_) {
+        if (k.vk != b.vk) continue;
+        ++k.bursts;
+        if (b.seen) ++k.bursts_seen;
+        break;
+    }
+    judged_.push_back(b);
+    // Read once a second; a GoBot whose log is not taken keeps no more.
+    while (judged_.size() > kKeys) judged_.erase(judged_.begin());
+}
+
+std::vector<CastMatch::Burst> CastMatch::take_bursts() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Burst> out;
+    out.swap(judged_);
+    return out;
 }
 
 std::uint64_t CastMatch::pair_from() const {
@@ -273,6 +339,8 @@ CastMatch::Minute CastMatch::take_minute() {
     for (Key& k : keys_) {
         k.pressed = 0;
         k.cast = 0;
+        k.bursts = 0;
+        k.bursts_seen = 0;
     }
     return out;
 }
@@ -414,6 +482,10 @@ std::string casts_line(const CastMatch::Minute& m) {
             out << ", kind 2";
         else if (k.kind_mismatch())
             out << ", kind 2 (a buff's) " << k.buffs << " times";
+        // A buff key's own check, whichever key the pairing gave the cast to.
+        if (k.buff && k.bursts > 0)
+            out << ", a kind-2 cast with " << k.bursts_seen << " of its " << k.bursts << " burst"
+                << (k.bursts == 1 ? "" : "s");
     }
     out << "; no macro key " << m.unpaired;
     if (!m.reach.empty()) {
@@ -427,6 +499,22 @@ std::string casts_line(const CastMatch::Minute& m) {
     }
     if (m.named_unplaced > 0) out << "; named targets not in the packets' world " << m.named_unplaced;
     if (m.wrong_size > 0) out << "; 0x0031 of another size " << m.wrong_size;
+    return out.str();
+}
+
+std::string burst_line(const CastMatch::Burst& b) {
+    std::ostringstream out;
+    out << "Buff (packets): " << key_text(b.vk) << " -- ";
+    if (b.seen && b.cast_ms >= b.first_ms)
+        out << "a kind-2 cast of yours, skill " << b.skill << ", " << b.cast_ms - b.first_ms
+            << " ms after its first press";
+    else if (b.seen)
+        out << "a kind-2 cast of yours, skill " << b.skill << ", " << b.first_ms - b.cast_ms
+            << " ms before its first press";
+    else
+        out << "no kind-2 cast of yours from " << CastMatch::kEarlyMs << " ms before its first press to "
+            << CastMatch::kPairMs << " ms after its last: maybe not cast";
+    out << " (" << b.presses << (b.presses == 1 ? " press" : " presses") << ")";
     return out.str();
 }
 

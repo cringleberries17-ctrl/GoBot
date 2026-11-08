@@ -1,7 +1,10 @@
 // gobot_test -- "Thử" beside the jump key (gobot/jump_check.hpp): the key
 // pressed exactly once, and what the character's plate did after; and what
 // else the key is already used for. And the walker's jump key, hunt.ini's
-// [Move] one: shipped as Up, and said when it would attack.
+// [Move] one: shipped as Up, and said when it would attack. And "Thử ↑", "Thử
+// ↑↑", "Thử Ctrl + ↑" (2026.11.05b): one jump of the kind, judged by your
+// take-offs by kind, its flight and the gravity it shows -- never under a
+// floor the map shows above.
 //
 // Nothing here goes near the game: the plate is scripted, the keyboard is
 // pretend and writes down every press, and the clock is the test's own.
@@ -20,6 +23,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -620,6 +624,302 @@ void test_jump_by_packets() {
     }
 }
 
+// ------------------------------------------- "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑"
+
+/// One report of yours, as the packet world keeps it.
+PacketWorld::OwnTrace report(OwnReport kind, std::uint32_t state, float y, float vy) {
+    PacketWorld::OwnTrace r;
+    r.kind = kind;
+    r.state = state;
+    r.x = 1300.0f;
+    r.y = y;
+    r.vy = vy;
+    return r;
+}
+PacketWorld::OwnTrace air(std::uint32_t state, float y, float vy) { return report(OwnReport::Air, state, y, vy); }
+
+/// The pretend game for one Thử of a kind: your reports scripted from the
+/// press on, each `at` ms after it, and the packets' counts by kind made of
+/// those come so far on top of `base`; the map's floor above; the press as
+/// `answer` says; the clock the check's own.
+struct KindRig {
+    struct Scripted {
+        std::uint64_t         at;
+        PacketWorld::OwnTrace r;
+    };
+    ExecutionCoordinator   coord;
+    JumpCheck              check_{ coord };
+    std::uint64_t          t = 7'000'000;
+    bool                   in_front = true;
+    bool                   packets = true;
+    bool                   packets_after = true;    ///< still told once the press went
+    std::optional<int>     above;
+    PacketWorld::AirCounts base;
+    std::vector<Scripted>  script;
+    JumpCheck::Press       answer;
+    std::uint64_t          pressed_at = 0;
+    std::vector<JumpKind>  presses;
+    int                    air_asked = 0;
+    /// Told to stop at the first look after the press.
+    std::atomic<bool>*     stop_after = nullptr;
+
+    KindRig() {
+        base.jumps = 5;
+        base.landed = 6;
+        answer.went = true;
+        answer.whole = true;
+        answer.held_ms = 95;
+        JumpCheck::Eyes eyes;
+        eyes.air = [this]() -> std::optional<PacketWorld::AirCounts> {
+            ++air_asked;
+            if (!packets || (pressed_at != 0 && !packets_after)) return std::nullopt;
+            PacketWorld::AirCounts c = base;
+            for (const Scripted& s : come(0)) {
+                if (s.r.kind != OwnReport::Air) continue;
+                if (s.r.state == 1) ++c.jumps;
+                if (s.r.state == 1 && s.r.vy >= 0.0f) ++c.walkoffs;
+                if (s.r.state == 6) ++c.second;
+                if (s.r.state == 2) ++c.high;
+                if (s.r.state == 0) ++c.landed;
+            }
+            return c;
+        };
+        eyes.own_since = [this](std::uint64_t ms) {
+            std::vector<PacketWorld::OwnTrace> out;
+            for (const Scripted& s : come(ms)) {
+                PacketWorld::OwnTrace r = s.r;
+                r.ms = pressed_at + s.at;
+                out.push_back(r);
+            }
+            return out;
+        };
+        eyes.floor_above = [this] { return above; };
+        check_.set_eyes(eyes);
+        JumpCheck::Hands hands;
+        hands.focus = [this] { return in_front; };
+        hands.focused = [this] { return in_front; };
+        hands.jump = [this](JumpKind k, const std::function<bool()>& go_on) {
+            presses.push_back(k);
+            JumpCheck::Press p = answer;
+            if (!go_on()) p = JumpCheck::Press{};
+            if (p.went) {
+                pressed_at = t;
+                p.down_ms = t;
+            }
+            return p;
+        };
+        check_.set_hands(hands);
+        JumpCheck::Clock clock;
+        clock.now_ms = [this] { return t; };
+        clock.sleep_ms = [this](std::uint32_t ms) {
+            t += ms;
+            if (stop_after != nullptr && pressed_at != 0) *stop_after = true;
+        };
+        check_.set_clock(clock);
+    }
+    /// The scripted reports come by now, and at or after `ms`.
+    std::vector<Scripted> come(std::uint64_t ms) const {
+        std::vector<Scripted> out;
+        if (pressed_at == 0) return out;
+        for (const Scripted& s : script)
+            if (pressed_at + s.at <= t && pressed_at + s.at >= ms) out.push_back(s);
+        return out;
+    }
+    JumpCheck::KindResult run(JumpKind k, const std::atomic<bool>* stop = nullptr) { return check_.run_kind(k, stop); }
+};
+
+/// The flights of a clean jump of each kind at g 2400 from y 1125, as the
+/// client would report them: Ctrl + ↑ up at -36 a step and down 1.2 s later;
+/// ↑↑ up at -20, again at -20 340 ms on and 133 px up, down 805 ms after
+/// that; ↑ up at -20 and down 667 ms later. A cast at the top of each.
+std::vector<KindRig::Scripted> clean_flight(JumpKind k) {
+    if (k == JumpKind::CtrlUp)
+        return { { 40, air(2, 1125.0f, -36.0f) }, { 640, report(OwnReport::Cast, 0, 693.0f, 0.0f) },
+                 { 1240, air(0, 1125.0f, 0.0f) } };
+    if (k == JumpKind::UpUp)
+        return { { 30, air(1, 1125.0f, -20.0f) }, { 370, air(6, 991.72f, -20.0f) },
+                 { 700, report(OwnReport::Cast, 0, 858.0f, 0.0f) }, { 1175, air(0, 1125.0f, 0.0f) } };
+    return { { 30, air(1, 1125.0f, -20.0f) }, { 360, report(OwnReport::Cast, 0, 992.0f, 0.0f) },
+             { 697, air(0, 1125.0f, 0.0f) } };
+}
+
+bool g_near(const std::optional<double>& g, double want) { return g && std::abs(*g - want) <= 0.02 * want; }
+
+std::string g_text(const std::optional<double>& g) {
+    return g ? std::to_string(static_cast<int>(std::lround(*g))) : std::string("none");
+}
+
+void test_flight_of() {
+    section("Thử of a kind: a jump read off your own reports -- the take-off, the last push, the landing");
+
+    const auto at = [](std::uint64_t ms, PacketWorld::OwnTrace r) {
+        r.ms = ms;
+        return r;
+    };
+    const PacketWorld::OwnTrace cast = report(OwnReport::Cast, 0, 900.0f, 0.0f);
+    JumpCheck::Flight f = JumpCheck::flight_of({ at(10, cast), at(20, air(1, 1125.0f, -20.0f)), at(200, cast),
+                                                 at(360, air(6, 990.0f, -20.0f)), at(600, cast),
+                                                 at(1180, air(0, 1125.0f, 0.0f)) });
+    check(f.took_off && f.off.ms == 20 && f.push.ms == 360 && f.push.state == 6 && f.landed && f.land.ms == 1180,
+          "↑↑: the take-off the first 0x002A going up, the last push its second (state 6), the landing state 0 -- "
+          "the casts passed over");
+    f = JumpCheck::flight_of({ at(20, air(1, 400.0f, 12.2f)), at(500, air(0, 600.0f, 30.0f)) });
+    check(!f.took_off && !f.landed, "a walk-off (state 1 going down): no take-off");
+    f = JumpCheck::flight_of({ at(40, air(2, 634.0f, -36.0f)), at(600, cast),
+                               at(1300, report(OwnReport::Move, 0, 274.0f, 0.0f)) });
+    check(f.took_off && f.landed && f.land.kind == OwnReport::Move && f.land.y == 274.0f,
+          "no landing frame: the first report of a walk after the take-off, at its own y -- never the cast");
+    f = JumpCheck::flight_of({ at(40, air(2, 634.0f, -36.0f)), at(500, report(OwnReport::Other, 0, 400.0f, 0.0f)),
+                               at(1200, air(0, 274.0f, 0.0f)) });
+    check(f.landed && f.land.kind == OwnReport::Air && f.land.y == 274.0f,
+          "a landing frame after a report of a turn in the air: the landing frame");
+    f = JumpCheck::flight_of({ at(40, air(2, 634.0f, -36.0f)), at(600, cast) });
+    check(f.took_off && !f.landed, "in the air still: taken off, not landed");
+}
+
+void test_jump_kinds() {
+    section("Thử ↑, Thử ↑↑, Thử Ctrl + ↑: one jump of the kind, judged by your take-offs by kind");
+
+    for (const JumpKind k : { JumpKind::Up, JumpKind::UpUp, JumpKind::CtrlUp }) {
+        KindRig rig;
+        rig.script = clean_flight(k);
+        const JumpCheck::KindResult r = rig.run(k);
+        const int want_flight = k == JumpKind::CtrlUp ? 1200 : k == JumpKind::UpUp ? 1145 : 667;
+        const std::string said = JumpCheck::kind_said_vi(r);
+        check(r.outcome == JumpCheck::KindOutcome::Jumped && r.pressed && rig.presses.size() == 1 &&
+                  rig.presses[0] == k && r.flight_ms == want_flight && r.rose_px == 0 && g_near(r.gravity, 2400.0) &&
+                  r.takeoff_ms == (k == JumpKind::CtrlUp ? 40 : 30) && !r.held_long &&
+                  said.find(jump_kind_key(k)) != std::string::npos && said.find("g≈2") != std::string::npos,
+              std::string(jump_kind_name(k)) + ": jumped -- jumps " + std::to_string(r.jumps) + ", second " +
+                  std::to_string(r.second) + ", high " + std::to_string(r.high) + ", landed " +
+                  std::to_string(r.landed) + "; took off " + std::to_string(r.takeoff_ms) + " ms after the key, flew " +
+                  std::to_string(r.flight_ms) + " ms, g≈" + g_text(r.gravity) + " -- " + said);
+    }
+    {
+        KindRig rig;
+        rig.script = clean_flight(JumpKind::CtrlUp);
+        const JumpCheck::KindResult r = rig.run(JumpKind::CtrlUp);
+        check(r.high == 1 && r.jumps == 0 && r.second == 0 && r.landed == 1 &&
+                  JumpCheck::kind_said_vi(r).find("nhảy cao") != std::string::npos,
+              "Ctrl + ↑: one high jump and its landing counted since the press, the 5 jumps before it not");
+    }
+    {
+        // Ctrl + ↑ that came out as a plain jump: the pick-up got in the way.
+        KindRig rig;
+        rig.script = clean_flight(JumpKind::Up);
+        const JumpCheck::KindResult r = rig.run(JumpKind::CtrlUp);
+        const std::string said = JumpCheck::kind_said_vi(r);
+        check(r.outcome == JumpCheck::KindOutcome::KindMissed && r.jumps == 1 && r.high == 0 &&
+                  said.find("chỉ nhảy thường") != std::string::npos,
+              "Ctrl + ↑ answered by state 1, no state 2: a jump, not the kind asked -- " + said);
+    }
+    {
+        KindRig rig;
+        rig.script = clean_flight(JumpKind::Up);
+        const JumpCheck::KindResult r = rig.run(JumpKind::UpUp);
+        check(r.outcome == JumpCheck::KindOutcome::KindMissed &&
+                  JumpCheck::kind_said_vi(r).find("chỉ nhảy một lần") != std::string::npos,
+              "↑↑ answered by state 1 and no state 6: not the kind asked");
+    }
+    {
+        KindRig rig;
+        const JumpCheck::KindResult r = rig.run(JumpKind::Up);
+        KindRig off;
+        off.script = { { 20, air(1, 400.0f, 12.2f) }, { 500, air(0, 600.0f, 30.0f) } };
+        const JumpCheck::KindResult w = off.run(JumpKind::Up);
+        check(r.outcome == JumpCheck::KindOutcome::NoJump && r.takeoff_ms == -1 && r.flight_ms == -1 &&
+                  w.outcome == JumpCheck::KindOutcome::NoJump && w.walkoffs == 1 && w.jumps == 0 &&
+                  JumpCheck::kind_said_vi(r).find("không nhảy") != std::string::npos,
+              "nothing after the press, or only a walk-off: no jump");
+    }
+    {
+        // The map shows a floor above: nothing pressed, the packets not asked.
+        KindRig rig;
+        rig.above = 360;
+        const JumpCheck::KindResult r = rig.run(JumpKind::CtrlUp);
+        const std::string said = JumpCheck::kind_said_vi(r);
+        check(r.outcome == JumpCheck::KindOutcome::FloorAbove && rig.presses.empty() && rig.air_asked == 0 &&
+                  r.floor_above_px == 360 && said.find("360 px") != std::string::npos &&
+                  said.find("650 px") != std::string::npos && said.find("cửa") == std::string::npos,
+              "a floor 360 px above: refused, nothing pressed -- and no word of a gate (the owner's answer 2) -- " +
+                  said);
+    }
+    {
+        KindRig rig;
+        rig.packets = false;
+        const JumpCheck::KindResult r = rig.run(JumpKind::UpUp);
+        check(r.outcome == JumpCheck::KindOutcome::NoPackets && rig.presses.empty() &&
+                  JumpCheck::kind_said_vi(r).find("gói tin") != std::string::npos,
+              "the packets cannot tell the kinds apart: nothing pressed");
+    }
+    {
+        KindRig held, busy, behind;
+        held.coord.engage_critical("trash cleaning");
+        busy.coord.request("hunt-attack", Priority::Movement);
+        behind.in_front = false;
+        const JumpCheck::KindResult a = held.run(JumpKind::CtrlUp), b = busy.run(JumpKind::CtrlUp),
+                                    c = behind.run(JumpKind::CtrlUp);
+        std::atomic<bool> stop{ true };
+        KindRig stopped;
+        const JumpCheck::KindResult d = stopped.run(JumpKind::CtrlUp, &stop);
+        check(a.outcome == JumpCheck::KindOutcome::Held && a.hold == "trash cleaning" && held.air_asked == 0 &&
+                  b.outcome == JumpCheck::KindOutcome::Busy && c.outcome == JumpCheck::KindOutcome::NotInFront &&
+                  d.outcome == JumpCheck::KindOutcome::Stopped && held.presses.empty() && busy.presses.empty() &&
+                  behind.presses.empty() && stopped.presses.empty(),
+              "a hold, anyone holding the token -- even a walk's, taken only from nobody -- the game behind, a stop: "
+              "nothing pressed");
+    }
+    {
+        // ↑↑'s second ↑ not sent; Ctrl + ↑ not sent at all.
+        KindRig cut, none;
+        cut.answer.whole = false;
+        cut.script = clean_flight(JumpKind::Up);
+        none.answer.went = false;
+        const JumpCheck::KindResult a = cut.run(JumpKind::UpUp), b = none.run(JumpKind::CtrlUp);
+        check(a.outcome == JumpCheck::KindOutcome::Cut && a.pressed && a.jumps == 1 &&
+                  JumpCheck::kind_said_vi(a).find("Chỉ bấm được phím ↑ đầu") != std::string::npos &&
+                  b.outcome == JumpCheck::KindOutcome::NotSent && !b.pressed && none.presses.size() == 1,
+              "↑↑ with only its first ↑ sent: Cut, said so; Ctrl + ↑ whose ↑ never went: NotSent");
+    }
+    {
+        // Stopped at the first look after the press, nothing counted yet; and
+        // the packets lost meanwhile.
+        std::atomic<bool> stop{ false };
+        KindRig early, lost;
+        early.stop_after = &stop;
+        early.script = { { 200, air(2, 1125.0f, -36.0f) }, { 1400, air(0, 1125.0f, 0.0f) } };
+        lost.packets_after = false;
+        lost.script = clean_flight(JumpKind::CtrlUp);
+        const JumpCheck::KindResult a = early.run(JumpKind::CtrlUp, &stop), b = lost.run(JumpKind::CtrlUp);
+        check(a.outcome == JumpCheck::KindOutcome::Unsure && a.pressed &&
+                  b.outcome == JumpCheck::KindOutcome::Unsure,
+              "the watch stopped before a take-off was counted, or the packets lost after the press: not sure -- "
+              "none counted is no proof of no jump");
+    }
+    {
+        KindRig rig;
+        rig.answer.held_ms = 300;
+        rig.script = clean_flight(JumpKind::Up);
+        const JumpCheck::KindResult r = rig.run(JumpKind::Up);
+        check(r.outcome == JumpCheck::KindOutcome::Jumped && r.held_long &&
+                  JumpCheck::kind_said_vi(r).find("giữ lâu (300 ms)") != std::string::npos,
+              "↑ held 300 ms: past InputManager::kJumpHeldLongMs, and said");
+    }
+    {
+        // Landed 360 px up, on a ledge: said where it landed.
+        KindRig rig;
+        rig.script = { { 40, air(2, 634.0f, -36.0f) }, { 1000, air(0, 274.0f, 0.0f) } };
+        const JumpCheck::KindResult r = rig.run(JumpKind::CtrlUp);
+        check(r.outcome == JumpCheck::KindOutcome::Jumped && r.rose_px == 360 &&
+                  JumpCheck::kind_said_vi(r).find("cao hơn chỗ nhảy 360 px") != std::string::npos,
+              "landed 360 px above where it took off: said so -- g≈" + g_text(r.gravity));
+    }
+    check(std::string(JumpCheck::kind_outcome_name(JumpCheck::KindOutcome::KindMissed)) == "jumped, but not as asked" &&
+              std::string(JumpCheck::kind_outcome_name(JumpCheck::KindOutcome::FloorAbove)) ==
+                  "not pressed: a floor above",
+          "the outcomes in the log's English");
+}
+
 } // namespace
 
 void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -632,4 +932,6 @@ void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(co
     test_unfound_while_packets_steer();
     test_walk_key();
     test_jump_by_packets();
+    test_flight_of();
+    test_jump_kinds();
 }

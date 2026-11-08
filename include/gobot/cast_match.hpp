@@ -144,11 +144,33 @@ public:
         std::uint64_t other_kinds = 0;      ///< anything else
         std::deque<std::uint32_t> votes;    ///< the skills of its last kVotes pairs
         std::vector<Paired> recent;         ///< its last kRecent pairs, oldest first
+        /// A buff key's bursts judged this minute (Burst), and of them those
+        /// a kind-2 cast came with: whichever press it was paired with.
+        std::uint64_t bursts = 0;
+        std::uint64_t bursts_seen = 0;
 
         /// A buff key whose casts are not all of kind 2, or a skill key with
         /// one that is.
         bool kind_mismatch() const { return buff ? attacks + other_kinds > 0 : buffs > 0; }
     };
+
+    /// One burst of a buff key's presses -- the macro presses a buff several
+    /// times, buff_press_gap_ms apart -- and whether a cast of yours of kind
+    /// 2 came with it: from kEarlyMs before its first press to kPairMs after
+    /// its last, whichever press the pairing gave it to (2026.11.04d: buff S
+    /// "cast" at 20:39:13 on 2026-11-04 left no buff cast in the packets).
+    /// Log only: the kind byte is DOCUMENTED, not PROVEN.
+    struct Burst {
+        std::uint32_t vk = 0;
+        std::uint64_t first_ms = 0;
+        std::uint64_t last_ms = 0;
+        int           presses = 0;
+        bool          seen = false;         ///< a kind-2 cast in its window
+        std::uint64_t cast_ms = 0;          ///< the first such cast's time
+        std::uint32_t skill = 0;            ///< ... and its skill
+    };
+    /// Presses of one buff key no further apart than this are one burst.
+    static constexpr std::uint64_t kBurstGapMs = 2000;
 
     /// How far from you a skill's named targets were, the farthest seen.
     struct Reach {
@@ -193,6 +215,11 @@ public:
     /// The time the next pair() starts from: presses before it are paired.
     std::uint64_t pair_from() const;
 
+    /// The buff keys' bursts judged since the last call, oldest first: each
+    /// once no press of the pairing can join it any more -- kBurstGapMs gone
+    /// by after its last -- by which time its casts have come.
+    std::vector<Burst> take_bursts();
+
     /// The skill `vk` is learned to cast; 0 for none.
     std::uint32_t learned(std::uint32_t vk) const;
 
@@ -206,6 +233,9 @@ public:
 private:
     Key* key_of(std::uint32_t vk);                  ///< under mutex_; nullptr past kKeys
     static void vote(Key& k, std::uint32_t skill);
+    /// Under mutex_: `b` judged by the casts kept, counted to its key and
+    /// set among those take_bursts gives.
+    void judge(Burst b);
 
     mutable std::mutex mutex_;
     std::deque<Cast>   casts_;
@@ -213,6 +243,8 @@ private:
     std::vector<Reach> reach_;
     Minute             minute_;                     ///< its counts only
     std::uint64_t      pair_from_ = 0;
+    std::vector<Burst> open_bursts_;                ///< one a buff key at most, not judged yet
+    std::vector<Burst> judged_;                     ///< judged, for take_bursts
 };
 
 /// The frames that follow your buffs: 0x0077 and 0x005A from the server, each
@@ -288,6 +320,11 @@ std::vector<BuffSeen> pair_buffs(const std::vector<CastMatch::Key>& keys, const 
 /// "Casts (packets): ..." for one minute; "" when nothing was cast or pressed
 /// in it.
 std::string casts_line(const CastMatch::Minute& m);
+
+/// "Buff (packets): key S -- ..." for one burst judged: the kind-2 cast seen
+/// and how long after the first press, or none in its window -- maybe not
+/// cast at all, which nothing acts on.
+std::string burst_line(const CastMatch::Burst& b);
 
 /// "Buffs (packets): ..." for one minute, with each buff key's interval in the
 /// macro (key, seconds); "" when nothing of a buff came in it.

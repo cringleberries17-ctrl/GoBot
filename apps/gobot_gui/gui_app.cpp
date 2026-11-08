@@ -10,6 +10,7 @@
 #include "gobot/byte_reader.hpp"
 #include "gobot/common.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/map_view.hpp"
 #include "gobot/no_real_input.hpp"
 
 #include "imgui.h"
@@ -210,6 +211,10 @@ GuiApp::~GuiApp() {
     if (chat_doubt_look_.valid()) chat_doubt_look_.wait();
     if (login_look_.valid()) login_look_.wait();
     stop_vitals();
+    // The Bản đồ tab's worker, while what it reads -- the packets, the
+    // capture's stats, the map files -- is still there: the hunting zones
+    // still owed written to configs\spots.ini first.
+    simple_map_stop();
     // A capture start or stop under way on the worker is let finish, and none
     // begins after it: a start it made then, nothing here would stop.
     capture_worker_.stop();
@@ -457,6 +462,8 @@ void GuiApp::initialise() {
     // left ↓ and Ctrl down in Windows: let go of here, ups only, with
     // "Nhảy xuống bậc dưới" on.
     if (hunt_config_.drop_down) input_.release_stray_drop_keys();
+    // And a high jump's ↑ and Ctrl, with "Nhảy lên bục trên" on (2026.11.05b).
+    if (hunt_config_.jump_up && !hunt_config_.drop_down) input_.release_stray_drop_keys();
     // Its eyes, set once before any start: the detector's plates, passed
     // through untouched, or -- with "Vị trí từ gói tin" ticked and the packets
     // healthy -- you and the monsters from the packet world. Everything here
@@ -485,6 +492,16 @@ void GuiApp::initialise() {
         in.config = [this] { return hunter_->config(); };
         in.walk_held_until = [this] { return hunter_->walk_held_until_ms(); };
         in.takeoffs = [this] { return packet_takeoffs(); };
+        // And for its jumps up (2026.11.05b, "Nhảy lên bục trên"): your
+        // take-offs by kind and your own last reports, under the same guards.
+        in.air = [this] { return packet_air_counts(); };
+        in.own_since = [this](std::uint64_t ms) { return packet_own_since(ms); };
+        // And for "Tự tìm quái trong vùng": the map tab's floors the monsters
+        // are placed on, read by the tab's worker -- none read here.
+        in.floors = [this] {
+            std::lock_guard<std::mutex> lock(plate_floors_mx_);
+            return plate_floors_;
+        };
         packet_eyes_ = std::make_unique<PacketEyes>(packet_world_, std::move(screen), std::move(in));
         hunter_->set_eyes(packet_eyes_->eyes());
     }
@@ -494,6 +511,9 @@ void GuiApp::initialise() {
     // (InputManager::drop_ctrl_down), through no seam.
     hunter_->set_map_book(&game_maps_);
     hunter_->set_drop_veto([this] { return drop_veto_now(); });
+    // Its own attack key's presses, beside the macro's below, for the log's
+    // casts: the macro skips that key, and its casts went to the macro's.
+    hunter_->set_on_attack([this](std::uint32_t vk, std::uint64_t at_ms) { more_note_attack(vk, at_ms); });
     // Skills that follow the fight ask the hunter, from the macro's own
     // threads, whether it is fighting: only its atomics are read there. No
     // hunter running is no hunter, and every key keeps its timer.
@@ -555,13 +575,21 @@ void GuiApp::tick() {
         if (!input_.settle_owed() && input_.owed_tries() >= InputManager::kOwedTries && hunting_) {
             stop_hunt();
             // The red line under BẮT ĐẦU, as drop_tick says it: the hunt
-            // stopped here, drop_tick finds it stopped and says nothing.
-            drop_stopped_vi_ = "GoBot đã dừng đánh quái: phím ↓ hoặc Ctrl có thể vẫn đang bị giữ — nhấn rồi nhả ↓ và "
-                               "Ctrl trên bàn phím.";
+            // stopped here, drop_tick finds it stopped and says nothing. A
+            // high jump's ↑ owed is named as ↑ (2026.11.05b).
+            const bool up = input_.up_owed();
+            drop_stopped_vi_ = up ? "GoBot đã dừng đánh quái: phím ↑ hoặc Ctrl có thể vẫn đang bị giữ — nhấn rồi nhả ↑ "
+                                    "và Ctrl trên bàn phím."
+                                  : "GoBot đã dừng đánh quái: phím ↓ hoặc Ctrl có thể vẫn đang bị giữ — nhấn rồi nhả ↓ "
+                                    "và Ctrl trên bàn phím.";
             simple_note(drop_stopped_vi_, 15000);
             if (!simple_view_) set_status(drop_stopped_vi_, 15000);
-            GB_WARN("Hunter: keys owed after a drop (Down or Ctrl up not sent, %d tries) -- hunting stopped",
-                    input_.owed_tries());
+            if (up)
+                GB_WARN("Hunter: keys owed after a jump up (Up or Ctrl up not sent, %d tries) -- hunting stopped",
+                        input_.owed_tries());
+            else
+                GB_WARN("Hunter: keys owed after a drop (Down or Ctrl up not sent, %d tries) -- hunting stopped",
+                        input_.owed_tries());
         }
     }
     // The hunter's drop: what GoBot says against one, and a hunt it wants
@@ -708,6 +736,9 @@ void GuiApp::tick() {
         // window. Only a hunter that runs: one a cold start begins below takes
         // its spot afresh.
         if (hunter_ && hunter_->running()) hunter_->suspend_spot();
+        // And the Bản đồ tab lets go of the map it knew, hunting or not: the
+        // old session's map entry is no place of the new one's.
+        if (found) simple_map_lose();
         // Logged back in: every buff came off with the old session. Nothing
         // for a cold start's first login, whose jobs start below and cast
         // every buff as they start.
@@ -738,6 +769,7 @@ void GuiApp::tick() {
     simple_lists_tick();    // "Quái đang thấy", and the end of a look (simple_lists.cpp)
     simple_style_tick();    // a jump key's "Thử" that has finished (simple_style.cpp)
     positions_tick();       // the capture for positions, and its log line
+    simple_map_tick();      // the Bản đồ tab's worker, and its zone handed to the hunter (simple_map.cpp)
     detector_pace_tick(now_ms());   // how often the name plates are read (packets_detector.cpp)
 
     // The packets' map entries, followed at every tick, so that below only
@@ -1059,7 +1091,7 @@ bool GuiApp::any_job_alive() const {
     return simple_running() || macro_running_ || (macro_ && macro_->running()) || hunting_ || party_running_ ||
            revive_running_ || popups_running() || keeper_running_ || trash_running_ || chat_running_ ||
            quest_running_ || simple_find_bars_ || full_find_bars_ || coord_.critical_active() || jump_test_running() ||
-           bot_running_ || autopilot || (calibrator_ && calibrator_->running()) ||
+           jump_kind_running() || bot_running_ || autopilot || (calibrator_ && calibrator_->running()) ||
            (navigator_ && navigator_->running());
 }
 
@@ -1080,6 +1112,15 @@ GuiApp::Pacing GuiApp::pacing() const {
     // full_find_bars_tick), so they get the interactive rate for as long as
     // they last.
     p.want_interactive = simple_listening_ != 0 || simple_find_bars_ || full_find_bars_;
+    // The Bản đồ tab shown: the character and the monsters move on it, so
+    // behind the game and idle it is drawn kMapTabFps times a second, 10
+    // since 2026.11.05 (the owner's Q3 (a); 5 before) -- kMapTabLightFps, 2,
+    // with "Nhẹ máy" -- rather than 2 and 1. Its cost shows on the Load line.
+    if (simple_view_ && map_tab_open()) {
+        const int rate = light_.on ? kMapTabLightFps : kMapTabFps;
+        p.rates.background = std::max(p.rates.background, rate);
+        p.rates.idle = std::max(p.rates.idle, rate);
+    }
     return p;
 }
 
@@ -1618,6 +1659,8 @@ void GuiApp::retarget(void* hwnd) {
     // (Hunter::suspend_spot), until the character stands within 150 px of
     // where it was, or "Đặt chỗ này" sets one anew.
     if (hunter_ && hunter_->running()) hunter_->suspend_spot();
+    // The Bản đồ tab lets go of the map it knew, as at a log in.
+    simple_map_lose();
     // Where the view was, the map's edge, and a walk steered by them mean
     // nothing in another window.
     camera_.reset();
@@ -7509,6 +7552,8 @@ void GuiApp::start_hunt() {
     // A ↓ or Ctrl a drop left down in Windows let go of, as at GoBot's start;
     // and what the drop said when it stopped the last hunt, gone.
     if (hunt_config_.drop_down) input_.release_stray_drop_keys();
+    // A high jump's ↑ and Ctrl the same way, with "Nhảy lên bục trên" on.
+    if (hunt_config_.jump_up && !hunt_config_.drop_down) input_.release_stray_drop_keys();
     drop_stopped_vi_.clear();
 
     // Same reason as the macro: the hunter refuses to send anything to an
@@ -7569,7 +7614,7 @@ const char* GuiApp::drop_veto_now() const {
         case kDropVetoMacro:  return "the macro is held: the character is not in the world";
         case kDropVetoWalk:   return "a navigator walk is under way";
         case kDropVetoKeeper: return "the keeper is crossing";
-        case kDropVetoHotkey: return "one of GoBot's own keys is Ctrl or Down";
+        case kDropVetoHotkey: return "one of GoBot's own keys is Ctrl or Down, or Up with jumps up on";
         default:              break;
     }
     // HP under the chat's floor, as the chat line and the quest round wait
@@ -7586,12 +7631,16 @@ void GuiApp::drop_tick() {
     // the drop on, none with it off.
     int veto = kDropVetoNone;
     bool hp_watch = false;
-    if (hunt_config_.drop_down) {
-        // A key of GoBot's own on Ctrl or ↓: its own reading of the keys
-        // (GetAsyncKeyState) sees the drop's press as the player's.
-        const auto ctrl_or_down = [](std::uint32_t vk) {
+    // The jumps up (2026.11.05b) go by the same veto: HP, the macro held, a
+    // walk, the keeper crossing.
+    if (hunt_config_.drop_down || hunt_config_.jump_up) {
+        // A key of GoBot's own on Ctrl or ↓ -- or ↑, with the jumps up on: its
+        // own reading of the keys (GetAsyncKeyState) sees the drop's press, or
+        // a jump's, as the player's.
+        const bool up = hunt_config_.jump_up;
+        const auto ctrl_or_down = [up](std::uint32_t vk) {
             const std::uint32_t low = vk & 0xFFu;
-            return vk != 0 && (low == 0x11u || low == 0xA2u || low == 0xA3u || low == 0x28u);
+            return vk != 0 && (low == 0x11u || low == 0xA2u || low == 0xA3u || low == 0x28u || (up && low == 0x26u));
         };
         if (macro_ && macro_running_ && macro_->suspended())
             veto = kDropVetoMacro;
@@ -7632,6 +7681,54 @@ void GuiApp::drop_tick() {
                 saved ? " and saved" : " (hunt.ini could not be written)");
         if (!simple_view_)
             set_status("Hunting stopped: a drop (Ctrl+Down) changed the map -- drop_down is off now", 30000);
+    } else if (stop == Hunter::DropStop::JumpMapChanged) {
+        // A jump up's key changed the map (2026.11.05b): the same, for
+        // "Nhảy lên bục trên" -- the hunt stops, the tick is taken off and
+        // saved, and said in red.
+        hunt_config_.jump_up = false;
+        hunter_->set_config(hunt_config_);
+        const bool saved = hunt_config_.save(exe_relative("configs/hunt.ini"));
+        SYSTEMTIME at{};
+        GetLocalTime(&at);
+        char clock[16];
+        std::snprintf(clock, sizeof clock, "%02u:%02u:%02u", static_cast<unsigned>(at.wHour),
+                      static_cast<unsigned>(at.wMinute), static_cast<unsigned>(at.wSecond));
+        drop_stopped_vi_ = std::string("Lần nhảy lên lúc ") + clock +
+                           " làm đổi bản đồ — GoBot đã dừng đánh quái và bỏ dấu Nhảy lên.";
+        GB_WARN("Hunter: Nhảy lên unticked%s -- a jump up's key changed the map, hunting stopped",
+                saved ? " and saved" : " (hunt.ini could not be written)");
+        if (!simple_view_)
+            set_status("Hunting stopped: a jump up changed the map -- jump_up is off now", 30000);
+    } else if (stop == Hunter::DropStop::BothMapChanged) {
+        // A drop and a jump up were both under watch as the map changed
+        // (2026.11.05b): either may have done it -- both ticks taken off and
+        // saved, and said in red.
+        hunt_config_.drop_down = false;
+        hunt_config_.jump_up = false;
+        hunter_->set_config(hunt_config_);
+        const bool saved = hunt_config_.save(exe_relative("configs/hunt.ini"));
+        SYSTEMTIME at{};
+        GetLocalTime(&at);
+        char clock[16];
+        std::snprintf(clock, sizeof clock, "%02u:%02u:%02u", static_cast<unsigned>(at.wHour),
+                      static_cast<unsigned>(at.wMinute), static_cast<unsigned>(at.wSecond));
+        drop_stopped_vi_ = std::string("Lần nhảy lúc ") + clock +
+                           " làm đổi bản đồ — GoBot đã dừng đánh quái và bỏ dấu Nhảy xuống và Nhảy lên.";
+        GB_WARN("Hunter: Nhảy xuống and Nhảy lên unticked%s -- a drop and a jump up were both under watch when the "
+                "map changed, hunting stopped",
+                saved ? " and saved" : " (hunt.ini could not be written)");
+        if (!simple_view_)
+            set_status("Hunting stopped: the map changed after a drop and a jump up -- drop_down and jump_up are off "
+                       "now",
+                       30000);
+    } else if (stop == Hunter::DropStop::JumpKeysStuck) {
+        // A high jump's ↑ or Ctrl up stayed owed (2026.11.05b): ↑ named, not
+        // ↓ -- pressing ↓ would not let go of ↑.
+        drop_stopped_vi_ = "GoBot đã dừng đánh quái: phím ↑ hoặc Ctrl có thể vẫn đang bị giữ — nhấn rồi nhả ↑ và "
+                           "Ctrl trên bàn phím.";
+        GB_WARN("Hunter: Nhảy lên: a high jump's Up or Ctrl up stayed owed -- hunting stopped");
+        if (!simple_view_) set_status("Hunting stopped: Up or Ctrl may still be held -- press and let go of both",
+                                      30000);
     } else {
         drop_stopped_vi_ = "GoBot đã dừng đánh quái: phím ↓ hoặc Ctrl có thể vẫn đang bị giữ — nhấn rồi nhả ↓ và "
                            "Ctrl trên bàn phím.";
@@ -7957,8 +8054,21 @@ void GuiApp::positions_tick() {
     if (now - packet_sample_ms_ >= 1000) {
         packet_sample_ms_ = now;
         // From GoBot's start, hunt or no hunt: every door, login and
-        // re-login has its map entry said.
+        // re-login has its map entry said -- with your last report before
+        // it, as this sample keeps it after.
         note_map_entries();
+        {
+            const PacketWorld::View v = packet_world_.view(now);
+            if (v.me.known && v.me.report_ms != 0) {
+                own_seen_.set = true;
+                own_seen_.x = v.me.report_x;
+                own_seen_.y = v.me.report_y;
+                own_seen_.report_ms = v.me.report_ms;
+                own_seen_.epoch = v.map_epoch;
+                own_seen_.map = v.map;
+                own_seen_.area = v.area;
+            }
+        }
         note_capture_gaps(now);
         // The line owed since logging back in: once the capture is on the
         // game's process of now and has the character -- the world starts
@@ -8054,11 +8164,41 @@ void GuiApp::note_map_entries() {
     if (entry_from_map_ != 0 || entry_from_area_ != 0)
         std::snprintf(from, sizeof from, " (from t%u_s%u)", static_cast<unsigned>(entry_from_map_),
                       static_cast<unsigned>(entry_from_area_));
+    // Who took the character there (2026.11.04d): your last report before
+    // it, by the 1-s sample -- from an earlier map entry than this one --
+    // GoBot's own last key or click, and the PC's last input. One newer than
+    // GoBot's own was not GoBot's: a hand on the keys. Key names only.
+    std::string before = "; before it: ";
+    const std::uint32_t epoch = packet_world_.place().epoch;
+    if (own_seen_.set && own_seen_.epoch < epoch) {
+        char seen[160];
+        std::snprintf(seen, sizeof seen, "you last placed at %ld,%ld on t%u_s%u, %.1f s before",
+                      std::lround(own_seen_.x), std::lround(own_seen_.y), static_cast<unsigned>(own_seen_.map),
+                      static_cast<unsigned>(own_seen_.area),
+                      ws.entry_ms >= own_seen_.report_ms
+                          ? static_cast<double>(ws.entry_ms - own_seen_.report_ms) / 1000.0 : 0.0);
+        before += seen;
+    } else {
+        before += "no report of yours since the entry before";
+    }
+    before += "; GoBot's last key or click: " + InputManager::last_input_text(InputManager::last_input(), ws.entry_ms);
+    LASTINPUTINFO last{};
+    last.cbSize = sizeof last;
+    if (GetLastInputInfo(&last)) {
+        const std::uint64_t age = GetTickCount() - last.dwTime;
+        const std::uint64_t now = now_ms();
+        const std::uint64_t at = now > age ? now - age : 0;
+        char pc[64];
+        std::snprintf(pc, sizeof pc, "; the PC's last input %.1f s %s",
+                      static_cast<double>(at <= ws.entry_ms ? ws.entry_ms - at : at - ws.entry_ms) / 1000.0,
+                      at <= ws.entry_ms ? "before" : "after");
+        before += pc;
+    }
     GB_INFO("Positions: map entry %u/%u = %s -- you at %ld,%ld%s%s (%llu map entries since the world started "
-            "afresh)",
+            "afresh)%s",
             static_cast<unsigned>(ws.entry_map), static_cast<unsigned>(ws.entry_area),
             place_text(ws.entry_map, ws.entry_area).c_str(), std::lround(ws.entry_x), std::lround(ws.entry_y), from,
-            on == 0 ? ", OFF that map's file" : "", static_cast<unsigned long long>(ws.map_entries));
+            on == 0 ? ", OFF that map's file" : "", static_cast<unsigned long long>(ws.map_entries), before.c_str());
     entry_from_map_ = ws.entry_map;
     entry_from_area_ = ws.entry_area;
 }
@@ -8158,9 +8298,11 @@ void GuiApp::packet_watch_tick() {
     if (v.me.known) line << " at " << std::lround(v.me.x) << "," << std::lround(v.me.y);
     if (v.me.airborne) line << " (in the air)";
     // The jumps by kind, and the casts made in the air: what a jump attack or
-    // a double jump would show.
+    // a double jump would show. The walk-offs off an edge are among the jumps,
+    // and said apart from them (2026.11.05b).
     line << ", reports 0027:" << ws.own(OwnReport::Move) << " 002A:" << ws.own(OwnReport::Air) << " (jumps "
-         << ws.air_jumps << ", second " << ws.air_second << ", high " << ws.air_high << ", landed " << ws.air_landed
+         << ws.air_jumps << " (walk-offs " << ws.air_walkoffs << "), second " << ws.air_second << ", high "
+         << ws.air_high << ", landed " << ws.air_landed
          << ", other " << ws.air_other << ")"
          << " 0029:" << ws.own(OwnReport::Other) << " 0028:" << ws.own(OwnReport::Here)
          << " 0031:" << ws.own(OwnReport::Cast) << " (" << ws.casts_in_air << " in the air), foreign " << ws.foreign
@@ -8213,6 +8355,13 @@ void GuiApp::packet_watch_tick() {
         }
         line << ")";
     }
+    // The frames far from where their monster was worked out to be -- placed
+    // all the same (a chained hurt, a contact) or refused -- and the walks
+    // followed faster than a monster walks: what leaves a monster 1,000 px
+    // and more from its own frames. Each far one is said in the log as well
+    // (PacketWorld::note_far).
+    line << ", far frames placed " << ws.far_corrections << " refused " << ws.far_refused << ", walks faster than "
+         << decimals(PacketWorld::kPlausibleWalkSpeed, 0) << " px/step " << ws.walks_fast;
     line << ", wrong size " << wrong_size;
     // Your id, which the hitters are weighed against, and the first few
     // hitters met since HUNT ON; and the minimap's map changes the packets
@@ -8254,6 +8403,18 @@ void GuiApp::packet_watch_tick() {
     line << "; source: packets " << share(es.packets_ms - was.packets_ms) << "% of the time, healthy "
          << share(es.healthy_ms - was.healthy_ms) << "%, switches " << (es.switches - was.switches) << ", now "
          << (packet_eyes_ ? packet_why_name(packet_eyes_->why()) : "?");
+    // The hunter's plates of the packets' monsters (2026.11.05b): how many of
+    // the map's living ones are in view, and how they were placed on floors.
+    if (packet_eyes_ && packet_eyes_->source() == PacketEyes::Source::Packets) {
+        const PacketEyes::PlateCounts pc = packet_eyes_->plates();
+        line << "; the hunter's plates: " << pc.in_view << " of " << pc.alive << " living monsters in view (±"
+             << pc.half_w << " x ±" << pc.half_h << ")";
+        if (pc.floors)
+            line << "; placed on floors: " << pc.walking << " walking (" << pc.projected << " projected past "
+                 << PacketWorld::kMobWalkMs / 1000 << " s), " << pc.set_down << " set down";
+        else
+            line << "; not placed on floors (no map file in use)";
+    }
 
     // The hunting spot ("Chỗ đánh quái"), when it is switched on: where it
     // is, how far off the character is, the walks back (simple_spot.cpp).
@@ -8436,7 +8597,25 @@ void GuiApp::draw_hunt_settings() {
                 "the rest of the session.");
 
     changed |= ImGui::Checkbox("Jump at things above you", &hunt_config_.jump_to_reach);
-    ImGui::SameLine();
+    // "Nhảy lên bục trên" (2026.11.05b) beside the old hop's box: its reasons
+    // not to are the simple screen's tick's -- greyed, but a ticked one may
+    // still be unticked.
+    {
+        ImGui::SameLine();
+        const std::string why = simple_jump_up_refusal_vi();
+        ImGui::BeginDisabled(!why.empty() && !hunt_config_.jump_up);
+        changed |= ImGui::Checkbox("Jump up onto floors above (Up / Up Up / Ctrl+Up)", &hunt_config_.jump_up);
+        ImGui::EndDisabled();
+        help_marker("Straight up, by the game's own map file with a margin -- Up, Up Up or Ctrl+Up -- onto the floor "
+                    "of a monster above, and onto the floors of the way back to the home. Only in a hunting area "
+                    "drawn on the Bản đồ tab, on a map GoBot trusts, packets On, never with Stand still, the jump key "
+                    "Up; the take-off, the landing and the monster inside the area, and no floor outside it within "
+                    "650 px above. 4 a minute, 2 per monster; 3 that did not get up in a row, or 5 in a run, switch "
+                    "it off until the next start. A map change within 10 s of a jump stops hunting and switches this "
+                    "off. Off: nothing new is pressed, and the log says where a jump would have gone. Ticked, where "
+                    "jumps up may be planned (the jump key Up, packets On, the map trusted), the old hop beside it "
+                    "never presses in such an area, off for the run too; anywhere else it hops as before.");
+    }
     changed |= ImGui::Checkbox("Only while the game has focus##hunt",
                                &hunt_config_.require_focus);
     ImGui::SameLine();
@@ -8469,6 +8648,20 @@ void GuiApp::draw_hunt_settings() {
                     "area; maps GoBot saw you enter, or named by where you and the monsters stand; never "
                     "near a gate (drop_gate_px); never a bare Down: Down goes only with Ctrl held. A map "
                     "change after a drop stops hunting and switches this off.");
+    }
+    // "Tự tìm quái trong vùng" (2026.11.05b): its reasons not to are the
+    // simple screen's tick's.
+    {
+        ImGui::SameLine();
+        const std::string why = simple_seek_refusal_vi();
+        ImGui::BeginDisabled(!why.empty());
+        changed |= ImGui::Checkbox("Seek monsters anywhere in the area", &hunt_config_.seek_in_zone);
+        ImGui::EndDisabled();
+        help_marker("With the Bản đồ tab's hunting area in use, the packets steering and Stand still off: go to any "
+                    "monster inside the area the character gets to -- in view or not -- walking, off a floor's end "
+                    "or by a jump up, and fight it from a standing point inside the area. One in reach first, then "
+                    "your own floor, below, above. With none to get to, stand where it is; never out of the area. "
+                    "Off: as 2026.11.05.");
     }
 
     // ---- what counts as dead, and what to finish first ----

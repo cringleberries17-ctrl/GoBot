@@ -286,6 +286,19 @@ void test_bag_hotbar() {
     int total = -1;
     std::uint32_t item = 0;
     check(!f.L.low_total(kG, f.link, total, item) && total == -1, "learned, not checked yet: \"Low\" is the hotbar's");
+    // 2026.11.04d: what it drinks counted all the same -- for the words of
+    // the slot's "Low" (learned_total) and the minute line (KeySummary::total).
+    int learned = -1;
+    std::uint32_t learned_item = 0;
+    check(f.L.learned_total(kG, f.link, learned, learned_item) && learned == 168 && learned_item == kHp &&
+              key_of(f.L.summary(f.link), kG).total == 168 && key_of(f.L.summary(f.link), kH).total == -1 &&
+              !f.L.learned_total(kH, f.link, learned, learned_item) && learned == -1,
+          "learned, not checked yet: the bag's total of what G drinks is had for words, 168; H never learned has "
+          "none");
+    BagLedger::Link off = f.link;
+    off.capturing = false;
+    check(!f.L.learned_total(kG, off, learned, learned_item) && learned == -1,
+          "nor with the bag not the game's now");
 
     // Judged only once the frames of its moment are in.
     f.t += 2500;
@@ -642,6 +655,24 @@ void test_bag_wiring() {
     check(has(body(part, "bool GuiApp::bag_low_count("), "packets_settings_.bag == PacketUse::Off") &&
               has(body(part, "bool GuiApp::bag_says_enough("), "packets_settings_.bag == PacketUse::Off"),
           "packets_bag.cpp: [Packets] bag=off keeps both uses -- \"Low\" and the shop's skip -- on the screen");
+    // 2026.11.04d: the bag's total of what a key drinks in the minute line;
+    // a slot's "Low" named the stack in use, with that total beside it while
+    // not checked yet -- words only, bag=off none; and a slot unreadable two
+    // looks running kept as a picture of that slot alone, off this thread.
+    const std::size_t unread_case = tick.find("case Kind::Unreadable: {");
+    const std::string unread = unread_case == npos ? std::string() : tick.substr(unread_case, 1400);
+    check(has(body(part, "void GuiApp::note_bag_minute("),
+              "if (k.total >= 0) line << \", \" << k.total << \" in the bag\";") &&
+              has(body(part, "bool GuiApp::bag_learned_count("), "packets_settings_.bag == PacketUse::Off") &&
+              has(tick, "if (!bag_learned_count(vk, unchecked, unchecked_item)) unchecked = -1;") &&
+              has(tick, "alert(\"potion_low\", alert_text::potion_low(hp, key, ev.count, unchecked));"),
+          "packets_bag.cpp and simple_potions.cpp: the bag's total in the minute line, and beside a slot's \"Low\" "
+          "while not checked yet");
+    check(has(unread, "f = slot_cut(got.frame, got.spot.slot(row, col));") &&
+              has(unread, "ui.saving.push_back(std::async(std::launch::async,") && !has(unread, "save_png(got.frame") &&
+              has(potions, "constexpr int kSlotCutMargin = 3;"),
+          "simple_potions.cpp: a slot unreadable two looks running kept as that slot alone, written off the GUI "
+          "thread");
     {
         // A charm's slot: Nothing with bag=off, and Other -- an answer that
         // stops a right-click -- only after the count is the screen's; before

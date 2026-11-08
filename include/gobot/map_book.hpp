@@ -43,6 +43,22 @@ struct MapFloor {
     std::uint8_t layer = 0;     ///< which of the file's two blocks its top row is in: 0 or 1
 
     bool platform() const { return attr == 1; }
+    /// GoC reads attribute 4 as a wall: never stood on, never walked through.
+    bool wall() const { return attr == 4; }
+};
+
+/// One floor followed from a point on it, a column at a time, one way
+/// (GameMapBook::Page::follow): what a walk along it goes over.
+struct MapTrail {
+    /// Each column's floor top, the start's first. A hole of the floor it
+    /// bridges has no point: t52_s2's spawn ledge has none at x 711. Empty when
+    /// the start stands on no floor, or on a wall.
+    std::vector<MapPoint> pts;
+    /// The floor ends past pts.back(): a walk goes off it there, and falls.
+    bool ledge = false;
+    /// A walk stops at pts.back(): the map's edge, or a wall, comes next.
+    bool stop = false;
+    /// Neither: it was followed as far as asked.
 };
 
 /// A gate -- a warp zone -- as the game's .prj file places it, or as GoBot
@@ -111,8 +127,20 @@ public:
     /// A no-drop point covers this far either way (the drop plan's 11a).
     static constexpr int kNoDropXPx = 64;
     static constexpr int kNoDropYPx = 24;
+    /// A no-jump point covers this far either way (the jump-up plan's §7).
+    static constexpr int kNoJumpXPx = 48;
+    static constexpr int kNoJumpYPx = 24;
     /// More cells either way than this is not a map (as MapFile).
     static constexpr int kMaxCells = 4096;
+    /// Following a floor (Page::follow): the next column's floor whose top is
+    /// within this of the last one's, up or down -- the nearest -- is the same
+    /// floor, as the floors are drawn (kSketchLinkPx): a slope on the game's
+    /// maps rises at most a pixel a column (t52_s2's ramp, 0.74).
+    static constexpr int kFollowLinkPx = 4;
+    /// Columns with no floor of it this many at most are a hole it is
+    /// followed across, not its end: the game walks over them. t52_s2 has 1-px
+    /// holes at x 711 (the spawn ledge) and 1056 (the ramp).
+    static constexpr int kFollowHolePx = 2;
     /// Points remembered per map, each kind: the oldest go past this.
     static constexpr std::size_t kLearnedMax = 256;
 
@@ -131,6 +159,22 @@ public:
         /// The first floor whose top is more than `gap` below y at x: where a
         /// fall straight down from there lands. None for nothing below.
         std::optional<MapFloor> floor_below(int x, int y, int gap) const;
+        /// The floor a point at x, y stands on (floor_near; never a wall)
+        /// followed `dir` -- below 0 left, else right -- column by column,
+        /// across holes of kFollowHolePx, for `max_px` columns at most: where
+        /// a walk along it goes, slopes and all, and where it ends. t52_s2's
+        /// spawn ledge from 880,274: right to its end at 1104, left over the
+        /// hole at 711 to 472.
+        MapTrail follow(int x, int y, int dir, int max_px = kMaxCells * kCellPx) const;
+        /// The top of that floor at column to_x -- of the column before it
+        /// when to_x is a hole it is followed across. None when the floor
+        /// ends or stops before to_x, or x, y stands on none.
+        std::optional<int> follow_to(int x, int y, int to_x) const;
+        /// Where a point at x, y lies against its column's floors, for the
+        /// log: "31 px above floor 850 (attr 1), 471 px below floor 348
+        /// (attr 1)" -- the nearest each way, measured from the floor's top;
+        /// "on floor 850 (attr 1)" for one on a floor.
+        std::string gap_text(int x, int y) const;
     };
 
     /// A .map file's bytes, read planar into floors. None unless it is
@@ -193,10 +237,35 @@ public:
     void distrust(const std::string& stem);
     bool distrusted(const std::string& stem) const;
 
+    /// A jump up that did not get there (2026.11.05b): from `take`, a
+    /// standing point, onto the floor whose standing point `land` is, with
+    /// the key `kind` (JumpKind's number) -- that key and the weaker ones are
+    /// not pressed for that floor within kNoJumpXPx, kNoJumpYPx of `take`
+    /// again this session. Which floor that is the hunter's planner judges
+    /// (Hunter::jump_rules): the book keeps the points.
+    struct NoJump {
+        MapPoint     take;
+        MapPoint     land;
+        std::uint8_t kind = 0;
+    };
+    void learn_no_jump(const std::string& stem, const NoJump& n);
+    std::vector<NoJump> no_jumps(const std::string& stem) const;
+    /// Takes back one learned at exactly `take` -- a verdict a map change
+    /// later overrode. Whether there was one.
+    bool unlearn_no_jump(const std::string& stem, MapPoint take);
+    /// A floor jumps up fell back from twice -- solid from below, the map
+    /// file cannot say -- by a standing point on it: no jump onto it again
+    /// this session.
+    void learn_solid(const std::string& stem, MapPoint on);
+    std::vector<MapPoint> solid_floors(const std::string& stem) const;
+    bool unlearn_solid(const std::string& stem, MapPoint on);
+
 private:
     struct Learned {
         std::vector<MapPoint> gates;
         std::vector<MapPoint> no_drop;
+        std::vector<NoJump>   no_jump;
+        std::vector<MapPoint> solid;
     };
 
     std::shared_ptr<const Page> read_page(const std::string& dir, const std::string& stem) const;
@@ -230,13 +299,34 @@ private:
 /// Either way its .prj must list a gate, and a map a drop found wrong this
 /// session (GameMapBook::distrusted) is never trusted again.
 ///
-/// A standing point is yours when settled (WorldFix::settled), once per
-/// report -- never at the entry's spawn, where you may still be in the air --
-/// or a monster's, where its own stop frame put it, once per frame. Every one
-/// seen is checked against the file in use: one off its floors (kOnFloorPx)
-/// and an entry's file is not gone by again until the next entry -- the
-/// capture lost and back meanwhile, or lose(), changes nothing of that; a
-/// named map is let go of, and naming starts again from that point on.
+/// A standing point is yours when settled (WorldFix::settled) -- on the
+/// ground, not moving, nothing worked out: what a drop is pressed from --
+/// once per report, never at the entry's spawn, where you may still be in the
+/// air. A monster's frame is one only once the monster STANDS: the same
+/// monster (its slot and generation) put at the same height, within
+/// kMobSameYPx, by two of its frames kMobStandMs apart or more. Its frames
+/// alone say nothing of a floor: a spawn comes 9-36 px above its floor, and
+/// one thrown or in the air is where it is for a moment (2026-11-04 07:59:20,
+/// t52_s2: a monster at 1929,819, 31 px above floor 850, took the file away
+/// for the whole stay, and no drop went).
+///
+/// A monster's point never lets a file go. Every monster frame off the floors
+/// (kOnFloorPx) of the file in use is counted and said, once a minute at most
+/// (kMobOffSayMs), with the floors above and below it, and nothing more; those
+/// that stand count toward (b) only on its floors, and toward a name. One that
+/// stands off them, before (b) is had, sets its count back to 0, as a miss
+/// does to a name (said once a kMobOffSayMs at most); trust once had it never
+/// touches.
+///
+/// Only yours let a file go: two of them off its floors, kOwnOffApartMs apart
+/// or more, with none of yours on them in between -- wherever they are: one
+/// place twice is you standing there, two places you walking there, and a
+/// wrong file puts nearly every point off its floors either way. One alone is
+/// said and let pass (a report taken for settled a moment off the ground), and
+/// holds (b) back until one of yours lands on a floor. Two, and an entry's
+/// file is not gone by again until the next entry -- the capture lost and back
+/// meanwhile, or lose(), changes nothing of that; a named map is let go of,
+/// and naming starts again from those two points on.
 ///
 /// Everything is let go of when the capture stops or starts again (the map
 /// may have changed unseen), at each map entry, and at lose() -- a re-login,
@@ -248,7 +338,8 @@ private:
 /// that still fit, for later points; all of them again at most every
 /// kNameRescanMs. A file that could not be opened or read is tried again at
 /// each update, and nothing is named until it reads: left out, a copy of the
-/// map beside it would be the one that fits. One thread: the hunter's.
+/// map beside it would be the one that fits. One thread: its owner's -- the
+/// hunter's, or the map tab's worker for the tab's own.
 class MapTrust {
 public:
     static constexpr int kGateMatchXPx = 40;
@@ -271,6 +362,17 @@ public:
     static constexpr int kEntrySpawnPx = 2;
     /// Real time spent reading files at one update(): one file at least.
     static constexpr std::uint32_t kWorkMs = 8;
+    /// Two frames of one monster put it at the same height within this ...
+    static constexpr int kMobSameYPx = 2;
+    /// ... this far apart at least, on the frames' clock: it stands there.
+    static constexpr std::uint64_t kMobStandMs = 300;
+    /// Two points of yours off the floors of the file in use this far apart at
+    /// least, on the reports' clock, none on them between: it is let go of.
+    static constexpr std::uint64_t kOwnOffApartMs = 500;
+    /// Monster points off the floors said at most this often (the hunter's clock).
+    static constexpr std::uint64_t kMobOffSayMs = 60000;
+    /// Your point off the floors let pass said at INFO at most this often.
+    static constexpr std::uint64_t kOwnOffSayMs = 60000;
 
     enum class How : std::uint8_t {
         None,
@@ -286,19 +388,22 @@ public:
         NoFile,         ///< no .map for the entry's numbers, or one that does not read
         NoGates,        ///< its .prj lists no gate, or is missing
         Distrusted,     ///< a drop on it landed where its file did not say, this session
-        Mismatch,       ///< a standing point off its floors, during this entry's stay
+        Mismatch,       ///< two standing points of yours off its floors, during this entry's stay
         Confirming,     ///< entry seen, its spawn by no gate: `points` of kTrustPoints so far
         Naming,         ///< no entry seen: `points` of kNamePoints so far, or the files being read
         Ambiguous,      ///< no entry seen: another file fits too many of the points yet
     };
     static const char* why_text(Why w);
 
-    /// A monster standing where its own stop frame put it, alive, not moving:
-    /// never a place worked out.
+    /// A monster where its own frame put it, alive, with no speed of a walk or
+    /// a blow on it -- a stop's place, or a spawn's, perhaps in the air above
+    /// its floor -- never a place worked out. It stands once two of its frames
+    /// agree (kMobSameYPx, kMobStandMs).
     struct Mob {
         MapPoint      at;
         std::uint32_t slot = 0;
         std::uint64_t at_ms = 0;        ///< when that frame came: one point per frame
+        std::uint32_t gen = 0;          ///< which monster of its slot (PacketWorld::Mob::gen): a respawn is another
     };
     /// What one pass of the hunter sees, out of its WorldFix (rounded) and
     /// the packets' standing monsters.
@@ -332,10 +437,22 @@ public:
         std::string   next_best;        ///< naming: the file that fits next best, ...
         int           next_misses = 0;  ///< ... and how many of the points it misses
         int           fit = 0;          ///< naming: how many files fit every point
-        MapPoint      miss;             ///< Mismatch: the standing point off the floors
+        MapPoint      miss;             ///< Mismatch: the point of yours off the floors that let it go ...
+        std::string   miss_gap;         ///< ... and where it lies against them (Page::gap_text)
+        /// A point of yours off the floors of the file in use, let pass so far:
+        /// a second kOwnOffApartMs on, none on them between, lets it go.
+        bool          own_off = false;
+        int           mob_off = 0;      ///< monster frames off the floors of the file in use, ignored, since it was taken
+        /// No entry seen, and `stem` is the map named from standing points --
+        /// trusted, or not for want of a gate (NoGates) or for a drop that
+        /// found it wrong (Distrusted). how is None unless trusted; this says
+        /// it was named all the same. False while naming, and for an entry's.
+        bool          named = false;
     };
 
-    explicit MapTrust(GameMapBook* book = nullptr);
+    /// `who` begins its log lines: "Hunter" for the hunter's own, "Map view"
+    /// for the map tab's (2026.11.04c), which reads files while naming too.
+    explicit MapTrust(GameMapBook* book = nullptr, const char* who = "Hunter");
     void set_book(GameMapBook* book);
 
     /// One pass. Reads files on this thread: a map's at its first ask, and
@@ -356,8 +473,22 @@ public:
 
 private:
     struct Stand {
-        MapPoint at;
-        bool     own = false;
+        MapPoint      at;
+        bool          own = false;
+        /// Yours: always -- only a settled report is one. A monster's: two of
+        /// its frames at this height, kMobStandMs apart; otherwise its frame
+        /// is only looked at for the log (note_mobs), never gone by.
+        bool          standing = false;
+        std::uint32_t slot = 0;         ///< a monster's
+        std::uint64_t at_ms = 0;        ///< your report's time, or the monster frame's
+    };
+    /// A monster's frames so far: its last, and the height they have put it
+    /// at since `y_ms`.
+    struct MobSeen {
+        std::uint32_t gen = 0;
+        std::uint64_t last_ms = 0;
+        int           y = 0;
+        std::uint64_t y_ms = 0;
     };
     struct Cand {
         std::string stem;
@@ -373,6 +504,16 @@ private:
     std::vector<Stand> standing_points(const Look& look);
     void by_entry(const Look& look, const std::vector<Stand>& points);
     void by_name(const Look& look, const std::vector<Stand>& points, std::uint32_t work_ms);
+    /// The monsters' frames against the file in use: those off its floors
+    /// counted, and said once a kMobOffSayMs at most. Nothing else.
+    void note_mobs(const std::vector<Stand>& points, const GameMapBook::Page& page, const std::string& stem,
+                   std::uint64_t now);
+    /// A point of yours against the file in use. On its floors, any one let
+    /// pass before is forgotten. Off them, the first is kept and said; the
+    /// next kOwnOffApartMs after it or more lets the file go: true, `why`
+    /// then the two points and where they lie.
+    bool own_lets_go(const Stand& s, const GameMapBook::Page& page, const std::string& stem, std::uint64_t now,
+                     std::string& why);
     void add_name_point(MapPoint p);
     void scan(std::uint32_t work_ms);
     void decide();
@@ -380,6 +521,7 @@ private:
     void restart_naming(const char* why);
 
     GameMapBook*                         book_ = nullptr;
+    std::string                          who_;                  ///< its log lines' first word
     bool                                 epoch_set_ = false;
     std::uint32_t                        epoch_ = 0;
     bool                                 entry_mode_ = false;   ///< the map from an entry, not named
@@ -396,9 +538,27 @@ private:
     std::string                          lost_stem_;            ///< ... on this map's file, ...
     bool                                 lost_mismatch_ = false; ///< ... found wrong then, ...
     MapPoint                             lost_miss_;            ///< ... by this point
+    std::string                          lost_miss_gap_;
     bool                                 mismatch_ = false;
     MapPoint                             miss_;
+    std::string                          miss_gap_;
     std::vector<MapPoint>                confirm_;
+    // yours off the floors of the file in use, let pass so far
+    bool                                 own_off_ = false;
+    MapPoint                             own_off_at_;
+    std::uint64_t                        own_off_ms_ = 0;       ///< its report's time
+    std::string                          own_off_gap_;
+    bool                                 own_off_said_ = false; ///< one said at INFO, at ...
+    std::uint64_t                        own_off_said_ms_ = 0;  ///< ... this time (the hunter's clock)
+    // the monsters' frames off the floors of the file in use, ignored
+    int                                  mob_off_ = 0;          ///< since it was taken: Report::mob_off
+    int                                  mob_off_new_ = 0;      ///< since the last said, ...
+    int                                  mob_off_new_standing_ = 0; ///< ... of them standing
+    std::string                          mob_off_last_;         ///< the last of them, for the log
+    bool                                 mob_off_said_ = false;
+    std::uint64_t                        mob_off_said_ms_ = 0;
+    bool                                 confirm_cut_said_ = false;   ///< (b) set back to 0 by a monster
+    std::uint64_t                        confirm_cut_said_ms_ = 0;    ///< standing off the floors, said at
     bool                                 said_no_gate_ = false;
     bool                                 said_not_by_gate_ = false;
     // naming
@@ -414,7 +574,7 @@ private:
     bool                                 said_ambiguous_ = false;
     // each report or frame once
     std::uint64_t                        own_seen_ms_ = 0;
-    std::map<std::uint32_t, std::uint64_t> mob_seen_;
+    std::map<std::uint32_t, MobSeen>     mob_seen_;             ///< by slot
 };
 
 } // namespace gobot

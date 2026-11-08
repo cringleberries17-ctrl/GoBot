@@ -2,31 +2,43 @@
 // cách") and the jump key ("Phím nhảy") with its "Thử": their pieces of the
 // "Tự đánh quái" row, the "Tầm đánh" window -- which has the hunting spot's
 // numbers too ("Chỗ đánh quái", simple_spot.cpp) -- the jump key's line in
-// "Trước khi bắt đầu", and the one press "Thử" makes.
+// "Trước khi bắt đầu", and the one press "Thử" makes. And the moves on the
+// row: "Nhảy xuống bậc dưới", "Nhảy lên bục trên" with its "Thử ↑", "Thử ↑↑"
+// and "Thử Ctrl + ↑", and "Tự tìm quái trong vùng" (2026.11.05b) -- their
+// ticks, their lines under the row, and what the card says of them.
 //
 // What the numbers do in a fight is the hunter's (gobot/hunter.hpp), the
-// styles are gobot/attack_style.hpp, and "Thử" is gobot/jump_check.hpp. Here
+// styles are gobot/attack_style.hpp, and "Thử" is gobot/jump_check.hpp; why a
+// tick cannot work and which card lines hold are gobot/hunt_card.hpp's. Here
 // is only what the window draws and keeps. "Thử" acts on the game -- one key
-// press, on the player's click -- so it is held to the gates everything that
-// presses keys is: not while the bot runs, not under a hold, and through
-// keys_may_start. In a file of its own so that simple_view.cpp gets only the
-// calls.
+// press, or one jump, on the player's click -- so it is held to the gates
+// everything that presses keys is: not while the bot runs, not under a hold,
+// and through keys_may_start. In a file of its own so that simple_view.cpp
+// gets only the calls.
 
 #include "gui_app.hpp"
 #include "simple_ui.hpp"
 
 #include "gobot/attack_style.hpp"
 #include "gobot/common.hpp"
+#include "gobot/hunt_card.hpp"
 #include "gobot/jump_check.hpp"
+#include "gobot/jump_plan.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/map_book.hpp"
 #include "gobot/navigator.hpp"
+#include "gobot/packet_eyes.hpp"
 
 #include "imgui.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <future>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,16 +67,27 @@ struct GuiApp::StyleUi {
     /// three of them come from files, so they are not read on every frame.
     std::vector<NamedKey> keys;
     std::uint64_t         keys_ms = 0;
+
+    /// "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑" (2026.11.05b): the jump under way
+    /// -- its result says which kind -- and what the last one said.
+    std::future<JumpCheck::KindResult> kind;
+    std::atomic<bool> kind_stop{ false };
+    std::string       kind_said;
 };
 
 void GuiApp::StyleUiFree::operator()(StyleUi* ui) const {
     // A "Thử" still under way presses nothing more, and is waited for: it
     // reads the detector and the keyboard, which go after this.
-    if (ui) ui->jump_stop = true;
+    if (ui) {
+        ui->jump_stop = true;
+        ui->kind_stop = true;
+    }
     delete ui;
 }
 
 bool GuiApp::jump_test_running() const { return style_ui_ && style_ui_->jump.valid(); }
+
+bool GuiApp::jump_kind_running() const { return style_ui_ && style_ui_->kind.valid(); }
 
 namespace {
 
@@ -306,45 +329,63 @@ void GuiApp::simple_drop_hints() {
                        std::to_string(c.drop_side_px) + " px theo chiều ngang; không nhảy khi có cửa trong vòng " +
                        std::to_string(c.drop_gate_px) + " px.";
     // The area's height said with it: at the shipped 100, a monster dropped
-    // to is already outside it.
-    if (c.spot)
+    // to is already outside it. The map tab's zone, by its own box.
+    const Hunter::Status hs = hunting_ && hunter_ ? hunter_->status() : Hunter::Status{};
+    if (c.spot && hs.spot_set && hs.spot_from_map)
+        text += " Có Chỗ đánh quái: chỉ nhảy khi chỗ đứng, chỗ rơi xuống và con quái đều ở trong vùng đánh (vùng "
+                "dọc " + std::to_string(std::lround(hs.spot_top)) + "–" + std::to_string(std::lround(hs.spot_bottom)) +
+                ").";
+    else if (c.spot)
         text += " Có Chỗ đánh quái: chỉ nhảy khi chỗ đứng, chỗ rơi xuống và con quái đều ở trong vùng đánh (cao "
-                "thấp " + std::to_string(c.spot_half_h) + " px).";
+                "thấp " + std::to_string(c.spot_half_h) + " px; vùng vẽ ở tab Bản đồ thì theo vùng đó).";
     hint(trial_hint(kTrialDrop, text.c_str()).c_str());
     if (!hunting_ || !hunter_) return;
 
     // While it hunts: off until the next start, or why the monster below is
     // not dropped to just now -- for what the player can act on.
-    const Hunter::Status hs = hunter_->status();
+    bool off = false;
+    const std::string wait = drop_wait_vi(hs, map_known_now(), &off);
+    if (wait.empty()) return;
+    if (off) coloured(kWait, wait.c_str());
+    else     hint(wait.c_str());
+}
+
+std::string GuiApp::drop_wait_vi(const Hunter::Status& hs, bool map_known_here, bool* off) {
+    if (off != nullptr) *off = false;
     using Off = Hunter::DropOff;
+    const char* off_vi = nullptr;
     switch (hs.drop_off) {
-        case Off::Fails:
-            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: nhiều lần bấm Ctrl + ↓ không rơi xuống.");
-            return;
-        case Off::Rose:
-            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: bấm Ctrl + ↓ làm nhân vật nhảy lên.");
-            return;
-        case Off::OffMap:
-            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: nhân vật rơi xuống chỗ khác với bản đồ của game.");
-            return;
-        case Off::HeldLong:
-            coloured(kWait, "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: phím ↓ bị giữ quá lâu.");
-            return;
+        case Off::Fails:    off_vi = "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: nhiều lần bấm Ctrl + ↓ không rơi xuống."; break;
+        case Off::Rose:     off_vi = "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: bấm Ctrl + ↓ làm nhân vật nhảy lên."; break;
+        case Off::OffMap:   off_vi = "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: nhân vật rơi xuống chỗ khác với bản đồ của game."; break;
+        case Off::HeldLong: off_vi = "Nhảy xuống đã tắt tới lần BẮT ĐẦU sau: phím ↓ bị giữ quá lâu."; break;
         case Off::MapChanged:
         case Off::KeysStuck:
         case Off::None:
             break;
     }
-    if (hs.drop_wait_ms == 0 || now_ms() - hs.drop_wait_ms > 1500) return;
+    if (off_vi != nullptr) {
+        if (off != nullptr) *off = true;
+        return off_vi;
+    }
+    if (hs.drop_wait_ms == 0 || now_ms() - hs.drop_wait_ms > 1500) return {};
     using Why = Hunter::DropWhy;
+    const bool naming = hs.drop_map.why == MapTrust::Why::Naming || hs.drop_map.why == MapTrust::Why::Ambiguous ||
+                        hs.drop_map.why == MapTrust::Why::Confirming;
+    const std::string count = std::to_string(hs.drop_map.points) + "/" + std::to_string(hs.drop_map.needed);
     std::string wait;
     switch (hs.drop_wait) {
         case Why::MapUnknown:
+            // The Bản đồ tab knows the map; the drop's own check, apart, does
+            // not yet.
+            if (map_known_here) {
+                wait = "Nhảy xuống: GoBot còn đang tự kiểm tra bản đồ cho việc nhảy";
+                if (naming) wait += " (" + count + ")";
+                wait += ".";
+                break;
+            }
             wait = "Nhảy xuống: chưa biết bản đồ này — qua cửa hoặc đăng nhập lại một lần khi GoBot đang mở";
-            if (hs.drop_map.why == MapTrust::Why::Naming || hs.drop_map.why == MapTrust::Why::Ambiguous ||
-                hs.drop_map.why == MapTrust::Why::Confirming)
-                wait += ", hoặc chờ GoBot nhận ra bản đồ từ chỗ nhân vật và quái đứng (" +
-                        std::to_string(hs.drop_map.points) + "/" + std::to_string(hs.drop_map.needed) + ")";
+            if (naming) wait += ", hoặc chờ GoBot nhận ra bản đồ từ chỗ nhân vật và quái đứng (" + count + ")";
             wait += ".";
             break;
         case Why::Gate:
@@ -357,7 +398,381 @@ void GuiApp::simple_drop_hints() {
         case Why::Veto:        wait = "Nhảy xuống: đang chờ (máu thấp, bot tạm dừng, hoặc đang vào game)."; break;
         default:               break;
     }
-    if (!wait.empty()) hint(wait.c_str());
+    return wait;
+}
+
+// --------------------------------------------- "Nhảy lên bục trên"
+
+namespace {
+
+/// GoBot's own keys, each with what it does, as simple_drop_refusal_vi names
+/// them: one on Ctrl or ↑ would take a jump's press for the player's.
+struct OwnKeys {
+    std::uint32_t vk[5];
+    const char*   what[5];
+};
+
+/// Why the planner found no sure jump, in a few words for the card
+/// (JumpNo); `px` the floor's rise above the character's.
+std::string jump_no_vi(JumpNo no, int px) {
+    switch (no) {
+        case JumpNo::Short:
+            return "bục cao " + std::to_string(px) + " px, Ctrl+↑ chỉ chắc tới " +
+                   std::to_string(jump_peak(JumpKind::CtrlUp).usable()) + " px";
+        case JumpNo::OffFloor:  return "chỗ đứng không nằm trên bục nào của file bản đồ";
+        case JumpNo::Blocked:   return "có bục chặn ở phía trên";
+        case JumpNo::Ambiguous: return "bục cao vừa tới mức nhảy lúc tới lúc không";
+        case JumpNo::Ceiling:
+            return "có bục ngoài vùng trong khoảng " + std::to_string(kJumpUpCeilingPx) + " px phía trên";
+        case JumpNo::Edge:      return "mép bục ở ngay chỗ rơi xuống";
+        case JumpNo::Outside:   return "chỗ nhảy, chỗ rơi xuống hay con quái ở ngoài vùng";
+        case JumpNo::Weaker:    return "lỡ chỉ nhảy được kiểu thường thì sẽ rơi ra ngoài vùng";
+        case JumpNo::Learned:   return "ở đây đã nhảy hỏng trong lần mở GoBot này";
+        case JumpNo::Solid:     return "bục đó không nhảy xuyên lên được (đã rơi lại)";
+        case JumpNo::Gate:      return "gần cửa";
+        case JumpNo::Narrow:    return "chỗ đứng nhảy được quá hẹp";
+        case JumpNo::Far:       return "lên được bục nhưng đi tới con quái sẽ ra khỏi vùng";
+        case JumpNo::NotTargetFloor: return "nhảy lên được, nhưng không phải bục của con quái";
+        case JumpNo::None:      break;
+    }
+    return "không có chỗ nhảy nào chắc chắn";
+}
+
+} // namespace
+
+std::string GuiApp::simple_jump_up_refusal_vi() {
+    // What the settings tell (jump_up_tick); the rest -- no area for this
+    // map, the map not trusted -- only a hunt shows, and the card says it.
+    const OwnKeys own{ { macro_config_.toggle_key, macro_config_.panic_key, hunt_config_.toggle_key, hotkeys_.trash_now,
+                         hotkeys_.login_now },
+                       { "bật/tắt bot", "dừng ngay", "bật/tắt đánh quái", "dọn túi ngay", "vào game ngay" } };
+    std::size_t at = 0;
+    switch (jump_up_tick(hunt_config_, own.vk, &at)) {
+        case JumpUpTick::Ok:        return {};
+        case JumpUpTick::StayPut:   return "Không nhảy lên khi Đứng yên một chỗ: bỏ dấu Đứng yên trước.";
+        case JumpUpTick::NoPackets: return "Cần dấu Vị trí từ gói tin.";
+        case JumpUpTick::NoSpot:    return "Cần dấu Chỗ đánh quái, với vùng đánh quái vẽ ở tab Bản đồ.";
+        case JumpUpTick::JumpKey:
+            return hunt_config_.jump_key == 0 ? std::string("Phím nhảy phải là ↑ (chưa đặt phím nhảy).")
+                                              : "Phím nhảy phải là ↑ (đang là " + key_text(hunt_config_.jump_key) + ").";
+        case JumpUpTick::OwnKey:
+            return std::string("Phím ") + own.what[at < 5 ? at : 0] + " đang là " +
+                   ((own.vk[at < 5 ? at : 0] & 0xFFu) == VK_UP ? "↑" : "Ctrl") + ": đổi phím khác trước.";
+    }
+    return {};
+}
+
+void GuiApp::simple_jump_up_tick() {
+    // After "Nhảy xuống bậc dưới", beside it or under it when the row is full.
+    const char* const kJumpUp = "Nhảy lên bục trên (↑ / ↑↑ / Ctrl+↑)";
+    const float wide =
+        ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(kJumpUp).x;
+    ImGui::SameLine(0, 18);
+    if (ImGui::GetContentRegionAvail().x < wide) ImGui::NewLine();
+    // On by default (the owner's answer 5): greyed out, with its reason, while
+    // it cannot work as set -- but a ticked one may still be unticked: a
+    // GoBot key on Ctrl or ↑ greys it while the old hop stays off in an area.
+    const std::string why = simple_jump_up_refusal_vi();
+    ImGui::BeginDisabled(!why.empty() && !hunt_config_.jump_up);
+    if (ImGui::Checkbox(kJumpUp, &hunt_config_.jump_up)) simple_changed();
+    ImGui::EndDisabled();
+    const std::string tip =
+        !why.empty()
+            ? why
+            : trial_hint(kTrialJumpUp,
+                         ("Nhảy thẳng lên bục phía trên để đánh quái trên đó và để về chỗ về. Chỉ nhảy khi bản đồ\n"
+                          "cho thấy chắc chắn rơi đúng bục, trong vùng đánh quái. ↑, ↑↑ hay Ctrl + ↑: GoBot tự chọn\n"
+                          "theo file bản đồ của game, có chừa hao (↑ tới khoảng " +
+                          std::to_string(jump_peak(JumpKind::Up).usable()) + " px, ↑↑ tới " +
+                          std::to_string(jump_peak(JumpKind::UpUp).usable()) + " px, Ctrl + ↑ tới " +
+                          std::to_string(jump_peak(JumpKind::CtrlUp).usable()) +
+                          " px).\n"
+                          "Chỗ đứng nhảy, chỗ rơi xuống và con quái đều trong vùng vẽ ở tab Bản đồ, và không có bục\n"
+                          "nào ngoài vùng trong khoảng " +
+                          std::to_string(kJumpUpCeilingPx) +
+                          " px phía trên. Đang bay mà quái vào tầm thì vẫn đánh.\n"
+                          "Tối đa " +
+                          std::to_string(Hunter::kJumpUpsPerMinute) + " lần mỗi phút, " +
+                          std::to_string(Hunter::kJumpUpsPerTarget) + " lần cho một con quái; " +
+                          std::to_string(Hunter::kJumpUpFailsInRow) + " lần liền hoặc " +
+                          std::to_string(Hunter::kJumpUpFailsPerRun) +
+                          " lần trong một lượt\n"
+                          "không lên được bục thì tự tắt tới lần BẮT ĐẦU sau. Ctrl + ↑ đứng trên cửa không đổi bản\n"
+                          "đồ; nhưng bản đồ mà đổi trong " +
+                          std::to_string(Hunter::kPressWatchMs / 1000) +
+                          " giây sau một lần nhảy thì GoBot dừng đánh quái và bỏ dấu\n"
+                          "ô này. Bỏ dấu: GoBot không bấm gì mới, chỉ ghi vào log chỗ lẽ ra đã nhảy. GoBot không\n"
+                          "bao giờ bấm ↓ một mình. Cần phím nhảy là ↑. Thử ↑ / ↑↑ / Ctrl + ↑ để đo, không bắt buộc.")
+                             .c_str());
+    ImGui::SetItemTooltip("%s", tip.c_str());
+}
+
+void GuiApp::simple_jump_up_hints() {
+    // Not able to work as set: why, under the row too, when ticked and with
+    // the spot ticked -- it ships ticked, and with no spot nobody needs it
+    // said. Nor then the Thử row.
+    const std::string why = simple_jump_up_refusal_vi();
+    if (!why.empty()) {
+        if (hunt_config_.jump_up && hunt_config_.spot)
+            hint(trial_hint(kTrialJumpUp, ("Nhảy lên bục trên chưa chạy: " + why).c_str()).c_str());
+        return;
+    }
+    if (hunt_config_.jump_up) {
+        hint(trial_hint(kTrialJumpUp,
+                        ("Nhảy lên bục trên: chỉ trong vùng vẽ ở tab Bản đồ, khi bản đồ cho thấy chắc chắn rơi đúng "
+                         "bục (↑ tới khoảng " +
+                         std::to_string(jump_peak(JumpKind::Up).usable()) + " px, ↑↑ tới " +
+                         std::to_string(jump_peak(JumpKind::UpUp).usable()) + " px, Ctrl + ↑ tới " +
+                         std::to_string(jump_peak(JumpKind::CtrlUp).usable()) + " px); tối đa " +
+                         std::to_string(Hunter::kJumpUpsPerMinute) + " lần mỗi phút.")
+                            .c_str())
+                 .c_str());
+        // Ctrl + ↑ alone left out: the rest still go.
+        if (jump_up_no_ctrl(hunt_config_))
+            coloured(kWait, "Phím đánh hoặc phím đi đang là Ctrl nên GoBot không dùng Ctrl+↑ (↑ và ↑↑ vẫn dùng).");
+    }
+
+    // "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑": one jump of each kind, its flight
+    // measured -- where the jumps up can work as set, ticked or not (a jump
+    // that changed the map unticks it, and a measure may be wanted then).
+    // They help measure; nothing waits for them.
+    StyleUi& ui = style_ui();
+    const bool busy = ui.kind.valid() || ui.jump.valid();
+    std::string wait;
+    if (busy)                           wait = "Đang thử…";
+    else if (!input_.window_valid())    wait = "Chưa tìm thấy game.";
+    else if (simple_running())          wait = "Bot đang chạy: dừng bot rồi hãy thử.";
+    else if (keeper_entering())         wait = "Đang vào game — thử lại sau.";
+    else if (hunt_config_.packet_positions == PacketPositions::Off)
+        wait = "Cần Vị trí từ gói tin: chỉ gói tin cho biết nhân vật nhảy kiểu gì.";
+    else if (coord_.critical_active())
+        wait = "Bot đang tạm dừng (" + coord_.critical_reason() + ") — thử lại sau.";
+    ImGui::PushFont(nullptr, kSmall);
+    label("Đo cú nhảy:");
+    ImGui::BeginDisabled(!wait.empty());
+    for (const JumpKind k : { JumpKind::Up, JumpKind::UpUp, JumpKind::CtrlUp }) {
+        ImGui::SameLine();
+        const std::string text = std::string("Thử ") + jump_kind_key(k) + "###jumpkind" +
+                                 std::to_string(static_cast<int>(k));
+        if (ImGui::SmallButton(text.c_str())) simple_jump_kind_try(k);
+        ImGui::SetItemTooltip("%s", !wait.empty()
+                                        ? wait.c_str()
+                                        : "Nhảy MỘT lần kiểu này trong game và đo theo gói tin: có nhảy đúng kiểu "
+                                          "không, bay bao lâu, rơi xuống ở đâu. Đứng ở mặt đất phẳng, không có bục "
+                                          "phía trên. Không bắt buộc: chỉ để đo.");
+    }
+    ImGui::EndDisabled();
+    ImGui::PopFont();
+    if (!ui.kind_said.empty()) hint(ui.kind_said.c_str());
+}
+
+void GuiApp::simple_jump_kind_try(JumpKind kind) {
+    StyleUi& ui = style_ui();
+    if (ui.kind.valid() || ui.jump.valid()) return;
+    // Never into the login pages, a chat line or the bin's dialog: as "Thử".
+    if (keeper_entering()) {
+        simple_note("Đang vào game — thử lại sau.");
+        return;
+    }
+    if (!keys_may_start()) return;
+    // The map the Bản đồ tab has read, if any: the floor above is looked for
+    // on the check's own thread, never here.
+    const std::shared_ptr<const GameMapBook::Page> page = map_page_now();
+    ui.kind_stop = false;
+    ui.kind_said = std::string("Đang thử ") + jump_kind_key(kind) + "…";
+    GB_INFO("Jump test: one %s, to see how the character jumps (by the packets' take-offs by kind)",
+            jump_kind_name(kind));
+    std::atomic<bool>* stop = &ui.kind_stop;
+    ui.kind = std::async(std::launch::async, [this, kind, stop, page] {
+        JumpCheck check(coord_);
+        JumpCheck::Eyes eyes;
+        // Your client's take-offs by kind and your own last reports, under
+        // packet_takeoffs' guards.
+        eyes.air = [this] { return packet_air_counts(); };
+        eyes.own_since = [this](std::uint64_t ms) { return packet_own_since(ms); };
+        // A floor the map shows above where you stand, within the ceiling:
+        // the tab's page, or -- with none -- the map entry's own file, read
+        // here, on the check's thread.
+        eyes.floor_above = [this, page]() -> std::optional<int> {
+            const std::uint64_t at = now_ms();
+            PacketLink link;
+            link.capturing = capture_.running();
+            link.npcap = link.capturing || position_npcap_ok_.load();
+            link.last_tcp_ms = capture_.stats().last_tcp_ms;
+            const WorldFix f =
+                world_fix(packet_world_.view(at, PacketWorld::kOwnStepReckonMs), packet_world_.stats(), link, at);
+            if (f.state != WorldFix::State::Known) return std::nullopt;
+            std::shared_ptr<const GameMapBook::Page> p = page;
+            if (!p && f.map_known) p = game_maps_.get(GameMapBook::stem_of(f.map, f.area));
+            if (!p) return std::nullopt;
+            return floor_above(*p, MapPoint{ static_cast<int>(std::lround(f.rx)), static_cast<int>(std::lround(f.ry)) });
+        };
+        check.set_eyes(eyes);
+        JumpCheck::Hands hands;
+        hands.focus = [this] { return input_.window_focused() || input_.focus_window(); };
+        hands.focused = [this] { return input_.window_focused(); };
+        // Always ↑, by the input's own presses: never a key of the settings.
+        hands.jump = [this](JumpKind k, const std::function<bool()>& go_on) {
+            return JumpCheck::press_with(input_, k, go_on);
+        };
+        check.set_hands(hands);
+        return check.run_kind(kind, stop);
+    });
+}
+
+std::vector<std::pair<bool, std::string>> GuiApp::jump_up_card_vi(const Hunter::Status& hs) {
+    // Each line, and whether it is said in red: off until the next start.
+    std::vector<std::pair<bool, std::string>> lines;
+    const JumpUpCard card = jump_up_card(hunt_config_, hs, now_ms());
+    const std::string off = "Nhảy lên đã tắt tới lần BẮT ĐẦU sau: ";
+    using Off = Hunter::JumpUpOff;
+    switch (card.off) {
+        case Off::Fails:
+            lines.push_back({ true, off + std::to_string(Hunter::kJumpUpFailsInRow) + " lần liền (hoặc " +
+                                        std::to_string(Hunter::kJumpUpFailsPerRun) +
+                                        " lần trong lượt này) không lên được bục." });
+            break;
+        case Off::Physics:
+            lines.push_back({ true, off + "nhân vật nhảy khác với GoBot tính. Hãy gửi file log." });
+            break;
+        case Off::OffMap:
+            lines.push_back({ true, off + "nhân vật rơi xuống chỗ khác với bản đồ của game." });
+            break;
+        case Off::HeldLong:
+            lines.push_back({ true, off + "phím ↑ bị giữ quá lâu." });
+            break;
+        case Off::None:
+        case Off::MapChanged:
+        case Off::KeysStuck:
+            break;
+    }
+    for (const JumpKind k : { JumpKind::Up, JumpKind::UpUp, JumpKind::CtrlUp }) {
+        if ((card.kinds_off & (1u << static_cast<unsigned>(k))) == 0) continue;
+        const char* what = k == JumpKind::CtrlUp ? "game không nhảy cao"
+                           : k == JumpKind::UpUp ? "nhân vật không nhảy thêm trên không"
+                                                 : "nhân vật không nhảy";
+        lines.push_back({ true, std::string(jump_kind_key(k)) + " đã tắt tới lần BẮT ĐẦU sau: " +
+                                    std::to_string(Hunter::kJumpUpKindMisses) + " lần bấm mà " + what + "." });
+    }
+    const std::string key = jump_kind_key(hs.jump_kind);
+    const std::string x = std::to_string(hs.jump_x);
+    const char* const toward = hs.jump_for == Hunter::JumpUpFor::Home   ? " để về chỗ về"
+                               : hs.jump_for == Hunter::JumpUpFor::Seek ? " tới con quái đang tìm"
+                                                                        : "";
+    switch (card.now) {
+        case JumpUpCard::Now::Approach:
+            lines.push_back({ false, "Nhảy lên: đang đi tới x " + x + " để nhảy " + key + toward + "." });
+            break;
+        case JumpUpCard::Now::Settle:
+            lines.push_back({ false, "Nhảy lên: đang chờ nhân vật đứng yên ở x " + x + " để nhảy " + key + "." });
+            break;
+        case JumpUpCard::Now::Air:
+            lines.push_back({ false, "Nhảy lên: đang ở trên không (" + key + ", lên bục " +
+                                         std::to_string(hs.jump_land_top) + ")." });
+            break;
+        case JumpUpCard::Now::NoPlan: {
+            const std::string who = hs.jump_wait_name.empty() ? std::string("con quái") : hs.jump_wait_name;
+            lines.push_back({ false, "Nhảy lên: không có chỗ nhảy chắc chắn tới bục của " + who + " (" +
+                                         jump_no_vi(hs.jump_wait_no, hs.jump_wait_px) + ")." });
+            break;
+        }
+        case JumpUpCard::Now::None:
+            break;
+    }
+    if (card.would)
+        lines.push_back({ false, "Nhảy lên (đang tắt): lẽ ra đã nhảy " + std::to_string(hs.jumps_would) +
+                                     " lần — xem log." });
+    if (card.counts)
+        lines.push_back({ false, "Nhảy lên: " + std::to_string(hs.jumps) + " lần, " +
+                                     std::to_string(hs.jumps_worked) + " lần lên tới bục, " +
+                                     std::to_string(hs.jumps_fell_back) + " lần rơi lại." });
+    return lines;
+}
+
+void GuiApp::simple_jump_up_state(const Hunter::Status& hs) {
+    // The red ones in red; the rest grey, the dry run's among them.
+    for (const auto& [red, text] : jump_up_card_vi(hs)) {
+        if (red) coloured(kBad, text.c_str());
+        else     hint(text.c_str());
+    }
+}
+
+// --------------------------------------------- "Tự tìm quái trong vùng"
+
+std::string GuiApp::simple_seek_refusal_vi() {
+    switch (seek_tick(hunt_config_)) {
+        case SeekTick::Ok:        return {};
+        case SeekTick::StayPut:   return "Không tự tìm quái khi Đứng yên một chỗ: bỏ dấu Đứng yên trước.";
+        case SeekTick::NoPackets: return "Cần dấu Vị trí từ gói tin.";
+        case SeekTick::NoSpot:    return "Cần dấu Chỗ đánh quái, với vùng đánh quái vẽ ở tab Bản đồ.";
+    }
+    return {};
+}
+
+void GuiApp::simple_seek_tick() {
+    // After "Chỗ đánh quái", beside it or under it when the row is full.
+    const char* const kSeek = "Tự tìm quái trong vùng";
+    const float wide = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(kSeek).x;
+    ImGui::SameLine(0, 18);
+    if (ImGui::GetContentRegionAvail().x < wide) ImGui::NewLine();
+    // On by default (the seek's Q7 (a)): greyed out, with its reason, while
+    // it cannot work as set.
+    const std::string why = simple_seek_refusal_vi();
+    ImGui::BeginDisabled(!why.empty());
+    if (ImGui::Checkbox(kSeek, &hunt_config_.seek_in_zone)) simple_changed();
+    ImGui::EndDisabled();
+    const std::string tip =
+        !why.empty()
+            ? why
+            : trial_hint(kTrialSeek,
+                         "Đi tới quái ở bất kỳ chỗ nào trong vùng vẽ ở tab Bản đồ mà GoBot đi tới được (đi bộ, rơi\n"
+                         "xuống, nhảy lên), kể cả quái chưa thấy trên màn hình; không bao giờ ra khỏi vùng. Đánh con\n"
+                         "trong tầm trước, rồi con đi bộ trên bục đang đứng tới được, rồi con ở bục dưới, cuối cùng\n"
+                         "con phải nhảy lên mới tới. Trong vùng không còn con nào tới được thì đứng chờ tại chỗ,\n"
+                         "không đi về chỗ về; bị đẩy ra ngoài vùng thì đi về như trước. Bỏ dấu: như bản 2026.11.05.");
+    ImGui::SetItemTooltip("%s", tip.c_str());
+}
+
+std::string GuiApp::seek_going_vi(const Hunter::Status& hs) {
+    const std::string mob = std::to_string(hs.seek_mob_x) + "," + std::to_string(hs.seek_mob_y);
+    std::string s = "Đang đi tìm quái trong vùng: ";
+    if (hs.seek_planned && hs.seek_leg == 'J') {
+        s += std::string("nhảy ") + jump_kind_key(hs.seek_jump_kind) + " ở x " + std::to_string(hs.seek_leg_x) +
+             " lên bục " + std::to_string(hs.seek_jump_land_top) + " rồi đi tới con ở " + mob;
+    } else if (hs.seek_planned && hs.seek_leg == 'F') {
+        s += "đi ra mép bục ở x " + std::to_string(hs.seek_leg_x) + " rồi rơi xuống, tới con ở " + mob;
+    } else {
+        s += "con ở " + mob;
+        const int dx = hs.seek_mob_x - hs.seek_you_x;
+        if (dx != 0) s += std::string(" (bên ") + (dx < 0 ? "trái " : "phải ") + std::to_string(std::abs(dx)) + " px)";
+    }
+    // Projected: a walker out of view, followed on along its floor.
+    if (hs.seek_projected) s += " — chỗ đoán: con quái đi khuất, GoBot đoán nó đi tiếp dọc bục";
+    return s + ".";
+}
+
+void GuiApp::simple_seek_none(const Hunter::Status& hs) {
+    coloured(kWait, hs.seek_none_why == Hunter::SeekNone::Empty
+                        ? "Trong vùng không có con quái nào — đứng chờ ở đây."
+                        : "Trong vùng không còn con quái nào tới được — đứng chờ ở đây.");
+    // Some above that only a jump up gets to: what would get there.
+    switch (seek_above(hunt_config_, hs)) {
+        case SeekAbove::TickOff:
+            hint((std::to_string(hs.seek_above_no_way) +
+                  " con ở bục trên: chưa nhảy lên được — bật “Nhảy lên bục trên”.")
+                     .c_str());
+            break;
+        case SeekAbove::Latched:
+            hint((std::to_string(hs.seek_above_no_way) +
+                  " con ở bục trên: chưa nhảy lên được — Nhảy lên đã tắt tới lần BẮT ĐẦU sau.")
+                     .c_str());
+            break;
+        case SeekAbove::None:
+            break;
+    }
+    if (hs.seek_passed > 0)
+        hint((std::to_string(hs.seek_passed) + " con đang tạm bỏ qua (không tới được, hoặc tới nơi không thấy).")
+                 .c_str());
 }
 
 void GuiApp::simple_style_hints() {
@@ -482,7 +897,8 @@ void GuiApp::simple_style_popups() {
         changed = true;
     }
     ImGui::SetItemTooltip("Bot chỉ đi tới quái cách chỗ đánh quái không quá số này về mỗi bên (50–2000). Quái "
-                          "trong tầm đánh thì vẫn đánh, dù ở ngoài vùng.");
+                          "trong tầm đánh thì vẫn đánh, dù ở ngoài vùng. (Bản đồ có vùng vẽ trên tab Bản đồ: dùng "
+                          "vùng đó.)");
     ImGui::SameLine();
     label("dọc ±");
     ImGui::SameLine();
@@ -491,7 +907,8 @@ void GuiApp::simple_style_popups() {
         hunt_config_.spot_half_h = std::clamp(half_h, 20, 500);
         changed = true;
     }
-    ImGui::SetItemTooltip("Và cao hơn hay thấp hơn chỗ đánh quái không quá số này (20–500).");
+    ImGui::SetItemTooltip("Và cao hơn hay thấp hơn chỗ đánh quái không quá số này (20–500). (Bản đồ có vùng vẽ trên "
+                          "tab Bản đồ: dùng vùng đó.)");
     ImGui::SameLine();
     label("px");
     ImGui::AlignTextToFramePadding();
@@ -504,11 +921,12 @@ void GuiApp::simple_style_popups() {
     }
     ImGui::SetItemTooltip("Hết quái mà nhân vật cách chỗ đánh quái (theo chiều ngang) hơn số này thì bot đi bộ "
                           "về chỗ (10–1000). Bằng hay lớn hơn số ngang của vùng đánh: chỉ đi về khi bị đẩy ra "
-                          "ngoài vùng.");
+                          "ngoài vùng. (Bản đồ có vùng vẽ trên tab Bản đồ: tính từ chỗ về của vùng đó.)");
     ImGui::SameLine();
     label("px");
-    hint(trial_hint(kTrialSpot, "Đo bằng điểm ảnh của bản đồ trong gói tin của game. Vùng đánh mới dùng từ chỗ "
-                                "đặt sau (lần bắt đầu sau, hoặc khi bấm Đặt chỗ này); số Đi về dùng ngay.")
+    hint(trial_hint(kTrialSpot, "Cỡ vùng mới (vùng vẽ trên tab Bản đồ giữ cỡ của nó): đo bằng điểm ảnh của bản đồ "
+                                "trong gói tin của game. Dùng từ chỗ đặt sau (lần bắt đầu sau, hoặc khi bấm Đặt chỗ "
+                                "này), và là cỡ của vùng tạo mới trên tab Bản đồ; số Đi về dùng ngay.")
              .c_str());
 
     ImGui::Dummy(ImVec2(0, 6));
@@ -544,8 +962,9 @@ void GuiApp::simple_jump_checklist() {
     if (ui.keys_ms == 0 || now - ui.keys_ms > 3000) {
         ui.keys_ms = now;
         ui.keys.clear();
+        // Not the jump key itself, nor the jumps up's own ↑ (game_keys_in_use).
         for (NamedKey& k : game_keys_in_use())
-            if (k.what_vi != "nhảy") ui.keys.push_back(std::move(k));
+            if (k.what_vi != "nhảy" && k.what_vi != kJumpUpKeyVi) ui.keys.push_back(std::move(k));
     }
 
     const std::uint32_t jump = hunt_config_.jump_key;
@@ -683,6 +1102,20 @@ void GuiApp::simple_jump_try() {
 void GuiApp::simple_style_tick() {
     if (!style_ui_) return;
     StyleUi& ui = *style_ui_;
+    // A "Thử ↑", "Thử ↑↑" or "Thử Ctrl + ↑" that has finished: what it saw,
+    // measured, in the log and under the row.
+    if (ui.kind.valid() && ui.kind.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const JumpCheck::KindResult r = ui.kind.get();
+        ui.kind_said = JumpCheck::kind_said_vi(r);
+        GB_INFO("Jump test: %s %s -- %s (packets: jumps %d, walk-offs %d, second %d, high %d, landed %d; take-off "
+                "%d ms after the key, flight %d ms, rose %d px, g %s; Up held %u ms)",
+                r.pressed ? "pressed" : "did not press", jump_kind_name(r.kind),
+                JumpCheck::kind_outcome_name(r.outcome), r.jumps, r.walkoffs, r.second, r.high, r.landed,
+                r.takeoff_ms, r.flight_ms, r.rose_px,
+                r.gravity ? std::to_string(static_cast<int>(std::lround(*r.gravity))).c_str() : "not measured",
+                static_cast<unsigned>(r.held_ms));
+        simple_note(ui.kind_said, 12000);
+    }
     if (!ui.jump.valid() || ui.jump.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         return;
     const JumpCheck::Result r = ui.jump.get();
@@ -721,7 +1154,9 @@ void GuiApp::simple_style_tick() {
 }
 
 void GuiApp::simple_style_stop() {
-    if (style_ui_) style_ui_->jump_stop = true;
+    if (!style_ui_) return;
+    style_ui_->jump_stop = true;
+    style_ui_->kind_stop = true;
 }
 
 } // namespace gobot

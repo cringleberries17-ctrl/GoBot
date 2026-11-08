@@ -44,9 +44,9 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
   "Run anyway" (GoBot chưa có chữ ký số). Nếu phần mềm diệt virus chặn hay
   xoá file, đừng tắt diệt virus: hãy báo lại cho người gửi bạn bản này.
 - Không cần cài thêm gì, không cần GoC. Npcap (máy đã có nếu từng chạy
-  GoC) chỉ cần cho "Vị trí từ gói tin" và "Chỗ đánh quái". Không có Npcap
-  thì GoBot đọc màn hình như cũ, và Tự đánh quái không chạy khi ô Chỗ đánh
-  quái có dấu.
+  GoC) chỉ cần cho "Vị trí từ gói tin", "Chỗ đánh quái" và tab Bản đồ.
+  Không có Npcap thì GoBot đọc màn hình như cũ, Tự đánh quái không chạy
+  khi ô Chỗ đánh quái có dấu, và tab Bản đồ không vẽ được gì.
 
 
 3. CỬA SỔ GAME
@@ -88,13 +88,17 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
     thì GoBot không bật Tự đánh quái và ghi lý do ở khung dưới nút BẮT ĐẦU.
   + Chưa đọc được HP và MP: bấm "Tự tìm" lúc HP và MP đang đầy.
   + Chưa đặt phím nhảy (dấu vàng): không bắt buộc. Không có phím nhảy thì
-    bot chỉ không nhảy lên chỗ cao. Muốn đặt thì bấm "Đặt phím nhảy" rồi
-    nhấn phím nhảy của game (thường là ↑). Phần này là thử nghiệm: đặt
-    xong, thử nút "Thử" trước (xem mục 6).
+    bot chỉ không nhảy lên chỗ cao. "Nhảy lên bục trên" (bản 2026.11.05b)
+    cần phím nhảy là ↑. Muốn đặt thì bấm "Đặt phím nhảy" rồi nhấn phím nhảy
+    của game (thường là ↑). Phần này là thử nghiệm: đặt xong, thử nút "Thử"
+    trước (xem mục 6).
   + Có Npcap (chỉ hiện khi đánh dấu Tự đánh quái và Chỗ đánh quái): dấu
     đỏ thì Tự đánh quái không chạy. Cài Npcap, hoặc bỏ dấu Chỗ đánh quái.
-- Phần "Bot sẽ làm gì": lúc mới giải nén, mọi việc đều TẮT. Đánh dấu việc
-  bạn muốn. Muốn đổi phím: bấm vào ô phím rồi nhấn phím bạn dùng trong game.
+- Phần "Bot sẽ làm gì": lúc mới giải nén, mọi việc đều TẮT. (Từ bản
+  2026.11.05b, hai ô "Nhảy lên bục trên" và "Tự tìm quái trong vùng" có dấu
+  sẵn, nhưng chỉ chạy khi có dấu Tự đánh quái, Chỗ đánh quái và vùng vẽ ở
+  tab Bản đồ.) Đánh dấu việc bạn muốn. Muốn đổi phím: bấm vào ô phím rồi
+  nhấn phím bạn dùng trong game.
 - Bấm "BẮT ĐẦU" (hoặc F10 trong game). BẮT ĐẦU chạy mọi việc đã đánh dấu ở
   tất cả các thẻ. Bấm "DỪNG LẠI" (hoặc F10) để dừng.
 - F12: dừng TẤT CẢ ngay và nhả mọi phím. Hãy nhớ phím này.
@@ -128,6 +132,697 @@ chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2
 Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
 khác chưa được thử trên game thật.
 
+- Mới trong bản 2026.11.05b (nhảy lên bục trên, và tự tìm quái trong vùng
+  đánh quái theo điều bạn báo tối 05/11; chưa thử trên game thật):
+  + Hai ô mới trên hàng Tự đánh quái, cả hai BẬT SẴN: "Nhảy lên bục trên
+    (↑ / ↑↑ / Ctrl+↑)", sau "Nhảy xuống bậc dưới", và "Tự tìm quái trong
+    vùng", sau "Chỗ đánh quái". Màn hình Nâng cao có hai ô tương tự: "Jump
+    up onto floors above (Up / Up Up / Ctrl+Up)" và "Seek monsters anywhere
+    in the area". Cả hai chỉ chạy khi bot đang dùng vùng đánh quái vẽ ở tab
+    Bản đồ (có dấu Tự đánh quái và Chỗ đánh quái), trên bản đồ mà GoBot tin
+    file bản đồ (như Nhảy xuống bậc dưới), có dấu Vị trí từ gói tin
+    (packet_positions=on) và không có dấu Đứng yên một chỗ. Nhảy lên còn cần
+    Phím nhảy là ↑. Ở mọi chỗ khác (chỗ đánh quái chỉ cho lần chạy này, ở
+    bản đồ chưa có vùng, hay không có dấu Chỗ đánh quái) bot đánh y như bản
+    2026.11.05; lúc màn hình tạm thay gói tin, hay khi dùng danh sách Lọc
+    quái, bot không tự tìm quái. Ô nào không chạy được như đang đặt thì mờ
+    đi; rê chuột lên ô để xem lý do. Ô Nhảy lên bục trên mờ mà có dấu vẫn
+    bỏ dấu được. hunt.ini không có dòng jump_up hay seek_in_zone thì GoBot
+    coi như ô đó có dấu.
+  + Nhảy lên bục trên: bot nhảy thẳng lên (không giữ phím mũi tên, không lái
+    trên không) lên bục của con quái ở phía trên, và lên các bục trên đường
+    về chỗ về. Phím do GoBot tự chọn theo file bản đồ của game: phím đơn
+    giản nhất mà chắc chắn rơi đúng bục, ↑, ↑↑ (↑ thứ hai bấm 340 ms sau ↑
+    đầu) hay Ctrl+↑. Bạn trả lời độ cao "Theo GoC": ↑ khoảng 133 px, ↑↑
+    khoảng 280 px, Ctrl+↑ khoảng 432 px (câu 1). GoBot tính theo tốc độ nhảy
+    trong gói tin của game, có chừa hao vì sức hút trong game chưa đo được:
+    ↑ lên cao 121–143 px, ↑↑ 213–286 px, Ctrl+↑ 392–463 px; số của GoC nằm
+    trong các khoảng đó. Nên GoBot chỉ nhảy khi bục cao hơn chỗ đứng không
+    quá 109 px (↑), 201 px (↑↑) hay 380 px (Ctrl+↑), và không có bục nào
+    khác ở độ cao mà cú nhảy lúc tới lúc không. Bục cao hơn thì chỉ lên được
+    qua một bục ở giữa (tối đa 2 lần nhảy): trên đường về, và khi Tự tìm quái
+    trong vùng đi tới con quái ở bục đó (2 lần nhảy là hết 2 lần cho một con
+    quái). Mỗi lần nhảy, log ghi thời gian bay và sức hút đo được (g≈).
+  + Chỗ nhảy: bot đi dọc bục đang đứng tới chỗ nhảy, thả phím, chờ gói tin
+    báo nhân vật đứng yên, xem lại đúng chỗ đang đứng (lệch thì nhích tối đa
+    2 lần), rồi bấm một lần. Mỗi chỗ nhảy được xét theo file bản đồ, ở chính
+    chỗ đó và 24 px mỗi bên: trên đường lên không có bục chắn (loại bục
+    không nhảy xuyên lên được); dù nhảy cao nhất hay thấp nhất cũng rơi đúng
+    một bục; chỗ đứng nhảy, chỗ rơi xuống và con quái đều ở trong vùng;
+    không có bục nào NGOÀI vùng trong khoảng 650 px phía trên (nên dù nhân
+    vật có nhảy cao tới 600 px như có lần bạn nói, cũng không rơi ra ngoài
+    vùng); và nếu lỡ mất Ctrl hay mất ↑ thứ hai, cú ↑ thường còn lại vẫn rơi
+    về bục cũ hay một bục trong vùng. Lúc bay, nhân vật được vọt cao hơn
+    cạnh trên của vùng (câu 3). Đang bay thì không đi, không quay mặt; quái
+    vào tầm thì vẫn đánh (câu 4). Không nhảy chéo, không nhảy tại chỗ để
+    đánh trên không như GoC.
+  + Phím: Ctrl+↑ bấm như Ctrl+↓ của Nhảy xuống bậc dưới: giữ Ctrl khoảng
+    50 ms, bấm ↑ trong lúc vẫn giữ Ctrl, giữ ↑ khoảng 0,1 giây, nhả ↑ rồi
+    mới nhả Ctrl. Ctrl một mình là phím nhặt đồ của game, nên lúc đó nhân
+    vật có thể nhặt đồ dưới chân: không sao. Mỗi lần bấm ↑ (cả ↑ và ↑↑) đều
+    giữ 80–110 ms. GoBot vẫn không bao giờ bấm ↓ một mình. Bấm F12 hay DỪNG
+    LẠI giữa lúc nhảy thì GoBot nhả ↑ rồi Ctrl ngay; mở GoBot hay bấm BẮT
+    ĐẦU thì GoBot nhả ↑ và Ctrl nếu Windows thấy chúng còn bị giữ. GoBot
+    không nhả được ↑ hay Ctrl sau 3 lần thử thì dừng đánh quái và báo đỏ:
+    hãy tự nhấn rồi nhả ↑ và Ctrl trên bàn phím (không phải ↓). Không
+    nhảy lên khi một phím tắt của GoBot (F10, F11, F12, Phím dọn ngay, Phím
+    vào game ngay) là Ctrl hay ↑; phím đánh hay phím đi là Ctrl thì chỉ
+    không dùng Ctrl+↑ (↑ và ↑↑ vẫn dùng).
+  + Sau mỗi lần nhảy, GoBot xem gói tin: đã nhảy đúng kiểu chưa (Ctrl+↑ phải
+    là nhảy cao, ↑↑ phải có lần nhảy thứ hai trên không), và rơi xuống đâu.
+    Lên tới bục: đánh tiếp trên bục đó như thường, hay đi tiếp về chỗ về.
+    Rơi lại chỗ cũ: GoBot nhớ chỗ đó (không nhảy phím đó, hay phím yếu hơn,
+    lên bục đó trong vòng 48 px quanh chỗ đó, tới khi tắt GoBot) và tạm bỏ
+    con quái đó 8 giây; rơi lại lần thứ hai lên cùng một bục thì GoBot coi
+    bục đó không nhảy xuyên lên được, tới khi tắt GoBot. Trên tab Bản đồ,
+    các chỗ đó có dấu xám. 2 lần bấm Ctrl+↑ mà game chỉ nhảy thường (hay ↑↑
+    mà không có lần nhảy thứ hai) thì phím đó tắt tới lần BẮT ĐẦU sau. 3 lần
+    liền (hay 5 lần trong một lượt) không lên được bục; nhân vật rơi lên bục
+    cao hơn GoBot tính, ra ngoài vùng, hay xuống chỗ không có trong file bản
+    đồ; phím ↑ bị giữ quá 250 ms; hay sức hút đo được hai lần khác xa GoBot
+    tính: Nhảy lên tắt tới lần BẮT ĐẦU sau, và dưới nút BẮT ĐẦU có dòng đỏ
+    ghi lý do (ví dụ "Nhảy lên đã tắt tới lần BẮT ĐẦU sau: nhân vật nhảy
+    khác với GoBot tính. Hãy gửi file log.").
+  + Giới hạn: tối đa 4 lần nhảy lên mỗi phút, 2 lần cho một con quái (và 2
+    lần đứng lại chờ nhảy mà không bấm); hai lần bấm, nhảy lên hay nhảy
+    xuống, cách nhau ít nhất 1,5 giây. Như Nhảy xuống bậc dưới, không nhảy
+    trong 5 giây đầu sau khi vào bản đồ, khi máu dưới mức của bình HP (ít
+    nhất 50%), khi bot tạm dừng (chat, dọn rác, nhiệm vụ...), khi game không
+    ở trên cùng, khi đang đi tới điểm đã lưu hay đang vào lại game. Nhảy lên
+    tới một con quái được rồi thì 8 giây không nhảy xuống, và nhảy xuống tới
+    một con được rồi thì 8 giây không nhảy lên tới quái. Con quái chỉ tới
+    được bằng cách nhảy lên thì được chọn sau cùng.
+  + Đổi bản đồ: bạn đã thử, đứng trên cửa bấm Ctrl+↑ không đổi bản đồ
+    (câu 2), nên GoBot không tránh cửa khi nhảy lên. Nhưng như Nhảy xuống,
+    nếu bản đồ đổi trong 10 giây sau bất kỳ lần nhảy lên nào: GoBot DỪNG
+    đánh quái, bỏ dấu "Nhảy lên bục trên" và lưu lại, ghi WARN "MAP CHANGED"
+    vào gobot_gui.log, và có dòng đỏ "Lần nhảy lên lúc ... làm đổi bản đồ —
+    GoBot đã dừng đánh quái và bỏ dấu Nhảy lên." Nếu lúc đó một lần nhảy
+    xuống (Ctrl+↓) cũng chưa quá 10 giây thì không biết lần nào làm đổi bản
+    đồ: GoBot bỏ dấu cả hai ô, dòng đỏ ghi "... bỏ dấu Nhảy xuống và Nhảy
+    lên." Các việc khác (bình, buff...) vẫn chạy. Hãy đưa nhân vật về, báo
+    lại kèm gobot_gui.log, rồi mới đánh dấu lại.
+  + Đường về chỗ về: khi đi bộ và rơi xuống không tới được, đường về có thể
+    có tới 2 lần nhảy lên (đường ít lần nhảy hơn được chọn trước); dưới nút
+    BẮT ĐẦU ghi "Về: nhảy Ctrl+↑ ở x ...". Trong vùng vẽ ở tab Bản đồ, có
+    dấu Nhảy lên bục trên thì GoBot không còn bấm phím nhảy kiểu cũ (nhảy
+    một cái về phía con quái hay chỗ về): mọi lần nhảy ở đó đều được tính
+    trước như trên, kể cả khi Nhảy lên đã tự tắt tới lần BẮT ĐẦU sau. Chỉ
+    khi Nhảy lên chưa chạy được ở đó (Phím nhảy không phải ↑, Vị trí từ gói
+    tin chưa bật, hay GoBot chưa tin file bản đồ) thì vẫn nhảy kiểu cũ như
+    bản 2026.11.05. Không có đường nào (đi bộ, rơi xuống hay nhảy lên) thì
+    bot đánh tại chỗ, và thẻ ghi "... không có đường đi bộ, rơi xuống hay
+    nhảy lên nào về vùng: bot đánh ở đây. ...". Bỏ dấu, hay khi Nhảy lên đã
+    tắt tới lần BẮT ĐẦU sau: GoBot không bấm gì mới, chỉ ghi vào log chỗ lẽ
+    ra đã nhảy (tối đa một dòng mỗi 30 giây), vẽ mũi tên nét đứt ở chỗ đó
+    trên tab Bản đồ, và dưới nút BẮT ĐẦU ghi "Nhảy lên (đang tắt): lẽ ra đã
+    nhảy N lần — xem log."
+  + Ở RừngĐạiThụ[2] (t52_s2), với vùng bạn đã vẽ (ngang 265–1399, dọc
+    174–694, chỗ về 880,274): theo file bản đồ, chỉ có Ctrl+↑ nhảy được, lên
+    bục chỗ về: từ mặt đất ở khoảng x 695–884, hay từ chân dốc bên phải ở
+    khoảng x 1024–1048. Ở x 505–638 thì không, vì phía trên có hai bục nhỏ ở
+    ngoài vùng. Vậy chỗ về 880,274 nay về được từ mặt đất: từ 880,634, bot
+    đi sang trái tới khoảng x 800–820, đứng lại rồi bấm Ctrl+↑. (Đó là
+    đường về khi bỏ dấu "Tự tìm quái trong vùng". Dấu đó bật sẵn, và khi bật
+    thì trong vùng hết quái bot đứng chờ tại chỗ; bot chỉ đi tới đó bấm
+    Ctrl+↑ lên bục chỗ về khi trên bục có quái.) Cứ giữ vùng như bây giờ:
+    lời khuyên ở bản 2026.11.04d (kéo chỗ về xuống nền lớn, khoảng
+    1100,714) không cần nữa. Muốn đánh cả quái ở chân dốc bên phải,
+    dưới cạnh dưới 694, thì kéo cạnh dưới của vùng xuống khoảng 810: khi đó
+    có thêm Ctrl+↑ từ mặt đất lên dốc, ở khoảng x 1161–1288. Ở t53_s2, trong
+    vùng của bạn không có chỗ nào nhảy lên chắc chắn được (kể cả khi kéo
+    cạnh trên lên 1020), nên GoBot không nhảy lên ở đó; Tự tìm quái vẫn
+    chạy.
+  + Tự tìm quái trong vùng. Sau lần đánh quái lúc 23:02–23:08 tối 05/11 (bản
+    05, t52_s2), bạn báo: "đang chưa tự tìm quái ở trong ô đánh quái. Nên có
+    thể tự tìm quái và di chuyển tới đánh". Log lần đó cho thấy: khoảng
+    23:03 nhân vật rời bục chỗ về xuống mặt đất, rồi suốt 5 phút chỉ quanh
+    quẩn ở một khúc mặt đất (x 691–961), giữa phần dưới của vùng; lúc
+    23:05:19 bot bỏ chỗ 709,579, ngay trong vùng, nơi vừa đánh chết 7 con,
+    để đi bộ 171 px về 880,634 (dưới chỗ về); 4 lần bot đi sang phải về phía
+    quái bên phải rồi dừng ở 1035,695, chỗ cạnh dưới của vùng cắt mặt đất
+    (log "Hunter: not walking right ..."); cuối cùng bot đứng 22 giây ở
+    907,646 mà không làm gì. Lý do: bản 05 chỉ đi tới con quái đang thấy
+    quanh nhân vật; hết con chọn được thì đi về chỗ trên mặt đất gần chỗ về
+    nhất, kể cả khi đang ở trong vùng; đi về phía con quái theo chiều ngang,
+    nên trên dốc thì đi xuống tới cạnh dưới của vùng rồi dừng; không leo lại
+    lên bục được; và con quái trên dốc đi quá 5 giây mà game không gửi gói
+    tin mới thì GoBot tưởng nó còn đứng ở x 2594, ngoài màn hình, trong khi
+    nó đã xuống tới chân dốc, trong vùng.
+  + Nay, với dấu "Tự tìm quái trong vùng": GoBot biết mọi con quái còn sống
+    của cả bản đồ từ gói tin, không chỉ con quanh nhân vật. Với mỗi con ở
+    trong vùng, GoBot tìm theo file bản đồ một chỗ đứng đánh: một chỗ trên
+    bục trong vùng mà nhân vật tới được (đi bộ dọc bục, đi ra mép bục rơi
+    xuống một bục trong vùng, hay nhảy lên khi Nhảy lên bục trên được phép),
+    và từ đó con quái chắc chắn ở trong tầm đánh (chừa 24 px theo chiều
+    ngang, 8 px cao thấp). Chỗ đứng đánh luôn cách chỗ bục ra khỏi vùng ít
+    nhất 48 px, nên bot không bao giờ đi ra khỏi vùng. Bot đi tới chỗ đứng
+    đó, không đi theo chiều ngang về phía con quái nữa. Ví dụ lúc 23:04:42,
+    từ 945,666 tới con quái ở chân dốc (khoảng 1007,578), bot đi sang TRÁI,
+    lên dốc, rồi đánh từ khoảng 867,627, chứ không đi sang phải xuống cạnh
+    vùng. GoBot tính lại mỗi 0,25 giây, nên quái mới hiện ra ở đâu trong
+    vùng thì bot đi tới ngay.
+  + Thứ tự (câu 2): con trong tầm đánh trước; rồi con đi bộ trên bục đang
+    đứng tới được; rồi con ở bục dưới mà Nhảy xuống bậc dưới (Ctrl+↓) nhảy
+    tới được, khi ô đó có dấu; rồi con phải đi ra mép bục rơi xuống mới tới;
+    cuối cùng con phải nhảy lên mới tới. Cùng loại thì con gần nhất theo
+    đường đi (mỗi lần rơi tính thêm 200 px, mỗi lần nhảy lên thêm 600 px).
+    Đang đi tới một con thì giữ con đó, chỉ đổi khi có con vào tầm đánh, có
+    con thuộc loại trước, hay có con gần hơn ít nhất 200 px mà đã giữ con cũ
+    2 giây. Đi 4 giây mà không gần chỗ đứng đánh thêm 40 px thì bỏ qua con
+    đó 20 giây; tới chỗ đứng đánh mà 1,5 giây vẫn không thấy con quái trong
+    tầm thì cũng bỏ qua nó 20 giây, rồi đi tới con khác. Lúc bot tạm dừng
+    (dọn rác, bùa, chat, hồi sinh, mua bình) hay game không ở trên cùng thì
+    không tính vào hai khoảng đó, và đánh xong một trận thì tính lại từ đầu.
+    Con đã nhảy lên đủ 2 lần (hay đứng chờ nhảy 2 lần) mà chỉ nhảy mới tới
+    thì bot thôi đi tới con đó (tab Bản đồ: "Không tới được: bục trên, đã
+    nhảy đủ số lần cho con này"). Con ở bục dưới mà Ctrl+↓ bị từ chối ngay
+    trên đầu nó vì lý do không đổi (gần cửa, không có bục dưới, rơi quá con
+    quái...) thì 20 giây bot đi tới nó theo đường riêng (đi ra mép bục rơi
+    xuống); log ghi "Hunter: slot N -- no drop to it from above (...); its
+    own way instead".
+  + Không còn con nào tới được (câu 1): ở trong vùng thì bot thả phím và
+    đứng chờ tại chỗ, không đi về chỗ về nữa; dưới nút BẮT ĐẦU ghi "Trong
+    vùng không còn con quái nào tới được — đứng chờ ở đây." (có con ở bục
+    trên mà chưa nhảy lên được thì thêm "N con ở bục trên: chưa nhảy lên
+    được — bật “Nhảy lên bục trên”."). Bị đẩy ra ngoài vùng thì đi về như
+    trước (bản 2026.11.04d), nay có thể có cả nhảy lên. Lúc đang đi tìm,
+    dưới nút BẮT ĐẦU ghi "Đang đi tìm quái trong vùng: con ở X, Y (bên trái
+    N px)." hay "Đang đi tìm quái trong vùng: nhảy Ctrl+↑ ở x ... lên bục
+    ... rồi đi tới con ở X, Y."; dưới ô Chỗ đánh quái có dòng "Tự tìm quái:
+    bật — ...".
+  + Việc này không bấm phím nào mới: chỉ đi bộ (giữ phím mũi tên), đi ra mép
+    bục để rơi, và nhảy lên qua đúng Nhảy lên bục trên, với mọi giới hạn ở
+    trên. Con quái trong vùng mà bot không tới được thì tô xám trên tab Bản
+    đồ (rê chuột: "Không tới được: bục trên, chưa nhảy lên", "Tạm bỏ qua,
+    còn N s"...), và log ghi một lần mỗi con. Tab Bản đồ còn vẽ: đường nét
+    đứt từ nhân vật tới chỗ đứng đánh (ô vuông nhỏ) rồi tới con quái đang
+    tìm; vòng nét đứt quanh con quái mà GoBot đoán chỗ (câu 4); mũi tên ở
+    chỗ sẽ nhảy lên, có ghi ↑, ↑↑ hay Ctrl+↑ (nét đứt: lẽ ra đã nhảy, khi
+    Nhảy lên bục trên đang tắt); dấu xám ở chỗ đã nhảy hỏng và bục không
+    nhảy xuyên lên được.
+  + Độ cao của quái (câu 3): khi bot dùng vùng của tab Bản đồ với dấu Tự tìm
+    quái, bot xét chỗ của quái đúng như chấm đỏ trên tab (quái đi trên dốc
+    được đặt trên bục của nó), cho cả việc tìm lẫn việc đánh. Điều này đổi
+    điều bản 2026.11.05 ghi (câu 2 của bản đó: bot vẫn xét độ cao như
+    trước), nhưng chỉ trong lúc đó; ở chỗ khác bot vẫn xét như bản 05. Quái
+    đi khuất (câu 4): con quái đã đi quá 5 giây mà game không gửi gói tin
+    mới thì GoBot đoán nó đi tiếp dọc bục với tốc độ của nó, tới đầu bục thì
+    dừng, tính tối đa 25 giây; tới nơi mà không thấy thì bỏ qua con đó
+    20 giây như trên. Chấm đỏ của tab thì vẫn vẽ như bản 05, không đoán.
+    Quái mà người khác vừa đánh trong 10 giây thì bot không đi tìm (câu 6);
+    con đã ở trong tầm thì vẫn đánh như cũ. Quái ở sát ngoài vùng: chỉ đánh
+    khi đã ở trong tầm, không đi tới (câu 5).
+  + Log mới trong gobot_gui.log. Nhảy lên: mỗi lần bấm một dòng "Hunter:
+    jump up (Ctrl+Up) toward ... (hay on the way home): from X,Y on floor
+    ..., onto floor ... (rise ...; peak 392..463, headroom ...; no floor
+    outside the area within 650 above) ..."; rồi "Hunter: jump up worked:
+    landed at ..." (cuối dòng có "flight N ms, g≈N": thời gian bay và sức
+    hút đo được), hay "jump up FELL BACK ...", "jump up landed LOWER ...",
+    "did nothing in ... ms", "Ctrl+Up came out as ...", "... OFF until the
+    next BẮT ĐẦU", và WARN "MAP CHANGED". "Hunter: not jumping up to ... --
+    ..." ghi vì sao không nhảy. Bỏ dấu, hay đã tắt tới lần BẮT ĐẦU sau:
+    "Hunter: a jump up would go here (jump_up is off): Ctrl+Up at x ... from
+    floor ... onto floor ...". Dòng "Hunter:" mỗi phút thêm "; jump-ups:
+    looks N, would N, settles N, pressed N (Up N, Up,Up N, Ctrl+Up N),
+    worked N, fell back N, ..." và "; g≈N (N flights)". Dòng "Positions" ghi
+    "002A:N (jumps N (walk-offs N), second N, high N, landed N, other N)":
+    số lần nhân vật rời mặt đất theo từng kiểu; đi ra mép bục rơi xuống cũng
+    nằm trong "jumps", và được đếm riêng ở "walk-offs". Nút Thử ghi "Jump
+    test: ...".
+  + Log của Tự tìm quái: "Hunter: seeking slot ... -- attack from X,Y: ..."
+    khi chọn con để đi tìm (tối đa một dòng mỗi 2 giây); "Hunter: not going
+    for slot ... -- ..." một lần cho mỗi con không tới được; "Hunter: slot N
+    not found at ...; passed over for 20 s"; "Hunter: nothing to seek for N
+    s at X,Y ... -- standing where it is" khi bắt đầu đứng chờ, rồi mỗi
+    10 giây; "Hunter: monsters at X,Y ..." mỗi 30 giây: chỗ của từng con
+    quái trong vùng và bot làm gì với nó (con đoán chỗ có "projected"), các
+    con ở ngoài vùng không quá 200 px, và số con ở xa hơn. Dòng "Hunter:"
+    mỗi phút thêm "; seek: goals N (your floor N, below N, above N), reached
+    N, ..., nothing to seek N s; time: attacking N, approaching N, seeking
+    N, nothing to seek N, walking back N, ...": bot dùng thời gian vào việc
+    gì; bấm DỪNG LẠI thì có một dòng như vậy cho phút dở ("Hunter (last N s,
+    hunt stopped): ..."). Dòng "Positions" thêm "the hunter's plates: N of M
+    living monsters in view (...); placed on floors: N walking (N projected
+    past 5 s), N set down".
+  + Câu trả lời của bạn cho Nhảy lên bục trên (bản này làm đúng như vậy):
+    1. Độ cao: "Theo GoC" (↑ khoảng 133, ↑↑ khoảng 280, Ctrl+↑ khoảng
+       432 px). GoBot vẫn chừa hao như trên, giữ luật 650 px và đo mỗi lần
+       nhảy.
+    2. Ctrl+↑ đứng trên cửa không đổi bản đồ: GoBot không tránh cửa khi nhảy
+       lên; bản đồ đổi trong 10 giây sau một lần nhảy thì vẫn dừng đánh
+       quái.
+    3. Lúc bay được vọt cao hơn cạnh trên của vùng; chỗ đứng nhảy, chỗ rơi
+       xuống và con quái phải ở trong vùng.
+    4. Quái ở bục trên: nhảy lên bục của nó rồi đánh như thường; đang bay mà
+       quái vào tầm thì vẫn đánh. Không nhảy tại chỗ để đánh trên không như
+       GoC.
+    5. Bật sẵn, với mọi giới hạn ở trên. Các nút "Thử ↑", "Thử ↑↑", "Thử
+       Ctrl+↑" (dòng "Đo cú nhảy:") vẫn còn để đo, không bắt buộc bấm trước.
+    6. Giữ vùng ở t52_s2 như bây giờ (xem trên).
+  + Các câu hỏi về Tự tìm quái chưa có câu trả lời, nên bản này làm theo
+    cách (a) của từng câu; báo lại nếu muốn khác (phần lớn chỉ là một chỗ
+    nhỏ để đổi; câu 1 (c) và (d) phải làm thêm):
+    1. Trong vùng không còn con nào tới được: (a) đứng chờ tại chỗ, không đi
+       về chỗ về; bị đẩy ra ngoài vùng thì đi về như trước; (b) chờ 20 giây
+       rồi về chỗ về; (c) tới chỗ trong vùng có nhiều điểm quái hồi sinh
+       nhất rồi đứng đó; (d) đi tuần qua lại trong vùng.
+    2. Thứ tự đi tìm: (a) bục đang đứng, rồi bục dưới, cuối cùng con phải
+       nhảy lên; cùng loại thì con gần nhất theo đường đi; (b) chỉ theo
+       đường đi nhanh nhất, không chia loại.
+    3. Độ cao của quái: (a) dùng đúng chỗ chấm đỏ của tab Bản đồ cho cả việc
+       tìm lẫn việc đánh; (b) chỉ cho việc tìm, việc đánh vẫn theo độ cao
+       gói tin như bản 05.
+    4. Quái đi lâu không có gói tin mới: (a) đoán nó đi tiếp dọc bục, tới
+       đầu bục thì dừng (tối đa 25 giây), tới nơi không thấy thì bỏ qua
+       20 giây; (b) như bản 05: sau 5 giây coi như nó đứng lại.
+    5. Quái ở sát ngoài vùng: (a) chỉ đánh khi đã ở trong tầm, không đi tới
+       (muốn đánh quái ở chân dốc thì kéo cạnh dưới của vùng xuống khoảng
+       810); (b) đi tới một chỗ đứng trong vùng mà từ đó đánh tới được con
+       quái.
+    6. Quái người khác đang đánh: (a) không đi tìm con mà người khác vừa
+       đánh trong 10 giây, con đã trong tầm thì vẫn đánh; (b) cứ đi tới.
+    7. Cách bật: (a) dấu "Tự tìm quái trong vùng" bật sẵn; bỏ dấu thì bot
+       đánh như bản 2026.11.05 (và nhảy lên như trên); (b) tắt sẵn, bạn tự
+       bật.
+    Thử như bước 10 ở mục 6.
+
+- Mới trong bản 2026.11.05 (sửa cách tab Bản đồ vẽ quái, theo điều bạn báo
+  ngày 05/11; chưa thử trên game thật):
+  + Bạn báo phần vẽ quái trên bản đồ chưa chính xác, ở hai điều: "Lệch chỗ"
+    (chấm nổi lên trên bục hay nằm bên cạnh bục, không ở chỗ quái đứng) và
+    "Thừa chấm" (chấm ở chỗ không có quái, hay chấm của con quái đã chết, đã
+    biến mất vẫn còn). Theo log lần thử sáng 05/11 (bản 04d, RừngĐạiThụ[2],
+    file t52_s2) và code, gói tin của game thì đúng: quái dừng ở đâu, gói
+    tin báo đúng chỗ đó, trên bục của file bản đồ. Sai là ở cách GoBot tính
+    chỗ của quái giữa hai gói tin, và ở những gì tab vẽ. Các lỗi và cách sửa
+    ở dưới; mọi thay đổi chỉ ở phần vẽ của tab, trừ "Chỗ quái sai xa".
+  + Quái đang đi (lý do chính của "Lệch chỗ"): giữa hai gói tin, game chỉ
+    cho biết quái đi về phía nào và nhanh bao nhiêu. GoBot tính chỗ của nó
+    theo chiều ngang và giữ độ cao của gói tin trước. Trên bục bằng thì
+    không sao, nhưng bục ở t52_s2 đều dốc (nền lớn đi từ 586 ở x 750 xuống
+    715 ở x 1100, rồi 802 ở x 1400), nên chấm đỏ của con quái đang đi nổi
+    lên trên bục hay chìm xuống dưới bục 10-170 px, rồi nhảy về đúng chỗ khi
+    có gói tin sau. Lúc nào cũng có khoảng một nửa số quái đang đi.
+    Nay tab vẽ con quái đang đi trên chính bục mà nó đứng ở gói tin trước:
+    đi theo bục đó (lên dốc, xuống dốc, qua cả lỗ nhỏ 1-2 px của bục) tới
+    chỗ ngang GoBot tính, và giữ độ cao của nó trên mặt bục như ở gói tin đó
+    (quái đứng cao hơn mặt bục 1-3 px). Bục hết trước chỗ đó thì chấm đứng ở
+    đầu bục: trong game, quái tới đầu bục thì quay lại. Con quái không đứng
+    trên bục nào ở gói tin trước, hay GoBot chưa biết bản đồ (tab chỉ vẽ
+    lưới ô vuông): vẽ như cũ.
+  + Chấm xanh của bạn cũng nổi lên hay chìm xuống như vậy khi bạn đi trên
+    dốc (log lần thử có lúc chấm xanh ở trên bục 74 px). Nay khi bạn đi trên
+    mặt đất, chấm xanh được vẽ trên bục dưới chân theo cùng cách, từ chỗ gói
+    tin báo lần cuối. Đang nhảy, đang rơi, đứng yên, hay gói tin tạm không
+    biết bạn ở đâu: như cũ.
+  + Quái vừa hiện ra: game đặt nó ở điểm hiện ra, cao hơn bục của nó
+    15-66 px, tới gói tin sau. Nay con quái đứng yên ở chỗ không có bục thì
+    được vẽ trên bục đầu tiên ở dưới nó trong vòng 100 px (bục mà bot cũng
+    coi là của nó), cao hơn mặt bục 1 px. Không có bục nào như vậy thì vẽ
+    như cũ. Khi file bản đồ có thể không khớp chỗ nhân vật đứng (bục vẽ
+    mờ), mọi chấm, cả chấm xanh, vẽ như cũ, không theo bục của file đó.
+  + Quái chết (một phần của "Thừa chấm"): con quái bị đánh chết còn được vẽ
+    mờ 1,5 giây ở chỗ bị đánh chết, trong khi game hất xác nó văng đi. Nay
+    chấm của nó mất ngay, như GoC (câu hỏi 1). Cách bot xử lý quái chết
+    không đổi.
+  + Khi không có gói tin: lúc giữa bản đồ ghi "Chưa có gói tin của game" hay
+    "Vị trí từ gói tin đang tắt", tab vẫn vẽ các con quái GoBot biết lần
+    cuối (con đang đi còn trượt thêm tới 5 giây), cả vòng vàng. Nay khi đó
+    tab không vẽ quái, không vẽ vòng vàng, rê chuột không hiện quái, và lưới
+    ô vuông (khi chưa biết bản đồ) không canh theo các con quái cũ.
+  + Chỗ quái sai xa (hiếm, nhưng là chấm thừa rõ nhất): khoảng mỗi phút một
+    lần trong lúc đánh, chỗ GoBot tính cho một con quái đang đánh cách chỗ
+    gói tin của chính game báo 1100-1900 px. GoBot bỏ qua gói tin báo chỗ
+    quái xa hơn 200 px so với chỗ đã tính, nên giữ chỗ sai đó tới khi con
+    quái dừng lại hay đi tiếp: một chấm đỏ ở chỗ không có quái, còn con quái
+    đang đánh bạn thì không có chấm. Nay GoBot nhận chỗ của gói tin quái bị
+    đánh khi máu khớp (máu trước trừ sát thương đúng bằng máu sau, nên chắc
+    chắn là con đó), và của gói tin loại 3 và 11 về một con quái còn sống,
+    dù xa bao nhiêu; các gói tin khác xa quá 200 px vẫn bỏ qua như trước.
+    Đây là thay đổi duy nhất mà bot cũng thấy: bot dùng chung chỗ của quái
+    với tab, nên chỗ sai xa của con quái đang đánh được sửa ngay ở gói tin
+    quái bị đánh (máu khớp) hay gói tin loại 3, 11 kế tiếp của nó, không
+    còn bị giữ tới khi nó dừng lại hay đi tiếp; trước gói tin đó, chỗ tính
+    vẫn có thể trượt xa như trước. Chưa rõ điều gì làm chỗ tính sai từ đầu,
+    nên log có thêm để tìm: mỗi lần như vậy một dòng "Positions: a far
+    monster frame placed ..." (hay "refused ..."; tối đa một dòng mỗi 5
+    giây) ghi con quái, chỗ gói tin báo, chỗ GoBot đã tính và gói tin trước
+    đó của nó; dòng "Positions" mỗi 10 giây thêm ", far frames placed N
+    refused N, walks faster than 4 px/step N". Số ở dòng "Positions" tính
+    từ lúc bấm BẮT ĐẦU; số "so far" ở cuối dòng "a far monster frame" tính
+    từ lúc GoBot bắt đầu nghe game đang chạy (mở game lại hay có kết nối
+    mới thì tính lại từ 0), nên khi đã DỪNG rồi BẮT ĐẦU lại, hay có gói tin
+    xa trước lúc bấm BẮT ĐẦU, số "so far" lớn hơn.
+  + Vẽ lại nhanh hơn: khi tab Bản đồ đang mở, GoBot vẽ lại 10 lần mỗi giây
+    (trước đây 5), cả lúc game ở trước, để chấm đi đều hơn (câu hỏi 3); có
+    dấu "Nhẹ máy" thì vẫn 2 lần. Dòng "Load:" trong gobot_gui.log ghi tốn
+    bao nhiêu.
+  + Quái màu xám (bot không đi tới): nay xám cả con quái ở ngoài vùng mà ở
+    trong tầm đánh, trong lúc bot đi bộ về vùng trước, rồi mới đánh tiếp
+    (bot bỏ qua những con đó, mà bản 04d vẫn tô đỏ). Con quái bot đang đánh
+    (có vòng vàng) chỉ xám khi đã ra ngoài vùng quá 60 px, vì tới đó bot
+    mới bỏ nó. Màu xám vẫn xét theo chỗ bot thấy con quái (độ cao của gói
+    tin trước), không theo chỗ chấm được vẽ, để đúng với việc bot làm: trên
+    dốc sát cạnh vùng, một chấm vẽ trong khung có thể vẫn xám, hay ngược
+    lại.
+  + Rê chuột lên một con quái: cuối dòng là chỗ chấm được vẽ, thêm "(gói
+    tin x, y)" khi chỗ GoBot tính theo gói tin khác chỗ đó. Dòng "Nhân vật:
+    ..." ở trên bản đồ cũng vậy, và không ghi "Quái: N" khi tab không vẽ
+    quái.
+  + Chỉ phần vẽ của tab đi theo bục: bot vẫn xét độ cao của quái và của
+    nhân vật như bản 04d (câu hỏi 2), trừ "Chỗ quái sai xa" ở trên, là chỗ
+    chung mà bot cũng dùng. Vì vậy log vẫn có thể có dòng "Hunter: not
+    walking ..." trước một con quái ở trên cùng con dốc, khi độ cao của gói
+    tin trước (của nó hay của bạn) lệch xa chỗ đứng thật. (Sửa ở bản
+    2026.11.05b: khi bot dùng vùng của tab Bản đồ với dấu Tự tìm quái trong
+    vùng, bot cũng xét chỗ của quái theo bục, đúng chỗ chấm đỏ; xem "Mới
+    trong bản 2026.11.05b".)
+  + Các câu hỏi mới chưa có câu trả lời, nên bản này làm theo cách (a) của
+    từng câu; báo lại nếu muốn khác (câu 1 và câu 3 mỗi câu chỉ là một chỗ
+    nhỏ để đổi; câu 2 (b) là một thay đổi riêng ở phần bot đánh quái, phải
+    làm và thử riêng):
+    1. Quái chết: (a) chấm mất ngay, như GoC; (b) để mờ 1,5 giây ở chỗ bị
+       đánh chết, như trước.
+    2. Độ cao theo bục: (a) chỉ tab Bản đồ vẽ theo bục, bot vẫn xét độ cao
+       như trước; (b) bot cũng xét độ cao của quái và của nhân vật theo bục
+       (bớt những lần bot không đi tới con quái trên cùng con dốc, nhưng đổi
+       cách bot đánh, nên phải thử riêng).
+    3. Vẽ lại khi tab mở: (a) 10 lần mỗi giây; (b) 5 lần như trước, nhẹ máy
+       hơn một chút.
+    Thử như bước 9 g ở mục 6.
+
+- Mới trong bản 2026.11.04d (sửa theo lần thử tab Bản đồ trên game thật tối
+  04/11; chưa thử trên game thật):
+  + Lần thử đó, ở RừngĐạiThụ[2] (file t52_s2): chỗ về đặt ngay ở bục cửa
+    vào (880,274), cạnh dưới của vùng kéo xuống tới 694. Nền lớn bên dưới
+    dốc xuống bên phải và ra khỏi cạnh dưới đó ở khoảng x 1030. Bot đi theo
+    quái dọc nền đó ra ngoài vùng, rồi đứng đánh ở 1402,802 (dưới vùng 108
+    px, thấp hơn chỗ về 528 px) tới lúc bạn bấm DỪNG, không đi về lần nào.
+    Có ba lý do: bản 04c chỉ giới hạn con quái bot đi tới, chưa giới hạn
+    chỗ nhân vật đi; bot chỉ đi về khi không còn con quái nào để chọn, mà
+    lúc nào cũng còn; và chỗ về cao hơn một lần nhảy (120 px) thì bot không
+    đi về. Bot cũng không nhảy xuống lần nào (log có 4 dòng "the fall would
+    land below the monster's floor"): bục ở bản đồ này đều dốc, mà bản 04c
+    chỉ nhận chỗ rơi phẳng.
+  + Sửa lời khuyên sai của bản 04c: ghi chú 04c (và tin nhắn trước) bảo
+    kéo vùng xuống thấp hơn chỗ về, để nhảy xuống được giữa các bục. Chính
+    cách đó làm phần lớn vùng thành bục tô đỏ, tức bục mà bot không tự đi
+    về được (vùng của lần thử có gần 60% bục là đỏ). Cách đúng: đặt chỗ về
+    (ghim cam) ở bục THẤP NHẤT bạn muốn đánh, rồi kéo vùng LÊN TRÊN, đừng
+    kéo xuống. Từ các bục cao hơn, bot về được bằng cách đi ra mép bục rồi
+    rơi xuống, và vẫn nhảy xuống được giữa các bục trong vùng. Đừng bấm
+    "Tạo vùng quanh nhân vật" ngay khi vừa qua cửa: chỗ về sẽ nằm sát cửa,
+    nơi thường ít quái (cả hai vùng của lần thử đều vậy). Vùng của
+    RừngĐạiThụ[2] trong configs\spots.ini vẫn là vùng cũ: hãy vẽ lại trước
+    lần thử sau, ví dụ chỗ về ở nền lớn, khoảng 1100,714, và cạnh dưới của
+    vùng khoảng 810 (tính thử thì vùng đó không có bục đỏ nào). (Sửa ở bản
+    2026.11.05b: không cần nữa. Có Nhảy lên bục trên, bot lên lại bục chỗ về
+    880,274 bằng Ctrl+↑ từ mặt đất; cứ giữ vùng của bạn.)
+  + Không đi ra khỏi vùng (câu hỏi 1, xem cuối mục này): khi bot dùng vùng
+    vẽ ở tab Bản đồ, trước khi đi tới một con quái, GoBot xem trước bục
+    dưới chân theo file bản đồ (tới 96 px phía trước). Đi xuống dốc ra khỏi
+    vùng, hay đi ra mép bục mà rơi xuống chỗ ngoài vùng (hay không có gì
+    bên dưới), thì bot không đi: thả phím, bỏ con quái đó 8 giây (gấp đôi
+    give_up_ms) và chọn con khác. Rơi xuống một bục vẫn ở trong vùng thì
+    vẫn đi. Khi không nhảy xuống được mà đi bộ tới con quái ở bục dưới,
+    cũng theo luật này; bước lùi của "Giữ khoảng cách" cũng vậy (không lùi
+    được thì đứng đánh tại chỗ). Đang ở ngoài vùng thì bước nào không làm nhân vật
+    ra xa vùng hơn vẫn được, để luôn đi vào lại được. Log ghi "Hunter: not
+    walking ..." (tối đa một dòng mỗi 5 giây), và dòng "Hunter:" mỗi phút
+    thêm "walks stopped at the hunting area's edge N". Việc này, và các
+    việc đi về ở dưới, chỉ cho vùng đã lưu ở tab Bản đồ, khi GoBot tin file
+    bản đồ; chỗ đánh quái chỉ cho lần chạy này thì vẫn như trước.
+  + Đi về theo bục (câu hỏi 2): GoBot tìm đường về vùng theo file bản đồ:
+    đi bộ theo bục đang đứng (lên dốc, xuống dốc, qua cả các lỗ nhỏ 1-2 px
+    của bục), hoặc đi ra mép bục để rơi xuống một bục trong vùng (tối đa 3
+    lần rơi, lần nào cũng phải rơi vào trong vùng). Bot tới chính chỗ về
+    nếu được; không thì tới điểm trong vùng ít lần rơi nhất, rồi gần chỗ về
+    nhất theo chiều ngang, đứng lại đó và đánh quái từ đó. Đi về như vậy
+    KHÔNG bao giờ bấm phím nhảy, và như mọi khi không bao giờ bấm ↓. Nên
+    chỗ về cao hơn một lần nhảy vẫn về được, nếu có dốc lên tới đó. (Sửa ở
+    bản 2026.11.05b: có dấu Nhảy lên bục trên thì đường về có thể có tới 2
+    lần nhảy lên tính trước, như Ctrl+↑ lên bục chỗ về ở t52_s2; vẫn không
+    bao giờ bấm ↓.)
+    Ở ngoài vùng quá 60 px mà có đường về như vậy: bot thôi đánh quái ở
+    ngoài vùng, kể cả quái trong tầm, mà đi bộ về (quái ở trong vùng thì
+    vẫn đi tới đánh). Ngoài vùng không quá 60 px (ví dụ một đoạn dốc cắt
+    qua cạnh vùng) thì như trước: quái trong tầm vẫn đánh, hết quái mới về.
+    Đi về mà không tới được (bị kẹt): trong lúc chờ thử lại, và sau 3 lần
+    không tới, quái trong tầm lại được đánh như trước.
+    Không có đường về nào (ví dụ nhân vật đã rơi xuống một bục ngoài vùng,
+    mà từ đó không đi hay rơi vào vùng được): bot đánh quái tại chỗ; thẻ
+    ghi vàng "... không có đường đi bộ hay rơi xuống nào về vùng: bot đánh
+    ở đây. Tự đưa nhân vật về vùng, hoặc bấm Đặt chỗ này." và log ghi một
+    dòng "Hunter: no way back into the hunting area ...". File bản đồ không
+    cho thấy đường nào mà chỗ về không cao hơn một lần nhảy: bot đi về như
+    bản cũ (có thể bấm phím nhảy). (Từ bản 2026.11.05b, có dấu Nhảy lên bục
+    trên: không bấm phím nhảy kiểu cũ nữa; xem "Mới trong bản 2026.11.05b".)
+  + "Đã về" theo cả độ cao: bot chỉ coi là đã về khi nhân vật cách chỗ về
+    không quá spot_tolerance (48 px) theo chiều ngang VÀ đứng trên đúng bục
+    của chỗ về. Bản 04c chỉ xét chiều ngang, nên đứng ở nền dưới, ngay dưới
+    chỗ về, cũng được tính là đã về.
+  + Quái ở bục trên mà bot không với tới (câu hỏi 3): khi bot không nhảy
+    lên theo quái (có dấu Chỗ đánh quái, hay không có Phím nhảy, hay
+    jump_to_reach=false) và có file bản đồ để xem (vùng của tab Bản đồ; không
+    đặt Chỗ đánh quái thì bản đồ mà Nhảy xuống bậc dưới đã tin), lúc không
+    còn con quái nào ngang tầm hay ở dưới để nhảy xuống, bot không chọn con
+    quái cao hơn số "Cao nhất" (trong "Tầm đánh…") mà không đứng trên chính
+    bục nhân vật đang đứng. Bản 04c đi lòng vòng dưới những con đó 4 giây mỗi
+    lần, và chính những lần đó đưa nhân vật xuống dốc ra khỏi vùng. Quái ở
+    phía trên của chính con dốc nhân vật đang đứng thì vẫn đi tới. Chỗ đánh
+    quái chỉ đặt cho lần chạy này (chưa lưu vùng ở tab Bản đồ) thì vẫn như
+    trước. Có dấu Chỗ đánh quái thì bot vẫn không nhảy lên bục trên để đánh
+    quái (câu hỏi 4), như trước. (Sửa ở bản 2026.11.05b: bạn đã đổi câu 4.
+    Trong vùng vẽ ở tab Bản đồ, có dấu Nhảy lên bục trên, bot nhảy lên bục
+    của con quái khi file bản đồ cho thấy chắc chắn, và chọn con đó sau
+    cùng; có dấu Tự tìm quái trong vùng thì chỉ con quái không có chỗ đứng
+    đánh nào tới được mới bị bỏ qua.)
+  + Thẻ dưới bản đồ: nhân vật ở ngoài vùng thì thẻ không còn ghi xanh "Đang
+    dùng vùng này" (lần thử đó vẫn ghi xanh khi nhân vật cách chỗ về 522
+    px), mà ghi vàng "Nhân vật đang ở ngoài vùng N px — bot đi bộ về X, Y
+    trước, rồi mới đánh tiếp." hay "... bot vẫn đánh quái trong tầm; hết
+    quái thì đi bộ về X, Y."; dòng "Chỗ đánh quái: ..." dưới nút BẮT ĐẦU
+    cũng chuyển vàng. Dòng "Positions" trong log thêm ", outside the area N
+    px" (và "walking back first, to X,Y" khi bot đi về trước).
+  + Vùng có hơn nửa số bục tô đỏ (bục thấp hơn chỗ về quá 120 px): thẻ ghi
+    chữ đỏ "Phần lớn bục trong vùng (N%) bot không tự đi về được (tô đỏ):
+    ... Kéo ghim cam xuống bục thấp nhất có quái, rồi kéo vùng lên trên."
+    (ít bục đỏ hơn thì vẫn là dòng vàng như trước). Mỗi lần lưu vùng (tạo,
+    kéo, dời) mà vùng như vậy, GoBot báo đỏ ngay dưới bản đồ và ghi log
+    "Map tab: hunting area for ... has N of M floor columns red". "Tạo vùng
+    quanh nhân vật" vẫn đặt chỗ về ở chỗ nhân vật đứng (câu hỏi 5).
+  + Chỗ về cách một cửa không quá 60 px: thẻ ghi vàng "Chỗ về sát cửa (N
+    px): thường là chỗ vào bản đồ, ít quái. Kéo ghim cam ra chỗ có quái."
+    (có dấu Nhảy xuống bậc dưới thì thêm "quanh đó bot không nhảy xuống").
+    Chỉ là lời nhắc: vùng vẫn được lưu và dùng, và đi bộ về chỗ về thì bot
+    không bấm ↓.
+  + Nhảy xuống trên bục dốc: bản 04c chỉ nhảy khi bục chỗ rơi (và cả bục
+    nhân vật đang đứng) phẳng ở hai bên chỗ đứng, nên trên bản đồ toàn bục
+    dốc như t52_s2 gần như không bao giờ nhảy. Nay GoBot đi theo từng bục,
+    dốc hay phẳng, ở hai bên chỗ đứng (qua cả lỗ 1-2 px của bục). Bục của
+    con quái là bục nó đứng lần cuối (hai gói tin của nó, cách nhau ít nhất
+    0,3 giây, cùng một độ cao), hoặc bục đầu tiên dưới nó trong vòng 100
+    px: quái đang nhảy hay bị đánh văng (3 trong 4 lần của lần thử đó, cao
+    hơn bục của nó 61-78 px) không còn làm GoBot tưởng nó ở bục khác. Nhảy
+    rồi, chỗ đáp được so với bục đó ở đúng chỗ nhân vật đáp (trên dốc, lệch
+    ngang vài px là lệch cao vài px), nên một lần nhảy đúng không còn bị
+    tính là "rơi chỗ khác", việc làm thôi nhảy và thôi tin file bản đồ.
+  + Đứng lại trên con quái rồi mới nhảy (câu hỏi 6): khi con quái ở dưới
+    cách không quá 24 px theo chiều ngang và nhảy xuống đang được phép, bot
+    thả phím đi, đứng lại, rồi mới xét lần nhảy từ chỗ đứng đó (bục chỗ rơi
+    phải còn ít nhất 8 px mỗi bên). Bản 04c xét khi nhân vật còn đang đi.
+    Không nhảy được từ đó (ví dụ có cửa gần) thì bot đứng đó, rồi bỏ con
+    quái như mọi con ngoài tầm (sau 4 giây).
+  + Các luật nhảy khác giữ nguyên: chỉ Ctrl + ↓, không bao giờ ↓ một mình;
+    không nhảy khi có cửa trong vòng drop_gate_px (150 px) theo chiều
+    ngang, từ chỗ đứng, suốt đường rơi tới chỗ đáp; 3 lần liền (hay 5 lần
+    trong một lần chạy) bấm mà không được thì thôi nhảy; nhảy mà đổi bản đồ
+    trong 10 giây thì dừng đánh quái. Log rõ hơn: dòng "Hunter: not
+    dropping ..." ghi thêm chỗ nhân vật, bục dưới chân, chỗ con quái và bục
+    của nó; dòng "Hunter:" mỗi phút thêm "drop looks N (settles M; refused:
+    ...)": số lần xét, số lần đứng lại để nhảy, và lý do không nhảy.
+  + Tự mua bình và Dùng bùa: lần thử đó, Tự mua bình dừng vì không chắc túi
+    đồ đang ở ngăn Tiêu Dùng: game tô viền đỏ sáng quanh ngăn đang chọn.
+    Nay GoBot đọc trước dải ngay dưới chữ tên ngăn (viền đỏ không tới đó);
+    dải đó không cho biết gì thì đọc cả ngăn như cũ; hai cách ra hai ngăn
+    khác nhau thì vẫn là chưa chắc. Dòng "Trash: tab not read ..." thêm
+    "under the labels ...".
+  + Bình: tin "Sắp hết bình" theo ô phím nay ghi rõ số đó là của chồng đang
+    dùng, ví dụ "Sắp hết bình HP: ô phím 1 (chồng đang dùng) còn 5 bình."
+    Khi gói tin túi đồ đã biết phím đó uống món gì mà chưa so khớp xong,
+    tin thêm "; cả túi còn N bình (theo gói tin, chưa kiểm)". Dòng "Bag
+    (packets)" mỗi phút ghi thêm cả túi còn bao nhiêu món mỗi phím uống (ví
+    dụ "key H -> slot 33 (8810121, 260 in the bag)"), để biết lúc nào cần
+    đổi bình. Ô phím bình hai lần liền không đọc được thì GoBot giữ một ảnh
+    chỉ ô đó trong potion_debug (mỗi phím một ảnh mỗi lần chạy): lần thử
+    đó, ô phím G không đọc được suốt phiên.
+  + Log để tìm lỗi: mỗi dòng vào bản đồ ("Positions: map entry ...") ghi
+    thêm chỗ cuối cùng gói tin báo nhân vật ở bản đồ trước, phím hay cú bấm
+    chuột cuối cùng của GoBot (chỉ tên phím; chữ gõ thì chỉ ghi "typed
+    text") và lần cuối máy nhận phím hay chuột, của bạn hay của GoBot, mỗi
+    thứ cách lúc vào bản đồ bao lâu: để biết ai đã đưa nhân vật qua cửa.
+    Khi GoBot đọc gói tin, mỗi lượt bấm phím buff có một dòng "Buff
+    (packets): key ... -- ..." cho biết gói tin có thấy buff được dùng
+    không ("maybe not cast" là không thấy); chỉ ghi log, cách bấm buff
+    không đổi. Dòng "Casts (packets)" mỗi phút nay tính cả phím đánh của
+    bot (trước đây chiêu của phím đó có thể bị tính cho phím khác).
+  + Các câu hỏi gửi bạn sau lần thử đó chưa có câu trả lời, nên bản này
+    làm theo cách (a) của từng câu:
+    1. Khi đi tới quái, không đi bước nào làm nhân vật ra khỏi vùng; rơi
+       xuống một bục vẫn ở trong vùng thì được.
+    2. Ở ngoài vùng mà có đường về: bỏ qua quái ở ngoài vùng, kể cả quái
+       trong tầm, để đi về; không có đường về thì đánh tại chỗ.
+    3. Bỏ qua quái ở bục trên mà bot không với tới; quái trên cùng con dốc
+       nhân vật đang đứng thì vẫn đi tới.
+    4. Chưa cho bot nhảy lên bục trên để đánh quái. (Sửa ở bản 2026.11.05b:
+       bạn đã trả lời khác; xem "Mới trong bản 2026.11.05b".)
+    5. "Tạo vùng quanh nhân vật" vẫn đặt chỗ về ở chỗ nhân vật đứng, kèm
+       dòng chữ đỏ khi phần lớn vùng không đi về được.
+    6. Nhảy xuống: đứng lại khi còn cách con quái phía dưới không quá 24 px
+       theo chiều ngang, rồi mới xét và bấm Ctrl + ↓.
+    Bạn muốn khác ở câu nào thì báo lại: mỗi câu chỉ là một chỗ nhỏ để đổi.
+    Thử như bước 8 và bước 9 ở mục 6.
+
+- Mới trong bản 2026.11.04c (tab Bản đồ: xem bản đồ và vẽ vùng đánh quái
+  cho từng bản đồ bằng chuột; chưa thử trên game thật):
+  + Tab mới "Bản đồ" (ngay sau "Đánh quái"; thử nghiệm) vẽ bản đồ nhân vật
+    đang ở, như GoC: bục (xanh lá), nền dưới cùng (xanh dương), cửa (dấu +
+    hồng trong ô đỏ), nhân vật (chấm xanh, mũi tên trắng chỉ hướng nhân vật
+    quay), quái (chấm đỏ, có thanh máu khi phóng to) và con quái bot đang
+    đánh (vòng vàng). Bục và cửa lấy từ file bản đồ của chính game (data\Map
+    và data\Project trong thư mục game, chỉ đọc); nhân vật và quái lấy từ
+    gói tin của game, nên tab cần Npcap. Không cần bấm BẮT ĐẦU, cũng không
+    cần dấu "Vị trí từ gói tin" (nhưng có packet_positions=off trong
+    hunt.ini thì tab không có gì để vẽ). Dòng đầu ghi tên bản đồ, tên file
+    của nó (ví dụ t52_s2), và GoBot biết bản đồ nhờ đâu: "game báo khi vào
+    bản đồ" (GoBot đã thấy nhân vật qua cửa, hay vào game lúc GoBot đang
+    mở), hoặc "nhận ra từ chỗ đứng" (12 chỗ đứng, như Nhảy xuống bậc dưới;
+    trong lúc chờ, dòng đó ghi đã có mấy chỗ, ví dụ 7/12, và tab chỉ vẽ
+    nhân vật và quái trên lưới ô vuông). Tab và Nhảy xuống bậc dưới nhận ra
+    bản đồ riêng: tab đã biết mà Nhảy xuống chưa thì dòng Nhảy xuống ghi
+    "GoBot còn đang tự kiểm tra bản đồ cho việc nhảy".
+    Xem: kéo bản đồ (chuột trái, phải hay giữa) để di chuyển; lăn chuột hay
+    bấm - + để phóng to, thu nhỏ; nút "Theo nhân vật" (hay nhấp đúp lên bản
+    đồ) và "Cả bản đồ". Rê chuột lên con quái để xem cấp và máu, lên cửa để
+    xem toạ độ. Ô "Chi tiết" vẽ thêm vài đường để tìm lỗi (chỉ trong lần mở
+    GoBot này). Khi bot đang đánh với Chỗ đánh quái, quái màu xám là quái ở
+    ngoài vùng và ngoài tầm đánh: bot không đi tới. Có dấu Nhảy xuống bậc
+    dưới thì đoạn bục tô đỏ nhạt là chỗ bot không nhảy xuống vì có cửa gần
+    đường rơi.
+  + Vùng đánh của từng bản đồ: một ô chữ nhật (xanh, viền trắng) và một
+    "chỗ về" (ghim cam): một điểm trên bục trong vùng, nơi bot đi bộ về khi
+    hết quái. Vùng thay cho vùng quanh chỗ đánh quái (mặc định ±300 / ±100
+    px), và không cần đều hai bên: đặt chỗ về ở bục thấp nhất bạn muốn
+    đánh, rồi kéo vùng lên trên. (Sửa ở bản 2026.11.04d: trước đây chỗ này
+    khuyên kéo vùng xuống thấp hơn chỗ về, và chính cách đó làm bot ra khỏi
+    vùng rồi không đi về được; xem "Mới trong bản 2026.11.04d".)
+    Đặt vùng (chỉ bằng chuột): lúc nhân vật đứng yên trên mặt đất, bấm "Tạo
+    vùng quanh nhân vật" ở thẻ dưới bản đồ (chỗ về là chỗ nhân vật đứng, cỡ
+    vùng như ở "Tầm đánh…", mặc định ngang ±300, dọc ±100 px), hoặc bấm
+    chuột phải lên bản đồ → "Tạo vùng ở đây". Rồi kéo cạnh hay góc của vùng
+    để đổi cỡ, kéo dải trên cùng của vùng (có chữ "vùng đánh") để dời cả
+    vùng, kéo ghim cam để dời chỗ về; kéo bên trong vùng thì chỉ di chuyển
+    bản đồ. Chuột phải trong vùng có "Đặt chỗ về ở đây", ở chỗ khác có "Dời
+    vùng tới đây"; nút "Dời vùng tới nhân vật" dời vùng (giữ nguyên cỡ) tới
+    chỗ nhân vật đang đứng. Chỗ về được đặt lên bục ngay dưới chỗ thả chuột
+    (hay bục gần nhất).
+    Thả chuột là lưu ngay, không có nút Lưu. Mỗi bản đồ một vùng, lưu trong
+    configs\spots.ini: GoBot tự tạo và tự ghi file này (sửa vùng không ghi
+    gì vào hunt.ini). Sau mỗi lần sửa có nút "Hoàn tác": đưa vùng về như
+    trước lần sửa vừa rồi (cũng lưu luôn). "Xoá vùng" hỏi lại rồi mới xoá;
+    xoá rồi thì Chỗ đánh quái lấy chỗ nhân vật đứng như trước.
+    Vùng phải rộng ít nhất 100 px, cao ít nhất 40 px, nằm trong bản đồ, có
+    bục, và chỗ về phải ở trên một bục trong vùng; không thì GoBot không
+    lưu và ghi lý do. Thẻ còn nhắc (vẫn lưu): bục thấp hơn chỗ về quá 120 px
+    (tô đỏ: từ đó bot không tự đi về được); bục cao hơn chỗ về (tô vàng: từ
+    đó chỉ về được nếu đi ra mép bục rồi rơi xuống); có dấu Nhảy xuống bậc
+    dưới thì thêm: có cửa trong hay gần vùng, vùng thấp quá để nhảy xuống.
+    File bản đồ có thể không khớp (bục vẽ mờ) hay không có file: chỉ kéo
+    được cạnh và góc, chuột phải không tạo hay dời vùng được (dùng nút "Tạo
+    vùng quanh nhân vật" / "Dời vùng tới nhân vật"), và chỗ về không được
+    đặt lên bục.
+  + Khi nào bot dùng vùng đã lưu: cần dấu Tự đánh quái và Chỗ đánh quái (ô
+    Chỗ đánh quái có cả ở thẻ dưới bản đồ), Npcap, và GoBot phải biết chắc
+    nhân vật đang ở bản đồ nào (như trên). Không cần mở tab Bản đồ. Lúc bấm
+    BẮT ĐẦU, sau khi qua cửa hay vào lại game, vùng chỉ được dùng khi nhân
+    vật đứng yên trên mặt đất ở trong vùng hoặc cách vùng không quá 150 px,
+    hoặc quay lại cách chỗ nhân vật đứng lúc rời đi không quá 150 px (qua
+    cửa rồi quay về, vào lại game). Ở xa hơn thì bot đánh ở chỗ nhân vật
+    đang đứng như trước (thẻ dưới bản đồ báo nhân vật đang ở ngoài vùng bao
+    nhiêu px), và tự chuyển sang vùng khi nhân vật đứng yên trong vùng hay
+    cách vùng không quá 150 px. Khi dùng vùng, bot chỉ đi tới quái trong
+    vùng (quái trong tầm đánh thì vẫn đánh), hết quái thì đi bộ về chỗ về,
+    như Chỗ đánh quái trước giờ; thẻ ghi "Đang dùng vùng này". Sửa vùng
+    đang dùng thì bot dùng vùng mới ngay, nhân vật ở đâu cũng vậy, nên có
+    thể đi bộ về chỗ về mới (không bao giờ bấm ↓; chỗ về cao hơn một lần
+    nhảy thì không đi). Từ bản 2026.11.04d: bot không đi tới quái theo
+    đường ra khỏi vùng, đi về theo bục (cả khi chỗ về cao hơn một lần nhảy
+    mà có dốc lên tới đó), và thẻ ghi vàng khi nhân vật ở ngoài vùng: xem
+    "Mới trong bản 2026.11.04d". Từ bản 2026.11.05b: có dấu Tự tìm quái
+    trong vùng thì bot đi tới quái ở khắp vùng, hết quái tới được thì đứng
+    chờ tại chỗ; có dấu Nhảy lên bục trên thì nhảy lên được; xem "Mới trong
+    bản 2026.11.05b".
+    Qua cửa sang bản đồ khác thì bot đứng yên như trước; bản đồ bên kia có
+    vùng đã lưu, và nhân vật vào ở trong vùng hay cách vùng không quá 150
+    px, thì bot dùng vùng đó. Đang dùng vùng mà GoBot không còn chắc nhân
+    vật ở bản đồ nào (ví dụ bắt gói tin lại từ đầu): bot đứng yên, chỉ
+    đánh quái tới trong tầm, tới khi biết lại bản đồ, rồi dùng lại vùng
+    theo cách trên.
+    Bản đồ chưa có vùng đã lưu, hay GoBot chưa biết bản đồ: như trước, chỗ
+    đánh quái là chỗ nhân vật đứng khi bắt đầu, chỉ nhớ trong lần chạy này
+    (GoBot nhận ra bản đồ rồi thì dùng vùng theo cách trên). Muốn giữ chỗ
+    đó cho lần sau: bấm "Lưu vùng này cho bản đồ" ở tab Bản đồ, hoặc kéo ô
+    nét đứt của nó.
+  + Nút "Đặt chỗ này" (cạnh ô Chỗ đánh quái, chỉ bấm được khi đang đánh
+    quái), trên bản đồ đã có vùng: dời vùng đã lưu tới chỗ nhân vật đang
+    đứng (giữ nguyên cỡ, chỗ về đặt lên bục dưới chân) và lưu luôn; muốn bỏ
+    thì bấm "Hoàn tác" ở tab Bản đồ. Nhân vật chưa đứng yên trên mặt đất
+    thì GoBot nhắc chờ rồi bấm lại. Cách cũ (bỏ dấu Chỗ đánh quái, đi tới
+    chỗ mới, đánh dấu lại rồi bấm Đặt chỗ này) cũng dời vùng như vậy. Bản
+    đồ chưa có vùng, hay GoBot chưa biết bản đồ: như trước, chỉ đặt chỗ
+    đánh quái cho lần chạy này.
+  + Tab Bản đồ chỉ dùng chuột, không có ô gõ số: lúc bot chạy, phím gõ vào
+    GoBot sẽ tới game. Tab không bấm gì vào game.
+  + Khi tab Bản đồ đang mở, GoBot vẽ lại 5 lần mỗi giây cả lúc game ở trước
+    (có dấu "Nhẹ máy" thì 2 lần), để thấy nhân vật và quái đi; dòng "Load:"
+    trong gobot_gui.log ghi tốn bao nhiêu. (Từ bản 2026.11.05: 10 lần mỗi
+    giây; xem "Mới trong bản 2026.11.05".)
+  + Log: "Map view: ..." khi đọc file bản đồ; "Map tab: hunting area for
+    t52_s2 saved ..." (hay deleted, undo) mỗi lần lưu; "Map tab: hunting
+    area ... handed to the hunter" và "Hunter: hunting area from the map tab
+    ..." khi bot nhận vùng; "Hunter: the map tab's hunting area ... waits"
+    khi vùng còn chờ nhân vật.
+  + Cập nhật lên bản sau: chép configs\spots.ini từ thư mục cũ sang để giữ
+    các vùng đã vẽ (xem mục 8); file zip không có file này. Thử tab Bản đồ
+    theo bước 9 ở mục 6.
+
+- Mới trong bản 2026.11.04b (sửa lỗi không tự nhảy xuống; chưa thử trên
+  game thật):
+  + Lần thử đầu trên game thật (04/11), bot không nhảy xuống lần nào. Lý
+    do: một con quái vừa hiện ra (hay đang nhảy, bị đánh văng) ở lơ lửng
+    trên bậc 31 px là GoBot thôi tin file bản đồ tới lần vào bản đồ sau.
+    Sau đó, mỗi lần có quái ở bậc dưới, log chỉ ghi "Hunter: not dropping
+    ... the map is not known".
+  + Nay chỗ của quái không bao giờ làm GoBot thôi tin file bản đồ. Quái chỉ
+    được tính là đang đứng khi hai lần gói tin của cùng con quái đó, cách
+    nhau ít nhất 0,3 giây, cho cùng một độ cao (lệch không quá 2 px); chỉ
+    khi đó nó mới giúp nhận ra bản đồ. Quái ở chỗ không có bậc thì chỉ được
+    đếm và ghi vào log, tối đa một dòng mỗi phút. Khi còn chờ đủ 3 chỗ
+    đứng (vào bản đồ không ở cạnh cửa), một con quái đứng hẳn ở chỗ không
+    có bậc làm đếm lại từ đầu; file bản đồ đã được tin rồi thì quái không
+    làm thôi tin.
+  + Chỉ chỗ đứng của nhân vật mới làm thôi tin, và phải 2 lần: nhân vật
+    đứng yên (không nhảy, không đi) ở chỗ không có bậc nào, hai lần cách
+    nhau ít nhất 0,5 giây (cùng một chỗ hay hai chỗ khác nhau đều tính), và
+    giữa hai lần đó không lần nào đứng trên bậc. Một lần lẻ thì GoBot chỉ
+    ghi log rồi bỏ qua. Thôi tin rồi thì như cũ: không nhảy tới lần vào bản
+    đồ sau (bản đồ tự nhận ra thì nhận lại từ đầu).
+  + Log rõ hơn: dòng về một chỗ không nằm trên bậc nào ghi đó là chỗ của
+    nhân vật ("you") hay của quái (số slot), và cách bậc ngay dưới, ngay
+    trên bao nhiêu, ví dụ "31 px above floor 850 (attr 1), 471 px below
+    floor 348 (attr 1)".
+
 - Mới trong bản 2026.11.04 (nhảy xuống bậc dưới, và sửa theo log farm 30
   phút ngày 03/11; chưa thử trên game thật):
   + Nhảy xuống bậc dưới (ô mới trên dòng Tự đánh quái, sau "Vị trí từ gói
@@ -157,16 +852,18 @@ khác chưa được thử trên game thật.
     GoBot phải biết chắc đang ở bản đồ nào: hoặc đã thấy nhân vật vào bản
     đồ này lúc GoBot đang mở (qua cửa, hay đăng nhập vào game), hoặc tự
     nhận ra bản đồ từ chỗ nhân vật và quái đứng: ít nhất 12 chỗ đứng khác
-    nhau, tất cả nằm trên bậc của đúng một bản đồ trong các file của game,
+    nhau (từ bản 2026.11.04b, quái chỉ được tính khi đứng yên: xem trên),
+    tất cả nằm trên bậc của đúng một bản đồ trong các file của game,
     và file khớp nhiều thứ hai phải sai ít nhất 6 chỗ. Mở GoBot khi nhân
     vật đã ở trong bản đồ (log ghi "map 0/0") thì thường đánh quái một lúc
     là GoBot nhận ra; trong lúc đó, khi có quái ở bậc dưới, dưới ô có dòng
     "Nhảy xuống: chưa biết bản đồ này — ..." kèm số chỗ đứng đã có (ví dụ
-    7/12). Gói tin báo vào bản đồ thì luôn theo gói tin. Mỗi chỗ đứng sau
-    đó phải nằm trên một bậc của bản đồ đang dùng: một chỗ không nằm trên
-    bậc nào thì GoBot thôi nhảy trên bản đồ đó (bản đồ tự nhận ra thì nhận
-    lại từ đầu; bản đồ đã vào thì tới lần vào bản đồ sau). Bản đồ mà file
-    của game không có cửa nào thì không nhảy.
+    7/12). Gói tin báo vào bản đồ thì luôn theo gói tin. Sau đó, chỗ nhân
+    vật đứng phải nằm trên một bậc của bản đồ đang dùng: hai chỗ không nằm
+    trên bậc nào (cách nhau ít nhất 0,5 giây, từ bản 2026.11.04b; trước đó
+    là một chỗ, kể cả chỗ của quái) thì GoBot thôi nhảy trên bản đồ đó
+    (bản đồ tự nhận ra thì nhận lại từ đầu; bản đồ đã vào thì tới lần vào
+    bản đồ sau). Bản đồ mà file của game không có cửa nào thì không nhảy.
     Mỗi lần nhảy, GoBot giữ Ctrl khoảng 50 ms, rồi bấm ↓ trong lúc vẫn giữ
     Ctrl, giữ ↓ khoảng 0,1 giây, nhả ↓ rồi mới nhả Ctrl. GoBot vẫn không
     bao giờ bấm ↓ một mình: ↓ chỉ đi ra cùng Ctrl, và chỉ khi ô này có
@@ -192,9 +889,13 @@ khác chưa được thử trên game thật.
     chỗ thì không nhảy; lúc chỗ đánh quái tạm gác lại (sau khi đổi bản đồ,
     vào lại game) cũng không nhảy. Vùng đánh mặc định chỉ 100 px cao thấp,
     nên quái thấp hơn chỗ đánh quái quá 100 px nằm ngoài vùng: muốn nhảy
-    thì tăng số đó ("Tầm đánh…", phần Chỗ đánh quái). Nhảy xuống rồi, bot
-    chỉ đi về được chỗ đánh quái ở bậc trên khi chỗ đó cao không quá một
-    lần nhảy (khoảng 120 px, cần Phím nhảy).
+    thì tăng số đó ("Tầm đánh…", phần Chỗ đánh quái; từ bản 2026.11.04c
+    cũng có thể vẽ vùng ở tab Bản đồ: chỗ về ở bậc dưới, rồi kéo vùng lên
+    trên tới bậc trên, như "Mới trong bản 2026.11.04d" chỉ). Nhảy xuống
+    rồi, bot chỉ đi về được chỗ đánh quái ở bậc trên khi chỗ đó cao không
+    quá một lần nhảy (khoảng 120 px, cần Phím nhảy). (Từ bản 2026.11.04d
+    vùng vẽ ở tab Bản đồ đi về theo bục; từ bản 2026.11.05b có thể nhảy lên
+    bằng Ctrl+↑, với dấu Nhảy lên bục trên.)
     Không nhảy khi: máu dưới mức của bình HP (ít nhất 50%); bot tạm dừng
     (chat, dọn rác, nhiệm vụ...); game không ở trên cùng; đang đi tới điểm
     đã lưu; đang vào lại game; trong 5 giây đầu sau khi vào bản đồ. Mở
@@ -946,9 +1647,13 @@ khác chưa được thử trên game thật.
     vật sang chỗ khác khi bot đang chạy: bỏ dấu Chỗ đánh quái, đi tới chỗ
     mới, đánh dấu lại rồi bấm Đặt chỗ này. (Bỏ dấu thì bot thôi đi về ngay
     và quên chỗ cũ; đánh dấu lại thì chỗ được lấy ở chỗ nhân vật đứng yên.)
-    Bản này chỉ nhớ chỗ trong lần chạy này: bấm DỪNG LẠI rồi BẮT ĐẦU là lấy
-    chỗ mới ở chỗ nhân vật đang đứng. Số mới của vùng đánh dùng từ chỗ đặt
-    sau; số "Đi về khi cách chỗ hơn" dùng ngay.
+    Bản đồ có vùng đã lưu ở tab Bản đồ (từ bản 2026.11.04c) thì Đặt chỗ này
+    dời vùng đó tới chỗ mới và lưu luôn.
+    Bản đồ chưa có vùng đã lưu thì chỗ chỉ nhớ trong lần chạy này: bấm DỪNG
+    LẠI rồi BẮT ĐẦU là lấy chỗ mới ở chỗ nhân vật đang đứng. Bản đồ có vùng
+    đã lưu thì bot dùng vùng đó (xem "Mới trong bản 2026.11.04c"). Số mới
+    của vùng đánh dùng từ chỗ đặt sau; số "Đi về khi cách chỗ hơn" dùng
+    ngay.
     Cần Npcap (vị trí lấy từ gói tin của game, có dấu "Vị trí từ gói tin"
     hay không). Không có Npcap, hoặc packet_positions=off trong hunt.ini,
     thì GoBot không bật Tự đánh quái khi ô này có dấu (các việc khác vẫn
@@ -960,7 +1665,11 @@ khác chưa được thử trên game thật.
     vật thì bot nhảy lên (cần Phím nhảy; chỉ tới khoảng 120 px, một lần
     nhảy; cao hơn thì bot không đi về mà đứng đánh ở đó); chỗ thấp hơn thì
     bot chỉ đi bộ về phía chỗ đó, nên chỉ về được nếu bục cho nhân vật đi
-    rơi xuống từ mép bục; bục có tường chắn thì không.
+    rơi xuống từ mép bục; bục có tường chắn thì không. Từ bản 2026.11.04d,
+    với vùng vẽ ở tab Bản đồ thì khác: bot không đi tới quái theo đường ra
+    khỏi vùng, đi về theo bục mà không nhảy, và ở ngoài vùng quá 60 px mà
+    có đường về thì bỏ qua cả quái trong tầm để đi về trước (xem "Mới trong
+    bản 2026.11.04d").
     Đi về mà 4 giây không tới gần hơn (vướng tường, vướng bục), bot thôi và
     30 giây sau thử lại; 3 lần liền không được thì thôi hẳn, tới khi bấm
     "Đặt chỗ này" hay nhân vật tự về tới chỗ.
@@ -973,7 +1682,8 @@ khác chưa được thử trên game thật.
     báo là bản đồ khác (gói tin báo chỗ đứng sau bước đi hay kỹ năng đầu
     tiên trong game mới). Đã qua cửa sang bản đồ khác rồi mới vào lại game
     thì vẫn phải qua cửa quay về. Không thì bấm "Đặt chỗ này" để đặt chỗ
-    mới ở chỗ đang đứng. Khi
+    mới ở chỗ đang đứng (bản đồ có vùng đã lưu thì dời vùng tới đó; vùng đã
+    lưu được dùng lại khi nào: xem "Mới trong bản 2026.11.04c"). Khi
     gói tin tạm không biết nhân vật ở đâu, bot cũng đứng yên và chỉ đánh
     quái tới trong tầm, tới khi biết lại. Có dấu cả "Đứng yên một chỗ": bot
     đứng đánh quái tới trong tầm, bị đẩy ra xa thì đi về chỗ.
@@ -1101,11 +1811,11 @@ khác chưa được thử trên game thật.
   thoại), kêu và hiện thông báo trên máy khi nhân vật chết, mất kết nối,
   bot tự dừng…
   Danh sách "Báo khi" có thêm hai việc, có dấu sẵn khi đã bật Thông báo:
-  "Sắp hết bình" (tin "Sắp hết bình HP: ô phím 1 còn 6 bình.") và "Hết
-  bình" (tin "Hết bình HP ở ô phím 1 — GoBot vẫn bấm phím nhưng ô đã
-  trống."). Khi GoBot tắt game vì không thấy nhân vật (ô mới ở thẻ Tự đăng
-  nhập), tin là "Mất kết nối: không thấy nhân vật trong game N phút (game
-  vẫn chạy)."
+  "Sắp hết bình" (tin "Sắp hết bình HP: ô phím 1 (chồng đang dùng) còn 6
+  bình.") và "Hết bình" (tin "Hết bình HP ở ô phím 1 — GoBot vẫn bấm phím
+  nhưng ô đã trống."). Khi GoBot tắt game vì không thấy nhân vật (ô mới ở
+  thẻ Tự đăng nhập), tin là "Mất kết nối: không thấy nhân vật trong game N
+  phút (game vẫn chạy)."
 - GoBot không xử lý captcha (mã xác nhận của game). Nếu game hỏi, bạn phải
   tự trả lời; đừng để bot chạy một mình lâu nếu game của bạn hay hỏi.
 
@@ -1119,12 +1829,16 @@ Nút nào bấm vào game, nút nào không:
   "Kiểm tra ô chat" (Tự chat), và các nút "Thử xem" (cả "Thử xem" ở thẻ
   Tổ đội và "Thử xem" cạnh "Tự đóng thông báo"): chụp màn hình game rồi
   nói thấy gì.
+- Không bấm gì trong game: tab Bản đồ (đọc file bản đồ của game và gói
+  tin). Nhưng sửa vùng đánh lúc bot đang dùng vùng đó thì bot đi theo vùng
+  mới ngay, có thể đi bộ về chỗ về mới.
 - Chỉ gửi tin, không đụng tới game: "Gửi thử" (Thông báo).
 - Bấm vào game ngay khi bạn bấm nút: "Thử" cạnh Phím nhảy (phím nhảy, một
-  lần), "Gửi thử 1 câu" (gõ một câu chat), "Thử tìm (không xoá)" (mở túi
+  lần), "Thử ↑", "Thử ↑↑" và "Thử Ctrl+↑" ở dòng "Đo cú nhảy:" (một cú nhảy
+  mỗi lần), "Gửi thử 1 câu" (gõ một câu chat), "Thử tìm (không xoá)" (mở túi
   đồ và xem, không xoá gì), "Dọn ngay", "Làm ngay 1 lần", và BẮT ĐẦU; cả
-  "Phím dọn ngay" và "Phím vào game ngay" khi bạn bấm chúng lúc game ở
-  trên cùng.
+  "Phím dọn ngay" và "Phím vào game ngay" khi bạn bấm chúng lúc game ở trên
+  cùng.
 - Ô đánh dấu làm GoBot bấm thêm vào game: "Dùng mảnh ghép" (trong "Dọn
   ngay" và "Tự dọn rác": bấm chuột phải vào mảnh ghép rồi xác nhận đăng
   ký, không lấy lại được), "Dùng bùa" (và nút "Dùng bùa ngay": bấm chuột
@@ -1136,9 +1850,12 @@ Nút nào bấm vào game, nút nào không:
   tối đa 3 bước về một phía; GoBot không thấy mép bục), "Chỗ đánh quái"
   (giữ phím mũi tên, và phím nhảy khi chỗ ở cao hơn, để đi về chỗ đánh
   quái), "Nhảy xuống bậc dưới" (giữ Ctrl rồi bấm ↓ để nhảy xuống tới quái
-  ở bậc dưới; nhảy mà đổi bản đồ thì GoBot dừng đánh quái), và "Cũng vào
-  lại khi game vẫn chạy mà không thấy nhân vật quá ... phút" (TẮT game rồi
-  vào lại).
+  ở bậc dưới; nhảy mà đổi bản đồ thì GoBot dừng đánh quái), "Nhảy lên bục
+  trên" (bấm ↑, ↑↑, hay giữ Ctrl rồi bấm ↑, để nhảy lên bục trên trong vùng
+  vẽ ở tab Bản đồ; nhảy mà đổi bản đồ thì GoBot dừng đánh quái; bật sẵn),
+  "Tự tìm quái trong vùng" (giữ phím mũi tên để đi tới quái ở bất kỳ đâu
+  trong vùng đó; bật sẵn), và "Cũng vào lại khi game vẫn chạy mà không thấy
+  nhân vật quá ... phút" (TẮT game rồi vào lại).
 
 - Dọn rác: chọn món cần bỏ, rồi bấm "Thử tìm (không xoá)". GoBot mở túi đồ,
   xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. Chỉ khi danh
@@ -1206,7 +1923,8 @@ Nút nào bấm vào game, nút nào không:
      hết quái, có bỏ con quái ở xa ngoài vùng không. Rồi thử đổi chỗ: bỏ
      dấu Chỗ đánh quái, đi tới chỗ khác, đánh dấu lại rồi bấm "Đặt chỗ
      này"; dòng "Chỗ đánh quái: ..." phải ghi chỗ mới, và bot không đi về
-     chỗ cũ.
+     chỗ cũ. (Bước này ở bản đồ chưa có vùng đã lưu ở tab Bản đồ; bản đồ có
+     vùng thì xem bước 9.)
      Thử qua cửa, một lần riêng: bấm DỪNG LẠI, đánh dấu "Đứng yên một chỗ"
      và Chỗ đánh quái, đứng ngay TRÊN một cửa, không có quái ở gần, rồi bấm
      BẮT ĐẦU. Chờ dòng "Chỗ đánh quái: ..." ghi chỗ (nếu dòng đó bảo chờ
@@ -1238,10 +1956,96 @@ Nút nào bấm vào game, nút nào không:
         sao.
      d. Nếu dùng Chỗ đánh quái: thử thêm một lần có dấu ô đó, chỗ đánh quái
         ở bậc trên, số cao thấp của vùng (trong "Tầm đánh…") lớn hơn
-        khoảng cách xuống bậc dưới: bot chỉ nhảy khi con quái và chỗ rơi
-        xuống ở trong vùng, và không bao giờ nhảy ra ngoài vùng.
+        khoảng cách xuống bậc dưới (hoặc vùng vẽ ở tab Bản đồ có chỗ về ở
+        bậc dưới và vùng kéo lên tới bậc trên): bot chỉ nhảy khi con quái
+        và chỗ rơi xuống ở trong vùng, và không bao giờ nhảy ra ngoài vùng.
      Thấy nhân vật nhảy ở gần cửa, sang bản đồ khác, hay nhảy lung tung:
      bấm F12, bỏ dấu và báo lại kèm giờ và gobot_gui.log.
+  9. Tab Bản đồ (cần Npcap; đã thử trên game thật với bản 04c và bản 04d,
+     phần mới của bản 2026.11.05 thì chưa):
+     a. Chưa bấm BẮT ĐẦU, mở tab Bản đồ ở một bản đồ quen (tốt nhất là qua
+        một cửa rồi quay lại, để GoBot thấy nhân vật vào bản đồ). Dòng đầu
+        phải ghi tên bản đồ. Chấm xanh của nhân vật phải nằm ngay trên
+        đường xanh lá của bục đang đứng, quái ở đúng chỗ như trong game. Đi
+        qua vài bục, nhảy lên, rơi xuống, xem chấm xanh có theo đúng không.
+        Thấy lệch: chụp màn hình cả GoBot và game, báo lại kèm
+        gobot_gui.log.
+     b. Lúc nhân vật đứng yên trên bục thấp nhất có quái (không phải ngay
+        cạnh cửa), bấm "Tạo vùng quanh nhân vật". Kéo cạnh trên của vùng
+        lên cao hơn các bục bên trên; kéo ghim cam sang chỗ khác; rồi bấm
+        "Hoàn tác": vùng phải trở lại như trước lần kéo ghim. Tắt GoBot rồi
+        mở lại: khi dòng đầu lại ghi tên bản đồ, vùng vẫn còn. Thẻ dưới bản
+        đồ không được có dòng chữ đỏ (từ bản 2026.11.04d: phần lớn vùng bot
+        không đi về được).
+     c. Đánh dấu Tự đánh quái và Chỗ đánh quái, đứng trong vùng, bấm BẮT
+        ĐẦU: thẻ dưới bản đồ phải ghi "Đang dùng vùng này". Đánh khoảng 10
+        phút: bot chỉ đi tới quái trong vùng, hết quái thì đi về chỗ về. (Từ
+        bản 2026.11.05b, có dấu Tự tìm quái trong vùng: hết quái tới được
+        thì đứng chờ tại chỗ; xem bước 10.) Có dấu Nhảy xuống bậc dưới thì
+        bot chỉ nhảy trong vùng.
+     d. Bấm DỪNG LẠI, đưa nhân vật ra xa vùng (hơn 150 px), bấm BẮT ĐẦU:
+        bot phải đánh ở chỗ đang đứng, và thẻ báo nhân vật đang ở ngoài
+        vùng. Bấm "Đặt chỗ này": vùng phải dời tới chỗ nhân vật. Bấm DỪNG
+        LẠI rồi "Hoàn tác" ở tab Bản đồ để đưa vùng về chỗ cũ.
+     e. Đứng trong vùng, bấm BẮT ĐẦU, qua một cửa rồi quay lại ngay: thẻ
+        phải lại ghi "Đang dùng vùng này". Vào lại game (Tìm lại hay Tự đăng
+        nhập) rồi đứng yên trong vùng: cũng vậy.
+     f. Từ bản 2026.11.04d, khi bot đánh trong vùng: nhân vật không đi ra
+        khỏi vùng (log có thể có "Hunter: not walking ..."). Bấm DỪNG LẠI,
+        tự đi ra ngoài vùng 70-150 px ở chỗ có đường đi bộ về (ví dụ xuống
+        một đoạn dốc qua cạnh vùng), đứng yên rồi bấm BẮT ĐẦU: thẻ phải ghi
+        vàng "Nhân vật đang ở ngoài vùng N px — bot đi bộ về ... trước", và
+        nhân vật đi bộ về, không nhảy, rồi thẻ lại ghi "Đang dùng vùng này".
+        Từ bản 2026.11.05b, có dấu Nhảy lên bục trên mà chỗ về ở bục trên
+        (như ở t52_s2): đường về có thể có một lần nhảy Ctrl+↑.
+     g. Từ bản 2026.11.05 (chấm của quái), chưa cần bấm BẮT ĐẦU: ở
+        RừngĐạiThụ[2] (t52_s2), bấm "Theo nhân vật" và nhìn quái đi trên nền
+        lớn dốc (khoảng x 750 tới 1400). Chấm đỏ phải đi sát đường xanh lá
+        của bục, không nổi lên hay chìm xuống rồi nhảy về; tới đầu bục thì
+        đứng ở đầu bục. Tự đi xuống dốc: chấm xanh cũng phải sát bục. Rê
+        chuột lên một con quái đang đi: cuối dòng có thể có "(gói tin x,
+        y)", là chỗ bản cũ vẽ nó. Đánh chết một con quái: chấm của nó phải
+        mất ngay. Rồi bấm DỪNG LẠI (nếu bot đang chạy), bấm "Nâng cao ►",
+        thẻ Capture, bấm "Stop capture", rồi bấm "◄ Giao diện đơn giản" về
+        tab Bản đồ: giữa bản đồ phải ghi "Chưa có gói tin của game", và không
+        còn chấm đỏ hay vòng vàng nào. Tắt GoBot rồi mở lại để GoBot bắt gói
+        tin như thường. Thấy chấm còn lệch hay thừa: chụp màn hình cả GoBot
+        và game, ghi giờ.
+     h. Gửi gobot_gui.log (các dòng "Map view:", "Map tab:", "Hunter:" và
+        "Positions").
+     Thấy nhân vật đi lung tung, hay đi về chỗ không phải chỗ về: bấm F12,
+     bỏ dấu Chỗ đánh quái và báo lại kèm giờ.
+  10. Nhảy lên bục trên và Tự tìm quái trong vùng (bản 2026.11.05b, chưa thử
+      trên game thật; cần Npcap, vùng vẽ ở tab Bản đồ và Phím nhảy là ↑; chỉ
+      thử khi ngồi xem, tay gần F12):
+      a. Không bắt buộc, chỉ để đo: lúc bot dừng, đứng ở mặt đất phẳng,
+         không có bục nào phía trên, xa cửa, bấm "Thử ↑", "Thử ↑↑" và "Thử
+         Ctrl+↑" ở dòng "Đo cú nhảy:" (dưới hàng Tự đánh quái; dòng này chỉ
+         hiện khi Nhảy lên bục trên chạy được như đang đặt), mỗi nút 2–3
+         lần. Mỗi lần GoBot bấm MỘT cú nhảy trong game rồi báo nhân vật có
+         nhảy đúng kiểu không, bay bao lâu, lên cao bao nhiêu; log có dòng
+         "Jump test: ...". Báo lại nếu "Thử ↑↑" nói nhân vật chỉ nhảy một
+         lần, hay "Thử Ctrl+↑" nói nhân vật chỉ nhảy thường.
+      b. Ở RừngĐạiThụ[2] (t52_s2), vùng như bây giờ: đứng trong vùng, đánh
+         dấu Tự đánh quái, Chỗ đánh quái và Vị trí từ gói tin ("Nhảy lên bục
+         trên" và "Tự tìm quái trong vùng" đã có dấu sẵn), bấm BẮT ĐẦU và
+         đánh 15–30 phút. Xem: bot đi tới quái ở khắp vùng, cả mặt đất bên
+         trái; không đi ra khỏi vùng, không còn đi sang phải rồi dừng ở cạnh
+         dưới (1035,695); hết quái tới được thì đứng chờ tại chỗ, không đi
+         về 880,634; quái ở bục chỗ về thì bot đi tới khoảng x 800–820 (hay
+         1024–1048), đứng lại, bấm Ctrl+↑, lên tới bục rồi đánh trên bục.
+         Tab Bản đồ có đường nét đứt tới chỗ đứng đánh, và mũi tên ở chỗ
+         nhảy.
+      c. Trong log phải có "Hunter: jump up (Ctrl+Up) ..." rồi "Hunter: jump
+         up worked ..."; "Hunter: seeking slot ..."; "Hunter: monsters at
+         ..." mỗi 30 giây; dòng "Hunter:" mỗi phút có "; jump-ups: ..." và
+         "; seek: ...". Có "jump up FELL BACK" hay dòng đỏ dưới nút BẮT ĐẦU
+         thì không sao: GoBot tự tránh chỗ đó, hay tự tắt Nhảy lên tới lần
+         BẮT ĐẦU sau; báo lại kèm log.
+      d. Thấy nhân vật nhảy ra ngoài vùng, nhảy mãi một chỗ, hay đi lung
+         tung: bấm F12, bỏ dấu ô đó và báo lại kèm giờ. Bản đồ đổi sau một
+         lần nhảy thì GoBot tự dừng đánh quái và bỏ dấu Nhảy lên.
+      e. Gửi gobot_gui.log (các dòng "Hunter:" và "Positions").
 - Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
   xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
 - Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
@@ -1412,7 +2216,8 @@ Gặp lỗi khác:
 - Các thư mục trash_debug, revive_debug, quest_debug, chat_debug là ảnh
   chụp màn hình game lúc có lỗi. potion_debug giữ tới 20 ảnh cả màn hình
   game, chụp khi một ô bình hết, khi số bình tăng lên, hoặc khi một lần
-  đọc số bình tụt bất thường rồi trở lại; keeper_debug giữ
+  đọc số bình tụt bất thường rồi trở lại (từ bản 2026.11.04d có thêm ảnh
+  chỉ một ô bình, khi hai lần liền không đọc được ô đó); keeper_debug giữ
   tới 20 ảnh game, chụp khi GoBot tắt game vì không thấy nhân vật;
   login_debug giữ tới 20 ảnh game, chụp mỗi lần Tự đăng nhập thử không
   được ở một màn hình của game (ví dụ kẹt ở màn hình chọn kênh). Trong
@@ -1431,7 +2236,9 @@ Gặp lỗi khác:
 - Muốn giữ cài đặt cũ: đóng GoBot, rồi chép party.ini (tổ đội) từ thư mục
   configs cũ sang thư mục configs mới (Windows hỏi quyền quản trị thì bấm
   "Tiếp tục"). Nếu bản cũ đã có Dọn rác, chép thêm trash.ini và thư mục
-  trash. Đừng chép các file khác: bản mới đã khác.
+  trash. Nếu đã vẽ vùng đánh ở tab Bản đồ (từ bản 2026.11.04c), chép thêm
+  spots.ini để giữ các vùng đó (file zip không có file này, nên không chép
+  đè lên gì). Đừng chép các file khác: bản mới đã khác.
 - Đừng chép hunt.ini: hunt.ini của các bản cũ (trước 15/10/2026) có thể có
   sẵn tên nhân vật của người khác. Gõ lại tên nhân vật và phím đánh ở thẻ
   Đánh quái. Nếu lỡ chép rồi, xem lại ô "Tên nhân vật": phải là tên nhân

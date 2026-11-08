@@ -19,6 +19,7 @@
 #include "gobot/hunter.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/mob_detector.hpp"
+#include "gobot/mob_place.hpp"
 #include "gobot/net_discovery.hpp"
 #include "gobot/packet_eyes.hpp"
 #include "gobot/packet_world.hpp"
@@ -31,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -652,6 +654,9 @@ struct Game {
 struct EyesRig {
     PacketWorld          world;
     Game                 g;
+    /// The map file the monsters are placed on (Inputs::floors): none unless
+    /// a test sets one.
+    std::shared_ptr<const GameMapBook::Page> floors;
     PacketEyes           eyes;
     InputManager         input;
     ExecutionCoordinator coord;
@@ -769,6 +774,7 @@ struct EyesRig {
         };
         in.config = [this] { return hunter.config(); };
         in.walk_held_until = [this] { return hunter.walk_held_until_ms(); };
+        in.floors = [this] { return floors; };
         return in;
     }
 
@@ -1162,6 +1168,77 @@ void test_eyes_box() {
         check(r.eyes.source() == PacketEyes::Source::Screen && r.eyes.view() == view + 1,
               "restart(), as hunting starts: back to the screen, in another view");
     }
+}
+
+/// A made-up page: one platform across the whole of a 6400 x 2048 map, its
+/// top at 1101 -- where you stand, 1100, is on it.
+std::shared_ptr<const GameMapBook::Page> flat_page() {
+    auto p = std::make_shared<GameMapBook::Page>();
+    p->stem = "t1_s1";
+    p->floors.w_cells = 200;
+    p->floors.h_cells = 64;
+    const int w = p->floors.w_px();
+    p->floors.start.resize(static_cast<std::size_t>(w) + 1);
+    for (int x = 0; x < w; ++x) {
+        p->floors.start[static_cast<std::size_t>(x)] = static_cast<std::uint32_t>(p->floors.floors.size());
+        MapFloor f;
+        f.y = 1101;
+        f.attr = 1;
+        p->floors.floors.push_back(f);
+    }
+    p->floors.start[static_cast<std::size_t>(w)] = static_cast<std::uint32_t>(p->floors.floors.size());
+    return p;
+}
+
+/// "Tự tìm quái trong vùng" (2026.11.05b): the whole map's monsters for the
+/// seek -- no box round you, none while the screen steers -- and, with a map
+/// file in use, the plates where they are placed on their floors.
+void test_eyes_world() {
+    section("Vị trí từ gói tin 2026.11.05b: the whole map for the seek, uncut, none on the screen; plates on their "
+            "floors with a map file");
+
+    EyesRig r(packets_on());
+    r.g.walks_report = false;
+    r.enter({ monster(1, 100), monster(2, 900), monster(3, -2000), monster(4, 200, -50) });
+    std::vector<SeekMob> w;
+    r.pass();
+    check(!r.eyes.world(w) && w.empty(), "the screen steering: no list, false");
+    r.until_packets();
+    r.eyes.frame();
+    const bool had = r.eyes.world(w);
+    std::vector<Nameplate> mobs = r.eyes.mobs();
+    // No floors from the map tab: no list for the seek -- every monster would
+    // be on no floor and the seek would stand; off, the hunter as 05.
+    check(!had && w.empty() && mobs.size() == 2,
+          "the packets steering, no map file: no list for the seek, false; the plates 2 (" +
+              std::to_string(mobs.size()) + ")");
+    const auto plate_of = [&](int slot) {
+        for (const Nameplate& n : mobs)
+            if (n.slot == slot) return n.y();
+        return -1;
+    };
+    check(plate_of(4) == 1050, "no map file: the plates at the packets' own points, as 2026.11.05");
+
+    // A map file in use: the one 50 px over its floor set down on it, the
+    // seek's list on the floor's top.
+    r.floors = flat_page();
+    r.pass();
+    r.eyes.frame();
+    const bool placed = r.eyes.world(w);
+    mobs = r.eyes.mobs();
+    check(placed && w.size() == 4 && w[1].at.x == 5540 && w[2].at.x == 2640 &&
+              std::all_of(w.begin(), w.end(), [](const SeekMob& m) { return m.slot >= 1; }),
+          "with a file: all 4 living monsters, 900 and 2,000 px off too, uncut (" + std::to_string(w.size()) + ")");
+    const PacketEyes::PlateCounts pc = r.eyes.plates();
+    const auto at = std::find_if(w.begin(), w.end(), [](const SeekMob& m) { return m.slot == 4; });
+    check(kPlatesOnFloors && plate_of(4) == 1100 && at != w.end() && at->at.y == 1100 && at->floor_y == 1101 &&
+              at->why == static_cast<std::uint8_t>(DotWhy::SetDown),
+          "with a file: the plate set down at 1100 (was 1050), the list's too, floor 1101 (plate " +
+              std::to_string(plate_of(4)) + ")");
+    check(pc.floors && pc.alive == 4 && pc.in_view == 2 && pc.set_down == 1 && pc.half_w == 768 && pc.half_h == 432,
+          "the Positions line's counts: " + std::to_string(pc.in_view) + " of " + std::to_string(pc.alive) +
+              " in view (±" + std::to_string(pc.half_w) + " x ±" + std::to_string(pc.half_h) + "), " +
+              std::to_string(pc.set_down) + " set down");
 }
 
 /// Each packet plate says which monster it is -- its slot, and the slot's
@@ -1844,6 +1921,7 @@ void test_packet_eyes(void (*check_fn)(bool, const std::string&), void (*section
     test_eyes_wounded();
     test_eyes_lists();
     test_eyes_box();
+    test_eyes_world();
     test_eyes_slots();
     test_eyes_backstep();
     test_eyes_long_backstep();

@@ -6444,6 +6444,111 @@ void test_tab_unsure() {
 /// for nobody at the mouse under its hold, the charm job says the tab was not
 /// read and waits ten minutes; and the bag's own order -- the tab read before
 /// anything is counted or right-clicked.
+/// The band under the tabs' labels (2026.11.04d, F16): on 2026-11-04 the
+/// shop's look read no tab -- Tiêu Dùng chosen, the game's red glow round its
+/// top lifting its inside to the others' -- where the band under the labels
+/// read it 68 against 121 and 122. The glow drawn here over a pretend strip;
+/// the kept cuts of the live bag read as they are, when they are here.
+void test_tab_band() {
+    section("Túi đồ: the chosen tab read by the band under its label, a red glow round a tab or not (F16)");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    const BagLayout l;
+    // A tab's top rows lit, as the game's glow lights them: rows 1 to 5.
+    const auto glow = [&l](Frame& f, int strip_x, int strip_y, int tab) {
+        for (int y = strip_y + 1; y <= strip_y + 5; ++y)
+            for (int x = strip_x + tab * l.tab_w; x < strip_x + (tab + 1) * l.tab_w; ++x) {
+                std::uint8_t* p = &f.pixels[(static_cast<std::size_t>(y) * f.width + x) * 4];
+                p[0] = 230;
+                p[1] = 230;
+                p[2] = 255;
+            }
+    };
+    const auto inside_reads = [](const BagView& v, int tab) {
+        for (int t = 0; t < kBagTabs; ++t)
+            if (t != tab && v.tab_mean[t] - v.tab_mean[tab] < 10) return false;
+        return true;
+    };
+    const auto band_by = [](const BagView& v, int tab) {
+        int least = 255;
+        for (int t = 0; t < kBagTabs; ++t)
+            if (t != tab) least = std::min(least, v.tab_band[t] - v.tab_band[tab]);
+        return least;
+    };
+    const auto bands = [](const BagView& v) {
+        std::string out;
+        for (int t = 0; t < kBagTabs; ++t) out += (t ? " " : "") + std::to_string(v.tab_band[t]);
+        return out;
+    };
+    {
+        Frame f = scene(1024, 768, 60);
+        blit(f, strip_on(kUseTab), 300, 300);
+        const BagView plain = bag::find(f, k.store, l);
+        glow(f, 300, 300, kUseTab);
+        const BagView lit = bag::find(f, k.store, l);
+        check(plain.selected_tab == kUseTab && inside_reads(plain, kUseTab) && band_by(plain, kUseTab) >= 10,
+              "the pretend strip on Tiêu Dùng: read so by the inside and by the band -- band " + bands(plain));
+        check(lit.found && !inside_reads(lit, kUseTab) && lit.selected_tab == kUseTab && band_by(lit, kUseTab) >= 10,
+              "Tiêu Dùng lit by the glow round its top: no longer darkest inside, still read by the band -- inside " +
+                  means_of(lit) + ", band " + bands(lit));
+        Frame other = scene(1024, 768, 60);
+        blit(other, strip_on(kUseTab), 300, 300);
+        glow(other, 300, 300, 3);
+        Frame none = scene(1024, 768, 60);
+        blit(none, strip_on(0), 300, 300);
+        glow(none, 300, 300, kUseTab);
+        check(bag::find(other, k.store, l).selected_tab == kUseTab && bag::find(none, k.store, l).selected_tab == -1,
+              "the glow on Khác beside it: Tiêu Dùng all the same; no tab drawn chosen and Tiêu Dùng lit: none");
+        // The band and the inside at odds -- Khác darkest inside, Tiêu Dùng
+        // under its label: no tab, never the band's alone.
+        Frame odds = scene(1024, 768, 60);
+        const Frame s3 = strip_on(kOtherTab);
+        blit(odds, s3, 300, 300);
+        for (int y = 300 + s3.height - 4; y < 300 + s3.height; ++y)
+            for (int x = 300 + kUseTab * l.tab_w; x < 300 + (kUseTab + 1) * l.tab_w; ++x) {
+                std::uint8_t* q = &odds.pixels[(static_cast<std::size_t>(y) * odds.width + x) * 4];
+                q[0] = q[1] = q[2] = 50;
+            }
+        const BagView at_odds = bag::find(odds, k.store, l);
+        check(at_odds.found && inside_reads(at_odds, kOtherTab) && band_by(at_odds, kUseTab) >= 10 &&
+                  at_odds.selected_tab == -1,
+              "Khác darkest inside, Tiêu Dùng under its label: at odds, no tab -- inside " + means_of(at_odds) +
+                  ", band " + bands(at_odds));
+    }
+    // The kept cuts of the live bag, Tiêu Dùng chosen: the band reads it by
+    // far more than kChosenTabDarker.
+    const std::string dir = charm_cuts_dir();
+    if (dir.empty()) {
+        skip("no cuts of the live bag here (handoff\\charms\\testdata): the band on the live client\n");
+        return;
+    }
+    for (const char* what : { "charm_baga", "charm_bagb", "charm_bagc", "charm_bag_singles" }) {
+        Frame f = scene(1024, 768, 40);
+        if (!put_back(f, dir, what)) {
+            skip("no %s cut here\n", what);
+            continue;
+        }
+        const BagView v = bag::find(f, k.store, l);
+        std::printf("  [info] %s: inside %s, band %s\n", what, means_of(v).c_str(), bands(v).c_str());
+        check(v.found && v.selected_tab == kUseTab && band_by(v, kUseTab) >= 40,
+              std::string(what) + ": Tiêu Dùng read, darker under its label than every other tab by 40 or more -- "
+                                  "band " + bands(v));
+    }
+    // The shop's own look of 2026-11-04 20:40:00 (gobot_gui.log:289, kept as
+    // shop_tab): Tiêu Dùng chosen under the game's red glow -- the inside
+    // reads no tab, the band reads it.
+    Frame f = scene(1024, 768, 40);
+    if (!put_back(f, dir, "shop_tab_glow")) {
+        skip("no shop_tab_glow cut here\n");
+        return;
+    }
+    const BagView v = bag::find(f, k.store, l);
+    std::printf("  [info] shop_tab_glow: inside %s, band %s\n", means_of(v).c_str(), bands(v).c_str());
+    check(v.found && v.selected_tab == kUseTab && band_by(v, kUseTab) >= 40 && !inside_reads(v, kUseTab),
+          "the shop's look of 20:40:00, Tiêu Dùng under the red glow: read by the band (by 40 or more), never by its "
+          "inside -- inside " + means_of(v) + ", band " + bands(v));
+}
+
 void test_tab_unsure_sources() {
     section("Túi đồ: the shop's quiet moment and the charms' tab line, in their source (farm30 B4)");
 #ifdef GOBOT_SOURCE_DIR
@@ -6628,6 +6733,7 @@ void test_use(void (*check_fn)(bool, const std::string&), void (*section_fn)(con
     test_shop_pieces();
     test_shop();
     test_tab_unsure();
+    test_tab_band();
     test_tab_unsure_sources();
     test_trash_list_quiet();
 }

@@ -179,6 +179,13 @@ bool GuiApp::bag_low_count(std::uint32_t vk, int& total, std::uint32_t& item) co
     return BagPart::of(*this).ledger.low_total(vk, BagPart::link_of(*this), total, item);
 }
 
+bool GuiApp::bag_learned_count(std::uint32_t vk, int& total, std::uint32_t& item) const {
+    total = -1;
+    item = 0;
+    if (packets_settings_.bag == PacketUse::Off) return false;
+    return BagPart::of(*this).ledger.learned_total(vk, BagPart::link_of(*this), total, item);
+}
+
 bool GuiApp::bag_says_enough(int hp_below, int mp_below, int& hp_slots, int& mp_slots) const {
     BagPart& part = BagPart::of(*this);
     const std::uint64_t now = now_ms();
@@ -300,10 +307,15 @@ void GuiApp::note_bag_minute(std::uint64_t now) {
     std::string low;
     for (const BagLedger::KeySummary& k : s.keys) {
         line << "; " << key_text(k.vk);
-        if (k.learned)
-            line << " -> slot " << k.slot << " (" << k.item << ") learned " << k.votes_for << "/" << k.votes;
-        else
+        // With the bag's total of what it drinks: when to put another on the
+        // key before it runs dry.
+        if (k.learned) {
+            line << " -> slot " << k.slot << " (" << k.item;
+            if (k.total >= 0) line << ", " << k.total << " in the bag";
+            line << ") learned " << k.votes_for << "/" << k.votes;
+        } else {
             line << " not learned (" << k.votes_for << " of " << BagLedger::kLearnVotes << " votes)";
+        }
         line << ", presses " << k.presses << " (answered " << k.answered << ", not " << k.unanswered
              << ", other changes " << k.refused << ")";
         if (k.distrusts > 0) line << ", distrusted " << k.distrusts;

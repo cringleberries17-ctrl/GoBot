@@ -414,6 +414,13 @@ void GuiApp::draw_simple_view() {
             simple_fight_tab();
             ImGui::EndTabItem();
         }
+        // Beside fighting, whose hunting zone it sets: no dot, it is no job
+        // (simple_map.cpp).
+        if (tab("Bản đồ", false, "map")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_map_tab();
+            ImGui::EndTabItem();
+        }
         if (tab("Tổ đội", party_running_, "party")) {
             ImGui::Dummy(ImVec2(0, 4));
             simple_party_tab();
@@ -447,10 +454,14 @@ void GuiApp::draw_simple_view() {
         }
         ImGui::EndTabBar();
     }
+    // Measured for the Bản đồ tab, whose map leaves room for these below it.
+    const float start_top = ImGui::GetCursorPosY();
     simple_start_block();
+    start_block_h_ = ImGui::GetCursorPosY() - start_top;
 
     // The way to everything else, out of the way at the bottom -- and at the
     // other end of the same row the version, which a report should quote.
+    const float version_top = ImGui::GetCursorPosY();
     ImGui::Dummy(ImVec2(0, 4));
     {
         const std::string version = package_version().empty()
@@ -475,6 +486,7 @@ void GuiApp::draw_simple_view() {
         ImGui::SetItemTooltip("Mọi cài đặt chi tiết (tiếng Anh).\n"
                               "Nút \"◄ Giao diện đơn giản\" ở góc trên bên trái để quay lại.");
     }
+    version_h_ = ImGui::GetCursorPosY() - version_top;
 
     simple_window_list();
     simple_monster_lists();     // "Danh sách quái", when asked for: simple_lists.cpp
@@ -907,7 +919,9 @@ void GuiApp::simple_jobs() {
         ImGui::SetItemTooltip("%s", tip.c_str());
     }
     simple_drop_tick();         // "Nhảy xuống bậc dưới" after it: simple_style.cpp
+    simple_jump_up_tick();      // "Nhảy lên bục trên" after it: simple_style.cpp
     simple_spot_tick();         // "Chỗ đánh quái [Đặt chỗ này]" after them: simple_spot.cpp
+    simple_seek_tick();         // "Tự tìm quái trong vùng" after it: simple_style.cpp
     hint(hunt_config_.stay_put ? "Đứng yên tại chỗ, đánh con quái nào tới trong tầm đánh."
                                : "Tự đi tới con quái gần nhất và đánh nó.");
     simple_style_hints();
@@ -918,6 +932,7 @@ void GuiApp::simple_jobs() {
                                    "dùng cách nào.")
                  .c_str());
     simple_drop_hints();        // "Nhảy xuống bậc dưới"'s, and why it stopped the hunt: simple_style.cpp
+    simple_jump_up_hints();     // "Nhảy lên bục trên"'s, with its "Thử ↑ / ↑↑ / Ctrl+↑": simple_style.cpp
     simple_spot_hint();
     row_gap();
     simple_monster_row();       // "Lọc quái", simple_lists.cpp
@@ -1409,21 +1424,34 @@ void GuiApp::simple_start_block() {
                 coloured(kGood, ("Đang đánh quái." + simple_skills_note(false)).c_str());
                 break;
             case Hunter::State::Approaching:
-                // Settling to press Ctrl + ↓, or falling from it.
-                coloured(kGood, hs.dropping ? "Đang nhảy xuống tới quái ở bậc dưới (Ctrl + ↓)." : "Đang đi tới quái.");
+                // Going to a monster anywhere in the area ("Tự tìm quái trong
+                // vùng", simple_style.cpp); settling to press Ctrl + ↓, or
+                // falling from it.
+                if (hs.seek_on)
+                    coloured(kGood, seek_going_vi(hs).c_str());
+                else
+                    coloured(kGood, hs.dropping ? "Đang nhảy xuống tới quái ở bậc dưới (Ctrl + ↓)." : "Đang đi tới quái.");
                 break;
             case Hunter::State::Returning:
                 // Along the ground: what the walk back lets go of within
-                // spot_tolerance (Chỗ đánh quái, simple_spot.cpp).
+                // spot_tolerance (Chỗ đánh quái, simple_spot.cpp) -- and a
+                // jump up the way starts with (2026.11.05b).
                 coloured(kGood, ("Đang về chỗ đánh quái (còn " +
-                                 std::to_string(std::lround(std::abs(hs.spot_dx))) + " px).")
+                                 std::to_string(std::lround(std::abs(hs.spot_dx))) + " px)." +
+                                 (hs.spot_way_by_jumps && hs.spot_way_jump_first
+                                      ? std::string(" Về: nhảy ") + jump_kind_key(hs.spot_way_jump_kind) + " ở x " +
+                                            std::to_string(hs.spot_way_jump_x) + "."
+                                      : std::string()))
                                     .c_str());
                 break;
             case Hunter::State::NoTargets:
-                // A monster in view given up on a moment ago -- out of reach,
-                // or not losing health -- first: with it, any the lists rule
-                // out are not all there is.
-                if (hs.passed_over)
+                // Nothing in the area the seek gets to: it stands where it is
+                // (simple_style.cpp). Else a monster in view given up on a
+                // moment ago -- out of reach, or not losing health -- first:
+                // with it, any the lists rule out are not all there is.
+                if (hs.seek_none)
+                    simple_seek_none(hs);
+                else if (hs.passed_over)
                     coloured(kWait, "Đang tạm bỏ qua con quái không tới được (hoặc đánh không mất máu), "
                                     "lát nữa thử lại.");
                 // Monsters in view, only outside the hunting spot's area:
@@ -1467,6 +1495,9 @@ void GuiApp::simple_start_block() {
         // And the hunting spot, when "Chỗ đánh quái" is ticked: where it is
         // and how far off, or why it does not steer (simple_spot.cpp).
         simple_spot_state(hs);
+        // And the jumps up: off for the run in red, at work, refused, the
+        // dry run's and the counts in grey (simple_style.cpp).
+        simple_jump_up_state(hs);
     } else if (macro_running_) {
         coloured(kGood, "Đang chạy: tự bấm phím theo giờ và tự uống bình.");
     } else {

@@ -1087,6 +1087,24 @@ void test_wild() {
         check(misreads == 1, "41, 4, three unreadable looks, 40: a misread too");
     }
     {
+        // Unreadable on two looks in a row: once a run, for a picture of the
+        // slot (2026.11.04d: key G of 2026-11-04 read nothing else).
+        SlotReading unread;
+        unread.state = SlotState::Unreadable;
+        SlotReading covered;
+        covered.state = SlotState::NoHotbar;
+        PotionWatch w;
+        w.set_warn_below(20);
+        check(feed(w, 'G', { unread, covered, unread, count(30), unread }, Kind::Unreadable) == 0,
+              "unreadable looks with another between: no picture");
+        check(feed(w, 'G', { unread }, Kind::Unreadable) == 1, "two running: the picture's event");
+        check(feed(w, 'G', { unread, unread, count(30), unread, unread }, Kind::Unreadable) == 0 &&
+                  feed(w, '1', { unread, unread }, Kind::Unreadable) == 1,
+              "once a run for that key, whatever comes after; another key its own");
+        w.reset();
+        check(feed(w, 'G', { unread, unread }, Kind::Unreadable) == 1, "and once more in the next run");
+    }
+    {
         // The slot believed empty -- two looks -- is a stack gone: the next
         // count is a new stack, believed at once.
         PotionWatch w;
@@ -1237,12 +1255,19 @@ void test_texts_and_settings() {
     SlotReading none;
     check(potion_line_vi(none, "1") == "Chưa đọc được số bình", "Chưa đọc được số bình");
 
-    check(alert_text::potion_low(true, "1", 18) == "Sắp hết bình HP: ô phím 1 còn 18 bình.",
+    // The slot's number is the stack in use, and is named so (2026.11.04d:
+    // "còn 5" on 2026-11-04 with a stack of 100 next in the bag).
+    check(alert_text::potion_low(true, "1", 18) == "Sắp hết bình HP: ô phím 1 (chồng đang dùng) còn 18 bình.",
           "the alert: " + alert_text::potion_low(true, "1", 18));
+    check(alert_text::potion_low(false, "H", 5, 205) ==
+              "Sắp hết bình MP: ô phím H (chồng đang dùng) còn 5 bình; cả túi còn 205 bình (theo gói tin, chưa "
+              "kiểm).",
+          "with the bag's total learned and not yet checked: said beside it as that -- " +
+              alert_text::potion_low(false, "H", 5, 205));
     check(alert_text::potion_out(false, "2") ==
               "Hết bình MP ở ô phím 2 — GoBot vẫn bấm phím nhưng ô đã trống.",
           "the alert: " + alert_text::potion_out(false, "2"));
-    check(alert_text::potion_low(true, "a\"b/c", 3) == "Sắp hết bình HP: ô phím ? còn 3 bình.",
+    check(alert_text::potion_low(true, "a\"b/c", 3) == "Sắp hết bình HP: ô phím ? (chồng đang dùng) còn 3 bình.",
           "a key name with anything but letters and digits in it is not said");
     check(alert_text::potion_low_bag(true, "G", 18) == "Sắp hết bình HP (phím G): cả túi còn 18 bình (theo gói tin)." &&
               alert_text::potion_low_bag(false, "a\"b/c", 3) ==

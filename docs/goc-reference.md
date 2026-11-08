@@ -224,9 +224,9 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
 |---|---|
 | Any key press | Down, hold 60–131 ms (uniform, MT19937 seeded from `random_device`), up. A caller asking for less than 51 ms gets a random hold instead. |
 | Injection | `SendInput` with scancodes only (`wVk = 0`, `KEYEVENTF_SCANCODE`). The extended flag is set for the arrows, PgUp/PgDn, Home/End, Insert and Delete. |
-| Double jump | Jump, 341 ms, jump. |
+| Double jump | Jump, 341 ms, jump. The 341 ms is counted from the first key's release (corrected 2026-11-05): the jump is held 60–131 ms, so the second goes down 401–472 ms after the first. GoBot's ↑↑ (2026.11.05b) presses it 340 ms after the first went down. |
 | Jump down | Hold the modifier, 50 ms, tap Down, 50 ms, release. |
-| High jump | Hold the modifier, 50 ms, tap jump, 50 ms, release. |
+| High jump | Hold the modifier, 50 ms, tap jump, 50 ms, release. About 160–230 ms in all, the modifier sent as a keystroke of its own. Inferred: `key_jump` sets the modifier, and the owner's profile has `key_jump=17`, Ctrl, which is also the pick-up key. No high jump followed by a second jump exists anywhere in GoC's input. |
 | Facing | Tap Left or Right. |
 | Default keys | Jump = Up arrow, down = Down arrow, modifier = Shift (constructor). The modifier is the key GoC's setters call the loot key. |
 | Fast-key mode | A background loop releases keys 100–131 ms after they go down. At most 10 are held at once. |
@@ -238,7 +238,8 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
   (attacking). It presses each enabled attack skill once, 300 ms apart, and
   idles for 100 ms when there is none.
 - **Server skill command** (`HandleUseSkill`, command `0x10`, GhostCore
-  0x180046A80). In this order: the jump attacks, the MP check, keep distance,
+  0x1800478B0 -- earlier versions of this page said 0x180046A80; corrected
+  2026-11-05). In this order: the jump attacks, the MP check, keep distance,
   facing, then the skills -- or the normal attack when no skill went out.
   - Skipped in two player states, inferred to be dead and loading. While a chat
     line is being typed, it waits 500 ms instead.
@@ -268,7 +269,12 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
     modes, since no server paces GoBot's presses.
   - **Jump attack** (mode 1). A target more than `higher_threshold` px off
     vertically, and within that + 132 px, gets one jump. Further than that gets
-    a double jump.
+    a double jump. It goes by |dy|, so a monster below qualifies too; there is
+    no ground check and no gate check, no arrow (a jump in place) and never a
+    high jump; and the attacks go out at once, in the air -- it never waits to
+    land. (Corrected 2026-11-05.) The owner's `higher_threshold=326` would
+    almost never fire it. GoBot's jump up (2026.11.05b) does not copy it: it
+    jumps only toward a monster above, onto its floor, planned from the map.
   - **Jump-down attack** (mode 2). Only from the ground, at most once per
     800 ms, and never on a warp gate. Then a 341 ms pause.
 - **Buffs** (`BuffThread`, every 500 ms):
@@ -293,6 +299,18 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
 
 ### Movement
 
+**None of this ran in the owner's play** (found 2026-11-05). The owner's GoC
+profile has `enable_tile_pathfinding=false`, `lazy_mode=false` and
+`return_to_original_location=false`, and GhostCore reads `double_jump`,
+`allow_attack_while_jumping`, `enable_tile_pathfinding` and
+`overcome_obstacles` only to load and save them -- they go to ZTeam's server.
+So neither the pathfinder nor the return to the spot below ever moved the
+owner's character: its jumps came from the server's commands (`0x04` jump,
+`0x05` high jump, `0x30` double jump) and the server's jump-attack flag, by
+rules on that server that cannot be seen. The owner's "Theo GoC" heights of
+2026-11-05 -- ↑ ~133, ↑↑ ~280, Ctrl + ↑ ~432 -- are the return to the spot's
+thresholds (132, 280) and the high jump's peak by the formula (432).
+
 **Physics** (`PathFinder::SimulateMove`, `SimulateDoubleJump`,
 `BuildPlatformGraph`):
 
@@ -303,8 +321,16 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
 | Sideways speed, walking and jumping | 360 px/s (355 px/s in the executor's walking maths) |
 | Normal jump | −800 px/s, so about 133 px high |
 | High jump | −1440 px/s, so about 432 px high |
-| Double jump | a second push at the top of the first |
+| Double jump | a second push at the top of the first (`SimulateDoubleJump` replaces the vertical speed once t ≥ 0.333 s) |
 | Tile | 32 px |
+
+The 133 and 432 are the formula's (v²/2g). GoC's own 0.05-s steps give rises
+of 114 and 396, from a point it starts 33 px above the feet, so its graph is
+conservative. 2026.11.05b's jump up keeps a range of its own instead
+(`gobot/jump_plan.hpp`: gravity 2240..2640, peaks ↑ 121..143, ↑↑ 213..286,
+Ctrl + ↑ 392..463), and the game's own second jump is −800 again (state 6;
+[protocol-findings.md](protocol-findings.md)), not the −1440 the pathfinder
+can model after a high jump.
 
 Graph edges and their costs:
 
@@ -312,11 +338,17 @@ Graph edges and their costs:
 - Fall: 0.3.
 - Normal jump: 0.8 straight up, 0.7 to the left or right.
 - High jump: 2.5 straight up, 2.4 to the left or right.
-- Drop down, and double jump.
+- Drop down, and double jump -- but the double jump's `DJ_` edges are never
+  built: the double-jump flag is always false (`Init(…, false)` from both
+  `SetMapData` and go_client at 0x1400D12C7; `SetDoubleJump` is never
+  called). (Corrected 2026-11-05.)
 
 **Path following** (`PathfindingThread`, 40 times a second). It holds Left or
 Right toward each step's x and fires the step's action when it gets there: a
-plain jump, `JumpH`, `DownJump` or `DoubleJump`. Stuck means it moved less than
+plain jump, `JumpH`, `DownJump` or `DoubleJump` -- the last never happens, as
+no `DJ_` edge exists, and its executor matches the text "DoubleJump", so one
+would run as a single jump. Edges and landings are not checked against the
+working area, nor against gates. Stuck means it moved less than
 5 px in 2 s, checked every 500 ms. When stuck it drops the path, releases the
 arrows, jumps if on the ground, and plans again.
 
@@ -325,8 +357,19 @@ arrows, jumps if on the ground, and plans again.
 - The tolerance is `return_tolerance_x/y` (48/31).
 - It walks in chunks of at most 500 ms at 355 px/s.
 - Spot above by less than 132 px: jump. 132–280 px: double jump. More: high
-  jump. More than 484 px above is not tried this way.
-- Spot below: drop down, unless on a warp gate.
+  jump. More than 484 px above, it tries "stairs" first (corrected
+  2026-11-05; this page said it was not tried): the map platform nearest
+  above the character that lies between it and the spot and less than 484 px
+  up -- its x range not considered -- is walked to (the character's x clamped
+  to its ends ±48 px) and high-jumped onto straight up once within 32 px;
+  with no such platform, a high jump.
+- It does not walk under the spot first: with |dx| > 48 the arrow goes down
+  and the jump follows in the same pass, a jump to the side. The vertical
+  action needs only the game state's vertical speed at 0.0, not the
+  `0x002A` state. There is no landing check, no working-area check, no retry
+  count and no give-up: it jumps again on every pass while on the ground.
+- Spot below: drop down, unless on a warp gate. Jumps up are never
+  gate-checked.
 
 **Map collision** comes from ZTeam's server, gzipped, and is decoded in
 go_client.exe at `FUN_1400aa740`:

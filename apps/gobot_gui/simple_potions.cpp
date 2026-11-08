@@ -96,6 +96,28 @@ std::string key_at(std::uint32_t vk, const std::string& key) {
     return "key " + key + " at " + where(r);
 }
 
+/// Round a slot whose picture is kept, this much of the bar's frame: the
+/// slot's own edge and the label's corner, nothing of the screen beyond.
+constexpr int kSlotCutMargin = 3;
+
+/// One hotbar slot cut out of a frame, kSlotCutMargin round it (2026.11.04d):
+/// the slot's icon and its count, never a name, a chat line or a bar. Empty
+/// when it is not wholly in the frame.
+Frame slot_cut(const Frame& f, const ScreenRect& slot) {
+    Frame out;
+    const ScreenRect r{ slot.x - kSlotCutMargin, slot.y - kSlotCutMargin, slot.w + 2 * kSlotCutMargin,
+                        slot.h + 2 * kSlotCutMargin };
+    if (!f.valid() || r.x < 0 || r.y < 0 || r.right() > f.width || r.bottom() > f.height || !r.valid()) return out;
+    out.width = r.w;
+    out.height = r.h;
+    out.pixels.resize(static_cast<std::size_t>(r.w) * r.h * 4);
+    for (int y = 0; y < r.h; ++y)
+        std::copy_n(f.pixels.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(r.y + y) * f.width + r.x) * 4),
+                    static_cast<std::size_t>(r.w) * 4,
+                    out.pixels.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) * r.w * 4));
+    return out;
+}
+
 /// A key's name as it can go in a file's name: its letters and digits.
 std::string file_part(const std::string& key) {
     std::string out;
@@ -201,15 +223,29 @@ void GuiApp::potions_tick() {
             for (const PotionWatch::Event& ev : ui.watch.feed(vk, r)) {
                 using Kind = PotionWatch::Event::Kind;
                 switch (ev.kind) {
-                    case Kind::Low:
+                    case Kind::Low: {
                         if (by_bag) {
                             GB_INFO("Potions: key %s's slot reads %d -- not said: the bag holds %d of %u (packets)",
                                     key.c_str(), ev.count, bag_total, static_cast<unsigned>(bag_item));
                             break;
                         }
-                        GB_INFO("Potions: key %s is low -- %d left in its slot", key.c_str(), ev.count);
-                        alert("potion_low", alert_text::potion_low(hp, key, ev.count));
+                        // The slot's number is the stack in use; the bag's
+                        // total beside it, once the packets have learned what
+                        // the key drinks but before they are trusted for it
+                        // (2026.11.04d: "còn 5" with 100 more next to it).
+                        int unchecked = -1;
+                        std::uint32_t unchecked_item = 0;
+                        if (!bag_learned_count(vk, unchecked, unchecked_item)) unchecked = -1;
+                        if (unchecked >= 0)
+                            GB_INFO("Potions: key %s is low -- %d left in its slot, the stack in use; the bag holds %d "
+                                    "of %u (packets, not checked yet)",
+                                    key.c_str(), ev.count, unchecked, static_cast<unsigned>(unchecked_item));
+                        else
+                            GB_INFO("Potions: key %s is low -- %d left in its slot, the stack in use", key.c_str(),
+                                    ev.count);
+                        alert("potion_low", alert_text::potion_low(hp, key, ev.count, unchecked));
                         break;
+                    }
                     case Kind::Out:
                         GB_WARN("Potions: key %s's slot is empty, and the key is still pressed", key.c_str());
                         alert("potion_out", alert_text::potion_out(hp, key));
@@ -243,6 +279,29 @@ void GuiApp::potions_tick() {
                                 return text + "; the frame could not be kept";
                             prune(dir, kKeptFrames);
                             return text + "; kept the frame as potion_debug\\" + name;
+                        }));
+                        break;
+                    }
+                    case Kind::Unreadable: {
+                        // Two looks running, once a run: a picture of that
+                        // slot alone (slot_cut), written off this thread as a
+                        // misread's frame is (2026.11.04d: key G of 2026-11-04).
+                        const std::string text = "Potions: " + key_at(vk, key) + " unreadable on two looks running";
+                        int row = -1, col = -1;
+                        Frame f;
+                        if (got.spot.found && hotbar_slot_of(vk, row, col))
+                            f = slot_cut(got.frame, got.spot.slot(row, col));
+                        if (!f.valid()) {
+                            GB_INFO("%s -- no picture of the slot to keep", text.c_str());
+                            break;
+                        }
+                        const std::string name = stamp() + "_" + file_part(key) + "_unreadable.png";
+                        ui.saving.push_back(std::async(std::launch::async, [f = std::move(f), name, text] {
+                            const std::string dir = exe_relative("potion_debug");
+                            if (!make_folder(dir) || !save_png(f, dir + "\\" + name))
+                                return text + "; its picture could not be kept";
+                            prune(dir, kKeptFrames);
+                            return text + "; kept a picture of the slot alone as potion_debug\\" + name;
                         }));
                         break;
                     }

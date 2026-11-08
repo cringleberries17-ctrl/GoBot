@@ -9,10 +9,12 @@
 #include "gobot/config.hpp"
 #include "gobot/frame_pacer.hpp"
 #include "gobot/machine_info.hpp"
+#include "gobot/map_view.hpp"
 #include "test_support.hpp"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -127,6 +129,33 @@ void test_pacer_rates() {
         const FrameRates normal = FramePacer::normal_rates();
         check(normal.interactive == 30 && normal.idle == 5 && normal.background == 2,
               "and 30, 5 and 2 for everybody else");
+    }
+    {
+        // The Bản đồ tab shown, as GuiApp::pacing raises the rates: kMapTabFps
+        // behind the game and in front -- 10 since 2026.11.05, the owner's
+        // Q3 (a); 5 before -- and kMapTabLightFps, 2, with "Nhẹ máy".
+        const auto tab_rates = [](FrameRates r, int rate) {
+            r.background = std::max(r.background, rate);
+            r.idle = std::max(r.idle, rate);
+            return r;
+        };
+        FramePacer::Pass tab_bg = fg;
+        tab_bg.foreground = false;
+        tab_bg.rates = tab_rates(FramePacer::normal_rates(), kMapTabFps);
+        FramePacer p = settled(tab_bg);
+        const int behind = frames_over(p, tab_bg, kT0 + kTick, kT0 + 10'000);
+        FramePacer::Pass tab_fg = tab_bg;
+        tab_fg.foreground = true;
+        const int in_front = frames_over(p, tab_fg, kT0 + 10'000, kT0 + 20'000);
+        FramePacer::Pass light_bg = tab_bg;
+        light_bg.rates = tab_rates(FramePacer::light_rates(), kMapTabLightFps);
+        FramePacer q = settled(light_bg);
+        const int light_behind = frames_over(q, light_bg, kT0 + kTick, kT0 + 10'000);
+        check(kMapTabFps == 10 && kMapTabLightFps == 2 && behind >= 95 && behind <= 110 && in_front >= 95 &&
+                  in_front <= 110 && light_behind >= 19 && light_behind <= 21,
+              "the Bản đồ tab shown: 10 a second behind the game and in front (the owner's Q3 (a)), 2 in light mode "
+              "-- " + std::to_string(behind) + " and " + std::to_string(in_front) + " in ten seconds, " +
+                  std::to_string(light_behind) + " in light mode");
     }
     {
         // Typing, a combo open, a button held, a key box waiting: as long as
@@ -516,6 +545,16 @@ void test_pacer_wiring() {
     const std::size_t perf = gui.find("load_performance(app_ini);");
     check(matching != npos && perf != npos && matching < perf && perf - matching < 600,
           "gui_app.cpp: the GUI and Machine lines straight after the Template matching line");
+    const std::size_t pacing_at = gui.find("GuiApp::Pacing GuiApp::pacing() const {");
+    const std::size_t pacing_end = pacing_at == npos ? npos : gui.find("\n}", pacing_at);
+    const std::string pacing = pacing_end == npos ? std::string() : gui.substr(pacing_at, pacing_end - pacing_at);
+    check(pacing.find("if (simple_view_ && map_tab_open()) {") != npos &&
+              pacing.find("const int rate = light_.on ? kMapTabLightFps : kMapTabFps;") != npos &&
+              pacing.find("p.rates.background = std::max(p.rates.background, rate);") != npos &&
+              pacing.find("p.rates.idle = std::max(p.rates.idle, rate);") != npos &&
+              pacing.find("? 2 : 5") == npos && gui.find("#include \"gobot/map_view.hpp\"") != npos,
+          "gui_app.cpp: the Bản đồ tab shown raises the background and idle rates to kMapTabFps, kMapTabLightFps "
+          "in light mode -- the one place the owner's Q3 is");
     const std::string view = source("/apps/gobot_gui/simple_view.cpp");
     const std::size_t refocus = view.find("ImGui::Checkbox(\"Luôn đưa game lên trước khi bot đang chạy\"");
     const std::size_t row = refocus == npos ? npos : view.find("simple_light_row();", refocus);

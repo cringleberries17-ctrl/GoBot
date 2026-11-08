@@ -15,6 +15,7 @@
 #include "gobot/front_keeper.hpp"
 #include "gobot/game_state.hpp"
 #include "gobot/glyph_font.hpp"
+#include "gobot/hunt_zone.hpp"
 #include "gobot/hunter.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/mob_detector.hpp"
@@ -820,6 +821,13 @@ private:
     /// "Vị trí từ gói tin" is ticked and the packets are healthy. Declared
     /// before the hunter, so that it outlives it.
     std::unique_ptr<PacketEyes> packet_eyes_;
+    /// The map file the hunter's plates and its seek place the monsters on
+    /// (PacketEyes::Inputs::floors, 2026.11.05b): the map tab's, the dots'
+    /// own, while the hunter goes by the tab's area of that map with "Tự tìm
+    /// quái trong vùng" on -- set on the GUI thread (simple_map_tick), asked
+    /// on the hunter's. Null otherwise: the packets' own points.
+    std::mutex                               plate_floors_mx_;
+    std::shared_ptr<const GameMapBook::Page> plate_floors_;
     /// The game's own map files -- floors and gates -- for the hunter's drops
     /// (HunterConfig::drop_down), read on its thread at a map's first need.
     /// Not map_book_, the minimap's names typed by hand. Before the hunter,
@@ -894,6 +902,9 @@ private:
     /// A jump key's "Thử" under way, whoever started the detector for it
     /// (simple_style.cpp).
     bool jump_test_running() const;
+    /// A "Thử ↑", "Thử ↑↑" or "Thử Ctrl + ↑" under way: it presses a key, and
+    /// reads no plate (simple_style.cpp).
+    bool jump_kind_running() const;
 
     /// The camera tracker -- the search for how far the view moved, 3 to 10
     /// million samples a frame -- fed from the detector's frames only while
@@ -1120,6 +1131,18 @@ private:
     PacketCapture::Stats capture_seen_{};
     PacketWorld::Stats   hunt_world_seen_{};               // the Positions line counts from HUNT ON
     std::uint16_t  entry_from_map_ = 0, entry_from_area_ = 0;
+    /// Your last report as the 1-s sample before a map entry had it -- where,
+    /// when, and on which map entry -- for that entry's line, with GoBot's own
+    /// last key or click and the PC's last input beside it: who moved the
+    /// character there (note_map_entries, 2026.11.04d).
+    struct OwnSeen {
+        bool          set = false;
+        float         x = 0.0f, y = 0.0f;
+        std::uint64_t report_ms = 0;
+        std::uint32_t epoch = 0;
+        std::uint16_t map = 0, area = 0;
+    };
+    OwnSeen        own_seen_;
     /// The wall-clock time the capture running now was started, as the log
     /// writes it, for the "Packets:" line; and the last line's content, so
     /// that a minute with nothing new writes none.
@@ -1172,6 +1195,9 @@ private:
     void bag_check_tick(std::uint64_t now);
     void bag_note_hotbar(std::uint32_t vk, int count, std::uint64_t at);
     bool bag_low_count(std::uint32_t vk, int& total, std::uint32_t& item) const;
+    /// The bag's total of what `vk` drinks once the packets have learned it,
+    /// trusted or not -- for the words of a slot's "Low" alone.
+    bool bag_learned_count(std::uint32_t vk, int& total, std::uint32_t& item) const;
     bool bag_says_enough(int hp_below, int mp_below, int& hp_slots, int& mp_slots) const;   // any thread
     void bag_note_shop(int hp_slots_screen, int mp_slots_screen, bool skipped, std::uint64_t at);  // any thread
     std::string bag_charm_text(const std::string& clock_id, std::uint64_t claimed_at) const;
@@ -1184,7 +1210,11 @@ private:
     void more_on_packets(const std::vector<GamePacket>& all);    // capture thread
     void more_tick(std::uint64_t now);
     void note_casts_minute(std::uint64_t now);
+    void more_note_attack(std::uint32_t vk, std::uint64_t at_ms);   // the hunter's thread (set_on_attack)
     std::optional<std::uint64_t> packet_takeoffs() const;        // M; any thread
+    // 2026.11.05b, any thread: packet_takeoffs' rules, the counts by kind and your last reports
+    std::optional<PacketWorld::AirCounts> packet_air_counts() const;
+    std::vector<PacketWorld::OwnTrace> packet_own_since(std::uint64_t ms) const;
     // Slice 2 -- gui_app.cpp tick()
     std::uint32_t map_epoch_seen_ = 0; std::uint64_t minimap_overruled_ = 0;
     // Slice 6 -- packets_detector.cpp
@@ -1610,6 +1640,9 @@ private:
     /// Every key GoBot presses or watches, and what for: the new keys' boxes
     /// refuse each of them.
     std::vector<NamedKey> game_keys_in_use();
+    /// What game_keys_in_use calls the jumps up's ↑ (2026.11.05b): the jump
+    /// key's line leaves it out, as it leaves the jump key itself.
+    static constexpr const char* kJumpUpKeyVi = "nhảy lên (↑)";
     void simple_hotkey_box(bool trash);         ///< "Phím dọn ngay", or "Phím vào game ngay"
     std::string simple_hotkeys_line() const;    ///< the keys line's part for them
     /// "Vào game ngay": one crossing, by the keeper watching or by a keeper
@@ -1630,7 +1663,8 @@ private:
     /// What GoBot says against a drop, for the hunter's thread: worked out at
     /// every tick from what only this thread may read -- the macro held, a
     /// navigator walk, the keeper crossing, one of GoBot's own keys on Ctrl
-    /// or ↓ -- as one of DropVeto's codes; and whether HP is being read.
+    /// or ↓ (or ↑, with the jumps up on) -- as one of DropVeto's codes; and
+    /// whether HP is being read. The jumps up go by it too.
     enum DropVeto : int { kDropVetoNone, kDropVetoMacro, kDropVetoWalk, kDropVetoKeeper, kDropVetoHotkey };
     std::atomic<int>  drop_veto_{ kDropVetoNone };
     std::atomic<bool> drop_hp_watch_{ false };
@@ -1866,6 +1900,35 @@ private:
     void simple_keep_distance_tick();   ///< "Giữ khoảng cách", beside "Đứng yên một chỗ"
     void simple_drop_tick();            ///< "Nhảy xuống bậc dưới", after "Vị trí từ gói tin"
     void simple_drop_hints();           ///< its lines under the row
+    // "Nhảy lên bục trên" (HunterConfig::jump_up, 2026.11.05b): its tick
+    // after "Nhảy xuống bậc dưới", on by default and greyed with its reason
+    // while it cannot work as set (gobot/hunt_card.hpp); its lines under the
+    // row with "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑"; and the card's lines.
+    void simple_jump_up_tick();
+    void simple_jump_up_hints();
+    /// Why "Nhảy lên bục trên" cannot work as set, in Vietnamese: "" when it
+    /// can, as far as the settings tell.
+    std::string simple_jump_up_refusal_vi();
+    /// One jump of `kind` measured (JumpCheck::run_kind), on a thread of its own.
+    void simple_jump_kind_try(JumpKind kind);
+    /// The card's lines of the jump up while it hunts, each with whether it
+    /// is said in red (jump_up_card); and them drawn.
+    std::vector<std::pair<bool, std::string>> jump_up_card_vi(const Hunter::Status& hs);
+    void simple_jump_up_state(const Hunter::Status& hs);
+    // "Tự tìm quái trong vùng" (HunterConfig::seek_in_zone, 2026.11.05b): its
+    // tick after "Chỗ đánh quái", on by default and greyed with its reason
+    // while it cannot work as set; the card's line while it goes to a monster,
+    // and while nothing in the area is got to.
+    std::string simple_seek_refusal_vi();
+    void simple_seek_tick();
+    std::string seek_going_vi(const Hunter::Status& hs);
+    void simple_seek_none(const Hunter::Status& hs);
+    /// The drop's line for the player while it hunts -- off until the next
+    /// start, or why the monster below is not dropped to now -- "" for
+    /// nothing fresh within 1.5 s. `map_known_here`: the Bản đồ tab knows the
+    /// map while the drop's own check still names it. `off`: the line is the
+    /// drops being off. Here and on the Bản đồ tab.
+    std::string drop_wait_vi(const Hunter::Status& hs, bool map_known_here, bool* off = nullptr);
     /// Why "Nhảy xuống bậc dưới" cannot be ticked now, in Vietnamese: "" when
     /// it can.
     std::string simple_drop_refusal_vi();
@@ -1898,13 +1961,23 @@ private:
     /// Npcap's line on the checklist, the card's line under "Vị trí:", why
     /// fighting with it ticked does not start, and its part of the
     /// "Positions" line. The spot is the hunter's own, taken where the
-    /// character stands and kept for the run only; the area's numbers are in
-    /// the "Tầm đánh" window (simple_style.cpp). Lives in simple_spot.cpp.
+    /// character stands and kept for the run only -- or the hunting zone
+    /// saved for the map on the Bản đồ tab (simple_map.cpp); the area's
+    /// numbers are in the "Tầm đánh" window (simple_style.cpp). Lives in
+    /// simple_spot.cpp.
     void simple_spot_tick();            ///< "Chỗ đánh quái [Đặt chỗ này]", after "Vị trí từ gói tin"
     void simple_spot_hint();            ///< its line under the row, while it is ticked
     void simple_spot_checklist();       ///< Npcap's line in "Trước khi bắt đầu", while it is ticked
     /// The card's line under "Vị trí:", from the hunter's status.
     void simple_spot_state(const Hunter::Status& hs);
+    /// How far the character is from the spot -- or the zone's home -- and
+    /// the walks back: "nhân vật cách chỗ về 120 px, chỗ về thấp hơn 40 px;
+    /// đã đi về 3 lần". For the card's lines.
+    static std::string spot_offset_vi(const Hunter::Status& hs);
+    /// The map tab's zone, the character outside its box (2026.11.04d): how
+    /// far, and the way back the hunter walks -- first, or once nothing is
+    /// left to fight. "" inside it, for this run's spot, or not known.
+    static std::string spot_outside_vi(const Hunter::Status& hs);
     /// Why fighting with the spot ticked cannot start, or null when it can:
     /// the spot goes by where the game's packets put the character, so Npcap
     /// must be there and packet_positions not Off. In the log's English, and
@@ -1920,6 +1993,87 @@ private:
     /// The "Positions" line's part about the spot: where it is, how far off
     /// the character is, the walks back and those given up on.
     std::string spot_positions_text();
+
+    // ---- Bản đồ ----
+    /// The "Bản đồ" tab: the map the character is on from the game's own
+    /// files, the character and the monsters where the packets put them, and
+    /// the hunting zone of that map set on it with the mouse -- saved in
+    /// configs\spots.ini and handed to the hunter (Hunter::set_zone). Its
+    /// worker reads every file (MapViewJob, gobot/map_view.hpp); the GUI
+    /// thread reads none. Lives in simple_map.cpp.
+    void simple_map_tab();
+    /// From tick(): the worker's jobs posted and their results taken, and the
+    /// zone handed to the hunter -- whether the tab is drawn or not, while
+    /// it hunts with "Chỗ đánh quái".
+    void simple_map_tick();
+    /// Logged back in (the keeper) or another game window (Tìm lại): what
+    /// the tab knew of the map may be the old session's. Never makes the
+    /// tab's state.
+    void simple_map_lose();
+    /// From ~GuiApp: the worker waited for, the saves still owed written,
+    /// and the worker stopped. Never makes the tab's state.
+    void simple_map_stop();
+    /// "Đặt chỗ này" on a map with a saved zone (the owner's Q2,
+    /// kSpotHereMovesZone): the zone moved to where the character stands,
+    /// saved, with Hoàn tác. False when the map has none -- the hunter's
+    /// retake_spot then, as before.
+    bool map_zone_here();
+    /// The zone saved for the map the tab knows the character is on now, and
+    /// that map's name (tb_Map's, or its stem); none without one.
+    std::optional<HuntZone> map_zone_now(std::string* name) const;
+    /// Whether the tab knows the map the character is on now.
+    bool map_known_now() const;
+    /// That map's file as the tab's worker read it -- null with none, or with
+    /// its file found off: nothing is read here ("Thử ↑"'s floor above).
+    std::shared_ptr<const GameMapBook::Page> map_page_now() const;
+    /// A map's name from tb_Map when it is the one the tab knows, else its stem.
+    std::string map_name_of(const std::string& stem) const;
+    /// The tab drawn on this frame or the one before (as camera_panels_open):
+    /// its frames are paced faster (pacing()).
+    bool map_tab_open() const;
+    int  map_tab_frame_ = -10;
+    /// What sits under the tabs, measured at the last frame: the canvas's
+    /// height leaves room for BẮT ĐẦU and the card.
+    float start_block_h_ = 0.0f;
+    float version_h_ = 0.0f;
+    /// The map entries counted as the keeper's crossing began, and when: a
+    /// log in within kCrossKeepMs of it leaves that entry (lose_epoch_for).
+    std::uint32_t cross_epoch_ = 0;
+    std::uint64_t cross_ms_ = 0;
+    bool          was_crossing_ = false;
+    /// The log ins and Tìm lại the tab counts (its trust_gen), and the map
+    /// entry the last one left: kept here, not in the tab's state, so one
+    /// before the tab is first made counts too.
+    std::uint64_t map_logins_ = 0;
+    bool          map_lose_on_ = false;
+    std::uint32_t map_lose_epoch_ = 0;
+    struct MapUi;
+    struct MapUiFree { void operator()(MapUi* ui) const; };
+    struct MapView;
+    enum class MapCommit : std::uint8_t;
+    MapUi& map_ui();
+    void map_look(MapUi& ui, MapView& mv);
+    void map_post(MapUi& ui, std::uint64_t now);
+    void map_zone_tick(MapUi& ui, std::uint64_t now);
+    void map_canvas(MapUi& ui, MapView& mv);
+    void map_drag(MapUi& ui, const MapView& mv);
+    void map_release(MapUi& ui, const MapView& mv);
+    void map_menu(MapUi& ui, const MapView& mv);
+    void map_card(MapUi& ui, const MapView& mv);
+    /// `around_you`: "Tạo vùng quanh nhân vật", its home where the character
+    /// stands -- not the right-click's "Tạo vùng ở đây", at the point clicked.
+    bool map_try(MapUi& ui, const MapView& mv, const std::optional<HuntZone>& next, MapCommit how,
+                 bool around_you = false);
+    void map_commit_zone(MapUi& ui, const std::string& stem, const std::optional<HuntZone>& next, MapCommit how);
+    /// `bad`: said in red, as a zone just saved with much of it red is.
+    void map_note(MapUi& ui, const std::string& msg, bool bad = false);
+    /// After a commit: much of the box red (ZoneCheck::red_bad) said in red at
+    /// once and logged -- at every edit; `made_new` a zone made round the
+    /// character, its home where it stands (the owner's Q5).
+    void map_red_note(MapUi& ui, const std::string& stem, const ZoneCheck& c, bool made_new);
+    /// Declared after what its worker reads -- the packets, the capture, the
+    /// map files, the hunter -- so it goes before them.
+    std::unique_ptr<MapUi, MapUiFree> map_ui_;
 
     // ---- status ----
     std::string status_message_;

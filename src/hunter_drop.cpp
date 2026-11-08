@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 namespace gobot {
@@ -51,6 +52,62 @@ const char* trust_text(MapTrust::How how) {
         case MapTrust::How::None:   break;
     }
     return "not trusted";
+}
+
+/// The landing's floor -- its top land_y under x0 -- followed m columns `dir`,
+/// across a hole as the game walks over it, and at the column it comes to the
+/// first floor more than kDropFeetPx below the character's own there (its
+/// floor from x0, y0 followed, or y0 past that floor's end): the same floor,
+/// kDropSameFloorPx up or down. No floor between, and the landing's not
+/// ending, within m -- on a slope as on the flat: t52_s2's ramp and ground
+/// run 0.4 to 0.74 px a column, and "the same height either side" failed on
+/// every one of them, landing or standing (2026.11.04d).
+bool landing_holds(const GameMapBook::Page& p, int x0, int y0, int land_y, int dir, int m) {
+    const MapTrail t = p.follow(x0, land_y - 1, dir, m);
+    // m columns on, or the column before a hole there.
+    const MapPoint* at = nullptr;
+    bool reached = false;
+    for (const MapPoint& q : t.pts) {
+        const int d = std::abs(q.x - x0);
+        if (d >= m) reached = true;
+        if (d <= m) at = &q;
+    }
+    if (!reached || at == nullptr) return false;
+    const std::optional<int> own = p.follow_to(x0, y0, at->x);
+    const std::optional<MapFloor> o = p.floor_below(at->x, own ? *own - 1 : y0, Hunter::kDropFeetPx);
+    return o && std::abs(o->y - at->y) <= Hunter::kDropSameFloorPx;
+}
+
+/// The minute line's words for what refused a look at a target below.
+const char* drop_why_short(Hunter::DropWhy w) {
+    switch (w) {
+        case Hunter::DropWhy::LevelMonster: return "a monster on the level";
+        case Hunter::DropWhy::TooFarSide:   return "too far across";
+        case Hunter::DropWhy::NotKnown:     return "you not known";
+        case Hunter::DropWhy::AfterEntry:   return "just after a map entry";
+        case Hunter::DropWhy::NotSettled:   return "not settled";
+        case Hunter::DropWhy::InAir:        return "in the air";
+        case Hunter::DropWhy::TooSoon:      return "too soon";
+        case Hunter::DropWhy::StepJudge:    return "a step back";
+        case Hunter::DropWhy::Walking:      return "walking";
+        case Hunter::DropWhy::MinuteCap:    return "minute's used up";
+        case Hunter::DropWhy::TargetCap:    return "monster's used up";
+        case Hunter::DropWhy::Held:         return "a hold";
+        case Hunter::DropWhy::Unfocused:    return "the game behind";
+        case Hunter::DropWhy::Loot:         return "pick-ups";
+        case Hunter::DropWhy::Veto:         return "GoBot's veto";
+        case Hunter::DropWhy::MapUnknown:   return "map not trusted";
+        case Hunter::DropWhy::OffFloor:     return "off its floors";
+        case Hunter::DropWhy::Bottom:       return "the bottom ground";
+        case Hunter::DropWhy::NoLanding:    return "no landing";
+        case Hunter::DropWhy::ShortFall:    return "short fall";
+        case Hunter::DropWhy::PastMonster:  return "past the monster";
+        case Hunter::DropWhy::OutsideArea:  return "outside the area";
+        case Hunter::DropWhy::Gate:         return "gate";
+        case Hunter::DropWhy::NoDropHere:   return "no drop here before";
+        case Hunter::DropWhy::AfterJump:    return "after a jump up";
+        default:                            return Hunter::drop_why_name(w);
+    }
 }
 
 /// What the player can do something about: said at INFO, once per target.
@@ -110,8 +167,44 @@ const char* Hunter::drop_why_name(DropWhy w) {
         case DropWhy::OutsideArea:     return "outside the hunting area";
         case DropWhy::Gate:            return "a gate is near";
         case DropWhy::NoDropHere:      return "Ctrl+Down did not drop here before";
+        case DropWhy::AfterJump:       return "a jump up toward a monster worked a moment ago";
     }
     return "?";
+}
+
+bool Hunter::drop_lasting(DropWhy w) {
+    // From the same standing point the next look refuses again: a gate, the
+    // floors under and below, the area, no drop here before, the monster's
+    // drops used up. Not the clock, a hold, a walk or the packets.
+    switch (w) {
+        case DropWhy::Gate:
+        case DropWhy::NoDropHere:
+        case DropWhy::NoLanding:
+        case DropWhy::ShortFall:
+        case DropWhy::PastMonster:
+        case DropWhy::Bottom:
+        case DropWhy::OutsideArea:
+        case DropWhy::TargetCap:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<int> Hunter::target_floor(const GameMapBook::Page& p, bool stood, MapPoint stand, int tx, int ty) {
+    // The floor it last stood on, followed to its column -- a walk moves a
+    // monster's x alone, so its point may be as far off that floor as the
+    // slope it walked, a pixel a column at most, and kDropMonsterFloorPx
+    // more; further, it has gone elsewhere since.
+    if (stood) {
+        const std::optional<MapFloor> on = p.floor_near(stand.x, stand.y);
+        if (on && !on->wall()) {
+            const std::optional<int> top = p.follow_to(stand.x, stand.y, tx);
+            const int slack = kDropMonsterFloorPx + std::abs(tx - stand.x);
+            if (top && std::abs(*top - ty) <= slack) return top;
+        }
+    }
+    return monster_floor(p, tx, ty);
 }
 
 const char* Hunter::drop_off_name(DropOff o) {
@@ -136,6 +229,55 @@ void Hunter::set_drop_veto(std::function<const char*()> veto) { drop_veto_ = std
 
 bool Hunter::drop_wanted(const HunterConfig& cfg) {
     return cfg.drop_down && cfg.packet_positions == PacketPositions::On && !cfg.stay_put;
+}
+
+bool Hunter::drops_may_go(const HunterConfig& cfg) const {
+    return drop_wanted(cfg) && drop_latch_ == DropOff::None && trust_.trusted() &&
+           (!cfg.spot || spot_mode_ == SpotMode::Use);
+}
+
+bool Hunter::drop_stop_above(const HunterConfig& cfg, const Nameplate& target, int dx, int dy) const {
+    // Q6 (a): walked by dx's sign, the character never stops above it -- every
+    // judging of the drop was of a walk going on, 24 px either side, at
+    // whichever column the walk had got to. (b), kDropStopAbovePx 0: never.
+    if (kDropStopAbovePx <= 0 || target.slot < 0 || !drops_may_go(cfg)) return false;
+    return dy > std::max(cfg.down(), cfg.drop_min_px) && std::abs(dx) <= kDropStopAbovePx;
+}
+
+void Hunter::note_stands(const std::vector<MapTrust::Mob>& mobs) {
+    for (const MapTrust::Mob& m : mobs) {
+        MobStand* s = nullptr;
+        for (MobStand& e : mob_stands_)
+            if (e.slot == m.slot) s = &e;
+        if (s == nullptr) {
+            if (mob_stands_.size() >= 128) mob_stands_.erase(mob_stands_.begin());
+            mob_stands_.push_back(MobStand{});
+            s = &mob_stands_.back();
+            s->slot = m.slot;
+            s->gen = m.gen;
+            s->y = m.at.y;
+            s->y_ms = s->last_ms = m.at_ms;
+            continue;
+        }
+        // Another monster in its slot: nothing of the last one's stands.
+        if (s->gen != m.gen) {
+            *s = MobStand{};
+            s->slot = m.slot;
+            s->gen = m.gen;
+            s->y = m.at.y;
+            s->y_ms = s->last_ms = m.at_ms;
+            continue;
+        }
+        if (m.at_ms == s->last_ms) continue;     // the same frame again
+        s->last_ms = m.at_ms;
+        if (std::abs(m.at.y - s->y) > MapTrust::kMobSameYPx) {
+            s->y = m.at.y;
+            s->y_ms = m.at_ms;
+        } else if (m.at_ms >= s->y_ms + MapTrust::kMobStandMs) {
+            s->stood = true;
+            s->at = m.at;
+        }
+    }
 }
 
 bool Hunter::level_monster(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
@@ -195,6 +337,10 @@ Hunter::DropCall Hunter::drop_rule(const HunterConfig& cfg, const DropFacts& f) 
     // 9. The hunter's own clock.
     if (f.in_air) return no(DropWhy::InAir);
     if (f.last_press_ms != 0 && f.now < f.last_press_ms + kDropGapMs) return no(DropWhy::TooSoon);
+    // A jump up toward a target that worked a moment ago: a drop would take
+    // the character back down the floor it jumped onto (2026.11.05b).
+    if (f.last_jump_worked_ms != 0 && f.now < f.last_jump_worked_ms + kJumpUpStayMs)
+        return no(DropWhy::AfterJump, static_cast<int>(f.last_jump_worked_ms + kJumpUpStayMs - f.now));
     if (f.step_judge) return no(DropWhy::StepJudge);
     if (f.press && (f.left_held || f.right_held)) return no(DropWhy::Walking);
     // 10. Limits.
@@ -211,6 +357,24 @@ Hunter::DropCall Hunter::drop_rule(const HunterConfig& cfg, const DropFacts& f) 
     const GameMapBook::Page& page = *f.page;
     c.x0 = round_px(f.press ? fix.rx : fix.x);
     c.y0 = round_px(f.press ? fix.ry : fix.y);
+    // As a settle begins, the fix is worked out along a walk, and its height
+    // stays the last report's: on a slope the floor the report stood on,
+    // followed to here, is where the character is (2026-11-04 20:40:01, 70
+    // px under t52_s2's ramp).
+    if (!f.press) {
+        const int rx = round_px(fix.rx), ry = round_px(fix.ry);
+        const std::optional<MapFloor> was = page.floor_near(rx, ry);
+        if (was && !was->wall())
+            if (const std::optional<int> top = page.follow_to(rx, ry, c.x0)) c.y0 = *top - 1;
+    }
+    c.tx = round_px(f.target_wx);
+    c.ty = round_px(f.target_wy);
+    c.placed = true;
+    // The monster's floor: where it last stood, or the first floor at or
+    // under its point -- its point alone is often in the air. Looked up here,
+    // so every refusal from here on says it (drop_refused).
+    const std::optional<int> theirs = target_floor(page, f.target_stood, f.target_stand, c.tx, c.ty);
+    c.target_floor = theirs ? *theirs : -1;
     const int x0 = c.x0, y0 = c.y0;
     const std::optional<MapFloor> under = page.floor_near(x0, y0);
     if (f.press && !under) return no(DropWhy::OffFloor);
@@ -225,27 +389,32 @@ Hunter::DropCall Hunter::drop_rule(const HunterConfig& cfg, const DropFacts& f) 
     if (!land) return no(DropWhy::NoLanding);
     c.land_y = land->y;
     if (land->y - y0 < kDropMinFallPx) return no(DropWhy::ShortFall, land->y - y0);
-    const int ty = round_px(f.target_wy);
-    if (land->y > ty + kDropFloorMatchPx) return no(DropWhy::PastMonster, land->y - ty);
+    // The landing is on the monster's floor when the landing's floor,
+    // followed to the monster, is it: on a slope the two are as far apart in
+    // height as across. Otherwise past it when lower than it.
+    const int floor_y = theirs ? *theirs : c.ty;
+    if (theirs) {
+        const std::optional<int> there = page.follow_to(x0, land->y - 1, c.tx);
+        c.direct = there && std::abs(*there - *theirs) <= kDropSameFloorPx;
+    } else {
+        c.direct = std::abs(land->y - c.ty) <= kDropFloorMatchPx;
+    }
+    if (!c.direct && land->y > floor_y + kDropFloorMatchPx) return no(DropWhy::PastMonster, land->y - floor_y);
     // kDropMarginSettlePx only for a place worked out along a walk, where the
     // stop may come a step on; standing, it is the report's own, and the
     // press's margin holds as it begins. At 24 px the player's own 06:48:49
     // -- 17 px in from the end of the monster's floor -- would never settle.
+    // Each side by the floors as they run, sloping or flat (landing_holds).
     const int margin = f.press || fix.settled() ? kDropMarginPressPx : kDropMarginSettlePx;
-    for (const int x : { x0 - margin, x0 + margin }) {
-        const std::optional<MapFloor> o = page.floor_below(x, y0, kDropFeetPx);
-        if (!o || std::abs(o->y - land->y) > kDropSameFloorPx) return no(DropWhy::NoLanding, x - x0);
-    }
-    c.direct = std::abs(land->y - ty) <= kDropFloorMatchPx;
+    for (const int dir : { -1, 1 })
+        if (!landing_holds(page, x0, y0, land->y, dir, margin)) return no(DropWhy::NoLanding, dir * margin);
     // The player's answer 2: with the hunting spot on, never a drop that
     // leaves its area -- where it stands, where it lands and the target all
-    // inside it.
+    // inside it: x +- half_w and y +- half_h round the spot taken where the
+    // character stood, the map tab's own box for its area (Spot::inside).
     if (cfg.spot) {
         const Spot& a = f.area;
-        const auto inside = [&a](float x, float y) {
-            return std::abs(x - a.x) <= static_cast<float>(a.half_w) &&
-                   std::abs(y - a.y) <= static_cast<float>(a.half_h);
-        };
+        const auto inside = [&a](float x, float y) { return a.inside(x, y); };
         if (!inside(static_cast<float>(x0), static_cast<float>(y0)) ||
             !inside(static_cast<float>(x0), static_cast<float>(land->y)) || !inside(f.target_wx, f.target_wy))
             return no(DropWhy::OutsideArea);
@@ -292,6 +461,7 @@ Hunter::DropFacts Hunter::drop_facts(const HunterConfig& cfg, const Nameplate& t
     f.walk_held = drop_.walk_held;
     f.in_air = in_air(now);
     f.last_press_ms = last_press_ms_;
+    f.last_jump_worked_ms = last_jump_worked_ms_;
     f.step_judge = back_.judge;
     f.left_held = cfg.left_key != 0 && is_down(cfg.left_key);
     f.right_held = cfg.right_key != 0 && is_down(cfg.right_key);
@@ -308,6 +478,14 @@ Hunter::DropFacts Hunter::drop_facts(const HunterConfig& cfg, const Nameplate& t
         const MapPoint here{ round_px(press ? f.fix.rx : f.fix.x), round_px(press ? f.fix.ry : f.fix.y) };
         f.no_drop_here = book_->no_drop_near(f.page->stem, here);
     }
+    // Where the target last stood, by its own frames: its floor, whatever its
+    // point says now.
+    if (target.slot >= 0)
+        for (const MobStand& s : mob_stands_)
+            if (static_cast<int>(s.slot) == target.slot && s.gen == target.gen && s.stood) {
+                f.target_stood = true;
+                f.target_stand = s.at;
+            }
     return f;
 }
 
@@ -340,18 +518,28 @@ void Hunter::drop_watch(const HunterConfig& cfg, std::uint64_t now) {
         drop_suspend_asked_ = false;
     }
     if (press_.open && now >= press_.down_ms + kPressWatchMs) press_.open = false;
+    if (press_other_.open && now >= press_other_.down_ms + kPressWatchMs) press_other_.open = false;
+    const bool watched = press_.open || press_other_.open;
     drop_fix_ = WorldFix{};
     drop_fix_on_ = false;
     // Logged back in: where the character stands may be another map's.
     if (suspend) {
         trust_.lose("logged back in");
         drop_hold("logged back in");
+        jump_hold("logged back in");
     }
-    const bool on = drop_wanted(cfg);
-    if (!on && !press_.open) {
-        // Switched off mid-drop: whatever was under way is over. Nothing new
-        // is asked of the eyes.
-        drop_hold("drop_down switched off");
+    // The jumps up watch the same map, the same press record and the same
+    // owed keys: with the map tab's area in use and the packets steering,
+    // jump_up on or off -- off, for the "would jump" lines (2026.11.05b).
+    const bool drops = drop_wanted(cfg);
+    const bool jumps = jump_watch(cfg);
+    const bool on = drops || jumps;
+    // Switched off mid-drop, or mid-jump, with no press to watch: whatever
+    // was under way is over.
+    if (!drops && !watched) drop_hold("drop_down switched off");
+    if (!jumps && !watched) jump_hold("no area to jump in");
+    if (!on && !watched) {
+        // Nothing new is asked of the eyes.
         return;
     }
 
@@ -363,14 +551,22 @@ void Hunter::drop_watch(const HunterConfig& cfg, std::uint64_t now) {
     if (settled) {
         owed_passes_ = 0;
     } else if (++owed_passes_ >= kDropOwedPasses && !drop_halt_) {
+        // Whose keys: a high jump's ↑ (no ↓ goes down there), or a drop's.
+        const bool up = hands_.up_owed ? hands_.up_owed() : input_.up_owed();
         latch_drops(DropOff::KeysStuck);
+        latch_jumps(JumpUpOff::KeysStuck);
         drop_halt_ = true;
-        drop_stop_.store(DropStop::KeysStuck);
+        drop_stop_.store(up ? DropStop::JumpKeysStuck : DropStop::KeysStuck);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             status_.drop_keys_stuck = true;
         }
-        GB_WARN("Hunter: keys owed after a drop (Down or Ctrl up not sent, %d passes) -- hunting stops", owed_passes_);
+        if (up)
+            GB_WARN("Hunter: keys owed after a jump up (Up or Ctrl up not sent, %d passes) -- hunting stops",
+                    owed_passes_);
+        else
+            GB_WARN("Hunter: keys owed after a drop (Down or Ctrl up not sent, %d passes) -- hunting stops",
+                    owed_passes_);
     }
 
     // Where the packets put the character, for the drop: asked here, once.
@@ -385,16 +581,32 @@ void Hunter::drop_watch(const HunterConfig& cfg, std::uint64_t now) {
         drop_entry_ms_ = now;
     }
     // A map change within kPressWatchMs of a press, however late its entry
-    // came and whatever was judged of the press: the press's.
-    if (press_.open && drop_fix_on_ && f.epoch != press_.epoch0) drop_gate(now);
+    // came and whatever was judged of the press: the press's -- and a press
+    // of the other kind still watched may as well have been it: both undone
+    // and learned, both switched off, the stop stored once for the two (the
+    // window never reads one before the other).
+    if (drop_fix_on_) {
+        const bool older = press_other_.open && f.epoch != press_other_.epoch0;
+        const bool newest = press_.open && f.epoch != press_.epoch0;
+        if (older) drop_gate(press_other_, now);
+        if (newest) drop_gate(press_, now);
+        if (older && newest)
+            drop_stop_.store(DropStop::BothMapChanged);
+        else if (older || newest)
+            drop_stop_.store((newest ? press_.jump : press_other_.jump) ? DropStop::JumpMapChanged
+                                                                        : DropStop::MapChanged);
+    }
     if (!on) return;
 
     // The map drops go by: from the entry, or named from standing points --
-    // the character's own, and the monsters' where their frames put them.
+    // the character's own, and the monsters' where two of their frames agree.
+    // Only the character's own let it go, two of them (MapTrust).
     MapTrust::Look look;
     look.now_ms = now;
     look.capture = drop_fix_on_ && f.state != WorldFix::State::NoCapture && f.state != WorldFix::State::FirstReport;
-    look.settled = f.settled();
+    // Not a point taken in a jump up's flight: a cast's report holds its y at
+    // the top (2026.11.05b).
+    look.settled = f.settled() && !jump_in_air(now);
     look.rx = round_px(f.rx);
     look.ry = round_px(f.ry);
     look.report_ms = f.report_ms;
@@ -405,6 +617,9 @@ void Hunter::drop_watch(const HunterConfig& cfg, std::uint64_t now) {
     look.entry_x = round_px(f.entry_x);
     look.entry_y = round_px(f.entry_y);
     if (look.capture && eyes_.stands) look.mobs = eyes_.stands();
+    // Where each monster last stood, from the same frames: the floor a drop
+    // to it is judged by.
+    note_stands(look.mobs);
     trust_.update(look);
     const MapTrust::Report report = trust_.report();
     std::lock_guard<std::mutex> lock(mutex_);
@@ -440,8 +655,15 @@ void Hunter::drop_follow(const HunterConfig& cfg, std::uint64_t now) {
     if (reported && !f.airborne && f.state == WorldFix::State::Known) {
         const int rx = round_px(f.rx), ry = round_px(f.ry);
         if (ry >= drop_.y0 + kDropLandPx) {
-            end_fall(cfg, std::abs(ry - drop_.land_y) <= kDropFloorMatchPx ? DropVerdict::Worked : DropVerdict::OffMap,
-                     now, rx, ry, nullptr);
+            // Against the floor the file said, at where it came down: that
+            // floor followed from under the press to the landing's column --
+            // on t52_s2's ramp 16 px across is 12 lower or higher, and a good
+            // landing would have read as off the map, the file distrusted.
+            int floor_y = drop_.land_y;
+            if (drop_.page)
+                if (const std::optional<int> top = drop_.page->follow_to(drop_.x0, drop_.land_y - 1, rx)) floor_y = *top;
+            end_fall(cfg, std::abs(ry - floor_y) <= kDropFloorMatchPx ? DropVerdict::Worked : DropVerdict::OffMap, now,
+                     rx, ry, nullptr);
             return;
         }
         if (ry <= drop_.y0 - kDropLandPx) {
@@ -463,6 +685,8 @@ void Hunter::drop_follow(const HunterConfig& cfg, std::uint64_t now) {
 bool Hunter::drop_toward(const HunterConfig& cfg, const Nameplate& target, const Nameplate& me,
                          const std::vector<Nameplate>& mobs, const std::vector<Listed>& listed, int dx, int dy,
                          std::uint64_t now) {
+    // What refused it this pass, for the seek (drop_refused sets it).
+    drop_why_pass_ = DropWhy::None;
     // Falling: held still -- no walk and no hop -- until it is judged, and
     // after a fall not judged for as long as it may still be in the air: a
     // walk would steer the fall.
@@ -482,6 +706,10 @@ bool Hunter::drop_toward(const HunterConfig& cfg, const Nameplate& target, const
 
     DropFacts facts = drop_facts(cfg, target, me, mobs, listed, dx, dy, now, settling);
     const DropCall call = drop_rule(cfg, facts);
+    // For the minute line: each look at a target below -- and what refused
+    // it, counted by drop_refused: a settle's wait for the stop's report is
+    // no refusal, and a drop that went after it is not "not settled".
+    ++minute_drop_looks_;
 
     if (!settling) {
         // Something to fight on the character's own level: the one below is
@@ -519,6 +747,7 @@ bool Hunter::drop_toward(const HunterConfig& cfg, const Nameplate& target, const
         drop_.renewed_pass = passes_;
         drop_.slot = target.slot;
         drop_.gen = target.gen;
+        ++minute_drop_settles_;
         let_go_of_moves(cfg);
         disengage();
         // No give-up while it settles and falls: the clock held still for the
@@ -593,6 +822,10 @@ bool Hunter::press_drop(const HunterConfig& cfg, const DropCall& call, const Nam
     const int for_it = drop_presses_for(drop_.slot, drop_.gen);
     ++minute_drops_;
     last_press_ms_ = after;
+    // A jump up's press still watched kept watched beside this one; a drop's
+    // left from before, closed.
+    if (press_.open && press_.jump) press_other_ = press_;
+    else if (!press_other_.jump) press_other_.open = false;
     press_ = PressRecord{};
     press_.open = true;
     press_.down_ms = p.down_ms;
@@ -613,6 +846,7 @@ bool Hunter::press_drop(const HunterConfig& cfg, const DropCall& call, const Nam
     drop_.y0 = call.y0;
     drop_.land_y = call.land_y;
     drop_.stem = stem;
+    drop_.page = trust_.page();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ++status_.drops;
@@ -756,17 +990,25 @@ void Hunter::end_fall(const HunterConfig& cfg, DropVerdict v, std::uint64_t now,
                     drop_fails_row_ >= kDropFailsInRow ? "in a row" : "this run");
         }
     }
-    // What the press's record has to undo, should the map turn out changed.
-    if (press_.open && press_.down_ms == drop_.down_ms) {
-        press_.verdict = v;
-        press_.no_drop = learn && book_ && !drop_.stem.empty();
-        press_.failed = fail;
-        press_.minute_from = minute_from_ms_;
+    // What the press's record has to undo, should the map turn out changed --
+    // the newest's, or the one kept beside a jump's since.
+    PressRecord* rec = nullptr;
+    for (PressRecord* c : { &press_, &press_other_ })
+        if (c->open && !c->jump && c->down_ms == drop_.down_ms) rec = c;
+    if (rec != nullptr) {
+        rec->verdict = v;
+        rec->no_drop = learn && book_ && !drop_.stem.empty();
+        rec->failed = fail;
+        rec->minute_from = minute_from_ms_;
     }
 }
 
-void Hunter::drop_gate(std::uint64_t now) {
-    PressRecord& r = press_;
+void Hunter::drop_gate(PressRecord& r, std::uint64_t now) {
+    // A jump up's key: its own undoing (hunter_jump.cpp).
+    if (r.jump) {
+        jump_gate(r, now);
+        return;
+    }
     r.open = false;
     const WorldFix& f = drop_fix_;
     // Whatever was judged of it before is undone: a no-drop point learned, a
@@ -800,7 +1042,6 @@ void Hunter::drop_gate(std::uint64_t now) {
     }
     latch_drops(DropOff::MapChanged);
     drop_halt_ = true;
-    drop_stop_.store(DropStop::MapChanged);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         status_.drop_map_changed = true;
@@ -824,6 +1065,9 @@ void Hunter::latch_drops(DropOff why) {
 
 void Hunter::drop_refused(const HunterConfig& cfg, const DropCall& call, const Nameplate& target, int dy,
                           std::uint64_t now) {
+    drop_why_pass_ = call.why;
+    // Every refusal acted on, for the minute line's "refused:".
+    ++minute_drop_why_[static_cast<std::size_t>(call.why)];
     {
         std::lock_guard<std::mutex> lock(mutex_);
         status_.drop_wait = call.why;
@@ -838,7 +1082,7 @@ void Hunter::drop_refused(const HunterConfig& cfg, const DropCall& call, const N
     }
     if (call.why == drop_said_why_) return;
     drop_said_why_ = call.why;
-    char more[96] = "";
+    char more[320] = "";
     switch (call.why) {
         case DropWhy::Gate:
             std::snprintf(more, sizeof more, " (%d px across; drop_gate_px is %d)", call.px, cfg.drop_gate_px);
@@ -846,11 +1090,40 @@ void Hunter::drop_refused(const HunterConfig& cfg, const DropCall& call, const N
         case DropWhy::PastMonster:
             std::snprintf(more, sizeof more, " (floor %d, %d px below it)", call.land_y, call.px);
             break;
-        case DropWhy::MapUnknown:
-            std::snprintf(more, sizeof more, " (%s)", MapTrust::why_text(trust_.report().why));
+        case DropWhy::MapUnknown: {
+            // Found wrong: which point of yours did it, and how far from the
+            // floors -- a monster's never does.
+            const MapTrust::Report r = trust_.report();
+            if (r.why == MapTrust::Why::Mismatch)
+                std::snprintf(more, sizeof more, " (%s: the last at %d,%d, %s)", MapTrust::why_text(r.why), r.miss.x,
+                              r.miss.y, r.miss_gap.empty() ? "?" : r.miss_gap.c_str());
+            else
+                std::snprintf(more, sizeof more, " (%s)", MapTrust::why_text(r.why));
+            break;
+        }
+        case DropWhy::OffFloor:
+            // The press's own check, one report: this press only, the file
+            // still gone by (MapTrust lets it go at two).
+            if (const std::shared_ptr<const GameMapBook::Page> page = trust_.page())
+                std::snprintf(more, sizeof more, " (you at %d,%d: %s)", call.x0, call.y0,
+                              page->gap_text(call.x0, call.y0).c_str());
             break;
         default:
             break;
+    }
+    // Where it was judged from: the character, the floor under it, the
+    // monster and its floor -- the log of 2026-11-04 had to be rebuilt from
+    // the map by hand to say. Only once the map was gone by.
+    if (call.placed) {
+        const std::size_t at = std::strlen(more);
+        char under[16] = "none";
+        if (call.stand_y >= 0) std::snprintf(under, sizeof under, "%d", call.stand_y);
+        char theirs[48] = "no floor within 100 px under it";
+        if (call.target_floor >= 0) std::snprintf(theirs, sizeof theirs, "its floor %d", call.target_floor);
+        if (at < sizeof more)
+            std::snprintf(more + at, sizeof more - at, "; you at %d,%d (floor %s), the monster at %d,%d (%s), %d px %s",
+                          call.x0, call.y0, under, call.tx, call.ty, theirs, std::abs(call.tx - call.x0),
+                          call.tx < call.x0 ? "left" : "right");
     }
     // Once a target for what the player can do something about; the rest,
     // and any again, at DEBUG.
@@ -864,16 +1137,36 @@ void Hunter::drop_refused(const HunterConfig& cfg, const DropCall& call, const N
 }
 
 std::string Hunter::drop_minute_text() const {
-    if (minute_drops_ == 0 && minute_drop_worked_ == 0 && minute_drop_nothing_ == 0 && minute_drop_jump_ == 0 &&
-        minute_drop_rose_ == 0 && minute_drop_off_map_ == 0 && minute_drop_gate_ == 0 && minute_drop_unknown_ == 0)
-        return {};
-    char text[200];
-    std::snprintf(text, sizeof text,
-                  "; drops %d (%d worked, %d did nothing, %d jumps in place, %d rose, %d off the map, %d map changes, "
-                  "%d unknown)",
-                  minute_drops_, minute_drop_worked_, minute_drop_nothing_, minute_drop_jump_, minute_drop_rose_,
-                  minute_drop_off_map_, minute_drop_gate_, minute_drop_unknown_);
-    return text;
+    std::string out;
+    if (minute_drops_ != 0 || minute_drop_worked_ != 0 || minute_drop_nothing_ != 0 || minute_drop_jump_ != 0 ||
+        minute_drop_rose_ != 0 || minute_drop_off_map_ != 0 || minute_drop_gate_ != 0 || minute_drop_unknown_ != 0) {
+        char text[200];
+        std::snprintf(text, sizeof text,
+                      "; drops %d (%d worked, %d did nothing, %d jumps in place, %d rose, %d off the map, %d map "
+                      "changes, %d unknown)",
+                      minute_drops_, minute_drop_worked_, minute_drop_nothing_, minute_drop_jump_, minute_drop_rose_,
+                      minute_drop_off_map_, minute_drop_gate_, minute_drop_unknown_);
+        out = text;
+    }
+    // And the looks at a target below that asked the rule, pressed or not:
+    // the settles begun, and what refused the rest, most first.
+    if (minute_drop_looks_ > 0) {
+        char text[64];
+        std::snprintf(text, sizeof text, "; drop looks %d (settles %d", minute_drop_looks_, minute_drop_settles_);
+        out += text;
+        std::vector<std::size_t> order;
+        for (std::size_t i = 0; i < kDropWhys; ++i)
+            if (minute_drop_why_[i] > 0) order.push_back(i);
+        std::stable_sort(order.begin(), order.end(),
+                         [this](std::size_t a, std::size_t b) { return minute_drop_why_[a] > minute_drop_why_[b]; });
+        for (std::size_t k = 0; k < order.size(); ++k) {
+            std::snprintf(text, sizeof text, "%s%s %d", k == 0 ? "; refused: " : ", ",
+                          drop_why_short(static_cast<DropWhy>(order[k])), minute_drop_why_[order[k]]);
+            out += text;
+        }
+        out += ")";
+    }
+    return out;
 }
 
 } // namespace gobot

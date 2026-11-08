@@ -94,6 +94,11 @@ std::vector<std::uint32_t> potion_keys_of(const MacroConfig& cfg) {
 struct GuiApp::MorePart {
     CastMatch casts;
     BuffWatch buffs;
+    /// The hunter's own presses of its attack key since the last pairing
+    /// (Hunter::set_on_attack), from its thread: the macro skips that key, so
+    /// a cast of it was given to some macro key (2026.11.04d).
+    std::mutex                    attack_mutex;
+    std::vector<CastMatch::Press> attacks;
     /// Whether the capture was on the game GoBot follows when more_tick last
     /// looked, and when that was: position_link_ is GoBot's thread's, and the
     /// jump test asks from a thread of its own.
@@ -132,7 +137,25 @@ void GuiApp::more_tick(std::uint64_t now) {
         press.at_ms = p.at_ms;
         presses.push_back(press);
     }
+    {
+        // And the hunter's attack key's (2026.11.04d): those the pairing has
+        // not passed yet, the rest let go of.
+        const std::uint64_t from = part.casts.pair_from();
+        std::lock_guard<std::mutex> lock(part.attack_mutex);
+        std::erase_if(part.attacks, [from](const CastMatch::Press& p) { return p.at_ms < from; });
+        presses.insert(presses.end(), part.attacks.begin(), part.attacks.end());
+    }
     part.casts.pair(presses, buff_keys_of(macro_config_), now);
+    // Each buff key's burst, once judged: whether the packets saw it cast.
+    for (const CastMatch::Burst& b : part.casts.take_bursts())
+        Logger::instance().write(LogLevel::Info, burst_line(b));
+}
+
+void GuiApp::more_note_attack(std::uint32_t vk, std::uint64_t at_ms) {
+    // On the hunter's thread: kept, and paired at the next more_tick.
+    MorePart& part = made(more_part_);
+    std::lock_guard<std::mutex> lock(part.attack_mutex);
+    if (part.attacks.size() < CastMatch::kCasts) part.attacks.push_back(CastMatch::Press{ vk, at_ms });
 }
 
 void GuiApp::note_casts_minute(std::uint64_t) {
@@ -172,6 +195,20 @@ std::optional<std::uint64_t> GuiApp::packet_takeoffs() const {
     if (!packet_world_.view(now).me.known) return std::nullopt;
     // Left the ground, a second jump in the air, a high jump.
     return s.air_jumps + s.air_second + s.air_high;
+}
+
+std::optional<PacketWorld::AirCounts> GuiApp::packet_air_counts() const {
+    // packet_takeoffs' own rules, and the counts by kind: which jump went out
+    // -- ↑, ↑↑ (a second), Ctrl + ↑ (high) -- and the walk-offs among the
+    // jumps (2026.11.05b).
+    if (!packet_takeoffs()) return std::nullopt;
+    return packet_world_.stats().air();
+}
+
+std::vector<PacketWorld::OwnTrace> GuiApp::packet_own_since(std::uint64_t ms) const {
+    // Under the same rules: a report of another client's is none of yours.
+    if (!packet_takeoffs()) return {};
+    return packet_world_.own_since(ms);
 }
 
 } // namespace gobot

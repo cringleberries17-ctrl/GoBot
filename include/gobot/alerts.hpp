@@ -151,8 +151,11 @@ std::string chat_stopped(int failures);
 std::string quest_trouble(int times, const std::string& why);
 /// A potion key's hotbar slot: `hp` the HP potion's or the MP potion's,
 /// `key` the key's name as InputManager::key_name gives it -- anything else
-/// in it is said as "?" -- and `count` the number the slot shows.
-std::string potion_low(bool hp, const std::string& key, int count);
+/// in it is said as "?" -- and `count` the number the slot shows: the stack
+/// in use, and so named (2026.11.04d). `bag_total` 0 or more: what the
+/// packets' bag holds of the item the key drinks, learned and not checked
+/// yet against the hotbar -- said beside it as that.
+std::string potion_low(bool hp, const std::string& key, int count, int bag_total = -1);
 /// The same, said by the packets' bag: `total` is what the whole bag holds of
 /// the item the key drinks, every stack of it, not the slot's number -- the
 /// two differ (27 in the slot against 614 in the bag), so it is named so.

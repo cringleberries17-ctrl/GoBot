@@ -164,6 +164,12 @@ constexpr float kStripScore = 0.62f;
 /// How much darker than every other tab the chosen one is, at least, in mean
 /// grey. Measured 16 to 23 darker on the live client and in its own picture.
 constexpr int kChosenTabDarker = 10;
+/// The band under the tabs' labels (2026.11.04d): the strip's bottom rows,
+/// this many. The chosen tab is drawn dark there too -- 63 to 80 against 110
+/// to 131 on every live picture -- and the game's red glow round a tab, which
+/// lights its top rows and on 2026-11-04 left no tab darkest by
+/// kChosenTabDarker over the whole inside, never reaches it.
+constexpr int kTabBandRows = 4;
 constexpr float kTrashScore = 0.80f;
 constexpr float kButtonScore = 0.82f;
 
@@ -392,33 +398,37 @@ BagView find(const Frame& f, const TemplateStore& store, const BagLayout& l) {
     if (!v.found) return v;
 
     // Which tab is chosen: the client draws it darker than the others, its
-    // inside 92 to 99 of 255 where theirs are 115 to 123. Only when one stands
-    // out from all the rest by that much; a strip half covered says nothing.
+    // inside 92 to 99 of 255 where theirs are 115 to 123 -- and the band under
+    // its label far darker still. Only when one stands out from all the rest
+    // by that much; a strip half covered says nothing. The band first: the
+    // game's red glow round a tab lights the inside but never the band. The
+    // inside where the band says nothing, and the two at odds say nothing.
     {
-        int mean[kBagTabs] = {};
-        bool readable = true;
-        for (int t = 0; t < kBagTabs && readable; ++t) {
-            const ScreenRect inside{ v.strip.x + t * l.tab_w + 2, v.strip.y + 2, l.tab_w - 4, v.strip.h - 4 };
-            if (inside.x < 0 || inside.y < 0 || inside.right() > f.width || inside.bottom() > f.height ||
-                !inside.valid()) {
-                readable = false;
-                break;
-            }
+        const auto mean_of = [&f](const ScreenRect& r) {
+            if (r.x < 0 || r.y < 0 || r.right() > f.width || r.bottom() > f.height || !r.valid()) return -1;
             long sum = 0;
-            for (int y = inside.y; y < inside.bottom(); ++y)
-                for (int x = inside.x; x < inside.right(); ++x) sum += lum(f, x, y);
-            mean[t] = static_cast<int>(sum / (static_cast<long>(inside.w) * inside.h));
-            v.tab_mean[t] = mean[t];
-        }
-        if (readable) {
+            for (int y = r.y; y < r.bottom(); ++y)
+                for (int x = r.x; x < r.right(); ++x) sum += lum(f, x, y);
+            return static_cast<int>(sum / (static_cast<long>(r.w) * r.h));
+        };
+        const auto chosen = [](const int (&mean)[kBagTabs]) {
             int darkest = 0;
-            for (int t = 1; t < kBagTabs; ++t)
+            for (int t = 0; t < kBagTabs; ++t) {
+                if (mean[t] < 0) return -1;
                 if (mean[t] < mean[darkest]) darkest = t;
-            bool stands_out = true;
+            }
             for (int t = 0; t < kBagTabs; ++t)
-                if (t != darkest && mean[t] - mean[darkest] < kChosenTabDarker) stands_out = false;
-            if (stands_out) v.selected_tab = darkest;
+                if (t != darkest && mean[t] - mean[darkest] < kChosenTabDarker) return -1;
+            return darkest;
+        };
+        for (int t = 0; t < kBagTabs; ++t) {
+            const int x = v.strip.x + t * l.tab_w + 2;
+            v.tab_mean[t] = mean_of(ScreenRect{ x, v.strip.y + 2, l.tab_w - 4, v.strip.h - 4 });
+            v.tab_band[t] = mean_of(ScreenRect{ x, v.strip.y + v.strip.h - kTabBandRows, l.tab_w - 4, kTabBandRows });
         }
+        const int by_band = chosen(v.tab_band);
+        const int by_inside = chosen(v.tab_mean);
+        v.selected_tab = by_band < 0 ? by_inside : (by_inside < 0 || by_inside == by_band) ? by_band : -1;
     }
 
     // The bin is where the layout says. The can is only drawn in it while it
@@ -6111,9 +6121,11 @@ bool BagCleaner::select_tab(int tab, BagView& v, Result& res, const char* where)
 }
 
 void BagCleaner::tab_unsure(const Frame& f, const BagView& v, int tab, const char* where) {
-    GB_INFO("Trash: tab not read as %d (%s) at %s -- read %d, strip at %d,%d (%.2f), tab means %d %d %d %d %d",
+    GB_INFO("Trash: tab not read as %d (%s) at %s -- read %d, strip at %d,%d (%.2f), tab means %d %d %d %d %d, "
+            "under the labels %d %d %d %d %d",
             tab, bag_tab_name(tab), where, v.selected_tab, v.strip.x, v.strip.y, static_cast<double>(v.score),
-            v.tab_mean[0], v.tab_mean[1], v.tab_mean[2], v.tab_mean[3], v.tab_mean[4]);
+            v.tab_mean[0], v.tab_mean[1], v.tab_mean[2], v.tab_mean[3], v.tab_mean[4], v.tab_band[0], v.tab_band[1],
+            v.tab_band[2], v.tab_band[3], v.tab_band[4]);
     if (said_once(std::string("tab_unsure|") + where)) keep(f, (std::string("tab_unsure_") + where).c_str());
 }
 

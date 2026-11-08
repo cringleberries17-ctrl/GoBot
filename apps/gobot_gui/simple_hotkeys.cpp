@@ -189,6 +189,12 @@ std::vector<NamedKey> GuiApp::game_keys_in_use() {
     };
     // The hunter's drop presses Ctrl (with ↓, which no key may be).
     if (hunt_config_.drop_down) k.push_back({ VK_CONTROL, "nhảy xuống (Ctrl + ↓)" });
+    // And its jumps up (2026.11.05b) Ctrl + ↑ and ↑ -- the jump key's line
+    // leaves this ↑ out (kJumpUpKeyVi), as it leaves the jump key.
+    if (hunt_config_.jump_up) {
+        k.push_back({ VK_CONTROL, "nhảy lên (Ctrl + ↑)" });
+        k.push_back({ VK_UP, kJumpUpKeyVi });
+    }
     for (const MacroKey& m : macro_config_.keys) {
         if (m.keycode == 0) continue;
         const char* what = "phím kỹ năng";

@@ -456,6 +456,15 @@ std::vector<PotionWatch::Event> PotionWatch::feed(std::uint32_t vk, const SlotRe
         k.out_armed = false;
         out.push_back(Event{ Event::Kind::Out, vk, 0, 0, 0 });
     }
+
+    // Unreadable on this look and on the one before: once a run, for a
+    // picture of the slot (2026.11.04d). Key G read nothing else all through
+    // the session of 2026-11-04, so neither "Low" could ever warn for it.
+    if (r.state == SlotState::Unreadable && k.have_last && k.last.state == SlotState::Unreadable &&
+        !k.unreadable_said) {
+        k.unreadable_said = true;
+        out.push_back(Event{ Event::Kind::Unreadable, vk, 0, 0, 0 });
+    }
     k.last = r;
     k.have_last = true;
     return out;

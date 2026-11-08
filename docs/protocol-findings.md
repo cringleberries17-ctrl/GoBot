@@ -773,6 +773,25 @@ them 17,602 bytes. Five types carry the character's position:
 an edge); 6 a second jump in the air (−20); 3 a vertical speed of −10; 2 a high
 jump (−36).
 
+**Jumps against walk-offs** (2026.11.05b, for the jump up). State 1 is both a
+jump and a walk off a platform's end; only its vertical speed tells them apart:
+−20 a step for a jump, 0 or more (+1.4, +12.2) for a walk-off. `PacketWorld`
+counts every state 1 in `air_jumps`, as it always has, and those at a vertical
+speed of 0 or down again in `air_walkoffs`, beside it: a walk-off stays among
+the jumps, and no existing counter changed its meaning. The *Positions* line
+says `002A:N (jumps J (walk-offs W), second S, high H, landed L, other O)`. A
+jump up is judged by these counts after its key -- ↑ a state 1 at −20, ↑↑ a
+state 1 and then a state 6 within 700 ms, Ctrl + ↑ a state 2 at −36 -- so a
+walk-off is never taken for a jump's take-off; and by your last reports, kept
+in a ring of 32 (`PacketWorld::own_since`): it landed at the first state 0
+after the take-off, or else at the first `0x0027`, `0x0028` or `0x0029`. A cast
+(`0x0031`) is never a landing -- its y holds at the peak -- and `MapTrust`
+takes no standing point in a jump's flight. Each clean flight's gravity,
+2((y1 − y0) − vy0·T)/T², is logged as `g≈` and never fed back. Not yet seen
+live: whether a second ↑ 340 ms after the first gives state 6, and g itself --
+the walk-off's +1.4 a step is 2240 px/s² if it is one step of gravity, GoC's
+model says 2400 (`kJumpUpGravity` brackets 2240..2640).
+
 Evidence:
 
 - GoC's client reads x, y at bytes 16 and 20 of `0x0027` and 20 and 24 of

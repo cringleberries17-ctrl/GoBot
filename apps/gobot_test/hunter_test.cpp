@@ -2155,6 +2155,494 @@ void test_spot_hop_regains() {
           "again -- " + std::to_string(r.hunter.status().backsteps - first) + " more");
 }
 
+// ------------------------------------------- the map tab's hunting areas
+
+/// A hunting area drawn on the map tab for the rig's map -- 11/1, t11_s1 --
+/// sent for map entry `epoch`: its home and box in the packets' world, where
+/// the rig's character stands at 4640,1100.
+Hunter::Zone zone_of(std::uint32_t epoch, float home_x, float home_y, float left, float top, float right,
+                     float bottom, const char* stem = "t11_s1") {
+    Hunter::Zone z;
+    z.stem = stem;
+    z.epoch = epoch;
+    z.home_x = home_x;
+    z.home_y = home_y;
+    z.left = left;
+    z.top = top;
+    z.right = right;
+    z.bottom = bottom;
+    return z;
+}
+
+/// The area round where the rig's character stands: 4340..4940 x 1000..1200.
+Hunter::Zone zone_here(std::uint32_t epoch = 1) { return zone_of(epoch, 4640, 1100, 4340, 1000, 4940, 1200); }
+
+bool from_map(const HuntRig& r) {
+    const Hunter::Spot s = r.hunter.spot();
+    return s.set && s.from_map && r.hunter.status().spot_from_map;
+}
+
+/// The owner's Q1 (a): taken with the character in the area or within 150 px
+/// of it, at the map entry it was sent for; waiting otherwise, the spot taken
+/// where the character stands meanwhile.
+void test_zone_taken() {
+    section("Chỗ đánh quái: the map tab's hunting area -- taken in it or within 150 px, waiting otherwise");
+
+    {
+        bool taken = false;
+        const std::vector<std::string> log = info_lines([&] {
+            HuntRig r(spotted(), false, true);
+            r.hunter.set_zone(zone_of(1, 4700, 1100, 4400, 1000, 5000, 1250, "T11_S1"));
+            r.pass();
+            const Hunter::Spot s = r.hunter.spot();
+            const Hunter::Status st = r.hunter.status();
+            taken = s.set && s.from_map && s.stem == "t11_s1" && s.x == 4700.0f && s.y == 1100.0f &&
+                    s.left == 4400.0f && s.top == 1000.0f && s.right == 5000.0f && s.bottom == 1250.0f &&
+                    s.half_w == 300 && s.half_h == 125 && s.epoch == 1 && s.map_known && s.map == 11 && !s.suspended &&
+                    st.spot_from_map && st.spot_stem == "t11_s1" && st.spot_x == 4700.0f && st.spot_left == 4400.0f &&
+                    st.spot_top == 1000.0f && st.spot_right == 5000.0f && st.spot_bottom == 1250.0f &&
+                    st.spot_epoch == 1 && st.zone_wait == Hunter::ZoneWait::None &&
+                    st.spot_why == Hunter::SpotWhy::None;
+        });
+        check(taken, "the character inside it: taken at the first settled look -- its home the spot, its box the "
+                     "area, the stem lowercase, half sizes for any old reader, and all of it in the status");
+        check(lines_with(log, "Hunter: hunting area from the map tab: t11_s1, home 4700,1100, box 4400..5000 x "
+                              "1000..1250 (map entry 1; inside)") == 1 &&
+                  lines_with(log, "hunting spot set where the character stands") == 0,
+              "the log says so, and no spot is taken where the character stands");
+    }
+    {
+        bool waits = false, session = false, untouched = false, taken = false;
+        const std::vector<std::string> log = info_lines([&] {
+            HuntRig r(spotted(), false, true);
+            r.w.step_px = 20;
+            r.hunter.set_zone(zone_of(1, 5500, 1100, 5240, 1000, 5840, 1200));   // 600 px right of it
+            r.pass();
+            const Hunter::Spot s = r.hunter.spot();
+            const Hunter::Status st = r.hunter.status();
+            waits = st.zone_wait == Hunter::ZoneWait::Outside && st.zone_wait_px == 600 &&
+                    st.zone_wait_stem == "t11_s1";
+            session = s.set && !s.from_map && s.x == 4640.0f && s.left == 4340.0f && s.right == 4940.0f &&
+                      s.top == 1000.0f && s.bottom == 1200.0f && !st.spot_from_map;
+            r.run(2000);
+            untouched = r.hunter.spot().x == 4640.0f && !from_map(r) && r.w.presses.empty() &&
+                        r.hunter.status().zone_wait == Hunter::ZoneWait::Outside;
+            r.w.me_x = 1340;                    // walked by hand into it: 5340
+            r.pass();
+            taken = from_map(r) && r.hunter.spot().x == 5500.0f &&
+                    r.hunter.status().zone_wait == Hunter::ZoneWait::None;
+        });
+        check(waits && session, "600 px outside it: waiting, Outside 600 px, and the spot taken where the character "
+                                "stands, +-300 / +-100, as without the tab");
+        check(untouched, "and hunted round as before while it waits -- nothing walked");
+        check(taken, "walked into it, settled: taken at that look");
+        check(lines_with(log, "Hunter: the map tab's hunting area for t11_s1 waits -- the character stands 600 px "
+                              "outside it (map entry 1)") == 1 &&
+                  lines_with(log, "(map entry 1; inside)") == 1,
+              "the wait logged once, and the take");
+    }
+    for (const int gap : { 140, 160 }) {
+        HuntRig r(spotted(), false, true);
+        const float l = 4640.0f + static_cast<float>(gap);
+        r.hunter.set_zone(zone_of(1, l + 300.0f, 1100, l, 1000, l + 600.0f, 1200));
+        r.pass();
+        const Hunter::Status st = r.hunter.status();
+        if (gap == 140)
+            check(from_map(r) && st.zone_wait == Hunter::ZoneWait::None, "140 px from its left edge: taken (near)");
+        else
+            check(!from_map(r) && st.zone_wait == Hunter::ZoneWait::Outside && st.zone_wait_px == 160,
+                  "160 px from it: waiting");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 4640, 900, 4340, 800, 4940, 980));     // its bottom 120 px above
+        r.pass();
+        check(from_map(r), "120 px below its bottom edge: taken (near) -- up and down count as across do");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.w.airborne = true;
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        const bool unsettled = !r.hunter.spot().set && r.hunter.status().zone_wait == Hunter::ZoneWait::NotSettled;
+        r.w.airborne = false;
+        r.pass();
+        check(unsettled && from_map(r), "in mid-jump: NotSettled, nothing taken; landed: taken");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 4640, 1100, 4340, 1000, 4940, 1200, "map"));
+        r.pass();
+        const bool no_map = r.hunter.spot().set && !from_map(r);
+        HuntRig q(spotted(), false, true);
+        q.hunter.set_zone(zone_of(1, 5000, 1100, 4340, 1000, 4940, 1200));    // its home outside its box
+        q.pass();
+        check(no_map && q.hunter.spot().set && !from_map(q) &&
+                  q.hunter.status().zone_wait == Hunter::ZoneWait::None,
+              "one of no map, or with its home outside its box: refused -- the spot where the character stands");
+    }
+}
+
+/// The map entry it was sent for: one still to come is waited for, one gone
+/// by drops it.
+void test_zone_epochs() {
+    section("Chỗ đánh quái: the map tab's hunting area -- for a map entry to come kept, for one gone by dropped");
+
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here(2));            // the tab saw entry 2 first
+        r.pass();
+        const bool ahead = r.hunter.status().zone_wait == Hunter::ZoneWait::Ahead && r.hunter.spot().set &&
+                           !from_map(r);
+        r.w.epoch = 2;
+        r.w.entry_x = 4660.0f;
+        r.w.entry_y = 1100.0f;
+        r.w.me_x = 660;
+        r.pass();
+        const Hunter::Spot s = r.hunter.spot();
+        check(ahead && from_map(r) && s.epoch == 2 && !s.suspended && s.x == 4640.0f,
+              "sent for the next map entry: Ahead, the spot where it stands meanwhile; the entry came, its spawn "
+              "inside: taken, at entry 2, the old spot gone");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.w.fix_state = WorldFix::State::NoCapture;
+        r.hunter.set_zone(zone_here());
+        r.run(600);
+        const bool kept = r.hunter.status().zone_wait == Hunter::ZoneWait::Ahead && !r.hunter.spot().set;
+        r.w.fix_state = WorldFix::State::Known;
+        r.pass();
+        check(kept && from_map(r), "no capture: kept (Ahead), never dropped; the capture back: taken");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.w.epoch = 3;
+        r.hunter.set_zone(zone_here(2));
+        r.pass();
+        const Hunter::Status st = r.hunter.status();
+        r.run(600);
+        check(st.zone_wait == Hunter::ZoneWait::None && r.hunter.spot().set && !from_map(r),
+              "sent for map entry 2, the fix at 3: dropped -- the spot taken where the character stands");
+    }
+}
+
+/// An edit of the area in use applies wherever the character is: the owner
+/// moved it himself.
+void test_zone_edit() {
+    section("Chỗ đánh quái: the map tab's hunting area in use, edited -- taken at once, wherever the character is");
+
+    bool edited = false, walked = false;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(spotted(), false, true);
+        r.w.step_px = 20;
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        r.hunter.set_zone(zone_of(1, 5900, 1100, 5600, 1000, 6200, 1200));   // the character 960 px outside it
+        r.pass();
+        const Hunter::Spot s = r.hunter.spot();
+        edited = from_map(r) && s.x == 5900.0f && s.left == 5600.0f && s.right == 6200.0f &&
+                 r.hunter.status().zone_wait == Hunter::ZoneWait::None;
+        r.hunter.set_zone(zone_of(1, 5900, 1100, 5600, 1000, 6200, 1200));   // the same, sent again
+        r.pass();
+        r.run(3000);
+        walked = walks_of(r.w, VK_RIGHT) >= 1 && r.w.of(VK_DOWN).empty();
+    });
+    check(edited, "moved 1260 px: taken at once, though the character stands 960 px outside the new box");
+    check(walked, "and walked back toward its new home -- Down never pressed");
+    check(lines_with(log, "(map entry 1; edited)") == 1 && lines_with(log, "Hunter: hunting area from the map tab") == 2,
+          "logged as edited; the same area sent again changes nothing and logs nothing");
+}
+
+/// Through a door with an area of the tab's in use: suspended as any spot.
+void test_zone_doors() {
+    section("Chỗ đánh quái: the map tab's hunting area through doors and a log in");
+
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        r.w.epoch = 2;                              // through a door, far away
+        r.w.map = 12;
+        r.w.entry_x = 20000.0f;
+        r.w.me_x = 16000;
+        r.pass();
+        const Hunter::Spot away = r.hunter.spot();
+        r.w.epoch = 3;                              // the door back, 60 px from where it left
+        r.w.map = 11;
+        r.w.entry_x = 4700.0f;
+        r.w.me_x = 700;
+        r.pass();
+        r.hunter.set_zone(zone_here(3));
+        r.pass();
+        const Hunter::Spot s = r.hunter.spot();
+        check(away.suspended && away.from_map && away.left_x == 4640.0f && from_map(r) && !s.suspended &&
+                  s.epoch == 3 && s.x == 4640.0f,
+              "a map entry suspends it as any spot; the door back near where it left: in use again, the tab's "
+              "area sent for that entry with it");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        r.w.epoch = 2;
+        r.w.map = 12;
+        r.w.entry_x = 20000.0f;
+        r.w.me_x = 16000;
+        r.pass();
+        r.w.epoch = 3;                              // another door onto its map, 600 px from where it left
+        r.w.map = 11;
+        r.w.entry_x = 5240.0f;
+        r.w.me_x = 1240;
+        r.pass();
+        r.hunter.set_zone(zone_here(3));
+        r.w.mobs = { plate(1440, 400, "Xa") };      // out of reach
+        r.run(1000);
+        const Hunter::Status st = r.hunter.status();
+        const bool waits = st.zone_wait == Hunter::ZoneWait::Outside && st.zone_wait_px == 300 &&
+                           r.hunter.spot().suspended && r.w.presses.empty();
+        r.w.mobs.clear();
+        r.w.me_x = 900;                             // walked into it by hand
+        r.pass();
+        check(waits && from_map(r) && !r.hunter.spot().suspended && r.hunter.spot().epoch == 3,
+              "a door onto its map far from where it left, 300 px outside it: it waits and the character stands; "
+              "walked into it: taken");
+    }
+    {
+        // Logged back in: standing inside the area, but far from where the
+        // character was and from the home -- a log in's own rule waits; the
+        // area sent again takes it.
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 4700, 1100, 4000, 1000, 5600, 1200));
+        r.pass();
+        r.hunter.suspend_spot();
+        r.w.fix_state = WorldFix::State::NoCapture;
+        r.run(600);
+        r.w.fix_state = WorldFix::State::FirstReport;
+        r.w.epoch = 2;
+        r.w.entry_x = 9000.0f;
+        r.w.entry_y = 1100.0f;
+        r.run(600);
+        r.w.fix_state = WorldFix::State::Known;
+        r.w.me_x = 1400;                            // 5400: 760 px from where it was, 700 from the home
+        r.run(600);
+        const bool aside = r.hunter.spot().suspended && r.hunter.spot().login;
+        r.hunter.set_zone(zone_of(2, 4700, 1100, 4000, 1000, 5600, 1200));
+        r.pass();
+        check(aside && from_map(r) && !r.hunter.spot().suspended && r.hunter.spot().epoch == 2,
+              "logged back in, standing inside it 700 px from its home: aside by the log in's rule, taken when the "
+              "tab sends it for the new entry");
+    }
+}
+
+/// zone_aside: the tab no longer places the character on that map.
+void test_zone_aside() {
+    section("Chỗ đánh quái: the map tab's hunting area set aside -- only the tab brings it back");
+
+    bool aside = false, door = false, login = false, back = false;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        r.w.me_x = 1300;                        // 5300: pushed 360 px out of it
+        r.hunter.zone_aside("t11_s1");
+        r.pass();
+        Hunter::Spot s = r.hunter.spot();
+        aside = s.suspended && s.map_aside && !s.login && s.left_x == 5300.0f && s.from_map &&
+                r.hunter.status().spot_why == Hunter::SpotWhy::Suspended && r.hunter.status().spot_map_aside;
+        r.w.epoch = 2;                          // a door and back, 50 px from where it was set aside
+        r.w.map = 12;
+        r.w.entry_x = 20000.0f;
+        r.w.me_x = 16000;
+        r.pass();
+        r.w.epoch = 3;
+        r.w.map = 11;
+        r.w.entry_x = 5350.0f;
+        r.w.me_x = 1350;
+        r.run(600);
+        door = r.hunter.spot().suspended && r.hunter.spot().map_aside && r.w.presses.empty();
+        r.hunter.suspend_spot();
+        r.pass();
+        s = r.hunter.spot();
+        login = s.suspended && s.map_aside && !s.login;
+        r.hunter.set_zone(zone_here(3));        // 410 px outside it, 50 from where it was set aside
+        r.pass();
+        s = r.hunter.spot();
+        back = from_map(r) && !s.suspended && !s.map_aside && s.epoch == 3 && !r.hunter.status().spot_map_aside;
+    });
+    check(aside, "set aside: suspended, as by the tab, where the character was kept -- the status says the tab's");
+    check(door, "a door there and back near where it was: still aside -- only the tab brings it back");
+    check(login, "a log in meanwhile: still the tab's aside, not a log in's");
+    check(back, "sent again, the character 50 px from where it was set aside: taken (back where it left), no longer "
+                "the tab's aside");
+    check(lines_with(log, "Hunter: the map tab no longer places the character on t11_s1 -- its hunting area stands "
+                          "aside until the map is known again") == 1 &&
+              lines_with(log, "(map entry 3; back where it left)") == 1,
+          "the aside and the take logged");
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        r.hunter.zone_aside("t12_s1");
+        r.pass();
+        const bool other = from_map(r) && !r.hunter.spot().suspended;
+        HuntRig q(spotted(), false, true);
+        q.pass();
+        q.hunter.zone_aside("t11_s1");
+        q.pass();
+        check(other && q.hunter.spot().set && !q.hunter.spot().suspended,
+              "another map's aside, or one for a spot taken where the character stood: nothing");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 5500, 1100, 5240, 1000, 5840, 1200));
+        r.pass();
+        const bool waits = r.hunter.status().zone_wait == Hunter::ZoneWait::Outside;
+        r.hunter.zone_aside("t11_s1");
+        r.pass();
+        r.w.me_x = 1340;
+        r.pass();
+        check(waits && r.hunter.status().zone_wait == Hunter::ZoneWait::None && !from_map(r),
+              "one waiting is dropped by its map's aside: walked into it after, not taken");
+    }
+}
+
+/// clear_zone: the area deleted on the tab.
+void test_zone_clear() {
+    section("Chỗ đánh quái: the map tab's hunting area deleted -- the spot taken where the character stands");
+
+    bool other = false, cleared = false;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 4700, 1100, 4400, 1000, 5000, 1250));
+        r.pass();
+        r.hunter.clear_zone("t12_s1");
+        r.pass();
+        other = from_map(r);
+        r.hunter.clear_zone("T11_S1");
+        r.pass();
+        const Hunter::Spot s = r.hunter.spot();
+        cleared = s.set && !s.from_map && s.x == 4640.0f && s.left == 4340.0f && s.bottom == 1200.0f &&
+                  !r.hunter.status().spot_from_map;
+    });
+    check(other, "another map's deleted: nothing");
+    check(cleared, "its own deleted: the spot taken again where the character stands, +-300 / +-100");
+    check(lines_with(log, "Hunter: the map tab's hunting area for t11_s1 was deleted -- the spot is taken where the "
+                          "character stands") == 1,
+          "and the log says so");
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 5500, 1100, 5240, 1000, 5840, 1200));
+        r.pass();
+        r.hunter.clear_zone("t11_s1");
+        r.pass();
+        r.w.me_x = 1340;
+        r.pass();
+        check(r.hunter.status().zone_wait == Hunter::ZoneWait::None && !from_map(r),
+              "one waiting is dropped with it: walked into it after, not taken");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.hunter.clear_zone("t11_s1");
+        r.pass();
+        const bool gone = !from_map(r);
+        HuntRig q(spotted(), false, true);
+        q.hunter.clear_zone("t11_s1");
+        q.hunter.set_zone(zone_here());
+        q.pass();
+        check(gone && from_map(q), "asked between two passes, in the order asked: sent then deleted, none; deleted "
+                                   "then sent again, the new one");
+    }
+}
+
+/// Unticked, or a new start: nothing of the tab's areas is kept.
+void test_zone_dropped() {
+    section("Chỗ đánh quái: the map tab's hunting area -- unticked or a new start, dropped with what waits");
+
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        HunterConfig off = spotted();
+        off.spot = false;
+        r.hunter.set_config(off);
+        r.pass();
+        const bool gone = !r.hunter.spot().set && !r.hunter.status().spot_from_map &&
+                          r.hunter.status().zone_wait == Hunter::ZoneWait::None;
+        r.hunter.set_config(spotted());
+        r.pass();
+        check(gone && r.hunter.spot().set && !from_map(r),
+              "unticked: dropped; ticked again, the spot where the character stands until the tab sends it again");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 5500, 1100, 5240, 1000, 5840, 1200));
+        r.pass();
+        HunterConfig off = spotted();
+        off.spot = false;
+        r.hunter.set_config(off);
+        r.pass();
+        r.hunter.set_config(spotted());
+        r.pass();
+        r.w.me_x = 1340;
+        r.pass();
+        check(!from_map(r) && r.hunter.status().zone_wait == Hunter::ZoneWait::None,
+              "one waiting as it was unticked: dropped too");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_of(1, 5500, 1100, 5240, 1000, 5840, 1200));
+        r.pass();
+        const bool waited = r.hunter.status().zone_wait == Hunter::ZoneWait::Outside;
+        r.hunter.stop();
+        r.hunter.start_stepped();
+        const bool none = r.hunter.status().zone_wait == Hunter::ZoneWait::None && r.hunter.status().zone_wait_stem.empty();
+        r.w.me_x = 1340;
+        r.pass();
+        const bool waiting_gone = !from_map(r);
+        r.hunter.set_zone(zone_here());
+        r.hunter.stop();
+        r.hunter.start_stepped();
+        r.w.me_x = 640;
+        r.pass();
+        check(waited && none && waiting_gone && !from_map(r) && r.hunter.spot().set,
+              "a new start: one waiting and one asked, both dropped -- the tab sends it again for the run");
+    }
+}
+
+/// The area is the box: a drawn one need not be even round its home.
+void test_zone_box() {
+    section("Chỗ đánh quái: the map tab's area is its own box -- 50 px up and 300 down from the home");
+
+    // 50 up and 300 down from the home, where the character stands.
+    const Hunter::Zone tall = zone_of(1, 4640, 1100, 4340, 1050, 4940, 1400);
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(tall);
+        r.pass();
+        r.w.mobs = { plate(800, 650, "Duoi") };     // 250 px below, 160 across: out of reach
+        r.pass();
+        check(from_map(r) && r.target() == "Duoi" && !r.hunter.status().outside_area,
+              "a monster 250 px below the home, inside the box: gone for");
+    }
+    {
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(tall);
+        r.pass();
+        r.w.mobs = { plate(800, 280, "Tren") };     // 120 px above: the box runs 50 up
+        r.pass();
+        check(r.target().empty() && r.hunter.status().outside_area, "one 120 px above it: outside the box");
+    }
+    {
+        HuntRig r(spotted(), false, true);          // the spot taken where it stands: +-100
+        r.pass();
+        r.w.mobs = { plate(800, 650, "Duoi") };
+        r.pass();
+        check(r.target().empty() && r.hunter.status().outside_area,
+              "the spot taken where the character stands: the one 250 px below outside its +-100");
+    }
+}
+
 void test_hunter_spot() {
     test_spot_off();
     test_spot_taken();
@@ -2173,6 +2661,14 @@ void test_hunter_spot() {
     test_spot_switched();
     test_spot_why_in_fight();
     test_spot_hop_regains();
+    test_zone_taken();
+    test_zone_epochs();
+    test_zone_edit();
+    test_zone_doors();
+    test_zone_aside();
+    test_zone_clear();
+    test_zone_dropped();
+    test_zone_box();
 }
 
 // ------------------------------------------------------------- turning

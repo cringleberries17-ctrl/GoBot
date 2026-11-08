@@ -152,6 +152,10 @@ public:
         int           hotbar_disagree = 0;
         bool          low_trusted = false;
         int           distrusts = 0;
+        /// The newest bag frame's total of `item`, every stack of it, once
+        /// learned; -1 otherwise (2026.11.04d: what key H drank on
+        /// 2026-11-04 was never counted in the log).
+        int           total = -1;
     };
 
     /// Everything, for the minute line.
@@ -214,6 +218,10 @@ public:
     /// "Low" by the bag for `vk`: true, with the total in the bag of the item
     /// it drinks, only for a key trusted for it and a bag that is current.
     bool low_total(std::uint32_t vk, const Link& link, int& total, std::uint32_t& item) const;
+    /// The same for a key only learned, trusted or not yet: for words only --
+    /// a slot's "Low" says the bag's total beside the stack in use, not
+    /// checked yet -- never for what goes by the bag (2026.11.04d).
+    bool learned_total(std::uint32_t vk, const Link& link, int& total, std::uint32_t& item) const;
 
     /// A due look of the shop: whether it may be skipped, the potions' slots
     /// in the bag, and why not. A new capture start with no bag frame since

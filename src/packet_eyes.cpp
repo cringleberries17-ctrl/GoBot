@@ -1,6 +1,7 @@
 #include "gobot/packet_eyes.hpp"
 #include "gobot/common.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/mob_place.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -245,6 +246,26 @@ WorldFix world_fix(const PacketWorld::View& v, const PacketWorld::Stats& s, cons
     return f;
 }
 
+std::vector<MapTrust::Mob> packet_stands(const PacketWorld::View& v, std::size_t max) {
+    // The monsters where their frame put them: a stop's speed is 0, a walk's
+    // and a blow's are not, and a walk run out keeps its speed with a place
+    // worked out. A spawn's is 0 too, 9-36 px above its floor: MapTrust takes
+    // a monster's place only once two of its frames -- the same monster, by
+    // its generation -- agree.
+    std::vector<MapTrust::Mob> out;
+    for (const PacketWorld::Mob& m : v.mobs) {
+        if (out.size() >= max) break;
+        if (m.dead || m.moving || m.speed > 0.0f) continue;
+        MapTrust::Mob st;
+        st.at = { static_cast<int>(std::lround(m.x)), static_cast<int>(std::lround(m.y)) };
+        st.slot = m.slot;
+        st.at_ms = m.event_ms;
+        st.gen = m.gen;
+        out.push_back(st);
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- the eyes
 
 PacketEyes::PacketEyes(const PacketWorld& world, Screen screen, Inputs inputs)
@@ -260,7 +281,29 @@ Hunter::Eyes PacketEyes::eyes() {
     // For the hunter's drops: the monsters' stops, and your take-offs.
     e.stands = [this] { return stands(); };
     e.takeoffs = inputs_.takeoffs;
+    // For its jumps up (2026.11.05b): your take-offs by kind, your reports.
+    e.air = inputs_.air;
+    e.own_since = inputs_.own_since;
+    // For "Tự tìm quái trong vùng": the whole map's monsters, placed.
+    e.world = [this](std::vector<SeekMob>& out) { return world(out); };
     return e;
+}
+
+bool PacketEyes::world(std::vector<SeekMob>& out) {
+    out.clear();
+    if (source_.load() != Source::Packets || handing_over_.load()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    // No floors from the map tab (not handed over yet, or its file doubtful):
+    // every monster would be on no floor, and the seek would stand. Off
+    // instead -- the hunter as 2026.11.05 and its jumps up.
+    if (!seek_floors_) return false;
+    out = seek_world_;
+    return true;
+}
+
+PacketEyes::PlateCounts PacketEyes::plates() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return plates_;
 }
 
 bool PacketEyes::where(WorldFix& out) {
@@ -294,6 +337,8 @@ std::uint64_t PacketEyes::frame() {
     // whatever steers: a switch back to the screen goes by how long ago it
     // last moved on, and a hand-over by its moving on since (kHandOverMs).
     const std::uint64_t pictures = screen_.frame ? screen_.frame() : 0;
+    // The map file the monsters are placed on, under the GUI's own lock.
+    const std::shared_ptr<const GameMapBook::Page> floors = watched && inputs_.floors ? inputs_.floors() : nullptr;
 
     bool from_packets = false;
     std::uint64_t number = 0;
@@ -340,18 +385,7 @@ std::uint64_t PacketEyes::frame() {
             const PacketWorld::Stats s = world_.stats();
             health = packet_health(v, s, link, judged, now);
             fix_ = world_fix(v, s, link, now);
-            // The monsters standing where their frame put them: a stop's
-            // speed is 0, a walk's and a blow's are not, and a walk run out
-            // keeps its speed with a place worked out.
-            for (const PacketWorld::Mob& m : v.mobs) {
-                if (stands_.size() >= kStandsMax) break;
-                if (m.dead || m.moving || m.speed > 0.0f) continue;
-                MapTrust::Mob st;
-                st.at = { static_cast<int>(std::lround(m.x)), static_cast<int>(std::lround(m.y)) };
-                st.slot = m.slot;
-                st.at_ms = m.event_ms;
-                stands_.push_back(st);
-            }
+            stands_ = packet_stands(v, kStandsMax);
         }
         was_healthy_ = health.ok;
 
@@ -432,7 +466,7 @@ std::uint64_t PacketEyes::frame() {
         why_ = reason;
 
         if (source_.load() == Source::Packets) {
-            make_plates(v, cfg, now);
+            make_plates(v, cfg, now, floors.get());
             from_packets = true;
             number = v.updates;
             packet_number_ = number;
@@ -441,6 +475,11 @@ std::uint64_t PacketEyes::frame() {
             // picture for the hunter until the screen has a fresh one.
             from_packets = true;
             number = packet_number_;
+        } else {
+            // The screen's: no whole map to seek in, no plates of the packets.
+            seek_world_.clear();
+            seek_floors_ = false;
+            plates_ = PlateCounts{};
         }
     }
     // The screen's own count, outside the lock: the detector's, under its own.
@@ -448,15 +487,14 @@ std::uint64_t PacketEyes::frame() {
     return screen_.frame ? screen_.frame() : 0;
 }
 
-void PacketEyes::make_plates(const PacketWorld::View& v, const HunterConfig& cfg, std::uint64_t now) {
+void PacketEyes::make_plates(const PacketWorld::View& v, const HunterConfig& cfg, std::uint64_t now,
+                             const GameMapBook::Page* floors) {
     // World pixels laid over the screen's: packet_scale over both ways, and
     // packet_dy on the monsters' heights against you. The same for you and
     // for them, so a monster standing still stays where it is as you walk,
     // and the hunter's following it from one look to the next holds.
     const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
-    const auto px = [scale](float world) {
-        return static_cast<int>(std::lround(static_cast<double>(world) / scale));
-    };
+    const auto px = [scale](double world) { return static_cast<int>(std::lround(world / scale)); };
     me_ = packet_plate(px(v.me.x), px(v.me.y));
     me_.is_player = true;
     me_.is_self = true;
@@ -477,6 +515,12 @@ void PacketEyes::make_plates(const PacketWorld::View& v, const HunterConfig& cfg
     // and the order -- which is the most hurt -- stays as it was.
     const float alive_floor = std::min(1.0f, cfg.dead_below + 0.01f);
     mobs_.clear();
+    seek_world_.clear();
+    plates_ = PlateCounts{};
+    plates_.half_w = static_cast<int>(std::lround(half_w));
+    plates_.half_h = static_cast<int>(std::lround(half_h));
+    plates_.floors = kPlatesOnFloors && floors != nullptr;
+    seek_floors_ = floors != nullptr;
     for (const PacketWorld::Mob& m : v.mobs) {
         float hp = 0.0f;
         if (m.dead) {
@@ -490,9 +534,39 @@ void PacketEyes::make_plates(const PacketWorld::View& v, const HunterConfig& cfg
             // hunter takes anything under 1 for wounded.
             hp = 1.0f - (1.0f - alive_floor) * (1.0f - left);
         }
-        const int x = px(m.x);
-        const int y = px(m.y) + cfg.packet_dy;
+        // Where it stands, by the map's file (mob_place): on its floor, a walk
+        // run out followed on -- the seek's whole map always, the plates with
+        // kPlatesOnFloors (2026.11.05b); a killed one where the blow found it.
+        // Another player's blows, within the seek's own while (Q6).
+        MapDot at;
+        at.x = m.x;
+        at.y = m.y;
+        if (!m.dead) {
+            ++plates_.alive;
+            at = mob_place(floors, m, now, true);
+            SeekMob s;
+            s.slot = static_cast<std::int32_t>(m.slot);
+            s.gen = m.gen;
+            s.at = { static_cast<int>(std::lround(at.x)), static_cast<int>(std::lround(at.y)) };
+            s.floor_y = at.top;
+            s.why = static_cast<std::uint8_t>(at.why);
+            s.frame_age_ms = age(m.event_ms, now);
+            s.hp = hp;
+            s.hurt_by_other = v.actor_checked && m.hurt_by_other_ms > m.hurt_by_you_ms &&
+                              age(m.hurt_by_other_ms, now) < kSeekOthersHurtMs;
+            seek_world_.push_back(s);
+        }
+        const bool placed = plates_.floors && !m.dead;
+        const int x = placed ? px(at.x) : px(static_cast<double>(m.x));
+        const int y = (placed ? px(at.y) : px(static_cast<double>(m.y))) + cfg.packet_dy;
         if (std::abs(x - me_.x()) > half_w || std::abs(y - me_.y()) > half_h) continue;
+        if (!m.dead) {
+            ++plates_.in_view;
+            if (placed && (at.why == DotWhy::Followed || at.why == DotWhy::Held || at.why == DotWhy::Projected))
+                ++plates_.walking;
+            if (placed && at.why == DotWhy::Projected) ++plates_.projected;
+            if (placed && at.why == DotWhy::SetDown) ++plates_.set_down;
+        }
         Nameplate n = packet_plate(x, y);
         n.hp = hp;
         // Which monster it is, for the hunter's hold on its target: its slot

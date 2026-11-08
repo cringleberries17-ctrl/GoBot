@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -110,6 +111,31 @@ void follow_mob(PacketWorld::Mob& m, std::uint64_t walk_from, std::uint64_t now)
     m.moving = now < walk_end;
 }
 
+/// Whether a 0x0038 of `state` more than kUnknownPlacePx from where its living
+/// monster was worked out to be puts it where it says all the same -- for a
+/// hurt, `chained`: its HP before less the damage was its HP after. The one
+/// rule of PacketWorld::kPlaceFarFrames: a chained hurt and a contact, nothing
+/// else.
+bool places_far(std::uint8_t state, bool chained) {
+    const bool hurt = state == 6 || state == 7;
+    const bool contact = state == 3 || state == 11;
+    return PacketWorld::kPlaceFarFrames && ((hurt && chained) || contact);
+}
+
+/// What a 0x0038 of `state` is, for the log.
+const char* state_name(std::uint8_t state) {
+    switch (state) {
+    case 0:  return "a stop";
+    case 1:  return "a walk";
+    case 3:
+    case 11: return "a contact";
+    case 6:
+    case 7:  return "a hurt";
+    case 9:  return "a hit";
+    default: return "not known";
+    }
+}
+
 /// The most HP a slot has been seen with stands for its max HP while neither
 /// the table nor a spawn has said, and max HP is never below the HP it has.
 void saw_hp(PacketWorld::Mob& m, std::int64_t hp) {
@@ -204,6 +230,9 @@ PacketWorld::Stats PacketWorld::Stats::since(const Stats& before) const {
     d.contacts = less(contacts, before.contacts);
     d.contacts_yours = less(contacts_yours, before.contacts_yours);
     d.contacts_others = less(contacts_others, before.contacts_others);
+    d.far_corrections = less(far_corrections, before.far_corrections);
+    d.far_refused = less(far_refused, before.far_refused);
+    d.walks_fast = less(walks_fast, before.walks_fast);
     // Each hitter against the same id before, wherever it stood.
     for (Hitter& h : d.hitters) {
         if (h.hits == 0) continue;
@@ -237,7 +266,19 @@ PacketWorld::Stats PacketWorld::Stats::since(const Stats& before) const {
     d.air_landed = less(air_landed, before.air_landed);
     d.air_other = less(air_other, before.air_other);
     d.casts_in_air = less(casts_in_air, before.casts_in_air);
+    d.air_walkoffs = less(air_walkoffs, before.air_walkoffs);
     return d;
+}
+
+PacketWorld::AirCounts PacketWorld::Stats::air() const {
+    AirCounts c;
+    c.jumps = air_jumps;
+    c.walkoffs = air_walkoffs;
+    c.second = air_second;
+    c.high = air_high;
+    c.landed = air_landed;
+    c.other = air_other;
+    return c;
 }
 
 PacketWorld::PacketWorld() { forget(); }
@@ -273,6 +314,9 @@ void PacketWorld::relink(std::uint64_t now_ms) {
     stats_.last_foreign_ms = 0;
     stats_.last_wrong_size_ms = 0;
     stats_.last_own_wrong_size_ms = 0;
+    // Your reports with you: none kept from before.
+    trace_next_ = 0;
+    trace_count_ = 0;
     // The place stays known, settled afresh from now: its monsters come back
     // one event at a time, as at an entry with no table.
     if (map_since_ms_ != 0) map_since_ms_ = now_ms;
@@ -299,6 +343,10 @@ void PacketWorld::forget() {
     unknown_logged_.fill(0);
     first_kill_ms_ = 0;
     never_hitter_said_ = false;
+    far_said_ms_ = 0;
+    far_unsaid_ = 0;
+    trace_next_ = 0;
+    trace_count_ = 0;
     // gens_ goes on, so that no generation is given to two monsters; and
     // id_said_, so that "your id is" is said only for another id.
     // updates_ goes on: a picture number taken before this is not a newer one.
@@ -308,42 +356,50 @@ void PacketWorld::forget() {
 }
 
 void PacketWorld::on_packets(const std::vector<GamePacket>& batch) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool used = false;
-    for (const GamePacket& p : batch) {
-        // Any frame at all says how late it is, the server's tick among them.
-        time_walk(p.timestamp_ms);
+    std::vector<std::string> said;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool used = false;
+        for (const GamePacket& p : batch) {
+            // Any frame at all says how late it is, the server's tick among them.
+            time_walk(p.timestamp_ms);
 
-        const std::size_t k = kind_index(p.opcode);
-        if (k == kOpcodeCount || !from_its_side(p, kKinds[k].from)) continue;
-        Stats::Frames& counts = stats_.frames[k];
-        if (p.payload.size() + kHeader != kKinds[k].size) {
-            ++counts.wrong_size;
-            stats_.last_wrong_size_ms = p.timestamp_ms;
-            // One of your reports' opcodes -- your client's, over UDP: a walk
-            // of yours may be what went unread.
-            if (kKinds[k].from == From::ClientUdp) stats_.last_own_wrong_size_ms = p.timestamp_ms;
-            continue;
-        }
+            const std::size_t k = kind_index(p.opcode);
+            if (k == kOpcodeCount || !from_its_side(p, kKinds[k].from)) continue;
+            Stats::Frames& counts = stats_.frames[k];
+            if (p.payload.size() + kHeader != kKinds[k].size) {
+                ++counts.wrong_size;
+                stats_.last_wrong_size_ms = p.timestamp_ms;
+                // One of your reports' opcodes -- your client's, over UDP: a
+                // walk of yours may be what went unread.
+                if (kKinds[k].from == From::ClientUdp) stats_.last_own_wrong_size_ms = p.timestamp_ms;
+                continue;
+            }
 
-        Taken taken = Taken::Refused;
-        switch (p.opcode) {
-        case 0x0086: taken = take_entry(p); break;
-        case 0x0042: taken = take_table(p); break;
-        case 0x003F: taken = take_spawn(p); break;
-        case 0x0038: taken = take_state(p); break;
-        default:     taken = take_own(p); break;
+            Taken taken = Taken::Refused;
+            switch (p.opcode) {
+            case 0x0086: taken = take_entry(p); break;
+            case 0x0042: taken = take_table(p); break;
+            case 0x003F: taken = take_spawn(p); break;
+            case 0x0038: taken = take_state(p); break;
+            default:     taken = take_own(p); break;
+            }
+            if (taken == Taken::Used) {
+                ++counts.used;
+                used = true;
+            } else if (taken == Taken::Refused) {
+                ++counts.refused;
+            }
         }
-        if (taken == Taken::Used) {
-            ++counts.used;
-            used = true;
-        } else if (taken == Taken::Refused) {
-            ++counts.refused;
-        }
+        // Once a batch, however many frames it used: the capture hands frames
+        // over a batch at a time, and a batch is what the hunter can see
+        // change.
+        if (used) ++updates_;
+        said.swap(said_);
     }
-    // Once a batch, however many frames it used: the capture hands frames over
-    // a batch at a time, and a batch is what the hunter can see change.
-    if (used) ++updates_;
+    // Written with the lock let go of: the GUI's map and the hunter's look
+    // wait on it, and the file's write can be slow.
+    for (const std::string& s : said) GB_INFO("%s", s.c_str());
 }
 
 PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
@@ -424,7 +480,11 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
         // 1 off the ground, 6 a second jump, 2 a high jump, 3 seen at a
         // vertical speed of -10: every state but 0, landed, is in the air.
         switch (*r->air_state) {
-            case 1:  ++stats_.air_jumps; break;
+            case 1:
+                ++stats_.air_jumps;
+                // Off an edge rather than a jump: state 1 too, falling.
+                if (r->vertical_speed && *r->vertical_speed >= 0.0f) ++stats_.air_walkoffs;
+                break;
             case 6:  ++stats_.air_second; break;
             case 2:  ++stats_.air_high; break;
             case 0:  ++stats_.air_landed; break;
@@ -443,6 +503,20 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
         me.airborne = false;
     }
     stats_.last_own_ms = t;
+
+    // Kept as it came, for a jump to be judged by (own_since).
+    OwnTrace& kept = trace_[trace_next_];
+    kept = OwnTrace{};
+    kept.ms = t;
+    kept.kind = r->kind;
+    kept.x = r->x;
+    kept.y = r->y;
+    if (r->kind == OwnReport::Air) {
+        kept.state = *r->air_state;
+        kept.vy = r->vertical_speed.value_or(0.0f);
+    }
+    trace_next_ = (trace_next_ + 1) % kOwnTraceSize;
+    trace_count_ = std::min(trace_count_ + 1, kOwnTraceSize);
 
     // Whether letting go of a walk key always sends a stop, timed from each
     // walk started from standing: a report that has you standing ends it.
@@ -532,6 +606,7 @@ PacketWorld::Taken PacketWorld::take_table(const GamePacket& p) {
         s.at = mob_from(e, hp_of(e), t);
         s.at.gen = next_gen();
         s.walk_from_ms = t;
+        placed(s, Placing::By::Table, 0, e.speed, e.facing, t);
     }
     table_seen_ = true;
     ++stats_.tables;
@@ -549,6 +624,7 @@ PacketWorld::Taken PacketWorld::take_spawn(const GamePacket& p) {
     slot.at = mob_from(*s, s->hp, t);
     slot.at.gen = next_gen();
     slot.walk_from_ms = 0;
+    placed(slot, Placing::By::Spawn, 0, s->speed, s->facing, t);
     ++stats_.spawns;
     return Taken::Used;
 }
@@ -585,9 +661,14 @@ PacketWorld::Taken PacketWorld::take_state(const GamePacket& p) {
     // whatever speed the blow gives it.
     m.moving = s->event == MonsterEvent::Walk;
     if (m.moving && !turn) slot.walk_from_ms = t;
+    placed(slot, Placing::By::State, s->state, s->speed, s->facing, t);
     switch (s->event) {
     case MonsterEvent::Stop: ++stats_.stops; break;
-    case MonsterEvent::Walk: ++stats_.walks; break;
+    case MonsterEvent::Walk:
+        ++stats_.walks;
+        // Followed all the same: only counted, for the log to say how often.
+        if (s->speed > kPlausibleWalkSpeed) ++stats_.walks_fast;
+        break;
     case MonsterEvent::Hit:  ++stats_.hits; break;
     case MonsterEvent::Hurt: break;     // take_hurt's
     }
@@ -652,6 +733,7 @@ PacketWorld::Taken PacketWorld::take_hurt(const MonsterState& s, std::uint64_t t
 
     Mob* m = nullptr;
     std::int64_t before = -1;     // the HP it had, for a monster known
+    bool chained = false;         // and the HP before less the damage is the HP after
     if (it == slots_.end()) {
         // A slot no frame has named: the monster is where the hurt says,
         // standing there, as a stop puts one.
@@ -665,27 +747,37 @@ PacketWorld::Taken PacketWorld::take_hurt(const MonsterState& s, std::uint64_t t
         m->speed = s.speed;
         m->moving = false;
         m->event_ms = t;
+        placed(slot, Placing::By::State, s.state, s.speed, s.facing, t);
         ++stats_.hurts_new_slot;
     } else {
-        // Its place only near where it was worked out to be, taken then as a
+        // Its place near where it was worked out to be, taken then as a
         // stop's: what the bytes at 32 and 34 are in these states was not
-        // looked at apart, and a hurt far off is counted and passed over.
+        // looked at apart. Far off, it is taken only when its HP chains --
+        // proof that the frame is this slot's monster, whose place the game
+        // has and the working-out lost (kPlaceFarFrames); otherwise it is
+        // counted and passed over.
         Slot& slot = it->second;
         m = &slot.at;
         before = m->hp;
+        chained = before - static_cast<std::int64_t>(s.damage) == s.hp;
         Mob now = *m;
         follow_mob(now, slot.walk_from_ms, t);
         const float off = std::max(std::abs(now.x - static_cast<float>(s.x)),
                                    std::abs(now.y - static_cast<float>(s.y)));
-        if (off <= kUnknownPlacePx) {
+        const bool far = off > kUnknownPlacePx;
+        const bool take = !far || places_far(s.state, chained);
+        if (far) {
+            ++stats_.hurts_far;
+            note_far(slot, s.state, s.x, s.y, now, off, take, t);
+        }
+        if (take) {
             m->x = static_cast<float>(s.x);
             m->y = static_cast<float>(s.y);
             m->facing = s.facing;
             m->speed = s.speed;
             m->moving = false;
             m->event_ms = t;
-        } else {
-            ++stats_.hurts_far;
+            placed(slot, Placing::By::State, s.state, s.speed, s.facing, t);
         }
     }
 
@@ -693,7 +785,7 @@ PacketWorld::Taken PacketWorld::take_hurt(const MonsterState& s, std::uint64_t t
     // after frame -- what proves the layout -- and an HP above the last is
     // the monster healing between blows.
     if (before >= 0) {
-        if (before - static_cast<std::int64_t>(s.damage) == s.hp) ++stats_.hurts_chained;
+        if (chained) ++stats_.hurts_chained;
         if (s.hp > before) ++stats_.hurts_rose;
     }
     saw_hp(*m, std::int64_t{ s.hp } + s.damage);
@@ -768,6 +860,60 @@ void PacketWorld::note_yours() {
                 static_cast<unsigned>(fix_.me.id), static_cast<unsigned long long>(kActorCheckHits));
 }
 
+void PacketWorld::placed(Slot& slot, Placing::By by, std::uint8_t state, float speed, int facing, std::uint64_t t) {
+    slot.at.frame_x = slot.at.x;
+    slot.at.frame_y = slot.at.y;
+    slot.placing.by = by;
+    slot.placing.state = state;
+    slot.placing.speed = speed;
+    slot.placing.facing = facing;
+    slot.placing.ms = t;
+}
+
+void PacketWorld::note_far(const Slot& slot, std::uint8_t state, std::uint16_t x, std::uint16_t y, const Mob& model,
+                           float off, bool taken, std::uint64_t t) {
+    if (taken) ++stats_.far_corrections;
+    else       ++stats_.far_refused;
+    // A fight that sends a dozen in a second says one, and the next line
+    // counts the rest.
+    if (far_said_ms_ != 0 && t < far_said_ms_ + kFarSaidEveryMs) {
+        ++far_unsaid_;
+        return;
+    }
+    const std::uint64_t unsaid = far_unsaid_;
+    far_said_ms_ = t;
+    far_unsaid_ = 0;
+
+    // What the working-out went on from: the slot's last placing frame.
+    const Placing& last = slot.placing;
+    char from[64] = "none";
+    switch (last.by) {
+    case Placing::By::Nothing: break;
+    case Placing::By::Table:   std::snprintf(from, sizeof from, "the map's table"); break;
+    case Placing::By::Spawn:   std::snprintf(from, sizeof from, "its spawn"); break;
+    case Placing::By::State:
+        std::snprintf(from, sizeof from, "state %u (%s)", static_cast<unsigned>(last.state), state_name(last.state));
+        break;
+    }
+    const double ago = static_cast<double>(t > last.ms ? t - last.ms : 0) / 1000.0;
+    // Written by on_packets with the lock let go of (said_).
+    char line[2048];    // as Logger::logf's own: never cut shorter than GB_INFO would print it
+    std::snprintf(line, sizeof line,
+                  "Positions: a far monster frame %s -- state %u (%s), slot %u gen %u at %u,%u, worked out at "
+                  "%.0f,%.0f %s, %.0f px off; its last placing frame: %s at speed %.2f, facing %+d, %.1f s "
+                  "before; %llu far frame(s) not said since the last such line; so far %llu placed far, %llu "
+                  "refused far, %llu walk(s) faster than %.0f px/step",
+                  taken ? "placed" : "refused", static_cast<unsigned>(state), state_name(state),
+                  static_cast<unsigned>(slot.at.slot), static_cast<unsigned>(slot.at.gen), static_cast<unsigned>(x),
+                  static_cast<unsigned>(y), static_cast<double>(model.x), static_cast<double>(model.y),
+                  model.moving ? "walking" : "standing", static_cast<double>(off), from,
+                  static_cast<double>(last.speed), last.facing, ago, static_cast<unsigned long long>(unsaid),
+                  static_cast<unsigned long long>(stats_.far_corrections),
+                  static_cast<unsigned long long>(stats_.far_refused),
+                  static_cast<unsigned long long>(stats_.walks_fast), static_cast<double>(kPlausibleWalkSpeed));
+    said_.emplace_back(line);
+}
+
 PacketWorld::Taken PacketWorld::take_other_state(const GamePacket& p) {
     // The reader knows stops, walks and hits, the only states the fight had,
     // and the hurts of today's server. One of those it refused -- a speed
@@ -823,30 +969,38 @@ PacketWorld::Taken PacketWorld::take_other_state(const GamePacket& p) {
                 static_cast<unsigned>(spot->x), static_cast<unsigned>(spot->y), bytes.c_str());
     }
 
-    // Where it says the monster is -- a contact as any other -- if that is
-    // near where the monster was worked out to be: standing there, and
-    // nothing else about it changed.
+    // Where it says the monster is, if that is near where the monster was
+    // worked out to be -- and a contact's wherever it is (kPlaceFarFrames):
+    // standing there, and nothing else about it changed.
     // Bytes 32 and 34 are the monster's place in each of the states known,
     // and the layout is one; if they are something else here, most such
     // frames land far off and are refused, and the kind's average says so.
+    // Every contact logged on t52_s2 stood 1 px above a floor of the map
+    // file, as a stop does.
     // Refused too: a frame for a slot with no monster known, or a dead one.
     if (it == slots_.end() || it->second.at.dead) return Taken::Refused;
-    Mob now = it->second.at;
-    follow_mob(now, it->second.walk_from_ms, t);
+    Slot& slot = it->second;
+    Mob now = slot.at;
+    follow_mob(now, slot.walk_from_ms, t);
     const float off = std::max(std::abs(now.x - static_cast<float>(spot->x)),
                                std::abs(now.y - static_cast<float>(spot->y)));
     if (kind) {
         ++kind->judged;
         kind->off_px += static_cast<double>(off);
     }
-    if (off > kUnknownPlacePx) return Taken::Refused;
+    if (off > kUnknownPlacePx) {
+        const bool take = places_far(spot->state, false);
+        note_far(slot, spot->state, spot->x, spot->y, now, off, take, t);
+        if (!take) return Taken::Refused;
+    }
 
     heard_monster(t);
-    Mob& m = it->second.at;
+    Mob& m = slot.at;
     m.x = static_cast<float>(spot->x);
     m.y = static_cast<float>(spot->y);
     m.moving = false;
     m.event_ms = t;
+    placed(slot, Placing::By::State, spot->state, spot->speed, spot->facing, t);
     ++stats_.unknown_placed;
     if (kind) ++kind->placed;
     return Taken::Used;
@@ -904,6 +1058,18 @@ PacketWorld::Place PacketWorld::place() const {
     p.entries = stats_.map_entries;
     p.entry_ms = stats_.entry_ms;
     return p;
+}
+
+std::vector<PacketWorld::OwnTrace> PacketWorld::own_since(std::uint64_t ms) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<OwnTrace> out;
+    // The oldest kept is trace_count_ back from the next to be written.
+    const std::size_t first = (trace_next_ + kOwnTraceSize - trace_count_) % kOwnTraceSize;
+    for (std::size_t k = 0; k < trace_count_; ++k) {
+        const OwnTrace& tr = trace_[(first + k) % kOwnTraceSize];
+        if (tr.ms >= ms) out.push_back(tr);
+    }
+    return out;
 }
 
 MapChangeBy map_change_by(const PacketWorld::Place& place, bool on_game, std::uint64_t last_server_ms,

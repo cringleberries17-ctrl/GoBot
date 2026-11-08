@@ -246,6 +246,10 @@ public:
         DropSent      sent = DropSent::NotSent;
         std::uint64_t down_ms = 0;      ///< now_ms() as [Ctrl↓, ↓↓] went out; 0 when ↓ did not
         std::uint32_t held_ms = 0;      ///< from then until ↓'s up went out
+        /// Ctrl alone before [Ctrl↓, ↓↓] went out, and from ↓'s up to Ctrl's
+        /// once it went: what was meant as 40-60 ms each, for the log.
+        std::uint32_t lead_ms = 0;
+        std::uint32_t tail_ms = 0;
     };
 
     /// Ctrl + ↓: the game's drop through a platform (the player, 2026-11-03).
@@ -276,22 +280,28 @@ public:
     /// go one at a time, in any order -- Ctrl before ↓.
     DropPress drop_ctrl_down(const std::function<bool()>& go_on) noexcept;
     /// Whether a drop's ↓-up or Ctrl-up has not gone out, with no drop
-    /// running to send it.
+    /// running to send it -- or a high jump's ↑-up (chord_ctrl).
     bool keys_owed() const noexcept;
     /// What a drop owes, sent whatever is in front: [↓↑, Ctrl↑] while ↓ is
     /// owed -- Ctrl↑ never alone before ↓'s -- and [Ctrl↑] once only Ctrl is.
+    /// A high jump's the same way: [↑↑, Ctrl↑] while its ↑ is owed.
     /// True when nothing is owed now; false while a drop runs (it sends its
     /// own) or an up did not go out again, counted in owed_tries.
     bool settle_owed() noexcept;
     /// How many times in a row settle_owed could not get the owed ups out:
     /// 0 once nothing is owed.
     int owed_tries() const noexcept { return owed_tries_.load(); }
-    /// That many, and ↓ or Ctrl may be stuck down: the hunt stops (GuiApp::tick).
+    /// Whether the up still owed is a high jump's ↑ (chord_ctrl(Up)) and not a
+    /// drop's ↓: the words a hunt stopped on it goes by (2026.11.05b).
+    bool up_owed() const noexcept { return up_owed_.load(); }
+    /// That many, and ↓ (or a high jump's ↑) or Ctrl may be stuck down: the
+    /// hunt stops (GuiApp::tick).
     static constexpr int kOwedTries = 3;
     /// For GoBot's start and each BẮT ĐẦU with drops on: a GoBot ended
     /// between ↓ and its up leaves both down in Windows. ↓ let go of when
-    /// Windows reads it down, then Ctrl the same way -- ups only, whatever is
-    /// in front. Nothing while a drop runs. How many ups went out.
+    /// Windows reads it down, then ↑ -- the high jump's, 2026.11.05b -- then
+    /// Ctrl the same way: ups only, whatever is in front. Nothing while a
+    /// chord runs. How many ups went out.
     int release_stray_drop_keys() noexcept;
 
     /// The steps' fixed events, whatever the keyboard layout: Ctrl is left
@@ -307,6 +317,76 @@ public:
     static constexpr int kDropTailMaxMs = 60;
     /// ↓ up again sooner than this after it went down: Cut.
     static constexpr std::uint32_t kDropCutMs = 60;
+
+    // ---- the jumps up: ↑, ↑↑ and Ctrl + ↑ (2026.11.05b) ----
+
+    /// The key a Ctrl chord carries after Ctrl: ↓, the drop through a
+    /// platform; ↑, the high jump.
+    enum class ChordKey : std::uint8_t { Down, Up };
+    /// Ctrl + `key`: the drop's chord with `key` its second key, its steps,
+    /// guards and owed ups as drop_ctrl_down's above. chord_ctrl(Down) IS
+    /// drop_ctrl_down. With Up:
+    ///
+    ///   1. [Ctrl↓] alone for 40-60 ms -- the pick-up, harmless;
+    ///   2. [Ctrl↓, ↑↓] in one SendInput array, ↑ {0x26, scan 0x48,
+    ///      extended} -- E0 48; without the flag the game reads numpad 8 --
+    ///      sent as any array is: inject()'s ↓ guard is not asked to let
+    ///      anything through for it;
+    ///   3. ↑ held kJumpHoldMinMs-kJumpHoldMaxMs, go_on asked every 10 ms,
+    ///      then [↑↑];
+    ///   4. 40-60 ms, then [Ctrl↑]. ↑ always comes up before Ctrl.
+    ///
+    /// About 170-230 ms in all. While it runs or owes an up, other threads'
+    /// key-downs are refused as in a drop (a skill key inside it would be
+    /// Ctrl + that key), and what is owed goes ↑ first, then Ctrl.
+    DropPress chord_ctrl(ChordKey key, const std::function<bool()>& go_on) noexcept;
+    /// Ctrl + ↑, the game's high jump (0x002A state 2, -36 a step):
+    /// chord_ctrl(ChordKey::Up).
+    DropPress high_jump(const std::function<bool()>& go_on) noexcept;
+    /// chord_ctrl's steps' events for `key`, as drop_batch's for ↓: DownUp
+    /// and BothUp let go of `key`. For tests.
+    static std::vector<KeyEvent> chord_batch(ChordKey key, DropStep s);
+
+    /// Every ↑ of a jump is held this long: the game misses short taps.
+    static constexpr int kJumpHoldMinMs = 80;
+    static constexpr int kJumpHoldMaxMs = 110;
+    /// ↑↑'s second ↑ goes this much either way of the gap asked for, and is
+    /// not sent at all later than this past it: too late to be the second.
+    static constexpr int kJumpSecondJitterMs = 15;
+    static constexpr int kJumpSecondSendLateMs = 60;
+    /// A jump's key held longer than this is not the press meant -- a thread
+    /// put off in the middle of it, an up sent again late: HeldLong.
+    static constexpr std::uint32_t kJumpHeldLongMs = 250;
+
+    /// How a jump's ↑ presses went (jump_twice, jump_once).
+    enum class JumpSent : std::uint8_t {
+        NotSent,    ///< nothing went down: no window or key, ↓ or Ctrl, refused, not in front, go_on no, a chord's keys
+        First,      ///< the first ↑ went out; the second was not asked for, or did not go
+        Both,       ///< both went out
+    };
+    struct JumpPress {
+        JumpSent      sent = JumpSent::NotSent;
+        std::uint64_t first_down_ms = 0;    ///< now_ms() as the first ↑ went down; 0 when it did not
+        std::uint64_t second_down_ms = 0;   ///< the same for the second
+        std::uint32_t held1 = 0;            ///< from each one's down until its up went out
+        std::uint32_t held2 = 0;
+        bool held_long() const { return held1 > kJumpHeldLongMs || held2 > kJumpHeldLongMs; }
+    };
+    /// ↑↑, the game's double jump (0x002A state 1, then 6): `vk` down, held
+    /// kJumpHoldMinMs-kJumpHoldMaxMs, up; then `gap_ms` after the first went
+    /// down (± kJumpSecondJitterMs), the second the same way -- only with
+    /// go_on still saying yes, the game in front, and no later than gap_ms +
+    /// kJumpSecondSendLateMs after the first: otherwise none (First). go_on
+    /// is asked before the first, every 10 ms of each hold and of the wait,
+    /// and just before the second; a no cuts a hold short. Each ↑ is held as
+    /// a key pressed here is (is_held), so release_all lets go of it -- and a
+    /// release_all during one ends the jump there. Never ↓, never Ctrl: those
+    /// are NotSent. Not while a chord runs or owes its ups. At TIME_CRITICAL;
+    /// downs only into the game in front, ups wherever focus is. `gap_ms` 0:
+    /// one ↑ only.
+    JumpPress jump_twice(std::uint32_t vk, int gap_ms, const std::function<bool()>& go_on) noexcept;
+    /// ↑, the plain jump (state 1): jump_twice's first press alone.
+    JumpPress jump_once(std::uint32_t vk, const std::function<bool()>& go_on) noexcept;
 
     /// One event of an array inject() hands to Windows, in SendInput's own
     /// terms: a key's code, scan code and flags (KEYBDINPUT) or, with
@@ -329,9 +409,10 @@ public:
     /// Every array inject() lets through -- past the ↓ guard and the drop's
     /// refusal of other threads, which it is there to test -- goes to `send`,
     /// which says how many of its events were taken; SendInput is never
-    /// called. drop_ctrl_down and release_stray_drop_keys are then not
-    /// refused by the switch, and ask `focused` for the game in front (none:
-    /// in front) and `key_held` for what Windows reads down (none: nothing).
+    /// called. drop_ctrl_down, chord_ctrl, jump_twice, jump_once and
+    /// release_stray_drop_keys are then not refused by the switch, and ask
+    /// `focused` for the game in front (none: in front) and `key_held` for
+    /// what Windows reads down (none: nothing).
     /// Process-wide, as the keyboard it stands in for.
     struct PretendSender {
         std::function<unsigned(const std::vector<SentEvent>& events, bool chord)> send;
@@ -342,6 +423,28 @@ public:
     /// An array through inject() as any key or click goes, never a drop's
     /// chord, for a test. 0, and nothing done, without a pretend sender.
     static unsigned pretend_inject(const std::vector<SentEvent>& events);
+
+    // ---- what GoBot itself last put down (2026.11.04d) ----
+
+    /// The last key or mouse button GoBot put down -- any InputManager of the
+    /// process, as inject() let it go out -- for the log's map-entry line: a
+    /// door gone through is told from GoBot's own doing. Key-downs and
+    /// button-downs only: an up, a pointer's move, anything refused, none.
+    /// Privacy: a key's code only for a key pressed as a key. Whatever is
+    /// typed -- a chat line, a log in's fields, as type_key, type_unit and
+    /// type_text send it -- is Text, never which key or character it was.
+    struct LastInput {
+        enum class Kind : std::uint8_t { None, Key, Text, Mouse };
+        Kind          kind = Kind::None;
+        std::uint32_t vk = 0;           ///< Key: its code; Mouse: 1 left, 2 right, 3 middle, 4 another
+        std::uint64_t at_ms = 0;        ///< now_ms() as it went out; 0 for none since GoBot started
+        const char*   what = "";        ///< what inject() was told it was for: a string literal
+    };
+    static LastInput last_input();
+    /// "key Right 2.4 s before (press a key)", "typed text 0.3 s after (type
+    /// a key)", "the left mouse button 12.0 s before", "none since GoBot
+    /// started" -- measured against `at_ms`. Never what was typed.
+    static std::string last_input_text(const LastInput& in, std::uint64_t at_ms);
 
     /// One UTF-16 unit as Unicode input (KEYEVENTF_UNICODE), down and up, only
     /// while the game is in front.
@@ -531,8 +634,19 @@ private:
     int  jitter(int min_ms, int max_ms) const;
 
     /// drop_ctrl_down's steps, which it runs in a try: `out` holds what went
-    /// out so far, for what it returns should one of them throw.
-    void drop_chord(const std::function<bool()>& go_on, DropPress& out);
+    /// out so far, for what it returns should one of them throw. `key` the
+    /// chord's second key: chord_ctrl's, ↑ for the high jump.
+    void drop_chord(ChordKey key, const std::function<bool()>& go_on, DropPress& out);
+    /// jump_twice's presses, which it runs in a try as chord_ctrl runs its
+    /// steps: `gap_ms` 0 for one ↑.
+    void jump_keys(std::uint32_t vk, int gap_ms, const std::function<bool()>& go_on, JumpPress& out);
+    /// One ↑ of them: down into the game in front, held `hold_ms` -- cut short
+    /// by go_on's no or a release_all -- and up wherever focus is, with a
+    /// guard that sends the up whatever happens. Held among the keys while
+    /// down. Whether it went down: then `down_ms` and `held_ms` as JumpPress
+    /// has them, and `whole` whether it was held its time.
+    bool jump_key(std::uint32_t vk, int hold_ms, const std::function<bool()>& go_on, std::uint64_t& down_ms,
+                  std::uint32_t& held_ms, bool& whole);
     /// The drop's guard, at its end whatever happened: with `send_ups`, what
     /// is still owed sent; then no drop runs. Nothing when none was running.
     void end_chord(bool send_ups) noexcept;
@@ -568,6 +682,7 @@ private:
     std::atomic<bool>  chord_in_flight_{false};
     std::atomic<bool>  chord_cancel_{false};       ///< release_all cut it short
     std::atomic<bool>  down_owed_{false};          ///< set before ↓ goes down, cleared once its up went out
+    std::atomic<bool>  up_owed_{false};            ///< likewise for the high jump's ↑ (chord_ctrl)
     std::atomic<bool>  ctrl_owed_{false};          ///< likewise for Ctrl
     std::atomic<int>   owed_tries_{0};
     bool               chord_counted_ = false;     ///< under chord_mutex_: see chord_busy_sync

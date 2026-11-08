@@ -400,6 +400,17 @@ bool BagLedger::low_total(std::uint32_t vk, const Link& link, int& total, std::u
     return true;
 }
 
+bool BagLedger::learned_total(std::uint32_t vk, const Link& link, int& total, std::uint32_t& item) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    total = -1;
+    item = 0;
+    const auto found = keys_.find(vk);
+    if (found == keys_.end() || !found->second.learned || !current_locked(link)) return false;
+    item = found->second.item;
+    total = total_of(seen_.back().slots, item);
+    return true;
+}
+
 BagLedger::ShopAnswer BagLedger::shop_ask(std::uint64_t now, const Link& link, int hp_below, int mp_below) {
     std::lock_guard<std::mutex> lock(mutex_);
     ShopAnswer a;
@@ -597,6 +608,7 @@ BagLedger::Summary BagLedger::summary(const Link& link) const {
             ks.hotbar_disagree = k.hotbar_disagree;
             ks.low_trusted = low_trusted(k);
             ks.distrusts = k.distrusts;
+            if (k.learned && s.known) ks.total = total_of(seen_.back().slots, k.item);
         }
         s.keys.push_back(ks);
     }

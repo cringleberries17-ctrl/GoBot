@@ -286,12 +286,17 @@ inline std::optional<MonsterContact> read_monster_contact(const GamePacket& p) {
 /// y u16 at 32 and 34. For a state read_monster_state does not know -- which
 /// came by the thousand in a hunt where the monsters fought back, and in no
 /// recording -- nothing says that is where its place is, so whoever uses one
-/// has to judge it against where the monster was.
+/// has to judge it against where the monster was. The facing i8 at 24 and the
+/// speed f32 at 28, read where the known states keep them too, are for the
+/// log alone (PacketWorld's far line): a speed that is no number is kept as
+/// it came, and nothing follows either.
 struct MonsterSpot {
     std::uint8_t  state = 0;
     std::uint32_t slot = 0;
     std::uint16_t x = 0;
     std::uint16_t y = 0;
+    int           facing = 0;   ///< +1, -1, or 0 for neither
+    float         speed = 0.0f;
 };
 
 inline std::optional<MonsterSpot> read_monster_spot(const GamePacket& p) {
@@ -304,6 +309,11 @@ inline std::optional<MonsterSpot> read_monster_spot(const GamePacket& p) {
     s.state = r.u8();
     r.seek(16 - kHeader);
     s.slot = r.u32();
+    r.seek(24 - kHeader);
+    const std::int8_t facing = r.i8();
+    s.facing = facing == 1 ? 1 : facing == -1 ? -1 : 0;
+    r.seek(28 - kHeader);
+    s.speed = r.f32();
     r.seek(32 - kHeader);
     s.x = r.u16();
     s.y = r.u16();

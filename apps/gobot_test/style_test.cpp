@@ -1311,6 +1311,55 @@ void test_spot_keep_distance() {
     }
 }
 
+/// The map tab's hunting area (Hunter::set_zone) need not be even round its
+/// home: the room for a step back is to its own edge on that side.
+void test_zone_keep_distance() {
+    section("Chỗ đánh quái: a step back goes no further than the map tab's area's own edge, each side");
+
+    // The character at world 4640, its home; the box 40 px to its left and
+    // 600 to its right -- or the other way round.
+    const auto zone = [](float left, float right) {
+        Hunter::Zone z;
+        z.stem = "t11_s1";
+        z.epoch = 1;
+        z.home_x = 4640.0f;
+        z.home_y = 1100.0f;
+        z.left = left;
+        z.top = 1000.0f;
+        z.right = right;
+        z.bottom = 1200.0f;
+        return z;
+    };
+    for (const bool near_left : { true, false }) {
+        const int toward = near_left ? VK_LEFT : VK_RIGHT;      // away from a monster on the other side
+        const int away = near_left ? VK_RIGHT : VK_LEFT;
+        {
+            Rig r(keeping_spot(), false, true);
+            r.hunter.set_zone(near_left ? zone(4600.0f, 5240.0f) : zone(4040.0f, 4680.0f));
+            r.pass();
+            r.w.mobs = { plate(near_left ? 720 : 560, 400, "Moc") };   // 80 px off: too close
+            r.pass();
+            const std::vector<World::Press> steps = r.w.of(static_cast<std::uint32_t>(toward), 50);
+            check(r.hunter.spot().from_map && steps.size() == 1 && steps[0].hold == 113,
+                  std::string(near_left ? "its left edge" : "its right edge") +
+                      " 40 px off: the step back that way held 113 ms, as far as the edge -- " +
+                      std::to_string(steps.empty() ? 0 : steps[0].hold) + " ms");
+        }
+        {
+            Rig r(keeping_spot(), false, true);
+            r.hunter.set_zone(near_left ? zone(4600.0f, 5240.0f) : zone(4040.0f, 4680.0f));
+            r.pass();
+            r.w.mobs = { plate(near_left ? 560 : 720, 400, "Moc") };   // 80 px off, the other side
+            r.pass();
+            const std::vector<World::Press> steps = r.w.of(static_cast<std::uint32_t>(away), 50);
+            check(steps.size() == 1 && steps[0].hold == Hunter::backstep_ms(120, 80) + Hunter::kTurnTapMs,
+                  std::string(near_left ? "its right edge" : "its left edge") +
+                      " 600 px off: the step back that way as without a spot -- " +
+                      std::to_string(steps.empty() ? 0 : steps[0].hold) + " ms");
+        }
+    }
+}
+
 void test_spot_view_follows() {
     section("Chỗ đánh quái: the view following the character -- the walk back goes by the packets alone");
 
@@ -1433,6 +1482,7 @@ void test_hunter_style(void (*check_fn)(bool, const std::string&), void (*sectio
     test_facing();
     test_engaged();
     test_spot_keep_distance();
+    test_zone_keep_distance();
     test_spot_view_follows();
     test_old_setup();
 }

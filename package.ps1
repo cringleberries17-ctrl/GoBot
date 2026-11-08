@@ -451,9 +451,54 @@ STARTING
      GoBot: it goes on running, and F10, F11 and F12 still work in the game.
 
 THE SIMPLE SCREEN
-  Seven tabs: Danh quai, To doi, Tu chat, Tu dang nhap, Don rac, Nhiem vu,
-  Thong bao. Everything that acts on the game ships switched OFF: tick what
-  you want first. Settings save themselves.
+  Eight tabs: Danh quai, Ban do, To doi, Tu chat, Tu dang nhap, Don rac,
+  Nhiem vu, Thong bao. Everything that acts on the game ships switched OFF:
+  tick what you want first. Settings save themselves.
+
+  Ban do (since 2026.11.04c; tried on the real game with 04c and 04d, and
+  this version's changes not yet) draws the map the character is
+  on from the game's own files -- platforms, the bottom ground, gates --
+  with the character and the monsters where the
+  game's packets put them (Npcap), as GoC does. Since 2026.11.05 a walking
+  monster's dot, and the character's, is drawn on its platform as the map
+  file has it (the bot itself still judges heights as before), a dead
+  monster's dot goes at once, no monster is drawn while no packets come,
+  and the tab is redrawn 10 times a second (2 behind the game with
+  Nhe may). On it, with the mouse only, each map gets one hunting area:
+  a box, and a home on a platform inside it that the bot walks back to.
+  Saved on the mouse's release in configs\spots.ini, which GoBot writes
+  and no package ships, with Hoan tac to undo. With Cho danh quai ticked
+  the bot uses the map's area once the character stands still inside it
+  or within 150 px of it (or back near where it left it, through a door
+  or after logging back in); farther off it hunts where the character
+  stands, as before. Dat cho nay on a map with an area moves the area
+  there, and saves it.
+  Since 2026.11.04d, by the map's own file, the bot never walks toward a
+  monster out of the area's box; more than 60 px outside it, with a way
+  back along the floors (or off a floor's end into the box), it walks back
+  first, never hopping, and with none it fights where it stands; the card
+  under the map says how far outside it is. Put the home on the LOWEST
+  floor to be hunted and drag the box UP, not down -- 04c's notes said the
+  reverse, and the card now says in red when most of the box cannot walk
+  back -- and do not make an area right after coming through a door, where
+  the home lands on the arrival spawn. Drops now work on sloping floors,
+  and the hunter stops once within 24 px across of the monster below
+  before it judges one.
+  Since 2026.11.05b (not yet tried on the game) an area has two more ticks,
+  both on as shipped (a hunt.ini without them reads them on). Nhay len buc
+  tren jumps straight up -- Up, Up Up or Ctrl+Up, chosen by the map's own
+  file with a margin -- onto a monster's platform above and on the way
+  home, only where the take-off, the landing and the monster all lie
+  inside the area and no platform outside it lies within 650 px above; it
+  needs the jump key to be Up, and a map change within 10 s of a jump
+  stops the hunt and unticks it. On t52_s2 the home ledge is reached from
+  the ground by Ctrl+Up at about x 695-884, so the home can stay where it
+  is. Tu tim quai trong vung goes to any monster inside the area the
+  character can get to, in view or not, and fights it from a place inside
+  the area; with none left it stands where it is (outside the area it
+  walks back first, as above). While it is on, the bot judges the
+  monsters' heights on their platforms too. Hunt t52_s2 and send
+  gobot_gui.log.
 
   Hunting needs the character's name typed on Danh quai: the hunter finds
   the character by that name, whole -- a player whose name has it inside,
@@ -535,7 +580,8 @@ EXPERIMENTAL
   potion (Tu bom mau pet), potion counts (Con N binh), monster lists (Loc
   quai), attack styles (Kieu danh), keeping distance (Giu khoang cach),
   positions from packets (Vi tri tu goi tin), the hunting spot (Cho danh
-  quai, with Dat cho nay), dropping to a monster on the floor below (Nhay
+  quai, with Dat cho nay), the Ban do tab with its hunting area per map,
+  dropping to a monster on the floor below (Nhay
   xuong bac duoi: Ctrl + Down, off as shipped, never with Dung yen mot cho,
   never near a gate; a map change after a drop stops hunting and unticks
   it), the jump key (Phim nhay and Thu),
@@ -719,6 +765,8 @@ UPDATING
   the 12th (the Lv2 potions among them), a save from it turns the pet's
   potion into a plain timed key -- which this version then reads the same
   way -- and it drops the mark that keeps a short buff a buff.
+  Copy spots.ini too, to keep the hunting areas drawn on Ban do (from
+  2026.11.04c on): no package ships one, so nothing is copied over.
 
 THE DISCORD WEBHOOK
   Kept encrypted for the Windows user in %LOCALAPPDATA%\GoBot, never in this
@@ -731,7 +779,8 @@ WHAT IS IN HERE
                     potion counts it reads on the hotbar), --party-hud (what
                     it reads of the party), --popups (which notices it
                     would close)
-  configs\          the settings, written by the app as they change
+  configs\          the settings, written by the app as they change; the
+                    app makes spots.ini there for the Ban do areas
   templates\        the game's own dialogs and buttons, used to recognise them
   bitmap_font\      the game's own glyphs, used to read numbers and names
   DOC-TRUOC.txt     the guide, in Vietnamese
@@ -745,9 +794,10 @@ WHAT IS IN HERE
 NOTHING ELSE TO INSTALL
   No VC++ redistributable: the runtime is linked in.
   Npcap is optional -- it is there if GoC ever ran, otherwise from
-  npcap.com: only Vi tri tu goi tin and Cho danh quai use it. Without it
-  GoBot reads the screen, and both programs start all the same -- but Tu
-  danh quai does not start while Cho danh quai is ticked.
+  npcap.com: only Vi tri tu goi tin, Cho danh quai and the Ban do tab use
+  it. Without it GoBot reads the screen, and both programs start all the
+  same -- but Tu danh quai does not start while Cho danh quai is ticked,
+  and Ban do has nothing to draw.
 
   Botting is against GhostOnline's terms of service. Your account, your call.
 "@
@@ -1080,6 +1130,14 @@ if ((Get-IniValue (Join-Path $cfg 'login.ini') 'Login' 'channel_index') -ne '0' 
 if (Test-Path (Join-Path $cfg 'trash')) { $problems += "configs\trash\ is in the package -- somebody's photographed items" }
 # The Nguoi Giu San item as one player's bag draws it (Tu mua binh): theirs alone.
 if (Test-Path (Join-Path $cfg 'shop')) { $problems += "configs\shop\ is in the package -- somebody's photographed item" }
+# The hunting areas one player drew on Ban do, map by map: configs\spots.ini,
+# which GoBot makes and writes beside itself, and the spots.ini.new a save
+# writes first. Theirs alone, and a new version's folder must not come with
+# one to be copied over: the configs are copied from source, where one is a
+# mistake.
+Get-ChildItem $stage -Recurse -File | Where-Object { $_.Name -like 'spots.ini*' } | ForEach-Object {
+    $problems += "$($_.FullName.Substring($stage.Length + 1)) is in the package -- somebody's hunting areas (Ban do)"
+}
 # And a tester's log starts afresh each session, keeping the one before: sent
 # with a problem, it holds two sessions, not weeks of names and chat lines.
 if ((Get-IniValue (Join-Path $cfg 'app.ini') 'Paths' 'new_log_each_start') -notmatch '^(true|1|yes|on)$') {

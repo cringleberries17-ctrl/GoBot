@@ -244,6 +244,8 @@ int potion_pair_gap_ms(int read_period_ms);
 ///   looks too, and a stack running down was warned of at its numbers.
 /// - Out: the slot empty on two looks in a row, once, until a count or single
 ///   or a new run.
+/// - Unreadable: the slot unreadable on two looks in a row, once a run -- for
+///   the window to keep a picture of that slot alone.
 class PotionWatch {
 public:
     /// The least believed count a wild drop is told from: below it a fifth is
@@ -259,6 +261,9 @@ public:
             Wild,           ///< a look read `count`, a wild drop from `was`: not believed, held
             Misread,        ///< the wild `count` came back to `back`: it was a misread of `was`
             WildBelieved,   ///< the wild drop to `count` read kWildLooks looks running: believed
+            /// The slot unreadable on two looks in a row, once a run: its
+            /// picture is worth keeping (2026.11.04d).
+            Unreadable,
         };
         Kind          kind = Kind::Low;
         std::uint32_t vk = 0;
@@ -306,6 +311,7 @@ private:
         /// The last count believed, kept while the slot is believed covered
         /// or unreadable: what a wild drop is told from. -1 for none.
         int         ref = -1;
+        bool        unreadable_said = false;    ///< Event::Unreadable given this run
     };
     std::map<std::uint32_t, Key> keys_;
     int warn_below_ = 20;

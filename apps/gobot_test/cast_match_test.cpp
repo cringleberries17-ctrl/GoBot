@@ -443,6 +443,77 @@ void test_buff_watch() {
           "values stay");
 }
 
+// ------------------------------------------- a buff key's bursts (2026.11.04d)
+
+void test_buff_bursts() {
+    section("A buff key's burst of presses: a kind-2 cast with it or none, whichever press the pairing gave it to");
+
+    // The live minute of 2026-11-04 20:39:12: A's 4 presses 200 ms apart, its
+    // buff cast 196 ms after the first -- with skill key 2 pressed 300 ms
+    // before A, so the oldest-first pairing gives the buff cast to key 2. And
+    // S's 4 presses at 20:39:13.3, with only attacks cast around them.
+    const std::uint32_t kA = 'A', kS = 'S';
+    CastMatch m;
+    std::vector<CastMatch::Press> presses;
+    presses.push_back(press_of(kKey2, kT0 - 300));
+    for (int i = 0; i < 4; ++i) presses.push_back(press_of(kA, kT0 + static_cast<std::uint64_t>(i) * 200));
+    m.add(kT0 + 196, cast_of(13304, 2));
+    const std::uint64_t s0 = kT0 + 1300;
+    for (int i = 0; i < 4; ++i) presses.push_back(press_of(kS, s0 + static_cast<std::uint64_t>(i) * 200));
+    m.add(s0 + 250, cast_of(51305, 1));
+    m.add(s0 + 900, cast_of(51302, 1));
+    m.pair(presses, { kA, kS }, kT0 + 1500);
+    const bool early = m.take_bursts().empty();
+    m.pair(presses, { kA, kS }, s0 + 600 + CastMatch::kBurstGapMs + CastMatch::kSettleMs + 1);
+    const std::vector<CastMatch::Burst> bursts = m.take_bursts();
+    const std::vector<CastMatch::Cast> casts = m.casts();
+    check(early && bursts.size() == 2 && casts.size() == 3 && casts[0].vk == kKey2,
+          "nothing judged while a press may still join; then both bursts -- the buff cast paired with key 2, "
+          "pressed before A, as the live pairing did");
+    if (bursts.size() == 2) {
+        const CastMatch::Burst& a = bursts[0];
+        const CastMatch::Burst& s = bursts[1];
+        check(a.vk == kA && a.presses == 4 && a.first_ms == kT0 && a.last_ms == kT0 + 600 && a.seen &&
+                  a.skill == 13304 && a.cast_ms == kT0 + 196 &&
+                  burst_line(a) == "Buff (packets): key A -- a kind-2 cast of yours, skill 13304, 196 ms after its "
+                                   "first press (4 presses)",
+              "A: its buff cast seen with its burst all the same -- " + burst_line(a));
+        check(s.vk == kS && s.presses == 4 && !s.seen &&
+                  burst_line(s) == "Buff (packets): key S -- no kind-2 cast of yours from 200 ms before its first "
+                                   "press to 700 ms after its last: maybe not cast (4 presses)",
+              "S: only attacks cast round its presses -- " + burst_line(s));
+    }
+    const std::string line = casts_line(m.take_minute());
+    check(has(line, "key A (buff): 4 pressed, 0 cast") && has(line, "a kind-2 cast with 1 of its 1 burst") &&
+              has(line, "key S (buff): 4 pressed") && has(line, "a kind-2 cast with 0 of its 1 burst"),
+          "and the Casts line says it of each buff key: " + line);
+
+    // Presses of one key more than kBurstGapMs apart are two bursts; a press
+    // within it joins.
+    CastMatch two;
+    two.add(kT0 + 4300, cast_of(13304, 2));
+    two.pair({ press_of(kA, kT0), press_of(kA, kT0 + 1900), press_of(kA, kT0 + 4000) }, { kA }, kT0 + 10'000);
+    const std::vector<CastMatch::Burst> split = two.take_bursts();
+    check(split.size() == 2 && split[0].presses == 2 && !split[0].seen && split[1].presses == 1 && split[1].seen &&
+              split[1].cast_ms == kT0 + 4300 && two.take_bursts().empty(),
+          "1.9 s apart: one burst; 2.1 s after it: another, its own cast its own; each given once");
+    // A skill key's presses make no burst.
+    CastMatch skill;
+    skill.pair({ press_of(kKey2, kT0) }, {}, kT0 + 10'000);
+    check(skill.take_bursts().empty(), "a skill key's presses: no burst");
+
+    // The hunter's own attack key, handed in beside the macro's: its cast its
+    // own, not the macro key's pressed after it.
+    const std::uint32_t kZ = 'Z';
+    CastMatch with_z, without_z;
+    with_z.add(kT0 + 150, cast_of(51305, 1));
+    without_z.add(kT0 + 150, cast_of(51305, 1));
+    with_z.pair({ press_of(kZ, kT0), press_of(kKey2, kT0 + 100) }, {}, kT0 + 5000);
+    without_z.pair({ press_of(kKey2, kT0 + 100) }, {}, kT0 + 5000);
+    check(with_z.casts()[0].vk == kZ && without_z.casts()[0].vk == kKey2,
+          "Z pressed 100 ms before key 2: its cast is Z's; without Z's press handed in, key 2 took it");
+}
+
 // ------------------------------------------------------------ the wiring
 
 #ifdef GOBOT_SOURCE_DIR
@@ -493,6 +564,18 @@ void test_more_wiring() {
               has(takeoffs, "me.known") && has(takeoffs, "return s.air_jumps + s.air_second + s.air_high;"),
           "packet_takeoffs: only with a capture on the game GoBot follows, your id locked since the last entry, "
           "you known and no other client's report lately -- the running total of your take-offs");
+    // 2026.11.04d: the hunter's attack key's presses handed in beside the
+    // macro's, and each buff key's burst written once judged.
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string hunter = source("/src/hunter.cpp");
+    check(has(gui, "hunter_->set_on_attack([this](std::uint32_t vk, std::uint64_t at_ms) { more_note_attack(vk, "
+                   "at_ms); });") &&
+              has(hunter, "if (press(cfg.attack_key, 60) && on_attack_) on_attack_(cfg.attack_key, down_ms);") &&
+              has(body(more, "void GuiApp::more_note_attack("), "part.attacks.push_back(") &&
+              has(tick, "presses.insert(presses.end(), part.attacks.begin(), part.attacks.end());") &&
+              has(tick, "for (const CastMatch::Burst& b : part.casts.take_bursts())") &&
+              has(tick, "burst_line(b)"),
+          "the hunter's attack presses go to the pairing; each buff burst judged is written");
     const std::string cast = source("/src/cast_match.cpp");
     check(!has(more, "light_") && !has(more + cast, "game_link_of(") && !has(more + cast, "tcp_connections(") &&
               !has(more + cast, "npcap_available(") && !has(more + cast, "key_press(") &&
@@ -538,5 +621,6 @@ void test_cast_match(void (*check_fn)(bool, const std::string&), void (*section_
     test_cast_pairing();
     test_cast_reach();
     test_buff_watch();
+    test_buff_bursts();
     test_more_wiring();
 }
