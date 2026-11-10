@@ -142,9 +142,11 @@ version of this looks like.
 `AttackThread`, `BuffThread`, `HealThread`, `LootThread`, `ChatThread`,
 `PathfindingThread`, `ReturnToOriginThread`, `ReturnOldMapThread`. Handlers for
 move/jump/face/skill/buff/target/attack. Confirmation hooks
-(`OnAttackConfirmed`, `OnSpellBaseConfirmed`, `OnMapWarp`) — it waits for the
-server to confirm an action landed before advancing. Constants:
-`MAX_SKILL_RETRIES`, `BUFF_RETRY_DELAY_MS`, `STUCK_THRESHOLD_MS`,
+(`OnAttackConfirmed`, `OnSpellBaseConfirmed`, `OnMapWarp`) — they write
+confirm flags that nothing reads, so nothing waits for a confirmation before
+the next action (corrected 2026-11-08, from two separate static reads of
+GhostCore.dll; earlier versions of this page said it waits). Constants:
+`MAX_SKILL_RETRIES` (never used), `BUFF_RETRY_DELAY_MS`, `STUCK_THRESHOLD_MS`,
 `STUCK_DISTANCE_THRESHOLD` (3, 1000 ms, 2000 ms, 5.0 px). `PerformHealCheck`
 is an empty function: potions are pressed by go_client.exe (see
 [Code-level findings](#code-level-findings-full-decompile-2026-10-17)).
@@ -234,9 +236,11 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
 
 ### Fight rules (`CommandExecutor`)
 
-- **Attack loop** (`AttackThread`). Runs only while the server reports state 5
-  (attacking). It presses each enabled attack skill once, 300 ms apart, and
-  idles for 100 ms when there is none.
+- **Attack loop** (`AttackThread`). Written to run only while the server
+  reports state 5 (attacking), pressing each enabled attack skill once, 300 ms
+  apart, and idling for 100 ms when there is none -- but the client never
+  starts this thread (corrected 2026-11-08). The skills go out from the
+  server's command below.
 - **Server skill command** (`HandleUseSkill`, command `0x10`, GhostCore
   0x1800478B0 -- earlier versions of this page said 0x180046A80; corrected
   2026-11-05). In this order: the jump attacks, the MP check, keep distance,
@@ -263,10 +267,13 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
   - **Skills**, not sequential. It presses only the first enabled skill in range
     whose cooldown, in seconds, has passed.
   - Either way, when no skill went out it presses the normal attack
-    (`key_normal_attack`). A press stays pending until the server confirms it
-    (`OnAttackConfirmed`, `OnSpellBaseConfirmed`). GoBot's "Chỉ khi đang đánh
-    quái" follows this, with a cooldown of its own on every skill in both
-    modes, since no server paces GoBot's presses.
+    (`key_normal_attack`). The confirm hooks (`OnAttackConfirmed`,
+    `OnSpellBaseConfirmed`) set flags that nothing reads, so no press waits for
+    a confirmation: GoC presses blind, as GoBot's timers did (corrected
+    2026-11-08). GoBot's "Chỉ khi đang đánh quái" follows the rest of this,
+    with a cooldown of its own on every skill in both modes, since no server
+    paces GoBot's presses; its "Ra chiêu theo vòng" (2026.11.08, the macro
+    alone, off by default) does wait for your own cast in the packets.
   - **Jump attack** (mode 1). A target more than `higher_threshold` px off
     vertically, and within that + 132 px, gets one jump. Further than that gets
     a double jump. It goes by |dy|, so a monster below qualifies too; there is
@@ -281,8 +288,10 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
   - A buff is queued when its cooldown has passed and at least 5 s have passed
     since it was last queued.
   - Each cast presses the key 4 times, 200 ms apart (`HandleUseBuff`, "(4x)").
-  - A cast counts only when the server confirms it (`OnSpellJobConfirmed`,
-    status 0). Otherwise it is retried.
+  - Its docs say a cast counts only when the server confirms it
+    (`OnSpellJobConfirmed`, status 0), and is retried otherwise. The client
+    writes that confirmation into a flag nothing reads (corrected 2026-11-08):
+    the four presses are what makes a buff likely to land.
   - At start every timer is set to 225 s ago, so buffs with a cooldown of 225 s
     or less go at once. `ResetBuffState` sets them to 1,800 s ago, which fires
     every buff.
@@ -782,11 +791,16 @@ chain it waits on. Do not take them as the capture target.
 **If GoC ran on a machine, Npcap is installed.** `GhostCore.dll` imports
 `wpcap.dll` and `packet.dll` directly.
 
-**GoC waits for server confirmation before advancing an action.**
-`OnAttackConfirmed`, `OnSpellBaseConfirmed`, `OnSpellJobConfirmed` exist because
-a skill key that did not land needs re-pressing, and only the server knows. A
-packet-driven GoBot can do the same once `skill_confirm` and `attack_confirm`
-are mapped — both are already names in `protocol.ini`.
+**GoC does not wait for server confirmation before advancing an action**
+(corrected 2026-11-08; earlier versions of this page said it does).
+`OnAttackConfirmed`, `OnSpellBaseConfirmed`, `OnSpellJobConfirmed` exist, but
+the flags they write are never read, `MAX_SKILL_RETRIES` is never used and
+`AttackThread` is never started: two separate static reads of GhostCore.dll
+agree. In sequential mode GoC presses the whole enabled list for each server
+`0x10` command, 60–131 ms per key plus 50 ms, with no cooldown check. A key
+that did not land is still worth knowing about, and only the game knows:
+GoBot's "Ra chiêu theo vòng" (2026.11.08) waits for your own cast, the client's
+UDP `0x0031`, before the next skill.
 
 **Their pathfinder validates edges by simulation, not geometry.**
 `SimulateMove`/`SimulateDoubleJump` per candidate edge, against a tile attribute

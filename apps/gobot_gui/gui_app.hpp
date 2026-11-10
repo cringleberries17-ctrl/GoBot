@@ -535,6 +535,10 @@ private:
     /// at the one that went away; tick() points it all at the new one. Also
     /// set while a cold start waits and the game is found up already.
     std::atomic<bool> keeper_reattach_{false};
+    /// When the keeper last got into the world (run_crossing's Crossed::In),
+    /// on now_ms()'s clock; 0 for never. The popup worker keeps a picture of
+    /// the game 15 s after it, for the check-in board (CheckinShots).
+    std::atomic<std::uint64_t> crossed_in_ms_{0};
     /// True when the game window was found; says so in the log once a run.
     bool reattach_game();
     bool reattach_missed_ = false;      ///< the last reattach found no window
@@ -591,6 +595,39 @@ private:
     std::vector<std::string> trash_log_;              ///< guarded by worker_mutex_
     std::mutex               trash_cleaner_mutex_;
     BagCleaner*              trash_cleaner_ = nullptr; ///< the pass under way, to cancel
+    /// The charms' and the shop's clocks, kept from one trash worker to the
+    /// next -- a MACRO OFF and ON starts a new one, which used to bring both
+    /// back to a start's 8 s and 45 s whatever was due -- with the shop's
+    /// spoiled quiet seconds in a row, and the ticks of "Dùng bùa" and "Tự mua
+    /// bình" each had seen (2026.11.08). Read as a worker starts, written as
+    /// it ends; guarded by trash_clocks_mutex_. And the shop's plan (2026.11.09):
+    /// what is still owed of it, when the next one begins, and its rounds in a
+    /// row that ended in trouble -- in memory only, as the clocks: a restart
+    /// starts from the plan time saved in shop_clock.txt, owing nothing.
+    struct TrashClocks {
+        std::uint64_t charm_check_ms = 0;   ///< 0: none kept
+        std::uint64_t shop_due_ms = 0;      ///< 0: none kept
+        int           shop_quiet_level = 0; ///< QuietBackOff::level
+        unsigned      charm_ticks_seen = 0;
+        unsigned      shop_ticks_seen = 0;
+        int           owed_hp = 0, owed_mp = 0;
+        std::uint64_t plan_due_ms = 0;      ///< 0: none kept
+        int           shop_troubles = 0;
+    };
+    TrashClocks              trash_clocks_;
+    std::mutex               trash_clocks_mutex_;
+    /// One more each time "Dùng bùa" / "Tự mua bình" is ticked on, from the
+    /// window's thread: the worker running, or the next one, starts that job's
+    /// clock -- and the shop its waits for a quiet second -- afresh.
+    std::atomic<unsigned>    charm_ticked_{0};
+    std::atomic<unsigned>    shop_ticked_{0};
+    /// The shop's plan as the trash worker last left it, for the card's line
+    /// alone: when the next plan begins and when it next looks, in wall-clock
+    /// seconds (0: no worker to do it), and the purchases still owed of the
+    /// plan under way. Written by the worker, read by the window.
+    std::atomic<std::int64_t> shop_plan_at_s_{0};
+    std::atomic<std::int64_t> shop_look_at_s_{0};
+    std::atomic<int>          shop_owed_{0};
     /// Held for a trash pass, for the revive sequence and for the party
     /// worker's clicks, so no two drive the mouse at once: a click on the
     /// death dialog in the middle of a drag lets the item go wherever the
@@ -1109,6 +1146,20 @@ private:
     FrameTally      frame_tally_;
     PacketsSettings packets_settings_;
     OneWorker       capture_worker_{"capture-jobs"};     // capture starts, socket looks: never on this thread
+    /// Log lines said on this thread and written on log_worker_'s, in the
+    /// order they were said (2026.11.08): the minute's Casts lines, who
+    /// started or stopped the run, the settings changed. No file is written
+    /// under log_later_mutex_, and the capture thread never takes it. The
+    /// worker comes after them, so it is gone before they are; its jobs read
+    /// them through `this`.
+    std::mutex               log_later_mutex_;
+    std::vector<std::string> log_later_;
+    OneWorker                log_worker_{"log-lines"};
+    /// `lines` kept, in order, and a write of whatever is kept posted to
+    /// log_worker_; never waits.
+    void log_later(std::vector<std::string> lines);
+    /// On log_worker_: every line kept so far, written.
+    void write_logged_later();
     /// What a job is given: the game by its window, or -- while the keeper
     /// crosses, the window not yet the new game's -- by its process's name;
     /// the link the running capture was built from, and how things stand.
@@ -1198,8 +1249,11 @@ private:
     /// The bag's total of what `vk` drinks once the packets have learned it,
     /// trusted or not -- for the words of a slot's "Low" alone.
     bool bag_learned_count(std::uint32_t vk, int& total, std::uint32_t& item) const;
-    bool bag_says_enough(int hp_below, int mp_below, int& hp_slots, int& mp_slots) const;   // any thread
-    void bag_note_shop(int hp_slots_screen, int mp_slots_screen, bool skipped, std::uint64_t at);  // any thread
+    /// The packets' bag on the shop's two potions, for the log only (2026.11.09:
+    /// it never gates a purchase): "8820131 total=380 (4 slots), 8810111
+    /// total=200 (2 slots); Tiêu Dùng 31/72 used", with the slots used in
+    /// `used`. Empty, and `used` -1, when the bag is not the game's now.
+    std::string bag_shop_text(int& used) const;            // any thread
     std::string bag_charm_text(const std::string& clock_id, std::uint64_t claimed_at) const;
     // any thread; the packets' bag on a charm's slot before its right-click -- it can only stop one
     BagCleaner::PacketSays bag_charm_slot(const std::string& colour_id, int slot, int count, std::string& said) const;
@@ -1345,7 +1399,19 @@ private:
     /// Everything the player ticked, on or off. One button and one key.
     void simple_start();
     void simple_stop();
-    void simple_toggle();
+    /// What asked for a start or a stop on the simple screen, for the log
+    /// (2026.11.08): the toggle key (F10), the big button, or the chat card's
+    /// "Để tôi tự đóng ô chat". Each overload says it, then does the plain one.
+    enum class RunFrom : std::uint8_t { ToggleKey, Button, ChatButton };
+    void simple_start(RunFrom from);
+    void simple_stop(RunFrom from);
+    void simple_toggle(RunFrom from);
+    std::string simple_run_from(RunFrom from) const;
+    /// The settings changed since `simple_settings_seen_`, written as one line
+    /// while a run is on (simple_changed), and seen from then on.
+    void simple_log_settings_changed();
+    /// The macro's and the hunt's settings as their files hold them, in memory.
+    IniFile simple_settings_ini() const;
     /// What simple_start starts once there is a game to start it on.
     void simple_start_jobs();
     /// BẮT ĐẦU with the game closed and "Tự vào lại game" ticked: the keeper
@@ -1572,6 +1638,13 @@ private:
     /// The keys those were counted against, so a key added or taken out
     /// during the run is matched by which key it is (macro_key_match).
     std::vector<MacroKey> simple_base_keys_;
+    /// The settings as the run began, or as last written to the log since:
+    /// what a change during the run is told against (simple_changed). Kept
+    /// after the run: a change made while stopped is told at the next start.
+    IniFile       simple_settings_seen_;
+    /// Set at the first run's start: before it simple_settings_seen_ holds
+    /// nothing to tell a change against (simple_track_run).
+    bool          simple_settings_known_ = false;
 
     // ---- alerts ----
     /// When something needs a person -- the character died, the game went,
@@ -1747,8 +1820,9 @@ private:
     // ---- closing stray popups ----
     /// "Tự đóng thông báo": during a run, the few popups on a fixed list --
     /// the check-in reward's notice, Yêu Quái Bách Khoa, the ESC menu GoBot's
-    /// own ESC brought up -- closed by their own controls, once they have
-    /// stayed up 3 s and nothing else is up (gobot/popup_closer.hpp). Lives in
+    /// own ESC brought up -- closed by their own controls, and the check-in
+    /// board ("Sự kiện và điểm danh") with ESC, once they have stayed up 3 s
+    /// and nothing else is up (gobot/popup_closer.hpp). Lives in
     /// simple_popups.cpp.
     void start_popups();            ///< for a run; nothing when it is unticked
     /// `wait` as for stop_party.
@@ -1848,8 +1922,9 @@ private:
     /// box, which is answered Hủy Bỏ, nothing typed and nothing bought. The
     /// same worker. Lives in simple_shop.cpp's card.
     void request_shop(bool dry);
-    /// The card "Tự mua bình" of the Dọn rác tab: the switch, the time, the
-    /// thresholds and limits, the two buttons.
+    /// The card "Tự mua bình" of the Dọn rác tab: the switch, the time, how
+    /// many purchases of each potion a plan makes, the plan's line, the two
+    /// buttons.
     void simple_shop_card(const std::function<void(const char*, const std::string&)>& put);
     /// Whether the pictures a purchase is held to are beside GoBot.
     bool simple_can_buy();
@@ -1883,6 +1958,14 @@ private:
     std::string simple_skills_note(bool no_player);
     /// Whether "Phím đánh" is also an enabled skill key.
     bool attack_key_is_skill() const;
+    /// A key on a buff row and a skill row, both on, said under the row
+    /// (macro_clash_note_vi): a warning, nothing refused (2026.11.08).
+    void simple_clash_note();
+    /// "Ra chiêu theo vòng" (MacroConfig::cast_paced, 2026.11.08): what its
+    /// hover says, and how the rotation is doing now, in a few words -- ""
+    /// with it off. Both screens show them.
+    static const char* cast_paced_tip_vi();
+    std::string cast_paced_status_vi() const;
     struct SkillsUi;
     struct SkillsUiFree { void operator()(SkillsUi* ui) const; };
     std::unique_ptr<SkillsUi, SkillsUiFree> skills_ui_;

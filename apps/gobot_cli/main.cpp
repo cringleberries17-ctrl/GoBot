@@ -563,9 +563,11 @@ UNATTENDED RUNNING
   --close [seconds]   Close the popups on GoBot's allow-list that are up, as
                       the GUI's "Tự đóng thông báo" does, looking once a second
                       for that long (default 10): the check-in reward notice by
-                      its own Xác Nhận, Yêu Quái Bách Khoa by its X (or ESC when
-                      nothing else is up), and an ESC menu GoBot's own ESC
-                      brought up. A popup is closed only once it has stayed 3 s,
+                      its own Xác Nhận, the check-in board (Sự kiện và điểm
+                      danh) by ESC when nothing else is up -- never its X --,
+                      Yêu Quái Bách Khoa by its X (or ESC when nothing else is
+                      up), and an ESC menu GoBot's own ESC brought up. A popup
+                      is closed only once it has stayed 3 s,
                       and nothing at all while anything else is up: a dialog
                       with Xác Nhận and Hủy Bỏ, a party invitation, the death
                       panel, the quest window, the bag, the chat line, any
@@ -2826,6 +2828,10 @@ int run_popups(const Options& o, const AppConfig& app) {
                     p.at.h, static_cast<double>(p.score));
         if (p.kind == PopupKind::EscMenu)
             std::printf("closed only right after GoBot's own ESC");
+        else if (p.by_esc && p.control)
+            std::printf("ESC, when nothing else is up; its X seen at %d,%d, never clicked", p.x, p.y);
+        else if (p.by_esc)
+            std::printf("ESC, when nothing else is up; no X seen");
         else if (p.control)
             std::printf("would be closed by clicking %d,%d", p.x, p.y);
         else
@@ -2839,8 +2845,10 @@ int run_popups(const Options& o, const AppConfig& app) {
 
 /// Close the popups on the allow-list that are up, for real, as the GUI's
 /// "Tự đóng thông báo" does: the check-in reward notice by its own Xác Nhận,
-/// Yêu Quái Bách Khoa by its X (or ESC with nothing else up), and an ESC menu
-/// GoBot's own ESC brought up. Looks once a second for --close's seconds. It
+/// the check-in board by ESC (never its X), Yêu Quái Bách Khoa by its X (or
+/// ESC with nothing else up), and an ESC menu GoBot's own ESC brought up --
+/// each of the board and the book only with nothing else up. Looks once a
+/// second for --close's seconds. It
 /// used to click every close button and every blank dialog's Xác Nhận it
 /// found, which agrees to whatever a dialog was asking; now it closes nothing
 /// that is not on the list, and nothing at all while anything else is up.

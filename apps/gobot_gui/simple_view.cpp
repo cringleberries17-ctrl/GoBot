@@ -867,6 +867,14 @@ void GuiApp::simple_jobs() {
                 if (before == 0 && k.keycode != 0) k.enabled = true;
                 if (k.keycode == 0) k.enabled = false;
                 simple_changed();
+                // Now on a buff and a skill both: said at once, as a key box
+                // says a key GoBot uses already -- and under the rows for as
+                // long as it lasts. Warned of, never refused -- and only with
+                // "Repeating keys" on: off, no row is pressed at all.
+                const std::vector<std::uint32_t> clash = macro_buff_skill_clashes(keys);
+                if (macro_config_.timers_enabled && k.keycode != 0 && !k.conditional() &&
+                    std::find(clash.begin(), clash.end(), k.keycode) != clash.end())
+                    simple_note(macro_clash_note_vi(keys), 10000);
             }
             if (own_timer) ImGui::PopStyleColor();
             if (after) after(k);
@@ -1228,6 +1236,7 @@ void GuiApp::simple_jobs() {
         hint(simple_ui::trial_hint(simple_ui::kTrialBuffs,
                                    "Mỗi phím buff có thời gian riêng (giây; 0 là bấm lại mỗi 5 giây). Sau "
                                    "khi chết, hồi sinh hoặc vào lại game, GoBot buff lại tất cả.").c_str());
+        simple_clash_note();    // a key on a buff and a skill, both on: simple_skills.cpp
         row_gap();
     }
 
@@ -1346,7 +1355,7 @@ void GuiApp::simple_start_block() {
     const std::string caption =
         (running ? "■   DỪNG LẠI   (" : "►   BẮT ĐẦU   (") + toggle + ")";
     ImGui::BeginDisabled(!running && !can_start);
-    if (ImGui::Button(caption.c_str(), ImVec2(-1, 64))) simple_toggle();
+    if (ImGui::Button(caption.c_str(), ImVec2(-1, 64))) simple_toggle(RunFrom::Button);
     ImGui::EndDisabled();
 
     ImGui::PopStyleVar();
@@ -1833,18 +1842,71 @@ void GuiApp::simple_track_run(bool running) {
         simple_base_seq_presses_ = macro_ ? macro_->stats().sequence_presses : 0;
         simple_base_finished_ = hunter_ ? hunter_->status().targets_finished : 0;
         simple_started_ms_ = now_ms();
+        // What changed since the last run first: a key box re-keyed while
+        // stopped (2026-11-08 22:40:19, between DỪNG and BẮT ĐẦU) is in no
+        // other line -- simple_changed tells only a run's changes, and
+        // simple_settings_seen_ still holds the last run's settings.
+        if (simple_settings_known_) {
+            const std::string changes = settings_changes(simple_settings_seen_, simple_settings_ini());
+            if (!changes.empty()) log_later({ "Settings changed since the last run: " + changes });
+        }
+        // The settings as the run began: a change during it is told against
+        // them, or against the change logged last (simple_log_settings_changed).
+        simple_settings_seen_ = simple_settings_ini();
+        simple_settings_known_ = true;
     } else {
         simple_stopped_ms_ = now_ms();
     }
 }
 
-void GuiApp::simple_toggle() {
-    if (simple_running()) simple_stop(); else simple_start();
+void GuiApp::simple_toggle(RunFrom from) {
+    if (simple_running()) simple_stop(from); else simple_start(from);
+}
+
+std::string GuiApp::simple_run_from(RunFrom from) const {
+    switch (from) {
+        case RunFrom::ToggleKey:  return "the toggle key " + InputManager::key_name(macro_config_.toggle_key);
+        case RunFrom::Button:     return "the big button";
+        case RunFrom::ChatButton: return "the chat card's \"Để tôi tự đóng ô chat\"";
+    }
+    return "?";
+}
+
+void GuiApp::simple_start(RunFrom from) {
+    // Who toggled is the first question of a log with stops in it (2026-11-08:
+    // seven ons and offs in the first three minutes, F10 or the button).
+    // Written off this thread (log_later), in the order said.
+    log_later({ "Simple screen: start asked by " + simple_run_from(from) });
+    simple_start();
+}
+
+void GuiApp::simple_stop(RunFrom from) {
+    log_later({ "Simple screen: stop asked by " + simple_run_from(from) });
+    simple_stop();
+}
+
+IniFile GuiApp::simple_settings_ini() const {
+    IniFile ini;
+    macro_config_.store(ini);
+    hunt_config_.store(ini);
+    return ini;
+}
+
+void GuiApp::simple_log_settings_changed() {
+    // In memory: the files are written by simple_changed as before; the line
+    // off this thread (log_later).
+    IniFile now = simple_settings_ini();
+    const std::string changes = settings_changes(simple_settings_seen_, now);
+    if (!changes.empty()) log_later({ "Settings changed during the run: " + changes });
+    simple_settings_seen_ = std::move(now);
 }
 
 void GuiApp::simple_changed() {
     apply_macro_config();
     if (hunter_) hunter_->set_config(hunt_config_);
+    // What changed, said while a run is on: a key box or a tick mid-run is
+    // a run's changed timing that its log otherwise never tells.
+    if (simple_running()) simple_log_settings_changed();
 
     // Running: follow the switches. Ticking fighting on mid-run starts it,
     // ticking it off stops it, and a key switched on when the timers were not
@@ -2971,7 +3033,7 @@ void GuiApp::simple_chat_tab() {
         // stay held off until a look shows it shut.
         if (watched) {
             if (ImGui::Button("Để tôi tự đóng ô chat")) {
-                if (simple_running()) simple_stop();
+                if (simple_running()) simple_stop(RunFrom::ChatButton);
                 else                  stop_chat(true, false);
             }
             ImGui::SetItemTooltip("GoBot thôi tự xoá và đóng ô chat, và dừng các việc đang chạy như "

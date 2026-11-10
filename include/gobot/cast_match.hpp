@@ -3,6 +3,7 @@
 #include "gobot/common.hpp"
 #include "gobot/self_frames.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -99,6 +100,13 @@ public:
     static constexpr std::size_t   kRecent = 8;     ///< a key's last pairs kept, for the buffs' times
     static constexpr std::size_t   kKeys = 32;      ///< keys followed; a press of any other is passed over
     static constexpr std::size_t   kSkills = 32;    ///< skills whose reach is kept
+    static constexpr std::size_t   kPresses = 256;  ///< the presses kept, for the presses either side of a cast
+    static constexpr std::size_t   kLoneSaid = 5;   ///< casts with no press of GoBot's described in a minute
+    /// A cast no press took is described only with a press of GoBot's this
+    /// near it, either side, or in a hold -- past the longest hold seen (4.93 s,
+    /// 2026-11-08). Further from every press, it is yours by hand or another
+    /// tool's: counted only (Minute::lone_far).
+    static constexpr std::uint64_t kLoneNearMs = 10'000;
 
     /// A key the macro pressed, and when.
     struct Press {
@@ -118,6 +126,45 @@ public:
         std::uint32_t vk = 0;           ///< the key whose press it was paired with; 0 for none
         std::uint64_t press_ms = 0;     ///< that press's time
         bool          settled = false;  ///< every press that could take it has been paired
+        std::uint64_t seq = 0;          ///< the order it came in, from 1: the minute's own from the ring
+        /// The keys held for a job -- a critical hold, which refuses every
+        /// press of the macro's -- as it came (set_held).
+        bool          held = false;
+        /// The run it came in (set_run): a gap is taken only from a cast of
+        /// the same run.
+        std::uint64_t run = 0;
+        /// Once settled: GoBot's newest press at or before it, any key handed
+        /// to pair(), and the first after it up to then; 0 for none kept.
+        std::uint64_t before_ms = 0;
+        std::uint32_t before_vk = 0;
+        std::uint64_t after_ms = 0;
+        std::uint32_t after_vk = 0;
+    };
+
+    /// A cast no press of GoBot's took, once settled (2026.11.08): when, the
+    /// presses either side of it, and whether the keys were held. The log's,
+    /// to tell a press of GoBot's come out late from one by hand.
+    struct Lone {
+        std::uint64_t at_ms = 0;
+        std::uint32_t skill = 0;
+        std::uint8_t  kind = 0;
+        bool          held = false;
+        std::uint64_t before_ms = 0;        ///< GoBot's last press before it; 0 for none kept
+        std::uint32_t before_vk = 0;
+        std::uint64_t after_ms = 0;         ///< its first press after it; 0 for none by `looked_ms`
+        std::uint32_t after_vk = 0;
+        std::uint64_t looked_ms = 0;        ///< presses after it known up to here
+    };
+
+    /// One skill's casts in a minute, from the ring of casts.
+    struct SkillCasts {
+        std::uint32_t skill = 0;
+        std::uint64_t casts = 0;
+        /// Of them, those with a cast of its own kept before them -- maybe
+        /// the minute before's -- and the shortest such gap: a cooldown it
+        /// has is never shorter.
+        std::uint64_t recasts = 0;
+        std::uint64_t shortest_ms = 0;
     };
 
     /// One press of a key and the cast paired with it.
@@ -192,6 +239,32 @@ public:
         std::uint64_t wrong_size = 0;       ///< 0x0031 from your client of another size
         std::vector<Key>   keys;            ///< every key ever pressed, in the order first pressed
         std::vector<Reach> reach;           ///< every skill a target was placed for, since the start
+
+        // ---- how evenly the casts came (2026.11.08), for cast_gaps_line ----
+        /// From one cast to the next, for each cast of the minute with one
+        /// kept before it of the same run -- that one maybe the minute
+        /// before's -- in the order they came; the longest, and when the cast
+        /// that ended it came.
+        std::vector<std::uint64_t> gaps;
+        std::uint64_t longest_ms = 0;
+        std::uint64_t longest_at_ms = 0;
+        /// Of the minute's casts with one kept before them, those whose cast
+        /// before came in another run -- across a stop and start, or a capture
+        /// started again: no gap of theirs is among `gaps`.
+        std::uint64_t gaps_left_out = 0;
+        /// Each skill cast in the minute, the most cast first.
+        std::vector<SkillCasts> skills;
+        /// GoBot's newest press to the cast, of the casts settled this minute
+        /// with one within kPairMs before them; and how many had none.
+        std::vector<std::uint64_t> delays;
+        std::uint64_t no_press_before = 0;
+        /// The casts settled this minute that no press took, the first
+        /// kLoneSaid of them; and how many more.
+        std::vector<Lone> lone;
+        std::uint64_t lone_more = 0;
+        /// Of the casts no press took, those with no press of GoBot's within
+        /// kLoneNearMs either side and no hold: counted, never described.
+        std::uint64_t lone_far = 0;
     };
 
     CastMatch() = default;
@@ -205,6 +278,20 @@ public:
 
     /// One cast at `at_ms`, its target's distance given when known.
     void add(std::uint64_t at_ms, const CastFrame& c, bool reach_known = false, int dx = 0, int dy = 0);
+
+    /// Whether the keys are held for a job now (a critical hold): each cast
+    /// that comes from here on is marked so. On the capture thread, before
+    /// each batch; an atomic, so it takes no lock of anyone's.
+    void set_held(bool held) { held_.store(held); }
+
+    /// Whether the macro and the hunter are running, and the capture's start
+    /// count (PacketCapture::start_count), for the casts from here on. A new
+    /// run begins when any of the three changes: a gap is never taken across
+    /// a stop and start or a capture's restart. A hold (set_held) or a
+    /// suspension is no new run -- that pause is GoBot's own, which the gaps
+    /// are there to show. Called on the capture thread before each batch, as
+    /// set_held is; no lock. All casts are one run until it is first called.
+    void set_run(bool macro_on, bool hunter_on, std::uint64_t capture_start);
 
     /// The macro's presses from pair_from() on -- any others are passed over
     /// -- each paired with its cast once kSettleMs has gone by since it, at
@@ -227,7 +314,9 @@ public:
     std::vector<Cast> casts() const;
 
     /// The minute's counts, and a new minute: the keys' and the casts' counts
-    /// of this minute start again from 0; what was learned stays.
+    /// of this minute start again from 0; what was learned stays. The gaps
+    /// and the skills are worked out here from the ring of casts: those that
+    /// came since the last call.
     Minute take_minute();
 
 private:
@@ -236,6 +325,9 @@ private:
     /// Under mutex_: `b` judged by the casts kept, counted to its key and
     /// set among those take_bursts gives.
     void judge(Burst b);
+    /// Under mutex_: `c` settled -- the presses either side of it, its delay
+    /// and, taken by no press, its description -- for the minute.
+    void settle(Cast& c);
 
     mutable std::mutex mutex_;
     std::deque<Cast>   casts_;
@@ -245,6 +337,14 @@ private:
     std::uint64_t      pair_from_ = 0;
     std::vector<Burst> open_bursts_;                ///< one a buff key at most, not judged yet
     std::vector<Burst> judged_;                     ///< judged, for take_bursts
+    std::deque<Press>  pressed_;                    ///< the last kPresses handed to pair(), oldest first
+    std::uint64_t      added_ = 0;                  ///< casts ever added: the last one's seq
+    std::uint64_t      minute_seq_ = 0;             ///< the newest cast's seq at the last take_minute
+    std::atomic<bool>  held_{ false };              ///< see set_held
+    bool               run_macro_ = false;          ///< set_run's, the capture thread's alone
+    bool               run_hunter_ = false;
+    std::uint64_t      run_capture_ = 0;
+    std::atomic<std::uint64_t> run_{ 1 };           ///< see set_run
 };
 
 /// The frames that follow your buffs: 0x0077 and 0x005A from the server, each
@@ -320,6 +420,23 @@ std::vector<BuffSeen> pair_buffs(const std::vector<CastMatch::Key>& keys, const 
 /// "Casts (packets): ..." for one minute; "" when nothing was cast or pressed
 /// in it.
 std::string casts_line(const CastMatch::Minute& m);
+
+/// A time on now_ms()'s clock as the log writes the time of day; given by
+/// GoBot's window, a test's own otherwise.
+using CastClockText = std::string (*)(std::uint64_t at_ms);
+
+/// "Cast gaps (packets): ..." for one minute, the line after the Casts line
+/// (2026.11.08): the gaps between your casts -- p50, p90, the longest and when
+/// it ended, how many over 1.0 s and 1.5 s -- GoBot's newest press to each
+/// cast -- p10, p50, p90 -- and each skill's casts with the shortest gap
+/// between two of its own. Log only: what the pauses between skills are, the
+/// game's cooldowns, and how late a cast comes after its key. "" when there is
+/// nothing of it. `clock` writes the times; none, the clock's own ms.
+std::string cast_gaps_line(const CastMatch::Minute& m, CastClockText clock = nullptr);
+
+/// "Cast (packets) with no GoBot key ..." for one cast no press took: when,
+/// GoBot's presses either side of it and whether the keys were held.
+std::string lone_cast_line(const CastMatch::Lone& c, CastClockText clock = nullptr);
 
 /// "Buff (packets): key S -- ..." for one burst judged: the kind-2 cast seen
 /// and how long after the first press, or none in its window -- maybe not

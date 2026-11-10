@@ -231,6 +231,11 @@ bool HunterConfig::load(const std::string& path) {
 bool HunterConfig::save(const std::string& path) const {
     IniFile ini;
     ini.load(path);        // preserve the rest of the file
+    store(ini);
+    return ini.save(path, "GoBot hunting");
+}
+
+void HunterConfig::store(IniFile& ini) const {
     ini.set_bool("Hunt", "enabled", enabled);
     ini.set    ("Hunt", "character_name", character_name);
     ini.set_int ("Hunt", "attack_key", static_cast<int>(attack_key));
@@ -291,7 +296,6 @@ bool HunterConfig::save(const std::string& path) const {
     ini.set_float("Hunt", "packet_scale", packet_scale);
     ini.set_int ("Hunt", "packet_dy", packet_dy);
     ini.set_int ("Hunt", "toggle_key", static_cast<int>(toggle_key));
-    return ini.save(path, "GoBot hunting");
 }
 
 void HunterConfig::set_band(int up_px, int down_px) {

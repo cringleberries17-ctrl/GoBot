@@ -549,6 +549,40 @@ THE SIMPLE SCREEN
   cannot be cast (the game not in front, the character not in the world...):
   send those lines if buffs still come and go.
 
+  Skills that come out unevenly (2026.11.08, not yet tried on the game). On
+  2026-11-08, the macro alone on the battlefield, each skill key went on its
+  own timer, so its interval was its share of the presses (Z at 0.5 s took
+  27%, S and A at 3 s 4% each), and the game, casting about 77 a minute,
+  ignores a key pressed during a cast: which skill came out was chance. One
+  interval for all eight skills (1.2 s each, in Chi tiet...) evens it out
+  today. The new tick Ra chieu theo vong (in the Ky nang window and on the
+  full screen's Timed keys; OFF as shipped, cast_paced in configs\macro.ini)
+  presses the skills one at a time in the order of the keys, each only once
+  the game has cast the one before -- seen in the game's packets, so it
+  needs Npcap -- and goes back to the timers after 2 s with no cast seen.
+  Only with Tu danh quai off. Tu mua binh and quick quest, after someone was
+  at the mouse, now wait 30 s, then 2, 5 and 10 minutes rather than 30 s
+  every time; keep them, the bag and the charms off during battlefield
+  fights, and leave GoBot's window alone while the macro runs. Fight 15
+  minutes or more on t1981_s2 with the tick off, then on, and send
+  gobot_gui.log.
+
+  Buying by the slot and the check-in board (2026.11.09, not yet tried on
+  the game). Tu mua binh counts nothing now: each time it buys the slots set
+  on the card for each potion (moi lan mua N o, 0 to 20, 3 and 3 as shipped;
+  a trash.ini from before reads its old buy_hp_to and buy_mp_to until the
+  card is changed), HP and MP in turn, 10 purchases a hold and the rest a
+  minute later; Mua ngay buys them all at once. The game's message that the
+  bag is full ends that round -- closed by its Xac Nhan, never ESC, then the
+  shop -- and the box stays ticked for the next time. When the next plan
+  begins is kept in %LOCALAPPDATA%\GoBot\shop_clock.txt, so a restart never
+  buys early. Tu dong thong bao (OFF as shipped; tick it once) now also
+  closes the Su kien va diem danh board the game shows at every login and
+  after 00:00, with ESC about 3 s after it shows, never its X, and only while
+  the bot runs; while it is up the bag jobs and quick quest wait a minute at
+  a time. Try Thu mua first, then 1 + 1 with Mua ngay, watched; send
+  gobot_gui.log with the popup_debug and trash_debug pictures.
+
   Walking to a monster, the hunter holds the arrow key down as a player
   does, rather than tapping it (the character stopped after every step).
   It lets go in reach, when the monster is behind, to loot, when the game
@@ -585,9 +619,11 @@ EXPERIMENTAL
   xuong bac duoi: Ctrl + Down, off as shipped, never with Dung yen mot cho,
   never near a gate; a map change after a drop stops hunting and unticks
   it), the jump key (Phim nhay and Thu),
-  skills only while fighting (Chi khi dang danh quai) and closing notices
-  (Tu dong thong bao); on Don rac, registering monster fragments (Dung manh
-  ghep), using charms once an hour (Dung bua, and the button Dung bua ngay),
+  skills only while fighting (Chi khi dang danh quai), skills paced on
+  their casts (Ra chieu theo vong, off as shipped) and closing notices and
+  the check-in board (Tu dong thong bao); on Don rac, registering monster
+  fragments (Dung manh ghep), using charms once an hour (Dung bua, and the
+  button Dung bua ngay),
   buying potions from the shop of the Nguoi Giu San item (Tu mua binh, with
   the trial Thu mua; it TYPES 100 into the game, so try the trial first)
   and the key Phim don ngay. Try one at a time, on a spare character,
@@ -602,9 +638,10 @@ EXPERIMENTAL
   sach Danh truoc (under Sua danh sach... on the Loc quai line, off as
   shipped) attacks only the monsters on that list, so nothing at all
   while it is empty. Dung skill tuan tu (in the Ky nang window, opened by
-  Chi tiet... on the Tu dung ky nang line; ticked as shipped, as in GoC)
+  Chi tiet... on the Tu dung ky nang line; ticked as shipped)
   presses every skill whose cooldown is over, one after the other, rather
-  than one at a time; it counts only with Chi khi dang danh quai ticked.
+  than one at a time; it counts only with Chi khi dang danh quai ticked and
+  Tu danh quai on: with the macro alone every skill keeps its own timer.
 
   The party, by the player's rule: alone means the game shows no party.
   Chi moi khi dang lam chu to doi (To doi tab, off as shipped) invites only
@@ -1218,9 +1255,11 @@ $wanted += 'inven/0/dialog_Panic.spr/0.png'
 # (AutoLogin::kChannelPanel, templates.ini channel_dialog); without it every
 # game of a size other than 1024x768 falls back to offsets measured on that one.
 $wanted += 'login/1/Img_Dlg_Channel.spr/0.png'
-# Tu mua binh counts the two potions and finds the Nguoi Giu San item by their
-# catalog icons (CleanSettings::kBuyHpId, kBuyMpId, buy_opener), and its shop
-# by pictures that templates.ini names under grabbed/ (checked above).
+# Tu mua binh finds the Nguoi Giu San item by its catalog icon (buy_opener),
+# asks for the two potions' (CleanSettings::kBuyHpId, kBuyMpId) beside it --
+# it counts nothing since 2026.11.09 -- and knows its shop, the bag-full
+# message and the check-in board by pictures that templates.ini names under
+# grabbed/ (checked above).
 $wanted += 'spend/hp/8820131.png'
 $wanted += 'spend/mana/8810111.png'
 $wanted += 'other/8950604.png'

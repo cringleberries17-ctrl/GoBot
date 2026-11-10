@@ -408,4 +408,12 @@ bool map_load_holds(const MapLoad& in, std::uint64_t now_ms) {
     return in.last_own_ms < in.entry_ms;
 }
 
+bool figure_lost_leading_one(int figure, std::uint32_t packet) {
+    if (figure < 0 || packet < 100) return false;
+    // The leading digit's place: 10000 for 14798.
+    std::uint32_t place = 1;
+    while (packet / place >= 10) place *= 10;
+    return packet / place == 1 && static_cast<std::uint32_t>(figure) == packet - place;
+}
+
 } // namespace gobot

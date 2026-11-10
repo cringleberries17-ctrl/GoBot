@@ -12,6 +12,7 @@
 
 #include "gobot/cast_match.hpp"
 #include "gobot/common.hpp"
+#include "gobot/macro.hpp"
 #include "gobot/packet_world.hpp"
 #include "gobot/self_frames.hpp"
 #include "test_support.hpp"
@@ -514,6 +515,178 @@ void test_buff_bursts() {
           "Z pressed 100 ms before key 2: its cast is Z's; without Z's press handed in, key 2 took it");
 }
 
+// ------------------------------------- how evenly they came (2026.11.08)
+
+/// The test's own clock text: how long after kT0.
+std::string test_clock(std::uint64_t at_ms) { return "T+" + std::to_string(at_ms - kT0); }
+
+void test_cast_gaps() {
+    section("Your casts' gaps, each skill's shortest re-cast, GoBot's newest press to each cast (2026.11.08)");
+
+    // Five casts: gaps of 700, 800, 800 and 1700 ms. Skill 51205 three times,
+    // 1.5 and 2.5 s apart. GoBot's presses 40, 80, 100 and 60 ms before four
+    // of them; the one at +1500 none took -- the last press 880 ms before it,
+    // the next 700 ms after -- and it came while the keys were held.
+    const std::uint32_t kZ = 'Z', kX = 'X', kC = 'C';
+    CastMatch m;
+    m.add(kT0, cast_of(51205, 1));
+    m.add(kT0 + 700, cast_of(51201, 1));
+    m.set_held(true);
+    m.add(kT0 + 1500, cast_of(51205, 1));
+    m.set_held(false);
+    m.add(kT0 + 2300, cast_of(51202, 1));
+    m.add(kT0 + 4000, cast_of(51205, 1));
+    const std::vector<CastMatch::Press> presses{ press_of(kZ, kT0 - 40), press_of(kX, kT0 + 620),
+                                                 press_of(kC, kT0 + 2200), press_of(kZ, kT0 + 3940) };
+    m.pair(presses, {}, kT0 + 6000);
+    const CastMatch::Minute minute = m.take_minute();
+    check(minute.gaps == std::vector<std::uint64_t>{ 700, 800, 800, 1700 } && minute.longest_ms == 1700 &&
+              minute.longest_at_ms == kT0 + 4000 && minute.skills.size() == 3 && minute.skills[0].skill == 51205 &&
+              minute.skills[0].casts == 3 && minute.skills[0].recasts == 2 && minute.skills[0].shortest_ms == 1500 &&
+              minute.skills[1].skill == 51201 && minute.skills[1].recasts == 0 && minute.skills[2].skill == 51202,
+          "from the ring: each gap from the cast before, the longest and when it ended, each skill's casts -- the "
+          "most cast first -- and its shortest gap from its own cast before");
+    check(minute.delays == std::vector<std::uint64_t>{ 40, 80, 100, 60 } && minute.no_press_before == 1 &&
+              minute.unpaired == 1 && minute.lone.size() == 1 && minute.lone[0].at_ms == kT0 + 1500 &&
+              minute.lone[0].held && minute.lone[0].before_ms == kT0 + 620 && minute.lone[0].before_vk == kX &&
+              minute.lone[0].after_ms == kT0 + 2200 && minute.lone[0].after_vk == kC,
+          "once settled: GoBot's newest press to each cast within 700 ms; the one no press took, with the presses "
+          "either side and the hold");
+    const std::string gaps = cast_gaps_line(minute, &test_clock);
+    check(has(gaps, "Cast gaps (packets): 4 gaps -- p50 0.80 s, p90 1.70 s, longest 1.70 s ending at T+4000; "
+                    "over 1.0 s 1, over 1.5 s 1") &&
+              has(gaps, "; newest press to cast p10 40 ms, p50 60 ms, p90 100 ms (4 casts), 1 with no press of "
+                        "GoBot's in the 700 ms before") &&
+              has(gaps, "; by skill 51205 3 casts, shortest re-cast 1.50 s / 51201 1 cast / 51202 1 cast"),
+          "the line after the Casts line: " + gaps);
+    const std::string lone = lone_cast_line(minute.lone[0], &test_clock);
+    check(lone == "Cast (packets) with no GoBot key at T+1500: skill 51205, kind 1; GoBot's last press 880 ms before "
+                  "it (key X), the first after it 700 ms after (key C); the keys held for a job then",
+          "and the cast no press took: " + lone);
+    check(has(casts_line(minute), "Casts (packets): 5 this minute") && has(casts_line(minute), "no macro key 1"),
+          "the Casts line as before");
+
+    // The next minute: its one cast's gap from the minute before's last, and
+    // its skill's re-cast likewise.
+    m.add(kT0 + 4800, cast_of(51205, 1));
+    m.pair({}, {}, kT0 + 7000);
+    const CastMatch::Minute next = m.take_minute();
+    check(next.gaps == std::vector<std::uint64_t>{ 800 } && next.skills.size() == 1 && next.skills[0].casts == 1 &&
+              next.skills[0].shortest_ms == 800 && next.delays.empty() && next.no_press_before == 1 &&
+              next.lone.size() == 1 && !next.lone[0].held && next.lone[0].before_ms == kT0 + 3940 &&
+              next.lone[0].after_ms == 0,
+          "the next minute: only its own casts, each gap and re-cast from the cast before it, the minute before's "
+          "too; a cast with GoBot's last press 860 ms before it has none in the 700 ms before");
+    check(has(lone_cast_line(next.lone[0], &test_clock), "GoBot's last press 860 ms before it (key Z), the first "
+                                                         "after it none in the 1200 ms after; no hold then"),
+          "with no press after it yet: none, up to where the presses are known -- " +
+              lone_cast_line(next.lone[0], &test_clock));
+    const CastMatch::Minute quiet = m.take_minute();
+    check(cast_gaps_line(quiet).empty() && quiet.gaps.empty() && quiet.skills.empty(),
+          "a minute with no cast writes no gaps line");
+
+    // Casts no press took, GoBot's last press 1-6.4 s before: the first
+    // kLoneSaid described, the rest counted.
+    CastMatch hand;
+    for (int i = 0; i < 7; ++i) hand.add(kT0 + static_cast<std::uint64_t>(i) * 900, cast_of(51205, 1));
+    hand.pair({ press_of(kZ, kT0 - 1000) }, {}, kT0 + 9000);
+    const CastMatch::Minute played = hand.take_minute();
+    check(played.unpaired == 7 && played.lone.size() == CastMatch::kLoneSaid && played.lone_more == 2 &&
+              played.lone_far == 0 && played.lone[0].before_ms == kT0 - 1000 &&
+              has(lone_cast_line(played.lone[0]), "at t=" + std::to_string(kT0) + " ms: skill 51205, kind 1; "
+                                                  "GoBot's last press 1000 ms before it (key Z)"),
+          "seven casts near GoBot's last press: five described, two more counted; with no clock given, the clock's "
+          "own ms");
+    // By hand: no press of GoBot's within kLoneNearMs either side -- counted
+    // only, unless the keys were held then.
+    CastMatch distant;
+    distant.add(kT0, cast_of(51205, 1));
+    distant.add(kT0 + 11'000, cast_of(51205, 1));
+    distant.set_held(true);
+    distant.add(kT0 + 22'000, cast_of(51205, 1));
+    distant.set_held(false);
+    distant.pair({ press_of(kZ, kT0 - 20'000) }, {}, kT0 + 25'000);
+    const CastMatch::Minute alone = distant.take_minute();
+    check(alone.unpaired == 3 && alone.lone_far == 2 && alone.lone_more == 0 && alone.lone.size() == 1 &&
+              alone.lone[0].held && alone.lone[0].at_ms == kT0 + 22'000,
+          "no press of GoBot's within 10 s either side: counted only; the one in a hold still described");
+
+    // Gaps only within a run: across the macro's stop and start, or a capture
+    // started again, left out and counted.
+    CastMatch runs;
+    runs.set_run(true, false, 1);
+    runs.add(kT0, cast_of(51205, 1));
+    runs.add(kT0 + 700, cast_of(51201, 1));
+    runs.set_run(false, false, 1);
+    runs.set_run(true, false, 1);
+    runs.add(kT0 + 10'700, cast_of(51205, 1));
+    runs.add(kT0 + 11'500, cast_of(51202, 1));
+    runs.set_run(true, false, 2);
+    runs.add(kT0 + 40'000, cast_of(51201, 1));
+    runs.add(kT0 + 40'750, cast_of(51205, 1));
+    const CastMatch::Minute split = runs.take_minute();
+    const std::string split_line = cast_gaps_line(split, &test_clock);
+    check(split.gaps == std::vector<std::uint64_t>{ 700, 800, 750 } && split.longest_ms == 800 &&
+              split.longest_at_ms == kT0 + 11'500 && split.gaps_left_out == 2 &&
+              has(split_line, "3 gaps -- p50 0.75 s, p90 0.80 s, longest 0.80 s ending at T+11500; over 1.0 s 0, "
+                              "over 1.5 s 0; 2 gaps across a stop and start or a capture restart, left out"),
+          "a stop and start, and a capture started again: no gap across either -- " + split_line);
+    // The hunter or your hands alone, the macro off all along: one run.
+    CastMatch hunted;
+    hunted.set_run(false, true, 1);
+    hunted.add(kT0, cast_of(51205, 1));
+    hunted.set_run(false, true, 1);
+    hunted.add(kT0 + 900, cast_of(51205, 1));
+    const CastMatch::Minute by_hunter = hunted.take_minute();
+    check(by_hunter.gaps == std::vector<std::uint64_t>{ 900 } && by_hunter.gaps_left_out == 0 &&
+              !has(cast_gaps_line(by_hunter), "left out"),
+          "with the macro off, the hunter's casts still one run: their gaps kept");
+}
+
+/// The macro's rows of 2026-11-08 22:13-22:40: A and S attack skills at 3 s,
+/// and the buff rows key_4 and key_5 switched off, still on A and S.
+void test_buff_rows_off() {
+    section("A buff row switched off with a skill's key on it: that key is no buff key (2026.11.08)");
+
+    const auto row = [](std::uint32_t vk, std::uint32_t ms, bool on, bool buff) {
+        MacroKey k;
+        k.keycode = vk;
+        k.interval_ms = ms;
+        k.enabled = on;
+        k.buff = buff;
+        return k;
+    };
+    const std::uint32_t kA = 'A', kS = 'S';
+    const std::vector<MacroKey> keys{ row('Z', 500, true, false),  row(kA, 60'000, false, true),
+                                      row(kS, 300'000, false, true), row(kS, 3000, true, false),
+                                      row(kA, 3000, true, false),    row(kKey5, 60'000, true, true) };
+    check(macro_buff_keycodes(keys) == std::vector<std::uint32_t>{ kKey5 } && !macro_buff_on(keys[1]) &&
+              !macro_buff_on(keys[2]) && macro_key_kind(keys[1]) == MacroKeyKind::Buff && macro_buff_on(keys[5]) &&
+              !macro_buff_on(keys[4]),
+          "the buff rows off on A and S are buffs by their kind, but not pressed: A and S are no buff keys; the buff "
+          "row on and in use is");
+
+    // A's presses, each with an attack cast: as a skill key, no burst and no
+    // "(buff)" -- where 05b, going by the kind alone, judged each a burst
+    // "maybe not cast".
+    std::vector<CastMatch::Press> presses;
+    CastMatch now, before;
+    for (int i = 0; i < 4; ++i) {
+        const std::uint64_t at = kT0 + static_cast<std::uint64_t>(i) * 4000;
+        presses.push_back(press_of(kA, at));
+        now.add(at + 60, cast_of(51305, 1));
+        before.add(at + 60, cast_of(51305, 1));
+    }
+    now.pair(presses, macro_buff_keycodes(keys), kT0 + 20'000);
+    before.pair(presses, { kA, kS, kKey5 }, kT0 + 20'000);
+    const std::string line = casts_line(now.take_minute());
+    const std::vector<CastMatch::Burst> bursts = before.take_bursts();
+    check(now.take_bursts().empty() && has(line, "key A: 4 pressed, 4 cast") && !has(line, "(buff)") &&
+              bursts.size() == 4 && !bursts[0].seen && has(casts_line(before.take_minute()), "key A (buff)"),
+          "A pressed four times, an attack cast each: a skill key, no burst -- " + line +
+              " -- where every buff row by its kind had four bursts judged not cast");
+}
+
 // ------------------------------------------------------------ the wiring
 
 #ifdef GOBOT_SOURCE_DIR
@@ -612,6 +785,93 @@ void test_more_wiring() {
 #endif
 }
 
+void test_log_wiring() {
+    section("The log of 2026.11.08 wired in: buff rows on, gaps and lone casts, who toggled, what changed (source)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string more = source("/apps/gobot_gui/packets_more.cpp");
+    const std::string simple = source("/apps/gobot_gui/simple_view.cpp");
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    if (more.empty() || simple.empty() || gui.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    // Only rows the timers press count: the buff keys, the buff intervals,
+    // and the skill and buff keys that keep a potion key's presses.
+    const std::string buffs = body(more, "std::vector<std::uint32_t> buff_keys_of(const MacroConfig& cfg) {");
+    const std::string potions = body(more, "std::vector<std::uint32_t> potion_keys_of(const MacroConfig& cfg) {");
+    const std::string minute = body(more, "void GuiApp::note_casts_minute(std::uint64_t) {");
+    const std::string tick = body(more, "void GuiApp::more_tick(");
+    check(has(buffs, "return macro_buff_keycodes(cfg.keys);") && has(tick, "buff_keys_of(macro_config_)") &&
+              has(potions, "if (macro_timer_on(k) && (kind == MacroKeyKind::Skill || kind == MacroKeyKind::Buff))") &&
+              has(minute, "if (macro_buff_on(k)) intervals.emplace_back(") &&
+              count_in(more, "macro_key_kind(k) == MacroKeyKind::Buff") == 0,
+          "packets_more.cpp: a buff row switched off is no buff key, no buff interval, and keeps no potion key's "
+          "presses");
+    // The gaps line and the lone casts after the Casts line; the hold as the
+    // batch came, an atomic, on the capture thread.
+    const std::string fed = body(more, "void GuiApp::more_on_packets(");
+    const std::size_t held = fed.find("part.casts.set_held(coord_.critical_active());");
+    const std::size_t run = fed.find("part.casts.set_run(");
+    check(held != std::string::npos && held < fed.find("part.casts.on_packets(all, packet_world_);") &&
+              run != std::string::npos && run < fed.find("part.casts.on_packets(all, packet_world_);") &&
+              has(fed, "part.casts.set_run(macro_ && macro_->running(), hunter_ && hunter_->running(), "
+                       "capture_.start_count());") &&
+              has(minute, "cast_gaps_line(casts, &cast_clock_text)") &&
+              has(minute, "for (const CastMatch::Lone& c : casts.lone)") &&
+              has(minute, "lone_cast_line(c, &cast_clock_text)") && has(minute, "casts.lone_more") &&
+              has(minute, "casts.lone_far"),
+          "the gaps line and each lone cast written once a minute; the hold and the run stamped before each batch");
+    // Written off the window's thread, one batch a minute in the order said;
+    // waited for at the close.
+    const std::string later = body(more, "void GuiApp::log_later(std::vector<std::string> lines) {");
+    const std::string writes = body(more, "void GuiApp::write_logged_later() {");
+    const std::string closing = body(gui, "GuiApp::~GuiApp() {");
+    const std::size_t last_minute = closing.find("packets_minute(now_ms());");
+    const std::size_t waited = closing.find("log_worker_.wait_idle();");
+    check(has(minute, "log_later(std::move(lines));") && count_in(minute, "Logger::instance().write") == 0 &&
+              count_in(minute, "GB_") == 0 && has(later, "log_worker_.post(") && !has(later, "Logger::") &&
+              has(writes, "Logger::instance().write(LogLevel::Info, l);") && last_minute != std::string::npos &&
+              waited != std::string::npos && last_minute < waited && has(closing, "log_worker_.stop();"),
+          "the minute's lines written on log_worker_, not the window's thread -- in their order, the last minute's "
+          "waited for at the close");
+    // Who toggled: the simple screen's own three ways, said before each.
+    check(has(body(gui, "void GuiApp::tick() {"), "if (simple_view_) simple_toggle(RunFrom::ToggleKey);") &&
+              has(simple, "if (ImGui::Button(caption.c_str(), ImVec2(-1, 64))) simple_toggle(RunFrom::Button);") &&
+              has(simple, "if (simple_running()) simple_stop(RunFrom::ChatButton);") &&
+              has(body(simple, "void GuiApp::simple_toggle(RunFrom from) {"),
+                  "if (simple_running()) simple_stop(from); else simple_start(from);") &&
+              has(body(simple, "void GuiApp::simple_start(RunFrom from) {"), "simple_start();") &&
+              has(body(simple, "void GuiApp::simple_stop(RunFrom from) {"), "simple_stop();"),
+          "F10, the big button and the chat card's button each say who asked, then start or stop as before");
+    // What changed during a run: in memory, against the run's start.
+    const std::string changed = body(simple, "void GuiApp::simple_changed() {");
+    const std::string said = body(simple, "void GuiApp::simple_log_settings_changed() {");
+    const std::string asked_start = body(simple, "void GuiApp::simple_start(RunFrom from) {");
+    const std::string asked_stop = body(simple, "void GuiApp::simple_stop(RunFrom from) {");
+    check(has(changed, "if (simple_running()) simple_log_settings_changed();") &&
+              has(said, "settings_changes(simple_settings_seen_, now)") && !has(said, "save(") &&
+              !has(said, "load(") && has(body(simple, "void GuiApp::simple_track_run(bool running) {"),
+                                         "simple_settings_seen_ = simple_settings_ini();"),
+          "simple_changed says what changed during a run, against the settings it began with, reading and "
+          "writing no file for it");
+    check(!has(said, "GB_") && !has(said, "Logger::") && !has(asked_start, "GB_") &&
+              !has(asked_start, "Logger::") && !has(asked_stop, "GB_") && !has(asked_stop, "Logger::") &&
+              has(said, "log_later(") && has(asked_start, "log_later(") && has(asked_stop, "log_later("),
+          "who toggled and what changed: said through log_later, no file written on the window's thread");
+    // And what changed while stopped, said at the next start, against the
+    // last run's settings -- before the new ones are taken.
+    const std::string track = body(simple, "void GuiApp::simple_track_run(bool running) {");
+    const std::size_t told = track.find("log_later({ \"Settings changed since the last run: \" + changes });");
+    check(has(track, "if (simple_settings_known_) {") &&
+              has(track, "settings_changes(simple_settings_seen_, simple_settings_ini())") &&
+              told != std::string::npos && told < track.find("simple_settings_seen_ = simple_settings_ini();") &&
+              has(track, "simple_settings_known_ = true;"),
+          "a start says what changed while stopped, against the last run's settings, before taking the new ones");
+#else
+    skip("no source folder\n");
+#endif
+}
+
 } // namespace
 
 void test_cast_match(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -622,5 +882,8 @@ void test_cast_match(void (*check_fn)(bool, const std::string&), void (*section_
     test_cast_reach();
     test_buff_watch();
     test_buff_bursts();
+    test_cast_gaps();
+    test_buff_rows_off();
     test_more_wiring();
+    test_log_wiring();
 }

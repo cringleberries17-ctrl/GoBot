@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gobot/checkin_board.hpp"
+#include "gobot/quiet_second.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -202,6 +204,11 @@ struct QuestPictures {
     /// Its inside, which is what is compared: the frame is the same in every
     /// look of the box.
     Frame learned_inside;
+    /// The check-in board's title (gobot/checkin_board.hpp), when it is
+    /// there: a round that finds the board up on its first look presses
+    /// nothing. Not needed for ready() -- without it the board is not looked
+    /// for, as before.
+    Frame board_title;
     /// What was asked for and not there, by name, for saying so.
     std::vector<std::string> missing;
 
@@ -416,6 +423,19 @@ struct QuestResult {
     Frame        ticked_frame;
     /// For NotNow and Refused: why, in Vietnamese.
     std::string  why;
+    /// NotNow because somebody used the mouse or keyboard in the quiet second
+    /// under the hold: a timed round then waits longer each time (QuietBackOff).
+    bool         touched = false;
+    /// NotNow because the check-in board ("Sự kiện và điểm danh") was up:
+    /// nothing pressed, and a timed round looked at again
+    /// QuestRun::kBoardMs on. Not a failure.
+    bool         board = false;
+    /// The quiet second had passed: a not-now since (the game gone behind,
+    /// say), or a round that ran, however it ended -- low HP, the game gone
+    /// behind, a stop. Set on every result made after it, the one
+    /// QuestRound::run returned included. The wait for a spoiled one starts
+    /// from its first step again.
+    bool         quiet = false;
     /// The whole round in one line of English, with its scores and points.
     std::string  log;
     /// The last frame looked at, to keep when the round went wrong.
@@ -636,6 +656,11 @@ struct QuestCall {
 /// gates and the alert come through hooks, so a test can run an hour of it in
 /// a moment. A round that cannot start now waits half a minute; one asked for
 /// with a button looks again every second, for a minute and a half at most.
+/// A timed round whose quiet second somebody spoiled (QuestResult::touched)
+/// waits 30 s, then 2, 5 and 10 minutes, one after another, never longer than
+/// the interval -- each of those held every key off for a second -- and from
+/// 30 s again after a quiet second that passed, Làm ngay 1 lần, or the box
+/// ticked on again (a new run).
 ///
 /// It also remembers whether a window an earlier round opened may still be
 /// open, for the next round to close: otherwise that round would take it for
@@ -689,6 +714,8 @@ public:
     /// ends the run with the window open.
     bool ours_open() const { return ours_open_; }
     void set_ours_open(bool yes) { ours_open_ = yes; }
+    /// The step the next spoiled quiet second takes (QuietBackOff::level).
+    int quiet_level() const { return quiet_.level(); }
 
     static constexpr std::uint64_t kPostponeMs = 30'000;
     static constexpr std::uint64_t kRestMs = 60'000;
@@ -698,15 +725,20 @@ public:
     /// forward. After that it waits for the game to be in front, as a timed
     /// round does.
     static constexpr std::uint64_t kAskFocusMs = 5'000;
+    /// A round that found the check-in board up (QuestResult::board) puts a
+    /// timed one off this long, as the bag jobs do.
+    static constexpr std::uint64_t kBoardMs = kCheckinBoardWaitMs;
 
 private:
-    void wait(std::uint64_t now, const std::string& why);
+    /// Not now: a timed round due is put off `postpone_ms`.
+    void wait(std::uint64_t now, const std::string& why, std::uint64_t postpone_ms = kPostponeMs);
     void stop_itself(const std::string& why, const std::string& why_en);
     void say_now_and_then(std::uint64_t now, const std::string& why);
 
     Hooks         hooks_;
     QuestSettings settings_;
     QuestSchedule schedule_;
+    QuietBackOff  quiet_;
     bool          running_ = false;
     bool          stopped_ = false;
     std::string   stopped_why_;

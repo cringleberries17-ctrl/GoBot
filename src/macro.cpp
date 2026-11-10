@@ -82,6 +82,59 @@ bool macro_timer_on(const MacroKey& k) {
     return k.enabled && k.keycode != 0 && (k.interval_ms != 0 || macro_key_kind(k) == MacroKeyKind::Buff);
 }
 
+bool macro_buff_on(const MacroKey& k) {
+    return macro_timer_on(k) && macro_key_kind(k) == MacroKeyKind::Buff;
+}
+
+std::vector<std::uint32_t> macro_buff_keycodes(const std::vector<MacroKey>& keys) {
+    std::vector<std::uint32_t> out;
+    for (const MacroKey& k : keys)
+        if (macro_buff_on(k)) out.push_back(k.keycode);
+    return out;
+}
+
+std::vector<std::uint32_t> macro_buff_skill_clashes(const std::vector<MacroKey>& keys) {
+    std::vector<std::uint32_t> out;
+    for (const MacroKey& b : keys) {
+        if (!macro_buff_on(b) || std::find(out.begin(), out.end(), b.keycode) != out.end()) continue;
+        for (const MacroKey& s : keys) {
+            if (s.keycode == b.keycode && macro_timer_on(s) && macro_key_kind(s) == MacroKeyKind::Skill) {
+                out.push_back(b.keycode);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+namespace {
+
+/// "A, S": the keys by name, in their order.
+std::string key_names(const std::vector<std::uint32_t>& vks) {
+    std::string out;
+    for (const std::uint32_t vk : vks) out += (out.empty() ? "" : ", ") + InputManager::key_name(vk);
+    return out;
+}
+
+} // namespace
+
+std::string macro_clash_note_vi(const std::vector<MacroKey>& keys) {
+    const std::vector<std::uint32_t> clash = macro_buff_skill_clashes(keys);
+    if (clash.empty()) return {};
+    return "Phím " + key_names(clash) + " đang bật ở cả buff lẫn kỹ năng: GoBot bấm " +
+           (clash.size() == 1 ? "phím đó" : "các phím đó") +
+           " theo cả hai giờ, và ghi lại như buff. Là chiêu đánh thì tắt hoặc xóa dòng buff; là buff thì xóa nó "
+           "khỏi kỹ năng.";
+}
+
+std::string macro_clash_line(const std::vector<MacroKey>& keys) {
+    const std::vector<std::uint32_t> clash = macro_buff_skill_clashes(keys);
+    if (clash.empty()) return {};
+    return "Macro: " + key_names(clash) + (clash.size() == 1 ? " is" : " are") +
+           " on a buff row and a skill row, both on -- pressed on both clocks, and logged as a buff (a warning "
+           "only: nothing is changed)";
+}
+
 std::uint32_t clamp_skill_ms(std::uint32_t ms) {
     // In tenths of a second, as the window shows them.
     const std::uint32_t tenths = (ms + 50) / 100 * 100;
@@ -302,6 +355,9 @@ bool MacroConfig::load(const std::string& path) {
     // and every key on its timer, as it was. The rest are GoC's own numbers.
     skills_follow_fight = ini.get_bool("Macro", "skills_follow_fight", false);
     sequential_skills   = ini.get_bool("Macro", "sequential_skills", true);
+    // Missing from a file written before 2026.11.08: off, every key on its
+    // own timer as it was.
+    cast_paced          = ini.get_bool("Macro", "cast_paced", false);
     skill_mp_floor_pct  = std::clamp(ini.get_int("Macro", "skill_mp_floor_pct", 10), 0, kSkillMaxMpFloor);
     skill_gap_ms        = static_cast<std::uint32_t>(
         std::clamp(ini.get_int("Macro", "skill_gap_ms", 50), static_cast<int>(kSkillGapMinMs),
@@ -418,7 +474,11 @@ bool MacroConfig::load(const std::string& path) {
 
 bool MacroConfig::save(const std::string& path) const {
     IniFile ini;
+    store(ini);
+    return ini.save(path, "GoBot keyboard macro");
+}
 
+void MacroConfig::store(IniFile& ini) const {
     ini.set_bool("Macro", "timers_enabled", timers_enabled);
     ini.set_bool("Macro", "sequence_enabled", sequence_enabled);
     ini.set_bool("Macro", "sequence_loop", sequence_loop);
@@ -429,6 +489,7 @@ bool MacroConfig::save(const std::string& path) const {
     ini.set_int ("Macro", "panic_key", static_cast<int>(panic_key));
     ini.set_bool("Macro", "skills_follow_fight", skills_follow_fight);
     ini.set_bool("Macro", "sequential_skills", sequential_skills);
+    ini.set_bool("Macro", "cast_paced", cast_paced);
     ini.set_int ("Macro", "skill_mp_floor_pct", skill_mp_floor_pct);
     ini.set_int ("Macro", "skill_gap_ms", static_cast<int>(skill_gap_ms));
     ini.set_int ("Macro", "key_hold_min_ms", static_cast<int>(key_hold_min_ms));
@@ -480,8 +541,39 @@ bool MacroConfig::save(const std::string& path) const {
         ini.set_int ("Sequence", p + "hold_ms", static_cast<int>(s.hold_ms));
         ini.set_int ("Sequence", p + "delay_after_ms", static_cast<int>(s.delay_after_ms));
     }
+}
 
-    return ini.save(path, "GoBot keyboard macro");
+std::string settings_changes(const IniFile& was, const IniFile& now, std::size_t most) {
+    // A key's code is a number in the file: written with its name beside it.
+    const auto value = [](const std::string& key, const std::string& v) {
+        const bool code = key.size() >= 4 && (key.compare(key.size() - 4, 4, "_key") == 0 ||
+                                              (key.size() >= 7 && key.compare(key.size() - 7, 7, "keycode") == 0));
+        if (!code || v.empty() || v.find_first_not_of("0123456789") != std::string::npos || v.size() > 9) return v;
+        const std::uint32_t vk = static_cast<std::uint32_t>(std::stoul(v));
+        return vk == 0 ? v + " (none)" : v + " (" + InputManager::key_name(vk) + ")";
+    };
+    std::vector<std::string> changes;
+    const auto add = [&](const std::string& section, const std::string& key, const std::string& from,
+                         const std::string& to) {
+        changes.push_back(section + "." + key + " " + from + " -> " + to);
+    };
+    for (const std::string& section : now.sections())
+        for (const std::string& key : now.keys(section)) {
+            const std::string to = now.get(section, key);
+            if (!was.has_key(section, key))
+                add(section, key, "(none)", value(key, to));
+            else if (was.get(section, key) != to)
+                add(section, key, value(key, was.get(section, key)), value(key, to));
+        }
+    for (const std::string& section : was.sections())
+        for (const std::string& key : was.keys(section))
+            if (!now.has_key(section, key)) add(section, key, value(key, was.get(section, key)), "(none)");
+    if (changes.empty()) return {};
+
+    std::string out;
+    for (std::size_t i = 0; i < changes.size() && i < most; ++i) out += (i == 0 ? "" : "; ") + changes[i];
+    if (changes.size() > most) out += "; and " + std::to_string(changes.size() - most) + " more";
+    return out;
 }
 
 // ---------------------------------------------------------------- engine
@@ -1038,6 +1130,8 @@ void MacroEngine::arm(std::uint64_t now) {
     // first pass.
     skill_look_ms_ = 0;
     skill_log_ms_ = 0;
+    // And the rotation on your casts, from its first key.
+    pace_arm(now);
 }
 
 void MacroEngine::start() {
@@ -1621,6 +1715,18 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
 
 void MacroEngine::timer_loop() {
     name_this_thread("macro timer");
+    // A key on a buff row and a skill row, both on: said once a run, as the
+    // macro comes on -- from here rather than from start(), which the
+    // window's thread calls, and writes no file. A warning only. With
+    // "Repeating keys" off no row is pressed, so nothing is said.
+    {
+        std::string clash;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (config_.timers_enabled) clash = macro_clash_line(config_.keys);
+        }
+        if (!clash.empty()) GB_WARN("%s", clash.c_str());
+    }
     while (running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if (!running_.load()) break;
@@ -1663,14 +1769,25 @@ void MacroEngine::run_timers(std::uint64_t now) {
     // With skills following the fight and a hunter running, the skill keys
     // are run_skills', after the rest. Otherwise every key keeps its own
     // timer, as it always has.
-    const Fight fight = cfg.skills_follow_fight ? fight_now() : Fight{};
+    const Fight fight = (cfg.skills_follow_fight || cfg.cast_paced) ? fight_now() : Fight{};
     const bool follow = following(cfg, fight);
+    // Paced on your casts (cast_paced, 2026.11.08): the skill keys are
+    // run_paced's, after the rest, while your casts come in the packets.
+    // Otherwise -- off, not yet, or fallen back -- as always. The hunter's
+    // own swing and the sequence's steps are cast too: the rotation would
+    // take those casts for the key it waits on, so it paces only while the
+    // macro's timers press alone. A sequence of pauses alone presses nothing.
+    const bool others = fight.mode != Fight::Mode::NoHunter ||
+                        (cfg.sequence_enabled && std::any_of(cfg.sequence.begin(), cfg.sequence.end(),
+                                                             [](const MacroStep& s) { return s.keycode != 0; }));
+    const bool paced = pace_pass(cfg, follow, others, now);
 
     for (std::size_t i = 0; i < cfg.keys.size(); ++i) {
         const MacroKey& k = cfg.keys[i];
         // The potion keys -- every conditional key is one -- are run_potions'.
         if (k.conditional() || !macro_timer_on(k)) continue;
         if (follow && macro_key_kind(k) == MacroKeyKind::Skill && !k.always_timer) continue;
+        if (paced && macro_key_kind(k) == MacroKeyKind::Skill) continue;
 
         // Its due time, wherever it stands now. One taken out since the pass
         // began is passed over.
@@ -1688,6 +1805,12 @@ void MacroEngine::run_timers(std::uint64_t now) {
         // would otherwise go out in a bunch the moment the keys are free, and
         // the game drops all but the first.
         const bool buff = macro_key_kind(k) == MacroKeyKind::Buff;
+        // Paced, one press at a time waits for the game's answer: a buff due
+        // while a skill's press waits for its cast, or inside the last cast's
+        // lock, goes once that lock is over -- still due, and ahead of the next
+        // skill, which this pass's run_paced then holds for the buff's cast.
+        // Pressed inside the lock, every press of it could be dropped.
+        if (buff && paced && (pace_press_.active || now < pace_last_cast_ms_ + pace_lock_ms_)) continue;
         if (buff) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (buff_pressed_ && now < last_buff_ms_ + buff_spacing(cfg)) {
@@ -1723,6 +1846,9 @@ void MacroEngine::run_timers(std::uint64_t now) {
         }
 
         Refused why = Refused::None;
+        // When the key goes down: a paced buff's wait for its cast counts from
+        // it -- a potion this pass pressed first is no part of that wait.
+        const std::uint64_t key_down = clock_now();
         if (press(k.keycode, k.hold_ms, "macro-timer", &why)) {
             if (skill_key) skill_free_ms_ = clock_now() + cfg.skill_gap_ms;
             {
@@ -1742,12 +1868,19 @@ void MacroEngine::run_timers(std::uint64_t now) {
             }
             if (buff) {
                 buff_refused_said_ = 0;
+                // Paced: the next skill waits for this cast, and its lock.
+                if (paced) pace_buff_ms_ = key_down;
                 GB_INFO("Buff: key %s cast (%u press%s, %u ms apart); the next cast in about %.0f s",
                         InputManager::key_name(k.keycode).c_str(), cfg.buff_presses,
                         cfg.buff_presses == 1 ? "" : "es", cfg.buff_press_gap_ms,
                         static_cast<double>(armed - now) / 1000.0);
             }
             count_press(i);
+        } else if (skill_key && why == Refused::Unfocused) {
+            // Its turn gone with the game behind another window (armed above):
+            // counted for the Skills line, nothing else.
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            ++stats_.skills_unfocused;
         } else if (buff) {
             if (buff_refused_said_ != k.keycode) {
                 buff_refused_said_ = k.keycode;
@@ -1774,7 +1907,9 @@ void MacroEngine::run_timers(std::uint64_t now) {
     }
 
     if (follow) run_skills(cfg, clock_now());
+    else if (paced) run_paced(cfg, clock_now());
     log_skills(clock_now());
+    if (cfg.cast_paced) log_paced(clock_now());
 }
 
 void MacroEngine::run_buff_repeats(std::uint64_t now) {
@@ -1797,7 +1932,12 @@ void MacroEngine::run_buff_repeats(std::uint64_t now) {
         buff_repeats_.erase(buff_repeats_.begin() + static_cast<std::ptrdiff_t>(found));
     }
     Refused why = Refused::None;
+    const std::uint64_t key_down = clock_now();
     if (press(r.keycode, r.hold_ms, "macro-buff", &why)) {
+        // Paced: the next skill waits for this press's cast too -- one of the
+        // cast's later presses may be the one the game took. From its
+        // key-down: a potion pressed first this pass is no part of that wait.
+        if (pace_mode_ == PaceStatus::Mode::Paced) pace_buff_ms_ = key_down;
         if (r.left > 1) {
             r.left -= 1;
             r.at = now + r.gap_ms;
@@ -1921,7 +2061,8 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
 
     const MacroKey& k = cfg.keys[pick];
     const std::uint64_t at = clock_now();
-    if (press(k.keycode, k.hold_ms, "macro-skill")) {
+    Refused why = Refused::None;
+    if (press(k.keycode, k.hold_ms, "macro-skill", &why)) {
         const std::uint64_t up = clock_now();
         // Its own cooldown, from this press. Worked out before the lock:
         // jittered() takes it too.
@@ -1947,6 +2088,10 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
         // Not gone out -- another job's key, a hold, the game not in front:
         // still ready, its cooldown not started and its turn not lost.
         skill_look_ms_ = now + kSkillRetryMs;
+        if (why == Refused::Unfocused) {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            ++stats_.skills_unfocused;
+        }
     }
 }
 
@@ -1976,12 +2121,16 @@ void MacroEngine::log_skills(std::uint64_t now) {
         const std::uint64_t low = since(s.held_low_mp, skill_log_held_.held_low_mp);
         const std::uint64_t dead = since(s.held_dead, skill_log_held_.held_dead);
         const std::uint64_t range = since(s.held_range, skill_log_held_.held_range);
-        if (p || idle || low || dead || range)
+        // Refused with GoBot's own window, or another, in front (2026.11.08):
+        // a click there mid-run costs every skill's turn while it lasts.
+        const std::uint64_t behind = since(s.skills_unfocused, skill_log_held_.skills_unfocused);
+        if (p || idle || low || dead || range || behind)
             GB_INFO("Skills: %llu pressed; held %llu not fighting, %llu MP under %d%%, %llu dead, "
-                    "%llu range",
+                    "%llu range; refused: game not in front %llu",
                     static_cast<unsigned long long>(p), static_cast<unsigned long long>(idle),
                     static_cast<unsigned long long>(low), mp_floor,
-                    static_cast<unsigned long long>(dead), static_cast<unsigned long long>(range));
+                    static_cast<unsigned long long>(dead), static_cast<unsigned long long>(range),
+                    static_cast<unsigned long long>(behind));
     }
     skill_log_ms_ = std::max<std::uint64_t>(now, 1);
     skill_log_pressed_ = pressed;

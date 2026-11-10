@@ -5,14 +5,16 @@
 // Casts and buffs are only written to the log: every cast your client sends
 // is paired with the press before it of a macro key that can cast -- the
 // potions' are passed over, a drink sends no cast (CastMatch), and a buff's frames
-// set beside its key (BuffWatch), once a minute. The jump test goes by your
+// set beside its key (BuffWatch), once a minute. Your own casts are also
+// handed to the macro, which paces its skills on them when cast_paced is on
+// (2026.11.08) and does nothing with them otherwise. The jump test goes by your
 // client's own take-offs whenever the packets can tell (packet_takeoffs), and
 // by the screen as before when they cannot.
 //
 // Nothing here acts on the game, and nothing here asks Windows for anything
-// but which process owns the game's window. The capture thread feeds the casts
-// and buffs; GoBot's thread pairs them and writes the lines; the jump test's
-// thread asks for the take-offs.
+// but which process owns the game's window, and the time of day for the log.
+// The capture thread feeds the casts and buffs; GoBot's thread pairs them and
+// writes the lines; the jump test's thread asks for the take-offs.
 
 #include "gui_app.hpp"
 #include "gobot/cast_match.hpp"
@@ -22,7 +24,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -59,23 +64,41 @@ const Part* made_already(const std::unique_ptr<Part, Free>& part) {
     return part.get();
 }
 
+/// The time of day `at_ms` (now_ms()'s clock) was, as the log writes it:
+/// HH:MM:SS.mmm. For the cast lines' times.
+std::string cast_clock_text(std::uint64_t at_ms) {
+    const std::uint64_t now = now_ms();
+    const std::chrono::system_clock::time_point wall =
+        std::chrono::system_clock::now() - std::chrono::milliseconds(now > at_ms ? now - at_ms : 0);
+    const std::time_t t = std::chrono::system_clock::to_time_t(wall);
+    const long long ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(wall.time_since_epoch()).count() % 1000;
+    std::tm local{};
+    if (localtime_s(&local, &t) != 0) return "?";
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "%02d:%02d:%02d.%03lld", local.tm_hour, local.tm_min, local.tm_sec, ms);
+    return buf;
+}
+
 /// The macro's buff keys: what each press of theirs should cast is a buff.
+/// Only rows the timers press (macro_buff_on): a buff row switched off with a
+/// skill's key on it made that skill a "buff" in every Casts line and a "maybe
+/// not cast" every few seconds (2026-11-08, A and S).
 std::vector<std::uint32_t> buff_keys_of(const MacroConfig& cfg) {
-    std::vector<std::uint32_t> out;
-    for (const MacroKey& k : cfg.keys)
-        if (k.keycode != 0 && macro_key_kind(k) == MacroKeyKind::Buff) out.push_back(k.keycode);
-    return out;
+    return macro_buff_keycodes(cfg.keys);
 }
 
 /// The macro's potion keys -- HP's, MP's and the pet's -- that nothing else of
 /// it presses: a drink sends no cast, and a press of one paired would take the
 /// cast of the skill pressed after it. A key a skill, a buff or a step of the
-/// sequence also uses is kept: its presses may cast.
+/// sequence also uses is kept: its presses may cast -- a skill or buff row
+/// only while on (macro_timer_on), as a row switched off presses nothing.
 std::vector<std::uint32_t> potion_keys_of(const MacroConfig& cfg) {
     std::vector<std::uint32_t> casting, out;
     for (const MacroKey& k : cfg.keys) {
         const MacroKeyKind kind = macro_key_kind(k);
-        if (k.keycode != 0 && (kind == MacroKeyKind::Skill || kind == MacroKeyKind::Buff)) casting.push_back(k.keycode);
+        if (macro_timer_on(k) && (kind == MacroKeyKind::Skill || kind == MacroKeyKind::Buff))
+            casting.push_back(k.keycode);
     }
     for (const MacroStep& s : cfg.sequence)
         if (s.keycode != 0) casting.push_back(s.keycode);
@@ -113,8 +136,27 @@ void GuiApp::more_on_packets(const std::vector<GamePacket>& all) {
     // named cast's target is looked for where the world has it at the cast's
     // own time.
     MorePart& part = made(more_part_);
+    // Whether the keys are held for a job as the batch's casts came, for the
+    // casts no press took (2026.11.08): an atomic of each, no lock.
+    part.casts.set_held(coord_.critical_active());
+    // And who presses, on which capture: a gap across a stop and start, or a
+    // capture's restart, is no pause of a run's (2026.11.08). Atomics only.
+    part.casts.set_run(macro_ && macro_->running(), hunter_ && hunter_->running(), capture_.start_count());
     part.casts.on_packets(all, packet_world_);
     part.buffs.on_packets(all);
+    // And your own casts to the macro, for the skills paced on them
+    // (cast_paced, 2026.11.08): your client's 0x0031 over UDP under your own
+    // id -- the world has had the batch, so a first report of yours since a
+    // map entry has locked it -- at the frame's own time. Atomics only on the
+    // macro's side: no lock of its is taken here.
+    const std::optional<std::uint32_t> me = packet_world_.own_id();
+    if (macro_ && me) {
+        for (const GamePacket& p : all) {
+            if (p.opcode != 0x0031) continue;
+            const std::optional<CastFrame> c = read_cast(p);
+            if (c && c->id == *me) macro_->note_own_cast(c->skill, p.timestamp_ms);
+        }
+    }
 }
 
 void GuiApp::more_tick(std::uint64_t now) {
@@ -160,21 +202,60 @@ void GuiApp::more_note_attack(std::uint32_t vk, std::uint64_t at_ms) {
 
 void GuiApp::note_casts_minute(std::uint64_t) {
     MorePart& part = made(more_part_);
-    // Each a copy, taken under its own lock; the lines are built here.
+    // Each a copy, taken under its own lock; the lines are built here and
+    // written off this thread, in this order, as one batch (log_later).
     const CastMatch::Minute casts = part.casts.take_minute();
     const BuffWatch::Minute buffs = part.buffs.take_minute();
+    std::vector<std::string> lines;
     const std::string cast_line = casts_line(casts);
-    if (!cast_line.empty()) Logger::instance().write(LogLevel::Info, cast_line);
+    if (!cast_line.empty()) lines.push_back(cast_line);
+    // How evenly they came, and the casts no press of GoBot's took, each
+    // described -- at most CastMatch::kLoneSaid a minute (2026.11.08).
+    const std::string gaps_line = cast_gaps_line(casts, &cast_clock_text);
+    if (!gaps_line.empty()) lines.push_back(gaps_line);
+    for (const CastMatch::Lone& c : casts.lone) lines.push_back(lone_cast_line(c, &cast_clock_text));
+    if (casts.lone_more > 0)
+        lines.push_back("Cast (packets) with no GoBot key: " + std::to_string(casts.lone_more) +
+                        " more this minute, not described");
+    // Those with no press of GoBot's near them and no hold: your own play
+    // beside GoBot, counted in one line.
+    if (casts.lone_far > 0)
+        lines.push_back("Cast (packets) with no GoBot key: " + std::to_string(casts.lone_far) +
+                        " with no GoBot press within " + std::to_string(CastMatch::kLoneNearMs / 1000) +
+                        " s either side and no hold (by hand or another tool), not described");
 
     // Each buff key's interval in the macro, beside what its frames said: the
     // unit of 0x0077's value is proven when two buffs' values stand in the
-    // proportion of their intervals.
+    // proportion of their intervals. Only rows the timers press.
     std::vector<std::pair<std::uint32_t, std::uint32_t>> intervals;
     for (const MacroKey& k : macro_config_.keys)
-        if (k.keycode != 0 && macro_key_kind(k) == MacroKeyKind::Buff)
-            intervals.emplace_back(k.keycode, macro_timer_interval_ms(k) / 1000);
+        if (macro_buff_on(k)) intervals.emplace_back(k.keycode, macro_timer_interval_ms(k) / 1000);
     const std::string buff_line = buffs_line(pair_buffs(casts.keys, buffs), buffs, intervals);
-    if (!buff_line.empty()) Logger::instance().write(LogLevel::Info, buff_line);
+    if (!buff_line.empty()) lines.push_back(buff_line);
+    log_later(std::move(lines));
+}
+
+void GuiApp::log_later(std::vector<std::string> lines) {
+    // Said here and written off this thread, so the file's write and flush
+    // never hold up the window (2026.11.08): kept in the order said, and the
+    // worker writes whatever is kept. A post refused -- kMaxJobs writes
+    // waiting, none begun -- loses nothing: the first of them takes these too.
+    if (lines.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(log_later_mutex_);
+        for (std::string& l : lines) log_later_.push_back(std::move(l));
+    }
+    log_worker_.post([this] { write_logged_later(); });
+}
+
+void GuiApp::write_logged_later() {
+    // On log_worker_'s thread: no file is written under log_later_mutex_.
+    std::vector<std::string> lines;
+    {
+        std::lock_guard<std::mutex> lock(log_later_mutex_);
+        lines.swap(log_later_);
+    }
+    for (const std::string& l : lines) Logger::instance().write(LogLevel::Info, l);
 }
 
 std::optional<std::uint64_t> GuiApp::packet_takeoffs() const {

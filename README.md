@@ -235,8 +235,15 @@ game back to the front at once whenever another window takes it, GoBot's own
 included -- a moment (0.2 s) after the last click or key, so a click lands
 first, and up to 10 s while a key box waits for its key (less when HP falls
 under the HP potion's mark, or 50% if that is higher); untick it to use the PC
-meanwhile. The game reads its keyboard once a frame, so a key held too briefly
-is now and then not seen (the key is pressed and nothing happens): the macro
+meanwhile. **Tự đóng thông báo** (off until ticked) closes, while the bot
+runs, the few popups that get in the way, each once it has stayed put 3 s
+and only with nothing else up: the check-in reward's notice by its Xác Nhận,
+Yêu Quái Bách Khoa by its X (or ESC), GoBot's own ESC menu by its X, and since
+2026.11.09 the *Sự kiện và điểm danh* board the game opens at every login and
+as the clock passes 00:00, by ESC -- never its X (*Buying by the slot, and the
+check-in board (2026.11.09)*, below). The game reads its keyboard once a
+frame, so a key held too briefly is now and then not seen (the key is pressed
+and nothing happens): the macro
 holds each key 70–110 ms (`key_hold_min_ms`, `key_hold_max_ms` in `macro.ini`),
 keeps two potions 60 ms apart, and presses a potion again after
 `potion_recheck_ms` (1000) when its bar has not risen and still wants the
@@ -319,8 +326,16 @@ monsters never attacked (*Không đánh*) and monsters gone for first
 typed. **Tự dùng kỹ năng**
 has **Chỉ khi đang đánh quái** -- skills only while a monster in reach is
 being attacked, each on its own cooldown, none under 10% MP -- and
-**Chi tiết…** for each skill's cooldown, range and *Luôn bấm theo giờ*; a key
-sequence left on in macro.ini is shown there with a **Tắt**. Each potion row
+**Chi tiết…** for each skill's cooldown, range and *Luôn bấm theo giờ*,
+*Dùng skill tuần tự* and, since 2026.11.08, *Ra chiêu theo vòng* (under
+*Keyboard macro*); a key sequence left on in macro.ini is shown there with a
+**Tắt**. *Chỉ khi đang đánh quái*, and with it *Dùng skill tuần tự*, the
+ranges and the MP floor, act only while **Tự đánh quái** runs
+(`MacroEngine::following`, the skills then going by `run_skills`): with the
+macro alone every skill key keeps its own timer (`run_timers`), ticked or
+not. Until 2026.11.08 the hover over *Dùng skill tuần tự* began *Như GoC*
+and never said so; the owner's macro-only run of 2026-11-08 had both
+ticked, for nothing. Each potion row
 has a second tier, *Lv2*: under both marks only the lower one drinks, and a
 potion due goes before any other key. **Tự bơm máu pet** is the third potion
 row, the pet's: its key is pressed when the pet's HP is at or under *khi máu
@@ -1054,18 +1069,27 @@ one less before the next kind. A stack of one has no number on it: it is
 used only when its count corner is that colour's own icon with nothing over
 it, and must then be seen gone. *Dùng bùa ngay* uses them at once. Beside them, *Tự mua bình* (also off until ticked) buys
 Thịt bò khô and Rượu lá tre from the shop the Người Giữ Sân item of the bag's
-Khác tab opens (found by the game's own icon for it, nothing to photograph),
-when Tiêu Dùng holds fewer slots of them than you set: it double-clicks the
+Khác tab opens (found by the game's own icon for it, nothing to photograph).
+Since 2026.11.09 it counts nothing: every *mua mỗi* minutes (60 as shipped)
+it buys the number of slots set on the card for each potion -- a purchase of
+100 a slot, 0 to 20 each, 3 and 3 as shipped -- HP and MP in turn, and the
+game's message that the bag is full (*Túi đồ [Tiêu thụ] đã đầy*) ends that
+time's round, the box staying ticked (*Buying by the slot, and the check-in
+board (2026.11.09)*, below). Each purchase double-clicks the
 potion in the shop, types 00 after the game's 1 in the quantity box, reads it
 back as 100, and only then presses Xác Nhận; anything unexpected is answered
 Hủy Bỏ. Skills, potions and buffs wait while it buys, and *Thử mua* goes as far
 as the quantity box without buying. It opens the bag only after a second
 with nobody at the mouse or keyboard; otherwise it logs `Shop: not now --
-someone is using the mouse or keyboard` and, on the clock, tries again in
-30 s, while **Mua ngay** or **Thử mua** says *Chờ: bạn đang dùng chuột hoặc
-bàn phím…* on the tab and does nothing. Nothing
-is counted, bought or right-clicked unless the bag's tab strip reads Tiêu
-Dùng chosen -- the chosen tab drawn darker than the rest, and far darker in
+someone is using the mouse or keyboard (held N ms): …`, with what spoiled the
+second, and, on the clock, tries again later -- since 2026.11.08 after 30 s,
+then 2, 5 and 10 minutes, one spoiled look after another (*Skills on the
+battlefield (2026.11.08)*, below; until then 30 s every time) -- while **Mua
+ngay** or **Thử mua** says *Chờ: bạn đang dùng chuột hoặc bàn phím…* on the
+tab and does nothing. No charm is counted or right-clicked unless the bag's
+tab strip reads Tiêu Dùng chosen, nor the Người Giữ Sân item unless it reads
+Khác chosen (since 2026.11.09 the shop reads no other tab) -- the chosen tab
+drawn darker than the rest, and far darker in
 the band of 4 rows under the labels, which since 2026.11.04d is read first:
 the game's red glow round a tab lights the rest of it (on 2026-11-04 no tab
 read chosen, and the shop stopped) but never that band. The whole tab is
@@ -1073,10 +1097,11 @@ read where the band says nothing, and the two at odds read as no tab. After
 a click on a tab the pointer is moved off the strip (a
 tab under it lights up), a strip that shows no tab chosen is looked at again
 up to 8 times, 150 ms apart, and one that shows another tab for sure is
-clicked once more. Still not Tiêu Dùng, the shop and the charms stop (a bag
+clicked once more. Still not the tab wanted, the shop and the charms stop (a bag
 pass goes on, as it always has), with a `Trash: tab not read as …` line
 (each tab's mean grey, and the band's: `under the labels …`) and
-one picture per place each session in `trash_debug` (`tab_unsure_…`); a
+one picture per place each session in `trash_debug` (`tab_unsure_…`; the
+shop's is `tab_unsure_shop_other`); a
 charm run stopped so says so, not "no charm found", and a timed one waits
 10 minutes. *Tốc độ bấm nút* (60, 80, 100 or 150 ms)
 sets how fast these bag jobs click, drag and type; what they wait for and read
@@ -1266,12 +1291,14 @@ found or a capture refused, everything comes from the screen as before.
   key drinks, before it is trusted, adds the bag's total, *cả túi còn N bình
   (theo gói tin, chưa kiểm)*; the minute's `Bag (packets)` line gives each
   learned key's item with its total in the bag (`key H -> slot 33 (8810121,
-  260 in the bag)`), all since 2026.11.04d. Once two
-  shop runs' own counts agree with the bag, a due *Tự mua bình* look may be
-  skipped while the bag holds enough -- never two due times running, never
-  more than 2 h without a real look, and only when the bag has come since the
-  last potion press. Any disagreement voids that trust. **Mua ngay** and
-  **Thử mua** always run, and buying stays on the screen. The bag can also
+  260 in the bag)`), all since 2026.11.04d. Until 2026.11.09, once two
+  shop runs' own counts agreed with the bag, a due *Tự mua bình* look could be
+  skipped while the bag held enough; the shop counts nothing now, and the
+  bag only writes its two potions and the Tiêu Dùng slots used to the log
+  either side of a real round, and the slots used when the game says the bag
+  is full (`Bag (packets): before the shop …`, `… after the shop …`, `… the
+  game said full with N Tiêu Dùng slots used`): it gates and ends nothing
+  there, and buying stays on the screen. The bag can also
   stop a charm's right-click when it names another item in that slot, with
   the screen's count, or -- for a stack of one, which has no number on the
   screen -- another count or none -- never cause one.
@@ -1296,7 +1323,11 @@ found or a capture refused, everything comes from the screen as before.
   a buff key's presses is judged on its own: `Buff (packets): key S -- …`,
   a kind-2 cast of yours in its window or *maybe not cast*, and `, a kind-2
   cast with N of its M bursts` on the minute's `Casts` line. Nothing acts on
-  it.
+  it. Since 2026.11.08 a buff key is one a buff row *switched on* holds
+  (`macro_buff_keycodes`), the minute adds `Cast gaps (packets)` and the
+  casts no GoBot key made (below), and your own casts, as they come, pace the
+  skills when *Ra chiêu theo vòng* is ticked (`MacroEngine::note_own_cast`):
+  the one use of the casts that acts, off as shipped.
 - **Still the screen's:** death and revive (with the reviver's HP and the
   recast after HP comes back from 0), the pet's HP, the shop's dialogs and
   buying, the captcha, and whether the character is in the world.
@@ -1315,7 +1346,7 @@ off; its check still runs and still writes its lines.
 | key | shipped | what |
 |---|---|---|
 | `vitals` | `auto` | your HP and MP from the packets once each bar's check trusts them: the potions, the jobs' HP guards, the skills' MP floor, and the bars read once a second |
-| `bag` | `auto` | the bag's potion counts: "Low" by the bag's total, and a due shop look skipped; and a charm's slot checked before its right-click |
+| `bag` | `auto` | the bag's potion counts: "Low" by the bag's total; a charm's slot checked before its right-click; and, log only, the bag either side of a shop round (until 2026.11.09 a due shop look could be skipped) |
 | `detector_rest` | `auto` | the name-plate reader every 600 ms instead of 140 while the packets steer |
 
 What to look for in a log sent after one session: `Positions: capturing …`
@@ -1330,8 +1361,9 @@ frames placed … refused …` and `your id` in the Positions line, and any
 `Positions: a far monster frame …`; `wounded picked` in the Hunter line;
 `Detector: every 600 ms …`; `Vitals check: …` and
 `Vitals: HP from the packets now`, or `… from the screen again` with both
-numbers; `World: map loads by packets …`; `Bag check: … agree (n of 2)`,
-later `Shop: skipped -- …`; `Jump test: … (packets: N take-off …)`;
+numbers; `World: map loads by packets …`; `Bag (packets): before the shop
+…` (since 2026.11.09; until then `Bag check: … agree (n of 2)`, later
+`Shop: skipped -- …`); `Jump test: … (packets: N take-off …)`;
 `Casts (packets)`, `Buffs (packets)` and `Bag (packets)`.
 
 Since 2026.11.04 the log is quieter where the first long farm found it
@@ -1350,6 +1382,277 @@ two looks running has a picture of that slot alone, 3 px round it, kept in
 thread (`Potions: key … unreadable on two looks running; kept a picture of
 the slot alone as …`): on 2026-11-04 key G read nothing all session, so its
 "Low" could never be said.
+
+### Skills on the battlefield (2026.11.08)
+
+Since 2026.11.08 (not yet run on the game). On 2026-11-08 the owner ran the
+macro alone -- no hunter -- on the battlefield t1981_s2 (22:12-22:43), hands
+off, and found the skills not smooth: pauses between them (*khựng giữa các
+chiêu*) and an uneven order (*chiêu ra lộn xộn*); A and S, the owner says,
+are attack skills, not buffs. The log showed:
+
+- **The order was the timers'.** Each skill key keeps its own timer, and a
+  10-ms pass presses the first one due and holds the rest `skill_gap_ms`
+  past its key-up, so the intervals became the shares of the presses: of
+  about 390 skill presses a minute Z (500 ms) took 26.6%, X, C, V, B and
+  Space (1000 ms) 12-14% each, S and A (3000 ms) about 4% each. The game
+  cast about 77 a minute and drops a key that goes down while the character
+  is still locked in the last cast (650-760 ms) -- it queues nothing -- so
+  whichever key came first after the lock was cast: an order by chance, Z
+  about every 3 s and S and A every 17-26 s (model).
+- **The pauses**, 22:12-22:20 only, were GoBot's own holds: 16, 26.9 s in
+  all -- the shop's quiet second spoiled ten times, about 31 s apart, each
+  holding every key about 1 s, and charm and quest runs of 1-4.9 s. From
+  22:20:43, the shop, the bag and the charms unticked, there was none:
+  GoBot pressed without a break, and any later pause was the game's
+  (cooldowns, a cast rate wandering between 72 and 83 a minute), which that
+  log cannot measure.
+- *Dùng skill tuần tự* did nothing (see the hunting row, above). A and S
+  were logged as buffs only (`(buff)`, and some 30 `Buff (packets) … maybe
+  not cast` lines a minute): two switched-off buff rows still held their key
+  codes. MP was read 4798 for the packets' 14798 from about 22:15 -- its
+  leading 1 lost -- and F pressed about 40 times a minute: not fixed here
+  (below).
+
+With *Ra chiêu theo vòng* unticked, as shipped, the macro presses the same
+keys at the same times as 2026.11.05b. What changes:
+
+- **Ra chiêu theo vòng** (`cast_paced`, off as shipped): the skills one at a
+  time in list order, each once the game has cast the one before -- the
+  owner's Q1 (a) -- under *Keyboard macro*, below.
+- **A spoiled quiet second waits longer each time** (`QuietBackOff`,
+  `gobot/quiet_second.hpp`): the shop's timed look and the quick quest's
+  timed round look again after 30 s, then 2, 5 and 10 minutes, one spoiled
+  look after another (`QuietBackOff::kStepsMs`), never past the job's own
+  interval (*kiểm tra mỗi*, *mua mỗi* since 2026.11.09; the quest's minutes)
+  and never under the first step. Back to 30 s once a quiet second passes, on
+  **Mua ngay**, **Thử
+  mua** or *Làm ngay 1 lần*, with the box ticked on again, and for the
+  quest at every BẮT ĐẦU; a button's own run never moves it. The owner's Q5
+  (a) keeps the shop off in battlefield fights; W4, a check for a hand on
+  the real mouse before the hold, waits for Q5 (b). Each spoiled second
+  says what spoiled it (`quiet_spoiled_text`): the pointer, the five mouse
+  buttons and the program in front, read -- never moved -- through
+  `InputGlancer` on the jobs' own threads alone: `Shop: not now -- someone
+  is using the mouse or keyboard (held 1012 ms): the pointer moved 35 px
+  (812,440 -> 845,452); no mouse button held; in front: chrome.exe; the next
+  look in 120 s`, or `Quest: the quiet second was not quiet -- …`, the
+  quest's tab saying *Chờ: bạn đang dùng chuột hoặc bàn phím; thử lại sau 2
+  phút.*
+- **The charms' and the shop's clocks are kept across a MACRO OFF and ON**
+  (`resumed_clock`, `GuiApp::TrashClocks`): every BẮT ĐẦU used to look for a
+  charm due 8 s on and at the shop 45 s on, and the first minutes' toggles
+  brought three charm holds of 2.4-4.9 s. The clock kept is used now, with
+  the shop's back-off level, never sooner than those (`kCharmFirstMs`,
+  `kShopFirstMs`); *Dùng bùa* or *Tự mua bình* ticked on again starts that
+  job's clock afresh. A shop or charm run cut short by DỪNG or F10 leaves
+  its clock as it was, so a purchase it cut is looked at again 45 s (8 s)
+  after the next BẮT ĐẦU, not an interval later.
+- **A key on a buff row and a skill row, both switched on** (A and S at
+  22:13-22:15) is warned of under the skills row, the buffs row and the full
+  screen's key table (`macro_clash_note_vi`), and once in the log as the
+  macro comes on, from its own thread (`macro_clash_line`): `Macro: A, S are
+  on a buff row and a skill row, both on -- pressed on both clocks, and
+  logged as a buff (a warning only: nothing is changed)`. Nothing is
+  refused: Q9 (a). Only while **Repeating keys** is on: off, no row is
+  pressed at all, and nothing is said.
+- **Words**: *Dùng skill tuần tự* and *Chỉ khi đang đánh quái* say they act
+  only with **Tự đánh quái**, and *Như GoC* is gone; `docs/goc-reference.md`
+  and `docs/goc-parity-plan.md` no longer say GoC waits for the server's
+  confirmation: two static reads of GhostCore.dll agree that its confirm
+  flags are written and never read, `MAX_SKILL_RETRIES` is never used and
+  `AttackThread` is never started -- GoC presses blind too.
+- **Log only**, to measure what the 2026-11-08 log could not:
+  - after each minute's `Casts` line, `Cast gaps (packets): N gaps -- p50
+    0.74 s, p90 …, longest … ending at …; over 1.0 s N, over 1.5 s N;
+    newest press to cast p10 N ms, p50 N ms, p90 N ms (N casts), N with no
+    press of GoBot's in the 700 ms before; by skill 51205 N casts, shortest
+    re-cast N s / …` (`cast_gaps_line`, from the 256-cast ring): the gaps
+    between your casts, and each skill's shortest re-cast, a floor of its
+    cooldown with no pairing needed; the delay from GoBot's newest key-down
+    within `CastMatch::kPairMs` (700 ms) before the cast. A gap across a
+    stop and start of the macro or the hunter, or a capture started again,
+    is no pause of a run's: left out and counted (`; N gaps across a stop and
+    start or a capture restart, left out`, `CastMatch::set_run`);
+  - a cast no GoBot key made: `Cast (packets) with no GoBot key at …: skill
+    N, kind K; GoBot's last press N ms before it (key Z), the first after it
+    N ms after (key X); no hold then` (or `the keys held for a job then`,
+    handed to the capture thread through an atomic, `CastMatch::set_held`),
+    at most `CastMatch::kLoneSaid` (5) a minute, the rest counted; a cast
+    with no press of GoBot's within `CastMatch::kLoneNearMs` (10 s) either
+    side and no hold -- yours by hand -- only counted: `Cast (packets) with
+    no GoBot key: N with no GoBot press within 10 s either side and no hold
+    (by hand or another tool), not described`;
+  - `Simple screen: start asked by the toggle key F10` (or `the big
+    button`, or the chat card's button; `stop asked by …` likewise);
+    `Settings changed during the run: Keys.key_7_keycode 72 (H) -> 70
+    (F)`, worked out in memory against the settings as the run began, or
+    as last logged (`settings_changes`); a change made while stopped is
+    said at the next start, `Settings changed since the last run:
+    Keys.key_4_keycode 65 (A) -> 51 (3)`; and the minute's `Skills:` line
+    ends `; refused: game not in front N`;
+  - the `(buff)` tag and the `Buff (packets)` bursts only for keys that a
+    buff row switched on holds (`macro_buff_keycodes`, `macro_buff_on`):
+    about 720 of that run's 763 bursts are gone;
+  - MP read short of the packets' value by its leading 1 (4798 for 14798,
+    `figure_lost_leading_one`): the MP bar and its caption, cut from the
+    reader's newest frame, written once a session off the GUI thread as
+    `vitals_debug\mp_caption_YYYYMMDD_HHMMSS.png`, outside `vitals_debug`'s
+    rotation (`Vitals: MP read 4798 where the packets say 14798 -- its
+    leading 1 lost …`);
+  - the minute's `Casts`, `Cast gaps`, lone-cast and buff lines, who
+    toggled and what changed are written by a worker of their own
+    (`GuiApp::log_later`), in the order they were said, never on the
+    window's thread; the last minute's are waited for at the close.
+
+Not in this release, each waiting for the owner: W2, "most overdue first"
+on the timers (Q1 (c)); W3, the MP reader's lost digit and `BarCheck`'s
+"reader short a digit", with the owner's MP mark and F's rate (Q7); W4, the
+hardware-input check (Q5 (b)); W5, the owner's own intervals and pet mark
+(Q1, Q8). Nor is the hunter's `run_skills` paced yet. No default interval,
+mark or number of the owner's is changed. Meanwhile `DOC-TRUOC.txt` advises
+one interval for the eight skill keys -- 1.2 s each, or for Q1 (b) Z 0.7 s
+and the rest 1.4 s -- *Tốc độ bấm kỹ năng* left at 50 ms (at 150 the model
+gives Z 40% of the casts and S and A next to none), the shop, the bag, the
+charms and quick quest off in battlefield fights, and GoBot's window left
+alone while the macro runs. The next live run -- 15 minutes or more on
+t1981_s2, the shop, the bag and the charms off, first with the tick off and
+the intervals equal, then with it on -- gives the `Cast gaps` to tune
+`kPaceLockStartMs` and the re-press by.
+
+### Buying by the slot, and the check-in board (2026.11.09)
+
+Since 2026.11.09 (not yet run on the game). On 2026-11-09 the owner asked
+for two things: *Tự mua bình* no longer to count the potions -- when the time
+comes, buy the slots set, and stop when the game says the bag is full -- and
+the daily check-in board, which the game shows at every login and after
+00:00, closed with ESC. The owner's answers: Q1 (a), a full bag ends that
+time's round and the box stays ticked, to buy again at the next time; Q2, the
+numbers are the owner's own setting; Q3 (a), keys G and F drink Thịt bò khô
+and Rượu lá tre, the two the shop buys; Q4 (c), the board folded into **Tự
+đóng thông báo**, with no tick of its own. Not asked, and built as their (a):
+Q5, the board closed only while the bot runs; Q6, the board told by its title
+and closed by ESC alone.
+
+- **Tự mua bình counts nothing.** No look at Tiêu Dùng, no first round of one
+  of each, no stop after a purchase that added no slot, no recount, no
+  packets' skip. When a plan is due it owes the card's numbers,
+  `buy_hp_slots` and `buy_mp_slots` in `trash.ini`: 0 to 20 each
+  (`CleanSettings::kBuySlotsPerRunMost`), 3 and 3 as shipped
+  (`kBuySlotsDefault`). A file without them reads its old `buy_hp_to` and
+  `buy_mp_to` -- the owner's 10 and 10 -- until the card saves the new key;
+  `buy_*_below` is not read, but for 0 -- that potion left alone -- which
+  reads 0. The purchases go HP, MP, HP, MP …
+  (`bag::shop_order`): the full message covers the whole Tiêu thụ tab, so one
+  potion bought first could leave no room for the other. A round on the
+  clock makes at most `kShopBuysPerHold` (10) purchases in one hold, the rest
+  `kShopPartGapMs` (60 s) later; **Mua ngay** starts the plan afresh and buys
+  all of it in one hold, `kShopMaxBuys` (40) at most, and the next plan comes
+  an interval after it. A round's deadline is 30 s and 6 s a purchase,
+  `kShopDeadlineMostMs` (300 s) at most, where it was 240 s. On the card the
+  interval is *mua mỗi* (it was *kiểm tra mỗi*), each potion's row *mỗi lần
+  mua N ô*, and a line says when the next plan begins and what is left of
+  this one.
+- **The bag full.** *Túi đồ [Tiêu thụ] đã đầy* -- by GoC's strings it comes
+  instead of the quantity box -- is looked for before the bag key, before each
+  purchase, after the double-click, for a second after Xác Nhận
+  (`kShopFullLateMs`) and before the shop's ESC. Its Xác Nhận is clicked -- its
+  label where it is found, else the picture's fixed point -- and it counts as
+  closed only when two looks 300 ms apart no longer see it; never an ESC
+  while it is up. Then the shop is shut, the round ends and nothing more of
+  that plan is bought, MP included; the next plan buys again (Q1 (a)). The
+  purchase it came after is not counted. Two clicks that do not close it are
+  the last, with a picture and the words; the keys are not held for a
+  message alone, only for a shop still open behind it.
+- **A message GoBot does not know** in the quantity box's place, seen alone
+  on two looks in a row -- no question, no two-button dialog -- is closed by
+  its Xác Nhận and ends the plan the same way, its picture kept as
+  `shop_message`. A purchase whose end is unclear -- Xác Nhận clicked and the
+  question never seen gone, a message after it, a stop -- counts as bought
+  and ends the round (`kShopUnsure`): never bought twice. A round in trouble
+  waits 10 minutes, and the second in a row (`kShopTroublesToDrop`) drops what
+  is left of the plan until the next. A message still up over the shop when
+  it is to be shut -- one whose Xác Nhận did not close it, one left for the
+  owner after Xác Nhận, perhaps the full bag drawn otherwise -- gets no ESC,
+  which would go into it, and no click: the shop is left open and the keys
+  held for it.
+- **The plan's time is kept on disk**, `%LOCALAPPDATA%\GoBot\shop_clock.txt`
+  (`shop_clock_path`), written on the trash worker before anything is
+  clicked; a time that cannot be written buys nothing. A GoBot started again
+  waits what is left of it, `kShopFirstWaitS` (45 s) at least and one
+  interval at most (`bag::shop_first_wait_s`). The box ticked on again owes
+  nothing and waits for that clock, so a plan just bought is not bought again
+  (**Mua ngay** is for that); a round cut by DỪNG keeps what it still owed for
+  the next BẮT ĐẦU. Two GoBot folders on one Windows account share the file,
+  as they share `charm_clock.txt`. A plan begins only once the round's gates
+  let it run, and a **Mua ngay** that does not get to run (HP, the quiet
+  second, the hold, a stop) leaves what is owed and the plan time as they
+  were. A number lowered under what is left buys no more and waits for the
+  plan's time, never beginning one early; a round cut by HP under the
+  potion's mark or a lost hold buys the rest a part's gap (60 s) later.
+- **The check-in board** ("Sự kiện và điểm danh", 878x600, with its *Điểm
+  danh* calendar) is told by its 280x30 title, which GoBot already shipped as
+  `grabbed/auto_login_success_indicator` -- the client's own
+  `Ui\Event\dialog_EventIntergration.spr` pixel for pixel -- under a second
+  name, `checkin_board_title` (`gobot/checkin_board.hpp`,
+  `kCheckinBoardScore` 0.90; a whole 1024x768 frame takes about 16 ms, and
+  `Checkin: a title search on WxH took N ms` says it once a session). With
+  **Tự đóng thông báo** ticked, while the bot runs and the game is in front,
+  the popup closer (`PopupKind::CheckinBoard`) presses ESC once the board has
+  stayed put 3 s with nothing else of its list up -- the reward notice's Xác
+  Nhận goes first -- through the monster book's guarded ESC: the gates, a hold
+  of at most 2 s, a fresh look, ESC by 1.2 s, and an ESC menu it brings up
+  closed by its X. Under the hold the board is looked for again only as its
+  title, within 8 px of where it was (a 296x46 search). Its X is never
+  clicked: any close button in its top band is its own, so an X a little off
+  the art's place does not keep it shut. Two tries in 10 minutes, then it is
+  left alone and the tab says so. Unticked, nothing closes it; with the bot
+  stopped nothing is pressed (Q5 (a)).
+- **The jobs that click look for the board themselves**: the bag pass, the
+  charms and the shop before the bag key -- the shop again before its
+  right-click, each double-click and each Xác Nhận -- and the quick quest
+  before it takes the keys. With it up the job presses nothing and looks
+  again a minute later (`BagCleaner::kBoardWaitMs`, `QuestRun::kBoardMs`),
+  not as trouble, and the tab says so; with the box unticked it adds *Bật "Tự
+  đóng thông báo" (thẻ Đánh quái) để GoBot tự tắt bảng điểm danh.* A board
+  that comes up in the shop stops the buying, and the shop is shut as ever:
+  the live board hides the shop whole, so a shop seen open and now hidden
+  under the board is not taken for shut -- its one ESC goes to the board, then
+  Thoát. A board over the quantity box (`BagCleaner::board_over_question`) is
+  never taken for the box gone: nothing more is pressed, ESC included, the
+  round's end keeps the hold, and the trash worker's `look_for_clear` keeps
+  it while the board's title is up, until the owner has closed the board, the
+  box and the shop.
+- **Pictures for the owner.** With the box ticked, `popup_debug` beside GoBot
+  keeps `checkin_<time>_<nn>_<why>.png`, the newest 20: `first` (the board's
+  first sighting of a day), `after` (once it is closed), `in15` (15 s after
+  the keeper got back in), `start15` (15 s after BẮT ĐẦU) and `midnight` (the
+  first look from 00:00:30) -- written on the popup worker between its turns,
+  never under a hold. *Thử xem* names the board and keeps
+  `probe_<time>_<nn>.png` from its own thread.
+
+New in the log: `Trash: shop plan HP 10 + MP 10 (owed 10+10, at most 10 a
+hold); clock saved, next plan 23:15`; `Trash: shop round of 10 purchase(s):
+HP 5 + MP 5`; `Trash: shop purchase 1/10 HP -- bought (100 read back)`;
+`Trash: shop full message at x,y (whole …, words …) …` and `… closed by its
+label (seen gone twice, 1 click(s))`, or `… NOT closed after 2 click(s), no
+ESC; the keys are not held for it`; `Trash: shop full at purchase 4/10 MP,
+after 3 bought -- nothing more this plan`; `Trash: shop lone message at x,y …
+-- kept shop_message, closing it; nothing more bought this plan`; `Trash:
+shop purchase of … unsure (…) -- counted as bought, stopped`; `Trash: shop
+done -- bought 5+5, unsure 0, full no; owed 5+5; next part 60 s on`;
+`Trash: shop -- 2 troubles in a row: owed dropped until the next plan …`;
+`Trash: shop -- both slot numbers 0, nothing to buy; next plan …`; the
+packets' `Bag (packets): before the shop …`, `… after the shop …` and `…
+the game said full with N Tiêu Dùng slots used`; `Trash: the check-in board
+is up -- the pass put off 60 s` (or the charms, the shop); `Quest: the
+check-in board is up at x,y (title 0.97) -- quest put off 60 s`; `Popups:
+the check-in board (Sự kiện và điểm danh) is up at x,y (title 0.97 at x,y;
+its X at +564,+14 from the title)`; `Popups: closed the check-in board at x,y
+(title 0.97) with ESC`; `Popups: kept …\popup_debug\checkin_…_first.png
+(board seen)`. The owner's live test is step 12 of section 6 in
+`DOC-TRUOC.txt`: *Tự đóng thông báo* ticked through a login and a 00:00;
+*Thử mua*, then 1 + 1 with **Mua ngay**, watched, then the real numbers.
 
 ## Keyboard macro
 
@@ -1387,6 +1690,59 @@ Worth leaving on:
 Every key is a press: a key's or a step's own hold (the **Hold (ms)** columns,
 `hold_ms` in the file) is at most 500 ms, and 0 -- as shipped -- is the usual
 70–110 ms.
+
+**Ra chiêu theo vòng** (`cast_paced` in `[Macro]`, 2026.11.08, *Thử nghiệm*):
+*Ra chiêu theo vòng (chờ game ra chiêu rồi mới bấm chiêu kế)* in the simple
+screen's **Kỹ năng** window (**Chi tiết…** on the skills row), after *Dùng
+skill tuần tự* and *Tốc độ bấm kỹ năng*, and in the full screen's **Timed
+keys** panel, which hands it over on Apply now or Save macro. Off as shipped,
+and a `macro.ini` without `cast_paced` reads false: every key on its own timer,
+the keys going out exactly as before. Ticked, with the macro alone pressing the
+skills on their timers (`run_timers` with no hunter running), the skill keys
+switched on go one round at a time in list order, each once -- the owner's Q1
+(a) -- and the next goes down only once the game has cast the one before and
+that cast's lock is over. Your casts are your client's own UDP `0x0031` under
+your own id, stamped with `GamePacket::timestamp_ms` and handed from the
+capture thread to `MacroEngine::note_own_cast` through a lock-free ring of
+`kCastRing` (16), which takes none of the macro's locks. The lock is guessed at
+`kPaceLockStartMs` (700) and learned within `kPaceLockMinMs`..`kPaceLockMaxMs`
+(550..900): `kPaceLockUpMs` (20) up when a dropped first press's re-press is
+cast and `kPaceDropsToRaise` (2) of the last `kPaceDropWindow` (10) first
+presses were -- one alone, a stun or a frame hitch, is not the lock;
+`kPaceLockDownMs` (5) down after `kPaceLockDownAfter` (20) first presses cast
+within `kPaceAtLockMs` (30) of the guess, counted afresh at the start, after
+each step down and after a re-press that was cast; a skip, a first press cast
+late (after a potion, a buff or a skip) and a spell on the timers neither count
+nor reset it. A key's `interval_ms` is then only the least time from its own
+last cast: not over, the key is passed over this round. One press waits for its
+cast at a time. None by `kPaceRepressMs` (160 ms) after the key went down and
+`skill_gap_ms` after it came up: the same key once more -- for a key skipped on
+an earlier turn, and not cast on a first press since, not before the longest
+lock (`kPaceLockMaxMs`) after the cast before it is over. None `kPaceConfirmMs`
+(220 ms) after that: skipped this round, and once another key casts within
+`kPaceFloorTakenMs` (1.5 s) the time since its last cast is seen as the least
+of its cooldown -- kept on the key's second such skip within `kPaceSeenMs` (60
+s), as one stop of the game's (a stun, a hitch, the capture late) skips every
+key in it -- the key passed over without a press `kPaceFloorUses` (20) times
+and then checked with one. A press refused (the keys held, the game not in
+front) is no try, and asked again 100 ms on; a key that never goes out (Windows
+not taking it, or ↓) has its turn pass with no cast. With no cast of yours for
+`kPaceStaleMs` (2 s) while keys go out -- out of the world, a town, no capture
+-- every key goes back on its own timer until your next cast. Potions go first
+as ever; a buff due while a skill's cast is waited for, or inside that cast's
+lock, goes once the lock is over, and the next skill waits for the buff's cast
+and its repeats. The hunter's `run_skills` is not paced in this release, and
+while the hunter runs or the key sequence is on the tick does nothing
+(`PaceStatus::others`): their own casts would answer the key waited on. Fitted
+to the 2026-11-08 log, the model gives 77-83 casts a minute, each skill about
+every 6 s in list order, from about 80 presses a minute instead of 390. Its
+log: `Paced: on -- …`, `Paced: no cast of yours for … -- the skills on their
+own timers until your next cast`, `Paced: your cast came after … on the timers
+-- the skills one after another again`, `Paced: off -- …`, and once a minute
+`Paced: N rounds; N casts confirmed (N on a re-press); N re-presses; skipped
+(cooldown): S 5 (4 learned, floor 6.0 s); fallback 0.0 s; lock_est 680 ms;
+other casts 0; now paced`; under the tick, `MacroEngine::pace_status_vi` (*Đang
+theo vòng — khóa chiêu ước 680 ms, 12 vòng.*).
 
 Settings live in `configs/macro.ini` and are editable there or in the GUI.
 
@@ -1613,7 +1969,8 @@ still be running 5 s after a Ctrl+C, a second one ends it at once.
 | `configs/spots.ini` | the hunting areas drawn on **Bản đồ**, one per map (`[t52_s2]`: the home and the box, and when it was saved); made and written by GoBot, never shipped -- copy it over to a new version's `configs` to keep them |
 | `configs/party.ini` | party: accepting, inviting by keyword, the lists of names |
 | `configs/login.ini` | logging back in: where VTCZone is, the pages, the channel and character |
-| `configs/trash.ini`, `configs/trash\` | bag cleaning: the icons picked, and the photographed items |
+| `configs/trash.ini`, `configs/trash\` | bag cleaning: the icons picked, and the photographed items; the charms, and the potion shop (`buy_potions`, `buy_every_minutes`, and since 2026.11.09 `buy_hp_slots` and `buy_mp_slots`, 0 to 20, 3 as shipped -- a file without them reads its old `buy_hp_to` and `buy_mp_to` until the card saves the new key) |
+| `%LOCALAPPDATA%\GoBot\charm_clock.txt`, `shop_clock.txt` | when each charm may be used again, and since 2026.11.09 when the next potion plan begins: written before the click, so GoBot started again neither uses a charm nor buys early -- shared by every GoBot folder of that Windows account |
 | `configs/chat.ini` | Tự chat: the lines, and how often |
 | `configs/quest.ini` | quick quest: the key, and how often |
 | `configs/alerts.ini` | alerts: which events, the limits -- never the webhook |

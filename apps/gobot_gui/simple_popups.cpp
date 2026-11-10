@@ -1,11 +1,15 @@
 // "Tự đóng thông báo" -- closing the few popups that get in the way of a run --
 // as the GUI does it: the worker that looks once a second during a run, and
-// its row on the Đánh quái tab with the look-only "Thử xem".
+// its row on the Đánh quái tab with the look-only "Thử xem". The check-in
+// board ("Sự kiện và điểm danh", after every login and at 00:00) is on the
+// list with the rest, closed with ESC (the owner's choice, 2026-11-09): no
+// tick of its own.
 //
 // What is on the allow-list, what keeps everything shut, and how a popup is
 // closed and checked is the library's (gobot/popup_closer.hpp). Here is what
 // only the window knows: the holds, the trash cleaner, Tự chat, the keeper,
-// the mouse, and whether the player is using the machine.
+// the mouse, whether the player is using the machine -- and the pictures of
+// the board kept for the owner to send (CheckinShots), on this worker.
 
 #include "gui_app.hpp"
 #include "simple_ui.hpp"
@@ -22,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <future>
 #include <mutex>
 #include <string>
@@ -37,6 +42,23 @@ using namespace simple_ui;
 
 /// The hold a close is made under, by name.
 const char* const kPopupHold = "đóng thông báo";
+
+/// Where the pictures of the board and the probe's are kept, beside the
+/// program as trash_debug and quest_debug are.
+const char* const kPopupDebug = "popup_debug";
+
+/// The PC's date as yyyymmdd and the second of its day, for CheckinShots.
+struct LocalTime {
+    int day = 0;
+    int second = 0;
+};
+LocalTime local_time() {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    return LocalTime{ (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday,
+                      tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec };
+}
 
 /// How long nobody may have touched the mouse or keyboard, with everything
 /// held off, before a popup is clicked: GoBot presses nothing then, so what
@@ -64,6 +86,7 @@ struct GuiApp::PopupsUi {
     std::atomic<bool> running{ false };
     std::atomic<bool> stop{ false };
     std::atomic<int>  closed{ 0 };
+    std::atomic<int>  boards{ 0 };      ///< of `closed`, the check-in board
 
     // What the worker says, for the tab; guarded by worker_mutex_.
     std::vector<std::string> log;
@@ -223,8 +246,24 @@ void GuiApp::popup_loop() {
     guard.stopped = [&] { return ui.stop.load(); };
     closer.set_guard(guard);
 
-    GB_INFO("Popups: watching for the check-in notice, Yêu Quái Bách Khoa and GoBot's own ESC menu");
-    say_popups("Đang để ý thông báo nhận quà điểm danh, Yêu Quái Bách Khoa và menu ESC do GoBot mở.");
+    // Pictures of the board for the owner to send, kept between turns -- never
+    // between a hold and its press, which turn() lets go of before it returns.
+    const std::string debug_dir = exe_relative(kPopupDebug);
+    CheckinShots shots;
+    {
+        const LocalTime lt = local_time();
+        shots.start(now_ms(), lt.day, crossed_in_ms_.load());
+    }
+
+    const bool board = eyes.sees_board();
+    GB_INFO("Popups: watching for the check-in notice, the check-in board (ESC), Yêu Quái Bách Khoa and GoBot's own "
+            "ESC menu; a look every 1 s%s",
+            board ? "" : " -- no picture of the check-in board's title, so the board is not looked for");
+    say_popups(board ? "Đang để ý thông báo nhận quà điểm danh, bảng Sự kiện và điểm danh (bấm ESC), Yêu Quái Bách "
+                       "Khoa và menu ESC do GoBot mở."
+                     : "Đang để ý thông báo nhận quà điểm danh, Yêu Quái Bách Khoa và menu ESC do GoBot mở. Thiếu "
+                       "hình tiêu đề bảng Sự kiện và điểm danh, nên không tắt được bảng đó.");
+    std::string board_said;             // the board's last line on the tab
     while (!ui.stop) {
         for (int i = 0; i < 10 && !ui.stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (ui.stop) break;
@@ -232,9 +271,31 @@ void GuiApp::popup_loop() {
         // looked for then either: a frame read off the screen would be that
         // window's, and the look is the costly part of a turn.
         if (!input_.window_valid() || !input_.window_focused()) continue;
-        if (closer.turn() == PopupCloser::Turn::Closed) {
+        const PopupCloser::Turn turn = closer.turn();
+        const bool about_board = closer.last_about(PopupKind::CheckinBoard);
+        if (turn == PopupCloser::Turn::Closed) {
             ++ui.closed;
+            if (about_board) ++ui.boards;
+            board_said.clear();
             say_popups(closer.last_vi());
+        } else if (about_board && closer.last_vi() != board_said) {
+            // The board tried and still up, put off, kept shut by something
+            // else or left alone: said on the tab as it changes.
+            board_said = closer.last_vi();
+            say_popups(board_said);
+        }
+        if (!closer.up(PopupKind::CheckinBoard) && !about_board) board_said.clear();
+        const LocalTime lt = local_time();
+        for (const std::string& shot : shots.due(now_ms(), lt.day, lt.second, closer.up(PopupKind::CheckinBoard),
+                                                 turn == PopupCloser::Turn::Closed && about_board,
+                                                 crossed_in_ms_.load())) {
+            // The closer's last look: this turn's, or the last after its press.
+            const std::string kept = keep_popup_frame(debug_dir, last, shot, false);
+            if (kept.empty())
+                GB_WARN("Popups: could not keep a picture (%s) in %s", shot.c_str(), debug_dir.c_str());
+            else
+                GB_INFO("Popups: kept %s (board %s)", kept.c_str(),
+                        closer.up(PopupKind::CheckinBoard) ? "seen" : "not seen");
         }
     }
     leave({});
@@ -242,8 +303,9 @@ void GuiApp::popup_loop() {
 
 std::string GuiApp::simple_popups_line() const {
     if (!popups_running()) return {};
-    const int n = popups_ui_->closed.load();
-    return "Tự đóng thông báo: đang bật" + (n > 0 ? ", đã đóng " + std::to_string(n) : std::string()) + ".";
+    const int n = popups_ui_->closed.load(), boards = popups_ui_->boards.load();
+    return "Tự đóng thông báo: đang bật" + (n > 0 ? ", đã đóng " + std::to_string(n) : std::string()) +
+           (boards > 0 ? " (bảng điểm danh: " + std::to_string(boards) + ")" : std::string()) + ".";
 }
 
 void GuiApp::simple_popups_row() {
@@ -257,13 +319,27 @@ void GuiApp::simple_popups_row() {
         if (ui.enabled && simple_running() && !simple_cold_start_) start_popups();
         if (!ui.enabled) stop_popups();
     }
+    ImGui::SetItemTooltip("%s", trial_hint(kTrialPopups,
+        "Trong lúc bot chạy, GoBot tự đóng vài thông báo hay chắn đường, sau khi chúng đứng yên 3 giây:\n"
+        "- thông báo nhận quà điểm danh: bấm Xác Nhận của nó;\n"
+        "- bảng Sự kiện và điểm danh, lúc vào game và lúc qua 00:00: bấm ESC sau khi bảng đứng yên 3 giây "
+        "(thông báo nhận quà, nếu có, được đóng trước; không bấm vào bảng);\n"
+        "- Yêu Quái Bách Khoa: nút X của nó, hoặc ESC;\n"
+        "- menu ESC do chính GoBot mở.\n"
+        "Không bấm gì khi đang có cửa sổ khác, khi máu thấp hoặc khi bạn đang dùng chuột/bàn phím. Bot dừng "
+        "thì không bấm gì. Khi bật, GoBot lưu vài ảnh màn hình game vào thư mục popup_debug (15 giây sau khi "
+        "GoBot tự vào lại game, 15 giây sau khi bấm BẮT ĐẦU, lúc qua 00:00 và khi thấy bảng) để kiểm tra bảng "
+        "điểm danh.").c_str());
     ImGui::TableNextColumn();
     {
         const bool busy = ui.probe.valid();
         ImGui::BeginDisabled(busy || !input_.window_valid());
         if (ImGui::Button("Thử xem##popups")) {
             ui.probe_said.clear();
-            ui.probe = std::async(std::launch::async, [this] {
+            // The tick as it is now, for what the board would get; the
+            // picture is kept from the probe's own thread.
+            const bool ticked = ui.enabled;
+            ui.probe = std::async(std::launch::async, [this, ticked] {
                 TemplateStore store;
                 if (!store.load_best(exe_relative("configs/templates.ini")))
                     return std::string("Không có hình giao diện của game.");
@@ -276,8 +352,12 @@ void GuiApp::simple_popups_row() {
                 Frame f;
                 if (!capture.grab(input_.target_window(), f) || !f.valid())
                     return std::string("Không chụp được màn hình game.");
+                const std::string kept = keep_popup_frame(exe_relative(kPopupDebug), f, {}, true);
+                if (!kept.empty()) GB_INFO("Popups: Thử xem kept %s", kept.c_str());
+                const std::string saved = kept.empty() ? std::string() : " Đã lưu ảnh vào thư mục popup_debug.";
                 const std::vector<PopupSeen> up = eyes.popups(f);
-                if (up.empty()) return std::string("Không thấy thông báo nào trong danh sách được đóng. Không bấm gì.");
+                if (up.empty())
+                    return "Không thấy thông báo nào trong danh sách được đóng. Không bấm gì." + saved;
                 std::string out = "Thấy: ";
                 for (std::size_t i = 0; i < up.size(); ++i) {
                     // The menu seen here is anybody's -- most likely the
@@ -287,25 +367,29 @@ void GuiApp::simple_popups_row() {
                                                              : popup_kind_vi(up[i].kind));
                     if (up[i].kind == PopupKind::EscMenu) out += " (GoBot không đóng menu do bạn mở)";
                     else if (up[i].kind == PopupKind::CheckinNotice) out += " (sẽ bấm Xác Nhận của nó)";
+                    else if (up[i].by_esc)
+                        out += " ở " + std::to_string(up[i].at.x) + "," + std::to_string(up[i].at.y) +
+                               (ticked ? " (sẽ bấm ESC)" : " (sẽ bấm ESC khi bật Tự đóng thông báo)");
                     else out += up[i].control ? " (sẽ bấm nút X của nó)" : " (sẽ bấm ESC nếu không có gì khác)";
                 }
                 std::vector<std::string> other;
                 eyes.blockers(f, up, &other);
                 if (!other.empty()) out += ". Nhưng lúc này sẽ không đóng gì: " + other.front();
-                return out + ". Không bấm gì.";
+                return out + ". Không bấm gì." + saved;
             });
         }
         ImGui::EndDisabled();
         if (ui.probe.valid() && ui.probe.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
             ui.probe_said = ui.probe.get();
-        ImGui::SetItemTooltip("Chụp màn hình game một lần và nói thấy gì, sẽ đóng gì -- không bấm gì cả.");
+        ImGui::SetItemTooltip("Chụp màn hình game một lần và nói thấy gì, sẽ đóng gì -- không bấm gì cả. Ảnh "
+                              "chụp được lưu vào thư mục popup_debug.");
     }
-    // The check-in board ("Sự kiện và điểm danh") is not named: nothing closes
-    // it until a picture of it has been taken from the live client.
+    // The check-in board ("Sự kiện và điểm danh") is on the list since
+    // 2026.11.09, folded into this tick: closed with ESC, never by its X.
     hint(trial_hint(kTrialPopups,
-                    "Chỉ đóng: thông báo nhận quà điểm danh, Yêu Quái Bách Khoa, và menu ESC do GoBot mở. "
-                    "Không bao giờ đóng hộp thoại thùng rác, lời mời tổ đội, bảng hồi sinh, cửa sổ nhiệm "
-                    "vụ hay cửa sổ lạ.").c_str());
+                    "Chỉ đóng: thông báo nhận quà điểm danh, bảng Sự kiện và điểm danh (bấm ESC, lúc vào game và "
+                    "lúc qua 00:00), Yêu Quái Bách Khoa, và menu ESC do GoBot mở. Không bao giờ đóng hộp thoại "
+                    "thùng rác, lời mời tổ đội, bảng hồi sinh, cửa sổ nhiệm vụ hay cửa sổ lạ.").c_str());
     if (!ui.probe_said.empty()) hint(ui.probe_said.c_str());
     std::string last;
     {

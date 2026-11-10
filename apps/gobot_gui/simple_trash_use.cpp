@@ -273,6 +273,9 @@ void GuiApp::simple_charm_switch(const std::function<void(const char*, const std
     // and lasts an hour, and GoBot uses it by itself while the bot runs.
     if (ImGui::Checkbox("Dùng bùa", &simple_clean_.use_charms)) {
         put("use_charms", simple_clean_.use_charms ? "true" : "false");
+        // Ticked on: the charms' check from a start's wait, not a wait an
+        // earlier run left -- each charm's own hour is CharmClock's still.
+        if (simple_clean_.use_charms) ++charm_ticked_;
         // The worker does the charms between its passes, so it runs for them
         // too: started with the bot, ended when neither is ticked.
         if (simple_clean_.use_charms && simple_running()) start_trash();

@@ -1060,6 +1060,14 @@ step pattern, and the client's `0x010D`, `0x0117` and `0x0026`. The pet item
 - **The tick:** plain `0x03C6` (12 B: a 4-byte body, zero in every tick) once a
   second: 32, 32, 62 and 122 in the four runs. With no monsters about, it is
   all the server sent.
+- **Not known (2026-11-09): no attendance packet**, nor one for the shop's
+  full bag. None of the four runs covers a login or the clock passing 00:00,
+  so nothing here is known to bring up the daily check-in board ("Sự kiện và
+  điểm danh") or its reward notice; and no purchase was recorded, while GoC's
+  strings put the *Túi đồ [Tiêu thụ] đã đầy* message in the client, instead
+  of the quantity box, with nothing bought. GoBot tells both off the screen
+  alone (`gobot/checkin_board.hpp`, `bag::shop_full_up`); of the packets it
+  only logs the bag, `0x0068`, either side of a shop round.
 
 ### What P0-3 can build on
 

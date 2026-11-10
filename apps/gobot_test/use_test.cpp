@@ -24,11 +24,13 @@
 // drawn alike are taken here for what they mostly are, two monsters' pieces.
 
 #include "gobot/bag.hpp"
+#include "gobot/checkin_board.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/quiet_second.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 #include "test_support.hpp"
@@ -230,6 +232,10 @@ struct Kit {
     std::string why;
     bool shop_ok = false;       ///< the shop's pictures are installed too
     Frame buy_question;         ///< the sell question's frame with other words
+    /// The check-in board's title (checkin_board.hpp), in the store under its
+    /// file's name: the board drawn as its title, all GoBot looks for.
+    bool board_ok = false;
+    Frame board_title;
 };
 
 Kit& kit() {
@@ -294,6 +300,10 @@ Kit& kit() {
             k.buy_question = *k.store.get(bag::kSellQuestion);
             write_words(k.buy_question, 7, ScreenRect{ 17, 11, k.buy_question.width - 34, 53 - 15 });
         }
+        // The check-in board's title, by its file's name: the copy of
+        // templates.ini beside the exe may be older than the alias.
+        k.board_ok = TemplateStore::load_one(kCheckinBoardTitleFile, ini, k.board_title) && k.board_title.valid();
+        if (k.board_ok) k.store.put(kCheckinBoardTitleFile, k.board_title);
         return true;
     }();
     (void)loaded;
@@ -483,7 +493,8 @@ struct Pretend {
     int  cur_tab = kUseTab;
     /// Clicks on a tab, with tabs_work; the next `tab_clicks_lost` of them do
     /// nothing, as a click the game let go -- and with `tabs_stuck` none does.
-    int  tab_clicks = 0, tab_clicks_lost = 0;
+    /// `use_tab_clicks`: those on Tiêu Dùng, which no shop run makes.
+    int  tab_clicks = 0, tab_clicks_lost = 0, use_tab_clicks = 0;
     bool tabs_stuck = false;
     /// The strip drawn with no tab chosen -- what a look reads as -1, as the
     /// live client's did on 2026-11-03 -- on the looks `unread` says, by their
@@ -502,10 +513,47 @@ struct Pretend {
     int  shop_sel = -1;             ///< 0 Thịt bò khô, 1 Rượu lá tre, -1 none chosen
     bool qty_up = false;
     bool qty_is_sell = false;       ///< the question is the sell question, not the buy question
-    bool full_bag = false;          ///< Mua brings the message that the bag is full instead
-    bool full_up = false;
-    bool shop_merges = false;       ///< a purchase fills a stack that is there, never a new slot
-    bool swap_columns = false;      ///< the cell clicked for HP sells MP, and the other way
+    /// The question with its Hủy Bỏ drawn pressed from the start, which
+    /// find_dialogs does not see as a dialog.
+    bool qty_hidden = false;
+    /// What the bag has room for: purchases that go through before the game
+    /// says it is full (-1: no end). With none left the message comes in place
+    /// of the quantity box -- as GoC has it -- or, with `full_late_ms` 0 or
+    /// more, that long after Xác Nhận on the box, that purchase not made.
+    int  room = -1;
+    int  full_late_ms = -1;
+    bool full_up = false, full_due = false;
+    std::chrono::steady_clock::time_point full_at{};
+    bool full_sticks = false;       ///< a click on its Xác Nhận does not close it
+    bool full_lit = false;          ///< its Xác Nhận drawn lit, as with the pointer over it
+    /// Clicks on its Xác Nhận, and where; how often it came up; keys and ESC
+    /// while it was up; and the digit keys there had been when it first did.
+    int  full_clicks = 0, full_shows = 0, keys_with_full = 0, esc_with_full = 0, digits_at_full = -1;
+    std::vector<std::pair<int, int>> full_click_at;
+    /// A message GoBot does not know -- grabbed/dialog_ok -- where questions
+    /// come up: in place of the quantity box (`lone_instead`), for one look and
+    /// then the box (`lone_flash`), or once the question is gone after Xác
+    /// Nhận, the purchase made (`lone_after_confirm`). A click on its button
+    /// closes it; any other click is the message's.
+    bool lone_up = false, lone_instead = false, lone_flash = false, lone_after_confirm = false;
+    bool lone_sticks = false;       ///< a click on its Xác Nhận does not close it
+    int  lone_clicks = 0, lone_looks = 0, esc_with_lone = 0;
+    bool lone_focused = false;
+    bool confirm_ignored = false;   ///< Xác Nhận on the question does nothing
+    /// The check-in board, drawn as its title -- all GoBot looks for -- where
+    /// nothing else is; ESC closes it. Clicks, double-clicks, right-clicks and
+    /// keys that reached the game while it was up.
+    bool board_on = false;
+    int  acts_with_board = 0;
+    static constexpr int kBoardX = 10, kBoardY = 200;
+    /// The board drawn whole, as the live one is: an opaque panel in front of
+    /// everything over the shop -- its row, its Mua | Thoát -- and where the
+    /// quantity box and the messages come up, its title on it; the bag left
+    /// clear. It takes every key and click: ESC closes it, nothing else does
+    /// anything.
+    bool board_whole = false;
+    static constexpr ScreenRect kBoardPanel{ 580, 0, 444, 360 };
+    static constexpr int kWholeTitleX = 620, kWholeTitleY = 5;
     bool esc_closes_shop = true;
     bool keys_dead = false;         ///< digits typed go nowhere
     /// The box takes digits only once clicked into, as the live client's did
@@ -520,17 +568,44 @@ struct Pretend {
     /// does not (with box_needs_click), as on the live client.
     bool double_unfocused = false;
     int  double_clicks = 0, mua_clicks = 0;
-    void open_question(bool focused) {
-        if (full_bag) {
-            full_up = true;
-            return;
-        }
+    void show_full() {
+        full_up = true;
+        ++full_shows;
+        if (digits_at_full < 0) digits_at_full = digit_keys;
+    }
+    /// The quantity box up, its number the game's 1.
+    void open_box(bool focused) {
         qty_up = true;
         typed = "1";
         box_focused = focused;
-        cancel_pressed = false;
+        cancel_pressed = qty_hidden;
         shown = qty_is_sell ? *kit().store.get(bag::kSellQuestion) : kit().buy_question;
         shown_pair = question_pair(shown);
+    }
+    void open_question(bool focused) {
+        if (room == 0 && full_late_ms < 0) {
+            show_full();
+            return;
+        }
+        if (lone_instead || lone_flash) {
+            lone_up = true;
+            lone_looks = lone_flash ? 1 : 0;
+            lone_focused = focused;
+            return;
+        }
+        open_box(focused);
+    }
+    /// The full-bag message's Xác Nhận, where its picture has it: the label at
+    /// 148,58 of its top-left, the button round it.
+    static ScreenRect full_ok_rect() { return ScreenRect{ kFX + 144, kFY + 54, 42, 21 }; }
+    /// The message GoBot does not know: where it is drawn, and its button.
+    static ScreenRect lone_rect() {
+        const Frame& ok = *kit().store.get("grabbed/dialog_ok");
+        return ScreenRect{ kQX, kQY, ok.width, ok.height };
+    }
+    static ScreenRect lone_button() {
+        const ScreenRect in = notice_label();
+        return ScreenRect{ kQX + in.x - 4, kQY + in.y - 4, 42, 21 };
     }
     /// The potion's cell at (x, y): 0 Thịt bò khô, 1 Rượu lá tre, -1 none.
     int cell_at(int x, int y) const {
@@ -542,7 +617,6 @@ struct Pretend {
     int  key_drops = 0;             ///< every this-many digit keys is lost (0: none)
     std::string typed = "1";
     std::vector<int> buys;          ///< what each confirmed purchase was (0 HP, 1 MP)
-    Frame shop_icon_hp, shop_icon_mp;   ///< the potions' icons, for slots a purchase fills
     int  digit_keys = 0, backspaces = 0, esc_presses = 0, thoat_clicks = 0, opener_clicks = 0;
     int kSX = 700, kSY = 20;        ///< where the shop's row is: moved over the bag by a test
     /// How far down the list the potions' row is: 42 a row, the buttons where
@@ -562,14 +636,6 @@ struct Pretend {
     }
     /// A click while the shop is up: true when the shop took it.
     bool shop_click(int x, int y) {
-        if (full_up) {
-            const ScreenRect ok{ kFX + bag::kShopFullOkX - 20, kFY + bag::kShopFullOkY - 8, 40, 16 };
-            if (ok.contains(x, y)) {
-                full_up = false;
-                ++notice_clicks;
-            }
-            return true;
-        }
         if (qty_up) {
             const ScreenRect p = shown_pair;
             const ScreenRect box{ p.x - 88, p.y + 3, 82, 15 };
@@ -583,19 +649,16 @@ struct Pretend {
             }
             if (!p.contains(x, y)) return true;
             if (x < p.x + p.w / 2) {
+                if (confirm_ignored) return true;
                 if (typed == "100" && !qty_is_sell) {
-                    buys.push_back(shop_sel);
-                    const int kind = swap_columns ? 1 - shop_sel : shop_sel;
-                    if (!shop_merges) {
-                        for (int slot = 0; slot < 24; ++slot) {
-                            bool used = false;
-                            for (const Item& it : items) used = used || (!it.gone() && it.tab == kUseTab && it.slot == slot);
-                            if (used) continue;
-                            Item bought{ slot, 3, 100 };
-                            bought.icon = kind == 0 ? shop_icon_hp : shop_icon_mp;
-                            items.push_back(bought);
-                            break;
-                        }
+                    if (room == 0) {
+                        // No room: the game says so a while on, and nothing is bought.
+                        full_due = true;
+                        full_at = time.t + std::chrono::milliseconds(full_late_ms);
+                    } else {
+                        buys.push_back(shop_sel);
+                        if (room > 0) --room;
+                        if (lone_after_confirm) lone_up = true;
                     }
                 } else {
                     ++wrong_confirms;
@@ -739,7 +802,12 @@ struct Pretend {
             const ScreenRect b = shop_buttons_rect();
             blit(f, *k.store.get(bag::kShopButtons), b.x, b.y);
         }
-        if (full_up) blit(f, *k.store.get(bag::kShopFull), kFX, kFY);
+        if (full_up) {
+            blit(f, *k.store.get(bag::kShopFull), kFX, kFY);
+            if (full_lit) light(f, full_ok_rect());
+        }
+        if (lone_up) blit(f, *k.store.get("grabbed/dialog_ok"), kQX, kQY);
+        if (board_on && !board_whole) blit(f, k.board_title, kBoardX, kBoardY);
         if (qty_up) {
             blit(f, shown, kQX, kQY);
             const ScreenRect p = shown_pair;
@@ -782,6 +850,10 @@ struct Pretend {
             print_number(f, box.x + 7, box.y + 6, std::to_string(it.count), k.font_dir);
             blit(f, *k.store.get("grabbed/confirm_button"), bin_pair().x, bin_pair().y);
         }
+        if (board_on && board_whole) {
+            fill(f, kBoardPanel, 46, 34, 24);
+            blit(f, k.board_title, kWholeTitleX, kWholeTitleY);
+        }
         return f;
     }
 
@@ -797,6 +869,10 @@ struct Pretend {
         if (shop_due >= 0 && looks >= shop_due) {
             shop_on = true;
             shop_due = -1;
+        }
+        if (full_due && time.t >= full_at) {
+            full_due = false;
+            show_full();
         }
         if (msg_due && time.t >= msg_at) {
             msg_due = false;
@@ -821,6 +897,11 @@ struct Pretend {
             blit(f, strip_on(0), v.strip.x, v.strip.y);
             ++unread_seen;
         }
+        // A message for one look only, and then the quantity box.
+        if (lone_up && lone_flash && lone_looks > 0 && --lone_looks == 0) {
+            lone_up = false;
+            open_box(lone_focused);
+        }
         return f;
     }
 
@@ -835,6 +916,10 @@ struct Pretend {
             book_at_right_click.push_back(book);
             events += 'R';
             seq += 'R';
+            if (board_on) ++acts_with_board;
+            if (board_on && board_whole) return true;       // the board in front takes it
+            // A message in front takes it.
+            if (full_up || lone_up) return true;
             Item* it = at(x, y);
             if (it != nullptr && it->opener) {
                 ++opener_clicks;
@@ -867,6 +952,26 @@ struct Pretend {
             ++clicks;
             px = x;
             py = y;
+            if (board_on) ++acts_with_board;
+            if (board_on && board_whole) return true;       // the board in front takes it
+            // The shop's messages in front take every click: their Xác Nhận
+            // closes them -- the full-bag one's not with `full_sticks`, nor the
+            // other's with `lone_sticks`.
+            if (full_up) {
+                if (full_ok_rect().contains(x, y)) {
+                    ++full_clicks;
+                    full_click_at.emplace_back(x, y);
+                    if (!full_sticks) full_up = false;
+                }
+                return true;
+            }
+            if (lone_up) {
+                if (lone_button().contains(x, y)) {
+                    ++lone_clicks;
+                    if (!lone_sticks) lone_up = false;
+                }
+                return true;
+            }
             // The scroll bar's arrows, on a tab longer than the view.
             if (total_rows > l.rows && !bag_shut) {
                 const int ax = v.strip.x + l.scroll_down_dx;
@@ -906,6 +1011,7 @@ struct Pretend {
                     v.tab_point(l, t, tx, ty);
                     if (std::abs(x - tx) <= l.tab_w / 2 && std::abs(y - ty) <= 8) {
                         ++tab_clicks;
+                        if (t == kUseTab) ++use_tab_clicks;
                         if (tabs_stuck) return true;
                         if (tab_clicks_lost > 0) {
                             --tab_clicks_lost;
@@ -1001,7 +1107,9 @@ struct Pretend {
         };
         h.double_click = [this, one = h.click](int x, int y) {
             ++double_clicks;
-            const int cell = shop_on && !qty_up && !full_up ? cell_at(x, y) : -1;
+            if (board_on) ++acts_with_board;
+            if ((board_on && board_whole) || full_up || lone_up) return true;      // what is in front takes it
+            const int cell = shop_on && !qty_up ? cell_at(x, y) : -1;
             if (cell < 0) return one(x, y) && one(x, y);
             shop_sel = cell;
             open_question(!double_unfocused);
@@ -1017,14 +1125,44 @@ struct Pretend {
                 ++moves;
                 px = x;
                 py = y;
+                move_at.emplace_back(x, y);
                 return true;
             };
         return h;
     }
+    /// Where each Hands::move put the pointer, in order.
+    std::vector<std::pair<int, int>> move_at;
     /// A key into the pretend game, as its key code or as its scan code alone.
     bool key_in(std::uint32_t vk, bool as_scan) {
         ++keys;
         if (msg_on) ++keys_with_message;
+        if (board_on) ++acts_with_board;
+        // The whole board in front takes every key: ESC closes it, and the
+        // box, a message and the shop under it get none.
+        if (board_on && board_whole) {
+            if (vk == VK_ESCAPE) {
+                ++esc_presses;
+                board_on = false;
+            }
+            return true;
+        }
+        // A message in front takes the key; ESC closes it, and nothing else.
+        if (full_up || lone_up) {
+            if (full_up) ++keys_with_full;
+            if (vk == VK_ESCAPE) {
+                ++esc_presses;
+                if (full_up) ++esc_with_full;
+                if (lone_up) ++esc_with_lone;
+                full_up = lone_up = false;
+            }
+            return true;
+        }
+        // The check-in board in front: an ESC closes it, and not the shop.
+        if (board_on && vk == VK_ESCAPE && !qty_up) {
+            ++esc_presses;
+            board_on = false;
+            return true;
+        }
         if (bag_keyed && !qty_up && vk != VK_ESCAPE) {
             bag_shut = !bag_shut;
             return true;
@@ -1084,6 +1222,7 @@ struct Pass {
     std::function<void(const std::string&)> claim;  ///< called with a charm's id before it is right-clicked
     int deadline_ms = 0;
     ScreenRect own_notice;                          ///< handed to set_own_notice when set
+    int shop_hp = 0, shop_mp = 0;                   ///< the shop's plan (set_shop_plan)
 
     Pass() {
         settings.tabs[0] = settings.tabs[1] = settings.tabs[3] = settings.tabs[4] = false;
@@ -1158,6 +1297,7 @@ struct Pass {
         if (packets) cleaner.set_charm_packets(packets);
         if (deadline_ms > 0) cleaner.set_deadline_ms(deadline_ms);
         if (own_notice.valid()) cleaner.set_own_notice(own_notice);
+        cleaner.set_shop_plan(shop_hp, shop_mp);
         if (!debug_dir.empty()) cleaner.set_debug_dir(debug_dir);
         cleaner.on_report([this](const std::string& line) { said.push_back(line); });
         result = cleaner.run();
@@ -5300,8 +5440,8 @@ void test_charm_singles_sources() {
     std::string others;
     for (const char* head : { "BagCleaner::Result BagCleaner::run_pass(", "bool BagCleaner::trash_one(",
                               "void BagCleaner::use_sweep(", "BagCleaner::UseResult BagCleaner::use_one(",
-                              "BagCleaner::Probe BagCleaner::probe(", "bool BagCleaner::shop_count(",
-                              "void BagCleaner::shop_buy(" }) {
+                              "BagCleaner::Probe BagCleaner::probe(", "bool BagCleaner::shop_open(",
+                              "int BagCleaner::shop_purchase(", "void BagCleaner::shop_buy(" }) {
         const std::string b = body(head);
         if (b.empty() || b.find("read_charm(") != std::string::npos || b.find("bare_corner(") != std::string::npos ||
             b.find("bare_of(") != std::string::npos)
@@ -5452,36 +5592,26 @@ void test_charm_settings() {
 #endif
 }
 
-/// What one shop run comes to, on a pretend bag with `hp_slots` slots of Thịt
-/// bò khô and `mp_slots` of Rượu lá tre in Tiêu Dùng, and -- with `opener` --
-/// the Người Giữ Sân item in Khác.
+/// What one shop run comes to, on a pretend bag -- the bag open on Tiêu Dùng,
+/// and with `opener` the Người Giữ Sân item in Khác -- planned to buy `hp_buy`
+/// of Thịt bò khô and `mp_buy` of Rượu lá tre, with room in the bag for `room`
+/// purchases (-1: no end). Nothing in the bag is counted (2026.11.09).
 struct ShopRun {
     Pass p;
     ItemCatalog catalog;
     BagCleaner::Result r;
     bool ok = false;
-    explicit ShopRun(int hp_slots, int mp_slots, bool opener = true) {
-        const std::string hp = CleanSettings::kBuyHpId, mp = CleanSettings::kBuyMpId;
+    int hp_buy = 0, mp_buy = 0;
+    explicit ShopRun(int hp, int mp, bool opener = true, int room = -1) : hp_buy(hp), mp_buy(mp) {
+        const std::string hp_id = CleanSettings::kBuyHpId, mp_id = CleanSettings::kBuyMpId;
         const std::string door = p.settings.buy_opener;
-        if (!kit().shop_ok || !catalog.load(ItemCatalog::default_dir()) || catalog.find(hp) == nullptr ||
-            catalog.find(mp) == nullptr || catalog.find(door) == nullptr)
+        if (!kit().shop_ok || !catalog.load(ItemCatalog::default_dir()) || catalog.find(hp_id) == nullptr ||
+            catalog.find(mp_id) == nullptr || catalog.find(door) == nullptr)
             return;
         make_bag(p.game);
         p.game.book_opens = false;
         p.game.tabs_work = true;
-        p.game.shop_icon_hp = catalog.find(hp)->tile;
-        p.game.shop_icon_mp = catalog.find(mp)->tile;
-        int slot = 0;
-        for (int i = 0; i < hp_slots; ++i) {
-            Pretend::Item it{ slot++, 3, 100 };
-            it.icon = p.game.shop_icon_hp;
-            p.game.items.push_back(it);
-        }
-        for (int i = 0; i < mp_slots; ++i) {
-            Pretend::Item it{ slot++, 3, 100 };
-            it.icon = p.game.shop_icon_mp;
-            p.game.items.push_back(it);
-        }
+        p.game.room = room;
         if (opener) {
             Pretend::Item o{ 0, 1, 1 };
             o.tab = kOtherTab;
@@ -5489,29 +5619,34 @@ struct ShopRun {
             o.icon = catalog.find(door)->tile;
             p.game.items.push_back(o);
         }
-        p.list.add_catalog(catalog, { hp, mp, door }, TrashList::Action::Delete, p.settings.catalog_score);
+        p.list.add_catalog(catalog, { hp_id, mp_id, door }, TrashList::Action::Delete, p.settings.catalog_score);
         p.list.add_rivals(catalog);
         p.mode = BagCleaner::Mode::ShopBuy;
         p.settings.buy_potions = true;
+        p.shop_hp = hp;
+        p.shop_mp = mp;
         ok = true;
     }
     BagCleaner::Result run(bool dry = false) {
         r = p.run(dry);
         return r;
     }
-    /// Slots of each potion now in Tiêu Dùng.
-    int slots(bool hp) const {
-        int n = 0;
-        for (const Pretend::Item& it : p.game.items)
-            if (!it.gone() && it.tab == kUseTab && it.icon.width > 0 &&
-                it.icon.pixels == (hp ? p.game.shop_icon_hp : p.game.shop_icon_mp).pixels)
-                ++n;
-        return n;
+    /// Purchases of each potion the pretend shop sold.
+    int bought(bool hp) const {
+        return static_cast<int>(std::count(p.game.buys.begin(), p.game.buys.end(), hp ? 0 : 1));
+    }
+    /// The pointer moved, after a double-click and after Xác Nhận, onto the
+    /// shop's bare panel left of Mua: how many times.
+    int moves_off_list() const {
+        const ScreenRect b = p.game.shop_buttons_rect();
+        return static_cast<int>(std::count(p.game.move_at.begin(), p.game.move_at.end(),
+                                           std::make_pair(b.x - 30, b.y + bag::kShopButtonY)));
     }
 };
 
 void test_shop() {
-    section("Mua bình: counted, bought 100 at a time with the number read back, and only on a screen as expected");
+    section("Mua bình: the slots set, bought 100 at a time with the number read back, nothing counted, and the "
+            "game's full-bag message the end of a round");
     if (skip_without_kit()) return;
     if (!kit().shop_ok) {
         skip("the shop's pictures are not installed here\n");
@@ -5526,57 +5661,496 @@ void test_shop() {
     }
     const auto spoken = [](const ShopRun& s, const char* what) { return s.p.says(what); };
 
+    // ---- what is bought, in which order, and nothing counted
     {
-        ShopRun s(4, 4);
+        ShopRun s(5, 0);
         s.run();
-        check(s.r.ran && s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 &&
-                  s.r.shop_bought == 0 && s.p.game.opener_clicks == 0 && s.p.game.right_clicks == 0 &&
-                  s.p.game.digit_keys == 0 && spoken(s, "đủ bình"),
-              "enough of both: counted, the item never right-clicked, nothing typed -- " + s.r.trouble + " / " +
+        check(s.r.ran && s.r.trouble.empty() && s.r.shop_bought == 5 && s.r.shop_bought_hp == 5 &&
+                  s.r.shop_bought_mp == 0 && s.p.game.buys == std::vector<int>(5, 0) && s.p.game.wrong_confirms == 0,
+              "five slots of Thịt bò khô set: five bought, Rượu lá tre not touched -- " + s.r.trouble + " / " +
                   s.p.last());
-    }
-    {
-        ShopRun s(1, 4);
-        s.run();
-        check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.buys == std::vector<int>(5, 0) &&
-                  s.slots(true) == 6 && s.slots(false) == 4 && s.r.shop_hp_before == 1 && s.r.shop_hp_after == 6,
-              "HP under its threshold: five bought up to six slots, MP left alone -- " + s.r.trouble + " / " +
-                  s.p.last());
-        check(s.p.game.digit_keys == 10 && s.p.game.wrong_confirms == 0 && s.p.game.cancels == 0 &&
-                  s.p.game.typed == "100",
+        check(s.p.game.digit_keys == 10 && s.p.game.cancels == 0 && s.p.game.typed == "100",
               "each time 00 typed after the game's 1 in the box, and the box read as 100 before Xác Nhận (" +
                   std::to_string(s.p.game.digit_keys) + " digit keys)");
         check(!s.p.game.shop_on && s.p.game.esc_presses == 1 && s.p.game.thoat_clicks == 0 &&
                   s.p.game.opener_clicks == 1,
-              "one bought as a try, the slots counted beside the open shop, then the rest: the shop opened once "
-              "and shut once at the end, with one ESC, seen to work");
+              "the shop opened once and shut once at the end, with one ESC, seen to work");
+        check(s.p.game.use_tab_clicks == 0 && s.p.game.scroll_clicks == 0 && !spoken(s, "ngăn Tiêu Dùng có"),
+              "nothing counted: Tiêu Dùng never clicked, the bag never scrolled, no count said");
+        check(s.moves_off_list() == 10,
+              "the pointer moved off the list after every double-click and off the question after every Xác Nhận, "
+              "never clicked there (" + std::to_string(s.moves_off_list()) + " moves)");
     }
+    {
+        // Turns, HP first, then the rest of the longer list.
+        ShopRun s(3, 1);
+        s.run();
+        check(s.r.trouble.empty() && s.p.game.buys == std::vector<int>({ 0, 1, 0, 0 }) && s.r.shop_bought_hp == 3 &&
+                  s.r.shop_bought_mp == 1,
+              "3 + 1: Thịt bò khô, Rượu lá tre, then the two Thịt bò khô left -- " + s.r.trouble);
+        ShopRun t(1, 3);
+        t.run();
+        check(t.r.trouble.empty() && t.p.game.buys == std::vector<int>({ 0, 1, 1, 1 }),
+              "1 + 3: HP, MP, then MP twice more -- " + t.r.trouble);
+    }
+    {
+        // A potion set to 0 is never bought; both 0 press nothing at all.
+        ShopRun s(0, 2);
+        s.run();
+        check(s.r.trouble.empty() && s.p.game.buys == std::vector<int>(2, 1) && s.bought(true) == 0,
+              "HP set to 0: only the two Rượu lá tre -- " + s.r.trouble);
+        ShopRun none(0, 0);
+        none.p.game.bag_shut = none.p.game.bag_keyed = true;
+        none.run();
+        check(!none.r.ran && none.r.trouble.empty() && none.p.game.keys == 0 && none.p.game.clicks == 0 &&
+                  none.p.game.right_clicks == 0 && none.p.game.double_clicks == 0 && none.p.game.bag_shut &&
+                  spoken(none, "cả hai số ô đều là 0"),
+              "both 0: nothing pressed, not even the bag key, and said so");
+    }
+    {
+        // The plan cut to kShopMaxBuys, taking turns.
+        const auto order = bag::shop_order(25, 25, BagCleaner::kShopMaxBuys);
+        const auto hold = bag::shop_order(7, 7, BagCleaner::kShopBuysPerHold);
+        check(order.size() == 40 && order.front() == bag::ShopPotion::Hp && order[1] == bag::ShopPotion::Mp &&
+                  std::count(order.begin(), order.end(), bag::ShopPotion::Hp) == 20 && hold.size() == 10 &&
+                  std::count(hold.begin(), hold.end(), bag::ShopPotion::Mp) == 5,
+              "the order: 25 + 25 cut to 40, 20 of each in turns; a timed part's 10, five of each");
+        check(BagCleaner::shop_deadline_ms(1) == 36'000 && BagCleaner::shop_deadline_ms(10) == 90'000 &&
+                  BagCleaner::shop_deadline_ms(40) == 270'000 && BagCleaner::shop_deadline_ms(50) == 300'000 &&
+                  BagCleaner::shop_deadline_ms(0) == 30'000,
+              "the deadline: 30 s and 6 s a purchase, 300 s at most");
+        ShopRun s(25, 25);
+        s.run();
+        check(s.r.trouble.empty() && s.r.shop_bought == 40 && s.bought(true) == 20 && s.bought(false) == 20,
+              "a plan of 25 + 25: forty bought in one round, 20 of each, and no more -- " +
+                  std::to_string(s.r.shop_bought) + " -- " + s.r.trouble);
+        ShopRun late(10, 10);
+        late.p.deadline_ms = 30'000;
+        late.run();
+        check(late.r.shop_bought < 20 && late.r.trouble.find("lâu quá thời gian cho phép") != std::string::npos &&
+                  !late.p.game.shop_on,
+              "past its deadline a run stops, nothing more bought, the shop shut -- " +
+                  std::to_string(late.r.shop_bought) + " bought -- " + late.r.trouble);
+    }
+
+    // ---- the game's full-bag message
+    {
+        // Instead of the box at the first purchase, as GoC has it.
+        ShopRun s(3, 3, true, 0);
+        s.run();
+        const ScreenRect ok = Pretend::full_ok_rect();
+        check(s.r.shop_full && s.r.shop_bought == 0 && s.p.game.buys.empty() && s.p.game.full_clicks == 1 &&
+                  !s.p.game.full_up && s.r.trouble.empty() && !s.r.full_stuck,
+              "full at the first purchase: the round ends there, its message closed with one click -- " + s.r.trouble);
+        check(s.p.game.digits_at_full == 0 && s.p.game.digit_keys == 0 && s.p.game.esc_with_full == 0 &&
+                  s.p.game.keys_with_full == 0 && s.p.game.double_clicks == 1 && !s.p.game.shop_on &&
+                  s.p.game.esc_presses == 1,
+              "no digit and no ESC while it was up, MP never tried, the shop shut after with its one ESC");
+        // Its label where lone_ok finds it, and the click in its middle.
+        Frame f = scene(1024, 768, 60);
+        blit(f, *kit().store.get(bag::kShopFull), Pretend::kFX, Pretend::kFY);
+        ScreenRect label;
+        const bool found = bag::lone_ok(f, kit().store,
+                                        ScreenRect{ Pretend::kFX + bag::kShopFullOkBand.x,
+                                                    Pretend::kFY + bag::kShopFullOkBand.y, bag::kShopFullOkBand.w,
+                                                    bag::kShopFullOkBand.h },
+                                        &label);
+        check(found && label.x == Pretend::kFX + 148 && label.y == Pretend::kFY + 58 &&
+                  s.p.game.full_click_at.size() == 1 && s.p.game.full_click_at[0].first == label.cx() &&
+                  s.p.game.full_click_at[0].second == label.cy() && ok.contains(label.cx(), label.cy()),
+              "its Xác Nhận clicked in the middle of its label, found at 148,58 of the message (" +
+                  std::to_string(label.x - Pretend::kFX) + "," + std::to_string(label.y - Pretend::kFY) + ")");
+    }
+    for (const int k : { 1, 3 }) {
+        ShopRun s(3, 3, true, k);
+        s.run();
+        check(s.r.shop_full && s.r.shop_bought == k && static_cast<int>(s.p.game.buys.size()) == k &&
+                  s.p.game.full_clicks == 1 && s.p.game.digit_keys == 2 * k && s.p.game.esc_with_full == 0 &&
+                  !s.p.game.shop_on && s.r.trouble.empty(),
+              "room for " + std::to_string(k) + ": " + std::to_string(k) +
+                  " bought, the next brings the message instead of its box -- closed, nothing typed after it, no ESC "
+                  "while it was up, the shop shut -- " + s.r.trouble);
+    }
+    for (const int late : { 0, 150, 400, 900 }) {
+        // After Xác Nhận on the box, that late: that purchase is not made, and
+        // not counted -- the looks after the question has gone go on until a
+        // second after the click -- and no double-click goes under it.
+        ShopRun s(3, 3, true, 2);
+        s.p.game.full_late_ms = late;
+        s.run();
+        const int counted = 2;
+        check(s.r.shop_full && s.r.shop_bought == counted && s.p.game.buys.size() == 2 &&
+                  s.p.game.full_clicks == 1 && s.p.game.esc_with_full == 0 && s.p.game.keys_with_full == 0 &&
+                  s.p.game.digits_at_full == 6 && s.p.game.digit_keys == 6 && s.p.game.double_clicks == 3 &&
+                  !s.p.game.shop_on,
+              "the message " + std::to_string(late) + " ms after Xác Nhận on the third: seen, closed, no ESC or key "
+              "while it was up, the shop shut; " + std::to_string(s.r.shop_bought) + " counted (" +
+                  std::to_string(counted) + " wanted) -- " + s.r.trouble);
+    }
+    {
+        // A-1: its label not to be told -- lit, as with the pointer over it:
+        // the picture's own place for Xác Nhận is clicked, and the message
+        // counts as closed only once two looks do not show it.
+        ShopRun s(1, 1, true, 0);
+        s.p.game.full_lit = true;
+        s.run();
+        const ScreenRect ok = Pretend::full_ok_rect();
+        check(s.r.shop_full && s.p.game.full_clicks == 1 && !s.p.game.full_up && s.p.game.full_click_at.size() == 1 &&
+                  s.p.game.full_click_at[0].first == Pretend::kFX + bag::kShopFullOkX &&
+                  s.p.game.full_click_at[0].second == Pretend::kFY + bag::kShopFullOkY &&
+                  ok.contains(s.p.game.full_click_at[0].first, s.p.game.full_click_at[0].second) &&
+                  s.r.trouble.empty(),
+              "its label lit: the fixed point clicked, and closed -- " + s.r.trouble);
+        // A message that will not close: two clicks, no ESC, the shop under it
+        // kept open -- the hold kept for the shop, not for the message.
+        ShopRun t(1, 1, true, 0);
+        t.p.game.full_sticks = true;
+        t.run();
+        check(t.r.shop_full && t.r.full_stuck && t.p.game.full_clicks == 2 && t.p.game.full_up &&
+                  t.p.game.esc_with_full == 0 && t.p.game.keys_with_full == 0 && t.p.game.esc_presses == 0 &&
+                  t.p.game.shop_on && t.r.stuck &&
+                  t.r.trouble.find("thông báo túi đầy không tắt được") != std::string::npos,
+              "a message that ignores clicks: exactly two, never ESC, the shop left open behind it holds the keys -- " +
+                  t.r.trouble);
+        // Gone on one look after the click, back on the next: not closed by
+        // that look -- clicked once more, and closed only once two looks do
+        // not show it.
+        ShopRun u(1, 1, true, 0);
+        int looks_after = 0;
+        u.p.during = [&](BagCleaner&) {
+            if (u.p.game.full_clicks == 1 && !u.p.game.full_up && ++looks_after == 2) u.p.game.full_up = true;
+        };
+        u.run();
+        check(u.r.shop_full && u.p.game.full_clicks == 2 && !u.p.game.full_up && !u.r.full_stuck &&
+                  u.p.game.esc_with_full == 0,
+              "a message gone on one look and back on the next is clicked again, and closed only once two looks "
+              "do not show it (" + std::to_string(u.p.game.full_clicks) + " clicks)");
+        // Slow to go after the first click -- gone only at the end of the
+        // wait for it, or after -- whenever it goes: seen gone on two looks,
+        // closed, never said not closed, and never clicked while gone.
+        // Gone by 2400 ms, before the look of step 4 -- the first wait's last
+        // looks among those (2.5 s) -- one click is all it gets.
+        std::string clicks_by;
+        bool all_closed = true, one_click = true;
+        for (int gone_after = 1900; gone_after <= 2700; gone_after += 100) {
+            ShopRun w(1, 1, true, 0);
+            bool timed = false;
+            std::chrono::steady_clock::time_point first{};
+            w.p.during = [&](BagCleaner&) {
+                Pretend& game = w.p.game;
+                if (game.full_clicks != 1) return;
+                if (!timed) {
+                    timed = true;
+                    first = game.time.t;
+                }
+                game.full_up = game.time.t - first < std::chrono::milliseconds(gone_after);
+            };
+            w.run();
+            all_closed = all_closed && w.r.shop_full && !w.p.game.full_up && !w.r.full_stuck && w.r.trouble.empty() &&
+                         w.p.game.esc_with_full == 0 && !w.p.game.shop_on && w.p.game.full_clicks <= 2;
+            if (gone_after <= 2400) one_click = one_click && w.p.game.full_clicks == 1;
+            clicks_by += (clicks_by.empty() ? "" : ", ") + std::to_string(gone_after) + " ms: " +
+                         std::to_string(w.p.game.full_clicks) + (w.r.trouble.empty() ? "" : " (" + w.r.trouble + ")");
+        }
+        check(all_closed && one_click,
+              "a message slow to go after the first click is closed by it -- seen gone on two looks, late or not, "
+              "never \"không bấm được\" -- or clicked again only on a look that shows it (" + clicks_by + ")");
+    }
+    {
+        // A-8: left up from before, the bag shut: closed before the bag key,
+        // and nothing else pressed -- no key at all.
+        ShopRun s(3, 3);
+        s.p.game.bag_shut = s.p.game.bag_keyed = true;
+        s.p.game.show_full();
+        s.run();
+        check(s.r.shop_full && !s.r.ran && s.p.game.full_clicks == 1 && !s.p.game.full_up && s.p.game.keys == 0 &&
+                  s.p.game.right_clicks == 0 && s.p.game.double_clicks == 0 && s.p.game.bag_shut && !s.r.stuck,
+              "the message up at the start: closed, the bag key never pressed, nothing right-clicked -- " +
+                  s.r.trouble);
+        // And one that will not close there: no ESC, and no hold for it alone.
+        ShopRun t(3, 3);
+        t.p.game.bag_shut = t.p.game.bag_keyed = true;
+        t.p.game.full_sticks = true;
+        t.p.game.show_full();
+        t.run();
+        check(t.r.shop_full && t.r.full_stuck && t.p.game.full_clicks == 2 && t.p.game.keys == 0 && !t.r.stuck,
+              "one that will not close at the start: two clicks, no key, and the keys not held for a message alone -- " +
+                  t.r.trouble);
+    }
+    {
+        // A trial that meets the full bag says so, buys nothing and presses no digit.
+        ShopRun s(1, 1, true, 0);
+        s.run(true);
+        check(s.r.shop_full && s.p.game.buys.empty() && s.p.game.digit_keys == 0 && s.p.game.full_clicks == 1 &&
+                  spoken(s, "thử mua: game báo túi đồ đã đầy") && !s.p.game.shop_on,
+              "a trial that meets the full bag: said, closed, nothing bought or typed -- " + s.r.trouble);
+    }
+    {
+        // What a hold kept for a purchase is let go on (A-3): the full-bag
+        // message, or another, alone is no reason.
+        const Kit& k = kit();
+        Frame shop = scene(1024, 768, 60);
+        blit(shop, *k.store.get(bag::kShopRow), 100, 50);
+        blit(shop, *k.store.get(bag::kShopButtons), 100 + bag::kShopButtonsDx, 50 + bag::kShopButtonsDy);
+        Frame buttons_only = scene(1024, 768, 60);
+        blit(buttons_only, *k.store.get(bag::kShopButtons), 400, 400);
+        const Frame& pair = *k.store.get("grabbed/confirm_button");
+        Frame half = scene(1024, 768, 60);
+        blit(half, bag::cut(pair, ScreenRect{ 0, 0, pair.width / 2 - 1, pair.height }), 500, 300);
+        Frame other_half = scene(1024, 768, 60);
+        blit(other_half, bag::cut(pair, ScreenRect{ pair.width - pair.width / 2 + 1, 0, pair.width / 2 - 1, pair.height }),
+             500, 300);
+        check(bag::shop_left_up(shop, k.store) && bag::shop_left_up(buttons_only, k.store) &&
+                  bag::shop_left_up(half, k.store) && bag::shop_left_up(other_half, k.store) &&
+                  bag::shop_left_up(scene(1024, 768, 0), k.store) && bag::shop_left_up(Frame{}, k.store) &&
+                  !bag::shop_left_up(scene(1024, 768, 60), k.store),
+              "shop_left_up: the shop, its buttons alone, either button of a question alone, no frame and a black "
+              "one are things still up; a clear screen is not");
+        Frame full = scene(1024, 768, 60);
+        blit(full, *k.store.get(bag::kShopFull), 300, 200);
+        Frame lone = scene(1024, 768, 60);
+        blit(lone, *k.store.get("grabbed/dialog_ok"), 300, 200);
+        check(bag::shop_full_up(full, k.store) && !bag::shop_left_up(full, k.store) &&
+                  !bag::shop_left_up(lone, k.store),
+              "and the full-bag message alone, or a message GoBot does not know, is not: it takes no key");
+    }
+
+    // ---- other messages, and purchases not seen through (A-6, D11)
+    {
+        BagCleaner::forget_said_once();
+        ShopRun s(2, 2);
+        s.p.game.lone_instead = true;
+        s.p.debug_dir = temp_path("shop_message_debug");
+        make_folder(s.p.debug_dir);
+        for (const std::string& name : files_in(s.p.debug_dir, "*.png")) remove_file(s.p.debug_dir + "\\" + name);
+        s.run();
+        check(s.r.shop_message && !s.r.shop_full && s.r.shop_bought == 0 && s.p.game.lone_clicks == 1 &&
+                  !s.p.game.lone_up && s.p.game.digit_keys == 0 && s.p.game.double_clicks == 1 && !s.p.game.shop_on &&
+                  !files_in(s.p.debug_dir, "*shop_message.png").empty(),
+              "another message in place of the box: its picture kept, its Xác Nhận clicked, the round over, never "
+              "taken for the full bag -- " + s.r.trouble + " / " + s.p.last());
+        for (const std::string& name : files_in(s.p.debug_dir, "*.png")) remove_file(s.p.debug_dir + "\\" + name);
+        RemoveDirectoryA(s.p.debug_dir.c_str());
+    }
+    {
+        // The question with its buttons hidden from find_dialogs is not a message.
+        ShopRun s(1, 0);
+        s.p.game.qty_hidden = true;
+        s.run();
+        check(!s.r.shop_message && !s.r.shop_full && s.r.shop_bought == 0 && s.p.game.digit_keys == 0 &&
+                  s.p.game.wrong_confirms == 0 && s.r.trouble.find("không thấy hộp nhập số lượng") != std::string::npos,
+              "the quantity question with Hủy Bỏ drawn pressed, which find_dialogs does not see: no message, nothing "
+              "typed or confirmed -- " + s.r.trouble);
+        // A message on one look only, the box on the next: not a message.
+        ShopRun t(2, 0);
+        t.p.game.lone_flash = true;
+        t.run();
+        check(!t.r.shop_message && t.r.trouble.empty() && t.r.shop_bought == 2 && t.p.game.lone_clicks == 0,
+              "a message caught on one look and gone on the next: not a message, both bought -- " + t.r.trouble);
+    }
+    {
+        // Xác Nhận that the box does not take: the question not seen gone,
+        // Hủy Bỏ on it, and the purchase counted as bought, the round over.
+        ShopRun s(3, 3);
+        s.p.game.confirm_ignored = true;
+        s.run();
+        check(s.r.shop_unsure == 1 && s.r.shop_unsure_hp == 1 && s.r.shop_bought == 0 && s.p.game.buys.empty() &&
+                  s.p.game.double_clicks == 1 && s.p.game.cancels >= 1 && !s.p.game.qty_up &&
+                  s.r.trouble.find("không chắc lần mua") != std::string::npos,
+              "a question still up after Xác Nhận: Hủy Bỏ, unsure, counted, no more bought -- " + s.r.trouble);
+        // A message after the question has gone, on both looks: left alone,
+        // unsure, counted -- and no ESC into it: the shop is left open
+        // behind it, the hold kept for the shop.
+        ShopRun t(3, 3);
+        t.p.game.lone_after_confirm = true;
+        t.run();
+        check(t.r.shop_unsure == 1 && t.r.shop_bought == 0 && t.p.game.buys.size() == 1 && t.p.game.lone_clicks == 0 &&
+                  t.p.game.double_clicks == 1 && t.r.trouble.find("thông báo lạ") != std::string::npos,
+              "a message after the question has gone: left for the player, unsure, counted, no more bought -- " +
+                  t.r.trouble);
+        check(t.p.game.esc_with_lone == 0 && t.p.game.esc_presses == 0 && t.p.game.lone_up && t.p.game.shop_on &&
+                  t.r.stuck && t.p.game.thoat_clicks == 0 && t.r.trouble.find("không bấm ESC") != std::string::npos,
+              "and left up indeed: no ESC into it, Thoát not clicked, the shop left open behind it and the keys "
+              "held for the shop -- " + t.r.trouble);
+    }
+    {
+        // A message in place of the box whose Xác Nhận does not close it: two
+        // clicks, and no ESC into it -- the shop left open, the keys held.
+        ShopRun u(2, 2);
+        u.p.game.lone_instead = u.p.game.lone_sticks = true;
+        u.run();
+        check(u.r.shop_message && u.p.game.lone_clicks == 2 && u.p.game.lone_up && u.p.game.esc_with_lone == 0 &&
+                  u.p.game.esc_presses == 0 && u.p.game.digit_keys == 0 && u.p.game.shop_on && u.r.stuck &&
+                  u.r.trouble.find("bạn đóng nó giúp") != std::string::npos,
+              "a message in place of the box that will not close: two clicks, never an ESC into it, nothing typed, "
+              "the shop left open and held -- " + u.r.trouble);
+    }
+
+    // ---- the check-in board (B-3): nothing clicked into it
+    if (!kit().board_ok) {
+        skip("the check-in board's title is not installed here\n");
+    } else {
+        {
+            // Up as the run begins, the bag shut: no key at all.
+            ShopRun s(3, 3);
+            s.p.game.bag_shut = s.p.game.bag_keyed = true;
+            s.p.game.board_on = true;
+            s.run();
+            check(s.r.board_up && !s.r.ran && s.r.trouble.empty() && s.p.game.keys == 0 && s.p.game.clicks == 0 &&
+                      s.p.game.right_clicks == 0 && s.p.game.acts_with_board == 0 && s.p.game.bag_shut,
+                  "the board up at the start of a shop run: nothing pressed, the bag key included");
+        }
+        {
+            // Come up before the right-click on the item.
+            ShopRun s(3, 3);
+            bool once = false;
+            s.p.during = [&](BagCleaner&) {
+                if (!once && s.p.game.tab_clicks > 0 && s.p.game.cur_tab == kOtherTab) once = s.p.game.board_on = true;
+            };
+            s.run();
+            check(s.r.board_up && s.p.game.opener_clicks == 0 && s.p.game.right_clicks == 0 && s.p.game.buys.empty() &&
+                      s.p.game.acts_with_board == 0 && s.r.trouble.empty(),
+                  "the board come up before the right-click on the item: not right-clicked, nothing pressed after -- " +
+                      s.r.trouble);
+        }
+        {
+            // Before the double-click.
+            ShopRun s(3, 3);
+            bool once = false;
+            s.p.during = [&](BagCleaner&) {
+                if (!once && s.p.game.shop_on) once = s.p.game.board_on = true;
+            };
+            s.run();
+            check(s.r.board_up && s.p.game.opener_clicks == 1 && s.p.game.double_clicks == 0 && s.p.game.buys.empty() &&
+                      !s.p.game.shop_on,
+                  "the board come up as the shop opens: no double-click, the shop shut after -- " + s.r.trouble);
+        }
+        {
+            // Before Xác Nhận: never clicked; Hủy Bỏ only on the question seen.
+            ShopRun s(3, 3);
+            bool once = false;
+            s.p.during = [&](BagCleaner&) {
+                if (!once && s.p.game.qty_up && s.p.game.typed == "100") once = s.p.game.board_on = true;
+            };
+            s.run();
+            check(s.r.board_up && s.p.game.buys.empty() && s.p.game.wrong_confirms == 0 && s.p.game.cancels == 1 &&
+                      !s.p.game.qty_up && s.r.shop_bought == 0 && s.r.shop_unsure == 0,
+                  "the board come up as 100 is read back: no Xác Nhận, Hủy Bỏ on the question still seen -- " +
+                      s.r.trouble);
+        }
+        {
+            // After a purchase: no more double-clicks, and the shop shut as
+            // ever -- its ESC to the board in front, then Thoát.
+            ShopRun s(3, 3);
+            bool once = false;
+            s.p.during = [&](BagCleaner&) {
+                if (!once && s.p.game.buys.size() == 1 && !s.p.game.qty_up) once = s.p.game.board_on = true;
+            };
+            s.run();
+            check(s.r.board_up && s.r.shop_bought == 1 && s.p.game.double_clicks == 1 && s.p.game.esc_presses == 1 &&
+                      s.p.game.thoat_clicks == 1 && !s.p.game.shop_on && !s.p.game.board_on,
+                  "the board come up after a purchase: nothing more bought, the shop's ESC taken by the board and "
+                  "Thoát clicked -- " + s.r.trouble);
+        }
+        // ---- the board drawn whole, as the live one: the shop and the box under it
+        {
+            // After a purchase, the shop hidden whole: not taken for shut --
+            // its one ESC to the board, Thoát on the look after it, and no
+            // hold left.
+            ShopRun s(3, 3);
+            bool once = false;
+            s.p.during = [&](BagCleaner&) {
+                if (!once && s.p.game.buys.size() == 1 && !s.p.game.qty_up)
+                    once = s.p.game.board_on = s.p.game.board_whole = true;
+            };
+            s.run();
+            check(s.r.board_up && s.r.shop_bought == 1 && s.p.game.double_clicks == 1 && s.p.game.esc_presses == 1 &&
+                      s.p.game.thoat_clicks == 1 && !s.p.game.shop_on && !s.p.game.board_on && !s.r.stuck &&
+                      s.p.game.acts_with_board == 1,
+                  "the whole board over the shop after a purchase: the shop not taken for shut -- one ESC, to the "
+                  "board, then Thoát -- and nothing else pressed into the board -- " + s.r.trouble);
+        }
+        for (const int k : { 1, 4 }) {
+            // Come up once 100 is typed -- as the box is read back (the first
+            // look), or on the look before Xác Nhận (the fourth) -- over the
+            // box: hidden, not gone. No Xác Nhận, no Hủy Bỏ, no key or ESC
+            // into it, and the keys held for what was typed.
+            ShopRun s(3, 3);
+            int looks = 0;
+            s.p.during = [&](BagCleaner&) {
+                if (!s.p.game.board_on && s.p.game.qty_up && s.p.game.typed == "100" && ++looks == k)
+                    s.p.game.board_on = s.p.game.board_whole = true;
+            };
+            s.run();
+            check(s.r.board_up && s.r.stuck && s.p.game.qty_up && s.p.game.typed == "100" && s.p.game.buys.empty() &&
+                      s.p.game.wrong_confirms == 0 && s.p.game.cancels == 0 && s.p.game.esc_presses == 0 &&
+                      s.p.game.acts_with_board == 0 && s.p.game.board_on && s.p.game.shop_on &&
+                      s.r.shop_bought == 0 && s.r.shop_unsure == 0 &&
+                      s.r.trouble.find("đè lên hộp nhập số lượng") != std::string::npos,
+                  "the whole board over the quantity box at look " + std::to_string(k) +
+                      " after 100: nothing confirmed, cancelled or pressed, the box not taken for gone, the hold "
+                      "kept -- " + s.r.trouble);
+        }
+        {
+            // Come up after the first 0: no more digits, no click, held.
+            ShopRun s(3, 3);
+            s.p.during = [&](BagCleaner&) {
+                if (!s.p.game.board_on && s.p.game.qty_up && s.p.game.typed == "10")
+                    s.p.game.board_on = s.p.game.board_whole = true;
+            };
+            s.run();
+            check(s.r.board_up && s.r.stuck && s.p.game.digit_keys == 1 && s.p.game.typed == "10" &&
+                      s.p.game.qty_up && s.p.game.cancels == 0 && s.p.game.wrong_confirms == 0 &&
+                      s.p.game.esc_presses == 0 && s.p.game.acts_with_board == 0 && s.p.game.buys.empty() &&
+                      s.r.trouble.find("đè lên hộp nhập số lượng") != std::string::npos,
+                  "the whole board over the box after the first 0: no more digits, no Hủy Bỏ blind, the hold kept -- " +
+                      s.r.trouble);
+        }
+        {
+            // What the GUI's look for a clear game meets then: nothing the bin's
+            // or the shop's looks can see -- only the board's title, which is
+            // what keeps the shop's hold (look_for_clear).
+            Pretend g;
+            make_bag(g);
+            g.shop_on = g.qty_up = true;
+            g.open_box(true);
+            g.board_on = g.board_whole = true;
+            const Frame f = g.render();
+            check(bag::nothing_held(f, kit().store, g.l) && !bag::shop_left_up(f, kit().store) &&
+                      checkin_board_title(f, kit().store),
+                  "a quantity box and a shop under the whole board: nothing_held and shop_left_up see nothing, the "
+                  "board's title is seen");
+        }
+    }
+
+    // ---- one purchase's guards, as ever
     {
         // Black frames now and then, as the live client gave right after the
         // quantity box came up: looked at again, never taken for the box gone.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.black_every = 6;
         s.run();
         check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.buys == std::vector<int>(5, 0) &&
-                  s.slots(true) == 6 && s.p.game.wrong_confirms == 0 && s.p.game.cancels == 0 &&
-                  s.p.game.black_looks > 10,
+                  s.p.game.wrong_confirms == 0 && s.p.game.cancels == 0 && s.p.game.black_looks > 10,
               "a black frame every sixth look: looked at again, and five Thịt bò khô bought as with none (" +
                   std::to_string(s.p.game.black_looks) + " black) -- " + s.r.trouble + " / " + s.p.last());
     }
     {
         // Black from the first look on: nothing pressed, nothing clicked, and
         // said.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.black_from = 1;
         s.run();
         check(!s.r.trouble.empty() && s.r.shop_bought == 0 && s.p.game.right_clicks == 0 &&
                   s.p.game.clicks == 0 && s.p.game.drags == 0 && s.p.game.digit_keys == 0 && s.p.game.keys == 0,
               "a game black throughout: no key, no click, no purchase -- " + s.r.trouble);
+        check(s.p.game.black_looks <= 30,
+              "a game black for good: " + std::to_string(s.p.game.black_looks) + " black looks in all, the wait once");
     }
     {
         // Black from the ESC that closes the shop on, for good: Thoát is not
         // clicked where the shop was, and the run keeps the hold.
-        ShopRun s(2, 4);
+        ShopRun s(2, 0);
         s.p.game.esc_closes_shop = false;
         s.p.during = [&s](BagCleaner&) {
             if (s.p.game.esc_presses > 0 && s.p.game.black_from < 0) s.p.game.black_from = s.p.game.looks + 1;
@@ -5586,18 +6160,9 @@ void test_shop() {
               "black from the ESC on: Thoát never clicked blind, the hold kept -- " + s.r.trouble);
     }
     {
-        // A black stretch waited out once: a game that stays black does not
-        // make every later look wait as long again.
-        ShopRun s(1, 4);
-        s.p.game.black_from = 1;
-        s.run();
-        check(s.p.game.black_looks <= 30,
-              "a game black for good: " + std::to_string(s.p.game.black_looks) + " black looks in all, the wait once");
-    }
-    {
         // Black once the quantity box has been seen, and for good: Hủy Bỏ is
         // not pressed blind, nothing is typed, and the run keeps the hold.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.during = [&s](BagCleaner&) {
             if (s.p.game.qty_up && s.p.game.black_from < 0) s.p.game.black_from = s.p.game.looks + 2;
         };
@@ -5612,26 +6177,16 @@ void test_shop() {
         // The potions' row second in the list, as on the live client with two
         // other items above it: the shop is still found, and each potion
         // clicked where its row is.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.row_drop = 42;
         s.run();
         check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.buys == std::vector<int>(5, 0) &&
-                  s.slots(true) == 6 && s.p.game.wrong_confirms == 0,
+                  s.p.game.wrong_confirms == 0,
               "the potions' row second in the shop's list: found, and five Thịt bò khô bought -- " + s.r.trouble +
                   " / " + s.p.last());
     }
     {
-        ShopRun s(0, 2);
-        s.run();
-        // One of each as a try, the slots counted, then the rest of each.
-        std::vector<int> want{ 0, 1 };
-        want.insert(want.end(), 5, 0);
-        want.insert(want.end(), 3, 1);
-        check(s.r.trouble.empty() && s.p.game.buys == want && s.slots(true) == 6 && s.slots(false) == 6,
-              "both under: Thịt bò khô first, then Rượu lá tre, each to its limit -- " + s.r.trouble);
-    }
-    {
-        ShopRun s(2, 6);
+        ShopRun s(4, 0);
         s.p.game.key_drops = 2;
         s.run();
         check(s.r.trouble.empty() && s.p.game.buys.size() == 4 && s.p.game.wrong_confirms == 0 &&
@@ -5640,7 +6195,7 @@ void test_shop() {
                   std::to_string(s.p.game.digit_keys) + " digit keys) -- " + s.r.trouble);
     }
     {
-        ShopRun s(2, 6);
+        ShopRun s(4, 0);
         s.p.game.keys_dead = true;
         s.run();
         check(s.r.shop_bought == 0 && s.p.game.wrong_confirms == 0 && s.p.game.cancels >= 1 &&
@@ -5652,7 +6207,7 @@ void test_shop() {
         // As on the live client: the box Mua brings up takes no keys, the one a
         // double-click on the potion brings up does. Mua is never clicked; the
         // potion double-clicked, 00 typed straight in, five bought.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.box_needs_click = true;
         s.run();
         check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.buys == std::vector<int>(5, 0) &&
@@ -5664,7 +6219,7 @@ void test_shop() {
     {
         // A box that takes digits only once clicked into, even after the
         // double-click: the second way of typing clicks into it.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.box_needs_click = true;
         s.p.game.double_unfocused = true;
         s.run();
@@ -5676,7 +6231,7 @@ void test_shop() {
     {
         // Digits taken only as scan codes alone: the key codes put nothing in
         // the box, and it is typed again as GoC types.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.scan_only = true;
         s.run();
         check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.scan_keys > 0 && s.p.game.wrong_confirms == 0 &&
@@ -5689,7 +6244,7 @@ void test_shop() {
         // which find_dialogs does not see as a dialog: still known by where it
         // is, Hủy Bỏ clicked, nothing confirmed, and the run does not end on a
         // box left up.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.box_needs_click = true;
         s.p.game.double_unfocused = true;
         s.p.game.click_dead = true;
@@ -5711,7 +6266,7 @@ void test_shop() {
     {
         // The same, and Hủy Bỏ does not close the box either: the run ends
         // keeping the hold, the box known to be up by its Xác Nhận.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.box_needs_click = true;
         s.p.game.double_unfocused = true;
         s.p.game.click_dead = true;
@@ -5724,7 +6279,7 @@ void test_shop() {
     {
         // A trial whose Hủy Bỏ does not close the box: not said to have
         // worked, the other potion not tried, the hold kept.
-        ShopRun s(4, 4);
+        ShopRun s(1, 1);
         s.p.game.qty_sticky = true;
         s.run(true);
         check(s.r.trouble.find("thử mua: đã bấm Hủy Bỏ mà không thấy") != std::string::npos && s.r.stuck &&
@@ -5738,7 +6293,7 @@ void test_shop() {
         std::vector<long long> took;
         bool same = true;
         for (const int ms : { 60, 80, 150 }) {
-            ShopRun s(1, 4);
+            ShopRun s(5, 0);
             s.p.settings.press_ms = ms;
             const auto from = s.p.game.time.t;
             s.run();
@@ -5751,31 +6306,18 @@ void test_shop() {
                   std::to_string(took[1]) + " and " + std::to_string(took[2]) + " ms of pretend time");
     }
     {
-        // The shop kept open between rounds lying over the bag's tab strip, as
-        // a small game window can have it: shut, the bag looked at again, the
-        // rest bought on a shop opened again.
-        ShopRun s(1, 4);
-        s.p.game.kSX = 290;
-        s.p.game.kSY = 296;
-        s.run();
-        check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.wrong_confirms == 0 &&
-                  s.p.game.esc_presses == 2 && s.p.game.opener_clicks == 2 && !s.p.game.shop_on,
-              "the shop over the bag's strip after the trial: shut, the bag counted, five bought in all (" +
-                  std::to_string(s.p.game.esc_presses) + " ESC) -- " + s.r.trouble + " / " + s.p.last());
-    }
-    {
         // The shop open already -- opened late after the last run gave up on
         // it: taken as it is, the item not right-clicked again, five bought.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.shop_on = true;
         s.run();
         check(s.r.trouble.empty() && s.r.shop_bought == 5 && s.p.game.wrong_confirms == 0 &&
-                  s.p.says("cửa hàng đã mở sẵn"),
+                  s.p.game.opener_clicks == 0 && s.p.says("cửa hàng đã mở sẵn"),
               "the shop open already: taken as it is, five bought (" + std::to_string(s.p.game.opener_clicks) +
                   " right-clicks on the item) -- " + s.r.trouble + " / " + s.p.last());
     }
     {
-        ShopRun s(2, 6);
+        ShopRun s(2, 2);
         s.p.game.qty_is_sell = true;
         s.run();
         check(s.r.shop_bought == 0 && s.p.game.digit_keys == 0 && s.p.game.wrong_confirms == 0 &&
@@ -5783,34 +6325,28 @@ void test_shop() {
               "the sell question where the buy question should be: nothing typed, Hủy Bỏ -- " + s.r.trouble);
     }
     {
-        ShopRun s(2, 6);
-        s.p.game.full_bag = true;
-        s.run();
-        check(s.r.shop_full && s.r.shop_bought == 0 && s.p.game.notice_clicks == 1 && s.p.game.digit_keys == 0 &&
-                  !s.p.game.shop_on && s.r.trouble.empty(),
-              "the bag full: its message dismissed with its one Xác Nhận, nothing typed, the shop shut -- " + s.r.trouble);
-    }
-    {
-        ShopRun s(1, 4, false);
+        ShopRun s(5, 0, false);
         s.run();
         check(s.p.game.right_clicks == 0 && s.p.game.opener_clicks == 0 &&
                   s.r.trouble.find("không thấy món Người Giữ Sân") != std::string::npos,
               "no Người Giữ Sân item in Khác: nothing right-clicked -- " + s.r.trouble);
     }
     {
-        // No scroll bar to read: said, with the bag's picture kept, and nothing clicked on Khác.
-        ShopRun s(1, 4);
+        // No scroll bar to read: said as that, with the bag's picture kept,
+        // and nothing right-clicked on Khác.
+        ShopRun s(5, 0);
         s.p.game.thumb = false;
         s.p.debug_dir = temp_path("shop_debug");
         s.run();
-        check(s.p.game.opener_clicks == 0 && s.r.trouble.find("thanh cuộn") != std::string::npos &&
+        check(s.p.game.opener_clicks == 0 && s.p.game.right_clicks == 0 &&
+                  s.r.trouble.find("thanh cuộn") != std::string::npos &&
                   !files_in(s.p.debug_dir, "*shop_scroll_unknown*.png").empty(),
               "a scroll bar that cannot be read: said, the picture kept, nothing right-clicked -- " + s.r.trouble);
     }
     {
         // The shop comes only after GoBot has stopped waiting for it: waited for
         // once more and shut, with its one ESC, nothing bought.
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.open_after_looks = 40;
         s.run();
         check(s.p.game.opener_clicks == 1 && s.p.game.digit_keys == 0 && s.p.game.esc_presses == 1 &&
@@ -5818,24 +6354,7 @@ void test_shop() {
               "a shop that comes late: waited for once more and shut -- " + s.r.trouble);
     }
     {
-        // What a hold kept for a purchase is let go on.
-        const Kit& k = kit();
-        Frame shop = scene(1024, 768, 60);
-        blit(shop, *k.store.get(bag::kShopRow), 100, 50);
-        blit(shop, *k.store.get(bag::kShopButtons), 100 + bag::kShopButtonsDx, 50 + bag::kShopButtonsDy);
-        Frame buttons_only = scene(1024, 768, 60);
-        blit(buttons_only, *k.store.get(bag::kShopButtons), 400, 400);
-        const Frame& pair = *k.store.get("grabbed/confirm_button");
-        Frame half = scene(1024, 768, 60);
-        blit(half, bag::cut(pair, ScreenRect{ 0, 0, pair.width / 2 - 1, pair.height }), 500, 300);
-        check(bag::shop_left_up(shop, k.store) && bag::shop_left_up(buttons_only, k.store) &&
-                  bag::shop_left_up(half, k.store) && bag::shop_left_up(scene(1024, 768, 0), k.store) &&
-                  bag::shop_left_up(Frame{}, k.store) && !bag::shop_left_up(scene(1024, 768, 60), k.store),
-              "shop_left_up: the shop, its buttons alone, a lone Xác Nhận, no frame and a black one are things "
-              "still up; a clear screen is not");
-    }
-    {
-        ShopRun s(1, 4);
+        ShopRun s(5, 0);
         s.p.game.opener_opens = false;
         s.run();
         check(s.p.game.opener_clicks == 1 && s.p.game.digit_keys == 0 && s.p.game.esc_presses == 0 &&
@@ -5843,25 +6362,21 @@ void test_shop() {
               "the item right-clicked and no shop come: nothing more pressed, ESC included -- " + s.r.trouble);
     }
     {
-        ShopRun s(4, 4);
+        ShopRun s(1, 1);
         s.run(true);
         check(s.r.trouble.empty() && s.p.game.opener_clicks == 1 && s.p.game.digit_keys == 0 &&
                   s.p.game.cancels == 2 && s.p.game.buys.empty() && s.r.shop_bought == 0 && !s.p.game.shop_on &&
-                  spoken(s, "thử mua: dừng ở hộp nhập số lượng"),
+                  spoken(s, "thử mua: dừng ở hộp nhập số lượng") && s.p.game.use_tab_clicks == 0,
               "a trial: both items tried as far as the box, Hủy Bỏ each time, nothing typed or bought, the shop shut -- " +
                   s.r.trouble);
+        // A trial whatever the plan: one of each, both 0 included.
+        ShopRun t(0, 0);
+        t.run(true);
+        check(t.r.trouble.empty() && t.p.game.double_clicks == 2 && t.p.game.cancels == 2 && t.p.game.digit_keys == 0,
+              "a trial with both set to 0 still tries one of each as far as the box -- " + t.r.trouble);
     }
     {
-        ShopRun s(1, 4);
-        s.p.game.shop_merges = true;
-        s.run();
-        check(s.p.game.buys.size() == 1 && s.p.game.opener_clicks == 1 && s.r.shop_no_gain &&
-                  s.r.trouble.find("không tăng") != std::string::npos,
-              "bought one as a try and no new slot: not bought again -- " + s.r.trouble + " (" +
-                  std::to_string(s.p.game.buys.size()) + " buys)");
-    }
-    {
-        ShopRun s(2, 4);
+        ShopRun s(2, 2);
         s.p.game.esc_closes_shop = false;
         s.run();
         check(s.p.game.buys.size() == 4 && s.p.game.esc_presses >= 1 && s.p.game.thoat_clicks >= 1 &&
@@ -5885,17 +6400,8 @@ void test_shop() {
               "with the switch off nothing is bought or right-clicked -- " + s.r.trouble);
     }
     {
-        // The cell clicked for HP sells MP: one bought as a try, the slots counted,
-        // and the potion that grew is not the one asked for -- not bought again.
-        ShopRun s(1, 4);
-        s.p.game.swap_columns = true;
-        s.run();
-        check(s.p.game.buys.size() == 1 && s.r.shop_no_gain && !s.p.game.shop_on && s.slots(true) == 1,
-              "a column swapped: one purchase as a try, seen not to be the potion asked for, and no more -- " + s.r.trouble);
-    }
-    {
         // The question replaced by another between two keys: no more digits, Hủy Bỏ, never Xác Nhận.
-        ShopRun s(2, 6);
+        ShopRun s(2, 2);
         bool swapped = false;
         s.p.during = [&](BagCleaner&) {
             if (s.p.game.qty_up && s.p.game.typed.size() == 2 && !swapped) {
@@ -5909,17 +6415,75 @@ void test_shop() {
                   s.r.shop_bought == 0 && !s.p.game.shop_on,
               "the question turns into another after the first key: nothing more typed, Hủy Bỏ -- " + s.r.trouble);
     }
+}
+
+/// The plan's bookkeeping between rounds (bag::shop_owed_after), and the
+/// clock saved when a plan begins (bag::shop_first_wait_s): pure, no game.
+void test_shop_plan() {
+    section("Mua bình: what is still owed of a plan after each round, and the first look after a start");
+    using bag::ShopEnd;
+    const bag::ShopOwed plan = bag::shop_new_plan(3, 3);
+    check(plan.hp == 3 && plan.mp == 3 && plan.troubles == 0 && !plan.dropped, "a new plan owes the slots set");
+    bag::ShopOwed o = bag::shop_owed_after(plan, 2, 1, 0, 0, ShopEnd::Clean);
+    check(o.hp == 1 && o.mp == 2 && o.troubles == 0, "bought 2 + 1, clean: 1 + 2 still owed");
+    o = bag::shop_owed_after(plan, 1, 0, 1, 0, ShopEnd::Trouble);
+    check(o.hp == 1 && o.mp == 3 && o.troubles == 1 && !o.dropped,
+          "one bought and one unsure, then trouble: both counted, 1 + 3 owed, one trouble");
+    const bag::ShopOwed two = bag::shop_owed_after(o, 0, 0, 0, 0, ShopEnd::Trouble);
+    check(two.hp == 0 && two.mp == 0 && two.dropped && two.troubles == 0,
+          "a second trouble in a row: what is owed dropped until the next plan, and said");
+    const bag::ShopOwed reset = bag::shop_owed_after(bag::shop_owed_after(o, 0, 0, 0, 0, ShopEnd::Clean), 0, 0, 0, 0,
+                                                     ShopEnd::Trouble);
+    check(reset.hp == 1 && reset.mp == 3 && reset.troubles == 1 && !reset.dropped,
+          "a clean round between two troubles: they are not in a row");
+    check(bag::shop_owed_after(plan, 1, 1, 0, 0, ShopEnd::Full).hp == 0 &&
+              bag::shop_owed_after(plan, 1, 1, 0, 0, ShopEnd::Full).mp == 0 &&
+              bag::shop_owed_after(plan, 0, 0, 0, 0, ShopEnd::Message).hp == 0 &&
+              !bag::shop_owed_after(plan, 0, 0, 0, 0, ShopEnd::Full).dropped,
+          "the bag full, or another message: nothing more of this plan, MP included");
+    const bag::ShopOwed paused = bag::shop_owed_after(o, 0, 0, 0, 0, ShopEnd::Paused);
+    check(paused.hp == o.hp && paused.mp == o.mp && paused.troubles == o.troubles,
+          "the board up, HP low, somebody at the mouse, a stop: owed and troubles as they were");
+    check(bag::shop_owed_after(plan, 9, 9, 0, 0, ShopEnd::Clean).hp == 0 && bag::shop_new_plan(-2, 4).hp == 0,
+          "never under 0");
+    const bag::ShopOwed fresh = bag::shop_new_plan(5, 0);
+    check(fresh.hp == 5 && fresh.mp == 0 && fresh.troubles == 0, "the next plan replaces whatever was owed: 5 + 0");
+
+    // The first look after a start, from the clock saved when the last plan
+    // began: what is left of it, 45 s at least, one interval at most.
+    const std::int64_t now = 1'800'000'000;
+    check(bag::shop_first_wait_s(0, now, 60) == 45, "no clock saved: 45 s");
+    check(bag::shop_first_wait_s(now - 600, now, 60) == 45, "a clock in the past: 45 s, never straight away");
+    check(bag::shop_first_wait_s(now + 1200, now, 60) == 1200, "20 minutes left of the hour: 20 minutes");
+    check(bag::shop_first_wait_s(now + 10 * 3600, now, 60) == 3600,
+          "a clock saved ten hours ahead -- a PC clock put back: one interval at most");
+    check(bag::shop_first_wait_s(now + 50 * 60, now, 15) == 15 * 60,
+          "the interval lowered to 15 minutes since: 15 minutes at most");
+    check(bag::shop_first_wait_s(now + 30, now, 60) == 45, "30 s left: 45 s");
+
+    // The file the plan time is kept in: shop_clock.txt beside the charms'
+    // charm_clock.txt -- only compared here, never opened -- and the shop's
+    // one id written and read back as the worker does it, in a file of the
+    // test's own.
+    const std::string charms = CharmClock::default_path(), shop = shop_clock_path();
+    const std::size_t cut = charms.find_last_of("\\/");
+    check(cut != std::string::npos && shop == charms.substr(0, cut + 1) + "shop_clock.txt" &&
+              std::string(kShopClockId) == "shop",
+          "the plan time kept in shop_clock.txt beside charm_clock.txt, by the id \"shop\": " + shop);
+    const std::string path = temp_path("gobot_shop_clock.txt");
+    DeleteFileA(path.c_str());
     {
-        // A limit under the threshold's own: a potion with its threshold 0 is left alone.
-        ShopRun s(0, 0);
-        s.p.settings.buy_hp_below = 0;
-        s.p.settings.buy_hp_to = 0;
-        s.p.settings.buy_mp_below = 2;
-        s.p.settings.buy_mp_to = 3;
-        s.run();
-        check(s.p.game.buys == std::vector<int>(3, 1) && s.slots(true) == 0 && s.slots(false) == 3,
-              "a potion whose threshold is 0 is never bought: only MP, up to three -- " + s.r.trouble);
+        CharmClock c(path);
+        check(!c.load() && bag::shop_first_wait_s(c.next(kShopClockId), now, 60) == 45,
+              "no shop_clock.txt yet: the first look 45 s after the start");
+        check(c.set_next(kShopClockId, now + 3600), "a plan begun at `now`: the next at now + 60 min, written");
     }
+    {
+        CharmClock again(path);
+        check(again.load() && bag::shop_first_wait_s(again.next(kShopClockId), now + 600, 60) == 3000,
+              "a GoBot started again 10 minutes on waits the 50 left of the hour, not 45 s");
+    }
+    DeleteFileA(path.c_str());
 }
 
 /// What the bag reader makes of saved frames of a live game -- a folder named
@@ -6131,22 +6695,45 @@ void test_shop_pieces() {
         const std::string path = temp_path("gobot_shop_trash.ini");
         CleanSettings s;
         write_all(path, "[Trash]\nenabled=false\n");
-        check(s.load(path) && !s.buy_potions && s.buy_every_minutes == 60 && s.buy_hp_below == 3 && s.buy_hp_to == 6 &&
-                  s.buy_mp_below == 3 && s.buy_mp_to == 6 && s.buy_opener == "other/8950604",
-              "a file without them: off, an hour, 3 to 6 slots of each, the portrait of the item");
-        write_all(path, "[Trash]\nbuy_potions=true\nbuy_every_minutes=30\nbuy_hp_below=2\nbuy_hp_to=9\n"
-                        "buy_mp_below=0\nbuy_mp_to=4\nbuy_opener=other/1\nbuy_frame_score=0.8\n");
-        check(s.load(path) && s.buy_potions && s.buy_every_minutes == 30 && s.buy_hp_below == 2 && s.buy_hp_to == 9 &&
-                  s.buy_mp_below == 0 && s.buy_mp_to == 4 && s.buy_opener == "other/1" &&
-                  s.buy_frame_score > 0.79f && s.buy_frame_score < 0.81f,
-              "read back");
+        check(s.load(path) && !s.buy_potions && s.buy_every_minutes == 60 && s.buy_hp_slots == 3 &&
+                  s.buy_mp_slots == 3 && s.buy_opener == "other/8950604",
+              "a file without them: off, an hour, 3 slots of each, the portrait of the item");
+        write_all(path, "[Trash]\nbuy_potions=true\nbuy_every_minutes=30\nbuy_hp_slots=2\nbuy_mp_slots=0\n"
+                        "buy_opener=other/1\nbuy_frame_score=0.8\n");
+        check(s.load(path) && s.buy_potions && s.buy_every_minutes == 30 && s.buy_hp_slots == 2 &&
+                  s.buy_mp_slots == 0 && s.buy_opener == "other/1" && s.buy_frame_score > 0.79f &&
+                  s.buy_frame_score < 0.81f,
+              "read back: 2 slots of HP, MP left alone");
         write_all(path, "[Trash]\nenabled=false\n");
-        check(s.load(path) && !s.buy_potions, "and off again when the line is taken out: never left as an earlier reading had it");
-        write_all(path, "[Trash]\nbuy_every_minutes=1\nbuy_hp_below=50\nbuy_hp_to=4\nbuy_mp_to=999\nbuy_frame_score=0.1\n");
-        check(s.load(path) && s.buy_every_minutes == CleanSettings::kBuyEveryLeast && s.buy_hp_to == 4 &&
-                  s.buy_hp_below == 4 && s.buy_mp_to == CleanSettings::kBuySlotsMost &&
-                  s.buy_frame_score == CleanSettings::kBuyFrameLeast,
-              "numbers out of range brought in, a threshold never over its limit");
+        check(s.load(path) && !s.buy_potions && s.buy_hp_slots == 3 && s.buy_mp_slots == 3,
+              "and off, 3 and 3, again when the lines are taken out: never left as an earlier reading had them");
+        write_all(path, "[Trash]\nbuy_every_minutes=1\nbuy_hp_slots=50\nbuy_mp_slots=-4\nbuy_frame_score=0.1\n");
+        check(s.load(path) && s.buy_every_minutes == CleanSettings::kBuyEveryLeast &&
+                  s.buy_hp_slots == CleanSettings::kBuySlotsPerRunMost && s.buy_hp_slots == 20 &&
+                  s.buy_mp_slots == 0 && s.buy_frame_score == CleanSettings::kBuyFrameLeast,
+              "numbers out of range brought in: slots 0 to 20");
+        // A file from before 2026.11.09 -- the owner's: buy_*_to, the slots it
+        // bought up to, stand for the new keys until the card saves them; the
+        // new key, once there, wins; buy_*_below is passed over, but for 0,
+        // which left that potion alone.
+        write_all(path, "[Trash]\nbuy_hp_below=7\nbuy_hp_to=10\nbuy_mp_below=7\nbuy_mp_to=10\n");
+        check(s.load(path) && s.buy_hp_slots == 10 && s.buy_mp_slots == 10,
+              "a file with buy_hp_to=10 and buy_mp_to=10 and no new keys reads 10 and 10");
+        write_all(path, "[Trash]\nbuy_hp_to=10\nbuy_hp_slots=4\nbuy_mp_to=10\nbuy_mp_slots=0\n");
+        check(s.load(path) && s.buy_hp_slots == 4 && s.buy_mp_slots == 0,
+              "with both, the new key wins: 4, and 0 for MP");
+        write_all(path, "[Trash]\nbuy_hp_to=60\nbuy_mp_below=2\n");
+        check(s.load(path) && s.buy_hp_slots == 20 && s.buy_mp_slots == 3,
+              "an old buy_hp_to of 60 read as 20; buy_mp_below alone is passed over: 3");
+        write_all(path, "[Trash]\nbuy_hp_below=0\nbuy_hp_to=6\nbuy_mp_below=3\nbuy_mp_to=6\n");
+        check(s.load(path) && s.buy_hp_slots == 0 && s.buy_mp_slots == 6,
+              "an old buy_hp_below=0 left HP alone: 0, not its buy_hp_to of 6; MP's below of 3 reads its 6");
+        write_all(path, "[Trash]\nbuy_hp_below=0\nbuy_hp_to=6\nbuy_hp_slots=2\nbuy_mp_below=-1\nbuy_mp_to=6\n");
+        check(s.load(path) && s.buy_hp_slots == 2 && s.buy_mp_slots == 0,
+              "the new key still wins over a below of 0: 2; a below under 0 leaves MP alone as well: 0");
+        write_all(path, "[Trash]\nbuy_hp_below=\nbuy_hp_to=6\nbuy_mp_below=x\nbuy_mp_to=5\n");
+        check(s.load(path) && s.buy_hp_slots == 6 && s.buy_mp_slots == 5,
+              "an empty or unreadable below is no opt-out: the old to, 6 and 5");
         write_all(path, "[Trash]\nbuy_opener=\n");
         check(s.load(path) && s.buy_opener == "other/8950604", "an empty opener is the portrait");
         // "Tốc độ bấm nút": 80 when the file says nothing, each step read back,
@@ -6172,7 +6759,55 @@ void test_shop_pieces() {
               "the shipped trash.ini ships the potion shop off: buy_potions=false");
         check(shipped.press_ms == 80 && text.find("\npress_ms=80\n") != std::string::npos,
               "and presses at 80 ms, as ever: press_ms=80");
+        check(shipped.buy_hp_slots == 3 && shipped.buy_mp_slots == 3 &&
+                  text.find("\nbuy_hp_slots=3\n") != std::string::npos &&
+                  text.find("\nbuy_mp_slots=3\n") != std::string::npos && text.find("\nbuy_hp_below=") == std::string::npos &&
+                  text.find("\nbuy_hp_to=") == std::string::npos && text.find("\nbuy_mp_below=") == std::string::npos &&
+                  text.find("\nbuy_mp_to=") == std::string::npos,
+              "and buys 3 + 3 each time, with no below/to keys left: buy_hp_slots=3, buy_mp_slots=3");
 #endif
+    }
+    // The full-bag message is told from every other message by its words:
+    // the wordless one-button picture, the check-in reward's notice and a
+    // live charm message all pass its frame (0.85) and none its words.
+    {
+        std::vector<std::pair<std::string, Frame>> others;
+        others.emplace_back("grabbed/dialog_ok", *k.store.get("grabbed/dialog_ok"));
+        Frame notice;
+        if (TemplateStore::load_one("grabbed/login_popup1", exe_relative("configs/templates.ini"), notice))
+            others.emplace_back("grabbed/login_popup1", notice);
+        for (const auto& [name, pic] : others) {
+            Frame f = scene(1024, 768, 60);
+            blit(f, pic, 413, 343);
+            const bag::ShopFullLook how = bag::shop_full_look(f, k.store);
+            check(!bag::shop_full_up(f, k.store) && how.words < 0.90f,
+                  name + " is not the full-bag message: whole " + fixed3(how.whole) + ", words " + fixed3(how.words));
+        }
+        // A 197x80 cut of the live charm message of 2026-11-08 22:13:51 at
+        // 413,343 (trash_debug 20261108_221351_3): handed over beside the
+        // charms' cuts when it is here -- no name, no chat in it.
+        Frame live = scene(1024, 768, 40);
+        if (!put_back(live, std::string(kLiveBuild) + "handoff\\shop\\testdata", "shop_charm_notice")) {
+            skip("no cut of the live charm message here (handoff\\shop\\testdata\\shop_charm_notice_*)\n");
+        } else {
+            const bag::ShopFullLook how = bag::shop_full_look(live, k.store);
+            std::printf("  [info] the live charm message against the full-bag picture: whole %s, words %s\n",
+                        fixed3(how.whole).c_str(), fixed3(how.words).c_str());
+            check(!bag::shop_full_up(live, k.store) && how.words < 0.90f && bag::lone_ok(live, k.store,
+                                                                                     ScreenRect{ 0, 0, 1024, 768 }),
+                  "the live charm message: a lone Xác Nhận, never the full-bag message -- words " + fixed3(how.words));
+        }
+        // The live buy question (2026-11-01 16:34:10): never a lone message.
+        Frame q;
+        const std::string shot =
+            std::string(kLiveBuild) + "bin\\Release\\trash_debug\\20261101_163410_0_shop_question.png";
+        if (!load_png(shot, q) || !q.valid()) {
+            skip("no live frame of the buy question here (trash_debug\\20261101_163410_0_shop_question.png)\n");
+        } else {
+            check(!bag::lone_ok(q, k.store, ScreenRect{ 0, 0, q.width, q.height }) && !bag::shop_full_up(q, k.store) &&
+                      !bag::find_dialogs(q, k.store).empty(),
+                  "the live buy question: a dialog of two buttons, never a lone message, never the full bag");
+        }
     }
 }
 
@@ -6263,40 +6898,38 @@ void test_tab_unsure() {
         return static_cast<int>(files_in(dir, std::string("*_tab_unsure_") + where + ".png").size());
     };
     const auto nothing_done = [](const ShopRun& s) {
-        return s.r.shop_hp_before == -1 && s.r.shop_bought == 0 && s.p.game.right_clicks == 0 &&
-               s.p.game.opener_clicks == 0 && s.p.game.digit_keys == 0;
+        return s.r.shop_bought == 0 && s.p.game.right_clicks == 0 && s.p.game.opener_clicks == 0 &&
+               s.p.game.digit_keys == 0;
     };
 
-    // ---- the click on Tiêu Dùng (select_tab)
+    // ---- the click on Khác (select_tab): the one tab the shop clicks, since
+    // nothing is counted (2026.11.09).
     {
         // The pointer left on the tab it clicked spoils the read, as the game
         // lights a control under it: moved off after the click, the tab is
         // read at once.
-        ShopRun s(4, 4);
-        s.p.game.cur_tab = kOtherTab;
+        ShopRun s(1, 0);
         s.p.game.hover_unreads = true;
         s.run();
-        check(s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 && !s.r.tab_unsure &&
-                  s.p.game.tab_clicks == 1 && s.p.game.unread_seen == 0 && s.p.game.moves >= 1 && s.p.says("đủ bình"),
-              "the pointer on a tab spoils its read: moved off after the click, Tiêu Dùng read at once and counted, "
-              "4 and 4 -- " + s.r.trouble + " / " + s.p.last());
-        ShopRun t(4, 4);
-        t.p.game.cur_tab = kOtherTab;
+        check(s.r.trouble.empty() && s.r.shop_bought == 1 && !s.r.tab_unsure && s.p.game.tab_clicks == 1 &&
+                  s.p.game.use_tab_clicks == 0 && s.p.game.unread_seen == 0 && s.p.game.moves >= 1,
+              "the pointer on a tab spoils its read: moved off after the click, Khác read at once and one bought -- " +
+                  s.r.trouble + " / " + s.p.last());
+        ShopRun t(1, 0);
         t.p.game.hover_unreads = true;
         t.p.game.no_move = true;
         t.run();
-        check(t.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos && t.r.tab_unsure &&
+        check(t.r.trouble.find("không chuyển được sang ngăn Khác") != std::string::npos && t.r.tab_unsure &&
                   nothing_done(t) && t.p.game.tab_clicks == 1 &&
                   t.p.game.unread_seen >= 10 + BagCleaner::kTabRelooks,
               "and with no way to move it, every look after the click reads no tab: looked at " +
-                  std::to_string(BagCleaner::kTabRelooks) + " more times, then a stop -- nothing counted, nothing "
-                  "right-clicked (" + std::to_string(t.p.game.unread_seen) + " looks with no tab) -- " + t.r.trouble);
+                  std::to_string(BagCleaner::kTabRelooks) + " more times, then a stop -- nothing right-clicked (" +
+                  std::to_string(t.p.game.unread_seen) + " looks with no tab) -- " + t.r.trouble);
     }
     {
         // No tab read for the ten short looks after the click and three more:
         // looked at again, and the shop goes on.
-        ShopRun s(4, 4);
-        s.p.game.cur_tab = kOtherTab;
+        ShopRun s(1, 0);
         int from = -1;
         s.p.during = [&](BagCleaner&) {
             if (from < 0 && s.p.game.tab_clicks > 0) from = s.p.game.looks + 1;
@@ -6304,11 +6937,11 @@ void test_tab_unsure() {
         s.p.game.unread = [&](int n) { return from >= 0 && n >= from && n < from + 13; };
         LogLines log;
         s.run();
-        check(s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 && !s.r.tab_unsure &&
-                  s.p.game.tab_clicks == 1 && s.p.game.unread_seen == 13 &&
-                  log.has("(Tiêu Dùng) read at shop_tab after 4 more looks -- the first read -1"),
-              "-1 on the 10 looks after the click and 3 more: looked at again, Tiêu Dùng read on the 4th, one click, "
-              "counted 4 and 4 -- " + s.r.trouble + " / " + log.line_with("read at shop_tab"));
+        check(s.r.trouble.empty() && s.r.shop_bought == 1 && !s.r.tab_unsure && s.p.game.tab_clicks == 1 &&
+                  s.p.game.unread_seen == 13 &&
+                  log.has("(Khác) read at shop_other_tab after 4 more looks -- the first read -1"),
+              "-1 on the 10 looks after the click and 3 more: looked at again, Khác read on the 4th, one click, one "
+              "bought -- " + s.r.trouble + " / " + log.line_with("read at shop_other_tab"));
     }
     {
         // No tab read on any look: one click, eight more looks, a stop -- and
@@ -6318,84 +6951,83 @@ void test_tab_unsure() {
         bool stopped[2] = { false, false };
         int kept[2] = { 0, 0 };
         for (int round = 0; round < 2; ++round) {
-            ShopRun s(4, 4);
+            ShopRun s(1, 0);
             s.p.game.unread = [](int) { return true; };
             s.p.debug_dir = dir;
             s.run();
-            stopped[round] = s.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos &&
+            stopped[round] = s.r.trouble.find("không chuyển được sang ngăn Khác") != std::string::npos &&
                              s.r.tab_unsure && nothing_done(s) && s.p.game.tab_clicks == 1;
-            kept[round] = pictures("shop_tab");
+            kept[round] = pictures("shop_other_tab");
         }
         check(stopped[0] && stopped[1],
-              "-1 on every look: Tiêu Dùng clicked once, looked at again, then a stop -- nothing counted, bought or "
-              "right-clicked");
+              "-1 on every look: Khác clicked once, looked at again, then a stop -- nothing bought or right-clicked");
         check(kept[0] == 1 && kept[1] == 1,
               "one picture kept the first time, none the second: once a GoBot start, so the newest few dozen are not "
               "pushed out (" + std::to_string(kept[0]) + ", " + std::to_string(kept[1]) + ")");
-        const std::string line = log.line_with("tab not read as 2 (Tiêu Dùng) at shop_tab -- read -1, strip at 300,300");
+        const std::string line = log.line_with("tab not read as 3 (Khác) at shop_other_tab -- read -1, strip at 300,300");
         const std::vector<int> m = means_in(line);
         check(m.size() == kBagTabs && *std::min_element(m.begin(), m.end()) >= 0,
               "the log says the tab wanted, the tab read, where the strip is, how alike, and every tab's mean -- " + line);
     }
     {
-        // Khác read for sure on every look: Tiêu Dùng clicked once more, as
+        // Tiêu Dùng read for sure on every look: Khác clicked once more, as
         // the game may have let the first click go, then a stop. A first
         // click let go: the second takes.
-        ShopRun s(4, 4);
-        s.p.game.cur_tab = kOtherTab;
+        ShopRun s(1, 0);
         s.p.game.tabs_stuck = true;
         s.run();
-        check(s.r.trouble.find("không chuyển được sang ngăn Tiêu Dùng") != std::string::npos && s.r.tab_unsure &&
+        check(s.r.trouble.find("không chuyển được sang ngăn Khác") != std::string::npos && s.r.tab_unsure &&
                   nothing_done(s) && s.p.game.tab_clicks == 2 && s.p.game.unread_seen == 0,
-              "Khác read for sure on every look: Tiêu Dùng clicked once more, then a stop -- nothing counted (" +
+              "Tiêu Dùng read for sure on every look: Khác clicked once more, then a stop (" +
                   std::to_string(s.p.game.tab_clicks) + " clicks) -- " + s.r.trouble);
-        ShopRun t(4, 4);
-        t.p.game.cur_tab = kOtherTab;
+        ShopRun t(1, 0);
         t.p.game.tab_clicks_lost = 1;
         t.run();
-        check(t.r.trouble.empty() && t.r.shop_hp_before == 4 && t.r.shop_mp_before == 4 && t.p.game.tab_clicks == 2 &&
-                  !t.r.tab_unsure,
-              "the first click let go by the game: the second takes, and it counts as ever -- " + t.r.trouble);
+        check(t.r.trouble.empty() && t.r.shop_bought == 1 && t.p.game.tab_clicks == 2 && !t.r.tab_unsure,
+              "the first click let go by the game: the second takes, and it buys as ever -- " + t.r.trouble);
     }
 
-    // ---- the count (shop_count): the moment its first look reads no tab is
+    // ---- the look for the item on Khác (shop_open): the bag on Khác from the
+    // start, so no tab is clicked; the moment its first look reads no tab is
     // found by trying, so that the test does not hang on how many looks come
     // before it.
-    int count_look = -1;
-    for (int k = 2; k <= 16 && count_look < 0; ++k) {
-        ShopRun s(4, 4);
+    int page_look = -1;
+    for (int k = 2; k <= 16 && page_look < 0; ++k) {
+        ShopRun s(1, 0);
+        s.p.game.cur_tab = kOtherTab;
         s.p.game.unread = [k](int n) { return n >= k && n < k + 3; };
         LogLines log;
         s.run();
-        if (!log.has("(Tiêu Dùng) read at shop_count after 3 more looks")) continue;
-        count_look = k;
-        check(s.r.trouble.empty() && s.r.shop_hp_before == 4 && s.r.shop_mp_before == 4 && s.r.shop_bought == 0 &&
-                  !s.r.tab_unsure && s.p.game.moves >= 3 && s.p.says("đủ bình"),
-              "-1 on three looks of the count: looked at again, the pointer moved off each time, and counted all the "
-              "same, 4 and 4, nothing bought (from look " + std::to_string(k) + ") -- " + s.r.trouble);
+        if (!log.has("(Khác) read at shop_other after 3 more looks")) continue;
+        page_look = k;
+        check(s.r.trouble.empty() && s.r.shop_bought == 1 && !s.r.tab_unsure && s.p.game.moves >= 3 &&
+                  s.p.game.tab_clicks == 0,
+              "-1 on three looks for the item: looked at again, the pointer moved off each time, and the item found "
+              "all the same, one bought (from look " + std::to_string(k) + ") -- " + s.r.trouble);
     }
-    check(count_look > 0, "(a moment in the count with three looks that read no tab: found)");
-    if (count_look > 0) {
+    check(page_look > 0, "(a moment in the look for the item with three looks that read no tab: found)");
+    if (page_look > 0) {
         BagCleaner::forget_said_once();
-        ShopRun s(4, 4);
-        s.p.game.unread = [count_look](int n) { return n >= count_look; };
+        ShopRun s(1, 0);
+        s.p.game.cur_tab = kOtherTab;
+        s.p.game.unread = [page_look](int n) { return n >= page_look; };
         s.p.debug_dir = dir;
         s.run();
-        check(s.r.trouble.find("không chắc túi đồ đang ở ngăn Tiêu Dùng") != std::string::npos && s.r.tab_unsure &&
-                  nothing_done(s) && s.p.game.moves >= BagCleaner::kTabRelooks && pictures("shop_count") == 1,
+        check(s.r.trouble.find("không chắc túi đồ đang ở ngăn Khác") != std::string::npos && s.r.tab_unsure &&
+                  nothing_done(s) && s.p.game.moves >= BagCleaner::kTabRelooks && pictures("shop_other") == 1,
               "no tab read for good from there: " + std::to_string(BagCleaner::kTabRelooks) +
-                  " more looks, then a stop, its picture kept -- nothing counted, bought or right-clicked -- " +
-                  s.r.trouble);
-        // Khác read there for sure: stopped at once, nothing looked at again.
-        ShopRun o(4, 4);
+                  " more looks, then a stop, its picture kept -- nothing right-clicked -- " + s.r.trouble);
+        // Tiêu Dùng read there for sure: stopped at once, nothing looked at again.
+        ShopRun o(1, 0);
+        o.p.game.cur_tab = kOtherTab;
         o.p.during = [&](BagCleaner&) {
-            if (o.p.game.looks + 1 == count_look) o.p.game.cur_tab = kOtherTab;
+            if (o.p.game.looks + 1 == page_look) o.p.game.cur_tab = kUseTab;
         };
         o.run();
-        check(o.r.trouble.find("không chắc túi đồ đang ở ngăn Tiêu Dùng") != std::string::npos && o.r.tab_unsure &&
+        check(o.r.trouble.find("không chắc túi đồ đang ở ngăn Khác") != std::string::npos && o.r.tab_unsure &&
                   nothing_done(o) && o.p.game.moves == 0 && o.p.game.unread_seen == 0,
-              "Khác read for sure in the count: stopped at once, the pointer not moved, nothing looked at again or "
-              "counted -- " + o.r.trouble);
+              "Tiêu Dùng read for sure in the look for the item: stopped at once, the pointer not moved, nothing "
+              "looked at again or right-clicked -- " + o.r.trouble);
     }
 
     // ---- the charms: Tiêu Dùng's click, and the sweep.
@@ -6597,10 +7229,22 @@ void test_tab_unsure_sources() {
               has(shop, "else if (lost && hp_under())"),
           "gui_app.cpp: \"Mua ngay\" and \"Thử mua\" look for the quiet second up to 5 times, the hold and HP "
           "watched; a timed run once");
-    check(has(shop, "not_now(\"Chờ: bạn đang dùng chuột hoặc bàn phím, mua bình sau.\", kShopTouchedMs);") &&
-              has(gui, "constexpr std::uint64_t kShopTouchedMs = 30'000;") &&
+    // 2026.11.08: no longer a flat 30 s, which held every key off for a second
+    // every 31 s on 2026-11-08 -- 30 s, then 2, 5 and 10 minutes, one spoiled
+    // look after another, never past the shop's own interval.
+    check(has(shop, "not_now(\"Chờ: bạn đang dùng chuột hoặc bàn phím, mua bình sau.\", touched_ms);") &&
+              has(shop, "touched_ms = shop_quiet.next_ms(static_cast<std::uint64_t>(settings.buy_every_minutes) *") &&
+              !has(gui, "kShopTouchedMs") &&
               count_of(shop, "if (!held) end_hold(\"trash cleaning\");") == 2 && count_of(shop, "take_hold(") == 1,
-          "and when somebody was, it lets the hold go as it was and asks again in 30 s, saying why");
+          "and when somebody was, it lets the hold go as it was and asks again after the back-off's wait, saying "
+          "why");
+    {
+        QuietBackOff waits;
+        std::vector<std::uint64_t> got;
+        for (int i = 0; i < 5; ++i) got.push_back(waits.next_ms(30ull * 60'000));
+        check(got == std::vector<std::uint64_t>{ 30'000, 120'000, 300'000, 600'000, 600'000 },
+              "... the back-off at a 30-minute interval: 30 s, 2 min, 5 min, 10 min, 10 min");
+    }
     check(!has(gui, "line += \" Dừng: \" + r.trouble") &&
               count_of(gui, "line += (line.empty() ? \"\" : \" \") + std::string(\"Dừng: \") + r.trouble + \".\";") == 2,
           "gui_app.cpp: the shop's line no longer begins \"Trash:  Dừng\" with two spaces");
@@ -6628,13 +7272,18 @@ void test_tab_unsure_sources() {
               has(pick_tab, "if (clicks > 0 && (!v.found || v.selected_tab < 0)) break;"),
           "bag.cpp: select_tab moves the pointer off right after its click, looks again only while no tab is read, "
           "and clicks again only on another tab read for sure");
-    const std::string counting = body(cpp, "bool BagCleaner::shop_count(");
-    const std::size_t tab_check = counting.find("if (v.selected_tab != tab) {");
-    const std::size_t relook = counting.find("v.found && v.selected_tab < 0 && unread < kTabRelooks");
-    const std::size_t judged = counting.find("trash_->judge(");
-    check(tab_check != npos && relook != npos && judged != npos && tab_check < relook && relook < judged &&
-              count_of(counting, "trash_->judge(") == 1,
-          "bag.cpp: shop_count looks again on a look with no tab read, and judges a slot only after the tab is read");
+    // The shop counts nothing (2026.11.09): Khác is the one tab it reads, and
+    // its look for the item reads the tab first, as the count did.
+    const std::string opening = body(cpp, "bool BagCleaner::shop_open(");
+    const std::size_t tab_check = opening.find("if (v.selected_tab != kOtherTab) {");
+    const std::size_t relook = opening.find("v.found && v.selected_tab < 0 && unread < kTabRelooks");
+    const std::size_t flagged = opening.find("res.tab_unsure = true;");
+    const std::size_t judged = opening.find("trash_->judge(");
+    check(!has(cpp, "bool BagCleaner::shop_count(") && !has(cpp, "kShopRounds") && tab_check != npos &&
+              relook != npos && flagged != npos && judged != npos && tab_check < relook && relook < flagged &&
+              flagged < judged && has(opening, "tab_unsure(f, v, kOtherTab, \"shop_other\");"),
+          "bag.cpp: no shop_count; shop_open looks again on a look with no tab read, flags a strip read otherwise, "
+          "and judges a slot only after Khác is read");
     const std::string sweep = body(cpp, "void BagCleaner::charm_sweep(");
     const std::size_t s_check = sweep.find("if (v.selected_tab != tab) {");
     const std::size_t s_relook = sweep.find("v.found && v.selected_tab < 0 && unread < kTabRelooks");
@@ -6680,6 +7329,162 @@ void test_trash_list_quiet() {
     check(quiet_loads == 1 && tm.find("if (path_exists(staged) && load(staged))") != std::string::npos &&
               tm.find("if (!images.empty() && load(images))") != std::string::npos,
           "only the trash list reads quietly: the start's line (\"522 templates\") stays");
+#endif
+}
+
+/// The "Sự kiện và điểm danh" board (checkin_board.hpp): told by its title,
+/// what a search of a whole frame costs, nothing taken for it that is not it,
+/// and every bag job's first look -- before any key, the bag's included.
+void test_checkin_board() {
+    section("Bảng Sự kiện và điểm danh: told by its title, and no bag job presses anything under it");
+    if (skip_without_kit()) return;
+    if (!kit().board_ok) {
+        skip("the check-in board's title (%s) is not installed here\n", kCheckinBoardTitleFile);
+        return;
+    }
+    const Kit& k = kit();
+    const Frame& title = k.board_title;
+    check(title.width == 280 && title.height == 30, "the title is 280x30 -- " + std::to_string(title.width) + "x" +
+                                                        std::to_string(title.height));
+    {
+        // Where the board centred on a 1024x768 window has it: 298,3 into the
+        // board, the board at 73,84.
+        Frame f = scene(1024, 768, 60);
+        blit(f, title, 73 + 298, 84 + 3);
+        ScreenRect at;
+        float score = 0.0f;
+        const auto from = std::chrono::steady_clock::now();
+        constexpr int kTimes = 5;
+        bool all = true;
+        for (int i = 0; i < kTimes; ++i) all = all && checkin_board_title(f, k.store, &at, &score);
+        const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - from)
+                            .count() / 1000.0 / kTimes;
+        std::printf("  [info] a title search on 1024x768: %.1f ms\n", ms);
+        check(all && at.x == 371 && at.y == 87 && score >= 0.99f,
+              "the title found where it is, at " + std::to_string(at.x) + "," + std::to_string(at.y) + " (" +
+                  fixed3(score) + ")");
+        check(ms < 200.0, "a search of the whole frame is cheap enough to make before every click: " +
+                              std::to_string(static_cast<int>(ms)) + " ms");
+        // Looked for again where it was: a 296x46 search, found a few pixels
+        // off, and not where it is not.
+        const ScreenRect close_by{ 371 + 5, 87 - 4, 280, 30 };
+        const ScreenRect away{ 100, 500, 280, 30 };
+        ScreenRect again;
+        check(checkin_board_title(f, k.store, &again, nullptr, &close_by) && again.x == 371 && again.y == 87 &&
+                  !checkin_board_title(f, k.store, nullptr, nullptr, &away),
+              "looked for again within 8 pixels of where it was: found there, and nowhere else");
+        // Said once a GoBot start: a second search of a whole frame says nothing.
+        LogLines log;
+        checkin_board_title(f, k.store);
+        check(!log.has("Checkin: a title search on"), "the cost said once a GoBot start, not on every look");
+    }
+    {
+        // Nothing else is the board: a blank screen, the title with other
+        // words, the close buttons alone, the old attendance dialog's X.
+        Frame other = title;
+        write_words(other, 3, ScreenRect{ 60, 5, 160, 20 });
+        Frame words = scene(1024, 768, 60);
+        blit(words, other, 371, 87);
+        Frame xs = scene(1024, 768, 60);
+        blit(xs, k.close_x, 600, 100);
+        blit(xs, *k.store.get(bag::kCloseButtons[1]), 300, 100);
+        Frame old_x;
+        if (TemplateStore::load_one("grabbed/check_in_close", exe_relative("configs/templates.ini"), old_x))
+            blit(xs, old_x, 450, 150);
+        float score = 0.0f;
+        checkin_board_title(words, k.store, nullptr, &score);
+        check(!checkin_board_title(scene(1024, 768, 60), k.store) && !checkin_board_title(words, k.store) &&
+                  !checkin_board_title(xs, k.store) && !checkin_board_title(Frame{}, k.store) &&
+                  !checkin_board_title(words, TemplateStore{}),
+              "not the board: a blank screen, the title with other words, the close buttons alone, no frame, no "
+              "picture");
+    }
+    {
+        // By its name in templates.ini, which the shipped file gives it.
+        TemplateStore named;
+        named.put(kCheckinBoardTitle, title);
+        Frame f = scene(1024, 768, 60);
+        blit(f, title, 200, 150);
+        check(checkin_board_picture(named) != nullptr && checkin_board_title(f, named),
+              "a store with the short name alone finds it");
+#ifdef GOBOT_SOURCE_DIR
+        const std::string names = read_all(std::string(GOBOT_SOURCE_DIR) + "/configs/templates.ini");
+        check(names.find("\ncheckin_board_title            = grabbed/auto_login_success_indicator") !=
+                  std::string::npos,
+              "configs/templates.ini names it: checkin_board_title = grabbed/auto_login_success_indicator");
+#endif
+    }
+    {
+        // The owner's own saved frames, read where they are and never copied:
+        // none shows the board, and none is taken for it.
+        const std::string dir = std::string(kLiveBuild) + "bin\\Release\\trash_debug";
+        const auto names = files_in(dir, "*.png");
+        if (names.empty()) {
+            skip("no saved frames of the live game here (trash_debug)\n");
+        } else {
+            int looked = 0, taken = 0;
+            std::string which;
+            for (const std::string& name : names) {
+                if (looked >= 40) break;
+                Frame f;
+                if (!load_png(dir + "\\" + name, f) || !f.valid()) continue;
+                ++looked;
+                if (checkin_board_title(f, k.store)) {
+                    ++taken;
+                    which += " " + name;
+                }
+            }
+            check(looked > 0 && taken == 0, "the owner's saved frames: none taken for the board (" +
+                                                std::to_string(looked) + " looked at)" + which);
+        }
+    }
+    // Every bag job's first look, the board up: nothing pressed at all.
+    {
+        Pass p;
+        make_bag(p.game);
+        p.item(0, 7, 3, TrashList::Action::Delete);
+        p.game.bag_shut = p.game.bag_keyed = true;
+        p.game.board_on = true;
+        const auto r = p.run();
+        check(r.board_up && !r.ran && r.trouble.empty() && p.game.keys == 0 && p.game.drags == 0 &&
+                  p.game.clicks == 0 && p.game.right_clicks == 0 && !p.game.items[0].gone() && p.game.bag_shut &&
+                  p.says("bảng Sự kiện và điểm danh"),
+              "the trash pass with the board up: no bag key, nothing dragged or clicked, said -- " + p.last());
+        Pass open;
+        make_bag(open.game);
+        open.item(0, 7, 3, TrashList::Action::Delete);
+        open.game.board_on = true;
+        const auto ro = open.run();
+        check(ro.board_up && open.game.drags == 0 && open.game.clicks == 0 && open.game.keys == 0 &&
+                  !open.game.items[0].gone(),
+              "nor with the bag open already");
+    }
+    {
+        CharmRun c;
+        c.p.game.bag_shut = c.p.game.bag_keyed = true;
+        c.p.game.board_on = true;
+        c.run();
+        check(c.r.board_up && c.p.game.keys == 0 && c.p.game.clicks == 0 && c.p.game.right_clicks == 0 &&
+                  c.r.charm_tries.empty() && c.r.trouble.empty(),
+              "a charm run with the board up: no key -- ESC least of all -- no right-click, no charm tried");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    {
+        // In the source: the board looked for in run_pass before the bag key
+        // is ever pressed, and before a charm's own message is closed.
+        std::string cpp = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/bag.cpp");
+        cpp.erase(std::remove(cpp.begin(), cpp.end(), '\r'), cpp.end());
+        const std::size_t from = cpp.find("BagCleaner::Result BagCleaner::run_pass() {");
+        const std::size_t board = cpp.find("if (board_up(f, res)) return res;", from);
+        const std::size_t charms = cpp.find("if (mode_ == Mode::CharmsOnly && !charms_start(f, v, res)) {", from);
+        const std::size_t key = cpp.find("press(settings_.bag_key);", from);
+        const std::size_t full = cpp.find("if (bag::shop_full_up(f, store_, &at)) {", from);
+        check(from != std::string::npos && board != std::string::npos && charms != std::string::npos &&
+                  key != std::string::npos && full != std::string::npos && board < full && full < charms &&
+                  charms < key,
+              "bag.cpp: run_pass looks for the board, then the shop's full-bag message, before the charms' own "
+              "message and before press(settings_.bag_key)");
+    }
 #endif
 }
 
@@ -6732,6 +7537,8 @@ void test_use(void (*check_fn)(bool, const std::string&), void (*section_fn)(con
     test_charm_settings();
     test_shop_pieces();
     test_shop();
+    test_shop_plan();
+    test_checkin_board();
     test_tab_unsure();
     test_tab_band();
     test_tab_unsure_sources();

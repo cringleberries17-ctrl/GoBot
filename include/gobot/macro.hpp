@@ -4,6 +4,7 @@
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/input_manager.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -15,6 +16,8 @@
 #include <vector>
 
 namespace gobot {
+
+class IniFile;
 
 /// What has to be true before a key fires.
 enum class MacroTrigger {
@@ -123,6 +126,31 @@ std::uint32_t macro_timer_interval_ms(const MacroKey& k);
 /// and an interval above 0 -- or a buff, which at 0 goes as often as it may.
 bool macro_timer_on(const MacroKey& k);
 
+/// Whether the timers press `k` as a buff: on (macro_timer_on) and a buff by
+/// its kind. A buff row switched off is none, whatever its interval: its key
+/// may be a skill's now (2026-11-08: two buff rows left off on A and S, which
+/// the owner had made attack skills, had A and S logged as buffs all run).
+bool macro_buff_on(const MacroKey& k);
+
+/// The keycodes of the buff rows the timers press (macro_buff_on), in the
+/// order of the keys: what each press of theirs should cast is a buff. For the
+/// log of your casts (CastMatch); nothing presses by it.
+std::vector<std::uint32_t> macro_buff_keycodes(const std::vector<MacroKey>& keys);
+
+/// The keycodes on a buff row the timers press (macro_buff_on) and on a skill
+/// row they press (macro_timer_on, kind Skill) at once, each once, in the
+/// order of the keys. Both clocks press such a key, and its presses are logged
+/// as a buff's (2026-11-08 22:13-22:15: A and S both buffs and attack skills,
+/// the buffs' four presses each in among the skills). Warned of, never
+/// refused: the window says so (macro_clash_note_vi), and the log once a run
+/// (macro_clash_line) -- only while "Repeating keys" (timers_enabled) is on,
+/// as with it off no row is pressed at all.
+std::vector<std::uint32_t> macro_buff_skill_clashes(const std::vector<MacroKey>& keys);
+/// The window's words for it, in Vietnamese; "" with no such key.
+std::string macro_clash_note_vi(const std::vector<MacroKey>& keys);
+/// The log's, at MACRO ON; "" with no such key.
+std::string macro_clash_line(const std::vector<MacroKey>& keys);
+
 /// A skill's cooldown as the "Kỹ năng" window takes it: half a second to 59 s,
 /// in tenths. A minute or more and the key would be a buff, and leave the
 /// skills.
@@ -203,10 +231,25 @@ struct MacroConfig {
     /// as it always has. Ships off: it changes how an existing setup fights.
     bool skills_follow_fight = false;
 
-    /// GoC's "Dùng skill tuần tự". On: every skill whose cooldown is over
-    /// goes, in the order of the keys, skill_gap_ms after the one before.
-    /// Off: only the first of them, one chance every 300 ms.
+    /// GoC's "Dùng skill tuần tự". Only while the skills follow the fight --
+    /// skills_follow_fight with the hunter running (run_skills); the macro
+    /// alone keeps every key on its own timer, and this does nothing there
+    /// (2026-11-08: ticked, with no hunter, all run). On: every skill whose
+    /// cooldown is over goes, in the order of the keys, skill_gap_ms after
+    /// the one before. Off: only the first of them, one chance every 300 ms.
     bool sequential_skills = true;
+
+    /// The skills on their timers paced by your own casts in the packets
+    /// (2026.11.08, W1): one round in the order of the keys, each skill once,
+    /// the next pressed only once the game has cast the one before -- its
+    /// 0x0031 seen -- and its lock is over; a key's interval_ms is then only
+    /// the least time from its last cast. Off, and in a file without it: every
+    /// key on its own timer, as before. Only with the skills on their timers
+    /// (not following the fight) and nothing else pressing keys -- no hunter
+    /// running, no key sequence; potions go first as ever, and a buff due
+    /// while a skill's cast is waited for, or inside its lock, goes once that
+    /// lock is over. See MacroEngine::note_own_cast and run_paced.
+    bool cast_paced = false;
 
     /// Under this much MP, read just now, no skill goes when skills follow
     /// the fight: the hunter's own swing carries on, which costs none. GoC
@@ -268,9 +311,11 @@ struct MacroConfig {
     static constexpr std::uint32_t kDefaultUrgentMs = 1000;
 
     /// A buff is cast by pressing its key this many times, buff_press_gap_ms
-    /// apart. GoC presses each buff 4 times, 200 ms apart, and counts the cast
-    /// only once the server confirms it: a single press is lost by the game
-    /// now and then, and a lost buff is not tried again for a whole interval.
+    /// apart. GoC presses each buff 4 times, 200 ms apart -- its docs say it
+    /// counts the cast only once the server confirms it, but its client writes
+    /// that confirmation where nothing reads it (2026-11-08) -- since a single
+    /// press is lost by the game now and then, and a lost buff is not tried
+    /// again for a whole interval.
     /// 1, which is what a config built in code gets, is the single press; a
     /// file that does not say gets kDefaultBuffPresses.
     std::uint32_t buff_presses = 1;
@@ -317,8 +362,18 @@ struct MacroConfig {
 
     bool load(const std::string& path);
     bool save(const std::string& path) const;
+    /// What save() writes, put into `ini`: two configs compared without a
+    /// file (settings_changes).
+    void store(IniFile& ini) const;
     void apply_defaults();
 };
+
+/// What changed from `was` to `now` -- configs as their files hold them
+/// (MacroConfig::store, HunterConfig::store) -- on one line for the log:
+/// "Keys.key_9_keycode 72 (H) -> 70 (F); Hunt.enabled true -> false", a key's
+/// code with its name. The first `most` changes, then how many more; "" when
+/// nothing changed.
+std::string settings_changes(const IniFile& was, const IniFile& now, std::size_t most = 12);
 
 /// Runs the macro.
 ///
@@ -523,12 +578,123 @@ public:
     /// start(), never while it runs; unset is nobody told.
     void set_on_press(std::function<void(std::uint32_t vk, std::uint64_t at_ms)> f) { on_press_ = std::move(f); }
 
-    /// With sequential_skills off: a skill at most this often, GoC's attack
-    /// thread's beat.
+    /// With sequential_skills off, and the skills following the fight: a
+    /// skill at most this often -- the beat GoC's docs give its attack thread,
+    /// which its client never starts (2026-11-08).
     static constexpr std::uint32_t kSkillChanceMs = 300;
     /// A skill whose press did not go out is tried again this soon, still
     /// due: its cooldown starts only from a press that went out.
     static constexpr std::uint32_t kSkillRetryMs = 30;
+
+    // ---- the cast-paced rotation (MacroConfig::cast_paced, 2026.11.08) ----
+    //
+    // On 2026-11-08 the timers sent a skill key down about every 147 ms, some
+    // 390 a minute, against some 77 casts: the game drops a key that goes down
+    // while the character is still in the last cast's lock, so whichever key
+    // came first after it was cast, and the order was a lottery. Paced, a
+    // skill goes only once the game has cast the one before -- your own 0x0031
+    // in the packets -- and that cast's lock is over: one round in the order
+    // of the keys, each skill once, a key's interval_ms only the least time
+    // from its last cast. One press waits for its cast at a time: no cast, the
+    // same key once more; none again, it is skipped this round -- a cooldown,
+    // learned so that it is passed over without a press next time. With no
+    // cast of yours for kPaceStaleMs while keys go out, the timers take over
+    // until the next one. Only with the skills on their timers and the macro's
+    // timers pressing alone -- no hunter, no key sequence: their casts cannot
+    // be told from the rotation's. The potions first as ever; a buff due while
+    // a skill's cast is waited for, or inside its lock, goes once that lock is
+    // over, and the next skill waits for the buff's cast.
+
+    /// One cast of yours: your client's own 0x0031 over UDP under your id --
+    /// its skill, and when it came: GamePacket::timestamp_ms, on now_ms()'s
+    /// clock as clock_now() is (a test's own, on the test's). From the capture
+    /// thread: atomics only, no lock of the engine's -- a ring of kCastRing,
+    /// each slot a sequence lock. The timer pass reads it; nothing else of the
+    /// engine acts on it, and with cast_paced off nothing at all.
+    void note_own_cast(std::uint32_t skill, std::uint64_t at_ms);
+    static constexpr std::size_t kCastRing = 16;
+
+    /// The lock: from your cast's stamp to the first key-down the game takes
+    /// again. Guessed at first, and never outside the least and the most.
+    /// Learned: kPaceLockUpMs more when a first press was dropped and its
+    /// re-press cast, once kPaceDropsToRaise of the last kPaceDropWindow first
+    /// presses at the guess were (one alone -- a stun, a frame hitch -- is not
+    /// the lock), and unless the key dropped one or was skipped in its last
+    /// kPaceSuspectTurns turns, its cooldown more likely than the lock, and
+    /// the key before it cast on its first; kPaceLockDownMs less after
+    /// kPaceLockDownAfter first presses cast, each pressed within
+    /// kPaceAtLockMs of the guess -- counted afresh at arm(), after each step
+    /// down and after a re-press that was cast; a skip, a first press cast
+    /// late and a spell on the timers neither count nor reset it.
+    static constexpr std::uint32_t kPaceLockStartMs = 700;
+    static constexpr std::uint32_t kPaceLockMinMs = 550;
+    static constexpr std::uint32_t kPaceLockMaxMs = 900;
+    static constexpr std::uint32_t kPaceLockUpMs = 20;
+    static constexpr std::uint32_t kPaceLockDownMs = 5;
+    static constexpr int           kPaceLockDownAfter = 20;
+    static constexpr std::uint32_t kPaceAtLockMs = 30;
+    static constexpr int           kPaceSuspectTurns = 3;
+    static constexpr int           kPaceDropWindow = 10;
+    static constexpr int           kPaceDropsToRaise = 2;
+    /// A press's cast is one stamped no sooner than kPaceEarlyMs before its
+    /// key-down, waited for kPaceConfirmMs: its latency, 27-87 ms, and the
+    /// capture's batch, up to 70 more. None by kPaceRepressMs after the key
+    /// went down -- and skill_gap_ms after it came up -- the same key once
+    /// more: a cast sooner than that is mostly on its way still.
+    static constexpr std::uint64_t kPaceEarlyMs = 5;
+    static constexpr std::uint64_t kPaceConfirmMs = 220;
+    static constexpr std::uint64_t kPaceRepressMs = 160;
+    /// No cast of yours this long from the first key that went out after the
+    /// last one: the timers, until the next cast.
+    static constexpr std::uint64_t kPaceStaleMs = 2000;
+    /// A key skipped -- no cast from its two presses -- has a cooldown longer
+    /// than the time since its last cast: taken, as the least of it, once
+    /// another key casts within kPaceFloorTakenMs (the game was casting, so it
+    /// was the key's own) -- on the key's second such skip within kPaceSeenMs:
+    /// one stop of the game's (a stun, a hitch, the capture late) skips every
+    /// key in it, cooldown or none. A key with a floor raises it at once.
+    /// Passed over while under it, kPaceFloorUses times; then pressed once at
+    /// its turn, a check: a cast under it drops it.
+    static constexpr std::uint64_t kPaceFloorTakenMs = 1500;
+    static constexpr int           kPaceFloorUses = 20;
+    static constexpr std::uint64_t kPaceSeenMs = 60'000;
+
+    /// What the rotation is doing, for the GUI: a copy, from any thread.
+    struct PaceStatus {
+        enum class Mode {
+            Off,        ///< cast_paced off, the skills follow the fight, or the hunter or the sequence presses keys too: every key as before
+            Paced,      ///< the rotation, on your casts
+            Fallback,   ///< no cast of yours yet, or none for kPaceStaleMs while keys went out: the timers
+        };
+        /// How a key's turn in a round went.
+        enum class Turn {
+            Cast,           ///< its press was cast
+            CastOnRepress,  ///< its first press was dropped and the second cast
+            NoCast,         ///< no cast from its presses: skipped this round
+            Cooling,        ///< passed over without a press: inside the cooldown learned for it
+            NotDue,         ///< passed over without a press: its interval_ms not over since its last cast
+        };
+        struct Step {
+            std::uint32_t keycode = 0;
+            Turn          turn = Turn::Cast;
+        };
+        Mode              mode = Mode::Off;
+        std::uint64_t     since_ms = 0;         ///< when it came to this mode, on clock_now()
+        std::uint32_t     lock_ms = kPaceLockStartMs;   ///< the lock as now learned
+        std::uint64_t     rounds = 0;           ///< whole rounds since the macro started
+        std::uint64_t     last_cast_ms = 0;     ///< your last cast, on clock_now(); 0 for none
+        std::vector<Step> last_round;           ///< the last whole round, in order
+        bool              others = false;       ///< Off because the hunter or the sequence presses keys too
+    };
+    PaceStatus pace_status() const;
+    /// "cast", "cast on the re-press", "no cast", "cooling", "not due".
+    static const char* pace_turn_name(PaceStatus::Turn turn);
+    /// The status in a few words for GoBot's window, in Vietnamese: "Đang
+    /// theo vòng -- khóa chiêu ước 700 ms, 12 vòng.", "Tạm theo giờ vì không
+    /// thấy gói tin ra chiêu ...". Off: what an Off with the switch on means,
+    /// the skills following the fight, or the hunter or the sequence pressing
+    /// keys too (PaceStatus::others).
+    static std::string pace_status_vi(const PaceStatus& s);
 
     /// The time as the engine reads it, in milliseconds: the steady clock
     /// unless set. `sleep_ms` is how it waits a few milliseconds inside a
@@ -611,6 +777,11 @@ public:
         std::uint64_t held_low_mp = 0;
         std::uint64_t held_dead = 0;
         std::uint64_t held_range = 0;
+
+        /// Skill keys refused because the game was not in front
+        /// (require_focus), on their timers or following the fight: of
+        /// skipped_unfocused, which counts every key's, for the Skills line.
+        std::uint64_t skills_unfocused = 0;
 
         /// Steps of the sequence that went out: key_presses has only the keys.
         std::uint64_t sequence_presses = 0;
@@ -722,6 +893,46 @@ private:
     /// Once a minute while anything was pressed or held: one line of what the
     /// skills did. From the keys as they are now, which the tallies follow.
     void log_skills(std::uint64_t now);
+
+    /// The cast-paced rotation's part of a pass, before the keys on their
+    /// timers: on or off by the config and the fight -- one line each time it
+    /// changes -- and your casts since the last pass taken in. `others`: the
+    /// hunter or the key sequence presses keys too, whose casts cannot be told
+    /// from the rotation's -- off. Whether the skills are the rotation's this
+    /// pass (run_paced), not the timers'.
+    bool pace_pass(const MacroConfig& cfg, bool follow, bool others, std::uint64_t now);
+    /// The casts note_own_cast has put in the ring since the last look, oldest
+    /// first, each to pace_cast.
+    void pace_take_casts(std::uint64_t now);
+    /// One cast of yours at `at_ms`: the lock's start; the press waiting for
+    /// it confirmed, or the timers given back to the rotation.
+    void pace_cast(std::uint64_t at_ms, std::uint32_t skill, std::uint64_t now);
+    /// The skills paced: the press waiting for its cast seen to -- pressed
+    /// again, or skipped -- then, the lock over, the next key of the round.
+    /// After the potions and the keys on their timers.
+    void run_paced(const MacroConfig& cfg, std::uint64_t now);
+    /// A press of the rotation's that went out, of the pass's `i`-th key,
+    /// its key down at `at`: the gap after it, its timer armed as the timers
+    /// would have, its tally.
+    void pace_went(const MacroConfig& cfg, std::size_t i, std::uint64_t at);
+    /// The press waiting for its cast gone with no cast from it: the key
+    /// skipped this round, its cooldown's least learned once another casts.
+    void pace_skip();
+    /// The cursor past the press's key; a round ended there.
+    void pace_advance();
+    /// A key's turn in the round under way, and the round's end.
+    void pace_step(std::uint32_t keycode, PaceStatus::Turn turn);
+    void pace_round_end();
+    /// Into `mode` at `now`, the status to match.
+    void pace_set_mode(PaceStatus::Mode mode, std::uint64_t now);
+    void pace_publish();
+    /// Once a minute while cast_paced is on: "Paced: ...".
+    void log_paced(std::uint64_t now);
+    /// A run's start: the rotation from its first key, off until its first
+    /// pass, the casts that came meanwhile taken as the lock's start only.
+    /// What was learned -- the lock, each key's last cast and cooldown -- is
+    /// the game's, and stays.
+    void pace_arm(std::uint64_t now);
     /// Once a minute while a potion key was pressed, or held for anything but
     /// its reading being above the mark: one line of what each potion key did
     /// -- presses, and the seconds spent in each reason, which add up to the
@@ -755,6 +966,9 @@ private:
     }
     /// Whether that is still so, asked without trying a press.
     bool still_refused(const MacroConfig& cfg, Refused why) const;
+    /// A press of the cast-paced rotation's refused -- held, busy, the game
+    /// not in front, out of the world: no try; looked at again kGatePollMs on.
+    void pace_refused(Refused why, std::uint64_t now);
 
     /// One kind of potion's part of the timer pass, HP's, MP's or the pet's:
     /// when it is next looked at -- kGatePollMs after a press, kPotionRetryMs
@@ -949,6 +1163,90 @@ private:
     std::uint64_t     skill_log_ms_ = 0;
     std::uint64_t     skill_log_pressed_ = 0;
     Stats             skill_log_held_;
+
+    // ---- the cast-paced rotation: the timer pass's alone (arm()'s at a
+    // start), but for the ring, which note_own_cast writes from the capture
+    // thread, and the status, under pace_mutex_ ----
+
+    /// One slot of the ring: `version` odd while note_own_cast writes it;
+    /// `n` is which cast it holds, counted from 0.
+    struct CastSlot {
+        std::atomic<std::uint64_t> version{ 0 };
+        std::atomic<std::uint64_t> n{ 0 };
+        std::atomic<std::uint64_t> at_ms{ 0 };
+        std::atomic<std::uint32_t> skill{ 0 };
+    };
+    std::array<CastSlot, kCastRing> cast_ring_{};
+    std::atomic<std::uint64_t>      casts_noted_{ 0 };   ///< casts ever written to the ring
+    std::uint64_t                   casts_read_ = 0;     ///< of them, those the timer pass has taken
+
+    /// A key of the rotation's, found by which key it is (key_ids_).
+    struct PaceKey {
+        std::uint64_t id = 0;
+        std::uint32_t keycode = 0;          ///< as it was last looked at, for the log
+        std::uint64_t last_cast_ms = 0;     ///< its last cast confirmed; 0 for none
+        std::uint32_t skill = 0;            ///< ... and that cast's skill
+        std::uint64_t floor_ms = 0;         ///< its cooldown is longer than this, as learned; 0 none
+        int           floor_uses = 0;       ///< turns passed over by it since it was learned or checked
+        std::uint64_t candidate_ms = 0;     ///< a floor from its last skip, until another key casts ...
+        std::uint64_t candidate_at = 0;     ///< ... from that skip's last key-down
+        std::uint64_t seen_ms = 0;          ///< a floor seen once and not yet taken; a second within kPaceSeenMs takes it; 0 none
+        std::uint64_t seen_at = 0;          ///< ... when it was seen
+        std::uint8_t  history = 0;          ///< its last kPaceSuspectTurns turns: 1 for a first press dropped or a skip
+        std::uint64_t skipped = 0;          ///< this minute: turns with no cast, learned or pressed
+        std::uint64_t skipped_learned = 0;  ///< ... of them, passed over without a press
+        bool          late = false;         ///< skipped on a turn, and no first press cast since: its re-press waits out the longest lock
+    };
+    std::vector<PaceKey> pace_keys_;
+    PaceKey& pace_key(std::uint64_t id);
+    /// The press waiting for its cast: which key, where in the rotation of
+    /// `n` keys, its key-down and key-up, the re-press's key-down (0 before
+    /// it), whether it went at the lock's guessed end, and whether it is a
+    /// floor's check, pressed once only.
+    struct PacePress {
+        bool          active = false;
+        std::uint64_t id = 0;
+        std::uint32_t keycode = 0;
+        std::size_t   pos = 0;
+        std::size_t   n = 0;
+        std::uint64_t down_ms = 0;
+        std::uint64_t up_ms = 0;
+        std::uint64_t again_ms = 0;
+        bool          at_lock = false;
+        bool          check = false;
+    };
+    PacePress        pace_press_;
+    PaceStatus::Mode pace_mode_ = PaceStatus::Mode::Off;
+    std::uint64_t    pace_mode_ms_ = 0;         ///< since when in it
+    std::size_t      pace_cursor_ = 0;          ///< the place in the rotation looked at next
+    std::uint64_t    pace_cursor_id_ = 0;       ///< the key there, so a list changed keeps its place; 0 unknown
+    std::uint32_t    pace_lock_ms_ = kPaceLockStartMs;
+    int              pace_clean_ = 0;           ///< first presses cast at the lock's guessed end since arm(), the last step down or the last re-press cast; skips and late ones leave it
+    std::uint16_t    pace_drops_ = 0;           ///< the last kPaceDropWindow first presses at the guess: 1 dropped, cast on its re-press
+    bool             pace_others_ = false;      ///< cast_paced on, but the hunter or the sequence presses keys too: off
+    bool             pace_prev_dropped_ = false;    ///< the last key confirmed dropped its first press
+    std::uint64_t    pace_prev_id_ = 0;         ///< ... which key it was
+    std::uint64_t    pace_last_cast_ms_ = 0;    ///< your last cast, any; the lock counts from it
+    std::uint64_t    pace_unanswered_ms_ = 0;   ///< the first key-down since your last cast; 0 none
+    std::uint64_t    pace_unanswered_n_ = 0;    ///< presses out since then
+    std::uint64_t    pace_retry_ms_ = 0;        ///< after a refusal, nothing is pressed before this
+    std::uint64_t    pace_buff_ms_ = 0;         ///< a buff's press, whose cast is waited for; 0 none
+    std::uint64_t    pace_rounds_ = 0;          ///< whole rounds since the start
+    std::vector<PaceStatus::Step> pace_round_;  ///< the turns of the round under way
+    /// The minute's counts, for log_paced.
+    struct PaceMinute {
+        std::uint64_t rounds = 0;
+        std::uint64_t confirmed = 0;
+        std::uint64_t on_repress = 0;       ///< of them, cast on the re-press
+        std::uint64_t repressed = 0;
+        std::uint64_t other = 0;            ///< casts of yours no press of the rotation's was waiting for
+        std::uint64_t fallback_ms = 0;
+    };
+    PaceMinute    pace_minute_;
+    std::uint64_t pace_log_ms_ = 0;
+    std::uint64_t pace_fallback_from_ = 0;      ///< the fallback time counted up to here
+    mutable std::mutex pace_mutex_;
+    PaceStatus         pace_status_;            ///< under pace_mutex_
 
     mutable std::mutex stats_mutex_;
     Stats              stats_;

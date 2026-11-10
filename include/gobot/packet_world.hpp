@@ -513,6 +513,12 @@ public:
     /// relink(). What a jump's take-off, flight and landing are judged by.
     std::vector<OwnTrace> own_since(std::uint64_t ms) const;
 
+    /// Your id while it is locked -- what a report of yours is told from
+    /// another client's by -- or none: no report of yours since the start, a
+    /// reset(), a relink() or the last map entry. For your own casts, handed
+    /// to the macro's cast-paced rotation (2026.11.08). Nothing else changes.
+    std::optional<std::uint32_t> own_id() const;
+
     /// The opcodes it reads, for a capture's opcode filter: your reports
     /// 0x0027, 0x0028, 0x0029, 0x002A and 0x0031; the monsters' 0x0038, 0x003F
     /// and 0x0042; and the map entry, 0x0086.

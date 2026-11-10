@@ -1154,6 +1154,23 @@ void test_map_loading() {
           "no capture on the window's process, not with the server quiet, not with no entry");
 }
 
+// ------------------------------------- the MP caption's leading 1 (2026.11.08)
+
+void test_lost_leading_one() {
+    section("The MP figure short of its leading 1 -- 4798 for 14798 -- told, for the caption's picture (2026.11.08)");
+
+    check(figure_lost_leading_one(4798, 14798) && figure_lost_leading_one(6209, 16209) &&
+              figure_lost_leading_one(798, 1798) && figure_lost_leading_one(500, 10500),
+          "the packets' value with its leading 1 gone: 4798 for 14798, 6209 for 16209, 798 for 1798, 500 for "
+          "10500");
+    check(!figure_lost_leading_one(4798, 24798) && !figure_lost_leading_one(14798, 14798) &&
+              !figure_lost_leading_one(14788, 14798) && !figure_lost_leading_one(1479, 14798) &&
+              !figure_lost_leading_one(142, 14236) && !figure_lost_leading_one(-1, 14798) &&
+              !figure_lost_leading_one(4, 14) && !figure_lost_leading_one(8305, 8307),
+          "never another digit lost, a trailing one (1479, 142 of 14236), a value off by ten or two, no figure, "
+          "or a value under 100");
+}
+
 // ------------------------------------------------------------ the wiring
 
 #ifdef GOBOT_SOURCE_DIR
@@ -1250,6 +1267,26 @@ void test_vitals_wiring() {
               has(minute, ", same moment "),
           "the minute line counts the agreements 0x0051 caught up with and the disagreements of one HUD moment again");
 
+    // 2026.11.08: the MP caption read short of its leading 1, kept once a
+    // session as a picture -- named apart from vitals_debug's own frames,
+    // whose rotation never takes it -- and cut and written off this thread.
+    const std::string keep = body(part, "    void keep_mp_caption(");
+    const std::size_t async = keep.find("std::async(std::launch::async,");
+    const auto in_async = [&keep, async](const char* part_of) {
+        const std::size_t at = keep.find(part_of);
+        return async != std::string::npos && at != std::string::npos && at > async;
+    };
+    check(has(checking, "if (!part.caption_kept)") &&
+              has(checking, "figure_lost_leading_one(d.read.figure, d.packet.value)") &&
+              has(checking, "part.keep_mp_caption(vitals_, d.read.figure, d.packet.value, d.read.read_at_ms);") &&
+              has(keep, "caption_kept = true;") && in_async("exe_relative(\"vitals_debug\")") &&
+              in_async("save_png(cut,") && in_async("make_folder(dir)") && in_async("Frame cut;") &&
+              has(keep, "\"mp_caption_%Y%m%d_%H%M%S.png\"") &&
+              !has(keep, "vitals_%") && !has(keep, "remove_file(") &&
+              has(keep, "VitalsReader::caption_box(bar)"),
+          "packets_vitals.cpp: the MP bar and its caption kept once, off GoBot's thread, as "
+          "vitals_debug\\mp_caption_*.png, never in the rotation of vitals_*.png");
+
     // Only figures a read made out itself go to the check: one in the
     // caption's shadow goes by the kept ones (shadowed_percent), at their
     // percentage exactly, which alone would pass them off as its own.
@@ -1342,5 +1379,6 @@ void test_vitals_trust(void (*check_fn)(bool, const std::string&), void (*sectio
     test_rest();
     test_world_window();
     test_map_loading();
+    test_lost_leading_one();
     test_vitals_wiring();
 }

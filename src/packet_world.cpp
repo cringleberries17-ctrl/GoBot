@@ -1072,6 +1072,12 @@ std::vector<PacketWorld::OwnTrace> PacketWorld::own_since(std::uint64_t ms) cons
     return out;
 }
 
+std::optional<std::uint32_t> PacketWorld::own_id() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!fix_.id_locked) return std::nullopt;
+    return fix_.me.id;
+}
+
 MapChangeBy map_change_by(const PacketWorld::Place& place, bool on_game, std::uint64_t last_server_ms,
                           std::uint64_t now) {
     if (place.entries == 0 || !on_game) return MapChangeBy::Minimap;

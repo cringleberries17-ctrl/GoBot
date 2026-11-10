@@ -1635,6 +1635,7 @@ struct PretendRun {
     std::vector<std::string> said;
     std::vector<QuestCall> calls;           ///< what each round was told
     std::uint64_t now = 1'000'000;
+    bool board = false;                     ///< a not-now is for the check-in board
 
     PretendRun() {
         gates.window = true;
@@ -1648,6 +1649,10 @@ struct PretendRun {
             const std::size_t i = std::min<std::size_t>(static_cast<std::size_t>(rounds),
                                                         script.empty() ? 0 : script.size() - 1);
             r.outcome = script.empty() ? QuestOutcome::TurnedOn : script[i];
+            if (board && r.outcome == QuestOutcome::NotNow) {
+                r.board = true;
+                r.why = "đang có bảng Sự kiện và điểm danh";
+            }
             r.maybe_open = maybe_open;
             ++rounds;
             round_at.push_back(now);
@@ -2280,6 +2285,9 @@ void test_postpone_log() {
               contains(body, "GB_INFO(\"Quest: put off -- %s\", vi.c_str());") && contains(body, "say_quest(vi);"),
           "the tell: a \"Chờ:\" line logged when it is not the last one logged; anything else said ends the wait; "
           "the tab told every time");
+    check(contains(body, "const bool known = !noted.empty() && vi.rfind(noted, 0) == 0;") &&
+              contains(body, "if (!known) GB_INFO(\"Quest: put off -- %s\", vi.c_str());"),
+          "a spoiled quiet second's wait, the not-now just logged plus its next look, is not logged a second time");
     check(contains(src, "waited_for = \"Chờ: \" + why + \".\";") &&
               src.find("waited_for = \"Chờ: \" + why + \".\";") > src.find("GB_INFO(\"Quest: not now -- %s\""),
           "a not-now logged after the hold is marked as said, so the wait it starts is not logged twice");
@@ -2431,6 +2439,71 @@ void test_texts() {
     }
 }
 
+/// The "Sự kiện và điểm danh" board (checkin_board.hpp) up as a round begins:
+/// it covers the middle of the screen, where the window opens, and a key or a
+/// click would go into it.
+void test_board() {
+    section("Quick quest: the check-in board up -- nothing pressed, looked at again a minute later (D17)");
+    if (!have_art()) return;
+    const Art& a = art();
+    if (!a.pictures.board_title.valid()) {
+        skip("the check-in board's title (%s) is not installed here\n", kCheckinBoardTitleFile);
+        return;
+    }
+    const Frame& title = a.pictures.board_title;
+    {
+        // Where a board at 200,60 has its title.
+        PretendQuest p;
+        paste(p.base, title, 498, 63);
+        const QuestResult r = p.run();
+        check(r.outcome == QuestOutcome::NotNow && r.board && !r.looked && p.keys.empty() && p.clicks.empty() &&
+                  p.moves.empty() && contains(r.why, "bảng Sự kiện và điểm danh") &&
+                  contains(r.log, "the check-in board is up, its title at 498,63"),
+              "the board up on the first look: not now, no key, no click, no move -- " + r.log);
+        check(!r.failed() && !r.done() && r.keys_pressed == 0 && r.clicks == 0,
+              "not a failure, and nothing said of the window, which was not looked for");
+    }
+    {
+        // The window open already under it: left as it is too.
+        PretendQuest p;
+        p.open = true;
+        paste(p.base, title, 498, 63);
+        const QuestResult r = p.run();
+        check(r.outcome == QuestOutcome::NotNow && r.board && p.inputs() == 0 && p.open,
+              "with the window open: nothing pressed, the window left");
+    }
+    {
+        // Without the title's picture the board is not looked for: the round
+        // as before.
+        QuestPictures without = a.pictures;
+        without.board_title = Frame{};
+        PretendQuest p;
+        const QuestResult r = p.run_with(without);
+        check(r.outcome == QuestOutcome::TurnedOn && !r.board, "no picture of the title: the round as before");
+    }
+    {
+        // A timed round that found it waits a minute -- not the 30 s of the
+        // other not-nows -- is said, and is not counted against anything.
+        QuestSettings s;
+        s.enabled = true;
+        PretendRun p;
+        p.board = true;
+        p.script = { QuestOutcome::NotNow };
+        p.run.start(p.now, s);
+        p.go(40'100);
+        const std::uint64_t next = p.run.next_at();
+        check(p.rounds == 1 && next >= p.now + 59'000 && next <= p.now + 60'100 && !p.said.empty() &&
+                  contains(p.said.back(), "Chờ: đang có bảng Sự kiện và điểm danh") && p.alerts.empty() &&
+                  p.run.schedule().failures() == 0 && QuestRun::kBoardMs == 60'000,
+              fmt("put off %llu s, said, no alert, no failure -- \"%s\"",
+                  static_cast<unsigned long long>((next - p.now) / 1000), p.said.empty() ? "" : p.said.back().c_str()));
+        p.board = false;
+        p.script = { QuestOutcome::NotNow, QuestOutcome::TurnedOn };
+        p.go(60'100);
+        check(p.rounds == 2, "and a round again once the minute is over");
+    }
+}
+
 } // namespace
 
 void test_quest(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -2451,4 +2524,5 @@ void test_quest(void (*check_fn)(bool, const std::string&), void (*section_fn)(c
     test_postpone_log();
     test_probe_and_frames();
     test_texts();
+    test_board();
 }

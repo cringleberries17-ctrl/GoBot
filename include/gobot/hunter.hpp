@@ -21,6 +21,8 @@
 
 namespace gobot {
 
+class IniFile;
+
 /// Where the hunter's positions may come from: "Vị trí từ gói tin".
 ///
 /// Like HunterConfig::enabled, the hunter itself never reads it. The GUI
@@ -368,6 +370,10 @@ struct HunterConfig {
 
     bool load(const std::string& path);
     bool save(const std::string& path) const;
+    /// What save() writes into [Hunt], put into `ini`: over the file's own
+    /// keys when save() calls it, or into an empty one to compare two configs
+    /// without a file (settings_changes, gobot/macro.hpp).
+    void store(IniFile& ini) const;
 };
 
 /// Where the game's packets put your character in their world, for the

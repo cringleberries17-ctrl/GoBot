@@ -132,6 +132,390 @@ chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2
 Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
 khác chưa được thử trên game thật.
 
+- Mới trong bản 2026.11.09 (Tự mua bình không đếm bình nữa, và tự tắt bảng
+  Sự kiện và điểm danh, theo điều bạn báo ngày 09/11; chưa thử trên game
+  thật):
+  + Việc cần làm trước: muốn GoBot tự tắt bảng điểm danh thì đánh dấu ô "Tự
+    đóng thông báo" (dòng cuối của "Bot sẽ làm gì", thẻ Đánh quái) MỘT lần.
+    Ô này giao ra tắt sẵn, và app.ini của bạn đang để tắt; không đánh dấu
+    thì không có gì tắt bảng (xem dưới).
+  + Bạn báo: "cần sửa 1 chút phần tự mua bình, không cần phải đếm có bao
+    nhiêu bình nữa, tới giờ sẽ tự mua số slot đã chỉ định, khi có thông báo
+    túi đồ đã đầy thì dừng lại và tắt", và "Khi login bị hiển thị bảng daily
+    checkin, cần ấn esc để tắt bảng này. Bảng này sẽ hiện mỗi khi login và
+    khi qua 00:00h".
+  + Tự mua bình không đếm bình nữa: không xem ngăn Tiêu Dùng, không còn lần
+    mua thử một lần mỗi loại rồi đếm lại, không còn thôi mua khi mua mà ô
+    không tăng, không còn bỏ qua lần tới giờ theo gói tin. Tới giờ (ô "mua
+    mỗi N phút", trước là "kiểm tra mỗi"), GoBot mua đúng số ô bạn đặt trên
+    thẻ cho mỗi loại, ở hai dòng mới "Thịt bò khô (HP): mỗi lần mua [N] ô" và
+    "Rượu lá tre (MP): mỗi lần mua [N] ô", từ 0 tới 20 (0 là không mua loại
+    đó). Mỗi ô là một lần mua 100 bình, như trước: bấm đúp vào bình trong cửa
+    hàng, gõ 100 vào hộp số lượng (game để sẵn số 1 nên gõ thêm "00"), đọc
+    lại thấy đúng 100 mới bấm Xác Nhận.
+  + Số ô của bạn: trash.ini của bạn có "mua tới" 10 và 10 (buy_hp_to,
+    buy_mp_to), nên bản này mua 10 ô Thịt bò khô và 10 ô Rượu lá tre mỗi
+    lần, cho tới khi bạn đổi số trên thẻ (đổi rồi thì GoBot ghi dòng mới
+    buy_hp_slots hay buy_mp_slots; dòng cũ để nguyên nhưng không còn được
+    đọc). Mức "dưới" cũ không còn dùng (trừ khi là 0: không mua loại đó).
+    trash.ini của bản zip đặt 3 và 3.
+    Lưu ý: 1 ô Thịt bò khô khoảng 140.000 vàng, nên 10 ô mỗi giờ là khoảng
+    1,4 triệu vàng; ngăn Tiêu thụ của bạn đang dùng khoảng 31–36 trên 60–72
+    ô, nên 10 + 10 mỗi giờ có thể làm đầy túi sau 1–2 giờ, và khi đó bùa rơi
+    ra cũng không nhặt được nữa. Muốn mua ít hơn thì hạ số trên thẻ.
+  + Thứ tự mua: xen kẽ HP, MP, HP, MP... (thông báo túi đầy là chung cho cả
+    ngăn Tiêu thụ, nên mua hết một loại trước có thể không còn chỗ cho loại
+    kia). Mỗi lượt theo giờ giữ phím mua tối đa 10 lần (kỹ năng, bình và buff
+    tạm dừng trong lúc đó), phần còn lại mua tiếp sau 1 phút: 10 + 10 là hai
+    lượt cách nhau 1 phút. Mỗi lượt có hạn 30 giây cộng 6 giây mỗi lần mua
+    (tối đa 300 giây; trước là 240 giây).
+  + Túi đầy (câu 1, bạn chọn (a)): khi game báo "Túi đồ [Tiêu thụ] đã đầy",
+    GoBot bấm Xác Nhận của thông báo (chỉ coi là đã đóng khi hai lần nhìn
+    cách nhau 0,3 giây đều không còn thấy), đóng cửa hàng và dừng lượt mua
+    đó, cả MP cũng không mua tiếp. Ô "Tự mua bình" VẪN CÓ DẤU: tới giờ sau
+    GoBot mua lại. Lần mua mà thông báo hiện ngay sau đó không tính là đã
+    mua. GoBot không bao giờ bấm ESC khi thông báo này đang mở; bấm 2 lần mà
+    thông báo không tắt thì GoBot thôi, ghi lý do, giữ ảnh shop_full_stuck,
+    và không giữ phím vì thông báo đó (chỉ giữ khi cửa hàng còn mở sau nó).
+  + Game hiện một thông báo khác thay cho hộp số lượng (có thể là túi đầy mà
+    GoBot không đọc ra chữ): GoBot bấm Xác Nhận của nó, dừng như túi đầy, và
+    giữ ảnh shop_message trong trash_debug. Lần mua không rõ có thành công
+    không (đã bấm Xác Nhận mà không thấy hộp số lượng đóng, hay có thông báo
+    hiện sau đó) thì tính là đã mua và dừng lượt đó: không bao giờ mua hai
+    lần. Lượt có lỗi thì chờ 10 phút; hai lượt liền có lỗi thì GoBot bỏ phần
+    còn lại, tới giờ sau mua lại. Thông báo lạ đó còn mở trên cửa hàng (bấm
+    Xác Nhận 2 lần không tắt, hay hiện sau khi mua) thì GoBot không bấm ESC
+    vào nó: cửa hàng để nguyên, kỹ năng, bình và buff tạm dừng cho tới khi
+    bạn đóng thông báo và cửa hàng. Lượt bị cắt vì máu xuống dưới mốc bình
+    máu thì phần còn lại mua tiếp sau 1 phút, như các lượt khác.
+  + Giờ mua được ghi vào %LOCALAPPDATA%\GoBot\shop_clock.txt TRƯỚC khi bấm
+    gì, như giờ của bùa: tắt hay sập GoBot rồi mở lại thì GoBot chờ phần còn
+    lại (ít nhất 45 giây, nhiều nhất một khoảng "mua mỗi"), không mua sớm.
+    Không ghi được file này thì không mua. Bỏ dấu rồi đánh dấu lại ô Tự mua
+    bình thì cũng chờ tới giờ đã ghi (ít nhất 45 giây), không mua lại ngay.
+    Lượt bị DỪNG LẠI cắt ngang thì phần còn lại được mua 45 giây sau lần BẮT
+    ĐẦU sau. Hai thư mục GoBot trên cùng một tài khoản Windows dùng chung
+    file này, như charm_clock.txt.
+  + "Mua ngay": mua ngay đủ số ô đã đặt trong MỘT lượt (tối đa 40 lần mua),
+    không chờ tới giờ; giờ mua kế tiếp tính lại từ lúc đó. Bấm mà thẻ báo
+    chờ (máu thấp, bạn đang dùng chuột...) thì không đổi gì: giờ mua và phần
+    còn lại của lượt trước giữ như cũ. Hạ một số trên thẻ xuống dưới phần còn
+    lại thì GoBot chỉ mua tới số đó và chờ tới giờ, không mua lại sớm. Cả hai
+    số là 0 thì
+    thẻ báo "Cả hai số ô đều là 0: không có gì để mua." "Thử mua (không mua
+    gì)" như trước: bấm đúp từng món, thấy hộp số lượng thì Hủy Bỏ, không gõ,
+    không mua, không đổi giờ mua; gặp thông báo túi đầy thì báo "Thử mua: game
+    báo túi đồ [Tiêu thụ] đã đầy." Lần đầu: bấm Thử mua, rồi đặt 1 ô mỗi loại
+    và bấm Mua ngay, ngồi xem (bước 12 ở mục 6), rồi mới đặt số thật.
+  + Tự mua bình chỉ đọc ngăn Khác (để tìm Người Giữ Sân): dải ngăn chưa rõ
+    thì nhìn lại tối đa 8 lần, như Dùng bùa với ngăn Tiêu Dùng; vẫn không
+    chắc thì dừng, giữ ảnh tab_unsure_shop_other. Gói tin chỉ ghi vào log số
+    bình và số ô Tiêu Dùng trước và sau lượt mua, không quyết định gì.
+  + Bảng Sự kiện và điểm danh (câu 4, bạn chọn (c)): gộp vào ô "Tự đóng
+    thông báo", không có ô riêng. Khi ô này có dấu và bot đang chạy (đã bấm
+    BẮT ĐẦU), bảng hiện (lúc vào game, lúc qua 00:00) và đứng yên 3 giây thì
+    GoBot bấm ESC một lần, tức khoảng 3–5 giây sau khi bảng hiện; thông báo
+    "Bạn đã nhận được vật phẩm thưởng điểm danh..." nếu có thì được bấm Xác
+    Nhận trước. Không bao giờ bấm nút X hay bấm vào trong bảng. Ô này vẫn
+    đóng thông báo nhận quà điểm danh, Yêu Quái Bách Khoa và menu ESC do
+    GoBot mở, như trước, với mọi điều kiện cũ: game ở trên cùng, không có
+    cửa sổ nào khác, không ai đụng chuột hay bàn phím, máu không thấp; các
+    phím khác chờ tối đa 2 giây. Bấm ESC 2 lần trong 10 phút mà bảng vẫn còn
+    thì GoBot để yên và báo "Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm
+    ESC: GoBot để yên, bạn tắt giúp." Dưới nút BẮT ĐẦU ghi "Tự đóng thông
+    báo: đang bật, đã đóng N (bảng điểm danh: M)."
+  + Ô "Tự đóng thông báo" không có dấu thì không gì tắt bảng. Khi bảng đang
+    hiện, Tự dọn rác, Dùng bùa, Tự mua bình và Làm nhiệm vụ nhanh không bấm
+    gì, chờ 1 phút rồi xem lại (không tính là lỗi), và thẻ ghi "Đang có bảng
+    Sự kiện và điểm danh: việc túi đồ chờ 1 phút. Bật "Tự đóng thông báo"
+    (thẻ Đánh quái) để GoBot tự tắt bảng điểm danh." Bảng hiện lúc đang mua
+    thì GoBot thôi mua và đóng cửa hàng như thường: bảng che cửa hàng thì
+    ESC của cửa hàng tắt bảng, rồi GoBot bấm Thoát. Bảng hiện đè lên hộp số
+    lượng (đang gõ hay đã gõ 100) thì GoBot không bấm gì nữa, kể cả ESC:
+    kỹ năng, bình và buff tạm dừng cho tới khi bạn tắt bảng, bấm Hủy Bỏ trên
+    hộp và đóng cửa hàng.
+  + Ảnh để kiểm tra (khi ô có dấu): GoBot lưu ảnh màn hình game vào thư mục
+    popup_debug cạnh GoBot, tên checkin_..._first (lần đầu thấy bảng trong
+    ngày), _after (sau khi tắt bảng), _in15 (15 giây sau khi GoBot vào lại
+    game), _start15 (15 giây sau BẮT ĐẦU) và _midnight (lần nhìn đầu tiên từ
+    00:00:30), giữ 20 ảnh mới nhất. "Thử xem" cạnh ô đó cũng nói có thấy
+    bảng không, và lưu ảnh probe_....png.
+  + Câu trả lời của bạn ngày 09/11, và hai câu chưa hỏi mà bản này làm theo
+    cách (a); báo lại nếu muốn khác:
+    1. Túi đầy: (a) đóng thông báo và cửa hàng, dừng lượt đó; Tự mua bình
+       vẫn có dấu, tới giờ sau mua lại.
+    2. Số ô mỗi lần: "mua theo setting", tức số đặt trên thẻ (của bạn 10 +
+       10, lấy từ "mua tới" cũ; bản zip đặt 3 + 3).
+    3. Phím G và F uống Thịt bò khô và Rượu lá tre: (a); bản này chỉ mua hai
+       loại này, như trước.
+    4. Tắt bảng điểm danh: (c) gộp vào ô "Tự đóng thông báo".
+    5. (Chưa hỏi) Bot đang dừng mà vào game (kể cả bằng "Phím vào game
+       ngay"): (a) không tắt bảng. GoBot chỉ tắt bảng khi bot đang chạy; bot
+       dừng thì không bấm gì.
+    6. (Chưa hỏi) Bảng được nhận ra bằng tiêu đề "Sự kiện và điểm danh" (lấy
+       từ chính file của game) và tắt bằng ESC, không bấm nút X: (a). Bảng
+       của bạn trông khác, hay một lần ESC không tắt được: báo lại, kèm ảnh
+       trong popup_debug.
+  + Log mới trong gobot_gui.log: "Trash: shop plan HP 10 + MP 10 (owed
+    10+10, at most 10 a hold); clock saved, next plan 23:15", "Trash: shop
+    purchase 1/10 HP -- bought (100 read back)", "Trash: shop full message at
+    ... closed by its label (seen gone twice, 1 click(s))" (hay "... NOT
+    closed after 2 click(s), no ESC; the keys are not held for it"), "Trash:
+    shop lone message at ...", "Trash: shop done -- bought 5+5, unsure 0,
+    full no; owed 5+5; next part 60 s on", "Trash: shop -- 2 troubles in a
+    row: owed dropped until the next plan ...", "Bag (packets): before the
+    shop ..." và "Bag (packets): after the shop ...", "Trash: the check-in
+    board is up -- the pass put off 60 s", "Quest: the check-in board is up
+    at ...", "Popups: the check-in board (Sự kiện và điểm danh) is up at
+    ...", "Popups: closed the check-in board at ... with ESC", "Popups: kept
+    ...\popup_debug\checkin_..." và, mỗi lần mở GoBot, một dòng "Checkin: a
+    title search on ... took N ms".
+    Thử như bước 12 ở mục 6.
+
+- Mới trong bản 2026.11.08 (kỹ năng ra không mượt, theo điều bạn báo sau lần
+  đánh ở chiến trường tối 08/11; chưa thử trên game thật):
+  + Bạn báo "phần sử dụng skill đang không mượt": "khựng giữa các chiêu" và
+    "chiêu ra lộn xộn". Lần đó (22:12–22:43, chiến trường t1981_s2) bạn chỉ
+    chạy macro, Tự đánh quái tắt, không đụng chuột hay bàn phím; A và S là
+    chiêu đánh, không phải buff. Log lần đó cho thấy những điều dưới đây;
+    cách sửa và những gì nên đổi ngay ở sau.
+  + Chiêu ra lộn xộn (lý do chính): mỗi phím kỹ năng được bấm theo giờ riêng
+    của nó, nên giờ đặt cho phím nào thì phím đó được bấm nhiều chừng ấy. Z
+    đặt 0,5 giây chiếm khoảng 27% số lần bấm; X, C, V, B và Space đặt 1
+    giây, mỗi phím khoảng 13%; S và A đặt 3 giây, mỗi phím chỉ khoảng 4%.
+    GoBot bấm khoảng 390 lần mỗi phút, mà game chỉ ra khoảng 77 chiêu mỗi
+    phút: trong lúc nhân vật đang ra một chiêu (khoảng 0,65–0,76 giây), game
+    bỏ qua phím được bấm, không giữ lại để ra sau. Phím nào xuống đầu tiên
+    ngay sau khi chiêu trước xong thì chiêu đó ra, nên chiêu nào ra là do
+    may rủi: Z ra khoảng 3 giây một lần, còn S và A trung bình 17–26 giây
+    mới ra một lần.
+  + Khựng: từ 22:12 tới 22:20, chính GoBot dừng mọi phím (kỹ năng, bình,
+    buff) 16 lần, cộng lại 26,9 giây. Tự mua bình thử "1 giây không ai dùng
+    chuột, bàn phím" khoảng 31 giây một lần, và 10 lần thấy "có người dùng
+    chuột hoặc bàn phím": mỗi lần mọi phím dừng khoảng 1 giây. Dùng bùa
+    (2,4–4,9 giây, mỗi lần 8 giây sau BẮT ĐẦU) và Làm nhiệm vụ nhanh (1–2,5
+    giây) cũng dừng phím, chỉ trong khoảng đó. Từ 22:20:43, khi bạn bỏ dấu
+    Tự mua bình, Tự dọn rác và Dùng bùa, GoBot không dừng phím lần nào nữa
+    và bấm liên tục tới cuối: chỗ khựng sau đó, nếu có, là ở phía game (hồi
+    chiêu riêng của từng chiêu, game ra chiêu lúc nhanh lúc chậm, từ 72 tới
+    83 chiêu mỗi phút), mà log lần đó không đo được. Lúc bạn bấm DỪNG LẠI
+    hay F10, hay bấm vào cửa sổ GoBot (như lúc đổi phím bình MP từ H sang F,
+    khoảng 22:14:20), mọi phím cũng dừng tới khi game lại ở trên cùng.
+  + "Dùng skill tuần tự" không làm gì trong lần đó: ô này, và "Chỉ khi đang
+    đánh quái", chỉ có tác dụng khi Tự đánh quái đang chạy. Macro chạy một
+    mình thì mỗi phím vẫn bấm theo giờ của nó. Chữ "Như GoC" cũ trên màn
+    hình làm hiểu lầm; nay đã sửa lời (xem dưới).
+  + A và S có chữ "(buff)" trong log chỉ là cách ghi log: GoBot vẫn bấm A và
+    S như hai chiêu 3 giây, và gói tin cũng cho thấy chúng không phải buff.
+    Chữ đó, và khoảng 30 dòng "Buff (packets) ... maybe not cast" mỗi phút,
+    đến từ hai dòng buff đã tắt mà còn giữ phím A và S (tới 22:40:19).
+  + MP đọc sai: từ khoảng 22:15, chữ số MP trên màn hình bị đọc mất số 1 ở
+    đầu (4798 thay vì 14798 theo gói tin), nên GoBot tưởng MP chỉ còn 25–38%
+    và bấm bình MP (phím F) khoảng 40 lần mỗi phút, uống phí khoảng 5–16
+    bình mỗi phút. Điều này không làm chiêu khựng hay lộn xộn thấy được. Bản
+    này CHƯA sửa cách đọc: đọc đúng thì GoBot uống theo MP thật, và với mốc
+    59% MP có thể xuống thấp tới mức chiêu không ra vì thiếu MP, nên phải
+    chờ bạn chọn mốc MP (câu 7 ở dưới). Bản này chỉ lưu một ảnh thanh MP để
+    sửa cho đúng (xem "Log mới" ở dưới).
+  + Đổi trong bản này. Ô mới "Ra chiêu theo vòng" để trống (mặc định) thì
+    macro bấm phím y như bản 2026.11.05b: cùng phím, cùng thứ tự, cùng lúc.
+    Tự mua bình, Làm nhiệm vụ nhanh và Dùng bùa thì chờ khác đi (ở dưới);
+    còn lại chỉ là lời trên màn hình và log.
+  + Ô mới "Ra chiêu theo vòng (chờ game ra chiêu rồi mới bấm chiêu kế)" (thử
+    nghiệm, mặc định KHÔNG có dấu) trong cửa sổ Kỹ năng (nút "Chi tiết…" ở
+    dòng Tự dùng kỹ năng), sau "Dùng skill tuần tự" và "Tốc độ bấm kỹ năng".
+    Màn hình Nâng cao, phần "Timed keys", có ô y như vậy (ở đó phải bấm
+    Apply now hay Save macro). Có dấu: các phím kỹ năng đang bật được bấm
+    lần lượt theo thứ tự trong danh sách (của bạn: Z X C V B Space S A, rồi
+    lại từ đầu), mỗi phím một lần mỗi vòng (câu 1, cách (a)); phím kế chỉ
+    được bấm khi game đã ra chiêu trước (GoBot thấy gói tin ra chiêu của
+    chính nhân vật bạn, nên cần Npcap) và hết lúc khóa của chiêu đó. Lúc
+    khóa GoBot tự đoán: bắt đầu 700 ms, rồi tự chỉnh trong khoảng 550–900
+    ms. Giờ của mỗi phím (cột "Hồi chiêu (giây)") không còn là nhịp bấm, mà
+    chỉ là khoảng chờ ngắn nhất giữa hai lần ra chiêu của chính phím đó:
+    phím chưa tới giờ thì vòng đó bỏ qua nó (với giờ 0,5–3 giây như của bạn,
+    vòng nào cũng tới lượt mọi phím). Mô phỏng theo số đo của log 08/11: vẫn
+    khoảng 77–83 chiêu mỗi phút, mỗi chiêu khoảng 6 giây một lần theo đúng
+    thứ tự, mà GoBot chỉ bấm khoảng 80 lần mỗi phút thay vì 390.
+  + Phím bấm mà sau 160 ms chưa thấy chiêu ra (game đã bỏ qua phím) thì
+    GoBot bấm lại phím đó một lần; vẫn không ra trong 220 ms thì vòng đó bỏ
+    qua phím đó (thường là chiêu còn hồi trong game). Phím bị bỏ qua như vậy
+    hai lần trong một phút thì GoBot học hồi chiêu của nó để lần sau bỏ qua
+    mà không bấm (một lần thôi thì không học: game khựng một chút, như lúc
+    bị choáng, làm mọi phím trong lúc đó bị bỏ qua). Không bao giờ bấm lại
+    quá một lần. Bình vẫn luôn được bấm trước. Buff vẫn theo giờ riêng,
+    nhưng buff tới giờ đúng lúc một phím kỹ năng đang chờ chiêu ra, hay
+    chiêu vừa ra chưa xong, thì chờ chiêu đó xong (thường dưới một giây); kỹ
+    năng thì chờ buff ra xong. Không thấy gói tin ra chiêu nào trong 2 giây
+    trong khi vẫn bấm phím (ra khỏi game, vào làng, không bắt được gói tin)
+    thì GoBot tạm bấm theo giờ như khi bỏ dấu, thấy lại chiêu ra thì theo
+    vòng tiếp. Phím không bấm được vì game không ở trên cùng (hay GoBot đang
+    tạm dừng phím) thì không tính là một lần bấm; phím mà Windows không nhận
+    thì vòng đó qua phím đó.
+  + Ô này chỉ dùng khi Tự đánh quái tắt (macro chạy một mình): Tự đánh quái
+    đang chạy, hay chuỗi phím (Sequence, màn hình Nâng cao) đang bật, thì ô
+    này tạm không có tác dụng, mỗi phím bấm theo giờ như thường, và dưới ô
+    có dòng nhắc; với "Chỉ khi đang đánh quái" kỹ năng vẫn theo trận đánh
+    như trước (bản này chưa có vòng cho Tự đánh quái). Dưới ô có dòng cho
+    biết đang làm gì, ví dụ "Đang theo vòng — khóa chiêu ước 680 ms, 12
+    vòng." hay "Tạm theo giờ: chưa thấy gói tin ra chiêu nào của bạn.".
+    Cách bật: thẻ Đánh quái, dòng Tự dùng kỹ năng, nút "Chi tiết…", đánh
+    dấu ô đó (lưu ngay; bỏ dấu là về như cũ). macro.ini không có dòng
+    cast_paced thì coi như ô này không có dấu; sửa tay thì là
+    cast_paced=true trong phần [Macro], lúc GoBot đã tắt.
+  + Tự mua bình và Làm nhiệm vụ nhanh chờ lâu dần (câu 5, cách (a)): lần thử
+    theo giờ mà thấy có người dùng chuột hay bàn phím trong 1 giây đó thì
+    lần sau chờ 30 giây, rồi 2, 5 và 10 phút (không lâu hơn "kiểm tra mỗi"
+    của Tự mua bình hay số phút giữa hai lần làm nhiệm vụ, nhưng không dưới
+    30 giây). Trước đây luôn là 30 giây, nên khi tay để trên chuột thì cứ 31
+    giây mọi phím dừng khoảng 1 giây. Về lại 30 giây khi 1 giây đó qua yên,
+    khi bấm "Mua ngay", "Thử mua" hay "Làm ngay 1 lần", khi đánh dấu lại ô
+    đó, và (với nhiệm vụ) mỗi lần BẮT ĐẦU. Thẻ Nhiệm vụ ghi lúc thử lại, ví
+    dụ "Chờ: bạn đang dùng chuột hoặc bàn phím; thử lại sau 2 phút.". Log
+    ghi đã thấy gì (GoBot chỉ đọc, không bấm gì): "Shop: not now -- someone
+    is using the mouse or keyboard (held 1012 ms): the pointer moved 35 px
+    (812,440 -> 845,452); no mouse button held; in front: chrome.exe; the
+    next look in 120 s" và "Quest: the quiet second was not quiet -- ...";
+    "the pointer still at ..." là chuột không dời: một phím, bánh xe chuột,
+    hay chuột đi rồi về chỗ cũ.
+  + Giờ của Dùng bùa và Tự mua bình được giữ qua DỪNG LẠI rồi BẮT ĐẦU: trước
+    đây mỗi lần BẮT ĐẦU, GoBot xem bùa sau 8 giây và xem cửa hàng sau 45
+    giây, nên bật tắt nhiều lần là thêm nhiều lần dừng phím (log 08/11: 3
+    lần xem bùa, mỗi lần 8 giây sau BẮT ĐẦU, dừng phím 2,4–4,9 giây). Nay
+    giờ đã có được giữ, cả mức chờ lâu dần của Tự mua bình, nhưng vẫn không
+    sớm hơn 8 giây (bùa) hay 45 giây (cửa hàng) sau BẮT ĐẦU. Đánh dấu lại ô
+    Dùng bùa hay Tự mua bình thì việc đó tính giờ lại từ đầu. Lần mua bình
+    hay dùng bùa bị DỪNG LẠI (hay F10) cắt ngang thì giữ giờ cũ: lần BẮT
+    ĐẦU sau xem lại sau 45 giây (8 giây với bùa), không phải chờ cả "kiểm
+    tra mỗi".
+  + Một phím ở cả dòng buff đang bật lẫn dòng kỹ năng đang bật (như A và S
+    lúc 22:13–22:15): dưới dòng Tự dùng kỹ năng và dòng Tự buff (và dưới
+    bảng phím của màn hình Nâng cao) có dòng nhắc, ví dụ "Phím A, S đang bật
+    ở cả buff lẫn kỹ năng: GoBot bấm các phím đó theo cả hai giờ, và ghi lại
+    như buff. Là chiêu đánh thì tắt hoặc xóa dòng buff; là buff thì xóa nó
+    khỏi kỹ năng.", và log ghi một dòng "Macro: A, S are on a buff row and a
+    skill row, both on -- ..." mỗi lần macro bật. Chỉ nhắc: GoBot vẫn bấm
+    như cũ (câu 9, cách (a)).
+  + Sửa lời: ô "Dùng skill tuần tự" và "Chỉ khi đang đánh quái" nay ghi rõ
+    chỉ có tác dụng khi Tự đánh quái đang bật; bỏ chữ "Như GoC". Tài liệu về
+    GoC (thư mục docs) cũng sửa: đọc lại GhostCore.dll của GoC hai lần cho
+    thấy GoC không chờ máy chủ báo chiêu đã ra rồi mới bấm tiếp (các cờ báo
+    đó không được đọc tới, số lần thử lại không được dùng, luồng đánh
+    AttackThread không bao giờ chạy): GoC cũng bấm liên tục, không theo nhịp
+    chiêu ra.
+  + Log mới trong gobot_gui.log, để đo chỗ khựng ở lần chạy sau. Mỗi phút,
+    ngay sau dòng "Casts (packets)", một dòng "Cast gaps (packets): N gaps
+    -- p50 ..., p90 ..., longest ... ending at ...; over 1.0 s N, over 1.5 s
+    N; newest press to cast p10 ... ms, p50 ... ms, p90 ... ms (N casts); by
+    skill ... N casts, shortest re-cast ... s / ...": khoảng cách giữa hai
+    lần ra chiêu (giữa, 90%, dài nhất và lúc nào), bao nhiêu khoảng hơn 1
+    giây và hơn 1,5 giây, từ phím bấm mới nhất tới lúc chiêu ra bao lâu, và
+    mỗi chiêu (theo số của game) ra mấy lần, hai lần gần nhau nhất cách bao
+    lâu (hồi chiêu của nó không ngắn hơn số đó). Khoảng cách qua một lần
+    dừng rồi bật lại macro (hay Tự đánh quái), hay qua lúc bắt gói tin lại
+    từ đầu, thì không tính mà chỉ đếm: "; N gaps across a stop and start or
+    a capture restart, left out". Chiêu ra mà không có phím nào của GoBot:
+    tối đa 5 dòng mỗi phút "Cast (packets) with no GoBot key at ...: skill
+    ..., kind ...; GoBot's last press ... before it (key Z), the first after
+    it ... after (key X); no hold then" (hay "; the keys held for a job
+    then"), rồi "Cast (packets) with no GoBot key: N more this minute, not
+    described". Chiêu ra mà không có phím GoBot nào trong 10 giây trước hay
+    sau, lúc không giữ phím (bạn tự bấm hay công cụ khác): chỉ đếm, một dòng
+    "Cast (packets) with no GoBot key: N with no GoBot press within 10 s
+    either side and no hold (by hand or another tool), not described". Bấm
+    BẮT ĐẦU hay DỪNG LẠI: "Simple screen: start asked by the big button"
+    (hay "the toggle key F10", hay "stop asked by ..."). Đổi cài đặt lúc bot
+    chạy: "Settings changed during the run: Keys.key_7_keycode 72 (H) -> 70
+    (F)". Đổi lúc đã dừng: lần BẮT ĐẦU sau ghi "Settings changed since the
+    last run: ...". Dòng "Skills:" mỗi phút thêm "; refused: game not in
+    front N": số lần phím kỹ năng không bấm được vì game không ở trên cùng
+    (như khi bạn bấm vào cửa sổ GoBot). Không còn "(buff)" và "Buff
+    (packets): key A -- ... maybe not cast" từ dòng buff đã tắt. MP đọc mất
+    số 1 ở đầu: một lần mỗi lần mở GoBot, "Vitals: MP read 4798 where the
+    packets say 14798 -- its leading 1 lost (the read at ...); kept the MP
+    bar and its caption, of the frame read at ..., as
+    vitals_debug\mp_caption_....png" (ảnh nằm trong thư mục vitals_debug
+    cạnh GoBot: gửi kèm khi được hỏi). Ô mới: "Paced: on -- ...", "Paced: no
+    cast of yours for ... -- the skills on their own timers until your next
+    cast", "Paced: your cast came after ... on the timers -- the skills one
+    after another again", "Paced: off -- ...", và mỗi phút "Paced: N rounds;
+    N casts confirmed (N on a re-press); N re-presses; skipped (cooldown): S
+    5 (4 learned, floor 6.0 s); fallback 0.0 s; lock_est 680 ms; other casts
+    0; now paced".
+  + Nên đổi ngay (không cần chờ bản sau), theo log 08/11; ô mới để trống hay
+    có dấu đều được:
+    1. Cho các chiêu đều nhau (nếu câu 1 là (a)): đặt cột "Hồi chiêu (giây)"
+       của cả 8 phím kỹ năng (cửa sổ Kỹ năng, nút "Chi tiết…") là 1,2: Z từ
+       0,5 lên 1,2; X, C, V, B và Space từ 1,0 lên 1,2; S và A từ 3,0 xuống
+       1,2. Mô phỏng: mỗi chiêu được khoảng 12–13% số chiêu ra, trung bình
+       khoảng 6 giây một lần (thay vì Z khoảng 3 giây, S và A 17–26 giây),
+       tổng vẫn khoảng 77 chiêu mỗi phút; thứ tự vẫn may rủi tới khi đánh
+       dấu ô mới. Muốn Z ra gấp đôi (câu 1, cách (b)): Z 0,7 và bảy phím kia
+       1,4. Đổi ít hơn: chỉ đổi Z từ 0,5 lên 1,0. Sửa macro.ini bằng tay thì
+       đóng GoBot trước (GoBot ghi lại macro.ini khi chạy).
+    2. Để "Tốc độ bấm kỹ năng" ở 50 ms: số lớn hơn làm tệ hơn (150 ms: Z
+       chiếm 40% số chiêu, S và A gần như không ra).
+    3. Để Tự mua bình, Tự dọn rác, Dùng bùa và Làm nhiệm vụ nhanh TẮT khi
+       đánh chiến trường, như bạn đã làm lúc 22:20:43.
+    4. Đừng đổi cài đặt hay bấm vào cửa sổ GoBot khi macro đang chạy: game
+       không ở trên cùng thì mọi phím đều không được bấm, và bấm vào một ô
+       phím thì GoBot chờ bạn nhấn phím tới 10 giây.
+    5. Bình thú cưng (không bắt buộc): hạ "khi máu pet dưới" từ 95% xuống
+       70% bớt khoảng 6 lần bấm Q mỗi phút, đỡ tốn thức ăn pet; không làm
+       chiêu mượt hơn, và pet có thể chết nhiều hơn (câu 8).
+    6. Mốc bình MP: chưa đổi gì tới khi sửa cách đọc MP (câu 7). UniKey
+       (không bắt buộc): chuyển sang E khi game ở trên cùng.
+  + Các câu hỏi dưới đây chưa có câu trả lời, nên bản này làm theo cách (a)
+    ở chỗ cần; báo lại nếu muốn khác:
+    1. Thứ tự chiêu, khi mọi chiêu đều sẵn: (a) một vòng cố định theo thứ tự
+       phím, mỗi chiêu một lần, chỉ bấm phím kế khi game đã ra chiêu trước
+       (Z X C V B Space S A, rồi lại từ đầu); Z ngang các phím khác; (b) như
+       (a) nhưng Z hai lần mỗi vòng; (c) mỗi phím vẫn theo giờ riêng như bây
+       giờ, chỉ cho phím chờ lâu nhất đi trước. Ô "Ra chiêu theo vòng" làm
+       theo (a).
+    2. Phím nào là đánh thường của game (Đánh thường / Tấn công)? (a) Space,
+       còn Z là chiêu thật (GoC của bạn đặt Space là đánh thường, và Z ra
+       chiêu 51205); (b) Z; (c) không phím nào, cả 8 phím đều là chiêu. Hỏi
+       thêm: đánh thường có nên chỉ bấm khi không chiêu nào sẵn, như GoC?
+       Mặc định: có. Bản này chưa đổi gì theo câu này: Space vẫn là một phím
+       trong vòng.
+    3. Hồi chiêu trong game: có chiêu nào hồi lâu hơn khoảng 1–2 giây không?
+       (a) để GoBot tự đo ở lần chạy sau, không cần trả lời (dòng "Cast gaps
+       (packets)", và ô mới tự học hồi chiêu); (b) có: ghi từng phím và số
+       giây; (c) mọi chiêu hồi lại trong 1–2 giây.
+    4. Lúc "khựng" trông thế nào, và lúc nào? (a) nhân vật đứng yên trong
+       khi quái và người khác vẫn chạy, cả sau khoảng 22:21; (b) cả hình
+       đứng lại; (c) nhân vật đang ra một chiêu dài; (d) chỉ ở mấy phút đầu
+       (22:12–22:21). Hỏi thêm: lúc đó LDPlayer có đang chạy ứng dụng nào
+       không, và máy có dùng cùng Wi-Fi 2,4 GHz không?
+    5. Tự mua bình, dọn túi khi đang đánh: (a) để tắt khi đánh chiến trường,
+       như bạn đã đặt lúc 22:20:43, và GoBot chờ lâu dần sau mỗi lần thấy có
+       người dùng chuột (bản này làm vậy); (b) bật, GoBot chỉ dừng kỹ năng
+       khi thật sự bắt đầu mua (cần kiểm tra chuột, bàn phím thật; chưa
+       làm); (c) bật như trước.
+    6. Nguồn "bạn đang dùng chuột hoặc bàn phím" lúc 22:17–22:20: (a) chạy
+       chương trình theo dõi 5 phút một lần (bước 11 d ở mục 6); (b) bỏ qua:
+       từ bản này GoBot ghi vào log đã thấy gì; (c) lúc đó tay bạn để trên
+       chuột hay đang di chuột, không cần thử.
+    7. Bình MP sau khi sửa cách đọc MP: (a) nâng mốc MP từ 59% lên 75% và
+       cho F bấm lại mỗi 2 giây (MP mất khoảng 1.200–1.500 mỗi giây); (b)
+       giữ 59% và 3 giây; (c) chạy một lần với phần sửa chỉ ghi log, rồi mới
+       quyết. Hỏi thêm: bình nào ở phím F, và một bình hồi bao nhiêu MP
+       (khoảng 5.000?). Bản này chưa sửa cách đọc MP và không đổi mốc nào:
+       chờ câu trả lời.
+    8. Bình thú cưng (Q) ở mức nào? (a) 70%; (b) giữ 95%; (c) 60%. Bản này
+       không đổi số của bạn: muốn (a) thì tự đặt "khi máu pet dưới" là 70.
+    9. Một phím vừa là buff vừa là kỹ năng: (a) GoBot nhắc (bản này làm
+       vậy); (b) GoBot không nhận phím thứ hai.
+    10. Lúc 22:12–22:16, 22:20:28–43 và 22:39–22:42, log thấy DỪNG LẠI/F10,
+        phím bình MP đổi từ H sang F, Tự mua bình tắt và macro.ini được lưu:
+        lúc đó bạn đang chỉnh trước khi ngồi xem phải không? (a) đúng; (b)
+        không, vậy có thứ khác dùng cửa sổ GoBot, và cần chạy chương trình
+        theo dõi. Lúc 23:17–23:21 (chiêu ra khi GoBot không bấm phím nào):
+        (a) bạn tự chơi bằng tay; (b) có công cụ khác (GoC hay khác) đang
+        chạy.
+    Thử như bước 11 ở mục 6.
+
 - Mới trong bản 2026.11.05b (nhảy lên bục trên, và tự tìm quái trong vùng
   đánh quái theo điều bạn báo tối 05/11; chưa thử trên game thật):
   + Hai ô mới trên hàng Tự đánh quái, cả hai BẬT SẴN: "Nhảy lên bục trên
@@ -935,7 +1319,8 @@ khác chưa được thử trên game thật.
     dừng như cũ, KHÔNG đếm, mua hay bấm chuột phải vào món nào (lượt Dọn
     rác thì vẫn làm tiếp như cũ); GoBot giữ một ảnh tab_unsure_... trong
     trash_debug (mỗi chỗ một ảnh mỗi lần mở GoBot) và ghi dòng "Trash: tab
-    not read as ..." vào log.
+    not read as ..." vào log. (Từ bản 2026.11.09 Tự mua bình không đọc ngăn
+    Tiêu Dùng nữa, chỉ đọc ngăn Khác, và cũng nhìn lại như vậy.)
   + Dùng bùa: lượt dừng vì không chắc ngăn Tiêu Dùng nay báo rõ điều đó
     (ví dụ "Chưa dùng bùa nào: không chắc túi đồ đang ở ngăn Tiêu Dùng, nên
     dừng dùng bùa; thử lại sau 10 phút."), không còn báo nhầm "Không thấy
@@ -947,6 +1332,9 @@ khác chưa được thử trên game thật.
     or keyboard"): lần theo giờ thì thử lại sau 30 giây; lần bấm "Mua ngay"
     hay "Thử mua" thì thẻ báo "Chờ: bạn đang dùng chuột hoặc bàn phím, mua
     bình sau." và không làm gì, nên bấm xong đừng đụng chuột khoảng 1 giây.
+    (Sửa ở bản 2026.11.08: lần theo giờ nay chờ 30 giây, rồi 2, 5 và 10 phút
+    nếu lần nào cũng có người dùng, và log ghi đã thấy gì; xem bản
+    2026.11.08.)
   + "Sắp hết bình" theo cả túi (khi gói tin túi đồ đã so khớp, xem bản
     2026.11.03) nay có mức riêng: dưới 200 bình trong cả túi
     (warn_bag_below=200 trong phần [Potions] của configs\app.ini; 0 = không
@@ -1138,7 +1526,9 @@ khác chưa được thử trên game thật.
     Cứ lần tới giờ thứ hai, và ít nhất 2 giờ một lần, GoBot vẫn xem cửa
     hàng thật; chỉ bỏ qua khi túi đã báo lại sau lần uống bình gần nhất.
     Thấy lệch là thôi tin túi, lại xem thật. "Mua ngay" và "Thử mua" luôn
-    chạy thật, và việc mua vẫn bấm trên màn hình như cũ.
+    chạy thật, và việc mua vẫn bấm trên màn hình như cũ. (Bỏ ở bản
+    2026.11.09: Tự mua bình không đếm bình nữa, gói tin chỉ ghi log; xem bản
+    2026.11.09.)
   + Đọc tên quái (chỉ khi có dấu "Vị trí từ gói tin"): lúc bot đánh theo
     gói tin, GoBot đọc tên quái trên màn hình mỗi 0,6 giây thay vì 0,14
     giây, nhẹ máy hơn. Màn hình làm thay là đọc lại mỗi 0,14 giây ngay.
@@ -1369,7 +1759,8 @@ khác chưa được thử trên game thật.
     đầu một lượt dọn theo giờ.
   + Tự mua bình không cần chụp hình món Người Giữ Sân nữa: chỉ cần đánh dấu
     "Tự mua bình". Nếu cửa hàng mở đè lên túi đồ (cửa sổ game nhỏ), GoBot
-    đóng cửa hàng, đếm bình rồi mở lại.
+    đóng cửa hàng, đếm bình rồi mở lại. (Từ bản 2026.11.09 không đếm bình
+    nữa.)
 - Dọn rác: bỏ đồ vào thùng rác ("Tự dọn rác", "Dọn ngay") đã chạy tốt trên
   game thật. Ba phần mới dưới đây thì chưa:
   + "Dùng mảnh ghép" (thử nghiệm, mặc định TẮT): đăng ký mảnh ghép (mảnh
@@ -1457,20 +1848,19 @@ khác chưa được thử trên game thật.
     (mỗi lần mở GoBot, mỗi ảnh chỉ lưu một lần).
   + "Tự mua bình" (thử nghiệm, mặc định TẮT; thẻ riêng trong Dọn rác): mua
     Thịt bò khô (HP) và Rượu lá tre (MP) ở cửa hàng mà món "Người Giữ Sân"
-    trong ngăn Khác của túi đồ mở ra. Mỗi "kiểm tra mỗi N phút" (mặc định 60;
-    lần đầu ngay sau khi bấm BẮT ĐẦU khoảng 45 giây) GoBot mở túi đồ, đếm số ô
-    Thịt bò khô và Rượu lá tre ở ngăn Tiêu Dùng. Món nào có ít ô hơn mức "dưới"
-    bạn đặt thì GoBot bấm chuột phải vào Người Giữ Sân, BẤM ĐÚP vào món trong
-    cửa hàng (Rượu lá tre bên trái, Thịt bò khô bên phải; không bấm Mua), gõ 100
+    trong ngăn Khác của túi đồ mở ra. Từ bản 2026.11.09 GoBot không đếm bình
+    nữa: mỗi "mua mỗi N phút" (mặc định 60; lần đầu không sớm hơn 45 giây
+    sau khi bấm BẮT ĐẦU) GoBot mở túi đồ, bấm chuột phải vào Người Giữ Sân
+    và mua đúng số ô đã đặt cho mỗi loại ("mỗi lần mua N ô", 0 tới 20, mặc
+    định 3), xen kẽ HP và MP. Mỗi ô là một lần BẤM ĐÚP vào món trong cửa
+    hàng (Rượu lá tre bên trái, Thịt bò khô bên phải; không bấm Mua), gõ 100
     vào hộp số lượng (game để sẵn số 1 nên gõ thêm "00"), ĐỌC LẠI hộp thấy
-    đúng 100 mới bấm Xác Nhận, rồi bấm ESC đóng cửa hàng (ESC không đóng thì
-    bấm nút Thoát). Lần đầu GoBot chỉ mua thử MỘT lần mỗi loại, đếm lại ô và
-    thấy đúng loại bình đó tăng thêm một ô rồi mới mua phần còn lại cho tới
-    đủ số ô "tới" (tối đa 40 lần mua, 4 vòng, 240 giây một lượt). Mỗi lần mua
-    100 được cho là đầy một ô, nhưng điều đó CHƯA kiểm chứng trên game thật:
-    nếu mua mà ô không tăng thì GoBot dừng và KHÔNG tự mua nữa cho tới khi bạn
-    bấm "Mua ngay" hoặc tắt rồi bật lại ô "Tự mua bình". Túi đầy (game báo
-    "Túi đồ [Tiêu thụ] đã đầy") thì dừng.
+    đúng 100 mới bấm Xác Nhận; xong thì bấm ESC đóng cửa hàng (ESC không đóng
+    thì bấm nút Thoát). Mỗi lượt theo giờ mua tối đa 10 lần, phần còn lại
+    sau 1 phút (mỗi lượt tối đa 30 giây cộng 6 giây mỗi lần mua, không quá
+    300 giây). Game báo "Túi đồ [Tiêu thụ] đã đầy" thì GoBot bấm Xác Nhận
+    của thông báo, đóng cửa hàng và dừng lượt đó; ô vẫn có dấu, tới giờ sau
+    mua lại (xem bản 2026.11.09).
     Hộp số lượng chưa có ảnh mẫu, nên GoBot nhận nó bằng khung giống hộp "bán"
     của game (tối thiểu "buy_frame_score", mặc định 0.85) mà lời không phải của
     hộp bán, thùng rác hay hồi sinh (hộp "vứt" không có chữ trong ảnh mẫu nên
@@ -1479,9 +1869,10 @@ khác chưa được thử trên game thật.
     kỹ năng, bình và buff đều TẠM DỪNG (có thể vài chục giây), chứ không chỉ
     chậm lại: nếu không, phím bình (số) sẽ gõ lẫn vào hộp số lượng. Không mua
     khi máu thấp hơn mốc bình máu cộng 10% (tối đa 95%), khi chưa đọc được máu, đang chat,
-    hay bot đang bận việc khác. Nút "Thử mua (không mua gì)" đi tới hộp số
-    lượng của từng món rồi bấm Hủy Bỏ: không gõ, không mua, giữ ảnh ở
-    trash_debug; nút "Mua ngay" mua ngay không chờ giờ. Món Người Giữ Sân
+    đang có bảng Sự kiện và điểm danh, hay bot đang bận việc khác. Nút "Thử
+    mua (không mua gì)" đi tới hộp số lượng của từng món rồi bấm Hủy Bỏ:
+    không gõ, không mua, giữ ảnh ở trash_debug; nút "Mua ngay" mua ngay đủ
+    số ô đã đặt trong một lượt, không chờ giờ. Món Người Giữ Sân
     được nhận theo hình trong catalog (mặc định other/8950604, chân dung một
     người đội mũ); nếu hình trong túi khác thì GoBot báo "không thấy món Người
     Giữ Sân" và bạn đổi buy_opener trong trash.ini.
@@ -1716,17 +2107,20 @@ khác chưa được thử trên game thật.
     Nâng cao), dòng "Tự dùng kỹ năng" nay báo điều đó, kèm nút "Tắt".
   + "Tự đóng thông báo" (mặc định TẮT; dòng cuối của "Bot sẽ làm gì", bên
     cạnh có nút "Thử xem" chỉ nhìn): khi bot chạy, GoBot chỉ đóng thông báo
-    nhận quà điểm danh (bấm Xác Nhận của nó), Yêu Quái Bách Khoa (bấm nút
-    X, hoặc ESC khi không có gì khác) và menu ESC do chính GoBot bấm ESC mở
-    ra. Mỗi cái chỉ được đóng khi đã hiện 3 giây, game ở trên cùng, không
+    nhận quà điểm danh (bấm Xác Nhận của nó), bảng Sự kiện và điểm danh lúc
+    vào game và lúc qua 00:00 (bấm ESC, không bao giờ bấm nút X; từ bản
+    2026.11.09), Yêu Quái Bách Khoa (bấm nút X, hoặc ESC khi không có gì
+    khác) và menu ESC do chính GoBot bấm ESC mở ra. Mỗi cái chỉ được đóng
+    khi đã hiện 3 giây, game ở trên cùng, không
     ai đụng chuột hay bàn phím, và HP cao hơn mức của bình HP ít nhất 10
     (không cần quá 95%; mức bình tính ít nhất 50%: bình ở 60% thì HP từ
     70%, bình dưới 50% hay không bật bình thì HP từ 60%); lúc đó các phím
     khác của GoBot chờ tối đa 2 giây. Không bao giờ đóng hộp thoại thùng
     rác, lời mời tổ đội, bảng hồi sinh, cửa sổ nhiệm vụ hay cửa sổ lạ, và
-    không làm gì khi một trong số đó đang mở. Bảng sự kiện điểm danh cũng
-    không đóng. Dưới nút BẮT ĐẦU ghi "Tự đóng thông báo: đang bật, đã
-    đóng N."
+    không làm gì khi một trong số đó đang mở. Bảng điểm danh chỉ được bấm
+    ESC khi không còn cái nào khác trong danh sách đang mở (thông báo nhận
+    quà được đóng trước). Bot dừng thì không bấm gì. Dưới nút BẮT ĐẦU ghi
+    "Tự đóng thông báo: đang bật, đã đóng N (bảng điểm danh: M)."
 - Tổ đội, "Tự mời người chat từ khoá" (thử nghiệm): nay đọc được khung
   chat và danh sách người chơi ở cả cửa sổ 1280x720. Mới (thử nghiệm):
   + Ô "Chỉ mời khi đang làm chủ tổ đội" (mặc định TẮT). Có dấu thì GoBot
@@ -1846,7 +2240,8 @@ Nút nào bấm vào game, nút nào không:
   lần mất một cái), "Tự mua bình" (bấm chuột phải Người Giữ Sân, mua
   bằng tiền của nhân vật và GÕ số 100 vào game),
   "Tự đóng thông báo" (bấm Xác Nhận, nút X hoặc
-  ESC khi bot chạy), "Giữ khoảng cách" (bấm phím mũi tên để lùi, mặc định
+  ESC khi bot chạy, cả ESC cho bảng Sự kiện và điểm danh), "Giữ khoảng
+  cách" (bấm phím mũi tên để lùi, mặc định
   tối đa 3 bước về một phía; GoBot không thấy mép bục), "Chỗ đánh quái"
   (giữ phím mũi tên, và phím nhảy khi chỗ ở cao hơn, để đi về chỗ đánh
   quái), "Nhảy xuống bậc dưới" (giữ Ctrl rồi bấm ↓ để nhảy xuống tới quái
@@ -2046,6 +2441,57 @@ Nút nào bấm vào game, nút nào không:
          tung: bấm F12, bỏ dấu ô đó và báo lại kèm giờ. Bản đồ đổi sau một
          lần nhảy thì GoBot tự dừng đánh quái và bỏ dấu Nhảy lên.
       e. Gửi gobot_gui.log (các dòng "Hunter:" và "Positions").
+  11. Kỹ năng ở chiến trường (bản 2026.11.08, chưa thử trên game thật; ô mới
+      cần Npcap; chỉ macro, Tự đánh quái tắt):
+      a. Ở chiến trường t1981_s2, bỏ dấu Tự mua bình, Tự dọn rác, Dùng bùa
+         (thẻ Dọn rác) và Làm nhiệm vụ nhanh (thẻ Nhiệm vụ). Đặt cột "Hồi
+         chiêu (giây)" của cả 8 phím kỹ năng là 1,2 (xem "Nên đổi ngay" ở
+         bản 2026.11.08, mục 5). Để TRỐNG ô "Ra chiêu theo vòng". Bấm BẮT
+         ĐẦU, đánh ít nhất 15 phút, không đụng chuột, bàn phím, không bấm
+         vào cửa sổ GoBot. Ghi giờ bắt đầu, giờ kết thúc, và giờ những lúc
+         thấy khựng hay chiêu lộn xộn.
+      b. Bấm DỪNG LẠI, đánh dấu "Ra chiêu theo vòng" (nút "Chi tiết…" ở dòng
+         Tự dùng kỹ năng), bấm BẮT ĐẦU và đánh thêm ít nhất 15 phút như
+         trên. Dòng dưới ô phải ghi "Đang theo vòng — ..."; thấy "Tạm theo
+         giờ ..." lâu thì ghi giờ. Xem các chiêu có ra lần lượt Z X C V B
+         Space S A không, và còn khựng không.
+      c. Gửi gobot_gui.log (các dòng "Casts (packets)", "Cast gaps
+         (packets)", "Paced:" và "Skills:"), kèm các giờ đã ghi.
+      d. Không bắt buộc, chỉ một lần: để biết cái gì gây ra "có người dùng
+         chuột hoặc bàn phím", có một chương trình nhỏ, input_watch2.py
+         (không có trong file zip: hỏi người gửi bạn bản này; cần Python).
+         Mở PowerShell bằng "Run as administrator", vào thư mục có
+         input_watch2.py, bật macro, rồi chạy "python -I input_watch2.py 300
+         input_watch.csv" và không đụng chuột, bàn phím trong 5 phút. Chương
+         trình chỉ đọc, không bấm gì, nhưng có ghi lại các phím được bấm:
+         đừng gõ mật khẩu khi nó đang chạy. Gửi file input_watch.csv cùng
+         gobot_gui.log.
+  12. Bảng điểm danh và Tự mua bình (bản 2026.11.09, chưa thử trên game
+      thật):
+      a. Đánh dấu ô "Tự đóng thông báo" (thẻ Đánh quái; ô này giao ra tắt
+         sẵn). Thoát ra rồi vào lại game bằng tay, chờ bảng Sự kiện và điểm
+         danh hiện, rồi mới bấm BẮT ĐẦU: khoảng 3–5 giây sau, GoBot phải bấm
+         ESC và bảng tắt (GoBot chụp ảnh 15 giây sau BẮT ĐẦU). Hay bấm BẮT
+         ĐẦU trước rồi để GoBot tự vào lại game (Phím vào game ngay; ảnh 15
+         giây sau khi vào). Vào lại bằng tay SAU khi bấm BẮT ĐẦU thì GoBot
+         không chụp được ảnh nào nếu không nhận ra bảng. Ghi giờ. Bảng không
+         tắt thì đọc dòng dưới ô đó (lý do) và bấm "Thử xem" cạnh ô một lần
+         (chỉ nhìn, lưu ảnh probe_...png), không cần bấm gì thêm.
+      b. Để GoBot chạy qua 00:00 một lần, ô đó vẫn có dấu, như trên.
+      c. Gửi gobot_gui.log (các dòng "Popups:" và "Checkin:") và các ảnh
+         popup_debug\checkin_*.png (và probe_*.png nếu có) của lần vào game
+         và lúc 00:00.
+      d. Tự mua bình: xem lại phím G và F uống đúng Thịt bò khô và Rượu lá
+         tre. Đứng yên ở chỗ an toàn, có Người Giữ Sân trong ngăn Khác. Bấm
+         "Thử mua (không mua gì)" một lần: GoBot mở túi, mở cửa hàng, bấm
+         đúp từng món, thấy hộp số lượng thì Hủy Bỏ, rồi đóng cửa hàng.
+      e. Đặt 1 ô HP và 1 ô MP, đánh dấu Tự mua bình, bấm "Mua ngay" và ngồi
+         xem: hộp hiện 1 rồi 100, rồi Xác Nhận; hai lần như vậy (HP rồi MP),
+         rồi cửa hàng đóng, và thẻ ghi "Đã mua 2 lần 100: 1 ô Thịt bò khô, 1
+         ô Rượu lá tre."
+      f. Rồi đặt số thật (của bạn 10 + 10, hay ít hơn). Lần đầu game báo túi
+         đầy, gửi các dòng "Trash:" và "Bag (packets):" của log, cùng các ảnh
+         trash_debug\*_shop_full*, *_shop_message* và *_shop_no_question*.
 - Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
   xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
 - Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
@@ -2090,7 +2536,9 @@ Nút nào bấm vào game, nút nào không:
   phím đó, cách nhau khoảng 3 giây. Thấy % sai, hay GoBot bấm khi không cần,
   thì báo lại kèm gobot_gui.log (có dòng "Vitals: the pet's HP bar at ...").
 - Tự đóng thông báo: lúc trong game đang có thông báo, bấm "Thử xem" cạnh
-  ô này (chỉ nhìn). Chỉ đánh dấu khi nó nói đúng thông báo đó.
+  ô này (chỉ nhìn). Chỉ đánh dấu khi nó nói đúng thông báo đó. Lúc bảng Sự
+  kiện và điểm danh đang hiện, "Thử xem" phải nói thấy "bảng Sự kiện và
+  điểm danh ở x,y"; rồi thử như bước 12 ở trên.
 - Phím dọn ngay, Phím vào game ngay: để trống nếu không cần. Muốn đặt thì
   bấm vào ô rồi nhấn một phím F; phím GoBot đã dùng (F10, F11, F12, phím
   của ô kia, phím kỹ năng, bình...) không được nhận. Phím vẫn tới game như
@@ -2123,14 +2571,14 @@ Nút nào bấm vào game, nút nào không:
   chọn loại đó, bấm "Dùng bùa ngay": ô đó phải trống ra, và log có dòng
   "nothing printed over its icon".
 - Tự mua bình: bấm "Thử mua (không mua gì)" TRƯỚC, khi nhân vật đứng yên ở
-  chỗ an toàn có Người Giữ Sân trong ngăn Khác. Xem nhật ký: GoBot đếm bình,
-  mở cửa hàng, bấm đúp từng món, thấy hộp số lượng rồi Hủy Bỏ. Gửi các
-  ảnh trong trash_debug (shop_question, shop_not_seen...) và các dòng "Trash:"
-  của log, nhất là khi báo "không thấy cửa hàng" hay "không thấy hộp nhập số
-  lượng". Sau đó đặt "dưới" và "tới" cao hơn số ô bình đang có đúng 1-2 ô (ví
-  dụ đang có 3 ô thì đặt dưới 4, tới 5) để thử mua thật vài lần, nhìn theo:
-  hộp phải hiện 1 rồi 100 trước khi Xác Nhận, mỗi lần đầy đúng một ô. Cẩn
-  thận với tiền của nhân vật khi chưa chắc.
+  chỗ an toàn có Người Giữ Sân trong ngăn Khác. Xem nhật ký: GoBot mở túi
+  đồ, mở cửa hàng, bấm đúp từng món, thấy hộp số lượng rồi Hủy Bỏ (từ bản
+  2026.11.09 không đếm bình nữa). Gửi các ảnh trong trash_debug
+  (shop_question, shop_not_seen...) và các dòng "Trash:" của log, nhất là
+  khi báo "không thấy cửa hàng" hay "không thấy hộp nhập số lượng". Sau đó
+  đặt 1 ô mỗi loại và bấm "Mua ngay", nhìn theo: hộp phải hiện 1 rồi 100
+  trước khi Xác Nhận. Rồi mới đặt số thật (bước 12 ở trên). Cẩn thận với
+  tiền của nhân vật khi chưa chắc.
 
 Đừng:
 - bật nhiều phần thử nghiệm cùng lúc khi chưa thử từng phần;
@@ -2239,6 +2687,13 @@ Gặp lỗi khác:
   trash. Nếu đã vẽ vùng đánh ở tab Bản đồ (từ bản 2026.11.04c), chép thêm
   spots.ini để giữ các vùng đó (file zip không có file này, nên không chép
   đè lên gì). Đừng chép các file khác: bản mới đã khác.
+- trash.ini của bản trước 2026.11.09 có mức "dưới" và "tới" của Tự mua bình
+  (buy_hp_below, buy_hp_to, buy_mp_below, buy_mp_to): bản này lấy số "tới"
+  làm số ô mua mỗi lần, cho tới khi bạn đổi số đó trên thẻ; số "dưới" không
+  còn dùng, trừ khi là 0 (không mua món đó): món đó vẫn không mua cho tới
+  khi bạn đổi số trên thẻ. Xem lại hai số trên thẻ trước khi bấm BẮT ĐẦU.
+- app.ini không chép sang, nên "Tự đóng thông báo" (cũng là ô tắt bảng Sự
+  kiện và điểm danh từ bản 2026.11.09) giao ra tắt: đánh dấu lại nếu muốn.
 - Đừng chép hunt.ini: hunt.ini của các bản cũ (trước 15/10/2026) có thể có
   sẵn tên nhân vật của người khác. Gõ lại tên nhân vật và phím đánh ở thẻ
   Đánh quái. Nếu lỡ chép rồi, xem lại ô "Tên nhân vật": phải là tên nhân

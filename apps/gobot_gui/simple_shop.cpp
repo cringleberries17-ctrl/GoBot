@@ -1,10 +1,13 @@
 // "Tự mua bình" in Dọn rác: buying Thịt bò khô and Rượu lá tre from the shop
-// the Người Giữ Sân item opens, when Tiêu Dùng holds too few slots of them.
+// the Người Giữ Sân item opens -- the number of purchases set for each, every
+// so often. Nothing in the bag is counted (2026.11.09): the game's message
+// that the bag is full ends a round, and the next time buys again.
 //
 // The run itself, and every rule it keeps, is the library's (gobot/bag.hpp,
 // BagCleaner::Mode::ShopBuy) and the worker's (GuiApp::trash_loop, run_shop).
-// Here is what only the window knows: the card and what it writes to
-// configs/trash.ini.
+// Here is what only the window knows: the card, what it writes to
+// configs/trash.ini, and the plan's line, read from the worker's atomics --
+// never from a file.
 
 #include "gui_app.hpp"
 #include "simple_ui.hpp"
@@ -17,6 +20,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <string>
 
 namespace gobot {
@@ -59,6 +64,34 @@ bool can_buy() {
     return known == 1;
 }
 
+/// "23:15" for a time in seconds since 1970, in this PC's own time.
+std::string hhmm(std::int64_t at_s) {
+    const std::time_t t = static_cast<std::time_t>(at_s);
+    std::tm tm{};
+    if (localtime_s(&tm, &t) != 0) return "?";
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
+    return buf;
+}
+
+/// The card's line on the plan: when the next one begins, and what is left
+/// of this one and when it is bought -- or, with no worker to buy it, what a
+/// round cut short left for the next run. Empty when there is nothing to say.
+std::string plan_line(std::int64_t plan_at_s, std::int64_t look_at_s, int owed, std::int64_t now_s) {
+    if (plan_at_s > 0) {
+        std::string line = "Lần mua tới: " + hhmm(plan_at_s);
+        if (owed > 0 && look_at_s > 0) {
+            const std::int64_t in_s = std::max<std::int64_t>(0, look_at_s - now_s);
+            line += " (còn " + std::to_string(owed) + " lần của lượt này, mua tiếp sau " +
+                    std::to_string(std::max<std::int64_t>(1, (in_s + 59) / 60)) + " phút)";
+        }
+        return line + ".";
+    }
+    if (owed > 0)
+        return "Còn " + std::to_string(owed) + " lần mua của lượt trước: GoBot mua tiếp khi bot chạy (BẮT ĐẦU).";
+    return std::string();
+}
+
 }  // namespace
 
 bool GuiApp::simple_can_buy() { return can_buy(); }
@@ -67,9 +100,15 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
     if (!begin_card("##trashshop")) { end_card(); return; }
     heading(strong_font_, "Tự mua bình");
 
-    // The switch, off as shipped, and how often the bag is looked at.
+    // The switch, off as shipped, and how often a plan is bought.
     if (ImGui::Checkbox("Tự mua bình", &simple_clean_.buy_potions)) {
         put("buy_potions", simple_clean_.buy_potions ? "true" : "false");
+        // Ticked on: nothing owed, the shop's clock and its waits for a quiet
+        // second afresh, in the worker running or the next (trash_loop).
+        if (simple_clean_.buy_potions) {
+            ++shop_ticked_;
+            shop_owed_ = 0;
+        }
         // The worker does it between its passes, so it runs for it too: started
         // with the bot, ended when nothing else asks for it.
         if (simple_clean_.buy_potions && simple_running()) start_trash();
@@ -77,17 +116,23 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
             !trash_oneshot_)
             stop_trash();
     }
-    ImGui::SetItemTooltip("%s", trial_hint(kTrialUse,
-                                           "Mỗi khoảng thời gian bên cạnh, GoBot mở túi đồ, đếm số ô Thịt bò khô và "
-                                           "Rượu lá tre ở ngăn Tiêu Dùng; ô nào ít hơn mức \"dưới\" thì bấm chuột "
-                                           "phải vào món Người Giữ Sân ở ngăn Khác, mua tới mức \"tới\" (mỗi lần mua "
-                                           "100, mỗi lần đầy một ô), rồi bấm ESC đóng cửa hàng. Trong lúc mua, kỹ "
-                                           "năng, bình và buff tạm dừng (có thể vài chục giây): GoBot gõ số vào game "
-                                           "và các phím đó sẽ gõ lẫn vào. Không mua khi máu thấp, đang chat hay bot "
-                                           "đang bận việc khác. Tắt thì không làm gì.")
-                                    .c_str());
+    {
+        static const std::string tip = trial_hint(
+            kTrialUse,
+            ("Mỗi khoảng thời gian bên cạnh, GoBot bấm chuột phải vào món Người Giữ Sân ở ngăn Khác và mua số ô đã "
+             "đặt bên dưới, xen kẽ Thịt bò khô và Rượu lá tre (mỗi ô là một lần mua " +
+             std::to_string(CleanSettings::kBuyQuantity) +
+             "). GoBot không đếm bình trong túi nữa. Khi game báo túi đồ đã đầy, GoBot đóng thông báo và cửa hàng "
+             "rồi dừng lượt đó; tới giờ sau mua lại. Mỗi lượt giữ phím mua tối đa " +
+             std::to_string(BagCleaner::kShopBuysPerHold) + " lần, phần còn lại mua tiếp sau " +
+             std::to_string(BagCleaner::kShopPartGapMs / 60'000) +
+             " phút. Trong lúc mua, kỹ năng, bình và buff tạm dừng. Không mua khi máu thấp, đang chat, đang có bảng "
+             "Sự kiện và điểm danh hoặc bot đang bận việc khác. Tắt thì không làm gì.")
+                .c_str());
+        ImGui::SetItemTooltip("%s", tip.c_str());
+    }
     ImGui::SameLine(0, 16);
-    label("kiểm tra mỗi");
+    label("mua mỗi");
     ImGui::SameLine();
     {
         static const int kMinutes[] = { 15, 30, 60, 90, 120, 180 };
@@ -109,66 +154,52 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
         coloured(kWait, "GoBot chưa có hình của game để làm việc này, nên chưa mua.");
     }
 
-    // Slots of each potion, in Tiêu Dùng: under `below`, more are bought up to
-    // `to`. 0 for `below` leaves that potion alone.
-    const auto limits = [&](const char* name, const char* id, int& below, int& to, const char* below_key,
-                            const char* to_key) {
+    // How many purchases of 100 of each potion each time -- a slot each -- 0
+    // leaving that potion alone. Each saves itself alone, as it is typed.
+    const auto slots = [&](const char* name, const char* id, int& n, const char* key) {
         ImGui::PushID(id);
         label(name);
         ImGui::SameLine(0, 10);
-        label("mua khi dưới");
-        ImGui::SameLine();
-        // Each number saves itself alone, as it is typed: the other is never moved
-        // under the hand -- typing 12 passes through 1 -- and a threshold over
-        // its limit is read as the limit, as the file is when it is loaded.
-        const char* changed_key = nullptr;
-        ImGui::SetNextItemWidth(95);
-        if (ImGui::InputInt("##below", &below, 1, 5)) {
-            below = std::clamp(below, 0, CleanSettings::kBuySlotsMost);
-            changed_key = below_key;
-        }
-        ImGui::SetItemTooltip("Số ô thấp nhất cho phép. Ít hơn số này thì mua. 0: không mua món này.");
-        ImGui::SameLine();
-        label("ô, mua tới");
+        label("mỗi lần mua");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(95);
-        if (ImGui::InputInt("##to", &to, 1, 5)) {
-            to = std::clamp(to, 0, CleanSettings::kBuySlotsMost);
-            changed_key = to_key;
-        }
-        ImGui::SetItemTooltip("Mua cho tới khi túi có chừng này ô. Mỗi lần mua 100, thường đầy một ô.");
+        const bool changed = ImGui::InputInt("##slots", &n, 1, 5);
+        if (changed) n = std::clamp(n, 0, CleanSettings::kBuySlotsPerRunMost);
+        ImGui::SetItemTooltip("Số lần mua 100 mỗi khi tới giờ (0–20). 0: không mua món này.");
         ImGui::SameLine();
         label("ô");
-        if (below > to) {
-            ImGui::SameLine();
-            coloured(kWait, "(\"dưới\" lớn hơn \"tới\": GoBot lấy \"dưới\" bằng \"tới\")");
-        }
         ImGui::PopID();
-        if (changed_key != nullptr) put(changed_key, std::to_string(changed_key == below_key ? below : to));
+        if (changed) put(key, std::to_string(n));
     };
-    limits("Thịt bò khô (HP):", "hp", simple_clean_.buy_hp_below, simple_clean_.buy_hp_to, "buy_hp_below",
-           "buy_hp_to");
-    limits("Rượu lá tre (MP):", "mp", simple_clean_.buy_mp_below, simple_clean_.buy_mp_to, "buy_mp_below",
-           "buy_mp_to");
-    hint("Cần có món Người Giữ Sân trong ngăn Khác của túi đồ. Mỗi lần mua GoBot gõ 100 vào hộp số lượng và "
-         "đọc lại rồi mới bấm Xác Nhận; có gì lạ thì bấm Hủy Bỏ và dừng, giữ ảnh trong thư mục trash_debug. "
-         "Thử mua một lần trước khi bật: nút bên dưới đi tới hộp số lượng rồi bấm Hủy Bỏ, không mua gì.");
+    slots("Thịt bò khô (HP):", "hp", simple_clean_.buy_hp_slots, "buy_hp_slots");
+    slots("Rượu lá tre (MP):", "mp", simple_clean_.buy_mp_slots, "buy_mp_slots");
+    if (simple_clean_.buy_potions && simple_clean_.buy_hp_slots + simple_clean_.buy_mp_slots <= 0)
+        coloured(kWait, "Cả hai đều 0 ô: tới giờ GoBot không mua gì.");
+    hint("Cần có món Người Giữ Sân trong ngăn Khác của túi đồ, và phím bình của bạn phải uống Thịt bò khô và Rượu "
+         "lá tre. Mỗi lần mua GoBot gõ 100 vào hộp số lượng, đọc lại rồi mới bấm Xác Nhận; có gì lạ thì bấm Hủy Bỏ "
+         "và dừng, giữ ảnh trong thư mục trash_debug. Thử mua một lần trước khi bật, và lần đầu nên đặt 1 ô mỗi "
+         "loại.");
+    // The plan, as the worker last left it: atomics, no file.
+    if (simple_clean_.buy_potions) {
+        const std::string line = plan_line(shop_plan_at_s_.load(), shop_look_at_s_.load(), shop_owed_.load(),
+                                           static_cast<std::int64_t>(std::time(nullptr)));
+        if (!line.empty()) hint(line.c_str());
+    }
 
     // Now, and a trial that buys nothing.
     const bool busy = trash_running_ && (trash_oneshot_ || trash_request_ != 0 || trash_pass_);
     const bool chat_open = chat_doubt_;
     ImGui::BeginDisabled(busy || chat_open || !input_.window_valid());
     if (ImGui::Button("Thử mua (không mua gì)")) request_shop(true);
-    ImGui::SetItemTooltip("Mở túi đồ, đếm bình, mở cửa hàng Người Giữ Sân, bấm đúp vào từng món, rồi bấm Hủy Bỏ "
-                          "ở hộp số lượng và đóng cửa hàng. Không gõ số và không mua. Giữ ảnh các bước trong "
-                          "trash_debug.");
+    ImGui::SetItemTooltip("Mở túi đồ, mở cửa hàng Người Giữ Sân, bấm đúp vào từng món, rồi bấm Hủy Bỏ ở hộp số "
+                          "lượng và đóng cửa hàng. Không gõ số và không mua. Giữ ảnh các bước trong trash_debug.");
     ImGui::SameLine();
     ImGui::BeginDisabled(!simple_clean_.buy_potions);
     if (ImGui::Button("Mua ngay")) request_shop(false);
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("%s", simple_clean_.buy_potions
-                                    ? "Kiểm tra và mua ngay bây giờ, không chờ tới giờ. Kỹ năng, bình và buff tạm "
-                                      "dừng cho tới khi xong."
+                                    ? "Mua ngay bây giờ đủ số ô đã đặt trong một lượt, không chờ tới giờ; giờ mua kế "
+                                      "tiếp tính lại từ lúc này. Kỹ năng, bình và buff tạm dừng cho tới khi xong."
                                     : "Bật ô \"Tự mua bình\" trước.");
     ImGui::EndDisabled();
     if (chat_open)

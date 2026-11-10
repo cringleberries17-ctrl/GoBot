@@ -36,11 +36,14 @@ namespace gobot {
 ///   from the live client (bag::find_book) -- or by GoC's own picture of its
 ///   first page;
 /// - the game's ESC menu, only when GoBot's own ESC brought it up a moment
-///   before: its X. The player's own ESC menu may be on its way to Thoát Game.
-///
-/// The check-in board ("Sự kiện và điểm danh") is not on the list yet: no
-/// frame of it has been taken from the live client, and its close button is
-/// not known to be where a picture would say.
+///   before: its X. The player's own ESC menu may be on its way to Thoát Game;
+/// - the "Sự kiện và điểm danh" board the game opens on its "Điểm danh"
+///   calendar after every login and as the clock passes 00:00: ESC, and only
+///   when nothing else of the list is up -- its notice is closed first. Told
+///   by its title (checkin_board.hpp). Its X is never clicked: no frame of
+///   the live board has been seen yet, and its place is the art's. Any close
+///   button in the board's top band counts as its own, so that an X drawn a
+///   little off the art's place does not keep it shut.
 ///
 /// A popup is closed only once it has stayed in one place for 3 seconds, and
 /// never on a look where anything else is up -- a dialog with Xác Nhận and Hủy
@@ -53,8 +56,12 @@ enum class PopupKind {
     CheckinNotice,      ///< the check-in reward's notice
     MonsterBook,        ///< Yêu Quái Bách Khoa
     EscMenu,            ///< the game's ESC menu, when GoBot's own ESC opened it
+    CheckinBoard,       ///< "Sự kiện và điểm danh", closed with ESC
 };
-constexpr int kPopupKinds = 3;
+constexpr int kPopupKinds = 4;
+/// One bit a kind, for a set of kinds: what is looked for, what is allowed.
+constexpr unsigned popup_bit(PopupKind k) { return 1u << static_cast<unsigned>(k); }
+constexpr unsigned kAllPopups = (1u << kPopupKinds) - 1;
 /// "the check-in notice", for the log.
 const char* popup_kind_name(PopupKind k);
 /// "thông báo nhận quà điểm danh", for the screen.
@@ -63,12 +70,18 @@ const char* popup_kind_vi(PopupKind k);
 /// One allowed popup on one frame.
 struct PopupSeen {
     PopupKind  kind = PopupKind::CheckinNotice;
-    ScreenRect at;                  ///< the popup
-    float      score = 0.0f;        ///< its picture; for the notice, its words
+    /// The popup. For the check-in board, the whole board as the art has it
+    /// from its title (kCheckinBoardFromTitle); the title is at +298,3.
+    ScreenRect at;
+    /// Its picture; for the notice, its words; for the board, its title.
+    float      score = 0.0f;
     /// Its own close control was found, at x, y. The monster book without it
     /// is closed with ESC, when nothing else is up.
     bool       control = false;
     int        x = 0, y = 0;
+    /// Closed with ESC whether its X was found or not, when nothing else is
+    /// up: the check-in board, whose X is never clicked.
+    bool       by_esc = false;
 };
 
 /// What one look found.
@@ -145,10 +158,16 @@ public:
     /// run is the cheaper for leaving it out. With `only_at`, the notice and
     /// the book are looked for only round that rectangle, a few pixels either
     /// way: a popup's own place, looked at again under the hold, in a few
-    /// milliseconds rather than a search of the whole screen.
-    std::vector<PopupSeen> popups(const Frame& f, bool with_menu = true, const ScreenRect* only_at = nullptr) const;
+    /// milliseconds rather than a search of the whole screen -- and the
+    /// check-in board only as its title, within kCheckinRelookSlack of where
+    /// a board at `only_at` has it: a 296x46 search. `kinds` (popup_bit) are
+    /// the kinds looked for at all.
+    std::vector<PopupSeen> popups(const Frame& f, bool with_menu = true, const ScreenRect* only_at = nullptr,
+                                  unsigned kinds = kAllPopups) const;
     /// What else is up, given the popups found on the frame, in English for
     /// the log -- and in Vietnamese into `vi`, for the screen, when given.
+    /// A close button is one of `popups`' own when it is where that popup's
+    /// control is -- or, for the check-in board, anywhere in its top band.
     std::vector<std::string> blockers(const Frame& f, const std::vector<PopupSeen>& popups,
                                       std::vector<std::string>* vi = nullptr) const;
 
@@ -157,6 +176,15 @@ public:
     /// the book is still up there, even with something drawn over the rest of
     /// it.
     bool book_title_in(const Frame& f, const ScreenRect& area) const;
+    /// Some of the popup of `kind` that was at `where` is still up, even with
+    /// something drawn over the rest of it: the book's title box
+    /// (book_title_in), the board's title where it was. For the rule that an
+    /// ESC menu seen once the popup is wholly gone was under it -- the
+    /// player's. False for the kinds never closed with ESC.
+    bool still_partly_in(PopupKind kind, const Frame& f, const ScreenRect& where) const;
+    /// The check-in board's title picture is there: without it the board is
+    /// never seen, and the rest of the list is closed as before.
+    bool sees_board() const;
 
 private:
     /// The best of the close buttons in `area`, by any of their pictures.
@@ -218,6 +246,9 @@ public:
     /// and a click on the menu's X -- before it would run past kHoldMs: the
     /// hold is let go rather than started on another.
     static constexpr std::uint64_t kLookAllowMs = 350;
+    /// A look under the hold slower than this is said in the log: the board's
+    /// is a 296x46 search, and one this slow is a busy machine (B-5).
+    static constexpr std::uint64_t kSlowRelookMs = 600;
     /// Tries for one kind in any kTriesWindowMs; after them it is left alone.
     static constexpr int kTries = 2;
     static constexpr std::uint64_t kTriesWindowMs = 600'000;
@@ -272,6 +303,12 @@ public:
     void set_hands(Hands h) { hands_ = std::move(h); }
     void set_clock(Clock c) { clock_ = std::move(c); }
     void on_report(Report r) { report_ = std::move(r); }
+    /// The kinds that may be closed (popup_bit), read every turn: all of them
+    /// unless set. A kind not allowed is never pressed and owns nothing on
+    /// the screen -- its X is an unknown window's -- and the check-in board
+    /// seen while it is not allowed keeps everything else shut, as any window
+    /// does: a click or an ESC beside it may land on it.
+    void set_allowed(unsigned kinds) { allowed_ = kinds & kAllPopups; }
 
     /// One look and, when a popup has stayed kSteadyMs and nothing forbids
     /// it, one click or one ESC, checked.
@@ -280,6 +317,11 @@ public:
     /// What the last turn saw and did, in Vietnamese, for the tab.
     const std::string& last_vi() const { return last_vi_; }
     int closed() const { return closed_; }
+    /// A popup of `kind` was up on the last turn's look.
+    bool up(PopupKind kind) const { return tracks_[static_cast<int>(kind)].seen; }
+    /// The last turn was about a popup of `kind`: the one it closed, tried,
+    /// put off or left alone. False after a turn that saw nothing to close.
+    bool last_about(PopupKind kind) const { return last_kind_ == static_cast<int>(kind); }
 
 private:
     struct Track {
@@ -311,9 +353,59 @@ private:
     std::uint64_t    own_esc_ms_ = 0;
     std::string      last_vi_;
     int              closed_ = 0;
+    unsigned         allowed_ = kAllPopups;
+    int              last_kind_ = -1;   ///< last_about's kind; -1 for none
     /// A turn's look, kept from turn to turn so that its 3 MB are grabbed
     /// into again rather than made anew every turn.
     Frame            turn_frame_;
 };
+
+/// Pictures of the game the popup worker keeps while "Tự đóng thông báo" is
+/// on, for the owner to send: the check-in board has never been seen on the
+/// live client, and these show where it is drawn, its X and whether it was
+/// told. popup_debug\checkin_<time>_<why>.png, the newest kKeep of them:
+///
+/// - "first": the first sight of the board in a day, during its 3 s wait;
+/// - "after": once after it was closed;
+/// - "in15": about 15 s after each time the keeper got back in the world;
+/// - "start15": about 15 s after the worker started (BẮT ĐẦU) -- a login by
+///   hand has no keeper crossing;
+/// - "midnight": about 00:00:30 by the PC's clock.
+///
+/// The last three whether the board is told or not. No threads and no clock
+/// of its own: told the time at every call, so that a test runs a day of it
+/// in a moment. The worker keeps what it says between turns, never between a
+/// hold and its press.
+class CheckinShots {
+public:
+    static constexpr std::uint64_t kAfterMs = 15'000;
+    static constexpr int kMidnightS = 30;
+    static constexpr int kKeep = 20;
+
+    /// The worker started: `now` on the steady clock, `day` the PC's date as
+    /// yyyymmdd, `crossed_in_ms` the keeper's last arrival on the same clock
+    /// as `now` (0 for none) -- one well over kAfterMs before is not this
+    /// worker's to picture.
+    void start(std::uint64_t now, int day, std::uint64_t crossed_in_ms);
+    /// What to keep now, in order: "first", "after", "in15", "start15",
+    /// "midnight" -- each at most once. `second` is the second of the PC's
+    /// day; `board_up` whether the last turn saw the board, `board_closed`
+    /// whether it closed it.
+    std::vector<std::string> due(std::uint64_t now, int day, int second, bool board_up, bool board_closed,
+                                 std::uint64_t crossed_in_ms);
+
+private:
+    std::uint64_t started_ = 0;
+    bool          start_kept_ = true;
+    int           first_day_ = 0;       ///< the day the board's "first" was kept
+    int           day_ = 0;             ///< the day the worker last saw
+    std::uint64_t crossed_seen_ = 0;    ///< the arrival last pictured, or passed over
+};
+
+/// Keep `f` in `dir` as checkin_<time>_<nn>_<why>.png -- or, for the tab's
+/// "Thử xem", probe_<time>_<nn>.png -- keeping the newest
+/// CheckinShots::kKeep of each. The folder is made when it is not there.
+/// Returns the file, or empty. Never on the window's own thread.
+std::string keep_popup_frame(const std::string& dir, const Frame& f, const std::string& why, bool probe);
 
 } // namespace gobot

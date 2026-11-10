@@ -1,11 +1,11 @@
 // The bag from the packets (the packets plan, item E): the potion keys'
-// presses matched to the bag frames that answer them, the hotbar's counts and
-// the shop's own counts set beside the bag's (gobot/bag_ledger.hpp), and what
-// goes by the bag once those agree -- "Low" on a potion's total in the bag
-// (potions_tick) and a due look of the shop skipped (run_shop). The trash's
-// lines only say what the bag shows. The charms' can also stop a right-click
-// on a slot the bag names another item in, or another count in for a stack of
-// one (bag_charm_slot) -- never cause one.
+// presses matched to the bag frames that answer them, the hotbar's counts set
+// beside the bag's (gobot/bag_ledger.hpp), and what goes by the bag once those
+// agree -- "Low" on a potion's total in the bag (potions_tick). The trash's
+// lines and the shop's (bag_shop_text) only say what the bag shows: since
+// 2026.11.09 the shop counts nothing, and no look of it is skipped. The charms'
+// can also stop a right-click on a slot the bag names another item in, or
+// another count in for a stack of one (bag_charm_slot) -- never cause one.
 //
 // "Out" stays the hotbar's, buying stays the screen's, and with [Packets]
 // bag=off nothing goes by the bag at all: the checks and their lines go on.
@@ -186,52 +186,21 @@ bool GuiApp::bag_learned_count(std::uint32_t vk, int& total, std::uint32_t& item
     return BagPart::of(*this).ledger.learned_total(vk, BagPart::link_of(*this), total, item);
 }
 
-bool GuiApp::bag_says_enough(int hp_below, int mp_below, int& hp_slots, int& mp_slots) const {
-    BagPart& part = BagPart::of(*this);
-    const std::uint64_t now = now_ms();
-    part.sync(*this, now);
-    const BagLedger::ShopAnswer a = part.ledger.shop_ask(now, BagPart::link_of(*this), hp_below, mp_below);
-    hp_slots = a.hp_slots;
-    mp_slots = a.mp_slots;
-    if (!a.skip) {
-        GB_INFO("Shop: a real look -- the packets' bag does not skip it: %s", a.why);
-        return false;
-    }
-    if (packets_settings_.bag == PacketUse::Off) {
-        GB_INFO("Shop: a real look -- the packets' bag would skip it, but [Packets] bag=off");
-        return false;
-    }
-    return true;
-}
-
-void GuiApp::bag_note_shop(int hp_slots_screen, int mp_slots_screen, bool skipped, std::uint64_t at) {
+std::string GuiApp::bag_shop_text(int& used) const {
+    used = -1;
     BagPart& part = BagPart::of(*this);
     part.sync(*this, now_ms());
-    const BagLedger::ShopCheck c =
-        part.ledger.shop_done(hp_slots_screen, mp_slots_screen, skipped, at, BagPart::link_of(*this));
-    if (skipped) return;            // run_shop has said so
-    const std::string hp_item = std::to_string(BagLedger::item_of_id(CleanSettings::kBuyHpId));
-    const std::string mp_item = std::to_string(BagLedger::item_of_id(CleanSettings::kBuyMpId));
-    const int need = BagLedger::kShopAgreements;
-    if (!c.real) {
-        GB_INFO("Bag check: the shop run counted no slots -- nothing compared");
-        return;
-    }
-    if (!c.compared) {
-        GB_INFO("Bag check: the shop counted %d slots of Thịt bò khô (%s) and %d of Rượu lá tre (%s) -- not compared: %s",
-                hp_slots_screen, hp_item.c_str(), mp_slots_screen, mp_item.c_str(), c.why);
-        return;
-    }
-    if (c.agreed)
-        GB_INFO("Bag check: the shop counted %d slots of Thịt bò khô (%s) and %d of Rượu lá tre (%s), the packets' bag "
-                "%d and %d -- agree (%d of %d)%s",
-                hp_slots_screen, hp_item.c_str(), mp_slots_screen, mp_item.c_str(), c.hp_packets, c.mp_packets,
-                std::min(c.agreements, need), need, c.trusted ? ": trusted, a due look may be skipped" : "");
-    else
-        GB_INFO("Bag check: the shop counted %d slots of Thịt bò khô (%s) and %d of Rượu lá tre (%s), the packets' bag "
-                "%d and %d -- disagree (0 of %d): no due look is skipped until %d runs agree again",
-                hp_slots_screen, hp_item.c_str(), mp_slots_screen, mp_item.c_str(), c.hp_packets, c.mp_packets, need,
-                need);
+    const BagLedger::Summary s = part.ledger.summary(BagPart::link_of(*this));
+    // Only the game's bag as it is now: an older frame says nothing of what
+    // the shop just did.
+    if (!s.known || !s.current) return std::string();
+    used = s.used_slots;
+    const auto potion = [](std::uint32_t item, int slots, int total) {
+        return std::to_string(item) + " total=" + std::to_string(total) + " (" + std::to_string(slots) +
+               (slots == 1 ? " slot)" : " slots)");
+    };
+    return potion(s.hp_item, s.hp_slots, s.hp_total) + ", " + potion(s.mp_item, s.mp_slots, s.mp_total) +
+           "; Tiêu Dùng " + std::to_string(s.used_slots) + "/" + std::to_string(kBagSlots) + " used";
 }
 
 std::string GuiApp::bag_charm_text(const std::string& clock_id, std::uint64_t claimed_at) const {
@@ -321,13 +290,10 @@ void GuiApp::note_bag_minute(std::uint64_t now) {
         if (k.distrusts > 0) line << ", distrusted " << k.distrusts;
         if (k.low_trusted) low += (low.empty() ? "" : ", ") + InputManager::key_name(k.vk);
     }
-    line << "; checks: hotbar " << s.hotbar_agree << "/" << s.hotbar_disagree << ", shop " << s.shop_agree << "/"
-         << s.shop_disagree << "; voids " << s.voids;
-    if (s.voids > 0) line << " (last: " << s.last_void << ")";
-    line << "; \"Low\" by the bag: " << (low.empty() ? std::string("none") : low) << "; shop: "
-         << (s.shop_trusted ? "trusted" : "not trusted") << " ("
-         << std::min(s.shop_agreements, BagLedger::kShopAgreements) << " of " << BagLedger::kShopAgreements
-         << "), skipped " << s.skips << ", real " << s.reals;
+    // Nothing of the shop: since 2026.11.09 it counts nothing, so its trust,
+    // skips and voids stay at nothing (bag_shop_text has its own lines).
+    line << "; checks: hotbar " << s.hotbar_agree << "/" << s.hotbar_disagree;
+    line << "; \"Low\" by the bag: " << (low.empty() ? std::string("none") : low);
     if (packets_settings_.bag == PacketUse::Off) line << "; [Packets] bag=off: the screen decides";
     if (line.str() != part.said) {
         part.said = line.str();

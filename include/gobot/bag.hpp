@@ -5,6 +5,7 @@
 #include "gobot/input_manager.hpp"
 #include "gobot/template_matcher.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -464,26 +465,28 @@ struct CleanSettings {
     static constexpr float kCharmFrameLeast = 0.85f;
     static constexpr float kCharmFrameMost = 0.99f;
 
-    /// [Trash] buy_potions: whether the bag is looked at every
-    /// buy_every_minutes for the potions of Tiêu Dùng and, when there are
-    /// fewer slots of them than the player wants, more are bought from the
-    /// shop the Người Giữ Sân item in Khác opens: a right-click on it, the
-    /// item, a double-click on the potion, 100 into the box, Xác Nhận
-    /// (BagCleaner::Mode::ShopBuy). Off
-    /// unless the file says so, and it ships off: it spends the character's
-    /// money, and types into the game for the first time.
+    /// [Trash] buy_potions: whether potions are bought every
+    /// buy_every_minutes from the shop the Người Giữ Sân item in Khác opens: a
+    /// right-click on the item, a double-click on the potion, 100 into the
+    /// box, Xác Nhận (BagCleaner::Mode::ShopBuy) -- buy_hp_slots purchases of
+    /// Thịt bò khô and buy_mp_slots of Rượu lá tre, taking turns. Nothing in
+    /// the bag is counted (the owner, 2026-11-09): the game's message that the
+    /// bag is full ends a round. Off unless the file says so, and it ships
+    /// off: it spends the character's money, and types into the game.
     bool buy_potions = false;
     int  buy_every_minutes = 60;
     static constexpr int kBuyEveryLeast = 5;
     static constexpr int kBuyEveryMost = 1440;
-    /// Slots of Thịt bò khô (HP) and of Rượu lá tre (MP) in Tiêu Dùng: under
-    /// `below` of them more are bought, up to `to`. `below` 0 leaves that
-    /// potion alone; `to` is never under `below`.
-    int  buy_hp_below = 3;
-    int  buy_hp_to = 6;
-    int  buy_mp_below = 3;
-    int  buy_mp_to = 6;
-    static constexpr int kBuySlotsMost = 60;
+    /// [Trash] buy_hp_slots, buy_mp_slots: how many purchases of 100 of Thịt
+    /// bò khô (HP) and of Rượu lá tre (MP) each time -- a slot of the bag each
+    /// -- 0 leaving that potion alone. A file from before 2026.11.09 has
+    /// neither: its buy_hp_to and buy_mp_to, the slots it bought up to, stand
+    /// for them until the card saves the new keys; buy_*_below is passed over.
+    /// Neither there: kBuySlotsDefault.
+    static constexpr int kBuySlotsDefault = 3;
+    static constexpr int kBuySlotsPerRunMost = 20;
+    int  buy_hp_slots = kBuySlotsDefault;
+    int  buy_mp_slots = kBuySlotsDefault;
     /// How many of a potion one purchase asks for: always this, typed into the
     /// quantity box and read back before Xác Nhận.
     static constexpr int kBuyQuantity = 100;
@@ -609,6 +612,13 @@ private:
     std::string path_;
     std::map<std::string, std::int64_t> next_;
 };
+
+/// When the potion shop's next plan is due (2026.11.09), kept as the charms'
+/// times are -- a CharmClock of its own, one id -- in shop_clock.txt beside
+/// charm_clock.txt: nothing in the bag is counted any more, so a GoBot started
+/// again must not buy a plan early. Read and written by the trash worker only.
+std::string shop_clock_path();
+inline const char* const kShopClockId = "shop";
 
 /// What to get rid of: pictures of items, cut from the player's own bag and
 /// kept as PNGs in one folder for each way of getting rid of them, and icons
@@ -1057,11 +1067,75 @@ Shop find_shop(const Frame& f, const TemplateStore& store);
 /// The message that the bag has no room, on `f`: where it is, or not found.
 bool shop_full_up(const Frame& f, const TemplateStore& store, ScreenRect* at = nullptr);
 
+/// How near `f` comes to that message, found or not, for the log: the best
+/// place for the whole picture anywhere, how alike it is there, and how alike
+/// its line of words is at that place. -1 for what was not looked at. Where
+/// the run meets another message, or none, it says whether the owner's client
+/// draws the message a little apart from the picture.
+struct ShopFullLook {
+    ScreenRect at;
+    float      whole = -1.0f;
+    float      words = -1.0f;
+};
+ShopFullLook shop_full_look(const Frame& f, const TemplateStore& store);
+
+/// Where the Xác Nhận label of the full-bag message is looked for, from the
+/// message's top-left: its label at 148,58 in the picture, give or take six
+/// pixels across and four up and down.
+constexpr ScreenRect kShopFullOkBand{ 142, 54, 46, 21 };
+
 /// Whether anything of a potion purchase may still be up on `f`: the shop, its
-/// buttons alone, its full-bag message, or either button of a question -- one
-/// find_dialogs does not see with a button drawn pressed. True on no frame or a
-/// black one. What a hold kept for a purchase is let go only without.
+/// buttons alone, or either button of a question -- one find_dialogs does not
+/// see with a button drawn pressed. True on no frame or a black one. What a
+/// hold kept for a purchase is let go only without. A message alone -- the
+/// bag full, or one GoBot does not know -- is none of it (2026.11.09): it takes
+/// no key, and a message that would not close kept every key off all night.
 bool shop_left_up(const Frame& f, const TemplateStore& store);
+
+/// The order a round of the shop buys in: Thịt bò khô and Rượu lá tre taking
+/// turns, HP first, then what is left of the longer -- `hp` and `mp` of them,
+/// cut to `most`. The full-bag message is for the whole of Tiêu Dùng, so a
+/// round that meets it after a few has some of each.
+enum class ShopPotion { Hp, Mp };
+std::vector<ShopPotion> shop_order(int hp, int mp, int most);
+
+/// What is still to be bought of a plan -- the slots set, from the time it was
+/// due -- and the rounds in a row that ended in trouble.
+struct ShopOwed {
+    int hp = 0, mp = 0;
+    int troubles = 0;
+    /// The last round left the plan with nothing owed after troubles in a
+    /// row: the owner is told.
+    bool dropped = false;
+};
+/// How a round of the shop ended, as whoever runs it sees it. Full: the game
+/// said the bag is full. Message: another message came up instead of the
+/// quantity box. Trouble: anything else that went wrong. Clean: no trouble.
+/// Paused: the round did not get to buying for a reason of its own -- the
+/// check-in board up, HP low, somebody at the mouse, a stop.
+enum class ShopEnd { Clean, Full, Message, Trouble, Paused };
+/// What is owed after a round that bought `bought_hp` and `bought_mp` and
+/// made `unsure_hp` and `unsure_mp` purchases that may or may not have gone
+/// through -- counted as bought: never bought twice -- and ended `end`:
+/// nothing after a full bag or a message; after a trouble, the rest unless it
+/// is the kShopTroublesToDrop-th in a row, and then nothing either; the
+/// troubles in a row reset by a clean round and left as they were by a paused
+/// one. Never under 0.
+ShopOwed shop_owed_after(const ShopOwed& before, int bought_hp, int bought_mp, int unsure_hp, int unsure_mp,
+                         ShopEnd end);
+/// A new plan when its time comes: the slots set, owing all of them, and no
+/// trouble yet. Whatever an earlier plan still owed is dropped.
+ShopOwed shop_new_plan(int hp_slots, int mp_slots);
+constexpr int kShopTroublesToDrop = 2;
+
+/// How long after its worker starts the shop first looks, in seconds, given
+/// when the next plan was due by the clock saved when the last plan began
+/// (`saved_s`, wall-clock seconds; 0: none saved) and the interval: what is
+/// left of the wait, but never under kShopFirstWaitS -- a GoBot started does
+/// not buy straight away -- nor over one interval, so a clock saved far ahead,
+/// or a shorter interval set since, waits no longer than the interval.
+constexpr int kShopFirstWaitS = 45;
+std::int64_t shop_first_wait_s(std::int64_t saved_s, std::int64_t now_s, int every_minutes);
 
 /// The shop's row of potions anywhere on `f`, its buttons or not: a shop
 /// whose Mua | Thoát an item's description lies over is still up.
@@ -1239,9 +1313,10 @@ public:
         std::function<bool(std::uint32_t)>           scan_key;
         /// A double-click; two of `click` when unset.
         std::function<bool(int, int)>                double_click;
-        /// The pointer moved there, no button pressed: what park_pointer does
-        /// with pretend hands. Unset, pretend hands leave the pointer where the
-        /// last click put it; the real pointer is never moved by them.
+        /// The pointer moved there, no button pressed: what park_pointer and
+        /// the shop's moves off its list and off its question do with pretend
+        /// hands. Unset, pretend hands leave the pointer where the last click
+        /// put it; the real pointer is never moved by them.
         std::function<bool(int, int)>                move;
     };
     void set_hands(Hands h) { hands_ = std::move(h); skip_focus_check_ = true; }
@@ -1268,14 +1343,40 @@ public:
     /// nothing deleted. A Pass leaves the charms to it: it says where it sees
     /// one and never right-clicks it.
     ///
-    /// ShopBuy: the potions of Tiêu Dùng counted, and -- when fewer slots of
-    /// Thịt bò khô or Rượu lá tre are there than the settings want -- bought
-    /// from the Người Giữ Sân item's shop (see shop_buy); with set_dry_run
-    /// everything but the typing and the Xác Nhận. The list it goes by holds
-    /// the two potions and the item as catalog icons (the settings' ids), and
-    /// nothing in it is ever deleted.
+    /// ShopBuy: the purchases set_shop_plan asks for, Thịt bò khô and Rượu lá
+    /// tre taking turns, from the Người Giữ Sân item's shop (see shop_buy) --
+    /// nothing in the bag counted -- until the game says the bag is full; with
+    /// set_dry_run one of each as far as the quantity box, nothing typed and no
+    /// Xác Nhận. The list it goes by holds the two potions and the item as
+    /// catalog icons (the settings' ids), and nothing in it is ever deleted.
+    ///
+    /// Every mode looks for the check-in board first, on the look before the
+    /// bag key: with it up, nothing at all is pressed (Result::board_up).
     enum class Mode { Pass, CharmsOnly, ShopBuy };
     void set_mode(Mode m) { mode_ = m; }
+
+    /// How many purchases of 100 a ShopBuy run makes of each potion, in the
+    /// order bag::shop_order gives, kShopMaxBuys at most. Unset, or both 0, a
+    /// run that is not a trial presses nothing. A trial (set_dry_run) tries
+    /// one of each whatever this says.
+    void set_shop_plan(int hp, int mp) {
+        shop_plan_hp_ = std::max(0, hp);
+        shop_plan_mp_ = std::max(0, mp);
+    }
+    /// The deadline of a ShopBuy run of `purchases`, in milliseconds: 30 s and
+    /// 6 s a purchase, kShopDeadlineMostMs at most.
+    static int shop_deadline_ms(int purchases);
+    static constexpr int kShopDeadlineMostMs = 300'000;
+    /// The most purchases of one run -- what "Mua ngay" may make in one hold --
+    /// and of a timed run in one hold, the rest of its plan kShopPartGapMs
+    /// later: a round of twenty would hold every skill, potion and buff off for
+    /// a minute or more with nobody watching.
+    static constexpr int kShopMaxBuys = 40;
+    static constexpr int kShopBuysPerHold = 10;
+    static constexpr int kShopPartGapMs = 60'000;
+    /// How long a job that found the check-in board up waits before it looks
+    /// again. Not counted as trouble.
+    static constexpr int kBoardWaitMs = 60'000;
 
     /// Which charms are due, by TrashList::Item::clock_id: a charm used or
     /// perhaps used less than charm_every_minutes ago is not (CharmClock).
@@ -1337,10 +1438,10 @@ public:
     /// A look at the bag's strip that reads no tab chosen at all -- something
     /// drawn over it for a moment, the pointer resting on it -- is looked at
     /// again, up to kTabRelooks times kTabRelookMs apart, before it stops the
-    /// run: after the click on a tab (select_tab), and in the shop's count and
-    /// the charm sweep, the pointer moved off first. A look that reads another
-    /// tab chosen stops those two at once. Nothing is counted, bought or
-    /// right-clicked on a look that does not read the tab wanted.
+    /// run: after the click on a tab (select_tab), and in the shop's look for
+    /// its item on Khác and the charm sweep, the pointer moved off first. A look
+    /// that reads another tab chosen stops those two at once. Nothing is
+    /// bought or right-clicked on a look that does not read the tab wanted.
     static constexpr int kTabRelooks = 8;
     static constexpr int kTabRelookMs = 150;
 
@@ -1399,22 +1500,35 @@ public:
         ScreenRect notice_place;
         bool notice_carried = false;
 
-        /// The shop (Mode::ShopBuy): slots of each potion in Tiêu Dùng when
-        /// the run began and when it ended (-1: not counted), purchases
-        /// confirmed, whether the shop was seen open, and whether the game
-        /// said the bag has no room.
-        int  shop_hp_before = -1, shop_mp_before = -1;
-        int  shop_hp_after = -1, shop_mp_after = -1;
+        /// The shop (Mode::ShopBuy): purchases seen through -- the question
+        /// gone after Xác Nhận, and no message after it -- in all and of each
+        /// potion; and those whose Xác Nhận was clicked and whose outcome was
+        /// not seen, which stop the run and count as bought (never bought
+        /// twice). Whether the shop was seen open.
         int  shop_bought = 0;
+        int  shop_bought_hp = 0, shop_bought_mp = 0;
+        int  shop_unsure = 0;
+        int  shop_unsure_hp = 0, shop_unsure_mp = 0;
         bool shop_opened = false;
+        /// The game said the bag has no room: the round ends there, the
+        /// message closed -- `full_stuck` when two clicks did not close it,
+        /// and then no key is pressed for it, ESC least of all.
         bool shop_full = false;
-        /// Bought a potion and the slots of it did not grow: not bought again,
-        /// and whoever runs the job does not run it again by itself.
-        bool shop_no_gain = false;
+        bool full_stuck = false;
+        /// A message GoBot does not know came up instead of the quantity box,
+        /// on two looks: its picture kept (shop_message), its Xác Nhận
+        /// clicked, and the round ended as for a full bag -- most likely the
+        /// same message drawn a little apart from the picture.
+        bool shop_message = false;
+        /// The check-in board was up: nothing pressed from then on -- at the
+        /// start of a run, with no key pressed at all -- and the run is to be
+        /// looked at again later (kBoardWaitMs). Not trouble.
+        bool board_up = false;
         /// The run stopped on the bag's strip not reading as the tab it
         /// wanted -- no tab drawn chosen after its looks again, or another --
-        /// at the tab's click (`trouble` says so) or in the charm sweep (said,
-        /// and no trouble: nothing more was right-clicked). Not "no charm
+        /// at the tab's click or in the shop's look on Khác (`trouble` says
+        /// so), or in the charm sweep (said, and no trouble: nothing more was
+        /// right-clicked). Not "no charm
         /// there": none was looked for. Whoever runs a charm job waits longer
         /// before the next (gui_app.cpp).
         bool tab_unsure = false;
@@ -1679,19 +1793,17 @@ private:
     /// `stop` set. False when the run may go on.
     bool charm_must_stop(Result& res, bool& stop);
 
-    /// Mode::ShopBuy, after the bag has been found: count the potions' slots
-    /// in Tiêu Dùng; when some potion is under its threshold, open the shop --
-    /// a right-click on the Người Giữ Sân item of Khác -- and buy that potion
-    /// up to its limit, 100 at a time, the number typed into the quantity box
-    /// and read back before Xác Nhận; close the shop (ESC, seen to work, else
-    /// its Thoát) and count again, never more than kShopRounds times over.
-    /// Every step is seen to have happened before the next, and anything not as
-    /// expected stops it with Hủy Bỏ on whatever is up and a picture kept.
+    /// Mode::ShopBuy, after the bag has been found: open the shop -- a
+    /// right-click on the Người Giữ Sân item of Khác -- and make the purchases
+    /// set_shop_plan asks for, in bag::shop_order's order, 100 at a time, the
+    /// number typed into the quantity box and read back before Xác Nhận; then
+    /// close the shop (ESC, seen to work, else its Thoát), the full-bag message
+    /// closed first if it is up. Nothing in the bag is counted, and Tiêu Dùng
+    /// is never clicked (the owner, 2026-11-09). The game's message that the
+    /// bag is full, another message instead of the box, a purchase not seen
+    /// through, the check-in board, or anything else not as expected ends the
+    /// round, with Hủy Bỏ on whatever is up and a picture kept.
     void shop_buy(BagView& v, Result& res, bool& stop);
-    /// The slots of the HP and MP potions in tab `tab`, the whole tab from its
-    /// top, each once. False, with `res.trouble` saying why, when the tab could
-    /// not be counted to its end.
-    bool shop_count(int tab, BagView& v, Result& res, bool& stop, int& hp, int& mp);
     /// The page on show with its scroll bar read: the pointer is moved off the
     /// bar and the page looked at again a few times when the thumb is not
     /// readable. False when the bag is not found at all.
@@ -1740,6 +1852,10 @@ private:
     /// -- so that a copy of the screen there shows the game's. Nothing is taken
     /// for gone where it is not: the shop's frames come off the screen only.
     bool seen_at(const ScreenRect& r);
+    /// Whether the check-in board on `f` lies over the question taken to be up
+    /// (shop_q_, its whole box): a question it may hide is not gone, and what
+    /// was typed into it is still there.
+    bool board_over_question(const Frame& f) const;
     /// The number in the box of the dialog at `pair`, looked at over a whole
     /// blink of its caret: the number every look agrees on, kBoxMixed,
     /// kUnreadable, or kBoxGone when the dialog was no longer where it was.
@@ -1751,13 +1867,28 @@ private:
     /// `clicked`: the item was right-clicked -- a shop may come even when this
     /// gave up waiting for it, and is then waited for once more and shut.
     bool shop_open(BagView& v, Result& res, Frame& shot, bag::Shop& shop, bool& clicked);
-    /// One purchase of potion `hp` (else MP): its cell double-clicked -- never
-    /// Mua, which brings up a box that takes no keys (the player's own way,
-    /// 2026-10-31) -- the quantity question seen, 100 typed and read back,
-    /// Xác Nhận. kShopBought,
-    /// or kShopFullBag when the game said no room, or kShopStopped with
-    /// `res.trouble`. Dry: stops at the question, which is answered Hủy Bỏ.
-    enum { kShopStopped = 0, kShopBought = 1, kShopFullBag = 2, kShopProbed = 3 };
+    /// One purchase of potion `hp` (else MP): on a fresh look with the shop up
+    /// and nothing else -- no dialog, no message, no check-in board -- its cell
+    /// double-clicked -- never Mua, which brings up a box that takes no keys
+    /// (the player's own way, 2026-10-31) -- the quantity question seen, 100
+    /// typed and read back, Xác Nhận on a fresh look with only that question
+    /// up, and the question seen gone with no message after it. kShopBought;
+    /// kShopFullBag when the game said no room, instead of the box or after
+    /// Xác Nhận -- that one not counted -- the message closed (shop_full_close);
+    /// kShopMessage for a message GoBot does not know (lone_message), closed;
+    /// kShopUnsure when Xác Nhận was clicked and what came of it was not seen;
+    /// kShopBoard with the check-in board up, nothing clicked from then on; or
+    /// kShopStopped with `res.trouble`. Dry: stops at the question, which is
+    /// answered Hủy Bỏ (kShopProbed).
+    enum {
+        kShopStopped = 0,
+        kShopBought = 1,
+        kShopFullBag = 2,
+        kShopProbed = 3,
+        kShopMessage = 4,
+        kShopUnsure = 5,
+        kShopBoard = 6,
+    };
     int  shop_purchase(bool hp, Result& res);
     /// The shop on `f`: bag::find_shop, or -- with its first row hidden -- its
     /// buttons alone, where they were last seen.
@@ -1765,8 +1896,47 @@ private:
     /// Close the shop with ESC -- looked at, and its Thoát clicked when it is
     /// still there -- and nothing else pressed. False when it is still open.
     bool shop_close(const bag::Shop& shop, Result& res);
-    static constexpr int kShopRounds = 4;
-    static constexpr int kShopMaxBuys = 40;
+    /// Close the full-bag message found at `at` by its own Xác Nhận, with a
+    /// loop of its own: gone on a fresh look and on another kShopFullGapMs
+    /// later is closed with no click; else its label is clicked where lone_ok
+    /// finds it in kShopFullOkBand -- or, the label not to be told (lit by the
+    /// pointer), at the picture's own place for it, the message still up on
+    /// that fresh look -- and it is closed only once two looks kShopFullGapMs
+    /// apart do not show it, within kShopFullCloseMs; once more on a fresh
+    /// look no sooner than kShopFullGapMs after the first click, and no
+    /// third time. Still up: `res.full_stuck`, said, and never an ESC -- an ESC
+    /// would close the message the round is ended by, or the shop under it.
+    bool shop_full_close(const ScreenRect& at, Result& res);
+    static constexpr int kShopFullGapMs = 300;
+    static constexpr int kShopFullCloseMs = 2500;
+    /// Looks after the question is seen gone, kShopFullTailGapMs apart, for a
+    /// full-bag message that comes a moment after it: kShopFullTailLooks at
+    /// least, and on until kShopFullLateMs after Xác Nhận was clicked.
+    static constexpr int kShopFullTailLooks = 2;
+    static constexpr int kShopFullTailGapMs = 150;
+    static constexpr int kShopFullLateMs = 1000;
+    /// A message GoBot does not know -- one Xác Nhận under it, lone_ok
+    /// anywhere -- and nothing else: not the full-bag message, no dialog of
+    /// two buttons, not the quantity question taken to be up. On `f` and on a
+    /// fresh look kShopTailGap later both, so a message caught for one frame
+    /// is none. `at` gets its label; `shot`, when given, the second look.
+    bool lone_message(const Frame& f, ScreenRect* at, Frame* shot = nullptr);
+    /// That message closed by its own Xác Nhận (close_notice), its picture kept
+    /// as shop_message first, and the full-bag picture's scores on it logged
+    /// `where`: `res.shop_message`, and kShopMessage. A message that would not
+    /// close is said too: nothing more is pressed for it.
+    int  shop_message(const Frame& f, const ScreenRect& label, Result& res, const char* where);
+    /// The check-in board on `f` (checkin_board_title): logged and said once a
+    /// run, `res.board_up`. Nothing is clicked where it is.
+    bool board_up(const Frame& f, Result& res);
+    /// The pointer moved to x, y with no button pressed: with pretend hands
+    /// through Hands::move -- nothing when unset -- and the game's own pointer
+    /// otherwise. Never a click.
+    void move_to(int x, int y);
+    /// What set_shop_plan asked for.
+    int shop_plan_hp_ = 0, shop_plan_mp_ = 0;
+    /// The check-in board has been said this run.
+    bool board_said_ = false;
 
     /// A slot this pass registered from, with some of its stack still in it,
     /// by tab, row of the tab and column -- kept only where the scroll bar

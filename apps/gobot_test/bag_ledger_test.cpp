@@ -596,7 +596,7 @@ int count_in(const std::string& text, const std::string& part) {
 #endif
 
 void test_bag_wiring() {
-    section("Bag (packets) wired in: the shop's skip, \"Low\" and \"Out\", the charms (their source)");
+    section("Bag (packets) wired in: the shop's lines (no skip), \"Low\" and \"Out\", the charms (their source)");
 #ifdef GOBOT_SOURCE_DIR
     const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
     if (gui.empty()) {
@@ -607,27 +607,41 @@ void test_bag_wiring() {
     const std::string potions = source("/apps/gobot_gui/simple_potions.cpp");
     const std::string part = source("/apps/gobot_gui/packets_bag.cpp");
 
-    // The shop: bag_says_enough( once, under !forced && !dry, after the HP
-    // check and before anything of the run is built.
+    // The shop (2026.11.09): nothing is counted any more, so the packets' bag
+    // never skips a due run -- a skip on "enough" would be counting by another
+    // name -- nor is told what a run counted.
     const std::size_t from = gui.find("const auto run_shop = [&](bool forced, bool dry) {");
     const std::size_t to = gui.find("while (!trash_stop_) {", from == npos ? 0 : from);
     const std::string shop = from == npos || to == npos ? std::string() : gui.substr(from, to - from);
-    const std::size_t hp_check = shop.find("return not_now(\"Máu đang thấp, mua bình sau.\", 15'000);");
-    const std::size_t guard = shop.find("if (!forced && !dry) {");
-    const std::size_t asked = shop.find("bag_says_enough(");
-    const std::size_t built = shop.find("TrashList list;");
-    check(!shop.empty() && count_in(gui, "bag_says_enough(") == 1 && hp_check != npos && guard != npos &&
-              asked != npos && built != npos && hp_check < guard && guard < asked && asked - guard < 100 &&
-              asked < built,
-          "gui_app.cpp: run_shop asks bag_says_enough( only under !forced && !dry, after its HP check, before "
-          "anything is built");
-    const std::size_t skipped = shop.find("bag_note_shop(-1, -1, true, now_ms());");
-    const std::size_t ran = shop.find("cleaner.run()");
-    const std::size_t noted = shop.find("bag_note_shop(r.shop_hp_before, r.shop_mp_before, false, held_ms);");
-    check(skipped != npos && asked < skipped && skipped < built && ran != npos && noted != npos && ran < noted &&
-              has(shop.substr(asked, skipped - asked), "shop_due_ms = minutes(settings.buy_every_minutes);"),
-          "a skip sets the next due look and is told to the bag; a real run's own counts are set beside the bag as "
-          "it was when the hold was taken");
+    check(!shop.empty() && has(shop, "cleaner.run()") && !has(gui, "bag_says_enough(") &&
+              !has(gui, "bag_note_shop("),
+          "gui_app.cpp: run_shop never asks the packets' bag to skip a run (no bag_says_enough(), and tells it no "
+          "count (no bag_note_shop()");
+    // Both wrappers gone with their only caller; BagLedger's own shop_ask and
+    // shop_done stay, unused, with their tests (test_bag_shop_checks). The
+    // bag is only logged either side of a real round, and the minute line
+    // says nothing of the shop's trust any more -- it would stay at nothing.
+    {
+        const std::size_t before = shop.find("GB_INFO(\"Bag (packets): before the shop %s\"");
+        const std::size_t ran = shop.find("r = cleaner.run();");
+        const std::size_t after = shop.find("GB_INFO(\"Bag (packets): after the shop %s\"");
+        const std::string minute = body(part, "void GuiApp::note_bag_minute(");
+        const std::string text = body(part, "std::string GuiApp::bag_shop_text(int& used) const {");
+        // Each of the two asked only for a real round: under its "if (!dry) {".
+        const auto real_only = [&](std::size_t at) {
+            const std::size_t guard = at == npos ? npos : shop.rfind("if (!dry) {", at);
+            return guard != npos && at - guard < 120;
+        };
+        check(!has(part, "bag_says_enough") && !has(part, "bag_note_shop") && !has(part, "shop_ask(") &&
+                  !has(part, "shop_done(") && before != npos && ran != npos && after != npos && before < ran &&
+                  ran < after && count_in(shop, "bag_shop_text(") == 2 && count_in(gui, "bag_shop_text(") == 2 &&
+                  real_only(shop.find("bag_shop_text(")) && real_only(shop.rfind("bag_shop_text(")) &&
+                  has(shop, "\"Bag (packets): the game said full with %d Tiêu Dùng slots used\"") &&
+                  has(text, "if (!s.known || !s.current) return std::string();") && !has(text, "PacketUse::Off") &&
+                  !minute.empty() && !has(minute, "s.shop_") && !has(minute, "s.voids") && !has(minute, "s.skips"),
+              "packets_bag.cpp: no shop wrappers; the shop's packets lines before and after a real round, only on "
+              "a current bag, and gating nothing; the minute line without the shop's trust");
+    }
 
     // Potions: "Out" always the hotbar's, "Low" by the bag only for a key it
     // has been checked for, with the same alert; no input at all.
@@ -652,9 +666,9 @@ void test_bag_wiring() {
               !has(part, "input_.") && !has(part, "take_hold") && !has(part, "key_press") &&
               !has(part, "click_at") && !has(part, "click_on_game") && !has(part, "game_mouse_mutex_"),
           "simple_potions.cpp and packets_bag.cpp call no InputManager function, take no hold and click nothing");
-    check(has(body(part, "bool GuiApp::bag_low_count("), "packets_settings_.bag == PacketUse::Off") &&
-              has(body(part, "bool GuiApp::bag_says_enough("), "packets_settings_.bag == PacketUse::Off"),
-          "packets_bag.cpp: [Packets] bag=off keeps both uses -- \"Low\" and the shop's skip -- on the screen");
+    check(has(body(part, "bool GuiApp::bag_low_count("), "packets_settings_.bag == PacketUse::Off"),
+          "packets_bag.cpp: [Packets] bag=off keeps its one use -- \"Low\" -- on the screen (the shop's skip is gone "
+          "since 2026.11.09)");
     // 2026.11.04d: the bag's total of what a key drinks in the minute line;
     // a slot's "Low" named the stack in use, with that total beside it while
     // not checked yet -- words only, bag=off none; and a slot unreadable two

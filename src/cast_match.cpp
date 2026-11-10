@@ -40,6 +40,30 @@ std::string seconds_text(std::uint64_t ms) {
 
 std::string key_text(std::uint32_t vk) { return "key " + InputManager::key_name(vk); }
 
+/// `ms` in seconds with two decimals: "0.74 s".
+std::string seconds2_text(std::uint64_t ms) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.2f s", static_cast<double>(ms) / 1000.0);
+    return buf;
+}
+
+/// A span between a cast and a press: in ms under 10 s, in seconds past it.
+std::string span_text(std::uint64_t ms) {
+    return ms < 10'000 ? std::to_string(ms) + " ms" : seconds_text(ms);
+}
+
+/// `at_ms` as `clock` writes it, or the clock's own ms.
+std::string time_text(CastClockText clock, std::uint64_t at_ms) {
+    return clock != nullptr ? clock(at_ms) : "t=" + std::to_string(at_ms) + " ms";
+}
+
+/// The nearest-rank `pct`th percentile of `v`, which is not empty.
+std::uint64_t percentile(std::vector<std::uint64_t> v, std::size_t pct) {
+    std::sort(v.begin(), v.end());
+    const std::size_t rank = std::max<std::size_t>(1, (v.size() * pct + 99) / 100);
+    return v[std::min(rank, v.size()) - 1];
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- readers
@@ -123,6 +147,16 @@ void CastMatch::on_packets(const std::vector<GamePacket>& all, const PacketWorld
     }
 }
 
+void CastMatch::set_run(bool macro_on, bool hunter_on, std::uint64_t capture_start) {
+    // The capture thread's alone, as the three are: only the count is read by
+    // another (add, under no lock of its).
+    if (macro_on == run_macro_ && hunter_on == run_hunter_ && capture_start == run_capture_) return;
+    run_macro_ = macro_on;
+    run_hunter_ = hunter_on;
+    run_capture_ = capture_start;
+    run_.fetch_add(1);
+}
+
 void CastMatch::add(std::uint64_t at_ms, const CastFrame& c, bool reach_known, int dx, int dy) {
     std::lock_guard<std::mutex> lock(mutex_);
     Cast cast;
@@ -131,6 +165,9 @@ void CastMatch::add(std::uint64_t at_ms, const CastFrame& c, bool reach_known, i
     cast.reach_known = reach_known;
     cast.dx = dx;
     cast.dy = dy;
+    cast.seq = ++added_;
+    cast.held = held_.load();
+    cast.run = run_.load();
     ++minute_.casts;
     switch (c.kind) {
         case 1:  ++minute_.attacks; break;
@@ -202,6 +239,10 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
     std::stable_sort(due.begin(), due.end(), [](const Press& a, const Press& b) { return a.at_ms < b.at_ms; });
 
     for (const Press& p : due) {
+        // Kept, any key, for the presses either side of a cast once it is
+        // settled: oldest first, as each call's come after the last's.
+        pressed_.push_back(p);
+        if (pressed_.size() > kPresses) pressed_.pop_front();
         Key* k = key_of(p.vk);
         if (k == nullptr) continue;
         k->buff = std::find(buff_keys.begin(), buff_keys.end(), p.vk) != buff_keys.end();
@@ -273,7 +314,57 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
         if (c.settled || c.at_ms + kEarlyMs >= pair_from_) continue;
         c.settled = true;
         if (c.vk == 0) ++minute_.unpaired;
+        settle(c);
     }
+}
+
+void CastMatch::settle(Cast& c) {
+    // GoBot's presses either side of it: each one up to pair_from_ has been
+    // handed over by now, in the order they went down.
+    for (const Press& p : pressed_) {
+        if (p.at_ms <= c.at_ms) {
+            c.before_ms = p.at_ms;
+            c.before_vk = p.vk;
+            continue;
+        }
+        c.after_ms = p.at_ms;
+        c.after_vk = p.vk;
+        break;
+    }
+    // How long after GoBot's newest key-down the cast came: the game's
+    // latency, and what a pairing by the newest press would need. Only
+    // within the pairing's own window -- further back, the cast was no
+    // press's of GoBot's.
+    if (c.before_ms != 0 && c.at_ms - c.before_ms <= kPairMs) {
+        if (minute_.delays.size() < kCasts) minute_.delays.push_back(c.at_ms - c.before_ms);
+    } else {
+        ++minute_.no_press_before;
+    }
+    if (c.vk != 0) return;
+    // No press of GoBot's near it either side and no hold: by hand or another
+    // tool's -- GoBot open beside your own play -- counted only. (Before it,
+    // at it, after: neither difference wraps.)
+    const bool pressed_before = c.before_ms != 0 && c.at_ms - c.before_ms <= kLoneNearMs;
+    const bool pressed_after = c.after_ms != 0 && c.after_ms - c.at_ms <= kLoneNearMs;
+    if (!c.held && !pressed_before && !pressed_after) {
+        ++minute_.lone_far;
+        return;
+    }
+    if (minute_.lone.size() >= kLoneSaid) {
+        ++minute_.lone_more;
+        return;
+    }
+    Lone l;
+    l.at_ms = c.at_ms;
+    l.skill = c.frame.skill;
+    l.kind = c.frame.kind;
+    l.held = c.held;
+    l.before_ms = c.before_ms;
+    l.before_vk = c.before_vk;
+    l.after_ms = c.after_ms;
+    l.after_vk = c.after_vk;
+    l.looked_ms = pair_from_;
+    minute_.lone.push_back(l);
 }
 
 void CastMatch::judge(Burst b) {
@@ -335,6 +426,58 @@ CastMatch::Minute CastMatch::take_minute() {
     Minute out = minute_;
     out.keys = keys_;
     out.reach = reach_;
+
+    // The minute's casts are those of the ring that came since the last
+    // call: each one's gap from the cast before it, and from its own skill's
+    // last cast, either maybe from the minute before.
+    using LastCast = std::pair<std::uint32_t, std::uint64_t>;      // a skill, its last cast
+    std::vector<LastCast> last_of;
+    const Cast* before = nullptr;
+    for (const Cast& c : casts_) {
+        auto own = std::find_if(last_of.begin(), last_of.end(),
+                                [&c](const LastCast& s) { return s.first == c.frame.skill; });
+        if (c.seq > minute_seq_) {
+            // A gap only within a run: across a stop and start, or a capture
+            // started again, it is no pause of the run's -- counted apart.
+            if (before != nullptr && c.at_ms >= before->at_ms) {
+                if (c.run == before->run) {
+                    const std::uint64_t gap = c.at_ms - before->at_ms;
+                    out.gaps.push_back(gap);
+                    if (gap > out.longest_ms || out.gaps.size() == 1) {
+                        out.longest_ms = gap;
+                        out.longest_at_ms = c.at_ms;
+                    }
+                } else {
+                    ++out.gaps_left_out;
+                }
+            }
+            auto s = std::find_if(out.skills.begin(), out.skills.end(),
+                                  [&c](const SkillCasts& k) { return k.skill == c.frame.skill; });
+            if (s == out.skills.end() && out.skills.size() < kSkills) {
+                SkillCasts k;
+                k.skill = c.frame.skill;
+                out.skills.push_back(k);
+                s = out.skills.end() - 1;
+            }
+            if (s != out.skills.end()) {
+                ++s->casts;
+                if (own != last_of.end() && c.at_ms >= own->second) {
+                    const std::uint64_t gap = c.at_ms - own->second;
+                    s->shortest_ms = s->recasts == 0 ? gap : std::min(s->shortest_ms, gap);
+                    ++s->recasts;
+                }
+            }
+        }
+        if (own != last_of.end())
+            own->second = c.at_ms;
+        else if (last_of.size() < kCasts)
+            last_of.emplace_back(c.frame.skill, c.at_ms);
+        before = &c;
+    }
+    std::stable_sort(out.skills.begin(), out.skills.end(),
+                     [](const SkillCasts& a, const SkillCasts& b) { return a.casts > b.casts; });
+    if (!casts_.empty()) minute_seq_ = casts_.back().seq;
+
     minute_ = Minute{};
     for (Key& k : keys_) {
         k.pressed = 0;
@@ -499,6 +642,66 @@ std::string casts_line(const CastMatch::Minute& m) {
     }
     if (m.named_unplaced > 0) out << "; named targets not in the packets' world " << m.named_unplaced;
     if (m.wrong_size > 0) out << "; 0x0031 of another size " << m.wrong_size;
+    return out.str();
+}
+
+std::string cast_gaps_line(const CastMatch::Minute& m, CastClockText clock) {
+    if (m.gaps.empty() && m.delays.empty() && m.no_press_before == 0 && m.skills.empty()) return {};
+
+    std::ostringstream out;
+    out << "Cast gaps (packets): ";
+    if (m.gaps.empty()) {
+        out << "no gap between two casts";
+    } else {
+        const auto over = [&m](std::uint64_t ms) {
+            return std::count_if(m.gaps.begin(), m.gaps.end(), [ms](std::uint64_t g) { return g > ms; });
+        };
+        out << m.gaps.size() << (m.gaps.size() == 1 ? " gap" : " gaps") << " -- p50 "
+            << seconds2_text(percentile(m.gaps, 50)) << ", p90 " << seconds2_text(percentile(m.gaps, 90))
+            << ", longest " << seconds2_text(m.longest_ms) << " ending at " << time_text(clock, m.longest_at_ms)
+            << "; over 1.0 s " << over(1000) << ", over 1.5 s " << over(1500);
+    }
+    if (m.gaps_left_out > 0)
+        out << "; " << m.gaps_left_out << (m.gaps_left_out == 1 ? " gap" : " gaps")
+            << " across a stop and start or a capture restart, left out";
+    // How long after GoBot's newest key-down each cast came.
+    out << "; newest press to cast ";
+    if (m.delays.empty())
+        out << "none";
+    else
+        out << "p10 " << percentile(m.delays, 10) << " ms, p50 " << percentile(m.delays, 50) << " ms, p90 "
+            << percentile(m.delays, 90) << " ms (" << m.delays.size() << (m.delays.size() == 1 ? " cast" : " casts")
+            << ")";
+    if (m.no_press_before > 0)
+        out << ", " << m.no_press_before << " with no press of GoBot's in the " << CastMatch::kPairMs << " ms before";
+    // Each skill: how often, and how soon again after its own cast -- a
+    // cooldown it has is never shorter.
+    if (!m.skills.empty()) {
+        out << "; by skill";
+        bool first = true;
+        for (const CastMatch::SkillCasts& s : m.skills) {
+            out << (first ? " " : " / ") << s.skill << " " << s.casts << (s.casts == 1 ? " cast" : " casts");
+            if (s.recasts > 0) out << ", shortest re-cast " << seconds2_text(s.shortest_ms);
+            first = false;
+        }
+    }
+    return out.str();
+}
+
+std::string lone_cast_line(const CastMatch::Lone& c, CastClockText clock) {
+    std::ostringstream out;
+    out << "Cast (packets) with no GoBot key at " << time_text(clock, c.at_ms) << ": skill " << c.skill << ", kind "
+        << static_cast<unsigned>(c.kind) << "; GoBot's last press ";
+    if (c.before_ms != 0)
+        out << span_text(c.at_ms - c.before_ms) << " before it (" << key_text(c.before_vk) << ")";
+    else
+        out << "none kept";
+    out << ", the first after it ";
+    if (c.after_ms != 0)
+        out << span_text(c.after_ms - c.at_ms) << " after (" << key_text(c.after_vk) << ")";
+    else
+        out << "none in the " << span_text(c.looked_ms > c.at_ms ? c.looked_ms - c.at_ms : 0) << " after";
+    out << (c.held ? "; the keys held for a job then" : "; no hold then");
     return out.str();
 }
 

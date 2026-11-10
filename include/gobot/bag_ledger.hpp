@@ -226,6 +226,10 @@ public:
     /// A due look of the shop: whether it may be skipped, the potions' slots
     /// in the bag, and why not. A new capture start with no bag frame since
     /// voids the shop's trust here.
+    ///
+    /// Unused since 2026.11.09, with shop_done: the shop counts nothing now,
+    /// and GoBot never skips one of its looks (GuiApp::bag_shop_text only
+    /// logs). Kept, with its tests, for a later use of the bag's counts.
     ShopAnswer shop_ask(std::uint64_t now, const Link& link, int hp_below, int mp_below);
 
     /// A shop look done: `skipped`, or a real run whose own counts of the

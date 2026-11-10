@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <future>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -220,6 +221,64 @@ struct GuiApp::VitalsPart {
     // Map loads by the packets (packet_map_loading).
     std::uint64_t      load_entry_ms = 0, load_at_ms = 0, held_ms = 0;
     int                loads = 0, hud_first = 0;
+    /// The MP caption read short of its leading 1, kept once a session
+    /// (keep_mp_caption), and its writing, off this thread.
+    bool               caption_kept = false;
+    std::future<void>  caption_keeping;
+
+    /// The MP bar and its caption, cut from the reader's newest frame and
+    /// written to vitals_debug once a session: the figure `figure` of the read
+    /// at `read_at` was the packets' `packet` short of its leading 1 (2026.11.08,
+    /// 4798 for 14798 all run). The misread is steady, so the newest frame
+    /// shows what that read saw. Named apart from vitals_debug's own frames,
+    /// whose rotation never takes it; cut and written off GoBot's thread.
+    void keep_mp_caption(const VitalsReader& reader, int figure, std::uint32_t packet, std::uint64_t read_at) {
+        const std::uint64_t frame_at = reader.last_read_ms();
+        const BarSpec bar = reader.mp_bar();
+        Frame shot;
+        if (!bar.valid() || !reader.latest_frame(shot)) return;     // tried again at the next
+        caption_kept = true;
+        const std::string read_text = clock_at(read_at, true);
+        const std::string frame_text = clock_at(frame_at, true);
+        caption_keeping = std::async(std::launch::async, [shot = std::move(shot), bar, figure, packet, read_text,
+                                                          frame_text] {
+            // The bar and the box the reader reads its caption in, a few
+            // pixels round them.
+            const ScreenRect box = VitalsReader::caption_box(bar);
+            const int x0 = std::max(0, std::min(bar.x, box.x) - 4);
+            const int y0 = std::max(0, std::min(bar.y, box.y) - 4);
+            const int x1 = std::min(shot.width, std::max(bar.right(), box.right()) + 4);
+            const int y1 = std::min(shot.height, std::max(bar.bottom(), box.bottom()) + 4);
+            Frame cut;
+            if (x1 > x0 && y1 > y0) {
+                cut.width = x1 - x0;
+                cut.height = y1 - y0;
+                const std::size_t row = static_cast<std::size_t>(cut.width) * 4;
+                cut.pixels.resize(row * static_cast<std::size_t>(cut.height));
+                for (int y = 0; y < cut.height; ++y) {
+                    const std::size_t from = (static_cast<std::size_t>(y0 + y) * static_cast<std::size_t>(shot.width) +
+                                              static_cast<std::size_t>(x0)) * 4;
+                    std::copy_n(shot.pixels.begin() + static_cast<std::ptrdiff_t>(from), row,
+                                cut.pixels.begin() + static_cast<std::ptrdiff_t>(row * static_cast<std::size_t>(y)));
+                }
+            }
+            const std::string dir = exe_relative("vitals_debug");
+            const std::time_t t = std::time(nullptr);
+            std::tm tm{};
+            localtime_s(&tm, &t);
+            char name[48];
+            std::strftime(name, sizeof name, "mp_caption_%Y%m%d_%H%M%S.png", &tm);
+            if (!cut.valid() || !make_folder(dir) || !save_png(cut, dir + "\\" + name)) {
+                GB_INFO("Vitals: MP read %d where the packets say %u -- its leading 1 lost; the caption could not "
+                        "be kept",
+                        figure, static_cast<unsigned>(packet));
+                return;
+            }
+            GB_INFO("Vitals: MP read %d where the packets say %u -- its leading 1 lost (the read at %s); kept the MP "
+                    "bar and its caption, of the frame read at %s, as vitals_debug\\%s",
+                    figure, static_cast<unsigned>(packet), read_text.c_str(), frame_text.c_str(), name);
+        });
+    }
 
     /// One bar's usable() inputs, now.
     VitalsUsable usable_in(const GuiApp& app, bool hp_bar, const SelfNow& s) const {
@@ -548,6 +607,14 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
             ++part.mp_dis_said;
             said_disagreement("MP", d, false);
         }
+    // The MP caption read short of its leading 1, as all of 2026-11-08's run:
+    // a picture of it, once a session, for the reader's fix (R9). Log only.
+    if (!part.caption_kept)
+        for (const BarCheck::Disagreement& d : mp_dis)
+            if (figure_lost_leading_one(d.read.figure, d.packet.value)) {
+                part.keep_mp_caption(vitals_, d.read.figure, d.packet.value, d.read.read_at_ms);
+                break;
+            }
 
     // ---- usable now: for the resting pace's 10 s, the minute's share, the log ----
     const VitalsUsable hp_in = part.usable_in(*this, true, s);

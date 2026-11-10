@@ -15,6 +15,7 @@
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/quick_quest.hpp"
+#include "gobot/quiet_second.hpp"
 
 #include "imgui.h"
 
@@ -206,14 +207,21 @@ void GuiApp::quest_loop() {
     // 2026-11-03 had two rounds 364 s apart with nothing to say why. Anything
     // else said -- a round, a start -- ends the wait, and the same reason
     // after it is news again. A not-now after the hold is logged where it
-    // is made (held_not_now), and not twice.
+    // is made (held_not_now), and not twice, nor again with the back-off's
+    // next look added.
     std::string waited_for;
     const auto tell = [this, &waited_for](const std::string& vi) {
         if (vi.rfind("Chờ:", 0) != 0) {
             waited_for.clear();
         } else if (vi != waited_for) {
+            // A spoiled quiet second's wait only adds when the next look is
+            // ("; thử lại sau ...") to the not-now held_not_now has just
+            // logged: that one is not logged again.
+            const std::string noted =
+                waited_for.empty() ? std::string() : waited_for.substr(0, waited_for.size() - 1) + ";";
+            const bool known = !noted.empty() && vi.rfind(noted, 0) == 0;
             waited_for = vi;
-            GB_INFO("Quest: put off -- %s", vi.c_str());
+            if (!known) GB_INFO("Quest: put off -- %s", vi.c_str());
         }
         say_quest(vi);
     };
@@ -315,6 +323,19 @@ void GuiApp::quest_loop() {
         return in;
     };
 
+    // Why a round waits for the check-in board, and what would close it: with
+    // "Tự đóng thông báo" off nothing does. app.ini read here, on this
+    // worker's thread, as the trash worker reads it.
+    const auto board_closes = [] {
+        IniFile app;
+        return app.load(exe_relative("configs/app.ini")) && app.get_bool("Simple", "close_popups", false);
+    };
+    const auto board_why = [](bool closes) {
+        return std::string("đang có bảng Sự kiện và điểm danh") +
+               (closes ? "" : "; bật Tự đóng thông báo để GoBot tự tắt bảng điểm danh");
+    };
+    bool board_said = false;            // the board's put-off logged, until a look without it
+
     // One round, with the mouse to itself and everything else held off.
     const auto one_round = [&](const QuestCall& call) -> QuestResult {
         QuestResult not_now;
@@ -325,6 +346,27 @@ void GuiApp::quest_loop() {
         if (!clash.empty()) {
             not_now.why = clash;
             return not_now;
+        }
+        // The check-in board up: nothing of the round goes into it, and the
+        // keys are not held for a round that cannot run -- one look first,
+        // with no hold. The round looks again on its own first frame, under
+        // the hold (QuestRound::run). Put off QuestRun::kBoardMs, not trouble.
+        if (pictures.board_title.valid()) {
+            Frame seen;
+            ScreenRect title;
+            float score = 0.0f;
+            if (grab(seen) && checkin_board_title(seen, pictures.board_title, &title, &score)) {
+                const bool closes = board_closes();
+                not_now.board = true;
+                not_now.why = board_why(closes);
+                if (!board_said)
+                    GB_INFO("Quest: the check-in board is up at %d,%d (title %.2f) -- quest put off %d s%s", title.x,
+                            title.y, static_cast<double>(score), static_cast<int>(QuestRun::kBoardMs / 1000),
+                            closes ? "" : " (close_popups is off: nothing closes it)");
+                board_said = true;
+                return not_now;
+            }
+            board_said = false;
         }
         // Not while the trash cleaner, the revive sequence or the party
         // worker is clicking, nor they while this is.
@@ -355,11 +397,23 @@ void GuiApp::quest_loop() {
         if (quest_stop_) return stopped;
         if (coord_.held()) return held_not_now("bot đang bấm phím");
         input_.release_all();
+        // The pointer, its buttons and the window in front, either side of the
+        // quiet second: what spoiled it, for the log (2026-11-08, the owner's
+        // "who is at the mouse?"). Read only.
+        const InputGlancer glancer = InputGlancer::real();
+        const InputGlance seen_before = glancer.glance();
         const DWORD quiet = last_input();
         for (int slept = 0; slept < kQuietMs && !quest_stop_; slept += 50)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         if (quest_stop_) return stopped;
-        if (last_input() != quiet) return held_not_now("bạn đang dùng chuột hoặc bàn phím");
+        if (last_input() != quiet) {
+            // Further off each time, as QuestRun has it (QuietBackOff).
+            not_now.touched = true;
+            GB_INFO("Quest: the quiet second was not quiet -- %s",
+                    quiet_spoiled_text(seen_before, glancer.glance()).c_str());
+            return held_not_now("bạn đang dùng chuột hoặc bàn phím");
+        }
+        not_now.quiet = true;
         // Looked at again with the hold on: something may have begun since.
         QuestGateInput now_in = gates();
         now_in.asked = call.asked;
@@ -390,6 +444,12 @@ void GuiApp::quest_loop() {
         // cancel; it is passed on now instead.
         if (quest_stop_) round.cancel();
         QuestResult r = round.run();
+        // Only run after its quiet second passed: the back-off from its first
+        // step, whatever became of the round (a halt, a stop) -- QuestRun::step.
+        r.quiet = true;
+        // The board came up during the quiet second: said with what would
+        // close it, as the look before the hold says it.
+        if (r.board) r.why = board_why(board_closes());
         GB_INFO("Quest: %s -- %s", quest_outcome_name(r.outcome), r.log.c_str());
         if (r.by_change) {
             // Taken for ticked by the change GoBot's click made, no picture

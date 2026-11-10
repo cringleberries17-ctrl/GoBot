@@ -1,10 +1,15 @@
 #include "gobot/popup_closer.hpp"
+#include "gobot/checkin_board.hpp"
+#include "gobot/common.hpp"
 #include "gobot/config.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <future>
 #include <thread>
 
@@ -77,10 +82,45 @@ bool same_place(const ScreenRect& a, const ScreenRect& b) {
 
 std::string at_text(int x, int y) { return std::to_string(x) + "," + std::to_string(y); }
 
+/// "+564,+14": how far one point is from another.
+std::string offset_text(int dx, int dy) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%+d,%+d", dx, dy);
+    return buf;
+}
+
 std::string score_text(float s) {
     char buf[16];
     std::snprintf(buf, sizeof buf, "%.2f", static_cast<double>(s));
     return buf;
+}
+
+/// The check-in board's title where a board at `board` (PopupSeen::at) has
+/// it, the size of `title`; and the board's top band, where its X is.
+ScreenRect board_title_at(const ScreenRect& board, const Frame& title) {
+    return ScreenRect{ board.x - kCheckinBoardFromTitle.x, board.y - kCheckinBoardFromTitle.y, title.width,
+                       title.height };
+}
+ScreenRect board_band(const ScreenRect& board) {
+    const int tx = board.x - kCheckinBoardFromTitle.x, ty = board.y - kCheckinBoardFromTitle.y;
+    return ScreenRect{ tx + kCheckinBandFromTitle.x, ty + kCheckinBandFromTitle.y, kCheckinBandFromTitle.w,
+                       kCheckinBandFromTitle.h };
+}
+
+/// Closed with ESC rather than by its control: the board always, the book
+/// when its X was not found. ESC goes to whatever is in front, so only when
+/// nothing else of the list is up.
+bool closes_with_esc(const PopupSeen& p) {
+    return p.by_esc || (p.kind == PopupKind::MonsterBook && !p.control);
+}
+
+/// What a popup is looked for again as, round its own place under the hold
+/// and after its press: the board as itself alone -- its title round where
+/// it was, a 296x46 search -- and the rest as before, every allowed kind but
+/// the board.
+unsigned relook_kinds(PopupKind kind, unsigned allowed) {
+    const unsigned board = popup_bit(PopupKind::CheckinBoard);
+    return kind == PopupKind::CheckinBoard ? board : allowed & ~board;
 }
 
 } // namespace
@@ -90,6 +130,7 @@ const char* popup_kind_name(PopupKind k) {
         case PopupKind::CheckinNotice: return "the check-in notice";
         case PopupKind::MonsterBook:   return "Yêu Quái Bách Khoa";
         case PopupKind::EscMenu:       return "the ESC menu";
+        case PopupKind::CheckinBoard:  return "the check-in board";
     }
     return "?";
 }
@@ -99,6 +140,7 @@ const char* popup_kind_vi(PopupKind k) {
         case PopupKind::CheckinNotice: return "thông báo nhận quà điểm danh";
         case PopupKind::MonsterBook:   return "Yêu Quái Bách Khoa";
         case PopupKind::EscMenu:       return "menu ESC do GoBot mở";
+        case PopupKind::CheckinBoard:  return "bảng Sự kiện và điểm danh";
     }
     return "?";
 }
@@ -202,7 +244,28 @@ bool PopupEyes::book_title_in(const Frame& f, const ScreenRect& area) const {
            TemplateMatcher::find(f, a, book_key_, kBookScore).found;
 }
 
-std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const ScreenRect* only_at) const {
+bool PopupEyes::still_partly_in(PopupKind kind, const Frame& f, const ScreenRect& where) const {
+    switch (kind) {
+        case PopupKind::MonsterBook:
+            return book_title_in(f, where);
+        case PopupKind::CheckinBoard:
+            // Its title where it was: the ESC menu GoBot's ESC brings up is
+            // drawn in the middle, over the board's calendar, not its title.
+            return !popups(f, false, &where, popup_bit(PopupKind::CheckinBoard)).empty();
+        case PopupKind::CheckinNotice:
+        case PopupKind::EscMenu:
+            break;
+    }
+    return false;
+}
+
+bool PopupEyes::sees_board() const {
+    const Frame* title = store_ != nullptr ? checkin_board_picture(*store_) : nullptr;
+    return title != nullptr && title->valid();
+}
+
+std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const ScreenRect* only_at,
+                                         unsigned kinds) const {
     std::vector<PopupSeen> out;
     if (!f.valid()) return out;
     const ScreenRect all{ 0, 0, f.width, f.height };
@@ -219,7 +282,8 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
     // every dialog's frame and buttons are the same. Measured from a lone
     // Xác Nhận's place, they are nowhere near where a two-button dialog has
     // its words.
-    if (ok_.valid() && notice_words_.valid() && look.w >= ok_.width && look.h >= ok_.height) {
+    if ((kinds & popup_bit(PopupKind::CheckinNotice)) != 0 && ok_.valid() && notice_words_.valid() &&
+        look.w >= ok_.width && look.h >= ok_.height) {
         for (const auto& ok : TemplateMatcher::find_all(f, look, ok_, kOkScore, 8)) {
             const int dx = ok.at.x - ok_dx_ - kNoticeOkDx, dy = ok.at.y - ok_dy_ - kNoticeOkDy;
             const ScreenRect place =
@@ -238,6 +302,28 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
         }
     }
 
+    // The check-in board, by its title: anywhere, or -- round `only_at`, a
+    // board's own place -- only where that board has its title, a few pixels
+    // either way. Its X is looked for in its top band, where the art has it
+    // at +555,5 from the title, only on a look of the whole screen: found or
+    // not, the board is closed with ESC, and any X in that band is its own.
+    const Frame* board_title = store_ != nullptr ? checkin_board_picture(*store_) : nullptr;
+    if ((kinds & popup_bit(PopupKind::CheckinBoard)) != 0 && board_title != nullptr && board_title->valid()) {
+        const ScreenRect was = only_at == nullptr ? ScreenRect{} : board_title_at(*only_at, *board_title);
+        ScreenRect title;
+        float score = 0.0f;
+        if (checkin_board_title(f, *board_title, &title, &score, only_at == nullptr ? nullptr : &was)) {
+            PopupSeen p;
+            p.kind = PopupKind::CheckinBoard;
+            p.at = ScreenRect{ title.x + kCheckinBoardFromTitle.x, title.y + kCheckinBoardFromTitle.y,
+                               kCheckinBoardFromTitle.w, kCheckinBoardFromTitle.h };
+            p.score = score;
+            p.by_esc = true;
+            if (only_at == nullptr) p.control = close_button_in(f, board_band(p.at), p.x, p.y);
+            out.push_back(p);
+        }
+    }
+
     // The monster book as the live client draws it, by its first tab and its
     // X where the tab puts it (bag::find_book): the page a fragment's
     // right-click opens it on is a monster's, which GoC's picture below is
@@ -246,7 +332,8 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
     // without, GoC's picture of the first page is looked for as well, which
     // looks for its X round its top-right corner -- and failing that it is
     // the book without its X.
-    const bag::Book live = store_ != nullptr ? bag::find_book(f, *store_, only_at) : bag::Book{};
+    const bool want_book = (kinds & popup_bit(PopupKind::MonsterBook)) != 0;
+    const bag::Book live = want_book && store_ != nullptr ? bag::find_book(f, *store_, only_at) : bag::Book{};
     const auto add_live = [&] {
         PopupSeen p;
         p.kind = PopupKind::MonsterBook;
@@ -278,7 +365,7 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
         if (around.w < book_.width || around.h < book_.height) return none;
         return TemplateMatcher::find(f, around, book_, kBookScore);
     };
-    if (!book_seen) {
+    if (!book_seen && want_book) {
         const auto m = book_at();
         if (m.found) {
             PopupSeen p;
@@ -296,7 +383,7 @@ std::vector<PopupSeen> PopupEyes::popups(const Frame& f, bool with_menu, const S
     if (!book_seen && live.found) add_live();
 
     // The ESC menu, and its X where the live client draws it.
-    if (with_menu && menu_.valid()) {
+    if (with_menu && (kinds & popup_bit(PopupKind::EscMenu)) != 0 && menu_.valid()) {
         const auto m = TemplateMatcher::find(f, all, menu_, kMenuScore);
         if (m.found) {
             PopupSeen p;
@@ -389,7 +476,10 @@ std::vector<std::string> PopupEyes::blockers(const Frame& f, const std::vector<P
         }
     }
     // And every X has to be an allowed popup's own: any other is a window
-    // nothing here knows -- Kho Cash, a shop, the player list.
+    // nothing here knows -- Kho Cash, a shop, the player list. The check-in
+    // board's is any in its top band: the live board's X has never been seen,
+    // and one drawn a little off the art's place would otherwise keep the
+    // board itself shut.
     std::vector<TemplateMatcher::Match> found_x;
     for (auto& these : xs) {
         const std::vector<TemplateMatcher::Match> got = these.get();
@@ -397,6 +487,7 @@ std::vector<std::string> PopupEyes::blockers(const Frame& f, const std::vector<P
     }
     for (const auto& x : found_x) {
         const bool known = std::any_of(popups.begin(), popups.end(), [&](const PopupSeen& p) {
+            if (p.kind == PopupKind::CheckinBoard) return board_band(p.at).contains(x.at.cx(), x.at.cy());
             return p.control && close_to(p.x, x.at.cx(), kSlack) && close_to(p.y, x.at.cy(), kSlack);
         });
         if (!known) {
@@ -471,6 +562,7 @@ const PopupSeen* PopupCloser::same(const PopupScene& scene, PopupKind want, cons
 
 PopupCloser::Turn PopupCloser::turn() {
     const std::uint64_t t = now();
+    last_kind_ = -1;
     // Grabbed into the same buffer turn after turn (turn_frame_).
     Frame& f = turn_frame_;
     if (!grab_ || !grab_(f) || !f.valid()) {
@@ -482,11 +574,19 @@ PopupCloser::Turn PopupCloser::turn() {
     // that ESC's check below. Otherwise it is the player's -- they may be on
     // their way to Thoát Game or Cửa Sổ Chọn Kênh -- and its X is one more
     // window nothing here may touch, which keeps everything else shut too.
-    const auto allowed = [this](const Frame& frame) { return eyes_.popups(frame, false); };
+    // Only the kinds allowed now are closed, and only theirs own anything on
+    // the screen; the check-in board is looked for all the same, and seen
+    // while it is not allowed it keeps everything shut (B-2).
+    const unsigned allowed = allowed_;
     PopupScene scene;
-    scene.popups = allowed(f);
+    bool board_barred = false;
+    for (const PopupSeen& p : eyes_.popups(f, false, nullptr, allowed | popup_bit(PopupKind::CheckinBoard))) {
+        if ((allowed & popup_bit(p.kind)) != 0) scene.popups.push_back(p);
+        else if (p.kind == PopupKind::CheckinBoard) board_barred = true;
+    }
 
-    // Where each kind has been, and since when.
+    // Where each kind has been, and since when. The board said as it is first
+    // seen at a place, its X with it: the live board has never been seen.
     for (int k = 0; k < kPopupKinds; ++k) {
         Track& tr = tracks_[k];
         const PopupSeen* p = scene.find(static_cast<PopupKind>(k));
@@ -500,6 +600,14 @@ PopupCloser::Turn PopupCloser::turn() {
             tr.at = p->at;
             tr.since = t;
             tr.said_blocked = false;
+            if (p->kind == PopupKind::CheckinBoard) {
+                const int tx = p->at.x - kCheckinBoardFromTitle.x, ty = p->at.y - kCheckinBoardFromTitle.y;
+                say("the check-in board (Sự kiện và điểm danh) is up at " + at_text(p->at.x, p->at.y) + " (title " +
+                    score_text(p->score) + " at " + at_text(tx, ty) + "; " +
+                    (p->control ? "its X at " + offset_text(p->x - tx, p->y - ty) + " from the title"
+                                : std::string("no X seen")) +
+                    ")");
+            }
         }
     }
     if (scene.popups.empty()) {
@@ -508,10 +616,12 @@ PopupCloser::Turn PopupCloser::turn() {
     }
 
     // The one to close: up at one place for kSteadyMs, not put off, not tried
-    // too often lately. The monster book without its X only when it is the
-    // only thing up: its ESC would go to anything else first.
+    // too often lately. The board, and the monster book without its X, only
+    // when nothing else of the list is up: an ESC would go to that first --
+    // the board's notice is closed before it.
     const PopupSeen* pick = nullptr;
     bool waiting = false, left = false;
+    int left_kind = -1;
     for (const PopupSeen& p : scene.popups) {
         Track& tr = tracks_[static_cast<int>(p.kind)];
         tr.tries.erase(std::remove_if(tr.tries.begin(), tr.tries.end(),
@@ -524,6 +634,7 @@ PopupCloser::Turn PopupCloser::turn() {
                 tr.said_left = true;
             }
             left = true;
+            if (left_kind < 0) left_kind = static_cast<int>(p.kind);
             continue;
         }
         tr.said_left = false;
@@ -532,23 +643,31 @@ PopupCloser::Turn PopupCloser::turn() {
             waiting = true;
             continue;
         }
-        if (p.kind == PopupKind::MonsterBook && !p.control && scene.popups.size() > 1) continue;
+        if (closes_with_esc(p) && scene.popups.size() > 1) continue;
         pick = &p;
         break;
     }
     if (pick == nullptr) {
+        if (!waiting && left) last_kind_ = left_kind;
         last_vi_ = waiting ? "Thấy thông báo, chờ 3 giây rồi mới đóng."
-                 : left    ? "Có thông báo đã thử đóng 2 lần không được: để yên."
+                 : left    ? (left_kind == static_cast<int>(PopupKind::CheckinBoard)
+                                  ? "Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm ESC: GoBot để yên, bạn tắt giúp."
+                                  : "Có thông báo đã thử đóng 2 lần không được: để yên.")
                            : "Có thông báo, chờ lượt sau.";
         return waiting ? Turn::Waiting : left ? Turn::LeftAlone : Turn::Held;
     }
     const PopupKind kind = pick->kind;
     const ScreenRect where = pick->at;
     Track& tr = tracks_[static_cast<int>(kind)];
+    last_kind_ = static_cast<int>(kind);
 
     // Nothing else may be up.
     std::vector<std::string> why_vi;
     scene.blockers = eyes_.blockers(f, scene.popups, &why_vi);
+    if (board_barred) {
+        scene.blockers.insert(scene.blockers.begin(), "the check-in board is up, and it is not to be closed now");
+        why_vi.insert(why_vi.begin(), "đang có bảng Sự kiện và điểm danh");
+    }
     if (scene.blocked()) {
         tr.backoff_until = t + kBlockedMs;
         if (!tr.said_blocked) {
@@ -596,31 +715,39 @@ PopupCloser::Turn PopupCloser::turn() {
     // look that decided it is a moment old, and with the hold just taken.
     // The allowed popups are looked for only where they were -- a few
     // milliseconds, where a search of the whole screen takes a tenth of a
-    // second of the hold; anything else up is looked for everywhere, as
-    // before.
+    // second of the hold; the check-in board only as its title, round where
+    // it was (B-5); anything else up is looked for everywhere, as before.
+    const std::uint64_t relook_from = now();
+    const auto said_slow = [&] {
+        const std::uint64_t took = now() - relook_from;
+        if (took > kSlowRelookMs) say("the re-look under the hold took " + std::to_string(took) + " ms");
+    };
     Frame g;
     if (!grab_ || !grab_(g) || !g.valid()) return Turn::Blind;
     PopupScene again;
     for (const PopupSeen& p : scene.popups)
-        for (const PopupSeen& q : eyes_.popups(g, false, &p.at))
+        for (const PopupSeen& q : eyes_.popups(g, false, &p.at, relook_kinds(p.kind, allowed)))
             if (same(again, q.kind, q.at) == nullptr) again.popups.push_back(q);
     const PopupSeen* still = same(again, kind, where);
-    if (still == nullptr) return Turn::Nothing;
+    if (still == nullptr) {
+        said_slow();
+        return Turn::Nothing;
+    }
     again.blockers = eyes_.blockers(g, again.popups);
+    said_slow();
     if (again.blocked()) {
         tr.backoff_until = t + kBlockedMs;
         say(std::string("left ") + popup_kind_name(kind) + " alone: " + again.blockers.front());
         return Turn::Blocked;
     }
-    if (kind == PopupKind::MonsterBook && !still->control && again.popups.size() > 1)
-        return Turn::Held;
+    if (closes_with_esc(*still) && again.popups.size() > 1) return Turn::Held;
 
     // A stop that came while the fresh frame was looked at: nothing pressed.
     if (guard_.stopped && guard_.stopped()) return Turn::Held;
 
     // That look took too long -- a busy machine -- to press now and still let
     // go of the game in time: put off, nothing pressed, no try counted.
-    const bool with_esc = !still->control;
+    const bool with_esc = closes_with_esc(*still);
     const std::uint64_t took = held_for();
     if (took > (with_esc ? kEscPressByMs : kPressByMs)) {
         tr.backoff_until = now() + kBackoffMs;
@@ -703,15 +830,15 @@ PopupCloser::Turn PopupCloser::turn() {
         if (!grab_ || !grab_(h) || !h.valid()) continue;
         after = h;
         PopupScene now_up;
-        now_up.popups = eyes_.popups(h, true, &where);
+        now_up.popups = eyes_.popups(h, true, &where, relook_kinds(kind, allowed) | popup_bit(PopupKind::EscMenu));
         gone = same(now_up, kind, where) == nullptr;
         const PopupSeen* menu = now_up.find(PopupKind::EscMenu);
-        // One ESC does one thing: it shuts the book, or it brings up the
-        // menu. A menu seen once nothing of the book is left -- not even its
-        // title, which a menu GoBot's ESC brought up over the book leaves
-        // showing -- was under it: the player's, opened before the book, and
-        // never GoBot's to close.
-        if (with_esc && gone && menu != nullptr && !menu_tried && !eyes_.book_title_in(h, where)) {
+        // One ESC does one thing: it shuts the book or the board, or it
+        // brings up the menu. A menu seen once nothing of the popup is left --
+        // not even its title, which a menu GoBot's ESC brought up over it
+        // leaves showing -- was under it: the player's, opened before the
+        // popup, and never GoBot's to close.
+        if (with_esc && gone && menu != nullptr && !menu_tried && !eyes_.still_partly_in(kind, h, where)) {
             say("the ESC menu was already open under " + std::string(popup_kind_name(kind)) +
                 "; left as it is");
             break;
@@ -735,19 +862,20 @@ PopupCloser::Turn PopupCloser::turn() {
             done.let_go();
             continue;
         }
-        // The book gone and no menu: the ESC did its one thing.
+        // The popup gone and no menu: the ESC did its one thing.
         if (gone && menu == nullptr) break;
     }
     done.let_go();
 
+    const bool board = kind == PopupKind::CheckinBoard;
     const std::string how = with_esc ? std::string("with ESC")
                           : kind == PopupKind::CheckinNotice ? std::string("with its Xác Nhận")
                                                              : std::string("with its X");
     if (gone) {
         ++closed_;
         tr.seen = false;
-        say(std::string("closed ") + popup_kind_name(kind) + " at " + at_text(where.x, where.y) +
-            " (" + (kind == PopupKind::CheckinNotice ? "words " : "picture ") + score_text(score) +
+        say(std::string("closed ") + popup_kind_name(kind) + " at " + at_text(where.x, where.y) + " (" +
+            (kind == PopupKind::CheckinNotice ? "words " : board ? "title " : "picture ") + score_text(score) +
             ") " + how);
         // Whatever came up in its place -- a window the notice's Xác Nhận
         // opened, say -- is said, and left as it is.
@@ -755,14 +883,83 @@ PopupCloser::Turn PopupCloser::turn() {
             const std::vector<std::string> other = eyes_.blockers(after, {});
             if (!other.empty()) say("after that, " + other.front() + "; left as it is");
         }
-        last_vi_ = std::string("Đã đóng ") + popup_kind_vi(kind) + ".";
+        last_vi_ = board ? std::string("Đã tắt bảng Sự kiện và điểm danh (bấm ESC).")
+                         : std::string("Đã đóng ") + popup_kind_vi(kind) + ".";
         return Turn::Closed;
     }
+    // Tried, and still up: again after kBackoffMs, and after kTries in
+    // kTriesWindowMs left alone. Never anything else for it -- the board's
+    // X least of all.
     tr.backoff_until = now() + kBackoffMs;
-    say(std::string(popup_kind_name(kind)) + " is still up after closing it " + how +
-        (static_cast<int>(tr.tries.size()) < kTries ? "; trying again in 30 s" : "; leaving it alone"));
-    last_vi_ = std::string("Đã thử đóng ") + popup_kind_vi(kind) + " mà vẫn còn.";
+    const int tries = static_cast<int>(tr.tries.size());
+    say(std::string(popup_kind_name(kind)) + " is still up after closing it " + how + " (try " +
+        std::to_string(tries) + " of " + std::to_string(kTries) + ")" +
+        (tries < kTries ? "; trying again in 30 s" : "; leaving it alone"));
+    last_vi_ = board ? std::string("Đã bấm ESC mà bảng Sự kiện và điểm danh vẫn còn.")
+                     : std::string("Đã thử đóng ") + popup_kind_vi(kind) + " mà vẫn còn.";
     return Turn::NotClosed;
+}
+
+// ------------------------------------------------- pictures for the owner
+
+void CheckinShots::start(std::uint64_t now, int day, std::uint64_t crossed_in_ms) {
+    started_ = now;
+    start_kept_ = false;
+    first_day_ = 0;
+    day_ = day;
+    // An arrival whose 15 s were over before this worker began is not its to
+    // picture: the board, if it came, has been up a while or gone.
+    crossed_seen_ = crossed_in_ms != 0 && crossed_in_ms + kAfterMs < now ? crossed_in_ms : 0;
+}
+
+std::vector<std::string> CheckinShots::due(std::uint64_t now, int day, int second, bool board_up, bool board_closed,
+                                           std::uint64_t crossed_in_ms) {
+    std::vector<std::string> out;
+    if (board_up && first_day_ != day) {
+        out.push_back("first");
+        first_day_ = day;
+    }
+    if (board_closed) out.push_back("after");
+    if (crossed_in_ms != 0 && crossed_in_ms != crossed_seen_ && now >= crossed_in_ms + kAfterMs) {
+        out.push_back("in15");
+        crossed_seen_ = crossed_in_ms;
+    }
+    if (!start_kept_ && now >= started_ + kAfterMs) {
+        out.push_back("start15");
+        start_kept_ = true;
+    }
+    // The PC's clock may be minutes out (Windows Time is off on the owner's
+    // machine): the day turning over is what counts, at 00:00:30 or the first
+    // look after it.
+    if (day != day_ && second >= kMidnightS) {
+        out.push_back("midnight");
+        day_ = day;
+    }
+    return out;
+}
+
+std::string keep_popup_frame(const std::string& dir, const Frame& f, const std::string& why, bool probe) {
+    if (dir.empty() || !f.valid() || !make_folder(dir)) return {};
+    const std::string head = probe ? "probe_" : "checkin_";
+    // The newest of each kind, room made for this one: named by when they
+    // were taken, they sort oldest first.
+    std::vector<std::string> old = files_in(dir, head + "*.png");
+    std::sort(old.begin(), old.end());
+    for (std::size_t i = 0; i + CheckinShots::kKeep <= old.size(); ++i) remove_file(dir + "\\" + old[i]);
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &now);
+    char stamp[32];
+    std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
+    // Two digits, so that several in one second still sort in the order taken.
+    static std::atomic<int> n{ 0 };
+    char count[8];
+    std::snprintf(count, sizeof count, "%02d", n++ % 100);
+    std::string tag;
+    for (const char c : why) tag += (std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_';
+    const std::string path =
+        dir + "\\" + head + stamp + "_" + count + (probe || tag.empty() ? std::string() : "_" + tag) + ".png";
+    return save_png(f, path) ? path : std::string();
 }
 
 } // namespace gobot

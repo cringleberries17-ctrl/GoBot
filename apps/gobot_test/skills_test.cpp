@@ -11,6 +11,7 @@
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
+#include "gobot/hunter.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/macro.hpp"
@@ -166,6 +167,35 @@ bool logged_line(LogLevel level, const std::function<void()>& run,
     log.set_level(was);
     log.set_ring_capacity(0);
     return found;
+}
+
+/// As logged_line, the first such line itself; "" for none.
+std::string logged_text(LogLevel level, const std::function<void()>& run, std::initializer_list<const char*> words) {
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(2000);
+    log.clear_ring();
+    log.set_level(level);
+    run();
+    std::string found;
+    for (const LogLine& l : log.ring()) {
+        bool all = true;
+        for (const char* w : words) all = all && l.text.find(w) != std::string::npos;
+        if (all && found.empty()) found = l.text;
+    }
+    log.set_level(was);
+    log.set_ring_capacity(0);
+    return found;
+}
+
+/// The number after `after` in `text`; -1 for none.
+long long number_after(const std::string& text, const std::string& after) {
+    const std::size_t at = text.find(after);
+    if (at == std::string::npos) return -1;
+    const std::size_t from = at + after.size();
+    std::size_t to = from;
+    while (to < text.size() && text[to] >= '0' && text[to] <= '9') ++to;
+    return to == from ? -1 : std::stoll(text.substr(from, to - from));
 }
 
 // ------------------------------------------------------------------ gates
@@ -433,6 +463,41 @@ void test_skills_log() {
         rig.run(500);
     }, { "Skills: Z, the target 80 px to the side" });
     check(each, "and each press, with how far to the side the target was (debug)");
+
+    // 2026.11.08: the skills refused with the game behind another window --
+    // GoBot's own, clicked mid-run -- on their timers or following the fight,
+    // counted on the minute's line. Nothing else changes: none goes out.
+    for (const bool follow : { false, true }) {
+        std::uint64_t counted = 0;
+        bool none_out = false;
+        const std::string line = logged_text(LogLevel::Info, [&] {
+            Rig rig({ skill('Z', 1000), skill('X', 3000) }, follow, follow);
+            MacroEngine::Hands h;
+            h.focused = [] { return false; };
+            h.key = [&rig](std::uint32_t vk, int) {
+                rig.pressed.emplace_back(vk, rig.t);
+                return true;
+            };
+            rig.engine.set_hands(h);
+            rig.attack_key = 0;
+            rig.run(61'000);
+            counted = rig.engine.stats().skills_unfocused;
+            none_out = rig.pressed.empty();
+        }, { "Skills: 0 pressed; held 0 not fighting, ", "; refused: game not in front " });
+        const long long said = number_after(line, "; refused: game not in front ");
+        // The line counts its minute; the count runs on a second past it.
+        check(none_out && said > 0 && counted >= static_cast<std::uint64_t>(said) &&
+                  static_cast<std::uint64_t>(said) * 10 >= counted * 9,
+              std::string(follow ? "following the fight" : "on their timers") +
+                  ", the game not in front for a minute: none pressed, the refusals counted on the Skills line -- " +
+                  line + " (" + std::to_string(counted) + " in all)");
+    }
+    const std::string in_front = logged_text(LogLevel::Info, [] {
+        Rig rig({ skill('Z', 1000), skill('X', 3000) }, false, false);
+        rig.run(61'000);
+    }, { "Skills: ", " pressed; held " });
+    check(number_after(in_front, "; refused: game not in front ") == 0,
+          "and the game in front: refused 0 -- " + in_front);
 }
 
 // --------------------------------------------------- the tick off: as ever
@@ -557,6 +622,56 @@ void test_skills_config() {
               "1000 px");
     }
     std::remove(path.c_str());
+}
+
+void test_settings_changes() {
+    section("Settings changed during a run: one line of what changed (2026.11.08)");
+
+    // 2026-11-08 at 22:14:20: the MP potion's key from H to F, mid-run.
+    MacroConfig was;
+    was.apply_defaults();
+    was.keys[7].keycode = 'H';
+    MacroConfig now = was;
+    now.keys[7].keycode = 'F';
+    now.keys[0].interval_ms = 500;
+    HunterConfig hunt_was, hunt_now;
+    hunt_was.enabled = false;
+    hunt_now.enabled = true;
+    IniFile a, b;
+    was.store(a);
+    hunt_was.store(a);
+    now.store(b);
+    hunt_now.store(b);
+    const std::string line = settings_changes(a, b);
+    check(line.find("Keys.key_7_keycode 72 (H) -> 70 (F)") != std::string::npos &&
+              line.find("Keys.key_0_interval_ms 1200 -> 500") != std::string::npos &&
+              line.find("Hunt.enabled false -> true") != std::string::npos &&
+              std::count(line.begin(), line.end(), ';') == 2,
+          "the MP key H to F, Z's interval and Tự đánh quái, each as the file has it, a key's code with its name: " +
+              line);
+    check(settings_changes(a, a).empty() && settings_changes(a, b, 1).find("; and 2 more") != std::string::npos,
+          "nothing changed: no line; past `most`: how many more -- " + settings_changes(a, b, 1));
+    // A row taken out, and one put in.
+    MacroConfig fewer = was;
+    fewer.keys.pop_back();
+    IniFile c;
+    fewer.store(c);
+    hunt_was.store(c);
+    const std::string gone = settings_changes(a, c, 20);
+    check(gone.find("Keys.key_7_keycode 72 (H) -> (none)") != std::string::npos &&
+              settings_changes(c, a, 20).find("Keys.key_7_keycode (none) -> 72 (H)") != std::string::npos,
+          "a row taken out, or put in: said as none -- " + gone);
+
+    // What save() writes is what store() puts in, every key of it.
+    const std::string path = temp_path("gobot_store.ini");
+    IniFile saved, stored;
+    now.store(stored);
+    bool same = now.save(path) && saved.load(path);
+    for (const std::string& s : stored.sections())
+        for (const std::string& k : stored.keys(s)) same = same && saved.get(s, k, "?") == stored.get(s, k);
+    for (const std::string& s : saved.sections()) same = same && saved.keys(s).size() == stored.keys(s).size();
+    std::remove(path.c_str());
+    check(same && settings_changes(stored, saved).empty(), "macro.ini as saved holds what store() gives, no more");
 }
 
 // ------------------------------------------------------------ the sequence
@@ -721,5 +836,6 @@ void test_skills(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_skills_off_as_before();
     test_skills_timed_gap();
     test_skills_config();
+    test_settings_changes();
     test_sequence_follows();
 }

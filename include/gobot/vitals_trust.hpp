@@ -375,4 +375,11 @@ struct MapLoad {
 constexpr std::uint64_t kLoadHoldMs = 3000;
 bool map_load_holds(const MapLoad& in, std::uint64_t now_ms);
 
+/// Whether a bar's figure is `packet` with its leading 1 lost: the packet
+/// value less 10^k, 10^k its leading digit's place and that digit a 1 -- 4798
+/// for 14798, as the MP caption read all of 2026-11-08's run. A figure under
+/// 0, or a packet value under 100, is not. Only for keeping a picture of the
+/// caption (packets_vitals.cpp); no check goes by it.
+bool figure_lost_leading_one(int figure, std::uint32_t packet);
+
 } // namespace gobot

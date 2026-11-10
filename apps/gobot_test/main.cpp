@@ -17093,7 +17093,8 @@ void test_charm_sources() {
               "and it takes no other hold, runs in shop mode only here, lets the hold go, and stops with HP under "
               "the potion's mark");
         check(shop.find("if (!settings.buy_potions && !dry) {") != npos &&
-                  gui.find("!held && settings.buy_potions && !shop_blocked &&") != npos &&
+                  gui.find("!held && settings.buy_potions && now_ms() >= shop_due_ms;") != npos &&
+                  gui.find("shop_blocked") == npos &&
                   shop.find("bag::can_check_shop(store)") != npos && shop.find("hp < 0.0f") != npos &&
                   shop.find("keeper_cold_start_") != npos,
               "and it runs only with 'Tự mua bình' ticked -- a trial apart -- with the pictures, in the world, "
@@ -20649,6 +20650,12 @@ void test_vitals_trust(void (*check)(bool, const std::string&), void (*section)(
 void test_bag_ledger(void (*check)(bool, const std::string&), void (*section)(const char*));
 // Your casts and buffs from the packets, paired with the macro's presses, in cast_match_test.cpp.
 void test_cast_match(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The skills paced on your casts (cast_paced, 2026.11.08), in cast_pace_test.cpp.
+void test_cast_pace(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The jobs and the window in 2026.11.08: the shop's and the quest's waits after a
+// spoiled quiet second, the clocks kept across a MACRO OFF and ON, a key on a
+// buff and a skill both, the "Ra chiêu theo vòng" tick, in jobs_gui_test.cpp.
+void test_jobs_gui(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -20809,6 +20816,8 @@ int main() {
     test_vitals_trust(check, section);
     test_bag_ledger(check, section);
     test_cast_match(check, section);
+    test_cast_pace(check, section);
+    test_jobs_gui(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();

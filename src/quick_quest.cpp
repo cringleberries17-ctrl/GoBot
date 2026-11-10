@@ -51,6 +51,12 @@ std::string percent(float score) {
     return format("%.0f%%", static_cast<double>(std::max(0.0f, score)) * 100.0);
 }
 
+/// A wait as the tab says it: "30 giây", "2 phút".
+std::string wait_text_vi(std::uint64_t ms) {
+    if (ms < 60'000) return format("%llu giây", static_cast<unsigned long long>((ms + 999) / 1000));
+    return format("%llu phút", static_cast<unsigned long long>((ms + 30'000) / 60'000));
+}
+
 // ---- the file ---------------------------------------------------------------
 
 /// What a quest.ini starts as when the tab has to make one. The shipped file
@@ -259,6 +265,10 @@ void fill(QuestPictures& p, const QuestSettings& s, const PictureGetter& get) {
         p.box_ring = with_hole(p.box_off, within);
         p.box_inside = cut(p.box_off, within);
     }
+
+    // The check-in board's title, by its name in templates.ini or its file's:
+    // a round never starts its keys into the board.
+    if (!may(kCheckinBoardTitle, p.board_title)) may(kCheckinBoardTitleFile, p.board_title);
 
     Frame english;
     if (!s.window_en.empty() && may(s.window_en, english) && english.width == window.width &&
@@ -1245,6 +1255,22 @@ QuestResult QuestRound::run() {
         set(QuestOutcome::NoFrame, "could not capture the game");
         return r;
     }
+    // The check-in board up on the first look: it covers the middle of the
+    // screen, where the window opens, and the key or a click would go into
+    // it. Nothing pressed, not a failure, and nothing said of the window --
+    // it was not looked for. A timed round looks again QuestRun::kBoardMs on.
+    {
+        ScreenRect title;
+        float score = 0.0f;
+        if (pictures_.board_title.valid() && checkin_board_title(f, pictures_.board_title, &title, &score)) {
+            r.outcome = QuestOutcome::NotNow;
+            r.board = true;
+            r.why = "đang có bảng Sự kiện và điểm danh";
+            note(r, format("the check-in board is up, its title at %d,%d (%.2f): nothing pressed", title.x,
+                           title.y, static_cast<double>(score)));
+            return r;
+        }
+    }
     r.looked = true;
     r.last = f;
     r.window = find_quest_window(f, pictures_, settings_);
@@ -1658,6 +1684,7 @@ QuestRun::QuestRun(std::uint32_t seed) : schedule_(seed) {}
 void QuestRun::start(std::uint64_t now, const QuestSettings& s) {
     settings_ = s;
     schedule_.start(now, s);
+    quiet_.reset();
     running_ = true;
     stopped_ = false;
     stopped_why_.clear();
@@ -1669,6 +1696,8 @@ void QuestRun::start(std::uint64_t now, const QuestSettings& s) {
 }
 
 void QuestRun::update(const QuestSettings& s) {
+    // Ticked on again: the waits for a spoiled quiet second from the first.
+    if (!settings_.enabled && s.enabled) quiet_.reset();
     settings_ = s;
     schedule_.update(s);
 }
@@ -1679,6 +1708,7 @@ void QuestRun::ask_once(std::uint64_t now) {
     asked_until_ = now + kAskMs;
     retry_at_ = 0;
     waiting_for_.clear();
+    quiet_.reset();
 }
 
 void QuestRun::soon(std::uint64_t now) {
@@ -1697,10 +1727,10 @@ void QuestRun::say_now_and_then(std::uint64_t now, const std::string& why) {
     if (hooks_.say) hooks_.say(why);
 }
 
-void QuestRun::wait(std::uint64_t now, const std::string& why) {
+void QuestRun::wait(std::uint64_t now, const std::string& why, std::uint64_t postpone_ms) {
     waiting_for_ = why;
     if (asked_) retry_at_ = now + 1000;
-    if (running_ && settings_.enabled && schedule_.due(now)) schedule_.postpone(now, kPostponeMs);
+    if (running_ && settings_.enabled && schedule_.due(now)) schedule_.postpone(now, postpone_ms);
     say_now_and_then(now, "Chờ: " + why + ".");
 }
 
@@ -1750,8 +1780,26 @@ void QuestRun::step(std::uint64_t now) {
     // Whether a window GoBot opened may still be open, for the next round to
     // close: news only from a round that looked at the game.
     if (r.looked) ours_open_ = r.opened_by_us && (r.left_open || r.maybe_open);
+    // A quiet second that passed -- the round halted or stopped since, or a
+    // not-now after it: the next spoiled one waits 30 s again (R4).
+    if (r.quiet && !r.touched) quiet_.reset();
     if (r.outcome == QuestOutcome::NotNow || r.outcome == QuestOutcome::None) {
-        wait(now, r.why.empty() ? std::string("bot đang bận") : r.why);
+        const std::string why = r.why.empty() ? std::string("bot đang bận") : r.why;
+        // The check-in board up: a minute, as the bag jobs wait -- by then
+        // the popup closer, when ticked, has closed it.
+        if (r.board) {
+            wait(now, why, kBoardMs);
+            return;
+        }
+        // A timed round's quiet second spoiled: each one held every key off
+        // for a second, so the next look is further off each time. One asked
+        // for with the button looks again every second, as before.
+        if (r.touched && !ask) {
+            const std::uint64_t ms = quiet_.next_ms(schedule_.interval_ms());
+            wait(now, why + "; thử lại sau " + wait_text_vi(ms), ms);
+            return;
+        }
+        wait(now, why);
         return;
     }
     asked_ = false;
@@ -1766,6 +1814,8 @@ void QuestRun::step(std::uint64_t now) {
         if (running_ && settings_.enabled && schedule_.due(now)) schedule_.postpone(now, kPostponeMs);
         return;
     }
+    // A round that ran had its quiet second.
+    quiet_.reset();
     const std::string key = InputManager::key_name(settings_.quest_key);
     if (r.outcome == QuestOutcome::NoFrame) {
         if (running_ && settings_.enabled) schedule_.postpone(now, kPostponeMs);
