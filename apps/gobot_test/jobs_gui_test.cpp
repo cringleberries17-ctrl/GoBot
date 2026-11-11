@@ -8,7 +8,11 @@
 // server (R8); and the release's notes -- DOC-TRUOC.txt, README.md,
 // START-HERE (package.ps1) and macro.ini -- against the numbers and the words
 // the code has. And 2026.11.09's notes the same way: the potion shop bought
-// by the slot, and the check-in board closed under "Tự đóng thông báo".
+// by the slot, and the check-in board closed under "Tự đóng thông báo"; and
+// 2026.11.10's purchase count with no cap of GoBot's own, and that release's
+// notes -- the pet, the walk back, the bag pass, the key window, the death the
+// screen alone read -- against the code the same way; and 2026.11.11's -- the
+// shop right after the pass, HP during the bag jobs, the six keys, the digits.
 //
 // Nothing here goes near the desktop, the pointer, the keyboard's state or the
 // game. The glances at the pointer are a pretend desktop's (InputGlancer's
@@ -17,15 +21,19 @@
 // its own threads, the keyboard still pretend -- and where only GoBot's window
 // does a thing, its source is read.
 
+#include "gobot/alerts.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/cast_match.hpp"
 #include "gobot/checkin_board.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
+#include "gobot/hunt_zone.hpp"
+#include "gobot/hunter.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/macro.hpp"
+#include "gobot/packet_world.hpp"
 #include "gobot/popup_closer.hpp"
 #include "gobot/quick_quest.hpp"
 #include "gobot/quiet_second.hpp"
@@ -662,10 +670,12 @@ void test_jobs_wiring() {
 
     // ---- R4: the shop ----
     const std::string loop = body(gui, "void GuiApp::trash_loop() {");
-    const std::string shop = slice(gui, "const auto run_shop = [&](bool forced, bool dry) {", "while (!trash_stop_) {");
+    const std::string shop =
+        slice(gui, "const auto run_shop = [&](bool forced, bool dry, bool after_pass) {", "while (!trash_stop_) {");
     check(in_order(shop, { "if (forced || dry) shop_quiet.reset();", "take_hold(\"trash cleaning\")",
                            "input_.release_all();", "seen_before = glancer.glance();",
-                           "const DWORD quiet = last_input();", "touched = !trash_stop_ && !lost && last_input() != quiet;",
+                           "const DWORD quiet = last_input();",
+                           "touched = !trash_stop_ && !lost && said == QuietSaid::Touched;",
                            "quiet_spoiled_text(seen_before, glancer.glance())", "passed = true;", "shop_quiet.reset();",
                            "r = cleaner.run();" }),
           "run_shop: a button resets the back-off; the glance before the quiet second and after it is spoiled, under "
@@ -743,12 +753,14 @@ void test_jobs_wiring() {
           "\"Dùng bùa\" and \"Tự mua bình\" ticked on again: that job's clock, and the shop's back-off, afresh -- the "
           "shop owing nothing, its first look as at a start (the plan time saved, not 45 s); the worker running or "
           "the next; the window's thread moves an atomic only; no shop_blocked anywhere");
-    const std::string shop_job = slice(gui, "const auto run_shop = [&](bool forced, bool dry) {", "while (!trash_stop_) {");
+    const std::string shop_job =
+        slice(gui, "const auto run_shop = [&](bool forced, bool dry, bool after_pass) {", "while (!trash_stop_) {");
     const std::string charm_job = slice(gui, "const auto run_charms = [&](bool forced) {", "// ---- the potion shop ----");
     check(in_order(shop_job, { "if (dry) {", "shop_due_ms = due_before;", "const bool next_part = owed.hp + owed.mp > 0;",
                                "if (!next_part) shop_due_ms = plan_due_ms;",
                                "else if (trash_stop_) shop_due_ms = due_before;",
                                "else if (r.board_up) shop_due_ms = now_ms() + BagCleaner::kBoardWaitMs;",
+                               "else if (hp_stop) shop_due_ms = now_ms() + bag::kHpStoppedAgainMs;",
                                "else if (end == bag::ShopEnd::Paused) shop_due_ms = now_ms() + "
                                "BagCleaner::kShopPartGapMs;",
                                "else if (end == bag::ShopEnd::Trouble) shop_due_ms = minutes(10);",
@@ -756,7 +768,8 @@ void test_jobs_wiring() {
               has(charm_job, "if (!forced && !trash_stop_ && ((!r.ran && (!only_message || !r.trouble.empty())) ||") &&
               has(charm_job, "if (!forced && r.tab_unsure) charm_check_ms = now_ms() + kCharmTabRetryMs;"),
           "a shop run cut by DỪNG/F10 owing the rest leaves its clock as it was (the next worker resumes from 45 s), a "
-          "charm run's too (8 s) -- but a plan bought in full waits for the next plan whatever ended its round");
+          "charm run's too (8 s) -- but a plan bought in full waits for the next plan whatever ended its round; one "
+          "its guard stopped for HP is looked at again in 15 s (2026.11.11)");
 
     // ---- 2026.11.09: the shop's plan ----
     const std::size_t plan_at = shop_job.find("owed = bag::shop_new_plan(settings.buy_hp_slots, settings.buy_mp_slots);");
@@ -776,7 +789,7 @@ void test_jobs_wiring() {
           "run_shop: a new plan's time is written to shop_clock.txt before anything is clicked -- never by a trial "
           "(\"if (!dry)\") -- and one not written buys nothing; the numbers set bound what is owed; nothing owed "
           "before the plan's time waits for it, never a new plan early");
-    check(in_order(shop_job, { "return not_now(\"Máu đang thấp, mua bình sau.\", 15'000);",
+    check(in_order(shop_job, { "return not_now(\"Máu đang thấp, mua bình sau.\", bag::kHpLookAgainMs);",
                                "const bag::ShopOwed owed_before = owed;", "owed = bag::shop_new_plan(",
                                "ScreenCapture shop_capture;", "if (!passed) {", "if (forced) {",
                                "owed = owed_before;", "plan_due_ms = plan_before;" }) &&
@@ -1147,7 +1160,7 @@ void test_notes_1108() {
               has(view, "log_later({ \"Settings changed since the last run: \" + changes });") &&
               has(doc, "lần BẮT ĐẦU sau ghi \"Settings changed since the last run: ...\"") &&
               has(readme, "`Settings changed since the last run: Keys.key_4_keycode 65 (A) -> 51 (3)`") &&
-              has(macro, "\"%llu range; refused: game not in front %llu\"") &&
+              has(macro, "\"%llu range, %llu walking back; refused: game not in front %llu\"") &&
               has(doc, "\"Simple screen: start asked by the big button\" (hay \"the toggle key F10\", hay \"stop asked by "
                        "...\")") &&
               has(doc, "\"Settings changed during the run: " + change + "\"") &&
@@ -1348,28 +1361,40 @@ void test_notes_1109() {
           "Q4 (c): the board under \"Tự đóng thông báo\", no close_checkin anywhere; the notes say to tick it first");
 
     // ---- the slots: the card's own numbers, the old buy_*_to read till saved ----
+    // 2026.11.09 had them 0 to 20, as its entry still says; since 2026.11.10
+    // they go to kBuySlotsPerRunMost (test_buy_count_1110), an old key still
+    // to kBuySlotsFromOldMost.
     const int most = CleanSettings::kBuySlotsPerRunMost, three = CleanSettings::kBuySlotsDefault;
+    const int old_most = CleanSettings::kBuySlotsFromOldMost, then = 20;
     check(has(bag_cpp, "slots(\"buy_hp_slots\", \"buy_hp_to\", \"buy_hp_below\")") &&
               has(bag_cpp, "slots(\"buy_mp_slots\", \"buy_mp_to\", \"buy_mp_below\")") &&
               has(shop, "label(\"mỗi lần mua\");") && has(shop, "slots(\"Thịt bò khô (HP):\", \"hp\"") &&
               has(shop, "slots(\"Rượu lá tre (MP):\", \"mp\"") &&
               has(shop, "n = std::clamp(n, 0, CleanSettings::kBuySlotsPerRunMost);") &&
               has(doc, "\"Thịt bò khô (HP): mỗi lần mua [N] ô\" và \"Rượu lá tre (MP): mỗi lần mua [N] ô\", từ 0 tới " +
-                           n(most)) &&
+                           n(then) + " (0 là không mua loại đó; từ bản 2026.11.10 không còn giới hạn " + n(then) +
+                           ").") &&
               has(doc, "trash.ini của bản zip đặt " + n(three) + " và " + n(three) + ".") &&
               has(doc, "bản này lấy số \"tới\" làm số ô mua mỗi lần, cho tới khi bạn đổi số đó trên thẻ") &&
-              has(readme, "0 to " + n(most) + " each (`CleanSettings::kBuySlotsPerRunMost`), " + n(three) + " and " +
-                              n(three) + " as shipped (`kBuySlotsDefault`)") &&
+              has(readme, "`buy_hp_slots` and `buy_mp_slots` in `trash.ini`: 0 to " + n(then) + " each in 2026.11.09, "
+                          "and since 2026.11.10, the owner's \"Không giới hạn\", 0 to " + n(most) +
+                              " each (`CleanSettings::kBuySlotsPerRunMost`, a bound of the number alone: the "
+                              "bag-full message ends the round), " + n(three) + " and " + n(three) +
+                              " as shipped (`kBuySlotsDefault`)") &&
               has(readme, "A file without them reads its old `buy_hp_to` and `buy_mp_to` -- the owner's 10 and 10 -- "
-                          "until the card saves the new key") &&
+                          "until the card saves the new key, " + n(old_most) + " at most (`kBuySlotsFromOldMost`)") &&
               has(trash_ini, "a slot of the bag each: 0 to " + n(most) + ". 0 leaves that potion alone.") &&
-              has(trash_ini, "until that number is changed on the card, which writes the new key; with neither, " +
-                                 n(three) + ".") &&
-              has(trash_ini, "cho tới khi bạn đổi số đó trên thẻ (GoBot ghi dòng mới); không có cả hai thì là " +
-                                 n(three) + ".") &&
-              has(pack, "(moi lan mua N o, 0 to " + n(most) + ", " + n(three) + " and " + n(three) + " as shipped;"),
-          "the slots, 0 to " + n(most) + " and " + n(three) + " as shipped, a file's old buy_*_to read until the "
-          "card saves -- as CleanSettings::load and the card have them");
+              has(trash_ini, "(buy_hp_to, buy_mp_to; " + n(old_most) + " at the most), until that number is changed "
+                             "on the card, which writes the new key; with neither, " + n(three) + ".") &&
+              has(trash_ini, "(buy_hp_to, buy_mp_to; tối đa " + n(old_most) + ") cho tới khi bạn đổi số đó trên thẻ "
+                             "(GoBot ghi dòng mới); không có cả hai thì là " + n(three) + ".") &&
+              has(pack, "(moi lan mua N o, 0 to " + n(then) + " then and 0 to " + n(most) + " since 2026.11.10, " +
+                            n(three) + " and " + n(three) + " as shipped;") &&
+              has(pack, "reads its old buy_hp_to and buy_mp_to, " + n(old_most) + " at most, until the card is "
+                        "changed)"),
+          "the slots, 0 to " + n(most) + " (" + n(then) + " in 2026.11.09) and " + n(three) + " as shipped, a file's "
+          "old buy_*_to read until the card saves, " + n(old_most) + " at most -- as CleanSettings::load and the card "
+          "have them");
 
     // ---- the check-in board over the shop and its quantity box (the review) ----
     const std::string clear = slice(gui, "const auto look_for_clear = [&] {", "const bool was_held = held;");
@@ -1410,10 +1435,18 @@ void test_notes_1109() {
                           "`kShopPartGapMs` (" + n(gap_s) + " s) later") &&
               has(readme, "`kShopMaxBuys` (" + n(all) + ") at most") &&
               has(trash_ini, "so a run on the clock makes " + n(per_hold) + " purchases at the most and the rest a "
-                             "minute later; \"Mua ngay\" buys them all at once (" + n(all) + " at the most).") &&
-              has(pack, n(per_hold) + " purchases a hold and the rest a minute later"),
+                             "minute later; \"Mua ngay\" buys up to " + n(all) + " at once, and the rest the same "
+                             "way, " + n(per_hold) + " a minute.") &&
+              has(pack, n(per_hold) + " purchases a hold and the rest a minute later; Mua ngay buys up to " + n(all) +
+                            " at once.") &&
+              gap_min == 1 &&
+              has(doc, "nút \"Mua ngay\" mua ngay số ô đã đặt, không chờ giờ: tối đa " + n(all) + " lần trong một "
+                       "lượt, phần còn lại mua tiếp như lượt theo giờ (" + n(per_hold) + " lần, sau " + n(gap_min) +
+                       " phút).") &&
+              has(goc, n(per_hold) + " purchases a hold and the rest a minute later (**Mua ngay**: up to " + n(all) +
+                           " in one hold)"),
           "a timed round " + n(per_hold) + " purchases, the rest " + n(gap_s) + " s later, \"Mua ngay\" " + n(all) +
-              " at most -- as BagCleaner has them");
+              " at most and the rest in timed parts -- as BagCleaner has them");
 
     // ---- a round's deadline ----
     const int dl0 = B::shop_deadline_ms(0), per = B::shop_deadline_ms(1) - dl0, cap = B::kShopDeadlineMostMs;
@@ -1621,6 +1654,1009 @@ void test_notes_1109() {
 #endif
 }
 
+// ------------------------------------------- 2026.11.10: the purchase count
+
+/// The owner on 2026-11-10: "Mua HP/MP cần để người chơi tự setting bao nhiêu
+/// lần chứ không phải là max 20", answered "Không giới hạn". The card's box,
+/// its words and the notes against the constants; what a hold buys as it was.
+void test_buy_count_1110() {
+    section("2026.11.10: the potion shop's purchase count with no cap of GoBot's own -- the card, its words, the "
+            "notes");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string trash_ini = flat(source("/configs/trash.ini"), true);
+    const std::string goc = flat(source("/docs/goc-comparison.md"));
+    const std::string shop = source("/apps/gobot_gui/simple_shop.cpp");
+    const std::string bag_cpp = source("/src/bag.cpp");
+    const std::string bag_hpp = source("/include/gobot/bag.hpp");
+    if (doc.empty() || readme.empty() || pack.empty() || trash_ini.empty() || goc.empty() || shop.empty() ||
+        bag_cpp.empty() || bag_hpp.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto n = [](auto v) { return std::to_string(v); };
+    using B = BagCleaner;
+    using C = CleanSettings;
+
+    // ---- the numbers: a bound of the box only; an old key as 2026.11.09 read it ----
+    check(C::kBuySlotsPerRunMost == 999 && C::kBuySlotsFromOldMost == 20 && B::kShopMaxBuys == 40 &&
+              B::kShopBuysPerHold == 10 && B::kShopPartGapMs == 60'000 &&
+              has(bag_hpp, "static constexpr int kBuySlotsPerRunMost = 999;") &&
+              has(bag_hpp, "static constexpr int kBuySlotsFromOldMost = 20;") &&
+              has(bag_cpp,
+                  "return std::clamp(ini.get_int(\"Trash\", key, kBuySlotsDefault), 0, kBuySlotsPerRunMost);") &&
+              has(bag_cpp,
+                  "return std::clamp(ini.get_int(\"Trash\", before, kBuySlotsDefault), 0, kBuySlotsFromOldMost);"),
+          "the slots 0 to 999 as set, an old buy_*_to 20 at most; a hold's 40 and 10 and a part's minute as they "
+          "were -- CleanSettings::load");
+
+    // ---- the card: 0 to the bound, steps of 1 and 10, words from the constants ----
+    check(has(shop, "ImGui::InputInt(\"##slots\", &n, 1, 10);") &&
+              has(shop, "n = std::clamp(n, 0, CleanSettings::kBuySlotsPerRunMost);") &&
+              has(shop, "std::to_string(CleanSettings::kBuySlotsPerRunMost)") &&
+              has(shop, "ImGui::SetItemTooltip(\"%s\", slots_tip.c_str());") &&
+              has(shop, "GoBot không giới hạn số này: HP và MP chung ngăn Tiêu thụ, game báo túi đồ đã \"") &&
+              has(shop, "\"đầy thì GoBot dừng lượt đó.\"") && !has(shop, "0–20") && !has(shop, "(0-20)"),
+          "the card's box: 0 to kBuySlotsPerRunMost, steps 1 and 10, its tooltip from the constants and saying a "
+          "full bag ends the round; no \"0–20\" left");
+    check(in_order(shop, { "const int planned = simple_clean_.buy_hp_slots + simple_clean_.buy_mp_slots;",
+                           "if (simple_clean_.buy_potions && planned <= 0)",
+                           "if (planned > BagCleaner::kShopMaxBuys) {",
+                           "std::to_string(BagCleaner::kShopBuysPerHold) + \" lần (\\\"Mua ngay\\\": \" +",
+                           "std::to_string(BagCleaner::kShopMaxBuys) + \" lần), phần còn lại mua tiếp, mỗi \" +",
+                           "std::to_string(BagCleaner::kShopPartGapMs / 60'000) +", "hint(over.c_str());" }) &&
+              in_order(shop, { "static const std::string buy_now_tip =",
+                               "std::to_string(BagCleaner::kShopMaxBuys) + \" lần; phần còn lại mua tiếp, mỗi \" +",
+                               "std::to_string(BagCleaner::kShopPartGapMs / 60'000) + \" phút một lượt \" +",
+                               "std::to_string(BagCleaner::kShopBuysPerHold) +",
+                               "Game báo túi đồ đã đầy thì dừng lượt đó.",
+                               "ImGui::SetItemTooltip(\"%s\", simple_clean_.buy_potions ? buy_now_tip.c_str() : "
+                               "\"Bật ô \\\"Tự mua bình\\\" trước.\");" }) &&
+              !has(shop, "Mua ngay bây giờ đủ số ô đã đặt trong một lượt"),
+          "a hint only over kShopMaxBuys in all, and \"Mua ngay\"'s tooltip: " + n(B::kShopMaxBuys) + " in its hold, "
+          "the rest " + n(B::kShopBuysPerHold) + " a part every " + n(B::kShopPartGapMs / 60'000) +
+          " minute, a full bag ending it -- from the constants");
+
+    // ---- the notes: what is no longer so is no longer said ----
+    check(has(readme, "100 a slot, 0 to " + n(C::kBuySlotsPerRunMost) + " each (no cap of GoBot's own since "
+                      "2026.11.10; 20 before), 3 and 3 as shipped") &&
+              has(readme, "`buy_hp_slots` and `buy_mp_slots`, 0 to " + n(C::kBuySlotsPerRunMost) +
+                              " since 2026.11.10 (20 before), 3 as shipped -- a file without them reads its old "
+                              "`buy_hp_to` and `buy_mp_to`, " + n(C::kBuySlotsFromOldMost) + " at most,") &&
+              has(doc, "(\"mỗi lần mua N ô\", 0 tới " + n(C::kBuySlotsPerRunMost) + ", mặc định " +
+                           n(C::kBuySlotsDefault) + "; từ bản 2026.11.10 GoBot không giới hạn số này, trước là 20: game "
+                           "báo túi đầy thì dừng lượt đó)") &&
+              has(trash_ini, "từ 0 tới " + n(C::kBuySlotsPerRunMost) + "; 0 là không mua loại đó. GoBot không giới hạn "
+                             "số này (trước bản 2026.11.10 là 20): game báo túi đồ đã đầy thì dừng lượt đó.") &&
+              has(trash_ini, "GoBot sets no cap of its own (20 until 2026.11.10): the game's message that the bag is "
+                             "full ends the round.") &&
+              has(goc, "0 to " + n(C::kBuySlotsPerRunMost) + " each (no cap of GoBot's own since 2026.11.10, 20 "
+                       "before: the bag-full message ends the round)") &&
+              !has(readme, "100 a slot, 0 to 20 each") && !has(readme, "`buy_mp_slots`, 0 to 20, 3 as shipped") &&
+              !has(doc, "(\"mỗi lần mua N ô\", 0 tới 20, mặc định") && !has(doc, "nút \"Mua ngay\" mua ngay đủ số ô") &&
+              !has(trash_ini, "a slot of the bag each: 0 to 20.") && !has(trash_ini, "buys them all at once") &&
+              !has(pack, "Mua ngay buys them all at once") && !has(goc, "0 to 20 each, 3 and 3 as shipped") &&
+              !has(goc, "(**Mua ngay**: all in one hold)"),
+          "README, DOC-TRUOC.txt, trash.ini and docs/goc-comparison.md: 0 to " + n(C::kBuySlotsPerRunMost) +
+              " with no cap of GoBot's own, a full bag ending the round, \"Mua ngay\" " + n(B::kShopMaxBuys) +
+              " at most -- no \"0 to 20\" left but as 2026.11.09 had it");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------ 2026.11.10: the notes
+
+/// 2026.11.10's notes against the code: DOC-TRUOC.txt's entry and its live
+/// test step 13, README.md's release section, START-HERE (package.ps1), the
+/// comments of trash.ini, hunt.ini and alerts.ini, and docs/goc-comparison.md
+/// -- the owner's words and answers as written, and the numbers and the words
+/// of the screen and the log they quote, as the code has them: the pet pressed
+/// over and over, the walk back first, the bag pass, the key window, the
+/// purchases and the death the screen alone read.
+void test_notes_1110() {
+    section("The 2026.11.10 notes against the code: the pet, the walk back, the bag pass, the key window, the "
+            "purchases, the death alert, the words quoted");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string trash_ini = flat(source("/configs/trash.ini"), true);
+    const std::string hunt_ini = flat(source("/configs/hunt.ini"), true);
+    const std::string alerts_ini = flat(source("/configs/alerts.ini"), true);
+    const std::string goc = flat(source("/docs/goc-comparison.md"));
+    const std::string pet_cpp = source("/src/macro_pet.cpp");
+    const std::string macro_cpp = source("/src/macro.cpp");
+    const std::string hunter_cpp = source("/src/hunter.cpp");
+    const std::string bag_cpp = source("/src/bag.cpp");
+    const std::string bag_hpp = source("/include/gobot/bag.hpp");
+    const std::string coord_cpp = source("/src/execution_coordinator.cpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    const std::string potions = source("/apps/gobot_gui/simple_potions.cpp");
+    const std::string spot = source("/apps/gobot_gui/simple_spot.cpp");
+    const std::string map = source("/apps/gobot_gui/simple_map.cpp");
+    const std::string alerts = source("/apps/gobot_gui/simple_alerts.cpp");
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    if (doc.empty() || readme.empty() || pack.empty() || trash_ini.empty() || hunt_ini.empty() ||
+        alerts_ini.empty() || goc.empty() || pet_cpp.empty() || macro_cpp.empty() || hunter_cpp.empty() ||
+        bag_cpp.empty() || bag_hpp.empty() || coord_cpp.empty() || view.empty() || potions.empty() ||
+        spot.empty() || map.empty() || alerts.empty() || gui.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    // A time as the notes write it: 500 ms "0,5", 3000 "3".
+    const auto vi_s = [](std::uint64_t ms) {
+        std::string s = std::to_string(ms / 1000);
+        if (ms % 1000 != 0) s += "," + std::to_string(ms % 1000 / 100);
+        return s;
+    };
+    using MC = MacroConfig;
+    using E = MacroEngine;
+    using B = BagCleaner;
+    using C = CleanSettings;
+
+    // ---- where: on top of 2026.11.09's entry; its live test step 13 ----
+    const std::size_t e10 = doc.find("- Mới trong bản 2026.11.10 (");
+    const std::size_t e09 = doc.find("- Mới trong bản 2026.11.09 (");
+    const std::size_t step12 = doc.find("12. Bảng điểm danh và Tự mua bình (bản 2026.11.09, chưa thử trên game thật):");
+    const std::size_t step13 = doc.find("13. Bơm máu pet, về vùng đánh quái, dọn rác và mua bình (bản 2026.11.10, chưa "
+                                        "thử trên game thật;");
+    const std::size_t revive = doc.find("- Tự hồi sinh: thử ở bản đồ dễ");
+    const std::size_t sec7 = doc.find("7. KHI GẶP LỖI");
+    const std::size_t r09 = readme.find("### Buying by the slot, and the check-in board (2026.11.09)");
+    const std::size_t r10 = readme.find("### The pet, the walk back, the bag and the shop (2026.11.10)");
+    const std::size_t rkeys = readme.find("### The hold's key window (2026.11.10)");
+    check(e10 != npos && e09 != npos && e10 < e09 && step12 != npos && step13 != npos && revive != npos &&
+              sec7 != npos && step12 < step13 && step13 < revive && revive < sec7 &&
+              has(doc, "2026.11.10 (bơm máu pet liên tục, về vùng đánh quái trước, dọn rác nhanh hơn, kỹ năng khi dọn "
+                       "rác và mua bình, mua bình không giới hạn số lần, theo điều bạn báo ngày 10/11; chưa thử trên "
+                       "game thật)") &&
+              has(doc, "Thử như bước 13 ở mục 6.") && r09 != npos && r10 != npos && rkeys != npos && r09 < r10 &&
+              r10 < rkeys && has(readme, "Since 2026.11.10 (not yet run on the game).") &&
+              has(pack, "The pet, walking back, the bag and the shop (2026.11.10, not yet tried on the game)."),
+          "DOC-TRUOC.txt: the 2026.11.10 entry on top of 2026.11.09's, not yet tried on the game, its live test "
+          "step 13 of section 6; README's release section before the key window's, and START-HERE, say it too");
+
+    // ---- the owner's words and answers, as written ----
+    const char* const owner[] = {
+        "\"Bơm máu pet chậm\"",
+        "\"Thao tác dọn rác chậm\"",
+        "\"dọn rác chậm là từ user feedback\"",
+        "\"Không tự di chuyển quay về vùng đánh quái\"",
+        "\"Khi dọn rác thì cần ra các skill thuộc phím chữ cái (z,x,c,v, v.v.)\"",
+        "\"cả khi mua HP và MP cũng cần ra skill nhé\"",
+        "\"có tính phím space, vì phím space không ảnh hưởng\"",
+        "\"lúc dùng bùa thì không cần ra skill\"",
+        "\"Mua HP/MP cần để người chơi tự setting bao nhiêu lần chứ không phải là max 20\"",
+        "\"Liên tục như GoC (0,2–0,5 s)\"",
+        "(a) \"Ngưng đánh, đi về trước\"",
+        "\"Bấm cả bình\"",
+        "\"Không giới hạn\"",
+    };
+    bool quoted = true;
+    for (const char* w : owner) quoted = quoted && has(doc, w);
+    const char* const owner_en[] = {
+        "*\"Bơm máu pet chậm\"*",
+        "*\"Thao tác dọn rác chậm\"*",
+        "*\"dọn rác chậm là từ user feedback\"*",
+        "*\"Không tự di chuyển quay về vùng đánh quái\"*",
+        "*\"Mua HP/MP cần để người chơi tự setting bao nhiêu lần chứ không phải là max 20\"*",
+        "*\"Liên tục như GoC (0,2–0,5 s)\"*",
+        "(a) *\"Ngưng đánh, đi về trước\"*",
+        "*\"Bấm cả bình\"*",
+        "*\"Không giới hạn\"*",
+        "*\"Khi dọn rác thì cần ra các skill thuộc phím chữ cái (z,x,c,v, v.v.)\"*",
+        "*\"cả khi mua HP và MP cũng cần ra skill nhé\"*",
+        "*\"có tính phím space, vì phím space không ảnh hưởng\"*",
+        "*\"lúc dùng bùa thì không cần ra skill\"*",
+    };
+    for (const char* w : owner_en) quoted = quoted && has(readme, w);
+    check(quoted && has(doc, "Câu trả lời của bạn ngày 10/11:"),
+          "the owner's five requests and four answers of 2026-11-10 quoted as written, and \"dọn rác chậm là từ "
+          "user feedback\", in DOC-TRUOC.txt and README");
+
+    // ---- the pet: the box's numbers, the turn a skill gets ----
+    const std::string least = n(MC::kPetEveryLeastMs), most = n(MC::kPetEveryMostMs), def = n(MC::kDefaultPetEveryMs);
+    check(MC::kPetEveryLeastMs == 200 && MC::kPetEveryMostMs == 3000 && MC::kDefaultPetEveryMs == 300 &&
+              has(view, "label(\"Bơm liên tục, mỗi\");") &&
+              has(doc, "có ô mới \"Bơm liên tục, mỗi [N] ms\", từ " + least + " tới " + most + " ms, mặc định " + def +
+                           " ms, một số cho mọi phím pet") &&
+              has(doc, "macro.ini chưa có dòng pet_every_ms (như của bạn: Q đặt 3000 ms ở cả hai dòng) thì đọc là " +
+                           def + " ms.") &&
+              has(doc, "bản này bấm Q mỗi " + def + " ms khi máu pet dưới mức") &&
+              has(doc, "macro.ini của bản trước 2026.11.10 không có dòng pet_every_ms: bản này đọc là " + def + " ms") &&
+              has(readme, "(`MacroConfig::pet_every_ms`, `kPetEveryLeastMs`-`kPetEveryMostMs`, " + least + "-" + most +
+                              " ms; `kDefaultPetEveryMs`, " + def + ", in a file without it") &&
+              has(readme, "`pet_every_ms`, how often the pet's potions go while the pet is under its mark (" + least +
+                              "-" + most + " ms, " + def + " as shipped and in a file without it)") &&
+              has(pack, "(" + least + " to " + most + " ms; " + def + " as shipped and in a macro.ini without "
+                        "pet_every_ms, where it was about every 3 s)") &&
+              has(pack, "A macro.ini from before 2026.11.10 has no pet_every_ms: its pet keys are then pressed every " +
+                            def + " ms") &&
+              has(doc, "phím đó liên tục, mỗi \"Bơm liên tục, mỗi N ms\" một lần (mặc định " + def +
+                           " ms; trước bản 2026.11.10 là khoảng 3 giây)"),
+          "the pet's box " + least + " to " + most + " ms, " + def + " in a file without it -- as MacroConfig has it "
+          "-- in the entry, section 6's pet step, the update notes, README's table and START-HERE");
+    check(E::kPetYieldMostMs == 500 && has(doc, "(pet chờ nhiều nhất " + vi_s(E::kPetYieldMostMs) + " giây)") &&
+              has(readme, "`kPetYieldMostMs` " + n(E::kPetYieldMostMs) + " at most, *" +
+                              E::potion_why_name(E::PotionWhy::SkillTurn) + "*") &&
+              std::string(E::potion_why_name(E::PotionWhy::SkillTurn)) == "a skill's turn" &&
+              MC::kRecheckPeakMs == 700 &&
+              has(doc, "theo lần đọc cao nhất trong " + vi_s(MC::kRecheckPeakMs) + " giây sau khi bấm") &&
+              has(readme, "`MacroConfig::kRecheckPeakMs` (" + n(MC::kRecheckPeakMs) + " ms)") &&
+              has(view, "\"Lv2 cùng phím không bấm nhanh hơn: Lv1 và Lv2 trên một phím là một bình, \"") &&
+              has(doc, "\"Lv2 cùng phím không bấm nhanh hơn: ...\""),
+          "a skill's turn after the pet's press, " + n(E::kPetYieldMostMs) + " ms of waiting at most; the peak "
+          "within " + n(MC::kRecheckPeakMs) + " ms; the Lv2 note -- as the engine and the row have them");
+
+    // ---- the pet's log: the minute's line, a still run, the plateau's picture ----
+    char still_head[256];
+    std::snprintf(still_head, sizeof still_head,
+                  "Potion check: Pet key %s pressed at %d%%, the bar within %.0f%% of it for %llu ms -- no rise; "
+                  "pressed on every %u ms all the same",
+                  "Q", 71, static_cast<double>(PetHealWatch::kStaticPct),
+                  static_cast<unsigned long long>(PetHealWatch::kJudgeMs), MC::kDefaultPetEveryMs);
+    const std::string still = std::string(still_head) + " (more often than the " + n(MC::kDefaultRecheckMs) +
+                              "-ms check)";
+    const std::string minute = "Pet heals: key Q, N pressed; of N judged, N rose (median +N% after N ms; two that "
+                               "rose N s apart at the closest), N static -- the bar still -- in N runs (N at 71%, ";
+    check(has(pet_cpp, "\"Pet heals: key %s, %llu pressed; of %llu judged, %llu rose\"") &&
+              has(pet_cpp, "\" (median +%d%% after %llu ms\"") &&
+              has(pet_cpp, "\"; two that rose %.1f s apart at the closest\"") &&
+              has(pet_cpp, "\", %llu static -- the bar still -- in %zu run%s (\"") &&
+              has(pet_cpp, "\" no rise with the bar moving\"") && has(pet_cpp, "\" with no reading\"") &&
+              has(doc, "\"" + minute + "...), N no rise with the bar moving, N with no reading\"") &&
+              has(readme, "`" + minute + "…), N no rise with the bar moving, N with no reading`") &&
+              PetHealWatch::kJudgeMs == 700 &&
+              has(readme, "`PetHealWatch::kJudgeMs` (" + n(PetHealWatch::kJudgeMs) + " ms)"),
+          "the minute's \"Pet heals\" line, as PetHealWatch::minute_line writes it");
+    check(has(pet_cpp, "GB_INFO(\"Potion check: Pet key %s pressed at %d%%, the bar within %.0f%% of it for %llu ms -- "
+                       "no rise; pressed \"") &&
+              has(pet_cpp, "\"on every %u ms all the same (more often than the %u-ms check), the minute's") &&
+              has(doc, "\"" + still + ", ...\"") && has(readme, "`" + std::string(still_head) + " …`"),
+          "a still run's \"" + still + "\" -- as pet_outcomes writes it");
+    check(E::kPlateauLowPct == 70 && E::kPlateauHighPct == 75 &&
+              has(potions, "\"Pet heals: the pet's bar still at \" + std::to_string(plateau) +") &&
+              has(potions, "\"% through a press of its potion\";") &&
+              has(potions, "stamp() + \"_pet_\" + std::to_string(plateau) + \".png\";") &&
+              has(potions, "return text + \"; kept a picture of the pet's slot as potion_debug\\\\\" + name;") &&
+              has(doc, "\"Pet heals: the pet's bar still at 71% through a press of its potion; kept a picture of the "
+                       "pet's slot as potion_debug\\...\"") &&
+              has(doc, "Lần đầu thanh đứng yên ở " + n(E::kPlateauLowPct) + "–" + n(E::kPlateauHighPct) + "%") &&
+              has(readme, "`MacroEngine::kPlateauLowPct`-`kPlateauHighPct` (" + n(E::kPlateauLowPct) + "-" +
+                              n(E::kPlateauHighPct) + "%;") &&
+              has(readme, "`potion_debug\\<time>_pet_<pct>.png`"),
+          "the plateau's picture, " + n(E::kPlateauLowPct) + "-" + n(E::kPlateauHighPct) + "%, and its line -- as "
+          "GoBot's window keeps it");
+
+    // ---- the walk back first: the edge, the waits, the card ----
+    HunterConfig hc;
+    check(kZoneOutsideBackPx == 60 &&
+              has(doc, "ra ngoài vùng quá " + n(kZoneOutsideBackPx) + " px (vùng có đường về, hay chỗ đánh quái của "
+                       "lần chạy này không cao hơn một lần nhảy) thì bot ngưng đánh ngay") &&
+              has(doc, "(không chờ " + vi_s(hc.spot_return_delay_ms) + " giây)") &&
+              has(doc, "Đi về mà " + vi_s(hc.spot_give_up_ms) + " giây không tới gần hơn (vướng tường) thì bot thôi, "
+                       "đánh ở chỗ đang đứng, " + vi_s(hc.spot_retry_ms) + " giây sau thử lại") &&
+              has(readme, "more than `kZoneOutsideBackPx` (" + n(kZoneOutsideBackPx) + ") out, nothing is fought until "
+                          "the character is inside the box") &&
+              has(pack, "More than " + n(kZoneOutsideBackPx) + " px outside the hunting area the bot stops fighting") &&
+              has(spot, "if (back) return out + \" — bot ngưng đánh, về vùng trước: đi bộ về \" + way + \", vào tới "
+                        "trong vùng rồi mới đánh tiếp.\";") &&
+              has(doc, "\"Nhân vật đang ở ngoài vùng N px — bot ngưng đánh, về vùng trước: đi bộ về X, Y, vào tới "
+                       "trong vùng rồi mới đánh tiếp.\""),
+          "the walk back first past " + n(kZoneOutsideBackPx) + " px, no " + n(hc.spot_return_delay_ms) + " ms wait, "
+          "a wall given up after " + n(hc.spot_give_up_ms) + " ms -- as hunt_zone.hpp and HunterConfig have them -- "
+          "and the card's words");
+    const std::string loading = "Vừa qua cửa về lại bản đồ này: chờ bản đồ tải xong rồi dùng lại vùng đã lưu và đi bộ "
+                                "về vùng.";
+    check(Hunter::kDoorLoadMs == 3000 && has(spot, "hint(\"" + loading + "\");") &&
+              has(doc, "\"" + loading + "\"") && has(readme, "*" + loading + "*") &&
+              has(doc, "(gói tin báo chỗ nhân vật, hay sau " + vi_s(Hunter::kDoorLoadMs) + " giây)") &&
+              has(readme, "`Hunter::kDoorLoadMs` (" + n(Hunter::kDoorLoadMs / 1000) + " s)") &&
+              has(hunt_ini, "Back on an area's map through any door, the area is taken again once the map has loaded") &&
+              has(hunt_ini, "qua cửa nào cũng được về lại bản đồ có vùng thì bot dùng lại vùng khi bản đồ tải xong"),
+          "a door back to the area's map: the area taken again once loaded, " + n(Hunter::kDoorLoadMs) + " ms at "
+          "most -- as Hunter::kDoorLoadMs and the card have it");
+    check(Hunter::kOneJumpPx == 120 && Hunter::kSpotOddSayMs == 60'000 &&
+              has(hunter_cpp, "GB_INFO(\"Hunter: a report of yours at %d,%d not taken for the hunting spot -- %s "
+                              "(opcode 0x%04X)%s\",") &&
+              has(hunter_cpp, "\"y 0 is no place to stand\"") &&
+              has(doc, "\"Hunter: a report of yours at 999,0 not taken for the hunting spot -- y 0 is no place to "
+                       "stand (opcode 0x....)\"") &&
+              has(readme, "`Hunter::kOneJumpPx` (" + n(Hunter::kOneJumpPx) + ")") &&
+              has(readme, "`Hunter: a report of yours at x,y not taken for the hunting spot -- …`") &&
+              has(map, "const std::string label = \"Dùng vùng \" + pick + \"##map_choose\";") &&
+              has(doc, "nút \"Dùng vùng <tên file>\" (ví dụ \"Dùng vùng t1901_s2\")") &&
+              has(readme, "*Dùng vùng <stem>*"),
+          "no spot at y 0 or a jump up with no jump, said as the hunter says it; the Bản đồ card's \"Dùng vùng\"");
+
+    // ---- the walk's log, the own walk's line made by the code ----
+    PacketWorld::OwnWalk w;
+    w.from_x = 25.0f;
+    w.from_y = 632.0f;
+    w.to_x = 363.0f;
+    w.to_y = 632.0f;
+    w.from_ms = 10'000;
+    w.to_ms = 10'940;
+    w.ended_by = 0x0027;
+    w.casts = 2;
+    std::vector<InputManager::KeyMark> marks(2);
+    marks[0].vk = 'Z';
+    marks[0].down = true;
+    marks[0].at_ms = w.from_ms - 85;
+    marks[1].vk = 'Z';
+    marks[1].at_ms = w.from_ms - 5;
+    const std::string walk =
+        PacketWorld::own_walk_line(w, InputManager::walk_keys_text(marks, VK_LEFT, VK_RIGHT, w.from_ms, w.to_ms));
+    check(walk == "Positions: own walk 25,632 -> 363,632 (+338 px) in 0.94 s, stopped by 0x0027; 2 casts of yours in "
+                  "it; GoBot: no arrow within " + n(InputManager::kWalkKeyMs) + " ms; last key Z 85 ms before" &&
+              has(doc, "\"" + walk + "\"") && has(readme, "`" + walk + "`") &&
+              has(doc, "trong " + n(InputManager::kWalkKeyMs) + " ms quanh đó") &&
+              has(readme, "`kWalkKeyMs` " + n(InputManager::kWalkKeyMs)),
+          "the own walk's line the notes quote, as own_walk_line and walk_keys_text write it -- " + walk);
+    check(has(hunter_cpp, "GB_INFO(\"Hunter: %d px outside the hunting area -- no fight until the character is back "
+                          "inside it: walking back \"") &&
+              has(hunter_cpp, "\"first, %s (reach %d px)\",") &&
+              has(hunter_cpp, "GB_INFO(\"Hunter: the walk back first is over after %.1f s, from %d px outside -- %s\",") &&
+              has(hunter_cpp, "back_walk_end(\"inside the hunting area: fighting again\");") &&
+              has(hunter_cpp, "GB_INFO(\"Hunter: walk back over after %.1f s -- %s\",") &&
+              has(hunter_cpp, "\"; outside the area %.1f s, walking back %.1f s\"") &&
+              has(macro_cpp, "\"%llu range, %llu walking back; refused: game not in front %llu\"") &&
+              has(doc, "\"Hunter: N px outside the hunting area -- no fight until the character is back inside it: "
+                       "walking back first, to x,y (reach 450 px)\"") &&
+              has(doc, "\"Hunter: the walk back first is over after N s, from N px outside -- inside the hunting area: "
+                       "fighting again\"") &&
+              has(doc, "\"Hunter: walk back over after N s -- ...\"") &&
+              has(doc, "\"; outside the area N s, walking back N s\"") &&
+              has(doc, "dòng \"Skills:\" thêm \", N walking back\"") &&
+              has(readme, "`Hunter: N px outside the hunting area -- no fight until the character is back inside it: "
+                          "walking back first, to x,y (reach N px)`") &&
+              has(readme, "`Hunter: the walk back first is over after N s, from N px outside -- …`") &&
+              has(readme, "`Hunter: walk back over after N s -- …`") &&
+              has(readme, "`; outside the area N s, walking back N s`") && has(readme, "`, N walking back`"),
+          "the walk back's lines, the minute's time outside and the Skills line's walking back -- as the hunter and "
+          "the macro write them");
+
+    // ---- the bag pass: nothing to look through, Tiêu Dùng alone, the steps ----
+    const std::string spend_hint = "Mọi món trong danh sách đều nằm ở ngăn Tiêu Dùng, nên khi dọn GoBot chỉ tìm ở "
+                                   "ngăn đó.";
+    check(has(doc, "\"" + std::string(bag::kNoTabVi) + ".\"") && has(doc, "\"" + std::string(bag::kNoUseTabVi) + ".\"") &&
+              has(view, "coloured(kWait, (std::string(looked.none_said()) + \".\").c_str());") &&
+              has(view, "hint(\"" + spend_hint + "\");") && has(doc, "\"" + spend_hint + "\"") &&
+              has(readme, "*" + std::string(bag::kNoTabVi) + "*") &&
+              has(bag_cpp, "GB_INFO(\"Trash: every item on the list is a spend/ icon -- only Tiêu Dùng looked through, "
+                           "not %s\",") &&
+              has(doc, "\"Trash: every item on the list is a spend/ icon -- only Tiêu Dùng looked through, not ...\"") &&
+              has(readme, "`Trash: every item on the list is a spend/ icon -- only Tiêu Dùng looked through, not …`"),
+          "no tab ticked, or Tiêu Dùng alone and not ticked: the card's words as bag::pass_tabs says them; the "
+          "spend-only line as the pass writes it");
+    const std::string item = "Trash: item at Tiêu Dùng, hàng 1 ô 1 (giống 97%) deleted in N ms -- drag N ms, in the "
+                             "bin after N ms (N looks), its dialog N ms after the click, the box read on N looks in N "
+                             "ms, closed N ms after Xác Nhận (1 question), then N ms till the item was seen gone, last "
+                             "look N ms";
+    const std::string steps = "Trash: pass steps -- bag opened in N ms (N looks); Tiêu Dùng: tab N ms, top N ms, N "
+                              "pages (scrolling N ms), N items in N ms; bag shut in N ms; N ms in all";
+    check(has(bag_cpp, "return \"item at \" + where + (gone ? \" deleted in \" : \" not deleted, after \") + "
+                       "ms(t.total) +") &&
+              has(bag_cpp, "step(\"in the bin after \" + ms(t.in_bin) + \" (\"") &&
+              has(bag_cpp, "step(\"its dialog \" + ms(t.dialog) + \" after the click\");") &&
+              has(bag_cpp, "step(\"closed \" + ms(t.closed) + \" after Xác Nhận (\"") &&
+              has(bag_cpp, "(t.early ? \" till the item was seen gone\" : \" watching for another question\")") &&
+              has(bag_cpp, "GB_INFO(\"Trash: pass steps -- %s; %d ms in all\",") &&
+              has(bag_cpp, "\": tab \" + std::to_string(t.select) + \" ms, top \"") &&
+              has(bag_cpp, "line += \"; bag shut in \"") && has(doc, "\"" + item + "\"") &&
+              has(readme, "`" + item + "`") && has(doc, "\"" + steps + "\"") && has(readme, "`" + steps + "`") &&
+              has(bag_cpp, "constexpr int kQuickLookMs = 80;") && has(bag_cpp, "constexpr int kDoneApartMs = 150;") &&
+              has(doc, "GoBot nhìn lại mỗi 80 ms (trước là 150 ms)") &&
+              has(doc, "hai lần nhìn cách nhau 0,15 giây"),
+          "each item's and each pass's timing line, as the cleaner writes them; the 80-ms looks and the two looks "
+          "150 ms apart as bag.cpp has them");
+
+    // ---- the key window: what goes through, the waits, the words ----
+    check(pass_key_allowed('Z') && pass_key_allowed('G') && pass_key_allowed(0x20) && !pass_key_allowed('6') &&
+              pass_key_allowed(VK_HOME) && pass_key_allowed(VK_END) && pass_key_allowed(VK_PRIOR) &&
+              pass_key_allowed(VK_NEXT) && pass_key_allowed(VK_INSERT) && pass_key_allowed(VK_DELETE) &&
+              !pass_key_allowed(VK_DOWN) && !pass_key_allowed(VK_NUMPAD2) && !pass_key_allowed('1') &&
+              !pass_key_allowed(VK_RETURN) && !pass_key_allowed(VK_ESCAPE) && !pass_key_allowed(VK_LEFT) &&
+              !pass_key_allowed(VK_CONTROL) && !pass_key_allowed(VK_F5) && !pass_key_allowed(VK_OEM_3) &&
+              has(doc, "các phím của macro ở chữ cái A–Z hay Space (kỹ năng, buff và bình: của bạn là Z X C V Space và "
+                       "G, F, Q)") &&
+              !has(doc, "của bạn là Z X C V B Space A S") &&
+              has(doc, "Không bao giờ để qua: phím số (như buff 6 của bạn: chờ xong lượt), Enter, Esc, phím mũi tên, "
+                       "Ctrl, Shift, Alt, phím F, các phím dấu") &&
+              has(doc, "Dùng bùa thì vẫn dừng hết mọi phím như trước.") &&
+              has(pack, "the macro's keys on a letter or Space -- skills, buffs and potions -- go on between GoBot's own "
+                        "clicks") &&
+              has(pack, "digit keys wait, and Dung bua still holds every key."),
+          "letters, Space and Home, End, PgUp, PgDn, Insert, Delete through (2026.11.11); digits, the number pad, "
+          "Enter, Esc, arrows, modifiers, F and OEM keys never -- as pass_key_allowed has it -- and the charms' full "
+          "hold, in the notes");
+    check(B::kKeysUpWaitMs == 600 && B::kPotionSettleMs == 500 &&
+              has(doc, "chờ các phím đó nhả ra, nhiều nhất " + vi_s(B::kKeysUpWaitMs) + " giây") &&
+              has(doc, "sau nửa giây kể từ lần bấm bình gần nhất") &&
+              has(bag_cpp, "const char* const kKeysLateVi = \"một phím của macro chưa nhả kịp trước khi GoBot bấm chuột "
+                           "hay bấm phím, nên dừng\";") &&
+              has(doc, "\"một phím của macro chưa nhả kịp trước khi GoBot bấm chuột hay bấm phím, nên dừng\"") &&
+              has(bag_hpp, "static constexpr int kShopFullLateMs = 1000;") &&
+              has(doc, "đã chờ " + vi_s(1000) + " giây xem game có báo túi đầy không") &&
+              has(gui, "constexpr int kShopOwnRelooks = 2;") && has(doc, "đo lại, nhiều nhất 2 lần") &&
+              has(gui, "not_now(\"Chờ: GoBot vừa tự bấm phím hay chuột trong lúc chờ yên, mua bình sau.\", 15'000);") &&
+              has(doc, "\"Chờ: GoBot vừa tự bấm phím hay chuột trong lúc chờ yên, mua bình sau.\" và thử lại sau 15 "
+                       "giây") &&
+              has(coord_cpp, "GB_INFO(\"Trash: %s's key window: %s%s\", job_,") &&
+              has(coord_cpp, "\" through, \" + std::to_string(pass_openings_) +") &&
+              has(coord_cpp, "(pass_openings_ == 1 ? \" time open (\" : \" times open (\")") &&
+              has(gui, "const PassKeysScope keys(coord_, pass_keys, \"pass\");") &&
+              has(gui, "const PassKeysScope keys(coord_, pass_keys, \"shop\");") &&
+              has(doc, "\"Trash: pass's key window: Z 5, X 4, G 1 through, 3 times open (1840 ms)\"") &&
+              has(doc, "\"Trash: shop's key window: ...\""),
+          "the keys seen up within " + n(B::kKeysUpWaitMs) + " ms, a slot judged " + n(B::kPotionSettleMs) +
+              " ms after a potion, the shop's second for the full message, GoBot's own input measured again twice "
+              "then 15 s, the window's line -- as the cleaner, the worker and the coordinator have them");
+
+    // ---- the purchases ----
+    const std::string over = "\"Tổng N lần: một lượt giữ phím mua tối đa " + n(B::kShopBuysPerHold) +
+                             " lần (\"Mua ngay\": " + n(B::kShopMaxBuys) + " lần), phần còn lại mua tiếp, mỗi " +
+                             n(B::kShopPartGapMs / 60'000) + " phút một lượt, khi bot chạy, cho tới khi đủ số hoặc "
+                             "game báo túi đồ đã đầy.\"";
+    check(has(doc, over) && has(doc, "nay nhận từ 0 tới " + n(C::kBuySlotsPerRunMost)) &&
+              has(doc, "\"Mua ngay\" mua tối đa " + n(B::kShopMaxBuys) + " lần trong một lượt") &&
+              has(doc, "số \"mua tới\" cũ vẫn chỉ tới " + n(C::kBuySlotsFromOldMost)) &&
+              has(pack, "Tu mua binh buys 0 to " + n(C::kBuySlotsPerRunMost) + " of each.") &&
+              has(readme, "*mỗi lần mua [N] ô* from 0 to " + n(C::kBuySlotsPerRunMost) +
+                              ", a hint when the two together pass `kShopMaxBuys` (" + n(B::kShopMaxBuys) + ")"),
+          "the purchases 0 to " + n(C::kBuySlotsPerRunMost) + ", \"Mua ngay\" " + n(B::kShopMaxBuys) + ", the card's "
+          "hint quoted as simple_shop.cpp builds it (test_buy_count_1110)");
+
+    // ---- the death the screen alone read ----
+    DeathByHp death;
+    const bool at_once = death.step(true, 0, 100, 1'000);
+    const bool short_of = death.step(true, 0, 100, 3'999);
+    const bool after = death.step(true, 0, 100, 4'000);
+    check(kLinkQuietMs == 5000 && kDeathQuietMostMs == 60'000 && !at_once && !short_of && after &&
+              has(alerts, "log_later({ \"Alerts: HP reads 0/\" + std::to_string(v.hp_max) + \" on the screen -- not "
+                          "taken for a death: \" +") &&
+              !has(alerts, "GB_INFO(\"Alerts: HP reads") &&
+              has(doc, "\"Alerts: HP reads 0/N on the screen -- not taken for a death: ...\"") &&
+              has(readme, "`Alerts: HP reads 0/N on the screen -- not taken for a death: …`") &&
+              has(doc, "im lặng quá " + n(kLinkQuietMs / 1000) + " giây (tới " + n(kDeathQuietMostMs / 1000) +
+                           " giây") &&
+              has(readme, "`kLinkQuietMs` (" + n(kLinkQuietMs / 1000) + " s) and up to `kDeathQuietMostMs` (" +
+                              n(kDeathQuietMostMs / 1000) + " s)") &&
+              has(doc, "Chết thật vẫn được báo, 3 giây sau khi không còn lý do nào ở trên.") &&
+              has(readme, "a real death alerts 3 s after nothing doubts it") &&
+              has(alerts_ini, "Từ bản 2026.11.10, HP đọc ra 0 trên màn hình không tính là chết khi game không ở trên "
+                              "cùng"),
+          "no death from the screen's HP 0 with the game behind, live packets above 0 or the server silent past " +
+              n(kLinkQuietMs) + " ms up to " + n(kDeathQuietMostMs) + " ms; a real one after DeathByHp's 3 s");
+    // The pet's plateau lines and the misread frames' lines, written off the
+    // GUI thread as the doubt's is (log_later): no file on the GUI's.
+    check(has(potions, "log_later({ text + \" -- no picture of the pet's slot to keep\" });") &&
+              has(potions, "saved.push_back(it->get());") && has(potions, "log_later(std::move(saved));") &&
+              !has(potions, "GB_INFO(\"%s\", it->get().c_str());") &&
+              !has(potions, "GB_INFO(\"%s -- no picture of the pet's slot to keep\""),
+          "simple_potions.cpp: the plateau's line and the saved frames' lines through log_later, never GB_INFO on the "
+          "GUI thread");
+
+    // ---- the pass's figures: the narrowing to Tiêu Dùng said with them ----
+    check(has(readme, "With the zip's four tabs ticked and every item on the list a spend/ icon, so that only Tiêu "
+                      "Dùng is looked through: a pass with two stacks 12.6 to 6.8 s, one with nothing to delete 7.4 "
+                      "to 2.1 s.") &&
+              has(readme, "all four tabs are still looked through: 12.6 to 12.0 s and 7.4 to 7.3 s") &&
+              !has(readme, "a pass of the zip's four tabs with two spend stacks 12.6 to 6.8 s") &&
+              has(doc, "khi mọi món trong danh sách đều là hình của game ở nhóm đồ tiêu dùng (GoBot chỉ tìm ở ngăn "
+                       "Tiêu Dùng): một lượt có 2 chồng đồ khoảng 12,6 xuống 6,8 giây") &&
+              has(doc, "thì GoBot vẫn tìm cả 4 ngăn: khoảng 12,6 xuống 12,0 giây và 7,4 xuống 7,3 giây") &&
+              !has(doc, "một lượt với 4 ngăn của bản zip và 2 chồng đồ tiêu dùng: khoảng 12,6 xuống 6,8 giây"),
+          "the pass's estimates: 6.8 s and 2.1 s only with a list of spend/ icons alone; with any other item, all "
+          "four tabs, 12.0 s and 7.3 s");
+
+    // ---- the comments beside, and what is no longer so ----
+    check(has(trash_ini, "since 2026.11.10 those on a letter or Space -- skills, buffs and potions -- go on between "
+                         "its own clicks") &&
+              has(trash_ini, "since 2026.11.10 those on a letter or Space -- skills, buffs and potions -- go on between "
+                             "purchases") &&
+              has(goc, "since 2026.11.10 those on a letter or Space -- skills, potions and buffs -- go on between "
+                       "purchases") &&
+              !has(trash_ini, "Fighting, potions and buffs wait while it does.") &&
+              !has(trash_ini, "While it runs nothing else of GoBot presses a key") &&
+              !has(goc, "Everything else that presses keys -- skills, potions and buffs -- is held for the length of "
+                        "the run") &&
+              !has(pack, "presses it about every 3 seconds while the pet's HP") &&
+              !has(doc, "bấm BẮT ĐẦU và xem GoBot bấm phím đó, cách nhau khoảng 3 giây.") &&
+              has(doc, "ghi số thức ăn pet đang có và giờ") &&
+              has(doc, "tự bấm Z, X, C, V và Space, mỗi phím 5 lần") &&
+              has(doc, "ở \"Tìm trong:\" chỉ đánh dấu Tiêu Dùng") &&
+              has(doc, "bấm \"Thử tìm (không xoá)\" và đọc danh sách sẽ bỏ") &&
+              has(doc, "bấm \"Mua ngay\" một lần và ngồi xem"),
+          "trash.ini and docs/goc-comparison.md: letters and Space between the pass's clicks and the purchases; the "
+          "old \"every key waits\" and \"about every 3 seconds\" gone; step 13's pet, hand test, pass and purchase");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------ 2026.11.11: the notes
+
+/// 2026.11.11's notes against the code: DOC-TRUOC.txt's entry and its live
+/// test step 14, README.md's release section, START-HERE (package.ps1), the
+/// comments of trash.ini and macro.ini, and docs/goc-comparison.md -- the
+/// users' words and the owner's four answers as written, and the numbers and
+/// the words of the card and the log they quote, as the code has them: the
+/// shop right after the pass, HP and MP during the bag jobs, the digits kept
+/// shut and the six keys let through.
+void test_notes_1111() {
+    section("The 2026.11.11 notes against the code: the shop after the pass, HP during the bag jobs, the six keys, "
+            "the digits, the words quoted");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string trash_ini = flat(source("/configs/trash.ini"), true);
+    const std::string macro_ini = flat(source("/configs/macro.ini"), true);
+    const std::string goc = flat(source("/docs/goc-comparison.md"));
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string shop_card = source("/apps/gobot_gui/simple_shop.cpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    const std::string bag_cpp = source("/src/bag.cpp");
+    const std::string coord_cpp = source("/src/execution_coordinator.cpp");
+    if (doc.empty() || readme.empty() || pack.empty() || trash_ini.empty() || macro_ini.empty() || goc.empty() ||
+        gui.empty() || shop_card.empty() || view.empty() || bag_cpp.empty() || coord_cpp.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    // A time as the notes write it: 400 ms "0,4" in Vietnamese, "0.4" in
+    // English; 15000 "15".
+    const auto vi_s = [](std::uint64_t ms) {
+        std::string s = std::to_string(ms / 1000);
+        if (ms % 1000 != 0) s += "," + std::to_string(ms % 1000 / 100);
+        return s;
+    };
+    const auto en_s = [](std::uint64_t ms) {
+        std::string s = std::to_string(ms / 1000);
+        if (ms % 1000 != 0) s += "." + std::to_string(ms % 1000 / 100);
+        return s;
+    };
+    using B = BagCleaner;
+
+    // ---- where: on top of 2026.11.10's entry; its live test step 14 ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e11 = doc.find("- Mới trong bản 2026.11.11 (mua bình ngay sau khi dọn rác, bình HP và MP được "
+                                     "bấm trong lúc dọn rác và mua bình, và các phím Home, End, PgUp, PgDn, Insert, "
+                                     "Delete, theo điều người dùng báo và câu trả lời của bạn ngày 11/11; chưa thử trên "
+                                     "game thật):");
+    const std::size_t e10 = doc.find("- Mới trong bản 2026.11.10 (");
+    // 2026.11.11b's entry on top of it since, its step 15 after step 14.
+    const std::size_t e11b = doc.find("- Mới trong bản 2026.11.11b (mua bình và dọn rác ở mọi mức máu, GoBot tự");
+    const std::size_t step15 = doc.find("15. Mua bình và dọn rác ở mọi mức máu, GoBot tự bấm bình (bản 2026.11.11b,");
+    const std::size_t try14 = doc.find("Thử như bước 14 ở mục 6.");
+    const std::size_t step13 = doc.find("13. Bơm máu pet, về vùng đánh quái, dọn rác và mua bình (bản 2026.11.10,");
+    const std::size_t step14 = doc.find("14. Mua bình ngay sau khi dọn rác, bình trong lúc mua, và sáu phím mới (bản "
+                                        "2026.11.11, chưa thử trên game thật; chỉ thử khi ngồi xem, tay gần F12):");
+    const std::size_t revive = doc.find("- Tự hồi sinh: thử ở bản đồ dễ");
+    const std::size_t rkeys = readme.find("### The hold's key window (2026.11.10)");
+    const std::size_t r11 =
+        readme.find("### The shop after the pass, HP during the bag jobs, and six more keys (2026.11.11)");
+    const std::size_t rmacro = readme.find("## Keyboard macro");
+    check(sec5 != npos && e11b != npos && e11 != npos && e10 != npos && doc.find("- Mới trong bản", sec5) == e11b &&
+              e11b < e11 && doc.find("- Mới trong bản", e11b + 1) == e11 && e11 < e10 &&
+              try14 != npos && e11 < try14 && try14 < e10 && step13 != npos && step14 != npos && revive != npos &&
+              step15 != npos && step13 < step14 && step14 < step15 && step15 < revive && rkeys != npos &&
+              r11 != npos && rmacro != npos && rkeys < r11 &&
+              r11 < rmacro && has(readme, "Since 2026.11.11 (not yet run on the game).") &&
+              has(pack, "The shop right after the pass, potions during the bag jobs, and six more keys (2026.11.11, "
+                        "not yet tried on the game)."),
+          "DOC-TRUOC.txt: the 2026.11.11 entry first in section 5, on top of 2026.11.10's, not yet tried on the game, "
+          "its live test step 14 after step 13; README's section after the key window's, and START-HERE, say it too");
+
+    // ---- the users' words and the owner's answers, as written ----
+    const std::string feedback =
+        "- Sau khi dọn rác thì không lập tức mua bình ngay mà bị delay tới tận vài phút. Việc này dẫn tới khi bắt "
+        "đầu thực hiện mua bình thì rác đã đầy túi đồ => Cần cho thực hiện mua bình ngay sau khi dọn rác xong. - Làm "
+        "cho có thể bơm HP và MP khi đang dọn rác và mua bình. => Hiện tại khi HP thấp thì sẽ ưu tiên bơm xong mới "
+        "mua bình dẫn tới việc mua bình bị delay. Cần sửa vấn đề này. Ngoài ra làm cho các phím như home, pgup, "
+        "pgdown, end, delete có thể sử dụng được";
+    const char* const answers[] = {
+        "Tới giờ mua: dọn rồi mua",
+        "Mua luôn, bơm xen",
+        "Không cho phím số",
+        "Home End PgUp PgDn Ins Del",
+    };
+    bool quoted = has(doc, "Người dùng báo (bạn chuyển lại ngày 11/11): \"" + feedback + "\"") &&
+                  has(readme, "*\"" + feedback + "\"*") && has(doc, "Câu trả lời của bạn ngày 11/11:");
+    for (const char* a : answers)
+        quoted = quoted && has(doc, "\"" + std::string(a) + "\"") && has(readme, "*\"" + std::string(a) + "\"*");
+    check(quoted &&
+              has(doc, "1. Mua bình sau khi dọn rác: \"Tới giờ mua: dọn rồi mua\" (\"Giữ ô mua mỗi N phút. Tới giờ "
+                       "mua, GoBot dọn rác trước (nếu Dọn rác bật) rồi mua liền trong cùng một lần dừng phím, không chờ "
+                       "thêm. Các lần dọn khác vẫn chạy theo giờ dọn.\").") &&
+              has(doc, "2. HP và MP trong lúc dọn rác và mua bình: \"Mua luôn, bơm xen\" (\"Không chờ máu đầy. Bình "
+                       "HP/MP bấm xen giữa các lần mua và giữa các món dọn rác. Chỉ dừng lượt mua khi máu xuống dưới "
+                       "nửa mức bình (sắp chết), rồi tới giờ sau mua tiếp.\").") &&
+              has(doc, "3. Phím số trong lúc dọn rác và mua bình: \"Không cho phím số\".") &&
+              has(doc, "4. Các phím mới: \"Home End PgUp PgDn Ins Del\"."),
+          "the users' words of 2026-11-11 and the owner's four answers, with the two options' words, quoted as "
+          "written in DOC-TRUOC.txt and README");
+
+    // ---- the shop right after the pass: a minute fresh, the card's words ----
+    const std::uint64_t fresh = bag::kRideFreshMs;
+    const std::uint64_t t0 = 10'000'000;
+    using R = bag::ShopRide;
+    const bool fresh_alone = bag::ride_turn(R::None, true, true, false, t0, t0 - fresh + 1) == R::Alone;
+    const bool stale_pulls = bag::ride_turn(R::None, true, true, false, t0, t0 - fresh) == R::Pending;
+    const bool none_pulls = bag::ride_turn(R::None, true, true, false, t0, 0) == R::Pending;
+    const bool trash_off = bag::ride_turn(R::None, true, false, false, t0, 0) == R::None;
+    const std::string mins = n(fresh / 60'000);
+    const std::string ride_hint = "Dọn rác đang bật: tới giờ mua, GoBot dọn rác trước rồi mua bình liền sau đó, trong "
+                                  "cùng một lần dừng phím, không chờ thêm. Vừa dọn xong chưa tới " + mins +
+                                  " phút thì mua luôn, không dọn lại.";
+    check(fresh == 60'000 && fresh_alone && stale_pulls && none_pulls && trash_off &&
+              has(shop_card, "\"Dọn rác đang bật: tới giờ mua, GoBot dọn rác trước rồi mua bình liền sau đó, trong "
+                             "cùng một lần dừng \"") &&
+              has(shop_card, "\"phím, không chờ thêm. Vừa dọn xong chưa tới \" + std::to_string(bag::kRideFreshMs / "
+                             "60'000) +") &&
+              has(shop_card, "\" phút thì mua luôn, không dọn lại.\";") &&
+              has(shop_card, "if (simple_clean_.buy_potions && simple_clean_.enabled) {") &&
+              has(doc, "thẻ Tự mua bình ghi \"" + ride_hint + "\"") && has(readme, "*" + ride_hint + "*") &&
+              has(doc, "Vừa dọn xong chưa tới " + mins + " phút thì không dọn lại") &&
+              has(readme, "`bag::kRideFreshMs` (" + n(fresh / 1000) + " s)") &&
+              has(pack, "after a pass that ended less than " + mins + " minute before, none is made again") &&
+              has(trash_ini, "a pass ended less than a minute before is not made again."),
+          "a pass ended less than " + n(fresh) + " ms ago pulls none, an older one or none yet pulls one, Dọn rác "
+          "off never -- as bag::ride_turn has it -- and the card's hint quoted as simple_shop.cpp builds it");
+    check(has(gui, "ride = bag::ride_turn(was, shop_due, settings.enabled, cannot_pull, now_ms(), last_pass_end_ms);") &&
+              in_order(gui, { "const bool pulled = ride == bag::ShopRide::Pending && request == 0;",
+                              "if (rides) {", "run_shop(false, false, true);" }) &&
+              count_in(gui, "run_shop(false, false, true);") == 1 &&
+              has(gui, "run_shop(request == 4, request == 5, false);") &&
+              B::kShopBuysPerHold == 10 && B::kShopPartGapMs == 60'000 && B::kShopMaxBuys == 40 &&
+              has(doc, "mỗi lượt theo giờ mua tối đa " + n(B::kShopBuysPerHold) + " lần và phần còn lại sau " +
+                           n(B::kShopPartGapMs / 60'000) + " phút, \"Mua ngay\" tối đa " + n(B::kShopMaxBuys) +
+                           " lần, túi đầy thì dừng lượt đó.") &&
+              has(readme, "`kShopBuysPerHold` (" + n(B::kShopBuysPerHold) + ") a hold and the rest `kShopPartGapMs` (" +
+                              n(B::kShopPartGapMs / 1000) + " s) on, **Mua ngay**'s `kShopMaxBuys` (" +
+                              n(B::kShopMaxBuys) + ")") &&
+              has(doc, "\"Dọn ngay\" không bao giờ mua bình.") && has(readme, "a **Dọn ngay** never buys.") &&
+              has(pack, "Don ngay never buys.") &&
+              has(doc, "riêng lượt mua đi liền sau lượt dọn thì đi trước Dùng bùa (bùa tới giờ cùng lúc thì dùng sau "
+                       "lượt mua).") &&
+              has(readme, "A ridden round comes before a charm run due at the same moment") &&
+              has(readme, "a potion round that rides the pass comes right after it, before the charms."),
+          "one round that rides the pass, after it, never for a button; the plan's rules kept -- " +
+              n(B::kShopBuysPerHold) + " a hold, the rest " + n(B::kShopPartGapMs) + " ms on, Mua ngay " +
+              n(B::kShopMaxBuys) + " -- and the charms after it, as the notes say");
+
+    // ---- the ride's log ----
+    const std::string due_line =
+        "Trash: shop due -- a pass first, then the round under the same hold (the last pass ended N s ago)";
+    const std::string rides_line = "Trash: shop rides the pass -- the same hold, no quiet second (the look that "
+                                   "pulled it)";
+    const std::string no_ride = "Trash: shop -- no ride on the pass it pulled (";
+    check(has(gui, "GB_INFO(\"Trash: shop due -- a pass first, then the round under the same hold (the last pass \"") &&
+              has(gui, "\"ended %s)\", since_pass().c_str());") &&
+              has(gui, ": std::to_string((now_ms() - last_pass_end_ms) / 1000) + \" s ago\";") &&
+              has(gui, "GB_INFO(\"Trash: shop rides the pass -- the same hold, no quiet second (%s)\",") &&
+              has(gui, "pulled ? \"the look that pulled it\" : \"come due while it ran\");") &&
+              has(gui, "GB_INFO(\"Trash: shop -- no ride on the pass it pulled (%s): it goes on its own\", no_ride);") &&
+              has(gui, "\"%d unsure, full %s; %s, the last pass ended %s\",") &&
+              has(gui, "after_pass ? \"right after the pass\" : forced ? \"Mua ngay\" : dry ? \"Thử mua\" : \"on its "
+                       "own\",") &&
+              has(doc, "\"" + due_line + "\"") && has(readme, "`" + due_line + "`") &&
+              has(doc, "\"" + rides_line + "\" (hay \"(come due while it ran)\")") &&
+              has(readme, "`" + rides_line + "` or `(come due while it ran)`") &&
+              has(doc, "\"" + no_ride + "...): it goes on its own\"") &&
+              has(readme, "`" + no_ride + "…): it goes on its own`") &&
+              has(doc, "\"; right after the pass, the last pass ended N s ago\" (hay \"on its own\", \"Mua ngay\", "
+                       "\"Thử mua\")") &&
+              has(readme, "`; right after the pass, the last pass ended N s ago` (or `on its own`, `Mua ngay`, `Thử "
+                          "mua`)"),
+          "the pull, the ride, no ride and the shop job's end -- \"" + due_line + "\" -- as the worker writes them");
+
+    // ---- HP and the bag jobs: the gates, the waits, the example ----
+    // 2026.11.11's numbers, as its entries tell them -- history since
+    // 2026.11.11b, which runs the bag jobs at any HP (bag::kJobDownHpPct).
+    const bag::HpGates drinks{ true, 80, 40 };
+    const bag::HpGates waits{ false, 90, 80 };
+    const bag::HpGates now_drinks = bag::hp_gates(true, 80, 80);
+    const bag::HpGates now_waits = bag::hp_gates(false, 80, 80);
+    const std::string look = n(bag::kHpLookAgainMs / 1000), again = n(bag::kHpStoppedAgainMs / 1000);
+    check(now_drinks.drinks && now_drinks.start == bag::kJobDownHpPct && now_drinks.stop == bag::kJobDownHpPct &&
+              !now_waits.drinks && now_waits.start == bag::kJobDownHpPct && now_waits.stop == bag::kJobDownHpPct &&
+              bag::kHpLookAgainMs == 5'000 && bag::kHpStoppedAgainMs == 15'000 &&
+              has(gui, "return bag::hp_gates(keys.hp_all_through, keys.hp_mark, chat_hp_floor_.load());") &&
+              has(doc, "Ví dụ bình HP 80%: trước đây bắt đầu từ " + n(waits.start) + "% và dừng dưới " +
+                           n(waits.stop) + "%; nay bắt đầu từ " + n(drinks.start) + "% và chỉ dừng dưới " +
+                           n(drinks.stop) + "%.") &&
+              has(readme, "a mark of 80 started at " + n(waits.start) + " and stopped under " + n(waits.stop) +
+                              ", and now starts at " + n(drinks.start) + " and stops under " + n(drinks.stop)) &&
+              has(pack, "(80 gives " + n(drinks.stop) + ")") &&
+              has(doc, "không cộng 10% nữa; chưa tới thì " + look + " giây sau xem lại;") &&
+              has(doc, "chỉ khác là xem lại sau " + look + " giây thay cho 15 giây") &&
+              has(doc, "phím cho bình; " + again + " giây sau thử lại (lượt dọn cũng vậy, không chờ cả khoảng \"dọn "
+                       "mỗi\").") &&
+              has(readme, "`bag::kHpLookAgainMs` (" + look + " s)") &&
+              has(readme, "`bag::kHpStoppedAgainMs` (" + again + " s)") &&
+              has(pack, "tried again " + again + " s later and never counted as trouble") &&
+              has(trash_ini, "tried again " + again + " s on, never as trouble.") &&
+              has(shop_card, "std::to_string(bag::kHpStoppedAgainMs / 1000) +"),
+          "2026.11.11's entries: the HP potion drunk through the job's window started at its mark, stopped under "
+          "half of it (80: " + n(drinks.start) + " and " + n(drinks.stop) + ", where it was " + n(waits.start) +
+              " and " + n(waits.stop) + "), " + n(bag::kHpLookAgainMs) + " ms to look again, " +
+              n(bag::kHpStoppedAgainMs) + " ms after a stop; since 2026.11.11b at any HP, only the character down "
+              "under " + n(bag::kJobDownHpPct) + "%");
+    bag::ShopRoundSeen hp_seen;
+    hp_seen.hp_cut = true;
+    hp_seen.trouble = true;
+    bag::ShopRoundSeen late_seen;
+    late_seen.keys_late = true;
+    late_seen.trouble = true;
+    check(bag::shop_end(hp_seen) == bag::ShopEnd::Paused && bag::shop_end(late_seen) == bag::ShopEnd::Paused &&
+              has(doc, "Lượt mua bị dừng vì máu không tính là lỗi, phần còn lại vẫn mua.") &&
+              has(doc, "nay không tính là lỗi: phần còn lại mua sau " + n(B::kShopPartGapMs / 60'000) + " phút.") &&
+              has(bag_cpp, "const char* const kKeysLateVi = \"một phím của macro chưa nhả kịp trước khi GoBot bấm chuột "
+                           "hay bấm phím, nên dừng\";") &&
+              has(doc, "(\"một phím của macro chưa nhả kịp trước khi GoBot bấm chuột hay bấm phím, nên dừng\")") &&
+              has(readme, "a key of the macro's not seen up in time (`Result::keys_late`) is Paused too") &&
+              has(doc, "Thông báo túi đầy nay được đóng cả khi máu thấp"),
+          "a round stopped for HP, or by a key not up in time, is put off, never trouble -- as bag::shop_end has it");
+
+    // ---- the potion breaks ----
+    char breaks[160];
+    std::snprintf(breaks, sizeof breaks, "Trash: potion break %s -- the key window open %s ms for an HP or MP potion "
+                  "due%s", "before the double-click", "N", "");
+    check(B::kPotionBreakMs == 400 &&
+              has(bag_cpp, "GB_INFO(\"Trash: potion break %s -- the key window open %d ms for an HP or MP potion due%s\", "
+                           "where, waited,") &&
+              has(bag_cpp, "waited >= kPotionBreakMs ? \", one still due\" : \"\");") &&
+              has(bag_cpp, "potion_break(f0, BagView{}, \"before the double-click\", nullptr, -1, true);") &&
+              has(bag_cpp, "potion_break(g, v, \"as the shop is seen\", nullptr, -1, false, true);") &&
+              has(bag_cpp, "potion_break(f, v, \"between two items\")") &&
+              has(doc, "\"" + std::string(breaks) + "\" (hay \"as the shop is seen\", \"between two items\"; thêm \", "
+                       "one still due\" khi đã hết " + vi_s(B::kPotionBreakMs) + " giây mà bình vẫn chờ)") &&
+              has(readme, "`" + std::string(breaks) + "` (or `as the shop is seen`, `between two items`; `, one still "
+                          "due` after the whole " + n(B::kPotionBreakMs) + " ms)") &&
+              has(doc, "GoBot mở lối phím cho bình tới " + vi_s(B::kPotionBreakMs) + " giây ngay trước mỗi lần bấm đúp") &&
+              has(readme, "`BagCleaner::kPotionBreakMs` (" + n(B::kPotionBreakMs) + " ms)") &&
+              has(pack, "(up to " + en_s(B::kPotionBreakMs) + " s each time)") &&
+              has(trash_ini, "is given up to " + en_s(B::kPotionBreakMs) + " s between two items") &&
+              has(trash_ini, "is given up to " + en_s(B::kPotionBreakMs) + " s before each double-click") &&
+              has(goc, "is given up to " + en_s(B::kPotionBreakMs) + " s between two items") &&
+              has(goc, "is given up to " + en_s(B::kPotionBreakMs) + " s before each double-click"),
+          "a potion break of " + n(B::kPotionBreakMs) + " ms at most, at its three places, and its line -- \"" +
+              std::string(breaks) + "\" -- as the cleaner has them");
+
+    // ---- the stops and the put-offs, said ----
+    char hp_said[96], put_off[160], stopped[160];
+    std::snprintf(hp_said, sizeof hp_said, "HP %.0f%% under %s %d%%", 62.0, "the HP potion's mark", drinks.start);
+    std::snprintf(put_off, sizeof put_off, "Trash: timed %s put off -- %s", "shop", hp_said);
+    std::snprintf(hp_said, sizeof hp_said, "HP %.0f%% under %s %d%%", 38.0, "the level", drinks.stop);
+    std::snprintf(stopped, sizeof stopped, "Trash: %s stopped by HP -- %s", "pass", hp_said);
+    check(has(gui, "GB_INFO(\"Trash: timed %s put off -- %s\", job, said.c_str());") &&
+              has(gui, "std::snprintf(buf, sizeof buf, \"HP %.0f%% under %s %d%%\", static_cast<double>(hp), what, "
+                       "level);") &&
+              has(gui, "hp_said(hp, hp_gate.start, hp_gate.drinks ? \"the HP potion's mark\" : \"the start gate\")") &&
+              has(gui, "GB_INFO(\"Trash: %s stopped by HP -- %s\", job, hp_said(seen.hp, seen.level, \"the level\")"
+                       ".c_str());") &&
+              has(gui, "GB_INFO(\"Trash: %s stopped by the hold -- %s's now; HP %.0f%%, the level %d%%\", job, "
+                       "whose.c_str(),") &&
+              has(gui, "say_stopped(\"pass\", hp_cut, r.trouble);") &&
+              has(gui, "say_stopped(\"shop round\", hp_cut, r.trouble);") &&
+              has(gui, "\"someone is using the mouse or keyboard (the quiet second)\"") &&
+              has(gui, "\"GoBot's own input in each quiet second\"") &&
+              has(gui, "\"the check-in board is up\"") &&
+              has(doc, "\"" + std::string(put_off) + "\"") && has(readme, "`" + std::string(put_off) + "`") &&
+              has(doc, "\"" + std::string(stopped) + "\"") && has(readme, "`" + std::string(stopped) + "`") &&
+              has(doc, "\"Trash: shop round stopped by the hold -- ...'s now; HP N%, the level N%\"") &&
+              has(readme, "`Trash: shop round stopped by the hold -- …'s now; HP N%, the level N%`") &&
+              has(doc, "\"someone is using the mouse or keyboard (the quiet second)\", \"GoBot's own input in each "
+                       "quiet second\", \"the check-in board is up\"") &&
+              has(doc, "\"Trash: shop round stopped by HP -- HP N% under the level N%\""),
+          "the put-off's \"" + std::string(put_off) + "\" and the stop's \"" + std::string(stopped) + "\" -- as the "
+          "worker writes them");
+
+    // ---- the six keys, exactly; the digits, the number pad and F shut ----
+    const std::uint32_t six[] = { VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_INSERT, VK_DELETE };
+    const char* const named[] = { "Home", "End", "PgUp", "PgDn", "Insert", "Delete" };
+    bool six_through = true;
+    for (std::size_t i = 0; i < 6; ++i)
+        six_through = six_through && pass_key_allowed(six[i]) && pass_key_nav(six[i]) &&
+                      InputManager::key_name(six[i]) == named[i] && InputManager::parse_key(named[i]) == six[i];
+    int admitted = 0;
+    bool shut = true;
+    for (std::uint32_t vk = 0; vk < 256; ++vk) {
+        if (pass_key_allowed(vk)) ++admitted;
+        const bool digit = vk >= '0' && vk <= '9';
+        const bool pad = vk >= VK_NUMPAD0 && vk <= VK_DIVIDE;
+        const bool fkey = vk >= VK_F1 && vk <= VK_F24;
+        const bool between = vk >= VK_LEFT && vk <= VK_SNAPSHOT;
+        if ((digit || pad || fkey || between) && pass_key_allowed(vk)) shut = false;
+    }
+    check(six_through && admitted == 26 + 1 + 6 && shut && InputManager::parse_key("pgup") == VK_PRIOR &&
+              InputManager::parse_key("pgdn") == VK_NEXT && InputManager::parse_key("del") == VK_DELETE &&
+              InputManager::parse_key("ins") == VK_INSERT &&
+              has(coord_cpp, "keys += (keys.empty() ? \"\" : \", \") + InputManager::key_name(t.first) + \" \" + "
+                             "std::to_string(t.second);") &&
+              has(doc, "\"Trash: pass's key window: Z 1, Home 2, PgDn 1, Delete 1 through, ...\"") &&
+              has(readme, "`Trash: pass's key window: Z 1, Home 2, PgDn 1, Delete 1 through, …`") &&
+              has(doc, "gõ pgup, pgdn, del hay ins vào ô phím nay là PgUp, PgDn, Delete, Insert (trước đây thành phím "
+                       "P, P, D, I)") &&
+              has(readme, "`parse_key` also takes `pgup`, `pgdn`, `del` and `ins`, which set P, P, D and I before") &&
+              has(readme, "before 2026.11.11 `pgup`, `pgdn`, `del` and `ins` set P, P, D and I.") &&
+              has(readme, "exactly VK 0x21, 0x22, 0x23, 0x24, 0x2D and 0x2E go through the key window") &&
+              has(doc, "Chỉ đúng sáu phím đó: các phím mũi tên (cả ↓) và các phím khác vẫn không.") &&
+              has(macro_ini, "since 2026.11.11 those on PgUp " + n(VK_PRIOR) + ", PgDn " + n(VK_NEXT) + ", End " +
+                                 n(VK_END) + ", Home " + n(VK_HOME) + ", Insert " + n(VK_INSERT) + " and Delete " +
+                                 n(VK_DELETE) + " too; a key on a digit, the number pad or an F-key waits for the "
+                                 "job's end.") &&
+              has(doc, "phím 0–9 không bao giờ được bấm trong lúc dọn rác và mua bình (gõ vào hộp số lượng sẽ thành "
+                       "số), cả phím số bên phải bàn phím và phím F."),
+          "Home, End, PgUp, PgDn, Insert and Delete through, " + n(admitted) + " keys in all, by those names and "
+          "typed short; digits, the number pad, F-keys and the arrows never -- as pass_key_allowed, key_name and "
+          "parse_key have them");
+
+    // ---- the six keys' settle, the shop's row, the trouble said ----
+    const std::string row_line = "Trash: shop row not matched before the double-click on Thịt bò khô -- its buttons "
+                                 "alone at x,y (row 0.00, buttons 0.97), look 1 of " + n(B::kShopRowRelooks + 1);
+    const std::string row_trouble = "không thấy hàng Thịt bò khô và Rượu lá tre trong cửa hàng trước khi chọn Thịt bò "
+                                    "khô (danh sách có thể đã bị cuộn), nên không bấm";
+    check(B::kNavSettleMs == 200 && B::kShopRowRelooks == 3 &&
+              has(bag_cpp, "if (ago >= 0 && ago < kNavSettleMs) pause_ms(kNavSettleMs - ago);") &&
+              has(bag_cpp, "if (s.row_score > 0.0f) return -1;") &&
+              has(bag_cpp, "GB_INFO(\"Trash: shop row not matched before the double-click on %s -- its buttons alone "
+                           "at %d,%d (row \"") &&
+              has(bag_cpp, "\"%.2f, buttons %.2f), look %d of %d\",") &&
+              has(bag_cpp, "static_cast<double>(s.buttons_score), again + 1, kShopRowRelooks + 1);") &&
+              has(bag_cpp, "const std::string name = hp ? \"Thịt bò khô\" : \"Rượu lá tre\";") &&
+              has(bag_cpp, "res.trouble = \"không thấy hàng Thịt bò khô và Rượu lá tre trong cửa hàng trước khi chọn "
+                           "\" + name +") &&
+              has(bag_cpp, "\" (danh sách có thể đã bị cuộn), nên không bấm\";") &&
+              has(bag_cpp, "keep(f0, \"shop_row_unseen\");") &&
+              has(doc, "GoBot chờ " + vi_s(B::kNavSettleMs) + " giây rồi mới tự bấm chuột, bấm phím, hay nhìn màn hình "
+                       "để quyết định.") &&
+              has(doc, "không thấy thì nhìn lại tối đa " + n(B::kShopRowRelooks) + " lần nữa, rồi dừng lượt mua, không "
+                       "bấm gì.") &&
+              has(doc, "\"" + row_trouble + "\"") && has(doc, "ảnh giữ là shop_row_unseen trong trash_debug") &&
+              has(doc, "\"" + row_line + "\"") && has(readme, "`" + row_line + "`") &&
+              has(readme, "`BagCleaner::kNavSettleMs` (" + n(B::kNavSettleMs) + " ms)") &&
+              has(readme, "`BagCleaner::kShopRowRelooks` (" + n(B::kShopRowRelooks) + ") times") &&
+              has(pack, "GoBot waits " + en_s(B::kNavSettleMs) + " s after one, and double-clicks a potion only when "
+                        "it sees the potions' row itself.") &&
+              has(doc, "các ảnh trash_debug\\*shop_row_unseen* nếu có."),
+          "a settle of " + n(B::kNavSettleMs) + " ms after one of the six, the shop's row looked for " +
+              n(B::kShopRowRelooks) + " times more, the trouble and the line -- as the cleaner has them");
+
+    // ---- the simple screen: Delete a key, Backspace to clear ----
+    check(has(view, "{ ImGuiKey_Delete, VK_DELETE },") &&
+              has(view, "(can_clear ? \"Nhấn phím muốn dùng. Esc để huỷ, Backspace để bỏ phím này.\"") &&
+              has(view, "help += \"\\nMuốn bỏ phím này: bấm vào ô rồi nhấn Backspace.\";") &&
+              !has(view, "Delete để bỏ phím này") &&
+              has(doc, "\"Nhấn phím muốn dùng. Esc để huỷ, Backspace để bỏ phím này.\"") &&
+              has(readme, "*Nhấn phím muốn dùng. Esc để huỷ, Backspace để bỏ phím này.*") &&
+              has(doc, "muốn bỏ phím của một ô thì bấm vào ô rồi nhấn Backspace (trước là Delete)") &&
+              has(pack, "On the simple screen Delete is now a key like any other, and Backspace clears a key box."),
+          "Delete a key on the simple screen, Backspace clearing a box -- its help quoted as simple_view.cpp has it");
+
+    // ---- the digits: the zip's potions on 1 and 2, as the screen fills in ----
+    MacroConfig ships;
+    const bool shipped = ships.load(std::string(GOBOT_SOURCE_DIR) + "/configs/macro.ini");
+    std::uint32_t hp_vk = 0, mp_vk = 0;
+    for (const MacroKey& k : ships.keys) {
+        if (hp_vk == 0 && macro_key_kind(k) == MacroKeyKind::HpPotion) hp_vk = k.keycode;
+        if (mp_vk == 0 && macro_key_kind(k) == MacroKeyKind::MpPotion) mp_vk = k.keycode;
+    }
+    check(shipped && hp_vk == '1' && mp_vk == '2' && !pass_key_allowed(hp_vk) && !pass_key_allowed(mp_vk) &&
+              !bag::hp_gates(pass_key_allowed(hp_vk), 50, 50).drinks &&
+              has(view, "{ MacroKeyKind::HpPotion, MacroTrigger::HpBelow, '1', 50, \"HP potion\" },") &&
+              has(view, "{ MacroKeyKind::MpPotion, MacroTrigger::MpBelow, '2', 30, \"MP potion\" },") &&
+              has(doc, "mà màn hình đơn giản tự điền sẵn phím 1 và 2 cho hai dòng bình (macro.ini của bản zip cũng để "
+                       "1 và 2).") &&
+              has(doc, "hãy nhắc người dùng đổi bình sang phím chữ cái hay một trong sáu phím trên.") &&
+              has(doc, "Bình HP, MP ở phím số (macro.ini của bản zip và màn hình đơn giản để sẵn phím 1 và 2) vẫn chờ "
+                       "trong lúc dọn rác và mua bình") &&
+              has(readme, "the simple screen fills in 1 and 2, and so does the zip's `macro.ini` -- still waits through "
+                          "a pass and a round") &&
+              has(pack, "the simple screen fills in 1 and 2 for the HP and MP potions (so does the zip's macro.ini), "
+                        "so tell testers to move them to a letter or one of the six") &&
+              has(pack, "An HP or MP potion on a digit (the zip's, 1 and 2) still waits through a bag pass and a "
+                        "purchase round in 2026.11.11") &&
+              has(macro_ini, "ship on " + n(hp_vk) + " and " + n(mp_vk) + " (1 and 2), as the simple screen fills "
+                             "them in: move them to a letter or one of the six") &&
+              has(macro_ini, "(VI) Trong lúc dọn rác và mua bình chỉ phím chữ cái, Space, Home, End, PgUp, PgDn, "
+                             "Insert, Delete được bấm; phím số chờ xong việc."),
+          "the zip's HP and MP potions on 1 and 2, as the simple screen fills them in, wait through the bag jobs "
+          "(the owner's \"Không cho phím số\") -- said in the entry, its update notes, README, START-HERE and "
+          "macro.ini");
+
+    // ---- the comments beside, and the step's words ----
+    check(has(trash_ini, "Since 2026.11.11 those on Home, End, PgUp, PgDn, Insert and Delete go on too (never a "
+                         "digit)") &&
+              has(trash_ini, "With buy_potions below on too, a pass is also made the moment the shop comes due "
+                             "(2026.11.11), and the next comes interval_minutes after that one.") &&
+              has(trash_ini, "With enabled=true above, a timed round comes right after a pass: when it is due GoBot "
+                             "cleans the bag first and buys at once, in the same stop of the keys, with no quiet "
+                             "second;") &&
+              has(trash_ini, "Since 2026.11.11b a round runs at any HP: only the character down holds it back or stops "
+                             "it, tried again 15 s on, never as trouble.") &&
+              has(trash_ini, "a potion on a digit is never pressed during a round, so move it to one of those keys.") &&
+              !has(trash_ini, "It does not run with HP near the HP potion's mark (never counted over 95%), nor with") &&
+              has(trash_ini, "Từ bản 2026.11.11: Dọn rác bật thì tới giờ mua GoBot dọn rác trước rồi mua liền sau đó. "
+                             "Từ bản 2026.11.11b: mua và dọn ở mọi mức máu") &&
+              has(trash_ini, "since 2026.11.10 those on a letter or Space -- skills, buffs and potions -- go on between "
+                             "purchases") &&
+              has(goc, "Since 2026.11.11, with **Dọn rác** on, a timed round comes right after a bag pass, made the "
+                       "moment the round is due, under the same hold and with no quiet second.") &&
+              has(goc, "It does not start with HP near the potion's mark -- since 2026.11.11 only with the HP potion "
+                       "on a digit") &&
+              has(goc, "since 2026.11.10 those on a letter or Space -- skills, potions and buffs -- go on between "
+                       "purchases") &&
+              // Step 14a sets both clocks (the review's DOC-RIDE-STEP14A): with
+              // "dọn mỗi" 10 the plan 15 minutes on comes 5 minutes after a
+              // pass, and pulls one; 5 or 15 would have it go on its own.
+              has(doc, "đặt \"dọn mỗi\" 10 phút và \"mua mỗi\" 15 phút, đặt 1 ô HP và 1 ô MP, rồi mới đánh dấu Tự "
+                       "mua bình") &&
+              has(doc, "Với \"dọn mỗi\" 5 hay 15 phút thì lần mua rơi vào trong 1 phút sau lượt dọn của nó và đi "
+                       "riêng, log ghi \"on its own, the last pass ended N s ago\": đó là đúng, không phải lỗi.") &&
+              has(view, "static const int kMinutes[] = { 5, 10, 15, 30, 60 };") &&
+              has(shop_card, "static const int kMinutes[] = { 15, 30, 60, 90, 120, 180 };") &&
+              has(doc, "và khoảng " + again + " giây sau (máu đã lên tới mức bình) GoBot mua tiếp phần còn lại;") &&
+              has(doc, "lúc túi đồ đang mở và lúc cửa hàng đang mở") &&
+              has(doc, "Rồi làm lại với End, PgUp, PgDn, Insert và Delete.") &&
+              has(doc, "Chưa biết sáu phím mới làm gì trong game khi túi đồ hay cửa hàng đang mở.") &&
+              has(readme, "Still not known: what the six keys do in the game with the bag or the shop open"),
+          "trash.ini, macro.ini and docs/goc-comparison.md say the ride, the HP gates and the six keys, 2026.11.10's "
+          "words kept; step 14's buy every 15 minutes (a choice on the card), its HP stop and the six keys by hand");
+
+    // ---- the review's fixes, said where the ride and the HP gates are ----
+    // A round due within the fresh minute of its pass goes on its own -- every
+    // timed one with the shipped 10 and 60 -- and a pass is pulled only longer
+    // after one (DOC-RIDE-STEP14A); none where the shop would wait, nor again
+    // after one with nothing to do (R1, R2); HP unread waits a ridden round
+    // too (R3); the H gates only with every HP line from half the mark up let
+    // through (HP-1); a lone message closed with HP low (HP-2).
+    check(has(doc, "lần xem mua đầu " + n(bag::kShopFirstWaitS) + " giây sau, rồi mỗi đồng hồ tính từ lượt của chính "
+                   "nó. Nên khi \"mua mỗi\" chia hết cho \"dọn mỗi\" (như 10 và 60 của bản zip, hay 5 hoặc 15 với "
+                   "15), mỗi lần mua theo giờ thường tới trong vòng " + mins + " phút sau một lượt dọn theo giờ") &&
+              has(readme, "so when `buy_every_minutes` is a multiple of `interval_minutes` -- the shipped 10 and 60, or "
+                          "5 or 15 with 15 -- each timed round usually comes within that minute of a timed pass and is "
+                          "bought on its own right after it.") &&
+              has(doc, "GoBot cũng không kéo lượt dọn lên khi chính lượt mua sẽ phải chờ: chưa thấy cửa sổ game hay "
+                       "game nằm ngoài màn hình, chưa đọc được máu") &&
+              has(doc, "Lượt mua liền sau lượt dọn vẫn chờ khi chưa đọc được máu (thử lại sau 15 giây).") &&
+              has(readme, "nor for an interval after a pulled pass found an empty list or no tab ticked "
+                          "(`no_pull_before_ms`)") &&
+              has(readme, "a ridden round still waits while HP is not read.") &&
+              has(trash_ini, "nor again before interval_minutes after one with nothing to do.") &&
+              has(pack, "No pass is made for the shop while the game is not in the world (HP not read) or not found.") &&
+              has(gui, "if (hp < 0.0f) return not_now(\"Chưa đọc được máu của nhân vật, mua bình sau.\", 15'000);\n"
+                       "        if (!after_pass) {") &&
+              has(doc, "và có hai dòng bình HP (Lv1, Lv2) thì mọi dòng có mức từ nửa mức cao nhất trở lên đều ở phím "
+                       "như vậy") &&
+              has(readme, "`PassKeys::hp_all_through`") &&
+              has(pack, "With two HP potion lines (Lv1, Lv2), each one marked at half the highest or over must be on "
+                        "such a key too, or the job goes as before.") &&
+              has(trash_ini, "Since 2026.11.11b a pass runs at any HP -- only the character down holds it back or "
+                             "stops it, tried again 15 s on --") &&
+              has(doc, "Một thông báo lạ hiện ra thay cho hộp số lượng cũng vậy.") &&
+              has(readme, "The bag-full message, or any lone message in the quantity box's place, is closed whatever "
+                          "HP is (`set_hold_check`: a stop or the hold lost only).") &&
+              has(bag_cpp, "(mode_ == Mode::ShopBuy && hold_check_ ? !hold_check_() : guard_ && !guard_());") &&
+              has(goc, "A pass that ended under a minute before is not made again: the round then goes on its own right "
+                       "after it, as with Dọn rác every 10 minutes and buying every 60."),
+          "the review's fixes said: a round within the fresh minute of its pass goes on its own -- the shipped 10 and "
+          "60 every time -- none pulled where the shop would wait or after one with nothing to do, HP unread waits a "
+          "ridden round, the H gates only with every HP line from half the mark up let through, a lone message closed "
+          "with HP low");
+#else
+    skip("no source folder\n");
+#endif
+}
+
 } // namespace
 
 void test_jobs_gui(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1635,4 +2671,7 @@ void test_jobs_gui(void (*check_fn)(bool, const std::string&), void (*section_fn
     test_jobs_wiring();
     test_notes_1108();
     test_notes_1109();
+    test_buy_count_1110();
+    test_notes_1110();
+    test_notes_1111();
 }

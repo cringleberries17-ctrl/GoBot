@@ -667,6 +667,10 @@ void MapTrust::reset() {
     mob_off_new_standing_ = 0;
     mob_off_last_.clear();
     clear_naming();
+    // Your last ground point with them: a map entry puts you anywhere.
+    own_ground_on_ = false;
+    own_ground_y_ = 0;
+    own_ground_air_ = 0;
     // own_seen_ms_ and mob_seen_ stay: a report is never taken twice, and a
     // monster's generation tells another in its slot. So do the times things
     // were last said: never more often than they say.
@@ -680,6 +684,8 @@ void MapTrust::clear_naming() {
     next_misses_ = 0;
     fit_ = 0;
     said_ambiguous_ = false;
+    // A name the owner chose goes with the naming it was chosen in.
+    chosen_ = false;
 }
 
 void MapTrust::lose(const char* why) {
@@ -710,7 +716,33 @@ std::vector<MapTrust::Stand> MapTrust::standing_points(const Look& look) {
         // air above its floor (t1_s4, 2026-11-03: 20 px): never a standing point.
         const bool spawn = std::abs(look.rx - look.entry_x) <= kEntrySpawnPx &&
                            std::abs(look.ry - look.entry_y) <= kEntrySpawnPx;
-        if (!spawn) {
+        // Nor a place no floor can be (2026.11.10, kOwnRisePx): y 0, or far
+        // above the last with no jump of yours between -- judged of a report
+        // whose opcode is known. The next one up there is taken; the frame
+        // itself was the packets' all the same.
+        const bool zero = look.ry <= 0;
+        const bool rose = look.report_op != 0 && own_ground_on_ && look.air_reports == own_ground_air_ &&
+                          own_ground_y_ - look.ry > kOwnRisePx;
+        const int was_y = own_ground_y_;
+        if (!zero) {
+            own_ground_on_ = true;
+            own_ground_y_ = look.ry;
+            own_ground_air_ = look.air_reports;
+        }
+        if ((zero || rose) && !spawn) {
+            if (!own_odd_said_ || look.now_ms >= own_odd_said_ms_ + kOwnOffSayMs) {
+                own_odd_said_ = true;
+                own_odd_said_ms_ = look.now_ms;
+                if (zero)
+                    GB_INFO("%s: your report at %d,%d (opcode 0x%04X) not taken as a standing point -- y 0 is no place "
+                            "to stand",
+                            who_.c_str(), look.rx, look.ry, static_cast<unsigned>(look.report_op));
+                else
+                    GB_INFO("%s: your report at %d,%d (opcode 0x%04X) not taken as a standing point -- %d px above "
+                            "your last, with no jump of yours between",
+                            who_.c_str(), look.rx, look.ry, static_cast<unsigned>(look.report_op), was_y - look.ry);
+            }
+        } else if (!spawn) {
             Stand s;
             s.at = { look.rx, look.ry };
             s.own = true;
@@ -1153,6 +1185,38 @@ void MapTrust::decide() {
     }
 }
 
+bool MapTrust::choose(const std::string& stem) {
+    if (book_ == nullptr || !stem_.empty() || stem.empty()) return false;
+    // One of the files every point so far lies on, read for all of them.
+    const std::size_t n = name_pts_.size();
+    const Cand* pick = nullptr;
+    std::size_t fit = 0;
+    for (const Cand& c : cands_) {
+        if (c.out || c.misses != 0 || c.checked < n) continue;
+        ++fit;
+        if (c.stem == stem) pick = &c;
+    }
+    if (pick == nullptr) return false;
+    std::shared_ptr<const GameMapBook::Page> page = book_->get(stem);
+    if (!page) return false;
+    stem_ = stem;
+    page_ = std::move(page);
+    how_ = How::Named;
+    chosen_ = true;
+    own_off_ = false;
+    mob_off_ = 0;
+    mob_off_new_ = 0;
+    mob_off_new_standing_ = 0;
+    mob_off_last_.clear();
+    GB_INFO("%s: map %s chosen on the Bản đồ card -- one of the %zu map files the %zu standing points all lie on; "
+            "gone by as a map named from them: two points of yours off its floors let it go",
+            who_.c_str(), stem_.c_str(), fit, n);
+    cands_.clear();
+    cursor_ = 0;
+    judge_named();
+    return true;
+}
+
 void MapTrust::judge_named() {
     trusted_ = false;
     if (book_->distrusted(stem_)) {
@@ -1200,6 +1264,12 @@ MapTrust::Report MapTrust::report() const {
         for (const Cand& c : cands_)
             if (c.out || c.checked >= name_pts_.size()) ++r.read;
     }
+    // The files every point lies on, while more than one does: what the card
+    // offers to choose from (2026.11.10).
+    if (why_ == Why::Ambiguous)
+        for (const Cand& c : cands_)
+            if (!c.out && c.misses == 0 && c.checked >= name_pts_.size()) r.fits.push_back(c.stem);
+    r.chosen = r.named && chosen_;
     return r;
 }
 

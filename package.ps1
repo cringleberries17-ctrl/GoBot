@@ -569,12 +569,13 @@ THE SIMPLE SCREEN
 
   Buying by the slot and the check-in board (2026.11.09, not yet tried on
   the game). Tu mua binh counts nothing now: each time it buys the slots set
-  on the card for each potion (moi lan mua N o, 0 to 20, 3 and 3 as shipped;
-  a trash.ini from before reads its old buy_hp_to and buy_mp_to until the
-  card is changed), HP and MP in turn, 10 purchases a hold and the rest a
-  minute later; Mua ngay buys them all at once. The game's message that the
-  bag is full ends that round -- closed by its Xac Nhan, never ESC, then the
-  shop -- and the box stays ticked for the next time. When the next plan
+  on the card for each potion (moi lan mua N o, 0 to 20 then and 0 to 999
+  since 2026.11.10, 3 and 3 as shipped; a trash.ini from before reads its old
+  buy_hp_to and buy_mp_to, 20 at most, until the card is changed), HP and MP
+  in turn, 10 purchases a hold and the rest a minute later; Mua ngay buys up
+  to 40 at once. The game's message that the bag is full ends that round --
+  closed by its Xac Nhan, never ESC, then the shop -- and the box stays
+  ticked for the next time. When the next plan
   begins is kept in %LOCALAPPDATA%\GoBot\shop_clock.txt, so a restart never
   buys early. Tu dong thong bao (OFF as shipped; tick it once) now also
   closes the Su kien va diem danh board the game shows at every login and
@@ -582,6 +583,55 @@ THE SIMPLE SCREEN
   the bot runs; while it is up the bag jobs and quick quest wait a minute at
   a time. Try Thu mua first, then 1 + 1 with Mua ngay, watched; send
   gobot_gui.log with the popup_debug and trash_debug pictures.
+
+  The pet, walking back, the bag and the shop (2026.11.10, not yet tried on
+  the game). The pet's potion goes over and over while the pet is under its
+  mark: every Bom lien tuc, moi N ms on its row (200 to 3000 ms; 300 as
+  shipped and in a macro.ini without pet_every_ms, where it was about every
+  3 s), as GoC feeds the pet; a skill that is ready takes the next press, so
+  the skills are not starved, and HP and MP potions still go first. More
+  than 60 px outside the hunting area the bot stops fighting -- monsters in
+  the area and in reach too -- and walks back along the ground first, no
+  skill keys meanwhile (potions and buffs go on), fighting again once inside;
+  back through any door to the area's map, it takes the area again once the
+  map has loaded. A Don rac pass with no tab ticked under Tim trong does not
+  open the bag; with every item a Tieu Dung icon of the game's it looks
+  through Tieu Dung alone; and each item is quicker, every check kept.
+  During a Don rac pass and a Tu mua binh round the macro's keys on a letter
+  or Space -- skills, buffs and potions -- go on between GoBot's own clicks,
+  never with a dialog, a message or the quantity box up; digit keys wait,
+  and Dung bua still holds every key. Tu mua binh buys 0 to 999 of each. An
+  HP of 0 read off the screen is no death while the game is behind, while the
+  packets say HP is above 0, or while the server is silent. Count the pet's
+  food each hour, and send gobot_gui.log: its Pet heals, Hunter, Positions:
+  own walk, Trash: and Alerts lines say what happened.
+
+  The shop right after the pass, potions during the bag jobs, and six more
+  keys (2026.11.11, not yet tried on the game). With Don rac on, when Tu mua
+  binh comes due (a plan, or the rest of one) GoBot cleans the bag first and
+  buys right after it, in the same stop of the keys, with no quiet second in
+  between; after a pass that ended less than 1 minute before, none is made
+  again and the shop goes alone, as before (with Don rac every 10 minutes and
+  buying every 60, as the zip ships, most rounds go so: alone, right after
+  their pass). No pass is made for the shop while the game is not in the
+  world (HP not read) or not found. Mua moi N phut, shop_clock.txt,
+  10 purchases a hold, Mua ngay, Thu mua and Don ngay are unchanged, and Don
+  ngay never buys. With the HP potion on a letter, Space or one of Home,
+  End, PgUp, PgDn, Insert, Delete, a pass or a round starts at the HP
+  potion's mark (not 10 over it), HP and MP potions go between purchases and
+  between two items (up to 0.4 s each time), and the job stops only under
+  HALF the mark (80 gives 40), tried again 15 s later and never counted as
+  trouble. With two HP potion lines (Lv1, Lv2), each one marked at half the
+  highest or over must be on such a key too, or the job goes as before.
+  Those six keys now go through as the letters do, for skills,
+  buffs and potions; what the game does with them while the bag or the shop
+  is open is not known yet, so GoBot waits 0.2 s after one, and double-clicks
+  a potion only when it sees the potions' row itself. Digit keys still wait:
+  the simple screen fills in 1 and 2 for the HP and MP potions (so does the
+  zip's macro.ini), so tell testers to move them to a letter or one of the
+  six to have them pressed meanwhile. On the simple screen Delete is now a
+  key like any other, and Backspace clears a key box. Send gobot_gui.log:
+  its Trash: lines say what happened.
 
   Walking to a monster, the hunter holds the arrow key down as a player
   does, rather than tapping it (the character stopped after every step).
@@ -687,9 +737,10 @@ EXPERIMENTAL
   misread, and its screenshot is kept in potion_debug.
 
   The pet's potion (Tu bom mau pet, a third potion row): ticked, it asks
-  for the key of the pet's potion on the hotbar, and presses it about every
-  3 seconds while the pet's HP is at or under its mark; HP and MP potions
-  always go first. The pet's HP is read from the RED bar in the pet's box
+  for the key of the pet's potion on the hotbar, and presses it over and
+  over while the pet's HP is at or under its mark, every Bom lien tuc, moi
+  N ms (300 as shipped; about every 3 seconds before 2026.11.10); HP and MP
+  potions always go first. The pet's HP is read from the RED bar in the pet's box
   at the top left of the game, under HP and MP -- the purple bar under it
   is not HP. With no pet out the row says so and presses nothing.
 
@@ -804,6 +855,12 @@ UPDATING
   way -- and it drops the mark that keeps a short buff a buff.
   Copy spots.ini too, to keep the hunting areas drawn on Ban do (from
   2026.11.04c on): no package ships one, so nothing is copied over.
+  A macro.ini from before 2026.11.10 has no pet_every_ms: its pet keys are
+  then pressed every 300 ms while the pet is under its mark, not on their
+  old Every (often 3000); Bom lien tuc, moi on the pet's row changes it.
+  An HP or MP potion on a digit (the zip's, 1 and 2) still waits through a
+  bag pass and a purchase round in 2026.11.11: move it to a letter or to
+  Home, End, PgUp, PgDn, Insert or Delete, in the game and on its row.
 
 THE DISCORD WEBHOOK
   Kept encrypted for the Windows user in %LOCALAPPDATA%\GoBot, never in this

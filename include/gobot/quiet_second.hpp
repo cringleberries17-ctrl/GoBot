@@ -64,6 +64,19 @@ struct InputGlancer {
     static InputGlancer real();
 };
 
+/// How a quiet second came out (2026.11.10), from GetLastInputInfo's time as
+/// it began and as it ended, and how many events GoBot itself had sent -- a
+/// key, a click, a move (InputManager::sent_count) -- likewise. Quiet:
+/// no input at all. Touched: input, and none of it GoBot's. Own: GoBot sent
+/// something meanwhile, so whose the input was cannot be told -- the second
+/// is measured again, and GoBot's own keys are never taken for the player's.
+/// The caller reads GoBot's count before the time as it begins, and the time
+/// before the count as it ends -- each event moves the count both before and
+/// after Windows stamps it, so one of those moves falls between the reads.
+enum class QuietSaid { Quiet, Touched, Own };
+QuietSaid quiet_said(std::uint32_t input_before, std::uint32_t input_after, std::uint64_t own_before,
+                     std::uint64_t own_after);
+
 /// The log's words for a spoiled quiet second, from a glance as it began and
 /// one as it ended: "the pointer moved 37 px (812,440 -> 845,452); buttons
 /// held: left; in front: chrome.exe". A pointer that stayed with no button

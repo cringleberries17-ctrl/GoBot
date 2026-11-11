@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -519,6 +520,32 @@ public:
     /// to the macro's cast-paced rotation (2026.11.08). Nothing else changes.
     std::optional<std::uint32_t> own_id() const;
 
+    // ---- one line per walk of yours (2026.11.10)
+
+    /// One walk of yours: from the 0x0027 that set you moving from standing
+    /// to the report that had you standing again -- or the map entry that cut
+    /// it -- with your casts (0x0031) between. What walked the character out
+    /// of its hunting area on 2026-11-10 was no walk of GoBot's: 29 of 32
+    /// exits had none, and the client reports as many walks with the hunter
+    /// off. The line for each (own_walk_line) says whose keys were about it.
+    struct OwnWalk {
+        float         from_x = 0.0f, from_y = 0.0f;
+        float         to_x = 0.0f, to_y = 0.0f;
+        std::uint64_t from_ms = 0, to_ms = 0;   ///< the frames' clock
+        std::uint16_t ended_by = 0;             ///< the opcode that stopped it; 0x0086 a map entry
+        int           casts = 0;
+    };
+    /// Asked for each walk of yours as it stops, on the capture's thread with
+    /// the lock let go of: the words on GoBot's own keys about it
+    /// (InputManager::walk_keys_text), which whatever it is answers at once.
+    /// Each walk is then written at INFO (own_walk_line). Unset -- as in
+    /// every test that does not set it -- nothing is written. Set at any
+    /// time: it is copied under the lock.
+    void set_walk_keys(std::function<std::string(const OwnWalk&)> f);
+    /// "Positions: own walk 25,632 -> 363,632 (+338 px) in 0.94 s, stopped by
+    /// 0x0027; 2 casts of yours in it; <keys>".
+    static std::string own_walk_line(const OwnWalk& w, const std::string& keys);
+
     /// The opcodes it reads, for a capture's opcode filter: your reports
     /// 0x0027, 0x0028, 0x0029, 0x002A and 0x0031; the monsters' 0x0038, 0x003F
     /// and 0x0042; and the map entry, 0x0086.
@@ -659,6 +686,13 @@ private:
     /// let go of it: a slow write to the log file holds up no view() or
     /// stats() -- the map tab's and the hunter's looks.
     std::vector<std::string>      said_;
+    /// The walk of yours under way for its line, the walks stopped since the
+    /// last batch, and who is asked of GoBot's keys about them
+    /// (set_walk_keys).
+    bool                          walk_on_ = false;
+    OwnWalk                       walk_;
+    std::vector<OwnWalk>          walks_done_;
+    std::function<std::string(const OwnWalk&)> walk_keys_;
 };
 
 /// Who says the map has changed, as the GUI's tick asks it.

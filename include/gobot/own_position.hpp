@@ -27,6 +27,18 @@ enum class OwnReport : std::uint8_t {
     Cast,    ///< 0x0031: a skill cast, with the caster's x, y in whole pixels
 };
 
+/// The opcode a report of its kind comes in, for the log (WorldFix::report_op).
+constexpr std::uint16_t own_report_opcode(OwnReport k) {
+    switch (k) {
+        case OwnReport::Move:  return 0x0027;
+        case OwnReport::Air:   return 0x002A;
+        case OwnReport::Other: return 0x0029;
+        case OwnReport::Here:  return 0x0028;
+        case OwnReport::Cast:  return 0x0031;
+    }
+    return 0;
+}
+
 /// One report of your own position, as the client sent it.
 struct OwnPosition {
     OwnReport     kind = OwnReport::Move;

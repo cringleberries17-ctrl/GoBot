@@ -84,6 +84,7 @@ struct Rig {
     MacroEngine          engine{ input, coord };
     std::uint64_t        t = 11'000'000;
     float                hp = 100.0f, mp = 100.0f;
+    float                pet = -1.0f;    ///< the pet's HP: none read unless a test says
     Mode                 mode = Mode::Fighting;
     int                  dx = 80;
     std::uint32_t        attack_key = VK_SPACE;
@@ -129,7 +130,7 @@ struct Rig {
 
     void run(std::uint64_t ms) {
         for (const std::uint64_t until = t + ms; t < until; t += 10) {
-            engine.set_vitals(hp, mp);
+            engine.set_vitals(hp, mp, pet);
             engine.step();
         }
     }
@@ -564,6 +565,154 @@ void test_skills_timed_gap() {
                                                           std::to_string(rig.count('X')) + " in 10 s");
 }
 
+// ------------------------ walking back to the hunting area (2026.11.10)
+
+void test_skills_returning() {
+    section("Skills held while the hunter walks back to its area (Fight::Mode::Returning, 2026.11.10): on their own "
+            "timers or following the fight -- potions, the pet and a buff as ever");
+
+    for (const bool follow : { false, true }) {
+        // The owner's way: Z and X on their own timers ("Luôn bấm theo giờ"),
+        // C following the fight, a buff on 6, the HP potion on G, the pet's
+        // on Q.
+        Rig rig({ skill('Z', 500, 0, true), skill('X', 500, 0, true), skill('C', 1000), buff('6', 60'000),
+                  potion(MacroTrigger::HpBelow, 'G', 50), potion(MacroTrigger::PetHpBelow, 'Q', 50) },
+                follow);
+        rig.mode = Mode::Returning;
+        rig.hp = 40.0f;
+        rig.pet = 40.0f;
+        const std::uint64_t t0 = rig.t;
+        rig.run(5000);
+        const auto st = rig.engine.stats();
+        const bool held = rig.count('Z', t0) == 0 && rig.count('X', t0) == 0 && rig.count('C', t0) == 0 &&
+                          st.held_returning > 0;
+        const bool rest = rig.count('G', t0) == 2 && rig.count('6', t0) == 1 && rig.count('Q', t0) >= 1;
+        // The walk over: what waited goes at once.
+        rig.mode = follow ? Mode::Fighting : Mode::Idle;
+        const std::uint64_t t1 = rig.t;
+        rig.run(300);
+        const auto z = rig.when('Z', t1);
+        check(held && rest && !z.empty() && z[0] - t1 <= 110 && rig.count('X', t1) >= 1,
+              std::string(follow ? "following the fight" : "on their own timers") +
+                  ": 5 s walking back -- Z, X and C never pressed (" + std::to_string(st.held_returning) +
+                  " held), the potion every 3 s (" + std::to_string(rig.count('G', t0)) + "), the pet (" +
+                  std::to_string(rig.count('Q', t0)) + "), the buff once (" + std::to_string(rig.count('6', t0)) +
+                  "); the walk over, Z at +" + ms_list(z, t1) + " ms");
+    }
+    // The minute's Skills line says them.
+    Rig rig({ skill('Z', 500, 0, true) }, false);
+    rig.mode = Mode::Returning;
+    check(logged_line(LogLevel::Info, [&] { rig.run(61'000); }, { "Skills: 0 pressed; held ", " walking back; refused" }),
+          "the Skills line counts them: \"... N walking back; refused ...\"");
+    // A hunter's own pass: returning() is what the macro is told, and is
+    // false once hunting stops (source: the GUI's and the command line's
+    // set_fight).
+#ifdef GOBOT_SOURCE_DIR
+    const auto read = [](const char* rel) {
+        std::FILE* f = nullptr;
+        std::string out;
+        if (fopen_s(&f, (std::string(GOBOT_SOURCE_DIR) + rel).c_str(), "rb") != 0 || f == nullptr) return out;
+        char buf[4096];
+        for (std::size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) out.append(buf, n);
+        std::fclose(f);
+        return out;
+    };
+    const std::string gui = read("/apps/gobot_gui/gui_app.cpp");
+    const std::string cli = read("/apps/gobot_cli/main.cpp");
+    check(gui.find(": hunter_->returning() ? MacroEngine::Fight::Mode::Returning") != std::string::npos &&
+              cli.find(": hunter.returning() ? MacroEngine::Fight::Mode::Returning") != std::string::npos,
+          "the GUI and the command line tell the macro Returning from the hunter's own returning()");
+#endif
+}
+
+// ------------------------------------ the pet pressed over and over (11.10)
+
+void test_pet_takes_turns() {
+    section("The pet pressed over and over (pet_every_ms) takes at most every other press while a skill is "
+            "ready (2026.11.10)");
+
+    {
+        // Z always due, free skill_gap_ms (250) after each press; the pet
+        // under its mark, every 200 ms. A pet press straight after a pet press
+        // only while Z was not free to go -- with Z free, Z goes first.
+        Rig rig({ skill('Z', 100), potion(MacroTrigger::PetHpBelow, 'Q', 50) }, false, false);
+        MacroConfig cfg = rig.engine.config();
+        cfg.pet_every_ms = 200;
+        cfg.skill_gap_ms = 250;
+        rig.engine.set_config(cfg);
+        rig.pet = 40.0f;
+        const std::uint64_t from = rig.t;
+        // The first time both are due with the pet's the last press: at 1 s,
+        // where the black box still holds it.
+        rig.run(1100);
+        std::string box;
+        for (const std::string& l : rig.engine.black_box_lines())
+            if (l.rfind("Pet potion key Q", 0) == 0) box = l;
+        rig.run(8900);
+        std::uint64_t last_z = 0;
+        bool have_z = false, pet_last = false;
+        int both = 0;
+        std::string where;
+        for (const auto& p : rig.pressed) {
+            if (p.first == 'Z') {
+                last_z = p.second;
+                have_z = true;
+                pet_last = false;
+                continue;
+            }
+            if (p.first != 'Q') continue;
+            if (pet_last && have_z && p.second >= last_z + 250) {
+                ++both;
+                if (where.empty()) where = " -- first at +" + std::to_string(p.second - from) + " ms";
+            }
+            pet_last = true;
+        }
+        const std::size_t pets = rig.count('Q', from), zs = rig.count('Z', from);
+        check(both == 0, "no pet press straight after another while Z was free to go: " + std::to_string(both) +
+                             where);
+        check(pets >= 45 && zs >= 38 && box.find("a skill's turn") != std::string::npos,
+              "the pet still about every 200 ms (" + std::to_string(pets) + " in 10 s), Z every 250 (" +
+                  std::to_string(zs) + "), \"a skill's turn\" in the black box -- " + box);
+    }
+    {
+        // Following the fight with no fight: the skills are held, so none is
+        // ready, and the pet goes at its own pace.
+        Rig rig({ skill('Z', 100), potion(MacroTrigger::PetHpBelow, 'Q', 50) }, true, true);
+        rig.mode = Mode::Idle;
+        MacroConfig cfg = rig.engine.config();
+        cfg.pet_every_ms = 200;
+        rig.engine.set_config(cfg);
+        rig.pet = 40.0f;
+        rig.run(2000);
+        const auto at = rig.when('Q');
+        bool even = at.size() == 10;
+        for (std::size_t i = 1; even && i < at.size(); ++i) even = at[i] - at[i - 1] == 200;
+        check(even && rig.count('Z') == 0,
+              "skills following the fight, no fight: the pet every 200 ms, nothing waited for -- at +" +
+                  ms_list(at, at.empty() ? 0 : at[0]) + " ms");
+    }
+    {
+        // HP's potion keeps going first, ahead of the pet and the skill.
+        Rig rig({ skill('Z', 100), potion(MacroTrigger::PetHpBelow, 'Q', 50),
+                  potion(MacroTrigger::HpBelow, '1', 50) },
+                false, false);
+        MacroConfig cfg = rig.engine.config();
+        cfg.pet_every_ms = 200;
+        rig.engine.set_config(cfg);
+        rig.pet = 40.0f;
+        rig.run(1000);
+        rig.hp = 30.0f;
+        const std::uint64_t low = rig.t;
+        rig.run(20);
+        const auto hp = rig.when('1', low);
+        bool first = !hp.empty();
+        for (const auto& p : rig.pressed)
+            if (first && p.second >= low && p.second < hp[0]) first = false;
+        check(first && hp[0] - low <= 10, "HP under its mark: its potion the first key out, as ever -- at +" +
+                                              ms_list(hp, low) + " ms");
+    }
+}
+
 // ------------------------------------------------------------ macro.ini
 
 void test_skills_config() {
@@ -835,6 +984,8 @@ void test_skills(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_skills_log();
     test_skills_off_as_before();
     test_skills_timed_gap();
+    test_skills_returning();
+    test_pet_takes_turns();
     test_skills_config();
     test_settings_changes();
     test_sequence_follows();

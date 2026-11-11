@@ -11,6 +11,7 @@
 
 #include "gobot/common.hpp"
 #include "gobot/hunter.hpp"
+#include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/monster_frames.hpp"
@@ -378,6 +379,84 @@ void test_own_walk() {
     check(s.own(OwnReport::Move) == 2 && s.own_walks == 1 && s.own_walks_stopped == 1 &&
               s.own_walks_unstopped == 0 && s.last_own_ms == t + 180,
           "one walk started, and a stop followed it within 1 s");
+}
+
+/// One line per walk of yours (2026.11.10): from its start to the report that
+/// has you standing -- or the map entry that cuts it -- with your casts
+/// between, and what is said of GoBot's own keys about it. Nothing is written
+/// unless someone says it (set_walk_keys).
+void test_own_walk_line() {
+    section("Packet world (2026.11.10): one line per walk of yours -- start, stop, casts between, GoBot's keys");
+
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(200);
+    log.clear_ring();
+    log.set_level(LogLevel::Info);
+    const auto lines = [&log] {
+        std::vector<std::string> out;
+        for (const LogLine& l : log.ring())
+            if (l.text.find("Positions: own walk ") != std::string::npos) out.push_back(l.text);
+        return out;
+    };
+
+    PacketWorld w;
+    const std::uint64_t t = kT0;
+    w.on_packets({ from_client(move_frame(25.0f, 632.0f, 9.0f, 1), t) });
+    w.on_packets({ from_client(move_frame(60.0f, 632.0f, 0.0f, 1), t + 100) });
+    const bool quiet = lines().empty();
+
+    int asked = 0;
+    PacketWorld::OwnWalk got;
+    w.set_walk_keys([&](const PacketWorld::OwnWalk& walk) {
+        ++asked;
+        got = walk;
+        return std::string("GoBot: no arrow within 300 ms; last key Z 85 ms before");
+    });
+    w.on_packets({ from_client(move_frame(25.0f, 632.0f, 9.0f, 1), t + 1000) });
+    w.on_packets({ from_client(cast_frame(100, 632), t + 1200), from_client(cast_frame(150, 632), t + 1300) });
+    const bool not_yet = asked == 0;
+    w.on_packets({ from_client(move_frame(363.0f, 632.0f, 0.0f, 1), t + 1940) });
+    const std::vector<std::string> one = lines();
+    // A log line's text begins with its time and level.
+    const auto ends = [](const std::string& s, const std::string& tail) {
+        return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
+    };
+    check(quiet && not_yet && asked == 1 && got.from_ms == t + 1000 && got.to_ms == t + 1940 && got.casts == 2 &&
+              got.ended_by == 0x0027 && one.size() == 1 &&
+              ends(one[0], "[INFO ] Positions: own walk 25,632 -> 363,632 (+338 px) in 0.94 s, stopped by 0x0027; 2 "
+                           "casts of yours in it; GoBot: no arrow within 300 ms; last key Z 85 ms before"),
+          "nobody asked: nothing written; asked: one line at the stop -- \"" + (one.empty() ? std::string() : one[0]) +
+              "\"");
+    // A walk cut by a map entry: where it was last reported.
+    w.on_packets({ from_client(move_frame(400.0f, 632.0f, 9.0f, -1), t + 3000) });
+    w.on_packets({ from_server(entry_frame(11, 1, 64, 620), t + 3200) });
+    const std::vector<std::string> two = lines();
+    check(asked == 2 && two.size() == 2 && got.ended_by == 0x0086 &&
+              two[1].find("[INFO ] Positions: own walk 400,632 -> 400,632 (+0 px) in 0.20 s, cut by a map entry, "
+                          "0x0086; 0 casts of yours in it; GoBot: ") != std::string::npos,
+          "cut by a map entry: \"" + (two.size() < 2 ? std::string() : two[1]) + "\"");
+    log.set_level(was);
+    log.set_ring_capacity(0);
+
+    // GoBot's keys about a walk (InputManager::walk_keys_text): its arrow held
+    // as the walk began, or put down within 300 ms of it; the last key before.
+    using Mark = InputManager::KeyMark;
+    constexpr std::uint32_t kLeft = 0x25, kRight = 0x27;    // the arrows, the hunter's keys by default
+    const std::vector<Mark> held = { { 'Z', true, 900 }, { 'Z', false, 960 }, { kLeft, true, 980 } };
+    const std::vector<Mark> tap = { { 'X', true, 700 }, { 'X', false, 760 }, { kRight, true, 1100 },
+                                    { kRight, false, 1160 } };
+    const std::vector<Mark> none = { { kLeft, true, 300 }, { kLeft, false, 600 }, { 'Z', true, 915 },
+                                     { 'Z', false, 975 } };
+    const std::string a = InputManager::walk_keys_text(held, kLeft, kRight, 1000, 1900);
+    const std::string b = InputManager::walk_keys_text(tap, kLeft, kRight, 1000, 1900);
+    const std::string c = InputManager::walk_keys_text(none, kLeft, kRight, 1000, 1900);
+    const std::string d = InputManager::walk_keys_text({}, kLeft, kRight, 1000, 1900);
+    check(a == "GoBot: Left held from 20 ms before; last key Left 20 ms before" &&
+              b == "GoBot: Right tapped 100 ms after; last key X 300 ms before" &&
+              c == "GoBot: no arrow within 300 ms; last key Z 85 ms before" &&
+              d == "GoBot: no arrow within 300 ms; no key of GoBot's before it",
+          "GoBot's keys: \"" + a + "\" / \"" + b + "\" / \"" + c + "\" / \"" + d + "\"");
 }
 
 /// A skill cast says where you cast it, in whole pixels, and nothing of how
@@ -1988,6 +2067,7 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_nearest_first();
     test_map_entry();
     test_own_walk();
+    test_own_walk_line();
     test_own_cast();
     test_own_facing();
     test_own_jump();

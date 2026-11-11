@@ -517,11 +517,32 @@ void Hunter::fresh_run() {
     login_report_ms_ = 0;
     spot_busy_ms_ = clock_now();
     return_on_ = returning_ = returned_last_ = false;
+    returning_now_.store(false);
     return_quiet_ms_ = 0;
     return_pass_ = 0;
     return_strikes_ = 0;
     return_retry_ms_ = 0;
+    return_from_ms_ = 0;
     said_too_high_ = false;
+    // The walk back first (2026.11.10) and the minute's times; a door back,
+    // and the last ground report a spot goes by.
+    back_walk_ = false;
+    back_walk_from_ms_ = 0;
+    back_walk_px_ = 0;
+    minute_outside_ms_ = minute_back_ms_ = 0;
+    spot_time_ms_ = 0;
+    spot_time_outside_ = false;
+    door_epoch_ = 0;
+    door_seen_ms_ = door_report_ms_ = 0;
+    ground_on_ = false;
+    ground_epoch_ = 0;
+    ground_y_ = 0.0f;
+    ground_air_ = 0;
+    odd_judged_ms_ = 0;
+    odd_judged_y_ = -1.0f;
+    odd_ok_ = true;
+    odd_said_now_ = false;
+    odd_unsaid_ = 0;
     // Nor anything the map made of the area's floors.
     zone_ = ZoneHere{};
     way_asked_ = false;
@@ -657,6 +678,8 @@ void Hunter::fresh_run() {
     status_.spot_outside_px = -1;
     status_.spot_home = false;
     status_.spot_way = status_.spot_back_first = false;
+    status_.spot_back_walk = false;
+    status_.spot_back_walk_ms = 0;
     status_.spot_way_x = status_.spot_way_y = 0;
     status_.spot_way_by_jumps = status_.spot_way_jump_first = false;
     status_.spot_way_jumps = status_.spot_way_jump_x = 0;
@@ -702,6 +725,7 @@ void Hunter::stop() {
     if (!running_.exchange(false)) return;
     stepped_ = false;
     if (thread_.joinable()) thread_.join();
+    returning_now_.store(false);
     disengage();
     end_fight("stopped");
     drop_hold("stopped");
@@ -1524,16 +1548,22 @@ void Hunter::minute_log(const HunterConfig& cfg, std::uint64_t now) {
     // went for, and where the minute's time went.
     const std::string drops = drop_minute_text() + jump_minute_text() + seek_minute_text();
     const bool more = minute_wounded_ > 0 || slotted || levels[0] != '\0' || !drops.empty();
+    // With the spot, the minute's time outside its area and walking back to
+    // it (2026.11.10): 23% outside on 2026-11-10, and nothing said it.
+    char spot_time[96] = "";
+    if (minute_outside_ms_ > 0 || minute_back_ms_ > 0)
+        std::snprintf(spot_time, sizeof spot_time, "; outside the area %.1f s, walking back %.1f s",
+                      static_cast<double>(minute_outside_ms_) / 1000.0, static_cast<double>(minute_back_ms_) / 1000.0);
     if (cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || minute_returns_ > 0 ||
-                     minute_return_give_ups_ > 0 || turned || more))
+                     minute_return_give_ups_ > 0 || turned || more || spot_time[0] != '\0'))
         GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up%s, "
                 "%d walks back to the spot, %d of them given up, "
                 "%d turns (%d facings put right by the packets, %d of them keys the game missed), "
-                "wounded picked %d%s%s%s",
+                "wounded picked %d%s%s%s%s",
                 minute_fights_, minute_far_, keep_away_px(cfg), minute_backsteps_,
                 static_cast<unsigned long long>(dropped), repicks, minute_returns_, minute_return_give_ups_,
                 minute_turns_, minute_packet_facings_, minute_missed_keys_, minute_wounded_, packets, levels,
-                drops.c_str());
+                drops.c_str(), spot_time);
     else if (!cfg.spot && (minute_fights_ > 0 || minute_backsteps_ > 0 || dropped > 0 || turned || more))
         GB_INFO("Hunter: %d fights, %d with attacks at >= %d px, %d back-steps, %llu given up%s, "
                 "%d turns (%d facings put right by the packets, %d of them keys the game missed), "
@@ -1549,6 +1579,7 @@ void Hunter::minute_log(const HunterConfig& cfg, std::uint64_t now) {
     minute_picks_ = minute_nearest_below_ = minute_nearest_above_ = 0;
     minute_below_wait_ms_ = 0;
     minute_walks_kept_ = 0;
+    minute_outside_ms_ = minute_back_ms_ = 0;
     minute_drop_looks_ = minute_drop_settles_ = 0;
     for (int& n : minute_drop_why_) n = 0;
     minute_drops_ = minute_drop_worked_ = minute_drop_nothing_ = minute_drop_jump_ = 0;
@@ -1640,7 +1671,8 @@ void Hunter::track_spot(const HunterConfig& cfg) {
         return_strikes_ = 0;
         return_retry_ms_ = 0;
         said_too_high_ = false;
-        end_return();
+        end_return("Đặt chỗ này");
+        back_walk_end("Đặt chỗ này");
         zone_pending_.reset();
         GB_INFO("Hunter: Đặt chỗ này -- the hunting spot is taken again where the character stands");
     }
@@ -1658,7 +1690,7 @@ void Hunter::track_spot(const HunterConfig& cfg) {
             spot.left_y = known_y_;
             login_gap_ = false;
             login_report_ms_ = f.report_ms;
-            end_return();
+            end_return("logged back in");
             GB_INFO("Hunter: logged back in -- the hunting spot (%d,%d) waits until the character stands within "
                     "%d px of %d,%d, where it was last known, or of the spot",
                     static_cast<int>(std::lround(spot.x)), static_cast<int>(std::lround(spot.y)), kSpotBackPx,
@@ -1701,6 +1733,12 @@ void Hunter::track_spot(const HunterConfig& cfg) {
             epoch_seen_ = f.epoch;
         } else if (f.epoch != epoch_seen_) {
             epoch_seen_ = f.epoch;
+            // Its map loading from here (kDoorLoadMs): the entry's own fix
+            // stamps report_ms, and a report of yours after it is the game in
+            // the map again.
+            door_epoch_ = f.epoch;
+            door_seen_ms_ = clock_now();
+            door_report_ms_ = f.report_ms;
             const int ex = static_cast<int>(std::lround(f.entry_x)), ey = static_cast<int>(std::lround(f.entry_y));
             if (spot.set && !spot.suspended && spot.epoch != f.epoch) {
                 // Through a door, or put somewhere by the server: the spot's
@@ -1714,7 +1752,7 @@ void Hunter::track_spot(const HunterConfig& cfg) {
                 spot.away_known = f.map_known;
                 spot.away_map = f.map;
                 spot.away_area = f.area;
-                end_return();
+                end_return("a map entry");
                 GB_INFO("Hunter: map entry %u/%u at %d,%d -- the hunting spot waits until the character is back "
                         "near %d,%d, where it left from",
                         static_cast<unsigned>(f.map), static_cast<unsigned>(f.area), ex, ey,
@@ -1792,7 +1830,9 @@ void Hunter::track_spot(const HunterConfig& cfg) {
     // None yet: where the character stands, once it stands there -- not in
     // mid-jump, where y holds at the top, nor mid-walk, worked out. So too
     // while an area of the map tab's waits for the character to come to it.
-    if (cfg.spot && !spot.set && f.settled()) {
+    // Nor at a place no floor can be (spot_plausible, 2026.11.10): 999,0.
+    const bool plausible = spot_plausible(f, cfg.spot && !spot.set);
+    if (cfg.spot && !spot.set && f.settled() && plausible) {
         spot = Spot{};
         spot.set = true;
         spot.set_half(f.x, f.y, cfg.spot_half_w, cfg.spot_half_h);
@@ -1839,7 +1879,7 @@ void Hunter::track_spot(const HunterConfig& cfg) {
                     : said_too_high_                                          ? SpotWhy::TooHigh
                                                                               : SpotWhy::None;
     }
-    if (spot_mode_ != SpotMode::Use) end_return();
+    if (spot_mode_ != SpotMode::Use) end_return("the hunting spot not in use");
 
     // The map tab's area against its map's file: where the character stands
     // on it, how far outside the box, and the way back -- at every pass, a
@@ -1851,6 +1891,22 @@ void Hunter::track_spot(const HunterConfig& cfg) {
     if (spot_mode_ == SpotMode::Use && zone_.page && zone_.judged && spot_why_ == SpotWhy::None && !zone_.home &&
         !zone_.way)
         spot_why_ = SpotWhy::NoReturn;
+    // The walk back first, latched or let go of (2026.11.10).
+    track_back_walk(cfg, spot);
+
+    // The minute's time outside the area and walking back, by what the last
+    // pass was: its time to this one, kSpotTimeStepMs at most.
+    {
+        const std::uint64_t t = clock_now();
+        if (spot_time_ms_ != 0 && t > spot_time_ms_) {
+            const std::uint64_t dt = std::min<std::uint64_t>(t - spot_time_ms_, kSpotTimeStepMs);
+            if (spot_time_outside_) minute_outside_ms_ += dt;
+            if (returned_last_) minute_back_ms_ += dt;
+        }
+        spot_time_ms_ = t;
+        spot_time_outside_ =
+            spot_mode_ == SpotMode::Use && f.state == WorldFix::State::Known && zone_.outside_px > 0;
+    }
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1949,9 +2005,29 @@ void Hunter::track_zone_way(const HunterConfig& cfg, const Spot& spot) {
         // the map shows, the walk back first -- but not while a walk back
         // given up on waits to be tried again, nor once kSpotMaxTries have
         // got nowhere: what is in reach outside is fought then, as in 04c, or
-        // the character stands out there and never attacks.
-        z.back_first = zone_walks_back_first(z.outside_px, z.way) && return_strikes_ < kSpotMaxTries &&
+        // the character stands out there and never attacks. Nor where
+        // go_home_zone would stand as there already -- home, or at the way
+        // back's point -- a spot_tolerance past the box's edge.
+        const bool at_goal = z.home || (z.way && !z.way->home && z.way->own_floor() && z.stand &&
+                                        zone_stands_at(z.page.get(), z.way->at, *z.stand, cfg.spot_tolerance));
+        z.back_first = zone_walks_back_first(z.outside_px, z.way) && !at_goal && return_strikes_ < kSpotMaxTries &&
                        (return_retry_ms_ == 0 || clock_now() >= return_retry_ms_);
+    } else {
+        // No map to go by -- this run's spot, or the map tab's area with its
+        // file not gone by: the owner's answer of 2026-11-10 ("Ngưng đánh, đi
+        // về trước") all the same. Further outside than kZoneOutsideBackPx,
+        // the walk back first -- toward the spot along the ground, as go_home
+        // walks -- but not with the spot more than one jump up (TooHigh), at
+        // it across already (go_home's home), nor while a walk back given up
+        // on waits, as above.
+        // In the air: how far outside as judged where it took off, as the
+        // map's branch above -- the fix's y climbs the arc, 100 px and more
+        // over the box's top, and the walk back first would come on
+        // mid-flight, the fight and its target let go of.
+        if ((f.airborne || in_air(clock_now())) && same_place(zone_.box, z.box)) z.outside_px = zone_.outside_px;
+        z.back_first = z.outside_px > kZoneOutsideBackPx && spot.y - f.y >= -static_cast<float>(kOneJumpPx) &&
+                       std::abs(spot.x - f.x) > static_cast<float>(cfg.spot_tolerance) &&
+                       return_strikes_ < kSpotMaxTries && (return_retry_ms_ == 0 || clock_now() >= return_retry_ms_);
     }
     zone_ = std::move(z);
 }
@@ -1967,7 +2043,8 @@ void Hunter::track_zone(Spot& spot, std::optional<Zone> asked, const std::string
             return_strikes_ = 0;
             return_retry_ms_ = 0;
             said_too_high_ = false;
-            end_return();
+            end_return("the hunting area deleted");
+            back_walk_end("the hunting area deleted");
             GB_INFO("Hunter: the map tab's hunting area for %s was deleted -- the spot is taken where the character "
                     "stands",
                     clear.c_str());
@@ -1986,7 +2063,8 @@ void Hunter::track_zone(Spot& spot, std::optional<Zone> asked, const std::string
             spot.map_aside = true;
             spot.left_x = known_x_;
             spot.left_y = known_y_;
-            end_return();
+            end_return("the map tab lost the map");
+            back_walk_end("the map tab lost the map");
             GB_INFO("Hunter: the map tab no longer places the character on %s -- its hunting area stands aside "
                     "until the map is known again",
                     aside.c_str());
@@ -2023,10 +2101,38 @@ void Hunter::track_zone(Spot& spot, std::optional<Zone> asked, const std::string
     const HuntZone box = zone_box(z);
     const bool ours = spot.set && spot.from_map && spot.stem == z.stem;
     const bool edit = ours && !spot.suspended;
+    // A door back (2026.11.10): its spot set aside by a map entry -- not by
+    // a log in, nor by the tab -- and the packets putting the character on
+    // the spot's own map and place again, by whatever door. Back, as a walk
+    // there and back would be: the doors of t1901_s2 at 64,620 are 275 px
+    // from the box, and the area waited until the character was walked in.
+    // Only once the map has loaded (kDoorLoadMs): the walk back first would
+    // start into the loading and burn a strike.
+    // The spot's own map and place: by the packets' ids when it was taken
+    // with them; taken with the map only named -- by its standing points, or
+    // the card's "Dùng vùng" -- by its stem, the entry naming the place now.
+    const bool own_place = spot.map_known ? spot.map == f.map && spot.area == f.area
+                                          : zone_stem(GameMapBook::stem_of(f.map, f.area)) == spot.stem;
+    const bool door = ours && spot.suspended && !spot.login && !spot.map_aside && f.map_known && own_place &&
+                      spot.epoch != f.epoch && door_epoch_ == f.epoch;
     const bool back = ours && spot.suspended &&
                       std::hypot(static_cast<double>(f.x - spot.left_x), static_cast<double>(f.y - spot.left_y)) <=
                           static_cast<double>(kZoneTakePx);
-    const ZoneTake take = zone_take(box, f.x, f.y, edit, back);
+    ZoneTake take = zone_take(box, f.x, f.y, edit, back);
+    if (take == ZoneTake::Wait && door) {
+        const std::uint64_t now = clock_now();
+        if (f.report_ms <= door_report_ms_ && now < door_seen_ms_ + kDoorLoadMs) {
+            zone_wait_ = ZoneWait::Loading;
+            return;
+        }
+        take = ZoneTake::Back;
+        GB_INFO("Hunter: a door back onto %s's own place (map entry %u at %d,%d, %d px outside the area) -- its "
+                "hunting area taken back %.1f s after the entry, %s",
+                z.stem.c_str(), static_cast<unsigned>(f.epoch), round_px(f.x), round_px(f.y),
+                zone_outside_px(box, round_px(f.x), round_px(f.y)),
+                static_cast<double>(now > door_seen_ms_ ? now - door_seen_ms_ : 0) / 1000.0,
+                f.report_ms > door_report_ms_ ? "a report of yours since it" : "with no report of yours since it");
+    }
     if (take == ZoneTake::Wait) {
         zone_wait_ = ZoneWait::Outside;
         zone_wait_px_ = zone_outside_px(box, round_px(f.x), round_px(f.y));
@@ -2065,7 +2171,8 @@ void Hunter::track_zone(Spot& spot, std::optional<Zone> asked, const std::string
     return_strikes_ = 0;
     return_retry_ms_ = 0;
     said_too_high_ = false;
-    end_return();
+    end_return("a hunting area from the map tab");
+    back_walk_end("a hunting area from the map tab");
     GB_INFO("Hunter: hunting area from the map tab: %s, %s (map entry %u; %s)", spot.stem.c_str(),
             zone_text(box).c_str(), static_cast<unsigned>(f.epoch), zone_take_name(take));
     zone_pending_.reset();
@@ -2089,8 +2196,9 @@ void Hunter::mark_out_of_area(const HunterConfig& cfg, const std::vector<Namepla
         // But for the owner's Q2 of 04d: the character outside the box with a
         // way back the map shows walks back first -- what is in reach outside
         // the box is let be, or it fights out there for good (2026-11-04,
-        // 1402,802: 108 px below the box until DỪNG).
-        if (in_reach(cfg, n.x() - me.x(), n.y() - me.y()) && !zone_.back_first) continue;
+        // 1402,802: 108 px below the box until DỪNG). So too while the walk
+        // back first is latched (2026.11.10), past that edge too.
+        if (in_reach(cfg, n.x() - me.x(), n.y() - me.y()) && !zone_.back_first && !back_walk_) continue;
         // The current target too when its name did not read this look: with
         // only "Đánh trước" to be attacked, that makes it NotFirst, and it is
         // kept as the one it was (pass()) -- walked after past the edge for as
@@ -2107,14 +2215,133 @@ void Hunter::mark_out_of_area(const HunterConfig& cfg, const std::vector<Namepla
     }
 }
 
-void Hunter::spot_busy(std::uint64_t now) {
+void Hunter::spot_busy(std::uint64_t now, const std::string& why) {
     spot_busy_ms_ = now;
-    end_return();
+    end_return(why.empty() ? nullptr : why.c_str());
 }
 
-void Hunter::end_return() {
+void Hunter::end_return(const char* why) {
+    // How each walk back ended, said once at its end (2026.11.10): arrived,
+    // cut by a fight in or out of the box, a hold, given up, a door.
+    if (return_on_ && why != nullptr) {
+        const std::uint64_t now = clock_now();
+        GB_INFO("Hunter: walk back over after %.1f s -- %s",
+                static_cast<double>(now > return_from_ms_ ? now - return_from_ms_ : 0) / 1000.0, why);
+    }
     return_on_ = false;
     return_quiet_ms_ = 0;
+}
+
+std::string Hunter::fight_cut(const HunterConfig& cfg, const Nameplate& n, const Nameplate& me) const {
+    if (!return_on_) return {};
+    Spot spot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        spot = spot_;
+    }
+    // Laid over the world as mark_out_of_area lays it.
+    const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+    const double wx = fix_.x + (n.x() - me.x()) * scale;
+    const double wy = fix_.y + (n.y() - me.y() - cfg.packet_dy) * scale;
+    const int dx = n.x() - me.x();
+    char text[128];
+    if (n.slot >= 0)
+        std::snprintf(text, sizeof text, "cut by a fight with slot %d %s the box, %d px %s", n.slot,
+                      spot.inside(wx, wy) ? "inside" : "outside", std::abs(dx), dx < 0 ? "left" : "right");
+    else
+        std::snprintf(text, sizeof text, "cut by a fight with a monster %s the box, %d px %s",
+                      spot.inside(wx, wy) ? "inside" : "outside", std::abs(dx), dx < 0 ? "left" : "right");
+    return text;
+}
+
+void Hunter::back_walk_end(const char* why) {
+    if (!back_walk_) return;
+    back_walk_ = false;
+    const std::uint64_t now = clock_now();
+    GB_INFO("Hunter: the walk back first is over after %.1f s, from %d px outside -- %s",
+            static_cast<double>(now > back_walk_from_ms_ ? now - back_walk_from_ms_ : 0) / 1000.0, back_walk_px_,
+            why);
+    back_walk_from_ms_ = 0;
+    back_walk_px_ = 0;
+}
+
+void Hunter::track_back_walk(const HunterConfig& cfg, const Spot& spot) {
+    const bool use = spot_mode_ == SpotMode::Use && fix_.state == WorldFix::State::Known;
+    const bool held = coord_.critical_active();
+    if (back_walk_) {
+        // Held until inside the box -- not let go of at kZoneOutsideBackPx: a
+        // walk back cut 60 px out by a monster in reach is 2026-11-10's again.
+        if (!use) back_walk_end(spot_mode_ != SpotMode::Use ? "the hunting spot not in use" : "the character not placed");
+        else if (held) back_walk_end("a hold");
+        else if (zone_.outside_px == 0) back_walk_end("inside the hunting area: fighting again");
+        return;
+    }
+    if (!use || held || !zone_.back_first) return;
+    back_walk_ = true;
+    back_walk_from_ms_ = std::max<std::uint64_t>(clock_now(), 1);
+    back_walk_px_ = zone_.outside_px;
+    char to[64];
+    if (zone_.page && zone_.way)
+        std::snprintf(to, sizeof to, "to %d,%d", zone_.way->at.x, zone_.way->at.y);
+    else
+        std::snprintf(to, sizeof to, "toward the spot %d,%d", round_px(spot.x), round_px(spot.y));
+    GB_INFO("Hunter: %d px outside the hunting area -- no fight until the character is back inside it: walking back "
+            "first, %s (reach %d px)",
+            zone_.outside_px, to, cfg.reach);
+}
+
+bool Hunter::spot_plausible(const WorldFix& f, bool say) {
+    if (f.state != WorldFix::State::Known || !f.settled()) return true;
+    // Each report judged once, as it comes: standing, the same one is at
+    // every pass.
+    // Where the spot would be: the fix's own, settled -- its last report's.
+    if (f.report_ms != odd_judged_ms_ || f.y != odd_judged_y_ || f.epoch != ground_epoch_) {
+        odd_judged_ms_ = f.report_ms;
+        odd_judged_y_ = f.y;
+        // This map entry's ground reports only: a door puts the character
+        // anywhere.
+        if (ground_on_ && ground_epoch_ != f.epoch) ground_on_ = false;
+        const float y = f.y;
+        const bool zero = y < 1.0f;
+        const float rise = ground_on_ ? ground_y_ - y : 0.0f;
+        // Far above with no jump between: judged of a report whose opcode
+        // the packets know -- not the spawn's, nor a fix put together by hand.
+        const bool rose =
+            f.report_op != 0 && ground_on_ && f.air_reports == ground_air_ && rise > static_cast<float>(kOneJumpPx);
+        // Every ground report but a 0 is the last ground from here: a second
+        // one up there is taken -- a climb nothing of the packets says --
+        // and none is waited for before a first one is.
+        if (!zero) {
+            ground_on_ = true;
+            ground_y_ = y;
+            ground_air_ = f.air_reports;
+        }
+        ground_epoch_ = f.epoch;
+        odd_ok_ = !zero && !rose;
+        odd_said_now_ = false;
+        if (zero)
+            std::snprintf(odd_why_, sizeof odd_why_, "y 0 is no place to stand");
+        else if (rose)
+            std::snprintf(odd_why_, sizeof odd_why_, "%d px above the last ground report, with no jump of yours "
+                          "between", round_px(rise));
+    }
+    if (odd_ok_) return true;
+    // Said when a spot was to be taken there, once a kSpotOddSayMs at most.
+    if (say && !odd_said_now_) {
+        odd_said_now_ = true;
+        const std::uint64_t now = clock_now();
+        if (odd_said_ms_ == 0 || now >= odd_said_ms_ + kSpotOddSayMs) {
+            char more[48] = "";
+            if (odd_unsaid_ > 0) std::snprintf(more, sizeof more, " (%d more since, not said)", odd_unsaid_);
+            GB_INFO("Hunter: a report of yours at %d,%d not taken for the hunting spot -- %s (opcode 0x%04X)%s",
+                    round_px(f.x), round_px(f.y), odd_why_, static_cast<unsigned>(f.report_op), more);
+            odd_said_ms_ = std::max<std::uint64_t>(now, 1);
+            odd_unsaid_ = 0;
+        } else {
+            ++odd_unsaid_;
+        }
+    }
+    return false;
 }
 
 bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
@@ -2163,13 +2390,15 @@ bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
         if (return_on_ && reported <= tol) {
             GB_DEBUG("Hunter: back at the hunting spot, %d px off",
                      static_cast<int>(std::lround(std::abs(sdx))));
-            end_return();
+            end_return("arrived at the hunting spot");
         }
         // Back by itself -- pushed there, or walked there by a fight: tries
-        // given up on are tried again.
+        // given up on are tried again. The walk back first with it: under
+        // the spot is as far as a walk along the ground goes.
         if (reported <= tol) {
             return_strikes_ = 0;
             return_retry_ms_ = 0;
+            back_walk_end("at the hunting spot");
         }
         said_too_high_ = false;
         spot_why_ = SpotWhy::None;
@@ -2179,11 +2408,13 @@ bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
 
     if (return_strikes_ >= kSpotMaxTries) {
         spot_why_ = SpotWhy::GaveUp;
+        back_walk_end("walks back given up on");
         publish_spot();
         return false;
     }
     if (return_retry_ms_ != 0 && now < return_retry_ms_) {
         spot_why_ = SpotWhy::Retrying;
+        back_walk_end("a walk back to be tried again");
         publish_spot();
         return false;
     }
@@ -2194,7 +2425,8 @@ bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
             GB_INFO("Hunter: the hunting spot is %d px above -- higher than one jump; not walking back to it",
                     static_cast<int>(std::lround(-sdy)));
         }
-        end_return();
+        end_return("the spot higher than one jump");
+        back_walk_end("the spot higher than one jump");
         spot_why_ = SpotWhy::TooHigh;
         publish_spot();
         return false;
@@ -2205,9 +2437,11 @@ bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
 
     // Not under a hold, which wants the character standing; not with a
     // kill's pick-ups owed; not before the delay -- a monster on its way
-    // would have it walk off and straight back.
+    // would have it walk off and straight back. The walk back first
+    // (2026.11.10) waits for no delay: nothing is fought before it.
+    if (held) back_walk_end("a hold");
     if (held || (cfg.loots() && loot_left_ > 0)) return false;
-    if (now - spot_busy_ms_ < cfg.spot_return_delay_ms) return false;
+    if (!back_walk_ && now - spot_busy_ms_ < cfg.spot_return_delay_ms) return false;
     // In the air -- by the packets, or by the hunter's own last hop: a walk
     // back already held goes on as it is, with no key pressed or let go of;
     // none starts.
@@ -2229,20 +2463,23 @@ bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
         return_quiet_ms_ = 0;
         return_pass_ = passes_;
         return_seen_ms_ = now;
+        return_from_ms_ = now;
         ++minute_returns_;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++status_.returns;
         }
-        GB_INFO("Hunter: walking back to the hunting spot: %d px %s, %d px %s",
+        GB_INFO("Hunter: walking back to the hunting spot: %d px %s, %d px %s%s",
                 static_cast<int>(std::lround(std::abs(sdx))), sdx < 0 ? "left" : "right",
-                static_cast<int>(std::lround(std::abs(sdy))), sdy < 0 ? "up" : "down");
+                static_cast<int>(std::lround(std::abs(sdy))), sdy < 0 ? "up" : "down",
+                back_walk_ ? " -- first, along the ground, no hop" : "");
     } else if (return_quiet_ms_ >= cfg.spot_give_up_ms) {
         // Nowhere, by the reports, in spot_give_up_ms: a wall, a ledge it
         // cannot climb, a gap. Tried again a while later; kSpotMaxTries in a
         // row, and not again until the spot is set again or the character is
         // back at it.
-        end_return();
+        end_return("given up: no nearer by the reports");
+        back_walk_end("the walk back got nowhere");
         ++return_strikes_;
         ++minute_return_give_ups_;
         {
@@ -2265,9 +2502,11 @@ bool Hunter::go_home(const HunterConfig& cfg, std::uint64_t now) {
         return false;
     }
 
+    // The walk back first along the ground alone (2026.11.10): no hop out
+    // there, as the map tab's way back walks (WalkFor::Floor).
     const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
     walk(cfg, static_cast<int>(std::lround(sdx / scale)), static_cast<int>(std::lround(sdy / scale)), now,
-         WalkFor::Spot);
+         back_walk_ ? WalkFor::Floor : WalkFor::Spot);
     returning_ = true;
     return true;
 }
@@ -2374,11 +2613,12 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
         if (return_on_ && reported_there) {
             GB_DEBUG("Hunter: back in the hunting area at %d,%d -- %s", at.x, at.y,
                      z.home ? "the home" : "its floor's point nearest the home, which it cannot reach from there");
-            end_return();
+            end_return(z.home ? "arrived at the home" : "arrived at its floor's point nearest the home");
         }
         if (reported_there) {
             return_strikes_ = 0;
             return_retry_ms_ = 0;
+            back_walk_end("there");
         }
         said_no_way_ = false;
         said_too_high_ = false;
@@ -2407,11 +2647,13 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
 
     if (return_strikes_ >= kSpotMaxTries) {
         spot_why_ = SpotWhy::GaveUp;
+        back_walk_end("walks back given up on");
         publish_spot();
         return false;
     }
     if (return_retry_ms_ != 0 && now < return_retry_ms_) {
         spot_why_ = SpotWhy::Retrying;
+        back_walk_end("a walk back to be tried again");
         publish_spot();
         return false;
     }
@@ -2426,7 +2668,8 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
                     "floor or off an end gets there, and the home is %d px %s; fighting where it stands",
                     at.x, at.y, z.outside_px, std::abs(dy), dy < 0 ? "up" : "down");
         }
-        end_return();
+        end_return("no way back the map shows");
+        back_walk_end("no way back the map shows");
         said_too_high_ = false;
         spot_why_ = SpotWhy::NoReturn;
         publish_spot();
@@ -2442,10 +2685,12 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
     // (track_zone_way), not walked meanwhile (2026.11.05b).
     if (way_jumps_ && way_epoch_ != jump_epoch_) return false;
     // As go_home: not under a hold, nor with a kill's pick-ups owed, nor
-    // before the delay; in the air, or past the floor's end before the
-    // landing's report, a walk back already held goes on as it is (hold_on).
+    // before the delay -- but for the walk back first (2026.11.10); in the
+    // air, or past the floor's end before the landing's report, a walk back
+    // already held goes on as it is (hold_on).
+    if (held) back_walk_end("a hold");
     if (held || (cfg.loots() && loot_left_ > 0)) return false;
-    if (now - spot_busy_ms_ < cfg.spot_return_delay_ms) return false;
+    if (!back_walk_ && now - spot_busy_ms_ < cfg.spot_return_delay_ms) return false;
     if (f.airborne || in_air(now) || !z.stand) return hold_on();
 
     if (!return_on_) {
@@ -2454,6 +2699,7 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
         return_quiet_ms_ = 0;
         return_pass_ = passes_;
         return_seen_ms_ = now;
+        return_from_ms_ = now;
         ++minute_returns_;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2487,7 +2733,8 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
                 : (gdx < 0) == (goal.x < at.x) ? ", off its floor's end first, no hop"
                                                : ", off its floor's end the other way first, no hop");
     } else if (return_quiet_ms_ >= cfg.spot_give_up_ms) {
-        end_return();
+        end_return("given up: no nearer by the reports");
+        back_walk_end("the walk back got nowhere");
         ++return_strikes_;
         ++minute_return_give_ups_;
         {
@@ -2524,10 +2771,11 @@ bool Hunter::go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64
     }
 
     // Along the floor, or off its end: no hop (WalkFor::Floor). As before,
-    // with nothing the map shows: the home's height hopped toward.
+    // with nothing the map shows: the home's height hopped toward -- but not
+    // on the walk back first (2026.11.10), which never hops out there.
     const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
     const int dx = static_cast<int>(std::lround((goal.x - f.x) / scale));
-    if (way->as_before)
+    if (way->as_before && !back_walk_)
         walk(cfg, dx, static_cast<int>(std::lround((spot.y - f.y) / scale)), now, WalkFor::Spot);
     else
         walk(cfg, dx, 0, now, WalkFor::Floor);
@@ -2645,6 +2893,8 @@ void Hunter::publish_spot() {
     status_.zone_wait = zone_wait_;
     status_.zone_wait_stem = zone_wait_ != ZoneWait::None && zone_pending_ ? zone_pending_->stem : std::string();
     status_.zone_wait_px = zone_wait_px_;
+    status_.spot_back_walk = back_walk_;
+    status_.spot_back_walk_ms = back_walk_ ? back_walk_from_ms_ : 0;
 }
 
 // ---------------------------------------------------------------- the loop
@@ -2698,6 +2948,12 @@ void Hunter::pass() {
     // below changes.
     returned_last_ = returning_;
     returning_ = false;
+    // Whether this pass walked back, for the macro's skills (returning()):
+    // published as the pass ends, whichever way it ends.
+    struct PublishReturning {
+        Hunter* h;
+        ~PublishReturning() { h->returning_now_.store(h->returning_); }
+    } publish_returning{ this };
     if (cfg.spot) {
         track_spot(cfg);
     } else if (spot_mode_ != SpotMode::Off) {
@@ -2708,7 +2964,8 @@ void Hunter::pass() {
         // new place, not a walk back to the old one.
         spot_mode_ = SpotMode::Off;
         spot_why_ = SpotWhy::None;
-        end_return();
+        end_return("Chỗ đánh quái switched off");
+        back_walk_end("Chỗ đánh quái switched off");
         return_strikes_ = 0;
         return_retry_ms_ = 0;
         said_too_high_ = false;
@@ -2865,7 +3122,7 @@ void Hunter::pass() {
             const std::uint64_t t = clock_now();
             const SeekIdle idle = seek_idle(cfg, seek_choose(cfg, mobs, me, {}, t, -1, nullptr), t);
             if (idle != SeekIdle::NotMine) {
-                if (idle == SeekIdle::Going) spot_busy(t);
+                if (idle == SeekIdle::Going) spot_busy(t, "cut by the seek going for a monster out of view");
                 disengage();
                 set_state(idle == SeekIdle::Going ? State::Approaching : State::NoTargets, false);
                 fight_unseen(t, "gone");
@@ -2904,6 +3161,32 @@ void Hunter::pass() {
     // With the seek on: one not in reach that no standing point inside the
     // area gets in reach of is never walked toward (2026.11.05b).
     if (seek_on_) mark_no_way(cfg, mobs, me, listed, now);
+
+    // The walk back first, latched (the owner's answer of 2026-11-10, "Ngưng
+    // đánh, đi về trước"): nothing is fought -- in reach or not, in the box
+    // or not -- until the character is back inside the box, and the walk
+    // back comes before the attack in reach and before choose_in_reach. On
+    // 2026-11-10 a monster in the box within the 450 px reach cut every walk
+    // back short, and they began only at the floor's two ends. go_home lets
+    // the latch go where it cannot walk -- there, given up on, no way, a
+    // hold -- and the pass goes on as ever.
+    if (back_walk_) {
+        if (have_target_ || fight_.on) {
+            have_target_ = false;
+            end_fight("walking back into the hunting area first");
+            watch_ = DamageWatch{};
+        }
+        disengage();
+        just_stepped_ = false;
+        const bool home = go_home(cfg, now);
+        if (home || back_walk_) {
+            // Latched still and not walking this pass -- in the air with no
+            // walk held, a kill's pick-ups owed, a way asked again: standing.
+            if (!home) let_go_of_moves(cfg);
+            set_state(home ? State::Returning : State::Waiting, false);
+            return;
+        }
+    }
 
     // Stay on the current target while it is still there. Re-picking the
     // nearest every frame makes the bot oscillate between two monsters a
@@ -3111,7 +3394,7 @@ void Hunter::pass() {
                 nothing_to_pick();
                 return;
             }
-            if (idle == SeekIdle::Going) spot_busy(now);
+            if (idle == SeekIdle::Going) spot_busy(now, "cut by the seek going for a monster out of view");
             disengage();
             set_state(idle == SeekIdle::Going ? State::Approaching : State::NoTargets, false);
             fight_unseen(now, "nothing to attack");
@@ -3210,7 +3493,7 @@ void Hunter::pass() {
     // out of it, so the walk goes on to its aim first (2026.11.05b).
     if (in_reach(cfg, dx, dy) && !(seek_on_ && seek_walks_away(*target))) {
         let_go_of_moves(cfg);
-        spot_busy(now);
+        spot_busy(now, fight_cut(cfg, *target, me));
         // The seek's walk ends here (2026.11.05b): its arrival, its way and
         // its progress mark count within one walk to the point only. Kept over
         // a fight, a monster that stepped a few px out of reach after it read
@@ -3410,7 +3693,7 @@ void Hunter::pass() {
             target_first_ = listed[i] == Listed::First;
             target_since_ms_ = now;
             reach_ms_ = now;
-            spot_busy(now);
+            spot_busy(now, fight_cut(cfg, mobs[i], me));
             if (fresh_pick) note_pick(cfg, mobs, me, listed);
         } else {
             have_target_ = false;
@@ -3425,7 +3708,9 @@ void Hunter::pass() {
     // Walk towards it -- but not with a kill's pick-ups still owed, which the
     // next pass stands for (hold_walk): walked off now, it would be let go of
     // at once.
-    spot_busy(now);
+    spot_busy(now, return_on_ ? "cut by a walk toward " + (target->slot >= 0 ? "slot " + std::to_string(target->slot)
+                                                                            : std::string("a monster"))
+                              : std::string());
     set_state(State::Approaching, false);
     if (cfg.hold_walk && cfg.loots() && loot_left_ > 0) {
         let_go_of_moves(cfg);

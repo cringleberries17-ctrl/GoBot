@@ -214,6 +214,7 @@ add_library(gobot_core STATIC
     src/protocol_analyzer.cpp
     src/macro.cpp
     src/macro_pace.cpp
+    src/macro_pet.cpp
     src/screen_capture.cpp
     src/vitals_reader.cpp
     src/mob_detector.cpp
@@ -476,7 +477,8 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/jump_plan_test.cpp apps/gobot_test/jump_key_test.cpp
                           apps/gobot_test/jump_hunt_test.cpp apps/gobot_test/hunt_seek_test.cpp
                           apps/gobot_test/seek_hunt_test.cpp apps/gobot_test/hunt_card_test.cpp
-                          apps/gobot_test/cast_pace_test.cpp apps/gobot_test/jobs_gui_test.cpp)
+                          apps/gobot_test/cast_pace_test.cpp apps/gobot_test/jobs_gui_test.cpp
+                          apps/gobot_test/pass_keys_test.cpp apps/gobot_test/shop_ride_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

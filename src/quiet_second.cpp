@@ -58,6 +58,12 @@ InputGlancer InputGlancer::real() {
     return g;
 }
 
+QuietSaid quiet_said(std::uint32_t input_before, std::uint32_t input_after, std::uint64_t own_before,
+                     std::uint64_t own_after) {
+    if (input_after == input_before) return QuietSaid::Quiet;
+    return own_after != own_before ? QuietSaid::Own : QuietSaid::Touched;
+}
+
 std::string quiet_spoiled_text(const InputGlance& before, const InputGlance& after) {
     char buf[160];
     std::string out;

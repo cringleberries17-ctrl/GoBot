@@ -11,6 +11,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace gobot {
 namespace {
@@ -308,6 +309,7 @@ void PacketWorld::relink(std::uint64_t now_ms) {
     first_monster_ms_ = 0;
     walk_timed_ = false;
     walk_from_ms_ = 0;
+    walk_on_ = false;
     // Nothing of yours, nor of anyone's under another id, since the start:
     // the packets wait for a report of yours again (packet_health).
     stats_.last_own_ms = 0;
@@ -334,6 +336,8 @@ void PacketWorld::forget() {
     first_monster_ms_ = 0;
     walk_timed_ = false;
     walk_from_ms_ = 0;
+    walk_on_ = false;
+    walks_done_.clear();
     // The counts from 0, and one more reset() before them: since() tells
     // counts taken before it from those after.
     const std::uint64_t resets = stats_.resets;
@@ -357,6 +361,8 @@ void PacketWorld::forget() {
 
 void PacketWorld::on_packets(const std::vector<GamePacket>& batch) {
     std::vector<std::string> said;
+    std::vector<OwnWalk> walks;
+    std::function<std::string(const OwnWalk&)> walk_keys;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         bool used = false;
@@ -396,10 +402,39 @@ void PacketWorld::on_packets(const std::vector<GamePacket>& batch) {
         // change.
         if (used) ++updates_;
         said.swap(said_);
+        // The walks of yours that stopped in this batch, each a line once
+        // GoBot's keys about it are asked -- nobody asked, none.
+        if (!walks_done_.empty()) {
+            if (walk_keys_) {
+                walks.swap(walks_done_);
+                walk_keys = walk_keys_;
+            } else {
+                walks_done_.clear();
+            }
+        }
     }
     // Written with the lock let go of: the GUI's map and the hunter's look
     // wait on it, and the file's write can be slow.
     for (const std::string& s : said) GB_INFO("%s", s.c_str());
+    for (const OwnWalk& w : walks) GB_INFO("%s", own_walk_line(w, walk_keys(w)).c_str());
+}
+
+void PacketWorld::set_walk_keys(std::function<std::string(const OwnWalk&)> f) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    walk_keys_ = std::move(f);
+}
+
+std::string PacketWorld::own_walk_line(const OwnWalk& w, const std::string& keys) {
+    const int from_x = static_cast<int>(std::lround(w.from_x)), from_y = static_cast<int>(std::lround(w.from_y));
+    const int to_x = static_cast<int>(std::lround(w.to_x)), to_y = static_cast<int>(std::lround(w.to_y));
+    const std::uint64_t ms = w.to_ms > w.from_ms ? w.to_ms - w.from_ms : 0;
+    char line[192];
+    std::snprintf(line, sizeof line,
+                  "Positions: own walk %d,%d -> %d,%d (%+d px) in %.2f s, %s 0x%04X; %d cast%s of yours in it",
+                  from_x, from_y, to_x, to_y, to_x - from_x, static_cast<double>(ms) / 1000.0,
+                  w.ended_by == 0x0086 ? "cut by a map entry," : "stopped by", static_cast<unsigned>(w.ended_by),
+                  w.casts, w.casts == 1 ? "" : "s");
+    return keys.empty() ? std::string(line) : std::string(line) + "; " + keys;
 }
 
 PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
@@ -528,6 +563,24 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
         ++stats_.own_walks_stopped;
         walk_timed_ = false;
     }
+    // And for its line (own_walk_line, 2026.11.10): from the start to the
+    // report that has you standing, your casts between counted.
+    if (r->kind == OwnReport::Move && me.moving && !was_moving) {
+        walk_on_ = true;
+        walk_ = OwnWalk{};
+        walk_.from_x = r->x;
+        walk_.from_y = r->y;
+        walk_.from_ms = t;
+    } else if (walk_on_ && r->kind == OwnReport::Cast) {
+        ++walk_.casts;
+    } else if (walk_on_ && !me.moving) {
+        walk_on_ = false;
+        walk_.to_x = r->x;
+        walk_.to_y = r->y;
+        walk_.to_ms = t;
+        walk_.ended_by = own_report_opcode(r->kind);
+        if (walks_done_.size() < 64) walks_done_.push_back(walk_);
+    }
     return Taken::Used;
 }
 
@@ -535,6 +588,16 @@ PacketWorld::Taken PacketWorld::take_entry(const GamePacket& p) {
     const std::optional<MapEntry> e = read_map_entry(p);
     if (!e) return Taken::Refused;
     const std::uint64_t t = p.timestamp_ms;
+    // A walk of yours under way, for its line: cut by the entry, where it was
+    // last reported -- before the entry puts you at its spawn.
+    if (walk_on_) {
+        walk_on_ = false;
+        walk_.to_x = fix_.me.report_x;
+        walk_.to_y = fix_.me.report_y;
+        walk_.to_ms = t;
+        walk_.ended_by = 0x0086;
+        if (walks_done_.size() < 64) walks_done_.push_back(walk_);
+    }
     // A new place, whichever it is: (10, 4) and (10, 5) are two areas of one
     // map, with monsters of their own. The last place's monsters are gone;
     // this one's table comes within about a second, and each of its slots'

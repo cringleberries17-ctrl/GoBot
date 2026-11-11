@@ -679,7 +679,8 @@ void test_capture_wiring() {
     const std::string dialog_wait = body(source("/src/bag.cpp"), "bag::Dialog BagCleaner::wait_for_dialog(");
     check(has(source("/src/reviver.cpp"), "Frame& frame = turn_frame_;") &&
               has(source("/src/popup_closer.cpp"), "Frame& f = turn_frame_;") &&
-              before(dialog_wait, "Frame f;", "for (int waited = 0;") && has(dialog_wait, "std::swap(*last, f);") &&
+              before(dialog_wait, "Frame f;", "while (ms_between(from, now()) < ms) {") &&
+              has(dialog_wait, "std::swap(*last, f);") &&
               !has(dialog_wait, "*last = std::move(f);"),
           "the revive's and the popups' turns, and the bin's wait for its dialog, grab into the same frame each time");
 #else

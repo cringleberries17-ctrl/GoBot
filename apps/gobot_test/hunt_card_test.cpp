@@ -521,7 +521,8 @@ void test_gui_source() {
           "tick()'s own halt on owed ups: ↑ named for a high jump's, ↓ for a drop's, in the red line and the log");
 
     // The spot's lines: the way back that jumps, and none of three ways.
-    check(has(spot, "\" — bot về \" + way + jump + \" trước, rồi mới đánh tiếp.\"") &&
+    check(has(spot, "\" — bot ngưng đánh, về vùng trước: về \" + way + jump + \", vào tới trong vùng rồi mới đánh "
+                    "tiếp.\"") &&
               has(spot, "\" không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đánh ở đây. Tự đưa \"") &&
               has(spot, "\"Tự tìm quái: bật — bot đi tới quái ở bất kỳ chỗ nào trong vùng mà nó tới được, \"") &&
               has(spot, "out << \", the way back jumps up \" << hs.spot_way_jumps"),

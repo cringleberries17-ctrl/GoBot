@@ -122,12 +122,20 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
             ("Mỗi khoảng thời gian bên cạnh, GoBot bấm chuột phải vào món Người Giữ Sân ở ngăn Khác và mua số ô đã "
              "đặt bên dưới, xen kẽ Thịt bò khô và Rượu lá tre (mỗi ô là một lần mua " +
              std::to_string(CleanSettings::kBuyQuantity) +
-             "). GoBot không đếm bình trong túi nữa. Khi game báo túi đồ đã đầy, GoBot đóng thông báo và cửa hàng "
+             "). Khi Dọn rác bật, tới giờ mua GoBot dọn rác trước rồi mua liền sau đó, trong cùng một lần dừng "
+             "phím. GoBot không đếm bình trong túi nữa. Khi game báo túi đồ đã đầy, GoBot đóng thông báo và cửa hàng "
              "rồi dừng lượt đó; tới giờ sau mua lại. Mỗi lượt giữ phím mua tối đa " +
              std::to_string(BagCleaner::kShopBuysPerHold) + " lần, phần còn lại mua tiếp sau " +
              std::to_string(BagCleaner::kShopPartGapMs / 60'000) +
-             " phút. Trong lúc mua, kỹ năng, bình và buff tạm dừng. Không mua khi máu thấp, đang chat, đang có bảng "
-             "Sự kiện và điểm danh hoặc bot đang bận việc khác. Tắt thì không làm gì.")
+             " phút. Trong lúc mua, bot đứng yên; các phím chữ cái, Space, Home, End, PgUp, PgDn, Insert và Delete "
+             "của kỹ năng, bình và buff vẫn bấm giữa hai lần mua, nhưng không bao giờ từ lúc bấm đúp vào bình tới "
+             "khi hộp số lượng đã đóng; phím số chờ mua xong. GoBot mua ở mọi mức máu, không chờ máu lên: bình HP "
+             "và MP bấm xen giữa các lần mua, kể cả lúc bot đang dừng (khi đó GoBot tự bấm bình theo các dòng bình "
+             "của bạn). Chỉ khi nhân vật đã chết thì GoBot chờ (thử lại sau " +
+             std::to_string(bag::kHpStoppedAgainMs / 1000) +
+             " giây). Bình ở phím số thì không được bấm trong lúc mua và dọn rác; muốn bình được bấm thì đặt nó ở "
+             "phím chữ cái hoặc Home, End, PgUp, PgDn, Insert, Delete. Không mua khi đang chat, "
+             "đang có bảng Sự kiện và điểm danh hoặc bot đang bận việc khác. Tắt thì không làm gì.")
                 .c_str());
         ImGui::SetItemTooltip("%s", tip.c_str());
     }
@@ -155,7 +163,15 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
     }
 
     // How many purchases of 100 of each potion each time -- a slot each -- 0
-    // leaving that potion alone. Each saves itself alone, as it is typed.
+    // leaving that potion alone. No cap of GoBot's own (the owner, 2026-11-10:
+    // "Không giới hạn"): the game's message that the bag is full ends a round,
+    // and kBuySlotsPerRunMost only bounds the box. Each saves itself alone, as
+    // it is typed.
+    static const std::string slots_tip =
+        "Số lần mua " + std::to_string(CleanSettings::kBuyQuantity) + " mỗi khi tới giờ, từ 0 tới " +
+        std::to_string(CleanSettings::kBuySlotsPerRunMost) +
+        ". 0: không mua món này. GoBot không giới hạn số này: HP và MP chung ngăn Tiêu thụ, game báo túi đồ đã "
+        "đầy thì GoBot dừng lượt đó.";
     const auto slots = [&](const char* name, const char* id, int& n, const char* key) {
         ImGui::PushID(id);
         label(name);
@@ -163,9 +179,9 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
         label("mỗi lần mua");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(95);
-        const bool changed = ImGui::InputInt("##slots", &n, 1, 5);
+        const bool changed = ImGui::InputInt("##slots", &n, 1, 10);
         if (changed) n = std::clamp(n, 0, CleanSettings::kBuySlotsPerRunMost);
-        ImGui::SetItemTooltip("Số lần mua 100 mỗi khi tới giờ (0–20). 0: không mua món này.");
+        ImGui::SetItemTooltip("%s", slots_tip.c_str());
         ImGui::SameLine();
         label("ô");
         ImGui::PopID();
@@ -173,8 +189,19 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
     };
     slots("Thịt bò khô (HP):", "hp", simple_clean_.buy_hp_slots, "buy_hp_slots");
     slots("Rượu lá tre (MP):", "mp", simple_clean_.buy_mp_slots, "buy_mp_slots");
-    if (simple_clean_.buy_potions && simple_clean_.buy_hp_slots + simple_clean_.buy_mp_slots <= 0)
+    const int planned = simple_clean_.buy_hp_slots + simple_clean_.buy_mp_slots;
+    if (simple_clean_.buy_potions && planned <= 0)
         coloured(kWait, "Cả hai đều 0 ô: tới giờ GoBot không mua gì.");
+    // More than "Mua ngay" buys in its one hold: how the rest is bought.
+    if (planned > BagCleaner::kShopMaxBuys) {
+        const std::string over =
+            "Tổng " + std::to_string(planned) + " lần: một lượt giữ phím mua tối đa " +
+            std::to_string(BagCleaner::kShopBuysPerHold) + " lần (\"Mua ngay\": " +
+            std::to_string(BagCleaner::kShopMaxBuys) + " lần), phần còn lại mua tiếp, mỗi " +
+            std::to_string(BagCleaner::kShopPartGapMs / 60'000) +
+            " phút một lượt, khi bot chạy, cho tới khi đủ số hoặc game báo túi đồ đã đầy.";
+        hint(over.c_str());
+    }
     hint("Cần có món Người Giữ Sân trong ngăn Khác của túi đồ, và phím bình của bạn phải uống Thịt bò khô và Rượu "
          "lá tre. Mỗi lần mua GoBot gõ 100 vào hộp số lượng, đọc lại rồi mới bấm Xác Nhận; có gì lạ thì bấm Hủy Bỏ "
          "và dừng, giữ ảnh trong thư mục trash_debug. Thử mua một lần trước khi bật, và lần đầu nên đặt 1 ô mỗi "
@@ -184,6 +211,15 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
         const std::string line = plan_line(shop_plan_at_s_.load(), shop_look_at_s_.load(), shop_owed_.load(),
                                            static_cast<std::int64_t>(std::time(nullptr)));
         if (!line.empty()) hint(line.c_str());
+    }
+    // With Dọn rác on, the round rides a pass (2026.11.11, the owner: "Tới giờ
+    // mua: dọn rồi mua"; GuiApp::trash_loop, bag::ShopRide).
+    if (simple_clean_.buy_potions && simple_clean_.enabled) {
+        static const std::string ride =
+            "Dọn rác đang bật: tới giờ mua, GoBot dọn rác trước rồi mua bình liền sau đó, trong cùng một lần dừng "
+            "phím, không chờ thêm. Vừa dọn xong chưa tới " + std::to_string(bag::kRideFreshMs / 60'000) +
+            " phút thì mua luôn, không dọn lại.";
+        hint(ride.c_str());
     }
 
     // Now, and a trial that buys nothing.
@@ -197,10 +233,16 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
     ImGui::BeginDisabled(!simple_clean_.buy_potions);
     if (ImGui::Button("Mua ngay")) request_shop(false);
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("%s", simple_clean_.buy_potions
-                                    ? "Mua ngay bây giờ đủ số ô đã đặt trong một lượt, không chờ tới giờ; giờ mua kế "
-                                      "tiếp tính lại từ lúc này. Kỹ năng, bình và buff tạm dừng cho tới khi xong."
-                                    : "Bật ô \"Tự mua bình\" trước.");
+    // At most kShopMaxBuys in its one hold, the rest as a timed round buys it.
+    static const std::string buy_now_tip =
+        "Mua ngay bây giờ số ô đã đặt, không chờ tới giờ; giờ mua kế tiếp tính lại từ lúc này. Lượt này mua tối "
+        "đa " + std::to_string(BagCleaner::kShopMaxBuys) + " lần; phần còn lại mua tiếp, mỗi " +
+        std::to_string(BagCleaner::kShopPartGapMs / 60'000) + " phút một lượt " +
+        std::to_string(BagCleaner::kShopBuysPerHold) +
+        " lần, khi bot chạy (bot đang dừng thì sau khi bấm BẮT ĐẦU). Game báo túi đồ đã đầy thì dừng lượt đó. "
+        "Trong lượt mua, phím chữ cái, Space, Home, End, PgUp, PgDn, Insert và Delete của kỹ năng, bình và buff "
+        "chỉ bấm giữa hai lần mua; phím số chờ xong lượt.";
+    ImGui::SetItemTooltip("%s", simple_clean_.buy_potions ? buy_now_tip.c_str() : "Bật ô \"Tự mua bình\" trước.");
     ImGui::EndDisabled();
     if (chat_open)
         coloured(kWait, "Ô chat trong game có thể đang mở: chưa mua được cho đến khi ô chat đóng.");

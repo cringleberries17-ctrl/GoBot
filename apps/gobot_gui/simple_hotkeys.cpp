@@ -45,6 +45,9 @@ HotkeyActions GuiApp::hotkeys_tick() {
     set.panic = macro_config_.panic_key;
     set.trash_now = hotkeys_.trash_now;
     set.login_now = hotkeys_.login_now;
+    // For the trash worker's key window, which never lets them through.
+    own_trash_key_.store(hotkeys_.trash_now);
+    own_login_key_.store(hotkeys_.login_now);
     const HotkeyEdges edges = hotkey_edges_.update(set, [](std::uint32_t vk) {
         return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
     });

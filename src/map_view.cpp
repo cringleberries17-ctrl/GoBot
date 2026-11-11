@@ -110,8 +110,18 @@ MapViewResult MapViewJob::run(const PacketWorld::View& view, const PacketWorld::
     look.epoch = f.epoch;
     look.entry_x = round_px(f.entry_x);
     look.entry_y = round_px(f.entry_y);
+    look.report_op = f.report_op;
+    look.air_reports = f.air_reports;
     if (look.capture) look.mobs = packet_stands(view, PacketEyes::kStandsMax);
     ws.view_trust.update(look, kWorkMs);
+    // The owner's one-click choice of the map (2026.11.10): asked of the GUI,
+    // taken here, on the worker, once.
+    if (!ws.choose.empty()) {
+        if (!ws.view_trust.choose(ws.choose))
+            GB_INFO("Map view: %s not taken as the map -- it is not among the map files that fit now",
+                    ws.choose.c_str());
+        ws.choose.clear();
+    }
 
     // 4. Which map.
     r.id = map_identity(f, ws.view_trust.report(), trust_gen);
@@ -219,6 +229,17 @@ bool map_drawn(MapShows s) {
     return s == MapShows::EntryDoubtful || s == MapShows::NoGates || s == MapShows::ByEntry || s == MapShows::ByName;
 }
 
+std::string zone_choice(const std::vector<std::string>& fits, const ZoneBook& book) {
+    std::string pick;
+    for (const std::string& stem : fits) {
+        if (!book.get(stem)) continue;
+        // A second one with a zone: which is meant is not for GoBot to say.
+        if (!pick.empty()) return {};
+        pick = zone_stem(stem);
+    }
+    return pick;
+}
+
 MapEdit map_edit(bool book_loaded, bool book_bad, const KnownMap& usable, MapShows shows) {
     if (book_bad) return MapEdit::BookBad;
     if (!book_loaded) return MapEdit::BookLoading;
@@ -319,6 +340,9 @@ const GameMapBook::Page* dot_floors(const GameMapBook::Page* page, MapShows show
 bool mob_grey(const HunterConfig& cfg, const Hunter::Status& hs, bool area_on, bool you, double you_x,
               double you_y, const PacketWorld::Mob& m, bool target) {
     if (!area_on || m.dead) return false;
+    // The walk back first latched (2026.11.10): nothing is fought until the
+    // character is inside the box -- in it or not, in reach or not.
+    if (hs.spot_back_walk) return true;
     // The one fought let go of only kSpotKeepPx past the edge, as Spot::inside
     // has it in Hunter::mark_out_of_area.
     const double keep = target ? static_cast<double>(Hunter::kSpotKeepPx) : 0.0;

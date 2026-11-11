@@ -441,10 +441,42 @@ public:
         const char*   what = "";        ///< what inject() was told it was for: a string literal
     };
     static LastInput last_input();
+    /// A count of the events -- keys, buttons, moves, typed text -- every
+    /// InputManager of the process has handed to Windows since it started
+    /// (2026.11.10): the shop's quiet second asks whether GoBot sent anything
+    /// in it (quiet_said), and never takes that for the player's. Each event
+    /// moves it twice, as it is handed over and again once SendInput has
+    /// returned, so that a reader before the last-input tick Windows stamps
+    /// and one after it both see it move: only a difference means anything.
+    /// Refused before Windows is asked -- a bare ↓, a chord's owed keys, the
+    /// "no real input" switch -- it does not move.
+    static std::uint64_t sent_count();
     /// "key Right 2.4 s before (press a key)", "typed text 0.3 s after (type
     /// a key)", "the left mouse button 12.0 s before", "none since GoBot
     /// started" -- measured against `at_ms`. Never what was typed.
     static std::string last_input_text(const LastInput& in, std::uint64_t at_ms);
+
+    /// One key event GoBot sent that went out -- any InputManager of the
+    /// process, as inject() let it go -- which key, down or up, and when on
+    /// now_ms() (2026.11.10): what a walk of yours the packets report is
+    /// weighed against (PacketWorld::own_walk_line). Keys pressed as keys
+    /// only: nothing typed, no mouse.
+    struct KeyMark {
+        std::uint32_t vk = 0;
+        bool          down = false;
+        std::uint64_t at_ms = 0;
+    };
+    static constexpr std::size_t kKeyMarks = 64;
+    /// The last kKeyMarks, oldest first: those at or after `since_ms`.
+    static std::vector<KeyMark> key_marks(std::uint64_t since_ms);
+    /// A walk of yours from `from_ms` to `to_ms` against `marks`, GoBot's
+    /// keys: whether its arrow -- `left` or `right` -- was held as the walk
+    /// began, or put down within kWalkKeyMs of it before its stop; and the
+    /// last key it put down before the start, with how long before. "GoBot:
+    /// no arrow within 300 ms; last key Z 85 ms before".
+    static constexpr std::uint64_t kWalkKeyMs = 300;
+    static std::string walk_keys_text(const std::vector<KeyMark>& marks, std::uint32_t left, std::uint32_t right,
+                                      std::uint64_t from_ms, std::uint64_t to_ms);
 
     /// One UTF-16 unit as Unicode input (KEYEVENTF_UNICODE), down and up, only
     /// while the game is in front.
@@ -615,9 +647,9 @@ public:
     static bool never_pressed(std::uint32_t vk) { return (vk & 0xFFu) == 0x28u; }
     /// Parse a key as a person or a file writes it into a VK, 0 for none. One
     /// letter or digit is that key ("Z"; "1" is the 1 key, not key code 1); a
-    /// name ("F10", "Space", "Numpad3"); or a key code, as 0x and hex ("0x5A")
-    /// or as two or more decimal digits ("90"). Whatever key_name() writes
-    /// reads back as the same key.
+    /// name ("F10", "Space", "Numpad3", "PgUp" or "PageUp", "Del" or "Delete");
+    /// or a key code, as 0x and hex ("0x5A") or as two or more decimal digits
+    /// ("90"). Whatever key_name() writes reads back as the same key.
     static std::uint32_t parse_key(const std::string& text);
     static std::string   key_name(std::uint32_t vk);
 

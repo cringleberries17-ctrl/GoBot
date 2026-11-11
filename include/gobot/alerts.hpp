@@ -606,4 +606,32 @@ private:
     bool                         told_ = false;
 };
 
+/// What says HP read 0 off the screen is no death this moment (DeathByHp,
+/// 2026.11.10): an "ALERT death" at 22:12:52 of 2026-11-10 rested on the HUD
+/// reading 0/14585 while the game reloaded behind LDPlayer's splash, the
+/// packets' last word HP 14585/14585 and the server silent for 11 s.
+struct DeathDoubt {
+    /// The reader cuts its frames off the screen -- whatever is in front of
+    /// the game's place there -- not from the window's own drawing.
+    bool          from_screen = false;
+    bool          game_in_front = true;
+    /// The packets' HP, usable this moment (vitals_usable: checked against
+    /// the bars, the server heard within kLinkQuietMs), above 0.
+    bool          packets_alive = false;
+    /// The capture is the game window's own, and when it last had a frame of
+    /// the server's over TCP, on now_ms()'s clock; 0 none.
+    bool          capture_on_window = false;
+    std::uint64_t last_server_ms = 0;
+};
+/// Why HP read 0 off the screen is not taken for a death at `now`, or nullptr
+/// when nothing doubts it: the frame not the game's -- cut off the screen
+/// with another window in front -- the packets, usable now, saying HP is
+/// above 0, or the server silent over the game's own capture for more than
+/// kLinkQuietMs and up to kDeathQuietMostMs: a game reloading, or its link
+/// gone; the server tells a death. Past that a capture gone wrong does not
+/// keep a death untold. Doubted, the 3 s count again from the end of it, so a
+/// real death is told 3 s after nothing doubts it any more.
+const char* death_doubt(const DeathDoubt& in, std::uint64_t now);
+constexpr std::uint64_t kDeathQuietMostMs = 60'000;
+
 } // namespace gobot

@@ -3127,8 +3127,18 @@ int run_trash(const Options& o, const AppConfig& app) {
 
     // What the pass goes by, to read what it says against.
     std::string tabs;
+    int ticked = 0;
     for (int t = 0; t < kBagTabs; ++t)
-        if (settings.tabs[t]) tabs += std::string(tabs.empty() ? "" : ", ") + bag_tab_name(t);
+        if (settings.tabs[t]) {
+            tabs += std::string(tabs.empty() ? "" : ", ") + bag_tab_name(t);
+            ++ticked;
+        }
+    // Every item one of Tiêu Dùng's: that tab alone is looked through
+    // (bag::pass_tabs); with none to look through the pass presses nothing.
+    const bag::PassTabs looked = bag::pass_tabs(settings, list);
+    if (looked.spend_only && looked.count < ticked)
+        tabs += looked.count > 0 ? " (only Tiêu Dùng looked through: every item is a spend/ icon)"
+                                 : " (none looked through: every item is a spend/ icon, and Tiêu Dùng is not ticked)";
     int pictures = 0, icons = 0, alike = 0, to_drop = 0;
     for (const TrashList::Item& item : list.items) {
         if (!item.file.empty()) ++pictures;
@@ -5277,8 +5287,9 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
         macro->set_fight([&hunter] {
             MacroEngine::Fight f;
             if (!hunter.running()) return f;
-            f.mode = hunter.engaged() ? MacroEngine::Fight::Mode::Fighting
-                                      : MacroEngine::Fight::Mode::Idle;
+            f.mode = hunter.engaged()     ? MacroEngine::Fight::Mode::Fighting
+                     : hunter.returning() ? MacroEngine::Fight::Mode::Returning
+                                          : MacroEngine::Fight::Mode::Idle;
             f.dx = hunter.engaged_dx();
             f.attack_key = hunter.attack_key();
             return f;

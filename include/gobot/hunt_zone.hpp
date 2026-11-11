@@ -385,7 +385,13 @@ std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZon
 /// this, with a way back the map shows (not as_before), the character walks
 /// back before it fights again -- monsters in reach outside the box let be.
 /// With none, it fights where it stands. An edge a slope crosses would flip
-/// it in and out at less: Hunter::kSpotKeepPx.
+/// it in and out at less: Hunter::kSpotKeepPx. The owner's answer of
+/// 2026-11-10 ("Ngưng đánh, đi về trước"): once it holds, the walk back
+/// first is latched until the character is inside the box -- past this edge
+/// too -- and nothing is fought meanwhile, monsters in the box and in reach
+/// among them (Hunter::track_back_walk); on 2026-11-10 a monster in the box
+/// within the 450 px reach had every walk back cut short, and they started
+/// only at the floor's two ends.
 inline constexpr int kZoneOutsideBackPx = 60;
 bool zone_walks_back_first(int outside_px, const std::optional<ZoneReturn>& way);
 

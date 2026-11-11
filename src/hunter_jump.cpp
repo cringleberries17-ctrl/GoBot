@@ -1415,8 +1415,10 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
             if (j.purpose == JumpUpFor::Seek && seek_.on && seek_.slot == j.slot && seek_.gen == j.gen)
                 seek_let_go(nullptr);
         } else if (v == JumpUpVerdict::FellBack || v == JumpUpVerdict::Lower) {
-            // On the way back: a strike, as a walk back that got nowhere.
-            end_return();
+            // On the way back: a strike, as a walk back that got nowhere --
+            // and the walk back first let go of with it (2026.11.10).
+            end_return("given up: its jump up did not get there");
+            back_walk_end("the way back's jump up did not get there");
             ++return_strikes_;
             ++minute_return_give_ups_;
             {

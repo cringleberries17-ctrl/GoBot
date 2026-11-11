@@ -147,6 +147,10 @@ struct World {
     int           lead = 0;             ///< how far the working-out has run past the character
     float         report_x = 0.0f, report_y = 0.0f;
     std::uint64_t report_ms = 0;
+    /// Which report placed it, by its opcode, and your 0x002A so far
+    /// (WorldFix::report_op, air_reports): 0, as unless set, judges no rise.
+    std::uint16_t report_op = 0;
+    std::uint64_t air_reports = 0;
     /// Which way the packets say the character faces (WorldFix::facing), and
     /// when a report said so -- set by the test: 0, as here unless set, the
     /// packets do not know, and nothing of the hunter's turning changes.
@@ -221,6 +225,8 @@ struct HuntRig {
                 f.epoch = w.epoch;
                 f.entry_x = w.entry_x;
                 f.entry_y = w.entry_y;
+                f.report_op = w.report_op;
+                f.air_reports = w.air_reports;
                 return true;
             };
         }
@@ -1321,21 +1327,24 @@ void test_spot_walk_back() {
     section("Chỗ đánh quái: nothing to fight away from the spot -- walked back after a moment, let go of there");
 
     {
+        // Inside its area (340..940): the walk back once nothing has been
+        // fought for a while. Further out, the walk back first goes at once
+        // (2026.11.10, test_spot_back_walk).
         HuntRig r(spotted(), false, true);
         r.w.step_px = 20;
         const std::uint64_t t0 = r.w.t;
         r.pass();
-        r.w.me_x = 1100;                        // pushed 460 px to the right
+        r.w.me_x = 900;                         // pushed 260 px to the right
         while (r.w.t < t0 + 1500) r.pass();
         const bool waited = r.w.presses.empty() && r.hunter.status().state == Hunter::State::NoTargets;
         r.pass();
         const Hunter::Status going = r.hunter.status();
         const bool went = r.w.held.count(VK_LEFT) == 1 && going.state == Hunter::State::Returning &&
-                          going.returns == 1 && std::abs(going.spot_dx + 460.0f) < 0.5f;
+                          going.returns == 1 && std::abs(going.spot_dx + 260.0f) < 0.5f;
         r.run(2000);
         const Hunter::Status st = r.hunter.status();
         check(waited, "nothing for spot_return_delay_ms, 1.5 s");
-        check(went, "then the left arrow held: Returning, one walk back, the spot 460 px to the left");
+        check(went, "then the left arrow held: Returning, one walk back, the spot 260 px to the left");
         check(r.w.held.empty() && std::abs(r.w.me_x - 640) <= 48 && walks_of(r.w, VK_LEFT) == 1 &&
                   r.w.of(VK_RIGHT).empty() && st.state == Hunter::State::NoTargets && st.returns == 1 &&
                   st.return_give_ups == 0,
@@ -1353,7 +1362,7 @@ void test_spot_walk_back() {
         r.w.step_px = 20;
         const std::uint64_t t0 = r.w.t;
         r.pass();
-        r.w.me_x = 1100;
+        r.w.me_x = 900;                         // inside its area: no walk back first
         while (r.w.held.empty() && r.w.t < t0 + 3000) r.pass();
         r.pass();
         const bool walking = r.w.held.count(VK_LEFT) == 1;
@@ -1361,7 +1370,8 @@ void test_spot_walk_back() {
         r.pass();
         check(walking && r.w.held.empty() && !r.w.of('Z').empty() &&
                   r.hunter.status().state == Hunter::State::Attacking,
-              "walking back, a monster comes within reach: the walk let go of and the monster attacked in that pass");
+              "walking back inside the area, a monster comes within reach: the walk let go of and the monster "
+              "attacked in that pass");
     }
     {
         HuntRig r(spotted(), false, true);
@@ -1420,6 +1430,145 @@ void test_spot_walk_back() {
     }
 }
 
+/// The owner's answer of 2026-11-10 ("Ngưng đánh, đi về trước") with this
+/// run's own spot: pushed more than 60 px out of its area under Đứng yên, a
+/// monster inside the area within reach -- not attacked until the character
+/// is back inside; along the ground, no hop.
+void test_spot_back_walk() {
+    section("Chỗ đánh quái (2026.11.10): pushed 160 px out of this run's area under Đứng yên, a monster in the area "
+            "within reach -- walked back first along the ground, nothing fought until inside");
+
+    HunterConfig cfg = spotted();
+    cfg.stay_put = true;
+    cfg.reach = 450;
+    cfg.jump_key = VK_UP;                       // a hop would show
+    bool walked_at_once = false, held_edge = false, returning = false;
+    int z_out = 0, rights_out = 0, first_z_x = -1;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(cfg, false, true);
+        r.w.step_px = 20;
+        r.pass();                               // the spot at 640 (world 4640), its area 340..940
+        r.w.me_x = 1100;                        // pushed 460 px right: 160 px outside it
+        r.w.mobs = { plate(900, 400, "Trong") };    // inside the area, 200 px off: within reach
+        const std::uint64_t t0 = r.w.t;
+        std::size_t last_z = 0, last_right = 0;
+        int prev = r.w.me_x;
+        r.run(3000, [&] {
+            const Hunter::Status st = r.hunter.status();
+            const std::size_t z = r.w.of('Z').size(), right = r.w.of(VK_RIGHT).size();
+            if (z > last_z && prev > 940) ++z_out;
+            if (z > last_z && first_z_x < 0) first_z_x = prev;
+            if (right > last_right && prev > 940) ++rights_out;
+            if (prev > 940 && prev <= 940 + kZoneOutsideBackPx && st.spot_back_walk) held_edge = true;
+            if (prev > 940 && r.hunter.returning() && st.state == Hunter::State::Returning) returning = true;
+            if (walks_of(r.w, VK_LEFT) == 1 && r.w.presses.front().at <= t0 + 60) walked_at_once = true;
+            last_z = z;
+            last_right = right;
+            prev = r.w.me_x;
+        });
+        check(r.w.of(VK_UP).empty() && r.w.of(VK_DOWN).empty(), "no hop on the jump key out there, no Down");
+    });
+    check(walked_at_once && z_out == 0 && rights_out == 0 && first_z_x >= 0 && first_z_x <= 940,
+          "walked left at once, no spot_return_delay_ms; the monster in the area within reach never attacked from "
+          "outside, no turn right out there; first attacked from " + std::to_string(first_z_x) + ", inside");
+    check(held_edge && returning, "held past the 60 px edge, the macro told it walks back (returning)");
+    check(lines_with(log, "Hunter: 160 px outside the hunting area -- no fight until the character is back inside "
+                          "it: walking back first, toward the spot 4640,1100") == 1 &&
+              lines_with(log, "Hunter: walking back to the hunting spot: 460 px left, 0 px down -- first, along the "
+                              "ground, no hop") == 1,
+          "said, once each");
+    // Too high: never latched, as TooHigh never walks.
+    {
+        HuntRig r(cfg, false, true);
+        r.pass();
+        r.w.me_x = 1100;
+        r.w.me_y = 600;                         // the spot 200 px above
+        r.w.mobs = { plate(1150, 600, "Gan") };
+        r.run(1000);
+        check(!r.hunter.status().spot_back_walk && !r.w.of('Z').empty() && walks_of(r.w, VK_LEFT) == 0,
+              "the spot more than one jump above: no walk back first -- the monster in reach fought");
+    }
+}
+
+/// A jump inside this run's area whose arc peaks over the box's top is no way
+/// out of it (2026.11.10, the review's WALK-2): how far outside is judged where
+/// it took off, as the map's branch does -- never latched mid-flight, the
+/// fight and its target let go of.
+void test_spot_jump_arc() {
+    section("Chỗ đánh quái (2026.11.10): a jump from a ledge inside the area, its arc 90 px over the box's top -- no "
+            "walk back first, the fight kept");
+
+    HunterConfig cfg = spotted();
+    cfg.stay_put = true;
+    cfg.reach = 450;
+    std::string before, after;
+    bool latched = false, out_said = false;
+    int most_out = 0;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(cfg, false, true);
+        r.pass();                               // the spot at 640,400 (world 4640,1100): box 340..940 x 1000..1200
+        r.w.me_x = 800;                         // on a ledge 60 px up, inside, 160 px across
+        r.w.me_y = 340;
+        r.w.mobs = { plate(900, 340, "Gan") };
+        r.run(600);
+        before = r.target();
+        r.w.airborne = true;                    // up to 130 px over the ledge: 90 px over the box's top
+        for (const int up : { 40, 80, 130, 130, 130, 80, 40 }) {
+            r.w.me_y = 340 - up;
+            r.pass();
+            const Hunter::Status st = r.hunter.status();
+            latched = latched || st.spot_back_walk || st.spot_back_first;
+            most_out = std::max(most_out, st.spot_outside_px);
+        }
+        r.w.airborne = false;
+        r.w.me_y = 340;
+        r.run(300);
+        latched = latched || r.hunter.status().spot_back_walk;
+        after = r.target();
+    });
+    for (const std::string& l : log)
+        if (l.find("outside the hunting area -- no fight until") != std::string::npos ||
+            l.find("the walk back first is over") != std::string::npos ||
+            l.find("walking back into the hunting area first") != std::string::npos)
+            out_said = true;
+    check(before == "Gan" && !latched && most_out == 0,
+          "in the air over the box's top: outside 0 px as it took off, never latched -- outside at most " +
+              std::to_string(most_out) + " px");
+    check(after == "Gan" && !out_said, "landed: the same fight on, no walk back first said or ended");
+}
+
+/// A place no floor can be is no spot (2026.11.10): 999,0 at t1901_s2's right
+/// wall, at 21:11:21.
+void test_spot_plausible() {
+    section("Chỗ đánh quái (2026.11.10): a report at y 0, or one far above with no jump between, is no spot");
+
+    HunterConfig cfg = spotted();
+    bool zero = false, rose = false, next = false;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(cfg, false, true);
+        r.w.report_op = 0x0027;
+        r.w.world_dy = -400;                    // y 0 at the screen's 400
+        r.pass();
+        zero = !r.hunter.spot().set;
+        r.w.world_dy = 700;                     // on the ground again: taken
+        r.pass();
+        const bool ground = r.hunter.spot().set && r.hunter.spot().y == 1100.0f;
+        r.hunter.retake_spot();
+        r.w.world_dy = 500;                     // 200 px above, nothing of a jump between
+        r.pass();
+        rose = ground && !r.hunter.spot().set;
+        r.w.reports = true;
+        r.pass();                               // the next report up there: a climb, taken
+        next = r.hunter.spot().set && r.hunter.spot().y == 900.0f;
+    });
+    check(zero, "y 0: no spot taken there");
+    check(rose && next, "200 px above the last ground report with no jump of yours between: not taken; the next "
+                        "report up there is");
+    check(lines_with(log, "Hunter: a report of yours at 4640,0 not taken for the hunting spot -- y 0 is no place to "
+                          "stand (opcode 0x0027)") == 1,
+          "said with the report's opcode");
+}
+
 void test_spot_give_up() {
     section("Chỗ đánh quái: a walk back the reports say gets nowhere is given up on, tried again, and stopped");
 
@@ -1434,6 +1583,9 @@ void test_spot_give_up() {
         r.pass();
         r.w.reports = false;
         std::vector<std::uint64_t> tries, gave;
+        // 160 px out of the area: the walk back first went at that look
+        // (2026.11.10), not 1.5 s on.
+        if (r.hunter.status().returns == 1) tries.push_back(r.w.t - 60);
         bool worked_out_home = false;
         const std::vector<std::string> log = info_lines([&] {
             r.run(125'000, [&] {
@@ -1542,8 +1694,11 @@ void test_spot_heights() {
               "100 px below: walked toward along the ground -- no jump, never Down -- to within 48 px of its x");
     }
     {
+        // An area wide enough to be inside it: further out, the walk back
+        // first goes along the ground with no hop (2026.11.10).
         HunterConfig cfg = spotted();
         cfg.jump_key = VK_UP;
+        cfg.spot_half_w = 1000;
         HuntRig r(cfg, false, true);
         r.w.step_px = 20;
         r.pass();
@@ -1562,8 +1717,11 @@ void test_spot_heights() {
         // The edges: kSpotFloorPx (31) of rise is the same floor -- a slope,
         // walked up with no hop, as a hop may land the character on the
         // platform above -- and kOneJumpPx (120) the most one jump reaches.
+        // Inside a wide area, as above.
         HunterConfig cfg = spotted();
         cfg.jump_key = VK_UP;
+        cfg.spot_half_w = 1000;
+        cfg.spot_half_h = 200;
         HuntRig slope(cfg, false, true);
         slope.w.step_px = 20;
         slope.pass();
@@ -2380,8 +2538,14 @@ void test_zone_doors() {
               "a map entry suspends it as any spot; the door back near where it left: in use again, the tab's "
               "area sent for that entry with it");
     }
-    {
+    for (const bool reports : { false, true }) {
+        // Another door onto its own map and place, 600 px from where it left
+        // and 300 px outside it (2026.11.10; t1901_s2's doors at 64,620, 275
+        // px from the box): taken back once the map has loaded -- a report of
+        // yours since the entry, or Hunter::kDoorLoadMs -- and walked back to
+        // first. Before that it waits, Loading, and nothing walks.
         HuntRig r(spotted(), false, true);
+        r.w.step_px = 20;
         r.hunter.set_zone(zone_here());
         r.pass();
         r.w.epoch = 2;
@@ -2389,23 +2553,100 @@ void test_zone_doors() {
         r.w.entry_x = 20000.0f;
         r.w.me_x = 16000;
         r.pass();
-        r.w.epoch = 3;                              // another door onto its map, 600 px from where it left
+        r.w.reports = reports;
+        r.w.epoch = 3;
         r.w.map = 11;
         r.w.entry_x = 5240.0f;
         r.w.me_x = 1240;
         r.pass();
         r.hunter.set_zone(zone_here(3));
         r.w.mobs = { plate(1440, 400, "Xa") };      // out of reach
-        r.run(1000);
-        const Hunter::Status st = r.hunter.status();
-        const bool waits = st.zone_wait == Hunter::ZoneWait::Outside && st.zone_wait_px == 300 &&
-                           r.hunter.spot().suspended && r.w.presses.empty();
-        r.w.mobs.clear();
-        r.w.me_x = 900;                             // walked into it by hand
         r.pass();
-        check(waits && from_map(r) && !r.hunter.spot().suspended && r.hunter.spot().epoch == 3,
-              "a door onto its map far from where it left, 300 px outside it: it waits and the character stands; "
-              "walked into it: taken");
+        const Hunter::Status st = r.hunter.status();
+        const bool loading = st.zone_wait == Hunter::ZoneWait::Loading && r.hunter.spot().suspended &&
+                             walks_of(r.w, VK_LEFT) == 0;
+        const std::uint64_t t1 = r.w.t;
+        while (r.hunter.spot().suspended && r.w.t < t1 + Hunter::kDoorLoadMs + 500) r.pass();
+        const std::uint64_t took = r.w.t - t1;
+        const bool taken = from_map(r) && !r.hunter.spot().suspended && r.hunter.spot().epoch == 3;
+        r.w.reports = true;
+        r.run(600);
+        const bool walking = walks_of(r.w, VK_LEFT) >= 1 && r.hunter.status().spot_back_walk && r.w.of('Z').empty();
+        if (!reports)
+            check(loading && taken && took >= Hunter::kDoorLoadMs - 120 && walking,
+                  "a door back onto its map 300 px outside it, no report of yours since: Loading, nothing walked, "
+                  "for kDoorLoadMs (" + std::to_string(took) + " ms); then taken back and walked back to first");
+        else
+            check(!loading && taken && took <= 120 && walking,
+                  "the same with a report of yours since the entry: taken back at once (" + std::to_string(took) +
+                      " ms) and walked back to first");
+    }
+    for (const std::uint16_t back_to : { std::uint16_t{ 11 }, std::uint16_t{ 13 } }) {
+        // Taken while the map was known only by name -- the capture started
+        // on the map, no entry seen, the tab naming it by standing points or
+        // "Dùng vùng" (the review's WALK-3): the spot has no map ids. A door
+        // back onto the place its stem names is a door back all the same;
+        // onto another place, it waits as before.
+        HuntRig r(spotted(), false, true);
+        r.w.step_px = 20;
+        r.w.map_known = false;
+        r.w.map = 0;
+        r.w.area = 0;
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        const bool named = from_map(r) && !r.hunter.spot().map_known;
+        r.w.map_known = true;
+        r.w.area = 1;
+        r.w.epoch = 2;                              // through a door, far away
+        r.w.map = 12;
+        r.w.entry_x = 20000.0f;
+        r.w.me_x = 16000;
+        r.pass();
+        r.w.reports = false;
+        r.w.epoch = 3;                              // another door back, 600 px from where it left
+        r.w.map = back_to;
+        r.w.entry_x = 5240.0f;
+        r.w.me_x = 1240;
+        r.pass();
+        r.hunter.set_zone(zone_here(3));
+        r.pass();
+        const bool loading = r.hunter.status().zone_wait == Hunter::ZoneWait::Loading && r.hunter.spot().suspended &&
+                             walks_of(r.w, VK_LEFT) == 0;
+        const std::uint64_t t1 = r.w.t;
+        while (r.hunter.spot().suspended && r.w.t < t1 + Hunter::kDoorLoadMs + 500) r.pass();
+        const bool taken = from_map(r) && !r.hunter.spot().suspended && r.hunter.spot().epoch == 3 &&
+                           r.hunter.spot().map_known && r.hunter.spot().map == 11;
+        r.w.reports = true;
+        r.run(600);
+        const Hunter::Status st = r.hunter.status();
+        if (back_to == 11)
+            check(named && loading && taken && walks_of(r.w, VK_LEFT) >= 1 && st.spot_back_walk &&
+                      r.w.of(VK_DOWN).empty(),
+                  "taken with the map only named, a door back onto t11_s1 300 px outside it: Loading, then taken "
+                  "back by its stem -- now with the map's ids -- and walked back to first, no Down");
+        else
+            check(named && !loading && !taken && r.hunter.spot().suspended &&
+                      st.zone_wait == Hunter::ZoneWait::Outside && walks_of(r.w, VK_LEFT) == 0,
+                  "the same, the door onto t13_s1, not the stem's place: no door back -- it waits outside, nothing "
+                  "walked");
+    }
+    {
+        // A door onto another map first, then its own map at another door,
+        // set aside by a log in in between: the log in's rule, not a door's.
+        HuntRig r(spotted(), false, true);
+        r.hunter.set_zone(zone_here());
+        r.pass();
+        r.hunter.suspend_spot();
+        r.pass();
+        r.w.epoch = 3;
+        r.w.entry_x = 5240.0f;
+        r.w.me_x = 1240;
+        r.run(600);
+        r.hunter.set_zone(zone_here(3));
+        r.run(600);
+        const Hunter::Status st = r.hunter.status();
+        check(st.zone_wait == Hunter::ZoneWait::Outside && st.zone_wait_px == 300 && r.hunter.spot().suspended,
+              "set aside by a log in, then an entry onto its map 300 px outside it: it waits, as before");
     }
     {
         // Logged back in: standing inside the area, but far from where the
@@ -2649,6 +2890,9 @@ void test_hunter_spot() {
     test_spot_area();
     test_spot_target_slack();
     test_spot_walk_back();
+    test_spot_back_walk();
+    test_spot_jump_arc();
+    test_spot_plausible();
     test_spot_give_up();
     test_spot_heights();
     test_spot_map_entry();

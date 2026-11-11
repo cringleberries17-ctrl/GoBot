@@ -216,7 +216,7 @@ std::uint32_t pressed_vk() {
         { ImGuiKey_UpArrow, VK_UP },        { ImGuiKey_DownArrow, VK_DOWN },
         { ImGuiKey_Insert, VK_INSERT },     { ImGuiKey_Home, VK_HOME },
         { ImGuiKey_End, VK_END },           { ImGuiKey_PageUp, VK_PRIOR },
-        { ImGuiKey_PageDown, VK_NEXT },
+        { ImGuiKey_PageDown, VK_NEXT },     { ImGuiKey_Delete, VK_DELETE },
         { ImGuiKey_LeftCtrl, VK_CONTROL },  { ImGuiKey_RightCtrl, VK_CONTROL },
         { ImGuiKey_LeftShift, VK_SHIFT },   { ImGuiKey_RightShift, VK_SHIFT },
         { ImGuiKey_LeftAlt, VK_MENU },      { ImGuiKey_RightAlt, VK_MENU },
@@ -809,8 +809,8 @@ void GuiApp::simple_jobs() {
     };
 
     // Empty boxes go once nothing is waiting to fill them -- a skill's, a
-    // buff's, a potion row's Lv2. A box with no key does nothing, and Delete
-    // on a key is how a player takes it off.
+    // buff's, a potion row's Lv2. A box with no key does nothing, and
+    // Backspace on a key is how a player takes it off.
     constexpr std::size_t kNone = static_cast<std::size_t>(-1);
     if (simple_listening_ == 0 && simple_listen_key_ == kNone && drop_empty_keys(keys))
         simple_changed();
@@ -1107,15 +1107,16 @@ void GuiApp::simple_jobs() {
             // Kept by value: a Lv2 made below may move every key.
             const std::uint32_t lv1_key = k.enabled ? k.keycode : 0;
             const int           lv1_pct = k.threshold_pct;
+            const std::uint32_t lv1_every = macro_potion_cooldown_ms(macro_config_, k);
 
             // Lv2: the second key of the kind, or an empty box that makes one.
-            // Emptied with Delete it is off, and gone from macro.ini once nothing
+            // Emptied with Backspace it is off, and gone from macro.ini once nothing
             // is waiting for a key (drop_empty_keys).
             label("Lv2: Phím");
             ImGui::SameLine();
             if (which.size() >= 2) {
                 MacroKey& k2 = keys[which[1]];
-                const std::string tip = lv2_tip(seconds_text(k2.interval_ms));
+                const std::string tip = lv2_tip(seconds_text(macro_potion_cooldown_ms(macro_config_, k2)));
                 const std::uint32_t before = k2.keycode;
                 if (simple_key_box("potion2", k2.keycode, true, !k2.enabled, tip.c_str())) {
                     // Filling in an empty box means "use this one".
@@ -1133,11 +1134,19 @@ void GuiApp::simple_jobs() {
                 else if (k2.keycode != 0 && k2.threshold_pct > lv1_pct)
                     small_note(kWait, std::string("Lv2 đang cao hơn Lv1: khi ") + vital +
                                           " dưới cả hai mức, chỉ Lv1 (mức thấp hơn) được uống.");
+                // On Lv1's key the two are one potion in the game and one
+                // wait here (MacroEngine): the second mark presses no more
+                // often (2026-11-10: Q under 90% and under 68%, no more
+                // presses than Q alone).
+                if (k2.enabled && k2.keycode != 0 && k2.keycode == lv1_key)
+                    small_note(kWait, "Lv2 cùng phím không bấm nhanh hơn: Lv1 và Lv2 trên một phím là một bình, "
+                                      "chung một lần chờ giữa hai lần bấm.");
             } else {
                 // Nothing there yet: the box makes the key once one is pressed,
                 // with what the second potion starts at shown greyed beside it.
                 MacroKey fresh = macro_potion_key(kind, 0, 2);
-                const std::string tip = room ? lv2_tip("3") : full;
+                const std::string tip =
+                    room ? lv2_tip(kind == MacroKeyKind::PetPotion ? seconds_text(lv1_every) : std::string("3")) : full;
                 ImGui::BeginDisabled(!room);
                 const bool made = simple_key_box("potion2", fresh.keycode, true, true, tip.c_str()) &&
                                   fresh.keycode != 0 && room;
@@ -1150,6 +1159,37 @@ void GuiApp::simple_jobs() {
                     keys.push_back(macro_potion_key(kind, fresh.keycode, 2));
                     simple_changed();
                 }
+            }
+
+            // The pet's: pressed over and over while it is under its mark,
+            // every N ms, one value for its Lv1 and Lv2 alike
+            // (MacroConfig::pet_every_ms, the owner's "Liên tục như GoC",
+            // 2026-11-10). Applied as it is dragged; written to macro.ini once
+            // let go of, not on every step of the drag. From the config and
+            // lv1_every, never `k`: a Lv2 made just above may have moved it.
+            if (kind == MacroKeyKind::PetPotion) {
+                constexpr int kLeast = static_cast<int>(MacroConfig::kPetEveryLeastMs);
+                constexpr int kMost = static_cast<int>(MacroConfig::kPetEveryMostMs);
+                int every = std::clamp(static_cast<int>(lv1_every), kLeast, kMost);
+                label("Bơm liên tục, mỗi");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(150);
+                if (ImGui::SliderInt("##pet_every", &every, kLeast, kMost, "%d ms", ImGuiSliderFlags_AlwaysClamp)) {
+                    // In tens of ms: a drag lands on 297 as often as on 300.
+                    macro_config_.pet_every_ms =
+                        static_cast<std::uint32_t>(std::clamp((every + 5) / 10 * 10, kLeast, kMost));
+                    apply_macro_config();
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit()) simple_changed();
+                static const std::string every_tip =
+                    "Khi máu pet dưới mức, bot bấm phím pet liên tục, cứ mỗi chừng này một lần (như GoC: 0,2–0,5 "
+                    "giây), tới khi máu pet lên lại. Dùng chung cho Lv1 và Lv2. Từ " +
+                    std::to_string(MacroConfig::kPetEveryLeastMs) + " tới " +
+                    std::to_string(MacroConfig::kPetEveryMostMs) + " ms; mặc định " +
+                    std::to_string(MacroConfig::kDefaultPetEveryMs) +
+                    " ms.\nKỹ năng không bị chậm lại: khi có kỹ năng tới lượt, pet và kỹ năng bấm xen kẽ. Bình HP "
+                    "và MP vẫn được bấm trước.";
+                ImGui::SetItemTooltip("%s", every_tip.c_str());
             }
         }
 
@@ -1271,8 +1311,9 @@ bool GuiApp::simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, b
     if (simple_listening_ == me) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             simple_listening_ = 0;
-        } else if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false) ||
-                   ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
+            // Backspace alone clears the box (2026.11.11): Delete is a key a
+            // potion or a skill may be on, set like any other (pressed_vk).
             if (can_clear && vk != 0) { vk = 0; changed = true; }
             simple_listening_ = 0;
         } else if (const std::uint32_t got = pressed_vk()) {
@@ -1320,10 +1361,10 @@ bool GuiApp::simple_key_box(const char* id, std::uint32_t& vk, bool can_clear, b
     if (listening && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsItemHovered())
         simple_listening_ = 0;
 
-    std::string help = listening ? (can_clear ? "Nhấn phím muốn dùng. Esc để huỷ, Delete để bỏ phím này."
+    std::string help = listening ? (can_clear ? "Nhấn phím muốn dùng. Esc để huỷ, Backspace để bỏ phím này."
                                               : "Nhấn phím muốn dùng. Esc để huỷ.")
                                  : "Bấm vào ô rồi nhấn phím muốn dùng.";
-    if (can_clear && !listening) help += "\nMuốn bỏ phím này: bấm vào ô rồi nhấn Delete.";
+    if (can_clear && !listening) help += "\nMuốn bỏ phím này: bấm vào ô rồi nhấn Backspace.";
     if (tip) { help += "\n"; help += tip; }
     if (dimmed && vk != 0 && !listening) help += "\nĐang tắt.";
     ImGui::SetItemTooltip("%s", help.c_str());
@@ -2358,7 +2399,11 @@ void GuiApp::simple_trash_tab() {
     }
     hint("Chọn món cần bỏ một lần ở dưới. Khi bot chạy, GoBot tự mở túi đồ, bỏ những món "
          "đó rồi đóng túi lại: lần đầu ngay sau khi bấm BẮT ĐẦU, sau đó theo giờ ở trên. "
-         "Đánh quái, bình và buff tạm dừng trong lúc dọn.");
+         "Trong lúc dọn, bot đứng yên không đánh quái; các phím chữ cái (Z, X, C, V…), Space, "
+         "Home, End, PgUp, PgDn, Insert và Delete của kỹ năng, bình và buff vẫn bấm giữa các lần "
+         "GoBot bấm chuột, khi không có hộp thoại nào mở. Phím số (bình, buff ở phím 1–9…) chờ dọn "
+         "xong mới bấm: muốn bình HP, MP được bấm trong lúc dọn thì đặt chúng ở phím chữ cái hoặc "
+         "Home, End, PgUp, PgDn, Insert, Delete.");
 
     // How fast GoBot presses in the bag jobs: one value for Dọn rác, Dùng bùa
     // and Tự mua bình (CleanSettings::press_ms).
@@ -2813,6 +2858,18 @@ void GuiApp::simple_trash_tab() {
     if (chat_open)
         coloured(kWait, "Ô chat trong game có thể đang mở: chưa dọn rác được cho đến khi ô chat đóng "
                         "(xem thẻ Tự chat).");
+    // The tabs a pass looks through (bag::pass_tabs): none, and the worker
+    // takes no hold and presses no key for a pass (2026.11.10); every item
+    // one of Tiêu Dùng's, and the other tabs ticked are passed over.
+    {
+        const bag::PassTabs looked = bag::pass_tabs(simple_clean_, simple_trash_);
+        bool others = false;
+        for (int t = 0; t < kBagTabs; ++t) others = others || (t != kUseTab && simple_clean_.tabs[t]);
+        if (looked.count == 0)
+            coloured(kWait, (std::string(looked.none_said()) + ".").c_str());
+        else if (looked.spend_only && others)
+            hint("Mọi món trong danh sách đều nằm ở ngăn Tiêu Dùng, nên khi dọn GoBot chỉ tìm ở ngăn đó.");
+    }
     hint("Thử tìm: mở túi đồ, xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. "
          "Khi một bước không được, GoBot giữ lại ảnh màn hình lúc đó trong thư mục "
          "trash_debug để sửa.");

@@ -92,12 +92,19 @@ void GuiApp::simple_spot_tick() {
                           : "bot dùng vùng đó khi nhân vật\nđứng trong vùng hoặc cách vùng không quá " +
                                 std::to_string(kZoneTakePx) +
                                 " px; ở xa hơn thì đánh ở chỗ đang đứng\ntới khi nhân vật đi vào vùng.";
+    // The walk back first (the owner's answer of 2026-11-10): the reach as
+    // hunt.ini has it, the edge as the hunter goes by it.
+    const std::string back =
+        "Quái trong tầm đánh (" + std::to_string(hunt_config_.reach) + " px) thì vẫn đánh, cả khi nhân vật ra ngoài\n"
+        "vùng chưa quá " + std::to_string(kZoneOutsideBackPx) + " px; hết quái thì bot tự đi bộ về chỗ. Bị đẩy ra "
+        "ngoài vùng quá " + std::to_string(kZoneOutsideBackPx) + " px thì\nbot ngưng đánh, về vùng trước: đi bộ "
+        "theo mặt đất, kỹ năng tạm dừng (bình và buff vẫn\nbấm), vào tới trong vùng rồi mới đánh tiếp. ";
     const std::string tip = trial_hint(
         kTrialSpot,
         ("Chỉ đi tới quái trong một vùng quanh chỗ đánh quái: chỗ nhân vật đứng yên trên mặt đất\n"
-         "lần đầu gói tin của game báo được vị trí sau khi bắt đầu (sau bước đi hay kỹ năng đầu tiên).\n"
-         "Quái trong tầm đánh thì vẫn đánh, dù ở ngoài vùng. Bị đẩy ra xa mà hết quái thì bot tự\n"
-         "đi bộ về chỗ. Không nhảy theo quái; đi về chỗ thì không bao giờ bấm ↓: chỗ thấp hơn\n"
+         "lần đầu gói tin của game báo được vị trí sau khi bắt đầu (sau bước đi hay kỹ năng đầu tiên).\n" +
+         back +
+         "Không nhảy theo quái; đi về chỗ thì không bao giờ bấm ↓: chỗ thấp hơn\n"
          "chỉ về được khi bục cho nhân vật đi rơi xuống từ mép bục. Có dấu Nhảy xuống bậc dưới:\n"
          "chỉ nhảy xuống tới quái, khi chỗ đứng, chỗ rơi xuống và con quái đều ở trong vùng.\n"
          "Có vùng vẽ ở tab Bản đồ và dấu Nhảy lên bục trên: về chỗ về bằng cách đi bộ, rơi xuống\n"
@@ -222,10 +229,18 @@ std::string GuiApp::spot_offset_vi(const Hunter::Status& hs) {
 }
 
 std::string GuiApp::spot_outside_vi(const Hunter::Status& hs) {
-    // The map tab's zone alone: this run's spot is said as it always was.
-    if (!hs.spot_from_map || hs.spot_outside_px <= 0) return {};
+    if (hs.spot_outside_px <= 0) return {};
+    // The map tab's zone; this run's spot only while its walk back first is
+    // on (2026.11.10) -- otherwise it is said as it always was.
+    const bool back = hs.spot_back_first || hs.spot_back_walk;
+    if (!hs.spot_from_map && !back) return {};
     const std::string out = "Nhân vật đang ở ngoài vùng " + std::to_string(hs.spot_outside_px) + " px";
-    const std::string way = std::to_string(hs.spot_way_x) + ", " + std::to_string(hs.spot_way_y);
+    // The way's point when there is one; a zone with no way -- its map's
+    // file not trusted this session, or the stop on none of its floors --
+    // walks toward its home, as the hunter's own log says.
+    const std::string way = hs.spot_from_map && hs.spot_way
+                                ? std::to_string(hs.spot_way_x) + ", " + std::to_string(hs.spot_way_y)
+                                : px(hs.spot_x) + ", " + px(hs.spot_y);
     // A way that jumps up on the way (2026.11.05b): the jump it starts with
     // said, or that it jumps further on.
     const std::string jump = !hs.spot_way || hs.spot_way_jumps <= 0 ? std::string()
@@ -233,14 +248,19 @@ std::string GuiApp::spot_outside_vi(const Hunter::Status& hs) {
                                  ? std::string(" (nhảy ") + jump_kind_key(hs.spot_way_jump_kind) + " ở x " +
                                        std::to_string(hs.spot_way_jump_x) + ")"
                                  : std::string(" (có nhảy lên trên đường về)");
-    // The owner's Q2 (zone_walks_back_first): far enough out, with a way back
-    // the map shows, the walk back comes before any fight.
-    if (hs.spot_back_first && !jump.empty()) return out + " — bot về " + way + jump + " trước, rồi mới đánh tiếp.";
-    if (hs.spot_back_first) return out + " — bot đi bộ về " + way + " trước, rồi mới đánh tiếp.";
+    // The owner's Q2 (zone_walks_back_first), and the answer of 2026-11-10
+    // ("Ngưng đánh, đi về trước"): far enough out, the walk back comes before
+    // any fight, and nothing is fought -- in the box or not -- until the
+    // character is inside it. Nearer the edge, what is in reach is fought,
+    // the reach said as hunt.ini has it.
+    if (back && !jump.empty())
+        return out + " — bot ngưng đánh, về vùng trước: về " + way + jump + ", vào tới trong vùng rồi mới đánh tiếp.";
+    if (back) return out + " — bot ngưng đánh, về vùng trước: đi bộ về " + way + ", vào tới trong vùng rồi mới đánh tiếp.";
+    const std::string reach = " (tầm đánh " + std::to_string(hunt_config_.reach) + " px)";
     if (hs.spot_way && !jump.empty())
-        return out + " — bot vẫn đánh quái trong tầm; hết quái thì về " + way + jump + ".";
-    if (hs.spot_way) return out + " — bot vẫn đánh quái trong tầm; hết quái thì đi bộ về " + way + ".";
-    return out + " — bot vẫn đánh quái trong tầm; hết quái thì đi về chỗ về.";
+        return out + " — bot vẫn đánh quái trong tầm" + reach + "; hết quái thì về " + way + jump + ".";
+    if (hs.spot_way) return out + " — bot vẫn đánh quái trong tầm" + reach + "; hết quái thì đi bộ về " + way + ".";
+    return out + " — bot vẫn đánh quái trong tầm" + reach + "; hết quái thì đi về chỗ về.";
 }
 
 void GuiApp::simple_spot_state(const Hunter::Status& hs) {
@@ -354,6 +374,9 @@ void GuiApp::simple_spot_state(const Hunter::Status& hs) {
         case Hunter::ZoneWait::Ahead:
             hint("Chờ nhân vật đứng yên trên mặt đất để dùng vùng đã lưu.");
             break;
+        case Hunter::ZoneWait::Loading:
+            hint("Vừa qua cửa về lại bản đồ này: chờ bản đồ tải xong rồi dùng lại vùng đã lưu và đi bộ về vùng.");
+            break;
         case Hunter::ZoneWait::None:
             break;
     }
@@ -408,8 +431,12 @@ std::string GuiApp::spot_positions_text() {
         // -- whether the walk back comes first, and to where (2026.11.04d).
         if (hs.spot_outside_px > 0) {
             out << ", outside the area " << hs.spot_outside_px << " px";
-            if (hs.spot_back_first)
+            // Latched too, past the edge (2026.11.10); this run's spot's way
+            // back is the spot itself, and so is a zone's with no way.
+            if ((hs.spot_back_first || hs.spot_back_walk) && hs.spot_from_map && hs.spot_way)
                 out << " (walking back first, to " << hs.spot_way_x << "," << hs.spot_way_y << ")";
+            else if (hs.spot_back_first || hs.spot_back_walk)
+                out << " (walking back first, to " << px(hs.spot_x) << "," << px(hs.spot_y) << ")";
         }
         // A way back that jumps up (2026.11.05b): how many, and the one it
         // starts with.
@@ -421,6 +448,8 @@ std::string GuiApp::spot_positions_text() {
     }
     if (hs.zone_wait == Hunter::ZoneWait::Outside)
         out << ", the map tab's area " << hs.zone_wait_stem << " waits outside " << hs.zone_wait_px << " px";
+    else if (hs.zone_wait == Hunter::ZoneWait::Loading)
+        out << ", the map tab's area " << hs.zone_wait_stem << " waits for the map to load (a door back)";
     else if (hs.zone_wait != Hunter::ZoneWait::None)
         out << ", the map tab's area " << hs.zone_wait_stem << " waits for the character to stand settled";
     out << ", returns " << hs.returns << ", given up " << hs.return_give_ups;

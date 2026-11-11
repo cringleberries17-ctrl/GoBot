@@ -11,6 +11,7 @@
 #include "gobot/crash_watch.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/reviver.hpp"
+#include "gobot/vitals_trust.hpp"
 #include "test_support.hpp"
 
 #include <windows.h>
@@ -1396,6 +1397,82 @@ void test_watch() {
     }
 }
 
+// ------------------------------------------- a death told by HP, doubted
+
+void test_death_doubt() {
+    section("Alerts: HP 0 off the screen while the frame is not the game's, the packets say alive or the "
+            "server is silent is no death (2026.11.10, 22:12:52)");
+
+    const std::uint64_t t0 = 1'000'000;
+    DeathDoubt in;
+    check(death_doubt(in, t0) == nullptr, "nothing doubts it: a death, as before");
+    in.game_in_front = false;
+    check(death_doubt(in, t0) == nullptr,
+          "the game behind another window, its frames drawn by the window itself: still the game's HUD");
+    in.from_screen = true;
+    const char* behind = death_doubt(in, t0);
+    check(behind != nullptr && contains(behind, "not in front"),
+          std::string("cut off the screen with another window in front: not the game's frame -- ") +
+              (behind ? behind : "none"));
+    in = DeathDoubt{};
+    in.packets_alive = true;
+    const char* alive = death_doubt(in, t0);
+    check(alive != nullptr && contains(alive, "packets say HP is above 0"),
+          std::string("the packets, usable now, say HP above 0 -- ") + (alive ? alive : "none"));
+
+    in = DeathDoubt{};
+    in.capture_on_window = true;
+    in.last_server_ms = t0 - kLinkQuietMs + 1;
+    check(death_doubt(in, t0) == nullptr, "the server heard within kLinkQuietMs: no doubt");
+    in.last_server_ms = t0 - 10'600;
+    const char* quiet = death_doubt(in, t0);
+    check(quiet != nullptr && contains(quiet, "silent"),
+          std::string("the server silent 10.6 s on the game's own capture, as at 22:12:52: doubted -- ") +
+              (quiet ? quiet : "none"));
+    in.last_server_ms = t0 - kDeathQuietMostMs - 1;
+    check(death_doubt(in, t0) == nullptr,
+          "silent over kDeathQuietMostMs: a capture gone wrong does not keep a death untold");
+    in.last_server_ms = t0 - 10'600;
+    in.capture_on_window = false;
+    check(death_doubt(in, t0) == nullptr, "a capture not the game window's own says nothing of its server");
+    in.capture_on_window = true;
+    in.last_server_ms = 0;
+    check(death_doubt(in, t0) == nullptr, "no server frame ever: nothing to go by");
+
+    // As alerts_tick drives it: doubted, the 3 s count again from its end --
+    // a real death is told, 3 s after nothing doubts it.
+    {
+        DeathByHp d(3000);
+        bool told_early = false;
+        for (std::uint64_t t = 0; t <= 5000; t += 250) told_early = told_early || d.step(false, 0, 14585, t);
+        check(!told_early && !d.step(true, 0, 14585, 5250) && !d.step(true, 0, 14585, 8000) &&
+                  d.step(true, 0, 14585, 8250),
+              "HP 0/14585 for 5 s doubted, then 3 s more with nothing doubting it: told at the end of those 3 s");
+    }
+
+#ifdef GOBOT_SOURCE_DIR
+    // The watch as GoBot's window drives it.
+    const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/simple_alerts.cpp");
+    const std::string part = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/packets_vitals.cpp");
+    if (gui.empty() || part.empty()) {
+        skip("the source tree is not here\n");
+    } else {
+        check(contains(gui, "doubt = death_doubt(death_doubt_now(now), now);") &&
+                  contains(gui, "ui.dead.step(by_hp && doubt == nullptr, v.hp, v.hp_max, now)") &&
+                  contains(gui, "on the screen -- not taken for a death: \" +") &&
+                  contains(gui, "log_later({ \"Alerts: HP reads 0/\"") && !contains(gui, "GB_INFO(\"Alerts: HP reads"),
+              "simple_alerts.cpp: HP 0 is counted toward a death only while nothing doubts it, and the doubt is "
+              "logged when it changes -- off the GUI thread (log_later)");
+        check(contains(part, "d.from_screen = vitals_.stats().capture_from_screen;") &&
+                  contains(part, "d.game_in_front = input_.window_focused();") &&
+                  contains(part, "vitals_usable(part->usable_in(*this, true, s), now) && s.v.hp > 0") &&
+                  contains(part, "d.last_server_ms = s.last_server_ms;"),
+              "packets_vitals.cpp: the frame's source, the front, the packets' HP only while usable, the server's "
+              "last frame");
+    }
+#endif
+}
+
 } // namespace
 
 void test_alerts(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -1414,4 +1491,5 @@ void test_alerts(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_local();
     test_settings();
     test_watch();
+    test_death_doubt();
 }

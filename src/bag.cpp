@@ -4,6 +4,7 @@
 #include "gobot/logger.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -188,6 +189,24 @@ constexpr int kBoxEnoughMs = 750;
 /// Two looks this far apart, at least, to take the item for gone after Xác
 /// Nhận -- or a dialog for another's: a frame caught being drawn is not.
 constexpr int kDoneApartMs = 150;
+/// How often a pass looks for what the game shows at once (2026.11.10; every
+/// 150 ms before): the bag opened by its key, within kBagOpenWaitMs; the item
+/// on the bin, within kInBinWaitMs; and the bin's dialogs (wait_for_dialog).
+/// Only the looks come sooner, and what each has to see is the same. Each
+/// wait is now bounded by the clock at what its looks used to sleep in all
+/// (1800, 1200, 2100 and 900 ms), the time the looks take no longer on top.
+constexpr int kQuickLookMs = 80;
+constexpr int kBagOpenWaitMs = 1800;
+constexpr int kInBinWaitMs = 1200;
+
+/// What a run says when a key of the macro's that its key window let through
+/// was not seen up before an input of its own (2026.11.10).
+const char* const kKeysLateVi = "một phím của macro chưa nhả kịp trước khi GoBot bấm chuột hay bấm phím, nên dừng";
+
+/// Milliseconds from `from` to `to`.
+int ms_between(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count());
+}
 
 /// How alike a slot has to stay to what it held before the drag for the item
 /// to count as still there.
@@ -1323,18 +1342,21 @@ bool CleanSettings::load(const std::string& path) {
     buy_potions      = ini.get_bool("Trash", "buy_potions", false);
     buy_every_minutes = std::clamp(ini.get_int("Trash", "buy_every_minutes", buy_every_minutes), kBuyEveryLeast,
                                    kBuyEveryMost);
-    // The slots each time: the file's own, else -- a file the card has not
-    // saved since 2026.11.09 -- the slots it bought up to then, else 3. Never
-    // left as an earlier reading had it. An old "below" of 0 or less left that
-    // potion alone ("0: không mua món này" on the card before), so its "to" is
-    // not bought: 0, until the card writes the new key.
+    // The slots each time: the file's own, kBuySlotsPerRunMost at most, else
+    // -- a file the card has not saved since 2026.11.09 -- the slots it bought
+    // up to then, kBuySlotsFromOldMost at most as 2026.11.09 read them (an
+    // upgraded file never buys more on its own), else 3. Never left as an
+    // earlier reading had it. An old "below" of 0 or less left that potion
+    // alone ("0: không mua món này" on the card before), so its "to" is not
+    // bought: 0, until the card writes the new key.
     const auto slots = [&](const char* key, const char* before, const char* below) {
         const bool left_alone = ini.has_key("Trash", below) && ini.get_int("Trash", below, 1) <= 0;
-        const int n = ini.has_key("Trash", key)      ? ini.get_int("Trash", key, kBuySlotsDefault)
-                      : left_alone                   ? 0
-                      : ini.has_key("Trash", before) ? ini.get_int("Trash", before, kBuySlotsDefault)
-                                                     : kBuySlotsDefault;
-        return std::clamp(n, 0, kBuySlotsPerRunMost);
+        if (ini.has_key("Trash", key))
+            return std::clamp(ini.get_int("Trash", key, kBuySlotsDefault), 0, kBuySlotsPerRunMost);
+        if (left_alone) return 0;
+        if (ini.has_key("Trash", before))
+            return std::clamp(ini.get_int("Trash", before, kBuySlotsDefault), 0, kBuySlotsFromOldMost);
+        return kBuySlotsDefault;
     };
     buy_hp_slots     = slots("buy_hp_slots", "buy_hp_to", "buy_hp_below");
     buy_mp_slots     = slots("buy_mp_slots", "buy_mp_to", "buy_mp_below");
@@ -1839,6 +1861,25 @@ bool charm_cut(const Frame& cut, const BagLayout& l, const ItemCatalog& catalog)
     return !one.items.empty() && one.items.front().charm();
 }
 
+const char* PassTabs::none_said() const {
+    return count > 0 ? "" : ticked_any ? kNoUseTabVi : kNoTabVi;
+}
+
+PassTabs pass_tabs(const CleanSettings& s, const TrashList& list) {
+    PassTabs out;
+    // Every item an icon of the catalog's spend/ group, none of them a picture:
+    // those lie in Tiêu Dùng and nowhere else. An empty list narrows nothing.
+    out.spend_only = !list.items.empty();
+    for (const TrashList::Item& it : list.items)
+        out.spend_only = out.spend_only && it.file.empty() && it.id.rfind("spend/", 0) == 0;
+    for (int t = 0; t < kBagTabs; ++t) {
+        out.ticked_any = out.ticked_any || s.tabs[t];
+        out.tabs[t] = s.tabs[t] && (!out.spend_only || t == kUseTab);
+        if (out.tabs[t]) ++out.count;
+    }
+    return out;
+}
+
 } // namespace bag
 
 // ------------------------------------------------------------------ charm clock
@@ -1966,10 +2007,26 @@ const char* dialog_name(int kind) {
     }
 }
 
+namespace {
+
+/// search_counts's: frames searched by find_dialogs and shop_full_up.
+std::atomic<std::uint64_t> g_dialog_searches{ 0 };
+std::atomic<std::uint64_t> g_full_searches{ 0 };
+
+}  // namespace
+
+SearchCounts search_counts() {
+    SearchCounts c;
+    c.dialogs = g_dialog_searches.load(std::memory_order_relaxed);
+    c.full = g_full_searches.load(std::memory_order_relaxed);
+    return c;
+}
+
 std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store) {
     std::vector<Dialog> out;
     const Frame* pair = store.get(kConfirm);
     if (pair == nullptr || !f.valid()) return out;
+    g_dialog_searches.fetch_add(1, std::memory_order_relaxed);
 
     // Both drawings of the two buttons: the store's, and the question's own,
     // a pixel closer together.
@@ -2320,6 +2377,7 @@ Shop find_shop(const Frame& f, const TemplateStore& store) {
 bool shop_full_up(const Frame& f, const TemplateStore& store, ScreenRect* at) {
     const Frame* full = store.get(kShopFull);
     if (!f.valid() || full == nullptr) return false;
+    g_full_searches.fetch_add(1, std::memory_order_relaxed);
     const auto m = TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *full, kShopScore);
     if (!m.found) return false;
     // Its words as well: the picture is nearly all frame, and another message
@@ -2444,6 +2502,54 @@ std::int64_t shop_first_wait_s(std::int64_t saved_s, std::int64_t now_s, int eve
     return std::clamp<std::int64_t>(saved_s - now_s, least, interval);
 }
 
+ShopRide ride_turn(ShopRide was, bool shop_due, bool trash_on, bool cannot_pull, std::uint64_t now_ms,
+                   std::uint64_t last_pass_end_ms) {
+    if (!shop_due || !trash_on) return ShopRide::None;
+    if (was != ShopRide::None) return was;
+    const bool fresh = last_pass_end_ms != 0 && now_ms < last_pass_end_ms + kRideFreshMs;
+    return fresh || cannot_pull ? ShopRide::Alone : ShopRide::Pending;
+}
+
+const char* ride_refused(const RidePass& p) {
+    // A button's pass never buys, and a stop buys nothing more.
+    if (!p.timed) return "not a timed pass";
+    if (!p.ran) return "the pass did not run";
+    if (p.stopped) return "a stop";
+    if (p.look_only) return "a look only";
+    // What may be left in the bin, or up, keeps every key held off until the
+    // game shows nothing: no shop on top of it.
+    if (p.left_held) return "a pass begun with something maybe left in the bin";
+    if (p.keeps_hold) return "something may be left up, the hold kept";
+    if (p.board_up) return "the check-in board";
+    if (!p.bag_ran) return "the bag not searched";
+    if (p.trouble) return "the pass stopped early";
+    if (!p.hold_ours) return "the hold no longer the job's";
+    if (!p.shop_due) return "the shop no longer due";
+    return nullptr;
+}
+
+HpGates hp_gates(bool drinks, int hp_mark, int floor) {
+    (void)floor;
+    HpGates g;
+    g.drinks = drinks && hp_mark > 0;
+    // At any HP (2026.11.11b, the owner: "mua bình ở bất cứ mức máu nào",
+    // "Cả dọn rác"): the potions go between the job's clicks -- the macro's
+    // through the key window, or the job's own with the macro not running --
+    // and only the character down, its HP read under kJobDownHpPct, holds a
+    // job back or stops it.
+    g.start = kJobDownHpPct;
+    g.stop = kJobDownHpPct;
+    return g;
+}
+
+ShopEnd shop_end(const ShopRoundSeen& s) {
+    if (s.full) return ShopEnd::Full;
+    if (s.message) return ShopEnd::Message;
+    if (s.board_up || s.stopped || s.hp_cut || s.hold_lost || s.keys_late) return ShopEnd::Paused;
+    if (s.trouble) return ShopEnd::Trouble;
+    return ShopEnd::Clean;
+}
+
 bool shop_question(const Frame& f, const TemplateStore& store, const Dialog& d, const CountReader& counts,
                    float frame_score, bool check_box) {
     // The bin's questions and the registration's are other questions, told by
@@ -2501,12 +2607,14 @@ bool can_check_shop(const TemplateStore& store) {
 bool notice_up(const Frame& f, const TemplateStore& store) {
     // The wordless picture of a one-button message matches the bin's own
     // question at 0.84, so only with no dialog of two buttons up.
-    const Frame* notice = store.get(kNotice);
-    if (notice == nullptr || !f.valid() || !find_dialogs(f, store).empty()) return false;
-    return TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f).found;
+    if (store.get(kNotice) == nullptr || !f.valid()) return false;
+    return notice_up(f, store, find_dialogs(f, store));
 }
 
-bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band, ScreenRect* at, LoneOk* how) {
+namespace {
+
+/// lone_ok's button found by its pieces alone, before the dialogs are asked.
+bool lone_button(const Frame& f, const TemplateStore& store, const ScreenRect& band, ScreenRect* at, LoneOk* how) {
     LonePieces p;
     if (!f.valid() || !lone_pieces(store, p)) return false;
     const ScreenRect area = clamp_to(f, band);
@@ -2531,8 +2639,14 @@ bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band,
         if (how != nullptr) *how = seen;
         if (at != nullptr) *at = m.at;
     }
+    return found;
+}
+
+}  // namespace
+
+bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band, ScreenRect* at, LoneOk* how) {
     // And no dialog of two buttons anywhere: asked last, the dearest look.
-    return found && find_dialogs(f, store).empty();
+    return lone_button(f, store, band, at, how) && find_dialogs(f, store).empty();
 }
 
 ScreenRect message_band(const ScreenRect& pair) {
@@ -2549,6 +2663,20 @@ ScreenRect message_box(const ScreenRect& pair) {
 bool message_up(const Frame& f, const TemplateStore& store) {
     if (!f.valid()) return false;
     return notice_up(f, store) || lone_ok(f, store, ScreenRect{ 0, 0, f.width, f.height });
+}
+
+bool notice_up(const Frame& f, const TemplateStore& store, const std::vector<Dialog>& dialogs) {
+    // The frame's dialogs given: none of two buttons, then the notice's
+    // picture.
+    const Frame* notice = store.get(kNotice);
+    if (notice == nullptr || !f.valid() || !dialogs.empty()) return false;
+    return TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f).found;
+}
+
+bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band, const std::vector<Dialog>& dialogs) {
+    // As lone_ok, the frame's dialogs given -- asked first, as they cost
+    // nothing now: a dialog of two buttons up, no lone button is looked for.
+    return dialogs.empty() && lone_button(f, store, band, nullptr, nullptr);
 }
 
 bool can_see_windows(const TemplateStore& store) {
@@ -2647,6 +2775,10 @@ BagCleaner::BagCleaner(InputManager& input, const TemplateStore& store, Grab gra
 }
 
 bool BagCleaner::see(Frame& f) {
+    // When this look began, and whether the key window was shut all through
+    // it (2026.11.10): what a slot may be dragged from goes by it.
+    look_at_ = now();
+    look_shut_ = !keys_out_;
     if (!raw_grab_(f) || !f.valid()) {
         f = Frame{};
         return false;
@@ -2721,11 +2853,17 @@ void BagCleaner::pause_ms(int ms) {
     sleep(ms);
 }
 
+// Every input of the cleaner's own goes through one of these six, and each
+// shuts the key window first, the keys let through seen up (2026.11.10): no
+// key of the macro's is down with the bag key, a drag, a click or a typed
+// digit, nor goes down meanwhile.
 bool BagCleaner::click(int x, int y, bool need_front) {
+    if (!keys_shut()) return false;
     return hands_.click ? hands_.click(x, y) : click_game(x, y, false, need_front);
 }
 
 bool BagCleaner::drag(int fx, int fy, int tx, int ty) {
+    if (!keys_shut()) return false;
     if (hands_.drag) return hands_.drag(fx, fy, tx, ty);
     // As click_game: only onto the game, asked again as the button goes down,
     // the press carrying its point; and a stop before then moves nothing.
@@ -2736,16 +2874,19 @@ bool BagCleaner::drag(int fx, int fy, int tx, int ty) {
 }
 
 bool BagCleaner::press(std::uint32_t vk) {
+    if (!keys_shut()) return false;
     return hands_.key ? hands_.key(vk) : input_.key_press(vk);
 }
 
 bool BagCleaner::press_scan(std::uint32_t vk) {
+    if (!keys_shut()) return false;
     if (hands_.scan_key) return hands_.scan_key(vk);
     if (hands_.key) return hands_.key(vk);
     return input_.type_key(vk, false, 45, InputManager::KeyInject::Scancode);
 }
 
 bool BagCleaner::right_click(int x, int y) {
+    if (!keys_shut()) return false;
     // Pretend hands with no right click of their own are a test that never
     // meant one: nothing reaches the game.
     if (hands_.click || hands_.drag || hands_.key) return hands_.right_click ? hands_.right_click(x, y) : false;
@@ -2753,6 +2894,7 @@ bool BagCleaner::right_click(int x, int y) {
 }
 
 bool BagCleaner::double_click(int x, int y) {
+    if (!keys_shut()) return false;
     if (hands_.double_click) return hands_.double_click(x, y);
     if (hands_.click) return hands_.click(x, y) && hands_.click(x, y);
     // Pretend hands with no click of their own never meant one: nothing
@@ -2790,6 +2932,133 @@ void BagCleaner::say_not_made(InputManager::GameClick why, int x, int y) {
             GB_INFO("Trash: no click at %d,%d -- %s", x, y, InputManager::game_click_name(why));
             break;
     }
+}
+
+bool BagCleaner::keys_shut() {
+    if (!keys_out_ && !keys_late_) return true;
+    keys_out_ = false;
+    if (!keys_.shut || keys_.shut(kKeysUpWaitMs)) {
+        // Home, End, PgUp, PgDn, Insert or Delete let through (2026.11.11):
+        // the game may act on it a frame or two after its key-up -- a page or
+        // the shop's list scrolled, the box's caret moved -- so nothing of the
+        // run's own, nor the look it goes by, until kNavSettleMs after it. A
+        // letter or Space waits for nothing more, as before.
+        const int ago = keys_.nav_ago_ms ? keys_.nav_ago_ms() : -1;
+        if (ago >= 0 && ago < kNavSettleMs) pause_ms(kNavSettleMs - ago);
+        return true;
+    }
+    // A key of the macro's still down: nothing of the cleaner's goes with it.
+    // The run stops -- giving back what is out, each of those inputs asking
+    // again -- and the job says why.
+    if (!keys_late_) {
+        keys_late_ = true;
+        GB_WARN("Trash: a key the window let through was still down %d ms after it was shut -- the input is not "
+                "made, and the run stops",
+                kKeysUpWaitMs);
+    }
+    cancelled_ = true;
+    return false;
+}
+
+bool BagCleaner::keys_may_open(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up, int lone,
+                               bool full_asked) {
+    if (!keys_.open) return false;
+    return keys_clear(f, v, up, lone, full_asked);
+}
+
+bool BagCleaner::keys_clear(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up, int lone,
+                            bool full_asked) {
+    if (cancelled_ || keys_late_ || item_out_ || late_ask_ || money_ || !f.valid()) return false;
+    // Never in a charm run: the owner's "lúc dùng bùa thì không cần ra skill".
+    if (mode_ != Mode::Pass && mode_ != Mode::ShopBuy) return false;
+    // Nothing up of any kind -- a key may go into whatever is: a dialog (the
+    // shop's own Mua | Thoát are none), the question taken to be up, a
+    // message, the full-bag message, the check-in board; and in a pass the bag
+    // seen, nothing waiting in its bin. The frame searched for dialogs once,
+    // by the caller when it has (the review's T1 of 2026.11.10): each check
+    // as before, none of them made twice on one frame.
+    std::vector<bag::Dialog> found;
+    if (up == nullptr) {
+        found = bag::find_dialogs(f, store_);
+        up = &found;
+    }
+    if (mode_ == Mode::Pass && !clean(v, *up)) return false;
+    if (!shop_filter(*up).empty() || shop_q_.valid() || question_still(f)) return false;
+    const bool message = bag::notice_up(f, store_, *up) ||
+                         (lone < 0 ? bag::lone_ok(f, store_, ScreenRect{ 0, 0, f.width, f.height }, *up) : lone > 0);
+    return !(message || (!full_asked && bag::shop_full_up(f, store_)) || checkin_board_title(f, store_));
+}
+
+void BagCleaner::keys_open(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up, int lone,
+                           bool full_asked) {
+    if (keys_out_ || !keys_may_open(f, v, up, lone, full_asked)) return;
+    if (keys_.open()) keys_out_ = true;
+}
+
+bool BagCleaner::keys_settle() {
+    if (!keys_shut()) return false;
+    const int ago = keys_.potion_ago_ms ? keys_.potion_ago_ms() : -1;
+    if (ago >= 0 && ago < kPotionSettleMs) pause_ms(kPotionSettleMs - ago);
+    return !cancelled_;
+}
+
+bool BagCleaner::press_own_potion(const Frame& f, const BagView& v, const char* where,
+                                  const std::vector<bag::Dialog>* up, int lone, bool full_asked) {
+    // Asked of the look first: the due hook may say a key is refused (a
+    // digit), which is said once by whoever set it.
+    std::string line;
+    const std::uint32_t vk = own_potions_.due(line);
+    if (vk == 0 || !keys_clear(f, v, up, lone, full_asked)) return false;
+    // Through the run's own hands, as its bag key: the window -- there is
+    // none -- shut, nothing the macro's in flight.
+    if (!press(vk)) return false;
+    if (own_potions_.pressed) own_potions_.pressed(vk);
+    own_potion_at_ = now();
+    own_potion_any_ = true;
+    own_pressed_ = true;
+    GB_INFO("Trash: own potion press %s -- %s", where, line.c_str());
+    // What the potion may change -- the bag's counts, a slot emptied -- has
+    // come before the next look that is gone by.
+    sleep(kPotionSettleMs);
+    return !cancelled_;
+}
+
+bool BagCleaner::potion_break(const Frame& f, const BagView& v, const char* where, const std::vector<bag::Dialog>* up,
+                              int lone, bool full_asked, bool asked) {
+    // The macro not running (2026.11.11b): the run presses the potion itself.
+    if (own_potions_.due) return press_own_potion(f, v, where, up, lone, full_asked);
+    if (!keys_.potion_due || !keys_.potion_due()) return false;
+    // Opened as ever -- nothing up, nothing out, not in the money stretch, not
+    // a charm run -- or not at all. Open already, since a purchase's tail, it
+    // is kept open for the break only if `f` would open it now: keys_open asks
+    // nothing of a window open, and a message come up since is given no 400
+    // ms of keys (the review's KEYS-1). Not shut here when refused: the
+    // caller's own shut, and the look it takes after it, go on as with no
+    // break. Asked of `f` by the caller just now: not asked again.
+    if (!asked) {
+        if (!keys_out_) keys_open(f, v, up, lone, full_asked);
+        else if (!keys_may_open(f, v, up, lone, full_asked)) return false;
+    }
+    if (!keys_out_) return false;
+    int waited = 0;
+    while (waited < kPotionBreakMs && !cancelled_ && keys_.potion_due()) {
+        sleep(kPotionBreakStepMs);
+        waited += kPotionBreakStepMs;
+    }
+    GB_INFO("Trash: potion break %s -- the key window open %d ms for an HP or MP potion due%s", where, waited,
+            waited >= kPotionBreakMs ? ", one still due" : "");
+    return true;
+}
+
+bool BagCleaner::drag_grade(std::chrono::steady_clock::time_point at, bool shut) const {
+    // A potion the run pressed itself (2026.11.11b): only from a look begun
+    // kPotionSettleMs after it.
+    if (own_potion_any_ && at - own_potion_at_ < std::chrono::milliseconds(kPotionSettleMs)) return false;
+    if (!keys_.open) return true;       // no window: as ever
+    if (!shut) return false;
+    const int ago = keys_.potion_ago_ms ? keys_.potion_ago_ms() : -1;
+    if (ago < 0) return true;
+    return at - (now() - std::chrono::milliseconds(ago)) >= std::chrono::milliseconds(kPotionSettleMs);
 }
 
 bool BagCleaner::grab_view(Frame& f, BagView& v) {
@@ -2842,7 +3111,11 @@ bool BagCleaner::clean(const Frame& f, const BagView& v) {
     // A bin out of the frame is taken for empty: nothing can be seen or put
     // there, and with no dialog up nothing in it takes a key. A pass, which
     // would put items there, stops on it before this is asked (run).
-    return v.found && (v.bin_empty || !v.bin_on_frame) && bag::find_dialogs(f, store_).empty();
+    return bin_clear(v) && bag::find_dialogs(f, store_).empty();
+}
+
+bool BagCleaner::clean(const BagView& v, const std::vector<bag::Dialog>& up) {
+    return bin_clear(v) && up.empty();
 }
 
 bool BagCleaner::mouse_ok(int x, int y, bool need_front) {
@@ -2916,6 +3189,14 @@ bool BagCleaner::scroll_arrow(bool down, BagView& v) {
 
 BagCleaner::Result BagCleaner::run() {
     Result res = run_pass();
+    // A key of the macro's not seen up before an input of the run's own
+    // (2026.11.10): said, whatever else stopped it.
+    if (keys_late_ && res.trouble.find(kKeysLateVi) == std::string::npos)
+        res.trouble += std::string(res.trouble.empty() ? "" : "; ") + kKeysLateVi;
+    res.keys_late = keys_late_;
+    // Nor left open for whoever holds the keys next: the job's own end shuts
+    // it too (PassKeysScope).
+    keys_shut();
     // A charm run's own message not seen closed -- left by a stop, the mouse
     // not to be had, or come too late to watch for -- is the next run's to
     // close (set_own_notice); one two clicks did not close is the player's.
@@ -2945,12 +3226,26 @@ BagCleaner::Result BagCleaner::run_pass() {
     item_out_ = false;
     late_ask_ = false;
     board_said_ = false;
+    keys_late_ = false;
+    money_ = false;
     // A round of the shop with nothing to buy presses nothing at all, the bag
     // key included.
     if (mode_ == Mode::ShopBuy && !dry_run_ && shop_plan_hp_ + shop_plan_mp_ <= 0) {
         say("không có lần mua nào (cả hai số ô đều là 0), nên không mở túi đồ");
         return res;
     }
+    // Nor a pass with no tab to look through (2026.11.10): it would open the
+    // bag and shut it again, and delete nothing. Only to give back what an
+    // earlier one may have left in the bin does it go on.
+    const bag::PassTabs pass_tabs = bag::pass_tabs(settings_, *trash_);
+    if (mode_ == Mode::Pass && pass_tabs.count == 0 && !left_held_) {
+        res.trouble = pass_tabs.none_said();
+        return res;
+    }
+
+    // How long the steps of a pass took, for one line at its end.
+    const auto pass_from = now();
+    int open_ms = -1, open_looks = 0;
 
     Frame f;
     BagView v;
@@ -3029,12 +3324,16 @@ BagCleaner::Result BagCleaner::run_pass() {
         return res;
     }
     if (!v.found) {
+        const auto key_at = now();
         press(settings_.bag_key);
         opened_here = true;
-        for (int i = 0; i < 12 && !v.found; ++i) {
-            if (!wait_ms(150)) return res;
+        // Looked for every kQuickLookMs, for as long as ever.
+        while (!v.found && ms_between(key_at, now()) < kBagOpenWaitMs) {
+            if (!wait_ms(kQuickLookMs)) return res;
+            ++open_looks;
             grab_view(f, v);
         }
+        open_ms = ms_between(key_at, now());
         if (!v.found) {
             keep(f, "bag_not_found");
             res.trouble = "không mở được túi đồ (phím " + InputManager::key_name(settings_.bag_key) +
@@ -3219,8 +3518,27 @@ BagCleaner::Result BagCleaner::run_pass() {
     int done = 0, uses = 0;
     bool stop = false;
     bool colour_said = false;        // a charm of a colour not sure, said once a pass
+    // Only Tiêu Dùng when every item on the list lies there (bag::pass_tabs).
+    if (pass_tabs.spend_only) {
+        std::string passed_over;
+        for (int t = 0; t < kBagTabs; ++t)
+            if (settings_.tabs[t] && !pass_tabs.tabs[t])
+                passed_over += std::string(passed_over.empty() ? "" : ", ") + bag_tab_name(t);
+        if (!passed_over.empty())
+            GB_INFO("Trash: every item on the list is a spend/ icon -- only Tiêu Dùng looked through, not %s",
+                    passed_over.c_str());
+    }
+    // Each tab's steps, for the pass's line.
+    struct TabSteps {
+        int tab = 0, select = -1, top = -1, use = -1, pages = 1, scroll = 0, items = 0, item_ms = 0;
+    };
+    std::vector<TabSteps> tab_steps;
     for (int tab = 0; tab < kBagTabs && !stop && !cancelled_; ++tab) {
-        if (!settings_.tabs[tab]) continue;
+        if (!pass_tabs.tabs[tab]) continue;
+        tab_steps.push_back(TabSteps{});
+        TabSteps& took = tab_steps.back();
+        took.tab = tab;
+        auto step_from = now();
 
         // The game on top where the tab is, whether or not it needs a click:
         // a pass that cannot click does not start judging. Then the tab
@@ -3247,7 +3565,10 @@ BagCleaner::Result BagCleaner::run_pass() {
                 break;
             }
         }
+        took.select = ms_between(step_from, now());
+        step_from = now();
         scroll_to_top(v);
+        took.top = ms_between(step_from, now());
 
         // On Tiêu Dùng, the items on the Dùng list are registered before
         // anything there is deleted, as GoC orders its pass: an item to be
@@ -3256,7 +3577,13 @@ BagCleaner::Result BagCleaner::run_pass() {
         // not unless [Trash] use_fragments says so: the picture is shipped,
         // and its being there is no say-so.
         if (tab == kUseTab && any_use && can_use && settings_.use_fragments && !dry_run_) {
+            step_from = now();
+            // Every look of the sweep taken with the key window shut and a
+            // potion let through waited out: a right-click there uses what it
+            // lands on (2026.11.10).
+            if (!keys_settle()) break;
             use_sweep(tab, v, res, stop, used, no_use, uses, registered);
+            took.use = ms_between(step_from, now());
             if (stop || cancelled_) break;
             scroll_to_top(v);
         }
@@ -3271,19 +3598,45 @@ BagCleaner::Result BagCleaner::run_pass() {
 
         int scrolls = 0;
         bool hid_pointer = false;
+        // The last look of an item seen gone, with nothing at all up on it,
+        // handed over by trash_one: the next round judges on it, nothing
+        // having been pressed since (2026.11.10). Only then.
+        Frame handed_f;
+        BagView handed_v;
+        bool handed = false;
+        // When the look a round judges on was begun, and whether the key
+        // window was shut all through it -- the one handed over too; and a
+        // round to judge again with the window shut (2026.11.10).
+        auto handed_at = now();
+        bool handed_shut = true;
+        bool relook = false;
         for (int round = 0; round < 200 && !stop && !cancelled_; ++round) {
             // A fresh look every time: after an item is thrown away, or fails
             // to be, the screen is not what it was.
-            if (!grab_view(f, v)) {
+            const bool fresh = !handed;
+            auto f_at = handed_at;
+            bool f_shut = handed_shut;
+            if (handed) {
+                std::swap(f, handed_f);
+                v = handed_v;
+                handed = false;
+            } else if (!grab_view(f, v)) {
                 res.trouble = "mất dấu túi đồ";
                 stop = true;
                 break;
+            } else {
+                f_at = look_at_;
+                f_shut = look_shut_;
             }
             // Never a slot judged while the bin holds something or a dialog
             // is up: the slot an item was dragged from shows an enlarged copy
             // of it until it is gone or given back, and that copy is no item
-            // to drag. Looking only says what is in the way and stops.
-            if (!clean(f, v)) {
+            // to drag. Looking only says what is in the way and stops. A look
+            // handed over was seen clean already. A fresh one is searched for
+            // dialogs once: the key window goes by the same (2026.11.10).
+            std::vector<bag::Dialog> up;
+            if (fresh && bin_clear(v)) up = bag::find_dialogs(f, store_);
+            if (fresh && !clean(v, up)) {
                 if (dry_run_) {
                     res.trouble = "thùng rác đang có đồ chờ xoá hoặc có hộp thoại đang mở; "
                                   "xong việc đó trong game rồi thử lại";
@@ -3300,6 +3653,21 @@ BagCleaner::Result BagCleaner::run_pass() {
                 }
                 continue;
             }
+            // The macro's letter and Space keys go on while the page is judged
+            // (2026.11.10) -- not on a look to drag from: a slot found on one
+            // taken with the window open is looked at again with it shut.
+            if (fresh && !relook) {
+                keys_open(f, v, &up);
+                if (keys_out_) f_shut = false;
+            } else if (!fresh && potion_break(f, v, "between two items")) {
+                // Between two items, on the look the last one handed over
+                // clean, an HP or MP potion due (2026.11.11): the window open
+                // for it a moment -- the slot found next is then looked at
+                // again with it shut, half a second after the potion, as one
+                // found on any look taken open.
+                f_shut = false;
+            }
+            relook = false;
             // A tooltip over the grid hides rows; the pointer is moved off it
             // once rather than those rows skipped.
             if (v.slot_rows < l.rows && !v.at_bottom(l) && !hid_pointer) {
@@ -3470,8 +3838,26 @@ BagCleaner::Result BagCleaner::run_pass() {
                     stop = true;
                     break;
                 }
+                // Not dragged from a look the macro's keys may have changed
+                // since -- taken with the key window open, or less than
+                // kPotionSettleMs after a potion let through went down: the
+                // window shut, the potion waited out, and the page looked at
+                // again, this slot judged afresh (2026.11.10).
+                if (!drag_grade(f_at, f_shut)) {
+                    seen.erase(key);
+                    --res.matched;
+                    relook = true;
+                    break;
+                }
                 const int count = counts_ ? counts_->read(f, slots[s]) : CountReader::kUnreadable;
-                const bool gone = trash_one(f, v, static_cast<int>(s), count);
+                const bool gone = trash_one(f, v, static_cast<int>(s), count, &handed_f, &handed_v, &handed);
+                if (handed) {
+                    handed_at = look_at_;
+                    handed_shut = look_shut_;
+                }
+                GB_INFO("Trash: %s", item_times_line(std::string(where) + score, gone).c_str());
+                ++took.items;
+                took.item_ms += std::max(0, item_times_.total);
                 if (gone) {
                     ++done;
                     ++res.deleted;
@@ -3510,6 +3896,10 @@ BagCleaner::Result BagCleaner::run_pass() {
                 hid_pointer = false;        // it has been somewhere else since
                 break;
             }
+            if (relook) {
+                if (!keys_settle()) break;
+                continue;
+            }
             if (acted || stop) continue;
 
             // Nothing more on this page: the next rows, until the scroll bar
@@ -3524,7 +3914,11 @@ BagCleaner::Result BagCleaner::run_pass() {
                 break;
             }
             hid_pointer = false;
-            if (!scroll_arrow(true, v)) break;
+            step_from = now();
+            const bool scrolled = scroll_arrow(true, v);
+            took.scroll += ms_between(step_from, now());
+            if (!scrolled) break;
+            ++took.pages;
         }
     }
 
@@ -3551,7 +3945,23 @@ BagCleaner::Result BagCleaner::run_pass() {
                 res.trouble = "một hộp thoại hiện ra muộn sau khi bấm chuột phải vào món đồ; bấm Hủy Bỏ trong game";
         }
     }
+    const auto close_from = now();
     close_bag();
+    // How long its steps took (2026.11.10): the bag opened, and for each tab
+    // its click, its top, the use sweep, its pages and scrolling, its items.
+    std::string line = opened_here ? "bag opened in " + std::to_string(open_ms) + " ms (" +
+                                         std::to_string(open_looks) + (open_looks == 1 ? " look)" : " looks)")
+                                   : std::string("bag open already");
+    for (const TabSteps& t : tab_steps) {
+        line += std::string("; ") + bag_tab_name(t.tab) + ": tab " + std::to_string(t.select) + " ms, top " +
+                std::to_string(t.top) + " ms";
+        if (t.use >= 0) line += ", use sweep " + std::to_string(t.use) + " ms";
+        line += ", " + std::to_string(t.pages) + (t.pages == 1 ? " page" : " pages") + " (scrolling " +
+                std::to_string(t.scroll) + " ms), " + std::to_string(t.items) +
+                (t.items == 1 ? " item" : " items") + " in " + std::to_string(t.item_ms) + " ms";
+    }
+    if (opened_here) line += "; bag shut in " + std::to_string(ms_between(close_from, now())) + " ms";
+    GB_INFO("Trash: pass steps -- %s; %d ms in all", line.c_str(), ms_between(pass_from, now()));
     return res;
 }
 
@@ -3663,22 +4073,37 @@ bool BagCleaner::back_out() {
 bag::Dialog BagCleaner::wait_for_dialog(int ms, bool& foreign, Frame* last,
                                         const std::function<bool(const Frame&)>& done) {
     foreign = false;
-    int others = 0;
+    // Another's dialog: when first seen, and whether again kDoneApartMs on.
+    bool other_seen = false, other_again = false;
+    std::chrono::steady_clock::time_point other_at{};
     bool gone_seen = false;
     std::chrono::steady_clock::time_point gone_at{};
     // One frame for every look, grabbed into again rather than 3 MB made anew
-    // every 150 ms. The newest goes to `last` by a swap, which hands its old
+    // every look. The newest goes to `last` by a swap, which hands its old
     // buffer back for the next grab.
     Frame f;
-    for (int waited = 0; waited < ms; waited += 150) {
-        if (!wait_ms(150)) break;
+    // Up to `ms` by the clock, a look every kQuickLookMs -- but the look that
+    // is to see the item gone a second time, kDoneApartMs after the first and
+    // no sooner (2026.11.10).
+    const auto from = now();
+    while (ms_between(from, now()) < ms) {
+        const int pause = gone_seen ? std::max(kQuickLookMs, kDoneApartMs - ms_between(gone_at, now()))
+                                    : kQuickLookMs;
+        if (!wait_ms(pause)) break;
         if (!grab_ || !grab_(f) || !f.valid()) continue;
         const auto dialogs = bag::find_dialogs(f, store_);
         for (const bag::Dialog& d : dialogs)
             if (d.ours()) return d;
         // A dialog fading in can fail the words for a frame; one that is
-        // still not the bin's a frame later is not.
-        if (!dialogs.empty()) ++others;
+        // still not the bin's kDoneApartMs later is not.
+        if (!dialogs.empty()) {
+            if (!other_seen) {
+                other_seen = true;
+                other_at = now();
+            } else if (ms_between(other_at, now()) >= kDoneApartMs) {
+                other_again = true;
+            }
+        }
         // Nothing up and the item seen gone, twice, kDoneApartMs apart: the
         // bin asks again at once when it does at all, and while it has a
         // question to ask the slot still shows the item's enlarged copy.
@@ -3696,18 +4121,22 @@ bag::Dialog BagCleaner::wait_for_dialog(int ms, bool& foreign, Frame* last,
         }
         if (last) std::swap(*last, f);
     }
-    foreign = others >= 2;
+    foreign = other_again;
     return bag::Dialog{};
 }
 
-int BagCleaner::box_holds(const bag::Dialog& d, Frame& last) {
+int BagCleaner::box_holds(const bag::Dialog& d, Frame& last, int* reads_out) {
     // Every look until the caret has been on and off: one that reads a
     // number has to agree with every other that does, and a look that reads
     // nothing -- the dialog caught being drawn, say -- counts neither way.
     int value = CountReader::kUnreadable, reads = 0;
+    const auto said = [&](int n) {
+        if (reads_out) *reads_out = reads;
+        return n;
+    };
     const auto start = now();
     for (;;) {
-        if (!wait_ms(kBoxLookMs)) return CountReader::kUnreadable;     // stopped
+        if (!wait_ms(kBoxLookMs)) return said(CountReader::kUnreadable);     // stopped
         const bool long_enough = now() - start >= std::chrono::milliseconds(kBoxWatchMs);
         Frame f;
         if (grab_ && grab_(f) && f.valid()) {
@@ -3716,20 +4145,20 @@ int BagCleaner::box_holds(const bag::Dialog& d, Frame& last) {
                 there = there || (each.ours() && each.quantity && same_place(each.pair, d.pair));
             if (!there) {
                 last = std::move(f);
-                return kBoxGone;
+                return said(kBoxGone);
             }
             const int n = counts_ ? counts_->read_field(f, d.box) : CountReader::kUnreadable;
             last = std::move(f);
             if (n != CountReader::kUnreadable) {
-                if (reads > 0 && n != value) return kBoxMixed;
+                if (reads > 0 && n != value) return said(kBoxMixed);
                 value = n;
                 ++reads;
-                if (reads >= 3 && now() - start >= std::chrono::milliseconds(kBoxEnoughMs)) return value;
+                if (reads >= 3 && now() - start >= std::chrono::milliseconds(kBoxEnoughMs)) return said(value);
             }
         }
         if (long_enough) break;
     }
-    return reads >= 2 ? value : CountReader::kUnreadable;
+    return said(reads >= 2 ? value : CountReader::kUnreadable);
 }
 
 int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<bool(const Frame&)>& done) {
@@ -3756,7 +4185,9 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
             // under a pass; and a deletion cannot be undone. So the item goes
             // back instead: trash_one answers Hủy Bỏ.
             Frame f;
-            const int in_box = box_holds(d, f);
+            const auto box_from = now();
+            const int in_box = box_holds(d, f, &item_times_.box_reads);
+            item_times_.box = ms_between(box_from, now());
             if (cancelled_) return kFailed;
             if (in_box != count) {
                 const std::string slot = std::to_string(count) + " như trên ô đồ";
@@ -3780,7 +4211,9 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
         // Xác Nhận, the left half of the pair -- unless a stop came in the
         // meantime, which gives the item back instead of deleting it.
         if (cancelled_ || !mouse_ok(d.confirm_x(), d.y())) return kFailed;
+        const auto confirmed_at = now();
         click(d.confirm_x(), d.y());
+        ++item_times_.questions;
         // Off the button at once: lit with the pointer on it, the pair is not
         // the pair find_dialogs knows, and once the dialog is gone the pointer
         // would rest on the bag's grid, drawing an item's description there.
@@ -3789,15 +4222,18 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
         // Gone from where it was -- or replaced there by the bin's other
         // dialog, which is the next question rather than this one stuck. Gone
         // only where the game itself is on the screen there: a copy of the
-        // screen shows whatever lies over it.
+        // screen shows whatever lies over it. What the look that saw it gone
+        // found up is kept for the refusal's test below: one search a frame.
         bool closed = false;
         bag::Dialog then;
         Frame f;
+        std::vector<bag::Dialog> up;
         for (int i = 0; i < 12 && !closed; ++i) {
             if (!wait_ms(150)) return kFailed;
             if (!grab_ || !grab_(f) || !f.valid()) continue;
+            up = bag::find_dialogs(f, store_);
             bool still = false;
-            for (const bag::Dialog& each : bag::find_dialogs(f, store_)) {
+            for (const bag::Dialog& each : up) {
                 if (!same_place(each.pair, d.pair)) continue;
                 if (each.ours() && each.kind != d.kind) then = each;
                 else still = true;
@@ -3809,6 +4245,7 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
             keep(f, "stuck");
             return kFailed;
         }
+        item_times_.closed = std::max(0, item_times_.closed) + ms_between(confirmed_at, now());
         if (then.ours()) {
             d = then;
             continue;
@@ -3820,7 +4257,7 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
         // the wordless picture matches the bin's own question at 0.84, and
         // that question is the next step, not a refusal.
         if (const Frame* notice = store_.get(kNotice)) {
-            if (bag::find_dialogs(f, store_).empty() &&
+            if (up.empty() &&
                 TemplateMatcher::find(f, ScreenRect{ 0, 0, f.width, f.height }, *notice, 0.75f)
                     .found) {
                 say("game không nhận và hiện một thông báo; để nguyên cho người chơi đọc");
@@ -3833,7 +4270,10 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
         // other way round. Only its own dialog is answered. Over at once once
         // the item is seen gone (done).
         bool foreign = false;
+        const auto after_from = now();
         const bag::Dialog next = wait_for_dialog(900, foreign, nullptr, done);
+        item_times_.after = ms_between(after_from, now());
+        item_times_.early = answered_early_;
         if (foreign) {
             say("sau khi bấm Xác Nhận game hiện một hộp thoại khác, nên không bấm");
             return kFailed;
@@ -3845,16 +4285,25 @@ int BagCleaner::answer(const bag::Dialog& first, int count, const std::function<
     return kFailed;
 }
 
-bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int count) {
+bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int count, Frame* after,
+                           BagView* after_view, bool* seen_clean) {
     const BagLayout& l = settings_.layout;
+    // Each step timed for the pass's line, the whole on every way out.
+    item_times_ = ItemTimes{};
+    if (seen_clean) *seen_clean = false;
+    const auto from = now();
+    const auto out = [&](bool gone) {
+        item_times_.total = ms_between(from, now());
+        return gone;
+    };
     const auto slots = v.slots(l);
-    if (index < 0 || index >= static_cast<int>(slots.size())) return false;
+    if (index < 0 || index >= static_cast<int>(slots.size())) return out(false);
     const ScreenRect s = slots[static_cast<std::size_t>(index)];
     const Frame before = bag::cut(f, s);
 
     // 1. Onto the bin. It takes the item and waits, showing it where the can
     //    was, and leaves an enlarged copy in the slot.
-    if (!mouse_ok(s.cx(), s.cy()) || !mouse_ok(v.trash.cx(), v.trash.cy())) return false;
+    if (!mouse_ok(s.cx(), s.cy()) || !mouse_ok(v.trash.cx(), v.trash.cy())) return out(false);
     item_out_ = true;                // until it is seen gone, or given back
     bool moved = false;
     if (settings_.click_to_move) {
@@ -3870,34 +4319,40 @@ bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int coun
     } else {
         moved = drag(s.cx(), s.cy(), v.trash.cx(), v.trash.cy());
     }
+    item_times_.drag = ms_between(from, now());
     if (!moved) {
         say(cancelled_ ? "dừng giữa chừng" : "không điều khiển được chuột trong cửa sổ game");
         back_out();
-        return false;
+        return out(false);
     }
 
+    // Looked for every kQuickLookMs, for as long as ever.
     Frame g;
     BagView w;
     bool waiting = false;
-    for (int i = 0; i < 8 && !waiting; ++i) {
-        if (!wait_ms(150)) {
+    const auto moved_at = now();
+    while (!waiting && ms_between(moved_at, now()) < kInBinWaitMs) {
+        if (!wait_ms(kQuickLookMs)) {
             back_out();
-            return false;
+            return out(false);
         }
+        ++item_times_.in_bin_looks;
         waiting = grab_view(g, w) && !w.bin_empty && bag::find_dialogs(g, store_).empty();
     }
     if (!waiting) {
         say("món đồ không vào thùng rác");
         keep(g, "not_in_bin");
         back_out();
-        return false;
+        return out(false);
     }
+    item_times_.in_bin = ms_between(moved_at, now());
 
     // 2. A click on the bin, which is what asks.
     if (!mouse_ok(w.trash.cx(), w.trash.cy())) {
         back_out();
-        return false;
+        return out(false);
     }
+    const auto clicked_at = now();
     click(w.trash.cx(), w.trash.cy());
     bool foreign = false;
     Frame shot;
@@ -3907,8 +4362,9 @@ bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int coun
                     : "bấm vào thùng rác mà không thấy hộp thoại xác nhận");
         keep(shot, foreign ? "wrong_dialog" : "no_dialog");
         back_out();
-        return false;
+        return out(false);
     }
+    item_times_.dialog = ms_between(clicked_at, now());
 
     // 3. The answer. Whatever goes wrong, the bin's dialog is said no to and
     //    the item goes back to the bag. The item seen gone -- the can back,
@@ -3923,38 +4379,73 @@ bool BagCleaner::trash_one(const Frame& f, const BagView& v, int index, int coun
     };
     if (answer(d, count, gone_from) != kDone) {
         back_out();
-        return false;
+        return out(false);
     }
 
     // 4. Only gone counts: the can back in the bin, none of the bin's dialogs
     //    up, and the slot no longer holding what it held -- on a fresh look,
-    //    at once when the answer already saw it gone.
+    //    at once when the answer already saw it gone. Its dialogs searched for
+    //    once.
+    const auto check_from = now();
     if (!answered_early_) wait_ms(300);
-    if (!grab_view(g, w)) return false;
+    const bool seen = grab_view(g, w);
+    item_times_.check = ms_between(check_from, now());
+    if (!seen) return out(false);
+    const auto dialogs = bag::find_dialogs(g, store_);
     bool asking = false;
-    for (const bag::Dialog& each : bag::find_dialogs(g, store_)) asking = asking || each.ours();
+    for (const bag::Dialog& each : dialogs) asking = asking || each.ours();
     if (!w.bin_empty || asking) {
         say("thùng rác vẫn còn món đồ");
         keep(g, "still_in_bin");
         back_out();
-        return false;
+        return out(false);
     }
     // Nothing of it in the bin or in a dialog any more: gone, or back in the
     // bag, which is all the rest of this tells apart.
-    if (bag::find_dialogs(g, store_).empty()) item_out_ = false;
+    if (dialogs.empty()) item_out_ = false;
     if (v.scroll_known() && w.scroll_known() && w.first_row != v.first_row) {
         say("trang túi đồ đã đổi, nên không biết món đồ còn hay không");
-        return false;
+        return out(false);
     }
     const auto now = w.slots(l);
-    if (static_cast<std::size_t>(index) >= now.size()) return false;
+    if (static_cast<std::size_t>(index) >= now.size()) return out(false);
     const ScreenRect same = now[static_cast<std::size_t>(index)];
     if (!bag::is_empty(g, same, l) && bag::alike(bag::cut(g, same), before, l) >= kStillThere) {
         say("món đồ vẫn còn trong túi");
         keep(g, "still_there");
-        return false;
+        return out(false);
     }
-    return true;
+    // Gone, and nothing at all up on this look -- clean, as the pass's next
+    // round would have to see it: that round judges on it.
+    if (dialogs.empty() && after != nullptr && after_view != nullptr && seen_clean != nullptr) {
+        std::swap(*after, g);
+        *after_view = w;
+        *seen_clean = true;
+    }
+    return out(true);
+}
+
+std::string BagCleaner::item_times_line(const std::string& where, bool gone) const {
+    const ItemTimes& t = item_times_;
+    const auto ms = [](int n) { return std::to_string(n) + " ms"; };
+    std::string steps;
+    const auto step = [&steps](const std::string& what) { steps += (steps.empty() ? "" : ", ") + what; };
+    if (t.drag >= 0) step("drag " + ms(t.drag));
+    if (t.in_bin >= 0)
+        step("in the bin after " + ms(t.in_bin) + " (" + std::to_string(t.in_bin_looks) +
+             (t.in_bin_looks == 1 ? " look)" : " looks)"));
+    if (t.dialog >= 0) step("its dialog " + ms(t.dialog) + " after the click");
+    if (t.box >= 0)
+        step("the box read on " + std::to_string(t.box_reads) + (t.box_reads == 1 ? " look" : " looks") + " in " +
+             ms(t.box));
+    if (t.closed >= 0)
+        step("closed " + ms(t.closed) + " after Xác Nhận (" + std::to_string(t.questions) +
+             (t.questions == 1 ? " question)" : " questions)"));
+    if (t.after >= 0)
+        step("then " + ms(t.after) + (t.early ? " till the item was seen gone" : " watching for another question"));
+    if (t.check >= 0) step("last look " + ms(t.check));
+    return "item at " + where + (gone ? " deleted in " : " not deleted, after ") + ms(t.total) +
+           (steps.empty() ? std::string() : " -- " + steps);
 }
 
 // --------------------------------------------------------------------- use
@@ -4636,11 +5127,6 @@ constexpr int kNoticeRetryMs = 300;
 /// right-click, or at the end of the run.
 constexpr int kOwnNoticeMs = 3000;
 
-/// Milliseconds from `from` to `to`.
-int ms_between(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
-    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count());
-}
-
 } // namespace
 
 void BagCleaner::forget_said_once() {
@@ -4698,7 +5184,14 @@ bool BagCleaner::own_message(const Frame& f, ScreenRect* at) {
 BagCleaner::NoticeClose BagCleaner::close_notice(const ScreenRect& band, const ScreenRect& box, Frame& shot,
                                                  int& clicks) {
     clicks = 0;
-    const auto stopped = [this] { return cancelled_ || (guard_ && !guard_()); };
+    // A stop, or the hold no longer the job's; in a shop round not HP
+    // (2026.11.11, the review's HP-2): a message left up there keeps the shop
+    // open and the hold with it, every potion held, as shop_full_close says.
+    // A charm run, and a run with no hold_check, ask the guard as before.
+    const auto stopped = [this] {
+        return cancelled_.load() ||
+               (mode_ == Mode::ShopBuy && hold_check_ ? !hold_check_() : guard_ && !guard_());
+    };
     // What a look shows of the message. Lingers: its frame is still right of
     // where the last click went, its label not to be told -- lit by the
     // pointer, or hidden -- so it is neither gone nor to be clicked.
@@ -6125,8 +6618,12 @@ std::vector<bag::Dialog> BagCleaner::dialogs_here(const Frame& f, const Template
     // The shop's own Mua | Thoát are two buttons side by side, and a pair of
     // buttons is what find_dialogs looks for: not a dialog, and Hủy Bỏ is never
     // pressed on them -- the right one is Thoát.
+    return shop_filter(bag::find_dialogs(f, store));
+}
+
+std::vector<bag::Dialog> BagCleaner::shop_filter(const std::vector<bag::Dialog>& all) const {
     std::vector<bag::Dialog> out;
-    for (const bag::Dialog& d : bag::find_dialogs(f, store)) {
+    for (const bag::Dialog& d : all) {
         const ScreenRect& s = shop_buttons_;
         const bool over = s.valid() && d.pair.x < s.right() + 4 && s.x < d.pair.right() + 4 &&
                           d.pair.y < s.bottom() + 4 && s.y < d.pair.bottom() + 4;
@@ -6398,6 +6895,10 @@ bool BagCleaner::shop_open(BagView& v, Result& res, Frame& shot, bag::Shop& shop
         }
         ++pages;
         last_page = f;
+        // The macro's letter and Space keys go on while Khác is looked through
+        // (2026.11.10); the look the right-click goes by is taken with the
+        // window shut (below).
+        keys_open(f, v);
         const auto slots = v.slots(l);
         for (std::size_t s = 0; s < slots.size() && index < 0; ++s) {
             if (bag::is_empty(f, slots[s], l)) continue;
@@ -6451,7 +6952,12 @@ bool BagCleaner::shop_open(BagView& v, Result& res, Frame& shot, bag::Shop& shop
     }
 
     // Looked at once more, the moment before the click: the same page, the same
-    // slot, nothing else of the game's open beside the bag, nothing up.
+    // slot, nothing else of the game's open beside the bag, nothing up -- with
+    // the key window shut and a potion let through waited out (2026.11.10).
+    if (!keys_settle()) {
+        res.trouble = cancelled_ && !keys_late_ ? "dừng giữa chừng" : kKeysLateVi;
+        return false;
+    }
     Frame f;
     if (!look_page(f, v) || v.selected_tab != kOtherTab) {
         res.trouble = "túi đồ đã đổi trang trước khi bấm chuột phải vào món Người Giữ Sân";
@@ -6531,6 +7037,14 @@ bool BagCleaner::shop_open(BagView& v, Result& res, Frame& shot, bag::Shop& shop
             std::snprintf(line, sizeof line, "cửa hàng đã mở (hàng đầu ở %d,%d, nút Mua ở %d,%d)", shop.row.x,
                           shop.row.y, shop.buttons.x, shop.buttons.y);
             say(line);
+            // The macro's keys go on from this look, as between purchases, an
+            // HP or MP potion due given its moment (2026.11.11): from the
+            // right-click to here the window was shut, and the first purchase
+            // is not another stretch with none -- the look its double-click
+            // goes by is taken after the shut, as for any purchase. The break
+            // goes by what keys_open just found on this look.
+            keys_open(g, v);
+            potion_break(g, v, "as the shop is seen", nullptr, -1, false, true);
             return true;
         }
         if (!dialogs_here(g, store_).empty()) {
@@ -6660,6 +7174,8 @@ bool BagCleaner::lone_message(const Frame& f, ScreenRect* at, Frame* shot) {
     };
     ScreenRect first;
     if (!lone(f, first)) return false;
+    // No key of the macro's while it may be one (2026.11.10).
+    keys_shut();
     // And on a fresh look a moment later: a frame caught being drawn is none.
     if (!wait_ms(kShopFullTailGapMs)) return false;
     Frame g;
@@ -6701,8 +7217,14 @@ int BagCleaner::shop_message(const Frame& f, const ScreenRect& label, Result& re
         res.trouble = "game hiện một thông báo khác thay cho hộp nhập số lượng, và bấm Xác Nhận không đóng được: "
                       "bạn đóng nó giúp";
     } else if (c == NoticeClose::Stopped) {
+        // With the hold asked alone (set_hold_check), a stop or the hold lost:
+        // never HP, which close_notice no longer stops for.
         bool stop = false;
-        if (!charm_must_stop(res, stop)) res.trouble = "dừng giữa chừng";
+        if (hold_check_)
+            res.trouble = cancelled_ ? "dừng giữa chừng"
+                                     : "bot không còn giữ phím (có việc khác đã lấy lại), nên dừng mua bình";
+        else if (!charm_must_stop(res, stop))
+            res.trouble = "dừng giữa chừng";
     } else {
         res.trouble = "không bấm được Xác Nhận trên thông báo của game";
     }
@@ -6740,7 +7262,12 @@ bool BagCleaner::shop_full_close(const ScreenRect& at, Result& res) {
         }
         return false;
     };
-    const auto stopped = [this] { return cancelled_.load() || (guard_ && !guard_()); };
+    // A stop, or the hold no longer the job's -- not HP (2026.11.11): with HP
+    // low the message is closed all the same, for one left up keeps the shop
+    // open and every key held with it.
+    const auto stopped = [this] {
+        return cancelled_.load() || (hold_check_ ? !hold_check_() : guard_ && !guard_());
+    };
 
     // 1. A fresh look: gone already, on it and on another a moment later, is
     //    closed with no click.
@@ -6846,6 +7373,8 @@ int BagCleaner::shop_purchase(bool hp, Result& res) {
     const std::string name = hp ? "Thịt bò khô" : "Rượu lá tre";
     // The bag-full message on `g`, said and closed: the round ends there.
     const auto full_here = [&](const Frame& g, const ScreenRect& at, const char* when) {
+        // No key of the macro's into it from the moment it is seen (2026.11.10).
+        keys_shut();
         const bag::ShopFullLook how = bag::shop_full_look(g, store_);
         GB_INFO("Trash: shop full message at %d,%d (whole %.2f, words %.2f) %s %s", at.x, at.y,
                 static_cast<double>(how.whole), static_cast<double>(how.words), when, name.c_str());
@@ -6855,32 +7384,116 @@ int BagCleaner::shop_purchase(bool hp, Result& res) {
         return kShopFullBag;
     };
     // A fresh look at the shop for every purchase, and nothing clicked from an
-    // older one: where its row is now, and nothing else up.
+    // older one: where its row is now, and nothing else up. A look judged:
+    // -1 when the purchase may go on from it, else how the round ends. `f0`
+    // is the look the purchase then goes by: one taken again here, when the
+    // row was looked for again.
     bag::Shop shop;
+    const auto judge = [&](Frame& f0, bag::Shop& s) -> int {
+        for (int again = 0;; ++again) {
+            s = f0.valid() ? shop_now(f0) : bag::Shop{};
+            // The full-bag message come after the last purchase, later than its
+            // looks; and the check-in board come up: nothing more clicked.
+            ScreenRect at;
+            if (f0.valid() && bag::shop_full_up(f0, store_, &at)) return full_here(f0, at, "before");
+            // Anything else that ends the round here shuts the key window at
+            // once too (2026.11.10): open since the last purchase, it lets no
+            // key into the board, a dialog or a message come up meanwhile.
+            if (board_up(f0, res)) {
+                keys_shut();
+                return kShopBoard;
+            }
+            if (!s.found) {
+                keys_shut();
+                keep(f0, "shop_gone");
+                res.trouble = "không thấy cửa hàng trên màn hình trước khi chọn " + name;
+                return kShopStopped;
+            }
+            // Nothing up over it: a question left from the last potion would
+            // take the double-click, and the keys after it.
+            if (!dialogs_here(f0, store_).empty() || question_still(f0)) {
+                keys_shut();
+                keep(f0, "shop_dialog_up");
+                res.trouble = "đang có một hộp thoại mở trước khi chọn " + name + "; đóng nó trong game";
+                return kShopStopped;
+            }
+            // Nor a message GoBot does not know.
+            ScreenRect label;
+            Frame shot;
+            if (lone_message(f0, &label, &shot)) {
+                keys_shut();
+                return shop_message(shot, label, res, "before the double-click");
+            }
+            // The potions' row itself matched on this look (2026.11.11, the
+            // owner: "Home End PgUp PgDn Ins Del"). Found by its buttons alone
+            // -- shop_now's fallback, the row's place worked out from where it
+            // was -- the list may have scrolled since (PgUp, PgDn, Home or End
+            // let through, the player's wheel), and the double-click would
+            // land on whatever lies at the old place now, the box it brings up
+            // the same for any item. Taken for a shop not seen: the window
+            // shut, looked at again a few times, then stopped -- nothing
+            // clicked, no box up.
+            if (s.row_score > 0.0f) return -1;
+            if (!keys_shut()) {
+                res.trouble = kKeysLateVi;
+                return kShopStopped;
+            }
+            GB_INFO("Trash: shop row not matched before the double-click on %s -- its buttons alone at %d,%d (row "
+                    "%.2f, buttons %.2f), look %d of %d",
+                    name.c_str(), s.buttons.x, s.buttons.y, static_cast<double>(s.row_score),
+                    static_cast<double>(s.buttons_score), again + 1, kShopRowRelooks + 1);
+            if (again >= kShopRowRelooks) {
+                keep(f0, "shop_row_unseen");
+                res.trouble = "không thấy hàng Thịt bò khô và Rượu lá tre trong cửa hàng trước khi chọn " + name +
+                              " (danh sách có thể đã bị cuộn), nên không bấm";
+                return kShopStopped;
+            }
+            if (!wait_ms(kShopLookMs)) return kShopStopped;
+            Frame g;
+            if (grab_) grab_(g);
+            f0 = std::move(g);
+        }
+    };
+    // The macro's letter and Space keys go on while this look is judged, the
+    // window open since the last purchase's tail (2026.11.10).
     {
         Frame f0;
-        if (grab_ && grab_(f0)) shop = shop_now(f0);
-        // The full-bag message come after the last purchase, later than its
-        // looks; and the check-in board come up: nothing more clicked.
-        ScreenRect at;
-        if (f0.valid() && bag::shop_full_up(f0, store_, &at)) return full_here(f0, at, "before");
-        if (board_up(f0, res)) return kShopBoard;
-        if (!shop.found) {
-            keep(f0, "shop_gone");
-            res.trouble = "không thấy cửa hàng trên màn hình trước khi chọn " + name;
+        if (grab_) grab_(f0);
+        if (const int end = judge(f0, shop); end >= 0) return end;
+        shop_buttons_ = shop.buttons;
+        if (shop.row_score > 0.0f) shop_row_dy_ = shop.buttons.y - shop.row.y;
+        // An HP or MP potion due (2026.11.11, the owner: "Mua luôn, bơm xen"):
+        // the window kept open for it a moment on this look -- judged just
+        // now, and asked again of everything else that keeps it shut
+        // (keys_may_open: a message only the notice's picture matches, say),
+        // whether it was open since the last purchase's tail or not -- before
+        // the money stretch; the look the double-click goes by is then taken
+        // after the shut. The full-bag message judge asked already.
+        own_pressed_ = false;
+        potion_break(f0, BagView{}, "before the double-click", nullptr, -1, true);
+    }
+    // From here until the question is seen gone and the full-bag message has
+    // had its time the money is at stake (2026.11.10): no key of the macro's
+    // goes -- the key window shut, each key it let through seen up -- and it
+    // is not opened again until then. A potion the run pressed itself on that
+    // look (2026.11.11b) is looked past the same way.
+    const bool went = keys_out_ || own_pressed_;
+    money_ = true;
+    if (!keys_shut()) {
+        res.trouble = kKeysLateVi;
+        return kShopStopped;
+    }
+    // Keys went out while that look was judged, and up to kKeysUpWaitMs more
+    // while the last came up: what they brought -- a board, a dialog, a
+    // message over the potion's cell -- is on a look from after them, taken
+    // with the window shut. The double-click goes by that look alone.
+    if (went) {
+        Frame f1;
+        if (!grab_ || !grab_(f1) || !f1.valid()) {
+            res.trouble = "không chụp được màn hình game trước khi chọn " + name;
             return kShopStopped;
         }
-        // Nothing up over it: a question left from the last potion would take
-        // the double-click, and the keys after it.
-        if (!dialogs_here(f0, store_).empty() || question_still(f0)) {
-            keep(f0, "shop_dialog_up");
-            res.trouble = "đang có một hộp thoại mở trước khi chọn " + name + "; đóng nó trong game";
-            return kShopStopped;
-        }
-        // Nor a message GoBot does not know.
-        ScreenRect label;
-        Frame shot;
-        if (lone_message(f0, &label, &shot)) return shop_message(shot, label, res, "before the double-click");
+        if (const int end = judge(f1, shop); end >= 0) return end;
         shop_buttons_ = shop.buttons;
         if (shop.row_score > 0.0f) shop_row_dy_ = shop.buttons.y - shop.row.y;
     }
@@ -6967,6 +7580,8 @@ int BagCleaner::shop_purchase(bool hp, Result& res) {
             return kShopStopped;
         }
         say("thử mua: dừng ở hộp nhập số lượng, đã bấm Hủy Bỏ, không gõ gì");
+        // The question seen closed: nothing typed, nothing at stake.
+        money_ = false;
         return kShopProbed;
     }
 
@@ -7131,14 +7746,26 @@ int BagCleaner::shop_purchase(bool hp, Result& res) {
         // something else the game said: left for the player to read.
         int lone = 0;
         Frame tail_last = h;
+        // What the last tail look found, for the key window below: its
+        // dialogs as find_dialogs gave them, and the lone message asked of it
+        // (1, 0; -1 not asked: a dialog was up). Not kept for `h`, the look
+        // that saw the question gone: the window asks that one itself.
+        std::vector<bag::Dialog> tail_up;
+        int tail_lone = -1;
+        bool tail_seen = false;
         for (int t = 0; t < kShopFullTailLooks || ms_between(confirmed_at, now()) < kShopFullLateMs; ++t) {
             if (!wait_ms(kShopFullTailGapMs)) return unsure("dừng giữa chừng");
             Frame tail;
             if (!grab_ || !grab_(tail) || !tail.valid()) continue;
             if (bag::shop_full_up(tail, store_, &at)) return full_here(tail, at, "after Xác Nhận for");
-            const bool message = dialogs_here(tail, store_).empty() &&
-                                 bag::lone_ok(tail, store_, ScreenRect{ 0, 0, tail.width, tail.height });
+            // One search for dialogs a tail look (2026.11.10).
+            std::vector<bag::Dialog> all = bag::find_dialogs(tail, store_);
+            const bool none = shop_filter(all).empty();
+            const bool message = none && bag::lone_ok(tail, store_, ScreenRect{ 0, 0, tail.width, tail.height }, all);
             lone = message ? lone + 1 : 0;
+            tail_up = std::move(all);
+            tail_lone = none ? (message ? 1 : 0) : -1;
+            tail_seen = true;
             tail_last = std::move(tail);
         }
         if (lone >= kShopFullTailLooks) {
@@ -7146,6 +7773,13 @@ int BagCleaner::shop_purchase(bool hp, Result& res) {
             return unsure("sau khi bấm Xác Nhận game hiện một thông báo lạ (để nguyên cho người chơi đọc)");
         }
         say("đã mua " + target + " " + name);
+        // The question gone and its tail looked through: the macro's letter
+        // and Space keys may go again till the next double-click -- from this
+        // last look, if nothing at all is up on it (2026.11.10). What the tail
+        // found on it is not searched for again: the full-bag message was
+        // asked of every look, `h` too.
+        money_ = false;
+        keys_open(tail_last, BagView{}, tail_seen ? &tail_up : nullptr, tail_seen ? tail_lone : -1, true);
         return kShopBought;
     }
     keep(k, "shop_not_closed");
@@ -7245,6 +7879,10 @@ void BagCleaner::shop_buy(BagView& v, Result& res, bool& stop) {
     // waited for once more, a stop included, and shut too.
     bool late = false;
     const auto close_shop = [&] {
+        // The key window shut before anything of the end is looked at: a
+        // message or the board come up since the last purchase takes no key
+        // of the macro's (2026.11.10).
+        keys_shut();
         if (late) {
             for (int waited = 0; waited < kShopOpenMs; waited += kShopLookMs) {
                 Frame g;

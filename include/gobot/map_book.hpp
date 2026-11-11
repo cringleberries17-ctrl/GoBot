@@ -373,6 +373,14 @@ public:
     static constexpr std::uint64_t kMobOffSayMs = 60000;
     /// Your point off the floors let pass said at INFO at most this often.
     static constexpr std::uint64_t kOwnOffSayMs = 60000;
+    /// A settled point of yours is none (2026.11.10, standing_points): at y 0
+    /// -- the right wall of t1901_s2 reported 999,0, and two of those let a
+    /// good file go -- or more than this above your last one this map entry
+    /// with no 0x002A of yours between (Look::air_reports): one jump's most,
+    /// Hunter::kOneJumpPx. The next one up there is taken: a climb the
+    /// packets say nothing of. Refusals said at INFO at most kOwnOffSayMs
+    /// apart, with the report's opcode.
+    static constexpr int kOwnRisePx = 120;
 
     enum class How : std::uint8_t {
         None,
@@ -422,6 +430,11 @@ public:
         std::uint32_t epoch = 0;
         int           entry_x = 0;      ///< WorldFix::entry_x, entry_y
         int           entry_y = 0;
+        /// WorldFix::report_op and air_reports: which report placed you, and
+        /// your 0x002A so far -- a point of yours far above the last with
+        /// none between is none (kOwnRisePx).
+        std::uint16_t report_op = 0;
+        std::uint64_t air_reports = 0;
         std::vector<Mob> mobs;
     };
     /// How it stands, for the log and the hint.
@@ -448,6 +461,12 @@ public:
         /// found it wrong (Distrusted). how is None unless trusted; this says
         /// it was named all the same. False while naming, and for an entry's.
         bool          named = false;
+        /// Ambiguous: the files every point lies on, as the log lists them
+        /// (2026.11.10, the Bản đồ card's one-click choice).
+        std::vector<std::string> fits;
+        /// Named by the owner's choice of one of those (choose), not by the
+        /// points alone.
+        bool          chosen = false;
     };
 
     /// `who` begins its log lines: "Hunter" for the hunter's own, "Map view"
@@ -462,6 +481,15 @@ public:
     /// entry's file is trusted again only by standing points or a new entry,
     /// and one found wrong stays so; a named map is named afresh.
     void lose(const char* why);
+    /// The owner's choice, on the Bản đồ card (2026.11.10): while Ambiguous,
+    /// `stem` -- one of the files every point lies on (Report::fits) -- is
+    /// named as if it alone fitted, and judged as a named map is (its gates,
+    /// a drop that found it wrong); two points of yours off its floors let it
+    /// go as any named map's do, and so do a map entry, a capture lost and
+    /// lose(). Never picked by GoBot itself: t10_s60 and t1_s60 fit
+    /// t1901_s2's points too. False, and nothing changed, for a stem that is
+    /// not among them or a map not Ambiguous.
+    bool choose(const std::string& stem);
 
     bool trusted() const { return trusted_; }
     How how() const { return trusted_ ? how_ : How::None; }
@@ -572,9 +600,17 @@ private:
     int                                  fit_ = 0;
     int                                  restarts_ = 0;
     bool                                 said_ambiguous_ = false;
+    bool                                 chosen_ = false;       ///< the name the owner's choice (choose)
     // each report or frame once
     std::uint64_t                        own_seen_ms_ = 0;
     std::map<std::uint32_t, MobSeen>     mob_seen_;             ///< by slot
+    // your last settled point's height this map entry, and your 0x002A then
+    // (kOwnRisePx); when a point refused was last said
+    bool                                 own_ground_on_ = false;
+    int                                  own_ground_y_ = 0;
+    std::uint64_t                        own_ground_air_ = 0;
+    bool                                 own_odd_said_ = false;
+    std::uint64_t                        own_odd_said_ms_ = 0;
 };
 
 } // namespace gobot

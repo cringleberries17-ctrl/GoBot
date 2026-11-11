@@ -410,8 +410,14 @@ void MacroEngine::pace_skip() {
 
 // ------------------------------------------------------------ the presses
 
+bool MacroEngine::shut_out(Refused why, std::uint32_t vk) const {
+    return why == Refused::Gated && coord_.pass_keys_open() && !coord_.lets_through(vk);
+}
+
 void MacroEngine::pace_refused(Refused why, std::uint64_t now) {
-    pace_retry_ms_ = now + kGatePollMs;
+    // One a bag job's key window shut for a click of its own goes the moment
+    // it opens again, as on the timers (2026.11.10).
+    pace_retry_ms_ = now + (why == Refused::Gated ? kSkillRetryMs : kGatePollMs);
     // No key out is no key going out unanswered.
     pace_unanswered_ms_ = 0;
     pace_unanswered_n_ = 0;
@@ -511,7 +517,7 @@ void MacroEngine::run_paced(const MacroConfig& cfg, std::uint64_t now) {
                 pace_press_.pos = at;
                 pace_press_.n = n;
                 ++pace_minute_.repressed;
-            } else if (why == Refused::Failed) {
+            } else if (why == Refused::Failed || shut_out(why, k.keycode)) {
                 // The re-press never went out (Windows not taking it): the
                 // first press's own wait ends the turn, a skip -- never a
                 // re-press tried for good, holding every other key up.
@@ -597,7 +603,7 @@ void MacroEngine::run_paced(const MacroConfig& cfg, std::uint64_t now) {
     const bool at_lock = down <= pace_last_cast_ms_ + pace_lock_ms_ + kPaceAtLockMs;
     Refused why = Refused::None;
     if (!press(k.keycode, k.hold_ms, "macro-paced", &why)) {
-        if (why != Refused::Failed) {
+        if (why != Refused::Failed && !shut_out(why, k.keycode)) {
             pace_refused(why, now);
             return;
         }

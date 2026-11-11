@@ -310,6 +310,30 @@ struct MacroConfig {
     static constexpr std::uint32_t kUrgentMostMs = 5000;
     static constexpr std::uint32_t kDefaultUrgentMs = 1000;
 
+    /// The pet's potions pressed over and over while the pet is under its
+    /// mark: "Bơm liên tục, mỗi N ms" on the pet's row (2026.11.10). Every pet
+    /// potion key, Lv1 and Lv2 alike, goes again this long after its last
+    /// press in place of its own interval_ms, as GoC presses the pet's food
+    /// every 200 ms -- the owner's choice of 2026-11-10, "Liên tục như GoC
+    /// (0,2-0,5 s)": GoBot's own 3-s wait kept the pet under its mark half
+    /// the time. A skill due with it is not starved: see kPetYieldMostMs. 0,
+    /// which is what a config built in code gets: each key's own interval_ms,
+    /// as before; a file that does not say, and a missing or unreadable one,
+    /// gets kDefaultPetEveryMs -- its pet keys' interval_ms, 3000 in the
+    /// owner's and in macro_potion_key's, no longer counts. From the
+    /// file and the row, kPetEveryLeastMs..kPetEveryMostMs.
+    std::uint32_t pet_every_ms = 0;
+    static constexpr std::uint32_t kPetEveryLeastMs = 200;
+    static constexpr std::uint32_t kPetEveryMostMs = 3000;
+    static constexpr std::uint32_t kDefaultPetEveryMs = 300;
+    /// A press of the potion recheck (potion_recheck_ms) rose if the highest
+    /// reading from its key-down to this long after it -- or the reading at
+    /// the check -- is kRecheckRisePct over the one it was pressed at: a heal
+    /// shows within 0.1-0.7 s, and under heavy blows the bar may be down
+    /// again by the check (2026-11-10, 20:14:37 and 20:14:48 judged "no
+    /// rise" on one late reading).
+    static constexpr std::uint64_t kRecheckPeakMs = 700;
+
     /// A buff is cast by pressing its key this many times, buff_press_gap_ms
     /// apart. GoC presses each buff 4 times, 200 ms apart -- its docs say it
     /// counts the cast only once the server confirms it, but its client writes
@@ -368,12 +392,106 @@ struct MacroConfig {
     void apply_defaults();
 };
 
+/// A potion key's cooldown, the least time between two of its presses: a pet
+/// potion's MacroConfig::pet_every_ms when that is set, otherwise -- an HP or
+/// MP potion, or a config built in code -- its own interval_ms.
+std::uint32_t macro_potion_cooldown_ms(const MacroConfig& cfg, const MacroKey& k);
+
+/// Whether a step of the sequence on `vk` is a skill, for the hold while the
+/// hunter walks back (MacroEngine::Fight::Mode::Returning, 2026.11.10): not
+/// when an enabled key of `cfg` on the same keycode is a potion or a buff,
+/// which go on as ever.
+bool macro_step_is_skill(const MacroConfig& cfg, std::uint32_t vk);
+
 /// What changed from `was` to `now` -- configs as their files hold them
 /// (MacroConfig::store, HunterConfig::store) -- on one line for the log:
 /// "Keys.key_9_keycode 72 (H) -> 70 (F); Hunt.enabled true -> false", a key's
 /// code with its name. The first `most` changes, then how many more; "" when
 /// nothing changed.
 std::string settings_changes(const IniFile& was, const IniFile& now, std::size_t most = 12);
+
+/// The pet's presses and what came of them, for the log (2026.11.10, the
+/// owner's "Bơm máu pet chậm"): each press of a pet potion that went out,
+/// with the pet's HP read at its key-down, and the readings after it.
+///
+/// A rise of the bar -- MacroConfig::kRecheckRisePct or more over the reading
+/// before it, the rises within kRiseMergeMs of the first one counted as one
+/// heal -- is put down to one press: the earliest still open from
+/// kRiseLeastMs or more before it, the game answering no sooner. Pressed every
+/// few hundred ms, which press the game took is a guess: a heal is never
+/// counted twice, but the delay and the gaps are within a press or two. A
+/// press is closed kJudgeMs after its key-down -- it rose, by how much and
+/// how soon; or it did not, "static" when every reading from it to then
+/// stayed within kStaticPct of the one it was pressed at: nothing hid a heal.
+///
+/// Once a minute (minute_line): the presses that went out, those judged that
+/// rose, the median rise and delay, the shortest gap between two that rose
+/// -- the game's own wait between two of the pet's foods is no shorter -- and
+/// the runs of static presses with the bar's value. The macro's timer pass's
+/// alone; no lock.
+class PetHealWatch {
+public:
+    static constexpr std::uint64_t kJudgeMs = 700;
+    static constexpr std::uint64_t kRiseLeastMs = 50;
+    static constexpr std::uint64_t kRiseMergeMs = 250;
+    static constexpr float         kStaticPct = 1.0f;
+    /// Runs of static presses named in the minute's line, at most.
+    static constexpr std::size_t   kRunsSaid = 6;
+
+    /// How one press came out.
+    struct Outcome {
+        std::uint32_t keycode = 0;
+        std::uint64_t down_ms = 0;
+        float         before = -1.0f;   ///< the pet's HP at its key-down; -1 none
+        bool          read = false;     ///< a reading of the pet came in its window
+        bool          rose = false;
+        float         rise = 0.0f;      ///< the heal put down to it, in percent of the bar
+        std::uint64_t delay_ms = 0;     ///< from its key-down to that heal
+        bool          is_static = false;
+    };
+
+    /// A press of `keycode` went out, its key down at `down_ms`, the pet's HP
+    /// read at `before` then (-1 none).
+    void pressed(std::uint32_t keycode, std::uint64_t down_ms, float before);
+    /// The pet's HP read at `at_ms`, -1 for none: on every look, a reading or
+    /// not -- the presses kJudgeMs old are closed by it.
+    void reading(std::uint64_t at_ms, float pct);
+    /// The presses closed since the last call, oldest first.
+    std::vector<Outcome> take_closed();
+    /// "Pet heals: key Q, 180 pressed, 12 rose (...); ..." when a minute is up
+    /// since the last -- the first call starts the minute -- and a press went
+    /// out or was judged in it; "" otherwise.
+    std::string minute_line(std::uint64_t now);
+    void reset();
+
+private:
+    struct Press {
+        Outcome       o;
+        float         low = 0.0f, high = 0.0f;
+        bool          open = true;
+    };
+    struct Run {
+        int         pct = 0;
+        std::size_t n = 0;
+    };
+    void close(Press& p);
+
+    std::deque<Press>    open_;
+    std::vector<Outcome> closed_;
+    float         last_ = -1.0f;            ///< the reading before
+    std::uint64_t rise_at_ = 0;             ///< the last heal's first rise, for kRiseMergeMs
+    std::uint64_t rise_down_ = 0;           ///< ... and the press it was put down to
+    std::uint64_t rose_down_ = 0;           ///< the last press judged to have risen; 0 none
+    // The minute so far.
+    std::uint64_t minute_ms_ = 0;
+    std::uint32_t keycode_ = 0;
+    std::uint64_t pressed_ = 0, judged_ = 0, rose_ = 0, unread_ = 0, moving_ = 0;
+    std::vector<float>         rises_;
+    std::vector<std::uint64_t> delays_;
+    std::uint64_t              gap_ms_ = 0;     ///< the shortest between two that rose; 0 none
+    std::vector<Run>           runs_;           ///< of static presses; the last one may go on
+    bool                       in_run_ = false;
+};
 
 /// Runs the macro.
 ///
@@ -406,6 +524,41 @@ public:
     /// it stood when the pass began: see key_ids_.
     void set_config(const MacroConfig& cfg);
     MacroConfig config() const;
+
+    /// The keys a bag job's key window may let through (2026.11.10, the
+    /// owner: letters and Space keep going while Dọn rác deletes and Tự mua
+    /// bình buys; 2026.11.11, Home, End, PgUp, PgDn, Insert and Delete too):
+    /// every key of the macro's that is on (macro_timer_on) on a key
+    /// pass_key_allowed lets -- never a digit -- skills, buffs and potions
+    /// alike, by macro_key_kind; the potions among them apart -- from the keys in
+    /// memory, no file read. Never one in `never` (the bag's key, the quest
+    /// window's, GoBot's own switches), nor the macro's own toggle and panic
+    /// keys, nor a sequence step's alone. Empty with the timers off.
+    PassKeys pass_keys(const std::vector<std::uint32_t>& never) const;
+    /// Whether an HP or an MP potion is due now -- the tier of its kind the
+    /// timer pass would press, by the reading and its cooldown -- whose key
+    /// `through` says yes to (every key when it is empty): what a bag job's
+    /// potion break waits on (2026.11.11, BagCleaner::KeyWindow::potion_due).
+    /// Never the pet's: pressed every few hundred ms, it would hold the job
+    /// up at every item. False with the timers off.
+    bool vital_potion_due(const std::function<bool(std::uint32_t)>& through) const;
+    /// The HP or MP potion a bag job presses itself while the engine is not
+    /// running (2026.11.11b, BagCleaner::OwnPotions): the tier of its kind the
+    /// timer pass would press for the reading (macro_urgent_potion), HP's
+    /// first; `vk` 0 for none. One whose key pass_key_allowed refuses -- a
+    /// digit: the owner's "Giữ chặn phím số" -- or that is in `never` or the
+    /// engine's own toggle or panic key is not pressed: `refused` names it,
+    /// and the other kind is looked at. Never the pet's. The cooldown is the
+    /// caller's to keep, `cooldown_ms` the line's. Nothing with the timers off.
+    struct OwnPotion {
+        std::uint32_t vk = 0;
+        bool          hp = true;        ///< HP's, else MP's
+        float         pct = -1.0f;      ///< the reading
+        int           mark = 0;         ///< the line's mark
+        std::uint32_t cooldown_ms = 0;
+        std::uint32_t refused = 0;      ///< a due potion's key not pressed by a bag job
+    };
+    OwnPotion own_potion_due(const std::vector<std::uint32_t>& never) const;
 
     void start();
     void stop();
@@ -536,6 +689,8 @@ public:
     ///   them, starts its own with it.
     /// - A potion due when the macro starts drinks on the first look: a
     ///   potion's start delay is not waited out.
+    /// - The pet's, pressed every MacroConfig::pet_every_ms, lets a skill
+    ///   ready have the press after its own (kPetYieldMostMs).
     ///
     /// The cooldown is GoBot's own. GoC has none and drinks every 100 ms while
     /// low, reading HP from the game itself; GoBot reads a bar off the screen
@@ -555,11 +710,20 @@ public:
     /// What the hunter is doing, for skills that follow the fight
     /// (MacroConfig::skills_follow_fight). Asked on the macro's own threads,
     /// so whatever answers reads atomics only.
+    /// Asked on every pass of the timers, whatever the switches (2026.11.10):
+    /// Returning holds every skill.
     struct Fight {
         enum class Mode {
             NoHunter,   ///< not hunting: every key on its timer, as before
             Idle,       ///< hunting, and not attacking anything this moment
             Fighting,   ///< attacking a target in reach, and facing it
+            /// Walking back to the hunting spot or area (Hunter::returning,
+            /// the owner's answer of 2026-11-10): no skill key goes out --
+            /// on its own timer (always_timer too), following the fight, or
+            /// a step of the sequence -- for a cast stops the walk. Each
+            /// stays due and goes once the walk is over. Potions and buffs go
+            /// as ever (a buff of 0 s every 5 s).
+            Returning,
         };
         Mode          mode = Mode::NoHunter;
         int           dx = 0;             ///< how far to the side the target is, while Fighting
@@ -777,11 +941,20 @@ public:
         std::uint64_t held_low_mp = 0;
         std::uint64_t held_dead = 0;
         std::uint64_t held_range = 0;
+        /// Skills held while the hunter walks back (Fight::Mode::Returning),
+        /// on their timers or not: one for each due key at each look, a look
+        /// every kGatePollMs -- the sequence's steps at each of theirs.
+        std::uint64_t held_returning = 0;
 
         /// Skill keys refused because the game was not in front
         /// (require_focus), on their timers or following the fight: of
         /// skipped_unfocused, which counts every key's, for the Skills line.
         std::uint64_t skills_unfocused = 0;
+
+        /// Presses a bag job's key window held (Refused::Gated, 2026.11.10):
+        /// shut for the job's own click, or a key it never lets through --
+        /// apart from skipped_busy.
+        std::uint64_t held_gated = 0;
 
         /// Steps of the sequence that went out: key_presses has only the keys.
         std::uint64_t sequence_presses = 0;
@@ -824,11 +997,31 @@ public:
         KeyFailed,      ///< the key did not go out
         BehindHp,       ///< an MP or pet potion waiting while the HP potion waits for the keys
         BehindMp,       ///< a pet potion waiting while the MP potion waits for the keys
+        SkillTurn,      ///< a pet potion that had the last press, letting a skill due have the next (kPetYieldMostMs)
     };
     /// "pressed", "above the mark", "no reading", "cooling", "other tier",
     /// "game not in front", "not in the world", "keys held", "keys busy",
-    /// "key failed", "behind the HP potion", "behind the MP potion".
+    /// "key failed", "behind the HP potion", "behind the MP potion", "a
+    /// skill's turn".
     static const char* potion_why_name(PotionWhy why);
+
+    /// The pet pressed over and over (MacroConfig::pet_every_ms) does not
+    /// starve the skills: a pet potion that had the last press of the macro's
+    /// keys lets a skill that is ready -- due, and free to go this pass --
+    /// have the next, so the pet takes at most every other press while
+    /// skills are due. Never for longer than this, should that skill not go
+    /// after all. HP's and MP's potions keep going first, as ever.
+    static constexpr std::uint64_t kPetYieldMostMs = 500;
+
+    /// The pet's bar standing still at kPlateauLowPct..kPlateauHighPct
+    /// through a press of its potion -- 248 of 552 presses that did nothing
+    /// on 2026-11-10 began there, often 71% -- the first time in a run: true
+    /// once, with the bar's value, for a picture of the pet's slot to be kept
+    /// (GoBot's window keeps it in potion_debug, off its own thread). Any
+    /// thread.
+    bool take_pet_plateau(int& pct);
+    static constexpr int kPlateauLowPct = 70;
+    static constexpr int kPlateauHighPct = 75;
 
     /// The black box, for the log right after "ALERT death": the last
     /// kBlackBoxMs up to now on the engine's clock, in at most kBlackBoxLines
@@ -955,20 +1148,34 @@ private:
     /// of the test's clock.
     std::uint32_t sequence_turn(std::uint64_t now);
 
-    /// Why a press did not go out.
-    enum class Refused { None, Suspended, Unfocused, Busy, Held, Failed };
+    /// Why a press did not go out. Gated: a bag job's key window
+    /// (ExecutionCoordinator::request_key, 2026.11.10) holds it -- shut for a
+    /// click of the job's own, or the key not one it lets through.
+    enum class Refused { None, Suspended, Unfocused, Busy, Held, Failed, Gated };
+    /// `window`: the key may go through a bag job's key window -- every press
+    /// of the timers', the potions' and the buffs'; never a step of the
+    /// sequence, which waits for the job like the rest of GoBot.
     bool press(std::uint32_t keycode, std::uint32_t hold_ms, const char* owner,
-               Refused* why = nullptr);
+               Refused* why = nullptr, bool window = true);
     /// A refusal that every key of the macro meets alike: a hold, the game
-    /// not in front, the character out of the world.
+    /// not in front, the character out of the world. Never Gated: the window
+    /// lets some keys through and not others, so a potion it holds never
+    /// stamps potion_waiting_since_ afresh -- or a digit potion under its mark
+    /// would hold every letter skill off for the whole of a pass.
     static bool refuses_all(Refused why) {
         return why == Refused::Held || why == Refused::Unfocused || why == Refused::Suspended;
     }
-    /// Whether that is still so, asked without trying a press.
-    bool still_refused(const MacroConfig& cfg, Refused why) const;
+    /// Whether that is still so, asked without trying a press. Gated: still
+    /// a hold, and `vk` not let through.
+    bool still_refused(const MacroConfig& cfg, Refused why, std::uint32_t vk = 0) const;
     /// A press of the cast-paced rotation's refused -- held, busy, the game
-    /// not in front, out of the world: no try; looked at again kGatePollMs on.
+    /// not in front, out of the world: no try; looked at again kGatePollMs on,
+    /// or kSkillRetryMs when a bag job's key window held it (Gated).
     void pace_refused(Refused why, std::uint64_t now);
+    /// Gated with a bag job's key window open that never lets `vk` through
+    /// (2026.11.10): the rotation passes it over as a key that does not go
+    /// out, rather than waiting on it for the whole of the job.
+    bool shut_out(Refused why, std::uint32_t vk) const;
 
     /// One kind of potion's part of the timer pass, HP's, MP's or the pet's:
     /// when it is next looked at -- kGatePollMs after a press, kPotionRetryMs
@@ -977,6 +1184,7 @@ private:
     struct PotionKind {
         std::uint64_t look_ms = 0;
         Refused       refused = Refused::None;
+        std::uint32_t refused_vk = 0;     ///< the key that was refused, for still_refused
         bool          waiting = false;
         /// The last press that went out, to see whether the bar rose
         /// (MacroConfig::potion_recheck_ms): when, the reading it was
@@ -987,6 +1195,9 @@ private:
         std::uint32_t check_keycode = 0;
         bool          check_is_repress = false;
         bool          repress_next = false;   ///< the next press of this kind is the early one
+        /// The highest reading from that press to MacroConfig::kRecheckPeakMs
+        /// after it; -1 none yet.
+        float         check_peak = -1.0f;
     };
     std::uint32_t jittered(std::uint32_t base, int pct) const;
     std::uint64_t clock_now() const;
@@ -1073,7 +1284,11 @@ private:
     /// Whether the potion key `k`, in place `s` of the due times, may drink at
     /// `now` with its bar at `v`: its cooldown is over, or the bar is under
     /// half its mark and urgent_ms (MacroConfig::potion_urgent_ms) have passed
-    /// since its last press. With mutex_ held.
+    /// since its last press. Its mark there is the highest of the potions of
+    /// its kind on its keycode that are on, from config_: a Lv2 on Lv1's key
+    /// otherwise moved the line down to half of its own, lower mark
+    /// (2026-11-10: Q under 90% and under 68%, under 45% to under 34%). With
+    /// mutex_ held.
     bool potion_cooled(const MacroKey& k, int s, float v, std::uint64_t now, std::uint32_t urgent_ms) const;
     /// Buffs go out no closer than this: kBuffGapMs, or the whole of a cast
     /// and a little over, if that is longer.
@@ -1149,6 +1364,35 @@ private:
     /// HP's, MP's and the pet's: had a reading before the start and has had
     /// none since. arm()'s, then the timer pass's alone.
     bool              start_unread_[3] = { false, false, false };
+
+    // ---- the pet pressed over and over (MacroConfig::pet_every_ms) ----
+
+    /// Whether a skill of the macro's is ready to go this pass: due, on the
+    /// timers and free of skill_gap_ms -- or, following the fight, fighting,
+    /// in reach, its look due. Not while paced on your casts: those wait for
+    /// the game, not for the keys. The timer pass's; mutex_ not held.
+    bool skill_ready(const MacroConfig& cfg, std::uint64_t now) const;
+    /// Whether the pet's potion, ready to press, lets a skill have the next
+    /// press (kPetYieldMostMs). The timer pass's.
+    bool pet_yields(const MacroConfig& cfg, std::uint64_t now);
+    /// The last press of the macro's that went out was the pet's potion:
+    /// press() clears it at every press, run_potions sets it after the
+    /// pet's. Written by both threads.
+    std::atomic<bool> line_pet_last_{ false };
+    /// Since when the pet has let a skill go first; 0 not. The timer pass's.
+    std::uint64_t     pet_yield_since_ = 0;
+    /// The pet's presses and the readings after them, for the minute's "Pet
+    /// heals" line; the timer pass's alone.
+    PetHealWatch      pet_heals_;
+    /// The pet's presses and outcomes seen to since the last pass: one line
+    /// at the start of each run of presses that did nothing, the bar still,
+    /// when the pet is pressed too often for the potion check (the timer
+    /// pass's alone); and the plateau, once a run, for take_pet_plateau.
+    void pet_outcomes(const MacroConfig& cfg, std::uint64_t now);
+    bool              pet_static_said_ = false;
+    bool              pet_plateau_seen_ = false;      ///< this run; the timer pass's
+    std::atomic<bool> pet_plateau_{ false };
+    std::atomic<int>  pet_plateau_pct_{ -1 };
 
     std::function<Fight()> fight_;
     std::function<void(std::uint32_t, std::uint64_t)> on_press_;   ///< set_on_press
@@ -1268,7 +1512,7 @@ private:
         std::string   text;                 ///< for KeysHeld: what holds the game
     };
     /// How many reasons there are, for a tally of each.
-    static constexpr int kPotionWhys = static_cast<int>(PotionWhy::BehindMp) + 1;
+    static constexpr int kPotionWhys = static_cast<int>(PotionWhy::SkillTurn) + 1;
     /// A potion key's minute, for log_potions: its presses, and how long it
     /// spent in each reason, from its decisions as they change.
     struct PotionMinute {

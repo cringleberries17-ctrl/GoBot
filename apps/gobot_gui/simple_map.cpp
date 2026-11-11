@@ -544,6 +544,9 @@ struct GuiApp::MapUi {
     std::uint32_t posted_epoch = 0;
     std::uint64_t post_ms = 0;
     std::uint64_t shown_ms = 0;
+    /// "Dùng vùng <map>" pressed (2026.11.10): the stem for the worker's next
+    /// job to choose (MapViewState::choose), handed over with that job.
+    std::string   choose_ask;
     std::string   note;                     ///< the tab's last note, as simple_note has it
     bool          note_bad = false;         ///< ... said in red: much of a zone just saved is red
     std::uint64_t note_until = 0;
@@ -705,11 +708,14 @@ void GuiApp::map_post(MapUi& ui, std::uint64_t now) {
     const bool wanted = shown || (hunting_ && hunt_config_.spot);
     const std::uint32_t epoch = packet_world_.place().epoch;
     const std::uint64_t every = wanted ? kJobEveryMs : kKeepAliveMs;
-    if (now - ui.post_ms < every && (!wanted || epoch == ui.posted_epoch)) return;
-    // By value: the log ins counted and the gate's distance as they are now.
+    if (ui.choose_ask.empty() && now - ui.post_ms < every && (!wanted || epoch == ui.posted_epoch)) return;
+    // By value: the log ins counted and the gate's distance as they are now,
+    // and the map the owner chose on the card, if any (2026.11.10).
     const std::uint64_t gen = map_logins_;
     const int gate_px = hunt_config_.drop_gate_px;
-    const bool posted = ui.worker.post([this, p, gen, gate_px] {
+    std::string choose = ui.choose_ask;
+    const bool posted = ui.worker.post([this, p, gen, gate_px, choose] {
+        if (!choose.empty()) p->ws->choose = choose;
         const std::uint64_t at = now_ms();
         // A walk followed as PacketEyes follows it: 3 s while the hunter holds it.
         const std::uint64_t follow = hunter_ && at <= hunter_->walk_held_until_ms() ? PacketWorld::kOwnReckonMs
@@ -734,6 +740,7 @@ void GuiApp::map_post(MapUi& ui, std::uint64_t now) {
     if (posted) {
         ui.post_ms = now;
         ui.posted_epoch = epoch;
+        ui.choose_ask.clear();
     }
 }
 
@@ -1210,10 +1217,33 @@ void GuiApp::simple_map_tab() {
                   " chỗ đứng — đi lại vài bước trên các bục.")
                      .c_str());
             break;
-        case MapShows::Ambiguous:
+        case MapShows::Ambiguous: {
             hint("Chưa phân biệt được bản đồ (có bản đồ khác giống chỗ này) — đi tới bục khác vài bước, hoặc qua "
                  "cửa.");
+            // 2026.11.10: of the files that fit, exactly one with a saved
+            // zone -- one click takes that map; GoBot never takes it alone.
+            const std::string pick = ui.book_loaded && !ui.book_bad ? zone_choice(rep.fits, ui.book) : std::string();
+            if (!pick.empty()) {
+                std::string fits;
+                for (const std::string& s : rep.fits) fits += (fits.empty() ? "" : ", ") + s;
+                const std::string label = "Dùng vùng " + pick + "##map_choose";
+                ImGui::BeginDisabled(!ui.choose_ask.empty());
+                if (ImGui::Button(label.c_str())) {
+                    ui.choose_ask = pick;
+                    // Written off this thread (log_later): no file on the GUI's.
+                    log_later({ "Map tab: \"Dùng vùng " + pick + "\" pressed -- of " + fits +
+                                ", the one with a saved hunting area" });
+                }
+                ImGui::EndDisabled();
+                const std::string tip = "Chỗ nhân vật đứng khớp " + std::to_string(rep.fits.size()) +
+                                        " bản đồ (" + fits + "); chỉ " + pick +
+                                        " có vùng đánh đã lưu. Bấm để coi đây là " + pick +
+                                        " và dùng vùng đó. GoBot không tự chọn. Nhân vật đứng ngoài bục của bản đồ "
+                                        "đó hai lần thì GoBot bỏ và nhận ra lại.";
+                ImGui::SetItemTooltip("%s", tip.c_str());
+            }
             break;
+        }
         case MapShows::NamedDoubtful:
             hint(("Chưa chắc bản đồ: file " + rep.stem +
                   " không khớp chỗ nhân vật đứng — đi tới bục khác vài bước, hoặc qua cửa.")
@@ -1372,11 +1402,16 @@ void GuiApp::simple_map_tab() {
             ImGui::Dummy(ImVec2(16.0f, h));
             ImGui::SameLine(0, 4);
             ImGui::TextDisabled("%s", it.text);
-            if (it.sym == Sym::Mob)
-                ImGui::SetItemTooltip("Quái màu xám: ở ngoài vùng đánh và ngoài tầm đánh — hoặc ở ngoài vùng đánh "
-                                      "trong lúc bot đi bộ về vùng trước, rồi mới đánh tiếp — bot không đi tới."
-                                      " Có Tự tìm quái trong vùng: cả con trong vùng mà bot không tới được, hoặc "
-                                      "đang tạm bỏ qua.");
+            if (it.sym == Sym::Mob) {
+                // The walk back first (2026.11.10): every dot grey while it
+                // is latched (mob_grey's spot_back_walk).
+                static const std::string grey =
+                    "Quái màu xám: ở ngoài vùng đánh và ngoài tầm đánh — bot không đi tới. Nhân vật ra ngoài vùng "
+                    "quá " + std::to_string(kZoneOutsideBackPx) + " px thì bot ngưng đánh, về vùng trước: lúc đó mọi "
+                    "con đều xám, cả con trong vùng và trong tầm, tới khi nhân vật vào tới trong vùng. Có Tự tìm quái "
+                    "trong vùng: cả con trong vùng mà bot không tới được, hoặc đang tạm bỏ qua.";
+                ImGui::SetItemTooltip("%s", grey.c_str());
+            }
             if (it.sym == Sym::Jump)
                 ImGui::SetItemTooltip("Mũi tên: chỗ GoBot sẽ nhảy lên (nét đứt: lẽ ra đã nhảy, khi Nhảy lên bục trên "
                                       "đang tắt). Dấu xám: chỗ đã nhảy hỏng và bục không nhảy xuyên lên được, GoBot "

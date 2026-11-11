@@ -252,6 +252,10 @@ file is the old behaviour. A potion whose bar is under half its mark (a 59% MP
 potion: under 29%) may drink again `potion_urgent_ms` (1000) after its last
 press instead of after its 3-s interval, so that skills draining MP faster
 than one potion per 3 s do not leave the bot behind; 0 is the plain interval.
+Since 2026.11.10 that half is of the highest mark of the kind on the same key
+(a Lv2 on Lv1's key shares its wait, and says so on its row), and a press's
+check takes the highest reading in the `MacroConfig::kRecheckPeakMs` (700 ms)
+after its key-down, so a hit just after a heal no longer reads as no rise.
 A buff is cast the way GoC casts it, by pressing its key
 4 times, 200 ms apart (`buff_presses`, `buff_press_gap_ms`): the game drops a
 single press now and then, and a buff dropped is gone for its whole interval.
@@ -339,8 +343,14 @@ ticked, for nothing. Each potion row
 has a second tier, *Lv2*: under both marks only the lower one drinks, and a
 potion due goes before any other key. **Tự bơm máu pet** is the third potion
 row, the pet's: its key is pressed when the pet's HP is at or under *khi máu
-pet dưới*, on its own cooldown, after the HP and MP potions and never ahead of
-them. The pet's HP is the red bar in its slot on the HUD, under the HP and
+pet dưới*, after the HP and MP potions and never ahead of them -- since
+2026.11.10 over and over, every *Bơm liên tục, mỗi N ms* (`pet_every_ms`,
+200-3000, 300 in a file without it or with no macro.ini at all), one value
+for its Lv1 and Lv2, as GoC
+presses the pet's food; after a press of the pet's a skill that is ready goes
+next, so the pet takes at most every other key while skills are due. Once a
+minute the log's *Pet heals:* line says how many presses went out and how
+many the bar rose on. The pet's HP is the red bar in its slot on the HUD, under the HP and
 MP bars -- the wide slot with two pictures and *Thức Ăn* beside them; the
 purple bar under the red one is not the pet's HP. GoBot finds that bar by
 itself and keeps it through 0. With no pet out the row says it cannot see
@@ -436,7 +446,9 @@ map entry whose spawn is within 150 px of that. After a log back in (by
 stands until the character stands, still, within 150 px of where it was or
 of the spot -- placed by the new game's packets, after its first step or
 skill, and not on a map they know is another. A log in after a door keeps
-the door's rule. Otherwise it stands until **Đặt chỗ này** is pressed. It stands as well while
+the door's rule. (Since 2026.11.10 a **Bản đồ** area set aside by a map
+entry is taken again whichever door brings the character back to its map,
+once the map has loaded: below.) Otherwise it stands until **Đặt chỗ này** is pressed. It stands as well while
 the packets have lost the character. To take the character somewhere else
 while the bot runs: untick **Chỗ đánh quái** (the walk back stops at once and
 the spot is dropped), walk there, tick it again and press **Đặt chỗ này** --
@@ -708,7 +720,9 @@ drops it once the entries count past it, and takes it -- `zone_take`, the
 owner's Q1 -- only
 with the character settled inside the box or within 150 px of it, or back
 within 150 px of where a spot of it was left (a door there and back, a log
-in); an edit of the area in use applies at once, wherever the character is.
+in) -- since 2026.11.10 anywhere on its map when a door brought the
+character back to it (`ZoneWait::Loading`, then Back, below); an edit of the
+area in use applies at once, wherever the character is.
 Otherwise the hunt goes on as before, round where the character stands, and
 the card says how far outside the area it is. A map entry sets an area's
 spot aside as it does any spot; when the tab no longer knows the character
@@ -772,6 +786,17 @@ ground out of the box and never came back -- are not in yet, so each is its
   first; within 60 px -- a slope crossing the edge -- in-reach monsters are
   fought as before, and so they are while a walk back that got nowhere waits
   `spot_retry_ms` to be tried again, and after `Hunter::kSpotMaxTries` (3).
+  Since 2026.11.10 (the owner's answer "Ngưng đánh, đi về trước") the walk
+  back first is latched (`Hunter::track_back_walk`) and held until the
+  character is inside the box, past the 60 px edge too: nothing is fought
+  meanwhile, monsters in the box and in reach among them; `go_home` comes
+  before the attack in reach and `choose_in_reach`, with no
+  `spot_return_delay_ms`; a wall still gives up after `spot_give_up_ms`, and
+  then it fights where it stands. This run's own spot has it too, the spot no
+  more than one jump up, walked along the ground with no hop. While the
+  hunter walks back (`Hunter::returning`) the macro holds every skill key,
+  `always_timer` too (`MacroEngine::Fight::Mode::Returning`); potions and
+  buffs go on.
   Q4: no hop toward a monster is added (`hops_to_targets`, as it was) --
   reversed by the owner 2026-11-05: in an area of **Bản đồ** a monster above
   is jumped up to, the jump planned by the map's file, with *Nhảy lên bục
@@ -1044,7 +1069,21 @@ in to it once, with its remember option) and GoBot only presses *Chơi game*;
 if VTCZone shows its sign-in form instead, it stops and says so. **Dọn rác** opens the bag every
 few minutes and puts what is on your list in the trash can; you pick the junk
 once from the game's item icons (or a photo of your bag for anything else),
-and *Thử tìm* shows what would go without throwing anything away. Items are
+and *Thử tìm* shows what would go without throwing anything away. With no tab
+ticked under *Tìm trong:* no pass is made at all -- the bag is not opened, and
+the tab says why -- and when everything on the list is an icon of the game's
+*spend* group (potions, food, fragments, charms, which lie in Tiêu Dùng and
+nowhere else) only Tiêu Dùng is gone through (both since 2026.11.10). While a
+pass runs the hunter stands; since 2026.11.10 the macro's keys on a letter or
+Space -- skills, buffs and potions alike -- go on between its own clicks, on
+a look with nothing up and nothing out towards the bin, and a slot is dragged
+only from a look taken after they are up and half a second after the last
+potion (*the hold's key window*, below); digit keys wait for the pass. Since
+2026.11.11 the keys on Home, End, PgUp, PgDn, Insert and Delete go on too, an
+HP or MP potion due is given a moment between two items, and with the HP
+potion on such a key a timed pass starts at its mark and stops only under
+half of it (*The shop after the pass, HP during the bag jobs, and six more
+keys (2026.11.11)*, below). Items are
 matched by their drawing, whatever their colour -- the fragments in the bag
 change colour all the time -- so picking an icon also picks the same drawing
 in other colours, and the tab shows which -- except a charm on the *Dùng*
@@ -1072,15 +1111,23 @@ Thịt bò khô and Rượu lá tre from the shop the Người Giữ Sân item o
 Khác tab opens (found by the game's own icon for it, nothing to photograph).
 Since 2026.11.09 it counts nothing: every *mua mỗi* minutes (60 as shipped)
 it buys the number of slots set on the card for each potion -- a purchase of
-100 a slot, 0 to 20 each, 3 and 3 as shipped -- HP and MP in turn, and the
+100 a slot, 0 to 999 each (no cap of GoBot's own since 2026.11.10; 20
+before), 3 and 3 as shipped -- HP and MP in turn, and the
 game's message that the bag is full (*Túi đồ [Tiêu thụ] đã đầy*) ends that
 time's round, the box staying ticked (*Buying by the slot, and the check-in
 board (2026.11.09)*, below). Each purchase double-clicks the
 potion in the shop, types 00 after the game's 1 in the quantity box, reads it
 back as 100, and only then presses Xác Nhận; anything unexpected is answered
-Hủy Bỏ. Skills, potions and buffs wait while it buys, and *Thử mua* goes as far
-as the quantity box without buying. It opens the bag only after a second
-with nobody at the mouse or keyboard; otherwise it logs `Shop: not now --
+Hủy Bỏ. Skills, potions and buffs on a digit wait while it buys; since
+2026.11.10 those on a letter or Space go on between purchases, never from the
+double-click until the quantity box is seen gone and the bag-full message has
+had its second -- since 2026.11.11 those on Home, End, PgUp, PgDn, Insert and
+Delete too, an HP or MP potion due given a moment before each double-click.
+Since 2026.11.11, with *Tự dọn rác* on, a timed round comes right after a
+bag pass, under the same hold. *Thử mua* goes as far as the quantity box without buying. It opens the bag only after a second
+with nobody at the mouse or keyboard (a round that rides a pass, since
+2026.11.11, has no such second: the pass has just clicked through the bag);
+otherwise it logs `Shop: not now --
 someone is using the mouse or keyboard (held N ms): …`, with what spoiled the
 second, and, on the clock, tries again later -- since 2026.11.08 after 30 s,
 then 2, 5 and 10 minutes, one spoiled look after another (*Skills on the
@@ -1108,7 +1155,9 @@ sets how fast these bag jobs click, drag and type; what they wait for and read
 back does not change with it. (*Tốc độ bấm kỹ năng* on the skills row does the
 same for skill keys: 50 ms as GoC, or 60, 80, 100, 150 ms between one skill's
 key coming up and the next one's going down.) When several jobs fall due at once they run in
-turn: a Tự chat line, then the bag pass, then the charms, then the potions.
+turn: a Tự chat line, then the bag pass, then the charms, then the potions --
+but since 2026.11.11 a potion round that rides the pass comes right after it,
+before the charms.
 These jobs, and Tự chat, read the game off the screen, so the game's window has
 to lie wholly on the screen. BẮT ĐẦU starts whatever is ticked on any tab.
 
@@ -1160,7 +1209,10 @@ picture, is not supported.
 (or was revived, or could not be), the game went and GoBot is logging back
 in (or gave up), the character has been out of the world for minutes, a stop
 left the trash bin's dialog or the chat line open, Tự chat or quick quest
-stopped itself.
+stopped itself. Since 2026.11.10 an HP of 0 read off the screen is no death
+while the game is not in front, while the packets say HP is above 0, or
+while the server has been silent on the game's capture past `kLinkQuietMs`
+and up to `kDeathQuietMostMs` (60 s) -- a game reloading (`death_doubt`).
 Each is one short message in Vietnamese to a Discord channel of yours,
 through a webhook, so the Discord app on your phone shows it, and a beep and
 a Windows notification on this PC that never take the focus from the game.
@@ -1537,17 +1589,21 @@ and closed by ESC alone.
 - **Tự mua bình counts nothing.** No look at Tiêu Dùng, no first round of one
   of each, no stop after a purchase that added no slot, no recount, no
   packets' skip. When a plan is due it owes the card's numbers,
-  `buy_hp_slots` and `buy_mp_slots` in `trash.ini`: 0 to 20 each
-  (`CleanSettings::kBuySlotsPerRunMost`), 3 and 3 as shipped
+  `buy_hp_slots` and `buy_mp_slots` in `trash.ini`: 0 to 20 each in
+  2026.11.09, and since 2026.11.10, the owner's "Không giới hạn", 0 to 999
+  each (`CleanSettings::kBuySlotsPerRunMost`, a bound of the number alone:
+  the bag-full message ends the round), 3 and 3 as shipped
   (`kBuySlotsDefault`). A file without them reads its old `buy_hp_to` and
-  `buy_mp_to` -- the owner's 10 and 10 -- until the card saves the new key;
-  `buy_*_below` is not read, but for 0 -- that potion left alone -- which
-  reads 0. The purchases go HP, MP, HP, MP …
+  `buy_mp_to` -- the owner's 10 and 10 -- until the card saves the new key,
+  20 at most (`kBuySlotsFromOldMost`), so that only a number set on the card
+  buys more; `buy_*_below` is not read, but for 0 -- that potion left alone
+  -- which reads 0. The purchases go HP, MP, HP, MP …
   (`bag::shop_order`): the full message covers the whole Tiêu thụ tab, so one
   potion bought first could leave no room for the other. A round on the
   clock makes at most `kShopBuysPerHold` (10) purchases in one hold, the rest
   `kShopPartGapMs` (60 s) later; **Mua ngay** starts the plan afresh and buys
-  all of it in one hold, `kShopMaxBuys` (40) at most, and the next plan comes
+  it in one hold, `kShopMaxBuys` (40) at most -- above that, since
+  2026.11.10, the rest in parts as on the clock -- and the next plan comes
   an interval after it. A round's deadline is 30 s and 6 s a purchase,
   `kShopDeadlineMostMs` (300 s) at most, where it was 240 s. On the card the
   interval is *mua mỗi* (it was *kiểm tra mỗi*), each potion's row *mỗi lần
@@ -1589,7 +1645,11 @@ and closed by ESC alone.
   second, the hold, a stop) leaves what is owed and the plan time as they
   were. A number lowered under what is left buys no more and waits for the
   plan's time, never beginning one early; a round cut by HP under the
-  potion's mark or a lost hold buys the rest a part's gap (60 s) later.
+  potion's mark or a lost hold buys the rest a part's gap (60 s) later --
+  since 2026.11.11 a round its guard stopped for HP looks again 15 s on
+  (`bag::kHpStoppedAgainMs`), and with the HP potion on a key the round lets
+  through it starts at the potion's mark and is stopped only under half of
+  it.
 - **The check-in board** ("Sự kiện và điểm danh", 878x600, with its *Điểm
   danh* calendar) is told by its 280x30 title, which GoBot already shipped as
   `grabbed/auto_login_success_indicator` -- the client's own
@@ -1654,6 +1714,360 @@ its X at +564,+14 from the title)`; `Popups: closed the check-in board at x,y
 `DOC-TRUOC.txt`: *Tự đóng thông báo* ticked through a login and a 00:00;
 *Thử mua*, then 1 + 1 with **Mua ngay**, watched, then the real numbers.
 
+### The pet, the walk back, the bag and the shop (2026.11.10)
+
+Since 2026.11.10 (not yet run on the game). On 2026-11-10 the owner wrote
+*"Bơm máu pet chậm"*, *"Thao tác dọn rác chậm"*, *"Không tự di chuyển quay về
+vùng đánh quái"*, asked for the skills during the bag jobs (*The hold's key
+window*, below) and wrote *"Mua HP/MP cần để người chơi tự setting bao nhiêu
+lần chứ không phải là max 20"*. The slow bag cleaning, *"dọn rác chậm là từ
+user feedback"*, came from other players of the shipped zip, with no log of a
+delete pass anywhere: it is judged on the zip's settings (four tabs ticked,
+`press_ms` 80). The owner's answers: the pet
+*"Liên tục như GoC (0,2–0,5 s)"*; pushed outside the area, (a) *"Ngưng đánh,
+đi về trước"*; the keys, letters and Space, *"Bấm cả bình"*, never in a charm
+run; the purchases, *"Không giới hạn"* (`kBuySlotsPerRunMost`, under *Buying
+by the slot*, above). What the 20:01-22:23 log of that day showed comes with
+each.
+
+- **The pet pressed over and over** (`MacroConfig::pet_every_ms`,
+  `kPetEveryLeastMs`-`kPetEveryMostMs`, 200-3000 ms; `kDefaultPetEveryMs`,
+  300, in a file without it -- the owner's Q at 3000 on both rows goes every
+  300). On 2026-11-10 GoBot's own 3-s wait (±15%) between two presses of Q
+  kept the pet under its 91% about half the time from 20:03 to 21:12; GoC
+  presses its food every 200 ms. The pet's row has *Bơm liên tục, mỗi [N]
+  ms*, one value for every pet key, Lv1 and Lv2, applied as it is dragged and
+  written once let go of; the full screen's *Every (ms)* of a pet key is that
+  value. A skill that is ready takes the press after the pet's own
+  (`MacroEngine::pet_yields`, `kPetYieldMostMs` 500 at most, *a skill's turn*
+  in the black box), so while skills are due the pet has at most every other
+  press; HP and MP potions go first as ever. A pet key quicker than
+  `potion_recheck_ms` is never re-checked nor pressed early again.
+- **What came of the pet's presses**, once a minute (`PetHealWatch`, on the
+  timer pass's thread): `Pet heals: key Q, N pressed; of N judged, N rose
+  (median +N% after N ms; two that rose N s apart at the closest), N static
+  -- the bar still -- in N runs (N at 71%, …), N no rise with the bar
+  moving, N with no reading` -- a press judged `PetHealWatch::kJudgeMs` (700
+  ms) after its key-down, a heal put down to the earliest press still open;
+  the closest two that rose bound the game's own wait for the pet's food.
+  The first press of a still run says `Potion check: Pet key Q pressed at
+  71%, the bar within 1% of it for 700 ms -- no rise; pressed on every 300 ms
+  all the same …`, and the first still press at
+  `MacroEngine::kPlateauLowPct`-`kPlateauHighPct` (70-75%; 248 of the 552
+  presses that did nothing on 2026-11-10 began there) keeps a picture of the
+  pet's slot, `potion_debug\<time>_pet_<pct>.png`, cut and written off the
+  window's thread: whether the game refuses the food there or the bar is
+  misread is in it.
+- **The walk back first, latched** (the owner's (a); *The walk back first*,
+  under the hunting area, above). On 2026-11-10 -- t1901_s2, *Đứng yên một
+  chỗ*, a 366-px box and a reach of 450 -- a monster in the box was in reach
+  from almost anywhere outside it: the character was outside 23% of the
+  time, and all 35 walks back began at a floor's end, each fight cutting the
+  one before. Now, more than `kZoneOutsideBackPx` (60) out, nothing is fought
+  until the character is inside the box, and the skill keys wait while it
+  walks (`Hunter::returning`, `MacroEngine::Fight::Mode::Returning`, read from
+  the hunter on every pass); the card says *… — bot ngưng đánh, về vùng
+  trước: đi bộ về X, Y, vào tới trong vùng rồi mới đánh tiếp.*, its hover
+  takes the reach from `hunt.ini`, and every dot on **Bản đồ** is grey
+  meanwhile (`mob_grey`).
+- **A door back to the area's map**: an area set aside by a map entry -- not
+  by a log in, nor by the tab -- is taken again when the character comes back
+  to that map by any door, wherever it lands, once a report of its own has
+  come or `Hunter::kDoorLoadMs` (3 s) has passed (`ZoneWait::Loading`, then
+  Back), where it used to stand; meanwhile the card says *Vừa qua cửa về lại
+  bản đồ này: chờ bản đồ tải xong rồi dùng lại vùng đã lưu và đi bộ về vùng.*
+- **No spot where nobody stands**: a report at y 0, or more than
+  `Hunter::kOneJumpPx` (120) above the last ground report with no jump of
+  the character's between (`Hunter::spot_plausible`; 999,0 for 79 s at
+  21:11), is not taken for the spot, nor by **Bản đồ**'s `MapTrust` for a
+  standing point (`MapTrust::kOwnRisePx`); `Hunter: a report of yours at
+  x,y not taken for the hunting spot -- …` at most once a
+  `Hunter::kSpotOddSayMs` (a minute). `PacketWorld::take_own` keeps every
+  frame, so facing and speed are as they were.
+- **One map of several, by a click**: with the map not told apart -- several
+  files fit, as t10_s60, t1901_s2 and t1_s60 did from 21:01 to 21:11 -- and
+  just one of them with a saved area, the **Bản đồ** card offers *Dùng vùng
+  <stem>* (`zone_choice`, `MapTrust::choose`); GoBot never takes it alone.
+- **The walk's log**: `Hunter: N px outside the hunting area -- no fight until
+  the character is back inside it: walking back first, to x,y (reach N px)`;
+  `Hunter: the walk back first is over after N s, from N px outside -- …`;
+  `Hunter: walk back over after N s -- …` (arrived, cut by a fight with slot
+  N inside or outside the box, given up, a map entry); the minute's
+  `Hunter:` line adds `; outside the area N s, walking back N s` and the
+  `Skills:` line `, N walking back`. And for every walk of the character's, on
+  the capture thread, `Positions: own walk 25,632 -> 363,632 (+338 px) in
+  0.94 s, stopped by 0x0027; 2 casts of yours in it; GoBot: no arrow within
+  300 ms; last key Z 85 ms before` (`PacketWorld::own_walk_line`,
+  `InputManager::walk_keys_text`, `kWalkKeyMs` 300): what walked the
+  character out 32 times on 2026-11-10, about 340 px each, with no walk of
+  GoBot's in the log, is still not known -- Z, a melee skill walking to its
+  target, is the suspect.
+- **A bag pass with nothing to look through makes none** (`bag::pass_tabs`,
+  `kNoTabVi`): no tab ticked under *Tìm trong:* and the bag key is not
+  pressed nor the hold taken -- the card says *Chưa chọn ngăn nào ở 'Tìm
+  trong:', nên không xoá được gì* -- unless something may be left in the bin
+  to give back. Every item on the list a catalog icon under `spend/` --
+  potions, food, fragments, charms, in Tiêu Dùng and nowhere else -- and only
+  Tiêu Dùng is looked through, or none, with `kNoUseTabVi`, when it is not
+  ticked; a photographed item or any other icon, and every ticked tab is, as
+  before (`Trash: every item on the list is a spend/ icon -- only Tiêu Dùng
+  looked through, not …`).
+- **Each item quicker, every check kept**: the bag's opening and the item on
+  the bin looked for every 80 ms (`kQuickLookMs`; 150 before) up to a clock's
+  bound (`kBagOpenWaitMs`, `kInBinWaitMs`), the bin's dialog waited for by the
+  clock with "gone" two looks `kDoneApartMs` (150 ms) apart, one dialog search
+  a frame, the last frame of a deleted item judged by the next round when
+  nothing was up on it, and the drag's ten steps paced by *Tốc độ bấm nút*.
+  The quantity box's 750-ms watch with 3 agreeing reads, `back_out`'s polls
+  and the close poll are as they were. By the code's model, not yet measured:
+  9-14% an item (2.6 to 2.3 s at 80 ms). With the zip's four tabs ticked and
+  every item on the list a spend/ icon, so that only Tiêu Dùng is looked
+  through: a pass with two stacks 12.6 to 6.8 s, one with nothing to delete
+  7.4 to 2.1 s. With any other item on the list, a picture cut from the bag
+  or an icon of another group, all four tabs are still looked through: 12.6
+  to 12.0 s and 7.4 to 7.3 s, the item's gain and the bag's quicker opening
+  only. All of these come before the key window's waits. Each item logs
+  `Trash: item at Tiêu Dùng, hàng 1 ô 1 (giống 97%) deleted in N ms -- drag
+  N ms, in the bin after N ms (N
+  looks), its dialog N ms after the click, the box read on N looks in N ms,
+  closed N ms after Xác Nhận (1 question), then N ms till the item was seen
+  gone, last look N ms`, and each pass `Trash: pass steps -- bag opened in N
+  ms (N looks); Tiêu Dùng: tab N ms, top N ms, N pages (scrolling N ms), N
+  items in N ms; bag shut in N ms; N ms in all`, on the trash worker.
+- **The purchases**: *mỗi lần mua [N] ô* from 0 to 999, a hint when the two
+  together pass `kShopMaxBuys` (40) -- *Buying by the slot*, above.
+- **No death from an HP of 0 the screen alone reads** (`death_doubt`,
+  `GuiApp::death_doubt_now`): at 22:12:52 an *ALERT death* came while
+  LDPlayer covered the game and the game reloaded, the packets saying
+  14585/14585 (11.4 s old) and the server silent since 22:12:41. Not while
+  the game is behind with the frames off the screen, not while usable packets
+  say HP is above 0, not while the server has been silent on the game's
+  capture past `kLinkQuietMs` (5 s) and up to `kDeathQuietMostMs` (60 s);
+  `Alerts: HP reads 0/N on the screen -- not taken for a death: …` as the
+  reason changes, and a real death alerts 3 s after nothing doubts it.
+
+Still not known, each for the next log: the pet food's own cooldown (between
+about 1 and 2.4 s) and why presses do nothing at 70-75%; what walks the
+character out of the area; real per-item and per-pass times; whether skills
+cast with the bag open. The owner's live test is step 13 of section 6 in
+`DOC-TRUOC.txt`: the pet's food counted each hour with its `Pet heals` lines;
+the time outside the area, the walks back and the own walks, after a hand
+test of Z, X, C, V and Space with the bot stopped; one pass with Tiêu Dùng
+alone ticked, *Thử tìm* then *Dọn ngay*, its timing lines and the casts in
+it; and one small **Mua ngay**, watched, with the skills between purchases.
+
+### The hold's key window (2026.11.10)
+
+The owner, 2026-11-10: *"Khi dọn rác thì cần ra các skill thuộc phím chữ cái
+(z,x,c,v, v.v.)"*, then *"cả khi mua HP và MP cũng cần ra skill nhé"*, *"có
+tính phím space, vì phím space không ảnh hưởng"* and *"lúc dùng bùa thì không
+cần ra skill"*; the answer, *"Bấm cả bình"*. A bag job still takes
+the one hold that refuses every key below Critical -- the hunter, a walk, the
+drop and the jumps stand -- but a Dọn rác pass (*Dọn ngay* and *Thử tìm*
+too) and a *Tự mua bình* round (*Mua ngay* and *Thử mua* too) arm a key
+window beside it (`ExecutionCoordinator::arm_pass_keys`), separate from the
+hold's reason, which lets the macro's keys on a letter A-Z or Space through:
+skills, buffs and potions alike, built from the macro's keys in memory
+(`MacroEngine::pass_keys`). Never a digit, Enter, Esc, an arrow, a modifier,
+an F-key or an OEM key (`pass_key_allowed`), the bag key, the quest window's
+key or GoBot's own switches; never a step of the key sequence; never in a
+charm run, the give-back look, or a job begun with something maybe left in
+the bin. The job opens it only on a look just taken with nothing up -- no
+dialog, message, check-in board or quantity question, nothing out towards
+the bin -- and shuts it before every click, drag, right-click, double-click
+and key of its own, waiting up to 600 ms for each key let through to be up;
+one still down, and that input is not made and the job stops. A shop round
+shuts it from just before each double-click until the question is seen gone
+and the bag-full message has had its second; a purchase whose look was judged
+with the window open is judged again on a look taken after the shut, and the
+double-click goes by that one. Its quiet second is measured with no window
+armed, and a second in which GoBot itself sent anything is measured again
+(`quiet_said`; `InputManager::sent_count` moves both as an event is handed to
+Windows and once it has gone), never taken for the player's. A look the
+window opens on is searched for dialogs once. A pass drags or
+right-clicks a slot only from a look taken with the window shut and half a
+second after the last potion let through. A key the window holds is
+`Refused::Gated`: not a refusal of every key, so a digit potion under its
+mark holds the letter skills up 300 ms at most, and a skill or a buff it
+held is tried again 30 ms on. F12, DỪNG and the job's end close it
+(`PassKeysScope`, `stop_jobs`, `stop_trash`), as does any change of the hold.
+Each job logs `Trash: pass's key window: Z 5, X 4, G 1 through, 3 times open
+(1840 ms)`. Since 2026.11.11 the window also lets through Home, End, PgUp,
+PgDn, Insert and Delete (`pass_key_nav`), each key in that line by its name
+(`InputManager::key_name`), and opens for an HP or MP potion due; digits
+still never go (below).
+
+### The bag jobs at any HP, and their own potions (2026.11.11b)
+
+Since 2026.11.11b (not yet run on the game). The owner, 2026-11-11: *"Hiện
+tại máu thấp đang không được mua bình, làm cho có thể mua bình ở bất cứ mức
+máu nào và vừa mua vừa bơm máu"*; answers *"GoBot tự bấm bình"*, *"Giữ chặn
+phím số"*, *"Cả dọn rác"*.
+
+- **Any HP.** A Dọn rác pass and a Tự mua bình round -- timed, *Dọn ngay*,
+  *Mua ngay* -- start and go on at any HP: `bag::hp_gates` gives
+  `bag::kJobDownHpPct` (1%) for both gates whatever the potion, so only the
+  character down holds a job back or stops it (put off, never trouble, again
+  in 15 s), and HP not read still waits. This replaces the 11.11 gates below
+  (the mark and half of it, or the floor + 10). Charms and chat are unchanged.
+- **Own potions.** With the macro running, the HP and MP potions go between
+  the job's clicks through the key window, as in 11.11. With it not running
+  (the bot stopped, the macro off) the job presses them itself
+  (`BagCleaner::OwnPotions`, `MacroEngine::own_potion_due`): the tier the
+  macro would press for the reading, HP's first, never the pet's, each key's
+  cooldown kept across the jobs; at the moments of a potion break (the shop
+  seen, before each double-click, between two items), on `keys_clear` (nothing
+  up, never in the money stretch or a charm run), through the job's own
+  `press`, then half a second waited and a fresh look taken before a drag or a
+  double-click. Logged as `Trash: own potion press ...`.
+- **Never a digit.** A potion on a digit (the simple screen's 1 and 2) is never
+  pressed by a bag job, said once a job (`Trash: a potion due on key 1 is not
+  pressed by a bag job ...`); with no HP wait any more, move it to a letter or
+  to Home/End/PgUp/PgDn/Insert/Delete.
+
+### The shop after the pass, HP during the bag jobs, and six more keys (2026.11.11)
+
+Since 2026.11.11 (not yet run on the game). Users of the zip, as the owner
+passed it on on 2026-11-11: *"- Sau khi dọn rác thì không lập tức mua bình
+ngay mà bị delay tới tận vài phút. Việc này dẫn tới khi bắt đầu thực hiện mua
+bình thì rác đã đầy túi đồ => Cần cho thực hiện mua bình ngay sau khi dọn rác
+xong. - Làm cho có thể bơm HP và MP khi đang dọn rác và mua bình. => Hiện tại
+khi HP thấp thì sẽ ưu tiên bơm xong mới mua bình dẫn tới việc mua bình bị
+delay. Cần sửa vấn đề này. Ngoài ra làm cho các phím như home, pgup, pgdown,
+end, delete có thể sử dụng được"* The owner's answers: the shop after the
+pass, *"Tới giờ mua: dọn rồi mua"*; HP and MP during the bag jobs, *"Mua
+luôn, bơm xen"*; digits, *"Không cho phím số"*; the keys, *"Home End PgUp
+PgDn Ins Del"*.
+
+- **The shop rides a pass** (`bag::ShopRide`, `bag::ride_turn`,
+  `bag::ride_refused`, `GuiApp::trash_loop`). The pass and the shop had two
+  clocks that knew nothing of each other, so a round came anywhere up to an
+  interval after a pass, the bag full of loot again by then. The shop keeps
+  its own clock and plan rules -- `buy_every_minutes`, `shop_clock.txt`,
+  never early, `kShopBuysPerHold` (10) a hold and the rest `kShopPartGapMs`
+  (60 s) on, **Mua ngay**'s `kShopMaxBuys` (40), the bag-full end -- but a
+  timed look come due, a plan or an owed part, with **Tự dọn rác** on pulls
+  the pass to now, and the round is bought right after it under the same
+  hold: the "trash cleaning" hold and the game's mouse lock carried from the
+  pass into `run_shop` (`after_pass`), nothing let go between, no quiet
+  second and no HP start gate of its own -- the pass passed its gate a moment
+  before, and the guard watches HP through the round. A look come due while
+  a timed pass runs rides that pass too. The pulled pass is a timed pass like
+  any other: the next comes `interval_minutes` after it. With a pass ended
+  less than `bag::kRideFreshMs` (60 s) ago none is pulled, and the round goes
+  on its own at once by its old path. The first pass runs 15 s after a start
+  and the shop's first look 45 s after it, and each clock counts from its
+  own runs, so when `buy_every_minutes` is a multiple of `interval_minutes`
+  -- the shipped 10 and 60, or 5 or 15 with 15 -- each timed round usually
+  comes within that minute of a timed pass and is bought on its own right
+  after it. A pass is pulled when a round comes due longer after the last
+  one: other numbers (10 with 15), an owed part a minute after a round
+  (usually a short pass), a plan time read from `shop_clock.txt` on a start
+  or a re-tick, a **Mua ngay**, a round or a pass put off. None is pulled
+  where the shop's own cheap gates would put the look off -- the chat line in
+  doubt, no game window or the game off the screen, HP not read (the login
+  or character screen, a map loading, the death panel), a keeper's crossing
+  or cold start -- nor for an interval after a pulled pass found an empty
+  list or no tab ticked (`no_pull_before_ms`): the look waits by the shop's
+  rules, and the first one after pulls a pass. No ride after a pass that did
+  not run or did not end clean -- an empty list, no tab, no game window, the
+  chat line in doubt, another job's hold, HP, a stop, trouble, a kept hold,
+  the board -- and the round then goes on its own by its own rules; a ridden
+  round still waits while HP is not read. A ridden round
+  comes before a charm run due at the same moment; otherwise the order is as
+  it was: a chat line, the pass, the charms, the shop. **Dọn ngay**, *Thử
+  tìm*, **Mua ngay**, *Thử mua* and the CLI are unchanged; a **Dọn ngay**
+  never buys. The shop opens the bag itself, as before. With both ticked the
+  card says *Dọn rác đang bật: tới giờ mua, GoBot dọn rác trước rồi mua bình
+  liền sau đó, trong cùng một lần dừng phím, không chờ thêm. Vừa dọn xong chưa
+  tới 1 phút thì mua luôn, không dọn lại.*
+- **HP and the bag jobs** (`bag::hp_gates`, `PassKeys::hp_potions`,
+  `PassKeys::hp_mark`, `PassKeys::hp_all_through`). With the HP potion's key
+  one the job's key window lets through -- a letter, Space or one of the six
+  below, the macro on, the job not begun with something left in the bin --
+  and, with two HP lines, every one whose mark is at half the highest or
+  over on such a key (the macro presses only the tier HP is under, so a Lv1
+  on the digit 1 above a Lv2 on G would leave HP undrunk from its mark down
+  to G's) -- a timed pass or shop look
+  starts with HP at the HP potion's mark (the highest enabled HP mark, 95 at
+  most) rather than 10 over it, looks again `bag::kHpLookAgainMs` (5 s) on,
+  and the job's guard stops it only under half that mark: a mark of 80
+  started at 90 and stopped under 80, and now starts at 80 and stops under
+  40. With the HP potion on a digit -- or one such line of two -- the macro
+  off or no HP potion, as before -- started at min(95, floor + 10), stopped
+  under the floor -- but looked at again in 5 s, not 15. `chat_hp_floor_`,
+  the charms' gate and guard, and the pet are unchanged.
+- **Potion breaks** (`BagCleaner::KeyWindow::potion_due`,
+  `MacroEngine::vital_potion_due`, `BagCleaner::potion_break`): with an HP or
+  MP potion due whose key the window lets through -- never the pet's -- the
+  window is opened through `keys_open`, with all its checks, and kept open
+  `BagCleaner::kPotionBreakMs` (400 ms) at most while one still is: before
+  each purchase's double-click (before `money_`), on the look that first sees
+  the shop, and in a pass between two items on the look handed over clean.
+  The look the double-click goes by, and the slot dragged next, are then
+  taken after the shut, as after any open look. `Trash: potion break before
+  the double-click -- the key window open N ms for an HP or MP potion due`
+  (or `as the shop is seen`, `between two items`; `, one still due` after the
+  whole 400 ms).
+- **A stop by HP is no trouble**: a pass its guard stopped for HP is tried
+  again `bag::kHpStoppedAgainMs` (15 s) on, not an interval; a shop round so
+  stopped ends Paused (`bag::shop_end`, by the guard's own `hp_cut`), looked
+  at again in 15 s whatever HP reads by its end; a key of the macro's not
+  seen up in time (`Result::keys_late`) is Paused too, a part's gap on. The
+  bag-full message, or any lone message in the quantity box's place, is
+  closed whatever HP is (`set_hold_check`: a stop or the hold lost only).
+- **Home, End, PgUp, PgDn, Insert and Delete** (`pass_key_nav`): exactly VK
+  0x21, 0x22, 0x23, 0x24, 0x2D and 0x2E go through the key window as the
+  letters do, for skills, buffs and potions alike, at the same moments;
+  never a range -- the arrows 0x25-0x28 (↓ among them) and 0x29-0x2C stay out
+  -- and digits, the number pad and the F-keys stay out too. What the game
+  does with them on the bag or the shop is not known, so after one came up
+  (`ExecutionCoordinator::pass_nav_ms`, set in `release()`) every input of
+  the job's own, and the look it goes by, waits until
+  `BagCleaner::kNavSettleMs` (200 ms) after it (`keys_shut`). A shop's
+  double-click goes only by a look on which the potions' row itself matched
+  (`row_score > 0`): one that found only the buttons is looked at again
+  `BagCleaner::kShopRowRelooks` (3) times, a look apart, and then the round
+  stops with nothing clicked and no box up, as trouble, `shop_row_unseen`
+  kept, and for each look `Trash: shop row not matched before the
+  double-click on Thịt bò khô -- its buttons alone at x,y (row 0.00, buttons
+  0.97), look 1 of 4`. `shop_now`'s fallback stays for closing the shop and
+  for the run's end.
+- **Naming**: `InputManager::key_name` says Home, End, PgUp, PgDn, Insert and
+  Delete, and `parse_key` also takes `pgup`, `pgdn`, `del` and `ins`, which
+  set P, P, D and I before; the window's line names its keys (`Trash: pass's
+  key window: Z 1, Home 2, PgDn 1, Delete 1 through, …`). On the simple
+  screen Delete is a key like any other, and Backspace alone clears a key
+  box: *Nhấn phím muốn dùng. Esc để huỷ, Backspace để bỏ phím này.*
+
+New in the log, on the trash worker: `Trash: shop due -- a pass first, then
+the round under the same hold (the last pass ended N s ago)`, once until a
+job runs or a new reason puts a look off; `Trash: shop rides the pass -- the
+same hold, no quiet second (the look that pulled it)` or `(come due while it
+ran)`; `Trash: shop -- no ride on the pass it pulled (…): it goes on its
+own`; the shop job line ends `; right after the pass, the
+last pass ended N s ago` (or `on its own`, `Mua ngay`, `Thử mua`); `Trash:
+timed shop put off -- HP 62% under the HP potion's mark 80%` and the like
+(`timed pass`, another job's hold, the quiet second touched or GoBot's own
+input, the board), once each time the reason changes; `Trash: pass stopped by
+HP -- HP 38% under the level 40%`; `Trash: shop round stopped by the hold --
+…'s now; HP N%, the level N%`.
+
+Still not known: what the six keys do in the game with the bag or the shop
+open, and whether the live shop's row still matches with a cell selected
+after purchase 1 -- if it does not, rounds now stop after one purchase with
+the lines above, where 2026.11.10 went on by the buttons alone. An HP or MP
+potion on a digit -- the simple screen fills in 1 and 2, and so does the
+zip's `macro.ini` -- still waits through a pass and a round: move it to a
+letter or one of the six. The owner's live test is step 14 of section 6 in
+`DOC-TRUOC.txt`: a due shop with *Dọn rác* on -- every 10 minutes, buying
+every 15, so the round comes due minutes after a pass; with 5 or 15 it goes
+on its own within the minute after one, as it should -- a pass and then the
+round at once with no quiet second; HP under the mark during a round, the potions
+between purchases and the round going on; HP under half the mark, the round
+stopped and bought later; each of the six pressed by the macro with the bag
+open and with the shop open, watched.
+
 ## Keyboard macro
 
 The macro needs no packet capture and no protocol work. On the simple screen
@@ -1679,6 +2093,9 @@ Where a key is typed into its box by name -- the macro's keys, and most others
 under **Nâng cao ►** -- a single letter or digit is that key (`1` is the 1
 key), F1 to F24, Space, Up and the like go by name, and two or more digits, or
 `0x` and hex digits, are a Windows key code (`90` and `0x5A` are both Z).
+Home, End, PgUp (or PageUp), PgDn (or PageDown), Insert (or Ins) and Delete
+(or Del) go by name too, and the box shows them so; before 2026.11.11 `pgup`,
+`pgdn`, `del` and `ins` set P, P, D and I.
 
 Worth leaving on:
 
@@ -1964,12 +2381,12 @@ still be running 5 s after a Ctrl+C, a second one ends it at once.
 | file | holds |
 |---|---|
 | `configs/app.ini` | the game's window, the client keeper, the simple screen's switches (light mode among them: `[Simple] light_mode`); how hard GoBot works the PC (`[Performance]`, below); what it may take from the game's packets (`[Packets]`, under *Packets first (2026.11.03)*); the potion counts' warnings (`[Potions]`: `warn_below` for a hotbar slot, `warn_bag_below` for the packets' whole bag); capture interface and server address; whether `gobot_gui.log` starts afresh each session (`new_log_each_start`, on as shipped: the session before is kept as `gobot_gui.old.log`) |
-| `configs/macro.ini` | the macro's keys -- skills, potions, buffs -- and the sequence |
+| `configs/macro.ini` | the macro's keys -- skills, potions, buffs -- and the sequence; since 2026.11.10 `pet_every_ms`, how often the pet's potions go while the pet is under its mark (200-3000 ms, 300 as shipped and in a file without it) |
 | `configs/hunt.ini` | hunting: your character's name, the attack and pick-up keys, the reach; where positions come from (`packet_positions`: off, watch, on) and how the packets lie over the screen (`packet_scale`, `packet_dy`); the hunting spot (`spot`, its area and when it walks back); the drop to a floor below (`drop_down`, off as shipped, with `drop_min_px` 100, `drop_side_px` 120 and `drop_gate_px` 150); the jump up onto a floor above (`jump_up`) and the seek inside a **Bản đồ** area (`seek_in_zone`), both on as shipped and acting only in such an area |
 | `configs/spots.ini` | the hunting areas drawn on **Bản đồ**, one per map (`[t52_s2]`: the home and the box, and when it was saved); made and written by GoBot, never shipped -- copy it over to a new version's `configs` to keep them |
 | `configs/party.ini` | party: accepting, inviting by keyword, the lists of names |
 | `configs/login.ini` | logging back in: where VTCZone is, the pages, the channel and character |
-| `configs/trash.ini`, `configs/trash\` | bag cleaning: the icons picked, and the photographed items; the charms, and the potion shop (`buy_potions`, `buy_every_minutes`, and since 2026.11.09 `buy_hp_slots` and `buy_mp_slots`, 0 to 20, 3 as shipped -- a file without them reads its old `buy_hp_to` and `buy_mp_to` until the card saves the new key) |
+| `configs/trash.ini`, `configs/trash\` | bag cleaning: the icons picked, and the photographed items; the charms, and the potion shop (`buy_potions`, `buy_every_minutes`, and since 2026.11.09 `buy_hp_slots` and `buy_mp_slots`, 0 to 999 since 2026.11.10 (20 before), 3 as shipped -- a file without them reads its old `buy_hp_to` and `buy_mp_to`, 20 at most, until the card saves the new key) |
 | `%LOCALAPPDATA%\GoBot\charm_clock.txt`, `shop_clock.txt` | when each charm may be used again, and since 2026.11.09 when the next potion plan begins: written before the click, so GoBot started again neither uses a charm nor buys early -- shared by every GoBot folder of that Windows account |
 | `configs/chat.ini` | Tự chat: the lines, and how often |
 | `configs/quest.ini` | quick quest: the key, and how often |

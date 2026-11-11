@@ -118,6 +118,37 @@ Frame slot_cut(const Frame& f, const ScreenRect& slot) {
     return out;
 }
 
+/// Round the pet's bar, the picture of its slot kept takes this much: its
+/// portraits and its food over the bar, its purple bar under it, the slot's
+/// frame either side.
+constexpr int kPetSlotAbove = 64;
+constexpr int kPetSlotBelow = 18;
+constexpr int kPetSlotSide = 8;
+
+/// The pet's slot cut out of a frame round its bar (VitalsReader::pet_bar),
+/// never above the HP and MP bars' bottom: the slot alone, no bar of yours.
+/// Empty when nothing of it is in the frame.
+Frame pet_slot_cut(const Frame& f, const BarSpec& bar, const BarSpec& hp, const BarSpec& mp) {
+    Frame out;
+    if (!f.valid() || !bar.valid()) return out;
+    int top = 0;
+    if (hp.valid()) top = std::max(top, hp.bottom() + 2);
+    if (mp.valid()) top = std::max(top, mp.bottom() + 2);
+    const int x0 = std::max(0, bar.x - kPetSlotSide);
+    const int x1 = std::min(f.width, bar.right() + kPetSlotSide);
+    const int y0 = std::max({ 0, bar.y - kPetSlotAbove, std::min(top, bar.y) });
+    const int y1 = std::min(f.height, bar.bottom() + kPetSlotBelow);
+    if (x1 <= x0 || y1 <= y0) return out;
+    out.width = x1 - x0;
+    out.height = y1 - y0;
+    out.pixels.resize(static_cast<std::size_t>(out.width) * out.height * 4);
+    for (int y = 0; y < out.height; ++y)
+        std::copy_n(f.pixels.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y0 + y) * f.width + x0) * 4),
+                    static_cast<std::size_t>(out.width) * 4,
+                    out.pixels.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) * out.width * 4));
+    return out;
+}
+
 /// A key's name as it can go in a file's name: its letters and digits.
 std::string file_part(const std::string& key) {
     std::string out;
@@ -190,14 +221,45 @@ void GuiApp::potions_tick() {
     }
     ui.was_running = running;
 
-    // Misread frames written meanwhile: their lines for the log.
+    // Misread frames written meanwhile: their lines for the log, in the order
+    // they came back, written off this thread (log_later): no file on the
+    // GUI's.
+    std::vector<std::string> saved;
     for (auto it = ui.saving.begin(); it != ui.saving.end();) {
         if (it->wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
             ++it;
             continue;
         }
-        GB_INFO("%s", it->get().c_str());
+        saved.push_back(it->get());
         it = ui.saving.erase(it);
+    }
+    log_later(std::move(saved));
+
+    // The pet's bar still at 70-75% through a press of its potion, the first
+    // time a run (MacroEngine::take_pet_plateau, 2026.11.10): a picture of the
+    // pet's slot alone -- its portraits, its food and its bar -- from the
+    // reader's newest frame, cut and written off this thread as a misread's
+    // frame is. Whether the game refuses the food there, or the bar is
+    // misread, is in it.
+    int plateau = -1;
+    if (macro_ && macro_->take_pet_plateau(plateau)) {
+        const std::string text = "Pet heals: the pet's bar still at " + std::to_string(plateau) +
+                                 "% through a press of its potion";
+        const BarSpec bar = vitals_.pet_bar(), hp = vitals_.hp_bar(), mp = vitals_.mp_bar();
+        Frame f;
+        if (!bar.valid() || !vitals_.latest_frame(f)) {
+            log_later({ text + " -- no picture of the pet's slot to keep" });
+        } else {
+            const std::string name = stamp() + "_pet_" + std::to_string(plateau) + ".png";
+            ui.saving.push_back(std::async(std::launch::async, [f = std::move(f), bar, hp, mp, name, text] {
+                const Frame cut = pet_slot_cut(f, bar, hp, mp);
+                const std::string dir = exe_relative("potion_debug");
+                if (!cut.valid() || !make_folder(dir) || !save_png(cut, dir + "\\" + name))
+                    return text + "; its slot's picture could not be kept";
+                prune(dir, kKeptFrames);
+                return text + "; kept a picture of the pet's slot as potion_debug\\" + name;
+            }));
+        }
     }
 
     // A look that has come back.

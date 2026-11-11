@@ -13,6 +13,7 @@
 #include "gobot/logger.hpp"
 #include "gobot/map_view.hpp"
 #include "gobot/no_real_input.hpp"
+#include "gobot/quick_quest.hpp"
 #include "gobot/quiet_second.hpp"
 
 #include "imgui.h"
@@ -130,6 +131,10 @@ constexpr int kShopQuietMs = 1000;
 /// times under the one hold -- the hand that clicked it is still on the mouse --
 /// with the hold and HP watched as the run watches them; a timed run once.
 constexpr int kShopQuietTries = 5;
+/// A quiet second in which GoBot itself sent something -- a key let go of,
+/// another job's -- is measured again this many times at most, not counted as
+/// one of those tries (2026.11.10): GoBot's own input is never the player's.
+constexpr int kShopOwnRelooks = 2;
 /// How long the charms wait after a run that stopped on the bag's strip not
 /// reading as Tiêu Dùng (BagCleaner::Result::tab_unsure): as long as a charm
 /// not found waits. A minute changes nothing of what spoils the read, and
@@ -534,14 +539,28 @@ void GuiApp::initialise() {
     // Its own attack key's presses, beside the macro's below, for the log's
     // casts: the macro skips that key, and its casts went to the macro's.
     hunter_->set_on_attack([this](std::uint32_t vk, std::uint64_t at_ms) { more_note_attack(vk, at_ms); });
+    // One line per walk of yours (2026.11.10), written on the capture's
+    // thread: GoBot's own keys about it -- the hunter's arrows, held or
+    // tapped, and the last key put down -- to find what walks the character
+    // out of its hunting area. The hunter's config under its own lock, the
+    // keys out of InputManager's ring: nothing of the GUI's read there.
+    packet_world_.set_walk_keys([this](const PacketWorld::OwnWalk& w) {
+        if (!hunter_) return std::string();
+        const HunterConfig hc = hunter_->config();
+        const std::uint64_t from = w.from_ms > 5000 ? w.from_ms - 5000 : 0;
+        return InputManager::walk_keys_text(InputManager::key_marks(from), hc.left_key, hc.right_key, w.from_ms,
+                                            w.to_ms);
+    });
     // Skills that follow the fight ask the hunter, from the macro's own
     // threads, whether it is fighting: only its atomics are read there. No
-    // hunter running is no hunter, and every key keeps its timer.
+    // hunter running is no hunter, and every key keeps its timer. Walking
+    // back to the hunting area (2026.11.10), every skill waits.
     macro_->set_fight([this] {
         MacroEngine::Fight f;
         if (!hunter_ || !hunter_->running()) return f;
-        f.mode = hunter_->engaged() ? MacroEngine::Fight::Mode::Fighting
-                                    : MacroEngine::Fight::Mode::Idle;
+        f.mode = hunter_->engaged()     ? MacroEngine::Fight::Mode::Fighting
+                 : hunter_->returning() ? MacroEngine::Fight::Mode::Returning
+                                        : MacroEngine::Fight::Mode::Idle;
         f.dx = hunter_->engaged_dx();
         f.attack_key = hunter_->attack_key();
         return f;
@@ -4500,6 +4519,10 @@ void GuiApp::request_shop(bool dry) {
 }
 
 bool GuiApp::stop_trash(bool wait) {
+    // A bag job's key window shut first, and forgotten: no key of the macro's
+    // goes through it from here, and the job cannot open it again
+    // (2026.11.10).
+    coord_.disarm_pass_keys();
     trash_stop_ = true;
     {
         std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
@@ -4700,7 +4723,10 @@ bool GuiApp::stop_jobs(bool with_bot) {
     // were waited for they went on swinging and drinking. Not over a hold that
     // is somebody else's, which refuses them just the same -- and which, let
     // go of by its owner as it winds down, is the stop's from then on
-    // (end_hold).
+    // (end_hold). Before anything, a bag job's key window shut and forgotten:
+    // under the job's hold take_hold(kStopHold) below does nothing, and the
+    // macro's letter keys would go on through it (2026.11.10).
+    coord_.disarm_pass_keys();
     {
         std::lock_guard<std::mutex> lock(hold_mutex_);
         stopping_ = true;
@@ -4754,7 +4780,10 @@ bool GuiApp::stop_jobs(bool with_bot) {
 ///
 /// Every other part of the bot is held off for the length of a pass: the
 /// hunter walking off with the bag open drags it out of reach, and a potion key
-/// pressed while a quantity box has the keyboard types a number into it.
+/// pressed while a quantity box has the keyboard types a number into it. But
+/// for the macro's keys on a letter or Space, which go on through the hold's
+/// key window between a pass's or a shop round's own clicks while nothing is
+/// up (2026.11.10) -- never a charm run's.
 void GuiApp::trash_loop() {
     name_this_thread("trash");
     // What the worker says for itself goes to the log as well as the screen;
@@ -4851,7 +4880,8 @@ void GuiApp::trash_loop() {
             tell("Không còn gì chờ trong thùng rác.");
     };
     // Tự chat's line before any timed job here -- the player's order: chat,
-    // then the bag (the pass, then the charms), then the potions. None starts
+    // then the bag (the pass, then the charms), then the potions; a shop due
+    // as a pass ends rides it, before the charms (2026.11.11). None starts
     // while a line is due, its attempt included, or waits only for this
     // worker's last job. Not while this worker holds the game for something
     // left in the bin (the line waits on that, and only a pass ends it), not
@@ -4864,6 +4894,90 @@ void GuiApp::trash_loop() {
         if (waits != 0 && now < waits + kChatFirstMaxMs) return true;
         const std::uint64_t due = chat_next_ms_.load();
         return due != 0 && now >= due && now < due + kChatFirstMaxMs;
+    };
+    // ---- the macro's letter and Space keys during a pass and a shop round ----
+    // (2026.11.10, the owner: "Khi dọn rác thì cần ra các skill thuộc phím chữ
+    // cái", "cả khi mua HP và MP cũng cần ra skill", "có tính phím space", "lúc
+    // dùng bùa thì không cần ra skill"; 2026.11.11: "Home End PgUp PgDn Ins
+    // Del", "Không cho phím số"): the hold's key window, through which the
+    // macro's keys on a letter, Space or one of those six -- skills, buffs and
+    // potions; never a digit -- go between the job's own clicks and keys
+    // (BagCleaner::KeyWindow, pass_key_allowed). Built from
+    // the macro's keys in memory (MacroEngine::pass_keys); never the bag's key,
+    // the quest window's -- quest.ini read here, on this thread -- or GoBot's
+    // own switches; none with the macro off. Never for a charm run, nor for a
+    // job begun with something maybe left in the bin: those keep the whole hold.
+    // The keys no bag job lets through nor presses of its own (2026.11.11b:
+    // the job's own potion presses go by the same).
+    const auto job_never = [&] {
+        QuestSettings quest;
+        quest.load(exe_relative("configs/quest.ini"));
+        std::vector<std::uint32_t> never{ settings.bag_key, quest.quest_key, own_trash_key_.load(),
+                                          own_login_key_.load() };
+        if (hunter_) never.push_back(hunter_->config().toggle_key);
+        return never;
+    };
+    const auto pass_keys_now = [&] {
+        if (!macro_ || !macro_->running()) return PassKeys{};
+        return macro_->pass_keys(job_never());
+    };
+    // ---- the HP and MP potions a bag job presses itself ----
+    // (2026.11.11b, the owner: "làm cho có thể mua bình ở bất cứ mức máu nào và
+    // vừa mua vừa bơm máu", "GoBot tự bấm bình", "Giữ chặn phím số", "Cả dọn
+    // rác"): with the macro not running -- the bot stopped and "Mua ngay" or
+    // "Dọn ngay" pressed, or the macro off -- nothing else presses them, so a
+    // pass or a shop round does, by the macro's own potion lines (the tier for
+    // the reading, each key's cooldown), on a key the key window would let
+    // through: never a digit, which is said once a job. The cooldown is kept
+    // here, across the jobs, as the macro keeps its own.
+    std::map<std::uint32_t, std::uint64_t> own_potion_ms;
+    const auto own_potions = [&] {
+        BagCleaner::OwnPotions o;
+        auto refused_said = std::make_shared<bool>(false);
+        o.due = [this, never = job_never(), refused_said, &own_potion_ms](std::string& line) -> std::uint32_t {
+            if (!macro_ || macro_->running()) return 0;
+            const MacroEngine::OwnPotion p = macro_->own_potion_due(never);
+            if (p.refused != 0 && !*refused_said) {
+                *refused_said = true;
+                GB_INFO("Trash: a potion due on key %s is not pressed by a bag job -- letters, Space and "
+                        "Home/End/PgUp/PgDn/Insert/Delete only, never a digit",
+                        InputManager::key_name(p.refused).c_str());
+            }
+            if (p.vk == 0) return 0;
+            const auto at = own_potion_ms.find(p.vk);
+            if (at != own_potion_ms.end() && now_ms() < at->second + p.cooldown_ms) return 0;
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%s on %s, %s %.0f%% at or under its mark %d%%", p.hp ? "HP" : "MP",
+                          InputManager::key_name(p.vk).c_str(), p.hp ? "HP" : "MP", static_cast<double>(p.pct),
+                          p.mark);
+            line = buf;
+            return p.vk;
+        };
+        o.pressed = [&own_potion_ms](std::uint32_t vk) { own_potion_ms[vk] = now_ms(); };
+        return o;
+    };
+    const auto key_window = [this] {
+        BagCleaner::KeyWindow w;
+        w.open = [this] { return coord_.open_pass_keys(); };
+        w.shut = [this](int ms) { return coord_.close_pass_keys(static_cast<std::uint32_t>(std::max(0, ms))); };
+        w.potion_ago_ms = [this] {
+            const std::uint64_t at = coord_.pass_potion_ms();
+            const std::uint64_t now = now_ms();
+            return at == 0 ? -1 : static_cast<int>(std::min<std::uint64_t>(now > at ? now - at : 0, 3'600'000));
+        };
+        // An HP or MP potion due whose key this hold's window lets through --
+        // never the pet's -- for the job's potion breaks (2026.11.11).
+        w.potion_due = [this] {
+            return macro_ && macro_->vital_potion_due([this](std::uint32_t vk) { return coord_.pass_key_armed(vk); });
+        };
+        // Home, End, PgUp, PgDn, Insert or Delete let through and come up
+        // (2026.11.11): the job's input of its own waits a moment after it.
+        w.nav_ago_ms = [this] {
+            const std::uint64_t at = coord_.pass_nav_ms();
+            const std::uint64_t now = now_ms();
+            return at == 0 ? -1 : static_cast<int>(std::min<std::uint64_t>(now > at ? now - at : 0, 3'600'000));
+        };
+        return w;
     };
     // ---- charms (Bùa) ----
     // A job of its own beside the timed passes and the ones asked for: the
@@ -5249,13 +5363,24 @@ void GuiApp::trash_loop() {
     // is counted (the owner, 2026-11-09): what is still owed of the plan is
     // kept here, and the game's message that the bag is full ends it -- the
     // next plan buys again. A timed round makes kShopBuysPerHold purchases at
-    // most, the rest kShopPartGapMs later; "Mua ngay" all of a fresh plan in
-    // its one hold. Everything that presses keys is held off for as long as a
-    // round takes -- the skills too, which would otherwise press into the
-    // quantity box and the shop; the potion keys wait with them, so a round
-    // starts only with HP well over the potion's mark and stops when it falls.
+    // most, the rest kShopPartGapMs later; "Mua ngay" a fresh plan, up to
+    // kShopMaxBuys of it in its one hold and the rest as the timed rounds buy
+    // it -- the numbers have no cap of their own since 2026.11.10 (the owner:
+    // "Không giới hạn"). Everything that presses keys is held off for as long
+    // as a round takes -- the skills too, which would otherwise press into the
+    // quantity box and the shop -- but for the macro's keys the round's key
+    // window lets through between purchases (2026.11.10). An HP potion among
+    // them drinks there, an HP or MP potion due given a moment before each
+    // double-click, and the round starts at the HP potion's mark and stops
+    // only under half of it (2026.11.11, bag::hp_gates); one whose key waits
+    // starts with HP well over the mark and stops when it falls under it.
     // `forced` is the button "Mua ngay" (the time is not asked), `dry` the
     // button "Thử mua": everything up to the quantity box, answered Hủy Bỏ.
+    // `after_pass`: a timed round that rides the pass just ended (2026.11.11,
+    // the shop right after the pass, below) -- the hold and the game's mouse
+    // still the pass's, carried in, and neither the HP start gate nor the
+    // quiet second asked -- HP not read, it waits as one on its own does;
+    // whoever called it lets the hold go after it.
     //
     // When the next plan is due is written to shop_clock.txt as a plan begins,
     // before anything is clicked: a worker started with no clock of the last
@@ -5320,7 +5445,85 @@ void GuiApp::trash_loop() {
                           : left > 0 && plan_due_ms != 0 ? wall_of(plan_due_ms)
                                                          : wall_of(shop_due_ms);
     };
-    const auto run_shop = [&](bool forced, bool dry) {
+    // ---- the shop right after the pass (2026.11.11) ----
+    // The owner: "Tới giờ mua: dọn rồi mua" (bag::ShopRide). A timed look of
+    // the shop come due -- a plan, or a part still owed -- with Tự dọn rác on
+    // pulls the pass forward to now, and the round rides it: run_shop with
+    // `after_pass` right after the pass, the hold and the game's mouse carried
+    // across with nothing let go in between, no quiet second -- the pass has
+    // none, and clicked through the bag a moment before -- and no HP start gate
+    // of its own; a look come due while a timed pass ran rides that one the
+    // same way. No pass pulled when one ended less than bag::kRideFreshMs ago:
+    // the shop goes on its own at once then. No ride after a pass that did not
+    // run, or did not end clean: the shop goes on its own, by its own rules.
+    // Never for a button, nor in a worker here for one: a Dọn ngay never buys.
+    bag::ShopRide ride = bag::ShopRide::None;
+    std::uint64_t last_pass_end_ms = 0;
+    // No pass pulled before this time: one pulled found nothing it could do
+    // -- the list empty, no tab ticked -- which its own clock, an interval
+    // on, looks at again, as it did before 2026.11.11 (the review's R2).
+    std::uint64_t no_pull_before_ms = 0;
+    // Since the last pass ended, for the log: "312 s ago", or "none yet".
+    const auto since_pass = [&] {
+        return last_pass_end_ms == 0 ? std::string("none yet")
+                                     : std::to_string((now_ms() - last_pass_end_ms) / 1000) + " s ago";
+    };
+    // Why a timed pass or shop look was last put off -- HP with its value and
+    // the gate, another job's hold, the quiet second, the board -- said in the
+    // log once, and again only when the reason changes: a look every 15 s says
+    // nothing new each time. Forgotten once a job runs. The shop's pull of a
+    // pass likewise (`pull_said`): said once until a job runs or a new reason
+    // puts a look off (the review's R4), not again for each look the same
+    // reason puts off.
+    std::string put_off_why;
+    bool pull_said = false;
+    const auto put_off = [&](const char* job, const std::string& why, const std::string& said) {
+        if (why == put_off_why) return;
+        put_off_why = why;
+        pull_said = false;
+        GB_INFO("Trash: timed %s put off -- %s", job, said.c_str());
+    };
+    // HP and a job of the bag (2026.11.11, the owner: "Mua luôn, bơm xen"),
+    // by the job's own key window (bag::hp_gates): every HP potion the macro
+    // may choose from the mark down to half of it on a key the window lets
+    // through (PassKeys::hp_all_through, the review's HP-1) -- the macro on,
+    // the job not begun with something left in the bin -- and a timed pass or
+    // shop look starts at the potion's own mark, the potion drinking between
+    // the job's clicks, and the guard stops it only under half that mark;
+    // otherwise -- one of them on a digit, say -- it starts over the window's
+    // floor by a margin (95% at most: a mark at 91% and over would never let
+    // one start) and stops under the floor, as before. chat_hp_floor_ stays
+    // what chat and the other jobs go by.
+    const auto hp_gates_of = [this](const PassKeys& keys) {
+        return bag::hp_gates(keys.hp_all_through, keys.hp_mark, chat_hp_floor_.load());
+    };
+    const auto hp_said = [](float hp, int level, const char* what) {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "HP %.0f%% under %s %d%%", static_cast<double>(hp), what, level);
+        return std::string(buf);
+    };
+    // What a bag job's guard stopped it for, for the log: HP under the level,
+    // as the guard saw them -- set by the guard, forgotten before each run. A
+    // stop with none of it seen and the hold somebody else's was the hold's.
+    struct HpCut {
+        float hp = -1.0f;
+        int   level = 0;
+    };
+    HpCut hp_cut;
+    // The level the job under way stops at (bag::HpGates::stop), for the
+    // line of a stop by the hold.
+    int job_level = 0;
+    const auto say_stopped = [&](const char* job, const HpCut& seen, const std::string& trouble) {
+        if (trouble.empty() || trash_stop_) return;
+        if (seen.level > 0) {
+            GB_INFO("Trash: %s stopped by HP -- %s", job, hp_said(seen.hp, seen.level, "the level").c_str());
+        } else if (!(coord_.critical_active() && coord_.critical_reason() == "trash cleaning")) {
+            const std::string whose = coord_.critical_active() ? coord_.critical_reason() : std::string("nobody");
+            GB_INFO("Trash: %s stopped by the hold -- %s's now; HP %.0f%%, the level %d%%", job, whose.c_str(),
+                    static_cast<double>(hp_percent_now()), job_level);
+        }
+    };
+    const auto run_shop = [&](bool forced, bool dry, bool after_pass) {
         const std::uint64_t due_before = shop_due_ms;
         // "Mua ngay" and "Thử mua": somebody at GoBot wants the shop now, and
         // the waits for a spoiled quiet second start again from the first.
@@ -5346,24 +5549,47 @@ void GuiApp::trash_loop() {
             tell("Thiếu hình hoặc bộ chữ số của game để mua bình (xem thẻ Dọn rác).");
             return;
         }
+        // Why a timed look is put off, for the log (put_off); a button's says
+        // it on the card instead.
+        const auto timed_put_off = [&](const std::string& why, const std::string& said) {
+            if (!forced && !dry) put_off("shop", why, said);
+        };
         if (!input_.window_valid()) return not_now("Chưa thấy cửa sổ game.");
         if (!client_on_screen(input_.target_window())) return not_now(kGameOffScreen, 60'000);
         if (chat_doubt_) return not_now(kTrashWaitsForChat);
-        if (coord_.critical_active() && coord_.critical_reason() != "trash cleaning")
+        if (coord_.critical_active() && coord_.critical_reason() != "trash cleaning") {
+            timed_put_off("hold " + coord_.critical_reason(),
+                          "another job holds the game (" + coord_.critical_reason() + ")");
             return not_now("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), mua bình sau.",
                            coord_.critical_reason() == kChatHold ? kAfterChatLineMs : 15'000);
+        }
         if (keeper_cold_start_) return not_now("Chờ: GoBot đang vào lại game, mua bình sau.");
         {
             std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
             if (keeper_flow_ != nullptr) return not_now("Chờ: GoBot đang qua màn hình khác, mua bình sau.");
         }
-        {
-            const float hp = hp_percent_now();
-            if (hp < 0.0f) return not_now("Chưa đọc được máu của nhân vật, mua bình sau.", 15'000);
-            // Over the potion's mark by a margin -- never more than 95%, or a mark at
-            // 91% and over would never let a run start.
-            if (hp < static_cast<float>(std::min(95, chat_hp_floor_.load() + 10)))
-                return not_now("Máu đang thấp, mua bình sau.", 15'000);
+        // The macro's letter and Space keys between purchases (2026.11.10):
+        // the window shut from just before each double-click until the
+        // question is seen gone and the full-bag message has had its time.
+        // Whether the HP potion is among them sets the round's HP gates
+        // (2026.11.11).
+        const PassKeys pass_keys = held || trash_left_held_ ? PassKeys{} : pass_keys_now();
+        const bag::HpGates hp_gate = hp_gates_of(pass_keys);
+        job_level = hp_gate.stop;
+        // HP not read -- not in the world: a map loading, the death panel, the
+        // character screen -- is asked of every round, one that rides a pass
+        // too (the review's R3): the pass's own gate lets HP unread through.
+        // The start gate is not asked of a round that rides a pass: the pass
+        // passed its own a moment ago, and the guard watches HP through the
+        // round all the same.
+        const float hp = hp_percent_now();
+        if (hp < 0.0f) return not_now("Chưa đọc được máu của nhân vật, mua bình sau.", 15'000);
+        if (!after_pass) {
+            if (hp < static_cast<float>(hp_gate.start)) {
+                timed_put_off("hp",
+                              hp_said(hp, hp_gate.start, hp_gate.drinks ? "the HP potion's mark" : "the start gate"));
+                return not_now("Máu đang thấp, mua bình sau.", bag::kHpLookAgainMs);
+            }
         }
         // The two potions and the Người Giữ Sân item, as catalog icons -- the
         // live client's bag draws the item as its icon at 1.000, so no picture
@@ -5464,26 +5690,40 @@ void GuiApp::trash_loop() {
         // This round's part of what is owed, in turns: a timed round
         // kShopBuysPerHold at most -- the rest kShopPartGapMs later, the skills
         // and potions not held off a minute and more with nobody watching --
-        // and "Mua ngay" all of it (kShopMaxBuys). A trial tries one of each,
-        // whatever this says.
+        // and "Mua ngay" kShopMaxBuys at most, the rest in timed parts. A trial
+        // tries one of each, whatever this says.
         const std::vector<bag::ShopPotion> part =
             bag::shop_order(owed.hp, owed.mp, forced ? BagCleaner::kShopMaxBuys : BagCleaner::kShopBuysPerHold);
         const int part_hp = static_cast<int>(std::count(part.begin(), part.end(), bag::ShopPotion::Hp));
         if (!dry) cleaner.set_shop_plan(part_hp, static_cast<int>(part.size()) - part_hp);
-        // The hold must stay ours, and HP not fall under the potion's mark,
-        // which is held off as well: the run stops there and gives the keys back.
-        // The wait for a quiet second watches the same.
-        const auto still_ours = [this] {
+        // The hold must stay ours, and HP not fall under the round's level --
+        // half the HP potion's mark when the potion drinks between purchases,
+        // else the mark, the potion held off as well (2026.11.11): the run
+        // stops there and gives the keys back. The wait for a quiet second
+        // watches the same. What HP stopped it at goes to the log, and makes
+        // the round put off, never trouble (hp_cut).
+        const auto still_ours = [this, &hp_cut, stop_level = hp_gate.stop] {
             if (!(coord_.critical_active() && coord_.critical_reason() == "trash cleaning")) return false;
             const float hp = hp_percent_now();
-            return !(hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()));
+            const int level = stop_level;
+            if (hp >= 0.0f && hp < static_cast<float>(level)) {
+                hp_cut = HpCut{ hp, level };
+                return false;
+            }
+            return true;
         };
-        const auto hp_under = [this] {
+        const auto hp_under = [this, stop_level = hp_gate.stop] {
             const float hp = hp_percent_now();
-            return hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());
+            return hp >= 0.0f && hp < static_cast<float>(stop_level);
         };
         cleaner.set_guard(still_ours);
+        // The game's full-bag message closed whatever HP is, never under
+        // another job's hold (2026.11.11).
+        cleaner.set_hold_check(
+            [this] { return coord_.critical_active() && coord_.critical_reason() == "trash cleaning"; });
         cleaner.on_report([this](const std::string& line) { say_trash(line); });
+        if (pass_keys.any()) cleaner.set_key_window(key_window());
+        else if (!held && !trash_left_held_) cleaner.set_own_potions(own_potions());
         {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
             trash_cleaner_ = &cleaner;
@@ -5492,30 +5732,40 @@ void GuiApp::trash_loop() {
 
         // Whether anybody has used the mouse or keyboard since a moment: asked
         // only under the hold, after the keys are let go, as the quick quest
-        // asks it -- GoBot presses nothing then.
+        // asks it -- GoBot presses nothing then: no key window is armed until
+        // the round runs, and GoBot's own input in that second is never taken
+        // for the player's (quiet_said).
         const auto last_input = [] {
             LASTINPUTINFO info{};
             info.cbSize = sizeof info;
             return GetLastInputInfo(&info) ? info.dwTime : 0;
         };
         BagCleaner::Result r;
-        bool passed = false, touched = false, lost = false;
-        // The run ended with the hold no longer this job's, or HP under the
-        // potion's mark: put off, not trouble.
-        bool cut = false;
+        bool passed = false, touched = false, lost = false, own = false;
+        // The run ended with the hold no longer this job's (`cut`), or its
+        // guard stopped it for HP under the round's level (`hp_stop`): put
+        // off, not trouble -- HP's looked at again kHpStoppedAgainMs on.
+        bool cut = false, hp_stop = false;
         const std::uint64_t asked_ms = now_ms();
         std::uint64_t held_ms = 0;
         // The wait a spoiled quiet second brings: a timed look's, further off
         // each time; a button's run does not move it.
         std::uint64_t touched_ms = 0;
         {
+            // A round that rides a pass has the game's mouse already, in the
+            // pass's hand: not asked again -- the lock is not one a thread may
+            // take twice -- nor let go, which a revive or an invite would take.
+            // Its hold is the pass's too, which take_hold leaves as it is.
             std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
             const std::uint64_t give_up = now_ms() + 5'000;
-            while (!trash_stop_ && now_ms() < give_up && !mouse.try_lock())
+            while (!after_pass && !trash_stop_ && now_ms() < give_up && !mouse.try_lock())
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            if (mouse.owns_lock() && !trash_stop_ && !chat_doubt_ && take_hold("trash cleaning")) {
+            if ((after_pass || mouse.owns_lock()) && !trash_stop_ && !chat_doubt_ && take_hold("trash cleaning")) {
                 trash_pass_ = true;
                 held_ms = now_ms();
+                // No key window from the last job under this hold: none of the
+                // macro's keys from here to the round (2026.11.10).
+                coord_.disarm_pass_keys();
                 for (int i = 0; i < 30 && coord_.held(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 input_.release_all();
@@ -5526,20 +5776,46 @@ void GuiApp::trash_loop() {
                 // looks again a few times first, the hold and HP watched. The
                 // pointer, its buttons and the window in front are glanced at
                 // either side, for the log to say what spoiled it (read only).
+                // A second in which GoBot itself sent anything -- a key let go
+                // of, another job's -- is measured again, kShopOwnRelooks times
+                // at most: whose the input was cannot be told (2026.11.10).
+                // None for a round that rides a pass (2026.11.11, the owner):
+                // the pass has none, and has just clicked through the bag under
+                // this hold; the hold and HP looked at once instead.
                 const InputGlancer glancer = InputGlancer::real();
                 InputGlance seen_before;
-                const int tries = forced || dry ? kShopQuietTries : 1;
+                const int tries = forced || dry ? kShopQuietTries : after_pass ? 0 : 1;
+                int own_seen = 0;
+                if (after_pass) lost = !still_ours();
+                // The key-ups just sent in Windows' tick before the second
+                // starts, should it stamp them a moment after SendInput.
+                if (tries > 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 for (int t = 0; t < tries && !trash_stop_ && !lost; ++t) {
                     seen_before = glancer.glance();
+                    // GoBot's count read before the tick at the start and after
+                    // it at the end: an event of GoBot's whose tick lands in the
+                    // second moves the count between them (sent_count).
+                    const std::uint64_t own_from = InputManager::sent_count();
                     const DWORD quiet = last_input();
                     for (int slept = 0; slept < kShopQuietMs && !trash_stop_ && !lost; slept += 50) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
                         lost = !still_ours();
                     }
-                    touched = !trash_stop_ && !lost && last_input() != quiet;
-                    if (!touched) break;
+                    const DWORD after = last_input();
+                    const std::uint64_t own_to = InputManager::sent_count();
+                    const QuietSaid said = quiet_said(quiet, after, own_from, own_to);
+                    own = !trash_stop_ && !lost && said == QuietSaid::Own;
+                    if (own && own_seen++ < kShopOwnRelooks) {
+                        --t;
+                        continue;
+                    }
+                    touched = !trash_stop_ && !lost && said == QuietSaid::Touched;
+                    if (!touched && !own) break;
                 }
-                if (touched || trash_stop_ || lost) {
+                if (own)
+                    GB_INFO("Shop: not now -- GoBot itself sent input in each quiet second (held %llu ms)",
+                            static_cast<unsigned long long>(now_ms() - held_ms));
+                if (touched || own || trash_stop_ || lost) {
                     if (touched) {
                         const std::string seen = quiet_spoiled_text(seen_before, glancer.glance());
                         if (forced || dry) {
@@ -5558,8 +5834,12 @@ void GuiApp::trash_loop() {
                     trash_pass_ = false;
                 } else {
                     passed = true;
-                    // A quiet second: the next spoiled one waits 30 s again.
-                    shop_quiet.reset();
+                    put_off_why.clear();
+                    pull_said = false;
+                    // A quiet second: the next spoiled one waits 30 s again. A
+                    // round that rides a pass had none, and leaves the wait as
+                    // it was.
+                    if (!after_pass) shop_quiet.reset();
                     tell(dry ? "Thử mua bình (không mua)..." : "Mua bình...");
                     if (!input_.window_focused()) {
                         input_.focus_window();
@@ -5578,9 +5858,21 @@ void GuiApp::trash_loop() {
                         // No PrintWindow anywhere in GoBot meanwhile, the vitals
                         // reader's included: see ScreenCapture::set_screen_only.
                         const PrintWindowPause no_print;
+                        // The key window armed for this round's hold alone, and
+                        // shut -- its keys seen up -- and forgotten however the
+                        // round ends, before the hold is kept or let go of
+                        // below (2026.11.10).
+                        const PassKeysScope keys(coord_, pass_keys, "shop");
+                        hp_cut = HpCut{};
                         r = cleaner.run();
                     }
-                    cut = !trash_stop_ && !still_ours();
+                    say_stopped("shop round", hp_cut, r.trouble);
+                    // What stopped it, as its guard saw it (2026.11.11): HP
+                    // under the round's level -- whatever HP reads by now, a
+                    // potion let through may have lifted it since -- and,
+                    // looked at now, the hold no longer this job's.
+                    hp_stop = !trash_stop_ && hp_cut.level > 0;
+                    cut = !trash_stop_ && !(coord_.critical_active() && coord_.critical_reason() == "trash cleaning");
                     if (!dry) {
                         const std::string bag_now = bag_shop_text(bag_used);
                         if (!bag_now.empty()) GB_INFO("Bag (packets): after the shop %s", bag_now.c_str());
@@ -5607,23 +5899,32 @@ void GuiApp::trash_loop() {
                 owed = owed_before;
                 plan_due_ms = plan_before;
             }
-            if (touched)
+            const std::string busy =
+                coord_.critical_active() ? coord_.critical_reason() : std::string("chuột đang dùng");
+            if (touched) {
+                timed_put_off("touched", "someone is using the mouse or keyboard (the quiet second)");
                 not_now("Chờ: bạn đang dùng chuột hoặc bàn phím, mua bình sau.", touched_ms);
-            else if (lost && hp_under())
-                not_now("Máu đang thấp, mua bình sau.", 15'000);
-            else if (!trash_stop_)
-                not_now("Chờ: bot đang bận (" + (coord_.critical_active() ? coord_.critical_reason()
-                                                                         : std::string("chuột đang dùng")) +
-                        "), mua bình sau.",
+            } else if (own) {
+                timed_put_off("own input", "GoBot's own input in each quiet second");
+                not_now("Chờ: GoBot vừa tự bấm phím hay chuột trong lúc chờ yên, mua bình sau.", 15'000);
+            } else if (lost && hp_under()) {
+                timed_put_off("hp", hp_said(hp_percent_now(), hp_gate.stop, "the level"));
+                not_now("Máu đang thấp, mua bình sau.", bag::kHpStoppedAgainMs);
+            } else if (!trash_stop_) {
+                timed_put_off("hold " + busy, "another job holds the game (" + busy + ")");
+                not_now("Chờ: bot đang bận (" + busy + "), mua bình sau.",
                         coord_.critical_reason() == kChatHold ? kAfterChatLineMs : 15'000);
+            }
             return;
         }
 
         GB_INFO("Trash: shop job: asked at %llu ms, hold taken after %llu ms, took %llu ms, %d bought (HP %d, MP %d), "
-                "%d unsure, full %s",
+                "%d unsure, full %s; %s, the last pass ended %s",
                 static_cast<unsigned long long>(asked_ms), static_cast<unsigned long long>(held_ms - asked_ms),
                 static_cast<unsigned long long>(now_ms() - held_ms), r.shop_bought, r.shop_bought_hp,
-                r.shop_bought_mp, r.shop_unsure, r.shop_full ? "yes" : "no");
+                r.shop_bought_mp, r.shop_unsure, r.shop_full ? "yes" : "no",
+                after_pass ? "right after the pass" : forced ? "Mua ngay" : dry ? "Thử mua" : "on its own",
+                since_pass().c_str());
         if (!r.board_up) board_said = false;
         // What is owed after the round (bag::shop_owed_after), and the next
         // look. A trial moves none of it: not what is owed, nor the troubles,
@@ -5631,22 +5932,28 @@ void GuiApp::trash_loop() {
         // time, however the round ended -- never sooner, or a plan bought in
         // full would be bought again. Otherwise a round cut short by DỪNG / F10
         // keeps its clock as it was, which the next worker resumes from its
-        // start's 45 s, owing the rest. The board, the hold lost or HP under
-        // the potion's mark put the rest off a minute -- the board
-        // kBoardWaitMs, the others a part's gap, kShopPartGapMs -- and are not
-        // trouble; a full bag, or a message in the quantity box's place, ends
-        // the plan; a trouble waits ten minutes -- not every few seconds, which
-        // would hold the bot off each time -- and the second in a row drops
-        // what is left of the plan.
+        // start's 45 s, owing the rest. The board, the hold lost, HP its guard
+        // stopped it for, or a key of the macro's not seen up in time put the
+        // rest off -- the board kBoardWaitMs, HP kHpStoppedAgainMs, the others
+        // a part's gap, kShopPartGapMs -- and are not trouble (bag::shop_end);
+        // a full bag, or a message in the quantity box's place, ends the plan;
+        // a trouble waits ten minutes -- not every few seconds, which would
+        // hold the bot off each time -- and the second in a row drops what is
+        // left of the plan.
         bool dropped = false;
         if (dry) {
             shop_due_ms = due_before;
         } else {
-            const bag::ShopEnd end = r.shop_full                         ? bag::ShopEnd::Full
-                                     : r.shop_message                    ? bag::ShopEnd::Message
-                                     : r.board_up || trash_stop_ || cut ? bag::ShopEnd::Paused
-                                     : !r.trouble.empty() || !r.ran      ? bag::ShopEnd::Trouble
-                                                                         : bag::ShopEnd::Clean;
+            bag::ShopRoundSeen seen;
+            seen.full = r.shop_full;
+            seen.message = r.shop_message;
+            seen.board_up = r.board_up;
+            seen.stopped = trash_stop_;
+            seen.hp_cut = hp_stop;
+            seen.hold_lost = cut;
+            seen.keys_late = r.keys_late;
+            seen.trouble = !r.trouble.empty() || !r.ran;
+            const bag::ShopEnd end = bag::shop_end(seen);
             owed = bag::shop_owed_after(owed, r.shop_bought_hp, r.shop_bought_mp, r.shop_unsure_hp, r.shop_unsure_mp,
                                         end);
             dropped = owed.dropped;
@@ -5654,6 +5961,7 @@ void GuiApp::trash_loop() {
             if (!next_part) shop_due_ms = plan_due_ms;
             else if (trash_stop_) shop_due_ms = due_before;
             else if (r.board_up) shop_due_ms = now_ms() + BagCleaner::kBoardWaitMs;
+            else if (hp_stop) shop_due_ms = now_ms() + bag::kHpStoppedAgainMs;
             else if (end == bag::ShopEnd::Paused) shop_due_ms = now_ms() + BagCleaner::kShopPartGapMs;
             else if (end == bag::ShopEnd::Trouble) shop_due_ms = minutes(10);
             else shop_due_ms = now_ms() + BagCleaner::kShopPartGapMs;
@@ -5668,7 +5976,10 @@ void GuiApp::trash_loop() {
                 GB_INFO("Trash: shop -- %d troubles in a row: owed dropped until the next plan %s",
                         bag::kShopTroublesToDrop, clock_at(plan_due_ms).c_str());
         }
-        if (r.board_up) board_put_off("shop", forced || dry);
+        if (r.board_up) {
+            timed_put_off("board", "the check-in board is up");
+            board_put_off("shop", forced || dry);
+        }
         std::string line;
         if (r.shop_bought > 0)
             line = "Đã mua " + std::to_string(r.shop_bought) + " lần " + std::to_string(CleanSettings::kBuyQuantity) +
@@ -5748,17 +6059,56 @@ void GuiApp::trash_loop() {
             charm_check_ms = now_ms() + kCharmFirstMs;
         }
         // What is due by its own clock, and in the player's order when several
-        // are: Tự chat's line, then the pass, then the charms, then the shop.
-        // A button (requests 1 to 5) is now, and waits for nothing.
+        // are: Tự chat's line, then the pass, then the charms, then the shop --
+        // but a shop come due with Tự dọn rác on pulls the pass to now and
+        // rides it, right after it and before the charms (2026.11.11, the
+        // owner). A button (requests 1 to 5) is now, and waits for nothing.
         const bool timed = request == 0 && !trash_oneshot_;
+        const bool shop_due = timed && !held && settings.buy_potions && now_ms() >= shop_due_ms;
+        // The ride is the look due now's (bag::ride_turn): none with no look
+        // due -- Tự mua bình off, a button, a worker here for one, the bin
+        // held -- or Tự dọn rác off. Decided once for each look, as it comes
+        // due: a pass put off by its gates is not pulled again until the
+        // shop's own wait is over. The pass pulled to now -- but none where
+        // the shop's own cheap gates would put the look off, which the pass
+        // does not all ask (the review's R1): the chat line in doubt, no game
+        // window or the game off the screen, HP not read -- the login or
+        // character screen, a map loading, the death panel -- a keeper's
+        // crossing or cold start; nor for an interval after one pulled found
+        // nothing it could do (R2). The look goes on its own then, and waits
+        // by the shop's rules; the first look after pulls one.
+        {
+            const bag::ShopRide was = ride;
+            if (!settings.enabled) no_pull_before_ms = 0;
+            const auto no_pull = [&] {
+                if (chat_doubt_ || keeper_cold_start_ || now_ms() < no_pull_before_ms || !input_.window_valid() ||
+                    !client_on_screen(input_.target_window()) || hp_percent_now() < 0.0f)
+                    return true;
+                std::lock_guard<std::mutex> lock(keeper_flow_mutex_);
+                return keeper_flow_ != nullptr;
+            };
+            // Asked only as a look is decided, not every turn.
+            const bool cannot_pull = shop_due && settings.enabled && was == bag::ShopRide::None && no_pull();
+            ride = bag::ride_turn(was, shop_due, settings.enabled, cannot_pull, now_ms(), last_pass_end_ms);
+            if (ride == bag::ShopRide::Pending && was != bag::ShopRide::Pending) {
+                next = std::min(next, now_ms());
+                // Once until a job runs, not again for each look the same
+                // reason puts off.
+                if (!pull_said) {
+                    pull_said = true;
+                    GB_INFO("Trash: shop due -- a pass first, then the round under the same hold (the last pass "
+                            "ended %s)", since_pass().c_str());
+                }
+            }
+        }
         const bool pass_due = timed && settings.enabled && now_ms() >= next;
         const bool charm_due = timed && !held && settings.use_charms && now_ms() >= charm_check_ms;
-        const bool shop_due = timed && !held && settings.buy_potions && now_ms() >= shop_due_ms;
         show_shop();
         if ((pass_due || charm_due || shop_due) && chat_first()) continue;
-        if (request == 4 || request == 5 || (shop_due && !pass_due && !charm_due)) {
+        if (request == 4 || request == 5 || (shop_due && ride != bag::ShopRide::Pending && !pass_due && !charm_due)) {
             if (request == 0) shop_due_ms = now_ms() + 5'000;
-            run_shop(request == 4, request == 5);
+            ride = bag::ShopRide::None;
+            run_shop(request == 4, request == 5, false);
             if (trash_oneshot_ && !held) break;
             continue;
         }
@@ -5779,6 +6129,12 @@ void GuiApp::trash_loop() {
             }
             if (!settings.enabled || now_ms() < next) continue;
         }
+        // The pass a due shop pulled (2026.11.11): from here on that shop goes
+        // on its own -- its own gates, its quiet second -- by every way out
+        // below but the end of a timed pass that ran clean, which its round
+        // rides, as it does a shop come due while the pass ran.
+        const bool pulled = ride == bag::ShopRide::Pending && request == 0;
+        if (pulled) ride = bag::ShopRide::Alone;
 
         // Read again for the pass itself, a few times if it is caught being
         // written.
@@ -5810,6 +6166,9 @@ void GuiApp::trash_loop() {
         };
         if (held_by_other()) {
             tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
+            if (request == 0)
+                put_off("pass", "hold " + coord_.critical_reason(),
+                        "another job holds the game (" + coord_.critical_reason() + ")");
             if (trash_oneshot_ && !held) break;
             // Right after a Tự chat line: the bag is next in the player's order.
             next = now_ms() + (coord_.critical_reason() == kChatHold ? kAfterChatLineMs : 30'000);
@@ -5817,11 +6176,57 @@ void GuiApp::trash_loop() {
         }
         next = now_ms() + static_cast<std::uint64_t>(settings.interval_minutes) * 60'000ull;
 
+        const bool look_only = request == 2;
+        // An item may be left in the bin, which a pass is what gives back.
+        const bool left_held = held || trash_left_held_;
+        // The macro's letter and Space keys between the pass's own clicks
+        // (2026.11.10) -- not in one begun to give back what may be in the bin;
+        // whether the HP potion is among them sets the pass's HP gates
+        // (2026.11.11, bag::hp_gates).
+        const PassKeys pass_keys = left_held ? PassKeys{} : pass_keys_now();
+        const bag::HpGates hp_gate = hp_gates_of(pass_keys);
+        job_level = hp_gate.stop;
+
+        // Not with HP under the start gate: the HP potion's mark when it is
+        // drunk between items, else over it by a margin, the potion held off
+        // for the length of the pass. A timed pass waits a few seconds, said
+        // on the card once until it goes; one asked for with a button goes,
+        // and stops between items should HP fall under its level (the guard).
+        // Asked before the list is built (the review's PERF-PASS-HP-5S):
+        // building it reads every picture and weighs it against the catalog,
+        // too much to do every few seconds only to wait again.
+        if (request == 0 && !held) {
+            const float hp = hp_percent_now();
+            if (hp >= 0.0f && hp < static_cast<float>(hp_gate.start)) {
+                if (put_off_why != "hp") tell("Máu đang thấp, dọn rác sau.");
+                put_off("pass", "hp",
+                        hp_said(hp, hp_gate.start, hp_gate.drinks ? "the HP potion's mark" : "the start gate"));
+                next = now_ms() + bag::kHpLookAgainMs;
+                continue;
+            }
+        }
+
+        // A timed pass that finds nothing it could do -- the list empty, no
+        // tab ticked -- is looked at again by its own clock, an interval on:
+        // no shop's look pulls one before then (no_pull_before_ms, the
+        // review's R2), each to build the list and say the same again.
         TrashList list;
         list.build(exe_relative("configs/trash"), settings, catalog);
         if (list.items.empty()) {
             tell("Danh sách đồ bỏ đi đang trống, nên không có gì để dọn.");
+            if (request == 0) no_pull_before_ms = next;
             if (trash_oneshot_ && !held) break;
+            continue;
+        }
+        // No tab to look through -- none ticked, or every item one of Tiêu
+        // Dùng's with that tab not ticked (bag::pass_tabs): no hold, no bag
+        // key, and said as the card says it (2026.11.10). Unless an item may
+        // be left in the bin (left_held).
+        const bag::PassTabs pass_tabs = bag::pass_tabs(settings, list);
+        if (pass_tabs.count == 0 && !left_held) {
+            tell(std::string(pass_tabs.none_said()) + ".");
+            if (request == 0) no_pull_before_ms = next;
+            if (trash_oneshot_) break;
             continue;
         }
         if (!input_.window_valid()) {
@@ -5836,19 +6241,6 @@ void GuiApp::trash_loop() {
             continue;
         }
 
-        // Not with HP near the potion's mark: the potions are held off for the
-        // length of the pass. A timed pass waits a little; one asked for with a
-        // button goes, and stops between items should HP fall (the guard).
-        if (request == 0 && !held) {
-            const float hp = hp_percent_now();
-            if (hp >= 0.0f && hp < static_cast<float>(std::min(95, chat_hp_floor_.load() + 10))) {
-                tell("Máu đang thấp, dọn rác sau.");
-                next = now_ms() + 15'000;
-                continue;
-            }
-        }
-
-        const bool look_only = request == 2;
         // Its own capture, off the screen only, as the potion shop's: every
         // click of a pass needs the game in front and on top where it lands
         // anyway, and PrintWindow is not asked anywhere in GoBot while it runs
@@ -5863,13 +6255,24 @@ void GuiApp::trash_loop() {
         cleaner.set_counts(&counts);
         cleaner.set_debug_dir(exe_relative("trash_debug"));
         cleaner.set_dry_run(look_only);
+        cleaner.set_left_held(left_held);
+        if (pass_keys.any()) cleaner.set_key_window(key_window());
+        else if (!left_held && !look_only) cleaner.set_own_potions(own_potions());
         cleaner.on_report([this](const std::string& line) { say_trash(line); });
-        // The hold must stay this pass's, and HP not fall under the potion's
-        // mark: the pass stops between items and gives the keys back.
-        cleaner.set_guard([this] {
+        // The hold must stay this pass's, and HP not fall under its level --
+        // half the HP potion's mark when the potion drinks between items, else
+        // the mark (2026.11.11): the pass stops between items and gives the
+        // keys back. What HP stopped it at goes to the log (hp_cut), and the
+        // pass is tried again kHpStoppedAgainMs on.
+        cleaner.set_guard([this, &hp_cut, stop_level = hp_gate.stop] {
             if (!(coord_.critical_active() && coord_.critical_reason() == "trash cleaning")) return false;
             const float hp = hp_percent_now();
-            return !(hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()));
+            const int level = stop_level;
+            if (hp >= 0.0f && hp < static_cast<float>(level)) {
+                hp_cut = HpCut{ hp, level };
+                return false;
+            }
+            return true;
         });
         {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
@@ -5881,22 +6284,28 @@ void GuiApp::trash_loop() {
 
         BagCleaner::Result r;
         bool passed = false;
+        // The shop's round rides this pass (2026.11.11): the hold and the
+        // game's mouse kept for it, from the pass's end to the round's.
+        bool rides = false;
+        // Not while the revive sequence or the party worker is clicking, nor
+        // they while this is. The hold is taken only now, with the mouse: a
+        // revive that began while this waited for it keeps its own, and the
+        // pass waits instead. The chat line is asked about again with the
+        // mouse in hand: a line left in doubt since the look above was under
+        // Tự chat's hold until then. Waited for a little at a time, as the
+        // revive waits for a pass, and given up on a stop: an invite holding
+        // the mouse when F12 came handed it to this pass the moment it ended.
+        // Let go of as the pass ends -- or, the shop riding it, as its round
+        // does, below.
+        std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
         {
-            // Not while the revive sequence or the party worker is clicking,
-            // nor they while this is. The hold is taken only now, with the
-            // mouse: a revive that began while this waited for it keeps its
-            // own, and the pass waits instead. The chat line is asked about
-            // again with the mouse in hand: a line left in doubt since the
-            // look above was under Tự chat's hold until then. Waited for a
-            // little at a time, as the revive waits for a pass, and given up
-            // on a stop: an invite holding the mouse when F12 came handed it
-            // to this pass the moment it ended.
-            std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::defer_lock);
             while (!trash_stop_ && !mouse.try_lock())
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (mouse.owns_lock() && !trash_stop_ && !chat_doubt_ && take_hold("trash cleaning")) {
                 passed = true;
                 trash_pass_ = true;
+                put_off_why.clear();
+                pull_said = false;
                 tell(look_only ? "Thử tìm trong túi đồ..." : "Bắt đầu dọn rác...");
                 const std::uint64_t pass_from = now_ms();
                 // A key half pressed by a skill let finish first, as the shop's
@@ -5913,11 +6322,22 @@ void GuiApp::trash_loop() {
                 }
                 {
                     const PrintWindowPause no_print;
+                    // Armed for this pass's hold alone, and shut -- its keys
+                    // seen up -- and forgotten however the pass ends, before
+                    // the hold is kept or let go of below (2026.11.10).
+                    const PassKeysScope keys(coord_, pass_keys, "pass");
+                    hp_cut = HpCut{};
                     r = cleaner.run();
                 }
+                if (!look_only) last_pass_end_ms = now_ms();
                 GB_INFO("Trash: pass took %llu ms: %d deleted, %d failed%s",
                         static_cast<unsigned long long>(now_ms() - pass_from), r.deleted, r.failed,
                         r.trouble.empty() ? "" : " (stopped)");
+                say_stopped("pass", hp_cut, r.trouble);
+                // Stopped by its guard for HP (2026.11.11): tried again in a
+                // few seconds, not the whole interval on -- unless the hold is
+                // kept, below, which looks again in a minute.
+                if (hp_cut.level > 0 && !trash_stop_) next = now_ms() + bag::kHpStoppedAgainMs;
                 // Kept while the bin may still hold the item, and by a pass
                 // that never got to a clean screen -- a look-only one, or one
                 // that met a dialog it would not answer -- since it saw
@@ -5926,9 +6346,30 @@ void GuiApp::trash_loop() {
                 // somebody else's to end.
                 held = r.keeps_hold(held);
                 trash_hold_ = held;
-                if (!held) end_hold("trash cleaning");
-                trash_pass_ = false;
+                // The shop due -- the look that pulled this pass, or one come
+                // due while it ran -- rides a timed pass that ran clean: the
+                // hold and the mouse kept for its round (bag::ride_refused).
+                // A Dọn ngay never buys.
+                bag::RidePass ridden;
+                ridden.ran = true;
+                ridden.timed = request == 0 && !trash_oneshot_;
+                ridden.stopped = trash_stop_;
+                ridden.look_only = look_only;
+                ridden.left_held = left_held;
+                ridden.keeps_hold = held;
+                ridden.bag_ran = r.ran;
+                ridden.trouble = !r.trouble.empty();
+                ridden.board_up = r.board_up;
+                ridden.hold_ours = coord_.critical_active() && coord_.critical_reason() == "trash cleaning";
+                ridden.shop_due = settings.buy_potions && now_ms() >= shop_due_ms;
+                const char* no_ride = bag::ride_refused(ridden);
+                rides = no_ride == nullptr;
+                if (pulled && !rides)
+                    GB_INFO("Trash: shop -- no ride on the pass it pulled (%s): it goes on its own", no_ride);
+                if (!held && !rides) end_hold("trash cleaning");
+                if (!rides) trash_pass_ = false;
             }
+            if (!rides && mouse.owns_lock()) mouse.unlock();
         }
         {
             std::lock_guard<std::mutex> lock(trash_cleaner_mutex_);
@@ -5941,6 +6382,9 @@ void GuiApp::trash_loop() {
             const bool chat_line = !chat_doubt_ && coord_.critical_reason() == kChatHold;
             if (chat_doubt_) tell(kTrashWaitsForChat);
             else tell("Chờ: bot đang tạm dừng (" + coord_.critical_reason() + "), dọn rác sau.");
+            if (!chat_doubt_ && request == 0)
+                put_off("pass", "hold " + coord_.critical_reason(),
+                        "another job holds the game (" + coord_.critical_reason() + ")");
             if (trash_oneshot_ && !held) break;
             next = now_ms() + (chat_line ? kAfterChatLineMs : 30'000);
             continue;
@@ -5949,6 +6393,7 @@ void GuiApp::trash_loop() {
         // looked at again in a minute rather than the interval.
         if (r.board_up && !r.ran) {
             next = now_ms() + BagCleaner::kBoardWaitMs;
+            if (request == 0) put_off("pass", "board", "the check-in board is up");
             board_put_off(look_only ? "the look" : "the pass", request != 0);
             if (trash_oneshot_ && !held) break;
             continue;
@@ -5986,6 +6431,21 @@ void GuiApp::trash_loop() {
         // rather than at the next look, which a pass asked for by a button
         // does not stay for.
         if (!held && trash_left_held_) look_for_clear();
+        // ---- the shop's round right after it, under the same hold ----
+        // (2026.11.11) Nothing let go in between: the hold and the game's
+        // mouse the pass had, carried into run_shop (`after_pass`) -- no
+        // quiet second, no HP start gate -- and let go after the round:
+        // its own end lets the hold go, unless it keeps it for something
+        // left up, and an early way out of it leaves that to here.
+        if (rides) {
+            GB_INFO("Trash: shop rides the pass -- the same hold, no quiet second (%s)",
+                    pulled ? "the look that pulled it" : "come due while it ran");
+            ride = bag::ShopRide::None;
+            run_shop(false, false, true);
+            if (!held) end_hold("trash cleaning");
+            trash_pass_ = false;
+            if (mouse.owns_lock()) mouse.unlock();
+        }
         if (trash_oneshot_ && !held) break;
     }
     // The charms' and the shop's clocks for the next worker: a MACRO OFF and
@@ -9514,7 +9974,12 @@ void GuiApp::draw_macro_panel() {
             }
 
             ImGui::TableNextColumn();
-            int iv = static_cast<int>(k.interval_ms);
+            // A pet potion's, with the pet row's "every N ms" set, is that
+            // one value, for every pet potion key (MacroConfig::pet_every_ms):
+            // shown and set here as it is there, never a key's own number
+            // that nothing goes by.
+            const bool pet_every = macro_config_.pet_every_ms != 0 && macro_key_kind(k) == MacroKeyKind::PetPotion;
+            int iv = static_cast<int>(pet_every ? macro_config_.pet_every_ms : k.interval_ms);
             ImGui::SetNextItemWidth(-1);
             // A buff may be 0: as often as a buff goes, every kBuffRepeatMinMs.
             // One by its interval, unmarked as in a file from before the mark,
@@ -9525,9 +9990,20 @@ void GuiApp::draw_macro_panel() {
             const int least = is_buff ? 0 : 10;
             if (ImGui::InputInt("##iv", &iv, 0, 0)) {
                 if (is_buff) k.buff = true;
-                k.interval_ms = static_cast<std::uint32_t>(std::max(least, iv));
+                if (pet_every)
+                    macro_config_.pet_every_ms = static_cast<std::uint32_t>(
+                        std::clamp(iv, static_cast<int>(MacroConfig::kPetEveryLeastMs),
+                                   static_cast<int>(MacroConfig::kPetEveryMostMs)));
+                else
+                    k.interval_ms = static_cast<std::uint32_t>(std::max(least, iv));
             }
-            if (k.conditional() && ImGui::IsItemHovered())
+            if (pet_every && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Every pet potion key goes this often while the pet is under its mark: one value "
+                                  "for all of them (pet_every_ms, \"Bơm liên tục, mỗi N ms\" on the simple screen), "
+                                  "%u-%u ms.",
+                                  static_cast<unsigned>(MacroConfig::kPetEveryLeastMs),
+                                  static_cast<unsigned>(MacroConfig::kPetEveryMostMs));
+            else if (k.conditional() && ImGui::IsItemHovered())
                 ImGui::SetTooltip("For a conditional key this is the cooldown: "
                                   "the shortest gap between two firings. It does "
                                   "not delay the reaction.");

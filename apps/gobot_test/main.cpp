@@ -9963,6 +9963,20 @@ void test_parse_key() {
               key(",") == 0,
           "and nothing that is not a key is one: empty, 0x alone, past 0xFF, a letter after a "
           "digit, punctuation");
+    // Home, End, PgUp, PgDn, Insert, Delete (2026.11.11): named as the simple
+    // screen names them, and read back short too -- "pgup" typed on Nâng cao
+    // used to leave the key on P, "del" on D, "ins" on I.
+    check(InputManager::key_name(VK_HOME) == "Home" && InputManager::key_name(VK_END) == "End" &&
+              InputManager::key_name(VK_PRIOR) == "PgUp" && InputManager::key_name(VK_NEXT) == "PgDn" &&
+              InputManager::key_name(VK_INSERT) == "Insert" && InputManager::key_name(VK_DELETE) == "Delete",
+          "the six by name: Home, End, PgUp, PgDn, Insert, Delete -- not 0x24 and the like");
+    check(key("pgup") == VK_PRIOR && key("PgDn") == VK_NEXT && key("del") == VK_DELETE && key("Ins") == VK_INSERT &&
+              key("pageup") == VK_PRIOR && key("PageDown") == VK_NEXT && key("delete") == VK_DELETE &&
+              key("insert") == VK_INSERT && key("home") == VK_HOME && key("END") == VK_END,
+          "pgup, pgdn, del and ins read as those keys, beside pageup, pagedown, delete, insert, home and end");
+    check(key("p") == 'P' && key("pg") == 0 && key("pgu") == 0 && key("d") == 'D' && key("de") == 0 &&
+              key("i") == 'I' && key("in") == 0,
+          "typed one letter at a time, the box ends on the key: P, then nothing it takes, then PgUp");
 
     std::string wrong;
     for (std::uint32_t vk = 1; vk <= 0xFF; ++vk)
@@ -14013,12 +14027,13 @@ void test_bag_dialogs() {
               "a box that reads 2 one look and 3 the next: no reading, so Hủy Bỏ");
     }
     // How many looks the box needs, on the pretend clock: the bin's dialog
-    // is first seen 190 ms after the bin is clicked, and the box is then
-    // looked at every 190 ms until 1200 ms of watching have passed -- at 380,
-    // 570, 760 ms and on after the click.
+    // is first seen 120 ms after the bin is clicked (a look every 80 ms since
+    // 2026.11.10, 190 before), and the box is then looked at every 140 ms
+    // until 1200 ms of watching have passed -- at 260, 400, 540 ms and on
+    // after the click.
     {
         PretendBin game = game_with("7");
-        game.readable_ms = 650;         // the looks at 380 and 570 ms read it
+        game.readable_ms = 450;         // the looks at 260 and 400 ms read it
         const auto r = pass(game);
         check(r.deleted == 1 && game.gone && game.confirms == 1 && untouched(game),
               "two looks inside the box's watch that read the same number are its number: "
@@ -14026,7 +14041,7 @@ void test_bag_dialogs() {
     }
     {
         PretendBin game = game_with("7");
-        game.readable_ms = 470;         // only the look at 380 ms reads it
+        game.readable_ms = 330;         // only the look at 260 ms reads it
         std::vector<std::string> said;
         const auto r = pass(game, false, &said);
         check(r.deleted == 0 && !game.gone && game.confirms == 0 && game.cancels == 1 &&
@@ -17087,11 +17102,17 @@ void test_charm_sources() {
                   "gui_app.cpp: the potion shop job looks off the screen only, with its own capture, and no "
                   "PrintWindow anywhere in GoBot while it runs");
         }
+        // HP's level the round's own since 2026.11.11 (bag::hp_gates): half
+        // the HP potion's mark when the potion is drunk between purchases --
+        // every HP potion the macro may choose let through (the review's
+        // HP-1) -- else the floor chat goes by.
         check(count_of(shop, "take_hold(") == 1 && count_of(shop, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 &&
                   count_of(gui, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 && shop.find("end_hold(\"trash cleaning\")") != npos &&
-                  shop.find("chat_hp_floor_.load()") != npos,
+                  shop.find("bag::hp_gates(keys.hp_all_through, keys.hp_mark, chat_hp_floor_.load())") != npos &&
+                  shop.find("const bag::HpGates hp_gate = hp_gates_of(pass_keys);") != npos &&
+                  shop.find("const auto still_ours = [this, &hp_cut, stop_level = hp_gate.stop] {") != npos,
               "and it takes no other hold, runs in shop mode only here, lets the hold go, and stops with HP under "
-              "the potion's mark");
+              "the round's level -- the HP potion's mark, or half of it when that potion is drunk between purchases");
         check(shop.find("if (!settings.buy_potions && !dry) {") != npos &&
                   gui.find("!held && settings.buy_potions && now_ms() >= shop_due_ms;") != npos &&
                   gui.find("shop_blocked") == npos &&
@@ -17101,16 +17122,24 @@ void test_charm_sources() {
               "and not while the bin may hold something");
         {
             // Several jobs due at once go in the player's order: Tự chat's line,
-            // then the pass, then the charms, then the potion shop.
+            // then the pass, then the charms, then the potion shop -- but a shop
+            // due rides the pass, right after it and before the charms
+            // (2026.11.11): on its own only with no ride pending, which pulls the
+            // pass to now before the pass's turn is worked out.
             const std::size_t first = gui.find("if ((pass_due || charm_due || shop_due) && chat_first()) continue;");
-            const std::size_t shop_turn = gui.find("(shop_due && !pass_due && !charm_due)");
+            const std::size_t shop_turn =
+                gui.find("(shop_due && ride != bag::ShopRide::Pending && !pass_due && !charm_due)");
             const std::size_t charm_turn = gui.find("(charm_due && !pass_due)");
+            const std::size_t pulled = gui.find("next = std::min(next, now_ms());");
+            const std::size_t pass_due = gui.find("const bool pass_due = timed && settings.enabled && now_ms() >= next;");
             check(first != npos && shop_turn != npos && charm_turn != npos && first < shop_turn &&
-                      shop_turn < charm_turn &&
+                      shop_turn < charm_turn && pulled != npos && pass_due != npos && pulled < pass_due &&
+                      pass_due < first && gui.find("(shop_due && !pass_due && !charm_due)") == npos &&
                       gui.find("if (r.not_now && for_trash) chat_waits_trash_ms_ = end;") != npos &&
                       count_of(gui, "chat_waits_trash_ms_ = 0;") == count_of(gui, "chat_next_ms_ = 0;") + 1,
-                  "gui_app.cpp: chat, then the pass, then the charms, then the shop when several are due; a line "
-                  "put off for a trash job claims the next turn, and the claim is let go wherever the line is");
+                  "gui_app.cpp: chat, then the pass, then the charms, then the shop when several are due -- a shop "
+                  "due riding the pass it pulls, before the charms; a line put off for a trash job claims the next "
+                  "turn, and the claim is let go wherever the line is");
         }
         // Nothing but a Người Giữ Sân item's right-click ever happens on Khác.
         const std::string cpp = source_text("/src/bag.cpp");
@@ -20656,6 +20685,12 @@ void test_cast_pace(void (*check)(bool, const std::string&), void (*section)(con
 // spoiled quiet second, the clocks kept across a MACRO OFF and ON, a key on a
 // buff and a skill both, the "Ra chiêu theo vòng" tick, in jobs_gui_test.cpp.
 void test_jobs_gui(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The hold's key window (2026.11.10): the macro's letter and Space keys during a
+// Dọn rác pass and a Tự mua bình round, never a charm run's, in pass_keys_test.cpp.
+void test_pass_keys(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The potion shop right after the Dọn rác pass, under the same hold (2026.11.11),
+// in shop_ride_test.cpp.
+void test_shop_ride(void (*check)(bool, const std::string&), void (*section)(const char*));
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -20818,6 +20853,8 @@ int main() {
     test_cast_match(check, section);
     test_cast_pace(check, section);
     test_jobs_gui(check, section);
+    test_pass_keys(check, section);
+    test_shop_ride(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();

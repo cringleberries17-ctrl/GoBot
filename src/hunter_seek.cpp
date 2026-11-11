@@ -159,8 +159,9 @@ void Hunter::seek_look(const HunterConfig& cfg, std::uint64_t now) {
     if (seek_wanted_ && eyes_.world) seek_world_on_ = eyes_.world(seek_world_);
     if (!seek_world_on_) seek_world_.clear();
     // The walk back first (the owner's Q2 of 04d): outside the box with a way
-    // back, that comes before any monster.
-    seek_on_ = seek_wanted_ && seek_world_on_ && !zone_.back_first;
+    // back, that comes before any monster -- and while it is latched
+    // (2026.11.10), until the character is inside the box.
+    seek_on_ = seek_wanted_ && seek_world_on_ && !zone_.back_first && !back_walk_;
     if (!seek_on_) {
         if (seek_.on) seek_let_go("the seek is not on");
         seek_looks_.clear();

@@ -23,6 +23,7 @@
 // thread's alone.
 
 #include "gui_app.hpp"
+#include "gobot/alerts.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/vitals_trust.hpp"
 
@@ -397,6 +398,22 @@ float GuiApp::mp_percent_now() const {
 bool GuiApp::capture_on_window() const {
     const VitalsPart* part = vitals_part_.get();
     return part != nullptr && part->on_window.load();
+}
+
+DeathDoubt GuiApp::death_doubt_now(std::uint64_t now) const {
+    // For the death told by HP alone (alerts_tick): what the screen's frame
+    // is, and what the packets say -- their HP only while usable, asked
+    // afresh, as hp_percent_now asks it. Nothing that waits.
+    DeathDoubt d;
+    d.from_screen = vitals_.stats().capture_from_screen;
+    d.game_in_front = input_.window_focused();
+    if (const VitalsPart* part = vitals_part_.get()) {
+        const VitalsPart::SelfNow s = VitalsPart::self_now(*this, now);
+        d.packets_alive = vitals_usable(part->usable_in(*this, true, s), now) && s.v.hp > 0;
+        d.capture_on_window = part->on_window.load();
+        d.last_server_ms = s.last_server_ms;
+    }
+    return d;
 }
 
 void GuiApp::vitals_check_tick(std::uint64_t now) {

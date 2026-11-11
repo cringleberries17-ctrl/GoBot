@@ -292,7 +292,13 @@ struct HunterConfig {
     /// the owner's answers (a) until answered): no walk toward a monster
     /// leaves its box (Q1); outside it with a way back the map shows, the
     /// walk back -- along the floor, never a hop -- comes before any fight,
-    /// in reach or not (Q2); and home is by height as well as across.
+    /// in reach or not (Q2); and home is by height as well as across. The
+    /// owner's answer of 2026-11-10 ("Ngưng đánh, đi về trước"): more than
+    /// kZoneOutsideBackPx outside the box -- the map tab's with a way back,
+    /// or this run's own spot's with the spot no more than one jump up -- the
+    /// character stops fighting and walks back into the box first, along the
+    /// floor; nothing is fought, in the box or not, until it is inside, and
+    /// the macro holds its skills while it walks (Hunter::returning).
     bool          spot = false;
     int           spot_half_w = 300;            ///< 50..2000
     int           spot_half_h = 100;            ///< 20..500
@@ -412,6 +418,14 @@ struct WorldFix {
     /// moves at each one (PacketWorld::View::map_epoch).
     std::uint32_t epoch = 0;
     float entry_x = 0.0f, entry_y = 0.0f;   ///< the last map entry's spawn point
+    /// Which of your reports the last one was, by its opcode -- 0x0027, 0x002A,
+    /// 0x0029, 0x0028 or 0x0031; 0 for a map entry's spawn or none -- and how
+    /// many of your 0x002A the capture has used since it began (your jumps,
+    /// landings and falls): a report of yours on the ground far above the last
+    /// with none of those between is no place to stand (2026.11.10, the
+    /// hunter's spot and MapTrust's points).
+    std::uint16_t report_op = 0;
+    std::uint64_t air_reports = 0;
     /// Standing on the ground, with nothing worked out: where the spot is set.
     bool settled() const { return state == State::Known && !airborne && !moving && !uncertain; }
 };
@@ -647,6 +661,15 @@ public:
     int engaged_dx() const { return engaged_dx_.load(); }
     /// The attack key of the config in use, for any thread.
     std::uint32_t attack_key() const { return attack_key_.load(); }
+    /// Walking back to the hunting spot or area on its last pass
+    /// (State::Returning), and still running: what the macro holds its skill
+    /// keys for (MacroEngine::Fight::Mode::Returning, 2026.11.10) -- a cast
+    /// stops a held walk in this game, and the walks back of 2026-11-10 went
+    /// at 8-18 px/s while Z, X, C, V and Space were cast on their timers.
+    /// Never a potion or a buff. Read from any thread. Never under a hold, as
+    /// engaged() is not: nothing walks then, and a bag job's key window lets
+    /// the macro's letter skills through between its clicks (2026.11.10).
+    bool returning() const { return returning_now_.load() && running_.load() && !coord_.critical_active(); }
     static constexpr std::uint64_t kEngagedGraceMs = 500;
 
     // ---- the drop through a platform (HunterConfig::drop_down): the plan's 11a
@@ -859,6 +882,10 @@ public:
         Ahead,          ///< sent for a map entry the fix has not come to, or no capture
         NotSettled,     ///< the character not standing on the ground
         Outside,        ///< the character outside it and not back where it left: hunting where it stands
+        /// Back through a door onto the area's own map and place, the map
+        /// still loading: no report of yours since the entry yet, under
+        /// kDoorLoadMs (2026.11.10).
+        Loading,
     };
 
     /// Why the hunting spot does not steer the hunter just now, for the UI.
@@ -1148,6 +1175,13 @@ public:
         bool    spot_way = false;
         int     spot_way_x = 0, spot_way_y = 0;
         bool    spot_back_first = false;
+        /// The walk back first under way (the owner's answer of 2026-11-10,
+        /// "Ngưng đánh, đi về trước"): latched once further outside the box
+        /// than kZoneOutsideBackPx with a way back, held until the character
+        /// is inside it -- nothing fought meanwhile, in the box or not, in
+        /// reach or not -- and since when on the hunter's clock.
+        bool          spot_back_walk = false;
+        std::uint64_t spot_back_walk_ms = 0;
         /// ... worked out with jumps up able to go (2026.11.05b): walking,
         /// falling or jumping up; the jumps up on it; and, when it starts
         /// with one (ZoneReturn::jump), that one's key and take-off x -- what
@@ -1327,6 +1361,20 @@ public:
     /// (Spot::login), so is the character standing this close to where it
     /// was.
     static constexpr int kSpotBackPx = 150;
+    /// Back through a door onto the map tab's area's own map and place, the
+    /// area set aside by the entry before it is taken back (ZoneTake::Back)
+    /// once the map has loaded: a report of yours since the entry, or this
+    /// long after the hunter first saw it -- the macro's own hold for a map
+    /// loading (vitals_trust.hpp's kLoadHoldMs). Before that, a walk back
+    /// first would start into a map still loading and burn a strike
+    /// (2026.11.10; doors at 64,620 on t1901_s2, 275 px from the box).
+    static constexpr std::uint64_t kDoorLoadMs = 3000;
+    /// The minute line's "outside the area" and "walking back" times count a
+    /// pass's time at most this long, as the walks' own (walk_run_ms_).
+    static constexpr std::uint64_t kSpotTimeStepMs = 250;
+    /// A ground report of yours refused for a spot (spot_plausible) said at
+    /// INFO at most this often, with its opcode.
+    static constexpr std::uint64_t kSpotOddSayMs = 60'000;
     /// Room left before the area's edge that a step back needs: a step is
     /// held 50 ms at the least, about 18 px, and the turn back to the target
     /// after it walks about 21 px of that back in (kTurnTapMs). With room for
@@ -1805,19 +1853,48 @@ private:
     /// Those of `mobs` outside the spot's area and out of reach of `me`,
     /// marked OutOfArea in `listed` -- the current target, at `target_at`,
     /// only kSpotKeepPx past the edge. In reach too while the walk back
-    /// comes first (ZoneHere::back_first, the owner's Q2 of 04d).
+    /// comes first (ZoneHere::back_first, the owner's Q2 of 04d, or the
+    /// latch of 2026.11.10, back_walk_).
     void mark_out_of_area(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
                           int target_at, std::vector<Listed>& listed) const;
-    /// With nothing to fight: the walk back to the spot, if it is to be had
-    /// -- or kept up, or let go of there. True while walking back; false, and
-    /// the caller lets go of the keys as before. The map tab's area with its
-    /// map's file: go_home_zone.
+    /// With nothing to fight -- or, the walk back first latched, before any
+    /// fight: the walk back to the spot, if it is to be had -- or kept up,
+    /// or let go of there. True while walking back; false, and the caller
+    /// lets go of the keys as before. The map tab's area with its map's
+    /// file: go_home_zone. Latched, no spot_return_delay_ms, and a walk
+    /// along the floor alone (WalkFor::Floor); anything that ends the walk
+    /// for good -- there, given up on, to be tried again, too high, no way
+    /// back, a hold -- lets the latch go (back_walk_end).
     bool go_home(const HunterConfig& cfg, std::uint64_t now);
     /// Something to fight this pass: the idle time before a walk back counts
-    /// from here, and a walk back under way is over.
-    void spot_busy(std::uint64_t now);
-    /// The walk back under way is over: arrived, given up, or overtaken.
-    void end_return();
+    /// from here, and a walk back under way is over -- `why` said when one
+    /// was (fight_cut).
+    void spot_busy(std::uint64_t now, const std::string& why = {});
+    /// The walk back under way is over: arrived, given up, or overtaken --
+    /// with `why`, said at INFO with how long it went (2026.11.10, how each
+    /// walk back ended).
+    void end_return(const char* why = nullptr);
+    /// For spot_busy: "slot N inside the box at 120 px" -- `n` laid over the
+    /// world as mark_out_of_area lays it -- or "" with no walk back to cut.
+    std::string fight_cut(const HunterConfig& cfg, const Nameplate& n, const Nameplate& me) const;
+    /// The walk back first (the owner's answer of 2026-11-10, Q2 (a) "Ngưng
+    /// đánh, đi về trước"), at every pass after the way back is worked out:
+    /// latched by ZoneHere::back_first -- further outside the box than
+    /// kZoneOutsideBackPx with a way back -- and held, past that edge too,
+    /// until the character is inside the box; let go of at once by the spot
+    /// out of use, its fix not Known, or a hold. `spot` this pass's.
+    void track_back_walk(const HunterConfig& cfg, const Spot& spot);
+    /// The latch let go of, `why` said with how long it held.
+    void back_walk_end(const char* why);
+    /// Whether a settled report of yours is a place to stand for a spot
+    /// (2026.11.10): not y 0 -- the right wall of t1901_s2 reported 999,0, and
+    /// the spot was taken there at 21:11:21 -- nor more than kOneJumpPx above
+    /// your last ground report with none of your 0x002A between. Each report
+    /// judged once, at every pass; refused with `say` -- a spot to be taken
+    /// -- it is said once a kSpotOddSayMs with its opcode. The frame itself
+    /// stays the packets' (take_own keeps every one): facing and speed are
+    /// untouched.
+    bool spot_plausible(const WorldFix& f, bool say);
     /// The spot's numbers into status_.
     void publish_spot();
 
@@ -2202,6 +2279,7 @@ private:
     std::atomic<bool>          engaged_{false};
     std::atomic<int>           engaged_dx_{0};
     std::atomic<std::uint32_t> attack_key_{'Z'};
+    std::atomic<bool>          returning_now_{false};   ///< returning(): the last pass walked back
 
     // ---- the hunter's own thread's, or step()'s ----
     std::uint64_t last_engaged_ms_ = 0;
@@ -2419,6 +2497,38 @@ private:
     int           return_strikes_ = 0;
     std::uint64_t return_retry_ms_ = 0;
     bool          said_too_high_ = false;
+    /// When the walk back under way began, for how long it went (end_return).
+    std::uint64_t return_from_ms_ = 0;
+    /// The walk back first, latched (track_back_walk): since when, and how
+    /// far outside the box it was latched at.
+    bool          back_walk_ = false;
+    std::uint64_t back_walk_from_ms_ = 0;
+    int           back_walk_px_ = 0;
+    /// The minute line's times: outside the area, and walking back, by the
+    /// last pass's state; when the last pass's time was counted.
+    std::uint64_t minute_outside_ms_ = 0;
+    std::uint64_t minute_back_ms_ = 0;
+    std::uint64_t spot_time_ms_ = 0;
+    bool          spot_time_outside_ = false;
+    /// A door back onto the area's own map (kDoorLoadMs): the map entry the
+    /// hunter last saw come, when, and your last report's time then.
+    std::uint32_t door_epoch_ = 0;
+    std::uint64_t door_seen_ms_ = 0;
+    std::uint64_t door_report_ms_ = 0;
+    /// spot_plausible's: your last ground report's height and the 0x002A
+    /// count then, this map entry; the report last judged and what of it;
+    /// when a refusal was last said, and those not said since.
+    bool          ground_on_ = false;
+    std::uint32_t ground_epoch_ = 0;
+    float         ground_y_ = 0.0f;
+    std::uint64_t ground_air_ = 0;
+    std::uint64_t odd_judged_ms_ = 0;
+    float         odd_judged_y_ = -1.0f;
+    bool          odd_ok_ = true;
+    bool          odd_said_now_ = false;
+    char          odd_why_[96] = "";
+    std::uint64_t odd_said_ms_ = 0;
+    int           odd_unsaid_ = 0;
     /// The map tab's area against its map's file, this pass (track_zone_way);
     /// the way back last asked of the map, from where and for which box; the
     /// goal a walk back's give-up clock measures toward, and whether "no way

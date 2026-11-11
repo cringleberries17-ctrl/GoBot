@@ -479,12 +479,19 @@ struct CleanSettings {
     static constexpr int kBuyEveryMost = 1440;
     /// [Trash] buy_hp_slots, buy_mp_slots: how many purchases of 100 of Thịt
     /// bò khô (HP) and of Rượu lá tre (MP) each time -- a slot of the bag each
-    /// -- 0 leaving that potion alone. A file from before 2026.11.09 has
-    /// neither: its buy_hp_to and buy_mp_to, the slots it bought up to, stand
-    /// for them until the card saves the new keys; buy_*_below is passed over.
-    /// Neither there: kBuySlotsDefault.
+    /// -- 0 leaving that potion alone. No cap of GoBot's own since 2026.11.10
+    /// (the owner: "Không giới hạn"; 20 in 2026.11.09): the game's message
+    /// that the bag is full ends a round, and a hold buys
+    /// BagCleaner::kShopMaxBuys at most ("Mua ngay") or kShopBuysPerHold (on
+    /// the clock), the rest a part's gap later. kBuySlotsPerRunMost bounds
+    /// the number, no more. A file from before 2026.11.09 has neither: its
+    /// buy_hp_to and buy_mp_to, the slots it bought up to, stand for them
+    /// until the card saves the new keys -- kBuySlotsFromOldMost at most, as
+    /// 2026.11.09 read them, so that only a number set on the card buys more
+    /// -- and buy_*_below is passed over. Neither there: kBuySlotsDefault.
     static constexpr int kBuySlotsDefault = 3;
-    static constexpr int kBuySlotsPerRunMost = 20;
+    static constexpr int kBuySlotsPerRunMost = 999;
+    static constexpr int kBuySlotsFromOldMost = 20;
     int  buy_hp_slots = kBuySlotsDefault;
     int  buy_mp_slots = kBuySlotsDefault;
     /// How many of a potion one purchase asks for: always this, typed into the
@@ -858,6 +865,29 @@ struct TrashList {
 
 namespace bag {
 
+/// The tabs a delete pass looks through (2026.11.10): those ticked under
+/// "Tìm trong:" -- or, when every item on the list is a catalog icon under
+/// spend/, Tiêu Dùng alone, and only if it is ticked: potions, food,
+/// fragments and charms lie nowhere else, and the other tabs' pages were
+/// most of a pass's time. A picture cut from the bag, or an icon of any
+/// other group -- one brought along for being drawn like a chosen one (via)
+/// among them -- and every ticked tab is looked through, as before.
+struct PassTabs {
+    bool tabs[kBagTabs] = {};
+    int  count = 0;             ///< tabs looked through
+    bool ticked_any = false;    ///< a tab is ticked at all
+    bool spend_only = false;    ///< every item a spend/ icon: Tiêu Dùng alone
+    /// Why there is nothing to look through, in Vietnamese, as the card and
+    /// the worker say it; empty when there is.
+    const char* none_said() const;
+};
+PassTabs pass_tabs(const CleanSettings& s, const TrashList& list);
+/// No tab ticked; and every item a spend/ icon with Tiêu Dùng not ticked.
+inline constexpr const char* kNoTabVi = "Chưa chọn ngăn nào ở 'Tìm trong:', nên không xoá được gì";
+inline constexpr const char* kNoUseTabVi =
+    "Mọi món trong danh sách đều nằm ở ngăn Tiêu Dùng, mà ngăn đó chưa được chọn ở 'Tìm trong:', nên không xoá "
+    "được gì";
+
 /// A dialog with [Xác Nhận][Hủy Bỏ] under it, and whether it is one of the
 /// bin's own.
 ///
@@ -917,6 +947,15 @@ inline const char* const kRegisterDialog = "grabbed/fragment_register";
 
 /// Every dialog with the two buttons on screen, the bin's own marked.
 std::vector<Dialog> find_dialogs(const Frame& f, const TemplateStore& store);
+
+/// How many frames find_dialogs and shop_full_up have searched since GoBot
+/// started, never reset (2026.11.10): for the tests, which count what a look
+/// costs -- a frame is searched for dialogs once.
+struct SearchCounts {
+    std::uint64_t dialogs = 0;
+    std::uint64_t full = 0;
+};
+SearchCounts search_counts();
 
 /// How alike the words over `d`'s buttons are to each of the bin's pictures,
 /// indexed by kind: the best within two pixels of where that picture puts
@@ -1019,6 +1058,13 @@ ScreenRect message_box(const ScreenRect& pair);
 /// notice_up, or a lone Xác Nhận anywhere on the frame: for saying no only,
 /// never for a click.
 bool message_up(const Frame& f, const TemplateStore& store);
+
+/// notice_up and lone_ok with find_dialogs' result on `f` already in hand
+/// (`dialogs`, as it gave it: the shop's own Mua | Thoát among them): the same
+/// answers, the frame searched for dialogs once (2026.11.10). Neither looks
+/// for its picture with a dialog of two buttons in the list.
+bool notice_up(const Frame& f, const TemplateStore& store, const std::vector<Dialog>& dialogs);
+bool lone_ok(const Frame& f, const TemplateStore& store, const ScreenRect& band, const std::vector<Dialog>& dialogs);
 
 // ---------------------------------------------------------------- the shop
 
@@ -1136,6 +1182,98 @@ constexpr int kShopTroublesToDrop = 2;
 /// or a shorter interval set since, waits no longer than the interval.
 constexpr int kShopFirstWaitS = 45;
 std::int64_t shop_first_wait_s(std::int64_t saved_s, std::int64_t now_s, int every_minutes);
+
+/// The shop right after a Dọn rác pass (2026.11.11, the owner: "Tới giờ mua:
+/// dọn rồi mua"). The shop keeps its own clock and plan rules; a timed look of
+/// it that comes due -- a plan, or a part still owed -- with Tự dọn rác on
+/// pulls the pass forward to now, and the round rides it: bought right after
+/// the pass under the same hold and the same hand on the game's mouse, with no
+/// quiet second and no HP start gate of its own (GuiApp::trash_loop). The two
+/// clocks knew nothing of each other before, and the shop came any time up to
+/// an interval after a pass -- the bag full of loot again by then.
+/// None: nothing decided for the look due. Pending: a pass pulled for it, the
+/// round to ride that pass. Alone: the look goes on its own, by its own rules.
+enum class ShopRide { None, Pending, Alone };
+/// A pass that ended less than this long ago is fresh enough: a due shop goes
+/// on its own at once rather than pull another.
+constexpr std::uint64_t kRideFreshMs = 60'000;
+/// The ride at a turn of the trash worker's loop, from the last turn's (`was`):
+/// None with no timed look due (`shop_due`) or Tự dọn rác off (`trash_on`).
+/// A look just come due is Pending -- a pass pulled, the round to ride it --
+/// unless a pass ended within kRideFreshMs of `now_ms` (`last_pass_end_ms`, 0
+/// for none yet) or no pass may be pulled now (`cannot_pull`): where the
+/// shop's own cheap gates would put the look off -- the chat line in doubt,
+/// no game window or the game off the screen, HP not read (not in the world),
+/// a keeper's crossing or cold start -- or a pass found nothing it could do
+/// a while ago (2026.11.11, the review's R1 and R2): Alone then, the shop
+/// waiting by its own rules. A look already decided stays as it was: a pass
+/// its gates put off is not pulled again every turn, only once the shop's own
+/// wait is over and the next look comes due.
+ShopRide ride_turn(ShopRide was, bool shop_due, bool trash_on, bool cannot_pull, std::uint64_t now_ms,
+                   std::uint64_t last_pass_end_ms);
+/// How a pass a due shop pulled came out, for whether the round rides it.
+struct RidePass {
+    bool ran = false;           ///< it took the mouse and the hold, and the cleaner ran
+    bool timed = false;         ///< a timed pass of a worker that runs with the bot, never a button's
+    bool stopped = false;       ///< DỪNG, F12, the worker told to stop
+    bool look_only = false;     ///< Thử tìm
+    bool left_held = false;     ///< begun to give back what may be left in the bin
+    bool keeps_hold = false;    ///< BagCleaner::Result::keeps_hold after it: something may be left up
+    bool bag_ran = false;       ///< BagCleaner::Result::ran
+    bool trouble = false;       ///< it stopped early -- HP or the hold lost included
+    bool board_up = false;      ///< the check-in board was up
+    bool hold_ours = false;     ///< the "trash cleaning" hold still this worker's
+    bool shop_due = false;      ///< Tự mua bình still on, and its look still due
+};
+/// Why the round does not ride `p`, in a few words for the log -- nullptr when
+/// it does: a timed pass that ran clean, the hold still in hand. Otherwise the
+/// shop goes on its own, by its own rules.
+const char* ride_refused(const RidePass& p);
+
+/// HP and the Dọn rác pass and the potion shop. 2026.11.11 ("Mua luôn, bơm
+/// xen") started them at the HP potion's mark and stopped them under half of
+/// it when the potion could drink during the job, else at the window's floor
+/// + 10 and under it. Since 2026.11.11b (the owner: "Hiện tại máu thấp đang
+/// không được mua bình, làm cho có thể mua bình ở bất cứ mức máu nào và vừa
+/// mua vừa bơm máu", "Cả dọn rác") both go at any HP: `start` and `stop` are
+/// kJobDownHpPct whatever the arguments -- only the character down holds a
+/// job back or stops it -- and the HP and MP potions go between the job's
+/// clicks (the macro's through the key window, or the job's own presses,
+/// BagCleaner::OwnPotions). `drinks` still says whether the HP potion goes
+/// through the window. `floor` -- chat's and the other jobs' -- is not
+/// changed by this, and the charm run keeps its own gate.
+constexpr int kJobDownHpPct = 1;
+struct HpGates {
+    bool drinks = false;        ///< the HP potion is drunk through the job's key window
+    int  start = 0;             ///< a timed pass or shop look starts with HP at this or over
+    int  stop = 0;              ///< the job's guard stops it with HP under this
+};
+HpGates hp_gates(bool drinks, int hp_mark, int floor);
+/// A timed pass or shop look put off for HP under its start looks again this
+/// much later.
+constexpr std::uint64_t kHpLookAgainMs = 5'000;
+/// A pass or a shop round its guard stopped for HP is tried again this much
+/// later -- not the pass's interval, nor a part's minute -- and the round is
+/// never trouble for it.
+constexpr std::uint64_t kHpStoppedAgainMs = 15'000;
+
+/// How a round of the shop ended, as whoever ran it saw it (2026.11.11).
+struct ShopRoundSeen {
+    bool full = false;          ///< the game said the bag is full (Result::shop_full)
+    bool message = false;       ///< another message in the box's place (Result::shop_message)
+    bool board_up = false;      ///< the check-in board (Result::board_up)
+    bool stopped = false;       ///< DỪNG, F12, the worker told to stop
+    bool hp_cut = false;        ///< its guard stopped it for HP under the job's level
+    bool hold_lost = false;     ///< the hold no longer the job's after it
+    bool keys_late = false;     ///< a key of the macro's not seen up in time (Result::keys_late)
+    bool trouble = false;       ///< anything else said in Result::trouble, or the bag not searched
+};
+/// Full and Message as the game said them; then Paused -- never Trouble, two of
+/// which in a row drop the rest of the plan -- for the board, a stop, HP the
+/// guard stopped it for (whatever HP reads by the end: a potion may have lifted
+/// it since), the hold lost, and a key of the macro's not seen up in time;
+/// Trouble for anything else; Clean.
+ShopEnd shop_end(const ShopRoundSeen& s);
 
 /// The shop's row of potions anywhere on `f`, its buttons or not: a shop
 /// whose Mua | Thoát an item's description lies over is still up.
@@ -1281,6 +1419,12 @@ public:
     /// list, and throw nothing away.
     void set_dry_run(bool on) { dry_run_ = on; }
 
+    /// Whether the jobs before this one may have left an item in the bin, or
+    /// its dialog open (Result::keeps_hold): a pass with no tab to look
+    /// through (bag::pass_tabs) still runs then, to give that back. Unset, it
+    /// stops before its first look, nothing pressed -- not even the bag key.
+    void set_left_held(bool on) { left_held_ = on; }
+
     /// Stop at the next pause, giving back whatever is in the bin first --
     /// with the game brought to the front for it, since a stop is mostly
     /// pressed in GoBot's window or a console. A cleaner that is cancelled
@@ -1334,6 +1478,67 @@ public:
     };
     void set_clock(Clock c) { clock_ = std::move(c); }
 
+    /// The macro's letter and Space keys while a job runs (2026.11.10, the
+    /// owner: "Khi dọn rác thì cần ra các skill thuộc phím chữ cái", "cả khi
+    /// mua HP và MP cũng cần ra skill", "lúc dùng bùa thì không cần ra skill"):
+    /// the hold's key window (ExecutionCoordinator::arm_pass_keys), through
+    /// these, a test's pretend one or the coordinator. Only a Pass -- a look
+    /// only too -- and a ShopBuy run open it, never a charm run; and only on a
+    /// look just taken with nothing up on it: no dialog, no message, no
+    /// check-in board, no quantity question, nothing out towards the bin.
+    /// Every click, drag, right-click, double-click and key of the run's own
+    /// shuts it first, the keys let through seen up (kKeysUpWaitMs at most) --
+    /// one still down, and that input is not made and the run stops. A shop
+    /// round shuts it from just before each double-click until the question
+    /// is seen gone and the full-bag message has had its time (kShopFullLateMs).
+    /// A slot is dragged or right-clicked in a pass only from a look taken with
+    /// it shut and kPotionSettleMs after the last potion let through went down:
+    /// the bag may change after one. Unset, nothing is let through.
+    ///
+    /// A potion break (2026.11.11, the owner: "Mua luôn, bơm xen"): with an HP
+    /// or MP potion due whose key the window lets through (`potion_due`), the
+    /// window is opened -- through all of keys_open's checks -- and kept open
+    /// kPotionBreakMs at most while one still is, HP's going first: before each
+    /// purchase's double-click, on the look that first sees the shop, and in a
+    /// pass between two items on the look handed over clean. Never the pet's.
+    ///
+    /// Home, End, PgUp, PgDn, Insert and Delete go through it too (2026.11.11,
+    /// the owner: "Home End PgUp PgDn Ins Del"; pass_key_allowed). What the
+    /// game does with them on the bag or the shop is not known -- a page or the
+    /// shop's list scrolled, the box's caret moved -- so after one came up
+    /// (`nav_ago_ms`) the run's next input of its own, and the look it goes by,
+    /// wait until kNavSettleMs after it (keys_shut); and a shop's double-click
+    /// goes only by a look on which the potions' row itself was matched.
+    struct KeyWindow {
+        std::function<bool()>    open;          ///< let the keys through; false when it may not be opened
+        std::function<bool(int)> shut;          ///< no more through, and those that went up within `ms`
+        std::function<int()>     potion_ago_ms; ///< since a potion let through went down; -1 none
+        std::function<bool()>    potion_due;    ///< an HP or MP potion due whose key it lets through; unset none
+        std::function<int()>     nav_ago_ms;    ///< since one of the six no letter let through came up; -1 none
+    };
+    void set_key_window(KeyWindow w) { keys_ = std::move(w); }
+    /// HP and MP potions the run presses itself (2026.11.11b, the owner: "GoBot
+    /// tự bấm bình", "Giữ chặn phím số"): with the macro not running -- the bot
+    /// stopped, "Mua ngay" or "Dọn ngay" pressed -- nothing else presses them,
+    /// so a Pass or a ShopBuy run does, at the moments of a potion break and
+    /// on the same checks as the key window (nothing up, nothing out, never in
+    /// the money stretch or a charm run): the key `due` names -- one the
+    /// window would let through, never a digit; HP's first, never the pet's --
+    /// pressed through the run's own hands, then kPotionSettleMs waited, and
+    /// the next double-click or drag goes by a look taken after that. Unset,
+    /// nothing is pressed. Set only with no key window (the macro running
+    /// presses its own potions through that).
+    struct OwnPotions {
+        std::function<std::uint32_t(std::string&)> due;     ///< the key to press now, 0 none; its line for the log
+        std::function<void(std::uint32_t)>          pressed; ///< that key went down
+    };
+    void set_own_potions(OwnPotions p) { own_potions_ = std::move(p); }
+    static constexpr int kKeysUpWaitMs = 600;
+    static constexpr int kPotionSettleMs = 500;
+    static constexpr int kPotionBreakMs = 400;
+    static constexpr int kPotionBreakStepMs = 20;
+    static constexpr int kNavSettleMs = 200;
+
     /// What a run is for. Pass: all of it -- every tab ticked, the fragments
     /// registered, the delete sweep. CharmsOnly: only the charms on the Dùng
     /// list that are due (set_charm_due), and nothing else: the bag opened if
@@ -1374,6 +1579,11 @@ public:
     static constexpr int kShopMaxBuys = 40;
     static constexpr int kShopBuysPerHold = 10;
     static constexpr int kShopPartGapMs = 60'000;
+    /// A look before a double-click on which the shop was found by its buttons
+    /// alone, the potions' row not matched -- the list scrolled, say: looked
+    /// at again this many times, a look apart, and then the round stops with
+    /// nothing clicked (2026.11.11).
+    static constexpr int kShopRowRelooks = 3;
     /// How long a job that found the check-in board up waits before it looks
     /// again. Not counted as trouble.
     static constexpr int kBoardWaitMs = 60'000;
@@ -1387,6 +1597,12 @@ public:
     /// false -- whatever holds everything else of the bot off is gone -- stops
     /// it there, with nothing more pressed.
     void set_guard(std::function<bool()> still_held) { guard_ = std::move(still_held); }
+    /// The hold alone, HP not asked (2026.11.11): what a shop round asks
+    /// before each click on the game's full-bag message, and on a lone message
+    /// in the quantity box's place (shop_message, close_notice) -- closed with
+    /// HP low all the same, for a message left up keeps the shop and the hold
+    /// with it, but never under another job's hold. Unset, the guard is asked.
+    void set_hold_check(std::function<bool()> ours) { hold_check_ = std::move(ours); }
 
     /// Called with the clock id of a charm just before it is right-clicked --
     /// before anything that cannot be taken back: whoever keeps the clock
@@ -1532,6 +1748,10 @@ public:
         /// there": none was looked for. Whoever runs a charm job waits longer
         /// before the next (gui_app.cpp).
         bool tab_unsure = false;
+        /// A key the window let through was not seen up before an input of
+        /// the run's own, which stopped it (kKeysLateVi in `trouble`): no
+        /// trouble of the round's own, put off as a stop is (2026.11.11).
+        bool keys_late = false;
         std::string trouble;        ///< why it stopped early, in Vietnamese
 
         /// An item went towards the bin and was never seen given back or
@@ -1618,6 +1838,12 @@ private:
     /// The screen is in a state to start on an item: the bag found, the can
     /// in the bin and no dialog with the two buttons anywhere.
     bool clean(const Frame& f, const BagView& v);
+    /// The same with find_dialogs' result on the frame in hand (`up`): a pass
+    /// searches a fresh look once, for this and the key window (2026.11.10).
+    static bool clean(const BagView& v, const std::vector<bag::Dialog>& up);
+    /// Whether `v` lets a look be clean at all -- the bag found, nothing in
+    /// the bin -- before its dialogs are searched for.
+    static bool bin_clear(const BagView& v) { return v.found && (v.bin_empty || !v.bin_on_frame); }
 
     /// Give back whatever the bin holds -- answer Hủy Bỏ on its dialog, or
     /// click the bin to bring the dialog up and then answer it -- and leave
@@ -1637,7 +1863,28 @@ private:
     /// Put the item in slot `index` of `v` into the trash: onto the bin, which
     /// takes it and waits; then a click on the bin, which brings up the bin's
     /// dialog; then the answer. `count` is the stack count read off the slot.
-    bool trash_one(const Frame& f, const BagView& v, int index, int count);
+    /// Gone, its last look -- the item seen gone on it, nothing up at all --
+    /// goes to `after` and `after_view` when given, `seen_clean` set: the
+    /// pass's next round judges on it rather than on a look of its own. Not
+    /// on anything short of that (2026.11.10).
+    bool trash_one(const Frame& f, const BagView& v, int index, int count, Frame* after = nullptr,
+                   BagView* after_view = nullptr, bool* seen_clean = nullptr);
+
+    /// How long each step of the last trash_one took, for its line in the log
+    /// (2026.11.10), in ms on now()'s clock; -1 for a step not come to. The
+    /// drag; from it to the item seen in the bin, and in how many looks; the
+    /// bin's click to its dialog; the box watched, and how many looks read it;
+    /// each Xác Nhận to its dialog seen closed; the wait for another question
+    /// after the last, and whether the item seen gone ended it early; the
+    /// last look; and the whole.
+    struct ItemTimes {
+        int  drag = -1, in_bin = -1, in_bin_looks = 0, dialog = -1, box = -1, box_reads = 0;
+        int  closed = -1, questions = 0, after = -1, check = -1, total = -1;
+        bool early = false;
+    };
+    ItemTimes item_times_;
+    /// The line item_times_ makes, for the item at `where`, `gone` or not.
+    std::string item_times_line(const std::string& where, bool gone) const;
 
     /// How a right-click on an item on the Dùng list came out. Only Used,
     /// Nothing and Refused let the pass go on: anything else is a surprise,
@@ -1831,6 +2078,8 @@ private:
     /// find_dialogs, without the shop's own Mua | Thoát buttons, which a pair
     /// of buttons can pass for; and Hủy Bỏ on what is left, as cancel_all.
     std::vector<bag::Dialog> dialogs_here(const Frame& f, const TemplateStore& store) const;
+    /// dialogs_here's filter alone, over find_dialogs' result in hand.
+    std::vector<bag::Dialog> shop_filter(const std::vector<bag::Dialog>& all) const;
     bool shop_cancel(int tries);
     /// Where the shop's buttons are while it is open: set by shop_open and
     /// every purchase, empty when it is not.
@@ -1891,7 +2140,9 @@ private:
     };
     int  shop_purchase(bool hp, Result& res);
     /// The shop on `f`: bag::find_shop, or -- with its first row hidden -- its
-    /// buttons alone, where they were last seen.
+    /// buttons alone, where they were last seen (row_score 0): a shop still
+    /// open, for closing it and for the run's end; never what a double-click
+    /// goes by (shop_purchase's judge wants the row itself, 2026.11.11).
     bag::Shop shop_now(const Frame& f) const;
     /// Close the shop with ESC -- looked at, and its Thoát clicked when it is
     /// still there -- and nothing else pressed. False when it is still open.
@@ -1997,14 +2248,17 @@ private:
     /// frame looked at.
     static constexpr int kBoxMixed = -2;
     static constexpr int kBoxGone = -3;
-    int  box_holds(const bag::Dialog& d, Frame& last);
+    /// `reads`, when given, gets how many looks read a number.
+    int  box_holds(const bag::Dialog& d, Frame& last, int* reads = nullptr);
 
     /// A dialog of the bin's on screen within `ms`, or one with kind -1 and
-    /// an empty pair. `foreign` is set when another dialog came up instead,
-    /// and `last` gets the last frame looked at, to keep when that is wrong.
-    /// Waits up to `ms` for one of the bin's dialogs; `done`, when given and
-    /// true on two looks at least kDoneApartMs apart with nothing up, ends the
-    /// wait early with no dialog, and answered_early_ says so.
+    /// an empty pair. `foreign` is set when another dialog came up instead --
+    /// on two looks at least kDoneApartMs apart -- and `last` gets the last
+    /// frame looked at, to keep when that is wrong. Waits up to `ms` by the
+    /// clock, looking every 80 ms (2026.11.10; 150 before), for one of the
+    /// bin's dialogs; `done`, when given and true on two looks at least
+    /// kDoneApartMs apart with nothing up, ends the wait early with no
+    /// dialog, and answered_early_ says so.
     bag::Dialog wait_for_dialog(int ms, bool& foreign, Frame* last = nullptr,
                                 const std::function<bool(const Frame&)>& done = {});
     /// The pointer moved off the bag's slots and buttons -- right of the bag,
@@ -2049,6 +2303,74 @@ private:
     /// screen says it.
     void say_not_made(InputManager::GameClick why, int x, int y);
 
+    // ---- the key window (set_key_window, 2026.11.10) ----
+
+    /// Before every input of the run's own: the window shut and the keys let
+    /// through seen up -- and, one of the six no letter among them, until
+    /// kNavSettleMs after it came up (KeyWindow::nav_ago_ms), so the input and
+    /// any look taken after this go after whatever the game did with it.
+    /// False -- one still down after kKeysUpWaitMs -- and the input is not
+    /// made: the run is stopped (keys_late_), and each input after it asks
+    /// again.
+    bool keys_shut();
+    /// Whether the window may be open on `f`, a look just taken: nothing up on
+    /// it and nothing out (see KeyWindow), in a pass `v` clean as well; not in
+    /// a purchase's money stretch, a stop or a charm run. What the caller has
+    /// already found on `f` is not searched for again: `up`, find_dialogs'
+    /// result as it gave it; `lone`, lone_ok over the whole frame (1 up, 0
+    /// not, -1 not asked); `full_asked`, shop_full_up asked and not up. Every
+    /// check is made all the same, on the same frame.
+    bool keys_may_open(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up = nullptr, int lone = -1,
+                       bool full_asked = false);
+    /// keys_may_open's checks with no window asked for (2026.11.11b): what an
+    /// own potion press goes by as well.
+    bool keys_clear(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up, int lone, bool full_asked);
+    /// An HP or MP potion the run presses itself (OwnPotions), on `f` when
+    /// keys_clear says so of it; true when one went down.
+    bool press_own_potion(const Frame& f, const BagView& v, const char* where, const std::vector<bag::Dialog>* up,
+                          int lone, bool full_asked);
+    /// The window opened on `f` when keys_may_open says it may -- `v`, `up`,
+    /// `lone` and `full_asked` as it takes them -- unless it is open already.
+    void keys_open(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up = nullptr, int lone = -1,
+                   bool full_asked = false);
+    /// keys_shut, and then kPotionSettleMs since the last potion let through
+    /// went down: what the bag may still change for has come. Before a look a
+    /// slot is dragged or right-clicked from.
+    bool keys_settle();
+    /// An HP or MP potion due (KeyWindow::potion_due): the window opened on
+    /// `f` through keys_open -- `v`, `up`, `lone` and `full_asked` as it takes
+    /// them -- and kept open while one still is, kPotionBreakMs at most. Open
+    /// already -- since a purchase's tail, say -- it is kept open for one only
+    /// when keys_may_open says so of `f` (2026.11.11, the review's KEYS-1),
+    /// and otherwise left as it is for the caller's own shut. `asked`: the
+    /// caller asked keys_open of `f` just now, which is not asked again. True
+    /// when it was open for one; nothing at all with none due, or with the
+    /// window refused -- the money stretch, anything up, a charm run.
+    bool potion_break(const Frame& f, const BagView& v, const char* where, const std::vector<bag::Dialog>* up = nullptr,
+                      int lone = -1, bool full_asked = false, bool asked = false);
+    /// Whether a look taken at `at`, the window shut through it (`shut`), may
+    /// be dragged from: kPotionSettleMs after the last potion let through.
+    bool drag_grade(std::chrono::steady_clock::time_point at, bool shut) const;
+    KeyWindow keys_;
+    OwnPotions own_potions_;
+    /// The run's own last potion press (2026.11.11b): no drag from a look
+    /// begun less than kPotionSettleMs after it; and a purchase's double-click
+    /// goes by a look taken after it (own_pressed_).
+    std::chrono::steady_clock::time_point own_potion_at_{};
+    bool own_potion_any_ = false;
+    bool own_pressed_ = false;
+    /// The window opened by this run and not shut since.
+    bool keys_out_ = false;
+    /// A shut whose keys were not seen up: the run stops there.
+    bool keys_late_ = false;
+    /// A shop's purchase from just before its double-click to the end of its
+    /// tail looks: the window never opens.
+    bool money_ = false;
+    /// The last look: when it was begun, and whether the window was shut
+    /// through it (see()).
+    std::chrono::steady_clock::time_point look_at_{};
+    bool look_shut_ = true;
+
     InputManager&        input_;
     const TemplateStore& store_;
     Grab                 raw_grab_;     ///< the grab as given
@@ -2073,9 +2395,11 @@ private:
     /// taken for it -- see run().
     bool                 late_ask_ = false;
     std::atomic<bool>    cancelled_{false};
+    bool                 left_held_ = false;    ///< see set_left_held
     Mode                 mode_ = Mode::Pass;
     std::function<bool(const std::string&)> charm_due_;
     std::function<bool()> guard_;
+    std::function<bool()> hold_check_;     ///< set_hold_check
     std::function<void(const std::string&)> charm_claim_;
     std::function<PacketSays(const std::string&, int, int, std::string&)> charm_packets_;
     /// The last Xác Nhận pressed on a charm question: its pair and when --

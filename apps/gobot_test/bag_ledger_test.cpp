@@ -610,7 +610,7 @@ void test_bag_wiring() {
     // The shop (2026.11.09): nothing is counted any more, so the packets' bag
     // never skips a due run -- a skip on "enough" would be counting by another
     // name -- nor is told what a run counted.
-    const std::size_t from = gui.find("const auto run_shop = [&](bool forced, bool dry) {");
+    const std::size_t from = gui.find("const auto run_shop = [&](bool forced, bool dry, bool after_pass) {");
     const std::size_t to = gui.find("while (!trash_stop_) {", from == npos ? 0 : from);
     const std::string shop = from == npos || to == npos ? std::string() : gui.substr(from, to - from);
     check(!shop.empty() && has(shop, "cleaner.run()") && !has(gui, "bag_says_enough(") &&

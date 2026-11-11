@@ -616,6 +616,8 @@ void Hunter::drop_watch(const HunterConfig& cfg, std::uint64_t now) {
     look.epoch = f.epoch;
     look.entry_x = round_px(f.entry_x);
     look.entry_y = round_px(f.entry_y);
+    look.report_op = f.report_op;
+    look.air_reports = f.air_reports;
     if (look.capture && eyes_.stands) look.mobs = eyes_.stands();
     // Where each monster last stood, from the same frames: the floor a drop
     // to it is judged by.

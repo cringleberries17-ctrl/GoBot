@@ -2397,10 +2397,28 @@ void test_gui_source() {
           "drawn");
     const std::string spot = gui_source("/apps/gobot_gui/simple_spot.cpp");
     const std::string outside = body_of(spot, "std::string GuiApp::spot_outside_vi(const Hunter::Status& hs) {");
-    check(names(outside, "if (!hs.spot_from_map || hs.spot_outside_px <= 0) return {};") &&
-              names(outside, "if (hs.spot_back_first)") &&
+    check(names(outside, "if (hs.spot_outside_px <= 0) return {};") &&
+              names(outside, "const bool back = hs.spot_back_first || hs.spot_back_walk;") &&
+              names(outside, "if (!hs.spot_from_map && !back) return {};") &&
+              names(outside, "const std::string reach = \" (tầm đánh \" + std::to_string(hunt_config_.reach) + \" px)\";") &&
               names(spot, "coloured(outside.empty() ? kGood : kWait, (line + \".\").c_str());"),
-          "simple_spot.cpp: outside the map tab's box, said in amber with the way back; this run's spot as before");
+          "simple_spot.cpp: outside the map tab's box, said in amber with the way back -- and this run's spot's while "
+          "it walks back first (2026.11.10); the reach from hunt.ini, no number of its own");
+    // A zone latched with no way (its map's file not trusted this session,
+    // or the stop on none of its floors) walks toward its home: never "đi
+    // bộ về 0, 0" on the card or "to 0,0" in the Positions line.
+    const std::size_t latched = spot.find("if ((hs.spot_back_first || hs.spot_back_walk) && hs.spot_from_map");
+    const std::size_t to_way = spot.find("out << \" (walking back first, to \" << hs.spot_way_x << \",\" << hs.spot_way_y");
+    const std::size_t to_home = spot.find("out << \" (walking back first, to \" << px(hs.spot_x) << \",\" << px(hs.spot_y)");
+    check(names(outside, "const std::string way = hs.spot_from_map && hs.spot_way") &&
+              names(outside, "? std::to_string(hs.spot_way_x) + \", \" + std::to_string(hs.spot_way_y)") &&
+              names(outside, ": px(hs.spot_x) + \", \" + px(hs.spot_y);") &&
+              !names(outside, "hs.spot_from_map ? std::to_string(hs.spot_way_x)") &&
+              names(spot, "if ((hs.spot_back_first || hs.spot_back_walk) && hs.spot_from_map && hs.spot_way)") &&
+              latched != std::string::npos && to_way != std::string::npos && to_home != std::string::npos &&
+              latched < to_way && to_way < to_home && to_home - latched < 400,
+          "a zone latched with no way back (spot_way false): the card and the Positions line give its home, never "
+          "the way's 0, 0 (2026.11.10)");
 #else
     skip("GOBOT_SOURCE_DIR is not set\n");
 #endif
@@ -2597,11 +2615,15 @@ void test_notes_04d() {
               has(map_src, "\". Kéo ghim cam ra chỗ có quái.\"") &&
               has(doc, "px): thường là chỗ vào bản đồ, ít quái. Kéo ghim cam ra chỗ có quái.\""),
           "the map card's red and gate lines as simple_map.cpp says them");
-    check(has(spot_src, "\"Nhân vật đang ở ngoài vùng \"") && has(spot_src, "\" trước, rồi mới đánh tiếp.\"") &&
-              has(spot_src, "\" — bot vẫn đánh quái trong tầm; hết quái thì đi bộ về \"") &&
+    check(has(spot_src, "\"Nhân vật đang ở ngoài vùng \"") &&
+              has(spot_src, "\" — bot ngưng đánh, về vùng trước: đi bộ về \" + way + \", vào tới trong vùng rồi mới "
+                            "đánh tiếp.\"") &&
+              has(spot_src, "\" — bot vẫn đánh quái trong tầm\" + reach + \"; hết quái thì đi bộ về \"") &&
               has(spot_src, "rơi xuống nào về vùng: bot đánh ở đây. Tự đưa nhân vật về \"") &&
               has(doc, "\"Nhân vật đang ở ngoài vùng N px — bot đi bộ về X, Y trước, rồi mới đánh tiếp.\"") &&
               has(doc, "bot vẫn đánh quái trong tầm; hết quái thì đi bộ về X, Y.\"") &&
+              has(doc, "2026.11.10 thẻ ghi \"Nhân vật đang ở ngoài vùng N px — bot ngưng đánh, về") &&
+              has(doc, "\"... bot vẫn đánh quái trong tầm (tầm đánh N px); hết quái thì đi bộ về") &&
               has(doc, "rơi xuống nào về vùng: bot đánh ở đây. Tự đưa nhân vật về vùng, hoặc bấm Đặt chỗ này.\"") &&
               has(spot_src, "\", outside the area \"") && has(spot_src, "\" (walking back first, to \"") &&
               has(doc, "\", outside the area N px\" (và \"walking back first, to X,Y\""),
@@ -2729,9 +2751,13 @@ void test_notes_05() {
               has(doc, "lúc giữa bản đồ ghi \"Chưa có gói tin của game\" hay \"Vị trí từ gói tin đang tắt\"") &&
               has(readme, "(`map_shows_mobs`) no monster, ring or monster hover is drawn"),
           "no monster drawn without packets, under the tab's own words for it");
-    check(has(map_src, "trong lúc bot đi bộ về vùng trước, rồi mới đánh tiếp — bot không đi tới.") &&
+    check(has(map_src, "\" px thì bot ngưng đánh, về vùng trước: lúc đó mọi \"") &&
+              has(map_src, "\"con đều xám, cả con trong vùng và trong tầm, tới khi nhân vật vào tới trong vùng. Có Tự "
+                           "tìm quái \"") &&
+              has(map_src, "std::to_string(kZoneOutsideBackPx)") &&
               has(doc, "nay xám cả con quái ở ngoài vùng mà ở trong tầm đánh, trong lúc bot đi bộ về vùng trước, "
                        "rồi mới đánh tiếp (bot bỏ qua") &&
+              has(doc, "lại. (Từ bản 2026.11.10: trong lúc bot ngưng đánh để về vùng trước thì") &&
               has(doc, "chỉ xám khi đã ra ngoài vùng quá " + n(Hunter::kSpotKeepPx) + " px") &&
               has(readme, "`Hunter::kSpotKeepPx` (" + n(Hunter::kSpotKeepPx) + ") past the box's edge") &&
               has(readme, "outside it in reach too while the hunter walks back first") &&
@@ -3231,6 +3257,44 @@ void test_notes_05b() {
 #endif
 }
 
+/// The Bản đồ card's one-click choice while several files fit (2026.11.10):
+/// offered for the one of them with a saved zone, never taken by GoBot.
+void test_map_choice() {
+    section("Map tab (2026.11.10): several map files fit -- \"Dùng vùng <map>\" offered for the one with a saved "
+            "zone, never more, never taken alone");
+
+    ZoneBook book;
+    HuntZone z;
+    z.home_x = 495;
+    z.home_y = 632;
+    z.left = 339;
+    z.top = 532;
+    z.right = 705;
+    z.bottom = 700;
+    const std::vector<std::string> fits = { "t10_s60", "t1901_s2", "t1_s60" };
+    const bool none = zone_choice(fits, book).empty();
+    book.put("t1901_s2", z);
+    const std::string one = zone_choice(fits, book);
+    const bool not_listed = zone_choice({ "t10_s60", "t1_s60" }, book).empty() && zone_choice({}, book).empty();
+    book.put("t1_s60", z);
+    const bool two = zone_choice(fits, book).empty();
+    check(none && one == "t1901_s2" && not_listed && two,
+          "no zone among them: nothing; t1901_s2 alone with one: \"" + one +
+              "\"; it not among them: nothing; two with zones: nothing -- which is meant is the owner's to say");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string map = gui_source("/apps/gobot_gui/simple_map.cpp");
+    const std::string run = body_of(gui_source("/src/map_view.cpp"), "MapViewResult MapViewJob::run(");
+    const std::string post = body_of(map, "void GuiApp::map_post(");
+    check(names(map, "zone_choice(rep.fits, ui.book)") && names(map, "\"Dùng vùng \" + pick + \"##map_choose\"") &&
+              names(map, "ui.choose_ask = pick;") && names(map, "log_later({ \"Map tab: \\\"Dùng vùng \" + pick") &&
+              names(post, "if (!choose.empty()) p->ws->choose = choose;") &&
+              names(post, "ui.choose_ask.clear();") && names(run, "ws.view_trust.choose(ws.choose)") &&
+              names(run, "ws.choose.clear();") && !names(run, "zone_choice("),
+          "simple_map.cpp: the button under Ambiguous asks the worker's next job to choose; map_view.cpp's job "
+          "takes it on the worker -- and never picks one by itself");
+#endif
+}
+
 } // namespace
 
 void test_map_tab(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -3255,6 +3319,7 @@ void test_map_tab(void (*check_fn)(bool, const std::string&), void (*section_fn)
     test_dots_t52s2();
     test_dots_drawn();
     test_gui_source();
+    test_map_choice();
     test_package_notes();
     test_notes_04d();
     test_notes_05();

@@ -68,6 +68,7 @@ struct ImFont;
 namespace gobot {
 
 class AutoLogin;
+struct DeathDoubt;      // gobot/alerts.hpp
 
 /// The GUI front-end.
 ///
@@ -1233,6 +1234,7 @@ private:
     float         hp_percent_now() const;                  // any thread; the packets' when usable, else the bars'
     float         mp_percent_now() const;                  // any thread; likewise
     bool          capture_on_window() const;               // any thread; the positions' capture, on the game window's
+    DeathDoubt    death_doubt_now(std::uint64_t now) const;     // what may say HP 0 on the screen is no death
     void          vitals_check_tick(std::uint64_t now);
     SelfVitals    gate_vitals(std::uint64_t now);          // the potions' HP and MP from the packets; -1 for none
     bool          packet_map_loading(std::uint64_t now) const;   // a hold added while a map loads
@@ -1724,6 +1726,11 @@ private:
     void cancel_login_now();
     HotkeyConfig      hotkeys_;
     HotkeyEdgeTracker hotkey_edges_;
+    /// The two keys above as the window's thread last read them, for the
+    /// trash worker's key window (2026.11.10): never let through, and never
+    /// hotkeys_ read off this thread.
+    std::atomic<std::uint32_t> own_trash_key_{ 0 };
+    std::atomic<std::uint32_t> own_login_key_{ 0 };
     /// Whether the game was the window in front at the last tick: losing it
     /// lets go of every key held there (tick).
     bool              game_was_front_ = false;
@@ -2059,8 +2066,10 @@ private:
     static std::string spot_offset_vi(const Hunter::Status& hs);
     /// The map tab's zone, the character outside its box (2026.11.04d): how
     /// far, and the way back the hunter walks -- first, or once nothing is
-    /// left to fight. "" inside it, for this run's spot, or not known.
-    static std::string spot_outside_vi(const Hunter::Status& hs);
+    /// left to fight, the reach as hunt.ini has it. "" inside it, or not
+    /// known; for this run's spot, but while it walks back first
+    /// (2026.11.10).
+    std::string spot_outside_vi(const Hunter::Status& hs);
     /// Why fighting with the spot ticked cannot start, or null when it can:
     /// the spot goes by where the game's packets put the character, so Npcap
     /// must be there and packet_positions not Off. In the log's English, and

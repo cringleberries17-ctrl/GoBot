@@ -5,6 +5,7 @@
 #include "gobot/no_real_input.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -165,9 +166,18 @@ std::atomic<InputManager::PretendSender*> g_pretend{ nullptr };
 std::atomic<std::uint32_t> g_last_input_key{ 0 };
 std::atomic<std::uint64_t> g_last_input_ms{ 0 };
 std::atomic<const char*>   g_last_input_what{ "" };
+/// InputManager::sent_count's: every event inject() handed to Windows (or the
+/// pretend sender), of any kind, counted twice -- before the send and after.
+std::atomic<std::uint64_t> g_sent{ 0 };
 /// Set on a thread while type_key sends a typed line's keys (Typing): what
 /// goes down is noted for last_input as text, never as which key.
 thread_local bool t_typing = false;
+/// InputManager::key_marks's ring, process-wide as last_input's (2026.11.10):
+/// the next written at g_marks_next, g_marks_n of them kept.
+std::mutex g_marks_mx;
+std::array<InputManager::KeyMark, InputManager::kKeyMarks> g_marks{};
+std::size_t g_marks_next = 0;
+std::size_t g_marks_n = 0;
 
 /// t_typing for as long as one lives.
 class Typing {
@@ -311,6 +321,25 @@ void note_went_down(const INPUT* in, UINT went, const char* what, bool text) {
     }
 }
 
+/// The keys of the first `went` events that went out, down and up, for
+/// InputManager::key_marks -- a key pressed as a key only: a typed line's
+/// (`text`) or a Unicode character never.
+void note_key_marks(const INPUT* in, UINT went, bool text) {
+    if (text || went == 0) return;
+    const std::uint64_t at = now_ms();
+    std::lock_guard<std::mutex> lock(g_marks_mx);
+    for (UINT i = 0; i < went; ++i) {
+        const InputManager::SentEvent e = sent_event(in[i]);
+        if (e.mouse || (e.flags & KEYEVENTF_UNICODE) != 0 || e.vk == 0) continue;
+        InputManager::KeyMark& m = g_marks[g_marks_next];
+        m.vk = e.vk & 0xFFFFu;
+        m.down = key_down_event(e);
+        m.at_ms = at;
+        g_marks_next = (g_marks_next + 1) % g_marks.size();
+        g_marks_n = std::min(g_marks_n + 1, g_marks.size());
+    }
+}
+
 /// Every input this class sends goes through here. Whichever way a key, a
 /// click or a move got this far, the "no real input" switch is asked once
 /// more just before Windows is -- the one place nothing can get round.
@@ -336,17 +365,28 @@ UINT inject(INPUT* in, UINT count, const char* what, bool chord = false) {
                     what != nullptr ? what : "?");
         return 0;
     }
+    // sent_count: each event counted as it is handed over and again once it
+    // has gone -- Windows moves its last-input tick in between, so a reader
+    // on either side of that tick sees the count move (the shop's quiet
+    // second). Handed over is enough: one Windows then refused only leans
+    // towards GoBot's own.
     if (InputManager::PretendSender* const p = pretend()) {
         std::vector<InputManager::SentEvent> events;
         events.reserve(count);
         for (UINT i = 0; i < count; ++i) events.push_back(at(i));
+        g_sent.fetch_add(count);
         const UINT went = p->send ? std::min(count, static_cast<UINT>(p->send(events, chord))) : count;
+        g_sent.fetch_add(count);
         note_went_down(in, went, what, t_typing);
+        note_key_marks(in, went, t_typing);
         return went;
     }
     if (refuse_real_input(what)) return 0;
+    g_sent.fetch_add(count);
     const UINT went = SendInput(count, in, sizeof(INPUT));
+    g_sent.fetch_add(count);
     note_went_down(in, went, what, t_typing);
+    note_key_marks(in, went, t_typing);
     return went;
 }
 
@@ -1099,6 +1139,58 @@ std::string InputManager::last_input_text(const LastInput& in, std::uint64_t at_
     return out;
 }
 
+std::uint64_t InputManager::sent_count() { return g_sent.load(); }
+
+std::vector<InputManager::KeyMark> InputManager::key_marks(std::uint64_t since_ms) {
+    std::vector<KeyMark> out;
+    std::lock_guard<std::mutex> lock(g_marks_mx);
+    out.reserve(g_marks_n);
+    for (std::size_t k = 0; k < g_marks_n; ++k) {
+        const KeyMark& m = g_marks[(g_marks_next + g_marks.size() - g_marks_n + k) % g_marks.size()];
+        if (m.at_ms >= since_ms) out.push_back(m);
+    }
+    return out;
+}
+
+std::string InputManager::walk_keys_text(const std::vector<KeyMark>& marks, std::uint32_t left, std::uint32_t right,
+                                         std::uint64_t from_ms, std::uint64_t to_ms) {
+    const auto arrow = [&](std::uint32_t vk) { return vk != 0 && (vk == left || vk == right); };
+    const auto name = [&](std::uint32_t vk) { return vk == left ? "Left" : "Right"; };
+    const auto ms_text = [](std::uint64_t a, std::uint64_t b) {
+        char t[40];
+        std::snprintf(t, sizeof t, "%llu ms %s", static_cast<unsigned long long>(a > b ? a - b : b - a),
+                      a <= b ? "before" : "after");
+        return std::string(t);
+    };
+    // Its arrow held as the walk began: the last of its events up to the
+    // start a down. Else one put down from kWalkKeyMs before the start to
+    // the stop: held, or a tap (its up within the walk too).
+    std::string arrow_text;
+    for (const std::uint32_t vk : { left, right }) {
+        if (vk == 0 || !arrow_text.empty()) continue;
+        const KeyMark* last = nullptr;
+        for (const KeyMark& m : marks)
+            if (m.vk == vk && m.at_ms <= from_ms) last = &m;
+        if (last != nullptr && last->down) arrow_text = std::string(name(vk)) + " held from " + ms_text(last->at_ms, from_ms);
+    }
+    for (const KeyMark& m : marks) {
+        if (!arrow_text.empty()) break;
+        if (!arrow(m.vk) || !m.down || m.at_ms + kWalkKeyMs < from_ms || m.at_ms > to_ms) continue;
+        bool tap = false;
+        for (const KeyMark& u : marks)
+            if (u.vk == m.vk && !u.down && u.at_ms >= m.at_ms && u.at_ms <= to_ms) tap = true;
+        arrow_text = std::string(name(m.vk)) + (tap ? " tapped " : " put down ") + ms_text(m.at_ms, from_ms);
+    }
+    if (arrow_text.empty()) arrow_text = "no arrow within " + std::to_string(kWalkKeyMs) + " ms";
+    // The last key put down before the start, whichever.
+    const KeyMark* key = nullptr;
+    for (const KeyMark& m : marks)
+        if (m.down && m.at_ms <= from_ms) key = &m;
+    const std::string key_text =
+        key != nullptr ? "last key " + key_name(key->vk) + " " + ms_text(key->at_ms, from_ms) : "no key of GoBot's before it";
+    return "GoBot: " + arrow_text + "; " + key_text;
+}
+
 bool InputManager::keys_owed() const noexcept {
     return (down_owed_.load() || up_owed_.load() || ctrl_owed_.load()) && !chord_in_flight_.load();
 }
@@ -1814,12 +1906,15 @@ bool InputManager::drag_on_game(int from_x, int from_y, int to_x, int to_y,
 
     // From here it is finished whatever happens: a button left held down is
     // an item stuck to the pointer, and the next click drops it somewhere.
+    // Its ten steps at the pace too (2026.11.10), as press_ms promises for
+    // the pauses of a drag: as ever at 80, never under 12 to 20 ms -- about
+    // a frame of the game's, which sees the drag only through these moves.
     constexpr int kSteps = 10;
     bool moved = true;
     for (int i = 1; i <= kSteps && moved; ++i) {
         moved = move_pointer(from_x + (to_x - from_x) * i / kSteps,
                              from_y + (to_y - from_y) * i / kSteps);
-        std::this_thread::sleep_for(std::chrono::milliseconds(jitter(18, 30)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(18, 12), paced(30, 20))));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(paced(80, 60), paced(130, 95))));
     // Let go at the end point; where the pointer is, should the window have
@@ -1936,6 +2031,10 @@ std::uint32_t InputManager::parse_key(const std::string& text) {
         { "home", VK_HOME }, { "end", VK_END },
         { "pageup", VK_PRIOR }, { "pagedown", VK_NEXT },
         { "insert", VK_INSERT }, { "delete", VK_DELETE },
+        // As key_name writes them, and as typed short: before 2026.11.11
+        // "pgup" left a key on P, "del" on D and "ins" on I -- the box reads
+        // every edit, and one letter is that letter.
+        { "pgup", VK_PRIOR }, { "pgdn", VK_NEXT }, { "del", VK_DELETE }, { "ins", VK_INSERT },
         { "backspace", VK_BACK },
         { "numpad0", VK_NUMPAD0 }, { "numpad1", VK_NUMPAD1 }, { "numpad2", VK_NUMPAD2 },
         { "numpad3", VK_NUMPAD3 }, { "numpad4", VK_NUMPAD4 }, { "numpad5", VK_NUMPAD5 },
@@ -1967,6 +2066,12 @@ std::string InputManager::key_name(std::uint32_t vk) {
         case VK_DOWN:    return "Down";
         case VK_LEFT:    return "Left";
         case VK_RIGHT:   return "Right";
+        case VK_HOME:    return "Home";
+        case VK_END:     return "End";
+        case VK_PRIOR:   return "PgUp";
+        case VK_NEXT:    return "PgDn";
+        case VK_INSERT:  return "Insert";
+        case VK_DELETE:  return "Delete";
         default: break;
     }
     char buf[16];

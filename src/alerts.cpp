@@ -3,6 +3,7 @@
 #include "gobot/config.hpp"
 #include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/vitals_trust.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1909,6 +1910,16 @@ bool DeathByHp::step(bool watching, int hp, int hp_max, std::uint64_t now) {
     if (told_ || now < *since_ + ms_) return false;
     told_ = true;
     return true;
+}
+
+const char* death_doubt(const DeathDoubt& in, std::uint64_t now) {
+    if (in.from_screen && !in.game_in_front) return "the game is not in front, so the frame read is not the game's";
+    if (in.packets_alive) return "the packets say HP is above 0";
+    if (in.capture_on_window && in.last_server_ms != 0 && now > in.last_server_ms + kLinkQuietMs &&
+        now <= in.last_server_ms + kDeathQuietMostMs)
+        return "the server is silent on the game's capture -- a game reloading or its link gone, where the server "
+               "would tell a death";
+    return nullptr;
 }
 
 } // namespace gobot

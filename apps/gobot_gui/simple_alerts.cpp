@@ -185,6 +185,9 @@ struct GuiApp::AlertsUi {
     std::uint64_t    looked_ms = 0;
     AwayWatch        away{ 3 * 60 * 1000 };
     DeathByHp        dead{ 3000 };
+    /// Why the last HP 0 off the screen was not taken for a death, as the log
+    /// said it (death_doubt): said again only when that changes.
+    const char*      dead_doubt = nullptr;
     AlertWatch       trash{ kAlertStuckMs };
     AlertWatch       chat{ kAlertStuckMs };
     /// A chat line handed over in doubt. Half a second, so that the two flags
@@ -349,10 +352,20 @@ void GuiApp::alerts_tick() {
 
     // ---- a death nothing else will tell of ----
     // With Tự hồi sinh on, its worker sees the death dialog and says so.
-    // Without it, the HP figure read as 0 of something for 3 s.
+    // Without it, the HP figure read as 0 of something for 3 s -- while
+    // nothing says otherwise (death_doubt, 2026.11.10): the frame not the
+    // game's, the packets saying HP is above 0, the server silent on the
+    // game's capture. Doubted, the 3 s count again from its end.
     const bool by_hp = running && vitals_running_ && !revive_running_;
     const VitalsReader::Vitals v = by_hp ? vitals_.values() : VitalsReader::Vitals{};
-    if (ui.dead.step(by_hp, v.hp, v.hp_max, now)) alert("death", alert_text::death(false));
+    const char* doubt = nullptr;
+    if (by_hp && v.hp == 0 && v.hp_max > 0) doubt = death_doubt(death_doubt_now(now), now);
+    // Written off this thread (log_later): no file on the GUI's.
+    if (doubt != nullptr && doubt != ui.dead_doubt)
+        log_later({ "Alerts: HP reads 0/" + std::to_string(v.hp_max) + " on the screen -- not taken for a death: " +
+                    std::string(doubt) });
+    ui.dead_doubt = doubt;
+    if (ui.dead.step(by_hp && doubt == nullptr, v.hp, v.hp_max, now)) alert("death", alert_text::death(false));
 
     // ---- the bin's dialog, held ----
     // A trash pass could not give an item back and has held everything off

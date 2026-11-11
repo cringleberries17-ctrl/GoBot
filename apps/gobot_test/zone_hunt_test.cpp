@@ -739,9 +739,11 @@ void test_zone_walk_back() {
         ZoneRig r(owner_config(), 1402, 802);
         r.hunter.set_zone(owner_zone());
         r.w.mobs = { mob_at(1450, stand_y(p, 1450, 818), 1), mob_at(1300, stand_y(p, 1300, 389), 2) };
-        r.pass();
-        const Hunter::Status first = r.st();
+        // The first look too: the walk back first goes at once (2026.11.10).
+        Hunter::Status first;
         std::vector<std::string> log = info_lines([&] {
+            r.pass();
+            first = r.st();
             r.until([&] { return r.st().returns > 0 && !r.w.walking() && std::abs(r.w.me_x - 880) <= 48; }, 8000);
             r.run(2000);
         });
@@ -814,7 +816,9 @@ void test_zone_walk_back() {
     // A way back worked out there, then a report on none of the file's
     // floors, standing still 86 px under the box: no way carried to it -- a
     // character standing sends no report, so it would be for good. The
-    // monster in reach out there is fought, as in 04c.
+    // monster in reach out there is fought, as in 04c. The walk back first
+    // went out at the first look (2026.11.10: no spot_return_delay_ms), and
+    // stopped there: no walk from the place with no way.
     {
         HunterConfig c = owner_config();
         c.spot_return_delay_ms = 60'000;
@@ -822,14 +826,18 @@ void test_zone_walk_back() {
         r.hunter.set_zone(owner_zone());
         r.pass();
         const Hunter::Status first = r.st();
+        const bool went = first.spot_back_walk && r.w.downs_of(VK_LEFT) == 1;
+        r.w.held.clear();
         r.w.place(1402, 780);
+        const int lefts = r.w.downs_of(VK_LEFT);
         r.w.mobs = { mob_at(1450, 780, 1) };
         r.run(2000);
         const Hunter::Status st = r.st();
-        check(from_map(r) && first.spot_back_first && first.spot_way && !st.spot_back_first && !st.spot_way &&
-                  st.spot_outside_px == 86 && r.w.downs_of('Z') > 0 && r.w.downs_of(VK_LEFT) == 0,
-              fmt("from 1402,802 the way worked out; then at 1402,780 on no floor, %d px outside: no way carried, the "
-                  "monster in reach fought (%d attacks)",
+        check(from_map(r) && first.spot_back_first && first.spot_way && went && !st.spot_back_first &&
+                  !st.spot_way && !st.spot_back_walk && st.spot_outside_px == 86 && r.w.downs_of('Z') > 0 &&
+                  r.w.downs_of(VK_LEFT) == lefts,
+              fmt("from 1402,802 the way worked out and walked at once; then at 1402,780 on no floor, %d px outside: "
+                  "no way carried, the latch let go, the monster in reach fought (%d attacks)",
                   st.spot_outside_px, r.w.downs_of('Z')));
     }
 
@@ -950,6 +958,111 @@ void test_zone_walk_back() {
               fmt("from the ramp over the home: off the ramp's foot (%d fall), then along the ground to %d,%d -- home, "
                   "no jump key (%d)",
                   r.w.falls, r.w.me_x, r.w.me_y, r.w.downs_of(38)));
+    }
+}
+
+/// The owner's answer of 2026-11-10 ("Ngưng đánh, đi về trước"): Đứng yên in
+/// the map tab's area, the character pushed 300 px out along the ground, a
+/// monster in the box within reach. On 2026-11-10 that monster had the walk
+/// back cut short at once, and every walk back began at a floor's end.
+void test_zone_back_walk() {
+    section("Hunter 2026.11.10: the walk back first latched -- Đứng yên in the map tab's area, pushed 300 px out, a "
+            "monster in the box within reach: no attack until inside, left only, no Down; a wall gives up, then it "
+            "fights");
+    if (game_data().empty()) {
+        skip("no copies of the game's map files here: the walk back first\n");
+        return;
+    }
+    GameMapBook probe(game_data());
+    const GameMapBook::Page& p = *probe.get("t52_s2");
+    HunterConfig c = owner_config();
+    c.stay_put = true;
+    c.up_reach = 150;           // the ground's slope between it and the monster
+    c.down_reach = 150;
+    // A box on the ground's slope, 800..1100 across; its home on the ground.
+    const int home_y = stand_y(p, 1000, 690);
+    const Hunter::Zone box = zone_box(1000, home_y, 800, 450, 1100, 900);
+    const int mob_y = stand_y(p, 1090, 712);
+    {
+        // Taken at home; then pushed along the ground to 1402,802.
+        ZoneRig r(c, 1000, home_y);
+        r.hunter.set_zone(box);
+        r.pass();
+        const bool taken = from_map(r) && r.st().spot_outside_px == 0 && !r.st().spot_back_walk;
+        r.w.place(1402, 802);
+        r.w.mobs = { mob_at(1090, mob_y, 1) };
+        int z_out = 0, rights_out = 0, z_first_x = INT_MIN, last_z = 0, last_right = 0;
+        bool edge_latched = false, returning = false, after_inside = false;
+        int prev_x = r.w.me_x;
+        const std::uint64_t t0 = r.w.t;
+        std::uint64_t first_left = 0;
+        const std::vector<std::string> log = info_lines([&] {
+            r.run(6000, [&] {
+                const Hunter::Status st = r.st();
+                const int z = r.w.downs_of('Z'), right = r.w.downs_of(VK_RIGHT);
+                if (z > last_z && prev_x > 1100) ++z_out;
+                if (z > last_z && z_first_x == INT_MIN) z_first_x = prev_x;
+                if (right > last_right && prev_x > 1100) ++rights_out;
+                if (prev_x > 1100 && prev_x <= 1100 + kZoneOutsideBackPx && st.spot_back_walk) edge_latched = true;
+                if (prev_x > 1100 && r.hunter.returning() && st.state == Hunter::State::Returning) returning = true;
+                if (prev_x <= 1100 && !st.spot_back_walk && !r.hunter.returning()) after_inside = true;
+                if (first_left == 0 && r.w.downs_of(VK_LEFT) > 0) first_left = r.w.t;
+                last_z = z;
+                last_right = right;
+                prev_x = r.w.me_x;
+            });
+        });
+        check(taken && z_out == 0 && rights_out == 0 && z_first_x != INT_MIN && z_first_x <= 1100 &&
+                  r.w.downs_of('Z') > 0,
+              fmt("the monster in the box at 1090, within reach from 1402: never attacked while the character was "
+                  "outside the box (%d), no turn or walk right out there (%d); first attacked from %d, inside",
+                  z_out, rights_out, z_first_x));
+        check(edge_latched && returning && after_inside && first_left != 0 && first_left <= t0 + 120,
+              fmt("walked at once (%llu ms in, no spot_return_delay_ms), held past the 60 px edge, the macro told "
+                  "it walks back (returning) until inside",
+                  static_cast<unsigned long long>(first_left - t0)));
+        check(r.w.downs_of(VK_DOWN) == 0 && r.w.downs_of(38) == 0 && r.w.falls == 0 && r.w.max_x <= 1402,
+              "along the ground: no Down, no jump key, no fall, never further right");
+        check(lines_with(log, "Hunter: 302 px outside the hunting area -- no fight until the character is back "
+                              "inside it: walking back first, to ") == 1 &&
+                  lines_with(log, "Hunter: the walk back first is over after", "inside the hunting area: fighting "
+                                                                               "again") == 1 &&
+                  lines_with(log, "Hunter: walk back over after", "cut by a fight with slot 1 inside the box") == 1,
+              "said: \"" + line_with(log, "no fight until") + "\" / \"" + line_with(log, "walk back first is over") +
+                  "\" / \"" + line_with(log, "Hunter: walk back over") + "\"");
+        // The minute line has the time outside and walking back.
+        r.w.mobs.clear();
+        const std::vector<std::string> minute = info_lines([&] { r.run(61'000); });
+        check(lines_with(minute, "; outside the area ", " s, walking back ") == 1,
+              "the minute line: \"" + line_with(minute, "; outside the area ") + "\"");
+    }
+    // A wall: the left arrow held walks nowhere. The walk back first holds
+    // until spot_give_up_ms by the reports -- nothing fought -- then lets go,
+    // and the monster in reach is fought where it stands.
+    {
+        ZoneRig r(c, 1000, home_y);
+        r.hunter.set_zone(box);
+        r.pass();
+        r.w.place(1402, 802);
+        r.w.wall_left = true;
+        r.w.mobs = { mob_at(1090, mob_y, 1) };
+        const std::uint64_t t0 = r.w.t;
+        std::uint64_t first_z = 0;
+        const std::vector<std::string> log = info_lines([&] {
+            r.run(8000, [&] {
+                if (first_z == 0 && r.w.downs_of('Z') > 0) first_z = r.w.t;
+            });
+        });
+        check(first_z != 0 && first_z >= t0 + c.spot_give_up_ms && first_z <= t0 + c.spot_give_up_ms + 1000 &&
+                  r.w.me_x == 1402 && r.st().return_give_ups == 1 && !r.st().spot_back_walk &&
+                  r.st().spot_why == Hunter::SpotWhy::Retrying,
+              fmt("against a wall: nothing fought for %llu ms, given up after spot_give_up_ms (%u), then the "
+                  "monster in reach fought where it stands",
+                  static_cast<unsigned long long>(first_z - t0), c.spot_give_up_ms));
+        check(lines_with(log, "Hunter: the walk back first is over after", "the walk back got nowhere") == 1 &&
+                  lines_with(log, "Hunter: walk back over after", "given up: no nearer by the reports") == 1,
+              "said: \"" + line_with(log, "walk back first is over") + "\"");
+        check(r.w.downs_of(VK_DOWN) == 0 && r.w.downs_of(38) == 0, "no Down, no jump key");
     }
 }
 
@@ -1228,6 +1341,7 @@ void test_zone_hunt(void (*check_fn)(bool, const std::string&), void (*section_f
     test_zone_rules();
     test_zone_walk_kept();
     test_zone_walk_back();
+    test_zone_back_walk();
     test_zone_seek();
     test_zone_above();
     test_zone_drops();

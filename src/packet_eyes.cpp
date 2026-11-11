@@ -232,6 +232,11 @@ WorldFix world_fix(const PacketWorld::View& v, const PacketWorld::Stats& s, cons
     // after such a start would be measured from 0,0.
     f.entry_x = v.entry_x;
     f.entry_y = v.entry_y;
+    // Which report placed you, and your 0x002A so far: what a ground report
+    // far above the last is weighed by (2026.11.10, Hunter::spot_plausible,
+    // MapTrust's points).
+    f.report_op = v.me.kind ? own_report_opcode(*v.me.kind) : 0;
+    f.air_reports = s.own(OwnReport::Air);
     // packet_health's capture and "you" rules, in its order. A frame of a
     // strange size only when it is one of your reports': a monster's or the
     // map's says nothing of where you are, and a minute of standing for one

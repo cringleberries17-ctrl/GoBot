@@ -101,6 +101,10 @@ struct MapViewState {
     MapTable                     table;
     std::string                  name_stem;
     std::string                  name;
+    /// The owner's one-click choice on the Bản đồ card (2026.11.10): a stem
+    /// for the tab's MapTrust to take (MapTrust::choose) at the next run --
+    /// set by the job's own post, so the worker's alone -- then cleared.
+    std::string                  choose;
 };
 
 /// One run's result, for the GUI to copy under its lock.
@@ -187,6 +191,14 @@ struct MapShowsIn {
 MapShows map_shows(const MapShowsIn& in);
 /// Whether the map's floors are drawn: known, with its file.
 bool map_drawn(MapShows s);
+
+/// The card's one-click choice while several map files fit (MapShows::
+/// Ambiguous, 2026.11.10): of `fits` (MapTrust::Report::fits), the one stem
+/// with a zone saved in `book` -- "" when none has, or more than one: then
+/// nothing is offered. Never taken without the owner's click: on 2026-11-10
+/// t10_s60 and t1_s60 fitted t1901_s2's points as well, and its saved zone
+/// never applied for 9.7 minutes.
+std::string zone_choice(const std::vector<std::string>& fits, const ZoneBook& book);
 
 /// Whether a zone may be edited on the tab now (the plan's §4.4).
 enum class MapEdit : std::uint8_t {
@@ -326,8 +338,11 @@ const GameMapBook::Page* dot_floors(const GameMapBook::Page* page, MapShows show
 /// (none with `you` false), as the hunter has the plate -- packet_scale both
 /// ways, packet_dy on the height; or in reach too while it walks back first
 /// (Status::spot_back_first), when Hunter::mark_out_of_area lets what is in
-/// reach outside the box be. The hunter's current target (`target`) only once
-/// Hunter::kSpotKeepPx past the edge, as Hunter::mark_out_of_area lets it go.
+/// reach outside the box be; and every one, in the box too, while the walk
+/// back first is latched (Status::spot_back_walk, 2026.11.10), when nothing
+/// is fought until the character is inside. The hunter's current target
+/// (`target`) only once Hunter::kSpotKeepPx past the edge, as
+/// Hunter::mark_out_of_area lets it go.
 /// Judged where the hunter's plates put it, the world's own m.x and m.y --
 /// never its dot, whose height the hunter does not go by (the owner's Q2 (a)):
 /// a grey of the tab's own heights would grey what the hunter fights, and

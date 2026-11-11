@@ -2401,6 +2401,364 @@ void test_pet_potion_engine() {
 #endif
 }
 
+// ------------------------------- the pet pressed over and over (11.10)
+
+void test_pet_every() {
+    section("The pet pressed over and over: pet_every_ms, one value for its keys (2026.11.10, \"Liên tục như "
+            "GoC\")");
+
+    const auto with_pet = [](Rig& rig, std::uint32_t every, std::uint32_t recheck = 0) {
+        MacroConfig cfg = rig.engine.config();
+        cfg.pet_every_ms = every;
+        cfg.potion_recheck_ms = recheck;
+        rig.engine.set_config(cfg);
+    };
+    const auto gaps_between = [](const std::vector<std::uint64_t>& at, std::uint64_t lo, std::uint64_t hi) {
+        bool ok = at.size() >= 2;
+        for (std::size_t i = 1; i < at.size(); ++i) ok = ok && at[i] - at[i - 1] >= lo && at[i] - at[i - 1] <= hi;
+        return ok;
+    };
+
+    // --- the file
+    {
+        const std::string path = temp_path("macro_pet_every.ini");
+        const auto write = [&](const char* text) {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            f << text;
+        };
+        // The owner's, as it was on 2026-11-10: Q under 90% and under 68%,
+        // each with its own 3000, and no pet_every_ms.
+        write("[Macro]\npotion_recheck_ms=1000\n[Keys]\n"
+              "key_0_keycode=71\nkey_0_enabled=true\nkey_0_interval_ms=3000\nkey_0_trigger=hp_below\n"
+              "key_0_threshold_pct=80\n"
+              "key_9_keycode=81\nkey_9_enabled=true\nkey_9_interval_ms=3000\nkey_9_trigger=pet_hp_below\n"
+              "key_9_threshold_pct=90\n"
+              "key_10_keycode=81\nkey_10_enabled=true\nkey_10_interval_ms=3000\nkey_10_trigger=pet_hp_below\n"
+              "key_10_threshold_pct=68\n");
+        MacroConfig c;
+        const bool loaded = c.load(path) && c.keys.size() == 3;
+        check(loaded && c.pet_every_ms == MacroConfig::kDefaultPetEveryMs && c.pet_every_ms == 300 &&
+                  macro_potion_cooldown_ms(c, c.keys[1]) == 300 && macro_potion_cooldown_ms(c, c.keys[2]) == 300 &&
+                  macro_potion_cooldown_ms(c, c.keys[0]) == 3000,
+              "a macro.ini from before it -- the owner's, 3000 on both Q rows: the pet's keys every 300 ms, the HP "
+              "potion still 3000");
+        write("[Macro]\npet_every_ms=0\n[Keys]\nkey_0_keycode=81\nkey_0_interval_ms=3000\n"
+              "key_0_trigger=pet_hp_below\n");
+        check(c.load(path) && c.pet_every_ms == 0 && macro_potion_cooldown_ms(c, c.keys[0]) == 3000,
+              "0 in the file: each pet key's own interval_ms, as before");
+        write("[Macro]\npet_every_ms=50\n[Keys]\nkey_0_keycode=81\n");
+        const bool low = c.load(path) && c.pet_every_ms == MacroConfig::kPetEveryLeastMs;
+        write("[Macro]\npet_every_ms=99999\n[Keys]\nkey_0_keycode=81\n");
+        check(low && c.load(path) && c.pet_every_ms == MacroConfig::kPetEveryMostMs &&
+                  MacroConfig::kPetEveryLeastMs == 200 && MacroConfig::kPetEveryMostMs == 3000,
+              "out-of-range numbers are brought into 200..3000");
+        MacroConfig kept;
+        kept.apply_defaults();
+        kept.pet_every_ms = 450;
+        MacroConfig back;
+        IniFile raw;
+        check(kept.save(path) && back.load(path) && back.pet_every_ms == 450 && raw.load(path) &&
+                  raw.get("Macro", "pet_every_ms", "") == "450",
+              "saved as [Macro] pet_every_ms and read back");
+        MacroConfig code;
+        check(code.pet_every_ms == 0, "a config built in code: 0, each key's own interval_ms");
+        DeleteFileA(path.c_str());
+        // No macro.ini at all -- deleted to reset, or unreadable: the row's
+        // 300 ms, not the 3 s of the pet key the simple screen puts in.
+        const std::string none = temp_path("macro_pet_every_none.ini");
+        DeleteFileA(none.c_str());
+        MacroConfig missing;
+        const MacroKey pet = macro_potion_key(MacroKeyKind::PetPotion, 'Q', 1);
+        check(!missing.load(none) && missing.pet_every_ms == MacroConfig::kDefaultPetEveryMs && pet.interval_ms == 3000 &&
+                  macro_potion_cooldown_ms(missing, pet) == 300,
+              "no macro.ini: the pet's keys every 300 ms, as the row says, not the key's own 3000");
+    }
+
+    // --- the engine
+    {
+        // The pet at 71%, its mark 90%: every 300 ms, not every 3 s -- and with
+        // the potion check on, pressed more often than it comes, no press of
+        // the pet's is checked or pressed early.
+        Rig rig({ pet_key('Q', 90) });
+        with_pet(rig, 300, 1000);
+        rig.pet = 71.0f;
+        rig.run(3000);
+        const auto at = rig.when('Q');
+        const auto st = rig.engine.stats();
+        check(at.size() == 10 && gaps_between(at, 300, 300) && st.potion_checks == 0 && st.potion_repressed == 0,
+              "the pet under its mark: pressed every 300 ms -- at +" + ms_list(at, rig.start) + " ms; " +
+                  std::to_string(st.potion_checks) + " potion checks");
+        rig.pet = 95.0f;
+        const std::uint64_t up = rig.t;
+        rig.run(1000);
+        check(rig.count('Q', up) == 0, "above its mark: not pressed");
+    }
+    {
+        // Lv1 and Lv2 on one key: one value for both, one cooldown.
+        MacroKey lv2 = pet_key('Q', 68);
+        lv2.label = "Pet 2";
+        Rig rig({ pet_key('Q', 90), lv2 });
+        with_pet(rig, 300, 1000);
+        rig.pet = 40.0f;
+        rig.run(1500);
+        const auto at = rig.when('Q');
+        check(at.size() == 5 && gaps_between(at, 300, 300),
+              "Lv1 under 90% and Lv2 under 68% on Q, the pet at 40%: still every 300 ms, Lv2 no faster -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        // A config built in code: each key's own interval, as before.
+        Rig rig({ pet_key('Q', 90) });
+        rig.pet = 40.0f;
+        rig.run(3500);
+        const auto at = rig.when('Q');
+        check(at.size() == 2 && gaps_between(at, 3000, 3000),
+              "pet_every_ms 0: the key's own 3000 -- at +" + ms_list(at, rig.start) + " ms");
+    }
+    {
+        // Turned down mid-run, from the key's 3 s to 300 ms: the next press
+        // comes 300 ms after the last, not when the 3 s are up.
+        Rig rig({ pet_key('Q', 90) });
+        rig.pet = 40.0f;
+        rig.run(1000);
+        with_pet(rig, 300);
+        rig.run(1000);
+        const auto at = rig.when('Q');
+        check(at.size() >= 2 && at[1] - at[0] >= 1000 && at[1] - at[0] <= 1020,
+              "pet_every_ms set to 300 one second after a press on its 3-s cooldown: the next at once -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        // Pressed no more often than the potion check comes, the pet's press
+        // is checked as an HP potion's is: no rise, pressed again at 1 s.
+        Rig rig({ pet_key('Q', 90) });
+        with_pet(rig, 1500, 1000);
+        rig.pet = 71.0f;
+        rig.run(2000);
+        const auto at = rig.when('Q');
+        check(at.size() == 2 && at[1] - at[0] >= 1000 && at[1] - at[0] <= 1100 &&
+                  rig.engine.stats().potion_repressed == 1,
+              "pet_every_ms 1500 over a 1000-ms check: no rise, so pressed again at 1 s, as before -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        // What came of the presses, said: the first of a run of still presses
+        // once, and the minute's line.
+        Logger& log = Logger::instance();
+        const LogLevel was = log.level();
+        log.set_ring_capacity(6000);
+        log.clear_ring();
+        log.set_level(LogLevel::Info);
+        int checks = 0;
+        std::string first, minute;
+        {
+            Rig rig({ pet_key('Q', 90) });
+            with_pet(rig, 300, 1000);
+            rig.pet = 71.0f;
+            rig.run(30'000);
+            // One heal, on a press of its own, then still again.
+            rig.on_press = [&rig](std::uint32_t) { rig.pet = 99.0f; };
+            rig.run(320);
+            rig.on_press = nullptr;
+            rig.pet = 72.0f;
+            rig.run(31'000);
+        }
+        for (const LogLine& l : log.ring()) {
+            if (l.text.find("Potion check: Pet key Q pressed at 71%") != std::string::npos) {
+                ++checks;
+                if (first.empty()) first = l.text;
+            }
+            if (minute.empty() && l.text.find("] Pet heals: key Q, ") != std::string::npos) minute = l.text;
+        }
+        log.set_level(was);
+        log.set_ring_capacity(0);
+        check(checks == 1 && first.find("no rise; pressed on every 300 ms all the same") != std::string::npos,
+              "a run of still presses, too often for the potion check: said once at its start -- " +
+                  std::to_string(checks) + " line(s): " + first);
+        const std::string head = "Pet heals: key Q, ";
+        const std::size_t from = minute.find(head);
+        const long long pressed = from == std::string::npos ? -1 : std::atoll(minute.c_str() + from + head.size());
+        check(pressed >= 195 && pressed <= 205 && minute.find(" 1 rose (median +") != std::string::npos &&
+                  minute.find("static -- the bar still -- in 2 runs (") != std::string::npos &&
+                  minute.find(" at 71%") != std::string::npos && minute.find(" at 72%") != std::string::npos,
+              "the minute's line: about 200 presses, the one that rose, and the two still runs with the bar's "
+              "value -- " + minute);
+    }
+    {
+        // The plateau: the bar still at 70-75% through a press, the first time
+        // a run -- a picture of the pet's slot asked for once.
+        Rig rig({ pet_key('Q', 90) });
+        with_pet(rig, 300, 1000);
+        rig.pet = 71.0f;
+        rig.run(2000);
+        int pct = -1, again = -1;
+        const bool took = rig.engine.take_pet_plateau(pct);
+        rig.run(3000);
+        check(took && pct == 71 && !rig.engine.take_pet_plateau(again),
+              "the pet still at 71% through a press: the plateau asked for once a run, at 71%");
+        Rig high({ pet_key('Q', 90) });
+        with_pet(high, 300, 1000);
+        high.pet = 80.0f;
+        high.run(2000);
+        check(!high.engine.take_pet_plateau(again), "still at 80%: no plateau of 70-75%");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    {
+        const auto read = [](const char* rel) {
+            std::ifstream in(std::string(GOBOT_SOURCE_DIR) + rel, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const std::string simple = read("/apps/gobot_gui/simple_view.cpp");
+        const std::string potions = read("/apps/gobot_gui/simple_potions.cpp");
+        const std::string gui = read("/apps/gobot_gui/gui_app.cpp");
+        const std::string ini = read("/configs/macro.ini");
+        const std::size_t box = simple.find("SliderInt(\"##pet_every\"");
+        const std::size_t box_end = simple.find("every_tip", box == std::string::npos ? 0 : box);
+        const std::string slider =
+            box == std::string::npos || box_end == std::string::npos ? std::string() : simple.substr(box, box_end - box);
+        check(simple.find("label(\"Bơm liên tục, mỗi\");") != std::string::npos &&
+                  slider.find("macro_config_.pet_every_ms =") != std::string::npos &&
+                  slider.find("apply_macro_config();") != std::string::npos &&
+                  slider.find("if (ImGui::IsItemDeactivatedAfterEdit()) simple_changed();") != std::string::npos &&
+                  slider.find("save(") == std::string::npos,
+              "simple_view.cpp: the pet's row has \"Bơm liên tục, mỗi [N] ms\", applied as it is dragged and "
+              "written only once let go of");
+        check(simple.find("Lv2 cùng phím không bấm nhanh hơn") != std::string::npos &&
+                  simple.find("k2.keycode == lv1_key)") != std::string::npos,
+              "simple_view.cpp: each potion row says a Lv2 on Lv1's key presses no faster");
+        const std::size_t ask = potions.find("macro_->take_pet_plateau(plateau)");
+        const std::size_t async = potions.find("std::async(std::launch::async, [f = std::move(f), bar, hp, mp", ask);
+        const std::size_t cut = potions.find("pet_slot_cut(f, bar, hp, mp)", async);
+        const std::size_t png = potions.find("save_png(cut,", async);
+        check(ask != std::string::npos && async != std::string::npos && cut != std::string::npos &&
+                  png != std::string::npos,
+              "simple_potions.cpp: the plateau's picture of the pet's slot is cut and written off GoBot's thread");
+        check(gui.find("macro_config_.pet_every_ms = static_cast<std::uint32_t>(") != std::string::npos &&
+                  ini.find("\npet_every_ms=300") != std::string::npos,
+              "the full screen's Every (ms) of a pet key is pet_every_ms; the shipped macro.ini has pet_every_ms=300");
+    }
+#endif
+}
+
+void test_pet_heal_watch() {
+    section("The pet's presses, judged: a heal put down to one press, still runs, the minute's line");
+
+    const auto close_to = [](float a, float b) { return a > b - 0.01f && a < b + 0.01f; };
+    {
+        PetHealWatch w;
+        w.pressed('Q', 1000, 70.0f);
+        w.reading(1100, 70.0f);
+        w.reading(1300, 98.0f);
+        w.reading(1700, 98.0f);
+        const auto out = w.take_closed();
+        check(out.size() == 1 && out[0].rose && close_to(out[0].rise, 28.0f) && out[0].delay_ms == 300 &&
+                  !out[0].is_static,
+              "a press at 70%, the bar at 98% 300 ms on: it rose, +28, after 300 ms");
+    }
+    {
+        // Two presses 300 ms apart, one heal: the earliest open press's -- a
+        // heal is never counted twice.
+        PetHealWatch w;
+        w.pressed('Q', 1000, 70.0f);
+        w.reading(1100, 70.0f);
+        w.pressed('Q', 1300, 70.0f);
+        w.reading(1450, 98.0f);
+        w.reading(2100, 98.0f);
+        const auto out = w.take_closed();
+        check(out.size() == 2 && out[0].rose && out[0].delay_ms == 450 && !out[1].rose && !out[1].is_static,
+              "one heal at 450 ms over two presses: the first rose, the second did not, the bar moving under it");
+    }
+    {
+        // A heal shown over two reads, within kRiseMergeMs: one heal.
+        PetHealWatch w;
+        w.reading(990, 70.0f);
+        w.pressed('Q', 1000, 70.0f);
+        w.pressed('Q', 1100, 70.0f);
+        w.reading(1300, 85.0f);
+        w.reading(1450, 98.0f);
+        w.reading(2000, 98.0f);
+        const auto out = w.take_closed();
+        check(out.size() == 2 && out[0].rose && close_to(out[0].rise, 28.0f) && !out[1].rose,
+              "70 to 85 to 98 within 150 ms: one heal of +28, the first press's");
+    }
+    {
+        // A rise sooner than kRiseLeastMs after the only press: not its.
+        PetHealWatch w;
+        w.reading(990, 70.0f);
+        w.pressed('Q', 1000, 70.0f);
+        w.reading(1020, 98.0f);
+        w.reading(1800, 98.0f);
+        const auto out = w.take_closed();
+        check(out.size() == 1 && !out[0].rose, "a rise 20 ms after the key-down is not the press's");
+    }
+    {
+        // Still: the bar within 1% of where it was pressed, the whole window.
+        PetHealWatch w;
+        w.pressed('Q', 1000, 71.0f);
+        w.reading(1200, 71.0f);
+        w.reading(1500, 71.6f);
+        w.reading(1700, 70.4f);
+        PetHealWatch none;
+        none.pressed('Q', 1000, 71.0f);
+        none.reading(1700, -1.0f);
+        const auto out = w.take_closed();
+        const auto unread = none.take_closed();
+        check(out.size() == 1 && out[0].is_static && !out[0].rose && unread.size() == 1 && !unread[0].read &&
+                  !unread[0].is_static,
+              "within 1% of 71% for 700 ms: static; no reading in its window: neither");
+    }
+    {
+        // The minute's line: presses, the heals with their median, the closest
+        // two that rose, the still runs with the bar's value, the rest.
+        PetHealWatch w;
+        std::uint64_t t = 1000;
+        (void)w.minute_line(t);
+        float bar = 71.0f;
+        const auto press = [&] { w.pressed('Q', t, bar); };
+        const auto wait = [&](std::uint64_t ms) {
+            for (const std::uint64_t until = t + ms; t < until; t += 50) w.reading(t, bar);
+        };
+        // 5 still at 71, each judged before the next heal's press.
+        for (int i = 0; i < 5; ++i) {
+            press();
+            wait(300);
+        }
+        wait(500);
+        // A heal 300 ms after a press, and 1 s later another after the next.
+        press();
+        wait(300);
+        bar = 99.0f;
+        wait(400);
+        bar = 60.0f;
+        wait(300);
+        press();
+        wait(300);
+        bar = 88.0f;
+        wait(400);
+        bar = 72.0f;
+        wait(300);
+        // 3 still at 72, then one with the bar falling under it.
+        for (int i = 0; i < 3; ++i) {
+            press();
+            wait(300);
+        }
+        wait(500);
+        press();
+        bar = 50.0f;
+        wait(800);
+        t = 62'000;
+        w.reading(t, bar);
+        const std::string line = w.minute_line(t);
+        check(line.rfind("Pet heals: key Q, 11 pressed; of 11 judged, 2 rose (median +", 0) == 0 &&
+                  line.find("after 300 ms; two that rose 1.0 s apart at the closest)") != std::string::npos &&
+                  line.find(", 8 static -- the bar still -- in 2 runs (5 at 71%, 3 at 72%)") != std::string::npos &&
+                  line.find(", 1 no rise with the bar moving") != std::string::npos,
+              "the minute's line -- " + line);
+        check(w.minute_line(t + 1000).empty() && w.minute_line(t + 61'000).empty(),
+              "and nothing for a minute with no press");
+    }
+}
+
 // ------------------------------------------------------ Quái đang thấy
 
 void test_monster_sightings() {
@@ -2664,6 +3022,41 @@ void test_key_hold_and_recheck() {
                   ms_list(at, rig.start) + " ms");
     }
     {
+        // The peak (2026.11.10): the heal showed, and heavy blows took it back
+        // before the check at 1 s. Judged by the one reading then, that was
+        // "no rise" and a second drink; by the highest reading of the first
+        // 700 ms, it worked.
+        Rig rig({ hp_key('1', 50) });
+        with_recheck(rig, 1000);
+        rig.hp = 40.0f;
+        rig.on_press = [&rig](std::uint32_t) { rig.hp = 60.0f; };
+        rig.run(400);
+        rig.on_press = nullptr;
+        rig.hp = 40.0f;
+        rig.run(2100);
+        const auto st = rig.engine.stats();
+        check(rig.count('1') == 1 && st.potion_checks == 1 && st.potion_repressed == 0,
+              "HP up to 60% after the press and down to 40% again by the check: its peak says it rose, so no "
+              "second press before the cooldown -- " + std::to_string(rig.count('1')) + " press(es), " +
+                  std::to_string(st.potion_repressed) + " pressed again");
+    }
+    {
+        // The peak counts only kRecheckPeakMs after the press: a rise after
+        // that, gone again by the check, is no rise of this press's.
+        Rig rig({ hp_key('1', 50) });
+        with_recheck(rig, 1000);
+        rig.hp = 40.0f;
+        rig.run(750);
+        rig.hp = 60.0f;
+        rig.run(150);
+        rig.hp = 40.0f;
+        rig.run(400);
+        const auto at = rig.when('1');
+        check(at.size() == 2 && at[1] - at[0] >= 1000 && at[1] - at[0] <= 1100,
+              "a rise only 750-900 ms after the press, gone by the check: still no rise, pressed again at 1 s -- "
+              "at +" + ms_list(at, rig.start) + " ms");
+    }
+    {
         Rig rig({ hp_key('1', 50) });
         rig.hp = 40.0f;
         rig.run(3500);
@@ -2845,6 +3238,34 @@ void test_potion_urgent() {
                   ms_list(at, rig.start) + " ms");
     }
     {
+        // Lv1 under 90% and Lv2 under 68% on one key, as the owner's pet row
+        // had them on Q (2026-11-10): one potion in the game, one cooldown --
+        // and "far below" is under half of the higher mark, 45%, not of the
+        // lower one, 34%. At 40% Lv2 is the tier that drinks.
+        MacroKey lv2 = hp_key('1', 68);
+        lv2.label = "HP 2";
+        Rig rig({ hp_key('1', 90), lv2 });
+        with_urgent(rig, 1000);
+        rig.hp = 40.0f;
+        rig.run(3500);
+        const auto at = rig.when('1');
+        check(at.size() == 4 && gaps_between(at, 1000, 1030),
+              "marks 90 and 68 on one key, HP 40%: under half of 90, a press every second -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        // Each key's own mark still, on keys of their own: Lv2 on another key
+        // at 68 is far below only under 34%.
+        Rig rig({ hp_key('1', 90), hp_key('2', 68) });
+        with_urgent(rig, 1000);
+        rig.hp = 40.0f;
+        rig.run(3500);
+        const auto at = rig.when('2');
+        check(at.size() == 2 && gaps_between(at, 3000, 3030) && rig.count('1') == 0,
+              "marks 90 and 68 on two keys, HP 40%: the 68% one drinks on its 3-s interval -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
         // MP, as the skills drain it: down to 20%, a potion lifts it to 70%,
         // and the next second it is down to 20% again.
         Rig rig({ mp_key('2', 59) });
@@ -2912,5 +3333,7 @@ void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section
     test_out_of_world();
     test_pet_potion_config();
     test_pet_potion_engine();
+    test_pet_every();
+    test_pet_heal_watch();
     test_monster_sightings();
 }

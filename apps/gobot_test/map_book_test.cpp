@@ -1125,6 +1125,100 @@ std::string gates_text(const std::vector<MapGate>& g) {
     return s;
 }
 
+/// The owner's choice while several files fit (2026.11.10, the Bản đồ card's
+/// "Dùng vùng ..."): one of those that fit, and only while they do.
+void test_trust_choose() {
+    section("MapTrust (2026.11.10): several files fit -- the owner's choice of one of them names it, as a name "
+            "from the points goes; never anything else");
+
+    const std::string dir = naming_folder();
+    if (dir.empty()) {
+        skip("no made-up maps for the naming\n");
+        return;
+    }
+    GameMapBook book(dir);
+    MapTrust t(&book);
+    Feed f(false, 0, 0, 0, 0, 0);
+    const bool early = !t.choose("t7_s2");
+    for (int i = 0; i < 12; ++i) f.stand(t, on_slope(20 + i * 40).x, on_slope(20 + i * 40).y);
+    MapTrust::Report r = t.report();
+    const bool both = r.why == Why::Ambiguous && r.fits.size() == 2 &&
+                      std::find(r.fits.begin(), r.fits.end(), "t7_s1") != r.fits.end() &&
+                      std::find(r.fits.begin(), r.fits.end(), "t7_s2") != r.fits.end() && !r.chosen;
+    const bool not_fit = !t.choose("t7_s3") && !t.choose("t9_s9") && t.stem().empty();
+    check(early && both && not_fit,
+          "before the points, and of a file the points do not all lie on: refused; Ambiguous lists the two that fit");
+    const bool took = t.choose("t7_s2");
+    f.pass(t);
+    r = t.report();
+    check(took && t.trusted() && t.stem() == "t7_s2" && t.how() == How::Named && r.why == Why::Trusted && r.named &&
+              r.chosen && r.fits.empty() && !t.choose("t7_s1"),
+          "t7_s2 chosen: named and trusted as a name from the points is (its gate), said as chosen; no second choice "
+          "while named");
+    // Two points of yours off its floors -- t7_s1's slope right of 512 is
+    // 20 px above t7_s2's -- let it go, as any named map.
+    f.stand(t, on_slope(700).x, on_slope(700).y);
+    f.wait(MapTrust::kOwnOffApartMs);
+    f.stand(t, on_slope(760).x, on_slope(760).y);
+    r = t.report();
+    check(!t.trusted() && t.stem().empty() && !r.chosen && r.why == Why::Naming,
+          "two points of yours off t7_s2's floors 0.5 s apart: let go of, chosen or not -- naming again");
+}
+
+/// A point of yours no floor can be is no point (2026.11.10): y 0 -- 999,0
+/// at t1901_s2's right wall let a good file go -- or far above the last with
+/// no jump of yours between.
+void test_trust_odd_points() {
+    section("MapTrust (2026.11.10): a point of yours at y 0, or more than kOwnRisePx above the last with no 0x002A "
+            "between, is none");
+
+    const std::string dir = naming_folder();
+    if (dir.empty()) {
+        skip("no made-up maps for the naming\n");
+        return;
+    }
+    GameMapBook book(dir);
+    MapTrust t(&book);
+    Feed f(false, 0, 0, 0, 0, 0);
+    f.look.report_op = 0x0027;
+    f.stand(t, on_slope(400).x, on_slope(400).y);               // 399: a point
+    std::string said;
+    {
+        Logger& log = Logger::instance();
+        const LogLevel was = log.level();
+        log.set_ring_capacity(200);
+        log.clear_ring();
+        log.set_level(LogLevel::Info);
+        f.stand(t, 999, 0);
+        for (const LogLine& l : log.ring())
+            if (l.text.find("not taken as a standing point") != std::string::npos) said = l.text;
+        log.set_level(was);
+        log.set_ring_capacity(0);
+    }
+    const int after_zero = t.report().points;
+    f.stand(t, 500, on_slope(400).y - MapTrust::kOwnRisePx - 30);     // 150 px above, no jump between
+    const int after_rise = t.report().points;
+    f.stand(t, 520, on_slope(400).y - MapTrust::kOwnRisePx - 30);     // the next one up there
+    const int after_next = t.report().points;
+    f.look.air_reports = 3;                                         // a jump of yours, then far up again
+    f.stand(t, 540, on_slope(400).y - 2 * MapTrust::kOwnRisePx - 60);
+    const int after_jump = t.report().points;
+    check(after_zero == 1 && said.find("your report at 999,0 (opcode 0x0027) not taken as a standing point -- y 0 "
+                                       "is no place to stand") != std::string::npos,
+          "999,0: no point, said with its opcode -- \"" + said + "\"");
+    check(after_rise == 1 && after_next == 2 && after_jump == 3,
+          fmt("150 px above with no jump: none (%d); the next one up there: one (%d); far above after a jump of "
+              "yours: one (%d)",
+              after_rise, after_next, after_jump));
+    // A fix put together with no opcode (as every hand-made look before it)
+    // judges no rise.
+    Feed g(false, 0, 0, 0, 0, 0);
+    MapTrust u(&book);
+    g.stand(u, on_slope(400).x, on_slope(400).y);
+    g.stand(u, 500, on_slope(400).y - 300);
+    check(u.report().points == 2, "no opcode: 300 px up is a point, as before");
+}
+
 /// Where data.md had the character and the monsters standing, live.
 const std::vector<MapPoint> kT52s2Points = {
     // L06, you, 06:44:20-06:49:40 (06:49:50's 2579,315 was in the air)
@@ -1448,5 +1542,7 @@ void test_map_book(void (*check_fn)(bool, const std::string&), void (*section_fn
     test_book_files();
     test_trust_entry();
     test_trust_naming();
+    test_trust_choose();
+    test_trust_odd_points();
     test_game_files();
 }

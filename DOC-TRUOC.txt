@@ -132,6 +132,453 @@ chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2
 Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
 khác chưa được thử trên game thật.
 
+- Mới trong bản 2026.11.11b (mua bình và dọn rác ở mọi mức máu, GoBot tự
+  bấm bình khi bot đang dừng; chưa thử trên game thật). Bạn báo: "Hiện tại
+  máu thấp đang không được mua bình, làm cho có thể mua bình ở bất cứ mức
+  máu nào và vừa mua vừa bơm máu". Câu trả lời của bạn: "GoBot tự bấm bình",
+  "Giữ chặn phím số", "Cả dọn rác".
+  + Tự mua bình và Dọn rác (theo giờ, "Mua ngay", "Dọn ngay") chạy ở mọi
+    mức máu: không chờ máu lên, không dừng giữa chừng vì máu thấp. Chỉ chờ
+    (thử lại sau 15 giây) khi nhân vật đã chết (máu dưới 1%) hoặc chưa đọc
+    được máu (đang chuyển bản đồ...). Thay cho quy tắc của bản 2026.11.11
+    (bắt đầu từ mức bình, dừng dưới nửa mức; bình ở phím số thì mức bình
+    + 10%). Dùng bùa và chat giữ như cũ.
+  + Bot đang chạy: bình HP và MP do macro bấm xen như bản 2026.11.11. Bot
+    đang dừng (hay macro tắt): GoBot tự bấm bình HP và MP theo các dòng bình
+    của bạn (đúng phím, đúng mức máu, đúng thời gian chờ của dòng), ngay khi
+    thấy cửa hàng, trước mỗi lần bấm đúp vào món, và giữa các món dọn rác;
+    không bao giờ lúc hộp số lượng, hộp thoại hay thông báo đang mở; bấm
+    xong chờ nửa giây và nhìn lại rồi mới bấm đúp hay kéo món. Không bao giờ
+    bấm bình pet. Log: "Trash: own potion press ...".
+  + Rủi ro: bình ở phím số KHÔNG BAO GIỜ được bấm trong lúc dọn rác và mua
+    bình (log: "Trash: a potion due on key 1 is not pressed by a bag job"),
+    mà GoBot giờ không chờ máu nữa: nhân vật có thể chết nếu máu đang thấp.
+    Màn hình đơn giản tự điền phím 1 và 2 cho hai dòng bình, nên hãy chuyển
+    bình sang phím chữ cái hoặc Home, End, PgUp, PgDn, Insert, Delete.
+  + Thử: xem bước 15 ở mục 6.
+- Mới trong bản 2026.11.11 (mua bình ngay sau khi dọn rác, bình HP và MP
+  được bấm trong lúc dọn rác và mua bình, và các phím Home, End, PgUp, PgDn,
+  Insert, Delete, theo điều người dùng báo và câu trả lời của bạn ngày 11/11;
+  chưa thử trên game thật):
+  + Việc cần làm trước: xem bình HP và MP đang ở phím nào. Bình ở phím số
+    vẫn CHỜ trong lúc dọn rác và mua bình, như bản trước, mà màn hình đơn
+    giản tự điền sẵn phím 1 và 2 cho hai dòng bình (macro.ini của bản zip
+    cũng để 1 và 2). Muốn bình được bấm trong lúc đó thì đặt bình vào một ô
+    phím chữ cái, hay Home, End, PgUp, PgDn, Insert, Delete, trong game, rồi
+    đổi phím trên dòng bình của GoBot cho đúng; có hai dòng bình HP (Lv1,
+    Lv2) thì dòng nào có mức từ nửa mức cao nhất trở lên cũng phải ở phím như
+    vậy. Bình của bạn ở G và F (phím chữ cái): không cần đổi gì, trừ khi có
+    dòng bình HP thứ hai ở phím số. Hãy nhắc người dùng bản zip điều này.
+  + Người dùng báo (bạn chuyển lại ngày 11/11): "- Sau khi dọn rác thì không
+    lập tức mua bình ngay mà bị delay tới tận vài phút. Việc này dẫn tới khi
+    bắt đầu thực hiện mua bình thì rác đã đầy túi đồ => Cần cho thực hiện mua
+    bình ngay sau khi dọn rác xong. - Làm cho có thể bơm HP và MP khi đang
+    dọn rác và mua bình. => Hiện tại khi HP thấp thì sẽ ưu tiên bơm xong mới
+    mua bình dẫn tới việc mua bình bị delay. Cần sửa vấn đề này. Ngoài ra làm
+    cho các phím như home, pgup, pgdown, end, delete có thể sử dụng được"
+  + Câu trả lời của bạn ngày 11/11:
+    1. Mua bình sau khi dọn rác: "Tới giờ mua: dọn rồi mua" ("Giữ ô mua mỗi
+       N phút. Tới giờ mua, GoBot dọn rác trước (nếu Dọn rác bật) rồi mua
+       liền trong cùng một lần dừng phím, không chờ thêm. Các lần dọn khác
+       vẫn chạy theo giờ dọn.").
+    2. HP và MP trong lúc dọn rác và mua bình: "Mua luôn, bơm xen" ("Không
+       chờ máu đầy. Bình HP/MP bấm xen giữa các lần mua và giữa các món dọn
+       rác. Chỉ dừng lượt mua khi máu xuống dưới nửa mức bình (sắp chết),
+       rồi tới giờ sau mua tiếp.").
+    3. Phím số trong lúc dọn rác và mua bình: "Không cho phím số".
+    4. Các phím mới: "Home End PgUp PgDn Ins Del".
+  + Mua bình ngay sau khi dọn rác (câu 1). Trước đây giờ dọn rác và giờ mua
+    bình là hai đồng hồ riêng, nên lượt mua có thể tới bất kỳ lúc nào, tới
+    cả một khoảng "dọn mỗi" sau lượt dọn, khi túi đã đầy đồ nhặt lại; máu
+    thấp và 1 giây chờ "không ai dùng chuột, bàn phím" còn làm nó chậm thêm.
+    Nay khi tới giờ mua (lần mua mới theo "mua mỗi N phút", hay phần còn lại
+    của lần trước) mà "Tự dọn rác" có dấu, GoBot dọn rác ngay lúc đó rồi mua
+    liền sau lượt dọn, trong cùng một lần dừng phím: không nhả phím giữa hai
+    việc, không có 1 giây chờ yên, và không xét lại máu lúc bắt đầu mua (lượt
+    dọn vừa xét; máu vẫn được xem suốt lượt mua). Tới giờ mua đúng lúc một
+    lượt dọn theo giờ đang chạy thì cũng mua liền sau lượt đó. Lượt dọn kéo
+    lên như vậy là một lượt dọn theo giờ như mọi lượt: lượt sau tính "dọn
+    mỗi" từ nó.
+  + Vừa dọn xong chưa tới 1 phút thì không dọn lại: GoBot mua luôn, như lượt
+    mua riêng trước đây (có 1 giây chờ yên và các điều kiện của nó). Lượt dọn
+    đầu chạy 15 giây sau BẮT ĐẦU, lần xem mua đầu 45 giây sau, rồi mỗi đồng
+    hồ tính từ lượt của chính nó. Nên khi "mua mỗi" chia hết cho "dọn mỗi"
+    (như 10 và 60 của bản zip, hay 5 hoặc 15 với 15), mỗi lần mua theo giờ
+    thường tới trong vòng 1 phút sau một lượt dọn theo giờ và được mua riêng
+    ngay sau lượt dọn đó: vẫn liền sau lượt dọn, chỉ không cùng một lần dừng
+    phím. Lượt dọn chỉ được kéo lên khi tới giờ mua lâu hơn 1 phút sau lượt
+    dọn trước: hai số không chia hết cho nhau (như 10 với 15), phần còn lại
+    của một lần mua (mua sau 1 phút, thường có một lượt dọn ngắn trước nó),
+    giờ mua đọc từ shop_clock.txt khi mở lại GoBot hay khi đánh dấu lại Tự
+    mua bình, sau một lần "Mua ngay", hay khi một lần mua hoặc một lượt dọn
+    bị hoãn.
+  + Không dọn được, hay lượt dọn không xong gọn, thì lượt mua đi riêng theo
+    cách cũ: danh sách đồ bỏ đi trống, không ngăn nào có dấu ở "Tìm trong:",
+    chưa thấy cửa sổ game, ô chat có thể đang mở, việc khác đang giữ game,
+    máu thấp chưa cho dọn, DỪNG LẠI hay F12, lượt dọn dừng giữa chừng (có
+    lỗi, máu xuống quá thấp), có thể còn món trong thùng rác (GoBot giữ phím
+    và chờ như trước), hay bảng Sự kiện và điểm danh đang hiện.
+  + GoBot cũng không kéo lượt dọn lên khi chính lượt mua sẽ phải chờ: chưa
+    thấy cửa sổ game hay game nằm ngoài màn hình, chưa đọc được máu (đang ở
+    màn hình đăng nhập hay chọn nhân vật, đang chuyển bản đồ, đang chết),
+    GoBot đang vào lại game hay đang qua màn hình khác, hay ô chat có thể
+    đang mở. Lượt mua chờ như trước, và lần xem đầu tiên sau đó mới kéo lượt
+    dọn. Lượt dọn được kéo lên mà danh sách đồ bỏ đi trống hay không ngăn nào
+    có dấu thì tới giờ dọn sau GoBot mới kéo lượt dọn lại. Lượt mua liền sau
+    lượt dọn vẫn chờ khi chưa đọc được máu (thử lại sau 15 giây).
+  + Thứ tự khi nhiều việc tới giờ cùng lúc vẫn là Tự chat, Dọn rác, Dùng bùa,
+    Tự mua bình; riêng lượt mua đi liền sau lượt dọn thì đi trước Dùng bùa
+    (bùa tới giờ cùng lúc thì dùng sau lượt mua).
+  + Không đổi: "mua mỗi N phút" và giờ ghi trong shop_clock.txt (không bao
+    giờ mua sớm), mỗi lượt theo giờ mua tối đa 10 lần và phần còn lại sau 1
+    phút, "Mua ngay" tối đa 40 lần, túi đầy thì dừng lượt đó. "Dọn ngay",
+    "Thử tìm", "Mua ngay" và "Thử mua" như trước: "Dọn ngay" không bao giờ
+    mua bình. Lượt mua vẫn tự mở túi đồ (lượt dọn đóng túi, lượt mua mở lại).
+    Khi cả hai ô có dấu, thẻ Tự mua bình ghi "Dọn rác đang bật: tới giờ mua,
+    GoBot dọn rác trước rồi mua bình liền sau đó, trong cùng một lần dừng
+    phím, không chờ thêm. Vừa dọn xong chưa tới 1 phút thì mua luôn, không
+    dọn lại."
+  + Bơm HP và MP trong lúc dọn rác và mua bình (câu 2). Trước đây lượt dọn
+    theo giờ và lượt mua chỉ bắt đầu khi máu cao hơn mức bình HP 10% (tối đa
+    95%), xem lại mỗi 15 giây, và dừng ngay khi máu xuống dưới mức bình, kể
+    cả khi bình ở phím chữ cái đã được bấm trong lúc đó; lượt mua bị dừng như
+    vậy có khi bị tính là lỗi (chờ 10 phút, hai lần liền thì bỏ phần còn
+    lại). Nay, khi bình HP ở phím mà lượt đó cho bấm (phím chữ cái, Space,
+    Home, End, PgUp, PgDn, Insert, Delete; macro đang chạy; lượt không bắt
+    đầu lúc có thể còn món trong thùng rác), và có hai dòng bình HP (Lv1,
+    Lv2) thì mọi dòng có mức từ nửa mức cao nhất trở lên đều ở phím như vậy
+    (macro chỉ bấm bình của mức mà máu đang dưới, nên một dòng như vậy ở
+    phím số thì không có bình nào được bấm trong khoảng đó):
+    - lượt dọn theo giờ và lượt mua bắt đầu khi máu từ mức bình HP trở lên
+      (mức cao nhất của các dòng bình HP đang bật; tối đa 95%), không cộng
+      10% nữa; chưa tới thì 5 giây sau xem lại;
+    - trong lượt, bình HP và MP được bấm khi tới lượt: GoBot mở lối phím cho
+      bình tới 0,4 giây ngay trước mỗi lần bấm đúp vào bình trong cửa hàng,
+      ở lần đầu thấy cửa hàng, và giữa hai món khi dọn rác, rồi nhìn lại như
+      mọi lần (món sắp kéo: nửa giây sau lần bấm bình). Không bao giờ từ lúc
+      bấm đúp tới khi hộp số lượng đã đóng, khi có hộp thoại, thông báo hay
+      bảng điểm danh nào mở, và không bao giờ khi dùng bùa. Bình pet không
+      làm GoBot chờ (pet vẫn được bấm khi lối mở, như bản 2026.11.10);
+    - chỉ khi máu xuống dưới NỬA mức bình HP thì GoBot dừng lượt đó và nhả
+      phím cho bình; 15 giây sau thử lại (lượt dọn cũng vậy, không chờ cả
+      khoảng "dọn mỗi"). Lượt mua bị dừng vì máu không tính là lỗi, phần còn
+      lại vẫn mua.
+    Ví dụ bình HP 80%: trước đây bắt đầu từ 90% và dừng dưới 80%; nay bắt
+    đầu từ 80% và chỉ dừng dưới 40%.
+  + Bình HP ở phím số (hay một dòng bình HP có mức từ nửa mức cao nhất trở
+    lên ở phím số, như Lv1 ở phím 1 mà màn hình đơn giản điền sẵn và Lv2 ở
+    G; hay macro tắt, hay không có dòng bình HP): như trước, bắt đầu khi máu
+    cao hơn mức bình HP 10% (mức đó ít nhất 50%; tối đa 95%) và dừng khi máu
+    xuống dưới mức bình; chỉ khác là xem lại sau 5 giây thay cho 15 giây, và
+    lượt bị dừng vì máu thử lại sau 15 giây, không tính là lỗi.
+  + Thông báo túi đầy nay được đóng cả khi máu thấp (trước đây máu thấp có
+    thể để thông báo và cửa hàng mở, giữ phím tới khi bạn tự đóng); khi việc
+    khác (như hồi sinh) đang giữ game thì không. Một thông báo lạ hiện ra
+    thay cho hộp số lượng cũng vậy. Một phím của macro chưa nhả
+    kịp ("một phím của macro chưa nhả kịp trước khi GoBot bấm chuột hay bấm
+    phím, nên dừng") nay không tính là lỗi: phần còn lại mua sau 1 phút.
+  + Không đổi: mức máu của Tự chat, Dùng bùa và các việc khác; Dùng bùa vẫn
+    dừng hết mọi phím; bình pet như bản 2026.11.10.
+  + Phím số (câu 3, "Không cho phím số"): như bản 2026.11.10, phím 0–9 không
+    bao giờ được bấm trong lúc dọn rác và mua bình (gõ vào hộp số lượng sẽ
+    thành số), cả phím số bên phải bàn phím và phím F. Kỹ năng, buff và bình
+    ở phím số chờ xong lượt. Màn hình đơn giản tự điền sẵn phím 1 và 2 cho
+    hai dòng bình: muốn bình HP, MP được bấm trong lúc dọn rác và mua bình
+    thì đổi sang phím chữ cái hay Home, End, PgUp, PgDn, Insert, Delete. Có
+    hai dòng bình HP (Lv1, Lv2) thì mọi dòng có mức từ nửa mức cao nhất trở
+    lên đều phải đổi như vậy; còn một dòng như vậy ở phím số thì lượt dọn và
+    lượt mua giữ cách cũ về máu (bắt đầu trên mức bình 10%, dừng dưới mức
+    bình).
+  + Home, End, PgUp, PgDn, Insert, Delete (câu 4): trong lúc dọn rác và mua
+    bình, kỹ năng, buff và bình ở sáu phím này nay được bấm như ở phím chữ
+    cái và Space: chỉ khi GoBot vừa nhìn thấy không có gì mở, không bao giờ
+    từ lúc bấm đúp tới khi hộp số lượng đã đóng, không bao giờ khi dùng bùa,
+    trong lượt bắt đầu lúc có thể còn món trong thùng rác, hay cho chuỗi
+    phím. Chỉ đúng sáu phím đó: các phím mũi tên (cả ↓) và các phím khác vẫn
+    không.
+  + Chưa biết game làm gì với sáu phím đó khi túi đồ hay cửa hàng đang mở
+    (có thể lật trang túi, cuộn danh sách cửa hàng, dời con trỏ trong hộp số
+    lượng). Nên sau khi một trong sáu phím được bấm, GoBot chờ 0,2 giây rồi
+    mới tự bấm chuột, bấm phím, hay nhìn màn hình để quyết định. Và GoBot chỉ
+    bấm đúp vào bình khi lần nhìn đó thấy chính hàng Thịt bò khô và Rượu lá
+    tre (trước đây thấy nút Mua và Thoát là đủ, chỗ hàng tính theo lần
+    trước): không thấy thì nhìn lại tối đa 3 lần nữa, rồi dừng lượt mua, không
+    bấm gì. Thẻ ghi "không thấy hàng Thịt bò khô và Rượu lá tre trong cửa hàng
+    trước khi chọn Thịt bò khô (danh sách có thể đã bị cuộn), nên không bấm",
+    ảnh giữ là shop_row_unseen trong trash_debug, lượt đó tính là lỗi (chờ 10
+    phút), và log ghi mỗi lần nhìn "Trash: shop row not matched before the
+    double-click on Thịt bò khô -- its buttons alone at x,y (row 0.00,
+    buttons 0.97), look 1 of 4".
+  + Đặt phím: ở màn hình đơn giản nay đặt được Delete như mọi phím; muốn bỏ
+    phím của một ô thì bấm vào ô rồi nhấn Backspace (trước là Delete): "Nhấn
+    phím muốn dùng. Esc để huỷ, Backspace để bỏ phím này." Ở màn hình Nâng
+    cao, gõ pgup, pgdn, del hay ins vào ô phím nay là PgUp, PgDn, Delete,
+    Insert (trước đây thành phím P, P, D, I), và ô phím ghi Home, End, PgUp,
+    PgDn, Insert, Delete (trước là 0x24...). Dòng log của lối phím ghi tên
+    phím: "Trash: pass's key window: Z 1, Home 2, PgDn 1, Delete 1 through,
+    ...".
+  + Log mới: "Trash: shop due -- a pass first, then the round under the same
+    hold (the last pass ended N s ago)" (một lần, rồi chỉ ghi lại khi lượt
+    dọn hay lượt mua đã chạy, hay có lý do hoãn mới); "Trash: shop rides the
+    pass -- the same hold, no quiet second (the look that pulled it)" (hay
+    "(come due while it ran)"); "Trash: shop -- no ride on the pass it pulled
+    (...): it goes on its own"; dòng "Trash: shop job: ..." nay thêm "; right
+    after the pass, the last pass ended N s ago" (hay "on its own", "Mua
+    ngay", "Thử mua"); mỗi khi lý do hoãn một lượt dọn hay lượt mua theo giờ
+    đổi, một dòng như "Trash: timed shop put off -- HP 62% under the HP
+    potion's mark 80%" (hay "timed pass", "another job holds the game
+    (...)", "someone is using the mouse or keyboard (the quiet second)",
+    "GoBot's own input in each quiet second", "the check-in board is up");
+    khi một lượt bị dừng,
+    "Trash: pass stopped by HP -- HP 38% under the level 40%" hay "Trash:
+    shop round stopped by the hold -- ...'s now; HP N%, the level N%"; và
+    "Trash: potion break before the double-click -- the key window open N ms
+    for an HP or MP potion due" (hay "as the shop is seen", "between two
+    items"; thêm ", one still due" khi đã hết 0,4 giây mà bình vẫn chờ).
+  + Rủi ro:
+    - Chưa biết sáu phím mới làm gì trong game khi túi đồ hay cửa hàng đang
+      mở. Lật trang túi thì GoBot có thể bỏ sót một món (lượt sau dọn tiếp);
+      cuộn danh sách cửa hàng thì GoBot không bấm đúp và dừng lượt mua (ở
+      trên). Chưa có log mua bình nào trên game thật: nếu hàng bình trong cửa
+      hàng (lúc một ô đang được chọn và sáng lên) không được nhận ra, lượt mua
+      sẽ dừng sau lần mua đầu, với các dòng "shop row not matched" trong log,
+      trong khi bản 2026.11.10 vẫn mua tiếp theo nút Mua và Thoát. Thấy vậy
+      thì gửi log.
+    - Bình HP, MP ở phím số vẫn chờ trong lúc dọn rác và mua bình: màn hình
+      đơn giản tự điền sẵn phím 1 và 2, nên hãy nhắc người dùng đổi bình sang
+      phím chữ cái hay một trong sáu phím trên.
+    - Mua khi máu dưới mức bình: từ lúc bấm đúp tới khi hộp số lượng đóng và
+      đã chờ thông báo túi đầy (ước tính 2,5–3,5 giây mỗi lần mua), không có
+      bình nào được bấm, máu có thể tụt thêm; dưới nửa mức bình thì lượt
+      dừng.
+    - Lượt mua liền sau lượt dọn không có 1 giây chờ yên: đừng dùng chuột hay
+      bàn phím khi GoBot đang dọn rác. Giờ dọn lệch theo giờ mua mỗi lần mua,
+      và mỗi phần còn lại thường có thêm một lượt dọn ngắn.
+    Thử như bước 14 ở mục 6.
+
+- Mới trong bản 2026.11.10 (bơm máu pet liên tục, về vùng đánh quái trước,
+  dọn rác nhanh hơn, kỹ năng khi dọn rác và mua bình, mua bình không giới
+  hạn số lần, theo điều bạn báo ngày 10/11; chưa thử trên game thật):
+  + Việc cần làm trước: không có gì bắt buộc. Hai dòng bình pet của bạn
+    (phím Q, 90% và 68%) đang chờ 3 giây giữa hai lần bấm; bản này
+    bấm Q mỗi 300 ms khi máu pet dưới mức (ô mới "Bơm liên tục, mỗi" trên
+    dòng pet), và mỗi lần bấm có thể tốn một thức ăn pet: đếm thức ăn sau
+    giờ đầu (bước 13 ở mục 6). trash.ini của bạn ngày 10/11 chưa đánh dấu
+    ngăn nào ở "Tìm trong:", nên từ bản này "Dọn ngay" chỉ báo trên thẻ, không
+    mở túi: đánh dấu Tiêu Dùng trước khi thử.
+  + Bạn báo ngày 10/11: "Bơm máu pet chậm"; "Thao tác dọn rác chậm" (rồi:
+    "dọn rác chậm là từ user feedback"); "Không tự di chuyển quay về vùng
+    đánh quái"; "Khi dọn rác thì cần ra các skill thuộc phím chữ cái (z,x,c,v,
+    v.v.)", rồi "cả khi mua HP và MP cũng cần ra skill nhé", rồi "có tính
+    phím space, vì phím space không ảnh hưởng" và "lúc dùng bùa thì không
+    cần ra skill"; và "Mua HP/MP cần để người chơi tự setting bao nhiêu lần
+    chứ không phải là max 20".
+  + Câu trả lời của bạn ngày 10/11:
+    1. Bơm máu pet: "Liên tục như GoC (0,2–0,5 s)".
+    2. Bị đẩy ra ngoài vùng đánh quái: (a) "Ngưng đánh, đi về trước".
+    3. Phím trong lúc dọn rác và mua bình: phím chữ cái và Space, "Bấm cả
+       bình" (cả bình ở phím chữ cái như G, F, Q); lúc dùng bùa thì không.
+    4. Số lần mua bình: "Không giới hạn".
+    5. "dọn rác chậm là từ user feedback": người dùng khác của bản zip thấy
+       chậm, không có log nào của một lượt xoá, nên bản này làm nhanh theo
+       cài đặt của bản zip (bốn ngăn Trang Bị 1, Trang Bị 2, Tiêu Dùng và
+       Khác có dấu, "Tốc độ bấm nút" 80 ms) và ghi từng bước vào log.
+  + Bơm máu pet. Log 10/11: Q được bấm khoảng 20 lần mỗi phút vì GoBot tự
+    chờ khoảng 3 giây (2,55–3,45 giây) giữa hai lần bấm, nên từ 20:03 tới
+    21:12 pet ở dưới mức 91% khoảng một nửa thời gian; GoC của bạn bấm Q mỗi
+    200 ms. Nay dòng "Tự bơm máu pet" có ô mới "Bơm liên tục, mỗi [N] ms",
+    từ 200 tới 3000 ms, mặc định 300 ms, một số cho mọi phím pet (Lv1 và Lv2
+    cùng một số): máu pet dưới mức thì GoBot bấm phím pet cứ N ms một lần,
+    tới khi máu pet lên lại. macro.ini chưa có dòng pet_every_ms (như của
+    bạn: Q đặt 3000 ms ở cả hai dòng) thì đọc là 300 ms. Kéo ô đó là có tác
+    dụng ngay, GoBot lưu khi bạn thả chuột. Ô "Every (ms)" của phím pet ở màn
+    hình Nâng cao cũng là số này.
+  + Kỹ năng không bị chậm vì pet: sau một lần bấm pet, kỹ năng nào tới lượt
+    được bấm trước (pet chờ nhiều nhất 0,5 giây), nên khi kỹ năng đang tới
+    lượt thì pet và kỹ năng bấm xen kẽ. Bình HP và MP vẫn luôn được bấm
+    trước. Bấm pet nhanh hơn 1 giây (potion_recheck_ms) thì không còn "bấm
+    lại khi máu không lên" cho pet.
+  + Các dòng bình: Lv2 cùng phím với Lv1 không bấm nhanh hơn (hai dòng là
+    một bình, chung một lần chờ), nay cả ba dòng bình đều ghi "Lv2 cùng phím
+    không bấm nhanh hơn: ..."; bấm lại sau 1 giây khi dưới NỬA mức nay tính
+    theo mức cao nhất của các dòng cùng loại, cùng phím (hai dòng 90% và 68%
+    cùng một phím: dưới 45%, không còn là dưới 34%); và một lần bấm có làm
+    thanh lên không nay xét theo lần đọc cao nhất trong 0,7 giây sau khi bấm,
+    nên bị đánh mạnh ngay sau đó không còn bị tính là "không lên".
+  + Log mới của pet: mỗi phút một dòng "Pet heals: key Q, N pressed; of N
+    judged, N rose (median +N% after N ms; two that rose N s apart at the
+    closest), N static -- the bar still -- in N runs (N at 71%, ...), N no
+    rise with the bar moving, N with no reading": bấm bao nhiêu lần, bao
+    nhiêu lần máu pet lên, lên bao nhiêu và sau bao lâu, hai lần cùng làm máu
+    lên gần nhau nhất (hồi chiêu thật của thức ăn pet không dài hơn số đó),
+    và bao nhiêu lần bấm mà thanh đứng yên, ở mức nào. Mỗi đợt bấm mà thanh
+    đứng yên có một dòng "Potion check: Pet key Q pressed at 71%, the bar
+    within 1% of it for 700 ms -- no rise; pressed on every 300 ms all the
+    same (more often than the 1000-ms check), ...". Lần đầu thanh đứng yên ở
+    70–75% (như 21:50 ngày 10/11, ở 68–72%), GoBot giữ một ảnh ô pet trong
+    potion_debug, tên ..._pet_71.png, và log ghi "Pet heals: the pet's bar
+    still at 71% through a press of its potion; kept a picture of the pet's
+    slot as potion_debug\...".
+  + Rủi ro của pet: game không có hồi chiêu cho thức ăn pet thì mỗi lần bấm
+    là một thức ăn, tới khoảng 200 lần mỗi phút lúc pet dưới mức. Log 10/11
+    có hai lần bấm cách nhau 3,1 giây đều làm máu pet lên, nên game cho bấm
+    nhanh hơn 3 giây, nhưng chưa biết hồi chiêu thật (khoảng 1 tới 2,4 giây).
+    Tốn quá thì kéo ô lên (ví dụ 1000 ms). Khoảng 30% lần bấm ngày 10/11
+    không làm máu lên, nhiều nhất ở 70–75%: bấm nhanh hơn không sửa được điều
+    đó, ảnh trong potion_debug là để tìm vì sao. Lúc pet dưới mức, kỹ năng có
+    thể ra ít hơn một chút (pet và kỹ năng xen kẽ).
+  + Về vùng đánh quái. Log 10/11 (t1901_s2, Đứng yên một chỗ, vùng ở tab Bản
+    đồ rộng 366 px, tầm đánh 450 px): nhân vật ở ngoài vùng khoảng 23% thời
+    gian, và 35 lần đi về đều chỉ bắt đầu ở hai đầu bục: con quái trong vùng
+    mà trong tầm thì bot đánh luôn từ ngoài vùng, mỗi trận lại cắt ngang lần
+    đi về. Nay (câu 2, (a)): ra ngoài vùng quá 60 px (vùng có đường về, hay
+    chỗ đánh quái của lần chạy này không cao hơn một lần nhảy) thì bot ngưng
+    đánh ngay, không đánh con nào, kể cả con trong vùng và trong tầm, đi bộ
+    về theo mặt đất ngay (không chờ 1,5 giây), không bấm ↓, không nhảy ra
+    ngoài vùng, và chỉ đánh lại khi đã vào tới trong vùng (không phải khi chỉ
+    còn cách vùng 60 px). Lúc đi về, macro không bấm phím kỹ năng nào, kể cả
+    phím "Luôn bấm theo giờ"; bình và buff vẫn bấm như thường (buff 0 giây
+    vẫn mỗi 5 giây). Đi về mà 4 giây không tới gần hơn (vướng tường) thì bot
+    thôi, đánh ở chỗ đang đứng, 30 giây sau thử lại, như trước. Thẻ ghi "Nhân
+    vật đang ở ngoài vùng N px — bot ngưng đánh, về vùng trước: đi bộ về X,
+    Y, vào tới trong vùng rồi mới đánh tiếp."; ở tab Bản đồ mọi con quái
+    đều xám trong lúc đó.
+  + Qua cửa rồi về lại đúng bản đồ của vùng, bằng cửa nào cũng được: bản đồ
+    tải xong (gói tin báo chỗ nhân vật, hay sau 3 giây) thì bot dùng lại vùng
+    và đi bộ về vùng, không đứng chờ như trước; lúc chờ, thẻ ghi "Vừa qua cửa
+    về lại bản đồ này: chờ bản đồ tải xong rồi dùng lại vùng đã lưu và đi bộ
+    về vùng."
+  + Chỗ đánh quái không còn bị đặt ở chỗ không ai đứng được (như 999,0 lúc
+    21:11 ngày 10/11, 79 giây): báo vị trí ở y 0, hay cao hơn lần đứng trên
+    đất trước đó quá một lần nhảy mà không có cú nhảy nào ở giữa, thì không
+    lấy làm chỗ, và tab Bản đồ không tính là chỗ đứng. Log ghi "Hunter: a
+    report of yours at 999,0 not taken for the hunting spot -- y 0 is no
+    place to stand (opcode 0x....)", mỗi phút nhiều nhất một lần.
+  + Tab Bản đồ: chưa phân biệt được bản đồ vì vài file bản đồ cùng khớp chỗ
+    đứng (như 21:01–21:11 ngày 10/11: t10_s60, t1901_s2 và t1_s60), mà chỉ
+    một file có vùng đã lưu, thì thẻ có nút "Dùng vùng <tên file>" (ví dụ
+    "Dùng vùng t1901_s2"): bấm thì GoBot coi đó là bản đồ đang đứng và dùng
+    vùng của nó. GoBot không tự chọn.
+  + Log mới khi về vùng: "Hunter: N px outside the hunting area -- no fight
+    until the character is back inside it: walking back first, to x,y (reach
+    450 px)"; "Hunter: the walk back first is over after N s, from N px
+    outside -- inside the hunting area: fighting again" (hay "-- a hold",
+    "-- the hunting spot not in use"...); "Hunter: walk back over after N s
+    -- ..." (tới nơi, bị một trận cắt ngang ở trong hay ngoài vùng, bỏ cuộc,
+    qua cửa); dòng "Hunter:" mỗi phút thêm "; outside the area N s, walking
+    back N s"; dòng "Skills:" thêm ", N walking back". Và mỗi lần nhân vật
+    đi (do GoBot hay không), một dòng "Positions: own walk 25,632 -> 363,632
+    (+338 px) in 0.94 s, stopped by 0x0027; 2 casts of yours in it; GoBot: no
+    arrow within 300 ms; last key Z 85 ms before": đi từ đâu tới đâu, bao
+    lâu, có ra chiêu trong lúc đi không, GoBot có giữ hay bấm phím mũi tên
+    trong 300 ms quanh đó không, và phím cuối GoBot bấm trước đó là gì. Dòng
+    này để tìm ra cái gì đưa nhân vật ra khỏi vùng: ngày 10/11 có 32 lần,
+    mỗi lần khoảng 340 px, mà log không thấy GoBot cho đi bộ lần nào.
+  + Rủi ro khi về vùng: đi về vài giây không đánh, con quái đứng cạnh đánh
+    nhân vật mà không bị đánh lại. Vẫn chưa biết cái gì đưa nhân vật ra khỏi
+    vùng (nghi phím Z, chiêu cận chiến, tự đi tới quái): bản này chỉ làm thời
+    gian ở ngoài vùng ngắn lại; lần thử tay và các dòng "own walk" ở bước 13
+    sẽ cho biết.
+  + Dọn rác nhanh hơn (câu 5). Chưa có log nào của một lượt xoá, nên bản này
+    sửa theo cài đặt của bản zip và ghi từng bước vào log:
+    - Không đánh dấu ngăn nào ở "Tìm trong:" thì "Dọn ngay" và "Tự dọn rác"
+      không mở túi, không dừng phím nào, thẻ ghi ngay "Chưa chọn ngăn nào ở
+      'Tìm trong:', nên không xoá được gì." (trước đây GoBot vẫn mở túi,
+      không xem ngăn nào rồi đóng túi).
+    - Mọi món trong danh sách đều chọn từ hình của game ở nhóm đồ tiêu dùng
+      (bình, đồ ăn, mảnh ghép, bùa: chỉ nằm ở ngăn Tiêu Dùng) thì GoBot chỉ
+      tìm ở ngăn Tiêu Dùng, không lật các ngăn khác; thẻ ghi "Mọi món trong
+      danh sách đều nằm ở ngăn Tiêu Dùng, nên khi dọn GoBot chỉ tìm ở ngăn
+      đó." Ngăn Tiêu Dùng không có dấu thì thẻ ghi "Mọi món trong danh sách
+      đều nằm ở ngăn Tiêu Dùng, mà ngăn đó chưa được chọn ở 'Tìm trong:', nên
+      không xoá được gì." Có một món chụp từ túi, hay một hình ở nhóm khác,
+      thì tìm mọi ngăn có dấu như trước.
+    - Mỗi món nhanh hơn: lúc chờ túi mở và chờ món vào thùng rác GoBot nhìn
+      lại mỗi 80 ms (trước là 150 ms), chờ hộp thoại tính theo đồng hồ, mỗi
+      hình chỉ tìm hộp thoại một lần, món sau dùng luôn hình nhìn thấy cuối
+      của món trước, và mười bước kéo đồ theo "Tốc độ bấm nút". Mọi bước
+      kiểm tra giữ nguyên: đọc hộp số lượng ít nhất 0,75 giây (3 lần đọc
+      giống nhau), hai lần nhìn cách nhau 0,15 giây, trả món về và đóng hộp
+      thoại như trước.
+    - Ước tính theo mã, chưa đo trên game: mỗi món nhanh hơn khoảng 9–14% (ở
+      80 ms: khoảng 2,6 xuống 2,3 giây). Với 4 ngăn của bản zip, khi mọi món
+      trong danh sách đều là hình của game ở nhóm đồ tiêu dùng (GoBot chỉ tìm
+      ở ngăn Tiêu Dùng): một lượt có 2 chồng đồ khoảng 12,6 xuống 6,8 giây;
+      không có gì để xoá khoảng 7,4 xuống 2,1 giây. Danh sách có món khác
+      (hình chụp từ túi, hay hình ở nhóm khác) thì GoBot vẫn tìm cả 4 ngăn:
+      khoảng 12,6 xuống 12,0 giây và 7,4 xuống 7,3 giây. Chưa tính lúc chờ
+      các phím chữ cái nhả ra (ở dưới).
+    - Log mới, mỗi món: "Trash: item at Tiêu Dùng, hàng 1 ô 1 (giống 97%)
+      deleted in N ms -- drag N ms, in the bin after N ms (N looks), its
+      dialog N ms after the click, the box read on N looks in N ms, closed N
+      ms after Xác Nhận (1 question), then N ms till the item was seen gone,
+      last look N ms"; mỗi lượt: "Trash: pass steps -- bag opened in N ms (N
+      looks); Tiêu Dùng: tab N ms, top N ms, N pages (scrolling N ms), N items
+      in N ms; bag shut in N ms; N ms in all"; và "Trash: every item on the
+      list is a spend/ icon -- only Tiêu Dùng looked through, not ...".
+  + Kỹ năng khi dọn rác và mua bình (câu 3). Trong lượt dọn rác ("Dọn ngay",
+    "Tự dọn rác", cả "Thử tìm") và lượt mua bình ("Tự mua bình", cả "Mua
+    ngay" và "Thử mua"), bot vẫn đứng yên, không đánh quái, nhưng các phím
+    của macro ở chữ cái A–Z hay Space (kỹ năng, buff và bình: của bạn là Z X
+    C V Space và G, F, Q) vẫn bấm theo giờ của chúng, giữa các lần GoBot
+    bấm chuột hay bấm phím, khi GoBot vừa nhìn thấy không có hộp thoại, thông
+    báo, bảng điểm danh hay hộp số lượng nào mở, và không có món nào đang ở
+    thùng rác. Không bao giờ để qua: phím số (như buff 6 của bạn: chờ xong
+    lượt), Enter, Esc, phím mũi tên, Ctrl, Shift, Alt, phím F, các phím dấu,
+    phím mở túi đồ, phím mở cửa sổ Nhiệm Vụ, phím của GoBot, và chuỗi phím.
+    Dùng bùa thì vẫn dừng hết mọi phím như trước.
+  + Trước mỗi lần GoBot bấm chuột, kéo đồ hay bấm phím (cả phím mở túi, bấm
+    đúp, gõ số, Xác Nhận, Hủy Bỏ, ESC của cửa hàng và Thoát), GoBot đóng lối
+    đó lại và chờ các phím đó nhả ra, nhiều nhất 0,6 giây; một phím vẫn chưa
+    nhả thì GoBot không bấm và dừng lượt đó: "một phím của macro chưa nhả kịp
+    trước khi GoBot bấm chuột hay bấm phím, nên dừng". Khi dọn rác, món sắp
+    kéo được nhìn lại sau khi các phím đã nhả, và sau nửa giây kể từ lần bấm
+    bình gần nhất (uống bình có thể làm đổi ô trong túi).
+  + Khi mua bình: không có phím nào từ ngay trước lúc bấm đúp vào bình tới
+    khi hộp số lượng đã đóng và đã chờ 1 giây xem game có báo túi đầy không,
+    không có trong lúc có thông báo hay hộp thoại nào mở, và không có trong 1
+    giây "không ai dùng chuột, bàn phím" trước khi mở túi. Phím đi qua lúc
+    GoBot xem cửa hàng trước một lần mua thì, sau khi đóng lối, GoBot nhìn
+    lại một lần nữa và bấm đúp theo lần nhìn đó (bảng điểm danh hay một thông
+    báo vừa hiện ra thì không bấm). GoBot tự bấm gì
+    trong giây đó (một phím nhả ra, việc khác) thì không tính là bạn: GoBot
+    đo lại, nhiều nhất 2 lần, rồi thẻ ghi "Chờ: GoBot vừa tự bấm phím hay
+    chuột trong lúc chờ yên, mua bình sau." và thử lại sau 15 giây.
+  + Log mới: mỗi lượt một dòng "Trash: pass's key window: Z 5, X 4, G 1
+    through, 3 times open (1840 ms)" (khi mua bình là "Trash: shop's key
+    window: ..."): phím nào được bấm mấy lần, lối mở mấy lần, mở bao lâu.
+  + Rủi ro: lối này chỉ mở giữa các lần GoBot bấm, nên trong lượt dọn kỹ năng
+    vẫn ra ít hơn lúc đánh thường, và khi mua bình chỉ một lát giữa hai lần
+    mua. Một món tìm thấy lúc lối đang mở tốn thêm một lần nhìn và tới nửa
+    giây chờ bình. Hiệu ứng kỹ năng vẽ đè lên túi có thể làm GoBot không nhận
+    ra một món (lượt sau dọn tiếp) hay dừng lượt. Chưa biết phím chữ cái làm
+    gì khi hộp số lượng của game đang mở: GoBot không để phím nào qua lúc đó.
+  + Số lần mua bình (câu 4): ô "mỗi lần mua [N] ô" nay nhận từ 0 tới 999 (gõ
+    số, hay bấm nút - +), GoBot không tự giới hạn nữa: game báo túi đồ [Tiêu
+    thụ] đã đầy thì dừng lượt đó, như trước. "Mua ngay" mua tối đa 40 lần
+    trong một lượt, phần còn lại mua tiếp mỗi phút một lượt 10 lần khi bot
+    chạy (bot đang dừng thì sau khi bấm BẮT ĐẦU). Tổng hai số trên 40 thì thẻ
+    ghi "Tổng N lần: một lượt giữ phím mua tối đa 10 lần ("Mua ngay": 40
+    lần), phần còn lại mua tiếp, mỗi 1 phút một lượt, khi bot chạy, cho tới
+    khi đủ số hoặc game báo túi đồ đã đầy." trash.ini cũ chưa có
+    buy_hp_slots, buy_mp_slots thì số "mua tới" cũ vẫn chỉ tới 20: chỉ số bạn
+    đặt trên thẻ mới vượt 20.
+  + Rủi ro khi mua: tiền. 1 ô Thịt bò khô khoảng 140.000 vàng, 72 ô là khoảng
+    10 triệu vàng; mua tới khi túi đầy cũng làm bùa rơi ra không nhặt được.
+    Thông báo túi đầy chưa từng thấy trên game thật (GoBot nhận nó theo chữ
+    của GoC). Xem lại phím G và F có uống đúng Thịt bò khô và Rượu lá tre
+    không: ngày 10/11 số hai loại đó trong túi không đổi trong 2 giờ, dù F
+    được bấm 2.378 lần.
+  + Báo chết nhầm: lúc 22:12:52 ngày 10/11 GoBot báo "ALERT death" khi game
+    đang bị LDPlayer che và đang tải lại: HP đọc trên màn hình là 0, trong khi
+    gói tin báo HP 14585/14585. Nay HP 0 đọc trên màn hình không tính là chết
+    khi game không ở trên cùng (hình đọc được không phải của game), khi gói
+    tin còn mới báo HP trên 0, hay khi máy chủ game im lặng quá 5 giây (tới 60
+    giây: game đang tải lại hay mất kết nối). Log ghi "Alerts: HP reads 0/N
+    on the screen -- not taken for a death: ..." mỗi khi lý do đổi. Chết thật
+    vẫn được báo, 3 giây sau khi không còn lý do nào ở trên.
+    Thử như bước 13 ở mục 6.
+
 - Mới trong bản 2026.11.09 (Tự mua bình không đếm bình nữa, và tự tắt bảng
   Sự kiện và điểm danh, theo điều bạn báo ngày 09/11; chưa thử trên game
   thật):
@@ -150,9 +597,10 @@ khác chưa được thử trên game thật.
     mỗi N phút", trước là "kiểm tra mỗi"), GoBot mua đúng số ô bạn đặt trên
     thẻ cho mỗi loại, ở hai dòng mới "Thịt bò khô (HP): mỗi lần mua [N] ô" và
     "Rượu lá tre (MP): mỗi lần mua [N] ô", từ 0 tới 20 (0 là không mua loại
-    đó). Mỗi ô là một lần mua 100 bình, như trước: bấm đúp vào bình trong cửa
-    hàng, gõ 100 vào hộp số lượng (game để sẵn số 1 nên gõ thêm "00"), đọc
-    lại thấy đúng 100 mới bấm Xác Nhận.
+    đó; từ bản 2026.11.10 không còn giới hạn 20). Mỗi ô là một lần mua 100
+    bình, như trước: bấm đúp vào bình trong cửa hàng, gõ 100 vào hộp số
+    lượng (game để sẵn số 1 nên gõ thêm "00"), đọc lại thấy đúng 100 mới bấm
+    Xác Nhận.
   + Số ô của bạn: trash.ini của bạn có "mua tới" 10 và 10 (buy_hp_to,
     buy_mp_to), nên bản này mua 10 ô Thịt bò khô và 10 ô Rượu lá tre mỗi
     lần, cho tới khi bạn đổi số trên thẻ (đổi rồi thì GoBot ghi dòng mới
@@ -166,7 +614,8 @@ khác chưa được thử trên game thật.
   + Thứ tự mua: xen kẽ HP, MP, HP, MP... (thông báo túi đầy là chung cho cả
     ngăn Tiêu thụ, nên mua hết một loại trước có thể không còn chỗ cho loại
     kia). Mỗi lượt theo giờ giữ phím mua tối đa 10 lần (kỹ năng, bình và buff
-    tạm dừng trong lúc đó), phần còn lại mua tiếp sau 1 phút: 10 + 10 là hai
+    tạm dừng trong lúc đó; từ bản 2026.11.10 phím chữ cái và Space vẫn bấm
+    giữa hai lần mua), phần còn lại mua tiếp sau 1 phút: 10 + 10 là hai
     lượt cách nhau 1 phút. Mỗi lượt có hạn 30 giây cộng 6 giây mỗi lần mua
     (tối đa 300 giây; trước là 240 giây).
   + Túi đầy (câu 1, bạn chọn (a)): khi game báo "Túi đồ [Tiêu thụ] đã đầy",
@@ -187,7 +636,8 @@ khác chưa được thử trên game thật.
     Xác Nhận 2 lần không tắt, hay hiện sau khi mua) thì GoBot không bấm ESC
     vào nó: cửa hàng để nguyên, kỹ năng, bình và buff tạm dừng cho tới khi
     bạn đóng thông báo và cửa hàng. Lượt bị cắt vì máu xuống dưới mốc bình
-    máu thì phần còn lại mua tiếp sau 1 phút, như các lượt khác.
+    máu thì phần còn lại mua tiếp sau 1 phút, như các lượt khác (từ bản
+    2026.11.11: sau 15 giây).
   + Giờ mua được ghi vào %LOCALAPPDATA%\GoBot\shop_clock.txt TRƯỚC khi bấm
     gì, như giờ của bùa: tắt hay sập GoBot rồi mở lại thì GoBot chờ phần còn
     lại (ít nhất 45 giây, nhiều nhất một khoảng "mua mỗi"), không mua sớm.
@@ -869,7 +1319,8 @@ khác chưa được thử trên game thật.
     mới bỏ nó. Màu xám vẫn xét theo chỗ bot thấy con quái (độ cao của gói
     tin trước), không theo chỗ chấm được vẽ, để đúng với việc bot làm: trên
     dốc sát cạnh vùng, một chấm vẽ trong khung có thể vẫn xám, hay ngược
-    lại.
+    lại. (Từ bản 2026.11.10: trong lúc bot ngưng đánh để về vùng trước thì
+    mọi con quái đều xám, cả con trong vùng và trong tầm.)
   + Rê chuột lên một con quái: cuối dòng là chỗ chấm được vẽ, thêm "(gói
     tin x, y)" khi chỗ GoBot tính theo gói tin khác chỗ đó. Dòng "Nhân vật:
     ..." ở trên bản đồ cũng vậy, và không ghi "Quái: N" khi tab không vẽ
@@ -988,7 +1439,11 @@ khác chưa được thử trên game thật.
     trước, rồi mới đánh tiếp." hay "... bot vẫn đánh quái trong tầm; hết
     quái thì đi bộ về X, Y."; dòng "Chỗ đánh quái: ..." dưới nút BẮT ĐẦU
     cũng chuyển vàng. Dòng "Positions" trong log thêm ", outside the area N
-    px" (và "walking back first, to X,Y" khi bot đi về trước).
+    px" (và "walking back first, to X,Y" khi bot đi về trước). (Từ bản
+    2026.11.10 thẻ ghi "Nhân vật đang ở ngoài vùng N px — bot ngưng đánh, về
+    vùng trước: đi bộ về X, Y, vào tới trong vùng rồi mới đánh tiếp." hay
+    "... bot vẫn đánh quái trong tầm (tầm đánh N px); hết quái thì đi bộ về
+    X, Y.")
   + Vùng có hơn nửa số bục tô đỏ (bục thấp hơn chỗ về quá 120 px): thẻ ghi
     chữ đỏ "Phần lớn bục trong vùng (N%) bot không tự đi về được (tô đỏ):
     ... Kéo ghim cam xuống bục thấp nhất có quái, rồi kéo vùng lên trên."
@@ -1091,9 +1546,13 @@ khác chưa được thử trên game thật.
     đồ) và "Cả bản đồ". Rê chuột lên con quái để xem cấp và máu, lên cửa để
     xem toạ độ. Ô "Chi tiết" vẽ thêm vài đường để tìm lỗi (chỉ trong lần mở
     GoBot này). Khi bot đang đánh với Chỗ đánh quái, quái màu xám là quái ở
-    ngoài vùng và ngoài tầm đánh: bot không đi tới. Có dấu Nhảy xuống bậc
-    dưới thì đoạn bục tô đỏ nhạt là chỗ bot không nhảy xuống vì có cửa gần
-    đường rơi.
+    ngoài vùng và ngoài tầm đánh: bot không đi tới (từ bản 2026.11.10, lúc
+    bot ngưng đánh để về vùng trước thì mọi con đều xám). Có dấu Nhảy xuống
+    bậc dưới thì đoạn bục tô đỏ nhạt là chỗ bot không nhảy xuống vì có cửa
+    gần đường rơi. Bản đồ chưa nhận ra được vì vài file bản đồ cùng khớp chỗ
+    đứng, mà chỉ một trong số đó có vùng đã lưu: thẻ có nút "Dùng vùng
+    <tên file>" để bạn chọn bản đồ đó (từ bản 2026.11.10; GoBot không tự
+    chọn).
   + Vùng đánh của từng bản đồ: một ô chữ nhật (xanh, viền trắng) và một
     "chỗ về" (ghim cam): một điểm trên bục trong vùng, nơi bot đi bộ về khi
     hết quái. Vùng thay cho vùng quanh chỗ đánh quái (mặc định ±300 / ±100
@@ -1146,7 +1605,11 @@ khác chưa được thử trên game thật.
     "Mới trong bản 2026.11.04d". Từ bản 2026.11.05b: có dấu Tự tìm quái
     trong vùng thì bot đi tới quái ở khắp vùng, hết quái tới được thì đứng
     chờ tại chỗ; có dấu Nhảy lên bục trên thì nhảy lên được; xem "Mới trong
-    bản 2026.11.05b".
+    bản 2026.11.05b". Từ bản 2026.11.10: ra ngoài vùng quá 60 px thì bot
+    ngưng đánh, về vùng trước, không đánh con nào (cả con trong vùng, trong
+    tầm) tới khi vào tới trong vùng; lúc đi về, kỹ năng tạm dừng, bình và
+    buff vẫn bấm. Qua cửa nào cũng được về lại đúng bản đồ của vùng thì bot
+    dùng lại vùng khi bản đồ tải xong, rồi đi bộ về vùng.
     Qua cửa sang bản đồ khác thì bot đứng yên như trước; bản đồ bên kia có
     vùng đã lưu, và nhân vật vào ở trong vùng hay cách vùng không quá 150
     px, thì bot dùng vùng đó. Đang dùng vùng mà GoBot không còn chắc nhân
@@ -1747,7 +2210,8 @@ khác chưa được thử trên game thật.
     bước kiểm tra (đọc số lượng, chờ hộp thoại) không đổi theo.
   + Khi nhiều việc tới giờ cùng lúc, GoBot làm lần lượt: Tự chat, rồi Dọn
     rác, rồi Dùng bùa, rồi Tự mua bình. Nút bấm tay ("Dọn ngay", "Mua
-    ngay"...) thì làm ngay.
+    ngay"...) thì làm ngay. (Từ bản 2026.11.11, khi Dọn rác bật, lượt mua đi
+    liền sau lượt dọn, trước Dùng bùa.)
   + Dọn rác, Tự mua bình và Tự chat nhanh hơn: bớt các lần chờ không cần
     (đã thấy món đồ biến mất thì thôi chờ, đọc ô số lượng nhanh hơn...).
     Ba việc này đọc game thẳng từ màn hình, nên cửa sổ game phải nằm trọn
@@ -1756,7 +2220,11 @@ khác chưa được thử trên game thật.
     ngoài cửa sổ game thì Dọn rác cũng báo và không làm.
   + Dọn rác dừng giữa hai món nếu máu xuống dưới mốc bình máu (trong lúc
     dọn bot không uống bình), và chờ tới khi máu cao hơn mốc đó 10% mới bắt
-    đầu một lượt dọn theo giờ.
+    đầu một lượt dọn theo giờ. (Từ bản 2026.11.10 bình ở phím chữ cái vẫn
+    được bấm giữa các lần GoBot bấm chuột trong lúc dọn; bình ở phím số thì
+    vẫn chờ. Từ bản 2026.11.11 cả bình ở Home, End, PgUp, PgDn, Insert,
+    Delete; và khi bình HP ở một phím như vậy, lượt dọn theo giờ bắt đầu khi
+    máu từ mức bình trở lên và chỉ dừng khi máu dưới nửa mức đó.)
   + Tự mua bình không cần chụp hình món Người Giữ Sân nữa: chỉ cần đánh dấu
     "Tự mua bình". Nếu cửa hàng mở đè lên túi đồ (cửa sổ game nhỏ), GoBot
     đóng cửa hàng, đếm bình rồi mở lại. (Từ bản 2026.11.09 không đếm bình
@@ -1851,29 +2319,45 @@ khác chưa được thử trên game thật.
     trong ngăn Khác của túi đồ mở ra. Từ bản 2026.11.09 GoBot không đếm bình
     nữa: mỗi "mua mỗi N phút" (mặc định 60; lần đầu không sớm hơn 45 giây
     sau khi bấm BẮT ĐẦU) GoBot mở túi đồ, bấm chuột phải vào Người Giữ Sân
-    và mua đúng số ô đã đặt cho mỗi loại ("mỗi lần mua N ô", 0 tới 20, mặc
-    định 3), xen kẽ HP và MP. Mỗi ô là một lần BẤM ĐÚP vào món trong cửa
-    hàng (Rượu lá tre bên trái, Thịt bò khô bên phải; không bấm Mua), gõ 100
-    vào hộp số lượng (game để sẵn số 1 nên gõ thêm "00"), ĐỌC LẠI hộp thấy
-    đúng 100 mới bấm Xác Nhận; xong thì bấm ESC đóng cửa hàng (ESC không đóng
-    thì bấm nút Thoát). Mỗi lượt theo giờ mua tối đa 10 lần, phần còn lại
-    sau 1 phút (mỗi lượt tối đa 30 giây cộng 6 giây mỗi lần mua, không quá
-    300 giây). Game báo "Túi đồ [Tiêu thụ] đã đầy" thì GoBot bấm Xác Nhận
-    của thông báo, đóng cửa hàng và dừng lượt đó; ô vẫn có dấu, tới giờ sau
-    mua lại (xem bản 2026.11.09).
+    và mua đúng số ô đã đặt cho mỗi loại ("mỗi lần mua N ô", 0 tới 999, mặc
+    định 3; từ bản 2026.11.10 GoBot không giới hạn số này, trước là 20: game
+    báo túi đầy thì dừng lượt đó), xen kẽ HP và MP. Mỗi ô là một lần BẤM ĐÚP
+    vào món trong cửa hàng (Rượu lá tre bên trái, Thịt bò khô bên phải; không
+    bấm Mua), gõ 100 vào hộp số lượng (game để sẵn số 1 nên gõ thêm "00"),
+    ĐỌC LẠI hộp thấy đúng 100 mới bấm Xác Nhận; xong thì bấm ESC đóng cửa
+    hàng (ESC không đóng thì bấm nút Thoát). Mỗi lượt theo giờ mua tối đa 10
+    lần, phần còn lại sau 1 phút (mỗi lượt tối đa 30 giây cộng 6 giây mỗi lần
+    mua, không quá 300 giây). Game báo "Túi đồ [Tiêu thụ] đã đầy" thì GoBot
+    bấm Xác Nhận của thông báo, đóng cửa hàng và dừng lượt đó; ô vẫn có dấu,
+    tới giờ sau mua lại (xem bản 2026.11.09).
     Hộp số lượng chưa có ảnh mẫu, nên GoBot nhận nó bằng khung giống hộp "bán"
     của game (tối thiểu "buy_frame_score", mặc định 0.85) mà lời không phải của
     hộp bán, thùng rác hay hồi sinh (hộp "vứt" không có chữ trong ảnh mẫu nên
     chỉ phân biệt bằng khung, không bằng lời); hộp nào khác thì bấm Hủy Bỏ và dừng,
     ảnh giữ ở trash_debug (shop_question, shop_wrong_dialog...). Trong lúc mua,
-    kỹ năng, bình và buff đều TẠM DỪNG (có thể vài chục giây), chứ không chỉ
-    chậm lại: nếu không, phím bình (số) sẽ gõ lẫn vào hộp số lượng. Không mua
+    bot đứng yên, và phím số của kỹ năng, bình và buff TẠM DỪNG (có thể vài
+    chục giây): phím số gõ vào hộp số lượng sẽ thành số. Từ bản 2026.11.10,
+    phím chữ cái và Space của kỹ năng, bình và buff vẫn bấm giữa hai lần mua,
+    khi không có hộp thoại hay thông báo nào mở, nhưng không bao giờ từ lúc
+    bấm đúp vào món tới khi hộp số lượng đã đóng và đã chờ xem game có báo
+    túi đầy không; GoBot luôn chờ các phím đó nhả ra rồi mới bấm chuột. Từ
+    bản 2026.11.11 cả Home, End, PgUp, PgDn, Insert và Delete; phím số vẫn
+    chờ. Không mua
     khi máu thấp hơn mốc bình máu cộng 10% (tối đa 95%), khi chưa đọc được máu, đang chat,
-    đang có bảng Sự kiện và điểm danh, hay bot đang bận việc khác. Nút "Thử
+    đang có bảng Sự kiện và điểm danh, hay bot đang bận việc khác. Từ bản
+    2026.11.11, bình HP ở phím chữ cái, Space hay một trong sáu phím trên thì
+    lượt mua bắt đầu khi máu từ mức bình trở lên, bình HP và MP được bấm xen
+    giữa các lần mua, và lượt chỉ dừng khi máu dưới nửa mức bình (thử lại sau
+    15 giây); và khi "Tự dọn rác" có dấu, tới giờ mua GoBot dọn rác trước rồi
+    mua liền sau đó (xem bản 2026.11.11). Từ bản 2026.11.11b: mua ở mọi mức
+    máu, chỉ chờ khi nhân vật đã chết hay chưa đọc được máu; bot đang dừng
+    thì GoBot tự bấm bình HP và MP giữa các lần mua (không bao giờ bình ở
+    phím số; xem bản 2026.11.11b). Nút "Thử
     mua (không mua gì)" đi tới hộp số lượng của từng món rồi bấm Hủy Bỏ:
-    không gõ, không mua, giữ ảnh ở trash_debug; nút "Mua ngay" mua ngay đủ
-    số ô đã đặt trong một lượt, không chờ giờ. Món Người Giữ Sân
-    được nhận theo hình trong catalog (mặc định other/8950604, chân dung một
+    không gõ, không mua, giữ ảnh ở trash_debug; nút "Mua ngay" mua ngay số
+    ô đã đặt, không chờ giờ: tối đa 40 lần trong một lượt, phần còn lại mua
+    tiếp như lượt theo giờ (10 lần, sau 1 phút). Món Người Giữ Sân được
+    nhận theo hình trong catalog (mặc định other/8950604, chân dung một
     người đội mũ); nếu hình trong túi khác thì GoBot báo "không thấy món Người
     Giữ Sân" và bạn đổi buy_opener trong trash.ini.
   + "Phím dọn ngay" (thử nghiệm, mặc định không có phím): bấm phím này là
@@ -1910,7 +2394,9 @@ khác chưa được thử trên game thật.
   được bấm lại sau 1 giây (potion_urgent_ms trong configs/macro.ini; thanh
   "Potion when far below" ở màn hình Nâng cao, thẻ Macro, mục Options; 0 là
   cách cũ). Giữa mức bình và nửa mức đó vẫn là 3 giây. Muốn mạnh hơn nữa,
-  thêm dòng bình Lv2 (bình lớn hơn, mức thấp hơn).
+  thêm dòng bình Lv2 (bình lớn hơn, mức thấp hơn), ở một phím khác: từ bản
+  2026.11.10, hai dòng cùng một phím tính nửa mức theo mức cao hơn, và Lv2
+  cùng phím không bấm nhanh hơn.
 - Buff lúc được lúc không (mới): game thỉnh thoảng bỏ một lần bấm, và buff
   bị bỏ thì mất cả khoảng thời gian của nó (một phút, năm phút). GoC bấm
   mỗi buff 4 lần, cách nhau 200 ms; nay GoBot cũng vậy. Số lần bấm và khoảng
@@ -1941,7 +2427,10 @@ khác chưa được thử trên game thật.
   + Bơm máu pet ("Tự bơm máu pet"): dòng bình thứ ba, cho pet, như dòng
     bình HP. Lúc đầu dòng này chưa có phím: đánh dấu thì GoBot hỏi phím
     (bấm phím của bình máu pet trên thanh phím). Máu pet bằng hay dưới mức
-    "khi máu pet dưới" thì GoBot bấm phím đó, cách nhau khoảng 3 giây;
+    "khi máu pet dưới" thì GoBot bấm phím đó, cách nhau khoảng 3 giây
+    (từ bản 2026.11.10: bấm liên tục, mỗi "Bơm liên tục, mỗi N ms", mặc
+    định 300 ms, như GoC; sau một lần bấm pet, kỹ năng tới lượt được bấm
+    trước, nên kỹ năng không bị chậm);
     bình HP và MP luôn được bấm trước bình pet. Máu pet được đọc từ thanh
     ĐỎ trong ô của pet ở góc trên bên trái màn hình game (ô rộng có hai
     hình và ô "Thức Ăn", dưới thanh HP và MP); thanh tím bên dưới không
@@ -2060,7 +2549,10 @@ khác chưa được thử trên game thật.
     với vùng vẽ ở tab Bản đồ thì khác: bot không đi tới quái theo đường ra
     khỏi vùng, đi về theo bục mà không nhảy, và ở ngoài vùng quá 60 px mà
     có đường về thì bỏ qua cả quái trong tầm để đi về trước (xem "Mới trong
-    bản 2026.11.04d").
+    bản 2026.11.04d"). Từ bản 2026.11.10, cả với chỗ của lần chạy này (chỗ
+    không cao hơn một lần nhảy): ra ngoài vùng quá 60 px thì bot ngưng đánh,
+    đi bộ về theo mặt đất, không nhảy, không đánh con nào kể cả con trong
+    vùng, tới khi vào tới trong vùng; kỹ năng tạm dừng lúc đi về.
     Đi về mà 4 giây không tới gần hơn (vướng tường, vướng bục), bot thôi và
     30 giây sau thử lại; 3 lần liền không được thì thôi hẳn, tới khi bấm
     "Đặt chỗ này" hay nhân vật tự về tới chỗ.
@@ -2203,7 +2695,10 @@ khác chưa được thử trên game thật.
   rồi đóng cửa sổ.
 - Thông báo (thử nghiệm): báo tin vào Discord của bạn (xem trên điện
   thoại), kêu và hiện thông báo trên máy khi nhân vật chết, mất kết nối,
-  bot tự dừng…
+  bot tự dừng… Từ bản 2026.11.10, HP đọc ra 0 trên màn hình không tính là
+  chết khi game không ở trên cùng, khi gói tin còn mới báo HP trên 0, hay
+  khi máy chủ game im lặng (game đang tải lại): lúc 22:12:52 ngày 10/11
+  GoBot đã báo chết nhầm như vậy.
   Danh sách "Báo khi" có thêm hai việc, có dấu sẵn khi đã bật Thông báo:
   "Sắp hết bình" (tin "Sắp hết bình HP: ô phím 1 (chồng đang dùng) còn 6
   bình.") và "Hết bình" (tin "Hết bình HP ở ô phím 1 — GoBot vẫn bấm phím
@@ -2255,7 +2750,19 @@ Nút nào bấm vào game, nút nào không:
 - Dọn rác: chọn món cần bỏ, rồi bấm "Thử tìm (không xoá)". GoBot mở túi đồ,
   xem từng ngăn và báo món nào sẽ bị bỏ, nhưng không bỏ gì. Chỉ khi danh
   sách đúng mới bật "Tự dọn rác" hoặc bấm "Dọn ngay". Xoá là mất hẳn: đừng
-  chọn đồ quý, và đừng bấm gì trong game khi GoBot đang dọn.
+  chọn đồ quý, và đừng bấm gì trong game khi GoBot đang dọn. Từ bản
+  2026.11.10: không đánh dấu ngăn nào ở "Tìm trong:" thì GoBot không mở túi
+  đồ và báo ngay trên thẻ; mọi món trong danh sách đều là đồ ở ngăn Tiêu
+  Dùng (bình, đồ ăn, mảnh ghép, bùa chọn từ hình của game) thì GoBot chỉ
+  tìm ở ngăn Tiêu Dùng. Cũng từ bản 2026.11.10, trong lúc dọn bot đứng
+  yên, nhưng các phím chữ cái (Z, X, C, V…) và Space của kỹ năng, bình và
+  buff vẫn bấm giữa các lần GoBot bấm chuột, khi không có hộp thoại nào mở
+  và không có món nào đang ở thùng rác; phím số chờ dọn xong. Món sắp xoá
+  được nhìn lại sau khi các phím đó đã nhả, và sau nửa giây kể từ lần bấm
+  bình gần nhất. Dùng bùa thì vẫn dừng hết mọi phím như trước. Từ bản
+  2026.11.11 cả Home, End, PgUp, PgDn, Insert và Delete (GoBot chờ 0,2 giây
+  sau mỗi lần một phím đó được bấm), và bình HP, MP tới lượt được bấm giữa
+  hai món; phím số vẫn chờ.
 - Nhiệm vụ: mở cửa sổ Nhiệm Vụ bằng tay ở thẻ NV Phụ, rồi bấm "Thử xem
   (không bấm gì)": GoBot chỉ nhìn và cho biết nó thấy gì. Thấy đúng rồi mới
   bấm "Làm ngay 1 lần" và nhìn theo. Ngay sau khi bấm, GoBot đưa game lên
@@ -2492,6 +2999,105 @@ Nút nào bấm vào game, nút nào không:
       f. Rồi đặt số thật (của bạn 10 + 10, hay ít hơn). Lần đầu game báo túi
          đầy, gửi các dòng "Trash:" và "Bag (packets):" của log, cùng các ảnh
          trash_debug\*_shop_full*, *_shop_message* và *_shop_no_question*.
+  13. Bơm máu pet, về vùng đánh quái, dọn rác và mua bình (bản 2026.11.10,
+      chưa thử trên game thật; chỉ thử khi ngồi xem, tay gần F12):
+      a. Pet: trước khi chạy, ghi số thức ăn pet đang có và giờ. Đánh quái
+         như thường ít nhất một giờ, dòng "Tự bơm máu pet" có dấu, ô "Bơm liên
+         tục, mỗi" để 300 ms. Sau mỗi giờ ghi lại số thức ăn pet và giờ. Gửi
+         gobot_gui.log (các dòng "Pet heals:", "Potion check: Pet key" và
+         "Skills:") và các ảnh potion_debug\*_pet_*.png nếu có. Thức ăn hết
+         quá nhanh thì kéo ô đó lên (ví dụ 1000 ms) và ghi giờ.
+      b. Về vùng, thử tay trước (bot DỪNG, một lần): đứng trong vùng của tab
+         Bản đồ, có quái cách 100–450 px ở cả hai bên; tự bấm Z, X, C, V và
+         Space, mỗi phím 5 lần, chậm, và xem nhân vật có tự đi tới quái
+         không. Ghi phím nào làm nhân vật đi, và giờ.
+      c. Rồi đánh ở t1901_s2 như ngày 10/11 (Đứng yên một chỗ, Chỗ đánh
+         quái, vùng ở tab Bản đồ) 30–60 phút, ngồi xem. Bị đẩy ra ngoài vùng
+         quá 60 px thì nhân vật phải thôi đánh, không ra kỹ năng, đi bộ về
+         (không ↓, không nhảy ra ngoài vùng), vào tới trong vùng rồi mới đánh
+         tiếp; thẻ dưới bản đồ ghi "... bot ngưng đánh, về vùng trước: ...".
+         Thấy đi lung tung hay kẹt: F12, ghi giờ. Gửi gobot_gui.log: dòng
+         "Hunter:" mỗi phút (phần "outside the area N s, walking back N s"
+         cho biết bao lâu ở ngoài vùng), các dòng "Hunter: N px outside the
+         hunting area", "the walk back first is over", "walk back over after"
+         và "Positions: own walk": dòng có "GoBot: no arrow within 300 ms" là
+         nhân vật tự đi mà GoBot không bấm mũi tên, và "last key Z ..." là
+         phím GoBot bấm ngay trước đó.
+      d. Dọn rác: ở "Tìm trong:" chỉ đánh dấu Tiêu Dùng; danh sách bỏ đi chỉ
+         có đồ chọn từ hình của game (bình, đồ ăn...). Bấm BẮT ĐẦU (macro
+         chạy; Tự đánh quái có dấu hay không cũng được), đứng chỗ an toàn,
+         bấm "Thử tìm (không xoá)" và đọc danh sách sẽ bỏ. Đúng rồi mới bấm
+         "Dọn ngay" một lần (xoá thật, không lấy lại được). Xem kỹ năng có ra
+         trong lúc dọn không. Gửi các dòng "Trash: item at ...", "Trash: pass
+         steps -- ...", "Trash: pass's key window: ..." và "Casts (packets)"
+         của phút đó, kèm giờ bấm.
+      e. Mua bình: đặt 1 ô HP và 1 ô MP, Tự mua bình có dấu, bot đang chạy,
+         bấm "Mua ngay" một lần và ngồi xem: hộp số lượng hiện 1 rồi 100 rồi
+         Xác Nhận, như bước 12; kỹ năng có thể ra giữa hai lần mua, nhưng
+         không bao giờ lúc hộp số lượng đang mở. Gửi các dòng "Trash: shop
+         ..." và "Trash: shop's key window: ...", kèm giờ bấm.
+      f. Gửi gobot_gui.log và gobot_gui.old.log ngay sau lần chạy: GoBot chỉ
+         giữ hai log, mở lại GoBot hai lần là mất.
+  14. Mua bình ngay sau khi dọn rác, bình trong lúc mua, và sáu phím mới
+      (bản 2026.11.11, chưa thử trên game thật; chỉ thử khi ngồi xem, tay gần
+      F12):
+      a. Bình HP và MP ở phím chữ cái (như G và F của bạn). Đánh dấu Tự dọn
+         rác (ở "Tìm trong:" chỉ Tiêu Dùng, danh sách đã xem bằng "Thử tìm"),
+         đặt "dọn mỗi" 10 phút và "mua mỗi" 15 phút, đặt 1 ô HP và 1 ô MP, rồi
+         mới đánh dấu Tự mua bình (đã đánh dấu rồi thì bỏ dấu và đánh dấu lại,
+         để giờ mua tính theo 15 phút). Bấm BẮT ĐẦU và đánh quái như thường.
+         Lần mua đầu ngay sau BẮT ĐẦU là lượt mua riêng (lượt dọn đầu vừa
+         xong); xem lần mua kế tiếp, 15 phút sau, khoảng 5 phút sau lượt dọn
+         gần nhất: GoBot phải dọn rác trước rồi mua ngay sau đó, không đứng
+         chờ 1 giây giữa hai việc. Log có "Trash: shop due -- a pass first,
+         then the round under the same hold (the last pass ended N s ago)",
+         rồi "Trash: shop rides the pass -- the same hold, no quiet second
+         (the look that pulled it)" và dòng "Trash: shop job: ..." có "right
+         after the pass". Ghi giờ. Với "dọn mỗi" 5 hay 15 phút thì lần mua rơi
+         vào trong 1 phút sau lượt dọn của nó và đi riêng, log ghi "on its
+         own, the last pass ended N s ago": đó là đúng, không phải lỗi. Lượt
+         dọn còn đang chạy lúc tới giờ mua thì dòng đó ghi "(come due while it
+         ran)", và không có dòng "shop due -- a pass first".
+      b. Máu dưới mức bình HP mà trên nửa mức: đứng ở chỗ có quái yếu đánh
+         được nhân vật, đặt 3 ô mỗi loại và bấm "Mua ngay" lúc máu từ mức bình
+         trở lên. Máu xuống dưới mức bình trong lúc mua thì lượt mua vẫn chạy,
+         bình HP (và MP) được bấm giữa các lần mua (log: "Trash: potion break
+         before the double-click -- ..."), không bao giờ lúc hộp số lượng đang
+         mở.
+      c. Máu dưới nửa mức bình HP trong lượt mua: lượt dừng, bình được bấm,
+         và khoảng 15 giây sau (máu đã lên tới mức bình) GoBot mua tiếp phần
+         còn lại; log có "Trash: shop round stopped by HP -- HP N% under the
+         level N%". Thấy máu tụt nhanh thì F12 và tự uống bình.
+      d. Sáu phím mới, từng phím một: lúc bot dừng, đặt một kỹ năng hồi chiêu
+         ngắn (hay một buff không quan trọng) vào ô phím Home trong game và
+         trên một dòng của GoBot. Bấm BẮT ĐẦU, rồi "Dọn ngay" (túi đồ mở), rồi
+         "Mua ngay" với 1 ô (cửa hàng mở), và ngồi xem game làm gì khi GoBot
+         bấm phím đó lúc túi đồ đang mở và lúc cửa hàng đang mở: trang túi có
+         lật không, danh sách cửa hàng có cuộn không, có cửa sổ nào mở ra
+         không. Ghi phím, điều thấy và giờ. Rồi làm lại với End, PgUp, PgDn,
+         Insert và Delete.
+      e. Gửi gobot_gui.log và gobot_gui.old.log ngay sau lần chạy (các dòng
+         "Trash:", nhất là "shop due", "rides the pass", "shop job", "potion
+         break", "put off", "stopped by", "shop row not matched" và "key
+         window"), kèm các giờ đã ghi và các ảnh trash_debug\*shop_row_unseen*
+         nếu có.
+  15. Mua bình và dọn rác ở mọi mức máu, GoBot tự bấm bình (bản 2026.11.11b,
+      chưa thử trên game thật; chỉ thử khi ngồi xem, tay gần F12):
+      a. Bình HP và MP ở phím chữ cái. Bot ĐANG DỪNG (chưa bấm BẮT ĐẦU), máu
+         dưới mức bình HP (để quái đánh một chút): bấm "Mua ngay" với 2 ô mỗi
+         loại. GoBot phải mua ngay, không báo "Máu đang thấp", và bấm bình HP
+         (và MP) lúc thấy cửa hàng và trước mỗi lần bấm đúp, không bao giờ lúc
+         hộp số lượng đang mở. Log có "Trash: own potion press ...". Ghi giờ.
+      b. Như a, nhưng bấm "Dọn ngay" (Tiêu Dùng có món để xoá): dọn hết, bình
+         được bấm giữa các món.
+      c. Bot ĐANG CHẠY, máu thấp: tới giờ mua (hay "Mua ngay") GoBot mua luôn,
+         bình do macro bấm xen như bản 2026.11.11, không có dòng "own potion
+         press".
+      d. Chuyển bình HP sang phím 1, bot đang dừng, máu thấp, "Mua ngay": GoBot
+         vẫn mua nhưng KHÔNG bấm bình; log có "Trash: a potion due on key 1 is
+         not pressed by a bag job". Thấy máu tụt nhanh thì F12 và tự uống bình.
+      e. Gửi gobot_gui.log và gobot_gui.old.log ngay sau lần chạy, kèm các giờ
+         đã ghi.
 - Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
   xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
 - Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
@@ -2533,8 +3139,10 @@ Nút nào bấm vào game, nút nào không:
   pet. Rồi đặt phím bình máu pet. Mức "khi máu pet dưới" chỉ lên tới 95%,
   nên trước hết để pet bị đánh một chút cho máu pet xuống dưới 95%, rồi kéo
   mức đó lên cao hơn máu pet lúc đó một chút, bấm BẮT ĐẦU và xem GoBot bấm
-  phím đó, cách nhau khoảng 3 giây. Thấy % sai, hay GoBot bấm khi không cần,
-  thì báo lại kèm gobot_gui.log (có dòng "Vitals: the pet's HP bar at ...").
+  phím đó liên tục, mỗi "Bơm liên tục, mỗi N ms" một lần (mặc định 300 ms;
+  trước bản 2026.11.10 là khoảng 3 giây), tới khi máu pet lên lại. Thấy %
+  sai, hay GoBot bấm khi không cần, thì báo lại kèm gobot_gui.log (có dòng
+  "Vitals: the pet's HP bar at ..."). Đếm thức ăn pet như bước 13.
 - Tự đóng thông báo: lúc trong game đang có thông báo, bấm "Thử xem" cạnh
   ô này (chỉ nhìn). Chỉ đánh dấu khi nó nói đúng thông báo đó. Lúc bảng Sự
   kiện và điểm danh đang hiện, "Thử xem" phải nói thấy "bảng Sự kiện và
@@ -2578,7 +3186,9 @@ Nút nào bấm vào game, nút nào không:
   khi báo "không thấy cửa hàng" hay "không thấy hộp nhập số lượng". Sau đó
   đặt 1 ô mỗi loại và bấm "Mua ngay", nhìn theo: hộp phải hiện 1 rồi 100
   trước khi Xác Nhận. Rồi mới đặt số thật (bước 12 ở trên). Cẩn thận với
-  tiền của nhân vật khi chưa chắc.
+  tiền của nhân vật khi chưa chắc. Từ bản 2026.11.11, khi "Tự dọn rác" cũng
+  có dấu, tới giờ mua GoBot dọn rác trước rồi mua liền sau đó: thử như bước
+  14 ở trên.
 
 Đừng:
 - bật nhiều phần thử nghiệm cùng lúc khi chưa thử từng phần;
@@ -2692,6 +3302,17 @@ Gặp lỗi khác:
   làm số ô mua mỗi lần, cho tới khi bạn đổi số đó trên thẻ; số "dưới" không
   còn dùng, trừ khi là 0 (không mua món đó): món đó vẫn không mua cho tới
   khi bạn đổi số trên thẻ. Xem lại hai số trên thẻ trước khi bấm BẮT ĐẦU.
+- macro.ini của bản trước 2026.11.10 không có dòng pet_every_ms: bản này đọc
+  là 300 ms, nên phím bình pet được bấm 300 ms một lần khi máu pet dưới mức,
+  thay cho số "Every" cũ của phím đó (thường là 3000 ms). Muốn chậm hơn thì
+  kéo ô "Bơm liên tục, mỗi" trên dòng pet.
+- Bình HP, MP ở phím số (macro.ini của bản zip và màn hình đơn giản để sẵn
+  phím 1 và 2) vẫn chờ trong lúc dọn rác và mua bình, ở bản 2026.11.11 cũng
+  vậy. Muốn bình được bấm trong lúc đó, đặt bình vào một ô phím chữ cái hay
+  Home, End, PgUp, PgDn, Insert, Delete trong game, rồi đổi phím trên dòng
+  bình (có hai dòng bình HP thì cả dòng Lv1 lẫn Lv2, trừ dòng có mức dưới
+  nửa mức dòng kia). Từ bản 2026.11.11, ở màn hình đơn giản, muốn bỏ phím
+  của một ô thì nhấn Backspace (Delete nay là một phím đặt được).
 - app.ini không chép sang, nên "Tự đóng thông báo" (cũng là ô tắt bảng Sự
   kiện và điểm danh từ bản 2026.11.09) giao ra tắt: đánh dấu lại nếu muốn.
 - Đừng chép hunt.ini: hunt.ini của các bản cũ (trước 15/10/2026) có thể có

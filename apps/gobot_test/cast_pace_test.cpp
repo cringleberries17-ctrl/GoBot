@@ -1028,13 +1028,19 @@ void test_pace_wiring() {
               has(noted, "casts_noted_.store(n + 1, std::memory_order_release);"),
           "note_own_cast: atomics only -- no lock of the engine's, no log, on the capture thread");
     const std::string timers = body(macro, "void MacroEngine::run_timers(");
+    // The fight is read at every pass since 2026.11.10 (Fight::Mode::Returning
+    // holds the skills while the hunter walks back); with the switch off
+    // pace_pass is off before it looks at whether others press keys.
+    const std::string pass_body = body(pace, "bool MacroEngine::pace_pass(");
     check(has(timers, "const bool paced = pace_pass(cfg, follow, others, now);") &&
-              has(timers, "const Fight fight = (cfg.skills_follow_fight || cfg.cast_paced) ? fight_now() : Fight{};") &&
+              has(timers, "const Fight fight = fight_now();") &&
+              has(pass_body, "const bool off_others = cfg.cast_paced && !follow && others;") &&
+              has(pass_body, "if (!cfg.cast_paced || follow || others) {") &&
               has(timers, "if (paced && macro_key_kind(k) == MacroKeyKind::Skill) continue;") &&
               has(timers, "else if (paced) run_paced(cfg, clock_now());") &&
               has(timers, "if (cfg.cast_paced) log_paced(clock_now());"),
           "run_timers: the skill keys the rotation's only while paced; the timers' otherwise, as before; the fight "
-          "read for it only with the switch on");
+          "read at every pass, the rotation off with its switch whatever it says");
     // A buff paced: held while a skill's cast is waited for or inside the
     // last cast's lock; its wait counted from its own key-down.
     const std::string repeats = body(macro, "void MacroEngine::run_buff_repeats(");

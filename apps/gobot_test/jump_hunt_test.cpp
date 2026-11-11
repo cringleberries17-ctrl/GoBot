@@ -867,13 +867,15 @@ void test_jump_way_back() {
 
     JumpRig r(owner_config(), 1342, stand_y(p, 1342, 772));
     r.hunter.set_zone(owner_zone());
-    r.pass();
-    const bool used = from_map(r);
+    bool used = false;
     std::uint64_t first_key = 0;
     // What the card says of the way back on its way there: a jump up, the
     // one it starts with Ctrl + Up near 810 (2026.11.05b's GUI).
     bool said_jump = false;
+    // The first look too: the walk back first goes at once (2026.11.10).
     std::vector<std::string> log = info_lines([&] {
+        r.pass();
+        used = from_map(r);
         r.until([&] {
             const Hunter::Status s = r.st();
             said_jump = said_jump || (s.spot_way_by_jumps && s.spot_way_jumps == 1 && s.spot_way_jump_first &&
@@ -902,8 +904,10 @@ void test_jump_way_back() {
           "the give-up clock stood while it waited for the map entry's 5 s, settled and flew: no walk back given up");
     check(said_jump, "the status on the way: the way back worked out with jumps, one, starting with Ctrl+Up near 810 "
                      "-- the card's \"Về: nhảy Ctrl+↑ ở x ...\"");
-    check(lines_with(log, "Hunter: walking back into the hunting area from 1342,", "then a jump up (Ctrl+Up) onto "
-                                                                                    "floor 27") == 1 &&
+    // The walk back first goes at the first look (2026.11.10), before the
+    // map is trusted for jumps: it starts along the ground, and the way is
+    // asked again with the jump once it is -- one walk back, one start line.
+    check(lines_with(log, "Hunter: walking back into the hunting area from 1342,") == 1 &&
               lines_with(log, "Hunter: jump up (Ctrl+Up) on the way home: from ", "onto floor 27") == 1 &&
               lines_with(log, "Hunter: jump up worked: landed at ", "on floor 27") == 1 &&
               lines_with(log, "came up short") == 0 && lines_with(log, "bumped from below") == 0,
