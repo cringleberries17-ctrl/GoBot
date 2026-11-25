@@ -21,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -515,6 +516,57 @@ void test_buff_bursts() {
           "Z pressed 100 ms before key 2: its cast is Z's; without Z's press handed in, key 2 took it");
 }
 
+void test_buff_one_cast() {
+    section("A buff key's burst takes one cast (2026.11.17): its repeats no longer take the next skill's");
+
+    // The 2026-11-17 standing minutes: key 6's four presses 200 ms apart, its
+    // buff cast 51 ms after the first, and the rotation's next key, B, about
+    // 820 ms after the first with its cast 50 ms later. The repeats' windows
+    // reached 1.3 s past the first press, and the third took B's cast: "key 6
+    // (buff): 4 pressed, 2 cast", half its casts kind 1, B one cast short.
+    const std::uint32_t kB = 'B';
+    const auto run = [&](std::uint64_t buff_cast_at) {
+        auto m = std::make_unique<CastMatch>();
+        std::vector<CastMatch::Press> presses;
+        for (int i = 0; i < 4; ++i) presses.push_back(press_of(kKey6, kT0 + static_cast<std::uint64_t>(i) * 200));
+        presses.push_back(press_of(kB, kT0 + 820));
+        m->add(kT0 + buff_cast_at, cast_of(31206, 2));
+        m->add(kT0 + 870, cast_of(51202, 1));
+        m->pair(presses, { kKey6 }, kT0 + 10'000);
+        return m;
+    };
+    const auto first = run(51);
+    const std::vector<CastMatch::Key> keys = first->keys();
+    const CastMatch::Key* six = key_in(keys, kKey6);
+    const CastMatch::Key* b = key_in(keys, kB);
+    check(six != nullptr && b != nullptr && six->pressed == 4 && six->cast == 1 && six->buffs == 1 &&
+              six->attacks == 0 && b->pressed == 1 && b->cast == 1 && b->attacks == 1 &&
+              !b->votes.empty() && b->votes.back() == 51202,
+          "key 6: 4 pressed, 1 cast, a kind-2 one; B: its own cast, 51202 -- not 2 casts for 6 and none for B");
+    const std::vector<CastMatch::Burst> bursts = first->take_bursts();
+    check(bursts.size() == 1 && bursts[0].seen && bursts[0].skill == 31206, "the burst judged seen, skill 31206");
+    // The first press lost: the cast comes after the third, 430 ms on -- still
+    // the burst's, the press whose window has it first taking it.
+    const auto late = run(430);
+    const std::vector<CastMatch::Key> later = late->keys();
+    const CastMatch::Key* six2 = key_in(later, kKey6);
+    const CastMatch::Key* b2 = key_in(later, kB);
+    check(six2 != nullptr && b2 != nullptr && six2->cast == 1 && six2->buffs == 1 && six2->attacks == 0 &&
+              b2->cast == 1,
+          "the buff cast 430 ms after the first press: still key 6's one cast, B its own");
+    // No kind-2 cast at all: the burst takes the first in its window once, as
+    // any press would -- never two.
+    auto none = std::make_unique<CastMatch>();
+    std::vector<CastMatch::Press> p;
+    for (int i = 0; i < 4; ++i) p.push_back(press_of(kKey6, kT0 + static_cast<std::uint64_t>(i) * 200));
+    none->add(kT0 + 300, cast_of(51205, 1));
+    none->add(kT0 + 900, cast_of(51203, 1));
+    none->pair(p, { kKey6 }, kT0 + 10'000);
+    const std::vector<CastMatch::Key> nk = none->keys();
+    const CastMatch::Key* six3 = key_in(nk, kKey6);
+    check(six3 != nullptr && six3->cast == 1, "a burst with no kind-2 cast near: one cast at most, not two");
+}
+
 // ------------------------------------- how evenly they came (2026.11.08)
 
 /// The test's own clock text: how long after kT0.
@@ -882,6 +934,7 @@ void test_cast_match(void (*check_fn)(bool, const std::string&), void (*section_
     test_cast_reach();
     test_buff_watch();
     test_buff_bursts();
+    test_buff_one_cast();
     test_cast_gaps();
     test_buff_rows_off();
     test_more_wiring();

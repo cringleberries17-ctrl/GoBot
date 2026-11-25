@@ -1,9 +1,10 @@
 // Đánh quái's skills that follow the fight: "Chỉ khi đang đánh quái" and
 // "Chi tiết…" on the "Tự dùng kỹ năng" row, the "Kỹ năng" window, the key
 // sequence said where a player sees it, and what the state card says of
-// skills held back. And, for the macro alone, "Ra chiêu theo vòng" -- the
-// skills on their timers paced by your casts (MacroConfig::cast_paced) -- and
-// the note for a key that is a buff and a skill both.
+// skills held back. And "Ra chiêu theo vòng" -- the skills paced by your casts
+// (MacroConfig::cast_paced), on by default and with the hunter too since
+// 2026.11.16b: a tick on the row itself and in the window -- and the note for
+// a key that is a buff and a skill both.
 //
 // The rules are the macro's (MacroConfig::skills_follow_fight,
 // gobot/macro.hpp) and whether there is a fight is the hunter's
@@ -97,21 +98,27 @@ bool skill_gap_combo(MacroConfig& cfg) {
     return changed;
 }
 
-/// "Ra chiêu theo vòng" (MacroConfig::cast_paced), as both screens label it.
+/// "Ra chiêu theo vòng" (MacroConfig::cast_paced), as the "Kỹ năng" window and
+/// the full screen label it.
 const char* const kCastPacedLabel = "Ra chiêu theo vòng (chờ game ra chiêu rồi mới bấm chiêu kế)";
+/// ... and the "Tự dùng kỹ năng" row, short (2026.11.16b): the same switch.
+const char* const kCastPacedShort = "Ra chiêu theo vòng";
 
 } // namespace
 
 const char* GuiApp::cast_paced_tip_vi() {
-    return "Có dấu: các phím kỹ năng được bấm lần lượt theo thứ tự, mỗi phím một lần mỗi vòng, và phím kế tiếp chỉ "
-           "được bấm khi game đã ra chiêu trước (GoBot thấy gói tin ra chiêu của bạn). Thời gian của mỗi phím trở "
-           "thành khoảng chờ ngắn nhất giữa hai lần ra chiêu của chính phím đó.\n"
+    return "Có dấu (mặc định): các phím kỹ năng được bấm lần lượt theo thứ tự, mỗi phím một lần mỗi vòng, và phím kế "
+           "tiếp chỉ được bấm khi game đã ra chiêu trước (GoBot thấy gói tin ra chiêu của bạn). Thời gian của mỗi "
+           "phím trở thành khoảng chờ ngắn nhất giữa hai lần ra chiêu của chính phím đó: phím chưa tới giờ thì nhường "
+           "lượt, không phím nào bị bỏ đói.\n"
+           "Chạy cả khi Tự đánh quái bật: bot đi về, quay mặt, rơi, không có quái... thì vòng chờ tại chỗ rồi đi tiếp. "
+           "Phím đánh mà cũng là kỹ năng thì ra theo lượt của nó, bot không bấm thêm; đòn đánh của bot chỉ chen vào "
+           "lúc không kỹ năng nào tới lượt.\n"
            "Cần gói tin của game: không thấy gói tin ra chiêu trong 2 giây thì GoBot tạm bấm theo giờ như thường, "
-           "thấy lại thì theo vòng tiếp.\n"
-           "Chỉ dùng khi Tự đánh quái tắt (macro chạy một mình): lúc Tự đánh quái chạy, hay chuỗi phím (Sequence) "
-           "bật, ô này tạm không có tác dụng. Bình luôn trước; buff vẫn theo giờ riêng, nhưng buff tới giờ lúc một "
-           "kỹ năng đang chờ chiêu ra, hay chiêu vừa ra chưa xong, thì chờ chiêu đó xong (thường dưới một giây).\n"
-           "Bỏ dấu (mặc định): mỗi phím bấm theo giờ riêng như trước.";
+           "thấy lại thì theo vòng tiếp. Chuỗi phím (Sequence) bật thì ô này tạm không có tác dụng. Bình luôn trước; "
+           "buff vẫn theo giờ riêng, nhưng buff tới giờ lúc một kỹ năng đang chờ chiêu ra, hay chiêu vừa ra chưa xong, "
+           "thì chờ chiêu đó xong (thường dưới một giây).\n"
+           "Bỏ dấu: mỗi phím bấm theo giờ riêng như trước.";
 }
 
 std::string GuiApp::cast_paced_status_vi() const {
@@ -123,19 +130,17 @@ std::string GuiApp::cast_paced_status_vi() const {
         // Ticked on the full screen, which hands its settings over only then.
         out = "Chưa dùng: bấm Apply now hoặc Save macro.";
     } else {
-        // Off with the switch on is the skills following the fight, the
-        // hunter or the sequence pressing keys too (st.others) -- or the
-        // moment before the timers' first pass.
+        // Off with the switch on is the sequence pressing keys too
+        // (st.others) -- or the moment before the timers' first pass. With
+        // the hunter it paces too since 2026.11.16b, and says so.
         const MacroEngine::PaceStatus st = macro_->pace_status();
-        const bool follows = macro_config_.skills_follow_fight && hunting_;
-        out = st.mode == MacroEngine::PaceStatus::Mode::Off && !follows && !st.others
-                  ? "Ra chiêu theo vòng đang bắt đầu."
-                  : MacroEngine::pace_status_vi(st);
+        out = st.mode == MacroEngine::PaceStatus::Mode::Off && !st.others ? "Ra chiêu theo vòng đang bắt đầu."
+                                                                           : MacroEngine::pace_status_vi(st);
     }
-    // The hunter's own attack is cast too, and the rotation would take it
-    // for the key it waits on: the switch is for the macro alone.
-    if (hunt_config_.enabled)
-        out += " Tự đánh quái đang bật: ra chiêu theo vòng chỉ dành cho macro chạy một mình.";
+    // The hunter's attack key a skill too: the rotation's in its turn.
+    if (hunt_config_.enabled && attack_key_is_skill())
+        out += " Phím đánh " + key_text(hunt_config_.attack_key) +
+               " cũng là kỹ năng: lúc theo vòng nó ra theo lượt của nó, bot không bấm thêm.";
     return out;
 }
 
@@ -175,6 +180,15 @@ void GuiApp::simple_skills_line() {
                           "theo giờ của nó.\nBỏ dấu: bấm theo giờ như trước.");
     ImGui::SameLine(0, 16);
     if (skill_gap_combo(cfg)) simple_changed();
+    // The rotation on your casts (2026.11.16b): on the row, on a line of its
+    // own right under "Tốc độ bấm kỹ năng" (the notes say so: beside it, that
+    // line would be some 650 px wide, too wide to be sure of at 1024x768) --
+    // on by default, the same switch as the window's and the full screen's
+    // Timed keys; saved and handed over at once.
+    if (ImGui::Checkbox(kCastPacedShort, &cfg.cast_paced)) simple_changed();
+    ImGui::SetItemTooltip("Có dấu (mặc định): kỹ năng ra lần lượt theo thứ tự phím, mỗi phím một lần mỗi vòng; "
+                          "game ra chiêu xong mới bấm phím sau, nên không khựng và không chiêu nào bị bỏ quên. "
+                          "Chạy cả khi Tự đánh quái bật.\nBỏ dấu: mỗi phím bấm theo giờ riêng như trước.");
 
     if (!cfg.skills_follow_fight) {
         hint(cfg.cast_paced ? "Bấm các phím kỹ năng theo vòng: mỗi phím một lần, chờ game ra chiêu rồi mới bấm "
@@ -183,7 +197,10 @@ void GuiApp::simple_skills_line() {
     } else if (!hunt_config_.enabled) {
         hint("Cần bật Tự đánh quái thì kỹ năng mới theo trận đánh; không thì bấm theo giờ như thường.");
     } else {
-        std::string text = cfg.sequential_skills
+        std::string text = cfg.cast_paced
+                               ? "Chỉ dùng kỹ năng khi đang đánh quái, theo vòng: mỗi phím một lần, chờ game ra "
+                                 "chiêu rồi mới bấm phím kế."
+                           : cfg.sequential_skills
                                ? "Chỉ dùng kỹ năng khi đang đánh quái, lần lượt từng phím, mỗi phím chờ "
                                  "hồi chiêu."
                                : "Chỉ dùng kỹ năng khi đang đánh quái, mỗi lần một phím đã hồi chiêu.";
@@ -191,7 +208,7 @@ void GuiApp::simple_skills_line() {
             text += " MP dưới " + std::to_string(cfg.skill_mp_floor_pct) +
                     "% thì không dùng kỹ năng.";
         hint(trial_hint(kTrialSkills, text.c_str()).c_str());
-        if (attack_key_is_skill())
+        if (attack_key_is_skill() && !cfg.cast_paced)
             small_note(kWait, key_text(hunt_config_.attack_key) +
                                   " vừa là phím đánh vừa là kỹ năng: khi đánh quái bot dùng nó làm phím "
                                   "đánh. Nên đặt Phím đánh là Space (Đánh thường).");
@@ -252,11 +269,15 @@ void GuiApp::simple_skills_popup() {
     ImGui::SetItemTooltip("Chỉ có tác dụng khi Tự đánh quái đang bật và \"Chỉ khi đang đánh quái\" có dấu; "
                           "macro chạy một mình thì mỗi phím bấm theo giờ của nó. Có dấu: mọi kỹ năng đã hồi "
                           "chiêu được bấm lần lượt theo thứ tự, cách nhau theo Tốc độ bấm kỹ năng (50 ms).\nBỏ "
-                          "dấu: mỗi lần chỉ bấm kỹ năng đầu tiên đã hồi chiêu, 300 ms một lần.");
+                          "dấu: mỗi lần chỉ bấm kỹ năng đầu tiên đã hồi chiêu, 300 ms một lần.\n"
+                          "Khi \"Ra chiêu theo vòng\" có dấu và GoBot thấy gói tin ra chiêu, kỹ năng ra theo vòng "
+                          "và ô này không có tác dụng; nó chỉ dùng lúc tạm bấm theo giờ (không có gói tin) hoặc "
+                          "khi bỏ dấu \"Ra chiêu theo vòng\".");
     changed |= skill_gap_combo(cfg);
-    // The skills on their timers paced by your casts (2026.11.08): the macro
-    // alone's counterpart of the two above, off as shipped. Handed over at
-    // once, so the status under it is the engine's from this frame.
+    // The skills paced by your casts (2026.11.08): on as shipped since
+    // 2026.11.16b, with the hunter too -- the row's own tick is the same
+    // switch. Handed over at once, so the status under it is the engine's
+    // from this frame.
     if (ImGui::Checkbox(kCastPacedLabel, &cfg.cast_paced)) simple_changed();
     ImGui::SetItemTooltip("%s", cast_paced_tip_vi());
     if (cfg.cast_paced) hint(cast_paced_status_vi().c_str());
@@ -349,7 +370,9 @@ void GuiApp::simple_skills_popup() {
         ImGui::EndTable();
     }
 
-    if (attack_key_is_skill())
+    // Ticked, the rotation has the key in its turn and the hunter leaves it
+    // be (cast_paced_status_vi says so); unticked, the hunter's alone.
+    if (attack_key_is_skill() && !cfg.cast_paced)
         small_note(kWait, key_text(hunt_config_.attack_key) +
                               " vừa là phím đánh vừa là kỹ năng: khi đánh quái bot dùng nó làm phím đánh. "
                               "Nên đặt Phím đánh là Space (Đánh thường).");

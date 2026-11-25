@@ -1,120 +1,15 @@
 #include "gobot/session_manager.hpp"
-#include "gobot/common.hpp"
-#include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/no_real_input.hpp"
-#include "gobot/util.hpp"
 #include "gobot/vitals_reader.hpp"
 
-#include <algorithm>
-#include <chrono>
-#include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <thread>
 
 #include <windows.h>
 #include <tlhelp32.h>
 
 namespace gobot {
-
-const char* SessionManager::state_name(State s) {
-    switch (s) {
-        case State::NoWindow:   return "not running";
-        case State::NotPlaying: return "not in the world";
-        case State::Playing:    return "playing";
-        case State::Unknown:    break;
-    }
-    return "unknown";
-}
-
-const char* SessionManager::event_name(Event e) {
-    switch (e) {
-        case Event::StateChanged:     return "state changed";
-        case Event::SessionLost:      return "session lost";
-        case Event::SessionRegained:  return "session regained";
-        case Event::NeedsAPerson:     return "needs a person";
-        case Event::StoppingOnTimer:  return "stopping on timer";
-        case Event::ShuttingDown:     return "shutting down";
-    }
-    return "?";
-}
-
-void SessionManager::Settings::load(const IniFile& ini) {
-    poll_ms            = ini.get_int ("Session", "poll_ms",            poll_ms);
-    lost_grace_s       = ini.get_int ("Session", "lost_grace_s",       lost_grace_s);
-    stop_after_minutes = ini.get_int ("Session", "stop_after_minutes", stop_after_minutes);
-    shutdown_when_done = ini.get_bool("Session", "shutdown_when_done", shutdown_when_done);
-    shutdown_delay_s   = ini.get_int ("Session", "shutdown_delay_s",   shutdown_delay_s);
-
-    poll_ms          = std::clamp(poll_ms, 250, 60000);
-    lost_grace_s     = std::clamp(lost_grace_s, 3, 3600);
-    shutdown_delay_s = std::clamp(shutdown_delay_s, 10, 3600);
-}
-
-void SessionManager::Settings::save(IniFile& ini) const {
-    ini.set_int ("Session", "poll_ms",            poll_ms);
-    ini.set_int ("Session", "lost_grace_s",       lost_grace_s);
-    ini.set_int ("Session", "stop_after_minutes", stop_after_minutes);
-    ini.set_bool("Session", "shutdown_when_done", shutdown_when_done);
-    ini.set_int ("Session", "shutdown_delay_s",   shutdown_delay_s);
-}
-
-SessionManager::SessionManager() = default;
-SessionManager::~SessionManager() { stop(); }
-
-void SessionManager::set_settings(const Settings& s) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    settings_ = s;
-}
-
-SessionManager::Settings SessionManager::settings() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return settings_;
-}
-
-void SessionManager::set_window_hints(const std::string& title,
-                                      const std::string& window_class,
-                                      const std::string& process_name) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    title_ = title;
-    class_ = window_class;
-    process_ = process_name;
-}
-
-void SessionManager::on_event(std::function<void(Event, const std::string&)> fn) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    callback_ = std::move(fn);
-}
-
-void SessionManager::fire(Event e, const std::string& detail) {
-    std::function<void(Event, const std::string&)> fn;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        fn = callback_;
-    }
-    if (fn) fn(e, detail);
-}
-
-void SessionManager::start() {
-    if (running_.exchange(true)) return;
-    if (thread_.joinable()) thread_.join();
-    finished_.store(false);
-    state_.store(State::Unknown);
-    thread_ = std::thread(&SessionManager::loop, this);
-    GB_INFO("Session watcher started");
-}
-
-void SessionManager::stop() {
-    if (!running_.exchange(false)) return;
-    if (thread_.joinable()) thread_.join();
-    state_.store(State::Unknown);
-    GB_INFO("Session watcher stopped");
-}
-
-SessionManager::Stats SessionManager::stats() const {
-    std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_;
-}
 
 bool SessionManager::hud_present(const Frame& f) {
     if (!f.valid()) return false;
@@ -130,108 +25,6 @@ bool SessionManager::hud_present(const Frame& f) {
            std::abs(hp.x - mp.x) <= 4 &&
            mp.y > hp.y && mp.y - hp.y < 40;
 }
-
-void SessionManager::loop() {
-    ScreenCapture capture;
-    capture.set_label("session");
-    InputManager  finder;
-    Frame         frame;
-
-    const auto started = std::chrono::steady_clock::now();
-    std::uint64_t not_playing_since = 0;
-    bool announced_lost = false;
-
-    while (running_.load()) {
-        Settings s;
-        std::string title, klass, process;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            s = settings_;
-            title = title_; klass = class_; process = process_;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(s.poll_ms));
-        if (!running_.load()) break;
-
-        // Find the window afresh every time. Holding a handle across a client
-        // restart means watching a window that no longer exists and concluding
-        // the game is gone when it is sitting right there with a new one.
-        State now = State::NoWindow;
-        if (finder.find_game_window(title, klass, process) && finder.window_valid()) {
-            if (!capture.grab(finder.target_window(), frame) || !frame.valid()) {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                ++stats_.captures_failed;
-                continue;               // say nothing rather than guess
-            }
-            now = hud_present(frame) ? State::Playing : State::NotPlaying;
-        }
-
-        const State was = state_.exchange(now);
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.looks;
-            if (now == State::Playing) stats_.seconds_playing += s.poll_ms / 1000;
-            stats_.seconds_watching =
-                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - started).count());
-        }
-
-        if (now != was) {
-            if (was != State::Unknown)
-                GB_INFO("Session: %s -> %s", state_name(was), state_name(now));
-            fire(Event::StateChanged, state_name(now));
-        }
-
-        // ---- has the session dropped? ----
-        if (now == State::Playing) {
-            not_playing_since = 0;
-            if (announced_lost) {
-                announced_lost = false;
-                fire(Event::SessionRegained, "the HUD is back");
-                GB_INFO("Session: back in the world");
-            }
-        } else {
-            const std::uint64_t t = now_ms();
-            if (not_playing_since == 0) not_playing_since = t;
-
-            const std::uint64_t gone_for = (t - not_playing_since) / 1000;
-            if (!announced_lost &&
-                gone_for >= static_cast<std::uint64_t>(s.lost_grace_s)) {
-                announced_lost = true;
-                {
-                    std::lock_guard<std::mutex> lock(stats_mutex_);
-                    ++stats_.sessions_lost;
-                }
-                const std::string why = now == State::NoWindow
-                    ? "the client is not running"
-                    : "the client is running but the character is not in the world";
-                GB_WARN("Session lost after %llus: %s",
-                        static_cast<unsigned long long>(gone_for), why.c_str());
-                fire(Event::SessionLost, why);
-                fire(Event::NeedsAPerson, why);
-            }
-        }
-
-        // ---- has the run gone on long enough? ----
-        if (s.stop_after_minutes > 0 && !finished_.load()) {
-            const auto mins = std::chrono::duration_cast<std::chrono::minutes>(
-                std::chrono::steady_clock::now() - started).count();
-            if (mins >= s.stop_after_minutes) {
-                finished_.store(true);
-                GB_INFO("Session: %d minutes up, stopping", s.stop_after_minutes);
-                fire(Event::StoppingOnTimer, std::to_string(s.stop_after_minutes) +
-                                             " minutes up");
-                if (s.shutdown_when_done) {
-                    const std::string why = "GoBot finished its run";
-                    fire(Event::ShuttingDown, why);
-                    request_shutdown(s.shutdown_delay_s, why);
-                }
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------------ processes
 
 bool SessionManager::process_running(const std::string& exe_name) {
     if (exe_name.empty()) return false;
@@ -288,53 +81,6 @@ bool SessionManager::start_program(const std::string& path) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     GB_INFO("Started %s", path.c_str());
-    return true;
-}
-
-bool SessionManager::request_shutdown(int delay_s, const std::string& why) {
-    // Before the warning below, which would otherwise announce a shut-down
-    // that is not coming. It starts a program, and turns the machine off.
-    if (refuse_real_input("shut the machine down")) return false;
-    delay_s = std::clamp(delay_s, 10, 3600);
-
-    // Windows' own shutdown.exe, by its full path. Named bare, CreateProcess
-    // looks first in the folder GoBot was started from -- one any program may
-    // write to -- and would start whatever was left there as shutdown.exe,
-    // with GoBot's administrator rights. Worked out before the warning below,
-    // so the log never announces a shut-down that cannot start.
-    const std::wstring program = utf8_to_wide(system32_path("shutdown.exe"));
-    if (program.empty()) {
-        GB_WARN("Could not ask Windows to shut down: it would not say where its own programs are");
-        return false;
-    }
-
-    // Loud, and in the log, because somebody will come back to a machine that
-    // is off and want to know what turned it off.
-    GB_WARN("SHUTTING DOWN in %d seconds: %s.  Run `shutdown /a` to call it off.",
-            delay_s, why.c_str());
-
-    // The reason, cut to 200 UTF-16 units between two characters. Cut as
-    // UTF-8 bytes, it could end halfway through a Vietnamese letter, and the
-    // whole command line would then be read in the ANSI code page.
-    std::wstring reason = utf8_to_wide(why);
-    if (reason.size() > 200) {
-        reason.resize(200);
-        // Not the first half of a surrogate pair whose second half was cut.
-        if (reason.back() >= 0xD800 && reason.back() <= 0xDBFF) reason.pop_back();
-    }
-    std::wstring command = L"\"" + program + L"\" /s /t " + std::to_wstring(delay_s) +
-                           L" /c \"GoBot: " + reason + L"\"";   // CreateProcessW writes into it
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        GB_WARN("Could not ask Windows to shut down (error %lu)", GetLastError());
-        return false;
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
     return true;
 }
 

@@ -58,7 +58,27 @@ bool PlayerList::click(InputManager& input, int x, int y, const Stop& stop) cons
     return click_ ? click_(x, y) : input.click_on_game(x, y, false, stop);
 }
 
-bool PlayerList::nap(int ms, const Stop& stop) {
+bool PlayerList::grab(InputManager& input, ScreenCapture& capture, Frame& into) const {
+    if (grab_) return grab_(into) && into.valid();
+    return capture.grab(input.target_window(), into) && into.valid();
+}
+
+std::uint64_t PlayerList::clock_ms() const {
+    if (now_) return now_();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+}
+
+bool PlayerList::nap(int ms, const Stop& stop) const {
+    // A test's clock: its sleep moves it, in the same slices.
+    if (sleep_) {
+        for (int slept = 0;; slept += 50) {
+            if (stop && stop()) return false;
+            if (slept >= ms) return true;
+            sleep_(std::min(50, ms - slept));
+        }
+    }
     // Against the clock rather than by adding up the slices: Windows rounds
     // each sleep up to its 15.6 ms tick, and 50 ms slices made a wait of a
     // second a quarter longer.
@@ -203,6 +223,7 @@ bool PlayerList::ensure_open(InputManager& input, ScreenCapture& capture,
         return false;
     };
     const auto stopped = [&] { return stop && stop(); };
+    opened_it_ = false;
     if (stopped()) return fail(kStopped);
 
     // Input goes to whatever has the foreground, not to the window the
@@ -213,12 +234,11 @@ bool PlayerList::ensure_open(InputManager& input, ScreenCapture& capture,
     }
 
     auto showing = [&](Frame& into) {
-        return capture.grab(input.target_window(), into) && into.valid() &&
-               open(into, store);
+        return grab(input, capture, into) && open(into, store);
     };
 
     Frame frame;
-    if (!capture.grab(input.target_window(), frame) || !frame.valid())
+    if (!grab(input, capture, frame))
         return fail("could not capture the game");
 
     const Frame* button = store.get(settings_.open_picture);
@@ -247,24 +267,94 @@ bool PlayerList::ensure_open(InputManager& input, ScreenCapture& capture,
     // the client's activity notices and reported that nobody was on the map.
     if (open(frame, store)) return true;
 
-    // Two presses at most, checked after each rather than assumed. One should
-    // do it; the second covers the case where the first arrives while the
-    // panel is busy with something else.
-    for (int press = 0; press < 2; ++press) {
-        if (stopped()) return fail(kStopped);
-        click(input, bx, by, stop);
-        if (!nap(800, stop)) return fail(kStopped);
-        if (showing(frame)) return true;
-    }
-
-    // Nothing worked, and the presses may have left the panel somewhere it
-    // was not. Put it back -- unless stopped meanwhile: a stop clicks nothing
-    // more.
+    // ONE press, since 2026-11-15, and the list looked for every quarter of a
+    // second until it shows -- up to react_ms() from the press (the owner, for
+    // slow PCs: "sẽ có thêm 30 giây chờ phản ứng. Nếu màn hình phản ứng luôn
+    // thì thực hiện tiếp bước tiếp theo, còn nếu màn hình không phản ứng gì thì
+    // sẽ dừng xử lý"). Until then two presses 800 ms apart and a third "to put
+    // it back": the button toggles, so on a slow game the second shut the list
+    // the first opened late, and the third flipped it again. Nothing more is
+    // pressed for a list that does not show: it may be up and not known, or
+    // the press lost, and the next asker presses again.
     if (stopped()) return fail(kStopped);
-    if (!click(input, bx, by, stop) && stopped()) return fail(kStopped);
-    if (!nap(400, stop)) return fail(kStopped);
+    if (!click(input, bx, by, stop))
+        return fail(stopped() ? kStopped
+                              : "the click on the players-on-map button was refused -- the game is not in front, "
+                                "or something covers it");
+    const std::uint64_t pressed_at = clock_ms();
+    const std::uint64_t show_by = static_cast<std::uint64_t>(std::max(800, react_ms_));
+    for (;;) {
+        if (!nap(250, stop)) return fail(kStopped);
+        if (showing(frame)) {
+            const std::uint64_t took = clock_ms() - pressed_at;
+            if (took > static_cast<std::uint64_t>(kReactSlowMs))
+                GB_INFO("PlayerList: the game took %llu ms to show the list after the press on its button",
+                        static_cast<unsigned long long>(took));
+            opened_it_ = true;
+            return true;
+        }
+        if (clock_ms() - pressed_at >= show_by) break;
+    }
+    GB_INFO("PlayerList: nothing after %d s to show the list after the press on its button",
+            static_cast<int>(show_by / 1000));
+    return fail("the player list did not come up within " + std::to_string(show_by / 1000) +
+                " s of the press on its button, or nobody else is on this map");
+}
 
-    return fail("the player list did not come up, or nobody else is on this map");
+bool PlayerList::close(InputManager& input, ScreenCapture& capture, const TemplateStore& store,
+                       std::string* why, const Stop& stop) {
+    auto fail = [&](const std::string& text) {
+        if (why) *why = text;
+        return false;
+    };
+    const auto stopped = [&] { return stop && stop(); };
+    if (stopped()) return fail(kStopped);
+
+    // Up on two looks kCloseSettleMs apart, or it is left: a good invite
+    // shuts the list by itself a moment after Req Party, and the button
+    // flips -- a press on a list already going would bring it back up.
+    Frame frame;
+    if (!grab(input, capture, frame)) return fail("could not capture the game");
+    if (!open(frame, store)) return true;
+    if (!nap(kCloseSettleMs, stop)) return fail(kStopped);
+    if (!grab(input, capture, frame)) return fail("could not capture the game");
+    if (!open(frame, store)) return true;
+
+    // Its own button, found by its picture over the whole frame: where it is
+    // at whatever size the client is, as ensure_open finds it.
+    const Frame* button = store.get(settings_.open_picture);
+    if (button == nullptr || !button->valid())
+        return fail("no picture called '" + settings_.open_picture + "', which is the button that opens and "
+                    "shuts the list");
+    const auto found = TemplateMatcher::find(frame, ScreenRect{ 0, 0, frame.width, frame.height }, *button,
+                                             settings_.open_score);
+    if (!found.found) return fail("the players-on-map button is not on screen");
+
+    if (!input.window_focused()) {
+        input.focus_window();
+        if (!nap(250, stop)) return fail(kStopped);
+    }
+    if (stopped()) return fail(kStopped);
+    const int bx = found.at.x + found.at.w / 2;
+    const int by = found.at.y + found.at.h / 2;
+    if (!click(input, bx, by, stop))
+        return fail(stopped() ? kStopped
+                              : "the click on the players-on-map button was refused -- the game is not in front, "
+                                "or something covers it");
+
+    // ONE press, then looked at -- never a second, which would flip it back.
+    const std::uint64_t pressed_at = clock_ms();
+    const std::uint64_t gone_by = static_cast<std::uint64_t>(std::max(250, close_wait_ms_));
+    for (;;) {
+        if (!nap(250, stop)) return fail(kStopped);
+        Frame now;
+        if (grab(input, capture, now) && !open(now, store)) {
+            opened_it_ = false;
+            return true;
+        }
+        if (clock_ms() - pressed_at >= gone_by) break;
+    }
+    return fail("the list still showed " + std::to_string(gone_by / 1000) + " s after the press on its button");
 }
 
 int PlayerList::find(const std::vector<Row>& rows, const std::string& who) const {
@@ -346,10 +436,41 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
     // where "Req Party" was going to be, the menu came up afterwards, and the
     // run reported "Invited" with the menu still sitting on screen untouched.
     // The same click a moment later worked perfectly.
-    if (!nap(settings_.menu_wait_ms, stop)) {
-        // The row is picked and its menu may be up: left as it is. A stop
-        // presses nothing more, and the menu goes with the next click on the
-        // game.
+    //
+    // So, since 2026-11-15 (the owner's 30 s for slow PCs), not a blind
+    // menu_wait_ms: the menu looked for every quarter of a second, and Req
+    // Party pressed once two looks in a row show it -- one look could catch
+    // it half drawn -- up to react_ms() from the row's click, menu_wait_ms if
+    // that is longer. Not shown by then: nothing pressed, the row left picked.
+    // A stop presses nothing more either, and the menu goes with the next
+    // click on the game.
+    {
+        const std::uint64_t picked_at = clock_ms();
+        const std::uint64_t menu_by = static_cast<std::uint64_t>(std::max(settings_.menu_wait_ms, react_ms_));
+        int seen = 0;
+        while (seen < 2) {
+            if (!nap(250, stop)) {
+                if (why) *why = kStopped;
+                return false;
+            }
+            Frame now;
+            if (grab(input, capture, now) && menu_up(now, row.y)) ++seen;
+            else seen = 0;
+            if (seen < 2 && clock_ms() - picked_at >= menu_by) {
+                GB_INFO("PlayerList: nothing after %d s to show row %d's menu -- Req Party not clicked",
+                        static_cast<int>(menu_by / 1000), row.index + 1);
+                if (why)
+                    *why = "the row's menu did not come up within " + std::to_string(menu_by / 1000) +
+                           " s of the click on it, so Req Party was not clicked";
+                return false;
+            }
+        }
+        const std::uint64_t took = clock_ms() - picked_at;
+        if (took > static_cast<std::uint64_t>(kReactSlowMs))
+            GB_INFO("PlayerList: the game took %llu ms to show row %d's menu",
+                    static_cast<unsigned long long>(took), row.index + 1);
+    }
+    if (stopped()) {
         if (why) *why = kStopped;
         return false;
     }
@@ -375,11 +496,18 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
     //
     // The menu closing is the thing that means "the button was pressed". What
     // the server then makes of it is a separate question.
+    //
+    // Looked at every 400 ms, as before, up to react_ms() from the press
+    // (2026-11-15, the owner's 30 s for slow PCs; four seconds before), and
+    // never pressed again: a second press on a menu that went late lands on
+    // whatever is under it.
     bool pressed = false;
-    for (int i = 0; i < 10 && !pressed; ++i) {
+    const std::uint64_t req_at = clock_ms();
+    const std::uint64_t land_by = static_cast<std::uint64_t>(std::max(4000, react_ms_));
+    while (!pressed && clock_ms() - req_at < land_by) {
         if (!nap(400, stop)) break;
         Frame after;
-        if (!capture.grab(input.target_window(), after) || !after.valid()) continue;
+        if (!grab(input, capture, after)) continue;
         pressed = !menu_up(after, row.y);
     }
     if (!pressed) {
@@ -387,10 +515,19 @@ bool PlayerList::invite(InputManager& input, ScreenCapture& capture,
             if (stopped())
                 *why = "stopped before the press could be seen to land";
             else
-                *why = "the menu is still up after four seconds, so that press "
-                       "did not land";
+                *why = "the menu is still up after " + std::to_string(land_by / 1000) +
+                       " seconds, so that press did not land";
         }
+        if (!stopped())
+            GB_INFO("PlayerList: nothing after %d s to show the menu gone after Req Party",
+                    static_cast<int>(land_by / 1000));
         return false;
+    }
+    {
+        const std::uint64_t took = clock_ms() - req_at;
+        if (took > static_cast<std::uint64_t>(kReactSlowMs))
+            GB_INFO("PlayerList: the game took %llu ms to show the menu gone after Req Party",
+                    static_cast<unsigned long long>(took));
     }
 
     GB_INFO("PlayerList: invited row %d ('%s') -- row at %d,%d, Req Party at %d,%d",

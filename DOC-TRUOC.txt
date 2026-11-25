@@ -51,8 +51,14 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
 
 3. CỬA SỔ GAME
 
-- Để game ở chế độ cửa sổ (không toàn màn hình), cỡ 1024x768 hoặc
-  1280x720. GoBot đã được kiểm tra với hai cỡ này; cỡ khác chưa thử.
+- Để game ở chế độ cửa sổ (không toàn màn hình), cỡ 1024x768, 1280x720
+  hoặc 1366x768. Cỡ 1024x768 đã chạy đầy đủ trên game thật. Ở 1280x720,
+  các màn hình trong game (thanh máu, thanh phím, ô chat) đã chạy trên máy
+  một người chơi. Ở 1366x768 GoBot mới thấy thanh máu và thanh phím, trong
+  một ảnh của một người chơi (26/10); ô chat, bản đồ nhỏ, túi đồ và các hộp
+  thoại ở cỡ này chưa thấy lần nào, chỉ đoán theo các cỡ khác. Tự đăng nhập
+  chưa thử ở cả 1280x720 lẫn 1366x768 (xem bản 2026.11.13c ở mục 5). Cỡ
+  khác chưa thử. Chơi toàn màn hình chưa thử với GoBot.
 - Tỉ lệ hiển thị của Windows (Scale, trong Settings > Display) để bao
   nhiêu cũng được, trên Windows 10 (bản 1607 trở lên) và Windows 11. Nhưng
   khi Scale lớn hơn 100%, Windows có thể phóng to game lên, và GoBot không
@@ -67,10 +73,17 @@ thử trên nhân vật phụ, và ngồi xem khi thử.
 - GoBot nhìn màn hình để đọc game, nên game phải hiện rõ. Đừng để cửa sổ
   GoBot, thanh tác vụ (taskbar) của Windows hay cửa sổ nào khác che game.
   Nếu GoBot báo "Cửa sổ GoBot đang che game", bấm "Dời GoBot sang bên".
-- Màn hình thấp (cao 768 điểm ảnh, như nhiều máy xách tay): cửa sổ game cỡ
-  1024x768 cao hơn cả màn hình, không vừa. Hãy dùng cỡ 1280x720, cho thanh
-  tác vụ tự ẩn (bấm chuột phải vào thanh tác vụ → Taskbar settings → bật
-  "Automatically hide the taskbar"), rồi kéo cửa sổ game lên sát mép trên.
+- Game chạy cửa sổ cần màn hình cao hơn game khoảng 31 điểm ảnh (thanh
+  tiêu đề của cửa sổ), cộng thêm chiều cao thanh tác vụ nếu thanh tác vụ
+  không tự ẩn. Màn hình thấp (cao 768 điểm ảnh, như nhiều máy xách tay):
+  cửa sổ game cỡ 1024x768 hay 1366x768 cao hơn cả màn hình, không vừa. Hãy
+  dùng cỡ 1280x720, cho thanh tác vụ tự ẩn (bấm chuột phải vào thanh tác vụ
+  → Taskbar settings → bật "Automatically hide the taskbar"), rồi kéo cửa sổ
+  game lên sát mép trên. Khi game không nằm trọn trên màn hình, GoBot báo
+  "Game không nằm trọn trên màn hình" ở phần "Trước khi bắt đầu" (bản
+  2026.11.13c). Từ bản 2026.11.14, sau mỗi lần GoBot tự vào game, GoBot tự
+  kéo game lên góc trái trên (xem mục 5); 1280x720 khi đó vừa màn hình cao
+  768 cả khi thanh tác vụ không tự ẩn.
 - Màn hình nhỏ, không đủ chỗ đặt GoBot bên cạnh game: bấm BẮT ĐẦU rồi thu
   nhỏ cửa sổ GoBot xuống thanh tác vụ. Bot vẫn chạy, và trong game vẫn
   dùng được F10 (bật/tắt) và F12 (dừng hết).
@@ -132,6 +145,1507 @@ chưa chạy trên game thật"); lỗi thấy được ghi ở mục 7 (Lỗi 2
 Lỗi 5; Lỗi 1 và Lỗi 4 của lần đó đã sửa ở bản này). Các phần "Thử nghiệm"
 khác chưa được thử trên game thật.
 
+- Mới trong bản 2026.11.24 (mua HP pet khi ra tới TổCổLong; theo lời bạn
+  ngày 24/11; chưa thử trên game thật).
+  Bạn báo: "Khi ra tới bản đồ TổCổLong thì cần mua lại HP cho pet. Cái này
+  ở trong tab Linh Thú của người giữ sân và là item "Thịtbò" => cần có lựa
+  chọn để mua và mua bao nhiêu slot tương tự như mua HP MP".
+  + Thẻ "Tự mua bình" (thẻ Dọn rác) có thêm ô "Mua HP pet (Thịt bò) khi ra
+    tới TổCổLong" (mặc định không đánh dấu, vì tốn tiền) và dòng "Thịt bò
+    (HP pet): mỗi lần mua [N] ô" (0 tới 999, mặc định 1; mỗi ô là một lần mua
+    100). Lưu trong configs\trash.ini: buy_pet, buy_pet_slots.
+  + Khi bot đang chạy và ô có dấu, mỗi lần nhân vật ra tới TổCổLong (t60_s19,
+    sảnh Cổ Long, chỗ ra sau mỗi lượt phó bản), GoBot mua MỘT lượt: mở túi
+    đồ, bấm chuột phải vào Người Giữ Sân ở ngăn Khác, bấm sang ngăn Linh Thú
+    của cửa hàng, tìm món Thịtbò theo tên rồi mua như mua bình: bấm đúp, gõ
+    100, đọc lại rồi mới bấm Xác Nhận. Chỉ mua thức ăn của pet: không mua
+    Thịt bò khô (bình HP của nhân vật) và không đụng tới giờ mua bình HP/MP.
+    Chạy cả khi "Tự mua bình", "Tự dọn rác" và "Dùng bùa" đều tắt.
+  + Ngăn Linh Thú được bấm theo chỗ của nó so với nút Mua | Thoát, đo trên
+    ảnh chụp cửa hàng thật (trash_debug\20261111_214922_0_shop_full.png):
+    giữa ngăn cách nút 33 điểm ảnh sang phải và 353 điểm ảnh lên trên. Trước
+    khi bấm, GoBot xem dải ngăn có đúng chỗ đó không; sau khi bấm, chờ thấy
+    ngăn Linh Thú được chọn (tô tối) và hàng bình biến mất rồi mới mua. Chữ
+    "Thịtbò" mà chỉ là phần đầu của "Thịtbòkhô" (hay phần cuối một tên dài
+    hơn) thì không bấm.
+  + Game báo túi đồ [Linh Thú] đã đầy, hay hiện một thông báo khác: GoBot
+    bấm Xác Nhận để tắt và thôi mua lượt đó. Mua chưa được (không thấy ngăn,
+    không thấy món...) thì thẻ ghi lý do, giữ ảnh trong trash_debug (pet_tab,
+    pet_no_item, pet_item_place), rồi thử lại sau 30 giây nếu nhân vật còn ở
+    TổCổLong (trong 90 giây đầu kể từ lúc ra tới), không thì ở lần ra
+    TổCổLong sau. Không có gì bị dừng hẳn.
+  + Thẻ Phó bản: khi lượt mua HP pet chưa xong, các bước Cổ Long ở sảnh
+    (mua Lư Hương, đếm ngược, vào phó bản; thành viên chờ đội trưởng) chờ với
+    dòng "Chờ mua HP pet (Thịt bò) xong rồi mới đi tiếp", tối đa 90 giây kể
+    từ lúc ra tới sảnh, rồi đi tiếp dù chưa mua xong.
+  + Bấm BẮT ĐẦU khi đang đứng sẵn ở TổCổLong thì chưa mua: chỉ mua khi ra tới
+    (lần ra kế tiếp). Muốn thử: bật ô, đặt 1 ô, ra khỏi TổCổLong rồi vào lại
+    khi bot đang chạy, ngồi xem.
+  + Chưa có ảnh nào của ngăn Linh Thú: lần chạy đầu, nếu không mua được, gửi
+    giúp các ảnh trash_debug\*pet_* và các dòng "Pet:" / "Trash: shop pet
+    food" trong gobot_gui.log.
+  Cũng trong bản này, Nhảy xuống và Nhảy lên khi hỏng thì thử lại luôn, theo
+  lời bạn: "không, 2. Nhảy xuống (Ctrl+↓) khi hỏng thì thử lại luôn, hoặc
+  dừng ra skill rồi nhảy xuống chứ không phải là dừng 90s" (chưa thử trên
+  game thật).
+  + Không còn gì làm Nhảy xuống, Nhảy lên hay cú ↑ cho quái cao hơn vạch
+    trên tạm nghỉ (30, 60, 120 giây) hay tắt tới lần BẮT ĐẦU sau; không còn
+    dòng đỏ "Nhảy xuống đã tắt" hay "Nhảy lên tạm nghỉ"; GoBot không bao giờ
+    tự bỏ dấu ô hay lưu hunt.ini. Chỉ ô của bạn bật, tắt chúng.
+  + Bấm mà không được (không rơi, nhảy tại chỗ, nhảy lên không tới, rơi
+    lại, sai kiểu nhảy...): lần đầu của một chuỗi bỏ qua con quái 1,2 giây,
+    các lần sau 3 giây (một lượt ra chiêu), rồi bấm lại. Chỗ đã hỏng (chỗ
+    Ctrl+↓ không rơi, chỗ nhảy lên bị rơi lại hay rơi ra ngoài vùng, bục
+    không nhảy xuyên lên được) chỉ bị bỏ qua 30 giây — GoBot nhảy ở chỗ khác
+    trước — rồi thử lại; log ghi "Hunter: the place at ... where ... did not
+    work is tried again (30 s on)".
+  + Lần bấm không làm nhân vật đi đâu (không rơi, nhảy tại chỗ, nhảy lên
+    không nhảy hay rơi lại chỗ cũ) không tính vào 4 lần mỗi phút; 2 lần cho
+    mỗi con quái chỉ tính trong 10 giây gần nhất.
+  + Rơi xuống chỗ không có trong file bản đồ: GoBot tạm không tin file đó tới
+    khi nhân vật đứng trên sàn của file 3 lần (không tính giờ), rồi nhảy
+    tiếp. Giữ ↓ hay ↑ quá lâu, sức hút đo được khác xa: chỉ ghi vào log.
+  + Nhảy mà đổi bản đồ (trong 10 giây sau lần bấm): không dừng đánh quái,
+    không bỏ dấu, không lưu gì. Hai đầu được nhớ là cửa (không nhảy gần đó
+    nữa tới khi tắt GoBot), bot đánh quái tiếp ở chỗ nhân vật tới, và dưới
+    ô có dòng vàng "Lần nhảy xuống lúc ... làm đổi bản đồ — chỗ đó đã được
+    nhớ là cửa, GoBot không nhảy ở gần đó nữa và vẫn đánh quái tiếp."
+  + Phím ↓, ↑ hay Ctrl có thể đang bị giữ (Windows không nhận lệnh nhả phím
+    sau 3 lần): không dừng đánh quái nữa. GoBot nhả mọi phím một lần, có
+    dòng vàng "Phím ↓ hoặc Ctrl có thể đang bị giữ: GoBot đã nhả mọi phím;
+    đánh quái tự chạy tiếp khi Windows nhận lệnh nhả phím.", nhân vật đứng
+    yên chờ, rồi tự đánh tiếp.
+  Cũng trong bản này, theo lời bạn "Kiểm tra các phần khác xem có phần nào
+  không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác",
+  thêm bốn chỗ không còn bỏ cuộc hay chờ lâu (chưa thử trên game thật):
+  + Chỗ đánh quái, đi về 3 lần liền không tới được: chỉ chờ spot_retry_ms
+    (30 giây) rồi thử thêm 3 lần nữa, cứ thế mãi (trước là chờ 1 tới 5 phút
+    rồi chỉ thử một lần). Thẻ ghi màu vàng "Chỗ đánh quái: đi về 3 lần liền
+    không tới được — GoBot thử lại sau 30 giây (sớm hơn nếu nhân vật bị đẩy
+    đi chỗ khác). ...".
+  + Đứng kẹt ngoài vùng trên file bản đồ chưa tin: đi 3 bước dọc bục mà
+    GoBot vẫn chưa tin file thì 30 giây sau đi thêm 3 bước nữa (trước là
+    thôi tới lần qua cửa sau); log "Hunter: stranded on ..., its file still
+    not trusted after 3 steps -- the steps again in 30 s".
+  + File bản đồ bị coi là sai (2 lần nhân vật đứng ở chỗ không có sàn trong
+    file): không còn bỏ file đó tới lần qua cửa sau; nhân vật (hay quái)
+    đứng trên sàn của file 3 lần ở 3 chỗ khác nhau thì GoBot tin lại (log
+    "... fits where you stand again ... -- gone by again"). File sai thật thì
+    không bao giờ đủ 3 lần.
+  + Bắt gói tin cho vị trí: không bắt được thì thử lại sau 10 giây, 20
+    giây, rồi cứ 30 giây (trước là lâu dần tới 10 phút); bắt gói bị hỏng
+    giữa chừng (card mạng mất...) thì GoBot dừng nó và bắt lại như trên
+    (trước là để nguyên, không nghe được gì); không nghe thấy game mà game
+    vẫn nối với máy chủ thì cứ 30 giây bắt lại một lần, tìm lại card mạng.
+    Dòng lỗi của phần bắt gói chỉ ghi một lần cho mỗi đợt hỏng.
+  Cũng trong bản này, cùng lời bạn ở trên, Tự mua bình và Dùng bùa không còn
+  bỏ cuộc (chưa thử trên game thật):
+  + Tự mua bình: lượt mua có lỗi thì 30 giây sau mua lại phần còn lại, lượt
+    nào có lỗi cũng vậy, không giới hạn, tới khi một lượt mua xong hay game
+    báo túi đầy (trước đây hai lượt liền có lỗi thì GoBot bỏ phần còn lại,
+    tới giờ "mua mỗi" sau, mặc định 1 tiếng, mới mua). Lần mua không rõ có
+    thành công không vẫn tính là đã mua (không bao giờ mua hai lần); lần thử
+    lại không bắt đầu lượt mua mới; phím số vẫn không lọt vào hộp số lượng.
+    Từ lần lỗi thứ hai liền nhau, thẻ ghi "Mua bình bị lỗi N lần liền (lý
+    do): GoBot thử lại sau 30 giây."; log ghi "Trash: shop -- 2 trouble(s)
+    in a row: owed 5+5 kept, tried again 30 s on". Túi đầy hay thông báo lạ
+    thay cho hộp số lượng thì vẫn dừng lượt đó như cũ (game đã nói không).
+    Thẻ ghi thời gian mua tiếp bằng giây khi dưới 1 phút ("mua tiếp sau 30
+    giây").
+  + Dùng bùa: thông báo của game sau khi dùng bùa mà bấm Xác Nhận 2 lần
+    không đóng thì GoBot không bỏ cho bạn nữa: thẻ ghi "thông báo của game
+    chưa đóng sau 2 lần bấm Xác Nhận — GoBot bấm lại ở lần dùng bùa sau
+    (khoảng 1 phút)", và khoảng 1 phút sau GoBot lại bấm Xác Nhận của nó
+    (tối đa 2 lần mỗi lượt, chỉ đúng chỗ thông báo đó, không bao giờ bấm
+    phím, không bấm khi có hộp thoại hai nút), cứ thế tới khi nó đóng. Trong
+    lúc nó còn mở GoBot không dùng bùa nào; giữa các lần bấm lại, đánh quái,
+    bình và các việc khác vẫn chạy (mỗi lần bấm lại, sau mỗi cú bấm GoBot
+    chờ game phản ứng như mọi bước khác, nên có thể giữ phím tới khoảng 30
+    giây). Ảnh charm_notice_stuck chỉ lưu một lần, không phải mỗi phút.
+  + Dùng bùa: túi đồ không chắc đang ở ngăn Tiêu Dùng thì 1 phút sau thử lại
+    ("...; thử lại sau 1 phút."), không phải 10 phút. Bùa không thấy trong
+    túi hay không dùng được thì vẫn 10 phút sau mới tìm lại, như cũ.
+  Cũng trong bản này, cùng lời bạn ở trên, Tự chat, Làm nhiệm vụ nhanh và
+  Tự đóng thông báo không còn tự dừng (chưa thử trên game thật):
+  + Tự chat: câu không gửi được vẫn giữ lượt, 30 giây sau gửi lại, bao
+    nhiêu lần cũng vậy (trước đây 3 lần liền thì Tự chat tự dừng). Tới 3
+    lần liền (max_failures trong configs\chat.ini) thì thẻ và điện thoại
+    được báo một lần: "Tự chat: 3 lần liền không gửi được câu chat — GoBot
+    vẫn thử lại."; gửi được một câu thì đếm lại từ đầu. Ô chat không giống
+    hình ô chat đang mở hay đang đóng, hay không đóng được sau khi gửi,
+    cũng không còn làm Tự chat dừng: như trước, GoBot giữ đánh quái, bình
+    và buff tới khi thấy ô chat đóng (tự xoá và đóng khi không ai dùng
+    chuột, bàn phím), rồi chờ trọn một khoảng "Gửi mỗi ... giây" mới gửi
+    câu sau. "Gửi thử 1 câu" gặp chuyện đó cũng không làm dừng các câu
+    theo giờ. Ô ở thẻ Thông báo nay tên là "Tự chat gửi không được nhiều
+    lần".
+  + Làm nhiệm vụ nhanh: hỏng 3 lần liền (max_failures trong
+    configs\quest.ini) thì thẻ ghi "Không làm được 3 lần liền (lý do) —
+    GoBot vẫn thử lại mỗi lượt. Xem ảnh trong quest_debug." và điện thoại
+    được báo một lần ("Làm nhiệm vụ nhanh: 3 lần liền ... — GoBot vẫn thử
+    lại."); lần sau vẫn tới đúng giờ "Kiểm tra mỗi" (mặc định 5 phút), như
+    sau mọi lần hỏng, và làm được một lần thì đếm lại từ đầu (trước đây hỏng
+    3 lần liền thì tự tắt). Thiếu hình nhận diện cửa sổ Nhiệm Vụ cũng không
+    làm tắt nữa: thẻ ghi một lần "Thiếu hình nhận diện cửa sổ Nhiệm Vụ —
+    GoBot thử lại sau 30 giây.", và cứ 30 giây GoBot tìm lại hình, không bấm
+    gì. Chỉ bản game tiếng Anh (GoBot chưa hỗ trợ) là vẫn dừng như cũ.
+  + Tự đóng thông báo: bảng Sự kiện và điểm danh, thông báo nhận quà điểm
+    danh hay Yêu Quái Bách Khoa đã bấm mà vẫn còn thì 30 giây sau GoBot bấm
+    lại, cứ thế tới khi nó tắt (trước đây 2 lần trong 10 phút thì GoBot để
+    yên). Thẻ ghi "Đã bấm ESC mà bảng Sự kiện và điểm danh vẫn còn: thử lại
+    sau 30 giây." (hay "Đã thử đóng ... mà vẫn còn: thử lại sau 30 giây.");
+    log ghi "Popups: ... is still up after closing it with ESC (try N);
+    trying again in 30 s". Mọi điều kiện cũ vẫn giữ: bảng chỉ bấm ESC 30
+    giây sau khi vào game, qua ngày thì chờ tới 00:03, không bao giờ bấm
+    nút X của bảng, không bấm ESC khi có thông báo hay cửa sổ khác.
+  Cũng trong bản này, cùng lời bạn ở trên, Tự hồi sinh và Tự vào lại game
+  không còn dừng bot hay tự dừng (chưa thử trên game thật):
+  + Tự hồi sinh: thử 3 lần không được thì bot KHÔNG dừng nữa (trước đây
+    GoBot dừng cả bot, ghi lý do bằng chữ đỏ, chờ bạn bấm BẮT ĐẦU). Trong lúc
+    nhân vật còn nằm, GoBot vẫn giữ mọi phím (không bấm gì vào bảng hồi
+    sinh); 30 giây sau GoBot thử thêm 3 lần, cứ thế mãi, không bao giờ bấm
+    hồi sinh tại làng hay Cash. Bạn hồi sinh bằng tay thì mọi việc tự chạy
+    tiếp. Thẻ ghi màu vàng "Tự hồi sinh: 3 lần chưa được — có thể đã hết
+    giấy/bùa hồi sinh. Thử lại sau N giây; hồi sinh bằng tay thì bot tự chạy
+    tiếp."; điện thoại được báo một lần cho mỗi lần chết: "Hồi sinh tại chỗ
+    3 lần chưa được — có thể đã hết giấy/bùa hồi sinh. GoBot không hồi sinh
+    tại làng; thử lại sau 30 giây. Hồi sinh bằng tay thì bot tự chạy tiếp."
+  + Tự vào lại game: số lần vào lại tối đa (max_restarts trong
+    configs\app.ini, mặc định 5) nay tính trong 1 giờ, không phải cả lần
+    chạy. Quá số đó thì GoBot không đóng game, không bấm gì, chờ tới khi lần
+    cũ nhất đã qua 1 giờ rồi tự vào lại (trước đây GoBot ngừng tự vào lại và
+    chờ bạn). Thẻ và điện thoại ghi: "Đã vào lại game 5 lần trong 1 giờ —
+    GoBot chờ tới hh:mm:ss rồi tự vào lại."; ô ở thẻ Thông báo nay tên là
+    "Tạm nghỉ tự vào lại". Trong lúc chờ, bấm phím vào game ngay thì GoBot
+    xem lại game ngay (bạn có thể đã tự sửa). Vào lại được thì báo "Đã vào
+    lại game (lần N trong 1 giờ qua). Bot chạy tiếp."
+  + Lần vào game không được (đã thử hết các lần của một lượt, thiếu hình
+    nhận diện, không thấy VTCZone, VTCZone đang ở màn hình đăng nhập, hộp
+    Security Alert của game...) thì 30 giây sau GoBot vào lại, cứ thế mãi,
+    mỗi lượt đọc lại configs\login.ini (trước đây GoBot dừng và chờ bạn).
+    GoBot vẫn không bao giờ gõ gì vào màn hình đăng nhập của VTCZone hay
+    bấm vào hộp Security Alert: bạn đăng nhập hay trả lời xong thì lượt sau
+    tự đi tiếp. Thẻ ghi màu vàng "Vào lại game chưa được (lý do) — GoBot
+    thử lại sau 30 giây.", lý do đầy đủ màu đỏ bên dưới (mất khi vào được);
+    điện thoại được báo một lần cho tới khi vào được. Phím vào game ngay
+    cũng vậy: 30 giây sau vào lại, trừ khi bạn bấm phím đó lần nữa để huỷ.
+    Chỉ khi GoBot không chạy bằng quyền Administrator thì Tự vào lại game
+    vẫn dừng (chỉ chạy lại GoBot bằng quyền Administrator mới sửa được).
+  + Sau khi vào lại game mà GoBot chưa tìm thấy cửa sổ game, cứ 5 giây GoBot
+    tìm lại một lần (trước đây chỉ tìm một lần), và khi thấy thì làm đủ các
+    việc như sau mỗi lần vào lại (buff lại, bỏ chỗ đánh quái cũ, bật các
+    việc đã chọn nếu vừa mở game).
+
+- Mới trong bản 2026.11.17c (bảng Sự kiện và điểm danh: vẫn được tắt bằng
+  ESC dù có lúc GoBot nhìn không thấy nó; theo lời bạn ngày 17/11; chưa thử
+  trên game thật).
+  Bạn báo: "check lại phần tắt thông báo, có bảng điểm danh hiển thị mà
+  không thấy tự tắt".
+  + Nguyên nhân (theo log lúc 21:36 ngày 17/11): GoBot thấy bảng lúc
+    21:36:17 và hẹn bấm ESC 30 giây sau. Trước giờ đó có một lần nhìn không
+    thấy bảng, nên GoBot tưởng bảng đã tắt rồi hiện lại, đếm lại 30 giây từ
+    21:36:55, và bot được dừng trước khi tới giờ. Ảnh GoBot lưu trong
+    popup_debug cho thấy game viết các dòng thông báo (như "Khôi phục năng
+    lực Quỷ Hồn.") và tên bản đồ đè lên bảng; có thêm dòng (như lúc buff
+    lại) thì chúng đè lên thanh tiêu đề của bảng, chỗ GoBot dùng để nhận ra
+    bảng.
+  + Nay bảng thấy lại ở đúng chỗ cũ trong vòng 15 giây là cùng một bảng:
+    vẫn bấm ESC 30 giây sau khi vào game (hay sau lần thấy đầu tiên). Bảng
+    đã tắt, vào lại game, hoặc không thấy quá 15 giây thì mới đếm lại từ
+    đầu. Qua ngày vẫn chờ tới 00:03 như cũ.
+    Chỉ 15 giây vì GoBot không phân biệt được bảng nó nhìn sót với bảng bạn
+    tự tắt: bạn tắt rồi mở lại bảng để điểm danh thì đó là bảng mới, vẫn có
+    đủ 30 giây để đọc. Bảng thấy lại sau một lần nhìn sót, dù đã tới giờ,
+    cũng chờ thêm 3 giây mới bấm ESC, để GoBot kịp nhìn xem có Yêu Quái Bách
+    Khoa vừa mở hay không (ESC sẽ tắt nó trước).
+  + Tiêu đề bị chữ đè một phần vẫn được nhận ra, nhưng chỉ ở đúng chỗ bảng
+    vừa được thấy rõ trong 60 giây trước, không bao giờ để nhận một bảng
+    mới. Bấm ESC rồi mà tiêu đề còn bị chữ đè thì không coi là đã tắt.
+  + Đến giờ mà chưa bấm được ESC thì log ghi lý do, mỗi lý do một lần: nhìn
+    lại ngay trước lúc bấm không thấy bảng (lượt sau, 1 giây sau, nhìn
+    lại; hai lần liền thì 5 giây sau), có thông báo khác cùng hiện, game
+    không ở trên cùng quá 10 giây.
+    Đang có việc khác giữ game (dọn rác, cửa hàng, tự mời tổ đội đang bấm
+    chuột...) hay bạn vừa chạm chuột, bàn phím thì 5 giây sau thử lại,
+    không phải 30 giây.
+  + Vẫn như cũ: không bấm ESC khi có cửa sổ hay hộp thoại khác đang mở, khi
+    GoBot đang dọn rác hay mua đồ, khi bạn đang gõ; không bao giờ bấm vào
+    bảng. Không có ô mới; không cần sửa gì trong configs. Chạy thử xong,
+    bạn gửi giúp các dòng log có chữ "Popups:" và các ảnh trong thư mục
+    popup_debug.
+
+- Mới trong bản 2026.11.17b (mời tổ đội người đã có tổ đội: không còn mở
+  danh sách người chơi liên tục, không còn giữ chuột lâu; theo lời bạn
+  ngày 17/11; chưa thử trên game thật).
+  Bạn báo: "Hiện tại có bug khi pt người đã có pt thì hiển thị thông báo
+  sau đó bot không phản ứng gì nữa và cứ mở khung pt." Bạn chọn: "ok làm
+  A B C đi".
+  + A. Mời không thành thì tạm ngưng mời người đó. 15 giây sau lời mời,
+    GoBot xem khung tổ đội của game (các ô thành viên bên trái màn hình):
+    có thêm một ô so với lúc trước khi mời là người đó đã vào. Không thấy
+    thêm ô nào, hay không đọc được khung tổ đội, thì coi là không vào;
+    game hiện thông báo sau lời mời thì tính là không vào ngay, không chờ
+    15 giây. Không vào thì 1 phút nữa mới mời lại người đó; không vào 2
+    lần liền thì 10 phút. Vào tổ đội rồi thì đếm lại từ đầu. Người đang bị
+    tạm ngưng có chat từ khoá thì GoBot không mở danh sách người chơi.
+    Có thông báo hay không cũng vậy, nên hết cảnh mở danh sách liên tục.
+    (Trước đây chỉ khi GoBot thấy thông báo, và chỉ 30 giây, từ bản
+    2026.11.15b.) Hai người được mời gần nhau mà cả hai đều vào thì cả hai
+    được tính là đã vào. Người chat từ khoá mà không có trong danh sách
+    người chơi trên bản đồ thì GoBot chưa mời, nên không tính là một lần
+    không vào: GoBot chỉ bỏ qua từ khoá của người đó 1 phút, lần nào cũng
+    1 phút, không bao giờ thành 10 phút (bạn bè đang trên đường tới bản đồ
+    được mời lại sau tối đa 1 phút).
+  + B. Tắt thông báo chắc hơn. Hộp chỉ có một nút Xác Nhận hiện lên sau
+    lời mời được bấm vào chính nút Xác Nhận đó; không bao giờ Enter hay
+    ESC, không bao giờ bấm hộp có hai nút (lời mời, hộp của thùng rác,
+    hồi sinh). Mỗi lần bấm, GoBot chỉ giữ chuột chờ hộp tắt tối đa 2,5
+    giây (trước đây tới 30 giây, nên các việc khác phải đứng chờ). Hộp
+    chưa tắt thì GoBot thả chuột, lượt sau bấm lại (cách nhau ít nhất 1
+    giây), tối đa 3 lần; vẫn không tắt thì ngưng mời 1 phút và nhờ bạn
+    bấm Xác Nhận giúp. Trong lúc chờ bấm lại thì không mời ai, kể cả
+    những người khác chat từ khoá cùng lúc (họ chờ lượt sau).
+  + C. Mời xong thì đóng danh sách người chơi, bằng chính nút mở nó (hình
+    người nhỏ dưới bản đồ nhỏ), không dùng ESC. Nút được tìm theo hình
+    trên cả màn hình game nên dùng được ở 1024x768, 1280x720 và 1366x768
+    (1366x768 chưa có ảnh thật để thử). Mời thành công thì game tự đóng
+    danh sách, GoBot không bấm thêm. Chỉ đóng danh sách do GoBot mở; danh
+    sách bạn tự mở thì để yên. Bấm một lần, chờ tối đa 3 giây; không đóng
+    được thì ghi log một lần và để vậy.
+  + Chưa có ảnh của thông báo "đã có nhóm" nên chưa biết chắc GoBot nhận
+    ra nó (cách A không cần nhận ra). Không có ô mới; không cần sửa gì
+    trong configs.
+  + Gửi giúp: gobot_gui.log của lần chạy (các dòng "Party:", nhất là
+    "Party: invite to ... did not lead to a join (...)", "Party: ...
+    joined after the invite", "Party: the game's message after the
+    invite to ..." và "Party: the player list did not shut ..."), kèm một
+    ảnh chụp màn hình lúc thông báo "đã có nhóm" đang hiện.
+
+- Mới trong bản 2026.11.17 (sửa thanh MP đọc sai làm bình MP bị bấm liên
+  tục, HP/MP nay chỉ theo gói tin, và kỹ năng ra không đều khi đánh quái;
+  theo log của bạn đêm 16/11 sang 17/11; chưa thử trên game thật).
+  Bạn nhờ: "check lại log mới nhất nhé, tìm thanh MP lỗi, skill ra không
+  đồng đều". Log là của bản 2026.11.16b: đánh quái từ 23:45 tới 00:23, rồi
+  đứng bấm macro tới 00:39.
+  + Lỗi thanh MP: lúc đứng, bình MP (phím G, dưới 62%) bị bấm 58-59 lần mỗi
+    phút trong khi MP thật còn 92-100%. Ảnh game lúc 00:23:27 cho thấy vì
+    sao: đốm sáng hồng ở đầu thanh EXP (thanh thứ ba; đốm nằm ở chỗ EXP
+    đang tới và dời dần sang phải khi EXP tăng) đè lên mấy chữ số đầu của
+    số MP, nên "15542/16813" bị đọc thành "542/16813" (3%). Khi GoBot thôi
+    giữ số cũ thì nó đo độ dài phần thanh có màu, mà đoạn dưới hàng chữ số
+    bị chữ che, nên ra khoảng 57%, vẫn dưới mức 62% của bạn. Gói tin của
+    game thì vẫn báo MP đúng. Nhưng bản cũ chỉ dùng HP/MP trong gói tin sau
+    khi đã so với thanh trên màn hình đủ 20 lần khớp: HP qua được (từ
+    00:24:10), MP thì không bao giờ qua, vì kỹ năng ra đều nên MP đổi gần
+    như mỗi lần đọc, mà lần đọc lúc MP đang đổi thì không được đem so.
+  + Bạn chọn "chỉ dùng gói tin": HP và MP nay theo gói tin, không so với
+    màn hình nữa. Có gói tin là dùng ngay; thanh HP/MP trên màn hình chỉ
+    được dùng khi không có gói tin: chưa cài Npcap hay không bắt được gói
+    tin của game, vừa mở GoBot hay vừa bắt lại gói tin mà game chưa gửi
+    HP/MP, hay game im hơn 5 giây. Có gói tin lại là dùng gói tin ngay.
+    Qua cửa thì không chuyển sang màn hình: số cũ trong gói tin vẫn dùng,
+    lúc bản đồ đang tải thì macro chờ, và game gửi lại HP/MP ngay khi vào
+    bản đồ mới. Không còn "20 lần khớp", "đang nghi" hay "thôi tin". Máu
+    thú cưng, nhân vật có ở trong game không, bảng chết và hồi sinh vẫn
+    theo màn hình như cũ; riêng HP 0 trên thanh thì không bị coi là chết
+    khi gói tin còn báo HP trên 0 (như từ bản 2026.11.10).
+    Muốn HP/MP luôn theo màn hình thì vẫn là vitals=off trong phần
+    [Packets] của configs\app.ini (sửa lúc GoBot đã tắt).
+  + Đổi lại: nếu một ngày game đổi cách gửi HP/MP thì GoBot không tự biết.
+    Dòng "Vitals:" mỗi phút trong gobot_gui.log vẫn đặt số trên thanh cạnh
+    số gói tin để mình xem (chỉ ghi log, không làm gì): "same" là khớp,
+    "short" là thanh bị đọc sót chữ số, "other" là khác hẳn. Thấy "other"
+    nhiều thì báo mình.
+  + Gói tin MP lúc đánh nhau (0x02F0) nay cũng được dùng, nên MP theo gói
+    tin sát hơn khi tung kỹ năng.
+  + Khi không có gói tin (và cả khi có, cho phần ghi log): số trên thanh mà
+    ít chữ số hơn số tối đa và nhỏ hơn hẳn (quá 5 điểm %) phần thanh đang
+    có màu thì bị coi là bị che: bỏ lần đọc đó, giữ số cũ. Không còn số
+    cũ mà MP đo được từ 54% trở lên thì GoBot coi là chưa đọc được MP, chứ
+    không phải 3% hay 57%, nên khi không có gói tin bình MP chỉ được bấm
+    khi phần thanh MP thấy được dưới khoảng 54%. Dòng "Đọc được HP và MP"
+    ở thẻ Đánh quái lúc đó ghi "Đọc được HP; MP theo gói tin (số MP trên
+    thanh đang bị che)", hay khi không có gói tin "Đọc được HP; số MP đang
+    bị che (đầu thanh EXP) -- chờ".
+  + Phanh bình: một phím bình bấm 3 lần liền mà số đọc được không tăng thì
+    từ đó chỉ bấm theo giờ hồi của chính nó (không bấm lại ngay sau 1 giây,
+    không bấm sớm khi dưới nửa mức), tới khi số tăng, số lên trên mức,
+    không đọc được, hay tắt macro. Riêng HP mà còn tụt thêm (đang thua) thì bấm nhanh lại
+    ngay. Log: "Potion check: MP key G pressed 3 times and the reading
+    never rose (3%) -- ..." và khi hết phanh "... its quicker presses back".
+  + Lỗi kỹ năng ra không đều: lúc đánh quái, Z, X, B, A, D mỗi phím ra
+    14-16 chiêu mỗi phút, còn C và V chỉ 1 chiêu. Có bốn lý do trong log:
+    1. Phím lướt đoán sai: khi GoBot chưa học được chiêu lướt (đêm đó nó
+       học được rồi lại bỏ hai lần), nó coi C, V và Space đều là phím lướt
+       và giữ chúng lại ở gần mép vùng, đầu bục. Bạn đánh gần mép gần như
+       suốt, nên C và V gần như không ra. Nay chưa học được thì không phím
+       nào bị coi là phím lướt; chỉ phím lướt GoBot đã học được (theo gói
+       tin) mới bị giữ ở gần mép. Lướt ra ngoài vùng thì bot dừng đánh và
+       đi về vùng, như bạn muốn.
+    2. Học sai giờ hồi: có lúc GoBot học rằng một kỹ năng hồi 20-70 giây (C
+       33 giây, X 70,9 giây, D 70,3 giây) trong khi nó ra lại mỗi 3 giây,
+       vì những lần game không nhận phím ngay sau lúc bot giữ kỹ năng, lúc
+       bạn tự bấm, hay lúc bị quái vây. Nay: chiêu ra, ai bấm cũng vậy, đều
+       tính giờ hồi của phím đó; giờ hồi học được không bao giờ dài hơn
+       khoảng ngắn nhất mà kỹ năng đó từng ra lại, và không quá 12 giây;
+       lần game không nhận phím trong 1 giây sau lúc giữ kỹ năng, lúc đáp,
+       quay mặt hay nhảy xuống thì không dạy gì; phím bị cho là đang hồi
+       được bấm thử lại sau 3 lượt (trước đây 20 lượt). Mỗi lần bấm BẮT
+       ĐẦU, giờ hồi đã học được xoá đi, học lại từ đầu.
+    3. Nhân vật đã chết (HP 0 trên thanh lúc 00:07:17, rồi tải lại bản
+       đồ, tới 00:09): không thấy chiêu nào ra trong 2 giây, bản cũ chuyển
+       sang bấm theo giờ, 220-230 phím mỗi phút. (Phút tới 00:22:55 có 169
+       phím là chuyện khác: lúc đó vẫn đánh nhau, HP từ 64% trở lên, chỉ
+       bấm theo giờ chừng 5 giây; phần lớn là bấm lại X và D vì học sai
+       giờ hồi 70 giây, tức lý do 2.) Nay, khi vẫn có gói tin, vòng vẫn
+       giữ, chỉ bấm thử một phím mỗi giây tới khi chiêu ra lại. HP dưới
+       0,5% quá 0,8 giây thì không bấm phím kỹ năng nào (bình, buff và phím
+       "Luôn bấm theo giờ" vẫn bấm). HP ở đây là HP GoBot đang dùng, tức
+       HP trong gói tin khi có gói tin: lần chết lúc 00:07 gói tin vẫn báo
+       27% trong khi thanh ghi 0, nên lúc đó chính việc bấm thử một phím
+       mỗi giây giữ cho số phím ít. Mất hẳn gói tin thì vẫn bấm theo giờ,
+       nhưng mỗi phím cách nhau ít nhất một lần khoá chiêu (khoảng 85 phím
+       mỗi phút thay vì 220-230). Không có Npcap thì vẫn bấm theo giờ như
+       cũ.
+    4. Buff: lúc theo vòng, GoBot thấy chiêu buff đã ra thì không bấm nốt
+       các lần còn lại (buff_presses=4 vẫn là số lần tối đa khi game bỏ sót
+       phím). Log không còn tính nhầm chiêu kỹ năng kế tiếp là của phím
+       buff.
+    Chiêu ra từ đòn đánh của bot (phím đánh Z) không còn làm GoBot học
+    nhầm phím khác ra chiêu nào.
+  + Không có ô mới; không cần sửa gì trong configs.
+  + Gửi log: đánh quái một lúc có macro, rồi gửi gobot_gui.log, kèm giờ lúc
+    thấy bình MP bấm liên tục hay kỹ năng nào ít ra. Nhất là các dòng:
+    "Vitals:" mỗi phút ("from the packets HP ...% MP ...% of the minute
+    ..."), "Vitals: MP from the screen until the packets have it again --
+    ..." và "Vitals: MP figures ... refused" nếu có, "Potion check:",
+    "Potions:", "Paced:" mỗi phút (nay thêm "skips taught N, not taught:
+    ..."), "Paced: no cast of yours for ..." và "Dash (packets):".
+
+- Mới trong bản 2026.11.16b (kỹ năng ra đều, theo vòng cả khi đánh quái;
+  theo lời bạn ngày 16/11; chưa thử trên game thật).
+  Bạn báo: "Hiện tại dùng skill đang không được đều, cần chỉnh lại", cả lúc
+  Tự đánh quái chạy lẫn lúc chỉ đứng bấm phím theo giờ: có lúc khựng 1-2
+  giây không ra chiêu nào, và chiêu chờ lâu ít khi ra trong khi chiêu ngắn
+  ra suốt. Log ngày 15/11 cho thấy mỗi phím Z, X, C bị bấm khoảng 90 lần
+  mỗi phút mà mỗi phím chỉ ra 14-17 chiêu: game bỏ qua phím bấm lúc nhân
+  vật còn đang ra chiêu trước, nên chiêu nào ra là do may. Bạn chọn "Ra
+  chiêu theo vòng cả khi đánh quái", bật sẵn.
+  + Ô "Ra chiêu theo vòng" nay mặc định CÓ dấu, kể cả với macro.ini cũ của
+    bạn (dòng cast_paced=false trong đó là mặc định cũ, không phải bạn
+    chọn). Ô nằm ngay ở dòng Tự dùng kỹ năng (thẻ Đánh quái), ngay dưới "Tốc
+    độ bấm kỹ năng". Cửa sổ Kỹ năng (nút "Chi tiết…") và màn hình Nâng cao
+    (phần "Timed keys") vẫn có ô "Ra chiêu theo vòng (chờ game ra chiêu rồi
+    mới bấm chiêu kế)"; cả ba là một ô.
+  + Có dấu: các phím kỹ năng được bấm lần lượt theo thứ tự trong danh sách,
+    mỗi phím một lần mỗi vòng; phím sau chỉ được bấm khi game đã ra chiêu
+    trước (GoBot thấy gói tin ra chiêu của bạn) và chiêu đó đã xong. Giờ của
+    mỗi phím (cột "Hồi chiêu (giây)") là khoảng chờ ngắn nhất giữa hai lần
+    ra chiêu của chính phím đó: phím chưa tới giờ thì nhường lượt ngay, tới
+    giờ thì ra ở lượt kế của nó, nên không phím nào bị bỏ đói. Với các phím
+    của bạn (Z 0,5 giây; X, C, V, B, Space 1 giây; A, S 3 giây) mỗi phím ra
+    một lần mỗi vòng, khoảng 6 giây một lần; phím 10 giây hay 30 giây thì ra
+    mỗi 10 hay 30 giây, trễ nhất thêm một vòng.
+  + Nay chạy cả khi Tự đánh quái chạy, có hay không "Chỉ khi đang đánh
+    quái". Những lúc bot giữ kỹ năng như trước (đi về vùng, đang quay mặt,
+    đang nhảy xuống hay rơi, trong vùng không có quái, ở ngoài vùng, đang
+    nhảy lên; với "Chỉ khi đang đánh quái" thêm lúc không đánh quái, MP dưới
+    mức và lúc chết) thì vòng đứng chờ ở phím đang tới lượt, hết giữ thì đi
+    tiếp từ phím đó, mỗi lần một phím, không bấm dồn. Còn phím mà quái xa
+    quá tầm của nó, hay phím lướt lúc gần mép, thì chỉ nhường lượt: vòng đi
+    tiếp phím kế, các phím khác vẫn ra. Với "Chỉ khi đang đánh quái", phím
+    đánh mà cũng là kỹ năng cũng nhường lượt khi quái xa quá tầm đánh của
+    bot, như bot vẫn không đánh lúc đó.
+  + Phím đánh (ở thẻ Đánh quái) mà cũng là một phím kỹ năng, như Z của bạn:
+    lúc theo vòng, Z ra theo lượt của nó, bot không bấm thêm Z mỗi 0,7 giây
+    nữa (trước đây chính vì vậy mà Z ra suốt). Phím đánh không phải kỹ năng
+    (ví dụ Space đánh thường) thì bot chỉ bấm nó lúc không kỹ năng nào tới
+    lượt. Chiêu ra từ đòn đánh của bot không bị tính nhầm là chiêu của phím
+    đang chờ. Chiêu bạn tự bấm cũng vậy, khi GoBot đã nhớ phím đó ra chiêu
+    nào (sau 3 lần ra chiêu đầu của phím đó, mỗi lần mở GoBot); trước đó một
+    chiêu bạn tự bấm có thể bị tính là của phím đang chờ, phím đó mất một
+    lượt. Chiêu nhận ra không phải của phím đang chờ thì phím đó được bấm
+    lại sau khi chiêu kia xong.
+  + Phím bấm mà game bỏ qua: bấm lại sau 160 ms, vẫn không ra trong 220 ms
+    thì vòng qua phím kế ngay, như trước. Trong bài thử, khoảng cách dài
+    nhất giữa hai chiêu là 0,74 giây khi không mất phím nào, 0,9 giây khi
+    mất một lần bấm và 1,12 giây khi mất cả hai lần bấm của một phím. Phím
+    không bấm được vì việc khác (đòn đánh, bước đi của bot) đang giữ bàn
+    phím một chút thì thử lại sau 30 ms thay vì 100 ms.
+  + Không có gói tin (chưa cài Npcap, hay không bắt được gói tin): mọi phím
+    bấm theo giờ như trước, cả khi đánh quái. Bình HP, bình MP và bình thú
+    cưng luôn được bấm trước; buff vẫn theo giờ riêng (tới giờ lúc chiêu
+    chưa xong thì chờ chiêu đó xong, thường dưới một giây). Chuỗi phím
+    (Sequence, màn hình Nâng cao) đang bật thì ô này vẫn tạm không có tác
+    dụng.
+  + Muốn tắt: thẻ Đánh quái, dòng Tự dùng kỹ năng, bỏ dấu ô "Ra chiêu theo
+    vòng" (lưu ngay; mở lại GoBot vẫn tắt). Sửa tay thì là dòng
+    cast_paced_v2=false trong phần [Macro] của configs\macro.ini, lúc GoBot
+    đã tắt.
+  + Dưới ô có dòng cho biết đang làm gì, ví dụ "Đang theo vòng cùng Tự đánh
+    quái — khóa chiêu ước 680 ms, 12 vòng.". Trong gobot_gui.log, dòng
+    "Paced:" mỗi phút nay ghi thêm "now paced with the hunter" khi chạy cùng
+    Tự đánh quái, "given back N" (lần bấm nhường lại vì chiêu khác ra), "held
+    N s" (thời gian vòng đứng chờ) và số lần bấm và số chiêu ra của từng phím
+    ("per key pressed/cast: Z 9/9, X 9/8, ..."); dòng "Casts (packets):" vẫn
+    ghi số lần bấm và số chiêu ra của từng phím. Sau khi đánh quái một lúc,
+    nhờ bạn gửi gobot_gui.log, nhất là các dòng "Paced:", "Casts (packets):",
+    "Cast gaps (packets):" và "Skills:".
+
+- Mới trong bản 2026.11.16 (GoBot nhẹ máy hơn cho máy yếu, và bỏ các phần
+  cũ không còn ai dùng; theo lời bạn ngày 16/11; chưa thử trên game thật).
+  Một máy người chơi (1 nhân, 3,5 GB RAM, chạy cả game) bị giật khi chạy
+  GoBot. Bạn nhờ làm GoBot nhẹ hơn, và xoá các phần cũ không còn dùng,
+  không cần hỏi lại từng phần. Màn hình đơn giản không đổi gì (trừ một dòng
+  nhắc, xem dưới), các ô đánh dấu vẫn làm đúng việc cũ; chỉ đổi số lần
+  GoBot nhìn màn hình và lượng việc mỗi lần nhìn.
+  + Đo trên máy của bạn (20 nhân, log ngày 15/11, đánh quái kèm macro, Tự
+    đóng thông báo và Tự vào lại game): GoBot tốn khoảng 11,5 giây CPU mỗi
+    phút, và chụp cả màn hình khoảng 8,5 lần mỗi giây. Bản khảo sát ước
+    chừng còn khoảng 4 giây mỗi phút nếu làm hết các đề xuất. Đó chỉ là ước
+    tính, chưa đo, và có một đề xuất bản này không làm (chỉ chụp phần thanh
+    máu), nên thực tế sẽ bớt ít hơn thế. Dòng "Load:" trong gobot_gui.log
+    cho biết GoBot tốn bao nhiêu.
+  + Ít nhìn màn hình hơn:
+    1. Tự đóng thông báo: lần nhìn không thấy gì thì 2 giây sau mới nhìn
+       lại (3 giây khi bật Nhẹ máy), thay vì 1 giây; đã thấy thông báo thì
+       vẫn nhìn mỗi giây như cũ. Luật "đứng yên 3 giây", và bảng Sự kiện và
+       điểm danh (30 giây sau khi vào game, từ 23:55 tới 00:03 không bấm)
+       vẫn như cũ; chỉ là thông báo có thể được thấy muộn hơn tới 2 giây (3
+       giây khi Nhẹ máy). Hình phím sách của GoC, hình tốn công tìm nhất,
+       chỉ tìm mỗi 5 lần nhìn không thấy gì, hoặc ngay khi thấy tiêu đề
+       sách mà không thấy nút X của nó.
+    2. Đọc tên quái lúc bot đánh theo gói tin: mỗi 2 giây thay vì 0,6 giây.
+       Khi màn hình làm thay, GoBot đọc lại ngay như cũ, và không dùng tên
+       quái của ảnh chụp trước lúc đổi.
+    3. Có phím bình thú cưng: trước đây, suốt lúc bot chạy, GoBot đọc thanh
+       HP/MP liên tục (mỗi 0,15 giây; 0,25 giây khi Nhẹ máy). Nay, khi gói
+       tin đã lo HP/MP, GoBot đọc mỗi 0,5 giây (máu thú cưng chỉ đọc được
+       trên màn hình), tức khoảng 2 lần mỗi giây thay vì 6. Bình thú cưng
+       vẫn được bấm như cũ.
+    4. Khi không thấy thanh máu (bị che, chưa vào game), GoBot tìm lại thanh
+       máu tối đa mỗi giây một lần.
+    5. Ảnh trong thư mục vitals_debug: 20 ảnh đầu mỗi lần chạy, sau đó tối
+       đa 10 phút một ảnh.
+    6. Dòng log lặp lại mỗi lần đọc (ví dụ "MP disagreement (learning)"):
+       tối đa một dòng mỗi 10 giây, kèm số dòng đã không ghi.
+  + Mỗi lần nhìn tốn ít hơn, ít đánh thức máy hơn:
+    1. Phần tìm hình giữ lại bộ nhớ đã dùng cho lần tìm sau, thay vì xin
+       lại mỗi lần; kết quả y hệt cũ (có bài kiểm tra so từng điểm).
+    2. Máy có 1 hoặc 2 nhân: các lần tìm hình chạy song song của Dọn rác,
+       Dùng bùa, Tự mua bình và Tự đóng thông báo nay chạy lần lượt: cùng
+       kết quả, không tạo thêm luồng và không tốn thêm bộ nhớ.
+    3. Hình của game chỉ nạp một lần cho cả GoBot, thay vì mỗi việc một bản
+       (trước có 3 tới 9 bản, mỗi bản khoảng 18 MB).
+    4. Cửa sổ GoBot: rê chuột qua GoBot không còn làm GoBot làm việc nhiều
+       hơn. F10, F11, F12 vẫn nghe như cũ.
+    5. Macro và đánh quái chỉ chép lại cài đặt khi có đổi. Chuỗi phím đang
+       tắt thì nằm chờ, không nhìn lại mỗi 0,05 giây nữa. Tổ đội chỉ đọc lại
+       party.ini khi file đó đổi. Tự vào lại game xem game có văng không mỗi
+       6 giây thay vì 3 giây.
+    6. Các việc chạy nền (Tự đóng thông báo, Tự vào lại game, đọc tên quái,
+       Thông báo, Tổ đội, Tự hồi sinh, Dọn rác, Dùng bùa, Tự mua bình, Tự
+       chat, Nhiệm vụ nhanh...) không còn được Windows cho chen lên trước
+       game mỗi lần thức dậy; mức ưu tiên vẫn bình thường. Bấm phím, đánh
+       quái, đọc HP/MP và bình máu không đổi.
+  + Ô "Nhẹ máy (máy ảo / máy yếu)" ở chế độ tự động nay cũng tự bật khi máy
+    chỉ có 1 hoặc 2 nhân, hoặc RAM dưới 4 GB; dòng chữ mờ dưới ô ghi lý do,
+    ví dụ "Tự bật vì máy chỉ có 1 nhân." hay "Tự bật vì máy có RAM dưới 4
+    GB." Máy của bạn (20 nhân) không bị ảnh hưởng. Bỏ dấu ô đó thì GoBot
+    vẫn tắt Nhẹ máy theo ý bạn.
+  + Sửa lỗi đọc sai MP: số trên thanh bị đọc thiếu mấy chữ số đầu (16462
+    đọc thành 462) không còn bị coi là lệch với gói tin. Trước đây chỉ cho
+    phép thiếu một chữ số (bản 2026.11.13), nên GoBot thôi tin MP của gói
+    tin, và macro có thể nhận một MP thấp sai rồi bấm bình MP thừa.
+  + Đã bỏ (đều ở màn hình Nâng cao hay gobot_cli; người chơi không cần):
+    1. Bot gói tin cũ, chưa bao giờ chạy được (game không gửi vị trí của
+       chính nhân vật): menu Bot > Start, các thẻ Dashboard, Protocol,
+       Autopilot, Calibrate, Mapper và thẻ Map của màn hình Nâng cao (tab
+       Bản đồ của màn hình đơn giản vẫn giữ), các mục Game keys, Weapon
+       ranges, Working area, Monsters, Waypoints, Buffs, Click sequences,
+       "What is not built yet", và file configs\bot_default.ini.
+    2. Đi tới điểm đã lưu ("Go", "Patrol these") và thẻ Radar; GoBot không
+       còn xem bản đồ nhỏ (minimap) để biết đổi bản đồ (gói tin vẫn báo
+       như cũ). Phần [Move] trong hunt.ini không còn được đọc. Dòng nhắc
+       "Phím nhảy khi đi tới điểm đã lưu là Space: sẽ đánh chứ không nhảy"
+       ở "Trước khi bắt đầu" cũng bỏ theo: đây là chỗ duy nhất màn hình
+       đơn giản đổi. Dòng "Phím nhảy đang là Space" (phím nhảy khi đánh
+       quái) vẫn giữ.
+    3. Câu cá, đào mỏ (configs\gathering.ini) và phần tự bấm theo các bảng
+       trong routines.ini. Tự hồi sinh không đổi.
+    4. gobot_cli: chạy mà không kèm lệnh nay chỉ in cách dùng; các lệnh
+       dành cho người làm GoBot gắn với phần đã bỏ cũng bỏ. Các lệnh
+       --doctor, --login, --fix-dpi và các lệnh chỉ nhìn (--potions,
+       --party-hud, --popups...) vẫn giữ.
+  + Vẫn giữ ở màn hình Nâng cao: thẻ Features (Attack, Healing, Timed keys,
+    HP / MP reader, Auto party, Keep the client alive, Watch the session),
+    thẻ Log, và khi bật View > Advanced panels: thẻ Tools với HP / MP và
+    Capture (nút "Stop capture" dùng ở bước 9 g của mục 6).
+  + Cập nhật từ bản cũ: file bot_default.ini hay gathering.ini chép từ bản
+    cũ sang thì GoBot để yên, không đọc.
+  + Khi thử: chơi như thường. Nếu máy vẫn giật hay có gì lạ, gửi
+    gobot_gui.log (có các dòng "Load:", và dòng "Machine:" ở đầu file), ghi
+    kèm máy có mấy nhân, bao nhiêu RAM.
+
+- Mới trong bản 2026.11.15d (máy chậm: mỗi thao tác của GoBot chờ game phản
+  ứng tới 30 giây; bảng điểm danh tắt 30 giây sau khi vào game, qua ngày thì
+  chờ tới 00:03; theo lời bạn ngày 15/11; chưa thử trên game thật).
+  Bạn báo, cho máy yếu (1 nhân, 3,5 GB) hay bị lag, giật, đơ: "khi GoBot
+  thực hiện thao tác, sẽ có thêm 30 giây chờ phản ứng. Nếu màn hình phản
+  ứng luôn thì thực hiện tiếp bước tiếp theo, còn nếu màn hình không phản
+  ứng gì thì sẽ dừng xử lý." Và: "Sau khi chọn nhân vật xong và vào tới màn
+  hình game thì sẽ chờ 30 giây rồi mới ấn ESC để tắt thông báo. Trường hợp
+  qua ngày thì chờ tới 00:03 mới ấn ESC."
+  + 30 giây chờ phản ứng: sau mỗi phím, cú bấm chuột, chuột phải, bấm đúp,
+    kéo đồ, gõ chữ hay ESC, GoBot nhìn màn hình (nhịp nhìn như cũ) tới khi
+    thấy việc đó đã xảy ra (túi đồ mở, hộp thoại hiện, cửa sổ đóng, ngăn
+    đã chọn...), tối đa 30 giây. Thấy ngay thì làm bước tiếp ngay, nên máy
+    nhanh không chậm hơn trước. Hết 30 giây mà không thấy gì thì bỏ bước đó
+    như trước (trước đây mỗi bước chỉ chờ từ nửa giây tới 10 giây). Trong
+    lúc chờ, F12 và DỪNG vẫn dừng ngay. GoBot không vì chờ lâu mà bấm lại
+    phím: phím túi đồ, Enter, ESC bấm lần hai trên máy chậm sẽ đóng cái mà
+    lần một vừa mở muộn.
+  + Áp dụng cho:
+    1. Tự dọn rác, Dùng bùa, Tự mua bình: mở túi đồ, món đồ vào thùng rác,
+       hộp hỏi của thùng rác, Xác Nhận, món đồ đã xoá, Hủy Bỏ, chuyển ngăn
+       (ngăn Khác của cửa hàng bấm tối đa 4 lần trong 30 giây), cuộn túi,
+       câu hỏi khi dùng bùa, cửa hàng hiện ra, hộp nhập số lượng, thông báo
+       túi đầy, đóng túi đồ cuối lượt (trước là 1,5 giây). Luật "kẹt quá 10
+       giây thì bấm ESC" (bản 2026.11.14b) nay là kẹt quá 30 giây, tính từ
+       thao tác cuối của GoBot trong bước đó. Thời hạn của một lượt mua bình
+       và một lượt dùng bùa được cộng thêm phần game chậm quá 2 giây ở mỗi
+       bước. Trong lúc chờ, bình HP và MP vẫn được bấm mỗi 2 giây nếu cần.
+    2. Nhiệm vụ nhanh: mở cửa sổ, thẻ NV Phụ, ô Tự Động, đóng cửa sổ, mỗi
+       bước chờ tới 30 giây; giới hạn 10 giây của một lần làm
+       (round_limit_ms) nay không tính thời gian chờ game. Vẫn làm ở mọi
+       mức máu, nhưng đang chờ game quá 2 giây mà máu xuống dưới mốc bình
+       thì thôi lượt đó (ghi "máu thấp", làm lại sau, không tính là lỗi),
+       để bình không bị giữ 30 giây.
+    3. Tự chat: mỗi Enter mở ô chat chờ tới 30 giây; Enter thứ hai
+       (max_enters=2) chỉ bấm sau trọn 30 giây đó mà ô chat vẫn đóng. Không
+       mở được thì thẻ ghi "Không mở được ô chat (đã bấm Enter 2 lần, mỗi
+       lần chờ 30 giây) — bỏ qua câu này." và câu đó nói lại ở lượt sau.
+    4. Tổ đội: danh sách người chơi chờ tới 30 giây sau một lần bấm nút;
+       nút Req Party chỉ bấm khi đã thấy menu (chờ tới 30 giây), không bấm
+       mò. Thông báo của game sau khi mời: lần bấm Xác Nhận đầu chờ tới 30
+       giây, lần hai 2,5 giây. Nhân vật gục thì các bước chờ này thôi ngay,
+       để Tự hồi sinh dùng được chuột.
+    5. Tự hồi sinh: câu hỏi và bảng hồi sinh mỗi cái chờ tới 30 giây, nên
+       máy chậm không mất lần thử (3 lần thử hỏng vẫn dừng bot; từ bản
+       2026.11.24 không dừng nữa: 30 giây sau thử thêm 3 lần).
+    6. Tự đăng nhập: dòng kênh đã chọn và Xác Nhận của thông báo lúc đăng
+       nhập bấm tối đa 3 lần, rải trong 30 giây tính từ lần bấm đầu; thấy
+       danh sách kênh đóng, dòng kênh sáng hay thông báo tắt thì làm tiếp
+       ngay.
+    7. Tự đóng thông báo: sau khi bấm, GoBot nhìn tới 30 giây xem thông báo
+       đã tắt chưa (trước là 1,5 giây); các phím khác của GoBot vẫn chỉ chờ
+       tối đa 2 giây.
+  + Câu báo lỗi trên thẻ nay kết thúc bằng "sau 30 giây", ví dụ "không mở
+    được túi đồ (phím B) sau 30 giây, hoặc túi đồ bị che", "hộp nhập số
+    lượng của ... không thành 100 sau 30 giây", "đã bấm chuột phải vào món
+    Người Giữ Sân mà không thấy cửa hàng hiện ra sau 30 giây (...)",
+    "kẹt quá 30 giây (mua bình): GoBot đã bấm ESC N lần ...".
+  + Bảng Sự kiện và điểm danh (ô "Tự đóng thông báo" có dấu, bot đang
+    chạy): GoBot bấm ESC 30 giây sau khi nhân vật vào game (GoBot tự vào:
+    tính từ lúc vào; vào bằng tay: tính từ lúc thấy bảng), bảng phải đứng
+    yên ít nhất 3 giây. Từ 23:55 tới 00:03 theo đồng hồ máy thì không bấm:
+    qua ngày GoBot chờ tới 00:03 mới bấm ESC (5 phút trước 00:00 là cho máy
+    có đồng hồ chậm hơn đồng hồ game). Dọn rác và mua bình cũng để yên bảng
+    trong lúc đó. Thông báo nhận quà điểm danh và Yêu Quái Bách Khoa vẫn
+    đóng sau 3 giây như cũ. Thẻ Đánh quái ghi "Thấy bảng Sự kiện và điểm
+    danh: chờ 30 giây sau khi vào game rồi mới bấm ESC." hoặc "Qua ngày: chờ
+    tới 00:03 rồi mới bấm ESC tắt bảng Sự kiện và điểm danh."
+  + Máy chậm phải trả giá: game bỏ sót một phím thì nay GoBot chờ tới 30
+    giây mới bỏ bước đó (một câu chat bị bỏ sót cả hai Enter: tới 60 giây);
+    trong lúc đó Tự chat giữ đánh quái và bình (máu dưới mốc bình thì thôi
+    câu đó), Nhiệm vụ nhanh giữ tối đa 2 giây khi máu dưới mốc. Bảng
+    điểm danh còn hiện 30 giây sau mỗi lần vào game, và từ 23:55 tới 00:03.
+  + Khi thử: nếu có gì sai, gửi gobot_gui.log. Các dòng "the game took N
+    ms to show ..." cho biết game chậm bao lâu ở bước nào; "nothing after
+    30 s ..." là bước đã bỏ sau 30 giây; "the check-in board waits for its
+    ESC until ..." cho biết bảng điểm danh đang chờ gì.
+
+- Mới trong bản 2026.11.15c (một gói tin giữa không trung không còn bị coi
+  là lần đáp xuống của cú nhảy lên; theo log lần chạy đầu của bản 2026.11.15,
+  sáng 15/11; chưa thử trên game thật).
+  + Log của bạn lúc 10:15:51: Ctrl+↑ từ 2327,1240 lên sàn 908. 478 ms sau khi
+    bấm, khi nhân vật còn đang bay (cao hơn chỗ nhảy 261 px, không nằm trên
+    sàn nào), game gửi một gói tin di chuyển (không phải gói "đáp đất" 0x002A,
+    cũng không phải gói ra chiêu). GoBot lấy đó làm lần đáp xuống, thấy
+    "không nằm trên sàn nào của file bản đồ" và tắt nhảy lên 120 giây
+    ("jumps up OFF until the next BẮT ĐẦU (or 120 s)"). Lần đáp thật, đúng
+    sàn 908, tới sau đó 743 ms. Trong hai phút đó (10:15:51 tới 10:17:51)
+    GoBot không nhảy lên được và bỏ qua hai con quái ở trên.
+  + Bản 2026.11.15 chỉ chờ gói tiếp theo khi gói "đáp đất" lạ là gói 0x002A;
+    nay chờ với mọi loại gói. Cứ mỗi gói sau đó (kể cả gói ra chiêu) đặt
+    nhân vật cách chỗ "đáp" từ 12 px trở lên thì thời gian chờ (0,9 giây)
+    tính lại từ gói đó, tối đa 2,2 giây sau lúc bấm. Nhân vật đứng yên 0,9
+    giây ở chỗ không có sàn thì vẫn bị coi là đứng ở đó, như trước.
+  + Đã chốt (bạn trả lời 15/11): GoBot không học thêm skill lướt (D, 13206).
+    Ra ngoài vùng thì dừng đánh quái và quay lại, như bạn nói; việc sửa nằm
+    ở đường quay lại, không phải ở việc tránh bị văng ra.
+  + Khi thử: nếu gobot_gui.log còn dòng "jump up landed at ..., on no floor
+    of ...", hãy gửi kèm các dòng "jump up +N ms: ..." ngay trên nó.
+
+- Mới trong bản 2026.11.15b (mua bình và mời tổ đội thử lại sau 30 giây,
+  không phải 10 phút; theo lời bạn ngày 15/11; chưa thử trên game thật).
+  Bạn báo: "về việc thực hiện lại xử lý thì giờ mua HPMP nếu bị kẹt sẽ thực
+  hiện lại sau 10 phút tương tự với việc tổ đội. Cần thực hiện lại sau 30s
+  chứ không phải 10 phút".
+  + Tự mua bình: một lượt mua có lỗi (kẹt quá 10 giây, từ bản 2026.11.15d
+    là 30 giây, rồi GoBot bấm ESC đóng cửa hàng và túi đồ, không chuyển được sang ngăn Khác, một bước mua
+    không được...) nay 30 giây sau mua lại (trước là 10 phút). Hai lượt liền
+    có lỗi thì GoBot vẫn bỏ phần còn lại, tới giờ "mua mỗi" sau mới mua, để
+    một lỗi không lặp lại mỗi 30 giây mà giữ bot không đánh quái. (Từ bản
+    2026.11.24 không bỏ nữa: lượt nào có lỗi cũng 30 giây sau mua lại, không
+    giới hạn; xem "Mới trong bản 2026.11.24".)
+  + Tự tổ đội: người mà lần mời làm game hiện thông báo (đã có tổ đội, từ
+    chối...) và GoBot đã bấm Xác Nhận tắt nay 30 giây sau gõ từ khoá là
+    được mời lại (trước là 10 phút). Thông báo bấm hai lần không tắt thì vẫn
+    1 phút không mời ai, như bản 2026.11.14b.
+  + Khi thử: sau một lượt mua có lỗi, dòng "Trash: shop done" trong
+    gobot_gui.log ghi "next part 30 s on" (hay 29 s); sau một thông báo khi
+    mời, dòng "Party: invite to ..." ghi "not invited again for 30 s".
+
+- Mới trong bản 2026.11.15 (game bỏ sót phím không còn làm GoBot tắt nhảy
+  lên/xuống hay cấm một chỗ, mà chỉ nghỉ một lúc rồi tự thử lại; hỏi lại
+  đường về sau 3 giây; theo log của bạn đêm 14/11 sang 15/11; chưa thử trên
+  game thật). Bạn báo: "check log moi nhat, co 1 so loi nhu khi ra ngoai vung
+  thi khong tu quay vao lai, khi danh quai o duoi nguong px thi khong chiu
+  nhay xuong hoac nhay len".
+  + Nguyên nhân (đọc từ log): game bỏ sót khoảng 30-40% lần bấm phím ngắn
+    của GoBot, ngẫu nhiên, nhất là lúc game chạy chậm: Ctrl+↑ lần đầu "không
+    làm gì" 4 trong 5 lần (lần bấm lại sau 1-2 giây thì lần nào cũng được),
+    Ctrl+↓ 2 trong 6 lần, các cú chạm quay mặt khoảng 30%. Trước bản này
+    GoBot coi MỖI lần bỏ sót là bằng chứng: một lần Ctrl+↓ không làm gì là
+    cấm nhảy xuống trong 64 px quanh chỗ đó tới khi tắt GoBot và bỏ qua con
+    quái 8 giây; 3 lần liền (hay 5 lần trong một lượt) là tắt nhảy xuống, hay
+    nhảy lên, tới lần BẮT ĐẦU sau, cả đường về lẫn tìm quái trong vùng. Nên
+    đánh lâu thì kiểu gì cũng bị tắt, và nhân vật đứng nhìn quái ở trên hay
+    dưới vạch mà không nhảy.
+  + Một lần bỏ sót không còn là bằng chứng:
+    1. Một chỗ chỉ bị ghi nhớ là Ctrl+↓ không nhảy xuống được ở đó khi lần
+       Ctrl+↓ THỨ HAI không làm gì (hay chỉ nhảy tại chỗ) ở gần chỗ lần
+       trước (không quá 64 px ngang, 24 px dọc) trong vòng 120 giây, và giữa
+       hai lần không có lần nhảy xuống nào ăn ở đó. Lần đầu chỉ được ghi chú,
+       log ghi "not held against the place yet".
+    2. Lần đầu của một chuỗi mà Ctrl+↓ hay nhảy lên không làm gì thì con quái
+       chỉ bị bỏ qua 1,2 giây (trước là 8 giây), nên GoBot bấm lại ngay từ
+       chỗ đứng đó; lần thứ hai liền thì vẫn bỏ qua 8 giây như cũ.
+    3. 3 lần liền (hay 5 lần trong một lượt) không ăn không còn tắt nhảy
+       xuống hay nhảy lên tới lần BẮT ĐẦU sau: chỉ nghỉ 30 giây; lần nghỉ thứ
+       hai 60 giây, từ lần thứ ba 120 giây; hết giờ thì tự bật lại ngay ở lượt
+       chạy kế (log "Hunter: drops on again after 30 s", "Hunter: jumps up on
+       again after 30 s"). Có một lần nhảy ăn thì lần nghỉ sau lại là 30
+       giây; bấm BẮT ĐẦU cũng đếm lại từ đầu.
+    4. 5 lần trong một lượt chỉ tính khi số lần không ăn nhiều hơn số lần ăn
+       của lượt đó: chỗ nhảy không bao giờ ăn vẫn bị nghỉ, còn bỏ sót 40%
+       suốt một buổi thì chỉ thỉnh thoảng bị nghỉ do ngẫu nhiên (khoảng 4
+       buổi trong 9, thường ngay đầu buổi): nghỉ ở lần bỏ sót đầu tiên mà số
+       lần không ăn nhiều hơn số lần ăn (30 giây, lâu hơn nếu từ lần nghỉ trước
+       chưa có lần nào ăn), rồi lần bỏ sót nào kế tiếp cũng nghỉ nữa, cho tới
+       khi số lần ăn bắt kịp.
+  + Các lý do khác vẫn tắt tới lần BẮT ĐẦU sau, như trước: nhân vật nhảy
+    khác với GoBot tính, rơi ra ngoài vùng, Ctrl+↓ làm nhân vật nhảy lên,
+    phím ↓ hay ↑ giữ quá lâu, phím kẹt, đổi bản đồ. Rơi xuống chỗ không có
+    trong file bản đồ thì file đó bị bỏ và nhảy lên / nhảy xuống tắt 120
+    giây (hay tới lần BẮT ĐẦU sau) rồi tự bật lại, xem "Bản đồ bị coi là sai
+    cả đêm" bên dưới. Cú ↑ tại chỗ cho quái cao hơn vạch trên (bản
+    2026.11.12c) cũng nghỉ thay vì tắt: 3 lần liền không ăn, hay 5 lần một
+    lượt mà số lần không ăn nhiều hơn số lần ăn, thì nghỉ 30, 60, 120 giây
+    rồi tự thử lại (log "Hunter: Up for monsters above on again after 30
+    s"); chỉ khi một cú ↑ đáp xuống NGOÀI vùng thì cú ↑ đó vẫn tắt tới lần
+    BẮT ĐẦU sau.
+  + Trên màn hình: lúc nghỉ, thẻ Đánh quái ghi "Nhảy lên tạm nghỉ thêm N
+    giây: 3 lần liền (hoặc 5 lần trong lượt này) không lên được bục. Hết giờ
+    GoBot tự thử lại." (không đỏ), và dưới ô Nhảy xuống ghi "Nhảy xuống tạm
+    nghỉ thêm N giây: nhiều lần bấm Ctrl + ↓ không rơi xuống. Hết giờ GoBot
+    tự thử lại."; hết giờ thì dòng đó mất ngay, không treo tới lần BẮT ĐẦU
+    sau.
+  + Đường về: khi kẹt ngoài vùng ở một chỗ đứng đã biết mà chưa có đường về,
+    GoBot hỏi lại bản đồ mỗi 3 giây (trước là 10 giây), nên đường về hiện ra
+    trong vòng 3 giây sau khi có (ví dụ một lần nhảy vừa hết nghỉ). Lần đứng
+    8 giây trong log của bạn (00:05:56) không do chu kỳ này: lúc đó nhân vật
+    không có chỗ đứng nào trên bản đồ nên GoBot không hỏi gì (xem mục "Rơi mà
+    game không báo đáp đất" bên dưới).
+  + Log mới: "Hunter: drop did nothing in 1000 ms at X,Y -- not held against
+    the place yet (a second near it within 120 s is); the monster passed over
+    for 1.2 s (1 in a row)", lần thứ hai gần chỗ đó "... -- no drops within
+    64 px of it this session; the monster passed over for 8 s (2 in a row)",
+    "Hunter: 3 presses of Ctrl+Down in a row did not drop -- drops paused for
+    30 s (the 1st pause since the last drop that worked; they go again by
+    themselves)", "Hunter: drops on again after 30 s"; nhảy lên: "Hunter: 3
+    jumps up in a row did not get there -- jumps up paused for 30 s ...",
+    "Hunter: jumps up on again after 30 s".
+  + Tường trong file bản đồ (log 00:18:28-00:18:56): một cú lướt của skill D
+    (13206) đẩy nhân vật sang mỏm đá bên phải (sàn y 1035, x 4480..4599).
+    Bên trái mỏm là một khối chặn của file bản đồ game (thuộc tính 6, không
+    có mặt sàn: x 4448..4479, y 960..1055) mà GoBot trước đây không đọc, vì
+    nó chỉ đọc những ô có mặt sàn. GoBot coi đầu trái là mép sàn để rơi
+    xuống, lên kế hoạch "đi trái tới 4480 rồi rơi xuống tầng 1240", và nhân
+    vật đẩy vào tường 15 lần trong 12 giây, tới khi bạn bấm dừng (đồng hồ
+    kẹt của tìm quái tính theo từng con quái, mà con quái đã đổi 9 lần). Nay
+    GoBot đọc cả ô tường (thuộc tính 4) lẫn ô chặn (5 và 6) không có mặt sàn
+    (t60_s1: 47 ô, t49_s5: 30, t53_s2: 7; ô có mặt sàn giữ như cũ): đi dọc
+    một sàn mà gặp tường trong 48 px phía trên chân thì DỪNG ở chân tường,
+    không còn coi là mép sàn để bước xuống; mép phải của mỏm mới là chỗ rơi.
+    Bậc của nền đất (bản 2026.11.12c: đi tới chân bậc rồi Ctrl+↑ tại chỗ)
+    vẫn được xét trước tường. Một ô chặn nằm cùng ô với mặt sàn của lớp kia
+    (đất đắp dưới mặt đất, như t100_s3 x 1440..1471) không phải tường và
+    không tính: bản đồ khác của game có khoảng 600 ô như vậy, sáu bản đồ của
+    bạn không có ô nào.
+  + Rơi mà game không báo đáp đất (log 00:05:56): cú lướt của D kết thúc
+    giữa không trung; gói tin duy nhất là gói ra chiêu (0x0031) tại
+    2245,867, không nằm trên sàn nào, còn nhân vật rơi xuống sàn 1007 mà
+    game không gửi gói đáp đất (đứng yên thì game không gửi gì). GoBot tưởng
+    nhân vật còn lơ lửng, không tính được đường về, và đứng 8 giây "kẹt
+    ngoài vùng" cho tới khi nhân vật tự nhích 27 px; thật ra bản đồ có đường
+    về từ đó (đi phải, rơi một lần, nhảy hai lần). Nay: gói cuối là gói ra
+    chiêu, không nằm trên sàn nào của file, và sau 0,7 giây không có gói nào
+    khác, thì GoBot coi nhân vật đã đáp xuống sàn đầu tiên dưới cột đó
+    (không quá 600 px) và tính đường về từ đó; gói đầu tiên của cú đi bộ về
+    sẽ chỉnh lại vị trí thật. Log: "Hunter: no report of yours since the
+    cast at X,Y, 0.7 s ago -- on no floor of the file: taken as landed on
+    floor N, M px under it (the next report of yours puts it right)". Gói
+    không phải gói ra chiêu (đi bộ, nhảy) trên chỗ không có sàn vẫn là "kẹt"
+    như trước.
+  + Bản đồ bị coi là sai cả đêm (log 21:15 tới 08:07): lúc 00:27:54 một cú
+    Ctrl+↑ bị hất sang bên ở đỉnh vòng nhảy, game gửi một gói 0x002A trạng
+    thái 0 ("đáp đất") giữa không trung tại 2956,815 (cao hơn chỗ đứng 426
+    px, không nằm trên sàn nào). GoBot coi đó là lần đáp xuống, thấy nó
+    "không nằm trên sàn nào của file" và coi file bản đồ t60_s1 là sai: tắt
+    nhảy lên và thả, bỏ file bản đồ TRONG SUỐT PHIÊN (tới khi tắt GoBot), dù
+    lần đáp thật, trên sàn đúng kế hoạch, tới sau đó 450 ms. Từ 00:28 tới
+    01:10 nhảy lên bị tắt nên nhân vật đứng dưới quái ở trên mà không nhảy
+    lên được; lúc 01:10:45 nó lướt khỏi mép trái của sàn, rơi xuống hố trái
+    dưới cùng, và từ đó tới 08:07 nhân vật đứng ngoài vùng (2077,1339),
+    không có bản đồ để tính đường về, đi "về chỗ cũ" thẳng vào tường rồi
+    "bỏ cuộc, thử lại sau 60/120 giây": gần bảy tiếng liền. Nay: (1) một
+    lần "đáp" không
+    nằm trên sàn nào của file không bị phán ngay: GoBot chờ gói đáp kế tiếp
+    tối đa 0,9 giây (cú nhảy: một gói 0x002A trạng thái 0 sau đó mà nằm trên
+    một sàn của file là lần đáp thật; cú thả: đọc lại vị trí mới); hết 0,9
+    giây mà không có gì thì kết luận như trước (từ bản 2026.11.15c: chờ với mọi
+    loại gói, xem mục 2026.11.15c ở trên). (2) File bị coi là sai (đáp
+    ngoài sàn) chỉ bị bỏ 120 giây rồi được tin lại, cùng với nhảy lên và thả
+    mà phán quyết đó đã tắt (log "Hunter: t60_s1's map file trusted again
+    after 120 s ..."), hoặc ngay khi bạn bấm BẮT ĐẦU; nếu nó thật sự sai thì
+    lần đáp ngoài sàn kế tiếp lại bỏ nó 120 giây nữa.
+  + Rơi mà game không báo đáp đất, mà đường về bắt đầu bằng cú nhảy lên hay
+    Ctrl+↓ ngay tại chỗ rơi xuống: GoBot không bấm từ chỗ đứng đoán được (cú
+    bấm đọc gói tin thật của nhân vật, mà gói đó vẫn nằm trên không nên bị
+    từ chối mãi); nó đi một bước trước, gói tin của bước đi đặt nhân vật về
+    đúng chỗ, rồi mới nhảy lên hay Ctrl+↓.
+  + Skill D (13206) lướt 150-317 px và đã ném nhân vật hai lần trong 17 phút
+    (00:05:56 và 00:18:28); GoBot chỉ nhận MỘT skill lướt (V, 51203) nên chỉ
+    giữ phím V gần mép sàn và mép vùng. Bạn đã chốt không cần học thêm skill
+    lướt: ra ngoài vùng thì dừng đánh và quay lại (xem bản 2026.11.15c).
+  + Khi thử: cho bot đánh quái ở bản đồ có bục trên và dưới như t60_s1 vài
+    chục phút, rồi gửi gobot_gui.log. Các dòng "not held against the place
+    yet", "paused for" và "on again after" cho biết game bỏ sót bao nhiêu
+    lần và GoBot đã nghỉ bao lâu.
+- Mới trong bản 2026.11.14b (mua bình ngay sau khi dọn rác, kẹt quá 10 giây
+  thì bấm ESC, và thông báo của game khi mời tổ đội; theo ba lỗi bạn báo
+  ngày 14/11; chưa thử trên game thật).
+  + Bạn báo: "Khi dọn rác xong thì tắt luôn túi đồ khiến xử lý mua HPMP bị
+    dừng => trước khi thực hiện xử lý mua HPMP cần check xem túi đồ có đang
+    mở không, nếu có thì thực hiện luôn, còn không thì mở túi đồ lên và thao
+    tác mua". Nay lượt mua bình nhìn túi đồ hai lần, cách nhau 0,25 giây:
+    túi đang mở thì mua luôn, không bấm phím túi đồ; túi đóng thì bấm phím
+    túi đồ một lần, chờ thấy túi mở và nhìn lại cho chắc. GoBot không bấm
+    phím túi đồ khi lần nhìn gần nhất còn thấy túi. Cuối mỗi lượt dọn rác
+    (và dùng bùa), sau phím túi đồ GoBot nhìn tới khi thấy túi đóng hẳn (tối
+    đa 1,5 giây, từ bản 2026.11.15d tối đa 30 giây, không bấm lần hai).
+    Ngăn Khác chỉ được bấm trên túi vừa nhìn thấy; không ăn thì bấm lại,
+    tối đa 4 lần (trước là 2; từ bản 2026.11.15d 4 lần trong 30 giây). Lúc có hộp
+    thoại hay bảng điểm danh vừa hiện ra thì GoBot không bấm phím túi đồ.
+    Lần dừng lúc 21:37 (game không nhận cú bấm nào trong khoảng 16 giây sau
+    một lần kéo đồ vào thùng rác không được) thì bấm thêm cũng chưa chắc
+    đỡ: nếu lại thấy "không chuyển được sang ngăn Khác", bạn gửi giúp các
+    ảnh *_not_in_bin.png và *_tab_unsure_shop_other_tab.png trong
+    trash_debug.
+  + Bạn báo: "Khi thao tác mua nếu không may click vào chỗ khác sẽ khiến
+    không ấn được số 00 để mua. Trường hợp bị dừng quá 10s thì tắt toàn bộ
+    hiển thị shop, túi đồ trên màn hình bằng phím ESC. Xử lý này thực hiện
+    cho cả khi hộp nhập số lượng không biến mất", rồi: "[c]hắc chắn khi
+    dialog mua HPMP hiện ra và không click vào đâu nữa thì sẽ có thể ấn được
+    00 luôn". Cách gõ 00 giữ như cũ, không bấm thêm vào ô. Nay một bước mua
+    (từ lúc bấm chuột phải vào món Người Giữ Sân, từ lúc bấm đúp vào bình,
+    từ lúc hộp nhập số lượng hiện ra) hay một món đồ kéo vào thùng rác mà
+    kẹt quá 10 giây (từ bản 2026.11.15d: quá 30 giây kể từ thao tác cuối
+    của GoBot trong bước đó), GoBot bấm ESC cho tới khi trên màn hình không còn cửa
+    hàng, hộp thoại, thông báo, bảng điểm danh hay túi đồ nào. Mỗi lần ESC
+    chỉ khi lần nhìn ngay trước đó thấy có cái đang mở, tối đa 6 lần; hai
+    lần ESC liền không đóng được gì thì thôi. Một lần ESC chưa thấy đóng gì
+    thì GoBot nhìn lại hai lần cách nhau nửa giây, thấy giống nhau mới bấm
+    tiếp (game chậm có khi đang đóng dở); nếu ESC lỡ mở bảng menu của game
+    thì GoBot bấm nút X của bảng đó để tắt. Nhân vật đã chết thì không bấm
+    ESC. Hộp hỏi của thùng rác được bấm Hủy Bỏ trước (món đồ về túi), không
+    được mới bấm ESC. ESC được cho là không xoá đồ (chỉ Xác Nhận mới xoá),
+    nhưng điều này chưa thấy trên game thật: bạn thử tay giúp một lần (kéo
+    một món rác vào thùng rác, bấm vào thùng cho hiện hộp hỏi, bấm ESC, xem
+    món đồ còn trong túi không). Món còn trong thùng rác thì lượt dọn sau
+    trả lại. Lượt mua đó tính là lỗi, 10 phút sau mua lại (từ bản
+    2026.11.15b: 30 giây sau). Thông báo túi đầy
+    hay thông báo lạ mà bấm Xác Nhận hai lần không tắt (trước đây để nguyên
+    cho bạn) nay cũng được tắt bằng ESC sau 10 giây (từ bản 2026.11.15d:
+    30 giây). Dùng bùa không bao giờ
+    bấm ESC hay Enter.
+  + Bạn báo: "Khi thực hiện auto pt, nếu chẳng may pt trúng người đã vào pt
+    thì sẽ bị hiện dialog mà không tự động tắt => chỉ cần ấn enter hoặc
+    click xác nhận trong dialog". Nay sau mỗi lần mời, nếu game hiện hộp
+    thông báo chỉ có nút Xác Nhận, GoBot bấm Xác Nhận để tắt (không bấm
+    Enter: Enter mở ô chat của game, phím bấm sau đó sẽ vào ô chat; từ bản
+    2026.11.15d lần bấm đầu chờ tới 30 giây cho thông báo tắt; từ bản
+    2026.11.17b chỉ chờ 2,5 giây, lượt sau bấm lại), và 10 phút sau mới
+    mời lại người đó (từ bản 2026.11.15b: 30 giây sau; từ bản 2026.11.17b:
+    1 phút, 10 phút nếu 2 lần liền không vào). Thông
+    báo hiện muộn tới 30 giây sau khi mời (như "Đối phương đã hủy yêu cầu
+    tham gia nhóm.") cũng được tắt như vậy. Khi có người chat từ khoá mà
+    trên màn hình đang có sẵn một thông
+    báo chỉ có nút Xác Nhận, GoBot bấm Xác Nhận tắt nó trước rồi mới mời.
+    Thông báo bấm hai lần không tắt, hoặc không bấm được vì một việc khác
+    của GoBot đang giữ game (như Tự chat đang gõ), thì 1 phút không mời ai
+    (thẻ Tổ đội ghi là GoBot không tắt được thông báo).
+  + Khi thử: gửi gobot_gui.log và thư mục trash_debug (các ảnh
+    *_stuck_esc.png, *_shop_stuck.png nếu có). Log ghi "Trash: stuck at ...
+    -- ESC" mỗi lần bấm ESC, và "Party: invite to ... answered by the game's
+    message" kèm chữ trong thông báo.
+- Mới trong bản 2026.11.14 (tự kéo game lên góc trái trên sau khi tự đăng
+  nhập; theo câu trả lời của bạn ngày 14/11; chưa thử trên game thật). Hỏi
+  có cần GoBot tự kéo cửa sổ game lên không, bạn trả lời "Mặc định sẽ kéo lên
+  góc trên bên trái đi", rồi "chỉ kéo lên sau khi auto login thôi"; người
+  chơi 1366x768 chơi "cửa sổ".
+  + Mỗi lần GoBot tự vào game xong (Tự vào lại game sau khi game văng hay
+    treo, phím vào game ngay, hay gobot_cli --login), GoBot kéo cửa sổ game
+    lên góc trái trên của màn hình mà game đang nằm (phía trên thanh tác
+    vụ; thanh tác vụ nằm trên hay bên trái thì sát nó). Chỉ lúc đó, không
+    lúc nào khác: không khi game đã ở trong game sẵn mà GoBot không phải bấm
+    gì, không trong lúc chơi. Không đổi cỡ game.
+  + Cả cửa sổ (có thanh tiêu đề) vào góc khi như vậy game nằm trọn màn
+    hình. Nếu không, phần hình game vào sát góc, còn thanh tiêu đề bị đẩy
+    khuất lên trên mép màn hình (không thấy, không kéo được bằng chuột) --
+    như 1280x720 trên màn hình cao 768 có thanh tác vụ: khi đó game vừa màn
+    hình. Muốn dời game khi thanh tiêu đề bị khuất: bấm vào game, bấm
+    Alt+Space, chọn Move (Di chuyển) rồi dùng phím mũi tên. Game đang thu
+    nhỏ, đang phóng to hết cỡ, chơi toàn màn hình, hay đã phủ kín màn hình
+    thì để nguyên.
+  + Nếu cửa sổ GoBot đang nằm ở góc đó và che game sau khi game được kéo
+    lên, GoBot tự dời cửa sổ của nó sang bên cạnh game.
+  + Không muốn GoBot kéo: đặt move_game_to_corner=false trong
+    configs\login.ini. Log ghi "the game's window moved from x,y to the
+    top-left of its screen, x,y".
+- Mới trong bản 2026.11.13c (game cỡ 1024x768, 1280x720 và 1366x768; theo
+  yêu cầu của bạn ngày 13/11; chưa thử trên game thật ở 1280x720 và
+  1366x768). Bạn nhắn: "nhớ là cần làm cho đối ứng các độ phân giải: 1080 x
+  768, 1280 x 720, 1366 x 768" (1080 x 768 là cỡ 1024x768).
+  + Đã soát mọi việc GoBot làm trên màn hình game ở cả ba cỡ: mỗi việc tìm
+    hình của nó ở bất cứ đâu trong game (túi đồ, cửa hàng, bùa, hộp thoại,
+    nhiệm vụ, bảng điểm danh, hồi sinh, thông báo), hoặc đọc ở góc mà game
+    luôn vẽ nó (thanh máu ở góc trái trên, thanh phím và ô chat ở dưới),
+    nên đổi cỡ game không làm lệch chỗ đọc hay chỗ bấm. Vùng tìm quái tính
+    theo cỡ game mỗi lần nhìn.
+  + Dòng mới "Game không nằm trọn trên màn hình" (ở phần "Trước khi bắt
+    đầu" của thẻ Đánh quái): hiện khi mấy hàng dưới cùng hay trên cùng, hoặc
+    mấy cột bên phải hay bên trái của game nằm ngoài màn hình hay bị thanh
+    tác vụ che. Trên phần lớn các máy (cả máy của bạn) GoBot đọc game từ màn
+    hình, nên chỗ đó đọc ra màu đen, hay ra thanh tác vụ: dòng này có dấu
+    đỏ. Trên máy mà game tự vẽ hình cho GoBot thì GoBot vẫn đọc được chỗ đó:
+    dòng này chỉ có dấu chấm, và không việc nào phải chờ. Dòng này nói cách
+    sửa theo cỡ màn hình và cỡ game: màn hình quá thấp thì chọn cỡ 1280x720
+    và cho thanh tác vụ tự ẩn; không thì cho thanh tác vụ tự ẩn, hay kéo
+    game lên cao hơn (xuống thấp hơn, sang bên) khi màn hình còn đủ chỗ. Khi
+    hàng dưới cùng bị che và GoBot đọc từ màn hình, dòng "Còn N bình" ghi lý
+    do thay cho "Chưa đọc được số bình", Tự chat và "Tự mời người chat từ
+    khoá" chờ và ghi lý do, và khi Tự đăng nhập không thấy nút Kết Nối hay
+    màn hình Chọn Nhân Vật thì lý do nói thêm chuyện đó. Dọn rác, mua bình
+    và bùa chạy như cũ.
+  + Tự đăng nhập, màn hình Chọn Nhân Vật ở cỡ khác 1024x768: chỗ bấm nhân
+    vật được tính theo chỗ thấy nút "Bắt Đầu Game". Nút ở chỗ như khi cả
+    màn hình đăng nhập 1024x768 nằm giữa game, hay nằm ở góc trái trên, thì
+    bấm như ở 1024x768. Nút nằm sát góc phải dưới thì nhân vật được tính từ
+    giữa màn hình game. Chỗ khác thì bấm như cũ, và log ghi cảnh báo. Ở cỡ
+    1280x720, nếu phần dưới của hình bị cắt mất, GoBot nhận màn hình này
+    bằng nửa trên (nút "Bắt Đầu Game"), nhưng không bao giờ khi đang thấy
+    nút Kết Nối. Phần này chưa thử, và cách tính khi nút nằm sát góc phải
+    dưới chỉ là đoán: nếu game đặt cả khối màn hình đăng nhập 1024x768 vào
+    góc phải dưới thì nút cũng nằm đúng chỗ đó, mà khi ấy nhân vật lại ở
+    chỗ bấm như ở 1024x768, nên GoBot bấm vào chỗ trống và "Bắt Đầu Game"
+    vào nhân vật game đang chọn sẵn. GoBot không kiểm tra nhân vật nào đang
+    được chọn. Người chơi thấy vào nhầm nhân vật thì báo ngay. Khi đã biết
+    cách game xếp màn hình này, dòng slot_anchor ở mục [Page.character]
+    trong configs\login.ini sửa được mà không cần bản GoBot mới: picture
+    (bấm như ở 1024x768) hay centre (tính từ giữa màn hình); auto là như
+    bản này. Mỗi lần đăng nhập ở cỡ khác 1024x768, khi không có gì che
+    game, GoBot giữ một ảnh màn hình này trong thư mục login_debug
+    (login_*_character_<rộng>x<cao>.png), và log ghi "slot N at x,y on a
+    WxH game (layout: ...)".
+  + Màn hình Chọn Kênh ở cỡ khác 1024x768: GoBot bấm kênh trên khung danh
+    sách kênh của game như trước. Không thấy khung đó thì GoBot không bấm
+    đoán nữa (trước đây bấm theo khoảng cách đo ở 1024x768): lần thử đó
+    dừng, không bấm Kết Nối, và GoBot giữ ảnh
+    login_*_channel_<rộng>x<cao>.png.
+  + Khi Windows phóng to game (tỉ lệ hiển thị trên 100%), lý do Tự đăng nhập
+    không vào được giờ nói luôn chuyện đó và cách sửa: bấm "Sửa cho game"
+    rồi mở lại game, hoặc đặt tỉ lệ hiển thị về 100%.
+  + GoBot tự giữ một ảnh game ở mỗi cỡ khác 1024x768, mỗi lần mở GoBot một
+    ảnh mỗi cỡ, khi đã đọc được máu: vitals_debug\size_<rộng>x<cao>_*.png
+    (giữ 6 ảnh mới nhất). Không đọc được máu ở cỡ đó thì không có ảnh này.
+  + Ở 1280x720 và 1366x768 vùng tìm quái theo gói tin rộng hơn ở 1024x768,
+    nên bot có thể nhắm quái xa hơn một chút.
+  + Người chơi dùng 1280x720 hay 1366x768: trước khi chạy, để game nằm
+    trọn trên màn hình (không có dòng đỏ "Game không nằm trọn trên màn
+    hình") và không để cửa sổ nào che game. Nếu được, dùng tài khoản có 2
+    hay 3 nhân vật và chọn nhân vật thứ 2 hay thứ 3. Sau khi chạy Tự đăng
+    nhập một lần và chơi một phút, nén và gửi các thư mục login_debug,
+    vitals_debug và hai file gobot_gui.log, gobot_gui.old.log (trong thư mục
+    GoBot), kèm: nhân vật vào game có đúng nhân vật đã chọn không, cỡ màn
+    hình, tỉ lệ hiển thị của Windows, chơi toàn màn hình hay chơi cửa sổ (và
+    khi chơi toàn màn hình thì có dòng "Game không nằm trọn trên màn hình"
+    không), và thanh tác vụ có tự ẩn không. Nếu trong vitals_debug không có
+    file size_<rộng>x<cao>_*.png, chụp thêm một ảnh game lúc đang ở trong
+    game (bấm Alt+PrtSc khi game ở trên cùng, rồi dán vào Paint và lưu).
+- Mới trong bản 2026.11.13b (mua bình ngay sau khi dọn rác, và tự đăng nhập
+  lại khi game báo "Tài khoản đã bị chặn"; theo góp ý của người dùng bạn
+  chuyển ngày 13/11 và câu trả lời của bạn; chưa thử trên game thật).
+  + Ô mới "Mua ngay sau khi dọn rác" ở thẻ Tự mua bình, mặc định không đánh
+    dấu. Người dùng góp ý: "Thêm 1 checkbox "Mua ngay sau khi dọn rác": Bằng
+    checkbox này thì không cần thiết định thời gian mua HP/MP nữa, sẽ ngay
+    lập tức thực hiện mua sau khi dọn rác xong"; bạn chọn bỏ đồng hồ. Đánh
+    dấu ô này khi Dọn rác đang bật: mỗi lần dọn rác theo giờ xong, GoBot mua
+    bình liền sau đó, trong cùng một lần dừng phím; ô "mua mỗi" bị làm mờ,
+    đồng hồ mua không tự mở lượt mua nào nữa. Lượt mua nhiều ô vẫn mua tiếp
+    phần còn lại như cũ (phần còn lại không mở lượt mua mới). Tới giờ dọn mà
+    danh sách đồ bỏ đi trống, hay không ngăn nào được chọn, thì GoBot vẫn
+    mua. Lần mua ngay sau đó chưa chạy được (chưa đọc được
+    máu, có bảng Sự kiện...) thì GoBot thử lại theo luật mua bình. "Dọn
+    ngay" và "Thử tìm" không mua. Dọn rác tắt thì mua theo "mua mỗi" như cũ;
+    bỏ dấu ô thì đồng hồ đếm lại một khoảng "mua mỗi" từ lúc đó. Dòng trong
+    configs\trash.ini: buy_after_trash. Log: "Trash: shop rides the pass --
+    the same hold, no quiet second (right after each timed pass,
+    buy_after_trash)".
+  + Tự đăng nhập: người dùng báo "khi auto login xong thì có thông báo dialog
+    "Tài khoản đã bị chặn", cần ấn nút xác nhận ở dialog này rồi thực hiện
+    login lại"; bạn trả lời hộp này hiện sau Kết Nối, và chọn "Thử lại ngay,
+    không giới hạn". Giờ khi game hiện thông báo chỉ có nút Xác Nhận lúc
+    GoBot đang ở các màn hình đăng nhập của game (Kết Nối, chọn kênh, chọn
+    nhân vật), GoBot bấm Xác Nhận rồi bấm Kết Nối lại ngay, bao nhiêu lần
+    cũng được, không tính vào số lần thử. F12 hay DỪNG vẫn dừng được. Thông
+    báo phải thấy ở cùng một chỗ trên 2 lần nhìn mới bấm; bấm Xác Nhận 3 lần
+    mà không tắt thì lần thử đó coi như hỏng (từ bản 2026.11.15d 3 lần đó
+    rải trong 30 giây tính từ lần bấm đầu). GoBot nhận hộp này như hộp
+    thông báo chung của game (cùng hộp có nút Xác Nhận GoBot đã biết trong
+    game); chưa có ảnh chụp thật của hộp lúc đăng nhập, nên nếu GoBot không
+    bấm được, hãy gửi thư mục login_debug (ảnh login_*_message.png,
+    login_*_attempt*.png) và gobot_gui.log (các dòng "AutoLogin"). Trên màn
+    hình: "Game hiện thông báo (như "Tài khoản đã bị chặn"): GoBot đã bấm Xác
+    Nhận và bấm Kết Nối lại (lần N)."
+- Mới trong bản 2026.11.13 (sửa lỗi đọc sót chữ số máu/mana trên thanh; theo
+  log của bạn đêm 12/11 sang sáng 13/11; chưa thử trên game thật).
+  + Lỗi: khi số máu hay mana có hai chữ "1" liền nhau (11552) hay chữ "0" sát
+    dấu "/" (18590/18590), GoBot đọc sót một chữ số: "11552/18590" ra "1/552"
+    (0%), "18590/18590" ra "1859/18590" (10%). Trong bộ chữ của game, "l", "i"
+    và "I" (nét 1 px) giống chữ "1", "O" và "D" giống chữ "0"; một chữ số đọc
+    nhầm thành chúng bị bỏ qua mà không để lại dấu. GoBot tin số sai đó, cho
+    là gói tin sai, rồi theo màn hình ("Vitals: HP from the screen again ...
+    the bars 1/552 (0%)") và đưa 0% cho macro; từ 00:40 MP theo màn hình tới
+    hết phiên.
+  + Sửa: chữ số của game cách nhau đều 6 px, dấu "/" rộng 3 px (đo trên ảnh
+    thanh của bạn), nên chữ số bị sót để lại một ô trống: bước qua dấu "/"
+    là 9 px, có chữ số sót cạnh nó thì 15 px; sót trong một số thì có thêm
+    một bước 12 px. Lần đọc như vậy bị bỏ (giữ số cũ, như một lần không đọc
+    được). Số tối đa phải là số đã tin (thấy 2 lần liền), không thì lần đọc
+    đó không cho số. Máu tối đa đổi thật (lên cấp, buff) thì sau 2 lần đọc
+    là nhận.
+  + Chỗ sót không để lại ô trống (chữ số đầu hay cuối, "11552" ra "1552"):
+    số trên thanh đúng bằng số gói tin bớt một chữ số thì GoBot coi là đọc
+    sót, không còn cho là gói tin sai, nên máu/mana vẫn theo gói tin.
+  + Lần đọc bị bỏ vì sót chữ số không làm GoBot dò lại khung giao diện (đỡ
+    tốn máy). Gửi gobot_gui.log nếu còn thấy dòng "Vitals: ... disagreement"
+    (từ bản 2026.11.17: "other" ở dòng "Vitals:" mỗi phút) với số trên thanh
+    lệch hẳn số gói tin.
+- Mới trong bản 2026.11.12c (nhảy lên/xuống theo hai vạch, nhảy Ctrl+↑ ở chân
+  bậc, tự về vùng đánh quái chắc hơn; theo điều bạn báo tối 12/11 và câu trả
+  lời của bạn; chưa thử trên game thật). Bạn báo: "có trường hợp không quay
+  lại được vùng train quái", "check lại log vừa xong, mình đã ctrl + mũi tên
+  lên để nhảy cao về vùng đánh quái"; về bậc ở t49_s5 bạn trả lời "Chỉ
+  Ctrl+↑ tại chỗ"; rồi "ngoài ra bot vẫn chưa chủ động nhảy lên hay nhảy
+  xuống khi ở trên hoặc dưới ngưỡng pixel. khi ở trên ngưỡng pixel thì chỉ
+  cần nhảy thường (1 lần mũi tên lên) còn khi ở dưới thì ctrl + xuống là
+  được"; và "cũng được nhưng mình thấy phần tự quay về vùng đánh quái khi ở
+  ngoài hoạt động chưa ổn đâu".
+  + Đường về vùng: GoBot tính lại độ cao mỗi kiểu nhảy theo hai lần nhảy đo
+    được tối 12/11 (sức hút 1900–2400): ↑ lên cao 133–169 px, ↑↑ 250–337
+    px, Ctrl+↑ 432–546 px; nhảy khi bục cao hơn chỗ đứng không quá 121 px
+    (↑), 238 px (↑↑) hay 420 px (Ctrl+↑). Bục nằm trong khoảng "lúc tới lúc
+    không" vẫn nhảy nếu mọi bục có thể đáp đều trong vùng (hay trên bản đồ,
+    khi đang tìm đường về từ ngoài vùng); rơi lên bục nào trong số đó cũng
+    được. Dốc của chính bục đang đứng không còn bị coi là "bục ở phía trên".
+    Kết quả trên năm vùng của bạn (thử trên máy, mọi chỗ đứng ngoài vùng,
+    cách nhau 32 px, tới 400 px hai bên và 500 px dưới vùng): ở
+    PhòngSinhTử[4] (t23_s14) trước bản này không chỗ nào có đường về
+    (232/232), giờ GoBot tìm được đường về từ cả 232 chỗ; bốn vùng kia vẫn
+    có đường về từ mọi chỗ. Đây là GoBot tự kiểm theo cách GoBot tính các
+    cú nhảy, cú rơi và cú đi rời mép bục (các cú nhảy tính lại với sức hút
+    2400 và 1905), chưa phải đo trên game, nên chưa chắc bot về được từ mọi
+    chỗ đó: lúc 23:47:45 trong log của bạn, nhân vật đi rời mép bục 1425 ở
+    x 1728 rồi rơi qua bục 1465 (file bản đồ có bục này ở x 1707) xuống tận
+    đáy, điều cách tính đó không lường được (chưa rõ vì sao; lúc đó GoBot
+    vừa bắt đầu dùng bùa). Từ đáy PhòngSinhTử[4] bot đi tới chỗ nhảy,
+    Ctrl+↑ lên bục 1393 rồi ↑↑ lên bục của chỗ về, như bạn đã tự làm.
+  + Kẹt ngoài vùng không có đường về: bot hỏi lại bản đồ mỗi 10 giây (từ bản
+    2026.11.15: mỗi 3 giây) (log
+    "Hunter: a way back shows now ..." khi tìm thấy), và dòng "standing
+    where it is" ghi lý do của từng kiểu nhảy ở đó ("here: ..."). Đăng nhập
+    lại hay rơi xuống dưới vùng (cách đáy vùng tới 600 px, ngang trong vùng
+    hay cách vùng không quá 150 px): bot tự nhận vùng ("under it") và tìm
+    đường về. Chưa tin file bản đồ: bot đi tới tối đa 3 chỗ trên bục đang
+    đứng, cách chỗ bắt đầu 80, 160 hay 240 px về hai phía và cách nhau ít
+    nhất 64 px, để GoBot có đủ chỗ đứng mà tin file, rồi mới nhảy (log
+    "... a step of N px ... for one, to x ..."). Không đi khỏi mép bục, và
+    không xuống thấp hơn chỗ bắt đầu quá 24 px. (Chỗ vừa đăng nhập vào
+    không được tính là chỗ đứng, nên ở đáy PhòngSinhTử[4], khi đi 2 bước
+    về một phía là hết chỗ, GoBot trước đây vẫn chưa tin được file.)
+  + Nhảy theo hai vạch: quái cao hơn vạch trên (trong tầm một lần ↑, ngang
+    trong tầm đánh): bot quay mặt, đứng yên, bấm ↑ một lần tại chỗ và đánh
+    trên không; mọi chỗ có thể rơi xuống phải ở trong vùng; tối đa 10
+    lần/phút (riêng, không tính vào 4 lần nhảy lên mỗi phút ở mục 6), cách
+    1,2 giây sau mỗi lần rơi. Lần nhảy làm quái mất máu thì bot không bỏ
+    con đó (tính lại giờ bỏ quái); hai lần nhảy mà con quái không mất máu,
+    hay rơi lên một bục khác không phải bục của nó, thì bỏ qua con đó một
+    lúc; 3 lần liền (hay 5 lần một lượt) bấm ↑ mà không nhảy, hay một lần
+    rơi ra ngoài vùng, thì tắt riêng kiểu nhảy này tới lần BẮT ĐẦU sau (từ
+    bản 2026.11.15: 3 lần liền, hay 5 lần một lượt mà số lần không ăn nhiều
+    hơn số lần ăn, chỉ nghỉ 30, 60, 120 giây rồi tự bật lại; chỉ một lần rơi
+    ra ngoài vùng vẫn tắt tới lần BẮT ĐẦU sau; từ bản 2026.11.24 không nghỉ,
+    không tắt: bấm ↑ mà không nhảy thì thử lại sau 1,2 giây, rơi ra ngoài
+    vùng thì bỏ qua chỗ nhảy đó 30 giây và đi về vùng). Rơi
+    lên bục cao hơn chỗ nhảy thì 8 giây không Ctrl+↓. Lúc đang bay, phím
+    lướt của macro (C, V, Space, hay phím GoBot đã học; từ bản 2026.11.17
+    chỉ phím đã học) vẫn bị giữ nếu lướt
+    từ chỗ nhảy sẽ ra ngoài vùng hay qua mép bục. Cú ↑ ở chân bậc mà leo
+    được lên bậc (nhân vật đứng sát mép trên của bậc) thì tính là đứng trên
+    bậc, không còn bị coi là rơi ra ngoài file bản đồ. Đây là kiểu nhảy tại
+    chỗ đánh trên không của GoC: nó thay câu trả lời 4 của bản 05b ("Không
+    nhảy tại chỗ để đánh trên không") cho quái cao hơn vạch trên trong tầm
+    một lần ↑. Log: "Hunter: Up (one plain jump) toward ...", "... in the
+    air only (hit it)" hay "(no hit)", "... onto its floor", và dòng mỗi
+    phút có "bars: Up ...". Quái thấp hơn vạch dưới: Ctrl+↓ như trước, giờ
+    cho rơi thấp hơn bục của quái nếu còn trong tầm một lần ↑ và cú ↑ từ
+    chỗ rơi không thể đáp lên bục nào khác ngoài bục của quái (nếu không
+    thì như bản trước: chỉ Ctrl+↓ khi rơi đúng bục của quái); rơi như vậy
+    rồi thì bot ↑ đánh nó ngay, không chờ 8 giây. Quái ngang tầm đi trước
+    khi nó trong tầm đánh, hay gần hơn con ở dưới. Vẫn giữ: không nhảy ra
+    ngoài vùng, không Ctrl+↓ gần cửa, không rơi xuống vực, giới hạn số lần
+    mỗi phút.
+  + Luật 650 px (đổi từ bản này): trước đây mọi kiểu nhảy lên đều cần không
+    có bục nào ngoài vùng trong 650 px phía trên chỗ nhảy. Từ bản này ↑ chỉ
+    xét 245 px và ↑↑ 413 px (cao nhất phím đó lên được, cộng 64 px); Ctrl+↑
+    vẫn 650 px. Nên ở chỗ có bục ngoài vùng cao hơn 245 px (↑) hay 413 px
+    (↑↑) phía trên, GoBot vẫn nhảy. Nếu game cho nhân vật nhảy cao hơn
+    GoBot tính rất nhiều thì cú nhảy đó có thể rơi lên bục ngoài vùng; khi
+    đó GoBot tắt nhảy lên tới lần BẮT ĐẦU sau và đi về vùng (từ bản
+    2026.11.24 chỉ bỏ qua chỗ nhảy đó 30 giây, Nhảy lên vẫn chạy).
+  + Bậc ở t49_s5 (x 2816): giờ là tường, không còn bị coi là hố, nên bot
+    quay mặt và đi tới chân bậc như thường. Ở chân bậc bot bấm Ctrl+↑ tại
+    chỗ (không giữ mũi tên) để lên bục 1639, như bạn nói. Nếu cú nhảy đó rơi
+    chỗ khác (ví dụ lên tấm ván 1287 ở trên, ngoài vùng) thì chỉ tắt nhảy ở
+    chân bậc tới lần BẮT ĐẦU sau (từ bản 2026.11.24 chỉ bỏ qua chỗ đó 30
+    giây); các kiểu nhảy khác vẫn chạy, và bot tìm đường về như thường.
+  + Sửa lỗi: client ngày 12/11 không gửi trạng thái nhảy 1, 2, 6 lúc đang
+    bay, nên GoBot tưởng mọi cú Ctrl+↑ là "nhảy thường" rồi tắt Ctrl+↑. Giờ
+    GoBot xét theo tốc độ bật lên (-36 là Ctrl+↑, -20 là ↑), và cú nhảy rơi
+    đúng bục đã định là được, dù trạng thái thế nào. Rơi lên bục cao hơn
+    trong vùng (vẫn trong tầm của phím đó) thì coi như đổi chỗ, không phải
+    lỗi. Kỹ năng macro được giữ lại lúc đi tới chỗ rơi/nhảy của đường tìm
+    quái và lúc đứng chờ nhảy.
+  + Câu hỏi cho bạn (GoBot đang làm theo cách đầu tiên của mỗi câu):
+    1. Quái ngang tầm và quái cao hơn vạch trên cùng trong tầm: đánh con gần
+       hơn (mặc định) hay con ngang tầm trước?
+    2. Nhảy thường đánh quái trên cao tối đa mấy lần/phút (mặc định 10)?
+    3. Ở t53_s2, chỗ nào nhảy ↑ có thể rơi lên trên vùng thì không nhảy (mặc
+       định) hay kéo vạch trên của vùng lên?
+    4. Ctrl+↓ rơi thấp hơn quái nhưng còn trong một lần ↑: cho (mặc định)
+       hay chỉ khi rơi đúng tầng quái?
+    5. Đăng nhập lại hay rơi xuống dưới vùng (tới 600 px): bot tự nhận vùng
+       và tìm đường về (mặc định)?
+    6. Chưa tin bản đồ mà kẹt ngoài vùng: cho bot đi vài bước 80 px trên sàn
+       đang đứng để tin bản đồ (mặc định)?
+    7. Giữ skill macro khi đi tới chỗ rơi/nhảy của đường tìm quái và lúc
+       đứng chờ nhảy (mặc định)?
+    8. Ctrl+↑ ở chân bậc t49_s5: lên bục 1639 bên cạnh, hay lên tấm ván 1287
+       phía trên?
+    9. Luật 650 px: giữ như bản này (↑ xét 245 px, ↑↑ 413 px, Ctrl+↑ 650 px;
+       mặc định) hay quay lại 650 px cho mọi kiểu nhảy (ít chỗ nhảy hơn)?
+    Thử như bước 17 ở mục 6.
+- Mới trong bản 2026.11.12b (bùa, nhảy xuống/lên, Nhiệm vụ nhanh và Tự đóng
+  thông báo ở mọi mức máu; theo điều bạn báo tối 12/11 và câu trả lời của
+  bạn; chưa thử trên game thật). Bạn báo: "hiện tại còn lỗi máu thấp thì
+  không dùng bùa nữa, cái này cũng cần sửa", "kiểm tra xem còn chức năng
+  nào máu thấp thì không thực hiện nữa không". Câu trả lời của bạn: sửa cả
+  "Nhảy xuống/lên", "Nhiệm vụ nhanh" và "Tự đóng thông báo"; Tự chat giữ
+  như cũ.
+  + Dùng bùa (theo giờ và "Dùng bùa ngay") chạy ở mọi mức máu. Trước đây
+    bùa chỉ bắt đầu khi máu cao hơn mốc bình HP 10% (bình HP của bạn ở 80%,
+    nên phải từ 90%) và dừng khi máu xuống dưới mốc, nên lúc đánh quái gần
+    như không bao giờ dùng được. Giờ GoBot tự bấm bình HP và MP giữa hai bùa
+    (đúng phím, đúng mức, đúng thời gian chờ của dòng bình; máu dưới nửa
+    mốc thì chờ ngắn như macro, "potion_urgent_ms" (của bạn 1 giây); bình HP
+    đang chờ thì vẫn bấm bình MP; không bao giờ phím số, không bao giờ bình
+    pet), cả khi bot đang chạy. Kỹ năng và buff vẫn dừng trong lúc dùng bùa
+    như cũ. Chỉ chờ khi nhân vật đã gục (máu dưới 1%) hoặc chưa đọc được
+    máu: bùa theo giờ thì thử lại sau 5 giây, "Dùng bùa ngay" thì báo lý do
+    trên thẻ (bấm lại sau). Log: "Trash: own potion press between two charms
+    ...". Từ bản này, khi bot đang dừng, "Dọn ngay" và "Mua ngay" cũng bấm
+    bình MP lúc bình HP đang chờ, và chờ ngắn như vậy khi máu dưới nửa mốc.
+  + Nhảy xuống (Ctrl+↓) và nhảy lên (↑, ↑↑, Ctrl+↑), khi đuổi quái và khi
+    tìm đường về: không còn chờ máu. Trước đây máu dưới mốc bình HP (của bạn
+    80%) là bot không nhảy, nên rơi ra ngoài vùng lúc máu thấp thì không về
+    được. Macro vẫn bấm bình như thường trong lúc nhảy. Vẫn không nhảy khi
+    chưa đọc được máu, và khi nhân vật đã gục (nhảy lúc chết không đi đâu,
+    và GoBot sẽ tưởng nhảy hỏng rồi tắt nhảy tới lần BẮT ĐẦU sau).
+  + Nhiệm vụ nhanh: bắt đầu ở mọi mức máu (trước đây phải cao hơn mốc bình
+    HP 10%), và không dừng giữa lượt vì máu thấp nữa; chỉ dừng khi nhân vật
+    đã gục. Trong lượt (vài giây) bình vẫn bị giữ lại như cũ.
+  + Tự đóng thông báo: đóng ở mọi mức máu (trước đây phải cao hơn mốc bình
+    HP 10%); chỉ chờ khi nhân vật đã gục.
+  + Giữ như cũ: Tự chat (câu chat chờ máu cao hơn mốc bình HP 10%, của bạn
+    90%, và dừng câu khi máu xuống dưới mốc, vì lúc gõ không bấm bình
+    được), và ô đổi phím của GoBot (máu dưới mốc thì GoBot để game lên trên
+    cho bình bấm).
+  + Rủi ro: máu rất thấp mà Nhiệm vụ nhanh hay Tự đóng thông báo đang chạy
+    thì bình bị giữ vài giây. Bình MP của bạn ở phím G, và G từng mở bảng
+    Môn Phái khi cửa hàng đang mở: nếu G mở Môn Phái che túi đồ lúc dùng bùa
+    thì lượt bùa dừng ("mất dấu túi đồ"), không bấm nhầm gì, và thử lại sau.
+  + Thử: đánh dấu "Dùng bùa" với một bùa đã tới giờ, cho bot đánh quái tới
+    khi máu dưới 80%, rồi bấm "Dùng bùa ngay": bùa phải được dùng, và khi máu
+    hay MP dưới mốc thì log có "Trash: own potion press between two charms".
+- Mới trong bản 2026.11.12 (đánh quái và di chuyển: quay mặt, rơi xuống, đi
+  lạc, hai vạch trên tab Bản đồ; và Dọn rác, Tự mua bình đếm giờ từ lúc bật;
+  theo điều bạn báo tối 11/11 và câu trả lời của bạn; chưa thử trên game
+  thật):
+  + Việc cần làm trước: xem hai vạch ở tab Bản đồ. hunt.ini của bạn ngày
+    11/11 để "Cao nhất" 10 px và "Thấp nhất" 20 px (up_reach=10,
+    down_reach=20). Từ bản này hai số đó là hai vạch, và là mức DUY NHẤT để
+    nhảy: quái thấp hơn nhân vật quá 20 px (vạch dưới) là bot tìm cách nhảy
+    xuống (trước đây phải thấp hơn quá 100 px), cao hơn quá 10 px (vạch
+    trên) là bot tìm cách nhảy lên. Kéo hai vạch tới mức bạn muốn trước khi
+    chạy (bước 16 ở mục 6). Và từ bản này, sau BẮT ĐẦU, lượt dọn rác đầu và
+    lần mua bình đầu tới sau cả một khoảng "dọn mỗi", "mua mỗi" (câu 8):
+    muốn làm ngay thì bấm "Dọn ngay", "Mua ngay".
+  + Bạn báo tối 11/11, về đánh quái và di chuyển: "Quay mặt sai, đánh hụt",
+    "Rơi xuống, không về chỗ", "Đi lung tung, đi lạc xa".
+  + Câu trả lời của bạn tối 11/11 và rạng sáng 12/11:
+    1. Phím lướt: "C, V hoặc Space".
+    2. Kỹ năng: "GoBot giữ skill lúc nguy hiểm".
+    3. Quái ngoài vùng mà trong tầm: "Chỉ đánh quái trong vùng".
+    4. Rơi ra ngoài vùng, không có đường về: "Tìm cách quay lại chỗ cũ, khi
+       bị rơi xuống thì tìm platform có thể nhảy lên theo map rồi thực hiện
+       nhảy cao nếu cần".
+    5. Lần nhân vật lên đỉnh ĐồiĐen[5] lúc 21:50:37: "không, nhân vật bị rơi
+       xuống vực nên bị di chuyển lên trên đỉnh".
+    6. Vùng hai tầng ở PhòngSinhTử[4]: "nó vẫn thuộc vùng đánh quái nhưng bot
+       không biết cần cho nhảy xuống. Nên thể hiện 2 thanh trên và dưới trên
+       bản đồ để có thể thiết định xem bot sẽ nhảy xuống ở mức bao nhiêu
+       pixel."
+    7. "Ngoài ra hiện tại đang giới hạn không cho bot nhảy xuống hoặc nhảy
+       lên nếu không quá 30 pixel, cần bỏ giới hạn này"
+    8. Dọn rác và mua bình khi bấm BẮT ĐẦU: "vậy thêm 1 chỉnh sửa vào lần
+       fix lần này, đó là khi bật thì bắt đầu đếm thời gian. Lúc nào tới thời
+       gian thì mới bắt đầu thực hiện"
+  + Log ngày 11/11 (ĐồiĐen[5] t62_s5 lúc 21:48–21:56, PhòngSinhTử[4] t23_s14
+    lúc 22:21–22:30) cho thấy: một kỹ năng của bạn dời nhân vật khoảng 214
+    hay 319 px mà không đi bộ (ở t23_s14 là 43% quãng đường ngang), và các
+    phím Z, X, C, V, Space "Luôn bấm theo giờ" bấm nó mỗi 0,5 giây, bot đang
+    làm gì cũng vậy: nhân vật bị đưa đi xa, rơi khỏi đầu bục, và quay qua
+    quay lại. Thêm nữa: khoảng 40% lần bấm quay mặt game không nhận (đang ra
+    chiêu) mà bot vẫn đánh như đã quay; phím đánh Z chỉ tới khoảng 76 px mà
+    bot bấm từ xa tới 450 px; ở t23_s14 một lần nhảy xuống bị tính nhầm là
+    rơi ra ngoài file bản đồ, nên GoBot bỏ file đúng (8,5 phút không nhảy
+    xuống, không nhảy lên, không có đường về); ở t62_s5 các lần báo vị trí
+    giữa lúc rơi làm GoBot bỏ file đúng; báo vị trí ở y 0 lúc 21:50:37 làm
+    bot đi bộ 2910 px trong 9,9 giây; và chỗ đánh quái được lấy ngay ở chỗ
+    vào bản đồ, lơ lửng 33 px trên bục.
+  + Quay mặt (câu 2 và "Quay mặt sai, đánh hụt"). Khi bot đánh theo gói tin
+    (Vị trí từ gói tin có dấu) và game đã báo hướng nhân vật từ lúc vào bản
+    đồ: bấm phím quay xong, bot chờ game báo nhân vật đã quay đúng hướng rồi
+    mới đánh; trong lúc chờ, macro giữ phím kỹ năng (bình, buff vẫn bấm).
+    Game chưa báo thì bot bấm quay lại sau 0,3 giây (trước là 0,5 giây), khi
+    đã 0,15 giây không có chiêu nào của bạn ra; quá 1 giây thì coi như đã
+    quay. Phím quay giữ 80 ms (trước là 60 ms). Lần quay đầu tiên sau khi
+    vào bản đồ, hay khi bot đánh theo màn hình, thì như trước. Kỹ năng được
+    giữ ngay từ lúc bấm phím quay (không đợi hết lượt). Phím quay đi được
+    khoảng 28 px: GoBot tin file bản đồ thì không bấm quay khi bước đó (cộng
+    các lần bấm quay chưa được game báo) đưa nhân vật qua đầu bục trên vực;
+    con quái bên kia bị bỏ qua ít giây (log "Hunter: not turning right
+    toward ... (a pit), and a turn's tap walks the character; passed over
+    for N s").
+  + Không quay qua quay lại: quái mới thì quay ngay; con đang đánh đi qua
+    người nhân vật thì chỉ quay khi nó ở phía sau quá "Hạn chế quay người"
+    (facing_tolerance, của bạn 12 px) thêm 25 px suốt 0,25 giây, hoặc ở
+    phía sau quá "Hạn chế quay người" suốt 0,6 giây (con quái đứng sau lưng
+    để đánh, hay cú lướt dừng ngay quá nó); trong lúc chờ đó bot đánh về
+    phía đang nhìn. Thứ tự chọn quái không đổi.
+  + Phím đánh (Z của bạn) bot tự bấm chỉ khi con quái trong tầm của chiêu
+    đó: tầm GoBot đo được từ gói tin (sau 5 lần ra chiêu có tên con quái)
+    cộng 24 px, hay số attack_range_px mới trong hunt.ini (0 = theo tầm đo
+    được). Chưa đo được thì bấm như trước. "Tầm (px)" của từng kỹ năng (cửa
+    sổ Kỹ năng, nút "Chi tiết…") nay có tác dụng cả khi "Chỉ khi đang đánh
+    quái" không có dấu, lúc bot đang đánh một con quái: con quái ở xa hơn
+    số đó thì kỹ năng chờ. Của bạn đều là 0 (mọi khoảng cách), nên không
+    đổi gì cho tới khi bạn đặt. Có Kiểu đánh mà phím đánh bị giữ vì con quái
+    ngoài tầm của nó, và không gì làm con quái mất máu, thì sau no_damage_ms
+    bot vẫn bỏ con đó như trước; con mà kỹ năng của macro làm mất máu thì
+    bot vẫn đánh tiếp, không đi tới gần.
+  + Giữ kỹ năng lúc nguy hiểm (câu 2): macro giữ phím kỹ năng, cả phím
+    "Luôn bấm theo giờ" (bình và buff vẫn bấm), khi: đang quay mặt chờ game
+    báo; đang nhảy xuống (lúc đứng lại xét và lúc rơi); có Chỗ đánh quái mà
+    trong vùng không có con nào để đánh; ở ngoài vùng quá 60 px mà không đi
+    về được, hay đang chờ sau khi game đưa nhân vật đi (câu 5); và lúc đi bộ
+    về vùng, như bản 2026.11.10. Lúc bot đi tới con quái thì không giữ. Mỗi
+    phút log có dòng "Skills: N held for the hunter -- T turning, D a drop
+    settling or in its fall, I nothing to fight in the area, O outside the
+    area or stranded, L a leg of the seek's way, J a jump up; K of the dash's
+    key near an edge" (L và J từ bản 2026.11.12c).
+  + Phím lướt (câu 1): GoBot tự tìm. Mỗi lần nhân vật dời ít nhất 100 px mà
+    không đi bộ, không nhảy, log ghi "Positions: moved +214 px with no walk,
+    A,B -> C,D by 0x0027, facing right; your cast of skill S M ms before;
+    its key C; GoBot: ..." (tối đa 30 dòng mỗi phút). Khi ít nhất 3 lần như
+    vậy, và từ 70% số lần trở lên, đi ngay sau cùng một chiêu, GoBot coi
+    chiêu đó là chiêu lướt: log ghi "Positions: the dash is skill S, about
+    214 px -- ...", và mỗi phút "Dash (packets): N moves of yours with no
+    walk this minute (N px); the dash is skill S, key C, about 214 px (A of
+    B)". Chưa học được thì C, V và Space đều coi là phím lướt, dài 320 px.
+    (Từ bản 2026.11.17: chưa học được thì không phím nào bị giữ vì lướt;
+    320 px chỉ còn là độ dài của phím lướt đã học mà chưa đo được.)
+    Phím lướt (chỉ phím đó) bị giữ khi cú lướt sẽ đưa nhân vật ra xa vùng
+    hơn chỗ đang đứng, hay qua đầu bục theo file bản đồ GoBot tin (file bản
+    đồ được xét khi có Chỗ đánh quái hay Nhảy xuống bậc dưới).
+  + Chỉ đánh quái trong vùng (câu 3): có Chỗ đánh quái (vùng ở tab Bản đồ
+    hay vùng quanh chỗ của lần chạy này), con quái ở ngoài vùng không bao
+    giờ được quay tới, đánh hay đi tới, kể cả khi ở trong tầm đánh (con đang
+    đánh vẫn được giữ tới khi nó ra ngoài vùng quá 60 px). Ở tab Bản đồ, quái
+    ngoài vùng xám, kể cả con trong tầm. Thẻ ghi "... bot vẫn đánh quái trong
+    vùng tới trong tầm (tầm đánh N px); hết quái thì đi bộ về X, Y." Không
+    có Chỗ đánh quái thì như trước. Có Chỗ đánh quái mà không nhảy xuống
+    được (ô Nhảy xuống không có dấu, hay đã tắt), con quái thấp hơn vạch
+    dưới mà đi bộ không tới (không ở bục đang đứng, hay bục mà đi ra đầu bục
+    rơi xuống) thì bot bỏ qua, không đi lòng vòng dưới nó. Không có file bản
+    đồ thì chỉ bỏ qua con rõ là ở tầng khác: thấp hơn quá một lần nhảy (120
+    px), hay dốc hơn mọi dốc đi được (thấp hơn khoảng cách ngang cộng 31 px);
+    con hơi thấp trên dốc của bục đang đứng thì vẫn đi tới như trước, và đi
+    tới mà thấy nó dốc hơn thế thì bỏ qua ("Hunter: X passed over -- N px
+    below, ..."). Vùng ở tab Bản đồ mà chưa có
+    file bản đồ: nhân vật đang ở trong vùng thì hết quái không đi bộ về chỗ
+    về nữa.
+  + Về chỗ sau khi rơi (câu 4): khi nhân vật ra khỏi vùng mà không có đường
+    về theo các bục trong vùng, GoBot tìm đường theo file bản đồ qua cả các
+    bục ngoài vùng: đi bộ, đi ra đầu bục để rơi xuống, và nhảy lên ↑ (khoảng
+    133 px), ↑↑ (khoảng 280 px), Ctrl+↑ (khoảng 432 px) "Theo GoC", từng tầng
+    một, tối đa 4 lần nhảy, tới bục của chỗ về. Cho vùng ở tab Bản đồ, và từ
+    bản này cả chỗ của lần chạy này khi GoBot tin file bản đồ (chỗ đó cũng
+    không còn đi ra khỏi vùng, và nhảy lên tới quái như vùng ở tab Bản đồ;
+    trừ "Tự tìm quái trong vùng", vẫn chỉ cho vùng ở tab Bản đồ). Nhảy lên
+    cần dấu "Nhảy lên bục trên" và Phím nhảy là ↑; giới hạn của nó giữ nguyên
+    (tối đa 4 lần mỗi phút; 3 lần liền hay 5 lần trong một lần chạy không
+    lên được thì tắt tới lần BẮT ĐẦU sau; đổi bản đồ thì dừng đánh quái).
+    (Từ bản 2026.11.15: 3 lần liền hay 5 lần trong một lần chạy không lên
+    được chỉ làm Nhảy lên nghỉ 30 giây, rồi 60, rồi 120 giây, rồi tự bật
+    lại. Từ bản 2026.11.24 không nghỉ, không tắt: nhảy hỏng thì thử lại
+    ngay, hay sau một lượt ra chiêu; đổi bản đồ thì nhớ chỗ đó là cửa và
+    vẫn đánh quái tiếp.)
+    Có dấu "Nhảy xuống bậc dưới" (nhảy xuống chưa tắt, GoBot tin file bản
+    đồ) thì đường về còn nhảy xuống Ctrl+↓ qua bục, theo luật của Nhảy
+    xuống: không gần cửa, không xuống vực, không ở chỗ Ctrl+↓ đã không
+    xuống được, tối đa 8 lần một đường về; đứng lại rồi mới bấm, kỹ năng giữ
+    lúc đó; log "Hunter: drop (Ctrl+Down) on the way back: N px down -- ...".
+    Đường về không bao giờ đi qua cửa. Dưới nút BẮT ĐẦU vẫn ghi "Về: nhảy
+    Ctrl+↑ ở x ..."; log thêm "over floors outside the area" (và ", and N
+    drops (Ctrl+Down)").
+  + Không có đường về nào: bot đứng yên ở đó (trước đây đánh tại chỗ):
+    không đi, không đánh con quái nào ngoài vùng (con trong vùng tới trong
+    tầm thì vẫn đánh), kỹ năng giữ. Thẻ ghi "... không có đường về vùng: bot
+    đứng yên ở đây, không đánh quái ngoài vùng, kỹ năng tạm dừng (bình và
+    buff vẫn bấm), tới khi có đường về."; log ghi một lần "Hunter: N px
+    outside the hunting area at X,Y -- ...: standing where it is until a
+    way back shows (no walk, nothing outside the area fought, the macro's
+    skills held)". Cũng vậy khi chỗ đánh quái cao hơn một lần nhảy mà không
+    có file bản đồ ("... quá một lần nhảy: bot không đi về được, đứng yên ở
+    đây."), và khi đi về không được (chờ thử lại; 3 lần liền không được thì
+    từ bản 2026.11.24 chỉ chờ spot_retry_ms, của bạn 30 giây, rồi thử thêm 3
+    lần nữa, cứ thế mãi -- trước đó chờ lâu: 4 lần spot_retry_ms, ít nhất 1
+    phút, nhiều nhất 5 phút, rồi chỉ thử thêm một lần; sớm hơn khi nhân vật
+    bị đẩy sang chỗ khác; log "Hunter: walks back given up on 3 times in a
+    row -- the next round of tries in N s" rồi "Hunter: trying the walk back
+    again -- ..."). Không có file bản đồ mà chỗ đánh quái thấp hơn
+    quá một màn hình (461 px) thì bot cũng đứng yên, không đi bộ mò về qua
+    các bục ("... more than a view above it, no map to go by"). GoBot tính
+    lại đường về mỗi khi nhân vật tới bục khác.
+  + Rơi xuống vực (câu 5): gói tin báo nhân vật cao hơn lần trước quá 1000
+    px mà không đi, không nhảy, không qua cửa thì GoBot coi là game đưa nhân
+    vật lên sau khi rơi xuống vực. Bot đứng yên (thẻ: "Chỗ đánh quái: gói
+    tin vừa báo nhân vật ở rất xa chỗ cũ mà không đi, không nhảy, không qua
+    cửa (rơi xuống vực thì game đưa lên trên) — bot đứng yên, chờ gói tin
+    sau báo đúng chỗ rồi mới tính đường về."), chờ một lần báo nữa ở gần đó
+    (trong 400 px) hay 3 giây, rồi tính đường về từ chỗ thật; log "Hunter:
+    the game put you at X,Y, N px from A,B (N px up) ...". Báo tiếp theo về
+    lại gần chỗ cũ thì GoBot bỏ qua lần báo lạ đó. Báo vị trí ở y 0 không
+    bao giờ làm bot đi đâu: GoBot giữ độ cao của lần báo thật trước đó (log
+    mỗi phút nhiều nhất một lần "Positions: your report at X,0 (opcode ...)
+    -- y 0 is no place: height kept at Y"), nên đứng ở chỗ như tường phải
+    của t1901_s2 (báo 999,0) bot vẫn thấy quái và đánh như thường.
+  + Không để rơi xuống vực: khi GoBot tin file bản đồ, bot không đi bộ (cả
+    bước lùi của Giữ khoảng cách) qua đầu bục mà bên dưới không có bục nào
+    trong file; log "Hunter: not walking left -- the floor ends at X,Y with
+    nothing of the map file under it (a pit ...)", dòng "Hunter:" mỗi phút
+    thêm "; walks stopped at a pit's edge N". Phím lướt cũng bị giữ ở đó, và
+    nhảy xuống không bao giờ nhảy tới chỗ không có bục.
+  + Đỉnh ĐồiĐen[5] (t62_s5): sau khi game đưa nhân vật lên đỉnh
+    (3166,723), mọi đường đi bộ và rơi xuống đều dừng ở một bục dài ngang cả
+    bản đồ (khoảng y 3000), mà chỉ Ctrl+↓ mới xuống qua được. Có dấu "Nhảy
+    xuống bậc dưới" (của bạn có) thì đường về nhảy xuống qua bục đó và các
+    bục dưới rồi đi tiếp về chỗ (thử trên máy với file bản đồ của game: 5
+    lần Ctrl+↓, về tới chỗ). Không có dấu đó thì bot đứng yên ở đó, log một
+    lần "... no way back the map shows but by Ctrl+Down, and Nhảy xuống is
+    off: standing where it is ..."; khi đó hãy tự đưa nhân vật về, hay bấm
+    Đặt chỗ này. Từ góc dưới bên phải (3166,5446) thì GoBot tìm được đường
+    về (đi dọc nền tới x 1242, nhảy lên bục 5386, lên dốc).
+  + Nhảy xuống không còn tự tắt nhầm: rơi xuống một bục khác của file bản
+    đồ (bị đẩy lệch khi rơi) thì vẫn tính là nhảy được, không bỏ file, không
+    tắt nhảy xuống (log "Hunter: drop landed at X,Y, N px down, on floor F
+    (attr A) -- not floor L the map file gave ..."; dòng "Hunter:" mỗi phút
+    thêm "N on another floor"); còn đứng trên bục cũ mà bị dời xa hơn 64 px
+    (một kỹ năng dời nhân vật) thì không tính là lần nhảy hỏng ("...
+    something else moved you"). Chỉ khi rơi tới chỗ không có bục nào trong
+    file thì GoBot mới bỏ file và thôi nhảy, như trước. Báo vị trí ở y 0
+    không bao giờ tính là chỗ rơi xuống.
+  + Báo vị trí giữa lúc rơi: một chỗ đứng ngoài các bục của file chỉ được
+    tính khi có báo vị trí sau đó ít nhất 0,3 giây ở cùng độ cao, không
+    trong lúc nhảy, rơi; nên rơi qua các bục không còn làm GoBot bỏ file
+    đúng.
+  + Chỗ đánh quái của lần chạy này: GoBot tin file bản đồ thì chỗ được đặt
+    lên mặt bục ngay dưới nó (log thêm "-- on the floor under X,Y, by the map
+    file"); chưa tin thì không lấy chỗ ở ngay chỗ vào bản đồ (nhân vật có
+    thể còn lơ lửng) mà ở lần báo vị trí sau ("Hunter: no hunting spot at
+    the map entry's spawn X,Y -- ..."): lần báo ra chiêu hay đi bộ, kể cả ở
+    đúng chỗ vào bản đồ (vào bản đồ đứng trên bục, như lúc đăng nhập); bốn
+    báo 0x0028 lúc vào bản đồ thì không tính. Chỗ cao hơn một lần nhảy mà file bản
+    đồ cho thấy có dốc liền tới đó thì bot đi bộ lên dốc về, không còn báo
+    "quá một lần nhảy". Vùng ở tab Bản đồ mà chưa có file bản đồ: "cao hơn
+    một lần nhảy" tính theo cạnh vùng gần nhất, không theo chỗ về.
+  + Hai vạch trên tab Bản đồ (câu 6): hai đường nét đứt màu tím nhạt, tính
+    từ chân nhân vật (trừ packet_dy, như vòng quanh con quái đang đánh; của
+    bạn là 0), ngang qua vùng đánh (hay cả khung bản đồ khi không có
+    vùng): vạch trên ghi "+10 px", vạch dưới "-20 px" (số của bạn). Kéo vạch
+    lên xuống bằng chuột (mỗi nấc 5 px; lúc kéo, bản đồ đứng yên), hay sửa
+    số ở dòng "Vạch trên [..] px  Vạch dưới [..] px" ngay dưới bản đồ (0
+    tới 1000). Thả chuột thì bot dùng số mới ngay, và GoBot lưu vào hunt.ini
+    (up_reach, down_reach); không lưu được thì có dòng đỏ "Không lưu được
+    hai vạch vào configs\hunt.ini — GoBot thử lại sau ít giây." Hai vạch
+    cũng là "Cao nhất" và "Thấp nhất" của nút "Tầm đánh…" (nay tới 1000 px,
+    trước là 400). Rê chuột lên ô số: "Quái thấp hơn vạch dưới: bot nhảy
+    xuống; cao hơn vạch trên: bot nhảy lên; giữa hai vạch: đánh tại chỗ."
+    Nhảy xuống cần dấu "Nhảy xuống bậc dưới", nhảy lên cần "Nhảy lên bục
+    trên", và chỉ ở chỗ file bản đồ của game cho phép. Dòng dưới ô Nhảy
+    xuống nay ghi "Nhảy xuống (Ctrl + ↓) khi quái thấp hơn vạch dưới (N
+    px), ...". Thử trên máy với file bản đồ PhòngSinhTử[4] của game và vùng
+    của bạn (746–2844 x 1145–1549, chỗ về 1987,1245): con quái ở bục dưới
+    2020,1374, bot nhảy xuống hai lần (1246 xuống 1314, rồi 60 px xuống
+    1374) rồi đánh nó; lần thứ hai trước đây bị chặn.
+  + Bỏ các mức tối thiểu ẩn (câu 7):
+    - drop_min_px (100 px: nhảy xuống chỉ khi quái thấp hơn quá số lớn hơn
+      giữa "Thấp nhất" và 100): bỏ. hunt.ini cũ còn dòng đó thì GoBot không
+      đọc nữa.
+    - Lần rơi ngắn nhất GoBot nhận là nhảy xuống: 60 px xuống 25 px. 25 px
+      còn lại không phải mức cài đặt: rơi ít hơn thế GoBot không phân biệt
+      được với đứng yên (một lần nhảy được sẽ bị tính là không có tác dụng,
+      và 3 lần liền thì tắt nhảy xuống).
+    - "Cao không cần nhảy" và "Thấp không cần nhảy" (30 px, cửa sổ "Tầm
+      đánh…"; đây là số "30 px" bạn thấy): nay không bao giờ lớn hơn "Cao
+      nhất", "Thấp nhất" (vạch 10 và 20 thì hiện 10 và 20). Số 30 vẫn giữ
+      trong hunt.ini: kéo vạch lên lại thì về 30.
+    - Nhảy lên (bản 2026.11.05b) vốn chỉ theo "Cao nhất", không có mức tối
+      thiểu; nay đã thử trên máy với một bục cao 50 px: vạch trên 10 px thì
+      bot nhảy ↑ lên, vạch trên 60 px thì đánh từ dưới.
+    - Tự tìm quái trong vùng: vạch đặt dưới 8 px không còn làm bot bỏ con
+      quái đứng ngang nhân vật.
+    - Giữ nguyên, vì là luật an toàn hay không phải mức độ cao: không nhảy
+      gần cửa (drop_gate_px 150) và chỉ nhảy xuống tới quái cách không quá
+      drop_side_px (120) theo chiều ngang, không đi qua đầu bục trên vực,
+      tối đa 4 lần nhảy mỗi phút, 3 lần liền hay 5 lần trong một lần chạy
+      không được thì tắt, chỉ nhảy khi GoBot tin file bản đồ, đổi bản đồ
+      thì dừng đánh quái, một lần nhảy thường là 120 px cho chỗ đánh quái
+      không có file bản đồ, khoảng trống 650 px phía trên khi nhảy lên (từ
+      bản 2026.11.12c: 650 px cho Ctrl+↑, 245 px cho ↑, 413 px cho ↑↑), và
+      các khoảng sai số nhỏ khi xét độ cao.
+  + Dọn rác và Tự mua bình đếm giờ từ lúc bật (câu 8): bấm BẮT ĐẦU (hay
+    F10) thì lượt dọn rác theo giờ đầu tiên tới sau cả một khoảng "dọn mỗi"
+    (trước đây 15 giây sau), và lần xem mua đầu tiên sau cả một khoảng "mua
+    mỗi" (trước đây 45 giây sau, hay theo giờ trong shop_clock.txt). Đánh
+    dấu lại "Tự dọn rác" hay "Tự mua bình" cũng đếm lại từ đầu. DỪNG rồi
+    BẮT ĐẦU lại khi chưa tới giờ thì giờ đang đếm được giữ (nhưng không sớm
+    hơn 15 giây cho dọn rác, 45 giây cho mua bình); dừng tới quá giờ thì đếm
+    lại cả khoảng. "Dọn ngay", "Mua ngay", "Thử mua", "Thử tìm" vẫn làm
+    ngay. Dùng bùa không đổi. shop_clock.txt vẫn được ghi, nhưng không làm
+    lần mua đầu tới sớm hơn. Có thể còn món trong thùng rác lúc bắt đầu thì
+    lượt dọn vẫn tới sau 15 giây, để trả món về túi (lúc đó mọi phím đều
+    chờ). Phần còn lại của "Mua ngay" lúc bot dừng thì mua ở lần mua theo
+    giờ đầu tiên sau khi bấm BẮT ĐẦU. Log: "Trash: counting from the start
+    -- the first timed pass at HH:MM (10 min from the start), the shop's
+    first look at HH:MM (60 min from the start)" (hay "(kept from the last
+    run)"), "Trash: Tự dọn rác ticked on -- the first timed pass at HH:MM, N
+    min from now", "Trash: Tự mua bình ticked on -- the first look at HH:MM,
+    N min from now, owing nothing".
+  + Log mới khác: dòng "Hunter:" mỗi phút có "N turns (T taps; C confirmed
+    by the packets, the report A ms after its tap on average, M at most; K
+    not confirmed in 1000 ms; P facings put right by the packets; keys the
+    game missed: X turn taps, Y walk holds)" và "; own attack key let be N
+    times beyond its reach (L px), M at an edge as the dash's".
+  + Tab Bản đồ mượt hơn (bạn báo sáng 12/11: "cảm giác quái vật hay player
+    hiển thị trên bản đồ đang chưa mượt, chưa khớp mà bị delay khoảng 0.5
+    -1s"):
+    - Chấm của nhân vật: game chỉ báo vị trí lúc bắt đầu đi và lúc dừng.
+      Trước đây khi bạn tự đi (hay bot bước ngắn), tab chỉ tính tiếp chấm
+      0,6 giây, rồi để chấm đứng chờ (vòng xám nét đứt) tới lúc game báo
+      dừng mới nhảy tới. Nay tab tính tiếp tới 3 giây; tới đầu bục thì chấm
+      vẫn dừng ở đó. Chỉ phần vẽ đổi, bot vẫn tính như trước.
+    - Vẽ lại 30 lần mỗi giây khi tab Bản đồ đang mở, cả lúc game ở trước
+      (trước đây 10); có dấu "Nhẹ máy" thì vẫn 2 lần. Dòng "Load:" trong
+      gobot_gui.log ghi tốn bao nhiêu.
+    - Log mới mỗi phút: "Capture delay: last 60 s | N packets read A ms on
+      average, M ms at most, after the quickest -- Npcap's stamp to GoBot's
+      read": gói tin tới GoBot trễ bao nhiêu. Tab vẫn trễ thì gửi mình log
+      có dòng này.
+  + Rủi ro: tới khi GoBot học được phím lướt, cả C, V và Space đều chờ ở
+    gần mép vùng và đầu bục, nên ở đó kỹ năng ra ít hơn (bỏ ở bản
+    2026.11.17: chính điều này làm C và V gần như không ra). Mỗi lần quay mặt,
+    kỹ năng có thể chờ tới 1 giây. Có Chỗ đánh quái mà trong vùng hết quái
+    thì không kỹ năng nào ra, kể cả "Luôn bấm theo giờ": kỹ năng tự buff
+    thì đặt ở dòng Tự buff. Vạch thấp (như 10 và 20 của bạn) làm bot nhảy
+    xuống, nhảy lên nhiều hơn. Đứng yên khi không có đường về nghĩa là
+    nhân vật có thể đứng lâu một chỗ cho tới khi bạn đưa về (đi về không
+    được 3 lần liền thì vài phút sau bot thử lại; từ bản 2026.11.24 chỉ 30
+    giây). Đường về có Ctrl+↓ chưa
+    thử trên game thật.
+    Thử như bước 16 ở mục 6.
+
+- Mới trong bản 2026.11.11c (tự tắt thông báo lạ khi mua bình; chưa thử trên
+  game thật). Bạn báo: "có đoạn không mua HP MP được do hiện dialog thông
+  báo, cần sửa để bot tự tắt thông báo này". Trong log, hai lần (21:40 và
+  22:11) sau khi bấm Xác Nhận mua thì game hiện một thông báo không phải
+  "Túi đồ [Tiêu thụ] đã đầy"; GoBot để nguyên, dừng lượt mua, không bấm ESC
+  và giữ phím cho tới khi bạn tự tắt (gần 3 phút).
+  + Giờ GoBot tự bấm Xác Nhận của thông báo đó (như thông báo của bùa), xem
+    nó biến mất trên hai lần nhìn, giữ ảnh shop_notice trong trash_debug,
+    tính lần mua đó là đã mua rồi mua tiếp. Thông báo lần thứ hai trong cùng
+    một lượt thì tắt nốt và dừng lượt. Thông báo hiện muộn trước lúc bấm ESC
+    đóng cửa hàng cũng được tắt trước. Log: "Trash: shop notice at ...",
+    "Trash: shop notice closed (1 click(s))".
+  + Bấm Xác Nhận 2 lần mà thông báo không tắt thì GoBot thôi như cũ (ảnh
+    shop_notice_stuck), không bấm ESC vào nó.
+  + GoBot không đọc chữ trong thông báo. Nếu bạn gửi ảnh
+    trash_debug\*_shop_notice.png thì có thể làm GoBot hiểu thông báo đó là
+    gì (túi gần đầy, hay lỗi khác) và xử lý đúng hơn.
 - Mới trong bản 2026.11.11b (mua bình và dọn rác ở mọi mức máu, GoBot tự
   bấm bình khi bot đang dừng; chưa thử trên game thật). Bạn báo: "Hiện tại
   máu thấp đang không được mua bình, làm cho có thể mua bình ở bất cứ mức
@@ -206,7 +1720,9 @@ khác chưa được thử trên game thật.
     (như 10 và 60 của bản zip, hay 5 hoặc 15 với 15), mỗi lần mua theo giờ
     thường tới trong vòng 1 phút sau một lượt dọn theo giờ và được mua riêng
     ngay sau lượt dọn đó: vẫn liền sau lượt dọn, chỉ không cùng một lần dừng
-    phím. Lượt dọn chỉ được kéo lên khi tới giờ mua lâu hơn 1 phút sau lượt
+    phím. (Từ bản 2026.11.12, lượt dọn đầu và lần xem mua đầu tới sau cả một
+    khoảng "dọn mỗi", "mua mỗi" kể từ BẮT ĐẦU: xem bản 2026.11.12.) Lượt
+    dọn chỉ được kéo lên khi tới giờ mua lâu hơn 1 phút sau lượt
     dọn trước: hai số không chia hết cho nhau (như 10 với 15), phần còn lại
     của một lần mua (mua sau 1 phút, thường có một lượt dọn ngắn trước nó),
     giờ mua đọc từ shop_clock.txt khi mở lại GoBot hay khi đánh dấu lại Tự
@@ -494,7 +2010,8 @@ khác chưa được thử trên game thật.
       không xoá được gì." Có một món chụp từ túi, hay một hình ở nhóm khác,
       thì tìm mọi ngăn có dấu như trước.
     - Mỗi món nhanh hơn: lúc chờ túi mở và chờ món vào thùng rác GoBot nhìn
-      lại mỗi 80 ms (trước là 150 ms), chờ hộp thoại tính theo đồng hồ, mỗi
+      lại mỗi 80 ms (trước là 150 ms), mỗi lần chờ tới 30 giây từ bản
+      2026.11.15d, chờ hộp thoại tính theo đồng hồ, mỗi
       hình chỉ tìm hộp thoại một lần, món sau dùng luôn hình nhìn thấy cuối
       của món trước, và mười bước kéo đồ theo "Tốc độ bấm nút". Mọi bước
       kiểm tra giữ nguyên: đọc hộp số lượng ít nhất 0,75 giây (3 lần đọc
@@ -629,13 +2146,21 @@ khác chưa được thử trên game thật.
   + Game hiện một thông báo khác thay cho hộp số lượng (có thể là túi đầy mà
     GoBot không đọc ra chữ): GoBot bấm Xác Nhận của nó, dừng như túi đầy, và
     giữ ảnh shop_message trong trash_debug. Lần mua không rõ có thành công
-    không (đã bấm Xác Nhận mà không thấy hộp số lượng đóng, hay có thông báo
-    hiện sau đó) thì tính là đã mua và dừng lượt đó: không bao giờ mua hai
-    lần. Lượt có lỗi thì chờ 10 phút; hai lượt liền có lỗi thì GoBot bỏ phần
-    còn lại, tới giờ sau mua lại. Thông báo lạ đó còn mở trên cửa hàng (bấm
-    Xác Nhận 2 lần không tắt, hay hiện sau khi mua) thì GoBot không bấm ESC
-    vào nó: cửa hàng để nguyên, kỹ năng, bình và buff tạm dừng cho tới khi
-    bạn đóng thông báo và cửa hàng. Lượt bị cắt vì máu xuống dưới mốc bình
+    không (đã bấm Xác Nhận mà không thấy hộp số lượng đóng) thì tính là đã
+    mua và dừng lượt đó: không bao giờ mua hai lần. Từ bản 2026.11.11c: game
+    hiện thông báo lạ SAU khi bấm Xác Nhận mua (không phải "Túi đồ [Tiêu thụ]
+    đã đầy") thì GoBot tự bấm Xác Nhận của thông báo đó để tắt, giữ ảnh
+    shop_notice trong trash_debug, tính lần mua đó là đã mua (không bao giờ mua
+    hai lần) rồi MUA TIẾP; thông báo lạ lần thứ hai trong cùng một lượt thì
+    tắt nốt rồi dừng lượt đó. Thông báo hiện muộn, còn mở lúc sắp bấm ESC đóng
+    cửa hàng, cũng được tự tắt rồi mới bấm ESC. Lượt có lỗi thì chờ 30 giây
+    (trước bản 2026.11.15b là 10 phút) rồi mua tiếp phần còn lại, lượt nào
+    có lỗi cũng vậy, không giới hạn (từ bản 2026.11.24; trước đó hai lượt
+    liền có lỗi thì GoBot bỏ phần còn lại, tới giờ sau mới mua lại).
+    Thông báo lạ mà bấm Xác Nhận 2 lần không tắt (ảnh shop_notice_stuck) thì
+    GoBot không bấm thêm và không bấm ESC vào nó: cửa hàng để nguyên, kỹ
+    năng, bình và buff tạm dừng cho tới khi bạn đóng thông báo và cửa hàng.
+    Lượt bị cắt vì máu xuống dưới mốc bình
     máu thì phần còn lại mua tiếp sau 1 phút, như các lượt khác (từ bản
     2026.11.11: sau 15 giây).
   + Giờ mua được ghi vào %LOCALAPPDATA%\GoBot\shop_clock.txt TRƯỚC khi bấm
@@ -663,16 +2188,22 @@ khác chưa được thử trên game thật.
     bình và số ô Tiêu Dùng trước và sau lượt mua, không quyết định gì.
   + Bảng Sự kiện và điểm danh (câu 4, bạn chọn (c)): gộp vào ô "Tự đóng
     thông báo", không có ô riêng. Khi ô này có dấu và bot đang chạy (đã bấm
-    BẮT ĐẦU), bảng hiện (lúc vào game, lúc qua 00:00) và đứng yên 3 giây thì
-    GoBot bấm ESC một lần, tức khoảng 3–5 giây sau khi bảng hiện; thông báo
+    BẮT ĐẦU), bảng hiện (lúc vào game, lúc qua 00:00) thì GoBot bấm ESC một
+    lần 30 giây sau khi nhân vật vào game (GoBot tự vào: tính từ lúc vào;
+    vào bằng tay: tính từ lúc thấy bảng), bảng phải đứng yên ít nhất 3 giây;
+    từ 23:55 tới 00:03 theo đồng hồ máy thì không bấm, qua ngày GoBot chờ
+    tới 00:03 mới bấm ESC (từ bản 2026.11.15d; trước đó là khoảng 3–5 giây
+    sau khi bảng hiện); thông báo
     "Bạn đã nhận được vật phẩm thưởng điểm danh..." nếu có thì được bấm Xác
     Nhận trước. Không bao giờ bấm nút X hay bấm vào trong bảng. Ô này vẫn
     đóng thông báo nhận quà điểm danh, Yêu Quái Bách Khoa và menu ESC do
     GoBot mở, như trước, với mọi điều kiện cũ: game ở trên cùng, không có
     cửa sổ nào khác, không ai đụng chuột hay bàn phím, máu không thấp; các
-    phím khác chờ tối đa 2 giây. Bấm ESC 2 lần trong 10 phút mà bảng vẫn còn
-    thì GoBot để yên và báo "Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm
-    ESC: GoBot để yên, bạn tắt giúp." Dưới nút BẮT ĐẦU ghi "Tự đóng thông
+    phím khác chờ tối đa 2 giây. Bấm ESC mà bảng vẫn còn thì 30 giây sau
+    GoBot bấm lại, cứ thế tới khi bảng tắt, và thẻ ghi "Đã bấm ESC mà bảng
+    Sự kiện và điểm danh vẫn còn: thử lại sau 30 giây." (từ bản 2026.11.24;
+    trước đó bấm ESC 2 lần trong 10 phút mà bảng vẫn còn thì GoBot để yên
+    cho bạn tự tắt). Dưới nút BẮT ĐẦU ghi "Tự đóng thông
     báo: đang bật, đã đóng N (bảng điểm danh: M)."
   + Ô "Tự đóng thông báo" không có dấu thì không gì tắt bảng. Khi bảng đang
     hiện, Tự dọn rác, Dùng bùa, Tự mua bình và Làm nhiệm vụ nhanh không bấm
@@ -712,8 +2243,10 @@ khác chưa được thử trên game thật.
     ... closed by its label (seen gone twice, 1 click(s))" (hay "... NOT
     closed after 2 click(s), no ESC; the keys are not held for it"), "Trash:
     shop lone message at ...", "Trash: shop done -- bought 5+5, unsure 0,
-    full no; owed 5+5; next part 60 s on", "Trash: shop -- 2 troubles in a
-    row: owed dropped until the next plan ...", "Bag (packets): before the
+    full no; owed 5+5; next part 60 s on", "Trash: shop -- 2 trouble(s) in
+    a row: owed 5+5 kept, tried again 30 s on" (từ bản 2026.11.24; trước đó
+    "Trash: shop -- 2 troubles in a row: owed dropped until the next plan
+    ..."), "Bag (packets): before the
     shop ..." và "Bag (packets): after the shop ...", "Trash: the check-in
     board is up -- the pass put off 60 s", "Quest: the check-in board is up
     at ...", "Popups: the check-in board (Sự kiện và điểm danh) is up at
@@ -767,13 +2300,16 @@ khác chưa được thử trên game thật.
     59% MP có thể xuống thấp tới mức chiêu không ra vì thiếu MP, nên phải
     chờ bạn chọn mốc MP (câu 7 ở dưới). Bản này chỉ lưu một ảnh thanh MP để
     sửa cho đúng (xem "Log mới" ở dưới).
-  + Đổi trong bản này. Ô mới "Ra chiêu theo vòng" để trống (mặc định) thì
+  + Đổi trong bản này. Ô mới "Ra chiêu theo vòng" để trống (mặc định của
+    bản này; từ bản 2026.11.16b mặc định có dấu) thì
     macro bấm phím y như bản 2026.11.05b: cùng phím, cùng thứ tự, cùng lúc.
     Tự mua bình, Làm nhiệm vụ nhanh và Dùng bùa thì chờ khác đi (ở dưới);
     còn lại chỉ là lời trên màn hình và log.
   + Ô mới "Ra chiêu theo vòng (chờ game ra chiêu rồi mới bấm chiêu kế)" (thử
-    nghiệm, mặc định KHÔNG có dấu) trong cửa sổ Kỹ năng (nút "Chi tiết…" ở
-    dòng Tự dùng kỹ năng), sau "Dùng skill tuần tự" và "Tốc độ bấm kỹ năng".
+    nghiệm; trong bản này mặc định KHÔNG có dấu, từ bản 2026.11.16b mặc định
+    CÓ dấu và chạy cả khi Tự đánh quái chạy) trong cửa sổ Kỹ năng (nút
+    "Chi tiết…" ở dòng Tự dùng kỹ năng), sau "Dùng skill tuần tự" và "Tốc
+    độ bấm kỹ năng".
     Màn hình Nâng cao, phần "Timed keys", có ô y như vậy (ở đó phải bấm
     Apply now hay Save macro). Có dấu: các phím kỹ năng đang bật được bấm
     lần lượt theo thứ tự trong danh sách (của bạn: Z X C V B Space S A, rồi
@@ -802,17 +2338,20 @@ khác chưa được thử trên game thật.
     vòng tiếp. Phím không bấm được vì game không ở trên cùng (hay GoBot đang
     tạm dừng phím) thì không tính là một lần bấm; phím mà Windows không nhận
     thì vòng đó qua phím đó.
-  + Ô này chỉ dùng khi Tự đánh quái tắt (macro chạy một mình): Tự đánh quái
-    đang chạy, hay chuỗi phím (Sequence, màn hình Nâng cao) đang bật, thì ô
-    này tạm không có tác dụng, mỗi phím bấm theo giờ như thường, và dưới ô
+  + Trong bản này (từ bản 2026.11.16b thì khác: chạy cả khi Tự đánh quái
+    chạy, xem bản đó) ô chỉ dùng khi Tự đánh quái tắt (macro chạy một mình):
+    Tự đánh quái đang chạy, hay chuỗi phím (Sequence, màn hình Nâng cao)
+    đang bật, thì ô này tạm không có tác dụng, mỗi phím bấm theo giờ như
+    thường, và dưới ô
     có dòng nhắc; với "Chỉ khi đang đánh quái" kỹ năng vẫn theo trận đánh
     như trước (bản này chưa có vòng cho Tự đánh quái). Dưới ô có dòng cho
     biết đang làm gì, ví dụ "Đang theo vòng — khóa chiêu ước 680 ms, 12
     vòng." hay "Tạm theo giờ: chưa thấy gói tin ra chiêu nào của bạn.".
     Cách bật: thẻ Đánh quái, dòng Tự dùng kỹ năng, nút "Chi tiết…", đánh
-    dấu ô đó (lưu ngay; bỏ dấu là về như cũ). macro.ini không có dòng
-    cast_paced thì coi như ô này không có dấu; sửa tay thì là
-    cast_paced=true trong phần [Macro], lúc GoBot đã tắt.
+    dấu ô đó (lưu ngay; bỏ dấu là về như cũ). Trong bản này, macro.ini không
+    có dòng cast_paced thì coi như ô này không có dấu. Từ bản 2026.11.16b ô
+    nằm ngay ở dòng Tự dùng kỹ năng, mặc định có dấu, và sửa tay là dòng
+    cast_paced_v2 trong phần [Macro], lúc GoBot đã tắt.
   + Tự mua bình và Làm nhiệm vụ nhanh chờ lâu dần (câu 5, cách (a)): lần thử
     theo giờ mà thấy có người dùng chuột hay bàn phím trong 1 giây đó thì
     lần sau chờ 30 giây, rồi 2, 5 và 10 phút (không lâu hơn "kiểm tra mỗi"
@@ -989,11 +2528,14 @@ khác chưa được thử trên game thật.
     giản nhất mà chắc chắn rơi đúng bục, ↑, ↑↑ (↑ thứ hai bấm 340 ms sau ↑
     đầu) hay Ctrl+↑. Bạn trả lời độ cao "Theo GoC": ↑ khoảng 133 px, ↑↑
     khoảng 280 px, Ctrl+↑ khoảng 432 px (câu 1). GoBot tính theo tốc độ nhảy
-    trong gói tin của game, có chừa hao vì sức hút trong game chưa đo được:
-    ↑ lên cao 121–143 px, ↑↑ 213–286 px, Ctrl+↑ 392–463 px; số của GoC nằm
+    trong gói tin của game, có chừa hao vì sức hút trong game chưa đo chắc
+    (từ bản 2026.11.12c theo hai lần nhảy đo được tối 12/11, 1900–2400):
+    ↑ lên cao 133–169 px, ↑↑ 250–337 px, Ctrl+↑ 432–546 px; số của GoC nằm
     trong các khoảng đó. Nên GoBot chỉ nhảy khi bục cao hơn chỗ đứng không
-    quá 109 px (↑), 201 px (↑↑) hay 380 px (Ctrl+↑), và không có bục nào
-    khác ở độ cao mà cú nhảy lúc tới lúc không. Bục cao hơn thì chỉ lên được
+    quá 121 px (↑), 238 px (↑↑) hay 420 px (Ctrl+↑), và bục nào khác ở độ
+    cao mà cú nhảy lúc tới lúc không thì phải là bục trong vùng (từ bản
+    2026.11.12c: bục trong khoảng chưa chắc vẫn nhảy nếu mọi bục có thể đáp
+    đều trong vùng; rơi lên bục nào trong số đó cũng được). Bục cao hơn thì chỉ lên được
     qua một bục ở giữa (tối đa 2 lần nhảy): trên đường về, và khi Tự tìm quái
     trong vùng đi tới con quái ở bục đó (2 lần nhảy là hết 2 lần cho một con
     quái). Mỗi lần nhảy, log ghi thời gian bay và sức hút đo được (g≈).
@@ -1002,14 +2544,18 @@ khác chưa được thử trên game thật.
     2 lần), rồi bấm một lần. Mỗi chỗ nhảy được xét theo file bản đồ, ở chính
     chỗ đó và 24 px mỗi bên: trên đường lên không có bục chắn (loại bục
     không nhảy xuyên lên được); dù nhảy cao nhất hay thấp nhất cũng rơi đúng
-    một bục; chỗ đứng nhảy, chỗ rơi xuống và con quái đều ở trong vùng;
-    không có bục nào NGOÀI vùng trong khoảng 650 px phía trên (nên dù nhân
-    vật có nhảy cao tới 600 px như có lần bạn nói, cũng không rơi ra ngoài
-    vùng); và nếu lỡ mất Ctrl hay mất ↑ thứ hai, cú ↑ thường còn lại vẫn rơi
+    một bục (từ bản 2026.11.12c: hay một trong các bục trong vùng ở khoảng
+    lúc tới lúc không, xem trên); chỗ đứng nhảy, chỗ rơi xuống và con quái
+    đều ở trong vùng; không có bục nào NGOÀI vùng trong khoảng 650 px phía
+    trên (nên dù nhân vật có nhảy cao tới 600 px như có lần bạn nói, cũng
+    không rơi ra ngoài vùng; từ bản 2026.11.12c luật 650 px chỉ còn cho
+    Ctrl+↑: ↑ chỉ xét 245 px, ↑↑ 413 px, xem bản 2026.11.12c ở mục 5); và
+    nếu lỡ mất Ctrl hay mất ↑ thứ hai, cú ↑ thường còn lại vẫn rơi
     về bục cũ hay một bục trong vùng. Lúc bay, nhân vật được vọt cao hơn
     cạnh trên của vùng (câu 3). Đang bay thì không đi, không quay mặt; quái
-    vào tầm thì vẫn đánh (câu 4). Không nhảy chéo, không nhảy tại chỗ để
-    đánh trên không như GoC.
+    vào tầm thì vẫn đánh (câu 4). Không nhảy chéo. (Từ bản 2026.11.12c có
+    nhảy tại chỗ để đánh trên không như GoC, cho quái cao hơn vạch trên
+    trong tầm một lần ↑: xem bản 2026.11.12c ở mục 5.)
   + Phím: Ctrl+↑ bấm như Ctrl+↓ của Nhảy xuống bậc dưới: giữ Ctrl khoảng
     50 ms, bấm ↑ trong lúc vẫn giữ Ctrl, giữ ↑ khoảng 0,1 giây, nhả ↑ rồi
     mới nhả Ctrl. Ctrl một mình là phím nhặt đồ của game, nên lúc đó nhân
@@ -1018,7 +2564,11 @@ khác chưa được thử trên game thật.
     LẠI giữa lúc nhảy thì GoBot nhả ↑ rồi Ctrl ngay; mở GoBot hay bấm BẮT
     ĐẦU thì GoBot nhả ↑ và Ctrl nếu Windows thấy chúng còn bị giữ. GoBot
     không nhả được ↑ hay Ctrl sau 3 lần thử thì dừng đánh quái và báo đỏ:
-    hãy tự nhấn rồi nhả ↑ và Ctrl trên bàn phím (không phải ↓). Không
+    hãy tự nhấn rồi nhả ↑ và Ctrl trên bàn phím (không phải ↓). (Từ bản
+    2026.11.24 không dừng nữa: GoBot nhả mọi phím một lần, có dòng vàng
+    "Phím ↑ hoặc Ctrl có thể đang bị giữ: GoBot đã nhả mọi phím; đánh quái
+    tự chạy tiếp khi Windows nhận lệnh nhả phím.", nhân vật đứng yên chờ, và
+    Windows nhận lệnh nhả phím rồi thì bot tự đánh tiếp.) Không
     nhảy lên khi một phím tắt của GoBot (F10, F11, F12, Phím dọn ngay, Phím
     vào game ngay) là Ctrl hay ↑; phím đánh hay phím đi là Ctrl thì chỉ
     không dùng Ctrl+↑ (↑ và ↑↑ vẫn dùng).
@@ -1030,62 +2580,92 @@ khác chưa được thử trên game thật.
     con quái đó 8 giây; rơi lại lần thứ hai lên cùng một bục thì GoBot coi
     bục đó không nhảy xuyên lên được, tới khi tắt GoBot. Trên tab Bản đồ,
     các chỗ đó có dấu xám. 2 lần bấm Ctrl+↑ mà game chỉ nhảy thường (hay ↑↑
-    mà không có lần nhảy thứ hai) thì phím đó tắt tới lần BẮT ĐẦU sau. 3 lần
+    mà không có lần nhảy thứ hai) thì phím đó tắt tới lần BẮT ĐẦU sau (từ bản
+    2026.11.12c GoBot xét kiểu nhảy theo tốc độ bật lên, và chỉ tính là sai
+    kiểu khi nhân vật không rơi đúng bục đã định). 3 lần
     liền (hay 5 lần trong một lượt) không lên được bục; nhân vật rơi lên bục
-    cao hơn GoBot tính, ra ngoài vùng, hay xuống chỗ không có trong file bản
+    cao hơn GoBot tính (từ bản 2026.11.12c: cao hơn tầm của phím đó; còn
+    trong tầm và trong vùng thì chỉ coi là đổi chỗ), ra ngoài vùng, hay
+    xuống chỗ không có trong file bản
     đồ; phím ↑ bị giữ quá 250 ms; hay sức hút đo được hai lần khác xa GoBot
     tính: Nhảy lên tắt tới lần BẮT ĐẦU sau, và dưới nút BẮT ĐẦU có dòng đỏ
     ghi lý do (ví dụ "Nhảy lên đã tắt tới lần BẮT ĐẦU sau: nhân vật nhảy
-    khác với GoBot tính. Hãy gửi file log.").
+    khác với GoBot tính. Hãy gửi file log."). (Từ bản 2026.11.15, riêng 3
+    lần liền hay 5 lần trong một lượt không lên được bục chỉ làm Nhảy lên
+    nghỉ 30 giây, rồi 60, rồi 120 giây, rồi tự bật lại; xem "Mới trong bản
+    2026.11.15".) (Từ bản 2026.11.24 không còn tắt hay nghỉ vì những điều trên:
+    nhảy lên không tới thì GoBot thử lại ngay ở lần nhìn sau — lần hỏng đầu
+    tiên chỉ tạm bỏ con quái 1,2 giây, các lần sau 3 giây (một lượt ra chiêu)
+    rồi nhảy lại. Chỗ nhảy bị rơi lại, rơi thấp hơn, cao hơn hay ra ngoài
+    vùng chỉ bị bỏ qua 30 giây (GoBot nhảy ở chỗ khác trước), bục coi là
+    không nhảy xuyên lên được cũng chỉ 30 giây, rồi thử lại. Nhảy sai kiểu,
+    phím ↑ giữ lâu hay sức hút đo được khác xa chỉ được ghi vào log. Rơi
+    xuống chỗ không có trong file bản đồ thì GoBot tạm không tin file đó,
+    tới khi nhân vật đứng trên sàn của file 3 lần. Không còn dòng đỏ dưới
+    nút BẮT ĐẦU; xem "Mới trong bản 2026.11.24".)
   + Giới hạn: tối đa 4 lần nhảy lên mỗi phút, 2 lần cho một con quái (và 2
-    lần đứng lại chờ nhảy mà không bấm); hai lần bấm, nhảy lên hay nhảy
+    lần đứng lại chờ nhảy mà không bấm), không tính cú ↑ tại chỗ cho quái
+    cao hơn vạch trên (từ bản 2026.11.12c, giới hạn riêng 10 lần mỗi phút);
+    hai lần bấm, nhảy lên hay nhảy
     xuống, cách nhau ít nhất 1,5 giây. Như Nhảy xuống bậc dưới, không nhảy
-    trong 5 giây đầu sau khi vào bản đồ, khi máu dưới mức của bình HP (ít
-    nhất 50%), khi bot tạm dừng (chat, dọn rác, nhiệm vụ...), khi game không
-    ở trên cùng, khi đang đi tới điểm đã lưu hay đang vào lại game. Nhảy lên
+    trong 5 giây đầu sau khi vào bản đồ, khi nhân vật đã gục hoặc chưa đọc
+    được máu (từ bản 2026.11.12b; trước đó cả khi máu dưới mức của bình HP,
+    ít nhất 50%), khi bot tạm dừng (chat, dọn rác, nhiệm vụ...), khi game không
+    ở trên cùng, hay khi đang vào lại game. Nhảy lên
     tới một con quái được rồi thì 8 giây không nhảy xuống, và nhảy xuống tới
     một con được rồi thì 8 giây không nhảy lên tới quái. Con quái chỉ tới
     được bằng cách nhảy lên thì được chọn sau cùng.
   + Đổi bản đồ: bạn đã thử, đứng trên cửa bấm Ctrl+↑ không đổi bản đồ
     (câu 2), nên GoBot không tránh cửa khi nhảy lên. Nhưng như Nhảy xuống,
-    nếu bản đồ đổi trong 10 giây sau bất kỳ lần nhảy lên nào: GoBot DỪNG
-    đánh quái, bỏ dấu "Nhảy lên bục trên" và lưu lại, ghi WARN "MAP CHANGED"
-    vào gobot_gui.log, và có dòng đỏ "Lần nhảy lên lúc ... làm đổi bản đồ —
-    GoBot đã dừng đánh quái và bỏ dấu Nhảy lên." Nếu lúc đó một lần nhảy
-    xuống (Ctrl+↓) cũng chưa quá 10 giây thì không biết lần nào làm đổi bản
-    đồ: GoBot bỏ dấu cả hai ô, dòng đỏ ghi "... bỏ dấu Nhảy xuống và Nhảy
-    lên." Các việc khác (bình, buff...) vẫn chạy. Hãy đưa nhân vật về, báo
-    lại kèm gobot_gui.log, rồi mới đánh dấu lại.
+    nếu bản đồ đổi trong 10 giây sau bất kỳ lần nhảy lên nào: GoBot nhớ hai
+    đầu (chỗ nhảy và chỗ tới) là cửa, không nhảy xuống hay nhảy lên gần đó
+    nữa tới khi tắt GoBot, và vẫn đánh quái tiếp ở chỗ nhân vật tới — không
+    bỏ dấu, không lưu gì (từ bản 2026.11.24). Log có WARN "MAP CHANGED",
+    và dưới ô có dòng vàng "Lần nhảy lên lúc ... làm đổi bản đồ — chỗ đó đã
+    được nhớ là cửa, GoBot không nhảy ở gần đó nữa và vẫn đánh quái tiếp."
+    Nếu lúc đó một lần nhảy xuống (Ctrl+↓) cũng chưa quá 10 giây thì không
+    biết lần nào làm đổi bản đồ: cả hai lần đều được nhớ là cửa. (Trước bản
+    2026.11.24, GoBot DỪNG đánh quái, bỏ dấu "Nhảy lên bục trên" (hay cả hai
+    ô) và lưu lại, với dòng đỏ "Lần nhảy lên lúc ... làm đổi bản đồ — GoBot
+    đã dừng đánh quái và bỏ dấu Nhảy lên.")
   + Đường về chỗ về: khi đi bộ và rơi xuống không tới được, đường về có thể
     có tới 2 lần nhảy lên (đường ít lần nhảy hơn được chọn trước); dưới nút
     BẮT ĐẦU ghi "Về: nhảy Ctrl+↑ ở x ...". Trong vùng vẽ ở tab Bản đồ, có
     dấu Nhảy lên bục trên thì GoBot không còn bấm phím nhảy kiểu cũ (nhảy
     một cái về phía con quái hay chỗ về): mọi lần nhảy ở đó đều được tính
-    trước như trên, kể cả khi Nhảy lên đã tự tắt tới lần BẮT ĐẦU sau. Chỉ
+    trước như trên, kể cả khi Nhảy lên đã tự tắt tới lần BẮT ĐẦU sau (từ bản
+    2026.11.24 Nhảy lên không bao giờ tự tắt nữa). Chỉ
     khi Nhảy lên chưa chạy được ở đó (Phím nhảy không phải ↑, Vị trí từ gói
     tin chưa bật, hay GoBot chưa tin file bản đồ) thì vẫn nhảy kiểu cũ như
     bản 2026.11.05. Không có đường nào (đi bộ, rơi xuống hay nhảy lên) thì
     bot đánh tại chỗ, và thẻ ghi "... không có đường đi bộ, rơi xuống hay
-    nhảy lên nào về vùng: bot đánh ở đây. ...". Bỏ dấu, hay khi Nhảy lên đã
-    tắt tới lần BẮT ĐẦU sau: GoBot không bấm gì mới, chỉ ghi vào log chỗ lẽ
+    nhảy lên nào về vùng: bot đánh ở đây. ...". (Từ bản 2026.11.12 đường về
+    đi qua cả các bục ngoài vùng, tối đa 4 lần nhảy lên; không có đường nào
+    thì bot đứng yên, không đánh quái ngoài vùng, và thẻ ghi "... không có
+    đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đứng yên ở đây.
+    ...".) Bỏ dấu, hay khi Nhảy lên đã
+    tắt tới lần BẮT ĐẦU sau (trước bản 2026.11.24; từ bản đó chỉ còn khi bỏ
+    dấu): GoBot không bấm gì mới, chỉ ghi vào log chỗ lẽ
     ra đã nhảy (tối đa một dòng mỗi 30 giây), vẽ mũi tên nét đứt ở chỗ đó
     trên tab Bản đồ, và dưới nút BẮT ĐẦU ghi "Nhảy lên (đang tắt): lẽ ra đã
     nhảy N lần — xem log."
   + Ở RừngĐạiThụ[2] (t52_s2), với vùng bạn đã vẽ (ngang 265–1399, dọc
     174–694, chỗ về 880,274): theo file bản đồ, chỉ có Ctrl+↑ nhảy được, lên
-    bục chỗ về: từ mặt đất ở khoảng x 695–884, hay từ chân dốc bên phải ở
+    bục chỗ về: từ mặt đất ở khoảng x 695–1002, hay từ chân dốc bên phải ở
     khoảng x 1024–1048. Ở x 505–638 thì không, vì phía trên có hai bục nhỏ ở
     ngoài vùng. Vậy chỗ về 880,274 nay về được từ mặt đất: từ 880,634, bot
-    đi sang trái tới khoảng x 800–820, đứng lại rồi bấm Ctrl+↑. (Đó là
+    bấm Ctrl+↑ ngay tại chỗ (từ bản 2026.11.12c; trước đó bot đi
+    sang trái tới khoảng x 800–820). (Đó là
     đường về khi bỏ dấu "Tự tìm quái trong vùng". Dấu đó bật sẵn, và khi bật
     thì trong vùng hết quái bot đứng chờ tại chỗ; bot chỉ đi tới đó bấm
     Ctrl+↑ lên bục chỗ về khi trên bục có quái.) Cứ giữ vùng như bây giờ:
     lời khuyên ở bản 2026.11.04d (kéo chỗ về xuống nền lớn, khoảng
     1100,714) không cần nữa. Muốn đánh cả quái ở chân dốc bên phải,
     dưới cạnh dưới 694, thì kéo cạnh dưới của vùng xuống khoảng 810: khi đó
-    có thêm Ctrl+↑ từ mặt đất lên dốc, ở khoảng x 1161–1288. Ở t53_s2, trong
-    vùng của bạn không có chỗ nào nhảy lên chắc chắn được (kể cả khi kéo
-    cạnh trên lên 1020), nên GoBot không nhảy lên ở đó; Tự tìm quái vẫn
+    có thêm Ctrl+↑ từ mặt đất lên dốc, ở khoảng x 1070–1343 (và từ bản
+    2026.11.12c cả ↑↑ ở khoảng x 1048–1086). Ở t53_s2, trong
+    vùng của bạn không có chỗ nào nhảy lên chắc chắn được (kéo cạnh trên
+    lên 1020 thì từ bản 2026.11.12c có ↑ ở khoảng x 2391–2409), nên GoBot không nhảy lên ở đó; Tự tìm quái vẫn
     chạy.
   + Tự tìm quái trong vùng. Sau lần đánh quái lúc 23:02–23:08 tối 05/11 (bản
     05, t52_s2), bạn báo: "đang chưa tự tìm quái ở trong ô đánh quái. Nên có
@@ -1169,13 +2749,16 @@ khác chưa được thử trên game thật.
     khi đã ở trong tầm, không đi tới (câu 5).
   + Log mới trong gobot_gui.log. Nhảy lên: mỗi lần bấm một dòng "Hunter:
     jump up (Ctrl+Up) toward ... (hay on the way home): from X,Y on floor
-    ..., onto floor ... (rise ...; peak 392..463, headroom ...; no floor
+    ..., onto floor ... (rise ...; peak 432..546, headroom ...; no floor
     outside the area within 650 above) ..."; rồi "Hunter: jump up worked:
     landed at ..." (cuối dòng có "flight N ms, g≈N": thời gian bay và sức
     hút đo được), hay "jump up FELL BACK ...", "jump up landed LOWER ...",
     "did nothing in ... ms", "Ctrl+Up came out as ...", "... OFF until the
-    next BẮT ĐẦU", và WARN "MAP CHANGED". "Hunter: not jumping up to ... --
-    ..." ghi vì sao không nhảy. Bỏ dấu, hay đã tắt tới lần BẮT ĐẦU sau:
+    next BẮT ĐẦU", và WARN "MAP CHANGED" (từ bản 2026.11.24 không còn "OFF
+    until the next BẮT ĐẦU": "... that take-off skipped 30 s, jumps up go
+    on", và WARN "MAP CHANGED ... hunting goes on, Nhảy lên stays ticked").
+    "Hunter: not jumping up to ... --
+    ..." ghi vì sao không nhảy. Bỏ dấu (hay, trước bản 2026.11.24, đã tắt tới lần BẮT ĐẦU sau):
     "Hunter: a jump up would go here (jump_up is off): Ctrl+Up at x ... from
     floor ... onto floor ...". Dòng "Hunter:" mỗi phút thêm "; jump-ups:
     looks N, would N, settles N, pressed N (Up N, Up,Up N, Ctrl+Up N),
@@ -1201,7 +2784,8 @@ khác chưa được thử trên game thật.
     past 5 s), N set down".
   + Câu trả lời của bạn cho Nhảy lên bục trên (bản này làm đúng như vậy):
     1. Độ cao: "Theo GoC" (↑ khoảng 133, ↑↑ khoảng 280, Ctrl+↑ khoảng
-       432 px). GoBot vẫn chừa hao như trên, giữ luật 650 px và đo mỗi lần
+       432 px). GoBot vẫn chừa hao như trên, giữ luật 650 px (từ bản
+       2026.11.12c chỉ cho Ctrl+↑; ↑ xét 245 px, ↑↑ 413 px) và đo mỗi lần
        nhảy.
     2. Ctrl+↑ đứng trên cửa không đổi bản đồ: GoBot không tránh cửa khi nhảy
        lên; bản đồ đổi trong 10 giây sau một lần nhảy thì vẫn dừng đánh
@@ -1210,7 +2794,9 @@ khác chưa được thử trên game thật.
        xuống và con quái phải ở trong vùng.
     4. Quái ở bục trên: nhảy lên bục của nó rồi đánh như thường; đang bay mà
        quái vào tầm thì vẫn đánh. Không nhảy tại chỗ để đánh trên không như
-       GoC.
+       GoC. (Không còn đúng từ bản 2026.11.12c cho quái cao hơn vạch trên
+       trong tầm một lần ↑: theo lời bạn "khi ở trên ngưỡng pixel thì chỉ cần
+       nhảy thường", bot bấm ↑ tại chỗ và đánh trên không.)
     5. Bật sẵn, với mọi giới hạn ở trên. Các nút "Thử ↑", "Thử ↑↑", "Thử
        Ctrl+↑" (dòng "Đo cú nhảy:") vẫn còn để đo, không bắt buộc bấm trước.
     6. Giữ vùng ở t52_s2 như bây giờ (xem trên).
@@ -1443,7 +3029,9 @@ khác chưa được thử trên game thật.
     2026.11.10 thẻ ghi "Nhân vật đang ở ngoài vùng N px — bot ngưng đánh, về
     vùng trước: đi bộ về X, Y, vào tới trong vùng rồi mới đánh tiếp." hay
     "... bot vẫn đánh quái trong tầm (tầm đánh N px); hết quái thì đi bộ về
-    X, Y.")
+    X, Y." Từ bản 2026.11.12 chỉ đánh quái trong vùng: "... bot vẫn đánh
+    quái trong vùng tới trong tầm (tầm đánh N px); hết quái thì đi bộ về X,
+    Y.")
   + Vùng có hơn nửa số bục tô đỏ (bục thấp hơn chỗ về quá 120 px): thẻ ghi
     chữ đỏ "Phần lớn bục trong vùng (N%) bot không tự đi về được (tô đỏ):
     ... Kéo ghim cam xuống bục thấp nhất có quái, rồi kéo vùng lên trên."
@@ -1477,7 +3065,9 @@ khác chưa được thử trên game thật.
     không nhảy khi có cửa trong vòng drop_gate_px (150 px) theo chiều
     ngang, từ chỗ đứng, suốt đường rơi tới chỗ đáp; 3 lần liền (hay 5 lần
     trong một lần chạy) bấm mà không được thì thôi nhảy; nhảy mà đổi bản đồ
-    trong 10 giây thì dừng đánh quái. Log rõ hơn: dòng "Hunter: not
+    trong 10 giây thì dừng đánh quái (từ bản 2026.11.24 không thôi nhảy,
+    không dừng: thử lại ngay, đổi bản đồ thì nhớ là cửa và đánh tiếp). Log
+    rõ hơn: dòng "Hunter: not
     dropping ..." ghi thêm chỗ nhân vật, bục dưới chân, chỗ con quái và bục
     của nó; dòng "Hunter:" mỗi phút thêm "drop looks N (settles M; refused:
     ...)": số lần xét, số lần đứng lại để nhảy, và lý do không nhảy.
@@ -1589,7 +3179,9 @@ khác chưa được thử trên game thật.
     Chỗ đánh quái có cả ở thẻ dưới bản đồ), Npcap, và GoBot phải biết chắc
     nhân vật đang ở bản đồ nào (như trên). Không cần mở tab Bản đồ. Lúc bấm
     BẮT ĐẦU, sau khi qua cửa hay vào lại game, vùng chỉ được dùng khi nhân
-    vật đứng yên trên mặt đất ở trong vùng hoặc cách vùng không quá 150 px,
+    vật đứng yên trên mặt đất ở trong vùng hoặc cách vùng không quá 150 px
+    (từ bản 2026.11.12c: hoặc ngay dưới vùng (tới 600 px), rơi xuống hay
+    vào lại ở đó),
     hoặc quay lại cách chỗ nhân vật đứng lúc rời đi không quá 150 px (qua
     cửa rồi quay về, vào lại game). Ở xa hơn thì bot đánh ở chỗ nhân vật
     đang đứng như trước (thẻ dưới bản đồ báo nhân vật đang ở ngoài vùng bao
@@ -1634,7 +3226,8 @@ khác chưa được thử trên game thật.
   + Khi tab Bản đồ đang mở, GoBot vẽ lại 5 lần mỗi giây cả lúc game ở trước
     (có dấu "Nhẹ máy" thì 2 lần), để thấy nhân vật và quái đi; dòng "Load:"
     trong gobot_gui.log ghi tốn bao nhiêu. (Từ bản 2026.11.05: 10 lần mỗi
-    giây; xem "Mới trong bản 2026.11.05".)
+    giây; xem "Mới trong bản 2026.11.05". Từ bản 2026.11.12: 30 lần mỗi
+    giây; xem "Mới trong bản 2026.11.12".)
   + Log: "Map view: ..." khi đọc file bản đồ; "Map tab: hunting area for
     t52_s2 saved ..." (hay deleted, undo) mỗi lần lưu; "Map tab: hunting
     area ... handed to the hunter" và "Hunter: hunting area from the map tab
@@ -1675,7 +3268,9 @@ khác chưa được thử trên game thật.
   + Nhảy xuống bậc dưới (ô mới trên dòng Tự đánh quái, sau "Vị trí từ gói
     tin"; mặc định KHÔNG có dấu; thử nghiệm): khi con quái bot đang nhắm ở
     thấp hơn nhân vật quá 100 px (drop_min_px trong hunt.ini; hoặc quá số
-    "Thấp nhất" trong "Tầm đánh…", nếu số đó lớn hơn), cách không quá
+    "Thấp nhất" trong "Tầm đánh…", nếu số đó lớn hơn; từ bản 2026.11.12 chỉ
+    theo "Thấp nhất", tức vạch dưới ở tab Bản đồ: drop_min_px không còn
+    được đọc), cách không quá
     120 px (drop_side_px) theo chiều ngang, và trên bậc đang đứng không còn
     con quái nào để đánh, bot đi tới trên chỗ con quái, đứng lại rồi bấm
     Ctrl + ↓ để nhảy xuống. Quái trên bậc đang đứng luôn được ưu tiên: còn
@@ -1724,13 +3319,34 @@ khác chưa được thử trên game thật.
     con quái đó 8 giây; 3 lần liền như vậy (hay 5 lần trong một lần chạy)
     thì thôi nhảy xuống tới lần BẮT ĐẦU sau. Bấm mà nhân vật nhảy lên, hay
     rơi xuống chỗ khác với file bản đồ (file đó thì không dùng nữa tới khi
-    tắt GoBot), cũng thôi nhảy tới lần BẮT ĐẦU sau. Dưới ô có dòng vàng ghi
-    lý do. Tối đa 4 lần nhảy mỗi phút, 2 lần cho mỗi con quái.
+    tắt GoBot; từ bản 2026.11.15 chỉ 120 giây, rồi được tin lại), cũng thôi
+    nhảy tới lần BẮT ĐẦU sau (từ bản 2026.11.15 cũng chỉ 120 giây). Dưới ô
+    có dòng vàng ghi
+    lý do. Tối đa 4 lần nhảy mỗi phút, 2 lần cho mỗi con quái. (Từ bản
+    2026.11.15: một lần không rơi không còn làm GoBot nhớ chỗ đó, chỉ lần
+    thứ hai gần chỗ đó; lần đầu của một chuỗi chỉ bỏ qua con quái 1,2 giây;
+    3 lần liền hay 5 lần trong một lần chạy, nhiều hơn số lần ăn, chỉ nghỉ 30
+    giây, rồi 60, rồi 120 giây, rồi tự bật lại; xem "Mới trong bản
+    2026.11.15".) (Từ bản 2026.11.24 không còn nghỉ hay tắt: bấm mà không
+    rơi, nhảy tại chỗ hay nhảy lên thì GoBot thử lại ngay ở lần nhìn sau —
+    lần hỏng đầu của một chuỗi bỏ qua con quái 1,2 giây, các lần sau 3 giây
+    (một lượt ra chiêu) rồi nhảy lại; chỗ đã nhớ chỉ bị bỏ qua 30 giây
+    (GoBot nhảy ở chỗ khác trước) rồi thử lại; rơi xuống chỗ khác với file
+    bản đồ thì GoBot tạm không tin file đó tới khi nhân vật đứng trên sàn
+    của file 3 lần, không tính giờ; giữ ↓ quá lâu chỉ được ghi vào log. Lần
+    bấm không rơi (không thấy nhảy, hay chỉ nhảy tại chỗ) không tính vào 4
+    lần mỗi phút, và 2 lần cho mỗi con quái chỉ tính trong 10 giây gần
+    nhất.)
     Nhảy mà đổi bản đồ (trong 10 giây sau lần bấm): GoBot DỪNG đánh quái,
     bỏ dấu "Nhảy xuống bậc dưới" và lưu lại, ghi WARN "MAP CHANGED" vào
     gobot_gui.log, và dưới ô có dòng đỏ "Lần nhảy lúc ... làm đổi bản đồ".
     Các việc khác (bình, buff...) vẫn chạy. Hãy đưa nhân vật về, báo lại
-    kèm gobot_gui.log, rồi mới đánh dấu lại.
+    kèm gobot_gui.log, rồi mới đánh dấu lại. (Từ bản 2026.11.24 không dừng,
+    không bỏ dấu, không lưu gì: hai đầu được nhớ là cửa — không nhảy xuống
+    hay nhảy lên gần đó nữa tới khi tắt GoBot — bot đánh quái tiếp ở chỗ
+    nhân vật tới, và dưới ô có dòng vàng "Lần nhảy xuống lúc ... làm đổi
+    bản đồ — chỗ đó đã được nhớ là cửa, GoBot không nhảy ở gần đó nữa và
+    vẫn đánh quái tiếp.")
     Có dấu "Chỗ đánh quái": chỉ nhảy khi chỗ đứng, chỗ rơi xuống và con
     quái đều ở trong vùng đánh, không bao giờ nhảy ra ngoài vùng; khi đi về
     chỗ thì không nhảy; lúc chỗ đánh quái tạm gác lại (sau khi đổi bản đồ,
@@ -1743,13 +3359,17 @@ khác chưa được thử trên game thật.
     quá một lần nhảy (khoảng 120 px, cần Phím nhảy). (Từ bản 2026.11.04d
     vùng vẽ ở tab Bản đồ đi về theo bục; từ bản 2026.11.05b có thể nhảy lên
     bằng Ctrl+↑, với dấu Nhảy lên bục trên.)
-    Không nhảy khi: máu dưới mức của bình HP (ít nhất 50%); bot tạm dừng
+    Không nhảy khi: nhân vật đã gục hoặc chưa đọc được máu (từ bản
+    2026.11.12b; trước đó cả khi máu dưới mức của bình HP, ít nhất 50%); bot tạm dừng
     (chat, dọn rác, nhiệm vụ...); game không ở trên cùng; đang đi tới điểm
     đã lưu; đang vào lại game; trong 5 giây đầu sau khi vào bản đồ. Mở
     GoBot hay bấm BẮT ĐẦU khi ô này có dấu thì GoBot nhả ↓ và Ctrl nếu
     Windows thấy chúng còn bị giữ (sau một lần GoBot bị tắt ngang). GoBot
     không nhả được ↓ hay Ctrl sau 3 lần thử thì dừng đánh quái và báo đỏ:
-    hãy tự nhấn rồi nhả ↓ và Ctrl trên bàn phím.
+    hãy tự nhấn rồi nhả ↓ và Ctrl trên bàn phím. (Từ bản 2026.11.24 không
+    dừng nữa: GoBot nhả mọi phím một lần, có dòng vàng "Phím ↓ hoặc Ctrl có
+    thể đang bị giữ: GoBot đã nhả mọi phím; đánh quái tự chạy tiếp khi
+    Windows nhận lệnh nhả phím.", nhân vật đứng yên chờ, rồi tự đánh tiếp.)
     Log: mỗi lần nhảy có dòng "Hunter: drop (Ctrl+Down) ...", rồi "Hunter:
     drop worked ..." hay "drop did nothing ..."; dòng "Hunter:" mỗi phút
     thêm "drops N (...)"; "Hunter: not dropping ..." ghi vì sao chưa nhảy.
@@ -1765,7 +3385,8 @@ khác chưa được thử trên game thật.
     thay vì 0,5 giây. Để được tin lúc đầu thì vẫn chặt như cũ: 20 lần khớp,
     không lần nào lệch, và lúc đó không có phần nới ra ở trên. Dòng "Vitals
     check:" mỗi phút thêm "caught up N" (gói tin tới đúng số sau đó) và
-    "same moment M" (lần lệch của cùng một lúc, chỉ tính một).
+    "same moment M" (lần lệch của cùng một lúc, chỉ tính một). (Từ bản
+    2026.11.17 không còn so để quyết định: HP/MP có gói tin là dùng ngay.)
   + Thanh MP (và HP) bị chữ số che: chữ số in trên thanh (ví dụ
     12643/15280) che phần cuối của thanh. Lần nào GoBot không đọc được chữ
     số, thanh đầy hơn chỗ chữ bắt đầu bị đo thành khoảng 56% (dưới mốc bình
@@ -1788,7 +3409,8 @@ khác chưa được thử trên game thật.
     (ví dụ "Chưa dùng bùa nào: không chắc túi đồ đang ở ngăn Tiêu Dùng, nên
     dừng dùng bùa; thử lại sau 10 phút."), không còn báo nhầm "Không thấy
     bùa nào", và chờ 10 phút mới thử lại (trước là 1 phút). Không bùa nào
-    bị dùng hai lần vì việc này.
+    bị dùng hai lần vì việc này. (Từ bản 2026.11.24 lại chờ 1 phút: "...;
+    thử lại sau 1 phút.")
   + Tự mua bình: sau khi tạm dừng kỹ năng, bình và buff, GoBot chờ 1 giây
     không ai đụng chuột, bàn phím rồi mới mở túi đồ. Có người dùng thì
     không mua lúc đó (log ghi "Shop: not now -- someone is using the mouse
@@ -1900,9 +3522,7 @@ khác chưa được thử trên game thật.
   + Chỉ thêm vào gobot_gui.log: mỗi lần thanh HP/MP lệch với gói tin có
     dòng "Vitals: HP (MP) disagreement" kèm các số (tối đa 5 dòng mỗi
     phút mỗi thanh); dòng "Vitals check:" thêm "HP/MP frames" và "empty";
-    mỗi lần minimap báo đổi bản đồ ghi nhiều nhất một dòng "Map changed --
-    minimap" (không dòng nào khi gói tin báo vào bản đồ cùng lúc); Nhiệm
-    vụ ghi lý do "Quest: not now -- ..."; ảnh trong quest_debug là lúc có
+    Nhiệm vụ ghi lý do "Quest: not now -- ..."; ảnh trong quest_debug là lúc có
     lỗi, không phải lúc cửa sổ đã đóng; dòng "Positions" thêm "others'" ở
     "contacts"; đóng GoBot thì ghi nốt các dòng "Vitals check", "Bag",
     "Casts" của phút cuối.
@@ -1915,7 +3535,8 @@ khác chưa được thử trên game thật.
        không dùng".
     2. Mỗi lượt chỉ dùng được một bùa. Nay chọn nhiều loại thì một lượt
        dùng mỗi loại tới giờ một cái, liền nhau (khoảng 3 giây mỗi loại,
-       tối đa 20 đến 40 giây). Gặp điều gì không chắc thì vẫn dừng; các
+       tối đa 20 đến 40 giây; từ bản 2026.11.15d cộng thêm phần game chậm
+       quá 2 giây ở mỗi bước). Gặp điều gì không chắc thì vẫn dừng; các
        loại còn lại được dùng ở lượt sau.
     3. Thông báo của game sau khi dùng bùa ("Bạn đã nhận được hiệu ứng
        ...") cứ mở. Nay GoBot bấm nút Xác Nhận của chính thông báo đó để
@@ -1967,13 +3588,16 @@ khác chưa được thử trên game thật.
   + HP/MP của bạn: lấy từ gói tin chỉ sau khi GoBot đã so với thanh HP/MP
     trên màn hình đủ nhiều lần (20 lần khớp, ít nhất 3 số khác nhau, không
     lần nào lệch; HP phải có lúc xuống dưới 98%). Lệch một lần là màn hình
-    làm thay ngay, và bình được bấm theo số đọc trên màn hình. Khi dùng
+    làm thay ngay, và bình được bấm theo số đọc trên màn hình. (Bỏ ở bản
+    2026.11.17, theo lựa chọn của bạn: HP/MP có gói tin là dùng ngay, không
+    so với màn hình nữa; thanh trên màn hình chỉ dùng khi không có gói tin.
+    Xem bản 2026.11.17.) Khi dùng
     được, gói tin lo: bình HP, MP; mức máu của các việc (Dọn rác, Dùng bùa,
     Tự mua bình, Tự chat, Nhiệm vụ, Tự đóng thông báo, đưa game lên trước);
     mức MP của kỹ năng. Lúc đó, khi bot chạy, GoBot đọc thanh HP/MP thưa
-    hơn (mỗi giây một lần), trừ khi: có phím bình thú cưng (máu thú cưng chỉ
-    đọc được trên màn hình); đang "Tự tìm"; máu đọc là 0; hay chưa quá 60
-    giây từ lúc thấy bảng hồi sinh.
+    hơn (mỗi giây một lần; từ bản 2026.11.16, có phím bình thú cưng thì mỗi
+    0,5 giây, vì máu thú cưng chỉ đọc được trên màn hình), trừ khi: đang
+    "Tự tìm"; máu đọc là 0; hay chưa quá 60 giây từ lúc thấy bảng hồi sinh.
   + Qua cửa: trong lúc bản đồ mới đang tải (tối đa 3 giây sau khi gói tin
     báo vào bản đồ, tới khi nhân vật của bạn có tin đầu tiên), bình, kỹ
     năng và buff tạm chờ, như khi nhân vật không ở trong game. Gói tin chỉ
@@ -1993,14 +3617,15 @@ khác chưa được thử trên game thật.
     2026.11.09: Tự mua bình không đếm bình nữa, gói tin chỉ ghi log; xem bản
     2026.11.09.)
   + Đọc tên quái (chỉ khi có dấu "Vị trí từ gói tin"): lúc bot đánh theo
-    gói tin, GoBot đọc tên quái trên màn hình mỗi 0,6 giây thay vì 0,14
-    giây, nhẹ máy hơn. Màn hình làm thay là đọc lại mỗi 0,14 giây ngay.
-    Không đọc thưa khi đang "Thử" phím nhảy, "Nhìn quanh", mở thẻ Radar ở
-    màn hình Nâng cao, hay khi bot đi tới điểm đã lưu. Khi đọc thưa, dòng
-    "Cannot find <tên nhân vật>" chỉ ghi khi tên mất khoảng 6 giây.
+    gói tin, GoBot đọc tên quái trên màn hình mỗi 0,6 giây (từ bản
+    2026.11.16: mỗi 2 giây) thay vì 0,14 giây, nhẹ máy hơn. Màn hình làm
+    thay là đọc lại mỗi 0,14 giây ngay. Không đọc thưa khi đang "Thử" phím
+    nhảy hay "Nhìn quanh". Khi đọc thưa, dòng "Cannot find <tên nhân vật>"
+    chỉ ghi khi tên mất khoảng 6 giây (từ bản 2026.11.16: khoảng 20 giây).
   + Đổi bản đồ: khi gói tin đã báo một lần vào bản đồ (qua cửa hay vào lại
     game), GoBot biết đổi bản đồ nhờ gói tin, không nhờ bản đồ nhỏ
-    (minimap) nữa. Bản đồ nhỏ hay báo đổi bản đồ khi không qua cửa.
+    (minimap) nữa. Bản đồ nhỏ hay báo đổi bản đồ khi không qua cửa. Từ bản
+    2026.11.16 GoBot không xem bản đồ nhỏ nữa.
   + Nút "Thử" cạnh Phím nhảy: khi gói tin cho biết được (đang bắt gói tin
     của game, đã biết nhân vật của bạn), GoBot xem gói tin nhảy của game để
     biết nhân vật có nhảy không, và câu trả lời ghi "(theo gói tin)". Màn
@@ -2017,13 +3642,14 @@ khác chưa được thử trên game thật.
   + Phần [Packets] mới trong configs\app.ini (thường không cần sửa; sửa
     xong thì tắt rồi mở lại GoBot). Mỗi dòng là auto (dùng gói tin khi đã
     so khớp) hoặc off (đọc màn hình như cũ; GoBot vẫn so và ghi log):
-    vitals=auto (HP/MP), bag=auto (số bình trong túi, cho "Sắp hết bình" và
+    vitals=auto (HP/MP; từ bản 2026.11.17 auto là có gói tin là dùng, không
+    so trước), bag=auto (số bình trong túi, cho "Sắp hết bình" và
     Tự mua bình; từ bản 2026.11.03b, cả để không dùng nhầm bùa),
     detector_rest=auto (đọc tên quái thưa hơn khi đánh theo gói tin).
   + Bỏ dấu "Vị trí từ gói tin": bot đánh quái theo màn hình, nên máu quái,
     giữ con quái và đọc tên quái thưa ở trên thôi dùng gói tin. Nhưng GoBot
     vẫn bắt gói tin, và HP/MP, túi đồ, nút "Thử", đổi bản đồ vẫn dùng gói
-    tin khi đã so khớp. Muốn mọi thứ về màn hình hết, không bắt gói tin
+    tin khi đã so khớp (HP/MP: từ bản 2026.11.17 không cần so). Muốn mọi thứ về màn hình hết, không bắt gói tin
     nào: packet_positions=off trong hunt.ini (hoặc "Positions from packets:
     Off" ở màn hình Nâng cao). Muốn tắt riêng một phần: dùng [Packets].
   + Khi gửi log: xin một lần chơi như sau, có dấu "Vị trí từ gói tin", rồi
@@ -2034,16 +3660,19 @@ khác chưa được thử trên game thật.
        dòng "Packets: first 0x..."; dòng "frames:" dưới dòng "Load:".
     2. Tự đi qua một cửa rồi quay lại (bạn tự bấm ↓; GoBot không bao giờ
        bấm ↓). Cần thấy: hai dòng "Positions: map entry ..." có "(from
-       ...)"; không lần đổi bản đồ nào theo minimap, hoặc dòng "Map changed
-       -- minimap" có chữ "ignored".
+       ...)".
     3. Bấm F11 bật, tắt, bật, tắt. Cần thấy: không có dòng "Capture
        stopped"; mỗi lần bật, khoảng 2 giây sau có "from the packets now".
     4. Đánh quái 10 phút ở chỗ quái đánh lại, có bình, buff và kỹ năng; để
        HP xuống dưới 98% ít nhất 3 lần. Cần thấy: dòng "Positions" có
        "hurts", "kills ... (yours ...)" và "your id"; dòng "Hunter:" có
-       "wounded picked"; "Detector: every 600 ms"; "Vitals check:"; "Vitals:
+       "wounded picked"; "Detector: every 2000 ms" (600 ms trước bản
+       2026.11.16); "Vitals check:"; "Vitals:
        HP (MP) from the packets now", và nếu có thì "from the screen again"
-       (kèm số của gói tin và của màn hình); "Casts (packets)", "Buffs
+       (kèm số của gói tin và của màn hình) -- từ bản 2026.11.17 là dòng
+       "Vitals: from the packets HP ...% MP ...% of the minute ..." mỗi
+       phút, và nếu có thì "Vitals: HP (MP) from the screen until the
+       packets have it again -- ..."; "Casts (packets)", "Buffs
        (packets)", "Bag (packets)".
     5. Lúc bot dừng, đứng chỗ trống, bấm "Thử" cạnh Phím nhảy. Cần thấy:
        dòng "Jump test: ..." có "(packets: ... take-off ...)".
@@ -2093,7 +3722,8 @@ khác chưa được thử trên game thật.
     (20, 3 và 1 lần mỗi giây thay vì 30, 5 và 2), GoBot không thử lại
     PrintWindow với cửa sổ game đã từ chối, và khi bot chạy GoBot đọc HP/MP
     mỗi 0,25 giây thay vì 0,15 giây. Lúc đầu ô này ở chế độ tự động: GoBot
-    tự đánh dấu khi thấy máy ảo VMware hoặc máy không có card đồ hoạ thật,
+    tự đánh dấu khi thấy máy ảo VMware hoặc máy không có card đồ hoạ thật
+    (từ bản 2026.11.16 cả máy chỉ có 1-2 nhân hay RAM dưới 4 GB),
     và ghi lý do bằng chữ mờ ngay dưới ô (dòng "Machine:" ở đầu
     gobot_gui.log ghi GoBot đã thấy gì). Bạn bấm vào ô thì GoBot làm theo
     lựa chọn của bạn từ đó về sau; muốn trở lại tự động, sửa light_mode=auto
@@ -2112,7 +3742,7 @@ khác chưa được thử trên game thật.
     để đặt game và GoBot cạnh nhau (khoảng 2000x1080); không đủ thì thu nhỏ
     GoBot như trên.
   + Lúc bot chạy, đừng để mở thẻ Dọn rác hay Tự đăng nhập, và đừng mở thẻ
-    Log, Radar hay phần xem HP/MP ở màn hình Nâng cao: đó là các thẻ nặng.
+    Log hay phần xem HP/MP ở màn hình Nâng cao: đó là các thẻ nặng.
   + Cài đặt máy ảo: 2 nhân CPU (4 nếu máy thật có từ 8 luồng trở lên, đừng
     cho máy ảo hết nhân của máy thật), RAM ít nhất 4 GB, VMware Tools bản
     mới nhất. Thử một lần bật, một lần tắt "Accelerate 3D graphics" (phần
@@ -2190,14 +3820,14 @@ khác chưa được thử trên game thật.
     game kẹt giữa chừng lúc đang vào, kể cả lần vào bằng "Phím vào game
     ngay") đều tính là một lần vào lại. Quá số lần tối đa (5, max_restarts
     trong configs/app.ini) thì GoBot dừng và chờ bạn. Số này đếm lại từ đầu
-    mỗi lần bấm BẮT ĐẦU hay bật lại ô "Tự vào lại game".
+    mỗi lần bấm BẮT ĐẦU hay bật lại ô "Tự vào lại game". (Từ bản 2026.11.24
+    số này tính trong 1 giờ, và quá số đó GoBot chờ tới khi lần cũ nhất qua
+    1 giờ rồi tự vào lại, không dừng.)
   + Không phím nào trong game cần giữ lâu: ô "Hold (ms)" riêng của từng phím
     và từng bước của chuỗi phím (màn hình Nâng cao, thẻ Macro) nay tối đa
     500 ms. Để 0 như mặc định là bấm một lần bình thường.
-  + Màn hình Nâng cao, bot gói tin: không còn bình và buff riêng trong
-    bot_default.ini. Bot gói tin dùng bình và buff của macro (các dòng bình
-    và Tự buff trên màn hình chính), khi macro đang chạy. Bảng điều khiển
-    không còn ghi "F10" cho bot gói tin: F10 là phím của macro.
+  + (Bot gói tin cũ ở màn hình Nâng cao đã bỏ hẳn ở bản 2026.11.16, cùng
+    file bot_default.ini.)
 - Mới trong bản 2026.11.01:
   + "Tốc độ bấm kỹ năng" (dòng Tự dùng kỹ năng, và trong "Chi tiết…"): 50
     (mặc định, như GoC), 60, 80, 100 hoặc 150 ms nghỉ giữa hai lần bấm kỹ năng
@@ -2281,7 +3911,9 @@ khác chưa được thử trên game thật.
     được đóng: trong lượt đó, hoặc ở lượt sau (trong vòng 2 phút) khi lượt
     bị dừng giữa chừng. Bấm hai lần mà thông báo không đóng thì GoBot dừng,
     lưu ảnh charm_notice_stuck và để thông báo đó cho bạn tự đóng trong
-    game. GoBot không đọc lời trong thông báo: thông báo lạ sau khi bấm
+    game. (Từ bản 2026.11.24 GoBot không bỏ nó cho bạn nữa: lần dùng bùa
+    sau, khoảng 1 phút sau, GoBot lại bấm Xác Nhận của nó, tối đa 2 lần, cứ
+    thế tới khi nó đóng.) GoBot không đọc lời trong thông báo: thông báo lạ sau khi bấm
     Xác Nhận cũng được đóng, và nếu sau đó chồng bùa không bớt đúng một
     cái thì GoBot coi như bùa đã dùng, dừng lượt và lưu ảnh
     charm_notice_other trong trash_debug.
@@ -2300,14 +3932,17 @@ khác chưa được thử trên game thật.
     hiệu lực là dùng sớm một bùa; chỉ khi chưa bấm Xác Nhận (không có câu
     hỏi, hoặc hộp thoại không đạt và đã Hủy Bỏ) thì mới thử lại sau 10
     phút. Việc dùng bùa chạy riêng, nhanh (khoảng 3 giây mỗi loại, tối đa
-    20 đến 40 giây), và trong lúc đó kỹ năng, bình và buff đều tạm dừng; nó
-    không chạy trong lượt dọn rác chậm (lượt dọn chỉ báo chỗ có bùa). Nút
-    "Dùng bùa ngay" dùng mỗi loại một cái ngay, không chờ giờ (kể cả loại
-    vừa dùng: game cộng thêm thời gian, tối đa 2 giờ). GoBot để bùa lại
-    sau khi máu thấp hơn mốc bình máu cao nhất cộng 10% (ít nhất 60%), khi
-    chưa đọc được máu (ở màn hình đăng nhập), khi đang chat hoặc có việc
-    khác giữ game; máu rơi xuống dưới mốc bình trong lúc dùng thì dừng
-    ngay. Hộp thoại nào không đạt thì GoBot bấm Hủy Bỏ và thử loại bùa tiếp
+    20 đến 40 giây, cộng thêm phần game chậm quá 2 giây ở mỗi bước từ bản
+    2026.11.15d), và trong lúc đó kỹ năng và buff đều tạm dừng (từ bản
+    2026.11.12b GoBot tự bấm bình HP và MP giữa hai bùa; trước đó bình cũng
+    dừng); nó không chạy trong lượt dọn rác chậm (lượt dọn chỉ báo chỗ có
+    bùa). Nút "Dùng bùa ngay" dùng mỗi loại một cái ngay, không chờ giờ (kể
+    cả loại vừa dùng: game cộng thêm thời gian, tối đa 2 giờ). GoBot để bùa
+    lại khi nhân vật đã gục, khi chưa đọc được máu (ở màn hình đăng nhập),
+    khi đang chat hoặc có việc khác giữ game; nhân vật gục trong lúc dùng
+    thì dừng ngay. (Trước bản 2026.11.12b còn để bùa lại khi máu thấp hơn
+    mốc bình máu cao nhất cộng 10%, ít nhất 60%, và dừng khi máu xuống dưới
+    mốc bình.) Hộp thoại nào không đạt thì GoBot bấm Hủy Bỏ và thử loại bùa tiếp
     theo, quá 3 lần thì dừng, và lưu ảnh vào thư mục trash_debug
     (charm_wrong_dialog...). GoBot đã có ảnh thật của câu hỏi dùng bùa
     ("Thời gian hiệu lực tối đa là 2 giờ. Bạn có muốn sử dụng không?") và
@@ -2317,8 +3952,9 @@ khác chưa được thử trên game thật.
   + "Tự mua bình" (thử nghiệm, mặc định TẮT; thẻ riêng trong Dọn rác): mua
     Thịt bò khô (HP) và Rượu lá tre (MP) ở cửa hàng mà món "Người Giữ Sân"
     trong ngăn Khác của túi đồ mở ra. Từ bản 2026.11.09 GoBot không đếm bình
-    nữa: mỗi "mua mỗi N phút" (mặc định 60; lần đầu không sớm hơn 45 giây
-    sau khi bấm BẮT ĐẦU) GoBot mở túi đồ, bấm chuột phải vào Người Giữ Sân
+    nữa: mỗi "mua mỗi N phút" (mặc định 60; từ bản 2026.11.12 lần đầu là cả
+    một khoảng "mua mỗi" sau khi bấm BẮT ĐẦU hay đánh dấu ô này, trước đó
+    không sớm hơn 45 giây) GoBot mở túi đồ, bấm chuột phải vào Người Giữ Sân
     và mua đúng số ô đã đặt cho mỗi loại ("mỗi lần mua N ô", 0 tới 999, mặc
     định 3; từ bản 2026.11.10 GoBot không giới hạn số này, trước là 20: game
     báo túi đầy thì dừng lượt đó), xen kẽ HP và MP. Mỗi ô là một lần BẤM ĐÚP
@@ -2372,7 +4008,9 @@ khác chưa được thử trên game thật.
   hồi sinh" rồi "Xác Nhận". Cần có giấy hồi sinh hoặc bùa hồi sinh trong
   túi. GoBot không bao giờ hồi sinh tại làng (mất 2% EXP) và không dùng
   Cash. Thử 3 lần không được thì GoBot dừng cả bot, ghi lý do bằng chữ đỏ,
-  và để nhân vật nằm tại chỗ chờ bạn.
+  và để nhân vật nằm tại chỗ chờ bạn. (Từ bản 2026.11.24 không dừng nữa:
+  GoBot giữ mọi phím trong lúc nhân vật nằm, 30 giây sau thử thêm 3 lần, cứ
+  thế; hồi sinh bằng tay thì bot tự chạy tiếp.)
 - Tự buff (thử nghiệm): mỗi phím buff có thời gian riêng, từ 0 đến 7200
   giây; 0 là bấm lại sớm nhất có thể, mỗi 5 giây như GoC. Sau khi chết, hồi
   sinh hoặc vào lại game, GoBot buff lại tất cả.
@@ -2507,7 +4145,9 @@ khác chưa được thử trên game thật.
   + Chỗ đánh quái (ô cạnh "Vị trí từ gói tin", mặc định không có dấu):
     bot chỉ đi tới quái trong một vùng quanh chỗ đánh quái: mặc định 300
     px mỗi bên và 100 px cao thấp (sửa ở "Tầm đánh…", phần "Chỗ đánh
-    quái"). Con quái đã ở trong tầm đánh thì vẫn đánh, dù đứng ngoài vùng.
+    quái"). Con quái đã ở trong tầm đánh thì vẫn đánh, dù đứng ngoài vùng
+    (từ bản 2026.11.12 thì không: chỉ đánh quái trong vùng, xem bản
+    2026.11.12).
     Con đang đi tới mà ra ngoài vùng quá 60 px thì bot bỏ nó. Hết quái
     khoảng 1,5 giây mà nhân vật cách chỗ hơn 48 px theo chiều ngang (ô "Đi
     về khi cách chỗ hơn") thì bot đi bộ về chỗ; có con quái vào tầm đánh
@@ -2552,7 +4192,11 @@ khác chưa được thử trên game thật.
     bản 2026.11.04d"). Từ bản 2026.11.10, cả với chỗ của lần chạy này (chỗ
     không cao hơn một lần nhảy): ra ngoài vùng quá 60 px thì bot ngưng đánh,
     đi bộ về theo mặt đất, không nhảy, không đánh con nào kể cả con trong
-    vùng, tới khi vào tới trong vùng; kỹ năng tạm dừng lúc đi về.
+    vùng, tới khi vào tới trong vùng; kỹ năng tạm dừng lúc đi về. Từ bản
+    2026.11.12, khi GoBot tin file bản đồ, chỗ của lần chạy này cũng đi về
+    theo bục (qua cả các bục ngoài vùng, có thể nhảy lên), và ở ngoài vùng
+    quá 60 px mà không có đường về thì bot đứng yên, không đánh, thay cho
+    đứng đánh ở đó (xem bản 2026.11.12).
     Đi về mà 4 giây không tới gần hơn (vướng tường, vướng bục), bot thôi và
     30 giây sau thử lại; 3 lần liền không được thì thôi hẳn, tới khi bấm
     "Đặt chỗ này" hay nhân vật tự về tới chỗ.
@@ -2574,13 +4218,11 @@ khác chưa được thử trên game thật.
     để nhảy lên chỗ cao khi đánh quái (thường là ↑). Bản này không đặt sẵn
     phím cho ô này; không đặt thì bot chỉ không nhảy (dòng "Chưa đặt phím
     nhảy", xem mục 4). Nút "Thử" chỉ dùng được khi bot đang dừng ("Bot đang
-    chạy: dừng bot rồi hãy thử."). Còn một phím nhảy nữa, chỉ dùng khi đi
-    tới điểm đã lưu ("Go", "Patrol these" ở thẻ Radar của màn hình Nâng
-    cao); phím đó nay đặt sẵn là ↑. hunt.ini cũ giữ phím cũ, thường là
+    chạy: dừng bot rồi hãy thử."). hunt.ini cũ có thể giữ phím nhảy là
     Space, mà trong game Space là phím Tấn công. Khi đó "Trước khi bắt đầu"
-    nhắc "Phím nhảy đang là Space" (phím khi đánh quái, chỉ khi có dấu "Tự
-    đánh quái") và "Phím nhảy khi đi tới điểm đã lưu là Space: sẽ đánh chứ
-    không nhảy" (có dấu hay không). GoBot không tự sửa file của bạn.
+    nhắc "Phím nhảy đang là Space" (chỉ khi có dấu "Tự đánh quái"). GoBot
+    không tự sửa file của bạn. (Phím nhảy thứ hai, chỉ dùng khi đi tới điểm
+    đã lưu ở thẻ Radar, đã bỏ cùng thẻ đó ở bản 2026.11.16.)
   + Kỹ năng "Chỉ khi đang đánh quái": phím kỹ năng chỉ được bấm lúc bot
     đang đánh một con quái trong tầm, mỗi phím chờ hồi chiêu của nó. Điều
     này chỉ có tác dụng khi "Tự đánh quái" đang chạy; không thì mỗi phím
@@ -2594,7 +4236,12 @@ khác chưa được thử trên game thật.
     tự buff: vẫn bấm theo giờ cả khi không đánh quái); hai ô này cũng chỉ
     có tác dụng khi "Chỉ khi đang đánh quái" có dấu. "Phím đánh" mặc định
     là Z, cũng là phím kỹ năng đầu tiên: màn hình sẽ nhắc đặt "Phím đánh"
-    là Space (Đánh thường). Hãy làm vậy trước khi thử phần này.
+    là Space (Đánh thường). Hãy làm vậy trước khi thử phần này. (Từ bản
+    2026.11.12: "Tầm (px)" có tác dụng cả khi ô "Chỉ khi đang đánh quái"
+    không có dấu, lúc bot đang đánh một con quái; và dù ô đó có dấu hay
+    không, khi Tự đánh quái chạy, macro giữ phím kỹ năng, cả "Luôn bấm theo
+    giờ", lúc quay mặt, lúc nhảy xuống, lúc trong vùng không có quái và lúc
+    ở ngoài vùng; bình và buff vẫn bấm. Xem bản 2026.11.12.)
   + Chuỗi phím: nếu macro.ini của bạn còn bật chuỗi phím Z, X, C (màn hình
     Nâng cao), dòng "Tự dùng kỹ năng" nay báo điều đó, kèm nút "Tắt".
   + "Tự đóng thông báo" (mặc định TẮT; dòng cuối của "Bot sẽ làm gì", bên
@@ -2603,10 +4250,11 @@ khác chưa được thử trên game thật.
     vào game và lúc qua 00:00 (bấm ESC, không bao giờ bấm nút X; từ bản
     2026.11.09), Yêu Quái Bách Khoa (bấm nút X, hoặc ESC khi không có gì
     khác) và menu ESC do chính GoBot bấm ESC mở ra. Mỗi cái chỉ được đóng
-    khi đã hiện 3 giây, game ở trên cùng, không
-    ai đụng chuột hay bàn phím, và HP cao hơn mức của bình HP ít nhất 10
-    (không cần quá 95%; mức bình tính ít nhất 50%: bình ở 60% thì HP từ
-    70%, bình dưới 50% hay không bật bình thì HP từ 60%); lúc đó các phím
+    khi đã hiện 3 giây (từ bản 2026.11.15d bảng điểm danh: 30 giây sau khi
+    vào game, và không bấm từ 23:55 tới 00:03), game ở trên cùng, không
+    ai đụng chuột hay bàn phím, và nhân vật chưa gục (từ bản 2026.11.12b
+    đóng ở mọi mức máu; trước đó HP phải cao hơn mức của bình HP ít nhất
+    10, không cần quá 95%, mức bình tính ít nhất 50%); lúc đó các phím
     khác của GoBot chờ tối đa 2 giây. Không bao giờ đóng hộp thoại thùng
     rác, lời mời tổ đội, bảng hồi sinh, cửa sổ nhiệm vụ hay cửa sổ lạ, và
     không làm gì khi một trong số đó đang mở. Bảng điểm danh chỉ được bấm
@@ -2664,14 +4312,16 @@ khác chưa được thử trên game thật.
     game một lần, không bấm gì.
 - Tự đăng nhập (thử nghiệm): không còn ô tài khoản, mật khẩu. VTCZone tự
   giữ đăng nhập; GoBot chỉ bấm "Chơi game", START, chọn kênh và nhân vật.
-  Thử 3 lần không được thì dừng và chờ bạn. Mới ở thẻ này (thử nghiệm):
+  Thử 3 lần không được thì dừng và chờ bạn (từ bản 2026.11.24: 30 giây sau
+  vào lại, không dừng). Mới ở thẻ này (thử nghiệm):
   + Ô "Cũng vào lại khi game vẫn chạy mà không thấy nhân vật quá [5] phút"
     (mặc định TẮT; dưới ô "Tự vào lại game khi bị văng hoặc mất kết nối",
     chỉ bấm được khi ô đó có dấu; 1 tới 30 phút). Có dấu thì khi game vẫn
     chạy, vẫn phản hồi, mà quá số phút đó không thấy nhân vật trong game
     (mất kết nối hiện ngay trong game, game đứng ở danh sách kênh hay màn
     hình chọn nhân vật), GoBot TẮT game rồi vào lại; lần đó tính vào số lần
-    vào lại tối đa (5). Không bao giờ làm vậy khi nhân vật chết, khi cửa sổ
+    vào lại tối đa (5; từ bản 2026.11.24 là 5 lần trong 1 giờ). Không bao giờ
+    làm vậy khi nhân vật chết, khi cửa sổ
     game bị thu nhỏ hay bị che, hoặc khi GoBot đang làm việc khác trong
     game; màn hình đang tải mà vẫn đổi thì được chờ tới 15 phút. Thông báo
     ghi "Mất kết nối: không thấy nhân vật trong game N phút (game vẫn
@@ -2720,7 +4370,8 @@ Nút nào bấm vào game, nút nào không:
   nói thấy gì.
 - Không bấm gì trong game: tab Bản đồ (đọc file bản đồ của game và gói
   tin). Nhưng sửa vùng đánh lúc bot đang dùng vùng đó thì bot đi theo vùng
-  mới ngay, có thể đi bộ về chỗ về mới.
+  mới ngay, có thể đi bộ về chỗ về mới; và kéo hai vạch (từ bản
+  2026.11.12) lúc bot chạy thì bot nhảy xuống, nhảy lên theo số mới ngay.
 - Chỉ gửi tin, không đụng tới game: "Gửi thử" (Thông báo).
 - Bấm vào game ngay khi bạn bấm nút: "Thử" cạnh Phím nhảy (phím nhảy, một
   lần), "Thử ↑", "Thử ↑↑" và "Thử Ctrl+↑" ở dòng "Đo cú nhảy:" (một cú nhảy
@@ -2740,9 +4391,10 @@ Nút nào bấm vào game, nút nào không:
   tối đa 3 bước về một phía; GoBot không thấy mép bục), "Chỗ đánh quái"
   (giữ phím mũi tên, và phím nhảy khi chỗ ở cao hơn, để đi về chỗ đánh
   quái), "Nhảy xuống bậc dưới" (giữ Ctrl rồi bấm ↓ để nhảy xuống tới quái
-  ở bậc dưới; nhảy mà đổi bản đồ thì GoBot dừng đánh quái), "Nhảy lên bục
+  ở bậc dưới; nhảy mà đổi bản đồ thì GoBot nhớ chỗ đó là cửa, không nhảy
+  gần đó nữa, và vẫn đánh quái tiếp), "Nhảy lên bục
   trên" (bấm ↑, ↑↑, hay giữ Ctrl rồi bấm ↑, để nhảy lên bục trên trong vùng
-  vẽ ở tab Bản đồ; nhảy mà đổi bản đồ thì GoBot dừng đánh quái; bật sẵn),
+  vẽ ở tab Bản đồ; nhảy mà đổi bản đồ thì cũng như vậy; bật sẵn),
   "Tự tìm quái trong vùng" (giữ phím mũi tên để đi tới quái ở bất kỳ đâu
   trong vùng đó; bật sẵn), và "Cũng vào lại khi game vẫn chạy mà không thấy
   nhân vật quá ... phút" (TẮT game rồi vào lại).
@@ -2842,7 +4494,8 @@ Nút nào bấm vào game, nút nào không:
      a. Lúc "Đứng yên một chỗ" còn dấu, ô "Nhảy xuống bậc dưới" phải mờ
         đi; rê chuột lên ô thì thấy lý do. Bỏ dấu Đứng yên, đánh dấu "Vị
         trí từ gói tin", rồi đánh dấu ô này. Dưới hàng Tự đánh quái phải có
-        "Nhảy xuống (Ctrl + ↓) khi quái thấp hơn quá 100 px, ...".
+        "Nhảy xuống (Ctrl + ↓) khi quái thấp hơn vạch dưới (N px), ...".
+        (Trước bản 2026.11.12: "khi quái thấp hơn quá 100 px".)
      b. Chọn chỗ có hai bậc chồng nhau, quái ở bậc dưới, KHÔNG có cửa nào
         gần (cách xa hơn nửa màn hình); nhân vật đứng ở bậc trên, trên bậc
         đó không có quái. Tốt nhất là mở GoBot trước khi vào game, hoặc qua
@@ -2941,12 +4594,13 @@ Nút nào bấm vào game, nút nào không:
       c. Trong log phải có "Hunter: jump up (Ctrl+Up) ..." rồi "Hunter: jump
          up worked ..."; "Hunter: seeking slot ..."; "Hunter: monsters at
          ..." mỗi 30 giây; dòng "Hunter:" mỗi phút có "; jump-ups: ..." và
-         "; seek: ...". Có "jump up FELL BACK" hay dòng đỏ dưới nút BẮT ĐẦU
-         thì không sao: GoBot tự tránh chỗ đó, hay tự tắt Nhảy lên tới lần
-         BẮT ĐẦU sau; báo lại kèm log.
+         "; seek: ...". Có "jump up FELL BACK" thì không sao: GoBot tránh
+         chỗ đó 30 giây (nhảy ở chỗ khác trước) rồi thử lại; từ bản
+         2026.11.24 Nhảy lên không bao giờ tự tắt; báo lại kèm log.
       d. Thấy nhân vật nhảy ra ngoài vùng, nhảy mãi một chỗ, hay đi lung
          tung: bấm F12, bỏ dấu ô đó và báo lại kèm giờ. Bản đồ đổi sau một
-         lần nhảy thì GoBot tự dừng đánh quái và bỏ dấu Nhảy lên.
+         lần nhảy thì GoBot nhớ chỗ đó là cửa và vẫn đánh quái tiếp (từ bản
+         2026.11.24; trước đó GoBot tự dừng đánh quái và bỏ dấu Nhảy lên).
       e. Gửi gobot_gui.log (các dòng "Hunter:" và "Positions").
   11. Kỹ năng ở chiến trường (bản 2026.11.08, chưa thử trên game thật; ô mới
       cần Npcap; chỉ macro, Tự đánh quái tắt):
@@ -2977,8 +4631,11 @@ Nút nào bấm vào game, nút nào không:
       thật):
       a. Đánh dấu ô "Tự đóng thông báo" (thẻ Đánh quái; ô này giao ra tắt
          sẵn). Thoát ra rồi vào lại game bằng tay, chờ bảng Sự kiện và điểm
-         danh hiện, rồi mới bấm BẮT ĐẦU: khoảng 3–5 giây sau, GoBot phải bấm
-         ESC và bảng tắt (GoBot chụp ảnh 15 giây sau BẮT ĐẦU). Hay bấm BẮT
+         danh hiện, rồi mới bấm BẮT ĐẦU: khoảng 30 giây sau BẮT ĐẦU (từ bản
+         2026.11.15d GoBot tính 30 giây từ lúc nó thấy bảng; trước là 3–5
+         giây), GoBot phải bấm ESC và bảng tắt (GoBot chụp ảnh 15 giây sau
+         BẮT ĐẦU, lúc bảng còn hiện). Từ 23:55 tới 00:03 theo đồng hồ máy
+         thì GoBot chờ tới 00:03 mới bấm. Hay bấm BẮT
          ĐẦU trước rồi để GoBot tự vào lại game (Phím vào game ngay; ảnh 15
          giây sau khi vào). Vào lại bằng tay SAU khi bấm BẮT ĐẦU thì GoBot
          không chụp được ảnh nào nếu không nhận ra bảng. Ghi giờ. Bảng không
@@ -3058,6 +4715,13 @@ Nút nào bấm vào game, nút nào không:
          own, the last pass ended N s ago": đó là đúng, không phải lỗi. Lượt
          dọn còn đang chạy lúc tới giờ mua thì dòng đó ghi "(come due while it
          ran)", và không có dòng "shop due -- a pass first".
+         (Từ bản 2026.11.12 thì bấm BẮT ĐẦU không dọn, không mua ngay: lượt
+         dọn đầu tới sau 10 phút, lần mua đầu sau 15 phút, khoảng 5 phút sau
+         lượt dọn đó. Nên chính lần mua đầu này có "Trash: shop due -- a pass
+         first ..." rồi "rides the pass", không có lượt mua riêng lúc mới bật.
+         Với "dọn mỗi" 5 hay 15, lần mua đầu cũng kéo một lượt dọn lên như
+         vậy; với 15, lượt dọn và lần mua tới cùng lúc ("the last pass ended
+         none yet"). Xem bước 16f.)
       b. Máu dưới mức bình HP mà trên nửa mức: đứng ở chỗ có quái yếu đánh
          được nhân vật, đặt 3 ô mỗi loại và bấm "Mua ngay" lúc máu từ mức bình
          trở lên. Máu xuống dưới mức bình trong lúc mua thì lượt mua vẫn chạy,
@@ -3098,6 +4762,83 @@ Nút nào bấm vào game, nút nào không:
          not pressed by a bag job". Thấy máu tụt nhanh thì F12 và tự uống bình.
       e. Gửi gobot_gui.log và gobot_gui.old.log ngay sau lần chạy, kèm các giờ
          đã ghi.
+  16. Quay mặt, chỉ đánh trong vùng, rơi xuống và hai vạch (bản 2026.11.12,
+      chưa thử trên game thật; cần Npcap và Vị trí từ gói tin có dấu; chỉ
+      thử khi ngồi xem, tay gần F12):
+      a. Hai vạch, chưa bấm BẮT ĐẦU: ở PhòngSinhTử[4] (t23_s14), đứng trong
+         vùng của bạn, mở tab Bản đồ. Trên bản đồ có hai đường nét đứt màu
+         tím nhạt, tính từ chân nhân vật, ghi "+10 px" và "-20 px"; dưới bản
+         đồ có dòng "Vạch trên [..] px  Vạch dưới [..] px". Kéo vạch dưới
+         xuống tới mức bạn muốn bot nhảy xuống (ví dụ nửa đường tới bục dưới
+         của vùng), thả chuột: số trong ô đổi theo. Gõ số vào ô cũng được.
+         Mở "Tầm đánh…": "Cao nhất", "Thấp nhất" là hai số đó. Tắt GoBot rồi
+         mở lại: hai vạch vẫn ở chỗ mới. Ghi lại hai số bạn chọn.
+      b. Ở đó, đánh dấu Tự đánh quái, Chỗ đánh quái và Nhảy xuống bậc dưới
+         ("Nhảy lên bục trên" đã có dấu sẵn), bấm BẮT ĐẦU, đánh 15–30 phút.
+         Xem: hết quái ở bục trên thì bot đi tới trên chỗ con quái ở bục dưới
+         (trong vùng), đứng lại, nhảy xuống (Ctrl+↓) rồi đánh nó. Log có
+         "Hunter: drop (Ctrl+Down) ..." rồi "Hunter: drop worked ..." (hay
+         "Hunter: drop landed at ... on floor ..."); nhảy xuống không tự
+         tắt chỉ vì nhân vật rơi lệch sang bục khác.
+      c. Trong lúc đó xem: nhân vật không còn quay qua quay lại khi một con
+         quái đi qua người; con quái ở ngoài vùng (chấm xám) không bị quay
+         tới, không bị đánh, dù ở gần; trong vùng hết quái thì nhân vật đứng
+         yên và không ra kỹ năng (bình, buff vẫn bấm). Sau mỗi lần quay, kỹ
+         năng có thể chờ một chút (tới 1 giây). Ghi giờ những lúc thấy khác.
+      d. Phím lướt: trong log tìm dòng "Positions: moved ... with no walk
+         ...; its key ..." và dòng "Dash (packets): ... the dash is skill
+         ..., key ..." — phím đó là phím GoBot học được là phím lướt. Ghi
+         lại phím đó (C, V hay Space). Gần mép vùng và đầu bục, phím đó
+         không được bấm; xa mép thì vẫn bấm như thường.
+      e. ĐồiĐen[5] (t62_s5), vùng hay chỗ đánh quái như ngày 11/11: đánh
+         15–30 phút. Nhân vật bị rơi ra khỏi vùng xuống bục dưới thì bot phải
+         tự tìm đường về: đi bộ, rơi xuống, nhảy ↑, ↑↑ hay Ctrl+↑ lên từng
+         bục, không đánh quái ngoài vùng, kỹ năng chờ; log có "Hunter: jump
+         up (...)" với "over floors outside the area". Không có đường thì
+         nhân vật đứng yên và thẻ ghi "... không có đường về vùng: bot đứng
+         yên ở đây, ..."; ghi giờ rồi tự đưa nhân vật về hay bấm Đặt chỗ này.
+         Nhân vật rơi xuống vực và game đưa lên đỉnh bản đồ: bot đứng yên
+         khoảng 3 giây (thẻ ghi "gói tin vừa báo nhân vật ở rất xa chỗ cũ
+         ..."), log có "Hunter: the game put you at ..."; từ đỉnh t62_s5,
+         có dấu Nhảy xuống bậc dưới, bot đi bộ rồi nhảy xuống Ctrl+↓ qua bục
+         dài khoảng y 3000 và các bục dưới, về tới chỗ (log "Hunter: drop
+         (Ctrl+Down) on the way back: ..."); ghi giờ, và xem nhân vật không
+         nhảy xuống gần cửa, không rơi xuống vực. Đi về 3 lần liền không
+         được thì bot đứng yên 30 giây (spot_retry_ms) rồi thử lại 3 lần nữa
+         (log "Hunter: trying the walk back again -- ...").
+      f. Có dấu Tự dọn rác hay Tự mua bình: ghi giờ bấm BẮT ĐẦU. Lượt dọn
+         đầu phải tới sau "dọn mỗi" phút, lần mua đầu sau "mua mỗi" phút,
+         không phải ngay khi bật; log có "Trash: counting from the start --
+         ...". Bấm "Dọn ngay" thì vẫn dọn ngay.
+      g. Thấy nhân vật nhảy ra ngoài vùng, nhảy mãi một chỗ, đi lung tung,
+         hay đứng yên lâu ở chỗ có đường về: bấm F12 và ghi giờ. Gửi
+         gobot_gui.log và gobot_gui.old.log ngay sau lần chạy (các dòng
+         "Hunter:", "Skills:", "Positions:", "Dash (packets):" và "Trash:"),
+         kèm hai số vạch đã chọn, phím lướt và các giờ đã ghi.
+  17. Nhảy lên/xuống theo hai vạch và đường về vùng (bản 2026.11.12c, chưa
+      thử trên game thật; cần Npcap và Vị trí từ gói tin có dấu; chỉ thử khi
+      ngồi xem, tay gần F12):
+      a. PhòngSinhTử[4] (t23_s14), vùng của bạn, Nhảy lên bục trên và Nhảy
+         xuống bậc dưới có dấu, hai vạch như bạn đặt (10 và 20). Đánh 15–30
+         phút. Quái cao hơn vạch trên mà gần: bot quay mặt, bấm ↑ một lần
+         tại chỗ và đánh trên không (log "Hunter: Up (one plain jump) toward
+         ..."); quái thấp hơn vạch dưới: Ctrl+↓. Ghi giờ những lần nhảy lạ.
+      b. Vẫn ở đó: để nhân vật rơi xuống đáy (hay đăng nhập lại ở đáy). Bot
+         phải tự đi tới chỗ nhảy, Ctrl+↑ lên bục 1393 rồi ↑↑ lên bục của chỗ
+         về; log có "Hunter: walking back into the hunting area ...", "jump
+         up (Ctrl+Up) on the way home", "jump up worked". Không về được thì
+         ghi giờ; log có "standing where it is ... (here: ...)".
+      c. t49_s5, vùng của bạn: quái đứng trên bục 1639 bên trái bậc (x
+         2816). Bot đi tới chân bậc (không còn dòng "(a pit)"), đứng yên,
+         Ctrl+↑ tại chỗ; log có "at the foot of a step of 64 px at x 2816".
+         Xem nhân vật lên bục 1639 hay lên tấm ván 1287 phía trên, và trả lời
+         câu 8. Quái trên bục 1639 sát bậc mà cao hơn vạch trên trong tầm một
+         lần ↑ thì bot có thể bấm ↑ tại chỗ ở chân bậc; ↑ đó leo được lên bậc
+         thì log có "Up toward ...: onto its floor", không có "on no floor".
+      d. Gửi gobot_gui.log và gobot_gui.old.log ngay sau lần chạy: các dòng
+         "jump up", "Up toward", "bars:", "a way back shows", "a step of"
+         (bước để tin bản đồ), "Packets: your 0x002A state", kèm các giờ đã
+         ghi.
 - Tự hồi sinh: thử ở bản đồ dễ, có giấy/bùa hồi sinh trong túi, và ngồi
   xem lần đầu. Nếu GoBot bấm sai chỗ, bấm F12 và báo lại.
 - Tự buff: đặt số giây khi bot đang dừng, rồi xem buff có lên đúng giờ
@@ -3110,14 +4851,16 @@ Nút nào bấm vào game, nút nào không:
   C:\Program Files\VTCZone; nếu thẻ báo "Không thấy VTCZone", hãy mở
   VTCZone bằng tay: thấy VTCZone đang chạy, GoBot nhớ chỗ của nó cho tới khi
   tắt GoBot. GoBot không bao giờ gõ tài khoản, mật khẩu: nếu VTCZone hiện
-  màn hình đăng nhập, GoBot dừng và báo. Gặp hộp "Security Alert" của game,
-  GoBot cũng dừng, để bạn tự quyết. Ở màn hình chọn kênh, GoBot tìm chính
-  bảng kênh (khung các dòng "Kênh 1" tới "Kênh 8") và bấm vào giữa dòng kênh
-  đã chọn, thay vì đo từ chữ "Chọn Kênh" như trước (cách đo đó chỉ đúng ở
-  1024x768). Bấm xong GoBot xem bảng đã đóng hoặc dòng đó đã sáng lên chưa,
-  chưa thì bấm lại, tối đa 3 lần; game vẫn không nhận thì lần thử đó tính là
-  không được (GoBot KHÔNG bấm Kết Nối, vì sẽ vào kênh khác), và như mọi lần,
-  thử 3 lần không được thì dừng. Nếu không tìm thấy bảng kênh, GoBot bấm theo
+  màn hình đăng nhập, GoBot báo và (từ bản 2026.11.24) 30 giây sau xem lại,
+  không gõ gì vào đó. Gặp hộp "Security Alert" của game, GoBot cũng không
+  bấm, để bạn tự quyết, và 30 giây sau xem lại. Ở màn hình chọn kênh, GoBot
+  tìm chính bảng kênh (khung các dòng "Kênh 1" tới "Kênh 8") và bấm vào giữa
+  dòng kênh đã chọn, thay vì đo từ chữ "Chọn Kênh" như trước (cách đo đó chỉ
+  đúng ở 1024x768). Bấm xong GoBot xem bảng đã đóng hoặc dòng đó đã sáng lên
+  chưa, chưa thì bấm lại, tối đa 3 lần; game vẫn không nhận thì lần thử đó
+  tính là không được (GoBot KHÔNG bấm Kết Nối, vì sẽ vào kênh khác), và như
+  mọi lần, thử 3 lần không được thì dừng (từ bản 2026.11.24: 30 giây sau vào
+  lại). Nếu không tìm thấy bảng kênh, GoBot bấm theo
   vị trí đo ở 1024x768 như trước. Nếu vẫn kẹt, thử để game ở 1024x768, và gửi
   gobot_gui.log, gobot_gui.old.log, kèm độ phân giải đang chọn trong game;
   thư mục login_debug thì gửi khi được hỏi, xem trước khi gửi.
@@ -3189,6 +4932,13 @@ Nút nào bấm vào game, nút nào không:
   tiền của nhân vật khi chưa chắc. Từ bản 2026.11.11, khi "Tự dọn rác" cũng
   có dấu, tới giờ mua GoBot dọn rác trước rồi mua liền sau đó: thử như bước
   14 ở trên.
+- Mua HP pet (bản 2026.11.24, thẻ Tự mua bình): đặt 1 ô "Thịt bò (HP pet)",
+  đánh dấu "Mua HP pet (Thịt bò) khi ra tới TổCổLong", bấm BẮT ĐẦU ở chỗ
+  khác rồi đi vào TổCổLong (hay đánh xong một lượt Cổ Long), và ngồi xem:
+  cửa hàng mở, ngăn Linh Thú được bấm, Thịtbò được bấm đúp, hộp hiện 1 rồi
+  100 trước khi Xác Nhận, rồi cửa hàng đóng; thẻ ghi "Mua HP pet: đã mua 1
+  lần 100 Thịt bò." Không được thì gửi các ảnh trash_debug\*pet_* và
+  *shop_* cùng các dòng "Pet:" và "Trash:" của log.
 
 Đừng:
 - bật nhiều phần thử nghiệm cùng lúc khi chưa thử từng phần;
@@ -3231,16 +4981,20 @@ lại, kèm gobot_gui.log.
   "Chat trace" trong log: mỗi lần bấm Enter giữ bao lâu, ô chat sau đó ra
   sao, và (khi game không hiện chữ) Unikey/EVKey có đang chạy không. Trước
   khi báo "Game không nhận chữ", GoBot nhìn ô chat ba lần, tới khoảng 0,65
-  giây sau phím cuối. Câu lỗi được thử lại sau 30 giây; 3 lần liền thì Tự
-  chat tự dừng. Lúc gõ, GoBot giữ đánh quái, kỹ năng, bình và buff (một
-  câu: khoảng 5,5 giây); HP xuống dưới mức của bình HP thì câu dừng ngay,
+  giây sau phím cuối (từ bản 2026.11.15d: nhìn tới 30 giây). Câu lỗi được
+  thử lại sau 30 giây; 3 lần liền thì GoBot báo một lần và vẫn thử lại (từ
+  bản 2026.11.24; trước đó Tự chat tự dừng). Lúc gõ, GoBot giữ đánh quái,
+  kỹ năng, bình và buff (một
+  câu: khoảng 5,5 giây; máy chậm: mỗi bước chờ game tới 30 giây, từ bản
+  2026.11.15d); HP xuống dưới mức của bình HP thì câu dừng ngay,
   cả lúc đang chờ, để bình được bấm.
   Làm: Unikey/EVKey để gõ tiếng Anh (E), bàn phím Windows ở English (US);
   đừng để gì che ô chat (góc trái dưới game); đừng đụng chuột, bàn phím lúc
   GoBot gõ. Ô chat cứ mở mãi thì bạn tự đóng nó: xoá chữ rồi bấm Enter.
   Gửi thư mục chat_debug và các dòng "Chat" của log khi được hỏi.
   configs\chat.ini có thêm vài số để thử cách bấm phím (hold_min_ms,
-  max_enters, inject...): chỉ đổi khi được hỏi.
+  max_enters, inject...): chỉ đổi khi được hỏi. Từ bản 2026.11.15d mỗi
+  Enter (max_enters) chờ tới 30 giây trước khi bấm Enter sau.
 - Lỗi 5, đánh quái: nhiều trận bị bỏ.
   Thấy: khoảng 110 trận trong 11 phút, khoảng 1 trong 7 trận bị bỏ, không
   lùi bước nào. Với Kiểu đánh "Như trước" (mặc định), con quái còn sống 4
@@ -3313,6 +5067,11 @@ Gặp lỗi khác:
   bình (có hai dòng bình HP thì cả dòng Lv1 lẫn Lv2, trừ dòng có mức dưới
   nửa mức dòng kia). Từ bản 2026.11.11, ở màn hình đơn giản, muốn bỏ phím
   của một ô thì nhấn Backspace (Delete nay là một phím đặt được).
+- Từ bản 2026.11.12 hunt.ini không còn dòng drop_min_px (hunt.ini cũ còn
+  dòng đó thì GoBot không đọc): nhảy xuống, nhảy lên chỉ theo "Cao nhất" và
+  "Thấp nhất", tức hai vạch ở tab Bản đồ; xem lại hai vạch trước khi bấm BẮT
+  ĐẦU. Dọn rác và Tự mua bình nay đếm giờ từ lúc bấm BẮT ĐẦU: lượt đầu không
+  còn tới ngay sau khi bật.
 - app.ini không chép sang, nên "Tự đóng thông báo" (cũng là ô tắt bảng Sự
   kiện và điểm danh từ bản 2026.11.09) giao ra tắt: đánh dấu lại nếu muốn.
 - Đừng chép hunt.ini: hunt.ini của các bản cũ (trước 15/10/2026) có thể có
@@ -3320,10 +5079,12 @@ Gặp lỗi khác:
   Đánh quái. Nếu lỡ chép rồi, xem lại ô "Tên nhân vật": phải là tên nhân
   vật của chính bạn. hunt.ini cũ còn giữ phím nhảy cũ, thường là Space, mà
   Space là phím Tấn công của game: thẻ Đánh quái sẽ nhắc ("Phím nhảy đang
-  là Space", "Phím nhảy khi đi tới điểm đã lưu là Space: sẽ đánh chứ không
-  nhảy"). GoBot không tự sửa file: hãy tự đặt ô "Phím nhảy" (thường là ↑).
-  Dòng nhắc thứ hai chỉ hết khi dùng hunt.ini của bản này (hoặc sửa file
-  như dòng đó chỉ).
+  là Space"). GoBot không tự sửa file: hãy tự đặt ô "Phím nhảy" (thường là
+  ↑). Phần [Move] của hunt.ini cũ (đi tới điểm đã lưu) không còn được đọc
+  từ bản 2026.11.16.
+- File bot_default.ini hay gathering.ini trong thư mục configs cũ: bản
+  2026.11.16 không còn dùng, đừng chép sang (chép rồi thì GoBot cũng để
+  yên).
 - Phím kỹ năng, bình và buff cũng đặt lại trên màn hình mới: macro.ini của
   bản cũ có bật sẵn một chuỗi phím Z, X, C tự lặp. Bản này báo chuỗi đó ở
   dòng "Tự dùng kỹ năng", kèm nút "Tắt".

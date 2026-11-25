@@ -735,11 +735,9 @@ void test_jump_key_sources() {
               body(im, "InputManager::DropPress InputManager::chord_ctrl(")
                       .find("if (key == ChordKey::Down) return drop_ctrl_down(go_on);") != std::string::npos,
           "jump_twice, jump_once and chord_ctrl catch what their steps throw; chord_ctrl(Down) is drop_ctrl_down");
-    check(body(im, "bool InputManager::jump()").find("return key_press(key_jump_);") != std::string::npos &&
-              body(im, "bool InputManager::double_jump()").find("jitter(180, 240)") != std::string::npos &&
-              hunter.find("input_.jump(") == std::string::npos && hunter.find("double_jump(") == std::string::npos &&
+    check(hunter.find("input_.jump(") == std::string::npos && hunter.find("double_jump(") == std::string::npos &&
               hunter.find("key_jump") == std::string::npos,
-          "InputManager::jump() and double_jump() as they were -- Ctrl's key_jump_ -- and the hunter calls neither");
+          "the hunter calls neither of the old jumps, InputManager::jump() and double_jump() on Ctrl's key_jump_");
     const std::string stray = body(im, "int InputManager::release_stray_drop_keys()");
     check(before(stray, "reads_down(fake, VK_DOWN)", "reads_down(fake, VK_UP)") &&
               before(stray, "reads_down(fake, VK_UP)", "reads_down(fake, VK_CONTROL)"),

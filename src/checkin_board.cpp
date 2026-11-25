@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 
 namespace gobot {
 
@@ -20,6 +21,13 @@ ScreenRect clamp_to(const Frame& f, ScreenRect r) {
 
 } // namespace
 
+int local_second_of_day() {
+    const std::time_t t = std::time(nullptr);
+    std::tm local{};
+    if (localtime_s(&local, &t) != 0) return -1;
+    return local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
+}
+
 const Frame* checkin_board_picture(const TemplateStore& store) {
     if (const Frame* named = store.get(kCheckinBoardTitle)) return named;
     return store.get(kCheckinBoardTitleFile);
@@ -32,9 +40,11 @@ bool checkin_board_title(const Frame& f, const TemplateStore& store, ScreenRect*
 }
 
 bool checkin_board_title(const Frame& f, const Frame& picture, ScreenRect* title, float* score,
-                         const ScreenRect* around) {
+                         const ScreenRect* around, float min_score) {
     const Frame* pic = &picture;
     if (!pic->valid() || !f.valid()) return false;
+    // The lower bar only round a place: anywhere, the title is a first sight.
+    if (around == nullptr) min_score = kCheckinBoardScore;
     // The whole frame, or round where it was: the board is never dragged, and a
     // title a few pixels off is the same board drawn a little aside.
     constexpr int kSlack = kCheckinRelookSlack;
@@ -45,7 +55,7 @@ bool checkin_board_title(const Frame& f, const Frame& picture, ScreenRect* title
     if (area.w < pic->width || area.h < pic->height) return false;
     const bool time_it = around == nullptr && !g_timed.exchange(true);
     const auto from = std::chrono::steady_clock::now();
-    const auto m = TemplateMatcher::find(f, area, *pic, kCheckinBoardScore);
+    const auto m = TemplateMatcher::find(f, area, *pic, min_score);
     if (time_it) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - from);
         GB_INFO("Checkin: a title search on %dx%d took %lld ms", f.width, f.height,

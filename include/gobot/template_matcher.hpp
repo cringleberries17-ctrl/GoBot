@@ -3,6 +3,7 @@
 #include "gobot/mob_detector.hpp"      // ScreenRect
 #include "gobot/screen_capture.hpp"
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -58,6 +59,49 @@ public:
                                        float min_score = kDefaultScore,
                                        std::size_t limit = 64,
                                        Tone tone = Tone::Grey);
+
+    /// find_all with every buffer made afresh, as every search was made before
+    /// 2026-11-16, when the buffers began to be kept from one search to the
+    /// next and each picture's mask made once. For the test that holds the
+    /// kept ones to the same answers, to the bit; nothing else should need it.
+    static std::vector<Match> find_all_fresh(const Frame& frame, const ScreenRect& area,
+                                             const Frame& tpl, float min_score,
+                                             std::size_t limit, Tone tone);
+
+    /// Several searches of one frame that turn it into grey, or colour, once.
+    ///
+    /// Each search starts by turning the part of the frame it looks at into
+    /// grey (or colour without the alpha): for a whole 1024x768 frame that is
+    /// 0.8 MB written before any matching starts, again for every picture
+    /// looked for. One turn of the popups looks for four pictures in the same
+    /// frame, and a look for windows in the way about nine; on a PC with one
+    /// core it is time the game does not get.
+    ///
+    /// While one of these is alive, the searches its own thread makes of
+    /// `frame` -- by find, find_all or TemplateStore::find -- cut their part
+    /// from one conversion of the whole frame, made by the first of them that
+    /// needs it, grey and colour once each. The answers are the same to the
+    /// bit. Worth it only when the searches cover most of the frame: the whole
+    /// of it is converted, however small the part looked at.
+    ///
+    /// The frame must stay as it is while this lives -- not moved, resized or
+    /// grabbed into again -- or the searches see the picture as it was. Other
+    /// frames, and other threads, are not touched. One may be made inside
+    /// another, each for its own frame.
+    class OneFrame {
+    public:
+        explicit OneFrame(const Frame& frame);
+        ~OneFrame();
+        OneFrame(const OneFrame&) = delete;
+        OneFrame& operator=(const OneFrame&) = delete;
+
+        /// The frame and its conversions: defined beside the matching, which
+        /// alone looks inside.
+        struct State;
+
+    private:
+        std::unique_ptr<State> state_;
+    };
 
     /// How alike counts as the same picture.
     ///
@@ -156,6 +200,23 @@ public:
     /// and a machine that has the game has it already.
     bool load_best(const std::string& name_map_ini = {});
 
+    /// load_best's set, one for the whole program.
+    ///
+    /// Every job used to load a set of its own: about 18 MB of pictures each,
+    /// 3 to 9 of them at once, and on a PC with one core a second of reading
+    /// PNGs at each job's start (2026-11-16). Now the first job to ask loads
+    /// it, and every job that asks while someone still holds it gets that
+    /// same one -- so nobody may change it: a job that wants pictures of its
+    /// own puts them in a store of its own. It is loaded again when nobody
+    /// holds it any more, and when a picture in the places load_best reads,
+    /// or the name map, was added, removed or written since: a job starting
+    /// then sees the pictures as they are, as each job's own load did.
+    ///
+    /// Never null. When load_best would fail, an empty store, and the next
+    /// ask tries again. Safe from any thread; two jobs asking at once wait
+    /// for one load rather than making two.
+    static std::shared_ptr<const TemplateStore> shared_best(const std::string& name_map_ini = {});
+
     /// Which source the last `load_best` used, for saying so.
     const std::string& source() const { return source_; }
 
@@ -170,7 +231,8 @@ public:
     /// The commercial client's extracted pictures, if that client is here.
     static std::string client_images();
 
-    std::size_t size() const { return by_name_.size(); }
+    /// How many names it answers to, short names included.
+    std::size_t size() const;
     bool        has(const std::string& name) const;
 
     /// The picture, or null if nothing of that name was loaded.
@@ -205,7 +267,17 @@ public:
     int apply_names(const std::string& name_map_ini);
 
 private:
+    /// The short names back into copies, as apply_names made them before
+    /// 2026-11-16: before a put, which would otherwise change what a short
+    /// name shows when it replaces the picture the name is for.
+    void unalias();
+
     std::unordered_map<std::string, Frame> by_name_;
+    /// Short name -> the name in by_name_ it shows (apply_names). A name,
+    /// not a copy of the picture as before: there are some hundred of them.
+    /// Looked at before by_name_, as a copy put over a picture of the same
+    /// name used to win.
+    std::unordered_map<std::string, std::string> aliases_;
     std::string                            source_;
 };
 

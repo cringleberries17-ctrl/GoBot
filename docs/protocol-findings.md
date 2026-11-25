@@ -788,9 +788,16 @@ after the take-off, or else at the first `0x0027`, `0x0028` or `0x0029`. A cast
 (`0x0031`) is never a landing -- its y holds at the peak -- and `MapTrust`
 takes no standing point in a jump's flight. Each clean flight's gravity,
 2((y1 − y0) − vy0·T)/T², is logged as `g≈` and never fed back. Not yet seen
-live: whether a second ↑ 340 ms after the first gives state 6, and g itself --
-the walk-off's +1.4 a step is 2240 px/s² if it is one step of gravity, GoC's
-model says 2400 (`kJumpUpGravity` brackets 2240..2640).
+live: whether a second ↑ 340 ms after the first gives state 6. g seen
+(2026-11-12): 1905 from one whole flight of GoBot's Ctrl + ↑, the free arc
+~2400 with a ~0.3 s late landing report -- `kJumpUpGravity` brackets
+1900..2400 since 2026.11.12c (2240..2640 before). On that day's client no
+airborne 0x002A carried state 1, 2 or 6: since 2026.11.12c `PacketWorld` and
+the hunter judge a take-off by its vertical speed -- −28 a step or more
+upward high, upward a jump, 0 or down a walk-off; a report pushed up again
+past a free flight's speed a second jump -- and say each unknown state once
+(`Packets: your 0x002A state N (0x...) at vy V -- not 0/1/2/6; judged by its
+vertical speed (...)`).
 
 Evidence:
 

@@ -161,20 +161,29 @@ std::vector<JumpRun> usable_runs(const std::vector<JumpRun>& rs) {
 void test_model() {
     section("Jump-up plan: each key's peak, what it lands on for sure, the second Up's window, g from a flight");
 
+    // 2026.11.12c: gravity 1900..2400 -- both readings of the live flights of
+    // 2026-11-12 (g≈1905 at face value; GoC's 2400 with a late landing
+    // report). Re-derived by wbx_check5.py's bracket: Up 133.3..168.4, Up,Up
+    // 250.3..336.8, Ctrl+Up 432.0..545.7 (until 11.12b: 121..143, 213..286,
+    // 392..463 at 2240..2640).
     const JumpPeak up = jump_peak(JumpKind::Up), uu = jump_peak(JumpKind::UpUp), hi = jump_peak(JumpKind::CtrlUp);
-    check(up.lo == 121 && up.hi == 143 && uu.lo == 213 && uu.hi == 286 && hi.lo == 392 && hi.hi == 463,
-          fmt("peaks above the feet: Up %d..%d, Up,Up %d..%d, Ctrl+Up %d..%d (the prototype's 121.2..142.9, "
-              "213.9..285.7, 392.7..462.9: lowest down, highest up)",
+    check(up.lo == 133 && up.hi == 169 && uu.lo == 250 && uu.hi == 337 && hi.lo == 432 && hi.hi == 546,
+          fmt("peaks above the feet: Up %d..%d, Up,Up %d..%d, Ctrl+Up %d..%d (133.3..168.4, 250.3..336.8, "
+              "432.0..545.7: lowest down, highest up)",
               up.lo, up.hi, uu.lo, uu.hi, hi.lo, hi.hi));
-    check(up.usable() == 109 && up.beyond() == 155 && uu.usable() == 201 && uu.beyond() == 298 &&
-              hi.usable() == 380 && hi.beyond() == 475,
-          fmt("landed on for sure up to %d / %d / %d px, the next floor above more than %d / %d / %d -- the "
-              "prototype's rises to the pixel, its far side a pixel stricter",
+    check(up.usable() == 121 && up.beyond() == 181 && uu.usable() == 238 && uu.beyond() == 349 &&
+              hi.usable() == 420 && hi.beyond() == 558,
+          fmt("landed on for sure up to %d / %d / %d px, the next floor above more than %d / %d / %d -- or a "
+              "platform inside the box (2026.11.12c's band)",
               up.usable(), uu.usable(), hi.usable(), up.beyond(), uu.beyond(), hi.beyond()));
-    // The owner's "Theo GoC": nominal peaks, inside the ranges or above them.
+    // The owner's "Theo GoC": nominal peaks, inside the ranges.
     check(133 >= up.lo && 133 <= up.hi && 280 >= uu.lo && 280 <= uu.hi && 432 >= hi.lo && 432 <= hi.hi &&
               up.usable() < 133 && uu.usable() < 280 && hi.usable() < 432,
           "the owner's 133 / 280 / 432 px (GoC's) lie in the ranges: upper bounds, never planned to");
+    check(std::lround(jump_shortest_arc_s(JumpKind::Up) * 1000.0) == 667 &&
+              std::lround(jump_shortest_arc_s(JumpKind::CtrlUp) * 1000.0) == 1200,
+          fmt("the shortest full arcs: Up %.0f ms, Ctrl+Up %.0f ms (2v/g at 2400)",
+              jump_shortest_arc_s(JumpKind::Up) * 1000.0, jump_shortest_arc_s(JumpKind::CtrlUp) * 1000.0));
     check(kJumpUpSecondAtMs - kJumpUpSecondEarlyMs == 280 && kJumpUpSecondAtMs + kJumpUpSecondLateMs == 450 &&
               kJumpUpCeilingPx == 650 && kJumpUpMarginPx == 24 && kJumpUpRunMinPx == 64 && kJumpUpRunInsetPx == 32 &&
               !kJumpUpGateBand,
@@ -210,8 +219,8 @@ void test_columns() {
     const JumpRules all;
 
     JumpColumn c = judge_column(sp, sz, { 250, 999 }, JumpKind::Up, all);
-    check(c.ok() && c.land_top == 900 && c.rise == 100 && c.headroom == 21 && c.take_top == 1000,
-          fmt("Up from the ground at 250: onto the platform 100 px up, headroom 21 (%s, %d)", jump_no_name(c.why),
+    check(c.ok() && c.land_top == 900 && c.rise == 100 && c.headroom == 33 && c.take_top == 1000,
+          fmt("Up from the ground at 250: onto the platform 100 px up, headroom 33 (%s, %d)", jump_no_name(c.why),
               c.land_top));
     c = judge_column(sp, sz, { 600, 899 }, JumpKind::UpUp, all);
     check(c.ok() && c.land_top == 720 && c.rise == 180,
@@ -219,8 +228,16 @@ void test_columns() {
     c = judge_column(sp, sz, { 600, 899 }, JumpKind::Up, all);
     check(c.why == JumpNo::Short, "a plain Up there reaches nothing: Short");
     c = judge_column(sp, sz, { 600, 999 }, JumpKind::UpUp, all);
+    check(c.ok() && c.land_top == 900 && c.band_top == 720,
+          fmt("Up,Up from the ground under both: the top one 280 px up is in its uncertain band 239..349, a platform "
+              "inside the box -- accepted (2026.11.12c): planned onto 900, a landing up to 720 works (%s, %d, band "
+              "%d)",
+              jump_no_name(c.why), c.land_top, c.band_top));
+    JumpRules no_top;
+    no_top.ceiling_px = 0;
+    c = judge_column(sp, box_of(600, 899, 0, 800, 1500, 1100), { 600, 999 }, JumpKind::UpUp, no_top);
     check(c.why == JumpNo::Ambiguous && c.bad_top == 720,
-          fmt("Up,Up from the ground under both: the top one 280 px up is in its uncertain band 202..298 -- "
+          fmt("the same with the box's top under it (no ceiling guard, a test): a band floor outside the box -- "
               "Ambiguous (%s, %d)",
               jump_no_name(c.why), c.bad_top));
     c = judge_column(sp, sz, { 600, 999 }, JumpKind::CtrlUp, all);
@@ -250,7 +267,10 @@ void test_columns() {
     band.flat(300, 700, 870, 1);
     const GameMapBook::Page ap = band.page("t90_s4");
     c = judge_column(ap, sz, { 500, 999 }, JumpKind::Up, all);
-    check(c.why == JumpNo::Ambiguous && c.bad_top == 870, "a floor 130 px up, in Up's band 110..155: Ambiguous");
+    check(c.why == JumpNo::Short,
+          fmt("a floor 130 px up, in Up's band 122..181 and inside the box: accepted, but nothing under it reached "
+              "for sure -- Short (%s)",
+              jump_no_name(c.why)));
     c = judge_column(ap, sz, { 500, 999 }, JumpKind::UpUp, all);
     check(c.ok() && c.land_top == 870, "Up,Up lands on it for sure");
 
@@ -458,16 +478,20 @@ void test_t52s2() {
     const HuntZone b810 = box_of(880, 274, 265, 174, 1399, 810);
     const JumpRules all;
 
-    // The runs, against runs05b.py's: Ctrl+Up 663..916 (take-offs 695..884)
+    // The runs, against runs05b.py's -- 2026.11.12c's bracket (1900..2400)
+    // and its column rule (the take-off's own slope no floor above, platforms
+    // in the band inside the box accepted), re-derived by wbx_check5.py's
+    // rules: Ctrl+Up from the ground 663..1034 (take-offs 695..1002; 663..916
+    // until 11.12b, the ramp's own slope past 916 taken for a floor above)
     // and 992..1080 (1024..1048); Up,Up 1016..1034 and Ctrl+Up 496..504 narrow.
     const std::vector<JumpRun> runs = jump_runs(p, owner, all);
     const std::vector<JumpRun> use = usable_runs(runs);
     check(use.size() == 2 && use[0].kind == JumpKind::CtrlUp && use[1].kind == JumpKind::CtrlUp &&
-              near(use[0].x0, 663, 4) && near(use[0].x1, 916, 4) && near(use[0].take_l(), 695, 4) &&
-              near(use[0].take_r(), 884, 4) && near(use[1].x0, 992, 4) && near(use[1].x1, 1080, 4) &&
+              near(use[0].x0, 663, 4) && near(use[0].x1, 1034, 4) && near(use[0].take_l(), 695, 4) &&
+              near(use[0].take_r(), 1002, 4) && near(use[1].x0, 992, 4) && near(use[1].x1, 1080, 4) &&
               near(use[1].take_l(), 1024, 4) && near(use[1].take_r(), 1048, 4) && use[0].land_y0 >= 272 &&
               use[0].land_y0 <= 276 && use[1].land_y0 >= 272 && use[1].land_y0 <= 276,
-          "the owner's box: Ctrl+Up from the ground 663..916 (take-offs 695..884) and from the ramp's foot "
+          "the owner's box: Ctrl+Up from the ground 663..1034 (take-offs 695..1002) and from the ramp's foot "
           "992..1080 (1024..1048), both onto the home ledge -- and nothing else usable: " +
               runs_text(runs, false));
     check(std::none_of(use.begin(), use.end(), [](const JumpRun& r) { return r.x0 < 659; }) &&
@@ -479,7 +503,9 @@ void test_t52s2() {
               runs_text(runs, true));
     // 505..638: under ledges A and B, outside the box above: the ceiling guard
     // -- or ledge A's one column of attr 255, at 586,164, in the way up first.
-    int judged = 0, ceiling = 0, blocked = 0;
+    // Since 2026.11.12c the guard reaches only as high as each key does (Up
+    // 245, Up,Up 413): a plain Up or Up,Up there falls short of everything.
+    int judged = 0, ceiling = 0, blocked = 0, short_of = 0;
     std::string other;
     for (int x = 505; x <= 638; ++x)
         for (const MapFloor& f : p.floors_at(x)) {
@@ -491,15 +517,17 @@ void test_t52s2() {
                     ++ceiling;
                 } else if (jc.why == JumpNo::Blocked && jc.bad_x == 586 && jc.bad_top == 164) {
                     ++blocked;
+                } else if (jc.why == JumpNo::Short && k != JumpKind::CtrlUp) {
+                    ++short_of;
                 } else if (other.size() < 200) {
                     other += fmt(" %s at %d,%d: %s;", jump_kind_name(k), x, f.y - 1, jump_no_name(jc.why));
                 }
             }
         }
-    check(judged > 0 && ceiling + blocked == judged && blocked == 28,
+    check(judged > 0 && ceiling + blocked + short_of == judged && blocked == 28,
           fmt("no take-off of any key at 505..638, on the ground or the ledge: of %d, %d refused by the ceiling "
-              "guard, %d by ledge A's attr-255 column at 586 (Blocked, first)",
-              judged, ceiling, blocked) +
+              "guard, %d by ledge A's attr-255 column at 586 (Blocked, first), %d Up or Up,Up short of everything",
+              judged, ceiling, blocked, short_of) +
               other);
     // The ledge's 1-px hole at 711: a take-off under it lands on the column before.
     const JumpColumn under = judge_column(p, owner, { 711, stand_y(p, 711, 579) }, JumpKind::CtrlUp, all);
@@ -511,7 +539,7 @@ void test_t52s2() {
     JumpColumn c = judge_column(p, owner, { 880, 634 }, JumpKind::CtrlUp, all);
     check(judge_column(p, owner, { 880, 634 }, JumpKind::Up, all).why == JumpNo::Short &&
               judge_column(p, owner, { 880, 634 }, JumpKind::UpUp, all).why == JumpNo::Short && c.ok() &&
-              c.land_top == 275 && c.rise == 360 && c.headroom == 32,
+              c.land_top == 275 && c.rise == 360 && c.headroom == 72,
           fmt("880,634 under the home: Up and Up,Up fall short; Ctrl+Up lands on floor %d, 360 up, headroom %d",
               c.land_top, c.headroom));
     c = judge_column(p, owner, { 600, 579 }, JumpKind::CtrlUp, all);
@@ -519,22 +547,23 @@ void test_t52s2() {
           fmt("600,579: Ctrl+Up refused by the ceiling -- floor %d at x %d, outside the box", c.bad_top, c.bad_x));
 
     // The take-off chosen (plan05b.py: 810 / 696 / -- its trail stops at the
-    // ramp's 1-px hole at 1056, Page::follow walks over it).
+    // ramp's 1-px hole at 1056, Page::follow walks over it). Since 2026.11.12c
+    // Ctrl+Up's lowest peak is 432: 72 px of headroom under the ledge, no
+    // headroom short of kJumpUpHeadroomWantPx -- where it stands.
     JumpNo why = JumpNo::None;
     int px = 0;
     const MapPoint home{ 880, 274 };
     std::optional<JumpPlan> j = plan_jump_to(p, owner, { 880, 634 }, home, all, &why, &px);
-    check(j && j->kind == JumpKind::CtrlUp && near(j->x, 810, 8) && j->land_top >= 272 && j->land_top <= 276 &&
-              near(j->run_l, 663, 4) && near(j->run_r, 916, 4),
-          fmt("from 880,634 to the home: Ctrl+Up at %d (prototype 810: rise 330, headroom 63), feet %d, rise %d, "
-              "headroom %d, run %d..%d",
-              j ? j->x : -1, j ? j->feet_y : -1, j ? j->rise : -1, j ? j->headroom : -1, j ? j->run_l : -1,
+    check(j && j->kind == JumpKind::CtrlUp && j->x == 880 && j->land_top >= 272 && j->land_top <= 276 &&
+              near(j->run_l, 663, 4) && near(j->run_r, 1034, 4) && j->headroom >= kJumpUpHeadroomWantPx,
+          fmt("from 880,634 to the home: Ctrl+Up at %d, where it stands (headroom %d), feet %d, rise %d, run %d..%d",
+              j ? j->x : -1, j ? j->headroom : -1, j ? j->feet_y : -1, j ? j->rise : -1, j ? j->run_l : -1,
               j ? j->run_r : -1));
     JumpRules flat_score;
     flat_score.headroom_weight = 0;
     j = plan_jump_to(p, owner, { 880, 634 }, home, flat_score);
-    check(j && j->x == 880 && j->headroom < 64,
-          fmt("headroom not weighed: 880 itself (%d, headroom %d) -- the weight is what moves it", j ? j->x : -1,
+    check(j && j->x == 880 && j->headroom >= kJumpUpHeadroomWantPx,
+          fmt("headroom not weighed: 880 itself as well (%d, headroom %d) -- nothing short to weigh", j ? j->x : -1,
               j ? j->headroom : -1));
     const MapPoint ledge_mob{ 700, stand_y(p, 700, 273) };
     j = plan_jump_to(p, owner, { 600, 579 }, ledge_mob, all, &why, &px);
@@ -576,16 +605,18 @@ void test_t52s2() {
     // The way back with jumps.
     std::optional<ZoneReturn> r = return_point(p, owner, { 880, 634 }, &all);
     check(r && r->home && r->jumps == 1 && r->falls == 0 && r->jump && r->jump->kind == JumpKind::CtrlUp &&
-              near(r->jump->x, 810, 8) && r->walk_x == r->jump->x && !r->own_floor(),
-          fmt("from 880,634 (04d's walk back ended there): home by one Ctrl+Up at %d, walked to first",
+              r->jump->x == 880 && r->walk_x == r->jump->x && !r->own_floor(),
+          fmt("from 880,634 (04d's walk back ended there): home by one Ctrl+Up at %d, where it stands",
               r && r->jump ? r->jump->x : -1));
     const auto t0 = std::chrono::steady_clock::now();
     r = return_point(p, owner, { 1402, 802 }, &all);
     const long long ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    check(r && r->home && r->jumps == 1 && r->jump && r->jump->kind == JumpKind::CtrlUp && near(r->jump->x, 810, 12) &&
+    // The nearest take-off of the run 695..1002 the walk back into the box
+    // gets to (Closer): about 895 (2026.11.12c; 810 until 11.12b).
+    check(r && r->home && r->jumps == 1 && r->jump && r->jump->kind == JumpKind::CtrlUp && near(r->jump->x, 895, 12) &&
               r->walk_x == r->jump->x && r->jump->walk_px == 1402 - r->jump->x,
-          fmt("from 1402,802, 108 px below the box: left along the ground, then the same Ctrl+Up at %d",
+          fmt("from 1402,802, 108 px below the box: left along the ground, then Ctrl+Up at %d (about 895)",
               r && r->jump ? r->jump->x : -1));
     check(ms < 1500, fmt("that way worked out in %lld ms", ms));
     r = return_point(p, owner, { 300, 531 }, &all);
@@ -601,20 +632,21 @@ void test_t52s2() {
     check(r && !r->home && r->at.x == 992 && r->at.y == 587 && r->own_floor(),
           "and from 1030,563 the ramp's foot, 992,587");
 
-    // The bottom moved to 810: ground -> ramp as well.
+    // The bottom moved to 810: ground -> ramp as well -- since 2026.11.12c by
+    // Up,Up from 1016..1118 (the ramp's own slope no floor above) and by
+    // Ctrl+Up from 1038..1375 (1129..1320 until 11.12b).
     const std::vector<JumpRun> runs810 = jump_runs(p, b810, all);
     const std::vector<JumpRun> use810 = usable_runs(runs810);
-    check(use810.size() == 3 && use810[2].kind == JumpKind::CtrlUp && near(use810[0].x0, 663, 4) &&
-              near(use810[1].x0, 992, 4) && near(use810[2].x0, 1129, 4) && near(use810[2].x1, 1320, 4) &&
-              near(use810[2].take_l(), 1161, 4) && near(use810[2].take_r(), 1288, 4),
-          "the bottom at 810: also Ctrl+Up ground -> ramp 1129..1320 (take-offs 1161..1288): " +
+    check(use810.size() == 4 && use810[0].kind == JumpKind::UpUp && near(use810[0].x0, 1016, 4) &&
+              near(use810[0].x1, 1118, 4) && use810[3].kind == JumpKind::CtrlUp && near(use810[1].x0, 663, 4) &&
+              near(use810[2].x0, 992, 4) && near(use810[3].x0, 1038, 4) && near(use810[3].x1, 1375, 4) &&
+              near(use810[3].take_l(), 1070, 4) && near(use810[3].take_r(), 1343, 4),
+          "the bottom at 810: also Up,Up ground -> ramp 1016..1118 and Ctrl+Up ground -> ramp 1038..1375 "
+          "(take-offs 1070..1343): " +
               runs_text(runs810, false));
-    check(std::none_of(use810.begin(), use810.end(), [](const JumpRun& x) { return x.kind != JumpKind::CtrlUp; }) &&
-              std::any_of(runs810.begin(), runs810.end(),
-                          [](const JumpRun& x) {
-                              return x.kind == JumpKind::UpUp && !x.usable() && x.x0 <= 1030 && x.x1 >= 1060;
-                          }),
-          "Up,Up ground -> ramp about 1016..1076: too narrow -- every run: " + runs_text(runs810, true));
+    check(std::count_if(use810.begin(), use810.end(), [](const JumpRun& x) { return x.kind == JumpKind::UpUp; }) == 1 &&
+              std::none_of(use810.begin(), use810.end(), [](const JumpRun& x) { return x.kind == JumpKind::Up; }),
+          "one Up,Up run usable, no plain Up -- every run: " + runs_text(runs810, true));
 }
 
 // ------------------------------------------------------------------ t53_s2
@@ -637,8 +669,15 @@ void test_t53s2() {
     const JumpRules all;
     const std::vector<JumpRun> runs = jump_runs(p, owner, all);
     const std::vector<JumpRun> raised_runs = jump_runs(p, raised, all);
-    check(usable_runs(runs).empty() && usable_runs(raised_runs).empty(),
-          "no usable run of any key: " + runs_text(runs, true) + " / top at 1020: " + runs_text(raised_runs, true));
+    // 2026.11.12c: in the owner's box still none (the owner's Q3 (a): an Up
+    // that could land above the box's top is refused); with the top raised to
+    // 1020, a plain Up 2359..2441 onto the floor at about 1150 (Up's lowest
+    // peak 133 since 11.12c).
+    const std::vector<JumpRun> raised_use = usable_runs(raised_runs);
+    check(usable_runs(runs).empty() && raised_use.size() == 1 && raised_use[0].kind == JumpKind::Up &&
+              near(raised_use[0].x0, 2359, 4) && near(raised_use[0].x1, 2441, 4),
+          "no usable run of any key in the owner's box: " + runs_text(runs, true) +
+              " / top at 1020, one Up: " + runs_text(raised_runs, true));
     // The way back is 04d's wherever it is the map's.
     bool same = true;
     std::string seen;
@@ -702,6 +741,227 @@ void test_floor_above() {
               below_home ? *below_home : -1, bottom ? *bottom : -1));
 }
 
+// ------------------------------------------------------------ 2026.11.12c
+
+/// t23_s14's bottom stack, made up as the game's file has it at x 1500..1950:
+/// the bottom floor 1811 at 1757 (a platform, rising 0.25 px a column to the
+/// left), platforms at 1468, 1425, 1393 and 1263, the ground 1864 under it all.
+Floors t23_stack() {
+    Floors f(100, 70);
+    f.flat(0, 3199, 1864, 2);
+    f.run(1500, 1950, [](int x) { return 1811 - (1757 - x) / 4; }, 1);
+    f.flat(1604, 1797, 1468, 1);
+    f.flat(1650, 1900, 1425, 1);
+    f.flat(826, 1900, 1393, 1);
+    f.flat(1500, 1900, 1263, 1);
+    return f;
+}
+
+void test_band() {
+    section("Jump-up plan 2026.11.12c: the uncertain band accepted inside the box, the take-off's own slope no floor "
+            "above, the ceiling per key -- t23_s14's bottom, made up");
+    const GameMapBook::Page p = t23_stack().page("t87_s1");
+    const HuntZone owner = box_of(1593, 1262, 740, 1162, 2858, 1586);
+    const HuntZone whole = zone_whole_map(p, owner);
+    const JumpRules all;
+
+    JumpColumn c = judge_column(p, whole, { 1757, 1810 }, JumpKind::CtrlUp, all);
+    check(c.ok() && c.land_top == 1393 && c.band_top == 1263,
+          fmt("Ctrl+Up from the bottom at 1757,1810 over the map: onto 1393 for sure, 1263 (548 up) in its band and a "
+              "platform inside -- accepted (%s, land %d, band %d)",
+              jump_no_name(c.why), c.land_top, c.band_top));
+    JumpRules no_top;
+    no_top.ceiling_px = 0;
+    c = judge_column(p, box_of(1593, 1400, 740, 1300, 2858, 1900), { 1757, 1810 }, JumpKind::CtrlUp, no_top, 0);
+    check(c.why == JumpNo::Ambiguous && c.bad_top == 1263,
+          fmt("the box's top under 1263 (no ceiling guard, a test): a band floor outside it -- Ambiguous (%s, %d)",
+              jump_no_name(c.why), c.bad_top));
+    Floors solid = t23_stack();
+    solid.hole(1500, 1900, 1263);
+    solid.flat(1500, 1900, 1263, 2);
+    c = judge_column(solid.page("t87_s2"), whole, { 1757, 1810 }, JumpKind::CtrlUp, all);
+    check(c.why == JumpNo::Blocked && c.bad_top == 1263, fmt("1263 solid ground: Blocked (%s)", jump_no_name(c.why)));
+    c = judge_column(p, owner, { 1757, 1810 }, JumpKind::CtrlUp, all, 224);
+    check(c.ok() && c.land_top == 1393,
+          fmt("in the owner's box, 224 px under it: its own slope (1805 at x 1733, outside the box) no floor above -- "
+              "not Ceiling (%s)",
+              jump_no_name(c.why)));
+    // The ceiling per key: a floor outside the box 300 px up is out of a plain
+    // Up's reach; Ctrl+Up's 650 px guard keeps it.
+    Floors high(64, 40);
+    high.flat(0, 2047, 1000, 2);
+    high.flat(300, 700, 900, 1);
+    high.flat(300, 700, 700, 1);
+    const GameMapBook::Page hp = high.page("t87_s3");
+    const HuntZone low_top = box_of(500, 899, 0, 800, 1500, 1100);
+    check(judge_column(hp, low_top, { 500, 999 }, JumpKind::Up, all).ok() &&
+              judge_column(hp, low_top, { 500, 999 }, JumpKind::CtrlUp, all).why == JumpNo::Ceiling,
+          "a floor outside the box 300 px up: Up goes (out of its reach, 245); Ctrl+Up refused by the ceiling");
+
+    // The way back from the bottom: Ctrl+Up near where it stands onto 1393,
+    // then Up,Up onto the home's floor -- what the owner did by hand.
+    std::optional<ZoneReturn> r = return_point(p, owner, { 1757, 1810 }, &all);
+    check(r && r->home && r->jumps == 2 && r->jump && r->jump->kind == JumpKind::CtrlUp && r->jump->x >= 1500 &&
+              r->jump->x <= 1760 && near(r->jump->land_top, 1393, 4) && r->jump->band_top == 1263,
+          fmt("from 1757,1810: home by %d jumps, the first %s at x %d onto %d (band to %d)", r ? r->jumps : -1,
+              r && r->jump ? jump_kind_name(r->jump->kind) : "-", r && r->jump ? r->jump->x : -1,
+              r && r->jump ? r->jump->land_top : -1, r && r->jump ? r->jump->band_top : -1));
+    // The area taken when the character is under it (the owner's Q5 of
+    // 2026.11.12c): the relog of 23:47:34 at 1757,1810 -- 224 px under the box.
+    check(kZoneTakeFallen && kZoneTakeBelowPx == 600 &&
+              zone_take(owner, 1757.0f, 1810.0f, false, false) == ZoneTake::Below &&
+              zone_take(owner, 2300.0f, 2300.0f, false, false) == ZoneTake::Wait &&
+              zone_take(box_of(495, 632, 339, 532, 705, 700), 64.0f, 620.0f, false, false) == ZoneTake::Wait &&
+              std::string(zone_take_name(ZoneTake::Below)) == "under it",
+          "zone_take: 224 px under t23_s14's box -- taken (\"under it\"); 714 px under, or 275 px beside t1901_s2's "
+          "-- waits");
+    const ZoneDropRules down{ {}, 150, {} };
+    r = return_point(p, owner, { 1826, stand_y(p, 1826, 1863) }, &all);
+    if (!r) r = return_point(p, owner, { 1826, stand_y(p, 1826, 1863) }, &all, &whole, &down);
+    check(r && r->jump && r->jumps >= 2,
+          fmt("from the ground under it at 1826: a way back, its first leg a jump (%s, %d jumps)",
+              r && r->jump ? jump_kind_name(r->jump->kind) : "-", r ? r->jumps : -1));
+}
+
+/// t88_s1's floors, made up: a ledge of solid ground at 936 to x 1299, the
+/// ground at 1000 from 1300 -- a step of 64 px, as t49_s5's at 2816 -- and a
+/// platform at 584 over 1200..1500, outside the box (as t49_s5's 1287).
+Floors t88_floors() {
+    Floors f(80, 40);
+    f.flat(0, 1299, 936, 2);
+    f.flat(1300, 2559, 1000, 2);
+    f.flat(1200, 1500, 584, 1);
+    return f;
+}
+
+void test_wall_foot() {
+    section("Jump-up plan 2026.11.12c: a step of the ground is a wall, not a pit; Ctrl+Up at its foot onto the step "
+            "(the owner's \"Chỉ Ctrl+↑ tại chỗ\"); a plain Up past the upper bar's landings");
+    const GameMapBook::Page p = t88_floors().page("t88_s1");
+    // The step: followed left from the ground it stops at the foot, never a pit.
+    MapTrail t = p.follow(1500, 999, -1);
+    check(t.step && t.stop && !t.ledge && !t.pts.empty() && t.pts.back().x == 1300 && t.step_x == 1299 &&
+              t.step_top == 936,
+          fmt("follow left from 1500,999: a step at %d (top %d), stopped at x %d -- not a pit", t.step_x, t.step_top,
+              t.pts.empty() ? -1 : t.pts.back().x));
+    t = p.follow(1200, 935, 1);
+    check(t.ledge && !t.step, "the ledge followed right: an ordinary walk-off onto the ground");
+    Floors plat = t88_floors();
+    plat.hole(0, 1299, 936);
+    plat.flat(0, 1299, 936, 1);
+    Floors tall = t88_floors();
+    tall.hole(0, 1299, 936);
+    tall.flat(0, 1299, 700, 2);
+    Floors block = t88_floors();
+    block.hole(0, 1299, 936);
+    block.flat(0, 1299, 936, 5);
+    // A 2-px hole before the step -- no platform over it (the first column on
+    // with any floor is what is looked at).
+    Floors holed(80, 40);
+    holed.flat(0, 1299, 936, 2);
+    holed.flat(1302, 2559, 1000, 2);
+    check(plat.page("t88_s2").follow(1500, 999, -1).ledge && tall.page("t88_s3").follow(1500, 999, -1).ledge &&
+              block.page("t88_s4").follow(1500, 999, -1).ledge && holed.page("t88_s5").follow(1500, 999, -1).step,
+          "a platform past the end, a step 300 px up, attr 5: a pit as before; a 2-px hole before the step: a step");
+    check(p.on_step_lip({ 1301, 935 }) && !p.on_step_lip({ 1306, 935 }) && !p.on_step_lip({ 1301, 999 }),
+          "the step's lip: 1301,935 on it, 1306,935 and 1301,999 not");
+
+    const HuntZone box = box_of(1800, 999, 400, 650, 2400, 1050);
+    const JumpRules all;
+    std::vector<JumpPlan> w = wall_foot_jumps(p, box, { 1800, 999 }, all);
+    check(w.size() == 1 && w[0].wall && w[0].kind == JumpKind::CtrlUp && w[0].x == 1300 && w[0].land_x == 1299 &&
+              w[0].land_top == 936 && w[0].rise == 64,
+          fmt("from 1800,999: one wall-foot Ctrl+Up at x %d onto %d/%d, rise %d", w.empty() ? -1 : w[0].x,
+              w.empty() ? -1 : w[0].land_x, w.empty() ? -1 : w[0].land_top, w.empty() ? -1 : w[0].rise));
+    const std::vector<JumpPlan> legs = jump_legs_from(p, box, { 1800, 999 }, all);
+    check(std::any_of(legs.begin(), legs.end(), [](const JumpPlan& j) { return j.wall && j.land_top == 936; }) &&
+              std::none_of(legs.begin(), legs.end(),
+                           [](const JumpPlan& j) { return !j.wall && j.land_top == 936; }),
+          "jump_legs_from has it -- and no Up or Up,Up onto the ledge");
+    JumpRules reach = all;
+    reach.reach_px = 400;
+    const std::optional<JumpPlan> to = plan_jump_to(p, box, { 1800, 999 }, { 1100, 935 }, reach);
+    check(to && to->wall && to->x == 1300, "a monster on the ledge at 1100: the wall-foot Ctrl+Up");
+    check(wall_foot_jumps(p, box, { 1800, 999 }, kinds_only(kUp | kUpUp)).empty() &&
+              judge_wall_foot(p, box_of(1800, 999, 1250, 650, 2400, 1050), { 1300, 999 }, -1, all).why == JumpNo::Edge &&
+              judge_wall_foot(p, box_of(1800, 999, 400, 940, 2400, 1050), { 1300, 999 }, -1, all).why ==
+                  JumpNo::Outside,
+          "none without Ctrl+Up; the box's left at 1250 (the ledge runs out of it): Edge; its top at 940: Outside");
+    JumpRules learned;
+    learned.refused = [](MapPoint take, int, JumpKind) {
+        return std::abs(take.x - 1301) <= 48 ? JumpNo::Learned : JumpNo::None;
+    };
+    check(wall_foot_jumps(p, box, { 1800, 999 }, learned).empty() &&
+              judge_wall_foot(p, box, { 1301, 999 }, -1, all).ok() &&
+              judge_wall_foot(p, box, { 1306, 999 }, -1, all).why == JumpNo::Foot,
+          "learned at 1301: none; judged at 1301 it goes, at 1306 not at the foot (Foot)");
+    Floors roof = t88_floors();
+    roof.flat(1300, 1320, 940, 2);
+    check(judge_wall_foot(roof.page("t88_s6"), box, { 1300, 999 }, -1, all).why == JumpNo::Blocked,
+          "solid ground 60 px over the foot: Blocked");
+    JumpRules no_wall = all;
+    no_wall.wall_foot = false;
+    check(wall_foot_jumps(p, box, { 1800, 999 }, no_wall).empty(), "wall-foot jumps off for the run: none");
+    const HuntZone ledge_home = box_of(1100, 935, 400, 650, 2400, 1050);
+    const std::optional<ZoneReturn> r = return_point(p, ledge_home, { 1800, 999 }, &all);
+    check(r && r->home && r->jumps == 1 && r->jump && r->jump->wall && r->walk_x == 1300,
+          fmt("the home on the ledge, from 1800,999: one wall-foot jump, walked to x %d", r ? r->walk_x : -1));
+
+    // The plain Up past the upper bar: where it may come down.
+    check(bar_up_landings(p, box, { 1310, 999 }, all).ok() && bar_up_landings(p, box, { 1301, 999 }, all).ok(),
+          "Up at the step's foot: the ledge solid -- a bump, no landing -- ok");
+    Floors plats(64, 40);
+    plats.flat(0, 2047, 1000, 2);
+    plats.flat(300, 700, 932, 1);
+    plats.flat(300, 700, 876, 1);
+    const GameMapBook::Page pp = plats.page("t87_s4");
+    const HuntZone pbox = box_of(500, 999, 0, 800, 1500, 1100);
+    const JumpColumn b1 = bar_up_landings(pp, pbox, { 500, 999 }, all);
+    const JumpColumn b2 = bar_up_landings(pp, box_of(500, 999, 0, 900, 1500, 1100), { 500, 999 }, all);
+    check(b1.ok() && b1.land_top == 1000 && b2.why == JumpNo::Outside && b2.bad_top == 876,
+          fmt("platforms 68 and 124 px up inside the box: ok; the box's top under the upper one: Outside at %d",
+              b2.bad_top));
+    Floors head(64, 40);
+    head.flat(0, 2047, 1000, 2);
+    head.flat(300, 700, 950, 2);
+    JumpRules up_learned;
+    up_learned.refused = [](MapPoint take, int, JumpKind k) {
+        return k == JumpKind::Up && std::abs(take.x - 500) <= 48 ? JumpNo::Learned : JumpNo::None;
+    };
+    check(bar_up_landings(head.page("t87_s5"), pbox, { 500, 999 }, all).ok() &&
+              bar_up_landings(pp, pbox, { 520, 999 }, up_learned).why == JumpNo::Learned,
+          "solid ground 50 px up: a bump, ok; a learned no-Up within 48 px: Learned");
+}
+
+/// t49_s5's own floors (copies in build\handoff\drop\testdata): its step at
+/// 2816, and the wall-foot jump the owner makes there.
+void test_t49s5() {
+    section("Jump-up plan 2026.11.12c on t49_s5's own floors: the step at 2816 a wall, Ctrl+Up at its foot onto 1639");
+    const std::string data = game_data();
+    if (data.empty() || !path_exists(data + "\\Map\\t49_s5.map")) {
+        skip("no copy of the game's t49_s5.map here (build\\handoff\\drop\\testdata): the step at 2816\n");
+        return;
+    }
+    GameMapBook book(data);
+    const std::shared_ptr<const GameMapBook::Page> page = book.get("t49_s5");
+    check(page != nullptr, "t49_s5 reads");
+    if (!page) return;
+    const GameMapBook::Page& p = *page;
+    const HuntZone owner = box_of(2836, 1702, 1985, 1455, 3720, 1846);
+    const MapTrail t = p.follow(2836, 1702, -1);
+    check(t.step && t.step_top == 1639 && !t.pts.empty() && t.pts.back().x == 2816,
+          fmt("left from 2836,1702: a step at the foot x %d, its top %d", t.pts.empty() ? -1 : t.pts.back().x,
+              t.step_top));
+    check(walk_stays_in(p, owner, { 2836, 1702 }, -1, 96).ok && p.follow(2800, 1638, 1).ledge,
+          "the walk left toward it stays in the area; the ledge followed right is a walk-off");
+    const std::vector<JumpPlan> legs = jump_legs_from(p, owner, { 2836, 1702 }, JumpRules{});
+    check(std::any_of(legs.begin(), legs.end(),
+                      [](const JumpPlan& j) {
+                          return j.wall && j.x == 2816 && j.land_x == 2815 && j.land_top == 1639;
+                      }),
+          fmt("from 2836,1702: the wall-foot Ctrl+Up at 2816 onto 1639 (%zu legs)", legs.size()));
+}
+
 } // namespace
 
 void test_jump_plan(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -713,4 +973,7 @@ void test_jump_plan(void (*check_fn)(bool, const std::string&), void (*section_f
     test_t52s2();
     test_t53s2();
     test_floor_above();
+    test_band();
+    test_wall_foot();
+    test_t49s5();
 }

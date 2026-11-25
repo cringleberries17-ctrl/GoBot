@@ -383,7 +383,27 @@ void test_keeper() {
               "the look to end it by: Stalled, 1 minute -- \"" + out.detail + "\"");
         check(!files_in(kept, "stall_*.png").empty(), "and the frame kept, as keeper_debug keeps it");
         check(CrashWatch::next_move(out, true, false) == CrashWatch::Move::Restart,
-              "which the keeper takes the way it takes a crash: a restart, counted against max_restarts");
+              "which the keeper takes the way it takes a crash: a restart, counted in max_restarts' hour");
+        // Counted in the hour like a crash (2026.11.24; a run's number, then a
+        // stop, until then): a stall every 6 minutes, each a restart while
+        // the hour allows one -- 5 in any hour, the others waited out, none
+        // given up.
+        std::vector<std::uint64_t> made;
+        int waited = 0;
+        for (std::uint64_t t = t0; t < t0 + 3 * CrashWatch::kRestartWindowMs; t += 6 * kMinute) {
+            if (CrashWatch::restart_allowed(made, t, 5, CrashWatch::kRestartWindowMs)) made.push_back(t);
+            else ++waited;
+        }
+        bool capped = true;
+        for (const std::uint64_t first : made) {
+            int in_hour = 0;
+            for (const std::uint64_t m : made) in_hour += m >= first && m < first + CrashWatch::kRestartWindowMs ? 1 : 0;
+            capped = capped && in_hour <= 5;
+        }
+        check(capped && made.size() == 15 && waited == 15,
+              fmt("a stall every 6 minutes for 3 hours: %d restarts, at most 5 in any hour, %d waited for -- the "
+                  "watchdog's restarts counted in the hour as a crash's",
+                  static_cast<int>(made.size()), waited));
         CrashWatch::Look again;
         check(!k.judge(dark, true, false, login, no_pages, at + kLookMs, again, {}),
               "and the count starts afresh once it has said so");
@@ -510,6 +530,23 @@ void test_texts() {
               src.find("key_press") == std::string::npos && src.find("type_text") == std::string::npos &&
               src.find("focus_window") == std::string::npos,
           "and clicks, presses and brings forward nothing: the in-game dialog is only read");
+    // The keeper takes the watchdog's word as a crash, through the one count
+    // of restarts -- max_restarts' hour since 2026.11.24, waited out when used
+    // up rather than a stop.
+    const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp");
+    const std::size_t loop_at = gui.find("void GuiApp::keeper_loop() {");
+    const std::size_t stall_at =
+        loop_at == std::string::npos ? loop_at
+                                     : gui.find("if (wake == KeeperWake::Stalled) move = CrashWatch::Move::Restart;", loop_at);
+    const std::size_t counted_at =
+        stall_at == std::string::npos
+            ? stall_at
+            : gui.find("if (!cold && !counted && !keeper_take_restart(watch_settings)) {", stall_at);
+    const std::size_t hour_at =
+        gui.find("CrashWatch::restart_spaced(keeper_restart_times_, now, watch_settings.max_restarts");
+    check(counted_at != std::string::npos && hour_at != std::string::npos,
+          "gui_app.cpp: a stall is a Restart before keeper_take_restart counts it, in max_restarts' hour "
+          "(CrashWatch::restart_spaced since the 2026.11.24 review), as a crash is");
 #endif
 }
 

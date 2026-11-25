@@ -2,6 +2,7 @@
 
 #include "gobot/config.hpp"
 #include "gobot/input_manager.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -57,6 +58,11 @@ namespace gobot {
 /// indistinguishable from an attack on that server, and would be treated as
 /// one. Something that a retry cannot get past -- the sign-in form, a missing
 /// picture, a launcher that is not where the file says -- stops it at once.
+/// One exception, the owner's (2026.11.13b): a message of the game's own with
+/// only Xác Nhận under it -- "Tài khoản đã bị chặn" after Kết Nối, as players
+/// meet it -- is closed and Kết Nối pressed again at once, as often as it
+/// comes, none of it counted as an attempt (`messages_closed`). F12 and DỪNG
+/// still stop it.
 ///
 /// And nothing is clicked that would not land where it is meant to. A page is
 /// found in a picture the window draws of itself, which it draws just the
@@ -93,6 +99,7 @@ public:
         Channel,            ///< pick a channel
         ConnectAgain,       ///< "Kết Nối" once more
         Character,          ///< pick the character
+        Message,            ///< close the game's message after Kết Nối, and connect again (2026.11.13b)
         EndClient,          ///< end a game stuck on a screen nobody knows
         InWorld,            ///< the HUD is up: done
         Blocked,            ///< a person is needed
@@ -126,6 +133,7 @@ public:
         World,              ///< a character was picked and never arrived
         Covered,            ///< another window stayed over the place to click
         BadPoint,           ///< a place to click is off its window: an offset in login.ini
+        Message,            ///< the game's message would not close on its Xác Nhận (2026.11.13b)
     };
 
     /// Whether another attempt could get past it. The ones that cannot -- the
@@ -180,6 +188,19 @@ public:
     static const char* pick_name(Pick p);
     static Pick pick_from(const std::string& word, Pick fallback);
 
+    /// Pick::Slot on a game of another size than the 1024x768 its offsets
+    /// were measured on (2026.11.13c): where its slots are counted from --
+    /// `slot_anchor` in the page's section of configs/login.ini, so that a
+    /// picture kept of the screen can be acted on without a new GoBot
+    /// (slot_layout_for).
+    enum class SlotAnchor {
+        Auto,       ///< by where the picture is found (slot_layout)
+        Picture,    ///< the offsets from the picture, wherever it is
+        Centre,     ///< from the middle of the game, wherever the picture is
+    };
+    static const char* slot_anchor_name(SlotAnchor a);
+    static SlotAnchor slot_anchor_from(const std::string& word, SlotAnchor fallback);
+
     /// The most a page is waited for. A wait read from the file is held to
     /// it, so a number typed one digit too long cannot run the clock over.
     static constexpr int kMaxWaitS = 600;
@@ -230,6 +251,10 @@ public:
         /// "nobody has counted", which is the honest answer for a list whose
         /// length depends on the account; the index is then used as given.
         int         row_count = 0;
+
+        /// Pick::Slot -- where the slots are counted from on a game that is
+        /// not 1024x768 (SlotAnchor). Written to the file for a slot page only.
+        SlotAnchor  slot_anchor = SlotAnchor::Auto;
 
         bool identified() const { return !picture.empty(); }
     };
@@ -292,6 +317,15 @@ public:
         bool  heal_on_arrival = true;
         std::uint32_t heal_hp_key = 0;
         std::uint32_t heal_mp_key = 0;
+
+        /// [Login] move_game_to_corner (2026.11.14): once a crossing has
+        /// logged in, the game's window is moved to the top-left corner of
+        /// the screen it is on (corner_place) -- the owner: "Mặc định sẽ kéo
+        /// lên góc trên bên trái đi", "chỉ kéo lên sau khi auto login thôi".
+        /// Never at any other time, never resized, never a minimised or Full
+        /// Mode game. Only after a run that did something to log in. On as
+        /// shipped.
+        bool  move_to_corner = true;
 
         std::vector<Page> pages = default_pages();
 
@@ -518,6 +552,67 @@ public:
     /// clicked on the panel itself when it is found, and by the title's
     /// offsets only when it is not.
     static constexpr const char* kChannelPanel = "channel_dialog";
+
+    /// A message of the game's own with only Xác Nhận under it, on a page of
+    /// the game (2026.11.13b): "Tài khoản đã bị chặn" after Kết Nối, as players
+    /// meet it -- the owner: "cần ấn nút xác nhận ở dialog này rồi thực hiện
+    /// login lại", at once and as often as it comes. The client has one
+    /// message box (Ui\Common\Dialog_Message.spr, its Xác Nhận btn_Ok), the
+    /// one bag::lone_ok knows in the world -- grabbed/dialog_ok is its frame 0
+    /// -- so it is looked for the same way: the label cut from the pair's
+    /// picture, the box's frame right of it and under it, and no dialog of two
+    /// buttons up; seen on kMessageLooks looks in one place. Not a picture of
+    /// it on the login screen: none has been seen yet.
+    static constexpr const char* kMessageNotice = "grabbed/dialog_ok";
+    static constexpr const char* kMessageButtons = "grabbed/confirm_button";
+    /// The question's own drawing of the pair, which find_dialogs also knows a
+    /// dialog of two buttons by.
+    static constexpr const char* kMessageAsk = "grabbed/del_item_confirm_1";
+    static constexpr int kMessageLooks = 2;
+    /// Its Xác Nhận clicked at most this many times, each looked at for its
+    /// share of react_ms() -- never less than kMessageGoneMs -- to go, and the
+    /// last until react_ms() from the first click (2026-11-15, the owner's 30
+    /// s for slow PCs); one that stays ends the attempt (Why::Message).
+    static constexpr int kMessageClicks = 3;
+    static constexpr int kMessageGoneMs = 2500;
+    /// The pointer put this far under the label after each click, off the
+    /// box -- whose frame runs about 20 px under the label -- so its button
+    /// is not lit while it is looked at.
+    static constexpr int kMessageParkPx = 50;
+    /// Closed: Kết Nối looked for again after this -- the owner: "Thử lại
+    /// ngay, không giới hạn".
+    static constexpr int kMessagePauseMs = 1500;
+    /// The message in `game`: true, `label` its Xác Nhận's label, the middle of
+    /// which is clicked. False with the pictures missing: nothing changes then.
+    static bool message_in(const Frame& game, const TemplateStore& store, ScreenRect* label = nullptr);
+    /// Messages closed by the last run(), each followed by Kết Nối again.
+    int messages_closed() const { return messages_closed_.load(); }
+
+    /// Where the game's window goes once a crossing has logged in
+    /// (2026.11.14, Settings::move_to_corner): the top-left corner of the
+    /// work area -- the screen less its taskbar -- of the screen it is on.
+    /// Its visible frame there when the game's picture (its client) then
+    /// fits that area whole; otherwise the client itself in the corner, the
+    /// title bar pushed off the work area -- 1280x720 on a 768-row screen with
+    /// the taskbar shown -- which shows the most of the picture there is
+    /// room for (the review: the frame in the corner put rows past the
+    /// screen's bottom, black in every capture). Never a minimised or a
+    /// maximised game, nor one whose picture already covers its whole screen
+    /// (Full Mode, or a window put there). In screen pixels, the frame as
+    /// Windows draws it (not its invisible resize borders).
+    struct CornerPlace {
+        bool        move = false;           ///< false: left where it is, `why`
+        int         x = 0, y = 0;           ///< the visible frame's new top-left
+        bool        client_fits = false;    ///< the game's picture wholly in the work area there
+        bool        title_hidden = false;   ///< the client in the corner, the title bar above it
+        const char* why = "";
+    };
+    static CornerPlace corner_place(const ScreenRect& frame, const ScreenRect& client, const ScreenRect& work,
+                                    const ScreenRect& monitor, bool caption, bool minimised,
+                                    bool maximised = false);
+    /// The last run() moved the game's window (move_to_corner): for the GUI,
+    /// to move its own window off the game when the game now lies under it.
+    bool moved_to_corner() const { return moved_to_corner_.load(); }
     /// The part of that picture the panel is looked for by: its column of
     /// labels, none of the words the channels' states are written in, which
     /// change. Measured on the dialog's own picture, 360x320.
@@ -556,6 +651,155 @@ public:
     static void channel_row_point(const ScreenRect& panel, int index, int& x, int& y);
     /// Whether row `index` of the panel at `panel` is lit: the one chosen.
     static bool channel_row_lit(const Frame& game, const ScreenRect& panel, int index);
+
+    /// Where a page was found in a picture, and how.
+    struct PageHit {
+        bool       found = false;
+        ScreenRect at;
+        float      score = 0.0f;
+        bool       by_panel = false;    ///< `at` is the channel list's panel, not the page's picture
+        /// The character select found by the top kCharStartRows of its
+        /// picture -- "Bắt Đầu Game" -- the rest of it past the bottom of the
+        /// frame (2026.11.13c); `at` is still the whole picture's place.
+        bool       by_start = false;
+    };
+    /// Page `page` in `frame`, by `store`'s pictures: its picture anywhere in
+    /// the frame; for the channel list, its panel when the title is not found;
+    /// for the character select on a game that is not 1024x768, its "Bắt Đầu
+    /// Game" half when the whole picture is cut off by the frame's bottom edge
+    /// (2026.11.13c, the owner: "1080 x 768, 1280 x 720, 1366 x 768") -- taken
+    /// only when that half runs past no edge, the rest does, and the Kết Nối
+    /// bar is not in the same frame: a "Bắt Đầu Game" taken from the Kết Nối
+    /// page would have Kết Thúc clicked. The one lookup the crossing and the
+    /// keeper's look at a hung game (login_page_up) both go by.
+    static PageHit page_found(const Page& page, const Frame& frame, const TemplateStore& store);
+    /// How many rows from the top of select_char_indicator (169x99) are its
+    /// "Bắt Đầu Game" button, and how alike they have to be alone.
+    static constexpr int   kCharStartRows = 50;
+    static constexpr float kCharStartScore = 0.85f;
+
+    /// The character slots on a game of another size (2026.11.13c).
+    ///
+    /// The slots were measured on a 1024x768 game, at offsets from the
+    /// picture of "Bắt Đầu Game" (842,655 there). The login's art is a
+    /// 1024x768 canvas, and how the game lays it out on a wider or shorter
+    /// client has not been seen. The picture's place says what it can: where
+    /// the 1024x768 block centred, or left in the top-left corner, puts it,
+    /// the stage moved with the buttons and the offsets hold (Picture); where
+    /// the buttons pinned to the bottom-right corner put it, the stage is
+    /// taken to be in the middle of the game (Centre); anywhere else the
+    /// offsets, as before, and a warning (Unknown).
+    ///
+    /// A bet, not a proof, and in one layout worse than before: the whole
+    /// 1024x768 block anchored to the bottom-right corner puts the picture
+    /// at the very place the pinned buttons do (1184,655 on 1366x768,
+    /// 1098,607 on 1280x720), the stage moving with it -- the offsets would
+    /// be right there, and Centre clicks the empty stage, so Bắt Đầu Game
+    /// starts whichever character the game had chosen. The corner cannot tell
+    /// the two apart; Centre bets on the buttons pinned and the stage centred.
+    /// The picture kept of the screen (login_*_character_<W>x<H>.png) settles
+    /// it, and the page's slot_anchor in login.ini (picture, centre) then
+    /// sets a player right without a new GoBot. Nothing checks which
+    /// character is chosen before Bắt Đầu Game.
+    enum class SlotLayout { Picture, Centre, Unknown };
+    static const char* slot_layout_name(SlotLayout l);
+    static constexpr int kMeasuredW = 1024;
+    static constexpr int kMeasuredH = 768;
+    static constexpr int kCharPicX = 842;
+    static constexpr int kCharPicY = 655;
+    static constexpr int kCharLayoutSlack = 12;
+    /// Which, for the character select's picture at `at` in a frame
+    /// `frame_w` x `frame_h`, by its place alone. Always Picture on a
+    /// 1024x768 frame.
+    static SlotLayout slot_layout(const ScreenRect& at, int frame_w, int frame_h);
+    /// Which `page` is clicked by: its slot_anchor when that is Picture or
+    /// Centre, at every size; Auto: slot_layout.
+    static SlotLayout slot_layout_for(const Page& page, const ScreenRect& at, int frame_w, int frame_h);
+    /// Where slot `choice` (from 0) is clicked: by `page`'s row_dx, row_dy and
+    /// row_step, from the picture (Picture, Unknown) or from the frame's middle
+    /// as they sat on 1024x768 (Centre) -- by slot_layout_for.
+    static void slot_point(const Page& page, const ScreenRect& at, int frame_w, int frame_h, int choice, int& x,
+                           int& y);
+    /// The character select's slot click as the crossing makes it: from the
+    /// page found at `at` in a picture `found_w` x `found_h` (await's,
+    /// found_w_ and found_h_; 0 when none was recorded, taken as 1024x768).
+    struct SlotClick {
+        int        x = 0;
+        int        y = 0;
+        int        frame_w = kMeasuredW;
+        int        frame_h = kMeasuredH;
+        SlotLayout layout = SlotLayout::Picture;
+        bool       other_size = false;     ///< not 1024x768: the screen is kept once a crossing
+    };
+    static SlotClick slot_click(const Page& page, const ScreenRect& at, int found_w, int found_h, int choice);
+
+    /// Shown as a fault from this many rows or columns: a taskbar set to hide
+    /// itself leaves kHiddenBarPx at the edge, which lies_over passes over.
+    static constexpr int kFitSlackPx = 3;
+    /// Whether the game's client area is all on the screen, with nothing of
+    /// Windows' taskbar over it (2026.11.13c). Frames of this game are read
+    /// off the screen on most machines -- PrintWindow draws it blank -- so
+    /// rows past the screen's edge read black and a taskbar over the game is
+    /// read as the game: the hotbar's potion counts, the chat bar and the
+    /// chat's lines sit along the bottom, the HUD in the top-left corner, and
+    /// a 1366x768 game in a window on a screen 768 px tall has its bottom 31
+    /// px past the edge and 40 more under the taskbar.
+    struct Fit {
+        Box  client;                ///< the client area on the desktop
+        int  hidden_bottom = 0;     ///< rows at the bottom off every screen or under a taskbar
+        int  hidden_top = 0;        ///< rows at the top, of those above them
+        int  hidden_right = 0;      ///< columns at the right, of the rows seen
+        int  hidden_left = 0;       ///< columns at the left, of those
+        /// Why, for the edge said (fit_reason: the bottom, else the top, the
+        /// right, the left -- the first hidden past kFitSlackPx): past a
+        /// screen's edge, under a taskbar, and how thick that taskbar is.
+        bool off_screen = false;
+        bool taskbar = false;
+        int  taskbar_px = 0;
+        int  screen_w = 0;          ///< the screen the client's top-left is on
+        int  screen_h = 0;
+        int  width() const { return static_cast<int>(client.right - client.left); }
+        int  height() const { return static_cast<int>(client.bottom - client.top); }
+        /// Rows or columns hidden past kFitSlackPx: shown as a fault.
+        bool hides() const {
+            return hidden_bottom > kFitSlackPx || hidden_top > kFitSlackPx || hidden_right > kFitSlackPx ||
+                   hidden_left > kFitSlackPx;
+        }
+        bool same(const Fit& o) const {
+            return hidden_bottom == o.hidden_bottom && hidden_top == o.hidden_top &&
+                   hidden_right == o.hidden_right && hidden_left == o.hidden_left && off_screen == o.off_screen &&
+                   taskbar == o.taskbar;
+        }
+    };
+    /// The rule, with no window of anybody's: rows from the bottom up and
+    /// from the top down, then columns from the right and from the left of
+    /// the rows seen, each hidden while none of it is on `screens` or a box
+    /// of `taskbars` lies over it (lies_over, a taskbar's strip of
+    /// kHiddenBarPx left out) -- a taskbar lying along an edge for rows, one
+    /// standing up the side for columns.
+    static Fit fit_of(const Box& client, const std::vector<Box>& screens, const std::vector<Box>& taskbars);
+    /// The same for the game's window now: its client area, the screens, and
+    /// the taskbars drawn above it -- one under a game in Full Mode is not
+    /// over it. Other windows over it are not asked here.
+    static Fit game_fit(void* window);
+    /// The Vietnamese for a Fit with rows or columns hidden: which, what that
+    /// stops, and the cure worked out from the sizes. Empty when nothing is
+    /// hidden past kFitSlackPx. `read_off_screen` false -- the game draws
+    /// itself for GoBot (PrintWindow), so what is hidden is still read --
+    /// says that instead of what stops.
+    static std::string fit_advice(const Fit& fit, bool read_off_screen = true);
+    /// The same, short, for one feature's line: why `what` cannot be read.
+    static std::string fit_reason(const Fit& fit, const std::string& what);
+    /// Said after the login's own reason for a page of the game never found
+    /// (Connect, Character) while the bottom of the game was hidden on the
+    /// screen it was read off: the buttons there -- Kết Nối, Bắt Đầu Game --
+    /// read black or as the taskbar. Empty otherwise.
+    static std::string fit_note(Why why, const Fit& fit);
+
+    /// The Vietnamese said after the login's own reasons when Windows
+    /// enlarges the game -- its pages, found by pictures taken at 100%, are
+    /// then not found (2026.11.13c).
+    static std::string game_scale_note(int percent);
 
     /// Nothing is up. See `furthest_up`.
     static constexpr std::size_t kNone = static_cast<std::size_t>(-1);
@@ -643,6 +887,14 @@ public:
         std::function<bool(const std::string&)>    running;   ///< is that program running
         std::function<bool(const std::string&)>    start;     ///< start that program
         std::function<void(void*)>                 minimise;  ///< put that window away
+        /// The pointer to a client point, nothing clicked: off the game's
+        /// message after its Xác Nhận is clicked (2026.11.13b). Pretend hands
+        /// without one move nothing.
+        std::function<void(int, int)>              move;
+        /// The game's window moved, its visible frame's top-left to a screen
+        /// point, nothing resized (2026.11.14, move_to_corner). Pretend hands
+        /// without one move no window.
+        std::function<bool(void*, int, int)>       place;
     };
     void set_hands(Hands h) { hands_ = std::move(h); }
 
@@ -665,6 +917,19 @@ public:
     /// Give it a page key from configs/login.ini -- `channel_list`, say. An
     /// empty string, the default, means run the whole crossing.
     void halt_before(std::string page_key) { halt_at_ = std::move(page_key); }
+
+    /// How long, from GoBot's first click, the game is watched for that click
+    /// to show -- the channel row taken, the message's Xác Nhận closing it --
+    /// before the attempt is given up: kReactMs, the owner's 30 s (2026-11-15:
+    /// "khi GoBot thực hiện thao tác, sẽ có thêm 30 giây chờ phản ứng. Nếu màn
+    /// hình phản ứng luôn thì thực hiện tiếp bước tiếp theo, còn nếu màn hình
+    /// không phản ứng gì thì sẽ dừng xử lý"). The few clicks those controls get
+    /// are spread over it, and the crossing goes on at the first look that
+    /// shows the click took. The crossing's naps are on the real clock, so a
+    /// test that means to see a click never taken sets this short rather than
+    /// sitting out 30 s; nothing else does.
+    void set_react_ms(int ms) { react_ms_ = ms > 0 ? ms : kReactMs; }
+    int react_ms() const { return react_ms_; }
 
     /// Ask it to stop at the next opportunity -- a click already on its way
     /// included: one asked for after the page was found is not clicked, nor
@@ -714,6 +979,7 @@ private:
         Barred,     ///< its window may not be touched now: go on from `later`
         Stopped,    ///< something a person must see to; `why_` says what
         TimedOut,   ///< not seen for its wait_s; this attempt is over
+        Message,    ///< the game's message is up, its label at `found` (2026.11.13b)
     };
 
     /// How one click went.
@@ -758,26 +1024,28 @@ private:
     bool   up_anywhere(std::size_t index, const Frame (&frames)[3]) const;
     /// Whether any page drawn on the game is in `frame`.
     bool   game_page_in(const Frame& frame) const;
-    /// Page `index` in `frame`: its picture, or -- for the channel list -- its
-    /// panel when the title is not found.
-    struct PageHit {
-        bool       found = false;
-        ScreenRect at;
-        float      score = 0.0f;
-        bool       by_panel = false;    ///< `at` is the channel list's panel, not the page's picture
-    };
+    /// Page `index` in `frame`: page_found, by this crossing's pictures.
     PageHit page_in(std::size_t index, const Frame& frame) const;
     /// The channel list's panel in `frame`, when the pictures have it.
     PanelHit panel_in(const Frame& frame) const;
     /// The channel row clicked, and looked at until it took -- the list gone,
-    /// or the row lit -- clicked again if not, a few times; NotTaken when it
-    /// never did, for Kết Nối would then join whichever channel the game has
+    /// or the row lit -- clicked again if not, a few times spread over
+    /// react_ms() from the first click; NotTaken when it never did in that
+    /// time, for Kết Nối would then join whichever channel the game has
     /// chosen, not the player's; `why_` then says which. The panel is looked
     /// for afresh; `by_panel` says the page was found by it, not by its
     /// picture. `x`,`y` on entry the point for the first row by the page's
     /// offsets from its picture -- used only when there is no panel -- on
     /// return the point last clicked or held.
     Click  choose_channel(const Page& page, bool by_panel, int choice, int& x, int& y);
+    /// The game's message closed (2026.11.13b): its Xác Nhận clicked in the
+    /// middle of `label`, and the game looked at until the message is gone on
+    /// two looks -- clicked again if not, kMessageClicks times spread over
+    /// react_ms() from the first click. NotTaken when it stays that long.
+    Click  close_message(ScreenRect label);
+    /// Settings::move_to_corner, after a crossing that logged in: the game's
+    /// window put where corner_place says, and said.
+    void   move_to_corner();
     /// A picture of the game, kept in the debug folder as login_<stamp>_<what>.png.
     void   keep_frame(const std::string& what);
     /// The landmark set or loaded for this crossing -- loaded the first time
@@ -836,6 +1104,7 @@ private:
 
     Settings           settings_;
     std::string        halt_at_;
+    int                react_ms_ = kReactMs;    ///< see set_react_ms
     TemplateStore*     store_ = nullptr;
     Frame              landmark_;               ///< see set_landmark
     bool               landmark_loaded_ = false;
@@ -855,6 +1124,31 @@ private:
     std::string        debug_dir_;              ///< see set_debug_dir
     /// The last page await() found was the channel list, found by its panel.
     bool               found_by_panel_ = false;
+    /// The size of the picture of the game the last page was found in, for
+    /// the character slots (slot_point), and whether a picture of the
+    /// character select at a size other than 1024x768 has been kept this
+    /// crossing (2026.11.13c).
+    int                found_w_ = 0;
+    int                found_h_ = 0;
+    bool               character_kept_ = false;
+    /// How large Windows shows the game, in percent, when it enlarges it; 0
+    /// when it does not or nobody has looked (2026.11.13c). Asked each time
+    /// the game is pictured for real.
+    int                game_scale_pct_ = 0;
+    /// How much of the game was on the screen as it was last read off it
+    /// (game_fit; empty when it drew itself, or nobody has looked), for
+    /// advice()'s fit_note -- asked as game_scale_pct_ is (2026.11.13c).
+    Fit                login_fit_{};
+    /// The game's message (2026.11.13b): closed this run, read off the GUI's
+    /// thread for its line; and await()'s looks at one in a place.
+    std::atomic<int>   messages_closed_{0};
+    int                message_looks_ = 0;
+    ScreenRect         message_at_;
+    /// This run did something to log in -- clicked, started VTCZone -- so a
+    /// success is a login, and the game's window may be moved (2026.11.14,
+    /// the review: "in the world after all" with nothing clicked is none).
+    bool               acted_ = false;
+    std::atomic<bool>  moved_to_corner_{false};
     std::function<bool()> end_client_;
     int                end_cooldown_s_ = 15;
 

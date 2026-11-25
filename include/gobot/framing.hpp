@@ -324,8 +324,8 @@ FrameScanResult extract_datagram(const FramingSpec& spec,
 /// defaults to 13 (see FramingSpec::inner_offset) so that a config written
 /// before it existed unwraps 0x0081 too.
 ///
-/// One reader for gobot_sniff, gobot_cli and the tests, so that all of them
-/// frame a stream the same way.
+/// One reader for gobot_sniff, a capture file and the tests, so that all of
+/// them frame a stream the same way.
 FramingSpec load_framing(const std::string& path, bool& found,
                          const char* section = "Framing");
 

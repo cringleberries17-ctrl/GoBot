@@ -11,15 +11,9 @@
 #include "gobot/capture_file.hpp"
 #include "gobot/framing.hpp"
 #include "gobot/front_keeper.hpp"
-#include "gobot/bot_brain.hpp"
-#include "gobot/calibrator.hpp"
-#include "gobot/command_executor.hpp"
 #include "gobot/execution_coordinator.hpp"
-#include "gobot/game_state.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
-#include "gobot/camera_tracker.hpp"
-#include "gobot/field_finder.hpp"
 #include "gobot/hunter.hpp"
 #include "gobot/macro.hpp"
 #include "gobot/map_file.hpp"
@@ -29,21 +23,15 @@
 #include "gobot/net_discovery.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/packet_world.hpp"
-#include "gobot/pathfinder.hpp"
 #include "gobot/protocol_analyzer.hpp"
-#include "gobot/minimap_tracker.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/map_table.hpp"
 #include "gobot/template_matcher.hpp"
-#include "gobot/world_anchor.hpp"
 #include "gobot/mob_detector.hpp"
-#include "gobot/protocol_handler.hpp"
 #include "gobot/tcp_reassembler.hpp"
 #include "gobot/auto_chat.hpp"
 #include "gobot/auto_login.hpp"
 #include "gobot/bag.hpp"
-#include "gobot/dialog_driver.hpp"
-#include "gobot/gatherer.hpp"
 #include "gobot/party.hpp"
 #include "gobot/party_chat.hpp"
 #include "gobot/routine.hpp"
@@ -1144,6 +1132,22 @@ void test_udp_datagrams() {
               "with this machine at both ends, or at neither, only the ports are left, and that "
               "is said");
     }
+    {
+        // How late the capture read the packets (2026.11.12, the Bản đồ tab's
+        // delay): above the quickest of the stretch, whatever stands between
+        // Npcap's clock and Windows'.
+        PacketCapture::DelayMeter m;
+        const std::int64_t apart = 3'600'000'000;   // the two clocks an hour apart
+        m.add(1'000'000, 1'000'000 + apart + 2'000);
+        m.add(2'000'000, 2'000'000 + apart + 2'000);
+        m.add(3'000'000, 3'000'000 + apart + 602'000);
+        const PacketCapture::ReadDelay d = m.take();
+        const PacketCapture::ReadDelay none = m.take();
+        check(d.packets == 3 && d.avg_ms > 199.99 && d.avg_ms < 200.01 && d.max_ms > 599.99 && d.max_ms < 600.01 &&
+                  none.packets == 0 && none.avg_ms == 0.0 && none.max_ms == 0.0,
+              "the read delay: of 3 packets one read 600 ms after the quickest -- 200 ms on average above it, 600 "
+              "at most, the clocks' hour apart not counted; take() starts a new stretch");
+    }
 
     // Through the capture's own code, as a recording files them: with this
     // machine's addresses, which start() reads and a replay is given, the two
@@ -1553,7 +1557,7 @@ void test_capture_filters() {
     const std::string unpinned = build_filter_for({ mine }, { 50123 });
     check(unpinned == "((tcp or udp) and ((host 203.0.113.10 and port 15101))) or "
                       "(udp and (port 15101 or port 50123))",
-          "while build_filter_for -- Autopilot's, gobot_sniff's -- is as it was: " + unpinned);
+          "while build_filter_for -- gobot_sniff's -- is as it was: " + unpinned);
 
     // What gobot_sniff --record refuses: a capture that nothing narrows,
     // which would write every program's traffic on the machine to the files.
@@ -1807,49 +1811,6 @@ void test_capture_file_inner() {
         std::remove(udp_path.c_str());
     }
     std::remove(path.c_str());
-}
-
-// ---------------------------------------------- the world model holds back
-
-void test_protocol_handler_holds_back() {
-    section("The world model leaves frames from inside 0x0081 and UDP alone");
-
-    OpcodeRegistry reg;
-    PacketSpec mv;
-    mv.opcode = 0x0201;
-    mv.semantic = Semantic::SelfMove;
-    mv.fields = OpcodeRegistry::parse_field_list("id:u32,x:f32,y:f32", nullptr);
-    reg.add(mv);
-
-    GameState st;
-    ProtocolHandler ph(reg, st);
-
-    auto move_to = [](float x, float y) {
-        GamePacket p;
-        p.opcode = 0x0201;
-        p.payload.assign(12, 0);
-        p.payload[0] = 0x2A;
-        std::memcpy(p.payload.data() + 4, &x, 4);
-        std::memcpy(p.payload.data() + 8, &y, 4);
-        return p;
-    };
-
-    const Vec2 start = st.self().pos;
-    GamePacket inner = move_to(100.0f, 100.0f);
-    inner.depth = 1;
-    GamePacket udp = move_to(200.0f, 200.0f);
-    udp.udp = true;
-    ph.on_packet(inner);
-    ph.on_packet(udp);
-    check(st.self().pos.x == start.x && st.self().pos.y == start.y,
-          "a mapped frame from inside 0x0081, or over UDP, moves nothing");
-
-    ph.on_packet(move_to(640.0f, 480.0f));
-    check(std::abs(st.self().pos.x - 640.0f) < 0.01f, "the same frame off the TCP stream still does");
-
-    const auto s = ph.stats();
-    check(s.held_back == 2 && s.decoded == 1 && s.unknown == 0 && s.malformed == 0,
-          "the two held back are counted as such, not as unknown or malformed");
 }
 
 // ------------------------------------------------------ a real capture
@@ -3027,8 +2988,8 @@ void test_monster_frames() {
 /// holding a map entry, the map's table packed into an 0x0081 and cut across
 /// two segments, a monster's stop and a spawn -- through PacketCapture with
 /// unpacking on, as GuiApp::push_framings sets it, into a PacketWorld. And
-/// what the opcode filter Apply set, the mapped opcodes alone, did to them,
-/// before it let the packet world's through as well.
+/// what an opcode filter of the mapped opcodes alone does to them, and one
+/// that lets the packet world's through as well.
 void test_packet_world_capture() {
     section("The capture for positions: the client's UDP and the server's TCP into the packet world");
 
@@ -3124,7 +3085,7 @@ void test_packet_world_capture() {
               seven->hp == 2500 && !seven->dead,
           "slot 12's stop and slot 7's spawn applied after it");
 
-    // Apply set the filter to the mapped opcodes alone: 0x0038.
+    // A filter of the mapped opcodes alone: 0x0038.
     PacketWorld narrow;
     replay({ 0x0038 }, narrow);
     const PacketWorld::View n = narrow.view(1300);
@@ -3138,7 +3099,7 @@ void test_packet_world_capture() {
     const PacketWorld::View w = wide.view(1300);
     check(w.me.known && w.me.x == 4700.0f && w.table_seen && w.mobs.size() == 3 && w.mob(7) &&
               w.mob(7)->type_id == 2000999,
-          "with PacketWorld::opcodes() let through as well, as Apply now does, all of it arrives");
+          "with PacketWorld::opcodes() let through as well, all of it arrives");
 }
 
 // ------------------------------------- one opcode's frames as numbers
@@ -3689,11 +3650,8 @@ void registry_rewritten_under_decodes() {
     std::atomic<bool>          stop{ false };
     std::atomic<std::uint64_t> decodes{ 0 };
     std::atomic<std::uint64_t> torn{ 0 };
-    ProtocolHandler::Stats     handled;
 
     std::thread reader([&] {
-        GameState st;
-        ProtocolHandler ph(reg, st);
         do {
             if (const auto d = reg.decode(pkt)) {
                 // The writer names the layout MonsterUpdate, or a run of n too
@@ -3709,11 +3667,9 @@ void registry_rewritten_under_decodes() {
             if (const auto c = reg.find_copy(0x0405)) {
                 if (c->fields.size() != 3 && c->fields.size() != 4) torn.fetch_add(1);
             }
-            ph.on_packet(pkt);
             decodes.fetch_add(1);
             started.store(true);
         } while (!stop.load());
-        handled = ph.stats();
     });
 
     for (int i = 0; i < 2000 && !started.load(); ++i)
@@ -3747,8 +3703,6 @@ void registry_rewritten_under_decodes() {
           "the decoding thread ran: " + std::to_string(decodes.load()) + " decodes against " +
               std::to_string(rounds) + " rewrites");
     check(torn.load() == 0, "every decode read one whole layout, never half of one");
-    check(handled.total > 0 && handled.total == handled.decoded + handled.unknown + handled.malformed,
-          "the handler counted every frame once, as decoded, unknown or malformed");
 
     reg.add(base);
     const auto last = reg.decode(pkt);
@@ -3756,15 +3710,13 @@ void registry_rewritten_under_decodes() {
           "afterwards the layout added last is the one decoded with");
 }
 
-/// The GUI rewrites the layouts on its drawing thread -- Apply, Apply all
-/// above 70%, Apply layout, Reload configs -- while the capture thread decodes
-/// every frame through them. Here a thread decodes flat out, through decode()
-/// and through a ProtocolHandler as the capture thread does, while another
-/// swaps the layout's field list, grows and empties the table and loads it
-/// from a file. Every decode has to have read one whole layout. Before the
-/// table had its lock, a rewrite in the middle of a decode freed the field
-/// list being walked, and the elevated GUI crashed or put garbage HP and
-/// positions into GameState.
+/// The layouts can be rewritten on one thread while another decodes every
+/// frame through them. Here a thread decodes flat out, through decode(),
+/// while another swaps the layout's field list, grows and empties the table
+/// and loads it from a file. Every decode has to have read one whole layout.
+/// Before the table had its lock, a rewrite in the middle of a decode freed
+/// the field list being walked, and the elevated GUI crashed or read garbage
+/// HP and positions.
 void test_opcode_registry_threads() {
     section("Opcode registry: rewritten while another thread decodes");
     finish_within(30000, "the registry rewritten while another thread decodes",
@@ -3824,7 +3776,7 @@ void test_opcode_registry_strict() {
           "a scale past a double are refused too" +
               (accepted.empty() ? std::string() : " -- not " + accepted));
 
-    // What the GUI's layout editor and the calibrator write, read back the same.
+    // What field_list_to_string writes, read back the same.
     err.clear();
     const auto first = OpcodeRegistry::parse_field_list(
         "x:i16be@12*0.125,s:strf6@0x10,:skip4,h:i32@8*-0.5", &err);
@@ -3945,151 +3897,6 @@ void test_opcode_registry_strict() {
         check(shipped.size() == 1 && offsets,
               "the shipped protocol.ini loads its one layout, 0x0038, as 5 fields at offsets 8, 20, 24, 26 and 56");
 #endif
-}
-
-// ------------------------------------------------------------- world model
-
-void test_game_state() {
-    section("GameState");
-
-    GameState st;
-    st.update_self_id(42);
-    st.update_self_position(100, 200);
-    st.update_self_hp(50, 100);
-    st.update_self_mp(30, 60);
-
-    const Self me = st.self();
-    check(me.id == 42, "self id");
-    check(std::abs(me.hp_pct() - 50.0f) < 0.01f, "hp percent");
-    check(std::abs(me.mp_pct() - 50.0f) < 0.01f, "mp percent");
-
-    Monster m;
-    m.id = 7;
-    m.pos = { 300, 200 };
-    m.hp = 80;
-    m.max_hp = 100;
-    st.upsert_monster(m);
-    check(st.monster_count() == 1, "monster added");
-
-    // A position-only update must not wipe known HP.
-    Monster pos_only;
-    pos_only.id = 7;
-    pos_only.pos = { 310, 200 };
-    pos_only.hp = -1;
-    pos_only.max_hp = -1;
-    st.upsert_monster(pos_only);
-
-    auto got = st.monster(7);
-    check(got.has_value(), "monster still present");
-    if (got) {
-        check(std::abs(got->pos.x - 310.0f) < 0.01f, "position updated");
-        check(got->hp == 80, "partial update preserves hp");
-    }
-
-    // Death removes it.
-    st.remove_monster(7);
-    check(st.monster_count() == 0, "monster removed");
-
-    // A map change must clear entities; stale mobs from the old map would be
-    // attacked in the new one.
-    st.upsert_monster(m);
-    st.set_map("NewMap", 2);
-    check(st.monster_count() == 0, "map change clears entities");
-
-    // Facing inferred from movement.
-    st.update_self_position(100, 200);
-    st.update_self_position(150, 200);
-    check(st.self().facing == Facing::Right, "facing inferred rightward");
-    st.update_self_position(50, 200);
-    check(st.self().facing == Facing::Left, "facing inferred leftward");
-
-    // Dead is read off every HP reading, both ways. A 0 used to set it for
-    // good, and only a self_revive packet -- which nothing maps -- cleared it:
-    // one death left the brain recovering and the potions and buffs skipping
-    // until GoBot was closed.
-    GameState life;
-    life.update_self_hp(100, 100);
-    check(!life.self().dead, "HP 100 of 100 is alive");
-    life.update_self_hp(0, 0);
-    check(life.self().dead && life.self().max_hp == 100, "HP 0 is dead, and the max already known is kept");
-    life.update_self_hp(40, 100);
-    check(!life.self().dead, "HP above 0 again is alive again, with no self_revive needed");
-    life.set_self_dead(true);
-    check(life.self().dead, "a self_dead packet still says so outright");
-    life.update_self_hp(40, 100);
-    check(!life.self().dead, "until the next reading, which says otherwise");
-    life.set_self_dead(true);
-    life.set_self_dead(false);
-    check(!life.self().dead, "and a self_revive says alive");
-    life.update_self_hp(0, 100);
-    life.set_self_dead(false);
-    check(!life.self().dead && life.self().hp == 100,
-          "a self_revive with HP still at 0 fills it from the max, as before");
-    GameState no_max;
-    no_max.update_self_hp(0, 0);
-    check(no_max.self().dead, "with no max known, HP 0 is dead, as before");
-    no_max.update_self_hp(5, 0);
-    check(!no_max.self().dead, "and HP 5 is alive");
-}
-
-// -------------------------------------------------------------- pathfinding
-
-void test_pathfinder() {
-    section("PathFinder");
-
-    // Two ledges with a gap, and a higher shelf on the right:
-    //
-    //   row 3            ####      <- shelf
-    //   row 6   #####  #######     <- ground, split by a gap
-    MapData map;
-    map.name = "test";
-    map.width = 24;
-    map.height = 10;
-    map.tile_w = 32;
-    map.tile_h = 32;
-    map.attrs.assign(static_cast<std::size_t>(map.width) * map.height, Tile_Empty);
-
-    auto set = [&](int x, int y, std::uint8_t v) {
-        map.attrs[static_cast<std::size_t>(y) * map.width + x] = v;
-    };
-
-    for (int x = 0; x < 5; ++x)   set(x, 6, Tile_Ground);
-    for (int x = 7; x < 14; ++x)  set(x, 6, Tile_Ground);
-    for (int x = 16; x < 20; ++x) set(x, 3, Tile_Platform);
-
-    PathFinder pf;
-    check(pf.init(map), "builds the platform graph");
-    check(pf.platform_count() == 3, "finds 3 platforms");
-
-    const Vec2 left_ledge  = map.to_world(2, 5);
-    const Vec2 right_ledge = map.to_world(10, 5);
-
-    auto p1 = pf.platform_at(left_ledge);
-    check(p1.has_value(), "locates the platform under a point");
-
-    auto path = pf.find_path(left_ledge, right_ledge);
-    check(!path.empty(), "finds a route across the gap");
-
-    // Same-surface movement should not go through A*.
-    auto direct = pf.find_path(left_ledge, map.to_world(4, 5));
-    check(direct.size() == 1 && direct[0].kind == MoveKind::Walk,
-          "same-platform move is a single walk step");
-
-    check(pf.same_platform(left_ledge, map.to_world(4, 5)), "same_platform true within a run");
-    check(!pf.same_platform(left_ledge, right_ledge), "same_platform false across a gap");
-
-    auto h = pf.height_at(left_ledge);
-    check(h.has_value(), "ground height found under a platform");
-
-    auto over_pit = pf.height_at(map.to_world(6, 1));
-    check(!over_pit.has_value(), "no ground height over a pit");
-
-    // An invalid map must be rejected rather than producing a broken graph.
-    MapData bad;
-    bad.width = 10;
-    bad.height = 10;      // attrs left empty
-    PathFinder pf2;
-    check(!pf2.init(bad), "rejects a malformed map");
 }
 
 // --------------------------------------------------------------- analyzer
@@ -4399,17 +4206,6 @@ void test_map_file() {
                     adjacent, frac * 100.0);
         check(adjacent > 100, "surfaces form long horizontal runs");
         check(frac > 0.9, "neighbouring columns differ by at most a couple of pixels");
-    }
-
-    // And it must produce a grid the existing pathfinder accepts.
-    const MapData md = m.to_map_data(8);
-    check(md.valid(), "converts to a MapData grid");
-    if (md.valid()) {
-        PathFinder pf;
-        check(pf.init(md), "pathfinder accepts the grid");
-        check(pf.platform_count() > 0, "graph has platforms");
-        std::printf("         %zu platforms from a %d x %d grid\n",
-                    pf.platform_count(), md.width, md.height);
     }
 }
 
@@ -5642,13 +5438,8 @@ void test_party_chat() {
     }
 }
 
-/// Parties.
-///
-/// The detecting is the other helper's: its PartyStatusDetector takes the
-/// game's window and answers, and its PartyConfigureDetector works out where
-/// the sharing dropdowns are. What is ours is reading that answer and deciding
-/// who may be invited, and those are what is tested here -- all of it without
-/// .NET, without that helper installed, and without a game running.
+/// Parties: the settings, and who may be invited or accepted by them -- all of
+/// it without a game running.
 void test_party() {
     section("Party");
 
@@ -5664,67 +5455,6 @@ void test_party() {
         check(!missing.load(temp_file("gobot_test_no_party.ini")) && !missing.auto_accept &&
                   !missing.auto_invite,
               "and a party.ini that cannot be read turns neither on");
-    }
-
-    // Reading the bridge's answer. This is the exact text that came back from
-    // the live client, so a change in their field names fails here rather than
-    // in the middle of a party.
-    {
-        const std::string reply =
-            "status=Alone\n"
-            "is_player_have_party=0\n"
-            "is_player_key_party=0\n"
-            "can_auto_accept=1\n"
-            "can_auto_invite=1\n"
-            "can_transfer_party_key=0\n"
-            "client_width=1024\n"
-            "exp_dropdown=777,76\n"
-            "loot_dropdown=727,76\n"
-            "exp_equal=777,116\n"
-            "exp_more=777,152\n"
-            "loot_free=727,116\n"
-            "loot_contribution=727,152\n";
-
-        const auto state = Party::parse(reply);
-        check(state.read, "the detector's answer parses");
-        check(state.status == Party::Status::Alone, "alone is read as alone");
-        check(!state.in_party && !state.is_leader, "and so is being in no party");
-        check(state.can_accept && state.can_invite && !state.can_transfer_key,
-              "their own rules come through unchanged");
-        check(state.client_width == 1024, "the client width survives");
-        check(state.points.size() == 6, "all six click points are read -- got " +
-                                        std::to_string(state.points.size()));
-
-        int x = 0, y = 0;
-        check(state.point("exp_more", x, y) && x == 777 && y == 152,
-              "and each is where their code put it");
-    }
-
-    // Their status word and their two flags can disagree. The flags are the
-    // ones that mean something.
-    {
-        const auto state = Party::parse(
-            "status=InParty\nis_player_have_party=1\nis_player_key_party=1\n");
-        check(state.status == Party::Status::Leader,
-              "holding the key means leading, whatever the status word says");
-        check(state.in_party, "and being in one");
-    }
-    {
-        const auto state = Party::parse(
-            "status=Alone\nis_player_have_party=1\nis_player_key_party=0\n");
-        check(state.status == Party::Status::InParty,
-              "being in one outranks a status word that says otherwise");
-    }
-
-    // Failures are reported, not guessed at.
-    {
-        check(!Party::parse("").read, "an empty answer is not a reading");
-        check(!Party::parse("error=no PartyStatusDetector").read,
-              "and neither is an error");
-        check(Party::parse("error=no detector").trouble.find("no detector") !=
-                  std::string::npos, "whose reason is kept");
-        check(!Party::parse("something=else\n").read,
-              "nor is an answer with no status in it");
     }
 
     // Who may be invited. The blacklist is the one that has to win.
@@ -6006,7 +5736,6 @@ void test_shipped_configs() {
     }
     check(!app.get_bool("Simple", "keep_alive", true) && !app.get_bool("Simple", "revive", true),
           "app.ini: the client keeper and the revive are off");
-    check(!app.get_bool("Capture", "autostart", true), "app.ini: the packet bot does not start by itself");
     check(app.get_bool("Simple", "refocus", false),
           "app.ini: keeping the game in front while the bot runs is on -- it presses nothing");
     check(app.get_bool("Paths", "new_log_each_start", false),
@@ -6054,11 +5783,12 @@ void test_shipped_configs() {
     check(spot_keys && !hunt.spot && hunt.spot_half_w == 300 && hunt.spot_half_h == 100 && hunt.spot_tolerance == 48 &&
               hunt.spot_return_delay_ms == 1500 && hunt.spot_give_up_ms == 4000 && hunt.spot_retry_ms == 30000,
           "hunt.ini: spot=false, and its numbers there at the code's defaults");
-    // "Nhảy xuống bậc dưới" moves the character: off, its numbers the code's.
-    check(hunt_ini.has_key("Hunt", "drop_down") && hunt_ini.has_key("Hunt", "drop_min_px") &&
+    // "Nhảy xuống bậc dưới" moves the character: off, its numbers the code's
+    // -- and no drop_min_px since 2026.11.12: the lower bar alone.
+    check(hunt_ini.has_key("Hunt", "drop_down") && !hunt_ini.has_key("Hunt", "drop_min_px") &&
               hunt_ini.has_key("Hunt", "drop_side_px") && hunt_ini.has_key("Hunt", "drop_gate_px") && !hunt.drop_down &&
-              hunt.drop_min_px == 100 && hunt.drop_side_px == 120 && hunt.drop_gate_px == 150,
-          "hunt.ini: drop_down=false, 100, 120, 150");
+              hunt.drop_side_px == 120 && hunt.drop_gate_px == 150,
+          "hunt.ini: drop_down=false, 120, 150, no drop_min_px");
 
     Party::Settings party;
     check(party.load(dir + "party.ini") && !party.auto_accept && !party.auto_invite,
@@ -6095,232 +5825,22 @@ void test_shipped_configs() {
         for (const char* key : { "username", "password", "account", "user" })
             account = account || !login_ini.get("Login", key, "").empty();
     check(!account, "login.ini: no account and no password");
-
-    // bot_default.ini, the packet bot's. BotConfig::load starts from
-    // apply_defaults(), which ticks four skills, and the struct starts with
-    // attacking, fury, turning to a target, stepping back and walking a route
-    // on -- so each switch has to be written in the file, off. A key left out
-    // reads as on. Its potions and buffs are macro.ini's: none of its own.
-    BotConfig bot;
-    check(bot.load(dir + "bot_default.ini"), "bot_default.ini loads");
-    bool skill_on = false;
-    for (const SkillSlot& s : bot.skills) skill_on = skill_on || s.enabled;
-    IniFile bot_ini;
-    bool own_sustain = !bot_ini.load(dir + "bot_default.ini") || bot_ini.has_key("Bot", "auto_buff");
-    for (const char* key : { "hp_heal1_enabled", "hp_heal2_enabled", "mp_heal1_enabled" })
-        own_sustain = own_sustain || bot_ini.has_key("Heal", key);
-    for (int i = 0; i < 6; ++i)
-        own_sustain = own_sustain || bot_ini.has_key("Bot", "buff_" + std::to_string(i) + "_enabled");
-    check(!own_sustain, "bot_default.ini: no potion or buff of the packet bot's own -- they are macro.ini's");
-    check(!bot.auto_attack && !skill_on && !bot.auto_fury && !bot.face_target && !bot.backing_away,
-          "bot_default.ini: attacking, every skill, fury, turning to a target and stepping back are off");
-    check(!bot.auto_loot && !bot.double_jump && !bot.enable_tile_pathfinding && !bot.patrol_use_waypoints &&
-              !bot.return_to_original_location && !bot.return_to_previous_map &&
-              !bot.continue_auto_after_death && !bot.player_auto_revive,
-          "bot_default.ini: looting, jumping, routes, going back and reviving are off");
-    check(bot.lazy_mode,
-          "bot_default.ini: lazy_mode stays on -- it waits for monsters instead of chasing them");
-}
-
-/// Fishing and mining: the deciding half.
-///
-/// This is why `decide` takes a situation and returns an intention instead of
-/// pressing anything. A loop that decides and acts in one step can only be
-/// tested by standing at a fishing spot with the game running for an hour;
-/// this way every branch -- tool gone, tool broken, bag full, health low,
-/// cannot afford a replacement -- is a few lines.
-void test_gatherer() {
-    section("Gathering");
-
-    auto mining = [] {
-        Gatherer::Settings s;
-        s.name = "mining";
-        s.tool_picture = "pickaxe";
-        s.broken_picture = "broken_pickaxe";
-        s.buy_routine = "buy_pickaxe";
-        s.hand_in_routine = "mining_exchange";
-        s.work_key = 'E';
-        s.hand_in_every = 5;
-        return s;
-    };
-
-    // The ordinary case: tool in hand, nothing wrong, get on with it.
-    {
-        Gatherer g;
-        g.set_settings(mining());
-        Gatherer::Look look;
-        look.tool_present = true;
-        check(g.decide(look) == Gatherer::Action::Work, "works when it has a tool");
-    }
-
-    // The tool has gone, or broken. Both mean replace, and replacing comes
-    // before everything else -- working without a tool presses a key at nothing
-    // and looks exactly like working.
-    {
-        Gatherer g;
-        g.set_settings(mining());
-        Gatherer::Look gone;          // tool_present stays false
-        check(g.decide(gone) == Gatherer::Action::Replace,
-              "replaces the tool when it has gone");
-
-        Gatherer::Look broken;
-        broken.tool_present = true;
-        broken.tool_broken = true;
-        check(g.decide(broken) == Gatherer::Action::Replace,
-              "and when it is broken but still in the slot");
-    }
-
-    // Handing in happens before the next cycle, not after: a bag that fills
-    // mid-cycle loses whatever came out of it.
-    {
-        Gatherer g;
-        g.set_settings(mining());
-        Gatherer::Look look;
-        look.tool_present = true;
-
-        for (int i = 0; i < 4; ++i) {
-            check(g.decide(look) == Gatherer::Action::Work,
-                  "cycle " + std::to_string(i + 1) + " of five is work");
-            g.worked();
-        }
-        g.worked();        // the fifth
-        check(g.decide(look) == Gatherer::Action::HandIn,
-              "hands in once it has done the configured number");
-        g.handed_in();
-        check(g.decide(look) == Gatherer::Action::Work,
-              "and goes back to work afterwards");
-    }
-
-    // Low health holds the loop rather than working through it.
-    {
-        Gatherer::Settings s = mining();
-        s.pause_below_hp_pct = 40;
-        Gatherer g;
-        g.set_settings(s);
-
-        Gatherer::Look look;
-        look.tool_present = true;
-        look.hp_pct = 30.0f;
-        check(g.decide(look) == Gatherer::Action::Nothing, "holds while health is low");
-
-        look.hp_pct = 80.0f;
-        check(g.decide(look) == Gatherer::Action::Work, "and carries on once it is not");
-
-        // No reading at all must not hold it forever. This is the one that
-        // would turn a reader that stopped working into a bot that did nothing
-        // all night and said nothing about it.
-        look.hp_pct = -1.0f;
-        check(g.decide(look) == Gatherer::Action::Work,
-              "an absent reading does not hold it indefinitely");
-    }
-
-    // Giving up. A loop that cannot afford a new pickaxe must not spend the
-    // night walking into a shop.
-    {
-        Gatherer::Settings s = mining();
-        s.give_up_after = 3;
-        Gatherer g;
-        g.set_settings(s);
-
-        Gatherer::Look look;       // no tool
-        for (int i = 0; i < 2; ++i) {
-            check(g.decide(look) == Gatherer::Action::Replace,
-                  "tries again after failure " + std::to_string(i + 1));
-            g.replaced(false);
-        }
-        g.replaced(false);         // the third
-        check(g.decide(look) == Gatherer::Action::Stop, "gives up after three failures");
-        check(g.trouble().find("could not replace") != std::string::npos,
-              "and says why -- got: " + g.trouble());
-
-        // A success in between clears the run. Three failures spread over an
-        // hour is not the same thing as three in a row.
-        g.reset();
-        g.replaced(false);
-        g.replaced(false);
-        g.replaced(true);
-        g.replaced(false);
-        check(g.decide(look) == Gatherer::Action::Replace,
-              "a success in between clears the run of failures");
-    }
-
-    // Stopping when asked.
-    {
-        Gatherer::Settings s = mining();
-        s.stop_after = 2;
-        s.hand_in_every = 0;
-        Gatherer g;
-        g.set_settings(s);
-
-        Gatherer::Look look;
-        look.tool_present = true;
-        g.worked();
-        check(g.decide(look) == Gatherer::Action::Work, "works up to the limit");
-        g.worked();
-        check(g.decide(look) == Gatherer::Action::Stop, "and stops at it");
-    }
-
-    // A configuration that cannot work refuses to start, rather than pressing
-    // an unset key every few seconds.
-    {
-        Gatherer::Settings s = mining();
-        s.work_key = 0;
-        Gatherer g;
-        g.set_settings(s);
-        Gatherer::Look look;
-        look.tool_present = true;
-        check(g.decide(look) == Gatherer::Action::Stop, "refuses to run with no key set");
-        check(g.trouble().find("no key is set") != std::string::npos,
-              "and says so -- got: " + g.trouble());
-    }
-    {
-        Gatherer::Settings s = mining();
-        s.hand_in_every = 10;
-        s.hand_in_routine.clear();
-        Gatherer g;
-        g.set_settings(s);
-        Gatherer::Look look;
-        look.tool_present = true;
-        check(g.decide(look) == Gatherer::Action::Stop,
-              "refuses when told to hand in with no routine to do it with");
-    }
-
-    // The shipped config loads, and names routines that exist.
-    {
-        IniFile ini;
-        const std::string path = exe_relative("configs/gathering.ini");
-        check(ini.load(path), "the shipped gathering config loads");
-
-        const auto routines = Routine::load(exe_relative("configs/routines.ini"));
-        for (const char* section : { "Fishing", "Mining" }) {
-            Gatherer::Settings s;
-            s.load(ini, section);
-            check(!s.tool_picture.empty() && !s.buy_routine.empty(),
-                  std::string(section) + " names a tool and a way to replace it");
-            check(Routine::find(routines, s.buy_routine) != nullptr,
-                  std::string(section) + "'s buy routine exists: " + s.buy_routine);
-            if (s.hand_in_every > 0)
-                check(Routine::find(routines, s.hand_in_routine) != nullptr,
-                      std::string(section) + "'s hand-in routine exists: " +
-                          s.hand_in_routine);
-            // Shipped with no key on purpose, so it cannot start by accident.
-            check(s.work_key == 0,
-                  std::string(section) + " ships with no key set, so it cannot "
-                  "start until somebody sets one");
-        }
-    }
 }
 
 /// Routines read out of a config file.
 void test_routines() {
     section("Routines");
 
+    // A step as a routine holds it, by Routine's own member: no name of the
+    // step's type to keep in step with routine.hpp.
+    using Step = decltype(Routine::steps)::value_type;
+
     // Round trip first, so a parser that drops a field fails here rather than
     // three dialogs into a live run.
     {
         Routine buy;
         buy.name = "buy_thing";
-        DialogDriver::Step pick;
+        Step pick;
         pick.find = "thing_in_shop";
         pick.confirm = "buy_button";
         pick.click_dx = 12;
@@ -6328,11 +5848,11 @@ void test_routines() {
         pick.score = 0.72f;
         pick.wait_ms = 9000;
         pick.attempts = 5;
-        DialogDriver::Step press;
+        Step press;
         press.find = "buy_button";
         press.gone = true;
         press.optional = true;
-        DialogDriver::Step blind;
+        Step blind;
         blind.find = "thing_row";
         blind.check = false;
         buy.steps = { pick, press, blind };
@@ -6387,7 +5907,7 @@ void test_routines() {
         std::string wrong;
         for (const Routine& r : shipped)
             for (std::size_t i = 0; i < r.steps.size(); ++i) {
-                const DialogDriver::Step& s = r.steps[i];
+                const Step& s = r.steps[i];
                 const bool shop_pick = r.name.rfind("buy_", 0) == 0 && i == 0;
                 if (!s.check) ++unchecked;
                 if (s.check == shop_pick || (!s.check && (!s.confirm.empty() || s.gone)))
@@ -6406,19 +5926,16 @@ void test_routines() {
         check(routines.size() >= 6, "the shipped routines load -- got " +
                                     std::to_string(routines.size()));
 
-        check(Routine::find(routines, "buy_fishing_rod") != nullptr,
-              "including the one the fishing loop depends on");
         check(Routine::find(routines, "nothing_called_this") == nullptr,
-              "and nothing that is not there");
+              "and find() names nothing that is not there");
 
         // Every step can prove it worked, or says check = false and names
-        // nothing to check by. This is the rule the driver enforces at run
-        // time; checking it here means a bad table is caught by the test
-        // suite rather than halfway through a shop visit.
+        // nothing to check by: a bad table is caught by the test suite rather
+        // than halfway through a shop visit.
         bool all_provable = true;
         std::string offender;
         for (const Routine& r : routines)
-            for (const DialogDriver::Step& s : r.steps)
+            for (const Step& s : r.steps)
                 if (s.check ? (s.confirm.empty() && !s.gone) : (!s.confirm.empty() || s.gone)) {
                     all_provable = false;
                     offender = r.name + " / " + s.find;
@@ -6617,388 +6134,6 @@ void test_colour_templates() {
     }
 }
 
-/// The dialog driver, over scripted screens.
-///
-/// The failure paths are the point. A driver that clicks and moves on walks a
-/// whole sequence into nothing and reports success, so what has to be tested is
-/// what it does when the click misses, when the page never arrives, and when
-/// the step has no way of telling either.
-void test_dialog_driver() {
-    section("Dialog driver");
-
-    auto noise_frame = [](unsigned seed) {
-        Frame f = make_frame(400, 300);
-        std::mt19937 r(seed);
-        for (int y = 0; y < f.height; ++y)
-            for (int x = 0; x < f.width; ++x)
-                put_px(f, x, y, static_cast<std::uint8_t>(r() % 90),
-                       static_cast<std::uint8_t>(r() % 90),
-                       static_cast<std::uint8_t>(r() % 90));
-        return f;
-    };
-    // Two marks that differ in shape, not in colour.
-    //
-    // They differed only in colour at first, and the test failed in a way worth
-    // keeping a note of: the matcher reduces everything to grey before
-    // correlating, so a red square and a blue square of the same shape are the
-    // same picture to it, and the second mark matched the first everywhere it
-    // appeared.
-    //
-    // That is a real limit rather than a test artefact. Several of the pictures
-    // still to be used are one icon in different colours -- the four crest
-    // tiers, the sixteen exchange items -- and telling those apart needs the
-    // colour. It belongs on the list for when matching moves to OpenCV, which
-    // can correlate the channels rather than their average.
-    auto make_mark = [](bool low_right) {
-        Frame m = make_frame(24, 18);
-        for (int y = 0; y < m.height; ++y)
-            for (int x = 0; x < m.width; ++x) {
-                const bool edge = x < 3 || y < 3 || x >= 21 || y >= 15;
-                const bool blob = low_right ? (x >= 13 && y >= 9) : (x < 11 && y < 9);
-                const auto v = static_cast<std::uint8_t>(edge ? 20 : (blob ? 55 : 225));
-                put_px(m, x, y, v, v, v);
-            }
-        return m;
-    };
-    auto paste = [](Frame& into, const Frame& what, int px, int py) {
-        for (int y = 0; y < what.height; ++y)
-            for (int x = 0; x < what.width; ++x) {
-                std::uint8_t r, g, b;
-                what.get(x, y, r, g, b);
-                put_px(into, px + x, py + y, r, g, b);
-            }
-    };
-
-    const Frame button = make_mark(false);
-    const Frame after  = make_mark(true);
-
-    TemplateStore store;
-    store.put("button", button);
-    store.put("after", after);
-
-    InputManager input;      // no window: the clicks go nowhere, which is fine
-
-    // ---- the click lands ----
-    {
-        int served = 0;
-        DialogDriver driver(input, store, [&](Frame& f) {
-            f = noise_frame(7);
-            if (served++ < 2) paste(f, button, 100, 80);
-            else              paste(f, after, 100, 80);
-            return true;
-        });
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 1500;
-        step.confirm_ms = 1500;
-
-        const auto r = driver.run(step);
-        check(r.ok, "a step succeeds when the confirmation appears");
-        check(r.at.x == 100 && r.at.y == 80, "and reports where it clicked");
-        check(r.attempts_used == 1, "on the first attempt");
-    }
-
-    // ---- the click misses, every time ----
-    {
-        DialogDriver driver(input, store, [&](Frame& f) {
-            f = noise_frame(11);
-            paste(f, button, 60, 40);        // the button never goes away
-            return true;
-        });
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 400;
-        step.confirm_ms = 400;
-        step.attempts = 3;
-
-        const auto r = driver.run(step);
-        check(!r.ok, "a step fails when the confirmation never appears");
-        check(r.attempts_used == 3, "after using its whole retry budget");
-        check(r.trouble.find("after") != std::string::npos,
-              "and says what it was waiting for -- got: " + r.trouble);
-        // Its click goes through click_on_game, which clicks only on the
-        // game: with no window there is none, and that is said.
-        check(r.trouble.find("was refused (no game window)") != std::string::npos,
-              "and that the click itself was refused, with no game window -- got: " + r.trouble);
-    }
-
-    // ---- a confirmation already up before the click proves nothing ----
-    {
-        int served = 0;
-        DialogDriver driver(input, store, [&](Frame& f) {
-            ++served;
-            f = noise_frame(43);
-            paste(f, button, 60, 40);
-            paste(f, after, 200, 150);       // up before anything is clicked
-            return true;
-        });
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 400;
-        step.confirm_ms = 400;
-        step.attempts = 3;
-
-        const auto r = driver.run(step);
-        check(!r.ok && r.attempts_used == 1 &&
-                  r.trouble.find("was already on screen before the click") != std::string::npos,
-              "a confirmation up before the first click: the step is refused -- got: " + r.trouble);
-        check(r.trouble.find("was refused") == std::string::npos && served == 2,
-              "with no click asked for: one look for the button, one for its confirmation");
-    }
-
-    // ---- a confirmation that comes up late is the earlier click landing ----
-    {
-        int served = 0;
-        std::string said;
-        DialogDriver driver(input, store, [&](Frame& f) {
-            f = noise_frame(47);
-            paste(f, button, 60, 40);
-            if (served++ >= 3) paste(f, after, 200, 150);
-            return true;
-        });
-        driver.on_step_report([&](const std::string& line) { said = line; });
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 1000;
-        step.confirm_ms = 0;            // one look for the confirmation after each click
-        step.attempts = 3;
-
-        const auto r = driver.run(step);
-        check(r.ok && r.attempts_used == 2 && said.find("came up late") != std::string::npos && served == 5,
-              "a confirmation up before a retry came after the earlier click: done, not clicked again -- " + said);
-    }
-
-    // ---- check = false: nothing on screen can prove the click ----
-    {
-        DialogDriver driver(input, store, [&](Frame& f) {
-            f = noise_frame(53);
-            paste(f, button, 60, 40);
-            paste(f, after, 200, 150);
-            return true;
-        });
-        DialogDriver::Step both;
-        both.find = "button";
-        both.check = false;
-        both.confirm = "after";
-        const auto a = driver.run(both);
-        check(!a.ok && a.trouble.find("check = false") != std::string::npos,
-              "check = false with a confirmation named as well is refused -- got: " + a.trouble);
-
-        DialogDriver::Step blind;
-        blind.find = "button";
-        blind.check = false;
-        blind.wait_ms = 400;
-        blind.attempts = 2;
-        const auto t0 = std::chrono::steady_clock::now();
-        const auto b = driver.run(blind);
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - t0).count();
-        check(!b.ok && b.attempts_used == 2 && b.trouble.find("whether the click landed") == std::string::npos &&
-                  b.trouble.find("was refused (no game window)") != std::string::npos && ms < 1000,
-              "check = false is not 'no way of telling'; a refused click is tried again, never taken as done, "
-              "and no confirmation is waited for -- got: " + b.trouble);
-    }
-#ifdef GOBOT_SOURCE_DIR
-    if (!sources_here()) {
-        skip("the source tree is not here to read\n");
-    } else {
-        // No click goes through in the tests, so the unchecked step's success
-        // is read off the source: said to be NOT CHECKED, and never waiting
-        // for a confirmation; and a checked one looks before its click.
-        const std::string run =
-            body_of(source_text("/src/dialog_driver.cpp"), "DialogDriver::Result DialogDriver::run(");
-        const std::size_t blind = run.find("if (!step.check) {");
-        const std::size_t said = run.find("NOT CHECKED: nothing on screen shows whether this click landed");
-        const std::size_t landed = run.find("const bool landed");
-        const std::size_t before = run.find("was already on screen before the click");
-        const std::size_t click = run.find("input_.click_on_game(");
-        check(blind != std::string::npos && said != std::string::npos && landed != std::string::npos &&
-                  before != std::string::npos && click != std::string::npos && blind < said && said < landed &&
-                  before < click,
-              "dialog_driver.cpp: a check = false step is said to be NOT CHECKED and never waits for a "
-              "confirmation; a checked one looks for its confirmation before its click");
-    }
-#endif
-
-    // ---- confirmed by the button going away instead ----
-    {
-        int served = 0;
-        DialogDriver driver(input, store, [&](Frame& f) {
-            f = noise_frame(13);
-            if (served++ < 1) paste(f, button, 200, 150);
-            return true;
-        });
-        DialogDriver::Step step;
-        step.find = "button";
-        step.gone = true;
-        step.wait_ms = 1000;
-        step.confirm_ms = 1000;
-
-        check(driver.run(step).ok, "a step can be confirmed by the thing vanishing");
-    }
-
-    // ---- the page never arrives ----
-    {
-        DialogDriver driver(input, store,
-                            [&](Frame& f) { f = noise_frame(17); return true; });
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 300;
-        step.attempts = 2;
-
-        const auto r = driver.run(step);
-        check(!r.ok, "a step fails when its page never appears");
-        check(r.trouble.find("never appeared") != std::string::npos,
-              "and says so -- got: " + r.trouble);
-
-        step.optional = true;
-        check(driver.run(step).ok, "an optional step passes when its page is absent");
-    }
-
-    // ---- a step that cannot prove anything is refused ----
-    {
-        DialogDriver driver(input, store,
-                            [&](Frame& f) { f = noise_frame(19); return true; });
-        DialogDriver::Step step;
-        step.find = "button";       // no confirm, no gone
-        const auto r = driver.run(step);
-        check(!r.ok && r.trouble.find("whether the click landed") != std::string::npos,
-              "a step with no way to tell it worked is refused outright");
-    }
-
-    // ---- a sequence stops where it breaks, and says where ----
-    {
-        int served = 0;
-        DialogDriver driver(input, store, [&](Frame& f) {
-            f = noise_frame(23);
-            // Step one's button, for its find and its look before the click;
-            // then its confirmation, for good.
-            if (served++ < 2) paste(f, button, 10, 10);
-            else              paste(f, after, 10, 10);
-            return true;
-        });
-        DialogDriver::Step ok_step;
-        ok_step.find = "button";
-        ok_step.confirm = "after";
-        ok_step.wait_ms = 300; ok_step.confirm_ms = 300;
-
-        DialogDriver::Step bad_step;
-        bad_step.find = "button";       // gone for good once step one landed
-        bad_step.confirm = "after";
-        bad_step.wait_ms = 300; bad_step.attempts = 1;
-
-        std::string trouble;
-        const std::size_t got = driver.run_all({ ok_step, bad_step }, &trouble);
-        check(got == 1, "a sequence reports how far it got");
-        check(trouble.find("step 2 of 2") != std::string::npos,
-              "and which step broke -- got: " + trouble);
-    }
-
-    // ---- cancelling ----
-    {
-        DialogDriver driver(input, store,
-                            [&](Frame& f) { f = noise_frame(29); return true; });
-        driver.cancel();
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 5000;
-        const auto r = driver.run(step);
-        check(!r.ok && r.trouble == "cancelled", "cancelling stops it at once");
-    }
-
-    // ---- cancelled from another thread, while a step waits ----
-    //
-    // gobot_cli's Ctrl+C watcher calls cancel() while a step waits: the wait
-    // ends at its next look, not when its 5 s are up, and a stop is not taken
-    // for an optional page being absent.
-    {
-        const auto cancelled_after_200ms = [](DialogDriver& d, const DialogDriver::Step& s, long long& took_ms) {
-            std::thread canceller([&d] {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                d.cancel();
-            });
-            const auto t0 = std::chrono::steady_clock::now();
-            const DialogDriver::Result res = d.run(s);
-            took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-                          .count();
-            canceller.join();
-            return res;
-        };
-        DialogDriver::Step step;
-        step.find = "button";
-        step.confirm = "after";
-        step.wait_ms = 5000;
-        step.confirm_ms = 5000;
-        long long ms = 0;
-        {
-            DialogDriver driver(input, store, [&](Frame& f) { f = noise_frame(31); return true; });
-            const auto r = cancelled_after_200ms(driver, step, ms);
-            check(!r.ok && r.trouble == "cancelled" && ms < 1500,
-                  "waiting up to 5 s for its page, cancelled from another thread: it ends then -- " +
-                      std::to_string(ms) + " ms");
-        }
-        {
-            DialogDriver driver(input, store, [&](Frame& f) { f = noise_frame(37); return true; });
-            DialogDriver::Step maybe = step;
-            maybe.optional = true;
-            const auto r = cancelled_after_200ms(driver, maybe, ms);
-            check(!r.ok && r.trouble == "cancelled" && ms < 1500,
-                  "an optional step cancelled while it waits is cancelled, not 'was not there, which is allowed' "
-                  "-- " + r.trouble);
-        }
-        {
-            // The page there at once and its confirmation never: cancelled
-            // while the click is waited on.
-            DialogDriver driver(input, store, [&](Frame& f) {
-                f = noise_frame(41);
-                paste(f, button, 60, 40);
-                return true;
-            });
-            const auto r = cancelled_after_200ms(driver, step, ms);
-            // At most one attempt: a loaded machine can let the cancel land
-            // before run() has made its first.
-            check(!r.ok && r.trouble == "cancelled" && r.attempts_used <= 1 && ms < 1500,
-                  "cancelled while it waits for the confirmation: it ends then, with no second attempt -- " +
-                      std::to_string(ms) + " ms");
-        }
-    }
-
-    // ---- where a step clicks: on the picture, whatever its offsets say ----
-    //
-    // From the picture's top-left, kept inside it: an offset past its right
-    // or bottom edge clicks at that edge, so a typo in routines.ini cannot
-    // send a click across the screen. A negative one is the middle that way.
-    {
-        const ScreenRect at{ 100, 80, 24, 18 };
-        const auto lands = [](const ScreenRect& on, int dx, int dy, int want_x, int want_y) {
-            DialogDriver::Step s;
-            s.click_dx = dx;
-            s.click_dy = dy;
-            int x = -1, y = -1;
-            DialogDriver::click_point(on, s, x, y);
-            return x == want_x && y == want_y;
-        };
-        check(lands(at, -1, -1, 112, 89), "no offsets: the picture's middle, 112,89");
-        check(lands(at, 12, 30, 112, 97), "an offset below its bottom edge clicks on that edge: 112,97");
-        check(lands(at, 23, 5, 123, 85) && lands(at, 24, 5, 123, 85) && lands(at, 500, 5, 123, 85),
-              "and one past its right edge on that edge: 23, 24 and 500 across all click at x 123");
-        check(lands(at, 0, 0, 100, 80), "0,0 is its top-left corner");
-        check(lands(at, -1, 5, 112, 85), "a negative offset is the middle that way alone: 112,85");
-        check(lands(ScreenRect{ 100, 80, 1, 18 }, 7, 5, 100, 85) && lands(ScreenRect{ 100, 80, 0, 18 }, 7, 5, 100, 85),
-              "a picture one pixel wide, or none, is clicked at its left edge");
-    }
-}
-
-// The cancel is atomic now, set from another thread while a step waits; a
-// driver is never copied.
-static_assert(!std::is_copy_constructible_v<DialogDriver>, "a DialogDriver is not copied");
-
 /// Finding the bars by the HUD's landmark instead of by colour.
 ///
 /// The case that matters is the one that broke the old way: a bar drained far
@@ -7097,7 +6232,7 @@ void test_anchored_bars() {
 }
 
 void test_session_manager() {
-    section("Session watcher");
+    section("In the world or not, and a process running (SessionManager)");
 
     // In the world: the HUD is there, so the bot may act.
     {
@@ -7110,7 +6245,7 @@ void test_session_manager() {
 
     // The states that must not read as playing. Each of these is a real thing
     // the client shows, and the bot pressing keys at any of them is the whole
-    // problem this watcher exists for.
+    // problem hud_present is asked about.
     {
         // A loading screen: dark, with a bright banner across it.
         Frame f = make_frame(1024, 768);
@@ -7137,42 +6272,6 @@ void test_session_manager() {
     {
         Frame nothing;
         check(!SessionManager::hud_present(nothing), "no frame does not read as playing");
-    }
-
-    // Settings survive a trip through a config file, including the one that
-    // turns the machine off -- a setting that silently failed to load would be
-    // either a bot that never stops or a machine that shuts down unasked.
-    {
-        SessionManager::Settings s;
-        s.poll_ms = 1500;
-        s.lost_grace_s = 40;
-        s.stop_after_minutes = 180;
-        s.shutdown_when_done = true;
-        s.shutdown_delay_s = 90;
-
-        IniFile ini;
-        s.save(ini);
-
-        SessionManager::Settings back;
-        back.load(ini);
-        check(back.poll_ms == 1500 && back.lost_grace_s == 40 &&
-              back.stop_after_minutes == 180 && back.shutdown_when_done &&
-              back.shutdown_delay_s == 90,
-              "session settings survive a config round trip");
-    }
-
-    // Nonsense in the file does not become nonsense in the settings. A poll
-    // interval of zero would spin a core flat out capturing the screen.
-    {
-        IniFile ini;
-        ini.set_int("Session", "poll_ms", 0);
-        ini.set_int("Session", "lost_grace_s", -5);
-        ini.set_int("Session", "shutdown_delay_s", 1);
-
-        SessionManager::Settings s;
-        s.load(ini);
-        check(s.poll_ms >= 250 && s.lost_grace_s >= 3 && s.shutdown_delay_s >= 10,
-              "unusable values from a config file are clamped");
     }
 
     // The process check answers truthfully about a process that is certainly
@@ -7417,7 +6516,8 @@ void test_auto_login() {
                        a.pick == b.pick && a.row_step == b.row_step &&
                        a.row_across == b.row_across && a.row_dx == b.row_dx &&
                        a.row_dy == b.row_dy && a.step_dx == b.step_dx && a.step_dy == b.step_dy &&
-                       a.step_pause_ms == b.step_pause_ms && a.row_count == b.row_count;
+                       a.step_pause_ms == b.step_pause_ms && a.row_count == b.row_count &&
+                       a.slot_anchor == b.slot_anchor;
             }
             check(same, "the shipped configs/login.ini has the table's pages, pictures and "
                         "measurements, field by field");
@@ -7807,14 +6907,20 @@ void test_auto_login() {
         for (const auto& p : shipped.pages) every.put(p.picture, blocks(3, 16, 16));
         every.put(shipped.signin_picture, blocks(4, 16, 16));
         every.put(AutoLogin::kChannelPanel, blocks(7, 16, 16));
+        every.put(AutoLogin::kMessageNotice, blocks(8, 16, 16));
+        every.put(AutoLogin::kMessageButtons, blocks(9, 16, 16));
+        every.put(AutoLogin::kMessageAsk, blocks(10, 16, 16));
         every.put("inventory", blocks(5, 16, 16));
         every.put("hpmp_indicator2", blocks(6, 16, 16));
         const TemplateStore kept = AutoLogin::pictures_for(shipped, every);
         // Six pages' pictures -- both connect steps are one button -- the
-        // sign-in form's, and the channel list's panel.
-        check(kept.size() == 8 && shipped.recognised(kept) == shipped.pages.size() &&
-                  kept.get(shipped.signin_picture) != nullptr && kept.get(AutoLogin::kChannelPanel) != nullptr,
-              "a keeper keeps the crossing's pictures, the sign-in form's and the channel list's panel");
+        // sign-in form's, the channel list's panel, and the game's message's
+        // three (2026.11.13b).
+        check(kept.size() == 11 && shipped.recognised(kept) == shipped.pages.size() &&
+                  kept.get(shipped.signin_picture) != nullptr && kept.get(AutoLogin::kChannelPanel) != nullptr &&
+                  kept.get(AutoLogin::kMessageNotice) != nullptr && kept.get(AutoLogin::kMessageButtons) != nullptr,
+              "a keeper keeps the crossing's pictures, the sign-in form's, the channel list's panel and the game's "
+              "message's");
         check(!kept.has("inventory") && !kept.has("hpmp_indicator2"),
               "and none of the rest of the set");
     }
@@ -7916,7 +7022,8 @@ void test_auto_login() {
                       .find("channel_first_index") != std::string::npos,
               "a missing picture is named");
         bool all_said = true;
-        for (int w = static_cast<int>(Why::Cancelled); w <= static_cast<int>(Why::BadPoint); ++w)
+        // To the last reason, the game's message's (2026.11.13b).
+        for (int w = static_cast<int>(Why::Cancelled); w <= static_cast<int>(Why::Message); ++w)
             if (AutoLogin::advice(static_cast<Why>(w), "x").empty()) all_said = false;
         check(all_said && AutoLogin::advice(Why::None).empty(),
               "every reason to stop has words for the screen, and no reason has none");
@@ -8089,11 +7196,12 @@ void test_auto_login() {
     {
         const AutoLogin::Settings s;
         const auto names = AutoLogin::picture_names(s);
-        check(names.size() == 8 && std::is_sorted(names.begin(), names.end()) &&
+        check(names.size() == 11 && std::is_sorted(names.begin(), names.end()) &&
                   std::find(names.begin(), names.end(), "login_page") != names.end() &&
-                  std::find(names.begin(), names.end(), AutoLogin::kChannelPanel) != names.end(),
-              "the shipped crossing needs eight pictures, the sign-in form's and the channel list's panel among "
-              "them");
+                  std::find(names.begin(), names.end(), AutoLogin::kChannelPanel) != names.end() &&
+                  std::find(names.begin(), names.end(), AutoLogin::kMessageNotice) != names.end(),
+              "the shipped crossing needs eleven pictures, the sign-in form's, the channel list's panel and the "
+              "game's message's three (2026.11.13b) among them");
         AutoLogin::Settings picked = s;
         picked.channel_index = 5;
         picked.character_index = 2;
@@ -8104,7 +7212,7 @@ void test_auto_login() {
         check(AutoLogin::picture_names(renamed) != names, "a page given another picture does");
         AutoLogin::Settings off = s;
         off.signin_picture.clear();
-        check(AutoLogin::picture_names(off).size() == 7,
+        check(AutoLogin::picture_names(off).size() == 10,
               "and with the sign-in check off there is one fewer");
     }
 
@@ -8419,6 +7527,7 @@ void test_auto_login() {
             bool  vtczone_up = false;
             Frame vtczone_shows;
             int   clicks = 0, focuses = 0, starts = 0, minimised = 0, ended = 0;
+            int   placed = 0;                   // the game's window moved to its corner (2026.11.14)
             std::function<void()> on_grab;      // the test's own doing, as the game is looked at
             std::function<void()> on_focus;     // ... and as a window is brought forward
         };
@@ -8450,6 +7559,8 @@ void test_auto_login() {
             h.running = [](const std::string&) { return false; };
             h.start = [&d](const std::string&) { ++d.starts; return false; };
             h.minimise = [&d](void*) { ++d.minimised; };
+            // The game's window "moved": counted, no real window touched.
+            h.place = [&d](void*, int, int) { ++d.placed; return true; };
             return h;
         };
         // The table, every page waited for one second, one attempt, and no
@@ -8698,9 +7809,9 @@ void test_auto_login() {
                     const bool in = flow.run();
                     check(in && flow.step() == AutoLogin::Step::InWorld &&
                               flow.attempts_made() == 1 && ended == 0 && d.clicks == 0 &&
-                              d.starts == 0,
+                              d.starts == 0 && d.placed == 0 && !flow.moved_to_corner(),
                           "a crossing that finds that frame is in the world at once: nothing "
-                          "clicked, and nothing ended");
+                          "clicked, nothing ended, and the game's window not moved (2026.11.14)");
                 }
                 {
                     // Not seen at the first look, and seen when the crossing
@@ -8720,9 +7831,10 @@ void test_auto_login() {
                     flow.set_end_client([&ended] { ++ended; return true; }, 0);
                     const bool in = flow.run();
                     check(in && flow.step() == AutoLogin::Step::InWorld && ended == 0 &&
-                              d.clicks == 0,
+                              d.clicks == 0 && d.placed == 0 && !flow.moved_to_corner(),
                           "and judged after a page wait ran out, that frame is the world too: the "
-                          "end hook is called 0 times");
+                          "end hook is called 0 times, and nothing clicked, the game's window is not moved "
+                          "(the review of 2026.11.14)");
                 }
             }
             {
@@ -8809,6 +7921,8 @@ void test_auto_login() {
                     Frame shows;
                     std::vector<POINT> clicks;
                     std::function<void(int, int)> on_click;
+                    std::function<void()> on_grab;
+                    int placed = 0;     // the game's window "moved" to its corner (2026.11.14)
                 };
                 const auto hands_on = [&, wide](Wide& d) {
                     AutoLogin::Hands h;
@@ -8816,6 +7930,7 @@ void test_auto_login() {
                     h.grab = [&d](On w, void*, Frame& out) {
                         if (w != On::Game) return false;
                         out = d.shows;
+                        if (d.on_grab) d.on_grab();
                         return out.valid();
                     };
                     h.focus = [](void*) { return true; };
@@ -8827,6 +7942,7 @@ void test_auto_login() {
                     h.running = [](const std::string&) { return false; };
                     h.start = [](const std::string&) { return false; };
                     h.minimise = [](void*) {};
+                    h.place = [&d](void*, int, int) { ++d.placed; return true; };
                     return h;
                 };
                 const auto on_row = [&](const POINT& p) { return p.x == row_x && p.y == row_y; };
@@ -8850,10 +7966,36 @@ void test_auto_login() {
                     flow.set_settings(s);
                     flow.set_templates(&with_panel);
                     flow.set_hands(hands_on(d));
+                    // What is said of the game's window after the login
+                    // (2026.11.14): once, and never "nothing clicked".
+                    std::vector<std::string> window_said;
+                    flow.on_step([&window_said](AutoLogin::Step, const std::string& detail) {
+                        if (detail.rfind("the game's window", 0) == 0) window_said.push_back(detail);
+                    });
                     const bool in = flow.run();
                     check(in && flow.attempts_made() == 1 && d.clicks.size() == 3 && on_row(d.clicks[0]),
                           "Kênh 3 is clicked on the list's own panel, not at the offsets from its title, and the "
                           "crossing goes on once the list is gone (" + std::to_string(d.clicks.size()) + " clicks)");
+                    check(window_said.size() == 1 && window_said[0].find("nothing clicked") == std::string::npos &&
+                              (d.placed == 1) == flow.moved_to_corner() && d.placed <= 1,
+                          "after that login the game's window is put in its corner once, by the pretend hook -- " +
+                              (window_said.empty() ? std::string("nothing said") : window_said[0]));
+                    AutoLogin::Settings off = s;
+                    off.move_to_corner = false;
+                    Wide e;
+                    e.shows = list(true, false, -1);
+                    int stage2 = 0;
+                    e.on_click = [&](int x, int y) {
+                        if (stage2 == 0 && on_row(POINT{ x, y })) { stage2 = 1; e.shows = at_bar; }
+                        else if (stage2 == 1 && on_bar(x, y)) { stage2 = 2; e.shows = choose; }
+                        else if (stage2 == 2 && choose_at(x, y)) { stage2 = 3; e.shows = hud; }
+                    };
+                    AutoLogin flow_off;
+                    flow_off.set_settings(off);
+                    flow_off.set_templates(&with_panel);
+                    flow_off.set_hands(hands_on(e));
+                    check(flow_off.run() && e.placed == 0 && !flow_off.moved_to_corner(),
+                          "with move_game_to_corner=false the same login leaves the game's window where it is");
                 }
                 {
                     // Found by the panel alone; the click lights the row and
@@ -8880,22 +8022,119 @@ void test_auto_login() {
                     // Never taken: three clicks on the row, and Ket Noi, there
                     // beside the list all along, never pressed -- it would join
                     // the channel the game had chosen. The attempt fails as one.
+                    // The wait is the owner's 30 s from the first click
+                    // (2026-11-15); the crossing naps on the real clock, so it
+                    // is cut to 6 s here -- three shares of 2 s -- and the
+                    // default is pinned below.
                     Wide d;
                     d.shows = list(false, true, 0);
                     AutoLogin flow;
                     flow.set_settings(s);
                     flow.set_templates(&with_panel);
                     flow.set_hands(hands_on(d));
+                    flow.set_react_ms(6000);
                     int ended = 0;
                     flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                    const auto began = std::chrono::steady_clock::now();
                     const bool in = flow.run();
+                    const long long took = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                      std::chrono::steady_clock::now() - began)
+                                                                      .count());
                     bool rows_only = d.clicks.size() == 3;
                     for (const POINT& p : d.clicks) rows_only = rows_only && on_row(p);
                     check(!in && rows_only && flow.why() == AutoLogin::Why::ChannelNotTaken && ended == 0,
                           "a row never taken: clicked three times, Ket Noi never pressed, the attempt failed for "
                           "it, and the game left on the list (" + std::to_string(d.clicks.size()) + " clicks)");
-                    check(flow.advice().find("không vào kênh khác") != std::string::npos,
-                          "and the player is told the game did not take the channel, and no other was joined");
+                    // Not much later: the look at the game after a failed
+                    // attempt (judge_game, about 2.3 s) comes on top.
+                    check(took >= 6000 && took < 6000 + 6000,
+                          "and it was given up only once the whole wait from the first click had passed, and not "
+                          "much later (" + std::to_string(took) + " ms for a 6000 ms wait)");
+                    check(flow.advice().find("không vào kênh khác") != std::string::npos &&
+                              flow.advice().find("30 giây") != std::string::npos,
+                          "and the player is told the game did not take the channel in 30 s, and no other was joined");
+                    check(flow.trouble().find("nothing after") != std::string::npos,
+                          "and the log says nothing came after the wait -- " + flow.trouble());
+                }
+                {
+                    // The wait is the owner's 30 s unless a test cuts it
+                    // (2026-11-15: "sẽ có thêm 30 giây chờ phản ứng").
+                    AutoLogin plain;
+                    check(kReactMs == 30'000 && plain.react_ms() == kReactMs,
+                          "a crossing watches a channel row or a message's Xác Nhận for kReactMs, 30 s, from the "
+                          "first click (" + std::to_string(plain.react_ms()) + " ms)");
+                }
+                {
+                    // A slow game: the row lights only 2.5 s after the click --
+                    // past the 2 s each click was watched for before
+                    // 2026-11-15, when a second click went. Now it is watched
+                    // for, clicked once, and the crossing goes on at once.
+                    Wide d;
+                    d.shows = list(false, true, -1);
+                    int stage = 0;          // the list, the click on its way, lit, the characters, the world
+                    std::chrono::steady_clock::time_point clicked_at{};
+                    d.on_click = [&](int x, int y) {
+                        if (stage == 0 && on_row(POINT{ x, y })) {
+                            stage = 1;
+                            clicked_at = std::chrono::steady_clock::now();
+                        } else if (stage == 2 && on_bar(x, y)) {
+                            stage = 3;
+                            d.shows = choose;
+                        } else if (stage == 3 && choose_at(x, y)) {
+                            stage = 4;
+                            d.shows = hud;
+                        }
+                    };
+                    d.on_grab = [&] {
+                        if (stage == 1 && std::chrono::steady_clock::now() - clicked_at >= std::chrono::milliseconds(2500)) {
+                            stage = 2;
+                            d.shows = list(false, true, 2);
+                        }
+                    };
+                    AutoLogin flow;
+                    flow.set_settings(s);
+                    flow.set_templates(&with_panel);
+                    flow.set_hands(hands_on(d));
+                    std::vector<std::string> slow;
+                    flow.on_step([&slow](AutoLogin::Step, const std::string& detail) {
+                        if (detail.rfind("the game took ", 0) == 0) slow.push_back(detail);
+                    });
+                    const bool in = flow.run();
+                    int row_clicks = 0;
+                    for (const POINT& p : d.clicks) row_clicks += on_row(p) ? 1 : 0;
+                    check(in && stage == 4 && row_clicks == 1 && flow.attempts_made() == 1,
+                          "a row the game lights 2.5 s after its click: clicked once, waited for, and the crossing "
+                          "goes on in the same attempt (" + std::to_string(row_clicks) + " row clicks)");
+                    check(slow.size() == 1,
+                          "and how long the game took is said once -- " + (slow.empty() ? std::string("nothing") : slow[0]));
+                }
+                {
+                    // A stop (DỪNG, F12) while a row is watched for: the
+                    // crossing ends within a moment, not after 30 s.
+                    Wide d;
+                    d.shows = list(false, true, 0);
+                    AutoLogin flow;
+                    std::chrono::steady_clock::time_point clicked_at{};
+                    d.on_click = [&](int, int) {
+                        if (d.clicks.size() == 1) clicked_at = std::chrono::steady_clock::now();
+                    };
+                    d.on_grab = [&] {
+                        if (!d.clicks.empty() &&
+                            std::chrono::steady_clock::now() - clicked_at >= std::chrono::milliseconds(1000))
+                            flow.cancel();
+                    };
+                    flow.set_settings(s);
+                    flow.set_templates(&with_panel);
+                    flow.set_hands(hands_on(d));
+                    const auto began = std::chrono::steady_clock::now();
+                    const bool in = flow.run();
+                    const long long took = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                                      std::chrono::steady_clock::now() - began)
+                                                                      .count());
+                    check(!in && d.clicks.size() == 1 && took < 5000,
+                          "a stop a second into the 30 s watch of a channel row ends the crossing at once, nothing "
+                          "clicked again (" + std::to_string(d.clicks.size()) + " clicks, " + std::to_string(took) +
+                              " ms)");
                 }
                 {
                     // The Ket Noi bar on its own, with the file's "middle":
@@ -8916,6 +8155,238 @@ void test_auto_login() {
                               bar.width == 247 && bar.height == 42,
                           "Ket Noi is clicked on its own words, 66,21 into the 247x42 bar -- never at its "
                           "middle, the seam with Ket Thuc");
+                }
+
+                // ---- the game's message after Ket Noi (2026.11.13b) ----
+                // Users, via the owner: "khi auto login xong thì có thông báo
+                // dialog 'Tài khoản đã bị chặn', cần ấn nút xác nhận ở dialog
+                // này rồi thực hiện login lại" -- after Kết Nối, at once, no
+                // limit. The client's one message box (grabbed/dialog_ok, its
+                // Xác Nhận the pair's label) put over the Ket Noi bar.
+                Frame ok_box, pair_pic, ask_pic;
+                if (!TemplateStore::load_one(AutoLogin::kMessageNotice, names, ok_box) ||
+                    !TemplateStore::load_one(AutoLogin::kMessageButtons, names, pair_pic)) {
+                    skip("the message's pictures are not installed\n");
+                } else {
+                    TemplateStore with_msg = with_panel;
+                    with_msg.put(AutoLogin::kMessageNotice, ok_box);
+                    with_msg.put(AutoLogin::kMessageButtons, pair_pic);
+                    if (TemplateStore::load_one(AutoLogin::kMessageAsk, names, ask_pic))
+                        with_msg.put(AutoLogin::kMessageAsk, ask_pic);
+                    const int mx = 140, my = 150;
+                    Frame bar_msg = at_bar;
+                    paste(bar_msg, ok_box, mx, my);
+                    const auto in_box = [&](int x, int y) {
+                        return x >= mx && x < mx + ok_box.width && y >= my && y < my + ok_box.height;
+                    };
+                    ScreenRect label;
+                    check(AutoLogin::message_in(bar_msg, with_msg, &label) && in_box(label.x, label.y) &&
+                              !AutoLogin::message_in(at_bar, with_msg) &&
+                              !AutoLogin::message_in(list(true, true, -1), with_msg) &&
+                              !AutoLogin::message_in(choose, with_msg) && !AutoLogin::message_in(hud, with_msg) &&
+                              !AutoLogin::message_in(bar_msg, with_panel),
+                          "the message is made out over the Ket Noi bar, its label inside its box -- and not on the "
+                          "bar alone, the channel list, the characters or the world, nor without its pictures");
+                    {
+                        // Three messages in a row after Ket Noi, then the
+                        // characters: each closed and Ket Noi pressed again, at
+                        // once, none of it an attempt -- one attempt is enough.
+                        Wide d;
+                        d.shows = at_bar;
+                        int messages_left = 3, bar_clicks = 0, box_clicks = 0;
+                        bool done = false;
+                        d.on_click = [&](int x, int y) {
+                            if (on_bar(x, y) && d.shows.pixels == at_bar.pixels) {
+                                ++bar_clicks;
+                                d.shows = messages_left-- > 0 ? bar_msg : choose;
+                            } else if (in_box(x, y) && d.shows.pixels == bar_msg.pixels) {
+                                ++box_clicks;
+                                d.shows = at_bar;
+                            } else if (choose_at(x, y)) {
+                                done = true;
+                                d.shows = hud;
+                            }
+                        };
+                        AutoLogin::Settings one = s;
+                        one.attempts = 1;
+                        AutoLogin flow;
+                        flow.set_settings(one);
+                        flow.set_templates(&with_msg);
+                        flow.set_hands(hands_on(d));
+                        int ended = 0;
+                        flow.set_end_client([&ended] { ++ended; return true; }, 0);
+                        const bool in = flow.run();
+                        check(in && done && flow.messages_closed() == 3 && flow.attempts_made() == 1 &&
+                                  bar_clicks == 4 && box_clicks == 3 && ended == 0,
+                              "three messages after Ket Noi: each one's Xác Nhận clicked once and Ket Noi pressed "
+                              "again, then in -- one attempt of one, nothing ended (" +
+                                  std::to_string(bar_clicks) + " Ket Noi, " + std::to_string(box_clicks) +
+                                  " Xác Nhận, " + std::to_string(flow.messages_closed()) + " closed)");
+                    }
+                    {
+                        // A message that stays: its Xác Nhận clicked three
+                        // times, then this attempt is over -- Why::Message.
+                        // The clicks are spread over the owner's 30 s from the
+                        // first (2026-11-15), cut here to 7.5 s -- three shares
+                        // of kMessageGoneMs -- for the crossing naps on the
+                        // real clock.
+                        Wide d;
+                        d.shows = bar_msg;
+                        AutoLogin::Settings one = s;
+                        one.attempts = 1;
+                        AutoLogin flow;
+                        flow.set_settings(one);
+                        flow.set_templates(&with_msg);
+                        flow.set_hands(hands_on(d));
+                        flow.set_react_ms(3 * AutoLogin::kMessageGoneMs);
+                        flow.set_end_client([] { return true; }, 0);
+                        const auto began = std::chrono::steady_clock::now();
+                        const bool in = flow.run();
+                        const long long took = static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began)
+                                .count());
+                        int box_clicks = 0, other = 0;
+                        for (const POINT& p : d.clicks) (in_box(p.x, p.y) ? box_clicks : other)++;
+                        check(!in && flow.why() == AutoLogin::Why::Message && box_clicks == AutoLogin::kMessageClicks &&
+                                  other == 0 && flow.messages_closed() == 0,
+                              "a message that stays up: its Xác Nhận clicked " +
+                                  std::to_string(AutoLogin::kMessageClicks) +
+                                  " times and nothing under it, then the attempt over for it (" +
+                                  std::to_string(box_clicks) + " in the box, " + std::to_string(other) + " else)");
+                        check(took >= 3 * AutoLogin::kMessageGoneMs && took < 3 * AutoLogin::kMessageGoneMs + 6000,
+                              "and only once the whole wait from the first click had passed, not much later (" +
+                                  std::to_string(took) + " ms)");
+                        check(flow.advice().find("Xác Nhận") != std::string::npos &&
+                                  flow.advice().find("30 giây") != std::string::npos,
+                              "and the player told the game's message would not close in 30 s");
+                    }
+                    {
+                        // A slow game (2026-11-15): the message goes only 3 s
+                        // after its Xác Nhận -- past the 2.5 s each click was
+                        // watched for before, when a second click went through
+                        // to whatever was under it. Clicked once, waited for,
+                        // and Ket Noi pressed again.
+                        Wide d;
+                        d.shows = at_bar;
+                        int stage = 0;      // Ket Noi, the message, its click on the way, Ket Noi again, in
+                        int box_clicks = 0;
+                        std::chrono::steady_clock::time_point clicked_at{};
+                        d.on_click = [&](int x, int y) {
+                            if (stage == 0 && on_bar(x, y)) {
+                                stage = 1;
+                                d.shows = bar_msg;
+                            } else if (stage >= 1 && stage <= 2 && in_box(x, y)) {
+                                ++box_clicks;
+                                if (stage == 1) clicked_at = std::chrono::steady_clock::now();
+                                stage = 2;
+                            } else if (stage == 3 && on_bar(x, y)) {
+                                stage = 4;
+                                d.shows = choose;
+                            } else if (stage == 4 && choose_at(x, y)) {
+                                stage = 5;
+                                d.shows = hud;
+                            }
+                        };
+                        d.on_grab = [&] {
+                            if (stage == 2 && std::chrono::steady_clock::now() - clicked_at >= std::chrono::milliseconds(3000)) {
+                                stage = 3;
+                                d.shows = at_bar;
+                            }
+                        };
+                        AutoLogin::Settings one = s;
+                        one.attempts = 1;
+                        AutoLogin flow;
+                        flow.set_settings(one);
+                        flow.set_templates(&with_msg);
+                        flow.set_hands(hands_on(d));
+                        flow.set_end_client([] { return true; }, 0);
+                        const bool in = flow.run();
+                        check(in && stage == 5 && box_clicks == 1 && flow.messages_closed() == 1,
+                              "a message the game shuts 3 s after its Xác Nhận: clicked once, waited for, then Ket Noi "
+                              "again and in (" + std::to_string(box_clicks) + " Xác Nhận)");
+                    }
+                    {
+                        // A stop while the message is watched for: over at
+                        // once, not after 30 s.
+                        Wide d;
+                        d.shows = bar_msg;
+                        AutoLogin::Settings one = s;
+                        one.attempts = 1;
+                        AutoLogin flow;
+                        std::chrono::steady_clock::time_point clicked_at{};
+                        d.on_click = [&](int, int) {
+                            if (d.clicks.size() == 1) clicked_at = std::chrono::steady_clock::now();
+                        };
+                        d.on_grab = [&] {
+                            if (!d.clicks.empty() &&
+                                std::chrono::steady_clock::now() - clicked_at >= std::chrono::milliseconds(1000))
+                                flow.cancel();
+                        };
+                        flow.set_settings(one);
+                        flow.set_templates(&with_msg);
+                        flow.set_hands(hands_on(d));
+                        flow.set_end_client([] { return true; }, 0);
+                        const auto began = std::chrono::steady_clock::now();
+                        const bool in = flow.run();
+                        const long long took = static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began)
+                                .count());
+                        check(!in && d.clicks.size() == 1 && took < 5000,
+                              "a stop a second into the 30 s watch of the message ends the crossing at once (" +
+                                  std::to_string(d.clicks.size()) + " clicks, " + std::to_string(took) + " ms)");
+                    }
+                    {
+                        // A message on one frame only: never clicked.
+                        Wide d;
+                        d.shows = at_bar;
+                        bool flash = false, done = false;
+                        d.on_click = [&](int x, int y) {
+                            if (on_bar(x, y) && !flash) {
+                                flash = true;
+                                d.shows = bar_msg;
+                            } else if (choose_at(x, y)) {
+                                done = true;
+                                d.shows = hud;
+                            }
+                        };
+                        d.on_grab = [&] {
+                            if (flash && d.shows.pixels == bar_msg.pixels) d.shows = choose;
+                        };
+                        AutoLogin::Settings one = s;
+                        one.attempts = 1;
+                        AutoLogin flow;
+                        flow.set_settings(one);
+                        flow.set_templates(&with_msg);
+                        flow.set_hands(hands_on(d));
+                        const bool in = flow.run();
+                        bool none_in_box = true;
+                        for (const POINT& p : d.clicks) none_in_box = none_in_box && !in_box(p.x, p.y);
+                        check(in && done && none_in_box && flow.messages_closed() == 0,
+                              "a message on one look alone is never clicked");
+                    }
+                    {
+                        // Without its pictures: as before -- nothing clicked on
+                        // it, the channel list waited for and not seen.
+                        Wide d;
+                        d.shows = at_bar;
+                        d.on_click = [&](int x, int y) {
+                            if (on_bar(x, y)) d.shows = bar_msg;
+                        };
+                        AutoLogin::Settings one = s;
+                        one.attempts = 1;
+                        for (auto& p : one.pages) p.wait_s = std::min(p.wait_s, 3);
+                        AutoLogin flow;
+                        flow.set_settings(one);
+                        flow.set_templates(&with_panel);
+                        flow.set_hands(hands_on(d));
+                        flow.set_end_client([] { return true; }, 0);
+                        const bool in = flow.run();
+                        bool none_in_box = true;
+                        for (const POINT& p : d.clicks) none_in_box = none_in_box && !in_box(p.x, p.y);
+                        check(!in && none_in_box && flow.messages_closed() == 0 &&
+                                  flow.why() != AutoLogin::Why::Message,
+                              "without the message's pictures: nothing clicked on it, as before");
+                    }
                 }
             }
             if (wide) DestroyWindow(wide);
@@ -9327,14 +8798,12 @@ void test_no_real_input() {
         // send_key and type_key, whatever asks for it.
         InputManager keys;
         keys.set_target_window(hidden);
-        bool down = true, pressed = true, typed = true, typed_high = true, dropped = true;
+        bool down = true, pressed = true, typed = true, typed_high = true;
         check(refusals_in([&] { down = keys.key_down(VK_DOWN); }) == 0 && !down &&
                   refusals_in([&] { pressed = keys.key_press(VK_DOWN, 1); }) == 0 && !pressed &&
                   refusals_in([&] { typed = keys.type_key(VK_DOWN, false, 1); }) == 0 && !typed &&
-                  refusals_in([&] { typed_high = keys.type_key(0x10028u, true, 1); }) == 0 && !typed_high &&
-                  refusals_in([&] { dropped = keys.jump_down(); }) == 0 && !dropped,
-              "↓ held, pressed, typed (0x10028 too) or under the old jump_down: false, and refused before the "
-              "switch is even asked");
+                  refusals_in([&] { typed_high = keys.type_key(0x10028u, true, 1); }) == 0 && !typed_high,
+              "↓ held, pressed or typed (0x10028 too): false, and refused before the switch is even asked");
         // The drop asks the switch first of all: before the window, the
         // game in front, or its own go_on.
         int asked = 0;
@@ -10740,6 +10209,91 @@ void test_crash_watch() {
                   CrashWatch::next_move(gone, true, true) == M::Restart,
               "and one that was up and fell over, or hangs, is a restart");
     }
+
+    // max_restarts over an hour (2026.11.24, the owner: "Kiểm tra các phần
+    // khác xem có phần nào không làm được thì dừng không, cần thay cơ chế này
+    // bằng 1 cơ chế khác" -- his default of question 3): five in any hour, the
+    // sixth waits until the oldest is an hour old, and never a give-up.
+    {
+        const std::uint64_t hour = CrashWatch::kRestartWindowMs;
+        check(hour == 3'600'000 && CrashWatch::kCrossAgainMs == 30'000 && CrashWatch::Settings{}.max_restarts == 5,
+              "the window is an hour, a crossing not in is made again 30 s on, and 5 restarts an hour as shipped");
+        const std::uint64_t t0 = 50'000'000;
+        std::vector<std::uint64_t> times;
+        bool five = true;
+        for (std::uint64_t i = 0; i < 5; ++i) {
+            const std::uint64_t now = t0 + i * 10 * 60'000;        // one every 10 minutes
+            five = five && CrashWatch::restart_allowed(times, now, 5, hour);
+            times.push_back(now);
+        }
+        std::uint64_t next = 0;
+        const std::uint64_t sixth = t0 + 45 * 60'000;
+        const bool sixth_waits = !CrashWatch::restart_allowed(times, sixth, 5, hour, &next);
+        check(five && sixth_waits && next == t0 + hour,
+              "5 in 40 minutes allowed; the 6th, at 45 minutes, waits until the oldest is an hour old (" +
+                  std::to_string(next > t0 ? (next - t0) / 60'000 : 0) + " min after the first)");
+        check(!CrashWatch::restart_allowed(times, t0 + hour - 1, 5, hour) &&
+                  CrashWatch::restart_allowed(times, t0 + hour, 5, hour),
+              "refused a millisecond before that, allowed at it");
+        check(CrashWatch::restarts_within(times, sixth, hour) == 5 &&
+                  CrashWatch::restarts_within(times, t0 + hour, hour) == 4 &&
+                  CrashWatch::restarts_within(times, t0 + 2 * hour, hour) == 0,
+              "the restarts of the last hour: 5 at 45 minutes, 4 once the first is an hour old, none an hour later");
+        check(!CrashWatch::restart_allowed(times, sixth, 3, hour, &next) && next == times[2] + hour,
+              "more than max in the hour (max lowered to 3): one more once the 3rd oldest is an hour old");
+        check(!CrashWatch::restart_allowed({}, t0, 0, hour, &next) && next == t0 + hour,
+              "max_restarts 0: none at all, asked again an hour on");
+        check(!CrashWatch::restart_allowed({ t0 + 5'000 }, t0, 1, hour, &next) && next == t0 + 5'000 + hour,
+              "a time stamped after now still counts -- the clocks' difference never wraps round");
+        check(CrashWatch::restart_allowed({ t0 }, t0 + hour, 1, hour) && CrashWatch::restart_allowed({}, t0, 1, hour),
+              "one an hour: allowed again at the hour, and at once with none made");
+
+        // A client that falls over every 5 minutes for 6 hours, as the keeper
+        // takes it: a restart whenever one is allowed, the rest waited for --
+        // at most 5 in any hour, and they never stop coming.
+        std::vector<std::uint64_t> made;
+        int refused = 0;
+        for (std::uint64_t now = t0; now < t0 + 6 * hour; now += 5 * 60'000) {
+            if (CrashWatch::restart_allowed(made, now, 5, hour)) made.push_back(now);
+            else ++refused;
+        }
+        bool capped = true;
+        for (const std::uint64_t at : made) {
+            int in_hour = 0;            // made in the hour that starts with this one
+            for (const std::uint64_t t : made) in_hour += t >= at && t < at + hour ? 1 : 0;
+            capped = capped && in_hour <= 5;
+        }
+        check(capped && made.size() >= 25 && made.size() <= 30 && refused > 0 && made.back() >= t0 + 5 * hour,
+              "a crash every 5 minutes for 6 hours: " + std::to_string(made.size()) + " restarts, at most 5 in any "
+              "hour, the last in the 6th hour -- " + std::to_string(refused) + " waited for, none given up");
+
+        // The 2026.11.24 review: once the hour's are used, one more every
+        // window / max after the newest (12 min at 5 an hour), never sooner
+        // than the gap given -- no hour's sleep with the game closed.
+        std::uint64_t at = 0;
+        const std::uint64_t quick = t0 + 4 * 60'000;
+        std::vector<std::uint64_t> burst;
+        for (std::uint64_t i = 0; i < 5; ++i) burst.push_back(t0 + i * 60'000);     // 5 crashes in 4 minutes
+        check(!CrashWatch::restart_spaced(burst, quick + 60'000, 5, hour, 30'000, &at) && at == quick + 12 * 60'000 &&
+                  !CrashWatch::restart_spaced(burst, quick + 12 * 60'000 - 1, 5, hour, 30'000) &&
+                  CrashWatch::restart_spaced(burst, quick + 12 * 60'000, 5, hour, 30'000),
+              "5 restarts in 4 minutes: the 6th 12 min after the newest, not when the oldest is an hour old");
+        check(CrashWatch::restart_spaced(times, t0 + 10 * 60'000 * 4 + 12 * 60'000, 5, hour, 30'000) &&
+                  !CrashWatch::restart_spaced({}, t0, 0, hour, 30'000, &at) && at == t0 + hour &&
+                  CrashWatch::restart_spaced({}, t0, 5, hour, 30'000) &&
+                  !CrashWatch::restart_spaced({ t0 }, t0 + 10'000, 1, 20'000, 30'000, &at) && at == t0 + 20'000,
+              "within the hour's max as restart_allowed; max 0 still none; never sooner than the gap given, nor later "
+              "than the hour's own");
+        // A client that dies on each launch, crossed again 30 s on (the
+        // keeper's Retry, then Gone): every relaunch counted -- 5 at once,
+        // then one every 12 min, never more.
+        std::vector<std::uint64_t> relaunched;
+        for (std::uint64_t now = t0; now < t0 + 2 * hour; now += 90'000)
+            if (CrashWatch::restart_spaced(relaunched, now, 5, hour, 30'000)) relaunched.push_back(now);
+        check(relaunched.size() >= 12 && relaunched.size() <= 16,
+              "a client dying on each launch, tried every 90 s for 2 hours: " + std::to_string(relaunched.size()) +
+                  " relaunches (5, then one every 12 min) -- spaced, never stopped");
+    }
 }
 
 void test_find_bars() {
@@ -11419,75 +10973,6 @@ void test_map_table() {
           "the same place name exists twice, as different maps");
 }
 
-void test_world_anchor() {
-    section("Tying the wire to the screen");
-
-    // A level with creatures scattered along it, and a camera looking at part
-    // of it. The transform the anchor has to recover: world = 1.25 * (screen +
-    // camera) + 900. Nothing tells it either number.
-    const double kScale = 1.25;
-    const double kOffset = 900.0;
-
-    std::vector<Monster> world;
-    const double spots[] = { 120, 480, 910, 1180, 1600, 2050, 2390, 2800,
-                             3310, 3720, 4080, 4550, 5010, 5400 };
-    std::int32_t id = 1;
-    for (double sx : spots) {
-        Monster m;
-        m.id = id++;
-        m.pos.x = static_cast<float>(kScale * sx + kOffset);
-        m.pos.y = static_cast<float>(kScale * 600.0 + kOffset);
-        world.push_back(m);
-    }
-
-    // Walk the camera along, showing whatever falls in the window. Each
-    // creature is seen many times from different camera positions, which is
-    // the whole point: no single frame shows enough of them at once.
-    WorldAnchor anchor;
-    for (int step = 0; step < 240; ++step) {
-        const double camera = step * 20.0;
-        std::vector<Nameplate> seen;
-        for (double sx : spots) {
-            const double on_screen = sx - camera;
-            if (on_screen < 0.0 || on_screen > 1000.0) continue;
-            Nameplate n;
-            n.plate = ScreenRect{ static_cast<int>(on_screen) - 10,
-                                  static_cast<int>(600.0 - camera * 0.0) - 6, 20, 12 };
-            n.bar = ScreenRect{ n.plate.x, n.plate.y + 14, 20, 3 };
-            seen.push_back(n);
-        }
-        anchor.observe(world, seen, camera, 0.0);
-    }
-
-    const WorldAnchor::Fix fix = anchor.current();
-    check(fix.valid, "finds the transform from landmarks seen at different times");
-    if (fix.valid) {
-        check(std::fabs(fix.scale - kScale) < 0.08,
-              "recovers the scale (" + std::to_string(fix.scale) + ")");
-        Vec2 w;
-        check(anchor.to_world(500, 600, 1000.0, 0.0, w), "converts a screen position");
-        const double want = kScale * (500 + 1000.0) + kOffset;
-        check(std::fabs(w.x - want) < 90.0,
-              "puts a screen position in the right place (" + std::to_string(w.x) +
-              " vs " + std::to_string(want) + ")");
-    }
-
-    // And a screen with nothing recognisable on it says nothing. A bot that
-    // invents a position when it cannot see walks into walls.
-    {
-        WorldAnchor blind;
-        for (int step = 0; step < 240; ++step) {
-            std::vector<Nameplate> seen;
-            Nameplate n;
-            n.plate = ScreenRect{ 400, 600, 20, 12 };
-            n.bar = ScreenRect{ 400, 614, 20, 3 };
-            seen.push_back(n);
-            blind.observe(world, seen, step * 20.0, 0.0);
-        }
-        check(!blind.current().valid, "one landmark is not a position");
-    }
-}
-
 void test_glyph_font() {
     section("Glyph font");
 
@@ -11692,6 +11177,87 @@ void test_glyph_font() {
                 }
             }
 
+            // A digit the reader missed (2026.11.13). On 2026-11-13 the
+            // owner's "11552/18590" came back as 1/552 (0%) and "18590/18590"
+            // as 1859/18590 (10%): a '1' taken for 'l' (a 1 px stem beside
+            // its 3 px) and a '0' for 'O' or 'D', both passed over as not
+            // digits. Drawn here as the game draws, measured on the owner's
+            // captures ("14915/16209", "15047/18590"): digits 6 px apart, the
+            // '1' at its cell's start, the slash 3 px (left empty: the set
+            // has no glyph for it) -- across it 9 px. A missed digit's cell
+            // is left empty, what passing it over leaves.
+            {
+                const int cell = 6, slash = 3;
+                const auto pitched_read = [&](const std::string& cells, int& c, int& m) -> int {
+                    Frame pf = make_frame(400, 60);
+                    for (int y = 0; y < pf.height; ++y)
+                        for (int x = 0; x < pf.width; ++x) put_px(pf, x, y, 20, 0, 0);
+                    int width = 0;
+                    for (const char ch : cells) width += ch == '/' ? slash : cell;
+                    const int left = bar.right() - 7 - width;
+                    const int top = box.y + 5;
+                    int pen = left;
+                    for (const char ch : cells) {
+                        const int at = pen;
+                        pen += ch == '/' ? slash : cell;
+                        if (ch < '0' || ch > '9') continue;      // the slash, or a missed digit
+                        Frame digit;
+                        if (!font.render_line(std::string(1, ch), digit)) return -1;
+                        for (int y = 0; y < digit.height; ++y)
+                            for (int x = 0; x < digit.width; ++x) {
+                                std::uint8_t r, g, b;
+                                digit.get(x, y, r, g, b);
+                                if (r < 60 && g < 60 && b < 60) continue;
+                                put_px(pf, at + x, top + y, r, g, b);
+                            }
+                    }
+                    c = 0;
+                    m = 0;
+                    bool refused = false;
+                    if (VitalsReader::read_numbers(pf, bar, font, c, m, &refused)) return 1;
+                    return refused ? 2 : 0;   // 2: figures there, refused for a hole
+                };
+                struct Case {
+                    const char* cells;
+                    int want, c, m;
+                    const char* what;
+                };
+                const Case cases[] = {
+                    { "11552/18590", 1, 11552, 18590, "reads 11552/18590, two '1's side by side" },
+                    { "18590/18590", 1, 18590, 18590, "reads 18590/18590, a '0' beside the slash" },
+                    { "0/18590", 1, 0, 18590, "reads 0/18590 (the slash a cell and a half across)" },
+                    { "15047/18590", 1, 15047, 18590, "reads 15047/18590, as on the owner's capture" },
+                    { "1859 /18590", 2, 0, 0,
+                      "refuses \"1859?/18590\" (the '0' beside the slash missed: 15 px across), not 1859/18590 "
+                      "(10%) -- the owner's MP of 2026-11-13" },
+                    { "1 552/18590", 2, 0, 0,
+                      "refuses \"1?552/18590\" (a '1' missed inside the figure), not 1/552 (0%) -- the owner's "
+                      "HP of 2026-11-13" },
+                    { "18590/ 8590", 2, 0, 0, "refuses \"18590/?8590\" (the maximum's first digit missed)" },
+                    { "11552/18 90", 2, 0, 0, "refuses \"11552/18?90\" (a digit missed inside the maximum)" },
+                    { "1552/1859 ", 1, 1552, 1859,
+                      "a missed last digit leaves no hole on the pitch: left to the believed maximum "
+                      "(max_believed) and the packets' check (figure_lost_a_digit)" },
+                };
+                int got[sizeof cases / sizeof cases[0]] = {};
+                int cs[sizeof cases / sizeof cases[0]] = {}, ms[sizeof cases / sizeof cases[0]] = {};
+                bool drawn_all = true;
+                for (std::size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+                    got[i] = pitched_read(cases[i].cells, cs[i], ms[i]);
+                    drawn_all = drawn_all && got[i] >= 0;
+                }
+                if (!drawn_all) {
+                    skip("no glyph for a digit of the pitched captions\n");
+                } else {
+                    for (std::size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+                        const Case& k = cases[i];
+                        const bool ok = got[i] == k.want && (k.want != 1 || (cs[i] == k.c && ms[i] == k.m));
+                        check(ok, std::string(k.what) + " -- got " + std::to_string(got[i]) + ", " +
+                                      std::to_string(cs[i]) + "/" + std::to_string(ms[i]));
+                    }
+                }
+            }
+
             // And still reads them with something else written further right.
             //
             // Reaching past the bar's measured end is what makes the above
@@ -11728,6 +11294,30 @@ void test_glyph_font() {
         int current = -1, maximum = -1;
         check(!VitalsReader::read_numbers(plain, bar, font, current, maximum),
               "refuses a bar with no figures on it");
+    }
+
+    // The maximum a read gives, against the one believed (2026.11.13): seen
+    // twice in a row before it is believed, as before, and a read with
+    // another gives no figures until then -- 1/552 against 18590 is a misread.
+    {
+        int believed = -1, pending = -1, seen = 0;
+        const bool first = VitalsReader::max_believed(18590, believed, pending, seen);
+        check(first && believed == -1 && pending == 18590,
+              "the first maximum is taken while none is believed, and is pending");
+        const bool second = VitalsReader::max_believed(18590, believed, pending, seen);
+        check(second && believed == 18590 && pending == -1, "seen twice: believed");
+        check(!VitalsReader::max_believed(552, believed, pending, seen) && believed == 18590 && pending == 552,
+              "1/552 against a believed 18590: no figures from it");
+        check(VitalsReader::max_believed(18590, believed, pending, seen) && pending == -1,
+              "the believed one again: figures, and the stray forgotten");
+        check(!VitalsReader::max_believed(19200, believed, pending, seen),
+              "a new maximum (a level, a buff): not on its first sight");
+        check(VitalsReader::max_believed(19200, believed, pending, seen) && believed == 19200,
+              "on its second in a row: believed, and its figures taken");
+        check(!VitalsReader::max_believed(552, believed, pending, seen) &&
+                  !VitalsReader::max_believed(553, believed, pending, seen) &&
+                  !VitalsReader::max_believed(552, believed, pending, seen) && believed == 19200,
+              "strays that differ read to read are never believed");
     }
 }
 
@@ -12170,286 +11760,6 @@ void test_mob_detector_forgets() {
         hold_new.store(false);
         d2.stop();
     }
-}
-
-// --------------------------------------------------------- camera tracking
-
-/// Scenery: enough detail that one alignment is clearly better than another,
-/// which is the whole premise. `ox` slides it, standing in for the camera.
-void paint_scenery(Frame& f, int ox, int oy) {
-    for (int y = 0; y < f.height; ++y) {
-        for (int x = 0; x < f.width; ++x) {
-            const int wx = x + ox, wy = y + oy;
-            // A deterministic hash, so the same world point is the same colour
-            // whichever frame it appears in.
-            unsigned h = static_cast<unsigned>(wx * 374761393 + wy * 668265263);
-            h = (h ^ (h >> 13)) * 1274126177u;
-            const std::uint8_t v = static_cast<std::uint8_t>(40 + (h >> 24) % 180);
-            put_px(f, x, y, v, static_cast<std::uint8_t>(v / 2 + 30),
-                   static_cast<std::uint8_t>(200 - v / 2));
-        }
-    }
-}
-
-void test_camera_tracker() {
-    section("Camera tracking");
-
-    const ScreenRect area{ 100, 100, 600, 400 };
-
-    const auto shift_between = [&](int ox, int oy, int& dx, int& dy, float& conf) {
-        Frame a = make_frame(1024, 768), b = make_frame(1024, 768);
-        paint_scenery(a, 0, 0);
-        paint_scenery(b, ox, oy);
-
-        std::vector<std::uint8_t> prev(static_cast<std::size_t>(area.w) * area.h);
-        for (int y = 0; y < area.h; ++y)
-            for (int x = 0; x < area.w; ++x) {
-                std::uint8_t r, g, bl;
-                a.get(area.x + x, area.y + y, r, g, bl);
-                prev[static_cast<std::size_t>(y) * area.w + x] =
-                    static_cast<std::uint8_t>((r * 77 + g * 151 + bl * 28) >> 8);
-            }
-        return CameraTracker::estimate_shift(prev, area.w, area.h, b, area, 0, 0, dx, dy, conf);
-    };
-
-    int dx = 0, dy = 0;
-    float conf = 0.0f;
-
-    check(shift_between(0, 0, dx, dy, conf), "a still view matches");
-    check(dx == 0 && dy == 0, "and reports no movement");
-    check(conf > CameraTracker::kMinConfidence, "with confidence");
-
-    check(shift_between(17, 0, dx, dy, conf), "a view scrolled right matches");
-    check(dx == 17 && dy == 0, "and the distance is exact");
-
-    check(shift_between(-23, 9, dx, dy, conf), "a diagonal scroll matches");
-    check(dx == -23 && dy == 9, "and both distances are exact");
-
-    // Detail is what makes one alignment better than another. A flat wall is
-    // equally good everywhere, and reporting the best of those as a position
-    // would send the bot walking off on nothing.
-    {
-        Frame flat = make_frame(1024, 768);
-        for (int y = 0; y < flat.height; ++y)
-            for (int x = 0; x < flat.width; ++x) put_px(flat, x, y, 70, 70, 74);
-        std::vector<std::uint8_t> prev(static_cast<std::size_t>(area.w) * area.h, 70);
-        check(!CameraTracker::estimate_shift(prev, area.w, area.h, flat, area, 0, 0, dx, dy, conf),
-              "a featureless view reports nothing rather than guessing");
-    }
-
-    // Accumulated over several frames, which is what makes a position.
-    {
-        CameraTracker t;
-        t.set_play_area(area);
-        int ox = 0;
-        const int steps[] = { 0, 12, 12, 12, -30, 5, 5 };
-        for (int s : steps) {
-            ox += s;
-            Frame f = make_frame(1024, 768);
-            paint_scenery(f, ox, 0);
-            t.update(f);
-        }
-        const auto fx = t.fix();
-        check(fx.tracking, "still tracking after a run of frames");
-        check(static_cast<int>(std::lround(fx.x)) == ox,
-              "the camera position is the sum of the steps, with no drift");
-        check(fx.updates == 6, "one update per frame after the first");
-
-        // A world position survives the view moving: the same place in the
-        // level, seen from two different camera positions, is the same number.
-        double wx = 0.0, wy = 0.0;
-        t.to_world(300 - ox, 200, wx, wy);
-        check(std::fabs(wx - 300.0) < 1.5, "a fixed point in the level keeps its position");
-
-        int sx = 0, sy = 0;
-        t.to_screen(wx, wy, sx, sy);
-        check(std::abs(sx - (300 - ox)) <= 1, "and converts back to where it is on screen");
-
-        t.reset();
-        check(!t.fix().tracking, "reset forgets where we were");
-    }
-}
-
-// -------------------------------------------------------- finding fields
-
-/// A packet stream shaped like the real one: several creatures sharing an
-/// opcode, each with its own id, and only one of them moving the way the
-/// screen said we did.
-void test_field_finder() {
-    section("Finding packet fields");
-
-    FieldFinder finder;
-
-    // Payload: [0..3] id, [4..5] x, [6..7] y, [8..9] something unrelated.
-    const auto make = [](std::uint32_t id, int x, int y, int junk) {
-        GamePacket p;
-        p.opcode = 0x0038;
-        p.from_server = true;
-        p.payload.assign(32, 0);
-        for (int i = 0; i < 4; ++i)
-            p.payload[i] = static_cast<std::uint8_t>(id >> (i * 8));
-        p.payload[4] = static_cast<std::uint8_t>(x);
-        p.payload[5] = static_cast<std::uint8_t>(x >> 8);
-        p.payload[6] = static_cast<std::uint8_t>(y);
-        p.payload[7] = static_cast<std::uint8_t>(y >> 8);
-        p.payload[8] = static_cast<std::uint8_t>(junk);
-        p.payload[9] = static_cast<std::uint8_t>(junk >> 8);
-        return p;
-    };
-
-    // The character walks; the server reports it at four times the screen
-    // scale with its origin a long way off. Three other creatures mill about.
-    std::mt19937 rng(1234);
-    for (int t = 0; t < 200; ++t) {
-        const double screen_x = 500.0 + 9.0 * t;
-        const double screen_y = 640.0 + 40.0 * std::sin(t * 0.1);
-        finder.set_truth(screen_x, screen_y, 100.0f, 50.0f, true);
-
-        finder.on_packet(make(0xAABBCCDD,
-                              static_cast<int>(12000 + 4.0 * screen_x),
-                              static_cast<int>(3000 + 4.0 * screen_y),
-                              static_cast<int>(rng() % 60000)));
-
-        for (std::uint32_t other = 1; other <= 3; ++other)
-            finder.on_packet(make(0x1000 + other,
-                                  static_cast<int>(rng() % 20000),
-                                  static_cast<int>(rng() % 2000),
-                                  static_cast<int>(rng() % 60000)));
-    }
-
-    const auto summary = finder.summarise();
-    check(!summary.empty(), "summarises what it captured");
-    if (!summary.empty()) {
-        check(summary[0].count == 800, "counts every packet");
-        check(summary[0].entities == 4, "separates the four creatures");
-    }
-
-    const auto found = finder.analyse(20, 0.9);
-    check(!found.empty(), "finds something");
-
-    bool got_x = false, got_y = false;
-    for (const auto& c : found) {
-        if (!c.grouped || c.id_value != 0xAABBCCDD) continue;
-        if (c.reading.offset == 4 && c.reading.width == 2 && !c.reading.big_endian &&
-            c.quantity == FieldFinder::Quantity::X) {
-            got_x = true;
-            check(std::fabs(c.scale - 4.0) < 0.1, "recovers the x scale");
-            check(c.correlation > 0.99, "x correlates almost perfectly");
-        }
-        if (c.reading.offset == 6 && c.reading.width == 2 && !c.reading.big_endian &&
-            c.quantity == FieldFinder::Quantity::Y) {
-            got_y = true;
-            check(std::fabs(c.scale - 4.0) < 0.2, "recovers the y scale");
-        }
-    }
-    check(got_x, "finds the x field, attributed to the right creature");
-    check(got_y, "finds the y field");
-
-    // The decisive property. Another creature's position must not be claimed
-    // as ours, or the bot would steer by a monster.
-    bool impostor = false;
-    for (const auto& c : found)
-        if (c.quantity == FieldFinder::Quantity::X && c.grouped &&
-            c.id_value != 0xAABBCCDD && std::abs(c.correlation) > 0.95)
-            impostor = true;
-    check(!impostor, "no other creature is matched to our movement");
-
-    // Health never changed, so nothing can correlate with it. A constant is
-    // not a match however perfectly it fits -- and getting this wrong is how
-    // the first run came back full of NaNs sorted to the top.
-    bool claimed_hp = false;
-    for (const auto& c : found)
-        if (c.quantity == FieldFinder::Quantity::Hp) claimed_hp = true;
-    check(!claimed_hp, "a quantity that never varied produces no matches");
-
-    for (const auto& c : found)
-        check(std::isfinite(c.correlation) && std::isfinite(c.scale),
-              "every reported number is finite");
-}
-
-// ----------------------------------------------------------- map identity
-
-void test_minimap_tracker() {
-    section("Map identity");
-
-    const auto layout = MinimapTracker::default_layout(1024, 768);
-    check(layout.valid(), "default layout is usable");
-    check(layout.body.right() <= 1024, "minimap sits inside the window");
-    check(layout.title.bottom() <= layout.body.y, "the name bar is above the picture");
-
-    // Two different maps, and the same map a moment later with its weather
-    // moved on. The first pair has to come out different and the second pair
-    // the same, or either the map never changes or it changes constantly.
-    const auto paint_map = [&](Frame& f, int seed, int noise) {
-        for (int y = 0; y < f.height; ++y)
-            for (int x = 0; x < f.width; ++x)
-                put_px(f, x, y, 20, 24, 30);
-        for (int i = 0; i < 40; ++i) {
-            const int bx = layout.body.x + ((i * 37 + seed * 53) % (layout.body.w - 20));
-            const int by = layout.body.y + ((i * 23 + seed * 17) % (layout.body.h - 10));
-            for (int y = by; y < by + 9; ++y)
-                for (int x = bx; x < bx + 19; ++x)
-                    put_px(f, x, y, static_cast<std::uint8_t>(60 + (i * 7 + seed) % 180),
-                           150, 90);
-        }
-        // Weather: a scatter of bright specks, a couple of percent of the area.
-        for (int i = 0; i < noise; ++i) {
-            const int bx = layout.body.x + (i * 991 + noise * 7) % layout.body.w;
-            const int by = layout.body.y + (i * 131 + noise * 3) % layout.body.h;
-            put_px(f, bx, by, 240, 240, 255);
-        }
-    };
-
-    Frame a = make_frame(1024, 768), a2 = make_frame(1024, 768), b = make_frame(1024, 768);
-    paint_map(a,  1, 0);
-    paint_map(a2, 1, 400);      // same map, different weather
-    paint_map(b,  2, 0);
-
-    const auto fingerprint_of = [&](const Frame& f) {
-        MinimapTracker t;
-        t.set_layout(layout);
-        for (int i = 0; i < 8; ++i) t.update(f);
-        return t.fingerprint();
-    };
-
-    const std::uint64_t fa = fingerprint_of(a);
-    const std::uint64_t fa2 = fingerprint_of(a2);
-    const std::uint64_t fb = fingerprint_of(b);
-
-    check(fa != 0, "a fingerprint is produced");
-    check(MinimapTracker::distance(fa, fa2) <= MinimapTracker::kSameMap,
-          "weather does not make it a different map");
-    check(MinimapTracker::distance(fa, fb) > MinimapTracker::kSameMap,
-          "a different map reads as different");
-
-    // It must not announce a change before the picture has settled: the panel
-    // churns through intermediate states while a map loads.
-    MinimapTracker t;
-    t.set_layout(layout);
-    t.update(a);
-    check(t.fingerprint() == 0, "says nothing after one frame");
-    for (int i = 0; i < 8; ++i) t.update(a);
-    check(t.fingerprint() == fa, "settles on the map once it holds steady");
-    check(t.take_changed(), "reports the change once");
-    check(!t.take_changed(), "and not again");
-
-    // Names, remembered against the picture.
-    MapBook book;
-    book.set_name(fa, "Thanh Am Coc");
-    book.set_map_file(fa, "t14_s0");
-    check(book.name_for(fa) == "Thanh Am Coc", "remembers a name");
-    check(book.name_for(fa2) == "Thanh Am Coc",
-          "recognises the same map through its weather");
-    check(book.name_for(fb).empty(), "does not claim to know a different map");
-    check(book.size() == 1, "one entry");
-
-    const std::string path = temp_file("gobot_maps_test.ini");
-    check(book.save(path), "saves");
-    MapBook back;
-    check(back.load(path), "loads");
-    check(back.name_for(fa) == "Thanh Am Coc", "name survives");
-    check(back.map_file_for(fa) == "t14_s0", "linked map file survives");
-    std::remove(path.c_str());
 }
 
 // ----------------------------------------------------------------- hunter
@@ -14408,6 +13718,11 @@ struct PretendDeath {
     /// it is back -- what the live game does then is not known yet.
     int  blink_ms = 0;
     std::chrono::steady_clock::time_point hidden_until{};
+    /// A slow PC's (2026-11-15): the question drawn this long after the item
+    /// button; the panel gone this long after Xác Nhận, with an item. 0: at once.
+    int  ask_lag_ms = 0, revive_lag_ms = 0;
+    std::chrono::steady_clock::time_point ask_from{}, gone_from{};
+    bool going = false;                 ///< revived, the panel still drawn until gone_from
     std::function<void(Frame&)> also;   ///< anything else on the screen
     PretendClock time;
 
@@ -14427,11 +13742,15 @@ struct PretendDeath {
     int village_clicks = 0, cash_clicks = 0, tick_clicks = 0, other_clicks = 0;
     std::vector<std::pair<int, int>> clicks;
 
+    /// The panel as drawn now: a revive the game is slow to show keeps it up.
+    bool panel_shown() const {
+        return panel && time.t >= hidden_until && !(going && time.t >= gone_from);
+    }
     Frame render() const {
         Frame f = base;
-        if (panel && time.t >= hidden_until)
+        if (panel_shown())
             blit(f, *store->get("grabbed/chardeadpanel"), kPanelX, kPanelY);
-        if (question) blit(f, *store->get("grabbed/hoisinh_confirm"), kAskX, kAskY);
+        if (question && time.t >= ask_from) blit(f, *store->get("grabbed/hoisinh_confirm"), kAskX, kAskY);
         if (bin) blit(f, *store->get("grabbed/del_item_confirm_1"), 120, 120);
         if (also) also(f);
         return f;
@@ -14451,18 +13770,28 @@ struct PretendDeath {
             if (village().contains(x, y)) ++village_clicks;
             if (cash().contains(x, y)) ++cash_clicks;
             if (tick1().contains(x, y) || tick2().contains(x, y)) ++tick_clicks;
-            if (question && confirm().contains(x, y)) {
+            if (question && time.t >= ask_from && confirm().contains(x, y)) {
                 ++confirm_clicks;
                 question = false;
-                if (has_item) panel = false;
-                else if (blink_ms > 0) hidden_until = time.t + std::chrono::milliseconds(blink_ms);
+                if (has_item && revive_lag_ms > 0) {
+                    going = true;
+                    gone_from = time.t + std::chrono::milliseconds(revive_lag_ms);
+                } else if (has_item) {
+                    panel = false;
+                } else if (blink_ms > 0) {
+                    hidden_until = time.t + std::chrono::milliseconds(blink_ms);
+                }
             } else if (question && cancel().contains(x, y)) {
                 ++cancel_clicks;
                 question = false;
             } else if (panel && !question && item().contains(x, y)) {
                 ++item_clicks;
-                if (asks) question = true;
-                else if (has_item) panel = false;
+                if (asks) {
+                    question = true;
+                    ask_from = time.t + std::chrono::milliseconds(ask_lag_ms);
+                } else if (has_item) {
+                    panel = false;
+                }
             } else {
                 ++other_clicks;
             }
@@ -14507,8 +13836,9 @@ bool revive_with_no_hands(HWND window, Reviver::Turn& turn, int& tries, std::str
 }
 
 /// Reviving, as GoC does it: the panel found by two corners of its buttons,
-/// its revive-item button, Xác Nhận on the question -- three tries a death,
-/// never the village or Cash, and nothing while the bin's dialog is up.
+/// its revive-item button, Xác Nhận on the question -- three tries a round
+/// (another round asked for with again(), 2026.11.24), never the village or
+/// Cash, and nothing while the bin's dialog is up.
 void test_reviver() {
     section("Revive: the death panel's item button, then Xác Nhận; never the village");
     const auto started = std::chrono::steady_clock::now();
@@ -14713,8 +14043,9 @@ void test_reviver() {
         g.base = whole_frame ? world : corner;
         return g;
     };
-    // What the reviver told: each revive, each stop request, and the two the
-    // alerts are raised from -- a death begun, and a death come back from.
+    // What the reviver told: each revive, each death out of tries (a stop
+    // request until 2026.11.24), and the two the alerts are raised from -- a
+    // death begun, and a death come back from.
     struct Heard { int revived = 0, out = 0, deaths = 0, back = 0; std::string reason; };
     const auto reviver_for = [&](PretendDeath& g, Heard& heard) {
         auto r = std::make_unique<Reviver>(no_window, store, [&g](Frame& out) {
@@ -14800,16 +14131,17 @@ void test_reviver() {
         macro.stop();
     }
     {
-        // The alerts' two hooks, and the stop request: a death with a revive
-        // item tells of the death and of the revive, once each; one without
-        // tells of the death and asks for the stop, once each.
+        // The alerts' two hooks, and the out-of-tries one: a death with a
+        // revive item tells of the death and of the revive, once each; one
+        // without tells of the death and of the tries run out, once each --
+        // and, with no again() asked for here, clicks no more.
         PretendDeath with = game();
         Heard a;
         auto r1 = reviver_for(with, a);
         r1->set_hp([&with] { return with.panel ? 0.0f : 80.0f; });
         (void)turns_for(*r1, with, 30);
         check(a.deaths == 1 && a.revived == 1 && a.back == 1 && a.out == 0,
-              "a death with a revive item: told dead once, revived once, no stop -- " +
+              "a death with a revive item: told dead once, revived once, never out of tries -- " +
                   std::to_string(a.deaths) + " / " + std::to_string(a.back) + " / " +
                   std::to_string(a.out));
         PretendDeath without = game();
@@ -14821,7 +14153,7 @@ void test_reviver() {
         (void)turns_for(*r2, without, 300, 30000);
         check(b.deaths == 1 && b.back == 0 && b.revived == 0 && b.out == 1 &&
                   without.item_clicks == 3,
-              "a death with no revive item: told dead once, never revived, one stop request -- " +
+              "a death with no revive item: told dead once, never revived, out of tries told once -- " +
                   std::to_string(b.deaths) + " / " + std::to_string(b.back) + " / " +
                   std::to_string(b.out));
     }
@@ -14851,7 +14183,7 @@ void test_reviver() {
         }
         check(heard.out == 0 && heard.revived >= 6 && heard.deaths >= heard.revived && heard.deaths <= heard.revived + 1 &&
                   heard.back == heard.revived && never_wrong(g),
-              "dead again 3 s after each revive, items left: revived every time and never stopped -- " +
+              "dead again 3 s after each revive, items left: revived every time and never out of tries -- " +
                   std::to_string(heard.revived) + " revives, " + std::to_string(heard.deaths) +
                   " deaths told, " + std::to_string(heard.out) + " stop requests");
     }
@@ -14859,8 +14191,8 @@ void test_reviver() {
         // No revive item, HP unreadable, and the game puts the panel away
         // for 10 s after each Xác Nhận. Each of those passes for a revive,
         // but the panel is back long before the character has stayed up for
-        // a minute: the same death, so the third try is still the last, and
-        // the bot stops.
+        // a minute: the same death, so the third try is still the round's
+        // last, and it runs out (the bot stopped there until 2026.11.24).
         for (const int blink : { 10000, 15000 }) {
             PretendDeath g = game();
             g.has_item = false;
@@ -14872,9 +14204,9 @@ void test_reviver() {
             check(heard.out == 1 && g.item_clicks == 3 && g.confirm_clicks == 3 && heard.deaths == 1 &&
                       heard.back == 0 && never_wrong(g),
                   "no item, HP unreadable, the panel away " + std::to_string(blink / 1000) +
-                      " s after each Xác Nhận: still 3 tries, one death told, then the stop -- " +
+                      " s after each Xác Nhận: still 3 tries, one death told, then out of tries -- " +
                       std::to_string(g.item_clicks) + " tries, " + std::to_string(heard.revived) +
-                      " taken for revives, " + std::to_string(heard.out) + " stop requests");
+                      " taken for revives, out of tries told " + std::to_string(heard.out) + " time(s)");
         }
     }
     {
@@ -14947,7 +14279,7 @@ void test_reviver() {
                   " item clicks, " + std::to_string(g.confirm_clicks) + " Xác Nhận");
         check(heard.out == 1 && count(Reviver::Turn::Failed) == 2 && r->out_of_tries() &&
                   heard.reason.find("revive items") != std::string::npos,
-              "then one stop request, with the reason, and no 4th click in ten minutes");
+              "then out of tries told once, with the reason, and no 4th click in ten minutes with no again() asked");
         if (asks) {
             // Alive for a while, and dead again: a new death, with its own tries.
             g.panel = false;
@@ -14973,6 +14305,102 @@ void test_reviver() {
               "the panel gone for 2 s between tries is the same death: still 3 tries in all");
     }
     {
+        // 2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không
+        // làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác" --
+        // the bot no longer stops when the tries run out. No revive item, and
+        // another round asked for Reviver::kRoundGapMs after each ran out, as
+        // GoBot's window asks (revive_loop): three more tries a round, never
+        // the village or Cash, the out-of-tries hook still once for the
+        // death. Revived by hand, the death is over, and the next is told
+        // again.
+        check(Reviver::kRoundGapMs == kReactMs && Reviver::kRoundGapMs == 30'000 && Reviver::kAttempts == 3,
+              "a round of 3 tries run out, the next one is asked for kRoundGapMs on: the owner's 30 s");
+        PretendDeath g = game();
+        g.has_item = false;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        // When each item click went out, on the pretend clock.
+        std::vector<std::chrono::steady_clock::time_point> item_at;
+        auto hands = g.hands();
+        const auto click = hands.click;
+        hands.click = [&g, &item_at, click](int x, int y) {
+            const int before = g.item_clicks;
+            const bool ok = click(x, y);
+            if (g.item_clicks > before) item_at.push_back(g.time.t);
+            return ok;
+        };
+        r->set_hands(hands);
+        // The worker's turns, a little over a second apart, with again() a
+        // round's kRoundGapMs after its first OutOfTries.
+        bool waiting = false;
+        std::chrono::steady_clock::time_point next{};
+        int asked = 0;
+        const auto run_for = [&](int seconds) {
+            const auto until = g.time.t + std::chrono::seconds(seconds);
+            while (g.time.t < until) {
+                const Reviver::Turn t = r->turn();
+                if (t == Reviver::Turn::Alive || t == Reviver::Turn::Revived) waiting = false;
+                if (t == Reviver::Turn::OutOfTries) {
+                    if (!waiting) {
+                        waiting = true;
+                        next = g.time.t + std::chrono::milliseconds(Reviver::kRoundGapMs);
+                    } else if (g.time.t >= next) {
+                        waiting = false;
+                        r->again();
+                        ++asked;
+                    }
+                }
+                g.time.advance(1200);
+            }
+        };
+        run_for(5 * 60);
+        // A round's last click to the next round's first: the round's last
+        // attempt watched (kReviveWaitMs + kSettleBlindMs), then kRoundGapMs --
+        // never sooner, and no long pause beyond that.
+        bool gaps = item_at.size() > 3;
+        long long widest = 0;
+        for (std::size_t i = 3; i < item_at.size(); i += 3) {
+            const long long gap = std::chrono::duration_cast<std::chrono::milliseconds>(item_at[i] - item_at[i - 1]).count();
+            widest = std::max(widest, gap);
+            gaps = gaps && gap >= Reviver::kRoundGapMs &&
+                   gap <= Reviver::kRoundGapMs + Reviver::kReviveWaitMs + Reviver::kSettleBlindMs + 15'000;
+        }
+        check(asked >= 2 && r->round() == asked + 1 && g.item_clicks > 3 * asked &&
+                  g.item_clicks <= 3 * (asked + 1) && g.confirm_clicks == g.item_clicks && never_wrong(g) && gaps,
+              "no revive item for 5 minutes: " + std::to_string(asked + 1) + " rounds of 3, " +
+                  std::to_string(g.item_clicks) + " item clicks, never the village or Cash, at most " +
+                  std::to_string(widest / 1000) + " s from a round's last click to the next round's first");
+        check(heard.out == 1 && heard.deaths == 1 && heard.back == 0 && heard.revived == 0,
+              "and the death told once, out of tries told once -- not again for each round");
+
+        // Revived by hand while a round waits or goes on: the death over once
+        // the character has stayed up kAliveMs -- its rounds with it.
+        g.panel = false;
+        g.question = false;
+        run_for(10);
+        check(r->round() == 1 && r->tries() == 0 && !waiting,
+              "revived by hand: the death over after a few seconds up, round 1 and no try owed");
+        const int before = g.item_clicks;
+        g.panel = true;
+        run_for(150);
+        check(heard.deaths == 2 && heard.out == 2 && g.item_clicks >= before + 3 && never_wrong(g),
+              "dead again: told dead once more, its first round's 3 tries, and out of tries told once more");
+    }
+    {
+        // again() gives a round only once one has run out: before any try, or
+        // with a round under way, it changes nothing.
+        PretendDeath g = game();
+        g.has_item = false;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        r->again();
+        const bool idle = r->round() == 1 && r->tries() == 0;
+        (void)r->turn();                    // the first try: Failed
+        r->again();
+        check(idle && r->round() == 1 && r->tries() == 1 && heard.out == 0,
+              "again() with no round run out -- before any try, or 1 try of 3 used -- changes nothing");
+    }
+    {
         // HP read as 0 with the panel gone: not revived.
         PretendDeath g = game();
         Heard heard;
@@ -14996,13 +14424,14 @@ void test_reviver() {
         check(heard.revived == 0 && heard.out == 1 && g.item_clicks == 3 && g.confirm_clicks == 3 &&
                   never_wrong(g),
               "no item and the panel away for 1.5 s after Xác Nhận, HP unreadable: no revive "
-              "counted, 3 tries, then the stop -- " + std::to_string(g.item_clicks) + " tries");
+              "counted, 3 tries, then out of tries -- " + std::to_string(g.item_clicks) + " tries");
     }
     {
         // Away longer than that -- 5 s, past the 3 s it has to stay gone --
         // and each comes back as a "revive"; but a panel back before the
         // character has stayed up a minute is the same death, its tries not given
-        // back, so this still ends in the stop rather than going on.
+        // back, so this still runs out of the round's tries rather than
+        // clicking on.
         PretendDeath g = game();
         g.has_item = false;
         g.blink_ms = 5000;
@@ -15011,7 +14440,7 @@ void test_reviver() {
         (void)turns_for(*r, g, 60);
         (void)turns_for(*r, g, 180, 30000);
         check(heard.out == 1 && g.item_clicks == 3 && r->out_of_tries() && never_wrong(g),
-              "no item and the panel away for 5 s each time: still 3 tries in all, then the stop "
+              "no item and the panel away for 5 s each time: still 3 tries in all, then out of tries "
               "-- " + std::to_string(g.item_clicks) + " tries, " +
                   std::to_string(heard.revived) + " taken for revives");
     }
@@ -15027,6 +14456,73 @@ void test_reviver() {
         check(turn == Reviver::Turn::Revived && heard.revived == 1 && took < 5000,
               "with HP read above 0 a revive is taken at once, without the 3 s wait -- " +
                   std::to_string(took) + " ms of pretend time");
+    }
+    {
+        // A slow PC (2026-11-15, the owner: "sẽ có thêm 30 giây chờ phản ứng"): the revive question drawn
+        // 12 s after the item button, and the panel gone 20 s after Xác Nhận. Both waited for -- one
+        // attempt, one try, no click twice -- and how long the game took said. Until then the question
+        // had 3 s, and a late one cost a try: three of those stop the whole bot.
+        check(Reviver::kQuestionWaitMs == kReactMs && Reviver::kReviveWaitMs == kReactMs &&
+                  Reviver::kSettleBlindMs == 3000,
+              "the reviver waits kReactMs for the question and for the panel to go, kSettleBlindMs on top");
+        PretendDeath g = game();
+        g.ask_lag_ms = 12'000;
+        g.revive_lag_ms = 20'000;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        r->set_hp([&g] { return g.panel_shown() ? 0.0f : 80.0f; });
+        std::vector<std::string> said;
+        r->on_report([&said](const std::string& line) { said.push_back(line); });
+        const auto before = g.time.t;
+        const auto turn = r->turn();
+        const long long took = g.time.ms_since(before);
+        int slow = 0;
+        for (const std::string& s : said) slow += s.rfind("the game took ", 0) == 0 ? 1 : 0;
+        check(turn == Reviver::Turn::Revived && g.item_clicks == 1 && g.confirm_clicks == 1 && g.clicks.size() == 2 &&
+                  heard.revived == 1 && never_wrong(g) && took >= 32'000 && took <= 32'000 + 5'000 && slow == 2,
+              "the question 12 s late and the revive 20 s late: both waited for, revived on the first attempt in " +
+                  std::to_string(took) + " ms, " + std::to_string(slow) + " slow steps said");
+    }
+    {
+        // Nothing at all after the item button for kReactMs: the attempt given up as before -- one try --
+        // about kReactMs and kSettleBlindMs after the click, not much later.
+        PretendDeath g = game();
+        g.ask_lag_ms = 600'000;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        r->set_hp([&g] { return g.panel_shown() ? 0.0f : 80.0f; });
+        const auto before = g.time.t;
+        const auto turn = r->turn();
+        const long long took = g.time.ms_since(before);
+        check(turn == Reviver::Turn::Failed && g.item_clicks == 1 && g.confirm_clicks == 0 && r->tries() == 1 &&
+                  took >= Reviver::kReviveWaitMs + Reviver::kSettleBlindMs &&
+                  took <= Reviver::kReviveWaitMs + Reviver::kSettleBlindMs + 3'000,
+              "nothing after the item button: one try used, given up " + std::to_string(took) + " ms on");
+    }
+    {
+        // A stop 7 s into the wait for the question: the turn ends at the next look.
+        PretendDeath g = game();
+        g.ask_lag_ms = 600'000;
+        Heard heard;
+        auto r = reviver_for(g, heard);
+        std::chrono::steady_clock::time_point clicked{};
+        r->set_stop([&g, &clicked] {
+            return g.item_clicks > 0 && g.time.t >= clicked + std::chrono::milliseconds(7'000);
+        });
+        auto hands = g.hands();
+        const auto click = hands.click;
+        hands.click = [&g, &clicked, click](int x, int y) {
+            const bool ok = click(x, y);
+            if (g.item_clicks == 1 && clicked == std::chrono::steady_clock::time_point{}) clicked = g.time.t;
+            return ok;
+        };
+        r->set_hands(hands);
+        const auto turn = r->turn();
+        const long long after = g.time.ms_since(clicked);
+        check(turn == Reviver::Turn::Stopped && g.item_clicks == 1 && g.confirm_clicks == 0 && after >= 7'000 &&
+                  after <= 7'000 + 1'000,
+              "a stop 7 s into the long wait for the question: stopped " + std::to_string(after) +
+                  " ms after the click, nothing more clicked");
     }
     {
         // Nothing is clicked in any of these, however long they last.
@@ -15375,8 +14871,9 @@ void test_screen_layout() {
         check(!loaded.fixed, "and a party.ini with only the old numbers is not fixed");
 
         // F12 or DỪNG in the middle of an invite: nothing more is clicked,
-        // and it ends then -- not after the menu's wait and the four seconds
-        // of watching it, with the window that reads F12 frozen behind it.
+        // and it ends then -- not after the menu's wait and the watch of it
+        // (up to kReactMs each since 2026-11-15), with the window that reads
+        // F12 frozen behind it.
         int pressed = 0;
         bool stop = false;
         PlayerList stoppable;
@@ -15424,6 +14921,143 @@ void test_screen_layout() {
         const bool row_refused = !unclicked.invite(no_window, capture, TemplateStore{}, first, &why);
         check(row_refused && tried == 1 && why.find("row") != std::string::npos,
               "a row click refused ends the invite there, with nothing more clicked -- " + why);
+
+        // A slow game (2026-11-15, the owner: "sẽ có thêm 30 giây chờ phản ứng"), on a pretend clock:
+        // the row's menu looked for, not waited for blind, and Req Party pressed once two looks show it;
+        // the press seen to land up to kReactMs on; never a second press. A stop in a long wait ends it.
+        {
+            struct SlowList {
+                std::uint64_t t = 1'000;
+                int menu_after = 0, gone_after = 0;     ///< ms from the row's click / Req Party's; -1 never
+                bool picked = false, req = false;
+                std::uint64_t picked_at = 0, req_at = 0, stop_at = ~0ull;
+                std::vector<std::pair<int, int>> clicks;
+                PlayerList list;
+                SlowList(const PlayerList::Settings& s, int menu, int gone) : menu_after(menu), gone_after(gone) {
+                    list.set_settings(s);
+                    list.place(1212, 139, 1280, 720);
+                    list.set_click([this](int x, int y) {
+                        clicks.emplace_back(x, y);
+                        if (!picked) {
+                            picked = true;
+                            picked_at = t;
+                        } else if (!req) {
+                            req = true;
+                            req_at = t;
+                        }
+                        return true;
+                    });
+                    list.set_clock([this] { return t; }, [this](int ms) { t += static_cast<std::uint64_t>(ms); });
+                    list.set_grab([this](Frame& f) {
+                        f = make_frame(1280, 720);
+                        const bool drawn = picked && menu_after >= 0 &&
+                                           t >= picked_at + static_cast<std::uint64_t>(menu_after);
+                        const bool gone = req && gone_after >= 0 && t >= req_at + static_cast<std::uint64_t>(gone_after);
+                        // The three buttons, pale, under the row picked (menu_up's rectangle).
+                        if (drawn && !gone) fill(f, ScreenRect{ 1088, 188, 60, 66 }, 200, 200, 200);
+                        return true;
+                    });
+                }
+                bool invite(std::string& why) {
+                    PlayerList::Row row;
+                    row.index = 0;
+                    row.y = 182;
+                    InputManager none;
+                    ScreenCapture capture;
+                    return list.invite(none, capture, TemplateStore{}, row, &why, [this] { return t >= stop_at; });
+                }
+            };
+            {
+                SlowList s(measured, 9'000, 6'000);
+                std::string reason;
+                const bool ok = s.invite(reason);
+                check(s.list.react_ms() == kReactMs && ok && s.clicks.size() == 2 && s.clicks[1].first == 1118 &&
+                          s.clicks[1].second == 220 && s.req_at >= s.picked_at + 9'000 &&
+                          s.req_at <= s.picked_at + 9'000 + 600 && s.t <= s.req_at + 6'000 + 400,
+                      "a menu drawn 9 s after the row's click and gone 6 s after Req Party: waited for, Req Party "
+                      "pressed once at " + std::to_string(s.req_at - s.picked_at) + " ms, the invite gone -- " + reason);
+            }
+            {
+                SlowList s(measured, -1, 0);
+                std::string reason;
+                const bool ok = s.invite(reason);
+                check(!ok && s.clicks.size() == 1 && s.t >= s.picked_at + kReactMs &&
+                          s.t <= s.picked_at + kReactMs + 300 && reason.find("did not come up within 30 s") != std::string::npos,
+                      "a menu that never comes: Req Party never pressed, given up " +
+                          std::to_string(s.t - s.picked_at) + " ms after the row's click -- " + reason);
+            }
+            {
+                SlowList s(measured, 300, -1);
+                std::string reason;
+                const bool ok = s.invite(reason);
+                check(!ok && s.clicks.size() == 2 && s.t >= s.req_at + kReactMs && s.t <= s.req_at + kReactMs + 450 &&
+                          reason.find("still up after 30 seconds") != std::string::npos,
+                      "a menu still up kReactMs after Req Party: no second press, given up " +
+                          std::to_string(s.t - s.req_at) + " ms after it -- " + reason);
+            }
+            {
+                SlowList s(measured, -1, 0);
+                s.stop_at = s.t + 250 + 7'000;     // the focus nap, then 7 s into the wait for the menu
+                std::string reason;
+                const bool ok = s.invite(reason);
+                check(!ok && reason == "stopped" && s.clicks.size() == 1 && s.t <= s.stop_at + 50,
+                      "a stop 7 s into the wait for the menu: over at once, nothing more pressed");
+            }
+            // The list's own button: ONE press, the list looked for until it shows, up to kReactMs -- never
+            // the second press nor the third "to put it back" it had, which on a slow game flipped it shut.
+            {
+                Frame icon = make_frame(20, 20), grid = make_frame(60, 30);
+                std::mt19937 noise(1116);
+                for (Frame* p : { &icon, &grid })
+                    for (std::size_t i = 0; i < p->pixels.size(); i += 4) {
+                        p->pixels[i] = static_cast<std::uint8_t>(noise() % 256);
+                        p->pixels[i + 1] = static_cast<std::uint8_t>(noise() % 256);
+                        p->pixels[i + 2] = static_cast<std::uint8_t>(noise() % 256);
+                        p->pixels[i + 3] = 255;
+                    }
+                TemplateStore pics;
+                pics.put(PlayerList::Settings{}.open_picture, icon);
+                pics.put(PlayerList::Settings{}.grid_picture, grid);
+                const auto opens_after = [&](int ms, std::uint64_t stop_after) {
+                    struct Out { bool ok = false; int presses = 0; std::uint64_t took = 0; std::string why; } out;
+                    std::uint64_t t = 5'000, pressed_at = 0;
+                    PlayerList list;
+                    list.set_settings(measured);
+                    list.set_click([&](int, int) {
+                        if (++out.presses == 1) pressed_at = t;
+                        return true;
+                    });
+                    list.set_clock([&t] { return t; }, [&t](int step) { t += static_cast<std::uint64_t>(step); });
+                    list.set_grab([&](Frame& f) {
+                        f = make_frame(1280, 720);
+                        blit(f, icon, 1212, 139);
+                        if (out.presses > 0 && ms >= 0 && t >= pressed_at + static_cast<std::uint64_t>(ms))
+                            blit(f, grid, 1000, 250);
+                        return true;
+                    });
+                    InputManager none;
+                    ScreenCapture capture;
+                    const std::uint64_t start = t;
+                    out.ok = list.ensure_open(none, capture, pics, &out.why,
+                                              [&] { return t >= start + stop_after; });
+                    out.took = pressed_at != 0 ? t - pressed_at : 0;
+                    return out;
+                };
+                const auto late = opens_after(12'000, ~0ull / 2);
+                check(late.ok && late.presses == 1 && late.took >= 12'000 && late.took <= 12'300,
+                      "the list drawn 12 s after its button: one press, open " + std::to_string(late.took) +
+                          " ms after it -- " + late.why);
+                const auto never = opens_after(-1, ~0ull / 2);
+                check(!never.ok && never.presses == 1 && never.took >= static_cast<std::uint64_t>(kReactMs) &&
+                          never.took <= static_cast<std::uint64_t>(kReactMs) + 300 &&
+                          never.why.find("within 30 s") != std::string::npos,
+                      "a list that never shows: one press -- not three -- given up " + std::to_string(never.took) +
+                          " ms after it -- " + never.why);
+                const auto stopped = opens_after(-1, 250 + 7'000);
+                check(!stopped.ok && stopped.presses == 1 && stopped.why == "stopped" && stopped.took <= 7'000 + 100,
+                      "a stop 7 s into the wait for the list: over at once, one press");
+            }
+        }
 #ifdef GOBOT_SOURCE_DIR
         {
             // Every click of the list's goes where the game is, and only there.
@@ -16019,8 +15653,10 @@ void test_macro_buffs() {
     }
     {
         // The keys held for 40 s by a dialog -- the trash pass's hold: the
-        // buff that fell due then goes out right after, the skill keeps to
-        // its own beat.
+        // buff that fell due then goes out right after, and the skill too
+        // (2026.11.21, the audit's B16: a skill refused Held keeps its turn,
+        // tried again kGatePollMs on, rather than waiting a whole interval
+        // more), then keeps to its own beat from there.
         Rig rig({ key('Z', 5000, 0, 0), key('F', 60000, 0, 0) });
         const std::uint64_t t0 = rig.p.t;
         rig.run(59'500);
@@ -16038,9 +15674,18 @@ void test_macro_buffs() {
               "a buff that fell due while the keys were held for 40 s goes out within 3 s of "
               "the hold ending -- " + std::to_string(first_f ? first_f - freed : 0) + " ms");
         const auto z = rig.p.when('Z');
-        check(!z.empty() && std::all_of(z.begin(), z.end(),
-                                        [&](std::uint64_t t) { return (t - t0) % 5000 == 0; }),
-              "while a skill refused the same way keeps to its own 5-s beat, as before");
+        std::vector<std::uint64_t> before_hold, after_hold;
+        for (const std::uint64_t t : z) (t < freed ? before_hold : after_hold).push_back(t);
+        bool beat_after = after_hold.size() >= 3;
+        for (std::size_t i = 1; i < after_hold.size(); ++i)
+            beat_after = beat_after && after_hold[i] - after_hold[i - 1] == 5000;
+        check(!before_hold.empty() &&
+                  std::all_of(before_hold.begin(), before_hold.end(),
+                              [&](std::uint64_t t) { return (t - t0) % 5000 == 0; }) &&
+                  !after_hold.empty() && after_hold[0] - freed <= 200 && beat_after,
+              "while the skill refused the same way goes within kGatePollMs of the hold ending (" +
+                  (after_hold.empty() ? std::string("never") : std::to_string(after_hold[0] - freed) + " ms") +
+                  "), then on its own 5-s beat");
     }
     {
         // The game not in front: a buff is tried again every couple of
@@ -16488,13 +16133,13 @@ void test_front_keeper() {
     check(keep.find("GetAsyncKeyState(vk)") != std::string::npos && keep.find("VK_LBUTTON") != std::string::npos &&
               keep.find("look.input_age_ms = GetTickCount() - last.dwTime") != std::string::npos &&
               keep.find("look.in_front = fg_pid != 0 && fg_pid == game_pid") != std::string::npos &&
-              keep.find("look.running = simple_running() || bot_running_;") != std::string::npos &&
+              keep.find("look.running = simple_running()") != std::string::npos &&
               keep.find("keeper_crossing()") != std::string::npos &&
               keep.find("front_keeper_.due(") != std::string::npos &&
               keep.find("front_keeper_.tried(") != std::string::npos,
           "the GUI asks it with the mouse buttons and how long the input has been still, a window of the game's "
-          "own process counted as the game in front, whatever DỪNG LẠI stops and the packet bot as running, and "
-          "the keeper's crossing");
+          "own process counted as the game in front, whatever DỪNG LẠI stops as running, and the keeper's "
+          "crossing");
     check(keep.find("look.listening = !hp_low && simple_listening_ != 0 && fg != nullptr && "
                     "fg == static_cast<HWND>(main_hwnd_);") != std::string::npos &&
               keep.find("const bool hp_low = vitals_running_ && hp >= 0.0f && "
@@ -16562,463 +16207,6 @@ void test_front_keeper() {
 #endif
 }
 
-/// The executor paused, as the GUI pauses it after a stop that may have left
-/// the trash bin's quantity dialog open.
-///
-/// Its queue presses whenever the packet bot is started -- armed, as here --
-/// and the only thing that kept it out of that dialog's box was the trash
-/// pass's hold on the coordinator, which the stop ends. Nothing reaches the
-/// keyboard in a test run -- there is no game window -- so what is watched is
-/// whether it asks the coordinator for the keys at all, which it does before
-/// it looks for the window: something holding them at the lowest priority
-/// loses them to a command that asks.
-void test_executor_pause() {
-    section("Executor: paused while the bin may be asking");
-
-    BotConfig cfg;
-    GameState state;
-    InputManager input;
-    ExecutionCoordinator coord;
-
-    // What the hold did, and why it is not enough: while the trash pass
-    // holds everything off a buff is refused, and once a stop ends that hold
-    // nothing refuses it.
-    coord.engage_critical("trash cleaning");
-    check(!coord.request("buff", Priority::Buff), "a buff is refused while the pass holds the keys");
-    coord.disengage_critical();
-    check(coord.request("buff", Priority::Buff), "and let through once the stop ends that hold");
-    coord.release("buff");
-
-    CommandExecutor exec(cfg, state, input, coord);
-    exec.arm();             // the packet bot started: unarmed, nothing asks, paused or not
-    exec.set_paused(true);
-    check(exec.paused(), "pauses");
-    check(coord.request("test", Priority::Idle), "something low holds the keys");
-    exec.start();
-    exec.enqueue(Command::buff('6', 0));
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    const auto held = exec.stats();
-    check(coord.held() && coord.current_owner() == "test",
-          "paused, a queued command does not ask for the keys -- held by '" + coord.current_owner() + "'");
-    check(held.held_paused > 0 && held.buffs_cast == 0,
-          "and is counted as held -- " + std::to_string(held.held_paused));
-    check(!exec.execute_now(Command::buff('6', 0)) && coord.current_owner() == "test",
-          "a command is refused before it asks for the keys");
-
-    // Let go: a command queued now asks.
-    exec.set_paused(false);
-    exec.enqueue(Command::buff('6', 0));
-    bool asked = false;
-    for (int i = 0; i < 40 && !asked; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        asked = coord.current_owner() != "test";
-    }
-    check(asked, "let go, a queued command asks for the keys again");
-    exec.stop();
-    check(exec.stats().buffs_cast == 0, "and with no game window, still nothing is pressed");
-}
-
-/// No potions and no buffs of the packet bot's own: they are the macro's,
-/// given the packets' HP and MP while the bot runs (packet_vitals). Its heal
-/// and buff threads drank beside the macro's potions for the same HP drop,
-/// each with its own tiers, cooldowns and stale-reading rules.
-void test_executor_no_sustain() {
-    section("Executor: no potions or buffs of its own -- they are the macro's");
-
-    BotConfig cfg;
-    GameState state;
-    state.update_self_hp(10, 100);           // low HP and MP from packets
-    state.update_self_mp(5, 100);
-    InputManager input;
-    ExecutionCoordinator coord;
-    check(coord.request("test", Priority::Idle), "something low holds the keys");
-
-    CommandExecutor exec(cfg, state, input, coord);
-    exec.arm();             // the packet bot started
-    exec.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(900));
-    check(coord.current_owner() == "test" && exec.stats().heals == 0 && exec.stats().buffs_cast == 0,
-          "armed, with low packet HP and MP and nothing queued, it never asks for the keys -- held by '" +
-              coord.current_owner() + "'");
-    exec.stop();
-
-#ifdef GOBOT_SOURCE_DIR
-    if (sources_here()) {
-        const std::string exec_src = source_text("/src/command_executor.cpp");
-        const std::string config_src = source_text("/src/config.cpp");
-        check(!exec_src.empty() && exec_src.find("heal_loop") == std::string::npos &&
-                  exec_src.find("buff_loop") == std::string::npos,
-              "command_executor.cpp: no heal or buff thread");
-        // The macro's potions press at the commands' own priority: the keys
-        // are let go of for the gap after each command, or a queue fed every
-        // 80 ms never left them a moment.
-        const std::string dispatch = body_of(exec_src, "bool CommandExecutor::dispatch(const Command& cmd) {");
-        const std::size_t let_go = dispatch.find("{ ExecutionCoordinator::Token done = std::move(token); }");
-        const std::size_t gap = dispatch.find("std::this_thread::sleep_for(std::chrono::milliseconds(input_.random_delay()));");
-        check(let_go != std::string::npos && gap != std::string::npos && let_go < gap,
-              "command_executor.cpp: the keys are let go of before the gap after a command");
-        check(!config_src.empty() && config_src.find("\"auto_buff\"") == std::string::npos &&
-                  config_src.find("\"hp_heal1_enabled\"") == std::string::npos &&
-                  config_src.find("\"buff_\"") == std::string::npos,
-              "config.cpp: bot_default.ini's potions and buffs are neither read nor written");
-        const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
-        const std::string tick = body_of(gui, "void GuiApp::tick() {");
-        check(tick.find("packet_vitals(state_.self(), PacketCapture::silent_for_ms(capture_.stats(), now_ms())") !=
-                      std::string::npos &&
-                  tick.find("macro_->set_vitals(VitalsReader::if_fresh(vitals_.hp_percent(), read_at") !=
-                      std::string::npos,
-              "gui_app.cpp: while the packet bot runs the macro drinks on the packets' HP and MP, and on the "
-              "screen's otherwise");
-        check(gui.find("bot_config_.auto_buff") == std::string::npos &&
-                  gui.find("bot_config_.buffs") == std::string::npos &&
-                  gui.find("bot_config_.hp_heal") == std::string::npos,
-              "gui_app.cpp: nothing edits the packet bot's old potions or buffs");
-    }
-#endif
-}
-
-/// What the macro is given from the packets: packet_vitals.
-void test_packet_vitals() {
-    section("The macro's HP and MP from the packets");
-
-    const auto about = [](float a, float b) { return std::fabs(a - b) < 0.01f; };
-    Self none;
-    const SelfVitals blank = packet_vitals(none, 0, 1500);
-    check(blank.hp < 0.0f && blank.mp < 0.0f, "no maximum from any packet: no reading, not 100%");
-
-    Self me;
-    me.hp = 30;
-    me.max_hp = 120;
-    const SelfVitals hp_only = packet_vitals(me, 200, 1500);
-    check(about(hp_only.hp, 25.0f) && hp_only.mp < 0.0f, "HP 30 of 120 is 25%, and no MP mapped is no MP reading");
-
-    me.mp = 50;
-    me.max_mp = 50;
-    const SelfVitals quiet = packet_vitals(me, 1501, 1500);
-    check(quiet.hp < 0.0f && quiet.mp < 0.0f, "the game's traffic silent longer than the macro trusts: no reading");
-
-    Self low = me;
-    low.hp = -5;
-    Self dead = me;
-    dead.hp = 50;
-    dead.dead = true;
-    Self over = me;
-    over.hp = 500;
-    check(about(packet_vitals(low, 0, 1500).hp, 0.0f) && about(packet_vitals(dead, 0, 1500).hp, 0.0f) &&
-              about(packet_vitals(over, 0, 1500).hp, 100.0f) && about(packet_vitals(me, 0, 1500).mp, 100.0f),
-          "HP under 0, or the character dead, reads 0; over the maximum, 100");
-}
-
-/// The executor presses nothing until the bot is started.
-///
-/// Its threads run from launch, and with nothing to hold them back they
-/// pressed before START, after STOP, F12 or the disconnect watchdog, and all
-/// through gobot_cli --status. Nothing reaches the keyboard here -- there is
-/// no game window -- so what is watched is whether it asks the coordinator for
-/// the keys at all, which it does before it looks for the window.
-void test_executor_armed() {
-    section("Executor: nothing pressed until the bot is started");
-
-    BotConfig cfg;
-    GameState state;
-    state.update_self_hp(10, 100);           // low HP from packets
-    InputManager input;
-    ExecutionCoordinator coord;
-    check(coord.request("test", Priority::Idle), "something low holds the keys");
-
-    // Whether anything took the keys off 'test' within `ms`. Nothing gives
-    // them back to it, so all through `ms` when nothing did.
-    const auto asked_within = [&coord](int ms) {
-        for (int waited = 0; waited < ms && coord.current_owner() == "test"; waited += 25)
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        return coord.current_owner() != "test";
-    };
-    const auto hold_again = [&coord] {
-        bool held = false;
-        for (int i = 0; i < 40 && !held; ++i) {
-            held = coord.request("test", Priority::Idle);
-            if (!held) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        return held;
-    };
-
-    CommandExecutor exec(cfg, state, input, coord);
-    check(!exec.armed(), "it starts disarmed");
-    exec.start();
-    const bool asked_unarmed = asked_within(700);
-    check(!asked_unarmed && exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
-          "running but not started, with packet HP, nothing asks for the keys -- held by '" +
-              coord.current_owner() + "'");
-
-    exec.enqueue(Command::move_left());
-    bool dropped = false;
-    for (int i = 0; i < 40 && !dropped; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        dropped = exec.queue_size() == 0 && exec.stats().dropped_blocked >= 1;
-    }
-    check(dropped && coord.current_owner() == "test",
-          "a queued command is refused before it asks for the keys");
-    check(!exec.execute_now(Command::buff('6', 0)) && coord.current_owner() == "test",
-          "and so is one run at once");
-
-    exec.arm();
-    exec.enqueue(Command::buff('6', 0));
-    check(exec.armed() && asked_within(2000), "started, a queued command asks for the keys");
-
-    exec.halt();
-    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding(),
-          "halted: disarmed, nothing queued, no route");
-    // A pass that took the keys as the halt came lets them go when it finds
-    // the bot stopped; from then on nothing asks.
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    const bool held = hold_again();
-    const bool asked_halted = asked_within(700);
-    check(held && !asked_halted, "halted, nothing asks for the keys again -- held by '" +
-                                     coord.current_owner() + "'");
-
-    // Started again, and taking the keys off 'test' once more, before it is
-    // stopped while started.
-    exec.arm();
-    exec.enqueue(Command::buff('6', 0));
-    check(asked_within(2000), "started again, a queued command asks for the keys again");
-    exec.stop();
-    check(!exec.armed(), "stopped while started, it is disarmed");
-    const bool held_after = hold_again();
-    exec.start();
-    const bool asked_restarted = asked_within(700);
-    exec.stop();
-    check(held_after && !asked_restarted && exec.stats().buffs_cast == 0 && exec.stats().heals == 0,
-          "started again it presses nothing until armed again -- and with no game window nothing "
-          "was pressed at all");
-}
-
-/// test_pathfinder's map: two ledges with a gap between them, and a shelf.
-MapData two_ledges() {
-    MapData map;
-    map.name = "test";
-    map.width = 24;
-    map.height = 10;
-    map.tile_w = 32;
-    map.tile_h = 32;
-    map.attrs.assign(static_cast<std::size_t>(map.width) * map.height, Tile_Empty);
-    const auto set = [&map](int x, int y, std::uint8_t v) {
-        map.attrs[static_cast<std::size_t>(y) * map.width + x] = v;
-    };
-    for (int x = 0; x < 5; ++x)   set(x, 6, Tile_Ground);
-    for (int x = 7; x < 14; ++x)  set(x, 6, Tile_Ground);
-    for (int x = 16; x < 20; ++x) set(x, 3, Tile_Platform);
-    return map;
-}
-
-/// halt(), which the bot's stop now calls: synchronous, from any thread, and
-/// harmless on an executor never started, and said twice. The stop used to
-/// set a flag nothing read and queue a StopMove, which gobot_cli's F10 then
-/// cleared away with the queue: the arrow stayed held after BOT DISABLED, and
-/// the route went on being walked every 80 ms. Not started here, so nothing
-/// but halt() and arm() empties the queue.
-void test_executor_halt() {
-    section("Executor: halt() empties the queue and drops the route");
-
-    const MapData map = two_ledges();
-    PathFinder pf;
-    check(pf.init(map), "the map with a gap in it builds");
-    const Vec2 here = map.to_world(2, 5);
-    const Vec2 across = map.to_world(10, 5);
-    BotConfig cfg;
-    GameState state;
-    state.update_self_position(here.x, here.y);
-    InputManager input;
-    ExecutionCoordinator coord;
-    CommandExecutor exec(cfg, state, input, coord);
-    exec.set_pathfinder(&pf);
-
-    const std::uint64_t refused_before = real_input_refusals();
-    exec.halt();
-    exec.halt();
-    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding(),
-          "halt() on an executor never started nor armed, twice: harmless");
-
-    exec.arm();
-    exec.enqueue(Command::move_left());
-    exec.enqueue(Command::pathfind(across));
-    exec.set_path_target(across);
-    check(exec.armed() && exec.queue_size() == 2 && exec.pathfinding() && !exec.current_path().empty(),
-          "armed: two commands queued and a route across the gap");
-    exec.halt();
-    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding() && exec.current_path().empty(),
-          "halt(): disarmed, the queue empty, the route dropped");
-    exec.halt();
-    check(!exec.armed() && exec.queue_size() == 0 && real_input_refusals() == refused_before,
-          "halted again, nothing changes -- and nothing reached for the desktop");
-
-    exec.enqueue(Command::move_right());
-    exec.arm();
-    check(exec.armed() && exec.queue_size() == 0, "arm() drops what was queued before it");
-    exec.stop();
-    check(!exec.armed(), "and stop() disarms, on one never started too");
-}
-
-/// BotBrain::stop() halts the executor: on return nothing is queued -- not
-/// even a StopMove -- the route is dropped and every key is up. The executor
-/// is declared before the brain, to outlive it.
-void test_brain_stop_halts() {
-    section("Bot brain: starting arms the executor, stopping halts it");
-
-    BotConfig cfg;
-    GameState state;
-    InputManager input;
-    ExecutionCoordinator coord;
-    CommandExecutor exec(cfg, state, input, coord);     // not started: nothing drains its queue
-    BotBrain brain(cfg, state, exec);
-    check(!exec.armed(), "the executor waits, disarmed, for the brain");
-    brain.start();
-    check(exec.armed() && brain.running(), "starting the brain arms the executor");
-    // An idle tick queues a StopMove, every 80 ms.
-    for (int i = 0; i < 40 && exec.queue_size() == 0; ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    const std::size_t queued = exec.queue_size();
-    brain.stop();
-    check(!exec.armed() && exec.queue_size() == 0 && !exec.pathfinding(),
-          "stop(): disarmed, nothing left queued, not even a StopMove, and no route -- " +
-              std::to_string(queued) + " queued before it");
-    check(brain.phase() == BotPhase::Stopped && !brain.running(), "and the brain is stopped");
-}
-
-/// A death and its end, read off HP alone: nothing maps a self_revive.
-///
-/// With continue_auto_after_death off the brain stops itself once the
-/// character is back up, and halts the executor as stop() does. And a death
-/// that ended one run is not the next one's: stopped while dead -- which the
-/// death callback does -- and started again once up, the first tick took the
-/// character being up for the end of that death and stopped the bot again.
-void test_brain_death() {
-    section("Bot brain: a death, and the character back up");
-
-    const MapData map = two_ledges();
-    PathFinder pf;
-    pf.init(map);
-    const Vec2 here = map.to_world(2, 5);
-    BotConfig cfg;
-    cfg.continue_auto_after_death = false;
-    GameState state;
-    state.update_self_position(here.x, here.y);
-    state.update_self_hp(100, 100);
-    InputManager input;
-    ExecutionCoordinator coord;
-    CommandExecutor exec(cfg, state, input, coord);     // not started
-    exec.set_pathfinder(&pf);
-    BotBrain brain(cfg, state, exec);
-    const auto wait_for = [](const std::function<bool()>& cond) {
-        for (int i = 0; i < 60 && !cond(); ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        return cond();
-    };
-
-    // A route under way when the character falls is dropped with it.
-    exec.set_path_target(map.to_world(10, 5));
-    const bool routed = exec.pathfinding();
-    brain.start();
-    state.update_self_hp(0, 100);
-    check(routed && wait_for([&] { return brain.stats().deaths == 1 && !exec.pathfinding(); }),
-          "HP read 0: a death, and the route under way is dropped");
-    state.update_self_hp(100, 100);
-    // running() goes false before the halt, on purpose, so that a start()
-    // racing it joins first: Stopped is what says the halt is done.
-    check(wait_for([&] { return brain.phase() == BotPhase::Stopped && !brain.running(); }),
-          "back up, read off HP with no self_revive packet, it stops itself");
-    check(!exec.armed() && exec.queue_size() == 0, "and halts the executor, as stop() does");
-    brain.stop();
-
-    brain.start();
-    state.update_self_hp(0, 100);
-    check(wait_for([&] { return brain.stats().deaths == 2; }), "started again, the next death is seen");
-    brain.stop();                                   // as the death callback does
-    state.update_self_hp(100, 100);
-    brain.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    check(brain.running() && exec.armed() && brain.phase() != BotPhase::Recovering,
-          "stopped while dead and started again once up, the old death does not stop it");
-    brain.stop();
-}
-
-/// The protocol calibrator with no game: refused at the start, and stopped as
-/// often as asked -- told, waited for twice, and once more as it goes -- with
-/// nothing to join and nothing pressed. A run itself needs the game in front
-/// to drive, so what it does is read off the source: a run that ended by
-/// itself still had its thread, and returning on that left it unjoined, which
-/// ended GoBot as it closed.
-void test_calibrator() {
-    section("Calibrator: no game, no run; a run that ends by itself is still joined");
-
-    const std::uint64_t refused_before = real_input_refusals();
-    {
-        InputManager no_window;
-        ProtocolCalibrator c(no_window);
-        const bool started = c.start();
-        check(!started && c.status() == "No game window selected." && !c.running() &&
-                  c.phase() == CalibPhase::Idle,
-              "with no game window it does not start, and says so: " + c.status());
-        const auto t0 = std::chrono::steady_clock::now();
-        c.request_stop();
-        c.stop();
-        c.stop();
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-                            .count();
-        check(!c.running() && c.phase() == CalibPhase::Idle && ms < 1000,
-              "told to stop, then stopped twice, with nothing running: at once, and still idle");
-    }
-    check(real_input_refusals() == refused_before,
-          "and it goes away without ending the program, and nothing reached for the desktop");
-
-#ifdef GOBOT_SOURCE_DIR
-    if (!sources_here()) {
-        skip("the source tree is not here to read\n");
-        return;
-    }
-    const auto npos = std::string::npos;
-    const std::string src = source_text("/src/calibrator.cpp");
-    const std::string start = body_of(src, "bool ProtocolCalibrator::start() {");
-    const std::string stop = body_of(src, "void ProtocolCalibrator::stop() {");
-    const std::string run = body_of(src, "void ProtocolCalibrator::run() {");
-    const std::size_t joined = start.find("if (thread_.joinable()) thread_.join();");
-    const std::size_t window = start.find("input_.window_valid()");
-    const std::size_t first_phase = start.find("phase_.store(kSchedule[0].phase);");
-    const std::size_t on = start.find("running_.store(true);");
-    check(joined != npos && window != npos && joined < window && first_phase != npos && on != npos &&
-              first_phase < on,
-          "calibrator.cpp: start() joins a run that ended by itself before anything else, and a new run "
-          "starts at its first step's phase, not the last run's Done");
-    check(stop.find("const bool was_running = running_.exchange(false);") != npos &&
-              stop.find("if (thread_.joinable()) thread_.join();") != npos &&
-              stop.find("if (was_running) input_.release_all();") != npos &&
-              stop.find("if (!running_.exchange(false)) return;") == npos,
-          "stop() joins whenever there is a thread, and lets go of the keys when it was running");
-    check(run.find("const bool completed = running_.exchange(false);") != npos &&
-              run.find("set_phase(completed ? CalibPhase::Done : CalibPhase::Failed);") != npos &&
-              run.find("Stopped before the end -- nothing to analyse. Run it again.") != npos &&
-              run.find("for (int i = 0; i < 7 && running_.load(); ++i)") != npos,
-          "a run stopped part way ends Failed, with nothing to analyse, and a stop cuts the cast's wait short");
-
-    // GoBot's window starts one under the 'calibrating' hold, never while
-    // something else steers the character, and stops it the one way.
-    const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
-    const std::string begins = body_of(gui, "bool GuiApp::start_calibration() {");
-    const std::string ends = body_of(gui, "void GuiApp::stop_calibration() {");
-    const std::string panel = body_of(gui, "void GuiApp::draw_calibrate_panel() {");
-    const std::size_t busy = begins.find("if (hunting_ || bot_running_ || (navigator_ && navigator_->running())) {");
-    const std::size_t held = begins.find("if (!take_hold(kCalibHold)) {");
-    const std::size_t go = begins.find("calibrator_->start()");
-    check(busy != npos && held != npos && go != npos && busy < held && held < go,
-          "gui_app.cpp: a calibration starts only with no hunting, walking or packet bot, under the "
-          "'calibrating' hold");
-    check(ends.find("calibrator_->stop();") != npos && ends.find("end_hold(kCalibHold);") != npos &&
-              !panel.empty() && panel.find("calibrator_->start()") == npos &&
-              panel.find("calibrator_->stop()") == npos,
-          "and stop_calibration joins it and lets the hold go -- the Calibrate tab's buttons go through "
-          "both");
-#endif
-}
-
 /// The charm job reads as it should where no pretend game reaches: the worker
 /// (gui_app.cpp) and the tab (simple_trash_use.cpp, simple_view.cpp). What the
 /// run itself does is tried in use_test.cpp.
@@ -17066,18 +16254,48 @@ void test_charm_sources() {
     }
     {
         // Its deadline by the kinds due, and the message a run left up handed
-        // to the next -- for two minutes, and never renewed by a run that only
-        // found it still there.
+        // to the next -- for two minutes, never renewed by a run that only
+        // found it still there, and renewed by one that clicked it and left it
+        // up (2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào
+        // không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế
+        // khác"): two clicks that did not close it hand it over too, clicked
+        // again a minute on, without limit -- it was the player's until then.
         const std::size_t deadline = job.find("cleaner.set_deadline_ms(BagCleaner::charm_deadline_ms(due_kinds));");
-        const std::size_t own = job.find("if (notice_kept) cleaner.set_own_notice(charm_notice_place);");
+        const std::size_t own = job.find("if (notice_kept) cleaner.set_own_notice(charm_notice_place, charm_notice_clicked);");
+        const std::size_t renewed = job.find("} else if (!r.notice_carried || charm_notice_ms == 0 || r.notice_clicked) {");
+        const std::size_t again =
+            job.find("if (r.notice_left && r.notice_clicked && !trash_stop_) charm_check_ms = now_ms() + kCharmNoticeAgainMs;");
         check(deadline != npos && run != npos && deadline < run && job.find("cleaner.set_deadline_ms(20'000);") == npos,
               "gui_app.cpp: the charm job's deadline is 12 s and 3 s a kind due, 20 to 40 s (charm_deadline_ms)");
         check(own != npos && run != npos && own < run && count_of(gui, "set_own_notice(") == 1 &&
                   job.find("charm_notice_ms + 120'000") != npos &&
-                  job.find("bool any_due = forced || notice_kept;") != npos &&
-                  job.find("} else if (!r.notice_carried || charm_notice_ms == 0) {") != npos,
+                  // The 2026.11.24 review: one GoBot clicked and that stayed up has no two minutes' end,
+                  // and the next run makes one quick click (set_own_notice's clicked_out).
+                  job.find("if (charm_notice_ms != 0 && !charm_notice_clicked && now_ms() >= charm_notice_ms + 120'000)") != npos &&
+                  job.find("charm_notice_clicked = r.notice_clicked;") != npos &&
+                  source_text("/src/bag.cpp").find("last_carried_ && last_carried_out_);") != npos &&
+                  source_text("/src/bag.cpp").find("const NoticeClose c = quick       ? watch_gone(kNoticeCloseMs * 2, clicked_at)") != npos &&
+                  job.find("bool any_due = forced || notice_kept;") != npos && renewed != npos && run < renewed &&
+                  job.find("} else if (!r.notice_carried || charm_notice_ms == 0) {") == npos && again != npos &&
+                  renewed < again && gui.find("constexpr std::uint64_t kCharmNoticeAgainMs = 60'000;") != npos,
               "and a message the last run left up is the next run's to close, for two minutes, a reason to run with "
-              "nothing due, in no other job");
+              "nothing due, in no other job -- the two minutes renewed by a run that clicked it, the next run a "
+              "minute on (kCharmNoticeAgainMs)");
+        // bag.cpp: nothing gives such a message up any more -- handed over
+        // whatever two clicks came to, never clicked a third time in a run.
+        const std::string cpp = source_text("/src/bag.cpp");
+        const std::string ran = body_of(cpp, "BagCleaner::Result BagCleaner::run() {");
+        const std::string trouble = body_of(cpp, "void BagCleaner::notice_trouble(");
+        check(cpp.find("last_gave_up_") == npos &&
+                  ran.find("if (mode_ == Mode::CharmsOnly && last_asked_.valid() && !last_closed_) {") != npos &&
+                  ran.find("res.notice_clicked = last_clicked_;") != npos &&
+                  trouble.find("last_clicked_out_ = true;") != npos && trouble.find("why = notice_again_vi(clicks);") != npos &&
+                  cpp.find("không đóng lại khi bấm Xác Nhận: đóng nó trong game\"") == npos &&
+                  cpp.find("\"; \" + notice_again_vi(u.notice_clicks)") != npos &&
+                  body_of(cpp, "bool BagCleaner::own_message(").find("last_clicked_out_") != npos &&
+                  body_of(cpp, "void BagCleaner::finish_charms(").find("last_clicked_out_") != npos,
+              "bag.cpp: a charm's message two clicks did not close is handed to the next run (notice_left, "
+              "notice_clicked) -- not clicked again in the same run, never left to the player");
     }
 
     // The potion shop job, the same way: the mouse, then the one hold, then the
@@ -17106,15 +16324,25 @@ void test_charm_sources() {
         // the HP potion's mark when the potion is drunk between purchases --
         // every HP potion the macro may choose let through (the review's
         // HP-1) -- else the floor chat goes by.
-        check(count_of(shop, "take_hold(") == 1 && count_of(shop, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 &&
-                  count_of(gui, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 && shop.find("end_hold(\"trash cleaning\")") != npos &&
+        // Two shop rounds since 2026.11.24, both here: the potions' and the
+        // pet's HP food on reaching TổCổLong (run_pet), each one hold.
+        const std::size_t pet_at = shop.find("const auto run_pet = [&](std::uint32_t entry) {");
+        const std::size_t potions_at = shop.find("const auto run_shop = [&](bool forced, bool dry, bool after_pass) {");
+        const std::string pet_part = pet_at == npos || potions_at == npos || potions_at < pet_at
+                                         ? std::string()
+                                         : shop.substr(pet_at, potions_at - pet_at);
+        check(count_of(shop, "take_hold(") == 2 && count_of(shop, "set_mode(BagCleaner::Mode::ShopBuy)") == 2 &&
+                  count_of(gui, "set_mode(BagCleaner::Mode::ShopBuy)") == 2 && count_of(pet_part, "take_hold(") == 1 &&
+                  count_of(pet_part, "set_mode(BagCleaner::Mode::ShopBuy)") == 1 &&
+                  shop.find("end_hold(\"trash cleaning\")") != npos &&
                   shop.find("bag::hp_gates(keys.hp_all_through, keys.hp_mark, chat_hp_floor_.load())") != npos &&
                   shop.find("const bag::HpGates hp_gate = hp_gates_of(pass_keys);") != npos &&
                   shop.find("const auto still_ours = [this, &hp_cut, stop_level = hp_gate.stop] {") != npos,
-              "and it takes no other hold, runs in shop mode only here, lets the hold go, and stops with HP under "
-              "the round's level -- the HP potion's mark, or half of it when that potion is drunk between purchases");
+              "and it takes no other hold, runs in shop mode only here -- it and the pet's round (2026.11.24) -- lets "
+              "the hold go, and stops with HP under the round's level -- the HP potion's mark, or half of it when "
+              "that potion is drunk between purchases");
         check(shop.find("if (!settings.buy_potions && !dry) {") != npos &&
-                  gui.find("!held && settings.buy_potions && now_ms() >= shop_due_ms;") != npos &&
+                  gui.find("!held && settings.buy_potions && now_ms() >= shop_due_ms &&") != npos &&
                   gui.find("shop_blocked") == npos &&
                   shop.find("bag::can_check_shop(store)") != npos && shop.find("hp < 0.0f") != npos &&
                   shop.find("keeper_cold_start_") != npos,
@@ -17956,18 +17184,27 @@ void test_auto_chat() {
               "one frame wrongly showing the line shut does not end the line");
     }
 
-    // A line that will not open: two Enters, never three -- a game that takes
-    // them late is left as it was, shut -- and the line reported as maybe
+    // A line that will not open: each Enter watched up to kReactMs since
+    // 2026-11-15, the second of max_enters (two as shipped) only after the
+    // first's whole wait -- a game that takes the first late would have a
+    // sooner second shut what it opened -- and the line reported as maybe
     // open, so that it is watched for.
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
         g.deaf = true;
         auto sender = make_sender(g);
+        const std::uint64_t start = g.clock;
         const ChatSender::Result r = sender->send(line_of("test"));
-        check(!r.sent && g.enters == 2 && g.letters == 0 && g.backspaces == 0,
+        const std::uint64_t took = g.clock - start;
+        check(!r.sent && settings.max_enters == 2 && g.enters == 2 && g.letters == 0 && g.backspaces == 0,
               "a line that will not open: two Enters and nothing typed");
         check(r.left_open && !r.aborted, "a failure, and the line left to be watched");
+        check(sender->react_ms() == kReactMs && took >= 2 * static_cast<std::uint64_t>(kReactMs) &&
+                  took <= 2 * static_cast<std::uint64_t>(kReactMs) + 3000 &&
+                  r.trouble.find("2 lần, mỗi lần chờ 30 giây") != std::string::npos,
+              "... given up only after kReactMs for each (" + std::to_string(took) + " ms on the pretend clock): " +
+                  r.trouble);
     }
 
     // The line opens but looks like neither picture -- the live client's open
@@ -18223,6 +17460,42 @@ void test_auto_chat() {
         const ChatSender::Result r = sender->send(line_of("abcdefghij"));
         check(!r.sent && r.aborted && r.wait_ms > 0, "HP falling mid-line: put off, not failed");
     }
+    // 2026-11-15: HP falling mid-line, and the closing Enter then taken for
+    // nothing (the line stays open, as on a game that drops it). The closing
+    // Enter's watch -- kReactMs since 2026-11-15 -- falls back to its old
+    // three looks once the guard has spoken, as the sending Enter's does:
+    // thirty seconds a closing Enter, twice, held the potions off at low HP.
+    // A closer afterwards, the guard quiet by then, waits the full kReactMs.
+    {
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.stays_open = true;
+        auto sender = make_sender(g);
+        bool low = true;
+        std::uint64_t low_at = 0;
+        sender->set_guard([&g, &low, &low_at]() -> std::string {
+            if (!low || g.letters < 3) return std::string();
+            if (low_at == 0) low_at = g.clock;
+            return std::string("Máu thấp — dừng câu đang gõ.");
+        });
+        bool said_nothing_after = false;
+        sender->on_report([&said_nothing_after](const std::string& s) {
+            if (s.find("nothing after") != std::string::npos && s.find("closing Enter") != std::string::npos)
+                said_nothing_after = true;
+        });
+        const ChatSender::Result r = sender->send(line_of("abcdefghij"));
+        const std::uint64_t after = low_at != 0 ? g.clock - low_at : 0;
+        check(!r.sent && r.aborted && r.left_open && g.sent.empty() && g.typed == 0 && g.enters == 3 &&
+                  low_at != 0 && after < 8'000 && !said_nothing_after,
+              "HP falling mid-line, the closing Enter taken for nothing: two closing Enters, each watched the "
+              "old ~750 ms, not kReactMs -- done " + std::to_string(after) + " ms after HP fell");
+        low = false;
+        const std::uint64_t from = g.clock;
+        const bool closed = sender->close_left_open(0);
+        check(!closed && g.enters == 5 && g.clock - from >= static_cast<std::uint64_t>(kReactMs),
+              "... and a closer later, the guard quiet: each closing Enter watched kReactMs again (" +
+                  std::to_string(g.clock - from) + " ms)");
+    }
     {
         PretendChat g;
         g.store = &store; g.settings = &settings;
@@ -18437,6 +17710,51 @@ void test_auto_chat() {
         check(!d.active() && w.releases == 1 && g.enters == 0, "the game closed: let go");
     }
     {
+        // Dropped to a page of the login in the same window (2026.11.21, the
+        // audit's B4): no bar ever again, the window the same. Let go once two
+        // looks in a row find the page -- not on one -- with nothing pressed,
+        // and never while no page is seen.
+        PretendChat g;
+        g.store = &store; g.settings = &settings;
+        g.state = PretendChat::State::Open;
+        g.hidden = true;
+        auto closer = make_sender(g);
+        DoubtWatch w;
+        bool page = false;
+        int asked = 0;
+        ChatDoubt::Hooks h = w.hooks();
+        h.no_line_here = [&] { ++asked; return page; };
+        ChatDoubt d(h);
+        d.note(left_open(4), 10, g.clock);
+        steps(d, *closer, g, 100);   // ten seconds of no bar, no page
+        check(d.active() && w.releases == 0 && asked >= 8,
+              "no bar and no page of the login for 10 s: still held, the page asked on each look");
+        page = true;
+        steps(d, *closer, g, 10);    // one look
+        page = false;
+        steps(d, *closer, g, 30);
+        check(d.active() && w.releases == 0, "one look at a page, then none: still held -- one odd frame decides nothing");
+        page = true;
+        steps(d, *closer, g, 30);
+        check(!d.active() && w.releases == 1 && g.enters == 0 && g.backspaces == 0 &&
+                  w.released.find("đăng nhập") != std::string::npos,
+              "a page of the login on two looks in a row: let go, nothing pressed (" + w.released + ")");
+        // A bar seen: the page is not asked -- the line is where it is.
+        PretendChat g2;
+        g2.store = &store; g2.settings = &settings;
+        g2.state = PretendChat::State::Open;
+        g2.dialog = "lời mời tổ đội";
+        auto closer2 = make_sender(g2);
+        DoubtWatch w2;
+        int asked2 = 0;
+        ChatDoubt::Hooks h2 = w2.hooks();
+        h2.no_line_here = [&] { ++asked2; return true; };
+        ChatDoubt d2(h2);
+        d2.note(left_open(0), 8, g2.clock);
+        steps(d2, *closer2, g2, 50);
+        check(d2.active() && asked2 == 0, "the line seen open behind a dialog: still held, no page asked");
+    }
+    {
         // Handed over, when the player takes over: nothing let go here.
         PretendChat g;
         g.store = &store; g.settings = &settings;
@@ -18489,8 +17807,10 @@ void test_auto_chat() {
               "the game drawing the typed text 400 ms late: looked at again, and sent -- " + chat_trace_line(r.trace));
     }
     {
-        // Nothing drawn at all: given up a little over a second after the
-        // last key, the line rubbed out and shut, no Backspace into it shut.
+        // Nothing drawn at all: given up a little over kReactMs after the
+        // last key (2026-11-15, the owner's 30 s for slow PCs; a little over
+        // a second before), the line rubbed out and shut, no Backspace into
+        // it shut. The trace keeps the first three looks and the last.
         PretendChat g;
         g.store = &store; g.settings = &settings;
         g.ignore_text = true;
@@ -18498,8 +17818,9 @@ void test_auto_chat() {
         const ChatSender::Result r = sender->send(line_of("test"));
         const int waited = r.trace.after.empty() ? -1 : r.trace.after.back().first;
         check(!r.sent && g.sent.empty() && g.state == PretendChat::State::Shut && g.keys_while_shut == 0 &&
-                  r.trace.outcome == "no_text" && r.trace.after.size() == 3 && waited > 0 && waited <= 1200,
-              "nothing drawn: three looks, the last " + std::to_string(waited) +
+                  r.trace.outcome == "no_text" && r.trace.after.size() == 4 && waited >= kReactMs &&
+                  waited <= kReactMs + 400,
+              "nothing drawn: looked at for kReactMs, the last look " + std::to_string(waited) +
                   " ms after the last key, then not sent, rubbed out and shut, nothing pressed into it shut");
     }
     {
@@ -18542,24 +17863,44 @@ void test_auto_chat() {
               "one letter that shows only as the caret 4 px on: not taken for text, not sent");
     }
     {
-        // The trace of a line that needed a second Enter: each Enter's hold
-        // and the looks after it, and none of the line's words.
+        // A slow PC (2026-11-15, the owner: "sẽ có thêm 30 giây chờ phản
+        // ứng"): every key acted on 5 s after it is pressed. One Enter opens
+        // the line, watched until it shows open; the typed text waited for;
+        // the sending Enter's line waited for to shut -- each slow step said
+        // in the log, the line sent once. And the trace of it: the one
+        // Enter's hold and the looks after it -- the first ten, then the
+        // change -- and none of the line's words.
         PretendChat g;
         g.store = &store; g.settings = &settings;
-        g.drop_first = 1;
+        g.lag = 5000;
         auto sender = make_sender(g);
+        std::vector<std::string> said;
+        sender->on_report([&said](const std::string& s) { said.push_back(s); });
         const ChatSender::Result r = sender->send(line_of("hello there"));
+        g.advance(6000);            // whatever is still on its way lands
+        const auto said_has = [&said](const char* part) {
+            for (const std::string& s : said)
+                if (s.rfind("the game took ", 0) == 0 && s.find(part) != std::string::npos) return true;
+            return false;
+        };
+        check(r.sent && !r.left_open && g.sent.size() == 1 && g.sent[0] == 11 && g.enters == 2 &&
+                  g.keys_while_shut == 0 && g.state == PretendChat::State::Shut,
+              "a game that acts on every key 5 s late: one Enter to open, one to send, the line sent once, nothing "
+              "pressed into it shut");
+        check(said_has("ms to show the chat line open") && said_has("ms to show the typed text") &&
+                  said_has("ms to show the chat line shut after the sending Enter"),
+              "... each slow step said in the log with how long the game took");
         const std::string t = chat_trace_line(r.trace);
-        bool first_shut = r.trace.enters.size() == 2 && r.trace.enters[0].looks.size() >= 3;
-        if (first_shut)
-            for (const auto& look : r.trace.enters[0].looks) first_shut = first_shut && look.second == ChatBarState::Closed;
-        check(r.sent && first_shut && !r.trace.enters[1].looks.empty() &&
-                  r.trace.enters[1].looks.back().second == ChatBarState::Open && t.rfind("Chat trace: Enter 1 held ", 0) == 0 &&
-                  t.find("; Enter 2 held ") != std::string::npos && t.find(" shut") != std::string::npos &&
+        bool shut_first = r.trace.enters.size() == 1 && !r.trace.enters[0].looks.empty() &&
+                          r.trace.enters[0].looks.front().second == ChatBarState::Closed &&
+                          r.trace.enters[0].looks.back().second == ChatBarState::Open &&
+                          r.trace.enters[0].looks.size() <= 12;
+        check(shut_first && t.rfind("Chat trace: Enter 1 held ", 0) == 0 &&
+                  t.find("; Enter 2 held ") == std::string::npos && t.find(" shut") != std::string::npos &&
                   t.find(" open") != std::string::npos && t.find("11 keys typed in 1 try, held 50 ms (vk)") != std::string::npos &&
                   t.find("; sent") != std::string::npos && t.find("hello") == std::string::npos &&
                   t.find("there") == std::string::npos,
-              "the trace of a line that took two Enters: " + t);
+              "the trace of a line whose Enter the game took 5 s late: one Enter, its looks shut then open: " + t);
         PretendChat d;
         d.store = &store; d.settings = &settings;
         d.ignore_text = true;
@@ -18605,24 +17946,33 @@ void test_auto_chat() {
         check(as_ever, "as shipped: the opening Enter 60-130 ms, letters and the sending Enter 50, Backspace 40-70");
     }
     {
-        // An Enter dropped every other press: opens with the second.
+        // An Enter dropped every other press. Since 2026-11-15 each Enter is
+        // watched kReactMs before the next goes: the dropped one is pressed
+        // again only after that whole wait, on a look that still shows the
+        // line shut -- never sooner, which on a slow game shuts what the
+        // first opened late -- and the line goes.
         PretendChat g;
         g.store = &store; g.settings = &settings;
         g.drop_every = 2;
         auto sender = make_sender(g);
+        const std::uint64_t from = g.clock;
         const ChatSender::Result r = sender->send(line_of("test"));
-        check(r.sent && r.trace.enters.size() == 2 && g.sent.size() == 1,
-              "the game dropping every other Enter: opened with the second, and sent");
-        // Deaf to Enter: two pressed, as shipped, then not opened.
+        check(r.sent && r.trace.enters.size() == 2 && g.enters == 3 && g.sent.size() == 1 &&
+                  g.clock - from >= static_cast<std::uint64_t>(kReactMs),
+              "the game dropping the first Enter: the second only after kReactMs (" +
+                  std::to_string(g.clock - from) + " ms), the line opened and sent -- " + r.trouble);
+        // Deaf to Enter: two pressed, kReactMs apart, then not opened.
         PretendChat d;
         d.store = &store; d.settings = &settings;
         d.deaf = true;
         auto deaf_sender = make_sender(d);
         const ChatSender::Result n = deaf_sender->send(line_of("test"));
         check(!n.sent && n.left_open && n.typed == 0 && d.enters == 2 && n.trace.outcome == "not_opened" &&
-                  n.trouble.find("2 lần") != std::string::npos,
+                  n.trouble.find("2 lần") != std::string::npos &&
+                  d.clock >= 2 * static_cast<std::uint64_t>(kReactMs),
               "deaf to Enter: two pressed, nothing typed, not opened -- " + n.trouble);
-        // max_enters 3, the first two dropped: opens with the third.
+        // max_enters 3, the first two dropped: the third opens it, each
+        // pressed only after the one before had its whole wait.
         ChatSettings three = settings;
         three.max_enters = 3;
         PretendChat t;
@@ -18630,7 +17980,55 @@ void test_auto_chat() {
         t.drop_first = 2;
         auto third = sender_with(t, three);
         const ChatSender::Result r3 = third->send(line_of("test"));
-        check(r3.sent && r3.trace.enters.size() == 3, "max_enters=3, the first two Enters dropped: opened with the third");
+        check(r3.sent && r3.trace.enters.size() == 3 && t.enters == 4 &&
+                  t.clock >= 2 * static_cast<std::uint64_t>(kReactMs),
+              "max_enters=3, the first two Enters dropped: the third opens it, after 2 x kReactMs, and it is sent");
+        // The line opening 20 s after its Enter: waited for, typed and sent.
+        {
+            PretendChat l;
+            l.store = &store; l.settings = &settings;
+            l.drop_first = 1;
+            std::uint64_t opens_at = 0;
+            l.after_key = [&l, &opens_at](std::uint32_t vk) {
+                if (vk == VK_RETURN && opens_at == 0) opens_at = l.clock + 20'000;
+            };
+            auto slow = make_sender(l);
+            std::string slow_said;
+            slow->on_report([&slow_said](const std::string& s) {
+                if (s.find("ms to show the chat line open") != std::string::npos) slow_said = s;
+            });
+            // The game draws the line open 20 s on, as a slow PC does: the
+            // dropped Enter stands for one taken that late.
+            ChatSender::Hands h = l.hands();
+            h.sleep = [&l, &opens_at](int ms) {
+                l.advance(static_cast<std::uint64_t>(std::max(0, ms)));
+                if (opens_at != 0 && l.clock >= opens_at && l.state == PretendChat::State::Shut && l.enters == 1) {
+                    l.state = PretendChat::State::Open;
+                    l.typed = 0;
+                }
+            };
+            slow->set_hands(h);
+            const ChatSender::Result rs = slow->send(line_of("test"));
+            check(rs.sent && l.enters == 2 && l.sent.size() == 1 && l.sent[0] == 4 &&
+                      (slow_said.rfind("the game took 19", 0) == 0 || slow_said.rfind("the game took 20", 0) == 0),
+                  "the line drawn open 20 s after its one Enter: waited for, typed, sent with the second Enter "
+                  "(the sending one) -- " + slow_said);
+        }
+        // DỪNG 7 s into the wait for the line to open: ended at once, not 23 s
+        // later, and nothing more pressed.
+        {
+            PretendChat s;
+            s.store = &store; s.settings = &settings;
+            s.deaf = true;
+            auto stopped = make_sender(s);
+            s.to_cancel = stopped.get();
+            s.cancel_at = 7'000;
+            const ChatSender::Result rc = stopped->send(line_of("test"));
+            check(!rc.sent && s.enters == 1 && s.backspaces == 0 && s.letters == 0 && s.clock >= 7'000 &&
+                      s.clock <= 7'000 + 500,
+                  "a stop 7 s into the long wait for the line to open: over at " + std::to_string(s.clock) +
+                      " ms, nothing more pressed");
+        }
         // max_enters 1, the first dropped: not opened after the one.
         ChatSettings one = settings;
         one.max_enters = 1;
@@ -18753,10 +18151,14 @@ void test_auto_chat() {
                                     " ms): ";
             check(g.sent.size() == 1 && g.sent_at.size() == 1, tag + "the game sent the line, once");
             check(r.send_pressed && calls == 1, tag + "send_pressed, and the hook called once");
-            if (late == 0) check(r.sent && !r.left_open, tag + "seen sent");
+            // Since 2026-11-15 the line is watched up to kReactMs after the
+            // sending Enter (the owner's 30 s for slow PCs): taken 1.5 or
+            // 2.5 s late it is seen sent; only one taken later than that is
+            // not -- and then, as it was, the trace says the game may send it.
+            if (late < kReactMs) check(r.sent && !r.left_open, tag + "seen sent, the line seen shut");
             else check(!r.sent && r.trace.outcome.rfind("not seen sent (the game may send it late)", 0) == 0,
                        tag + "not seen sent: r.sent says so, as it did, and the trace says the game may send it late");
-            if (late == 2500 && std::string(kind.said) == "pt")
+            if (late > kReactMs && std::string(kind.said) == "pt")
                 check(r.left_open, tag + "and left open, for the doubt");
             check(pressed_at != 0 && !said.empty() && said[0].second <= pressed_at &&
                       pressed_at - said[0].second <= 50,
@@ -18786,7 +18188,7 @@ void test_auto_chat() {
         };
         for (const Kind& kind : kinds)
             for (const int dialog_ms : { 0, 100 })
-                for (const int late : { 0, 1500, 2500 }) run(kind, dialog_ms, late);
+                for (const int late : { 0, 1500, 2500, kReactMs + 5000 }) run(kind, dialog_ms, late);
 
         // chat.ini's holds go up to half a second, every key alike, and a game that acts on the key-down
         // shows the line while the sending Enter is still held: remembered before that key goes down, the
@@ -19033,12 +18435,14 @@ void test_auto_chat() {
 
 // ------------------------------------------------------- GoBot's window
 
-/// F12, DỪNG, a revive out of tries and closing GoBot: every job told before
-/// any is waited for, and every key let go of before the first wait and again
-/// after the last. Told and waited for one by one, the hunter and the macro
-/// went on swinging and drinking while the party worker finished an invite.
-/// GuiApp needs its window and the game to run, so this is read off its
-/// source -- all but the coordinator's half of the hold handed to the stop.
+/// F12, DỪNG and closing GoBot: every job told before any is waited for, and
+/// every key let go of before the first wait and again after the last. Told
+/// and waited for one by one, the hunter and the macro went on swinging and
+/// drinking while the party worker finished an invite. A revive out of tries
+/// was one of these until 2026.11.24; since, it stops nothing, and the keeper
+/// waits and crosses again rather than stop -- read here too. GuiApp needs its
+/// window and the game to run, so this is read off its source -- all but the
+/// coordinator's half of the hold handed to the stop.
 void test_gui_stop() {
     section("GoBot's window: a stop tells every job before it waits for one (its source)");
 
@@ -19067,21 +18471,19 @@ void test_gui_stop() {
 
     // ---- stop_jobs: tell, let go, wait, let go again ----
     {
-        const std::string jobs = body_of(gui, "bool GuiApp::stop_jobs(bool with_bot) {");
+        const std::string jobs = body_of(gui, "bool GuiApp::stop_jobs(");
         bool all_told = !jobs.empty();
         std::size_t last_told = 0;
-        for (const char* tell : { "navigator_->request_stop()", "calibrator_->request_stop()",
-                                  "stop_chat(true, false)", "stop_party(false)", "stop_revive(false)",
+        for (const char* tell : { "stop_chat(true, false)", "stop_party(false)", "stop_revive(false)",
                                   "stop_trash(false)", "stop_quest(false)", "stop_popups(false)",
-                                  "stop_keeper(false)", "simple_style_stop()", "executor_->halt()" }) {
+                                  "stop_keeper(false)", "simple_style_stop()" }) {
             const std::size_t at = jobs.find(tell);
             all_told = all_told && at != npos;
             if (at != npos) last_told = std::max(last_told, at);
         }
         bool all_waited = !jobs.empty();
         std::size_t first_wait = npos, last_wait = 0;
-        for (const char* wait : { "navigator_->stop()", "stop_hunt()", "stop_macro()", "stop_bot()",
-                                  "stop_calibration()", "stop_party();", "stop_revive();",
+        for (const char* wait : { "stop_hunt()", "stop_macro()", "stop_party();", "stop_revive();",
                                   "const bool bin_note = stop_trash();", "stop_quest();", "stop_popups();",
                                   "stop_keeper();" }) {
             const std::size_t at = jobs.find(wait);
@@ -19095,9 +18497,9 @@ void test_gui_stop() {
         const std::size_t last_up = jobs.rfind("input_.release_all();");
         check(all_told && all_waited && first_up != npos && last_told < first_up && first_up < first_wait &&
                   last_wait < last_up,
-              "gui_app.cpp: stop_jobs tells the walk, the calibration, Tự chat, the party, the revive, the "
-              "trash, the quest, the popups, the keeper, a Thử and the packet bot's executor, and lets go of "
-              "every key, before it waits for any -- and lets go again after the last");
+              "gui_app.cpp: stop_jobs tells Tự chat, the party, the revive, the trash, the quest, the popups, the "
+              "keeper and a Thử, and lets go of every key, before it waits for any -- and lets go again after the "
+              "last");
         const std::size_t stopping = jobs.find("stopping_ = true;");
         const std::size_t hold = jobs.find("take_hold(kStopHold);");
         const std::size_t stopped = jobs.find("stopping_ = false;");
@@ -19105,8 +18507,6 @@ void test_gui_stop() {
         check(stopping != npos && hold != npos && stopping < hold && hold < first_up && stopped != npos &&
                   last_up < stopped && freed != npos && stopped < freed,
               "all of it under the stop's hold, taken first and let go of last");
-        check(jobs.find("executor_->halt()") < jobs.find("stop_bot()"),
-              "the executor halted -- its queue and its route dropped -- before the bot is waited for");
     }
 
     // ---- each job, told, returns before it waits ----
@@ -19137,7 +18537,7 @@ void test_gui_stop() {
     {
         const std::string tick = body_of(gui, "void GuiApp::tick() {");
         const std::size_t panic = tick.find("if (keys.panic) {");
-        const std::size_t all_stop = panic == npos ? npos : tick.find("stop_jobs(true);", panic);
+        const std::size_t all_stop = panic == npos ? npos : tick.find("stop_jobs(", panic);
         const std::size_t otherwise = all_stop == npos ? npos : tick.find("} else {", all_stop);
         const std::size_t toggle = tick.find("if (keys.toggle)");
         const std::size_t hunt = tick.find("toggle_hunt()");
@@ -19155,15 +18555,41 @@ void test_gui_stop() {
                   decided < panic_only && panic_only < trash_now && panic_only < login_now,
               "simple_hotkeys.cpp: and no trash pass or crossing starts from its one-job keys in that tick");
         const std::string closing = body_of(gui, "GuiApp::~GuiApp() {");
-        const std::string after_revive = body_of(gui, "void GuiApp::stop_after_revive() {");
         const std::string dung = body_of(source_text("/apps/gobot_gui/simple_view.cpp"), "void GuiApp::simple_stop() {");
-        const std::size_t closed = closing.find("stop_jobs(true);");
-        const std::size_t revived = after_revive.find("stop_jobs(true)");
-        check(closed != npos && closed < closing.find("stop_chat();") && revived != npos &&
-                  revived < after_revive.find("end_hold(\"reviving\")") && dung.find("stop_jobs(false)") != npos &&
+        const std::size_t closed = closing.find("stop_jobs(");
+        check(closed != npos && closed < closing.find("stop_chat();") && dung.find("stop_jobs(") != npos &&
                   dung.find("stop_party()") == npos,
-              "closing GoBot and a revive out of tries stop through stop_jobs as F12 does, and DỪNG through it "
-              "without the packet bot");
+              "closing GoBot and DỪNG stop through stop_jobs as F12 does");
+
+        // A revive out of tries stops nothing since 2026.11.24 (the owner:
+        // "Kiểm tra các phần khác xem có phần nào không làm được thì dừng
+        // không, cần thay cơ chế này bằng 1 cơ chế khác"): stop_after_revive
+        // is gone; tick() only says it, once a death; the worker keeps its
+        // hold while the character lies dead and asks for another round.
+        const std::string hpp = source_text("/apps/gobot_gui/gui_app.hpp");
+        const std::string said = body_of(gui, "void GuiApp::revive_out_of_tries() {");
+        const std::string loop = body_of(gui, "void GuiApp::revive_loop() {");
+        const std::size_t out_at = loop.find("if (turn == Reviver::Turn::OutOfTries) {");
+        const std::size_t loop_end =
+            out_at == npos ? npos : loop.find("\n    release();\n    revive_no_panel_ms_ = 0;", out_at);
+        const std::string out_case = loop_end == npos ? std::string() : loop.substr(out_at, loop_end - out_at);
+        check(gui.find("void GuiApp::stop_after_revive()") == npos && gui.find("stop_after_revive();") == npos &&
+                  hpp.find("void stop_after_revive();") == npos &&
+                  tick.find("if (revive_gave_up_.exchange(false)) revive_out_of_tries();") != npos,
+              "gui_app: no stop_after_revive any more -- tick() hands a revive out of tries to revive_out_of_tries");
+        check(!said.empty() && said.find("stop_jobs(") == npos && said.find("simple_track_run(") == npos &&
+                  said.find("stop_hunt(") == npos && said.find("stop_macro(") == npos &&
+                  said.find("end_hold(") == npos && said.find("simple_cold_start_") == npos &&
+                  said.find("simple_note(vi, 30000);") != npos && said.find("alert(\"revive_failed\", vi);") != npos,
+              "revive_out_of_tries: no stop_jobs, no simple_track_run(false), no hold ended -- the words on the "
+              "screen and revive_failed to the phone");
+        check(!out_case.empty() && out_case.find("return;") == npos && out_case.find("revive_running_ = false") == npos &&
+                  out_case.find("release()") == npos && out_case.find("Reviver::kRoundGapMs") != npos &&
+                  out_case.find("reviver.again();") != npos &&
+                  loop.find("if (turn == Reviver::Turn::Alive || turn == Reviver::Turn::Revived) {\n            "
+                            "release();") != npos,
+              "revive_loop: out of tries the worker goes on, its hold kept -- let go of only once the character "
+              "is up -- and asks for another round (Reviver::again) kRoundGapMs on");
     }
 
     // ---- the hold a stop takes over ----
@@ -19183,19 +18609,15 @@ void test_gui_stop() {
         const std::size_t keys = tick.find("hotkeys_tick()");
         check(edge != npos && keys != npos && edge < keys,
               "tick() lets go of every key as the game stops being in front, before anything else");
-        check(tick.find("if (bot_died_.exchange(false) && !bot_config_.continue_auto_after_death) stop_bot();") !=
-                      npos &&
-                  tick.find("if (traffic_lost_.exchange(false)) stop_bot();") != npos,
-              "a death, or the traffic gone quiet, stops the bot from tick(), on the thread that starts it");
-        const std::size_t died = gui.find("protocol_->set_death_callback(");
-        const std::size_t died_end = died == npos ? npos : gui.find(");", died);
+        // The traffic gone quiet is said from tick(): the disconnect callback,
+        // on the capture's watchdog thread, only asks for it.
         const std::size_t lost = gui.find("capture_.set_disconnect_callback(");
         const std::size_t lost_end = lost == npos ? npos : gui.find("});", lost);
-        const std::string on_death = died_end == npos ? std::string() : gui.substr(died, died_end - died);
         const std::string on_lost = lost_end == npos ? std::string() : gui.substr(lost, lost_end - lost);
-        check(on_death.find("bot_died_ = true") != npos && on_death.find("stop_bot") == npos &&
-                  on_lost.find("traffic_lost_ = true") != npos && on_lost.find("stop_bot") == npos,
-              "while the death and disconnect callbacks, on the capture's threads, only ask for it");
+        check(tick.find("say_traffic_lost();") != npos && on_lost.find("traffic_lost_ = true") != npos &&
+                  on_lost.find("say_traffic_lost") == npos,
+              "the traffic gone quiet is said from tick(), the disconnect callback on the capture's thread only "
+              "asking for it");
     }
 
     // ---- waited for with the window answering ----
@@ -19295,6 +18717,105 @@ void test_gui_stop() {
                   crossing.find("if (!keeper_oneshot_)") != npos && cap_cancels,
               "max_restarts counted in keeper_take_restart alone: before the keeper ends a client, and for "
               "every client the crossing ends, however it began; out of them, the crossing is cancelled");
+
+        // 2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không
+        // làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác".
+        // max_restarts counts over an hour, and used up is a wait; a crossing
+        // not in is made again 30 s on; only a stop and GoBot not running as
+        // administrator end the keeper.
+        check(take.find("CrashWatch::restart_spaced(keeper_restart_times_, now, watch_settings.max_restarts, window,") !=
+                      npos &&
+                  take.find("static_cast<std::uint64_t>(CrashWatch::kCrossAgainMs), &next_at)) {") != npos &&
+                  take.find("keeper_restart_times_.push_back(now);") != npos &&
+                  take.find("keeper_wait_until_ms_ = next_at;") != npos &&
+                  take.find("if (!keeper_wait_told_) {") != npos &&
+                  take.find("alert(\"keeper_gave_up\", told);") != npos && take.find("keeper_give_up(") == npos,
+              "keeper_take_restart: the hour's restarts by CrashWatch::restart_spaced; used up, when one more is "
+              "allowed kept for the wait, said and alerted once a wait -- no give-up");
+        const std::size_t refused_at = loop.find("if (!cold && !counted && !keeper_take_restart(watch_settings)) {");
+        const std::size_t waited =
+            refused_at == npos ? npos
+                               : loop.find("std::min(keeper_wait_until_ms_, now_ms() + static_cast<std::uint64_t>(CrashWatch::kCrossAgainMs)),", refused_at);
+        const std::size_t looked_again = waited == npos ? npos : loop.find("continue;", waited);
+        const std::string refused_case =
+            looked_again == npos ? std::string() : loop.substr(refused_at, looked_again - refused_at);
+        check(!refused_case.empty() && looked_again < loop.find("watch.shut_down(seen)") &&
+                  refused_case.find("if (!on) break;") != npos && count_of(refused_case, "break;") == 1 &&
+                  refused_case.find("if (keeper_login_now_.exchange(false)) {") != npos &&
+                  refused_case.find("shut_down") == npos && refused_case.find("run_crossing") == npos,
+              "keeper_loop: a restart refused waits for the hour, nothing ended or crossed -- a stop ends that wait, "
+              "and the login key, whose request goes then rather than cut every later wait -- and looks again");
+        // The 2026.11.24 review: a crossing made again on a game gone after
+        // the failed one got it up is a relaunch, counted (keeper_take_restart)
+        // -- refused, a wait looked at again every kCrossAgainMs, the crossing
+        // still owed.
+        {
+            const std::size_t again_at = loop.find("if (keeper_again_ && (fine || seen.what == CrashWatch::Trouble::Gone)) {");
+            const std::size_t crossed = again_at == npos ? npos : loop.find("run_crossing(keeper_again_how_", again_at);
+            const std::string again_case = crossed == npos ? std::string() : loop.substr(again_at, crossed - again_at);
+            check(again_case.find("keeper_again_how_ != Crossing::Cold &&") != npos &&
+                      again_case.find("keeper_again_launched_) {") != npos &&
+                      again_case.find("if (!keeper_take_restart(watch_settings)) {") != npos &&
+                      again_case.find("continue;") != npos &&
+                      gui.find("keeper_again_launched_ = reached_game;") != npos,
+                  "keeper_loop: a game gone after a crossing that got it up -- crossed again only as a counted restart");
+        }
+        const std::size_t after_at = loop.find("const auto after = [&](Crossed got, Crossing how) {");
+        const std::size_t after_end = after_at == npos ? npos : loop.find("\n    };", after_at);
+        const std::string after = after_end == npos ? std::string() : loop.substr(after_at, after_end - after_at);
+        const auto in_order_of = [](const std::string& text, std::initializer_list<const char*> parts) {
+            std::size_t at = 0;
+            for (const char* p : parts) {
+                const std::size_t found = text.find(p, at);
+                if (found == std::string::npos) return false;
+                at = found + 1;
+            }
+            return true;
+        };
+        check(in_order_of(after, { "case Crossed::In: {", "return true;", "case Crossed::Cancelled:", "return true;",
+                                   "case Crossed::Retry:", "case Crossed::Wait: {", "keeper_again_ = true;",
+                                   "keeper_again_how_ = how;",
+                                   "keeper_nap_until(now_ms() + static_cast<std::uint64_t>(CrashWatch::kCrossAgainMs), "
+                                   "nullptr)",
+                                   ": keeper_nap_until(keeper_wait_until_ms_, &keeper_login_now_);", "return on;",
+                                   "case Crossed::Stopped:", "case Crossed::NotElevated:", "break;", "return false;" }) &&
+                  in_order_of(loop, { "if (keeper_again_ && (fine || seen.what == CrashWatch::Trouble::Gone)) {",
+                                      "keeper_again_ = false;",
+                                      "if (!after(run_crossing(keeper_again_how_, watch, watch_settings, login, store), "
+                                      "keeper_again_how_))",
+                                      "if (fine) {" }) &&
+                  loop.find("!= Crossed::In)") == npos &&
+                  loop.find("if (!after(run_crossing(cold ? Crossing::Cold : Crossing::Restart, watch, watch_settings, "
+                            "login, store), how))") != npos,
+              "keeper_loop: never broken off by a crossing not in -- Retry waits kCrossAgainMs, Wait the hour, and "
+              "the crossing is made again on the next look, the game fine or gone; only Stopped and NotElevated "
+              "end it");
+        check(both.find("Crossed::GaveUp") == npos &&
+                  in_order_of(crossing, { "if (!login.unidentified().empty()) {", "keeper_not_in(",
+                                          "alert(\"keeper_gave_up\", alert_text::gave_up_not_set_up());",
+                                          "return Crossed::Retry;", "if (!elevated_) {", "keeper_give_up(",
+                                          "alert(\"keeper_gave_up\", alert_text::gave_up_not_elevated());",
+                                          "return Crossed::NotElevated;", "if (out_of_restarts) return Crossed::Wait;",
+                                          "if (!in) {", "keeper_not_in(",
+                                          "alert(\"keeper_gave_up\", alert_text::gave_up_crossing(flow.attempts_made(), "
+                                          "flow.why()));",
+                                          "return Crossed::Retry;", "keeper_retry_told_ = false;",
+                                          "keeper_again_ = false;", "keeper_problem_vi_.clear();",
+                                          "alert_text::back_in(CrashWatch::restarts_within(" }) &&
+                  count_of(crossing, "keeper_give_up(") == 1 && count_of(crossing, "if (!keeper_retry_told_) {") == 2,
+              "run_crossing: not set up and not in are Retry, the phone told once an episode; the hour's restarts "
+              "used up in the end-the-client is Wait; only GoBot not running as administrator gives up");
+        const std::size_t key_retry = key.find("case Crossed::Retry:");
+        const std::string key_wait = key_retry == npos ? std::string() : key.substr(key_retry);
+        check(key.find("case Crossed::NotElevated:\n            return false;") != npos &&
+                  in_order_of(key_wait, { "case Crossed::Wait:", "keeper_waiting_ = true;",
+                                          "got == Crossed::Wait ? keeper_wait_until_ms_ : now_ms() + "
+                                          "static_cast<std::uint64_t>(CrashWatch::kCrossAgainMs);",
+                                          "keeper_nap_until(until, &keeper_key_cancel_);",
+                                          "if (keeper_key_cancel_.exchange(false)) {", "return watching();",
+                                          "keeper_login_now_ = true;" }),
+              "simple_keeper.cpp: the login key's crossing not in is asked again -- kCrossAgainMs on, or after the "
+              "hour -- unless the key is pressed again meanwhile");
     }
 #else
     skip("no source folder\n");
@@ -19303,8 +18824,8 @@ void test_gui_stop() {
 
 /// "Vị trí từ gói tin" in GoBot's window: the capture the positions come
 /// from, running all session and started and stopped on its worker, and what
-/// it shares with the Protocol tab, Autopilot and the packet bot. GuiApp
-/// needs its window and the game to run, so this is read off its source.
+/// it shares with the Capture tab. GuiApp needs its window and the game to
+/// run, so this is read off its source.
 void test_position_wiring() {
     section("GoBot's window: the capture for positions, and what it shares (its source)");
 #ifdef GOBOT_SOURCE_DIR
@@ -19317,38 +18838,23 @@ void test_position_wiring() {
     {
         const std::string on = body_of(gui, "void GuiApp::on_packets(const std::vector<GamePacket>& all) {");
         const std::size_t fed = on.find("packet_world_.on_packets(all);");
-        const std::size_t plain = on.find(".plain()");
-        check(fed != npos && plain != npos && fed < plain,
-              "on_packets hands every frame -- UDP, and from inside 0x0081 -- to the packet world before any "
-              "plain() test");
         const std::size_t self = on.find("packet_self_.on_packets(all, capture_.start_count());");
         const std::size_t tally = on.find("frame_tally_.add(all);");
         const std::size_t more = on.find("more_on_packets(all);");
-        check(self != npos && tally != npos && more != npos && fed < self && self < plain && tally < plain &&
-                  more < plain,
-              "and, after it, to PacketSelf under the capture's start count, to the frames' tally and to the casts' "
-              "part -- every frame, before any plain() test");
+        check(fed != npos && self != npos && tally != npos && more != npos && fed < self,
+              "on_packets hands every frame -- UDP, and from inside 0x0081 -- to the packet world first, and after "
+              "it to PacketSelf under the capture's start count, to the frames' tally and to the casts' part");
     }
     {
         const std::string push = body_of(gui, "void GuiApp::push_framings() {");
-        check(push.find("f.unpack = f.unwraps();") != npos && push.find("capture_.set_framing(f);") != npos &&
-                  push.find("configured_framing_") != npos && push.find("has_trailer()") != npos,
-              "push_framings unpacks every wrapper it opens, and takes the 0x0081 rule back from protocol.ini's "
-              "framing when Autopilot's has none");
+        check(push.find("f.unpack = f.unwraps();") != npos && push.find("capture_.set_framing(f);") != npos,
+              "push_framings unpacks every wrapper it opens");
         const std::string init = body_of(gui, "void GuiApp::initialise() {");
-        check(init.find("configured_framing_ = framing_;") != npos &&
-                  init.find("hunter_->set_eyes(packet_eyes_->eyes());") != npos,
-              "protocol.ini's framing kept as read, and the hunter given the PacketEyes as GoBot starts");
+        check(init.find("hunter_->set_eyes(packet_eyes_->eyes());") != npos,
+              "the hunter given the PacketEyes as GoBot starts");
         check(init.find("link.npcap = link.capturing || position_npcap_ok_.load();") != npos,
               "a capture running, whoever started it, is Npcap there: a start that found its service stopped "
-              "does not keep saying so once the Protocol tab or Autopilot captures");
-    }
-    {
-        const std::string apply = body_of(gui, "void GuiApp::apply_findings() {");
-        check(apply.find("PacketWorld::opcodes()") != npos && apply.find("registry_.mapped_opcodes()") != npos,
-              "Apply lets the packet world's opcodes through beside the mapped ones");
-        check(apply.find("PacketSelf::opcodes()") != npos,
-              "and every opcode the packets plan reads of your own character, the link and the casts");
+              "does not keep saying so once the Capture tab captures");
     }
     {
         // The start itself, the socket looks and the stop before it: on the
@@ -19368,7 +18874,7 @@ void test_position_wiring() {
         check(running != npos && posted != npos && running < posted && start.find("capture_.stop()") == npos &&
                   start.find("capture_.start(") == npos && start.find("game_link_of(") == npos &&
                   job.find("capture_.start(cfg)") != npos,
-              "a capture already running -- the Protocol tab's, Autopilot's, the packet bot's -- is used as it is, "
+              "a capture already running -- the Capture tab's -- is used as it is, "
               "never stopped from there; otherwise the start is posted to capture_worker_, which looks at the "
               "sockets and starts it");
         const std::size_t same = job.find("if (pid == in.before.pid");
@@ -19401,10 +18907,6 @@ void test_position_wiring() {
                   attaching.find("kPositionIdleLooksMs") != npos,
               "with no capture, the game looked for every second only while a start is not backing off, and for two "
               "minutes of nothing to capture -- every five seconds after");
-        const std::string autopilot = body_of(gui, "void GuiApp::auto_step() {");
-        check(autopilot.find("build_filter_for(game_connections_, udp_ports_for_pid(game_pid_))") != npos &&
-                  autopilot.find("packet_world_.reset();") != npos,
-              "Autopilot's capture takes the game's own UDP ports as well, and starts the packet world afresh");
     }
     {
         const std::string hunt = body_of(gui, "void GuiApp::start_hunt() {");
@@ -19415,15 +18917,10 @@ void test_position_wiring() {
               "start_hunt starts the capture unless the positions are Off, the eyes back on the screen first");
         const std::string stop = body_of(gui, "void GuiApp::stop_hunt() {");
         const std::string halt = body_of(gui, "void GuiApp::stop_position_capture() {");
-        const std::string shared = body_of(gui, "bool GuiApp::capture_shared() {");
         check(!stop.empty() && stop.find("stop_position_capture();") == npos &&
-                  halt.find("if (!position_capture_) return;") != npos &&
-                  halt.find("if (capture_shared()) return;") != npos && halt.find("capture_worker_.post(") != npos &&
-                  shared.find("bot_running_") != npos && shared.find("Auto::Idle") != npos &&
-                  shared.find("recording_") != npos && shared.find("calibrator_") != npos,
+                  halt.find("if (!position_capture_) return;") != npos && halt.find("capture_worker_.post(") != npos,
               "stop_hunt keeps it: the capture runs all session, and F11, DỪNG and F12 join no thread of it. It "
-              "stops only once the positions are switched off -- on the worker, never a capture it did not start, "
-              "nor one the packet bot, Autopilot, a recording or the calibration is reading");
+              "stops only once the positions are switched off -- on the worker, never a capture it did not start");
         const std::string manual = body_of(gui, "void GuiApp::stop_capture() {");
         const std::string again = body_of(gui, "void GuiApp::position_reattach(std::uint64_t now) {");
         const std::string job = body_of(gui, "void GuiApp::position_job(const PositionJobIn& in) {");
@@ -19437,14 +18934,15 @@ void test_position_wiring() {
         const std::size_t refused = again.find("if (position_start_failed_) {");
         const std::size_t posted = again.find("capture_worker_.post(");
         check(applied.find("position_start_failed_ = true;") != npos &&
-                  applied.find("position_backoff_ms_ = std::min<std::uint64_t>(position_backoff_ms_ * 2") != npos &&
+                  applied.find("position_backoff_ms_ = GameLink::refused_wait_after(position_backoff_ms_);") != npos &&
                   refused != npos && posted != npos && refused < posted &&
                   again.find("since_try < position_backoff_ms_") != npos &&
                   job.find("in.failed && in.backoff != 0 && !should_reattach(") != npos &&
-                  hunt.find("position_start_failed_ = false;") != npos,
-              "a start the capture itself refused is tried again at once only for a new game link, otherwise "
-              "after twice as long each time -- not at every look, its lines in the log each time -- and afresh at "
-              "the next hunt");
+                  hunt.find("position_start_failed_ = false;") != npos &&
+                  hunt.find("position_backoff_ms_ = 0;") != npos,
+              "a start the capture itself refused -- or a capture that died (2026.11.24) -- is tried again at once "
+              "only for a new game link, otherwise after 10 s, 20 s, then every 30 s (up to 10 min until 2026.11.24) "
+              "-- not at every look, its lines in the log each time -- and afresh at the next hunt");
         const std::string tick = body_of(gui, "void GuiApp::tick() {");
         check(tick.find("positions_tick();") != npos, "tick() keeps the capture, and writes its line every 10 s");
     }
@@ -19482,18 +18980,6 @@ void test_position_wiring() {
                   watch.find("light_") == npos,
               "nothing on the capture's path asks for light mode: positions_tick, packets_wanted, position_job and "
               "packets_watch.cpp");
-        const std::string autopilot = body_of(gui, "void GuiApp::auto_step() {");
-        const std::size_t from = autopilot.find("case Auto::StartCapture: {");
-        const std::size_t to = from == npos ? npos : autopilot.find("case Auto::Recording: {", from);
-        const std::string step = to == npos ? std::string() : autopilot.substr(from, to - from);
-        const std::size_t ours = step.find("if (position_capture_) {");
-        const std::size_t stopped = ours == npos ? npos : step.find("capture_.stop();", ours);
-        const std::size_t other = ours == npos ? npos : step.find("} else {", ours);
-        const std::size_t by_hand = other == npos ? npos : step.find("stop_capture();", other);
-        check(step.find("if (capture_worker_.busy()) return;") != npos && stopped != npos && other != npos &&
-                  stopped < other && by_hand != npos && step.find("position_capture_off_") == npos,
-              "Autopilot's StartCapture waits out a job under way, and stops the capture for positions without "
-              "stop_capture() -- the packets are not kept off after it");
         const std::string closing = body_of(gui, "GuiApp::~GuiApp() {");
         const std::size_t worker = closing.find("capture_worker_.stop();");
         const std::size_t capture = closing.find("stop_capture();");
@@ -19501,10 +18987,10 @@ void test_position_wiring() {
               "~GuiApp lets the worker's job finish, and starts none, before the capture is stopped");
         const std::size_t minute = closing.find("packets_minute(");
         const std::size_t minute_if = minute == npos ? npos : closing.rfind("if (packets_minute_ms_ != 0", minute);
-        const std::size_t jobs_stopped = closing.find("stop_jobs(true);");
+        const std::size_t jobs_stopped = closing.find("stop_jobs(");
         check(minute_if != npos && closing.substr(minute_if, minute - minute_if).find("10'000") != npos &&
                   jobs_stopped != npos && minute < jobs_stopped,
-              "~GuiApp writes the packets' minute lines -- Vitals check, Bag, Casts -- over what is left of their "
+              "~GuiApp writes the packets' minute lines -- Vitals, Bag, Casts -- over what is left of their "
               "minute, ten seconds of it at least, before anything is stopped");
         const std::string start = body_of(gui, "void GuiApp::start_capture() {");
         const std::string halt = body_of(gui, "void GuiApp::stop_capture() {");
@@ -19519,11 +19005,9 @@ void test_position_wiring() {
         check(line.find("<< \", others' \" << ws.contacts_others") != npos,
               "and its contacts say the others' beside yours, as its kills and hurts do");
         const std::string tick = body_of(gui, "void GuiApp::tick() {");
-        const std::size_t said = tick.find("if (traffic_lost_.load()) say_traffic_lost();");
-        const std::size_t lost = tick.find("if (traffic_lost_.exchange(false)) stop_bot();");
-        check(said != npos && lost != npos && said < lost && tick.find("detector_pace_tick(") != npos,
-              "tick() says what the game gone quiet means just before it stops the bot for it, and asks the "
-              "detector's pace every pass");
+        check(tick.find("say_traffic_lost();") != npos && tick.find("stop_bot") == npos &&
+                  tick.find("detector_pace_tick(") != npos,
+              "tick() says what the game gone quiet means, and asks the detector's pace every pass");
     }
     {
         const std::string simple = source_text("/apps/gobot_gui/simple_view.cpp");
@@ -19608,11 +19092,16 @@ void test_spot_wiring() {
               "and BẮT ĐẦU's note says why rather than \"Đã bắt đầu\", and the card under it says so in red");
     }
     {
-        // The keeper back in the world: the running hunter's spot aside.
+        // The keeper back in the world: the running hunter's spot aside --
+        // since 2026.11.24, when the window is looked for again every 5 s
+        // after a miss, at the log in and on the look that finds it, not on
+        // every look that misses it.
         const std::string tick = body_of(gui, "void GuiApp::tick() {");
         const std::size_t back = tick.find("if (keeper_reattach_.exchange(false)) {");
         const std::size_t aside =
-            back == npos ? npos : tick.find("if (hunter_ && hunter_->running()) hunter_->suspend_spot();", back);
+            back == npos ? npos
+                         : tick.find("if (hunter_ && hunter_->running() && (found || !again)) hunter_->suspend_spot();",
+                                     back);
         const std::size_t jobs = aside == npos ? npos : tick.find("simple_start_jobs();", aside);
         // And a new game window found while it hunts -- "Tìm lại" after a
         // game opened again by hand, or the keeper's: the same.
@@ -19649,7 +19138,9 @@ void test_spot_wiring() {
         check(pack.find("@('hunt.ini', 'Hunt', 'spot'),") != npos,
               "package.ps1 holds hunt.ini's spot to ship off, as keep_distance");
         // And the drop through a platform (Ctrl + ↓), the player's answer 8.
-        check(pack.find("@('hunt.ini', 'Hunt', 'drop_down'),") != npos,
+        // No comma after it since 2026.11.16: bot_default.ini's rows that
+        // came after it went with the packet bot.
+        check(pack.find("@('hunt.ini', 'Hunt', 'drop_down')") != npos,
               "package.ps1 holds hunt.ini's drop_down to ship off too");
     }
 #else
@@ -19684,10 +19175,28 @@ void test_gui_clicks() {
               "gui_app.cpp: the party worker answers only the same player's invitation, through click_on_game "
               "with its stop, and clicks nothing through click_at");
         const std::size_t watching = party.find("say_party(\"watching\")");
-        check(party.find("list.ensure_open(input_, capture, store, &why, stopped)") != npos &&
-                  party.find("list.invite(input_, capture, store, *row, &why, stopped)") != npos &&
+        check(party.find("list.ensure_open(input_, capture, store, &why, mouse_stopped)") != npos &&
+                  party.find("list.invite(input_, capture, store, *row, &why, mouse_stopped)") != npos &&
                   watching != npos && party.find("std::this_thread::sleep_for", watching) == npos,
               "and invites with its stop too, every wait of its own cut short by one");
+        // 2026-11-15: the invite's waits -- up to kReactMs each since
+        // 2026-11-15, the game's mouse held through them -- and the game's
+        // message after it end on the character down as on a stop, so the
+        // reviver is not kept from the death panel; the worker's own pauses,
+        // which hold nothing, keep the plain stop (ended at once, they spin).
+        const std::size_t down = party.find("const auto down = [this] {");
+        const std::size_t down_end = down == npos ? npos : party.find("};", down);
+        const std::string down_body = down_end == npos ? std::string() : party.substr(down, down_end - down);
+        check(down_body.find("bag::kJobDownHpPct") != npos && down_body.find("death_seen_ms_") != npos &&
+                  down_body.find("revive_running_") != npos &&
+                  party.find("const auto mouse_stopped = [&] { return stopped() || down(); };") != npos &&
+                  party.find("reply_hands.stop = mouse_stopped;") != npos &&
+                  party.find("reply_hands.nap = mouse_nap;") != npos &&
+                  party.find("input_.click_on_game(x, y, false, mouse_stopped, &reply_how)") != npos &&
+                  party.find("const auto nap = [&](int ms) { return nap_unless(ms, stopped); };") != npos,
+              "gui_app.cpp: the party's invite and its message watch stop on the character down (HP under "
+              "bag::kJobDownHpPct, or the death panel the running reviver saw) as well as on DỪNG; its own "
+              "pauses on DỪNG alone");
     }
 
     // ---- quick quest ----
@@ -19736,11 +19245,9 @@ void test_gui_clicks() {
         const std::string reattach = body_of(gui, "bool GuiApp::reattach_game() {");
         check(count_of(gui, "input_.set_target_window(") == 1 && follow.find("input_.set_target_window(hwnd)") != npos &&
                   follow.find("detector_.set_target_window(hwnd)") != npos &&
-                  follow.find("mapper_->set_target_window(hwnd)") != npos &&
-                  follow.find("apply_vitals_config()") != npos && follow.find("camera_.reset()") != npos &&
-                  follow.find("anchor_.reset()") != npos,
-              "gui_app.cpp: the keys, the HP/MP reader, the detector and the mapper are pointed at a game "
-              "window in one place, retarget(), and what was seen in the old one is forgotten there");
+                  follow.find("apply_vitals_config()") != npos,
+              "gui_app.cpp: the keys, the HP/MP reader and the detector are pointed at a game window in one place, "
+              "retarget()");
         check(!view.empty() && view.find("input_.set_target_window(") == npos &&
                   view.find("input_.find_game_window(") == npos &&
                   count_of(gui, "input_.find_game_window(") == 2 && first.find("input_.find_game_window(") != npos &&
@@ -19755,12 +19262,10 @@ void test_gui_clicks() {
 
 // ------------------------------------------------------------- gobot_cli
 
-/// gobot_cli's start, its Ctrl+C and close, F10, --status, --hunt and
-/// --invites: each acts on the real desktop when run, so it is read off the
-/// source.
+/// gobot_cli's start, its Ctrl+C and close, --windows, --hunt and --invites:
+/// each acts on the real desktop when run, so it is read off the source.
 void test_cli_source() {
-    section("gobot_cli: DLLs from System32 first, Ctrl+C and the close stop it, --status presses nothing "
-            "(its source)");
+    section("gobot_cli: DLLs from System32 first, Ctrl+C and the close stop it (its source)");
 #ifdef GOBOT_SOURCE_DIR
     if (!sources_here()) {
         skip("the source tree is not here to read\n");
@@ -19823,72 +19328,6 @@ void test_cli_source() {
                   handler.find("WaitForSingleObject(g_main_done, kCloseWaitMs)") != npos,
               "Ctrl+C, Ctrl+Break and the close each ask the command to stop before a word is written, and the "
               "close waits for main() to let go of what it holds");
-    }
-
-    // ---- --status ----
-    {
-        // Started, the executor's threads pressed under "no input will be
-        // sent". Nor is the macro started there (--with-macro).
-        const std::size_t threads = main_body.find("std::thread hotkeys;");
-        const std::size_t not_status = threads == npos ? npos : main_body.find("if (!opt.status_only) {", threads);
-        const std::size_t started = main_body.find("executor.start();");
-        const std::size_t hotkeys = main_body.find("hotkeys = std::thread(");
-        check(count_of(main_body, "executor.start();") == 1 && not_status != npos && hotkeys != npos &&
-                  not_status < started && started < hotkeys,
-              "--status starts no executor: it is started only for the bot, with its F10 thread");
-    }
-
-    // ---- an unconfirmed [Framing] ----
-    {
-        // README: gobot_cli refuses to start while verified=false. It said so
-        // in a note and started the capture, the executor and F10 all the same.
-        const std::size_t asked = main_body.find("if (!ini.get_bool(\"Framing\", \"verified\", false)) {");
-        const std::size_t refused = asked == npos ? npos : main_body.find("if (!opt.status_only) {", asked);
-        const std::size_t out = refused == npos ? npos : main_body.find("return 1;", refused);
-        // The refusal's own return, inside its block: before the --status note.
-        const std::size_t note = refused == npos ? npos : main_body.find("Note: [Framing]", refused);
-        const std::size_t window = main_body.find("if (!attach_window(input, opt, app)) {");
-        const std::size_t capture = main_body.find("if (!capture.start(ccfg)) {");
-        check(asked != npos && refused != npos && out != npos && note != npos && out < note && window != npos &&
-                  capture != npos && out < window && window < capture,
-              "an unconfirmed [Framing] stops the bot before the game window, the capture and F10 -- all but "
-              "--status");
-    }
-
-    // ---- the packet bot's potions and buffs ----
-    {
-        // They are macro.ini's: --with-macro runs it beside the bot, on and
-        // off with it, on the packets' HP and MP -- never in --status.
-        const std::size_t made = main_body.find("if (opt.with_macro && !opt.status_only) {");
-        const std::size_t follows = main_body.find("const bool on = g_bot_enabled.load() && brain.running();");
-        // Fed the packets' HP and MP, and held while the character is dead.
-        const std::size_t fed =
-            main_body.find("packet_vitals(me, PacketCapture::silent_for_ms(capture.stats(), now_ms())");
-        const std::size_t held = fed == npos ? npos : main_body.find("macro->set_suspended(down,", fed);
-        const std::size_t stopped = main_body.find("if (macro) macro->stop();");
-        const std::size_t last_stop = main_body.rfind("brain.stop();");
-        check(made != npos && follows != npos && fed != npos && held != npos && stopped != npos &&
-                  last_stop != npos && stopped < last_stop,
-              "--with-macro runs macro.ini beside the packet bot, on and off with it, on the packets' HP and "
-              "MP, held while dead; never in --status");
-    }
-
-    // ---- F10 ----
-    {
-        const std::string loop =
-            body_of(cli, "void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, const InputManager& input) {");
-        const std::size_t gate = loop.find("if (enable && !input.window_focused() && !console_in_front()) {");
-        const std::size_t on = loop.find("brain.start();");
-        check(gate != npos && on != npos && gate < on && loop.find("brain.stop();") != npos &&
-                  cli.find("set_auto_attack") == npos && cli.find("std::ref(executor)") == npos,
-              "F10 turns the bot on only with the game or this console in front, and off from anywhere -- "
-              "through the brain, which arms and halts its executor");
-        // gobot_gui's F10 is macro.ini's toggle_key; key_start_stop is this
-        // program's alone, and the window neither shows nor edits it (M6).
-        const std::string gui = source_text("/apps/gobot_gui/gui_app.cpp");
-        check(cli.find("hotkey_loop, bot.key_start_stop,") != npos && !gui.empty() &&
-                  gui.find("key_start_stop") == npos,
-              "key_start_stop is gobot_cli's F10 alone: gobot_gui neither shows it nor edits it");
     }
 
     // ---- --window, --windows ----
@@ -20315,219 +19754,6 @@ void test_config() {
 #endif
 }
 
-// --------------------------------------------------------- protocol handler
-
-void test_protocol_handler() {
-    section("ProtocolHandler");
-
-    OpcodeRegistry reg;
-
-    PacketSpec mv;
-    mv.opcode = 0x0201;
-    mv.semantic = Semantic::SelfMove;
-    mv.fields = OpcodeRegistry::parse_field_list("id:u32,x:f32,y:f32", nullptr);
-    reg.add(mv);
-
-    PacketSpec hp;
-    hp.opcode = 0x0310;
-    hp.semantic = Semantic::SelfHpMp;
-    hp.fields = OpcodeRegistry::parse_field_list("hp:i32,max_hp:i32", nullptr);
-    reg.add(hp);
-
-    GameState st;
-    ProtocolHandler ph(reg, st);
-
-    GamePacket move;
-    move.opcode = 0x0201;
-    move.payload = {
-        0x2A, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x20, 0x44,     // 640.0
-        0x00, 0x00, 0xF0, 0x43,     // 480.0
-    };
-    ph.on_packet(move);
-
-    const Self me = st.self();
-    check(std::abs(me.pos.x - 640.0f) < 0.01f, "self position applied from packet");
-
-    GamePacket hpp;
-    hpp.opcode = 0x0310;
-    hpp.payload = { 0x32, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00 };
-    ph.on_packet(hpp);
-    check(st.self().hp == 50 && st.self().max_hp == 100, "hp applied from packet");
-
-    // A combined vitals packet must drive MP as well as HP. The heal loop
-    // gates MP potions on mp_pct(), so an unmapped MP means max_mp stays zero
-    // and MP potions silently never fire.
-    PacketSpec vitals;
-    vitals.opcode = 0x0311;
-    vitals.semantic = Semantic::SelfHpMp;
-    vitals.fields = OpcodeRegistry::parse_field_list(
-        "hp:i32,max_hp:i32,mp:i32,max_mp:i32", nullptr);
-    reg.add(vitals);
-
-    GamePacket vp;
-    vp.opcode = 0x0311;
-    vp.payload = {
-        0x49, 0x2D, 0x00, 0x00,     // hp     = 11593
-        0xB6, 0x2F, 0x00, 0x00,     // max_hp = 12214
-        0xB2, 0x2D, 0x00, 0x00,     // mp     = 11698
-        0x39, 0x2F, 0x00, 0x00,     // max_mp = 12089
-    };
-    ph.on_packet(vp);
-
-    const Self me2 = st.self();
-    check(me2.hp == 11593 && me2.max_hp == 12214, "hp and max_hp from a combined packet");
-    check(me2.mp == 11698 && me2.max_mp == 12089, "mp and max_mp from a combined packet");
-    check(me2.max_mp > 0, "max_mp is non-zero, so mp_pct() is meaningful");
-    check(std::abs(me2.mp_pct() - 96.76f) < 0.1f, "mp_pct computes correctly");
-    check(std::abs(me2.hp_pct() - 94.91f) < 0.1f, "hp_pct computes correctly");
-
-    // Unmapped traffic must be counted, not dropped silently — it is the
-    // input to the next round of protocol discovery.
-    GamePacket unknown;
-    unknown.opcode = 0x7777;
-    unknown.payload = { 1, 2, 3, 4 };
-    ph.on_packet(unknown);
-
-    const auto stats = ph.stats();
-    check(stats.decoded == 3, "decoded count");   // move, hp, combined vitals
-    check(stats.unknown == 1, "unknown count");
-    check(stats.unknown_opcodes.count(0x7777) == 1, "unknown opcode recorded");
-
-    // A death is said once: by the reading that takes HP to 0, not by every
-    // packet after it, and the next only after a reading above 0 between.
-    // HP at 0 was the only sign of one the layouts the tools write give, and
-    // it marked the character dead without a word, so a bot set to stop at a
-    // death never stopped.
-    int deaths = 0;
-    ph.set_death_callback([&deaths] { ++deaths; });
-    GamePacket zero;
-    zero.opcode = 0x0310;
-    zero.payload = { 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00 };     // 0 of 100
-    ph.on_packet(zero);
-    check(st.self().dead && deaths == 1, "HP read 0 is a death, and said");
-    ph.on_packet(zero);
-    check(st.self().dead && deaths == 1, "once per death, not once per packet");
-    ph.on_packet(hpp);
-    check(!st.self().dead && deaths == 1, "HP above 0 again is alive again, with no revive packet");
-    ph.on_packet(zero);
-    check(st.self().dead && deaths == 2, "and the next 0 is the next death");
-
-    // self_dead and self_revive say so outright, and a death is still one.
-    PacketSpec dead_spec;
-    dead_spec.opcode = 0x0320;
-    dead_spec.semantic = Semantic::SelfDead;
-    reg.add(dead_spec);
-    PacketSpec revive_spec;
-    revive_spec.opcode = 0x0321;
-    revive_spec.semantic = Semantic::SelfRevive;
-    reg.add(revive_spec);
-    GamePacket dead_pkt;
-    dead_pkt.opcode = 0x0320;
-    GamePacket revive_pkt;
-    revive_pkt.opcode = 0x0321;
-    ph.on_packet(dead_pkt);
-    check(deaths == 2, "a self_dead packet just after HP read 0 is the same death");
-    ph.on_packet(revive_pkt);
-    check(!st.self().dead && st.self().hp == 100,
-          "a self_revive with HP at 0 is alive, HP filled from the max");
-    ph.on_packet(dead_pkt);
-    ph.on_packet(dead_pkt);
-    check(st.self().dead && deaths == 3, "a self_dead packet while alive is a death, said once for two");
-    ph.on_packet(hpp);
-    PacketSpec state_spec;
-    state_spec.opcode = 0x0330;
-    state_spec.semantic = Semantic::SelfState;
-    state_spec.fields = OpcodeRegistry::parse_field_list("hp:i32,max_hp:i32", nullptr);
-    reg.add(state_spec);
-    GamePacket state_zero = zero;
-    state_zero.opcode = 0x0330;
-    ph.on_packet(state_zero);
-    check(st.self().dead && deaths == 4, "and HP read 0 through a self_state layout is one too");
-    ph.on_packet(revive_pkt);
-    ph.on_packet(dead_pkt);
-    ph.on_packet(zero);
-    check(st.self().dead && deaths == 5, "a self_dead packet and then HP read 0 are one death, not two");
-
-    // 0x0038 as the shipped layout reads it: slot 0 is a monster like any
-    // other, at x, y @24/@26, and an HP read below 0 at @56 is a kill, which
-    // takes it off the list. Its id of 0 was taken for no id at all.
-    {
-        OpcodeRegistry monsters;
-        PacketSpec spec;
-        spec.opcode = 0x0038;
-        spec.semantic = Semantic::MonsterUpdate;
-        spec.fields =
-            OpcodeRegistry::parse_field_list("id:u32@8,speed:f32@20,x:u16@24,y:u16@26,hp:i32@56", nullptr);
-        monsters.add(spec);
-        GameState world;
-        ProtocolHandler handler(monsters, world);
-        const auto event = [](std::uint32_t slot, std::uint16_t x, std::uint16_t y, std::int32_t hp) {
-            GamePacket p;
-            p.opcode = 0x0038;
-            p.from_server = true;
-            p.payload.assign(96 - 8, 0);
-            std::memcpy(p.payload.data() + 8, &slot, 4);
-            std::memcpy(p.payload.data() + 24, &x, 2);
-            std::memcpy(p.payload.data() + 26, &y, 2);
-            std::memcpy(p.payload.data() + 56, &hp, 4);
-            return p;
-        };
-        handler.on_packet(event(0, 1636, 850, 67668));
-        const auto slot0 = world.monster(0);
-        check(slot0 && std::abs(slot0->pos.x - 1636.0f) < 0.01f && std::abs(slot0->pos.y - 850.0f) < 0.01f &&
-                  slot0->hp == 67668 && !slot0->dead,
-              "0x0038 for slot 0: a monster like any other, at x, y @24/@26, with its HP @56");
-        handler.on_packet(event(0, 1640, 850, -5000));
-        check(!world.monster(0) && world.monster_count() == 0,
-              "an HP read below 0 is a kill: the monster is taken off the list");
-        PacketSpec nameless = spec;
-        nameless.fields = OpcodeRegistry::parse_field_list("x:u16@24,y:u16@26,hp:i32@56", nullptr);
-        monsters.add(nameless);
-        handler.on_packet(event(3, 100, 200, 500));
-        check(world.monster_count() == 0, "a layout with no id field still keeps no monster");
-    }
-
-    // The callbacks are called with no lock of the registry's or the
-    // handler's held: gobot_cli's death callback stops the bot there and
-    // then, the sniffer's unknown-packet one keeps its own books, and either
-    // may touch the table. Called under decode()'s lock, a callback that adds
-    // a layout would wait on itself for ever.
-    {
-        OpcodeRegistry table;
-        table.add(hp);
-        GameState life;
-        ProtocolHandler handler(table, life);
-        const std::string path = temp_file("registry_callbacks.ini");
-        write_lines(path, { "[Packet.0x0310]", "name=SelfHpMp", "semantic=self_hpmp",
-                            "fields=hp:i32,max_hp:i32" });
-        int died = 0, strangers = 0;
-        handler.set_death_callback([&] {
-            ++died;
-            PacketSpec more;
-            more.opcode = 0x0999;
-            more.semantic = Semantic::Chat;
-            table.add(more);
-            (void)handler.stats();
-        });
-        handler.set_unknown_callback([&](const GamePacket&) {
-            ++strangers;
-            table.load(path);
-        });
-        finish_within(10000, "a callback that rewrites the opcode table", [&] {
-            handler.on_packet(zero);
-            GamePacket stranger;
-            stranger.opcode = 0x7778;
-            stranger.payload = { 1, 2 };
-            handler.on_packet(stranger);
-        });
-        check(died == 1 && strangers == 1 && table.known(0x0310) && !table.known(0x0999),
-              "a death callback that adds a layout, and an unknown-packet one that reloads the table, "
-              "both come back");
-        std::remove(path.c_str());
-    }
-}
-
 } // namespace
 
 /// See test_support.hpp. Out at once, as check()'s lines are.
@@ -20592,6 +19818,9 @@ void test_party_hud(void (*check)(bool, const std::string&), void (*section)(con
 void test_chat_alone(void (*check)(bool, const std::string&), void (*section)(const char*));
 // "Dùng" in Dọn rác, in use_test.cpp.
 void test_use(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The pet's HP food on reaching TổCổLong (2026.11.24) alone, for working on
+// it: its part of "use", in use_test.cpp.
+void test_pet_shop_suite(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The hunter on scripted plates and the monster lists, in hunter_test.cpp.
 void test_hunter_fight(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The potion tiers, potions first, and Quái đang thấy, in macro_fight_test.cpp.
@@ -20679,7 +19908,8 @@ void test_vitals_trust(void (*check)(bool, const std::string&), void (*section)(
 void test_bag_ledger(void (*check)(bool, const std::string&), void (*section)(const char*));
 // Your casts and buffs from the packets, paired with the macro's presses, in cast_match_test.cpp.
 void test_cast_match(void (*check)(bool, const std::string&), void (*section)(const char*));
-// The skills paced on your casts (cast_paced, 2026.11.08), in cast_pace_test.cpp.
+// The skills paced on your casts (cast_paced, 2026.11.08; with the hunter too and
+// on by default since 2026.11.16b), in cast_pace_test.cpp.
 void test_cast_pace(void (*check)(bool, const std::string&), void (*section)(const char*));
 // The jobs and the window in 2026.11.08: the shop's and the quest's waits after a
 // spoiled quiet second, the clocks kept across a MACRO OFF and ON, a key on a
@@ -20691,6 +19921,125 @@ void test_pass_keys(void (*check)(bool, const std::string&), void (*section)(con
 // The potion shop right after the Dọn rác pass, under the same hold (2026.11.11),
 // in shop_ride_test.cpp.
 void test_shop_ride(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The way back into the owner's five hunting areas from everywhere outside them,
+// walked at g 2400 and 1905 (2026.11.12c), in way_back_cover_test.cpp.
+void test_way_back_cover(void (*check)(bool, const std::string&), void (*section)(const char*));
+// The game at 1024x768, 1280x720 and 1366x768 (2026.11.13c): the character
+// select, the game off the screen, the channel list, the trackers on a resize
+// and the in-world screens at each size, in res_sizes_test.cpp.
+void test_res_sizes(void (*check)(bool, const std::string&), void (*section)(const char*));
+// Đào khoáng and phó bản Cổ Thụ (2026.11.19): the packets, the settings, the
+// two planners, the trips and the gate key, in expedition_test.cpp.
+void test_expedition(void (*check)(bool, const std::string&), void (*section)(const char*));
+
+namespace {
+
+/// GOBOT_TEST_ONLY=jump_plan,way_back_cover (2026.11.12c): only those of the
+/// suites below, by their names less "test_", for a quick look while working
+/// on them -- never set by package.ps1 or run_tests: unset, every test runs.
+/// Whether the run was so cut, and what it ran.
+///
+/// Since 2026.11.24 every suite main() runs is here, in main()'s order -- the
+/// plain ones too -- so the whole run can be split over a few processes at
+/// once (the owner asked why one run takes 35-40 min): each named suite says
+/// its name and how long it took ("[suite use] ... s"), so a split run can be
+/// checked to have run each exactly once and the slow ones spread out; and the
+/// end's "nothing but the switch's own test reached for the real desktop" is
+/// checked here as well. "pet_shop" is a part of "use", for working on it.
+using Suite = void (*)(void (*)(bool, const std::string&), void (*)(const char*));
+#define GOBOT_PLAIN_SUITE(name) \
+    { #name, [](void (*)(bool, const std::string&), void (*)(const char*)) { test_##name(); } }
+bool only_suites(const char* only) {
+    static const std::pair<const char*, Suite> suites[] = {
+        // The plain ones main() runs first, in its order: the switch's own
+        // test first, then where DLLs are looked for.
+        GOBOT_PLAIN_SUITE(no_real_input), GOBOT_PLAIN_SUITE(dll_search), GOBOT_PLAIN_SUITE(display_scale),
+        GOBOT_PLAIN_SUITE(key_rule), GOBOT_PLAIN_SUITE(parse_key), GOBOT_PLAIN_SUITE(game_click),
+        GOBOT_PLAIN_SUITE(own_windows), GOBOT_PLAIN_SUITE(byte_reader), GOBOT_PLAIN_SUITE(framing_extract),
+        GOBOT_PLAIN_SUITE(framing_detect), GOBOT_PLAIN_SUITE(checksum_framing), GOBOT_PLAIN_SUITE(frame_trailer),
+        GOBOT_PLAIN_SUITE(unwrap), GOBOT_PLAIN_SUITE(udp_datagrams), GOBOT_PLAIN_SUITE(udp_framing),
+        GOBOT_PLAIN_SUITE(own_position), GOBOT_PLAIN_SUITE(watchdog_clock), GOBOT_PLAIN_SUITE(capture_filters),
+        GOBOT_PLAIN_SUITE(socket_owners), GOBOT_PLAIN_SUITE(framing_config), GOBOT_PLAIN_SUITE(capture_file_inner),
+        GOBOT_PLAIN_SUITE(real_capture), GOBOT_PLAIN_SUITE(saved_vitals_frames), GOBOT_PLAIN_SUITE(live_frames),
+        GOBOT_PLAIN_SUITE(skips_counted), GOBOT_PLAIN_SUITE(capture_file), GOBOT_PLAIN_SUITE(capture_file_framings),
+        GOBOT_PLAIN_SUITE(unpack), GOBOT_PLAIN_SUITE(monster_frames), GOBOT_PLAIN_SUITE(packet_world_capture),
+        GOBOT_PLAIN_SUITE(frame_numbers), GOBOT_PLAIN_SUITE(flow_halves),
+        GOBOT_PLAIN_SUITE(both_framings_configured), GOBOT_PLAIN_SUITE(reassembler), GOBOT_PLAIN_SUITE(stream_tap),
+        GOBOT_PLAIN_SUITE(opcode_registry), GOBOT_PLAIN_SUITE(opcode_registry_load),
+        GOBOT_PLAIN_SUITE(opcode_registry_threads), GOBOT_PLAIN_SUITE(opcode_registry_strict),
+        GOBOT_PLAIN_SUITE(protocol_analyzer), GOBOT_PLAIN_SUITE(map_file), GOBOT_PLAIN_SUITE(macro_config),
+        GOBOT_PLAIN_SUITE(macro_trigger_config), GOBOT_PLAIN_SUITE(macro_engine), GOBOT_PLAIN_SUITE(macro_key_kind),
+        GOBOT_PLAIN_SUITE(macro_buffs), GOBOT_PLAIN_SUITE(macro_short_buffs), GOBOT_PLAIN_SUITE(front_keeper),
+        GOBOT_PLAIN_SUITE(charm_sources), GOBOT_PLAIN_SUITE(vitals_reader), GOBOT_PLAIN_SUITE(screen_capture_frees),
+        GOBOT_PLAIN_SUITE(find_bars), GOBOT_PLAIN_SUITE(pet_bar), GOBOT_PLAIN_SUITE(macro_triggers),
+        GOBOT_PLAIN_SUITE(template_matcher), GOBOT_PLAIN_SUITE(assembly_templates), GOBOT_PLAIN_SUITE(routines),
+        GOBOT_PLAIN_SUITE(party_chat), GOBOT_PLAIN_SUITE(party), GOBOT_PLAIN_SUITE(shipped_macro_works),
+        GOBOT_PLAIN_SUITE(shipped_configs), GOBOT_PLAIN_SUITE(colour_templates), GOBOT_PLAIN_SUITE(anchored_bars),
+        GOBOT_PLAIN_SUITE(session_manager), GOBOT_PLAIN_SUITE(auto_login), GOBOT_PLAIN_SUITE(game_install),
+        GOBOT_PLAIN_SUITE(crash_watch), GOBOT_PLAIN_SUITE(party_invite), GOBOT_PLAIN_SUITE(invite_decision),
+        GOBOT_PLAIN_SUITE(map_table), GOBOT_PLAIN_SUITE(glyph_font), GOBOT_PLAIN_SUITE(mob_detector),
+        GOBOT_PLAIN_SUITE(mob_detector_forgets), GOBOT_PLAIN_SUITE(hunter_config), GOBOT_PLAIN_SUITE(hunter),
+        GOBOT_PLAIN_SUITE(bag), GOBOT_PLAIN_SUITE(bag_counts), GOBOT_PLAIN_SUITE(bag_dialogs),
+        GOBOT_PLAIN_SUITE(reviver), GOBOT_PLAIN_SUITE(screen_layout), GOBOT_PLAIN_SUITE(auto_chat),
+        GOBOT_PLAIN_SUITE(gui_stop), GOBOT_PLAIN_SUITE(position_wiring), GOBOT_PLAIN_SUITE(spot_wiring),
+        GOBOT_PLAIN_SUITE(gui_clicks), GOBOT_PLAIN_SUITE(cli_source),
+        { "alerts", test_alerts },         { "quest", test_quest },
+        { "hotkeys", test_hotkeys },       { "potions", test_potions },
+        { "popups", test_popups },         { "stall", test_stall },
+        { "party_hud", test_party_hud },   { "chat_alone", test_chat_alone },
+        { "use", test_use },               { "hunter_fight", test_hunter_fight },
+        { "macro_fight", test_macro_fight }, { "hunter_style", test_hunter_style },
+        { "jump", test_jump },             { "drop_key", test_drop_key },
+        { "jump_key", test_jump_key },     { "map_book", test_map_book },
+        { "drop_hunt", test_drop_hunt },   { "map_tab", test_map_tab },
+        { "zone_hunt", test_zone_hunt },   { "jump_plan", test_jump_plan },
+        { "way_back_cover", test_way_back_cover }, { "jump_hunt", test_jump_hunt },
+        { "hunt_seek", test_hunt_seek },   { "seek_hunt", test_seek_hunt },
+        { "hunt_card", test_hunt_card },   { "skills", test_skills },
+        { "packet_world", test_packet_world }, { "packet_eyes", test_packet_eyes },
+        { "pacer", test_pacer },           { "load", test_load },
+        { "tabs", test_tabs },             { "capture_load", test_capture_load },
+        { "packet_self", test_packet_self }, { "vitals_trust", test_vitals_trust },
+        { "bag_ledger", test_bag_ledger }, { "cast_match", test_cast_match },
+        { "cast_pace", test_cast_pace },   { "jobs_gui", test_jobs_gui },
+        { "pass_keys", test_pass_keys },   { "shop_ride", test_shop_ride },
+        { "res_sizes", test_res_sizes },   { "expedition", test_expedition },
+        // And the plain ones main() runs last.
+        GOBOT_PLAIN_SUITE(config), GOBOT_PLAIN_SUITE(unicode_paths), GOBOT_PLAIN_SUITE(version_file),
+        GOBOT_PLAIN_SUITE(log_each_start),
+        // The pet's HP food alone, out of "use" (2026.11.24): not a suite of
+        // its own in the whole run.
+        { "pet_shop", test_pet_shop_suite },
+    };
+    if (only == nullptr || only[0] == '\0') return false;
+    const std::string list = std::string(",") + only + ",";
+    // As in main(): every refusal after the switch's own test is a test
+    // reaching for the real desktop.
+    std::uint64_t guard_refusals = real_input_refusals();
+    for (const auto& s : suites) {
+        if (list.find(std::string(",") + s.first + ",") == std::string::npos) continue;
+        std::printf("\n[suite %s]\n", s.first);
+        std::fflush(stdout);
+        const auto t0 = std::chrono::steady_clock::now();
+        s.second(check, section);
+        const double took =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("[suite %s] done in %.1f s\n", s.first, took);
+        std::fflush(stdout);
+        if (std::string(s.first) == "no_real_input") guard_refusals = real_input_refusals();
+    }
+    section("Nothing but the switch's own test reached for the real desktop");
+    const std::uint64_t outside = real_input_refusals() - guard_refusals;
+    check(outside == 0,
+          outside == 0 ? std::string("no test reached for the real desktop outside the switch's own")
+                       : std::to_string(outside) +
+                             " reach(es) for the real desktop outside the switch's own test -- "
+                             "give that test pretend hands");
+    return true;
+#undef GOBOT_PLAIN_SUITE
+}
+
+} // namespace
 
 int main() {
     // Before anything else, and never turned off. From here on nothing in this
@@ -20709,6 +20058,19 @@ int main() {
     std::printf("GoBot self-tests\n");
     // This run's scratch folder: see temp_file.
     if (!run_temp_dir().empty()) CreateDirectoryW(run_temp_dir().c_str(), nullptr);
+
+    // Only some suites, while working on them (GOBOT_TEST_ONLY): the switch
+    // above is on all the same.
+    if (only_suites(std::getenv("GOBOT_TEST_ONLY"))) {
+        std::printf("\n%s\n", std::string(50, '-').c_str());
+        std::printf("%d passed, %d failed, %d skipped (GOBOT_TEST_ONLY: not the whole suite)\n", g_passed, g_failed,
+                    g_skipped);
+        if (!run_temp_dir().empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(run_temp_dir()), ec);
+        }
+        return g_failed == 0 ? 0 : 1;
+    }
 
     test_no_real_input();
     // Every refusal from here on is a test reaching for the real desktop.
@@ -20734,7 +20096,6 @@ int main() {
     test_socket_owners();
     test_framing_config();
     test_capture_file_inner();
-    test_protocol_handler_holds_back();
     test_real_capture();
     test_saved_vitals_frames();
     test_live_frames();
@@ -20753,8 +20114,6 @@ int main() {
     test_opcode_registry_load();
     test_opcode_registry_threads();
     test_opcode_registry_strict();
-    test_game_state();
-    test_pathfinder();
     test_protocol_analyzer();
     test_map_file();
     test_macro_config();
@@ -20764,14 +20123,6 @@ int main() {
     test_macro_buffs();
     test_macro_short_buffs();
     test_front_keeper();
-    test_executor_pause();
-    test_executor_no_sustain();
-    test_packet_vitals();
-    test_executor_armed();
-    test_executor_halt();
-    test_brain_stop_halts();
-    test_brain_death();
-    test_calibrator();
     test_charm_sources();
     test_vitals_reader();
     test_screen_capture_frees();
@@ -20781,13 +20132,11 @@ int main() {
     test_template_matcher();
     test_assembly_templates();
     test_routines();
-    test_gatherer();
     test_party_chat();
     test_party();
     test_shipped_macro_works();
     test_shipped_configs();
     test_colour_templates();
-    test_dialog_driver();
     test_anchored_bars();
     test_session_manager();
     test_auto_login();
@@ -20796,13 +20145,9 @@ int main() {
     test_party_invite();
     test_invite_decision();
     test_map_table();
-    test_world_anchor();
     test_glyph_font();
     test_mob_detector();
     test_mob_detector_forgets();
-    test_camera_tracker();
-    test_field_finder();
-    test_minimap_tracker();
     test_hunter_config();
     test_hunter();
     test_bag();
@@ -20836,6 +20181,7 @@ int main() {
     test_map_tab(check, section);
     test_zone_hunt(check, section);
     test_jump_plan(check, section);
+    test_way_back_cover(check, section);
     test_jump_hunt(check, section);
     test_hunt_seek(check, section);
     test_seek_hunt(check, section);
@@ -20855,11 +20201,12 @@ int main() {
     test_jobs_gui(check, section);
     test_pass_keys(check, section);
     test_shop_ride(check, section);
+    test_res_sizes(check, section);
+    test_expedition(check, section);
     test_config();
     test_unicode_paths();
     test_version_file();
     test_log_each_start();
-    test_protocol_handler();
 
     // A reach outside the switch's own test was refused, and its error is in
     // the log -- but a line in a log is what a check by hand misses, and

@@ -17,6 +17,7 @@
 #include <d3d11.h>
 #include <tchar.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
@@ -79,8 +80,14 @@ bool create_device(HWND hwnd) {
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
     D3D_FEATURE_LEVEL got = D3D_FEATURE_LEVEL_10_0;
 
+    // Only this thread ever touches the device: the loop below, ImGui's DX11
+    // backend inside it, and nothing GoBot's other threads do. So no locks
+    // inside Direct3D, and no worker threads of the driver's own -- on a
+    // 1-core PC they only take turns from the game (2026-11-16). WARP too.
+    const UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
+
     HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
         levels, 2, D3D11_SDK_VERSION,
         &sd, &g_swapchain, &g_device, &got, &g_context);
 
@@ -92,7 +99,7 @@ bool create_device(HWND hwnd) {
     if (FAILED(hr)) {
         cleanup_device();       // whatever the failed attempt left
         hr = D3D11CreateDeviceAndSwapChain(
-            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
             levels, 2, D3D11_SDK_VERSION,
             &sd, &g_swapchain, &g_device, &got, &g_context);
         warp = SUCCEEDED(hr);
@@ -138,6 +145,14 @@ bool create_device(HWND hwnd) {
 void wait_for_input(std::uint32_t ms) {
     if (ms == 0) return;
     MsgWaitForMultipleObjectsEx(0, nullptr, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+}
+
+/// How long the loop may wait after a pass that asked the pacer: until its
+/// next frame, and never past FramePacer::kMaxWaitMs from the last tick() --
+/// a pass a message woke, which ran no tick(), must not put the next one off.
+std::uint32_t next_wait(const gobot::FramePacer& pacer, std::uint64_t ticked_at) {
+    const std::uint64_t now = gobot::now_ms();
+    return std::min(pacer.wait_ms(now), gobot::FramePacer::tick_wait_ms(ticked_at, now));
 }
 
 void cleanup_device() {
@@ -273,11 +288,12 @@ Faces load_faces(ImGuiIO& io) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     // Before anything loads a DLL. GoBot runs as administrator from a folder a
     // player made, and Windows looks for a DLL named without its path in the
-    // program's own folder first: an xinput1_4.dll (Dear ImGui asks for it by
-    // name) or a wpcap.dll left beside gobot_gui.exe would run as
-    // administrator. From here on such DLLs come from System32 and Npcap's
-    // folder alone. The ones this program imports load before this line;
-    // /DEPENDENTLOADFLAG in CMakeLists.txt holds those to System32.
+    // program's own folder first: a wpcap.dll, or any DLL asked for by name,
+    // left beside gobot_gui.exe would run as administrator. (Dear ImGui's
+    // gamepad code asked for xinput1_4.dll so; CMakeLists.txt leaves it out
+    // since 2026.11.16.) From here on such DLLs come from System32 and
+    // Npcap's folder alone. The ones this program imports load before this
+    // line; /DEPENDENTLOADFLAG in CMakeLists.txt holds those to System32.
     gobot::harden_dll_search();
 
     // Real screen pixels for everything GoBot does to the game (gobot/dpi.hpp):
@@ -352,7 +368,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     // inside the window rather than a modal before it: a dialog that blocks
     // before anything is on screen reads as a crash when it is dismissed.
     app.set_elevated(running_as_admin());
-    // The radar needs to know where this window is: the game refuses to render
+    // The screen readers need to know where this window is: the game refuses to render
     // itself into a bitmap, so frames come off the screen and anything covering
     // the game is read instead of it.
     app.set_main_window(hwnd);
@@ -381,10 +397,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
                                    : 0.0;
     };
 
+    // When tick() last ran, on now_ms()'s clock; 0 before the first. The
+    // waits below are counted from here, so tick() comes round within
+    // FramePacer::kMaxWaitMs of the last one however long a pass took and
+    // whatever woke the loop in between.
+    std::uint64_t ticked_at = 0;
+
     while (!done) {
-        // When this pass began: the pacer's wait is counted from here, so the
-        // loop comes round within FramePacer::kMaxWaitMs of it however long
-        // the pass took.
+        // When this pass began, for the pacer's frames.
         const std::uint64_t woke = gobot::now_ms();
         MSG msg;
         // The W versions, by name. The window is a Unicode one (RegisterClassExW,
@@ -406,11 +426,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         // which is exactly when the window is occluded. Skipping it there
         // meant the panic key stopped working whenever there was something to
         // panic about.
-        {
+        //
+        // At most once per FramePacer::kTickEveryMs, however many messages
+        // woke the loop: a mouse moving over the window sends hundreds a
+        // second, and each ran the whole tick(). The keys are still read every
+        // 10 ms: the waits end that long after the last tick().
+        if (gobot::FramePacer::tick_due(ticked_at, woke)) {
+            ticked_at = woke;
             const gobot::DpiScope pixels(gobot::DpiScope::Mode::RealPixels);
             app.tick();
+            ++counters.passes;
         }
-        ++counters.passes;
 
         // How frames are paced, asked every pass: "Nhẹ máy" can be ticked
         // meanwhile. With [Performance] gui_pacer=off, the loop as it was
@@ -423,7 +449,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         if (g_occluded && g_swapchain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
             ++counters.occluded_skips;
             if (pacing.pacer_on)
-                wait_for_input(gobot::FramePacer::tick_wait_ms(woke, gobot::now_ms()));
+                wait_for_input(gobot::FramePacer::tick_wait_ms(ticked_at, gobot::now_ms()));
             else
                 Sleep(10);
             continue;
@@ -451,7 +477,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             pass.redraw = app.take_redraw();
             pass.rates = pacing.rates;
             if (!pacer.decide(pass)) {
-                wait_for_input(pacer.wait_ms(gobot::now_ms()));
+                wait_for_input(next_wait(pacer, ticked_at));
                 continue;
             }
         }
@@ -495,7 +521,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         counters.frame(build_ms, ms_since(presented_from));
         g_occluded = (hr == DXGI_STATUS_OCCLUDED);
 
-        if (pacing.pacer_on) wait_for_input(pacer.wait_ms(gobot::now_ms()));
+        if (pacing.pacer_on) wait_for_input(next_wait(pacer, ticked_at));
     }
 
     ImGui_ImplDX11_Shutdown();

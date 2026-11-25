@@ -122,7 +122,7 @@ BagLedger::Link GuiApp::BagPart::link_of(const GuiApp& app) {
     BagLedger::Link l;
     // packet_positions=off: nothing from the packets, whoever captures. And
     // only GoBot's own capture of the game window's process, as for HP: one
-    // of the Protocol tab's or Autopilot's takes every client's bag.
+    // started on the Capture tab takes every client's bag.
     l.capturing = app.capture_.running() && !app.packets_off_.load() && app.capture_on_window();
     l.epoch = app.packet_self_.epoch();
     l.self_start = app.packet_self_.start_count();

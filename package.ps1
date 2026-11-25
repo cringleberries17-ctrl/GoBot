@@ -185,10 +185,8 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'configs') | Out-Null
 
-# The two programs a player runs. Not gobot_sniff (protocol tools), not
-# gobot_test (it reads the source tree, which a tester does not have), and
-# not the GoBotBridge files: those run another bot's code, which no feature
-# of the simple screen uses and which a virus scanner rightly distrusts.
+# The two programs a player runs. Not gobot_sniff (protocol tools), and not
+# gobot_test (it reads the source tree, which a tester does not have).
 Copy-Item (Join-Path $rel 'gobot_gui.exe') $stage
 Copy-Item (Join-Path $rel 'gobot_cli.exe') $stage
 
@@ -437,16 +435,21 @@ STARTING
      runs elevated, and Windows drops the keys of a program that is not.
      SmartScreen may say "Windows protected your PC" -- More info, Run
      anyway: GoBot is not signed.
-  3. The game in a window, 1024x768 or 1280x720. Windows' display scale
-     can be anything on Windows 10 (1607 or later) and 11; on an older
-     Windows keep it at 100%. Above 100% Windows may enlarge the game, and
+  3. The game in a window, 1024x768, 1280x720 or 1366x768. 1024x768 has
+     run in full; at 1280x720 the HUD, hotbar and chat bar have run on a
+     player's machine; at 1366x768 only the HUD and hotbar were seen, once;
+     Tu dang nhap is not yet tried at 1280x720 or 1366x768. Windows'
+     display scale can be anything on Windows 10 (1607 or later) and 11; on
+     an older Windows keep it at 100%. Above 100% Windows may enlarge the game, and
      an enlarged game cannot be read: when GoBot says Windows dang phong to
      game, press Sua cho game and start the game again (or set the scale to
      100%); Windows dang phong to chinh GoBot has Sua cho GoBot. Tu dang
      nhap knows VTCZone by pictures taken at 100%: if VTCZone draws itself
      bigger, use 100%. Keep every window, GoBot's included, off the game: it
-     is read off the screen. On a screen 768 pixels high a 1024x768 game
-     does not fit: use 1280x720, with the taskbar set to hide itself.
+     is read off the screen. On a screen 768 pixels high a 1024x768 or
+     1366x768 game does not fit: use 1280x720, with the taskbar set to hide
+     itself (GoBot says "Game khong nam tron tren man hinh" when it does not
+     fit).
      Where GoBot cannot sit beside the game, press BAT DAU and minimise
      GoBot: it goes on running, and F10, F11 and F12 still work in the game.
 
@@ -463,7 +466,7 @@ THE SIMPLE SCREEN
   monster's dot, and the character's, is drawn on its platform as the map
   file has it (the bot itself still judges heights as before), a dead
   monster's dot goes at once, no monster is drawn while no packets come,
-  and the tab is redrawn 10 times a second (2 behind the game with
+  and the tab is redrawn 30 times a second (2 behind the game with
   Nhe may). On it, with the mouse only, each map gets one hunting area:
   a box, and a home on a platform inside it that the bot walks back to.
   Saved on the mouse's release in configs\spots.ini, which GoBot writes
@@ -476,7 +479,9 @@ THE SIMPLE SCREEN
   Since 2026.11.04d, by the map's own file, the bot never walks toward a
   monster out of the area's box; more than 60 px outside it, with a way
   back along the floors (or off a floor's end into the box), it walks back
-  first, never hopping, and with none it fights where it stands; the card
+  first, never hopping, and with none it fights where it stands (since
+  2026.11.12 it stands still, and the way is looked for over other floors
+  too); the card
   under the map says how far outside it is. Put the home on the LOWEST
   floor to be hunted and drag the box UP, not down -- 04c's notes said the
   reverse, and the card now says in red when most of the box cannot walk
@@ -489,10 +494,11 @@ THE SIMPLE SCREEN
   tren jumps straight up -- Up, Up Up or Ctrl+Up, chosen by the map's own
   file with a margin -- onto a monster's platform above and on the way
   home, only where the take-off, the landing and the monster all lie
-  inside the area and no platform outside it lies within 650 px above; it
+  inside the area and no platform outside it lies within 650 px above
+  (since 2026.11.12c for Ctrl+Up only: Up looks 245 px up, Up Up 413); it
   needs the jump key to be Up, and a map change within 10 s of a jump
   stops the hunt and unticks it. On t52_s2 the home ledge is reached from
-  the ground by Ctrl+Up at about x 695-884, so the home can stay where it
+  the ground by Ctrl+Up at about x 695-1002, so the home can stay where it
   is. Tu tim quai trong vung goes to any monster inside the area the
   character can get to, in view or not, and fights it from a place inside
   the area; with none left it stands where it is (outside the area it
@@ -556,11 +562,12 @@ THE SIMPLE SCREEN
   ignores a key pressed during a cast: which skill came out was chance. One
   interval for all eight skills (1.2 s each, in Chi tiet...) evens it out
   today. The new tick Ra chieu theo vong (in the Ky nang window and on the
-  full screen's Timed keys; OFF as shipped, cast_paced in configs\macro.ini)
-  presses the skills one at a time in the order of the keys, each only once
-  the game has cast the one before -- seen in the game's packets, so it
-  needs Npcap -- and goes back to the timers after 2 s with no cast seen.
-  Only with Tu danh quai off. Tu mua binh and quick quest, after someone was
+  full screen's Timed keys; OFF as shipped in this version, ON and with Tu
+  danh quai too since 2026.11.16b, below) presses the skills one at a time
+  in the order of the keys, each only once the game has cast the one before
+  -- seen in the game's packets, so it needs Npcap -- and goes back to the
+  timers after 2 s with no cast seen. In this version only with Tu danh quai
+  off. Tu mua binh and quick quest, after someone was
   at the mouse, now wait 30 s, then 2, 5 and 10 minutes rather than 30 s
   every time; keep them, the bag and the charms off during battlefield
   fights, and leave GoBot's window alone while the macro runs. Fight 15
@@ -632,6 +639,325 @@ THE SIMPLE SCREEN
   six to have them pressed meanwhile. On the simple screen Delete is now a
   key like any other, and Backspace clears a key box. Send gobot_gui.log:
   its Trash: lines say what happened.
+
+  Turns, the area, falls and two bars (2026.11.12, not yet tried on the
+  game). The owner's hunt of 2026-11-11 showed a skill that carries the
+  character about 214 or 319 px with no walk, pressed on its own timer
+  whatever the hunter did. With the packets steering, a turn now waits for
+  the game's report of it (1 s at most; the tap is 80 ms) before the hunter
+  swings, and a monster walking through the character no longer turns it
+  back and forth. The hunter's own attack key goes only within the reach its
+  skill was seen to have (attack_range_px in configs\hunt.ini, 0 = as
+  learned). The macro holds the skill keys -- never potions or buffs --
+  while a turn waits, through a drop, with nothing to fight in the area and
+  outside it with no walk back; and the dash's key (learned from the
+  packets, the log names it; until then C, V and Space -- since 2026.11.17
+  no key until one is learned) where its landing
+  would leave the area or run past a floor's end. With Cho danh quai,
+  monsters outside the area are never fought, in reach or not. Fallen out
+  of the area, the character finds its way back by the map's file over
+  other floors too -- walking, walking off ends, Up / Up Up / Ctrl+Up, 4
+  jumps at most, and with Nhay xuong ticked Ctrl+Down through platforms by
+  the drop's own rules, 8 at most -- for a Ban do area and, with the file
+  trusted, for this run's spot; with no way it stands still, skills held,
+  and walks back given up on 3 times are tried once more a few minutes
+  later. A rise of more than
+  1000 px with no walk, jump or door is a fall into a pit put back up top
+  by the game: it stands until a second report agrees, then works the way
+  back out from there; walks stop at a pit's edge. Ban do draws the band as
+  two dashed bars from the character's feet, dragged or typed under the map
+  (0 to 1000 px; up_reach and down_reach in hunt.ini, also Cao nhat and
+  Thap nhat): lower than the lower bar the bot drops, higher than the upper
+  it jumps, between them it fights where it stands. drop_min_px (100) and
+  the other hidden minimums are gone, so check the bars first. Don rac and
+  Tu mua binh count from the start: the first timed pass comes
+  interval_minutes after BAT DAU, the first shop look buy_every_minutes
+  after it (Don ngay and Mua ngay still at once). From the top of t62_s5 the
+  way back needs Ctrl+Down: with Nhay xuong off the character stands there.
+  The way back's drops are not yet tried on the game. Watch a hunt on
+  t23_s14 and t62_s5 and send gobot_gui.log: its Hunter, Skills, Positions
+  and Dash (packets) lines say what happened.
+
+  Charms, drops, the quick quest and popups at any HP (2026.11.12b, not yet
+  tried on the game). Dung bua (timed and Dung bua ngay) no longer waits for
+  HP 10 over the HP potion's mark, nor stops under the mark: it goes at any
+  HP but the character down, and presses the HP and MP potions itself
+  between two charms (letters, Space and Home/End/PgUp/PgDn/Insert/Delete
+  only, never a digit nor the pet's), the bot running or not; skills and
+  buffs still wait. The hunter's drops (Ctrl+Down) and jumps up (Up, Up Up,
+  Ctrl+Up), for a monster and on the way back, no longer wait for HP over
+  the HP potion's mark. Nhiem vu nhanh and Tu dong thong bao start at any HP
+  and stop only with the character down. Tu chat is unchanged. Send
+  gobot_gui.log: its "Trash: own potion press between two charms" lines say
+  when GoBot drank.
+
+  Jumps past the two bars, the wall foot and the way back (2026.11.12c, not
+  yet tried on the game). The jump model's gravity is 1900..2400, from the
+  two live flights of 2026-11-12: Up reaches 133..169 px, Up Up 250..337,
+  Ctrl+Up 432..546. A floor in a key's uncertain band no longer stops a jump
+  when it is a platform inside the area, and a take-off's own slope is no
+  floor above: from t23_s14's bottom the way back walks to its take-off and
+  goes Ctrl+Up, then Up Up, as the owner did by hand (no way from any of 232
+  places outside that area before, a way from all of them now, by GoBot's
+  own model of falls and jumps in the tests -- not yet measured in the
+  game). A monster above the upper bar within one plain Up gets one Up in
+  place, attacked in the air, at most 10 a minute; below the lower bar,
+  Ctrl+Down as before, now landing within one Up of it where that Up can
+  come down on no other floor. The Up-in-place replaces the old rule of no
+  jump attack in place for those monsters. The 650 px rule now holds for
+  Ctrl+Up only: Up looks 245 px up for a floor outside the area, Up Up 413.
+  t49_s5's step at x 2816 is a wall, not a pit: at its foot the bot presses
+  Ctrl+Up in place onto the ledge, and an Up there that climbs the step
+  counts as standing on it. A jump is judged by its take-off's speed (the
+  2026-11-12 client sends no state 1, 2 or 6). Stranded, the way back is
+  asked again every 10 s (every 3 s since 2026.11.15); under the area after a
+  fall or a relog, the area
+  is taken and, with the map file not trusted yet, up to three steps to
+  places 80 px apart earn it. Send gobot_gui.log: its Hunter, Packets and
+  bars: lines say what happened.
+
+  HP and MP figures with a digit missed (2026.11.13, not yet tried on the
+  game). The bars' figures "11552/18590" read as 1/552 (0%) and
+  "18590/18590" as 1859/18590 (10%) on 2026-11-13: a '1' taken for 'l' and
+  a '0' for 'O' or 'D' were passed over as not digits, and the packets'
+  check believed the bars. On the game's 6 px pitch (a 3 px slash) a missed
+  digit leaves a hole, and such a read is now refused; a read whose maximum
+  is not the one seen twice in a row gives no figures either; and a figure
+  that is the packets' value less one digit no longer counts against the
+  packets. Send gobot_gui.log if a "Vitals: ... disagreement" line (since
+  2026.11.17: "other" on the minute's "Vitals:" line) still shows the bars
+  far off the packets.
+
+  Buy right after the pass, and the game's message at login (2026.11.13b,
+  not yet tried on the game). A new box on the Tu mua binh card, "Mua ngay
+  sau khi don rac" (off as shipped): with Tu don rac on, potions are bought
+  right after each timed pass and the "mua moi" clock begins no round. Auto
+  login: a message of the game's with only Xac Nhan after Ket Noi ("Tai
+  khoan da bi chan") is closed and Ket Noi pressed again at once, with no
+  limit and not counted as an attempt; F12 still stops it. Send the
+  login_debug folder and gobot_gui.log if it is not closed.
+
+  The game at 1024x768, 1280x720 and 1366x768 (2026.11.13c, not yet tried
+  on the game at 1280x720 and 1366x768). Every screen GoBot reads was gone
+  through for the three sizes. New on the checklist: "Game khong nam tron
+  tren man hinh", when an edge of the game is past the screen's edge or
+  under the taskbar; where GoBot reads the game off the screen (most
+  machines) the potion count, Tu chat and the keyword's chat lines then
+  wait and say why. Tu dang nhap at another size: the character slot is
+  picked by where "Bat Dau Game" is, and a picture of that screen is kept
+  in login_debug while nothing is over the game; the channel list is never
+  clicked by guess. With "Bat Dau Game" in the bottom-right corner the
+  slots are taken from the middle of the game, which is a guess: if the
+  wrong character enters, report it at once. slot_anchor=picture (or
+  centre) in [Page.character] of configs\login.ini changes that without a
+  new GoBot. GoBot also keeps vitals_debug\size_<W>x<H>_*.png once a
+  session at a new size, when it reads HP there. At 1280x720 or 1366x768:
+  first make the game fit the screen (no red "Game khong nam tron tren man
+  hinh" row) with no window over it; if you can, use an account with 2 or 3
+  characters and choose the 2nd or 3rd; run Tu dang nhap once and play a
+  minute; then send the login_debug and vitals_debug folders,
+  gobot_gui.log and gobot_gui.old.log, with whether the chosen character
+  entered, the screen's size, the display scale, Full or Window Mode (in
+  Full Mode: whether the row appears), and whether the taskbar hides
+  itself. If vitals_debug has no size_ file, add a screenshot of the game
+  in the world (Alt+PrtSc).
+
+  The game's window in the corner after a login (2026.11.14, not yet tried
+  on the game). Each time GoBot itself gets into the game (Tu vao lai game,
+  the login key, gobot_cli --login), it moves the game's window to the
+  top-left corner of the screen it is on (above the taskbar), and at no
+  other time; it is never resized. When the whole window would not fit
+  there, the game's picture goes in the corner and its title bar out of
+  sight above the screen's edge (1280x720 on a screen 768 high with the
+  taskbar shown then fits); to move the game then: click it, Alt+Space,
+  Move, the arrow keys. A minimised, maximised or Full Mode game is left
+  where it is. GoBot's own window is moved beside the game if it now covers
+  it. To keep the game where you put it: move_game_to_corner=false in
+  configs\login.ini.
+
+  The shop after a pass, ESC after 10 s stuck, and the game's message after
+  an invite (2026.11.14b, not yet tried on the game). Before buying, the
+  shop round looks at the bag twice: open, it buys at once; shut, it
+  presses the bag key once and checks the bag stays open. Khac is clicked
+  only on the bag just seen, up to 4 times. At the end of a pass the bag key
+  is pressed once and GoBot waits to see the bag shut. A shop step or an
+  item in the bin stuck for more than 10 s: GoBot presses ESC, only on a
+  look that shows something open, until no shop, dialog, message or bag is
+  on the screen (6 at most; the bin's question gets Huy Bo first); the
+  round is tried again later. Charms never press ESC or Enter. After each
+  party invite, a game message with only Xac Nhan is closed by clicking
+  Xac Nhan (never Enter), and that player is not invited again for 10
+  minutes (30 s since 2026.11.15b). Send gobot_gui.log and the trash_debug
+  folder if it goes wrong.
+
+  Walls, a lost key press and the way back (2026.11.15, not yet tried on the
+  game). The map file's walls and blocks -- the pocket ledge of t60_s1 at x
+  4480 has one on its left -- now stop a walk: the bot no longer pushes into
+  one for seconds, taking it for a floor's end. A key press the game loses --
+  about one in three, at random -- no longer switches Nhay xuong, Nhay len or
+  the plain jump for a monster above off until the next start, and no longer
+  forbids a place: the first miss is tried again at once, and after 3 in a
+  row (or 5 in a run, with more misses than hits) that jump or drop pauses
+  for 30 s, then 60 s, then 120 s, and goes again by itself. When a dash ends
+  in the air and the game sends no landing report, the bot now takes the
+  character as landed on the floor under it and walks back, instead of
+  standing out of the area for good; the way back is asked again every 3 s.
+  One odd landing report no longer makes the bot give up the map file for the
+  rest of the session: it waits for the next report, and a file it did
+  distrust comes back after 2 minutes or at the next start. Outside the
+  area the bot stops fighting and walks back; it does not learn a second dash
+  skill to stay in. Send gobot_gui.log if it goes wrong.
+
+  The shop and the party again after 30 s (2026.11.15b, not yet tried on
+  the game). A shop round that ends in trouble -- stuck and shut with ESC,
+  the Khac tab not switched, a step that did not go -- is tried again 30 s
+  later, not 10 minutes; a second trouble in a row still leaves the rest
+  until the next "mua moi" time. A player whose invite the game answered
+  with its message (already in a party, refused) can be invited again after
+  30 s, not 10 minutes.
+
+  A report in mid-air is no landing (2026.11.15c, not yet tried on the
+  game). At 10:15:51 of the first live run a report in the air, 0.5 s into a
+  jump that landed at 1.2 s, was taken for the landing, judged off the map,
+  and the map file was given up on for 2 minutes with the jumps. The bot now
+  waits for the real landing whatever kind of report came first, and for as
+  long as the character is still moving in the air. Send gobot_gui.log if a
+  line "jump up landed ... on no floor of" still shows.
+
+  Thirty seconds for the game to react, and the board's ESC after a login
+  (2026.11.15d, not yet tried on the game). For slow PCs: after each key,
+  click, drag, typing or ESC, GoBot now waits up to 30 s for the screen to
+  show what it did, and goes on at once when it does -- a fast PC is as quick
+  as before; only after 30 s with nothing is the step given up. This covers
+  the bag jobs (Don rac, Dung bua, Tu mua binh: a step stuck 30 s, not 10 s,
+  gets the ESCs), the quick quest, Tu chat (each Enter waited 30 s before
+  the next), the party list and its Req Party (never clicked blind), the
+  game's message after an invite, Tu hoi sinh, auto login's channel row and
+  login message, and Tu dong thong bao. GoBot never presses a key again just
+  because the game is slow. The "Su kien va diem danh" board now gets its
+  ESC 30 s after the character comes into the game, and never from 23:55 to
+  00:03 by the PC's clock: at the day's turn it waits until 00:03. A key
+  press the game loses now costs up to 30 s. Send gobot_gui.log if it goes
+  wrong: the lines "the game took N ms to show", "nothing after 30 s" and
+  "the check-in board waits for its ESC until".
+
+  Lighter on weak PCs, and old features removed (2026.11.16, not yet tried
+  on the game). For a player's PC of one core and 3.5 GB that stutters with
+  GoBot. On the owner's PC GoBot used about 11.5 s of CPU a minute while
+  hunting; the survey estimated about 4 s if all its proposals were done --
+  an estimate only, not measured, and one proposal is not in this version.
+  Fewer looks at the screen: Tu dong thong bao looks every 2 s (3 s with Nhe
+  may) while nothing is up, not every 1 s, so a popup can be seen up to 2 s
+  later (its 3 s rule and the check-in board's 30 s and 23:55 to 00:03 are
+  unchanged); the monsters' names are read every 2 s, not 0.6 s, while the
+  packets steer; with the pet's potion key HP and MP are read every 0.5 s
+  while the packets carry them, not at full speed. Less work per look: the
+  picture searches reuse their memory (same results), run one after another
+  on a PC of 1 or 2 cores, and the game's pictures are loaded once; moving
+  the mouse over GoBot no longer makes it work harder; the client keeper
+  looks for a crash every 6 s, not 3; background jobs no longer jump ahead
+  of the game when they wake (keys, potions and fighting unchanged). Nhe may
+  now ticks itself on a PC of 1 or 2 logical CPUs or under 4 GB of RAM (the
+  grey line says why; unticking it still turns it off). Fixed: an MP figure
+  read with several leading digits lost (16462 as 462) no longer makes GoBot
+  distrust the packets' MP. Removed, all on the full screen or in gobot_cli:
+  the old packet-only bot (Bot > Start, the Dashboard, Protocol, Autopilot,
+  Calibrate, Mapper and Map tabs, configs\bot_default.ini), the Radar tab
+  and walking to saved points (hunt.ini's [Move] is no longer read), the
+  minimap watch, fishing and mining (configs\gathering.ini), and gobot_cli's
+  developer commands for them (with no argument it now prints its usage;
+  --doctor, --login, --fix-dpi and the look-only checks stay). The simple
+  screen is the same except one warning gone with the walker: "Phim nhay khi
+  di toi diem da luu la Space". Send gobot_gui.log, with its Load: lines,
+  if the PC still stutters, saying how many cores and how much RAM it has.
+
+  Skills in turn while hunting too (2026.11.16b, not yet tried on the
+  game). The owner's report: the skills came out unevenly -- pauses of 1-2 s
+  with no skill, and the long-wait keys rarely cast while the short ones went
+  all the time (the hunt of 2026-11-15: Z, X and C each pressed about 90
+  times a minute for 14-17 casts). The tick Ra chieu theo vong is now ON by
+  default, also for a macro.ini saved before (its cast_paced=false was the
+  old default, not a choice), and it is on the Tu dung ky nang row itself.
+  It works while Tu danh quai runs too: the skill keys go one after another
+  in the order of the keys, each once the game has cast the one before; a
+  key not due yet passes its turn, so no key is starved. The hunter's holds
+  (walking back, turning, a drop, nothing to fight, outside the area, a jump;
+  with Chi khi dang danh quai also no fight and MP under the floor) keep the
+  round at its key, and it goes on from that key, one key at a time. A key
+  whose monster is out of its reach, or the dash key near an edge, only
+  passes its turn: the round goes on with the next key. When the attack key (Phim danh) is also a skill, the round presses
+  it in its turn and the hunter does not press it on top; the hunter's own
+  attack only fills the gaps when no skill is ready. Without the game's
+  packets (no Npcap) every key goes on its own timer as before; potions
+  always go first. To switch it off: untick Ra chieu theo vong on the Tu dung
+  ky nang row (kept after a restart; by hand, cast_paced_v2=false in
+  configs\macro.ini with GoBot closed). Send gobot_gui.log after a hunt, with
+  its "Paced:" lines (now each key's presses and casts) and "Casts
+  (packets):" lines.
+
+  MP bar and skills while hunting (2026.11.17, not yet tried on the game).
+  The owner's report after 2026.11.16b: the MP bar read wrong and the skills
+  came out unevenly. Standing, the MP potion went about 60 times a minute
+  with MP at 92-100%: the glowing tip of the EXP bar sat over the first digits
+  of the MP figure, so 15542/16813 read as 542/16813 (3%). HP and MP now go
+  by the game's packets whenever GoBot has them, with no check against the
+  screen first (the owner's choice); the bars on the screen are used only
+  without packets (no Npcap, a gap in the capture or just after a start until
+  the game sends HP/MP, the game quiet for 5 s; a door is not one: the last
+  values carry across it while the map loads). If the game ever sends HP or MP otherwise,
+  GoBot will not notice by itself; the minute's "Vitals:" line still sets the
+  bars' figures beside the packets', for the log only. Without packets, a
+  figure covered that way is refused, and MP reads as nothing rather than
+  3% or 57%. A potion pressed 3 times in a row with no rise goes at its own
+  cooldown until the reading rises (HP still falling brings the quick presses
+  back). Skills: while hunting, C and V came out once a minute and the
+  others 14-16 times. With no dash skill learned yet, C, V and Space were
+  all taken for the dash key and held near every edge; now no key is held
+  for a dash until one is learned. Cooldowns of 20-70 s learned by mistake
+  for skills cast every 3 s are now capped by how soon each skill was ever
+  cast again, and at 12 s. With the character dead (00:07-00:09 that night)
+  and the packets still coming, the round now tries one key a second instead
+  of 220-230 presses a minute on the timers; HP under 0.5% holds the skill
+  keys (potions and buffs still go) -- the HP GoBot goes by, the packets'
+  while it has them, which kept 27% through that death. A buff's cast seen ends the rest of its
+  presses. Nothing to set. Send gobot_gui.log after a hunt with the macro,
+  with its "Vitals:", "Potion check:", "Potions:", "Paced:" and "Dash
+  (packets):" lines.
+
+  Party: inviting somebody already in a party (2026.11.17b, not yet tried
+  on the game). The owner's report: inviting somebody already in a party
+  brought a notice, then the bot stood still and kept opening the player
+  list. Three changes, the owner's choice. A player whose invite did not
+  lead to a join -- one more member's panel on the party HUD 15 s after
+  it -- is not invited again for 1 minute, 10 minutes after 2 in a row,
+  whether or not GoBot saw the notice; a notice after the invite counts at
+  once, a join starts the count again, and a held-off player never has the
+  list opened for them. The one-button notice (Xac Nhan only) is clicked
+  with the game's mouse held 2.5 s at most, not 30 s; still up, it is
+  clicked again on a later pass, 3 clicks in all, then no invite for 1
+  minute. Never Enter or ESC, never a box with two buttons. After every
+  invite the player list GoBot opened is shut again with the same button
+  that opens it (the little figure under the minimap), found by its
+  picture at 1024x768, 1280x720 and 1366x768; a good invite shuts it by
+  itself and nothing is pressed then. Nothing to set. Send gobot_gui.log
+  with its "Party:" lines, and a screenshot of the "already in a party"
+  notice -- GoBot has no picture of it yet.
+
+  Check-in board closed even after a missed look (2026.11.17c, not yet
+  tried on the game). The owner's report: the "Su kien va diem danh" board
+  stayed up with "Tu dong thong bao" on. One look that missed the board --
+  the game writes its lines of news over the board's title -- started its
+  30 s over, and the run was stopped before they ran out. Now a board seen
+  again where it was within 15 s is the same board, its 30 s still counted
+  from the arrival (one the player closes and opens again later is a new
+  board, with its own 30 s), and seen again it gets no ESC for 3 s; a
+  title partly covered by those lines is still told where the board was
+  just seen whole, and is not taken for closed after its ESC. Every reason
+  no ESC went is said once in the log, and another job's hold puts the
+  board off 5 s, not 30 s. Still no ESC beside another
+  window, under another job's hold or while the player types; the board is
+  never clicked. Nothing to set. Send gobot_gui.log with its "Popups:"
+  lines and the popup_debug pictures.
 
   Walking to a monster, the hunter holds the arrow key down as a player
   does, rather than tapping it (the character stopped after every step).
@@ -841,13 +1167,11 @@ UPDATING
   15/10/2026 may hold another player's character name. Type the name and the
   attack key again on Danh quai; if hunt.ini was copied anyway, check that
   "Ten nhan vat" there shows the tester's own name. A hunt.ini copied anyway
-  keeps its own jump keys, often Space, the game's attack: Danh quai warns
-  ("Phim nhay dang la Space", "Phim nhay khi di toi diem da luu la Space:
-  se danh chu khong nhay"); GoBot never changes the file. The walker's
-  jump key (the Radar tab of the full screen, used only when walking to
-  saved points) now ships as the Up arrow; a hunt.ini without it gets Up
-  too; one copied from an older package keeps its own. Set the other keys
-  again on the screen rather than copying an older macro.ini, which may
+  keeps its own jump key, often Space, the game's attack: Danh quai warns
+  ("Phim nhay dang la Space"); GoBot never changes the file. Its [Move]
+  part, for walking to saved points, is no longer read (2026.11.16). Set
+  the other keys again on the screen rather than copying an older
+  macro.ini, which may
   have a hidden key sequence switched on. Never open this version's
   configs folder with an older GoBot: an older build may drop the keys past
   the 12th (the Lv2 potions among them), a save from it turns the pet's
@@ -861,6 +1185,9 @@ UPDATING
   An HP or MP potion on a digit (the zip's, 1 and 2) still waits through a
   bag pass and a purchase round in 2026.11.11: move it to a letter or to
   Home, End, PgUp, PgDn, Insert or Delete, in the game and on its row.
+  A hunt.ini from before 2026.11.12 may hold drop_min_px: it is no longer
+  read, and up_reach and down_reach -- the two bars on Ban do -- alone say
+  when a drop or a jump up goes: look at them before BAT DAU.
 
 THE DISCORD WEBHOOK
   Kept encrypted for the Windows user in %LOCALAPPDATA%\GoBot, never in this
@@ -1079,8 +1406,8 @@ if (-not $problems) { Ok "every auto-login page has a picture in the package" }
 # Shipping TungHaVGOBot.dll is what got the zip flagged as malware. Its
 # pictures are cut out as PNGs instead, so if that file ever reappears here it
 # is a mistake.
-foreach ($stranger in 'TungHaVGOBot.dll','GhostCore.dll','go_client.exe','GoBotBridge.dll',
-                      'GoBotBridge.runtimeconfig.json','gobot_test.exe','gobot_sniff.exe') {
+foreach ($stranger in 'TungHaVGOBot.dll','GhostCore.dll','go_client.exe',
+                      'gobot_test.exe','gobot_sniff.exe') {
     if (Test-Path (Join-Path $stage $stranger)) {
         $problems += "$stranger is in the package -- it is not for testers"
     }
@@ -1121,8 +1448,7 @@ Get-ChildItem $stage -Recurse -File | ForEach-Object {
 
 # 7. Everything that acts on the game ships switched off. A tester presses
 # BAT DAU before reading a word, and what is on in a file here is a key
-# pressed, an invitation taken or a line said in their game. The packet
-# bot's bot_default.ini is held to the same, switch by switch.
+# pressed, an invitation taken or a line said in their game.
 $cfg = Join-Path $stage 'configs'
 $mustBeOff = @(
     @('macro.ini', 'Macro', 'sequence_enabled'),
@@ -1132,7 +1458,6 @@ $mustBeOff = @(
     @('party.ini', 'Party', 'party_auto_party'),
     @('app.ini', 'Simple', 'keep_alive'),
     @('app.ini', 'Simple', 'revive'),
-    @('app.ini', 'Capture', 'autostart'),
     @('trash.ini', 'Trash', 'enabled'),
     @('chat.ini', 'Chat', 'enabled'),
     @('quest.ini', 'Quest', 'enabled'),
@@ -1145,25 +1470,8 @@ $mustBeOff = @(
     @('macro.ini', 'Macro', 'skills_follow_fight'),
     @('hunt.ini', 'Hunt', 'keep_distance'),
     @('hunt.ini', 'Hunt', 'spot'),
-    @('hunt.ini', 'Hunt', 'drop_down'),
-    @('bot_default.ini', 'Bot', 'auto_attack'),
-    @('bot_default.ini', 'Bot', 'auto_fury'),
-    @('bot_default.ini', 'Bot', 'backing_away'),
-    @('bot_default.ini', 'Bot', 'face_target'),
-    @('bot_default.ini', 'Bot', 'auto_loot'),
-    @('bot_default.ini', 'Bot', 'double_jump'),
-    @('bot_default.ini', 'Bot', 'enable_tile_pathfinding'),
-    @('bot_default.ini', 'Bot', 'return_to_original_location'),
-    @('bot_default.ini', 'Bot', 'return_to_previous_map'),
-    @('bot_default.ini', 'Bot', 'continue_auto_after_death'),
-    @('bot_default.ini', 'Heal', 'player_auto_revive_enabled'),
-    @('bot_default.ini', 'Patrol', 'patrol_use_waypoints')
+    @('hunt.ini', 'Hunt', 'drop_down')
 )
-# The packet bot's skill slots, every one written down and off: a slot the
-# file leaves out is switched on by BotConfig's own defaults (four skills), so
-# a missing one is as bad as one left on. Its potions and buffs are
-# macro.ini's, whose keys are checked below.
-foreach ($i in 0..7) { $mustBeOff += ,@('bot_default.ini', 'Bot', "skill_${i}_enabled") }
 foreach ($m in $mustBeOff) {
     $v = Get-IniValue (Join-Path $cfg $m[0]) $m[1] $m[2]
     if ($null -eq $v) { $problems += "$($m[0]): [$($m[1])] $($m[2]) is not there to be off" }
@@ -1175,8 +1483,7 @@ foreach ($pair in (Get-IniSection (Join-Path $cfg 'macro.ini') 'Keys')) {
     }
 }
 # Keys that press something whenever they are not 0: a hotkey a tester would
-# hit by chance, and the hunter's hop. (hunt.ini's [Move] jump_key, the
-# walker's, ships as Up by decision: only [Hunt]'s is checked.)
+# hit by chance, and the hunter's hop.
 $mustBeZero = @(
     @('app.ini', 'Hotkeys', 'trash_now'),
     @('app.ini', 'Hotkeys', 'login_now'),
@@ -1309,8 +1616,9 @@ Get-Content (Join-Path $cfg 'party.ini') | Where-Object { $_ -match '^\s*\w*pict
     ForEach-Object { $wanted += ($Matches[1] + '.png') }
 $wanted += 'inven/0/dialog_Panic.spr/0.png'
 # Tu dang nhap clicks the channel rows on the game's own channel panel
-# (AutoLogin::kChannelPanel, templates.ini channel_dialog); without it every
-# game of a size other than 1024x768 falls back to offsets measured on that one.
+# (AutoLogin::kChannelPanel, templates.ini channel_dialog); without it a game
+# of a size other than 1024x768 is never clicked there (2026.11.13c), and on
+# 1024x768 it falls back to the offsets measured on that one.
 $wanted += 'login/1/Img_Dlg_Channel.spr/0.png'
 # Tu mua binh finds the Nguoi Giu San item by its catalog icon (buy_opener),
 # asks for the two potions' (CleanSettings::kBuyHpId, kBuyMpId) beside it --

@@ -234,8 +234,10 @@ std::optional<SeekPlan> seek_attack(const SeekMap& m, const HuntZone& z, const S
     if (mob.floor_y < 0) return none(SeekNo::NoFloor);
     if (mob.hurt_by_other) return none(SeekNo::Others);
     const int reach = rules.reach - rules.reach_margin;
-    const int up = rules.up - rules.band_margin;
-    const int down = rules.down - rules.band_margin;
+    // Never under 0: a bar set under the margin on the Bản đồ tab
+    // (2026.11.12) still fights a monster on the character's own height.
+    const int up = std::max(0, rules.up - rules.band_margin);
+    const int down = std::max(0, rules.down - rules.band_margin);
     // Best first: the tier (kSeekTiered), then the cost, then the nearer the
     // monster across.
     using Rank = std::array<int, 3>;

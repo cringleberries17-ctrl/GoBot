@@ -3,9 +3,11 @@
 #include "gobot/config.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/input_manager.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -82,6 +84,13 @@ public:
         /// Seven hundred was not enough: the first live run clicked where
         /// "Req Party" was going to be, the menu appeared afterwards, and the
         /// run reported success with the menu untouched on screen.
+        ///
+        /// Since 2026-11-15 (the owner, for slow PCs: "sẽ có thêm 30 giây chờ
+        /// phản ứng") the menu is looked for instead, a look every quarter of
+        /// a second, and Req Party is clicked once two looks in a row show it
+        /// -- however soon or late that is, up to kReactMs (or this, if it is
+        /// longer) from the row's click; never blind. Not shown by then:
+        /// nothing clicked.
         int menu_wait_ms = 1100;
 
         /// How alike a row has to be to the name being looked for.
@@ -151,6 +160,21 @@ public:
     /// For tests: the clicks go here instead of to the game -- the button
     /// that opens the list, the row and Req Party.
     void set_click(std::function<bool(int, int)> fn) { click_ = std::move(fn); }
+    /// For tests: frames from here instead of the game's capture, and a
+    /// pretend clock -- `now` in ms, and `sleep` that moves it -- instead of
+    /// the steady one the waits go by.
+    void set_grab(std::function<bool(Frame&)> fn) { grab_ = std::move(fn); }
+    void set_clock(std::function<std::uint64_t()> now, std::function<void(int)> sleep) {
+        now_ = std::move(now);
+        sleep_ = std::move(sleep);
+    }
+    /// How long, from a click, the list is given to show what it did -- the
+    /// list up after its button, the row's menu drawn, the menu gone after Req
+    /// Party -- before the step is given up as it always was: kReactMs (the
+    /// owner, 2026-11-15: 30 s for slow PCs). Every look of it asks the stop.
+    /// Settable for a test.
+    void set_react_ms(int ms) { react_ms_ = ms; }
+    int  react_ms() const { return react_ms_; }
 
     /// Whether the three-button menu is drawn over the list, below this row.
     ///
@@ -169,6 +193,37 @@ public:
     bool ensure_open(InputManager& input, ScreenCapture& capture,
                      const TemplateStore& store, std::string* why,
                      const Stop& stop = {});
+    /// Whether the last ensure_open() that said true pressed the button to
+    /// get there, rather than finding the list up already -- the player's,
+    /// perhaps, and left alone.
+    bool opened_it() const { return opened_it_; }
+
+    /// Shut the list (2026.11.17b, C): the owner's "cứ mở khung pt" -- every
+    /// invite left it up over the right of the screen, and a message of the
+    /// game's could be under it. By the same button that opens it, found by
+    /// its picture wherever the client's size puts it (956,139 on a 1024x768
+    /// client, 1212,139 on a 1280x720 one; no capture at 1366x768 yet, and
+    /// the picture is searched for over the whole frame, as ensure_open
+    /// does): the button flips between the list and the panel that was there
+    /// before. Never ESC -- the client gives ESC to whatever window it likes.
+    ///
+    /// Not up on a fresh look, nor on a second kCloseSettleMs later: nothing
+    /// pressed, true. A good invite shuts the list by itself a moment after
+    /// Req Party, and a press then would open it again. Up on both: one press
+    /// on its button, then looked at every quarter of a second, up to
+    /// close_wait_ms(), until a look shows it gone -- true -- or not -- false,
+    /// with why; never a second press, which would flip it back up. The
+    /// game's mouse is the caller's all the while.
+    bool close(InputManager& input, ScreenCapture& capture, const TemplateStore& store,
+               std::string* why, const Stop& stop = {});
+    /// The longest close() holds the game's mouse waiting for the list to go
+    /// after its press: about as long as the party worker's other short
+    /// holds (InviteReply::kCloseHoldMs), so the other jobs are not kept
+    /// waiting by it. A list not seen gone by then is said once and left.
+    static constexpr int kCloseWaitMs = 3000;
+    static constexpr int kCloseSettleMs = 300;
+    void set_close_wait_ms(int ms) { close_wait_ms_ = ms; }
+    int  close_wait_ms() const { return close_wait_ms_; }
 
     /// Every row that has a name on it -- none until the list is placed.
     std::vector<Row> read(const Frame& frame, const GlyphFont& font) const;
@@ -188,14 +243,24 @@ private:
     /// pointer's pause, just before the button goes down.
     bool click(InputManager& input, int x, int y, const Stop& stop) const;
     /// Sleep `ms` in short slices, asking `stop` between them: false once it
-    /// says stop.
-    static bool nap(int ms, const Stop& stop);
+    /// says stop. On the test's clock when set_clock gave one.
+    bool nap(int ms, const Stop& stop) const;
+    /// A fresh frame of the game (or of the test's grab).
+    bool grab(InputManager& input, ScreenCapture& capture, Frame& into) const;
+    /// Milliseconds on the steady clock, or the test's.
+    std::uint64_t clock_ms() const;
 
     Settings settings_;
     Settings placed_;
     bool     placed_ok_ = false;
     int      frame_w_ = 0, frame_h_ = 0;    ///< the frame the list was placed in
     std::function<bool(int, int)> click_;
+    std::function<bool(Frame&)> grab_;
+    std::function<std::uint64_t()> now_;
+    std::function<void(int)> sleep_;
+    int      react_ms_ = kReactMs;
+    int      close_wait_ms_ = kCloseWaitMs;
+    bool     opened_it_ = false;
 };
 
 } // namespace gobot

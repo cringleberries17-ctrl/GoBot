@@ -3,9 +3,7 @@
 #include "gobot/config.hpp"
 #include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
-#include "gobot/camera_tracker.hpp"
 #include "gobot/glyph_font.hpp"
-#include "gobot/minimap_tracker.hpp"
 #include "gobot/screen_layout.hpp"
 
 #include <algorithm>
@@ -527,6 +525,9 @@ std::vector<Nameplate> MobDetector::detect(const Frame& f, const DetectorTuning&
 
 void MobDetector::loop() {
     name_this_thread("detector");
+    // A look every 140 ms, or 2 s while the packets steer: it can wait for
+    // the game's slice to end on a one-core PC.
+    quiet_this_thread();
     ScreenCapture capture;
     capture.set_label("detector");
     Frame frame;
@@ -563,8 +564,8 @@ void MobDetector::loop() {
             t = tuning_;
         }
 
-        // The look at the frame timed for the Load line, from here to the
-        // camera fed below: the plates, the name, the minimap and the camera.
+        // The look at the frame timed for the Load line: the plates and the
+        // name.
         const std::uint64_t look_from = load_clock_us();
         const GlyphFont* font = font_.load();
         std::vector<Nameplate> found = detect(frame, t, font);
@@ -587,21 +588,6 @@ void MobDetector::loop() {
                 want = character_name_;
             }
             if (!want.empty()) find_character(frame, t, *font, want, found);
-        }
-
-        // Fed from the same frame rather than capturing its own: the screen
-        // grab is by far the expensive part and there is no reason to pay for
-        // it twice. Not once the window has changed under this look, though:
-        // the camera is reset on a change of window, and an old frame fed to
-        // it after that is one from somewhere else.
-        if (generation_.load() == generation) {
-            if (MinimapTracker* mm = minimap_.load()) mm->update(frame);
-            CameraTracker* cam = camera_.load();
-            if (cam) cam->update(frame);
-            // The window changed while it was being fed: the reset made for the
-            // change may have come first, leaving the old window's frame as the
-            // camera's reference. Made again, so the new window starts afresh.
-            if (cam && generation_.load() != generation) cam->reset();
         }
         load_meters().detect.add_since(look_from);
 
@@ -661,7 +647,7 @@ void MobDetector::find_character(const Frame& f, const DetectorTuning& t,
     ScreenRect last{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (last_player_.plate.valid() && now_ms() - last_player_ms_ <= kPlayerMemoryMs)
+        if (last_player_.plate.valid() && now_ms() - last_player_ms_ <= player_memory_ms(period_ms_.load()))
             last = last_player_.plate;
     }
 
@@ -675,7 +661,7 @@ void MobDetector::find_character(const Frame& f, const DetectorTuning& t,
     // Said once each way round, so a character that cannot be found says so
     // instead of the bot silently standing still -- but not for a plate gone
     // a moment, as it is several times a minute: for one gone as many looks
-    // as 1.5 s is at 140 ms, which is about 6 s while the detector rests.
+    // as 1.5 s is at 140 ms, which is about 20 s while the detector rests.
     const std::uint64_t grace = sightings_grace_ms(period_ms_.load());
     const int say = sightings_.note(got, now_ms(), grace);
     if (say > 0) GB_INFO("Found your character \"%s\" at %d,%d", want.c_str(),
@@ -782,7 +768,7 @@ std::vector<Nameplate> MobDetector::mobs() const {
         // they were found, the hunter's "nearest" was the topmost plate on
         // screen whenever the pet, a casting glow or the grass covered yours,
         // several times a fight.
-        if (!have_me && last_player_ms_ != 0 && now_ms() - last_player_ms_ <= kPlayerMemoryMs) {
+        if (!have_me && last_player_ms_ != 0 && now_ms() - last_player_ms_ <= player_memory_ms(period_ms_.load())) {
             me = last_player_;
             have_me = true;
         }
@@ -843,8 +829,9 @@ bool MobDetector::player(Nameplate& out, bool* fresh) const {
     }
     // Not visible this instant. The pet, a casting effect or the grass covers
     // the plate for a frame or two several times a fight, and stopping dead
-    // each time leaves the bot standing still for most of it.
-    if (last_player_ms_ != 0 && now_ms() - last_player_ms_ <= kPlayerMemoryMs) {
+    // each time leaves the bot standing still for most of it. Remembered past
+    // the wait between two looks, a resting detector's too.
+    if (last_player_ms_ != 0 && now_ms() - last_player_ms_ <= player_memory_ms(period_ms_.load())) {
         out = last_player_;
         if (fresh) *fresh = false;
         return true;

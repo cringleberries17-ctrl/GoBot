@@ -1,4 +1,6 @@
 #include "gobot/packet_world.hpp"
+#include "gobot/cast_match.hpp"
+#include "gobot/jump_plan.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/monster_frames.hpp"
 
@@ -7,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -338,6 +341,12 @@ void PacketWorld::forget() {
     walk_from_ms_ = 0;
     walk_on_ = false;
     walks_done_.clear();
+    // Your moves with no walk not yet written, and the minute's: the dash
+    // learned stays (dash_votes_, dash_).
+    moves_done_.clear();
+    move_minute_ms_ = 0;
+    move_lines_ = 0;
+    minute_moves_ = minute_move_px_ = minute_unsaid_ = 0;
     // The counts from 0, and one more reset() before them: since() tells
     // counts taken before it from those after.
     const std::uint64_t resets = stats_.resets;
@@ -363,6 +372,8 @@ void PacketWorld::on_packets(const std::vector<GamePacket>& batch) {
     std::vector<std::string> said;
     std::vector<OwnWalk> walks;
     std::function<std::string(const OwnWalk&)> walk_keys;
+    std::vector<OwnMove> moves;
+    std::function<std::string(const OwnMove&)> move_keys;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         bool used = false;
@@ -412,11 +423,163 @@ void PacketWorld::on_packets(const std::vector<GamePacket>& batch) {
                 walks_done_.clear();
             }
         }
+        // And your moves with no walk (2026.11.12): written whoever asks.
+        moves.swap(moves_done_);
+        move_keys = move_keys_;
     }
     // Written with the lock let go of: the GUI's map and the hunter's look
     // wait on it, and the file's write can be slow.
     for (const std::string& s : said) GB_INFO("%s", s.c_str());
     for (const OwnWalk& w : walks) GB_INFO("%s", own_walk_line(w, walk_keys(w)).c_str());
+    for (const OwnMove& m : moves) GB_INFO("%s", own_move_line(m, move_keys ? move_keys(m) : std::string()).c_str());
+}
+
+void PacketWorld::set_move_keys(std::function<std::string(const OwnMove&)> f) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    move_keys_ = std::move(f);
+}
+
+std::string PacketWorld::own_move_line(const OwnMove& m, const std::string& keys) {
+    const int from_x = static_cast<int>(std::lround(m.from_x)), from_y = static_cast<int>(std::lround(m.from_y));
+    const int to_x = static_cast<int>(std::lround(m.to_x)), to_y = static_cast<int>(std::lround(m.to_y));
+    char cast[96];
+    if (m.skill != 0)
+        std::snprintf(cast, sizeof cast, "your cast of skill %u %llu ms before", static_cast<unsigned>(m.skill),
+                      static_cast<unsigned long long>(m.to_ms >= m.cast_ms ? m.to_ms - m.cast_ms : 0));
+    else
+        std::snprintf(cast, sizeof cast, "no cast of yours in the %.1f s before",
+                      static_cast<double>(kDashCastMs) / 1000.0);
+    char line[256];
+    std::snprintf(line, sizeof line, "Positions: moved %+d px with no walk, %d,%d -> %d,%d by 0x%04X, facing %s; %s",
+                  to_x - from_x, from_x, from_y, to_x, to_y, static_cast<unsigned>(m.report_op),
+                  m.facing > 0 ? "right" : m.facing < 0 ? "left" : "not known", cast);
+    return keys.empty() ? std::string(line) : std::string(line) + "; " + keys;
+}
+
+void PacketWorld::note_move(const OwnPosition& r, std::uint64_t t) {
+    const Me& me = fix_.me;
+    OwnMove m;
+    m.from_x = me.report_x;
+    m.from_y = me.report_y;
+    m.to_x = r.x;
+    m.to_y = r.y;
+    m.from_ms = me.report_ms;
+    m.to_ms = t;
+    m.report_op = own_report_opcode(r.kind);
+    m.facing = me.facing;
+    if (fix_.cast_skill != 0 && t >= fix_.cast_ms && t - fix_.cast_ms <= kDashCastMs) {
+        m.skill = fix_.cast_skill;
+        m.cast_ms = fix_.cast_ms;
+    }
+    const int across = static_cast<int>(std::lround(std::fabs(m.to_x - m.from_x)));
+    // The minute's, and a line -- kMoveLinesPerMinute at most, by the frames'
+    // clock: a run of them is counted, not written.
+    if (move_minute_ms_ == 0 || t >= move_minute_ms_ + 60'000) {
+        move_minute_ms_ = t;
+        move_lines_ = 0;
+    }
+    ++minute_moves_;
+    minute_move_px_ += across;
+    if (move_lines_ < kMoveLinesPerMinute) {
+        ++move_lines_;
+        if (moves_done_.size() < 64) moves_done_.push_back(m);
+    } else {
+        ++minute_unsaid_;
+    }
+    // A vote for the dash: put down to a cast, and no further than a dash goes.
+    if (m.skill == 0 || across > kDashMostPx) return;
+    if (dash_votes_.size() >= kDashMoves) dash_votes_.erase(dash_votes_.begin());
+    dash_votes_.push_back(DashVote{ m.skill, across });
+    learn_dash();
+}
+
+void PacketWorld::learn_dash() {
+    // The skill most of the moves came after.
+    std::uint32_t top = 0;
+    int top_n = 0;
+    for (const DashVote& v : dash_votes_) {
+        int n = 0;
+        for (const DashVote& o : dash_votes_)
+            if (o.skill == v.skill) ++n;
+        if (n > top_n) {
+            top = v.skill;
+            top_n = n;
+        }
+    }
+    const int of = static_cast<int>(dash_votes_.size());
+    Dash d;
+    d.of = of;
+    if (top_n >= kDashLearnMoves && top_n * 100 >= kDashLearnPct * of) {
+        d.skill = top;
+        d.agree = top_n;
+        // Its length: the longest of its moves with another near it.
+        std::vector<int> px;
+        for (const DashVote& v : dash_votes_)
+            if (v.skill == top) px.push_back(v.px);
+        std::sort(px.begin(), px.end(), std::greater<int>());
+        d.px = px.front();
+        for (std::size_t i = 0; i < px.size(); ++i) {
+            bool twice = false;
+            for (std::size_t j = 0; j < px.size() && !twice; ++j)
+                twice = j != i && std::abs(px[j] - px[i]) <= kDashClassPx;
+            if (twice) {
+                d.px = px[i];
+                break;
+            }
+        }
+    }
+    const bool changed = d.skill != dash_.skill || std::abs(d.px - dash_.px) > kDashClassPx;
+    const Dash was = dash_;
+    dash_ = d;
+    if (!changed) return;
+    char line[256];
+    if (d.skill != 0)
+        std::snprintf(line, sizeof line,
+                      "Positions: the dash is skill %u, about %d px -- %d of the last %d moves of yours with no walk "
+                      "put down to a cast came after its casts; its key is held near the hunting area's edge and a "
+                      "floor's end",
+                      static_cast<unsigned>(d.skill), d.px, d.agree, d.of);
+    else
+        std::snprintf(line, sizeof line,
+                      "Positions: the dash is no longer skill %u -- %d of the last %d moves of yours with no walk came "
+                      "after its casts; no key is held for a dash until one is learned",
+                      static_cast<unsigned>(was.skill), top == was.skill ? top_n : 0, of);
+    said_.push_back(line);
+}
+
+PacketWorld::Dash PacketWorld::dash() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dash_;
+}
+
+PacketWorld::DashMinute PacketWorld::take_dash_minute() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DashMinute m;
+    m.moves = minute_moves_;
+    m.px = minute_move_px_;
+    m.unsaid = minute_unsaid_;
+    m.dash = dash_;
+    minute_moves_ = minute_move_px_ = minute_unsaid_ = 0;
+    return m;
+}
+
+std::string PacketWorld::dash_line(const DashMinute& m, const std::string& key) {
+    if (m.moves == 0 && m.dash.skill == 0) return {};
+    char line[320];
+    int n = std::snprintf(line, sizeof line, "Dash (packets): %d move%s of yours with no walk this minute (%d px",
+                          m.moves, m.moves == 1 ? "" : "s", m.px);
+    if (n > 0 && m.unsaid > 0 && static_cast<std::size_t>(n) < sizeof line)
+        n += std::snprintf(line + n, sizeof line - static_cast<std::size_t>(n), ", %d not written", m.unsaid);
+    if (n > 0 && static_cast<std::size_t>(n) < sizeof line) {
+        if (m.dash.skill != 0)
+            std::snprintf(line + n, sizeof line - static_cast<std::size_t>(n),
+                          "); the dash is skill %u, %s, about %d px (%d of %d)", static_cast<unsigned>(m.dash.skill),
+                          key.empty() ? "its key not learned yet" : key.c_str(), m.dash.px, m.dash.agree, m.dash.of);
+        else
+            std::snprintf(line + n, sizeof line - static_cast<std::size_t>(n),
+                          "); the dash not learned yet -- no key held for it");
+    }
+    return line;
 }
 
 void PacketWorld::set_walk_keys(std::function<std::string(const OwnWalk&)> f) {
@@ -476,12 +639,42 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
 
     Me& me = fix_.me;
     const bool was_moving = me.known && me.moving;
+    // A move with no walk (2026.11.12): from a report of yours since the map
+    // entry -- standing, on the ground -- to this one, not a 0x002A, at least
+    // kNoWalkMovePx across. Never from or to y 0, which no place is -- one
+    // whose height was kept (Me::y_kept) is still from y 0.
+    if (me.known && me.kind && !was_moving && !me.airborne && r->kind != OwnReport::Air && me.report_y >= 1.0f &&
+        !me.y_kept && r->y >= 1.0f && std::fabs(r->x - me.report_x) >= static_cast<float>(kNoWalkMovePx))
+        note_move(*r, t);
+    // y 0 is no place (2026.11.12 review): t1901_s2's right wall reports
+    // 999,0 and the character stands there; the hunter, its skills held,
+    // sent nothing that would bring a real report, and saw every monster
+    // thousands of px below it. With a real height on this map before it,
+    // that height is kept -- x, facing, cast and the rest taken as they came
+    // -- and the frame marked (Me::y_kept). Kept as it came in the trace,
+    // whose judges pass y 0 by.
+    const bool keep_y = r->y < 1.0f && me.known && me.report_y >= 1.0f;
+    if (keep_y) {
+        ++stats_.y_kept;
+        if (y_kept_said_ms_ == 0 || t >= y_kept_said_ms_ + 60'000) {
+            char more[48] = "";
+            if (y_kept_unsaid_ > 0) std::snprintf(more, sizeof more, " (%d more since, not said)", y_kept_unsaid_);
+            GB_INFO("Positions: your report at %d,0 (opcode 0x%04X) -- y 0 is no place: height kept at %d%s",
+                    static_cast<int>(std::lround(r->x)), static_cast<unsigned>(p.opcode),
+                    static_cast<int>(std::lround(me.report_y)), more);
+            y_kept_said_ms_ = std::max<std::uint64_t>(t, 1);
+            y_kept_unsaid_ = 0;
+        } else {
+            ++y_kept_unsaid_;
+        }
+    }
     me.known = true;
     me.id = r->id;
     me.x = r->x;
-    me.y = r->y;
+    if (!keep_y) me.y = r->y;
     me.report_x = r->x;
-    me.report_y = r->y;
+    if (!keep_y) me.report_y = r->y;
+    me.y_kept = keep_y;
     me.report_ms = t;
     me.kind = r->kind;
     // Only 0x0027, 0x0029 and 0x0028 say which way you face: a jump goes on
@@ -511,11 +704,55 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
     // time a landing is waited for.
     if (r->kind == OwnReport::Cast && me.airborne && t <= fix_.air_from_ms + kAirReckonMs)
         ++stats_.casts_in_air;
+    // Its skill, for the moves with no walk that come after it (2026.11.12);
+    // and when, read or not, for a turn's tap the hunter waits to send again.
+    if (r->kind == OwnReport::Cast) {
+        me.cast_ms = t;
+        if (const std::optional<CastFrame> c = read_cast(p)) {
+            fix_.cast_skill = c->skill;
+            fix_.cast_ms = t;
+        }
+    }
     if (r->kind == OwnReport::Air) {
         // 1 off the ground, 6 a second jump, 2 a high jump, 3 seen at a
         // vertical speed of -10: every state but 0, landed, is in the air.
+        // The client of 2026-11-12 sent none of 1, 2 or 6 in the air
+        // (2026.11.12c): every take-off is judged by its vertical speed as
+        // well -- -28 a step or more upward a high jump, upward a jump, at 0
+        // or down a walk-off; one in the air pushed up again past a free
+        // flight's speed a second jump.
+        const float vy = r->vertical_speed.value_or(0.0f);
+        const bool off = !me.airborne;
+        const auto by_speed = [&]() -> const char* {
+            if (off) {
+                if (vy <= kJumpUpHighVyStep) {
+                    ++stats_.air_high;
+                    return "high jump";
+                }
+                ++stats_.air_jumps;
+                if (vy >= 0.0f) {
+                    ++stats_.air_walkoffs;
+                    return "walk-off";
+                }
+                return "jump";
+            }
+            const double dt_s = t > fix_.air_off_ms ? static_cast<double>(t - fix_.air_off_ms) / 1000.0 : 0.0;
+            const float free_vy = fix_.air_vy0 + static_cast<float>(kGravity / kStepsPerSecond * dt_s);
+            if (vy <= kJumpUpSecondVyStep && t >= fix_.air_off_ms + kJumpUpSecondAfterMs &&
+                vy <= free_vy - kJumpUpSecondPushStep) {
+                ++stats_.air_second;
+                return "second jump";
+            }
+            return "in the air";
+        };
         switch (*r->air_state) {
             case 1:
+                // State 1 at a high jump's speed: a high jump, as its speed
+                // says (2026.11.12c).
+                if (off && vy <= kJumpUpHighVyStep) {
+                    ++stats_.air_high;
+                    break;
+                }
                 ++stats_.air_jumps;
                 // Off an edge rather than a jump: state 1 too, falling.
                 if (r->vertical_speed && *r->vertical_speed >= 0.0f) ++stats_.air_walkoffs;
@@ -523,7 +760,27 @@ PacketWorld::Taken PacketWorld::take_own(const GamePacket& p) {
             case 6:  ++stats_.air_second; break;
             case 2:  ++stats_.air_high; break;
             case 0:  ++stats_.air_landed; break;
-            default: ++stats_.air_other; break;
+            default: {
+                ++stats_.air_other;
+                const char* what = by_speed();
+                const std::uint32_t st = *r->air_state;
+                if (std::find(air_states_said_.begin(), air_states_said_.end(), st) == air_states_said_.end() &&
+                    air_states_said_.size() < 64) {
+                    air_states_said_.push_back(st);
+                    char text[200];
+                    std::snprintf(text, sizeof text,
+                                  "Packets: your 0x002A state %u (0x%08X) at vy %.1f -- not 0/1/2/6; judged by its "
+                                  "vertical speed (%s)",
+                                  static_cast<unsigned>(st), static_cast<unsigned>(st), static_cast<double>(vy), what);
+                    said_.push_back(text);
+                }
+                break;
+            }
+        }
+        // The take-off's speed and time, for a second push later.
+        if (off && *r->air_state != 0 && vy < 0.0f) {
+            fix_.air_vy0 = vy;
+            fix_.air_off_ms = t;
         }
         me.airborne = *r->air_state != 0;
         if (me.airborne) {
@@ -625,8 +882,13 @@ PacketWorld::Taken PacketWorld::take_entry(const GamePacket& p) {
     me.airborne = false;
     me.report_ms = t;
     me.kind.reset();
+    me.cast_ms = 0;
+    me.y_kept = false;
     fix_.rise = 0.0;
     fix_.id_locked = false;
+    // No cast of the last place's is what a move here is put down to.
+    fix_.cast_skill = 0;
+    fix_.cast_ms = 0;
     // A walk being timed ends standing here, as at a stop.
     if (walk_timed_) {
         ++stats_.own_walks_stopped;
@@ -1139,18 +1401,6 @@ std::optional<std::uint32_t> PacketWorld::own_id() const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!fix_.id_locked) return std::nullopt;
     return fix_.me.id;
-}
-
-MapChangeBy map_change_by(const PacketWorld::Place& place, bool on_game, std::uint64_t last_server_ms,
-                          std::uint64_t now) {
-    if (place.entries == 0 || !on_game) return MapChangeBy::Minimap;
-    if (last_server_ms == 0 || (now > last_server_ms && now - last_server_ms > kMapByPacketsQuietMs))
-        return MapChangeBy::Minimap;
-    // An entry stamps since_ms and entry_ms alike; a relink only since_ms.
-    const bool relinked = place.since_ms != 0 && place.since_ms != place.entry_ms;
-    if (relinked && (now < place.since_ms || now - place.since_ms < kMapByPacketsSettleMs))
-        return MapChangeBy::Minimap;
-    return MapChangeBy::Packets;
 }
 
 } // namespace gobot

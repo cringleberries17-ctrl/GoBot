@@ -164,8 +164,6 @@ endif()
 # harden_dll_search (gobot/util.hpp). And OpenCV is built without the
 # parallel plugins it would otherwise load from beside the exe by their full
 # path, where neither of those reaches (PARALLEL_ENABLE_PLUGINS, above).
-# Only gobot_cli's developer commands --bridge and --party take one from
-# there, on purpose: GoBotBridge.dll, which no package carries.
 #
 # Not applied to the test runner: it has no business asking for a prompt, and
 # the packaging script runs it unelevated as a release gate.
@@ -220,11 +218,6 @@ add_library(gobot_core STATIC
     src/mob_detector.cpp
     src/screen_layout.cpp
     src/glyph_font.cpp
-    src/camera_tracker.cpp
-    src/world_anchor.cpp
-    src/field_finder.cpp
-    src/navigator.cpp
-    src/minimap_tracker.cpp
     src/hunter.cpp
     src/hunter_drop.cpp
     src/hunter_jump.cpp
@@ -232,10 +225,8 @@ add_library(gobot_core STATIC
     src/monster_list.cpp
     src/attack_style.cpp
     src/jump_check.cpp
-    src/map_mapper.cpp
     src/map_file.cpp
     src/map_table.cpp
-    src/map_locator.cpp
     src/map_book.cpp
     src/map_sketch.cpp
     src/hunt_zone.cpp
@@ -261,17 +252,11 @@ add_library(gobot_core STATIC
     src/popup_closer.cpp
     src/stall_watch.cpp
     src/party_hud.cpp
-    src/dialog_driver.cpp
     src/routine.cpp
     src/reviver.cpp
-    src/gatherer.cpp
-    src/clr_bridge.cpp
     src/party.cpp
     src/party_chat.cpp
-    src/calibrator.cpp
     src/opcode_registry.cpp
-    src/game_state.cpp
-    src/protocol_handler.cpp
     src/packet_world.cpp
     src/packet_eyes.cpp
     src/packet_self.cpp
@@ -289,10 +274,9 @@ add_library(gobot_core STATIC
     src/quiet_second.cpp
     src/game_install.cpp
     src/input_manager.cpp
-    src/pathfinder.cpp
     src/execution_coordinator.cpp
-    src/command_executor.cpp
-    src/bot_brain.cpp
+    src/expedition.cpp
+    src/menu_text.cpp
 )
 
 target_include_directories(gobot_core
@@ -320,7 +304,7 @@ if(GOBOT_USE_OPENCV)
                                 PROPERTIES COMPILE_FLAGS "/W2")
 endif()
 
-# ------------------------------------------------------------------- bot runner
+# --------------------------------------------------------- command-line tools
 add_executable(gobot_cli apps/gobot_cli/main.cpp)
 target_link_libraries(gobot_cli PRIVATE gobot_core)
 gobot_require_admin(gobot_cli)
@@ -396,6 +380,7 @@ if(GOBOT_BUILD_GUI)
         apps/gobot_gui/simple_spot.cpp
         apps/gobot_gui/simple_map.cpp
         apps/gobot_gui/simple_skills.cpp
+        apps/gobot_gui/simple_expedition.cpp
         apps/gobot_gui/packets_watch.cpp
         apps/gobot_gui/packets_vitals.cpp
         apps/gobot_gui/packets_bag.cpp
@@ -414,6 +399,14 @@ if(GOBOT_BUILD_GUI)
         "${imgui_SOURCE_DIR}"
         "${imgui_SOURCE_DIR}/backends"
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/gobot_gui"
+    )
+
+    # No gamepad: GoBot's window is worked with the mouse and keys, and the
+    # Win32 backend otherwise asks XInput for a pad on every frame and loads
+    # xinput1_4.dll by name to do it (2026-11-16).
+    set_source_files_properties(
+        "${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp"
+        PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
     )
 
     target_link_libraries(gobot_gui PRIVATE
@@ -458,7 +451,7 @@ endif()
 
 # ---------------------------------------------------------------- self-tests
 # Covers the layers that can be checked without the game running: framing,
-# reassembly, packet decoding, world model, pathfinding.
+# reassembly, packet decoding, and every job's decisions on saved frames.
 add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.cpp
                           apps/gobot_test/quest_test.cpp apps/gobot_test/hotkey_test.cpp
                           apps/gobot_test/potion_test.cpp apps/gobot_test/popup_test.cpp
@@ -478,7 +471,9 @@ add_executable(gobot_test apps/gobot_test/main.cpp apps/gobot_test/alerts_test.c
                           apps/gobot_test/jump_hunt_test.cpp apps/gobot_test/hunt_seek_test.cpp
                           apps/gobot_test/seek_hunt_test.cpp apps/gobot_test/hunt_card_test.cpp
                           apps/gobot_test/cast_pace_test.cpp apps/gobot_test/jobs_gui_test.cpp
-                          apps/gobot_test/pass_keys_test.cpp apps/gobot_test/shop_ride_test.cpp)
+                          apps/gobot_test/pass_keys_test.cpp apps/gobot_test/shop_ride_test.cpp
+                          apps/gobot_test/way_back_cover_test.cpp apps/gobot_test/res_sizes_test.cpp
+                          apps/gobot_test/expedition_test.cpp)
 target_link_libraries(gobot_test PRIVATE gobot_core)
 gobot_delay_npcap(gobot_test)
 # Where the configs that ship are, so a test checks those against the code --

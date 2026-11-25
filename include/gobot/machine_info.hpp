@@ -44,24 +44,38 @@ constexpr std::uint32_t kVendorMicrosoft = 0x1414;
 /// VMware's: the SVGA adapter of VMware Tools' display driver.
 constexpr std::uint32_t kVendorVmware = 0x15AD;
 
-/// Which of the signals of a VMware guest, or of a PC with no real graphics
-/// card, are there (judge_machine). Any one turns light mode on when it is
-/// left to "auto".
+/// A weak PC, for light mode: this many logical CPUs or fewer, or less RAM
+/// than this. A player's PC with 1 core and 3.5 GB, the game running on it
+/// too, stuttered with GoBot (2026-11-16) and had no VMware signal and a real
+/// graphics card, so light mode stayed off where it was needed most.
+constexpr int           kWeakCpus = 2;
+constexpr std::uint64_t kWeakRamMb = 4096;
+
+/// Which of the signals of a VMware guest, of a PC with no real graphics
+/// card, or of a weak PC are there (judge_machine). Any one turns light mode
+/// on when it is left to "auto".
 struct LightSignals {
     bool software_renderer = false;     ///< WARP, or the adapter is Microsoft's (0x1414)
     bool smbios_vmware = false;         ///< SystemManufacturer has "VMware", or the product starts with it
     bool cpuid_vmware = false;          ///< the hypervisor bit, and its vendor is "VMwareVMware"
     bool vmware_adapter = false;        ///< the adapter is VMware's (0x15AD)
+    bool few_cpus = false;              ///< kWeakCpus logical CPUs or fewer
+    bool little_ram = false;            ///< under kWeakRamMb of RAM
+    /// The figures behind few_cpus and little_ram, for the lines that say why.
+    int           logical_cpus = 0;
+    std::uint64_t ram_mb = 0;
 
     bool vmware() const { return smbios_vmware || cpuid_vmware || vmware_adapter; }
-    bool any() const { return software_renderer || vmware(); }
+    bool weak() const { return few_cpus || little_ram; }
+    bool any() const { return software_renderer || vmware() || weak(); }
     /// For the log: the signals that fired, or "none".
     std::string describe(const MachineSignals& m) const;
 };
 
 /// The signals in what was read. The hypervisor bit alone is not one: a PC
 /// with Hyper-V, VBS or Memory integrity on sets it too, with the vendor
-/// "Microsoft Hv", and that PC is no VM.
+/// "Microsoft Hv", and that PC is no VM. A count of 0 CPUs or 0 MB is one
+/// Windows did not give, and says nothing.
 LightSignals judge_machine(const MachineSignals& m);
 
 /// light_mode in [Simple]: left to GoBot, or set by the player's tick.
@@ -75,7 +89,7 @@ const char* light_setting_name(LightSetting s);    ///< "auto", "on", "off"
 /// Light mode, worked out.
 struct LightDecision {
     bool        on = false;
-    bool        by_auto = false;        ///< on because "auto" saw a signal
+    bool        by_auto = false;        ///< on because "auto" saw a signal: a VMware guest, no real card, a weak PC
     std::string why;                    ///< English, for the log
     std::string why_vi;                 ///< the simple screen's line when auto turned it on; else empty
 };

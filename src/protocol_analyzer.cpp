@@ -572,11 +572,11 @@ std::vector<SemanticGuess> analyze_protocol(
                 if (take >= 2) {
                     r << "Labelled HP first and MP second, which is the usual order -- "
                          "but that is convention, not evidence. Apply it, then watch the "
-                         "Dashboard bars while you take damage and spend mana: if they are "
+                         "decoded values while you take damage and spend mana: if they are "
                          "swapped, exchange the hp and mp names in the layout.";
                 } else {
                     r << "Only one pair here, so this could be HP or MP -- the bytes "
-                         "cannot say which. Apply it and check the Dashboard against your "
+                         "cannot say which. Apply it and check the decoded values against your "
                          "bars; if it tracks mana, rename hp/max_hp to mp/max_mp.";
                 }
                 g.reason = r.str();

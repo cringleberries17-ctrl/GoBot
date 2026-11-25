@@ -3,19 +3,34 @@
 // made-up numbers, the counters it is made of -- the timers, the grabs owner
 // by owner, the named threads' CPU on a pretend set of threads -- and where
 // the window, the readers and the workers feed it, read off their source.
+// And the template matcher's kept buffers (2026-11-16), which save work and
+// page faults on every look: held to the answers of buffers made afresh, to
+// the bit, on made-up frames. And the game's pictures loaded once for the
+// whole program (2026-11-16): the same pictures under the same names as a
+// job's own load, short names that point rather than copy, and the GUI's
+// jobs asking for that one set.
 //
 // Nothing here looks at the desktop, a window or the registry, and no input
-// is sent: the one real call is the high-resolution clock.
+// is sent: the real calls are the high-resolution clock, and the pictures
+// beside the tests and a name map in the temp folder read from disk.
 
+#include "gobot/config.hpp"
 #include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/template_matcher.hpp"
 #include "test_support.hpp"
 
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <random>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 using namespace gobot;
@@ -404,8 +419,6 @@ void test_load_wiring() {
         { "/apps/gobot_gui/gui_app.cpp", "void GuiApp::keeper_loop() {", "keeper" },
         { "/src/packet_capture.cpp", "void PacketCapture::capture_loop() {", "capture" },
         { "/src/packet_capture.cpp", "void PacketCapture::watchdog_loop() {", "capture watchdog" },
-        { "/src/command_executor.cpp", "void CommandExecutor::execution_loop() {", "executor" },
-        { "/src/command_executor.cpp", "void CommandExecutor::pathfinding_loop() {", "executor path" },
         { "/src/alerts.cpp", "void AlertService::run() {", "alerts" },
     };
     std::string unnamed;
@@ -461,12 +474,12 @@ void test_load_wiring() {
     // The line itself: from the end of tick(), no snapshot of the system's
     // threads, and the front keeper timed around its one try.
     const std::size_t tick = gui.find("void GuiApp::tick() {");
-    const std::size_t framing = tick == npos ? npos : gui.find("check_framing_health();", tick);
+    const std::size_t framing = tick == npos ? npos : gui.find("say_traffic_lost();", tick);
     const std::size_t line = framing == npos ? npos : gui.find("load_tick();", framing);
     const std::size_t end = tick == npos ? npos : gui.find("\n}", tick);
     check(framing != npos && line != npos && end != npos && framing < line && line < end &&
               gui.find_first_not_of(" \t\r\n", line + std::string("load_tick();").size()) == end + 1,
-          "gui_app.cpp: tick() ends with load_tick(), after check_framing_health()");
+          "gui_app.cpp: tick() ends with load_tick(), after say_traffic_lost()");
     const std::string meter = source("/src/load_meter.cpp");
     check(!meter.empty() && meter.find("CreateToolhelp32Snapshot") == npos && meter.find("TH32CS_SNAP") == npos &&
               has(meter, "GetThreadTimes(") && has(meter, "GetProcessTimes(") &&
@@ -485,6 +498,438 @@ void test_load_wiring() {
 #endif
 }
 
+// ------------------------------------------------ the matcher's kept buffers
+
+Frame blank_frame(int w, int h) {
+    Frame f;
+    f.width = w;
+    f.height = h;
+    f.pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4, 0);
+    return f;
+}
+
+void paint(Frame& f, int x, int y, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a = 255) {
+    if (x < 0 || y < 0 || x >= f.width || y >= f.height) return;
+    const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(f.width) + static_cast<std::size_t>(x)) * 4;
+    f.pixels[i] = b;
+    f.pixels[i + 1] = g;
+    f.pixels[i + 2] = r;
+    f.pixels[i + 3] = a;
+}
+
+std::uint8_t alpha_at(const Frame& f, int x, int y) {
+    return f.pixels[(static_cast<std::size_t>(y) * static_cast<std::size_t>(f.width) + static_cast<std::size_t>(x)) * 4 + 3];
+}
+
+Frame noise_frame(int w, int h, unsigned seed) {
+    Frame f = blank_frame(w, h);
+    std::mt19937 rng(seed);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            paint(f, x, y, static_cast<std::uint8_t>(rng() % 90), static_cast<std::uint8_t>(rng() % 90),
+                  static_cast<std::uint8_t>(rng() % 90));
+    return f;
+}
+
+/// A `w` x `h` piece of `f` from (x, y), opaque.
+Frame cut(const Frame& f, int x, int y, int w, int h) {
+    Frame t = blank_frame(w, h);
+    for (int j = 0; j < h; ++j)
+        for (int i = 0; i < w; ++i) {
+            std::uint8_t r, g, b;
+            f.get(x + i, y + j, r, g, b);
+            paint(t, i, j, r, g, b);
+        }
+    return t;
+}
+
+/// `t`'s opaque pixels drawn onto `f` at (x, y).
+void stamp(Frame& f, const Frame& t, int x, int y) {
+    for (int j = 0; j < t.height; ++j)
+        for (int i = 0; i < t.width; ++i) {
+            if (alpha_at(t, i, j) < TemplateMatcher::kOpaque) continue;
+            std::uint8_t r, g, b;
+            t.get(i, j, r, g, b);
+            paint(f, x + i, y + j, r, g, b);
+        }
+}
+
+/// A close button: a ring with a cross in it, its corners see-through; with
+/// `ring_only`, only the ring is drawn, the rest see-through too.
+Frame close_button(int size, bool ring_only) {
+    Frame t = blank_frame(size, size);
+    const int c = size / 2;
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x) {
+            const int dx = x - c, dy = y - c;
+            const int d2 = dx * dx + dy * dy;
+            if (d2 >= c * c) continue;
+            const bool rim = d2 >= (c - 2) * (c - 2);
+            const bool cross = (dx == dy || dx == -dy) && d2 < (c - 3) * (c - 3);
+            if (ring_only && !rim) continue;
+            const int v = rim ? 200 : cross ? 240 : 40;
+            paint(t, x, y, static_cast<std::uint8_t>(v), static_cast<std::uint8_t>(v - 20),
+                  static_cast<std::uint8_t>(v / 2));
+        }
+    return t;
+}
+
+/// A square icon of one hue with a dark rim: the same drawing in several
+/// hues, as the crest tiers are.
+Frame icon(int size, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+    Frame t = blank_frame(size, size);
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x) {
+            const bool rim = x < 3 || y < 3 || x >= size - 3 || y >= size - 3;
+            if (rim) paint(t, x, y, 18, 18, 22);
+            else     paint(t, x, y, r, g, b);
+        }
+    return t;
+}
+
+/// Empty when the two answers are the same to the bit; what differs otherwise.
+std::string differ(const std::vector<TemplateMatcher::Match>& fresh,
+                   const std::vector<TemplateMatcher::Match>& kept) {
+    if (fresh.size() != kept.size())
+        return std::to_string(fresh.size()) + " found fresh, " + std::to_string(kept.size()) + " kept";
+    for (std::size_t i = 0; i < fresh.size(); ++i) {
+        const TemplateMatcher::Match& a = fresh[i];
+        const TemplateMatcher::Match& b = kept[i];
+        if (a.found != b.found || a.at.x != b.at.x || a.at.y != b.at.y || a.at.w != b.at.w || a.at.h != b.at.h ||
+            std::memcmp(&a.score, &b.score, sizeof(float)) != 0)
+            return "match " + std::to_string(i) + ": fresh " + std::to_string(a.at.x) + "," + std::to_string(a.at.y) +
+                   " " + std::to_string(a.score) + ", kept " + std::to_string(b.at.x) + "," + std::to_string(b.at.y) +
+                   " " + std::to_string(b.score);
+    }
+    return {};
+}
+
+struct MatchCase {
+    const Frame*                        frame = nullptr;
+    const Frame*                        tpl = nullptr;
+    ScreenRect                          area;
+    TemplateMatcher::Tone               tone = TemplateMatcher::Tone::Grey;
+    float                               min_score = 0.8f;
+    std::size_t                         limit = 64;
+    std::string                         name;
+    std::vector<TemplateMatcher::Match> fresh;
+};
+
+/// Every case searched with the kept buffers, in order or backwards, against
+/// its fresh answer; the first few that differ, in words.
+std::string search_kept(const std::vector<MatchCase>& cases, bool backwards) {
+    std::string bad;
+    int shown = 0;
+    for (std::size_t n = 0; n < cases.size(); ++n) {
+        const MatchCase& c = cases[backwards ? cases.size() - 1 - n : n];
+        const std::string d =
+            differ(c.fresh, TemplateMatcher::find_all(*c.frame, c.area, *c.tpl, c.min_score, c.limit, c.tone));
+        if (!d.empty() && shown++ < 3) bad += "\n  " + c.name + ": " + d;
+    }
+    return bad;
+}
+
+void test_matcher_kept_buffers() {
+    section("Template matching with kept buffers and pictures made ready once: the answers of fresh ones, to the bit");
+
+    if (!TemplateMatcher::uses_opencv()) {
+        skip("built without OpenCV, which keeps nothing between searches\n");
+        return;
+    }
+
+    // Two made-up screens. The first has what the searches below exercise:
+    // three copies of one close button (equal scores, so the order among
+    // ties counts), two icons of one drawing in two hues, a flat patch where
+    // the masked correlation blows up, and stripes that repeat.
+    const Frame button = close_button(18, false);
+    const Frame ring = close_button(22, true);
+    const Frame red = icon(28, 210, 40, 40);
+    const Frame blue = icon(28, 50, 70, 220);
+
+    Frame a = noise_frame(400, 260, 11);
+    for (int y = 10; y < 90; ++y)
+        for (int x = 250; x < 390; ++x) paint(a, x, y, 36, 44, 72);
+    for (int y = 160; y < 190; ++y)
+        for (int x = 10; x < 140; ++x) {
+            const auto v = static_cast<std::uint8_t>(40 + (x % 7) * 25);
+            paint(a, x, y, v, v, static_cast<std::uint8_t>(255 - v));
+        }
+    stamp(a, button, 40, 30);
+    stamp(a, button, 190, 30);
+    stamp(a, button, 41, 200);
+    stamp(a, ring, 300, 40);
+    stamp(a, red, 110, 120);
+    stamp(a, blue, 160, 120);
+
+    Frame b = noise_frame(400, 260, 22);
+    stamp(b, button, 300, 150);
+    stamp(b, red, 20, 20);
+
+    const Frame noise_piece = cut(a, 61, 97, 24, 20);
+    const Frame stripe_piece = cut(a, 14, 165, 16, 16);
+    const Frame big_piece = cut(a, 220, 140, 70, 45);
+
+    const struct { const Frame* tpl; const char* name; } kPictures[] = {
+        { &button, "close button" }, { &ring, "ring" },          { &red, "red icon" },     { &blue, "blue icon" },
+        { &noise_piece, "piece" },   { &stripe_piece, "stripes" }, { &big_piece, "big piece" },
+    };
+    const struct { ScreenRect area; const char* name; } kAreas[] = {
+        { ScreenRect{ 0, 0, 0, 0 }, "whole" },
+        { ScreenRect{ 13, 7, 331, 233 }, "odd part" },
+        { ScreenRect{ -5, -9, 190, 150 }, "over the top left" },
+        { ScreenRect{ 250, 120, 400, 400 }, "past the bottom right" },
+    };
+    const float kScores[] = { 0.5f, 0.8f, 0.95f };
+    const std::size_t kLimits[] = { 64, 1, 4 };
+
+    std::vector<MatchCase> cases;
+    std::size_t found = 0;
+    int i = 0;
+    for (const Frame* frame : { &a, &b })
+        for (const auto& p : kPictures)
+            for (const auto& area : kAreas)
+                for (const TemplateMatcher::Tone tone : { TemplateMatcher::Tone::Grey, TemplateMatcher::Tone::Colour }) {
+                    MatchCase c;
+                    c.frame = frame;
+                    c.tpl = p.tpl;
+                    c.area = area.area;
+                    c.tone = tone;
+                    c.min_score = kScores[i % 3];
+                    c.limit = kLimits[(i / 3) % 3];
+                    c.name = std::string(frame == &a ? "screen A, " : "screen B, ") + p.name + ", " + area.name +
+                             (tone == TemplateMatcher::Tone::Colour ? ", colour" : ", grey");
+                    c.fresh = TemplateMatcher::find_all_fresh(*c.frame, c.area, *c.tpl, c.min_score, c.limit, c.tone);
+                    found += c.fresh.size();
+                    cases.push_back(std::move(c));
+                    ++i;
+                }
+
+    // Not an empty comparison: the fresh searches do find things, the three
+    // buttons among them.
+    const std::vector<TemplateMatcher::Match> buttons =
+        TemplateMatcher::find_all_fresh(a, ScreenRect{}, button, 0.9f, 64, TemplateMatcher::Tone::Grey);
+    check(found >= 20 && buttons.size() == 3,
+          "the fresh searches find things to compare: " + std::to_string(found) + " in " +
+              std::to_string(cases.size()) + " searches, the three buttons " + std::to_string(buttons.size()));
+
+    std::string bad = search_kept(cases, false);
+    check(bad.empty(), "every search with the kept buffers gives the fresh answer, to the bit" + bad);
+    bad = search_kept(cases, true);
+    check(bad.empty(), "and again backwards, each search on buffers left by searches of other sizes" + bad);
+
+    // Under one OneFrame per screen, one inside the other: each search cuts
+    // its part from the whole screen converted once.
+    {
+        TemplateMatcher::OneFrame one_a(a);
+        TemplateMatcher::OneFrame one_b(b);
+        bad = search_kept(cases, false);
+    }
+    check(bad.empty(), "under a OneFrame for each screen, one inside the other, the same answers" + bad);
+
+    // Two threads at once, which share the pool of buffers and the pictures
+    // made ready.
+    {
+        std::string first, second;
+        std::thread one([&] { first = search_kept(cases, false); });
+        std::thread two([&] { second = search_kept(cases, true); });
+        one.join();
+        two.join();
+        check(first.empty() && second.empty(),
+              "two threads searching at once get the same answers" + first + second);
+    }
+
+    // A picture written over in place, where its pixels were: made ready
+    // again, not matched with what was there before.
+    {
+        Frame picture = cut(a, 61, 97, 24, 20);
+        const std::uint8_t* place = picture.pixels.data();
+        const TemplateMatcher::Match before = TemplateMatcher::find(a, ScreenRect{}, picture, 0.9f);
+        const Frame other = cut(a, 300, 200, 24, 20);
+        std::memcpy(picture.pixels.data(), other.pixels.data(), other.pixels.size());
+        const TemplateMatcher::Match after = TemplateMatcher::find(a, ScreenRect{}, picture, 0.9f);
+        // And see-through corners on it now, which give it a mask.
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) {
+                paint(picture, x, y, 0, 0, 0, 0);
+                paint(picture, 23 - x, 19 - y, 0, 0, 0, 0);
+            }
+        const std::vector<TemplateMatcher::Match> masked =
+            TemplateMatcher::find_all(a, ScreenRect{}, picture, 0.8f, 8, TemplateMatcher::Tone::Colour);
+        const std::vector<TemplateMatcher::Match> masked_fresh =
+            TemplateMatcher::find_all_fresh(a, ScreenRect{}, picture, 0.8f, 8, TemplateMatcher::Tone::Colour);
+        check(picture.pixels.data() == place && before.found && before.at.x == 61 && before.at.y == 97 &&
+                  after.found && after.at.x == 300 && after.at.y == 200 && differ(masked_fresh, masked).empty() &&
+                  !masked.empty() && masked.front().at.x == 300 && masked.front().at.y == 200,
+              "a picture written over where it lies is made ready again: found at its new place, its new mask "
+              "used -- " + differ(masked_fresh, masked));
+    }
+}
+
+// ------------------------------------------------- the one set of pictures
+
+bool same_picture(const Frame* a, const Frame* b) {
+    return a != nullptr && b != nullptr && a->width == b->width && a->height == b->height && a->pixels == b->pixels;
+}
+
+/// A file in the PC's temp folder, written whole; its path, or empty.
+std::string temp_ini(const char* name, const std::string& text) {
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+    if (ec) return {};
+    const std::string path = (dir / name).string();
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << text;
+    return out ? path : std::string();
+}
+
+void test_store_short_names() {
+    section("The pictures' short names point at the picture, no copy, and act as the copies did (2026-11-16)");
+    Frame a = blank_frame(6, 4), b = blank_frame(5, 5), shadowed = blank_frame(3, 3);
+    paint(a, 1, 1, 200, 10, 10);
+    paint(b, 2, 2, 10, 200, 10);
+    paint(shadowed, 0, 0, 10, 10, 200);
+    TemplateStore store;
+    store.put("long/a", a);
+    store.put("long/b", b);
+    store.put("short_b", shadowed);     // a picture of the same name as a short name
+    // The keys are applied in name order (IniFile keeps them sorted), as the
+    // copies were: "tail" comes after the "short_a" it names.
+    const std::string ini = temp_ini("gobot_test_short_names.ini",
+                                     "[Templates]\nshort_a = long/a\nshort_b = long/b\ntail = short_a\n"
+                                     "nothing = long/missing\n");
+    if (ini.empty()) {
+        skip("no temp folder to write a name map in\n");
+        return;
+    }
+    const int named = store.apply_names(ini);
+    std::error_code ec;
+    std::filesystem::remove(ini, ec);
+    check(named == 3,
+          "three short names given, the one for a picture not loaded left out (" + std::to_string(named) + ")");
+    check(store.get("short_a") == store.get("long/a") && store.get("tail") == store.get("long/a"),
+          "a short name, and a short name for a short name, is the picture itself: no copy");
+    check(same_picture(store.get("short_b"), &b) && store.get("nothing") == nullptr && !store.has("nothing") &&
+              store.has("short_a") && store.has("tail"),
+          "a short name wins over a picture of the same name, as the copy put over it did");
+    const std::vector<std::string> names = store.names();
+    check(store.size() == 5 && names == std::vector<std::string>{ "long/a", "long/b", "short_a", "short_b", "tail" },
+          "size and names count each name once, short names included");
+
+    // A put after the names: what each name shows is what it showed when the
+    // names were copies.
+    TemplateStore over = store;
+    Frame other = blank_frame(6, 4);
+    paint(other, 4, 2, 90, 90, 90);
+    over.put("long/a", other);
+    check(same_picture(over.get("long/a"), &other) && same_picture(over.get("short_a"), &a) &&
+              same_picture(over.get("tail"), &a) && same_picture(over.get("short_b"), &b) && over.size() == 5,
+          "a picture put over one a short name shows leaves the short name showing the old one");
+    TemplateStore renamed = store;
+    renamed.put("short_a", other);
+    check(same_picture(renamed.get("short_a"), &other) && same_picture(renamed.get("long/a"), &a) &&
+              same_picture(renamed.get("tail"), &a),
+          "a picture put under a short name replaces only that name");
+    check(store.get("short_a") == store.get("long/a") && same_picture(store.get("short_a"), &a),
+          "the store copied from is untouched by the copies' puts");
+}
+
+void test_shared_pictures() {
+    section("The game's pictures loaded once for the program, handed to every job (2026-11-16)");
+    const std::string map = exe_relative("configs/templates.ini");
+    std::shared_ptr<const TemplateStore> one = TemplateStore::shared_best(map);
+    if (!one || one->size() == 0) {
+        skip("no game pictures beside the tests\n");
+        return;
+    }
+    const std::shared_ptr<const TemplateStore> again = TemplateStore::shared_best(map);
+    check(again.get() == one.get(), "a second job asking while the first holds the set gets the same one");
+    {
+        const TemplateStore* got[2] = { nullptr, nullptr };
+        std::thread t1([&] { got[0] = TemplateStore::shared_best(map).get(); });
+        std::thread t2([&] { got[1] = TemplateStore::shared_best(map).get(); });
+        t1.join();
+        t2.join();
+        check(got[0] == one.get() && got[1] == one.get(), "and so do two threads asking at once");
+    }
+
+    // The same pictures, under the same names, as a job's own load gave.
+    TemplateStore own;
+    const bool loaded = own.load_best(map);
+    bool same = loaded && own.size() == one->size() && own.names() == one->names() && own.source() == one->source();
+    std::string first_odd;
+    if (same)
+        for (const std::string& name : own.names())
+            if (!same_picture(own.get(name), one->get(name))) {
+                same = false;
+                first_odd = name;
+                break;
+            }
+    check(same, "the shared set holds what load_best loads, picture for picture" +
+                    (first_odd.empty() ? std::string() : " (not " + first_odd + ")"));
+
+    // The name map written again: a job starting then gets the names as they
+    // are, and one that holds the set keeps its own.
+    std::string text;
+    {
+        std::ifstream in(map, std::ios::binary);
+        text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    if (text.find("[Templates]") == std::string::npos) text += "\n[Templates]\n";
+    const std::string real = one->names().front();
+    const std::string ini = temp_ini("gobot_test_shared_names.ini", text + "\ns1_shared_test = " + real + "\n");
+    if (ini.empty()) {
+        skip("no temp folder to write a name map in\n");
+        return;
+    }
+    const std::shared_ptr<const TemplateStore> named = TemplateStore::shared_best(ini);
+    const std::shared_ptr<const TemplateStore> named_again = TemplateStore::shared_best(ini);
+    check(named.get() != one.get() && named_again.get() == named.get() && named->has("s1_shared_test") &&
+              !one->has("s1_shared_test") && named->get("s1_shared_test") == named->get(real),
+          "another name map, another set, shared in its turn");
+    temp_ini("gobot_test_shared_names.ini", text + "\ns1_shared_test = " + real + "\ns1_shared_again = " + real + "\n");
+    const std::shared_ptr<const TemplateStore> changed = TemplateStore::shared_best(ini);
+    check(changed.get() != named.get() && changed->has("s1_shared_again") && !named->has("s1_shared_again") &&
+              named->has("s1_shared_test"),
+          "the name map written again: loaded again for the job asking, the held one left as it was");
+    std::error_code ec;
+    std::filesystem::remove(ini, ec);
+}
+
+void test_shared_wiring() {
+    section("The GUI's jobs use the one set of pictures (their source)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string popups = source("/apps/gobot_gui/simple_popups.cpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    const std::string closer = source("/src/popup_closer.cpp");
+    if (gui.empty() || popups.empty() || view.empty() || closer.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto count = [](const std::string& text, const std::string& part) {
+        std::size_t n = 0;
+        for (std::size_t at = text.find(part); at != std::string::npos; at = text.find(part, at + part.size())) ++n;
+        return n;
+    };
+    const std::string own_load = ".load_best(exe_relative(\"configs/templates.ini\"))";
+    check(count(gui, own_load) == 0 && count(popups, own_load) == 0 && count(view, own_load) == 0 &&
+              count(gui, "AutoLogin::load_pictures(") == 0 && count(view, "AutoLogin::load_pictures(") == 0,
+          "no job loads a set of its own any more");
+    // The keeper, Tổ đội, Hồi sinh, Dọn rác, Tự chat, BẮT ĐẦU's look, and the
+    // two looks after a stop; Tự đóng thông báo and its Thử xem; the trash
+    // tab's bag picture and the login tab's look.
+    check(count(gui, "TemplateStore::shared_best(exe_relative(\"configs/templates.ini\"))") == 8 &&
+              count(popups, "TemplateStore::shared_best(exe_relative(\"configs/templates.ini\"))") == 2 &&
+              count(view, "TemplateStore::shared_best(exe_relative(\"configs/templates.ini\"))") == 2,
+          "each of them asks for the shared one");
+    check(count(popups, "eyes.load(std::move(store), exe_relative(\"configs\"));") == 2 &&
+              has(closer, "held_ = std::move(store);"),
+          "the popups' eyes hold the shared set they look with");
+#else
+    skip("the source tree is not known to this build\n");
+#endif
+}
+
 } // namespace
 
 void test_load(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -494,4 +939,8 @@ void test_load(void (*check_fn)(bool, const std::string&), void (*section_fn)(co
     test_thread_ledger();
     test_load_report();
     test_load_wiring();
+    test_matcher_kept_buffers();
+    test_store_short_names();
+    test_shared_pictures();
+    test_shared_wiring();
 }

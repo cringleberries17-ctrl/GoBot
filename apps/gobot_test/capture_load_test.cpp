@@ -4,8 +4,8 @@
 // vitals_run_ms); the detector stopped at once, and with the hunt;
 // PrintWindow judged once per window for the whole process
 // (PrintWindowVerdicts, PrintWindowAsk), and in light mode never asked again
-// of a window that refused it; the camera tracker fed only when used; and the
-// frames grabbed into again rather than made anew.
+// of a window that refused it; and the frames grabbed into again rather than
+// made anew.
 //
 // On frames, windows and clocks of the test's own: no window is made, nothing
 // is grabbed off the screen -- the readers' threads are fed by set_grab --
@@ -17,6 +17,7 @@
 #include "gobot/machine_info.hpp"
 #include "gobot/macro.hpp"
 #include "gobot/mob_detector.hpp"
+#include "gobot/owed_start.hpp"
 #include "gobot/potion_stock.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/vitals_reader.hpp"
@@ -536,11 +537,19 @@ bool before(const std::string& text, const char* first, const char* then) {
     const std::size_t b = text.find(then);
     return a != std::string::npos && b != std::string::npos && a < b;
 }
+
+/// How many times `what` is in `text`.
+int count_of(const std::string& text, const char* what) {
+    int n = 0;
+    const std::size_t len = std::char_traits<char>::length(what);
+    for (std::size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + len)) ++n;
+    return n;
+}
 #endif
 
 void test_capture_wiring() {
     section("Watching the game wired in: the readers' waits, the detector with the hunt, the pace before each "
-            "start, PrintWindow's verdict, the camera, the frames kept (their source)");
+            "start, PrintWindow's verdict, the frames kept (their source)");
 #ifdef GOBOT_SOURCE_DIR
     const std::string vitals = source("/src/vitals_reader.cpp");
     const std::string mobs = source("/src/mob_detector.cpp");
@@ -575,11 +584,9 @@ void test_capture_wiring() {
     check(has(stop_hunt, "release_detector();") && !has(stop_hunt, "stop_position_capture();") &&
               before(stop_det, "detector_running_ = false;", "stop_hunt();") &&
               has(release, "if (!detector_running_ || detector_wanted()) return;") &&
-              has(wanted, "hunting_") && has(wanted, "monster_look_running()") && has(wanted, "jump_test_running()") &&
-              has(wanted, "navigator_->running()") && has(wanted, "detector_by_player_") &&
-              has(wanted, "camera_panels_open()"),
-          "gui_app.cpp: the hunt's end lets the detector go unless a look, a Thử, a walk or the Radar still uses it; "
-          "stop_detector marks it stopped before it ends the hunt");
+              has(wanted, "hunting_") && has(wanted, "monster_look_running()") && has(wanted, "jump_test_running()"),
+          "gui_app.cpp: the hunt's end lets the detector go unless a look or a Thử still uses it; stop_detector marks "
+          "it stopped before it ends the hunt");
     const std::size_t ended = tick.find("if (hunting_ && hunter_ && !hunter_->running()) {");
     const std::size_t let_go = ended == npos ? npos : tick.find("release_detector();", ended);
     check(ended != npos && let_go != npos && let_go - ended < 300,
@@ -627,8 +634,7 @@ void test_capture_wiring() {
     for (const char* job : { "simple_running()", "macro_running_", "hunting_", "party_running_", "revive_running_",
                              "popups_running()", "keeper_running_", "trash_running_", "chat_running_",
                              "quest_running_", "simple_find_bars_", "full_find_bars_", "coord_.critical_active()",
-                             "bot_running_",
-                             "navigator_->running()", "jump_test_running()" })
+                             "jump_test_running()" })
         all_jobs = all_jobs && has(any, job);
     check(all_jobs, "any_job_alive: every job and one-shot pass, Tự tìm and a critical hold");
     const std::size_t click = view.find("if (ImGui::Button(simple_find_bars_ ? \"Đang tìm…\" : \"Tự tìm\")) {");
@@ -660,15 +666,6 @@ void test_capture_wiring() {
               "print_window_verdicts().set_light(light_.on);") &&
               has(body(view, "void GuiApp::set_light_mode(bool on) {"), "print_window_verdicts().set_light(light_.on);"),
           "light mode handed to the PrintWindow verdicts at the start and at every tick of its box");
-
-    // The camera tracker only while something uses it.
-    const std::string start_det = body(gui, "void GuiApp::start_detector() {");
-    check(has(start_det, "detector_.set_camera(camera_fed_ ? &camera_ : nullptr);") &&
-              !has(start_det, "detector_.set_camera(&camera_);") &&
-              has(tick, "if (feed) camera_.reset();") && has(tick, "detector_.set_camera(feed ? &camera_ : nullptr);") &&
-              has(body(gui, "bool GuiApp::camera_wanted() const {"), "navigator_->running()"),
-          "gui_app.cpp: the camera fed only for a walk or the full screen's Radar and movement panels, afresh when "
-          "it starts");
 
     // The frames grabbed into again.
     const std::string party = body(gui, "void GuiApp::party_loop() {");
@@ -777,12 +774,12 @@ void test_detector_pace_wiring() {
     bool all = !pace.empty();
     for (const char* what : { "detector_rest(", "detector_.set_period_ms(", "hunting_", "packet_eyes_->source()",
                               "packet_eyes_->why()", "jump_test_running()", "monster_look_running()",
-                              "camera_panels_open()", "navigator_->running()", "packets_settings_.detector_rest",
-                              "detector_running_", "Detector: every %d ms while the packets steer" })
+                              "packets_settings_.detector_rest", "detector_running_",
+                              "Detector: every %d ms while the packets steer" })
         all = all && has(pace, what);
     check(has(tick, "detector_pace_tick(") && all,
-          "tick(): the detector's pace decided at every tick, from the hunt, the eyes, Thử, Quái đang thấy, the "
-          "panels, a walk and [Packets] detector_rest");
+          "tick(): the detector's pace decided at every tick, from the hunt, the eyes, Thử, Quái đang thấy and "
+          "[Packets] detector_rest");
     check(!has(paced, "light_") && !has(paced, "sleep_for") && !has(paced, "Sleep(") && !has(paced, "capture_.") &&
               !has(paced, "wait_idle"),
           "packets_detector.cpp: nothing that waits, and nothing of the capture, on GoBot's thread");
@@ -794,9 +791,161 @@ void test_detector_pace_wiring() {
     const std::string frame = body(eyes, "std::uint64_t PacketEyes::frame() {");
     check(has(frame, "age(picture_new_ms_, now) > fresh") && has(frame, "picture_gap_ms_ > kScreenFreshMs") &&
               has(frame, "MobDetector::kLookGapMs") && has(frame, "handing_over_ = true;") &&
-              has(frame, "pictures > handover_pictures_ + 1") && has(frame, "held >= kHandOverMs"),
+              has(frame, "pictures > handover_pictures_ + 1") && has(frame, "held >= kHandOverMs") &&
+              has(frame, "screen_stale_ = true;"),
           "packet_eyes.cpp: back to the screen with an old picture -- older than one at the detector's own pace "
-          "while it rests -- the packets' plates kept until the detector's count is two on, or 300 ms");
+          "while it rests -- the packets' plates kept until the detector's count is two on, or 300 ms, and "
+          "nothing after that until it is");
+    // The detector's thread: its wake-up boost off (2026.11.16), right after
+    // it is named.
+    check(before(mloop, "name_this_thread(\"detector\");", "quiet_this_thread();") &&
+              before(mloop, "quiet_this_thread();", "while (running_.load()) {"),
+          "mob_detector.cpp: the detector's thread is quiet (no wake-up boost) from its start");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// The capture for positions kept up (2026.11.24, the owner: "Kiểm tra các
+/// phần khác xem có phần nào không làm được thì dừng không, cần thay cơ chế
+/// này bằng 1 cơ chế khác"): a read that fails marks the capture dead rather
+/// than leaving a deaf thread counted as running, GoBot's window has a job
+/// stop it and starts another as after a refusal -- 10 s, 20 s, then every
+/// 30 s (GameLink::refused_wait_after, packet_eyes_test's pure check), not up
+/// to 10 min -- the silence restart comes again every 30 s while the game
+/// holds a connection, the adapter looked up afresh, and the capture's own
+/// error lines are said once a row. Npcap and the game are needed to see it
+/// live, so it is read off the source.
+void test_position_capture_kept() {
+    section("Positions' capture kept up (2026.11.24): a dead capture stopped and started again, refusals every 30 s "
+            "at most, the silence restart again every 30 s, error lines once a row (their source)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string cap = source("/src/packet_capture.cpp");
+    const std::string cap_h = source("/include/gobot/packet_capture.hpp");
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string gui_h = source("/apps/gobot_gui/gui_app.hpp");
+    if (cap.empty() || cap_h.empty() || gui.empty() || gui_h.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+
+    // The capture: an error ends its loop dead, said once a row; a packet
+    // read ends the row; start and stop leave it alive.
+    const std::string loop = body(cap, "void PacketCapture::capture_loop() {");
+    const std::size_t failed = loop.find("trouble(trouble_said_, \"pcap_next_ex failed: %s");
+    const std::size_t marked = loop.find("dead_.store(true);");
+    const std::size_t left = loop.find("break;", marked == std::string::npos ? 0 : marked);
+    const std::string start = body(cap, "bool PacketCapture::start(const CaptureConfig& cfg) {");
+    const std::string stop = body(cap, "void PacketCapture::stop() {");
+    check(failed != std::string::npos && marked != std::string::npos && left != std::string::npos &&
+              failed < marked && has(loop, "trouble_said_.store(true);") && has(loop, "trouble_said_.store(false);") &&
+              !has(loop, "GB_ERROR(") && has(cap_h, "bool dead() const { return dead_.load(); }") &&
+              before(start, "dead_.store(false);", "running_.store(true);") &&
+              before(stop, "watchdog_thread_.join();", "dead_.store(false);"),
+          "packet_capture.cpp: a pcap_next_ex error said (once a row) and the capture marked dead before its loop "
+          "ends; a packet read ends the row; start() and stop() clear it");
+    const std::string open = body(cap, "bool PacketCapture::open_device(");
+    check(!has(open, "GB_ERROR(") && has(open, "trouble(trouble_said_, \"pcap_open_live(%s) failed: %s\"") &&
+              !has(start, "GB_ERROR(") && has(start, "return refused();") &&
+              has(cap, "trouble(g_devices_trouble_said, \"pcap_findalldevs failed: %s\", errbuf);"),
+          "the capture's own refusals -- the device, Npcap, no adapter, the adapters' list -- said once a row, then "
+          "in the debug log: GoBot tries again every 30 s at most");
+
+    // GoBot's window: the dead capture stopped by a job, never on its own
+    // thread; started again as after a refusal.
+    const std::string again = body(gui, "void GuiApp::position_reattach(std::uint64_t now) {");
+    const std::string job = body(gui, "void GuiApp::position_job(const PositionJobIn& in) {");
+    const std::string applied = body(gui, "void GuiApp::position_started(const PositionJobOut& out) {");
+    const std::size_t dead = again.find("} else if (capture_.dead()) {");
+    const std::size_t asked = again.find("in.stop_first = true;");
+    const std::size_t posted = again.find("capture_worker_.post(");
+    check(dead != std::string::npos && asked != std::string::npos && posted != std::string::npos && dead < asked &&
+              asked < posted && !has(again, "capture_.stop()"),
+          "position_reattach: our capture dead -- the job is asked to stop it first, nothing stopped on GoBot's "
+          "thread");
+    const std::size_t first = job.find("if (in.stop_first) {");
+    const std::size_t stopped = job.find("capture_.stop();", first == std::string::npos ? 0 : first);
+    const std::size_t said = job.find("out.stopped = true;");
+    const std::size_t done = job.find("return done();", said == std::string::npos ? 0 : said);
+    const std::size_t looked = job.find("pid_for_window(");
+    check(first != std::string::npos && stopped != std::string::npos && said != std::string::npos &&
+              done != std::string::npos && looked != std::string::npos && first < stopped && stopped < said &&
+              done < looked && has(job, "iface_by_ip_.clear();"),
+          "position_job: a dead capture stopped on the worker and nothing more -- the adapter looked up afresh at the "
+          "next start");
+    const std::size_t out_stopped = applied.find("if (out.stopped) {");
+    const std::size_t tried = applied.find("if (!out.tried) return;");
+    check(out_stopped != std::string::npos && tried != std::string::npos && out_stopped < tried &&
+              has(applied, "position_start_failed_ = true;") &&
+              count_of(applied, "position_backoff_ms_ = GameLink::refused_wait_after(position_backoff_ms_);") == 2 &&
+              !has(applied, "position_backoff_ms_ = GameLink::kReattachEveryMs;") &&
+              !has(applied + again, "kPositionBackoffMaxMs") &&
+              !has(gui_h, "static constexpr std::uint64_t kPositionBackoffMaxMs") &&
+              has(gui_h, "std::uint64_t position_backoff_ms_ = 0;"),
+          "position_started: a death waits as a refusal does -- 10 s, 20 s, then every 30 s -- and so does a "
+          "refusal; no 10-min backoff left");
+    check(has(again, "if (st.last_tcp_ms != 0) {") && has(again, "position_backoff_ms_ = 0;") &&
+              has(again, "position_dead_said_ = false;"),
+          "the row of refusals and deaths ends once a capture of ours has heard the game's TCP, not at a mere start");
+
+    // The silence restart: again every 30 s while quiet, the adapter afresh.
+    check(has(again, "} else if (since_try >= GameLink::kReattachSilentAgainMs) {") &&
+              has(again, "in.silent = since_try;") &&
+              has(job, "if (out.why.find(\"no game TCP\") != std::string::npos) iface_by_ip_.erase(local_ip);") &&
+              has(applied, "if (silence) silence_restart_armed_ = false;"),
+          "position_reattach: quiet still 30 s after a start again for the silence, asked again -- the job starts it "
+          "again only while the game holds a connection (should_reattach), the adapter looked up afresh");
+    // The 2026.11.24 review: one that has heard nothing since ANY start (a
+    // hunt start, a new process, a dead capture started again) is asked again
+    // the same way -- it stayed deaf the whole session; and the repeats of one
+    // quiet spell said at INFO once, DEBUG after.
+    check(has(again, "if (silence_restart_armed_ && st.last_tcp_ms != 0) {") &&
+              !has(again, "if (silence_restart_armed_) {") && has(again, "silence_repeat_said_ = false;") &&
+              has(applied, "if (silence && !silence_restart_armed_ && !silence_repeat_said_) {") &&
+              has(applied, "GB_DEBUG(\"Positions: starting the capture again -- %s (quiet still)\"") &&
+              has(gui_h, "bool           silence_repeat_said_ = false;"),
+          "position_reattach: a capture never heard since its start asked again every 30 s too; the repeat restarts "
+          "of a quiet spell said once at INFO");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// A start owed asked again (2026.11.24, gobot/owed_start.hpp: Tự đánh quái,
+/// the macro and the cold start's jobs refused by something that passes):
+/// from tick() alone, nothing worked out while nothing is owed, at most every
+/// 30 s, and never a look of its own on GoBot's thread -- a doubt keys_may_start
+/// would look at there (a quarter of a second a look) is left to its watcher,
+/// which looks on a thread of its own and asks at once as it ends. The starts
+/// it asks ask the run's pace first (test_capture_wiring's list). It needs
+/// GoBot's window and the game to run, so it is read off the source.
+void test_owed_start_load() {
+    section("A start owed asked again (2026.11.24): from tick() alone, at most every 30 s, never a look on GoBot's "
+            "thread (their source)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    if (gui.empty() || view.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::string tick = body(gui, "void GuiApp::tick() {");
+    const std::string owed = body(view, "void GuiApp::owed_tick() {");
+    check(count_of(tick, "owed_tick();") == 1 && count_of(gui + view, "owed_tick();") == 1 &&
+              before(owed, "if (!hunt_owed_ && !macro_owed_ && !jobs_owed_) return;", "any_key_on(macro_config_)") &&
+              before(owed, "if (!hunt_owed_ && !macro_owed_ && !jobs_owed_) return;", "now_ms()"),
+          "owed_tick: asked from tick() alone, and nothing worked out -- no key list read, no clock -- while nothing "
+          "is owed");
+    check(!has(owed, "ScreenCapture") && !has(owed, "grab(") && !has(owed, "bin_looks_clear(") &&
+              !has(owed, "chat_line_looks_shut(") && !has(owed, "std::async") && !has(owed, "keys_may_start()") &&
+              before(owed, "if (trash_left_held_ || (chat_doubt_ && !chat_doubt_watched_) || (chat_running_ && "
+                           "chat_quit_)) return;",
+                     "owed_ms_ = now;"),
+          "owed_tick: no look of its own on GoBot's thread, nor one through keys_may_start -- a doubt it would look at "
+          "waits for its watcher, which looks off this thread");
+    check(before(owed, "owed_due(now, owed_ms_, run, hunt_config_.enabled, hunting_)", "owed_ms_ = now;") &&
+              before(owed, "if (!input_.window_valid()) return;", "owed_ms_ = now;") && kOwedAskMs == 30'000,
+          "owed_tick: asked no sooner than 30 s after the last ask, and not with no game window to start on");
 #else
     skip("no source folder\n");
 #endif
@@ -816,4 +965,6 @@ void test_capture_load(void (*check_fn)(bool, const std::string&), void (*sectio
     test_capture_wiring();
     test_detector_pace();
     test_detector_pace_wiring();
+    test_position_capture_kept();
+    test_owed_start_load();
 }

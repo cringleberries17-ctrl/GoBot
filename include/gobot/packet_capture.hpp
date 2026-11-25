@@ -124,6 +124,14 @@ public:
     bool start(const CaptureConfig& cfg);
     void stop();
     bool running() const { return running_.load(); }
+    /// The capture's thread ended on a read that failed (pcap_next_ex: the
+    /// adapter gone, its driver stopped): it hears nothing more, though
+    /// running() still says true -- its threads are joined and its handle
+    /// closed only by stop(). Its owner stops it and starts another
+    /// (2026.11.24, the owner: "cần thay cơ chế này bằng 1 cơ chế khác"; until
+    /// then it stayed counted as running, deaf, until the game's process or
+    /// connection changed). False again after stop() or start().
+    bool dead() const { return dead_.load(); }
 
     /// How many times start() has got as far as starting its threads, ever:
     /// never reset, not even by a stop. A number that moves says the capture
@@ -217,6 +225,33 @@ public:
 
     /// The silence after which the watchdog says the game has disconnected.
     static constexpr std::uint64_t kDisconnectSilenceMs = 15'000;
+
+    /// How late the capture read the packets (2026.11.12, the owner's "delay
+    /// khoảng 0.5 -1s" on the Bản đồ tab): from Npcap's own stamp on each one
+    /// to the moment the capture thread read it. Npcap's clock and Windows'
+    /// may stand a fixed amount apart, so the quickest packet of the stretch
+    /// is taken as read at once and the others are measured above it.
+    struct ReadDelay {
+        std::uint64_t packets = 0;
+        double        avg_ms  = 0.0;   ///< on average, above the quickest of the stretch
+        double        max_ms  = 0.0;   ///< the slowest, above the quickest
+    };
+    /// The stretch since the last call; a new one starts. Any thread.
+    ReadDelay take_read_delay();
+
+    /// The working-out, apart for the tests: each packet's stamp and read
+    /// time in microseconds, on two clocks a fixed amount apart.
+    class DelayMeter {
+    public:
+        void add(std::int64_t stamp_us, std::int64_t read_us);
+        ReadDelay take();
+
+    private:
+        std::uint64_t n_ = 0;
+        double        sum_us_ = 0.0;
+        std::int64_t  min_us_ = 0;
+        std::int64_t  max_us_ = 0;
+    };
 
     /// Which way a datagram went, decided in this order:
     ///
@@ -315,6 +350,12 @@ private:
     std::atomic<std::uint64_t> starts_{0};    ///< start_count()
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
+    std::atomic<bool> dead_{false};           ///< dead()
+    /// The capture's own error lines said once an episode (2026.11.24): from
+    /// a start refused or a read that failed until a packet is read again,
+    /// the next failure's lines go to the debug log -- its owner tries again
+    /// every 30 s at most, and each try would say them all again.
+    std::atomic<bool> trouble_said_{false};
     /// What the watchdog waits on between its looks, a second apart, so that
     /// stop() -- on the GUI's thread, at every hunt's end -- wakes it rather
     /// than waiting out the rest of its second.
@@ -323,6 +364,9 @@ private:
 
     mutable std::mutex stats_mutex_;
     Stats              stats_;
+
+    std::mutex         delay_mutex_;
+    DelayMeter         delay_;          ///< take_read_delay()
 };
 
 } // namespace gobot

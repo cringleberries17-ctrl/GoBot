@@ -103,7 +103,9 @@ struct GuiApp::QuestUi {
     // What the worker says, for the tab; guarded by worker_mutex_.
     std::vector<std::string> log;
     std::string   last;             ///< "Lần gần nhất lúc HH:MM: ..."
-    std::string   stopped;          ///< why it stopped itself, in red
+    /// Why it stopped itself, in red: since 2026.11.24 only the English
+    /// client -- failures in a row and missing pictures no longer stop it.
+    std::string   stopped;
     std::uint64_t next_ms = 0;      ///< the next timed round, on now_ms()'s clock
 
     /// The round under way, to cancel.
@@ -201,6 +203,8 @@ void GuiApp::stop_quest(bool wait) {
 /// The timed rounds, and the ones asked for.
 void GuiApp::quest_loop() {
     name_this_thread("quest");
+    // A job between fights: it can wait for the game's slice to end.
+    quiet_this_thread();
     QuestUi& ui = *quest_ui_;
     // A round put off ("Chờ: ...") goes to the log as well, once for each
     // change of what it waits for: only the tab had it, and the farm of
@@ -225,12 +229,6 @@ void GuiApp::quest_loop() {
         }
         say_quest(vi);
     };
-    const auto leave = [&](const std::string& why) {
-        if (!why.empty()) tell(why);
-        std::lock_guard<std::mutex> lock(quest_life_mutex_);
-        quest_running_ = false;
-    };
-
     // Read again every second, and kept from one reading that worked to the
     // next: the tab writes the file key by key as things change.
     const std::string config = exe_relative("configs/quest.ini");
@@ -242,21 +240,21 @@ void GuiApp::quest_loop() {
     // hours.
     QuestPictures pictures;
     std::string from;
+    // Some of them missing is no reason to stop (2026.11.24, the owner: "Kiểm
+    // tra các phần khác xem có phần nào không làm được thì dừng không, cần
+    // thay cơ chế này bằng 1 cơ chế khác"): the worker runs on, and each round
+    // looks for them again first (one_round), coming to NoPictures with nothing
+    // held or pressed while they are still missing -- QuestRun says so once and
+    // looks again 30 s on. Until then the worker was not started at all.
     if (!pictures.load_best(settings, &from)) {
-        const std::string why = quest_missing_vi(pictures);
-        GB_WARN("Quest: %zu of its pictures are missing, the first %s -- not started",
+        GB_WARN("Quest: %zu of its pictures are missing, the first %s -- looked for again before each round",
                 pictures.missing.size(), pictures.missing.empty() ? "?" : pictures.missing[0].c_str());
-        {
-            std::lock_guard<std::mutex> lock(worker_mutex_);
-            ui.stopped = why;
-        }
-        leave(why);
-        return;
+    } else {
+        const std::string learned = pictures.box_learned.valid()
+                                        ? "; the ticked box as learned here, from " + QuestPictures::learned_file()
+                                        : std::string();
+        GB_INFO("Quest: pictures from %s%s", from.c_str(), learned.c_str());
     }
-    const std::string learned = pictures.box_learned.valid()
-                                    ? "; the ticked box as learned here, from " + QuestPictures::learned_file()
-                                    : std::string();
-    GB_INFO("Quest: pictures from %s%s", from.c_str(), learned.c_str());
 
     ScreenCapture capture;
     capture.set_label("quest");
@@ -295,10 +293,27 @@ void GuiApp::quest_loop() {
     hands.now = [] { return now_ms(); };
     hands.sleep = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
     hands.stop = halted;
-    // The round's hold keeps the HP potion off as well: under the potion's
-    // mark it ends where it is, so the potion is not kept waiting for the rest
-    // of it, as Tự chat ends a line. Not known while the bars are unread.
+    // At any HP (2026.11.12b, the owner: Nhiệm vụ nhanh at every HP level):
+    // the round's hold keeps the potions off for its few seconds -- on a slow
+    // game up to kReactMs a step since 2026-11-15, each step waiting for the
+    // game to show what its key or click did (QuestRound::react_ms) -- and only
+    // the character down -- HP read under bag::kJobDownHpPct, as for the bag's
+    // jobs -- ends it where it is, but for its reaction waits (below). Until
+    // 2026.11.12 HP under the potion's mark did, as Tự chat ends a line. Not
+    // known while the bars are unread.
     hands.low_hp = [this] {
+        const float hp = hp_percent_now();
+        return hp >= 0.0f && hp < static_cast<float>(bag::kJobDownHpPct);
+    };
+    // But while the round only waits for the game to show what its key or
+    // click did -- up to kReactMs a step since 2026-11-15, pressing nothing --
+    // and the game is slow (past kReactSlowMs: QuestRound::react_wait), HP
+    // under the potion's mark ends it as not now, the rule Tự chat's lines
+    // keep (the chat's floor, handed over by the UI thread): thirty seconds or
+    // more of potions held off at low HP is how a character dies, where the
+    // old round was over in a few. The round still starts, and presses, at any
+    // HP; the next one, soon, closes the window this one left.
+    hands.under_potion_mark = [this] {
         const float hp = hp_percent_now();
         return hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());
     };
@@ -311,15 +326,17 @@ void GuiApp::quest_loop() {
         in.focused = input_.window_focused();
         in.keeper = crossing();
         in.hp_pct = hp_percent_now();
-        // Tự chat's rule: some way over what the HP potion fires at, so that
-        // HP hovering at the mark in a fight does not start a round only for
-        // the guard above to end it.
-        const int floor = chat_hp_floor_.load();
-        in.hp_floor = std::max(floor, std::min(95, floor + 10));
+        // At any HP but the character down (2026.11.12b), as the guard above.
+        // Until 2026.11.12 Tự chat's rule: 10 over what the HP potion fires at.
+        in.hp_floor = bag::kJobDownHpPct;
         const std::string reason = coord_.critical_active() ? coord_.critical_reason() : std::string();
         in.held_by = reason == kQuestHold ? std::string() : reason;
         in.trash = trash_pass_ || trash_hold_ || trash_left_held_;
         in.chat = chat_doubt_.load();
+        // A dungeon run's boss fight or reward room (2026.11.21, the audit's
+        // B6): a timed round -- the one a revive brings 30 s on as well --
+        // waits it out (quest_gate; one asked for with the button goes).
+        in.dungeon = trip_quiet_vi(trip_quiet_.at(now_ms()));
         return in;
     };
 
@@ -338,6 +355,20 @@ void GuiApp::quest_loop() {
 
     // One round, with the mouse to itself and everything else held off.
     const auto one_round = [&](const QuestCall& call) -> QuestResult {
+        // Its pictures missing (2026.11.24): looked for again first -- a dozen
+        // small files, once a round at most, every 30 s while they are missing
+        // (QuestRun puts the next look off kPostponeMs) -- and until they are
+        // there the round comes to NoPictures, nothing held or pressed.
+        if (!pictures.ready()) {
+            std::string again;
+            if (!pictures.load_best(settings, &again)) {
+                QuestResult missing;
+                missing.outcome = QuestOutcome::NoPictures;
+                missing.why = quest_missing_vi(pictures);
+                return missing;
+            }
+            GB_INFO("Quest: the missing pictures are there now, from %s", again.c_str());
+        }
         QuestResult not_now;
         not_now.outcome = QuestOutcome::NotNow;
         // Never one of GoBot's own switches: GoBot would take its own press
@@ -548,6 +579,9 @@ void GuiApp::quest_loop() {
                 std::lock_guard<std::mutex> lock(worker_mutex_);
                 ui.next_ms = run.next_at();
             }
+            // Only the English client, which is not supported, since 2026.11.24:
+            // failed rounds in a row and missing pictures no longer stop it
+            // (QuestRun::step) -- the rounds go on, the trouble told once.
             if (run.stopped_itself()) {
                 GB_WARN("Quest: stopped itself -- %s", run.stopped_log().c_str());
                 std::lock_guard<std::mutex> lock(worker_mutex_);

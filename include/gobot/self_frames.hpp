@@ -119,8 +119,9 @@ inline std::optional<StatSheetFrame> read_stat_sheet(const GamePacket& p, FrameF
 }
 
 /// 0x02F0 from the server over UDP, plain, 16 bytes: MP u32 at 12.
-/// DOCUMENTED, and only ever written to the log: it came only in a fight, and
-/// in what order it and 0x0051 say MP is not known.
+/// DOCUMENTED. It came only in a fight; on 2026-11-17 it said each MP a moment
+/// before 0x0051 did, and the HUD's MP where 0x0051 was still behind, so since
+/// 2026.11.17 it is your MP as well, the newer of the two going (PacketSelf).
 inline std::optional<std::uint32_t> read_udp_mp(const GamePacket& p, FrameFit* fit = nullptr) {
     using namespace self_frames_detail;
     if (!fits(p, 0x02F0, true, false, 16, fit)) return std::nullopt;

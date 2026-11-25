@@ -164,6 +164,11 @@ public:
     bool key_up(std::uint32_t vk);
     /// Press and release, holding for a randomised human-ish duration.
     bool key_press(std::uint32_t vk, int hold_ms = -1);
+    /// ↓ once, on purpose, to take the gate the character stands on
+    /// (2026.11.19): the one press of ↓ outside the drop's Ctrl + ↓, for
+    /// Đào khoáng's gates and Cổ Thụ's boss door alone -- what GoC's own
+    /// InputManager::Down() is there. Every other way to ↓ still refuses it.
+    bool gate_down(int hold_ms = 80);
     /// Whether one key event goes out, by the rule every key here keeps: down
     /// only into the game in front; up into the game in front, and wherever
     /// focus has gone when it is owed -- the key is down by this manager's
@@ -177,33 +182,6 @@ public:
     /// Release every key this manager is currently holding. Called on stop and
     /// on focus loss so the character doesn't run off holding a direction.
     void release_all();
-
-    // ---- movement ----
-    bool move_left();
-    bool move_right();
-    bool stop_move();
-    bool jump();
-    bool double_jump();
-    bool jump_down();       ///< the packet bot's old drop: ↓ held, so always refused (drop_ctrl_down is the drop)
-    bool face_left();
-    bool face_right();
-
-    bool moving_left() const  { return held(key_left_); }
-    bool moving_right() const { return held(key_right_); }
-    bool moving() const { return moving_left() || moving_right(); }
-
-    // ---- actions ----
-    bool use_skill(std::uint32_t vk);
-    bool normal_attack();
-    bool loot();
-
-    /// Refuses, and says so: chat goes through ChatSender (gobot/auto_chat.hpp).
-    ///
-    /// This used to press Enter and type blind. Letters typed into a chat line
-    /// that did not open are skill keys, and an Enter pressed on a dialog
-    /// answers it, so a line is only ever typed once a look at the screen has
-    /// shown it open -- which needs pictures and frames this class has not got.
-    bool send_chat(const std::string& text, std::uint32_t chat_key = 13);
 
     // ---- typing into the game's chat line ----
 
@@ -292,10 +270,12 @@ public:
     /// 0 once nothing is owed.
     int owed_tries() const noexcept { return owed_tries_.load(); }
     /// Whether the up still owed is a high jump's ↑ (chord_ctrl(Up)) and not a
-    /// drop's ↓: the words a hunt stopped on it goes by (2026.11.05b).
+    /// drop's ↓: the words the window says of it go by it (2026.11.05b).
     bool up_owed() const noexcept { return up_owed_.load(); }
-    /// That many, and ↓ (or a high jump's ↑) or Ctrl may be stuck down: the
-    /// hunt stops (GuiApp::tick).
+    /// That many, and ↓ (or a high jump's ↑) or Ctrl may be stuck down: every
+    /// key is let go of, once an episode, and the hunt goes on once Windows
+    /// takes the key-ups (GuiApp::tick, 2026.11.24; the hunt stopped until
+    /// then). The owed ups are still sent again every 100 ms meanwhile.
     static constexpr int kOwedTries = 3;
     /// For GoBot's start and each BẮT ĐẦU with drops on: a GoBot ended
     /// between ↓ and its up leaves both down in Windows. ↓ let go of when
@@ -422,7 +402,7 @@ public:
     static void set_pretend_sender(PretendSender* p);
     /// An array through inject() as any key or click goes, never a drop's
     /// chord, for a test. 0, and nothing done, without a pretend sender.
-    static unsigned pretend_inject(const std::vector<SentEvent>& events);
+    static unsigned pretend_inject(const std::vector<SentEvent>& events, bool as_gate_down = false);
 
     // ---- what GoBot itself last put down (2026.11.04d) ----
 
@@ -574,29 +554,11 @@ public:
     /// Type a string into whatever has focus, one character at a time.
     ///
     /// Sent as Unicode rather than as key codes, so what arrives does not
-    /// depend on the keyboard layout that happens to be active -- the same
-    /// method `send_chat` already uses for the same reason.
+    /// depend on the keyboard layout that happens to be active.
     ///
     /// Not gated on the game window being foreground: the fields this types
     /// into belong to the publisher's launcher.
     bool type_text(const std::string& utf8);
-
-    // ---- key bindings ----
-    void set_left_key(std::uint32_t vk)  { key_left_ = vk; }
-    void set_right_key(std::uint32_t vk) { key_right_ = vk; }
-    void set_up_key(std::uint32_t vk)    { key_up_ = vk; }
-    void set_down_key(std::uint32_t vk)  { key_down_ = vk; }
-    void set_jump_key(std::uint32_t vk)  { key_jump_ = vk; }
-    void set_attack_key(std::uint32_t vk){ key_attack_ = vk; }
-    void set_loot_key(std::uint32_t vk)  { key_loot_ = vk; }
-
-    std::uint32_t left_key() const  { return key_left_; }
-    std::uint32_t right_key() const { return key_right_; }
-    std::uint32_t jump_key() const  { return key_jump_; }
-
-    /// Randomised inter-action delay, in ms, drawn from [min, max].
-    void set_delay_range(int min_ms, int max_ms);
-    int  random_delay() const;
 
     /// While one is alive on a thread, that thread's clicks and drags on the
     /// game (click_on_game, drag_on_game) pause as `press_ms` says -- the
@@ -614,11 +576,10 @@ public:
         int was_;
     };
 
-    /// Hard gates used by higher layers (e.g. suspend combat during a dialog).
-    void set_block_movement(bool b) { block_movement_ = b; if (b) stop_move(); }
-    void set_block_attack(bool b)   { block_attack_ = b; }
+    /// A hard gate a higher layer may set (e.g. to hold the moves off during a
+    /// dialog): while it is up, the drop's and the jumps' chords send nothing.
+    void set_block_movement(bool b) { block_movement_ = b; }
     bool movement_blocked() const { return block_movement_.load(); }
-    bool attack_blocked() const   { return block_attack_.load(); }
 
     /// Whether synthetic keystrokes reach this machine at all.
     ///
@@ -655,14 +616,13 @@ public:
 
 private:
     /// One key event, under key_event_allowed's rule. `owed`: this key-up
-    /// ends a press or tap begun here (key_press, face_left/right, jump_down),
-    /// so it goes out even when another thread's release_all() crossed the key
-    /// off the held list in between.
+    /// ends a press or tap begun here (key_press, a tap), so it goes out even
+    /// when another thread's release_all() crossed the key off the held list
+    /// in between.
     bool send_key(std::uint32_t vk, bool down, bool owed = false);
     bool held(std::uint32_t vk) const;
-    void sleep_jitter(int base_ms) const;
     /// Thread-safe uniform draw from [min_ms, max_ms]. Every use of rng_ goes
-    /// through here or random_delay(); the generator is shared across threads.
+    /// through here; the generator is shared across threads.
     int  jitter(int min_ms, int max_ms) const;
 
     /// drop_ctrl_down's steps, which it runs in a try: `out` holds what went
@@ -692,16 +652,7 @@ private:
     std::atomic<void*> hwnd_{nullptr};
     std::atomic<bool>  said_never_{false};     ///< a ↓ refused has been said in the log
 
-    std::uint32_t key_left_   = 37;
-    std::uint32_t key_right_  = 39;
-    std::uint32_t key_up_     = 38;
-    std::uint32_t key_down_   = 40;
-    std::uint32_t key_jump_   = 17;
-    std::uint32_t key_attack_ = 32;
-    std::uint32_t key_loot_   = 90;
-
     std::atomic<bool> block_movement_{false};
-    std::atomic<bool> block_attack_{false};
 
     mutable std::mutex                             held_mutex_;
     std::unordered_map<std::uint32_t, bool>        held_keys_;
@@ -721,8 +672,6 @@ private:
 
     mutable std::mutex         rng_mutex_;
     mutable std::mt19937       rng_;
-    int                        delay_min_ = 40;
-    int                        delay_max_ = 90;
 };
 
 } // namespace gobot

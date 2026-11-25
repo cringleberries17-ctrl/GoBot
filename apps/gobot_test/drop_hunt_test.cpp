@@ -89,14 +89,16 @@ struct MapMaker {
     }
     /// A floor at y from x0 to x1 in `layer`, its cells' attribute `attr`.
     void flat(int layer, int x0, int x1, int y, std::uint8_t attr) {
-        for (int x = x0; x <= x1; ++x) {
-            const std::size_t r = 8 + static_cast<std::size_t>(layer) * static_cast<std::size_t>(w) *
-                                          static_cast<std::size_t>(h) * 36 +
-                                  (static_cast<std::size_t>(x / 32) * static_cast<std::size_t>(h) +
-                                   static_cast<std::size_t>(y / 32)) * 36;
-            b[r + 2] = attr;
-            b[r + 3 + static_cast<std::size_t>(x % 32)] = static_cast<std::uint8_t>(y % 32);
-        }
+        for (int x = x0; x <= x1; ++x) column(layer, x, y, attr);
+    }
+    /// One column of a floor: its top at y.
+    void column(int layer, int x, int y, std::uint8_t attr) {
+        const std::size_t r = 8 + static_cast<std::size_t>(layer) * static_cast<std::size_t>(w) *
+                                      static_cast<std::size_t>(h) * 36 +
+                              (static_cast<std::size_t>(x / 32) * static_cast<std::size_t>(h) +
+                               static_cast<std::size_t>(y / 32)) * 36;
+        b[r + 2] = attr;
+        b[r + 3 + static_cast<std::size_t>(x % 32)] = static_cast<std::uint8_t>(y % 32);
     }
 };
 
@@ -177,10 +179,87 @@ std::string fixture_folder() {
     prj.junk(5);
     MapMaker decoy(100, 40);
     decoy.flat(0, 0, 3199, 1120, 2);
-    const bool ok = write_bytes(dir + "\\Map\\t52_s2.map", map.b) &&
+    // 2026.11.12: t23_s14 at 22:22:00 -- the take-off floor 853 from x 135
+    // right, sloping down left to 932 at x 30 (follow.py of the real file:
+    // 853, 882 at 90, 906 at 60, 932 at 30), floor 1014 under it, a gate at
+    // 500,600 on floor 633; and t62_s5's spawn 265,5104, 33 px over floor 5137,
+    // by its gate at 265,5125.
+    MapMaker slope(20, 40);
+    for (int x = 0; x <= 400; ++x)
+        slope.column(0, x, x >= 135 ? 853 : 853 + static_cast<int>(std::lround((135 - x) * 0.75)), 1);
+    slope.flat(0, 0, 400, 1014, 1);
+    slope.flat(0, 450, 600, 633, 1);
+    slope.flat(1, 0, 639, 1250, 2);
+    PrjMaker slope_prj;
+    slope_prj.junk(12);
+    slope_prj.kind(kJeontu, "\\Data\\OBJ\\Object\\warpzone.spr");
+    slope_prj.junk(9);
+    slope_prj.place(kJeontu, 500, 600);
+    slope_prj.junk(5);
+    MapMaker spawn(20, 180);
+    spawn.flat(0, 0, 639, 5137, 1);
+    spawn.flat(1, 0, 639, 5700, 2);
+    PrjMaker spawn_prj;
+    spawn_prj.junk(12);
+    spawn_prj.kind(kPiseu, "\\Data\\OBJ\\Object\\warpzone.spr");
+    spawn_prj.junk(9);
+    spawn_prj.place(kPiseu, 265, 5125);
+    spawn_prj.junk(5);
+    // 2026.11.12, the owner's Q7: t91_s1, two platforms 40 px apart -- 500
+    // and 540, x 0..1200 -- over the bottom at 1100, its gate at 2000,1092.
+    MapMaker close(80, 40);
+    close.flat(0, 0, 1200, 500, 1);
+    close.flat(1, 0, 1200, 540, 1);
+    close.flat(0, 0, 2559, 1100, 2);
+    PrjMaker close_prj;
+    close_prj.junk(12);
+    close_prj.kind(kPiseu, "\\Data\\OBJ\\Object\\warpzone.spr");
+    close_prj.junk(9);
+    close_prj.place(kPiseu, 2000, 1092);
+    close_prj.junk(5);
+    const bool ok = write_bytes(dir + "\\Map\\t91_s1.map", close.b) &&
+                    write_bytes(dir + "\\Project\\t91_s1.prj", close_prj.b) &&
+                    write_bytes(dir + "\\Map\\t52_s2.map", map.b) &&
                     write_bytes(dir + "\\Project\\t52_s2.prj", prj.b) &&
-                    write_bytes(dir + "\\Map\\t99_s9.map", decoy.b);
+                    write_bytes(dir + "\\Map\\t99_s9.map", decoy.b) &&
+                    write_bytes(dir + "\\Map\\t23_s14.map", slope.b) &&
+                    write_bytes(dir + "\\Project\\t23_s14.prj", slope_prj.b) &&
+                    write_bytes(dir + "\\Map\\t62_s5.map", spawn.b) &&
+                    write_bytes(dir + "\\Project\\t62_s5.prj", spawn_prj.b);
     if (!ok) dir.clear();
+    return dir;
+}
+
+/// The game's own t23_s14 (PhòngSinhTử[4]), copied from build\handoff --
+/// never the game's install -- with a .prj written for it: one gate, by the
+/// entry's spawn at 300,1001, far from the owner's box of 2026-11-11. "" with
+/// no copy here. Written once a run.
+std::string real_folder() {
+    static std::string dir;
+    static bool tried = false;
+    if (tried) return dir;
+    tried = true;
+#ifdef GOBOT_SOURCE_DIR
+    const std::string real =
+        std::string(GOBOT_SOURCE_DIR) + "\\build\\handoff\\drop\\testdata\\data\\Map\\t23_s14.map";
+    std::ifstream in(real, std::ios::binary);
+    if (!in) return dir;
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    Bytes b(text.size());
+    if (!text.empty()) std::memcpy(b.data(), text.data(), text.size());
+    dir = temp_path("drop_real");
+    make_folder(dir);
+    make_folder(dir + "\\Map");
+    make_folder(dir + "\\Project");
+    PrjMaker prj;
+    prj.junk(12);
+    prj.kind(kPiseu, "\\Data\\OBJ\\Object\\warpzone.spr");
+    prj.junk(9);
+    prj.place(kPiseu, 300, 994);
+    prj.junk(5);
+    if (text.empty() || !write_bytes(dir + "\\Map\\t23_s14.map", b) || !write_bytes(dir + "\\Project\\t23_s14.prj", prj.b))
+        dir.clear();
+#endif
     return dir;
 }
 
@@ -338,7 +417,8 @@ void test_drop_rule() {
         { "Đứng yên một chỗ", [](HunterConfig& c, Hunter::DropFacts&) { c.stay_put = true; }, Why::StayPut },
         { "the spot on, standing for want of a fix", [](HunterConfig& c, Hunter::DropFacts&) { c.spot = true; },
           Why::Spot },
-        { "drops off for the run", [](HunterConfig&, Hunter::DropFacts& f) { f.latched = true; }, Why::Latched },
+        // No "drops off for the run" since 2026.11.24 (DropWhy::Latched gone):
+        // nothing switches the drops off.
         { "a key-up owed", [](HunterConfig&, Hunter::DropFacts& f) { f.owed = true; }, Why::KeysOwed },
         { "the jump key Ctrl", [](HunterConfig& c, Hunter::DropFacts&) { c.jump_key = 0x11; }, Why::KeyClash },
         { "the left key right Ctrl", [](HunterConfig& c, Hunter::DropFacts&) { c.left_key = 0xA3; }, Why::KeyClash },
@@ -348,8 +428,11 @@ void test_drop_rule() {
           Why::NotPacketTarget },
         { "a monster on the level", [](HunterConfig&, Hunter::DropFacts& f) { f.level_monster = true; },
           Why::LevelMonster },
-        { "100 px below", [](HunterConfig&, Hunter::DropFacts& f) { f.dy = 100; }, Why::NotBelow },
+        // The lower bar alone (2026.11.12, the owner's Q7): 60, height_tolerance's.
+        { "60 px below", [](HunterConfig&, Hunter::DropFacts& f) { f.dy = 60; }, Why::NotBelow },
         { "140 px below with down() 150", [](HunterConfig& c, Hunter::DropFacts& f) { c.down_reach = 150; f.dy = 140; },
+          Why::NotBelow },
+        { "20 px below with down() 20", [](HunterConfig& c, Hunter::DropFacts& f) { c.down_reach = 20; f.dy = 20; },
           Why::NotBelow },
         { "141 px across at the press", [](HunterConfig&, Hunter::DropFacts& f) { f.dx = 141; }, Why::TooFarSide },
         { "121 px across as a settle begins", [](HunterConfig&, Hunter::DropFacts& f) { f.press = false; f.dx = -121; },
@@ -392,11 +475,13 @@ void test_drop_rule() {
               f.fix.moving = true;
           }, Why::NoLanding },
         // Its last report there too: as a settle begins the height is the
-        // report's floor followed (2026.11.04d), and here there is none.
-        { "the floor below 52 px down, as a settle begins",
+        // report's floor followed (2026.11.04d), and here there is none. Under
+        // kDropMinFallPx -- 25 since 2026.11.12, 60 until then -- a landing
+        // is not told from standing still.
+        { "the floor below 20 px down, as a settle begins",
           [](HunterConfig&, Hunter::DropFacts& f) {
               f.press = false;
-              f.fix.y = f.fix.ry = 320.0f;
+              f.fix.y = f.fix.ry = 352.0f;
           }, Why::ShortFall },
         // The monster's point 113 px over the landing, no floor within 100 px
         // under it: its point is all there is, and the landing past it.
@@ -420,7 +505,15 @@ void test_drop_rule() {
 
     // And what each of those lets through.
     const std::vector<Case> goes = {
-        { "101 px below", [](HunterConfig&, Hunter::DropFacts& f) { f.dy = 101; }, Why::None },
+        { "61 px below: past the band's 60 -- drop_min_px's 100 gone (2026.11.12)",
+          [](HunterConfig&, Hunter::DropFacts& f) { f.dy = 61; }, Why::None },
+        { "40 px below with down() 20", [](HunterConfig& c, Hunter::DropFacts& f) { c.down_reach = 20; f.dy = 40; },
+          Why::None },
+        { "the floor below 52 px down, as a settle begins (60 px at least until 2026.11.12)",
+          [](HunterConfig&, Hunter::DropFacts& f) {
+              f.press = false;
+              f.fix.y = f.fix.ry = 320.0f;
+          }, Why::None },
         { "140 px across at the press", [](HunterConfig&, Hunter::DropFacts& f) { f.dx = 140; }, Why::None },
         { "120 px across as a settle begins", [](HunterConfig&, Hunter::DropFacts& f) { f.press = false; f.dx = 120; },
           Why::None },
@@ -565,11 +658,20 @@ void test_drop_rule() {
         const std::vector<Hunter::Listed> free3(3, Hunter::Listed::Free);
         check(Hunter::choose_target(c, level, &me, free3, nullptr, true) == 2,
               "one on the level as well: that one, below_first or not");
+        // The lower bar alone (2026.11.12): within it on the level, past it
+        // the one below -- drop_min_px's 100 held one 90 px down back.
         std::vector<Nameplate> shallow = mobs;
-        shallow[1].bar.y = 371 + 90;
+        shallow[1].bar.y = 371 + 60;
         shallow[1].plate.y = shallow[1].bar.y - 14;
-        check(Hunter::choose_target(c, shallow, &me, free2, nullptr, true) == 0,
-              "90 px below -- not past drop_min_px 100: the nearest, as ever");
+        check(Hunter::choose_target(c, shallow, &me, free2, nullptr, true) == 1 &&
+                  Hunter::choose_target(c, shallow, &me, free2, nullptr, false) == 1,
+              "60 px below, the lower bar at 60: on the level -- fought where it stands, a drop able to go or not");
+        std::vector<Nameplate> past = mobs;
+        past[1].bar.y = 371 + 90;
+        past[1].plate.y = past[1].bar.y - 14;
+        check(Hunter::choose_target(c, past, &me, free2, nullptr, true) == 1 &&
+                  Hunter::choose_target(c, past, &me, free2, nullptr, false) == 0,
+              "90 px below, past the lower bar: the one below with a drop able to go, the nearest without");
         std::vector<Nameplate> screen = mobs;
         screen[1].slot = -1;
         check(Hunter::choose_target(c, screen, &me, free2, nullptr, true) == 0,
@@ -593,6 +695,19 @@ enum class Fall {
     Overshoot,      ///< lands 300 px below where the file says
     Gate,           ///< the map changes: a new entry, a view change, map 53/2
     LateGate,       ///< nothing; then the map changes 2.5 s later
+    /// No take-off; 700 ms after Down a report on the ground at slide_x,
+    /// slide_y -- a skill's move during the press (t23_s14, 22:22:00).
+    Slide,
+    Past,           ///< drops past the file's first floor below onto the next
+    /// As Floor, with a report at y 0 on the ground 100 ms after Down.
+    Zero,
+    /// As Floor, with a report on the ground in mid-air -- on no floor of the
+    /// file, 110 px under the take-off -- 100 ms after Down: a hit's state 0 at
+    /// the top of an arc (the owner's 00:27:54, as a jump up's), the landing on
+    /// the floor the file says coming on.
+    Apex,
+    /// As Apex, with no landing after it: reported there, and stays.
+    ApexStays,
 };
 
 /// The pretend game, in the packets' world pixels: the plates are laid one
@@ -648,6 +763,10 @@ struct DropWorld {
     int           land_y = 0;
     std::uint64_t landed_at = 0;
     std::uint64_t late_gate_at = 0;
+    int           slide_x = 0, slide_y = 0;
+    std::uint64_t slide_at = 0;
+    std::uint64_t zero_at = 0;
+    std::uint64_t apex_at = 0;
 
     void report() {
         report_x = static_cast<float>(me_x);
@@ -689,8 +808,12 @@ struct DropRig {
     DropWorld            w;
     const char*          veto = nullptr;
 
-    explicit DropRig(const HunterConfig& cfg, bool wired = true) : book(fixture_folder()) {
-        w.page = book.get("t52_s2").get();
+    /// `data`: another folder's files -- the game's own t23_s14 (real_folder)
+    /// -- and `stem` the map the pretend game is on; the made-up t52_s2 else.
+    explicit DropRig(const HunterConfig& cfg, bool wired = true, const std::string& data = std::string(),
+                     const char* stem = "t52_s2")
+        : book(data.empty() ? fixture_folder() : data) {
+        w.page = book.get(stem).get();
         Hunter::Eyes eyes;
         eyes.view = [this] { return w.view; };
         eyes.where = [this](WorldFix& f) {
@@ -805,6 +928,25 @@ struct DropRig {
                 case Fall::Overshoot:   if (below) fall_to(below->y - 1 + 300); break;
                 case Fall::Gate:        w.change_map(); break;
                 case Fall::LateGate:    w.late_gate_at = down + 2500; break;
+                case Fall::Slide:       w.slide_at = down + 700; break;
+                case Fall::Past:
+                    if (below) {
+                        const std::optional<MapFloor> next = w.page->floor_below(w.me_x, below->y, 8);
+                        fall_to((next ? next->y : below->y) - 1);
+                    }
+                    break;
+                case Fall::Zero:
+                    if (below) fall_to(below->y - 1);
+                    w.zero_at = down + 100;
+                    break;
+                case Fall::Apex:
+                    if (below) fall_to(below->y - 1);
+                    w.apex_at = down + 100;
+                    break;
+                case Fall::ApexStays:
+                    ++w.takeoffs;
+                    w.apex_at = down + 100;
+                    break;
             }
             return p;
         };
@@ -842,6 +984,27 @@ struct DropRig {
         if (w.late_gate_at != 0 && w.t >= w.late_gate_at) {
             w.late_gate_at = 0;
             w.change_map();
+        }
+        if (w.slide_at != 0 && w.t >= w.slide_at) {
+            w.slide_at = 0;
+            w.place(w.slide_x, w.slide_y);
+        }
+        if (w.zero_at != 0 && w.t >= w.zero_at) {
+            // On the ground by its frame, at y 0: no place.
+            w.zero_at = 0;
+            w.airborne = false;
+            w.report_x = static_cast<float>(w.me_x);
+            w.report_y = 0.0f;
+            w.report_ms = w.t;
+        }
+        if (w.apex_at != 0 && w.t >= w.apex_at) {
+            // On the ground by its frame, in mid-air: a hit's, at the top of
+            // an arc -- no floor of the file under it.
+            w.apex_at = 0;
+            w.airborne = false;
+            w.report_x = static_cast<float>(w.me_x);
+            w.report_y = static_cast<float>(w.me_y + 110);
+            w.report_ms = w.t;
         }
     }
     void run(std::uint64_t ms, const std::function<void()>& each = nullptr) {
@@ -944,8 +1107,8 @@ void test_drop_owner_cases() {
         const std::vector<std::string> more = info_lines([&] { r.run(55'000); });
         const std::string minute = line_with(more, " fights, ");
         const std::size_t given = minute.find(" given up");
-        check(minute.find("; drops 1 (1 worked, 0 did nothing, 0 jumps in place, 0 rose, 0 off the map, 0 map "
-                          "changes, 0 unknown)") != std::string::npos,
+        check(minute.find("; drops 1 (1 worked, 0 did nothing, 0 jumps in place, 0 rose, 0 off the map, 0 on another "
+                          "floor, 0 map changes, 0 unknown)") != std::string::npos,
               "the minute line: \"" + (given == std::string::npos ? minute : minute.substr(given)) + "\"");
         const Hunter::Status after = r.st();
         check(after.targets_dropped == after.targets_repicked,
@@ -1200,11 +1363,17 @@ void test_drop_choosing() {
 }
 
 void test_drop_verdicts() {
-    section("Hunter: what came of a drop -- did nothing, jumped in place, rose, off the map, the map changed");
+    section("Hunter: what came of a drop -- did nothing, jumped in place, rose, off the map, the map changed; since "
+            "2026.11.24 never a pause, an \"off\" or a stop");
     if (fixture_folder().empty()) return;
 
-    // Ctrl + ↓ did nothing: judged at 1 s, the place remembered, the monster
-    // passed over -- and not tried there again.
+    // Ctrl + ↓ did nothing: judged at 1 s. The first of a row is no evidence
+    // (2026.11.15, the game loses a share of GoBot's presses at random): the
+    // place is noted, not learned, and the monster passed over only
+    // kRetryPassOverMs -- the next look presses again from the same place. The
+    // second near it is: the place remembered for kLearnedForgetMs, the
+    // monster passed over one fight turn, kRetryFightMs (2026.11.24; 8 s, the
+    // place for the session, until then) -- and not tried there meanwhile.
     {
         DropRig r(drop_config(136));
         r.w.mode = Fall::Solid;
@@ -1214,22 +1383,44 @@ void test_drop_verdicts() {
             r.until([&] { return !r.w.drops.empty(); }, 3000);
             r.run(1200);
         });
-        const Hunter::Status st = r.st();
-        check(r.w.drops.size() == 1 && r.book.no_drop_near("t52_s2", { 2675, 371 }) && st.drops == 1 &&
-                  lines_with(log, "Hunter: drop did nothing in 1000 ms at 2675,371 -- no drops within 64 px of it "
-                                  "this session; the monster passed over for 8 s (1 in a row)") == 1,
-              "Solid: one press, judged Nothing at 1 s, 2675,371 learned as a no-drop point");
+        Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && !r.book.no_drop_near("t52_s2", { 2675, 371 }) && st.drops == 1 &&
+                  lines_with(log, "Hunter: drop did nothing in 1000 ms at 2675,371 -- not held against the place yet "
+                                  "(a second near it within 120 s is); the monster passed over for 1.2 s "
+                                  "(1 in a row)") == 1,
+              "Solid: one press, judged Nothing at 1 s -- 2675,371 noted, not learned as a no-drop point");
         check(st.targets_dropped == 0 && st.state == Hunter::State::NoTargets && st.passed_over,
               "the monster passed over -- not counted as given up: the minute line counts it among the drops");
+        // 1.2 s after the verdict it is picked again and pressed from the same
+        // place: the second press that did nothing near it.
+        log = info_lines([&] {
+            r.until([&] { return r.w.drops.size() > 1; }, 4000);
+            r.run(1200);
+        });
+        st = r.st();
+        const std::uint64_t gap = r.w.drops.size() > 1 ? r.w.drops[1] - r.w.drops[0] : 0;
+        check(r.w.drops.size() == 2 && gap >= Hunter::kDropGapMs && gap < 4000 &&
+                  r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
+                  lines_with(log, "Hunter: drop did nothing in 1000 ms at 2675,371 -- no drops within 64 px of it for "
+                                  "30 s, another column first; the monster passed over for 3 s: a fight turn, then "
+                                  "tried again (2 in a row)") == 1,
+              fmt("the second press %llu ms after the first (not the 8 s of before): 2675,371 learned as a no-drop "
+                  "point for 30 s, the monster passed over one fight turn, 3 s",
+                  static_cast<unsigned long long>(gap)));
+        check(st.targets_dropped == 0 && st.state == Hunter::State::NoTargets && st.passed_over,
+              "passed over, still not counted as given up");
         // Another monster below, past where the first is passed over: the
         // character, standing where it pressed, does not press there again.
         r.w.mobs = { mob_at(2730, 632, 8) };
         log = info_lines([&] { r.run(3000); });
-        check(r.w.drops.size() == 1 && r.st().drop_wait == Why::NoDropHere,
+        check(r.w.drops.size() == 2 && r.st().drop_wait == Why::NoDropHere,
               fmt("another beneath the same place: not pressed there again (%s)",
                   Hunter::drop_why_name(r.st().drop_wait)));
     }
-    // Three in a row did nothing: off until the next start.
+    // Three in a row did nothing -- and a fourth place is pressed at once:
+    // never a pause (2026.11.24, the owner: "khi hỏng thì thử lại luôn ... chứ
+    // không phải là dừng 90s"; paused 30 s from 2026.11.15, off until the next
+    // start before).
     {
         DropRig r(drop_config(40));
         r.w.mode = Fall::Solid;
@@ -1237,7 +1428,7 @@ void test_drop_verdicts() {
         r.age_entry();
         const struct {
             int x, mx, slot;
-        } spots[] = { { 2600, 2610, 11 }, { 2350, 2355, 12 }, { 2480, 2485, 13 } };
+        } spots[] = { { 2600, 2610, 11 }, { 2350, 2355, 12 }, { 2480, 2485, 13 }, { 2700, 2705, 14 } };
         std::vector<std::string> log;
         for (const auto& s : spots) {
             r.w.place(s.x, 371);
@@ -1247,27 +1438,22 @@ void test_drop_verdicts() {
                 info_lines([&] { r.until([&] { return r.w.drops.size() > before; }, 4000); r.run(1200); });
             log.insert(log.end(), l.begin(), l.end());
         }
-        const Hunter::Status st = r.st();
-        check(r.w.drops.size() == 3 && st.drop_off == Hunter::DropOff::Fails,
-              fmt("three places, three presses that did nothing (%zu): drops off (%s)", r.w.drops.size(),
-                  Hunter::drop_off_name(st.drop_off)));
-        check(lines_with(log, "3 presses of Ctrl+Down in a row did not drop -- drops OFF until the next BẮT ĐẦU") == 1,
-              "said once");
-        r.w.place(2700, 371);
-        r.w.mobs = { mob_at(2705, 983, 14) };
-        r.run(4000);
-        check(r.w.drops.size() == 3 && r.st().drop_wait == Why::Latched, "a fourth place: no press");
-        // A new start clears it.
-        r.hunter.stop();
-        r.hunter.start_stepped();
-        r.run(Hunter::kDropAfterEntryMs + 3000);
-        check(r.w.drops.size() == 4 && r.st().drop_off == Hunter::DropOff::None,
-              "BẮT ĐẦU again: the latch is gone, and the fourth place is pressed");
+        check(r.w.drops.size() == 4 && r.w.drops[3] - r.w.drops[2] >= Hunter::kDropGapMs &&
+                  r.w.drops[3] - r.w.drops[2] < 4000,
+              fmt("four places, four presses that did nothing (%zu): the fourth %llu ms after the third -- no pause",
+                  r.w.drops.size(),
+                  r.w.drops.size() == 4 ? static_cast<unsigned long long>(r.w.drops[3] - r.w.drops[2]) : 0ull));
+        check(lines_with(log, "did not drop -- drops paused") == 0 && lines_with(log, "OFF until the next") == 0 &&
+                  lines_with(log, "Hunter: drop did nothing in 1000 ms") == 4,
+              "each said as a press that did nothing; never a pause, never \"OFF\"");
     }
     // Five in a run did nothing, never three in a row -- a drop that worked
-    // between each two: off until the next start all the same. Each place
-    // that did nothing more than 64 px from the others, a fresh monster
-    // each time, and no more than 4 presses a minute: over two minutes.
+    // between each two -- and more of them failed than worked: no pause
+    // (2026.11.24; a pause all the same from 2026.11.15). Each place that did
+    // nothing more than 64 px from the others, a fresh monster each time --
+    // and the minute's 4 presses count only the ones that moved the character
+    // (the two that worked): never waited for, where the seven took over two
+    // minutes before.
     {
         DropRig r(drop_config(40));
         r.age_entry();
@@ -1286,6 +1472,7 @@ void test_drop_verdicts() {
         std::vector<std::string> log;
         std::string got;
         int slot = 20;
+        const std::uint64_t t0 = r.w.t;
         for (const Step& s : steps) {
             r.w.mode = s.mode;
             r.w.place(s.x, s.y);
@@ -1299,71 +1486,137 @@ void test_drop_verdicts() {
             got += r.w.drops.size() > before ? (s.mode == Fall::Solid ? "S" : "F") : "-";
         }
         const Hunter::Status st = r.st();
-        check(got == "SSFSSFS" && st.drops_worked == 2 && st.drop_off == Hunter::DropOff::Fails,
-              fmt("did nothing, did nothing, worked, twice more, worked, did nothing (%s): drops off (%s)",
-                  got.c_str(), Hunter::drop_off_name(st.drop_off)));
-        check(lines_with(log, "5 presses of Ctrl+Down this run did not drop -- drops OFF until the next") == 1 &&
-                  lines_with(log, "in a row did not drop") == 0,
-              "said once: 5 this run, never 3 in a row");
+        check(got == "SSFSSFS" && st.drops_worked == 2 && r.w.t - t0 < 60'000,
+              fmt("did nothing, did nothing, worked, twice more, worked, did nothing (%s) in %llu s: every press at "
+                  "once",
+                  got.c_str(), static_cast<unsigned long long>((r.w.t - t0) / 1000)));
+        check(lines_with(log, "drops paused") == 0 && lines_with(log, "minute's used up") == 0,
+              "never paused, and the minute's cap never in the way of a press after one that did nothing");
     }
-    // Down held past kDropHeldMaxMs: off until the next start, with a WARN.
+    // Down held past kDropHeldMaxMs: a WARN, the press judged as any other --
+    // and the next press goes (2026.11.24; off until the next start until
+    // then).
     {
         DropRig r(drop_config(136));
         r.w.held_ms = 200;
         r.age_entry();
         r.w.mobs = { mob_at(2673, 632, 5) };
         std::vector<std::string> log = info_lines([&] { r.run(3000); });
-        const bool off = r.w.drop_calls == 1 && r.st().drop_off == Hunter::DropOff::HeldLong &&
-                         lines_with(log, "Hunter: Down was held 200 ms (over 180) -- drops OFF until the next") == 1;
-        // Back up on the long floor, a fresh monster below: no press.
+        const bool warned = r.w.drop_calls == 1 && r.st().drops_worked == 1 &&
+                            lines_with(log, "Hunter: Down was held 200 ms (over 180) -- a slow PC; the press is judged "
+                                            "as any other") == 1 &&
+                            lines_with(log, "OFF until") == 0;
+        // Back up on the long floor, a fresh monster below: pressed again.
         r.w.place(2675, 371);
         r.w.mobs = { mob_at(2673, 632, 6) };
         r.run(6000);
-        const int calls = r.w.drop_calls;
-        const Hunter::DropWhy wait = r.st().drop_wait;
-        r.hunter.stop();
-        r.hunter.start_stepped();
-        r.run(Hunter::kDropAfterEntryMs + 3000);
-        check(off && calls == 1 && wait == Why::Latched && r.w.drop_calls == 2,
-              fmt("Down held 200 ms: drops off (%s), no press in 6 s after (%d; %s) -- BẮT ĐẦU again, pressed",
-                  Hunter::drop_off_name(Hunter::DropOff::HeldLong), calls, Hunter::drop_why_name(wait)));
+        check(warned && r.w.drop_calls == 2 && r.st().drops_worked == 2,
+              fmt("Down held 200 ms: said, the drop judged (worked) -- and a fresh monster below dropped to again (%d "
+                  "presses)",
+                  r.w.drop_calls));
     }
-    // A jump in place: remembered, a fail.
+    // A jump in place: a fail, like a press that did nothing (2026.11.15: a
+    // ↓ the game lost leaves a Ctrl alone, which jumps in place) -- the place
+    // learned at the second near it; the monster passed over 1.2 s at the
+    // first, one fight turn at the second (2026.11.24; 8 s each until then).
     {
         DropRig r(drop_config(136));
         r.w.mode = Fall::JumpInPlace;
         r.age_entry();
         r.w.mobs = { mob_at(2673, 632, 5) };
-        const std::vector<std::string> log = info_lines([&] { r.run(3000); });
-        check(r.w.drops.size() == 1 && r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
-                  lines_with(log, "Hunter: drop was a jump in place (landed at 2675,371)") == 1 &&
-                  r.st().drop_off == Hunter::DropOff::None,
-              "a jump in place: one press, the place learned, drops still on");
+        std::vector<std::string> log = info_lines([&] {
+            r.until([&] { return !r.w.drops.empty(); }, 4000);
+            r.run(300);
+        });
+        const bool first = r.w.drops.size() == 1 && !r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
+                           lines_with(log, "Hunter: drop was a jump in place (landed at 2675,371) -- not held against "
+                                           "the place yet (a second near it within 120 s is); the monster passed over "
+                                           "for 1.2 s") == 1;
+        log = info_lines([&] {
+            r.until([&] { return r.w.drops.size() > 1; }, 6000);
+            r.run(300);
+        });
+        const std::uint64_t gap = r.w.drops.size() > 1 ? r.w.drops[1] - r.w.drops[0] : 0;
+        check(first && r.w.drops.size() == 2 && gap >= Hunter::kDropGapMs && gap < 4000 &&
+                  r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
+                  lines_with(log, "Hunter: drop was a jump in place (landed at 2675,371) -- remembered as no drop for "
+                                  "30 s, another column first; the monster passed over for 3 s: a fight turn, then "
+                                  "tried again") == 1,
+              fmt("a jump in place: the first press noted, not learned; the second, %llu ms later, the place learned "
+                  "for 30 s -- drops still on",
+                  static_cast<unsigned long long>(gap)));
     }
-    // A rise: off at once.
+    // A rise: a failed press like any other -- the place learned at once,
+    // skipped kLearnedForgetMs -- and the drops go on from another column
+    // (2026.11.24; off until the next start at once until then).
     {
         DropRig r(drop_config(136));
         r.w.mode = Fall::Rise;
         r.age_entry();
         r.w.mobs = { mob_at(2673, 632, 5) };
-        const std::vector<std::string> log = info_lines([&] { r.run(5000); });
-        check(r.w.drops.size() == 1 && r.st().drop_off == Hunter::DropOff::Rose &&
-                  lines_with(log, "Hunter: drop ROSE to 2675,251") == 1,
-              "a rise: one press, drops off at once");
+        const std::vector<std::string> log = info_lines([&] { r.run(3000); });
+        const bool rose = r.w.drops.size() == 1 && r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
+                          lines_with(log, "Hunter: drop ROSE to 2675,251 -- Ctrl+Down acts as a jump here; this place "
+                                          "skipped 30 s, another column first; drops go on") == 1 &&
+                          lines_with(log, "OFF until") == 0;
+        // Back on the long floor 75 px left -- another column -- a fresh
+        // monster below: dropped to.
+        r.w.mode = Fall::Floor;
+        r.w.place(2600, 371);
+        r.w.mobs = { mob_at(2605, 983, 6) };
+        r.until([&] { return r.w.drops.size() > 1; }, 5000);
+        r.run(1500);
+        check(rose && r.w.drops.size() == 2 && r.st().drops_worked == 1,
+              fmt("a rise: one press, the place learned, said as \"%s\" -- the next column dropped from at once (%zu "
+                  "presses, %llu worked)",
+                  line_with(log, "drop ROSE").c_str(), r.w.drops.size(),
+                  static_cast<unsigned long long>(r.st().drops_worked)));
     }
-    // Off the map: the file said 633 and it landed 300 px lower.
+    // Off the map: the file said 633 and it landed 300 px lower. MapTrust lets
+    // the file go -- never the book's distrust -- and three standing points on
+    // its floors take it again, no clock; then drops go on (2026.11.24; the
+    // file distrusted, drops off, until then).
     {
         DropRig r(drop_config(136));
         r.w.mode = Fall::Overshoot;
         r.age_entry();
         r.w.mobs = { mob_at(2673, 632, 5) };
-        const std::vector<std::string> log = info_lines([&] { r.run(5000); });
-        check(r.w.drops.size() == 1 && r.st().drop_off == Hunter::DropOff::OffMap && r.book.distrusted("t52_s2") &&
-                  lines_with(log, "not on floor 633 the map file gave -- drops OFF") == 1,
-              "off the map: drops off, and t52_s2's file not trusted again this session");
+        const std::vector<std::string> log = info_lines([&] {
+            r.until([&] { return !r.w.drops.empty(); }, 4000);
+            r.run(2400);
+            r.w.mobs.clear();
+            r.run(600);
+        });
+        check(r.w.drops.size() == 1 && !r.book.distrusted("t52_s2") &&
+                  lines_with(log, "not on floor 633 the map file gave -- t52_s2's file let go of until 3 standing "
+                                  "points on its floors agree again (no clock); drops go on then") == 1 &&
+                  lines_with(log, "drops OFF") == 0,
+              "off the map: the file let go of until its standing points agree again -- never distrusted, no drops "
+              "off");
         check(r.st().drop_map.why != MapTrust::Why::Trusted, "the map no longer trusted");
+        // Three standing points of yours on its floors, apart: trusted again
+        // at once -- and the drop goes.
+        r.w.mode = Fall::Floor;
+        r.w.mobs.clear();
+        const std::vector<std::string> back = info_lines([&] {
+            for (const int x : { 2350, 2450, 2600 }) {
+                r.w.place(x, 371);
+                r.run(700);
+            }
+        });
+        const MapTrust::Report t = r.st().drop_map;
+        r.w.mobs = { mob_at(2605, 983, 6) };
+        r.until([&] { return r.w.drops.size() > 1; }, 5000);
+        check(t.why == MapTrust::Why::Trusted && t.how == MapTrust::How::Points &&
+                  lines_with(back, "Hunter: t52_s2 trusted by 3 standing points on its floors") == 1 &&
+                  r.w.drops.size() == 2,
+              fmt("three standing points on its floors: trusted again (%s), no clock -- and a drop again (%zu presses)",
+                  MapTrust::why_text(t.why), r.w.drops.size()));
     }
-    // The map changed: the hunter halts for the window to stop it.
+    // The map changed: both ends learned as gates, said once for the window
+    // (PressGate::Drop), and the hunt goes on where the character came --
+    // nothing stopped, drop_down left ticked (2026.11.24; the hunter halted
+    // for the window to stop it and untick drop_down until then).
     {
         DropRig r(drop_config(136));
         r.w.mode = Fall::Gate;
@@ -1376,35 +1629,46 @@ void test_drop_verdicts() {
                 if (g.x == x && g.y == y) return true;
             return false;
         };
-        check(r.w.drops.size() == 1 && st.drop_map_changed && r.hunter.drop_stop() == Hunter::DropStop::MapChanged &&
-                  st.drop_off == Hunter::DropOff::MapChanged,
-              "the map changed at the press: drop_stop() MapChanged, drops off");
+        const Hunter::PressGate said = r.hunter.take_press_gate();
+        check(r.w.drops.size() == 1 && st.press_gates == 1 && said == Hunter::PressGate::Drop &&
+                  r.hunter.take_press_gate() == Hunter::PressGate::None && r.hunter.running() &&
+                  r.hunter.config().drop_down,
+              "the map changed at the press: PressGate::Drop once, then None; the hunter running, drop_down on");
         check(learned("t52_s2", 2675, 371) && learned("t53_s2", 2635, 1188),
               "both ends learned as gates: 2675,371 on t52_s2, 2635,1188 on t53_s2");
         check(lines_with(log, "Hunter: MAP CHANGED ", "after Ctrl+Down at 2675,371 on t52_s2 -> map 53/2 at "
-                                                     "2635,1188 -- hunting STOPS") == 1,
+                                                     "2635,1188 -- both ends learned as gates (no drop or jump near "
+                                                     "them again this session); hunting goes on, Nhảy xuống stays "
+                                                     "ticked") == 1 &&
+                  lines_with(log, "hunting STOPS") == 0,
               "the WARN: \"" + line_with(log, "MAP CHANGED") + "\"");
         const std::size_t keys = r.w.keys.size();
         r.w.mobs = { mob_at(2700, 1450, 9), mob_at(2900, 1188, 10) };
         r.run(10'000);
-        check(r.w.keys.size() == keys && r.w.drops.size() == 1 && r.st().state == Hunter::State::Idle,
-              "halted: not one key more in 10 s, a monster on the level in view or not");
+        check(r.w.keys.size() > keys && r.w.drops.size() == 1 && r.st().state != Hunter::State::Idle,
+              fmt("hunting on: %zu keys in 10 s for the monsters there (%s)", r.w.keys.size() - keys,
+                  Hunter::to_string(r.st().state)));
     }
     // Late: nothing at first, then the map changes 2.5 s on -- the press's
-    // all the same, and what Nothing learned is undone.
+    // all the same, and what Nothing learned is undone. A first press that
+    // did nothing learns none (2026.11.15): the second near it does -- its
+    // key, the second press, is the late one.
     {
         DropRig r(drop_config(136));
-        r.w.mode = Fall::LateGate;
+        r.w.mode = Fall::Solid;
         r.age_entry();
         r.w.mobs = { mob_at(2673, 632, 5) };
         r.until([&] { return !r.w.drops.empty(); }, 3000);
+        r.w.mode = Fall::LateGate;
+        r.until([&] { return r.w.drops.size() > 1; }, 6000);
         r.run(1500);
         const bool nothing = r.book.no_drop_near("t52_s2", { 2675, 371 });
         r.run(2000);
         const Hunter::Status st = r.st();
-        check(nothing && !r.book.no_drop_near("t52_s2", { 2675, 371 }) && st.drop_map_changed &&
-                  r.hunter.drop_stop() == Hunter::DropStop::MapChanged,
-              "Nothing at 1 s learned a no-drop point; the map change at 2.5 s overrode it and took it back");
+        check(nothing && !r.book.no_drop_near("t52_s2", { 2675, 371 }) && st.press_gates == 1 &&
+                  r.hunter.take_press_gate() == Hunter::PressGate::Drop,
+              "the second Nothing at 1 s learned a no-drop point; the map change at 2.5 s overrode it and took it "
+              "back -- learned as a gate instead");
     }
     // A map change after kPressWatchMs is no press's.
     {
@@ -1415,9 +1679,315 @@ void test_drop_verdicts() {
         r.run(Hunter::kPressWatchMs);
         r.w.change_map();
         r.run(1000);
-        check(r.w.drops.size() == 1 && !r.st().drop_map_changed && r.hunter.drop_stop() == Hunter::DropStop::None,
+        check(r.w.drops.size() == 1 && r.st().press_gates == 0 && r.hunter.take_press_gate() == Hunter::PressGate::None,
               "a map change 13 s after the press: a door walked through, not the drop's");
     }
+    // 2026.11.21 (the audit's B3): a map change the expedition said it would
+    // make -- its gate's ↓ 3 s after a trip walk's drop -- is no press's:
+    // nothing learned, nothing for the window to say.
+    {
+        DropRig r(drop_config(136));
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        r.run(3000);
+        const std::size_t gates = r.book.learned_gates("t52_s2").size();
+        r.hunter.expect_map_change(15'000);
+        r.w.change_map();
+        const std::vector<std::string> log = info_lines([&] { r.run(1000); });
+        const Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && st.press_gates == 0 && r.hunter.take_press_gate() == Hunter::PressGate::None &&
+                  r.book.learned_gates("t52_s2").size() == gates &&
+                  lines_with(log, "the expedition's own map change, the press forgotten") == 1,
+              "the expedition's map change 3 s after a drop: the press forgotten -- no gate learned, nothing said");
+    }
+    // Its time over, a map change after a press is the press's again.
+    {
+        DropRig r(drop_config(136));
+        r.age_entry();
+        r.hunter.expect_map_change(1000);
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        r.run(3000);
+        r.w.change_map();
+        r.run(1000);
+        check(r.w.drops.size() == 1 && r.hunter.take_press_gate() == Hunter::PressGate::Drop && r.hunter.running(),
+              "the expedition's 1 s over before the press's map change: learned as a gate, as any press's -- the "
+              "hunt going on");
+    }
+}
+
+/// t23_s14 at 22:22:00 (2026.11.12): pressed at 135,852 on floor 853, the
+/// character was reported 700 ms on at 30,931 -- on the floor it stood on, 105
+/// px down its slope, moved by a skill -- and the drop was judged off the map:
+/// the right file dropped for the run. Now the file goes only for a landing
+/// on none of its floors; on the take-off floor further across than a no-drop
+/// point covers it is not known, and on another floor of the file it is its
+/// own verdict. The skills held through the settle and the fall.
+void test_drop_landings_2026_11_12() {
+    section("Hunter (2026.11.12): a landing on the take-off floor, or on another floor of the file, never lets the "
+            "file go -- only one on none of its floors; skills held through the settle and the fall");
+    if (fixture_folder().empty()) return;
+
+    // The rig on the slope of t23_s14's: the entry by its gate at 500,600.
+    const auto on_slope = [](DropRig& r) {
+        r.w.page = r.book.get("t23_s14").get();
+        r.w.map = 23;
+        r.w.area = 14;
+        r.w.entry_x = 500.0f;
+        r.w.entry_y = 600.0f;
+        r.w.place(135, 852);
+    };
+    {
+        DropRig r(drop_config(120));
+        on_slope(r);
+        r.age_entry();
+        r.w.mode = Fall::Slide;
+        r.w.slide_x = 30;
+        r.w.slide_y = 931;
+        r.w.mobs = { mob_at(140, 1013, 5) };
+        const std::vector<std::string> log = info_lines([&] {
+            r.until([&] { return !r.w.drops.empty(); }, 4000);
+            r.run(1500);
+        });
+        const Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && !r.book.distrusted("t23_s14") && st.drop_map.why == MapTrust::Why::Trusted &&
+                  !r.book.no_drop_near("t23_s14", { 135, 852 }),
+              fmt("pressed at 135,852, reported at 30,931 700 ms on: not off the map -- t23_s14 still trusted (%s), no "
+                  "no-drop point learned",
+                  MapTrust::why_text(st.drop_map.why)));
+        check(lines_with(log, "Hunter: drop at 135,852 -- reported at 30,931, 105 px left along the floor it stood on "
+                              "with no arrow held: something else moved you") == 1 &&
+                  lines_with(log, "no longer trusted") == 0 && lines_with(log, "let go of") == 0 &&
+                  lines_with(log, "drops OFF") == 0,
+              "said once at INFO; nothing let go of");
+    }
+    {
+        // Within kNoDropXPx of where it pressed: Ctrl + ↓ did nothing there.
+        DropRig r(drop_config(120));
+        on_slope(r);
+        r.age_entry();
+        r.w.mode = Fall::Slide;
+        r.w.slide_x = 90;
+        r.w.slide_y = 886;
+        r.w.mobs = { mob_at(140, 1013, 5) };
+        r.until([&] { return !r.w.drops.empty(); }, 4000);
+        r.run(1500);
+        // The first such press is only noted (2026.11.15); back where it
+        // pressed, the second is the place's second -- learned.
+        const bool noted = r.w.drops.size() == 1 && !r.book.no_drop_near("t23_s14", { 135, 852 });
+        r.w.place(135, 852);
+        r.until([&] { return r.w.drops.size() > 1; }, 4000);
+        r.run(1500);
+        check(noted && r.w.drops.size() == 2 && r.book.no_drop_near("t23_s14", { 135, 852 }) &&
+                  !r.book.distrusted("t23_s14") && r.st().drop_map.why == MapTrust::Why::Trusted,
+              "reported 45 px down its slope: did nothing there -- noted, and at the second the point learned, the "
+              "file still trusted");
+    }
+    {
+        // On none of the file's floors: the file let go of, as ever -- by
+        // MapTrust since 2026.11.24, never the book's distrust, no drops off.
+        DropRig r(drop_config(120));
+        on_slope(r);
+        r.age_entry();
+        r.w.mode = Fall::Slide;
+        r.w.slide_x = 30;
+        r.w.slide_y = 980;
+        r.w.mobs = { mob_at(140, 1013, 5) };
+        // The verdict kLandSettleMs after the report 700 ms on; MapTrust's
+        // report at the pass after it.
+        const std::vector<std::string> log = info_lines([&] {
+            r.until([&] { return !r.w.drops.empty(); }, 4000);
+            r.run(2500);
+        });
+        check(r.w.drops.size() == 1 && r.st().drop_map.why != MapTrust::Why::Trusted && !r.book.distrusted("t23_s14") &&
+                  lines_with(log, "t23_s14's file let go of until 3 standing points on its floors agree again") == 1,
+              fmt("reported at 30,980, on no floor of the file: off the map -- the file let go of (%s), never "
+                  "distrusted: \"%s\" / \"%s\" / \"%s\"",
+                  MapTrust::why_text(r.st().drop_map.why), line_with(log, "30,980").c_str(),
+                  line_with(log, "let go of").c_str(), line_with(log, "trusted by").c_str()));
+    }
+    {
+        // Past the floor the file gave, onto the next one it has: its own.
+        DropRig r(drop_config(136));
+        r.w.mode = Fall::Past;
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        const std::vector<std::string> log = info_lines([&] { r.run(5000); });
+        const Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && st.drop_map.why == MapTrust::Why::Trusted && !r.book.distrusted("t52_s2") &&
+                  lines_with(log, "Hunter: drop landed at 2675,983, 612 px down, on floor 984 (attr 1) -- not floor 633 "
+                                  "the map file gave from 2675,371; t52_s2's file still gone by") == 1,
+              fmt("landed on floor 984, not 633: on another floor -- the file still trusted (%s)",
+                  MapTrust::why_text(st.drop_map.why)));
+        const std::string minute = line_with(info_lines([&] { r.run(56'000); }), " fights, ");
+        check(minute.find("1 off the map") == std::string::npos &&
+                  minute.find("0 off the map, 1 on another floor, 0 map changes") != std::string::npos,
+              "the minute line counts it apart: \"" + minute.substr(std::min(minute.size(), minute.find("; drops"))) +
+                  "\"");
+    }
+    {
+        // A report at y 0 mid-fall is no landing: no rise, no latch.
+        DropRig r(drop_config(136));
+        r.w.mode = Fall::Zero;
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        const std::vector<std::string> log = info_lines([&] { r.run(5000); });
+        check(r.w.drops.size() == 1 && r.st().drops_worked == 1 && lines_with(log, "drop ROSE") == 0,
+              "a report at 2675,0 100 ms after Down: not a rise -- the landing on 633 worked");
+    }
+    {
+        // The skills held (Hunter::skills_held) from the settle to the
+        // verdict, and not before or after.
+        DropRig r(drop_config(136));
+        r.age_entry();
+        const bool before = r.hunter.skills_held();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        bool settle = false, fall = false, after_held = true;
+        std::uint64_t judged = 0;
+        r.run(4000, [&] {
+            const bool h = r.hunter.skills_held();
+            if (r.w.drops.empty() && h) settle = true;
+            if (!r.w.drops.empty() && r.w.falling && h) fall = true;
+            if (r.st().drops_worked == 1 && judged == 0) judged = r.w.t;
+            if (judged != 0 && r.w.t > judged + 120 && h) after_held = false;
+        });
+        check(!before && settle && fall && judged != 0 && after_held,
+              "skills_held: not before, while it settles and falls, and not once the landing is judged");
+    }
+}
+
+/// t62_s5 at 21:48:17 (2026.11.12): the spot taken at the map entry's spawn,
+/// 265,5104, 33 px over floor 5137. With the file trusted, onto that floor.
+void test_drop_spot_on_floor() {
+    section("Hunter (2026.11.12): the spot taken at the spawn, the map's file trusted -- onto the floor under it");
+    if (fixture_folder().empty()) return;
+
+    HunterConfig c = drop_config(136);
+    c.spot = true;
+    Hunter::Spot s;
+    const std::vector<std::string> log = info_lines([&] {
+        DropRig r(c);
+        r.w.page = r.book.get("t62_s5").get();
+        r.w.map = 62;
+        r.w.area = 5;
+        r.w.entry_x = 265.0f;
+        r.w.entry_y = 5104.0f;
+        r.w.place(265, 5104);
+        r.run(1000);
+        s = r.hunter.spot();
+    });
+    check(s.set && s.x == 265.0f && s.y == 5136.0f,
+          fmt("the spot at 265,%d: on floor 5137, not 33 px over it", static_cast<int>(s.y)));
+    check(lines_with(log, "Hunter: hunting spot set where the character stands: 265,5136 (+-300 / +-100) -- on the "
+                          "floor under 265,5104, by the map file") == 1,
+          "said, with where the character stood");
+}
+
+/// The owner's Q6 and Q7 of 2026-11-11 (2026.11.12): the two bars -- up()
+/// and down() -- the only heights a drop goes by. Until then a drop wanted
+/// more than max(down(), drop_min_px 100) below, and a floor 60 px under at
+/// the least (kDropMinFallPx).
+void test_drop_band_2026_11_12() {
+    section("Hunter (2026.11.12, the owner's Q6 and Q7): past the lower bar a drop -- 40 px down with the bar at 20; "
+            "on PhòngSinhTử[4]'s two levels a drop, then another, never a walk to the ledge");
+    if (fixture_folder().empty()) return;
+
+    // t91_s1: you on the platform at 500, the monster on the one 40 px under.
+    const auto on_close = [](DropRig& r) {
+        r.w.page = r.book.get("t91_s1").get();
+        r.w.map = 91;
+        r.w.area = 1;
+        r.w.entry_x = 2000.0f;
+        r.w.entry_y = 1099.0f;
+        r.w.place(600, 499);
+    };
+    {
+        HunterConfig c = drop_config(120);
+        c.up_reach = 10;
+        c.down_reach = 20;
+        DropRig r(c);
+        on_close(r);
+        r.age_entry();
+        r.w.mobs = { mob_at(600, 539, 5) };
+        const std::vector<std::string> log = info_lines([&] { r.run(4000); });
+        const Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && r.w.me_y == 539 && st.drops_worked == 1 &&
+                  st.drop_map.why == MapTrust::Why::Trusted && r.w.downs_of('Z', r.w.landed_at) > 0,
+              fmt("the monster 40 px below, down() 20, the floor 40 px under: one drop (%zu), landed on 539 (%d), "
+                  "fought there -- drop_min_px and the 60-px fall refused it until 2026.11.12",
+                  r.w.drops.size(), r.w.me_y));
+        check(lines_with(log, "Hunter: drop (Ctrl+Down) toward ", "40 px down") == 1,
+              "the press said: \"" + line_with(log, "Hunter: drop (Ctrl+Down)") + "\"");
+    }
+    {
+        // The lower bar at 40: the monster between the bars -- fought from
+        // where you stand, nothing dropped.
+        HunterConfig c = drop_config(120);
+        c.down_reach = 40;
+        DropRig r(c);
+        on_close(r);
+        r.age_entry();
+        r.w.mobs = { mob_at(600, 539, 5) };
+        r.run(3000);
+        check(r.w.drop_calls == 0 && r.w.me_y == 499 && r.w.downs_of('Z') > 0,
+              "the lower bar at 40: the monster 40 px below between the bars -- fought where you stand, no drop");
+    }
+
+    // PhòngSinhTử[4] (t23_s14), the game's own file: the owner's box of
+    // 22:23:02, 746..2844 x 1145..1549, home 1987,1245 -- the home's floor
+    // (1247 at x 2010), one 68 px under it (1315) and the lower one 60 px
+    // under that (1375). The monster on the lower floor, the bars at 10 and
+    // 20: a drop onto the floor between, then one onto its own -- each of
+    // them under drop_min_px's 100 the second, never dropped to until then,
+    // and walked toward along the floor between instead.
+    const std::string real = real_folder();
+    if (real.empty()) {
+        skip("no copy of the game's t23_s14.map here (build\\handoff\\drop\\testdata): PhòngSinhTử[4]'s two levels\n");
+        return;
+    }
+    HunterConfig c = drop_config(120);
+    c.spot = true;
+    c.up_reach = 10;
+    c.down_reach = 20;
+    c.drop_side_px = 120;
+    DropRig r(c, true, real, "t23_s14");
+    r.w.map = 23;
+    r.w.area = 14;
+    r.w.entry_x = 300.0f;
+    r.w.entry_y = 1001.0f;
+    r.w.step_px = 10;
+    r.w.place(2010, 1246);
+    Hunter::Zone z;
+    z.stem = "t23_s14";
+    z.epoch = r.w.epoch;
+    z.home_x = 1987.0f;
+    z.home_y = 1245.0f;
+    z.left = 746.0f;
+    z.top = 1145.0f;
+    z.right = 2844.0f;
+    z.bottom = 1549.0f;
+    r.hunter.set_zone(z);
+    r.age_entry();
+    const bool used = r.hunter.spot().set && r.hunter.spot().from_map && r.st().drop_map.why == MapTrust::Why::Trusted;
+    r.w.mobs = { mob_at(2020, 1374, 5) };
+    int min_x = r.w.me_x, max_x = r.w.me_x;
+    const std::vector<std::string> log = info_lines([&] {
+        r.run(9000, [&] {
+            min_x = std::min(min_x, r.w.me_x);
+            max_x = std::max(max_x, r.w.me_x);
+        });
+    });
+    const Hunter::Status st = r.st();
+    check(used && r.w.drops.size() == 2 && r.w.me_y == 1374 && st.drops_worked == 2,
+          fmt("the map tab's box in use, t23_s14 trusted (%s): two drops (%zu), 1246 -> 1314 -> on the monster's floor "
+              "(%d), both worked (%llu)",
+              MapTrust::why_text(st.drop_map.why), r.w.drops.size(), r.w.me_y,
+              static_cast<unsigned long long>(st.drops_worked)));
+    check(min_x >= 1987 && max_x <= 2034 && r.w.downs_of('Z', r.w.landed_at) > 0,
+          fmt("never walked toward a ledge -- x stayed %d..%d, the home's floor running on to 776 and the floor between "
+              "ending at 2111 -- and the monster fought where it landed",
+              min_x, max_x));
+    check(lines_with(log, "Hunter: drop (Ctrl+Down) toward ", "60 px down") == 1,
+          "the second press, 60 px down: \"" + line_with(log, "60 px down") + "\"");
 }
 
 void test_drop_safety() {
@@ -1599,16 +2169,67 @@ void test_drop_safety() {
                   "(%zu)",
                   one.points, two.points, r.w.drops.size()));
     }
-    // A key-up owed: no drop, then the hunter halts.
+    // A key-up owed: no drop, and from kDropOwedPasses on every key let go of
+    // once, nothing walked or pressed while it is owed -- then, the key-ups
+    // out, the hunt goes on by itself and drops (2026.11.24: until then the
+    // hunter halted for the window to stop the hunt).
     {
         DropRig r(drop_config(136));
         r.age_entry();
         r.w.owed = true;
         r.w.mobs = { mob_at(2673, 632, 5) };
-        const std::vector<std::string> log = info_lines([&] { r.run(2000); });
-        check(r.w.drop_calls == 0 && r.hunter.drop_stop() == Hunter::DropStop::KeysStuck && r.st().drop_keys_stuck &&
-                  lines_with(log, "Hunter: keys owed after a drop") == 1,
-              "a drop's key-up owed three passes: no drop, the hunter halts for the window to stop the hunt");
+        std::size_t keys_held = 0;
+        bool stuck = false;
+        const std::vector<std::string> log = info_lines([&] {
+            r.run(600);
+            stuck = r.st().drop_keys_stuck;
+            const std::size_t keys0 = r.w.keys.size();
+            r.run(3000);
+            keys_held = r.w.keys.size() - keys0;
+        });
+        check(r.w.drop_calls == 0 && stuck && r.st().drop_keys_stuck && keys_held == 0 && r.hunter.running() &&
+                  lines_with(log, "Hunter: keys owed after a drop (Down or Ctrl up not sent, 3 passes) -- every key let "
+                                  "go of; nothing pressed until Windows takes the key-ups, then hunting goes on by "
+                                  "itself") == 1,
+              fmt("a drop's key-up owed three passes: no drop, every key let go of once, nothing pressed while owed "
+                  "(%zu keys in 3 s), the hunter running",
+                  keys_held));
+        r.w.owed = false;
+        const std::vector<std::string> after = info_lines([&] {
+            r.until([&] { return !r.w.drops.empty(); }, 4000);
+            r.run(200);
+        });
+        check(!r.st().drop_keys_stuck && r.w.drops.size() == 1 &&
+                  lines_with(after, "Hunter: the owed key-ups went out -- hunting goes on") == 1,
+              fmt("the key-ups out: hunting on by itself, the drop pressed (%zu)", r.w.drops.size()));
+    }
+    // The 2026.11.24 review: the key-ups owed three passes, then Nhảy xuống
+    // unticked at the amber note -- no spot, no jump area, the press's watch
+    // run out. The owed count is cleared all the same once the key-ups went
+    // out, and the hunter fights again (it stayed idle for the rest of the run
+    // when the owed keys were looked at only with something ticked).
+    {
+        DropRig r(drop_config(136));
+        r.age_entry();
+        r.w.owed = true;
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        r.run(600);
+        const bool stuck = r.st().drop_keys_stuck;
+        HunterConfig off = drop_config(136);
+        off.drop_down = false;
+        off.spot = false;
+        r.hunter.set_config(off);
+        r.run(Hunter::kPressWatchMs + 1000);
+        r.w.owed = false;
+        // A monster on its own floor, in reach: something to fight once the
+        // hunter goes on.
+        r.w.mobs = { mob_at(2720, 371, 6) };
+        const std::size_t keys0 = r.w.keys.size();
+        r.run(3000);
+        check(stuck && !r.st().drop_keys_stuck && r.w.keys.size() > keys0 && r.hunter.running(),
+              fmt("owed three passes, then drop_down unticked with no spot: the key-ups out, the count cleared, the "
+                  "hunter pressing keys again (%zu keys in 3 s)",
+                  r.w.keys.size() - keys0));
     }
 }
 
@@ -1690,16 +2311,19 @@ void test_drop_spot_and_limits() {
         r.w.mobs = { mob_at(2702, 632, 5) };
         const std::uint64_t t0 = r.w.t;
         std::uint64_t gave_at = 0;
+        bool capped = false;
         const std::vector<std::string> log = info_lines([&] {
             r.run(15'000, [&] {
                 if (gave_at == 0 && r.st().targets_dropped > 0) gave_at = r.w.t;
+                if (r.st().drop_wait == Why::TargetCap) capped = true;
             });
         });
         const Hunter::Status st = r.st();
-        check(r.w.drop_calls == 0 && st.targets_dropped >= 1 && lines_with(log, "Hunter: gave up on ") == 1 &&
-                  st.drop_wait == Why::TargetCap,
+        // The settles used up for it at some look -- for kTargetCountMs since
+        // 2026.11.24, then counted afresh (the rest of the run until then).
+        check(r.w.drop_calls == 0 && st.targets_dropped >= 1 && lines_with(log, "Hunter: gave up on ") == 1 && capped,
               fmt("in the air at every press: no press, given up on %llu time(s), said %d time(s) in 15 s, the "
-                  "settles for it used up (%s)",
+                  "settles for it used up a while (%s at the end)",
                   static_cast<unsigned long long>(st.targets_dropped), lines_with(log, "Hunter: gave up on "),
                   Hunter::drop_why_name(st.drop_wait)));
         // 4 s of walking under it, the two settles' 0.6 s each not counted --
@@ -1755,50 +2379,58 @@ void test_drop_spot_and_limits() {
 // ------------------------------------------------------------- settings
 
 void test_drop_config() {
-    section("HunterConfig: drop_down and its three numbers in hunt.ini");
+    section("HunterConfig: drop_down and its two numbers in hunt.ini -- drop_min_px no longer read (2026.11.12)");
     HunterConfig d;
-    check(!d.drop_down && d.drop_min_px == 100 && d.drop_side_px == 120 && d.drop_gate_px == 150,
-          "the code's defaults: off, 100, 120, 150");
+    check(!d.drop_down && d.drop_side_px == 120 && d.drop_gate_px == 150, "the code's defaults: off, 120, 150");
     const std::string path = temp_path("drop_hunt.ini");
     {
         std::ofstream(path) << "[Hunt]\nreach=150\n";
         HunterConfig old;
-        check(old.load(path) && !old.drop_down && old.drop_min_px == 100 && old.drop_side_px == 120 &&
-                  old.drop_gate_px == 150,
+        check(old.load(path) && !old.drop_down && old.drop_side_px == 120 && old.drop_gate_px == 150,
               "a hunt.ini without them: off, at the defaults");
     }
     {
         HunterConfig c;
         c.drop_down = true;
-        c.drop_min_px = 130;
         c.drop_side_px = 90;
         c.drop_gate_px = 60;
         HunterConfig back;
-        check(c.save(path) && back.load(path) && back.drop_down && back.drop_min_px == 130 &&
-                  back.drop_side_px == 90 && back.drop_gate_px == 60,
+        check(c.save(path) && back.load(path) && back.drop_down && back.drop_side_px == 90 && back.drop_gate_px == 60,
               "saved and read back");
     }
     {
-        std::ofstream(path) << "[Hunt]\ndrop_down=true\ndrop_min_px=5\ndrop_side_px=9999\ndrop_gate_px=1\n";
+        std::ofstream(path) << "[Hunt]\ndrop_down=true\ndrop_side_px=9999\ndrop_gate_px=1\n";
         HunterConfig lo;
         const bool read_lo = lo.load(path);
-        std::ofstream(path) << "[Hunt]\ndrop_min_px=900\ndrop_side_px=3\ndrop_gate_px=4000\n";
+        std::ofstream(path) << "[Hunt]\ndrop_side_px=3\ndrop_gate_px=4000\n";
         HunterConfig hi;
-        check(read_lo && hi.load(path) && lo.drop_min_px == 60 && lo.drop_side_px == 300 && lo.drop_gate_px == 40 &&
-                  hi.drop_min_px == 470 && hi.drop_side_px == 20 && hi.drop_gate_px == 400,
-              "kept within 60-470, 20-300 and 40-400");
+        check(read_lo && hi.load(path) && lo.drop_side_px == 300 && lo.drop_gate_px == 40 && hi.drop_side_px == 20 &&
+                  hi.drop_gate_px == 400,
+              "kept within 20-300 and 40-400");
+    }
+    {
+        // An older file's drop_min_px: never read, left as it is -- the
+        // lower bar alone says how far below a drop goes for (the owner's Q7).
+        std::ofstream(path) << "[Hunt]\ndrop_down=true\ndrop_min_px=100\ndown_reach=20\n";
+        HunterConfig old;
+        IniFile after;
+        check(old.load(path) && old.down() == 20 && old.save(path) && after.load(path) &&
+                  after.get_int("Hunt", "drop_min_px", 0) == 100,
+              "an older file's drop_min_px=100: not read, the band's 20 is the threshold; saved over, the line kept");
     }
     DeleteFileA(path.c_str());
+    check(Hunter::kDropMinFallPx == Hunter::kDropLandPx + 1 && Hunter::kDropMinFallPx == 25,
+          "the least fall: 25 px, a landing kDropLandPx (24) lower told from standing -- 60 until 2026.11.12");
 
 #ifdef GOBOT_SOURCE_DIR
     const std::string shipped = std::string(GOBOT_SOURCE_DIR) + "\\configs\\hunt.ini";
     HunterConfig ship;
     IniFile ini;
     check(ship.load(shipped) && ini.load(shipped) && ini.has_key("Hunt", "drop_down") &&
-              ini.has_key("Hunt", "drop_min_px") && ini.has_key("Hunt", "drop_side_px") &&
-              ini.has_key("Hunt", "drop_gate_px") && !ship.drop_down && ship.drop_min_px == 100 &&
-              ship.drop_side_px == 120 && ship.drop_gate_px == 150,
-          "the shipped hunt.ini: drop_down=false, 100, 120, 150 (the player's answer 8)");
+              !ini.has_key("Hunt", "drop_min_px") && ini.has_key("Hunt", "drop_side_px") &&
+              ini.has_key("Hunt", "drop_gate_px") && !ship.drop_down && ship.drop_side_px == 120 &&
+              ship.drop_gate_px == 150,
+          "the shipped hunt.ini: drop_down=false, 120, 150 (the player's answer 8) -- no drop_min_px");
 #endif
 }
 
@@ -1879,29 +2511,657 @@ void test_drop_window() {
 
     const std::string gtick = body(gui, "void GuiApp::tick() {");
     const std::string dtick = body(gui, "void GuiApp::drop_tick() {");
-    const std::size_t stop = dtick.find("const Hunter::DropStop stop = hunter_->drop_stop();");
-    const std::size_t halt = stop == npos ? npos : dtick.find("stop_hunt();", stop);
-    const std::size_t changed = halt == npos ? npos : dtick.find("if (stop == Hunter::DropStop::MapChanged) {", halt);
-    const std::size_t untick = changed == npos ? npos : dtick.find("hunt_config_.drop_down = false;", changed);
-    const std::size_t save =
-        untick == npos ? npos : dtick.find("hunt_config_.save(exe_relative(\"configs/hunt.ini\"))", untick);
-    check(gtick.find("drop_tick();") != npos && stop != npos && halt != npos && changed != npos && untick != npos &&
-              save != npos && dtick.find("GB_WARN(\"Hunter: Nhảy xuống unticked") != npos &&
-              dtick.find("drop_stopped_vi_ = std::string(\"Lần nhảy lúc \")") != npos,
-          "tick(): a map change after a press stops the hunt, unticks drop_down and saves hunt.ini, with a WARN "
-          "and a red line (the player's answer 3)");
-    check(dtick.find("GB_WARN(\"Hunter: Nhảy xuống: a drop's Down or Ctrl up stayed owed") != npos,
-          "and a key-up stuck stops it too");
+    // 2026.11.24, the owner: "khi hỏng thì thử lại luôn ... chứ không phải là
+    // dừng" -- a map change after a press is said once and the hunt goes on:
+    // no stop_hunt(), nothing unticked, hunt.ini not saved (the player's
+    // answer 3 of 2026-11-04 had it stop, untick and save until then).
+    const std::size_t take = dtick.find("const Hunter::PressGate gate = hunter_->take_press_gate();");
+    const std::size_t none = take == npos ? npos : dtick.find("if (gate == Hunter::PressGate::None) return;", take);
+    const std::size_t note = none == npos ? npos : dtick.find("drop_note_vi_ = std::string(\"Lần \") + what", none);
+    check(gtick.find("drop_tick();") != npos && take != npos && none != npos && note != npos &&
+              dtick.find("simple_note(drop_note_vi_, 15000);") != npos &&
+              dtick.find("GB_INFO(\"Hunter: a %s changed the map -- learned as a gate; the hunt goes on, the ticks "
+                         "unchanged\"") != npos &&
+              dtick.find("stop_hunt();") == npos && dtick.find("drop_down = false") == npos &&
+              dtick.find("jump_up = false") == npos && dtick.find("hunt_config_.save(") == npos &&
+              dtick.find("drop_stopped_vi_") == npos,
+          "drop_tick(): a map change after a press said once in amber and the log -- no stop_hunt(), nothing "
+          "unticked, hunt.ini not saved (2026.11.24)");
+    const std::size_t owed = gtick.find("if (input_.keys_owed() && now_ms() - owed_look_ms_ >= 100)");
+    const std::size_t owed_end = owed == npos ? npos : gtick.find("drop_tick();", owed);
+    const std::string owed_block = owed == npos || owed_end == npos ? std::string() : gtick.substr(owed, owed_end - owed);
+    check(owed_block.find("input_.release_all();") != npos && owed_block.find("stop_hunt();") == npos &&
+              dtick.find("stayed owed") == npos,
+          "and a key-up stuck: every key let go of in tick() -- the hunt never stopped for it");
     const std::string veto = body(gui, "const char* GuiApp::drop_veto_now() const {");
-    check(veto.find("hp_percent_now()") != npos && veto.find("chat_hp_floor_") != npos &&
+    // HP low no longer a veto (2026.11.12b, the owner: drops and jumps up at
+    // any HP); HP not known still is.
+    check(veto.find("hp_percent_now()") != npos && veto.find("chat_hp_floor_") == npos &&
+              veto.find("return \"HP is low\";") == npos &&
+              veto.find("if (hp >= 0.0f && hp < static_cast<float>(bag::kJobDownHpPct)) return \"the character is "
+                        "down\";") != npos &&
+              veto.find("if (hp < 0.0f && drop_hp_watch_.load()) return \"HP is not known\";") != npos &&
               veto.find("drop_veto_.load()") != npos,
-          "the veto: HP under the chat's floor or not known, and what tick() saw -- the macro held, a walk, the "
-          "keeper crossing, a GoBot key on Ctrl or Down");
+          "the veto: the character down or HP not known -- never HP low, since 2026.11.12b -- and what tick() saw: "
+          "the macro held, a walk, the keeper crossing, a GoBot key on Ctrl or Down");
     check(keys.find("if (hunt_config_.drop_down) k.push_back({ VK_CONTROL, \"nhảy xuống (Ctrl + ↓)\" });") != npos,
           "Ctrl among the keys GoBot presses, with drop_down on");
 #else
     skip("no source folder\n");
 #endif
+}
+
+/// 2026.11.15, the owner's log of 00:27:54 from the drop's side: a report on
+/// the ground in mid-air -- a hit's state 0 at the top of an arc -- is no
+/// landing. Judged off the file's floors at once, it had the file distrusted
+/// and every drop, jump and way back with it; the verdict waits kLandSettleMs
+/// for the next report. One that stands had the file distrusted kDistrustMs
+/// (120 s) from 2026.11.15, drops off; since 2026.11.24 MapTrust lets it go
+/// and takes it again from kTrustPoints standing points on its floors -- no
+/// clock, nothing switched off.
+void test_drop_apex_report() {
+    section("Hunter (2026.11.15, 2026.11.24): a drop's report in mid-air waits for the next report -- the landing "
+            "comes, the file stays trusted; none comes, the file is let go of after kLandSettleMs and taken again "
+            "from its standing points, no clock");
+    if (fixture_folder().empty()) return;
+
+    // A: the report in mid-air 100 ms after Down, the landing on 633 on its way.
+    {
+        DropRig r(drop_config(136));
+        r.w.mode = Fall::Apex;
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        const std::vector<std::string> log = info_lines([&] { r.run(5000); });
+        const Hunter::Status st = r.st();
+        check(r.w.drops.size() == 1 && st.drops_worked == 1 && !r.book.distrusted("t52_s2") &&
+                  lines_with(log, "no longer trusted") == 0 && lines_with(log, "let go of") == 0 &&
+                  lines_with(log, "drops OFF") == 0 && st.drop_map.why == MapTrust::Why::Trusted,
+              fmt("a report at 2675,481 -- on no floor -- 100 ms after Down, the landing on 633 on its way: the drop "
+                  "worked (%llu), the file still trusted (%d)",
+                  static_cast<unsigned long long>(st.drops_worked), r.book.distrusted("t52_s2") ? 1 : 0));
+    }
+
+    // B: nothing follows the report: judged only kLandSettleMs after it -- off
+    // the file's floors, the file let go of by MapTrust -- and taken again as
+    // soon as three standing points on its floors agree, no clock.
+    {
+        DropRig r(drop_config(136));
+        r.w.mode = Fall::ApexStays;
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        r.until([&] { return !r.w.drops.empty(); }, 4000);
+        const std::uint64_t reported = r.w.drops.front() + 100;
+        r.until([&] { return r.w.t >= reported + Hunter::kLandSettleMs - 250; }, 3000);
+        const bool waiting = r.st().drop_map.why == MapTrust::Why::Trusted;
+        std::vector<std::string> log = info_lines([&] { r.run(800); });
+        const bool off = r.st().drop_map.why != MapTrust::Why::Trusted && !r.book.distrusted("t52_s2") &&
+                         lines_with(log, "not on floor 633 the map file gave -- t52_s2's file let go of until 3 "
+                                         "standing points on its floors agree again (no clock)") == 1;
+        // Put back on its ledge, the game as it should be: three standing
+        // points on the file's floors, and it is gone by again at once.
+        r.w.mode = Fall::Floor;
+        r.w.mobs.clear();
+        const std::uint64_t back_at = r.w.t;
+        log = info_lines([&] {
+            for (const int x : { 2675, 2575, 2475 }) {
+                r.w.place(x, 371);
+                r.run(700);
+            }
+        });
+        const MapTrust::Report t = r.st().drop_map;
+        check(waiting && off && t.why == MapTrust::Why::Trusted && t.how == MapTrust::How::Points &&
+                  r.w.t - back_at < 5000 && lines_with(log, "Hunter: t52_s2 trusted by 3 standing points on its floors") == 1,
+              fmt("nothing after the report: waiting at kLandSettleMs - 250 ms (%d), then off the map and the file let "
+                  "go of (%d); trusted again by its standing points %llu ms after (%s) -- \"%s\"",
+                  waiting ? 1 : 0, off ? 1 : 0, static_cast<unsigned long long>(r.w.t - back_at),
+                  MapTrust::why_text(t.why), line_with(log, "trusted by").c_str()));
+    }
+}
+
+/// What DOC-TRUOC.txt and README.md say of 2026.11.15's input misses (the
+/// notes' words and numbers are the code's own), and where the code says them
+/// -- the log's lines, the window's cards, the constants.
+void test_drop_notes_2026_11_15() {
+    section("2026.11.15 notes: the pause in place of \"off until the next start\", the first miss's 1.2 s, the second "
+            "near a place, the way back asked every 3 s -- DOC-TRUOC.txt, README.md and the code say the same");
+#ifdef GOBOT_SOURCE_DIR
+    // Spaces and line ends one space: a phrase of the notes found however they wrap it.
+    const auto flat = [](const std::string& text) {
+        std::string out;
+        out.reserve(text.size());
+        bool space = false;
+        for (const char c : text) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                space = true;
+                continue;
+            }
+            if (space && !out.empty()) out += ' ';
+            space = false;
+            out += c;
+        }
+        return out;
+    };
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string drop = source("/src/hunter_drop.cpp");
+    const std::string jump = source("/src/hunter_jump.cpp");
+    const std::string hunter = source("/src/hunter.cpp");
+    const std::string header = source("/include/gobot/hunter.hpp");
+    if (doc.empty() || readme.empty() || drop.empty() || jump.empty() || hunter.empty() || header.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const auto has = [](const std::string& text, const std::string& part) {
+        return text.find(part) != std::string::npos;
+    };
+    const auto n = [](auto v) { return std::to_string(v); };
+    // 1200 ms as the notes say it: "1,2" in DOC-TRUOC.txt, "1.2" in README.
+    const std::string retry_vi = n(Hunter::kRetryPassOverMs / 1000) + "," + n(Hunter::kRetryPassOverMs % 1000 / 100);
+    const std::string retry_en = n(Hunter::kRetryPassOverMs / 1000) + "." + n(Hunter::kRetryPassOverMs % 1000 / 100);
+    // 2026.11.15's pauses, history since 2026.11.24 (kFailsCoolMs is gone: no
+    // pause any more) -- the entry of 2026.11.15 keeps its numbers.
+    const std::string cools_vi = "30 giây; lần nghỉ thứ hai 60 giây, từ lần thứ ba 120 giây";
+    const std::string cools_en = "(30 s, 60 s, 120 s";
+
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    // 2026.11.15b's entry (the shop and the party again after 30 s) on top
+    // of it since, and 2026.11.15c's (a report in mid-air is no landing) on
+    // top of that, and 2026.11.15d's (thirty seconds for the game to react)
+    // on top of that, and 2026.11.16's (lighter on weak PCs, old features
+    // removed) on them, and 2026.11.16b's (the skills in turn while hunting
+    // too) on those, and 2026.11.17's (the MP bar, HP/MP by the packets
+    // alone, the skills even while hunting) first of all.
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (");
+    const std::size_t e16 = doc.find("- Mới trong bản 2026.11.16 (");
+    const std::size_t e15d = doc.find("- Mới trong bản 2026.11.15d (");
+    const std::size_t e15c = doc.find("- Mới trong bản 2026.11.15c (");
+    const std::size_t e15b = doc.find("- Mới trong bản 2026.11.15b (");
+    const std::size_t e15 = doc.find("- Mới trong bản 2026.11.15 (");
+    const std::size_t e14b = doc.find("- Mới trong bản 2026.11.14b (");
+    const std::size_t r14b = readme.find("### The shop after a pass, ESC after 10 s stuck");
+    const std::size_t r15 = readme.find("### One lost key press, pauses instead of \"off until the next start\", and the way "
+                                        "back asked sooner (2026.11.15)");
+    const std::size_t rmacro = readme.find("## Keyboard macro");
+    check(sec5 != std::string::npos && e15 != std::string::npos && e14b != std::string::npos && sec5 < e15 &&
+              e15 < e14b && e15c != std::string::npos && e15b != std::string::npos &&
+              e17 != std::string::npos && e16b != std::string::npos && e16 != std::string::npos &&
+              e15d != std::string::npos && doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 &&
+              doc.find("- Mới trong bản", e17 + 1) == e16b && doc.find("- Mới trong bản", e16b + 1) == e16 &&
+              doc.find("- Mới trong bản", e16 + 1) == e15d && doc.find("- Mới trong bản", e15d + 1) == e15c && doc.find("- Mới trong bản", e15c + 1) == e15b &&
+              doc.find("- Mới trong bản", e15b + 1) == e15 &&
+              has(doc, "- Mới trong bản 2026.11.15 (game bỏ sót phím không còn làm GoBot tắt nhảy lên/xuống hay cấm một "
+                       "chỗ, mà chỉ nghỉ một lúc rồi tự thử lại; hỏi lại đường về sau " +
+                           n(Hunter::kStrandedReaskMs / 1000) + " giây; theo log của bạn đêm 14/11 sang 15/11; chưa thử "
+                           "trên game thật).") &&
+              r14b != std::string::npos && r15 != std::string::npos && rmacro != std::string::npos && r14b < r15 &&
+              r15 < rmacro && has(readme, "Since 2026.11.15 (not yet run on the game)."),
+          "DOC-TRUOC.txt: the 2026.11.15 entry in section 5 right under 2026.11.15b's, not yet tried on the game; "
+          "README's section after 2026.11.14b's and before the macro's");
+    check(has(doc, "\"check log moi nhat, co 1 so loi nhu khi ra ngoai vung thi khong tu quay vao lai, khi danh quai o "
+                   "duoi nguong px thi khong chiu nhay xuong hoac nhay len\"") &&
+              has(readme, "*\"check log moi nhat, co 1 so loi nhu khi ra ngoai vung thi khong tu quay vao lai, khi danh "
+                          "quai o duoi nguong px thi khong chiu nhay xuong hoac nhay len\"*"),
+          "the owner's words of 2026-11-15, as written, in the notes and in README");
+    // The numbers the notes quote are the constants' -- the pauses' (3 in a
+    // row, 5 in a run, 30 / 60 / 120 s) 2026.11.15's own, gone since 2026.11.24.
+    check(Hunter::kNoDropSuspectMs == 120'000 && Hunter::kRetryPassOverMs == 1200 && Hunter::kStrandedReaskMs == 3000 &&
+              has(doc, "ghi nhớ là Ctrl+↓ không nhảy xuống được ở đó khi lần Ctrl+↓ THỨ HAI không làm gì (hay chỉ nhảy "
+                       "tại chỗ) ở gần chỗ lần trước (không quá " +
+                           n(GameMapBook::kNoDropXPx) + " px ngang, " + n(GameMapBook::kNoDropYPx) + " px dọc) trong "
+                           "vòng " + n(Hunter::kNoDropSuspectMs / 1000) + " giây") &&
+              has(doc, "chỉ bị bỏ qua " + retry_vi + " giây (trước là 8 giây)") &&
+              has(doc, "3 lần liền (hay 5 lần trong một lượt) không ăn không còn tắt nhảy xuống hay nhảy lên tới lần BẮT "
+                       "ĐẦU sau: chỉ nghỉ " + cools_vi) &&
+              has(doc, "GoBot hỏi lại bản đồ mỗi " + n(Hunter::kStrandedReaskMs / 1000) + " giây (trước là 10 giây)") &&
+              has(doc, "bot hỏi lại bản đồ mỗi 10 giây (từ bản 2026.11.15: mỗi " + n(Hunter::kStrandedReaskMs / 1000) +
+                           " giây)") &&
+              has(readme, "`Hunter::kNoDropSuspectMs` (" + n(Hunter::kNoDropSuspectMs / 1000) + " s)") &&
+              has(readme, "`kRetryPassOverMs` (" + retry_en + " s)") &&
+              has(readme, "`kFailsCoolMs` " + cools_en + ": the first, the second, the third and every later one") &&
+              has(readme, "`kStrandedReaskMs` is " + n(Hunter::kStrandedReaskMs / 1000) + " s (10 s before)") &&
+              has(readme, "`kStrandedReaskMs` (" + n(Hunter::kStrandedReaskMs / 1000) + " s since 2026.11.15; 10 s)") &&
+              has(readme, "`kDropFailsInRow` (3) in a row, or `kDropFailsPerRun` and `kJumpUpFailsPerRun` (5) in the "
+                          "run"),
+          "the notes' numbers: a place kept " + n(Hunter::kNoDropSuspectMs / 1000) + " s and " +
+              n(GameMapBook::kNoDropXPx) + " x " + n(GameMapBook::kNoDropYPx) + " px, the first miss's " + retry_en +
+              " s, 2026.11.15's pauses 30, 60 and 120 s, the way back asked every " +
+              n(Hunter::kStrandedReaskMs / 1000) + " s -- as hunter.hpp has them");
+    // The log's words, as the notes of 2026.11.15 quote them -- the pause's
+    // gone from the code since 2026.11.24, the first miss's kept.
+    check(!has(drop, "\"Hunter: drops on again after %llu s\"") && !has(drop, "\"Hunter: jumps up on again after %llu s\"") &&
+              has(drop, "not held against the place yet (a second near ") &&
+              !has(drop, "drops paused for %llu s") && !has(jump, "jumps up paused for %llu s") &&
+              has(doc, "\"Hunter: drops on again after 30 s\", \"Hunter: jumps up on again after 30 s\"") &&
+              has(doc, "log ghi \"not held against the place yet\"") &&
+              has(doc, "\"Hunter: 3 presses of Ctrl+Down in a row did not drop -- drops paused for 30 s (the 1st pause "
+                       "since the last drop that worked; they go again by themselves)\"") &&
+              has(doc, "\"Hunter: jumps up on again after 30 s\".") &&
+              has(readme, "\"Hunter: drops on again after 30 s\" (`jumps up` likewise)") &&
+              has(readme, "-- not held against the place yet (a second near it within 120 s is); ...\""),
+          "the log's lines: 2026.11.15's notes keep the pause's words as history; the code says the first miss as "
+          "not held against the place, and no pause any more (2026.11.24)");
+    // Where the code does it since 2026.11.24: the pass forgets the places
+    // learned kLearnedForgetMs ago first thing; no latch, no pause, no run's
+    // count; the first failed press of a row is passed over kRetryPassOverMs,
+    // every other kRetryFightMs.
+    const std::size_t pass_at = hunter.find("void Hunter::pass() {");
+    const std::size_t end_at = pass_at == std::string::npos ? pass_at : hunter.find("forget_learned(clock_now());", pass_at);
+    const std::size_t view_at = pass_at == std::string::npos ? pass_at : hunter.find("eyes_.view", pass_at);
+    check(end_at != std::string::npos && view_at != std::string::npos && end_at < view_at &&
+              !has(hunter, "cool_downs_end(") && !has(drop, "latch_drops(") && !has(jump, "latch_jumps(") &&
+              !has(drop, "cool_drops(") && !has(jump, "cool_jumps(") && !has(header, "fails_cool_ms(") &&
+              !has(drop, "drop_fails_run_") && !has(jump, "jump_fails_run_") && !has(jump, "bar_fails_run_") &&
+              has(drop, "const bool first_fail = drop_fails_row_ == 0;") &&
+              has(drop, "const std::uint64_t over_ms = first_fail ? kRetryPassOverMs : kRetryFightMs;") &&
+              has(jump, "const bool first_fail = jump_fails_row_ == 0;") &&
+              has(jump, "const std::uint64_t over_ms = first_fail ? kRetryPassOverMs : kRetryFightMs;") &&
+              has(hunter, "drop_fails_row_ = 0;") && has(hunter, "jump_fails_row_ = 0;") &&
+              !has(drop, "OFF until the next BẮT ĐẦU") && !has(jump, "OFF until the next BẮT ĐẦU") &&
+              !has(hunter, "OFF until the next BẮT ĐẦU") &&
+              has(header, "static constexpr std::size_t kLearnedMax = 64;") &&
+              has(drop, "while (learned_.size() >= kLearnedMax) {") &&
+              has(drop, "unlearn_place(oldest.kind, oldest.stem, oldest.at, true);") &&
+              has(drop, "unlearn_place(n.kind, n.stem, n.at, false);"),
+          "the pass forgets the places learned kLearnedForgetMs ago before it asks anything; no latch, pause or run's "
+          "count; the first failed press of a row passed over 1.2 s, every other one fight turn -- no line says "
+          "\"OFF until the next BẮT ĐẦU\" any more; at 64 notes the oldest is given back to the book at once");
+    // The same release's other parts (gobot-c5's): the file's walls, the fall
+    // no report follows, and the plain Up's pause -- the notes say what the
+    // code does, with its numbers.
+    const std::string book_cpp = source("/src/map_book.cpp");
+    // START-HERE's paragraph (package.ps1), after 2026.11.14b's, saying the same in short.
+    const std::string pack = flat(source("/package.ps1"));
+    const std::size_t p14b = pack.find("The shop after a pass, ESC after 10 s stuck, and the game's message after an invite "
+                                       "(2026.11.14b, not yet tried on the game).");
+    const std::size_t p15 = pack.find("Walls, a lost key press and the way back (2026.11.15, not yet tried on the game).");
+    check(p14b != std::string::npos && p15 != std::string::npos && p14b < p15 &&
+              has(pack, "after 3 in a row (or 5 in a run, with more misses than hits) that jump or drop pauses for 30 s, "
+                        "then 60 s, then 120 s, and goes again by itself") &&
+              has(pack, "the way back is asked again every " + n(Hunter::kStrandedReaskMs / 1000) + " s"),
+          "package.ps1's START-HERE: the 2026.11.15 paragraph after 2026.11.14b's, with the pauses and the way back's "
+          "seconds as the code has them");
+    // The plain Up's pause (3 in a row, 5 in a run) is 2026.11.15's history:
+    // gone from the code since 2026.11.24.
+    check(!book_cpp.empty() && GameMapBook::kBodyPx == 48 && Hunter::kBlindLandMs == 700 &&
+              Hunter::kBlindLandMaxPx == 600 &&
+              has(doc, "dọc một sàn mà gặp tường trong " + n(GameMapBook::kBodyPx) +
+                           " px phía trên chân thì DỪNG ở chân tường") &&
+              has(doc, "sau 0,7 giây không có gói nào khác, thì GoBot coi nhân vật đã đáp xuống sàn đầu tiên dưới cột "
+                       "đó (không quá " + n(Hunter::kBlindLandMaxPx) + " px)") &&
+              has(doc, "Cú ↑ tại chỗ cho quái cao hơn vạch trên (bản 2026.11.12c) cũng nghỉ thay vì tắt") &&
+              has(readme, "`GameMapBook::kBodyPx` (" + n(GameMapBook::kBodyPx) + " px)") &&
+              has(readme, "`kBlindLandMs` (" + n(Hunter::kBlindLandMs) + " ms)") &&
+              has(readme, "`kBlindLandMaxPx` (" + n(Hunter::kBlindLandMaxPx) + " px)") &&
+              has(readme, "`kBarUpFailsPerRun` (5) with more of them failed than worked") &&
+              has(book_cpp, "if (walled(last.x + step, last.y)) {") && has(book_cpp, "t.stop = t.wall = true;") &&
+              has(hunter, "blind_landing(*z.page, f, clock_now())") &&
+              !has(drop, "Hunter: Up for monsters above on again after %llu s") &&
+              !has(jump, "bar_fails_run_ >= kBarUpFailsPerRun") && has(jump, "if (fail) ++bar_fails_row_;"),
+          "the notes of the file's walls (" + n(GameMapBook::kBodyPx) + " px above the feet), the fall no report follows (" +
+              n(Hunter::kBlindLandMs) + " ms, " + n(Hunter::kBlindLandMaxPx) + " px) say what map_book.cpp and "
+              "hunter.cpp do; the plain Up's pause, 2026.11.15's, is gone from hunter_jump.cpp (2026.11.24)");
+    // The overnight log's file distrusted on one report from the top of an arc
+    // (00:27:54 on t60_s1, seven hours out of the area): a landing on no floor
+    // waits for the next report -- the notes' seconds are the constants'. The
+    // distrust given back after 120 s is 2026.11.15's history: since
+    // 2026.11.24 a landing off the floors has MapTrust let the file go until
+    // its standing points take it again (trust_.lose), with no clock.
+    const std::string settle_vi = n(Hunter::kLandSettleMs / 1000) + "," + n(Hunter::kLandSettleMs % 1000 / 100);
+    const std::string distrust_s = "120";
+    check(Hunter::kLandSettleMs == 900 &&
+              has(doc, "GoBot chờ gói đáp kế tiếp tối đa " + settle_vi + " giây") &&
+              has(doc, "hết " + settle_vi + " giây mà không có gì thì kết luận như trước") &&
+              has(doc, "File bị coi là sai (đáp ngoài sàn) chỉ bị bỏ " + distrust_s + " giây rồi được tin lại") &&
+              has(doc, "(log \"Hunter: t60_s1's map file trusted again after " + distrust_s + " s ...\")") &&
+              has(doc, "lần đáp ngoài sàn kế tiếp lại bỏ nó " + distrust_s + " giây nữa") &&
+              has(readme, "waits `kLandSettleMs` (" + n(Hunter::kLandSettleMs) + " ms) for the next report") &&
+              has(readme, "is given back after `kDistrustMs` (" + distrust_s + " s) by `cool_downs_end`") &&
+              has(readme, "\"Hunter: t60_s1's map file trusted again after " + distrust_s + " s ...\"") &&
+              has(readme, "a landing off its floors distrusts it again for another " + distrust_s + " s") &&
+              has(pack, "it waits for the next report, and a file it did distrust comes back after 2 minutes or at the "
+                        "next start") &&
+              !has(drop, "distrusted_") && !has(drop, "undistrust(") &&
+              !has(drop, "\"Hunter: %s's map file trusted again after %llu s -- ") &&
+              has(drop, "trust_.lose(\"a drop landed off the file's floors\");") &&
+              has(jump, "trust_.lose(\"a jump up landed off the file's floors\");") &&
+              has(drop, "now < f.report_ms + kLandSettleMs") &&
+              has(jump, "} else if (now < moved_ms + kLandSettleMs) {") &&
+              has(jump, "if (landed && fl.landed && fl.took_off && p != nullptr && now < jump_.key_ms + "
+                        "kJumpUpAirMaxMs) {") &&
+              has(jump, "if (std::abs(round_px(r.x) - lx) >= kLandSamePx || std::abs(round_px(r.y) - ly) >= "
+                        "kLandSamePx)") &&
+              Hunter::kLandSamePx == 12 && !has(drop, "distrust_map(") && !has(jump, "distrust_map(") &&
+              !has(hunter, "DistrustNote") && !has(header, "kDistrustMs ="),
+          "the notes of the landing waited for (" + n(Hunter::kLandSettleMs) + " ms) say what hunter_drop.cpp and "
+          "hunter_jump.cpp do; the distrust given back after " + distrust_s + " s is 2026.11.15's, gone since "
+          "2026.11.24 -- MapTrust lets the file go instead, no clock");
+    // The walls' figures (the review of 2026.11.15 caught t53_s2 as 10:
+    // way_back_cover_test counts 47, 30 and 7 on the game's files) and the
+    // ground's fill -- a record in a cell the other layer holds a surface of
+    // is no wall.
+    check(has(readme, "t60_s1 has 47, t49_s5 30, t53_s2 7 (3 more of its 10 attr-4 cells hold a surface, and stay "
+                      "floors)") &&
+              has(doc, "(t60_s1: 47 ô, t49_s5: 30, t53_s2: 7; ô có mặt sàn giữ như cũ)") &&
+              has(readme, "and so does a cell the other layer holds a surface of: a layer-1 record under the ground of "
+                          "layer 0 is its fill, not a wall") &&
+              has(doc, "Một ô chặn nằm cùng ô với mặt sàn của lớp kia") &&
+              has(book_cpp, "if (holds_surface(layer, cx, cy) || holds_surface(1 - layer, cx, cy)) continue;") &&
+              !has(readme, "t53_s2 10") && !has(doc, "t53_s2: 10"),
+          "the walls' figures -- 47, 30 and 7 -- and the ground's fill under the other layer's surface as no wall: "
+          "the notes and map_book.cpp say the same");
+    // 2026.11.15c (the first live run, 10:15:51): a report in mid-air is no
+    // landing whatever its kind -- the entry on top of section 5, README's
+    // section after 15b's, START-HERE's paragraph after 15b's, and the numbers
+    // they quote.
+    const std::size_t r15b_at = readme.find("### The shop and the party again after 30 s (2026.11.15b)");
+    const std::size_t r15c = readme.find("### A report in mid-air is no landing, whatever its kind (2026.11.15c)");
+    const std::size_t p15b_at = pack.find("The shop and the party again after 30 s (2026.11.15b, not yet tried on the game).");
+    const std::size_t p15c = pack.find("A report in mid-air is no landing (2026.11.15c, not yet tried on the game).");
+    const std::string air_vi = n(Hunter::kJumpUpAirMaxMs / 1000) + "," + n(Hunter::kJumpUpAirMaxMs % 1000 / 100);
+    check(Hunter::kLandSamePx == 12 && Hunter::kLandSettleMs == 900 && Hunter::kJumpUpAirMaxMs == 2200 &&
+              e15c != std::string::npos && r15b_at != std::string::npos && r15c != std::string::npos &&
+              rmacro != std::string::npos && r15b_at < r15c && r15c < rmacro && p15b_at != std::string::npos &&
+              p15c != std::string::npos && p15b_at < p15c &&
+              has(readme, "Since 2026.11.15c (not yet run on the game).") &&
+              has(doc, "- Mới trong bản 2026.11.15c (một gói tin giữa không trung không còn bị coi là lần đáp xuống của "
+                       "cú nhảy lên;") &&
+              has(doc, "nay chờ với mọi loại gói. Cứ mỗi gói sau đó (kể cả gói ra chiêu) đặt nhân vật cách chỗ \"đáp\" "
+                       "từ " + n(Hunter::kLandSamePx) + " px trở lên thì thời gian chờ (" + settle_vi +
+                           " giây) tính lại từ gói đó, tối đa " + air_vi + " giây sau lúc bấm") &&
+              has(readme, "waits `kLandSettleMs` from the newest report of the flight that puts the character "
+                          "`kLandSamePx` (" + n(Hunter::kLandSamePx) + " px) or more from it") &&
+              has(readme, "no longer than `kJumpUpAirMaxMs` (2.2 s) after the key") &&
+              has(pack, "waits for the real landing whatever kind of report came first") &&
+              has(jump, "std::uint64_t moved_ms = fl.land.ms;") &&
+              has(header, "static constexpr int           kLandSamePx = 12;") &&
+              !has(jump, "fl.land.kind == OwnReport::Air && p != nullptr"),
+          "2026.11.15c: a report of any kind in mid-air is no landing -- the entry on top of section 5, README's "
+          "section and START-HERE's paragraph after 15b's, " + n(Hunter::kLandSamePx) + " px and " + settle_vi +
+              " s as the constants have them, and the wait in jump_follow as the notes say");
+    // A blind landing's way that starts with a press (the review): the walk
+    // takes the first step -- the notes and hunter.cpp say the same.
+    check(has(readme, "`ZoneHere::blind` marks the projection, and while it stands `go_home_zone` does not press but "
+                      "walks") &&
+              has(doc, "GoBot không bấm từ chỗ đứng đoán được") &&
+              has(hunter, "z.stand = z.report = landed;") && has(hunter, "z.blind = true;") &&
+              has(hunter, "const bool at_drop = !z.blind && way->drop") &&
+              has(hunter, "const bool at_take_off = !z.blind && way->jump") &&
+              has(hunter, "if (z.blind && dx == 0) dx = way->at.x >= at.x ? 1 : -1;") &&
+              has(header, "bool                    blind = false;"),
+          "a blind landing's way that starts with a jump up or a drop: no press from the projection, a walk's step "
+          "first -- as the notes and hunter.cpp say");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// The owner's Q2 and Q5 of 2026-11-11: the dash's key held where its landing
+/// would run past a floor's end of the trusted map file -- t23_s14 22:27:47
+/// and 22:29:10, off the ledge by a 318 and a 213 px move with no walk; not in
+/// the middle of a floor.
+void test_dash_edge_floor() {
+    section("Hunter (2026.11.12): the dash's edge on the trusted map file -- a floor's end within the dash, not the "
+            "middle of the floor");
+    if (fixture_folder().empty()) return;
+
+    DropRig r(drop_config(120));            // spot off; t52_s2 trusted by its entry
+    r.hunter.set_dash('C', 214);
+    r.w.place(2600, 371);                   // on the long floor 2300..2900 at 372
+    r.run(600);
+    const bool trusted = r.st().drop_map.why == MapTrust::Why::Trusted;
+    const bool middle = !r.hunter.dash_edge();      // 2386 .. 2814
+    r.w.place(2850, 371);
+    r.run(300);
+    const bool end = r.hunter.dash_edge();          // 3064 past the end at 2900
+    r.hunter.set_dash('V', 0);                      // learned with no length: 320 px either way
+    r.w.place(2600, 371);
+    r.run(300);
+    const bool guess = r.hunter.dash_edge();        // 2280 and 2920: past both ends
+    r.hunter.set_dash(0, 0);                        // not learned: no key held, no edge said (2026.11.17)
+    r.w.place(2850, 371);
+    r.run(300);
+    const bool none = !r.hunter.dash_edge();
+    check(trusted && middle && end && guess && none,
+          std::string("the dash learned as C, 214 px: none in the floor's middle (") + (middle ? "yes" : "no") +
+              "), held 50 px from its end (" + (end ? "yes" : "no") + "); learned with no length, 320 px, from the "
+              "middle of the 600-px floor (" + (guess ? "yes" : "no") + "); not learned, nothing held 50 px from "
+              "its end (" + (none ? "yes" : "no") + ")");
+}
+
+/// A scenario's step: the character placed at x,y with a fresh monster at
+/// mx,my below it, the game answering the next Ctrl + ↓ as `mode`; waits for
+/// the press (the minute's 4 presses may take a minute) and 1.5 s after it.
+/// Whether a press went.
+bool miss_step(DropRig& r, Fall mode, int x, int y, int mx, int my, int slot) {
+    r.w.mode = mode;
+    r.w.place(x, y);
+    r.w.mobs = { mob_at(mx, my, slot) };
+    const std::size_t before = r.w.drops.size();
+    r.until([&] { return r.w.drops.size() > before; }, 75'000);
+    r.run(1500);
+    return r.w.drops.size() > before;
+}
+
+/// 2026.11.15: the game loses 30-40% of GoBot's short presses at random (the
+/// log of 2026-11-15: Ctrl + ↓ did nothing at 2 of 6). One that did nothing
+/// is no evidence: a place is learned at the second near it with none that
+/// worked between; the first passes the monster over 1.2 s. Three in a row,
+/// or five in the run with more failed than worked, paused the drops 30 s, 60
+/// s and 120 s from 2026.11.15; since 2026.11.24 (the owner's correction:
+/// "không, 2. Nhảy xuống (Ctrl+↓) khi hỏng thì thử lại luôn, hoặc dừng ra
+/// skill rồi nhảy xuống chứ không phải là dừng 90s") nothing pauses them: the
+/// next press comes at the next look, after one fight turn from the second in
+/// a row on (kRetryFightMs), from another column while a place learned is
+/// skipped (kLearnedForgetMs), and a monster's two presses count for
+/// kTargetCountMs only.
+void test_drop_misses_2026_11_15() {
+    section("Hunter (2026.11.15, 2026.11.24): one press the game lost is no evidence -- a place learned at the second "
+            "near it, skipped 30 s and tried again; never a pause: 8 lost presses in a row each at the next look, the "
+            "monster passed over 1.2 s then one fight turn, the minute's cap and the monster's 2 of the last 10 s");
+
+    // The numbers are pure: checked with the game's files or without them.
+    check(Hunter::kNoDropSuspectMs == 120'000 && Hunter::kRetryPassOverMs == 1200 && Hunter::kRetryFightMs == 3000 &&
+              Hunter::kLearnedForgetMs == 30'000 && Hunter::kTargetCountMs == 10'000 && Hunter::kDropGapMs == 1500 &&
+              Hunter::kDropsPerMinute == 4 && Hunter::kDropsPerTarget == 2 && Hunter::kDropSettlesPerTarget == 2 &&
+              Hunter::kJumpUpsPerTarget == 2 && Hunter::kBarUpDryPerTarget == 2,
+          "the numbers: a note kept 120 s, the first failed press's pass-over 1.2 s, every other's one fight turn of "
+          "3 s, a place learned skipped 30 s, a monster's presses counted over 10 s; 1.5 s between presses, 4 a "
+          "minute, 2 a monster");
+    if (fixture_folder().empty()) return;
+
+    // A fluke: the first press did nothing, the second from the same place
+    // worked -- the place is no suspect any more, and a later press that does
+    // nothing there is a first again.
+    {
+        DropRig r(drop_config(136));
+        r.age_entry();
+        r.w.mode = Fall::Solid;
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        std::vector<std::string> log;
+        bool first_noted = false;
+        log = info_lines([&] {
+            r.until([&] { return !r.w.drops.empty(); }, 3000);
+            r.run(1200);
+            first_noted = r.w.drops.size() == 1 && !r.book.no_drop_near("t52_s2", { 2675, 371 });
+            r.w.mode = Fall::Floor;
+            r.until([&] { return r.st().drops_worked == 1; }, 8000);
+            r.run(500);
+            // Back up there with another monster below: nothing again.
+            r.w.mode = Fall::Solid;
+            r.age_entry();
+            r.w.place(2675, 371);
+            r.w.mobs = { mob_at(2673, 632, 6) };
+            const std::size_t before = r.w.drops.size();
+            r.until([&] { return r.w.drops.size() > before; }, 8000);
+            r.run(1500);
+        });
+        const Hunter::Status st = r.st();
+        check(first_noted && st.drops_worked == 1 && r.w.drops.size() == 3 &&
+                  !r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
+                  lines_with(log, "not held against the place yet") == 2 &&
+                  lines_with(log, "no drops within 64 px of it this session") == 0 &&
+                  lines_with(log, "the monster passed over for 1.2 s (1 in a row)") == 2,
+              fmt("nothing, then it worked there, then nothing again: three presses, the place never learned (%d "
+                  "\"not held against the place yet\", each the first of its row)",
+                  lines_with(log, "not held against the place yet")));
+    }
+    // The note ages: a second press that did nothing more than 120 s after the
+    // first is a first again.
+    {
+        DropRig r(drop_config(136));
+        r.w.mode = Fall::Solid;
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        r.until([&] { return !r.w.drops.empty(); }, 3000);
+        r.run(1500);
+        r.w.mobs.clear();
+        r.run(Hunter::kNoDropSuspectMs + 5000);
+        r.w.place(2675, 371);
+        r.w.mobs = { mob_at(2673, 632, 6) };
+        r.until([&] { return r.w.drops.size() > 1; }, 8000);
+        r.run(1500);
+        check(r.w.drops.size() == 2 && !r.book.no_drop_near("t52_s2", { 2675, 371 }),
+              "nothing, 125 s on nothing again at the same place: the note is gone -- the place not learned");
+    }
+    // 3, 5 and 8 lost presses in a row, each from a place of its own (more
+    // than kNoDropXPx apart, so no place is learned) for a fresh monster:
+    // never a pause (2026.11.24; 30 s after the third, then 60 s, from
+    // 2026.11.15) -- each next press at the next look, kDropGapMs or more after
+    // the last; and more than kDropsPerMinute in the minute: a press that did
+    // nothing leaves the minute's count, so it never holds the next back.
+    {
+        DropRig r(drop_config(40));
+        r.age_entry();
+        struct Place {
+            int x, y, mx, my;
+        };
+        const Place places[] = {
+            { 2330, 371, 2335, 983 }, { 2400, 371, 2405, 983 }, { 2470, 371, 2475, 983 },
+            { 2575, 371, 2580, 983 }, { 2640, 371, 2645, 983 }, { 2705, 371, 2710, 983 },
+            { 2770, 371, 2775, 983 }, { 2400, 237, 2405, 371 },
+        };
+        int slot = 30;
+        std::string got;
+        const std::uint64_t t0 = r.w.t;
+        const std::vector<std::string> log = info_lines([&] {
+            for (const Place& p : places)
+                got += miss_step(r, Fall::Solid, p.x, p.y, p.mx, p.my, ++slot) ? "x" : "-";
+        });
+        bool spaced = r.w.drops.size() == 8;
+        std::uint64_t widest = 0;
+        for (std::size_t i = 1; i < r.w.drops.size(); ++i) {
+            const std::uint64_t gap = r.w.drops[i] - r.w.drops[i - 1];
+            spaced = spaced && gap >= Hunter::kDropGapMs;
+            widest = std::max(widest, gap);
+        }
+        int in_first_minute = 0;
+        for (const std::uint64_t d : r.w.drops)
+            if (d < r.w.drops.front() + 60'000) ++in_first_minute;
+        check(got == "xxxxxxxx" && spaced && widest < 4000 && in_first_minute > Hunter::kDropsPerMinute,
+              fmt("8 places, 8 presses that did nothing (%s) in %llu s: each %llu ms or more after the last, the widest "
+                  "gap %llu ms; %d in the first minute, more than kDropsPerMinute (%d)",
+                  got.c_str(), static_cast<unsigned long long>((r.w.t - t0) / 1000),
+                  static_cast<unsigned long long>(Hunter::kDropGapMs), static_cast<unsigned long long>(widest),
+                  in_first_minute, Hunter::kDropsPerMinute));
+        check(lines_with(log, "(3 in a row)") == 1 && lines_with(log, "(5 in a row)") == 1 &&
+                  lines_with(log, "(8 in a row)") == 1 && lines_with(log, "drops paused") == 0 &&
+                  lines_with(log, "on again after") == 0 && lines_with(log, "OFF until") == 0 &&
+                  lines_with(log, "minute's used up") == 0,
+              "the 3rd, the 5th and the 8th in a row said as such -- never a pause, never \"OFF\", never the minute's "
+              "cap");
+        check(!r.book.no_drop_near("t52_s2", { 2330, 371 }) && !r.book.no_drop_near("t52_s2", { 2575, 371 }) &&
+                  !r.book.no_drop_near("t52_s2", { 2400, 237 }),
+              "every place more than kNoDropXPx from the others: a first each -- none learned");
+    }
+    // One monster, one place: the first press passed over kRetryPassOverMs,
+    // the second -- the place's second -- learns it and passes the monster
+    // over one fight turn (kRetryFightMs). The monster gone 90 px along: the
+    // next press from another column, kNoDropXPx or more from the place
+    // learned. kLearnedForgetMs on the place is forgotten -- said -- and
+    // pressed again.
+    {
+        DropRig r(drop_config(136));
+        r.w.mode = Fall::Solid;
+        r.w.step_px = 10;
+        r.age_entry();
+        r.w.mobs = { mob_at(2673, 632, 5) };
+        std::vector<std::string> log = info_lines([&] {
+            r.until([&] { return r.w.drops.size() >= 2; }, 8000);
+            r.run(1200);
+        });
+        const std::uint64_t gap = r.w.drops.size() >= 2 ? r.w.drops[1] - r.w.drops[0] : 0;
+        const bool learned = r.book.no_drop_near("t52_s2", { 2675, 371 });
+        check(r.w.drops.size() == 2 && gap >= Hunter::kDropGapMs && gap < Hunter::kRetryPassOverMs + 3000 && learned &&
+                  lines_with(log, "the monster passed over for 1.2 s (1 in a row)") == 1 &&
+                  lines_with(log, "the monster passed over for 3 s: a fight turn, then tried again (2 in a row)") == 1,
+              fmt("the first press passed over 1.2 s -- the second %llu ms on, the place learned, the monster passed "
+                  "over one fight turn",
+                  static_cast<unsigned long long>(gap)));
+        // The monster along the low floor, 90 px left: pressed from another
+        // column -- not near the place learned.
+        r.w.mode = Fall::Solid;
+        r.w.mobs = { mob_at(2585, 983, 6) };
+        int third_x = 0;
+        log = info_lines([&] {
+            r.until([&] {
+                if (r.w.drops.size() >= 3 && third_x == 0) third_x = r.w.me_x;
+                return r.w.drops.size() >= 3;
+            },
+                    8000);
+            r.run(1200);
+        });
+        check(r.w.drops.size() == 3 && std::abs(third_x - 2675) > GameMapBook::kNoDropXPx,
+              fmt("the next press from another column: x %d, %d px from the place learned (kNoDropXPx %d)", third_x,
+                  std::abs(third_x - 2675), GameMapBook::kNoDropXPx));
+        // kLearnedForgetMs after it was learned: forgotten, said -- and pressed
+        // there again.
+        r.w.mobs.clear();
+        log = info_lines([&] { r.run(Hunter::kLearnedForgetMs); });
+        const bool forgot = !r.book.no_drop_near("t52_s2", { 2675, 371 }) &&
+                            lines_with(log, "Hunter: the place at 2675,371 on t52_s2 where Ctrl+Down did not work is "
+                                            "tried again (30 s on)") == 1;
+        r.w.place(2675, 371);
+        r.w.mobs = { mob_at(2673, 632, 7) };
+        r.until([&] { return r.w.drops.size() >= 4; }, 6000);
+        check(forgot && r.w.drops.size() == 4,
+              fmt("the place forgotten %llu s on (\"%s\") and pressed there again (%zu presses)",
+                  static_cast<unsigned long long>(Hunter::kLearnedForgetMs / 1000),
+                  line_with(log, "is tried again").c_str(), r.w.drops.size()));
+    }
+    // Two presses for one monster, from two places (neither learned): the
+    // monster's kDropsPerTarget used up -- TargetCap -- until the last of them
+    // is kTargetCountMs old, then tried again (2026.11.24; for the rest of the
+    // run until then). give_up_ms long: no give-up between.
+    {
+        HunterConfig c = drop_config(40);
+        c.give_up_ms = 30'000;
+        DropRig r(c);
+        r.w.mode = Fall::Solid;
+        r.age_entry();
+        r.w.place(2580, 371);
+        r.w.mobs = { mob_at(2640, 983, 9) };
+        r.until([&] { return r.w.drops.size() >= 1; }, 4000);
+        r.run(300);
+        r.w.place(2700, 371);
+        r.until([&] { return r.w.drops.size() >= 2; }, 6000);
+        r.run(300);
+        r.w.place(2645, 371);
+        bool capped = false;
+        r.until([&] {
+            if (r.w.drops.size() == 2 && r.st().drop_wait == Why::TargetCap) capped = true;
+            return r.w.drops.size() >= 3;
+        },
+                Hunter::kTargetCountMs + 8000);
+        const std::uint64_t again = r.w.drops.size() >= 3 ? r.w.drops[2] - r.w.drops[1] : 0;
+        check(r.w.drops.size() == 3 && capped && again >= Hunter::kTargetCountMs &&
+                  again < Hunter::kTargetCountMs + 4000,
+              fmt("two presses for the monster: TargetCap (%s) -- the third %llu ms after the second, once they were "
+                  "%llu s old",
+                  capped ? "said" : "not seen", static_cast<unsigned long long>(again),
+                  static_cast<unsigned long long>(Hunter::kTargetCountMs / 1000)));
+    }
 }
 
 } // namespace
@@ -1913,8 +3173,15 @@ void test_drop_hunt(void (*check_fn)(bool, const std::string&), void (*section_f
     test_drop_owner_cases();
     test_drop_choosing();
     test_drop_verdicts();
+    test_drop_misses_2026_11_15();
+    test_drop_landings_2026_11_12();
+    test_drop_spot_on_floor();
+    test_drop_band_2026_11_12();
+    test_dash_edge_floor();
     test_drop_safety();
     test_drop_spot_and_limits();
     test_drop_config();
     test_drop_window();
+    test_drop_apex_report();
+    test_drop_notes_2026_11_15();
 }

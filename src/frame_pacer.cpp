@@ -16,6 +16,10 @@ std::uint32_t FramePacer::tick_wait_ms(std::uint64_t woke, std::uint64_t now) {
     return spent >= kMaxWaitMs ? 0u : static_cast<std::uint32_t>(kMaxWaitMs - spent);
 }
 
+bool FramePacer::tick_due(std::uint64_t last, std::uint64_t now) {
+    return last == 0 || now < last || now - last >= kTickEveryMs;
+}
+
 bool FramePacer::decide(const Pass& p) {
     woke_ms_ = p.now_ms;
     if (p.input) {

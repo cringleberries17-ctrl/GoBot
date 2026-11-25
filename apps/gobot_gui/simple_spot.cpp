@@ -65,8 +65,9 @@ const char* spot_why_name(Hunter::SpotWhy why) {
         case Hunter::SpotWhy::Suspended:    return "a map entry or a log in since it was set, standing";
         case Hunter::SpotWhy::TooHigh:      return "more than one jump above, not walked back to";
         case Hunter::SpotWhy::Retrying:     return "a walk back got nowhere, tried again later";
-        case Hunter::SpotWhy::GaveUp:       return "walks back got nowhere, no more tries";
-        case Hunter::SpotWhy::NoReturn:     return "no way back into the area the map shows, fighting where it stands";
+        case Hunter::SpotWhy::GaveUp:       return "walks back got nowhere; the next round after spot_retry_ms";
+        case Hunter::SpotWhy::NoReturn:     return "no way back into the area the map shows, standing where it is";
+        case Hunter::SpotWhy::PutBack:      return "a report far from the last, waiting for a second there, standing";
     }
     return "?";
 }
@@ -91,14 +92,22 @@ void GuiApp::simple_spot_tick() {
                                         "vùng.")
                           : "bot dùng vùng đó khi nhân vật\nđứng trong vùng hoặc cách vùng không quá " +
                                 std::to_string(kZoneTakePx) +
-                                " px; ở xa hơn thì đánh ở chỗ đang đứng\ntới khi nhân vật đi vào vùng.";
+                                (kZoneTakeFallen ? " px, hoặc ngay dưới vùng (rơi xuống, tới " +
+                                                       std::to_string(kZoneTakeBelowPx) + " px)"
+                                                 : std::string(" px")) +
+                                "; ở xa hơn thì đánh ở chỗ đang\nđứng tới khi nhân vật đi vào vùng.";
     // The walk back first (the owner's answer of 2026-11-10): the reach as
-    // hunt.ini has it, the edge as the hunter goes by it.
+    // hunt.ini has it, the edge as the hunter goes by it. Only monsters in
+    // the area (2026.11.12, the owner's Q3), and stranded with no way back,
+    // standing (Q4).
     const std::string back =
-        "Quái trong tầm đánh (" + std::to_string(hunt_config_.reach) + " px) thì vẫn đánh, cả khi nhân vật ra ngoài\n"
-        "vùng chưa quá " + std::to_string(kZoneOutsideBackPx) + " px; hết quái thì bot tự đi bộ về chỗ. Bị đẩy ra "
-        "ngoài vùng quá " + std::to_string(kZoneOutsideBackPx) + " px thì\nbot ngưng đánh, về vùng trước: đi bộ "
-        "theo mặt đất, kỹ năng tạm dừng (bình và buff vẫn\nbấm), vào tới trong vùng rồi mới đánh tiếp. ";
+        "Chỉ đánh quái trong vùng: quái ngoài vùng thì không đánh, cả khi ở trong tầm đánh (" +
+        std::to_string(hunt_config_.reach) + " px).\nNhân vật ra ngoài vùng chưa quá " +
+        std::to_string(kZoneOutsideBackPx) + " px thì vẫn đánh quái trong vùng tới trong tầm; hết quái thì\n"
+        "bot tự đi bộ về chỗ. Bị đẩy ra ngoài vùng quá " + std::to_string(kZoneOutsideBackPx) +
+        " px thì bot ngưng đánh, về vùng trước: đi bộ\ntheo mặt đất, kỹ năng tạm dừng (bình và buff vẫn bấm), vào "
+        "tới trong vùng rồi mới đánh tiếp.\nKhông có đường về thì bot đứng yên ở đó, kỹ năng tạm dừng, tới khi có "
+        "đường về. ";
     const std::string tip = trial_hint(
         kTrialSpot,
         ("Chỉ đi tới quái trong một vùng quanh chỗ đánh quái: chỗ nhân vật đứng yên trên mặt đất\n"
@@ -251,16 +260,23 @@ std::string GuiApp::spot_outside_vi(const Hunter::Status& hs) {
     // The owner's Q2 (zone_walks_back_first), and the answer of 2026-11-10
     // ("Ngưng đánh, đi về trước"): far enough out, the walk back comes before
     // any fight, and nothing is fought -- in the box or not -- until the
-    // character is inside it. Nearer the edge, what is in reach is fought,
-    // the reach said as hunt.ini has it.
+    // character is inside it. Nearer the edge, what is in reach inside the
+    // area is fought (2026.11.12: inside it only), the reach said as
+    // hunt.ini has it.
     if (back && !jump.empty())
         return out + " — bot ngưng đánh, về vùng trước: về " + way + jump + ", vào tới trong vùng rồi mới đánh tiếp.";
     if (back) return out + " — bot ngưng đánh, về vùng trước: đi bộ về " + way + ", vào tới trong vùng rồi mới đánh tiếp.";
+    // Stranded (2026.11.12, the owner's Q4): no way back to be had.
+    if (hs.spot_stranded)
+        return out + " — không có đường về vùng: bot đứng yên ở đây, không đánh quái ngoài vùng, kỹ năng tạm dừng "
+                     "(bình và buff vẫn bấm), tới khi có đường về.";
+    // Only monsters inside the area (2026.11.12, the owner's Q3).
     const std::string reach = " (tầm đánh " + std::to_string(hunt_config_.reach) + " px)";
     if (hs.spot_way && !jump.empty())
-        return out + " — bot vẫn đánh quái trong tầm" + reach + "; hết quái thì về " + way + jump + ".";
-    if (hs.spot_way) return out + " — bot vẫn đánh quái trong tầm" + reach + "; hết quái thì đi bộ về " + way + ".";
-    return out + " — bot vẫn đánh quái trong tầm" + reach + "; hết quái thì đi về chỗ về.";
+        return out + " — bot vẫn đánh quái trong vùng tới trong tầm" + reach + "; hết quái thì về " + way + jump + ".";
+    if (hs.spot_way)
+        return out + " — bot vẫn đánh quái trong vùng tới trong tầm" + reach + "; hết quái thì đi bộ về " + way + ".";
+    return out + " — bot vẫn đánh quái trong vùng tới trong tầm" + reach + "; hết quái thì đi về chỗ về.";
 }
 
 void GuiApp::simple_spot_state(const Hunter::Status& hs) {
@@ -333,8 +349,10 @@ void GuiApp::simple_spot_state(const Hunter::Status& hs) {
                                 "thì bấm Đặt chỗ này.");
             break;
         case Why::TooHigh:
+            // Standing there since 2026.11.12 (the owner's Q4): no fight
+            // outside the area, skills held.
             coloured(kWait, ("Chỗ đánh quái cao hơn " + px(-hs.spot_dy) +
-                             " px, quá một lần nhảy: bot không đi về được, đánh ở đây. Tự đưa nhân vật về, "
+                             " px, quá một lần nhảy: bot không đi về được, đứng yên ở đây. Tự đưa nhân vật về, "
                              "hoặc bấm Đặt chỗ này.").c_str());
             break;
         case Why::Retrying:
@@ -342,24 +360,41 @@ void GuiApp::simple_spot_state(const Hunter::Status& hs) {
                              "thử lại. Nhân vật cách chỗ " + off + " px.").c_str());
             break;
         case Why::GaveUp:
-            coloured(kBad, ("Chỗ đánh quái: đi về " + std::to_string(Hunter::kSpotMaxTries) +
-                            " lần liền không tới được nên thôi. Tự đưa nhân vật về gần chỗ, hoặc bấm Đặt "
-                            "chỗ này.").c_str());
+            // Since 2026.11.24 (the owner: "cần thay cơ chế này bằng 1 cơ chế
+            // khác"): a wait of spot_retry_ms, then a new round of tries --
+            // sooner once the character is somewhere else -- in amber, as
+            // anything waiting. From 2026.11.12 a long wait and one more try,
+            // in red.
+            coloured(kWait, ("Chỗ đánh quái: đi về " + std::to_string(Hunter::kSpotMaxTries) +
+                             " lần liền không tới được — GoBot thử lại sau " +
+                             std::to_string(hunt_config_.spot_retry_ms / 1000) +
+                             " giây (sớm hơn nếu nhân vật bị đẩy đi chỗ khác). Tự đưa nhân vật về gần chỗ, hoặc bấm "
+                             "Đặt chỗ này.")
+                                .c_str());
             break;
         case Why::NoReturn:
             // The map tab's zone, by its map's file: nothing of the floors
             // the character is on walks or falls back into the box.
             // Worked out with jumps up able to go (2026.11.05b): none of
-            // walking, falling or jumping up gets back.
+            // walking, falling or jumping up gets back -- over the map's
+            // other floors too, and the character stands there (2026.11.12,
+            // the owner's Q4).
             coloured(kWait, ((hs.spot_outside_px > 0 ? "Nhân vật đang ở ngoài vùng " + std::to_string(hs.spot_outside_px) +
                                                            " px, và từ chỗ này"
                                                      : std::string("Từ chỗ nhân vật đứng")) +
                              (hs.spot_way_by_jumps
-                                  ? " không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đánh ở đây. Tự đưa "
-                                    "nhân vật về vùng, hoặc bấm Đặt chỗ này."
-                                  : " không có đường đi bộ hay rơi xuống nào về vùng: bot đánh ở đây. Tự đưa nhân vật về "
-                                    "vùng, hoặc bấm Đặt chỗ này."))
+                                  ? " không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đứng yên ở đây. Tự "
+                                    "đưa nhân vật về vùng, hoặc bấm Đặt chỗ này."
+                                  : " không có đường đi bộ hay rơi xuống nào về vùng: bot đứng yên ở đây. Tự đưa nhân vật "
+                                    "về vùng, hoặc bấm Đặt chỗ này."))
                                 .c_str());
+            break;
+        case Why::PutBack:
+            // A report far from the last with nothing to take the character
+            // there (2026.11.12): a fall into a pit puts it back up top.
+            coloured(kWait, "Chỗ đánh quái: gói tin vừa báo nhân vật ở rất xa chỗ cũ mà không đi, không nhảy, không "
+                            "qua cửa (rơi xuống vực thì game đưa lên trên) — bot đứng yên, chờ gói tin sau báo đúng "
+                            "chỗ rồi mới tính đường về.");
             break;
     }
     // A zone of the map tab sent and not taken yet: why.
@@ -398,8 +433,11 @@ const char* GuiApp::spot_refusal(std::string& vi) {
     spot_npcap_ms_ = now_ms();
     spot_npcap_ok_ = PacketCapture::npcap_available();
     if (!spot_npcap_ok_) {
-        vi = "Chỗ đánh quái cần Npcap, mà Npcap chưa cài hoặc dịch vụ Npcap chưa chạy. Cài Npcap rồi bấm BẮT "
-             "ĐẦU lại, hoặc bỏ dấu Chỗ đánh quái.";
+        // No "bấm BẮT ĐẦU lại" (the 2026.11.24 review): owed, GoBot looks
+        // again by itself (owed_again_vi follows on the card) -- the two
+        // sentences said opposite things.
+        vi = "Chỗ đánh quái cần Npcap, mà Npcap chưa cài hoặc dịch vụ Npcap chưa chạy. Cài Npcap (hoặc bật dịch "
+             "vụ Npcap), hoặc bỏ dấu Chỗ đánh quái.";
         return "Npcap is not installed, or its service is not running";
     }
     return nullptr;

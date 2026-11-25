@@ -215,6 +215,7 @@ public:
         bool          seen = false;         ///< a kind-2 cast in its window
         std::uint64_t cast_ms = 0;          ///< the first such cast's time
         std::uint32_t skill = 0;            ///< ... and its skill
+        bool          took = false;         ///< a press of it was paired with a cast: its others pair none (2026.11.17)
     };
     /// Presses of one buff key no further apart than this are one burst.
     static constexpr std::uint64_t kBurstGapMs = 2000;
@@ -309,6 +310,14 @@ public:
 
     /// The skill `vk` is learned to cast; 0 for none.
     std::uint32_t learned(std::uint32_t vk) const;
+
+    /// How far across that skill's named targets have been, the farthest
+    /// (Reach::most_dx), once kReachCasts of its casts named one the packet
+    /// world placed; 0 before then, or with no skill learned for `vk`. What
+    /// the hunter presses its own attack key within (2026.11.12, F3: Z's
+    /// targets were all within 76 px, and it was swung from up to 450).
+    int learned_reach(std::uint32_t vk) const;
+    static constexpr std::uint64_t kReachCasts = 5;
 
     std::vector<Key>  keys() const;
     std::vector<Cast> casts() const;

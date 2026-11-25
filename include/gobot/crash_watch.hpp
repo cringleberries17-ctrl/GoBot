@@ -3,6 +3,7 @@
 #include "gobot/config.hpp"
 #include "gobot/game_install.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -96,7 +97,13 @@ public:
         /// every time that happens is worse than the problem.
         int hung_grace_s = 20;
 
-        /// Give up after this many restarts. Beyond it, a person is needed.
+        /// At most this many restarts in any hour (kRestartWindowMs). One more
+        /// waits, nothing ended or clicked, until the oldest of them is an hour
+        /// old, then goes ahead (restart_allowed) -- since 2026.11.24, the
+        /// owner: "Kiểm tra các phần khác xem có phần nào không làm được thì
+        /// dừng không, cần thay cơ chế này bằng 1 cơ chế khác". Until then the
+        /// window's keeper gave up for a person after this many in a run, as
+        /// `gobot_cli --keep`, a tool for a person at the PC, still does.
         ///
         /// A restart is every time the game was closed and had to be entered
         /// again -- by the keeper after a crash, a hang, an error box or the
@@ -104,10 +111,12 @@ public:
         /// login key's included (GuiApp::keeper_take_restart).
         ///
         /// A client that crashes once is a crash. A client that crashes five
-        /// times is something that restarting will not fix -- a bad
-        /// patch, a full disk, an account that has been locked -- and a loop
-        /// that keeps reconnecting to a server refusing it is indistinguishable
-        /// from an attack on that server.
+        /// times in an hour is something that restarting at once will not fix
+        /// -- a bad patch, a full disk, an account that has been locked -- and
+        /// a loop that keeps reconnecting to a server refusing it is
+        /// indistinguishable from an attack on that server: so the hour's cap
+        /// slows it down to that many an hour rather than letting it go on
+        /// without limit. 0: no restart at all.
         int max_restarts = 5;
 
         /// Wait this long after ending the client before starting again, so
@@ -161,6 +170,40 @@ public:
     /// game that came up by itself in the meantime, by hand or by another
     /// tool, is then followed rather than crossed into a second time.
     static Move next_move(const Look& seen, bool seen_running, bool start_pending);
+
+    // ---- max_restarts' hour, and a crossing made again (2026.11.24) ----
+
+    /// The hour max_restarts is counted over.
+    static constexpr std::uint64_t kRestartWindowMs = 60ull * 60'000;
+    /// A crossing that did not get in -- the login not set up, a picture
+    /// missing, VTCZone's sign-in form, the launcher's Security Alert, every
+    /// attempt used on a page that never came -- is made again this long
+    /// after, without end: the owner's 30 s (kReactMs). Until 2026.11.24 the
+    /// keeper stopped there for a person.
+    static constexpr int kCrossAgainMs = 30'000;
+
+    /// Whether one more restart may be made at `now`, given when the earlier
+    /// ones were made (`times`, any order, the same clock as `now`): true
+    /// while fewer than `max` of them lie within the last `window_ms` -- a
+    /// time `window_ms` or more before `now` no longer counts. False
+    /// otherwise, and `next_at` (when given) gets the moment one more is
+    /// allowed: when enough of them have aged out that only `max` - 1 are
+    /// left, the oldest of the hour's when it holds exactly `max`. `max` 0
+    /// or less allows none at all, ever: `next_at` is then `now` +
+    /// `window_ms`, when it is asked again. Pure: nothing is read or kept.
+    static bool restart_allowed(const std::vector<std::uint64_t>& times, std::uint64_t now, int max,
+                                std::uint64_t window_ms, std::uint64_t* next_at = nullptr);
+    /// restart_allowed, and once its max is used one more every window_ms /
+    /// max after the newest -- min_gap_ms at least (2026.11.24 review: the
+    /// keeper slept up to an hour with the game closed after 5 quick
+    /// crashes, "no long pause as a replacement for a stop"). max 0 or less
+    /// still allows none. `next_at` the earlier of the two. Pure.
+    static bool restart_spaced(const std::vector<std::uint64_t>& times, std::uint64_t now, int max,
+                               std::uint64_t window_ms, std::uint64_t min_gap_ms, std::uint64_t* next_at = nullptr);
+    /// How many of `times` lie within the last `window_ms` before `now`:
+    /// what "lần N trong 1 giờ qua" says.
+    static int restarts_within(const std::vector<std::uint64_t>& times, std::uint64_t now,
+                               std::uint64_t window_ms);
 
     /// Pull an error code out of a dialog's text.
     ///

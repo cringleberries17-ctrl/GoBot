@@ -356,7 +356,9 @@ void GuiApp::alerts_tick() {
     // nothing says otherwise (death_doubt, 2026.11.10): the frame not the
     // game's, the packets saying HP is above 0, the server silent on the
     // game's capture. Doubted, the 3 s count again from its end.
-    const bool by_hp = running && vitals_running_ && !revive_running_;
+    // And while the reviver waits for its pictures (the 2026.11.24 review):
+    // it watches no death panel then, and a death would be told to nobody.
+    const bool by_hp = running && vitals_running_ && (!revive_running_ || revive_waiting_.load());
     const VitalsReader::Vitals v = by_hp ? vitals_.values() : VitalsReader::Vitals{};
     const char* doubt = nullptr;
     if (by_hp && v.hp == 0 && v.hp_max > 0) doubt = death_doubt(death_doubt_now(now), now);

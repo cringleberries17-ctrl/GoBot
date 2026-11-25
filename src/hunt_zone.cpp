@@ -171,6 +171,7 @@ const char* zone_take_name(ZoneTake t) {
         case ZoneTake::Near:     return "near";
         case ZoneTake::Back:     return "back where it left";
         case ZoneTake::Anywhere: return "wherever the character stands";
+        case ZoneTake::Below:    return "under it";
     }
     return "?";
 }
@@ -181,6 +182,10 @@ ZoneTake zone_take(const HuntZone& z, float x, float y, bool edit_in_use, bool b
     const int yi = static_cast<int>(std::lround(y));
     if (z.contains(xi, yi)) return ZoneTake::Inside;
     if (zone_outside_px(z, xi, yi) <= kZoneTakePx) return ZoneTake::Near;
+    // Under it (2026.11.12c, the owner's Q5): fallen out, or relogged there.
+    if (kZoneTakeFallen && xi >= z.left - kZoneTakePx && xi <= z.right + kZoneTakePx && yi > z.bottom &&
+        yi - z.bottom <= kZoneTakeBelowPx)
+        return ZoneTake::Below;
     if (back_where_left) return ZoneTake::Back;
     return kZoneTakeAnywhere ? ZoneTake::Anywhere : ZoneTake::Wait;
 }
@@ -622,12 +627,76 @@ ZoneLegs zone_legs_from(const GameMapBook::Page& p, const HuntZone& z, MapPoint 
     return l;
 }
 
+bool drop_landing_holds(const GameMapBook::Page& p, int x0, int y0, int land_y, int dir, int m) {
+    const MapTrail t = p.follow(x0, land_y - 1, dir, m);
+    // m columns on, or the column before a hole there.
+    const MapPoint* at = nullptr;
+    bool reached = false;
+    for (const MapPoint& q : t.pts) {
+        const int d = std::abs(q.x - x0);
+        if (d >= m) reached = true;
+        if (d <= m) at = &q;
+    }
+    if (!reached || at == nullptr) return false;
+    const std::optional<int> own = p.follow_to(x0, y0, at->x);
+    const std::optional<MapFloor> o = p.floor_below(at->x, own ? *own - 1 : y0, Hunter::kDropFeetPx);
+    return o && std::abs(o->y - at->y) <= Hunter::kDropSameFloorPx;
+}
+
+std::optional<ZoneDrop> zone_drop_from(const GameMapBook::Page& p, const HuntZone& in, MapPoint at,
+                                       const ZoneDropRules& r) {
+    // A platform under it -- the bottom ground is never dropped through.
+    const std::optional<MapFloor> under = p.floor_near(at.x, at.y);
+    if (!under || under->wall() || !under->platform()) return std::nullopt;
+    const int y0 = under->y - 1;
+    // The first floor below, far enough down for a landing to be told from
+    // standing; none -- a pit -- no drop.
+    const std::optional<MapFloor> land = p.floor_below(at.x, y0, Hunter::kDropFeetPx);
+    if (!land || land->wall() || land->y - y0 < Hunter::kDropMinFallPx) return std::nullopt;
+    if (!in.contains(at.x, land->y - 1)) return std::nullopt;
+    // The same floor either side, with a settle's few px to spare.
+    const int margin = Hunter::kDropMarginPressPx + kZoneDropLeadPx;
+    for (const int dir : { -1, 1 })
+        if (!drop_landing_holds(p, at.x, y0, land->y, dir, margin)) return std::nullopt;
+    // No gate across in the fall's band (the drop rule's 15).
+    for (const MapGate& g : r.gates) {
+        if (g.y < y0 - Hunter::kDropGateSpanPx || g.y > land->y + Hunter::kDropGateSpanPx) continue;
+        if (std::abs(g.x - at.x) <= r.gate_px + kZoneDropLeadPx) return std::nullopt;
+    }
+    if (r.no_drop && r.no_drop(MapPoint{ at.x, y0 })) return std::nullopt;
+    return ZoneDrop{ MapPoint{ at.x, y0 }, under->y, MapPoint{ at.x, land->y - 1 }, land->y };
+}
+
+HuntZone zone_whole_map(const GameMapBook::Page& p, const HuntZone& z) {
+    HuntZone w;
+    w.home_x = z.home_x;
+    w.home_y = z.home_y;
+    w.left = 0;
+    w.top = 0;
+    w.right = std::max(0, p.floors.w_px() - 1);
+    w.bottom = std::max(0, p.floors.h_px() - 1);
+    return w;
+}
+
 std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZone& z, MapPoint from,
-                                       const JumpRules* up) {
+                                       const JumpRules* up, const HuntZone* legs, const ZoneDropRules* down,
+                                       ZoneReturnStats* stats) {
+    ZoneReturnStats none_given;
+    ZoneReturnStats& st = stats != nullptr ? *stats : none_given;
+    st = ZoneReturnStats{};
     const std::optional<MapFloor> home = home_floor(p, z);
-    // A floor reached: where on it, after how many falls and jumps and how
-    // much walking, and -- when the first leg goes off the floor it starts on
-    // -- where that walk is aimed, and the jump it is when it is one.
+    // Where the falls and jumps may land (2026.11.12): the box, or with `legs`
+    // the whole map -- the goal stays a standing point in the box.
+    const HuntZone& in = legs != nullptr ? *legs : z;
+    const int falls_max = legs != nullptr ? kZoneTravelFallsMax : kZoneReturnFallsMax;
+    const int jumps_max = legs != nullptr ? kZoneTravelJumpsMax : kZoneReturnJumpsMax;
+    // Drops only over the whole map (2026.11.12 review): the way into the box
+    // from inside it is 04d's and 05b's, as it was.
+    const ZoneDropRules* drops = legs != nullptr ? down : nullptr;
+    // A floor reached: where on it, after how many falls, drops and jumps and
+    // how much walking, and -- when the first leg goes off the floor it
+    // starts on -- where that walk is aimed, and the jump or drop it is when
+    // it is one.
     struct Leg {
         MapPoint at;
         int      falls = 0;
@@ -635,22 +704,41 @@ std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZon
         int      walked = 0;
         int      first_x = 0;
         std::optional<JumpPlan> first_jump;
+        int      drops = 0;
+        std::optional<ZoneDrop> first_drop;
     };
-    // Best first: the home; the fewest jumps, then falls; the nearest the home
-    // across, then up or down; the least walking.
-    using Rank = std::array<int, 6>;
+    // Best first: the home; the fewest jumps, then drops, then falls; the
+    // nearest the home across, then up or down; the least walking.
+    using Rank = std::array<int, 7>;
     std::optional<ZoneReturn> best;
     Rank best_rank{};
-    std::vector<Leg> todo{ Leg{ from, 0, 0, 0, 0, std::nullopt } };
+    std::vector<Leg> todo{ Leg{ from, 0, 0, 0, 0, std::nullopt, 0, std::nullopt } };
     std::vector<Leg> jumped;                            // the legs a jump more on: the next round's
     std::vector<std::pair<MapPoint, MapPoint>> seen;    // each floor once, by its two ends
     // A round per number of jumps -- one, without `up` -- so a floor is had by
     // the fewest jumps first, and by the fewest falls in its round.
-    const int rounds = up != nullptr ? kZoneReturnJumpsMax + 1 : 1;
+    const int rounds = up != nullptr ? jumps_max + 1 : 1;
     for (int round = 0; round < rounds && !todo.empty(); ++round) {
         // The home had with fewer jumps is never bettered.
         if (best && best->home) break;
         for (std::size_t i = 0; i < todo.size(); ++i) {
+            // Over the whole map, so many floors and no more: each of them
+            // looked along for its jumps up costs the most.
+            if (legs != nullptr &&
+                static_cast<int>(seen.size()) >= (up != nullptr ? kZoneTravelJumpFloorsMax : kZoneTravelFloorsMax)) {
+                // Cut short (2026.11.12c's stats): a floor not looked at yet
+                // was still to come.
+                for (std::size_t k = i; k < todo.size() && !st.capped; ++k) {
+                    const MapTrail l = p.follow(todo[k].at.x, todo[k].at.y, -1);
+                    const MapTrail r = p.follow(todo[k].at.x, todo[k].at.y, 1);
+                    if (l.pts.empty() || r.pts.empty()) continue;
+                    const MapPoint le = l.pts.back(), re = r.pts.back();
+                    st.capped = std::none_of(seen.begin(), seen.end(), [&](const std::pair<MapPoint, MapPoint>& s) {
+                        return s.first.x == le.x && s.first.y == le.y && s.second.x == re.x && s.second.y == re.y;
+                    });
+                }
+                break;
+            }
             const Leg leg = todo[i];
             const MapTrail left = p.follow(leg.at.x, leg.at.y, -1);
             const MapTrail right = p.follow(leg.at.x, leg.at.y, 1);
@@ -662,14 +750,19 @@ std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZon
                 }))
                 continue;
             seen.emplace_back(l_end, r_end);
-            const bool first = leg.falls == 0 && leg.jumps == 0;
+            st.floors = static_cast<int>(seen.size());
+            // The way's first leg: no fall, jump or drop before it -- a drop
+            // counted too (2026.11.12 final check), or the leg on a drop's
+            // landing floor took its own jump or drop for the first, pressed
+            // from the floor above.
+            const bool first = leg.falls == 0 && leg.jumps == 0 && leg.drops == 0;
             for (const MapTrail* t : { &left, &right }) {
                 for (const MapPoint& q : t->pts) {
                     const MapPoint s{ q.x, q.y - 1 };
                     if (!z.contains(s.x, s.y)) continue;
                     const bool at_home = home && q.x == z.home_x && q.y == home->y;
                     const int walked = leg.walked + std::abs(q.x - leg.at.x);
-                    const Rank rank{ at_home ? 0 : 1, leg.jumps, leg.falls, std::abs(s.x - z.home_x),
+                    const Rank rank{ at_home ? 0 : 1, leg.jumps, leg.drops, leg.falls, std::abs(s.x - z.home_x),
                                      std::abs(s.y - z.home_y), walked };
                     if (best && !(rank < best_rank)) continue;
                     best_rank = rank;
@@ -681,13 +774,17 @@ std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZon
                     r.jumps = leg.jumps;
                     r.walk_x = first ? r.at.x : leg.first_x;
                     r.jump = leg.first_jump;
+                    r.travel = legs != nullptr;
+                    r.drops = leg.drops;
+                    r.drop = leg.first_drop;
                     best = r;
                 }
             }
             // Off each end: on to the floor the fall lands on (zone_falls, the
-            // seek's rule too).
-            if (leg.falls < kZoneReturnFallsMax) {
-                for (const ZoneLegs::Fall& fall : zone_falls(p, z, left, right)) {
+            // seek's rule too) -- over the whole map with `legs`, never where a
+            // fall lands on nothing.
+            if (leg.falls < falls_max) {
+                for (const ZoneLegs::Fall& fall : zone_falls(p, in, left, right)) {
                     Leg next = leg;
                     next.at = fall.land;
                     next.falls = leg.falls + 1;
@@ -696,19 +793,64 @@ std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZon
                     todo.push_back(next);
                 }
             }
+            // Through a platform with Ctrl + ↓ (2026.11.12 review): from where
+            // the way comes onto it and every kZoneTravelDropEveryPx along it,
+            // as the drop rule would let a press go there -- never into a pit.
+            if (drops != nullptr && leg.drops < kZoneTravelDropsMax) {
+                std::vector<MapPoint> from_at{ leg.at };
+                for (const MapTrail* t : { &left, &right }) {
+                    int next_px = kZoneTravelDropEveryPx;
+                    for (const MapPoint& q : t->pts) {
+                        if (std::abs(q.x - leg.at.x) < next_px) continue;
+                        from_at.push_back(MapPoint{ q.x, q.y - 1 });
+                        next_px += kZoneTravelDropEveryPx;
+                    }
+                }
+                for (const MapPoint& s : from_at) {
+                    const std::optional<ZoneDrop> d = zone_drop_from(p, in, s, *drops);
+                    if (!d) continue;
+                    Leg next = leg;
+                    next.at = d->land;
+                    next.drops = leg.drops + 1;
+                    next.walked = leg.walked + std::abs(s.x - leg.at.x);
+                    if (first) {
+                        next.first_x = s.x;
+                        next.first_drop = *d;
+                    }
+                    todo.push_back(next);
+                }
+            }
             // Straight up off it, onto the floors a jump lands on in the box --
             // the next round's, unless the home is had already.
-            if (up != nullptr && leg.jumps < kZoneReturnJumpsMax && !(best && best->home)) {
-                for (const JumpPlan& j : jump_legs_from(p, z, leg.at, *up)) {
-                    Leg next = leg;
-                    next.at = j.land();
-                    next.jumps = leg.jumps + 1;
-                    next.walked = leg.walked + j.walk_px;
-                    if (first) {
-                        next.first_x = j.x;
-                        next.first_jump = j;
+            if (up != nullptr && leg.jumps < jumps_max && !(best && best->home)) {
+                // From where it stands -- and over the whole map, every
+                // kZoneTravelJumpEveryPx along its floor either way too
+                // (2026.11.12): the take-offs are looked for kJumpUpSearchPx
+                // round a point, and a way back may walk a long floor first.
+                std::vector<MapPoint> from_at{ leg.at };
+                if (legs != nullptr) {
+                    for (const MapTrail* t : { &left, &right }) {
+                        int next_px = kZoneTravelJumpEveryPx;
+                        for (const MapPoint& q : t->pts) {
+                            if (std::abs(q.x - leg.at.x) < next_px) continue;
+                            from_at.push_back(MapPoint{ q.x, q.y - 1 });
+                            next_px += kZoneTravelJumpEveryPx;
+                        }
                     }
-                    jumped.push_back(next);
+                }
+                for (const MapPoint& s : from_at) {
+                    ++st.jump_looks;
+                    for (const JumpPlan& j : jump_legs_from(p, in, s, *up)) {
+                        Leg next = leg;
+                        next.at = j.land();
+                        next.jumps = leg.jumps + 1;
+                        next.walked = leg.walked + std::abs(s.x - leg.at.x) + j.walk_px;
+                        if (first) {
+                            next.first_x = j.x;
+                            next.first_jump = j;
+                        }
+                        jumped.push_back(next);
+                    }
                 }
             }
         }
@@ -716,8 +858,9 @@ std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZon
         jumped.clear();
     }
     if (best) return best;
-    // With jumps: no blind hop -- the way is planned, or there is none.
-    if (up != nullptr) return std::nullopt;
+    // With jumps: no blind hop -- the way is planned, or there is none. Nor
+    // over the whole map.
+    if (up != nullptr || legs != nullptr) return std::nullopt;
     // Nothing in the box by walking and falling: the home as every walk back
     // went before -- toward it, hops and all, unless jump_up is ticked where
     // jumps up may be planned (Hunter::hop never presses there) -- when it is

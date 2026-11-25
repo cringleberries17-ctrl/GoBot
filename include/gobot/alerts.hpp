@@ -123,31 +123,49 @@ namespace alert_text {
 std::string death(bool reviving);
 std::string revived();
 // revive_failed has no sentence here: it is Reviver::out_of_tries_vi(), the
-// same words the simple screen shows in red, which say the bot has stopped.
+// same words the simple screen shows -- since 2026.11.24 that GoBot goes on
+// and tries again in 30 s, no longer that the bot has stopped.
 /// `code` only when it has the shape CrashWatch::code_in gives -- a hex or a
 /// decimal number -- and is left out otherwise. `coming_back`: the keeper is
 /// about to log back in. `minutes`, for Trouble::Stalled: how long nobody was
 /// in the world while the game ran.
 std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool coming_back,
                        int minutes = 0);
-std::string back_in(int restart, int max_restarts);
-/// `restarts`: times the game was closed and entered again since the keeper
-/// started (max_restarts).
-std::string gave_up_restarts(int restarts);
+/// `in_hour`: the restarts made in the last hour, this one with them
+/// (2026.11.24: max_restarts counts over an hour; "lần 1/5" of a run until
+/// then).
+std::string back_in(int in_hour);
+/// The keeper_gave_up sentences, their names kept from when the keeper gave
+/// up there. Since 2026.11.24 it gives up only for GoBot not running as
+/// administrator (gave_up_not_elevated); the rest say what GoBot does next.
+///
+/// `restarts` made in the last hour -- max_restarts of them -- and `until`
+/// (hh:mm:ss, the PC's clock) when the oldest is an hour old and the keeper
+/// goes on: nothing ended or clicked till then.
+std::string gave_up_restarts(int restarts, const std::string& until);
+/// The login not set up: crossed again 30 s on, login.ini read afresh.
 std::string gave_up_not_set_up();
 std::string gave_up_not_elevated();
 /// A fixed reason for each way a crossing fails, never its detail: that can
 /// be the launcher's path, with the Windows user name in it, or the title of
-/// some other program's window.
+/// some other program's window. Crossed again 30 s on.
 std::string gave_up_crossing(int attempts, AutoLogin::Why why);
+/// That fixed reason alone, for the keeper's line on the simple screen; null
+/// for one with no words of its own (Cancelled, None).
+const char* crossing_reason(AutoLogin::Why why);
 std::string not_in_world(int minutes);
 std::string in_world_again();
 /// `stopped`: a stop has just stopped everything; otherwise it has lasted
 /// kAlertStuckMs and everything is held off meanwhile.
 std::string trash_stuck(bool stopped);
 std::string chat_stuck(bool stopped);
+/// `failures` lines in a row not sent -- ChatSettings::max_failures, told once
+/// a streak. Named for what it was until 2026.11.24, when Tự chat stopped
+/// itself there; since, it goes on trying, and says so.
 std::string chat_stopped(int failures);
-/// `why` is one of the quick quest worker's own fixed phrases.
+/// `why` is one of the quick quest worker's own fixed phrases: `times` failed
+/// rounds in a row (QuestSettings::max_failures, told once a streak). Since
+/// 2026.11.24 no stop: the rounds go on, and it says so.
 std::string quest_trouble(int times, const std::string& why);
 /// A potion key's hotbar slot: `hp` the HP potion's or the MP potion's,
 /// `key` the key's name as InputManager::key_name gives it -- anything else
@@ -615,8 +633,8 @@ struct DeathDoubt {
     /// the game's place there -- not from the window's own drawing.
     bool          from_screen = false;
     bool          game_in_front = true;
-    /// The packets' HP, usable this moment (vitals_usable: checked against
-    /// the bars, the server heard within kLinkQuietMs), above 0.
+    /// The packets' HP, usable this moment (vitals_usable: of the current
+    /// epoch, the server heard within kLinkQuietMs), above 0.
     bool          packets_alive = false;
     /// The capture is the game window's own, and when it last had a frame of
     /// the server's over TCP, on now_ms()'s clock; 0 none.

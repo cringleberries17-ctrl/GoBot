@@ -389,8 +389,8 @@ std::vector<Sample> every_event() {
         { "revived",        alert_text::revived() },
         { "revive_failed",  Reviver::out_of_tries_vi() },
         { "disconnect",     alert_text::disconnect(CrashWatch::Trouble::Gone, "", true) },
-        { "keeper_gave_up", alert_text::gave_up_restarts(5) },
-        { "back_in",        alert_text::back_in(1, 5) },
+        { "keeper_gave_up", alert_text::gave_up_restarts(5, "04:10:00") },
+        { "back_in",        alert_text::back_in(1) },
         { "trash_stuck",    alert_text::trash_stuck(false) },
         { "not_in_world",   alert_text::not_in_world(3) },
         { "chat_stuck",     alert_text::chat_stuck(false) },
@@ -416,8 +416,20 @@ void test_texts() {
     check(alert_text::death(false) == "Nhân vật đã chết. Tự hồi sinh đang tắt — nhân vật nằm tại chỗ.",
           "death, Tự hồi sinh off");
     check(alert_text::revived() == "Đã hồi sinh tại chỗ, bot chạy tiếp.", "revived");
-    check(Reviver::out_of_tries_vi().rfind("Đã dừng bot: hồi sinh 3 lần không được", 0) == 0,
-          "revive_failed: the Reviver's own words, which say the bot has stopped");
+    // Since 2026.11.24 (the owner: "Kiểm tra các phần khác xem có phần nào
+    // không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác")
+    // no stop: another round 30 s on -- "Đã dừng bot: hồi sinh 3 lần không
+    // được ..." until then.
+    check(Reviver::out_of_tries_vi() ==
+              "Hồi sinh tại chỗ 3 lần chưa được — có thể đã hết giấy/bùa hồi sinh. GoBot không hồi sinh tại làng; "
+              "thử lại sau 30 giây. Hồi sinh bằng tay thì bot tự chạy tiếp.",
+          "revive_failed: the Reviver's own words, which say GoBot tries again in 30 s -- no longer that the bot "
+          "has stopped");
+    {
+        const AlertEventInfo* failed = find_alert_event("revive_failed");
+        check(failed != nullptr && failed->critical && failed->on && std::string(failed->label_vi) == "Hồi sinh không được",
+              "its tick unchanged: \"Hồi sinh không được\", critical, on");
+    }
     check(alert_text::disconnect(CrashWatch::Trouble::Gone, "", false) == "Mất kết nối: game đã tắt.",
           "disconnect: gone");
     check(alert_text::disconnect(CrashWatch::Trouble::Gone, "", true) ==
@@ -435,23 +447,40 @@ void test_texts() {
     check(alert_text::disconnect(CrashWatch::Trouble::ErrorBox, "", false) ==
               "Mất kết nối: game hiện bảng lỗi.",
           "disconnect: an error box with no code");
-    check(alert_text::back_in(1, 5) == "Đã vào lại game (lần 1/5). Bot chạy tiếp.", "back_in");
-    check(alert_text::gave_up_restarts(5) ==
-              "GoBot ngừng tự vào lại game: đã phải vào lại 5 lần. Cần người kiểm tra.",
-          "keeper_gave_up: max restarts");
+    // The keeper's since 2026.11.24, by the same request: max_restarts counts
+    // over an hour ("lần 1/5" of a run until then), used up is a wait, a
+    // crossing not in is made again 30 s on -- only GoBot not running as
+    // administrator still stops it. The key keeper_gave_up is kept.
+    check(alert_text::back_in(1) == "Đã vào lại game (lần 1 trong 1 giờ qua). Bot chạy tiếp." &&
+              alert_text::back_in(0) == alert_text::back_in(1),
+          "back_in: " + alert_text::back_in(1));
+    check(alert_text::gave_up_restarts(5, "04:10:00") ==
+              "Đã vào lại game 5 lần trong 1 giờ — GoBot chờ tới 04:10:00 rồi tự vào lại.",
+          "keeper_gave_up: the hour's restarts used up, waited out -- " + alert_text::gave_up_restarts(5, "04:10:00"));
     check(alert_text::gave_up_not_set_up() ==
-              "GoBot ngừng tự vào lại game: chưa cài đặt đủ các màn hình đăng nhập. Cần người kiểm tra.",
-          "keeper_gave_up: not set up");
+              "Vào lại game chưa được: chưa cài đặt đủ các màn hình đăng nhập — GoBot thử lại sau 30 giây.",
+          "keeper_gave_up: not set up, looked at again 30 s on");
     check(alert_text::gave_up_not_elevated() ==
               "GoBot ngừng tự vào lại game: GoBot không chạy bằng quyền Administrator. Cần người kiểm tra.",
-          "keeper_gave_up: not elevated");
+          "keeper_gave_up: not elevated -- the one stop left");
     check(alert_text::gave_up_crossing(3, AutoLogin::Why::SignIn) ==
-              "GoBot ngừng tự vào lại game: thử 3 lần không vào lại được (VTCZone đang hiện màn hình "
-              "đăng nhập). Cần người kiểm tra.",
-          "keeper_gave_up: the crossing failed, with a fixed reason");
+              "Vào lại game chưa được: đã thử 3 lần (VTCZone đang hiện màn hình đăng nhập) — GoBot thử lại sau "
+              "30 giây.",
+          "keeper_gave_up: the crossing not in, with a fixed reason, made again 30 s on");
     check(alert_text::gave_up_crossing(3, AutoLogin::Why::Cancelled) ==
-              "GoBot ngừng tự vào lại game: thử 3 lần không vào lại được. Cần người kiểm tra.",
+              "Vào lại game chưa được: đã thử 3 lần — GoBot thử lại sau 30 giây.",
           "keeper_gave_up: a reason with no words of its own adds none");
+    check(alert_text::crossing_reason(AutoLogin::Why::SecurityAlert) ==
+                  std::string("launcher của game đang hiện hộp Security Alert") &&
+              alert_text::crossing_reason(AutoLogin::Why::Cancelled) == nullptr &&
+              alert_text::crossing_reason(AutoLogin::Why::None) == nullptr,
+          "the fixed reason alone, for the keeper's line on the screen; none for one with no words");
+    {
+        const AlertEventInfo* keeper = find_alert_event("keeper_gave_up");
+        check(keeper != nullptr && keeper->critical && keeper->on &&
+                  std::string(keeper->label_vi) == "Tạm nghỉ tự vào lại",
+              "its tick: \"Tạm nghỉ tự vào lại\" (no longer \"Không tự vào lại được (cần người)\"), by the same key");
+    }
     check(alert_text::not_in_world(3) ==
               "Không thấy nhân vật trong game đã 3 phút — có thể mất kết nối hoặc đang ở màn hình chọn "
               "nhân vật.",
@@ -472,11 +501,24 @@ void test_texts() {
     check(alert_text::chat_stuck(false) ==
               "Ô chat trong game có thể đang mở đã 2 phút: đánh quái, bình và buff đang tạm dừng.",
           "chat_stuck: two minutes watched");
-    check(alert_text::chat_stopped(3) == "Tự chat đã tự dừng: 3 lần liền không gửi được câu chat.",
-          "chat_stopped");
+    // Neither stops its feature since 2026.11.24 (the owner: "Kiểm tra các
+    // phần khác xem có phần nào không làm được thì dừng không, cần thay cơ chế
+    // này bằng 1 cơ chế khác"): they say GoBot goes on trying -- their keys,
+    // and with them the player's ticks in alerts.ini, unchanged.
+    check(alert_text::chat_stopped(3) == "Tự chat: 3 lần liền không gửi được câu chat — GoBot vẫn thử lại.",
+          "chat_stopped: " + alert_text::chat_stopped(3));
     check(alert_text::quest_trouble(3, "không mở được bảng nhiệm vụ") ==
-              "Làm nhiệm vụ nhanh đã tự tắt: 3 lần liền không mở được bảng nhiệm vụ.",
-          "quest_trouble");
+              "Làm nhiệm vụ nhanh: 3 lần liền không mở được bảng nhiệm vụ — GoBot vẫn thử lại.",
+          "quest_trouble: " + alert_text::quest_trouble(3, "không mở được bảng nhiệm vụ"));
+    {
+        const AlertEventInfo* chat = find_alert_event("chat_stopped");
+        const AlertEventInfo* quest = find_alert_event("quest_trouble");
+        check(chat != nullptr && !chat->critical && chat->on &&
+                  std::string(chat->label_vi) == "Tự chat gửi không được nhiều lần" && quest != nullptr &&
+                  quest->critical && quest->on && std::string(quest->label_vi) == "Làm nhiệm vụ nhanh gặp lỗi",
+              "their ticks: \"Tự chat gửi không được nhiều lần\" (no longer \"Tự chat tự dừng\") and \"Làm nhiệm vụ "
+              "nhanh gặp lỗi\", by the same keys");
+    }
     check(alert_text::party_joined("Abc", false) == "Đã vào một tổ đội (nhận lời mời).", "party: joined, no name");
     check(alert_text::party_invited("Abc", false) == "Đã mời một người vào tổ đội.", "party: invited, no name");
     check(alert_text::party_joined("Abc", true) == "Đã vào tổ đội của Abc.", "party: joined, named");
@@ -647,13 +689,13 @@ void test_caps() {
         }
         r.raise("disconnect", alert_text::disconnect(CrashWatch::Trouble::Gone, "", true), 200'000);
         r.run(200'000, 250'000, 1000);
-        r.raise("keeper_gave_up", alert_text::gave_up_restarts(5), 300'000);
+        r.raise("keeper_gave_up", alert_text::gave_up_restarts(5, "04:10:00"), 300'000);
         r.run(300'000, 310'000, 1000);
         const auto got = r.contents();
         check(got.size() == 5, "three, the cap notice, and the critical one (" + std::to_string(got.size()) + ")");
         if (got.size() == 5) {
             check(contains(got[3], "Quá nhiều thông báo"), "the disconnect waits behind the notice");
-            check(contains(got[4], alert_text::gave_up_restarts(5)) && r.mock->times[4] == 300'000,
+            check(contains(got[4], alert_text::gave_up_restarts(5, "04:10:00")) && r.mock->times[4] == 300'000,
                   "keeper_gave_up goes at once, cap or no cap");
         }
     }
@@ -741,15 +783,15 @@ void test_replies() {
         };
         r.raise("death", death, 0);
         r.raise("disconnect", alert_text::disconnect(CrashWatch::Trouble::Hung, "", false), 1000);
-        r.raise("back_in", alert_text::back_in(1, 5), 2000);
-        r.raise("keeper_gave_up", alert_text::gave_up_restarts(5), 3000);
+        r.raise("back_in", alert_text::back_in(1), 2000);
+        r.raise("keeper_gave_up", alert_text::gave_up_restarts(5, "04:10:00"), 3000);
         r.run(3000, 10'800'000, 5000);
         std::vector<std::string> delivered;
         for (std::size_t i = 0; i < r.mock->times.size(); ++i)
             if (r.mock->times[i] >= 9'000'000) delivered.push_back(content_of(r.mock->bodies[i]));
         check(delivered.size() == 2, "after 2.5 h offline: two messages (" + std::to_string(delivered.size()) + ")");
         if (delivered.size() == 2) {
-            check(delivered[0] == "GoBot · 03:10 15/10 — " + alert_text::gave_up_restarts(5),
+            check(delivered[0] == "GoBot · 03:10 15/10 — " + alert_text::gave_up_restarts(5, "04:10:00"),
                   "the one that needs a person, first, with its time and date");
             check(contains(delivered[1], "Trong lúc mất mạng có 3 thông báo không gửi được (lần cuối 03:10)."),
                   "messages older than 2 h become one summary: " + delivered[1]);
@@ -1183,7 +1225,7 @@ void test_local() {
     r.at(0);
     r.raise("disconnect", alert_text::disconnect(CrashWatch::Trouble::Gone, "", true), 2000);
     r.at(2000);
-    r.raise("back_in", alert_text::back_in(1, 5), 4000);
+    r.raise("back_in", alert_text::back_in(1), 4000);
     r.at(4000);
     check(r.notifier.toasts.size() == 3 && r.notifier.beeps == 1, "three notifications, one beep within 10 s");
     r.raise("revived", alert_text::revived(), 12'000);

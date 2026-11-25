@@ -1,75 +1,54 @@
-// The gate between your HP and MP from the packets and the bars on the
-// screen (the packets plan, item D). See gobot/vitals_trust.hpp. Pure: GoBot's
-// window feeds it and asks it (apps/gobot_gui/packets_vitals.cpp).
+// Your HP and MP from the packets (the packets plan, item D): when they go,
+// and the bars' figures set beside them for the log. See gobot/vitals_trust.hpp.
+// Pure: GoBot's window feeds it and asks it (apps/gobot_gui/packets_vitals.cpp).
 
 #include "gobot/vitals_trust.hpp"
 
 #include <algorithm>
-#include <cmath>
+#include <string>
 
 namespace gobot {
 namespace {
 
-bool contains(const std::vector<std::uint32_t>& values, std::uint32_t v) {
-    return std::find(values.begin(), values.end(), v) != values.end();
+/// A figure the reader made short of the packets' value: one digit lost
+/// anywhere, or any number of them off the front.
+bool lost_digits(int figure, std::uint32_t packet) {
+    return figure_lost_a_digit(figure, packet) || figure_lost_leading_digits(figure, packet);
 }
 
-/// `v` remembered among `values`, at most `most` of them.
-void remember(std::vector<std::uint32_t>& values, std::uint32_t v, std::size_t most) {
-    if (!contains(values, v) && values.size() < most) values.push_back(v);
+int rank(BarCompare::Verdict v) {
+    switch (v) {
+        case BarCompare::Verdict::Same:  return 0;
+        case BarCompare::Verdict::Short: return 1;
+        case BarCompare::Verdict::Other: return 2;
+    }
+    return 2;
 }
 
 } // namespace
 
-// ---- BarCheck ----
-
-BarCheck::BarCheck(bool hp) : hp_(hp) {}
-
-const char* BarCheck::state_name(State s) {
-    switch (s) {
-        case State::Learning: return "learning";
-        case State::Trusted:  return "trusted";
-        case State::Doubt:    return "in doubt";
-        case State::Off:      return "off";
-    }
-    return "?";
-}
-
-float BarCheck::percent(std::uint32_t value, std::uint32_t max) {
+float vitals_percent(std::uint32_t value, std::uint32_t max) {
     if (max == 0) return -1.0f;
     const float pct = static_cast<float>(value) * 100.0f / static_cast<float>(max);
     return std::clamp(pct, 0.0f, 100.0f);
 }
 
-BarCheck::Verdict BarCheck::judge(const Point& got, const Read& read, bool& judged, float figure_slack_pct) {
-    judged = true;
+// ---- BarCompare ----
+
+BarCompare::Verdict BarCompare::compare(const Point& p, const Read& r) {
     // The figures printed on the bar are the game's own numbers: the packet
     // value is them or it is not. A maximum the packets do not know yet (the
-    // highest value seen) is not held against it.
-    if (read.figure >= 0 && read.figure_max > 0) {
-        const std::uint32_t fmax = static_cast<std::uint32_t>(read.figure_max);
-        if (got.max_known && got.max != fmax) return Verdict::Disagree;
-        const std::uint32_t fig = static_cast<std::uint32_t>(read.figure);
-        if (got.value == fig) return Verdict::Agree;
-        // The HUD ahead of 0x0051 by a hit or a cast: between, no step either
-        // way -- within the slack, which settle() gives only a trust earned.
-        const std::uint32_t off = got.value > fig ? got.value - fig : fig - got.value;
-        const float apart = static_cast<float>(off) * 100.0f / static_cast<float>(fmax);
-        return apart <= figure_slack_pct ? Verdict::Between : Verdict::Disagree;
-    }
-    // The bar's length: near enough agrees, far enough disagrees, and the
-    // band between says nothing.
-    if (!got.max_known || got.max == 0) {
-        judged = false;
-        return Verdict::Between;
-    }
-    const float d = std::fabs(percent(got.value, got.max) - read.pct);
-    if (d <= kAgreePoints) return Verdict::Agree;
-    if (d > kDisagreePoints) return Verdict::Disagree;
-    return Verdict::Between;
+    // highest value seen) is not held against them.
+    const std::uint32_t fmax = static_cast<std::uint32_t>(std::max(0, r.figure_max));
+    const bool max_same = !p.max_known || p.max == fmax;
+    const bool max_short = !max_same && lost_digits(r.figure_max, p.max);
+    if (!max_same && !max_short) return Verdict::Other;
+    if (r.figure >= 0 && p.value == static_cast<std::uint32_t>(r.figure))
+        return max_same ? Verdict::Same : Verdict::Short;
+    return lost_digits(r.figure, p.value) ? Verdict::Short : Verdict::Other;
 }
 
-void BarCheck::packet(const Point& p) {
+void BarCompare::packet(const Point& p) {
     // In the order they came; one out of order -- never, from one capture --
     // is put where its time says.
     auto at = points_.end();
@@ -78,269 +57,79 @@ void BarCheck::packet(const Point& p) {
     if (points_.size() > kPoints) points_.erase(points_.begin(), points_.begin() + (points_.size() - kPoints));
 }
 
-void BarCheck::max_changed() {
+void BarCompare::max_changed() {
     for (Point& p : points_) p.max_known = false;
 }
 
-void BarCheck::screen(const Read& r) {
-    if (r.pct < 0.0f || r.read_at_ms == 0) return;
+void BarCompare::screen(const Read& r) {
+    if (r.read_at_ms == 0 || r.figure < 0 || r.figure_max <= 0) return;
     pending_.push_back(r);
     if (pending_.size() > kPending) pending_.erase(pending_.begin(), pending_.begin() + (pending_.size() - kPending));
 }
 
-void BarCheck::over_max(std::uint64_t now_ms) {
-    ++counts_.over_max;
-    apply(Verdict::Disagree, Read{}, Point{}, -1.0f, true, now_ms);
-}
-
-void BarCheck::settle(std::uint64_t now_ms, std::uint32_t epoch) {
+void BarCompare::settle(std::uint64_t now_ms, std::uint32_t epoch) {
     std::size_t done = 0;
     for (; done < pending_.size(); ++done) {
         const Read r = pending_[done];
-        if (r.read_at_ms + kHalfWindowMs + kJudgeSlackMs > now_ms) break;
-        if (figures_only_ && (r.figure < 0 || r.figure_max <= 0) && r.pct >= kBarTrueBelowPct) {
-            ++counts_.no_figures;
-            continue;
-        }
-        if (figures_only_ && (r.figure < 0 || r.figure_max <= 0) && r.pct < kEmptyBelowPct) {
-            ++counts_.empty;
-            continue;
-        }
-        const std::uint64_t from = r.read_at_ms > kHalfWindowMs ? r.read_at_ms - kHalfWindowMs : 0;
-        const std::uint64_t to = r.read_at_ms + kHalfWindowMs;
+        if (r.read_at_ms + kLeadMs + kJudgeSlackMs > now_ms) break;
+        const std::uint64_t from = r.read_at_ms > kBeforeMs ? r.read_at_ms - kBeforeMs : 0;
+        const std::uint64_t to = r.read_at_ms + kLeadMs;
         // The value in force as the window opened, and every one that came
-        // inside it: the same value throughout, or nothing is said.
+        // inside it, of this epoch: the best verdict among them, and for one
+        // not Same the value nearest the figure.
+        bool any = false;
+        Verdict best = Verdict::Other;
+        Point at;
+        std::uint32_t off = 0;
+        const auto consider = [&](const Point& p) {
+            if (p.epoch != epoch) return;
+            const Verdict v = compare(p, r);
+            const std::uint32_t fig = static_cast<std::uint32_t>(r.figure);
+            const std::uint32_t d = p.value > fig ? p.value - fig : fig - p.value;
+            if (!any || rank(v) < rank(best) || (v == best && v == Verdict::Other && d < off)) {
+                best = v;
+                at = p;
+                off = d;
+            }
+            any = true;
+        };
         const Point* base = nullptr;
-        bool moving = false;
-        bool stale = false;
         for (const Point& p : points_) {
             if (p.at_ms <= from) {
                 base = &p;
                 continue;
             }
             if (p.at_ms > to) break;
-            if (base == nullptr || p.value != base->value || p.max != base->max) moving = true;
-            if (p.epoch != epoch) stale = true;
+            consider(p);
         }
-        if (base == nullptr) {
+        if (base != nullptr) consider(*base);
+        if (!any) {
             ++counts_.no_packet;
             continue;
         }
-        if (moving) {
-            ++counts_.moving;
-            continue;
+        switch (best) {
+            case Verdict::Same:  ++counts_.same; break;
+            case Verdict::Short: ++counts_.short_digits; break;
+            case Verdict::Other: ++counts_.other; break;
         }
-        if (stale || base->epoch != epoch) {
-            ++counts_.stale;
-            continue;
+        if (best != Verdict::Same) {
+            odd_.push_back(Odd{ best, r, at });
+            if (odd_.size() > kOddKept) odd_.erase(odd_.begin());
         }
-        // A trust earned allows for the HUD's lead over 0x0051; while learning
-        // only the figures exactly, at the read, count -- as hard to earn as
-        // ever.
-        const bool keeping = state_ == State::Trusted || state_ == State::Doubt;
-        bool judged = false;
-        Verdict v = judge(*base, r, judged, keeping ? (hp_ ? kFigureSlackHpPct : kFigureSlackMpPct) : 0.0f);
-        if (!judged) {
-            ++counts_.no_maximum;
-            continue;
-        }
-        // Figures that did not agree, 0x0051 may yet reach: the read -- and
-        // every one after it, judged in their order -- waits kLeadMs for that.
-        // A value equal to them by then, of this epoch and not of another
-        // maximum, agrees.
-        const Point* against = base;
-        if (keeping && v != Verdict::Agree && r.figure >= 0 && r.figure_max > 0) {
-            if (r.read_at_ms + kLeadMs + kJudgeSlackMs > now_ms) break;
-            for (const Point& p : points_) {
-                if (p.at_ms <= to) continue;
-                if (p.at_ms > r.read_at_ms + kLeadMs) break;
-                if (p.epoch == epoch && p.value == static_cast<std::uint32_t>(r.figure) &&
-                    (!p.max_known || p.max == static_cast<std::uint32_t>(r.figure_max))) {
-                    v = Verdict::Agree;
-                    against = &p;
-                    ++counts_.caught_up;
-                    break;
-                }
-            }
-        }
-        apply(v, r, *against, against->max_known ? percent(against->value, against->max) : -1.0f, false, now_ms);
     }
     pending_.erase(pending_.begin(), pending_.begin() + done);
 }
 
-int BarCheck::recent_disagreements() const {
-    const std::size_t n = std::min(recent_n_, kRecent);
-    int out = 0;
-    for (std::size_t i = 0; i < n; ++i) out += recent_[(recent_n_ - 1 - i) % kRecent] ? 1 : 0;
-    return out;
-}
-
-void BarCheck::apply(Verdict v, const Read& r, const Point& p, float packet_pct, bool over, std::uint64_t now) {
-    const bool exact = r.figure >= 0 && r.figure_max > 0;
-    switch (v) {
-        case Verdict::Between:
-            // Counts for nothing: neither a step towards trust nor away.
-            ++counts_.between;
-            return;
-        case Verdict::Agree:
-            ++counts_.agree;
-            if (exact) ++counts_.exact;
-            remember(count_values_, p.value, kValuesKept);
-            counts_.values = count_values_.size();
-            if (counts_.lowest < 0.0f || r.pct < counts_.lowest) counts_.lowest = r.pct;
-            recent_[recent_n_++ % kRecent] = false;
-            row_ = 0;
-            episode_ = false;
-            break;
-        case Verdict::Disagree: {
-            ++counts_.disagree;
-            // Kept for the log with the state it was judged in; an over_max
-            // has no read to keep.
-            if (!over && r.pct >= 0.0f) {
-                disagreements_.push_back(Disagreement{ now, state_, r, p });
-                if (disagreements_.size() > kDisagreementsKept) disagreements_.erase(disagreements_.begin());
-            }
-            // One HUD moment against one packet value is one disagreement,
-            // however many reads see it: reads come every 150 ms, and two of
-            // them 163 ms apart, 11031 against one 12643, put MP off for the
-            // session (2026-11-03 22:44:28.552 and .715). Each new packet
-            // value starts a new one -- not each 0x0051: a frame that moved
-            // only the other bar repeats this bar's value at a new time.
-            const int pct = static_cast<int>(std::lround(r.pct));
-            if (!over && episode_ && episode_value_ == p.value && episode_max_ == p.max &&
-                episode_epoch_ == p.epoch && episode_figure_ == r.figure && episode_pct_ == pct) {
-                ++counts_.same_episode;
-                return;
-            }
-            episode_ = !over;
-            episode_value_ = p.value;
-            episode_max_ = p.max;
-            episode_epoch_ = p.epoch;
-            episode_figure_ = r.figure;
-            episode_pct_ = pct;
-            recent_[recent_n_++ % kRecent] = true;
-            ++row_;
-            break;
-        }
-    }
-
-    switch (state_) {
-        case State::Off:
-            return;
-        case State::Learning:
-            if (v == Verdict::Agree) {
-                ++learn_agree_;
-                if (exact) ++learn_exact_;
-                remember(learn_values_, p.value, kValuesKept);
-                if (r.pct < kLowPct) low_seen_ = true;
-                if (learn_agree_ >= needed_ && static_cast<int>(learn_values_.size()) >= kTrustValues &&
-                    recent_disagreements() == 0 && (!hp_ || low_seen_))
-                    move_to(State::Trusted, now, r, p, packet_pct, over, false);
-            }
-            return;
-        case State::Trusted:
-        case State::Doubt:
-            if (v == Verdict::Disagree) {
-                const bool row = row_ >= kDisagreeRow;
-                if (row || recent_disagreements() >= kDisagreeRecent) {
-                    // Distrusted: learnt again from the start, and for longer.
-                    ++distrusts_;
-                    move_to(distrusts_ >= kDistrustsOff ? State::Off : State::Learning, now, r, p, packet_pct, over,
-                            row);
-                } else if (state_ == State::Trusted) {
-                    move_to(State::Doubt, now, r, p, packet_pct, over, false);
-                } else {
-                    // Still in doubt: the agreements in a row start again.
-                    doubt_agree_ = 0;
-                }
-            } else if (state_ == State::Doubt && ++doubt_agree_ >= kDoubtClears) {
-                move_to(State::Trusted, now, r, p, packet_pct, over, false);
-            }
-            return;
-    }
-}
-
-void BarCheck::move_to(State to, std::uint64_t now, const Read& r, const Point& p, float packet_pct, bool over,
-                       bool in_a_row) {
-    Change c;
-    c.from = state_;
-    c.to = to;
-    c.at_ms = now;
-    c.read = r;
-    c.packet = p;
-    c.packet_pct = packet_pct;
-    c.over_max = over;
-    c.in_a_row = in_a_row;
-    c.agreements = learn_agree_;
-    c.values = static_cast<int>(learn_values_.size());
-    c.exact = learn_exact_;
-    c.distrusts = distrusts_;
-    changes_.push_back(c);
-
-    state_ = to;
-    since_ms_ = now;
-    doubt_agree_ = 0;
-    if (to == State::Learning || to == State::Off) {
-        learn_agree_ = 0;
-        learn_exact_ = 0;
-        learn_values_.clear();
-        low_seen_ = false;
-        needed_ = kRelearnAgreements;
-    }
-}
-
-BarCheck::Progress BarCheck::progress() const {
-    Progress out;
-    out.state = state_;
-    out.since_ms = since_ms_;
-    out.agreements = learn_agree_;
-    out.needed = needed_;
-    out.values = static_cast<int>(learn_values_.size());
-    out.low_seen = low_seen_;
-    out.doubt_agreements = doubt_agree_;
-    out.distrusts = distrusts_;
-    return out;
-}
-
-std::vector<BarCheck::Change> BarCheck::take_changes() {
-    std::vector<Change> out;
-    out.swap(changes_);
-    return out;
-}
-
-BarCheck::Counts BarCheck::take_counts() {
+BarCompare::Counts BarCompare::take_counts() {
     const Counts out = counts_;
     counts_ = Counts{};
-    count_values_.clear();
     return out;
 }
 
-std::vector<BarCheck::Disagreement> BarCheck::take_disagreements() {
-    std::vector<Disagreement> out;
-    out.swap(disagreements_);
+std::vector<BarCompare::Odd> BarCompare::take_odd() {
+    std::vector<Odd> out;
+    out.swap(odd_);
     return out;
-}
-
-// ---- HandOver ----
-
-void HandOver::start(float pct, std::uint64_t read_at_ms) {
-    pct_ = pct;
-    read_at_ = read_at_ms;
-    live_ = pct >= 0.0f && read_at_ms != 0;
-    ++started_;
-}
-
-float HandOver::give(std::uint64_t now_ms, std::uint64_t screen_at_ms, std::uint64_t stale_ms) {
-    if (!live_) return -1.0f;
-    // The screen has a newer read of its own to give: it decides from here.
-    // That very read is no reason to stop -- the pace cut back to the run's
-    // on the next tick takes it from the screen (paced_from_ms) until a newer
-    // one lands. Or this one is too old to drink on: nobody's then.
-    if (screen_at_ms > read_at_ || now_ms > read_at_ + stale_ms) {
-        live_ = false;
-        return -1.0f;
-    }
-    return pct_;
 }
 
 // ---- PeriodWindow ----
@@ -383,8 +172,6 @@ const char* vitals_unusable_why(const VitalsUsable& in, std::uint64_t now_ms) {
     if (in.last_server_ms == 0 || (now_ms > in.last_server_ms && now_ms - in.last_server_ms > kLinkQuietMs))
         return "the server quiet for 5 s";
     if (!in.max_known) return "no maximum yet";
-    if (!in.reading) return "the bars are not being read, so nothing checks the packets";
-    if (!in.trusted) return "the check against the bars says no";
     return "";
 }
 
@@ -393,13 +180,17 @@ bool vitals_usable(const VitalsUsable& in, std::uint64_t now_ms) { return *vital
 bool vitals_rest_allowed(const VitalsRest& in, std::uint64_t now_ms) {
     if (!in.hp_usable || !in.mp_usable || in.usable_since_ms == 0) return false;
     if (now_ms < in.usable_since_ms || now_ms - in.usable_since_ms < kRestAfterUsableMs) return false;
-    if (in.pet_key || in.critical || in.finding_bars || in.hp_zero_since_ms != 0) return false;
+    // A pet potion key is no reason to keep the run's pace: it rests quicker
+    // (vitals_rest_period_ms), as the pet's HP is only on the screen.
+    if (in.critical || in.finding_bars || in.hp_zero_since_ms != 0) return false;
     if (in.death_seen_ms != 0 && (now_ms < in.death_seen_ms || now_ms - in.death_seen_ms < kRestAfterDeathMs))
         return false;
     return true;
 }
 
-int vitals_rest_period_ms(int run_ms, int idle_ms) { return std::max(run_ms, std::min(idle_ms, kRestMostMs)); }
+int vitals_rest_period_ms(int run_ms, int idle_ms, bool pet_key) {
+    return std::max(run_ms, std::min(idle_ms, pet_key ? kRestPetMs : kRestMostMs));
+}
 
 bool map_load_holds(const MapLoad& in, std::uint64_t now_ms) {
     if (!in.on_window || in.entry_ms == 0 || in.last_server_ms == 0) return false;
@@ -414,6 +205,32 @@ bool figure_lost_leading_one(int figure, std::uint32_t packet) {
     std::uint32_t place = 1;
     while (packet / place >= 10) place *= 10;
     return packet / place == 1 && static_cast<std::uint32_t>(figure) == packet - place;
+}
+
+bool figure_lost_a_digit(int figure, std::uint32_t packet) {
+    if (figure < 0 || packet < 100) return false;
+    const std::string whole = std::to_string(packet);
+    const std::string fig = std::to_string(figure);
+    if (fig.size() >= whole.size()) return false;
+    for (std::size_t i = 0; i < whole.size(); ++i) {
+        std::string less = whole;
+        less.erase(i, 1);
+        // As the reader gives it: "0500" (10500 less its 1) is 500.
+        const std::size_t lead = std::min(less.find_first_not_of('0'), less.size() - 1);
+        if (less.compare(lead, std::string::npos, fig) == 0) return true;
+    }
+    return false;
+}
+
+bool figure_lost_leading_digits(int figure, std::uint32_t packet) {
+    // 0 is HP at 0 -- a death is the screen's to say -- never digits lost.
+    if (figure <= 0 || packet < 100) return false;
+    const std::uint64_t whole = packet;
+    // Each place under the packet value's first digit: what is left once the
+    // digits from there up are gone. "0500" (10500 less its 1) reads as 500.
+    for (std::uint64_t place = 10; place <= whole; place *= 10)
+        if (whole % place == static_cast<std::uint64_t>(figure)) return true;
+    return false;
 }
 
 } // namespace gobot

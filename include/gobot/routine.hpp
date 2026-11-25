@@ -1,31 +1,60 @@
 #pragma once
 
-#include "gobot/dialog_driver.hpp"
-
 #include <string>
 #include <vector>
 
 namespace gobot {
 
+class TemplateStore;
+
+/// One step of a routine in configs/routines.ini, as the file writes it. The
+/// runner that clicked through these, DialogDriver, is gone (2026.11.16): the
+/// steps are read now for what they say -- the reviver's first picture comes
+/// from the "revive" routine (auto_chat.cpp) -- and keep the name they had.
+struct DialogDriver {
+    /// One thing to find and click.
+    struct Step {
+        /// What marks the page or the button. A name in the template store.
+        std::string find;
+
+        /// Where to click, from the picture's top-left. -1 for both means its
+        /// middle, which is right for a button and wrong for a page marker --
+        /// hence the offsets.
+        int click_dx = -1;
+        int click_dy = -1;
+
+        /// What proves the click landed. Either something that must appear, or
+        /// (when `gone` is set) `find` itself having to disappear.
+        std::string confirm;
+        bool gone = false;
+
+        /// false for a step nothing on screen can prove -- one whose
+        /// confirmation would be up before the click as well as after, as the
+        /// shop's Mua is for the item picked in its list. It names no
+        /// `confirm` and no `gone`.
+        bool check = true;
+
+        /// How well the pictures have to match, how long to wait for `find`,
+        /// and how long to wait for the confirmation.
+        float score = 0.80f;
+        int   wait_ms = 6000;
+        int   confirm_ms = 4000;
+
+        /// How many times to click before giving up. Bounded, always.
+        int attempts = 3;
+
+        /// A step that may simply not apply: a popup that is sometimes there,
+        /// a confirmation the game only asks for sometimes.
+        bool optional = false;
+    };
+};
+
 /// A named sequence of dialog steps, kept in a config file rather than in code.
 ///
-/// Nearly every feature left to build is a sequence of clicks through the
-/// game's own dialogs. Buying a fishing rod is: find the rod in the shop list,
-/// click it, click buy, confirm. Mining is the same shape at a different NPC.
-/// Opening a crest box, exchanging tokens, setting a party's loot rule --
-/// all of them.
-///
-/// Written as C++ that would be twenty near-identical functions, each with its
-/// own slightly different retry loop, and each needing a rebuild when the game
-/// moves a button by four pixels. Written as data it is a table somebody can
-/// correct in a text editor while the game is open in front of them, which is
-/// the only way this gets maintained once the pictures stop matching -- and
-/// they will, because the publisher patches the client.
-///
-/// The auto-login flow already works this way and that is the precedent. What
-/// is not data is the part that is genuinely decision-making: knowing a pickaxe
-/// has broken, knowing the bag is full, knowing how many fish have been caught.
-/// Those live in code and call routines to do the clicking.
+/// Written as data it is a table somebody can correct in a text editor while
+/// the game is open in front of them, which is the only way this gets
+/// maintained once the pictures stop matching -- and they will, because the
+/// publisher patches the client.
 struct Routine {
     std::string name;
     std::vector<DialogDriver::Step> steps;
@@ -44,8 +73,7 @@ struct Routine {
     ///     3.gone    = true
     ///
     /// Step 1 says check = false: the shop's Mua is up whether or not the rod
-    /// was picked, so nothing on screen can show that click landed, and a run
-    /// says it was not checked.
+    /// was picked, so nothing on screen can show that click landed.
     ///
     /// Numbers run from one and stop at the first gap, so commenting a step out
     /// truncates the routine rather than silently shifting the rest up.
@@ -59,10 +87,7 @@ struct Routine {
     static const Routine* find(const std::vector<Routine>& routines,
                                const std::string& name);
 
-    /// Every picture any of these routines mentions. For checking a set of
-    /// routines against a template store before running any of them -- a
-    /// routine that refers to a picture nobody has is a routine that fails
-    /// halfway, having already clicked three things.
+    /// Every picture any of these routines mentions.
     static std::vector<std::string> pictures_used(const std::vector<Routine>& routines);
 
     /// Which of `routines` mention a picture the store does not have.

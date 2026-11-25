@@ -42,6 +42,22 @@ bool valid_ipv4(const std::string& s) {
     return !s.empty() && inet_pton(AF_INET, s.c_str(), &addr) == 1;
 }
 
+/// A trouble line of the capture's own (2026.11.24, the owner: "cần thay cơ
+/// chế này bằng 1 cơ chế khác" -- the capture for positions is now tried again
+/// every 30 s at most, not every 10 min): at ERROR the first time of an
+/// episode, at DEBUG while `said` says the episode's lines are out. Whoever
+/// owns `said` sets it once the failure is over and clears it once the thing
+/// works again.
+template <typename... Args>
+void trouble(const std::atomic<bool>& said, const char* fmt, Args&&... args) {
+    Logger::instance().logf(said.load() ? LogLevel::Debug : LogLevel::Error, fmt, std::forward<Args>(args)...);
+}
+
+/// The adapters' list would not be read (pcap_findalldevs): said once until
+/// it reads again. Every look for the game's adapter asks for it, and a start
+/// may look three times.
+std::atomic<bool> g_devices_trouble_said{false};
+
 } // namespace
 
 PacketCapture::PacketCapture() {
@@ -121,10 +137,12 @@ std::vector<Interface> PacketCapture::list_interfaces() {
     char errbuf[PCAP_ERRBUF_SIZE]{};
 
     if (pcap_findalldevs(&devices, errbuf) == -1) {
-        GB_ERROR("pcap_findalldevs failed: %s", errbuf);
-        GB_ERROR("Npcap installed? Running as Administrator?");
+        trouble(g_devices_trouble_said, "pcap_findalldevs failed: %s", errbuf);
+        trouble(g_devices_trouble_said, "Npcap installed? Running as Administrator?");
+        g_devices_trouble_said.store(true);
         return out;
     }
+    g_devices_trouble_said.store(false);
 
     for (pcap_if_t* d = devices; d; d = d->next) {
         Interface iface;
@@ -306,14 +324,15 @@ bool PacketCapture::open_device(const std::string& name, const std::string& filt
                                config_.promiscuous ? 1 : 0,
                                config_.read_timeout_ms,
                                errbuf);
+    // Each refusal said once an episode (trouble_said_, 2026.11.24).
     if (!h) {
-        GB_ERROR("pcap_open_live(%s) failed: %s", name.c_str(), errbuf);
+        trouble(trouble_said_, "pcap_open_live(%s) failed: %s", name.c_str(), errbuf);
         return false;
     }
 
     if (pcap_datalink(h) != DLT_EN10MB) {
-        GB_ERROR("Interface %s is not Ethernet (datalink %d); unsupported",
-                 name.c_str(), pcap_datalink(h));
+        trouble(trouble_said_, "Interface %s is not Ethernet (datalink %d); unsupported", name.c_str(),
+                pcap_datalink(h));
         pcap_close(h);
         return false;
     }
@@ -321,12 +340,12 @@ bool PacketCapture::open_device(const std::string& name, const std::string& filt
     if (!filter.empty()) {
         bpf_program prog{};
         if (pcap_compile(h, &prog, filter.c_str(), 1, PCAP_NETMASK_UNKNOWN) == -1) {
-            GB_ERROR("Failed to compile BPF '%s': %s", filter.c_str(), pcap_geterr(h));
+            trouble(trouble_said_, "Failed to compile BPF '%s': %s", filter.c_str(), pcap_geterr(h));
             pcap_close(h);
             return false;
         }
         if (pcap_setfilter(h, &prog) == -1) {
-            GB_ERROR("Failed to set BPF filter: %s", pcap_geterr(h));
+            trouble(trouble_said_, "Failed to set BPF filter: %s", pcap_geterr(h));
             pcap_freecode(&prog);
             pcap_close(h);
             return false;
@@ -345,10 +364,17 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
         return false;
     }
 
-    if (!npcap_available()) {
-        GB_ERROR("Npcap is not installed, its service is not running, or its DLL would not "
-                 "load. Install Npcap and start the service.");
+    // A refusal's lines are out: the next refusal's go to the debug log until
+    // a packet is read again (trouble_said_, 2026.11.24).
+    const auto refused = [this] {
+        trouble_said_.store(true);
         return false;
+    };
+
+    if (!npcap_available()) {
+        trouble(trouble_said_, "Npcap is not installed, its service is not running, or its DLL would not "
+                               "load. Install Npcap and start the service.");
+        return refused();
     }
 
     config_ = cfg;
@@ -359,11 +385,11 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
         if (iface.empty()) iface = default_interface();
     }
     if (iface.empty()) {
-        GB_ERROR("No capture interface found. Run with --list to see options.");
-        return false;
+        trouble(trouble_said_, "No capture interface found. Run with --list to see options.");
+        return refused();
     }
 
-    if (!open_device(iface, build_filter(cfg))) return false;
+    if (!open_device(iface, build_filter(cfg))) return refused();
 
     // Tell the reassembler which side is the server whenever we know. Without
     // it, direction on an already-established connection is inferred, and a
@@ -408,6 +434,7 @@ bool PacketCapture::start(const CaptureConfig& cfg) {
     }
 
     stopping_.store(false);
+    dead_.store(false);
     // Counted before the threads start, so the first frame of this capture
     // is never handed on under the count of the one before.
     starts_.fetch_add(1);
@@ -438,6 +465,8 @@ void PacketCapture::stop() {
 
     if (capture_thread_.joinable())  capture_thread_.join();
     if (watchdog_thread_.joinable()) watchdog_thread_.join();
+    // Stopped, dead or not: nothing of it runs any more.
+    dead_.store(false);
 
     if (handle_) {
         pcap_close(handle_);
@@ -474,13 +503,35 @@ void PacketCapture::capture_loop() {
         const int rc = pcap_next_ex(handle_, &header, &data);
 
         if (rc == 1 && header && data) {
+            // A packet read: any trouble's episode is over -- the next is said
+            // in full again (2026.11.24).
+            if (trouble_said_.load(std::memory_order_relaxed)) trouble_said_.store(false);
+            // Npcap's stamp against Windows' clock now: take_read_delay.
+            const std::int64_t stamp_us =
+                static_cast<std::int64_t>(header->ts.tv_sec) * 1'000'000 + static_cast<std::int64_t>(header->ts.tv_usec);
+            const std::int64_t read_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count();
+            {
+                std::lock_guard<std::mutex> lock(delay_mutex_);
+                delay_.add(stamp_us, read_us);
+            }
             on_raw_packet(data, header->caplen, now_ms());
         } else if (rc == 0) {
             // Read timeout; normal.
         } else if (rc == -2) {
             break;      // breakloop
         } else {
-            GB_ERROR("pcap_next_ex failed: %s", pcap_geterr(handle_));
+            // A read that failed -- the adapter gone, its driver stopped: this
+            // capture hears nothing more. Marked dead (2026.11.24), for its
+            // owner to stop it and start another, rather than left counted as
+            // running, deaf, until something else had it started again; said
+            // once an episode.
+            trouble(trouble_said_, "pcap_next_ex failed: %s -- the capture hears nothing more until it is started "
+                                   "again",
+                    pcap_geterr(handle_));
+            trouble_said_.store(true);
+            dead_.store(true);
             break;
         }
 
@@ -802,6 +853,30 @@ bool PacketCapture::replay(const std::uint8_t* frame, std::size_t caplen,
     return true;
 }
 
+void PacketCapture::DelayMeter::add(std::int64_t stamp_us, std::int64_t read_us) {
+    const std::int64_t d = read_us - stamp_us;
+    if (n_ == 0 || d < min_us_) min_us_ = d;
+    if (n_ == 0 || d > max_us_) max_us_ = d;
+    sum_us_ += static_cast<double>(d);
+    ++n_;
+}
+
+PacketCapture::ReadDelay PacketCapture::DelayMeter::take() {
+    ReadDelay r;
+    r.packets = n_;
+    if (n_ > 0) {
+        r.avg_ms = (sum_us_ / static_cast<double>(n_) - static_cast<double>(min_us_)) / 1000.0;
+        r.max_ms = static_cast<double>(max_us_ - min_us_) / 1000.0;
+    }
+    *this = DelayMeter{};
+    return r;
+}
+
+PacketCapture::ReadDelay PacketCapture::take_read_delay() {
+    std::lock_guard<std::mutex> lock(delay_mutex_);
+    return delay_.take();
+}
+
 void PacketCapture::flush_batch() {
     std::vector<GamePacket> out;
     {
@@ -824,6 +899,8 @@ void PacketCapture::flush_batch() {
 
 void PacketCapture::watchdog_loop() {
     name_this_thread("capture watchdog");
+    // A look a second that can wait for the game's slice to end.
+    quiet_this_thread();
     // A live game connection is never silent for long — there is always a
     // heartbeat or a position update. Prolonged silence means the game closed
     // or the adapter changed, and the bot should stop pressing keys.

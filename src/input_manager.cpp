@@ -269,6 +269,10 @@ bool ctrl_goes_down(const InputManager::SentEvent& e) {
            vk == static_cast<unsigned>(VK_RCONTROL);
 }
 
+/// Set by InputManager::gate_down alone, on its own thread, for its one
+/// press of ↓: send_key and inject both let that ↓ go.
+thread_local bool t_gate_down = false;
+
 /// InputManager::bare_down_in over any array of events: `at(i)` is the i-th.
 template <class At>
 bool bare_down_among(std::size_t n, bool chord, At at) {
@@ -353,7 +357,9 @@ void note_key_marks(const INPUT* in, UINT went, bool text) {
 UINT inject(INPUT* in, UINT count, const char* what, bool chord = false) {
     if (in == nullptr || count == 0) return 0;
     const auto at = [in](std::size_t i) { return sent_event(in[i]); };
-    if (bare_down_among(count, chord, at)) {
+    // gate_down's one ↓ is let through here too (2026.11.19 live run: it
+    // passed send_key and was refused here, 34 presses, no gate taken).
+    if (!t_gate_down && bare_down_among(count, chord, at)) {
         if (!g_said_bare_down.exchange(true))
             GB_WARN("Not sending Down (vk 0x28) outside Ctrl + Down: standing on a gate it takes the character "
                     "to another map (%s)", what != nullptr ? what : "?");
@@ -751,15 +757,23 @@ std::uint16_t InputManager::scan_code(std::uint32_t vk) {
     return static_cast<std::uint16_t>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC));
 }
 
+bool InputManager::gate_down(int hold_ms) {
+    t_gate_down = true;
+    const bool ok = key_press(0x28, hold_ms);
+    t_gate_down = false;
+    GB_INFO("Down (vk 0x28) pressed on purpose to take a gate -- %s", ok ? "sent" : "not sent");
+    return ok;
+}
+
 bool InputManager::send_key(std::uint32_t vk, bool down, bool owed) {
     // No key, or no window to send it to: nothing to do, and nothing to refuse.
     if (vk == 0 || hwnd_.load() == nullptr) return false;
 
     // ↓ on a gate changes the map. Never down, whichever setting asked for it
-    // -- a key box set to it before it refused it, the packet bot's drop --
-    // and said once. Its key-up is let through: it lets go of nothing GoBot
-    // holds.
-    if (down && never_pressed(vk)) {
+    // -- a key box set to it before it refused it -- and said once. Its key-up is let through: it lets go of nothing GoBot
+    // holds. Only gate_down presses it (2026.11.19, Đào khoáng and Cổ Thụ:
+    // taking a gate is the point there).
+    if (down && never_pressed(vk) && !t_gate_down) {
         if (!said_never_.exchange(true))
             GB_WARN("Not pressing Down (vk 0x28): standing on a gate it takes the character to another map "
                     "-- a key set to it presses nothing");
@@ -900,96 +914,6 @@ void InputManager::release_all() {
     if (!keys.empty()) GB_DEBUG("Released %zu held key(s)", keys.size());
 }
 
-// ----------------------------------------------------------------- movement
-
-bool InputManager::move_left() {
-    if (block_movement_.load()) return false;
-    if (held(key_right_)) key_up(key_right_);
-    if (held(key_left_)) return true;        // already moving
-    return key_down(key_left_);
-}
-
-bool InputManager::move_right() {
-    if (block_movement_.load()) return false;
-    if (held(key_left_)) key_up(key_left_);
-    if (held(key_right_)) return true;
-    return key_down(key_right_);
-}
-
-bool InputManager::stop_move() {
-    bool any = false;
-    if (held(key_left_))  any |= key_up(key_left_);
-    if (held(key_right_)) any |= key_up(key_right_);
-    return any;
-}
-
-bool InputManager::jump() {
-    if (block_movement_.load()) return false;
-    return key_press(key_jump_);
-}
-
-bool InputManager::double_jump() {
-    if (block_movement_.load()) return false;
-    if (!key_press(key_jump_)) return false;
-    // The second press must land while airborne but after the engine has
-    // registered the first; too fast and it is swallowed.
-    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(180, 240)));
-    return key_press(key_jump_);
-}
-
-// The packet bot's old drop, ↓ held under the jump key: always refused, as
-// ↓ is never pressed (send_key). It stays so; the drop is drop_ctrl_down.
-bool InputManager::jump_down() {
-    if (block_movement_.load()) return false;
-    if (!key_down(key_down_)) return false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    const bool ok = key_press(key_jump_);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    send_key(key_down_, false, true);
-    return ok;
-}
-
-bool InputManager::face_left() {
-    if (block_movement_.load()) return false;
-    // A tap short enough to turn the character without displacing it.
-    if (!key_down(key_left_)) return false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(18));
-    return send_key(key_left_, false, true);
-}
-
-bool InputManager::face_right() {
-    if (block_movement_.load()) return false;
-    if (!key_down(key_right_)) return false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(18));
-    return send_key(key_right_, false, true);
-}
-
-// ------------------------------------------------------------------ actions
-
-bool InputManager::use_skill(std::uint32_t vk) {
-    if (block_attack_.load()) return false;
-    return key_press(vk);
-}
-
-bool InputManager::normal_attack() {
-    if (block_attack_.load()) return false;
-    return key_press(key_attack_);
-}
-
-bool InputManager::loot() { return key_press(key_loot_); }
-
-bool InputManager::send_chat(const std::string& text, std::uint32_t chat_key) {
-    // It pressed Enter and typed whatever it was given, one byte at a time as
-    // Unicode, without looking: a Vietnamese letter came out as two wrong
-    // characters, the game ignores Unicode input in at least one of its boxes,
-    // and letters typed when the line had not opened were skill keys. A line
-    // needs a look at the screen before each key, which ChatSender does.
-    (void)chat_key;
-    GB_WARN("Chat: send_chat typed nothing (%zu bytes asked for): a line is only typed once "
-            "the screen shows the chat line open, which ChatSender does", text.size());
-    return false;
-}
-
 // ------------------------------------------------------------------- typing
 
 InputManager::KeyEvent InputManager::typed_key_event(std::uint32_t vk, bool down, KeyInject how) {
@@ -1082,8 +1006,15 @@ bool InputManager::bare_down_in(const SentEvent* events, std::size_t n, bool cho
 
 void InputManager::set_pretend_sender(PretendSender* p) { g_pretend.store(p); }
 
-unsigned InputManager::pretend_inject(const std::vector<SentEvent>& events) {
+unsigned InputManager::pretend_inject(const std::vector<SentEvent>& events, bool as_gate_down) {
     if (pretend() == nullptr || events.empty()) return 0;
+    // As gate_down sets it around its one press (send_key itself refuses
+    // every key while real input is off, so a test meets inject this way).
+    struct GateFlag {
+        bool on;
+        explicit GateFlag(bool b) : on(b) { if (on) t_gate_down = b; }
+        ~GateFlag() { if (on) t_gate_down = false; }
+    } gate(as_gate_down);
     std::vector<INPUT> in(events.size());
     for (std::size_t i = 0; i < events.size(); ++i) {
         const SentEvent& e = events[i];
@@ -1961,25 +1892,6 @@ bool InputManager::type_text(const std::string& utf8) {
     return true;
 }
 
-// ------------------------------------------------------------------- timing
-
-void InputManager::set_delay_range(int min_ms, int max_ms) {
-    std::lock_guard<std::mutex> lock(rng_mutex_);
-    if (max_ms < min_ms) std::swap(min_ms, max_ms);
-    delay_min_ = std::max(0, min_ms);
-    delay_max_ = std::max(delay_min_, max_ms);
-}
-
-int InputManager::random_delay() const {
-    std::lock_guard<std::mutex> lock(rng_mutex_);
-    if (delay_max_ <= delay_min_) return delay_min_;
-    return delay_min_ + static_cast<int>(rng_() % static_cast<unsigned>(delay_max_ - delay_min_ + 1));
-}
-
-void InputManager::sleep_jitter(int base_ms) const {
-    std::this_thread::sleep_for(std::chrono::milliseconds(base_ms + random_delay()));
-}
-
 // ---------------------------------------------------------------- key names
 
 std::uint32_t InputManager::parse_key(const std::string& text) {
@@ -2078,8 +1990,5 @@ std::string InputManager::key_name(std::uint32_t vk) {
     std::snprintf(buf, sizeof(buf), "0x%02X", vk);
     return buf;
 }
-
-/// Bridge for config.cpp, which needs key labels without including this header.
-std::string InputManagerKeyName(std::uint32_t vk) { return InputManager::key_name(vk); }
 
 } // namespace gobot

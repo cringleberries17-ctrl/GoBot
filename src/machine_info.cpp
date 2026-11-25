@@ -45,6 +45,30 @@ std::string join(const std::vector<std::string>& parts) {
     return out;
 }
 
+/// "only 1 logical CPU", "only 2 logical CPUs": a weak PC's signals, in English.
+std::string cpus_said(int cpus) {
+    return "only " + std::to_string(cpus) + (cpus == 1 ? " logical CPU" : " logical CPUs");
+}
+
+/// "only 3584 MB of RAM usable". Usable, as Windows counts it: a PC sold
+/// with 4 GB shows a little under (what the graphics chip and the firmware
+/// keep), and is weak too -- so the line says the figure Windows gave rather
+/// than "under 4 GB", which its owner would take for a wrong reading.
+std::string ram_said(std::uint64_t mb) {
+    return "only " + std::to_string(mb) + " MB of RAM usable";
+}
+
+/// "chỉ có 3,5 GB RAM dùng được": the same in Vietnamese, in GB with one
+/// decimal and a comma, as players write it.
+std::string ram_said_vi(std::uint64_t mb) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f", static_cast<double>(mb) / 1024.0);
+    std::string gb = buf;
+    for (char& c : gb)
+        if (c == '.') c = ',';
+    return "chỉ có " + gb + " GB RAM dùng được";
+}
+
 } // namespace
 
 std::string feature_level_name(unsigned level) {
@@ -68,6 +92,14 @@ LightSignals judge_machine(const MachineSignals& m) {
     // integrity on sets too -- its vendor is "Microsoft Hv", and that is no
     // reason for light mode.
     s.cpuid_vmware = m.hypervisor_bit && m.hypervisor_vendor == "VMwareVMware";
+    // A weak PC, whatever else it is. On one core every one of GoBot's wakes
+    // takes the CPU from the game, and with under 4 GB the game and GoBot
+    // both page; light mode's slower reads and frames are what such a PC
+    // needs. The owner's 20-CPU, 64 GB PC stays as it was.
+    s.logical_cpus = m.logical_cpus;
+    s.ram_mb = m.ram_mb;
+    s.few_cpus = m.logical_cpus > 0 && m.logical_cpus <= kWeakCpus;
+    s.little_ram = m.ram_mb > 0 && m.ram_mb < kWeakRamMb;
     return s;
 }
 
@@ -80,6 +112,8 @@ std::string LightSignals::describe(const MachineSignals& m) const {
     if (software_renderer)
         parts.push_back(m.renderer.warp ? "WARP device (no usable graphics driver)"
                                         : "Microsoft Basic Render Driver (no real graphics card)");
+    if (few_cpus) parts.push_back(cpus_said(logical_cpus));
+    if (little_ram) parts.push_back(ram_said(ram_mb));
     return parts.empty() ? std::string("none") : join(parts);
 }
 
@@ -119,13 +153,27 @@ LightDecision resolve_light_mode(LightSetting setting, const LightSignals& signa
     std::vector<std::string> why;
     if (signals.vmware()) why.push_back("VMware guest");
     if (signals.software_renderer) why.push_back("no real graphics card");
+    if (signals.few_cpus) why.push_back(cpus_said(signals.logical_cpus));
+    if (signals.little_ram) why.push_back(ram_said(signals.ram_mb));
     d.why = join(why);
+
+    // The simple screen's line. A weak PC's figures follow a VMware guest or
+    // a missing card ("..., chỉ có 2 nhân."), or stand alone ("Tự bật vì máy
+    // chỉ có 1 nhân."); without them the lines are those of before.
+    std::vector<std::string> weak_vi;
+    if (signals.few_cpus) weak_vi.push_back("chỉ có " + std::to_string(signals.logical_cpus) + " nhân");
+    if (signals.little_ram) weak_vi.push_back(ram_said_vi(signals.ram_mb));
+    std::string head;
     if (signals.vmware() && signals.software_renderer)
-        d.why_vi = "Tự bật vì GoBot thấy đây là máy ảo VMware, không có card đồ hoạ thật.";
+        head = "Tự bật vì GoBot thấy đây là máy ảo VMware, không có card đồ hoạ thật";
     else if (signals.vmware())
-        d.why_vi = "Tự bật vì GoBot thấy đây là máy ảo VMware.";
+        head = "Tự bật vì GoBot thấy đây là máy ảo VMware";
+    else if (signals.software_renderer)
+        head = "Tự bật vì máy không có card đồ hoạ thật";
+    if (!head.empty())
+        d.why_vi = head + (weak_vi.empty() ? "" : ", " + join(weak_vi)) + ".";
     else
-        d.why_vi = "Tự bật vì máy không có card đồ hoạ thật.";
+        d.why_vi = "Tự bật vì máy " + join(weak_vi) + ".";
     return d;
 }
 
@@ -163,7 +211,10 @@ std::string describe_renderer(const RendererInfo& r) {
 std::string describe_machine(const MachineSignals& m, const LightSignals& s, LightSetting setting,
                              const LightDecision& light) {
     std::string out = "Machine: ";
-    out += s.vmware() ? "VMware guest" : s.software_renderer ? "no real graphics card" : "no VMware signal";
+    out += s.vmware()            ? "VMware guest"
+           : s.software_renderer ? "no real graphics card"
+           : s.weak()            ? "weak PC"
+                                 : "no VMware signal";
     out += " (signals: " + s.describe(m) + ")";
     // The hypervisor bit with another vendor is said but not counted: Hyper-V,
     // VBS or Memory integrity on the PC itself, or another kind of VM.

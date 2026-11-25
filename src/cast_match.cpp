@@ -248,6 +248,7 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
         k->buff = std::find(buff_keys.begin(), buff_keys.end(), p.vk) != buff_keys.end();
         ++k->pressed;
         ++k->pressed_all;
+        Burst* burst = nullptr;
         if (k->buff) {
             // Its burst: joined within kBurstGapMs of the last press, else
             // the one before judged and a new one begun.
@@ -256,6 +257,7 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
             if (open != open_bursts_.end() && p.at_ms <= open->last_ms + kBurstGapMs) {
                 open->last_ms = p.at_ms;
                 ++open->presses;
+                burst = &*open;
             } else {
                 if (open != open_bursts_.end()) {
                     const Burst done = *open;
@@ -267,12 +269,32 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
                 b.first_ms = b.last_ms = p.at_ms;
                 b.presses = 1;
                 open_bursts_.push_back(b);
+                burst = &open_bursts_.back();
             }
         }
+        // One cast a burst (2026.11.17): the game casts a buff once for its
+        // presses, and the repeats' windows reached 1.3 s past the first --
+        // they took the rotation's next skill cast, so every buff key read "4
+        // pressed, 2 cast", half its casts of kind 1, and key 6 never learned
+        // its 31206. A burst's press after the one paired pairs nothing.
+        if (burst != nullptr && burst->took) continue;
         const std::uint64_t from = p.at_ms > kEarlyMs ? p.at_ms - kEarlyMs : 0;
         const std::uint64_t to = p.at_ms + kPairMs;
+        // A buff's press takes a kind-2 cast in its window first, the kind a
+        // buff's is (DOCUMENTED, not PROVEN: cast_match.hpp's Burst); none,
+        // the first as any press does.
+        Cast* pick = nullptr;
         for (Cast& c : casts_) {
             if (c.vk != 0 || c.settled || c.at_ms < from || c.at_ms > to) continue;
+            if (burst == nullptr || c.frame.kind == 2) {
+                pick = &c;
+                break;
+            }
+            if (pick == nullptr) pick = &c;
+        }
+        if (pick != nullptr) {
+            Cast& c = *pick;
+            if (burst != nullptr) burst->took = true;
             c.vk = p.vk;
             c.press_ms = p.at_ms;
             ++k->cast;
@@ -289,7 +311,6 @@ void CastMatch::pair(const std::vector<Press>& presses, const std::vector<std::u
             paired.skill = c.frame.skill;
             k->recent.push_back(paired);
             if (k->recent.size() > kRecent) k->recent.erase(k->recent.begin());
-            break;
         }
     }
     pair_from_ = until;
@@ -408,6 +429,17 @@ std::uint32_t CastMatch::learned(std::uint32_t vk) const {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const Key& k : keys_)
         if (k.vk == vk) return k.skill;
+    return 0;
+}
+
+int CastMatch::learned_reach(std::uint32_t vk) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::uint32_t skill = 0;
+    for (const Key& k : keys_)
+        if (k.vk == vk) skill = k.skill;
+    if (skill == 0) return 0;
+    for (const Reach& r : reach_)
+        if (r.skill == skill) return r.casts >= kReachCasts ? r.most_dx : 0;
     return 0;
 }
 

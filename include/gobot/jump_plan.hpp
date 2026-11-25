@@ -11,14 +11,21 @@
 // held, no steering in the air -- at the game's own 0x002A speeds: ↑ -20 a
 // step, the second ↑ of ↑↑ setting it to -20 again (state 6), Ctrl + ↑ -36
 // (state 2), 40 steps a second. Gravity is not known to better than a
-// bracket: kJumpUpGravity, GoC's 2400 between the walk-off's 1.4 a step and
-// 10 % more. ↑↑'s second key goes kJumpUpSecondAtMs after the first, late or
-// early by the press's jitter and the game's lag. So each key's peak is a
-// range (jump_peak), and a floor is landed on for sure only kJumpUpClearPx
-// under the lowest peak, with none between that and kJumpUpClearPx over the
-// highest. The owner's "Theo GoC" of 2026-11-05 -- ↑ ~133, ↑↑ ~280, Ctrl + ↑
-// ~432 px -- are nominal peaks: within these ranges, or above them, and so
-// only upper bounds.
+// bracket: kJumpUpGravity, the one both readings of the live flights of
+// 2026-11-12 fit (2026.11.12c). ↑↑'s second key goes kJumpUpSecondAtMs after
+// the first, late or early by the press's jitter and the game's lag. So each
+// key's peak is a range (jump_peak) -- ↑ 133..169, ↑↑ 250..337, Ctrl + ↑
+// 432..546 -- and a floor is landed on for sure only kJumpUpClearPx under the
+// lowest peak, with none between that and kJumpUpClearPx over the highest
+// but platforms inside the box, all of them (2026.11.12c: the plan lands on
+// the sure floor, a landing on any of them works). The owner's "Theo GoC" of
+// 2026-11-05 -- ↑ ~133, ↑↑ ~280, Ctrl + ↑ ~432 px -- are nominal peaks:
+// within these ranges, and so only upper bounds.
+//
+// The client of 2026-11-12 sent no 0x002A state 1, 2 or 6 in the air: a
+// jump's kind is told by its take-off's vertical speed (kJumpUpHighVyStep),
+// a second push by a speed more upward than a free flight's by then
+// (kJumpUpSecondPushStep) -- the state only a second witness.
 //
 // The owner's answers of 2026-11-05 that live here: the arc may pass above
 // the box's top, the take-off, the landing and the monster inside it (Q3);
@@ -54,9 +61,22 @@ const char* jump_kind_key(JumpKind k);
 /// Ctrl + ↑ (-36 x 40).
 inline constexpr double kJumpUpV = 800.0;
 inline constexpr double kJumpUpVHigh = 1440.0;
-/// Gravity, px/s², lowest to highest: the walk-off's 1.4 a step, GoC's 2400,
-/// and 10 % over it.
-inline constexpr double kJumpUpGravity[] = { 2240.0, 2400.0, 2640.0 };
+/// Gravity, px/s², lowest to highest (2026.11.12c): the bracket both readings
+/// of the live flights fit -- g≈1905 from GoBot's Ctrl + ↑ of 2026-11-12
+/// 23:23:03 taken at face value, and GoC's 2400 with a landing report ~0.3 s
+/// late (the owner's Ctrl + ↑ from 1803 at x 1707 came down on 1390, not
+/// 1330). It was 2240..2640 until 2026.11.12b: Ctrl + ↑'s usable 380 refused
+/// the owner's own 418 px rise.
+inline constexpr double kJumpUpGravity[] = { 1900.0, 2300.0, 2400.0 };
+/// A jump's kind by its first 0x002A in the air (2026.11.12c), px per 25 ms
+/// step, below 0 up: a take-off at this speed or more upward is Ctrl + ↑'s
+/// (-36; ↑'s is -20); a report at least kJumpUpSecondAfterMs after the
+/// take-off this fast upward, and kJumpUpSecondPushStep more upward than a
+/// free flight from the take-off would be by then, is ↑↑'s second push.
+inline constexpr float kJumpUpHighVyStep = -28.0f;
+inline constexpr float kJumpUpSecondVyStep = -18.0f;
+inline constexpr int   kJumpUpSecondAfterMs = 100;
+inline constexpr float kJumpUpSecondPushStep = 8.0f;
 /// ↑↑: the second key goes this long after the first key went down (what
 /// InputManager::jump_twice is given), and is modelled at its push from this
 /// much before it to this much after it: 0.28 to 0.45 s after the take-off.
@@ -99,6 +119,19 @@ inline constexpr int kJumpUpSearchPx = 600;
 /// or down of a gate, as Ctrl + ↓ is. ↑ and ↑↑ are never banded.
 inline constexpr bool kJumpUpGateBand = false;
 
+/// The foot of a step of the ground (2026.11.12c, t49_s5's 2816,1703, the
+/// owner's "Chỉ Ctrl+↑ tại chỗ"): a stand this near the step's face, on the
+/// floor under it, is at its foot; the ledge on top must run on this far, its
+/// standing points inside the box; and the key pressed there, in place.
+inline constexpr int      kWallFootPx = GameMapBook::kStepLipPx;
+inline constexpr int      kWallLedgeRunPx = 64;
+inline constexpr JumpKind kWallFootKind = JumpKind::CtrlUp;
+/// The owner's plain ↑ past the upper bar (2026.11.12c): the floors it may
+/// come down on are looked for this far either way of the stand, every
+/// kBarUpMarginStepPx.
+inline constexpr int kBarUpMarginPx = 8;
+inline constexpr int kBarUpMarginStepPx = 4;
+
 /// A key's peak above the feet, px: lowest (the highest gravity, ↑↑'s second
 /// push at the worst end of its window) to highest -- whole pixels, the
 /// lowest rounded down and the highest up.
@@ -107,11 +140,17 @@ struct JumpPeak {
     int hi = 0;
     /// The highest floor top, above the take-off floor's, landed on for sure.
     int usable() const { return lo - kJumpUpClearPx; }
-    /// The next floor above must be higher than this.
+    /// The next floor above must be higher than this -- or a platform inside
+    /// the box (2026.11.12c).
     int beyond() const { return hi + kJumpUpClearPx; }
 };
-/// ↑ 121..143, ↑↑ 213..286, Ctrl + ↑ 392..463: usable to 109, 201 and 380.
+/// ↑ 133..169, ↑↑ 250..337, Ctrl + ↑ 432..546: usable to 121, 238 and 420
+/// (2026.11.12c; 109, 201 and 380 until 2026.11.12b).
 JumpPeak jump_peak(JumpKind k);
+/// The shortest full arc of a key, s: up and down again at the highest
+/// gravity from its take-off speed (Ctrl + ↑'s, or ↑'s): 0.667 s for ↑ and
+/// ↑↑, 1.2 s for Ctrl + ↑.
+double jump_shortest_arc_s(JumpKind k);
 
 /// Why a jump is refused, the first that holds. A take-off column's
 /// (judge_column) up to Solid; a monster's or a way's (plan_jump_to) the rest.
@@ -125,12 +164,13 @@ enum class JumpNo : std::uint8_t {
     Edge,           ///< the landing's floor ends, or changes, within the margin
     Outside,        ///< the take-off, the landing or the monster outside the box
     Weaker,         ///< lost Ctrl or lost second ↑: the plain ↑ lands outside, or is blocked
-    Learned,        ///< a jump of this key, or a weaker one, failed here this session
-    Solid,          ///< the landing's floor turned out solid from below this session
+    Learned,        ///< a jump of this key, or a weaker one, failed here a moment ago (Hunter::kLearnedForgetMs)
+    Solid,          ///< the landing's floor fell back twice a moment ago (Hunter::kLearnedForgetMs)
     Gate,           ///< Ctrl + ↑ by a gate (kJumpUpGateBand only)
     Narrow,         ///< take-off columns that pass, but no run kJumpUpRunMinPx wide
     Far,            ///< lands on the monster's floor, but out of reach and the walk to it leaves the box
     NotTargetFloor, ///< lands, but on another floor than the monster's
+    Foot,           ///< a wall-foot jump (2026.11.12c): not at the foot of a step
 };
 /// For the log: "falls short", "a floor outside the area above", ...
 const char* jump_no_name(JumpNo w);
@@ -156,6 +196,10 @@ struct JumpRules {
     /// one, did not get up (Learned), a landing floor solid from below
     /// (Solid). None to let it go.
     std::function<JumpNo(MapPoint take, int land_top, JumpKind kind)> refused;
+    /// Wall-foot jumps (2026.11.12c) may be planned: by kWallFootJumps alone
+    /// since 2026.11.24 (one that landed elsewhere has its take-off skipped a
+    /// while; until then wall-foot jumps were off for the run after it).
+    bool wall_foot = true;
 
     bool allows(JumpKind k) const { return ((kinds >> static_cast<int>(k)) & 1u) != 0; }
 };
@@ -175,6 +219,14 @@ struct JumpColumn {
     /// column and top; -1 none.
     int    bad_x = -1;
     int    bad_top = -1;
+    /// The highest floor top in the key's uncertain band over every margin
+    /// column -- platforms inside the box, accepted (2026.11.12c): a landing
+    /// on any floor from the sure one up to it works. -1 none.
+    int    band_top = -1;
+    /// A wall-foot jump's (judge_wall_foot): the highest platform a straight
+    /// arc from the take-off column could come down on, for the log; -1 none.
+    int    arc_top = -1;
+    int    arc_x = -1;
 
     bool ok() const { return why == JumpNo::None; }
 };
@@ -183,13 +235,18 @@ struct JumpColumn {
 ///   1. it stands on a floor that is not a wall, inside the box -- or, coming
 ///      back into it, no more than `take_out_px` outside (zone_outside_px:
 ///      walk_stays_in's Closer);
-///   2. at every column kJumpUpMarginPx either way, every kJumpUpMarginStepPx:
-///      no floor not a platform up to the highest peak + kJumpUpHeadPx; no
-///      floor outside the box up to rules.ceiling_px; no floor top in the
-///      uncertain band (JumpPeak::usable .. beyond); a floor reached for sure
-///      -- the highest no higher than usable() -- or a hole of it no wider
-///      than kFollowHolePx; the neighbours' floors linked as Page::follow
-///      links them;
+///   2. at every column kJumpUpMarginPx either way, every kJumpUpMarginStepPx,
+///      the character's own floor followed there and what is under it never
+///      counted (2026.11.12c: its own slope is no floor above): no floor not
+///      a platform up to the highest peak + kJumpUpHeadPx; no floor outside
+///      the box up to rules.ceiling_px -- for ↑ and ↑↑ no higher than their
+///      reach, beyond() + kJumpUpHeadPx; no floor top in the uncertain band
+///      (JumpPeak::usable .. beyond) but platforms whose standing points are
+///      inside the box, all of them (2026.11.12c: the plan lands on the sure
+///      floor, and a landing on any of them works -- band_top); a floor reached
+///      for sure -- the highest no higher than usable() -- or a hole of it no
+///      wider than kFollowHolePx; the neighbours' floors linked as
+///      Page::follow links them;
 ///   3. the landing's standing point inside the box;
 ///   4. for ↑↑ and Ctrl + ↑, the plain ↑ a lost key leaves lands back or in
 ///      the box, unblocked;
@@ -210,11 +267,52 @@ struct JumpPlan {
     int      run_r = 0;
     int      walk_px = 0;       ///< across, from where the character stands
     int      score = 0;         ///< kind x kJumpUpKindCostPx + walk_px + the headroom short, weighted
+    /// The highest floor of the key's uncertain band at its column (JumpColumn::
+    /// band_top, 2026.11.12c): a landing on any floor up to it works. -1 none.
+    int      band_top = -1;
+    /// A wall-foot jump (2026.11.12c, the owner's "Chỉ Ctrl+↑ tại chỗ"):
+    /// kWallFootKind in place at the foot of a step of the ground, onto its
+    /// top -- x the floor's last column before the step, land_x the step's.
+    bool     wall = false;
 
     MapPoint take() const { return { x, feet_y }; }
     /// Where it stands after: a standing point on the landing floor.
     MapPoint land() const { return { land_x, land_top - 1 }; }
 };
+
+/// The owner's plain ↑ past the upper bar (2026.11.12c): every floor a
+/// straight ↑ from `take` may come down on -- the take-off floor, and each
+/// platform (attr 1; or an attribute GoC does not name) with a rise in
+/// (kJumpUpFeetPx, jump_peak(Up).hi + kJumpUpClearPx] at take.x ±
+/// kBarUpMarginPx -- stands inside the box. Solid floors above are no landing
+/// (a head bump). No band, ceiling, edge or run rule: nothing is planned to be
+/// landed on. The character's own slope is no floor above. None: ok, land_top
+/// the take-off floor's; Outside with bad_x/bad_top the floor; OffFloor; then
+/// rules.refused for Up (Learned, Solid).
+JumpColumn bar_up_landings(const GameMapBook::Page& p, const HuntZone& z, MapPoint take, const JumpRules& rules);
+
+/// A wall-foot jump judged (2026.11.12c, t49_s5's step at 2816): `take` a
+/// standing point on the floor at the foot of a step of the ground `dir` of
+/// it (below 0 the step on the left). In order: kWallFootKind allowed; on a
+/// floor not a wall, the step within kWallFootPx (Foot); the ledge solid
+/// ground, its rise up to kStepMaxPx and usable() (Short), running on
+/// kWallLedgeRunPx inside the box (Edge); no floor not a platform over the
+/// take-off side or the ledge in the head's way (Blocked); a lost Ctrl's plain
+/// ↑ no floor outside the box within its reach (Weaker); the take-off inside
+/// the box or no further out than `take_out_px` (Outside); rules.refused. Not
+/// the ceiling nor the band: those are a straight arc's, and the owner's
+/// Ctrl + ↑ lands on the step. arc_top/arc_x: the highest platform a straight
+/// arc could come down on, for the log.
+JumpColumn judge_wall_foot(const GameMapBook::Page& p, const HuntZone& z, MapPoint take, int dir,
+                           const JumpRules& rules, int take_out_px = 0);
+
+/// The wall-foot jumps from where the character stands: its floor followed
+/// each way kJumpUpSearchPx to a step of the ground (MapTrail::step), the walk
+/// there coming no further out of the box than the stand, the foot judged by
+/// judge_wall_foot. With rules.wall_foot off, or kWallFootKind not allowed,
+/// none.
+std::vector<JumpPlan> wall_foot_jumps(const GameMapBook::Page& p, const HuntZone& z, MapPoint stand,
+                                      const JumpRules& rules);
 
 /// A jump onto the floor of a monster above: `stand`, where the character
 /// stands; `target`, the monster's floor's standing point at its column (its
@@ -236,7 +334,8 @@ std::optional<JumpPlan> plan_jump_to(const GameMapBook::Page& p, const HuntZone&
 /// The jumps from where the character stands -- its floor looked along as for
 /// plan_jump_to, coming back into the box by walk_stays_in's Closer -- onto
 /// any floor in the box: the cheapest per landing floor (known by its two
-/// ends, Page::follow), cheapest first. A way back's legs (return_point).
+/// ends, Page::follow), cheapest first; the wall-foot jumps among them
+/// (2026.11.12c, wall_foot_jumps). A way back's legs (return_point).
 std::vector<JumpPlan> jump_legs_from(const GameMapBook::Page& p, const HuntZone& z, MapPoint stand,
                                      const JumpRules& rules);
 

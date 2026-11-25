@@ -1,6 +1,7 @@
 #include "gobot/routine.hpp"
 #include "gobot/config.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/template_matcher.hpp"
 
 #include <algorithm>
 #include <set>

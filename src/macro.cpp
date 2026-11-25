@@ -369,9 +369,13 @@ bool MacroConfig::load(const std::string& path) {
     // and every key on its timer, as it was. The rest are GoC's own numbers.
     skills_follow_fight = ini.get_bool("Macro", "skills_follow_fight", false);
     sequential_skills   = ini.get_bool("Macro", "sequential_skills", true);
-    // Missing from a file written before 2026.11.08: off, every key on its
-    // own timer as it was.
-    cast_paced          = ini.get_bool("Macro", "cast_paced", false);
+    // On since 2026.11.16b (the owner's "Ra chiêu theo vòng cả khi đánh
+    // quái", on by default): a file written before it -- kCastPacedKey not in
+    // it -- is on, whatever its cast_paced says. That false was the shipped
+    // default of 2026.11.08, written back by every save, not a choice; read,
+    // it kept every player off. A file with the key was written by
+    // 2026.11.16b or later, and what it says is the player's: an untick kept.
+    cast_paced          = ini.get_bool("Macro", kCastPacedKey, true);
     skill_mp_floor_pct  = std::clamp(ini.get_int("Macro", "skill_mp_floor_pct", 10), 0, kSkillMaxMpFloor);
     skill_gap_ms        = static_cast<std::uint32_t>(
         std::clamp(ini.get_int("Macro", "skill_gap_ms", 50), static_cast<int>(kSkillGapMinMs),
@@ -513,7 +517,10 @@ void MacroConfig::store(IniFile& ini) const {
     ini.set_int ("Macro", "panic_key", static_cast<int>(panic_key));
     ini.set_bool("Macro", "skills_follow_fight", skills_follow_fight);
     ini.set_bool("Macro", "sequential_skills", sequential_skills);
+    // Both: the key read since 2026.11.16b, and the old one, the same, for an
+    // older GoBot reading this file.
     ini.set_bool("Macro", "cast_paced", cast_paced);
+    ini.set_bool("Macro", kCastPacedKey, cast_paced);
     ini.set_int ("Macro", "skill_mp_floor_pct", skill_mp_floor_pct);
     ini.set_int ("Macro", "skill_gap_ms", static_cast<int>(skill_gap_ms));
     ini.set_int ("Macro", "key_hold_min_ms", static_cast<int>(key_hold_min_ms));
@@ -703,6 +710,10 @@ void MacroEngine::set_config(const MacroConfig& cfg) {
     config_ = cfg;
     config_.keys = std::move(keys);
     key_ids_ = std::move(ids);
+    // The passes take it up at their next copy, and a sequence waiting while
+    // off looks again.
+    ++config_gen_;
+    seq_wake_.notify_all();
 }
 
 int MacroEngine::slot(std::size_t i) const {
@@ -796,10 +807,28 @@ bool MacroEngine::vital_potion_due(const std::function<bool(std::uint32_t)>& thr
     return false;
 }
 
-MacroEngine::OwnPotion MacroEngine::own_potion_due(const std::vector<std::uint32_t>& never) const {
+std::uint32_t MacroEngine::hp_potion_due(int* mark) const {
+    // HP's alone, by vital_potion_due's rule (2026.11.21, bag::drink_yield).
+    float hp, mp, pet;
+    current_vitals(hp, mp, pet);
+    const std::uint64_t now = clock_now();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!config_.timers_enabled) return 0;
+    const int i = macro_urgent_potion(config_.keys, MacroKeyKind::HpPotion, hp);
+    if (i < 0 || static_cast<std::size_t>(i) >= config_.keys.size()) return 0;
+    const MacroKey& k = config_.keys[static_cast<std::size_t>(i)];
+    if (!potion_cooled(k, i, hp, now, config_.potion_urgent_ms)) return 0;
+    if (mark != nullptr) *mark = k.threshold_pct;
+    return k.keycode;
+}
+
+MacroEngine::OwnPotion MacroEngine::own_potion_due(
+    const std::vector<std::uint32_t>& never, const std::function<bool(std::uint32_t, std::uint32_t)>& cooling,
+    bool macro_cooled) const {
     OwnPotion out;
     float hp, mp, pet;
     current_vitals(hp, mp, pet);
+    const std::uint64_t now = clock_now();
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config_.timers_enabled) return out;
     for (std::size_t n = 0; n < 2; ++n) {
@@ -813,11 +842,28 @@ MacroEngine::OwnPotion MacroEngine::own_potion_due(const std::vector<std::uint32
             if (out.refused == 0) out.refused = k.keycode;
             continue;
         }
+        // The line's cooldown -- or potion_urgent_ms with the reading under
+        // half the highest mark on its key, as potion_cooled has it for the
+        // timer pass (the 2026.11.12b review: a charm run at 30% drank once
+        // every 3 s where the macro drinks once a second).
+        std::uint32_t cooldown = macro_potion_cooldown_ms(config_, k);
+        if (config_.potion_urgent_ms != 0 && v >= 0.0f && !potion_kind_braked(k)) {
+            int mark = k.threshold_pct;
+            for (const MacroKey& o : config_.keys)
+                if (o.enabled && o.keycode != 0 && o.keycode == k.keycode && o.interval_ms != 0 &&
+                    macro_key_kind(o) == kind)
+                    mark = std::max(mark, o.threshold_pct);
+            if (v * 2.0f < static_cast<float>(mark)) cooldown = std::min(cooldown, config_.potion_urgent_ms);
+        }
+        // Still cooling -- the engine's own press, when asked, or the
+        // caller's: the other kind is looked at (2026.11.12b).
+        if (macro_cooled && !potion_cooled(k, i, v, now, config_.potion_urgent_ms)) continue;
+        if (cooling && cooling(k.keycode, cooldown)) continue;
         out.vk = k.keycode;
         out.hp = kind == MacroKeyKind::HpPotion;
         out.pct = v;
         out.mark = k.threshold_pct;
-        out.cooldown_ms = macro_potion_cooldown_ms(config_, k);
+        out.cooldown_ms = cooldown;
         return out;
     }
     return out;
@@ -1225,6 +1271,7 @@ void MacroEngine::arm(std::uint64_t now) {
     // timer thread's first pass comes 10 ms in. The first look clears this
     // when nothing is due, and with no potion to look at there is no wait.
     for (PotionKind& pk : potion_kind_) pk = PotionKind{};
+    potion_braked_.fill(false);
     potion_count_ms_ = 0;
     hp_up_ms_ = 0;
     mp_up_ms_ = 0;
@@ -1338,9 +1385,32 @@ void MacroEngine::step_sequence() {
 void MacroEngine::stop() {
     if (!running_.exchange(false)) return;
     stepped_ = false;
+    // A sequence waiting while off is woken to see the stop. mutex_ taken
+    // first: it either has not yet looked at running_ and will see it false,
+    // or is already waiting and gets the call.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+    }
+    seq_wake_.notify_all();
 
     if (timer_thread_.joinable()) timer_thread_.join();
     if (seq_thread_.joinable())   seq_thread_.join();
+    // Stopped, nothing keeps the potions' brake up to date: run_potions, the
+    // only thing that lifts it, runs only while the macro does. A bag or
+    // charm job drinking on its own after the stop (own_potion_due) must not
+    // stay on the slow cooldown because of a brake left from the run before.
+    // The threads are joined, so nothing sets it again behind this.
+    for (PotionKind& pk : potion_kind_) {
+        pk.unrisen = 0;
+        pk.unrisen_from = -1.0f;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        potion_braked_.fill(false);
+    }
+    // Stopped, the rotation presses nothing: the hunter swings its own key
+    // again (swing_yields).
+    swing_yield_vk_.store(0);
 
     // A key left held keeps repeating in the game long after the macro has
     // "stopped", which is the single most alarming way for this to misbehave.
@@ -1591,12 +1661,22 @@ bool MacroEngine::potion_first(std::uint64_t now) const {
     return until != 0 && now < until;
 }
 
+bool MacroEngine::potion_kind_braked(const MacroKey& k) const {
+    const MacroKeyKind kind = macro_key_kind(k);
+    for (std::size_t n = 0; n < std::size(kPotionKinds); ++n)
+        if (kPotionKinds[n] == kind) return potion_braked_[n];
+    return false;
+}
+
 bool MacroEngine::potion_cooled(const MacroKey& k, int s, float v, std::uint64_t now,
                                 std::uint32_t urgent_ms) const {
     if (s < 0 || static_cast<std::size_t>(s) >= due_ms_.size()) return false;
     const std::size_t at = static_cast<std::size_t>(s);
     if (now >= due_ms_[at]) return true;
     if (urgent_ms == 0 || v < 0.0f) return false;
+    // A reading that pressed after press never saw rise: its own cooldown
+    // (kBrakeAfterChecks, 2026.11.17).
+    if (potion_kind_braked(k)) return false;
     // Far below the highest mark on its key: Lv1 and Lv2 on one key are one
     // potion in the game, and one cooldown here.
     const MacroKeyKind kind = macro_key_kind(k);
@@ -1676,13 +1756,75 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
                 const int j = macro_urgent_potion(cfg.keys, kind, cur);
                 const bool wants = j >= 0 && cfg.keys[static_cast<std::size_t>(j)].keycode == check_key;
                 const bool rose = std::max(cur, peak) >= before + MacroConfig::kRecheckRisePct;
+                const char* const what = kind == MacroKeyKind::HpPotion ? "HP" : kind == MacroKeyKind::MpPotion ? "MP" : "Pet";
+                // Presses in a row the reading never rose after (2026.11.17):
+                // a reading stuck -- MP's caption covered, read 3% where it
+                // was full -- pressed once a second for ever, the potion
+                // drunk each time and the skills held for each. From the
+                // kBrakeAfterChecks-th, the key's own cooldown. HP's counted
+                // only while it has not fallen from the first of them: a
+                // character losing the fight is not braked.
+                bool braked;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    braked = potion_braked_[n];
+                }
+                if (wants && !rose) {
+                    const bool fell = kind == MacroKeyKind::HpPotion && pk.unrisen > 0 &&
+                                      cur < pk.unrisen_from - MacroConfig::kRecheckRisePct;
+                    // HP falling under a brake: a fight being lost, not a
+                    // reading stuck -- the quick presses back at once.
+                    if (fell && braked) {
+                        braked = false;
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            potion_braked_[n] = false;
+                        }
+                        GB_INFO("Potion check: HP key %s -- the reading fell to %.0f%%: its quicker presses back",
+                                InputManager::key_name(check_key).c_str(), static_cast<double>(cur));
+                    }
+                    if (pk.unrisen == 0 || fell) {
+                        pk.unrisen = 0;
+                        pk.unrisen_from = before;
+                    }
+                    ++pk.unrisen;
+                    if (!braked && pk.unrisen >= kBrakeAfterChecks) {
+                        braked = true;
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            potion_braked_[n] = true;
+                        }
+                        const MacroKey* key = nullptr;
+                        for (const MacroKey& k : cfg.keys)
+                            if (k.keycode == check_key && macro_key_kind(k) == kind) key = &k;
+                        GB_INFO("Potion check: %s key %s pressed %d times and the reading never rose (%.0f%%) -- the "
+                                "bar may be misread, or the potion does nothing: at its own %u ms cooldown until it "
+                                "rises",
+                                what, InputManager::key_name(check_key).c_str(), pk.unrisen,
+                                static_cast<double>(cur),
+                                key != nullptr ? macro_potion_cooldown_ms(cfg, *key) : 0u);
+                    }
+                } else {
+                    pk.unrisen = 0;
+                    pk.unrisen_from = -1.0f;
+                    if (braked) {
+                        braked = false;
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            potion_braked_[n] = false;
+                        }
+                        GB_INFO("Potion check: %s key %s -- the reading %s (%.0f%%): its quicker presses back", what,
+                                InputManager::key_name(check_key).c_str(), rose ? "rose" : "is over the mark",
+                                static_cast<double>(cur));
+                    }
+                }
                 {
                     std::lock_guard<std::mutex> lock(stats_mutex_);
                     ++stats_.potion_checks;
-                    if (wants && !rose && !was_early) ++stats_.potion_repressed;
+                    if (wants && !rose && !was_early && !braked) ++stats_.potion_repressed;
                 }
-                if (wants && !rose) {
-                    const char* const what = kind == MacroKeyKind::HpPotion ? "HP" : kind == MacroKeyKind::MpPotion ? "MP" : "Pet";
+                // Braked: no early press and no line for each check.
+                if (wants && !rose && !braked) {
                     char most[48] = "";
                     if (peak >= 0.0f)
                         std::snprintf(most, sizeof most, " (%.0f%% at most in its first %llu ms)",
@@ -1736,6 +1878,22 @@ void MacroEngine::run_potions(const MacroConfig& cfg, std::uint64_t now) {
         const float v = kind == MacroKeyKind::HpPotion ? hp_now : kind == MacroKeyKind::MpPotion ? mp_now : pet_now;
         if (v >= 0.0f) start_unread_[n] = false;
         const int chosen = macro_urgent_potion(cfg.keys, kind, v);
+        // No reading, or one over every mark of its kind: the presses that
+        // never saw a rise are over, and their brake with them (2026.11.17).
+        if (chosen < 0 && pk.unrisen > 0) {
+            pk.unrisen = 0;
+            pk.unrisen_from = -1.0f;
+            bool was;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                was = potion_braked_[n];
+                potion_braked_[n] = false;
+            }
+            if (was)
+                GB_INFO("Potion check: %s -- %s: its quicker presses back",
+                        kind == MacroKeyKind::HpPotion ? "HP" : kind == MacroKeyKind::MpPotion ? "MP" : "Pet",
+                        v < 0.0f ? "no reading" : "the reading over the mark");
+        }
         const auto id_of = [&](std::size_t i) { return i < pass_ids_.size() ? pass_ids_[i] : 0; };
         std::uint64_t held_condition = 0, held_no_reading = 0, held_tier = 0;
         bool ready = false;
@@ -1948,20 +2106,27 @@ void MacroEngine::timer_loop() {
 void MacroEngine::run_timers(std::uint64_t now) {
     // This pass's own copy of the keys, and which key each is: the keys may
     // be changed while it presses one, and from then on each is found by
-    // which it is (slot), never by where it stood here.
-    MacroConfig cfg;
+    // which it is (slot), never by where it stood here. Copied afresh only
+    // when set_config has run since the last copy: the keys and their ids
+    // change nowhere else.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        cfg = config_;
-        pass_ids_ = key_ids_;
-        if (due_ms_.size() != cfg.keys.size())
-            due_ms_.resize(cfg.keys.size(), now);
-        if (pressed_ms_.size() != cfg.keys.size())
-            pressed_ms_.resize(cfg.keys.size(), 0);
+        if (timer_cfg_gen_ != config_gen_) {
+            timer_cfg_ = config_;
+            pass_ids_ = key_ids_;
+            timer_cfg_gen_ = config_gen_;
+        }
+        if (due_ms_.size() != timer_cfg_.keys.size())
+            due_ms_.resize(timer_cfg_.keys.size(), now);
+        if (pressed_ms_.size() != timer_cfg_.keys.size())
+            pressed_ms_.resize(timer_cfg_.keys.size(), 0);
     }
+    const MacroConfig& cfg = timer_cfg_;
     if (!cfg.timers_enabled) {
         // No potion is pressed with the timers off, so none holds the
-        // sequence either.
+        // sequence either; nor is any swing of the hunter's left to the
+        // rotation, which presses nothing now.
+        swing_yield_vk_.store(0);
         potion_waiting_since_.store(0);
         potion_since_provisional_ = false;
         start_read_until_.store(0);
@@ -1983,24 +2148,41 @@ void MacroEngine::run_timers(std::uint64_t now) {
     // (Fight::Mode::Returning, 2026.11.10): asked whatever the switches.
     const Fight fight = fight_now();
     const bool follow = following(cfg, fight);
+    // Held alike for the hunter's moment of danger (Fight::Mode::Held,
+    // 2026.11.12): a drop settling or in its fall.
     const bool returning = fight.mode == Fight::Mode::Returning;
+    const bool held_hunter = fight.mode == Fight::Mode::Held;
     // Paced on your casts (cast_paced, 2026.11.08): the skill keys are
     // run_paced's, after the rest, while your casts come in the packets.
-    // Otherwise -- off, not yet, or fallen back -- as always. The hunter's
-    // own swing and the sequence's steps are cast too: the rotation would
-    // take those casts for the key it waits on, so it paces only while the
-    // macro's timers press alone. A sequence of pauses alone presses nothing.
-    const bool others = fight.mode != Fight::Mode::NoHunter ||
-                        (cfg.sequence_enabled && std::any_of(cfg.sequence.begin(), cfg.sequence.end(),
-                                                             [](const MacroStep& s) { return s.keycode != 0; }));
-    const bool paced = pace_pass(cfg, follow, others, now);
+    // Otherwise -- off, not yet, or fallen back -- as always. Since
+    // 2026.11.16b with the hunter running too, following the fight or not:
+    // its swing is told apart from the rotation's casts (pace_ours), and its
+    // holds are the rotation's. The sequence's steps are cast too, at a
+    // beat of their own the rotation cannot tell from its keys: with a key
+    // in it, off. A sequence of pauses alone presses nothing.
+    const bool sequence = cfg.sequence_enabled && std::any_of(cfg.sequence.begin(), cfg.sequence.end(),
+                                                              [](const MacroStep& s) { return s.keycode != 0; });
+    const bool paced = pace_pass(cfg, fight, sequence, now);
+    // The character down (2026.11.17): no skill key, on its timer or in the
+    // rotation, following the fight or not. Potions and buffs as ever.
+    skills_down_now_ = skills_down(now);
+    // Fallen back to the timers after your casts were seen (2026.11.17): a
+    // skill no sooner than a lock after the last, each key no sooner than a
+    // lock per key of the rotation -- the standing rate. On the timers at
+    // their own intervals, 500 ms each, the 2026-11-17 fallbacks pressed
+    // 169-230 keys a minute, nearly all dropped by the game.
+    const std::uint64_t spacing = fallback_spacing_ms(cfg, follow);
 
     for (std::size_t i = 0; i < cfg.keys.size(); ++i) {
         const MacroKey& k = cfg.keys[i];
         // The potion keys -- every conditional key is one -- are run_potions'.
         if (k.conditional() || !macro_timer_on(k)) continue;
         if (follow && macro_key_kind(k) == MacroKeyKind::Skill && !k.always_timer) continue;
-        if (paced && macro_key_kind(k) == MacroKeyKind::Skill) continue;
+        // Paced, the skills are the rotation's -- but for one on its own
+        // timer while they follow the fight, a buff on the character in all
+        // but name, which goes as a buff does, fight or none.
+        const bool own_timer = follow && k.always_timer;
+        if (paced && macro_key_kind(k) == MacroKeyKind::Skill && !own_timer) continue;
 
         // Its due time, wherever it stands now. One taken out since the pass
         // began is passed over.
@@ -2019,15 +2201,30 @@ void MacroEngine::run_timers(std::uint64_t now) {
         // back went at 8-18 px/s under Z, X, C, V and Space. Due still, it
         // is looked at again kGatePollMs on, and goes once the walk is over.
         // Potions and buffs go on as ever.
-        if (returning && macro_key_kind(k) == MacroKeyKind::Skill) {
+        // And alike, the dash's key with its landing past the area's edge or
+        // a floor's end, and a skill whose target is further than its
+        // range_px (2026.11.12): waiting, still due.
+        const SkillWait wait = macro_key_kind(k) == MacroKeyKind::Skill ? skill_waits(k, fight, true)
+                                                                          : SkillWait::None;
+        // Not one on "Luôn bấm theo giờ" (always_timer): it keeps its timer
+        // whatever the gates say, the death panel too, as a buff does.
+        const bool down_held = skills_down_now_ && macro_key_kind(k) == MacroKeyKind::Skill && !k.always_timer;
+        if (((returning || held_hunter) && macro_key_kind(k) == MacroKeyKind::Skill) || wait != SkillWait::None ||
+            down_held) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 const int s = slot(i);
                 if (s >= 0 && static_cast<std::size_t>(s) < due_ms_.size() && due_ms_[static_cast<std::size_t>(s)] == due)
                     due_ms_[static_cast<std::size_t>(s)] = now + kGatePollMs;
             }
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.held_returning;
+            if (held_hunter) {
+                count_hunter_hold(fight.hold, 1);
+            } else if (down_held && !returning) {
+                count_held(SkillGate::Dead, 1);
+            } else {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                ++(returning ? stats_.held_returning : wait == SkillWait::Dash ? stats_.held_dash : stats_.held_range);
+            }
             continue;
         }
 
@@ -2040,8 +2237,19 @@ void MacroEngine::run_timers(std::uint64_t now) {
         // while a skill's press waits for its cast, or inside the last cast's
         // lock, goes once that lock is over -- still due, and ahead of the next
         // skill, which this pass's run_paced then holds for the buff's cast.
-        // Pressed inside the lock, every press of it could be dropped.
-        if (buff && paced && (pace_press_.active || now < pace_last_cast_ms_ + pace_lock_ms_)) continue;
+        // Pressed inside the lock, every press of it could be dropped. So too
+        // a skill on its own timer beside the rotation (2026.11.16b) -- and
+        // each waits for the one of them pressed just before (pace_buff_ms_)
+        // until its cast shows, or kPaceConfirmMs: two due together after a
+        // hold, or a buff and such a skill, went back to back, the second
+        // inside the first one's lock, dropped, and its timer re-armed for a
+        // whole interval. That wait ends on its own, for the rotation clears
+        // pace_buff_ms_ only on its free passes.
+        const bool lock_waits = buff || (own_timer && macro_key_kind(k) == MacroKeyKind::Skill);
+        if (lock_waits && paced &&
+            (pace_press_.active || now < pace_last_cast_ms_ + pace_lock_ms_ ||
+             (pace_buff_ms_ != 0 && now < pace_buff_ms_ + kPaceConfirmMs)))
+            continue;
         if (buff) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (buff_pressed_ && now < last_buff_ms_ + buff_spacing(cfg)) {
@@ -2056,6 +2264,9 @@ void MacroEngine::run_timers(std::uint64_t now) {
         // that comes due right after another waits its turn, still due.
         const bool skill_key = macro_key_kind(k) == MacroKeyKind::Skill;
         if (skill_key && clock_now() < skill_free_ms_) continue;
+        // Fallen back after casts were seen: one of the rotation's keys a
+        // lock apart, each a lock per key apart (spacing).
+        const bool spaced = spacing != 0 && skill_key && !own_timer;
 
         // A potion that has fallen due while this pass pressed the keys
         // before -- a reading that came in as one was down -- goes first.
@@ -2068,6 +2279,7 @@ void MacroEngine::run_timers(std::uint64_t now) {
         // jitter takes off a 5-s interval.
         std::uint32_t next = jittered(macro_timer_interval_ms(k), k.jitter_pct);
         if (buff) next = std::max(next, kBuffRepeatMinMs);
+        if (spaced) next = std::max<std::uint32_t>(next, static_cast<std::uint32_t>(std::min<std::uint64_t>(spacing, 600'000)));
         const std::uint64_t armed = now + next;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2082,6 +2294,7 @@ void MacroEngine::run_timers(std::uint64_t now) {
         const std::uint64_t key_down = clock_now();
         if (press(k.keycode, k.hold_ms, "macro-timer", &why)) {
             if (skill_key) skill_free_ms_ = clock_now() + cfg.skill_gap_ms;
+            if (spaced) skill_free_ms_ = std::max<std::uint64_t>(skill_free_ms_, key_down + pace_lock_ms_);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 const int s = slot(i);
@@ -2097,10 +2310,16 @@ void MacroEngine::run_timers(std::uint64_t now) {
                                                   now + cfg.buff_press_gap_ms, now + buff_spacing(cfg) + 2000 });
                 }
             }
+            // Paced: the next skill waits for this cast, and its lock.
+            if (lock_waits && paced) pace_buff_ms_ = key_down;
+            // ... and, its cast seen, the rest of its presses are not needed
+            // (pace_buff_cast, 2026.11.17): pressed while it is not.
+            if (buff && paced && cfg.buff_presses > 1) {
+                pace_burst_vk_ = k.keycode;
+                pace_burst_ms_ = key_down;
+            }
             if (buff) {
                 buff_refused_said_ = 0;
-                // Paced: the next skill waits for this cast, and its lock.
-                if (paced) pace_buff_ms_ = key_down;
                 GB_INFO("Buff: key %s cast (%u press%s, %u ms apart); the next cast in about %.0f s",
                         InputManager::key_name(k.keycode).c_str(), cfg.buff_presses,
                         cfg.buff_presses == 1 ? "" : "es", cfg.buff_press_gap_ms,
@@ -2129,6 +2348,26 @@ void MacroEngine::run_timers(std::uint64_t now) {
             // counted for the Skills line, nothing else.
             std::lock_guard<std::mutex> lock(stats_mutex_);
             ++stats_.skills_unfocused;
+        } else if (skill_key && (why == Refused::Busy || why == Refused::Held)) {
+            // Another key down this moment -- the hunter's swing or turn tap,
+            // 60-100 ms of the token -- or the keys held for a job's moment: a
+            // chat line, a quest round, the popup closer, a revive, a trip, a
+            // charm run (2026.11.21, the audit's B16; the owner: "không để các
+            // chức năng block nhau"). Still due, as run_skills and the
+            // rotation keep a refused skill's turn: tried again kSkillRetryMs
+            // on after a key, kGatePollMs on under a hold -- which refuses it
+            // again for as long as it lasts, the charms' "no skills" among
+            // them, and lets it go the moment it ends. Left armed above, a
+            // 40-s skill due during a swing waited a whole 40 s more. Several
+            // due together after a long hold still go one at a time
+            // (skill_free_ms_, and paced, the locks above). Unless a re-arm
+            // made meanwhile, which wins.
+            const std::uint64_t retry = now + (why == Refused::Busy ? kSkillRetryMs : kGatePollMs);
+            std::lock_guard<std::mutex> lock(mutex_);
+            const int s = slot(i);
+            if (s >= 0 && static_cast<std::size_t>(s) < due_ms_.size() &&
+                due_ms_[static_cast<std::size_t>(s)] == armed)
+                due_ms_[static_cast<std::size_t>(s)] = retry;
         } else if (buff) {
             if (buff_refused_said_ != k.keycode) {
                 buff_refused_said_ = k.keycode;
@@ -2154,8 +2393,10 @@ void MacroEngine::run_timers(std::uint64_t now) {
         }
     }
 
-    if (follow) run_skills(cfg, clock_now());
-    else if (paced) run_paced(cfg, clock_now());
+    // Paced, the rotation has the skills, following the fight or not
+    // (2026.11.16b); on the timers, run_skills has them when they follow it.
+    if (paced) run_paced(cfg, follow, clock_now());
+    else if (follow) run_skills(cfg, clock_now());
     log_skills(clock_now());
     if (cfg.cast_paced) log_paced(clock_now());
 }
@@ -2242,6 +2483,35 @@ void MacroEngine::count_held(SkillGate g, std::uint64_t n) {
     }
 }
 
+void MacroEngine::count_hunter_hold(Fight::Hold why, std::uint64_t n) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.held_hunter += n;
+    switch (why) {
+        case Fight::Hold::Drop:     stats_.held_drop += n; break;
+        case Fight::Hold::Turning:  stats_.held_turning += n; break;
+        case Fight::Hold::NoTarget: stats_.held_no_target += n; break;
+        case Fight::Hold::Outside:  stats_.held_outside += n; break;
+        case Fight::Hold::SeekLeg:  stats_.held_seek_leg += n; break;
+        case Fight::Hold::Jump:     stats_.held_jump += n; break;
+        // A hunter that says Held with no reason: counted in the whole only.
+        case Fight::Hold::None:     break;
+    }
+}
+
+MacroEngine::SkillWait MacroEngine::skill_waits(const MacroKey& k, const Fight& fight, bool timed) {
+    // The owner's Q2 of 2026-11-11: the dash -- a skill that carries the
+    // character some 214 or 319 px -- not where it would land outside the
+    // area or off a floor's end (t23_s14 22:27:47 and 22:29:10: off the
+    // ledge, and out of the box below).
+    if (fight.dash_edge && fight.dash_key(k.keycode)) return SkillWait::Dash;
+    // F3: its range on its own timer too, once the hunter says how far the
+    // target is -- on 2026-11-11 Z, whose targets were all within 76 px, went
+    // out every 500 ms at monsters up to 450 px away.
+    if (timed && fight.mode == Fight::Mode::Fighting && k.range_px > 0 && fight.dx > k.range_px)
+        return SkillWait::Range;
+    return SkillWait::None;
+}
+
 void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
     if (now < skill_look_ms_) return;
 
@@ -2279,10 +2549,12 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
     }
     if (ready.empty()) return;
 
-    // Walking back to the hunting area (2026.11.10): they wait, ready, as for
-    // no fight -- counted apart.
-    if (fight.mode == Fight::Mode::Returning) {
-        {
+    // Walking back to the hunting area (2026.11.10), or the hunter holding
+    // them (2026.11.12): they wait, ready, as for no fight -- counted apart.
+    if (fight.mode == Fight::Mode::Returning || fight.mode == Fight::Mode::Held) {
+        if (fight.mode == Fight::Mode::Held) {
+            count_hunter_hold(fight.hold, ready.size());
+        } else {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             stats_.held_returning += ready.size();
         }
@@ -2299,10 +2571,15 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
         return;
     }
 
-    // The first in the order of the keys that reaches the target.
+    // The first in the order of the keys that reaches the target -- and not
+    // the dash's key with its landing past an edge (2026.11.12).
     std::size_t pick = cfg.keys.size();
-    std::uint64_t too_far = 0;
+    std::uint64_t too_far = 0, dash = 0;
     for (const std::size_t i : ready) {
+        if (skill_waits(cfg.keys[i], fight, false) == SkillWait::Dash) {
+            ++dash;
+            continue;
+        }
         const int range = cfg.keys[i].range_px;
         if (range > 0 && fight.dx > range) {
             ++too_far;
@@ -2311,9 +2588,10 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
         pick = i;
         break;
     }
-    if (too_far > 0) {
+    if (too_far > 0 || dash > 0) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.held_range += too_far;
+        stats_.held_dash += dash;
     }
     if (pick == cfg.keys.size()) {
         skill_look_ms_ = now + kGatePollMs;
@@ -2325,9 +2603,13 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
     Refused why = Refused::None;
     if (press(k.keycode, k.hold_ms, "macro-skill", &why)) {
         const std::uint64_t up = clock_now();
+        // Fallen back to the timers after your casts were seen (2026.11.17):
+        // a lock per key of the rotation at least, as on the timers.
+        const std::uint64_t spacing = fallback_spacing_ms(cfg, true);
         // Its own cooldown, from this press. Worked out before the lock:
         // jittered() takes it too.
-        const std::uint32_t cooldown = jittered(k.interval_ms, k.jitter_pct);
+        const std::uint32_t cooldown = std::max<std::uint32_t>(
+            jittered(k.interval_ms, k.jitter_pct), static_cast<std::uint32_t>(std::min<std::uint64_t>(spacing, 600'000)));
         {
             // On the key as it stands now: taken out during the press, on no
             // key at all.
@@ -2345,6 +2627,7 @@ void MacroEngine::run_skills(const MacroConfig& cfg, std::uint64_t now) {
         // key came up -- the rest of a burst, in the order of the keys. One
         // at a time otherwise: the next chance kSkillChanceMs on.
         skill_look_ms_ = cfg.sequential_skills ? up + cfg.skill_gap_ms : at + kSkillChanceMs;
+        if (spacing != 0) skill_look_ms_ = std::max<std::uint64_t>(skill_look_ms_, at + pace_lock_ms_);
     } else {
         // Not gone out -- another job's key, a hold, the game not in front:
         // still ready, its cooldown not started and its turn not lost.
@@ -2394,6 +2677,23 @@ void MacroEngine::log_skills(std::uint64_t now) {
                     static_cast<unsigned long long>(low), mp_floor,
                     static_cast<unsigned long long>(dead), static_cast<unsigned long long>(range),
                     static_cast<unsigned long long>(back), static_cast<unsigned long long>(behind));
+        // Held for the hunter's moment of danger (Fight::Mode::Held,
+        // 2026.11.12): a line of its own, when there were any, by reason;
+        // and the dash's key held near an edge.
+        const std::uint64_t hunter = since(s.held_hunter, skill_log_held_.held_hunter);
+        const std::uint64_t dash = since(s.held_dash, skill_log_held_.held_dash);
+        if (hunter || dash)
+            GB_INFO("Skills: %llu held for the hunter -- %llu turning, %llu a drop settling or in its fall, "
+                    "%llu nothing to fight in the area, %llu outside the area or stranded, %llu a leg of the seek's "
+                    "way, %llu a jump up; %llu of the dash's key near an edge",
+                    static_cast<unsigned long long>(hunter),
+                    static_cast<unsigned long long>(since(s.held_turning, skill_log_held_.held_turning)),
+                    static_cast<unsigned long long>(since(s.held_drop, skill_log_held_.held_drop)),
+                    static_cast<unsigned long long>(since(s.held_no_target, skill_log_held_.held_no_target)),
+                    static_cast<unsigned long long>(since(s.held_outside, skill_log_held_.held_outside)),
+                    static_cast<unsigned long long>(since(s.held_seek_leg, skill_log_held_.held_seek_leg)),
+                    static_cast<unsigned long long>(since(s.held_jump, skill_log_held_.held_jump)),
+                    static_cast<unsigned long long>(dash));
     }
     skill_log_ms_ = std::max<std::uint64_t>(now, 1);
     skill_log_pressed_ = pressed;
@@ -2404,6 +2704,14 @@ void MacroEngine::sequence_loop_fn() {
     name_this_thread("macro sequence");
     while (running_.load()) {
         const std::uint32_t wait = sequence_turn(clock_now());
+        // Off: only a change of config or a stop can turn it on, and both
+        // wake this (2026.11.16) -- not a look every 50 ms for the whole run
+        // of a macro that has no sequence.
+        if (seq_idle_) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            seq_wake_.wait(lock, [this] { return !running_.load() || config_gen_ != seq_cfg_gen_; });
+            continue;
+        }
         // Sleep in slices so stopping is responsive even behind a long delay.
         for (std::uint32_t slept = 0; slept < wait && running_.load(); slept += 20)
             std::this_thread::sleep_for(std::chrono::milliseconds(std::min<std::uint32_t>(20, wait - slept)));
@@ -2411,16 +2719,23 @@ void MacroEngine::sequence_loop_fn() {
 }
 
 std::uint32_t MacroEngine::sequence_turn(std::uint64_t now) {
-    MacroConfig cfg;
+    // The config as set_config last left it, copied only when that has
+    // changed since the last turn.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        cfg = config_;
+        if (seq_cfg_gen_ != config_gen_) {
+            seq_cfg_ = config_;
+            seq_cfg_gen_ = config_gen_;
+        }
     }
+    const MacroConfig& cfg = seq_cfg_;
+    seq_idle_ = false;
 
     // Off, or switched off while a step waited: nothing of it goes, and a
     // potion waited for then is waited for afresh once it is on again.
     if (!cfg.sequence_enabled || cfg.sequence.empty()) {
         seq_noticed_ = 0;
+        seq_idle_ = true;
         return 50;
     }
 
@@ -2430,7 +2745,12 @@ std::uint32_t MacroEngine::sequence_turn(std::uint64_t now) {
     if (seq_wrapped_) {
         pos = 0;
     } else if (pos >= cfg.sequence.size()) {
-        if (!cfg.sequence_loop) return 50;
+        // Played through with "loop" off: so it stays until the steps change
+        // or the macro starts again.
+        if (!cfg.sequence_loop) {
+            seq_idle_ = true;
+            return 50;
+        }
         pos = 0;
         seq_wrapped_ = true;
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -2467,9 +2787,21 @@ std::uint32_t MacroEngine::sequence_turn(std::uint64_t now) {
         // too, and waits where it is -- but for one on a potion's or a buff's
         // key, which goes as ever.
         const Fight fight = fight_now();
-        if (fight.mode == Fight::Mode::Returning && macro_step_is_skill(cfg, step.keycode)) {
+        if ((fight.mode == Fight::Mode::Returning || fight.mode == Fight::Mode::Held) &&
+            macro_step_is_skill(cfg, step.keycode)) {
+            if (fight.mode == Fight::Mode::Held) {
+                count_hunter_hold(fight.hold, 1);
+            } else {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                ++stats_.held_returning;
+            }
+            return 50;
+        }
+        // The dash's key with its landing past an edge (2026.11.12): a step
+        // on it waits where it is too.
+        if (fight.dash_edge && fight.dash_key(step.keycode) && macro_step_is_skill(cfg, step.keycode)) {
             std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.held_returning;
+            ++stats_.held_dash;
             return 50;
         }
         if (cfg.skills_follow_fight && fight.mode != Fight::Mode::NoHunter) {

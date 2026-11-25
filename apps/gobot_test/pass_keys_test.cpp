@@ -759,6 +759,44 @@ void test_own_due() {
     Rig nav({ key('Z', 500), potion(MacroTrigger::HpBelow, VK_HOME, 80) });
     nav.engine.set_vitals(50.0f, 100.0f, 100.0f);
     check(nav.engine.own_potion_due({}).vk == VK_HOME, "HP on Home: pressed like a letter");
+
+    // Since 2026.11.12b (the review of the charms at any HP): a key still
+    // cooling -- by the caller's word, or the engine's own press when asked --
+    // lets the other kind go, and far under the mark the urgent cooldown.
+    Rig r({ key('Z', 500), potion(MacroTrigger::HpBelow, 'G', 80), potion(MacroTrigger::MpBelow, 'F', 84) });
+    MacroConfig urgent_cfg = r.engine.config();
+    urgent_cfg.potion_urgent_ms = 1000;
+    r.engine.set_config(urgent_cfg);
+    r.engine.set_vitals(70.0f, 50.0f, -1.0f);
+    const MacroEngine::OwnPotion mp_instead =
+        r.engine.own_potion_due({}, [](std::uint32_t vk, std::uint32_t) { return vk == 'G'; });
+    check(mp_instead.vk == 'F' && !mp_instead.hp,
+          "HP 70% and MP 50%, G cooling by the caller's word: MP's F, not nothing");
+    check(r.engine.own_potion_due({}, [](std::uint32_t, std::uint32_t) { return true; }).vk == 0,
+          "both cooling: none");
+    const MacroEngine::OwnPotion by_line = r.engine.own_potion_due({});
+    r.engine.set_vitals(30.0f, 100.0f, -1.0f);
+    const MacroEngine::OwnPotion by_urgent = r.engine.own_potion_due({});
+    std::uint32_t asked_cooldown = 0;
+    r.engine.own_potion_due({}, [&asked_cooldown](std::uint32_t, std::uint32_t ms) {
+        asked_cooldown = ms;
+        return false;
+    });
+    check(by_line.vk == 'G' && by_line.cooldown_ms == 3000 && by_urgent.vk == 'G' && by_urgent.cooldown_ms == 1000 &&
+              asked_cooldown == 1000,
+          "HP 70%: the line's 3000 ms; HP 30%, under half of G's 80%: potion_urgent_ms, 1000, the caller asked by "
+          "it too -- " + std::to_string(by_line.cooldown_ms) + ", " + std::to_string(by_urgent.cooldown_ms));
+    // The engine's own press: G drunk by the macro a moment ago.
+    r.hp = 70.0f;
+    r.mp = 100.0f;
+    const std::uint64_t t0 = r.t;
+    r.run(300);
+    r.engine.set_vitals(70.0f, 50.0f, -1.0f);
+    const MacroEngine::OwnPotion engine_asked = r.engine.own_potion_due({}, {}, true);
+    const MacroEngine::OwnPotion engine_unasked = r.engine.own_potion_due({});
+    check(r.count('G', t0) == 1 && engine_asked.vk == 'F' && engine_unasked.vk == 'G',
+          "the macro drank G a moment ago: asked of the engine's own presses (a charm run, the macro held), MP's F; "
+          "not asked, G as before -- " + std::to_string(r.count('G', t0)) + " G");
 }
 
 void test_hp_gates() {
@@ -812,9 +850,14 @@ void test_hp_gates() {
     bag::ShopOwed o = bag::shop_new_plan(10, 10);
     o = bag::shop_owed_after(o, 2, 2, 0, 0, ShopEnd::Trouble);
     for (int i = 0; i < 3; ++i) o = bag::shop_owed_after(o, 1, 1, 0, 0, end({ &S::trouble, &S::hp_cut }));
-    check(o.hp == 5 && o.mp == 5 && o.troubles == 1 && !o.dropped,
+    check(o.hp == 5 && o.mp == 5 && o.troubles == 1,
           "one trouble, then three rounds stopped for HP: the rest owed, still one trouble -- the plan never dropped "
           "for HP");
+    // And a real trouble after them (2026.11.24): two in a row now, the rest
+    // still owed -- troubles never drop the plan, for HP or anything else.
+    o = bag::shop_owed_after(o, 1, 0, 0, 0, ShopEnd::Trouble);
+    check(o.hp == 4 && o.mp == 5 && o.troubles == 2,
+          "then a trouble: two in a row, 4 + 5 still owed -- since 2026.11.24 the second no longer drops the plan");
 }
 
 // ------------------------------------------------------- the quiet second
@@ -962,7 +1005,7 @@ void test_sources() {
     };
 
     // F12, DỪNG and a stop of the trash worker shut it before anything else.
-    const std::string jobs = body(gui, "bool GuiApp::stop_jobs(bool with_bot) {");
+    const std::string jobs = body(gui, "bool GuiApp::stop_jobs(");
     const std::string stop_trash = body(gui, "bool GuiApp::stop_trash(bool wait) {");
     check(in_order(jobs, { "coord_.disarm_pass_keys();", "stopping_ = true;", "take_hold(kStopHold);",
                            "stop_trash(false);" }) &&
@@ -994,11 +1037,25 @@ void test_sources() {
                            "const PassKeysScope keys(coord_, pass_keys, \"pass\");", "r = cleaner.run();",
                            "held = r.keeps_hold(held);" }),
           "the pass: likewise, none in a pass begun to give back what may be in the bin");
+    // The pet's HP food on reaching TổCổLong (2026.11.24): a shop round of its
+    // own, its window the potion round's.
+    const std::string pet = slice(gui, "const auto run_pet = [&](std::uint32_t entry) {", "const auto run_shop = [&]");
+    check(in_order(pet, { "const PassKeys pass_keys = held || trash_left_held_ ? PassKeys{} : pass_keys_now();",
+                          "if (pass_keys.any()) cleaner.set_key_window(key_window());", "take_hold(\"trash cleaning\")",
+                          "coord_.disarm_pass_keys();", "input_.release_all();",
+                          "const QuietSaid said = quiet_said(quiet_from, last_input(), own_from, "
+                          "InputManager::sent_count());",
+                          "if (touched || own || trash_stop_ || lost) {",
+                          "const PassKeysScope keys(coord_, pass_keys, \"pet\");", "r = cleaner.run();",
+                          "held = r.keeps_hold(held);" }),
+          "run_pet: the potion round's set, none with something maybe left in the bin; armed around its run alone, "
+          "after a quiet second, gone before the hold is kept or let go of");
     check(!charms.empty() && !has(charms, "set_key_window") && !has(charms, "PassKeysScope") &&
-              !has(charms, "pass_keys_now") && count_in(gui, "set_key_window(") == 2 &&
-              count_in(gui, "PassKeysScope keys(") == 2 && !has(cli, "set_key_window(") &&
+              !has(charms, "pass_keys_now") && count_in(gui, "set_key_window(") == 3 &&
+              count_in(gui, "PassKeysScope keys(") == 3 && !has(cli, "set_key_window(") &&
               !has(cli, "PassKeysScope"),
-          "never a charm run's -- and gobot_cli's jobs keep the whole hold");
+          "never a charm run's -- the pass, the potion round and the pet's round (2026.11.24) -- and gobot_cli's jobs "
+          "keep the whole hold");
     // The never-list in its own lambda since 2026.11.11b: the job's own potion
     // presses go by it too.
     const std::string now = slice(gui, "const auto job_never = [&] {", "const auto key_window = [this] {");
@@ -1007,9 +1064,9 @@ void test_sources() {
                           "own_login_key_.load() };", "never.push_back(hunter_->config().toggle_key);",
                           "const auto pass_keys_now = [&] {", "if (!macro_ || !macro_->running()) return PassKeys{};",
                           "return macro_->pass_keys(job_never());",
-                          "o.due = [this, never = job_never(), refused_said, &own_potion_ms](std::string& line)",
+                          "o.due = [this, never = job_never(), refused_said, own_cooling](std::string& line)",
                           "if (!macro_ || macro_->running()) return 0;",
-                          "const MacroEngine::OwnPotion p = macro_->own_potion_due(never);" }) &&
+                          "const MacroEngine::OwnPotion p = macro_->own_potion_due(never, own_cooling);" }) &&
               has(hotkeys, "own_trash_key_.store(hotkeys_.trash_now);") &&
               has(hotkeys, "own_login_key_.store(hotkeys_.login_now);"),
           "the set from the macro's keys in memory, never the bag key, the quest key, the trash-now and login-now "
@@ -1042,11 +1099,14 @@ void test_sources() {
     const std::string clear = body(bag, "bool BagCleaner::keys_clear(const Frame& f, const BagView& v, const "
                                         "std::vector<bag::Dialog>* up, int lone,");
     check(in_order(may, { "if (!keys_.open) return false;", "return keys_clear(f, v, up, lone, full_asked);" }) &&
-              in_order(clear, { "if (cancelled_ || keys_late_ || item_out_ || late_ask_ || money_ || "
+              in_order(clear, { "const bool late = late_ask_ && mode_ != Mode::CharmsOnly;",
+                          "if (cancelled_ || keys_late_ || item_out_ || late || money_ || "
                           "!f.valid()) return false;",
-                          "if (mode_ != Mode::Pass && mode_ != Mode::ShopBuy) return false;",
+                          "if (mode_ != Mode::Pass && mode_ != Mode::ShopBuy && !(mode_ == Mode::CharmsOnly && "
+                          "!keys_.open)) return false;",
                           "if (up == nullptr) {", "found = bag::find_dialogs(f, store_);",
                           "if (mode_ == Mode::Pass && !clean(v, *up)) return false;",
+                          "if (mode_ == Mode::CharmsOnly && !up->empty()) return false;",
                           "if (!shop_filter(*up).empty() || shop_q_.valid() || question_still(f)) return false;",
                           "const bool message = bag::notice_up(f, store_, *up) ||",
                           "(lone < 0 ? bag::lone_ok(f, store_, ScreenRect{ 0, 0, f.width, f.height }, *up) : lone > 0);",
@@ -1058,7 +1118,7 @@ void test_sources() {
           "keys_open: never with something out, a question come late, a stop, a key late, in a purchase's money "
           "stretch, in a charm run, nor with a dialog, the quantity question, a message, the full-bag message or the "
           "board up -- the frame searched for dialogs once, by the caller when it has (keys_may_open)");
-    const std::string buy = body(bag, "int BagCleaner::shop_purchase(bool hp, Result& res) {");
+    const std::string buy = body(bag, "int BagCleaner::shop_purchase(bag::ShopPotion what, Result& res) {");
     const std::size_t money_on = buy.find("money_ = true;");
     const std::size_t dbl = buy.find("double_click(cx, cy)");
     const std::size_t open_at = buy.find("keys_open(tail_last, BagView{}, tail_seen ? &tail_up : nullptr,");
@@ -1084,8 +1144,10 @@ void test_sources() {
                           "money_ = true;", "if (!keys_shut()) {", "res.trouble = kKeysLateVi;", "if (went) {",
                           "if (!grab_ || !grab_(f1) || !f1.valid()) {",
                           "if (const int end = judge(f1, shop); end >= 0) return end;", "shop_buttons_ = shop.buttons;",
-                          "const int cx = hp ? shop.hp_x() : shop.mp_x(), cy = shop.item_y();",
-                          "double_click(cx, cy)" }),
+                          // The pet's food at its cell as that look found it
+                          // by its name (2026.11.24).
+                          "const int cx = pet ? pet_item.cell.x : hp ? shop.hp_x() : shop.mp_x();",
+                          "const int cy = pet ? pet_item.cell.y : shop.item_y();", "double_click(cx, cy)" }),
           "shop_purchase: keys let through while a look was judged -- the look judged again after the shut, the "
           "double-click aimed by it");
     const std::string run_pass = body(bag, "BagCleaner::Result BagCleaner::run_pass() {");
@@ -1106,7 +1168,9 @@ void test_sources() {
               has(macro, "case Refused::Gated:     return coord_.critical_active() && !coord_.lets_through(vk);") &&
               has(macro, "const bool over = (refuses_all(pk.refused) || pk.refused == Refused::Gated) &&") &&
               has(pace, "return why == Refused::Gated && coord_.pass_keys_open() && !coord_.lets_through(vk);") &&
-              has(pace, "pace_retry_ms_ = now + (why == Refused::Gated ? kSkillRetryMs : kGatePollMs);") &&
+              // Since 2026.11.16b another key going (Busy) is waited as briefly.
+              has(pace, "pace_retry_ms_ = now + (why == Refused::Gated || why == Refused::Busy ? kSkillRetryMs : "
+                        "kGatePollMs);") &&
               count_in(pace, "shut_out(why, k.keycode)") == 2,
           "macro.cpp: Gated is no refusal of every key, is over the moment the key goes through, and the sequence "
           "never asks; a paced key never let through is passed over");
@@ -1170,22 +1234,40 @@ void test_hp_sources() {
         return;
     }
 
-    // chat_hp_floor_ as it was: set on the window's thread alone, and what
-    // the charms' gate and guard go by.
+    // chat_hp_floor_ as it was: set on the window's thread alone. The charms'
+    // gate and guard no longer go by it (2026.11.12b, the owner: "máu thấp
+    // thì không dùng bùa nữa, cái này cũng cần sửa"): at any HP but the
+    // character down, the run pressing the potions itself between two charms.
     check(count_in(gui, "chat_hp_floor_ = ") == 1 &&
               in_order(gui, { "int floor = 50;", "macro_key_kind(k) == MacroKeyKind::HpPotion)",
                               "floor = std::max(floor, k.threshold_pct);", "chat_hp_floor_ = floor;" }) &&
-              has(charms, "if (hp < static_cast<float>(chat_hp_floor_.load() + 10)) return not_now(\"Máu đang thấp, "
-                          "dùng bùa sau.\");") &&
-              has(charms, "return !(hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load()));") &&
-              !has(charms, "hp_gate") && !has(charms, "potion_break"),
-          "chat_hp_floor_ unchanged -- max(50, the HP potions' highest mark), set in one place -- and the charms' gate "
-          "and guard by it as before");
+              in_order(charms, { "if (hp < 0.0f) return not_now(\"Chưa đọc được máu của nhân vật, dùng bùa sau.\");",
+                                 "if (hp < static_cast<float>(bag::kJobDownHpPct)) return not_now(\"Nhân vật đã gục, "
+                                 "dùng bùa sau.\");",
+                                 "return !(hp >= 0.0f && hp < static_cast<float>(bag::kJobDownHpPct));",
+                                 "if (!held && !trash_left_held_) cleaner.set_own_potions(charm_potions());",
+                                 "r = cleaner.run();" }) &&
+              !has(charms, "chat_hp_floor_") && !has(charms, "hp_gate") && !has(charms, "potion_break") &&
+              !has(charms, "set_key_window"),
+          "chat_hp_floor_ unchanged -- max(50, the HP potions' highest mark), set in one place -- and the charms at "
+          "any HP: the character down alone puts them off or stops them, their own potions handed over, never a key "
+          "window");
     // The gates: one helper, both jobs, by the job's own window -- every HP
     // potion the macro may choose let through (the review's HP-1). HP not
     // read waits for a round that rides a pass too (R3).
+    // The pet's round (2026.11.24) by the same gates: HP not read waits, only
+    // the character down holds it back, its guard at the job's level.
+    const std::string pet = slice(gui, "const auto run_pet = [&](std::uint32_t entry) {", "const auto run_shop = [&]");
+    check(in_order(pet, { "const PassKeys pass_keys = held || trash_left_held_ ? PassKeys{} : pass_keys_now();",
+                          "const bag::HpGates gate = hp_gates_of(pass_keys);", "job_level = gate.stop;",
+                          "if (hp_now < 0.0f) return later(5'000, \"HP not read (not in the world)\");",
+                          "if (hp_now < static_cast<float>(gate.start)) return later(bag::kHpLookAgainMs,",
+                          "cleaner.set_guard([this, &hp_cut, stop_level = gate.stop] {",
+                          "if (ours && low) hp_cut = HpCut{ now_hp, stop_level };" }),
+          "run_pet: HP as a potion round has it -- not read: again in 5 s; under the start (the character down): "
+          "again in 5 s; the guard at the job's level, noting what HP it stopped at");
     check(has(gui, "return bag::hp_gates(keys.hp_all_through, keys.hp_mark, chat_hp_floor_.load());") &&
-              count_in(gui, "hp_gates_of(pass_keys)") == 2 && !has(gui, "start_gate") &&
+              count_in(gui, "hp_gates_of(pass_keys)") == 3 && !has(gui, "start_gate") &&
               in_order(shop, { "const PassKeys pass_keys = held || trash_left_held_ ? PassKeys{} : pass_keys_now();",
                                "const bag::HpGates hp_gate = hp_gates_of(pass_keys);",
                                "const float hp = hp_percent_now();",
@@ -1214,13 +1296,13 @@ void test_hp_sources() {
     // A stop for HP: the pass again in 15 s, the round put off (bag::shop_end),
     // never trouble, again in 15 s.
     check(in_order(pass, { "say_stopped(\"pass\", hp_cut, r.trouble);",
-                           "if (hp_cut.level > 0 && !trash_stop_) next = now_ms() + bag::kHpStoppedAgainMs;",
+                           "if ((hp_cut.level > 0 || r.yielded) && !trash_stop_) next = now_ms() + bag::kHpStoppedAgainMs;",
                            "held = r.keeps_hold(held);" }) &&
-              in_order(gui, { "if (hp_cut.level > 0 && !trash_stop_) next = now_ms() + bag::kHpStoppedAgainMs;",
+              in_order(gui, { "if ((hp_cut.level > 0 || r.yielded) && !trash_stop_) next = now_ms() + bag::kHpStoppedAgainMs;",
                               "if (held) {", "next = now_ms() + 60'000;" }),
           "a pass its guard stopped for HP is tried again in 15 s, not the interval on -- a hold kept still a minute");
     check(in_order(shop, { "say_stopped(\"shop round\", hp_cut, r.trouble);",
-                           "hp_stop = !trash_stop_ && hp_cut.level > 0;",
+                           "hp_stop = !trash_stop_ && (hp_cut.level > 0 || r.yielded);",
                            "cut = !trash_stop_ && !(coord_.critical_active() && coord_.critical_reason() == \"trash "
                            "cleaning\");",
                            "seen.stopped = trash_stop_;", "seen.hp_cut = hp_stop;", "seen.hold_lost = cut;",
@@ -1241,9 +1323,20 @@ void test_hp_sources() {
               in_order(shop, { "cleaner.set_guard(still_ours);", "cleaner.set_hold_check(",
                                "[this] { return coord_.critical_active() && coord_.critical_reason() == \"trash "
                                "cleaning\"; });" }) &&
-              count_in(gui, "set_hold_check(") == 1 && !has(cli, "set_hold_check("),
+              // The potion round's and the pet's round's (2026.11.24).
+              count_in(gui, "set_hold_check(") == 2 && has(pet, "cleaner.set_hold_check(") &&
+              !has(cli, "set_hold_check(") && !has(pass, "set_hold_check("),
           "shop_full_close asks the hold alone -- a stop or another job's hold stop it, HP low does not -- set for "
-          "the shop round only");
+          "the shop's rounds only (the potions', the pet's): the pass's ESCs after 10 s ask its guard (the review of "
+          "2026.11.14b)");
+    // The ESCs of a step stuck (esc_out) ask the hold and the guard both: the
+    // guard's HP stop is the character down alone, and no ESC goes over the
+    // death panel (the review of 2026.11.14b).
+    const std::string esc = body(bag, "bool BagCleaner::esc_out(Result& res, const char* where) {");
+    check(has(esc, "return cancelled_.load() || keys_late_ || (hold_check_ && !hold_check_()) || (guard_ && "
+                   "!guard_());") &&
+              count_in(esc, "guard_()") == 1,
+          "esc_out asks the hold and the guard both -- the character down stops its ESCs");
     // And a lone message in the box's place the same (the review's HP-2):
     // close_notice asks the hold alone in a shop round; a charm run, and a run
     // with no hold_check, the guard as before.
@@ -1279,7 +1372,7 @@ void test_hp_sources() {
                           "if (!keys_out_) return false;",
                           "while (waited < kPotionBreakMs && !cancelled_ && keys_.potion_due()) {" }) &&
               !has(brk, "keys_.open()") && !has(brk, "keys_shut(") && count_in(bag, "keys_.open()") == 1 &&
-              count_in(bag, "potion_break(") == 4 &&
+              count_in(bag, "potion_break(") == 5 &&  // and react_potion's, inside a wait for the game (2026.11.15d)
               in_order(run_pass, { "if (fresh && !relook) {", "keys_open(f, v, &up);", "if (keys_out_) f_shut = false;",
                                    "} else if (!fresh && potion_break(f, v, \"between two items\")) {",
                                    "f_shut = false;", "if (!drag_grade(f_at, f_shut)) {" }) &&
@@ -1300,7 +1393,7 @@ void test_hp_sources() {
     // The run's own potion press (2026.11.11b, the owner: "GoBot tự bấm bình",
     // "Giữ chặn phím số"): with no key window -- the macro not running -- at
     // the break's moments, on keys_clear's word (nothing up, never the money
-    // stretch nor a charm run), through the run's own press, then the potion
+    // stretch; a charm run's own since 2026.11.12b, below), through the run's own press, then the potion
     // waited out: a drag only from a look begun after it, a double-click only
     // from a look taken after it.
     const std::string own = body(bag, "bool BagCleaner::press_own_potion(");
@@ -1316,20 +1409,71 @@ void test_hp_sources() {
               in_order(grade, { "if (own_potion_any_ && at - own_potion_at_ < std::chrono::milliseconds(kPotionSettleMs)) "
                                 "return false;",
                                 "if (!keys_.open) return true;" }) &&
-              in_order(body(bag, "int BagCleaner::shop_purchase(bool hp, Result& res) {"),
+              in_order(body(bag, "int BagCleaner::shop_purchase(bag::ShopPotion what, Result& res) {"),
                        { "own_pressed_ = false;",
                          "potion_break(f0, BagView{}, \"before the double-click\", nullptr, -1, true);",
                          "const bool went = keys_out_ || own_pressed_;", "money_ = true;", "if (went) {" }) &&
               has(gui, "else if (!held && !trash_left_held_) cleaner.set_own_potions(own_potions());") &&
               has(gui, "else if (!left_held && !look_only) cleaner.set_own_potions(own_potions());") &&
-              count_in(gui, "set_own_potions(") == 2 && !has(charms, "own_potions") && !has(cli, "set_own_potions") &&
+              // The pass, the potion round, the charms -- and the pet's round
+              // (2026.11.24), as the potion round has it.
+              count_in(gui, "set_own_potions(") == 4 && count_in(charms, "set_own_potions(") == 1 &&
+              count_in(gui, "else if (!held && !trash_left_held_) cleaner.set_own_potions(own_potions());") == 2 &&
+              !has(cli, "set_own_potions") &&
               in_order(own_gui, { "if (!macro_ || macro_->running()) return 0;",
-                                  "const MacroEngine::OwnPotion p = macro_->own_potion_due(never);",
-                                  "if (p.refused != 0 && !*refused_said) {", "if (p.vk == 0) return 0;",
-                                  "if (at != own_potion_ms.end() && now_ms() < at->second + p.cooldown_ms) return 0;" }),
+                                  "const MacroEngine::OwnPotion p = macro_->own_potion_due(never, own_cooling);",
+                                  "if (p.refused != 0 && !*refused_said) {", "if (p.vk == 0) return 0;" }) &&
+              in_order(gui, { "const auto own_cooling = [&own_potion_ms](std::uint32_t vk, std::uint32_t cooldown_ms) {",
+                              "const auto at = own_potion_ms.find(vk);",
+                              "return at != own_potion_ms.end() && now_ms() < at->second + cooldown_ms;",
+                              "const auto own_potions = [&] {" }),
           "the run's own potion press: only with no window, on keys_clear, through press(), the potion waited out "
-          "before a drag or a double-click; set for a pass (not a look only) and a shop round, never a bin-held job, a "
-          "charm run or gobot_cli; the macro running presses its own; each key's cooldown kept");
+          "before a drag or a double-click; set for a pass (not a look only) and a shop round, never a bin-held job "
+          "or gobot_cli; the macro running presses its own; each key's cooldown kept -- asked inside own_potion_due "
+          "since 2026.11.12b, so that a key cooling lets the other kind go");
+    // A charm run's own (2026.11.12b, the owner: the charms at any HP): the
+    // macro running as well -- the run lets no window through, so nobody else
+    // drinks while it holds -- but then only once the macro's own cooldown
+    // for the key is over too; the same rules otherwise. In the sweep, at the
+    // top of a round: the bag on Tiêu Dùng, nothing up, its scroll read, and a
+    // fresh look after the press.
+    const std::string charm_gui = slice(gui, "const auto charm_potions = [&] {", "// ---- charms (Bùa) ----");
+    const std::string sweep = body(bag, "void BagCleaner::charm_sweep(int tab, BagView& v, Result& res, bool& stop) {");
+    check(in_order(charm_gui, { "if (!macro_) return 0;",
+                                "const MacroEngine::OwnPotion p = macro_->own_potion_due(never, own_cooling, "
+                                "macro_->running());",
+                                "if (p.refused != 0 && !*refused_said) {", "if (p.vk == 0) return 0;",
+                                "o.pressed = [&own_potion_ms](std::uint32_t vk) { own_potion_ms[vk] = now_ms(); };" }) &&
+              !has(charm_gui, "macro_->running()) return 0;") &&
+              in_order(sweep, { "if (v.selected_tab != tab) {", "if (!v.scroll_known()) {",
+                                "if (own_potions_.due && (press_own_potion(f, v, \"between two charms\", nullptr, -1, "
+                                "false) || cancelled_))",
+                                "continue;", "bool acted = false;", "const auto slots = v.slots(l);" }) &&
+              count_in(sweep, "press_own_potion(") == 1 && !has(sweep, "potion_break(") && !has(sweep, "keys_open("),
+          "the charm run's own potion press: the macro's cooldown asked when it runs, never refused for it running; "
+          "in the sweep between two charms only, on a look with the bag on Tiêu Dùng, never the key window");
+    // Nhiệm vụ nhanh and Tự đóng thông báo at any HP (2026.11.12b, the owner's
+    // answer): the character down alone holds them back or ends a round --
+    // never chat_hp_floor_ nor its + 10 any more. Save one place (2026-11-15):
+    // the quest round's waits for the game, which press nothing, end under the
+    // potion's mark (Hands::under_potion_mark) -- the round's start and its
+    // keys and clicks still go at any HP.
+    const std::string quest = read_file(root + "/apps/gobot_gui/simple_quest.cpp");
+    const std::string popups = read_file(root + "/apps/gobot_gui/simple_popups.cpp");
+    const std::string quest_low = slice(quest, "hands.low_hp = [this] {", "hands.under_potion_mark =");
+    const std::string quest_mark = slice(quest, "hands.under_potion_mark = [this] {", "hands.behind =");
+    // 2026.11.21 (B10): the one way past it, the check-in board's ESC on the
+    // reviver's look that saw no death panel (checkin_down_esc).
+    const std::string popups_low =
+        slice(popups, "const auto hp_low = [this, &closer, &said_down_esc] {", "PopupCloser::Guard guard;");
+    check(has(quest_low, "return hp >= 0.0f && hp < static_cast<float>(bag::kJobDownHpPct);") &&
+              has(quest, "in.hp_floor = bag::kJobDownHpPct;") && count_in(quest, "chat_hp_floor_") == 1 &&
+              has(quest_mark, "return hp >= 0.0f && hp < static_cast<float>(chat_hp_floor_.load());") &&
+              !has(quest, "floor + 10") &&
+              has(popups_low, "if (!(hp >= 0.0f && hp < static_cast<float>(bag::kJobDownHpPct))) return false;") &&
+              has(popups_low, "checkin_down_esc(closer.last_about(PopupKind::CheckinBoard)") &&
+              !has(popups, "chat_hp_floor_") && !has(popups, "floor + 10"),
+          "the quick quest's gate and guard and the popup closer's HP gate: the character down only");
 #else
     skip("no source folder\n");
 #endif
@@ -1404,7 +1548,7 @@ void test_nav_sources() {
           "GoBot's window: the hook by the coordinator's time");
     // The double-click only by a look with the row on it; shop_now's fallback
     // kept for the close paths and the run's end.
-    const std::string buy = body(bag, "int BagCleaner::shop_purchase(bool hp, Result& res) {");
+    const std::string buy = body(bag, "int BagCleaner::shop_purchase(bag::ShopPotion what, Result& res) {");
     const std::string now = body(bag, "bag::Shop BagCleaner::shop_now(const Frame& f) const {");
     check(in_order(buy, { "const auto judge = [&](Frame& f0, bag::Shop& s) -> int {", "for (int again = 0;; ++again) {",
                           "s = f0.valid() ? shop_now(f0) : bag::Shop{};", "if (board_up(f0, res)) {",
@@ -1414,12 +1558,28 @@ void test_nav_sources() {
                           "at %d,%d (row \"",
                           "if (again >= kShopRowRelooks) {", "keep(f0, \"shop_row_unseen\");",
                           "return kShopStopped;", "if (!wait_ms(kShopLookMs)) return kShopStopped;",
-                          "f0 = std::move(g);", "double_click(cx, cy)" }) &&
-              count_in(buy, "return -1;") == 1 && !has(now, "row_score >") &&
+                          "if (grab_) grab_(f0);", "else blank(f0);", "double_click(cx, cy)" }) &&
+              // The potions' row matched, or (2026.11.24) the pet's food
+              // found by its name on Linh Thú.
+              count_in(buy, "return -1;") == 2 && !has(now, "row_score >") &&
               has(now, "s.row = ScreenRect{ m.at.x - bag::kShopButtonsDx, m.at.y - shop_row_dy_, 294, 21 };") &&
               BagCleaner::kShopRowRelooks == 3,
           "shop_purchase's judge: a look passes only with the potions' row matched; the buttons alone, the window "
           "shut, looked at again 3 times with the scores said, then stopped -- shop_now's fallback as it was");
+    // The pet's food (2026.11.24): only on a look that draws Linh Thú chosen
+    // and finds it whole by its name; else the window shut, the pointer off
+    // the list and looked at again 3 times, then stopped with the picture kept.
+    check(in_order(buy, { "if (lone_message(f0, &label, &shot)) {", "if (pet) {",
+                          "const int drawn = bag::shop_tab_drawn(f0, s.buttons, bag::kShopTabPet);",
+                          "pet_item = drawn == 1 ? bag::shop_item(f0, s.buttons, CleanSettings::kBuyPetName) : "
+                          "bag::ShopItemSeen{};",
+                          "if (pet_item.ok) {", "return -1;", "if (!keys_shut()) {", "if (drawn == 0) {",
+                          "keep(f0, \"pet_tab\");", "if (again >= kShopRowRelooks) {",
+                          "keep(f0, pet_item.passed > 0 ? \"pet_item_place\" : \"pet_no_item\");",
+                          "move_to(s.buttons.x - 30, s.button_y());", "continue;",
+                          "if (s.row_score > 0.0f) return -1;" }),
+          "shop_purchase's judge for the pet's food: Linh Thú drawn chosen and the item whole by its name, else looked "
+          "at again kShopRowRelooks times, then stopped with pet_tab / pet_no_item / pet_item_place kept");
     // The simple screen: Delete a key like any other, Backspace clears.
     check(has(view, "{ ImGuiKey_PageDown, VK_NEXT },     { ImGuiKey_Delete, VK_DELETE },") &&
               has(view, "} else if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {") &&
@@ -1433,6 +1593,318 @@ void test_nav_sources() {
               has(card, "\"phím chữ cái hoặc Home, End, PgUp, PgDn, Insert, Delete. Không mua khi đang chat, \""),
           "the cards: the six go as the letters do, and a digit potion waits -- moved to a letter or one of the six "
           "to go");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------- the audit of 2026.11.21: bag jobs not blocking the rest
+
+void test_drink_yield() {
+    section("Bag jobs: the macro's HP potion on a digit -- a timed job gives way for it (2026.11.21, the audit's B2; "
+            "the owner: \"không để các chức năng block nhau\")");
+    // The shipped lines: HP on 1 at 50%, MP on 2 at 30%.
+    Rig rig({ key('Z', 500), potion(MacroTrigger::HpBelow, '1', 50), potion(MacroTrigger::MpBelow, '2', 30) });
+    rig.engine.set_vitals(80.0f, 100.0f, -1.0f);
+    int mark = -1;
+    check(rig.engine.hp_potion_due(&mark) == 0 && mark == -1, "HP 80%, over the 1's 50%: no HP potion due");
+    rig.engine.set_vitals(90.0f, 10.0f, -1.0f);
+    check(rig.engine.hp_potion_due() == 0, "MP under its mark alone: none -- a job gives way for HP's alone");
+    rig.engine.set_vitals(40.0f, 100.0f, -1.0f);
+    check(rig.engine.hp_potion_due(&mark) == '1' && mark == 50, "HP 40%: the 1 due, its mark 50%");
+    // Under a bag job's hold the 1 is never let through: refused, still due --
+    // what kept the character from drinking for the whole job.
+    rig.coord.engage_critical(kTrash);
+    rig.hp = 40.0f;
+    rig.mp = 100.0f;
+    rig.pet = 100.0f;
+    const std::uint64_t t0 = rig.t;
+    rig.run(1000);
+    rig.engine.set_vitals(40.0f, 100.0f, -1.0f);
+    check(rig.count('1', t0) == 0 && rig.engine.hp_potion_due() == '1',
+          "a second under the job's hold: the 1 never pressed, and still due");
+    // The hold given back: the macro drinks at once, and the 1 cools.
+    rig.coord.disengage_critical();
+    const std::uint64_t t1 = rig.t;
+    rig.run(300);
+    rig.engine.set_vitals(40.0f, 100.0f, -1.0f);
+    check(rig.count('1', t1) == 1 && rig.engine.hp_potion_due() == 0,
+          "the hold given back: the 1 drunk at once, on its cooldown, none due");
+    MacroConfig off = rig.engine.config();
+    off.timers_enabled = false;
+    rig.engine.set_config(off);
+    rig.engine.set_vitals(10.0f, 10.0f, -1.0f);
+    check(rig.engine.hp_potion_due() == 0, "the timers off: none");
+
+    // The rule: only a potion held off, only a job that lets its hold go, and
+    // only after kDrinkYieldAfterMs of the game -- never at once, or a job with
+    // HP hovering under the mark would never get anything done (2026.11.12).
+    const std::uint64_t after = bag::kDrinkYieldAfterMs;
+    check(bag::kDrinkYieldAfterMs == 10'000 && !bag::drink_yield(true, false, 0) &&
+              !bag::drink_yield(true, false, after - 1) && bag::drink_yield(true, false, after) &&
+              bag::drink_yield(true, false, 120'000),
+          "the potion held off: the job gives way once it has held the game 10 s, not before");
+    check(!bag::drink_yield(false, false, 120'000) && !bag::drink_yield(true, true, 120'000),
+          "never with the potion let through or none due, nor for a job begun with something maybe in the bin");
+}
+
+void test_kept_sweep_due() {
+    section("Bag jobs: the kept hold's way out -- the trash worker's own ESC sweep (2026.11.21, the audit's B1)");
+    const std::uint64_t react = static_cast<std::uint64_t>(kReactMs);
+    bag::KeptSweep k;
+    k.held = k.hold_ours = true;
+    k.kept_ms = 1'000;
+    k.now_ms = k.kept_ms + react;
+    check(bag::kept_sweep_due(k), "the hold kept 30 s, nothing else known: swept");
+    bag::KeptSweep e = k;
+    e.now_ms = k.kept_ms + react - 1;
+    check(!bag::kept_sweep_due(e), "kept less than 30 s: not yet -- the owner's reaction wait");
+    e = k;
+    e.held = false;
+    check(!bag::kept_sweep_due(e), "no hold kept: nothing");
+    e = k;
+    e.hold_ours = false;
+    check(!bag::kept_sweep_due(e), "the hold another job's (a revive, say): nothing");
+    e = k;
+    e.kept_ms = 0;
+    check(!bag::kept_sweep_due(e), "not known since when: nothing");
+    e = k;
+    e.swept_ms = k.now_ms - bag::kKeptSweepGapMs + 1;
+    check(!bag::kept_sweep_due(e), "swept less than a minute ago: not again yet");
+    e.swept_ms = k.now_ms - bag::kKeptSweepGapMs;
+    check(bag::kept_sweep_due(e), "a minute after the last: again");
+    // The check-in board over it: its own 30 s, and never in its night hold.
+    e = k;
+    e.now_ms = k.kept_ms + 10 * react;
+    e.board_ms = e.now_ms - react + 1;
+    check(!bag::kept_sweep_due(e), "the board up less than 30 s: not yet, as the popup closer waits");
+    e.board_ms = e.now_ms - react;
+    check(bag::kept_sweep_due(e), "the board up 30 s, after 00:03: swept -- its ESC under the worker's own hold");
+    e.night = true;
+    check(!bag::kept_sweep_due(e), "the board in its night hold (23:55 to 00:03): no ESC for it");
+    e.board_ms = 0;
+    check(bag::kept_sweep_due(e), "the night hold is the board's alone: a dialog with no board is swept");
+}
+
+void test_timer_retry() {
+    section("Macro: a timer skill refused for another key or a hold keeps its turn, tried again soon (2026.11.21, "
+            "the audit's B16; the owner: \"không để các chức năng block nhau\")");
+    {
+        // Due under a hold with no key window -- a chat line, a quest round,
+        // a charm run: refused, and the moment the hold ends it goes, not
+        // 40 s later.
+        Rig rig({ key('Z', 40'000) });
+        rig.coord.engage_critical("auto chat");
+        const std::uint64_t t0 = rig.t;
+        rig.run(1000);
+        check(rig.count('Z', t0) == 0, "a second under a hold: the 40-s skill not pressed");
+        rig.coord.disengage_critical();
+        const std::uint64_t t1 = rig.t;
+        rig.run(400);
+        const auto z = rig.when('Z', t1);
+        // MacroEngine::kGatePollMs, 100 ms (private).
+        check(z.size() == 1 && z[0] - t1 <= 100 + 20,
+              "the hold over: it goes within kGatePollMs (" +
+                  (z.empty() ? std::string("never") : std::to_string(z[0] - t1) + " ms") + ")");
+        const std::uint64_t t2 = rig.t;
+        rig.run(3000);
+        check(rig.count('Z', t2) == 0, "and then waits its own 40 s, as ever");
+    }
+    {
+        // Due while another key holds the token -- the hunter's 60-ms swing:
+        // refused Busy, and it goes kSkillRetryMs after the token is back.
+        Rig rig({ key('Z', 40'000) });
+        std::uint64_t t1 = 0;
+        {
+            auto swing = rig.coord.acquire("hunt-attack", Priority::Combat);
+            check(swing.ok(), "the swing's token taken");
+            const std::uint64_t t0 = rig.t;
+            rig.run(60);
+            check(rig.count('Z', t0) == 0, "the swing's 60 ms: Z refused");
+            t1 = rig.t;
+        }
+        rig.run(200);
+        const auto z = rig.when('Z', t1);
+        check(z.size() == 1 && z[0] - t1 <= MacroEngine::kSkillRetryMs + 20,
+              "the token back: Z within kSkillRetryMs, not 40 s on (" +
+                  (z.empty() ? std::string("never") : std::to_string(z[0] - t1) + " ms") + ")");
+    }
+    {
+        // The charm run's hold: no window, so a letter skill never goes
+        // through it, however often it is tried (the owner: no skills during
+        // charms).
+        Rig rig({ key('Z', 500), key('X', 40'000) });
+        rig.coord.engage_critical(kTrash);
+        const std::uint64_t t0 = rig.t;
+        rig.run(3000);
+        check(rig.count('Z', t0) == 0 && rig.count('X', t0) == 0,
+              "a hold with no key window: retried, never pressed");
+        rig.coord.disengage_critical();
+    }
+}
+
+void test_chat_start_sources() {
+    section("Chat doubt, the bin's doubt and BẮT ĐẦU: where GoBot's window wires them (their source, 2026.11.21, "
+            "the audit's B4, B9, B22)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string root = GOBOT_SOURCE_DIR;
+    const std::string gui = read_file(root + "/apps/gobot_gui/gui_app.cpp");
+    const std::string view = read_file(root + "/apps/gobot_gui/simple_view.cpp");
+    if (gui.empty() || view.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto has = [](const std::string& text, const std::string& part) { return text.find(part) != npos; };
+    const auto slice = [&](const std::string& text, const std::string& from, const std::string& to) {
+        const std::size_t a = text.find(from);
+        const std::size_t b = a == npos ? npos : text.find(to, a);
+        return a == npos || b == npos ? std::string() : text.substr(a, b - a);
+    };
+    const auto in_order = [](const std::string& text, std::initializer_list<const char*> parts) {
+        std::size_t at = 0;
+        for (const char* p : parts) {
+            const std::size_t found = text.find(p, at);
+            if (found == npos) return false;
+            at = found + 1;
+        }
+        return true;
+    };
+    // B4: the worker's doubt asks for a page of the login, and so does the
+    // look at a doubt handed over (watch_chat_doubt, keys_may_start).
+    check(has(gui, "hooks.no_line_here = [&] {") &&
+              has(gui, "return grab(f) && f.valid() && shows_login_page(f, store);") &&
+              has(gui, "if (bar.state != ChatBarState::Closed && !shows_login_page(f, store))") &&
+              has(gui, "return login_page_up(f, login, store);"),
+          "B4: a chat line in doubt ends on a page of the login, in the worker and in the look after a stop");
+    // B9: what the bin's doubt stopped, remembered only when the run goes on,
+    // and started again by itself on two clear looks.
+    const std::string stop = slice(gui, "bool GuiApp::stop_trash(bool wait) {", "void GuiApp::bin_seen_clear() {");
+    check(in_order(stop, { "stopping = stopping_;", "if (!stopping) {", "if (hunting_) left_held_resume_hunt_ = true;",
+                           "if (macro_running_) left_held_resume_macro_ = true;", "stop_hunt();", "stop_macro();",
+                           "const bool goes_on = !stopping && simple_running();" }),
+          "B9: stop_trash remembers the hunter and the macro it stops, not under DỪNG, and says what comes next");
+    const std::string watch = slice(gui, "void GuiApp::watch_left_held() {", "bool GuiApp::take_hold(");
+    check(in_order(watch, { "bin_seen_clear();", "resume_after_bin()", "Bấm DỪNG LẠI rồi BẮT ĐẦU" }) &&
+              in_order(watch, { "if (!bin_looks_clear(*left_held_store_, nullptr)) return false;",
+                                "std::this_thread::sleep_for(std::chrono::milliseconds(150));",
+                                "return bin_looks_clear(*left_held_store_, nullptr);" }),
+          "B9: the bin seen clear on two looks a frame apart: the run's hunter and macro back, else the right button");
+    const std::string resume = slice(view, "int GuiApp::resume_after_bin() {", "\n}\n");
+    check(in_order(resume, { "left_held_resume_hunt_.exchange(false)", "left_held_resume_macro_.exchange(false)",
+                             "if (!simple_running() || simple_cold_start_) return 0;", "start_macro();",
+                             "start_hunt();" }) &&
+              has(watch, "if (resumed < 0 || "),
+          "B9: resume_after_bin -- once, only with the run on, through start_macro and start_hunt");
+    // The review of 2026.11.21: nothing remembered when nothing goes on, and
+    // the note only for what started -- never over a start that refused.
+    check(in_order(stop, { "const bool goes_on = !stopping && simple_running();", "if (!goes_on) {",
+                           "left_held_resume_hunt_ = false;", "left_held_resume_macro_ = false;", "simple_note(" }) &&
+              in_order(resume, { "out |= macro_running_ ? kResumedMacro : kResumeRefused;",
+                                 "out |= hunting_ ? kResumedHunt : kResumeRefused;" }) &&
+              has(watch, "if (resumed < 0 || (resumed > 0 && (resumed & kResumeRefused))) return;") &&
+              has(watch, "if (resumed > 0 && !(resumed & kResumeRefused))") &&
+              in_order(watch, { "resumed_note((resumed & kResumedHunt) != 0, (resumed & kResumedMacro) != 0)",
+                                "resumed_note((resumed & kResumedHunt) != 0, (resumed & kResumedMacro) != 0)" }),
+          "B9 (review): the stop remembers only with the run going on; the note says what started, and none over a "
+          "refused start's own");
+    // Since 2026.11.24 the start's keys_may_start opens a block (the cold
+    // start's refusal owed: jobs_gui_test's test_owed_start).
+    check(has(slice(gui, "bool GuiApp::stop_jobs() {", "take_hold(kStopHold);"), "left_held_resume_hunt_ = false;") &&
+              in_order(slice(view, "void GuiApp::simple_start_jobs() {", "if (!keys_may_start()) {"),
+                       { "left_held_resume_hunt_ = false;", "left_held_resume_macro_ = false;" }),
+          "B9: DỪNG and BẮT ĐẦU forget it");
+    // B22: the cold start clears both doubts -- a closed game holds neither.
+    check(in_order(slice(view, "if (game_running(crash.game_process, GameInstall::here())) {", "start_keeper();"),
+                   { "if (trash_left_held_) {", "++left_held_gen_;", "bin_seen_clear();",
+                     "if (chat_doubt_ && !chat_doubt_watched_) {", "++chat_doubt_gen_;", "chat_seen_shut();",
+                     "keeper_cold_start_ = true;" }),
+          "B22: BẮT ĐẦU with the game closed: the bin's and the chat line's doubts over before the keeper opens it");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+void test_block_sources() {
+    section("Bag jobs: the give-way and the kept hold's sweep -- where GoBot's window wires them in (their source, "
+            "2026.11.21)");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string root = GOBOT_SOURCE_DIR;
+    const std::string gui = read_file(root + "/apps/gobot_gui/gui_app.cpp");
+    const std::string bag = read_file(root + "/src/bag.cpp");
+    if (gui.empty() || bag.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto has = [](const std::string& text, const std::string& part) { return text.find(part) != npos; };
+    const auto count_in = [](const std::string& text, const std::string& part) {
+        int n = 0;
+        for (std::size_t at = text.find(part); at != npos; at = text.find(part, at + 1)) ++n;
+        return n;
+    };
+    const auto slice = [&](const std::string& text, const std::string& from, const std::string& to) {
+        const std::size_t a = text.find(from);
+        const std::size_t b = a == npos ? npos : text.find(to, a);
+        return a == npos || b == npos ? std::string() : text.substr(a, b - a);
+    };
+    const auto in_order = [](const std::string& text, std::initializer_list<const char*> parts) {
+        std::size_t at = 0;
+        for (const char* p : parts) {
+            const std::size_t found = text.find(p, at);
+            if (found == npos) return false;
+            at = found + 1;
+        }
+        return true;
+    };
+    // B2: the give-way, set for the three timed jobs, measured from each run.
+    const std::string yield = slice(gui, "const auto drink_yield_of = [&]", "// ---- the HP and MP potions a charm run");
+    check(has(yield, "const std::uint32_t vk = macro_->hp_potion_due();") && has(yield, "keys.has(vk)") &&
+              has(yield, "pass_key_allowed(vk)") && has(yield, "bag::drink_yield(vk != 0 && !goes, kept,") &&
+              has(yield, "if (yield_from_ms == 0 || !macro_ || !macro_->running()) return false;"),
+          "the give-way: the macro running, its HP potion due on a key the job neither lets through nor presses");
+    // Four since 2026.11.24: the pet's round on reaching TổCổLong is a timed
+    // job too (run_pet), set as a timed potion round is.
+    check(count_in(gui, "cleaner.set_yield(drink_yield_of(") == 4 &&
+              has(gui, "if (!forced) cleaner.set_yield(drink_yield_of(PassKeys{}, true, held || trash_left_held_, "
+                       "job_never()));") &&
+              count_in(gui, "cleaner.set_yield(drink_yield_of(pass_keys, false, held || trash_left_held_, {}));") == 2 &&
+              has(gui, "cleaner.set_yield(drink_yield_of(pass_keys, false, left_held, {}));") &&
+              // Four runs, and the declaration's 0.
+              count_in(gui, "yield_from_ms = now_ms();") == 4 && count_in(gui, "yield_from_ms = 0;") == 5,
+          "set for a timed charm run, shop round, pet round and pass, and its clock set and cleared round each run");
+    check(has(gui, "if ((hp_cut.level > 0 || r.yielded) && !trash_stop_) next = now_ms() + bag::kHpStoppedAgainMs;") &&
+              has(gui, "hp_stop = !trash_stop_ && (hp_cut.level > 0 || r.yielded);") &&
+              has(gui, "if (r.yielded && !trash_stop_) charm_check_ms = now_ms() + bag::kHpStoppedAgainMs;"),
+          "given way: tried again in 15 s, the shop's round put off as for HP");
+    // Asked only at the guard's safe points: between two items, in
+    // charm_must_stop -- never in a wait for the game, nor by esc_out.
+    const std::string esc = slice(bag, "bool BagCleaner::esc_out(Result& res, const char* where) {",
+                                  "void BagCleaner::shop_buy(");
+    const std::string react = slice(bag, "bool BagCleaner::react_stop() {", "// What a wait moves a run's deadline");
+    check(count_in(bag, "yield_now(res)") == 2 && count_in(bag, "yield_()") == 1 && !has(esc, "yield") &&
+              !has(react, "yield"),
+          "bag.cpp: the give-way asked between two items and in charm_must_stop alone");
+    // B1: the kept hold's sweep, by the rule, under the worker's own hold and
+    // the game's mouse, no key window, and a fresh look after it.
+    const std::string sweep = slice(gui, "const auto kept_sweep = [&] {", "// Tự chat's line before any timed job");
+    check(in_order(sweep, { "kept_swept_ms = now_ms();", "mouse.try_lock()",
+                            "if (!(coord_.critical_active() && coord_.critical_reason() == \"trash cleaning\")) return;",
+                            "trash_pass_ = true;", "input_.release_all();",
+                            "cleaner.set_mode(shop_held ? BagCleaner::Mode::ShopBuy : BagCleaner::Mode::Pass);",
+                            "return !(hp >= 0.0f && hp < static_cast<float>(bag::kJobDownHpPct));",
+                            "clear = cleaner.sweep_kept(r, \"a kept hold\");", "trash_pass_ = false;",
+                            "look_for_clear();" }) &&
+              !has(sweep, "PassKeysScope") && !has(sweep, "set_key_window") && !has(sweep, "end_hold("),
+          "the kept hold's sweep: the mouse and the hold its own, no key window, the hold let go only by "
+          "look_for_clear");
+    check(in_order(gui, { "if ((held || trash_left_held_) && now_ms() - held_looked_ms > 1500) look_for_clear();",
+                          "kept_ms = kept_board_ms = kept_swept_ms = 0;", "shop_held = false;",
+                          "k.night = checkin_night_hold(local_second_of_day());",
+                          "if (bag::kept_sweep_due(k)) kept_sweep();" }) &&
+              count_in(gui, "if (!held) shop_held = false;") == 2,
+          "the trash worker's loop: the sweep by bag::kept_sweep_due, the board's night hold asked; shop_held "
+          "forgotten wherever the hold is");
 #else
     skip("no source folder\n");
 #endif
@@ -1456,4 +1928,9 @@ void test_pass_keys(void (*check_fn)(bool, const std::string&), void (*section_f
     test_sources();
     test_hp_sources();
     test_nav_sources();
+    test_drink_yield();
+    test_kept_sweep_due();
+    test_block_sources();
+    test_timer_retry();
+    test_chat_start_sources();
 }

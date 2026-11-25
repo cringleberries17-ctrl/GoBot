@@ -1,19 +1,9 @@
-﻿// gobot_cli — the bot runner.
+﻿// gobot_cli -- GoBot's command-line tools.
 //
-// Wires the pipeline together:
-//
-//   Npcap -> TcpReassembler -> framing -> OpcodeRegistry -> ProtocolHandler
-//                                                              |
-//                                                          GameState
-//                                                              |
-//                                                           BotBrain
-//                                                              |
-//                                                       CommandExecutor
-//                                                              |
-//                                                        InputManager -> game
-//
-// Capture is read-only; the bot acts only through synthetic keyboard input
-// into the focused game window.
+// --doctor, --login and --fix-dpi for players; for the rest, a look from a
+// console at what each job sees and does, against the live game or a
+// screenshot. Nothing runs without a command: the packet bot that used to
+// be the default went in 2026.11.16.
 
 #include "gobot/auto_chat.hpp"
 #include "gobot/auto_login.hpp"
@@ -23,44 +13,27 @@
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
 #include "gobot/party_chat.hpp"
-#include "gobot/bot_brain.hpp"
-#include "gobot/command_executor.hpp"
 #include "gobot/common.hpp"
 #include "gobot/util.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
-#include "gobot/game_state.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/hotkeys.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
-#include "gobot/camera_tracker.hpp"
-#include "gobot/field_finder.hpp"
 #include "gobot/hunter.hpp"
 #include "gobot/jump_check.hpp"
-#include "gobot/minimap_tracker.hpp"
 #include "gobot/mob_detector.hpp"
 #include "gobot/monster_list.hpp"
 #include "gobot/macro.hpp"
-#include "gobot/map_file.hpp"
-#include "gobot/map_locator.hpp"
-#include "gobot/map_table.hpp"
-#include "gobot/opcode_registry.hpp"
-#include "gobot/clr_bridge.hpp"
-#include "gobot/dialog_driver.hpp"
 #include "gobot/party.hpp"
 #include "gobot/reviver.hpp"
 #include "gobot/quick_quest.hpp"
-#include "gobot/routine.hpp"
 #include "gobot/screen_layout.hpp"
 #include "gobot/session_manager.hpp"
 #include "gobot/template_matcher.hpp"
 #include "gobot/vitals_reader.hpp"
-#include "gobot/world_anchor.hpp"
 #include "gobot/packet_capture.hpp"
-#include "gobot/pathfinder.hpp"
-#include "gobot/protocol_handler.hpp"
-#include "gobot/window_focus.hpp"
 #include "gobot/popup_closer.hpp"
 #include "gobot/potion_stock.hpp"
 #include "gobot/stall_watch.hpp"
@@ -88,15 +61,6 @@ using namespace gobot;
 namespace {
 
 std::atomic<bool> g_stop{false};
-std::atomic<bool> g_bot_enabled{false};
-
-/// How much of a calibration run is spent walking rather than fighting.
-int g_walk_share_pct = 55;
-
-// How far the character ranged during a calibration run, in level pixels.
-std::atomic<double> g_walk_lo{1e18};
-std::atomic<double> g_walk_hi{-1e18};
-std::atomic<double> g_walk_span{0.0};
 
 // When the first Ctrl+C, Ctrl+Break or close came, on now_ms()'s clock; 0 before.
 std::atomic<std::uint64_t> g_stop_asked_ms{0};
@@ -113,7 +77,7 @@ constexpr std::uint64_t kForceAfterMs = 5000;
 ///
 /// std::signal caught the first Ctrl+C alone, never Ctrl+Break or the close,
 /// and a program ended by one of those finished nothing: gobot_cli let go of
-/// no key or button -- --keytest's LCtrl stayed down for the whole machine, a
+/// no key or button -- a held LCtrl stayed down for the whole machine, a
 /// --trash drag kept the mouse button -- and gobot_sniff --record wrote none
 /// of its per-connection files. This runs on a thread Windows starts for it,
 /// so it touches the atomics, stderr and the event and nothing else: never
@@ -242,44 +206,32 @@ bool console_in_front() {
 
 void print_usage() {
     // In more than one piece: MSVC refuses any one string literal over 16 KB.
-    std::printf(R"(gobot_cli — GhostOnline packet-capture bot
+    std::printf(R"(gobot_cli — GoBot's command-line tools
 
 USAGE
-  gobot_cli [options]
+  gobot_cli <command> [options]
 
 OPTIONS
   --app <path>        App config      (default: configs/app.ini)
-  --bot <path>        Bot config      (default: configs/bot_default.ini)
-  --protocol <path>   Protocol map    (default: configs/protocol.ini)
-  --iface <name>      Capture interface (overrides app config)
-  --host <ip>         Game server IP
-  --port <n>          Game server port
   --window <spec>     Which window to aim at. A plain string is its whole
                       title, as --windows prints it: a part of the title
                       finds nothing. For a window with no title -- the game's
                       launcher is one -- name it by class and program instead:
                         --window "class=#32770,proc=GhostOnlineVTC.exe"
                       See --windows for what is on screen.
-  --status            Print state every second instead of running the bot.
-                      Use this to confirm capture and decoding work before
-                      letting it press any keys. Nothing at all is pressed:
-                      the bot's key threads are not even started. It runs
-                      while [Framing] is not yet confirmed, when the bot
-                      will not.
   --see               Look at the game window once and print every name plate
                       found, then exit. No packets, no keys pressed — this is
-                      how to check what the radar can actually see, from a
+                      how to check what the hunter can actually see, from a
                       console where nothing is covering the game. First it says
                       where each reader looks at this client's size: the
                       monster box, the chat bar and the lines read above it,
                       the player list placed from its button, the HUD
                       landmark. Nothing is focused and nothing is clicked.
   --read [x,y,w,h]    Read the game's text. With a rectangle, reads that patch;
-                      with none, reads the map's name off the minimap title bar
-                      and the name on every plate found. This is not OCR
-                      guesswork: the game draws text with a bitmap font, so the
-                      glyphs are matched against the font's own pictures and
-                      the answer is exact.
+                      with none, the name on every plate found. This is not
+                      OCR guesswork: the game draws text with a bitmap font, so
+                      the glyphs are matched against the font's own pictures
+                      and the answer is exact.
   --find <text>       Say where that text is on screen, searching the whole
                       frame, inside a longer line too. The bot finds your own
                       character by its name the same way, but only where the
@@ -293,8 +245,6 @@ OPTIONS
                       early and a nearly-full bar measures short. Ends with how
                       many looks could read the figures; well under all of them
                       means the bar geometry is wrong.
-  --whereami          Name the map the character is standing in and load its
-                      collision data.
   --windows           List every window the bot can see, with its class, its
                       program and where it is. Untitled ones are in the list:
                       the game's launcher -- the window with the purple start
@@ -316,23 +266,8 @@ OPTIONS
   --click x,y         Click that point of the window, in client coordinates.
                       For measuring: working out where a screen's controls
                       are means pressing one and seeing what changes.
-  --calibrate <n>     Walk the character for n seconds while capturing, then
-                      report which packet fields track the movement. This is
-                      how the position field is found: no guessing, the screen
-                      measures the truth and the correlation decides.
-  --anchor <n>        Watch for n seconds and solve for where the camera is,
-                      by matching creatures on screen against the ones the
-                      server reports.
 
 UNATTENDED RUNNING
-  --session <n>       Watch the session for n seconds the way an overnight run
-                      would, and report every drop. What it watches is the
-                      HUD: a character in the world has a health bar and a mana
-                      bar drawn as a matched pair, and nothing else the client
-                      shows looks like that -- not the launcher, not the
-                      channel list, not a disconnect dialog, not a loading
-                      screen. A dialog nobody has ever seen still reads
-                      correctly as "not playing".
   --autoparty <n>     For n seconds, invite whoever types the keyword in
                       chat. Reads the chat, waits for the same line to be
                       seen a few times over, then opens the player list and
@@ -389,26 +324,22 @@ UNATTENDED RUNNING
                       already -- if it shows its sign-in form the flow stops and
                       says so. It does not answer a Security Alert box and
                       never will: if one appears it stops and says so.
+                      Once logged in, the game's window is moved to the
+                      top-left corner of its screen (move_game_to_corner in
+                      configs/login.ini; 2026.11.14).
                       With --dry it only looks, and says what it would click.
   --upto <page>       With --login: cross as far as that page and stop with it
                       on screen. For measuring. The channel list and the
                       character select are each up for about a second in the
                       middle of a crossing, which is not long enough to
                       photograph one and work out where its entries are.
-  --routines          List the click sequences in configs/routines.ini: buying,
-                      mining, closing whatever is in the way. They live in a
-                      config file rather than in code so they can be
-                      corrected with the game open in front of you, which is
-                      what will be wanted when the publisher patches the client.
-  --routine <name>    Run one. "revive" runs the GUI's reviver instead: the
-                      death panel's revive-item button, then Xac Nhan on its
+  --routine revive    The GUI's reviver against the live game: the death
+                      panel's revive-item button, then Xac Nhan on its
                       question, three tries, never the village or Cash, and
                       nothing while the trash bin's dialog is up. With --dry
                       it only looks, and prints both points it would click;
-                      nothing is focused and nothing is clicked. A step
-                      whose confirmation is up before its click is refused;
-                      one marked check = false is clicked unchecked, and the
-                      run says so.
+                      nothing is focused and nothing is clicked. The click
+                      tables of configs/routines.ini are no longer run.
   --bag <png>         Find the bag in a screenshot and say what the trash
                       cleaner would see: where the tab strip is, the trash
                       can, and which slots hold something. Writes the
@@ -549,11 +480,7 @@ UNATTENDED RUNNING
   --with-macro        it runs configs/macro.ini beside it, as the GUI's BẮT
                       ĐẦU does: the HP/MP reader, potions, buffs, and the
                       skills following the fight when skills_follow_fight is
-                      on. Ends with what the macro pressed and held. Without
-                      --hunt, it runs beside the packet bot, on and off with
-                      it (F10), on the HP and MP its packets give: the packet
-                      bot's potions and buffs are macro.ini's, and go only
-                      with this.
+                      on. Ends with what the macro pressed and held.
   --method <m>        With --chat-once or --chat: type with vk (a key per
                       character, GoC's way), unicode, wmchar or imechar
                       instead of chat.ini's method. Every method but vk keeps
@@ -581,71 +508,39 @@ UNATTENDED RUNNING
                       party worker and Tự chat read it -- alone, a member or
                       the leader, how many, and where each member's panel is.
                       On the screenshot named, or one capture of the game.
-                      Presses nothing. (--party asks the other helper instead.)
-  --dry               With --routine: find each step's picture and say where it
-                      would click, without clicking anything. Use this first.
-                      The offsets in that file were worked out from the
-                      pictures' names rather than by watching the game, so a
-                      first pass over a routine is expected to be wrong
-                      somewhere -- and finding out by watching it misclick its
-                      way through a shop is the expensive way.
+                      Presses nothing.
+  --dry               With --routine revive, --login, --trash or --invite:
+                      look, and say what would be clicked, clicking nothing.
   --verbose           Debug logging.
   --help              This text.
 
-HOTKEYS (while running)
-  F10                 Toggle the bot on/off -- and, with --with-macro, the
-                      macro with it. It is switched on only with the game or
-                      this console in front.
+HOTKEYS (while a command runs)
   Ctrl+C, Ctrl+Break  Stop, letting go of every key. Closing the console
                       does the same.
-
-BEFORE THIS WORKS
-  configs/protocol.ini must contain a [Framing] block, marked verified=true
-  once checked (until then the bot will not start; --status still runs),
-  and at least the packet layouts the bot reads: self position, self HP,
-  and monster positions.
-  Derive them with gobot_sniff — see README.md.
-
-  Run as Administrator; Npcap requires it.
 )");
 }
 
 struct Options {
     std::string app_path      = "configs/app.ini";
-    std::string bot_path;
-    std::string protocol_path;
-    std::string iface;
-    std::string host;
     std::string window;
-    std::uint16_t port = 0;
-    bool status_only = false;
     bool see_only = false;
     bool read_text = false;
     std::string read_rect;
     bool readself = false;
     std::string readself_text;
     std::string find_text;
-    int  calibrate_seconds = 0;
-    bool keytest = false;
     bool inputcheck = false;
     int  hunt_seconds = 0;
-    bool with_macro = false;        ///< --with-macro, beside --hunt or the packet bot
+    bool with_macro = false;        ///< --with-macro, beside --hunt
     bool jumptest = false;          ///< --jumptest: the jump key once, watched
     std::string press_key;
     std::string click_spec;
-    std::string analyse_path;
-    std::string dump_opcode_arg;
-    std::string check_arg;
-    int anchor_seconds = 0;
-    bool fields = false;
-    bool whereami = false;
     bool list_windows = false;
     bool templates = false;
     bool survey = false;
     bool template_save = false;
     std::string template_source;
     int  vitals_seconds = 0;
-    int  session_seconds = 0;
     bool login = false;
     std::string login_upto;
     int  keepalive_minutes = 0;
@@ -656,7 +551,7 @@ struct Options {
     std::string invite_who;
     int  auto_party_seconds = 0;
     bool set_login = false;
-    bool routines = false;
+    bool revive = false;            ///< --routine revive: the GUI's reviver
     std::string bag_image;
     std::string bag_out;
     bool trash = false;
@@ -679,16 +574,10 @@ struct Options {
     std::string popups_image;       ///< on this screenshot rather than the game
     bool party_hud = false;         ///< --party-hud: the party read off the screen
     std::string party_hud_image;    ///< on this screenshot rather than the game
-    bool party = false;
     bool player_list = false;
     int  pick_row = 0;
-    std::string routine_name;
     std::string template_name;
     std::string grab_spec;
-    bool bridge = false;
-    std::string bridge_method = "Probe";
-    std::string bridge_arg;
-    int walk_pct = 55;
     bool verbose = false;
 };
 
@@ -704,13 +593,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         };
 
         if (a == "--app")            o.app_path = next("--app");
-        else if (a == "--bot")       o.bot_path = next("--bot");
-        else if (a == "--protocol")  o.protocol_path = next("--protocol");
-        else if (a == "--iface")     o.iface = next("--iface");
-        else if (a == "--host")      o.host = next("--host");
-        else if (a == "--port")      o.port = static_cast<std::uint16_t>(std::stoi(next("--port")));
         else if (a == "--window")    o.window = next("--window");
-        else if (a == "--status")    o.status_only = true;
         else if (a == "--see")       o.see_only = true;
         else if (a == "--read") {
             o.read_text = true;
@@ -723,19 +606,11 @@ bool parse_args(int argc, char** argv, Options& o) {
             o.readself = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') o.readself_text = argv[++i];
         }
-        else if (a == "--calibrate") o.calibrate_seconds = std::stoi(next("--calibrate"));
-        else if (a == "--keytest")   o.keytest = true;
         else if (a == "--inputcheck") o.inputcheck = true;
         else if (a == "--hunt")      o.hunt_seconds = std::stoi(next("--hunt"));
         else if (a == "--with-macro") o.with_macro = true;
         else if (a == "--jumptest")  o.jumptest = true;
         else if (a == "--press")     o.press_key = next("--press");
-        else if (a == "--analyse")   o.analyse_path = next("--analyse");
-        else if (a == "--dump")      o.dump_opcode_arg = next("--dump");
-        else if (a == "--check")     o.check_arg = next("--check");
-        else if (a == "--anchor")    o.anchor_seconds = std::stoi(next("--anchor"));
-        else if (a == "--fields")    o.fields = true;
-        else if (a == "--whereami") o.whereami = true;
         else if (a == "--windows")  o.list_windows = true;
         else if (a == "--upto")     o.login_upto = next("--upto");
         else if (a == "--click")    o.click_spec = next("--click");
@@ -754,8 +629,6 @@ bool parse_args(int argc, char** argv, Options& o) {
                                        o.template_name = next("--tplsave"); }
         else if (a == "--tplsrc")    o.template_source = next("--tplsrc");
         else if (a == "--vitals")    o.vitals_seconds = std::stoi(next("--vitals"));
-        else if (a == "--session")   o.session_seconds = std::stoi(next("--session"));
-        else if (a == "--routines")  o.routines = true;
         else if (a == "--bag")       o.bag_image = next("--bag");
         else if (a == "--bagout")    o.bag_out = next("--bagout");
         else if (a == "--trash")     o.trash = true;
@@ -810,7 +683,16 @@ bool parse_args(int argc, char** argv, Options& o) {
             }
             o.chat_method = m;
         }
-        else if (a == "--routine")   { o.routines = true; o.routine_name = next("--routine"); }
+        else if (a == "--routine") {
+            // The click tables' runner went in 2026.11.16; the reviver stays.
+            const std::string name = next("--routine");
+            if (name != "revive") {
+                std::fprintf(stderr, "error: --routine takes only revive -- the click tables of "
+                                     "configs/routines.ini are no longer run, not '%s'\n\n", name.c_str());
+                return false;
+            }
+            o.revive = true;
+        }
         else if (a == "--dry")       o.dry_run = true;
         else if (a == "--close") {
             o.close_popups = true;
@@ -825,17 +707,10 @@ bool parse_args(int argc, char** argv, Options& o) {
             o.party_hud = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') o.party_hud_image = argv[++i];
         }
-        else if (a == "--party")     o.party = true;
         else if (a == "--playerlist") o.player_list = true;
         else if (a == "--pickrow")   { o.player_list = true; o.pick_row = std::stoi(next("--pickrow")); }
-        else if (a == "--bridge") {
-            o.bridge = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-') o.bridge_method = next("--bridge");
-            if (i + 1 < argc && argv[i + 1][0] != '-') o.bridge_arg = next("--bridge");
-        }
         else if (a == "--login")     o.login = true;
         else if (a == "--setlogin")  o.set_login = true;
-        else if (a == "--walk")      o.walk_pct = std::stoi(next("--walk"));
         else if (a == "--verbose")   o.verbose = true;
         else if (a == "--help" || a == "-h") { print_usage(); std::exit(0); }
         else {
@@ -856,50 +731,6 @@ std::string resolve(const std::string& path) {
     // works from any working directory.
     if (path.size() > 1 && (path[1] == ':' || path[0] == '\\' || path[0] == '/')) return path;
     return exe_relative(path);
-}
-
-// [Framing] and [FramingClient] are read by gobot::load_framing (framing.hpp),
-// the one reader shared with gobot_sniff and the tests.
-
-/// Global hotkey thread. Uses GetAsyncKeyState rather than RegisterHotKey so
-/// the key still reaches the game — a registered hotkey is swallowed.
-///
-/// The bot is switched on only with the game or this console in front: an F10
-/// pressed in another program -- a menu key, a debugger's Step Over -- used to
-/// switch it on unseen, and it walked and attacked the moment the game came
-/// back. Off from anywhere: stopping is never the wrong thing to do.
-void hotkey_loop(std::uint32_t toggle_vk, BotBrain& brain, const InputManager& input) {
-    bool was_down = false;
-
-    while (!g_stop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
-
-        const bool down = (GetAsyncKeyState(static_cast<int>(toggle_vk)) & 0x8000) != 0;
-        if (down && !was_down) {
-            const bool enable = !g_bot_enabled.load();
-
-            if (enable && !input.window_focused() && !console_in_front()) {
-                GB_INFO("%s pressed with neither the game nor this console in front -- "
-                        "the bot stays off", InputManager::key_name(toggle_vk).c_str());
-            } else if (enable) {
-                g_bot_enabled.store(true);
-                brain.reanchor_origin();
-                // Arms the executor too: until now its threads pressed nothing,
-                // whatever HP the packets said.
-                brain.start();
-                GB_INFO("=== BOT ENABLED ===");
-            } else {
-                g_bot_enabled.store(false);
-                // Halts the executor too, before it returns: nothing queued, no
-                // route, every key up. The clear_queue() that used to follow
-                // threw away the StopMove the brain had queued, and the arrow
-                // stayed down.
-                brain.stop();
-                GB_INFO("=== BOT DISABLED ===");
-            }
-        }
-        was_down = down;
-    }
 }
 
 /// Says so, once a run, when Windows shows the window scaled (gobot/dpi.hpp):
@@ -1017,8 +848,8 @@ void print_utf8(const char* text);
 ///
 /// A console has no window of its own in the way, which is the point: the game
 /// will not render itself into a bitmap on request, so frames are lifted off
-/// the screen and anything covering the game is read instead. When the radar
-/// in the GUI sees nothing, this says whether the problem is the detector or
+/// the screen and anything covering the game is read instead. When the
+/// hunter sees nothing, this says whether the problem is the detector or
 /// the GUI window sitting on top of the game.
 int run_see(const Options& o, const AppConfig& app) {
     InputManager input;
@@ -1164,10 +995,16 @@ int run_see(const Options& o, const AppConfig& app) {
             int cur = 0, max = 0;
             if (!have_font)
                 std::printf("no glyph set installed\n");
-            else if (VitalsReader::read_numbers(frame, b, font, cur, max))
-                std::printf("%d / %d  (%.0f%%)\n", cur, max,
+            else if (VitalsReader::read_numbers(frame, b, font, cur, max)) {
+                std::printf("%d / %d  (%.0f%%)", cur, max,
                             100.0 * cur / std::max(1, max));
-            else {
+                // As the reader judges it (2026.11.17): figures short of the
+                // bar's own fill lost their first digits under something
+                // drawn over them, and are refused.
+                if (VitalsReader::figure_behind_fill(pct, cur, max))
+                    std::printf("  refused: the bar is filled to %.0f%% -- its first digits covered", pct);
+                std::printf("\n");
+            } else {
                 const ScreenRect box = VitalsReader::caption_box(b);
                 std::printf("could not read the figures at %d,%d %dx%d\n",
                             box.x, box.y, box.w, box.h);
@@ -1277,52 +1114,6 @@ int run_see(const Options& o, const AppConfig& app) {
         }
     }
 
-    // Which map this is.
-    MinimapTracker tracker;
-    tracker.set_layout(MinimapTracker::default_layout(frame.width, frame.height));
-    for (int i = 0; i < 6; ++i) tracker.update(frame);   // settle the fingerprint
-
-    MapBook book;
-    book.load(resolve("configs/maps.ini"));
-    const std::uint64_t fp = tracker.fingerprint();
-    const std::string name = book.name_for(fp);
-    std::printf("\nMap %016llx%s%s\n",
-                static_cast<unsigned long long>(fp),
-                name.empty() ? "" : "  -- ", name.c_str());
-    if (name.empty())
-        std::printf("  Not named yet. Name it on the Radar tab and it will be "
-                    "recognised from now on.\n");
-
-    // Follow the view for a few seconds and report where the character ends up
-    // in level coordinates. Walk about while this runs and the numbers should
-    // follow; stand still and they should not move.
-    {
-        CameraTracker cam;
-        cam.set_play_area(ScreenRect{});    // its own: the middle of the window, any size
-        ScreenCapture cap2;
-        Frame fr;
-        std::printf("\nFollowing the view for 4 seconds...\n");
-        for (int i = 0; i < 28; ++i) {
-            if (cap2.grab(input.target_window(), fr)) cam.update(fr);
-            std::this_thread::sleep_for(std::chrono::milliseconds(140));
-        }
-        const auto fx = cam.fix();
-        std::printf("  view moved %.0f,%.0f   %llu matched, %llu lost   match %.0f%%\n",
-                    fx.x, fx.y,
-                    static_cast<unsigned long long>(fx.updates),
-                    static_cast<unsigned long long>(fx.lost),
-                    fx.confidence * 100.0f);
-
-        Nameplate now;
-        if (have_font && cap2.grab(input.target_window(), fr)) {
-            if (MobDetector::find_self(fr, tuning, font, hc.character_name, now)) {
-                double wx = 0.0, wy = 0.0;
-                cam.to_world(now.x(), now.y(), wx, wy);
-                std::printf("  you are at %.0f,%.0f in the level\n", wx, wy);
-            }
-        }
-    }
-
     if (have_me) {
         std::printf("\nRelative to you:\n");
         for (const Nameplate& n : plates) {
@@ -1335,143 +1126,6 @@ int run_see(const Options& o, const AppConfig& app) {
         }
     }
     return 0;
-}
-
-/// Report what a capture contains and which fields track what we measured.
-/// Shared between a live run and a re-analysis of a saved one.
-void report_findings(const FieldFinder& finder) {
-    std::printf("what the capture contained:\n");
-    std::printf("  %-8s %-5s %8s %8s %10s %s\n",
-                "opcode", "dir", "packets", "bytes", "creatures", "named by");
-    for (const FieldFinder::Summary& s : finder.summarise()) {
-        std::printf("  0x%04X   %-5s %8zu %8zu %10zu %s\n",
-                    s.opcode, s.direction == Direction::ToClient ? "S->C" : "C->S",
-                    s.count, s.payload_bytes, s.entities, s.id_field.c_str());
-    }
-
-    // Pairs first. One field correlating is a coincidence waiting to happen
-    // across this many hypotheses; an x and a y from the same creature, side
-    // by side in the packet, is a position.
-    const auto pairs = finder.position_pairs(20, 0.75);
-    std::printf("\n=== position candidates (an x and a y together) ===\n");
-    if (pairs.empty()) {
-        std::printf("none.\n");
-    } else {
-        int shown = 0;
-        for (const FieldFinder::Pair& p : pairs) {
-            if (++shown > 10) break;
-            std::printf("opcode 0x%04X  creature %s = 0x%08X\n",
-                        p.x.opcode, p.x.id_reading.describe().c_str(), p.x.id_value);
-            std::printf("   x at %-11s corr %6.3f  %8.2f units/px  %zu samples\n",
-                        p.x.reading.describe().c_str(), p.x.correlation,
-                        p.x.scale, p.x.samples);
-            std::printf("   y at %-11s corr %6.3f  %8.2f units/px  %zu samples\n\n",
-                        p.y.reading.describe().c_str(), p.y.correlation,
-                        p.y.scale, p.y.samples);
-        }
-    }
-
-    // The busiest message from the client, read as little-endian words with
-    // the measured position beside it. Statistics say which byte; looking at
-    // the bytes says whether the answer is sensible.
-    for (const FieldFinder::Summary& s : finder.summarise()) {
-        if (s.direction != Direction::ToServer || s.count < 10) continue;
-        const auto rows = finder.examples(s.opcode, false, 12);
-        if (rows.empty()) break;
-
-        std::printf("\n=== opcode 0x%04X from the client, %zu bytes ===\n",
-                    s.opcode, s.payload_bytes);
-        const std::size_t words = rows.front().payload.size() / 2;
-        std::printf("%9s %9s |", "screen x", "screen y");
-        for (std::size_t w = 0; w < words; ++w) std::printf("%7zu", w * 2);
-        std::printf("   (byte offset)\n");
-
-        for (const auto& r : rows) {
-            if (r.position) std::printf("%9.0f %9.0f |", r.x, r.y);
-            else            std::printf("%9s %9s |", "-", "-");
-            for (std::size_t w = 0; w < words && (w * 2 + 1) < r.payload.size(); ++w) {
-                const unsigned v = static_cast<unsigned>(r.payload[w * 2]) |
-                                   (static_cast<unsigned>(r.payload[w * 2 + 1]) << 8);
-                std::printf("%7u", v);
-            }
-            std::printf("\n");
-        }
-        break;
-    }
-
-    const auto found = finder.analyse(20, 0.70);
-    std::printf("\n=== every field that tracked something ===\n");
-    if (found.empty()) {
-        std::printf("none above the threshold.\n");
-        return;
-    }
-    std::printf("%-8s %-5s %-11s %-4s %7s %7s %10s %7s  %s\n",
-                "opcode", "dir", "field", "is", "corr", "vs‑clk", "units/px",
-                "samples", "creature");
-    int shown = 0;
-    for (const FieldFinder::Candidate& c : found) {
-        if (++shown > 30) break;
-        char who[40] = "all";
-        if (c.grouped)
-            std::snprintf(who, sizeof(who), "%s = 0x%08X",
-                          c.id_reading.describe().c_str(), c.id_value);
-        std::printf("0x%04X   %-5s %-11s %-4s %7.3f %7.3f %10.2f %7zu  %s\n",
-                    c.opcode, c.direction == Direction::ToClient ? "S->C" : "C->S",
-                    c.reading.describe().c_str(),
-                    FieldFinder::to_string(c.quantity),
-                    c.correlation, c.clock_correlation, c.scale, c.samples, who);
-    }
-    std::printf("\n'vs-clk' is how well the same field tracks the clock. Anything\n"
-                "that follows the clock as closely as the measurement is a counter\n"
-                "and has already been dropped; what is left should be well below.\n");
-}
-
-/// Print raw payloads of one opcode next to what was measured alongside them.
-///
-/// The correlation table says which byte. This says whether the answer is
-/// sensible -- whether the number next to a position that moved by a thousand
-/// pixels also moved by about a thousand, whether the bytes around it look
-/// like a creature record repeated, whether the field is where a protocol
-/// designer would have put it. Statistics cannot see any of that.
-void dump_opcode(const FieldFinder& finder, std::uint16_t opcode, bool from_server) {
-    const auto rows = finder.examples(opcode, from_server, 24);
-    if (rows.empty()) {
-        std::printf("\nNo samples of 0x%04X %s.\n", opcode,
-                    from_server ? "from the server" : "from the client");
-        return;
-    }
-
-    std::size_t width = 0;
-    for (const auto& r : rows) width = std::max(width, r.payload.size());
-
-    std::printf("\n=== 0x%04X %s, %zu bytes, %zu samples ===\n", opcode,
-                from_server ? "S->C" : "C->S", width, rows.size());
-    std::printf("%8s %8s  ", "meas x", "meas y");
-    for (std::size_t i = 0; i < width; ++i) std::printf("%02zX ", i);
-    std::putchar('\n');
-
-    for (const auto& r : rows) {
-        if (r.position) std::printf("%8.0f %8.0f  ", r.x, r.y);
-        else            std::printf("%8s %8s  ", "-", "-");
-        for (std::size_t i = 0; i < width; ++i) {
-            if (i < r.payload.size()) std::printf("%02X ", r.payload[i]);
-            else                      std::printf("   ");
-        }
-        std::putchar('\n');
-    }
-
-    // The same bytes read as little-endian 16-bit words, which is how this
-    // protocol writes everything else in its header.
-    std::printf("\nas u16le:\n%8s  ", "meas x");
-    for (std::size_t i = 0; i + 1 < width; i += 2) std::printf("%6zu ", i);
-    std::putchar('\n');
-    for (const auto& r : rows) {
-        if (r.position) std::printf("%8.0f  ", r.x); else std::printf("%8s  ", "-");
-        for (std::size_t i = 0; i + 1 < r.payload.size(); i += 2)
-            std::printf("%6u ",
-                        static_cast<unsigned>(r.payload[i] | (r.payload[i + 1] << 8)));
-        std::putchar('\n');
-    }
 }
 
 /// Cut a picture out of the running game and keep it as a template.
@@ -1849,46 +1503,6 @@ int run_vitals(const Options& o, const AppConfig& app, int seconds) {
     std::printf(".\n%llu captures failed, bars relocated %llu time(s).\n",
                 static_cast<unsigned long long>(st.failures),
                 static_cast<unsigned long long>(st.relocations));
-    return 0;
-}
-
-/// Call into the other helper's own compiled code.
-///
-/// Everything else here reads that assembly from the outside. This runs a .NET
-/// runtime inside this process, loads the helper, and calls into it -- which is
-/// the only way to use what it knows rather than what it looks like.
-///
-/// `--bridge Hello` says whether the assembly loads at all. `--bridge Probe`
-/// lists what is in there that could be called, which is the question that
-/// decides how much of this is worth doing: a feature written as part of a WPF
-/// window cannot be called from outside, however much one would like to.
-int run_bridge(const Options& o) {
-    ClrBridge bridge;
-
-    std::printf(".NET runtime : %s\n",
-                ClrBridge::runtime_dir().empty() ? "not installed"
-                                                 : ClrBridge::runtime_dir().c_str());
-    std::printf("hosting lib  : %s\n",
-                ClrBridge::hostfxr_path().empty() ? "not found"
-                                                  : ClrBridge::hostfxr_path().c_str());
-    std::printf("bridge       : %s\n\n", ClrBridge::bridge_assembly().c_str());
-
-    std::string trouble;
-    if (!bridge.start(&trouble)) {
-        std::fprintf(stderr, "Could not start it: %s\n", trouble.c_str());
-        return 1;
-    }
-
-    // Anything after the method name is handed to it, which is how Click is
-    // told where to click.
-    std::string answer;
-    if (!bridge.call(o.bridge_method, o.bridge_arg, answer, &trouble)) {
-        std::fprintf(stderr, "Calling %s failed: %s\n", o.bridge_method.c_str(),
-                     trouble.c_str());
-        return 1;
-    }
-
-    std::printf("--- GoBot.Bridge.%s ---\n%s\n", o.bridge_method.c_str(), answer.c_str());
     return 0;
 }
 
@@ -2399,66 +2013,6 @@ int run_auto_party(const Options& o, const AppConfig& app, int seconds) {
     return 0;
 }
 
-/// What the party looks like, read by the other helper's own detector.
-int run_party(const Options& o, const AppConfig& app) {
-    Party::Settings settings;
-    const std::string config = resolve("configs/party.ini");
-    if (settings.load(config)) {
-        std::printf("settings from %s\n", config.c_str());
-        std::printf("  accept invitations   %s\n", settings.auto_accept ? "yes" : "no");
-        std::printf("  invite others        %s\n", settings.auto_invite ? "yes" : "no");
-        std::printf("  only while leading   %s\n", settings.always_leader ? "yes" : "no");
-        std::printf("  invite on chat word  %s\n",
-                    settings.by_magic_word ? settings.magic_word.c_str() : "(off)");
-        std::printf("  blacklist            %s (%zu names)\n",
-                    settings.use_blacklist ? "on" : "off", settings.blacklist.size());
-        std::printf("  share experience     %s\n",
-                    settings.exp_share == Party::ExpShare::More ? "weighted" : "equally");
-        std::printf("  share loot           %s\n\n",
-                    settings.loot_share == Party::LootShare::Contribution
-                        ? "by contribution" : "free for all");
-    } else {
-        std::printf("No %s yet; using defaults.\n\n", config.c_str());
-    }
-
-    InputManager input;
-    if (!attach_window(input, o, app)) {
-        std::fprintf(stderr, "No game window.\n");
-        return 1;
-    }
-
-    ClrBridge bridge;
-    Party party;
-    party.set_settings(settings);
-
-    const Party::State state = party.look(bridge, input.target_window());
-    if (!state.read) {
-        std::fprintf(stderr,
-            "Could not read the party: %s\n\n"
-            "This one feature is read through the other helper's own detector,\n"
-            "which needs .NET and that helper installed, plus GoBotBridge.dll\n"
-            "built beside this executable (bridge\\build.ps1).\n",
-            state.trouble.c_str());
-        return 1;
-    }
-
-    std::printf("right now: %s\n", Party::status_name(state.status));
-    std::printf("  in a party           %s\n", state.in_party ? "yes" : "no");
-    std::printf("  leading it           %s\n", state.is_leader ? "yes" : "no");
-    std::printf("\ntheir rules allow:\n");
-    std::printf("  accepting            %s\n", state.can_accept ? "yes" : "no");
-    std::printf("  inviting             %s\n", state.can_invite ? "yes" : "no");
-    std::printf("  handing over the key %s\n", state.can_transfer_key ? "yes" : "no");
-
-    if (!state.points.empty()) {
-        std::printf("\nwhere to click, worked out by their code for a %d wide client:\n",
-                    state.client_width);
-        for (const auto& [name, at] : state.points)
-            std::printf("  %-20s %d,%d\n", name.c_str(), at.x, at.y);
-    }
-    return 0;
-}
-
 /// Open the player list and read it.
 ///
 /// This is the half of inviting that is still unknown. Deciding who to invite
@@ -2897,7 +2451,8 @@ int run_close(const Options& o, const AppConfig& app) {
         std::printf("  %s\n", line.c_str());
         std::fflush(stdout);
     });
-    std::printf("Looking once a second for %d s; a popup is closed once it has stayed 3 s.\n",
+    std::printf("Looking once a second for %d s; a popup is closed once it has stayed 3 s -- the check-in board "
+                "only 30 s after its first sight, and never from 23:55 to 00:03 by the PC's clock.\n",
                 o.close_seconds);
     for (int s = 0; s < o.close_seconds && !g_stop; ++s) {
         closer.turn();
@@ -3583,8 +3138,9 @@ int run_chat(const Options& o, const AppConfig& app) {
         (settings.hold_max_ms > 0 ? std::to_string(settings.hold_min_ms) + "-" + std::to_string(settings.hold_max_ms) +
                                         " ms"
                                   : std::string("as always")) +
-        ", quiet " + std::to_string(settings.quiet_before_ms) + " ms, watch an Enter " +
-        std::to_string(settings.enter_gap_ms) + " ms, up to " + std::to_string(settings.max_enters) + " Enters, " +
+        ", quiet " + std::to_string(settings.quiet_before_ms) + " ms, watch an Enter at least " +
+        std::to_string(settings.enter_gap_ms) + " ms and up to 30 s, up to " + std::to_string(settings.max_enters) +
+        " Enters (each after the one before's whole 30 s), " +
         std::to_string(settings.type_tries) + " typing tries, " + std::to_string(settings.type_wait_ms) +
         " ms before the first letter");
     for (int slept = 0; slept < settings.quiet_before_ms && !g_stop; slept += 50)
@@ -3800,172 +3356,6 @@ int run_quest_once(const Options& o, const AppConfig& app) {
     return finish(r);
 }
 
-/// List the routines, or run one.
-///
-/// With --dry it finds each step's picture and says where it would click,
-/// without clicking. That is the mode that matters while the tables are being
-/// written: the click offsets and the step order in configs/routines.ini were
-/// worked out from the pictures' names rather than by watching the game, so the
-/// first pass over any routine is expected to be wrong somewhere, and finding
-/// out by watching it misclick through a shop is the expensive way.
-int run_routines(const Options& o, const AppConfig& app) {
-    // Reviving is not a click table any more: the panel is found by GoC's two
-    // corners and the bin's dialogs are kept clear of, which a table cannot
-    // say. The name still works, and runs what the GUI runs.
-    if (o.routine_name == "revive") return run_revive(o, app);
-
-    const std::string path = resolve("configs/routines.ini");
-    const auto routines = Routine::load(path);
-    if (routines.empty()) {
-        std::fprintf(stderr, "No routines in %s\n", path.c_str());
-        return 1;
-    }
-
-    // The launcher's pictures and the game's both, since routines draw on
-    // whichever has what they need.
-    TemplateStore store;
-    const std::string dll = o.template_source.empty()
-        ? TemplateStore::helper_assembly() : o.template_source;
-    if (!dll.empty()) store.load_from_assembly(dll, resolve("configs/templates.ini"));
-
-    if (o.routine_name.empty()) {
-        std::printf("%zu routines in %s\n\n", routines.size(), path.c_str());
-        for (const Routine& r : routines) {
-            std::printf("  %-22s %zu step%s\n", r.name.c_str(), r.steps.size(),
-                        r.steps.size() == 1 ? "" : "s");
-            for (const DialogDriver::Step& s : r.steps)
-                std::printf("      %-24s -> %s%s\n", s.find.c_str(),
-                            !s.check ? "(not checked)" : s.gone ? "(it goes away)" : s.confirm.c_str(),
-                            s.optional ? "   [optional]" : "");
-        }
-        const auto missing = Routine::missing_pictures(routines, store);
-        if (!missing.empty()) {
-            std::printf("\nPictures named but not loaded:\n");
-            for (const std::string& m : missing) std::printf("  %s\n", m.c_str());
-        }
-        return 0;
-    }
-
-    const Routine* routine = Routine::find(routines, o.routine_name);
-    if (!routine) {
-        std::fprintf(stderr, "No routine called '%s'.\n", o.routine_name.c_str());
-        return 1;
-    }
-
-    InputManager input;
-    if (!attach_window(input, o, app)) {
-        std::fprintf(stderr, "No game window.\n");
-        return 1;
-    }
-    if (!input.window_focused()) {
-        input.focus_window();
-        std::this_thread::sleep_for(std::chrono::milliseconds(350));
-    }
-
-    ScreenCapture capture;
-    auto grab = [&](Frame& f) { return capture.grab(input.target_window(), f); };
-
-    if (o.dry_run) {
-        std::printf("'%s', %zu steps -- looking only, clicking nothing.\n\n",
-                    routine->name.c_str(), routine->steps.size());
-
-        Frame frame;
-        if (!grab(frame) || !frame.valid()) {
-            std::fprintf(stderr, "Could not capture the window.\n");
-            return 1;
-        }
-
-        int found = 0;
-        for (std::size_t i = 0; i < routine->steps.size(); ++i) {
-            const DialogDriver::Step& step = routine->steps[i];
-            std::printf("  %zu. %-24s ", i + 1, step.find.c_str());
-
-            const Frame* picture = store.get(step.find);
-            if (!picture) { std::printf("no such picture\n"); continue; }
-
-            const auto hit = TemplateMatcher::find(
-                frame, ScreenRect{ 0, 0, frame.width, frame.height }, *picture, step.score);
-            if (!hit.found) {
-                std::printf("not on screen\n");
-                continue;
-            }
-            ++found;
-            int cx = 0, cy = 0;
-            DialogDriver::click_point(hit.at, step, cx, cy);
-            std::printf("at %d,%d (%.2f) -- would click %d,%d%s\n",
-                        hit.at.x, hit.at.y, static_cast<double>(hit.score), cx, cy,
-                        step.click_dx >= hit.at.w || step.click_dy >= hit.at.h
-                            ? "  (its offset is past the picture's edge: at the edge)" : "");
-            if (!step.check) {
-                std::printf("      not checked (check = false): clicked once, with nothing on "
-                            "screen to show it landed\n");
-            } else if (!step.gone && !step.confirm.empty()) {
-                // A run refuses a step whose confirmation is up before its
-                // click. Up now, it may well be up then.
-                const Frame* proof = store.get(step.confirm);
-                if (proof && TemplateMatcher::find(frame, ScreenRect{ 0, 0, frame.width, frame.height },
-                                                   *proof, step.score).found)
-                    std::printf("      its confirmation '%s' is on screen already: a run refuses "
-                                "this step if it still is when the step comes\n", step.confirm.c_str());
-            }
-        }
-
-        std::printf("\n%d of %zu steps are on screen right now. The first has to be; later "
-                    "ones mostly come up\nas the routine runs, though some -- a shop's Mua -- "
-                    "are up from the start.\n", found, routine->steps.size());
-        return 0;
-    }
-
-    // Every click is made only with the game in front. Saying so now beats
-    // three refused attempts at every step.
-    if (!input.window_focused()) {
-        std::fprintf(stderr, "The game is not in front, so no click would be let through. "
-                             "Click the game and run this again.\n");
-        return 1;
-    }
-
-    DialogDriver driver(input, store, grab);
-    driver.on_step_report([](const std::string& line) {
-        std::printf("  %s\n", line.c_str());
-        std::fflush(stdout);
-    });
-
-    // Ctrl+C stops the routine at its next look, before any further click.
-    // Watched from beside the driver, which knows nothing of g_stop.
-    if (g_stop.load()) driver.cancel();
-    std::atomic<bool> driving{true};
-    std::thread watch([&] {
-        while (driving.load()) {
-            if (g_stop.load()) driver.cancel();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-    });
-    std::string trouble;
-    const std::size_t done = driver.run_all(routine->steps, &trouble);
-    driving.store(false);
-    watch.join();
-    // The steps that ran with nothing to check them, said again at the end,
-    // so "finished" is not read as every click having been seen to land.
-    std::string unchecked;
-    for (std::size_t i = 0; i < done && i < routine->steps.size(); ++i)
-        if (!routine->steps[i].check)
-            unchecked += (unchecked.empty() ? "" : ", ") + std::to_string(i + 1);
-    if (done == routine->steps.size()) {
-        std::printf("\n'%s' finished.\n", routine->name.c_str());
-        if (!unchecked.empty())
-            std::printf("Not checked: step %s -- nothing on screen shows whether its click "
-                        "landed (check = false in routines.ini). Look in the game.\n",
-                        unchecked.c_str());
-        return 0;
-    }
-    std::fprintf(stderr, "\nStopped after %zu of %zu steps: %s\n",
-                 done, routine->steps.size(), trouble.c_str());
-    if (!unchecked.empty())
-        std::fprintf(stderr, "Step %s was not checked: if its click missed, that may be why.\n",
-                     unchecked.c_str());
-    return 1;
-}
-
 /// Text that is UTF-8, printed so a console shows it as written.
 ///
 /// The console shows bytes in its own code page, which is not UTF-8, and
@@ -4083,7 +3473,11 @@ int run_revive(const Options& o, const AppConfig& app) {
             return 0;
         }
         if (turn == Reviver::Turn::OutOfTries) {
-            print_utf8(("\n" + Reviver::out_of_tries_vi() + "\n").c_str());
+            // Not Reviver::out_of_tries_vi(): since 2026.11.24 that says the
+            // window's worker tries again in 30 s, and this routine is one
+            // round at one death, and ends here.
+            print_utf8("\nHồi sinh tại chỗ 3 lần chưa được — có thể đã hết giấy/bùa hồi sinh. GoBot không hồi "
+                       "sinh tại làng.\n");
             return 2;
         }
         if (turn == Reviver::Turn::Stopped || !nap_unless_stopped(1200)) break;
@@ -4538,11 +3932,6 @@ int run_doctor(const Options& o, const AppConfig& app) {
             note("npcap", "installed (only the protocol tools use it)");
         else
             note("npcap", "not installed -- fine, nothing that plays the game needs it");
-
-        note("dotnet", ClrBridge::runtime_dir().empty()
-                           ? "not installed -- fine, only the party-status "
-                             "reading uses it"
-                           : ClrBridge::runtime_dir());
     }
 
     std::printf("\n");
@@ -4754,450 +4143,9 @@ int run_keepalive(const Options& o, const AppConfig& app, int minutes) {
     return 0;
 }
 
-/// Watch the session the way an unattended run would.
-///
-/// Prints the state as it changes and every drop it notices. Run it and then
-/// go and do the things that break a bot overnight -- walk through a door, die,
-/// open a full-screen dialog, log out, close the client -- and watch what it
-/// makes of each. The ones that should be reported as a lost session are the
-/// last two; everything before them should pass without a word, and if they do
-/// not, the grace period is too short.
-int run_session(const Options& o, const AppConfig& app, int seconds) {
-    IniFile ini;
-    ini.load(resolve(o.app_path));
-
-    SessionManager::Settings settings;
-    settings.load(ini);
-
-    // Watching for a fixed time from the command line, not a scheduled run:
-    // whatever the config says about stopping and shutting down belongs to the
-    // real thing, and must not be acted on because somebody asked for a look.
-    settings.stop_after_minutes = 0;
-    settings.shutdown_when_done = false;
-
-    SessionManager session;
-    session.set_settings(settings);
-    session.set_window_hints(o.window.empty() ? app.window_title : o.window,
-                             o.window.empty() ? app.window_class : std::string{},
-                             o.window.empty() ? app.process_name : std::string{});
-
-    session.on_event([](SessionManager::Event e, const std::string& detail) {
-        std::printf("  [%-17s] %s\n", SessionManager::event_name(e), detail.c_str());
-        std::fflush(stdout);
-    });
-
-    std::printf("Watching for %d seconds, looking every %d ms.\n"
-                "A session counts as lost after %d seconds with no HUD.\n\n",
-                seconds, settings.poll_ms, settings.lost_grace_s);
-
-    session.start();
-    nap_unless_stopped(seconds * 1000LL);
-    const auto st = session.stats();
-    const auto final_state = session.state();
-    session.stop();
-
-    std::printf("\n%llu looks, %llu captures failed.\n"
-                "%llu seconds of them in the world, %llu sessions lost.\n"
-                "Ended %s.\n",
-                static_cast<unsigned long long>(st.looks),
-                static_cast<unsigned long long>(st.captures_failed),
-                static_cast<unsigned long long>(st.seconds_playing),
-                static_cast<unsigned long long>(st.sessions_lost),
-                SessionManager::state_name(final_state));
-    return 0;
-}
-
-/// Say which map the character is standing in, and load its geometry.
-///
-/// The two halves of this were both already here and had never been
-/// introduced. The game ships exact collision data for every map it has, and
-/// the bot can read a map's name off the minimap's title bar. What was missing
-/// was the index tying one to the other -- which the game also ships, in a
-/// table nobody had looked in.
-int run_whereami(const Options& o, const AppConfig& app) {
-    InputManager input;
-    const std::string title = o.window.empty() ? app.window_title : o.window;
-    if (!attach_window(input, o, app)) {
-        std::fprintf(stderr, "No window matching '%s'. Is the game running?\n", title.c_str());
-        return 1;
-    }
-
-    MapLocator locator;
-    if (!locator.init()) {
-        std::fprintf(stderr,
-            "Need two things from the game's own install:\n"
-            "  <game>\\zVietnam\\Chart\\tb_Map.tbl   the index of places\n"
-            "  <game>\\data\\Map\\*.map              the collision data\n"
-            "and a glyph set to read the map's name with.\n");
-        return 1;
-    }
-
-    // The creature list, which is what settles a name that means two places.
-    GameState state;
-    std::unique_ptr<OpcodeRegistry> registry;
-    std::unique_ptr<ProtocolHandler> handler;
-    PacketCapture capture;
-
-    bool framing_found = false;
-    const FramingSpec framing = load_framing(resolve(app.protocol_path), framing_found);
-    registry = std::make_unique<OpcodeRegistry>();
-    if (framing_found && registry->load(resolve(app.protocol_path))) {
-        handler = std::make_unique<ProtocolHandler>(*registry, state);
-        capture.set_framing(framing);
-        // The client frames its half differently; without this it is ground
-        // into resync noise a byte at a time.
-        bool cf_found = false;
-        const FramingSpec cf =
-            load_framing(resolve(app.protocol_path), cf_found, "FramingClient");
-        if (cf_found) capture.set_client_framing(cf);
-        capture.set_packet_callback([&](const std::vector<GamePacket>& packets) {
-            for (const GamePacket& p : packets) handler->on_packet(p);
-        });
-        CaptureConfig cc;
-        cc.interface_name = app.interface_name;
-        cc.server_ip_start = app.server_ip_start;
-        cc.server_ip_end = app.server_ip_end;
-        cc.port_start = app.port_start;
-        cc.port_end = app.port_end;
-        if (capture.start(cc)) {
-            std::printf("Listening for a moment, so the creature list can settle "
-                        "an ambiguous name...\n");
-            std::this_thread::sleep_for(std::chrono::milliseconds(2500));
-        }
-    }
-
-    if (!input.window_focused()) {
-        input.focus_window();
-        std::this_thread::sleep_for(std::chrono::milliseconds(350));
-    }
-    ScreenCapture cap;
-    Frame frame;
-    if (!cap.grab(input.target_window(), frame) || !frame.valid()) {
-        std::fprintf(stderr, "Could not capture the window.\n");
-        capture.stop();
-        return 1;
-    }
-
-    const std::vector<Monster> world = state.monsters();
-    const bool found = locator.identify(frame, world);
-    capture.stop();
-
-    std::printf("\ntitle bar reads \"%s\" (%.0f%% sure)\n",
-                locator.last_read().c_str(), locator.last_confidence() * 100.0f);
-    std::printf("%zu creatures on the wire\n\n", world.size());
-
-    if (!locator.candidates().empty() && locator.candidates().size() > 1) {
-        std::printf("that name belongs to %zu places:\n", locator.candidates().size());
-        for (const MapTable::Entry& e : locator.candidates())
-            std::printf("  %-10s %s\n", e.stem().c_str(), e.name.c_str());
-        std::printf("\n");
-    }
-
-    if (!found || !locator.here()) {
-        std::fprintf(stderr, "Could not tell which map this is.\n");
-        return 1;
-    }
-
-    const MapTable::Entry& here = *locator.here();
-    std::printf("you are in \"%s\"  ->  %s.map\n", here.name.c_str(), here.stem().c_str());
-
-    if (!locator.has_geometry()) {
-        std::fprintf(stderr, "but its collision file did not load.\n");
-        return 1;
-    }
-    const MapFile& g = locator.geometry();
-    std::printf("%d x %d cells, %d x %d px, %zu surface pixels\n",
-                g.width_cells(), g.height_cells(), g.width_px(), g.height_px(),
-                g.surface_count());
-
-    // The creature list and the collision file describe the same place in the
-    // same units, so saying so out loud is a check on both.
-    if (!world.empty()) {
-        float lo_x = 1e9f, hi_x = -1e9f, lo_y = 1e9f, hi_y = -1e9f;
-        for (const Monster& m : world) {
-            lo_x = std::min(lo_x, m.pos.x); hi_x = std::max(hi_x, m.pos.x);
-            lo_y = std::min(lo_y, m.pos.y); hi_y = std::max(hi_y, m.pos.y);
-        }
-        std::printf("creatures occupy x %.0f-%.0f, y %.0f-%.0f -- %s\n",
-                    lo_x, hi_x, lo_y, hi_y,
-                    (hi_x <= g.width_px() && hi_y <= g.height_px())
-                        ? "inside the map, as they should be"
-                        : "OUTSIDE the map, so something is wrong");
-    }
-    return 0;
-}
-
-/// Watch the two halves of the world line up.
-///
-/// Packets say where every creature in the level is and nothing about where you
-/// are. The screen shows creatures and your character together but in pixels.
-/// This prints both, and the offset between them -- which is the camera, and
-/// therefore the answer to where you are standing in the server's own numbers.
-int run_anchor(const Options& o, const AppConfig& app, int seconds) {
-    InputManager input;
-    const std::string title = o.window.empty() ? app.window_title : o.window;
-    if (!attach_window(input, o, app)) {
-        std::fprintf(stderr, "No window matching '%s'. Is the game running?\n", title.c_str());
-        return 1;
-    }
-
-    bool framing_found = false;
-    const FramingSpec framing = load_framing(resolve(app.protocol_path), framing_found);
-    if (!framing_found) {
-        std::fprintf(stderr, "No [Framing] in the protocol config.\n");
-        return 1;
-    }
-
-    OpcodeRegistry registry;
-    if (!registry.load(resolve(app.protocol_path))) {
-        std::fprintf(stderr, "No packet layouts in the protocol config.\n");
-        return 1;
-    }
-    GameState state;
-    ProtocolHandler handler(registry, state);
-
-    PacketCapture capture;
-    capture.set_framing(framing);
-    // The client frames its half differently; without this it is ground into
-    // resync noise a byte at a time.
-    bool client_framing_found = false;
-    const FramingSpec client_framing =
-        load_framing(resolve(app.protocol_path), client_framing_found, "FramingClient");
-    if (client_framing_found) capture.set_client_framing(client_framing);
-    capture.set_packet_callback([&](const std::vector<GamePacket>& packets) {
-        for (const GamePacket& p : packets) handler.on_packet(p);
-    });
-
-    CaptureConfig cc;
-    cc.interface_name = app.interface_name;
-    cc.server_ip_start = app.server_ip_start;
-    cc.server_ip_end = app.server_ip_end;
-    cc.port_start = app.port_start;
-    cc.port_end = app.port_end;
-    if (!capture.start(cc)) {
-        std::fprintf(stderr, "Could not start capture. Is Npcap installed?\n");
-        return 1;
-    }
-
-    GlyphFont font;
-    const std::string font_dir = GlyphFont::default_dir();
-    const bool have_font = !font_dir.empty() && font.load(font_dir);
-
-    HunterConfig hunt;
-    hunt.load(resolve("configs/hunt.ini"));
-
-    WorldAnchor anchor;
-    CameraTracker camera;
-    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
-
-    // The view is tracked in a loop of its own, far faster than anything else
-    // here runs.
-    //
-    // Tracking works by matching each frame against the one before it, so how
-    // far the view can move between frames is set by how often frames are
-    // taken. Sharing a loop with the detector and the reader meant a third of
-    // a second between captures, by which time a walking character has carried
-    // the view further than any sane search window -- and a frame that fails
-    // to match is movement that is never counted, which quietly corrupts every
-    // position measured against it afterwards. Capturing for the tracker alone
-    // costs a screen grab and a few hundred comparisons.
-    std::atomic<bool> watching{ true };
-    std::thread eyes([&] {
-        ScreenCapture own;
-        Frame f;
-        while (watching.load()) {
-            if (own.grab(input.target_window(), f)) camera.update(f);
-            std::this_thread::sleep_for(std::chrono::milliseconds(55));
-        }
-    });
-
-    ScreenCapture cap;
-    Frame frame;
-    const DetectorTuning tuning = DetectorTuning::defaults();
-
-    std::printf("\n%-5s %-6s %-16s %-16s %-10s %s\n",
-                "wire", "screen", "camera is at", "evidence", "minimap",
-                "your character");
-    int ticks = 0;
-    int breaks = 0;
-    std::uint64_t lost_before = 0;
-    const std::uint64_t until = now_ms() + static_cast<std::uint64_t>(seconds) * 1000;
-    while (now_ms() < until && !g_stop.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        if (!cap.grab(input.target_window(), frame) || !frame.valid()) continue;
-
-        // The view is the eyes thread's to track. Fed from here as well, the
-        // tracker got frames from two threads out of order, which counted
-        // movement and breaks that never happened -- the very numbers this
-        // watches.
-        const auto view = camera.fix();
-
-        const std::vector<Monster> world = state.monsters();
-        const std::vector<Nameplate> seen =
-            MobDetector::detect(frame, tuning, have_font ? &font : nullptr);
-
-        // A break in the view's tracking throws the landmarks away.
-        //
-        // Every landmark is a screen position with the camera added back, so
-        // they all mean something only while the camera's own count is
-        // continuous. A frame the tracker could not match is movement it did
-        // not see, and the count is wrong from then on by however far the view
-        // went during it -- silently, and for good. Landmarks gathered before
-        // such a gap and after it are measured from different origins and
-        // cannot be matched against the same creature list, which is what had
-        // been quietly ruining every run that walked briskly enough to lose
-        // the lock.
-        if (view.lost != lost_before) {
-            anchor.reset();
-            ++breaks;
-        }
-        lost_before = view.lost;
-
-        if (view.tracking) anchor.observe(world, seen, view.x, view.y);
-        const WorldAnchor::Fix fix = anchor.current();
-
-        char at_text[32] = "-";
-        if (fix.agreed > 0)
-            std::snprintf(at_text, sizeof at_text, "%s%.0f,%.0f x%.2f",
-                          fix.valid ? "" : "?", fix.offset_x, fix.offset_y, fix.scale);
-        char evidence[32];
-        std::snprintf(evidence, sizeof evidence, "%d/%d vs %.1f b%d",
-                      fix.agreed, fix.considered, fix.chance, breaks);
-
-        // And where that puts the character, found on screen by its own name.
-        char me[32] = "-";
-        if (fix.valid && have_font && !hunt.character_name.empty()) {
-            ScreenRect spot{};
-            if (font.find_text(frame, ScreenRect{ 0, 0, frame.width, frame.height },
-                               hunt.character_name, spot, nullptr)) {
-                Vec2 w;
-                if (anchor.to_world(spot.cx(), spot.y, view.x, view.y, w))
-                    std::snprintf(me, sizeof me, "%.0f,%.0f", w.x, w.y);
-            }
-        }
-
-        // And where the game itself says the character is. The one statement
-        // of our own position that this game makes anywhere: the marker it
-        // draws on the minimap for the player to look at.
-        char marker[24] = "-";
-        const auto layout = MinimapTracker::default_layout(frame.width, frame.height);
-        const auto spot = MinimapTracker::find_marker(frame, layout.body);
-        if (spot.valid)
-            std::snprintf(marker, sizeof marker, "%.1f,%.1f", spot.x, spot.y);
-
-        std::printf("%-5zu %-6zu %-16s %-16s %-10s %s\n",
-                    world.size(), seen.size(), at_text, evidence, marker, me);
-
-        // Once in a while, both lists side by side. If the spacing between
-        // creatures on screen does not match the spacing between creatures on
-        // the wire, no offset will ever line them up and the fault is the
-        // scale, not the search.
-        if (o.verbose && ++ticks % 8 == 0) {
-            std::printf("    landmarks:");
-            for (const auto& r : anchor.rivals(6))
-                std::printf("  [%.0f,%.0f seen%d wander%.0f]", r.x, r.y, r.weight, r.wander);
-            std::printf("\n    on screen:");
-            for (const Nameplate& n : seen)
-                if (!n.is_player) std::printf("  %d,%d", n.x(), n.y());
-            std::printf("\n    on the wire (within a screen of the view):");
-            for (const Monster& m : world) {
-                const double sx = m.pos.x - view.x;
-                if (sx < -600.0 || sx > 1600.0) continue;
-                std::printf("  %.0f,%.0f", m.pos.x, m.pos.y);
-            }
-            std::printf("\n");
-        }
-        std::fflush(stdout);
-    }
-
-    // The eyes first: a thread still joinable when this returns ends the
-    // program (std::terminate), and it reads the window and the camera.
-    watching.store(false);
-    eyes.join();
-    capture.stop();
-    return 0;
-}
-
-/// Re-run the analysis over a capture taken earlier.
-int run_analyse(const std::string& path, const std::string& dump,
-                const std::string& check, bool fields) {
-    FieldFinder finder;
-    if (!finder.load(path)) {
-        std::fprintf(stderr, "Could not read '%s'.\n", path.c_str());
-        return 1;
-    }
-    const auto fs = finder.stats();
-    std::printf("%llu samples from %s\n\n",
-                static_cast<unsigned long long>(fs.packets), path.c_str());
-
-    if (fields) {
-        // The map's size, taken from the one packet already understood.
-        std::printf("Everywhere in the protocol that looks like a position.\n"
-                    "A float in the right range with another beside it, varying,\n"
-                    "in most frames of that opcode.\n\n");
-        std::printf("%-8s %-5s %-9s %8s %14s %14s %7s\n",
-                    "opcode", "dir", "at", "samples", "x range", "y range", "in range");
-        for (const auto& f : finder.position_fields(8000.0, 2000.0)) {
-            char at[16], xr[20], yr[20];
-            std::snprintf(at, sizeof at, "+%zu,+%zu", f.x_offset, f.y_offset);
-            std::snprintf(xr, sizeof xr, "%.0f-%.0f", f.x_min, f.x_max);
-            std::snprintf(yr, sizeof yr, "%.0f-%.0f", f.y_min, f.y_max);
-            std::printf("0x%04X   %-5s %-9s %8zu %14s %14s %6.0f%%\n",
-                        f.opcode, f.direction == Direction::ToClient ? "S->C" : "C->S",
-                        at, f.samples, xr, yr, f.in_range_pct);
-        }
-        return 0;
-    }
-
-    if (!check.empty()) {
-        // opcode:id_off:x_off:y_off[:width]
-        unsigned op = 0, idoff = 0, xoff = 0, yoff = 0, width = 2;
-        const int got = std::sscanf(check.c_str(), "%i:%u:%u:%u:%u",
-                                    &op, &idoff, &xoff, &yoff, &width);
-        if (got < 4) {
-            std::fprintf(stderr, "Expected --check opcode:id_off:x_off:y_off[:width]\n");
-            return 2;
-        }
-        const bool from_server = check.find("/c") == std::string::npos;
-        const bool is_float = check.find('f') != std::string::npos;
-        std::printf("0x%04X %s, grouped by u32le@%u, x=%c%u@%u, y=%c%u@%u\n\n",
-                    op, from_server ? "S->C" : "C->S", idoff,
-                    is_float ? 'f' : 'u', width * 8, xoff,
-                    is_float ? 'f' : 'u', width * 8, yoff);
-        std::printf("%8s %8s %8s %11s %13s %8s %11s %13s\n",
-                    "group", "samples", "x corr", "x units/px", "x range",
-                    "y corr", "y units/px", "y range");
-        for (const auto& c : finder.check_layout(static_cast<std::uint16_t>(op),
-                                                 from_server, idoff, xoff, yoff,
-                                                 static_cast<int>(width), is_float)) {
-            char xr[32], yr[32];
-            std::snprintf(xr, sizeof xr, "%.0f-%.0f", c.x_min, c.x_max);
-            std::snprintf(yr, sizeof yr, "%.0f-%.0f", c.y_min, c.y_max);
-            std::printf("%8u %8zu %8.3f %11.3f %13s %8.3f %11.3f %13s\n",
-                        c.id, c.samples, c.x_corr, c.x_scale, xr,
-                        c.y_corr, c.y_scale, yr);
-        }
-        return 0;
-    }
-
-    if (!dump.empty()) {
-        // "0x0038", or "0x0038/c" for the client's half -- the same number
-        // means different things in each direction. The separator is not
-        // decoration: 'c' is also a hex digit, and 0x00C6c parses as 0x0C6C.
-        const bool from_server = dump.find("/c") == std::string::npos;
-        const auto opcode = static_cast<std::uint16_t>(
-            std::strtoul(dump.c_str(), nullptr, 0));
-        dump_opcode(finder, opcode, from_server);
-        return 0;
-    }
-
-    report_findings(finder);
-    return 0;
-}
-
 /// Run the vision bot from a console: watch, hunt, and report.
 ///
-/// The same pieces the Radar tab drives, without a window of our own to get in
+/// The same pieces the GUI drives, without a window of our own to get in
 /// the way of the screen capture. Useful for checking that the whole chain
 /// works end to end — eyes, decision, keys — and for running the thing on a
 /// machine where the GUI would only be sitting on top of the game.
@@ -5230,18 +4178,8 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
     const bool have_font = !font_dir.empty() && font.load(font_dir);
 
     MobDetector detector;
-    CameraTracker camera;
-    MinimapTracker minimap;
-
-    int w = 0, h = 0;
-    input.window_size(w, h);
-    minimap.set_layout(MinimapTracker::default_layout(w, h));
-    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
-
     detector.set_target_window(input.target_window());
     detector.set_tuning(DetectorTuning::defaults());
-    detector.set_minimap(&minimap);
-    detector.set_camera(&camera);
 
     HunterConfig cfg;
     cfg.load(resolve("configs/hunt.ini"));
@@ -5287,11 +4225,29 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
         macro->set_fight([&hunter] {
             MacroEngine::Fight f;
             if (!hunter.running()) return f;
-            f.mode = hunter.engaged()     ? MacroEngine::Fight::Mode::Fighting
+            f.mode = hunter.skills_held() ? MacroEngine::Fight::Mode::Held
+                     : hunter.engaged()   ? MacroEngine::Fight::Mode::Fighting
                      : hunter.returning() ? MacroEngine::Fight::Mode::Returning
                                           : MacroEngine::Fight::Mode::Idle;
+            // Why it holds them, and the dash's keys at an edge (2026.11.12):
+            // no casts are paired here, so no dash key: nothing held for one
+            // (2026.11.17, no guessed keys any more).
+            switch (hunter.skill_hold()) {
+                case Hunter::SkillHold::Drop:     f.hold = MacroEngine::Fight::Hold::Drop; break;
+                case Hunter::SkillHold::Turning:  f.hold = MacroEngine::Fight::Hold::Turning; break;
+                case Hunter::SkillHold::NoTarget: f.hold = MacroEngine::Fight::Hold::NoTarget; break;
+                case Hunter::SkillHold::Outside:  f.hold = MacroEngine::Fight::Hold::Outside; break;
+                case Hunter::SkillHold::SeekLeg:  f.hold = MacroEngine::Fight::Hold::SeekLeg; break;
+                case Hunter::SkillHold::Jump:     f.hold = MacroEngine::Fight::Hold::Jump; break;
+                case Hunter::SkillHold::None:     break;
+            }
             f.dx = hunter.engaged_dx();
             f.attack_key = hunter.attack_key();
+            f.dash_edge = hunter.dash_edge();
+            f.dash_keys = hunter.dash_keys();
+            f.attack_far = hunter.attack_far();
+            // Its swing's key-down, stored before the press (2026.11.17).
+            f.swing_ms = hunter.last_swing_ms();
             return f;
         });
         macro->start();
@@ -5341,11 +4297,6 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
             break;
         }
         if (g_stop.load()) break;
-        // The minimap's map changes, said here: the tracker's own line is the
-        // debug log's, as in the GUI.
-        if (minimap.take_changed())
-            GB_INFO("Map changed -- minimap fingerprint %016llx",
-                    static_cast<unsigned long long>(minimap.fingerprint()));
         if (macro) {
             const float hp = reader->hp_percent();
             // As no reading once the bars have not been read for as long as
@@ -5418,7 +4369,6 @@ int run_hunt(const Options& o, const AppConfig& app, int seconds) {
     const std::string every = "every " + std::to_string(cfg.give_up_ms / 1000) + " s without a style";
     std::printf("%llu fights re-picked while in reach (%s)\n", static_cast<unsigned long long>(repicked),
                 cfg.goc_rules() ? "a hold or the game behind, not out of reach" : every.c_str());
-    std::printf("the view moved %.0f px while it worked\n", camera.travelled());
     if (macro) {
         const auto ms = macro->stats();
         std::printf("the macro pressed %llu keys and %llu sequence steps; skills held: %llu not "
@@ -5591,8 +4541,7 @@ void print_region(const Frame& f, const ScreenRect& r) {
 
 /// Read the game's own text off the screen.
 ///
-/// With no rectangle given, reads the places worth reading: the minimap's
-/// title bar, which names the map, and every name plate the detector found.
+/// With no rectangle given, reads every name plate the detector found.
 /// Read back text drawn with the glyphs themselves.
 ///
 /// No window, no game, no login: if a string built out of the font's own
@@ -5731,17 +4680,8 @@ int run_read(const Options& o, const AppConfig& app, const std::string& rect,
         return 0;
     }
 
-    // The map's name, off the minimap's title bar.
-    const auto layout = MinimapTracker::default_layout(frame.width, frame.height);
-    if (layout.title.valid()) {
-        const std::string name = font.read_line(frame, layout.title);
-        std::printf("map name at %d,%d %dx%d -> \"%s\"   (%.0f%%)\n",
-                    layout.title.x, layout.title.y, layout.title.w, layout.title.h,
-                    name.c_str(), font.last_confidence() * 100.0f);
-    }
-
-    // And every name plate on screen, read rather than guessed at.
-    std::printf("\n%-8s %-20s %-6s %s\n", "what", "plate", "hp", "name");
+    // Every name plate on screen, read rather than guessed at.
+    std::printf("%-8s %-20s %-6s %s\n", "what", "plate", "hp", "name");
     for (const Nameplate& n :
          MobDetector::detect(frame, DetectorTuning::defaults(), &font)) {
         char where[32], hp[8];
@@ -5868,384 +4808,6 @@ int run_click(const Options& o, const AppConfig& app, const std::string& spec) {
     return 0;
 }
 
-/// Find out which key actually walks the character.
-///
-/// Worth asking rather than assuming. This game reads the keyboard through
-/// DirectInput and keeps its bindings in its own file as scan codes, so the
-/// arrow keys are a guess and not a given — and a bot pressing the wrong key
-/// looks exactly like a bot whose input does not work at all.
-int run_keytest(const Options& o, const AppConfig& app) {
-    // The character is followed by its name, as the hunter finds it: a plate
-    // with bars may be yours or somebody else's. Asked for before the game is
-    // touched, so that going without brings nothing to the front.
-    HunterConfig hc;
-    hc.load(resolve("configs/hunt.ini"));
-    GlyphFont font;
-    const std::string font_dir = GlyphFont::default_dir();
-    if (hc.character_name.empty() || font_dir.empty() || !font.load(font_dir)) {
-        std::fprintf(stderr, "Needs character_name in configs/hunt.ini and the game's glyph set: "
-                             "the character is followed by its name.\n");
-        return 1;
-    }
-
-    InputManager input;
-    const std::string title = o.window.empty() ? app.window_title : o.window;
-    if (!attach_window(input, o, app)) {
-        std::fprintf(stderr, "No window matching '%s'.\n", title.c_str());
-        return 1;
-    }
-    if (!input.focus_window()) {
-        std::fprintf(stderr, "Could not bring the game to the front.\n");
-        return 1;
-    }
-
-    CameraTracker camera;
-    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
-    ScreenCapture cap;
-    Frame frame;
-    const DetectorTuning tuning = DetectorTuning::defaults();
-
-    // Where the character is, in level coordinates. Screen position alone will
-    // not do: when the view scrolls with the character its place on screen
-    // barely changes.
-    const auto where = [&](double& wx, double& wy) -> bool {
-        if (!cap.grab(input.target_window(), frame)) return false;
-        camera.update(frame);
-        Nameplate me;
-        if (!MobDetector::find_self(frame, tuning, font, hc.character_name, me)) return false;
-        camera.to_world(me.x(), me.y(), wx, wy);
-        return true;
-    };
-
-    const struct { const char* name; std::uint32_t vk; } kKeys[] = {
-        { "Left arrow",  0x25 }, { "Right arrow", 0x27 },
-        { "A",           'A'  }, { "D",           'D'  },
-        { "Numpad 4",    0x64 }, { "Numpad 6",    0x66 },
-        { "Space",       0x20 }, { "Up arrow",    0x26 },
-        { "Z",           'Z'  }, { "LCtrl",       0x11 },
-    };
-
-    // Before blaming the game: does an injected keystroke reach anything at
-    // all? This process injects one and immediately asks Windows whether that
-    // key is down. If its own key does not come back, the input never got as
-    // far as the system -- which is a different problem from the game ignoring
-    // it, and one no choice of key will fix. The same F7 probe as --inputcheck,
-    // through InputManager, so that it asks the "no real input" switch as every
-    // other key does instead of calling SendInput itself.
-    {
-        const bool seen = InputManager::injection_works();
-
-        std::printf("injected keystrokes reach this machine: %s\n\n",
-                    seen ? "yes" : "NO -- something is filtering them");
-    }
-
-    std::printf("Holding each key and watching the character the whole time.\n"
-                "Sampled during the press, not after it -- a jump comes back down.\n"
-                "Leave the game in front.\n\n%-14s %8s %8s\n", "key", "max dx", "max dy");
-
-    for (const auto& k : kKeys) {
-        // Ctrl+C lets go of the key being tried and tries no more. Killed
-        // instead, this left LCtrl down for the whole machine.
-        if (g_stop.load()) break;
-
-        // Let the view settle, and establish where we are starting from.
-        double x0 = 0.0, y0 = 0.0;
-        bool have = false;
-        for (int i = 0; i < 5 && !have; ++i) {
-            have = where(x0, y0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(90));
-        }
-        if (!have) { std::printf("%-14s %8s\n", k.name, "no fix"); continue; }
-
-        double max_dx = 0.0, max_dy = 0.0;
-        input.key_down(k.vk);
-        for (int i = 0; i < 16 && !g_stop.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(90));
-            double x = 0.0, y = 0.0;
-            if (!where(x, y)) continue;
-            max_dx = std::max(max_dx, std::abs(x - x0));
-            max_dy = std::max(max_dy, std::abs(y - y0));
-        }
-        input.key_up(k.vk);
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-
-        std::printf("%-14s %8.0f %8.0f %s\n", k.name, max_dx, max_dy,
-                    (max_dx > 40.0 || max_dy > 40.0) ? " <-- does something" : "");
-    }
-
-    input.release_all();
-    std::printf("\nIf nothing moved at all, the game is not accepting synthetic\n"
-                "keystrokes -- which is a different problem from the wrong key.\n");
-    return 0;
-}
-
-/// key_press(vk, ms), let go of as soon as Ctrl+C comes. A closing console
-/// allows a few seconds, and a six-second hold outlasted them, leaving the
-/// arrow down.
-void hold_unless_stopped(InputManager& input, std::uint32_t vk, int ms) {
-    if (!input.key_down(vk)) return;
-    for (int held = 0; held < ms && !g_stop.load(); held += 50)
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    input.key_up(vk);
-}
-
-/// Work out which bytes of which packet carry the character's position.
-///
-/// Everything needed is already here: the screen says where the character is,
-/// and the network says what the server thinks. Walking the character back and
-/// forth makes both move together, and the field that moves in step with the
-/// measurement is the one we are looking for.
-///
-/// Nothing is guessed at. Every byte offset in every packet is tried as a
-/// number, four ways each, and the correlation decides.
-int run_calibrate(const Options& o, const AppConfig& app, int seconds) {
-    InputManager input;
-    const std::string title = o.window.empty() ? app.window_title : o.window;
-    if (!attach_window(input, o, app)) {
-        std::fprintf(stderr, "No window matching '%s'. Is the game running?\n", title.c_str());
-        return 1;
-    }
-    if (!input.focus_window()) {
-        std::fprintf(stderr, "Could not bring the game to the front. Click it and retry.\n");
-        return 1;
-    }
-
-    bool framing_found = false;
-    const FramingSpec framing = load_framing(resolve(app.protocol_path), framing_found);
-    if (!framing_found) {
-        std::fprintf(stderr, "No [Framing] in the protocol config -- nothing to decode with.\n");
-        return 1;
-    }
-
-    // The client frames its half of the conversation differently, and its half
-    // is the one that carries this character's own position: the server tells
-    // you about everyone else, not about you.
-    bool client_found = false;
-    const FramingSpec client_framing =
-        load_framing(resolve(app.protocol_path), client_found, "FramingClient");
-
-    FieldFinder finder;
-    MobDetector detector;
-    CameraTracker camera;
-    camera.set_play_area(ScreenRect{});     // its own: the middle of the window, any size
-
-    MacroConfig macro;
-    macro.load(resolve("configs/macro.ini"));
-
-    PacketCapture capture;
-    capture.set_framing(framing);
-    // The client frames its half differently, and its half is the one that
-    // carries this character's own position.
-    if (client_found) capture.set_client_framing(client_framing);
-    // Frames off the TCP stream only, as before. The finder groups by opcode,
-    // its saved files have no room to say where a frame came from, and one
-    // opcode number need not mean the same thing inside 0x0081 or over UDP;
-    // those are gobot_sniff's to look at (--watch, --verify, --inner).
-    capture.set_packet_callback([&](const std::vector<GamePacket>& packets) {
-        for (const GamePacket& p : packets)
-            if (p.plain()) finder.on_packet(p);
-    });
-
-    CaptureConfig cc;
-    cc.interface_name = app.interface_name;
-    cc.server_ip_start = app.server_ip_start;
-    cc.server_ip_end = app.server_ip_end;
-    cc.port_start = app.port_start;
-    cc.port_end = app.port_end;
-    if (!o.host.empty()) { cc.server_ip_start = o.host; cc.server_ip_end = o.host; }
-    if (o.port != 0) { cc.port_start = o.port; cc.port_end = o.port; }
-
-    if (!capture.start(cc)) {
-        std::fprintf(stderr, "Could not start capture. Is Npcap installed?\n");
-        return 1;
-    }
-
-    // Walk the character if we are allowed to, and ask the user to if we are
-    // not. Windows refuses injected input from a process less privileged than
-    // the window in front, so an unelevated run against an elevated game can
-    // watch but not drive.
-    const bool can_drive = InputManager::injection_works();
-    if (can_drive) {
-        std::printf("Walking the character back and forth for %d seconds.\n"
-                    "Leave the game in front and do not touch the keyboard.\n\n", seconds);
-    } else {
-        std::printf("Cannot send keys to the game -- it is running with higher\n"
-                    "privileges than this. Run as Administrator to have GoBot walk\n"
-                    "for you.\n\n"
-                    "For now: WALK YOUR CHARACTER AROUND for the next %d seconds.\n"
-                    "Left and right, as much ground as you can cover.\n\n", seconds);
-    }
-
-    // The eyes: one capture thread feeding the detector and the view tracker.
-    std::atomic<bool> watching{true};
-    std::thread eyes([&] {
-        ScreenCapture cap;
-        Frame frame;
-        while (watching.load()) {
-            if (cap.grab(input.target_window(), frame)) {
-                camera.update(frame);
-
-                // Where the character is, taken from where the view is.
-                //
-                // Not from finding the character on screen. That was the
-                // mistake that made every earlier run useless: the detector,
-                // looking for the character by a health bar, found it almost
-                // never, and a measurement that only arrives almost never
-                // pairs with almost no packets.
-                // Two hundred samples came out of a run that saw tens of
-                // thousands of frames, and nothing correlated.
-                //
-                // The camera follows the character. Walking right scrolls the
-                // view right by exactly as much, so the view's own position is
-                // the character's position give or take a constant -- and a
-                // constant is invisible to a correlation. It is available on
-                // every single frame, needs nothing to be visible, and is
-                // measured by whole-pixel scroll matching that does not drift.
-                const auto fx = camera.fix();
-                const float hp = VitalsReader::measure(frame, macro.hp_bar);
-                const float mp = VitalsReader::measure(frame, macro.mp_bar);
-
-                if (fx.tracking) {
-                    double lo = g_walk_lo.load(), hi = g_walk_hi.load();
-                    if (lo > 1e17) { g_walk_lo.store(fx.x); g_walk_hi.store(fx.x); }
-                    else {
-                        if (fx.x < lo) g_walk_lo.store(fx.x);
-                        if (fx.x > hi) g_walk_hi.store(fx.x);
-                        g_walk_span.store(g_walk_hi.load() - g_walk_lo.load());
-                    }
-                    finder.set_truth(fx.x, fx.y, hp, mp, true);
-                } else {
-                    finder.set_truth(0, 0, hp, mp, false);
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(60));
-        }
-    });
-
-    // The legs.
-    //
-    // Long sweeps rather than short shuffles. A second of walking is nothing on
-    // a map this size -- and if the character happens to be standing on a ledge
-    // it is not even enough to leave it, which reads as "the keys did not
-    // work" when the keys worked fine.
-    // Two phases, because one kind of behaviour cannot reveal everything.
-    //
-    // Walking tells you which field is a position and nothing about which is
-    // health, because health does not change while you walk. Standing in front
-    // of something that hits you tells you which field is health and nothing
-    // about position. A run that does both, in that order, gets both -- and
-    // the analysis already refuses to report a quantity that never varied, so
-    // the half that learns nothing stays quiet instead of inventing something.
-    const std::uint64_t started = now_ms();
-    const std::uint64_t until = started + static_cast<std::uint64_t>(seconds) * 1000;
-    const std::uint64_t walk_until = started +
-        static_cast<std::uint64_t>(seconds) * 1000 * g_walk_share_pct / 100;
-
-    HunterConfig hunt;
-    hunt.load(resolve("configs/hunt.ini"));
-
-    int leg = 0;
-    bool announced_fight = false;
-    while (now_ms() < until && !g_stop.load()) {
-        if (!can_drive) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        } else if (now_ms() < walk_until) {
-            // Walk out, stand, walk back, stand. The standing matters as much
-            // as the walking: a field that keeps changing while the character
-            // is still is a clock or a sequence number. Walking back to where
-            // it started makes the same point from the other side -- a real
-            // coordinate comes home to the value it left.
-            //
-            // Long legs. The span the character covers is the whole dynamic
-            // range of the measurement, and a correlation over two hundred
-            // pixels is a far weaker claim than one over a thousand.
-            if (!input.window_focused()) input.focus_window();
-            switch (leg % 4) {
-                case 0: hold_unless_stopped(input, input.right_key(), 6000); break;
-                case 2: hold_unless_stopped(input, input.left_key(), 6000); break;
-                default:
-                    // Jump, then swing, without moving on.
-                    //
-                    // Jumping is the only thing that gives a y field anything
-                    // to track, since flat ground scrolls the view sideways
-                    // only. Attacking here rather than in a phase of its own
-                    // is what makes a combat packet's position mean something:
-                    // keeping all the fighting until the end produced attacks
-                    // from one spot, to be correlated against a measurement
-                    // that never moved, which can say nothing about anything.
-                    for (int j = 0; j < 3 && !g_stop.load(); ++j) {
-                        input.key_press(hunt.jump_key, 90);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(650));
-                    }
-                    for (int swing = 0; swing < 7 && now_ms() < until && !g_stop.load(); ++swing) {
-                        input.key_press(hunt.attack_key, 60);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(360));
-                    }
-                    break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            ++leg;
-        } else {
-            if (!announced_fight) {
-                announced_fight = true;
-                std::printf("\n\nNow attacking in place, to find health and the "
-                            "monster packets.\n");
-            }
-            // Stand and fight. Health moves both ways -- down from being hit,
-            // up from the heal keys the macro is already pressing -- and
-            // monsters appear and disappear, which is what names the spawn and
-            // remove packets.
-            if (!input.window_focused()) input.focus_window();
-            input.key_press(hunt.attack_key, 60);
-            std::this_thread::sleep_for(std::chrono::milliseconds(450));
-        }
-
-        const auto fs = finder.stats();
-        const std::uint64_t t_now = now_ms();
-        std::printf("\r  %llus left | %llu packets, %llu paired | covered %.0f px   ",
-                    static_cast<unsigned long long>(t_now >= until ? 0 : (until - t_now) / 1000),
-                    static_cast<unsigned long long>(fs.packets),
-                    static_cast<unsigned long long>(fs.paired), g_walk_span.load());
-        std::fflush(stdout);
-    }
-    input.release_all();
-
-    watching.store(false);
-    eyes.join();
-    capture.stop();
-    input.release_all();
-
-    const auto fs = finder.stats();
-    std::printf("\n\n%llu packets seen, %llu kept with a measurement alongside them\n",
-                static_cast<unsigned long long>(fs.packets),
-                static_cast<unsigned long long>(fs.paired));
-
-    const auto cf = camera.fix();
-    std::printf("the view moved %.0f px; the character covered %.0f px "
-                "(%llu frames matched, %llu lost)\n\n",
-                camera.travelled(), g_walk_span.load(),
-                static_cast<unsigned long long>(cf.updates),
-                static_cast<unsigned long long>(cf.lost));
-
-    // What matters is how far the character went, not how far the view did:
-    // inside the camera's dead zone, and at the edges of a map, the character
-    // moves across a view that stays put.
-    if (g_walk_span.load() < 60.0) {
-        std::printf("The character barely moved, so there is nothing to correlate\n"
-                    "against. Run it again and walk around while it watches.\n");
-        return 1;
-    }
-
-    // Keep the capture. Walking the character around is the expensive part of
-    // this, and the analysis is worth redoing without doing that again.
-    const std::string saved = resolve("calibration.bin");
-    finder.save(saved);
-    std::printf("capture saved to %s -- re-analyse with --analyse\n\n", saved.c_str());
-
-    report_findings(finder);
-    return 0;
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -6279,12 +4841,7 @@ int main(int argc, char** argv) {
     AppConfig app;
     app.load(resolve(opt.app_path));
 
-    if (!opt.bot_path.empty())      app.bot_config_path = opt.bot_path;
-    if (!opt.protocol_path.empty()) app.protocol_path   = opt.protocol_path;
-    if (!opt.iface.empty())         app.interface_name  = opt.iface;
-    if (!opt.window.empty())        app.window_title    = opt.window;
-    if (!opt.host.empty())        { app.server_ip_start = opt.host; app.server_ip_end = opt.host; }
-    if (opt.port != 0)            { app.port_start = opt.port; app.port_end = opt.port; }
+    if (!opt.window.empty()) app.window_title = opt.window;
 
     Logger::instance().set_file(resolve(app.log_path));
 
@@ -6296,7 +4853,6 @@ int main(int argc, char** argv) {
     // say so itself, every run, where it cannot be missed.
     GB_INFO("Template matching: %s", TemplateMatcher::backend().c_str());
 
-    // Looking at the screen needs none of the protocol machinery below.
     if (opt.list_windows) return run_list_windows();
     if (opt.doctor) return run_doctor(opt, app);
     if (opt.fix_dpi) return run_fix_dpi(opt, app);
@@ -6305,25 +4861,19 @@ int main(int argc, char** argv) {
     if (opt.readself) return run_readself(opt.readself_text);
     if (opt.read_text || !opt.find_text.empty())
         return run_read(opt, app, opt.read_rect, opt.find_text);
-    if (!opt.analyse_path.empty())
-        return run_analyse(resolve(opt.analyse_path), opt.dump_opcode_arg,
-                           opt.check_arg, opt.fields);
     if (!opt.click_spec.empty()) return run_click(opt, app, opt.click_spec);
     if (!opt.press_key.empty()) return run_press(opt, app, opt.press_key, 1200);
     if (opt.inputcheck) return run_inputcheck(opt, app);
     if (!opt.grab_spec.empty()) return run_grab(opt, app, opt.grab_spec);
     if (opt.vitals_seconds > 0) return run_vitals(opt, app, opt.vitals_seconds);
-    if (opt.session_seconds > 0) return run_session(opt, app, opt.session_seconds);
-    if (opt.bridge) return run_bridge(opt);
     if (opt.player_list) return run_player_list(opt, app);
     if (opt.auto_party_seconds > 0) return run_auto_party(opt, app, opt.auto_party_seconds);
     if (!opt.invite_who.empty()) return run_invite_player(opt, app, opt.invite_who);
     if (opt.invite_seconds > 0) return run_invites(opt, app, opt.invite_seconds);
-    if (opt.party) return run_party(opt, app);
     if (opt.close_popups) return run_close(opt, app);
     if (opt.popups) return run_popups(opt, app);
     if (opt.party_hud) return run_party_hud(opt, app);
-    if (opt.routines) return run_routines(opt, app);
+    if (opt.revive) return run_revive(opt, app);
     if (!opt.bag_image.empty()) return run_bag(opt);
     if (opt.trash_probe) return run_trash_probe(opt, app);
     if (opt.trash) return run_trash(opt, app);
@@ -6336,287 +4886,13 @@ int main(int argc, char** argv) {
     if (opt.login) return run_login(opt, app);
     if (opt.keepalive_minutes > 0) return run_keepalive(opt, app, opt.keepalive_minutes);
     if (opt.templates) return run_templates(opt, app, opt.template_name);
-    if (opt.whereami) return run_whereami(opt, app);
-    if (opt.anchor_seconds > 0) return run_anchor(opt, app, opt.anchor_seconds);
     if (opt.jumptest) return run_jumptest(opt, app);
     if (opt.hunt_seconds > 0) return run_hunt(opt, app, opt.hunt_seconds);
-    if (opt.keytest) return run_keytest(opt, app);
-    if (opt.calibrate_seconds > 0) {
-        g_walk_share_pct = std::max(0, std::min(100, opt.walk_pct));
-        return run_calibrate(opt, app, opt.calibrate_seconds);
-    }
 
-    BotConfig bot;
-    bot.load(resolve(app.bot_config_path));
-
-    // ---- protocol ----
-    const std::string protocol_path = resolve(app.protocol_path);
-
-    bool have_framing = false;
-    const FramingSpec framing = load_framing(protocol_path, have_framing);
-
-    // What the client sends is framed differently; decoding it with the
-    // server's spec throws the whole direction away as noise.
-    bool client_found = false;
-    const FramingSpec client_framing =
-        load_framing(protocol_path, client_found, "FramingClient");
-
-    if (!have_framing) {
-        std::fprintf(stderr,
-            "\nNo [Framing] section in %s.\n\n"
-            "GhostOnline's wire format has to be derived from your own traffic\n"
-            "before the bot can read anything. Start here:\n\n"
-            "  gobot_sniff --list\n"
-            "  gobot_sniff --record capture.bin --host <game server ip>\n"
-            "  gobot_sniff --detect capture.bin\n\n"
-            "See README.md for the full walkthrough.\n",
-            protocol_path.c_str());
-        return 1;
-    }
-
-    // An unconfirmed framing stops the bot here, as GoBot's window will not
-    // START BOT on one: a wrong framing does not fail loudly, it gives
-    // plausible nonsense, and a bot acting on nonsense is worse than one that
-    // will not start. --status alone still runs -- it presses nothing, and it
-    // is how the framing is checked: the resync count against frames decoded.
-    // The packet layouts below are the other gate, the part only a person can
-    // confirm.
-    {
-        IniFile ini;
-        ini.load(protocol_path);
-        if (!ini.get_bool("Framing", "verified", false)) {
-            if (!opt.status_only) {
-                std::fprintf(stderr,
-                    "\n[Framing] in %s is not marked confirmed (verified=false),\n"
-                    "so the bot will not start: on a wrong framing it acts on nonsense.\n\n"
-                    "Check it first, with nothing pressed:\n\n"
-                    "  gobot_cli --status      more than a couple of resync bytes per frame\n"
-                    "                          decoded means the framing is wrong\n"
-                    "  gobot_sniff --decode    the packets read through it\n\n"
-                    "Then set verified=true in [Framing] -- or let GoBot's window confirm\n"
-                    "it from live traffic and save protocol.ini on its Protocol tab.\n",
-                    protocol_path.c_str());
-                return 1;
-            }
-            std::fprintf(stderr,
-                "\nNote: [Framing] in %s is not marked confirmed.\n"
-                "Watch the resync count -- more than a couple of bytes per frame means\n"
-                "the framing is wrong. Check with: gobot_sniff --decode\n\n",
-                protocol_path.c_str());
-        }
-    }
-
-    OpcodeRegistry registry;
-    registry.load(protocol_path);
-
-    if (registry.size() == 0) {
-        std::fprintf(stderr,
-            "\nFraming is configured but %s has no [Packet.*] layouts.\n"
-            "The bot would see frames it cannot interpret.\n\n"
-            "  gobot_sniff --watch          see which opcodes fire\n"
-            "  gobot_sniff --diff 0x<op>    work out one packet's fields\n",
-            protocol_path.c_str());
-        return 1;
-    }
-
-    // ---- wiring ----
-    // Declaration order is destruction order reversed. PathFinder must outlive
-    // the executor and brain that hold pointers to it, so it is declared
-    // first; executor must outlive brain, whose destructor halts it.
-    GameState state;
-    ProtocolHandler protocol(registry, state);
-    InputManager input;
-    ExecutionCoordinator coord;
-    PathFinder pathfinder;
-    CommandExecutor executor(bot, state, input, coord);
-    BotBrain brain(bot, state, executor);
-
-    executor.set_pathfinder(&pathfinder);
-    brain.set_pathfinder(&pathfinder);
-
-    // --with-macro: configs/macro.ini beside the bot, as the GUI's macro runs
-    // beside its START BOT. Its potions and buffs are the bot's only ones:
-    // bot_default.ini has none. Started and stopped with the bot by the status
-    // loop below, and given the character's HP and MP from the packets: there
-    // is no reader of the bars here. Never in --status.
-    std::unique_ptr<MacroEngine> macro;
-    if (opt.with_macro && !opt.status_only) {
-        MacroConfig mc;
-        mc.load(resolve("configs/macro.ini"));
-        macro = std::make_unique<MacroEngine>(input, coord);
-        macro->set_config(mc);
-    }
-
-    protocol.set_map_data_callback([&](const MapData& map) {
-        pathfinder.set_double_jump(bot.double_jump);
-        pathfinder.init(map);
-    });
-
-    protocol.set_death_callback([&] {
-        if (!bot.continue_auto_after_death) {
-            GB_WARN("Death — disabling bot (continue_auto_after_death is off)");
-            g_bot_enabled.store(false);
-            brain.stop();
-        }
-    });
-
-    // ---- game window ----
-    // Through attach_window like every other command: with app.ini's process
-    // as well as its title and class, so that the window followed and typed
-    // into is the game's, by where it runs from -- never a folder or a page
-    // that is merely titled like it -- and with --window honoured.
-    if (!attach_window(input, opt, app)) {
-        if (!opt.window.empty())
-            std::fprintf(stderr, "\nNo window matching --window '%s'.\n", opt.window.c_str());
-        else
-            std::fprintf(stderr, "\nGame window not found (looking for '%s', run by %s).\n",
-                         app.window_title.c_str(),
-                         app.process_name.empty() ? "any program" : app.process_name.c_str());
-        std::fprintf(stderr,
-            "Start the game first, or name the window with --window -- see --windows\n"
-            "for what is on screen.\n");
-        if (!opt.status_only) return 1;
-    } else {
-        WindowFocusMonitor::instance().start(input.target_window());
-        WindowFocusMonitor::instance().add_listener([&input](FocusState s) {
-            if (s != FocusState::Focused) {
-                // Keys held when focus leaves stay held in the game. Release
-                // them or the character runs into a wall indefinitely.
-                input.release_all();
-            }
-        });
-    }
-
-    // ---- capture ----
-    PacketCapture capture;
-    capture.set_framing(framing);
-    // The client frames its half differently, and its half is the one that
-    // carries this character's own position.
-    if (client_found) capture.set_client_framing(client_framing);
-    capture.set_batch_interval_ms(app.batch_interval_ms);
-    capture.set_packet_callback([&](const std::vector<GamePacket>& packets) {
-        protocol.on_packets(packets);
-    });
-    capture.set_disconnect_callback([&] {
-        GB_WARN("Traffic stopped — disabling bot");
-        g_bot_enabled.store(false);
-        brain.stop();
-        input.release_all();
-    });
-
-    // Forward only what we can interpret; everything else is noise.
-    capture.set_opcode_filter(registry.mapped_opcodes());
-
-    CaptureConfig ccfg;
-    ccfg.interface_name  = app.interface_name;
-    ccfg.bpf_filter      = app.bpf_filter;
-    ccfg.server_ip_start = app.server_ip_start;
-    ccfg.server_ip_end   = app.server_ip_end;
-    ccfg.port_start      = app.port_start;
-    ccfg.port_end        = app.port_end;
-
-    if (!capture.start(ccfg)) {
-        std::fprintf(stderr, "\nCapture failed to start. Running as Administrator?\n");
-        // The focus listener holds `input`, which goes when this returns.
-        WindowFocusMonitor::instance().stop();
-        return 1;
-    }
-
-    std::thread hotkeys;
-    if (!opt.status_only) {
-        // Not in --status, which starts none of the bot's threads, nor the
-        // macro's. Started, it presses nothing until F10 starts the brain,
-        // which arms it.
-        executor.update_config(bot);
-        executor.start();
-        hotkeys = std::thread(hotkey_loop, bot.key_start_stop, std::ref(brain), std::cref(input));
-        std::printf("\nReady. Press %s in game to toggle the bot. Ctrl+C to quit.\n\n",
-                    InputManager::key_name(bot.key_start_stop).c_str());
-        // As bot_default.ini ships, everything the bot presses is off.
-        if (!bot.any_action_on())
-            std::printf("Note: the attack is off in %s (skills go with the attack), so the bot will not "
-                        "attack or cast. Switch it on there first.\n\n", app.bot_config_path.c_str());
-        if (!macro)
-            std::printf("Note: the bot's potions and buffs are configs/macro.ini's, and go only with "
-                        "--with-macro.\n\n");
-    } else {
-        std::printf("\nStatus mode — no input will be sent. Ctrl+C to quit.\n\n");
-    }
-
-    // ---- status loop ----
-    while (!g_stop.load()) {
-        // A second, in slices: a closing console allows a few seconds for
-        // everything below to be stopped, and this was a whole one of them.
-        // With --with-macro, each slice keeps the macro on and off with the
-        // bot -- from this thread alone: F10, a death and the traffic going
-        // quiet all say so through g_bot_enabled, and the brain stops itself
-        // after a death -- and hands it the packets' HP and MP.
-        for (int slept = 0; slept < 1000 && !g_stop.load(); slept += 50) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            if (!macro) continue;
-            const bool on = g_bot_enabled.load() && brain.running();
-            if (on && !macro->running()) macro->start();
-            else if (!on && macro->running()) macro->stop();
-            const Self me = state.self();
-            const SelfVitals v = packet_vitals(me, PacketCapture::silent_for_ms(capture.stats(), now_ms()),
-                                               MacroEngine::kVitalsStaleMs);
-            if (v.hp >= 0.0f || v.mp >= 0.0f) macro->set_vitals(v.hp, v.mp);
-            // Dead, by the packets: held, as the window's reader holds it out
-            // of the world -- no potion, buff or timed skill on the death
-            // panel, and the buffs cast again once it is over.
-            const bool down = me.dead || v.hp == 0.0f;
-            if (macro->running() && down != macro->suspended())
-                macro->set_suspended(down, down ? "the character is dead" : std::string{});
-        }
-        if (g_stop.load()) break;
-
-        const auto cs = capture.stats();
-        const auto ps = protocol.stats();
-        const Self me = state.self();
-
-        std::printf("\r[%s] hp %d/%d mp %d/%d  pos (%.0f,%.0f)  mobs %zu  "
-                    "frames %llu  decoded %llu  unknown %llu  resync %llu   ",
-                    opt.status_only ? "status"
-                                    : (g_bot_enabled.load() ? to_string(brain.phase()) : "off"),
-                    me.hp, me.max_hp, me.mp, me.max_mp,
-                    me.pos.x, me.pos.y,
-                    state.monster_count(),
-                    static_cast<unsigned long long>(cs.frames_decoded),
-                    static_cast<unsigned long long>(ps.decoded),
-                    static_cast<unsigned long long>(ps.unknown),
-                    static_cast<unsigned long long>(cs.resync_bytes));
-        std::fflush(stdout);
-    }
-
-    std::printf("\n\nShutting down...\n");
-
-    g_stop.store(true);
-    if (hotkeys.joinable()) hotkeys.join();
-
-    if (macro) macro->stop();
-    brain.stop();
-    executor.stop();
-    capture.stop();
-    WindowFocusMonitor::instance().stop();
-    input.release_all();
-
-    const auto ps = protocol.stats();
-    std::printf("\nSession: %llu packets, %llu decoded, %llu unknown\n",
-                static_cast<unsigned long long>(ps.total),
-                static_cast<unsigned long long>(ps.decoded),
-                static_cast<unsigned long long>(ps.unknown));
-
-    if (!ps.unknown_opcodes.empty()) {
-        std::printf("\nUnmapped opcodes seen (candidates for protocol.ini):\n");
-        std::vector<std::pair<std::uint16_t, std::uint64_t>> sorted(
-            ps.unknown_opcodes.begin(), ps.unknown_opcodes.end());
-        std::sort(sorted.begin(), sorted.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
-        for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 15); ++i) {
-            std::printf("  0x%04X  x%llu\n", sorted[i].first,
-                        static_cast<unsigned long long>(sorted[i].second));
-        }
-    }
-    return 0;
+    // No command. What ran here was the packet bot, which went in 2026.11.16:
+    // the commands there are, as --help gives them.
+    std::printf("gobot_cli: no command given. gobot_cli --doctor checks everything GoBot needs on\n"
+                "this machine.\n\n");
+    print_usage();
+    return 2;
 }
-

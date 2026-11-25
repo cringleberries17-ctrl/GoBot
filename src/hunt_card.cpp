@@ -42,12 +42,10 @@ SeekTick seek_tick(const HunterConfig& c) {
 }
 
 JumpUpCard jump_up_card(const HunterConfig& c, const Hunter::Status& hs, std::uint64_t now) {
-    using Off = Hunter::JumpUpOff;
     using Phase = Hunter::JumpUpPhase;
     JumpUpCard card;
-    // Those that stop the hunt say so under BẮT ĐẦU.
-    if (hs.jump_off != Off::MapChanged && hs.jump_off != Off::KeysStuck) card.off = hs.jump_off;
-    card.kinds_off = static_cast<std::uint8_t>(hs.jump_kinds_off & 7u);
+    // Nothing off, paused or off for the run to say since 2026.11.24: a jump
+    // that did not get there is tried again.
     switch (hs.jump_phase) {
         case Phase::Approach: card.now = JumpUpCard::Now::Approach; break;
         case Phase::Settle:   card.now = JumpUpCard::Now::Settle; break;
@@ -67,8 +65,9 @@ JumpUpCard jump_up_card(const HunterConfig& c, const Hunter::Status& hs, std::ui
 
 SeekAbove seek_above(const HunterConfig& c, const Hunter::Status& hs) {
     if (hs.seek_above_no_way <= 0) return SeekAbove::None;
-    if (!c.jump_up) return SeekAbove::TickOff;
-    return SeekAbove::Latched;
+    // The tick off: the one reason left (2026.11.24) -- jumps up are never
+    // paused nor off until the next start any more.
+    return c.jump_up ? SeekAbove::None : SeekAbove::TickOff;
 }
 
 } // namespace gobot

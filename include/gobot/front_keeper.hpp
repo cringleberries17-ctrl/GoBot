@@ -8,8 +8,8 @@ namespace gobot {
 /// game lên trước khi bot đang chạy" on the simple screen, refocus in [Simple]
 /// in app.ini.
 ///
-/// The keys only land while the game is in front -- the macro, the hunter
-/// and the packet bot refuse every key with anything else there, and the
+/// The keys only land while the game is in front -- the macro and the hunter
+/// refuse every key with anything else there, and the
 /// chat, the quest and the bag wait for it -- so a window that takes the
 /// focus during a run stops the bot as surely as DỪNG does, and says nothing.
 /// The player asked for the game back at once, whatever took it, GoBot's own
@@ -55,7 +55,7 @@ public:
     /// What one look sees.
     struct Look {
         bool on = false;            ///< the option is ticked
-        bool running = false;       ///< the bot runs: anything DỪNG LẠI stops, and the packet bot
+        bool running = false;       ///< the bot runs: anything DỪNG LẠI stops
         bool window = false;        ///< there is a game window
         bool in_front = false;      ///< and it is the window in front
         bool mouse_down = false;    ///< a mouse button is held, wherever

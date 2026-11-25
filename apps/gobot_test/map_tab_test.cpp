@@ -50,6 +50,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace gobot;
@@ -780,6 +781,155 @@ void test_gesture() {
     h.cam = g.cam;
     check(same_place(gesture_draft(h, release, lim), frozen) && frozen.left == 1721 && !same_place(by_live, frozen),
           "the camera moved between press and release: the same draft by the frozen camera -- another by the live");
+}
+
+// ------------------------------------------------------- the band's bars
+
+void test_band_bars() {
+    section("Map tab (2026.11.12, the owner's Q6): the band's two bars -- up() over your feet and down() under them, "
+            "dragged or typed, hunt.ini's up_reach and down_reach written by the writer, the band's keys alone");
+
+    // Where they are drawn: the band as hunt.ini has it.
+    HunterConfig cfg;
+    cfg.set_band(10, 20);
+    const BandBars b = band_bars(400.0, Band{ cfg.up(), cfg.down() }, 1.0);
+    const BandBars twice = band_bars(400.0, Band{ 10, 20 }, 2.0);
+    const BandBars none = band_bars(400.0, Band{ 10, 20 }, 0.0);
+    check(b.up_y == 390.0 && b.down_y == 420.0 && twice.up_y == 380.0 && twice.down_y == 440.0 && none.up_y == 390.0 &&
+              none.down_y == 420.0,
+          "the band 10 and 20 with your feet at 400: bars at 390 and 420 -- 380 and 440 at packet_scale 2, as 1 at 0");
+    // Hung from the feet less packet_dy (2026.11.12 review): a plate's height
+    // is its world height over the scale plus packet_dy, and the hunter lays
+    // that against the band -- a world dot 10 px over the feet is 20 px down
+    // to it with packet_dy 30, on the lower bar of 20.
+    {
+        const BandBars dy30 = band_bars(band_feet_y(400.0, 30, 1.0), Band{ 10, 20 }, 1.0);
+        const BandBars dy30x2 = band_bars(band_feet_y(400.0, 30, 2.0), Band{ 10, 20 }, 2.0);
+        const BandBars dy0 = band_bars(band_feet_y(400.0, 0, 2.0), Band{ 10, 20 }, 2.0);
+        const double plate_dy = (390.0 - 400.0) / 1.0 + 30;     // packet_eyes: (m.y - you.y) / scale + packet_dy
+        check(dy30.down_y == 390.0 && dy30.up_y == 360.0 && plate_dy == 20.0 && dy30x2.down_y == 380.0 &&
+                  dy30x2.up_y == 320.0 && dy0.up_y == twice.up_y && dy0.down_y == twice.down_y,
+              "packet_dy 30: the lower bar of 20 at 390, where a dot 10 px over your feet is a plate 20 px down -- "
+              "the upper at 360; at packet_scale 2, 380 and 320; packet_dy 0 as before");
+    }
+    check(band_label(BandBar::Up, 10) == "+10 px" && band_label(BandBar::Down, 20) == "-20 px",
+          "labelled \"+10 px\" and \"-20 px\"");
+    const HuntZone z = owner_zone();
+    const BandSpan in_box = band_span(&z, 1821.0, 0.0, 9999.0);
+    const BandSpan out = band_span(&z, 2300.0, 0.0, 9999.0);
+    const BandSpan view = band_span(nullptr, 1821.0, 1471.0, 2171.0);
+    check(in_box.x0 == 1521.0 && in_box.x1 == 2121.0 && out.x0 == 1521.0 && out.x1 == 2300.0 && view.x0 == 1471.0 &&
+              view.x1 == 2171.0,
+          "across the area's box, out to you when you stand outside it, across the view with no box");
+
+    // The grips: at zoom 1 your feet at 360 are at screen 230 -- the bars at
+    // 220 and 250, the box 50..650 across.
+    MapCamera cam;
+    cam.cx = 1821;
+    cam.cy = 360;
+    cam.zoom = 1.0;
+    const P origin{ 0, 0 }, size{ 700, 460 };
+    const BandBars at360 = band_bars(360.0, Band{ 10, 20 }, 1.0);
+    const auto grip = [&](double x, double y) { return band_grip(at360, in_box, cam, origin, size, { x, y }); };
+    check(grip(300, 220) == BandBar::Up && grip(300, 225) == BandBar::Up && grip(300, 226) == BandBar::None &&
+              grip(300, 250) == BandBar::Down && grip(300, 245) == BandBar::Down && grip(300, 236) == BandBar::None,
+          "each bar within 5 px of its line, not 6");
+    check(grip(45, 220) == BandBar::Up && grip(44, 220) == BandBar::None && grip(655, 250) == BandBar::Down &&
+              grip(656, 250) == BandBar::None,
+          "across the box, 5 px to spare either end");
+    cam.zoom = 0.2;    // the bars at screen 228 and 234
+    check(grip(300, 229) == BandBar::Up && grip(300, 231) == BandBar::Down && grip(300, 233) == BandBar::Down,
+          "zoomed out, both within 5 px: the nearer -- the lower on a tie");
+
+    // A drag through the camera frozen at the press, at zoom 0.5: 1 screen
+    // px is 2 of the world.
+    BandGesture g;
+    g.feet_y = 360.0;
+    g.scale = 1.0;
+    g.from = Band{ 10, 20 };
+    g.cam.cx = 1821;
+    g.cam.cy = 360;
+    g.cam.zoom = 0.5;
+    g.origin = { 0, 0 };
+    g.size = { 700, 460 };
+    g.press = { 300, 225 };
+    const auto drag = [&](BandBar bar, double dy, double scale = 1.0) {
+        BandGesture h = g;
+        h.bar = bar;
+        h.scale = scale;
+        return band_drag(h, { g.press.x + 40, g.press.y + dy });
+    };
+    check(drag(BandBar::Up, -15) == Band{ 40, 20 } && drag(BandBar::Down, 10) == Band{ 10, 40 },
+          "the upper bar 15 px up: 40; the lower 10 px down: 40 -- the other as it was");
+    check(drag(BandBar::Up, -7) == Band{ 25, 20 } && drag(BandBar::Up, -15, 2.0) == Band{ 25, 20 },
+          "in whole 5 px: 24 is 25; at packet_scale 2, 30 px of the world is 15 of the band");
+    check(drag(BandBar::Up, 100) == Band{ 0, 20 } && drag(BandBar::Down, 5000) == Band{ 10, kBandMaxPx } &&
+              drag(BandBar::None, 50) == g.from,
+          "past your feet 0, never past 1000; no bar, nothing moves");
+    check(band_clamp(-5) == 0 && band_clamp(1005) == kBandMaxPx && band_clamp(35) == 35 && kBandStepPx == 5 &&
+              kBandMaxPx == 1000,
+          "a number typed: 0..1000, as it is; the boxes step 5");
+
+    // The drag's band set (map_band_commit: HunterConfig::set_band) and
+    // written by the worker's writer: the band's keys alone, the rest of the
+    // file as it was -- not the copy's other settings.
+    const std::string path = temp_path("band_hunt.ini");
+    write_text(path, "[Hunt]\nreach=450\nspot=true\nup_reach=10\ndown_reach=20\nup_no_jump=30\ndown_no_jump=30\n"
+                     "height_tolerance=20\ndrop_side_px=90\n");
+    HunterConfig mine;
+    const bool loaded = mine.load(path);
+    mine.reach = 999;       // changed in memory, not saved
+    const Band dragged = drag(BandBar::Down, 10);
+    mine.set_band(drag(BandBar::Up, -15).up_px, dragged.down_px);
+    IniFile after;
+    HunterConfig back;
+    check(loaded && mine.up_reach == 40 && mine.down_reach == 40 && mine.save_band(path) && after.load(path) &&
+              after.get_int("Hunt", "up_reach", 0) == 40 && after.get_int("Hunt", "down_reach", 0) == 40 &&
+              after.get_int("Hunt", "height_tolerance", 0) == 40 && after.get_int("Hunt", "up_no_jump", 0) == 30 &&
+              after.get_int("Hunt", "reach", 0) == 450 && after.get_int("Hunt", "drop_side_px", 0) == 90 &&
+              after.get_bool("Hunt", "spot", false) && back.load(path) && back.up() == 40 && back.down() == 40,
+          "the bars at 40 and 40 written: up_reach, down_reach and height_tolerance -- reach 450 as the file had it, "
+          "not the copy's 999; read back 40 and 40");
+    check(back.up_nj() == 30 && back.down_nj() == 30 && [] {
+        HunterConfig low;
+        low.up_no_jump = 30;
+        low.down_no_jump = 30;
+        low.set_band(10, 20);
+        const bool cut = low.up_nj() == 10 && low.down_nj() == 20;
+        low.set_band(60, 60);
+        return cut && low.up_nj() == 30 && low.down_nj() == 30;
+    }(),
+          "the no-jump pair never past the bars -- 30 under bars of 10 and 20 reads 10 and 20 (the owner's \"30 px\") "
+          "-- and kept as set: the bars raised to 60, 30 again");
+    const std::string fresh = temp_path("band_fresh.ini");
+    DeleteFileA(fresh.c_str());
+    IniFile whole;
+    check(mine.save_band(fresh) && whole.load(fresh) && whole.get_int("Hunt", "reach", 0) == 999 &&
+              whole.get_int("Hunt", "up_reach", 0) == 40,
+          "no file yet: the copy written whole, as the first save");
+    // One writer at a time: the GUI thread's save() and the worker's
+    // save_band() each read, change and write the file whole.
+    HunterConfig gui = mine;
+    gui.reach = 111;
+    gui.set_band(5, 15);
+    HunterConfig worker = mine;
+    worker.set_band(55, 65);
+    bool all_worker = true, all_gui = true;
+    std::thread other([&] {
+        for (int i = 0; i < 25; ++i) all_worker = worker.save_band(path) && all_worker;
+    });
+    for (int i = 0; i < 25; ++i) all_gui = gui.save(path) && all_gui;
+    other.join();
+    IniFile mixed;
+    const bool read = mixed.load(path);
+    const int up = mixed.get_int("Hunt", "up_reach", -2), down = mixed.get_int("Hunt", "down_reach", -2);
+    check(all_worker && all_gui && read && mixed.get_int("Hunt", "reach", 0) == 111 &&
+              ((up == 5 && down == 15) || (up == 55 && down == 65)) && mixed.get_bool("Hunt", "spot", false),
+          fmt("save() and save_band() from two threads, 25 each: the file whole, reach 111, the band one writer's "
+              "(%d, %d)",
+              up, down));
+    DeleteFileA(path.c_str());
+    DeleteFileA(fresh.c_str());
 }
 
 // ------------------------------------------------------------- snapping
@@ -2139,8 +2289,9 @@ void test_dots_drawn() {
               dot_is(you_dot(dot_floors(&p, MapShows::EntryDoubtful), walking, 450, 624), 450, 624, DotWhy::AsIs),
           "you walking down the ramp: on it at 724 by a trusted file; where the packets have you by one found off");
 
-    // Grey: outside the area and out of reach -- or in reach while the
-    // hunter walks back first.
+    // Grey: outside the area, in reach or not (2026.11.12, the owner's Q3
+    // "Chỉ đánh quái trong vùng": until then one in reach was red, fought
+    // where it stood).
     HunterConfig cfg;
     cfg.reach = 450;
     cfg.height_tolerance = 60;
@@ -2155,11 +2306,10 @@ void test_dots_drawn() {
     const PacketWorld::Mob inside = dot_mob(500, 600, 500, false);
     const PacketWorld::Mob near_out = dot_mob(1100, 650, 1100, false);
     const PacketWorld::Mob far_out = dot_mob(1500, 650, 1500, false);
-    check(!grey(inside, 2500, 999) && grey(far_out, 900, 650) && !grey(near_out, 900, 650),
-          "inside the area red, out of reach too; outside it and out of reach grey; outside in reach red -- fought "
-          "where it stands");
+    check(!grey(inside, 2500, 999) && grey(far_out, 900, 650) && grey(near_out, 900, 650),
+          "inside the area red, out of reach too; outside it grey, out of reach or in reach -- never fought");
     check(!grey(far_out, 900, 650, true, false), "no area in use: never grey");
-    check(grey(near_out, 900, 650, false), "you not drawn: nothing is in reach -- outside grey");
+    check(grey(near_out, 900, 650, false), "you not drawn: outside grey");
     PacketWorld::Mob dead_out = far_out;
     dead_out.dead = true;
     dead_out.dead_ms = now;
@@ -2180,9 +2330,10 @@ void test_dots_drawn() {
           "out of reach: the target 30 px outside red, as the hunter still walks after it; any other grey; the "
           "target 100 px out grey");
 
-    // As the hunter has the plate: packet_dy on the height, packet_scale both ways.
+    // Where you are, packet_dy and packet_scale no longer change it: outside
+    // is grey however near (2026.11.12).
     const PacketWorld::Mob low_out = dot_mob(1100, 710, 1100, false);
-    check(!grey(low_out, 900, 650), "60 px below you: level (height_tolerance 60), in reach -- red");
+    check(grey(low_out, 900, 650), "60 px below you, level and in reach, outside the area: grey");
     cfg.packet_dy = 10;
     const bool dy_down = grey(low_out, 900, 650);
     cfg.packet_dy = -10;
@@ -2191,9 +2342,7 @@ void test_dots_drawn() {
     cfg.packet_scale = 2.0f;
     const bool scaled = grey(far_out, 900, 650);
     cfg.packet_scale = 1.0f;
-    check(dy_down && !dy_up && !scaled,
-          "packet_dy 10 puts it 70 px below, out of reach: grey; -10, 50 px: red; packet_scale 2 halves 600 px "
-          "across to 300: red");
+    check(dy_down && dy_up && scaled, "packet_dy 10 or -10, packet_scale 2: outside the area grey all the same");
 
     // Judged on the world's heights, never the dot's (the owner's Q2 (a)):
     // a walker whose dot has left the box, or come into it, keeps the
@@ -2245,11 +2394,33 @@ void test_gui_source() {
     check(!posts.empty() && names(posts, "MapViewJob::run(") && names(posts, ".load(path)") &&
               names(posts, "ZoneBook::save_many(") && names(posts, "ui.worker.post("),
           "map_post posts the view job, the book's load and the saves to the worker");
+    // spots.ini there but not read (2026.11.24, the owner: "Kiểm tra các phần
+    // khác xem có phần nào không làm được thì dừng không, cần thay cơ chế này
+    // bằng 1 cơ chế khác"): read again every 30 s while book_bad, not once a
+    // session; the edits refused and nothing saved over it until a read works.
+    {
+        const std::size_t again = posts.find("if (ui.book_asked && ui.book_bad && now >= ui.book_again_ms) {");
+        const std::size_t asked = posts.find("ui.book_asked = false;", again);
+        const std::size_t next = posts.find("ui.book_again_ms = now + kBookAgainMs;", again);
+        const std::size_t post = posts.find("if (!ui.book_asked) {", again);
+        const std::string tick = body_of(src, "void GuiApp::simple_map_tick() {");
+        check(names(src, "constexpr std::uint64_t kBookAgainMs = 30'000;") && again != std::string::npos &&
+                  asked != std::string::npos && next != std::string::npos && post != std::string::npos &&
+                  asked < post && next < post &&
+                  names(tick, "if (ui.book_bad) ui.book_again_ms = now + kBookAgainMs;") &&
+                  names(src, "case MapEdit::BookBad:") && names(src, "for (int tries = 0; tries < 3 && ui.saves.owed() && !ui.book_bad; ++tries) {") &&
+                  names(src, "lại mỗi 30 giây; sửa file xong là dùng được.") &&
+                  !names(src, "file rồi mở lại GoBot.") && !names(src, "\"this session\")"),
+              "spots.ini that does not read: its read posted again every 30 s while book_bad, the edits refused and "
+              "nothing saved over it meanwhile (map_edit's BookBad, the saves' !book_bad); the card says so");
+        const MapEdit refused = map_edit(true, true, KnownMap{}, MapShows::ByEntry);
+        check(refused == MapEdit::BookBad, "map_edit: a book that did not read refuses every edit, loaded or not");
+    }
     bool clean = true;
     std::string named;
     for (const char* io : { "game_maps_.get(", ".stems(", "read_page(", "MapFile", "ZoneBook::load", "load(path",
                             "save_many(", "MapViewJob::run(", "set_in_place(", "std::ifstream", "open_file(",
-                            "IniFile", ".save(" }) {
+                            "IniFile", ".save(", "save_band(" }) {
         if (!names(rest, io)) continue;
         clean = false;
         named += std::string(" ") + io;
@@ -2270,6 +2441,52 @@ void test_gui_source() {
     check(saves == 1 && ticks == 1, fmt("simple_changed() once, on the \"Chỗ đánh quái\" tick (%zu, %zu)", saves, ticks));
     check(names(stop, "wait_idle()") && names(stop, "ZoneBook::save_many(") && names(stop, "ui.worker.stop()"),
           "simple_map_stop: the worker waited for, the saves owed written, then stopped");
+
+    // The band's bars (2026.11.12, the owner's Q6): set in memory on this
+    // thread, the hunter told as every setting is; hunt.ini written by the
+    // worker -- the band's keys alone, posted from map_post, owed ones
+    // flushed as GoBot closes -- never on this thread, never simple_changed.
+    const std::string commit = body_of(src, "void GuiApp::map_band_commit(MapUi& ui, int up_px, int down_px) {");
+    check(names(commit, "hunt_config_.set_band(up_px, down_px);") &&
+              names(commit, "if (hunter_) hunter_->set_config(hunt_config_);") &&
+              names(commit, "if (simple_running()) simple_log_settings_changed();") &&
+              names(commit, "ui.band_owed = true;") && !names(commit, ".save(") && !names(commit, "save_band(") &&
+              !names(commit, "post("),
+          "map_band_commit: the band set, the hunter told, the save owed -- no file, no job on this thread");
+    const std::size_t band_post = posts.find("if (ui.band_owed && !ui.band_out && now >= ui.band_retry_ms) {");
+    check(band_post != std::string::npos && posts.find("ui.worker.post([p, hunt, band] {", band_post) != std::string::npos &&
+              posts.find("const bool ok = band.save_band(hunt);", band_post) != std::string::npos &&
+              posts.find("ui.band_out = true;", band_post) != std::string::npos &&
+              names(stop, "const bool ok = band.save_band(hunt);") &&
+              names(body_of(src, "void GuiApp::simple_map_tick() {"), "band_saved.swap(ui.band_done);"),
+          "map_post posts the band's save to the worker, one out at a time; simple_map_stop writes one owed; the tick "
+          "takes what came of it");
+    const std::string bars = body_of(src, "void GuiApp::map_canvas(MapUi& ui, MapView& mv) {");
+    const std::size_t frame = bars.find("ui.band_draft = ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)");
+    const std::size_t let_go = bars.find("if (next != from) map_band_commit(ui, next.up_px, next.down_px);");
+    const std::size_t commits = bars.find("map_band_commit(");
+    check(frame != std::string::npos && let_go != std::string::npos && frame < let_go && commits > let_go &&
+              bars.find("map_band_commit(", commits + 1) == std::string::npos &&
+              names(bars, "band_drag(*ui.band_gesture, cam_p(mouse))") &&
+              names(bars, "if (!ui.gesture && !ui.band_gesture) {"),
+          "a bar's drag: the draft a frame at a time, the band set on the release only, the camera frozen meanwhile");
+    const std::string row = body_of(src, "void GuiApp::map_band_row(MapUi& ui) {");
+    check(names(row, "ImGui::InputInt(id, &v, kBandStepPx, kBandStepPx * 10)") && names(row, "\"##band_up\"") &&
+              names(row, "\"##band_down\"") && names(row, "map_band_commit(ui, up, down);") &&
+              names(row, "\"Vạch trên\"") && names(row, "\"Vạch dưới\"") && names(row, "kBandTip") &&
+              names(src, "\"Quái thấp hơn vạch dưới: bot nhảy xuống; cao hơn vạch trên: bot nhảy lên; giữa hai vạch: "
+                         "đánh tại chỗ.") &&
+              names(bars, "band_label(which, upper ? shown_band.up_px : shown_band.down_px)"),
+          "the px boxes beside the map, step 5, set through map_band_commit; the bars labelled; the owner's words as "
+          "the tooltip");
+    // Hung from the feet less packet_dy (2026.11.12 review), the press's and
+    // the drawn alike.
+    check(names(bars, "const double band_feet = band_feet_y(mv.you_at.y, hunt_config_.packet_dy, scale);") &&
+              names(bars, "g.feet_y = band_feet;") &&
+              names(bars, "band_bars(ui.band_gesture ? ui.band_gesture->feet_y : band_feet, band_now, scale)") &&
+              names(bars, "band_bars(ui.band_gesture ? ui.band_gesture->feet_y : band_feet, shown_band, scale)") &&
+              !names(bars, "ui.band_gesture->feet_y : mv.you_at.y"),
+          "the bars hung from band_feet_y -- your feet less packet_dy -- as drawn, gripped and dragged");
 
     // A drag commits on release only: the gesture's frame-by-frame part
     // changes nothing but the draft.
@@ -2326,18 +2543,20 @@ void test_gui_source() {
     // packets have you, as the hunter's is.
     const std::string greyed = body_of(gui_source("/src/map_view.cpp"), "bool mob_grey(");
     const std::string canvas = body_of(src, "void GuiApp::map_canvas(MapUi& ui, MapView& mv) {");
-    check(names(greyed, "round_px((m.y - you_y) / scale) + cfg.packet_dy") && names(greyed, "m.y >= hs.spot_top") &&
-              names(greyed, "if (hs.spot_back_first) return true;") && !names(greyed, "frame_") &&
-              !names(greyed, "mob_dot(") && !names(greyed, "along_floor(") &&
+    // 2026.11.12 (the owner's Q3): outside the area grey, in reach or not --
+    // where you are no longer gone by.
+    check(names(greyed, "return !in_area;") && !names(greyed, "Hunter::in_reach(") &&
+              names(greyed, "m.y >= hs.spot_top") && names(greyed, "if (hs.spot_back_walk) return true;") &&
+              !names(greyed, "frame_") && !names(greyed, "mob_dot(") && !names(greyed, "along_floor(") &&
               names(canvas, "mob_grey(hunt_config_, hs, area_on, mv.you, mv.you_x, mv.you_y, m, target)") &&
               names(canvas, "const bool fought = mv.hunt_on && hs.has_target && hs.target.slot >= 0;") &&
               names(canvas, "fought && m.slot == static_cast<std::uint32_t>(hs.target.slot) && "
                             "m.gen == hs.target.gen;") &&
               names(greyed, "Hunter::kSpotKeepPx") &&
               names(canvas, "const double cy = mv.you_y - hunt_config_.packet_dy * scale;"),
-          "the grey monsters: mob_grey on the world's own m.x, m.y and where the packets have you, packet_dy on the "
-          "height, the one fought kept kSpotKeepPx past the edge, as the hunter has it -- never on a dot; the Chi "
-          "tiết box round where the packets have you");
+          "the grey monsters: mob_grey on the world's own m.x, m.y -- outside the area, in reach or not -- the one "
+          "fought kept kSpotKeepPx past the edge, as the hunter has it -- never on a dot; the Chi tiết box round "
+          "where the packets have you");
 
     // 2026.11.04d: much of the box red said in red, at every edit; a home by
     // a gate warned of; outside the box never the green "in use".
@@ -2618,8 +2837,8 @@ void test_notes_04d() {
     check(has(spot_src, "\"Nhân vật đang ở ngoài vùng \"") &&
               has(spot_src, "\" — bot ngưng đánh, về vùng trước: đi bộ về \" + way + \", vào tới trong vùng rồi mới "
                             "đánh tiếp.\"") &&
-              has(spot_src, "\" — bot vẫn đánh quái trong tầm\" + reach + \"; hết quái thì đi bộ về \"") &&
-              has(spot_src, "rơi xuống nào về vùng: bot đánh ở đây. Tự đưa nhân vật về \"") &&
+              has(spot_src, "\" — bot vẫn đánh quái trong vùng tới trong tầm\" + reach + \"; hết quái thì đi bộ về \"") &&
+              has(spot_src, "rơi xuống nào về vùng: bot đứng yên ở đây. Tự đưa nhân vật \"") &&
               has(doc, "\"Nhân vật đang ở ngoài vùng N px — bot đi bộ về X, Y trước, rồi mới đánh tiếp.\"") &&
               has(doc, "bot vẫn đánh quái trong tầm; hết quái thì đi bộ về X, Y.\"") &&
               has(doc, "2026.11.10 thẻ ghi \"Nhân vật đang ở ngoài vùng N px — bot ngưng đánh, về") &&
@@ -2715,20 +2934,35 @@ void test_notes_05() {
                        "bot đánh quái, phải làm và thử riêng):"),
           "Q2 (a): only the map's drawing follows the floors; the hunter's heights as before -- (b) not a one-place "
           "change, as Q1 and Q3 are");
-    check(kMapTabFps == 10 && kMapTabLightFps == 2 &&
-              has(doc, "GoBot vẽ lại " + n(kMapTabFps) + " lần mỗi giây (trước đây 5), cả lúc game ở trước") &&
+    // 10 the owner's Q3 (a) of 2026.11.05, kept as history; 30 since
+    // 2026.11.12 (the owner's "chưa mượt, chưa khớp").
+    check(kMapTabFps == 30 && kMapTabLightFps == 2 &&
+              has(doc, "GoBot vẽ lại 10 lần mỗi giây (trước đây 5), cả lúc game ở trước") &&
               has(doc, "có dấu \"Nhẹ máy\" thì vẫn " + n(kMapTabLightFps) + " lần") &&
-              has(doc, "3. Vẽ lại khi tab mở: (a) " + n(kMapTabFps) + " lần mỗi giây") &&
-              has(doc, "(Từ bản 2026.11.05: " + n(kMapTabFps) + " lần mỗi giây;") &&
+              has(doc, "3. Vẽ lại khi tab mở: (a) 10 lần mỗi giây") &&
+              has(doc, "(Từ bản 2026.11.05: 10 lần mỗi giây;") &&
+              has(doc, "Từ bản 2026.11.12: " + n(kMapTabFps) + " lần mỗi giây;") &&
+              has(doc, "Vẽ lại " + n(kMapTabFps) +
+                           " lần mỗi giây khi tab Bản đồ đang mở, cả lúc game ở trước (trước đây 10)") &&
               has(readme, "`kMapTabFps` (" + n(kMapTabFps) + ") times a second behind the game and in front alike") &&
               has(readme, "`kMapTabLightFps` (" + n(kMapTabLightFps) + ") behind the game in light mode") &&
               has(readme, "shown, " + n(kMapTabFps) + " behind the game and in front alike (" + n(kMapTabLightFps) +
                               " behind it in light mode") &&
+              has(readme, "is drawn `kMapTabFps` (" + n(kMapTabFps) + ") times a second while shown") &&
               !has(readme, "5 behind the game too") && !has(readme, "drawn 5 times a second behind the game") &&
               has(pack, "the tab is redrawn " + n(kMapTabFps) + " times a second (" + n(kMapTabLightFps) +
                             " behind the game with Nhe may)"),
-          "Q3 (a): the tab redrawn kMapTabFps times a second, kMapTabLightFps in light mode -- the notes, README and "
-          "START-HERE, the old 5 gone");
+          "the tab redrawn kMapTabFps (30 since 2026.11.12; 10 the owner's Q3 (a)) times a second, kMapTabLightFps "
+          "in light mode -- the notes, README and START-HERE, the old 5 gone");
+    // Your walk followed 3 s on the tab whoever walks (2026.11.12), drawing only.
+    const std::string map_flat = flat(map_src);
+    check(has(map_flat,
+              "const std::uint64_t follow = PacketWorld::kOwnReckonMs; mv.v = packet_world_.view(mv.now, follow);") &&
+              has(doc, "Nay tab tính tiếp tới 3 giây; tới đầu bục thì chấm vẫn dừng ở đó. Chỉ phần vẽ đổi, bot vẫn tính "
+                       "như trước.") &&
+              has(readme, "Your dot follows your walk `PacketWorld::kOwnReckonMs` (3 s) on the tab, whoever walks"),
+          "2026.11.12: the tab's own view follows your walk kOwnReckonMs (3 s), whoever walks -- not the 0.6 s that "
+          "left your dot standing until the stop; the notes and README say so");
 
     // The dots, with the numbers the drawing goes by.
     check(has(doc, "qua cả lỗ nhỏ 1-" + n(GameMapBook::kFollowHolePx) + " px của bục) tới chỗ ngang GoBot tính") &&
@@ -2939,9 +3173,13 @@ void test_notes_05b() {
               has(doc, "không nhảy trong " + n(Hunter::kDropAfterEntryMs / 1000) + " giây đầu sau khi vào bản đồ") &&
               has(doc, "thì " + n(Hunter::kJumpUpStayMs / 1000) + " giây không nhảy xuống") &&
               has(doc, "thì " + n(Hunter::kDropStayMs / 1000) + " giây không nhảy lên tới quái") &&
-              has(doc, n(Hunter::kJumpUpFailsInRow) + " lần liền (hay " + n(Hunter::kJumpUpFailsPerRun) +
-                           " lần trong một lượt) không lên được bục") &&
-              has(doc, n(Hunter::kJumpUpKindMisses) + " lần bấm Ctrl+↑ mà game chỉ nhảy thường") &&
+              // 2026.11.05b's own numbers, history since 2026.11.24 (no
+              // pause, no key off for the run: kJumpUpFailsInRow,
+              // kJumpUpFailsPerRun and kJumpUpKindMisses are gone) -- and the
+              // entry says what came after.
+              has(doc, "3 lần liền (hay 5 lần trong một lượt) không lên được bục") &&
+              has(doc, "2 lần bấm Ctrl+↑ mà game chỉ nhảy thường") &&
+              has(doc, "(Từ bản 2026.11.24 không còn tắt hay nghỉ vì những điều trên:") &&
               has(doc, "phím ↑ bị giữ quá " + n(Hunter::kJumpUpHeldMaxMs) + " ms") &&
               Hunter::kJumpUpSolidAfter == 2 && has(doc, "rơi lại lần thứ hai lên cùng một bục") &&
               has(doc, "trong vòng " + n(GameMapBook::kNoJumpXPx) + " px quanh chỗ đó") &&
@@ -2953,9 +3191,9 @@ void test_notes_05b() {
               has(readme, "At most `kJumpUpsPerMinute` (" + n(Hunter::kJumpUpsPerMinute) +
                               ") presses a minute, `kJumpUpsPerTarget` (" + n(Hunter::kJumpUpsPerTarget) +
                               ") per monster") &&
-              has(readme, "`kJumpUpFailsInRow` (" + n(Hunter::kJumpUpFailsInRow) + ") fails in a row or "
-                          "`kJumpUpFailsPerRun` (" + n(Hunter::kJumpUpFailsPerRun) + ") in a run") &&
-              has(readme, "`kJumpUpKindMisses` (" + n(Hunter::kJumpUpKindMisses) + ")") &&
+              has(readme, "`kJumpUpFailsInRow` (3) fails in a row or `kJumpUpFailsPerRun` (5) in a run") &&
+              has(readme, "`kJumpUpKindMisses` (2)") &&
+              has(readme, "Since 2026.11.24 none of these switches the jumps up off") &&
               has(readme, "`GameMapBook::kNoJumpXPx` (" + n(GameMapBook::kNoJumpXPx) + ")") &&
               has(readme, "`kJumpUpStayMs` (" + n(Hunter::kJumpUpStayMs / 1000) + " s, `DropWhy::AfterJump`)") &&
               has(readme, "`kZoneReturnJumpsMax` (" + n(kZoneReturnJumpsMax) + ")") &&
@@ -2994,34 +3232,42 @@ void test_notes_05b() {
             const HuntZone owner = box_of(880, 274, 265, 174, 1399, 694);
             const std::vector<JumpRun> use = usable(*p52, owner);
             const std::vector<JumpRun> use810 = usable(*p52, box_of(880, 274, 265, 174, 1399, 810));
-            ok = use.size() == 2 && use810.size() == 3 &&
-                 std::all_of(use810.begin(), use810.end(), [](const JumpRun& r) { return r.kind == JumpKind::CtrlUp; });
+            // 2026.11.12c's bracket and column rule: the ground's run 663..1034,
+            // and with the bottom at 810 Up,Up 1048..1086 too, Ctrl+Up onto the
+            // ramp 1070..1343 (use810: Up,Up first, then Ctrl+Up by x).
+            ok = use.size() == 2 && use810.size() == 4 && use810[0].kind == JumpKind::UpUp &&
+                 std::all_of(use810.begin() + 1, use810.end(), [](const JumpRun& r) { return r.kind == JumpKind::CtrlUp; });
             if (ok) {
                 seen = "Ctrl+Up take-offs " + takes(use[0], "..") + ", " + takes(use[1], "..") + ", with 810 " +
-                       takes(use810[2], "..");
+                       takes(use810[3], "..") + " and Up,Up " + takes(use810[0], "..");
                 const std::optional<ZoneReturn> back = return_point(*p52, owner, { 880, 634 }, &all);
                 const int x = back && back->jump ? back->jump->x : -1;
                 seen += ", the way back's from 880,634 at " + n(x);
                 ok = std::none_of(use.begin(), use.end(), [](const JumpRun& r) { return r.x1 >= 505 && r.x0 <= 638; }) &&
-                     x >= 800 && x <= 820 && back->home && back->jump->kind == JumpKind::CtrlUp &&
+                     x == 880 && back->home && back->jump->kind == JumpKind::CtrlUp &&
                      has(doc, "chỉ có Ctrl+↑ nhảy được, lên bục chỗ về: từ mặt đất ở khoảng x " + takes(use[0], "–") +
                                   ", hay từ chân dốc bên phải ở khoảng x " + takes(use[1], "–")) &&
                      has(doc, "Ở x 505–638 thì không") &&
-                     has(doc, "có thêm Ctrl+↑ từ mặt đất lên dốc, ở khoảng x " + takes(use810[2], "–")) &&
-                     has(doc, "bot đi sang trái tới khoảng x 800–820, đứng lại rồi bấm Ctrl+↑") &&
+                     has(doc, "có thêm Ctrl+↑ từ mặt đất lên dốc, ở khoảng x " + takes(use810[3], "–") +
+                                  " (và từ bản 2026.11.12c cả ↑↑ ở khoảng x " + takes(use810[0], "–") + ")") &&
+                     has(doc, "bấm Ctrl+↑ ngay tại chỗ (từ bản 2026.11.12c; trước đó bot đi sang trái tới khoảng x "
+                              "800–820)") &&
                      has(readme, "from the ground at x " + takes(use[0], "..") + " (the run " + n(use[0].x0) + ".." +
-                                     n(use[0].x1) + ") and from the ramp's foot at " + takes(use[1], "..") + " (" +
-                                     n(use[1].x0) + ".." + n(use[1].x1) + ")") &&
-                     has(readme, "adds Ctrl + ↑ from the ground onto the ramp at " + takes(use810[2], "..")) &&
+                                     n(use[0].x1) + "; 695..884, 663..916 until 2026.11.12c) and from the ramp's foot at " +
+                                     takes(use[1], "..") + " (" + n(use[1].x0) + ".." + n(use[1].x1) + ")") &&
+                     has(readme, "adds Ctrl + ↑ from the ground onto the ramp at " + takes(use810[3], "..") +
+                                     " (1161..1288 until 2026.11.12c), and Up,Up at " + takes(use810[0], "..")) &&
                      has(readme, "from 880,634 the way back walks to about x " + n(x) + " and presses Ctrl + ↑") &&
                      has(pack, "by Ctrl+Up at about x " + takes(use[0], "-"));
             }
+            const std::vector<JumpRun> raised53 = usable(*p53, box_of(2635, 1188, 2335, 1020, 2935, 1288));
             const bool none53 = usable(*p53, box_of(2635, 1188, 2335, 1088, 2935, 1288)).empty() &&
-                                usable(*p53, box_of(2635, 1188, 2335, 1020, 2935, 1288)).empty();
+                                raised53.size() == 1 && raised53[0].kind == JumpKind::Up;
             ok = ok && none53 &&
-                 has(doc, "Ở t53_s2, trong vùng của bạn không có chỗ nào nhảy lên chắc chắn được (kể cả khi kéo cạnh "
-                          "trên lên 1020)") &&
-                 has(readme, "On t53_s2 no key has a usable jump in the owner's box, its top at 1088 or at 1020");
+                 has(doc, "Ở t53_s2, trong vùng của bạn không có chỗ nào nhảy lên chắc chắn được (kéo cạnh trên lên "
+                          "1020 thì từ bản 2026.11.12c có ↑ ở khoảng x " + takes(raised53[0], "–") + ")") &&
+                 has(readme, "On t53_s2 no key has a usable jump in the owner's box, its top at 1088 (at 1020, since "
+                             "2026.11.12c, Up at " + takes(raised53[0], "..") + ")");
         }
         check(ok, "t52_s2's jumps as the notes give them -- Ctrl+Up from the ground and the ramp's foot onto the home "
                   "ledge, the way back from 880,634, the bottom at 810 -- and none on t53_s2, as the planner finds "
@@ -3120,8 +3366,9 @@ void test_notes_05b() {
     // The jump up's log words, as hunter_jump.cpp and gui_app.cpp write them.
     check(has(jump_src, "\"Hunter: jump up (%s) %s: from %d,%d on floor %d of %s (trusted: %s), onto floor %d at x %d "
                         "(rise %d; \"") &&
-              has(jump_src, "\"peak %d..%d, headroom %d; no floor outside the area within %d above), run %d..%d, "
-                            "inside the area; no \"") &&
+              has(jump_src, "\"peak %d..%d, headroom %d; %s), run %d..%d, %s; no band round a gate (Ctrl+Up on a gate "
+                            "does not change \"") &&
+              has(jump_src, "\"no floor outside the area within %d above\"") && has(jump_src, ": \"inside the area\"") &&
               has(doc, "\"Hunter: jump up (Ctrl+Up) toward ... (hay on the way home): from X,Y on floor ..., onto "
                        "floor ... (rise ...; peak " + n(cu.lo) + ".." + n(cu.hi) +
                            ", headroom ...; no floor outside the area within " + n(kJumpUpCeilingPx) + " above) ...\"") &&
@@ -3133,15 +3380,22 @@ void test_notes_05b() {
               has(jump_src, "\", g≈%.0f\"") &&
               has(doc, "\"Hunter: jump up worked: landed at ...\" (cuối dòng có \"flight N ms, g≈N\"") &&
               has(jump_src, "\"FELL BACK\" : \"landed LOWER\"") && has(jump_src, "did nothing in %llu ms") &&
-              has(jump_src, "\"Hunter: %s came out as %s -- %d of %d%s\"") &&
-              has(jump_src, "OFF until the next BẮT ĐẦU") &&
-              has(jump_src, "\"Hunter: MAP CHANGED %.1f s after %s at %d,%d on %s -> %s at %d,%d -- hunting STOPS") &&
+              // 2026.11.24: a key that did not come as its kind, and a map
+              // change, stop nothing -- the log says the jumps go on.
+              has(jump_src, "\"Hunter: %s came out as %s (take-off at %.0f a step, state %u) -- a press that did not "
+                            "get there; \"") &&
+              !has(jump_src, "OFF until the next BẮT ĐẦU") &&
+              has(jump_src, "\"Hunter: MAP CHANGED %.1f s after %s at %d,%d on %s -> %s at %d,%d -- both ends learned "
+                            "as gates (no \"") &&
+              has(jump_src, "\"drop or jump near them again this session); hunting goes on, Nhảy lên stays ticked\"") &&
               has(doc, "\"jump up FELL BACK ...\", \"jump up landed LOWER ...\", \"did nothing in ... ms\", \"Ctrl+Up "
                        "came out as ...\", \"... OFF until the next BẮT ĐẦU\", và WARN \"MAP CHANGED\"") &&
+              has(doc, "(từ bản 2026.11.24 không còn \"OFF until the next BẮT ĐẦU\": \"... that take-off skipped 30 s, "
+                       "jumps up go on\", và WARN \"MAP CHANGED ... hunting goes on, Nhảy lên stays ticked\")") &&
               has(jump_src, "\"Hunter: not jumping up %s -- %s%s\"") &&
               has(doc, "\"Hunter: not jumping up to ... -- ...\"") &&
-              has(jump_src, "\"Hunter: a jump up would go here (%s): %s at x %d from floor %d onto floor %d, %s\"") &&
-              has(jump_src, "\"jump_up is off\"") &&
+              has(jump_src, "\"Hunter: a jump up would go here (jump_up is off): %s at x %d from floor %d onto floor "
+                            "%d, %s\"") &&
               has(doc, "\"Hunter: a jump up would go here (jump_up is off): Ctrl+Up at x ... from floor ... onto "
                        "floor ...\"") &&
               has(jump_src, "\"; jump-ups: looks %d, would %d, settles %d, pressed %d (Up %d, Up,Up %d, Ctrl+Up %d), "
@@ -3210,18 +3464,25 @@ void test_notes_05b() {
                               jump_kind_key(JumpKind::UpUp) + "** and **Thử " + jump_kind_key(JumpKind::CtrlUp) +
                               "**") &&
               has(style_src, "\"Jump test: %s %s -- %s (packets: jumps %d, walk-offs %d") &&
-              has(doc, "\"Jump test: ...\"") && has(gui_src, "std::string(\"Lần nhảy lên lúc \")") &&
-              has(gui_src, "\" làm đổi bản đồ — GoBot đã dừng đánh quái và bỏ dấu Nhảy lên.\"") &&
-              has(doc, "\"Lần nhảy lên lúc ... làm đổi bản đồ — GoBot đã dừng đánh quái và bỏ dấu Nhảy lên.\"") &&
-              has(style_src, "\"Nhảy lên đã tắt tới lần BẮT ĐẦU sau: \"") &&
-              has(style_src, "\"nhân vật nhảy khác với GoBot tính. Hãy gửi file log.\"") &&
+              has(doc, "\"Jump test: ...\"") &&
+              // 2026.11.24: a jump that changed the map stops nothing -- the
+              // line says it was learned as a gate and the hunt goes on; no
+              // jump is ever "off until the next BẮT ĐẦU" any more.
+              has(gui_src, "drop_note_vi_ = std::string(\"Lần \") + what + \" lúc \" + clock +") &&
+              has(gui_src, "\" làm đổi bản đồ — chỗ đó đã được nhớ là cửa, GoBot không nhảy ở gần đó nữa và vẫn đánh "
+                           "quái tiếp.\"") &&
+              !has(gui_src, "GoBot đã dừng đánh quái và bỏ dấu Nhảy lên.") &&
+              has(doc, "\"Lần nhảy lên lúc ... làm đổi bản đồ — chỗ đó đã được nhớ là cửa, GoBot không nhảy ở gần đó "
+                       "nữa và vẫn đánh quái tiếp.\"") &&
+              !has(style_src, "\"Nhảy lên đã tắt tới lần BẮT ĐẦU sau: \"") &&
+              !has(style_src, "nhân vật nhảy khác với GoBot tính. Hãy gửi file log.") &&
               has(doc, "\"Nhảy lên đã tắt tới lần BẮT ĐẦU sau: nhân vật nhảy khác với GoBot tính. Hãy gửi file "
                        "log.\"") &&
               has(style_src, "\"Nhảy lên (đang tắt): lẽ ra đã nhảy \"") && has(style_src, "\" lần — xem log.\"") &&
               has(doc, "\"Nhảy lên (đang tắt): lẽ ra đã nhảy N lần — xem log.\"") &&
               has(view_src, "std::string(\" Về: nhảy \") + jump_kind_key(hs.spot_way_jump_kind) + \" ở x \"") &&
               has(doc, "\"Về: nhảy Ctrl+↑ ở x ...\"") &&
-              has(spot_src, "\" không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đánh ở đây. Tự đưa \"") &&
+              has(spot_src, "\" không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đứng yên ở đây. Tự \"") &&
               has(doc, "\"... không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đánh ở đây. ...\"") &&
               has(style_src, "\"Trong vùng không còn con quái nào tới được — đứng chờ ở đây.\"") &&
               has(doc, "\"Trong vùng không còn con quái nào tới được — đứng chờ ở đây.\"") &&
@@ -3306,6 +3567,7 @@ void test_map_tab(void (*check_fn)(bool, const std::string&), void (*section_fn)
     test_camera();
     test_grips();
     test_gesture();
+    test_band_bars();
     test_snap();
     test_zone_check();
     test_zone_walk();

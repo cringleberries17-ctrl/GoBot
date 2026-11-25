@@ -14,8 +14,6 @@
 
 namespace gobot {
 
-class MinimapTracker;
-class CameraTracker;
 class GlyphFont;
 class IniFile;
 
@@ -192,12 +190,6 @@ public:
     void set_tuning(const DetectorTuning& t);
     DetectorTuning tuning() const;
 
-    /// Optional: trackers fed from the same frames, so identifying the map and
-    /// following the view cost no extra screen captures. Must outlive the
-    /// detector.
-    void set_minimap(MinimapTracker* m) { minimap_.store(m); }
-    void set_camera(CameraTracker* c) { camera_.store(c); }
-
     void start();
     /// Returns at once, give or take a look under way: the wait between two
     /// looks is cut short (wake_). It is GoBot's own thread that stops it, at
@@ -257,12 +249,26 @@ public:
     /// `fresh` says whether this was actually seen just now.
     bool player(Nameplate& out, bool* fresh = nullptr) const;
 
-    /// How long a remembered position stays usable.
+    /// How long a remembered position stays usable at the detector's own
+    /// wait (kLookGapMs). The hunter holds a monster plate unseen this long
+    /// too.
     static constexpr std::uint64_t kPlayerMemoryMs = 1500;
+
+    /// How long your remembered plate stays usable at the wait in use: as far
+    /// past the wait as kPlayerMemoryMs is past kLookGapMs -- 1500 at 140 ms,
+    /// 3360 at the resting 2000 (2026.11.16); never under kPlayerMemoryMs. A
+    /// resting detector looks for your plate only every 2 s, and a memory of
+    /// 1.5 s would lose it between every two looks. At its own wait nothing
+    /// changes.
+    static constexpr std::uint64_t player_memory_ms(int period_ms) {
+        const std::uint64_t past = kPlayerMemoryMs - static_cast<std::uint64_t>(kLookGapMs);
+        const std::uint64_t gap = static_cast<std::uint64_t>(period_ms > kLookGapMs ? period_ms : kLookGapMs);
+        return gap + past;
+    }
 
     /// How long your plate may go unfound before "Cannot find" is said: as
     /// many looks as kPlayerMemoryMs makes at kLookGapMs, at the wait in use
-    /// -- 1500 at 140 ms, 6000 at the resting 600 ms; never under
+    /// -- 1500 at 140 ms, 20000 at the resting 2000 ms; never under
     /// kPlayerMemoryMs.
     static std::uint64_t sightings_grace_ms(int period_ms);
 
@@ -372,8 +378,6 @@ private:
     std::mutex                    wake_mutex_;
     std::condition_variable       wake_;
     bool                          wake_now_ = false;
-    std::atomic<MinimapTracker*> minimap_{nullptr};
-    std::atomic<CameraTracker*>  camera_{nullptr};
     std::function<bool(void*, Frame&)> grab_;   ///< see set_grab; empty for the real window
     /// Counted up by forget(). A look begun under an older count was of a
     /// window no longer followed, and is not published.

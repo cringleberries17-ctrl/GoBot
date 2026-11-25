@@ -30,7 +30,7 @@ const char* packet_use_name(PacketUse use);
 /// [Packets] in app.ini, read once as GoBot starts. A key that is missing, or
 /// says anything but off, is auto.
 struct PacketsSettings {
-    PacketUse vitals = PacketUse::Auto;         ///< your HP and MP from the packets, once checked against the bars
+    PacketUse vitals = PacketUse::Auto;         ///< your HP and MP from the packets whenever they have them
     PacketUse bag = PacketUse::Auto;            ///< the bag's potion counts, for "Low" and the shop
     PacketUse detector_rest = PacketUse::Auto;  ///< the name-plate reader slower while the packets steer
 };
@@ -92,7 +92,9 @@ public:
         /// HP above a maximum the stat sheet gave: the sheet is out of date,
         /// or the layout is not what it is taken for.
         std::uint64_t over_max = 0;
-        /// 0x02F0's MP, for the log alone.
+        /// 0x02F0's MP, as it last came. Once a 0x0051 or 0x0050 has given
+        /// HP, it is your MP as well (mp, mp_ms, a point of its own), the
+        /// newer of the two going (2026.11.17).
         std::uint32_t udp_mp = 0;
         std::uint64_t udp_mp_ms = 0;
         /// The seq of the newest HP/MP point (VitalsPoint::seq); 0 for none since
@@ -218,7 +220,7 @@ public:
     Link link(std::uint64_t now) const;
     Stats stats() const;
 
-    /// Every opcode any part of the packets plan reads, for Apply's opcode
+    /// Every opcode any part of the packets plan reads, for an opcode
     /// filter: 0x0051, 0x0050, 0x02F0, 0x0068, 0x006B, 0x0077, 0x005A,
     /// 0x002E, 0x0014 and 0x03C6. PacketWorld::opcodes() has the rest.
     static const std::vector<std::uint16_t>& opcodes();

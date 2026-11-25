@@ -21,8 +21,11 @@
 // Mouse only -- while a run is on, keys typed here would go to the game
 // (FrontKeeper): a drag pans, the wheel and [-] [+] zoom, the zone's home, its
 // edges, corners and the strip along its top edit it, a right click opens the
-// menu. An edit is saved once, on the release, never a frame at a time, and
-// never into hunt.ini. The rules all this goes by are pure and tested
+// menu. An edit is saved once, on the release, never a frame at a time, and a
+// zone's never into hunt.ini. Since 2026.11.12 the hunter's band as two bars
+// across the area too (the owner's Q6), dragged or typed beside the map: in
+// hunt.ini's up_reach and down_reach, their keys alone written by the worker
+// (HunterConfig::save_band). The rules all this goes by are pure and tested
 // (map_view.hpp, hunt_zone.hpp, map_sketch.hpp); here is the drawing and the
 // asking.
 
@@ -93,6 +96,12 @@ constexpr std::uint64_t kShownMs = 1000;
 constexpr std::uint64_t kZoneTickMs = 100;
 /// A save that failed is tried again after this.
 constexpr std::uint64_t kSaveRetryMs = 5000;
+/// configs\spots.ini found there but not read: read again this often
+/// (2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không làm
+/// được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác"). Until then it
+/// was read once a session, and a file held for a moment by a virus scan or a
+/// sync left the saved hunting areas unused until GoBot was opened again.
+constexpr std::uint64_t kBookAgainMs = 30'000;
 /// A drop's reason is said while it is this fresh (as simple_drop_hints).
 constexpr std::uint64_t kDropFreshMs = 1500;
 constexpr std::uint32_t kNoteMs = 6000;
@@ -147,7 +156,17 @@ struct MapColors {
     static constexpr ImU32 kInk       = IM_COL32(15, 15, 15, 255);
     static constexpr ImU32 kJump      = IM_COL32(120, 230, 255, 240);
     static constexpr ImU32 kLearned   = IM_COL32(150, 150, 150, 200);
+    static constexpr ImU32 kBand      = IM_COL32(205, 150, 255, 230);
+    static constexpr ImU32 kBandBack  = IM_COL32(15, 15, 15, 170);
 };
+
+/// The band's bars, said the same in the px boxes, on a bar and in the
+/// legend (2026.11.12, the owner's Q6).
+const char* const kBandTip =
+    "Quái thấp hơn vạch dưới: bot nhảy xuống; cao hơn vạch trên: bot nhảy lên; giữa hai vạch: đánh tại chỗ.\n"
+    "Tính từ chân nhân vật, bằng điểm ảnh (0–1000). Nhảy xuống cần dấu “Nhảy xuống bậc dưới”, nhảy lên cần “Nhảy "
+    "lên bục trên”, và chỉ ở chỗ file bản đồ của game cho phép. Kéo vạch trên bản đồ, hoặc sửa số ở đây: lưu vào "
+    "hunt.ini (up_reach, down_reach), cũng là Cao nhất và Thấp nhất ở nút Tầm đánh…";
 
 /// `c` with its alpha times `f`: a doubtful file's floors, a learned gate, a
 /// monster on the move.
@@ -494,6 +513,8 @@ struct GuiApp::MapUi {
     bool          book_asked = false;
     bool          book_loaded = false;
     bool          book_bad = false;
+    /// While book_bad: the next read not posted before this (kBookAgainMs).
+    std::uint64_t book_again_ms = 0;
     ZoneSaveQueue saves;
     std::uint64_t save_retry_ms = 0;        ///< after a failed save, not before this
     bool          save_failed = false;      ///< the last save failed: said in the card
@@ -554,6 +575,16 @@ struct GuiApp::MapUi {
     float         below_h = 260.0f;         ///< the tab under the canvas, at the last frame
     bool          hover = false;            ///< the mouse over the canvas at the last frame, and where
     double        hover_x = 0.0, hover_y = 0.0;
+    /// The band's bars (2026.11.12): a drag on one, from its press, and the
+    /// band under it -- drawn live, set on the release only.
+    std::optional<BandGesture> band_gesture;
+    std::optional<Band>        band_draft;
+    /// The band's keys owed to hunt.ini (HunterConfig::save_band, on the
+    /// worker): the latest numbers, one save out at a time.
+    bool          band_owed = false;
+    bool          band_out = false;
+    std::uint64_t band_retry_ms = 0;        ///< after a failed save, not before this
+    bool          band_failed = false;
 
     // ---- handed over by the worker, under mx ----
     std::mutex    mx;
@@ -566,6 +597,7 @@ struct GuiApp::MapUi {
         bool                 ok = false;
     };
     std::optional<SaveDone> save_done;
+    std::optional<bool>     band_done;      ///< a band's save ended: whether it was written
 
     // ---- the worker's ----
     std::unique_ptr<MapViewState> ws;
@@ -678,6 +710,14 @@ void GuiApp::map_post(MapUi& ui, std::uint64_t now) {
     MapUi* const p = &ui;
     const std::string path = ui.path;
     // spots.ini, once, whatever else is asked: no edit before it is read.
+    // And again every kBookAgainMs while it is there but does not read
+    // (2026.11.24): the edits stay refused, and nothing saved over it, until
+    // a read works (map_edit, the saves' !book_bad) -- a file that did not
+    // read is never written over.
+    if (ui.book_asked && ui.book_bad && now >= ui.book_again_ms) {
+        ui.book_asked = false;
+        ui.book_again_ms = now + kBookAgainMs;     // not again while this one is out
+    }
     if (!ui.book_asked) {
         ui.book_asked = ui.worker.post([p, path] {
             ZoneBook fresh;
@@ -697,6 +737,21 @@ void GuiApp::map_post(MapUi& ui, std::uint64_t now) {
             });
             // The queue full: owed again, for the next pass.
             if (!posted) ui.saves.done(*batch, false);
+        }
+    }
+    // The band's bars (2026.11.12): its keys alone written into hunt.ini --
+    // the numbers as they are now, never a copy of another setting -- one
+    // save out at a time; the queue full, owed still.
+    if (ui.band_owed && !ui.band_out && now >= ui.band_retry_ms) {
+        const HunterConfig band = hunt_config_;
+        const std::string hunt = exe_relative("configs/hunt.ini");
+        if (ui.worker.post([p, hunt, band] {
+                const bool ok = band.save_band(hunt);
+                std::lock_guard<std::mutex> lock(p->mx);
+                p->band_done = ok;
+            })) {
+            ui.band_owed = false;
+            ui.band_out = true;
         }
     }
 
@@ -769,6 +824,7 @@ void GuiApp::simple_map_tick() {
     std::optional<ZoneBook> book;
     ZoneBook::Load load = ZoneBook::Load::Missing;
     std::optional<MapUi::SaveDone> saved;
+    std::optional<bool> band_saved;
     {
         std::lock_guard<std::mutex> lock(ui.mx);
         if (ui.slot_new) {
@@ -779,6 +835,21 @@ void GuiApp::simple_map_tick() {
         book.swap(ui.book_in);
         load = ui.book_load;
         saved.swap(ui.save_done);
+        band_saved.swap(ui.band_done);
+    }
+    if (band_saved) {
+        ui.band_out = false;
+        if (!*band_saved) {
+            // Tried again in a few seconds, with the numbers as they are then.
+            ui.band_owed = true;
+            ui.band_retry_ms = now + kSaveRetryMs;
+            if (!ui.band_failed)
+                log_later({ "Map tab: could not write the bars' up_reach and down_reach into configs\\hunt.ini -- "
+                            "tried again every few seconds" });
+            ui.band_failed = true;
+        } else {
+            ui.band_failed = false;
+        }
     }
     if (fresh) {
         ui.ran = true;
@@ -793,14 +864,22 @@ void GuiApp::simple_map_tick() {
     // known is not known now -- set aside at the hand-off as at a capture lost.
     if (!packets_wanted()) ui.cur.id = KnownMap{};
     if (book) {
+        const bool was_bad = ui.book_bad;
         ui.book = std::move(*book);
         ui.book_bad = load == ZoneBook::Load::Bad;
         ui.book_loaded = !ui.book_bad;
         ui.zone_due = true;
-        if (ui.book_bad)
+        // Not read: read again kBookAgainMs on (map_post), said once a run of
+        // failed reads (2026.11.24; until then read once a session, and never
+        // edited or saved until GoBot was opened again).
+        if (ui.book_bad) ui.book_again_ms = now + kBookAgainMs;
+        if (ui.book_bad && !was_bad)
             GB_WARN("Map tab: configs\\spots.ini exists but does not read -- hunting areas are not edited or saved "
-                    "this session");
-        else if (ui.book.size() > 0 || ui.book.skipped() > 0)
+                    "until it does; read again every %d s",
+                    static_cast<int>(kBookAgainMs / 1000));
+        else if (!ui.book_bad && was_bad)
+            GB_INFO("Map tab: configs\\spots.ini reads now -- %zu hunting areas", ui.book.size());
+        else if (!ui.book_bad && (ui.book.size() > 0 || ui.book.skipped() > 0))
             GB_INFO("Map tab: %zu hunting areas read from configs\\spots.ini%s", ui.book.size(),
                     ui.book.skipped() > 0 ? " (some sections not read as one, left in the file)" : "");
     }
@@ -947,6 +1026,32 @@ void GuiApp::simple_map_stop() {
     if (ui.saves.owed())
         GB_WARN("Map tab: could not write configs\\spots.ini as GoBot closed -- the last hunting areas edited are "
                 "not saved");
+    // The band's bars owed (2026.11.12): written likewise, once, waited for.
+    const auto band_done = [&ui] {
+        std::lock_guard<std::mutex> lock(ui.mx);
+        if (!ui.band_done) return;
+        if (!*ui.band_done) ui.band_owed = true;
+        ui.band_out = false;
+        ui.band_done.reset();
+    };
+    band_done();
+    if (ui.band_owed && !ui.band_out) {
+        MapUi* const p = &ui;
+        const HunterConfig band = hunt_config_;
+        const std::string hunt = exe_relative("configs/hunt.ini");
+        if (ui.worker.post([p, hunt, band] {
+                const bool ok = band.save_band(hunt);
+                std::lock_guard<std::mutex> lock(p->mx);
+                p->band_done = ok;
+            })) {
+            ui.band_owed = false;
+            ui.band_out = true;
+            ui.worker.wait_idle();
+            band_done();
+        }
+    }
+    if (ui.band_owed)
+        GB_WARN("Map tab: could not write the bars' up_reach and down_reach into configs\\hunt.ini as GoBot closed");
     ui.worker.stop();
 }
 
@@ -1074,8 +1179,14 @@ bool GuiApp::map_zone_here() {
 
 void GuiApp::map_look(MapUi& ui, MapView& mv) {
     mv.now = now_ms();
-    const std::uint64_t follow = hunter_ && mv.now <= hunter_->walk_held_until_ms() ? PacketWorld::kOwnReckonMs
-                                                                                     : PacketWorld::kOwnStepReckonMs;
+    // Your walk followed kOwnReckonMs on the tab, whoever walks (2026.11.12,
+    // the owner's "delay khoảng 0.5 -1s"): a walk of yours, or one the hunter
+    // does not hold, sends nothing until its stop, and followed only
+    // kOwnStepReckonMs your dot stood still -- Lost, at your last place -- for
+    // the rest of it and jumped at the stop. Drawing only: the hunter and the
+    // tab's worker (map_post) follow as PacketEyes does, and along_floor still
+    // holds the dot where its floor ends.
+    const std::uint64_t follow = PacketWorld::kOwnReckonMs;
     mv.v = packet_world_.view(mv.now, follow);
     mv.link.capturing = capture_.running();
     mv.link.npcap = mv.link.capturing || position_npcap_ok_.load();
@@ -1168,6 +1279,8 @@ void GuiApp::simple_map_tab() {
         ui.check_key.clear();
         ui.gesture.reset();
         ui.draft.reset();
+        ui.band_gesture.reset();
+        ui.band_draft.reset();
         ui.ask_delete = false;
     }
     // The shown zone's warnings: worked out when it -- at every edit -- its
@@ -1327,7 +1440,8 @@ void GuiApp::simple_map_tab() {
             ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
             ImGui::TextUnformatted(
                 "Kéo bản đồ để di chuyển · lăn chuột hay bấm - + để phóng to · nhấp đúp: theo nhân vật · kéo chỗ về, "
-                "cạnh, góc hay dải trên cùng của vùng để sửa · chuột phải: thêm lệnh.\n"
+                "cạnh, góc hay dải trên cùng của vùng để sửa · kéo vạch trên, vạch dưới để đổi tầm nhảy lên, nhảy "
+                "xuống · chuột phải: thêm lệnh.\n"
                 "Bản đồ lấy từ thư mục data của game; vị trí lấy từ gói tin.");
             ImGui::PopTextWrapPos();
             ImGui::EndTooltip();
@@ -1347,18 +1461,19 @@ void GuiApp::simple_map_tab() {
     map_canvas(ui, mv);
     map_menu(ui, mv);
 
-    // ---- what the colours are, then the zone's card ----
+    // ---- the bars' numbers, what the colours are, then the zone's card ----
     const float below_top = ImGui::GetCursorPosY();
+    map_band_row(ui);
     {
         ImGui::PushFont(nullptr, kSmall);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float h = ImGui::GetTextLineHeight();
-        enum class Sym { Platform, Bottom, Gate, You, Mob, Target, Zone, Home, Jump, Seek };
+        enum class Sym { Platform, Bottom, Gate, You, Mob, Target, Zone, Home, Jump, Seek, Band };
         const struct { Sym sym; const char* text; } items[] = {
             { Sym::Platform, "bục" }, { Sym::Bottom, "nền dưới cùng" }, { Sym::Gate, "cửa" },
             { Sym::You, "nhân vật" }, { Sym::Mob, "quái" },           { Sym::Target, "đang đánh" },
             { Sym::Zone, "vùng đánh" }, { Sym::Home, "chỗ về" },      { Sym::Jump, "nhảy lên" },
-            { Sym::Seek, "đi tìm quái" },
+            { Sym::Seek, "đi tìm quái" }, { Sym::Band, "vạch trên, dưới" },
         };
         bool first = true;
         for (const auto& it : items) {
@@ -1398,6 +1513,12 @@ void GuiApp::simple_map_tab() {
                     dl->AddRect(ImVec2(p.x + 11.0f, c.y - 2.5f), ImVec2(p.x + 16.0f, c.y + 2.5f), MapColors::kTarget,
                                 0.0f, 0, 1.5f);
                     break;
+                case Sym::Band:
+                    dashed_line(dl, ImVec2(p.x, c.y - 3.0f), ImVec2(p.x + 16.0f, c.y - 3.0f), MapColors::kBand, 1.5f,
+                                ImVec2(p.x, p.y), ImVec2(p.x + 16.0f, p.y + h));
+                    dashed_line(dl, ImVec2(p.x, c.y + 3.0f), ImVec2(p.x + 16.0f, c.y + 3.0f), MapColors::kBand, 1.5f,
+                                ImVec2(p.x, p.y), ImVec2(p.x + 16.0f, p.y + h));
+                    break;
             }
             ImGui::Dummy(ImVec2(16.0f, h));
             ImGui::SameLine(0, 4);
@@ -1406,7 +1527,8 @@ void GuiApp::simple_map_tab() {
                 // The walk back first (2026.11.10): every dot grey while it
                 // is latched (mob_grey's spot_back_walk).
                 static const std::string grey =
-                    "Quái màu xám: ở ngoài vùng đánh và ngoài tầm đánh — bot không đi tới. Nhân vật ra ngoài vùng "
+                    "Quái màu xám: ở ngoài vùng đánh — bot không đánh, không đi tới, cả khi ở trong tầm đánh. Nhân "
+                    "vật ra ngoài vùng "
                     "quá " + std::to_string(kZoneOutsideBackPx) + " px thì bot ngưng đánh, về vùng trước: lúc đó mọi "
                     "con đều xám, cả con trong vùng và trong tầm, tới khi nhân vật vào tới trong vùng. Có Tự tìm quái "
                     "trong vùng: cả con trong vùng mà bot không tới được, hoặc đang tạm bỏ qua.";
@@ -1419,6 +1541,7 @@ void GuiApp::simple_map_tab() {
             if (it.sym == Sym::Seek)
                 ImGui::SetItemTooltip("Đường nét đứt: GoBot đang đi tới chỗ đứng đánh (ô vuông nhỏ) con quái có "
                                       "vòng. Vòng nét đứt: con quái đi khuất, GoBot đoán chỗ nó đang ở.");
+            if (it.sym == Sym::Band) ImGui::SetItemTooltip("%s", kBandTip);
         }
         ImGui::PopFont();
     }
@@ -1469,10 +1592,12 @@ void GuiApp::map_canvas(MapUi& ui, MapView& mv) {
         ui.cam.zoom = fz;
         ui.gesture.reset();
         ui.draft.reset();
+        ui.band_gesture.reset();
+        ui.band_draft.reset();
     }
-    // A drag on a grip freezes the camera until its release: what is under
-    // the mouse stays what was under it.
-    if (!ui.gesture) {
+    // A drag on a grip -- a zone's or a bar's -- freezes the camera until its
+    // release: what is under the mouse stays what was under it.
+    if (!ui.gesture && !ui.band_gesture) {
         // A zoom leaves Fit, and Follow with nobody to follow: else the
         // camera's placing would undo it at once.
         const bool follow = ui.mode == MapUi::Mode::Follow && mv.you;
@@ -1522,9 +1647,62 @@ void GuiApp::map_canvas(MapUi& ui, MapView& mv) {
     const HuntZone* gripped = mv.zone ? &*mv.zone : mv.spot_editable ? &*mv.spot : nullptr;
     const bool can_edit = mv.edit == MapEdit::Ok && gripped != nullptr;
     ZoneGrip hot = ZoneGrip::None;
-    if (can_edit && hovered && !ui.gesture)
+    if (can_edit && hovered && !ui.gesture && !ui.band_gesture)
         hot = zone_grip(*gripped, ui.cam, cam_p(o), cam_p(s), cam_p(mouse), mv.limits.floors);
-    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ui.gesture && hot != ZoneGrip::None) {
+
+    // The band's bars (2026.11.12, the owner's Q6): hung from your dot's
+    // feet -- the press's, while one is dragged -- across the area's box or
+    // the view, and gripped where no grip of the zone's is. From the feet
+    // less packet_dy, as the target ring and the Chi tiết box (band_feet_y).
+    const double scale = hunt_config_.packet_scale > 0.0f ? static_cast<double>(hunt_config_.packet_scale) : 1.0;
+    const double band_feet = band_feet_y(mv.you_at.y, hunt_config_.packet_dy, scale);
+    const Band band_now = ui.band_draft ? *ui.band_draft : Band{ hunt_config_.up(), hunt_config_.down() };
+    std::optional<BandBars> bars;
+    BandSpan span;
+    if (mv.you || ui.band_gesture) {
+        const ToScreen view(ui.cam, o, s);
+        const HuntZone* area = mv.zone ? &*mv.zone : mv.spot_raw ? &*mv.spot_raw : nullptr;
+        bars = band_bars(ui.band_gesture ? ui.band_gesture->feet_y : band_feet, band_now, scale);
+        span = band_span(area, mv.you_at.x, view.vx0, view.vx1);
+    }
+    BandBar band_hot = BandBar::None;
+    if (bars && hovered && !ui.gesture && !ui.band_gesture && hot == ZoneGrip::None)
+        band_hot = band_grip(*bars, span, ui.cam, cam_p(o), cam_p(s), cam_p(mouse));
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ui.gesture && !ui.band_gesture && band_hot != BandBar::None) {
+        BandGesture g;
+        g.bar = band_hot;
+        g.feet_y = band_feet;
+        g.scale = scale;
+        g.from = band_now;
+        g.cam = ui.cam;
+        g.origin = cam_p(o);
+        g.size = cam_p(s);
+        g.press = cam_p(mouse);
+        ui.band_gesture = g;
+        ui.band_draft = band_now;
+    }
+    if (ui.band_gesture) {
+        // A frame of the drag: the draft alone. The release sets the band --
+        // nothing under ImGui's drag threshold.
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            ui.band_draft = ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)
+                                ? band_drag(*ui.band_gesture, cam_p(mouse))
+                                : ui.band_gesture->from;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        } else {
+            const Band next = ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)
+                                  ? band_drag(*ui.band_gesture, cam_p(mouse))
+                                  : ui.band_gesture->from;
+            const Band from = ui.band_gesture->from;
+            ui.band_gesture.reset();
+            ui.band_draft.reset();
+            if (next != from) map_band_commit(ui, next.up_px, next.down_px);
+        }
+    } else if (band_hot != BandBar::None) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    }
+
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ui.gesture && !ui.band_gesture && hot != ZoneGrip::None) {
         ZoneGesture g;
         g.grip = hot;
         g.from = *gripped;
@@ -1718,6 +1896,29 @@ void GuiApp::map_canvas(MapUi& ui, MapView& mv) {
         }
     }
 
+    // 7b. The band's bars (2026.11.12, the owner's Q6): dashed across the
+    // area's box or the view, each with its number at its right end -- the
+    // draft's under a drag, from the press's feet.
+    if (bars) {
+        const Band shown_band = ui.band_draft ? *ui.band_draft : Band{ hunt_config_.up(), hunt_config_.down() };
+        const BandBars at = band_bars(ui.band_gesture ? ui.band_gesture->feet_y : band_feet, shown_band, scale);
+        for (const BandBar which : { BandBar::Up, BandBar::Down }) {
+            const bool upper = which == BandBar::Up;
+            const double wy = upper ? at.up_y : at.down_y;
+            const ImVec2 left_end = ts.at(span.x0, wy), right_end = ts.at(span.x1, wy);
+            const bool lit_bar = band_hot == which || (ui.band_gesture && ui.band_gesture->bar == which);
+            const ImU32 col = lit_bar ? MapColors::kZoneHot : MapColors::kBand;
+            dashed_line(dl, left_end, right_end, col, lit_bar ? 2.0f : 1.5f, lo, hi);
+            const std::string text = band_label(which, upper ? shown_band.up_px : shown_band.down_px);
+            const ImVec2 w = small_size(text.c_str());
+            const float tx = std::clamp(std::min(right_end.x, hi.x) - w.x - 4.0f, lo.x + 2.0f,
+                                        std::max(lo.x + 2.0f, hi.x - w.x - 2.0f));
+            const float ty = upper ? left_end.y - w.y - 1.0f : left_end.y + 2.0f;
+            dl->AddRectFilled(ImVec2(tx - 2.0f, ty), ImVec2(tx + w.x + 2.0f, ty + w.y), MapColors::kBandBack, 2.0f);
+            small_text(dl, ImVec2(tx, ty), col, text.c_str());
+        }
+    }
+
     // 8. The monsters, each at its dot (mob_dots) -- a walker on its frame's
     // floor, a spawn set down on its own, the dead not at all
     // (kMapDeadShownMs) -- the dead fading out first, should they be drawn,
@@ -1726,7 +1927,6 @@ void GuiApp::map_canvas(MapUi& ui, MapView& mv) {
     // where the hunter has them, never at the dot (mob_grey).
     const bool area_on = mv.hunt_on && hunt_config_.spot && hs.spot_set && !hs.spot_suspended;
     const bool fought = mv.hunt_on && hs.has_target && hs.target.slot >= 0;
-    const double scale = hunt_config_.packet_scale > 0.0f ? static_cast<double>(hunt_config_.packet_scale) : 1.0;
     std::size_t mob_hover = mv.dots.size();
     float mob_dist = kHoverPx;
     for (int pass = 0; pass < 2; ++pass) {
@@ -1878,11 +2078,16 @@ void GuiApp::map_canvas(MapUi& ui, MapView& mv) {
     dl->AddRect(lo, hi, ImGui::GetColorU32(ImGuiCol_Border), 0.0f, 1.0f);
 
     // What the mouse is over.
-    if (hovered && !ui.gesture && !ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+    if (hovered && !ui.gesture && !ui.band_gesture && !ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
         std::string tip;
         if (pin_hover) {
             tip = "Chỗ về: bot đi bộ về đây khi hết quái";
+        } else if (band_hot != BandBar::None) {
+            const bool upper = band_hot == BandBar::Up;
+            tip = std::string(upper ? "Vạch trên: " : "Vạch dưới: ") +
+                  band_label(band_hot, upper ? hunt_config_.up() : hunt_config_.down()) +
+                  " so với chân nhân vật — kéo lên, xuống để đổi.\n" + kBandTip;
         } else if (attack_hover) {
             tip = "Chỗ đứng đánh: GoBot đi tới đây (" + std::to_string(hs.seek_at_x) + ", " +
                   std::to_string(hs.seek_at_y) + ") rồi đánh con quái có vòng";
@@ -1992,6 +2197,52 @@ void GuiApp::map_release(MapUi& ui, const MapView& mv) {
     map_red_note(ui, stem, c, false);
 }
 
+// ------------------------------------------------------- the band's bars
+
+void GuiApp::map_band_commit(MapUi& ui, int up_px, int down_px) {
+    up_px = band_clamp(up_px);
+    down_px = band_clamp(down_px);
+    if (up_px == hunt_config_.up() && down_px == hunt_config_.down()) return;
+    // As the Tầm đánh window sets the same two numbers: the hunter takes them
+    // at its next pass, and a run's log says what changed -- in memory here,
+    // the line off this thread. hunt.ini is the worker's to write (map_post),
+    // its band's keys alone: no file on this thread.
+    hunt_config_.set_band(up_px, down_px);
+    if (hunter_) hunter_->set_config(hunt_config_);
+    if (simple_running()) simple_log_settings_changed();
+    ui.band_owed = true;
+}
+
+void GuiApp::map_band_row(MapUi& ui) {
+    // Under a drag, the draft's numbers.
+    const Band now = ui.band_draft ? *ui.band_draft : Band{ hunt_config_.up(), hunt_config_.down() };
+    int up = now.up_px, down = now.down_px;
+    bool changed = false;
+    const auto box = [&changed](const char* text, const char* id, int& v) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(text);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt(id, &v, kBandStepPx, kBandStepPx * 10)) {
+            v = band_clamp(v);
+            changed = true;
+        }
+        ImGui::SetItemTooltip("%s", kBandTip);
+        ImGui::SameLine();
+        label("px");
+    };
+    ImGui::BeginDisabled(ui.band_gesture.has_value());
+    box("Vạch trên", "##band_up", up);
+    ImGui::SameLine(0, 18);
+    box("Vạch dưới", "##band_down", down);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    ImGui::SetItemTooltip("%s", kBandTip);
+    if (changed && !ui.band_gesture) map_band_commit(ui, up, down);
+    if (ui.band_failed) coloured(kBad, "Không lưu được hai vạch vào configs\\hunt.ini — GoBot thử lại sau ít giây.");
+}
+
 void GuiApp::map_menu(MapUi& ui, const MapView& mv) {
     if (!ImGui::BeginPopup(kMenu)) return;
     // Opened on another map, or before this one was known: its point is not this map's pixels.
@@ -2074,8 +2325,10 @@ void GuiApp::map_card(MapUi& ui, const MapView& mv) {
             hint("Đánh dấu Tự đánh quái ở tab Đánh quái để dùng vùng.");
             break;
         case ZoneCard::BookBad:
-            coloured(kBad, "Không đọc được configs\\spots.ini — không sửa được vùng, để khỏi ghi đè file. Kiểm tra "
-                           "file rồi mở lại GoBot.");
+            // Read again every kBookAgainMs (2026.11.24): no reopening of
+            // GoBot needed any more.
+            coloured(kBad, "Không đọc được configs\\spots.ini — không sửa được vùng, để khỏi ghi đè file. GoBot đọc "
+                           "lại mỗi 30 giây; sửa file xong là dùng được.");
             break;
         case ZoneCard::BookLoading:
             hint("Đang đọc vùng đã lưu…");

@@ -57,115 +57,6 @@ private:
     std::vector<std::string> order_;    ///< section write order
 };
 
-// ---------------------------------------------------------------- bot config
-
-struct SkillSlot {
-    std::string   key;              ///< display label
-    std::uint32_t keycode = 0;      ///< Win32 VK
-    std::uint32_t cooldown_ms = 1000;
-    bool          enabled = false;
-    /// Effective area relative to the player, in game units. A skill only
-    /// fires when a target sits inside this box.
-    float         aoe_min_x = 0, aoe_max_x = 1000;
-    float         aoe_min_y = 0, aoe_max_y = 0;
-    int           hits = 1;         ///< expected hits per cast
-    int           targets = 1;      ///< minimum targets in range before casting
-};
-
-enum class TargetMode {
-    Nearest = 0,
-    LowestHp = 1,
-    HighestHp = 2,
-    Weakest = 3,
-};
-
-struct BotConfig {
-    // --- combat ---
-    bool  auto_attack = true;
-    bool  auto_fury = true;
-    int   fury_skill_points = 0;
-    bool  double_jump = false;
-    bool  backing_away = true;
-    bool  lazy_mode = true;              ///< act only when a target is already close
-    bool  face_target = true;
-    int   facing_tolerance = 12;
-    bool  auto_loot = false;
-    bool  ignore_fly_monster = true;
-    bool  allow_attack_while_jumping = false;
-    bool  enable_tile_pathfinding = false;
-    bool  sequential_skill = true;
-    bool  priority_boss = false;
-    bool  overcome_obstacles = false;
-
-    TargetMode target_mode = TargetMode::Nearest;
-    float min_range = 0;
-    float attack_range = 350;
-
-    // Only engage inside this box (map coordinates).
-    float working_min_x = 0, working_min_y = 0;
-    float working_max_x = 1024, working_max_y = 1024;
-
-    // Vertical band a target must fall in to be hittable.
-    float highest_hit_y = 150;
-    float lowest_hit_y  = 63;
-    float higher_threshold = 150;
-    float lower_threshold  = 63;
-
-    // --- recovery ---
-    bool  return_to_original_location = false;
-    bool  return_to_previous_map = true;
-    bool  continue_auto_after_death = false;
-    int   return_delay_ms = 0;
-    float return_tolerance_x = 48;
-    float return_tolerance_y = 31;
-    bool  fix_location_after_login = false;
-
-    static constexpr std::size_t kSkillSlots = 8;
-    SkillSlot skills[kSkillSlots];
-
-    // --- revive --- (potions and buffs are the macro's, macro.ini: an
-    // engine of their own here drank beside the macro's for the same HP drop)
-    bool     player_auto_revive = false;
-    int      revive_max_attempts = 3;
-
-    // --- movement keys (Win32 VK) ---
-    std::uint32_t key_jump = 17;            // VK_CONTROL
-    std::uint32_t key_normal_attack = 32;   // VK_SPACE
-    std::uint32_t key_fury = 96;            // VK_NUMPAD0
-    std::uint32_t key_left = 37;            // VK_LEFT
-    std::uint32_t key_right = 39;           // VK_RIGHT
-    std::uint32_t key_up = 38;
-    std::uint32_t key_down = 40;
-    std::uint32_t key_loot = 90;            // 'Z'
-
-    // --- gobot_cli's on/off key for the packet bot (hotkey_loop). gobot_gui
-    // does not read it: its F10 is macro.ini's toggle_key. ---
-    std::uint32_t key_start_stop = 121;     // F10
-
-    // --- patrol ---
-    bool patrol_use_waypoints = true;
-    bool patrol_loop_cycle = false;
-    bool patrol_sweep_mode = false;
-    int  patrol_killall_goal_pct = 100;
-
-    // --- timing (ms) ---
-    int  command_delay_min = 40;
-    int  command_delay_max = 90;
-    int  attack_interval_ms = 120;
-    int  decision_interval_ms = 80;
-
-    bool load(const std::string& path);
-    bool save(const std::string& path) const;
-    void apply_defaults();
-
-    /// Whether a started bot will attack or cast at all: the attack with its
-    /// key, or a skill (skills go only with the attack). With neither -- as
-    /// bot_default.ini ships -- it does neither; only the movement settings
-    /// can still move the character. Its potions and buffs are not this
-    /// config's but the macro's.
-    bool any_action_on() const;
-};
-
 // --------------------------------------------------------------- app config
 
 struct AppConfig {
@@ -178,12 +69,6 @@ struct AppConfig {
     std::string   bpf_filter;
     std::uint32_t batch_interval_ms = 50;
 
-    /// Run automatic setup as soon as the GUI opens, instead of waiting for
-    /// the button. On by default: it is what almost everyone wants, and the
-    /// alternative is a window that sits there doing nothing until you find
-    /// the right control.
-    bool autostart = true;
-
     // target window
     std::string window_title = "GhostOnline";
     std::string window_class;
@@ -191,7 +76,6 @@ struct AppConfig {
 
     // paths
     std::string protocol_path = "configs/protocol.ini";
-    std::string bot_config_path = "configs/bot_default.ini";
     std::string log_path = "gobot.log";
     std::string log_level = "info";
 

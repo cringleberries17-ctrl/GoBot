@@ -122,6 +122,11 @@ void name_this_thread(const char* name) {
     thread_ledger().named(name, static_cast<std::uint32_t>(tid), handle);
 }
 
+void quiet_this_thread() {
+    // TRUE = boost disabled. Best effort: a refusal leaves the thread as it was.
+    SetThreadPriorityBoost(GetCurrentThread(), TRUE);
+}
+
 ThreadLedger::ThreadLedger(Probe probe) : probe_(std::move(probe)) {}
 
 ThreadLedger::~ThreadLedger() {
@@ -404,7 +409,7 @@ std::string load_report(const LoadSnapshot& before, const LoadSnapshot& now, con
     // in this entry.
     if (!now.frame_kinds.empty())
         out += indent + "frames: " + now.frame_kinds +
-               (now.frames_filtered ? " (filtered by Apply's opcode list)" : "");
+               (now.frames_filtered ? " (filtered by an opcode list)" : "");
 
     // ---- memory and handles; the front keeper ----
     const ProcessLoad& p = now.process;

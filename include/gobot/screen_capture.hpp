@@ -48,7 +48,7 @@ bool load_png(const std::string& path, Frame& out);
 /// Uses PrintWindow with PW_RENDERFULLCONTENT, which asks the window to render
 /// itself into our bitmap rather than copying whatever is on screen at those
 /// coordinates. That keeps working when the game is behind another window —
-/// which it routinely is, since the mapper's own UI sits on top of it.
+/// which it routinely is, since GoBot's own window sits on top of it.
 ///
 /// Falls back to a screen BitBlt for windows that refuse PrintWindow; those
 /// frames are only valid while the window is unobscured, which `from_screen`

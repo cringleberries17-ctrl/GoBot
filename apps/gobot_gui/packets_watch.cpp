@@ -40,8 +40,8 @@ std::string time_of_day() {
 
 void GuiApp::note_capture_gaps(std::uint64_t now) {
     const PacketCapture::Stats cs = capture_.stats();
-    // Another start, whoever made it -- this one's, the Capture tab's,
-    // Autopilot's: its counts begin at 0, so a drop or a wrapper that would
+    // Another start, whoever made it -- this one's, the Capture tab's: its
+    // counts begin at 0, so a drop or a wrapper that would
     // not unpack since then is a gap like any other, compared below. Not the
     // server's resyncs: joining its stream mid-way costs one, and they are
     // measured from here.
@@ -128,13 +128,9 @@ void GuiApp::packets_minute(std::uint64_t now) {
 }
 
 void GuiApp::say_traffic_lost() {
-    // The watchdog has said "No game traffic" already. What it means here:
-    // the packet bot stopped, or -- the capture running all session -- the
-    // game gone quiet under it.
-    if (bot_running_)
-        GB_WARN("Traffic stopped -- disabling bot");
-    else
-        GB_INFO("Positions: no game TCP for 15 s (the game closed, at the login, or disconnected)");
+    // The watchdog has said "No game traffic" already. What it means here,
+    // the capture running all session: the game gone quiet under it.
+    GB_INFO("Positions: no game TCP for 15 s (the game closed, at the login, or disconnected)");
 }
 
 } // namespace gobot

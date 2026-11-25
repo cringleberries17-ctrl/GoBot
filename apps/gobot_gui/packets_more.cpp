@@ -11,6 +11,11 @@
 // client's own take-offs whenever the packets can tell (packet_takeoffs), and
 // by the screen as before when they cannot.
 //
+// Since 2026.11.12 the dash learned from your moves with no walk, with the key
+// its casts are paired with, and the reach of the hunter's own attack key's
+// skill, are handed to the hunter once a second (more_tick): what it holds the
+// dash near an edge and swings its key within.
+//
 // Nothing here acts on the game, and nothing here asks Windows for anything
 // but which process owns the game's window, and the time of day for the log.
 // The capture thread feeds the casts and buffs; GoBot's thread pairs them and
@@ -18,9 +23,12 @@
 
 #include "gui_app.hpp"
 #include "gobot/cast_match.hpp"
+#include "gobot/hunter.hpp"
+#include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/macro.hpp"
 #include "gobot/net_discovery.hpp"
+#include "gobot/packet_world.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -112,6 +120,15 @@ std::vector<std::uint32_t> potion_keys_of(const MacroConfig& cfg) {
     return out;
 }
 
+/// The key `casts` has learned casts `skill` -- the dash's (2026.11.12) --
+/// the first pressed of any such; 0 for none, or no skill.
+std::uint32_t dash_key_of(const CastMatch& casts, std::uint32_t skill) {
+    if (skill == 0) return 0;
+    for (const CastMatch::Key& k : casts.keys())
+        if (k.skill == skill) return k.vk;
+    return 0;
+}
+
 } // namespace
 
 struct GuiApp::MorePart {
@@ -157,6 +174,16 @@ void GuiApp::more_on_packets(const std::vector<GamePacket>& all) {
             if (c && c->id == *me) macro_->note_own_cast(c->skill, p.timestamp_ms);
         }
     }
+    // And that the packets come at all (2026.11.17): with them coming and no
+    // cast of yours, the game is taking no key -- the rotation probes a key a
+    // second rather than falling back to the timers. Only with your own id
+    // locked: the capture on your game, where a cast of yours would show. An
+    // atomic on its side.
+    if (macro_ && me && !all.empty()) {
+        std::uint64_t newest = 0;
+        for (const GamePacket& p : all) newest = std::max(newest, p.timestamp_ms);
+        macro_->note_packets(newest);
+    }
 }
 
 void GuiApp::more_tick(std::uint64_t now) {
@@ -191,13 +218,45 @@ void GuiApp::more_tick(std::uint64_t now) {
     // Each buff key's burst, once judged: whether the packets saw it cast.
     for (const CastMatch::Burst& b : part.casts.take_bursts())
         Logger::instance().write(LogLevel::Info, burst_line(b));
+
+    // To the hunter (2026.11.12), atomics on its side: the dash learned from
+    // your moves with no walk and the key that casts its skill -- none known,
+    // no key is held near an edge (2026.11.17) -- and how far its own attack
+    // key's skill has reached (F3).
+    if (hunter_) {
+        const PacketWorld::Dash dash = packet_world_.dash();
+        hunter_->set_dash(dash_key_of(part.casts, dash.skill), dash.px);
+        hunter_->set_attack_reach(part.casts.learned_reach(hunter_->attack_key()));
+    }
 }
 
 void GuiApp::more_note_attack(std::uint32_t vk, std::uint64_t at_ms) {
-    // On the hunter's thread: kept, and paired at the next more_tick.
+    // On the hunter's thread: kept, and paired at the next more_tick. And its
+    // time for the macro's rotation, which tells the swing's cast from its
+    // own key's by it (Fight::swing_ms, 2026.11.16b): an atomic.
+    swing_ms_.store(at_ms);
     MorePart& part = made(more_part_);
     std::lock_guard<std::mutex> lock(part.attack_mutex);
     if (part.attacks.size() < CastMatch::kCasts) part.attacks.push_back(CastMatch::Press{ vk, at_ms });
+}
+
+std::string GuiApp::more_move_keys(const PacketWorld::OwnMove& m) {
+    // On the capture thread, the world's lock let go of: the pairing's own
+    // lock and InputManager's ring, nothing of the GUI's.
+    MorePart& part = made(more_part_);
+    std::string out;
+    if (m.skill != 0) {
+        const std::uint32_t vk = dash_key_of(part.casts, m.skill);
+        out = vk != 0 ? "its key " + InputManager::key_name(vk) : std::string("its key not learned yet");
+    }
+    if (hunter_) {
+        const HunterConfig hc = hunter_->config();
+        const std::uint64_t from = m.from_ms > 5000 ? m.from_ms - 5000 : 0;
+        const std::string keys = InputManager::walk_keys_text(InputManager::key_marks(from), hc.left_key,
+                                                              hc.right_key, m.from_ms, m.to_ms);
+        out += (out.empty() ? "" : "; ") + keys;
+    }
+    return out;
 }
 
 void GuiApp::note_casts_minute(std::uint64_t) {
@@ -232,6 +291,15 @@ void GuiApp::note_casts_minute(std::uint64_t) {
         if (macro_buff_on(k)) intervals.emplace_back(k.keycode, macro_timer_interval_ms(k) / 1000);
     const std::string buff_line = buffs_line(pair_buffs(casts.keys, buffs), buffs, intervals);
     if (!buff_line.empty()) lines.push_back(buff_line);
+    // Your moves with no walk this minute, and the dash with its key
+    // (2026.11.12).
+    const PacketWorld::DashMinute moves = packet_world_.take_dash_minute();
+    std::uint32_t dash_vk = 0;
+    for (const CastMatch::Key& k : casts.keys)
+        if (dash_vk == 0 && moves.dash.skill != 0 && k.skill == moves.dash.skill) dash_vk = k.vk;
+    const std::string dash_line =
+        PacketWorld::dash_line(moves, dash_vk != 0 ? "key " + InputManager::key_name(dash_vk) : std::string());
+    if (!dash_line.empty()) lines.push_back(dash_line);
     log_later(std::move(lines));
 }
 

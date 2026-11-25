@@ -260,13 +260,33 @@ void test_self_store() {
     check(seq_in_order && self.vitals().points == 6,
           "each with its seq, 1 to 6 -- 0x0050's among them -- and the newest's in the vitals");
 
-    // MP over UDP: for the log alone.
+    // MP over UDP: your MP as well since 2026.11.17, the newer of it and
+    // 0x0051's going; HP as 0x0051 left it.
     Built udp(0x02F0, 16);
     udp.u32(12, 100);
     self.on_packets({ server_udp(udp, kT0 + 900) }, 2);
     v = self.vitals();
-    check(v.udp_mp == 100 && v.udp_mp_ms == kT0 + 900 && v.mp == 8700,
-          "0x02F0's MP is kept beside the rest and changes nothing of it: it is the log's");
+    const std::vector<PacketSelf::VitalsPoint> uh = self.history();
+    check(v.udp_mp == 100 && v.udp_mp_ms == kT0 + 900 && v.mp == 100 && v.mp_ms == kT0 + 900 && v.hp == 9500 &&
+              v.hp_ms == kT0 + 700 && v.points == 7 && uh.size() == 7 && uh.back().mp == 100 &&
+              uh.back().hp == 9500 && uh.back().at_ms == kT0 + 900,
+          "0x02F0's MP is your MP now, a point of its own (seq 7); HP and its time as 0x0051 left them");
+    {
+        // Before any HP: kept for the log alone. Then each in turn, the
+        // newer going.
+        PacketSelf fresh;
+        fresh.on_packets({ server_udp(udp, kT0 + 100) }, 1);
+        const PacketSelf::Vitals f = fresh.vitals();
+        fresh.on_packets({ server(vitals_frame(9000, 8000), kT0 + 200) }, 1);
+        fresh.on_packets({ server_udp(udp, kT0 + 300) }, 1);
+        const PacketSelf::Vitals g = fresh.vitals();
+        fresh.on_packets({ server(vitals_frame(9000, 7000), kT0 + 400) }, 1);
+        const PacketSelf::Vitals h2 = fresh.vitals();
+        check(f.udp_mp == 100 && f.mp == 0 && f.mp_ms == 0 && f.points == 0 && g.mp == 100 &&
+                  g.mp_ms == kT0 + 300 && g.hp == 9000 && h2.mp == 7000 && h2.mp_ms == kT0 + 400 && h2.udp_mp == 100,
+              "0x02F0 before any 0x0051 or 0x0050: kept beside them, no MP of yours yet; after one, 0x0051's MP "
+              "and 0x02F0's in turn, the newer going");
+    }
 
     // The bag and gold.
     self.on_packets({ server(bag_frame(6, 8810121, 71), kT0 + 1000) }, 2);
@@ -298,7 +318,8 @@ void test_self_store() {
               !self.bag().known && self.history().empty() && self.bag_frames().empty() &&
               self.stats().of(0x0051).used == 5 && self.stats().resets == 1,
           "reset() forgets HP, MP, the maxima and the bag, and raises the epoch; the counts are kept");
-    check(seq_before == 6 && v.points == 0, "the refused frames take no seq; reset() leaves the vitals none");
+    check(seq_before == 7 && v.points == 0,
+          "the refused frames take no seq (six frames and 0x02F0's MP took one each); reset() leaves the vitals none");
 
     // Two frames in one millisecond -- one segment, one read of the capture.
     self.on_packets({ server(vitals_frame(9000, 8000), kT0 + 2000), server(vitals_frame(9000, 7400), kT0 + 2000) }, 2);
@@ -362,7 +383,7 @@ void test_self_link() {
 
     check(PacketSelf::opcodes() == std::vector<std::uint16_t>{ 0x0051, 0x0050, 0x02F0, 0x0068, 0x006B, 0x0077,
                                                                 0x005A, 0x002E, 0x0014, 0x03C6 },
-          "its opcodes, for Apply's filter: every one the packets plan reads beside the packet world's");
+          "its opcodes, for an opcode filter: every one the packets plan reads beside the packet world's");
 }
 
 /// How many of the log's `lines` have `part` in them.
@@ -696,7 +717,7 @@ void test_frame_tally() {
 }
 
 void test_frames_line() {
-    section("The Load line's frames: line, with and without Apply's filter (made-up numbers)");
+    section("The Load line's frames: line, with and without an opcode filter (made-up numbers)");
 
     LoadSnapshot before, now;
     before.at_ms = 1'000'000;
@@ -710,10 +731,9 @@ void test_frames_line() {
     check(!has(none, "frames:") &&
               has(with, " | log 0.0 lines/min, 0 KB\n      frames: over 600 s: S 0038:1234 03C6:600 | W 0051:30\n") &&
               !has(with, "filtered") &&
-              has(filtered, "\n      frames: over 600 s: S 0038:1234 03C6:600 | W 0051:30 (filtered by Apply's "
-                            "opcode list)\n"),
-          "a frames: line under reads: only when the window filled it, said to be filtered while Apply's opcode "
-          "filter is on" + std::string("\n") + filtered);
+              has(filtered, "\n      frames: over 600 s: S 0038:1234 03C6:600 | W 0051:30 (filtered"),
+          "a frames: line under reads: only when the window filled it, said to be filtered while an opcode filter "
+          "is on" + std::string("\n") + filtered);
 }
 
 // ------------------------------------------------------------ the wiring
@@ -774,7 +794,9 @@ void test_self_wiring() {
         { "the trash's start", before(gui, "tell(\"Máu đang thấp, dọn rác sau.\");", 200) },
         { "the chat's hp_low", after(gui, "const auto hp_low = [this] {", 80) },
         { "the quest's low_hp", after(quest, "hands.low_hp = [this] {", 80) },
-        { "the popups' hp_low", after(popups, "const auto hp_low = [this] {", 80) },
+        // 2026.11.21 (B10): the closer and its last look captured, for the
+        // check-in board's ESC with the character down (checkin_down_esc).
+        { "the popups' hp_low", after(popups, "const auto hp_low = [this, &closer, &said_down_esc] {", 80) },
         { "the front keeper's HP", before(view, "const bool hp_low = vitals_running_ && hp >= 0.0f", 80) },
     };
     std::string missed;
@@ -782,7 +804,8 @@ void test_self_wiring() {
         if (!has(r.near, kNow) || has(r.near, "vitals_.hp_percent()")) missed += std::string(" ") + r.where + ";";
     const int guards = count_in(gui, "\"trash cleaning\")) return false;");
     const int guards_now = count_in(gui, "\"trash cleaning\")) return false;\n            " + kNow);
-    check(missed.empty() && guards == 3 && guards_now == 3 && has(gui, "in.hp_pct = hp_percent_now();") &&
+    // Four since 2026.11.21 (B1): the kept hold's sweep has its own guard.
+    check(missed.empty() && guards == 4 && guards_now == 4 && has(gui, "in.hp_pct = hp_percent_now();") &&
               has(quest, "in.hp_pct = hp_percent_now();") && !has(gui + quest, "in.hp_pct = vitals_.hp_percent();") &&
               has(skills, "const float mp = vitals_running_ ? mp_percent_now() : -1.0f;"),
           "every job's HP read -- the charms', the shop's and the trash's starts and guards, the chat's, the "
@@ -842,7 +865,8 @@ void test_self_wiring() {
     const std::string snap = body(gui, "LoadSnapshot GuiApp::load_snapshot() {");
     check(has(snap, "frame_tally_.take(12)") && has(snap, "capture_.filtering()") && has(snap, "600'000") &&
               has(snap, "frame_tally_.top_changed()"),
-          "load_snapshot: the frames by kind every ten minutes, or when they change, said filtered under Apply");
+          "load_snapshot: the frames by kind every ten minutes, or when they change, said filtered under an "
+          "opcode filter");
 #else
     skip("no source folder\n");
 #endif

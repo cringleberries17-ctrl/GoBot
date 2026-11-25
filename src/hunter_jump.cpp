@@ -13,8 +13,16 @@
 // token taken only from nobody. In the air: held still -- no walk, no turn's
 // tap, no step back -- attacks allowed. What came of it: your own reports
 // (PacketWorld::own_since) and the take-offs by kind, against the planned
-// floor. A map change within kPressWatchMs of the key halts the hunter as a
-// drop's does, for GoBot's window to stop the hunt and untick jump_up.
+// floor. A map change within kPressWatchMs of the key learns both ends as
+// gates, as a drop's does, and the hunt goes on (2026.11.24; until then it
+// halted the hunter for GoBot's window to stop the hunt and untick jump_up).
+//
+// Never a stop (2026.11.24, the owner's "thử lại luôn"): a jump that did not
+// get there is tried again -- the first of a row after kRetryPassOverMs, every
+// other after one fight turn (kRetryFightMs) -- its take-off onto that floor
+// skipped kLearnedForgetMs when it fell back, landed elsewhere or outside, so
+// the next try is another column's; nothing pauses the jumps, switches them or
+// one of their keys off, unticks them or stops the hunt.
 //
 // One executor, three callers: the target above (jump_toward), the way back's
 // legs (go_home_zone), and the seek's (JumpUpFor::Seek, jump_go).
@@ -71,14 +79,19 @@ const char* trust_text(MapTrust::How how) {
 }
 
 /// Whether the floor whose top is `top` at column x -- or a hole's width
-/// before it, where the planner lands over a hole -- is the floor the standing
-/// point `on` is on: followed there, its top within kDropSameFloorPx.
+/// before it, where the planner lands over a hole, or a step's face beside it
+/// (2026.11.12c: a wall-foot jump's take-off is a few px off the ledge it lands
+/// on, either way) -- is the floor the standing point `on` is on: followed
+/// there, its top within kDropSameFloorPx. Nearest columns first.
 bool same_floor(const GameMapBook::Page& p, int x, int top, MapPoint on) {
-    for (int d = 0; d <= GameMapBook::kFollowHolePx; ++d) {
-        const std::optional<MapFloor> f = p.floor_near(x - d, top - 1);
-        if (!f || f->wall() || std::abs(f->y - top) > GameMapBook::kFollowLinkPx) continue;
-        const std::optional<int> there = p.follow_to(x - d, f->y - 1, on.x);
-        return there && std::abs(*there - (on.y + 1)) <= Hunter::kDropSameFloorPx;
+    for (int d = 0; d <= GameMapBook::kFollowHolePx + kWallFootPx + 1; ++d) {
+        for (const int cx : { x - d, x + d }) {
+            if (d == 0 && cx != x) continue;
+            const std::optional<MapFloor> f = p.floor_near(cx, top - 1);
+            if (!f || f->wall() || std::abs(f->y - top) > GameMapBook::kFollowLinkPx) continue;
+            const std::optional<int> there = p.follow_to(cx, f->y - 1, on.x);
+            return there && std::abs(*there - (on.y + 1)) <= Hunter::kDropSameFloorPx;
+        }
     }
     return false;
 }
@@ -103,6 +116,7 @@ Act act_of(Hunter::JumpUpWhy w) {
         case W::NotPacketTarget:
         case W::NotAbove:
         case W::OnOwnFloor:
+        case W::TooHigh:
             return Act::AsBefore;
         case W::LevelMonster:
             return Act::Level;
@@ -121,7 +135,6 @@ Act act_of(Hunter::JumpUpWhy w) {
         case W::Loot:
         case W::Veto:
             return Act::Passing;
-        case W::Latched:
         case W::KeyClash:
         case W::OutsideArea:
         case W::TargetCap:
@@ -139,7 +152,6 @@ bool said_at_info(Hunter::JumpUpWhy w) {
     switch (w) {
         case Hunter::JumpUpWhy::JumpKey:
         case Hunter::JumpUpWhy::KeyClash:
-        case Hunter::JumpUpWhy::Latched:
         case Hunter::JumpUpWhy::MapUnknown:
         case Hunter::JumpUpWhy::Plan:
         case Hunter::JumpUpWhy::OffColumn:
@@ -173,7 +185,6 @@ const char* why_short(Hunter::JumpUpWhy w) {
         case Hunter::JumpUpWhy::Plan:         return "no jump there";
         case Hunter::JumpUpWhy::OffColumn:    return "stopped off the column";
         case Hunter::JumpUpWhy::KeyClash:     return "Ctrl on a key";
-        case Hunter::JumpUpWhy::Latched:      return "off for the run";
         case Hunter::JumpUpWhy::OutsideArea:  return "outside the area";
         default:                              return Hunter::jump_why_name(w);
     }
@@ -186,11 +197,10 @@ std::string for_text(Hunter::JumpUpFor purpose, const std::string& name) {
     return purpose == Hunter::JumpUpFor::Seek ? "toward " + who + " (sought)" : "toward " + who;
 }
 
-/// The shortest full arc of a key, s: up and down again at the highest
-/// gravity, from its take-off speed (Ctrl + ↑'s, or ↑'s).
-double shortest_arc_s(JumpKind k) {
-    const double v = k == JumpKind::CtrlUp ? kJumpUpVHigh : kJumpUpV;
-    return 2.0 * v / kJumpUpGravity[std::size(kJumpUpGravity) - 1];
+/// A take-off's kind by its first 0x002A's vertical speed (2026.11.12c):
+/// "high", "jump", or "fall" at 0 or down.
+const char* kind_by_vy(float vy) {
+    return vy <= kJumpUpHighVyStep ? "high" : vy < 0.0f ? "jump" : "fall";
 }
 
 } // namespace
@@ -210,19 +220,8 @@ const char* Hunter::jump_verdict_name(JumpUpVerdict v) {
         case JumpUpVerdict::Nothing:  return "did nothing";
         case JumpUpVerdict::Unknown:  return "not known";
         case JumpUpVerdict::Gate:     return "changed the map";
-    }
-    return "?";
-}
-
-const char* Hunter::jump_off_name(JumpUpOff o) {
-    switch (o) {
-        case JumpUpOff::None:       return "on";
-        case JumpUpOff::Fails:      return "jumps that did not get up";
-        case JumpUpOff::Physics:    return "the character jumps otherwise than GoBot works out";
-        case JumpUpOff::OffMap:     return "a landing where the map file has no floor";
-        case JumpUpOff::MapChanged: return "a jump changed the map";
-        case JumpUpOff::HeldLong:   return "Up was held too long";
-        case JumpUpOff::KeysStuck:  return "a key-up did not go out";
+        case JumpUpVerdict::Moved:    return "on another floor above inside the area, within the key's reach: a move";
+        case JumpUpVerdict::AirOnly:  return "back on its floor: the attack in the air only";
     }
     return "?";
 }
@@ -234,7 +233,6 @@ const char* Hunter::jump_why_name(JumpUpWhy w) {
         case JumpUpWhy::NoPackets:       return "the packets do not steer (packet_positions is not on)";
         case JumpUpWhy::StayPut:         return "Đứng yên một chỗ is ticked";
         case JumpUpWhy::NoArea:          return "no hunting area of the map tab in use with its map's file";
-        case JumpUpWhy::Latched:         return "jumps up are off until the next start";
         case JumpUpWhy::KeysOwed:        return "a key-up of a chord has not gone out";
         case JumpUpWhy::JumpKey:         return "the jump key is not Up";
         case JumpUpWhy::KeyClash:        return "a walk or attack key is Ctrl, and only Ctrl+Up would do";
@@ -262,6 +260,7 @@ const char* Hunter::jump_why_name(JumpUpWhy w) {
         case JumpUpWhy::OffFloor:        return "where you stand is on no floor of the map file";
         case JumpUpWhy::Plan:            return "no sure jump there";
         case JumpUpWhy::OffColumn:       return "stopped where the jump does not hold";
+        case JumpUpWhy::TooHigh:         return "more than one Up above the upper bar";
     }
     return "?";
 }
@@ -284,18 +283,23 @@ bool Hunter::jump_ready(const HunterConfig& cfg, const GameMapBook::Page* page) 
 bool Hunter::jump_area(const HunterConfig& cfg) const { return jump_ready(cfg, zone_.page.get()); }
 
 bool Hunter::jumps_may_go(const HunterConfig& cfg) const {
-    return cfg.jump_up && jump_latch_ == JumpUpOff::None && jump_area(cfg);
+    // No latch since 2026.11.24: nothing switches the jumps up off.
+    return cfg.jump_up && jump_area(cfg);
 }
 
 JumpRules Hunter::jump_rules(const HunterConfig& cfg, const std::shared_ptr<const GameMapBook::Page>& page) {
     JumpRules r;
-    // The keys off for the run, and Ctrl + ↑ with a walk or attack key on
-    // Ctrl: Ctrl + ↑ would be pressed with it.
-    r.kinds = static_cast<std::uint8_t>(7u & ~static_cast<unsigned>(jump_kinds_off_));
+    // Every key, but Ctrl + ↑ with a walk or attack key on Ctrl: Ctrl + ↑
+    // would be pressed with it. No key off for the run since 2026.11.24.
+    r.kinds = 7u;
     for (const std::uint32_t vk : { cfg.left_key, cfg.right_key, cfg.attack_key })
         if (vk != 0 && is_ctrl(vk)) r.kinds = static_cast<std::uint8_t>(r.kinds & ~bit_of(JumpKind::CtrlUp));
     const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
     r.reach_px = round_px(cfg.reach * scale);
+    // Wall-foot jumps (2026.11.12c): since 2026.11.24 one that landed elsewhere
+    // has its take-off skipped kLearnedForgetMs, no longer the wall-foot jumps
+    // off for the run.
+    r.wall_foot = kWallFootJumps;
     if (!page) return r;
     // The judges' band round a gate, only with kJumpUpGateBand: the owner's
     // answer 2 of 2026-11-05 has none.
@@ -337,28 +341,30 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
         return c;
     };
     const bool target = f.purpose == JumpUpFor::Target;
+    // The owner's plain ↑ past the upper bar (2026.11.12c): in place, onto
+    // nothing planned -- every floor it may come down on inside the area.
+    const bool bar = f.purpose == JumpUpFor::Bar;
     const bool monster = f.purpose != JumpUpFor::Home;
 
     // 1. Switched on: the packets steering, not standing still, the map
-    // tab's area in use with its file, and not off for the run.
+    // tab's area in use with its file. Never off for the run since
+    // 2026.11.24: a jump that did not get there is tried again.
     if (!cfg.jump_up) return no(JumpUpWhy::Off);
     if (cfg.packet_positions != PacketPositions::On) return no(JumpUpWhy::NoPackets);
     if (cfg.stay_put) return no(JumpUpWhy::StayPut);
     if (!f.area) return no(JumpUpWhy::NoArea);
-    if (f.latched) return no(JumpUpWhy::Latched);
     if (f.owed) return no(JumpUpWhy::KeysOwed);
     // 2. The keys: ↑ the jump key; Ctrl + ↑ only with no walk or attack key
-    // on Ctrl, and none of a key off for the run.
+    // on Ctrl -- the one key ever left out since 2026.11.24, when no key is
+    // off for the run any more: ↑ and ↑↑ always go.
     if (cfg.jump_key != kUpVk) return no(JumpUpWhy::JumpKey, static_cast<int>(cfg.jump_key));
-    std::uint8_t kinds = static_cast<std::uint8_t>(7u & ~static_cast<unsigned>(f.kinds_off));
+    std::uint8_t kinds = 7u;
     bool clash = false;
     for (const std::uint32_t vk : { cfg.left_key, cfg.right_key, cfg.attack_key })
         if (vk != 0 && is_ctrl(vk)) clash = true;
     if (clash) kinds = static_cast<std::uint8_t>(kinds & ~bit_of(JumpKind::CtrlUp));
-    if (kinds == 0) return no(clash ? JumpUpWhy::KeyClash : JumpUpWhy::Latched);
-    if (f.plan && (kinds & bit_of(f.plan->kind)) == 0)
-        return no(clash && f.plan->kind == JumpKind::CtrlUp ? JumpUpWhy::KeyClash : JumpUpWhy::Latched,
-                  static_cast<int>(f.plan->kind));
+    if (!bar && f.plan && (kinds & bit_of(f.plan->kind)) == 0)
+        return no(JumpUpWhy::KeyClash, static_cast<int>(f.plan->kind));
     // 3. The map book, GoBot's say and the packets' counts: without them, never.
     if (!f.wired) return no(JumpUpWhy::NotWired);
     // 4. The monster: the packets' own, nothing on the level, above past the
@@ -370,6 +376,14 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
         if (f.level_monster) return no(JumpUpWhy::LevelMonster);
         if (f.dy >= -cfg.up()) return no(JumpUpWhy::NotAbove, -f.dy);
     }
+    // The bar's: past the upper bar, within the air band over it -- a monster
+    // on the level nearer across first (kBarNearestFirst, the owner's Q1).
+    if (bar) {
+        if (!f.packet_target) return no(JumpUpWhy::NotPacketTarget);
+        if (kBarNearestFirst ? f.level_nearer : f.level_monster) return no(JumpUpWhy::LevelMonster);
+        if (f.dy >= -cfg.up()) return no(JumpUpWhy::NotAbove, -f.dy);
+        if (f.dy < -(cfg.up() + f.air_px)) return no(JumpUpWhy::TooHigh, -f.dy);
+    }
     if (monster && f.packet_target) {
         if (!f.box.contains(goal.x, goal.y)) return no(JumpUpWhy::OutsideArea);
         const std::optional<int> theirs =
@@ -377,7 +391,7 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
         if (theirs) {
             c.target = { goal.x, *theirs - 1 };
             c.placed = true;
-            if (target && f.stand) {
+            if ((target || bar) && f.stand) {
                 const std::optional<int> own = f.page->follow_to(f.stand->x, f.stand->y, goal.x);
                 if (own && std::abs(*own - *theirs) <= GameMapBook::kFollowLinkPx) return no(JumpUpWhy::OnOwnFloor);
             }
@@ -400,10 +414,18 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
         return no(JumpUpWhy::AfterDrop, static_cast<int>(f.last_drop_worked_ms + kDropStayMs - f.now));
     if (f.step_judge) return no(JumpUpWhy::StepJudge);
     if (f.press && (f.left_held || f.right_held)) return no(JumpUpWhy::Walking);
-    // 7. Limits.
-    if (f.presses_minute >= kJumpUpsPerMinute) return no(JumpUpWhy::MinuteCap, f.presses_minute);
-    if (monster && f.presses_target >= kJumpUpsPerTarget) return no(JumpUpWhy::TargetCap, f.presses_target);
-    if (monster && f.settles_target >= kJumpUpSettlesPerTarget) return no(JumpUpWhy::TargetCap, f.settles_target);
+    // 7. Limits -- the bar's own (the owner's Q2): its minute, the ↑s back on
+    // the floor with no hurt to this monster, a moment after each landing.
+    if (bar) {
+        if (f.bar_presses_minute >= kBarUpsPerMinute) return no(JumpUpWhy::MinuteCap, f.bar_presses_minute);
+        if (f.bar_dry_target >= kBarUpDryPerTarget) return no(JumpUpWhy::TargetCap, f.bar_dry_target);
+        if (f.bar_landed_ms != 0 && f.now < f.bar_landed_ms + kBarUpGapMs) return no(JumpUpWhy::TooSoon);
+    } else {
+        if (f.presses_minute >= kJumpUpsPerMinute) return no(JumpUpWhy::MinuteCap, f.presses_minute);
+        if (monster && f.presses_target >= kJumpUpsPerTarget) return no(JumpUpWhy::TargetCap, f.presses_target);
+        if (monster && f.settles_target >= kJumpUpSettlesPerTarget)
+            return no(JumpUpWhy::TargetCap, f.settles_target);
+    }
     // 8. No hold, the game in front, no pick-ups owed, GoBot not against.
     if (f.held) return no(JumpUpWhy::Held);
     if (!f.focused) return no(JumpUpWhy::Unfocused);
@@ -425,8 +447,10 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
         int px = 0;
         std::optional<JumpPlan> best = plan_jump_to(page, f.box, *f.stand, c.target, rules, &why, &px);
         if (!best) return no(JumpUpWhy::Plan, px, why);
-        if (f.plan && f.plan->kind == best->kind && f.plan->x >= best->run_l + kJumpUpRunInsetPx &&
-            f.plan->x <= best->run_r - kJumpUpRunInsetPx) {
+        // The take-off kept while its run holds it -- never a wall-foot
+        // jump's, which has one column (2026.11.12c).
+        if (f.plan && !f.plan->wall && !best->wall && f.plan->kind == best->kind &&
+            f.plan->x >= best->run_l + kJumpUpRunInsetPx && f.plan->x <= best->run_r - kJumpUpRunInsetPx) {
             const JumpColumn kept = judge_column(page, f.box, f.plan->take(), best->kind, rules, 0);
             if (kept.ok()) {
                 JumpPlan k = *best;
@@ -436,6 +460,7 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
                 k.land_top = kept.land_top;
                 k.rise = kept.rise;
                 k.headroom = kept.headroom;
+                k.band_top = kept.band_top;
                 k.walk_px = std::abs(k.x - f.stand->x);
                 best = k;
             }
@@ -449,19 +474,36 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
                 return no(JumpUpWhy::Plan, best->rise, JumpNo::Far);
         }
         c.plan = best;
+    } else if (bar) {
+        // In place, onto nothing planned: every floor a straight ↑ may come
+        // down on inside the area -- the press judges it again where it
+        // stopped.
+        const JumpColumn b = bar_up_landings(page, f.box, *f.stand, rules);
+        if (!b.ok()) return no(JumpUpWhy::Plan, b.bad_top >= 0 ? b.take_top - b.bad_top : 0, b.why);
+        JumpPlan j;
+        j.kind = JumpKind::Up;
+        j.x = j.land_x = j.run_l = j.run_r = f.stand->x;
+        j.feet_y = f.stand->y;
+        j.land_top = b.land_top;
+        j.headroom = jump_peak(JumpKind::Up).lo;
+        if (f.press) c.column = b;
+        c.plan = j;
+        return c;
     } else {
         if (!f.plan) return no(JumpUpWhy::Plan, 0, JumpNo::Short);
         c.plan = f.plan;
     }
 
     // 11. At the press: the column it stopped on -- its samples either way
-    // too -- passes, and lands on the planned floor.
+    // too -- passes, and lands on the planned floor. A wall-foot jump's: the
+    // foot of its step (2026.11.12c).
     if (f.press) {
         const JumpPlan& j = *c.plan;
         // Coming back into the box, the take-off no further out than now (the
         // Closer rule the way was planned by).
         const int out = f.purpose == JumpUpFor::Home ? zone_outside_px(f.box, f.stand->x, f.stand->y) : 0;
-        c.column = judge_column(page, f.box, *f.stand, j.kind, rules, out);
+        c.column = j.wall ? judge_wall_foot(page, f.box, *f.stand, j.land_x < j.x ? -1 : 1, rules, out)
+                          : judge_column(page, f.box, *f.stand, j.kind, rules, out);
         if (!c.column.ok()) return no(JumpUpWhy::OffColumn, f.stand->x - j.x, c.column.why);
         const std::optional<int> there = page.follow_to(c.column.land_x, c.column.land_top - 1, j.land_x);
         if (!there || std::abs(*there - j.land_top) > GameMapBook::kFollowLinkPx)
@@ -473,6 +515,7 @@ Hunter::JumpUpCall Hunter::jump_up_rule(const HunterConfig& cfg, const JumpUpFac
         at.land_top = c.column.land_top;
         at.rise = c.column.rise;
         at.headroom = c.column.headroom;
+        at.band_top = c.column.band_top;
         at.walk_px = 0;
         c.plan = at;
     }
@@ -488,10 +531,10 @@ Hunter::JumpUpFacts Hunter::jump_facts(const HunterConfig& cfg, JumpUpFor purpos
     f.now = now;
     f.area = spot_mode_ == SpotMode::Use && zone_.page != nullptr;
     f.page = zone_.page;
-    f.box = zone_.box;
+    // The way back's leg over the map's other floors (2026.11.12): judged in
+    // the whole map's box it was planned in (go_home_zone).
+    f.box = purpose == JumpUpFor::Home && home_legs_travel_ ? home_legs_box_ : zone_.box;
     f.trusted = zone_.page && trust_.trusted() && trust_.stem() == zone_.page->stem;
-    f.latched = jump_latch_ != JumpUpOff::None;
-    f.kinds_off = jump_kinds_off_;
     f.owed = owed_passes_ > 0;
     f.wired = book_ != nullptr && static_cast<bool>(drop_veto_) && static_cast<bool>(eyes_.air) &&
               static_cast<bool>(eyes_.own_since);
@@ -517,7 +560,10 @@ Hunter::JumpUpFacts Hunter::jump_facts(const HunterConfig& cfg, JumpUpFor purpos
     f.walk_held = jump_.walk_held;
     f.in_air = in_air(now);
     f.last_press_ms = last_press_ms_;
-    f.last_drop_worked_ms = last_drop_worked_ms_;
+    // A drop made for the bar's ↑ -- its landing under the monster within one
+    // ↑ (DropCall::one_up) -- holds no ↑ of the bar's (2026.11.12c review):
+    // that ↑ is what it dropped for.
+    f.last_drop_worked_ms = purpose == JumpUpFor::Bar && last_drop_one_up_ ? 0 : last_drop_worked_ms_;
     f.step_judge = back_.judge;
     f.left_held = cfg.left_key != 0 && is_down(cfg.left_key);
     f.right_held = cfg.right_key != 0 && is_down(cfg.right_key);
@@ -536,7 +582,30 @@ Hunter::JumpUpFacts Hunter::jump_facts(const HunterConfig& cfg, JumpUpFor purpos
     }
     f.plan = plan;
     f.scale = cfg.packet_scale > 0.0f ? cfg.packet_scale : 1.0f;
+    // The plain ↑ past the upper bar's (2026.11.12c): `level` is whether a
+    // monster on the level goes first (bar_up_toward works it out).
+    f.bar_presses_minute = bar_presses_minute(now);
+    f.bar_dry_target = bar_dry_for(slot, gen);
+    f.bar_landed_ms = bar_landed_ms_;
+    f.air_px = bar_air(cfg);
+    f.level_nearer = level;
     return f;
+}
+
+int Hunter::bar_presses_minute(std::uint64_t now) {
+    bar_presses_.erase(std::remove_if(bar_presses_.begin(), bar_presses_.end(),
+                                      [now](std::uint64_t t) { return now >= t + 60'000; }),
+                       bar_presses_.end());
+    return static_cast<int>(bar_presses_.size());
+}
+
+int Hunter::bar_dry_for(int slot, std::uint32_t gen) const {
+    if (slot < 0) return 0;
+    // Only those of the last kTargetCountMs (2026.11.24).
+    const std::uint64_t now = clock_now();
+    for (const TargetPresses& t : bar_dry_)
+        if (t.slot == slot && t.gen == gen) return t.fresh(now) ? t.n : 0;
+    return 0;
 }
 
 int Hunter::jump_presses_minute(std::uint64_t now) {
@@ -548,15 +617,19 @@ int Hunter::jump_presses_minute(std::uint64_t now) {
 
 int Hunter::jump_presses_for(int slot, std::uint32_t gen) const {
     if (slot < 0) return 0;
+    // Only those of the last kTargetCountMs (2026.11.24): no monster refused
+    // for the rest of the run.
+    const std::uint64_t now = clock_now();
     for (const TargetPresses& t : jump_targets_)
-        if (t.slot == slot && t.gen == gen) return t.n;
+        if (t.slot == slot && t.gen == gen) return t.fresh(now) ? t.n : 0;
     return 0;
 }
 
 int Hunter::jump_settles_for(int slot, std::uint32_t gen) const {
     if (slot < 0) return 0;
+    const std::uint64_t now = clock_now();
     for (const TargetPresses& t : jump_targets_)
-        if (t.slot == slot && t.gen == gen) return t.settles;
+        if (t.slot == slot && t.gen == gen) return t.fresh(now) ? t.settles : 0;
     return 0;
 }
 
@@ -566,7 +639,7 @@ void Hunter::jump_marks(const HunterConfig& cfg, const std::vector<Nameplate>& m
                         const std::vector<Listed>& listed, const GameMapBook::Page& p, MapPoint stand,
                         const WorldFix& f, std::vector<char>& marks) {
     if (!jump_area(cfg)) return;
-    const bool go = cfg.jump_up && jump_latch_ == JumpUpOff::None;
+    const bool go = cfg.jump_up;
     const std::uint64_t now = clock_now();
     const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
     const JumpRules rules = jump_rules(cfg, zone_.page);
@@ -719,7 +792,7 @@ bool Hunter::jump_toward(const HunterConfig& cfg, const Nameplate& target, const
     if (!call.ok()) jump_refused(cfg, call, JumpUpFor::Target, target.slot, target.gen, target.name, now);
     const JumpPlan j = *plan_call.plan;
     // At its take-off, a moment in the way: stood there, the walk to it kept.
-    if (!call.ok() && f.stand && std::abs(f.stand->x - j.x) <= kJumpUpLeadPx) {
+    if (!call.ok() && f.stand && std::abs(f.stand->x - j.x) <= take_off_lead(j)) {
         if (jump_.phase == JumpUpPhase::Approach && jump_.purpose == JumpUpFor::Target) {
             jump_.plan = j;
             jump_.renewed_pass = passes_;
@@ -759,7 +832,7 @@ bool Hunter::jump_go(const HunterConfig& cfg, JumpUpFor purpose, const JumpPlan&
     const bool mine = jump_.phase == JumpUpPhase::Settle && jump_.purpose == purpose && jump_.slot == slot &&
                       jump_.gen == gen;
     if (jump_.phase == JumpUpPhase::Settle && !mine) jump_settle_end("another jump", false, now);
-    if (mine || std::abs(stand->x - plan.x) <= kJumpUpLeadPx)
+    if (mine || std::abs(stand->x - plan.x) <= take_off_lead(plan))
         return jump_at(cfg, purpose, plan, slot, gen, name, now);
     if (jump_.phase == JumpUpPhase::Idle || jump_.purpose != purpose || jump_.slot != slot || jump_.gen != gen) {
         jump_.phase = JumpUpPhase::Approach;
@@ -847,6 +920,7 @@ bool Hunter::jump_at(const HunterConfig& cfg, JumpUpFor purpose, const JumpPlan&
         jump_.target_w = was.target_w;
         jump_.dy = was.dy;
         jump_.level = was.level;
+        jump_.target_top = call.placed ? call.target.y + 1 : -1;
         jump_.settle_from_ms = now;
         jump_.walk_held = walk_vk_ != 0;
         jump_.renewed_pass = passes_;
@@ -879,10 +953,14 @@ bool Hunter::jump_at(const HunterConfig& cfg, JumpUpFor purpose, const JumpPlan&
     }
     // Stopped off a column that holds: a fine tap toward the take-off, no
     // more than kJumpUpFineTapsMax -- then the stop waited for again.
-    if (call.why == JumpUpWhy::OffColumn && jump_.taps < kJumpUpFineTapsMax && f.stand) {
+    // Never for the bar's ↑, which goes where it stands (2026.11.12c); toward
+    // a step's face, held long enough for the step to stop it.
+    if (call.why == JumpUpWhy::OffColumn && jump_.taps < kJumpUpFineTapsMax && f.stand &&
+        purpose != JumpUpFor::Bar) {
         const int off = jump_.plan.x - f.stand->x;
         if (off != 0) {
-            const int ms = std::clamp(static_cast<int>(std::lround(std::abs(off) * 1000.0 / kZoneWalkPxPerS)), 60, 200);
+            int ms = std::clamp(static_cast<int>(std::lround(std::abs(off) * 1000.0 / kZoneWalkPxPerS)), 60, 200);
+            if (jump_.plan.wall) ms = std::max(ms, kWallPushMs);
             bool tapped = false;
             if (auto token = coord_.acquire("hunt-move", Priority::Movement))
                 tapped = press(off < 0 ? cfg.left_key : cfg.right_key, ms);
@@ -976,22 +1054,29 @@ bool Hunter::press_jump(const HunterConfig& cfg, const JumpUpCall& call, const s
     }
 
     // Up went out: counted against the limits, and watched for a map change
-    // for kPressWatchMs whatever comes of it.
-    jump_presses_.push_back(after);
-    if (purpose != JumpUpFor::Home && jump_.slot >= 0) {
+    // for kPressWatchMs whatever comes of it. The bar's ↑ against its own
+    // (2026.11.12c). The monster's count is of its last kTargetCountMs
+    // (TargetPresses::touch), and a jump judged to have done nothing, or
+    // fallen back, leaves the minute's again (end_flight) -- 2026.11.24.
+    const bool bar = purpose == JumpUpFor::Bar;
+    if (bar) bar_presses_.push_back(after);
+    else     jump_presses_.push_back(after);
+    if (!bar && purpose != JumpUpFor::Home && jump_.slot >= 0) {
         bool counted = false;
         for (TargetPresses& t : jump_targets_)
             if (t.slot == jump_.slot && t.gen == jump_.gen) {
+                t.touch(after);
                 ++t.n;
                 counted = true;
             }
         if (!counted) {
             if (jump_targets_.size() >= 64) jump_targets_.erase(jump_targets_.begin());
-            jump_targets_.push_back(TargetPresses{ jump_.slot, jump_.gen, 1 });
+            jump_targets_.push_back(TargetPresses{ jump_.slot, jump_.gen, 1, 0, after });
         }
     }
     const int for_it = jump_presses_for(jump_.slot, jump_.gen);
-    ++minute_jumps_[static_cast<std::size_t>(j.kind)];
+    if (bar) ++minute_bar_ups_;
+    else     ++minute_jumps_[static_cast<std::size_t>(j.kind)];
     last_press_ms_ = after;
     // A drop's press still watched kept watched beside this one; a jump's
     // left from before, closed.
@@ -1012,6 +1097,7 @@ bool Hunter::press_jump(const HunterConfig& cfg, const JumpUpCall& call, const s
 
     jump_.phase = JumpUpPhase::Air;
     jump_.plan = j;
+    jump_.minute_at = bar ? 0 : after;
     jump_.key_ms = k.down_ms;
     jump_.last_key_ms = k.last_ms != 0 ? k.last_ms : k.down_ms;
     jump_.whole = k.whole;
@@ -1022,12 +1108,17 @@ bool Hunter::press_jump(const HunterConfig& cfg, const JumpUpCall& call, const s
     jump_.y0 = j.feet_y;
     jump_.stem = stem;
     jump_.page = page;
-    jump_.box = zone_.box;
+    // Judged where it lands by the box it was planned in: the whole map's for
+    // a way back over the map's other floors (2026.11.12) -- the area's would
+    // call its landing outside, and turn jumps up off.
+    jump_.box = purpose == JumpUpFor::Home && home_legs_travel_ ? home_legs_box_ : zone_.box;
     jump_trace_until_ = k.down_ms + kJumpUpTraceMs;
     jump_traced_ms_ = k.down_ms;
+    jump_trace_info_ = !bar || bar_traced_++ < kBarTraceInfo;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        ++status_.jumps;
+        if (bar) ++status_.bar_ups;
+        else     ++status_.jumps;
     }
     publish_jump();
 
@@ -1046,18 +1137,73 @@ bool Hunter::press_jump(const HunterConfig& cfg, const JumpUpCall& call, const s
     else
         std::snprintf(keys, sizeof keys, "Up held %u ms", k.held_ms);
     const JumpPeak pk = jump_peak(j.kind);
-    GB_INFO("Hunter: jump up (%s) %s: from %d,%d on floor %d of %s (trusted: %s), onto floor %d at x %d (rise %d; "
-            "peak %d..%d, headroom %d; no floor outside the area within %d above), run %d..%d, inside the area; no "
-            "band round a gate (Ctrl+Up on a gate does not change the map); %s for it, %d this minute; %s",
-            jump_kind_name(j.kind), for_text(purpose, name).c_str(), j.x, j.feet_y, j.feet_y + 1, stem.c_str(),
-            trust_text(trust_.how()), j.land_top, j.land_x, j.rise, pk.lo, pk.hi, j.headroom, kJumpUpCeilingPx, j.run_l,
-            j.run_r, purpose == JumpUpFor::Home ? "1st" : nth(std::max(1, for_it)).c_str(), jump_presses_minute(after),
-            keys);
-    if (k.held_ms > kJumpUpHeldMaxMs) {
-        GB_WARN("Hunter: Up was held %u ms (over %u) -- jumps up OFF until the next BẮT ĐẦU", k.held_ms,
-                kJumpUpHeldMaxMs);
-        latch_jumps(JumpUpOff::HeldLong);
+    // A way back over the map's other floors (2026.11.12): judged by the
+    // map's floors, not the area's box.
+    const bool travel = purpose == JumpUpFor::Home && home_legs_travel_;
+    char guard[64];
+    if (travel)
+        std::snprintf(guard, sizeof guard, "the map's floors, not the area's");
+    else
+        // The key's own guard (2026.11.12c: Ctrl + ↑'s alone is
+        // kJumpUpCeilingPx; ↑ and ↑↑ look as high as they reach).
+        std::snprintf(guard, sizeof guard, "no floor outside the area within %d above",
+                      j.kind == JumpKind::CtrlUp ? kJumpUpCeilingPx
+                                                 : std::min(kJumpUpCeilingPx, pk.beyond() + kJumpUpHeadPx));
+    // The target's HP at the key, for "hit it" at the landing (the bar's).
+    bar_hp0_ = -1.0f;
+    if (bar) {
+        // The bar's ↑ (2026.11.12c): one plain ↑ in place.
+        const int above = -jump_.dy;
+        std::string over;
+        if (page)
+            for (const MapFloor& fl : page->floors_at(j.x)) {
+                const int rise = j.feet_y + 1 - fl.y;
+                if (rise <= kJumpUpFeetPx || rise > pk.beyond() || !fl.platform()) continue;
+                over += (over.empty() ? " (floors " : ", ") + std::to_string(fl.y);
+            }
+        if (!over.empty()) over += ")";
+        bar_hp0_ = bar_hp_seen_;
+        GB_INFO("Hunter: Up (one plain jump) %s: %d px above, past the upper bar's %d (air band to %d), %d across; "
+                "from %d,%d on floor %d of %s; every landing inside the area%s; %d this minute of %d; Up held %u ms",
+                for_text(purpose, name).c_str(), above, cfg.up(), cfg.up() + bar_air(cfg),
+                std::abs(jump_.target_w.x - j.x), j.x, j.feet_y, j.feet_y + 1, stem.c_str(), over.c_str(),
+                bar_presses_minute(after), kBarUpsPerMinute, k.held_ms);
+    } else if (j.wall) {
+        // The wall-foot jump (2026.11.12c, the owner's "Chỉ Ctrl+↑ tại chỗ").
+        const JumpColumn wc = page ? judge_wall_foot(*page, jump_.box, j.take(), j.land_x < j.x ? -1 : 1,
+                                                     JumpRules{}, zone_outside_px(jump_.box, j.x, j.feet_y))
+                                   : JumpColumn{};
+        std::string arc = "nothing";
+        if (wc.arc_top >= 0 && page) {
+            const std::optional<MapFloor> af = page->floor_near(wc.arc_x, wc.arc_top - 1);
+            arc = "floor " + std::to_string(wc.arc_top) + " (attr " + std::to_string(af ? af->attr : 0) + ") " +
+                  std::to_string(j.feet_y + 1 - wc.arc_top) + " px up" +
+                  (!jump_.box.contains(wc.arc_x, wc.arc_top - 1) ? ", outside the area" : "");
+        }
+        GB_INFO("Hunter: jump up (%s) %s: at the foot of a step of %d px at x %d on floor %d of %s (trusted: %s), onto "
+                "floor %d at x %d (the owner's Ctrl+Up in place); a straight arc would reach %s; %s for it, %d this "
+                "minute; %s",
+                jump_kind_name(j.kind), for_text(purpose, name).c_str(), j.rise, j.x, j.feet_y + 1, stem.c_str(),
+                trust_text(trust_.how()), j.land_top, j.land_x, arc.c_str(),
+                purpose == JumpUpFor::Home ? "1st" : nth(std::max(1, for_it)).c_str(), jump_presses_minute(after),
+                keys);
+    } else {
+        // clang-format off
+        GB_INFO("Hunter: jump up (%s) %s: from %d,%d on floor %d of %s (trusted: %s), onto floor %d at x %d (rise %d; "
+            "peak %d..%d, headroom %d; %s), run %d..%d, %s; no band round a gate (Ctrl+Up on a gate does not change "
+            "the map); %s for it, %d this minute; %s",
+        // clang-format on
+                jump_kind_name(j.kind), for_text(purpose, name).c_str(), j.x, j.feet_y, j.feet_y + 1, stem.c_str(),
+                trust_text(trust_.how()), j.land_top, j.land_x, j.rise, pk.lo, pk.hi, j.headroom, guard, j.run_l,
+                j.run_r, travel ? "over floors outside the area, on the way back into it" : "inside the area",
+                purpose == JumpUpFor::Home ? "1st" : nth(std::max(1, for_it)).c_str(), jump_presses_minute(after),
+                keys);
     }
+    // ↑ held long: a slow PC, said -- the jump judged as any other, nothing
+    // switched off (2026.11.24; jumps up off until the next start until then).
+    if (k.held_ms > kJumpUpHeldMaxMs)
+        GB_WARN("Hunter: Up was held %u ms (over %u) -- a slow PC; the jump is judged as any other", k.held_ms,
+                kJumpUpHeldMaxMs);
     (void)cfg;
     return true;
 }
@@ -1066,14 +1212,22 @@ bool Hunter::press_jump(const HunterConfig& cfg, const JumpUpCall& call, const s
 
 void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
     // Your own 0x002A and 0x0031 for kJumpUpTraceMs after a jump's key: where
-    // the flight went, for the next log (DEBUG).
+    // the flight went, for the next log -- at INFO for every planned jump and
+    // the first kBarTraceInfo bar ↑s of a run (2026.11.12c: the 0.3 s
+    // question), DEBUG after.
     if (jump_trace_until_ != 0 && eyes_.own_since) {
         for (const PacketWorld::OwnTrace& r : eyes_.own_since(jump_traced_ms_)) {
             if (r.kind != OwnReport::Air && r.kind != OwnReport::Cast) continue;
-            GB_DEBUG("Hunter: jump up +%lld ms: %s state %u at %.0f,%.0f, vy %.1f",
-                     static_cast<long long>(r.ms) - static_cast<long long>(jump_t_key_),
-                     r.kind == OwnReport::Air ? "0x002A" : "0x0031", static_cast<unsigned>(r.state),
-                     static_cast<double>(r.x), static_cast<double>(r.y), static_cast<double>(r.vy));
+            const long long at = static_cast<long long>(r.ms) - static_cast<long long>(jump_t_key_);
+            const char* what = r.kind == OwnReport::Air ? "0x002A" : "0x0031";
+            if (jump_trace_info_)
+                GB_INFO("Hunter: jump up +%lld ms: %s state %u at %.0f,%.0f, vy %.1f", at, what,
+                        static_cast<unsigned>(r.state), static_cast<double>(r.x), static_cast<double>(r.y),
+                        static_cast<double>(r.vy));
+            else
+                GB_DEBUG("Hunter: jump up +%lld ms: %s state %u at %.0f,%.0f, vy %.1f", at, what,
+                         static_cast<unsigned>(r.state), static_cast<double>(r.x), static_cast<double>(r.y),
+                         static_cast<double>(r.vy));
             jump_traced_ms_ = r.ms + 1;
         }
         if (now >= jump_trace_until_) jump_trace_until_ = 0;
@@ -1099,7 +1253,12 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
         return;
     }
     // Took off, and as which key: the counts by kind since the key, and your
-    // own reports since it.
+    // own reports since it -- by their vertical speed (2026.11.12c): the
+    // client of 2026-11-12 sent no state 1, 2 or 6 in the air, and every jump
+    // was judged a key the game did not take. The first report up says the
+    // kind (kJumpUpHighVyStep), a later one pushed up again past a free
+    // flight's speed the second ↑ (kJumpUpSecondPushStep); a state 2 or 6 is
+    // a second witness.
     int plain = 0, second = 0, high = 0;
     if (jump_.air_known && eyes_.air) {
         if (const std::optional<PacketWorld::AirCounts> a = eyes_.air()) {
@@ -1113,18 +1272,34 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
     }
     const std::vector<PacketWorld::OwnTrace> reports =
         eyes_.own_since ? eyes_.own_since(jump_.key_ms) : std::vector<PacketWorld::OwnTrace>{};
-    const JumpCheck::Flight fl = JumpCheck::flight_of(reports);
+    JumpCheck::Flight fl = JumpCheck::flight_of(reports);
     std::uint64_t first_up_ms = 0;
+    float vy0 = 0.0f;
+    unsigned state0 = 0;
     for (const PacketWorld::OwnTrace& r : reports) {
-        if (r.kind != OwnReport::Air) continue;
-        if (r.state == 1 && r.vy < 0.0f) ++plain;
-        if (r.state == 2) ++high;
-        if (r.state != 0 && r.vy < 0.0f && first_up_ms == 0) first_up_ms = r.ms;
-        if (r.state == 6 && (first_up_ms == 0 || r.ms <= first_up_ms + kJumpUpSecondSeenMs)) ++second;
+        if (r.kind != OwnReport::Air || r.state == 0) continue;
+        if (first_up_ms == 0) {
+            if (r.vy >= 0.0f) continue;
+            first_up_ms = r.ms;
+            vy0 = r.vy;
+            state0 = r.state;
+            if (r.state == 2 || r.vy <= kJumpUpHighVyStep) ++high;
+            else ++plain;
+            continue;
+        }
+        const double dt = static_cast<double>(r.ms - first_up_ms) / 1000.0;
+        const float free_vy =
+            vy0 + static_cast<float>(PacketWorld::kGravity / PacketWorld::kStepsPerSecond * dt);
+        const bool push = r.ms >= first_up_ms + kJumpUpSecondAfterMs && r.vy <= kJumpUpSecondVyStep &&
+                          r.vy <= free_vy - kJumpUpSecondPushStep;
+        if ((r.state == 6 || push) && r.ms <= first_up_ms + kJumpUpSecondSeenMs) ++second;
+        else if (r.state == 2) ++high;
     }
     if (fl.took_off || plain + second + high > 0) jump_.took_off = true;
     const bool reported = f.report_ms >= jump_.key_ms;
     if (f.airborne && reported) jump_.took_off = true;
+    jump_.off_vy = vy0;
+    jump_.off_state = state0;
 
     // Landed: the first 0x002A on the ground after the take-off, or the first
     // walk's report -- never a cast's, its y held at the top; with none of
@@ -1136,10 +1311,78 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
         landed = true;
         lx = round_px(fl.land.x);
         ly = round_px(fl.land.y);
-    } else if (reports.empty() && jump_.took_off && reported && !f.airborne && f.state == WorldFix::State::Known) {
+    } else if (reports.empty() && jump_.took_off && reported && !f.airborne && f.state == WorldFix::State::Known &&
+               f.ry >= 1.0f && !f.y_kept) {
+        // Not a report at y 0 (2026.11.12): no place, it would read as a
+        // landing off the map's floors -- nor one whose height the packets
+        // kept from before (WorldFix::y_kept).
         landed = true;
         lx = round_px(f.rx);
         ly = round_px(f.ry);
+    }
+    const GameMapBook::Page* p = jump_.page.get();
+    // A "landing" in mid-air (2026.11.15, the owner's log of 00:27:54): a
+    // Ctrl+Up hit at the top of its arc and knocked 80 px aside sent a 0x002A
+    // of state 0 at 2956,815 -- 426 px up, on no floor -- and the landing on
+    // the planned floor came 450 ms later. Judged as the first, the verdict was
+    // OffMap: the file distrusted, and with it every jump, drop and way back,
+    // for the rest of the session. A landing on none of the file's floors waits
+    // for a later 0x002A on the ground that is on one -- that is the landing --
+    // for kLandSettleMs; with none by then it stands, as before.
+    // Of any kind (the first live run, 10:15:51): flight_of takes the first
+    // report that is neither a cast's nor a 0x002A for the landing when no
+    // 0x002A of state 0 has come, and one in mid-air, 478 ms into a flight
+    // that landed at 1221 ms, had the file distrusted for 120 s. The wait runs
+    // kLandSettleMs from the newest report that put the character somewhere
+    // else than the "landing" did, kLandSamePx or more away -- of any kind,
+    // a cast's too: it is still moving -- and no longer than kJumpUpAirMaxMs
+    // after the key.
+    if (landed && fl.landed && fl.took_off && p != nullptr && now < jump_.key_ms + kJumpUpAirMaxMs) {
+        const auto grounded = [p](int x, int y) {
+            return p->floor_near(x, y).has_value() || p->step_lip_at({ x, y }).has_value();
+        };
+        if (!grounded(lx, ly)) {
+            const PacketWorld::OwnTrace* later = nullptr;
+            std::uint64_t moved_ms = fl.land.ms;
+            for (const PacketWorld::OwnTrace& r : reports) {
+                if (r.ms <= fl.land.ms || r.y < 1.0f) continue;
+                if (r.kind == OwnReport::Air && r.state == 0 && grounded(round_px(r.x), round_px(r.y))) later = &r;
+                if (std::abs(round_px(r.x) - lx) >= kLandSamePx || std::abs(round_px(r.y) - ly) >= kLandSamePx)
+                    moved_ms = std::max(moved_ms, r.ms);
+            }
+            if (later != nullptr) {
+                fl.land = *later;
+                lx = round_px(later->x);
+                ly = round_px(later->y);
+            } else if (now < moved_ms + kLandSettleMs) {
+                return;     // it may still be moving: judged when the next report comes, or the time is up
+            }
+        }
+    }
+    // No take-off reported, its settled report after the key higher up: a
+    // climb. A wall-foot jump's on the step's top or its lip -- worked
+    // (2026.11.12c); the bar's ↑ on any floor of the file above its own, or a
+    // step's lip, judged below as a landing there (2026.11.12c review: at
+    // t49_s5's step foot a ↑ may climb the step, and a climb was counted as a
+    // ↑ that did nothing).
+    bool climbed = false;
+    if (!landed && !jump_.took_off && now >= jump_.last_key_ms + kJumpUpJudgeMs && p != nullptr && reported &&
+        !f.airborne && f.state == WorldFix::State::Known && f.ry >= 1.0f && !f.y_kept) {
+        const int rx = round_px(f.rx), ry = round_px(f.ry);
+        if (jump_.plan.wall) {
+            const std::optional<int> top = p->follow_to(jump_.plan.land_x, jump_.plan.land_top - 1, rx);
+            const bool lip = p->on_step_lip({ rx, ry }) && std::abs(ry - (jump_.plan.land_top - 1)) <=
+                                                              GameMapBook::kOnFloorPx;
+            if ((top && std::abs(ry + 1 - *top) <= kJumpUpFloorMatchPx) || lip) {
+                end_flight(cfg, JumpUpVerdict::Worked, now, rx, ry, nullptr, "no take-off reported: a climb");
+                return;
+            }
+        } else if (jump_.purpose == JumpUpFor::Bar && jump_.y0 - ry > kJumpUpFloorMatchPx &&
+                   (p->on_floor({ rx, ry }) || p->on_step_lip({ rx, ry }))) {
+            landed = climbed = true;
+            lx = rx;
+            ly = ry;
+        }
     }
     if (!landed) {
         if (!jump_.took_off && now >= jump_.last_key_ms + kJumpUpJudgeMs) {
@@ -1150,6 +1393,8 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
             end_flight(cfg, JumpUpVerdict::Unknown, now, 0, 0, "still in the air", {});
         return;
     }
+    // Landed higher than a plain ↑ reaches: a high jump, whatever was said.
+    if (jump_.y0 - ly > jump_peak(JumpKind::Up).beyond()) ++high;
 
     // The kind it should have been: ↑↑ without its second ↑ is a plain ↑.
     JumpKind meant = jump_.plan.kind;
@@ -1157,7 +1402,11 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
     const bool its_kind = meant == JumpKind::Up     ? plain + second + high > 0
                           : meant == JumpKind::UpUp ? second > 0
                                                     : high > 0;
-    // The flight, for the log: the take-off's lag, the time up, g≈.
+    jump_.other_kind = its_kind ? nullptr
+                       : meant == JumpKind::CtrlUp ? "a plain jump"
+                                                   : "a single jump (no second push)";
+    // The flight, for the log: the take-off's lag, the time up, g≈ -- its
+    // kind by its speed.
     std::string more;
     std::optional<double> g;
     int flight_ms = -1;
@@ -1168,9 +1417,7 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
                              static_cast<double>(fl.land.ms - fl.push.ms) / 1000.0);
         char text[200];
         std::snprintf(text, sizeof text, "0x002A: %s %.0f at +%lld ms, landed +%lld; flight %d ms%s",
-                      fl.off.state == 2   ? "high"
-                      : fl.off.state == 6 ? "second"
-                                          : "jump",
+                      second > 0 && meant == JumpKind::UpUp ? "second" : kind_by_vy(fl.off.vy),
                       static_cast<double>(fl.off.vy), static_cast<long long>(fl.off.ms - jump_.key_ms),
                       static_cast<long long>(fl.land.ms - jump_.key_ms), flight_ms, g ? "" : ", g not known");
         more = text;
@@ -1179,47 +1426,86 @@ void Hunter::jump_follow(const HunterConfig& cfg, std::uint64_t now) {
             more += text;
         }
     }
+    if (climbed) more = "no take-off reported: a climb";
 
-    // Where it came down, against the file: off its floors, outside the
-    // area, not the key's jump, the planned floor, a plain ↑ where ↑↑'s second
-    // ↑ was not sent, back where it stood, or another floor.
-    const GameMapBook::Page* p = jump_.page.get();
-    const std::optional<MapFloor> on = p ? p->floor_near(lx, ly) : std::nullopt;
-    const std::optional<int> planned = p ? p->follow_to(jump_.plan.land_x, jump_.plan.land_top - 1, lx) : std::nullopt;
-    const std::optional<int> own = p ? p->follow_to(jump_.x0, jump_.y0, lx) : std::nullopt;
+    // Where it came down, against the file (2026.11.12c's order): off its
+    // floors, outside the area, the planned floor -- or one of the key's band
+    // above it -- whatever the kind; not the key's jump; a plain ↑ where ↑↑'s
+    // second ↑ was not sent; back where it stood; another floor above within
+    // the key's reach (a move), past it (Physics), or below.
+    // At a step's lip -- a few px past its face, on its top -- standing on
+    // that step, whatever the jump was for (2026.11.12c review: a bar ↑ at
+    // t49_s5's step foot that climbs it lands there, and read as off the
+    // file's floors it had the file distrusted for the session): judged at
+    // the step's own column.
+    std::optional<MapFloor> on = p ? p->floor_near(lx, ly) : std::nullopt;
+    int jx = lx;
+    bool lip = false;
+    if (p && !on)
+        if (const std::optional<MapPoint> s = p->step_lip_at({ lx, ly })) {
+            on = p->floor_near(s->x, s->y);
+            jx = s->x;
+            lip = on.has_value();
+        }
+    const std::optional<int> planned = p ? p->follow_to(jump_.plan.land_x, jump_.plan.land_top - 1, jx) : std::nullopt;
+    const std::optional<int> own = p ? p->follow_to(jump_.x0, jump_.y0, jx) : std::nullopt;
+    const std::optional<int> band_at =
+        p && jump_.plan.band_top >= 0 ? p->follow_to(jump_.plan.land_x, jump_.plan.band_top - 1, jx) : std::nullopt;
     const bool cut = jump_.plan.kind == JumpKind::UpUp && !jump_.whole;
+    jump_.band_landing = false;
     JumpUpVerdict v = JumpUpVerdict::Lower;
-    if (!on)
-        v = JumpUpVerdict::OffMap;
-    else if (!jump_.box.contains(lx, ly))
-        v = JumpUpVerdict::Outside;
-    else if (!its_kind)
-        v = JumpUpVerdict::KindMiss;
-    else if (planned && std::abs(on->y - *planned) <= kJumpUpFloorMatchPx)
+    if (lip && jump_.plan.wall && std::abs(ly - (jump_.plan.land_top - 1)) <= GameMapBook::kOnFloorPx &&
+        jump_.box.contains(lx, ly)) {
         v = JumpUpVerdict::Worked;
-    else if (cut)
+    } else if (!on) {
+        v = JumpUpVerdict::OffMap;
+    } else if (!jump_.box.contains(lx, ly)) {
+        v = JumpUpVerdict::Outside;
+    } else if (planned && std::abs(on->y - *planned) <= kJumpUpFloorMatchPx) {
+        v = JumpUpVerdict::Worked;
+    } else if (band_at && planned && on->y >= *band_at - kJumpUpFloorMatchPx &&
+               on->y < *planned - kJumpUpFloorMatchPx) {
+        v = JumpUpVerdict::Worked;
+        jump_.band_landing = true;
+    } else if (!its_kind && !jump_.plan.wall && jump_.purpose != JumpUpFor::Bar) {
+        v = JumpUpVerdict::KindMiss;
+    } else if (cut) {
         v = JumpUpVerdict::Unknown;
-    else if (own && std::abs(on->y - *own) <= kJumpUpFloorMatchPx && std::abs(ly - jump_.y0) <= kJumpUpLandPx)
+    } else if (own && std::abs(on->y - *own) <= kJumpUpFloorMatchPx && std::abs(ly - jump_.y0) <= kJumpUpLandPx) {
         v = JumpUpVerdict::FellBack;
-    else if (on->y < (planned ? *planned : jump_.plan.land_top) - kJumpUpFloorMatchPx)
-        v = JumpUpVerdict::Higher;
+    } else if (on->y < (planned ? *planned : jump_.plan.land_top) - kJumpUpFloorMatchPx) {
+        v = (jump_.y0 + 1) - on->y <= jump_peak(jump_.plan.kind).beyond() ? JumpUpVerdict::Moved
+                                                                           : JumpUpVerdict::Higher;
+    }
+    // The bar's ↑ (2026.11.12c) by where it came down: onto the monster's
+    // floor (worked), back on its own (the attack in the air only), another
+    // floor inside the area (a move); outside, off the map, as any.
+    if (jump_.purpose == JumpUpFor::Bar && on && jump_.box.contains(lx, ly)) {
+        const std::optional<int> theirs =
+            p && jump_.target_top >= 0 ? p->follow_to(jump_.target_w.x, jump_.target_top - 1, jx) : std::nullopt;
+        if (theirs && std::abs(on->y - *theirs) <= kDropSameFloorPx && (!own || std::abs(on->y - *own) > kDropSameFloorPx))
+            v = JumpUpVerdict::Worked;
+        else if (own && std::abs(on->y - *own) <= kJumpUpFloorMatchPx)
+            v = JumpUpVerdict::AirOnly;
+        else
+            v = JumpUpVerdict::Moved;
+    }
 
     // g from a clean flight only -- up and down onto the planned floor; a
-    // bump from below is no free flight. Logged, never fed back: twice out of
-    // range in a run, the jumps are not what the model says.
-    if (g && v == JumpUpVerdict::Worked) {
+    // bump from below is no free flight. Logged, never fed back -- and since
+    // 2026.11.24 never a switch off: the jump got there, and the next goes on
+    // as planned (twice out of range in a run had the jumps up off until the
+    // next start until then). Never from the bar's ↑s: the minute line's.
+    if (g && v == JumpUpVerdict::Worked && !jump_.band_landing) {
         minute_jump_g_sum_ += *g;
         ++minute_jump_g_n_;
-        if ((*g < kJumpUpGravityLo || *g > kJumpUpGravityHi) && ++jump_gravity_out_ >= kJumpUpGravityOut) {
-            GB_INFO("Hunter: g≈%.0f measured, %d flights out of %.0f..%.0f this run -- jumps up OFF until the next "
-                    "BẮT ĐẦU (the character jumps otherwise than GoBot works out)",
-                    *g, jump_gravity_out_, kJumpUpGravityLo, kJumpUpGravityHi);
-            latch_jumps(JumpUpOff::Physics);
-        }
+        if (jump_.purpose != JumpUpFor::Bar && (*g < kJumpUpGravityLo || *g > kJumpUpGravityHi))
+            GB_INFO("Hunter: g≈%.0f measured, out of %.0f..%.0f -- logged only; jumps up go on", *g, kJumpUpGravityLo,
+                    kJumpUpGravityHi);
     }
     // A fall's hint: bumped from below -- a short flight -- or came up short.
     if (flight_ms >= 0 && (v == JumpUpVerdict::FellBack || v == JumpUpVerdict::Lower)) {
-        const double arc_ms = shortest_arc_s(meant) * 1000.0;
+        const double arc_ms = jump_shortest_arc_s(meant) * 1000.0;
         more += flight_ms < kJumpUpBumpShare * arc_ms ? "; bumped from below" : "; came up short";
     }
     end_flight(cfg, v, now, lx, ly, v == JumpUpVerdict::Unknown ? "the second Up not sent: a plain Up, as planned for"
@@ -1237,16 +1523,18 @@ void Hunter::jump_settle_end(const char* why, bool backoff, std::uint64_t now) {
         if (target_since_ms_ == jump_.settle_from_ms) target_since_ms_ = jump_.since0 + spent;
         if (reach_ms_ == jump_.settle_from_ms) reach_ms_ = jump_.reach0 + spent;
         // Counted for its monster: kJumpUpSettlesPerTarget let go of without a
-        // press, and no more are begun for it.
+        // press in kTargetCountMs, and no more are begun for it until the last
+        // is that old (2026.11.24: the rest of the run until then).
         if (jump_.slot >= 0) {
             TargetPresses* it = nullptr;
             for (TargetPresses& t : jump_targets_)
                 if (t.slot == jump_.slot && t.gen == jump_.gen) it = &t;
             if (it == nullptr) {
                 if (jump_targets_.size() >= 64) jump_targets_.erase(jump_targets_.begin());
-                jump_targets_.push_back(TargetPresses{ jump_.slot, jump_.gen, 0 });
+                jump_targets_.push_back(TargetPresses{ jump_.slot, jump_.gen, 0, 0, now });
                 it = &jump_targets_.back();
             }
+            it->touch(now);
             ++it->settles;
         }
     }
@@ -1278,8 +1566,37 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
     const MapPoint take{ j.x0, j.y0 };
     const MapPoint land{ j.plan.land_x, j.plan.land_top - 1 };
     bool learn = false, fail = false, solid = false;
+    const unsigned long long skip_s = kLearnedForgetMs / 1000;
     if (v != JumpUpVerdict::Unknown && v != JumpUpVerdict::Gate) jump_landed_ = true;
-    switch (v) {
+    // The take-off's own kind said beside a landing that settles it
+    // (2026.11.12c): "taken by its landing".
+    char kind_note[160] = "";
+    if (j.other_kind != nullptr)
+        std::snprintf(kind_note, sizeof kind_note,
+                      "; its 0x002A said %s (take-off %.0f a step, state %u) -- taken by its landing", j.other_kind,
+                      static_cast<double>(j.off_vy), j.off_state);
+    // A wall-foot jump that came down elsewhere than the step (2026.11.12c,
+    // the owner's Q8): that take-off learned -- skipped kLearnedForgetMs since
+    // 2026.11.24, the wall-foot jumps and the others staying on (until then
+    // wall-foot jumps were off for the run) -- and the way back takes over.
+    const bool wall_elsewhere = j.plan.wall && (v == JumpUpVerdict::Outside || v == JumpUpVerdict::Higher ||
+                                                v == JumpUpVerdict::Moved || v == JumpUpVerdict::Lower);
+    // The bar's ↑ (2026.11.12c): its own verdicts and counts.
+    const bool bar = j.purpose == JumpUpFor::Bar;
+    if (bar) {
+        learn = end_bar_flight(cfg, v, now, lx, ly, j, tail);
+    } else if (wall_elsewhere) {
+        learn = fail = true;
+        ++minute_jump_higher_;
+        if (j.purpose == JumpUpFor::Home) {
+            way_asked_ = false;
+            return_quiet_ms_ = 0;
+        }
+        GB_INFO("Hunter: the wall-foot Ctrl+Up at %d,%d landed at %d,%d on floor %d%s -- that take-off skipped %llu s, "
+                "other jumps stay on; %s%s",
+                j.x0, j.y0, lx, ly, ly + 1, v == JumpUpVerdict::Outside ? ", outside the area" : "", skip_s,
+                v == JumpUpVerdict::Outside ? "the walk back takes over" : "re-planned", tail.c_str());
+    } else switch (v) {
         case JumpUpVerdict::Worked:
             jump_fails_row_ = 0;
             ++minute_jump_worked_;
@@ -1297,8 +1614,30 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++status_.jumps_worked;
             }
-            GB_INFO("Hunter: jump up worked: landed at %d,%d on floor %d, %d px up, %llu ms after the key%s", lx, ly,
-                    j.plan.land_top, j.y0 - ly, ms, tail.c_str());
+            if (j.band_landing) {
+                GB_INFO("Hunter: jump up worked: landed at %d,%d on floor %d, %d px up, in the key's uncertain band "
+                        "over the planned %d, %llu ms after the key%s%s",
+                        lx, ly, ly + 1, j.y0 - ly, j.plan.land_top, ms, kind_note, tail.c_str());
+            } else {
+                const std::string notes = kind_note + tail;
+                GB_INFO("Hunter: jump up worked: landed at %d,%d on floor %d, %d px up, %llu ms after the key%s", lx, ly,
+                        j.plan.land_top, j.y0 - ly, ms, notes.c_str());
+            }
+            break;
+        case JumpUpVerdict::Moved:
+            // Another floor above inside the area, within the key's reach: a
+            // move -- no fail; the way and the seek asked again.
+            ++minute_jump_worked_;
+            retreat_[0] = retreat_[1] = Retreat{};
+            if (j.purpose == JumpUpFor::Home) {
+                way_asked_ = false;
+                return_quiet_ms_ = 0;
+            } else if (have_target_ && target_slot_ == j.slot && target_gen_ == j.gen) {
+                target_since_ms_ = reach_ms_ = now;
+            }
+            GB_INFO("Hunter: jump up landed at %d,%d on floor %d, above the planned %d inside the area and within %s's "
+                    "reach -- taken as a move; the way and the seek asked again%s",
+                    lx, ly, ly + 1, j.plan.land_top, jump_kind_name(j.plan.kind), tail.c_str());
             break;
         case JumpUpVerdict::FellBack:
         case JumpUpVerdict::Lower:
@@ -1310,10 +1649,14 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
             } else {
                 ++minute_jump_lower_;
             }
-            GB_INFO("Hunter: jump up %s to %d,%d%s -- no %s to floor %d within %d px of x %d this session; %d in a row",
+            GB_INFO("Hunter: jump up %s to %d,%d%s -- no %s to floor %d within %d px of x %d for %llu s, another column "
+                    "first; %d in a row",
                     v == JumpUpVerdict::FellBack ? "FELL BACK" : "landed LOWER", lx, ly, tail.c_str(),
-                    jump_kind_name(j.plan.kind), j.plan.land_top, GameMapBook::kNoJumpXPx, j.x0, jump_fails_row_ + 1);
-            if (v == JumpUpVerdict::FellBack && j.page) {
+                    jump_kind_name(j.plan.kind), j.plan.land_top, GameMapBook::kNoJumpXPx, j.x0, skip_s,
+                    jump_fails_row_ + 1);
+            // Never from a wall-foot jump's: two say nothing of the step's top
+            // from below (2026.11.12c).
+            if (v == JumpUpVerdict::FellBack && j.page && !j.plan.wall) {
                 // A second fall back onto the same floor: solid from below.
                 const MapTrail l = j.page->follow(land.x, land.y, -1);
                 const MapTrail r = j.page->follow(land.x, land.y, 1);
@@ -1332,51 +1675,59 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
                     if (++it->n >= kJumpUpSolidAfter && book_ && !j.stem.empty()) {
                         solid = true;
                         book_->learn_solid(j.stem, land);
-                        GB_INFO("Hunter: floor %d (x %d..%d) taken as solid from below this session -- %d jumps up "
+                        note_learned(LearnedKind::Solid, j.stem, land, now);
+                        GB_INFO("Hunter: floor %d (x %d..%d) taken as solid from below for %llu s -- %d jumps up "
                                 "fell back from it",
-                                j.plan.land_top, le.x, re.x, it->n);
+                                j.plan.land_top, le.x, re.x, skip_s, it->n);
                     }
                 }
             }
             break;
-        case JumpUpVerdict::KindMiss: {
-            fail = true;
+        case JumpUpVerdict::KindMiss:
+            // A failed press like any other (2026.11.24): the key goes on --
+            // two such misses had it off until the next start until then.
+            // Learned too (the 2026.11.24 review): that kind from that
+            // take-off onto that floor skipped kLearnedForgetMs, so the next
+            // try comes from another column -- not the same jump every 3 s.
+            learn = fail = true;
             ++minute_jump_kind_miss_;
-            const std::size_t k = static_cast<std::size_t>(j.plan.kind);
-            const int n = ++jump_kind_misses_[k];
-            GB_INFO("Hunter: %s came out as %s -- %d of %d%s", jump_kind_name(j.plan.kind),
-                    j.plan.kind == JumpKind::CtrlUp ? "a plain jump (state 1, no state 2)"
-                                                    : "a single jump (no state 6)",
-                    n, kJumpUpKindMisses, tail.c_str());
-            if (n >= kJumpUpKindMisses) {
-                jump_kinds_off_ = static_cast<std::uint8_t>(jump_kinds_off_ | bit_of(j.plan.kind));
-                ++jump_epoch_;
-                GB_INFO("Hunter: %s OFF until the next BẮT ĐẦU: %d presses the game did not take as that jump",
-                        jump_kind_name(j.plan.kind), n);
-            }
+            GB_INFO("Hunter: %s came out as %s (take-off at %.0f a step, state %u) -- a press that did not get there; "
+                    "the key stays on, that take-off skipped %llu s, tried again from another%s",
+                    jump_kind_name(j.plan.kind),
+                    j.plan.kind == JumpKind::CtrlUp ? "a plain jump" : "a single jump (no second push)",
+                    static_cast<double>(j.off_vy), j.off_state, skip_s, tail.c_str());
             break;
-        }
         case JumpUpVerdict::Higher:
+            // Past the key's reach: that kind from that take-off onto that
+            // floor skipped kLearnedForgetMs, so the retry is not the same jump
+            // -- no latch (2026.11.24; jumps up off until the next start until
+            // then). The way asked again from the landing.
+            learn = fail = true;
             ++minute_jump_higher_;
-            latch_jumps(JumpUpOff::Physics);
-            GB_INFO("Hunter: jump up landed at %d,%d on floor %d, ABOVE the planned %d -- jumps up OFF until the next "
-                    "BẮT ĐẦU%s",
-                    lx, ly, ly + 1, j.plan.land_top, tail.c_str());
+            way_asked_ = false;
+            GB_INFO("Hunter: jump up landed at %d,%d on floor %d, ABOVE the planned %d -- that take-off skipped %llu s, "
+                    "jumps up go on%s",
+                    lx, ly, ly + 1, j.plan.land_top, skip_s, tail.c_str());
             break;
         case JumpUpVerdict::Outside:
+            // Outside the area: the walk back takes over (the owner's rule),
+            // that take-off skipped kLearnedForgetMs -- no latch (2026.11.24).
+            learn = fail = true;
             ++minute_jump_higher_;
-            latch_jumps(JumpUpOff::Physics);
-            GB_WARN("Hunter: jump up landed at %d,%d, OUTSIDE the hunting area -- jumps up OFF until the next BẮT ĐẦU; "
-                    "the walk back takes over%s",
-                    lx, ly, tail.c_str());
+            GB_WARN("Hunter: jump up landed at %d,%d, OUTSIDE the hunting area -- that take-off skipped %llu s, jumps "
+                    "up go on; the walk back takes over%s",
+                    lx, ly, skip_s, tail.c_str());
             break;
         case JumpUpVerdict::OffMap:
+            // Off the file's floors: MapTrust lets the file go -- gone by again
+            // once kTrustPoints standing points on its floors agree, no clock
+            // -- and nothing is switched off (2026.11.24; the file distrusted
+            // kDistrustMs and the jumps up off until then).
             ++minute_jump_unknown_;
-            if (book_ && !j.stem.empty()) book_->distrust(j.stem);
-            latch_jumps(JumpUpOff::OffMap);
-            GB_WARN("Hunter: jump up landed at %d,%d, on no floor of %s's file -- jumps up OFF until the next BẮT ĐẦU; "
-                    "the file no longer trusted%s",
-                    lx, ly, stem, tail.c_str());
+            trust_.lose("a jump up landed off the file's floors");
+            GB_WARN("Hunter: jump up landed at %d,%d, on no floor of %s's file -- the file let go of until %d standing "
+                    "points on its floors agree again (no clock); jumps up go on then%s",
+                    lx, ly, stem, MapTrust::kTrustPoints, tail.c_str());
             break;
         case JumpUpVerdict::Nothing:
             fail = true;
@@ -1384,6 +1735,7 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
             GB_INFO("Hunter: jump up (%s) at %d,%d did nothing in %llu ms -- %d in a row", jump_kind_name(j.plan.kind),
                     j.x0, j.y0, static_cast<unsigned long long>(kJumpUpJudgeMs), jump_fails_row_ + 1);
             break;
+        case JumpUpVerdict::AirOnly:    // the bar's alone, above
         case JumpUpVerdict::Unknown:
         case JumpUpVerdict::Gate:
         case JumpUpVerdict::None:
@@ -1395,23 +1747,43 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
     }
     if (learn && book_ && !j.stem.empty()) {
         book_->learn_no_jump(j.stem, GameMapBook::NoJump{ take, land, static_cast<std::uint8_t>(j.plan.kind) });
+        note_learned(LearnedKind::NoJump, j.stem, take, now);
         ++jump_epoch_;
     }
     if (solid) ++jump_epoch_;
+    // A jump that did nothing, or fell back, moved nothing: out of the
+    // minute's count again (2026.11.24) -- kJumpUpsPerMinute counts only the
+    // presses that moved the character, and a lost press never has the next
+    // try wait for the minute. Nor a jump that came out as another kind (the
+    // 2026.11.24 review): four of them filled the minute, and every jump up,
+    // the working ones too, waited up to 45 s.
+    if ((v == JumpUpVerdict::Nothing || v == JumpUpVerdict::FellBack || v == JumpUpVerdict::KindMiss) &&
+        j.minute_at != 0) {
+        const auto at = std::find(jump_presses_.begin(), jump_presses_.end(), j.minute_at);
+        if (at != jump_presses_.end()) jump_presses_.erase(at);
+    }
     if (fail) {
+        // The monster passed over only a moment, never the jumps (2026.11.24,
+        // the owner's "thử lại luôn, hoặc dừng ra skill rồi nhảy"): the first
+        // press of a row that did not get there kRetryPassOverMs -- the next
+        // look tries again -- every other kRetryFightMs, one fight turn. Until
+        // 2026.11.24 only a first that did nothing got the short one, any
+        // other 2 x give_up_ms, and three in a row paused the jumps 30 / 60 /
+        // 120 s.
+        const bool first_fail = jump_fails_row_ == 0;
+        const std::uint64_t over_ms = first_fail ? kRetryPassOverMs : kRetryFightMs;
         ++jump_fails_row_;
-        ++jump_fails_run_;
         if (j.purpose != JumpUpFor::Home) {
             // The monster it was for, passed over a while -- not counted as
             // given up: the minute line counts it among the jumps. By the
             // seek too, in view or not, by its slot.
             if (have_target_ && target_slot_ == j.slot && target_gen_ == j.gen) {
                 if (gave_up_.size() < 16)
-                    gave_up_.push_back(GaveUpSpot{ target_x_, target_y_, now + 2ull * cfg.give_up_ms, true });
+                    gave_up_.push_back(GaveUpSpot{ target_x_, target_y_, now + over_ms, true });
                 end_fight("the jump up did not get there");
                 have_target_ = false;
             }
-            if (j.slot >= 0) seek_skip(j.slot, j.gen, now + 2ull * cfg.give_up_ms, SeekNo::Passed);
+            if (j.slot >= 0) seek_skip(j.slot, j.gen, now + over_ms, SeekNo::Passed);
             if (j.purpose == JumpUpFor::Seek && seek_.on && seek_.slot == j.slot && seek_.gen == j.gen)
                 seek_let_go(nullptr);
         } else if (v == JumpUpVerdict::FellBack || v == JumpUpVerdict::Lower) {
@@ -1426,16 +1798,13 @@ void Hunter::end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t 
                 ++status_.return_give_ups;
             }
             if (return_strikes_ >= kSpotMaxTries) {
+                // A round of tries over: the next spot_retry_ms on
+                // (track_give_up, 2026.11.24; a long wait until then).
                 spot_why_ = SpotWhy::GaveUp;
-                GB_INFO("Hunter: the way back's jumps up got nowhere %d times in a row -- no more tries",
-                        return_strikes_);
+                GB_INFO("Hunter: the way back's jumps up got nowhere %d times in a row -- this round of tries over, "
+                        "the next after %u s",
+                        return_strikes_, cfg.spot_retry_ms / 1000);
             }
-        }
-        if (jump_fails_row_ >= kJumpUpFailsInRow || jump_fails_run_ >= kJumpUpFailsPerRun) {
-            latch_jumps(JumpUpOff::Fails);
-            GB_INFO("Hunter: %d jumps up %s did not get there -- jumps up OFF until the next BẮT ĐẦU",
-                    jump_fails_row_ >= kJumpUpFailsInRow ? jump_fails_row_ : jump_fails_run_,
-                    jump_fails_row_ >= kJumpUpFailsInRow ? "in a row" : "this run");
         }
     }
     // What the press's record has to undo, should the map turn out changed --
@@ -1458,18 +1827,23 @@ void Hunter::jump_gate(PressRecord& r, std::uint64_t now) {
     r.open = false;
     const WorldFix& f = drop_fix_;
     // Whatever was judged of it before is undone: a no-jump point, a floor
-    // taken as solid, a fail, its count in this minute's line.
-    if (r.no_jump && book_) book_->unlearn_no_jump(r.stem, { r.x0, r.y0 });
-    if (r.solid && book_) book_->unlearn_solid(r.stem, r.solid_at);
-    if (r.no_jump || r.solid) ++jump_epoch_;
-    if (r.failed) {
-        if (jump_fails_row_ > 0) --jump_fails_row_;
-        if (jump_fails_run_ > 0) --jump_fails_run_;
+    // taken as solid -- and their notes (2026.11.24) -- a fail, its count in
+    // this minute's line.
+    if (r.no_jump && book_) {
+        book_->unlearn_no_jump(r.stem, { r.x0, r.y0 });
+        drop_learned_note(LearnedKind::NoJump, r.stem, { r.x0, r.y0 });
     }
+    if (r.solid && book_) {
+        book_->unlearn_solid(r.stem, r.solid_at);
+        drop_learned_note(LearnedKind::Solid, r.stem, r.solid_at);
+    }
+    if (r.no_jump || r.solid) ++jump_epoch_;
+    if (r.failed && jump_fails_row_ > 0) --jump_fails_row_;
     if (r.jverdict != JumpUpVerdict::None && r.minute_from == minute_from_ms_) {
         int* n = nullptr;
         switch (r.jverdict) {
-            case JumpUpVerdict::Worked:   n = &minute_jump_worked_; break;
+            case JumpUpVerdict::Worked:
+            case JumpUpVerdict::Moved:    n = &minute_jump_worked_; break;
             case JumpUpVerdict::FellBack: n = &minute_jump_fell_; break;
             case JumpUpVerdict::KindMiss: n = &minute_jump_kind_miss_; break;
             case JumpUpVerdict::Lower:    n = &minute_jump_lower_; break;
@@ -1483,40 +1857,33 @@ void Hunter::jump_gate(PressRecord& r, std::uint64_t now) {
     if (jump_.phase == JumpUpPhase::Air && jump_.key_ms == r.down_ms) jump_.phase = JumpUpPhase::Idle;
     ++minute_jump_gate_;
     // Both ends are gates: where it pressed, on the map it left, and where the
-    // entry put it, on the one it came to.
+    // entry put it, on the one it came to -- knowledge, kept for the session.
     const MapPoint to{ round_px(f.entry_x), round_px(f.entry_y) };
     if (book_) {
         if (!r.stem.empty()) book_->learn_gate(r.stem, { r.x0, r.y0 });
         if (f.map_known) book_->learn_gate(GameMapBook::stem_of(f.map, f.area), to);
     }
-    latch_jumps(JumpUpOff::MapChanged);
-    drop_halt_ = true;
+    // And the hunt goes on where the character is, as after a drop's map
+    // change (drop_gate, 2026.11.24): no latch, no halt, Nhảy lên left ticked
+    // and nothing saved. Until 2026.11.24 the jumps went off and the hunter
+    // halted for GoBot's window to stop the hunt and untick Nhảy lên.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        status_.jump_map_changed = true;
+        ++status_.press_gates;
     }
+    let_go_ = true;
+    ++drop_epoch_;
+    ++jump_epoch_;
+    way_asked_ = false;
+    travel_asked_ = false;
     publish_jump();
     char where[48] = "a map not known";
     if (f.map_known)
         std::snprintf(where, sizeof where, "map %u/%u", static_cast<unsigned>(f.map), static_cast<unsigned>(f.area));
-    GB_WARN("Hunter: MAP CHANGED %.1f s after %s at %d,%d on %s -> %s at %d,%d -- hunting STOPS, Nhảy lên to be "
-            "unticked and saved",
+    GB_WARN("Hunter: MAP CHANGED %.1f s after %s at %d,%d on %s -> %s at %d,%d -- both ends learned as gates (no "
+            "drop or jump near them again this session); hunting goes on, Nhảy lên stays ticked",
             static_cast<double>(now > r.down_ms ? now - r.down_ms : 0) / 1000.0, jump_kind_name(r.kind), r.x0, r.y0,
             r.stem.empty() ? "a map not trusted" : r.stem.c_str(), where, to.x, to.y);
-}
-
-void Hunter::latch_jumps(JumpUpOff why) {
-    // A map change and stuck keys stop the hunt: they are said over any other.
-    if (jump_latch_ != JumpUpOff::None && why != JumpUpOff::MapChanged && why != JumpUpOff::KeysStuck) return;
-    jump_latch_ = why;
-    // A walk to a take-off, or a settle, is over; a flight is still judged.
-    if (jump_.phase == JumpUpPhase::Settle) jump_settle_end("jumps up are off", false, clock_now());
-    else if (jump_.phase == JumpUpPhase::Approach) jump_.phase = JumpUpPhase::Idle;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        status_.jump_off = why;
-    }
-    publish_jump();
 }
 
 // ---------------------------------------------------------------- the log
@@ -1561,11 +1928,6 @@ void Hunter::jump_refused(const HunterConfig& cfg, const JumpUpCall& call, JumpU
             std::snprintf(more, sizeof more, " (%s)", MapTrust::why_text(r.why));
             break;
         }
-        case JumpUpWhy::Latched:
-            std::snprintf(more, sizeof more, " (%s)",
-                          jump_latch_ != JumpUpOff::None ? jump_off_name(jump_latch_)
-                                                          : "the key it needs is off for the run");
-            break;
         default:
             break;
     }
@@ -1613,10 +1975,10 @@ void Hunter::jump_would(const JumpPlan& plan, JumpUpFor purpose, int slot, std::
     }
     if (jump_would_ms_ != 0 && now < jump_would_ms_ + kJumpUpSayMs) return;
     jump_would_ms_ = now;
-    const HunterConfig cfg = config();
-    GB_INFO("Hunter: a jump up would go here (%s): %s at x %d from floor %d onto floor %d, %s",
-            !cfg.jump_up ? "jump_up is off" : "jumps up are off until the next BẮT ĐẦU", jump_kind_name(plan.kind),
-            plan.x, plan.feet_y + 1, plan.land_top, for_text(purpose, name).c_str());
+    // Only with the tick off since 2026.11.24: nothing else switches the
+    // jumps up off.
+    GB_INFO("Hunter: a jump up would go here (jump_up is off): %s at x %d from floor %d onto floor %d, %s",
+            jump_kind_name(plan.kind), plan.x, plan.feet_y + 1, plan.land_top, for_text(purpose, name).c_str());
 }
 
 void Hunter::publish_jump() {
@@ -1628,18 +1990,40 @@ void Hunter::publish_jump() {
     status_.jump_land_top = jump_.plan.land_top;
     status_.jump_feet_y = jump_.plan.feet_y;
     status_.jump_land_x = jump_.plan.land_x;
-    status_.jump_off = jump_latch_;
-    status_.jump_kinds_off = jump_kinds_off_;
 }
 
 std::string Hunter::jump_minute_text() const {
     std::string out;
+    // The plain ↑ past the upper bar's (2026.11.12c), only when there was any.
+    std::string bars;
+    {
+        int nref = 0;
+        std::string why;
+        for (std::size_t i = 0; i < kJumpUpWhys; ++i) {
+            if (minute_bar_why_[i] == 0) continue;
+            nref += minute_bar_why_[i];
+            why += (why.empty() ? "" : ", ") + std::string(why_short(static_cast<JumpUpWhy>(i))) + " " +
+                   std::to_string(minute_bar_why_[i]);
+        }
+        if (minute_bar_ups_ + minute_bar_onto_ + minute_bar_air_ + minute_bar_moved_ + minute_bar_nothing_ +
+                minute_bar_outside_ + nref >
+            0) {
+            char b[400];
+            std::snprintf(b, sizeof b,
+                          "; bars: Up %d (onto its floor %d, in the air only %d -- hit %d, dry %d; moved %d; nothing "
+                          "%d; outside %d), refused: %s",
+                          minute_bar_ups_, minute_bar_onto_, minute_bar_air_, minute_bar_hit_, minute_bar_dry_,
+                          minute_bar_moved_, minute_bar_nothing_, minute_bar_outside_,
+                          why.empty() ? "none" : why.c_str());
+            bars = b;
+        }
+    }
     const int pressed = minute_jumps_[0] + minute_jumps_[1] + minute_jumps_[2];
     if (minute_jump_looks_ == 0 && minute_jump_would_ == 0 && minute_jump_settles_ == 0 && pressed == 0 &&
         minute_jump_worked_ == 0 && minute_jump_fell_ == 0 && minute_jump_kind_miss_ == 0 &&
         minute_jump_nothing_ == 0 && minute_jump_lower_ == 0 && minute_jump_higher_ == 0 &&
         minute_jump_unknown_ == 0 && minute_jump_gate_ == 0)
-        return out;
+        return bars;
     char text[400];
     std::snprintf(text, sizeof text,
                   "; jump-ups: looks %d, would %d, settles %d, pressed %d (Up %d, Up,Up %d, Ctrl+Up %d), worked %d, "
@@ -1665,7 +2049,322 @@ std::string Hunter::jump_minute_text() const {
                       why_short(static_cast<JumpUpWhy>(order[k])), minute_jump_why_[order[k]]);
         out += text;
     }
-    return out;
+    return out + bars;
+}
+
+// ---------------------------------------------------------------- the bar's ↑
+
+int Hunter::bar_air(const HunterConfig& cfg) {
+    const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+    return round_px(jump_peak(JumpKind::Up).lo / scale);
+}
+
+bool Hunter::bar_reach(const HunterConfig& cfg, int dx, int dy, int air) {
+    return dy < -cfg.up() && dy >= -(cfg.up() + air) && std::abs(dx) <= cfg.reach;
+}
+
+bool Hunter::bar_up_may_go(const HunterConfig& cfg) const {
+    // No latch, pause or key off for the run since 2026.11.24.
+    return cfg.jump_up && jump_area(cfg);
+}
+
+void Hunter::bar_hp_check(const std::vector<Nameplate>& mobs, std::uint64_t now) {
+    if (!bar_hit_wait_ || now < bar_hit_at_ms_) return;
+    bar_hit_wait_ = false;
+    bool seen = false;
+    float hp = -1.0f;
+    for (const Nameplate& n : mobs)
+        if (n.slot == bar_hit_slot_ && n.gen == bar_hit_gen_) {
+            seen = true;
+            hp = n.hp;
+        }
+    // Gone from view or its bar lower than at the key: hurt in the air.
+    const bool hit = !seen || (bar_hp0_ >= 0.0f && hp < bar_hp0_ - 0.005f);
+    int dry = bar_dry_for(bar_hit_slot_, bar_hit_gen_);
+    if (hit) {
+        ++minute_bar_hit_;
+        // Hurt from below: fought, not out of reach -- the give-up clock
+        // starts again (the 2026.11.12c review: it passed a monster over 4 s
+        // into Ups that hit it every time).
+        if (have_target_ && target_slot_ == bar_hit_slot_ && target_gen_ == bar_hit_gen_)
+            target_since_ms_ = reach_ms_ = now;
+    } else {
+        ++minute_bar_dry_;
+        // Counted of the last kTargetCountMs (2026.11.24).
+        TargetPresses* it = nullptr;
+        for (TargetPresses& t : bar_dry_)
+            if (t.slot == bar_hit_slot_ && t.gen == bar_hit_gen_) it = &t;
+        if (it == nullptr) {
+            if (bar_dry_.size() >= 64) bar_dry_.erase(bar_dry_.begin());
+            bar_dry_.push_back(TargetPresses{ bar_hit_slot_, bar_hit_gen_, 0, 0, now });
+            it = &bar_dry_.back();
+        }
+        it->touch(now);
+        dry = ++it->n;
+    }
+    GB_INFO("Hunter: Up toward %s: back on its floor at %d,%d -- in the air only (%s; dry %d of %d)",
+            bar_hit_name_.empty() ? "the monster" : bar_hit_name_.c_str(), bar_hit_x_, bar_hit_y_,
+            hit ? "hit it" : "no hit", dry, kBarUpDryPerTarget);
+}
+
+bool Hunter::bar_up_toward(const HunterConfig& cfg, const Nameplate& target, const Nameplate& me,
+                           const std::vector<Nameplate>& mobs, const std::vector<Listed>& listed, int dx, int dy,
+                           bool fresh_pick, std::uint64_t now) {
+    bar_hp_check(mobs, now);
+    const bool mine = jump_.phase != JumpUpPhase::Idle && jump_.purpose == JumpUpFor::Bar;
+    // In the air of its ↑: held still -- no arrow, no turn -- and the attack
+    // goes: faced before the key, in reach across (the owner's "nhảy thường"
+    // to hit a monster above; the bars may be a few px apart, too narrow a
+    // band for the in-reach branch to catch in a flight).
+    if (mine && jump_.phase == JumpUpPhase::Air) {
+        let_go_of_moves(cfg);
+        // Not as the dash's key with its landing past the area's edge or a
+        // floor's end, judged from the take-off (dash_lands_out, the
+        // 2026.11.12c review) -- as the in-reach branch holds its swing.
+        if (std::abs(dx) <= cfg.reach && !coord_.critical_active() && focused() &&
+            !(dash_key_is(cfg.attack_key) && dash_lands_out())) {
+            // The flight swings at any distance in reach: none too far for
+            // the attack key (attack_far) left over from before the jump.
+            attack_far_now_.store(false);
+            engage(std::abs(dx), now);
+            // Not when the key is the macro's to press in its turn
+            // (swing_yields, 2026.11.16b).
+            if (now - last_attack_ms_ >= cfg.attack_interval_ms && !swing_yields(cfg.attack_key)) {
+                if (auto token = coord_.acquire("hunt-attack", Priority::Combat)) {
+                    const std::uint64_t down_ms = clock_now();
+                    // Before the press, for the macro's rotation (last_swing_ms).
+                    swing_down_ms_.store(down_ms);
+                    if (press(cfg.attack_key, 60) && on_attack_) on_attack_(cfg.attack_key, down_ms);
+                    last_attack_ms_ = now;
+                    note_attack(dx);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ++status_.attacks;
+                }
+            }
+        }
+        return true;
+    }
+    const int air = bar_air(cfg);
+    if (!bar_up_may_go(cfg) || target.slot < 0 || !bar_reach(cfg, dx, dy, air)) {
+        if (mine && jump_.phase == JumpUpPhase::Settle)
+            jump_settle_end("the target is no longer past the upper bar", false, now);
+        else if (mine)
+            jump_.phase = JumpUpPhase::Idle;
+        return false;
+    }
+    if (mine && (target.slot != jump_.slot || target.gen != jump_.gen)) {
+        if (jump_.phase == JumpUpPhase::Settle) jump_settle_end("another target", false, now);
+        else jump_.phase = JumpUpPhase::Idle;
+    }
+    // Another jump under way, or a flight not judged yet: not this one's.
+    if (jump_.phase != JumpUpPhase::Idle && jump_.purpose != JumpUpFor::Bar) return false;
+    if (jump_in_air(now)) {
+        let_go_of_moves(cfg);
+        return true;
+    }
+    bar_hp_seen_ = target.hp;
+    // The target in the packets' world, as jump_toward lays it.
+    const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
+    const WorldFix& fx = drop_fix_on_ ? drop_fix_ : fix_;
+    jump_.target_w = { round_px(fx.x + (target.x() - me.x()) * scale),
+                       round_px(fx.y + (target.y() - me.y() - cfg.packet_dy) * scale) };
+    jump_.dy = dy;
+    // A monster on the level first: with kBarNearestFirst only one nearer
+    // across, ties within kBarLevelTiePx its (the owner's Q1).
+    bool level = false;
+    if (kBarNearestFirst) {
+        for (std::size_t i = 0; i < mobs.size(); ++i) {
+            const Nameplate& n = mobs[i];
+            if (n.hp <= cfg.dead_below || (i < listed.size() && refused(listed[i]))) continue;
+            if (n.slot == target.slot && n.gen == target.gen) continue;
+            if (!level_with(cfg, n.y() - me.y())) continue;
+            if (std::abs(n.x() - me.x()) <= std::abs(dx) + kBarLevelTiePx) level = true;
+        }
+    } else {
+        level = level_monster(cfg, mobs, me, listed);
+    }
+    jump_.level = level;
+    if (mine && jump_.phase == JumpUpPhase::Settle)
+        return jump_at(cfg, JumpUpFor::Bar, jump_.plan, target.slot, target.gen, target.name, now);
+
+    const JumpUpFacts f =
+        jump_facts(cfg, JumpUpFor::Bar, target.slot, target.gen, jump_.target_w, dy, level, std::nullopt, now, false);
+    const JumpUpCall call = jump_up_rule(cfg, f);
+    if (!call.ok()) {
+        ++minute_bar_why_[static_cast<std::size_t>(call.why)];
+        const Act act = act_of(call.why);
+        if (act == Act::Passing) {
+            let_go_of_moves(cfg);
+            return true;
+        }
+        if (act != Act::Lasting) return false;
+        // Lasting: said once a monster at INFO; the planned ways tried.
+        if (bar_said_slot_ != target.slot || bar_said_gen_ != target.gen || bar_said_why_ != call.why) {
+            bar_said_slot_ = target.slot;
+            bar_said_gen_ = target.gen;
+            bar_said_why_ = call.why;
+            GB_INFO("Hunter: no Up toward slot %d -- %s (%s%s)", target.slot, jump_why_name(call.why),
+                    call.why == JumpUpWhy::Plan ? jump_no_name(call.no) : "",
+                    call.why == JumpUpWhy::Plan && call.px != 0 ? (", a floor " + std::to_string(call.px) +
+                                                                   " px up").c_str()
+                                                                : "");
+        }
+        if (call.why == JumpUpWhy::TargetCap) {
+            // Ups from below that did not hurt it: passed over a while.
+            GB_INFO("Hunter: slot %d passed over -- %d Ups from below did not hurt it", target.slot,
+                    bar_dry_for(target.slot, target.gen));
+            seek_skip(target.slot, target.gen, now + 2ull * cfg.give_up_ms, SeekNo::Passed);
+            if (gave_up_.size() < 16)
+                gave_up_.push_back(GaveUpSpot{ target.x(), target.y(), now + 2ull * cfg.give_up_ms, true });
+            let_go_of_moves(cfg);
+            end_fight("Ups from below did not hurt it");
+            watch_ = DamageWatch{};
+            have_target_ = false;
+            return true;
+        }
+        return false;
+    }
+    // Faced first: no ↑ while a turn is pending.
+    if (!face_target(cfg, target, dx, fresh_pick, now)) {
+        turning_ = turn_.on;
+        return true;
+    }
+    return jump_at(cfg, JumpUpFor::Bar, *call.plan, target.slot, target.gen, target.name, now);
+}
+
+bool Hunter::end_bar_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t now, int lx, int ly,
+                            const JumpUpState& j, const std::string& tail) {
+    (void)cfg;
+    const std::string who = j.name.empty() ? std::string("the monster") : j.name;
+    bar_landed_ms_ = now;
+    bool learn = false;
+    bool fail = false;
+    switch (v) {
+        case JumpUpVerdict::Worked:
+            ++minute_bar_onto_;
+            bar_fails_row_ = 0;
+            last_jump_worked_ms_ = now;
+            retreat_[0] = retreat_[1] = Retreat{};
+            if (have_target_ && target_slot_ == j.slot && target_gen_ == j.gen) target_since_ms_ = reach_ms_ = now;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++status_.bar_onto;
+            }
+            GB_INFO("Hunter: Up toward %s: onto its floor at %d,%d%s", who.c_str(), lx, ly, tail.c_str());
+            break;
+        case JumpUpVerdict::AirOnly:
+            // The HP a moment after says whether it hurt (bar_hp_check).
+            ++minute_bar_air_;
+            bar_fails_row_ = 0;     // the key took the character off the ground
+            bar_hit_wait_ = true;
+            bar_hit_at_ms_ = now + 300;
+            bar_hit_slot_ = j.slot;
+            bar_hit_gen_ = j.gen;
+            bar_hit_name_ = who;
+            bar_hit_x_ = lx;
+            bar_hit_y_ = ly;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++status_.bar_air_only;
+            }
+            break;
+        case JumpUpVerdict::Moved:
+        case JumpUpVerdict::Lower:
+        case JumpUpVerdict::Higher:
+        case JumpUpVerdict::FellBack:
+        case JumpUpVerdict::KindMiss: {
+            ++minute_bar_moved_;
+            bar_fails_row_ = 0;     // the key took the character off the ground
+            retreat_[0] = retreat_[1] = Retreat{};
+            // Neither on its floor nor back on its own (2026.11.12c review):
+            // counted toward the monster's kBarUpDryPerTarget -- a ↑ and a
+            // Ctrl+↓ going round between two floors under it end there, for
+            // kTargetCountMs (2026.11.24) -- and, up a floor, no drop for
+            // kJumpUpStayMs (AfterJump), as after a jump up that worked.
+            const bool up = ly < j.y0 - kJumpUpFloorMatchPx;
+            if (up) last_jump_worked_ms_ = now;
+            int dry = 0;
+            if (j.slot >= 0) {
+                TargetPresses* it = nullptr;
+                for (TargetPresses& t : bar_dry_)
+                    if (t.slot == j.slot && t.gen == j.gen) it = &t;
+                if (it == nullptr) {
+                    if (bar_dry_.size() >= 64) bar_dry_.erase(bar_dry_.begin());
+                    bar_dry_.push_back(TargetPresses{ j.slot, j.gen, 0, 0, now });
+                    it = &bar_dry_.back();
+                }
+                it->touch(now);
+                dry = ++it->n;
+            }
+            char stay[48] = "";
+            if (up)
+                std::snprintf(stay, sizeof stay, "; no drop for %llu s",
+                              static_cast<unsigned long long>(kJumpUpStayMs / 1000));
+            GB_INFO("Hunter: Up toward %s: moved onto floor %d inside the area -- not its floor (dry %d of %d%s)%s",
+                    who.c_str(), ly + 1, dry, kBarUpDryPerTarget, stay, tail.c_str());
+            break;
+        }
+        case JumpUpVerdict::Outside:
+            // Outside the area: the walk back takes over (the owner's rule),
+            // the take-off skipped kLearnedForgetMs -- the Up for monsters
+            // above stays on (2026.11.24; off for the run until then).
+            ++minute_bar_outside_;
+            fail = learn = true;
+            GB_WARN("Hunter: Up toward %s landed at %d,%d, OUTSIDE the hunting area -- that take-off skipped %llu s, "
+                    "Up for monsters above goes on; the walk back takes over%s",
+                    who.c_str(), lx, ly, static_cast<unsigned long long>(kLearnedForgetMs / 1000), tail.c_str());
+            break;
+        case JumpUpVerdict::OffMap:
+            // As a jump up's (2026.11.24): MapTrust lets the file go until its
+            // standing points take it again, nothing switched off.
+            ++minute_jump_unknown_;
+            trust_.lose("an Up landed off the file's floors");
+            GB_WARN("Hunter: Up toward %s landed at %d,%d, on no floor of %s's file -- the file let go of until %d "
+                    "standing points on its floors agree again (no clock); jumps up go on then%s",
+                    who.c_str(), lx, ly, j.stem.empty() ? "this map" : j.stem.c_str(), MapTrust::kTrustPoints,
+                    tail.c_str());
+            break;
+        case JumpUpVerdict::Nothing:
+            ++minute_bar_nothing_;
+            fail = true;
+            GB_INFO("Hunter: Up toward %s at %d,%d did nothing in %llu ms -- %d in a row", who.c_str(), j.x0, j.y0,
+                    static_cast<unsigned long long>(kJumpUpJudgeMs), bar_fails_row_ + 1);
+            break;
+        case JumpUpVerdict::Unknown:
+        case JumpUpVerdict::Gate:
+        case JumpUpVerdict::None:
+            ++minute_jump_unknown_;
+            GB_DEBUG("Hunter: what came of the Up at %d,%d is not known", j.x0, j.y0);
+            break;
+    }
+    // Counted in a row for the log alone: no pause (2026.11.24; 3 in a row, or
+    // 5 in a run with more failed than worked, paused it 30 / 60 / 120 s until
+    // then). The next ↑ goes kBarUpGapMs after this landing.
+    if (fail) ++bar_fails_row_;
+    return learn;
+}
+
+std::string Hunter::jump_why_here(const GameMapBook::Page& p, const HuntZone& box, MapPoint stand,
+                                  const JumpRules& rules) {
+    std::string s;
+    for (int k = 0; k < kJumpKinds; ++k) {
+        const JumpKind kind = static_cast<JumpKind>(k);
+        if (!rules.allows(kind)) continue;
+        const JumpColumn c = judge_column(p, box, stand, kind, rules, zone_outside_px(box, stand.x, stand.y));
+        if (!s.empty()) s += "; ";
+        s += jump_kind_name(kind);
+        s += " ";
+        s += c.ok() ? "goes" : jump_no_name(c.why);
+        if (!c.ok() && c.bad_top >= 0) s += " at " + std::to_string(c.bad_top);
+    }
+    return s.empty() ? std::string("no key allowed") : s;
+}
+
+bool Hunter::jump_ready_but_trust(const HunterConfig& cfg, const GameMapBook::Page* page) const {
+    const bool wired = book_ != nullptr && static_cast<bool>(drop_veto_) && static_cast<bool>(eyes_.air) &&
+                       static_cast<bool>(eyes_.own_since);
+    return page != nullptr && cfg.packet_positions == PacketPositions::On && !cfg.stay_put && cfg.spot &&
+           spot_mode_ == SpotMode::Use && cfg.jump_key == kUpVk && wired;
 }
 
 } // namespace gobot

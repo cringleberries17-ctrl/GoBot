@@ -548,6 +548,28 @@ void test_reattach() {
     const bool a = should_reattach(before, no_game, 60'000, 60'000);
     const bool b = should_reattach(before, login, 60'000, 60'000);
     check(!a && !b, "no game, or a game with no connection open: nothing to build a capture from yet");
+
+    // 2026.11.24 (the owner: "cần thay cơ chế này bằng 1 cơ chế khác"): a
+    // start the capture refused, or a capture that died, waits 10 s, 20 s,
+    // then 30 s again and again -- never the 10 min it doubled up to before.
+    std::vector<std::uint64_t> waits;
+    std::uint64_t w = 0;
+    for (int i = 0; i < 6; ++i) waits.push_back(w = GameLink::refused_wait_after(w));
+    const std::vector<std::uint64_t> want = { 10'000, 20'000, 30'000, 30'000, 30'000, 30'000 };
+    std::string seen;
+    for (const std::uint64_t s : waits) seen += std::to_string(s / 1000) + " s ";
+    check(GameLink::kRefusedMaxMs == 30'000 && waits == want && GameLink::refused_wait_after(25'000) == 30'000 &&
+              GameLink::refused_wait_after(600'000) == 30'000,
+          "refusals in a row wait 10 -> 20 -> 30 -> 30 s (GameLink::refused_wait_after): " + seen);
+    // Quiet still after a start again for it: again after 30 s, while the
+    // game holds a connection -- should_reattach at that silence.
+    const bool quiet_again = should_reattach(before, before, GameLink::kReattachSilentAgainMs,
+                                             GameLink::kReattachSilentAgainMs);
+    const bool quiet_gone = should_reattach(before, login, GameLink::kReattachSilentAgainMs,
+                                            GameLink::kReattachSilentAgainMs);
+    check(GameLink::kReattachSilentAgainMs == 30'000 && quiet_again && !quiet_gone,
+          "30 s on with none of the game's TCP heard since a start again for its silence: started again while the "
+          "game holds a connection, not once it has none");
 }
 
 // ------------------------------------------------- the game's UDP by pid
@@ -1342,7 +1364,7 @@ void test_eyes_backstep() {
 /// stop comes a moment later. Back on the screen there and then, the hunter
 /// would forget the step it had just taken, and the packets would be lost for
 /// 2 s at every long step back. The turn back to the monster after it, a tap
-/// of Hunter::kTurnTapMs, walks you 21.6 px in again here, as a key held that
+/// of Hunter::kTurnTapMs, walks you 28.8 px in again here, as a key held that
 /// long walks you: the step is held as much longer than GoC's 800 ms, so the
 /// turn leaves you as far out as GoC's step meant, and there is no second.
 void test_eyes_long_backstep() {
@@ -1351,7 +1373,7 @@ void test_eyes_long_backstep() {
     HunterConfig cfg = packets_on();
     cfg.keep_distance = true;
     cfg.reach = 400;
-    cfg.min_distance = 300;                 // from 20 px: GoC's longest step, 800 ms, and the turn's 60
+    cfg.min_distance = 300;                 // from 20 px: GoC's longest step, 800 ms, and the turn's 80
     EyesRig r(cfg);
     r.g.holds_take_time = true;
     r.enter({ monster(9, 2000) });          // far off, outside the box: nothing to fight yet
@@ -1368,7 +1390,7 @@ void test_eyes_long_backstep() {
     const std::vector<Game::Press> turns = r.g.of(VK_RIGHT, 50);
     check(steering && steps.size() == 1 && steps.front().hold == 800 + Hunter::kTurnTapMs && st.backsteps == 1 &&
               turns.size() == 1 && turns.front().hold == Hunter::kTurnTapMs,
-          "one step back from the monster 20 px away, held 860 ms, and one turn back to it -- no second step "
+          "one step back from the monster 20 px away, held 880 ms, and one turn back to it -- no second step "
           "after the turn -- " + std::to_string(steps.size()) + " step(s), " + std::to_string(turns.size()) +
               " turn(s)");
     check(stayed && st.state == Hunter::State::Attacking && st.dx == 308,
@@ -1595,7 +1617,12 @@ void test_eyes_spot_walk() {
         cfg.packet_positions = how;
         cfg.spot = true;
         EyesRig r(cfg);
-        r.enter({});
+        // The map entry's spawn 40 px over the floor, and your first report
+        // on it: no spot is taken at the spawn itself (2026.11.12, t62_s5's
+        // 265,5104 was 33 px in the air).
+        r.feed(from_server(entry_frame(11, 1, 4640, 1060), r.g.t));
+        r.feed(wrapped(table_frame({}), r.g.t));
+        r.feed(from_client(move_frame(r.g.me_x, r.g.me_y, 0.0f, 1), r.g.t));
         r.pass();
         const Hunter::Spot spot = r.hunter.spot();
         check(spot.set && spot.x == 4640.0f && spot.y == 1100.0f && spot.half_w == 300 && spot.half_h == 100 &&
@@ -1650,10 +1677,10 @@ void test_eyes_spot_walk() {
 
 // ------------------------------------------------------ the detector's pace
 
-/// Whether the detector may look every 600 ms rather than its own 140: each
+/// Whether the detector may look every 2000 ms rather than its own 140: each
 /// of the things that keep it at its own pace, one at a time.
 void test_detector_rest() {
-    section("Detector rest: every 600 ms while the packets steer, and for nothing else (detector_rest)");
+    section("Detector rest: every 2000 ms while the packets steer, and for nothing else (detector_rest)");
 
     DetectorPace steering;
     steering.hunting = true;
@@ -1663,9 +1690,17 @@ void test_detector_rest() {
     check(detector_rest(steering, &why) && std::string(why).empty() && detector_rest(steering),
           "hunting, the packets steering and healthy, and nothing else reading the plates: it rests, and no reason "
           "is given not to");
-    check(DetectorPace::kRestMs == 600 && DetectorPace::kRunMs == MobDetector::kLookGapMs &&
+    check(DetectorPace::kRestMs == 2000 && DetectorPace::kRunMs == MobDetector::kLookGapMs &&
               MobDetector::kLookGapMs == 140,
-          "600 ms resting; otherwise the detector's own 140, as it always was");
+          "2000 ms resting (2026.11.16, 600 before); otherwise the detector's own 140, as it always was");
+    // Your plate remembered across a resting detector's gap, and as long as
+    // it always was at its own pace.
+    check(MobDetector::player_memory_ms(DetectorPace::kRunMs) == 1500 &&
+              MobDetector::player_memory_ms(DetectorPace::kRestMs) == 3360 &&
+              MobDetector::player_memory_ms(600) == 1960 && MobDetector::player_memory_ms(50) == 1500 &&
+              MobDetector::player_memory_ms(0) == 1500,
+          "your plate remembered 1500 ms at 140 ms (and at 50, or 0), 3360 at the resting 2000: past the wait as "
+          "far as 1500 is past 140");
 
     DetectorPace no_hunt = steering;
     no_hunt.hunting = false;
@@ -1678,10 +1713,6 @@ void test_detector_rest() {
     jump.jump_test = true;
     DetectorPace look = steering;
     look.monster_look = true;
-    DetectorPace panels = steering;
-    panels.camera_panels = true;
-    DetectorPace walk = steering;
-    walk.walking = true;
     DetectorPace off = steering;
     off.rest_off = true;
     DetectorPace two = jump;
@@ -1696,8 +1727,6 @@ void test_detector_rest() {
         { "the packets the source but not healthy", &unhealthy, "the screen steers again" },
         { "a jump key's Thử", &jump, "a jump key's Thử watches your plate" },
         { "Quái đang thấy", &look, "Quái đang thấy reads the plates" },
-        { "the Radar or the movement panels", &panels, "the Radar or the movement panels are open" },
-        { "a walk", &walk, "a walk follows the camera" },
         { "[Packets] detector_rest=off", &off, "detector_rest=off in app.ini [Packets]" },
         { "a Thử with no hunt", &two, "no hunt" },
     };
@@ -1714,7 +1743,8 @@ void test_detector_rest() {
 /// healthy, with one monster 100 px to your right in slot 5, and a screen
 /// whose plates stand elsewhere and whose detector counts a picture when the
 /// test says -- at every pass at its own pace, every tenth (600 ms) while it
-/// rests.
+/// rests: shorter than the real rest (DetectorPace::kRestMs), but past
+/// kScreenFreshMs all the same, which is all the hand-over goes by.
 struct HandRig {
     PacketWorld   world;
     std::uint64_t t = kT0;
@@ -1810,8 +1840,9 @@ struct HandRig {
 
 /// Back to the screen while the detector rests: the packets' last plates,
 /// view and number kept for the hunter until the detector has counted a
-/// picture taken wholly after the switch, 300 ms at most -- and at once, as
-/// always, when its last picture is a fresh one.
+/// picture taken wholly after the switch, 300 ms at most, and nothing after
+/// that until such a picture comes -- and at once, as always, when its last
+/// picture is a fresh one.
 void test_eyes_hand_over() {
     section("Detector rest: back to the screen, the packets' plates kept until a picture taken since "
             "(PacketEyes::kHandOverMs)");
@@ -1852,10 +1883,51 @@ void test_eyes_hand_over() {
         bool held = true;
         for (int i = 0; i < 5; ++i) held = held && seen[i].from_packets() && seen[i].view == steering.view;
         const PacketEyes::Stats s = r.eyes.stats();
-        check(held && seen[5].from_screen() && seen[5].view == steering.view + 1 && s.handovers == 1 &&
-                  s.handovers_capped == 1 && s.handover_ms == PacketEyes::kHandOverMs,
-              "no picture from the detector at all: the packets' plates up to 240 ms after the switch, the "
-              "screen's at 300 -- never longer");
+        // Past 300 ms (2026.11.16): nothing, not the screen's plates from a
+        // picture taken before the switch -- for as long as no newer one
+        // comes, and the one under way at the switch is not newer.
+        const HandRig::Seen later = r.pass(false);
+        const HandRig::Seen one = r.pass(true);
+        const HandRig::Seen two = r.pass(true);
+        const auto nothing = [&](const HandRig::Seen& x) {
+            return x.source == PacketEyes::Source::Screen && x.mobs.empty() && x.me.x() == Nameplate{}.x() &&
+                   !x.fresh && x.view == steering.view + 1;
+        };
+        check(held && nothing(seen[5]) && s.handovers == 1 && s.handovers_capped == 1 &&
+                  s.handover_ms == PacketEyes::kHandOverMs,
+              "no picture from the detector at all: the packets' plates up to 240 ms after the switch, and at 300 "
+              "-- never longer -- nothing, in another view");
+        check(nothing(later) && nothing(one),
+              "still nothing with no picture, nor with the one that may have been grabbed before the switch");
+        check(two.from_screen() && two.fresh && two.view == steering.view + 1 &&
+                  r.eyes.stats().handovers_capped == 1,
+              "the screen's plates once a picture taken wholly after the switch is counted, in the same view");
+    }
+    {
+        // Waiting for that picture when the packets steer again: their
+        // plates, not nothing.
+        HandRig r;
+        r.steer(20);
+        r.capturing = false;
+        for (int i = 0; i < 6; ++i) r.pass(false);
+        const bool waiting = r.pass(false).mobs.empty();
+        r.capturing = true;
+        HandRig::Seen back;
+        for (int i = 0; i < 60 && back.source != PacketEyes::Source::Packets; ++i) back = r.pass(false);
+        check(waiting && back.source == PacketEyes::Source::Packets && back.from_packets() && back.fresh,
+              "waiting for a picture when the packets steer again: their plates, as always");
+    }
+    {
+        // And restart() -- a hunt starting -- ends the wait.
+        HandRig r;
+        r.steer(20);
+        r.capturing = false;
+        for (int i = 0; i < 6; ++i) r.pass(false);
+        const bool waiting = r.pass(false).mobs.empty();
+        r.eyes.restart();
+        const HandRig::Seen next = r.pass(false);
+        check(waiting && next.from_screen() && next.source == PacketEyes::Source::Screen,
+              "restart() -- a hunt starting -- while waiting for a picture: the screen's plates from then on");
     }
     {
         // When the detector's last picture is fresh, nothing is kept: at its

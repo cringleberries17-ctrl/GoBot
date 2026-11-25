@@ -157,17 +157,20 @@ void VitalsReader::set_target_window(void* hwnd) { hwnd_.store(hwnd); }
 
 // Each sets the landmark to be looked for again at the next read: the bars
 // given -- a save, a start, the GUI's own copy -- go where it puts them at once,
-// not after a dozen reads with the figures unread, two seconds without HP.
+// not after a dozen reads with the figures unread, two seconds without HP --
+// nor after the second between looks while lost (kAnchorLookGapMs).
 void VitalsReader::set_hp_bar(const BarSpec& s) {
     std::lock_guard<std::mutex> lock(mutex_);
     hp_spec_ = s;
     anchor_found_ = false;
+    anchor_looked_ms_ = 0;
 }
 
 void VitalsReader::set_mp_bar(const BarSpec& s) {
     std::lock_guard<std::mutex> lock(mutex_);
     mp_spec_ = s;
     anchor_found_ = false;
+    anchor_looked_ms_ = 0;
 }
 
 BarSpec VitalsReader::hp_bar() const {
@@ -231,6 +234,7 @@ void VitalsReader::stop() {
     hp_.store(-1.0f);
     mp_.store(-1.0f);
     pet_.store(-1.0f);
+    mp_covered_.store(false);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         values_ = Vitals{};
@@ -272,10 +276,31 @@ float VitalsReader::shadowed_percent(float measured, int value, int max) {
                     std::clamp(static_cast<float>(value) * 100.0f / static_cast<float>(max), 0.0f, 100.0f));
 }
 
+bool VitalsReader::figure_behind_fill(float measured_pct, int current, int maximum) {
+    if (measured_pct < 0.0f || current < 0 || maximum <= 0 || current > maximum) return false;
+    // Only a figure with fewer digits than its maximum can have lost its
+    // first ones: "542/16813" can be "15542/16813" covered, "6710/9232"
+    // cannot be anything covered (a covered digit of it leaves a hole, or
+    // a maximum it is over).
+    const auto digits = [](int v) {
+        int n = 1;
+        while (v >= 10) { v /= 10; ++n; }
+        return n;
+    };
+    if (digits(current) >= digits(maximum)) return false;
+    // The measure can come out short of the figures -- the caption paints
+    // out the end of the fill -- but never long: neither the caption's
+    // white nor anything glowing over it is the fill's colour, and the fill
+    // is drawn from the bar's left edge.
+    const float says = static_cast<float>(current) * 100.0f / static_cast<float>(maximum);
+    return measured_pct > says + kBehindFillPct;
+}
+
 void VitalsReader::set_anchor(const Frame& anchor) {
     std::lock_guard<std::mutex> lock(mutex_);
     anchor_ = anchor;
     anchor_found_ = false;
+    anchor_looked_ms_ = 0;
 }
 
 bool VitalsReader::has_anchor() const {
@@ -405,7 +430,9 @@ ScreenRect VitalsReader::caption_box(const BarSpec& spec) {
 }
 
 bool VitalsReader::read_numbers(const Frame& f, const BarSpec& spec,
-                                const GlyphFont& font, int& current, int& maximum) {
+                                const GlyphFont& font, int& current, int& maximum,
+                                bool* refused) {
+    if (refused) *refused = false;
     if (!f.valid() || !spec.valid() || !font.loaded()) return false;
 
     const ScreenRect box = caption_box(spec);
@@ -429,9 +456,10 @@ bool VitalsReader::read_numbers(const Frame& f, const BarSpec& spec,
     // while MP carried on, because MP happened to hold no ones.
     //
     // Position settles it where spacing cannot. Within a number the step from
-    // one digit to the next is one cell; across the slash it is two, because
-    // the slash occupies one. So: step up to about one and a half cells means
-    // the same number, more than that means the next one.
+    // one digit to the next is one cell; across the slash it is more, because
+    // the slash occupies its own room (3 px on the live client, 2026.11.13's
+    // measure: a cell and a half). So: a step up to a third of a cell over
+    // one means the same number, more than that means the next one.
     std::vector<std::pair<int, char>> digits;
     for (const GlyphFont::Placed& p : font.last_placed()) {
         if (p.ch.size() != 1) continue;
@@ -449,21 +477,37 @@ bool VitalsReader::read_numbers(const Frame& f, const BarSpec& spec,
         // The typical step is one cell. Anything materially wider is the next
         // number starting. The threshold has to sit above one cell and below
         // a cell plus whatever separates the two figures -- in the game that
-        // separator is a '/' and the step across it is two cells, so a third
-        // of a cell of headroom is plenty and leaves room for a separator
-        // narrower than a digit.
+        // separator is a 3 px '/' and the step across it a cell and a half
+        // (9 px), so a third of a cell of headroom (8 px) sits under it.
         const int cell = std::max(1, sorted[sorted.size() / 2]);
         const int apart = cell + std::max(2, cell / 3);
 
+        std::vector<int> breaks;   // the step where each figure after the first begins
         std::string number(1, digits[0].second);
         for (std::size_t i = 1; i < digits.size(); ++i) {
             if (steps[i - 1] > apart) {
                 got.push_back(std::strtoll(number.c_str(), nullptr, 10));
+                breaks.push_back(steps[i - 1]);
                 number.clear();
             }
             number.push_back(digits[i].second);
         }
         if (!number.empty()) got.push_back(std::strtoll(number.c_str(), nullptr, 10));
+
+        // A digit read as something else (2026.11.13): every glyph that is
+        // not a digit is passed over above, so it left a hole on the pitch.
+        // The game's slash is 3 px, so across it is a cell and a half (9 px).
+        // With a digit missing beside it, two and a half -- "1859?/18590" was
+        // 1859/18590 (10%); a hole inside a figure is two cells, a break of
+        // its own beside the slash's -- "1?552/18590" was 1/552 (0%). Writing
+        // past the caption stands further off (43 px or more).
+        const double across = kMissedStepCells * static_cast<double>(cell);
+        const bool hole = (!breaks.empty() && static_cast<double>(breaks[0]) > across) ||
+                          (breaks.size() >= 2 && static_cast<double>(breaks[1]) <= across);
+        if (hole) {
+            if (refused) *refused = true;
+            return false;
+        }
     } else {
         got = numbers_in(line);
     }
@@ -483,6 +527,19 @@ bool VitalsReader::read_numbers(const Frame& f, const BarSpec& spec,
     current = static_cast<int>(got[0]);
     maximum = static_cast<int>(got[1]);
     return true;
+}
+
+bool VitalsReader::max_believed(int max, int& believed, int& pending, int& seen) {
+    if (max == believed) {
+        pending = -1;
+        seen = 0;
+    } else if (max == pending) {
+        if (++seen >= 2) { believed = max; pending = -1; seen = 0; }
+    } else {
+        pending = max;
+        seen = 1;
+    }
+    return believed <= 0 || max == believed;
 }
 
 float VitalsReader::measure(const Frame& f, const BarSpec& spec) {
@@ -632,10 +689,20 @@ void VitalsReader::loop() {
                 // pet's HP was the character's.
                 const bool on_slot = in_slot_frame(frame, hp_spec_.x, hp_spec_.y + hp_spec_.height / 2) ||
                                      in_slot_frame(frame, mp_spec_.x, mp_spec_.y + mp_spec_.height / 2);
+                // Reads that found the caption and were refused (a hole in
+                // the figures, 2026.11.13) are no sign of a move: hp_blank_.
                 const bool lost = !anchor_found_ ||
-                                  hp_misses_ >= forget_at ||
-                                  mp_misses_ >= forget_at || on_slot;
-                if (lost) {
+                                  hp_blank_ >= forget_at ||
+                                  mp_blank_ >= forget_at || on_slot;
+                // Lost, looked for once in kAnchorLookGapMs at most -- slot
+                // frame or not: with the bag over the HUD it was 59-173 looks
+                // a minute, each over a corner of the frame. The HUD back, it
+                // is found again within a second.
+                const std::uint64_t look_at = now_ms();
+                const bool due = anchor_looked_ms_ == 0 || look_at < anchor_looked_ms_ ||
+                                 look_at - anchor_looked_ms_ >= kAnchorLookGapMs;
+                if (lost && due) {
+                    anchor_looked_ms_ = look_at;
                     const bool had = anchor_found_;
                     load_meters().anchor_searches.fetch_add(1, std::memory_order_relaxed);
                     if (locate_anchor(frame, &recoloured) && !had)
@@ -685,6 +752,7 @@ void VitalsReader::loop() {
         // measurement rather than sitting beside it: the measurement is known
         // to read a full bar as two-thirds full, because the caption is
         // painted over the end of the fill.
+        bool covered = false;      // MP read as nothing for a covered caption (mp_covered)
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (font_.loaded()) {
@@ -692,22 +760,68 @@ void VitalsReader::loop() {
                 const struct {
                     const BarSpec& spec;
                     int& value; int& max;
-                    int& pending; int& seen; int& misses;
+                    int& pending; int& seen; int& misses; int& blank;
                     float& percent;
                     bool& now;
+                    int which;          // 0 HP, 1 MP
                 } kBars[] = {
                     { hp, values_.hp, values_.hp_max, hp_max_pending_, hp_max_seen_,
-                      hp_misses_, hp_pct, values_.hp_now },
+                      hp_misses_, hp_blank_, hp_pct, values_.hp_now, 0 },
                     { mp, values_.mp, values_.mp_max, mp_max_pending_, mp_max_seen_,
-                      mp_misses_, mp_pct, values_.mp_now },
+                      mp_misses_, mp_blank_, mp_pct, values_.mp_now, 1 },
                 };
 
                 for (const auto& bar : kBars) {
+                    // The bar's own measure, before the figures take its place.
+                    const float measured = bar.percent;
                     int cur = 0, max = 0;
-                    if (!read_numbers(frame, bar.spec, font_, cur, max)) {
+                    // A maximum has to be seen twice before it is believed;
+                    // the current value is taken as it comes -- from a read
+                    // whose maximum is the believed one (2026.11.13).
+                    bool refused = false;
+                    bool read = read_numbers(frame, bar.spec, font_, cur, max, &refused);
+                    if (read && !max_believed(max, bar.max, bar.pending, bar.seen)) {
+                        read = false;
+                        refused = true;
+                    }
+                    // Figures short of the bar's own fill lost their first
+                    // digits under something drawn over them (2026.11.17: the
+                    // EXP bar's glowing tip on MP's "15542/16813" read
+                    // 542/16813, and the MP potion went 60 times a minute).
+                    // Refused as a hole is, the figures kept standing in.
+                    if (read && figure_behind_fill(measured, cur, max)) {
+                        read = false;
+                        refused = true;
+                        {
+                            std::lock_guard<std::mutex> slock(stats_mutex_);
+                            ++(bar.which == 0 ? stats_.behind_fill_hp : stats_.behind_fill_mp);
+                        }
+                        const std::uint64_t at = now_ms();
+                        std::uint64_t& said = behind_said_ms_[bar.which];
+                        if (said == 0 || at < said || at - said >= kCoverSayMs) {
+                            const std::string more =
+                                behind_unsaid_[bar.which] > 0
+                                    ? " -- " + std::to_string(behind_unsaid_[bar.which]) + " more since the last line"
+                                    : std::string();
+                            GB_INFO("Vitals: %s figures %d/%d (%.0f%%) refused -- the bar is filled to %.0f%%: its "
+                                    "first digits covered (the EXP bar's tip?)%s",
+                                    bar.which == 0 ? "HP" : "MP", cur, max,
+                                    static_cast<double>(cur) * 100.0 / static_cast<double>(max),
+                                    static_cast<double>(measured), more.c_str());
+                            said = at;
+                            behind_unsaid_[bar.which] = 0;
+                        } else {
+                            ++behind_unsaid_[bar.which];
+                        }
+                    }
+                    if (!read) {
                         // Not this read's own, whatever is kept: the packets'
                         // check holds only those against 0x0051.
                         bar.now = false;
+                        // The caption found and refused is no sign of a move:
+                        // it was where it is looked for.
+                        if (refused) bar.blank = 0;
+                        else ++bar.blank;
                         // Forget the figures rather than keep showing them.
                         //
                         // A reading that stops updating is the worst of the
@@ -720,6 +834,23 @@ void VitalsReader::loop() {
                             bar.max = -1;
                             bar.pending = -1;
                             bar.seen = 0;
+                            // MP's fill reaching into its caption measures
+                            // where the caption -- or the EXP bar's tip --
+                            // begins: "this much or more", which handed on
+                            // read a full MP as 57%, under the owner's mark of
+                            // 62 (2026.11.17). Nothing, then, until the figures
+                            // are back or the fill is short of any caption.
+                            // Never HP: an unread HP is out of the world.
+                            if (bar.which == 1 && bar.percent >= kCaptionShadowPct) {
+                                bar.percent = -1.0f;
+                                covered = true;
+                            }
+                        } else if (bar.which == 1 && bar.value < 0 && bar.percent >= kCaptionShadowPct) {
+                            // No figures kept to say how much more -- MP's
+                            // caption covered from the start: nothing, as
+                            // above (2026.11.17).
+                            bar.percent = -1.0f;
+                            covered = true;
                         } else {
                             // Until then, a measure in the caption's shadow
                             // goes as the kept figures say, when they say more.
@@ -728,20 +859,9 @@ void VitalsReader::loop() {
                         continue;
                     }
                     bar.misses = 0;
+                    bar.blank = 0;
                     bar.now = true;
                     any = true;
-
-                    // A maximum has to be seen twice before it is believed;
-                    // the current value is taken as it comes.
-                    if (max == bar.max) {
-                        bar.pending = -1;
-                        bar.seen = 0;
-                    } else if (max == bar.pending) {
-                        if (++bar.seen >= 2) { bar.max = max; bar.pending = -1; bar.seen = 0; }
-                    } else {
-                        bar.pending = max;
-                        bar.seen = 1;
-                    }
 
                     bar.value = cur;
                     const int against = bar.max > 0 ? bar.max : max;
@@ -766,6 +886,16 @@ void VitalsReader::loop() {
         // last_read_ms() sees the two agree. hp_seen_ms_ first, so that one who
         // reads last_read_ms() first never pairs a new read with an old sight.
         const std::uint64_t read_at = now_ms();
+        // MP read as nothing for a covered caption: said once in kCoverSayMs,
+        // as it starts -- a measure that would have gone as MP is in the line.
+        if (covered && !mp_covered_.load() &&
+            (covered_said_ms_ == 0 || read_at < covered_said_ms_ || read_at - covered_said_ms_ >= kCoverSayMs)) {
+            covered_said_ms_ = read_at;
+            GB_INFO("Vitals: MP's figures unread, none kept, and its fill reaching into them (%.0f%% or more) -- "
+                    "MP reads as nothing, not as that, until the figures are back or the fill is under %.0f%%",
+                    static_cast<double>(measure(frame, mp)), static_cast<double>(kCaptionShadowPct));
+        }
+        mp_covered_.store(covered);
         hp_.store(hp_pct);
         mp_.store(mp_pct);
         pet_.store(pet_pct);
@@ -779,6 +909,11 @@ void VitalsReader::loop() {
         // wait on this thread's next read.
         if (hp_pct < 0.0f && hp_was_read_) keep_unreadable_frame(frame, capture.from_screen(), mp_pct);
         hp_was_read_ = hp_pct >= 0.0f;
+        // The game at a size other than 1024x768, once a session for each
+        // (2026.11.13c): a picture of how it lays itself out there, for the
+        // owner. Nothing at 1024x768, and never a test's frame.
+        if (!grab_ && hp_pct >= 0.0f && anchored && (frame.width != 1024 || frame.height != 768))
+            keep_size_sample(frame);
 
         // Notice when the bars stop being where they were put.
         //
@@ -1449,11 +1584,17 @@ std::uint64_t VitalsReader::hp_seen_after(std::uint64_t seen_ms, float hp_pct, s
 
 void VitalsReader::keep_unreadable_frame(const Frame& f, bool from_screen, float mp_pct) {
     const std::uint64_t now = now_ms();
-    if (kept_frame_ms_ != 0 && now - kept_frame_ms_ < kKeepFrameGapMs) return;
+    // The first kFramesAtFirst of the run one every kKeepFrameGapMs, then one
+    // every kKeepFrameLaterGapMs: HP lost and found again all session was
+    // about 4 whole-client PNGs a minute, written on a slow PC beside the
+    // game, and the first ones already show what covered the bars.
+    const std::uint64_t gap = kept_frames_ < kFramesAtFirst ? kKeepFrameGapMs : kKeepFrameLaterGapMs;
+    if (kept_frame_ms_ != 0 && now - kept_frame_ms_ < gap) return;
     // One still being written is left to finish, and this one goes unkept:
     // a std::async future assigned over before it is ready waits for it here.
     if (keeping_.valid() && keeping_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     kept_frame_ms_ = now;
+    ++kept_frames_;
     const char* how = from_screen ? "read off the screen" : "drawn by the window itself";
     const char* mp = mp_pct >= 0.0f ? "MP read" : "MP unreadable too";
 
@@ -1474,6 +1615,42 @@ void VitalsReader::keep_unreadable_frame(const Frame& f, bool from_screen, float
         std::sort(names.begin(), names.end());
         for (std::size_t i = 0; i + kKeptFrames < names.size(); ++i) remove_file(dir + "\\" + names[i]);
         GB_INFO("Vitals: HP unreadable on a frame %s, %s -- kept it as vitals_debug\\%s", how, mp, name);
+    });
+}
+
+void VitalsReader::keep_size_sample(const Frame& f) {
+    const std::uint64_t size = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(f.width)) << 32) |
+                               static_cast<std::uint32_t>(f.height);
+    if (std::find(sizes_kept_.begin(), sizes_kept_.end(), size) != sizes_kept_.end()) return;
+    // One still being written: this size is tried again on a later read.
+    if (keeping_size_.valid() && keeping_size_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        return;
+    sizes_kept_.push_back(size);
+    // On a copy, off this thread: the next grab writes into `f`.
+    keeping_size_ = std::async(std::launch::async, [shot = f] {
+        const std::string dir = exe_relative("vitals_debug");
+        const std::time_t t = std::time(nullptr);
+        std::tm tm{};
+        localtime_s(&tm, &t);
+        char when[32];
+        std::strftime(when, sizeof when, "%Y%m%d_%H%M%S", &tm);
+        const std::string name =
+            "size_" + std::to_string(shot.width) + "x" + std::to_string(shot.height) + "_" + when + ".png";
+        if (!shot.valid() || !make_folder(dir) || !save_png(shot, dir + "\\" + name)) {
+            GB_INFO("Vitals: a picture of the game at %dx%d could not be kept", shot.width, shot.height);
+            return;
+        }
+        // The newest few, by when -- the part after the size -- whatever the
+        // size: never among the vitals_*.png, which have their own count.
+        std::vector<std::string> names = files_in(dir, "size_*.png");
+        const auto when_of = [](const std::string& n) {
+            return n.size() >= 19 ? n.substr(n.size() - 19) : n;
+        };
+        std::sort(names.begin(), names.end(),
+                  [&](const std::string& a, const std::string& b) { return when_of(a) < when_of(b); });
+        for (std::size_t i = 0; i + kSizeSamplesKept < names.size(); ++i) remove_file(dir + "\\" + names[i]);
+        GB_INFO("Vitals: a picture of the game at %dx%d kept as vitals_debug\\%s", shot.width, shot.height,
+                name.c_str());
     });
 }
 

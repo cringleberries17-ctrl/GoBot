@@ -81,10 +81,15 @@ const char* Reviver::turn_name(Turn t) {
     return "?";
 }
 
+// 2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không làm
+// được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác" -- the bot is no
+// longer stopped here (until then: "Đã dừng bot: hồi sinh 3 lần không được
+// ... Hãy hồi sinh nhân vật bằng tay rồi bấm BẮT ĐẦU."). The round's 30 s is
+// kRoundGapMs.
 std::string Reviver::out_of_tries_vi() {
-    return "Đã dừng bot: hồi sinh 3 lần không được — có thể đã hết giấy hồi sinh/bùa hồi sinh. "
-           "GoBot không hồi sinh tại làng (mất 2% EXP). Hãy hồi sinh nhân vật bằng tay rồi bấm "
-           "BẮT ĐẦU.";
+    return "Hồi sinh tại chỗ " + std::to_string(kAttempts) +
+           " lần chưa được — có thể đã hết giấy/bùa hồi sinh. GoBot không hồi sinh tại làng; thử lại "
+           "sau " + std::to_string(kRoundGapMs / 1000) + " giây. Hồi sinh bằng tay thì bot tự chạy tiếp.";
 }
 
 Reviver::Reviver(InputManager& input, const TemplateStore& store, Grab grab)
@@ -253,6 +258,9 @@ bool Reviver::aim(const Seen& s, int frame_w, int frame_h, int& x, int& y, bool&
 }
 
 Reviver::Turn Reviver::give_up() {
+    // Told once a death, at the end of its first round: the rounds again()
+    // gives it after that run out in silence here -- whoever runs this says
+    // each of them in its own log (2026.11.24).
     if (!gave_up_) {
         gave_up_ = true;
         const std::string reason = std::to_string(kAttempts) +
@@ -265,6 +273,17 @@ Reviver::Turn Reviver::give_up() {
     return Turn::OutOfTries;
 }
 
+void Reviver::again() {
+    // Only a round that ran out: a round under way keeps its count.
+    if (tries_ < kAttempts) return;
+    tries_ = 0;
+    ++round_;
+    said_waiting_ = false;
+    // gave_up_ is left as it is: the death goes on, and the hook has had it.
+    say("round " + std::to_string(round_) + " at this death: another " + std::to_string(kAttempts) +
+        " tries -- still never the village, never Cash");
+}
+
 void Reviver::begin_death() {
     death_on_ = true;
     if (in_death_) return;
@@ -274,6 +293,7 @@ void Reviver::begin_death() {
 
 void Reviver::end_death(bool came_back) {
     tries_ = 0;
+    round_ = 1;
     gave_up_ = false;
     death_on_ = false;
     blind_up_ = false;
@@ -320,7 +340,8 @@ Reviver::Turn Reviver::turn() {
     }
     alive_seen_ = false;
 
-    // Every try used: nothing more until the character is seen alive.
+    // Every try of the round used: nothing more until the character is seen
+    // alive, or whoever runs this asks for another round (again()).
     if (tries_ >= kAttempts) return give_up();
 
     const auto wait = [this](const std::string& why) {
@@ -384,21 +405,33 @@ Reviver::Turn Reviver::turn() {
     said_waiting_ = false;
     tries_ = attempt;
     say("attempt " + std::to_string(attempt) + " of " + std::to_string(kAttempts) +
-        " at this death -- " +
+        " at this death" + (round_ > 1 ? " (round " + std::to_string(round_) + ")" : std::string()) + " -- " +
         (s.by_anchors ? "the panel found by its corners"
          : s.panel    ? "the panel found by its picture"
                       : "the revive question up over the panel"));
     auto last_click = now();
     std::string why_not = "Xac Nhan was clicked and the character is still dead";
 
-    // After the item button, the question: answered as soon as it is up.
+    // After the item button, the question: answered as soon as it is up --
+    // looked for up to kQuestionWaitMs (kReactMs since 2026-11-15, the
+    // owner's 30 s for slow PCs; 3 s before, and a question drawn later cost
+    // a try). The button is not clicked again for it.
     if (!on_question) {
         Seen q;
         Frame qf;
+        const auto item_at = now();
         const bool came = watch(kQuestionWaitMs, [this](const Seen& v) {
             return v.question || v.bin_asking || !dead_at(v);
         }, q, qf);
         if (stop_now()) return Turn::Stopped;
+        {
+            const long long took = std::chrono::duration_cast<std::chrono::milliseconds>(now() - item_at).count();
+            if (came && took > kReactSlowMs)
+                say("the game took " + std::to_string(took) + " ms to show what the revive-item button did");
+            else if (!came)
+                say("nothing after " + std::to_string(kQuestionWaitMs / 1000) +
+                    " s to show the revive question after the revive-item button");
+        }
         if (came && q.bin_asking) {
             why_not = "one of the bin's dialogs came up instead of the revive question, and "
                       "nothing was answered";
@@ -419,7 +452,10 @@ Reviver::Turn Reviver::turn() {
     // With no revive item left the game may put the panel away for a moment
     // after Xác Nhận, and two looks half a second apart took that for a
     // revive: the tries were given back every time, and the bot clicked
-    // every couple of seconds instead of stopping.
+    // every couple of seconds instead of running out of them. Watched up to
+    // kReviveWaitMs (kReactMs since 2026-11-15, the owner's 30 s for slow
+    // PCs; 10 s before) and kSettleBlindMs more from the last click, ending
+    // on the look that shows it; a stop at any look.
     const auto deadline = last_click + std::chrono::milliseconds(kReviveWaitMs + kSettleBlindMs);
     int clear = 0;
     std::chrono::steady_clock::time_point clear_from{};
@@ -450,6 +486,17 @@ Reviver::Turn Reviver::turn() {
         if (!wait_ms(kLookMs)) break;
     }
     if (stop_now()) return Turn::Stopped;
+    {
+        // How long the game took to put the panel away, from the last click:
+        // a slow PC's, said; or that it showed nothing that long.
+        const long long took = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   (up ? clear_from : now()) - last_click).count();
+        if (up && took > kReactSlowMs)
+            say("the game took " + std::to_string(took) + " ms to show the death panel gone after the last click");
+        else if (!up)
+            say("nothing after " + std::to_string((kReviveWaitMs + kSettleBlindMs) / 1000) +
+                " s to show the character revived after the last click");
+    }
 
     if (up) {
         ++revived_;
@@ -469,8 +516,9 @@ Reviver::Turn Reviver::turn() {
             // Not given back yet: a panel back before the character has
             // stayed up for kAliveBlindMs is this death still, so a game
             // that only hides it for a while when there is no revive item
-            // runs out of tries, and the bot stops, instead of being revived
-            // for ever.
+            // runs out of the round's tries -- the next round kRoundGapMs on
+            // (the bot stopped there until 2026.11.24) -- instead of being
+            // clicked every couple of seconds for ever.
             death_on_ = false;
             blind_up_ = true;
         }

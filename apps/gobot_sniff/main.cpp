@@ -554,8 +554,8 @@ CaptureConfig make_capture_config(const Options& o) {
 #endif
 
 // The [Framing], [FramingClient] and [FramingUdp] blocks are read by
-// gobot::load_framing (framing.hpp), the one reader shared with gobot_cli and
-// the tests.
+// gobot::load_framing (framing.hpp), the one reader shared with capture files
+// and the tests.
 
 #if !GOBOT_SNIFF_FILES_ONLY
 /// Also hand the capture the framings besides [Framing]: the client's, for

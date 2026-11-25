@@ -308,6 +308,111 @@ void test_unseen_party() {
     }
 }
 
+/// One attempt's result, as far as the turns go: sent or not, and whether
+/// GoBot could not judge the bar or close the line (ChatSender::Result::stop),
+/// with the doubt that left -- every key held, no line -- for `doubt_ms`.
+struct Attempt {
+    bool          sent = false;
+    bool          doubtful = false;
+    std::uint64_t doubt_ms = 0;
+};
+
+/// The line turns of a run whose lines may fail, on a pretend clock, as
+/// chat_loop takes them since 2026.11.24: nothing while a doubt lasts; a line
+/// GoBot could not judge or close waits a whole line interval from the doubt's
+/// end; one sent goes on to the next line's turn; one that failed keeps its
+/// turn and is tried again chat_retry_ms on, the count reaching max_failures
+/// told once a streak. `tries` gets each attempt's time, `told` the times the
+/// phone was told.
+void fail_run(const ChatSettings& s, const std::function<Attempt(int)>& attempt, std::uint64_t for_ms,
+              std::vector<std::uint64_t>& tries, int& told) {
+    ChatSchedule schedule(7);
+    std::uint64_t now = 1'000'000;
+    const std::uint64_t start = now;
+    schedule.start(now, s);
+    std::uint64_t gap_after_doubt = 0, doubt_until = 0;
+    tries.clear();
+    told = 0;
+    for (const std::uint64_t until = now + for_ms; now < until; now += 100) {
+        if (now < doubt_until) continue;                    // doubt.active(): nothing else
+        if (gap_after_doubt != 0) {
+            if (schedule.due_at() < now + gap_after_doubt) schedule.postpone(now, gap_after_doubt);
+            gap_after_doubt = 0;
+        }
+        if (!schedule.due(now)) continue;
+        const Attempt a = attempt(static_cast<int>(tries.size()));
+        tries.push_back(now - start);
+        if (a.doubt_ms != 0) doubt_until = now + a.doubt_ms;
+        if (a.sent) {
+            schedule.sent(now);
+            if (a.doubtful) gap_after_doubt = chat_retry_ms(true, s);
+        } else {
+            const std::uint64_t retry_ms = chat_retry_ms(a.doubtful, s);
+            schedule.failed(now, retry_ms);
+            if (a.doubtful) gap_after_doubt = retry_ms;
+            if (schedule.failures() == s.max_failures) ++told;
+        }
+    }
+}
+
+/// Every gap between one time in `at` and the next is `ms`.
+bool gaps_are(const std::vector<std::uint64_t>& at, std::uint64_t ms) {
+    for (std::size_t i = 1; i < at.size(); ++i)
+        if (at[i] - at[i - 1] != ms) return false;
+    return at.size() >= 2;
+}
+
+void test_failures() {
+    section("Tự chat: a line that fails is tried again, never a stop; the phone told once a streak (2026.11.24)");
+    // The owner, 2026.11.24: "Kiểm tra các phần khác xem có phần nào không làm
+    // được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác". Until then
+    // max_failures lines in a row, a bar like neither picture or a line that
+    // would not close stopped Tự chat for the session.
+    ChatSettings s;
+    s.interval_s = 120;
+    s.jitter_pct = 0;
+    s.first_delay_s = 0;
+    s.lines = { "A", "B" };
+    s.max_failures = 3;
+    ChatSettings quick = s, slow = s;
+    quick.interval_s = 5;           // clamped to 30
+    slow.interval_s = 99'999;       // clamped to 3600
+    check(kChatRetryMs == 30'000 && chat_retry_ms(false, s) == 30'000 && chat_retry_ms(true, s) == 120'000 &&
+              chat_retry_ms(true, quick) == 30'000 && chat_retry_ms(true, slow) == 3'600'000 &&
+              chat_retry_ms(false, slow) == 30'000,
+          "chat_retry_ms: 30 s for a line that failed; a whole line interval, as Tự chat uses it (never under 30 s), "
+          "for one GoBot could not judge or close");
+
+    std::vector<std::uint64_t> tries;
+    int told = 0;
+    // Every line fails, plainly: tried again every 30 s for as long as the run
+    // lasts, the phone told once -- at the third.
+    fail_run(s, [](int) { return Attempt{}; }, 600'000, tries, told);
+    check(tries.size() == 20 && gaps_are(tries, 30'000) && told == 1,
+          "every line failing for 10 minutes: " + std::to_string(tries.size()) +
+              " tries, 30 s apart, never stopped, the phone told " + std::to_string(told) + " time(s)");
+    // A line sent starts the count again: three more failures are told again.
+    fail_run(s, [](int i) { return Attempt{ i == 3, false, 0 }; }, 600'000, tries, told);
+    check(told == 2 && tries.size() >= 8 && tries[4] - tries[3] == 120'000,
+          "three failures, a line sent, failures again: told twice (" + std::to_string(told) +
+              "), the next line a whole interval after the one sent");
+    // The bar like neither picture after the Enter each time, its doubt 45 s
+    // long: every try a whole line interval after the doubt ends -- 165 s
+    // apart -- never stopped, told once.
+    fail_run(s, [](int) { return Attempt{ false, true, 45'000 }; }, 1'000'000, tries, told);
+    check(tries.size() == 7 && gaps_are(tries, 45'000 + 120'000) && told == 1,
+          "a bar like neither picture at every try, each leaving a 45 s doubt: " + std::to_string(tries.size()) +
+              " tries in 1000 s, each 120 s after the last doubt ended, the phone told " + std::to_string(told) +
+              " time(s)");
+    // Sent, and then the line would not close, a 10 s doubt: no stop -- the
+    // next line a whole interval after the line was seen shut, not after the
+    // line went; lines after it as ever.
+    fail_run(s, [](int i) { return Attempt{ true, i == 0, i == 0 ? 10'000u : 0u }; }, 400'000, tries, told);
+    check(tries.size() >= 3 && tries[1] - tries[0] == 10'000 + 120'000 && tries[2] - tries[1] == 120'000 && told == 0,
+          "sent, and the line would not close: the next line 130 s on (the 10 s doubt, then the interval), the one "
+          "after it 120 s on");
+}
+
 /// Draw `pic` onto `f` at `x`, `y`, its see-through pixels left out.
 void blit(Frame& f, const Frame& pic, int x, int y) {
     for (int py = 0; py < pic.height; ++py)
@@ -370,5 +475,6 @@ void test_chat_alone(void (*check_fn)(bool, const std::string&), void (*section_
     test_carry();
     test_turns();
     test_unseen_party();
+    test_failures();
     test_dialog_names();
 }

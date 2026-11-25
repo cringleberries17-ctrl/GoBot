@@ -126,36 +126,6 @@ std::size_t MapFile::surface_count() const {
     return n;
 }
 
-MapData MapFile::to_map_data(int tile_size, int layer_mask) const {
-    MapData map;
-    if (!loaded_) return map;
-    if (tile_size < 1) tile_size = 1;
-
-    build_surfaces();
-
-    map.name   = name_;
-    map.id     = 0;
-    map.tile_w = tile_size;
-    map.tile_h = tile_size;
-    map.width  = std::max(1, (width_px()  + tile_size - 1) / tile_size);
-    map.height = std::max(1, (height_px() + tile_size - 1) / tile_size);
-    map.attrs.assign(static_cast<std::size_t>(map.width) * map.height, Tile_Empty);
-
-    for (int layer = 0; layer < kLayers; ++layer) {
-        if (!(layer_mask & (1 << layer))) continue;
-        for (const auto& [px, py] : surfaces_[layer]) {
-            const int tx = px / tile_size;
-            const int ty = py / tile_size;
-            if (tx < 0 || ty < 0 || tx >= map.width || ty >= map.height) continue;
-            map.attrs[static_cast<std::size_t>(ty) * map.width + tx] = Tile_Ground;
-        }
-    }
-
-    GB_INFO("MapFile: %s -> %d x %d grid at %d px/tile",
-            name_.c_str(), map.width, map.height, tile_size);
-    return map;
-}
-
 // ------------------------------------------------------------------ lookup
 
 std::string MapFile::find(const std::string& dir, const std::string& stem) {

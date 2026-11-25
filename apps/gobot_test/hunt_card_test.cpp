@@ -123,28 +123,27 @@ void test_ticks() {
 // -------------------------------------------------------------- the card
 
 void test_card() {
-    section("Hunt card: the jump up's lines -- off in red, at work, no sure jump a moment ago, the dry run, the counts");
+    section("Hunt card: the jump up's lines -- at work, no sure jump a moment ago, the dry run, the counts; nothing "
+            "off, paused or off for the run since 2026.11.24");
 
     HunterConfig c = ready();
     Hunter::Status hs;
     JumpUpCard k = jump_up_card(c, hs, 10'000);
-    check(k.off == Hunter::JumpUpOff::None && k.kinds_off == 0 && k.now == JumpUpCard::Now::None && !k.would &&
-              !k.counts,
-          "a run's start: nothing to say");
-
-    hs.jump_off = Hunter::JumpUpOff::Fails;
-    check(jump_up_card(c, hs, 10'000).off == Hunter::JumpUpOff::Fails, "3 in a row that did not get up: off, said");
-    hs.jump_off = Hunter::JumpUpOff::Physics;
-    check(jump_up_card(c, hs, 10'000).off == Hunter::JumpUpOff::Physics, "landed higher than planned: said");
-    hs.jump_off = Hunter::JumpUpOff::MapChanged;
-    const bool changed = jump_up_card(c, hs, 10'000).off == Hunter::JumpUpOff::None;
-    hs.jump_off = Hunter::JumpUpOff::KeysStuck;
-    check(changed && jump_up_card(c, hs, 10'000).off == Hunter::JumpUpOff::None,
-          "a map change or a stuck key: not here -- the hunt stopped, said in red under BẮT ĐẦU");
-    hs.jump_off = Hunter::JumpUpOff::None;
-    hs.jump_kinds_off = 1u << static_cast<unsigned>(JumpKind::CtrlUp);
-    check(jump_up_card(c, hs, 10'000).kinds_off == 4, "Ctrl + ↑ off for the run: said");
-    hs.jump_kinds_off = 0;
+    check(k.now == JumpUpCard::Now::None && !k.would && !k.counts, "a run's start: nothing to say");
+    // 2026.11.24 (the owner: "thử lại luôn"): a jump that did not get there is
+    // tried again -- the card has no `off`, `pause_ms` or `kinds_off` to say
+    // (the status no jump_off, jump_off_until_ms or jump_kinds_off): presses
+    // that did not get there, a map change or a key-up owed leave the card
+    // what it is at, what it would do and what it has done.
+    hs.jumps = 5;
+    hs.press_gates = 1;
+    hs.drop_keys_stuck = true;
+    const JumpUpCard after = jump_up_card(c, hs, 10'000);
+    check(after.now == JumpUpCard::Now::None && !after.would && after.counts,
+          "five presses, a map change learned as a gate, a key-up owed: only the counts said -- no line in red");
+    hs.jumps = 0;
+    hs.press_gates = 0;
+    hs.drop_keys_stuck = false;
 
     hs.jump_phase = Hunter::JumpUpPhase::Approach;
     const bool approach = jump_up_card(c, hs, 10'000).now == JumpUpCard::Now::Approach;
@@ -189,12 +188,15 @@ void test_card() {
     hs.jumps = 3;
     check(jump_up_card(c, hs, 10'000).counts && jump_up_card(off, hs, 10'000).counts, "presses this run: counted");
 
-    // The seek's monsters above: why not jumped to.
+    // The seek's monsters above: why not jumped to -- the tick off, the one
+    // reason since 2026.11.24 (no Latched, no Paused: nothing else turns the
+    // jumps up off).
     Hunter::Status s;
     check(seek_above(c, s) == SeekAbove::None, "none above with no way up: nothing to say");
     s.seek_above_no_way = 2;
-    check(seek_above(off, s) == SeekAbove::TickOff && seek_above(c, s) == SeekAbove::Latched,
-          "two above only a jump up gets to: the tick off -- tick it; ticked, jumps up are off for the run");
+    check(seek_above(off, s) == SeekAbove::TickOff && seek_above(c, s) == SeekAbove::None,
+          "two above only a jump up gets to: the tick off -- tick it; ticked, nothing to say (never \"off\" or "
+          "\"paused\")");
 }
 
 // ------------------------------------------------------------ the map tab
@@ -389,12 +391,31 @@ void test_gui_source() {
               in_order(view, { "simple_spot_state(hs);", "simple_jump_up_state(hs);" }),
           "the card: the jump up's lines after the spot's, and a way back that jumps");
     const std::string lines = body(style, "std::vector<std::pair<bool, std::string>> GuiApp::jump_up_card_vi(");
-    check(has(lines, "jump_up_card(hunt_config_, hs, now_ms())") && has(lines, "Nhảy lên đã tắt tới lần BẮT ĐẦU sau: ") &&
+    check(has(lines, "jump_up_card(hunt_config_, hs, now_ms())") && !has(lines, "Nhảy lên đã tắt tới lần BẮT ĐẦU sau") &&
               has(lines, "\"Nhảy lên (đang tắt): lẽ ra đã nhảy \"") && has(lines, "\" lần lên tới bục, \"") &&
               has(lines, "\"Nhảy lên: không có chỗ nhảy chắc chắn tới bục của \"") &&
               has(body(style, "void GuiApp::simple_jump_up_state(const Hunter::Status& hs) {"),
                   "if (red) coloured(kBad, text.c_str());"),
-          "the jump up's card lines from jump_up_card: off in red, the rest grey -- the dry run's among them");
+          "the jump up's card lines from jump_up_card, grey -- the dry run's among them; none \"off until the next "
+          "BẮT ĐẦU\" since 2026.11.24");
+    // 2026.11.24 (the owner: "thử lại luôn"): no pause and no "off" line any
+    // more -- not the jumps up's (2026.11.15's "Nhảy lên tạm nghỉ"), not the
+    // drops' ("Nhảy xuống tạm nghỉ", "Nhảy xuống đã tắt"), not the seek's
+    // monsters above (SeekAbove::Paused, Latched). The place a press failed at
+    // is said with the seconds until it is tried again.
+    const std::string drop_wait =
+        body(style, "std::string GuiApp::drop_wait_vi(const Hunter::Status& hs, bool map_known_here, bool* off) {");
+    check(!has(lines, "case Off::") && !has(lines, "Nhảy lên tạm nghỉ") && !has(lines, "card.pause_ms") &&
+              !has(lines, "card.kinds_off") && !has(drop_wait, "Nhảy xuống tạm nghỉ") &&
+              !has(drop_wait, "Nhảy xuống đã tắt") && !has(drop_wait, "drop_off") &&
+              has(drop_wait, "if (off != nullptr) *off = false;") &&
+              has(drop_wait, "\"Nhảy xuống: chỗ này bấm Ctrl + ↓ chưa rơi — GoBot thử chỗ khác trước, chỗ này thử lại "
+                             "sau \" +") &&
+              has(drop_wait, "std::to_string(Hunter::kLearnedForgetMs / 1000) + \" giây.\"") &&
+              !has(body(style, "void GuiApp::simple_seek_none(const Hunter::Status& hs) {"), "case SeekAbove::Paused:") &&
+              !has(body(style, "void GuiApp::simple_seek_none(const Hunter::Status& hs) {"), "case SeekAbove::Latched:"),
+          "no pause and no \"off\" said for the jumps up, the drops or the seek's monsters above; a place a press "
+          "failed at said with the seconds until it is tried again");
     check(has(body(style, "std::string GuiApp::seek_going_vi(const Hunter::Status& hs) {"),
               "\"Đang đi tìm quái trong vùng: \"") &&
               has(body(style, "void GuiApp::simple_seek_none(const Hunter::Status& hs) {"),
@@ -420,13 +441,19 @@ void test_gui_source() {
               has(body(style, "void GuiApp::simple_jump_checklist() {"), "k.what_vi != kJumpUpKeyVi"),
           "the keys GoBot uses: Ctrl and ↑ with the jumps up on -- the jump key's line leaving that ↑ out");
     const std::string dtick = body(gui, "void GuiApp::drop_tick() {");
+    // 2026.11.24: a map change after a jump stops nothing, unticks nothing,
+    // saves nothing -- learned as a gate, said once in amber, the hunt going on.
     check(has(dtick, "if (hunt_config_.drop_down || hunt_config_.jump_up) {") &&
               has(dtick, "const bool up = hunt_config_.jump_up;") && has(dtick, "(up && low == 0x26u)") &&
-              in_order(dtick, { "} else if (stop == Hunter::DropStop::JumpMapChanged) {", "hunt_config_.jump_up = false;",
-                                "hunter_->set_config(hunt_config_);",
-                                "hunt_config_.save(exe_relative(\"configs/hunt.ini\"))",
-                                "drop_stopped_vi_ = std::string(\"Lần nhảy lên lúc \")" }),
-          "the veto: a GoBot key on ↑ too with the jumps up on; a map change after a jump: unticked, saved, said in red");
+              in_order(dtick, { "const Hunter::PressGate gate = hunter_->take_press_gate();",
+                                "if (gate == Hunter::PressGate::None) return;",
+                                "gate == Hunter::PressGate::Jump ? \"nhảy lên\"",
+                                "drop_note_vi_ = std::string(\"Lần \") + what + \" lúc \" + clock +",
+                                "simple_note(drop_note_vi_, 15000);" }) &&
+              !has(dtick, "stop_hunt();") && !has(dtick, "hunt_config_.jump_up = false;") &&
+              !has(dtick, "hunt_config_.drop_down = false;") && !has(dtick, "hunt_config_.save("),
+          "the veto: a GoBot key on ↑ too with the jumps up on; a map change after a jump: learned as a gate, said "
+          "once -- nothing stopped, unticked or saved");
     check(has(body(gui, "void GuiApp::start_hunt() {"),
               "if (hunt_config_.jump_up && !hunt_config_.drop_down) input_.release_stray_drop_keys();") &&
               has(body(gui, "void GuiApp::initialise() {"),
@@ -457,8 +484,8 @@ void test_gui_source() {
               in_order(hints, { "const std::string why = simple_jump_up_refusal_vi();", "if (!why.empty()) {",
                                 "if (hunt_config_.jump_up && hunt_config_.spot)", "return;", "if (hunt_config_.jump_up) {",
                                 "label(\"Đo cú nhảy:\");", "simple_jump_kind_try(k);" }),
-          "the Đo cú nhảy row wherever the jumps up can work as set, ticked or not -- a map change unticks it, and a "
-          "measure may be wanted then");
+          "the Đo cú nhảy row wherever the jumps up can work as set, ticked or not -- a measure may be wanted with "
+          "the tick off");
 
     // The map tab: the arrow, the seek's line and marks, what was learned.
     const std::string canvas = body(map, "void GuiApp::map_canvas(MapUi& ui, MapView& mv) {");
@@ -500,30 +527,32 @@ void test_gui_source() {
           "the seek's floors: the tab's page while the hunter goes by this map's area with the seek on, none "
           "otherwise -- handed to PacketEyes as Inputs::floors");
 
-    // The hunt stopped by the drop and the jump up: a map change with a drop
-    // and a jump both under watch unticks both, before the save; a high
-    // jump's ↑ owed says ↑, not ↓ -- in drop_tick and in tick()'s own halt.
-    check(in_order(dtick, { "} else if (stop == Hunter::DropStop::BothMapChanged) {", "hunt_config_.drop_down = false;",
-                            "hunt_config_.jump_up = false;", "hunter_->set_config(hunt_config_);",
-                            "hunt_config_.save(exe_relative(\"configs/hunt.ini\"))",
-                            "drop_stopped_vi_ = std::string(\"Lần nhảy lúc \")",
-                            "bỏ dấu Nhảy xuống và Nhảy lên.\";" }) &&
-              in_order(dtick, { "} else if (stop == Hunter::DropStop::JumpKeysStuck) {",
-                                "\"GoBot đã dừng đánh quái: phím ↑ hoặc Ctrl có thể vẫn đang bị giữ — nhấn rồi nhả ↑ và \"",
-                                "} else {", "phím ↓ hoặc Ctrl có thể vẫn đang bị giữ" }),
-          "drop_tick: a map change with both under watch unticks Nhảy xuống and Nhảy lên and saves; a high jump's "
-          "keys owed name ↑ and Ctrl, a drop's ↓ and Ctrl");
+    // The drop and the jump up never stop the hunt (2026.11.24): a map change
+    // with a drop and a jump both under watch -- PressGate::Both -- is said as
+    // "Lần nhảy lúc ...", learned, nothing unticked; a high jump's ↑ owed says
+    // ↑, not ↓ -- in tick()'s owed block, which lets every key go and goes on.
+    check(in_order(dtick, { "const char* what = gate == Hunter::PressGate::Drop ? \"nhảy xuống\"",
+                            "gate == Hunter::PressGate::Jump ? \"nhảy lên\"", ": \"nhảy\";",
+                            "\" làm đổi bản đồ — chỗ đó đã được nhớ là cửa, GoBot không nhảy ở gần đó nữa và vẫn đánh "
+                            "quái tiếp.\";" }) &&
+              !has(dtick, "DropStop") && !has(dtick, "drop_stopped_vi_"),
+          "drop_tick: a map change with both under watch said as one press's -- learned as a gate, nothing unticked "
+          "or saved, the hunt going on");
     const std::string gtick = body(gui, "void GuiApp::tick() {");
-    check(in_order(gtick, { "input_.owed_tries() >= InputManager::kOwedTries && hunting_", "stop_hunt();",
-                            "const bool up = input_.up_owed();", "drop_stopped_vi_ = up ?", "nhấn rồi nhả ↑ \"",
-                            "nhấn rồi nhả ↓ \"", "simple_note(drop_stopped_vi_, 15000);",
-                            "\"Hunter: keys owed after a jump up (Up or Ctrl up not sent, %d tries)" }),
-          "tick()'s own halt on owed ups: ↑ named for a high jump's, ↓ for a drop's, in the red line and the log");
+    check(in_order(gtick, { "input_.owed_tries() >= InputManager::kOwedTries && hunting_", "owed_released_ = true;",
+                            "input_.release_all();", "input_.release_stray_drop_keys();",
+                            "const bool up = input_.up_owed();", "drop_note_vi_ = up ?", "\"Phím ↑ hoặc Ctrl có thể",
+                            "\"Phím ↓ hoặc Ctrl có thể", "simple_note(drop_note_vi_, 15000);",
+                            "\"Hunter: keys owed after a %s (%s or Ctrl up not sent, %d tries) -- every key let go of; "
+                            "the hunt \"" }) &&
+              !has(gtick, "drop_stopped_vi_"),
+          "tick()'s owed ups: every key let go of once, ↑ named for a high jump's, ↓ for a drop's, in the amber line "
+          "and the log -- the hunt going on");
 
     // The spot's lines: the way back that jumps, and none of three ways.
     check(has(spot, "\" — bot ngưng đánh, về vùng trước: về \" + way + jump + \", vào tới trong vùng rồi mới đánh "
                     "tiếp.\"") &&
-              has(spot, "\" không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đánh ở đây. Tự đưa \"") &&
+              has(spot, "\" không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đứng yên ở đây. Tự \"") &&
               has(spot, "\"Tự tìm quái: bật — bot đi tới quái ở bất kỳ chỗ nào trong vùng mà nó tới được, \"") &&
               has(spot, "out << \", the way back jumps up \" << hs.spot_way_jumps"),
           "the spot's lines: a way back by a jump up, no way back by walking, falling or jumping up, the seek on, "

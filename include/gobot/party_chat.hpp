@@ -196,11 +196,18 @@ public:
     std::vector<std::string> saw(const std::vector<std::string>& raw_lines,
                                  std::uint64_t now_ms);
 
-    /// Forget everything: who has been counted, who is on cooldown, and the
-    /// speakers without_own remembered.
+    /// Forget everything: who has been counted, who is on cooldown, who is held
+    /// off, and the speakers without_own remembered.
     void reset();
 
-    /// Who is waiting on their cooldown, and for how much longer.
+    /// `who` -- as saw() gave the name -- not returned again for `for_ms` from
+    /// `now_ms`, nor any name alike() min_name_match or more to it: the game
+    /// answered the invite with a message of its own (2026.11.14b,
+    /// InviteReply) -- already in a party, say -- and inviting again every
+    /// cooldown would bring the message back each time.
+    void hold_off(const std::string& who, std::uint64_t now_ms, std::uint64_t for_ms);
+
+    /// Who is waiting on their cooldown or held off, and for how much longer.
     std::map<std::string, int> cooling(std::uint64_t now_ms) const;
 
 private:
@@ -211,6 +218,8 @@ private:
     struct Tally { int votes = 0; std::uint64_t last_ms = 0; };
     std::map<std::string, Tally>         counting_;
     std::map<std::string, std::uint64_t> invited_at_;
+    /// hold_off's names, and when each may be invited again.
+    std::map<std::string, std::uint64_t> held_until_;
 
     /// without_own's memory: each speaker taken for the player's, by its
     /// letters and digits, with the reading clock when it was last seen

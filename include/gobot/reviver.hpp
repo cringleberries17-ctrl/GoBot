@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gobot/input_manager.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -44,19 +45,27 @@ namespace gobot {
 /// may be from before a wait for the mouse, and a trash pass that held it may
 /// have left the bin's own question where the revive's was.
 ///
-/// Three tries for each death, as GoC's player_revive_max_attempts. After that
-/// nothing more is clicked until the character is seen alive again; the
-/// player's rule is that the bot stops then rather than revive in the village,
-/// and `on_out_of_tries` is where whoever runs this hears it. A revive counts
+/// Three tries for each round, as GoC's player_revive_max_attempts. After that
+/// nothing more is clicked until whoever runs this asks for another round
+/// (again()) or the character is seen alive again, and `on_out_of_tries` is
+/// where whoever runs this hears it -- once a death, however many rounds it
+/// takes. Never the village button, never Cash. Until 2026.11.24 the player's
+/// rule was that the whole bot stopped then; since, the owner ("Kiểm tra các
+/// phần khác xem có phần nào không làm được thì dừng không, cần thay cơ chế
+/// này bằng 1 cơ chế khác", with his correction: try again at once or after a
+/// short gap, never a long pause), GoBot's window asks for another round of
+/// three kRoundGapMs after each one ran out, without end, holding every other
+/// part of the bot off while the character lies dead. A revive counts
 /// once the panel and the question have stayed away -- for a moment when HP
 /// reads above 0, for kSettleBlindMs when it cannot be read. One that HP read
 /// above 0 confirmed ends the death there and then: the character is up, and
 /// a death that follows at once -- revived among whatever killed it -- is a
-/// new one with its own three tries, so quick deaths never stop the bot while
-/// revive items last. One taken with HP unreadable gives its try back only
-/// once the character has stayed up for kAliveBlindMs: a panel that comes back
-/// before that is the same death, so a game that only hides the panel for a
-/// while when there is no revive item cannot keep it trying for ever.
+/// new one with its own three tries, so quick deaths are never told as out of
+/// tries while revive items last. One taken with HP unreadable gives its try
+/// back only once the character has stayed up for kAliveBlindMs: a panel that
+/// comes back before that is the same death, so a game that only hides the
+/// panel for a while when there is no revive item runs out of the round's
+/// tries -- and waits for the next round -- instead of trying for ever.
 ///
 /// Everything it does to the game goes through a grab, a click and a clock,
 /// each replaceable, so the whole of it is tried on a pretend game in the
@@ -106,9 +115,15 @@ public:
     static constexpr int   kPairDx = 103, kPairDy = 55;
 
     /// How long one attempt waits: for the question after the item button,
-    /// and for the panel and the question to go after the last click.
-    static constexpr int kQuestionWaitMs = 3000;
-    static constexpr int kReviveWaitMs = 10000;
+    /// and for the panel and the question to go after the last click. Both
+    /// kReactMs since 2026-11-15 (the owner, for slow PCs: "sẽ có thêm 30 giây
+    /// chờ phản ứng"; 3 s and 10 s before), each ending on the look that
+    /// shows it: an attempt given up too soon uses one of kAttempts, and the
+    /// third ends the round (it stopped the whole bot until 2026.11.24).
+    /// kSettleBlindMs comes on top of the second, so that a panel gone at its
+    /// very end can still be seen to stay gone.
+    static constexpr int kQuestionWaitMs = kReactMs;
+    static constexpr int kReviveWaitMs = kReactMs;
     /// How long the panel and the question have to stay away to count as a
     /// revive when HP cannot be read -- the HUD hidden, or no reader running.
     /// With HP read above 0, two looks running are enough.
@@ -129,8 +144,14 @@ public:
     /// item left -- seen at up to 15 s on a pretend game -- so that does not
     /// pass for a revive that held and give the tries back every time.
     static constexpr int kAliveBlindMs = 60000;
-    /// Tries per death.
+    /// Tries per round: a death's first, and each again() gives.
     static constexpr int kAttempts = 3;
+    /// How long whoever runs this waits after a round ran out before asking
+    /// for the next (again()): kReactMs, the owner's 30 s (2026.11.24 -- the
+    /// bot stopped there until then). Each round is three tries at most, so a
+    /// death with no revive item left clicks three times every half minute
+    /// or so, never the village or Cash.
+    static constexpr int kRoundGapMs = kReactMs;
 
     /// One look at the game, as far as reviving goes.
     struct Seen {
@@ -165,7 +186,7 @@ public:
         Waiting,    ///< dead, and nothing may be clicked now: the bin's dialog, or another over the button
         Revived,    ///< clicked, and the panel and the question went
         Failed,     ///< clicked, and the character is still dead
-        OutOfTries, ///< every try at this death was used: nothing more is clicked
+        OutOfTries, ///< every try of this round was used: nothing more is clicked until again()
         Stopped,    ///< asked to stop
     };
     static const char* turn_name(Turn t);
@@ -236,21 +257,35 @@ public:
     /// confirmed it, otherwise once it has stayed up for kAliveBlindMs.
     void on_back(std::function<void()> f) { back_hook_ = std::move(f); }
     /// Called once for each death whose tries ran out, with the reason in
-    /// English.
+    /// English: at the end of its first round. The rounds again() gives the
+    /// same death are not told again -- one alert a death (2026.11.24).
     void on_out_of_tries(std::function<void(const std::string&)> f) { out_hook_ = std::move(f); }
+
+    /// Another round of kAttempts tries at this death, once the last one ran
+    /// out (2026.11.24; the bot stopped there until then): the tries counted
+    /// afresh, while the death itself goes on -- its out-of-tries hook is not
+    /// called again until the character has been seen alive and dies anew.
+    /// Nothing when the round has not run out. Whoever runs this asks for it
+    /// kRoundGapMs after OutOfTries, without end.
+    void again();
+    /// The round of tries under way at this death: 1 for its first, one
+    /// more for each again(); 1 again once the death is over.
+    int round() const { return round_; }
 
     /// Where to keep the frame of an attempt that did not take, the newest
     /// kKeptFrames of them. Empty keeps none.
     void set_debug_dir(const std::string& dir) { debug_dir_ = dir; }
     static constexpr std::size_t kKeptFrames = 20;
 
-    /// Tries used at this death -- and at the last revive taken with HP
+    /// Tries used in this round -- and at the last revive taken with HP
     /// unreadable, until the character has stayed up for kAliveBlindMs.
     int  tries() const { return tries_; }
     int  revived() const { return revived_; }        ///< since this was made
     bool out_of_tries() const { return tries_ >= kAttempts; }
 
-    /// The Vietnamese said when the tries ran out: why the bot stopped.
+    /// The Vietnamese said when the tries ran out: on the simple screen and to
+    /// the phone (revive_failed). Since 2026.11.24 that the bot goes on and
+    /// tries again in kRoundGapMs; until then, why the bot had stopped.
     static std::string out_of_tries_vi();
 
 private:
@@ -316,11 +351,14 @@ private:
     Frame turn_frame_;
 
     int  tries_ = 0;
+    /// The round at this death: see round().
+    int  round_ = 1;
     int  revived_ = 0;
     bool said_waiting_ = false;
     /// The panel has been seen at this death: the question may be answered.
     bool death_on_ = false;
-    /// `on_out_of_tries` has been called for this death.
+    /// `on_out_of_tries` has been called for this death: kept through the
+    /// rounds again() gives it, until the death is over (end_death).
     bool gave_up_ = false;
     /// A death is under way, and has been told: from the first look at its
     /// panel until the next death would get its own tries.

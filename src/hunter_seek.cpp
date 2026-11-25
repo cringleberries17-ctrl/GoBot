@@ -19,7 +19,7 @@
 // Never out of the box: the attack points stand kSeekEdgeInsetPx inside where
 // a floor leaves it, so walk_kept_in, still asked, never refuses. No key of its
 // own: the arrows through walk(), the jumps through the jump-up executor with
-// its caps and latches; nothing here turns the character or writes which way
+// its caps (no latch since 2026.11.24); nothing here turns the character or writes which way
 // it faces. Off, or not on this pass (no zone, the screen's plates, a list, the
 // walk back first): the hunter of 2026.11.05 and its jumps up, exactly.
 
@@ -107,8 +107,11 @@ const char* Hunter::seek_none_name(SeekNone w) {
 // ---------------------------------------------------------------- where
 
 bool Hunter::seek_wanted(const HunterConfig& cfg) const {
+    // The map tab's area alone: this run's spot has its map's file too once
+    // trusted (2026.11.12, for the way back), and is hunted as before.
     return cfg.seek_in_zone && cfg.spot && cfg.packet_positions == PacketPositions::On && !cfg.stay_put &&
-           spot_mode_ == SpotMode::Use && zone_.page != nullptr && fix_.state == WorldFix::State::Known;
+           spot_mode_ == SpotMode::Use && zone_.page != nullptr && zone_.from_map &&
+           fix_.state == WorldFix::State::Known;
 }
 
 SeekRules Hunter::seek_rules(const HunterConfig& cfg) const {
@@ -178,7 +181,8 @@ void Hunter::seek_look(const HunterConfig& cfg, std::uint64_t now) {
     if (zone_.stand) {
         const MapPoint stand = *zone_.stand;
         const bool jumps = jump_area(cfg);
-        const bool go = jumps && cfg.jump_up && jump_latch_ == JumpUpOff::None;
+        // No latch since 2026.11.24: the tick alone says whether jumps go.
+        const bool go = jumps && cfg.jump_up;
         JumpRules up;
         if (jumps) up = jump_rules(cfg, zone_.page);
         const std::uint8_t kinds = jumps ? up.kinds : 0;
@@ -311,10 +315,12 @@ void Hunter::mark_no_way(const HunterConfig& cfg, const std::vector<Nameplate>& 
     for (std::size_t i = 0; i < mobs.size() && i < listed.size(); ++i) {
         const Nameplate& n = mobs[i];
         if (n.slot < 0 || (listed[i] != Listed::Free && listed[i] != Listed::First)) continue;
-        // Within reach it is fought where it stands; a monster below a drop
-        // could go to is the drop's to judge.
+        // Within reach it is fought where it stands -- or one plain Up past the
+        // upper bar gets at it (2026.11.12c); a monster below a drop could go
+        // to is the drop's to judge.
         if (in_reach(cfg, n.x() - me.x(), n.y() - me.y())) continue;
-        if (drops && n.y() - me.y() > std::max(cfg.down(), cfg.drop_min_px)) continue;
+        if (bar_up_may_go(cfg) && bar_reach(cfg, n.x() - me.x(), n.y() - me.y(), bar_air(cfg))) continue;
+        if (drops && n.y() - me.y() > cfg.down()) continue;
         const SeekLook* l = seek_look_of(n.slot, n.gen);
         if (l == nullptr) continue;
         if (l->why == SeekNo::Passed) {
@@ -337,7 +343,7 @@ void Hunter::mark_no_way(const HunterConfig& cfg, const std::vector<Nameplate>& 
         if (l->why == SeekNo::NoAttackPoint && !seek_map_.pieces.empty()) {
             const SeekPiece& own = seek_map_.pieces.front();
             std::snprintf(more, sizeof more, ": your floor (x %d..%d) is never within %d px up and %d across; %s",
-                          own.use_l, own.use_r, r.up - r.band_margin, r.reach - r.reach_margin, jumps);
+                          own.use_l, own.use_r, std::max(0, r.up - r.band_margin), r.reach - r.reach_margin, jumps);
         } else if (l->why == SeekNo::NeedsJumpOff && l->would && l->would->first.jump) {
             std::snprintf(more, sizeof more, " (%s at %d onto floor %d would get there)",
                           jump_kind_name(l->would->first.jump->kind), l->would->first.jump->x,
@@ -354,9 +360,14 @@ Hunter::SeekChoice Hunter::seek_choose(const HunterConfig& cfg, const std::vecto
                                        const Nameplate& me, const std::vector<Listed>& listed, std::uint64_t now,
                                        int kept, bool* wounded) {
     SeekChoice out;
+    // In reach -- or past the upper bar within one plain Up (2026.11.12c):
+    // fought from where it stands, the ↑ in place.
+    const bool bar_go = bar_up_may_go(cfg);
+    const int bar_band = bar_air(cfg);
     const auto reach_at = [&](int i) {
         const Nameplate& n = mobs[static_cast<std::size_t>(i)];
-        return in_reach(cfg, n.x() - me.x(), n.y() - me.y());
+        return in_reach(cfg, n.x() - me.x(), n.y() - me.y()) ||
+               (bar_go && n.slot >= 0 && bar_reach(cfg, n.x() - me.x(), n.y() - me.y(), bar_band));
     };
     const auto plate_of = [&](int slot, std::uint32_t gen) {
         for (std::size_t i = 0; i < mobs.size(); ++i)
@@ -493,9 +504,7 @@ Hunter::SeekChoice Hunter::seek_choose(const HunterConfig& cfg, const std::vecto
         int first = -1, chosen = -1;
         for (std::size_t i = 0; i < mobs.size(); ++i) {
             const Nameplate& n = mobs[i];
-            if (n.slot < 0 || n.hp <= cfg.dead_below || refused(listed[i]) ||
-                n.y() - me.y() <= std::max(cfg.down(), cfg.drop_min_px))
-                continue;
+            if (n.slot < 0 || n.hp <= cfg.dead_below || refused(listed[i]) || n.y() - me.y() <= cfg.down()) continue;
             bool no_drop = false;
             for (const SeekSkip& s : seek_no_drop_)
                 if (s.slot == n.slot && s.gen == n.gen && now < s.until_ms) no_drop = true;
@@ -635,7 +644,7 @@ bool Hunter::seek_go(const HunterConfig& cfg, const Nameplate* target, std::uint
     const SeekLeg& first = plan.first;
     const bool jumping = (jump_.phase == JumpUpPhase::Settle && jump_.purpose == JumpUpFor::Seek) ||
                          (first.kind == SeekLeg::Kind::Jump && first.jump &&
-                          std::abs(stand.x - first.jump->x) <= kJumpUpLeadPx);
+                          std::abs(stand.x - first.jump->x) <= take_off_lead(*first.jump));
     if (seek_.quiet_pass == 0 || plan.cost + kSeekProgressPx <= seek_.mark_cost) {
         seek_.mark_cost = plan.cost;
         seek_.quiet_ms = 0;
@@ -733,16 +742,22 @@ bool Hunter::seek_go(const HunterConfig& cfg, const Nameplate* target, std::uint
             const int dir = leg.walk_x < leg.from.x ? -1 : 1;
             seek_.arrived_ms = 0;
             seek_.dir = dir;
+            // The macro's skills held on this leg (2026.11.12c, the owner's
+            // Q7) -- to the end, and its fall: kDropFallMaxMs at most once past it.
+            seek_walked_this_pass_ = true;
+            if ((stand.x - leg.from.x) * dir > 0 && std::abs(to) <= kZoneWalkOffPastPx + 8)
+                seek_fell_until_ms_ = now + kDropFallMaxMs;
             walk(cfg, screen(to != 0 ? to : dir, dir), 0, now, WalkFor::Floor);
             return true;
         }
         case SeekLeg::Kind::Jump: {
             if (!leg.jump) return false;
             seek_.arrived_ms = 0;
-            // Through the jump-up executor, its caps and latches the
-            // monster's (JumpUpFor::Seek): walked to the take-off, settled,
+            // Through the jump-up executor, its caps the monster's
+            // (JumpUpFor::Seek): walked to the take-off, settled,
             // pressed. A lasting refusal: passed over as a give-up.
             jump_.target_w = look->mob.at;
+            seek_walked_this_pass_ = true;
             const std::string name = "slot " + std::to_string(seek_.slot);
             if (jump_go(cfg, JumpUpFor::Seek, *leg.jump, seek_.slot, seek_.gen, name, now)) return true;
             return pass_over("-- no jump up to it for now", 2ull * cfg.give_up_ms, false);
@@ -803,7 +818,7 @@ Hunter::SeekIdle Hunter::seek_idle(const HunterConfig& cfg, const SeekChoice& c,
     // 05b's dry run (the owner's answer 5): with jump-ups off, the jump the
     // seek would have gone for -- jumps its last tier, so only standing here
     // with nothing else to go to; the cheapest, as seek_publish's arrow.
-    if (would != nullptr && would_mob != nullptr && !(cfg.jump_up && jump_latch_ == JumpUpOff::None)) {
+    if (would != nullptr && would_mob != nullptr && !cfg.jump_up) {
         for (const SeekLeg& leg : would->legs)
             if (leg.jump) {
                 jump_would(*leg.jump, JumpUpFor::Seek, would_mob->slot, would_mob->gen,

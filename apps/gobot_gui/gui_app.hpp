@@ -2,11 +2,6 @@
 
 #include "gobot/auto_chat.hpp"
 #include "gobot/bag.hpp"
-#include "gobot/bot_brain.hpp"
-#include "gobot/calibrator.hpp"
-#include "gobot/camera_tracker.hpp"
-#include "gobot/navigator.hpp"
-#include "gobot/command_executor.hpp"
 #include "gobot/config.hpp"
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/file_watch.hpp"
@@ -23,27 +18,22 @@
 #include "gobot/load_meter.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/map_file.hpp"
-#include "gobot/map_mapper.hpp"
 #include "gobot/map_table.hpp"
 #include "gobot/machine_info.hpp"
-#include "gobot/minimap_tracker.hpp"
 #include "gobot/net_discovery.hpp"
-#include "gobot/opcode_registry.hpp"
 #include "gobot/packet_capture.hpp"
 #include "gobot/packet_eyes.hpp"
 #include "gobot/packet_self.hpp"
 #include "gobot/packet_world.hpp"
 #include "gobot/frame_tally.hpp"
 #include "gobot/one_worker.hpp"
-#include "gobot/pathfinder.hpp"
-#include "gobot/protocol_analyzer.hpp"
-#include "gobot/protocol_handler.hpp"
-#include "gobot/routine.hpp"
+#include "gobot/owed_start.hpp"
 #include "gobot/crash_watch.hpp"
 #include "gobot/dpi.hpp"
 #include "gobot/party.hpp"
 #include "gobot/party_chat.hpp"
 #include "gobot/party_hud.hpp"
+#include "gobot/expedition.hpp"
 #include "gobot/party_invite.hpp"
 #include "gobot/player_list.hpp"
 #include "gobot/potion_stock.hpp"
@@ -54,7 +44,6 @@
 #include <array>
 #include <atomic>
 #include <thread>
-#include <deque>
 #include <future>
 #include <map>
 #include <memory>
@@ -72,9 +61,7 @@ struct DeathDoubt;      // gobot/alerts.hpp
 
 /// The GUI front-end.
 ///
-/// Owns the whole pipeline and draws it. Panels mirror the workflow rather
-/// than the class diagram: you cannot run the bot until the protocol is
-/// mapped, so Capture and Protocol come before Bot and Skills.
+/// Owns the whole pipeline and draws it.
 ///
 /// Everything the panels read is a snapshot pulled once per frame — the
 /// capture and bot threads keep running while ImGui draws, and reaching into
@@ -167,12 +154,7 @@ private:
     void draw_menu_bar();
     void draw_macro_panel();
     void draw_vitals_panel();
-    void draw_mapper_panel();
-    void draw_dashboard();
     void draw_capture_panel();
-    void draw_protocol_panel();
-    void draw_bot_panel();
-    void draw_skills_panel();
     void draw_heal_panel();
     void draw_log_panel();
     void draw_status_bar();
@@ -211,29 +193,14 @@ private:
                       const std::function<void()>& settings);
 
     /// Push the front-end's copy of the configuration into whatever is running.
-    void apply_bot_config();
     void apply_macro_config();
 
     /// The list of them. Only features that actually work: see draw_feature's
     /// note on why the half-built ones are not here at all.
     void draw_feature_list();
 
-    void draw_profile_panel();     ///< class, weapon, and the range preset
     void draw_attack_panel();      ///< what it hits and how it stands to hit it
-    void draw_hunt_settings();     ///< the hunter's knobs, shared with Radar
-    /// Whether the protocol map can place the character. Without that the
-    /// packet bot has no idea where it is, and Attack uses the hunter.
-    bool packet_bot_can_see_self() const;
-    void draw_buff_panel();
-    void draw_waypoints_panel();
-    void draw_area_panel();
-    void draw_monsters_panel();
-    void draw_routines_panel();    ///< the click sequences, and a dry run
-
-    /// routines.ini, re-read when it changes rather than every frame.
-    std::vector<Routine> routines_cache_;
-    std::uint64_t        routines_mtime_ = 0;       ///< last write time seen
-    std::uint64_t        routines_checked_ms_ = 0;  ///< when it was last stat'd
+    void draw_hunt_settings();     ///< the hunter's knobs, under Attack
 
     /// The party and keeper panels' files, likewise re-read when they change
     /// rather than on every frame the panel is open (gobot/file_watch.hpp):
@@ -248,53 +215,25 @@ private:
     bool                 keeper_panel_can_login_ = false;
 
     void draw_session_panel();     ///< the watcher, auto-login, and stopping
-    void draw_keys_panel();        ///< the keys the game itself is set to
-    void draw_tools_panel();       ///< everything that exists to take the game apart
-
-    /// What has not been built, listed in one place off the main screen.
-    ///
-    /// Not as tabs, and not as switches. A panel of controls that look live and
-    /// do nothing costs somebody an evening finding out; a tab that says "not
-    /// built" costs them a click to learn nothing. One honest list, out of the
-    /// way, under Help.
-    void draw_not_built_list();
-    bool show_not_built_ = false;
-
-    // ---- protocol discovery sub-panels ----
-    void draw_autopilot();
-    void draw_framing_editor();
-    void draw_detect_section();
-    void draw_opcode_table();
-    void draw_packet_inspector();
-    void draw_field_analyzer();
-    void draw_layout_editor();
-    void draw_suggestions();
+    void draw_tools_panel();       ///< the HP/MP reader's own panel, and the capture by hand
 
     // ---- actions ----
     void refresh_interfaces();
     void start_capture();
     void stop_capture();
-    void start_bot();
-    void stop_bot();
-    void toggle_bot();
-    void run_detection();
-    void apply_framing(const FramingSpec& spec);
-    void save_protocol();
-    void save_bot_config();
     void reload_configs();
     void find_game_window();
     /// Point everything that looks at or presses into the game at `hwnd`: the
-    /// keyboard and mouse, the HP/MP reader, the monster detector and the map
-    /// mapper -- and, when it is another window than before, forget what was
-    /// learned from the old one: the detector's plates and where it last saw
-    /// the character (it forgets those itself), where the view was, the map's
-    /// edge, and a walk steered by them. Every way the game's window is chosen
-    /// goes through here: the pickers, Tìm lại, BẮT ĐẦU's look, Find game
-    /// window, the setup's look and the keeper's reattach. Done piecemeal, the
-    /// detector kept grabbing a window that had closed and served its last
-    /// frame forever -- the hunter walking and hitting at monsters of a game
-    /// that was gone -- and a window picked on the Capture tab left the HP/MP
-    /// reader on the old one.
+    /// keyboard and mouse, the HP/MP reader and the monster detector -- and,
+    /// when it is another window than before, forget what was learned from
+    /// the old one: the detector's plates and where it last saw the character
+    /// (it forgets those itself), and the map the Bản đồ tab knew. Every way
+    /// the game's window is chosen goes through here: the pickers, Tìm lại,
+    /// BẮT ĐẦU's look, Find game window, the setup's look and the keeper's
+    /// reattach. Done piecemeal, the detector kept grabbing a window that had
+    /// closed and served its last frame forever -- the hunter walking and
+    /// hitting at monsters of a game that was gone -- and a window picked on
+    /// the Capture tab left the HP/MP reader on the old one.
     void retarget(void* hwnd);
     /// How Windows shows the game (gobot/dpi.hpp): enlarged, above 100% display
     /// scale, when the game does not handle DPI itself -- and no reader can work
@@ -329,84 +268,17 @@ private:
     /// every key let go of again. Told one at a time and waited for in between,
     /// a slow one -- an invite of eight seconds, a quest round, a crossing --
     /// kept the rest pressing and clicking meanwhile, with the window that reads
-    /// F12 frozen. `with_bot`: the packet bot and a walk to a saved place as
-    /// well -- F12, a failed revive, closing GoBot; DỪNG has never stopped
-    /// those two. True when the trash worker was stopped with the bin's dialog
-    /// maybe still open, and said so (stop_trash).
-    bool stop_jobs(bool with_bot);
+    /// F12 frozen. True when the trash worker was stopped with the bin's
+    /// dialog maybe still open, and said so (stop_trash).
+    bool stop_jobs();
 
     void on_packets(const std::vector<GamePacket>& packets);
 
-    /// Confirm the framing once live traffic proves it tiles cleanly.
-    void check_framing_health();
-
-    // ---- autopilot ----
-    /// Drives the whole setup with no input: find the game's own socket, pick
-    /// the adapter that carries it, capture, record, detect framing, then
-    /// analyse what the opcodes mean. Advanced one step per frame from tick().
-    enum class Auto {
-        Idle,
-        FindGame,
-        FindConnection,
-        StartCapture,
-        Recording,
-        Detecting,
-        Collecting,
-        Analysing,
-        Done,
-        Failed,
-    };
-
-    void auto_start();
-    void auto_cancel();
-    void auto_step();
-    const char* auto_stage_label() const;
-    float auto_progress() const;
-
-    Auto          auto_stage_ = Auto::Idle;
-    std::uint64_t auto_stage_started_ms_ = 0;
-    std::string   auto_error_;
-    std::string   auto_detail_;
-
-    std::vector<ProcessConnection> game_connections_;
-    std::uint32_t                  game_pid_ = 0;
-
-    /// Raw bytes per stream. The framing detector needs one direction of one
-    /// connection; keeping them separate means we can simply pick the busiest
-    /// rather than asking which connection is the game.
-    std::map<std::uint64_t, Bytes> flow_samples_;
-    std::map<std::uint64_t, std::string> flow_labels_;
-
-    /// Traffic volume per direction. The client->server half is the tell for
-    /// whether the character actually did anything: it is a trickle of
-    /// keepalives when standing still, and a steady stream when moving. A
-    /// capture of a stationary character contains nothing to infer from, and
-    /// saying that is far more useful than reporting no results.
-    std::uint64_t bytes_to_client_ = 0;
-    std::uint64_t bytes_to_server_ = 0;
-
-    std::map<std::uint16_t, OpcodeObservations> observations_;
-    std::vector<SemanticGuess>                  suggestions_;
-    bool                                        analysis_ran_ = false;
-
-    /// How long autopilot records before detecting, and collects before
-    /// analysing. Long enough to be representative, short enough to sit
-    /// through.
-    static constexpr std::uint64_t kRecordMs  = 25'000;
-    static constexpr std::uint64_t kCollectMs = 40'000;
-
     // ---- pipeline ----
     AppConfig  app_config_;
-    BotConfig  bot_config_;
 
-    GameState                        state_;
-    OpcodeRegistry                   registry_;
-    std::unique_ptr<ProtocolHandler> protocol_;
     InputManager                     input_;
     ExecutionCoordinator             coord_;
-    PathFinder                       pathfinder_;
-    std::unique_ptr<CommandExecutor> executor_;
-    std::unique_ptr<BotBrain>        brain_;
     /// You and every monster from the game's own frames: on_packets hands it
     /// every frame, UDP and unpacked ones too, on the capture thread.
     /// Declared before the capture, so that it outlives the capture's thread.
@@ -471,11 +343,32 @@ private:
         Restart,    ///< the client found gone, or ended by the keeper
         Key,        ///< "Vào game ngay", with the game up: nothing ended for it
     };
+    /// How a crossing ended. Since 2026.11.24 (the owner: "Kiểm tra các phần
+    /// khác xem có phần nào không làm được thì dừng không, cần thay cơ chế này
+    /// bằng 1 cơ chế khác") only the player's stop and GoBot not running as
+    /// administrator end the keeper: a crossing not in is made again --
+    /// until then it was GaveUp, and the keeper stopped for a person.
     enum class Crossed {
         In,         ///< in the world
         Cancelled,  ///< the login key pressed again: the keeper goes on
         Stopped,    ///< the keeper was told to stop
-        GaveUp,     ///< a person is needed -- said and alerted: the keeper stops
+        /// Not in: the login not set up, a picture missing, VTCZone's sign-in
+        /// form, the launcher's Security Alert, every attempt used on a page
+        /// that never came... Said, alerted once an episode, and made again
+        /// CrashWatch::kCrossAgainMs on, without end -- login.ini and the
+        /// pictures read afresh, the sign-in form and the Security Alert never
+        /// clicked or typed into: the next round goes through once a person
+        /// has answered them.
+        Retry,
+        /// A client to end and the hour's restarts used up (keeper_take_restart
+        /// refused it in the crossing's end-the-client): the crossing
+        /// cancelled, the game left as it is, and made again once one more
+        /// restart is allowed.
+        Wait,
+        /// GoBot not running as administrator: Windows drops its clicks, and
+        /// only starting GoBot again as one puts that right -- said and
+        /// alerted, and the keeper stops.
+        NotElevated,
     };
     /// One crossing on the keeper's thread, for keeper_loop and the login key
     /// alike: login.ini read afresh into `login` (and `store`, when it names
@@ -488,27 +381,64 @@ private:
     /// max_restarts, the one rule: a restart is every time the game was
     /// closed and had to be entered again -- a client the keeper found gone
     /// or ended, or one a crossing ended for being stuck, however that
-    /// crossing began. True, and counted, while one more is allowed; false,
-    /// said and alerted, when they are used up. The keeper's thread only.
+    /// crossing began. True, and counted, while one more is allowed in the
+    /// last hour (CrashWatch::restart_allowed); false when the hour's are used
+    /// up -- said and alerted once a wait, with when one more is allowed in
+    /// keeper_wait_until_ms_ (2026.11.24; until then false meant max_restarts
+    /// used up for the run, and the keeper stopped). The keeper's thread only.
     bool keeper_take_restart(const CrashWatch::Settings& watch_settings);
+    /// The keeper's waits since 2026.11.24, in 100 ms steps, nothing ended or
+    /// clicked meanwhile: until `until_ms` (now_ms()), or `cut` set -- the
+    /// login key's request, or the key pressed again on its own crossing.
+    /// False once the keeper is told to stop.
+    bool keeper_nap_until(std::uint64_t until_ms, const std::atomic<bool>* cut);
     /// The keeper's own lines, to gobot.log and the panel. The crossing's
     /// steps are logged by the crossing itself, so those only go to the panel.
     void keeper_note(const std::string& line);
-    /// Stopping for a person: English for the log and the panel, Vietnamese
-    /// for the simple screen, where it stays after the keeper has gone.
+    /// Stopping for a person -- since 2026.11.24 only for GoBot not running as
+    /// administrator: English for the log and the panel, Vietnamese for the
+    /// simple screen, where it stays after the keeper has gone.
     void keeper_give_up(const std::string& english, const std::string& vi);
+    /// A crossing not in, made again (Crossed::Retry, 2026.11.24): English
+    /// for the log and the panel; on the simple screen what GoBot does now,
+    /// `now_vi`, with the whole reason, `problem_vi`, under it in red until
+    /// the keeper is back in the world.
+    void keeper_not_in(const std::string& english, const std::string& now_vi, const std::string& problem_vi);
     void draw_keeper_panel();
 
     std::thread       keeper_thread_;
     std::atomic<bool> keeper_running_{false};
     std::atomic<bool> keeper_stop_{false};
-    std::atomic<int>  keeper_restarts_{0};   ///< counted by keeper_take_restart, from 0 at start_keeper
+    /// Counted by keeper_take_restart, from 0 at start_keeper: every restart
+    /// of this keeper, for the screens ("Đã vào lại N lần").
+    std::atomic<int>  keeper_restarts_{0};
+    /// When each of those was made (now_ms()), for max_restarts' hour
+    /// (2026.11.24). From none at start_keeper; the keeper's thread.
+    std::vector<std::uint64_t> keeper_restart_times_;
+    /// The hour's restarts used up: when one more is allowed (now_ms()). The
+    /// keeper's thread.
+    std::uint64_t     keeper_wait_until_ms_ = 0;
+    /// keeper_gave_up told for the wait under way -- until a restart is
+    /// allowed again -- and for the crossings not in -- until back in the
+    /// world: once each. The keeper's thread.
+    bool              keeper_wait_told_ = false;
+    bool              keeper_retry_told_ = false;
+    /// A crossing of keeper_loop's own that did not get in (Retry, or Wait),
+    /// to be made again on the look after its wait, and how it began. Cleared
+    /// as any crossing gets in. The keeper's thread.
+    bool              keeper_again_ = false;
+    Crossing          keeper_again_how_ = Crossing::Restart;
+    /// The failed crossing got the client up -- its flow reached the game's
+    /// own screens (Kết Nối on) -- so a game gone after it is a relaunch to
+    /// count against max_restarts (the 2026.11.24 review: a client dying on
+    /// each launch was relaunched every minute or two without limit).
+    bool              keeper_again_launched_ = false;
+    /// The keeper is waiting to cross again, or for the hour's restarts: its
+    /// line on the simple screen in amber, not green.
+    std::atomic<bool> keeper_waiting_{false};
     /// A client ended by a crossing, and counted as a restart then: the next
     /// look that finds it gone does not count it again. The keeper's thread.
     bool              keeper_closed_counted_ = false;
-    /// The macro held by tick() for a death the packets read, with no reader
-    /// of the bars running; tick() lets it go.
-    bool              packet_dead_hold_ = false;
 
     /// What either thread last did, for the panels to show. Guarded because
     /// they are written from a worker and read from the drawing thread.
@@ -536,13 +466,21 @@ private:
     /// at the one that went away; tick() points it all at the new one. Also
     /// set while a cold start waits and the game is found up already.
     std::atomic<bool> keeper_reattach_{false};
-    /// When the keeper last got into the world (run_crossing's Crossed::In),
-    /// on now_ms()'s clock; 0 for never. The popup worker keeps a picture of
-    /// the game 15 s after it, for the check-in board (CheckinShots).
+    /// When the keeper last got into the world (run_crossing, its flow in the
+    /// world -- set before keeper_flow_ is cleared), on now_ms()'s clock; 0
+    /// for never. The popup worker keeps a picture of the game 15 s after it,
+    /// for the check-in board (CheckinShots), and presses the board's ESC
+    /// only 30 s after it (PopupCloser::board_due, 2026-11-15).
     std::atomic<std::uint64_t> crossed_in_ms_{0};
     /// True when the game window was found; says so in the log once a run.
     bool reattach_game();
     bool reattach_missed_ = false;      ///< the last reattach found no window
+    /// When it last found none (now_ms()). Since 2026.11.24 tick() looks for
+    /// the window again every kReattachAgainMs while the keeper runs, with
+    /// every follow-up of a log in on the look that finds it -- until then a
+    /// relogin's window not found at the first look was looked for no more.
+    std::uint64_t reattach_missed_ms_ = 0;
+    static constexpr std::uint64_t kReattachAgainMs = 5'000;
     /// The keeper was started by a cold start (simple_cold_start_, which only
     /// the drawing thread may read) and the ticked jobs have not started yet.
     /// The keeper's own copy of it; cleared by tick() once they have, and by
@@ -551,25 +489,40 @@ private:
 
     // ---- reviving ----
     /// Watches for the death panel and revives on the spot with a revive
-    /// item, the way GoC does: see Reviver. Three tries for each death; when
-    /// they run out the bot stops -- the player's rule, rather than revive in
-    /// the village for 2% EXP.
+    /// item, the way GoC does: see Reviver. Three tries a round, never the
+    /// village (2% EXP) nor Cash. Until 2026.11.24 the bot stopped when they
+    /// ran out -- the player's rule then; since, the owner ("Kiểm tra các
+    /// phần khác xem có phần nào không làm được thì dừng không, cần thay cơ
+    /// chế này bằng 1 cơ chế khác"), another round of three every
+    /// Reviver::kRoundGapMs while the character lies dead, without end,
+    /// everything else held off meanwhile.
     void start_revive();
     void stop_revive(bool wait = true);     ///< `wait` as for stop_party
     void revive_loop();
     void say_revive(const std::string& line);
-    /// The revive's tries ran out: stop every job, let go of every key, and
-    /// say why in red until the next BẮT ĐẦU. On the drawing thread, from
-    /// tick(): stopping joins the revive worker that asked for it.
-    void stop_after_revive();
+    /// The revive's tries ran out at a death (once a death): said on the
+    /// simple screen and in the log, and told to the phone -- nothing is
+    /// stopped (2026.11.24; until then stop_after_revive stopped every job
+    /// here). On the drawing thread, from tick(): simple_note is its.
+    void revive_out_of_tries();
 
     std::thread              revive_thread_;
     std::atomic<bool>        revive_running_{false};
+    /// The reviver waiting for its pictures (2026.11.24 review): running, but
+    /// watching no death panel -- the HP figure's death alert stays on.
+    std::atomic<bool>        revive_waiting_{false};
     std::atomic<bool>        revive_stop_{false};
     std::atomic<int>         revive_count_{0};
     std::vector<std::string> revive_log_;          ///< guarded by worker_mutex_
-    std::atomic<bool>        revive_gave_up_{false};   ///< set by the worker; see stop_after_revive
+    std::atomic<bool>        revive_gave_up_{false};   ///< set by the worker; see revive_out_of_tries
     std::string              revive_gave_up_why_;      ///< guarded by worker_mutex_
+    /// The character lies dead with a round of tries run out: when the
+    /// worker asks for the next (now_ms()), for the card's line; 0 otherwise.
+    std::atomic<std::uint64_t> revive_round_ms_{0};
+    /// The worker waiting at its start for the pictures it needs (2026.11.24:
+    /// it ended there until then): its line, said in red on the simple
+    /// screen's card while it waits; empty otherwise. Guarded by worker_mutex_.
+    std::string              revive_wait_vi_;
     int                      revive_seen_ = 0;         ///< revive_count_ as tick() last saw it
     /// When the HP reading first showed 0 -- dead with the HUD up -- for
     /// re-casting the buffs once it is above 0 again; 0 when it is not 0.
@@ -604,23 +557,34 @@ private:
     /// it ends; guarded by trash_clocks_mutex_. And the shop's plan (2026.11.09):
     /// what is still owed of it, when the next one begins, and its rounds in a
     /// row that ended in trouble -- in memory only, as the clocks: a restart
-    /// starts from the plan time saved in shop_clock.txt, owing nothing.
+    /// starts owing nothing. Since 2026.11.12 the timed pass's clock as well,
+    /// and the pass's and the shop's kept only while still counting -- one
+    /// that ran out while nothing ran, or none, and a start counts a whole
+    /// interval (bag::start_due_ms); written only by a worker that counted
+    /// them, never by one here for a button alone.
     struct TrashClocks {
         std::uint64_t charm_check_ms = 0;   ///< 0: none kept
+        std::uint64_t pass_due_ms = 0;      ///< 0: none kept
         std::uint64_t shop_due_ms = 0;      ///< 0: none kept
         int           shop_quiet_level = 0; ///< QuietBackOff::level
         unsigned      charm_ticks_seen = 0;
+        unsigned      pass_ticks_seen = 0;
         unsigned      shop_ticks_seen = 0;
         int           owed_hp = 0, owed_mp = 0;
         std::uint64_t plan_due_ms = 0;      ///< 0: none kept
         int           shop_troubles = 0;
+        /// "Mua ngay sau khi dọn rác" (2026.11.13b): a pass's look the shop
+        /// still owes, kept for the next worker.
+        bool          look_owed = false;
     };
     TrashClocks              trash_clocks_;
     std::mutex               trash_clocks_mutex_;
-    /// One more each time "Dùng bùa" / "Tự mua bình" is ticked on, from the
-    /// window's thread: the worker running, or the next one, starts that job's
-    /// clock -- and the shop its waits for a quiet second -- afresh.
+    /// One more each time "Dùng bùa" / "Tự dọn rác" / "Tự mua bình" is ticked
+    /// on, from the window's thread: the worker running, or the next one,
+    /// starts that job's clock -- and the shop its waits for a quiet second --
+    /// afresh; the pass's and the shop's a whole interval on (2026.11.12).
     std::atomic<unsigned>    charm_ticked_{0};
+    std::atomic<unsigned>    pass_ticked_{0};
     std::atomic<unsigned>    shop_ticked_{0};
     /// The shop's plan as the trash worker last left it, for the card's line
     /// alone: when the next plan begins and when it next looks, in wall-clock
@@ -640,13 +604,11 @@ private:
     /// off until the bag shows nothing waiting.
     std::atomic<bool>        trash_hold_{false};
     /// A stop ended that hold with nothing left to watch the bin, so nothing
-    /// is started again until the game is seen with nothing waiting. Nor does
-    /// the executor press anything meanwhile: it presses only while the packet
-    /// bot runs, which that stop stopped, and it is paused besides.
+    /// is started again until the game is seen with nothing waiting.
     std::atomic<bool>        trash_left_held_{false};
     /// The game has been seen with nothing waiting since that stop: clears
-    /// trash_left_held_ and lets the executor go on. From keys_may_start,
-    /// from a trash worker's own look, and from watch_left_held.
+    /// trash_left_held_. From keys_may_start, from a trash worker's own look,
+    /// and from watch_left_held.
     void bin_seen_clear();
     /// A fresh look at the game shows no dialog up and nothing waiting in the
     /// bin, by `store`'s pictures, which have to be there to tell the bin's
@@ -656,30 +618,99 @@ private:
     /// From tick(): while a stop's doubt is left and no trash worker is
     /// running to look, bin_looks_clear every couple of seconds, so the doubt
     /// ends by itself once the player has answered the bin's dialog -- what
-    /// waits on it goes on, and the executor's pause for it ends. What the
-    /// stop stopped, the packet bot among it, waits for BẮT ĐẦU.
-    /// The look runs on a thread of its own, with pictures of its own: it
-    /// takes a quarter of a second, too long to hold the window up for.
+    /// waits on it goes on. What the stop stopped waits for BẮT ĐẦU -- or,
+    /// with the run still on, starts again by itself (resume_after_bin,
+    /// 2026.11.21) on two clear looks a frame apart.
+    /// The look runs on a thread of its own: it takes a quarter of a second,
+    /// too long to hold the window up for.
     void watch_left_held();
-    TemplateStore            left_held_store_;          ///< the look's own
-    bool                     left_held_store_loaded_ = false;   ///< by the look
+    /// The look's pictures: the program's one set (TemplateStore::shared_best),
+    /// asked for by the first look.
+    std::shared_ptr<const TemplateStore> left_held_store_;
     std::future<bool>        left_held_look_;           ///< a look under way
     std::uint64_t            left_held_looked_ms_ = 0;
     /// One more for every stop that leaves the bin in doubt. A look's answer
     /// counts only for the doubt it was started for.
     std::atomic<unsigned>    left_held_gen_{0};
     unsigned                 left_held_look_gen_ = 0;
+    /// What stop_trash took down for the bin's doubt while the run went on
+    /// -- the last bag job unticked, not DỪNG (2026.11.21, the audit's B9):
+    /// the hunter, the macro. Started again by resume_after_bin once the
+    /// doubt is over, the run still on; forgotten by BẮT ĐẦU and DỪNG. One its
+    /// start refuses is owed since 2026.11.24 (hunt_owed_, macro_owed_), not
+    /// lost with these.
+    std::atomic<bool>        left_held_resume_hunt_{false};
+    std::atomic<bool>        left_held_resume_macro_{false};
+    /// From watch_left_held, the doubt over: the hunter and the macro the
+    /// bin's doubt stopped, started again while the rest of the run is still
+    /// on -- through start_hunt and start_macro, so keys_may_start still has
+    /// its say. -1 when asked and neither did (its start said why); 0 when
+    /// nothing was asked; else the bits below -- which started, and whether
+    /// one asked for was refused (the review of 2026.11.21: the note no longer
+    /// says the fighting is back when the hunter's start refused, and said why).
+    static constexpr int kResumedMacro = 1, kResumedHunt = 2, kResumeRefused = 4;
+    int resume_after_bin();
     /// Whether something that presses keys may start: the hunter, the macro,
-    /// the packet bot, walking to a place, the calibration, or the simple
-    /// screen's BẮT ĐẦU. Always, unless trash_left_held_ is set; then only
-    /// once a fresh look at the game shows no dialog up and nothing waiting
-    /// in the bin, which clears it. The same for a chat line Tự chat was
+    /// or the simple screen's BẮT ĐẦU. Always, unless trash_left_held_ is set;
+    /// then only once a fresh look at the game shows no dialog up and nothing
+    /// waiting in the bin, which clears it. The same for a chat line Tự chat was
     /// stopped with in doubt, until a look shows it shut; and not while a
     /// Tự chat worker that was told to quit is still on its way out, as it
     /// may yet leave one. Says why not, on whichever screen is up. Every one
     /// of those starts goes through here, so that no way of starting one --
     /// F10, F11, a button on either screen -- gets round it.
     bool keys_may_start();
+
+    // ---- a start owed (2026.11.24, gobot/owed_start.hpp) ----
+    //
+    // The owner: "Kiểm tra các phần khác xem có phần nào không làm được thì
+    // dừng không, cần thay cơ chế này bằng 1 cơ chế khác". A start the run
+    // asked for and that was refused by something that passes -- Npcap or its
+    // service up late after the PC's start (spot_refusal), a chat line or the
+    // bin's dialog in doubt, the detector not up the first time -- was lost
+    // until the next BẮT ĐẦU, the rest of the run going on without it. Now it is
+    // owed: asked again every kOwedAskMs (30 s) while the run is on, through
+    // the start's own checks (owed_tick), and at once when watch_left_held or
+    // watch_chat_doubt sees its doubt over (owed_now). Never after the player's
+    // own stop: stop_jobs (DỪNG, F12, closing GoBot), F11 (toggle_hunt), the
+    // full screen's Attack and Timed keys switches and its macro buttons,
+    // Tự đánh quái unticked (simple_changed) forget it -- and BẮT ĐẦU starts
+    // afresh (simple_start_jobs). On the window's thread alone.
+    /// Tự đánh quái: ticked, asked for with the run on and refused -- by
+    /// simple_start_jobs (BẮT ĐẦU, the cold start), resume_after_bin or
+    /// simple_changed. Cleared when it starts (start_hunt).
+    std::atomic<bool> hunt_owed_{false};
+    /// The macro the same: one resume_after_bin or simple_changed asked for
+    /// and start_macro refused. Cleared when it starts (start_macro).
+    std::atomic<bool> macro_owed_{false};
+    /// The cold start's simple_start_jobs refused by keys_may_start, with the
+    /// keeper alone running: nothing else would ever have started. Owed only
+    /// while that keeper runs; cleared once keys_may_start lets it through.
+    std::atomic<bool> jobs_owed_{false};
+    /// When what is owed was last asked -- a refused start is an ask -- on
+    /// now_ms()'s clock; 0: at once (owed_now).
+    std::uint64_t     owed_ms_ = 0;
+    /// The reason start_hunt last said it was refused for. An owed ask that
+    /// meets the same reason again says nothing (owed_asking_): asked every
+    /// 30 s, the same words would flash the card each time. "" once it starts.
+    std::string       owed_why_;
+    /// owed_tick is asking: start_hunt's refusal said only when its reason
+    /// is not owed_why_. Every other ask -- BẮT ĐẦU, F11, a tick -- says it.
+    bool              owed_asking_ = false;
+    /// `owed` set, and owed_ms_ to now -- the refusal just now was an ask --
+    /// while the run is on and not under a cold start, whose jobs are asked
+    /// once the keeper is in the world (tick); said in the log once, as it
+    /// becomes owed. With nothing else running there is no run to go on:
+    /// BẮT ĐẦU said why, and is pressed again.
+    void owe_start(std::atomic<bool>& owed, const char* what);
+    /// A doubt seen over (watch_left_held, watch_chat_doubt): what is owed is
+    /// asked in this tick, not on its 30 s. True when anything is owed.
+    bool owed_now();
+    /// From tick(): what is owed forgotten once it is no longer wanted, and
+    /// asked when due (owed_due) -- never into a doubt keys_may_start would
+    /// look at on this thread, whose watcher asks as it ends, nor with no game
+    /// window. What it starts says so on the card.
+    void owed_tick();
 
     /// Hold every other part of the bot off for `reason`, unless something
     /// else holds it already: one worker's hold is not another's to take
@@ -764,8 +795,8 @@ private:
 
     /// The game's chat line may be open: Tự chat could not show it shut and
     /// empty. With it open every key pressed goes into it -- a skill key is a
-    /// letter, a potion a digit -- so the executor is paused while this is
-    /// set, and the 'auto chat' hold kept on while a worker watches it.
+    /// letter, a potion a digit -- so the 'auto chat' hold is kept on while a
+    /// worker watches it.
     std::atomic<bool>        chat_doubt_{false};
     /// A worker is watching that doubt, with its hold on. Without one -- the
     /// worker was stopped by the player -- nothing that presses keys starts
@@ -781,25 +812,25 @@ private:
     unsigned                 chat_doubt_look_gen_ = 0;
     std::future<bool>        chat_doubt_look_;          ///< a look under way
     std::uint64_t            chat_doubt_looked_ms_ = 0;
-    TemplateStore            chat_doubt_store_;         ///< the look's own
-    bool                     chat_doubt_store_loaded_ = false;   ///< by the look
-    /// The doubt is over: the executor goes on, unless the bin's doubt keeps it.
+    /// The look's pictures: the program's one set, asked for by the first look.
+    std::shared_ptr<const TemplateStore> chat_doubt_store_;
+    /// The doubt is over.
     void chat_seen_shut();
     /// `looks` fresh looks at the game, a frame or two apart, all show the
-    /// chat line shut -- or there is no game, so no line to type into. When
+    /// chat line shut, or a page of the login with no line on it (2026.11.21)
+    /// -- or there is no game, so no line to type into. When
     /// not, `why` -- if given -- gets why not, in Vietnamese.
     bool chat_line_looks_shut(const TemplateStore& store, int looks, std::string* why);
+    /// `f` shows a page of the login -- the sign-in, the channel list, the
+    /// character select -- by login.ini's pages, as the keeper's watchdog
+    /// knows them (login_page_up): no chat line can be open there
+    /// (2026.11.21, the audit's B4). Any thread.
+    bool shows_login_page(const Frame& f, const TemplateStore& store) const;
     /// From tick(): while a doubt is left with no worker watching it, a look
     /// every couple of seconds, on a thread of its own, so the doubt ends by
-    /// itself once the player has shut the line -- what waits on it goes on,
-    /// and the executor's pause for it ends. What the stop stopped, the packet
-    /// bot among it, waits for BẮT ĐẦU.
+    /// itself once the player has shut the line -- what waits on it goes on.
+    /// What the stop stopped waits for BẮT ĐẦU.
     void watch_chat_doubt();
-
-    /// The executor's buffs and potions paused while either doubt -- the bin's
-    /// or the chat line's -- is left, and going again once neither is.
-    void update_executor_pause();
-    std::mutex               pause_mutex_;
 
     // ---- vitals ----
     /// Reads HP and MP off the on-screen bars. The only live game state
@@ -830,8 +861,7 @@ private:
     /// hunt, the macro, the party, the revive, the popups, the keeper, the
     /// trash and charms and shop, Tự chat, the quest -- runs and one-shot
     /// passes alike ("Dọn ngay", "Gửi thử", a quest round) -- "Tự tìm" and
-    /// FIND THE BARS, a critical hold, a jump key's "Thử", and on the full
-    /// screen the packet bot, Autopilot, the calibration and a walk to a place.
+    /// FIND THE BARS, a critical hold and a jump key's "Thử".
     bool any_job_alive() const;
     /// HP and MP read at the run's pace, [Performance] vitals_run_ms --
     /// automatic: 150 ms, 250 in light mode -- (vitals_run_period), and never
@@ -843,7 +873,7 @@ private:
     /// vitals_idle_ms once nothing is alive (any_job_alive).
     void vitals_for_job();
 
-    // ---- radar: seeing the monsters and going after them ----
+    // ---- seeing the monsters and going after them ----
 
     /// The game's own bitmap font, so plates are read rather than guessed at.
     /// Empty when the glyph set is not installed, and everything still works.
@@ -868,59 +898,34 @@ private:
     std::shared_ptr<const GameMapBook::Page> plate_floors_;
     /// The game's own map files -- floors and gates -- for the hunter's drops
     /// (HunterConfig::drop_down), read on its thread at a map's first need.
-    /// Not map_book_, the minimap's names typed by hand. Before the hunter,
-    /// which reads it from its thread, so that it outlives it.
+    /// Before the hunter, which reads it from its thread, so that it outlives
+    /// it.
     GameMapBook             game_maps_;
     std::unique_ptr<Hunter> hunter_;
     HunterConfig            hunt_config_;
     bool                    detector_running_ = false;
     bool                    hunting_ = false;
-    bool                    radar_tuning_open_ = false;
-    bool                    radar_show_rejects_ = false;
 
     /// How much of the game's client area our own window is sitting on top of.
     ///
     /// This game refuses PrintWindow, so frames come off the screen — which
     /// means anything covering the game is captured instead of the game. It is
-    /// the single most confusing way for the radar to fail, so it is measured
-    /// and said out loud rather than left to produce nonsense.
+    /// the single most confusing way for the screen readers to fail, so it is
+    /// measured and said out loud rather than left to produce nonsense.
     float overlap_fraction() const;
     void  move_clear_of_game();
 
-    // ---- which map we are in ----
-    MinimapTracker minimap_;
-    MapBook        map_book_;
-    char           map_name_[64] = "";
-    std::uint64_t  map_fp_ = 0;
-
-    // ---- where we are, and getting somewhere ----
-    CameraTracker              camera_;
-    EdgeAnchor                 anchor_;
-    PlaceBook               places_;
-    NavigatorConfig            nav_config_;
-    std::unique_ptr<Navigator> navigator_;
-    char                       place_name_[48] = "";
-
-    void draw_movement_section();
     void draw_input_warning();
     void relaunch_elevated();
 
     /// Whether synthetic keystrokes reach the machine. Checked at startup and
     /// on demand: it changes when the game's anticheat starts and stops.
     bool input_injection_ok_ = true;
-    void save_places();
 
-    void draw_map_section();
-    void draw_local_radar(const Nameplate* me, const std::vector<Nameplate>& plates,
-                          const Nameplate* target, int frame_w, int frame_h);
-    void save_map_book();
-
-    void draw_radar_panel();
     void start_detector();
-    /// Stops the hunt and the walk as well -- nothing to hunt or walk by with
-    /// the eyes shut -- marked stopped first, so that the hunt's own end finds
-    /// nothing left to stop (release_detector): once, never through a call of
-    /// itself.
+    /// Stops the hunt as well -- nothing to hunt by with the eyes shut --
+    /// marked stopped first, so that the hunt's own end finds nothing left to
+    /// stop (release_detector): once, never through a call of itself.
     void stop_detector();
     /// The detector stopped unless something still looks through it
     /// (detector_wanted): at the hunt's end, F11, DỪNG, F12 or the hunter
@@ -928,13 +933,8 @@ private:
     /// second, and their CPU, for nothing once nothing reads them.
     void release_detector();
     /// What keeps the detector running with no hunt: "Quái đang thấy"
-    /// (simple_lists.cpp), a jump key's "Thử" under way (simple_style.cpp), a
-    /// walk to a place, the full screen's START WATCHING, and its Radar and
-    /// movement panels open.
+    /// (simple_lists.cpp) and a jump key's "Thử" under way (simple_style.cpp).
     bool detector_wanted() const;
-    /// START WATCHING pressed on the full screen's Radar: the player's, until
-    /// STOP WATCHING.
-    bool detector_by_player_ = false;
     /// "Nhìn quanh (60 giây)" under way (simple_lists.cpp).
     bool monster_look_running() const;
     /// A jump key's "Thử" under way, whoever started the detector for it
@@ -944,25 +944,15 @@ private:
     /// reads no plate (simple_style.cpp).
     bool jump_kind_running() const;
 
-    /// The camera tracker -- the search for how far the view moved, 3 to 10
-    /// million samples a frame -- fed from the detector's frames only while
-    /// something uses it: a walk to a place (the navigator goes by it), or
-    /// the full screen's Radar and movement panels, which show where you are
-    /// by it. Nothing on the simple screen does. tick() feeds it, afresh, as
-    /// soon as one does (camera_.reset(), then set_camera), and stops when
-    /// none does.
-    bool camera_wanted() const;
-    bool camera_fed_ = false;
-    /// The Radar or movement panels drawn on this frame or the one before:
-    /// the frame count stands still while the window is minimised, so a
-    /// panel left open stays open. Set as they are drawn.
-    bool camera_panels_open() const;
-    int  camera_panel_frame_ = -10;
     /// Refuses, and says why, while no character name is typed: the hunter
     /// finds you by your name alone, so without one there is no "you" to
-    /// walk from -- F11, BẮT ĐẦU and the full screen's switch alike.
+    /// walk from -- F11, BẮT ĐẦU and the full screen's switch alike. Asked
+    /// again for a start owed (owed_tick, 2026.11.24), a refusal for the
+    /// reason it last said is not said again (owed_why_).
     void start_hunt();
     void stop_hunt();
+    /// F11: the player's own hand on the hunt -- nothing owed is asked for it
+    /// afterwards (2026.11.24).
     void toggle_hunt();
     void save_hunt_config();
     /// Whether a character name is typed, more than spaces.
@@ -981,53 +971,8 @@ private:
     FrameView draw_frame_region(const Frame& f, int x0, int y0, int w, int h,
                                 float scale, const char* id);
 
-    // ---- map mapper ----
-    std::unique_ptr<MapMapper> mapper_;
-    MinimapSpec                minimap_spec_;
-    bool                       mapper_running_ = false;
-    char                       map_label_[64] = "";
-
-    /// Calibration: the next click inside the minimap view samples the colour
-    /// under the cursor as the marker colour.
-    bool picking_marker_ = false;
-
-    // ---- game map files ----
-    MapFile                  map_file_;
-    std::string              map_dir_;
-    std::vector<std::string> map_stems_;
-    char                     map_filter_[64] = "";
-    int                      map_tile_size_ = 8;
-    int                      map_layer_mask_ = 3;
-    std::string              map_status_;
-    void draw_mapfile_panel();
-
-    // ---- protocol calibration ----
-    std::unique_ptr<ProtocolCalibrator> calibrator_;
-    std::vector<FieldFinding>           findings_;
-    bool                                calib_ran_ = false;
-    char                                calib_cast_key_[24] = "1";
-    bool                                calib_held_ = false;   ///< "calibrating" held for a run
-    void draw_calibrate_panel();
-    void apply_findings();
-    /// The Calibrate tab's run: the game brought to the front -- clicking the
-    /// button put GoBot's own window there, and the calibration refuses a game
-    /// that is not in front, so it could never start -- and everything else
-    /// that presses keys held off for its twenty seconds, under the
-    /// "calibrating" hold. Refused while hunting, walking to a place or the
-    /// packet bot runs: they steer the character too. False, and said why,
-    /// when it did not start.
-    bool start_calibration();
-    /// Stopped and waited for, and its hold let go: Abort, stop_jobs (F12,
-    /// DỪNG, a failed revive, closing GoBot), the trash and chat holds, and
-    /// tick() once a run has ended by itself.
-    void stop_calibration();
-
+    /// [Framing] as protocol.ini has it.
     FramingSpec framing_;
-    bool        framing_verified_ = false;
-    /// [Framing] as protocol.ini has it, kept when Autopilot applies the
-    /// framing it detected -- which never has the 0x0081 rule, and which
-    /// push_framings takes the rule back from.
-    FramingSpec configured_framing_;
 
     /// What the client sends is framed differently -- the opcode sits at offset
     /// 2 coming down and offset 6 going up. A capture given only `framing_`
@@ -1047,16 +992,13 @@ private:
     /// packet_positions is not Off -- asked for again by start_hunt: the
     /// game's own TCP and UDP, by its process (its window's), with every
     /// frame unpacked and none filtered out. A capture already running -- the
-    /// Protocol tab's, Autopilot's, the packet bot's -- is used as it is.
-    /// Otherwise the start is posted to capture_worker_ (position_job); one
-    /// that will not start is said once in the log, and the hunt goes on from
-    /// the screen.
+    /// Capture tab's -- is used as it is. Otherwise the start is posted to
+    /// capture_worker_ (position_job); one that will not start is said once in
+    /// the log, and the hunt goes on from the screen.
     void start_position_capture();
-    /// Stops the capture start_position_capture started -- on capture_worker_
-    /// -- unless the packet bot, Autopilot, a recording or the calibration is
-    /// using it now: then it stays, and positions_tick stops it once they are
-    /// done. Never one somebody else started. Only once the packets are not
-    /// wanted (packets_wanted): a hunt's end leaves it running.
+    /// Stops the capture start_position_capture started -- on capture_worker_.
+    /// Never one somebody else started. Only once the packets are not wanted
+    /// (packets_wanted): a hunt's end leaves it running.
     void stop_position_capture();
     /// From tick(), all session while the packets are wanted: the capture
     /// kept attached, its map entries and gaps said, the "Packets:" line
@@ -1087,19 +1029,18 @@ private:
     /// spare: 1 on it, 0 off it, -1 not known (no file).
     int on_place(std::uint16_t map, std::uint16_t area, float x, float y);
     /// The capture started again when the game's process, connections or UDP
-    /// ports change, or its TCP goes quiet on it (should_reattach); one that
-    /// would not start is tried again at the next look -- and one the
-    /// capture itself refused, only for a new game link or after
+    /// ports change, or its TCP goes quiet on it (should_reattach) -- and
+    /// since 2026.11.24, still quiet, again every
+    /// GameLink::kReattachSilentAgainMs while the game holds a connection;
+    /// one that would not start is tried again at the next look -- and one
+    /// the capture itself refused, or one that died (PacketCapture::dead,
+    /// stopped by a job of its own), only for a new game link or after
     /// position_backoff_ms_. Posts a job to capture_worker_ and never waits
-    /// for it: the job looks and decides.
+    /// for it: the job looks and decides, and stops what it stops.
     void position_reattach(std::uint64_t now);
     /// Say `what` in the log, unless it was the last thing said about the
     /// capture for positions: a capture that cannot start is said once.
     void position_say(const std::string& what);
-    /// Whether another part reads the capture now: the packet bot, Autopilot
-    /// part-way, a recording or the calibration. The capture for positions is
-    /// then neither stopped nor started again from under it.
-    bool capture_shared();
 
     bool          position_capture_ = false;    ///< the running capture is the one started for positions
     /// The capture was stopped by hand (stop_capture): not started again for
@@ -1110,13 +1051,21 @@ private:
     std::string   position_said_;               ///< the last thing position_say said
     GameLink      position_link_;               ///< what the capture for positions was built from
     std::uint64_t position_tried_ms_ = 0;       ///< the last start, or try at one
-    /// The last start got as far as the capture, and the capture refused it:
-    /// tried again at once only for a new game link, otherwise once
-    /// position_backoff_ms_ has gone by, which doubles at every refusal up to
-    /// kPositionBackoffMaxMs. A new hunt tries afresh.
+    /// The last start got as far as the capture, and the capture refused it
+    /// -- or the capture running died (PacketCapture::dead, 2026.11.24): tried
+    /// again at once only for a new game link, otherwise once
+    /// position_backoff_ms_ has gone by: 10 s for the first of a row, twice
+    /// the one before for each after it, 30 s at most -- 10 s, 20 s, then
+    /// every 30 s (GameLink::refused_wait_after; 2026.11.24, the owner: "cần
+    /// thay cơ chế này bằng 1 cơ chế khác" -- kPositionBackoffMaxMs, 10 min,
+    /// until then). The row (position_backoff_ms_ 0: none) ends once a
+    /// capture of ours has heard the game's TCP, not at a mere start: one that
+    /// started and died at once waits longer each time. A new hunt tries
+    /// afresh.
     bool          position_start_failed_ = false;
-    std::uint64_t position_backoff_ms_ = GameLink::kReattachEveryMs;
-    static constexpr std::uint64_t kPositionBackoffMaxMs = 600'000;
+    std::uint64_t position_backoff_ms_ = 0;
+    /// A capture's death said, at WARN, once a row (2026.11.24).
+    bool          position_dead_said_ = false;
     std::uint64_t position_checked_ms_ = 0;     ///< the last look at the game's sockets
     std::uint64_t packet_watch_ms_ = 0;         ///< the last "Positions" line; 0 before the first
     std::uint64_t packet_sample_ms_ = 0;
@@ -1167,11 +1116,13 @@ private:
     struct PositionJobIn {
         void* window = nullptr; std::string process;      // the game by its window, or by name while the keeper crosses
         GameLink before; std::uint64_t since_try = 0, silent = 0, backoff = 0;
+        /// `stop_first`: the capture running is ours and dead (2026.11.24): the job only stops it.
         bool running = false, failed = false, stop_first = false;
     };
     /// What a job found and did: whether it tried a start, and how that went.
     struct PositionJobOut {
-        bool tried = false, started = false, refused = false, kept_world = false, npcap = true;
+        /// `stopped`: the job stopped a dead capture (in.stop_first, 2026.11.24) and did nothing more.
+        bool tried = false, started = false, refused = false, kept_world = false, npcap = true, stopped = false;
         GameLink link; std::size_t conns = 0; std::string iface, said, why; std::uint64_t took_ms = 0;
     };
     std::mutex                    position_out_mutex_;
@@ -1179,7 +1130,15 @@ private:
     std::map<std::string, std::string> iface_by_ip_;      // the worker's only
     std::uint64_t  npcap_absent_until_ms_ = 0;             // the worker's only
     std::uint64_t  packets_minute_ms_ = 0, frames_line_ms_ = 0, capture_starts_seen_ = 0;
+    /// The silence restart (position_reattach): armed while the capture has
+    /// heard the game's TCP since its start; after a restart for silence, until
+    /// it hears it again -- or, since 2026.11.24, until
+    /// GameLink::kReattachSilentAgainMs after that start, quiet still.
     bool           silence_restart_armed_ = true;
+    /// The repeat restarts of one quiet spell said at INFO once (2026.11.24
+    /// review: 30 s apart with no end they buried the hunt log); DEBUG after.
+    /// Cleared when the game's TCP is heard.
+    bool           silence_repeat_said_ = false;
     PacketCapture::Stats capture_seen_{};
     PacketWorld::Stats   hunt_world_seen_{};               // the Positions line counts from HUNT ON
     std::uint16_t  entry_from_map_ = 0, entry_from_area_ = 0;
@@ -1267,12 +1226,14 @@ private:
     void more_tick(std::uint64_t now);
     void note_casts_minute(std::uint64_t now);
     void more_note_attack(std::uint32_t vk, std::uint64_t at_ms);   // the hunter's thread (set_on_attack)
+    // 2026.11.16b: the hunter's last swing's key-down, set there, read by the macro's fight (Fight::swing_ms)
+    std::atomic<std::uint64_t> swing_ms_{ 0 };
+    // 2026.11.12, the capture thread (PacketWorld::set_move_keys): the key a move's skill is cast with, GoBot's arrows
+    std::string more_move_keys(const PacketWorld::OwnMove& m);
     std::optional<std::uint64_t> packet_takeoffs() const;        // M; any thread
     // 2026.11.05b, any thread: packet_takeoffs' rules, the counts by kind and your last reports
     std::optional<PacketWorld::AirCounts> packet_air_counts() const;
     std::vector<PacketWorld::OwnTrace> packet_own_since(std::uint64_t ms) const;
-    // Slice 2 -- gui_app.cpp tick()
-    std::uint32_t map_epoch_seen_ = 0; std::uint64_t minimap_overruled_ = 0;
     // Slice 6 -- packets_detector.cpp
     int  detector_period_ms_ = 0;
     void detector_pace_tick(std::uint64_t now);
@@ -1281,9 +1242,8 @@ private:
     bool quit_ = false;
     int  active_tab_ = 0;
 
-    /// Hides the panels that only matter while reverse-engineering the
-    /// protocol. They are most of the tabs and none of what you need to run a
-    /// macro, and leaving them in the way made the app read as broken.
+    /// Shows the Tools tab -- the HP/MP reader's own panel and the capture by
+    /// hand -- and the Capture menu. Neither is needed to run the bot.
     bool advanced_ = false;
 
     std::vector<Interface> interfaces_;
@@ -1298,7 +1258,6 @@ private:
     char window_title_[128] = "GhostOnline";
 
     bool  capture_running_ = false;
-    bool  bot_running_ = false;
     bool  elevated_ = true;
     void* main_hwnd_ = nullptr;
     /// The window retarget() last pointed everything at, to tell a new window
@@ -1308,61 +1267,38 @@ private:
     /// with the game's program, for the cures done by hand.
     WindowScaling game_scaling_{};
     std::uint64_t game_scaling_looked_ms_ = 0;
+    /// A crossing moved the game into its screen's corner (2026.11.14,
+    /// AutoLogin::moved_to_corner): set by the keeper, taken by the window's
+    /// thread, which moves GoBot's own window off the game when it now lies
+    /// over it (the review: GoBot kept at the top-left beside the game).
+    std::atomic<bool> clear_after_login_{false};
     ScaleCure     game_scaling_cure_ = ScaleCure::None;
     std::string   game_scaling_program_;
+    /// Whether the game is all on the screen, nothing of the taskbar over it
+    /// (AutoLogin::game_fit, 2026.11.13c): looked at with the scale, on the
+    /// GUI's thread; a copy under game_fit_mutex_ for the workers' threads.
+    AutoLogin::Fit game_fit_{};
+    mutable std::mutex game_fit_mutex_;
+    AutoLogin::Fit game_fit_shared_{};
+    /// Why `what` cannot be read, in Vietnamese, when more than `rows` rows at
+    /// the bottom of the game are hidden and the frame `what` is read from
+    /// came off the screen (`from_screen`, ScreenCapture::from_screen): one
+    /// the game drew itself (PrintWindow) has those rows all the same. Empty
+    /// otherwise. From any thread.
+    std::string game_unseen(int rows, const std::string& what, bool from_screen) const;
+    /// The rows a potion slot's count needs (the hotbar's slots run to 13
+    /// above the bottom) and the chat bar and the chat's lines (from 6 above
+    /// it): more of them hidden and those reads are put off with the reason.
+    static constexpr int kHotbarRowsUnder = 10;
+    static constexpr int kChatRowsUnder = 6;
     /// GoBot held to Windows' scaling: whether an override on its own exe is
     /// what holds it (looked at with the game), and whether it was taken off.
     bool          own_override_found_ = false;
     bool          own_scaling_fixed_ = false;
 
-    /// The packet bot to be stopped, asked for off the drawing thread -- a
-    /// death read off HP, on the capture thread; the game's traffic gone quiet,
-    /// on the capture's watchdog -- and done by tick(), where it is started and
-    /// stopped, and where "Keep botting after death" is read. Stopped on those
-    /// threads, a stop landing inside a start was lost, and the bot ran on a
-    /// dead connection.
-    std::atomic<bool> bot_died_{false};
+    /// The game's traffic gone quiet, as the capture's watchdog says on its
+    /// own thread: said by tick(), on GoBot's.
     std::atomic<bool> traffic_lost_{false};
-
-    // ---- protocol discovery state ----
-    /// Raw server->client bytes held for the framing detector. Capped: the
-    /// detector only reads the first few hundred KB and an unbounded buffer
-    /// would grow for the whole session.
-    std::mutex                mutex_;
-    std::vector<std::uint8_t> raw_sample_;
-    bool                      recording_ = false;
-    static constexpr std::size_t kMaxSample = 512 * 1024;
-
-    std::vector<FramingScore> detect_results_;
-    bool                      detect_ran_ = false;
-
-    struct OpcodeStat {
-        std::uint64_t count = 0;
-        std::uint64_t to_server = 0;
-        std::uint64_t to_client = 0;
-        std::size_t   last_size = 0;
-        std::size_t   min_size = SIZE_MAX;
-        std::size_t   max_size = 0;
-    };
-    std::map<std::uint16_t, OpcodeStat> opcode_stats_;
-
-    /// Frames from inside 0x0081 or over UDP, which on_packets counts and
-    /// keeps out of every table and of the packet bot. The packet world,
-    /// which reads them by their own rules, has them all.
-    std::uint64_t held_back_frames_ = 0;
-
-    /// Recent payloads per opcode, for the inspector and the field analyzer.
-    std::map<std::uint16_t, std::deque<Bytes>> samples_;
-    static constexpr std::size_t kMaxSamplesPerOpcode = 256;
-
-    int  selected_opcode_ = -1;      ///< -1 = none
-    bool opcode_filter_mapped_only_ = false;
-
-    // ---- layout editor ----
-    char layout_name_[64]   = "";
-    char layout_fields_[512] = "";
-    int  layout_semantic_   = 0;
-    char layout_repeat_field_[64] = "";
 
     // ---- log panel ----
     int  log_level_filter_ = 2;      ///< index into the level combo
@@ -1424,7 +1360,7 @@ private:
         return macro_running_ || hunting_ || party_running_ || (keeper_running_ && !keeper_oneshot_) ||
                revive_running_ || (trash_running_ && !trash_oneshot_) ||
                (chat_running_ && !chat_oneshot_ && !chat_stop_) ||
-               (quest_running_ && !quest_oneshot_) || popups_running();
+               (quest_running_ && !quest_oneshot_) || popups_running() || expedition_running_;
     }
 
     /// The tabs. Fighting is what the whole screen used to be.
@@ -1447,13 +1383,12 @@ private:
     std::string       simple_chat_typers_;          ///< Unikey and the like, running
     std::uint16_t     simple_chat_layout_ = 0;      ///< the game's keyboard layout
 
-    /// The trash tab's copy of configs/trash.ini and of the pictures, and the
-    /// bag as last photographed for picking from.
+    /// The trash tab's copy of configs/trash.ini, its pictures, and the bag
+    /// as last photographed for picking from.
     CleanSettings     simple_clean_;
     TrashList         simple_trash_;
     bool              simple_clean_loaded_ = false;
-    TemplateStore     simple_store_;
-    bool              simple_store_loaded_ = false;
+    std::shared_ptr<const TemplateStore> simple_store_;     ///< the program's one set, once asked for
     Frame             simple_bag_frame_;
     BagView           simple_bag_view_;
     bool              simple_bag_shot_ = false;
@@ -1571,10 +1506,9 @@ private:
     void simple_login_look();
     LoginLook                login_seen_;
     std::uint64_t            login_looked_ms_ = 0;
-    /// The look's own pictures. Declared before the look so the look is gone
-    /// before they are.
-    TemplateStore            login_store_;
-    bool                     login_store_loaded_ = false;   ///< by the look
+    /// The look's pictures: the program's one set, asked for by the first
+    /// look. Declared before the look so the look is gone before they are.
+    std::shared_ptr<const TemplateStore> login_store_;
     /// The look's capture of VTCZone, one for every look rather than a new
     /// one each time: a new capture asked PrintWindow afresh at its first
     /// grabs, every 4 s, of a window that may have refused it already. Only
@@ -1630,8 +1564,6 @@ private:
     std::size_t   simple_listen_key_ = static_cast<std::size_t>(-1);
     std::string   simple_note_;
     std::uint64_t simple_note_until_ms_ = 0;
-    /// Why the bot stopped itself, in red on the card until the next BẮT ĐẦU.
-    std::string   simple_stopped_vi_;
     bool          simple_was_running_ = false;
     std::uint64_t simple_started_ms_ = 0;
     std::uint64_t simple_stopped_ms_ = 0;
@@ -1700,6 +1632,43 @@ private:
     struct QuestUiFree { void operator()(QuestUi* ui) const; };
     std::unique_ptr<QuestUi, QuestUiFree> quest_ui_;
 
+    // ---- Đào khoáng and phó bản Cổ Thụ (2026.11.19) ----
+    /// GoC 0.6.5's mining and its Cổ Thụ dungeon: one worker that hands the
+    /// planners (gobot/expedition.hpp) what the packets and the screen say and
+    /// does the jobs they ask for -- the walks by the hunter's trip. Lives in
+    /// simple_expedition.cpp.
+    void start_expedition();
+    void stop_expedition(bool wait = true);    ///< `wait` as for stop_quest
+    void expedition_loop();
+    void say_expedition(const std::string& line);
+    void simple_mining_tab();                  ///< tab "Đào khoáng"
+    void simple_expedition_tab();              ///< tab "Phó bản"
+    /// Shared by the two tabs: the settings, loaded once.
+    ExpeditionSettings& expedition_settings_for_tab();
+    /// Saves configs/expedition.ini and starts or stops the worker.
+    void expedition_settings_changed();
+    std::thread              expedition_thread_;
+    std::atomic<bool>        expedition_running_{false};
+    /// Which half of the worker has something to do, for the tabs' dots.
+    std::atomic<bool>        mining_on_{false};
+    std::atomic<bool>        dungeon_on_{false};
+    std::atomic<bool>        expedition_stop_{false};
+    /// A dungeon run's boss fight or reward room, set by the expedition
+    /// worker: the other features' timed jobs wait it out (2026.11.21, the
+    /// audit's B6) -- the trash worker's pass, charms and shop, Tự chat,
+    /// Nhiệm vụ nhanh, the party's invites. Capped; see TripQuietFlag.
+    TripQuietFlag            trip_quiet_;
+    /// The reviver's last turn saw no death panel nor its question (Turn::
+    /// Alive), on now_ms()'s clock; 0 after any other turn (2026.11.21, the
+    /// audit's B10): the popup closer's ESC for the check-in board with the
+    /// character down only on such a look -- see checkin_down_esc.
+    std::atomic<std::uint64_t> revive_no_panel_ms_{0};
+    /// The bag's other tabs and digging, from the capture thread.
+    TripPackets              trip_packets_;
+    struct ExpeditionUi;
+    struct ExpeditionUiFree { void operator()(ExpeditionUi* ui) const; };
+    std::unique_ptr<ExpeditionUi, ExpeditionUiFree> expedition_ui_;
+
     // ---- GoBot's own keys ----
     /// F10, F11 and F12, and the two that do one job at once -- "Dọn túi
     /// ngay" and "Vào game ngay" -- read every tick and acted on by which
@@ -1735,30 +1704,38 @@ private:
     /// lets go of every key held there (tick).
     bool              game_was_front_ = false;
     /// When tick() last sent a drop's owed ↓-up or Ctrl-up again: at most
-    /// every 100 ms (InputManager::settle_owed).
+    /// every 100 ms (InputManager::settle_owed). And whether every key was let
+    /// go of for the key-ups owed now (2026.11.24): once an episode, cleared
+    /// when nothing is owed any more.
     std::uint64_t     owed_look_ms_ = 0;
+    bool              owed_released_ = false;
 
     // ---- the hunter's drop through a platform (HunterConfig::drop_down) ----
     // Its map files are game_maps_, beside the hunter.
     /// What GoBot says against a drop, for the hunter's thread: worked out at
-    /// every tick from what only this thread may read -- the macro held, a
-    /// navigator walk, the keeper crossing, one of GoBot's own keys on Ctrl
+    /// every tick from what only this thread may read -- the macro held, the
+    /// keeper crossing, one of GoBot's own keys on Ctrl
     /// or ↓ (or ↑, with the jumps up on) -- as one of DropVeto's codes; and
     /// whether HP is being read. The jumps up go by it too.
-    enum DropVeto : int { kDropVetoNone, kDropVetoMacro, kDropVetoWalk, kDropVetoKeeper, kDropVetoHotkey };
+    enum DropVeto : int { kDropVetoNone, kDropVetoMacro, kDropVetoKeeper, kDropVetoHotkey };
     std::atomic<int>  drop_veto_{ kDropVetoNone };
     std::atomic<bool> drop_hp_watch_{ false };
-    /// The hunter's veto (Hunter::set_drop_veto): tick()'s code, and HP under
-    /// the chat's floor -- or not known while a HP potion key is on. Any
+    /// The hunter's veto (Hunter::set_drop_veto): tick()'s code, and the
+    /// character down -- HP under bag::kJobDownHpPct -- or HP not known while
+    /// a HP potion key is on; HP low no longer, since 2026.11.12b. Any
     /// thread: atomics and hp_percent_now() only.
     const char* drop_veto_now() const;
-    /// Once a tick: the veto's code, and a hunt the drop wants stopped -- the
-    /// map changed after a press (drop_down unticked and saved), or a drop's
-    /// key-up stuck -- stopped, said in red until the next start.
+    /// Once a tick: the veto's code, and a press that changed the map
+    /// (Hunter::take_press_gate) said once -- learned as a gate, the hunt
+    /// going on, nothing unticked or saved (2026.11.24; until then the hunt
+    /// stopped with Nhảy xuống / Nhảy lên unticked and saved, and a drop's
+    /// key-up stuck stopped it too).
     void drop_tick();
-    /// Why the drop has stopped the hunt, in red under its tick until the
-    /// next start of the hunt; "" for none.
-    std::string       drop_stopped_vi_;
+    /// What the drops and jumps last said under the tick, in amber until the
+    /// next start of the hunt -- a map change learned as a gate, every key let
+    /// go of for a key-up owed; "" for none. drop_stopped_vi_ until
+    /// 2026.11.24, in red: why the drop had stopped the hunt.
+    std::string       drop_note_vi_;
     /// The last "this key is one GoBot presses itself" said, and when: said
     /// again only when it changes, or ten minutes on.
     std::string       hotkey_taken_said_;
@@ -1854,8 +1831,14 @@ private:
     /// false, and said why, when the invite is not to go. `look`: the
     /// worker's look at the game this pass, with what was so of it when it
     /// was grabbed (take_party_look), held up against party_events().
+    /// `read`, when given, gets the HUD as it was read for this -- what an
+    /// invite's join is judged against later (InviteTries, 2026.11.17b).
     bool party_may_invite(const std::string& who, const PartyLook& look, const TemplateStore& store,
-                          bool always_leader);
+                          bool always_leader, PartyHud* read = nullptr);
+    /// The party HUD on `look`, as party_may_invite reads it, for nothing
+    /// but InviteTries' question whether an invite led to a join: no gate,
+    /// nothing said on the tab.
+    PartyHud party_read(const PartyLook& look, const TemplateStore& store);
     /// Every few seconds of the party worker, the HUD read off its look for
     /// the Tổ đội tab.
     void party_hud_tick(const PartyLook& look, const TemplateStore& store);
@@ -1935,6 +1918,25 @@ private:
     void simple_shop_card(const std::function<void(const char*, const std::string&)>& put);
     /// Whether the pictures a purchase is held to are beside GoBot.
     bool simple_can_buy();
+    /// The pet's HP food on reaching TổCổLong (2026.11.24, the owner: "Khi ra
+    /// tới bản đồ TổCổLong thì cần mua lại HP cho pet"; PetRestock): every
+    /// tick, where the packets put the character -- an arrival into t60_s19
+    /// with "Mua HP pet" ticked ([Trash] buy_pet, read every 2 s) and the bot
+    /// running owes one round -- and, while one is owed with no trash worker
+    /// to buy it, one started for it alone, as "Mua ngay" starts one: the
+    /// round goes whether or not a timed bag job is ticked. The bot stopped
+    /// (DỪNG, F12) drops what is owed.
+    void pet_arrival_tick();
+    /// A trash worker for the pet's round, as request_shop starts one for
+    /// "Mua ngay": nothing asked of it but what PetRestock owes.
+    void request_pet();
+    PetRestock               pet_restock_;
+    /// The box ticked, its slots over 0, the bot running and not in a cold
+    /// start: set by the tick, read by the expedition worker's look.
+    std::atomic<bool>        pet_armed_{false};
+    bool                     pet_on_ = false;           ///< buy_pet with slots over 0, as the file last read
+    std::uint64_t            pet_read_ms_ = 0;          ///< when trash.ini was last read for it
+    std::uint64_t            pet_wake_ms_ = 0;          ///< when a worker was last started for it
 
 
     // ---- the monster lists ----
@@ -2002,7 +2004,8 @@ private:
     /// One jump of `kind` measured (JumpCheck::run_kind), on a thread of its own.
     void simple_jump_kind_try(JumpKind kind);
     /// The card's lines of the jump up while it hunts, each with whether it
-    /// is said in red (jump_up_card); and them drawn.
+    /// is said in red (jump_up_card) -- none is since 2026.11.24, when nothing
+    /// switches the jumps up off; and them drawn.
     std::vector<std::pair<bool, std::string>> jump_up_card_vi(const Hunter::Status& hs);
     void simple_jump_up_state(const Hunter::Status& hs);
     // "Tự tìm quái trong vùng" (HunterConfig::seek_in_zone, 2026.11.05b): its
@@ -2013,11 +2016,12 @@ private:
     void simple_seek_tick();
     std::string seek_going_vi(const Hunter::Status& hs);
     void simple_seek_none(const Hunter::Status& hs);
-    /// The drop's line for the player while it hunts -- off until the next
-    /// start, or why the monster below is not dropped to now -- "" for
-    /// nothing fresh within 1.5 s. `map_known_here`: the Bản đồ tab knows the
-    /// map while the drop's own check still names it. `off`: the line is the
-    /// drops being off. Here and on the Bản đồ tab.
+    /// The drop's line for the player while it hunts -- why the monster below
+    /// is not dropped to now -- "" for nothing fresh within 1.5 s.
+    /// `map_known_here`: the Bản đồ tab knows the map while the drop's own
+    /// check still names it. `off`: the line is the drops being off -- never
+    /// since 2026.11.24, when nothing switches them off (kept false for the
+    /// Bản đồ tab's caller). Here and on the Bản đồ tab.
     std::string drop_wait_vi(const Hunter::Status& hs, bool map_known_here, bool* off = nullptr);
     /// Why "Nhảy xuống bậc dưới" cannot be ticked now, in Vietnamese: "" when
     /// it can.
@@ -2120,8 +2124,9 @@ private:
     std::shared_ptr<const GameMapBook::Page> map_page_now() const;
     /// A map's name from tb_Map when it is the one the tab knows, else its stem.
     std::string map_name_of(const std::string& stem) const;
-    /// The tab drawn on this frame or the one before (as camera_panels_open):
-    /// its frames are paced faster (pacing()).
+    /// The tab drawn on this frame or the one before -- the frame count stands
+    /// still while the window is minimised: its frames are paced faster
+    /// (pacing()).
     bool map_tab_open() const;
     int  map_tab_frame_ = -10;
     /// What sits under the tabs, measured at the last frame: the canvas's
@@ -2163,6 +2168,12 @@ private:
     /// once and logged -- at every edit; `made_new` a zone made round the
     /// character, its home where it stands (the owner's Q5).
     void map_red_note(MapUi& ui, const std::string& stem, const ZoneCheck& c, bool made_new);
+    /// The band's two bars (2026.11.12, the owner's Q6): set to up_px and
+    /// down_px -- in memory, the hunter told at once as every setting is, and
+    /// hunt.ini owed to the tab's worker (map_post, HunterConfig::save_band):
+    /// no file on this thread. The px boxes under the map are map_band_row.
+    void map_band_commit(MapUi& ui, int up_px, int down_px);
+    void map_band_row(MapUi& ui);
     /// Declared after what its worker reads -- the packets, the capture, the
     /// map files, the hunter -- so it goes before them.
     std::unique_ptr<MapUi, MapUiFree> map_ui_;

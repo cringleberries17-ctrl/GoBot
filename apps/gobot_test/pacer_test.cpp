@@ -1,7 +1,7 @@
 // gobot_test -- how heavy GoBot is on the PC: when its window draws a frame
-// (FramePacer), and light mode ("Nhẹ máy (máy ảo / máy yếu)") -- the signals
-// of a VMware guest or a PC with no real graphics card, and how the setting
-// resolves.
+// (FramePacer) and how often its loop runs tick(), and light mode ("Nhẹ máy
+// (máy ảo / máy yếu)") -- the signals of a VMware guest, a PC with no real
+// graphics card or a weak PC, and how the setting resolves.
 //
 // The decisions only, on a clock and a machine of the test's own: no window
 // is made, nothing is read from the registry or the CPU, nothing is drawn.
@@ -132,8 +132,9 @@ void test_pacer_rates() {
     }
     {
         // The Bản đồ tab shown, as GuiApp::pacing raises the rates: kMapTabFps
-        // behind the game and in front -- 10 since 2026.11.05, the owner's
-        // Q3 (a); 5 before -- and kMapTabLightFps, 2, with "Nhẹ máy".
+        // behind the game and in front -- 30 since 2026.11.12 (the owner's
+        // "chưa mượt"), 10 since 2026.11.05, the owner's Q3 (a), 5 before --
+        // and kMapTabLightFps, 2, with "Nhẹ máy".
         const auto tab_rates = [](FrameRates r, int rate) {
             r.background = std::max(r.background, rate);
             r.idle = std::max(r.idle, rate);
@@ -151,11 +152,11 @@ void test_pacer_rates() {
         light_bg.rates = tab_rates(FramePacer::light_rates(), kMapTabLightFps);
         FramePacer q = settled(light_bg);
         const int light_behind = frames_over(q, light_bg, kT0 + kTick, kT0 + 10'000);
-        check(kMapTabFps == 10 && kMapTabLightFps == 2 && behind >= 95 && behind <= 110 && in_front >= 95 &&
-                  in_front <= 110 && light_behind >= 19 && light_behind <= 21,
-              "the Bản đồ tab shown: 10 a second behind the game and in front (the owner's Q3 (a)), 2 in light mode "
-              "-- " + std::to_string(behind) + " and " + std::to_string(in_front) + " in ten seconds, " +
-                  std::to_string(light_behind) + " in light mode");
+        check(kMapTabFps == 30 && kMapTabLightFps == 2 && behind >= 270 && behind <= 330 && in_front >= 270 &&
+                  in_front <= 330 && light_behind >= 19 && light_behind <= 21,
+              "the Bản đồ tab shown: 30 a second behind the game and in front (2026.11.12; 10 from the owner's Q3 "
+              "(a)), 2 in light mode -- " + std::to_string(behind) + " and " + std::to_string(in_front) +
+                  " in ten seconds, " + std::to_string(light_behind) + " in light mode");
     }
     {
         // Typing, a combo open, a button held, a key box waiting: as long as
@@ -270,6 +271,45 @@ void test_pacer_events() {
               "and what the pass took counts against it: 4 ms of work leaves 6 to wait, 25 leaves none");
     }
     {
+        // tick() at most once per 10 ms, however many messages wake the loop
+        // (2026-11-16): a mouse over the window ran it on every WM_MOUSEMOVE.
+        check(FramePacer::kTickEveryMs == 10 && FramePacer::tick_due(0, kT0) &&
+                  !FramePacer::tick_due(kT0, kT0) && !FramePacer::tick_due(kT0, kT0 + 9) &&
+                  FramePacer::tick_due(kT0, kT0 + 10) && FramePacer::tick_due(kT0, kT0 + 40) &&
+                  FramePacer::tick_due(kT0 + 5, kT0),
+              "tick() is due 10 ms after the last one, at once the first time, and at once on a clock that went "
+              "back");
+        // The loop as main.cpp runs it: wake on a message or when the wait
+        // runs out, the wait counted from the last tick().
+        const auto run = [](std::uint64_t message_every, int& ticks, std::uint64_t& worst_gap, int& wakes) {
+            std::uint64_t t = kT0, ticked = 0, next_message = kT0 + message_every;
+            ticks = wakes = 0;
+            worst_gap = 0;
+            while (t < kT0 + 1000) {
+                ++wakes;
+                if (FramePacer::tick_due(ticked, t)) {
+                    if (ticked != 0) worst_gap = std::max(worst_gap, t - ticked);
+                    ticked = t;
+                    ++ticks;
+                }
+                while (next_message <= t) next_message += message_every;
+                t = std::min<std::uint64_t>(t + FramePacer::tick_wait_ms(ticked, t), next_message);
+            }
+        };
+        int mouse_ticks = 0, mouse_wakes = 0, odd_ticks = 0, odd_wakes = 0, still_ticks = 0, still_wakes = 0;
+        std::uint64_t mouse_gap = 0, odd_gap = 0, still_gap = 0;
+        run(1, mouse_ticks, mouse_gap, mouse_wakes);
+        run(3, odd_ticks, odd_gap, odd_wakes);
+        run(100'000, still_ticks, still_gap, still_wakes);
+        check(mouse_wakes >= 999 && mouse_ticks == 100 && mouse_gap == 10,
+              "a message every 1 ms, as a 1000 Hz mouse moving over the window: " + std::to_string(mouse_wakes) +
+                  " wakes, " + std::to_string(mouse_ticks) + " tick()s in a second, 10 ms apart");
+        check(odd_ticks == 100 && odd_gap == 10 && still_ticks == 100 && still_gap == 10,
+              "a message every 3 ms, or none at all: still a tick() every 10 ms, never later -- " +
+                  std::to_string(odd_ticks) + " and " + std::to_string(still_ticks) + " in a second, at most " +
+                  std::to_string(std::max(odd_gap, still_gap)) + " ms apart");
+    }
+    {
         // Right after a frame, behind the game: the wait is the full 10 ms, and
         // with the next frame 3 ms off, 3.
         FramePacer p = settled(bg);
@@ -315,7 +355,7 @@ MachineSignals plain_pc() {
 }
 
 void test_light_signals() {
-    section("Light mode: a VMware guest or no real graphics card (machine_info)");
+    section("Light mode: a VMware guest, no real graphics card or a weak PC (machine_info)");
 
     check(!judge_machine(plain_pc()).any(), "a PC with an NVIDIA card and Dell's SMBIOS: no signal");
     {
@@ -393,6 +433,89 @@ void test_light_signals() {
         check(!auto_none.on && !auto_none.by_auto, "auto with none is off");
     }
     {
+        // A weak PC (2026-11-16): a player's 1 core and 3.5 GB, the game on it
+        // too, stuttered with light mode off -- no VMware, a real card.
+        MachineSignals one = plain_pc();
+        one.logical_cpus = 1;
+        one.ram_mb = 8192;
+        MachineSignals two = plain_pc();
+        two.logical_cpus = 2;
+        two.ram_mb = 8192;
+        MachineSignals three = plain_pc();
+        three.logical_cpus = 3;
+        three.ram_mb = 4096;
+        MachineSignals low_ram = plain_pc();
+        low_ram.logical_cpus = 4;
+        low_ram.ram_mb = 3584;
+        MachineSignals user = plain_pc();
+        user.logical_cpus = 1;
+        user.ram_mb = 3584;
+        MachineSignals owner = plain_pc();
+        owner.logical_cpus = 20;
+        owner.ram_mb = 64791;
+        const LightSignals s1 = judge_machine(one), s2 = judge_machine(two), s3 = judge_machine(three),
+                           sr = judge_machine(low_ram), su = judge_machine(user), so = judge_machine(owner);
+        check(s1.few_cpus && !s1.little_ram && s1.weak() && s1.any() && !s1.vmware() && !s1.software_renderer &&
+                  s2.few_cpus && s2.any() && !s3.any() && !sr.few_cpus && sr.little_ram && sr.any() &&
+                  su.few_cpus && su.little_ram && !so.any() && !judge_machine(plain_pc()).weak(),
+              "a weak PC is a signal: 1 or 2 logical CPUs, or under 4096 MB of RAM -- not 3 CPUs with 4096 MB, "
+              "not the owner's 20 CPUs and 64 GB, and not counts Windows did not give (0)");
+
+        const LightDecision d1 = resolve_light_mode(LightSetting::Auto, s1);
+        const LightDecision d2 = resolve_light_mode(LightSetting::Auto, s2);
+        const LightDecision dr = resolve_light_mode(LightSetting::Auto, sr);
+        const LightDecision du = resolve_light_mode(LightSetting::Auto, su);
+        const LightDecision d_owner = resolve_light_mode(LightSetting::Auto, so);
+        const LightDecision unticked = resolve_light_mode(LightSetting::Off, su);
+        check(d1.on && d1.by_auto && d1.why == "only 1 logical CPU" &&
+                  d1.why_vi == "Tự bật vì máy chỉ có 1 nhân.",
+              "1 CPU: auto turns light mode on, and the screen says \"" + d1.why_vi + "\"");
+        check(d2.on && d2.by_auto && d2.why == "only 2 logical CPUs" && d2.why_vi == "Tự bật vì máy chỉ có 2 nhân.",
+              "2 CPUs: on -- \"" + d2.why_vi + "\"");
+        check(dr.on && dr.by_auto && dr.why == "only 3584 MB of RAM usable" &&
+                  dr.why_vi == "Tự bật vì máy chỉ có 3,5 GB RAM dùng được.",
+              "3.5 GB of RAM with 4 CPUs: on -- \"" + dr.why_vi + "\"");
+        check(du.on && du.why == "only 1 logical CPU, only 3584 MB of RAM usable" &&
+                  du.why_vi == "Tự bật vì máy chỉ có 1 nhân, chỉ có 3,5 GB RAM dùng được.",
+              "the player's 1 core and 3.5 GB: on, with both -- \"" + du.why_vi + "\"");
+        check(!d_owner.on && !d_owner.by_auto && d_owner.why == "no signal" && d_owner.why_vi.empty(),
+              "the owner's 20 CPUs and 64 GB: off, as before");
+        check(!unticked.on && unticked.why_vi.empty(), "and the player can still untick it on a weak PC");
+        // A PC sold with 4 GB: Windows leaves a little under 4096 MB usable. Weak
+        // too, and the line gives the figure rather than calling it "under 4 GB".
+        MachineSignals four = plain_pc();
+        four.logical_cpus = 4;
+        four.ram_mb = 4000;
+        const LightDecision d4 = resolve_light_mode(LightSetting::Auto, judge_machine(four));
+        check(d4.on && d4.why == "only 4000 MB of RAM usable" && d4.why_vi == "Tự bật vì máy chỉ có 3,9 GB RAM dùng được.",
+              "a 4 GB PC (4000 MB usable): on, with the figure -- \"" + d4.why_vi + "\"");
+
+        MachineSignals vm = user;
+        vm.smbios_maker = "VMware, Inc.";
+        MachineSignals card = two;
+        card.renderer.vendor_id = kVendorMicrosoft;
+        card.renderer.adapter = "Microsoft Basic Render Driver";
+        const LightDecision dv = resolve_light_mode(LightSetting::Auto, judge_machine(vm));
+        const LightDecision dc = resolve_light_mode(LightSetting::Auto, judge_machine(card));
+        check(dv.why == "VMware guest, only 1 logical CPU, only 3584 MB of RAM usable" &&
+                  dv.why_vi == "Tự bật vì GoBot thấy đây là máy ảo VMware, chỉ có 1 nhân, chỉ có 3,5 GB RAM dùng được." &&
+                  dc.why_vi == "Tự bật vì máy không có card đồ hoạ thật, chỉ có 2 nhân.",
+              "a VMware guest or a PC with no real card that is weak too says both -- \"" + dv.why_vi + "\", \"" +
+                  dc.why_vi + "\"");
+
+        const std::string user_line = describe_machine(user, su, LightSetting::Auto, du);
+        const std::string owner_line = describe_machine(owner, so, LightSetting::Auto, d_owner);
+        check(user_line.rfind("Machine: weak PC (signals: only 1 logical CPU, only 3584 MB of RAM usable)", 0) == 0 &&
+                  user_line.find("1 logical CPUs, 3584 MB RAM") != std::string::npos &&
+                  user_line.find("light mode: auto -> on (only 1 logical CPU, only 3584 MB of RAM usable)") !=
+                      std::string::npos,
+              "the log's Machine line on the player's PC -- " + user_line);
+        check(owner_line.rfind("Machine: no VMware signal (signals: none)", 0) == 0 &&
+                  owner_line.find("20 logical CPUs, 64791 MB RAM") != std::string::npos &&
+                  owner_line.find("light mode: auto -> off (no signal)") != std::string::npos,
+              "and on the owner's, as before -- " + owner_line);
+    }
+    {
         check(parse_light_setting("auto") == LightSetting::Auto && parse_light_setting(" ON ") == LightSetting::On &&
                   parse_light_setting("Off") == LightSetting::Off && parse_light_setting("true") == LightSetting::On &&
                   parse_light_setting("0") == LightSetting::Off && parse_light_setting("") == LightSetting::Auto &&
@@ -432,8 +555,11 @@ void test_light_signals() {
                   machine.find("VMware SVGA adapter") != std::string::npos &&
                   machine.find("2 logical CPUs, 4096 MB RAM, Windows 10.0.19045, screen 1920x1080") !=
                       std::string::npos &&
-                  machine.find("light mode: auto -> on (VMware guest)") != std::string::npos,
-              "Machine: the signals that fired, the CPUs, memory, Windows, screen and light mode -- " + machine);
+                  machine.find("VMware SVGA adapter, only 2 logical CPUs)") != std::string::npos &&
+                  machine.find("light mode: auto -> on (VMware guest, only 2 logical CPUs)") != std::string::npos &&
+                  d.why_vi == "Tự bật vì GoBot thấy đây là máy ảo VMware, chỉ có 2 nhân.",
+              "Machine: the signals that fired -- the 2 CPUs a weak PC's since 2026.11.16 -- the CPUs, memory, "
+              "Windows, screen and light mode -- " + machine + " / " + d.why_vi);
         MachineSignals hv = plain_pc();
         hv.hypervisor_bit = true;
         hv.hypervisor_vendor = "Microsoft Hv";
@@ -521,15 +647,22 @@ void test_pacer_wiring() {
                                                              start);
     check(renderer != npos && scope != npos && renderer < scope,
           "main.cpp: the device is handed over before GoBot starts, outside the real-pixels block around it");
+    const std::size_t gate = win_main.find("if (gobot::FramePacer::tick_due(ticked_at, woke)) {");
     const std::size_t tick = win_main.find("app.tick();");
     const std::size_t decide = win_main.find("pacer.decide(pass)");
     const std::size_t draw = win_main.find("app.draw();");
-    check(tick != npos && decide != npos && draw != npos && tick < decide && decide < draw &&
+    const std::size_t occluded =
+        win_main.find("wait_for_input(gobot::FramePacer::tick_wait_ms(ticked_at, gobot::now_ms()));");
+    check(gate != npos && tick != npos && decide != npos && draw != npos && gate < tick && tick - gate < 200 &&
+              tick < decide && decide < draw && win_main.find("ticked_at = woke;") != npos &&
               win_main.find("MsgWaitForMultipleObjectsEx(") == npos &&
               host.find("MsgWaitForMultipleObjectsEx(0, nullptr, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);") != npos &&
-              win_main.find("wait_for_input(pacer.wait_ms(gobot::now_ms()));") != npos,
-          "every pass runs tick() before the pacer is asked, and waits for input or the pacer's time -- never "
-          "longer than it allows");
+              host.find("return std::min(pacer.wait_ms(now), gobot::FramePacer::tick_wait_ms(ticked_at, now));") !=
+                  npos &&
+              win_main.find("wait_for_input(next_wait(pacer, ticked_at));") != npos &&
+              win_main.find("pacer.wait_ms(") == npos && win_main.find("tick_wait_ms(woke") == npos && occluded != npos,
+          "tick() runs before the pacer is asked, at most once per 10 ms (tick_due); every wait is for input or "
+          "the pacer's time, and never past 10 ms from the last tick()");
     check(win_main.find("g_swapchain->Present(pacing.pacer_on ? 0 : 1, 0);") != npos &&
               win_main.find("Sleep(10);") != npos,
           "with the pacer off, the loop as before: vsync, and 10 ms asleep while covered");
@@ -537,6 +670,18 @@ void test_pacer_wiring() {
     const std::size_t warp = failed == npos ? npos : host.find("D3D_DRIVER_TYPE_WARP", failed);
     check(failed != npos && warp != npos && warp - failed < 300 && host.find("hr == DXGI_ERROR_UNSUPPORTED") == npos,
           "WARP is tried on any failure of the hardware device, not only DXGI_ERROR_UNSUPPORTED");
+    check(host.find("const UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED | "
+                    "D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;") != npos &&
+              host.find("D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,") != npos &&
+              host.find("D3D_DRIVER_TYPE_WARP, nullptr, flags,") != npos,
+          "both devices, the hardware one and WARP, single-threaded and with no threads of the driver's own");
+    const std::string cmake = source("/CMakeLists.txt");
+    const std::size_t no_pad = cmake.find("PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_WIN32_DISABLE_GAMEPAD");
+    const std::size_t backend = no_pad == npos ? npos : cmake.rfind("/backends/imgui_impl_win32.cpp\"", no_pad);
+    const std::size_t props = no_pad == npos ? npos : cmake.rfind("set_source_files_properties(", no_pad);
+    check(no_pad != npos && backend != npos && props != npos && props < backend && no_pad - backend < 60 &&
+              no_pad - props < 160,
+          "CMakeLists.txt: ImGui's Win32 backend built without its gamepad code -- no XInput every frame");
     check(host.find("if (gobot::is_interactive_message(msg)) g_input = true;") != npos,
           "what reaches the window is noted in wnd_proc, sent messages included");
 

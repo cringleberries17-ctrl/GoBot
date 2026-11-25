@@ -920,15 +920,24 @@ void test_round() {
     {
         PretendQuest g;
         g.key_opens = false;
+        const std::uint64_t start = g.clock;
         const QuestResult r = g.run();
+        const std::uint64_t took = g.clock - start;
         check(r.outcome == QuestOutcome::NoWindow && g.keys.size() == 1 && g.clicks.empty(),
               "the window never appears: 1 key press, 0 clicks, outcome no_window");
+        // 2026-11-15, the owner's 30 s for slow PCs: looked for up to kReactMs
+        // from the key -- and not much longer -- with the one key, never two.
+        check(took >= static_cast<std::uint64_t>(kReactMs) && took <= static_cast<std::uint64_t>(kReactMs) + 500 &&
+                  r.react_s == 30 && contains(r.log, "nothing after 30 s to show the quest window"),
+              fmt("... given up only after kReactMs from the key, %llu ms on the pretend clock: ",
+                  static_cast<unsigned long long>(took)) + r.log);
         // The key went in, and whatever it opened -- another window, or this
         // one drawn so that it is not known -- is still there.
         check(r.maybe_open && !r.left_open && r.opened_by_us,
               "... and said to have maybe opened something GoBot does not know, not this window");
         check(quest_result_vi(r, "U") == "không mở được cửa sổ Nhiệm Vụ (đã bấm U); có thể đã mở một "
-                                         "cửa sổ mà GoBot không nhận ra — xem trong game",
+                                         "cửa sổ mà GoBot không nhận ra — xem trong game; đã chờ 30 giây mà "
+                                         "game không phản ứng",
               "for the tab: " + quest_result_vi(r, "U"));
         check(r.failed() && r.last.valid(), "... a failure, with the last frame kept for quest_debug");
         check(quest_trouble_why(r) == "không mở được cửa sổ Nhiệm Vụ", "... and the alert's words as before");
@@ -939,7 +948,10 @@ void test_round() {
         const QuestResult r = g.run();
         check(r.outcome == QuestOutcome::NoAuto && g.keys.size() == 2 && g.clicks.size() == 1 && !g.open,
               "no Tự Động in NV Phụ: the tab click and the closing key only, outcome no_auto");
-        check(quest_result_vi(r, "U") == "không thấy ô Tự Động trong thẻ NV Phụ",
+        // Looked for kReactMs from the tab click (2026-11-15): an absent Tự
+        // Động is never seen, so the tab says it was waited for.
+        check(quest_result_vi(r, "U") == "không thấy ô Tự Động trong thẻ NV Phụ; đã chờ 30 giây mà game "
+                                         "không phản ứng",
               "for the tab: " + quest_result_vi(r, "U"));
     }
     {
@@ -949,7 +961,10 @@ void test_round() {
         check(r.outcome == QuestOutcome::ClickFailed && g.clicks.size() == 2 && g.keys.size() == 2 &&
                   !g.open && !g.on,
               "a click that does not take: exactly one click on the box, no second, outcome click_failed");
-        check(quest_result_vi(r, "U") == "đã bấm ô Tự Động nhưng không thấy nó bật",
+        // The box looked at for kReactMs from the click (2026-11-15), never
+        // clicked again: said as waited for.
+        check(quest_result_vi(r, "U") == "đã bấm ô Tự Động nhưng không thấy nó bật; đã chờ 30 giây mà game "
+                                         "không phản ứng",
               "for the tab: " + quest_result_vi(r, "U"));
     }
     {
@@ -1029,6 +1044,193 @@ void test_round() {
         const std::uint64_t took = g.clock - start;
         check(took >= 1500 && took <= 4000, fmt("a whole round waits %llu ms in all",
                                                 static_cast<unsigned long long>(took)));
+    }
+}
+
+// ----------------------------------------------------------------- slow game
+
+/// A game on a slow PC (2026-11-15, the owner: "khi GoBot thực hiện thao tác,
+/// sẽ có thêm 30 giây chờ phản ứng"): what a key or a click does shows up
+/// seconds late. The round waits for it -- one key, one click, never a second
+/// -- goes on at once when it shows, and gives up as before only when nothing
+/// shows for kReactMs. A stop or the character down still ends a long wait at
+/// once.
+void test_slow_game() {
+    section("Quick quest: a slow game -- every step waits up to kReactMs for the game to react");
+    if (!have_art()) return;
+
+    {
+        PretendQuest g;
+        QuestRound round(art().pictures, QuestSettings{}, g.hands());
+        check(round.react_ms() == kReactMs && kReactMs == 30'000 && kReactSlowMs == 2'000,
+              "a round waits kReactMs (30 s) for each reaction, and says one that took over 2 s");
+    }
+    {
+        // The window drawn 12 s after the key: longer than round_limit_ms
+        // (10 s), which a wait for the game is not counted in.
+        PretendQuest g;
+        QuestRound::Hands h = g.hands();
+        std::uint64_t opened_at = 0;
+        const auto key = h.key;
+        h.key = [&g, &opened_at, key](std::uint32_t vk, int hold) {
+            const bool was = g.open;
+            const bool ok = key(vk, hold);
+            if (!was && g.open) opened_at = g.clock;
+            return ok;
+        };
+        const auto grab = h.grab;
+        h.grab = [&g, &opened_at, grab](Frame& f) {
+            if (g.open && g.clock < opened_at + 12'000) {
+                ++g.looks;
+                f = g.base;
+                return true;
+            }
+            return grab(f);
+        };
+        const std::uint64_t start = g.clock;
+        QuestRound round(art().pictures, QuestSettings{}, h);
+        const QuestResult r = round.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::TurnedOn && g.keys.size() == 2 && g.clicks.size() == 2 && g.on &&
+                  !g.open && !r.left_open,
+              std::string("the window drawn 12 s after the key: waited for, Tự Động ticked, closed -- one key "
+                          "each way (") +
+                  quest_outcome_name(r.outcome) + ") -- " + r.log);
+        check(took >= 12'000 && took <= 15'000 && r.react_s == 0 &&
+                  contains(r.log, "the game took 12000 ms to show the quest window"),
+              fmt("... on at once when it showed (%llu ms in all), the slow wait said in the log: ", took) + r.log);
+    }
+    {
+        // Every step late: Tự Động 8 s after the tab click, the tick 6 s
+        // after the click on the box, the window gone 9 s after the closing
+        // key. Each waited for; nothing pressed twice.
+        PretendQuest g;
+        QuestRound::Hands h = g.hands();
+        std::uint64_t auto_at = 0, tick_at = 0, shut_at = 0;
+        const auto key = h.key;
+        h.key = [&g, &shut_at, key](std::uint32_t vk, int hold) {
+            const bool was = g.open;
+            const bool ok = key(vk, hold);
+            if (was && !g.open) {
+                g.open = true;          // still drawn, for 9 s
+                shut_at = g.clock + 9'000;
+            }
+            return ok;
+        };
+        const auto click = h.click;
+        h.click = [&g, &auto_at, &tick_at, click](int x, int y) {
+            const int tab = g.tab;
+            const bool on = g.on;
+            const bool ok = click(x, y);
+            if (tab != 3 && g.tab == 3) {
+                g.has_auto = false;     // NV Phụ's contents not drawn yet
+                auto_at = g.clock + 8'000;
+            }
+            if (!on && g.on) {
+                g.on = false;           // the tick not drawn yet
+                tick_at = g.clock + 6'000;
+            }
+            return ok;
+        };
+        const auto grab = h.grab;
+        h.grab = [&g, &auto_at, &tick_at, &shut_at, grab](Frame& f) {
+            if (auto_at != 0 && g.clock >= auto_at) {
+                g.has_auto = true;
+                auto_at = 0;
+            }
+            if (tick_at != 0 && g.clock >= tick_at) {
+                g.on = true;
+                tick_at = 0;
+            }
+            if (shut_at != 0 && g.clock >= shut_at) {
+                g.open = false;
+                shut_at = 0;
+            }
+            return grab(f);
+        };
+        const std::uint64_t start = g.clock;
+        QuestRound round(art().pictures, QuestSettings{}, h);
+        const QuestResult r = round.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::TurnedOn && g.keys.size() == 2 && g.clicks.size() == 2 && g.on &&
+                  !g.open && !r.left_open && r.react_s == 0,
+              std::string("Tự Động, the tick and the window's going each seconds late: all waited for, "
+                          "2 keys and 2 clicks as on a fast game (") +
+                  quest_outcome_name(r.outcome) + ") -- " + r.log);
+        check(took >= 23'000 && took <= 26'000 && contains(r.log, "to show Tu Dong on the NV Phu tab") &&
+                  contains(r.log, "to show the box changed") && contains(r.log, "to show the window shut"),
+              fmt("... 23 s and more of waiting in a round whose own limit is 10 s (%llu ms), each slow step said",
+                  took));
+    }
+    {
+        // Nothing for kReactMs after the tab click: no_auto, as before, and
+        // not much later than kReactMs.
+        PretendQuest g;
+        g.has_auto = false;
+        const std::uint64_t start = g.clock;
+        const QuestResult r = g.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::NoAuto && g.keys.size() == 2 && g.clicks.size() == 1 && !g.open &&
+                  r.react_s == 30 && took >= 30'000 && took <= 32'000 &&
+                  contains(r.log, "nothing after 30 s to show Tu Dong on the NV Phu tab") &&
+                  quest_result_vi(r, "U") == "không thấy ô Tự Động trong thẻ NV Phụ; đã chờ 30 giây mà game "
+                                             "không phản ứng",
+              fmt("no Tự Động for 30 s: no_auto after %llu ms, the tab clicked once -- ", took) +
+                  quest_result_vi(r, "U"));
+    }
+    {
+        // A click on the box that never shows: click_failed after kReactMs,
+        // the box clicked once.
+        PretendQuest g;
+        g.click_takes = false;
+        const std::uint64_t start = g.clock;
+        const QuestResult r = g.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::ClickFailed && g.clicks.size() == 2 && !g.on && !g.open &&
+                  r.react_s == 30 && took >= 30'000 && took <= 32'500 &&
+                  contains(r.log, "nothing after 30 s to show the box changed"),
+              fmt("a box that never ticks: click_failed after %llu ms, one click on it, never a second -- ", took) +
+                  r.log);
+    }
+    {
+        // A window that never shuts: one closing key, watched kReactMs, then
+        // said left open -- never a third key.
+        PretendQuest g;
+        g.key_closes = false;
+        const std::uint64_t start = g.clock;
+        const QuestResult r = g.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::TurnedOn && r.left_open && g.keys.size() == 2 && g.open &&
+                  r.react_s == 30 && took >= 30'000 && took <= 32'500 &&
+                  contains(r.log, "nothing after 30 s to show the window shut"),
+              fmt("a window that never shuts: left open after %llu ms, two keys in all -- ", took) + r.log);
+    }
+    {
+        // F12 seven seconds into the wait for the window: the round ends
+        // there, not 23 s later.
+        PretendQuest g;
+        g.key_opens = false;
+        const std::uint64_t start = g.clock;
+        g.stop_when = [start](const PretendQuest& q) { return q.clock >= start + 7'000; };
+        const QuestResult r = g.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::Cancelled && g.keys.size() == 1 && took >= 7'000 && took <= 7'300,
+              fmt("a stop during the long wait for the window: cancelled after %llu ms, at once", took));
+    }
+    {
+        // The character down nine seconds into the wait for the tick: not
+        // now, at once.
+        PretendQuest g;
+        g.click_takes = false;
+        const std::uint64_t start = g.clock;
+        QuestRound::Hands h = g.hands();
+        h.low_hp = [&g, start] { return g.clock >= start + 9'000; };
+        QuestRound round(art().pictures, QuestSettings{}, h);
+        const QuestResult r = round.run();
+        const unsigned long long took = g.clock - start;
+        check(r.outcome == QuestOutcome::NotNow && r.why == "máu thấp" && g.clicks.size() == 2 &&
+                  took >= 9'000 && took <= 9'300,
+              fmt("the character down during the long wait for the tick: not now after %llu ms, at once", took));
     }
 }
 
@@ -1583,7 +1785,9 @@ void test_cancel() {
     {
         // A failure that is closing its window when the stop comes: the stop
         // is what became of it. The fourth look is the one before the closing
-        // key: closed, opened, on NV Phụ, then that.
+        // key: closed, opened, on NV Phụ, then that -- with the wait for the
+        // game's reaction as short as the steps' own waits (set_react_ms(0)),
+        // as before 2026-11-15; at kReactMs NV Phụ is looked at for 30 s.
         PretendQuest g;
         g.has_auto = false;
         QuestRound::Hands hands = g.hands();
@@ -1595,6 +1799,7 @@ void test_cancel() {
         };
         hands.stop = [&] { return looks >= 4; };
         QuestRound round(art().pictures, QuestSettings{}, hands);
+        round.set_react_ms(0);
         const QuestResult r = round.run();
         check(r.outcome == QuestOutcome::Cancelled && !r.failed() && g.keys.size() == 1 && g.open &&
                   r.left_open,
@@ -1829,38 +2034,63 @@ void test_schedule() {
         p.run.start(p.now, s);
         p.go(40 * 60'000);
         check(p.alerts.size() == 1 &&
-                  p.alerts[0].second == "Làm nhiệm vụ nhanh đã tự tắt: 3 lần liền không mở được cửa sổ "
-                                        "Nhiệm Vụ; có thể còn một cửa sổ khác đang mở trong game.",
+                  p.alerts[0].second == "Làm nhiệm vụ nhanh: 3 lần liền không mở được cửa sổ Nhiệm Vụ; có thể còn "
+                                        "một cửa sổ khác đang mở trong game — GoBot vẫn thử lại.",
               "a key that may have opened something else: the alert says so -- " +
                   (p.alerts.empty() ? std::string() : p.alerts[0].second));
     }
 
-    // Three failures in a row stop it, and the alert is raised once.
+    // Three failures in a row no longer stop it (2026.11.24, the owner: "Kiểm
+    // tra các phần khác xem có phần nào không làm được thì dừng không, cần
+    // thay cơ chế này bằng 1 cơ chế khác"): the tab and the phone are told
+    // once, as the count reaches max_failures, and the rounds go on at their
+    // interval, as after any failed round. Until then the third stopped it.
     {
         PretendRun p;
         p.script = { QuestOutcome::NoWindow };
         p.run.start(p.now, s);
         p.go(40 * 60'000);
-        check(p.rounds == 3 && p.run.stopped_itself() && p.alerts.size() == 1 &&
-                  p.alerts[0].first == "quest_trouble",
-              fmt("three rounds that fail: it stops itself after the third (%d rounds), one alert", p.rounds));
-        check(!p.alerts.empty() &&
-                  p.alerts[0].second == "Làm nhiệm vụ nhanh đã tự tắt: 3 lần liền không mở được cửa sổ "
-                                        "Nhiệm Vụ.",
-              "... the alert: " + (p.alerts.empty() ? std::string() : p.alerts[0].second));
-        check(p.run.stopped_why() == "Đã tự tắt: 3 lần liền không mở được cửa sổ Nhiệm Vụ. Xem ảnh trong "
-                                     "thư mục quest_debug.",
-              "... the tab, in red: " + p.run.stopped_why());
-        check(p.run.stopped_log() == "3 failed rounds in a row, the last no_window",
-              "... and the log, in English: " + p.run.stopped_log());
-        check(p.run.next_at() == 0, "... and no round is due after that");
+        bool every = p.rounds >= 7;
+        for (std::size_t i = 1; i < p.round_at.size(); ++i) {
+            const std::uint64_t gap = p.round_at[i] - p.round_at[i - 1];
+            every = every && gap >= 270'000 && gap <= 330'100;
+        }
+        check(every && !p.run.stopped_itself() && p.run.next_at() != 0 && p.run.stopped_why().empty() &&
+                  p.run.schedule().failures() == p.rounds,
+              fmt("rounds that always fail: never stopped -- %d rounds in 40 min, each 5 min after the last, give or "
+                  "take a tenth, and the next one due",
+                  p.rounds));
+        check(p.alerts.size() == 1 && p.alerts[0].first == "quest_trouble" &&
+                  p.alerts[0].second == "Làm nhiệm vụ nhanh: 3 lần liền không mở được cửa sổ Nhiệm Vụ — GoBot vẫn "
+                                        "thử lại.",
+              "... the phone told once, at the third: " + (p.alerts.empty() ? std::string() : p.alerts[0].second));
+        const std::string told = "Không làm được 3 lần liền (không mở được cửa sổ Nhiệm Vụ) — GoBot vẫn thử lại mỗi "
+                                 "lượt. Xem ảnh trong quest_debug.";
+        check(std::count(p.said.begin(), p.said.end(), told) == 1 &&
+                  std::none_of(p.said.begin(), p.said.end(),
+                               [](const std::string& l) { return contains(l, "Đã tự tắt"); }),
+              "... and the tab once: " + told);
+        // A done round starts the count again: the next three failures are
+        // told again, once.
         PretendRun q;
-        q.script = { QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::TurnedOn,
-                     QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::AlreadyOn };
+        q.script = { QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::TurnedOn,
+                     QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::NoAuto };
         q.run.start(q.now, s);
         q.go(40 * 60'000);
-        check(!q.run.stopped_itself() && q.alerts.empty() && q.rounds >= 6,
-              "two failures, a success, two failures: not stopped -- a success resets the count");
+        check(!q.run.stopped_itself() && q.rounds >= 7 && q.alerts.size() == 2 &&
+                  q.run.schedule().failures() == q.rounds - 4,
+              fmt("three failures, a success, three failures and on: told twice, at the 3rd and the 7th of %d "
+                  "rounds, never stopped",
+                  q.rounds));
+        PretendRun r;
+        r.script = { QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::TurnedOn,
+                     QuestOutcome::NoAuto, QuestOutcome::NoAuto, QuestOutcome::AlreadyOn };
+        r.run.start(r.now, s);
+        r.go(40 * 60'000);
+        check(!r.run.stopped_itself() && r.alerts.empty() && r.rounds >= 6,
+              "two failures, a success, two failures: nothing told -- a success resets the count");
+        // The English client stays a stop: a setting GoBot does not support,
+        // not a failure.
         PretendRun e;
         e.script = { QuestOutcome::English };
         e.run.start(e.now, s);
@@ -1874,6 +2104,38 @@ void test_schedule() {
         en.run.start(en.now, english);
         en.go(60'000);
         check(en.run.stopped_itself() && en.rounds == 0, "skin=en in the file: refused before any round");
+    }
+
+    // The pictures missing (2026.11.24): no stop -- looked at again 30 s on,
+    // the round looking for them afresh, said once until a round finds them,
+    // never counted, no alert. Until then it stopped itself.
+    {
+        PretendRun p;
+        p.script = { QuestOutcome::NoPictures, QuestOutcome::NoPictures, QuestOutcome::NoPictures,
+                     QuestOutcome::TurnedOn, QuestOutcome::NoPictures, QuestOutcome::TurnedOn };
+        p.run.start(p.now, s);
+        p.go(40'100);
+        const std::string told = "Thiếu hình nhận diện cửa sổ Nhiệm Vụ — GoBot thử lại sau 30 giây.";
+        check(p.rounds == 1 && !p.run.stopped_itself() && p.alerts.empty() && p.run.next_at() >= p.now + 29'000 &&
+                  p.run.next_at() <= p.now + 30'100 && !p.said.empty() && p.said.back() == told,
+              "the pictures missing at the first round: not stopped, said, looked at again 30 s on -- " +
+                  (p.said.empty() ? std::string() : p.said.back()));
+        p.go(61'000);
+        bool thirty = p.rounds == 3;
+        for (std::size_t i = 1; i < p.round_at.size(); ++i)
+            thirty = thirty && p.round_at[i] - p.round_at[i - 1] >= 30'000 && p.round_at[i] - p.round_at[i - 1] <= 30'100;
+        check(thirty && std::count(p.said.begin(), p.said.end(), told) == 1 && p.run.schedule().failures() == 0 &&
+                  !p.run.stopped_itself(),
+              fmt("... and again every 30 s while they are missing (%d rounds), said only the once, never counted",
+                  p.rounds));
+        p.go(31'000);
+        check(p.rounds == 4 && !p.said.empty() && starts_with(p.said.back(), "Xong:") && !p.run.stopped_itself(),
+              "... found again: the round runs, \"" + (p.said.empty() ? std::string() : p.said.back()) + "\"");
+        p.go(6 * 60'000);
+        check(p.rounds == 6 && std::count(p.said.begin(), p.said.end(), told) == 2 && p.alerts.empty() &&
+                  !p.run.stopped_itself() && p.round_at[5] - p.round_at[4] >= 30'000 &&
+                  p.round_at[5] - p.round_at[4] <= 30'100,
+              fmt("... and missing again a round later: said again, looked at again 30 s on (%d rounds)", p.rounds));
     }
 
     // Asked for with a button: runs when nothing is in the way, a minute and
@@ -1961,7 +2223,7 @@ void test_low_hp() {
               "... not now and not a failure; the window it opened is left, said to be open");
         check(quest_result_vi(r, "U") == "dừng giữa chừng: máu thấp; cửa sổ Nhiệm Vụ vẫn mở",
               "for the tab: " + quest_result_vi(r, "U"));
-        check(contains(r.log, "HP fell under the potion's mark"), "the log: " + r.log);
+        check(contains(r.log, "HP fell under the round's floor"), "the log: " + r.log);
     }
     {
         // After the box is ticked: the closing key waits for the next round.
@@ -1994,6 +2256,68 @@ void test_low_hp() {
         QuestRound round(art().pictures, QuestSettings{}, hands);
         check(round.run().outcome == QuestOutcome::Cancelled && g.inputs() == 0,
               "a stop and low HP at once: cancelled, as a stop");
+    }
+    {
+        // 2026-11-15: HP under the potion's mark through a slow wait for the
+        // game -- here NV Phụ without Tự Động, which no look ever shows. The
+        // round's hold kept the potions off for the whole kReactMs (30 s) of
+        // it; now the wait, which presses nothing, ends once it has run past
+        // kReactSlowMs, as not now -- the potion first, the round again soon.
+        PretendQuest g;
+        g.has_auto = false;
+        QuestRound::Hands hands = g.hands();
+        hands.under_potion_mark = [] { return true; };
+        QuestRound round(art().pictures, QuestSettings{}, hands);
+        const std::uint64_t start = g.clock;
+        const QuestResult r = round.run();
+        const std::uint64_t took = g.clock - start;
+        check(r.outcome == QuestOutcome::NotNow && !r.failed() && r.why == "máu thấp" && g.keys.size() == 1 &&
+                  g.clicks.size() == 1 && g.open && r.left_open && r.react_s == 0,
+              std::string("HP under the potion's mark in a slow wait for the game: nothing more pressed, not "
+                          "now and not a failure, the window left for the next round (") +
+                  quest_outcome_name(r.outcome) + "): " + r.log);
+        check(took >= static_cast<std::uint64_t>(kReactSlowMs) && took < 6'000,
+              fmt("... ended %llu ms into the round on the pretend clock -- past kReactSlowMs, nowhere near "
+                  "kReactMs",
+                  static_cast<unsigned long long>(took)));
+        check(contains(r.log, "HP under the potion's mark while waiting for the game"), "the log: " + r.log);
+        check(quest_result_vi(r, "U") == "dừng giữa chừng: máu thấp; cửa sổ Nhiệm Vụ vẫn mở",
+              "for the tab: " + quest_result_vi(r, "U"));
+    }
+    {
+        // The same mark on a game that answers at its usual pace: the round
+        // still starts and is done at any HP (the owner's 2026.11.12b) -- the
+        // mark is asked only in a wait already past kReactSlowMs.
+        PretendQuest g;
+        QuestRound::Hands hands = g.hands();
+        hands.under_potion_mark = [] { return true; };
+        QuestRound round(art().pictures, QuestSettings{}, hands);
+        const QuestResult r = round.run();
+        check(r.outcome == QuestOutcome::TurnedOn && r.done() && g.keys.size() == 2 && g.clicks.size() == 2 &&
+                  g.on && !g.open,
+              std::string("HP under the potion's mark on a game that answers at once: ticked and closed as "
+                          "ever (") +
+                  quest_outcome_name(r.outcome) + "): " + r.log);
+    }
+    {
+        // A stop and the mark in the same slow wait, both from the moment the
+        // mark is first asked: the stop is what is said.
+        PretendQuest g;
+        g.has_auto = false;
+        std::uint64_t clicked_at = 0;
+        QuestRound::Hands hands = g.hands();
+        hands.under_potion_mark = [] { return true; };
+        const auto click = hands.click;
+        hands.click = [&g, &clicked_at, click](int x, int y) {
+            clicked_at = g.clock;
+            return click(x, y);
+        };
+        hands.stop = [&g, &clicked_at] {
+            return clicked_at != 0 && g.clock >= clicked_at + static_cast<std::uint64_t>(kReactSlowMs);
+        };
+        QuestRound round(art().pictures, QuestSettings{}, hands);
+        check(round.run().outcome == QuestOutcome::Cancelled,
+              "a stop with HP under the potion's mark in a wait: cancelled, as a stop");
     }
     {
         // The player goes to another window after the tab click: nothing
@@ -2108,28 +2432,35 @@ void test_left_open() {
     {
         // The quest key opens the window but never shuts it. Each round after
         // the first finds the window it left, takes it as its own, presses the
-        // one closing key -- and, the window still open, counts a failure: the
-        // third stops it, with the alert, rather than every round after the
-        // first taking it for the player's and leaving it there all night.
+        // one closing key -- and, the window still open, counts a failure,
+        // rather than every round after the first taking it for the player's
+        // and leaving it there all night. The third is told on the phone,
+        // once; since 2026.11.24 no stop (the owner: "Kiểm tra các phần khác
+        // xem có phần nào không làm được thì dừng không, cần thay cơ chế này
+        // bằng 1 cơ chế khác"): every round after it still takes the window as
+        // GoBot's and tries its closing key again, at the interval. Until then
+        // the third stopped it.
         PretendLiveRun p;
         p.game.key_closes = false;
         p.settings = s;
         p.run.start(p.game.clock, s);
         p.go(40 * 60'000);
-        const bool adopted = p.calls.size() == 3 && !p.calls[0].ours_open && p.calls[1].ours_open &&
-                             p.calls[2].ours_open;
-        check(p.outcomes.size() == 3 && p.run.stopped_itself() && adopted,
-              fmt("a key that never shuts the window: %d rounds, the 2nd and 3rd taking the window left open "
-                  "as GoBot's, then stopped",
+        bool adopted = p.calls.size() >= 6 && !p.calls[0].ours_open;
+        for (std::size_t i = 1; i < p.calls.size(); ++i) adopted = adopted && p.calls[i].ours_open;
+        check(p.outcomes.size() >= 6 && !p.run.stopped_itself() && p.run.next_at() != 0 && adopted,
+              fmt("a key that never shuts the window: %d rounds in 40 min, every one after the first taking the "
+                  "window left open as GoBot's, never stopped",
                   static_cast<int>(p.outcomes.size())));
-        check(p.keys == std::vector<int>{ 2, 1, 1 },
-              "... the first round two keys, the next ones just the closing key");
+        std::vector<int> closing(p.keys.size(), 1);
+        if (!closing.empty()) closing[0] = 2;
+        check(!p.keys.empty() && p.keys == closing,
+              "... the first round two keys, every one after just the closing key");
         check(p.alerts.size() == 1 && p.alerts[0].first == "quest_trouble" &&
-                  p.alerts[0].second == "Làm nhiệm vụ nhanh đã tự tắt: 3 lần liền không đóng được cửa sổ "
-                                        "Nhiệm Vụ.",
-              "... one alert: " + (p.alerts.empty() ? std::string() : p.alerts[0].second));
-        check(p.run.stopped_log() == "3 failed rounds in a row, the last already_on with the window left open",
-              "... and the log line: " + p.run.stopped_log());
+                  p.alerts[0].second == "Làm nhiệm vụ nhanh: 3 lần liền không đóng được cửa sổ Nhiệm Vụ — GoBot vẫn "
+                                        "thử lại.",
+              "... one alert, at the third: " + (p.alerts.empty() ? std::string() : p.alerts[0].second));
+        check(p.run.stopped_log().empty() && p.run.schedule().failures() == static_cast<int>(p.outcomes.size()),
+              "... no stop's log line, and every round counted");
     }
     {
         // HP falls in the middle of a round, with the window open: put off like
@@ -2291,6 +2622,30 @@ void test_postpone_log() {
     check(contains(src, "waited_for = \"Chờ: \" + why + \".\";") &&
               src.find("waited_for = \"Chờ: \" + why + \".\";") > src.find("GB_INFO(\"Quest: not now -- %s\""),
           "a not-now logged after the hold is marked as said, so the wait it starts is not logged twice");
+
+    // The pictures missing (2026.11.24): the worker no longer leaves at its
+    // start; each round looks for them again first, before the board's look,
+    // the mouse and the hold, and comes to NoPictures while they are missing.
+    // Only the English client stops it, which the loop's break still reads.
+    const std::size_t round = src.find("const auto one_round = [&](const QuestCall& call) -> QuestResult {");
+    const std::size_t ready = round == std::string::npos ? round : src.find("if (!pictures.ready()) {", round);
+    const std::size_t again = ready == std::string::npos ? ready : src.find("pictures.load_best(settings, &again)", ready);
+    const std::size_t none = again == std::string::npos ? again : src.find("missing.outcome = QuestOutcome::NoPictures;", again);
+    const std::size_t mouse = src.find("std::unique_lock<std::mutex> mouse(game_mouse_mutex_, std::try_to_lock);", round);
+    const std::size_t hold = src.find("if (!take_hold(kQuestHold)) {", round);
+    const std::size_t board = src.find("if (pictures.board_title.valid()) {", round);
+    check(round != std::string::npos && ready != std::string::npos && again != std::string::npos &&
+              none != std::string::npos && board != std::string::npos && mouse != std::string::npos &&
+              hold != std::string::npos && none < board && board < mouse && mouse < hold,
+          "one_round: the missing pictures looked for again first, NoPictures with nothing held or pressed");
+    const std::size_t start = src.find("if (!pictures.load_best(settings, &from)) {");
+    const std::size_t loop = src.find("void GuiApp::quest_loop() {");
+    check(loop != std::string::npos && start != std::string::npos && start > loop && start < round &&
+              !contains(src, "-- not started") && !contains(src, "const auto leave = ") &&
+              contains(src, "-- looked for again before each round") &&
+              contains(src, "if (run.stopped_itself()) {\n                GB_WARN(\"Quest: stopped itself -- %s\""),
+          "the worker's start: pictures missing logged and gone on from, no longer \"not started\"; the loop "
+          "still ends on a stop of the run's own -- the English client's alone");
 }
 
 // --------------------------------------------------------------------- probe
@@ -2514,6 +2869,7 @@ void test_quest(void (*check_fn)(bool, const std::string&), void (*section_fn)(c
     test_window();
     test_auto();
     test_round();
+    test_slow_game();
     test_forbidden();
     test_ticked_by_change();
     test_live_window();

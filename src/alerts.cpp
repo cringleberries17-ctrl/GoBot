@@ -503,11 +503,17 @@ const std::vector<AlertEventInfo>& alert_events() {
         { "revive_failed",  true,  true,  "Hồi sinh không được" },
         { "disconnect",     false, true,  "Mất kết nối / game tắt" },
         { "back_in",        false, true,  "Đã vào lại game" },
-        { "keeper_gave_up", true,  true,  "Không tự vào lại được (cần người)" },
+        // Its key kept (configs/alerts.ini goes by it) though the keeper no
+        // longer gives up but for GoBot not running as administrator
+        // (2026.11.24): the hour's restarts used up, waited out, or a
+        // crossing not in, made again 30 s on.
+        { "keeper_gave_up", true,  true,  "Tạm nghỉ tự vào lại" },
         { "not_in_world",   false, true,  "Không thấy nhân vật trong game quá" },
         { "trash_stuck",    true,  true,  "Dọn rác bị kẹt" },
         { "chat_stuck",     true,  true,  "Ô chat có thể đang mở" },
-        { "chat_stopped",   false, true,  "Tự chat tự dừng" },
+        // Its key kept (configs/alerts.ini goes by it) though Tự chat no
+        // longer stops itself (2026.11.24): max_failures lines in a row.
+        { "chat_stopped",   false, true,  "Tự chat gửi không được nhiều lần" },
         { "quest_trouble",  true,  true,  "Làm nhiệm vụ nhanh gặp lỗi" },
         { "potion_low",     false, true,  "Sắp hết bình" },
         { "potion_out",     true,  true,  "Hết bình" },
@@ -639,8 +645,18 @@ namespace alert_text {
 
 namespace {
 
+/// The one stop the keeper still makes: GoBot not running as administrator,
+/// which only starting it again as one puts right.
 std::string gave_up(const std::string& reason) {
     return "GoBot ngừng tự vào lại game: " + reason + ". Cần người kiểm tra.";
+}
+
+/// A crossing not in, made again kCrossAgainMs on (2026.11.24; until then
+/// the keeper stopped for a person: "GoBot ngừng tự vào lại game: ... Cần
+/// người kiểm tra.").
+std::string not_in_yet(const std::string& reason) {
+    return "Vào lại game chưa được: " + reason + " — GoBot thử lại sau " +
+           std::to_string(CrashWatch::kCrossAgainMs / 1000) + " giây.";
 }
 
 /// A key's name as the alert may say it: what InputManager::key_name gives
@@ -653,6 +669,8 @@ std::string plain_key(const std::string& key) {
             return "?";
     return key;
 }
+
+} // namespace
 
 /// Each way a crossing can fail, in a few fixed words. Never AutoLogin's own
 /// advice, which names the launcher's path or another program's window.
@@ -677,11 +695,10 @@ const char* crossing_reason(AutoLogin::Why why) {
         case W::World:            return "đã chọn nhân vật nhưng chưa vào được game";
         case W::Covered:          return "có cửa sổ khác che chỗ cần bấm";
         case W::BadPoint:         return "một chỗ cần bấm trong configs/login.ini nằm ngoài cửa sổ";
+        case W::Message:          return "thông báo của game không tắt khi bấm Xác Nhận";
         default:                  return nullptr;
     }
 }
-
-} // namespace
 
 std::string death(bool reviving) {
     return reviving ? "Nhân vật đã chết. GoBot đang hồi sinh tại chỗ."
@@ -723,25 +740,29 @@ std::string disconnect(CrashWatch::Trouble what, const std::string& code, bool c
     return s;
 }
 
-std::string back_in(int restart, int max_restarts) {
-    return "Đã vào lại game (lần " + std::to_string(restart) + "/" + std::to_string(max_restarts) +
-           "). Bot chạy tiếp.";
+// The keeper's sentences since 2026.11.24, the owner: "Kiểm tra các phần khác
+// xem có phần nào không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ
+// chế khác". max_restarts counts over an hour now, not a run ("lần 1/5"), and
+// nothing but GoBot not running as administrator stops the keeper.
+std::string back_in(int in_hour) {
+    return "Đã vào lại game (lần " + std::to_string(std::max(1, in_hour)) + " trong 1 giờ qua). Bot chạy tiếp.";
 }
 
-std::string gave_up_restarts(int restarts) {
-    return gave_up("đã phải vào lại " + std::to_string(restarts) + " lần");
+std::string gave_up_restarts(int restarts, const std::string& until) {
+    return "Đã vào lại game " + std::to_string(restarts) + " lần trong 1 giờ — GoBot chờ tới " + until +
+           " rồi tự vào lại.";
 }
 
-std::string gave_up_not_set_up() { return gave_up("chưa cài đặt đủ các màn hình đăng nhập"); }
+std::string gave_up_not_set_up() { return not_in_yet("chưa cài đặt đủ các màn hình đăng nhập"); }
 
 std::string gave_up_not_elevated() {
     return gave_up("GoBot không chạy bằng quyền Administrator");
 }
 
 std::string gave_up_crossing(int attempts, AutoLogin::Why why) {
-    std::string reason = "thử " + std::to_string(std::max(1, attempts)) + " lần không vào lại được";
+    std::string reason = "đã thử " + std::to_string(std::max(1, attempts)) + " lần";
     if (const char* r = crossing_reason(why)) reason += std::string(" (") + r + ")";
-    return gave_up(reason);
+    return not_in_yet(reason);
 }
 
 std::string not_in_world(int minutes) {
@@ -765,13 +786,16 @@ std::string chat_stuck(bool stopped) {
                      "tạm dừng.";
 }
 
+// Since 2026.11.24 neither stops its feature any more -- the owner: "Kiểm tra
+// các phần khác xem có phần nào không làm được thì dừng không, cần thay cơ chế
+// này bằng 1 cơ chế khác" -- so they say GoBot goes on trying. Until then:
+// "Tự chat đã tự dừng: N lần liền ..." and "Làm nhiệm vụ nhanh đã tự tắt: ...".
 std::string chat_stopped(int failures) {
-    return "Tự chat đã tự dừng: " + std::to_string(failures) +
-           " lần liền không gửi được câu chat.";
+    return "Tự chat: " + std::to_string(failures) + " lần liền không gửi được câu chat — GoBot vẫn thử lại.";
 }
 
 std::string quest_trouble(int times, const std::string& why) {
-    return "Làm nhiệm vụ nhanh đã tự tắt: " + std::to_string(times) + " lần liền " + why + ".";
+    return "Làm nhiệm vụ nhanh: " + std::to_string(times) + " lần liền " + why + " — GoBot vẫn thử lại.";
 }
 
 std::string potion_low(bool hp, const std::string& key, int count, int bag_total) {
@@ -1846,6 +1870,8 @@ AlertStatus AlertService::status() const {
 
 void AlertService::run() {
     name_this_thread("alerts");
+    // Messages out to Discord and the like: never in a hurry.
+    quiet_this_thread();
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stopping_) {
         const std::uint64_t seen = work_;

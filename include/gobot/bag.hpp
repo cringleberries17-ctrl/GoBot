@@ -3,6 +3,7 @@
 #include "gobot/config.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/input_manager.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/template_matcher.hpp"
 
 #include <algorithm>
@@ -449,9 +450,13 @@ struct CleanSettings {
     int  charm_every_minutes = 60;
     static constexpr int kCharmEveryLeast = 5;
     static constexpr int kCharmEveryMost = 1440;
-    /// [Trash] charm_wait_ms: how long a right-click on a charm is watched for
-    /// its question, or for the stack to change, before the pass gives up on
-    /// that charm. A tuning knob for the real game.
+    /// [Trash] charm_wait_ms: how long a right-click on a charm is still
+    /// watched for its question once the run has been stopped (F12, DỪNG, the
+    /// guard's no), so that a question coming up late is not left open.
+    /// Without a stop the right-click is given kReactMs, 30 s, for its
+    /// question (2026.11.15d, the owner: "sẽ có thêm 30 giây chờ phản ứng"),
+    /// whatever this says: it was how long the question was waited for at
+    /// all before.
     int  charm_wait_ms = 1000;
     static constexpr int kCharmWaitLeast = 300;
     static constexpr int kCharmWaitMost = 3000;
@@ -477,6 +482,14 @@ struct CleanSettings {
     int  buy_every_minutes = 60;
     static constexpr int kBuyEveryLeast = 5;
     static constexpr int kBuyEveryMost = 1440;
+    /// [Trash] buy_after_trash (2026.11.13b, users' feedback via the owner:
+    /// "Mua ngay sau khi dọn rác ... không cần thiết định thời gian mua HP/MP
+    /// nữa"): with Tự dọn rác on too, a plan is bought right after each timed
+    /// pass, riding it under the same hold, and buy_every_minutes begins none
+    /// -- what is still owed of a plan is bought on as before. With Tự dọn
+    /// rác off it changes nothing: the clock buys. Off unless the file says
+    /// so (bag::buys_after_pass).
+    bool buy_after_trash = false;
     /// [Trash] buy_hp_slots, buy_mp_slots: how many purchases of 100 of Thịt
     /// bò khô (HP) and of Rượu lá tre (MP) each time -- a slot of the bag each
     /// -- 0 leaving that potion alone. No cap of GoBot's own since 2026.11.10
@@ -494,6 +507,26 @@ struct CleanSettings {
     static constexpr int kBuySlotsFromOldMost = 20;
     int  buy_hp_slots = kBuySlotsDefault;
     int  buy_mp_slots = kBuySlotsDefault;
+    /// [Trash] buy_pet, buy_pet_slots (2026.11.24, the owner: "Khi ra tới bản
+    /// đồ TổCổLong thì cần mua lại HP cho pet. Cái này ở trong tab Linh Thú
+    /// của người giữ sân và là item "Thịtbò" => cần có lựa chọn để mua và mua
+    /// bao nhiêu slot tương tự như mua HP MP"): whether the pet's HP food is
+    /// bought each time the character comes into TổCổLong (t60_s19, Cổ Long's
+    /// lobby, where a run leaves you) -- one round of buy_pet_slots purchases
+    /// of 100 of Thịt bò, the pet's, from the Linh Thú tab of the same shop,
+    /// a slot of the bag each, nothing counted, the game's message that its bag
+    /// is full the end of it (PetRestock, GuiApp::trash_loop). Never the
+    /// character's Thịt bò khô, which Dược Phẩm sells. Off unless the file says
+    /// so, and it ships off: it spends the character's money. The slots 0 to
+    /// kBuySlotsPerRunMost, kBuyPetSlotsDefault when the file has none.
+    bool buy_pet = false;
+    static constexpr int kBuyPetSlotsDefault = 1;
+    int  buy_pet_slots = kBuyPetSlotsDefault;
+    /// The pet's food as the shop's list draws its name -- with no spaces, as
+    /// it draws "Thịtbòkhô" and "Rượulátre" -- and as the card and the log
+    /// write it.
+    static constexpr const char* kBuyPetName = "Thịtbò";
+    static constexpr const char* kBuyPetShown = "Thịt bò";
     /// How many of a potion one purchase asks for: always this, typed into the
     /// quantity box and read back before Xác Nhận.
     static constexpr int kBuyQuantity = 100;
@@ -1142,17 +1175,24 @@ bool shop_left_up(const Frame& f, const TemplateStore& store);
 /// turns, HP first, then what is left of the longer -- `hp` and `mp` of them,
 /// cut to `most`. The full-bag message is for the whole of Tiêu Dùng, so a
 /// round that meets it after a few has some of each.
-enum class ShopPotion { Hp, Mp };
+///
+/// Pet (2026.11.24): Thịt bò, the pet's HP food, from the shop's Linh Thú tab
+/// -- CleanSettings::buy_pet.
+enum class ShopPotion { Hp, Mp, Pet };
 std::vector<ShopPotion> shop_order(int hp, int mp, int most);
+/// A round with the pet's food in it too (2026.11.24): its `pet` purchases
+/// first, all on the Linh Thú tab, then shop_order's turns of `hp` and `mp` on
+/// Dược Phẩm -- one switch of the tab each way at most -- cut to `most`.
+std::vector<ShopPotion> shop_round_order(int pet, int hp, int mp, int most);
 
 /// What is still to be bought of a plan -- the slots set, from the time it was
-/// due -- and the rounds in a row that ended in trouble.
+/// due -- and the rounds in a row that ended in trouble: counted for the words
+/// (the card's "Mua bình bị lỗi N lần liền", the log), never to drop what is
+/// owed (2026.11.24; `dropped` and kShopTroublesToDrop are gone, see
+/// shop_owed_after).
 struct ShopOwed {
     int hp = 0, mp = 0;
     int troubles = 0;
-    /// The last round left the plan with nothing owed after troubles in a
-    /// row: the owner is told.
-    bool dropped = false;
 };
 /// How a round of the shop ended, as whoever runs it sees it. Full: the game
 /// said the bag is full. Message: another message came up instead of the
@@ -1163,25 +1203,40 @@ enum class ShopEnd { Clean, Full, Message, Trouble, Paused };
 /// What is owed after a round that bought `bought_hp` and `bought_mp` and
 /// made `unsure_hp` and `unsure_mp` purchases that may or may not have gone
 /// through -- counted as bought: never bought twice -- and ended `end`:
-/// nothing after a full bag or a message; after a trouble, the rest unless it
-/// is the kShopTroublesToDrop-th in a row, and then nothing either; the
-/// troubles in a row reset by a clean round and left as they were by a paused
-/// one. Never under 0.
+/// nothing after a full bag or a message (the game said no: the plan ends);
+/// after a trouble, the rest, however many troubles came in a row -- one more
+/// counted; the troubles in a row reset by a clean round, a full bag or a
+/// message, and left as they were by a paused one. Never under 0.
+///
+/// 2026.11.24 (the owner: "Kiểm tra các phần khác xem có phần nào không làm
+/// được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác"; then "thử lại
+/// luôn ... chứ không phải là dừng 90s"): a trouble never drops the plan. Until
+/// then the kShopTroublesToDrop-th (2) in a row dropped what was left until the
+/// next plan, an hour on as shipped -- the shop stopped for want of one round
+/// that went. Now every round in trouble is tried again kShopTroubleAgainMs (the
+/// owner's 30 s of 2026.11.15b) later, without limit, until one goes clean or
+/// the game says the bag is full; what may have gone through is still counted
+/// as bought, a retry never begins a plan of its own (shop_plan_begins), and
+/// no digit goes through the key window for it.
 ShopOwed shop_owed_after(const ShopOwed& before, int bought_hp, int bought_mp, int unsure_hp, int unsure_mp,
                          ShopEnd end);
 /// A new plan when its time comes: the slots set, owing all of them, and no
 /// trouble yet. Whatever an earlier plan still owed is dropped.
 ShopOwed shop_new_plan(int hp_slots, int mp_slots);
-constexpr int kShopTroublesToDrop = 2;
 
-/// How long after its worker starts the shop first looks, in seconds, given
-/// when the next plan was due by the clock saved when the last plan began
-/// (`saved_s`, wall-clock seconds; 0: none saved) and the interval: what is
-/// left of the wait, but never under kShopFirstWaitS -- a GoBot started does
-/// not buy straight away -- nor over one interval, so a clock saved far ahead,
-/// or a shorter interval set since, waits no longer than the interval.
-constexpr int kShopFirstWaitS = 45;
-std::int64_t shop_first_wait_s(std::int64_t saved_s, std::int64_t now_s, int every_minutes);
+/// When a timed job of the trash worker -- the Dọn rác pass, the potion shop's
+/// look -- is first due once the worker counts (2026.11.12, the owner: "khi
+/// bật thì bắt đầu đếm thời gian. Lúc nào tới thời gian thì mới bắt đầu thực
+/// hiện"): a whole `every_minutes` from `now_ms`, the start -- BẮT ĐẦU, F10, the
+/// job's box ticked on -- but for a clock the last worker left still counting
+/// (`kept_ms` later than now; 0: none kept): a quick MACRO OFF and ON keeps
+/// what is left of its wait, `least_ms` at the least. One that ran out while
+/// nothing ran is not counting, and the job counts afresh. Times on now_ms()'s
+/// clock. Before 2026.11.12 every start had the first pass 15 s on and the
+/// shop's first look 45 s on, or what was left of the plan time saved in
+/// shop_clock.txt; that file is still written as a plan begins, and a whole
+/// interval from the start is never sooner than the plan it holds.
+std::uint64_t start_due_ms(std::uint64_t kept_ms, std::uint64_t now_ms, int every_minutes, std::uint64_t least_ms);
 
 /// The shop right after a Dọn rác pass (2026.11.11, the owner: "Tới giờ mua:
 /// dọn rồi mua"). The shop keeps its own clock and plan rules; a timed look of
@@ -1230,6 +1285,30 @@ struct RidePass {
 /// shop goes on its own, by its own rules.
 const char* ride_refused(const RidePass& p);
 
+/// "Mua ngay sau khi dọn rác" (2026.11.13b, CleanSettings::buy_after_trash):
+/// whether the shop buys right after each timed pass rather than by its clock
+/// -- the box ticked, with Tự mua bình and Tự dọn rác on. With Tự dọn rác
+/// off the clock buys, as before.
+bool buys_after_pass(const CleanSettings& s);
+/// Whether the shop's own clock may make a timed look, buying after each pass
+/// (`after_pass`, buys_after_pass): only for what is still owed of a plan
+/// (`owed`, a part's gap on), or a look a pass left owed (`look_owed`: its
+/// ride refused, or the round put off by a gate, tried again by the shop's
+/// rules). A plan of its own the clock never begins then. Not buying after
+/// each pass: always, as before.
+bool shop_clock_looks(bool after_pass, bool look_owed, int owed);
+/// Whether a plan begins at a round, the numbers owed afresh: "Mua ngay"
+/// (`forced`) always; buying after each pass, the look a pass left owed and
+/// no other (`look_owed`); otherwise the plan's own time come (`plan_time`).
+bool shop_plan_begins(bool forced, bool after_pass, bool look_owed, bool plan_time);
+/// Whether a timed pass -- one that ran, or one with nothing it could do --
+/// owes the shop a look, buying after each pass: only with nothing of a plan
+/// still owed (`owed`). A part still owed is that plan's, bought as a part --
+/// the review of 2026.11.13b: a part's look pulls a pass (kShopPartGapMs is
+/// kRideFreshMs), and that pass owing a look began the plan afresh every
+/// part, buying until the bag was full.
+bool pass_owes_look(bool after_pass, int owed);
+
 /// HP and the Dọn rác pass and the potion shop. 2026.11.11 ("Mua luôn, bơm
 /// xen") started them at the HP potion's mark and stopped them under half of
 /// it when the potion could drink during the job, else at the window's floor
@@ -1241,7 +1320,8 @@ const char* ride_refused(const RidePass& p);
 /// clicks (the macro's through the key window, or the job's own presses,
 /// BagCleaner::OwnPotions). `drinks` still says whether the HP potion goes
 /// through the window. `floor` -- chat's and the other jobs' -- is not
-/// changed by this, and the charm run keeps its own gate.
+/// changed by this. The charm run has gone at any HP too since 2026.11.12b,
+/// by kJobDownHpPct, pressing its own potions between two charms.
 constexpr int kJobDownHpPct = 1;
 struct HpGates {
     bool drinks = false;        ///< the HP potion is drunk through the job's key window
@@ -1257,6 +1337,60 @@ constexpr std::uint64_t kHpLookAgainMs = 5'000;
 /// never trouble for it.
 constexpr std::uint64_t kHpStoppedAgainMs = 15'000;
 
+/// A timed bag job and the macro's HP potion on a key the job neither lets
+/// through its key window nor presses itself -- a digit, as the shipped 1 and
+/// 2 are, which no bag job lets go (the owner: "Giữ chặn phím số") -- 2026.11.21,
+/// the audit's B2 (the owner: "không để các chức năng block nhau"). The jobs go
+/// at any HP (2026.11.11b, 2026.11.12b: no HP mark gates them, which kept the
+/// charms off all night at HP under 90), so with that potion due -- the tier
+/// the macro would press for the reading, its cooldown over -- nothing drank
+/// while the job held the game, and the guard stopped it only with the
+/// character down. Now the job gives the hold back -- between two items, two
+/// purchases or two charms, on the safe points the guard is asked at, never
+/// with a quantity box up (BagCleaner::set_yield) -- once it has held the game
+/// kDrinkYieldAfterMs (`ran_ms`), so the macro drinks, and the job is tried
+/// again kHpStoppedAgainMs later. Not before kDrinkYieldAfterMs: with HP
+/// hovering under the mark and the potion out, a job that gave way at once
+/// would never get anything done. Never a job begun with something maybe
+/// left in the bin, nor one whose hold is kept (`kept`): it keeps the hold
+/// whatever it does. `potion_held_off`: the macro runs, its HP potion is due,
+/// and the job's window / own presses do not take that key.
+constexpr std::uint64_t kDrinkYieldAfterMs = 10'000;
+bool drink_yield(bool potion_held_off, bool kept, std::uint64_t ran_ms);
+
+/// The trash worker's way out of a hold it keeps (2026.11.21, the audit's B1):
+/// a shop round cut short by the check-in board over its quantity box in the
+/// board's night hold keeps "trash cleaning" (Result::stuck), and after 00:03
+/// nothing ended it -- the popup closer, the only one to ESC the board, will
+/// not under that hold, look_for_clear lets go only with the board gone, and
+/// the kept pass stops at the board -- so no potion, skill or fight until a
+/// person pressed ESC; the same with any two-button dialog nobody answers. The
+/// worker itself then sweeps with ESC under its own hold (BagCleaner::
+/// sweep_kept, the owner's stuck rule, 2026.11.14b): once the hold has been
+/// kept kReactMs, the board -- when it is seen -- up kReactMs and out of its
+/// night hold (the owner: "Trường hợp qua ngày thì chờ tới 00:03 mới ấn ESC"),
+/// and kKeptSweepGapMs after the last sweep. The hold is let go only on a clean
+/// look after it, as ever.
+struct KeptSweep {
+    bool held = false;              ///< the worker keeps the hold for something left up
+    bool hold_ours = false;         ///< the coordinator's hold is still "trash cleaning"
+    std::uint64_t now_ms = 0;
+    std::uint64_t kept_ms = 0;      ///< since when the hold has been kept; 0 unknown
+    std::uint64_t board_ms = 0;     ///< since when the check-in board has been seen up; 0 not seen
+    std::uint64_t swept_ms = 0;     ///< the last sweep; 0 none
+    bool night = false;             ///< the PC's clock in the board's night hold (checkin_night_hold)
+};
+constexpr std::uint64_t kKeptSweepGapMs = 60'000;
+bool kept_sweep_due(const KeptSweep& k);
+/// A shop round that ended in trouble -- stuck and shut with ESC, the tab not
+/// switched, a step that did not go -- is tried again this much later: 30 s
+/// since 2026.11.15b (the owner: "Cần thực hiện lại sau 30s chứ không phải 10
+/// phút"), 10 minutes before. Every one, since 2026.11.24, without limit (the
+/// owner: "Kiểm tra các phần khác xem có phần nào không làm được thì dừng
+/// không, cần thay cơ chế này bằng 1 cơ chế khác"): until then the second
+/// trouble in a row dropped what was left of the plan until the next.
+constexpr std::uint64_t kShopTroubleAgainMs = 30'000;
+
 /// How a round of the shop ended, as whoever ran it saw it (2026.11.11).
 struct ShopRoundSeen {
     bool full = false;          ///< the game said the bag is full (Result::shop_full)
@@ -1268,11 +1402,12 @@ struct ShopRoundSeen {
     bool keys_late = false;     ///< a key of the macro's not seen up in time (Result::keys_late)
     bool trouble = false;       ///< anything else said in Result::trouble, or the bag not searched
 };
-/// Full and Message as the game said them; then Paused -- never Trouble, two of
-/// which in a row drop the rest of the plan -- for the board, a stop, HP the
-/// guard stopped it for (whatever HP reads by the end: a potion may have lifted
-/// it since), the hold lost, and a key of the macro's not seen up in time;
-/// Trouble for anything else; Clean.
+/// Full and Message as the game said them; then Paused -- never Trouble, which
+/// is counted in a row (two in a row dropped the rest of the plan until
+/// 2026.11.24) and waits kShopTroubleAgainMs rather than a part's gap -- for
+/// the board, a stop, HP the guard stopped it for (whatever HP reads by the
+/// end: a potion may have lifted it since), the hold lost, and a key of the
+/// macro's not seen up in time; Trouble for anything else; Clean.
 ShopEnd shop_end(const ShopRoundSeen& s);
 
 /// The shop's row of potions anywhere on `f`, its buttons or not: a shop
@@ -1298,6 +1433,163 @@ bool shop_question(const Frame& f, const TemplateStore& store, const Dialog& d, 
 /// know of another window open beside the bag.
 bool can_check_shop(const TemplateStore& store);
 
+// ------------------------------------------------------------ an NPC's shop
+//
+// 2026.11.24, the owner: "khi làm đội trưởng để đi Cổ Long thì không mua được
+// Lư Hương. Cụ thể là khi ấn vào Lư Hương thì không ấn mua mà lại tắt luôn
+// shop mua". The shop an NPC's "Shop" row opens -- Lư Hương Long Mỹ at Cổ
+// Long's, the pickaxes at Thợ Mỏ's -- is the window the Người Giữ Sân item
+// opens: its Mua | Thoát (kShopButtons) and its list of two columns of cells.
+// A cell, as GoC's own pictures of three NPCs' shops have it (grabbed/
+// pickaxe_npc_shop, rod_in_shop, baiter_in_shop) and as this client draws its
+// potions (kShopRow), all four measured alike: the item's icon box at its
+// left, its middle kShopMpX across and kShopIconY down from the cell's
+// top-left; beside it the name over the price, drawn with no spaces --
+// "CuốcHắcQuang", "CáNhỏ", "Rượulátre" -- and ending at kShopNameLastX
+// whatever its length, the middle of its letters kShopIconBelowName over the
+// icon's middle. The columns' cells kShopCellPitch apart, the left one's left
+// edge kShopButtonsDx left of the buttons, as kShopRow's is.
+constexpr int kShopCellPitch = kShopHpX - kShopMpX;
+constexpr int kShopIconY = 18;
+constexpr int kShopNameFieldX = 38, kShopNameFieldEndX = 139;    ///< the name's field, across the cell
+constexpr int kShopNameLastX = 135;                              ///< the name's last pixel, across the cell
+constexpr int kShopIconBelowName = 8;
+/// How far the icon's middle as the name's right edge puts it may be from
+/// its column's: MenuText's letters are not the game's, a few pixels wider or
+/// narrower over a name; a name found anywhere else in its field is a piece
+/// of another name, or a list laid out otherwise than the one measured.
+constexpr int kShopIconSlack = 20;
+
+/// Where the item whose name MenuText found at `name` (its letters with a
+/// pixel round them) is double-clicked, in the shop whose Mua | Thoát are at
+/// `buttons`: the middle of its icon box -- the spot the potion shop has
+/// double-clicked live since 2026-10-31 -- in the column whose name field
+/// holds the name, kShopIconBelowName under the name's middle. Not `ok`, and
+/// nothing to click, when the name lies in neither column's field, or ends
+/// more than kShopIconSlack from where the names of that column end: a
+/// double-click there could land on the next item.
+struct ShopCell {
+    bool ok = false;
+    int  column = -1;       ///< 0 the left column, 1 the right; -1 neither
+    int  x = 0, y = 0;      ///< the icon box's middle: what is double-clicked
+    int  by_name_x = 0;     ///< the icon's middle as the name's right edge puts it
+    const char* why = "";   ///< not ok: why, for the log
+};
+ShopCell shop_cell(const ScreenRect& name, const ScreenRect& buttons);
+
+/// Where an NPC's shop with its Mua | Thoát at `buttons` has its list's names:
+/// both columns' name fields, from under the window's title to just above
+/// the buttons -- what MenuText searches for an item, never the window's
+/// title or anything beside the window.
+ScreenRect shop_list(const ScreenRect& buttons);
+
+/// The quantity box of a question whose two buttons are at `pair`: left of
+/// them, a little inset -- what CountReader::read_field reads, as for the
+/// bin's quantity question and the potion shop's.
+ScreenRect quantity_box(const ScreenRect& pair);
+
+/// How much of quantity_box(pair) on `f` is a quantity box's dark field, 0 to
+/// 1: the sell question's (grabbed/sell_confirm) is (58..74, 66..74, 74..90)
+/// round its digits, where a question with no box -- the bin's, the revive's,
+/// a message -- has the light bar (214, 214, 222) its buttons stand on.
+/// kFieldBox and over: a box is there; kFieldNone and under: none. 0 off the
+/// frame.
+float quantity_field(const Frame& f, const ScreenRect& pair);
+constexpr int   kFieldDarkest = 120;    ///< a field's pixel: no channel brighter
+constexpr float kFieldBox = 0.60f;
+constexpr float kFieldNone = 0.15f;
+
+/// Whether the two buttons of a question are still at `pair` on `f`: either
+/// button alone, as either drawing of the pair has it, within three pixels --
+/// one is drawn pressed after keys the box did not take, or lit with the
+/// pointer over it after a click, never both at once, and find_dialogs then
+/// misses the pair (the live client, 2026-10-31). BagCleaner::question_still's
+/// look, for a question whose place is known.
+bool pair_still(const Frame& f, const TemplateStore& store, const ScreenRect& pair);
+
+// ---------------------------------------------------------- the shop's tabs
+//
+// 2026.11.24, the owner: "Khi ra tới bản đồ TổCổLong thì cần mua lại HP cho
+// pet. Cái này ở trong tab Linh Thú của người giữ sân và là item "Thịtbò"".
+// The Người Giữ Sân item's shop -- "Cửa Hàng" -- has five tabs across its top,
+// Dược Phẩm (chosen as it opens: the potions), Vũ Khí Phụ, Tạp Hóa, Linh Thú
+// and Công Thức Chế Tạo. Measured on the live client's own pictures of it,
+// trash_debug\20261111_214922_0_shop_full.png and 20261111_221637_5_shop_full.png
+// (1024x768, its Mua | Thoát -- kShopButtons -- found at 497,541 on both, 0.17
+// of a grey level from the picture): five tabs of 64 pixels side by side,
+// Dược Phẩm's from x 306 to 369 -- kShopTab0Dx, 191 left of the buttons --
+// Linh Thú's from 498 to 561, every one from y 178, its light top edge, to 198
+// -- kShopTabDy, 363 above the buttons. The tab chosen is drawn dark (14, 14,
+// 14 on the rows above and below its words, y 179 to 181 and 195 to 196), the
+// others grey (115, 123, 132); the words between. A tab is clicked in its
+// middle: Linh Thú's at 530,188, 33 right of the buttons' top-left and 353
+// above. The same sprite at every size of the game, so the same offsets.
+constexpr int kShopTabs = 5;
+constexpr int kShopTabPotions = 0;      ///< Dược Phẩm: Thịt bò khô, Rượu lá tre
+constexpr int kShopTabPet = 3;          ///< Linh Thú: Thịt bò, the pet's
+constexpr int kShopTab0Dx = -191, kShopTabDy = -363;
+constexpr int kShopTabW = 64, kShopTabH = 21;
+/// The rows of a tab, from its top, with nothing of its words on them: its
+/// body's colour says whether it is the one chosen.
+constexpr int kShopTabBodyRows[] = { 1, 2, 3, 17, 18 };
+/// Each tab's words, as the shop writes them.
+inline const char* const kShopTabNames[kShopTabs] = { "Dược Phẩm", "Vũ Khí Phụ", "Tạp Hóa", "Linh Thú",
+                                                      "Công Thức Chế Tạo" };
+/// Tab `tab` (0 to kShopTabs - 1) of the shop whose Mua | Thoát are at
+/// `buttons`: the whole tab, its top edge included. What is clicked is its
+/// middle.
+ScreenRect shop_tab_rect(const ScreenRect& buttons, int tab);
+/// Whether tab `tab` is drawn chosen on `f`: 1 its body dark, 0 grey, -1 can
+/// not be told -- something over it, off the frame, no shop there. Each of
+/// kShopTabBodyRows across the tab but for a pixel at each side: kShopTabSure
+/// of them dark (no channel over kShopTabDarkMost) is chosen, as many grey
+/// (kShopTabGreyLeast to kShopTabGreyMost) is not.
+int shop_tab_drawn(const Frame& f, const ScreenRect& buttons, int tab);
+constexpr int   kShopTabDarkMost = 60;
+constexpr int   kShopTabGreyLeast = 90, kShopTabGreyMost = 160;
+constexpr float kShopTabSure = 0.85f;
+/// The strip of tabs on `f` as one look reads it: `strip`, every tab read as
+/// chosen or not and exactly one chosen -- what says the tabs are where the
+/// buttons put them before one is clicked -- and which (`chosen`, -1 none).
+struct ShopTabs {
+    bool strip = false;
+    int  chosen = -1;
+};
+ShopTabs shop_tabs(const Frame& f, const ScreenRect& buttons);
+
+/// Whether the words MenuText found at `name` in column `column` of the list
+/// of the shop whose Mua | Thoát are at `buttons` are an item's whole name: no
+/// letter of the game's -- grey over MenuText's cut, 150 -- in that column's
+/// name field on the words' rows, right of them (from kShopNameTail past their
+/// box to where the names end) or left of them (from the field's start to
+/// kShopNameTail short of their box), in kShopNameInkCols columns or more. The
+/// names are drawn right to left from the same place, so "Thịtbò" found in
+/// Dược Phẩm's "Thịtbòkhô" has khô's 16 columns right of it -- 17 pixels short
+/// of the names' end, inside shop_cell's kShopIconSlack, so shop_cell alone
+/// would take it -- and one found at the end of a longer name has letters
+/// left of it.
+bool shop_name_alone(const Frame& f, const ScreenRect& name, const ScreenRect& buttons, int column);
+constexpr int kShopNameTail = 3;
+constexpr int kShopNameInkCols = 2;
+
+/// An item found by its name in the list of the shop whose Mua | Thoát are at
+/// `buttons` (2026.11.24): MenuText over shop_list, `list_name` as the list
+/// draws it (no spaces), in an item's place (shop_cell) and whole
+/// (shop_name_alone). A find that is not -- a piece of a longer name, words
+/// out of an item's place -- is wiped from a copy of the list and the list
+/// searched again, kShopItemFinds finds at most: the words wanted may be
+/// another cell's. `cell` is what is double-clicked.
+struct ShopItemSeen {
+    bool        ok = false;
+    ShopCell    cell;
+    ScreenRect  at;             ///< the words found last (the one taken, when ok)
+    float       score = 0.0f;   ///< MenuText's for them
+    int         passed = 0;     ///< finds passed over
+    const char* why = "";       ///< not ok: why, for the log
+};
+ShopItemSeen shop_item(const Frame& f, const ScreenRect& buttons, const std::string& list_name);
+constexpr int kShopItemFinds = 3;
+
 /// The client's close buttons, every drawing it has for one -- the bag's own X
 /// among them, and those of Kho Cash, a shop and the monster book -- by the
 /// names the template store gives them.
@@ -1320,6 +1612,18 @@ bool can_see_windows(const TemplateStore& store);
 /// it.
 bool other_window_up(const Frame& f, const TemplateStore& store, const BagView& v, const BagLayout& l,
                      ScreenRect* at = nullptr, const ScreenRect* also_own = nullptr);
+
+/// Whether other_window_up searches for its close buttons one after another
+/// on the caller's thread rather than each on a thread of its own: so on a PC
+/// of two logical CPUs or fewer (2026.11.16, a user's PC of one core, with the
+/// game, stuttered), where the extra threads only take turns on the same core
+/// and cost a frame's worth of OpenCV buffers each. The answer is the same
+/// either way: the matches are taken in kCloseButtons' order both ways.
+bool searches_inline();
+
+/// For tests: 1 forces the searches inline, 0 onto their own threads, and
+/// anything else gives them back to the PC's own count of CPUs.
+void force_searches_inline(int how);
 
 /// Yêu Quái Bách Khoa, the monster book, as the live client draws it: the
 /// window a fragment's right-click opens together with its question, and
@@ -1478,6 +1782,20 @@ public:
     };
     void set_clock(Clock c) { clock_ = std::move(c); }
 
+    /// How long the game is given to react to each of the run's own inputs
+    /// (2026.11.15d, the owner: "khi GoBot thực hiện thao tác, sẽ có thêm 30
+    /// giây chờ phản ứng. Nếu màn hình phản ứng luôn thì thực hiện tiếp bước
+    /// tiếp theo, còn nếu màn hình không phản ứng gì thì sẽ dừng xử lý"):
+    /// kReactMs unless set, and set only by a test that runs on the real clock
+    /// and must not sit through 30 s of it. The owner's stuck rule (kStuckMs)
+    /// goes by it too.
+    void set_react_ms(int ms) { react_ms_ = std::max(1, ms); }
+    int  react_ms() const { return react_ms_; }
+    /// The second of the local day, 0 to 86399, for the check-in board's night
+    /// hold in esc_out (checkin_night_hold): local_second_of_day() unless set
+    /// -- a test's pretend clock of the day, or -1 for none.
+    void set_day_clock(std::function<int()> second_of_day) { day_clock_ = std::move(second_of_day); }
+
     /// The macro's letter and Space keys while a job runs (2026.11.10, the
     /// owner: "Khi dọn rác thì cần ra các skill thuộc phím chữ cái", "cả khi
     /// mua HP và MP cũng cần ra skill", "lúc dùng bùa thì không cần ra skill"):
@@ -1527,7 +1845,10 @@ public:
     /// pressed through the run's own hands, then kPotionSettleMs waited, and
     /// the next double-click or drag goes by a look taken after that. Unset,
     /// nothing is pressed. Set only with no key window (the macro running
-    /// presses its own potions through that).
+    /// presses its own potions through that). Since 2026.11.12b a CharmsOnly
+    /// run has them too, the macro running or not -- its hold lets no window
+    /// through -- pressed at the top of a round of charm_sweep, between two
+    /// charms, on keys_clear (no dialog of any kind on that look).
     struct OwnPotions {
         std::function<std::uint32_t(std::string&)> due;     ///< the key to press now, 0 none; its line for the log
         std::function<void(std::uint32_t)>          pressed; ///< that key went down
@@ -1564,9 +1885,15 @@ public:
     /// order bag::shop_order gives, kShopMaxBuys at most. Unset, or both 0, a
     /// run that is not a trial presses nothing. A trial (set_dry_run) tries
     /// one of each whatever this says.
-    void set_shop_plan(int hp, int mp) {
+    ///
+    /// `pet` (2026.11.24): purchases of 100 of Thịt bò, the pet's HP food,
+    /// from the shop's Linh Thú tab, before the potions (bag::shop_round_order)
+    /// -- CleanSettings::buy_pet. The window's round on reaching TổCổLong asks
+    /// for these alone. Never in a trial.
+    void set_shop_plan(int hp, int mp, int pet = 0) {
         shop_plan_hp_ = std::max(0, hp);
         shop_plan_mp_ = std::max(0, mp);
+        shop_plan_pet_ = std::max(0, pet);
     }
     /// The deadline of a ShopBuy run of `purchases`, in milliseconds: 30 s and
     /// 6 s a purchase, kShopDeadlineMostMs at most.
@@ -1587,6 +1914,60 @@ public:
     /// How long a job that found the check-in board up waits before it looks
     /// again. Not counted as trouble.
     static constexpr int kBoardWaitMs = 60'000;
+    /// The owner's stuck rule (2026.11.14b: "Trường hợp bị dừng quá 10s thì
+    /// tắt toàn bộ hiển thị shop, túi đồ trên màn hình bằng phím ESC. Xử lý
+    /// này thực hiện cho cả khi hộp nhập số lượng không biến mất"), made 30 s
+    /// by the owner's 2026.11.15d rule ("sẽ có thêm 30 giây chờ phản ứng ...
+    /// nếu màn hình không phản ứng gì thì sẽ dừng xử lý"): kReactMs, counted
+    /// from the step's last input of GoBot's own -- for the shop the
+    /// right-click that asks for it, a purchase's double-click, its quantity
+    /// question seen, each typing into its box, its Xác Nhận, a Hủy Bỏ; for a
+    /// pass an item's drag towards the bin, the click on the bin, each Xác
+    /// Nhận. So a step's own wait for the game, up to kReactMs from that input
+    /// (react_ms()), is never cut short, and a step nothing has come of for
+    /// that long ends with esc_out: ESC until nothing of the shop, no dialog,
+    /// no message, no check-in board and no bag is on the screen -- the stop's
+    /// clean-up -- and the round to be tried again later. Never in a charm
+    /// run, which presses no Esc.
+    static constexpr int kStuckMs = kReactMs;
+    /// A wait of kReactMs after an input that a stop, the guard's no, or a
+    /// step given up on cut short still looks this long before it is over,
+    /// as it always did: Hủy Bỏ on the bin's question, the bin clicked to
+    /// bring one up, a Hủy Bỏ of cancel_all and shop_cancel (each of their
+    /// clicks given react_ms() / kCancelClicksShare otherwise, the first
+    /// click's kReactMs watched to its end).
+    static constexpr int kCancelLookMs = 1800;
+    static constexpr int kCancelClicksShare = 5;
+    /// How often, inside a wait for the game of kReactMs, an HP or MP potion
+    /// due is given its moment (potion_break, with every check of its own): a
+    /// long wait is no reason for the character to go without, where the
+    /// look allows a key at all -- never after a drag, a right-click or a
+    /// double-click until what it brought is seen.
+    static constexpr int kReactPotionMs = 2'000;
+    /// One sweep: at most kEscMax ESCs, each on a fresh look that shows
+    /// something up and given kEscGoneMs to close something; one that closes
+    /// nothing is let go once, the second ends the sweep. Clear: nothing up on
+    /// kEscClearLooks looks kEscClearGapMs apart -- those looks taken even
+    /// when the sweep's time is up. After an ESC that closed nothing seen
+    /// (the review of 2026.11.14b: a slow game may still be drawing what it
+    /// shut) the next goes only on two looks at least kEscSettleMs apart that
+    /// agree, so that it does not land on an empty screen and bring up the
+    /// game's menu.
+    static constexpr int kEscMax = 6;
+    static constexpr int kEscGoneMs = 1500;
+    static constexpr int kEscClearLooks = 3;
+    static constexpr int kEscClearGapMs = 400;
+    static constexpr int kEscSettleMs = 500;
+    /// The game's own menu (grabbed/client_menu_dialog) and its X, as the popup
+    /// closer has them (PopupEyes::kMenuXDx, kMenuXDy): come up after an ESC
+    /// of the sweep's, that ESC went past what was up -- it counts as one that
+    /// closed nothing -- and the menu is closed by its X, found within
+    /// kEscMenuXSlack of that place as the popup closer finds it, looked at
+    /// again after each click, kEscMenuClicks clicks at most; the sweep then
+    /// goes on. One that was up before is the player's, and left alone.
+    static constexpr int kEscMenuXDx = 156, kEscMenuXDy = 7;
+    static constexpr int kEscMenuXSlack = 3;
+    static constexpr int kEscMenuClicks = 2;
 
     /// Which charms are due, by TrashList::Item::clock_id: a charm used or
     /// perhaps used less than charm_every_minutes ago is not (CharmClock).
@@ -1595,14 +1976,31 @@ public:
 
     /// Asked before the bag key and before every right-click of a charm run:
     /// false -- whatever holds everything else of the bot off is gone -- stops
-    /// it there, with nothing more pressed.
+    /// it there, with nothing more pressed. Asked too, with the hold check, on
+    /// every look of a wait for the game to react (2026.11.15d, react_stop): a
+    /// no ends that wait, and the step is given up as it always was.
     void set_guard(std::function<bool()> still_held) { guard_ = std::move(still_held); }
     /// The hold alone, HP not asked (2026.11.11): what a shop round asks
     /// before each click on the game's full-bag message, and on a lone message
     /// in the quantity box's place (shop_message, close_notice) -- closed with
     /// HP low all the same, for a message left up keeps the shop and the hold
     /// with it, but never under another job's hold. Unset, the guard is asked.
+    /// The ESCs of a step stuck (esc_out) ask both, the hold and the guard:
+    /// the guard's HP stop is the character down alone (kJobDownHpPct), and no
+    /// ESC goes with the death panel up (the review of 2026.11.14b).
     void set_hold_check(std::function<bool()> ours) { hold_check_ = std::move(ours); }
+    /// Whether the job gives its hold back now for the macro's HP potion
+    /// (2026.11.21, the audit's B2; bag::drink_yield): asked only where the
+    /// guard is asked between two items of a pass, before each purchase's
+    /// double-click and the opener's right-click, and between two charms --
+    /// nothing in the bin, no quantity box or question up -- never in a wait
+    /// for the game, nor by the ESCs of a step stuck. Yes stops the run there
+    /// as the guard's no does (Result::yielded, `trouble` saying why); whoever
+    /// runs it tries again kHpStoppedAgainMs later. Unset, never. Never asked
+    /// before the run's first item, purchase or charm's right-click either
+    /// (the review of 2026.11.21): a slow start must not use the
+    /// kDrinkYieldAfterMs up, so every run gets something done.
+    void set_yield(std::function<bool()> yield) { yield_ = std::move(yield); }
 
     /// Called with the clock id of a charm just before it is right-clicked --
     /// before anything that cannot be taken back: whoever keeps the clock
@@ -1639,8 +2037,14 @@ public:
     /// This run closes it -- with its own Xác Nhận, where that pair puts it
     /// (bag::message_band) -- before anything else, the bag key included; and
     /// with no charm due, does nothing else. A message anywhere else, or none
-    /// handed over, is anyone's, and left alone.
-    void set_own_notice(const ScreenRect& pair);
+    /// handed over, is anyone's, and left alone. One that the last run's two
+    /// clicks did not close is handed over the same way since 2026.11.24, and
+    /// clicked again here, twice at most. `clicked_out`: the last run clicked
+    /// it to no end (the 2026.11.24 review) -- this run makes one click and
+    /// watches it kNoticeCloseMs x 2, not the whole 30 s reaction wait the
+    /// run that first met it already spent: a message that never closes
+    /// costs the hunt a few seconds a minute, not 30.
+    void set_own_notice(const ScreenRect& pair, bool clicked_out = false);
 
     /// The deadline of a charm run with `due_kinds` kinds due, in milliseconds:
     /// 12 s and 3 s a kind, kept between 20 and 40 s. The bag opened, Tiêu Dùng,
@@ -1648,8 +2052,21 @@ public:
     static int charm_deadline_ms(int due_kinds);
 
     /// The most a run may take from here on, in milliseconds: it stops, with
-    /// nothing more right-clicked, when it has. 0: no limit.
+    /// nothing more right-clicked, when it has. 0: no limit. Asked only
+    /// between steps, never inside a wait for the game; and the time the game
+    /// took to react to an input past kReactSlowMs -- up to kReactMs on a slow
+    /// PC (2026.11.15d) -- moves it on by as much (react_took), so that a slow
+    /// game's waiting is not what runs a charm run or a shop round out of time:
+    /// the deadline stays the backstop for a run that is slow for any other
+    /// reason.
     void set_deadline_ms(int ms);
+    /// What a wait for the game of `ms` from an input moves the deadline on
+    /// by: what it was past kReactSlowMs, less what an earlier wait measured
+    /// from the same input has moved it on by already -- `credited_ms` of it
+    /// (the review of 2026.11.15d: a charm's question gone and its stack down
+    /// are both measured from its Xác Nhận, and were counted twice). Never
+    /// below 0.
+    static int react_credit_ms(int ms, int credited_ms = 0);
 
     /// A look at the bag's strip that reads no tab chosen at all -- something
     /// drawn over it for a moment, the pointer resting on it -- is looked at
@@ -1660,6 +2077,14 @@ public:
     /// bought or right-clicked on a look that does not read the tab wanted.
     static constexpr int kTabRelooks = 8;
     static constexpr int kTabRelookMs = 150;
+    /// The shop's click on Khác (2026.11.14b): up to kShopTabClicks clicks on
+    /// a strip read as another tab for sure -- a pass and a charm run keep two
+    /// -- the third and fourth kTabRetryPauseMs after a fresh look, a pixel
+    /// further aside, and each looked after for kTabRetryLookMs by the clock.
+    /// On 2026-11-14 at 21:37 the game took neither of two clicks.
+    static constexpr int kShopTabClicks = 4;
+    static constexpr int kTabRetryPauseMs = 400;
+    static constexpr int kTabRetryLookMs = 1200;
 
     struct Result {
         bool ran = false;           ///< the bag was found and searched
@@ -1710,11 +2135,22 @@ public:
         /// over by set_own_notice -- whose message was not seen closed: it may
         /// still be up, or come. `notice_place` is that question's pair, for
         /// the next run's set_own_notice; `notice_carried`, that it was the one
-        /// handed over, which is not handed on for longer. Never set for a
-        /// message two clicks did not close: that one is the player's.
+        /// handed over, which is not handed on for longer -- unless this run
+        /// clicked it (`notice_clicked`). Since 2026.11.24 a message two clicks
+        /// did not close is handed over too (the owner: "Kiểm tra các phần khác
+        /// xem có phần nào không làm được thì dừng không, cần thay cơ chế này
+        /// bằng 1 cơ chế khác"): the next run clicks its own Xác Nhận again,
+        /// twice at most, at the place remembered only, never a key, never with
+        /// a two-button dialog up -- and so on, without limit. Until then that
+        /// message was the player's, and no charm was used while it was up.
         bool notice_left = false;
         ScreenRect notice_place;
         bool notice_carried = false;
+        /// That message clicked by this run -- its own Xác Nhận, once or twice
+        /// -- and still not seen closed (2026.11.24): GoBot's window renews the
+        /// two minutes it is GoBot's to close from this run, so it stays
+        /// GoBot's while GoBot keeps clicking it, about once a minute.
+        bool notice_clicked = false;
 
         /// The shop (Mode::ShopBuy): purchases seen through -- the question
         /// gone after Xác Nhận, and no message after it -- in all and of each
@@ -1726,6 +2162,17 @@ public:
         int  shop_unsure = 0;
         int  shop_unsure_hp = 0, shop_unsure_mp = 0;
         bool shop_opened = false;
+        /// The pet's food (2026.11.24): its purchases seen through and unsure,
+        /// counted in shop_bought and shop_unsure as well; and `pet_ended`
+        /// when the game said no during one of them -- the pet's bag full
+        /// ("Túi đồ [Linh Thú] đã đầy", a message GoBot has no picture of),
+        /// or another message in the quantity box's place or after Xác Nhận:
+        /// its message closed, the pet's buying over for this round, the rest
+        /// of the round going on. No trouble, and never shop_full nor
+        /// shop_message, which end the potions' plan.
+        int  shop_bought_pet = 0;
+        int  shop_unsure_pet = 0;
+        bool pet_ended = false;
         /// The game said the bag has no room: the round ends there, the
         /// message closed -- `full_stuck` when two clicks did not close it,
         /// and then no key is pressed for it, ESC least of all.
@@ -1736,6 +2183,11 @@ public:
         /// clicked, and the round ended as for a full bag -- most likely the
         /// same message drawn a little apart from the picture.
         bool shop_message = false;
+        /// Messages GoBot does not know that came up after a purchase's Xác
+        /// Nhận, or before the shop's ESC, and that GoBot closed by their own
+        /// Xác Nhận (shop_notice). One after a purchase counts that purchase
+        /// as bought (shop_unsure) and the round goes on; the second ends it.
+        int  shop_notices = 0;
         /// The check-in board was up: nothing pressed from then on -- at the
         /// start of a run, with no key pressed at all -- and the run is to be
         /// looked at again later (kBoardWaitMs). Not trouble.
@@ -1752,6 +2204,15 @@ public:
         /// the run's own, which stopped it (kKeysLateVi in `trouble`): no
         /// trouble of the round's own, put off as a stop is (2026.11.11).
         bool keys_late = false;
+        /// A step stuck kStuckMs (2026.11.14b): ESC pressed this many times,
+        /// each on a look that showed something up (esc_out); `esc_swept` when
+        /// any was, `trouble` then saying so.
+        bool esc_swept = false;
+        int  esc_presses = 0;
+        /// The run gave its hold back for the macro's HP potion, which it could
+        /// not let through (set_yield, 2026.11.21): a stop for HP, put off
+        /// kHpStoppedAgainMs, no trouble of the job's own.
+        bool yielded = false;
         std::string trouble;        ///< why it stopped early, in Vietnamese
 
         /// An item went towards the bin and was never seen given back or
@@ -1770,6 +2231,19 @@ public:
         bool keeps_hold(bool held_before) const { return stuck || (held_before && !ran); }
     };
     Result run();
+
+    /// The trash worker's sweep of a hold it keeps (2026.11.21, the audit's
+    /// B1; bag::kept_sweep_due): esc_out on its own, the step taken to be
+    /// kStuckMs old -- ESC on whatever a fresh look shows up: the check-in
+    /// board, the quantity box under it, the shop and the bag; in a Pass the
+    /// bin's question its Hủy Bỏ first, and -- nobody else may answer it under
+    /// this hold -- another's two-button dialog its ESC too (a trade, a
+    /// friend's request). Under the guard and the hold check, as esc_out ever
+    /// is: never with the character down or the hold another job's; and by
+    /// esc_out's night rule for the board alone. True when the screen is clear
+    /// after it; whoever kept the hold looks again for itself before letting
+    /// it go.
+    bool sweep_kept(Result& res, const char* where);
 
     /// What a probe of the bin saw: see probe.
     struct Probe {
@@ -1917,7 +2391,8 @@ private:
         ScreenRect  asked;
         std::chrono::steady_clock::time_point asked_at{};
         /// The game's message after it: seen and closed with its own Xác Nhận;
-        /// or seen and left up -- two clicks did not close it (`notice_stuck`),
+        /// or seen and left up -- two clicks did not close it (`notice_stuck`:
+        /// not clicked again by this run, handed to the next since 2026.11.24),
         /// the mouse could not be had there, or a stop came first.
         bool        notice_closed = false;
         bool        notice_left = false;
@@ -1992,10 +2467,15 @@ private:
     /// off `box` after it. Once more, a pixel aside and no sooner than
     /// kNoticeRetryMs after the first, when it is still up; no third time, and
     /// no key ever. `shot` gets the last look; `clicks` how many were made.
-    NoticeClose close_notice(const ScreenRect& band, const ScreenRect& box, Frame& shot, int& clicks);
+    /// `quick` (2026.11.24 review, set_own_notice's clicked_out): one click,
+    /// watched kNoticeCloseMs x 2.
+    NoticeClose close_notice(const ScreenRect& band, const ScreenRect& box, Frame& shot, int& clicks,
+                             bool quick = false);
     /// GoBot's own message on `f`: a lone Xác Nhận where the last Xác Nhận
     /// pressed on a charm question puts one, that Xác Nhận pressed less than
-    /// kOwnNoticeMs ago -- or handed over by set_own_notice. `at` gets its label.
+    /// kOwnNoticeMs ago -- or handed over by set_own_notice -- and not one this
+    /// run has clicked to no end already (`last_clicked_out_`, 2026.11.24: the
+    /// next run's to click). `at` gets its label.
     bool own_message(const Frame& f, ScreenRect* at = nullptr);
     /// own_message closed, said as `when` says: 1 when one was up and is
     /// closed, 0 when none is (one handed over and not up is gone), -1 when it
@@ -2003,9 +2483,11 @@ private:
     /// be pressed.
     int  close_own(const Frame& f, Result& res, const char* when);
     /// What a close_notice that did not close says, the picture kept and a
-    /// dialog answered Hủy Bỏ: `res.trouble`, and whether the message is the
-    /// player's from now on.
-    void notice_trouble(NoticeClose how, const Frame& shot, Result& res);
+    /// dialog answered Hủy Bỏ: `res.trouble`. `clicks`, how many it made: a
+    /// message still up after them is not clicked again by this run, and is
+    /// handed to the next (2026.11.24; until then it was the player's from
+    /// then on).
+    void notice_trouble(NoticeClose how, const Frame& shot, Result& res, int clicks);
     /// The end of a charm run, however the sweep ended but by a stop: the
     /// message of the last Xác Nhận not yet seen closed, watched for until
     /// kCharmNoticeMs and a little after that Xác Nhận, and closed.
@@ -2059,13 +2541,60 @@ private:
     /// page, tried again a pixel aside and waited for longer when it did not,
     /// up to four times. `v` is the page after. False when it never moved.
     bool scroll_arrow(bool down, BagView& v);
+    /// The use sweep's and the charm sweep's one click on the down arrow,
+    /// just made over `f` and `v`: true when a look shows the page moved --
+    /// within react_ms() while the scroll bar says it is not at the bottom
+    /// (2026.11.15d), else on one look 250 ms on as ever -- or when the last
+    /// look found no bag, which the sweep's next round says; false when it did
+    /// not move, or on a stop or the guards' no. `where` is for the log.
+    bool scroll_watch(const Frame& f, const BagView& v, const char* where);
     /// Click tab `tab` and look until it is the one chosen, the pointer moved
     /// off the strip after the click: the game lights what lies under it. A
     /// strip that reads no tab chosen is looked at again (kTabRelooks); one
     /// that reads another, clicked once more. False with `res.trouble`, and
     /// with `res.tab_unsure` when the strip was there and never read as `tab`.
-    /// `where` names the caller in the log and in the picture kept.
-    bool select_tab(int tab, BagView& v, Result& res, const char* where);
+    /// `where` names the caller in the log and in the picture kept. At most
+    /// `most_clicks` clicks: the shop's kShopTabClicks, two for the rest.
+    bool select_tab(int tab, BagView& v, Result& res, const char* where, int most_clicks = 2);
+    /// A shop round's bag before anything else (2026.11.14b, the owner: "trước
+    /// khi thực hiện xử lý mua HPMP cần check xem túi đồ có đang mở không, nếu
+    /// có thì thực hiện luôn, còn không thì mở túi đồ lên"): `f` and `v`, the
+    /// round's first look, are looked at again kBagSettleMs later. Seen on
+    /// both, the bag is open and nothing is pressed; not seen on both, its key
+    /// once -- never within kBagSettleMs of a look that saw it -- and then
+    /// looked for until it is seen, and once more kBagSettleMs later; looks
+    /// that differ are looked at again until two in a row agree. False, with
+    /// `res.trouble`, when the bag is not to be had: no second key.
+    bool shop_bag_ready(Frame& f, BagView& v, Result& res, bool& opened_here, int& open_ms, int& open_looks);
+    /// The stuck rule's 30 s (kStuckMs, react_ms(); 10 s before 2026.11.15d):
+    /// from the step's last input of GoBot's own -- at once when it is
+    /// older -- ESC on every fresh look that shows something up -- the
+    /// check-in board, a message, a dialog or the quantity question, the shop,
+    /// the bag -- until nothing is (kEscClearLooks looks), kEscMax at most. In
+    /// a pass the bin's question, when seen, gets its Hủy Bỏ first. Never in a
+    /// charm run, nor in a pass that only looks, nor after a stop, a key of
+    /// the macro's late, the hold lost or the guard's no (the character down),
+    /// nor on a look that shows nothing or none at all; once a run. True when
+    /// the screen is clear after it (with or without an ESC): `res` then says
+    /// what was pressed, and the question and the shop are no longer taken to
+    /// be up. Whoever called it looks again for what is still up whenever it
+    /// ran (esc_tried_), whatever it returned.
+    bool esc_out(Result& res, const char* where);
+    /// The step's last input, the stuck rule's 30 s are counted from: see
+    /// kStuckMs.
+    std::chrono::steady_clock::time_point step_from_{};
+    bool step_on_ = false;
+    bool esc_tried_ = false;
+    void step_begin() {
+        step_from_ = now();
+        step_on_ = true;
+    }
+    /// An input of the step's own after its start (2026.11.15d): the stuck
+    /// rule's kReactMs counted again from it -- only while a step is on.
+    void step_again() {
+        if (step_on_) step_from_ = now();
+    }
+    bool step_over() const { return step_on_ && now() - step_from_ >= std::chrono::milliseconds(react_ms_); }
     /// The strip not read as `tab` where a run stops on it: the tab read,
     /// where the strip is, how alike, and every tab's mean grey in the log;
     /// and the screen kept the first time at each `where` this GoBot start
@@ -2092,6 +2621,10 @@ private:
     /// The run's purchases type as scan codes, clicked into the box first: the
     /// way that put the number in the box once the plain way had not.
     bool shop_scan_ = false;
+    /// A notice that two clicks on its Xác Nhận did not close (shop_notice) is
+    /// the player's from then on in this run: not clicked a third time, as the
+    /// full-bag message is not (Result::full_stuck).
+    bool shop_notice_stuck_ = false;
     /// Whether `f` shows that question still where it was: its Xác Nhận where
     /// it was. Its Hủy Bỏ is not asked -- on the live client (2026-10-31) the
     /// box drew it pressed after keys it did not take, and the pair as a whole
@@ -2126,6 +2659,9 @@ private:
     /// Xác Nhận -- that one not counted -- the message closed (shop_full_close);
     /// kShopMessage for a message GoBot does not know (lone_message), closed;
     /// kShopUnsure when Xác Nhận was clicked and what came of it was not seen;
+    /// kShopNoticed when a message GoBot does not know came up after Xác Nhận
+    /// and was closed by its own Xác Nhận (2026.11.11c): counted as bought, as
+    /// an unsure one is, and the round goes on;
     /// kShopBoard with the check-in board up, nothing clicked from then on; or
     /// kShopStopped with `res.trouble`. Dry: stops at the question, which is
     /// answered Hủy Bỏ (kShopProbed).
@@ -2137,8 +2673,35 @@ private:
         kShopMessage = 4,
         kShopUnsure = 5,
         kShopBoard = 6,
+        kShopNoticed = 7,
+        /// The quantity question up kStuckMs and the number not read back
+        /// as 100, before Xác Nhận (2026.11.14b): nothing bought, no Hủy Bỏ
+        /// more -- the round ends with esc_out.
+        kShopStuck = 8,
     };
-    int  shop_purchase(bool hp, Result& res);
+    /// Notices closed after Xác Nhận that one shop round puts up with: the
+    /// second ends it (the purchase counted, the notice closed, `res.trouble`).
+    static constexpr int kShopNoticesMax = 2;
+    /// `what`: Thịt bò khô, Rượu lá tre -- by their cells in the potions' row
+    /// -- or the pet's Thịt bò (2026.11.24): on the Linh Thú tab, which
+    /// shop_tab has chosen, found by its name on the very look the double-click
+    /// goes by (bag::shop_item) -- the tab still drawn chosen -- in place of the
+    /// potions' row, looked at again kShopRowRelooks times and then given up
+    /// with its picture kept (pet_no_item, pet_item_place, pet_tab). The rest
+    /// is the potions' own: the money stretch, the quantity question, 100 typed
+    /// and read back, Xác Nhận, what came after it.
+    int  shop_purchase(bag::ShopPotion what, Result& res);
+    /// The shop's tab `tab` chosen (2026.11.24): on a fresh look with the shop
+    /// up and nothing over it -- no dialog, no message, no check-in board --
+    /// and its strip of tabs where its buttons put it (bag::shop_tabs), the
+    /// tab's middle clicked, the pointer moved off at once, and the tab watched
+    /// for react_ms() until two looks in a row draw it chosen -- for Linh Thú
+    /// with the potions' row gone from the list, for Dược Phẩm with it back. A
+    /// second click a pixel aside when the first brought nothing, no third.
+    /// Chosen already: nothing clicked. False with `res.trouble` and the
+    /// picture kept (pet_tab, shop_tab), or with `res.board_up`.
+    bool shop_tab(int tab, Result& res);
+    static constexpr int kShopTabClicksMost = 2;
     /// The shop on `f`: bag::find_shop, or -- with its first row hidden -- its
     /// buttons alone, where they were last seen (row_score 0): a shop still
     /// open, for closing it and for the run's end; never what a double-click
@@ -2177,6 +2740,15 @@ private:
     /// `where`: `res.shop_message`, and kShopMessage. A message that would not
     /// close is said too: nothing more is pressed for it.
     int  shop_message(const Frame& f, const ScreenRect& label, Result& res, const char* where);
+    /// A message GoBot does not know that came up after Xác Nhận, or that
+    /// stands before the shop's ESC (2026.11.11c, the owner: "cần sửa để bot
+    /// tự tắt thông báo này"): closed by its own Xác Nhận as a charm's message
+    /// is (close_notice), not left for the player. Asked of `f` through
+    /// lone_message first -- a second look a moment later, no dialog, not the
+    /// full-bag message, not a question drawn with Hủy Bỏ pressed -- so that
+    /// what is not surely a lone message is never clicked. 1 closed; 0 not a
+    /// lone message (nothing clicked); -1 would not close, `why` says so.
+    int  shop_notice(const Frame& f, const char* where, std::string& why);
     /// The check-in board on `f` (checkin_board_title): logged and said once a
     /// run, `res.board_up`. Nothing is clicked where it is.
     bool board_up(const Frame& f, Result& res);
@@ -2185,7 +2757,10 @@ private:
     /// otherwise. Never a click.
     void move_to(int x, int y);
     /// What set_shop_plan asked for.
-    int shop_plan_hp_ = 0, shop_plan_mp_ = 0;
+    int shop_plan_hp_ = 0, shop_plan_mp_ = 0, shop_plan_pet_ = 0;
+    /// The shop's tab as this run last chose or saw it (2026.11.24): Dược
+    /// Phẩm as a shop opens, Linh Thú once shop_tab has chosen it.
+    int shop_tab_ = bag::kShopTabPotions;
     /// The check-in board has been said this run.
     bool board_said_ = false;
 
@@ -2279,6 +2854,69 @@ private:
     void say(const std::string& line);
     bool wait_ms(int ms);           ///< false when cancelled
     void pause_ms(int ms);          ///< whether cancelled or not
+
+    // ---- waiting for the game to react (2026.11.15d, react_wait.hpp) ----
+
+    /// One gap of a wait for the game: `ms` waited through wait_ms -- a stop
+    /// ends it -- and then the job's guards asked (react_stop). False, and the
+    /// wait is over, on either.
+    bool react_gap(int ms);
+    /// A stop, a key of the macro's late, or the guards' no: the hold no
+    /// longer the job's (set_hold_check), or the guard's (set_guard) -- the
+    /// character down, HP under the job's level. A guard's no ends the wait
+    /// as nothing seen would, the step given up as it always was; the guard,
+    /// asked between steps as ever, stops the run at the next, and its
+    /// trouble says why (guard_stopped_). react_halted_: the last ask said so.
+    /// Inside a ReactAfter scope the no still ends the wait, and is not
+    /// counted as a stop (see ReactAfter).
+    bool react_stop();
+    bool react_halted_ = false;
+    /// The waits that come after the work, or give back what a stop or a
+    /// problem left (the review of 2026.11.15d): the bag shut at a run's end
+    /// (close_bag), the shop's ESC and Thoát (shop_close), the Hủy Bỏ watches
+    /// (back_out, cancel_all, shop_cancel). A guard's or the hold's no there
+    /// still shortens the wait -- after the no, as long as it ever was -- but
+    /// does not set guard_stopped_: nothing the run was doing is cut short by
+    /// it, and a pass that deleted everything and dipped under its HP level
+    /// while its bag shut is no pass "stopped mid-way" -- that would put the
+    /// pass on again a few seconds later and refuse the shop its ride. A run
+    /// still being worked through hears the guard between steps, as ever.
+    struct ReactAfter {
+        BagCleaner& c;
+        bool was;
+        explicit ReactAfter(BagCleaner& cleaner) : c(cleaner), was(cleaner.react_after_) { c.react_after_ = true; }
+        ~ReactAfter() { c.react_after_ = was; }
+        ReactAfter(const ReactAfter&) = delete;
+        ReactAfter& operator=(const ReactAfter&) = delete;
+    };
+    bool react_after_ = false;
+    /// What took the game `ms` to show, from the input: said in the log when
+    /// it is past kReactSlowMs ("the game took N ms to show <what>"), and a
+    /// run's deadline moved on by what it was past that. `what` in English.
+    /// `credited_ms`: how much of those `ms`, from the same input, an earlier
+    /// wait has already moved the deadline on by (the charm's question gone,
+    /// before its stack is read) -- only what is past it moves it again, so
+    /// that two waits measured from one Xác Nhận are not counted twice.
+    void react_took(int ms, const char* what, int credited_ms = 0);
+    /// Nothing shown react_ms() after the input: "nothing after 30 s" in the
+    /// log, the deadline moved on as react_took moves it, `credited_ms` the
+    /// same.
+    void react_none(const char* what, int credited_ms = 0);
+    /// Inside a wait for the game, on `f` just looked at: an HP or MP potion
+    /// due given its moment (potion_break) every kReactPotionMs of the wait
+    /// from `from` -- only through potion_break's own checks of the look --
+    /// and the key window shut again after it, so that what the game brings
+    /// up next takes no key.
+    void react_potion(const Frame& f, const BagView& v, const char* where,
+                      std::chrono::steady_clock::time_point from);
+    /// The " sau 30 giây" a give-up of such a wait is said with, and its "30
+    /// giây": react_ms() in whole seconds.
+    std::string react_said_vi() const;
+    std::string react_secs_vi() const;
+    int  react_ms_ = kReactMs;
+    bool guard_stopped_ = false;
+    std::chrono::steady_clock::time_point react_potion_at_{};
+    std::function<int()> day_clock_;
     // Through the clock when it is set, else the steady clock and a sleep.
     std::chrono::steady_clock::time_point now() const;
     void sleep(int ms);
@@ -2323,7 +2961,9 @@ private:
     bool keys_may_open(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up = nullptr, int lone = -1,
                        bool full_asked = false);
     /// keys_may_open's checks with no window asked for (2026.11.11b): what an
-    /// own potion press goes by as well.
+    /// own potion press goes by as well -- a charm run's too since 2026.11.12b,
+    /// with no window set, no dialog on the look, and a right-click that
+    /// brought nothing up not holding it (late_ask_ is the pass's alone here).
     bool keys_clear(const Frame& f, const BagView& v, const std::vector<bag::Dialog>* up, int lone, bool full_asked);
     /// An HP or MP potion the run presses itself (OwnPotions), on `f` when
     /// keys_clear says so of it; true when one went down.
@@ -2400,17 +3040,30 @@ private:
     std::function<bool(const std::string&)> charm_due_;
     std::function<bool()> guard_;
     std::function<bool()> hold_check_;     ///< set_hold_check
+    std::function<bool()> yield_;          ///< set_yield
+    /// Asked at the guard's safe points (set_yield): true, and `res` says the
+    /// run gave its hold back for the macro's HP potion.
+    bool yield_now(Result& res);
+    /// esc_out run by sweep_kept: in a Pass another's dialog gets its ESC too.
+    bool kept_sweep_ = false;
     std::function<void(const std::string&)> charm_claim_;
     std::function<PacketSays(const std::string&, int, int, std::string&)> charm_packets_;
     /// The last Xác Nhận pressed on a charm question: its pair and when --
     /// cleared by a charm_one that pressed none -- or the one handed over by
     /// set_own_notice (`last_carried_`); and whether its message has been seen
-    /// closed or gone, or given up on after two clicks.
+    /// closed or gone. Its message clicked by this run and still up
+    /// (`last_clicked_`), and clicked to no end -- two clicks, or one whose
+    /// label could not be told again -- so not clicked again by this run
+    /// (`last_clicked_out_`): handed to the next run all the same
+    /// (Result::notice_left, notice_clicked). 2026.11.24: until then such a
+    /// message was given up on (`last_gave_up_`), the player's from then on.
     ScreenRect           last_asked_;
     std::chrono::steady_clock::time_point last_asked_at_{};
     bool                 last_carried_ = false;
+    bool                 last_carried_out_ = false;   ///< handed over clicked to no end (set_own_notice)
     bool                 last_closed_ = false;
-    bool                 last_gave_up_ = false;
+    bool                 last_clicked_ = false;
+    bool                 last_clicked_out_ = false;
     /// The deadline of a run, on now()'s clock; unset when deadline_set_ is not.
     std::chrono::steady_clock::time_point deadline_;
     bool                 deadline_set_ = false;

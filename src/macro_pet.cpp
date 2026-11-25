@@ -208,10 +208,10 @@ std::string PetHealWatch::minute_line(std::uint64_t now) {
 bool MacroEngine::skill_ready(const MacroConfig& cfg, std::uint64_t now) const {
     // Paced, a skill waits for the game's cast and its lock, not for the keys.
     if (pace_mode_ == PaceStatus::Mode::Paced) return false;
-    // Walking back to the hunting area (2026.11.10): no skill goes, and the
-    // pet waits on none.
+    // Walking back to the hunting area (2026.11.10), or the hunter holding
+    // them (2026.11.12): no skill goes, and the pet waits on none.
     const Fight fight = fight_now();
-    if (fight.mode == Fight::Mode::Returning) return false;
+    if (fight.mode == Fight::Mode::Returning || fight.mode == Fight::Mode::Held) return false;
     const bool follow = following(cfg, fight);
     // run_skills' keys: its look due, a fight, the gate open.
     const bool fight_open =
@@ -223,6 +223,9 @@ bool MacroEngine::skill_ready(const MacroConfig& cfg, std::uint64_t now) const {
         // Nor one a hold refuses -- a bag job's key window lets only some keys
         // through, and only between its own clicks (2026.11.10).
         if (coord_.critical_active() && !coord_.lets_through(k.keycode)) continue;
+        // Nor one waiting for the fight -- the dash's key near an edge, one on
+        // its own timer further than its range (2026.11.12).
+        if (skill_waits(k, fight, !follow || k.always_timer) != SkillWait::None) continue;
         if (!follow || k.always_timer) {
             // The timers' own: skill_gap_ms after the last one came up.
             if (now < skill_free_ms_) continue;

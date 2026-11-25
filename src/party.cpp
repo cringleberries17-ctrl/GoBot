@@ -3,9 +3,7 @@
 #include "gobot/party_chat.hpp"
 #include "gobot/party_invite.hpp"
 
-#include <algorithm>
 #include <cctype>
-#include <sstream>
 
 namespace gobot {
 namespace {
@@ -15,12 +13,6 @@ std::string trim(const std::string& s) {
     if (first == std::string::npos) return {};
     const auto last = s.find_last_not_of(" \t\r\n");
     return s.substr(first, last - first + 1);
-}
-
-std::string lowered(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
 }
 
 /// A list written as one name per line, or separated by commas. Both because
@@ -124,16 +116,6 @@ bool Party::allowed_name(const std::string& listed, const std::string& read) {
     return one_letter_apart(have, want);
 }
 
-const char* Party::status_name(Status s) {
-    switch (s) {
-        case Status::Alone:   return "alone";
-        case Status::InParty: return "in a party";
-        case Status::Leader:  return "leading a party";
-        case Status::Unknown: break;
-    }
-    return "unknown";
-}
-
 // ------------------------------------------------------------------ settings
 
 bool Party::Settings::load(const std::string& path) {
@@ -218,90 +200,6 @@ bool Party::Settings::may_accept(const std::string& who) const {
     if (!accept_all) return allows(accept_only, who);
 
     return true;
-}
-
-// -------------------------------------------------------------------- state
-
-Party::State Party::parse(const std::string& reply) {
-    State out;
-    if (reply.empty()) {
-        out.trouble = "the bridge said nothing";
-        return out;
-    }
-
-    std::map<std::string, std::string> fields;
-    std::istringstream lines(reply);
-    std::string line;
-    while (std::getline(lines, line)) {
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        fields[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
-    }
-
-    if (const auto it = fields.find("error"); it != fields.end()) {
-        out.trouble = it->second;
-        return out;
-    }
-    if (fields.find("status") == fields.end()) {
-        out.trouble = "the bridge did not report a status";
-        return out;
-    }
-
-    const auto flag = [&](const char* key) {
-        const auto it = fields.find(key);
-        return it != fields.end() && it->second == "1";
-    };
-
-    const std::string status = lowered(fields["status"]);
-    if      (status == "alone")                       out.status = Status::Alone;
-    else if (status.find("leader") != std::string::npos ||
-             status.find("key") != std::string::npos)  out.status = Status::Leader;
-    else if (!status.empty())                          out.status = Status::InParty;
-
-    out.in_party        = flag("is_player_have_party");
-    out.is_leader       = flag("is_player_key_party");
-    out.can_accept      = flag("can_auto_accept");
-    out.can_invite      = flag("can_auto_invite");
-    out.can_transfer_key= flag("can_transfer_party_key");
-
-    // Leading implies being in one, whatever the status word happened to say.
-    if (out.is_leader) out.status = Status::Leader;
-    else if (out.in_party && out.status == Status::Alone) out.status = Status::InParty;
-
-    if (const auto it = fields.find("client_width"); it != fields.end())
-        out.client_width = std::atoi(it->second.c_str());
-
-    // The click points, as zero-sized rectangles at a position.
-    for (const auto& [key, value] : fields) {
-        const auto comma = value.find(',');
-        if (comma == std::string::npos) continue;
-        if (key.rfind("exp_", 0) != 0 && key.rfind("loot_", 0) != 0) continue;
-        out.points[key] = State::Point{
-            std::atoi(value.substr(0, comma).c_str()),
-            std::atoi(value.substr(comma + 1).c_str()) };
-    }
-
-    out.read = true;
-    return out;
-}
-
-Party::State Party::look(ClrBridge& bridge, void* hwnd) const {
-    State out;
-    if (!hwnd) {
-        out.trouble = "no game window";
-        return out;
-    }
-
-    std::string trouble;
-    std::string reply;
-    const std::string handle =
-        std::to_string(reinterpret_cast<std::uintptr_t>(hwnd));
-
-    if (!bridge.call("PartyState", handle, reply, &trouble)) {
-        out.trouble = trouble.empty() ? "the bridge could not be called" : trouble;
-        return out;
-    }
-    return parse(reply);
 }
 
 } // namespace gobot

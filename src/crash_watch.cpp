@@ -346,6 +346,68 @@ CrashWatch::Move CrashWatch::next_move(const Look& seen, bool seen_running, bool
     return Move::Restart;
 }
 
+// ------------------------------------------------- max_restarts' hour (2026.11.24)
+
+namespace {
+
+/// Whether a restart made at `t` still counts at `now`: less than `window_ms`
+/// before it. One stamped later than `now` -- which a steady clock never
+/// does -- counts, rather than wrap round to a time long past.
+bool within(std::uint64_t t, std::uint64_t now, std::uint64_t window_ms) {
+    return t >= now || now - t < window_ms;
+}
+
+} // namespace
+
+bool CrashWatch::restart_allowed(const std::vector<std::uint64_t>& times, std::uint64_t now, int max,
+                                 std::uint64_t window_ms, std::uint64_t* next_at) {
+    // None at all: asked again an hour on, and refused again -- the player's
+    // own number, never a give-up of GoBot's.
+    if (max <= 0) {
+        if (next_at) *next_at = now + window_ms;
+        return false;
+    }
+    std::vector<std::uint64_t> hour;
+    for (const std::uint64_t t : times)
+        if (within(t, now, window_ms)) hour.push_back(t);
+    if (static_cast<int>(hour.size()) < max) return true;
+    // One more once only max - 1 are left in the hour: when the newest of
+    // those that have to age out does -- the oldest, with exactly max.
+    std::sort(hour.begin(), hour.end());
+    const std::uint64_t last_out = hour[hour.size() - static_cast<std::size_t>(max)];
+    if (next_at) *next_at = last_out + window_ms;
+    return false;
+}
+
+bool CrashWatch::restart_spaced(const std::vector<std::uint64_t>& times, std::uint64_t now, int max,
+                                std::uint64_t window_ms, std::uint64_t min_gap_ms, std::uint64_t* next_at) {
+    std::uint64_t hour_next = 0;
+    if (restart_allowed(times, now, max, window_ms, &hour_next)) return true;
+    // max 0 or less: the player's "none", as restart_allowed has it.
+    if (max <= 0) {
+        if (next_at) *next_at = hour_next;
+        return false;
+    }
+    // The hour's used up: one more every window / max after the newest --
+    // 12 min with 5 an hour -- never sooner than min_gap_ms (the 2026.11.24
+    // review: no hour's sleep with the game closed in place of a stop).
+    std::uint64_t newest = 0;
+    for (const std::uint64_t t : times)
+        if (t <= now) newest = std::max(newest, t);
+    const std::uint64_t gap = std::max<std::uint64_t>(min_gap_ms, window_ms / static_cast<std::uint64_t>(max));
+    if (now >= newest + gap) return true;
+    if (next_at) *next_at = std::min(hour_next, newest + gap);
+    return false;
+}
+
+int CrashWatch::restarts_within(const std::vector<std::uint64_t>& times, std::uint64_t now,
+                                std::uint64_t window_ms) {
+    int n = 0;
+    for (const std::uint64_t t : times)
+        if (within(t, now, window_ms)) ++n;
+    return n;
+}
+
 // ------------------------------------------------------------- shutting down
 
 bool CrashWatch::shut_down(const Look& seen) {

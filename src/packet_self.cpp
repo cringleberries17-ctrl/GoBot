@@ -274,8 +274,26 @@ void PacketSelf::take(const GamePacket& p, std::vector<First>& firsts) {
         break;
     case 0x02F0:
         if (const auto mp = read_udp_mp(p, &fit)) {
-            vitals_.udp_mp = *mp;
-            vitals_.udp_mp_ms = t;
+            Vitals& s = vitals_;
+            s.udp_mp = *mp;
+            s.udp_mp_ms = t;
+            // Your MP as of now too (2026.11.17): it comes in a fight, a
+            // moment before 0x0051 says the same -- 11767 0.9 s before it on
+            // 2026-11-17, and 16811 where the HUD showed 16811 and 0x0051
+            // still 16813. The newer of the two goes, as each comes; HP is
+            // left as 0x0051 last said it.
+            if (s.hp_ms != 0) {
+                s.mp = *mp;
+                s.mp_ms = t;
+                s.mp_epoch = epoch_;
+                if (*mp > s.max_mp) {
+                    s.max_mp = *mp;
+                    s.max_ms = t;
+                    if (s.max_from == MaxFrom::None) s.max_from = MaxFrom::Seen;
+                }
+                s.points = ++points_taken_;
+                history_[history_n_++ % kHistory] = VitalsPoint{ t, s.hp, *mp, s.points };
+            }
         }
         break;
     case 0x0068:

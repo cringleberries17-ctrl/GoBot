@@ -1,10 +1,8 @@
 // gobot_test -- "Thử" beside the jump key (gobot/jump_check.hpp): the key
 // pressed exactly once, and what the character's plate did after; and what
-// else the key is already used for. And the walker's jump key, hunt.ini's
-// [Move] one: shipped as Up, and said when it would attack. And "Thử ↑", "Thử
-// ↑↑", "Thử Ctrl + ↑" (2026.11.05b): one jump of the kind, judged by your
-// take-offs by kind, its flight and the gravity it shows -- never under a
-// floor the map shows above.
+// else the key is already used for. And "Thử ↑", "Thử ↑↑", "Thử Ctrl + ↑"
+// (2026.11.05b): one jump of the kind, judged by your take-offs by kind, its
+// flight and the gravity it shows -- never under a floor the map shows above.
 //
 // Nothing here goes near the game: the plate is scripted, the keyboard is
 // pretend and writes down every press, and the clock is the test's own.
@@ -16,7 +14,6 @@
 #include "gobot/jump_check.hpp"
 #include "gobot/logger.hpp"
 #include "gobot/mob_detector.hpp"
-#include "gobot/navigator.hpp"
 #include "test_support.hpp"
 
 #include <windows.h>
@@ -281,7 +278,15 @@ void test_never_down() {
     const std::string im = read("/src/input_manager.cpp");
     const std::size_t send = im.find("bool InputManager::send_key(");
     const std::size_t typed = im.find("bool InputManager::type_key(");
-    const std::size_t send_guard = im.find("if (down && never_pressed(vk))", send);
+    const std::size_t send_guard = im.find("if (down && never_pressed(vk) && !t_gate_down)", send);
+    // The one way past it (2026.11.19): gate_down, for Đào khoáng's gates and
+    // Cổ Thụ's boss door -- set in one place, and only around its one press.
+    const std::size_t gate = im.find("bool InputManager::gate_down(");
+    const std::size_t set_on = im.find("t_gate_down = true;");
+    check(gate != std::string::npos && set_on > gate && set_on < send &&
+              im.find("t_gate_down = true;", set_on + 1) == std::string::npos &&
+              im.find("key_press(0x28", gate) < im.find("t_gate_down = false;", gate),
+          "↓ goes past the rule only from gate_down, set around its one press and unset after it");
     const std::size_t send_real = im.find("refuse_real_input(down ?", send);
     const std::size_t typed_guard = im.find("if (never_pressed(vk))", typed);
     const std::size_t typed_real = im.find("refuse_real_input(\"type a key\")", typed);
@@ -322,22 +327,25 @@ void test_sightings() {
           "found: said once; a 1.2-s dropout: nothing; gone past 1.5 s: said once; found again: said once");
 
     // The grace counted in looks: as many as 1.5 s is at 140 ms, at the wait
-    // in use -- a resting detector's 600 ms waits 6 s, never under 1.5 s.
+    // in use -- a resting detector's 2000 ms waits 20 s, never under 1.5 s.
     check(MobDetector::sightings_grace_ms(140) == 1500 && MobDetector::sightings_grace_ms(600) == 6000 &&
+              MobDetector::sightings_grace_ms(2000) == 20000 &&
               MobDetector::sightings_grace_ms(50) == 1500 && MobDetector::sightings_grace_ms(0) == 1500,
-          "the grace: 1500 ms at 140 ms and at 50, 6000 at the resting 600; a wait of 0 counts as 140");
-    // A resting detector's plate missed at every look, one every 620 ms: no
-    // "Cannot find" through 9 looks (5.58 s), said at the 10th (6.2 s).
+          "the grace: 1500 ms at 140 ms and at 50, 6000 at 600, 20000 at the resting 2000; a wait of 0 counts as "
+          "140");
+    // A resting detector's plate missed at every look, one every 2020 ms: no
+    // "Cannot find" through 9 looks (18.18 s), said at the 10th (20.2 s).
     {
         MobDetector::PlayerSightings r;
-        const std::uint64_t g600 = MobDetector::sightings_grace_ms(600);
-        const int first = r.note(true, t, g600);
-        int quiet600 = 0;
-        for (std::uint64_t k = 0; k <= 9; ++k) quiet600 += r.note(false, t + 100 + 620 * k, g600) == 0 ? 0 : 1;
-        const int lost600 = r.note(false, t + 100 + 6200, g600);
-        check(first == 1 && quiet600 == 0 && lost600 == -1,
-              "resting at 600 ms, the plate missed every 620 ms: nothing through 5.58 s, \"Cannot find\" at the "
-              "first look past 6 s");
+        const std::uint64_t g2000 = MobDetector::sightings_grace_ms(2000);
+        const int first = r.note(true, t, g2000);
+        int quiet2000 = 0;
+        for (std::uint64_t k = 0; k <= 9; ++k)
+            quiet2000 += r.note(false, t + 100 + 2020 * k, g2000) == 0 ? 0 : 1;
+        const int lost2000 = r.note(false, t + 100 + 20200, g2000);
+        check(first == 1 && quiet2000 == 0 && lost2000 == -1,
+              "resting at 2000 ms, the plate missed every 2020 ms: nothing through 18.18 s, \"Cannot find\" at the "
+              "first look past 20 s");
     }
 #ifdef GOBOT_SOURCE_DIR
     {
@@ -453,57 +461,6 @@ void test_unfound_while_packets_steer() {
               lines[1].level == LogLevel::Warn &&
               lines[1].text.find("-- check it against the name the game writes under your feet") != std::string::npos,
           "while the packets steer, at Info and saying so; with them not steering, the warning as before");
-}
-
-/// A file of the test's own, in the temp folder, holding `text`.
-std::string temp_ini(const char* name, const std::string& text) {
-    char dir[MAX_PATH]{};
-    const DWORD n = GetTempPathA(MAX_PATH, dir);
-    const std::string path = (n == 0 || n > MAX_PATH ? std::string() : std::string(dir)) + "gobot_test_" +
-                             std::to_string(GetCurrentProcessId()) + "_" + name;
-    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
-    return path;
-}
-
-void test_walk_key() {
-    section("Phím nhảy khi đi tới điểm đã lưu: hunt.ini [Move] ships Up, and a key that attacks is said");
-    const auto npos = std::string::npos;
-    check(JumpCheck::walk_key_warning_vi(VK_UP, 'Z').empty() && JumpCheck::walk_key_warning_vi(0, 'Z').empty(),
-          "Up, or no key at all: nothing to say");
-    const std::string space = JumpCheck::walk_key_warning_vi(VK_SPACE, 'Z');
-    check(space.find("Space") != npos && space.find("Tấn công") != npos && space.find("jump_key=38") != npos,
-          "Space, the attack key on Z: said, Space being the game's attack -- " + space);
-    const std::string same = JumpCheck::walk_key_warning_vi('Z', 'Z');
-    const std::string both = JumpCheck::walk_key_warning_vi(VK_SPACE, VK_SPACE);
-    check(same.find("trùng phím đánh") != npos && both.find("trùng phím đánh") != npos,
-          "the attack key itself, Z or Space: said as the same key as the attack -- " + same);
-#ifdef GOBOT_SOURCE_DIR
-    NavigatorConfig shipped;
-    check(shipped.load(std::string(GOBOT_SOURCE_DIR) + "/configs/hunt.ini") && shipped.jump_key == VK_UP &&
-              JumpCheck::walk_key_warning_vi(shipped.jump_key, 'Z').empty(),
-          "the shipped hunt.ini: [Move] jump_key=38, Up, the game's jump -- nothing to say");
-#else
-    skip("no source folder\n");
-#endif
-    // A player's own file from before: Space, kept as it is, and said.
-    const std::string old = temp_ini("walk_old.ini", "[Move]\nleft_key=37\nright_key=39\njump_key=32\n");
-    NavigatorConfig before;
-    check(before.load(old) && before.jump_key == VK_SPACE &&
-              !JumpCheck::walk_key_warning_vi(before.jump_key, 'Z').empty(),
-          "a file of the player's with jump_key=32: read as Space, as it says, and the warning shown");
-    // A file without the key, or no file at all: Up, as the shipped file has
-    // it -- never Space, this game's attack -- and nothing to say.
-    const std::string bare = temp_ini("walk_bare.ini", "[Move]\nleft_key=37\n");
-    NavigatorConfig none;
-    check(none.load(bare) && none.jump_key == VK_UP && JumpCheck::walk_key_warning_vi(none.jump_key, 'Z').empty(),
-          "a file without the key: Up, as the shipped file says, and no warning");
-    const std::string no_move = temp_ini("walk_no_move.ini", "[Hunt]\nattack_key=90\n");
-    NavigatorConfig unset, other_section;
-    check(unset.jump_key == VK_UP && other_section.load(no_move) && other_section.jump_key == VK_UP,
-          "no [Move] section, and the walker's own default: Up");
-    DeleteFileA(no_move.c_str());
-    DeleteFileA(old.c_str());
-    DeleteFileA(bare.c_str());
 }
 
 /// Thử by the packets (the packets plan, item M): your client sends an 0x002A
@@ -930,7 +887,6 @@ void test_jump(void (*check_fn)(bool, const std::string&), void (*section_fn)(co
     test_never_down();
     test_sightings();
     test_unfound_while_packets_steer();
-    test_walk_key();
     test_jump_by_packets();
     test_flight_of();
     test_jump_kinds();

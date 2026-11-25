@@ -161,7 +161,22 @@ struct World {
     int           facing = 0;
     std::uint64_t facing_ms = 0;
     bool          turn_reports = false;
+    /// How long after its key goes down a direction key's report is stamped,
+    /// with `turn_reports` (2026.11.12: a turn timed from its tap); and
+    /// whether a key put down and left down -- a held walk -- is reported too.
+    std::uint64_t turn_report_late_ms = 0;
+    bool          holds_report = true;
+    /// When your last cast came (WorldFix::cast_ms), set by the test: 0 for
+    /// none -- a turn's tap is sent again only once they stop.
+    std::uint64_t cast_ms = 0;
+    /// The last report came at y 0 and the packets kept the height before it
+    /// (WorldFix::y_kept, 2026.11.12 review).
+    bool          y_kept = false;
     int           wheres = 0;           ///< how often the hunter asked
+    /// Called as the hunter pauses, before the clock moves on: what the other
+    /// threads see then (2026.11.12 review: the turn's hold in the pause
+    /// after its tap).
+    std::function<void(std::uint32_t)> on_sleep;
     /// A report of where the character is: what the client sends as a walk
     /// starts or stops.
     void report() {
@@ -227,6 +242,8 @@ struct HuntRig {
                 f.entry_y = w.entry_y;
                 f.report_op = w.report_op;
                 f.air_reports = w.air_reports;
+                f.cast_ms = w.cast_ms;
+                f.y_kept = w.y_kept;
                 return true;
             };
         }
@@ -268,7 +285,7 @@ struct HuntRig {
             }
             if (w.turn_reports && (vk == VK_LEFT || vk == VK_RIGHT)) {
                 w.facing = vk == VK_LEFT ? -1 : 1;
-                w.facing_ms = w.t;
+                w.facing_ms = w.t + w.turn_report_late_ms;
             }
             return true;
         };
@@ -278,7 +295,7 @@ struct HuntRig {
             w.presses.push_back(World::Press{ w.t, vk, World::kHeld });
             w.held.insert(vk);
             if (vk == VK_LEFT || vk == VK_RIGHT) w.report();
-            if (w.turn_reports && (vk == VK_LEFT || vk == VK_RIGHT)) {
+            if (w.turn_reports && w.holds_report && (vk == VK_LEFT || vk == VK_RIGHT)) {
                 w.facing = vk == VK_LEFT ? -1 : 1;
                 w.facing_ms = w.t;
             }
@@ -299,7 +316,10 @@ struct HuntRig {
 
         Hunter::Clock clock;
         clock.now_ms = [this] { return w.t; };
-        clock.sleep_ms = [this](std::uint32_t ms) { w.t += ms; };
+        clock.sleep_ms = [this](std::uint32_t ms) {
+            if (w.on_sleep) w.on_sleep(ms);
+            w.t += ms;
+        };
         hunter.set_clock(clock);
 
         hunter.set_config(cfg);
@@ -422,6 +442,20 @@ void test_hunter_seam() {
         check(r.w.ups_of(VK_RIGHT) == 1 && r.w.ups_of('1') == 0 && r.w.held.count('1') == 1 &&
                   r.w.releases == 0,
               "a key that is not a direction -- a potion being pressed -- is never let go of");
+        // 2026.11.21 (the audit's B13): under a hold, an arrow the holder is
+        // pressing -- the expedition's 250 ms step onto the boss room's
+        // floor -- is the holder's, not let go of at the hunter's next pass.
+        const std::size_t rights = r.w.ups_of(VK_RIGHT);
+        r.coord.engage_critical("expedition");
+        r.w.held.insert(VK_RIGHT);
+        r.pass();
+        r.pass();
+        const bool kept = r.w.ups_of(VK_RIGHT) == rights && r.w.held.count(VK_RIGHT) == 1;
+        r.coord.disengage_critical();
+        r.pass();
+        check(kept && r.w.ups_of(VK_RIGHT) == rights + 1 && r.w.held.count(VK_RIGHT) == 0,
+              "under another's hold an arrow it holds is left down for it (two passes); left down after the hold, "
+              "let go of at the first pass, as before");
     }
     {
         // Not in front: nothing pressed, everything held let go, and it says why.
@@ -1113,6 +1147,14 @@ int lines_with(const std::vector<std::string>& all, const char* a, const char* b
     return n;
 }
 
+/// The first of `all` with `a` in it, "" with none: what a check that failed
+/// says it saw.
+std::string line_with(const std::vector<std::string>& all, const char* a) {
+    for (const std::string& l : all)
+        if (l.find(a) != std::string::npos) return l;
+    return {};
+}
+
 /// Whether two pretend games had the same keys pressed at the same moments,
 /// held as long, and the same let go of.
 bool same_keys(const World& a, const World& b) {
@@ -1244,7 +1286,8 @@ void test_spot_taken() {
 }
 
 void test_spot_area() {
-    section("Chỗ đánh quái: only monsters inside the area are walked to; one within reach is fought anywhere");
+    section("Chỗ đánh quái: only monsters inside the area are walked to or fought -- one within reach outside it "
+            "never (2026.11.12)");
 
     {
         HuntRig r(spotted(), false, true);
@@ -1273,14 +1316,36 @@ void test_spot_area() {
               "and never a key toward it");
     }
     {
+        // 2026.11.12, the owner's Q3 "Chỉ đánh quái trong vùng": in reach or
+        // not, one outside the area is never faced, attacked or walked to --
+        // until then this one was attacked where it stood.
         HuntRig r(spotted(), false, true);
         r.pass();
         r.w.me_x = 900;
         r.w.mobs = { plate(1010, 400, "Gan") };     // 70 px outside the area, 110 px off
         r.run(1000);
-        check(!r.w.of('Z').empty() && walks_of(r.w, VK_RIGHT) == 0 && walks_of(r.w, VK_LEFT) == 0 &&
-                  r.hunter.status().state == Hunter::State::Attacking,
-              "one 70 px outside the area but within reach: attacked where it stands, no walk");
+        check(r.w.of('Z').empty() && r.w.of(VK_RIGHT).empty() &&
+                  r.hunter.status().state != Hunter::State::Attacking && r.hunter.status().outside_area,
+              "one 70 px outside the area but within reach: never attacked, nothing toward it -- outside the area");
+    }
+    {
+        // t62_s5 at 21:49:58: "cut by a fight with slot 45 outside the box,
+        // 232 px right" -- a ranged reach of 450, the character 40 px inside
+        // the right edge, the monster 232 px past it: never picked, never
+        // turned to, never attacked.
+        HunterConfig c = spotted();
+        c.reach = 450;
+        HuntRig r(c, false, true);
+        r.pass();
+        r.w.me_x = 900;
+        r.w.mobs = { plate(1172, 400, "Xa") };
+        bool picked = false;
+        r.run(3000, [&] {
+            if (!r.target().empty()) picked = true;
+        });
+        check(!picked && r.w.of('Z').empty() && r.w.of(VK_RIGHT).empty() && r.hunter.status().outside_area &&
+                  !r.hunter.engaged(),
+              "a monster 232 px right of the area's edge, in reach (450): never picked, turned to or attacked");
     }
     {
         HuntRig r(spotted(), false, true);
@@ -1395,8 +1460,8 @@ void test_spot_walk_back() {
         HuntRig r(cfg, false, true);
         r.w.step_px = 20;
         r.pass();
-        r.w.me_x = 900;
-        r.w.mobs = { plate(960, 400, "Moc") };
+        r.w.me_x = 880;
+        r.w.mobs = { plate(930, 400, "Moc") };     // inside the area (2026.11.12: only those are fought)
         r.run(600);
         const std::uint64_t killed = r.w.t;
         r.w.mobs.clear();
@@ -1477,7 +1542,9 @@ void test_spot_back_walk() {
               lines_with(log, "Hunter: walking back to the hunting spot: 460 px left, 0 px down -- first, along the "
                               "ground, no hop") == 1,
           "said, once each");
-    // Too high: never latched, as TooHigh never walks.
+    // Too high: never latched, as TooHigh never walks -- and stranded
+    // (2026.11.12, the owner's Q4): standing, the monster in reach outside the
+    // area never fought (Q3).
     {
         HuntRig r(cfg, false, true);
         r.pass();
@@ -1485,8 +1552,11 @@ void test_spot_back_walk() {
         r.w.me_y = 600;                         // the spot 200 px above
         r.w.mobs = { plate(1150, 600, "Gan") };
         r.run(1000);
-        check(!r.hunter.status().spot_back_walk && !r.w.of('Z').empty() && walks_of(r.w, VK_LEFT) == 0,
-              "the spot more than one jump above: no walk back first -- the monster in reach fought");
+        check(!r.hunter.status().spot_back_walk && r.w.of('Z').empty() && walks_of(r.w, VK_LEFT) == 0 &&
+                  walks_of(r.w, VK_RIGHT) == 0 && r.hunter.status().spot_stranded &&
+                  r.hunter.skill_hold() == Hunter::SkillHold::Outside,
+              "the spot more than one jump above: no walk back first -- stranded, standing; the monster in reach "
+              "outside the area never fought, skills held");
     }
 }
 
@@ -1569,8 +1639,91 @@ void test_spot_plausible() {
           "said with the report's opcode");
 }
 
+void test_spot_give_up_wait() {
+    section("Chỗ đánh quái 2026.11.24 (the owner: \"cần thay cơ chế này bằng 1 cơ chế khác\"): walks back given up "
+            "on 3 times wait spot_retry_ms, then a new round of 3 tries, round after round -- at once when a report "
+            "has you somewhere else");
+    // The wall of test_spot_give_up: three give-ups by 72 s, a round; the next
+    // round 30 s on (spot_retry_ms) -- until 2026.11.24 one try after 4 x 30 s.
+    {
+        HuntRig r(spotted(), false, true);
+        r.pass();
+        r.w.me_x = 1100;
+        r.pass();
+        r.w.reports = false;
+        std::vector<std::uint64_t> tries, gave;
+        if (r.hunter.status().returns == 1) tries.push_back(r.w.t - 60);
+        bool held_in_wait = true;
+        const std::vector<std::string> log = info_lines([&] {
+            r.run(206'000, [&] {
+                const Hunter::Status st = r.hunter.status();
+                if (st.returns > tries.size()) tries.push_back(r.w.t - 60);
+                if (st.return_give_ups > gave.size()) gave.push_back(r.w.t - 60);
+                // Between the third give-up and the fourth try: standing,
+                // stranded, the skills held, nothing pressed.
+                if (gave.size() == 3 && tries.size() == 3 && r.w.t > gave[2] + 1000)
+                    held_in_wait = held_in_wait && st.spot_stranded && r.w.held.empty() &&
+                                   r.hunter.skill_hold() == Hunter::SkillHold::Outside;
+            });
+        });
+        const std::uint64_t wait = spotted().spot_retry_ms;
+        // Two rounds of three and the third round's first try by 206 s: each
+        // try spot_retry_ms after the give-up before it, within a round and
+        // between rounds alike, each given up on 4 s in.
+        bool spaced = tries.size() == 7 && gave.size() == 6;
+        for (std::size_t i = 1; spaced && i < 7; ++i)
+            spaced = tries[i] >= gave[i - 1] + wait && tries[i] <= gave[i - 1] + wait + 400;
+        for (std::size_t i = 0; spaced && i < 6; ++i)
+            spaced = gave[i] >= tries[i] + 4000 && gave[i] <= tries[i] + 4100;
+        check(spaced && held_in_wait,
+              "the fourth walk back " + std::to_string(tries.size() > 3 && gave.size() > 2 ? tries[3] - gave[2] : 0) +
+                  " ms after the third give-up (the wait " + std::to_string(wait) +
+                  ", spot_retry_ms), then two more tries of that round, and the next round's first 30 s after its "
+                  "third -- each given up on 4 s in, standing stranded, skills held, meanwhile (" +
+                  std::to_string(tries.size()) + " tries, " + std::to_string(gave.size()) + " give-ups)");
+        check(lines_with(log, "Hunter: walks back given up on 3 times in a row -- the next round of tries in 30 s, or "
+                              "sooner once you are somewhere else") == 2 &&
+                  lines_with(log, "Hunter: trying the walk back again -- the wait is over", "a new round of 3 tries") ==
+                      2 &&
+                  lines_with(log, "long wait") == 0 && lines_with(log, "once more") == 0,
+              "said: \"" + line_with(log, "walks back given up on 3 times") + "\" -- twice, a round each; \"" +
+                  line_with(log, "trying the walk back again") + "\" -- twice");
+        // Back in the area by a push: nothing held any more.
+        r.w.reports = true;
+        r.w.me_x = 640;
+        r.run(300);
+        check(r.hunter.skill_hold() != Hunter::SkillHold::Outside && !r.hunter.status().spot_stranded &&
+                  r.hunter.status().spot_why == Hunter::SpotWhy::None,
+              "pushed back into the area: given up on no longer, not stranded, the skills not held as outside");
+    }
+    // Somewhere else -- pushed 80 px further out, a report of it: tried at
+    // once, the wait not waited.
+    {
+        HuntRig r(spotted(), false, true);
+        r.pass();
+        r.w.me_x = 1100;
+        r.pass();
+        r.w.reports = false;
+        r.run(80'000);
+        const bool gave_up = r.hunter.status().spot_why == Hunter::SpotWhy::GaveUp && r.hunter.status().returns == 3;
+        std::uint64_t pushed = 0;
+        const std::vector<std::string> log = info_lines([&] {
+            r.w.me_x = 1180;
+            r.w.report();
+            pushed = r.w.t;
+            r.run(600);
+        });
+        check(gave_up && r.hunter.status().returns == 4 &&
+                  lines_with(log, "Hunter: trying the walk back again -- you are somewhere else") == 1,
+              "given up on, then pushed 80 px with a report of it: the walk back tried again at once (" +
+                  line_with(log, "trying the walk back again") + ")");
+        (void)pushed;
+    }
+}
+
 void test_spot_give_up() {
-    section("Chỗ đánh quái: a walk back the reports say gets nowhere is given up on, tried again, and stopped");
+    section("Chỗ đánh quái: a walk back the reports say gets nowhere is given up on, tried again, and after a round "
+            "of three waits spot_retry_ms for the next (2026.11.24; stopped until then)");
 
     {
         // A wall between: the character does not move (step_px 0), and the
@@ -1587,8 +1740,10 @@ void test_spot_give_up() {
         // (2026.11.10), not 1.5 s on.
         if (r.hunter.status().returns == 1) tries.push_back(r.w.t - 60);
         bool worked_out_home = false;
+        // To 95 s: the third given up on at about 72 s, the next round not
+        // before 102 s (spot_retry_ms after it).
         const std::vector<std::string> log = info_lines([&] {
-            r.run(125'000, [&] {
+            r.run(95'000, [&] {
                 const Hunter::Status st = r.hunter.status();
                 if (st.returns > tries.size()) tries.push_back(r.w.t - 60);
                 if (st.return_give_ups > gave.size()) gave.push_back(r.w.t - 60);
@@ -1596,9 +1751,10 @@ void test_spot_give_up() {
             });
         });
         check(lines_with(log, "the walk back to the hunting spot got nowhere in 4 s", "trying again in 30 s") == 2 &&
-                  lines_with(log, "got nowhere in 4 s, 3 times in a row -- no more tries") == 1 &&
+                  lines_with(log, "got nowhere in 4 s, 3 times in a row -- this round of tries over, the next after "
+                                  "30 s") == 1 &&
                   lines_with(log, "walks back to the spot", "of them given up") >= 1,
-              "the log says each give-up, the last as the last, and the minute's line counts the walks back");
+              "the log says each give-up, the round's last as the last, and the minute's line counts the walks back");
         const auto apart = [](std::uint64_t a, std::uint64_t b, std::uint64_t lo, std::uint64_t hi) {
             return b >= a + lo && b <= a + hi;
         };
@@ -1611,7 +1767,8 @@ void test_spot_give_up() {
               "each given up on 4 s in, by the reports, and tried again 30 s after");
         const Hunter::Status st = r.hunter.status();
         check(r.w.held.empty() && st.spot_why == Hunter::SpotWhy::GaveUp && st.returns == 3 && st.return_give_ups == 3,
-              "after the third, no more tries: GaveUp, nothing held, for the 40 s since");
+              "after the third, no try for spot_retry_ms: GaveUp, nothing held, for the 20 s since (the next round: "
+              "test_spot_give_up_wait)");
         // A new start counts this run's walks back, and give-ups, from none.
         {
             HuntRig again(spotted(), false, true);
@@ -2250,15 +2407,19 @@ void test_spot_switched() {
 void test_spot_why_in_fight() {
     section("Chỗ đánh quái: walks back given up on, or a spot too high, still said through a fight");
 
+    // The monster fought inside the area, in reach from out there: one outside
+    // it is never fought (2026.11.12, the owner's Q3).
+    HunterConfig cfg = spotted();
+    cfg.reach = 450;
     {
-        HuntRig r(spotted(), false, true);
+        HuntRig r(cfg, false, true);
         r.pass();
         r.w.me_x = 1100;
         r.pass();
         r.w.reports = false;
         r.run(80'000);
         const bool gave_up = r.hunter.status().spot_why == Hunter::SpotWhy::GaveUp;
-        r.w.mobs = { plate(r.w.me_x + 100, 400, "Gan") };
+        r.w.mobs = { plate(920, 400, "Gan") };
         bool said = true;
         r.run(1000, [&] {
             if (r.hunter.status().spot_why != Hunter::SpotWhy::GaveUp) said = false;
@@ -2267,13 +2428,15 @@ void test_spot_why_in_fight() {
               "three walks back given up on, then a fight: GaveUp at every look of it");
     }
     {
-        HuntRig r(spotted(), false, true);
+        HunterConfig tall = cfg;
+        tall.spot_half_h = 250;
+        HuntRig r(tall, false, true);
         r.pass();
         r.w.me_x = 1100;
         r.w.me_y = 600;                         // the spot 200 px above
         r.run(600);
         const bool high = r.hunter.status().spot_why == Hunter::SpotWhy::TooHigh;
-        r.w.mobs = { plate(1200, 600, "Gan") };
+        r.w.mobs = { plate(920, 600, "Gan") };
         bool said = true;
         r.run(1000, [&] {
             if (r.hunter.status().spot_why != Hunter::SpotWhy::TooHigh) said = false;
@@ -2863,8 +3026,11 @@ void test_zone_box() {
         r.pass();
         r.w.mobs = { plate(800, 650, "Duoi") };     // 250 px below, 160 across: out of reach
         r.pass();
-        check(from_map(r) && r.target() == "Duoi" && !r.hunter.status().outside_area,
-              "a monster 250 px below the home, inside the box: gone for");
+        // Inside the area -- but with no drop to go to it and no map to say a
+        // walk does, passed over (2026.11.12, A4): it was gone for until then.
+        check(from_map(r) && r.target().empty() && !r.hunter.status().outside_area,
+              "a monster 250 px below the home, inside the box: not outside the area -- no drop or map to get to it, "
+              "passed over (A4)");
     }
     {
         HuntRig r(spotted(), false, true);
@@ -2884,6 +3050,431 @@ void test_zone_box() {
     }
 }
 
+/// The rig's screen point for a point of the packets' world (World's fix is
+/// the screen's moved 4000, 700).
+void world_at(World& w, int x, int y) {
+    w.me_x = x - 4000;
+    w.me_y = y - 700;
+}
+
+/// t62_s5 at 21:48:12-17 (2026.11.12): the spot was taken at the map entry's
+/// spawn, 265,5104 -- 33 px over its floor. With no map file trusted, a spot
+/// is not taken there: the next report is, 309,5138 on the floor.
+void test_spot_at_spawn() {
+    section("Chỗ đánh quái (2026.11.12): no spot at the map entry's spawn with no map file to say -- the next report's");
+
+    bool none = false, set = false;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(spotted(), false, true);
+        r.w.entry_x = 265.0f;
+        r.w.entry_y = 5104.0f;
+        r.w.report_op = 0x0028;                 // the entry's own reports, at the spawn
+        world_at(r.w, 265, 5104);
+        r.run(1000);
+        none = !r.hunter.spot().set && r.hunter.status().spot_why == Hunter::SpotWhy::Settling && r.w.presses.empty();
+        world_at(r.w, 309, 5138);
+        r.pass();
+        const Hunter::Spot s = r.hunter.spot();
+        set = s.set && s.x == 309.0f && s.y == 5138.0f;
+    });
+    check(none, "standing at the spawn 265,5104 for 1 s: no spot, standing as for one not settled");
+    check(set, "the next report, 309,5138: the spot there");
+    check(lines_with(log, "Hunter: no hunting spot at the map entry's spawn 265,5104 -- perhaps in the air") == 1 &&
+              lines_with(log, "Hunter: hunting spot set where the character stands: 309,5138 (+-300 / +-100)") == 1,
+          "said once, and the spot where it was set");
+    // An entry onto its own floor (a log-in, a revive): its 0x0028s at the
+    // spawn are refused, the first cast there is not -- the client standing
+    // there (2026.11.12 review). Before, every report there was refused, and
+    // the spot never set while the character stood.
+    bool waits = false, cast = false;
+    const std::vector<std::string> l2 = info_lines([&] {
+        HuntRig r(spotted(), false, true);
+        r.w.entry_x = 400.0f;
+        r.w.entry_y = 1000.0f;
+        r.w.report_op = 0x0028;
+        world_at(r.w, 400, 1000);
+        r.run(1000);
+        waits = !r.hunter.spot().set && r.w.presses.empty();
+        r.w.report_op = 0x0031;                 // a cast of yours, at the same place
+        r.pass();
+        const Hunter::Spot s = r.hunter.spot();
+        cast = s.set && s.x == 400.0f && s.y == 1000.0f;
+    });
+    check(waits && cast &&
+              lines_with(l2, "Hunter: hunting spot set where the character stands: 400,1000 (+-300 / +-100)") == 1 &&
+              lines_with(l2, "taken at your next cast or walk report") == 1,
+          "the entry on its floor at 400,1000: its 0x0028s there refused, a cast there sets the spot -- said once");
+}
+
+/// t62_s5 at 21:50:37 (2026.11.12, the owner's Q5 of 2026-11-11): 3166,5446 at
+/// the bottom right, then a 0x0027 at 3175,0, then 3166,723 at the top right
+/// -- "nhân vật bị rơi xuống vực nên bị di chuyển lên trên đỉnh". The y 0 report
+/// made "5004 px outside" and a walk back 5,104 px down; none of it now. The
+/// place at the top waits for a second report there, then is gone by.
+void test_spot_put_back() {
+    section("Chỗ đánh quái (2026.11.12): a report at y 0 drives nothing; 4,700 px up with no walk, jump or map entry "
+            "is the game putting the character back -- standing until a second report agrees, then the way back from "
+            "there");
+
+    HunterConfig cfg = spotted();
+    cfg.reach = 450;
+    std::size_t keys_zero = 99, keys_far = 99;
+    Hunter::SpotWhy far_why = Hunter::SpotWhy::None, zero_why = Hunter::SpotWhy::TooHigh;
+    int zero_out = -2;
+    bool walked_after = false;
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(cfg, false, true);
+        r.w.report_op = 0x0027;
+        r.w.step_px = 0;
+        world_at(r.w, 265, 5138);
+        r.pass();                               // the spot 265,5138: box -35..565 x 5038..5238
+        // Moved along the bottom by skills, each move under 1000 px -- the
+        // spot then more than one jump above: not walked back to.
+        for (const MapPoint p : { MapPoint{ 1000, 5300 }, MapPoint{ 1900, 5400 }, MapPoint{ 2700, 5450 },
+                                  MapPoint{ 3166, 5446 } }) {
+            world_at(r.w, p.x, p.y);
+            r.run(300);
+        }
+        const int out_before = r.hunter.status().spot_outside_px;
+        r.w.reports = false;
+        std::size_t before = r.w.presses.size();
+        world_at(r.w, 3175, 0);                 // 21:50:37.849
+        r.w.report();
+        r.pass();
+        keys_zero = r.w.presses.size() - before;
+        zero_why = r.hunter.status().spot_why;
+        zero_out = r.hunter.status().spot_outside_px == out_before ? 1 : r.hunter.status().spot_outside_px;
+        before = r.w.presses.size();
+        world_at(r.w, 3166, 723);               // the top right, 4,723 px up
+        r.w.report();
+        r.run(1000);
+        keys_far = r.w.presses.size() - before;
+        far_why = r.hunter.status().spot_why;
+        r.w.report();                           // a second report there
+        r.w.step_px = 20;
+        r.w.reports = true;
+        r.run(600);
+        walked_after = walks_of(r.w, VK_LEFT) >= 1;
+    });
+    check(keys_zero == 0 && zero_why == Hunter::SpotWhy::TooHigh && zero_out == 1 &&
+              lines_with(log, "5038 px outside") == 0 && lines_with(log, "5138 px down") == 0,
+          "3175,0: no key, nothing outside or walked back worked out from it -- the last pass's judgement stands");
+    check(keys_far == 0 && far_why == Hunter::SpotWhy::PutBack &&
+              lines_with(log, "Hunter: your report at 3166,723 is 4723 px from the last at 3166,5446 with no walk, "
+                              "jump or map entry between -- standing until a second there") == 1,
+          "3166,723 with no walk, jump or entry between: standing a second, said once (PutBack)");
+    // With no map file to plan the way down (2026.11.12 review): 4,415 px
+    // above the spot is more than a view -- no blind walk back along the
+    // top's floors, stranded and said once (kSpotFarBelowPx).
+    check(lines_with(log, "Hunter: the game put you at 3166,723, 4723 px from 3166,5446 (4723 px up)",
+                     "agreed by a second report there") == 1 &&
+              !walked_after && lines_with(log, "walking back to the hunting spot") == 0 &&
+              lines_with(log, "outside the hunting area at 3166,723 -- more than a view above it, no map to go by: "
+                              "standing where it is") == 1,
+          "a second report there: put back, said once -- the spot 4415 px down, more than a view, with no map file: "
+          "no walk back, stranded, said once: \"" + line_with(log, "at 3166,723 --") + "\"");
+    // Put back 1,100 px up onto a place 300 px above the spot and 600 px to
+    // its side: within a view -- the ground walk back as ever.
+    {
+        bool walked = false;
+        const std::vector<std::string> l1 = info_lines([&] {
+            HuntRig r(cfg, false, true);
+            r.w.report_op = 0x0027;
+            r.w.step_px = 0;
+            world_at(r.w, 265, 5138);
+            r.pass();                           // the spot 265,5138
+            world_at(r.w, 865, 5938);           // 800 px below it: too high to walk back to
+            r.run(300);
+            r.w.reports = false;
+            world_at(r.w, 865, 4838);           // 1,100 px up, nothing between
+            r.w.report();
+            r.run(300);
+            r.w.report();                       // a second report there
+            r.w.step_px = 20;
+            r.w.reports = true;
+            r.run(900);
+            walked = walks_of(r.w, VK_LEFT) >= 1;
+        });
+        check(walked && lines_with(l1, "Hunter: the game put you at 865,4838") == 1 &&
+                  lines_with(l1, "walking back to the hunting spot: 600 px left, 300 px down") == 1 &&
+                  lines_with(l1, "more than a view above it") == 0,
+              "put back 300 px above the spot, 600 px to its side: walked back along the ground as ever -- \"" +
+                  line_with(l1, "walking back to the hunting spot") + "\"");
+    }
+
+    // One far report alone, the next back where it was: a frame read wrong.
+    {
+        bool none = false;
+        const std::vector<std::string> l2 = info_lines([&] {
+            HuntRig r(cfg, false, true);
+            r.w.report_op = 0x0027;
+            r.w.reports = false;
+            world_at(r.w, 4640, 1100);
+            r.w.report();
+            r.pass();
+            world_at(r.w, 4640, 20);            // 1,080 px up
+            r.w.report();
+            r.pass();
+            const bool waited = r.hunter.status().spot_why == Hunter::SpotWhy::PutBack;
+            world_at(r.w, 4650, 1100);
+            r.w.report();
+            r.pass();
+            none = waited && r.hunter.status().spot_why == Hunter::SpotWhy::None && r.w.presses.empty();
+        });
+        check(none && lines_with(l2, "Hunter: your report at 4640,20, far from the last, was not where you are") == 1 &&
+                  lines_with(l2, "the game put you") == 0,
+              "1,080 px up, then back where it was: waited on, then taken back -- nothing put back");
+    }
+    // No other report in kPutBackWaitMs: it is where the character is.
+    {
+        bool put = false;
+        const std::vector<std::string> l3 = info_lines([&] {
+            HuntRig r(cfg, false, true);
+            r.w.report_op = 0x0027;
+            r.w.reports = false;
+            world_at(r.w, 4640, 3100);
+            r.w.report();
+            r.pass();
+            world_at(r.w, 4640, 1100);          // 2,000 px up
+            r.w.report();
+            r.run(Hunter::kPutBackWaitMs - 300);
+            const bool waiting = r.hunter.status().spot_why == Hunter::SpotWhy::PutBack;
+            r.run(600);
+            put = waiting && r.hunter.status().spot_why != Hunter::SpotWhy::PutBack;
+        });
+        check(put && lines_with(l3, "Hunter: the game put you at 4640,1100", "agreed by no other report in 3 s") == 1,
+              "no other report for 3 s: taken where it is");
+    }
+    // A jump of yours between, or a fall down: no put back.
+    {
+        HuntRig r(cfg, false, true);
+        r.w.report_op = 0x0027;
+        r.w.reports = false;
+        world_at(r.w, 4640, 3100);
+        r.w.report();
+        r.pass();
+        r.w.air_reports = 2;
+        world_at(r.w, 4640, 1100);
+        r.w.report();
+        r.pass();
+        const bool jumped = r.hunter.status().spot_why != Hunter::SpotWhy::PutBack;
+        world_at(r.w, 4640, 3300);              // 2,200 px down
+        r.w.report();
+        r.pass();
+        check(jumped && r.hunter.status().spot_why != Hunter::SpotWhy::PutBack,
+              "2,000 px up with a 0x002A of yours between, or 2,200 px down: gone by as ever");
+    }
+    // A report at y 0 whose height the packets kept (2026.11.12 review):
+    // fought and walked back from as at that height -- no stall -- but no
+    // place a put-back is judged from.
+    {
+        bool fights = false;
+        HuntRig r(cfg, false, true);
+        r.w.report_op = 0x0027;
+        world_at(r.w, 900, 631);
+        r.pass();                               // the spot 900,631
+        world_at(r.w, 999, 630);                // t1901_s2's right wall: 999,0, its height kept
+        r.w.y_kept = true;
+        r.w.mobs = { plate(r.w.me_x + 1, r.w.me_y - 24, "Gan") };
+        r.run(1500);
+        fights = r.hunter.engaged() && !r.w.of('Z').empty() && r.hunter.skill_hold() == Hunter::SkillHold::None &&
+                 r.hunter.spot().set;
+        check(fights, "999,630 with its height kept: the monster in the area at 1000,606 fought, nothing held");
+    }
+    {
+        const std::vector<std::string> l4 = info_lines([&] {
+            HuntRig r(cfg, false, true);
+            r.w.report_op = 0x0027;
+            r.w.reports = false;
+            world_at(r.w, 4640, 3100);
+            r.w.report();
+            r.pass();
+            world_at(r.w, 4650, 3100);          // 4650,0 -- its height kept at 3100
+            r.w.y_kept = true;
+            r.w.report();
+            r.pass();
+            world_at(r.w, 4640, 1100);          // 2,000 px up from the last real report
+            r.w.y_kept = false;
+            r.w.report();
+            r.pass();
+            r.w.report();
+            r.pass();
+        });
+        check(lines_with(l4, "Hunter: the game put you at 4640,1100, 2000 px from 4640,3100") == 1,
+              "3100, a y 0 report kept at 3100, then 1100 twice: the put-back judged from the last real report -- \"" +
+                  line_with(l4, "the game put you") + "\"");
+    }
+}
+
+/// The map tab's box with no map file to go by (2026.11.12): "more than one
+/// jump above" is judged against the box's nearest height, not its home --
+/// t23_s14's box 1145..1549 held two levels, and an exit from the lower one
+/// was "200 px above" from inside the box (22:27:49).
+void test_zone_no_file_height() {
+    section("Chỗ đánh quái (2026.11.12): the map tab's box with no map file -- too high by its nearest height, not "
+            "its home's");
+
+    // Home 4640,1100 near the box's top; the box runs to 1500.
+    const Hunter::Zone tall = zone_of(1, 4640, 1100, 4340, 1000, 4940, 1500);
+    {
+        HunterConfig cfg = spotted();
+        cfg.reach = 450;
+        bool latched = false, zone = false;
+        const std::vector<std::string> log = info_lines([&] {
+            HuntRig r(cfg, false, true);
+            r.w.step_px = 20;
+            r.hunter.set_zone(tall);
+            r.pass();
+            zone = from_map(r);
+            world_at(r.w, 5040, 1400);          // 100 px right of the box, 300 px below the home: inside its height
+            r.run(600, [&] {
+                if (r.hunter.status().spot_back_walk) latched = true;
+            });
+        });
+        check(zone && latched && lines_with(log, "higher than one jump") == 0 &&
+                  lines_with(log, "Hunter: walking back to the hunting spot: 400 px left, 300 px up -- first, along "
+                                  "the ground, no hop") == 1,
+              "100 px right of the box, at a height inside it: walked back first -- not \"300 px above\"");
+    }
+    {
+        HunterConfig cfg = spotted();
+        Hunter::SpotWhy why = Hunter::SpotWhy::None;
+        std::size_t keys = 99;
+        const std::vector<std::string> log = info_lines([&] {
+            HuntRig r(cfg, false, true);
+            r.hunter.set_zone(tall);
+            r.pass();
+            world_at(r.w, 5040, 1650);          // 150 px below the box's bottom
+            const std::size_t before = r.w.presses.size();
+            r.run(2500);
+            keys = r.w.presses.size() - before;
+            why = r.hunter.status().spot_why;
+        });
+        check(keys == 0 && why == Hunter::SpotWhy::TooHigh &&
+                  lines_with(log, "Hunter: the hunting area is 150 px above -- higher than one jump") == 1,
+              "150 px below its bottom: the box more than one jump above -- not walked back to, said by the box");
+    }
+}
+
+/// A2 (2026.11.12): nothing in view inside the map tab's box -- stood for where
+/// it is, as the seek stands; t23_s14's 2,100 px box had 7 walks back begin
+/// inside it in 4 minutes, each cut by a walk toward a monster.
+void test_zone_inside_stands() {
+    section("Chỗ đánh quái (2026.11.12, A2): nothing in view inside the map tab's 2,000 px box, 900 px from its home "
+            "-- no walk back; this run's spot walks back as ever");
+    {
+        HunterConfig cfg = spotted();
+        cfg.spot_return_delay_ms = 500;
+        HuntRig r(cfg, false, true);
+        r.hunter.set_zone(zone_of(1, 4640, 1100, 3640, 1000, 5640, 1200));
+        r.pass();
+        const bool zone = from_map(r);
+        world_at(r.w, 5540, 1100);          // 900 px right of the home, inside the box
+        const std::size_t before = r.w.presses.size();
+        r.run(4000);
+        const Hunter::Status st = r.hunter.status();
+        check(zone && r.w.presses.size() == before && st.spot_outside_px == 0 && st.returns == 0 &&
+                  st.state == Hunter::State::NoTargets,
+              "inside the box, 900 px from its home, nothing in view: no key in 4 s (" +
+                  std::to_string(r.w.presses.size() - before) + "), no walk back");
+    }
+    {
+        // This run's spot: 300 px right of it, inside its +-300 -- walked back
+        // to it, as before.
+        HunterConfig cfg = spotted();
+        cfg.spot_return_delay_ms = 500;
+        HuntRig r(cfg, false, true);
+        r.pass();
+        world_at(r.w, 4890, 1100);
+        r.run(3000);
+        check(!r.w.of(VK_LEFT).empty() && r.hunter.status().returns >= 1,
+              "this run's spot, 250 px right of it inside its area: walked back to it as ever");
+    }
+}
+
+/// A4 (2026.11.12): the spot in use, no drop able to go, no map to go by --
+/// a monster below past the band is passed over, as one above is with a map.
+void test_spot_below_unreached() {
+    section("Chỗ đánh quái (2026.11.12, A4): drops off, no map to go by -- a monster below past down() is never "
+            "picked; one on the level is");
+    HunterConfig cfg = spotted();
+    cfg.spot_half_h = 250;
+    cfg.reach = 450;
+    {
+        HuntRig r(cfg, false, true);
+        r.pass();
+        r.w.mobs = { plate(700, 553, "Duoi") };     // 153 px below, in the area
+        bool picked = false;
+        r.run(3000, [&] {
+            if (!r.target().empty()) picked = true;
+        });
+        check(!picked && r.w.of(VK_RIGHT).empty() && r.w.of('Z').empty(),
+              "one 153 px below with no drop to go to it: never picked, nothing walked toward it");
+    }
+    {
+        HuntRig r(cfg, false, true);
+        r.pass();
+        r.w.mobs = { plate(700, 553, "Duoi"), plate(900, 410, "Ngang") };
+        bool level = false;
+        r.run(1500, [&] {
+            if (r.target() == "Ngang") level = true;
+        });
+        check(level, "with one on the level beside it: that one is the target");
+    }
+    // With no map to tell (2026.11.12 review): only one clearly another
+    // level -- more than one jump below, or steeper than a slope walked --
+    // is passed over; a few px lower down the character's own slope is
+    // walked to as before A4. Bars of 10 and 20, the owner's.
+    HunterConfig bars = cfg;
+    bars.set_band(10, 20);
+    bars.spot_half_w = 600;
+    const auto picked_walked = [&](const Nameplate& n, int step, std::size_t* rights, std::size_t* lefts) {
+        HuntRig r(bars, false, true);
+        r.w.step_px = step;
+        r.pass();
+        r.w.mobs = { n };
+        bool picked = false;
+        r.run(3000, [&] {
+            if (!r.target().empty()) picked = true;
+        });
+        *rights = r.w.of(VK_RIGHT).size();
+        *lefts = r.w.of(VK_LEFT).size();
+        return picked;
+    };
+    {
+        std::size_t rights = 0, lefts = 0;
+        const bool slope = picked_walked(plate(680, 430, "Doc"), 0, &rights, &lefts);
+        check(slope && rights >= 1, "30 px below, 40 px across: picked and walked to (" + std::to_string(rights) + ")");
+        const bool level_below = picked_walked(plate(1016, 553, "Xa"), 0, &rights, &lefts);
+        check(!level_below && rights == 0,
+              "153 px below, 376 px across: more than one jump down -- never picked, no walk");
+    }
+    {
+        // 80 px below, 260 px across, a flat rig: the walk closes across and
+        // not the height -- given up on once it is steeper than a slope, not
+        // walked under it.
+        std::size_t rights = 0;
+        bool picked = false;
+        int closest = 9999;
+        const std::vector<std::string> log = info_lines([&] {
+            HuntRig r(bars, false, true);
+            r.w.step_px = 20;
+            r.pass();
+            r.w.mobs = { plate(900, 480, "Duoi") };
+            r.run(4000, [&] {
+                if (!r.target().empty()) picked = true;
+                closest = std::min(closest, 900 - r.w.me_x);
+            });
+            rights = r.w.of(VK_RIGHT).size();
+        });
+        check(picked && rights >= 1 && closest > 0 && closest < 49 + 40 &&
+                  lines_with(log, "Hunter: Duoi passed over -- 80 px below", "with no drop to go and no floor") == 1,
+              "80 px below, 260 px across: picked, walked to within " + std::to_string(closest) +
+                  " px of it, then passed over once steeper than a slope, once -- not walked under it: \"" +
+                  line_with(log, "passed over --") + "\"");
+    }
+}
+
 void test_hunter_spot() {
     test_spot_off();
     test_spot_taken();
@@ -2894,6 +3485,7 @@ void test_hunter_spot() {
     test_spot_jump_arc();
     test_spot_plausible();
     test_spot_give_up();
+    test_spot_give_up_wait();
     test_spot_heights();
     test_spot_map_entry();
     test_spot_asked();
@@ -2913,6 +3505,11 @@ void test_hunter_spot() {
     test_zone_clear();
     test_zone_dropped();
     test_zone_box();
+    test_spot_at_spawn();
+    test_spot_put_back();
+    test_zone_no_file_height();
+    test_zone_inside_stands();
+    test_spot_below_unreached();
 }
 
 // ------------------------------------------------------------- turning
@@ -2940,9 +3537,9 @@ void test_hunter_turns() {
         const bool first = r.w.presses.size() == 2 && r.w.presses[0].vk == VK_RIGHT &&
                            r.w.presses[0].hold == Hunter::kTurnTapMs && r.w.presses[1].vk == 'Z';
         r.run(100 * 60);
-        check(Hunter::kTurnTapMs == 60 && first && r.w.of(VK_RIGHT).size() == 1 && r.w.of(VK_LEFT).empty() &&
+        check(Hunter::kTurnTapMs == 80 && first && r.w.of(VK_RIGHT).size() == 1 && r.w.of(VK_LEFT).empty() &&
                   r.w.of('Z').size() >= 8 && r.w.held.empty() && r.w.me_x == 640 && r.hunter.engaged(),
-              "no style, a target 400 px right within a reach of 450, which way it faces not known: one 60-ms tap "
+              "no style, a target 400 px right within a reach of 450, which way it faces not known: one 80-ms tap "
               "right, then the attack -- and over 100 passes no other tap and never a step, " +
                   std::to_string(r.w.of('Z').size()) + " attacks from where it stood");
 
@@ -2977,31 +3574,35 @@ void test_hunter_turns() {
               "it taken for what it says -- " + std::to_string(taps()) + " taps");
 
         // Something else turned the character away -- a report says it faces
-        // left, long after the hunter's turn: turned back at the next pass.
+        // left, long after the hunter's turn: the same target turned back to
+        // once it has stayed that side kTurnStayMs (2026.11.12, F2), not at
+        // the next pass as before.
         r.w.facing = -1;
         r.w.facing_ms = r.w.t;
-        r.pass();
-        const bool at_once = taps() == 2;
-        const std::uint64_t second = at_once ? r.w.of(VK_RIGHT)[1].at : 0;
+        const std::uint64_t away = r.w.t;
+        for (int i = 0; i < 10 && taps() < 2; ++i) r.pass();
+        const std::uint64_t second = taps() == 2 ? r.w.of(VK_RIGHT)[1].at : 0;
+        const bool stayed = second >= away + Hunter::kTurnStayMs && second < away + Hunter::kTurnStayMs + 120;
 
         // Then one saying left again, no more than kFacingTrustMs after that
         // tap -- one that may have been sent before the tap reached the game:
-        // not taken at once. With no report since for kFacingMissedMs, the
-        // game never took the tap, and the character faces left: turned
-        // again, once.
+        // nothing to the turn pending, which only a report its way confirms.
+        // With none since for kFacingMissedMs and no cast of yours, the game
+        // never took the tap: tapped again, once.
         r.w.facing = -1;
         r.w.facing_ms = r.w.t;
         const bool soon = r.w.facing_ms <= second + Hunter::kFacingTrustMs;
         bool waited = true;
         while (r.w.t <= second + Hunter::kFacingMissedMs) {
             r.pass();
-            waited = waited && taps() == 2;
+            waited = waited && taps() == 2 && r.hunter.turning();
         }
         r.run(10 * 60);
-        check(at_once && soon && waited && taps() == 3 && r.w.facing == 1,
-              "a report long after the tap saying the character faces away: one tap back at the next pass; one "
-              "within 150 ms of that tap saying the same: no tap for 500 ms, then one -- " +
-                  std::to_string(taps()) + " taps");
+        check(stayed && soon && waited && taps() == 3 && r.w.facing == 1 && !r.hunter.turning(),
+              "a report long after the tap saying the character faces away: one tap back once the target has stayed "
+              "that side 250 ms; one within 150 ms of that tap saying the same: the turn pending, no tap for 300 ms, "
+              "then one -- " + std::to_string(taps()) + " taps, the second " + std::to_string(second - away) +
+                  " ms after the report");
 
         // The packets not knowing the character: whatever the fix says of
         // the facing changes nothing. Known again, it does.
@@ -3020,7 +3621,10 @@ void test_hunter_turns() {
         // A tap the game does not take -- a press it read no frame of -- and
         // so never reports: the last report, from before it, still says the
         // character faces left. Tapped again once kFacingMissedMs show it,
-        // not sooner; and once the game takes one, no more.
+        // not sooner, no cast of yours coming; and once the game takes one,
+        // no more. 2026.11.12: the turn pending meanwhile, taken as made at
+        // kTurnCapMs, the packets then putting it back -- the next turn after
+        // kTurnStayMs, which the run of 1.2 s ends before.
         HuntRig r(steered, false, true);
         r.w.facing = -1;
         r.w.facing_ms = r.w.t;
@@ -3035,7 +3639,7 @@ void test_hunter_turns() {
         r.run(30 * 60);
         check(spaced && r.w.of(VK_RIGHT).size() == missed.size() + 1 && r.w.of(VK_LEFT).empty() &&
                   r.w.facing == 1,
-              "taps the game never reports: one, and another each 500 ms and a pass after the last; once one is "
+              "taps the game never reports: one, and another each 300 ms and a pass after the last; once one is "
               "reported, no more -- " + std::to_string(missed.size()) + " unreported, " +
                   std::to_string(r.w.of(VK_RIGHT).size()) + " in all");
     }
@@ -3100,15 +3704,19 @@ void test_hunter_turns() {
     {
         // Once a minute: the turns tapped, the facings the packets put right
         // and, of those, the keys the game missed -- with a style, so that
-        // nothing else (a fight ended, a give-up) has the line said, and a
-        // minute with none of them says none. The packets filling in a facing
-        // not known, at the start, is not counted.
+        // nothing else (a give-up) has the line said, and a minute with none
+        // of them says none. The packets filling in a facing not known, at
+        // the start, is not counted. 2026.11.12: the turns' taps, those a
+        // report confirmed and how long after the tap it answered, and the
+        // keys missed by what they were -- a turn's tap or a walk.
         HunterConfig styled = steered;
         styled.style = "near_wide";
+        bool walked = false;
         const std::vector<std::string> log = info_lines([&] {
             HuntRig r(styled, false, true);
             r.w.facing = -1;                    // the character faces left, by a report from before
             r.w.facing_ms = r.w.t;
+            r.w.turn_report_late_ms = 40;       // each tap reported 40 ms after its key went down
             r.w.mobs = { plate(640 + 300, 400, "Xa") };
             // Hurt a little at a time: never given up on for taking no
             // damage, never killed in the two minutes and more.
@@ -3121,13 +3729,30 @@ void test_hunter_turns() {
             // Then something else turns the character away.
             r.w.facing = -1;
             r.w.facing_ms = r.w.t;
-            r.run(115'000, hurt);
+            r.run(10'000, hurt);
+            // Then a walk to it the game never reports, the last report from
+            // before it saying left: put right once the walk's key is
+            // kFacingMissedMs old -- a walk missed -- and turned back to, the
+            // tap reported.
+            r.w.holds_report = false;
+            r.w.facing = -1;
+            r.w.facing_ms = r.w.t;
+            r.w.step_px = 20;
+            move_to(r.w.mob("Xa"), r.w.me_x + 600);
+            r.run(10'000, [&] {
+                hurt();
+                if (r.w.held.count(VK_RIGHT) != 0) walked = true;
+            });
+            r.run(95'000, hurt);
         });
-        check(lines_with(log, "Hunter: ", " turns (") == 1 &&
-                  lines_with(log, "Hunter: 0 fights, ",
-                             ", 3 turns (2 facings put right by the packets, 1 of them keys the game missed)") == 1,
-              "the minute's line: 3 turns, 2 facings put right by the packets, 1 a key the game missed -- and the "
-              "minute after, with none, no line");
+        check(walked && lines_with(log, "Hunter: ", " turns (") == 1 &&
+                  lines_with(log, "Hunter: ",
+                             ", 3 turns (4 taps; 3 confirmed by the packets, the report 40 ms after its tap on "
+                             "average, 40 at most; 0 not confirmed in 1000 ms; 2 facings put right by the packets; "
+                             "keys the game missed: 1 turn taps, 1 walk holds)") == 1,
+              "the minute's line: 3 turns, 4 taps, 3 confirmed 40 ms after their taps, 2 facings put right, the keys "
+              "missed 1 turn's tap and 1 walk -- and the minute after, with none, no line: \"" +
+                  line_with(log, " turns (") + "\"");
     }
 }
 
@@ -3768,6 +4393,441 @@ void test_hunter_held_walk() {
     }
 }
 
+// ------------------------------------- the skills held, the dash, the reach (2026.11.12)
+
+/// F3: Z's named targets on 2026-11-11 were all within 76 px, and the hunter
+/// swung it from up to 450. Its own attack key goes only within the reach its
+/// casts have shown, and kAttackReachSlackPx more -- or attack_range_px.
+void test_attack_reach() {
+    section("Hunter (2026.11.12, F3): its own attack key only within the reach learned for its skill, or "
+            "attack_range_px");
+
+    HunterConfig cfg;           // attack_key Z, a swing every 700 ms
+    cfg.reach = 450;
+    const auto swings = [&](const HunterConfig& c, int dx, int learned) {
+        HuntRig r(c);
+        r.hunter.set_attack_reach(learned);
+        r.w.mobs = { plate(640 + dx, 400, "Xa") };
+        r.run(3000);
+        return r.w.of('Z').size();
+    };
+    const std::size_t at_200 = swings(cfg, 200, 76), at_60 = swings(cfg, 60, 76), unknown = swings(cfg, 200, 0);
+    check(at_200 == 0 && at_60 >= 3 && unknown >= 3,
+          "learned reach 76 (+24): the target 200 px away -- " + std::to_string(at_200) + " swings in 3 s; 60 px -- " +
+              std::to_string(at_60) + "; with no reach learned, 200 px -- " + std::to_string(unknown) + ", as ever");
+    // Said to the macro (attack_far, 2026.11.16b review): fighting the one
+    // 200 px off, past the learned 76 (+24) -- its rotation, pressing Z in
+    // its turn, passes it there too; the one 60 px off, not.
+    {
+        const auto said = [&](int dx) {
+            HuntRig r(cfg);
+            r.hunter.set_attack_reach(76);
+            r.w.mobs = { plate(640 + dx, 400, "Xa") };
+            r.run(3000);
+            return std::make_pair(r.hunter.engaged(), r.hunter.attack_far());
+        };
+        const auto past = said(200), in_reach = said(60);
+        check(past.first && past.second && in_reach.first && !in_reach.second,
+              "fighting a target 200 px off with Z's reach 76: attack_far said to the macro; 60 px off: not");
+    }
+    HunterConfig set = cfg;
+    set.attack_range_px = 80;
+    const std::size_t set_200 = swings(set, 200, 300), set_60 = swings(set, 60, 0);
+    check(set_200 == 0 && set_60 >= 3,
+          "attack_range_px 80, over a learned 300: at 200 px none (" + std::to_string(set_200) + "), at 60 px " +
+              std::to_string(set_60));
+    // With a style, its swing let be for the reach counts as one for the
+    // no-damage give-up (2026.11.12 review): a monster in reach, past the
+    // key's, that nothing hurts is passed over after no_damage_ms as when Z
+    // swung at it -- never walked to; one the macro's skills hurt is fought on.
+    {
+        HunterConfig styled = cfg;
+        styled.style = "near_wide";
+        styled.no_damage_ms = 3000;
+        styled.attack_range_px = 80;
+        std::uint64_t dropped[2] = {};
+        std::size_t z[2] = {}, walks[2] = {};
+        for (int c = 0; c < 2; ++c) {
+            HuntRig r(styled);
+            r.w.mobs = { slotted(plate(750, 400, "Moc", 0.9f), 3) };    // 110 px: in the style's reach
+            r.run(6000, [&r, c] {
+                if (c == 1) r.w.mobs[0].hurt_ms = r.w.t;
+            });
+            dropped[c] = r.hunter.status().targets_dropped;
+            z[c] = r.w.of('Z').size();
+            walks[c] = r.w.of(VK_LEFT).size() + r.w.of(VK_RIGHT).size();
+        }
+        check(dropped[0] >= 1 && dropped[1] == 0 && z[0] == 0 && z[1] == 0,
+              "a style, attack_range_px 80, the monster 110 px off: unhurt -- given up on (" +
+                  std::to_string(dropped[0]) + "), no Z; hurt by the macro's skills -- fought on (" +
+                  std::to_string(dropped[1]) + "), no Z (taps and walks: " + std::to_string(walks[0]) + ", " +
+                  std::to_string(walks[1]) + ")");
+    }
+    // The minute says them.
+    const std::vector<std::string> log = info_lines([&] {
+        HuntRig r(cfg);
+        r.hunter.set_attack_reach(76);
+        r.w.mobs = { plate(840, 400, "Xa") };
+        r.run(61'000);
+    });
+    check(lines_with(log, "Hunter: ", "own attack key let be ") == 1 &&
+              lines_with(log, "times beyond its reach (100 px), 0 at an edge as the dash's") == 1,
+          "the minute line: \"own attack key let be N times beyond its reach (100 px), 0 at an edge as the dash's\"");
+    // Saved and read back; a file from before it is 0.
+    const std::string path = temp_path("gobot_hunter_attack_range.ini");
+    HunterConfig read;
+    write_file(path, "[Hunt]\nattack_range_px=5000\n");
+    HunterConfig big;
+    const bool clamped = big.load(path) && big.attack_range_px == 1000;
+    write_file(path, "[Hunt]\nstep_ms=180\n");
+    HunterConfig old;
+    const bool none = old.load(path) && old.attack_range_px == 0;
+    check(set.save(path) && read.load(path) && read.attack_range_px == 80 && clamped && none,
+          "attack_range_px saved and read back, kept to 0-1000; a hunt.ini without it is 0");
+    DeleteFileW(wide(path).c_str());
+}
+
+/// The owner's Q2 of 2026-11-11: the hunter says why the macro holds its
+/// skills -- nothing to fight with the spot in use, outside the area with no
+/// walk back -- and where a dash would land past the area's edge.
+void test_hunter_holds() {
+    section("Hunter (2026.11.12, the owner's Q2): the skills held for nothing to fight in the area and outside it; "
+            "the dash's edge by the area's box");
+
+    HunterConfig cfg = spotted();
+    cfg.spot_half_w = 600;      // a box 1200 px wide, round 5000,1100
+    {
+        HuntRig r(cfg, false, true);
+        r.w.report_op = 0x0027;
+        world_at(r.w, 5000, 1100);
+        r.pass();
+        r.run(300);
+        const bool idle = r.hunter.skills_held() && r.hunter.skill_hold() == Hunter::SkillHold::NoTarget &&
+                          !r.hunter.turning();
+        r.w.mobs = { plate(r.w.me_x + 100, r.w.me_y, "Gan") };
+        r.run(600);
+        const bool fighting = r.hunter.engaged() && r.hunter.skill_hold() == Hunter::SkillHold::None;
+        r.w.mobs.clear();
+        world_at(r.w, 5000, 1400);              // 300 px below the spot: 200 px under the box, too high
+        r.run(600);
+        const bool outside = r.hunter.skill_hold() == Hunter::SkillHold::Outside;
+        check(idle && fighting && outside,
+              std::string("the spot in use: nothing in view -- held, nothing to fight (") + (idle ? "yes" : "no") +
+                  "); a monster in reach -- fighting, none held (" + (fighting ? "yes" : "no") +
+                  "); 200 px under the box, the spot too high -- held, outside (" + (outside ? "yes" : "no") + ")");
+    }
+    {
+        // No spot: nothing in view holds nothing.
+        HuntRig r(HunterConfig{}, false, true);
+        r.run(600);
+        check(!r.hunter.skills_held(), "no hunting spot, nothing in view: nothing held");
+    }
+    {
+        HuntRig r(cfg, false, true);
+        r.w.report_op = 0x0027;
+        world_at(r.w, 5000, 1100);
+        r.pass();
+        r.run(300);
+        // Not learned (2026.11.17): no key guessed, so nothing to hold and no
+        // edge said -- the C, V and Space guess starved C and V while hunting.
+        const bool guess = r.hunter.dash_keys() == std::array<std::uint32_t, 3>{ 0, 0, 0 } &&
+                           r.hunter.dash_px() == Hunter::kDashGuessPx;
+        const bool middle = !r.hunter.dash_edge();      // 5000 +- 320 inside 4400..5600
+        world_at(r.w, 5450, 1100);
+        r.run(300);
+        const bool edge = !r.hunter.dash_edge();        // 5770 past 5600, and still no key held
+        r.hunter.set_dash('Z', 214);
+        world_at(r.w, 5300, 1100);
+        r.run(300);
+        const bool learned_in = !r.hunter.dash_edge() &&    // 5514
+                                r.hunter.dash_keys() == std::array<std::uint32_t, 3>{ 'Z', 0, 0 };
+        world_at(r.w, 5420, 1100);
+        r.run(300);
+        const bool learned_out = r.hunter.dash_edge();  // 5634
+        check(guess && middle && edge && learned_in && learned_out,
+              "the dash not learned: no key held for it, in the box's middle or 150 px from its edge (2026.11.17); "
+              "learned as Z, 214 px: not at 300 px from the edge, at 180");
+    }
+}
+
+/// F1 of 2026-11-11: 46 of 148 turns had a key the game missed, the taps lost
+/// in the skills' animations, and the hunter fought on as if each had worked
+/// -- its own swing 50 ms after the tap, taken or not, refused or not. With
+/// the packets steering and knowing the character, a turn is pending from its
+/// tap until a 0x0027 of yours toward the target, stamped since, comes:
+/// turning() -- the macro's skills held -- no fight and no swing meanwhile;
+/// tapped again once the last tap has had kFacingMissedMs and no cast of
+/// yours has come for kTurnQuietMs; taken as made at kTurnCapMs.
+void test_turn_pending() {
+    section("Hunter (2026.11.12, F1): a turn pending until a report of yours confirms it -- skills held, no swing; "
+            "tapped again once your casts stop; 1 s at most");
+
+    HunterConfig steered;           // no style, the walk held
+    steered.reach = 450;
+    steered.packet_positions = PacketPositions::On;
+    // The character facing left by a report from before; the target 300 px
+    // right, in reach.
+    const auto faces_left = [](HuntRig& r) {
+        r.w.facing = -1;
+        r.w.facing_ms = r.w.t;
+        r.w.mobs = { plate(640 + 300, 400, "Xa") };
+    };
+    const auto rights = [](const HuntRig& r) { return r.w.of(VK_RIGHT).size(); };
+    {
+        HuntRig r(steered, false, true);
+        faces_left(r);
+        r.pass();
+        const std::uint64_t tap = rights(r) == 1 ? r.w.of(VK_RIGHT)[0].at : 0;
+        bool pending = rights(r) == 1 && r.w.of(VK_RIGHT)[0].hold == Hunter::kTurnTapMs;
+        // No report of it for 250 ms: pending, the skills held for it, no
+        // fight, no swing, no tap more.
+        while (r.w.t < tap + 250) {
+            pending = pending && r.hunter.turning() && r.hunter.skill_hold() == Hunter::SkillHold::Turning &&
+                      !r.hunter.engaged() && r.w.of('Z').empty() && rights(r) == 1;
+            r.pass();
+        }
+        // A report saying right, stamped before the tap: no news.
+        r.w.facing = 1;
+        r.w.facing_ms = tap - 10;
+        r.pass();
+        const bool old_report = r.hunter.turning() && r.w.of('Z').empty();
+        // One stamped as the tap went down: confirmed -- the fight, the swing.
+        r.w.facing_ms = tap;
+        r.pass();
+        check(pending && old_report && !r.hunter.turning() && r.hunter.skill_hold() == Hunter::SkillHold::None &&
+                  r.hunter.engaged() && r.w.of('Z').size() == 1 && rights(r) == 1,
+              "a tap with no report: turning, the skills held for it, not fighting, no swing for 250 ms; a report "
+              "from before the tap changes nothing; one from its moment ends it -- fighting, one swing");
+    }
+    {
+        // Your casts at every pass for 600 ms after the tap: not tapped again
+        // meanwhile; then none -- tapped again at the first pass
+        // kTurnQuietMs after the last.
+        HuntRig r(steered, false, true);
+        faces_left(r);
+        r.pass();
+        const std::uint64_t tap = rights(r) == 1 ? r.w.of(VK_RIGHT)[0].at : 0;
+        while (r.w.t < tap + 600) {
+            r.w.cast_ms = r.w.t;
+            r.pass();
+        }
+        const std::uint64_t last_cast = r.w.cast_ms;
+        const bool held_off = rights(r) == 1 && r.hunter.turning();
+        for (int i = 0; i < 10 && rights(r) < 2; ++i) r.pass();
+        const std::uint64_t again = rights(r) == 2 ? r.w.of(VK_RIGHT)[1].at : 0;
+        check(held_off && again >= last_cast + Hunter::kTurnQuietMs && again < last_cast + Hunter::kTurnQuietMs + 61 &&
+                  r.hunter.turning() && r.w.of('Z').empty(),
+              "your casts going on for 600 ms after the tap: no tap again; tapped again " +
+                  std::to_string(again - last_cast) + " ms after the last cast (150 at the least), still pending");
+    }
+    {
+        // Never reported, no cast: tapped again every kFacingMissedMs and a
+        // pass, pending all along -- and at kTurnCapMs taken as made: the
+        // fight and the swing.
+        HuntRig r(steered, false, true);
+        faces_left(r);
+        r.pass();
+        const std::uint64_t tap = rights(r) == 1 ? r.w.of(VK_RIGHT)[0].at : 0;
+        bool pending = true;
+        while (r.w.t < tap + Hunter::kTurnCapMs) {
+            pending = pending && r.hunter.turning() && !r.hunter.engaged() && r.w.of('Z').empty();
+            r.pass();
+        }
+        const std::uint64_t capped_at = r.w.t;
+        r.pass();
+        check(pending && rights(r) == 3 && !r.hunter.turning() && r.hunter.engaged() && r.w.of('Z').size() == 1 &&
+                  capped_at < tap + Hunter::kTurnCapMs + 111,
+              "taps never reported: pending for 1 s, " + std::to_string(rights(r)) +
+                  " taps; then taken as made -- fighting, one swing");
+    }
+    {
+        // A tap the input refuses: no swing, no fight, nothing pending -- and
+        // the tap again at the next pass. With the packets, pending until
+        // its report; on the screen alone, taken as made at once, as ever.
+        bool ok[2] = { false, false };
+        for (const bool packets : { true, false }) {
+            HuntRig r(steered, false, packets);
+            r.w.turn_reports = true;
+            faces_left(r);
+            r.w.refuse = 1;
+            r.w.refuse_vk = VK_RIGHT;
+            r.pass();
+            const bool refused = rights(r) == 1 && r.w.of('Z').empty() && !r.hunter.engaged() && !r.hunter.turning();
+            r.pass();
+            const bool second = rights(r) == 2 && r.w.of('Z').size() == (packets ? 0u : 1u) &&
+                                r.hunter.turning() == packets;
+            r.pass();
+            ok[packets ? 0 : 1] = refused && second && rights(r) == 2 && r.w.of('Z').size() == 1 && r.hunter.engaged();
+        }
+        check(ok[0] && ok[1],
+              std::string("a tap refused: no swing, not fighting; tapped again at the next pass -- the packets: "
+                          "pending until its report, then the swing (") +
+                  (ok[0] ? "yes" : "no") + "); the screen alone: the swing with it (" + (ok[1] ? "yes" : "no") + ")");
+    }
+    {
+        // The hold out before the tap's key went down (2026.11.12 review):
+        // in the pause after its key-up the macro already sees the turn --
+        // turning(), the Turning hold, not fighting -- where it saw the
+        // last pass's fight until the pass ended. A refused tap leaves none.
+        HuntRig r(steered, false, true);
+        r.w.facing = 1;
+        r.w.facing_ms = r.w.t;
+        r.w.mobs = { plate(640 + 300, 400, "Xa") };
+        r.run(300);                             // fighting it, facing right
+        const bool fought = r.hunter.engaged() && r.hunter.skill_hold() == Hunter::SkillHold::None;
+        int pauses = 0;
+        bool seen = true;
+        r.w.on_sleep = [&](std::uint32_t) {
+            if (r.w.of(VK_LEFT).size() != 1) return;
+            ++pauses;
+            seen = seen && r.hunter.turning() && r.hunter.skill_hold() == Hunter::SkillHold::Turning &&
+                   !r.hunter.engaged();
+        };
+        move_to(r.w.mob("Xa"), 640 - 300);     // another side: a new pick there
+        r.w.mobs[0].slot = 7;
+        r.pass();
+        r.w.on_sleep = nullptr;
+        check(fought && pauses >= 1 && seen && r.w.of(VK_LEFT).size() == 1,
+              "fighting, then a turn: in the pause after its tap the macro sees it -- turning, the Turning hold, not "
+              "fighting (" + std::to_string(pauses) + " pause(s))");
+        HuntRig q(steered, false, true);
+        q.w.facing = 1;
+        q.w.facing_ms = q.w.t;
+        q.w.mobs = { plate(640 - 300, 400, "Xa") };
+        q.w.refuse = 1;
+        q.w.refuse_vk = VK_LEFT;
+        q.pass();
+        check(q.w.of(VK_LEFT).size() == 1 && !q.hunter.turning() && !q.hunter.skills_held(),
+              "a tap refused: no turn, no hold left behind it");
+    }
+}
+
+/// F2 of 2026-11-11: a monster walking through the character flipped the side
+/// it was on every 2-4 s on t56_s3, and each flip was a turn. The same target
+/// is turned to only once it has stayed the other side more than
+/// facing_tolerance + kTurnSlackPx for kTurnStayMs, and within that band it is
+/// fought where the character faces; a new pick the other side at once.
+void test_turn_hysteresis() {
+    section("Hunter (2026.11.12, F2): the same target turned to only once it has stayed the other side past a band "
+            "for a moment; a new pick at once");
+
+    HunterConfig steered;           // facing_tolerance 12
+    steered.reach = 450;
+    steered.packet_positions = PacketPositions::On;
+    const auto faces_right = [](HuntRig& r, int dx) {
+        r.w.turn_reports = true;
+        r.w.facing = 1;
+        r.w.facing_ms = r.w.t;
+        r.w.mobs = { plate(640 + dx, 400, "Xa") };
+    };
+    const auto taps = [](const HuntRig& r) { return r.w.of(VK_LEFT).size() + r.w.of(VK_RIGHT).size(); };
+    {
+        // dx +15 and -15 by turns every 150 ms for 3 s: inside 12 + 25.
+        HuntRig r(steered, false, true);
+        faces_right(r, 15);
+        r.run(300);
+        const std::uint64_t from = r.w.t;
+        bool fought = true;
+        while (r.w.t < from + 3000) {
+            const bool left = (r.w.t - from) / 150 % 2 == 0;
+            move_to(r.w.mob("Xa"), 640 + (left ? -15 : 15));
+            r.pass();
+            fought = fought && r.hunter.engaged() && !r.hunter.turning();
+        }
+        check(taps(r) == 0 && fought && r.w.of('Z').size() >= 4,
+              "a target between dx +15 and -15 every 150 ms for 3 s, the character facing right: no tap, fought "
+              "all along -- " + std::to_string(taps(r)) + " taps, " + std::to_string(r.w.of('Z').size()) + " swings");
+    }
+    {
+        // From +40 to -40, and kept there: one tap left, kTurnStayMs after;
+        // not fought meanwhile.
+        HuntRig r(steered, false, true);
+        faces_right(r, 40);
+        r.run(300);
+        const bool none_before = taps(r) == 0 && r.hunter.engaged();
+        move_to(r.w.mob("Xa"), 640 - 40);
+        const std::uint64_t crossed = r.w.t;
+        bool waited = true;
+        while (r.w.t < crossed + 600) {
+            r.pass();
+            if (r.w.of(VK_LEFT).empty()) waited = waited && !r.hunter.engaged();
+        }
+        const auto lefts = r.w.of(VK_LEFT);
+        const bool once = lefts.size() == 1 && r.w.of(VK_RIGHT).empty() &&
+                          lefts[0].at >= crossed + Hunter::kTurnStayMs && lefts[0].at < crossed + Hunter::kTurnStayMs + 61;
+        check(none_before && waited && once && r.hunter.engaged() && r.w.facing == -1,
+              "the target from +40 to -40 and kept there: one tap left " +
+                  std::to_string(lefts.empty() ? 0 : lefts[0].at - crossed) +
+                  " ms after (250 at the least), not fought before it; then fought");
+    }
+    {
+        // A new pick 40 px the other side: at once.
+        HuntRig r(steered, false, true);
+        faces_right(r, -40);
+        r.pass();
+        check(r.w.of(VK_LEFT).size() == 1 && r.hunter.turning(),
+              "a new pick 40 px the other side, the character facing right: tapped at the first pass");
+    }
+    // The band is a wait, not a facing (2026.11.12 review): a target that
+    // stays in it -- a melee monster stopped 30 px behind to hit -- is turned
+    // to after kTurnBandStayMs; fought where the character faces until then.
+    {
+        HuntRig r(steered, false, true);
+        faces_right(r, 20);
+        r.run(300);
+        move_to(r.w.mob("Xa"), 640 - 30);
+        const std::uint64_t crossed = r.w.t;
+        bool fought_before = true;
+        while (r.w.t < crossed + 1200) {
+            r.pass();
+            if (r.w.of(VK_LEFT).empty()) fought_before = fought_before && r.hunter.engaged();
+        }
+        const auto lefts = r.w.of(VK_LEFT);
+        const bool once = lefts.size() == 1 && r.w.of(VK_RIGHT).empty() &&
+                          lefts[0].at >= crossed + Hunter::kTurnBandStayMs &&
+                          lefts[0].at < crossed + Hunter::kTurnBandStayMs + 61;
+        check(once && fought_before && r.hunter.engaged() && r.w.facing == -1,
+              "the target from +20 to -30, kept there 1.2 s: fought facing right meanwhile, then one tap left " +
+                  std::to_string(lefts.empty() ? 0 : lefts[0].at - crossed) + " ms after (" +
+                  std::to_string(Hunter::kTurnBandStayMs) + " at the least), and fought facing it");
+    }
+    {
+        // Bobbing between -30 and -45 every 200 ms: the band's wait runs on
+        // across the bob -- one tap, kTurnBandStayMs at the most.
+        HuntRig r(steered, false, true);
+        faces_right(r, 20);
+        r.run(300);
+        const std::uint64_t crossed = r.w.t;
+        while (r.w.t < crossed + 1200) {
+            const bool out = (r.w.t - crossed) / 200 % 2 == 1;
+            if (r.w.of(VK_LEFT).empty()) move_to(r.w.mob("Xa"), 640 - (out ? 45 : 30));
+            r.pass();
+        }
+        const auto lefts = r.w.of(VK_LEFT);
+        check(lefts.size() == 1 && lefts[0].at < crossed + Hunter::kTurnBandStayMs + 61,
+              "bobbing between -30 and -45 every 200 ms: one tap left " +
+                  std::to_string(lefts.empty() ? 0 : lefts[0].at - crossed) + " ms after it went behind");
+    }
+    {
+        // -30 and +30 by turns every 300 ms for 3 s: the side in front ends
+        // each wait -- no tap, fought all along.
+        HuntRig r(steered, false, true);
+        faces_right(r, 30);
+        r.run(300);
+        const std::uint64_t from = r.w.t;
+        bool fought = true;
+        while (r.w.t < from + 3000) {
+            const bool behind = (r.w.t - from) / 300 % 2 == 0;
+            move_to(r.w.mob("Xa"), 640 + (behind ? -30 : 30));
+            r.pass();
+            fought = fought && r.hunter.engaged();
+        }
+        check(taps(r) == 0 && fought,
+              "a target between dx -30 and +30 every 300 ms for 3 s: no tap, fought all along -- " +
+                  std::to_string(taps(r)) + " taps");
+    }
+}
+
 void test_hunter_fight(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
     g_check = check_fn;
     g_section = section_fn;
@@ -3782,4 +4842,8 @@ void test_hunter_fight(void (*check_fn)(bool, const std::string&), void (*sectio
     test_hunter_minute_counts();
     test_monster_on_frame();
     test_hunter_slots();
+    test_attack_reach();
+    test_hunter_holds();
+    test_turn_pending();
+    test_turn_hysteresis();
 }

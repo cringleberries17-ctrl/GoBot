@@ -36,10 +36,11 @@ struct FrameRates {
 /// exception: it must come round often. tick() reads GoBot's own keys there
 /// -- F12, the panic key, among them -- by GetAsyncKeyState, so a key is
 /// seen only if it is down at a pass, and pushes HP and MP to the potions.
-/// So the loop never waits longer than kMaxWaitMs, from when it woke, whatever
-/// the frame rate: with Windows' 15.6 ms clock tick that lands every pass on
-/// the next tick, as today's loop does at 60 frames a second. tick() is never
-/// tied to the frame rate.
+/// So the loop never waits longer than kMaxWaitMs, from the last tick(),
+/// whatever the frame rate: with Windows' 15.6 ms clock tick that lands every
+/// pass on the next tick, as today's loop does at 60 frames a second. tick()
+/// is never tied to the frame rate -- nor to how many messages come: it runs
+/// at most once per kTickEveryMs (tick_due), however often they wake the loop.
 ///
 /// No Windows call here: the clock and every state come in with each pass,
 /// so the tests drive it with a clock of their own.
@@ -47,8 +48,17 @@ class FramePacer {
 public:
     /// After the last input, the interactive rate is kept up this long.
     static constexpr std::uint64_t kInteractiveForMs = 1000;
-    /// The longest the loop may wait between passes, counted from its wake.
+    /// The longest the loop may wait between passes, counted from its wake --
+    /// from the last tick() when the pass did not run one.
     static constexpr std::uint32_t kMaxWaitMs = 10;
+    /// tick() at most this often. Every window message wakes the loop, and a
+    /// mouse moving over GoBot sends one WM_MOUSEMOVE per report -- up to 1000
+    /// a second -- each of which ran the whole tick(): 184 passes a second
+    /// were seen in a startup minute, where 100 is all the keys need
+    /// (2026-11-16). No longer than kMaxWaitMs, or the loop would wake with no
+    /// tick() due and spin.
+    static constexpr std::uint64_t kTickEveryMs = 10;
+    static_assert(kTickEveryMs <= kMaxWaitMs, "a wait that ends before tick() is due would spin");
     /// How early a frame may come. Windows ends a wait on its 15.6 ms clock
     /// tick, so a frame due at 33 ms waited for the third tick, 47 ms, and 30
     /// frames a second came out as 21. Up to this much (and an eighth of the
@@ -85,6 +95,11 @@ public:
     /// has gone. For a pass that never asks decide(), as when the window is
     /// covered.
     static std::uint32_t tick_wait_ms(std::uint64_t woke, std::uint64_t now);
+
+    /// Whether the pass at `now` runs tick(): kTickEveryMs since `last`, the
+    /// one before it ran (0 for none yet). A clock that went back runs it:
+    /// a key missed is worse than a tick() too many.
+    static bool tick_due(std::uint64_t last, std::uint64_t now);
 
     /// Milliseconds between frames at `fps`, which is held to 1..60.
     static std::uint64_t period_of(int fps);

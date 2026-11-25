@@ -8,6 +8,8 @@
 #include "gobot/mob_detector.hpp"
 #include "gobot/packet_world.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -40,6 +42,10 @@ const char* packet_positions_name(PacketPositions p);
 /// hunt.ini's word back, whatever its case and spaces. Anything else --
 /// a word no GoBot wrote, or none -- is Watch: capture and log only.
 PacketPositions packet_positions_from(const std::string& word);
+
+/// The most any of the band's numbers may be, in pixels (HunterConfig::
+/// set_band, hunt.ini): the Tầm đánh window's and the Bản đồ tab's bars' top.
+inline constexpr int kBandMaxPx = 1000;
 
 struct HunterConfig {
     /// Whether START on the simple screen goes hunting -- that screen's
@@ -119,18 +125,28 @@ struct HunterConfig {
     /// of it -- which is the hunter before styles, so a hunt.ini that sets
     /// only height_tolerance works as it always did. Read through up(),
     /// down(), up_nj() and down_nj().
+    ///
+    /// up() and down() are the two bars on the Bản đồ tab (2026.11.12, the
+    /// owner's Q6 and Q7) and the only heights a drop or a jump up goes by: a
+    /// monster further below than down() is dropped to where the map lets a
+    /// drop go, one further above than up() jumped up to where it lets a jump
+    /// go, one between fought from where the character stands. The no-jump
+    /// pair is never more than them: the owner's 22:24 band of 10 and 20
+    /// under a pinned 30 read as "no jump under 30 px" on the Tầm đánh window.
     int up_reach = -1;
     int down_reach = -1;
     int up_no_jump = -1;
     int down_no_jump = -1;
     int up() const { return up_reach >= 0 ? up_reach : height_tolerance; }
     int down() const { return down_reach >= 0 ? down_reach : height_tolerance; }
-    int up_nj() const { return up_no_jump >= 0 ? up_no_jump : height_tolerance / 2; }
-    int down_nj() const { return down_no_jump >= 0 ? down_no_jump : height_tolerance / 2; }
+    int up_nj() const { return std::min(up_no_jump >= 0 ? up_no_jump : height_tolerance / 2, up()); }
+    int down_nj() const { return std::min(down_no_jump >= 0 ? down_no_jump : height_tolerance / 2, down()); }
 
     /// The band set by hand -- the "Tầm đánh" window, the full screen's Up
-    /// and Down: up and down as given, the no-jump band pinned where it is
-    /// now, and height_tolerance the larger of the two for an older GoBot.
+    /// and Down, the Bản đồ tab's two bars: up and down as given, 0..1000,
+    /// the no-jump band pinned where it is now -- as set or followed, not cut
+    /// to the old band: raised again, the bars give it back -- and
+    /// height_tolerance the larger of the two for an older GoBot.
     void set_band(int up_px, int down_px);
 
     /// "Giữ khoảng cách": a target closer than min_distance (50 px with none
@@ -144,7 +160,10 @@ struct HunterConfig {
 
     /// How far to the side, in pixels, a target may be before the character
     /// turns to it. GoC's "Hạn chế quay người", 12 in the player's config; the
-    /// hunter's number before it was a setting.
+    /// hunter's number before it was a setting. A new pick past it is turned
+    /// to at once; the same target only past Hunter::kTurnSlackPx more, for
+    /// Hunter::kTurnStayMs (2026.11.12) -- or past it at all for
+    /// Hunter::kTurnBandStayMs (the review of 2026.11.12).
     int facing_tolerance = 12;
 
     /// With a style: a target in reach whose health bar has not gone down in
@@ -205,13 +224,23 @@ struct HunterConfig {
     /// only the hunter's own swing.
     std::uint32_t attack_interval_ms = 700;
 
+    /// The furthest across, in world pixels, the hunter swings attack_key at
+    /// its target (2026.11.12, F3): 0 goes by the reach your casts of its
+    /// skill have shown (Hunter::set_attack_reach) and Hunter::
+    /// kAttackReachSlackPx more, and at any distance until that is known. On
+    /// 2026-11-11 Z, whose targets were all within 76 px, was swung from up
+    /// to 450 px. 0-1000.
+    int attack_range_px = 0;
+
     /// Jump when the target is above and out of reach.
     bool jump_to_reach = true;
 
     /// "Nhảy xuống bậc dưới": drop through the platform underfoot with Ctrl
     /// + ↓ (InputManager::drop_ctrl_down, the player's key for it) to the
-    /// target on a floor below -- more than max(down(), drop_min_px) below,
-    /// no more than drop_side_px to the side, and nothing to fight on the
+    /// target on a floor below -- more than down() below, the lower bar
+    /// alone (2026.11.12, the owner's Q7: drop_min_px, 100 at least until
+    /// then, is gone; a hunt.ini that has it keeps the line, unread), no
+    /// more than drop_side_px to the side, and nothing to fight on the
     /// character's own level. Only with the packets steering
     /// (packet_positions=on), never with stay_put, and with the hunting spot
     /// on only where the character stands, lands and the target all lie
@@ -223,7 +252,6 @@ struct HunterConfig {
     /// test, 2026-11-04). A map change after a press stops the hunt and
     /// unticks this (GuiApp). It moves the character, so it ships off.
     bool drop_down = false;
-    int  drop_min_px = 100;     ///< 60..470
     int  drop_side_px = 120;    ///< 20..300
     int  drop_gate_px = 150;    ///< 40..400
 
@@ -234,8 +262,10 @@ struct HunterConfig {
     /// MapTrust trusts, packet_positions=on, stay_put off and the jump key ↑;
     /// the take-off, the landing and the monster inside the area. On by
     /// default -- the owner's answer 5 of 2026-11-05, "Bật sẵn" -- and a
-    /// hunt.ini without it reads true. Off, or off for the run, nothing new
-    /// is pressed: the log says where a jump would have gone. Independent of
+    /// hunt.ini without it reads true. Off, nothing new is pressed: the log
+    /// says where a jump would have gone. Nothing turns it off for the run, nor
+    /// unticks it, since 2026.11.24: a jump that did not get there is tried
+    /// again. Independent of
     /// jump_to_reach, which is the old hop's alone.
     bool jump_up = true;
 
@@ -311,8 +341,14 @@ struct HunterConfig {
     /// A walk back that the game's own reports put no Hunter::kSpotProgressPx
     /// nearer the spot in this long -- a walk into a wall sends none, and the
     /// packets work it out as going on -- is let go of and tried again
-    /// spot_retry_ms later; after Hunter::kSpotMaxTries in a row, not again
-    /// until the spot is set again or the character is back at it. Not under
+    /// spot_retry_ms later; after Hunter::kSpotMaxTries in a row, a new round
+    /// of kSpotMaxTries tries spot_retry_ms on, round after round with no end
+    /// (2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không
+    /// làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác" --
+    /// from 2026.11.12 one more only after four spot_retry_ms, 1 to 5 min,
+    /// and never again before), sooner once a report has the character
+    /// somewhere else or the map has learned something, and at once when the
+    /// spot is set again or the character is back at it. Not under
     /// 3 s: a walk on a clear floor sends no report between its start and
     /// the stop of its renewal (Hunter::kWalkRenewMs, 2.5 s), and would be
     /// given up on before that came.
@@ -375,11 +411,22 @@ struct HunterConfig {
     std::uint32_t toggle_key = 122;     ///< F11
 
     bool load(const std::string& path);
+    /// The whole of [Hunt] written over the file's own keys. One writer of a
+    /// hunt.ini at a time, with save_band: the GUI thread's and the Bản đồ
+    /// tab's worker's never cross.
     bool save(const std::string& path) const;
+    /// The band's keys alone -- up_reach, down_reach, the no-jump pair and
+    /// height_tolerance (store_band) -- written over the file's own, the rest
+    /// of it as it is; the whole of it (save) when there is no file yet. The
+    /// Bản đồ tab's bars (2026.11.12), saved on its worker: never on the GUI
+    /// thread, and never a stale copy of another setting written back.
+    bool save_band(const std::string& path) const;
     /// What save() writes into [Hunt], put into `ini`: over the file's own
     /// keys when save() calls it, or into an empty one to compare two configs
     /// without a file (settings_changes, gobot/macro.hpp).
     void store(IniFile& ini) const;
+    /// The band's part of it.
+    void store_band(IniFile& ini) const;
 };
 
 /// Where the game's packets put your character in their world, for the
@@ -426,6 +473,16 @@ struct WorldFix {
     /// hunter's spot and MapTrust's points).
     std::uint16_t report_op = 0;
     std::uint64_t air_reports = 0;
+    /// When your last cast (0x0031) came since the map entry, on the frames'
+    /// clock; 0 for none (PacketWorld::Me::cast_ms): a turn's tap in its
+    /// animation is lost, and is tapped again only once they stop
+    /// (Hunter::kTurnQuietMs, 2026.11.12).
+    std::uint64_t cast_ms = 0;
+    /// The last report came at y 0, and y and ry are the last real report's
+    /// height (PacketWorld::Me::y_kept, 2026.11.12 review): fought and walked
+    /// back from as there, but no landing, standing point, put-back or spot
+    /// is made of it.
+    bool y_kept = false;
     /// Standing on the ground, with nothing worked out: where the spot is set.
     bool settled() const { return state == State::Known && !airborne && !moving && !uncertain; }
 };
@@ -559,7 +616,8 @@ public:
     /// command line's hunter has it -- and nothing is ever dropped to.
     void set_map_book(GameMapBook* book);
     /// What GoBot outside the hunter says against a drop at this moment --
-    /// HP low or not known, the macro held, a walk, the keeper crossing, one
+    /// HP not known (HP low no longer, since 2026.11.12b), the macro held, a
+    /// walk, the keeper crossing, one
     /// of GoBot's own keys on Ctrl or ↓ -- in the log's English, or null for
     /// nothing. Asked on the hunter's thread, so it reads atomics only. Set
     /// before start(); unset, nothing is ever dropped to.
@@ -571,6 +629,24 @@ public:
     /// answers at once and presses nothing. Set before start(); unset, nobody
     /// is told.
     void set_on_attack(std::function<void(std::uint32_t vk, std::uint64_t at_ms)> f) { on_attack_ = std::move(f); }
+    /// Whether the swing of `vk`, the attack key, is to be left to the macro
+    /// (2026.11.16b, MacroEngine::swing_yields): it is pacing the skills in
+    /// turn, and the key is one of them, or one of them is ready to go. The
+    /// swing then goes without its press -- the rotation presses its keys in
+    /// their turn -- and counts as a swing let be, as one held for the key's
+    /// reach does. Asked
+    /// on the hunter's thread, so it reads atomics only. Set before start();
+    /// unset, the hunter presses its key as ever.
+    void set_swing_yield(std::function<bool(std::uint32_t vk)> f) { swing_yield_ = std::move(f); }
+    /// When the hunter's last swing of its attack key went down, on its clock
+    /// -- stored just BEFORE the key goes down (2026.11.17), 0 for none. Read
+    /// from any thread: the macro's rotation tells the swing's cast from its
+    /// own key's by it (MacroEngine::Fight::swing_ms). set_on_attack is told
+    /// only once the press is over, and the swing's cast comes 27-87 ms after
+    /// its key-down: the rotation's pass could take that cast before the
+    /// swing's time was known, take it for a key's own, and teach the key the
+    /// swing's skill (2026-11-17, "key X cast skill 51205 ... learned afresh").
+    std::uint64_t last_swing_ms() const { return swing_down_ms_.load(); }
 
     /// For tests, which drive the hunter by hand on a clock of their own:
     /// start as start() does but with no thread, and run one pass of the loop
@@ -630,12 +706,14 @@ public:
     /// went out at every pass, a missed one made up for at the next; now the
     /// character is turned only when the hunter does not take it to be facing
     /// the target already, and a turn missed is not tried again at the next
-    /// pass -- only once the packets show it missed (kFacingMissedMs). The
-    /// attack's own press is as long. It walks the character about 21 px,
-    /// but once a turn, so they do not add up; and a step back
-    /// (keep_distance), which a turn always follows, is held as much longer
-    /// than backstep_ms, so that turn walks it no nearer than the step meant.
-    static constexpr int kTurnTapMs = 60;
+    /// pass -- only once the packets show it missed (kFacingMissedMs). 60 ms
+    /// until 2026.11.12: under the macro's own floor of 70 ms, and 46 of the
+    /// 148 turns of 2026-11-11 had a key the game missed (F1). It walks the
+    /// character about 28 px, but once a turn, so they do not add up; and a
+    /// step back (keep_distance), which a turn always follows, is held as much
+    /// longer than backstep_ms, so that turn walks it no nearer than the step
+    /// meant.
+    static constexpr int kTurnTapMs = 80;
     /// A report of yours that says which way you face (WorldFix::facing) is
     /// taken over the hunter's own idea of it at once when it came more than
     /// this long after the last key of the hunter's own that turned the
@@ -655,8 +733,40 @@ public:
     /// key -- a press it read no frame of, under a load, or in an animation
     /// -- and the report is taken: the hunter turns the character again. A
     /// report the capture lost costs a tap more, and the wait is long enough
-    /// for a game at a few frames a second.
-    static constexpr std::uint64_t kFacingMissedMs = 500;
+    /// for a game at a few frames a second: a taken tap was reported 35-100 ms
+    /// after its key on 2026-11-11. 500 ms until 2026.11.12. A turn's own tap
+    /// is tapped again after this too, with no cast of yours for kTurnQuietMs
+    /// (the turn pending, turning()).
+    static constexpr std::uint64_t kFacingMissedMs = 300;
+    /// A turn's tap (2026.11.12, F1, the owner's Q2): with the packets
+    /// steering and knowing the character, the turn is pending -- turning(),
+    /// the macro's skills held, the hunter's own attack let be -- until a
+    /// 0x0027 of yours toward the target comes, stamped at or after its first
+    /// tap went down. Tapped again once the last tap has had kFacingMissedMs
+    /// and no cast of yours (0x0031) has come for kTurnQuietMs: a tap in a
+    /// skill's animation is lost, and casts came back to back (a gap of
+    /// 0.8-0.9 s). Never pending past kTurnCapMs from its first tap: then the
+    /// turn is taken as made, as every tap was before, and the packets put it
+    /// right if it was not (kFacingMissedMs).
+    static constexpr std::uint64_t kTurnQuietMs = 150;
+    static constexpr std::uint64_t kTurnCapMs = 1000;
+    /// Turn hysteresis (2026.11.12, F2): a target the other side of the way
+    /// the character faces is turned to at once only as a new pick -- another
+    /// monster, not the same one picked straight back -- after the hunter's
+    /// own walk or step away from it, or with the facing not known. The same
+    /// target is turned to only once it has stayed more than facing_tolerance
+    /// + kTurnSlackPx the other side for kTurnStayMs: a monster walking
+    /// through the character flipped the side every 2-4 s on t56_s3, and each
+    /// flip was a turn. Within that band, it is fought where the character
+    /// faces, as within facing_tolerance; past it, not until the turn. A
+    /// target that settles in the band -- a melee monster stopped behind to
+    /// hit, a dash that ends just past it -- is turned to once it has stayed
+    /// that side past facing_tolerance for kTurnBandStayMs: the owner's
+    /// facing_tolerance (GoC's "Hạn chế quay người") holds for a monster that
+    /// stays put (2026.11.12 review).
+    static constexpr int           kTurnSlackPx = 25;
+    static constexpr std::uint64_t kTurnStayMs = 250;
+    static constexpr std::uint64_t kTurnBandStayMs = 600;
     /// How far to the side the target was, in pixels, on that pass.
     int engaged_dx() const { return engaged_dx_.load(); }
     /// The attack key of the config in use, for any thread.
@@ -670,6 +780,111 @@ public:
     /// engaged() is not: nothing walks then, and a bag job's key window lets
     /// the macro's letter skills through between its clicks (2026.11.10).
     bool returning() const { return returning_now_.load() && running_.load() && !coord_.critical_active(); }
+    /// Why the hunter holds the macro's skill keys (skill_hold), the first
+    /// that applies in this order.
+    enum class SkillHold : std::uint8_t {
+        None,
+        /// A drop's settle and fall (DropPhase::Settle, Fall): on t23_s14 at
+        /// 22:22:00 a skill fired during Ctrl + ↓ carried the character 105 px
+        /// along its slope, and the drop was judged off the map.
+        Drop,
+        /// A turn to the target the game has not confirmed yet (turning()).
+        Turning,
+        /// The hunting spot in use -- or this pass walking back, which
+        /// returning() holds for -- and nothing to fight: no target, standing
+        /// or waiting (State::NoTargets, State::Waiting).
+        NoTarget,
+        /// The spot in use and the character more than kZoneOutsideBackPx
+        /// outside its box with no walk back this pass -- too high, no way
+        /// back, given up on, latched and standing -- or the game's put-back
+        /// waiting for a second report (SpotWhy::PutBack): stranded.
+        Outside,
+        /// A leg of the seek's way (2026.11.12c, kHoldSkillsOnLegs): walking
+        /// to a walk-off's end or a jump's take-off, and the fall off the end
+        /// -- the drops through platforms of 2026-11-12 came right after
+        /// macro skills.
+        SeekLeg,
+        /// A jump's settle, and the flight of one the way, the seek or a
+        /// target planned (2026.11.12c) -- not a plain ↑ past the upper bar,
+        /// whose flight is the attack's.
+        Jump,
+    };
+    /// Holding the macro's skill keys for a moment of danger on its last pass,
+    /// and still running (the owner's Q2 of 2026-11-11, "GoBot giữ skill lúc
+    /// nguy hiểm"): why, SkillHold -- never None while this is true. What the
+    /// macro holds every skill key for, as for returning()
+    /// (MacroEngine::Fight::Mode::Held); never a potion or a buff. Read from
+    /// any thread; never under a hold, as returning().
+    bool skills_held() const { return skill_hold() != SkillHold::None; }
+    SkillHold skill_hold() const {
+        return running_.load() && !coord_.critical_active() ? static_cast<SkillHold>(skill_hold_now_.load())
+                                                             : SkillHold::None;
+    }
+    /// A turn to the target pending on the last pass: the arrow tapped, and
+    /// no report of yours since that has the character facing the target
+    /// (the owner's Q2: skills held "until the game confirms the facing").
+    /// Set by the turn's own tracking (turning_); read from any thread, and
+    /// never under a hold.
+    bool turning() const { return turning_now_.load() && running_.load() && !coord_.critical_active(); }
+
+    // ---- the dash (2026.11.12, the owner's Q1, Q2 and Q5 of 2026-11-11)
+
+    /// A dash's length while the one learned has none: the longer of the two
+    /// seen (214 and 319 px).
+    static constexpr int kDashGuessPx = 320;
+    /// The dash learned from your moves with no walk (PacketWorld::dash) and
+    /// the key that casts its skill (CastMatch): `vk` 0 while none is known,
+    /// `px` 0 while its length is not. From GoBot's thread, any time.
+    void set_dash(std::uint32_t vk, int px) {
+        dash_key_.store(vk);
+        dash_px_.store(px);
+    }
+    /// The key held as the dash: the one learned; none while none is
+    /// (2026.11.17). Until then C, V and Space were guessed at (the owner's
+    /// "C, V hoặc Space" of 2026-11-11), and that guess starved C and V while
+    /// hunting: in the owner's 366-px box a 320-px dash lands outside from
+    /// almost anywhere, so C and V got about one cast a minute against eleven
+    /// standing (2026-11-17), while the real dashes -- D's 300 px and X's
+    /// 105 + 214 px -- were never held. No key's cast came before a move
+    /// with no walk for C at all. Outside the area, the hunter stops fighting
+    /// and walks back (the owner's rule of 2026-11-15).
+    std::array<std::uint32_t, 3> dash_keys() const {
+        return std::array<std::uint32_t, 3>{ dash_key_.load(), 0, 0 };
+    }
+    /// A dash from where the packets put the character on the last pass --
+    /// dash_px() along the way it faces, either way when that is not known
+    /// -- would land further outside the hunting area's box than it stands
+    /// (the spot in use), or past a floor's end of the map file in use and
+    /// trusted -- the area's, or the one drops and jumps go by (the owner's
+    /// Q2; Q5: never off a pit's edge). In the flight of the bar's ↑, judged
+    /// from its take-off (2026.11.12c review: the skills attack in the air
+    /// then). What the macro holds the dash's keys for (MacroEngine::Fight::
+    /// dash_edge), whatever else it is doing. Read from any thread while
+    /// running.
+    bool dash_edge() const { return dash_edge_now_.load() && running_.load(); }
+    /// The target being fought is further across than attack_limit_px: the
+    /// hunter holds its own swing of attack_key there (F3), and the macro's
+    /// rotation, pressing that key in its turn since 2026.11.16b, passes it
+    /// (MacroEngine::Fight::attack_far). Set before engage() on the pass, so
+    /// the macro never sees the fight without it; false once disengaged. Read
+    /// from any thread while running.
+    bool attack_far() const { return attack_far_now_.load() && running_.load(); }
+    int dash_px() const {
+        const int px = dash_px_.load();
+        return px > 0 ? px : kDashGuessPx;
+    }
+
+    // ---- the attack key's own reach (2026.11.12, F3)
+
+    /// How far across the attack key's skill has reached, learned from your
+    /// casts (CastMatch::learned_reach): 0 while not known. From GoBot's
+    /// thread, any time.
+    void set_attack_reach(int px) { attack_reach_.store(px); }
+    /// The hunter presses attack_key only at a target no further across
+    /// than this (world pixels): HunterConfig::attack_range_px when set, else
+    /// the learned reach and kAttackReachSlackPx more; 0 at any distance.
+    int attack_limit_px(const HunterConfig& cfg) const;
+    static constexpr int kAttackReachSlackPx = 24;
     static constexpr std::uint64_t kEngagedGraceMs = 500;
 
     // ---- the drop through a platform (HunterConfig::drop_down): the plan's 11a
@@ -698,9 +913,13 @@ public:
     /// The floor landed on is the first more than kDropFeetPx below where the
     /// character stands, at least kDropMinFallPx below it -- a floor between
     /// is a real one -- and the same floor, kDropSameFloorPx up or down, this
-    /// far either side: at the settle and at the press.
+    /// far either side: at the settle and at the press. kDropMinFallPx was 60
+    /// until 2026.11.12 (the owner's Q7: the bars alone); it is kept as the
+    /// least fall a landing is told by -- a report kDropLandPx lower, standing
+    /// on the floor's top - 1 -- so a drop that went is never judged one that
+    /// did nothing, learned as a no-drop point and counted as a failed press.
     static constexpr int           kDropFeetPx = 8;
-    static constexpr int           kDropMinFallPx = 60;
+    static constexpr int           kDropMinFallPx = kDropLandPx + 1;
     static constexpr int           kDropSameFloorPx = 6;
     static constexpr int           kDropMarginSettlePx = 24;
     static constexpr int           kDropMarginPressPx = 8;
@@ -733,17 +952,68 @@ public:
     static constexpr std::uint64_t kDropStayMs = 8000;
     /// No drop this soon after a map entry first seen.
     static constexpr std::uint64_t kDropAfterEntryMs = 5000;
-    /// Drops off until the next start after this many presses in a row that
-    /// did nothing or jumped in place, or this many in a run.
-    static constexpr int           kDropFailsInRow = 3;
-    static constexpr int           kDropFailsPerRun = 5;
-    /// ↓ held longer than this -- the hold is 110 ms at most -- and drops are
-    /// off until the next start.
+    /// ↓ held longer than this -- the hold is 110 ms at most -- is said in the
+    /// log (a slow PC), and the press judged as any other: since 2026.11.24
+    /// no longer drops off until the next start.
     static constexpr std::uint32_t kDropHeldMaxMs = 180;
     /// A map change this long after a press is the press's.
     static constexpr std::uint64_t kPressWatchMs = 10000;
-    /// Passes in a row a drop's key-up stays owed before the hunter halts.
+    /// Passes in a row a drop's key-up stays owed before every key is let go
+    /// of and the hunter holds still, pass by pass, until the key-ups go out
+    /// (2026.11.24; the hunter halted for GoBot's window to stop the hunt
+    /// until then).
     static constexpr int           kDropOwedPasses = 3;
+
+    // ---- one lost key press is no evidence (2026.11.15): the log of
+    // 2026-11-15 had the game lose 30-40% of GoBot's short presses at random
+    // (Ctrl + ↑ did nothing at 4 of 5 first tries, Ctrl + ↓ at 2 of 6), and
+    // every one of them was held against the place, the monster and the key.
+
+    /// A place is remembered as one Ctrl + ↓ does not drop at
+    /// (GameMapBook::learn_no_drop) only at the SECOND press that did nothing
+    /// -- or jumped in place -- no further than GameMapBook::kNoDropXPx,
+    /// kNoDropYPx from the first, within this long of it, and with no drop that
+    /// worked there between. The first only counts (drop_suspects_).
+    static constexpr std::uint64_t kNoDropSuspectMs = 120'000;
+    /// The first press of a row that did not get there -- a drop's or a jump
+    /// up's -- passes its monster over only this long, so the next look tries
+    /// again at once (since 2026.11.24 whatever the verdict; until then only
+    /// one that did nothing, and the second in a row 2 x give_up_ms).
+    static constexpr std::uint64_t kRetryPassOverMs = 1200;
+
+    // ---- try again, never a pause (2026.11.24): the owner's correction of
+    // that day, "không, 2. Nhảy xuống (Ctrl+↓) khi hỏng thì thử lại luôn, hoặc
+    // dừng ra skill rồi nhảy xuống chứ không phải là dừng 90s". The 30 / 60 /
+    // 120 s pauses after 3 presses in a row (or 5 in a run) that did not get
+    // there, "off until the next BẮT ĐẦU" -- a rise, a landing off the file's
+    // floors, ↓ or ↑ held long, a key the game did not take as its jump, g out
+    // of range, a landing higher than planned or outside the area -- and the
+    // hunt stopped with Nhảy xuống / Nhảy lên unticked and saved after a map
+    // change, are all gone. A drop or a jump up that did not get there is
+    // tried again at the next look: the only spacing left is kDropGapMs and
+    // the settle and judge steps. What keeps a retry off the very same spot is
+    // the hunter's normal fighting between tries (kRetryFightMs) and the place
+    // a press failed at skipped a while (kLearnedForgetMs), so the next try
+    // comes from another take-off column when the map offers one. Gates learned
+    // where a press changed the map are knowledge, never forgotten.
+
+    /// From the second failed press in a row on, its monster is passed over
+    /// this long in place of kRetryPassOverMs: one fight turn -- the hunter's
+    /// normal attack and skills on whatever is in reach -- then the next look
+    /// presses again (the owner's "dừng ra skill rồi nhảy xuống"). 2 x
+    /// give_up_ms (8 s as shipped) until 2026.11.24.
+    static constexpr std::uint64_t kRetryFightMs = 3000;
+    /// A place a press failed at -- a no-drop point, a jump's take-off onto
+    /// that floor, a floor fallen back from -- is skipped this long, the next
+    /// try made from another take-off column when the map offers one; then it
+    /// is forgotten (forget_learned) and tried again. Until 2026.11.24 such a
+    /// place was kept for the rest of the session.
+    static constexpr std::uint64_t kLearnedForgetMs = 30'000;
+    /// The per-monster counts -- kDropsPerTarget, kDropSettlesPerTarget,
+    /// kJumpUpsPerTarget, kJumpUpSettlesPerTarget, kBarUpDryPerTarget -- count
+    /// only the presses and settles of the last this long (TargetPresses::
+    /// last_ms): no monster is refused for the rest of the run.
+    static constexpr std::uint64_t kTargetCountMs = 10'000;
 
     // ---- the jump up onto a floor above (HunterConfig::jump_up): the jump-up
     // plan's §6, §7 and §11; the shared numbers -- kDropGapMs, kPressWatchMs,
@@ -769,30 +1039,140 @@ public:
     /// On the planned floor within this of its top there: worked.
     static constexpr int           kJumpUpLandPx = 24;
     static constexpr int           kJumpUpFloorMatchPx = 12;
-    /// No more than this many presses in a minute, nor for one monster, nor
-    /// settles let go of for one monster without a press.
+    /// No more than this many presses in a minute -- since 2026.11.24 only
+    /// those that moved the character: one that did nothing, or fell back, is
+    /// taken back out -- nor for one monster in kTargetCountMs, nor settles
+    /// let go of for one monster without a press in that time.
     static constexpr int           kJumpUpsPerMinute = 4;
     static constexpr int           kJumpUpsPerTarget = 2;
     static constexpr int           kJumpUpSettlesPerTarget = 2;
     /// After a jump toward a target that worked, no drop for this long
     /// (DropWhy::AfterJump): it would take the character back down.
     static constexpr std::uint64_t kJumpUpStayMs = 8000;
-    /// Jumps up off until the next start after this many presses in a row
-    /// that did not get there, or this many in a run.
-    static constexpr int           kJumpUpFailsInRow = 3;
-    static constexpr int           kJumpUpFailsPerRun = 5;
-    /// A key whose kind never came this many times -- Ctrl + ↑ with no high
-    /// jump, ↑↑ with no second -- is off for the run; a floor fallen back
-    /// from this many times is solid from below this session; a jump's ↑
-    /// held longer than this latches HeldLong (InputManager::kJumpHeldLongMs).
-    static constexpr int           kJumpUpKindMisses = 2;
+    /// A floor fallen back from this many times is taken as solid from below
+    /// -- for kLearnedForgetMs since 2026.11.24, the session until then; a
+    /// jump's ↑ held longer than this is said in the log (a slow PC), the
+    /// jump judged as any other -- jumps up off until the next start until
+    /// 2026.11.24 (InputManager::kJumpHeldLongMs). Since 2026.11.24 a key
+    /// whose kind did not come is a failed press like any other, never a key
+    /// off for the run (kJumpUpKindMisses, 2, until then).
     static constexpr int           kJumpUpSolidAfter = 2;
     static constexpr std::uint32_t kJumpUpHeldMaxMs = 250;
-    /// g measured from a flight outside these, this many times in a run:
-    /// the jump is not what the model says -- Physics. Logged, never fed back.
-    static constexpr double        kJumpUpGravityLo = 2100.0;
-    static constexpr double        kJumpUpGravityHi = 2800.0;
-    static constexpr int           kJumpUpGravityOut = 2;
+    /// g measured from a flight outside these is said in the log, never fed
+    /// back -- and since 2026.11.24 never switches the jumps off (twice in a
+    /// run did, kJumpUpGravityOut, until then). Gross since 2026.11.12c: g from
+    /// a whole flight reads low by the landing report's ~0.3 s (1905 for a
+    /// clean Ctrl + ↑ of 2026-11-12); 2100..2800 until then.
+    static constexpr double        kJumpUpGravityLo = 1300.0;
+    static constexpr double        kJumpUpGravityHi = 3200.0;
+    /// The wall-foot jump (2026.11.12c, the owner's "Chỉ Ctrl+↑ tại chỗ" for
+    /// t49_s5's step; Q8 (a) until answered): planned at all, and a fine tap
+    /// toward the step's face at least this long -- the step stops it.
+    static constexpr bool          kWallFootJumps = true;
+    static constexpr int           kWallPushMs = 150;
+    /// The owner's plain ↑ past the upper bar (2026.11.12c, Q1 and Q2 (a)
+    /// until answered): no more than kBarUpsPerMinute a minute, kBarUpGapMs
+    /// after each landing, kBarUpDryPerTarget back on its own floor with no
+    /// hurt to one monster in kTargetCountMs before it is passed over. Since
+    /// 2026.11.24 never paused nor off for the run: one that did nothing is
+    /// tried again after kBarUpGapMs, and one that landed outside the area
+    /// has its take-off skipped kLearnedForgetMs while the walk back takes
+    /// over (kBarUpFailsInRow and kBarUpFailsPerRun -- 3 in a row, 5 in a run
+    /// -- paused it 30 / 60 / 120 s, and a landing outside switched it off for
+    /// the run, until then). A monster on the level and one past the bar
+    /// both to be had: the nearest across, a level one winning ties within
+    /// kBarLevelTiePx (kBarNearestFirst); false is level ones first. The
+    /// flight's 0x002A said at INFO for the first kBarTraceInfo of a run.
+    static constexpr int           kBarUpsPerMinute = 10;
+    static constexpr std::uint64_t kBarUpGapMs = 1200;
+    static constexpr int           kBarUpDryPerTarget = 2;
+    static constexpr bool          kBarNearestFirst = true;
+    static constexpr int           kBarLevelTiePx = 50;
+    static constexpr int           kBarTraceInfo = 10;
+    /// The owner's Ctrl + ↓ past the lower bar (2026.11.12c, Q4 (a) until
+    /// answered): a landing below the monster's floor, but within one ↑ of
+    /// it, goes -- the plain ↑ then takes it. (The plan's deeper look for the
+    /// monster's floor, 400 px, is not taken: it made the owner's own 06:48
+    /// refusal of a landing 351 px under a monster go.) Only where that ↑, in
+    /// place on the landing, comes down on no floor but its own or the
+    /// monster's (the 2026.11.12c review: DropCall::one_up).
+    static constexpr bool          kDropBelowOneUp = true;
+    /// Stranded with no way, the file not trusted yet (2026.11.12c, Q6 (a)
+    /// until answered): up to kTrustStepsMax steps along its own floor for
+    /// MapTrust's standing points, kTrustStepGapMs apart -- each to a place
+    /// kTrustStepPx times 1, 2 or 3 either way of where the steps began, at
+    /// least MapTrust::kTrustSpreadXPx from where it began and every step's
+    /// end, so each is a point of its own (the 2026.11.12c review: a relog's
+    /// spawn is never one, and at t23_s14's bottom two steps one way left no
+    /// room for the third); the floor followed there and kZoneWalkSlackPx on
+    /// with no end, no step and no wall, nowhere further outside the area
+    /// than where they began by more than kTrustStepOutPx (a sloping floor's
+    /// own fall), walked for kTrustStepWalkMs a kTrustStepPx at most. The file
+    /// still not trusted after kTrustStepsMax steps -- a monster standing off
+    /// its floors set the points back, one of yours off them was let pass --
+    /// the steps are armed again kTrustStepsAgainMs on, from where it stands
+    /// then, round after round, under the same guards (2026.11.24, the owner:
+    /// "cần thay cơ chế này bằng 1 cơ chế khác"; until then no more steps
+    /// until the next map entry). A few seconds since the 2026.11.24 review
+    /// (30 s at first): the stranded character, outside the area, neither
+    /// fights nor walks back meanwhile -- "no long pause as a replacement for
+    /// a stop". The outside limit stays the first round's of the stay
+    /// (trust_out_set_): rounds without end never drift further out.
+    static constexpr bool          kTrustSteps = true;
+    static constexpr int           kTrustStepPx = 80;
+    static constexpr int           kTrustStepsMax = 3;
+    static constexpr std::uint64_t kTrustStepsAgainMs = 5'000;
+    static constexpr int           kTrustStepOutPx = 24;
+    static constexpr int           kTrustStepArrivePx = 12;
+    static constexpr std::uint64_t kTrustStepGapMs = 1000;
+    static constexpr std::uint64_t kTrustStepWalkMs = 1500;
+    /// The macro's skills held on the seek's walk-off and jump legs and in a
+    /// jump's settle (2026.11.12c, Q7 (a) until answered).
+    static constexpr bool          kHoldSkillsOnLegs = true;
+    /// Stranded on a standing point, the way back asked of the map again this
+    /// often (2026.11.12c): a floor's budget or a fix's flicker no longer
+    /// leaves it standing for good. 10 s until 2026.11.15. Only with a
+    /// standing point (ZoneHere::stand): the 8 s stand of 2026-11-15 00:05:56
+    /// had none, and nothing is asked without one -- blind_landing gives it
+    /// one (kBlindLandMs).
+    static constexpr std::uint64_t kStrandedReaskMs = 3000;
+    /// Blind after a fall (2026.11.15, the same log, 00:05:56): the last
+    /// report of yours is a cast's (0x0031 -- a dash's move ends in the air) on
+    /// none of the file's floors, and none has come for kBlindLandMs: the
+    /// character fell and landed, and a fall sends no landing report. A
+    /// character that stands still sends nothing at all, so it stood for good,
+    /// "stranded" with no way asked (ZoneHere::stand none), until it was moved
+    /// by hand. Taken as standing on the first floor under that column, no
+    /// further down than kBlindLandMaxPx (a fall of that height takes 0.7 s at
+    /// g 2400): the way back is worked out from there, and the first report of
+    /// its walk puts it right (blind_landing).
+    static constexpr std::uint64_t kBlindLandMs = 700;
+    static constexpr int           kBlindLandMaxPx = 600;
+    /// A landing reported on none of the file's floors is not judged at once
+    /// (2026.11.15, the owner's log of 00:27:54): a Ctrl+Up knocked 80 px
+    /// aside at the top of its arc sent a 0x002A of state 0 -- a "landing" --
+    /// at 2956,815, 426 px up, and the real one, on the planned floor, came
+    /// 450 ms on; judged as the first, "off the map's floors", it had the file
+    /// distrusted for the rest of the session and every jump, drop and way
+    /// back with it: from 01:10 to 08:07 the character stood outside its area.
+    /// A jump's later report on a floor of the file is the landing; a drop's
+    /// newer fix is looked at again; with none for this long, the verdict
+    /// stands. Of ANY kind, the first report after the take-off that is not a
+    /// cast's or a 0x002A can stand for the landing (JumpCheck::flight_of: no
+    /// 0x002A of state 0 yet), and in the first live run of 2026.11.15 one in
+    /// mid-air did (10:15:51, 478 ms into a jump whose real landing came at
+    /// 1221 ms): the wait covers every kind, and every later report of the
+    /// flight that puts the character more than kLandSamePx from the "landing"
+    /// starts it again -- it is still moving.
+    ///
+    /// A verdict that stands -- a landing off the file's floors (OffMap) --
+    /// has the hunter's MapTrust let the file go (MapTrust::lose) since
+    /// 2026.11.24: it is gone by again as soon as MapTrust has kTrustPoints
+    /// standing points on its floors, with no clock, and nothing is switched
+    /// off meanwhile. Until then the map book distrusted the file for
+    /// kDistrustMs (120 s), the drops or the jumps off with it.
+    static constexpr std::uint64_t kLandSettleMs = 900;
+    static constexpr int           kLandSamePx = 12;
     /// A fall back shorter than this share of the key's shortest full arc
     /// (2v / g at the highest gravity) was bumped from below; longer, it came
     /// up short.
@@ -875,6 +1255,10 @@ public:
         std::uint32_t epoch = 0;
         float         home_x = 0.0f, home_y = 0.0f;
         float         left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+        /// A trip's place (2026.11.19, Đào khoáng and Cổ Thụ): taken at once
+        /// wherever the character stands -- never waiting for it to be near --
+        /// so the walk back takes it there (set_trip).
+        bool          force = false;
     };
     /// Why a hunting area sent (set_zone) is not in use yet.
     enum class ZoneWait : std::uint8_t {
@@ -898,13 +1282,22 @@ public:
         Suspended,      ///< a map entry or a log in since it was set: standing
         TooHigh,        ///< more than one jump above: not walked back to
         Retrying,       ///< a walk back got nowhere: tried again after spot_retry_ms
-        GaveUp,         ///< kSpotMaxTries walks back in a row got nowhere: no more
-        /// The map tab's area, its map's file gone by (2026.11.04d): away from
+        GaveUp,         ///< kSpotMaxTries walks back in a row got nowhere: the next round after spot_retry_ms
+        /// The map tab's area -- or this run's spot, its file trusted
+        /// (2026.11.12) -- its map's file gone by (2026.11.04d): away from
         /// the home with no way back into the box the map shows -- walking,
         /// falling off ends, the home no more than one jump above
-        /// (return_point): fighting where it stands. What TooHigh is for this
-        /// run's spot.
+        /// (return_point): standing where it is since 2026.11.12 (it fought
+        /// there until then) -- the map's other floors, jumps up and all,
+        /// giving none either. What TooHigh is for this run's spot with no
+        /// file to go by.
         NoReturn,
+        /// A report of yours more than kPutBackPx above the last, with no
+        /// 0x002A and no map entry between (2026.11.12, the owner's Q5 of
+        /// 2026-11-11: fallen into a pit, the game puts the character back at
+        /// the top of the map): standing until a second report there, or
+        /// kPutBackWaitMs with no other, says that is where it is.
+        PutBack,
     };
 
     /// Why the target below is not dropped to (drop_rule): the first of its
@@ -915,13 +1308,14 @@ public:
         NoPackets,          ///< packet_positions not on
         StayPut,            ///< Đứng yên một chỗ
         Spot,               ///< the hunting spot on, but not in use: the character stands
-        Latched,            ///< off until the next start (DropOff)
+        // Latched (off until the next start, or paused) is gone since
+        // 2026.11.24: a drop that did not drop is tried again at once.
         KeysOwed,           ///< a drop's key-up has not gone out
         KeyClash,           ///< the jump, left, right or attack key is Ctrl
         NotWired,           ///< no map book or no veto: the command line's hunter
         NotPacketTarget,    ///< the target is not the packets' (a screen plate)
         LevelMonster,       ///< one to fight on the character's own level
-        NotBelow,           ///< not more than max(down(), drop_min_px) below
+        NotBelow,           ///< not more than down() below: the lower bar
         TooFarSide,         ///< more than drop_side_px across
         NotKnown,           ///< the packets do not know where the character is, or are unsure
         AfterEntry,         ///< a map entry under kDropAfterEntryMs ago
@@ -944,7 +1338,7 @@ public:
         PastMonster,        ///< the fall lands below the target's floor
         OutsideArea,        ///< with the spot: where it stands, lands or the target outside the area
         Gate,               ///< a gate within drop_gate_px
-        NoDropHere,         ///< Ctrl + ↓ did not drop here before (GameMapBook::no_drop_near)
+        NoDropHere,         ///< Ctrl + ↓ did not drop here kLearnedForgetMs ago or less (GameMapBook::no_drop_near)
         AfterJump,          ///< a jump up toward a target worked under kJumpUpStayMs ago (2026.11.05b)
     };
     /// In the log's English.
@@ -954,17 +1348,12 @@ public:
     /// monster's drops used up -- not the clock, a hold, a walk or the packets.
     static bool drop_lasting(DropWhy w);
 
-    /// Why drops are off until the next start.
-    enum class DropOff : std::uint8_t {
-        None,
-        Fails,          ///< kDropFailsInRow presses in a row, or kDropFailsPerRun, did not drop
-        Rose,           ///< a press had the character rise: Ctrl + ↓ acts as a jump there
-        OffMap,         ///< a fall landed where the map file did not say
-        MapChanged,     ///< a press changed the map: the hunt stops (drop_stop)
-        HeldLong,       ///< ↓ was held over kDropHeldMaxMs
-        KeysStuck,      ///< a drop's key-up stayed owed: the hunt stops (drop_stop)
-    };
-    static const char* drop_off_name(DropOff o);
+    // Since 2026.11.24 there is no DropOff: nothing switches the drops off --
+    // not 3 presses in a row that did not drop (a pause of 30 / 60 / 120 s),
+    // a rise, a landing off the file's floors, ↓ held long, a map change, nor
+    // a key-up owed. The place a press failed at is skipped kLearnedForgetMs,
+    // a file a landing found wrong is let go of by MapTrust until its
+    // standing points take it again, and a map change is learned as a gate.
 
     /// What came of a press.
     enum class DropVerdict : std::uint8_t {
@@ -973,19 +1362,32 @@ public:
         Nothing,        ///< no take-off and no landing lower in kDropJudgeMs
         JumpInPlace,    ///< took off and came down where it stood
         Rose,           ///< came down higher
-        OffMap,         ///< came down lower, not where the file said
+        OffMap,         ///< came down lower, on no floor of the map file
         Gate,           ///< the map changed within kPressWatchMs
-        Unknown,        ///< cut short, a hold, the game behind, the view or the packets lost
+        /// Cut short, a hold, the game behind, the view or the packets lost --
+        /// or reported lower on the floor it stood on, more than
+        /// GameMapBook::kNoDropXPx across with no arrow held: something else
+        /// moved it (2026.11.12, t23_s14 at 22:22:01). Nothing learned.
+        Unknown,
+        /// Came down lower on a floor of the map file, not the one it said
+        /// (2026.11.12): pushed aside in the fall. The file still gone by,
+        /// nothing learned, no fail counted.
+        OtherFloor,
     };
 
-    /// What GoBot's window is to do about the drop: stop hunting -- and with
-    /// MapChanged untick drop_down and save it, with JumpMapChanged jump_up
-    /// (a jump up's key changed the map, 2026.11.05b), with BothMapChanged
-    /// both (a drop and a jump up both under watch as it changed). KeysStuck:
-    /// a drop's ↓ or Ctrl up left owed; JumpKeysStuck: a high jump's ↑ or
-    /// Ctrl. Read from any thread.
-    enum class DropStop : std::uint8_t { None, MapChanged, KeysStuck, JumpMapChanged, BothMapChanged, JumpKeysStuck };
-    DropStop drop_stop() const { return drop_stop_.load(); }
+    /// A press that changed the map (2026.11.24), for GoBot's window to say
+    /// once: a drop's, a jump up's, or both -- a drop and a jump up both under
+    /// watch as it changed, either of which may have done it. Both ends are
+    /// learned as gates and the hunt goes on where the character landed;
+    /// nothing is unticked, saved or stopped. Until 2026.11.24 this was
+    /// DropStop -- the window stopped the hunt, unticked Nhảy xuống and/or
+    /// Nhảy lên and saved hunt.ini -- with KeysStuck and JumpKeysStuck for a
+    /// key-up left owed, which since lets every key go and goes on (the
+    /// hunter's per-pass hold, drop_watch).
+    enum class PressGate : std::uint8_t { None, Drop, Jump, Both };
+    /// The last press gate not said yet, and None after it: the window says
+    /// each map change once. Read from any thread.
+    PressGate take_press_gate() { return press_gate_.exchange(PressGate::None); }
 
     // ---- the jump up (HunterConfig::jump_up, 2026.11.05b)
 
@@ -995,34 +1397,37 @@ public:
     /// What it is for: onto the floor of the target above, a leg of the way
     /// back to the home (return_point), or a leg toward a monster sought in
     /// the area ("Tự tìm quái trong vùng") -- the way back's rules, with the
-    /// per-monster caps and AfterDrop.
-    enum class JumpUpFor : std::uint8_t { Target, Home, Seek };
+    /// per-monster caps and AfterDrop -- or the owner's plain ↑ for a monster
+    /// past the upper bar (Bar, 2026.11.12c: "khi ở trên ngưỡng pixel thì chỉ
+    /// cần nhảy thường (1 lần mũi tên lên)"), in place, attacking in the air.
+    enum class JumpUpFor : std::uint8_t { Target, Home, Seek, Bar };
     /// What came of a press (the jump-up plan's §7).
     enum class JumpUpVerdict : std::uint8_t {
         None,
-        Worked,     ///< landed on the planned floor
+        Worked,     ///< landed on the planned floor, or on a floor of its band (2026.11.12c)
         FellBack,   ///< came down on the take-off's floor, where it stood
-        KindMiss,   ///< Ctrl + ↑ with no high jump, ↑↑ with no second one
+        KindMiss,   ///< landed elsewhere, and its take-off's speed says the other kind
         Lower,      ///< on another floor below the planned one, in the area
-        Higher,     ///< on a floor above the planned one: Physics
-        Outside,    ///< landed outside the area: Physics
-        OffMap,     ///< on no floor of the map's file: distrusted, OffMap
+        Higher,     ///< on a floor above the planned one past the key's reach: that take-off skipped a while
+        Outside,    ///< landed outside the area: that take-off skipped a while, the walk back takes over
+        OffMap,     ///< on no floor of the map's file: MapTrust lets the file go (2026.11.24)
         Nothing,    ///< no take-off within kJumpUpJudgeMs of the last key
         Unknown,    ///< the packets lost, a hold, the game behind, or still in the air at kJumpUpAirMaxMs
         Gate,       ///< the map changed within kPressWatchMs of the key
+        /// On another floor above the planned one inside the area, within the
+        /// key's reach (2026.11.12c): a move, re-planned -- no fail.
+        Moved,
+        /// A plain ↑ past the upper bar back on its own floor (2026.11.12c):
+        /// the attack was in the air -- not a fail.
+        AirOnly,
     };
     static const char* jump_verdict_name(JumpUpVerdict v);
-    /// Why jumps up are off until the next start.
-    enum class JumpUpOff : std::uint8_t {
-        None,
-        Fails,          ///< kJumpUpFailsInRow in a row, or kJumpUpFailsPerRun, did not get there
-        Physics,        ///< landed higher than planned, or outside the area, or g twice out of range
-        OffMap,         ///< landed on no floor of the file
-        MapChanged,     ///< a press changed the map: the hunt stops (drop_stop)
-        HeldLong,       ///< an ↑ held over kJumpUpHeldMaxMs
-        KeysStuck,      ///< a key-up stayed owed: the hunt stops (drop_stop)
-    };
-    static const char* jump_off_name(JumpUpOff o);
+    // Since 2026.11.24 there is no JumpUpOff: nothing switches the jumps up
+    // off -- not 3 in a row that did not get there (a pause), a landing higher
+    // than planned or outside the area, g out of range, a key the game did not
+    // take as its jump (off for the run), a landing off the file's floors, ↑
+    // held long, a map change, nor a key-up owed. The take-off a jump failed
+    // from is skipped kLearnedForgetMs, and a map change is learned as a gate.
     /// Why a jump up does not go (jump_up_rule): the first of its rules that
     /// does not hold, in their order. None: it goes.
     enum class JumpUpWhy : std::uint8_t {
@@ -1031,7 +1436,8 @@ public:
         NoPackets,          ///< packet_positions not on
         StayPut,            ///< Đứng yên một chỗ
         NoArea,             ///< no area of the map tab's in use, with its map's file
-        Latched,            ///< off until the next start (JumpUpOff), or every key it needs off for the run
+        // Latched (off until the next start, paused, or every key it needs off
+        // for the run) is gone since 2026.11.24.
         KeysOwed,           ///< a chord's key-up has not gone out
         JumpKey,            ///< the jump key is not ↑
         KeyClash,           ///< a walk or attack key is Ctrl: no Ctrl + ↑, and only it would do
@@ -1059,6 +1465,7 @@ public:
         OffFloor,           ///< where it stands is on no floor of that file
         Plan,               ///< no jump the planner keeps (JumpUpCall::no)
         OffColumn,          ///< at the press, where it stopped does not pass
+        TooHigh,            ///< a plain ↑ past the upper bar: more than its air band above (2026.11.12c)
     };
     static const char* jump_why_name(JumpUpWhy w);
 
@@ -1182,6 +1589,10 @@ public:
         /// reach or not -- and since when on the hunter's clock.
         bool          spot_back_walk = false;
         std::uint64_t spot_back_walk_ms = 0;
+        /// Stranded (2026.11.12, the owner's Q4, ZoneHere::stranded): further
+        /// out than kZoneOutsideBackPx with no walk back to be had -- standing
+        /// where it is, nothing outside the area fought, skills held.
+        bool          spot_stranded = false;
         /// ... worked out with jumps up able to go (2026.11.05b): walking,
         /// falling or jumping up; the jumps up on it; and, when it starts
         /// with one (ZoneReturn::jump), that one's key and take-off x -- what
@@ -1211,10 +1622,16 @@ public:
         DropWhy       drop_wait = DropWhy::None;
         int           drop_wait_px = 0;
         std::uint64_t drop_wait_ms = 0;
-        /// Drops off until the next start, and why; with MapChanged or
-        /// KeysStuck the hunt is to stop (drop_stop).
-        DropOff       drop_off = DropOff::None;
-        bool          drop_map_changed = false;
+        /// Presses this run -- a drop's or a jump up's -- that changed the map
+        /// (2026.11.24): each learned as a gate, the hunt going on (PressGate).
+        /// A key-up is owed right now -- a drop's ↓ or Ctrl, a high jump's ↑
+        /// -- past kDropOwedPasses: every key let go of, the hunter holding
+        /// still until Windows takes the key-ups (2026.11.24; the hunt stopped
+        /// until then). drop_off, drop_off_until_ms, drop_map_changed,
+        /// jump_off, jump_off_until_ms, jump_kinds_off, jump_map_changed,
+        /// bar_off and wall_foot_off -- the drops and jumps off, paused, or
+        /// the hunt stopped -- are gone with what set them.
+        int           press_gates = 0;
         bool          drop_keys_stuck = false;
         /// The map drops go by: its file, how it came to be trusted, or why
         /// none is (MapTrust::report). With drop_down off, as it was.
@@ -1224,7 +1641,7 @@ public:
         /// is at -- walking to a take-off, settled to press, in the air -- for
         /// what, with which key from which column onto which floor; the
         /// presses this run and what came of them, and the jumps it would
-        /// have made with the tick off or off for the run.
+        /// have made with the tick off.
         JumpUpPhase   jump_phase = JumpUpPhase::Idle;
         JumpUpFor     jump_for = JumpUpFor::Target;
         JumpKind      jump_kind = JumpKind::Up;
@@ -1238,10 +1655,9 @@ public:
         std::uint64_t jumps_worked = 0;
         std::uint64_t jumps_fell_back = 0;
         std::uint64_t jumps_would = 0;
-        /// The jump that would have gone last, with the tick off or jumps off
-        /// for the run -- toward a monster, on the way back, or to one sought
-        /// -- and when it was last worked out: the map tab draws it while
-        /// fresh. 0: none this run.
+        /// The jump that would have gone last, with the tick off -- toward a
+        /// monster, on the way back, or to one sought -- and when it was last
+        /// worked out: the map tab draws it while fresh. 0: none this run.
         JumpPlan      jump_would_plan = {};
         std::uint64_t jump_would_ms = 0;
         /// Why the last jump up was not taken, with its number -- the floor's
@@ -1253,11 +1669,15 @@ public:
         std::uint64_t jump_wait_ms = 0;
         JumpUpFor     jump_wait_for = JumpUpFor::Target;
         std::string   jump_wait_name;
-        /// Off until the next start, and why; the keys off for the run (bit
-        /// 1 << JumpKind, kJumpUpKindMisses); a press that changed the map.
-        JumpUpOff     jump_off = JumpUpOff::None;
-        std::uint8_t  jump_kinds_off = 0;
-        bool          jump_map_changed = false;
+        /// The plain ↑ past the upper bar (2026.11.12c): pressed, landed on
+        /// the monster's floor, back on its own.
+        std::uint64_t bar_ups = 0;
+        std::uint64_t bar_onto = 0;
+        std::uint64_t bar_air_only = 0;
+        /// The way back asked of the map again while stranded (2026.11.12c,
+        /// kStrandedReaskMs), and the trust steps taken.
+        std::uint64_t way_asks = 0;
+        std::uint64_t trust_steps = 0;
 
         /// "Tự tìm quái trong vùng" (HunterConfig::seek_in_zone, 2026.11.05b):
         /// whether it was on at the last pass; the monster gone for -- its slot
@@ -1341,6 +1761,36 @@ public:
     /// in does. Another map's is left alone. From any thread.
     void zone_aside(const std::string& stem);
 
+    // ---- trips (2026.11.19: Đào khoáng, Cổ Thụ) ----
+    //
+    // GoC walks its mining and its dungeon with its own server's move
+    // service; GoBot has none, so a trip is the walk back: a small area round
+    // the place to go, taken at once wherever the character stands (Zone::
+    // force), with Chỗ đánh quái switched on for as long as a trip is set --
+    // whatever the card says -- and, quiet, nothing fought nor sought on the
+    // way or there. The way is the walk back's own: along the floor, the
+    // map's drops and jumps up as their ticks allow.
+
+    /// Go to x, y of `stem` (the packets' world pixels), arriving within tol_x
+    /// either side and tol_y above and below; `quiet`: nothing fought. From
+    /// any thread; taken at the next pass. `epoch` is the map entries the
+    /// packets had counted (PacketWorld::Place::epoch).
+    void set_trip(const std::string& stem, std::uint32_t epoch, float x, float y, int tol_x, int tol_y,
+                  bool quiet);
+    /// No trip: Chỗ đánh quái back to the card's tick, and the trip's area
+    /// dropped (clear_zone) -- the spot taken again where the character stands.
+    void end_trip();
+    bool trip_set() const { return trip_on_.load(); }
+    /// The expedition is about to change the map itself -- a gate's ↓, an
+    /// NPC's teleport row, the dungeon's door, its way out -- or is waiting
+    /// for the game to move the party (2026.11.21, the audit's B3): for the
+    /// next `for_ms`, a map change after a drop's or a jump's press is not
+    /// the press's. The press is forgotten unjudged -- no gate learned --
+    /// where before the trip's own gate stopped the hunt and unticked
+    /// Nhảy xuống / Nhảy lên (since 2026.11.24 a press's map change stops
+    /// nothing either: it is learned as a gate). From any thread.
+    void expect_map_change(std::uint64_t for_ms);
+
     /// The hunting spot's numbers, in world pixels.
     ///
     /// The current target is let go of as outside the area only this far
@@ -1349,12 +1799,30 @@ public:
     /// A spot higher above the character than this is out of one jump's
     /// reach (a jump tops out about 133 px up): not walked back to.
     static constexpr int kOneJumpPx = 120;
+    /// A spot further below the character than this -- about one view's
+    /// height -- is not walked back to with no map file to plan the way down
+    /// (2026.11.12 review, wander C3): the blind walk back along the ground
+    /// after t62_s5's put-back at the top would have walked floor after floor
+    /// off their ends, a pit among them, and stopped 3,400 px above the spot.
+    /// The character stands there, stranded, until a trusted file plans it
+    /// or it comes nearer.
+    static constexpr int kSpotFarBelowPx = 461;
     /// Higher than this, the walk back hops on the way; level within it.
     static constexpr int kSpotFloorPx = 31;
     /// A walk back is getting somewhere while the reports put the character
     /// this much nearer the spot within spot_give_up_ms.
     static constexpr int kSpotProgressPx = 20;
-    /// Walks back given up on in a row before no more are tried.
+    /// Walks back given up on in a row -- a round of tries -- before the
+    /// round's wait (GaveUp). That wait is the player's own spot_retry_ms
+    /// (2026.11.24, the owner's "cần thay cơ chế này bằng 1 cơ chế khác":
+    /// never a long wait), and the next round has kSpotMaxTries tries again,
+    /// round after round with no end: standing -- stranded, the skills held,
+    /// out of the area -- a character sends no report, and nothing else would
+    /// have it try again. Sooner once a report of yours has the character
+    /// more than kSpotProgressPx from where it gave up, or the map has learned
+    /// something (jump_epoch_). From the review of 2026.11.12 the wait was
+    /// four spot_retry_ms, 60 s to 300 s (kSpotGaveUpRetryMinMs ..
+    /// kSpotGaveUpRetryMaxMs, gone), and the round one try.
     static constexpr int kSpotMaxTries = 3;
     /// A map entry whose spawn is this close to where the character left the
     /// spot's map is a way back to it: a door there and back. After a log in
@@ -1375,13 +1843,31 @@ public:
     /// A ground report of yours refused for a spot (spot_plausible) said at
     /// INFO at most this often, with its opcode.
     static constexpr std::uint64_t kSpotOddSayMs = 60'000;
+    /// A spot taken where the character stands, on a map whose file is
+    /// trusted, goes onto the floor under it -- the one it stands on, or the
+    /// first below no more than this down (2026.11.12): t62_s5's spawn
+    /// 265,5104 was 33 px over floor 5137, and every height judged of the
+    /// spot was 33 px out. With no trusted file, a spot is not taken at the
+    /// map entry's spawn (MapTrust::kEntrySpawnPx) but at the next report.
+    static constexpr int kSpotSnapPx = 40;
+    /// A report of yours placing the character more than this above the last
+    /// that did -- a rise no walk or fall makes -- with no 0x002A of yours and
+    /// no map entry between, is the game putting it back after a fall into a
+    /// pit (the owner's Q5 of 2026-11-11; t62_s5 at 21:50:37, 3166,5446 to
+    /// 3166,723): taken once a second report agrees within kPutBackAgreePx,
+    /// or none other has come in kPutBackWaitMs; standing meanwhile
+    /// (SpotWhy::PutBack). Then the way back is worked out afresh from there.
+    /// A fall down that far needs no 0x002A, and is a fall.
+    static constexpr int           kPutBackPx = 1000;
+    static constexpr int           kPutBackAgreePx = 400;
+    static constexpr std::uint64_t kPutBackWaitMs = 3000;
     /// Room left before the area's edge that a step back needs: a step is
     /// held 50 ms at the least, about 18 px, and the turn back to the target
-    /// after it walks about 21 px of that back in (kTurnTapMs). With room for
-    /// less, a step to the edge and the turn after it left room for another,
-    /// and the character stepped out and turned in again until
-    /// keep_distance_steps ran out.
-    static constexpr int kSpotStepRoomPx = 39;
+    /// after it walks about 28 px of that back in (kTurnTapMs; 21 px and 39
+    /// here until 2026.11.12). With room for less, a step to the edge and the
+    /// turn after it left room for another, and the character stepped out and
+    /// turned in again until keep_distance_steps ran out.
+    static constexpr int kSpotStepRoomPx = 46;
     /// A walk toward a target with the map tab's area in use is looked along
     /// its floor (walk_stays_in) as far as it goes before it stops for the
     /// target -- to reach across, or under it -- and this further, a look's
@@ -1406,7 +1892,9 @@ public:
     /// first floor of the column, not a wall, whose top is no more than
     /// kDropFloorMatchPx above y and no more than kDropMonsterFloorPx below
     /// it -- its top; none with no such floor.
-    static std::optional<int> monster_floor(const GameMapBook::Page& p, int x, int y);
+    /// `depth` (2026.11.12c): how far below its point its floor is looked for.
+    static std::optional<int> monster_floor(const GameMapBook::Page& p, int x, int y,
+                                            int depth = kDropMonsterFloorPx);
 
     static const char* to_string(State s);
 
@@ -1466,9 +1954,9 @@ public:
     /// it: its bar falls under anyone's blows. `wounded_picked`, when given,
     /// is set when the most wounded was taken over the nearest.
     ///
-    /// `below_first`: a drop could go now (drop_down on, not off for the run,
-    /// the map trusted, the spot in use if on) -- with none on the level, the
-    /// nearest from the packets more than max(down(), drop_min_px) below goes
+    /// `below_first`: a drop could go now (drop_down on, the map trusted, the
+    /// spot in use if on) -- with none on the level, the
+    /// nearest from the packets more than down() below goes
     /// before any other, one above nearer by the plates' measure among them
     /// (the player's answer 1 of 2026-11-04).
     ///
@@ -1481,10 +1969,17 @@ public:
     /// owner's Q3 of 04d). Null: any height, as ever. 2 (2026.11.05b): a jump
     /// up gets onto its floor (jumps_may_go) -- picked last of all
     /// (kJumpUpTargetsLast), once nothing else is.
+    ///
+    /// `skip_below` (2026.11.12, A4): the spot in use and no drop able to go
+    /// -- the last resort passes over one more than down() below too, as
+    /// kSkipAboveUnreached does one above: with `own_floor`, all but those it
+    /// marks 1 (the character's own floor, or a walk off its end); with none,
+    /// every one. t23_s14 at 22:27:41 was walked to and fro under a monster
+    /// 153 px below with drops off, and a skill's move took it off the ledge.
     static int choose_target(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
                              const Nameplate* me, const std::vector<Listed>& listed,
                              bool* wounded_picked = nullptr, bool below_first = false,
-                             const std::vector<char>* own_floor = nullptr);
+                             const std::vector<char>* own_floor = nullptr, bool skip_below = false);
 
     /// Standing still: of those within reach of `me` now, the nearest along
     /// the ground -- the nearest on "Đánh trước" if any is. -1 for none.
@@ -1510,6 +2005,12 @@ public:
     /// living, refused by nothing.
     static bool level_monster(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
                               const std::vector<Listed>& listed);
+    /// The one on the level that goes before a drop to the target below, `dx`
+    /// across (DropFacts::level_monster): with kBarNearestFirst (the owner's
+    /// Q1 of 2026.11.12c) one in reach, or nearer across than the target --
+    /// one further and out of reach does not; without it, any (level_monster).
+    static bool level_before_drop(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
+                                  const std::vector<Listed>& listed, int dx);
 
     /// Everything a drop to the target below is judged by at one look
     /// (drop_rule), laid out so a test can set any one of them.
@@ -1518,7 +2019,6 @@ public:
         std::uint64_t now = 0;                  ///< the hunter's clock
         bool          spot_use = false;         ///< the hunting spot in use (not standing for want of a fix)
         Spot          area;                     ///< and where it is
-        bool          latched = false;          ///< drops off until the next start
         bool          owed = false;             ///< a drop's key-up not out
         bool          wired = false;            ///< a map book and a veto
         bool          packet_target = false;    ///< the target is the packets' own (slot 0 or more)
@@ -1526,6 +2026,12 @@ public:
         float         target_wx = 0.0f;         ///< the target in the packets' world
         float         target_wy = 0.0f;
         bool          level_monster = false;    ///< one to fight on the level (level_monster)
+        /// The owner's Q4 of 2026.11.12c (kDropBelowOneUp): the plain ↑ past
+        /// the upper bar may go, and how far below the monster's floor a
+        /// landing may be for it to take the monster then -- up() and its air
+        /// band, world px.
+        bool          bar_ok = false;
+        int           below_one_up_px = 0;
         WorldFix      fix;                      ///< where the packets put the character
         std::uint64_t entry_ms = 0;             ///< when the hunter first saw this map entry
         std::uint64_t settle_from_ms = 0;       ///< when the settle began
@@ -1536,15 +2042,16 @@ public:
         bool          step_judge = false;       ///< a step back not judged yet
         bool          left_held = false;
         bool          right_held = false;
-        int           presses_minute = 0;       ///< in the last minute
-        int           presses_target = 0;       ///< for this monster
-        int           settles_target = 0;       ///< for this monster, let go of without a press
+        int           presses_minute = 0;       ///< in the last minute, those that moved the character (2026.11.24)
+        int           presses_target = 0;       ///< for this monster, in the last kTargetCountMs
+        int           settles_target = 0;       ///< for this monster, let go of without a press, the same
         bool          held = false;             ///< a hold
         bool          focused = true;
         bool          loot_owed = false;
         const char*   veto = nullptr;
         /// The trusted map's file -- null: none trusted -- with its gates and
-        /// those learned, and whether a no-drop point is near where it stands.
+        /// those learned, and whether a no-drop point is near where it stands
+        /// (one learned kLearnedForgetMs ago is forgotten, 2026.11.24).
         std::shared_ptr<const GameMapBook::Page> page;
         std::vector<MapGate> gates;
         bool          no_drop_here = false;
@@ -1553,6 +2060,11 @@ public:
         /// (monster_floor). None: by its point alone.
         bool          target_stood = false;
         MapPoint      target_stand;
+        /// A drop of the way back (2026.11.12 review, home_drop): no monster
+        /// -- its rules 4 to 7 and the area's (14) let be, the "target" the
+        /// leg's planned landing (target_stand), the walk back's own count in
+        /// place of a monster's -- the rest as for any drop.
+        bool          home = false;
     };
     /// What drop_rule made of them.
     struct DropCall {
@@ -1566,6 +2078,10 @@ public:
         int     gate_px = -1;       ///< the nearest gate across in the fall's band; -1 none
         int     tx = 0, ty = 0;     ///< the target's point, world pixels
         int     target_floor = -1;  ///< its floor's top at tx (monster_floor); -1 not known
+        /// The landing below the monster's floor, within one plain ↑ of it
+        /// (kDropBelowOneUp) -- the bar's ↑ to take it from there, not the
+        /// AfterDrop wait (2026.11.12c review).
+        bool    one_up = false;
         bool ok() const { return why == DropWhy::None; }
     };
     /// The drop plan's §3.2, in its order, with the player's answers of
@@ -1590,7 +2106,8 @@ public:
     /// slope it walked, and kDropMonsterFloorPx more; further, it has gone
     /// elsewhere since -- else monster_floor at its point. What a drop and a
     /// jump up to it land on.
-    static std::optional<int> target_floor(const GameMapBook::Page& p, bool stood, MapPoint stand, int tx, int ty);
+    static std::optional<int> target_floor(const GameMapBook::Page& p, bool stood, MapPoint stand, int tx, int ty,
+                                           int depth = kDropMonsterFloorPx);
 
     /// Everything a jump up is judged by at one look (jump_up_rule), laid out
     /// so a test can set any one of them.
@@ -1602,8 +2119,6 @@ public:
         /// page), and MapTrust trusting that same map.
         bool          area = false;
         bool          trusted = false;
-        bool          latched = false;          ///< jumps up off until the next start
-        std::uint8_t  kinds_off = 0;            ///< keys off for the run: bit 1 << JumpKind
         bool          owed = false;             ///< a chord's key-up not out
         bool          wired = false;            ///< a map book, a veto, air counts and your reports
         /// The monster: Target -- the target above, from the packets (slot 0
@@ -1618,6 +2133,12 @@ public:
         bool          target_stood = false;
         MapPoint      target_stand;
         bool          level_monster = false;    ///< one to fight on the level (level_monster)
+        /// The owner's Q4 of 2026.11.12c (kDropBelowOneUp): the plain ↑ past
+        /// the upper bar may go, and how far below the monster's floor a
+        /// landing may be for it to take the monster then -- up() and its air
+        /// band, world px.
+        bool          bar_ok = false;
+        int           below_one_up_px = 0;
         WorldFix      fix;                      ///< where the packets put the character
         std::uint64_t entry_ms = 0;
         std::uint64_t settle_from_ms = 0;
@@ -1646,6 +2167,15 @@ public:
         JumpRules     rules;
         std::optional<JumpPlan> plan;
         float         scale = 1.0f;             ///< packet_scale: reach in world pixels
+        /// The plain ↑ past the upper bar (Bar, 2026.11.12c): its presses of
+        /// the last minute, those back on the floor with no hurt to this
+        /// monster in kTargetCountMs, its last landing, its air band (plate px)
+        /// -- and a monster on the level nearer across than the target.
+        int           bar_presses_minute = 0;
+        int           bar_dry_target = 0;
+        std::uint64_t bar_landed_ms = 0;
+        int           air_px = 0;
+        bool          level_nearer = false;
     };
     /// What jump_up_rule made of them.
     struct JumpUpCall {
@@ -1663,7 +2193,8 @@ public:
     /// (plan_jump_to), the way's leg taken as given with Home and Seek, and at
     /// the press the column the character stopped on judged afresh: it must
     /// pass the planner, its ±kJumpUpMarginPx samples too, and land on the
-    /// planned floor. Ctrl + ↑ only with no walk or attack key on Ctrl.
+    /// planned floor. Ctrl + ↑ only with no walk or attack key on Ctrl -- since
+    /// 2026.11.24 the one key ever left out: none is off for the run.
     static JumpUpCall jump_up_rule(const HunterConfig& cfg, const JumpUpFacts& f);
 
 private:
@@ -1830,7 +2361,9 @@ private:
     /// the game never took the key. The fix this pass's track_spot took with
     /// the spot on; with it off, Eyes::where asked here. With none to be had,
     /// the packets not knowing the character, or watched only, facing_ stays
-    /// as it is.
+    /// as it is. A turn pending (turn_, 2026.11.12) is confirmed here by a
+    /// 0x0027 its way stamped since its first tap -- and while it is pending,
+    /// nothing else of the facing is taken.
     void face_from_packets(const HunterConfig& cfg);
 
     // ---- the hunting spot (HunterConfig::spot)
@@ -1850,11 +2383,11 @@ private:
     /// tab's asks of this pass -- a delete, an aside, a new area -- and the
     /// area pending, taken into `spot` when it applies.
     void track_zone(Spot& spot, std::optional<Zone> asked, const std::string& clear, const std::string& aside);
-    /// Those of `mobs` outside the spot's area and out of reach of `me`,
-    /// marked OutOfArea in `listed` -- the current target, at `target_at`,
-    /// only kSpotKeepPx past the edge. In reach too while the walk back
-    /// comes first (ZoneHere::back_first, the owner's Q2 of 04d, or the
-    /// latch of 2026.11.10, back_walk_).
+    /// Those of `mobs` outside the spot's area, marked OutOfArea in `listed`
+    /// -- the current target, at `target_at`, only kSpotKeepPx past the edge.
+    /// In reach of `me` too (2026.11.12, the owner's Q3 "Chỉ đánh quái trong
+    /// vùng"): never faced, attacked or walked to. Until then one in reach
+    /// was fought where it stood, but while the walk back came first.
     void mark_out_of_area(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
                           int target_at, std::vector<Listed>& listed) const;
     /// With nothing to fight -- or, the walk back first latched, before any
@@ -1895,16 +2428,44 @@ private:
     /// stays the packets' (take_own keeps every one): facing and speed are
     /// untouched.
     bool spot_plausible(const WorldFix& f, bool say);
+    /// This pass's report as a place (2026.11.12), at every pass with the spot
+    /// on, before anything is made of it: a report at y 0 is none -- it moved
+    /// the "outside" figure and a walk back 5,104 px down at 21:50:37 -- and
+    /// one more than kPutBackPx above the last with no 0x002A and no map
+    /// entry between waits for a second there (kPutBackAgreePx), or
+    /// kPutBackWaitMs, before it is gone by: the game putting the character
+    /// back at the top after a fall into a pit (the owner's Q5). Agreed, it
+    /// is said, the walk back and its latch are over, and the way back is
+    /// asked afresh from there; one back where the last was takes it back.
+    /// Sets fix_odd_.
+    void judge_place(const WorldFix& f);
+    /// Within track_spot, the spot in use: GaveUp's wait (spot_retry_ms since
+    /// 2026.11.24) armed once the character stands after the last walk back
+    /// of a round given up on, and at its end -- or a report of yours
+    /// somewhere else, or the map having learned something -- a new round of
+    /// kSpotMaxTries walks back (return_strikes_ 0; one more, one under
+    /// kSpotMaxTries, until 2026.11.24), said once each.
+    void track_give_up(const HunterConfig& cfg, const WorldFix& f);
+    /// Where a spot taken at `x`, `y` goes (2026.11.12, kSpotSnapPx): onto the
+    /// floor of the trusted map file under it, top - 1; `y` as it is with no
+    /// file trusted for this map or no floor that near; none at the map
+    /// entry's spawn with no such floor -- the next report is waited for.
+    std::optional<float> spot_y_for(const WorldFix& f) const;
     /// The spot's numbers into status_.
     void publish_spot();
 
     // ---- the map tab's area against its map's file (2026.11.04d)
 
     /// The file of a spot's map, to go by: the map tab's area's, not
-    /// suspended, with a map book -- null for this run's spot, and for a map
-    /// this session found wrong: a drop's landing (GameMapBook::distrusted),
-    /// or two standing points of yours off its floors (the hunter's MapTrust,
-    /// Mismatch). Read on its first ask, on the hunter's thread.
+    /// suspended, with a map book -- and for a map found wrong lately none:
+    /// one the map book distrusts (GameMapBook::distrusted -- the hunter's
+    /// landings off a file's floors have MapTrust let it go instead since
+    /// 2026.11.24), or two standing points of yours off its floors (the
+    /// hunter's MapTrust, Mismatch). Read
+    /// on its first ask, on the hunter's thread. This run's spot (2026.11.12,
+    /// the owner's Q4): the file the hunter's MapTrust trusts for the map it
+    /// stands on, the spot's own -- the way back, the jumps up and the ledge
+    /// guard of the map tab's area -- none while it trusts none.
     std::shared_ptr<const GameMapBook::Page> zone_page(const Spot& s) const;
     /// Where the character stands on `p` by `f`: its last report's point, on
     /// the floor it stood on -- with `worked_out`, that floor followed to the
@@ -1912,6 +2473,13 @@ private:
     /// fix not Known or in the air, a report on no floor, or a walk past its
     /// floor's end.
     static std::optional<MapPoint> stand_on(const GameMapBook::Page& p, const WorldFix& f, bool worked_out);
+    /// Where the character stands when the last report of yours is a cast's on
+    /// none of the file's floors and kBlindLandMs have passed with no other
+    /// (2026.11.15): the first floor under that column, within kBlindLandMaxPx;
+    /// none otherwise -- a fix not Known, in the air or walking, a report that
+    /// is another kind, on a floor or a step's lip, a fall too far or onto a
+    /// wall. Said once per report (blind_said_ms_).
+    std::optional<MapPoint> blind_landing(const GameMapBook::Page& p, const WorldFix& f, std::uint64_t now);
     /// What the map tab's area in use makes of where the character stands,
     /// worked out at every pass by track_spot (track_zone_way): its file and
     /// box, where the character stands on it, how far outside the box, the
@@ -1921,11 +2489,26 @@ private:
         HuntZone                box;
         std::optional<MapPoint> stand;                  ///< worked out along its floor
         std::optional<MapPoint> report;                 ///< at its last report
+        /// `stand` and `report` are blind_landing's projection (2026.11.15):
+        /// no report of the character's own is there. A jump or a drop is
+        /// pressed from the real report, which is on no floor -- so the walk
+        /// takes the first step, whose report puts the character right.
+        bool                    blind = false;
         int                     outside_px = 0;
         bool                    home = false;           ///< zone_at_home, worked out
         std::optional<ZoneReturn> way;
         bool                    back_first = false;     ///< zone_walks_back_first, no walk back given up on
         bool                    judged = false;         ///< a way back asked of the map from a standing point: this pass, or carried
+        /// The map tab's area (Spot::from_map), not this run's spot -- which
+        /// has a page too when its map's file is trusted (2026.11.12, W1).
+        bool                    from_map = false;
+        /// Further out than kZoneOutsideBackPx with no walk back to be had --
+        /// no way the map shows, more than one jump above with none to go by,
+        /// given up on or waiting to try again (2026.11.12, the owner's Q4):
+        /// standing where it is, nothing fought outside the area, the macro's
+        /// skills held (Outside). `stranded_why` says which, for the log.
+        bool                    stranded = false;
+        const char*             stranded_why = "";
     };
     /// Within track_spot, the spot in use: zone_ for this pass; a way back
     /// asked of the map only when where the character stands has changed.
@@ -1940,32 +2523,71 @@ private:
     /// target comes in reach.
     bool walk_kept_in(const HunterConfig& cfg, const Nameplate& target, int dx, int dy, std::uint64_t now,
                       int goal_px = -1);
+    /// Before a walk toward `target` with the spot in use, no drop able to go
+    /// and no map file marking the floors (2026.11.12 review of A4): `dy`
+    /// past down() and more than |dx| + kSpotFloorPx -- steeper than a slope
+    /// walked, so another floor -- it is passed over as walk_kept_in passes
+    /// one over: true, and the pass walks no further.
+    bool below_unwalkable(const HunterConfig& cfg, const Nameplate& target, int dx, int dy, std::uint64_t now);
     /// go_home with the map tab's area and its map's file: home by height as
     /// well as across (zone_at_home); otherwise the way back the map shows --
     /// walked to along the floor, or off its end into the box, never a hop
     /// (WalkFor::Floor) -- and stood at once there; with none, NoReturn in
-    /// place of TooHigh, and the character fights where it stands. A way back
-    /// as before (ZoneReturn::as_before) hops as every walk back did.
+    /// place of TooHigh, and the character stands where it is (2026.11.12:
+    /// it fought where it stood until then). A way back as before
+    /// (ZoneReturn::as_before) hops as every walk back did. A way over the
+    /// map's other floors (ZoneReturn::travel) has its jumps up judged in
+    /// the whole map's box (home_legs_box_).
     bool go_home_zone(const HunterConfig& cfg, const Spot& spot, std::uint64_t now);
+    /// Drops may be on a way back over the map's other floors (2026.11.12
+    /// review, the owner's Q4 "drop where it leads down"): Nhảy xuống ticked
+    /// with the packets steering and not standing still, and the hunter's
+    /// MapTrust trusting `page`'s map -- what a press would need of them (no
+    /// latch since 2026.11.24: the way back's Ctrl+↓ legs are never lost to
+    /// one). And what the planner goes by (ZoneDropRules): the map's gates and
+    /// those learned, drop_gate_px, the no-drop points.
+    bool          home_drops_may(const HunterConfig& cfg, const GameMapBook::Page& page) const;
+    ZoneDropRules home_drop_rules(const HunterConfig& cfg, const GameMapBook::Page& page) const;
+    /// At a way back's drop (ZoneReturn::drop): settled there, then Ctrl + ↓
+    /// by the drop rule as at any drop (DropFacts::home) -- the same chord,
+    /// limits and verdicts -- held still through its fall. True while
+    /// it settles or falls (the walk back going on); false refused: standing,
+    /// the give-up clock running.
+    bool home_drop(const HunterConfig& cfg, const ZoneDrop& leg, std::uint64_t now);
     /// For choose_target's `own_floor`: which of `mobs` more than up() above
     /// `me` stand on the character's own floor -- followed from `stand` to
     /// each one's column, the floor there theirs (monster_floor). `f` lays
-    /// the plates over the world.
+    /// the plates over the world. With `below` (2026.11.12, A4), those more
+    /// than down() below too -- on the character's own floor, or on the floor
+    /// a walk off one of its ends lands on.
     std::vector<char> own_floor_marks(const HunterConfig& cfg, const std::vector<Nameplate>& mobs,
                                       const Nameplate& me, const GameMapBook::Page& p, MapPoint stand,
-                                      const WorldFix& f) const;
+                                      const WorldFix& f, bool below = false) const;
+    /// The map file GoBot's own walks are kept out of pits by (2026.11.12,
+    /// the owner's Q5): the area's in use, or the one the hunter's MapTrust
+    /// trusts -- null with neither.
+    std::shared_ptr<const GameMapBook::Page> pit_page() const;
+    /// Whether a walk `dir` (below 0 left, else right) from where the packets
+    /// put the character, looked along its floor `ahead_px` (Page::follow),
+    /// comes to a floor's end a walk off which -- at any of
+    /// kZoneWalkOffShares -- lands on nothing of the map file: a pit, below
+    /// every floor (the owner's Q5 of 2026-11-11: the game puts a character
+    /// that falls in one back at the top of the map). False with no file to
+    /// go by, the character in the air or on none of its floors. Where:
+    /// `edge` the floor's last standing point.
+    bool pit_ahead(int dir, int ahead_px, MapPoint* edge = nullptr) const;
 
     // ---- the drop (HunterConfig::drop_down)
 
     /// drop_down on, the packets steering, not standing still: what asks
     /// anything new of the eyes.
     static bool drop_wanted(const HunterConfig& cfg);
-    /// A drop could go now: drop_wanted, not off for the run, the map
-    /// trusted, the spot in use if on -- what choose_target's below_first
-    /// and the stop above a target below (Q6) go by.
+    /// A drop could go now: drop_wanted, the map trusted, the spot in use if
+    /// on -- what choose_target's below_first and the stop above a target
+    /// below (Q6) go by.
     bool drops_may_go(const HunterConfig& cfg) const;
     /// The owner's Q6 (kDropStopAbovePx): `target`, from the packets, below
-    /// past max(down(), drop_min_px) and no more than kDropStopAbovePx
+    /// past down() and no more than kDropStopAbovePx
     /// across, with a drop able to go -- the walk to it let go of above it.
     bool drop_stop_above(const HunterConfig& cfg, const Nameplate& target, int dx, int dy) const;
     /// The monsters' frames of this pass (Eyes::stands), for where each last
@@ -1973,10 +2595,13 @@ private:
     /// within kMobSameYPx, as MapTrust judges one standing.
     void note_stands(const std::vector<MapTrust::Mob>& mobs);
     /// Once a pass, before a hold or the focus is looked at, with drops
-    /// wanted or a press of the last kPressWatchMs: the keys a drop still
-    /// owes sent again, where the packets put the character (drop_fix_), the
-    /// map entry's age, a map change since a press (Gate), and the map drops
-    /// go by (trust_).
+    /// wanted, the jumps up watched, the spot on with the packets steering
+    /// (2026.11.12: this run's spot's map file, the pit's edge) or a press of
+    /// the last kPressWatchMs: the keys a drop still owes sent again -- owed
+    /// kDropOwedPasses, every key let go of once (2026.11.24) -- where the
+    /// packets put the character (drop_fix_ -- the spot's own look of the
+    /// pass when it was asked), the map entry's age, a map change since a
+    /// press (Gate: press_gate_), and the map drops go by (trust_).
     void drop_watch(const HunterConfig& cfg, std::uint64_t now);
     /// Once a pass, after minute_log: a fall judged, and a settle that
     /// drop_toward did not renew at the last pass let go of. No key.
@@ -2009,54 +2634,89 @@ private:
     /// A press watched for a map change (press_, press_other_).
     struct PressRecord;
     /// A map change within kPressWatchMs of the press `r`, whatever was
-    /// judged before: undone, both ends learned as gates, drops off and the
-    /// hunter halted for GoBot's window to stop the hunt -- drop_watch stores
-    /// the stop, once for both presses when two were under watch.
+    /// judged before: undone, both ends learned as gates -- for good, no
+    /// drop or jump near them again this session -- and the hunt going on
+    /// where the character is (2026.11.24): the moves let go of at the pass
+    /// (let_go_), the way back asked again. drop_watch stores press_gate_
+    /// for GoBot's window to say it, once for both presses when two were
+    /// under watch. Until 2026.11.24 the drops went off and the hunter halted
+    /// for the window to stop the hunt and untick Nhảy xuống.
     void drop_gate(PressRecord& r, std::uint64_t now);
-    /// Drops off until the next start.
-    void latch_drops(DropOff why);
+    /// A press that did nothing, or jumped in place, at `at` on `stem`
+    /// (2026.11.15): true when it is the second near one place within
+    /// kNoDropSuspectMs -- then, and only then, the place is learned
+    /// (drop_suspects_); the first is noted. A drop that worked clears the
+    /// notes near its place (drop_worked_at).
+    bool drop_second_strike(const std::string& stem, MapPoint at, std::uint64_t now);
+    void drop_worked_at(const std::string& stem, MapPoint at);
     /// Why the target `dy` below is not dropped to: into status_, counted for
     /// the minute line, and said in the log at each change of reason -- at
     /// INFO once per target for what the player can do something about, DEBUG
     /// otherwise.
     void drop_refused(const HunterConfig& cfg, const DropCall& call, const Nameplate& target, int dy,
                       std::uint64_t now);
-    /// The presses of the last minute, and for the monster `slot`, `gen`; its
-    /// settles let go of without a press.
+    /// The presses of the last minute, and for the monster `slot`, `gen` in
+    /// the last kTargetCountMs (2026.11.24); its settles let go of without a
+    /// press, the same.
     int drop_presses_minute(std::uint64_t now);
     int drop_presses_for(int slot, std::uint32_t gen) const;
     int drop_settles_for(int slot, std::uint32_t gen) const;
+    /// A place a press failed at, learned in the map book (2026.11.24): a
+    /// no-drop point, a jump's take-off onto a floor, a floor solid from
+    /// below -- what forget_learned takes back kLearnedForgetMs on.
+    enum class LearnedKind : std::uint8_t { NoDrop, NoJump, Solid };
+    /// Noted with `now`: the next try comes from another take-off column
+    /// while it lasts. Kept to kLearnedMax notes -- the oldest taken back
+    /// from the book at once to make room -- and across a start, as the
+    /// book's own memories are.
+    void note_learned(LearnedKind kind, const std::string& stem, MapPoint at, std::uint64_t now);
+    /// A map change took that place's learning back (drop_gate, jump_gate):
+    /// its note goes too.
+    void drop_learned_note(LearnedKind kind, const std::string& stem, MapPoint at);
+    /// First thing in a pass (2026.11.24): each place learned kLearnedForgetMs
+    /// ago is taken back out of the map book -- GameMapBook::unlearn_no_drop,
+    /// unlearn_no_jump, unlearn_solid -- said in the log, and the way back,
+    /// the seek and the marks asked again: it is tried again. Until
+    /// 2026.11.24 cool_downs_end ended the drops' and jumps' pauses here.
+    void forget_learned(std::uint64_t now);
+    /// One place taken back out of the book (forget_learned; `early` for the
+    /// oldest note when note_learned makes room): the epochs moved and the way
+    /// asked again when the book still had it, said in the log.
+    void unlearn_place(LearnedKind kind, const std::string& stem, MapPoint at, bool early);
+    static constexpr std::size_t kLearnedMax = 64;
     /// The minute line's part for drops: "" with no press this minute.
     std::string drop_minute_text() const;
 
     // ---- the jump up (HunterConfig::jump_up, 2026.11.05b): hunter_jump.cpp
 
     /// The packets steering, not standing still, the map tab's area in use
-    /// with its map's file: the jump planner runs -- for real, or for the
+    /// with its map's file -- or this run's spot with its map's file trusted
+    /// (zone_page, 2026.11.12): the jump planner runs -- for real, or for the
     /// log alone (the "would jump" line) -- and the map is watched
     /// (drop_watch). jump_up on or off.
     bool jump_watch(const HunterConfig& cfg) const;
     /// For the area's file `page`: the packets steering, not standing still,
     /// the spot in use, MapTrust trusting that same map, the jump key ↑ and
-    /// the hunter wired -- a jump up would go but for the tick and the latch.
+    /// the hunter wired -- a jump up would go but for the tick.
     bool jump_ready(const HunterConfig& cfg, const GameMapBook::Page* page) const;
     /// jump_ready for the area in use this pass. With jump_up on, hop() never
-    /// presses here -- off for the run too: the jumps are planned.
+    /// presses here: the jumps are planned.
     bool jump_area(const HunterConfig& cfg) const;
-    /// jump_area, jump_up ticked and not off for the run: the planner's ways
-    /// and marks have jumps in them, and keys go.
+    /// jump_area and jump_up ticked: the planner's ways and marks have jumps
+    /// in them, and keys go (no latch since 2026.11.24).
     bool jumps_may_go(const HunterConfig& cfg) const;
-    /// What the planner goes by this pass, on the area's file: the keys (none
-    /// off for the run, no Ctrl + ↑ with a walk or attack key on Ctrl), the
-    /// gates (kJumpUpGateBand only), the reach, and what this session learned
-    /// of that map -- no-jump points and floors solid from below
-    /// (GameMapBook). Its gates point into jump_gates_: one pass's.
+    /// What the planner goes by this pass, on the area's file: the keys (no
+    /// Ctrl + ↑ with a walk or attack key on Ctrl -- none off for the run since
+    /// 2026.11.24), the gates (kJumpUpGateBand only), the reach, and what this
+    /// session learned of that map -- no-jump points and floors solid from
+    /// below (GameMapBook), each kLearnedForgetMs at most since 2026.11.24.
+    /// Its gates point into jump_gates_: one pass's.
     JumpRules jump_rules(const HunterConfig& cfg, const std::shared_ptr<const GameMapBook::Page>& page);
     /// Which of `mobs` more than up() above, not on the character's own
     /// floor (`marks` 0), a jump gets onto: the nearest one, marked 2 when
     /// jumps may go -- the rest left as they are, choose_target taking the
-    /// first anyway; with the tick off or off for the run, said in the log
-    /// ("would jump") and left 0.
+    /// first anyway; with the tick off, said in the log ("would jump") and
+    /// left 0.
     void jump_marks(const HunterConfig& cfg, const std::vector<Nameplate>& mobs, const Nameplate& me,
                     const std::vector<Listed>& listed, const GameMapBook::Page& p, MapPoint stand,
                     const WorldFix& f, std::vector<char>& marks);
@@ -2105,32 +2765,80 @@ private:
     /// A hold, the game behind, a view change, a log in: a settle let go of,
     /// a flight Unknown. The press record and the in-air guard stay.
     void jump_hold(const char* why);
-    /// The flight judged `v`, landed at `lx`, `ly`: what it learns, counts and
-    /// latches, and what the target or the way back makes of it.
+    /// The flight judged `v`, landed at `lx`, `ly`: what it learns and counts,
+    /// and what the target or the way back makes of it -- never a switch
+    /// off since 2026.11.24.
     void end_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t now, int lx, int ly, const char* why,
                     const std::string& more);
     /// A map change within kPressWatchMs of the jump's key `r` (drop_gate's
     /// for a jump): its learning and counts undone, the take-off and the
-    /// entry learned as gates, jumps off and the hunter halted -- the stop
-    /// JumpMapChanged, stored by drop_watch.
+    /// entry learned as gates, and the hunt going on (2026.11.24) --
+    /// PressGate::Jump stored by drop_watch. Until 2026.11.24 the jumps went
+    /// off and the hunter halted for the window to stop the hunt.
     void jump_gate(PressRecord& r, std::uint64_t now);
-    void latch_jumps(JumpUpOff why);
     /// Why a jump up for `purpose` is not taken: into status_, counted for the
     /// minute line, and said at INFO once a monster or way for what the owner
     /// can act on -- DEBUG otherwise.
     void jump_refused(const HunterConfig& cfg, const JumpUpCall& call, JumpUpFor purpose, int slot,
                       std::uint32_t gen, const std::string& name, std::uint64_t now);
-    /// The tick off or off for the run: where a jump would have gone, said
-    /// once a monster or way, and at most every kJumpUpSayMs; counted.
+    /// The tick off: where a jump would have gone, said once a monster or
+    /// way, and at most every kJumpUpSayMs; counted.
     void jump_would(const JumpPlan& plan, JumpUpFor purpose, int slot, std::uint32_t gen, const std::string& name,
                     std::uint64_t now);
     int jump_presses_minute(std::uint64_t now);
     int jump_presses_for(int slot, std::uint32_t gen) const;
     int jump_settles_for(int slot, std::uint32_t gen) const;
-    /// Into status_: the phase, the counts, the latch.
+    /// Into status_: the phase and what it is at.
     void publish_jump();
     /// The minute line's part for the jumps up: "" with nothing this minute.
     std::string jump_minute_text() const;
+    /// How near the take-off a walk to it hands over to jump_at: a wall-foot
+    /// jump's within kWallFootPx -- the walk pushes into the step -- the
+    /// rest kJumpUpLeadPx (2026.11.12c).
+    static int take_off_lead(const JumpPlan& j) { return j.wall ? kWallFootPx : kJumpUpLeadPx; }
+    /// Each key's reason not to go from `stand`, judged in `box` -- "Up no
+    /// floor reached for sure; ..." -- for the stranded line (2026.11.12c).
+    static std::string jump_why_here(const GameMapBook::Page& p, const HuntZone& box, MapPoint stand,
+                                     const JumpRules& rules);
+
+    // ---- the plain ↑ past the upper bar (2026.11.12c): hunter_jump.cpp
+
+    struct JumpUpState;
+
+    /// Its air band above the upper bar, plate px: ↑'s lowest peak.
+    static int bar_air(const HunterConfig& cfg);
+    /// A monster `dx`, `dy` away (plates) past the upper bar and within the
+    /// air band above it, `air`, in reach across.
+    static bool bar_reach(const HunterConfig& cfg, int dx, int dy, int air);
+    /// jump_up ticked and the area's jumps able to go (jump_area): nothing
+    /// switches it off since 2026.11.24.
+    bool bar_up_may_go(const HunterConfig& cfg) const;
+    /// In the walk branch, after drop_toward: the target past the upper bar
+    /// within the air band -- faced, settled, and one plain ↑ in place, every
+    /// floor it may come down on inside the area (bar_up_landings); held still
+    /// in the air, attacking as the target comes level. True while it has the
+    /// pass.
+    bool bar_up_toward(const HunterConfig& cfg, const Nameplate& target, const Nameplate& me,
+                       const std::vector<Nameplate>& mobs, const std::vector<Listed>& listed, int dx, int dy,
+                       bool fresh_pick, std::uint64_t now);
+    int bar_presses_minute(std::uint64_t now);
+    int bar_dry_for(int slot, std::uint32_t gen) const;
+    /// A bar ↑ back on its own floor: the monster's HP a moment after the
+    /// landing against the key's -- "hit it", or one more dry for it.
+    void bar_hp_check(const std::vector<Nameplate>& mobs, std::uint64_t now);
+    /// A bar ↑'s flight judged (end_flight's part for JumpUpFor::Bar): its
+    /// counts and lines. True when its take-off is to be learned as a
+    /// no-jump point -- it landed outside the area -- for kLearnedForgetMs.
+    bool end_bar_flight(const HunterConfig& cfg, JumpUpVerdict v, std::uint64_t now, int lx, int ly,
+                        const JumpUpState& j, const std::string& tail);
+    /// jump_ready but for MapTrust's trust: what a trust step waits on.
+    bool jump_ready_but_trust(const HunterConfig& cfg, const GameMapBook::Page* page) const;
+    /// Stranded with no way, the file not trusted yet: a step along its own
+    /// floor to a place of its own for a standing point, kTrustStepsMax at
+    /// most a round (2026.11.12c; its review: kTrustStepPx times 1, 2 or 3
+    /// from where they began), a new round kTrustStepsAgainMs after the last
+    /// (2026.11.24). True while it has the pass.
+    bool trust_step(const HunterConfig& cfg, std::uint64_t now);
 
     // ---- "Tự tìm quái trong vùng" (HunterConfig::seek_in_zone, 2026.11.05b):
     // hunter_seek.cpp
@@ -2156,8 +2864,10 @@ private:
     enum class SeekIdle : std::uint8_t { NotMine, Going, Standing };
 
     /// The setup the seek runs in, but for the packets steering this pass:
-    /// seek_in_zone, the map tab's area in use with its file, the character
-    /// known, packet_positions on, stay_put off.
+    /// seek_in_zone, the map tab's area in use with its file -- never this
+    /// run's spot, which has its map's file too since 2026.11.12
+    /// (ZoneHere::from_map) -- the character known, packet_positions on,
+    /// stay_put off.
     bool seek_wanted(const HunterConfig& cfg) const;
     /// Once a pass, after the monsters are seen: the whole map (Eyes::world),
     /// whether the seek is on (seek_on_) -- not while the walk back comes
@@ -2235,6 +2945,20 @@ private:
 
     mutable std::mutex mutex_;
     HunterConfig       config_;
+    /// Bumped by every set_config, under mutex_: a pass copies config_ only
+    /// when this has moved since its last copy (2026.11.16), not the whole
+    /// config 16 times a second.
+    std::uint64_t      config_gen_ = 0;
+    /// The passes' own copy of config_, and the config_gen_ it was taken at:
+    /// pass()'s alone -- the thread's, or step()'s when stepped.
+    HunterConfig       pass_cfg_;
+    std::uint64_t      pass_cfg_gen_ = ~std::uint64_t{0};
+    /// A trip set (set_trip): Chỗ đánh quái on whatever the card says, and
+    /// whether pass_cfg_ was copied with it so; quiet, nothing fought.
+    std::atomic<bool>  trip_on_{false};
+    std::atomic<bool>  trip_quiet_{false};
+    bool               pass_cfg_trip_ = false;
+    std::string        trip_stem_;         ///< under mutex_
     Status             status_;
 
     /// Which plate we are chasing, remembered between frames by position so a
@@ -2280,9 +3004,35 @@ private:
     std::atomic<int>           engaged_dx_{0};
     std::atomic<std::uint32_t> attack_key_{'Z'};
     std::atomic<bool>          returning_now_{false};   ///< returning(): the last pass walked back
+    /// skill_hold(): why the last pass held them, a SkillHold.
+    std::atomic<std::uint8_t>  skill_hold_now_{0};
+    std::atomic<bool>          turning_now_{false};     ///< turning(): a turn pending at the last pass
+    std::atomic<bool>          dash_edge_now_{false};   ///< dash_edge(): at the last pass
+    std::atomic<bool>          attack_far_now_{false};  ///< attack_far(): the fight's target past attack_limit_px
+    /// set_dash's and set_attack_reach's, GoBot's thread's: kept from run to
+    /// run, as what was learned is.
+    std::atomic<std::uint32_t> dash_key_{0};
+    std::atomic<int>           dash_px_{0};
+    std::atomic<int>           attack_reach_{0};
 
     // ---- the hunter's own thread's, or step()'s ----
     std::uint64_t last_engaged_ms_ = 0;
+    /// A turn to the target pending at this pass (turn_.on, kept by the pass
+    /// with the target in reach): tapped, not yet confirmed by a report of
+    /// yours. Published as turning().
+    bool          turning_ = false;
+    /// What the pass ended in (set_state), for the hold of nothing to fight.
+    State         pass_state_ = State::Idle;
+    /// The skill hold and the dash's edge at this pass's end (publish_pass).
+    SkillHold skill_hold_for_pass() const;
+    bool      dash_lands_out() const;
+    /// Whether `vk` is among dash_keys().
+    bool      dash_key_is(std::uint32_t vk) const;
+    /// The attack key let be this minute: beyond its reach, at an edge as the
+    /// dash's key -- once a swing's interval at most (attack_held_ms_).
+    int           minute_attack_far_ = 0;
+    int           minute_attack_edge_ = 0;
+    std::uint64_t attack_held_ms_ = 0;
 
     /// Which way the character faces, as far as the hunter knows: set by its
     /// own steps and turns, unknown at a start, with the game out of focus or
@@ -2301,6 +3051,68 @@ private:
     /// kFacingMissedMs).
     std::uint64_t facing_key_ms_ = 0;
     Facing        facing_key_way_ = Facing::Unknown;
+    /// What that key was, for the keys the game missed (2026.11.12): a
+    /// turn's tap, or a walk -- a walk held or stepped, a step back.
+    enum class FacingKey : std::uint8_t { None, Tap, Walk };
+    FacingKey     facing_key_by_ = FacingKey::None;
+    /// The turn pending (2026.11.12, F1: kTurnQuietMs, kTurnCapMs): which
+    /// way, when its first tap's key went down and when each tap's did, on
+    /// the hunter's clock -- what a report of yours is timed from. Kept only
+    /// from one pass with its target in reach to the next: a pass that never
+    /// comes to it -- the target gone or out of reach, a walk, a hold, the
+    /// loot -- ends it, facing_ as it was.
+    struct Turn {
+        bool          on = false;
+        Facing        way = Facing::Unknown;
+        std::uint64_t from_ms = 0;
+        std::array<std::uint64_t, 4> taps_ms{};    ///< past 4, the last in the last place
+        int           taps = 0;
+    };
+    Turn turn_;
+    /// This pass's fix has the packets steering and knowing the character
+    /// (face_from_packets): a turn from it waits for its report. And when
+    /// your last cast came, by it (WorldFix::cast_ms).
+    bool          turn_watch_ = false;
+    std::uint64_t turn_cast_ms_ = 0;
+    /// The target the other side of the way the character faces (F2,
+    /// kTurnSlackPx, kTurnStayMs): which way, since when past the band (0
+    /// while within it), and whether it is to be turned to at once -- a new
+    /// pick, the hunter's own walk, or the facing not known; kept over a tap
+    /// that did not go out. And since when past facing_tolerance that side
+    /// at all, in the band or past it (kTurnBandStayMs). And the last target
+    /// in reach by its slot and generation, a new pick being another.
+    struct TurnSide {
+        Facing        way = Facing::Unknown;
+        std::uint64_t since_ms = 0;
+        bool          due = false;
+        std::uint64_t band_ms = 0;
+    };
+    TurnSide      side_;
+    std::int32_t  side_slot_ = -1;
+    std::uint32_t side_gen_ = 0;
+    /// The pass that last came to face_target (passes_): side_ is kept only
+    /// from one such pass to the next, as turn_ is. And facing_key_ms_ as it
+    /// saw it: a walk's key since is the hunter's own turn away, and the turn
+    /// back is owed at once.
+    std::uint64_t side_pass_ = 0;
+    std::uint64_t side_key_ms_ = 0;
+    /// Whether the character faces the target in reach -- turned to it, as
+    /// F1 and F2 say, when it does not; false with a turn pending or a tap
+    /// that was wanted and did not go out. What the fight and the hunter's
+    /// own attack go by.
+    bool face_target(const HunterConfig& cfg, const Nameplate& target, int dx, bool fresh_pick, std::uint64_t now);
+    /// One turn's tap toward `way`, the first of a turn or again: whether it
+    /// went out. A turn to be waited on has the skills held from before its
+    /// key goes down (turning_now_, skill_hold_now_): a skill pressed in the
+    /// pause after the key-up went before the game's report of the turn.
+    bool tap_turn(const HunterConfig& cfg, Facing way);
+    /// A turn's tap toward `way` would walk the character off a floor's end
+    /// with nothing of the map file under it (pit_ahead, the owner's Q5): the
+    /// taps not yet confirmed and this one, each kTurnTapMs of a walk, and
+    /// kZoneWalkSlackPx more. True when refused: `target` passed over as a
+    /// walk out of the area is (walk_kept_in), said once a kWalkKeptSayMs,
+    /// counted with the walks stopped at a pit's edge.
+    bool turn_pit(const HunterConfig& cfg, Facing way, const Nameplate& target, std::uint64_t now);
     bool   held_before_ = false;        ///< a hold was on at the last pass
     /// The direction key held down for a walk (hold_walk), 0 for none, and
     /// since when -- or since its last renewal; how far off the target was at
@@ -2363,6 +3175,13 @@ private:
         std::uint64_t seen_ms = 0;
         /// The last blow of yours on it the packets had said (Nameplate::hurt_ms).
         std::uint64_t hurt_seen_ms = 0;
+        /// The hunter's own swings let be for the attack key's reach or the
+        /// dash's edge (F3), and when the last was: time spent so counts as
+        /// attacking it -- the Z pressed from 200 px before 2026.11.12 hurt
+        /// nothing either, and the give-up came after no_damage_ms (the
+        /// review of 2026.11.12).
+        int           held = 0;
+        std::uint64_t held_ms = 0;
     };
     DamageWatch watch_;
 
@@ -2428,12 +3247,25 @@ private:
     std::uint64_t minute_dropped_ = 0;      ///< targets_dropped when the minute began
     int           minute_returns_ = 0;      ///< walks back to the spot begun
     int           minute_return_give_ups_ = 0;
-    int           minute_turns_ = 0;        ///< turn taps sent (kTurnTapMs)
+    int           minute_turns_ = 0;        ///< turns begun: a first tap sent (kTurnTapMs)
+    /// Turns' taps sent, the first and again (2026.11.12); the turns a report
+    /// confirmed, the time from the tap it answered to it -- in all and the
+    /// longest -- and those not confirmed in kTurnCapMs.
+    int           minute_turn_taps_ = 0;
+    int           minute_turn_confirmed_ = 0;
+    std::uint64_t minute_turn_late_ms_ = 0;
+    std::uint64_t minute_turn_late_most_ = 0;
+    int           minute_turn_capped_ = 0;
     /// A facing_ of Left or Right the packets put the other way
-    /// (face_from_packets) -- not one filled in where it was not known; and
-    /// of those, the ones for a key the game never took (kFacingMissedMs).
+    /// (face_from_packets) -- not one filled in where it was not known. And
+    /// the keys the game never took, by what they were (2026.11.12): turns'
+    /// taps -- tapped again for want of a report, or put right after
+    /// kFacingMissedMs -- and walks (kFacingMissedMs; holds, steps, steps
+    /// back). One counter for both until then: 31% of 2026-11-11's turns
+    /// were "missed", walks among them.
     int           minute_packet_facings_ = 0;
-    int           minute_missed_keys_ = 0;
+    int           minute_missed_taps_ = 0;
+    int           minute_missed_walks_ = 0;
     /// The most wounded taken over the nearest (choose_target); and, with the
     /// packets' plates, the target kept by its slot, the looks at which the
     /// plate nearest where it was was another monster (a swap refused), and
@@ -2497,6 +3329,12 @@ private:
     int           return_strikes_ = 0;
     std::uint64_t return_retry_ms_ = 0;
     bool          said_too_high_ = false;
+    /// GaveUp's wait (track_give_up, spot_retry_ms): when the next round of
+    /// walks back begins (0: none armed yet), and where the character stood
+    /// and what the map knew (jump_epoch_) as it was armed.
+    std::uint64_t return_backoff_ms_ = 0;
+    float         gave_up_x_ = 0.0f, gave_up_y_ = 0.0f;
+    std::uint32_t gave_up_epoch_ = 0;
     /// When the walk back under way began, for how long it went (end_return).
     std::uint64_t return_from_ms_ = 0;
     /// The walk back first, latched (track_back_walk): since when, and how
@@ -2529,18 +3367,107 @@ private:
     char          odd_why_[96] = "";
     std::uint64_t odd_said_ms_ = 0;
     int           odd_unsaid_ = 0;
+    /// Your reports as places (judge_place, 2026.11.12): the last that placed
+    /// the character, and one far above it waiting for a second (kPutBackPx),
+    /// since when on the hunter's clock; the last report judged. fix_odd_:
+    /// this pass's fix is not gone by for the spot -- a report at y 0, or a
+    /// place far off not yet agreed -- and the pass keeps what the last made
+    /// of the area (zone_), walks nothing back and latches nothing.
+    struct OwnPlace {
+        bool          on = false;
+        float         x = 0.0f, y = 0.0f;
+        std::uint64_t ms = 0;               ///< the report's, on the frames' clock
+        std::uint32_t epoch = 0;
+        std::uint64_t air = 0;              ///< WorldFix::air_reports at it
+    };
+    /// The pass the spot's look (fix_) was asked at, and whether the eyes gave
+    /// one: drop_watch takes it rather than asking again (2026.11.12).
+    std::uint64_t fix_pass_ = 0;
+    bool          fix_got_ = false;
+    OwnPlace      place_last_;
+    OwnPlace      place_far_;
+    std::uint64_t place_far_since_ms_ = 0;
+    std::uint64_t place_seen_ms_ = 0;
+    bool          fix_odd_ = false;
+    bool          said_zero_ = false;       ///< a report at y 0 said at DEBUG, until a good one
+    bool          said_spawn_ = false;      ///< no spot at the entry's spawn said, until one is set
     /// The map tab's area against its map's file, this pass (track_zone_way);
     /// the way back last asked of the map, from where and for which box; the
     /// goal a walk back's give-up clock measures toward, and whether "no way
     /// back" was said.
     ZoneHere                  zone_;
     bool                      way_asked_ = false;
+    /// When the way and the travel were last asked (2026.11.12c): stranded,
+    /// asked again kStrandedReaskMs on; since when stranded, and whether the
+    /// last travel's floor budget cut it short.
+    std::uint64_t             way_asked_ms_ = 0;
+    std::uint64_t             travel_asked_ms_ = 0;
+    std::uint64_t             stranded_since_ms_ = 0;
+    bool                      travel_capped_ = false;
+    int                       travel_floors_ = 0;
+    /// The stranded line's per-key reasons (jump_why_here), worked out once
+    /// a stranding.
+    std::string               stranded_keys_;
     MapPoint                  way_from_;
     HuntZone                  way_box_;
     std::optional<ZoneReturn> way_;
     bool                      return_goal_on_ = false;
     MapPoint                  return_goal_;
     bool                      said_no_way_ = false;
+    /// The way back over the map's other floors (2026.11.12, the owner's Q4,
+    /// ZoneReturn::travel): the last worked out, kept while the character
+    /// stands on the same floor -- known by its two ends -- for the same box,
+    /// jumps and what the session learned: it looks the whole map over.
+    bool                      travel_asked_ = false;
+    MapPoint                  travel_l_, travel_r_;
+    HuntZone                  travel_box_;
+    bool                      travel_jumps_ = false;
+    std::uint32_t             travel_epoch_ = 0;
+    std::optional<ZoneReturn> travel_way_;
+    /// With drops on the way (2026.11.12 review, home_drops_may): whether they
+    /// could go when the way and the travel were worked out, and what the
+    /// session's drops had learned or forgotten then (drop_epoch_) -- either
+    /// changed, worked out again. And with them unable to go: whether a way
+    /// with them would have been there (the stranded line says so).
+    bool                      way_drops_ = false;
+    std::uint32_t             way_drop_epoch_ = 0;
+    bool                      travel_drops_ = false;
+    std::uint32_t             travel_drop_epoch_ = 0;
+    bool                      travel_by_drops_ = false;
+    bool                      way_by_drops_ = false;
+    /// Moves at every drop's verdict, at a place forgotten and a gate learned
+    /// (2026.11.24): the way back is worked out again (a no-drop point
+    /// learned or taken back).
+    std::uint32_t             drop_epoch_ = 0;
+    /// Ctrl + ↓ pressed on the walk back under way (home_drop), against
+    /// kZoneTravelDropsMax; counted afresh at each walk back.
+    int                       home_drop_presses_ = 0;
+    /// The box the way back's jump up under way is judged in: the area's, or
+    /// the whole map's for a way over the map's other floors -- set by
+    /// go_home_zone, read by jump_facts and press_jump for JumpUpFor::Home.
+    HuntZone                  home_legs_box_;
+    bool                      home_legs_travel_ = false;
+    /// Stranded (ZoneHere::stranded) said once, until the character is not.
+    bool                      said_stranded_ = false;
+    /// The report (WorldFix::report_ms) the last "taken as landed" line of
+    /// blind_landing was for (2026.11.15).
+    std::uint64_t             blind_said_ms_ = 0;
+    /// The places a press failed at, learned in the map book, and when
+    /// (note_learned, 2026.11.24): forget_learned takes each back
+    /// kLearnedForgetMs on. The hunter's thread's alone; kept across a start.
+    /// (Until 2026.11.24 distrusted_ kept the files a landing off their
+    /// floors had the book distrust, given back kDistrustMs on.)
+    struct LearnedNote {
+        LearnedKind   kind = LearnedKind::NoDrop;
+        std::string   stem;
+        MapPoint      at;               ///< the no-drop point, the no-jump take-off, the solid floor's point
+        std::uint64_t ms = 0;
+    };
+    std::vector<LearnedNote> learned_;
+    /// Walks and steps back let go of at a pit's edge (pit_ahead) this minute,
+    /// and when the last was said at INFO (kWalkKeptSayMs).
+    int                       minute_pit_stops_ = 0;
+    std::uint64_t             pit_said_ms_ = 0;
     /// Walks toward a target refused at the area's edge this minute, and
     /// when the last was said at INFO (kWalkKeptSayMs).
     int                       minute_walks_kept_ = 0;
@@ -2565,6 +3492,10 @@ private:
     GameMapBook*                 book_ = nullptr;
     std::function<const char*()> drop_veto_;
     std::function<void(std::uint32_t, std::uint64_t)> on_attack_;     ///< set_on_attack
+    std::function<bool(std::uint32_t)>                swing_yield_;   ///< set_swing_yield
+    std::atomic<std::uint64_t>                        swing_down_ms_{ 0 };   ///< last_swing_ms
+    /// Whether this pass's swing of `vk` is the macro's to press (swing_yield_).
+    bool swing_yields(std::uint32_t vk) const { return swing_yield_ && swing_yield_(vk); }
     MapTrust                     trust_;
     /// This pass's fix for the drop -- the spot's stays fix_ -- and whether
     /// the eyes gave one; the map entry it is in, and since when on the
@@ -2600,6 +3531,14 @@ private:
         /// it said, followed to where the character came down -- on a slope
         /// a few pixels across is that many lower or higher.
         std::shared_ptr<const GameMapBook::Page> page;
+        /// A drop of the way back (home_drop, 2026.11.12 review): no monster.
+        bool          home = false;
+        /// Its landing under the monster's floor within one ↑ (DropCall::one_up).
+        bool          one_up = false;
+        /// Its time in drop_presses_ (2026.11.24): a press judged to have done
+        /// nothing, or jumped in place, is taken back out -- kDropsPerMinute
+        /// counts only presses that moved the character.
+        std::uint64_t minute_at = 0;
     };
     DropState drop_;
     /// A press, watched for kPressWatchMs for a map change whatever was
@@ -2632,13 +3571,22 @@ private:
     /// the other). A map change within its kPressWatchMs may as well be its;
     /// a press of its own kind closes it (2026.11.05b).
     PressRecord press_other_;
-    /// The presses of the last minute, and those for each monster this run --
-    /// with its settles let go of without a press.
+    /// The presses of the last minute, and those for each monster -- with its
+    /// settles let go of without a press -- counted only while the last of
+    /// them is under kTargetCountMs old (2026.11.24: this run's until then).
     struct TargetPresses {
         int           slot = -1;
         std::uint32_t gen = 0;
         int           n = 0;
         int           settles = 0;
+        std::uint64_t last_ms = 0;      ///< the last press or settle counted, on the hunter's clock
+        /// Whether these counts are of the last kTargetCountMs at `now`.
+        bool fresh(std::uint64_t now) const { return now < last_ms + kTargetCountMs; }
+        /// One more at `now`: counted afresh when the last is too old.
+        void touch(std::uint64_t now) {
+            if (!fresh(now)) n = settles = 0;
+            last_ms = now;
+        }
     };
     std::vector<std::uint64_t> drop_presses_;
     std::vector<TargetPresses> drop_targets_;
@@ -2648,17 +3596,40 @@ private:
     std::uint64_t drop_t_down_ = 0;
     bool          drop_landed_ = false;
     std::uint64_t last_drop_worked_ms_ = 0;
+    /// That drop landed under its monster within one ↑ (DropCall::one_up):
+    /// the bar's ↑ not held by AfterDrop after it (2026.11.12c review).
+    bool          last_drop_one_up_ = false;
     std::uint64_t settle_backoff_ms_ = 0;   ///< no settle begun before this
+    /// Presses in a row that did not drop: the first of a row passes its
+    /// monster over kRetryPassOverMs, every other kRetryFightMs (2026.11.24).
+    /// No run's count, no latch and no pause since 2026.11.24
+    /// (drop_fails_run_, drop_worked_run_, drop_latch_, drop_cool_*_).
     int           drop_fails_row_ = 0;
-    int           drop_fails_run_ = 0;
-    DropOff       drop_latch_ = DropOff::None;
-    /// Halted for GoBot's window to stop the hunt: a map change, or a key-up
-    /// still owed (drop_stop_). Every pass lets go of the moves and returns.
-    bool          drop_halt_ = false;
+    /// Presses that did nothing, or jumped in place, not yet held against their
+    /// place (kNoDropSuspectMs): where, on which map, when. Cleared at a start.
+    struct NoDropSuspect {
+        std::string   stem;
+        MapPoint      at;
+        std::uint64_t ms = 0;
+    };
+    std::vector<NoDropSuspect> drop_suspects_;
+    /// Passes in a row a key-up stayed owed: from kDropOwedPasses on, every
+    /// key was let go of once (owed_said_) and each pass holds still until
+    /// the key-ups go out -- then the hunt goes on by itself (2026.11.24).
+    /// let_go_: a press changed the map this pass -- the moves let go of and
+    /// the fight disengaged once, and the pass goes on. (drop_halt_, the
+    /// hunter halted for GoBot's window to stop the hunt, until 2026.11.24.)
     int           owed_passes_ = 0;
+    bool          owed_said_ = false;
+    bool          let_go_ = false;
     /// A log in since the last pass (suspend_spot): under mutex_.
     bool          drop_suspend_asked_ = false;
-    std::atomic<DropStop> drop_stop_{DropStop::None};
+    /// Until when (clock_now()) a map change is GoBot's own trip's, not a
+    /// press's (expect_map_change, 2026.11.21): under mutex_, read by
+    /// drop_watch at the moment it judges a change.
+    std::uint64_t map_change_until_ms_ = 0;
+    /// A press's map change not said by the window yet (take_press_gate).
+    std::atomic<PressGate> press_gate_{PressGate::None};
     /// The refusal said for the target: the last reason, and those said at
     /// INFO (a bit for each DropWhy).
     int           drop_said_slot_ = -2;
@@ -2694,6 +3665,7 @@ private:
     int           minute_drop_off_map_ = 0;
     int           minute_drop_gate_ = 0;
     int           minute_drop_unknown_ = 0;
+    int           minute_drop_other_ = 0;   ///< DropVerdict::OtherFloor (2026.11.12)
 
     // ---- the jump up (HunterConfig::jump_up, 2026.11.05b): the hunter's own
     // thread's
@@ -2732,6 +3704,20 @@ private:
         std::string   stem;
         std::shared_ptr<const GameMapBook::Page> page;
         HuntZone      box;
+        /// The bar's ↑ (2026.11.12c): the monster's floor's top at its
+        /// column, as the rule placed it; -1 not placed.
+        int           target_top = -1;
+        /// What jump_follow made of the flight, for end_flight's lines
+        /// (2026.11.12c): landed on a floor of the key's band; its take-off's
+        /// speed and state; the kind that speed says, when it is not the key's.
+        bool          band_landing = false;
+        float         off_vy = 0.0f;
+        unsigned      off_state = 0;
+        const char*   other_kind = nullptr;
+        /// Its time in jump_presses_ (2026.11.24): a jump judged to have done
+        /// nothing, or fallen back, is taken back out -- kJumpUpsPerMinute
+        /// counts only presses that moved the character.
+        std::uint64_t minute_at = 0;
     };
     JumpUpState jump_;
     /// When the last jump's first ↑ went down, and whether its landing was
@@ -2740,18 +3726,18 @@ private:
     bool          jump_landed_ = false;
     std::uint64_t last_jump_worked_ms_ = 0;
     std::uint64_t jump_backoff_ms_ = 0;     ///< no settle begun before this
+    /// Jumps up in a row that did not get there, as drop_fails_row_: the
+    /// first passes its monster over kRetryPassOverMs, every other
+    /// kRetryFightMs (2026.11.24). No run's count, latch, pause, key off for
+    /// the run or g count since 2026.11.24.
     int           jump_fails_row_ = 0;
-    int           jump_fails_run_ = 0;
-    JumpUpOff     jump_latch_ = JumpUpOff::None;
-    std::uint8_t  jump_kinds_off_ = 0;
-    int           jump_kind_misses_[kJumpKinds] = {};
-    int           jump_gravity_out_ = 0;
     /// The presses of the last minute, and those and the settles for each
-    /// monster this run (Target, Seek).
+    /// monster in the last kTargetCountMs (Target, Seek).
     std::vector<std::uint64_t> jump_presses_;
     std::vector<TargetPresses> jump_targets_;
     /// Falls back onto each landing floor this session, by its two ends:
-    /// kJumpUpSolidAfter makes it solid from below.
+    /// kJumpUpSolidAfter makes it solid from below (for kLearnedForgetMs
+    /// since 2026.11.24).
     struct FellOnto {
         std::string stem;
         MapPoint    l_end, r_end;
@@ -2795,11 +3781,12 @@ private:
     /// Your own 0x002A and 0x0031 traced at DEBUG until this, from this report on.
     std::uint64_t jump_trace_until_ = 0;
     std::uint64_t jump_traced_ms_ = 0;
+    bool          jump_trace_info_ = true;  ///< ... at INFO (2026.11.12c)
     /// The minute line's (jump_minute_text): looks at a target above or a
     /// way's leg that asked the rule, the would-jumps, settles begun, the
     /// presses by key and what came of them, g measured, and the refusals
     /// acted on for each reason.
-    static constexpr std::size_t kJumpUpWhys = static_cast<std::size_t>(JumpUpWhy::OffColumn) + 1;
+    static constexpr std::size_t kJumpUpWhys = static_cast<std::size_t>(JumpUpWhy::TooHigh) + 1;
     int           minute_jump_looks_ = 0;
     int           minute_jump_would_ = 0;
     int           minute_jump_settles_ = 0;
@@ -2815,6 +3802,61 @@ private:
     double        minute_jump_g_sum_ = 0.0;
     int           minute_jump_g_n_ = 0;
     int           minute_jump_why_[kJumpUpWhys] = {};
+    /// The plain ↑ past the upper bar (2026.11.12c): its fails in a row (for
+    /// the log), its presses of the last minute, those back on the floor with
+    /// no hurt per monster in kTargetCountMs (TargetPresses::n), its last
+    /// landing, the target's HP at its key, its flights traced at INFO this
+    /// run, the monster its refusal was said for, and the minute line's
+    /// counts. No latch, pause or run's count since 2026.11.24 (bar_latch_,
+    /// bar_cool_*_, bar_cools_, bar_worked_run_, bar_fails_run_), nor the
+    /// wall-foot jumps' off for the run (jump_wall_off_).
+    float         bar_hp_seen_ = -1.0f;     ///< the bar's target's HP at its last look
+    int           bar_fails_row_ = 0;
+    std::vector<std::uint64_t> bar_presses_;
+    std::vector<TargetPresses> bar_dry_;
+    std::uint64_t bar_landed_ms_ = 0;
+    float         bar_hp0_ = -1.0f;
+    int           bar_traced_ = 0;
+    int           bar_said_slot_ = -2;
+    std::uint32_t bar_said_gen_ = 0;
+    JumpUpWhy     bar_said_why_ = JumpUpWhy::None;
+    bool          bar_hit_wait_ = false;    ///< a landing back on its floor waits for the HP after it
+    std::uint64_t bar_hit_at_ms_ = 0;
+    int           bar_hit_slot_ = -1;
+    std::uint32_t bar_hit_gen_ = 0;
+    std::string   bar_hit_name_;
+    int           bar_hit_x_ = 0, bar_hit_y_ = 0;
+    int           minute_bar_ups_ = 0;
+    int           minute_bar_onto_ = 0;
+    int           minute_bar_air_ = 0;
+    int           minute_bar_hit_ = 0;
+    int           minute_bar_dry_ = 0;
+    int           minute_bar_moved_ = 0;
+    int           minute_bar_nothing_ = 0;
+    int           minute_bar_outside_ = 0;
+    int           minute_bar_why_[kJumpUpWhys] = {};
+    /// The trust steps (2026.11.12c, kTrustSteps): how many this round,
+    /// where they began and how far outside the area, where each ended, the
+    /// one under way -- its way, its goal, since when, for how long -- the
+    /// next not before, and "no step" said. A round done with no trust: when
+    /// the next begins (kTrustStepsAgainMs, 2026.11.24; 0 none armed).
+    int           trust_steps_ = 0;
+    std::uint64_t trust_again_ms_ = 0;
+    MapPoint      trust_origin_;
+    int           trust_origin_out_ = 0;
+    /// trust_origin_out_ taken by this stay's first round (2026.11.24 review):
+    /// a later round keeps it, or the nearer of it and where it stands.
+    bool          trust_out_set_ = false;
+    std::vector<int> trust_ends_;
+    bool          trust_step_on_ = false;
+    int           trust_step_dir_ = 0;
+    int           trust_step_from_x_ = 0;
+    int           trust_step_to_x_ = 0;
+    std::uint64_t trust_step_walk_ms_ = 0;
+    std::uint64_t trust_step_ms_ = 0;
+    std::uint64_t trust_step_next_ms_ = 0;
+    bool          trust_step_none_said_ = false;
+    std::uint32_t trust_step_epoch_ = 0;
 
     // ---- "Tự tìm quái trong vùng" (HunterConfig::seek_in_zone, 2026.11.05b):
     // the hunter's own thread's
@@ -2872,6 +3914,11 @@ private:
         std::uint64_t mob_age_ms = 0;
     };
     SeekState seek_;
+    /// The seek walked toward a walk-off's end or a jump's take-off this pass,
+    /// and a fall off an end under way until this (2026.11.12c, SkillHold::
+    /// SeekLeg).
+    bool          seek_walked_this_pass_ = false;
+    std::uint64_t seek_fell_until_ms_ = 0;
     /// Monsters the seek passes over a while, by slot and generation.
     struct SeekSkip {
         int           slot = -1;

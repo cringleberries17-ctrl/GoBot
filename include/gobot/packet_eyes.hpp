@@ -225,6 +225,12 @@ public:
     /// last two pictures more than kScreenFreshMs apart -- a picture is used
     /// at once only up to MobDetector::kLookGapMs old, never older than one at
     /// its own pace would be.
+    ///
+    /// Past kHandOverMs with still no picture taken since the switch (two
+    /// slow looks on a one-core PC), the hunter is given no plates and no
+    /// you until one comes (2026.11.16): the screen's would be from a picture
+    /// up to 2 s old, the rest's, and the packets' frozen ones as old as the
+    /// switch.
     static constexpr std::uint64_t kHandOverMs = 300;
     static constexpr std::uint64_t kScreenFreshMs = 2 * static_cast<std::uint64_t>(MobDetector::kLookGapMs);
 
@@ -247,7 +253,9 @@ public:
     /// above dead_below and full -- a living monster is never finished, and
     /// every blow still shows on its bar -- and a killed one at 0 for
     /// kDeadShownMs. Its number is then the world's updates. With the
-    /// screen as the source, the screen's three are passed through untouched.
+    /// screen as the source, the screen's three are passed through untouched
+    /// -- but for a hand-over (kHandOverMs), and no plates and no you after
+    /// one run out until the detector has a picture taken since the switch.
     ///
     /// With a map file (Inputs::floors) and kPlatesOnFloors, a living
     /// monster's plate stands where mob_place puts it -- on its floor, a walk
@@ -316,7 +324,8 @@ public:
         std::uint64_t switches = 0;
         /// Switches back to the screen that kept the packets' plates a
         /// moment (kHandOverMs): how many, how many of them ran out the
-        /// time with no newer picture, and the time spent in them all.
+        /// time with no newer picture -- nothing served then until one
+        /// came -- and the time spent in them all.
         std::uint64_t handovers = 0;
         std::uint64_t handovers_capped = 0;
         std::uint64_t handover_ms = 0;
@@ -373,6 +382,10 @@ private:
     std::atomic<std::uint64_t> healthy_ms_{0};
     std::atomic<std::uint64_t> switches_{0};
     std::atomic<bool>          handing_over_{false};
+    /// A hand-over ran out its kHandOverMs with no picture taken since the
+    /// switch: no plates and no you for the hunter until the detector's count
+    /// is two past handover_pictures_.
+    std::atomic<bool>          screen_stale_{false};
     std::atomic<std::uint64_t> handovers_{0};
     std::atomic<std::uint64_t> handovers_capped_{0};
     std::atomic<std::uint64_t> handover_ms_{0};
@@ -398,20 +411,21 @@ struct DetectorPace {
     PacketWhy          why = PacketWhy::Off;                 ///< PacketEyes::why()
     bool               jump_test = false;       ///< a jump key's "Thử" watching your plate
     bool               monster_look = false;    ///< "Quái đang thấy" listing what is in view
-    bool               camera_panels = false;   ///< the Radar or the movement panels open
-    bool               walking = false;         ///< a navigator walk, which follows the camera
     bool               rest_off = false;        ///< app.ini [Packets] detector_rest=off
 
     /// The wait between looks while the packets steer, and otherwise: the
-    /// detector's own, as it always was.
-    static constexpr int kRestMs = 600;
+    /// detector's own, as it always was. 2000 since 2026.11.16 (600 before):
+    /// the plates are then only laid over the packets' for the Positions
+    /// line, and a look with its grab cost 25 ms 1.6 times a second -- on a
+    /// one-core PC, time taken from the game's frames.
+    static constexpr int kRestMs = 2000;
     static constexpr int kRunMs = MobDetector::kLookGapMs;
 };
 
 /// Whether the detector may rest -- look every DetectorPace::kRestMs rather
 /// than kRunMs: hunting, with the packets steering and healthy (the eyes'
-/// source the packets, and why() InUse), no "Thử", no "Quái đang thấy", no
-/// Radar or movement panel, no walk, and detector_rest not off. `why`, when
+/// source the packets, and why() InUse), no "Thử", no "Quái đang thấy", and
+/// detector_rest not off. `why`, when
 /// given, gets the first of those that does not hold, in the log's English,
 /// or "" when it may rest.
 bool detector_rest(const DetectorPace& p, const char** why = nullptr);
@@ -512,6 +526,25 @@ struct GameLink {
     static constexpr std::uint64_t kReattachNewMs = 1'000;
     /// Game TCP silent this long on the capture for positions: start it again.
     static constexpr std::uint64_t kReattachSilentMs = 5'000;
+    /// Started again for that silence, and still none of the game's TCP heard
+    /// this long after: started again, round after round while the game holds
+    /// a connection, the adapter looked up afresh at each (2026.11.24, the
+    /// owner: "Kiểm tra các phần khác xem có phần nào không làm được thì dừng
+    /// không, cần thay cơ chế này bằng 1 cơ chế khác"; until then once a quiet
+    /// spell, and never again until the game's TCP had been heard).
+    static constexpr std::uint64_t kReattachSilentAgainMs = 30'000;
+    /// A start the capture itself refused -- an adapter it cannot open, no
+    /// rights -- or a capture that died (PacketCapture::dead): tried again for
+    /// the same game link after refused_wait_after's wait -- kReattachEveryMs
+    /// for the first of a row, twice the one before for each after it, never
+    /// more than kRefusedMaxMs: 10 s, 20 s, then every 30 s (2026.11.24; up to
+    /// 10 min until then). A new game link is tried at once all the same.
+    static constexpr std::uint64_t kRefusedMaxMs = 30'000;
+    /// The wait after one more refusal, `wait` the one before it (0: none
+    /// before, the first of a row).
+    static constexpr std::uint64_t refused_wait_after(std::uint64_t wait) {
+        return wait == 0 ? kReattachEveryMs : wait >= kRefusedMaxMs / 2 ? kRefusedMaxMs : wait * 2;
+    }
 };
 
 /// Whether to start the capture for positions again: the game's process has

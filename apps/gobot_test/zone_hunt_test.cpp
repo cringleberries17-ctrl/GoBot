@@ -145,6 +145,9 @@ struct ZoneWorld {
     // last report's, as PacketWorld follows one
     float         report_x = 0.0f, report_y = 0.0f;
     std::uint64_t report_ms = 0;
+    /// The opcode of the last report (WorldFix::report_op): 0 unless a test
+    /// sets it -- 0x0031 is a cast's (2026.11.15, blind_landing).
+    std::uint16_t report_op = 0;
     std::uint32_t epoch = 7;
     std::uint64_t takeoffs = 40;
 
@@ -235,6 +238,7 @@ struct ZoneRig {
             f.rx = w.report_x;
             f.ry = w.report_y;
             f.report_ms = w.report_ms;
+            f.report_op = w.report_op;
             f.airborne = w.falling;
             f.moving = w.walking();
             f.map_known = true;
@@ -724,7 +728,7 @@ void test_zone_walk_kept() {
 
 void test_zone_walk_back() {
     section("Hunter 04d: the way back (Q2) -- from 1402,802 left along the ground to 880,634 with no jump key; no way "
-            "back, it fights; 882 under the home is not home");
+            "back, it stands (2026.11.12); 882 under the home is not home");
     if (game_data().empty()) {
         skip("no copies of the game's map files here: the way back\n");
         return;
@@ -773,10 +777,9 @@ void test_zone_walk_back() {
 
     // The walk back from there getting nowhere -- a wall: the left arrow held
     // walks nothing. Tried again a while later, and given up on after
-    // kSpotMaxTries: while it waits, and for good after, the monster in reach
-    // out there is fought as in 04c -- the walk back comes first only while
-    // one is to be tried, or the character stands out there and never
-    // attacks.
+    // kSpotMaxTries, a round: while it waits it stands out there (2026.11.12,
+    // the owner's Q4: stranded) -- and the monster in reach out there is never
+    // fought (Q3). Until then it was, as in 04c.
     {
         HunterConfig c = owner_config();
         c.spot_retry_ms = 3000;
@@ -787,38 +790,79 @@ void test_zone_walk_back() {
         r.pass();
         const bool first = from_map(r) && r.st().spot_back_first;
         int retry_z = -1, gave_z = -1;
-        bool retry_first = true, gave_first = true;
+        bool retry_first = true, gave_first = true, retry_stranded = false, gave_stranded = false;
+        std::uint64_t gave_at = 0;
         const std::vector<std::string> log = info_lines([&] {
             if (r.until([&] { return r.st().spot_why == Hunter::SpotWhy::Retrying; }, 20'000)) {
                 const int z0 = r.w.downs_of('Z');
                 r.run(1500);
                 retry_z = r.w.downs_of('Z') - z0;
                 retry_first = r.st().spot_back_first || r.st().spot_why != Hunter::SpotWhy::Retrying;
+                retry_stranded = r.st().spot_stranded;
             }
             if (r.until([&] { return r.st().spot_why == Hunter::SpotWhy::GaveUp; }, 60'000)) {
+                gave_at = r.w.t;
+                // Inside the round's wait of spot_retry_ms (3 s here).
                 const int z0 = r.w.downs_of('Z');
-                r.run(3000);
+                r.run(2000);
                 gave_z = r.w.downs_of('Z') - z0;
                 gave_first = r.st().spot_back_first || r.st().spot_why != Hunter::SpotWhy::GaveUp;
+                gave_stranded = r.st().spot_stranded;
             }
         });
-        check(first && retry_z > 0 && !retry_first,
-              fmt("the walk back against a wall, to be tried again: the monster in reach outside fought meanwhile "
-                  "(%d attacks in 1.5 s), the walk back not first",
+        check(first && retry_z == 0 && !retry_first && retry_stranded,
+              fmt("the walk back against a wall, to be tried again: stranded, standing meanwhile -- the monster in "
+                  "reach outside never fought (%d attacks in 1.5 s), the walk back not first",
                   retry_z));
-        check(gave_z > 0 && !gave_first && r.st().return_give_ups == static_cast<std::uint64_t>(Hunter::kSpotMaxTries) &&
-                  lines_with(log, "Hunter: the walk back into the hunting area got nowhere", "no more tries") == 1,
-              fmt("given up on after %d tries: fought for good (%d attacks in 3 s), the walk back not first -- \"%s\"",
-                  Hunter::kSpotMaxTries, gave_z, line_with(log, "no more tries").c_str()));
+        check(gave_z == 0 && !gave_first && gave_stranded &&
+                  r.st().return_give_ups == static_cast<std::uint64_t>(Hunter::kSpotMaxTries) &&
+                  lines_with(log, "Hunter: the walk back into the hunting area got nowhere",
+                             "this round of tries over, the next after 3 s") == 1 &&
+                  lines_with(log, "Hunter: walks back given up on 3 times in a row -- the next round of tries in 3 "
+                                  "s") == 1,
+              fmt("given up on after %d tries, a round: stranded for spot_retry_ms, the monster outside never fought "
+                  "(%d attacks in 2 s), the walk back not first -- \"%s\"",
+                  Hunter::kSpotMaxTries, gave_z, line_with(log, "this round of tries over").c_str()));
+        // Never for good (2026.11.24, the owner: "cần thay cơ chế này bằng 1 cơ
+        // chế khác"): the next round spot_retry_ms on -- 3 s here; four of
+        // them, 60 s at least, and one try from the 2026.11.12 review -- with
+        // kSpotMaxTries tries again, and the wall still there, that round's
+        // wait again.
+        int wait_z = -1;
+        std::uint64_t next_at = 0;
+        const std::vector<std::string> again = info_lines([&] {
+            const int z0 = r.w.downs_of('Z');
+            r.until([&] { return r.st().returns > static_cast<std::uint64_t>(Hunter::kSpotMaxTries); }, 20'000);
+            next_at = r.w.t;
+            r.until([&] { return r.st().return_give_ups >= 2ull * Hunter::kSpotMaxTries; }, 40'000);
+            r.run(1500);
+            wait_z = r.w.downs_of('Z') - z0;
+        });
+        check(gave_at != 0 && next_at >= gave_at + c.spot_retry_ms && next_at <= gave_at + c.spot_retry_ms + 1000 &&
+                  r.st().returns == 2ull * Hunter::kSpotMaxTries &&
+                  r.st().return_give_ups == 2ull * Hunter::kSpotMaxTries && wait_z == 0 &&
+                  lines_with(again, "Hunter: trying the walk back again -- the wait is over",
+                             "a new round of 3 tries") == 1 &&
+                  lines_with(again, "Hunter: walks back given up on 3 times in a row -- the next round of tries in 3 "
+                                    "s") == 1 &&
+                  lines_with(again, "long wait") == 0 && r.st().spot_why == Hunter::SpotWhy::GaveUp &&
+                  r.st().spot_stranded,
+              fmt("then the next round %llu ms after the first's last give-up (spot_retry_ms %u): three more walks "
+                  "back (%llu in all), nothing fought outside meanwhile (%d), given up on and waiting again: \"%s\"",
+                  static_cast<unsigned long long>(next_at > gave_at ? next_at - gave_at : 0), c.spot_retry_ms,
+                  static_cast<unsigned long long>(r.st().returns), wait_z,
+                  line_with(again, "trying the walk back again").c_str()));
         check(r.w.downs_of(38) == 0 && r.w.downs_of(VK_DOWN) == 0, "no jump key, no Down");
     }
 
     // A way back worked out there, then a report on none of the file's
     // floors, standing still 86 px under the box: no way carried to it -- a
-    // character standing sends no report, so it would be for good. The
-    // monster in reach out there is fought, as in 04c. The walk back first
-    // went out at the first look (2026.11.10: no spot_return_delay_ms), and
-    // stopped there: no walk from the place with no way.
+    // character standing sends no report, so it would be for good. It stands
+    // there (2026.11.12, stranded: the home 506 px above, on no floor of the
+    // file), and the monster in reach out there is never fought (Q3) -- as in
+    // 04c it was. The walk back first went out at the first look (2026.11.10:
+    // no spot_return_delay_ms), and stopped there: no walk from the place with
+    // no way.
     {
         HunterConfig c = owner_config();
         c.spot_return_delay_ms = 60'000;
@@ -834,11 +878,68 @@ void test_zone_walk_back() {
         r.run(2000);
         const Hunter::Status st = r.st();
         check(from_map(r) && first.spot_back_first && first.spot_way && went && !st.spot_back_first &&
-                  !st.spot_way && !st.spot_back_walk && st.spot_outside_px == 86 && r.w.downs_of('Z') > 0 &&
-                  r.w.downs_of(VK_LEFT) == lefts,
+                  !st.spot_way && !st.spot_back_walk && st.spot_outside_px == 86 && r.w.downs_of('Z') == 0 &&
+                  r.w.downs_of(VK_LEFT) == lefts && st.spot_stranded,
               fmt("from 1402,802 the way worked out and walked at once; then at 1402,780 on no floor, %d px outside: "
-                  "no way carried, the latch let go, the monster in reach fought (%d attacks)",
+                  "no way carried, the latch let go, stranded -- the monster in reach outside never fought (%d "
+                  "attacks)",
                   st.spot_outside_px, r.w.downs_of('Z')));
+    }
+
+    // Blind after a fall (2026.11.15, the owner's log of 00:05:56): the report
+    // is a cast's (0x0031) on none of the file's floors -- a dash's move ending
+    // in the air, 23 px over the floor at 803 -- and the character lands with no
+    // report of it (it stands still: it sends nothing). Stranded for kBlindLandMs
+    // and no walk; then taken as landed on that floor, and the way back walked.
+    // A report of another kind on no floor (the test above) stays stranded.
+    {
+        HunterConfig c = owner_config();
+        c.spot_return_delay_ms = 60'000;
+        ZoneRig r(c, 1402, 802);
+        r.hunter.set_zone(owner_zone());
+        r.pass();
+        const bool went = r.st().spot_back_walk && r.w.downs_of(VK_LEFT) == 1;
+        r.w.held.clear();
+        r.w.report_op = 0x0031;
+        r.w.place(1402, 780);
+        r.w.me_y = 802;                         // it lands -- and no report says so
+        const int lefts = r.w.downs_of(VK_LEFT);
+        const std::uint64_t t0 = r.w.t;
+        r.w.mobs = { mob_at(1450, 780, 1) };
+        // Sampled right up to the threshold (the last step of this run is at
+        // t0 + 660, the report 700 ms old at the next), then the way back
+        // walked within a pass or two of it -- not before, not much after.
+        r.run(Hunter::kBlindLandMs);
+        const Hunter::Status early = r.st();
+        const bool still = early.spot_stranded && r.w.downs_of(VK_LEFT) == lefts && r.w.downs_of('Z') == 0;
+        const std::vector<std::string> log = info_lines([&] { r.run(1300); });
+        const Hunter::Status late = r.st();
+        const bool in_time = r.w.downs_of(VK_LEFT, t0, t0 + Hunter::kBlindLandMs - 1) == 0 &&
+                             r.w.downs_of(VK_LEFT, t0 + Hunter::kBlindLandMs, t0 + Hunter::kBlindLandMs + 250) >= 1;
+        check(from_map(r) && went && still && in_time && r.w.downs_of(VK_LEFT) > lefts && !late.spot_stranded &&
+                  lines_with(log,
+                             fmt("Hunter: no report of yours since the cast at 1402,780, %.1f s ago",
+                                 static_cast<double>(Hunter::kBlindLandMs) / 1000.0)
+                                 .c_str(),
+                             "taken as landed on floor 803, 23 px under it") == 1,
+              fmt("a cast's report at 1402,780 on no floor, no report since: stranded and still for the first %d ms, "
+                  "then taken as landed on floor 803 and the way back walked within 250 ms of it (%d left arrows "
+                  "more, in time %d, stranded %d) -- \"%s\"",
+                  static_cast<int>(Hunter::kBlindLandMs), r.w.downs_of(VK_LEFT) - lefts, in_time ? 1 : 0,
+                  late.spot_stranded ? 1 : 0, line_with(log, "taken as landed").c_str()));
+        // Not for a report that is not a cast's.
+        ZoneRig q(c, 1402, 802);
+        q.hunter.set_zone(owner_zone());
+        q.pass();
+        q.w.held.clear();
+        q.w.report_op = 0x0027;
+        q.w.place(1402, 780);
+        q.w.me_y = 802;
+        const int qlefts = q.w.downs_of(VK_LEFT);
+        q.w.mobs = { mob_at(1450, 780, 1) };
+        q.run(2500);
+        check(q.st().spot_stranded && q.w.downs_of(VK_LEFT) == qlefts,
+              "a walk's report on no floor (not a cast's) is taken for no landing: stranded, as before");
     }
 
     // Past the file's end, the game's floor going on: the walk back off the
@@ -867,26 +968,35 @@ void test_zone_walk_back() {
     }
 
     // With no way back -- the floor under the ground, 889..914, whose ends
-    // both fall onto the bottom outside the box -- it fights where it stands.
+    // both fall onto the bottom outside the box -- it fought where it stood;
+    // since 2026.11.12 it stands (the owner's Q4: stranded), and the monster
+    // in reach out there is never fought (Q3).
     {
         ZoneRig r(owner_config(), 1300, stand_y(p, 1300, 752));
         r.hunter.set_zone(owner_zone());
         r.pass();
         const bool used = from_map(r);
-        r.w.place(1300, stand_y(p, 1300, 893));
-        r.w.mobs = { mob_at(1350, stand_y(p, 1350, 890), 5) };
-        r.run(3000);
+        std::vector<std::string> log = info_lines([&] {
+            r.w.place(1300, stand_y(p, 1300, 893));
+            r.w.mobs = { mob_at(1350, stand_y(p, 1350, 890), 5) };
+            r.run(3000);
+        });
         const Hunter::Status st = r.st();
         check(used && st.spot_why == Hunter::SpotWhy::NoReturn && st.spot_outside_px == 199 && !st.spot_way &&
-                  r.w.downs_of('Z') > 0 && r.w.downs_of(VK_LEFT) == 0 && r.w.downs_of(VK_RIGHT) <= 1,
-              fmt("from 1300,893, 199 px under the box with no way back: it fights the monster in reach (%d attacks), "
-                  "NoReturn said every pass",
+                  st.spot_stranded && r.w.downs_of('Z') == 0 && r.w.downs_of(VK_LEFT) == 0 &&
+                  r.w.downs_of(VK_RIGHT) == 0,
+              fmt("from 1300,893, 199 px under the box with no way back: standing, no arrow, the monster in reach "
+                  "outside never fought (%d attacks), NoReturn said every pass",
                   r.w.downs_of('Z')));
         r.w.mobs.clear();
-        const std::vector<std::string> log = info_lines([&] { r.run(3000); });
-        check(lines_with(log, "Hunter: no way back into the hunting area from 1300,893 (199 px outside it)") == 1 &&
-                  r.w.downs_of(VK_LEFT) == 0 && r.st().returns == 0 && r.w.downs_of(38) == 0,
-              "nothing left: said once, no walk -- \"" + line_with(log, "no way back") + "\"");
+        const std::vector<std::string> more = info_lines([&] { r.run(3000); });
+        log.insert(log.end(), more.begin(), more.end());
+        // 2026.11.12c: each key's reason here, or why no jump may go ("here: ...").
+        check(lines_with(log, "Hunter: 199 px outside the hunting area at 1300,893 -- no way back the map shows (here: ",
+                         "): standing where it is") == 1 &&
+                  lines_with(log, "Hunter: no way back into the hunting area") == 0 && r.w.downs_of(VK_LEFT) == 0 &&
+                  r.st().returns == 0 && r.w.downs_of(38) == 0,
+              "nothing left: said once, no walk -- \"" + line_with(log, "standing where it is") + "\"");
         // A jump attack out there: NoReturn in the air too, as judged where it
         // stood -- not None at every jump, the card flickering "đi bộ về".
         r.w.mobs = { mob_at(1350, stand_y(p, 1350, 890), 5) };
@@ -906,7 +1016,8 @@ void test_zone_walk_back() {
 
     // The 04c way back, for a report on none of the file's floors, says the
     // home 506 px up is too high; landed where the map shows no way back, it
-    // is NoReturn from then on -- fighting too, not TooHigh for good.
+    // is NoReturn from then on -- not TooHigh for good -- standing, the
+    // monster in reach outside never fought (2026.11.12).
     {
         ZoneRig r(owner_config(), 1402, 780);
         r.hunter.set_zone(owner_zone());
@@ -919,9 +1030,9 @@ void test_zone_walk_back() {
         const Hunter::Status st = r.st();
         check(from_map(r) && high == Hunter::SpotWhy::TooHigh &&
                   lines_with(log, "Hunter: the hunting spot is 506 px above -- higher than one jump") == 1 &&
-                  st.spot_why == Hunter::SpotWhy::NoReturn && r.w.downs_of('Z') > 0,
-              fmt("on no floor at 1402,780: TooHigh, as 04c (%d); then on 1300,893 with no way back: NoReturn while "
-                  "it fights (%d, %d attacks)",
+                  st.spot_why == Hunter::SpotWhy::NoReturn && st.spot_stranded && r.w.downs_of('Z') == 0,
+              fmt("on no floor at 1402,780: TooHigh, as 04c (%d); then on 1300,893 with no way back: NoReturn, "
+                  "standing, the monster outside never fought (%d, %d attacks)",
                   static_cast<int>(high), static_cast<int>(st.spot_why), r.w.downs_of('Z')));
     }
 
@@ -1103,8 +1214,10 @@ void test_zone_above() {
     check(s.st().has_target && s.st().target.slot == 6, "this run's spot, no map gone by: the nearest above, as before");
 
     // This run's spot with drops on, t52_s2 trusted by them at once (the
-    // entry by the 피스존 gate): still as before 04d -- the ramp's 107 px up
-    // is the target, its area 200 px up and down; never a jump key.
+    // entry by the 피스존 gate): as the map tab's area since 2026.11.12 (the
+    // owner's Q4) -- the file gone by, the ramp's 107 px up not on the
+    // character's own floor, never the target; never a jump key. Until then
+    // it was the target, as before 04d.
     {
         HunterConfig d = owner_config();
         d.spot_half_h = 200;
@@ -1117,9 +1230,9 @@ void test_zone_above() {
         t.run(1500, [&] {
             if (t.st().has_target && t.st().target.slot == 6) picked = true;
         });
-        check(trusted && !from_map(t) && t.hunter.spot().set && picked && t.w.downs_of(38) == 0,
-              "this run's spot, drops on, t52_s2 trusted: the ramp's 107 px up is the target as before 04d, no jump "
-              "key");
+        check(trusted && !from_map(t) && t.hunter.spot().set && !picked && t.w.downs_of(38) == 0,
+              "this run's spot, drops on, t52_s2 trusted: gone by as the map tab's area -- the ramp's 107 px up "
+              "never the target (Q3 of 04d), no jump key");
     }
     // No spot, a hop to follow: the ramp's picked, as before.
     {
@@ -1176,11 +1289,14 @@ void test_zone_drops() {
         r.w.mobs = { mob_at(1088, stand_y(p, 1088, 516), 8) };
         const std::vector<std::string> log = info_lines([&] { r.until([&] { return r.w.landed_at != 0; }, 4000); r.run(300); });
         const Hunter::Status st = r.st();
+        // Nothing switches the drops off since 2026.11.24 (no DropOff): the
+        // file still trusted is what 04c's "off the map" took away.
         check(r.w.drops.size() == 1 && r.w.me_x == 1114 && r.w.me_y == 497 && st.drops_worked == 1 &&
-                  st.drop_off == Hunter::DropOff::None && !r.book.distrusted("t52_s2"),
-              fmt("one Ctrl + Down from 1094,273, down at 1114,497 on the ramp: worked (%llu), drops still on, the file "
-                  "still trusted",
-                  static_cast<unsigned long long>(st.drops_worked)));
+                  st.drop_map.why == MapTrust::Why::Trusted && !r.book.distrusted("t52_s2") &&
+                  lines_with(log, "let go of until") == 0,
+              fmt("one Ctrl + Down from 1094,273, down at 1114,497 on the ramp: worked (%llu), the file still trusted "
+                  "(%s)",
+                  static_cast<unsigned long long>(st.drops_worked), MapTrust::why_text(st.drop_map.why)));
         check(lines_with(log, "Hunter: drop (Ctrl+Down) toward the monster: 6 px left, 243 px down -- you at 1094,273 "
                               "on floor 274 of t52_s2") == 1 &&
                   lines_with(log, "Hunter: drop worked: landed at 1114,497") == 1,
@@ -1316,13 +1432,18 @@ void test_zone_source() {
         skip("the hunter's source is not here to read\n");
         return;
     }
+    // 2026.11.12 (F1): the turn's tap in tap_turn, and two writes more -- the
+    // turn pending confirmed by a report, and taken as made at kTurnCapMs;
+    // the tap 80 ms, a key missed after 300.
     check(count_of(hunter, "facing_key_ms_ = ") == 5 && count_of(hunter, "facing_key_way_ = ") == 5 &&
-              count_of(hunter, "facing_ = ") == 9 && count_of(drop, "facing_") == 1 &&
+              count_of(hunter, "facing_key_by_ = ") == 5 && count_of(hunter, "facing_ = ") == 11 &&
+              count_of(drop, "facing_") == 1 &&
               count_of(hunter, "const bool missed = !after_key && !as_key && clock_now() > facing_key_ms_ + "
                                "kFacingMissedMs;") == 1 &&
-              Hunter::kTurnTapMs == 60 && Hunter::kFacingMissedMs == 500 && Hunter::kFacingTrustMs == 150,
-          "which way it faces: the same writes as 04c, none in the drop's file (its comment aside), the turn's tap "
-          "and its timings unchanged");
+              Hunter::kTurnTapMs == 80 && Hunter::kFacingMissedMs == 300 && Hunter::kFacingTrustMs == 150 &&
+              Hunter::kTurnQuietMs == 150 && Hunter::kTurnCapMs == 1000,
+          "which way it faces: the writes of 04c and the turn pending's (2026.11.12), none in the drop's file (its "
+          "comment aside), the turn's tap 80 ms and its timings");
     check(count_of(drop, "drop_ctrl_down(go_on)") == 1 && count_of(hunter + drop, "VK_DOWN") == 0 &&
               count_of(hunter + drop, "0x28") == 0,
           "the drop's key only through drop_ctrl_down; no Down named anywhere else in the hunter");

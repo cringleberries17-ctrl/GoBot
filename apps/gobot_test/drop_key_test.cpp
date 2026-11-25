@@ -389,6 +389,20 @@ struct DropRun {
     void go(const std::function<bool()>& go_on) { r = im.drop_ctrl_down(go_on); }
 };
 
+/// gate_down's one bare ↓ (2026.11.19 live run: refused in inject after
+/// send_key let it by -- 34 presses into Cổ Long's door, none went).
+void test_gate_down() {
+    section("gate_down's ↓ gets past inject's bare-↓ guard; any other ↓ still does not");
+    Pretend p;
+    const unsigned bare = InputManager::pretend_inject({ kDownDown });
+    const unsigned gate = InputManager::pretend_inject({ kDownDown }, true);
+    const unsigned after = InputManager::pretend_inject({ kDownDown });
+    const std::vector<Pretend::Got> g = p.log();
+    check(bare == 0 && gate == 1 && after == 0 && g.size() == 1 && same(g[0].events, { kDownDown }),
+          "a bare ↓ refused, the same ↓ as gate_down's sent, and refused again after it -- " + p.said());
+    InputManager::pretend_inject({ kDownUp });
+}
+
 void test_drop_press() {
     section("Ctrl + ↓ pressed: Ctrl, then [Ctrl↓, ↓↓] in one array, ↓ up, then Ctrl up");
 
@@ -920,6 +934,14 @@ void test_drop_sources() {
           "inject(): bare ↓ refused first, then other threads' downs during a drop, then the pretend sender, the "
           "switch and SendInput -- the file's only SendInput");
 
+    // gate_down (2026.11.19): the flag around its one press, and inject's
+    // guard letting that press by -- the live run's 34 presses went nowhere.
+    const std::string gd = body(im, "bool InputManager::gate_down(int hold_ms)");
+    check(before(gd, "t_gate_down = true;", "key_press(0x28, hold_ms)") &&
+              before(gd, "key_press(0x28, hold_ms)", "t_gate_down = false;") &&
+              inject.find("!t_gate_down && bare_down_among(count, chord, at)") != std::string::npos,
+          "gate_down sets the flag around its one press, and inject's guard lets that press by");
+
     // Only the drop's ↓ is sent as a chord, and ↓'s events are built in one place.
     const std::string chord = body(im, "void InputManager::drop_chord(");
     check(!chord.empty() && count(im, "kChord") == 2 &&
@@ -957,12 +979,10 @@ void test_drop_sources() {
                   std::string::npos,
           "drop_ctrl_down is noexcept, and catches what its steps throw");
 
-    // What stays as it was: never_pressed, the old jump_down.
+    // What stays as it was: never_pressed.
     check(hpp.find("static bool never_pressed(std::uint32_t vk) { return (vk & 0xFFu) == 0x28u; }") !=
-                  std::string::npos &&
-              body(im, "bool InputManager::jump_down()").find("if (!key_down(key_down_)) return false;") !=
-                  std::string::npos,
-          "never_pressed unchanged; jump_down still refused at its ↓, as ever");
+              std::string::npos,
+          "never_pressed unchanged");
 
     // release_all lets go of the drop's keys first, in their order; F12,
     // DỪNG and HUNT OFF all come through it.
@@ -973,21 +993,35 @@ void test_drop_sources() {
     const std::string hunter = source("/src/hunter.cpp");
     const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
     const std::string stop = body(hunter, "void Hunter::stop()");
-    const std::string jobs = body(gui, "bool GuiApp::stop_jobs(bool with_bot)");
+    const std::string jobs = body(gui, "bool GuiApp::stop_jobs(");
     const std::string tick = body(gui, "void GuiApp::tick()");
     check(before(stop, "running_.exchange(false)", "release_movement();") &&
               body(hunter, "void Hunter::release_movement()").find("input_.release_all();") != std::string::npos &&
               jobs.find("input_.release_all();") != std::string::npos &&
-              before(tick, "if (keys.panic) {", "stop_jobs(true);"),
+              before(tick, "if (keys.panic) {", "stop_jobs("),
           "HUNT OFF (Hunter::stop: go_on false, then release_all), F12 and DỪNG (stop_jobs) let go of Ctrl");
+    // 2026.11.24 (the owner: "thử lại luôn" -- nothing stops for good): after
+    // 3 tries that did not go, every key let go of once an episode, said in
+    // amber, and the hunt goes on -- never stop_hunt() as until then.
+    const std::size_t owed_at = tick.find("if (input_.keys_owed() && now_ms() - owed_look_ms_ >= 100)");
+    const std::size_t owed_end = owed_at == std::string::npos ? owed_at : tick.find("drop_tick();", owed_at);
+    const std::string owed_block =
+        owed_at == std::string::npos || owed_end == std::string::npos ? std::string() : tick.substr(owed_at, owed_end - owed_at);
     check(before(tick, "if (input_.keys_owed() && now_ms() - owed_look_ms_ >= 100)", "input_.settle_owed()") &&
-              before(tick, "input_.owed_tries() >= InputManager::kOwedTries && hunting_", "stop_hunt();"),
-          "GoBot's window sends owed ups again every 100 ms, and stops the hunt after 3 tries that did not go");
-    check(before(tick, "input_.owed_tries() >= InputManager::kOwedTries && hunting_", "drop_stopped_vi_ =") &&
-              before(tick, "drop_stopped_vi_ =", "simple_note(drop_stopped_vi_, 15000);") &&
-              before(tick, "simple_note(drop_stopped_vi_, 15000);", "drop_tick();"),
-          "and says so in the red line under BẮT ĐẦU, as drop_tick would: the hunt it stopped there is no longer "
-          "drop_tick's to say");
+              before(owed_block, "input_.owed_tries() >= InputManager::kOwedTries && hunting_", "!owed_released_") &&
+              before(owed_block, "owed_released_ = true;", "input_.release_all();") &&
+              before(owed_block, "input_.release_all();", "input_.release_stray_drop_keys();") &&
+              owed_block.find("stop_hunt();") == std::string::npos &&
+              owed_block.find("if (!input_.keys_owed()) owed_released_ = false;") != std::string::npos,
+          "GoBot's window sends owed ups again every 100 ms; after 3 tries that did not go it lets every key go, once "
+          "an episode -- and never stops the hunt (2026.11.24)");
+    check(before(owed_block, "input_.release_stray_drop_keys();", "drop_note_vi_ = up ?") &&
+              before(owed_block, "drop_note_vi_ = up ?", "simple_note(drop_note_vi_, 15000);") &&
+              owed_block.find("GoBot đã nhả mọi phím; đánh quái tự chạy tiếp \"") != std::string::npos &&
+              owed_block.find("\"khi Windows nhận lệnh nhả phím.\"") != std::string::npos &&
+              owed_block.find("drop_stopped_vi_") == std::string::npos && owed_end != std::string::npos,
+          "and says so in amber under the tick -- every key let go of, the hunt going on by itself -- before "
+          "drop_tick");
 
     // GoBot's last key or click (2026.11.04d): noted after the switch let it
     // go, type_key's letters as text.
@@ -1010,6 +1044,7 @@ void test_drop_key(void (*check_fn)(bool, const std::string&), void (*section_fn
     test_drop_events();
     test_bare_down_table();
     test_last_input();
+    test_gate_down();
     test_drop_press();
     test_drop_cut_and_owed();
     test_release_stray();

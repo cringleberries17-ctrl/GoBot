@@ -23,7 +23,10 @@
 #include "gobot/bag.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/party_chat.hpp"
 #include "gobot/party_invite.hpp"
+#include "gobot/player_list.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 #include "test_support.hpp"
@@ -1739,11 +1742,786 @@ void test_panel_picture() {
           "130x42, " + std::to_string(solid) + " pixels of frame; the bars and the leader's band left out");
 }
 
+/// Bug 3 of 2026-11-14 (the owner: "Khi thực hiện auto pt, nếu chẳng may pt
+/// trúng người đã vào pt thì sẽ bị hiện dialog mà không tự động tắt => chỉ cần
+/// ấn enter hoặc click xác nhận trong dialog"): the game's one-button message
+/// after an invite closed by its own Xác Nhận -- clicked, never Enter, which
+/// opens the chat line -- and that player held off for InviteReply::kHoldMs
+/// (30 s since 2026.11.15b, ten minutes before).
+struct ReplyGame {
+    Frame base, box;
+    int bx = 541, by = 320;
+    int looks = 0;
+    int from_look = 1;          ///< drawn from this look on; 0 never
+    int only_looks = -1;        ///< drawn for this many looks, then gone by itself (-1: till clicked)
+    std::vector<int> shift;     ///< its x moved by this much on look n (from 1), when given
+    bool sticks = false;        ///< a click on its Xác Nhận does nothing
+    /// A click on its Xác Nhận closes it this many ms of naps later -- a slow
+    /// game's (2026-11-15); 0: at once.
+    int  close_after_ms = 0;
+    int  closes_at = -1;        ///< the naps' time it goes at, once clicked
+    int  stop_at = -1;          ///< the naps' time from which a stop is asked; -1 never
+    bool lit_after = false;     ///< after a click its label drawn lit, the box still there
+    bool closed = false, clicked_once = false;
+    Frame footer;               ///< an invitation's footer drawn too, when valid
+    Frame words;                ///< its words, drawn on it where the game writes them, when valid
+    int fx = 140, fy = 560;
+    int t = 0;                  ///< the naps, in ms
+    /// A clock handed over as Hands::now_ms (with `clocked`): the naps and
+    /// `look_ms` for every look -- a slow guest's grab and search.
+    bool clocked = false;
+    int look_ms = 0;
+    std::uint64_t clock = 0;
+    bool stop = false;
+    std::vector<std::pair<int, int>> clicks, moves;
+    std::vector<int> click_t;
+    ScreenRect ok;              ///< its Xác Nhận's label, as lone_ok finds it on a look with only it
+    int dx_now() const {
+        return looks >= 1 && looks <= static_cast<int>(shift.size()) ? shift[static_cast<std::size_t>(looks - 1)] : 0;
+    }
+    bool stopped() const { return stop || (stop_at >= 0 && t >= stop_at); }
+    Frame look() {
+        ++looks;
+        clock += static_cast<std::uint64_t>(look_ms);
+        if (closes_at >= 0 && t >= closes_at) closed = true;
+        Frame f = base;
+        if (footer.valid()) blit(f, footer, fx, fy);
+        const bool on = from_look > 0 && looks >= from_look && !closed &&
+                        (only_looks < 0 || looks < from_look + only_looks);
+        if (on) {
+            blit(f, box, bx + dx_now(), by);
+            if (words.valid()) blit(f, words, bx + dx_now() + 24, by + 14);
+            if (lit_after && clicked_once)
+                for (int y = ok.y - 2; y < ok.bottom() + 2; ++y)
+                    for (int x = ok.x - 2; x < ok.right() + 2; ++x) {
+                        std::uint8_t* d = &f.pixels[(static_cast<std::size_t>(y) * f.width + x) * 4];
+                        for (int c = 0; c < 3; ++c) d[c] = static_cast<std::uint8_t>(std::min(255, d[c] + 70));
+                    }
+        }
+        return f;
+    }
+    InviteReply::Hands hands() {
+        InviteReply::Hands h;
+        h.grab = [this](Frame& f) {
+            f = look();
+            return true;
+        };
+        h.click = [this](int x, int y) {
+            clicks.emplace_back(x, y);
+            click_t.push_back(t);
+            const ScreenRect button{ ok.x - 4, ok.y - 4, ok.w + 8, ok.h + 8 };
+            if (button.contains(x, y)) {
+                clicked_once = true;
+                if (!sticks && !lit_after) {
+                    if (close_after_ms <= 0) closed = true;
+                    else if (closes_at < 0) closes_at = t + close_after_ms;
+                }
+            }
+            return true;
+        };
+        h.move = [this](int x, int y) { moves.emplace_back(x, y); };
+        h.nap = [this](int ms) {
+            t += ms;
+            clock += static_cast<std::uint64_t>(ms);
+            return !stopped();
+        };
+        h.stop = [this] { return stopped(); };
+        if (clocked) h.now_ms = [this] { return clock; };
+        return h;
+    }
+};
+
+void test_invite_reply() {
+    section("Tổ đội (2026.11.14b): the game's message after an invite -- \"already in a party\", refused -- closed "
+            "by its own Xác Nhận, never a key, and that player not invited again for 30 s (10 min until 2026.11.15b)");
+    static TemplateStore store;
+    static const bool loaded = store.load_best(exe_relative("configs/templates.ini"));
+    const Frame* fail = store.get("grabbed/invite_fail2");
+    const Frame* ok_box = store.get("grabbed/dialog_ok");
+    if (!loaded || fail == nullptr || ok_box == nullptr) {
+        skip("the game's message pictures (grabbed/invite_fail2, grabbed/dialog_ok) are not installed here\n");
+    } else {
+        const auto game_with = [&](const Frame& box) {
+            ReplyGame g;
+            g.base = plain_frame(1280, 720);
+            g.box = box;
+            Frame probe = g.base;
+            blit(probe, box, g.bx, g.by);
+            bag::lone_ok(probe, store, ScreenRect{ 0, 0, probe.width, probe.height }, &g.ok);
+            return g;
+        };
+        // 1. lone_ok and the party's own message: its label where it is.
+        {
+            const ReplyGame g = game_with(*fail);
+            check(g.ok.valid() && std::abs(g.ok.x - 689) <= 1 && std::abs(g.ok.y - 378) <= 1,
+                  fmt("grabbed/invite_fail2 at 541,320: its Xác Nhận found by lone_ok at %d,%d (689,378 wanted)", g.ok.x,
+                      g.ok.y));
+        }
+        // 2. Never an invitation's, the bin's or the revive question's.
+        {
+            bool none = true;
+            std::string which;
+            for (const char* name : { "grabbed/party_invite_buttons", "grabbed/del_item_confirm_1",
+                                      "grabbed/hoisinh_confirm" }) {
+                const Frame* pic = store.get(name);
+                if (pic == nullptr) continue;
+                Frame f = plain_frame(1280, 720);
+                blit(f, *pic, 140, 300);
+                if (bag::lone_ok(f, store, ScreenRect{ 0, 0, f.width, f.height })) {
+                    none = false;
+                    which += std::string(" ") + name;
+                }
+            }
+            check(none, "lone_ok takes no two-button dialog for the message -- an invitation, the bin's question, the "
+                        "revive question" + which);
+            const Frame* footer = store.get("grabbed/party_invite_buttons");
+            if (footer != nullptr) {
+                ReplyGame g = game_with(*fail);
+                g.footer = *footer;
+                const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+                const ScreenRect button{ g.ok.x - 4, g.ok.y - 4, g.ok.w + 8, g.ok.h + 8 };
+                bool safe = true;
+                for (const auto& [x, y] : g.clicks)
+                    safe = safe && button.contains(x, y) &&
+                           !(std::abs(x - (g.fx + 31)) <= 6 && std::abs(y - (g.fy + 23)) <= 6);
+                check(safe && r.how == InviteReply::How::None && g.clicks.empty(),
+                      std::string("an invitation and the message both up: nothing clicked -- lone_ok wants no dialog "
+                                  "of two buttons anywhere -- never the invitation's Xác Nhận -- ") +
+                          InviteReply::how_name(r.how));
+            }
+        }
+        // 3. Closed: one click in the middle of its label, the pointer moved
+        //    50 px under it, nothing else.
+        {
+            ReplyGame g = game_with(*fail);
+            g.from_look = 2;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            check(r.how == InviteReply::How::Closed && r.clicks == 1 && g.clicks.size() == 1 &&
+                      g.clicks[0].first == g.ok.cx() && g.clicks[0].second == g.ok.cy() && g.moves.size() == 1 &&
+                      g.moves[0].first == g.ok.cx() && g.moves[0].second == g.ok.bottom() + InviteReply::kParkPx &&
+                      r.seen_after_ms == InviteReply::kLookMs,
+                  fmt("the message up: closed with one click at %d,%d, the pointer moved under it -- %s, %d click(s)",
+                      g.clicks.empty() ? -1 : g.clicks[0].first, g.clicks.empty() ? -1 : g.clicks[0].second,
+                      InviteReply::how_name(r.how), r.clicks));
+        }
+        // 4. One that will not go: two clicks, the second a pixel aside and
+        //    later, then given up -- no third.
+        {
+            ReplyGame g = game_with(*fail);
+            g.sticks = true;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            check(r.how == InviteReply::How::NotClosed && g.clicks.size() == 2 &&
+                      g.clicks[1].first == g.clicks[0].first + 1 && g.clicks[1].second == g.clicks[0].second &&
+                      g.click_t[1] - g.click_t[0] >= 300,
+                  fmt("a message that will not close: two clicks, %d ms apart, then given up -- %s",
+                      g.click_t.size() == 2 ? g.click_t[1] - g.click_t[0] : -1, InviteReply::how_name(r.how)));
+        }
+        // 5. None: nothing clicked or moved, the watch its length.
+        {
+            ReplyGame g = game_with(*fail);
+            g.from_look = 0;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            check(r.how == InviteReply::How::None && g.clicks.empty() && g.moves.empty() &&
+                      g.t >= InviteReply::kWatchMs && g.t < InviteReply::kWatchMs + InviteReply::kLookMs,
+                  fmt("no message: nothing clicked or moved, watched %d ms", g.t));
+        }
+        // 6. A flash, and a box that moves: not clicked until seen twice at
+        //    one place.
+        {
+            ReplyGame g = game_with(*fail);
+            g.only_looks = 1;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            ReplyGame m = game_with(*fail);
+            m.shift = { 0, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6 };
+            m.ok.x += 6;
+            const InviteReply::Result rm = InviteReply::watch(store, nullptr, m.hands(), InviteReply::kWatchMs);
+            check(r.how == InviteReply::How::None && g.clicks.empty() && rm.how == InviteReply::How::Closed &&
+                      m.clicks.size() == 1 && m.looks >= 3 && m.clicks[0].first == m.ok.cx(),
+                  "a message for one look only: not clicked; one moved 6 px after its first look: clicked only where "
+                  "two looks found it");
+        }
+        // 7. Lit after the click, its box still there: not taken for closed.
+        {
+            ReplyGame g = game_with(*ok_box);
+            g.lit_after = true;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            check(r.how != InviteReply::How::Closed && !g.clicks.empty(),
+                  std::string("its button lit after the click, the box still up: not called closed -- ") +
+                      InviteReply::how_name(r.how));
+        }
+        // 8. A stop first: nothing clicked.
+        {
+            ReplyGame g = game_with(*fail);
+            g.stop = true;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            check(r.how == InviteReply::How::Stopped && g.clicks.empty(), "a stop: nothing clicked");
+        }
+        // 8b. On a slow guest, by the clock too (the review of 2026.11.14b): a
+        //     look of 600 ms ends a watch with nothing in it well before its
+        //     naps add up to 2.5 s; and a short watch (two looks) with a look
+        //     of 700 ms still takes a message seen, its one look more, and
+        //     sees it gone after the click.
+        {
+            ReplyGame g = game_with(*fail);
+            g.from_look = 0;
+            g.clocked = true;
+            g.look_ms = 600;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            ReplyGame s = game_with(*fail);
+            s.clocked = true;
+            s.look_ms = 700;
+            const InviteReply::Result rs =
+                InviteReply::watch(store, nullptr, s.hands(), 2 * InviteReply::kLookMs + 50);
+            check(r.how == InviteReply::How::None && g.clicks.empty() && g.looks <= 4 &&
+                      g.t < InviteReply::kWatchMs && rs.how == InviteReply::How::Closed && rs.clicks == 1,
+                  fmt("slow looks: an empty watch over by the clock after %d look(s) (%d ms of naps); a short one "
+                      "still closes the message seen -- %s, %d click(s)",
+                      g.looks, g.t, InviteReply::how_name(rs.how), rs.clicks));
+        }
+        // 8c. A slow game (2026-11-15, the owner: "sẽ có thêm 30 giây chờ phản
+        //     ứng"): the first click on its Xác Nhận watched up to
+        //     kFirstGoneMs (kReactMs) before the second. Gone 12 s after it:
+        //     one click, and how long said. Never gone: the second click
+        //     kFirstGoneMs after the first, watched kGoneMs, given up -- not
+        //     much later. A stop 7 s into the wait: over at once.
+        {
+            ReplyGame g = game_with(*fail);
+            g.close_after_ms = 12'000;
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs);
+            check(InviteReply::kFirstGoneMs == kReactMs && InviteReply::kGoneMs == 2500 &&
+                      r.how == InviteReply::How::Closed && r.clicks == 1 && g.clicks.size() == 1 &&
+                      r.gone_after_ms >= 12'000 && r.gone_after_ms <= 12'000 + InviteReply::kLookMs,
+                  fmt("the message gone 12 s after the click: one click, closed, seen gone %d ms after it -- %s",
+                      r.gone_after_ms, InviteReply::how_name(r.how)));
+            ReplyGame s = game_with(*fail);
+            s.sticks = true;
+            const InviteReply::Result rs = InviteReply::watch(store, nullptr, s.hands(), InviteReply::kWatchMs);
+            const int apart = s.click_t.size() == 2 ? s.click_t[1] - s.click_t[0] : -1;
+            const int after_first = s.click_t.empty() ? -1 : s.t - s.click_t[0];
+            check(rs.how == InviteReply::How::NotClosed && s.clicks.size() == 2 && apart >= InviteReply::kFirstGoneMs &&
+                      apart <= InviteReply::kFirstGoneMs + 2 * InviteReply::kLookMs &&
+                      after_first <= InviteReply::kFirstGoneMs + InviteReply::kGoneMs + 3 * InviteReply::kLookMs &&
+                      rs.gone_after_ms == -1,
+                  fmt("a message that never goes on a slow game: the second click %d ms after the first, given up "
+                      "%d ms after the first -- %s",
+                      apart, after_first, InviteReply::how_name(rs.how)));
+            ReplyGame p = game_with(*fail);
+            p.sticks = true;
+            p.stop_at = InviteReply::kLookMs + 7'000;   // the first click goes at the second look, kLookMs in
+            const InviteReply::Result rp = InviteReply::watch(store, nullptr, p.hands(), InviteReply::kWatchMs);
+            check(rp.how == InviteReply::How::Stopped && p.clicks.size() == 1 && p.t >= p.stop_at &&
+                      p.t <= p.stop_at + InviteReply::kLookMs,
+                  fmt("a stop 7 s into the wait for the message to go: stopped at %d ms of naps, one click", p.t));
+        }
+        // 9. Its words read, for the log.
+        {
+            GlyphFont font;
+            Frame words;
+            if (!font.load(GlyphFont::default_dir()) || !font.render_line("Doi phuong da co nhom", words)) {
+                skip("no glyphs here to draw the message's words with\n");
+            } else {
+                ReplyGame g = game_with(*ok_box);
+                g.words = words;
+                const InviteReply::Result r = InviteReply::watch(store, &font, g.hands(), InviteReply::kWatchMs);
+                check(r.how == InviteReply::How::Closed && r.words.find("Doi phuong da co nhom") != std::string::npos,
+                      "the message's words read with the game's glyphs: \"" + r.words + "\"");
+            }
+        }
+    }
+    // 10. That player held off (PartyChat::hold_off): not returned again for
+    //     the hold, a name read alike held too, and said by cooling() -- with
+    //     a hold of ten minutes, as 2026.11.14b had it.
+    {
+        const std::uint64_t ten_min = 600'000;
+        PartyChat chat;
+        PartyChat::Settings s;
+        s.votes = 1;
+        s.cooldown_s = 30;
+        chat.set_settings(s);
+        std::uint64_t now = 100000;
+        const auto first = chat.saw({ "Someone: pt" }, now);
+        chat.hold_off("Someone", now, ten_min);
+        const bool held_31 = chat.saw({ "Someone: pt" }, now + 31'000).empty();
+        const bool held_599 = chat.saw({ "Someone: pt" }, now + 599'000).empty();
+        const bool alike = chat.saw({ "Somone: pt" }, now + 400'000).empty();
+        const auto waiting = chat.cooling(now + 100'000);
+        const bool again = chat.saw({ "Someone: pt" }, now + 601'000).size() == 1;
+        const bool other = chat.saw({ "Other: pt" }, now + 602'000).size() == 1;
+        PartyChat reset = chat;
+        reset.hold_off("Someone", now + 601'000, ten_min);
+        reset.reset();
+        check(first.size() == 1 && held_31 && held_599 && alike && again && other &&
+                  waiting.count("Someone") == 1 && waiting.at("Someone") > 400 && reset.cooling(now + 602'000).empty(),
+              "hold_off: held at +31 s and +599 s, a name read alike held too, another player not; asked again at "
+              "+601 s; cooling() says so, reset() forgets it");
+    }
+    // 10b. The hold the party worker gives since 2026.11.17b (the owner chose
+    //      A: a minute, ten after two in a row -- 2026.11.15b's 30 s before):
+    //      InviteTries' first hold handed to PartyChat -- held at +59 s past a
+    //      5-s cooldown, asked again at +61 s.
+    {
+        PartyChat chat;
+        PartyChat::Settings s;
+        s.votes = 1;
+        s.cooldown_s = 5;
+        chat.set_settings(s);
+        const std::uint64_t now = 100000;
+        const auto first = chat.saw({ "Someone: pt" }, now);
+        InviteTries tries;
+        const InviteTries::Outcome o = tries.failed("Someone", now, "the game answered it with a message");
+        chat.hold_off("Someone", now, o.hold_ms);
+        const bool held_59 = chat.saw({ "Someone: pt" }, now + 59'000).empty();
+        const bool again = chat.saw({ "Someone: pt" }, now + 61'000).size() == 1;
+        check(o.hold_ms == 60'000 && first.size() == 1 && held_59 && again,
+              "InviteTries' first hold handed to PartyChat: the player whose invite the game answered is held 60 s "
+              "(30 s until 2026.11.17b): held at +59 s past a 5-s cooldown, asked again at +61 s");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    // 11. Where the party worker looks for it, and what it never presses.
+    {
+        const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp");
+        const std::string cpp = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/party_invite.cpp");
+        const std::size_t npos = std::string::npos;
+        const auto body = [](const std::string& text, const std::string& head) {
+            const std::size_t a = text.find(head);
+            const std::size_t b = a == std::string::npos ? std::string::npos : text.find("\n}", a);
+            return a == std::string::npos || b == std::string::npos ? std::string() : text.substr(a, b + 2 - a);
+        };
+        const std::string party = body(gui, "void GuiApp::party_loop() {");
+        const std::string watch = body(cpp, "InviteReply::Result InviteReply::watch(");
+        // With the stop that also ends on the character down (2026-11-15).
+        const std::size_t invite = party.find("list.invite(input_, capture, store, *row, &why, mouse_stopped)");
+        const std::size_t answered = invite == npos ? npos : party.find("InviteReply::watch(", invite);
+        const std::size_t invited = party.find("say_party(\"invited \" + who)");
+        check(!party.empty() && !watch.empty() && invite != npos && answered != npos && invited != npos &&
+                  invite < answered && answered < invited && party.find("chat.hold_off(") != npos &&
+                  party.find("VK_RETURN") == npos && party.find("VK_ESCAPE") == npos &&
+                  party.find("key_press(") == npos && watch.find("key_press") == npos && watch.find("VK_") == npos &&
+                  watch.find("send_key") == npos && party.find("click_at(") == npos,
+              "gui_app.cpp: after an invite the game's message is looked for and closed by its Xác Nhận, before "
+              "\"invited\" is said, the player held off; no Enter, ESC or other key anywhere in it");
+        // The other two places it is looked for, and the pause (the review of
+        // 2026.11.14b: the source check above reached neither): the late
+        // watch after the HUD's tick, that player held off; a message up
+        // before an invite closed on the list's own look, before its rows
+        // are read; the chat's askers not counted while one is stuck. Three
+        // watches in all, and the clock handed to them.
+        const auto in_order = [&](const std::vector<std::string>& parts) {
+            std::size_t at = 0;
+            for (const std::string& p : parts) {
+                at = party.find(p, at);
+                if (at == npos) return false;
+                at += p.size();
+            }
+            return true;
+        };
+        int watches = 0;
+        for (std::size_t at = party.find("InviteReply::watch("); at != npos;
+             at = party.find("InviteReply::watch(", at + 1))
+            ++watches;
+        check(in_order({ "party_hud_tick(look, store);", "InviteReply::kLateMs",
+                         "const bool late_due = rules.auto_invite && !last_invited.empty() && reply_clicks == 0;",
+                         "InviteReply::watch(",
+                         "invite_failed(last_invited" }) &&
+                  in_order({ "Frame open_now;", "if (bag::lone_ok(open_now, store,", "InviteReply::watch(",
+                             "const auto rows = list.read(open_now, font);" }) &&
+                  in_order({ "const bool reply_stuck = now_ms() < reply_stuck_until;",
+                             "if (reply_stuck || reply_clicks > 0) lines.clear();",
+                             "for (const std::string& who : chat.saw(lines, now))" }) &&
+                  watches == 3 && gui.find("reply_hands.now_ms = steady_ms;") != npos &&
+                  watch.find("clock_ms() >= watch_ms && !have_first") != npos,
+              "gui_app.cpp: the late watch after the HUD's tick, that invite counted as come to nothing; a message "
+              "up before an invite closed before the list is read; no asker counted while one is stuck or waits to "
+              "be clicked again; three watches, on the clock as well as the naps");
+
+        // 12. 2026.11.17b (the owner chose A, B and C): every watch of the
+        //     worker's one click with kCloseHoldMs -- never kReactMs with the
+        //     mouse held; a held-off player turned away before the list is
+        //     opened; each invite judged on a later pass's HUD and that player
+        //     held off in the chat as well; the list shut by close() -- its
+        //     button -- after every turn, and never a key.
+        int short_watches = 0;
+        for (std::size_t at = party.find("InviteReply::kCloseHoldMs, 1)"); at != npos;
+             at = party.find("InviteReply::kCloseHoldMs, 1)", at + 1))
+            ++short_watches;
+        const std::size_t open_at = party.find("list.ensure_open(input_, capture, store, &why, mouse_stopped)");
+        int shuts = 0;
+        for (std::size_t at = party.find("shut_list();", open_at == npos ? 0 : open_at); at != npos;
+             at = party.find("shut_list();", at + 1))
+            ++shuts;
+        check(short_watches == 3 && open_at != npos &&
+                  in_order({ "for (const std::string& who : chat.saw(lines, now))",
+                             "if (tries.held(who, now_ms(), &left)) {", "continue;",
+                             "list.ensure_open(input_, capture, store, &why, mouse_stopped)" }) &&
+                  in_order({ "if (tries.due(now_ms())) {", "const PartyHud hud = party_read(look, store);",
+                             "tries.judge(seen, now_ms())", "chat.hold_off(o.who, steady_ms(), o.hold_ms);" }) &&
+                  in_order({ "const InviteTries::Outcome o = tries.failed(who, now_ms(), why_en);",
+                             "chat.hold_off(who, steady_ms(), o.hold_ms);" }) &&
+                  in_order({ "list.invite(input_, capture, store, *row, &why, mouse_stopped)",
+                             "tries.sent(who, now_ms(), size_before);", "InviteReply::watch(",
+                             "invite_failed(who, \"the game answered it with a message\"", "shut_list();",
+                             "say_party(\"invited \" + who)" }) &&
+                  in_order({ "if (list.opened_it()) list_left_open = true;",
+                             "list.close(input_, capture, store, &why_open, mouse_stopped)" }) &&
+                  shuts >= 6 && party.find("InviteReply::kHoldMs") == npos && party.find("VK_ESCAPE") == npos,
+              fmt("gui_app.cpp (2026.11.17b): %d of the worker's watches one click held %d ms at most; a held-off "
+                  "player turned away before ensure_open; each invite judged on the HUD a pass later and held off in "
+                  "the chat too; the list shut by its button at %d places after it is opened, never ESC",
+                  short_watches, InviteReply::kCloseHoldMs, shuts));
+        // 13. The review of 2026.11.17b: a message left up, or the invites
+        //     stopped, by one asker's turn ends the pass's askers before the
+        //     next is held, the list opened or the message clicked again; an
+        //     asker not on the list held in the chat a short while, never
+        //     counted as a miss; a message up before an invite answers nobody,
+        //     no English stand-in on the tab.
+        const std::size_t not_listed = party.find("asked, but is not among the ");
+        const std::size_t not_listed_end = party.find("shut_list();", not_listed == npos ? 0 : not_listed);
+        const std::string not_listed_part =
+            not_listed == npos || not_listed_end == npos ? std::string()
+                                                         : party.substr(not_listed, not_listed_end - not_listed);
+        check(in_order({ "for (const std::string& who : chat.saw(lines, now))",
+                         "if (reply_clicks > 0 || now_ms() < reply_stuck_until) break;",
+                         "if (tries.held(who, now_ms(), &left)) {",
+                         "list.ensure_open(input_, capture, store, &why, mouse_stopped)" }) &&
+                  !not_listed_part.empty() &&
+                  not_listed_part.find("chat.hold_off(who, steady_ms(), InviteTries::kNotListedHoldMs);") != npos &&
+                  not_listed_part.find("invite_failed(") == npos && InviteTries::kNotListedHoldMs == 60'000 &&
+                  party.find("reply_after(\"\", before);") != npos &&
+                  party.find("reply_after(\"an earlier invitee\"") == npos &&
+                  party.find("\"Thông báo có sẵn\"") != npos,
+              "gui_app.cpp (review of 2026.11.17b): a message waiting or the invites stopped ends the pass's askers "
+              "before the next turn; not on the list -- a 60 s chat hold, never a counted miss; a message up before "
+              "an invite names no player on the tab");
+    }
+#endif
+}
+
+/// 2026.11.17b, A (the owner: "khi pt người đã có pt thì hiển thị thông báo
+/// sau đó bot không phản ứng gì nữa và cứ mở khung pt"; chose "ok làm A B C
+/// đi"): a player whose invite did not lead to a join is held off -- a minute,
+/// ten after two in a row -- whatever the screen showed; a join starts the
+/// count again. On a pretend clock, nothing on a screen.
+void test_invite_tries() {
+    section("Tổ đội (2026.11.17b, A): an invite that did not lead to a join holds that player off -- 1 min, 10 min "
+            "after two in a row -- judged on the party HUD 15 s on; a join starts the count again");
+    using T = InviteTries;
+    check(T::kJoinWaitMs == 15'000 && T::kFailHoldMs == 60'000 && T::kFailHoldLongMs == 600'000 &&
+              T::kFailsForLong == 2 && T::kStaleWaitMs == 10'000,
+          "the owner's numbers: judged 15 s after the invite, held 1 min, 10 min from the 2nd in a row");
+    const std::uint64_t t0 = 1'000'000;
+    // 1. No join: not judged before 15 s, then held a minute.
+    {
+        T t;
+        t.sent("Someone", t0, 1);
+        const bool early = !t.due(t0 + 14'999) && t.waiting("Someone");
+        const bool due = t.due(t0 + 15'000);
+        const auto out = t.judge(T::Hud{ 1, false }, t0 + 15'000);
+        std::uint64_t left = 0;
+        const bool held = t.held("Someone", t0 + 15'000 + 59'000, &left);
+        const bool free = !t.held("Someone", t0 + 15'000 + 60'001);
+        check(early && due && out.size() == 1 && !out[0].joined && out[0].fails == 1 && out[0].hold_ms == 60'000 &&
+                  held && left == 1'000 && free && !t.waiting("Someone") && !t.due(t0 + 100'000),
+              "alone before and after: not judged before 15 s, then no join -- held 60 s, free after: " +
+                  (out.empty() ? std::string("nothing") : out[0].why));
+        // 2. The second in a row: ten minutes.
+        t.sent("Someone", t0 + 80'000, 1);
+        const auto second = t.judge(T::Hud{ 1, false }, t0 + 95'000);
+        check(second.size() == 1 && second[0].fails == 2 && second[0].hold_ms == 600'000 &&
+                  t.held("Someone", t0 + 95'000 + 599'000) && !t.held("Someone", t0 + 95'000 + 600'001),
+              fmt("the second in a row: held %d s", second.empty() ? -1 : static_cast<int>(second[0].hold_ms / 1000)));
+        // 3. A join starts it again: no hold, the next miss a minute.
+        t.sent("Someone", t0 + 700'000, 2);
+        const auto joined = t.judge(T::Hud{ 3, false }, t0 + 715'000);
+        t.sent("Someone", t0 + 800'000, 3);
+        const auto after = t.failed("Someone", t0 + 801'000, "the game answered it with a message");
+        check(joined.size() == 1 && joined[0].joined && joined[0].hold_ms == 0 && after.fails == 1 &&
+                  after.hold_ms == 60'000 && !t.waiting("Someone"),
+              "a member's panel more than before: joined, the count started again -- the next miss a minute");
+    }
+    // 4. The game's message counts at once; the invite is not judged again.
+    {
+        T t;
+        t.sent("Other", t0, 1);
+        const auto o = t.failed("Other", t0 + 2'000, "the game answered it with a message");
+        check(o.fails == 1 && o.hold_ms == 60'000 && !t.waiting("Other") && !t.due(t0 + 20'000) &&
+                  t.judge(T::Hud{ 1, false }, t0 + 20'000).empty() && t.held("Other", t0 + 61'000) &&
+                  !t.held("Other", t0 + 62'001),
+              "a message after the invite: held at once, from then -- no second count 15 s on");
+    }
+    // 5. A HUD that cannot tell: unread now or before -- no join.
+    {
+        T a, b;
+        a.sent("Someone", t0, 1);
+        b.sent("Someone", t0, 0);
+        const auto ua = a.judge(T::Hud{ 0, false }, t0 + 15'000);
+        const auto ub = b.judge(T::Hud{ 2, false }, t0 + 15'000);
+        check(ua.size() == 1 && !ua[0].joined && ua[0].why.find("could not be read") != std::string::npos &&
+                  ub.size() == 1 && !ub[0].joined && ub[0].why.find("not read before") != std::string::npos,
+              "the HUD unread after the invite, or before it: counted as no join -- " +
+                  (ua.empty() ? std::string() : ua[0].why) + "; " + (ub.empty() ? std::string() : ub[0].why));
+    }
+    // 6. A look from before GoBot's last change: waited past, up to 10 s more.
+    {
+        T t;
+        t.sent("Someone", t0, 1);
+        const auto stale = t.judge(T::Hud{ 2, true }, t0 + 15'000);
+        const bool still = t.waiting("Someone");
+        const auto fresh = t.judge(T::Hud{ 2, false }, t0 + 16'000);
+        T u;
+        u.sent("Someone", t0, 1);
+        const auto late = u.judge(T::Hud{ 1, true }, t0 + 25'000);
+        check(stale.empty() && still && fresh.size() == 1 && fresh[0].joined && late.size() == 1 && !late[0].joined,
+              "a stale look: not judged on, the next one is; still stale 25 s on, taken as it is");
+    }
+    // 7. Two out at once share one more member: the first invited gets it.
+    {
+        T t;
+        t.sent("First", t0, 1);
+        t.sent("Second", t0 + 3'000, 1);
+        const auto out = t.judge(T::Hud{ 2, false }, t0 + 20'000);
+        const bool first_joined = out.size() == 2 && out[0].who == "First" && out[0].joined;
+        const bool second_not = out.size() == 2 && out[1].who == "Second" && !out[1].joined && out[1].fails == 1;
+        check(first_joined && second_not, "two invites, one member more: one join, the other held off");
+    }
+    // 8. A name read a letter differently is the same player.
+    {
+        T t;
+        t.failed("Someone", t0, "x");
+        const auto o = t.failed("Somone", t0 + 70'000, "x");
+        check(t.held("Somone", t0 + 1'000) && o.fails == 2 && o.hold_ms == 600'000 && !t.held("Other", t0 + 1'000),
+              "\"Somone\" for \"Someone\": the same count and hold; another player not held");
+    }
+    // 9. (Review of 2026.11.17b.) An older invitee who joined before a later
+    //    invite's HUD was read is in that invite's size_before already: not
+    //    taken off it again. A sent at 1, A joins, B sent at 2, A judged, B
+    //    joins: both joined. B not joining: a miss all the same.
+    {
+        T t, u;
+        for (T* x : { &t, &u }) {
+            x->sent("Alpha", t0, 1);
+            x->sent("Bravo", t0 + 5'000, 2);
+        }
+        const auto a = t.judge(T::Hud{ 2, false }, t0 + 15'000);
+        const auto b = t.judge(T::Hud{ 3, false }, t0 + 20'000);
+        const auto ua = u.judge(T::Hud{ 2, false }, t0 + 15'000);
+        const auto ub = u.judge(T::Hud{ 2, false }, t0 + 20'000);
+        check(a.size() == 1 && a[0].who == "Alpha" && a[0].joined && b.size() == 1 && b[0].who == "Bravo" &&
+                  b[0].joined && !t.held("Bravo", t0 + 21'000) && t.fails("Bravo") == 0 && ua.size() == 1 &&
+                  ua[0].joined && ub.size() == 1 && !ub[0].joined && ub[0].fails == 1,
+              "A sent at 1 and joined, B sent at 2, A judged, B joined: both joins -- " +
+                  (b.empty() ? std::string("nothing") : b[0].why) + "; B not joining (HUD 2): a miss");
+    }
+}
+
+/// 2026.11.17b, B: the party worker's watch clicks once and holds the game's
+/// mouse kCloseHoldMs at most after the click -- not kReactMs -- and a message
+/// still up is left for a later pass.
+void test_reply_short_hold() {
+    section("Tổ đội (2026.11.17b, B): the worker's watch -- one click on the message's Xác Nhận, the mouse held "
+            "2.5 s at most after it, never a key");
+    static TemplateStore store;
+    static const bool loaded = store.load_best(exe_relative("configs/templates.ini"));
+    const Frame* fail = store.get("grabbed/invite_fail2");
+    if (!loaded || fail == nullptr) {
+        skip("the game's message picture (grabbed/invite_fail2) is not installed here\n");
+        return;
+    }
+    const auto game = [&] {
+        ReplyGame g;
+        g.base = plain_frame(1280, 720);
+        g.box = *fail;
+        Frame probe = g.base;
+        blit(probe, *fail, g.bx, g.by);
+        bag::lone_ok(probe, store, ScreenRect{ 0, 0, probe.width, probe.height }, &g.ok);
+        return g;
+    };
+    check(InviteReply::kCloseHoldMs == 2500 && InviteReply::kCloseTries == 3 && InviteReply::kRetryGapMs == 1000 &&
+              InviteReply::kCloseHoldMs < kReactMs,
+          "kCloseHoldMs 2.5 s (not kReactMs), three clicks in all, a second apart at least");
+    // A message that will not go: one click, given up kCloseHoldMs after it.
+    {
+        ReplyGame g = game();
+        g.sticks = true;
+        const InviteReply::Result r =
+            InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs, InviteReply::kCloseHoldMs, 1);
+        const int after = g.click_t.empty() ? -1 : g.t - g.click_t[0];
+        check(r.how == InviteReply::How::NotClosed && g.clicks.size() == 1 && r.clicks == 1 && after >= 0 &&
+                  after <= InviteReply::kCloseHoldMs + 2 * InviteReply::kLookMs,
+              fmt("a message that stays: one click, given up %d ms after it (%d at most) -- %s", after,
+                  InviteReply::kCloseHoldMs + 2 * InviteReply::kLookMs, InviteReply::how_name(r.how)));
+    }
+    // On a slow guest, by the clock: looks of 700 ms do not stretch it.
+    {
+        ReplyGame g = game();
+        g.sticks = true;
+        g.clocked = true;
+        g.look_ms = 700;
+        const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), 2 * InviteReply::kLookMs + 50,
+                                                         InviteReply::kCloseHoldMs, 1);
+        // Two looks and a nap to take it, then the hold and one look past it.
+        const int most = 2 * (700 + InviteReply::kLookMs) + InviteReply::kCloseHoldMs + 700 + InviteReply::kLookMs;
+        check(r.how == InviteReply::How::NotClosed && g.clicks.size() == 1 &&
+                  g.clock <= static_cast<std::uint64_t>(most),
+              fmt("700-ms looks: one click, over %llu ms of the clock after it began",
+                  static_cast<unsigned long long>(g.clock)));
+    }
+    // Gone a second after the click: closed with that one click.
+    {
+        ReplyGame g = game();
+        g.close_after_ms = 1000;
+        const InviteReply::Result r =
+            InviteReply::watch(store, nullptr, g.hands(), InviteReply::kWatchMs, InviteReply::kCloseHoldMs, 1);
+        check(r.how == InviteReply::How::Closed && g.clicks.size() == 1 && r.gone_after_ms >= 1000 &&
+                  r.gone_after_ms <= 1000 + InviteReply::kLookMs,
+              fmt("gone 1 s after the click: closed, seen gone %d ms after it", r.gone_after_ms));
+    }
+    // Three watches in a row on one that stays -- what three passes do --
+    // click it three times, no more, each a watch of its own.
+    {
+        ReplyGame g = game();
+        g.sticks = true;
+        int clicks = 0;
+        for (int pass = 0; pass < InviteReply::kCloseTries; ++pass) {
+            const InviteReply::Result r = InviteReply::watch(store, nullptr, g.hands(), 2 * InviteReply::kLookMs + 50,
+                                                             InviteReply::kCloseHoldMs, 1);
+            clicks += r.clicks;
+        }
+        check(clicks == InviteReply::kCloseTries && static_cast<int>(g.clicks.size()) == clicks,
+              fmt("three passes on a message that stays: %d clicks, one each", clicks));
+    }
+}
+
+/// 2026.11.17b, C: the player list shut after an asker's turn by the button
+/// that opens it, found by its picture at 1024x768, 1280x720 and 1366x768;
+/// never pressed when it is shut already or shuts by itself; one press only.
+void test_list_close() {
+    section("Tổ đội (2026.11.17b, C): the player list shut by its own button after an invite, at 1024x768, "
+            "1280x720 and 1366x768 -- one press, none when it is shut already, never ESC");
+    Frame icon = plain_frame(20, 20), grid = plain_frame(60, 30);
+    std::uint32_t seed = 1117;
+    for (Frame* p : { &icon, &grid })
+        for (std::size_t i = 0; i < p->pixels.size(); i += 4) {
+            for (int c = 0; c < 3; ++c) {
+                seed = seed * 1664525u + 1013904223u;
+                p->pixels[i + static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(seed >> 24);
+            }
+            p->pixels[i + 3] = 255;
+        }
+    TemplateStore pics;
+    pics.put(PlayerList::Settings{}.open_picture, icon);
+    pics.put(PlayerList::Settings{}.grid_picture, grid);
+
+    struct Game {
+        int w = 1280, h = 720, bx = 1212, by = 139;
+        bool up = true;
+        int shuts_after = 0;            ///< ms after the press it goes; -1 never
+        int shuts_alone_at = -1;        ///< ms from the start it goes by itself; -1 never
+        std::uint64_t t = 10'000, start = 10'000, pressed_at = 0;
+        std::uint64_t stop_at = ~0ull;
+        std::vector<std::pair<int, int>> presses;
+    };
+    const auto run = [&](Game& g, std::string& why) {
+        PlayerList list;
+        list.set_click([&](int x, int y) {
+            g.presses.emplace_back(x, y);
+            if (g.presses.size() == 1) g.pressed_at = g.t;
+            return true;
+        });
+        list.set_clock([&g] { return g.t; }, [&g](int ms) { g.t += static_cast<std::uint64_t>(ms); });
+        list.set_grab([&](Frame& f) {
+            f = plain_frame(g.w, g.h);
+            blit(f, icon, g.bx, g.by);
+            bool showing = g.up;
+            if (g.shuts_alone_at >= 0 && g.t >= g.start + static_cast<std::uint64_t>(g.shuts_alone_at))
+                showing = false;
+            // The button flips it: shut so long after the first press.
+            if (!g.presses.empty() && g.shuts_after >= 0 &&
+                g.t >= g.pressed_at + static_cast<std::uint64_t>(g.shuts_after))
+                showing = false;
+            if (showing) blit(f, grid, g.bx - 200, g.by + 60);
+            return true;
+        });
+        InputManager none;
+        ScreenCapture capture;
+        return list.close(none, capture, pics, &why, [&g] { return g.t >= g.stop_at; });
+    };
+    check(PlayerList::kCloseWaitMs == 3000 && PlayerList::kCloseSettleMs == 300,
+          "close() waits 3 s at most after its press, and looks twice 300 ms apart first");
+    // At each size: the button where that client has it (1366x768 by the
+    // right edge, as the other two -- found by its picture wherever it is).
+    const struct { int w, h, bx, by; } sizes[] = { { 1024, 768, 956, 139 }, { 1280, 720, 1212, 139 },
+                                                   { 1366, 768, 1298, 139 } };
+    for (const auto& s : sizes) {
+        Game g;
+        g.w = s.w;
+        g.h = s.h;
+        g.bx = s.bx;
+        g.by = s.by;
+        g.shuts_after = 400;
+        std::string why;
+        const bool ok = run(g, why);
+        check(ok && g.presses.size() == 1 && g.presses[0].first == s.bx + 10 && g.presses[0].second == s.by + 10 &&
+                  g.t - g.pressed_at <= 400 + 250,
+              fmt("%dx%d: one press on its button's middle at %d,%d, shut %llu ms after it", s.w, s.h,
+                  g.presses.empty() ? -1 : g.presses[0].first, g.presses.empty() ? -1 : g.presses[0].second,
+                  static_cast<unsigned long long>(g.t - g.pressed_at)) +
+                  (why.empty() ? "" : " -- " + why));
+    }
+    // Shut already: nothing pressed.
+    {
+        Game g;
+        g.up = false;
+        std::string why;
+        check(run(g, why) && g.presses.empty(), "a list shut already: true, nothing pressed");
+    }
+    // Shut by itself a moment later -- a good invite does that: nothing
+    // pressed, or the press would bring it back up.
+    {
+        Game g;
+        g.shuts_alone_at = 100;
+        std::string why;
+        check(run(g, why) && g.presses.empty(), "a list that shuts by itself between the two looks: nothing pressed");
+    }
+    // Never shuts: one press -- never a second -- given up after 3 s.
+    {
+        Game g;
+        g.shuts_after = -1;
+        std::string why;
+        const bool ok = run(g, why);
+        check(!ok && g.presses.size() == 1 && g.t - g.pressed_at >= 3000 && g.t - g.pressed_at <= 3000 + 250 &&
+                  why.find("still showed") != std::string::npos,
+              fmt("a list that stays: one press, given up %llu ms after it -- ",
+                  static_cast<unsigned long long>(g.t - g.pressed_at)) + why);
+    }
+    // A stop first: nothing pressed.
+    {
+        Game g;
+        g.stop_at = 0;
+        std::string why;
+        check(!run(g, why) && g.presses.empty() && why == "stopped", "a stop: nothing pressed");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    {
+        const std::string cpp = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/player_list.cpp");
+        const std::size_t a = cpp.find("bool PlayerList::close(");
+        const std::size_t b = a == std::string::npos ? a : cpp.find("\n}", a);
+        const std::string body = a == std::string::npos || b == std::string::npos ? std::string() : cpp.substr(a, b - a);
+        check(!body.empty() && body.find("VK_") == std::string::npos && body.find("key_press") == std::string::npos &&
+                  body.find("click(input, bx, by, stop)") != std::string::npos,
+              "player_list.cpp: close() presses the list's own button through click(), and no key");
+    }
+#endif
+}
+
 } // namespace
 
 void test_party_hud(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
     g_check = check_fn;
     g_section = section_fn;
+    test_invite_reply();
+    test_invite_tries();
+    test_reply_short_hold();
+    test_list_close();
     test_panel_picture();
     test_crown_pictures();
     test_reading();

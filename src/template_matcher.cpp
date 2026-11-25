@@ -4,8 +4,11 @@
 #include "gobot/config.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
+#include <mutex>
+#include <utility>
 
 #include <windows.h>
 #include <objidl.h>
@@ -570,6 +573,7 @@ std::size_t png_length(const std::uint8_t* p, std::size_t avail) {
 bool TemplateStore::load_from_assembly(const std::string& dll_path,
                                        const std::string& name_map_ini) {
     by_name_.clear();
+    aliases_.clear();
     if (dll_path.empty()) return false;
 
     std::FILE* f = open_file(dll_path, "rb");
@@ -652,15 +656,34 @@ int TemplateStore::apply_names(const std::string& name_map_ini) {
     IniFile ini;
     if (!ini.load(name_map_ini)) return 0;
 
+    // Each short name points at the picture's own name in by_name_, not at a
+    // copy (2026-11-16). by_name_ is not written here, and a put first turns
+    // the short names back into copies (unalias), so a short name shows what
+    // a copy taken now would have shown.
     int named = 0;
     for (const std::string& key : ini.keys("Templates")) {
         const std::string which = ini.get("Templates", key, "");
-        const Frame* src = get(which);
-        if (!src) continue;         // a name for a source we did not load from
-        by_name_[key] = *src;
+        const auto alias = aliases_.find(which);
+        std::string real = alias != aliases_.end() ? alias->second : which;
+        if (by_name_.find(real) == by_name_.end()) continue;   // a name for a source we did not load from
+        aliases_[key] = std::move(real);
         ++named;
     }
     return named;
+}
+
+void TemplateStore::unalias() {
+    if (aliases_.empty()) return;
+    // Every copy taken before any is put in: a short name may be a picture's
+    // own name as well, which another short name points at.
+    std::vector<std::pair<std::string, Frame>> copies;
+    copies.reserve(aliases_.size());
+    for (const auto& [key, real] : aliases_) {
+        const auto it = by_name_.find(real);
+        if (it != by_name_.end()) copies.emplace_back(key, it->second);
+    }
+    aliases_.clear();
+    for (auto& [key, picture] : copies) by_name_[key] = std::move(picture);
 }
 
 std::string TemplateStore::client_images() {
@@ -763,6 +786,7 @@ std::string TemplateStore::helper_assembly() {
 
 bool TemplateStore::load(const std::string& dir, bool quiet) {
     by_name_.clear();
+    aliases_.clear();
     if (dir.empty()) return false;
     load_into(to_wide(dir), {}, by_name_);
     if (quiet)
@@ -788,24 +812,145 @@ std::string TemplateMatcher::backend() {
 
 void TemplateStore::put(const std::string& name, const Frame& picture) {
     if (name.empty() || !picture.valid()) return;
+    unalias();
     by_name_[name] = picture;
 }
 
+std::size_t TemplateStore::size() const {
+    std::size_t n = by_name_.size();
+    for (const auto& [key, _] : aliases_)
+        if (by_name_.find(key) == by_name_.end()) ++n;
+    return n;
+}
+
 bool TemplateStore::has(const std::string& name) const {
-    return by_name_.find(name) != by_name_.end();
+    return get(name) != nullptr;
 }
 
 const Frame* TemplateStore::get(const std::string& name) const {
-    const auto it = by_name_.find(name);
+    const auto alias = aliases_.find(name);
+    const auto it = by_name_.find(alias != aliases_.end() ? alias->second : name);
     return it == by_name_.end() ? nullptr : &it->second;
 }
 
 std::vector<std::string> TemplateStore::names() const {
     std::vector<std::string> out;
-    out.reserve(by_name_.size());
+    out.reserve(by_name_.size() + aliases_.size());
     for (const auto& [name, _] : by_name_) out.push_back(name);
+    for (const auto& [key, _] : aliases_)
+        if (by_name_.find(key) == by_name_.end()) out.push_back(key);
     std::sort(out.begin(), out.end());
     return out;
+}
+
+namespace {
+
+/// One number for a file found: its path, size and last write.
+std::uint64_t entry_mark(const std::wstring& path, const WIN32_FIND_DATAW& found) {
+    std::uint64_t x = 14695981039346656037ull;               // FNV-1a
+    const auto mix = [&x](std::uint64_t v) {
+        for (int i = 0; i < 8; ++i) {
+            x ^= (v >> (8 * i)) & 0xFF;
+            x *= 1099511628211ull;
+        }
+    };
+    for (const wchar_t c : path) mix(static_cast<std::uint64_t>(c));
+    mix((static_cast<std::uint64_t>(found.nFileSizeHigh) << 32) | found.nFileSizeLow);
+    mix((static_cast<std::uint64_t>(found.ftLastWriteTime.dwHighDateTime) << 32) |
+        found.ftLastWriteTime.dwLowDateTime);
+    return x;
+}
+
+/// One number for every PNG under `dir`, as load_into reads them: changed by
+/// a picture added, removed, renamed or written again. A sum, so the order
+/// Windows lists them in does not count; 0 for a folder with none.
+std::uint64_t folder_mark(const std::wstring& dir, const std::wstring& below = {}) {
+    WIN32_FIND_DATAW find{};
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &find);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    std::uint64_t sum = 0;
+    do {
+        const std::wstring name = find.cFileName;
+        if (name == L"." || name == L"..") continue;
+        if (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            sum += folder_mark(dir + L"\\" + name, below + name + L"/");
+            continue;
+        }
+        const std::size_t dot = name.find_last_of(L'.');
+        if (dot == std::wstring::npos || _wcsicmp(name.c_str() + dot, L".png") != 0) continue;
+        sum += entry_mark(below + name, find);
+    } while (FindNextFileW(h, &find));
+    FindClose(h);
+    return sum;
+}
+
+/// The same for one file; 0 when it is not there.
+std::uint64_t file_mark(const std::string& path) {
+    if (path.empty()) return 0;
+    const std::wstring wide = to_wide(path);
+    WIN32_FIND_DATAW found{};
+    HANDLE h = FindFirstFileW(wide.c_str(), &found);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    return entry_mark(wide, found);
+}
+
+/// What load_best would read now: every place it looks in, in its order, and
+/// the name map. Equal marks, the same pictures under the same names.
+using PicturesMark = std::array<std::uint64_t, 4>;
+
+PicturesMark pictures_mark(const std::string& name_map_ini) {
+    const std::string images = TemplateStore::client_images();
+    return { folder_mark(to_wide(TemplateStore::default_dir())),
+             images.empty() ? 0 : folder_mark(to_wide(images)),
+             file_mark(TemplateStore::helper_assembly()),
+             file_mark(name_map_ini) };
+}
+
+/// The set handed out for one name map. Held weakly: kept in memory by the
+/// jobs that use it, and gone when the last of them lets it go, as each
+/// job's own was.
+struct SharedSet {
+    PicturesMark                         mark{};
+    std::weak_ptr<const TemplateStore>   store;
+};
+
+struct SharedSets {
+    std::mutex                                 mutex;
+    std::unordered_map<std::string, SharedSet> by_map;
+};
+
+SharedSets& shared_sets() {
+    // Never destroyed: a job thread may still ask while the program exits.
+    static SharedSets* sets = new SharedSets;
+    return *sets;
+}
+
+} // namespace
+
+std::shared_ptr<const TemplateStore> TemplateStore::shared_best(const std::string& name_map_ini) {
+    SharedSets& sets = shared_sets();
+    // The load as well under the lock: a job asking while another loads gets
+    // that load, not a second one.
+    std::lock_guard<std::mutex> lock(sets.mutex);
+    const PicturesMark mark = pictures_mark(name_map_ini);
+    SharedSet& set = sets.by_map[name_map_ini];
+    if (std::shared_ptr<const TemplateStore> held = set.store.lock()) {
+        if (set.mark == mark) {
+            GB_DEBUG("TemplateStore: the %zu pictures from %s already loaded, shared", held->size(),
+                     held->source().c_str());
+            return held;
+        }
+        GB_INFO("TemplateStore: the pictures changed since they were loaded -- loading them again");
+    }
+    auto fresh = std::make_shared<TemplateStore>();
+    if (!fresh->load_best(name_map_ini)) {
+        set.store.reset();
+        return fresh;
+    }
+    set.mark = mark;
+    set.store = fresh;
+    return fresh;
 }
 
 TemplateMatcher::Match TemplateStore::find(const std::string& name, const Frame& frame,

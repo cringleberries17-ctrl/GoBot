@@ -21,8 +21,9 @@ std::string system32_path(const std::string& name = {});
 ///
 /// The first thing gobot_gui, gobot_cli and gobot_sniff do. They run as
 /// administrator from a folder a player made, and Windows looked in a
-/// program's own folder first, so an xinput1_4.dll (Dear ImGui asks for it by
-/// name) or a wpcap.dll left there ran as administrator at the next start.
+/// program's own folder first, so a wpcap.dll -- or any DLL asked for by name
+/// (Dear ImGui asked for xinput1_4.dll until its gamepad code was left out in
+/// 2026.11.16) -- left there ran as administrator at the next start.
 /// The DLLs a program imports are loaded before this can run;
 /// /DEPENDENTLOADFLAG in CMakeLists.txt holds those to System32.
 ///

@@ -1,26 +1,31 @@
-// Your HP and MP from the packets (the packets plan, item D): the gate against
-// the bars, the resting reader, the map-load hold.
+// Your HP and MP from the packets (the packets plan, item D): which one goes,
+// the resting reader, the map-load hold.
 //
-// The packets' HP and MP (wrapped 0x0051 and 0x0050, PacketSelf) are not
-// proven on today's server, so they are checked first, read by read, against
-// the bars off the screen (BarCheck, gobot/vitals_trust.hpp). Only a bar whose
-// check has passed, whose value came in the packets' current epoch, on the
-// capture running now -- the one started for the positions, on the game
-// window's own process -- with the server heard within 5 s and a maximum known,
-// is gone by -- usable -- and that is asked afresh every time, never kept:
-// by the potions (gate_vitals), by every job's HP guard (hp_percent_now), by
-// the reader's resting pace (vitals_pace) and nowhere else. The moment a bar
-// is not usable the screen decides, exactly as before; the moment its check
-// disagrees, the read it disagreed with goes to the macro at once (HandOver).
+// The packets' HP and MP (wrapped 0x0051 and 0x0050, and 0x02F0's MP --
+// PacketSelf) go whenever they have them (2026.11.17, the owner's call): a
+// value of the packets' current epoch, on the capture running now -- the one
+// started for the positions, on the game window's own process -- with the
+// server heard within 5 s and a maximum known is usable, and that is asked
+// afresh every time, never kept: by the potions (gate_vitals), by every job's
+// HP guard (hp_percent_now), by the reader's resting pace (vitals_pace) and
+// nowhere else. Nothing the bars read holds it back -- until 2026.11.16b a
+// check against them did, and on 2026-11-17 it kept MP on the screen all
+// night while the EXP bar's glowing tip made the bars read MP 3% where the
+// packets said 92-100%. The moment a bar's value is not usable -- no capture,
+// a gap in it, nothing since a start or a gap, the server quiet -- the
+// screen decides, exactly as before, and at the first usable value again the
+// packets do. A map load is no such moment: the last values carry across it,
+// the HUD is out while it loads and the macro waits (map_load_holds), and the
+// server's entry burst brings 0x0051/0x0050 again. The bars' figures are still set beside the packets, once a
+// minute, for the log alone (BarCompare).
 //
 // What stays on the screen whatever the packets say: the death panel and the
 // revive, HP coming back from 0, the pet's HP, and whether the character is in
 // the world at all -- the packets may only add a hold to that, while a map
 // loads (packet_map_loading).
 //
-// The checks are read from any thread under VitalsPart::mutex, and whose
-// capture it is as an atomic; everything else of VitalsPart is GoBot's
-// thread's alone.
+// Whose capture it is is an atomic, for any thread; everything else of
+// VitalsPart is GoBot's thread's alone.
 
 #include "gui_app.hpp"
 #include "gobot/alerts.hpp"
@@ -33,7 +38,6 @@
 #include <cstdio>
 #include <ctime>
 #include <future>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -77,25 +81,17 @@ std::string around_read(std::uint64_t at, std::uint64_t read_at) {
     return buf;
 }
 
-/// A bar's disagreements written to the log in one minute, at most.
-constexpr int kDisagreementsSaid = 5;
+/// A bar going between the packets and the screen, said once in this long
+/// each way at most, the switches not said counted on the next line and the
+/// minute's. A gap in the capture puts a bar whose value has not changed
+/// since on the screen until it does: HP while standing, every 10 s or so, on
+/// 2026-11-17.
+constexpr std::uint64_t kSwitchGapMs = 60'000;
 
 std::string percent_text(float pct) {
     char buf[16];
     std::snprintf(buf, sizeof buf, "%.0f%%", static_cast<double>(pct));
     return buf;
-}
-
-/// A read of the bar, for the log: "6100/9232 (66%)", or "66% (no figures)".
-std::string read_text(const BarCheck::Read& r) {
-    if (r.figure >= 0 && r.figure_max > 0)
-        return std::to_string(r.figure) + "/" + std::to_string(r.figure_max) + " (" + percent_text(r.pct) + ")";
-    return percent_text(r.pct) + " (no figures)";
-}
-
-/// A packet value, for the log: "7344 (79%)", or "7344" with no maximum.
-std::string packet_text(const BarCheck::Point& p, float pct) {
-    return std::to_string(p.value) + (pct >= 0.0f ? " (" + percent_text(pct) + ")" : std::string());
 }
 
 const char* max_from_text(PacketSelf::MaxFrom from) {
@@ -116,14 +112,13 @@ float figure_percent(int value, int max) {
     return std::clamp(static_cast<float>(value) * 100.0f / static_cast<float>(max), 0.0f, 100.0f);
 }
 
-/// A read of one bar for its check: the figures with it only when they are
-/// this read's own (`now`, VitalsReader::Vitals), not ones kept from a read up
-/// to two seconds before -- which a read in the caption's shadow goes by
+/// A read of one bar for the comparison: its figures only when they are this
+/// read's own (`now`, VitalsReader::Vitals), not ones kept from a read up to
+/// two seconds before -- which a read in the caption's shadow goes by
 /// (VitalsReader::shadowed_percent), its percentage then theirs exactly.
-BarCheck::Read bar_read(std::uint64_t read_at, float pct, int value, int max, bool now) {
-    BarCheck::Read r;
+BarCompare::Read bar_read(std::uint64_t read_at, float pct, int value, int max, bool now) {
+    BarCompare::Read r;
     r.read_at_ms = read_at;
-    r.pct = pct;
     if (now && pct >= 0.0f && figure_percent(value, max) == pct) {
         r.figure = value;
         r.figure_max = max;
@@ -131,12 +126,24 @@ BarCheck::Read bar_read(std::uint64_t read_at, float pct, int value, int max, bo
     return r;
 }
 
+/// A read not the same as the packets, for the minute's line: "MP 4215/16813
+/// at 00:25:51.693 against the packets' 15509, 0.4 s before the read
+/// (digits lost)".
+std::string odd_text(const char* bar, const BarCompare::Odd& o) {
+    std::ostringstream out;
+    out << bar << " " << o.read.figure << "/" << o.read.figure_max << " at " << clock_at(o.read.read_at_ms, true)
+        << " against the packets' " << o.packet.value;
+    if (o.packet.max_known) out << "/" << o.packet.max;
+    out << ", " << around_read(o.packet.at_ms, o.read.read_at_ms)
+        << (o.verdict == BarCompare::Verdict::Short ? " (digits lost: the reader's miss)" : "");
+    return out.str();
+}
+
 /// Why the reader keeps the run's pace, for the log; "" when it may rest.
 const char* rest_why_not(const VitalsRest& in, std::uint64_t now) {
     if (!in.hp_usable || !in.mp_usable) return "HP and MP are not both from the packets";
     if (in.usable_since_ms == 0 || now < in.usable_since_ms + kRestAfterUsableMs)
         return "HP and MP from the packets for under 10 s";
-    if (in.pet_key) return "a pet potion key is in use, and the pet's HP is the screen's";
     if (in.critical) return "a critical hold";
     if (in.finding_bars) return "the bars are being looked for";
     if (in.hp_zero_since_ms != 0) return "HP reads 0 on the screen";
@@ -176,10 +183,6 @@ struct GuiApp::VitalsPart {
         return *app.vitals_part_;
     }
 
-    /// The two checks, read from any thread: under `mutex`.
-    mutable std::mutex mutex;
-    BarCheck           hp{ true };
-    BarCheck           mp{ false };
     /// Whether the capture running is the one started for the positions, on
     /// the game window's own process, as vitals_check_tick last found on
     /// GoBot's thread -- whose position_capture_ and position_link_ are --
@@ -187,14 +190,16 @@ struct GuiApp::VitalsPart {
     std::atomic<bool>  on_window{ false };
 
     // ---- GoBot's thread only, from here ----
-    HandOver           hp_hand, mp_hand;
-    /// The newest packet value given to the checks, by its VitalsPoint::seq,
-    /// not its time -- two frames of one segment, or of one read of the
-    /// capture, share a millisecond -- and the maximum the last ones went with.
+    /// The bars' figures beside the packets, for the minute's line.
+    BarCompare         hp_cmp, mp_cmp;
+    /// The newest packet value given to the comparisons, by its
+    /// VitalsPoint::seq, not its time -- two frames of one segment, or of one
+    /// read of the capture, share a millisecond -- and the maximum the last
+    /// ones went with.
     std::uint64_t      fed_seq = 0;
     std::uint32_t      fed_max_hp = 0, fed_max_mp = 0;
     bool               fed_known = false;
-    std::uint64_t      read_seen_ms = 0;          ///< the last read of the bars given to the checks
+    std::uint64_t      read_seen_ms = 0;          ///< the last read of the bars given to the comparisons
     std::uint64_t      over_max_seen = 0;
     /// The figures' maxima, and in how many reads in a row both were the same:
     /// three, with no stat sheet, make the packets' maxima.
@@ -205,14 +210,22 @@ struct GuiApp::VitalsPart {
     std::uint64_t      usable_since_ms = 0;
     std::uint64_t      tick_ms = 0;
     bool               zero_said = false;
+    /// Each bar's switches (kSwitchGapMs): the last line said each way --
+    /// [0] to the packets, [1] to the screen -- and those not said since.
+    std::uint64_t      hp_said_ms[2] = { 0, 0 }, mp_said_ms[2] = { 0, 0 };
+    int                hp_unsaid[2] = { 0, 0 }, mp_unsaid[2] = { 0, 0 };
     // The minute, for note_vitals_minute.
     std::uint64_t      minute_from_ms = 0, hp_usable_ms = 0, mp_usable_ms = 0, frames_seen = 0;
+    int                hp_switches = 0, mp_switches = 0;
+    std::uint64_t      over_max_minute = 0;
     /// Of the points fed, those in the same millisecond as the point fed before
     /// them, and of those the ones with another MP; and the last point fed.
     std::uint64_t      same_ms = 0, same_ms_mp = 0;
     std::uint64_t      fed_at_ms = 0;
     std::uint32_t      fed_mp = 0;
-    int                hp_dis_said = 0, mp_dis_said = 0;   ///< disagreements written out, at most kDisagreementsSaid
+    /// The last read this minute not the same as the packets, each bar.
+    bool               hp_odd_seen = false, mp_odd_seen = false;
+    BarCompare::Odd    hp_odd, mp_odd;
     // The pace (vitals_pace): idle, the run's, or resting.
     enum class Pace : std::uint8_t { Idle, Run, Rest };
     PeriodWindow       periods;
@@ -285,11 +298,6 @@ struct GuiApp::VitalsPart {
     VitalsUsable usable_in(const GuiApp& app, bool hp_bar, const SelfNow& s) const {
         VitalsUsable in;
         in.use_on = app.packets_settings_.vitals != PacketUse::Off;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            in.trusted = (hp_bar ? hp : mp).trusted();
-        }
-        in.reading = app.vitals_.running();
         // packet_positions=off: nothing from the packets, whoever captures.
         in.capturing = app.capture_.running() && !app.packets_off_.load();
         in.on_window = on_window.load();
@@ -321,7 +329,8 @@ struct GuiApp::VitalsPart {
     }
 
     /// The pace asked for at `now`, and what it was asked as; `actual_ms` the
-    /// reader's period as it stood.
+    /// reader's period as it stood. `why`, for the log: why not resting, or
+    /// what a rest adds to its line.
     void note_pace(std::uint64_t now, int period_ms, int actual_ms, Pace asked, const char* why) {
         periods.note(now, period_ms);
         if (pace == Pace::Rest && pace_ms != 0 && now > pace_ms) rest_ms += now - pace_ms;
@@ -333,7 +342,8 @@ struct GuiApp::VitalsPart {
         if ((pace == Pace::Rest && asked == Pace::Run) || (pace == Pace::Run && asked == Pace::Rest)) {
             ++flips;
             if (asked == Pace::Rest)
-                GB_INFO("Vitals: the bars every %d ms now -- HP and MP from the packets for 10 s and more", period_ms);
+                GB_INFO("Vitals: the bars every %d ms now -- HP and MP from the packets for 10 s and more%s",
+                        period_ms, why);
             else
                 GB_INFO("Vitals: the bars at the run's pace again, every %d ms -- %s", period_ms, why);
         }
@@ -379,18 +389,21 @@ float GuiApp::hp_percent_now() const {
     if (const VitalsPart* part = vitals_part_.get()) {
         const std::uint64_t now = now_ms();
         const VitalsPart::SelfNow s = VitalsPart::self_now(*this, now);
-        if (vitals_usable(part->usable_in(*this, true, s), now)) return BarCheck::percent(s.v.hp, s.v.max_hp);
+        if (vitals_usable(part->usable_in(*this, true, s), now)) return vitals_percent(s.v.hp, s.v.max_hp);
     }
     return screen;
 }
 
 float GuiApp::mp_percent_now() const {
     const float screen = vitals_.mp_percent();
-    if (screen < 0.0f) return screen;
+    // Out of the world -- HP unread on the bars -- the screen's, as HP's. MP
+    // unread alone is its figures covered (VitalsReader::mp_covered), which
+    // says nothing of the world: the packets' MP goes over it.
+    if (vitals_.hp_percent() < 0.0f) return screen;
     if (const VitalsPart* part = vitals_part_.get()) {
         const std::uint64_t now = now_ms();
         const VitalsPart::SelfNow s = VitalsPart::self_now(*this, now);
-        if (vitals_usable(part->usable_in(*this, false, s), now)) return BarCheck::percent(s.v.mp, s.v.max_mp);
+        if (vitals_usable(part->usable_in(*this, false, s), now)) return vitals_percent(s.v.mp, s.v.max_mp);
     }
     return screen;
 }
@@ -420,8 +433,8 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
     VitalsPart& part = VitalsPart::of(*this);
     // Whose capture it is, for usable() on any thread: the one started for the
     // positions, on the process that owns the game's window now -- as the map
-    // load's hold asks. A capture of the Protocol tab's or Autopilot's takes
-    // every client's traffic to the server; and with the window switched to
+    // load's hold asks. A capture started on the Capture tab takes every
+    // client's traffic to the server; and with the window switched to
     // another client, the old capture is the old one's until it is restarted.
     // Only a window handle's owner asked here: nothing that waits.
     part.on_window.store(capture_.running() && position_capture_ && position_link_.pid != 0 &&
@@ -433,19 +446,19 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
     //
     // Told apart by their seq, not their time: those of one millisecond --
     // one segment, one read of the capture -- all go in, in the order they
-    // came, so the last of them is the check's as it is the potions'.
+    // came.
     //
     // With the maximum and the epoch of now, which they came under unless the
-    // maximum changed meanwhile: then they go with none, and are judged by
+    // maximum changed meanwhile: then they go with none, and are compared by
     // the figures' value alone, never against a maximum they did not have.
-    std::vector<BarCheck::Point> hp_points, mp_points;
+    std::vector<BarCompare::Point> hp_points, mp_points;
     const bool known = VitalsPart::max_known(v);
     const bool same_max = v.max_hp == part.fed_max_hp && v.max_mp == part.fed_max_mp && known == part.fed_known;
     if (v.points > part.fed_seq) {
         for (const PacketSelf::VitalsPoint& p : packet_self_.history()) {
             if (p.seq <= part.fed_seq) continue;
-            hp_points.push_back(BarCheck::Point{ p.at_ms, p.hp, v.max_hp, known && same_max, v.hp_epoch });
-            mp_points.push_back(BarCheck::Point{ p.at_ms, p.mp, v.max_mp, known && same_max, v.mp_epoch });
+            hp_points.push_back(BarCompare::Point{ p.at_ms, p.hp, v.max_hp, known && same_max, v.hp_epoch });
+            mp_points.push_back(BarCompare::Point{ p.at_ms, p.mp, v.max_mp, known && same_max, v.mp_epoch });
             // How often a point shares its millisecond with the one before,
             // for the minute's line.
             if (p.at_ms == part.fed_at_ms) {
@@ -461,9 +474,9 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
     part.fed_max_hp = v.max_hp;
     part.fed_max_mp = v.max_mp;
     part.fed_known = known;
-    // HP above a maximum the stat sheet gave: a disagreement, once a tick.
+    // HP above a maximum the stat sheet gave, for the minute's line.
     if (v.over_max < part.over_max_seen) part.over_max_seen = v.over_max;    // a new game: counted afresh
-    const bool over = v.over_max > part.over_max_seen;
+    part.over_max_minute += v.over_max - part.over_max_seen;
     part.over_max_seen = v.over_max;
 
     // ---- the screen's side: the reader's newest read, if it is new ----
@@ -471,8 +484,7 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
     // Its time asked before and after its values: a read that landed in
     // between is dropped, never paired with the other read's time (S20).
     bool have_read = false;
-    BarCheck::Read hp_read, mp_read;
-    bool figures_only = false;
+    BarCompare::Read hp_read, mp_read;
     if (vitals_.running()) {
         const std::uint64_t before = vitals_.last_read_ms();
         if (before != 0 && before != part.read_seen_ms) {
@@ -485,7 +497,6 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
                 have_read = true;
                 hp_read = bar_read(before, hp_pct, figures.hp, figures.hp_max, figures.hp_now);
                 mp_read = bar_read(before, mp_pct, figures.mp, figures.mp_max, figures.mp_now);
-                figures_only = vitals_.has_font();
                 // The maxima from the figures, while no stat sheet has given
                 // them: read the same three times in a row. Given again after
                 // a new game forgot them, said only when they are new.
@@ -514,126 +525,33 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
         }
     }
 
-    // ---- the checks ----
-    std::vector<BarCheck::Change> hp_changes, mp_changes;
-    std::vector<BarCheck::Disagreement> hp_dis, mp_dis;
-    {
-        std::lock_guard<std::mutex> lock(part.mutex);
-        if (!same_max) {
-            part.hp.max_changed();
-            part.mp.max_changed();
-        }
-        for (const BarCheck::Point& p : hp_points) part.hp.packet(p);
-        for (const BarCheck::Point& p : mp_points) part.mp.packet(p);
-        if (over) part.hp.over_max(now);
-        if (have_read) {
-            part.hp.set_figures_only(figures_only);
-            part.mp.set_figures_only(figures_only);
-            part.hp.screen(hp_read);
-            part.mp.screen(mp_read);
-        }
-        part.hp.settle(now, s.epoch);
-        part.mp.settle(now, s.epoch);
-        hp_changes = part.hp.take_changes();
-        mp_changes = part.mp.take_changes();
-        hp_dis = part.hp.take_disagreements();
-        mp_dis = part.mp.take_disagreements();
+    // ---- the bars' figures beside the packets, for the log ----
+    if (!same_max) {
+        part.hp_cmp.max_changed();
+        part.mp_cmp.max_changed();
+    }
+    for (const BarCompare::Point& p : hp_points) part.hp_cmp.packet(p);
+    for (const BarCompare::Point& p : mp_points) part.mp_cmp.packet(p);
+    if (have_read) {
+        part.hp_cmp.screen(hp_read);
+        part.mp_cmp.screen(mp_read);
+    }
+    part.hp_cmp.settle(now, s.epoch);
+    part.mp_cmp.settle(now, s.epoch);
+    for (const BarCompare::Odd& o : part.hp_cmp.take_odd()) {
+        part.hp_odd = o;
+        part.hp_odd_seen = true;
+    }
+    for (const BarCompare::Odd& o : part.mp_cmp.take_odd()) {
+        part.mp_odd = o;
+        part.mp_odd_seen = true;
+        // The MP caption read short of its leading 1, as all of 2026-11-08's
+        // run: a picture of it, once a session, for the reader. Log only.
+        if (!part.caption_kept && figure_lost_leading_one(o.read.figure, o.packet.value))
+            part.keep_mp_caption(vitals_, o.read.figure, o.packet.value, o.read.read_at_ms);
     }
 
-    // Each change said. A bar that stops being trusted hands the read it
-    // disagreed with to the macro (gate_vitals), until the screen has a newer
-    // read of its own to give, or that one is stale.
-    const auto said = [&](const char* bar, const BarCheck::Change& c, HandOver& hand, bool was_usable) {
-        using State = BarCheck::State;
-        const std::string pk = c.over_max ? std::string("HP ") + std::to_string(v.hp) + " above the stat sheet's maximum"
-                                          : packet_text(c.packet, c.packet_pct);
-        const std::string bars =
-            c.read.pct >= 0.0f ? read_text(c.read) + " at " + clock_at(c.read.read_at_ms, true) : std::string("-");
-        // Only to a macro running now: one started after the moment would
-        // take a read from before its start, at the idle pace. Nor a read
-        // from before the pace was last cut: a BẮT ĐẦU's own read is coming.
-        if (c.from == State::Trusted && c.read.pct >= 0.0f && macro_ && macro_->running() &&
-            c.read.read_at_ms >= vitals_.paced_from_ms())
-            hand.start(c.read.pct, c.read.read_at_ms);
-        const bool handed = hand.live() && was_usable;
-        if (c.to == State::Trusted && c.from == State::Learning) {
-            GB_INFO("Vitals: %s from the packets now -- %d agreements over %d values (exact %d)%s", bar, c.agreements,
-                    c.values, c.exact,
-                    packets_settings_.vitals == PacketUse::Off ? "; [Packets] vitals=off keeps the screen deciding"
-                                                               : "");
-        } else if (c.to == State::Trusted) {
-            GB_INFO("Vitals: %s from the packets again -- %d agreements in a row since the doubt", bar,
-                    BarCheck::kDoubtClears);
-        } else if (c.to == State::Doubt) {
-            GB_WARN("Vitals: %s from the screen again -- packets %s, the bars %s; %s", bar, pk.c_str(), bars.c_str(),
-                    handed ? "the bars' read handed to the macro" : "in doubt until 5 agreements in a row");
-        } else if (c.to == State::Learning) {
-            GB_WARN("Vitals: %s distrusted (%s) -- packets %s, the bars %s; from the screen, learning again: %d "
-                    "agreements needed (distrust %d of %d)%s",
-                    bar, c.in_a_row ? "2 disagreements in a row" : "3 disagreements among the last 20", pk.c_str(),
-                    bars.c_str(), BarCheck::kRelearnAgreements, c.distrusts, BarCheck::kDistrustsOff,
-                    handed ? "; the bars' read handed to the macro" : "");
-        } else {
-            GB_WARN("Vitals: %s from the screen for the rest of this session -- distrusted %d times; packets %s, the "
-                    "bars %s%s",
-                    bar, c.distrusts, pk.c_str(), bars.c_str(), handed ? "; the bars' read handed to the macro" : "");
-        }
-    };
-    for (const BarCheck::Change& c : hp_changes) said("HP", c, part.hp_hand, part.hp_usable);
-    for (const BarCheck::Change& c : mp_changes) said("MP", c, part.mp_hand, part.mp_usable);
-
-    // Each disagreement, at most kDisagreementsSaid a bar a minute, beside what
-    // else said that bar's value around the read: the newest packets, 0x02F0
-    // for MP, and the bar's potion key. For the log alone.
-    const auto last_press = [&](MacroKeyKind kind, std::uint64_t read_at) {
-        std::vector<std::uint32_t> keys;
-        for (const MacroKey& k : macro_config_.keys)
-            if (k.enabled && k.keycode != 0 && macro_key_kind(k) == kind) keys.push_back(k.keycode);
-        std::uint64_t at = 0;
-        for (const PacketSelf::Press& p : packet_self_.presses_since(read_at > 10'000 ? read_at - 10'000 : 0))
-            if (p.at_ms <= read_at && std::find(keys.begin(), keys.end(), p.vk) != keys.end()) at = p.at_ms;
-        return at != 0 ? "last pressed " + seconds_before(read_at, at) + " before the read"
-                       : std::string("none pressed in the 10 s before");
-    };
-    const auto said_disagreement = [&](const char* bar, const BarCheck::Disagreement& d, bool hp_bar) {
-        const std::uint64_t read_at = d.read.read_at_ms;
-        const std::uint32_t newest = hp_bar ? v.hp : v.mp;
-        const std::uint64_t newest_ms = hp_bar ? v.hp_ms : v.mp_ms;
-        std::ostringstream line;
-        line << "Vitals: " << bar << " disagreement (" << BarCheck::state_name(d.state) << ") -- the bars "
-             << read_text(d.read) << " at " << clock_at(read_at, true) << "; the check's packets "
-             << packet_text(d.packet, d.packet.max_known ? BarCheck::percent(d.packet.value, d.packet.max) : -1.0f)
-             << ", " << around_read(d.packet.at_ms, read_at) << "; the newest packets " << bar << " "
-             << (newest_ms != 0 ? std::to_string(newest) + ", " + around_read(newest_ms, read_at)
-                                : std::string("none"));
-        if (!hp_bar)
-            line << "; 0x02F0 MP "
-                 << (v.udp_mp_ms != 0 ? std::to_string(v.udp_mp) + ", " + around_read(v.udp_mp_ms, read_at)
-                                      : std::string("none"));
-        line << "; " << bar << " potion key "
-             << last_press(hp_bar ? MacroKeyKind::HpPotion : MacroKeyKind::MpPotion, read_at);
-        GB_INFO("%s", line.str().c_str());
-    };
-    for (const BarCheck::Disagreement& d : hp_dis)
-        if (part.hp_dis_said < kDisagreementsSaid) {
-            ++part.hp_dis_said;
-            said_disagreement("HP", d, true);
-        }
-    for (const BarCheck::Disagreement& d : mp_dis)
-        if (part.mp_dis_said < kDisagreementsSaid) {
-            ++part.mp_dis_said;
-            said_disagreement("MP", d, false);
-        }
-    // The MP caption read short of its leading 1, as all of 2026-11-08's run:
-    // a picture of it, once a session, for the reader's fix (R9). Log only.
-    if (!part.caption_kept)
-        for (const BarCheck::Disagreement& d : mp_dis)
-            if (figure_lost_leading_one(d.read.figure, d.packet.value)) {
-                part.keep_mp_caption(vitals_, d.read.figure, d.packet.value, d.read.read_at_ms);
-                break;
-            }
-
-    // ---- usable now: for the resting pace's 10 s, the minute's share, the log ----
+    // ---- usable now: what goes, said as it changes ----
     const VitalsUsable hp_in = part.usable_in(*this, true, s);
     const VitalsUsable mp_in = part.usable_in(*this, false, s);
     const bool hp_ok = vitals_usable(hp_in, now);
@@ -644,15 +562,31 @@ void GuiApp::vitals_check_tick(std::uint64_t now) {
         if (part.mp_usable) part.mp_usable_ms += now - part.tick_ms;
     }
     part.tick_ms = now;
-    const auto switched = [&](const char* bar, bool was, bool is, const VitalsUsable& in) {
+    // To the packets at their first usable value, to the screen the moment
+    // they have none: each way said once in kSwitchGapMs at most, those not
+    // said counted on the next line and the minute's.
+    const auto switched = [&](const char* bar, bool was, bool is, const VitalsUsable& in, std::uint64_t* said_ms,
+                              int* unsaid, int& switches) {
         if (was == is) return;
+        ++switches;
+        const int way = is ? 0 : 1;
+        if (said_ms[way] != 0 && now >= said_ms[way] && now - said_ms[way] < kSwitchGapMs) {
+            ++unsaid[way];
+            return;
+        }
+        const std::string more =
+            unsaid[way] > 0 ? " (" + std::to_string(unsaid[way]) + " more so since the last line)" : std::string();
         if (is)
-            GB_INFO("Vitals: %s goes by the packets -- the potions, the jobs' HP guards and the pace", bar);
+            GB_INFO("Vitals: %s from the packets -- the potions, the jobs' HP guards and the pace%s", bar,
+                    more.c_str());
         else
-            GB_INFO("Vitals: %s goes by the screen again -- %s", bar, vitals_unusable_why(in, now));
+            GB_INFO("Vitals: %s from the screen until the packets have it again -- %s%s", bar,
+                    vitals_unusable_why(in, now), more.c_str());
+        said_ms[way] = now;
+        unsaid[way] = 0;
     };
-    switched("HP", part.hp_usable, hp_ok, hp_in);
-    switched("MP", part.mp_usable, mp_ok, mp_in);
+    switched("HP", part.hp_usable, hp_ok, hp_in, part.hp_said_ms, part.hp_unsaid, part.hp_switches);
+    switched("MP", part.mp_usable, mp_ok, mp_in, part.mp_said_ms, part.mp_unsaid, part.mp_switches);
     part.hp_usable = hp_ok;
     part.mp_usable = mp_ok;
     if (!hp_ok || !mp_ok)
@@ -678,36 +612,13 @@ SelfVitals GuiApp::gate_vitals(std::uint64_t now) {
     SelfVitals out;
     VitalsPart* part = vitals_part_.get();
     if (part == nullptr) return out;
-    // With the bars not read nothing is checked, and nothing handed over: the
-    // death block's packet path stays the packet bot's alone.
-    if (!vitals_.running()) {
-        part->hp_hand.end();
-        part->mp_hand.end();
-        return out;
-    }
-    // Nor with no macro running: a hand-over never lasts across a BẮT ĐẦU,
-    // which would take it as a read of its own, from before its start.
-    if (!macro_ || !macro_->running()) {
-        part->hp_hand.end();
-        part->mp_hand.end();
-    }
+    // With the bars not read nothing is in the world to drink for: the
+    // macro's in-world hold is the bars'.
+    if (!vitals_.running()) return out;
+    // Each bar's packet value while usable, asked afresh; -1, the screen's.
     const VitalsPart::SelfNow s = VitalsPart::self_now(*this, now);
-    // The read the screen would hand the macro now, as tick() works it out
-    // below: none taken before the pace was last cut.
-    const std::uint64_t last = vitals_.last_read_ms();
-    const std::uint64_t screen_at = last >= vitals_.paced_from_ms() ? last : 0;
-    if (vitals_usable(part->usable_in(*this, true, s), now)) {
-        part->hp_hand.end();
-        out.hp = BarCheck::percent(s.v.hp, s.v.max_hp);
-    } else {
-        out.hp = part->hp_hand.give(now, screen_at, MacroEngine::kVitalsStaleMs);
-    }
-    if (vitals_usable(part->usable_in(*this, false, s), now)) {
-        part->mp_hand.end();
-        out.mp = BarCheck::percent(s.v.mp, s.v.max_mp);
-    } else {
-        out.mp = part->mp_hand.give(now, screen_at, MacroEngine::kVitalsStaleMs);
-    }
+    if (vitals_usable(part->usable_in(*this, true, s), now)) out.hp = vitals_percent(s.v.hp, s.v.max_hp);
+    if (vitals_usable(part->usable_in(*this, false, s), now)) out.mp = vitals_percent(s.v.mp, s.v.max_mp);
     return out;
 }
 
@@ -741,12 +652,13 @@ std::uint64_t GuiApp::in_world_window_ms() const {
 int GuiApp::vitals_pace() const {
     // The run's pace while anything that acts on HP and MP, or presses a key,
     // is alive; vitals_idle_ms -- a second -- once nothing is. And while a
-    // job runs with HP and MP both from the packets, checked and usable for
-    // 10 s, no pet potion key in use, no critical hold, no look for the bars,
-    // HP not at 0 on the screen and no death panel within a minute: resting,
-    // at most a second (vitals_rest_period_ms). Any of that lost is the run's
-    // pace at once, and the cut stamps paced_from_ms, so the macro waits for
-    // a read taken after it -- while a bar that disagreed hands its read over.
+    // job runs with HP and MP both from the packets for 10 s, no critical
+    // hold, no look for the bars, HP not at 0 on the screen and no death
+    // panel within a minute: resting, at most a second -- half that with a
+    // pet potion key in use, the pet's HP being the screen's
+    // (vitals_rest_period_ms). Any of that lost is the run's pace at once,
+    // and the cut stamps paced_from_ms, so the macro waits for a read taken
+    // after it.
     VitalsPart& part = VitalsPart::of(*this);
     const std::uint64_t now = now_ms();
     const int actual = vitals_.period_ms();
@@ -756,9 +668,12 @@ int GuiApp::vitals_pace() const {
     }
     const VitalsRest in = part.rest_in(*this, now);
     const bool rest = vitals_rest_allowed(in, now);
-    const int period = rest ? vitals_rest_period_ms(vitals_run_period(), performance_.vitals_idle_ms)
+    const int period = rest ? vitals_rest_period_ms(vitals_run_period(), performance_.vitals_idle_ms, in.pet_key)
                             : vitals_run_period();
-    part.note_pace(now, period, actual, rest ? VitalsPart::Pace::Rest : VitalsPart::Pace::Run, rest_why_not(in, now));
+    const char* why = !rest     ? rest_why_not(in, now)
+                      : in.pet_key ? " (quicker for the pet potion key: the pet's HP is the screen's)"
+                                   : "";
+    part.note_pace(now, period, actual, rest ? VitalsPart::Pace::Rest : VitalsPart::Pace::Run, why);
     return period;
 }
 
@@ -772,7 +687,7 @@ std::string GuiApp::packet_vitals_text() const {
     if (v.hp_ms == 0) return "the packets: no HP/MP frame since the capture started";
     const auto bar = [](std::uint32_t value, std::uint32_t max) {
         std::string out = std::to_string(value);
-        if (max > 0) out += "/" + std::to_string(max) + " (" + percent_text(BarCheck::percent(value, max)) + ")";
+        if (max > 0) out += "/" + std::to_string(max) + " (" + percent_text(vitals_percent(value, max)) + ")";
         return out;
     };
     std::ostringstream out;
@@ -780,17 +695,11 @@ std::string GuiApp::packet_vitals_text() const {
         << seconds_before(now, v.hp_ms) << " old" << (v.hp_epoch != s.epoch ? " (before a gap)" : "")
         << ", maxima from " << max_from_text(v.max_from);
     if (const VitalsPart* part = vitals_part_.get()) {
-        BarCheck::State hs = BarCheck::State::Learning, ms = BarCheck::State::Learning;
-        {
-            std::lock_guard<std::mutex> lock(part->mutex);
-            hs = part->hp.state();
-            ms = part->mp.state();
-        }
-        const VitalsUsable hp_in = part->usable_in(*this, true, s);
-        const VitalsUsable mp_in = part->usable_in(*this, false, s);
-        out << "; checked against the bars: HP " << BarCheck::state_name(hs) << ", MP " << BarCheck::state_name(ms)
-            << "; gone by: HP " << (vitals_usable(hp_in, now) ? "yes" : "no") << ", MP "
-            << (vitals_usable(mp_in, now) ? "yes" : "no");
+        const auto gone_by = [&](bool hp_bar) {
+            const VitalsUsable in = part->usable_in(*this, hp_bar, s);
+            return vitals_usable(in, now) ? std::string("yes") : std::string("no -- ") + vitals_unusable_why(in, now);
+        };
+        out << "; gone by: HP " << gone_by(true) << ", MP " << gone_by(false);
     }
     return out.str();
 }
@@ -798,78 +707,50 @@ std::string GuiApp::packet_vitals_text() const {
 void GuiApp::note_vitals_minute(std::uint64_t now) {
     VitalsPart* part = vitals_part_.get();
     if (part == nullptr) return;
-    BarCheck::Counts hc, mc;
-    BarCheck::Progress hpg, mpg;
-    {
-        std::lock_guard<std::mutex> lock(part->mutex);
-        hc = part->hp.take_counts();
-        mc = part->mp.take_counts();
-        hpg = part->hp.progress();
-        mpg = part->mp.progress();
-    }
+    const BarCompare::Counts hc = part->hp_cmp.take_counts();
+    const BarCompare::Counts mc = part->mp_cmp.take_counts();
     if (part->pace == VitalsPart::Pace::Rest && part->pace_ms != 0 && now > part->pace_ms) {
         part->rest_ms += now - part->pace_ms;
         part->pace_ms = now;
     }
     const std::uint64_t span = part->minute_from_ms != 0 && now > part->minute_from_ms ? now - part->minute_from_ms : 0;
-    // A minute with nothing judged, no HP/MP frame and the pace not flipped
-    // writes nothing: reads not judged for want of a frame say nothing new.
-    const auto judged = [](const BarCheck::Counts& c) { return c.agree + c.disagree + c.between; };
-
-    if (judged(hc) + judged(mc) + part->frames_seen + static_cast<std::uint64_t>(part->flips) > 0) {
-        const auto counts = [](const BarCheck::Counts& c, bool named) {
-            std::ostringstream o;
-            if (named)
-                o << "agree " << c.agree << " / disagree " << c.disagree << " / between " << c.between;
-            else
-                o << c.agree << "/" << c.disagree << "/" << c.between;
-            o << " (exact " << c.exact << ", " << c.values
-              << " values, lowest " << (c.lowest >= 0.0f ? percent_text(c.lowest) : std::string("-"));
-            // Of the agreements, those 0x0051 reached after the read; of the
-            // disagreements, those of the last one's HUD moment again.
-            o << ", caught up " << c.caught_up << ", same moment " << c.same_episode;
-            if (c.over_max) o << ", over the maximum " << c.over_max;
-            const std::uint64_t not_judged = c.moving + c.stale + c.no_packet + c.no_maximum + c.no_figures + c.empty;
-            if (not_judged)
-                o << "; not judged: moving " << c.moving << ", stale " << c.stale << ", no packet " << c.no_packet
-                  << ", no maximum " << c.no_maximum << ", no figures " << c.no_figures << ", empty " << c.empty;
-            o << ")";
-            return o.str();
-        };
-        const auto state = [](const BarCheck::Progress& p) {
-            std::ostringstream o;
-            switch (p.state) {
-                case BarCheck::State::Trusted:
-                    o << "trusted" << (p.since_ms != 0 ? " since " + clock_at(p.since_ms, false) : std::string());
-                    break;
-                case BarCheck::State::Doubt:
-                    o << "in doubt (" << p.doubt_agreements << " of " << BarCheck::kDoubtClears << " in a row)";
-                    break;
-                case BarCheck::State::Learning:
-                    o << "learning (" << p.agreements << " of " << p.needed << " agreements, " << p.values << " of "
-                      << BarCheck::kTrustValues << " values)";
-                    break;
-                case BarCheck::State::Off:
-                    o << "off for the session";
-                    break;
-            }
-            if (p.distrusts) o << ", distrusted " << p.distrusts << "x";
-            return o.str();
-        };
+    // A minute with nothing compared, no HP/MP frame, no switch and the pace
+    // not flipped writes nothing: reads with no packets to set them beside
+    // say nothing new.
+    const auto compared = [](const BarCompare::Counts& c) { return c.same + c.short_digits + c.other; };
+    if (compared(hc) + compared(mc) + part->frames_seen +
+            static_cast<std::uint64_t>(part->flips + part->hp_switches + part->mp_switches) >
+        0) {
         const auto share = [span](std::uint64_t ms) {
             return span == 0 ? std::string("-")
                              : std::to_string(static_cast<int>(std::min<std::uint64_t>(100, ms * 100 / span))) + "%";
         };
+        const auto counts = [](const BarCompare::Counts& c) {
+            std::ostringstream o;
+            o << "same " << c.same << ", short " << c.short_digits << ", other " << c.other;
+            if (c.no_packet) o << ", none to set beside " << c.no_packet;
+            return o.str();
+        };
         const PacketSelf::Vitals v = packet_self_.vitals();
+        const VitalsReader::Stats rs = vitals_.stats();
         std::ostringstream line;
-        line << "Vitals check: HP " << counts(hc, true) << " " << state(hpg);
-        if (hpg.state == BarCheck::State::Learning && !hpg.low_seen) line << ", none under 98% yet";
-        line << "; MP " << counts(mc, false) << " " << state(mpg) << "; usable HP " << share(part->hp_usable_ms) << " MP "
-             << share(part->mp_usable_ms) << " of the minute; the bars every " << vitals_.period_ms() << " ms (rest "
-             << part->rest_ms / 1000 << " s, flips " << part->flips << "); last HP/MP frame "
+        line << "Vitals: from the packets HP " << share(part->hp_usable_ms) << " MP " << share(part->mp_usable_ms)
+             << " of the minute (to and from the screen: HP " << part->hp_switches << ", MP " << part->mp_switches
+             << "); the bars' figures beside them, for the log: HP " << counts(hc) << "; MP " << counts(mc);
+        // The last read of the minute not the same as the packets, each bar.
+        if (part->hp_odd_seen) line << "; the last not the same: " << odd_text("HP", part->hp_odd);
+        if (part->mp_odd_seen) line << "; the last not the same: " << odd_text("MP", part->mp_odd);
+        if (part->over_max_minute) line << "; HP over the stat sheet's maximum " << part->over_max_minute;
+        line << "; the bars every " << vitals_.period_ms() << " ms (rest " << part->rest_ms / 1000 << " s, flips "
+             << part->flips << "); last HP/MP frame "
              << (v.hp_ms != 0 ? seconds_before(now, v.hp_ms) + " ago" : std::string("never")) << "; maxima from "
              << max_from_text(v.max_from) << "; HP/MP frames " << part->frames_seen << " (" << part->same_ms
              << " in the same millisecond as the one before, " << part->same_ms_mp << " of them another MP)";
+        // The bars' figures refused short of their fill, since the reader
+        // started (VitalsReader::figure_behind_fill, 2026.11.17).
+        if (rs.behind_fill_hp + rs.behind_fill_mp > 0)
+            line << "; figures refused short of the fill since the bars' reading started: HP " << rs.behind_fill_hp
+                 << ", MP " << rs.behind_fill_mp;
         if (packets_settings_.vitals == PacketUse::Off) line << "; [Packets] vitals=off: the screen decides";
         Logger::instance().write(LogLevel::Info, line.str());
     }
@@ -884,11 +765,14 @@ void GuiApp::note_vitals_minute(std::uint64_t now) {
     part->minute_from_ms = now;
     part->hp_usable_ms = 0;
     part->mp_usable_ms = 0;
+    part->hp_switches = 0;
+    part->mp_switches = 0;
+    part->over_max_minute = 0;
+    part->hp_odd_seen = false;
+    part->mp_odd_seen = false;
     part->frames_seen = 0;
     part->same_ms = 0;
     part->same_ms_mp = 0;
-    part->hp_dis_said = 0;
-    part->mp_dis_said = 0;
     part->rest_ms = 0;
     part->flips = 0;
     part->loads = 0;

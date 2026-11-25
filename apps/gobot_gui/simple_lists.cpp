@@ -18,7 +18,6 @@
 #include "gobot/common.hpp"
 #include "gobot/glyph_font.hpp"
 #include "gobot/monster_list.hpp"
-#include "gobot/navigator.hpp"
 
 #include "imgui.h"
 
@@ -147,14 +146,14 @@ void GuiApp::simple_lists_tick() {
     // A look started from the window ends after a minute, whatever is drawn
     // meanwhile -- unless hunting has started and needs the detector itself,
     // or it has been stopped from elsewhere. Only the detector is stopped,
-    // and only when nothing else is using it: stop_detector() stops the hunt
-    // and the walk too.
+    // and only when the hunt is not using it: stop_detector() stops the hunt
+    // too.
     if (ui.look_until_ms != 0) {
         if (hunting_ || !detector_running_) {
             ui.look_until_ms = 0;
         } else if (now >= ui.look_until_ms) {
             ui.look_until_ms = 0;
-            if (!(navigator_ && navigator_->running())) stop_detector();
+            stop_detector();
         }
     }
 }
@@ -184,9 +183,7 @@ void GuiApp::simple_monster_lists() {
 
     // The window closed with a look still going: the look goes with it.
     if (!open) {
-        if (ui.look_until_ms != 0 && !hunting_ && detector_running_ &&
-            !(navigator_ && navigator_->running()))
-            stop_detector();
+        if (ui.look_until_ms != 0 && !hunting_ && detector_running_) stop_detector();
         ui.look_until_ms = 0;
         return;
     }
@@ -210,7 +207,7 @@ void GuiApp::simple_monster_lists() {
         ImGui::SameLine();
         if (ImGui::Button("Thôi")) {
             ui.look_until_ms = 0;
-            if (!hunting_ && !(navigator_ && navigator_->running())) stop_detector();
+            if (!hunting_) stop_detector();
         }
     } else if (detector_running_) {
         hint("Bot đang nhìn màn hình game.");

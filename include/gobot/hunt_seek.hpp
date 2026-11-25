@@ -63,12 +63,13 @@ inline constexpr std::uint64_t kSeekStuckMs = 4000;
 inline constexpr int           kSeekArrivePx = 24;
 inline constexpr std::uint64_t kSeekArriveMs = 1500;
 /// The turn to a monster walks the character this far toward it at most
-/// (Hunter::kTurnTapMs, about 21 px at a walk): an attack point has its
-/// monster in reach from there too, with the margins -- on t52_s2's slope 21
-/// px across is 10 px of height, more than kSeekBandMarginPx. A walk to an
-/// attack point away from its monster is not stopped for it in reach short
-/// of the point -- within kSeekAimPx of it, or past it.
-inline constexpr int           kSeekTurnPx = 24;
+/// (Hunter::kTurnTapMs, about 28 px at a walk; 21 px and 24 here until
+/// 2026.11.12): an attack point has its monster in reach from there too, with
+/// the margins -- on t52_s2's slope 21 px across is 10 px of height, more than
+/// kSeekBandMarginPx. A walk to an attack point away from its monster is not
+/// stopped for it in reach short of the point -- within kSeekAimPx of it, or
+/// past it.
+inline constexpr int           kSeekTurnPx = 31;
 inline constexpr int           kSeekAimPx = 4;
 /// A monster passed over by the seek -- Stuck, NotFound -- is not gone for
 /// again for this long.

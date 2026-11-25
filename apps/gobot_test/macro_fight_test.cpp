@@ -2988,16 +2988,15 @@ void test_key_hold_and_recheck() {
               "-- at +" + ms_list(at, rig.start) + " ms");
         rig.run(2000);
         const auto later = rig.when('1');
-        // The early press is not checked in its turn (nothing at 2 s): the next
-        // is a full cooldown after it, and that one, a press of its own, is
-        // checked again -- so a bar that never rises is pressed twice in every
-        // 4 s, not once in 3.
-        check(later.size() == 4 && later[2] - later[1] >= 2900 && later[2] - later[1] <= 3100 &&
-                  later[3] - later[2] >= 1000 && later[3] - later[2] <= 1100,
-              "the early press is not checked in its turn: the next is a full cooldown after it, and is "
-              "itself checked -- at +" + ms_list(later, rig.start) + " ms");
+        // The early press is checked in its turn too, as a press that never
+        // saw a rise (2026.11.17): the next is a full cooldown after it, and
+        // its check is the third with no rise -- from there the key's own
+        // cooldown (MacroEngine::kBrakeAfterChecks), no early press at 5 s.
+        check(later.size() == 3 && later[2] - later[1] >= 2900 && later[2] - later[1] <= 3100,
+              "the early press's turn is a full cooldown after it; the third press with no rise is not pressed "
+              "again early -- at +" + ms_list(later, rig.start) + " ms");
         const auto st = rig.engine.stats();
-        check(st.potion_repressed == 2 && st.potion_checks == 3,
+        check(st.potion_repressed == 1 && st.potion_checks == 3,
               "counted: " + std::to_string(st.potion_repressed) + " pressed again of " +
                   std::to_string(st.potion_checks) + " checks");
     }
@@ -3310,6 +3309,366 @@ void test_potion_urgent() {
     }
 }
 
+// ------------------------------- a reading that never rises (2026.11.17)
+
+void test_potion_brake() {
+    section("Potions: a reading that never rises after kBrakeAfterChecks presses -- the key's own cooldown");
+
+    // The owner's MP row of 2026-11-17: G under 62%, every 3 s, urgent 1 s,
+    // checked 1 s after each press -- and MP read 3% all along, the EXP
+    // bar's tip over its caption, where it was 92-100%.
+    const auto owners = [](Rig& rig) {
+        MacroConfig cfg = rig.engine.config();
+        cfg.potion_urgent_ms = 1000;
+        cfg.potion_recheck_ms = 1000;
+        rig.engine.set_config(cfg);
+    };
+    const auto gaps = [](const std::vector<std::uint64_t>& at, std::size_t from, std::uint64_t lo, std::uint64_t hi) {
+        bool ok = at.size() >= from + 2;
+        for (std::size_t i = from + 1; i < at.size(); ++i) ok = ok && at[i] - at[i - 1] >= lo && at[i] - at[i - 1] <= hi;
+        return ok;
+    };
+    {
+        Rig rig({ mp_key('G', 62) });
+        owners(rig);
+        rig.mp = 3.0f;
+        rig.run(60'000);
+        const auto at = rig.when('G');
+        // 0, 1 and 2 s at the urgent second, the third check (3 s) brakes:
+        // from there every 3 s -- 21 in the minute, not 60.
+        check(at.size() >= 18 && at.size() <= 22 && gaps(at, 2, 2990, 3100),
+              "MP stuck at 3% under a 62% mark: 3 presses a second apart, then every 3 s -- " +
+                  std::to_string(at.size()) + " presses in a minute (was 60)");
+    }
+    {
+        Rig rig({ mp_key('G', 62) });
+        owners(rig);
+        rig.mp = 3.0f;
+        rig.run(10'000);
+        const std::size_t braked = rig.count('G');
+        // A potion that works again: the reading rises after the press, still
+        // under half the mark -- the urgent second is back.
+        rig.on_press = [&rig](std::uint32_t) { rig.mp += 5.0f; };
+        rig.run(10'000);
+        const auto at = rig.when('G');
+        bool second = false;
+        for (std::size_t i = braked + 1; i + 1 < at.size(); ++i)
+            if (at[i + 1] - at[i] >= 990 && at[i + 1] - at[i] <= 1100) second = true;
+        check(braked <= 6 && second,
+              "a rise after a press lifts the brake: a potion a second again while far below the mark -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        Rig rig({ mp_key('G', 62) });
+        owners(rig);
+        rig.mp = 3.0f;
+        rig.run(10'000);
+        rig.mp = 90.0f;           // over the mark: the brake is over
+        rig.run(2000);
+        rig.mp = 3.0f;
+        const std::size_t before = rig.count('G');
+        rig.run(2500);
+        const auto at = rig.when('G');
+        check(rig.count('G') - before == 3 && gaps(at, before, 990, 1100),
+              "the reading over the mark in between: under it again, the urgent second at once -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        Rig rig({ mp_key('G', 62) });
+        owners(rig);
+        rig.mp = -1.0f;
+        rig.run(10'000);
+        check(rig.count('G') == 0, "no MP reading (its caption covered): nothing pressed");
+    }
+    {
+        // HP losing the fight: a press a second, the reading falling on --
+        // never braked, every press a second apart.
+        Rig rig({ hp_key('F', 61) });
+        owners(rig);
+        rig.hp = 28.0f;
+        std::uint64_t until = rig.t + 8000;
+        while (rig.t < until) {
+            rig.run(500);
+            rig.hp = std::max(1.0f, rig.hp - 1.5f);
+        }
+        const auto at = rig.when('F');
+        check(at.size() >= 7 && gaps(at, 0, 990, 1100),
+              "HP falling under half its mark, no rise after any press: a potion every second all along -- at +" +
+                  ms_list(at, rig.start) + " ms");
+    }
+    {
+        // HP read stuck -- a reading that does not move at all -- is braked
+        // as MP is.
+        Rig rig({ hp_key('F', 61) });
+        owners(rig);
+        rig.hp = 20.0f;
+        rig.run(30'000);
+        const auto at = rig.when('F');
+        check(at.size() >= 9 && at.size() <= 12 && gaps(at, 2, 2990, 3100),
+              "HP stuck at 20%: 3 presses a second apart, then its own 3 s -- " + std::to_string(at.size()) +
+                  " presses in 30 s");
+    }
+    {
+        // HP stuck, braked -- then falling: the fight is being lost, and
+        // the quick presses come back at the next check.
+        Rig rig({ hp_key('F', 61) });
+        owners(rig);
+        rig.hp = 20.0f;
+        rig.run(10'000);
+        const std::size_t braked = rig.count('F');
+        std::uint64_t until = rig.t + 8000;
+        while (rig.t < until) {
+            rig.run(500);
+            rig.hp = std::max(1.0f, rig.hp - 1.5f);
+        }
+        const auto at = rig.when('F');
+        bool second = false;
+        for (std::size_t i = braked + 1; i + 1 < at.size(); ++i)
+            if (at[i + 1] - at[i] >= 990 && at[i + 1] - at[i] <= 1100) second = true;
+        check(braked <= 6 && at.size() >= braked + 5 && second,
+              "HP braked at a stuck 20%, then falling: a potion a second again -- at +" + ms_list(at, rig.start) +
+                  " ms");
+    }
+    {
+        // The 2026.11.17 review: HP braked at a stuck 20%, then the macro
+        // stopped -- a bag or charm job drinking on its own (own_potion_due)
+        // gets the urgent second, not the brake of the run before, which
+        // nothing keeps up to date while the macro is off.
+        Rig rig({ hp_key('F', 61) });
+        owners(rig);
+        rig.hp = 20.0f;
+        rig.run(10'000);
+        const MacroEngine::OwnPotion braked = rig.engine.own_potion_due({});
+        rig.engine.stop();
+        const MacroEngine::OwnPotion stopped = rig.engine.own_potion_due({});
+        check(braked.vk == 'F' && braked.cooldown_ms == 3000 && stopped.vk == 'F' && stopped.cooldown_ms == 1000,
+              "HP braked at 20%, the macro stopped: a bag job's own potion on the urgent 1000 ms again -- braked " +
+                  std::to_string(braked.cooldown_ms) + " ms, stopped " + std::to_string(stopped.cooldown_ms) + " ms");
+    }
+}
+
+// --------------------------- the hunter holding the skills (2026.11.12, Q2)
+
+/// The engine on the test's clock with a pretend hunter: what it says is
+/// `fight`, which a test changes as it goes. The owner's keys of 2026-11-11:
+/// Z, X, C, V and Space skills on their own timers every 500 ms, F and G the
+/// HP and MP potions, Q the pet's, 6 a buff.
+struct SkillHoldRig {
+    InputManager         input;
+    ExecutionCoordinator coord;
+    MacroEngine          engine{ input, coord };
+    std::uint64_t        t = 9'000'000;
+    float                hp = 40.0f, mp = 40.0f, pet = 40.0f;
+    MacroEngine::Fight   fight;
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> pressed;
+
+    explicit SkillHoldRig(bool sequence = false) {
+        MacroEngine::Clock c;
+        c.now_ms = [this] { return t; };
+        c.sleep_ms = [this](std::uint32_t ms) { t += ms; };
+        engine.set_clock(c);
+        MacroEngine::Hands h;
+        h.focused = [] { return true; };
+        h.key = [this](std::uint32_t vk, int) {
+            pressed.emplace_back(vk, t);
+            return true;
+        };
+        engine.set_hands(h);
+        engine.set_fight([this] { return fight; });
+        MacroConfig cfg;
+        cfg.apply_defaults();
+        cfg.keys.clear();
+        for (const std::uint32_t vk : { std::uint32_t{ 'Z' }, std::uint32_t{ 'X' }, std::uint32_t{ 'C' },
+                                        std::uint32_t{ 'V' }, std::uint32_t{ VK_SPACE } }) {
+            MacroKey k = timer_key(vk, 500, "Skill");
+            k.always_timer = true;
+            k.jitter_pct = 0;
+            cfg.keys.push_back(k);
+        }
+        cfg.keys.push_back(hp_key('F', 50));
+        cfg.keys.push_back(mp_key('G', 50));
+        cfg.keys.push_back(pet_key('Q', 50));
+        MacroKey b = timer_key('6', 60'000, "Buff");
+        b.jitter_pct = 0;
+        cfg.keys.push_back(b);
+        cfg.global_jitter_pct = 0;
+        cfg.skills_follow_fight = false;
+        cfg.require_focus = true;
+        cfg.sequence_enabled = sequence;
+        if (sequence) {
+            cfg.sequence_loop = true;
+            cfg.sequence = { MacroStep{ 'C', 0, 300, "" }, MacroStep{ 'X', 0, 300, "" } };
+        }
+        engine.set_config(cfg);
+        engine.start_stepped();
+    }
+    ~SkillHoldRig() { engine.stop(); }
+
+    void run(std::uint64_t ms) {
+        for (const std::uint64_t until = t + ms; t < until; t += 10) {
+            engine.set_vitals(hp, mp, pet);
+            engine.step();
+        }
+    }
+    std::size_t count(std::uint32_t vk, std::uint64_t from) const {
+        std::size_t n = 0;
+        for (const auto& p : pressed)
+            if (p.first == vk && p.second >= from) ++n;
+        return n;
+    }
+};
+
+void test_skill_holds() {
+    section("Skills held for the hunter (2026.11.12, the owner's Q2 \"GoBot giữ skill lúc nguy hiểm\"): each reason "
+            "holds Z, X, C, V and Space and lets the potions, the pet and the buff through; the dash's key alone at "
+            "an edge");
+
+    using Mode = MacroEngine::Fight::Mode;
+    using Hold = MacroEngine::Fight::Hold;
+    const std::uint32_t skills[] = { 'Z', 'X', 'C', 'V', VK_SPACE };
+    struct Case {
+        const char* name;
+        Mode        mode;
+        Hold        hold;
+    };
+    const Case cases[] = { { "turning", Mode::Held, Hold::Turning },
+                           { "a drop settling or falling", Mode::Held, Hold::Drop },
+                           { "nothing to fight in the area", Mode::Held, Hold::NoTarget },
+                           { "outside the area or stranded", Mode::Held, Hold::Outside },
+                           // 2026.11.12c (the owner's Q7): the seek's legs, a jump's settle.
+                           { "a leg of the seek's way", Mode::Held, Hold::SeekLeg },
+                           { "a jump up", Mode::Held, Hold::Jump },
+                           { "walking back", Mode::Returning, Hold::None } };
+    for (const Case& c : cases) {
+        SkillHoldRig r;
+        r.fight.mode = c.mode;
+        r.fight.hold = c.hold;
+        const std::uint64_t t0 = r.t;
+        r.run(3000);
+        std::size_t skill_presses = 0;
+        for (const std::uint32_t vk : skills) skill_presses += r.count(vk, t0);
+        const auto st = r.engine.stats();
+        const std::uint64_t by_reason = c.hold == Hold::Turning    ? st.held_turning
+                                        : c.hold == Hold::Drop     ? st.held_drop
+                                        : c.hold == Hold::NoTarget ? st.held_no_target
+                                        : c.hold == Hold::Outside  ? st.held_outside
+                                        : c.hold == Hold::SeekLeg  ? st.held_seek_leg
+                                        : c.hold == Hold::Jump     ? st.held_jump
+                                                                   : st.held_returning;
+        const bool rest = r.count('F', t0) >= 1 && r.count('G', t0) >= 1 && r.count('Q', t0) >= 1 &&
+                          r.count('6', t0) == 1;
+        check(skill_presses == 0 && rest && by_reason > 0 &&
+                  (c.mode == Mode::Returning || by_reason == st.held_hunter),
+              fmt("%s: 3 s -- Z, X, C, V, Space pressed %zu times, held %llu (by its reason); F %zu, G %zu, Q %zu, "
+                  "6 %zu",
+                  c.name, skill_presses, static_cast<unsigned long long>(by_reason), r.count('F', t0),
+                  r.count('G', t0), r.count('Q', t0), r.count('6', t0)));
+        // Let go: they go at once.
+        r.fight.mode = Mode::Fighting;
+        r.fight.hold = Hold::None;
+        r.fight.dx = 60;
+        const std::uint64_t t1 = r.t;
+        r.run(1000);
+        std::size_t after = 0;
+        for (const std::uint32_t vk : skills) after += r.count(vk, t1) > 0 ? 1 : 0;
+        check(after == 5, fmt("%s let go of: all five skills go within 1 s (%zu)", c.name, after));
+    }
+
+    // The dash's keys at an edge, three of them as the fight names them (C, V
+    // and Space, the guess of before 2026.11.17 -- the hunter names none
+    // until one is learned now); Z and X go on.
+    {
+        SkillHoldRig r;
+        r.fight.mode = Mode::Fighting;
+        r.fight.dx = 60;
+        r.fight.dash_edge = true;
+        r.fight.dash_keys = { 'C', 'V', VK_SPACE };
+        const std::uint64_t t0 = r.t;
+        r.run(3000);
+        const bool held = r.count('C', t0) == 0 && r.count('V', t0) == 0 && r.count(VK_SPACE, t0) == 0;
+        const bool rest = r.count('Z', t0) >= 4 && r.count('X', t0) >= 4 && r.count('F', t0) >= 1;
+        check(held && rest && r.engine.stats().held_dash > 0 && r.engine.stats().held_hunter == 0,
+              fmt("near an edge, the dash not learned: C, V, Space held (%llu), Z %zu and X %zu go on",
+                  static_cast<unsigned long long>(r.engine.stats().held_dash), r.count('Z', t0), r.count('X', t0)));
+        // In the middle: every one.
+        r.fight.dash_edge = false;
+        const std::uint64_t t1 = r.t;
+        r.run(1000);
+        check(r.count('C', t1) >= 1 && r.count('V', t1) >= 1 && r.count(VK_SPACE, t1) >= 1,
+              "away from the edge: C, V and Space go again");
+        // Learned as Z: Z alone held, C, V and Space go.
+        r.fight.dash_edge = true;
+        r.fight.dash_keys = { 'Z', 0, 0 };
+        const std::uint64_t t2 = r.t;
+        r.run(2000);
+        check(r.count('Z', t2) == 0 && r.count('C', t2) >= 2 && r.count('V', t2) >= 2 && r.count(VK_SPACE, t2) >= 2,
+              fmt("the dash learned as Z, at an edge: Z held, C %zu, V %zu, Space %zu go", r.count('C', t2),
+                  r.count('V', t2), r.count(VK_SPACE, t2)));
+    }
+    // A step of the sequence on the dash's key waits too.
+    {
+        SkillHoldRig r(true);
+        r.fight.mode = Mode::Fighting;
+        r.fight.dx = 60;
+        r.fight.dash_edge = true;
+        r.fight.dash_keys = { 'C', 'V', VK_SPACE };
+        const std::uint64_t t0 = r.t;
+        r.run(2000);
+        check(r.count('C', t0) == 0 && r.count('X', t0) >= 2,
+              fmt("the sequence's step on C waits at an edge (%zu), X goes (%zu)", r.count('C', t0),
+                  r.count('X', t0)));
+    }
+    // F3: a skill on its own timer waits while the target is further than its
+    // range, once the hunter says how far that is.
+    {
+        SkillHoldRig r;
+        MacroConfig cfg = r.engine.config();
+        cfg.keys[0].range_px = 80;          // Z
+        r.engine.set_config(cfg);
+        r.fight.mode = Mode::Fighting;
+        r.fight.dx = 200;
+        const std::uint64_t t0 = r.t;
+        r.run(2000);
+        const std::size_t at_200 = r.count('Z', t0);
+        r.fight.dx = 60;
+        const std::uint64_t t1 = r.t;
+        r.run(2000);
+        const std::size_t at_60 = r.count('Z', t1);
+        r.fight.mode = Mode::Idle;          // no target said: its timer as ever
+        r.fight.dx = 0;
+        const std::uint64_t t2 = r.t;
+        r.run(2000);
+        check(at_200 == 0 && at_60 >= 3 && r.count('Z', t2) >= 3 && r.engine.stats().held_range > 0,
+              fmt("Z (range 80, on its own timer): the target 200 px away -- %zu presses; 60 px -- %zu; no fight "
+                  "said -- %zu",
+                  at_200, at_60, r.count('Z', t2)));
+    }
+    // The minute's line, by reason.
+    {
+        SkillHoldRig r;
+        r.fight.mode = Mode::Held;
+        r.fight.hold = Hold::NoTarget;
+        Logger& log = Logger::instance();
+        const LogLevel was = log.level();
+        log.set_ring_capacity(2000);
+        log.clear_ring();
+        log.set_level(LogLevel::Info);
+        r.run(30'000);
+        r.fight.hold = Hold::Turning;
+        r.run(31'000);
+        std::string line;
+        for (const LogLine& l : log.ring())
+            if (l.text.find("held for the hunter -- ") != std::string::npos) line = l.text;
+        log.set_level(was);
+        log.set_ring_capacity(0);
+        check(line.find(" turning, 0 a drop settling or in its fall, ") != std::string::npos &&
+                  line.find(" nothing to fight in the area, 0 outside the area or stranded, 0 a leg of the seek's way, 0 "
+                            "a jump up; 0 of the dash's key near an edge") != std::string::npos &&
+                  line.find("Skills: 0 held") == std::string::npos,
+              "the minute's line by reason: \"" + line + "\"");
+    }
+}
+
 } // namespace
 
 void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -3324,6 +3683,7 @@ void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section
     test_key_hold_and_recheck();
     test_buff_presses();
     test_potion_urgent();
+    test_potion_brake();
     test_keys_change_mid_press();
     test_potion_after_hold_threaded();
     test_sequence_waits_for_potion();
@@ -3336,4 +3696,5 @@ void test_macro_fight(void (*check_fn)(bool, const std::string&), void (*section
     test_pet_every();
     test_pet_heal_watch();
     test_monster_sightings();
+    test_skill_holds();
 }

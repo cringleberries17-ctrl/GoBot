@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gobot/command.hpp"
+#include "gobot/priority.hpp"
 
 #include <atomic>
 #include <cstdint>

@@ -450,7 +450,7 @@ bool OpcodeRegistry::load(const std::string& path) {
                 fields = kRight;
                 GB_WARN("OpcodeRegistry: [Packet.0x0038] in %s read x,y at payload @80/@82, a point beside the "
                         "monster that is stale unless it is hit -- read at @24/@26 with hp at @56 instead (the file "
-                        "is left as it is, until a layout applied on the Protocol tab saves the corrected one)",
+                        "is left as it is)",
                         path.c_str());
             } else if (bare.find("@80") != std::string::npos && bare.find("@82") != std::string::npos) {
                 GB_WARN("OpcodeRegistry: [Packet.0x0038] in %s reads payload @80 and @82, a point beside the "

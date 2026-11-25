@@ -55,14 +55,13 @@ SeekTick seek_tick(const HunterConfig& c);
 inline constexpr std::uint64_t kJumpUpCardFreshMs = 1500;
 
 /// The card's lines of the jump up while it hunts: each that holds, in the
-/// order the card says them.
+/// order the card says them. Since 2026.11.24 nothing is off, paused or off
+/// for the run any more -- a jump that did not get there is tried again (the
+/// owner's "thử lại luôn") -- so the card has no `off`, `pause_ms` or
+/// `kinds_off` (Physics, HeldLong and OffMap off until the next start, in
+/// red; Fails, a pause; a key off for the run): what it is at, what it would
+/// have done with the tick off, and what it has done.
 struct JumpUpCard {
-    /// Off until the next start, in red: Fails, Physics, OffMap, HeldLong.
-    /// Never MapChanged or KeysStuck -- those stop the hunt, and the line
-    /// under BẮT ĐẦU says so in red (GuiApp::drop_stopped_vi_).
-    Hunter::JumpUpOff off = Hunter::JumpUpOff::None;
-    /// Keys off for the run (bit 1 << JumpKind, kJumpUpKindMisses), in red.
-    std::uint8_t kinds_off = 0;
     /// What it is at: walking to a take-off, settled there, in the air; or
     /// no sure jump to the monster above it was asked of, a moment ago.
     enum class Now : std::uint8_t { None, Approach, Settle, Air, NoPlan };
@@ -73,13 +72,14 @@ struct JumpUpCard {
     bool counts = false;
 };
 /// From the hunter's status at `now`: the tick as set (`c.jump_up`), what it
-/// is off for, at, refused a moment ago, would have done, and has done.
+/// is at, refused a moment ago, would have done, and has done.
 JumpUpCard jump_up_card(const HunterConfig& c, const Hunter::Status& hs, std::uint64_t now);
 
 /// Why the monsters above that only a jump up gets to are not gone for, with
-/// the seek on (Status::seek_above_no_way): the tick off, or jumps up off
-/// until the next start.
-enum class SeekAbove : std::uint8_t { None, TickOff, Latched };
+/// the seek on (Status::seek_above_no_way): the tick off -- the one reason
+/// since 2026.11.24, when jumps up are never paused (Paused, 2026.11.15) nor
+/// off until the next start (Latched) any more; None otherwise.
+enum class SeekAbove : std::uint8_t { None, TickOff };
 SeekAbove seek_above(const HunterConfig& c, const Hunter::Status& hs);
 
 } // namespace gobot

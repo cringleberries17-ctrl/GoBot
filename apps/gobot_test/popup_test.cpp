@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -121,6 +122,12 @@ struct Kit {
     /// with these tests, the whole board as the client's own art draws it.
     bool  board_ok = false;
     Frame board_title, box_x, board_art;
+    /// The popup worker's own picture of the live game of 2026-11-17 21:36:32
+    /// (popup_debug\checkin_..._in15.png, 1024x768, read off the screen): the
+    /// board up at 73,34, its title at 371,37, the game's two lines of news
+    /// drawn over the board just under its title. Only when handed over with
+    /// these tests.
+    Frame board_live;
 };
 
 void load_kit(Kit& x) {
@@ -167,6 +174,13 @@ void load_kit(Kit& x) {
                 break;
             }
         }
+        for (const std::string& d : dirs) {
+            Frame live;
+            if (load_png(d + "\\checkin_live_1024x768.png", live) && live.width == 1024 && live.height == 768) {
+                x.board_live = live;
+                break;
+            }
+        }
     }
     x.ok = true;
 }
@@ -191,6 +205,8 @@ struct Pretend {
         int         x = 0, y = 0;
         ScreenRect  control;        ///< a click here closes it; empty: nothing does
         bool        esc_closes = false;
+        /// Closed, and drawn until then: close_lag_ms after its click or ESC.
+        std::uint64_t gone_from = ~std::uint64_t{ 0 };
     };
     Frame base;
     std::vector<Shown> shown;
@@ -198,13 +214,22 @@ struct Pretend {
     int clicks = 0, escs = 0, missed = 0;
     std::vector<std::pair<int, int>> clicked;
     std::vector<std::uint64_t> pressed_at;      ///< when each click and ESC came, on the pretend clock
+    std::vector<std::uint64_t> esc_at;          ///< when each ESC came, alone
     /// ESC with nothing it closes brings up the ESC menu, as in the game --
     /// drawn `menu_lag_ms` after the ESC, a busy game being slow to.
     bool esc_opens_menu = true;
     std::uint64_t menu_lag_ms = 0;
     std::uint64_t menu_from = 0;
+    /// What a click or an ESC closes goes this long after it -- a slow game,
+    /// the owner's laggy PCs (2026-11-15) -- rather than at once.
+    std::uint64_t close_lag_ms = 0;
 
-    bool drawn(const Shown& s) const { return s.what != "menu" || t >= menu_from; }
+    bool drawn(const Shown& s) const { return (s.what != "menu" || t >= menu_from) && t < s.gone_from; }
+    /// Shown thing `i` closed: at once, or close_lag_ms on.
+    void close(std::size_t i) {
+        if (close_lag_ms > 0) shown[i].gone_from = t + close_lag_ms;
+        else shown.erase(shown.begin() + static_cast<std::ptrdiff_t>(i));
+    }
     Frame render() const {
         Frame f = base;
         for (const Shown& s : shown)
@@ -216,7 +241,8 @@ struct Pretend {
         shown.push_back(Shown{ what, pic, x, y, control, esc_closes });
     }
     bool has(const std::string& what) const {
-        return std::any_of(shown.begin(), shown.end(), [&](const Shown& s) { return s.what == what; });
+        return std::any_of(shown.begin(), shown.end(),
+                           [&](const Shown& s) { return s.what == what && t < s.gone_from; });
     }
     bool click(int x, int y) {
         ++clicks;
@@ -224,7 +250,7 @@ struct Pretend {
         pressed_at.push_back(t);
         for (std::size_t i = shown.size(); i-- > 0;)
             if (drawn(shown[i]) && shown[i].control.valid() && shown[i].control.contains(x, y)) {
-                shown.erase(shown.begin() + static_cast<std::ptrdiff_t>(i));
+                close(i);
                 return true;
             }
         ++missed;
@@ -233,9 +259,10 @@ struct Pretend {
     bool esc() {
         ++escs;
         pressed_at.push_back(t);
+        esc_at.push_back(t);
         for (std::size_t i = shown.size(); i-- > 0;)
-            if (shown[i].esc_closes) {
-                shown.erase(shown.begin() + static_cast<std::ptrdiff_t>(i));
+            if (shown[i].esc_closes && shown[i].gone_from == ~std::uint64_t{ 0 }) {
+                close(i);
                 return true;
             }
         if (esc_opens_menu && !has("menu")) {
@@ -265,6 +292,11 @@ struct Rig {
     std::vector<std::string> log;
     /// What one capture costs on the pretend clock: a busy machine.
     std::uint64_t grab_ms = 0;
+    /// For the check-in board's ESC (PopupCloser::board_due): the keeper's
+    /// pretend arrival in the world on the pretend clock, 0 for none, and the
+    /// PC's pretend second of the day, -1 for none -- never the real one.
+    std::uint64_t arrived = 0;
+    int second = -1;
 
     explicit Rig(bool plain = false) {
         game.base = plain ? plain_frame() : kit().base;
@@ -280,8 +312,33 @@ struct Rig {
         PopupCloser::Clock c;
         c.now_ms = [this] { return game.t; };
         c.sleep = [this](int ms) { game.t += static_cast<std::uint64_t>(ms); };
+        c.arrived_ms = [this] { return arrived; };
+        c.local_second = [this] { return second; };
         closer->set_clock(c);
         closer->on_report([this](const std::string& line) { log.push_back(line); });
+    }
+    /// The pretend clock on to `ms`, no turn between: a popup that stays where
+    /// it is loses nothing by not being looked at meanwhile.
+    void skip_to(std::uint64_t ms) {
+        if (game.t < ms) game.t = ms;
+    }
+    /// One turn at `ms`.
+    PopupCloser::Turn turn_at(std::uint64_t ms) {
+        skip_to(ms);
+        return closer->turn();
+    }
+    /// The check-in board's wait run through (2026-11-15): a turn a second
+    /// for its first 3 s, as the worker's, none until kCheckinBoardLoginWaitMs
+    /// from the first of them -- nothing is due in between -- and then
+    /// `seconds` more, a turn a second, from when it is due. The board, and
+    /// anything else, put up before.
+    std::vector<PopupCloser::Turn> run_board(int seconds) {
+        const std::uint64_t from = game.t;
+        std::vector<PopupCloser::Turn> turns = run(3);
+        skip_to(from + kCheckinBoardLoginWaitMs);
+        const std::vector<PopupCloser::Turn> more = run(seconds);
+        turns.insert(turns.end(), more.begin(), more.end());
+        return turns;
     }
     /// The worker's cadence: a turn a second, for `seconds` -- or one every
     /// `step` seconds, for the long waits in which nothing is to happen.
@@ -297,7 +354,21 @@ struct Rig {
     bool said(const std::string& part) const {
         return std::any_of(log.begin(), log.end(), [&](const std::string& l) { return l.find(part) != std::string::npos; });
     }
+    /// How many lines said `part`.
+    int said_times(const std::string& part) const {
+        return static_cast<int>(std::count_if(log.begin(), log.end(),
+                                              [&](const std::string& l) { return l.find(part) != std::string::npos; }));
+    }
 };
+
+/// Every gap between one time in `at` and the next is `lo` to `hi`, and there
+/// are at least two: tries that came again and again, never let go of.
+bool gaps_within(const std::vector<std::uint64_t>& at, std::uint64_t lo, std::uint64_t hi) {
+    if (at.size() < 2) return false;
+    for (std::size_t i = 1; i < at.size(); ++i)
+        if (at[i] < at[i - 1] + lo || at[i] > at[i - 1] + hi) return false;
+    return true;
+}
 
 /// The check-in notice where a player would see it, and its Xác Nhận.
 void add_notice(Pretend& g, int x = 542, int y = 320) {
@@ -476,10 +547,13 @@ void test_notice() {
 }
 
 void test_board() {
-    section("Popups: the check-in board, by ESC once it has stayed 3 s, never by its X (PU-B1)");
+    section("Popups: the check-in board, by ESC 30 s after it is first seen, never by its X (PU-B1)");
     if (skip_without_board()) return;
     const Kit& k = kit();
     {
+        // The owner, 2026-11-15: "vào tới màn hình game thì sẽ chờ 30 giây rồi
+        // mới ấn ESC" -- with no arrival known, from its first sight; until
+        // 2026-11-15 it went at 3 s.
         Rig r;
         add_board(r.game, board_picture(true));
         const auto early = r.run(3);
@@ -491,9 +565,18 @@ void test_board() {
                   r.said("the check-in board (Sự kiện và điểm danh) is up at 200,60 (title 1.00 at 498,63; its X at "
                          "+564,+14 from the title)"),
               "seen, and said with its X where the art has it -- " + (r.log.empty() ? std::string() : r.log.front()));
-        const auto then = r.closer->turn();
+        const auto at3 = r.closer->turn();
+        const auto at29 = r.turn_at(29'999);
+        check(at3 == PopupCloser::Turn::Waiting && at29 == PopupCloser::Turn::Waiting && r.game.escs == 0 &&
+                  r.game.clicks == 0 && r.closer->last_about(PopupKind::CheckinBoard) &&
+                  r.closer->last_vi() ==
+                      "Thấy bảng Sự kiện và điểm danh: chờ 30 giây sau khi vào game rồi mới bấm ESC." &&
+                  r.said("the check-in board waits for its ESC until 30 s after it was first seen"),
+              "at 3 s and at 29.999 s: still nothing, and the tab and the log say it waits its 30 s -- " +
+                  r.closer->last_vi());
+        const auto then = r.turn_at(30'000);
         check(then == PopupCloser::Turn::Closed && r.game.escs == 1 && r.game.clicks == 0 && !r.game.has("board"),
-              std::string("at 3 s: exactly one ESC, no click -- ") + PopupCloser::turn_name(then));
+              std::string("at 30 s: exactly one ESC, no click -- ") + PopupCloser::turn_name(then));
         check(r.said("closed the check-in board at 200,60 (title 1.00) with ESC") &&
                   r.closer->last_about(PopupKind::CheckinBoard) &&
                   r.closer->last_vi() == "Đã tắt bảng Sự kiện và điểm danh (bấm ESC).",
@@ -524,13 +607,13 @@ void test_board() {
                                                             up->y - (kBoardY + 3)).c_str()
                                                       : "not seen",
                       other.empty() ? "" : (": " + other.front()).c_str()));
-            r.run(5);
+            r.run_board(2);
             check(r.game.escs == 1 && r.game.clicks == 0 && !r.game.has("board"),
                   "closed with one ESC, its X never clicked");
         }
     }
     {
-        // Moved between looks: the 3 s start again where it is now.
+        // Moved between looks: its 30 s start again where it is now.
         Rig m;
         add_board(m.game, board_picture(true));
         m.run(2);
@@ -538,8 +621,10 @@ void test_board() {
         add_board(m.game, board_picture(true), 150, 80);
         m.run(2);
         check(m.game.escs == 0, "moved after 2 s: still nothing 2 s later");
-        m.run(2);
-        check(m.game.escs == 1 && m.game.clicks == 0, "and one ESC once it has stayed put for 3 s");
+        m.turn_at(31'000);
+        check(m.game.escs == 0, "nor 30 s after it was first seen, where it was before");
+        m.turn_at(32'000);
+        check(m.game.escs == 1 && m.game.clicks == 0, "and one ESC once it has stayed put for 30 s where it is");
     }
     {
         // Its X 20 px off the art's place, still in the board's top band: the
@@ -547,19 +632,19 @@ void test_board() {
         // all: ESC all the same.
         Rig r;
         add_board(r.game, board_picture(true, 535, 5), kBoardX, kBoardY, 535, 5);
-        r.run(5);
+        r.run_board(2);
         check(r.game.escs == 1 && r.game.clicks == 0 && !clicked_board_x(r.game, kBoardX, kBoardY, 535, 5),
               "its X 20 px aside but in its top band: one ESC, and the X never clicked");
         Rig bare;
         add_board(bare.game, board_picture(false));
-        bare.run(5);
+        bare.run_board(2);
         check(bare.game.escs == 1 && bare.game.clicks == 0 && bare.said("no X seen"),
               "no X seen at all: one ESC");
         // An X below the band is some other window's: nothing.
         Rig low;
         add_board(low.game, board_picture(false));
         low.game.add("x", k.box_x, kBoardX + 853, kBoardY + 60);
-        low.run(8);
+        low.run_board(5);
         check(low.game.escs == 0 && low.game.clicks == 0 && low.said("a window with a close button is up"),
               "a close button under the board's top band: nothing pressed, and why is said");
     }
@@ -576,19 +661,25 @@ void test_board_order() {
         check(r.game.clicks == 0 && r.game.escs == 0, "both up for 2 s: nothing yet");
         r.closer->turn();
         check(r.game.clicks == 1 && r.game.missed == 0 && r.game.escs == 0 && !r.game.has("notice"),
-              "at 3 s: the notice's Xác Nhận, and no ESC while it is up");
-        r.closer->turn();
+              "at 3 s: the notice's Xác Nhận, and no ESC while it is up -- the board's 30 s hold back no notice");
+        const auto waits = r.closer->turn();
+        check(waits == PopupCloser::Turn::Waiting && r.game.escs == 0 &&
+                  r.closer->last_vi() ==
+                      "Thấy bảng Sự kiện và điểm danh: chờ 30 giây sau khi vào game rồi mới bấm ESC.",
+              "the notice gone, the board waits out its 30 s -- " + r.closer->last_vi());
+        r.turn_at(30'000);
         check(r.game.escs == 1 && r.game.clicks == 1 && !r.game.has("board") && !clicked_board_x(r.game) &&
                   r.game.pressed_at.size() == 2 && r.game.pressed_at[0] < r.game.pressed_at[1],
-              "then the board, by one ESC: the click first, the ESC after, the X never clicked");
+              "then the board at 30 s, by one ESC: the click first, the ESC after, the X never clicked");
     }
     {
         // The book without its X beside the board: an ESC would go to either,
-        // so neither is pressed -- the book with its X is closed by it.
+        // so neither is pressed -- the book with its X is closed by it. Not
+        // once the board's 30 s are over either.
         Rig r;
         add_board(r.game, board_picture(true));
         add_book(r.game, false, 30, 120);
-        r.run(8);
+        r.run_board(8);
         check(r.game.escs == 0 && r.game.clicks == 0, "the board and the book without its X: no ESC for either");
     }
     {
@@ -605,8 +696,11 @@ void test_board_order() {
               "the board not allowed: nothing at all, the notice neither, and why is said");
         r.closer->set_allowed(kAllPopups);
         r.run(8);
+        check(r.game.clicks == 1 && r.game.escs == 0 && !r.game.has("notice") && r.game.has("board"),
+              "allowed again: the notice at once, the board waiting its 30 s from when it was first allowed");
+        r.turn_at(8'000 + kCheckinBoardLoginWaitMs);
         check(r.game.clicks == 1 && r.game.escs == 1 && !r.game.has("notice") && !r.game.has("board"),
-              "allowed again: the notice, then the board");
+              "then the board");
     }
 }
 
@@ -630,14 +724,16 @@ void test_board_blocked() {
         { "the bag", "grabbed/inventory", 14, 393 },
         { "a one-button dialog", "grabbed/dialog_ok", 542, 320 },
     };
-    // The other thing drawn over the board, as the game draws a dialog.
+    // The other thing drawn over the board, as the game draws a dialog. Each
+    // looked at once the board's 30 s are over (run_board), when its ESC
+    // would be due.
     for (const Other& o : others) {
         Rig r;
         add_board(r.game, board_picture(true));
         r.game.add(o.what, *k.get(o.picture), o.x, o.y);
         if (o.pair_dx >= 0)
             r.game.add("pair", *k.get("grabbed/confirm_button"), o.x + o.pair_dx, o.y + o.pair_dy);
-        const auto turns = r.run(8);
+        const auto turns = r.run_board(8);
         check(r.game.clicks == 0 && r.game.escs == 0 &&
                   std::count(turns.begin(), turns.end(), PopupCloser::Turn::Blocked) > 0,
               std::string("the board with ") + o.what + " up: nothing pressed");
@@ -649,7 +745,7 @@ void test_board_blocked() {
             load_png(TemplateStore::client_images() + "\\quest\\1\\Dlg_Quest_Neo.png", quest)) {
             add_board(r.game, board_picture(true));
             r.game.add("quest", quest, 40, 60);
-            r.run(8);
+            r.run_board(8);
             check(r.game.clicks == 0 && r.game.escs == 0, "the board with the Nhiệm Vụ window open: nothing");
         } else {
             skip("no Dlg_Quest_Neo picture here\n");
@@ -662,7 +758,7 @@ void test_board_blocked() {
         if (open != nullptr) {
             add_board(r.game, board_picture(true));
             r.game.add("chat", *open, 0, 690);
-            r.run(8);
+            r.run_board(8);
             check(r.game.clicks == 0 && r.game.escs == 0, "the board with the chat line open: nothing");
         } else {
             skip("no chat bar picture here\n");
@@ -674,7 +770,7 @@ void test_board_blocked() {
         Rig r;
         add_board(r.game, board_picture(true));
         r.game.add_menu();
-        r.run(8);
+        r.run_board(8);
         check(r.game.clicks == 0 && r.game.escs == 0, "the board with the player's ESC menu over it: nothing");
     }
     {
@@ -682,7 +778,7 @@ void test_board_blocked() {
         Rig r;
         add_board(r.game, board_picture(true));
         r.game.add("x", *k.get("inven/1/btn_CloseDialog.spr/0"), 1197, 341);
-        r.run(8);
+        r.run_board(8);
         check(r.game.clicks == 0 && r.game.escs == 0 && r.said("left the check-in board alone: a window with a close "
                                                                  "button is up at 1197,341"),
               "the board with a lone close button elsewhere: nothing, and why is said");
@@ -690,31 +786,66 @@ void test_board_blocked() {
 }
 
 void test_board_menu() {
-    section("Popups: the check-in board's ESC and the ESC menu; two tries, then left alone (PU-B4)");
+    section("Popups: the check-in board's ESC and the ESC menu; tried again every 30 s, never left alone (PU-B4, "
+            "2026.11.24)");
     if (skip_without_board()) return;
     {
         // The game takes the ESC for its menu: the menu GoBot's ESC brought
-        // up is shut by its X, once; the board is tried once more after 30 s
-        // and then left alone for 10 minutes. Its X is never clicked.
+        // up is shut by its X, once a try; the board is tried again 30 s after
+        // each try's watch, as often as it takes -- never left alone since
+        // 2026.11.24 (the owner: "Kiểm tra các phần khác xem có phần nào không
+        // làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác";
+        // until then two tries in 10 minutes, then left alone for the rest).
+        // Its X is never clicked. Since 2026-11-15 the ESC is at 30 s, and once
+        // the menu is seen to be its doing the board is watched kAfterMenuMs
+        // more, not 30 s.
         Rig r;
         add_board(r.game, board_picture(true));
         r.game.shown.back().esc_closes = false;
-        r.run(5);
-        check(r.game.escs == 1 && r.game.clicks == 1 && r.game.missed == 0 && !r.game.has("menu") &&
+        r.run_board(2);
+        check(r.game.escs == 1 && r.game.pressed_at[0] == 30'000 && r.game.clicks == 1 && r.game.missed == 0 &&
+                  !r.game.has("menu") &&
+                  r.game.t <= 30'000 + PopupCloser::kCheckLookMs + PopupCloser::kAfterMenuMs + 2'000 &&
                   !clicked_board_x(r.game) && r.said("GoBot's ESC brought up the ESC menu") &&
-                  r.said("the check-in board is still up after closing it with ESC (try 1 of 2); trying again in 30 s"),
+                  r.said("the check-in board is still up after closing it with ESC (try 1); trying again in 30 s"),
               "an ESC that brought up the menu: the menu shut by its X, the board's X never clicked");
-        check(r.closer->last_vi() == "Đã bấm ESC mà bảng Sự kiện và điểm danh vẫn còn.",
-              "and the tab says so -- " + r.closer->last_vi());
+        check(r.closer->last_vi() == "Đã bấm ESC mà bảng Sự kiện và điểm danh vẫn còn: thử lại sau 30 giây.",
+              "and the tab says so, and when it tries again -- " + r.closer->last_vi());
         r.run(40);
-        check(r.game.escs == 2 && r.said("(try 2 of 2); leaving it alone"), "tried once more after 30 s");
-        r.run(500, 10);
-        check(r.game.escs == 2 && r.game.clicks == 2 && !clicked_board_x(r.game) &&
-                  r.said("left the check-in board alone: tried 2 times in 10 minutes") &&
-                  r.closer->last_about(PopupKind::CheckinBoard) &&
-                  r.closer->last_vi() ==
-                      "Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm ESC: GoBot để yên, bạn tắt giúp.",
-              "then left alone for 10 minutes, and the tab says so -- " + r.closer->last_vi());
+        check(r.game.escs == 2 && r.said("(try 2); trying again in 30 s"), "tried once more after 30 s");
+        // Tries 3, 4, 5 and on, each 30 s after the last one's watch -- the
+        // menu's X and kAfterMenuMs, a turn's second at most -- for the next
+        // ten minutes, where it used to be left alone.
+        const auto turns = r.run(600);
+        const std::uint64_t lo = PopupCloser::kBackoffMs;
+        const std::uint64_t hi = PopupCloser::kBackoffMs + PopupCloser::kAfterMenuMs + PopupCloser::kCheckLookMs + 1'000;
+        check(r.game.escs >= 20 && r.game.clicks == r.game.escs && r.game.missed == 0 && !clicked_board_x(r.game) &&
+                  gaps_within(r.game.esc_at, lo, hi) && r.game.has("board") && !r.game.has("menu") &&
+                  r.said("(try 3); trying again in 30 s") && r.said("(try 20); trying again in 30 s") &&
+                  !r.said("alone: tried") && !r.said("leaving it alone") &&
+                  std::count(turns.begin(), turns.end(), PopupCloser::Turn::NotClosed) ==
+                      static_cast<std::ptrdiff_t>(r.game.escs - 2),
+              fmt("then every %llu to %llu ms, for 10 minutes and more: %d ESCs in all, each menu shut by its X, never "
+                  "left alone",
+                  static_cast<unsigned long long>(lo), static_cast<unsigned long long>(hi), r.game.escs));
+    }
+    {
+        // A slow game drawing that menu 4 s after the board's ESC, over the
+        // calendar: still the ESC's one thing -- shut by its X, and the board
+        // watched kAfterMenuMs more -- not taken for the player's, which left
+        // it up to keep the board's next ESC shut, the check running its full
+        // 30 s and saying nothing came (review 2026-11-15).
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.game.shown.back().esc_closes = false;
+        r.game.menu_lag_ms = 4000;
+        r.run_board(2);
+        check(r.game.escs == 1 && r.game.pressed_at[0] == 30'000 && r.game.clicks == 1 && r.game.missed == 0 &&
+                  !r.game.has("menu") && r.game.has("board") && !clicked_board_x(r.game) &&
+                  r.game.t <= 30'000 + 4'000 + PopupCloser::kCheckLookMs + PopupCloser::kAfterMenuMs + 2'000 &&
+                  r.said("GoBot's ESC brought up the ESC menu") && !r.said("nothing after 30 s") &&
+                  r.said("the check-in board is still up after closing it with ESC (try 1); trying again in 30 s"),
+              "the menu drawn 4 s after the board's ESC: GoBot's, shut by its X, the board's X never clicked");
     }
     {
         // The player opened the ESC menu, and the board came up over it. The
@@ -723,7 +854,7 @@ void test_board_menu() {
         Rig r;
         r.game.add_menu();
         add_board(r.game, board_picture(true));
-        r.run(5);
+        r.run_board(2);
         check(r.game.escs == 1 && r.game.clicks == 0 && !r.game.has("board") && r.game.has("menu") &&
                   r.said("the ESC menu was already open under the check-in board; left as it is"),
               "the player's ESC menu under the board: one ESC for the board, and the menu left up");
@@ -743,7 +874,7 @@ void test_board_gates() {
         g.gates = [why] { return std::string(why); };
         r.closer->set_guard(g);
         add_board(r.game, board_picture(true));
-        r.run(10);
+        r.run_board(5);
         check(r.game.clicks == 0 && r.game.escs == 0 && r.said(std::string("not closing the check-in board now: ") + why),
               std::string(why) + ": nothing, and put off");
     }
@@ -759,9 +890,25 @@ void test_board_gates() {
         };
         g.stopped = [&] { return stop; };
         s.closer->set_guard(g);
-        s.run(6);
+        s.run_board(3);
         check(s.game.clicks == 0 && s.game.escs == 0 && s.game.has("board"),
               "a stop between the hold and the press: nothing pressed");
+    }
+    {
+        // The board's own wait is not a gate (2026-11-15): no hold asked for,
+        // nothing put off -- the ESC goes at the first turn it is due, and
+        // the hold no longer than before.
+        Rig r;
+        Timed timed;
+        r.closer->set_guard(timed.guard(r.game));
+        add_board(r.game, board_picture(true));
+        r.run(29);
+        const int takes_waiting = timed.takes;
+        r.run(2);
+        check(takes_waiting == 0 && timed.takes == 1 && timed.dones == 1 && r.game.escs == 1 &&
+                  timed.held() <= PopupCloser::kHoldMs && !r.said("not closing the check-in board now"),
+              fmt("its 30 s: no hold taken while it waits (%d), one ESC once due, the hold let go after %llu ms",
+                  takes_waiting, static_cast<unsigned long long>(timed.held())));
     }
 }
 
@@ -805,7 +952,7 @@ void test_board_hold() {
         Timed timed;
         r.closer->set_guard(timed.guard(r.game));
         add_board(r.game, board_picture(true));
-        r.run(6);
+        r.run_board(3);
         const std::uint64_t esc_at = r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0] - timed.taken;
         check(r.game.escs == 1 && r.game.clicks == 0 && timed.dones == 1 && timed.held() <= PopupCloser::kHoldMs &&
                   esc_at <= PopupCloser::kEscPressByMs,
@@ -820,12 +967,192 @@ void test_board_hold() {
         r.closer->set_guard(timed.guard(r.game));
         add_board(r.game, board_picture(true));
         r.run(3);
+        r.skip_to(kCheckinBoardLoginWaitMs);
         r.grab_ms = 650;
         r.closer->turn();
         check(r.said("the re-look under the hold took 650 ms") && r.game.escs == 1 &&
                   timed.held() <= PopupCloser::kHoldMs,
               fmt("a look under the hold of 650 ms: said, one ESC, and the hold let go after %llu ms",
                   static_cast<unsigned long long>(timed.held())));
+    }
+}
+
+void test_board_wait() {
+    section("Popups: the check-in board's ESC 30 s after the arrival, never 23:55-00:03 (PU-B10, 2026-11-15)");
+    // The owner, 2026-11-15: "Sau khi chọn nhân vật xong và vào tới màn hình
+    // game thì sẽ chờ 30 giây rồi mới ấn ESC để tắt thông báo. Trường hợp qua
+    // ngày thì chờ tới 00:03 mới ấn ESC."
+    constexpr int k2356 = 23 * 3600 + 56 * 60, k0259 = 2 * 60 + 59, k0300 = 3 * 60, k2354 = 23 * 3600 + 54 * 60 + 59;
+    {
+        using P = PopupCloser;
+        check(kCheckinBoardLoginWaitMs == 30'000 && kCheckinNightFromS == 23 * 3600 + 55 * 60 &&
+                  kCheckinNightToS == 3 * 60 && P::kSteadyMs == 3000,
+              "30 s after the arrival, the night hold 23:55:00 to 00:03:00, and the other popups' 3 s as before");
+        check(!P::board_due(2'999, 0, 0, -1) && !P::board_due(29'999, 0, 0, -1) && P::board_due(30'000, 0, 0, -1),
+              "no arrival known: 30 s from its first sight -- not at 3 s, not at 29.999 s, at 30 s");
+        check(!P::board_due(39'999, 0, 10'000, -1) && P::board_due(40'000, 0, 10'000, -1),
+              "an arrival 10 s after its first sight: 30 s from the arrival");
+        check(!P::board_due(129'999, 100'000, 5'000, -1) && P::board_due(130'000, 100'000, 5'000, -1),
+              "an arrival long before it came up (the board at 00:00): 30 s from its own sight");
+        check(!P::board_due(60'000, 59'000, 0, -1), "never before it has stayed put 3 s, whatever the arrival");
+        check(!P::board_due(900'000, 0, 0, k2356) && !P::board_due(900'000, 0, 0, 0) &&
+                  !P::board_due(900'000, 0, 0, k0259) && P::board_due(900'000, 0, 0, k0300) &&
+                  P::board_due(900'000, 0, 0, k2354) && P::board_due(900'000, 0, 0, 12 * 3600),
+              "the night hold: nothing at 23:56, 00:00:00 or 00:02:59; due at 00:03:00, at 23:54:59 and at noon");
+    }
+    if (skip_without_board()) return;
+    {
+        // The keeper's arrival 10 s after the board was first seen: its 30 s
+        // are counted from the arrival.
+        Rig r;
+        r.arrived = 10'000;
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        const auto at_sight30 = r.turn_at(30'000);
+        const auto at39 = r.turn_at(39'999);
+        check(at_sight30 == PopupCloser::Turn::Waiting && at39 == PopupCloser::Turn::Waiting && r.game.escs == 0 &&
+                  r.said("the check-in board waits for its ESC until 30 s after the character's arrival in the world"),
+              "an arrival later than the sight: nothing 30 s after the sight, nor at 39.999 s, and why is said");
+        r.turn_at(40'000);
+        check(r.game.escs == 1 && !r.game.has("board"), "and one ESC 30 s after the arrival");
+    }
+    {
+        // The board seen at 23:56 by the PC's clock: nothing until 00:03:00.
+        Rig r;
+        r.second = k2356;
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        check(r.closer->last_vi() == "Qua ngày: chờ tới 00:03 rồi mới bấm ESC tắt bảng Sự kiện và điểm danh." &&
+                  r.closer->last_about(PopupKind::CheckinBoard) &&
+                  r.said("the check-in board waits for its ESC until 00:03:00: the PC's clock reads 23:56:00"),
+              "seen at 23:56: the tab says it waits for 00:03, and the log why -- " + r.closer->last_vi());
+        r.turn_at(60'000);
+        r.second = 0;
+        r.turn_at(300'000);
+        r.second = k0259;
+        const auto at0259 = r.turn_at(420'000);
+        check(r.game.escs == 0 && r.game.clicks == 0 && at0259 == PopupCloser::Turn::Waiting,
+              "at 23:57, 00:00:00 and 00:02:59: nothing, though its 30 s are long over");
+        r.second = k0300;
+        const auto at0300 = r.turn_at(421'000);
+        check(at0300 == PopupCloser::Turn::Closed && r.game.escs == 1 && r.game.clicks == 0,
+              std::string("at 00:03:00: one ESC -- ") + PopupCloser::turn_name(at0300));
+    }
+    {
+        // Seen at 00:02:50: the night hold, then still its 30 s from the
+        // sight -- 00:03:20.
+        Rig r;
+        r.second = k0300 - 10;
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        r.second = k0300;
+        const auto at10 = r.turn_at(10'000);
+        check(at10 == PopupCloser::Turn::Waiting && r.game.escs == 0 &&
+                  r.closer->last_vi() ==
+                      "Thấy bảng Sự kiện và điểm danh: chờ 30 giây sau khi vào game rồi mới bấm ESC." &&
+                  r.said("waits for its ESC until 30 s after it was first seen"),
+              "seen at 00:02:50: at 00:03:00 the night hold is over, and its 30 s are not -- " + r.closer->last_vi());
+        r.second = k0300 + 20;
+        r.turn_at(30'000);
+        check(r.game.escs == 1, "and one ESC at 00:03:20");
+    }
+    {
+        // The notice over the board at 23:58: its Xác Nhận at 3 s all the
+        // same; the board held to 00:03.
+        Rig r;
+        r.second = 23 * 3600 + 58 * 60;
+        add_board(r.game, board_picture(true));
+        add_notice(r.game);
+        r.run(5);
+        check(r.game.clicks == 1 && r.game.missed == 0 && r.game.escs == 0 && !r.game.has("notice") &&
+                  r.game.has("board"),
+              "the notice at 23:58: clicked at 3 s; the board not pressed");
+        r.run_board(10);
+        check(r.game.escs == 0, "nor once its 30 s are over, the clock still before 00:03");
+    }
+}
+
+void test_check_wait() {
+    section("Popups: a click or an ESC given 30 s to show, going on at once (PU-A10, 2026-11-15)");
+    // The owner, 2026-11-15: "khi GoBot thực hiện thao tác, sẽ có thêm 30 giây
+    // chờ phản ứng. Nếu màn hình phản ứng luôn thì thực hiện tiếp bước tiếp
+    // theo, còn nếu màn hình không phản ứng gì thì sẽ dừng xử lý."
+    check(PopupCloser::kCheckMs == kReactMs && kReactMs == 30'000 && kReactSlowMs == 2'000 &&
+              PopupCloser::kHoldMs == 2000 && PopupCloser::kPressByMs == 1500 && PopupCloser::kEscPressByMs == 1200 &&
+              PopupCloser::kLookAllowMs == 350 && PopupCloser::kCheckLookMs == 250,
+          "a press watched for 30 s, a look every 250 ms -- and the hold, the press-by times and a look's allowance "
+          "as short as before");
+    if (skip_without_kit()) return;
+    {
+        // A slow game: the notice goes 12 s after its Xác Nhận. Waited for --
+        // no second click -- closed on the first look that shows it gone, and
+        // how long it took said; the hold let go at the click as before.
+        Rig r;
+        Timed timed;
+        r.closer->set_guard(timed.guard(r.game));
+        r.game.close_lag_ms = 12'000;
+        add_notice(r.game);
+        r.run(3);
+        const auto then = r.closer->turn();
+        const std::uint64_t click_at = r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0];
+        check(then == PopupCloser::Turn::Closed && r.game.clicks == 1 && r.game.missed == 0 &&
+                  !r.game.has("notice") && r.game.t >= click_at + 12'000 &&
+                  r.game.t <= click_at + 12'000 + PopupCloser::kCheckLookMs && timed.dones == 1 &&
+                  timed.held() <= PopupCloser::kHoldMs && r.said("the game took 12000 ms to show the check-in notice gone"),
+              fmt("the notice gone 12 s after its click: one click, closed %llu ms after it, held %llu ms",
+                  static_cast<unsigned long long>(r.game.t - click_at), static_cast<unsigned long long>(timed.held())));
+        r.run(40);
+        check(r.game.clicks == 1, "and nothing more");
+    }
+    if (kit().board_ok) {
+        // The board going 20 s after its ESC: one ESC, never a second -- an
+        // ESC again would bring up the menu, or shut what the first opened.
+        Rig r;
+        r.game.close_lag_ms = 20'000;
+        add_board(r.game, board_picture(true));
+        r.run_board(1);
+        check(r.game.escs == 1 && r.game.clicks == 0 && !r.game.has("board") && !r.game.has("menu") &&
+                  r.said("the game took 20000 ms to show the check-in board gone") &&
+                  r.said("closed the check-in board"),
+              "the board gone 20 s after its ESC: one ESC, waited for, closed");
+    }
+    {
+        // Nothing in 30 s: not closed (NotClosed, its backoff, its try
+        // counted) at 30 s from the click, not later; said -- and tried again
+        // 30 s on, every time (2026.11.24).
+        Rig r;
+        add_notice(r.game);
+        r.game.shown.back().control = ScreenRect{};
+        r.run(3);
+        const auto then = r.closer->turn();
+        const std::uint64_t after = r.game.t - (r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0]);
+        check(then == PopupCloser::Turn::NotClosed && r.game.clicks == 1 &&
+                  after >= static_cast<std::uint64_t>(PopupCloser::kCheckMs) &&
+                  after <= static_cast<std::uint64_t>(PopupCloser::kCheckMs) + PopupCloser::kCheckLookMs &&
+                  r.said("nothing after 30 s: the check-in notice still up") &&
+                  r.said("is still up after closing it with its Xác Nhận (try 1); trying again in 30 s") &&
+                  r.closer->last_vi() ==
+                      "Đã thử đóng thông báo nhận quà điểm danh mà vẫn còn: thử lại sau 30 giây.",
+              fmt("a click that never shows: not closed %llu ms after it, and said -- ",
+                  static_cast<unsigned long long>(after)) + r.closer->last_vi());
+    }
+    {
+        // A stop (F12, DỪNG, the tick) 5 s into the watch: over at the next
+        // look, nothing more pressed, nothing judged.
+        Rig r;
+        r.game.close_lag_ms = 20'000;
+        add_notice(r.game);
+        PopupCloser::Guard g;
+        g.stopped = [&r] { return !r.game.pressed_at.empty() && r.game.t >= r.game.pressed_at[0] + 5'000; };
+        r.closer->set_guard(g);
+        r.run(3);
+        const auto then = r.closer->turn();
+        const std::uint64_t after = r.game.t - (r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0]);
+        check(then == PopupCloser::Turn::Held && r.game.clicks == 1 && after <= 5'000 + PopupCloser::kCheckLookMs &&
+                  r.said("a stop came while the check-in notice was watched for") &&
+                  !r.said("is still up after closing it"),
+              fmt("a stop 5 s into the 30 s: over %llu ms after the click, nothing more pressed -- ",
+                  static_cast<unsigned long long>(after)) + r.closer->last_vi());
     }
 }
 
@@ -989,13 +1316,84 @@ void test_book() {
         check(r.said("GoBot's ESC brought up the ESC menu"), "and said so");
         r.run(40);
         check(r.game.escs == 2, "the book still up: tried once more after 30 s");
-        // Ten minutes from the first try, which was at 3 s.
-        r.run(500, 10);
-        check(r.game.escs == 2 && r.said("left Yêu Quái Bách Khoa alone"),
-              "then left alone for 10 minutes (PU-A8)");
-        r.run(120, 2);
-        check(r.game.escs > 2, "and tried again once the 10 minutes are over (" +
-                                   std::to_string(r.game.escs) + " ESC in all)");
+        // Never left alone since 2026.11.24 (the owner: "Kiểm tra các phần
+        // khác xem có phần nào không làm được thì dừng không, cần thay cơ chế
+        // này bằng 1 cơ chế khác"): tries 3, 4, 5 and on, each 30 s after the
+        // last one's watch, where two tries in ten minutes used to leave it
+        // alone for the rest of them (PU-A8).
+        r.run(120);
+        const std::uint64_t lo = PopupCloser::kBackoffMs;
+        const std::uint64_t hi = PopupCloser::kBackoffMs + PopupCloser::kAfterMenuMs + PopupCloser::kCheckLookMs + 1'000;
+        check(r.game.escs >= 5 && r.game.clicks == r.game.escs && r.game.missed == 0 && r.game.has("book") &&
+                  gaps_within(r.game.esc_at, lo, hi) && r.said("Yêu Quái Bách Khoa is still up after closing it with "
+                                                               "ESC (try 5); trying again in 30 s") &&
+                  !r.said("left Yêu Quái Bách Khoa alone: tried"),
+              fmt("then tried again and again, 30 s after each watch: %d ESCs, each menu shut by its X, never left "
+                  "alone",
+                  r.game.escs));
+    }
+    // What one turn list came to: any Closed, any NotClosed.
+    const auto any_turn = [](const std::vector<PopupCloser::Turn>& turns, PopupCloser::Turn t) {
+        return std::find(turns.begin(), turns.end(), t) != turns.end();
+    };
+    {
+        // A slow game drawing the menu GoBot's ESC brought up 4 s after it,
+        // over the book's page and not its title: still that ESC's one thing
+        // -- shut by its X, and the book, seen again, not called closed. With
+        // kOwnEscMs at 3 s and the check at 30 s, a menu that late was taken
+        // for the player's, left up to keep every close after shut, and the
+        // book under it said closed (review 2026-11-15).
+        Rig r;
+        add_book(r.game, false);
+        r.game.shown.back().esc_closes = false;
+        r.game.menu_lag_ms = 4000;
+        const auto turns = r.run(10);
+        check(r.game.escs == 1 && r.game.clicks == 1 && r.game.missed == 0 && !r.game.has("menu") &&
+                  r.game.has("book") && !any_turn(turns, PopupCloser::Turn::Closed) &&
+                  any_turn(turns, PopupCloser::Turn::NotClosed) && r.said("GoBot's ESC brought up the ESC menu") &&
+                  !r.said("closed Yêu Quái Bách Khoa") &&
+                  r.said("Yêu Quái Bách Khoa is still up after closing it with ESC (try 1)"),
+              "the menu drawn 4 s after the ESC: GoBot's, shut by its X, and the book under it not called closed");
+    }
+    {
+        // The menu GoBot's ESC brought up still drawn 600 ms after its X was
+        // clicked, a slow game: a look meanwhile -- the page covered, the
+        // menu on it -- is no sign the book went. Looked at until the menu
+        // goes, and the book, seen again, still up (review 2026-11-15).
+        Rig r;
+        add_book(r.game, false);
+        r.game.shown.back().esc_closes = false;
+        r.game.close_lag_ms = 600;
+        const auto turns = r.run(6);
+        check(r.game.escs == 1 && r.game.clicks == 1 && r.game.missed == 0 && !r.game.has("menu") &&
+                  r.game.has("book") && !any_turn(turns, PopupCloser::Turn::Closed) &&
+                  any_turn(turns, PopupCloser::Turn::NotClosed) && !r.said("closed Yêu Quái Bách Khoa") &&
+                  r.said("Yêu Quái Bách Khoa is still up after closing it with ESC (try 1)"),
+              "the menu slow to go after its X: the book not called closed while the menu covered it");
+    }
+    {
+        // The same menu drawn 5 s after its X, past the kAfterMenuMs the book
+        // is watched for after it: the watch ends with the page still covered
+        // -- covered, not closed, and tried again later as any book still up.
+        Rig r;
+        add_book(r.game, false);
+        r.game.shown.back().esc_closes = false;
+        r.game.close_lag_ms = 5000;
+        r.run(3);
+        const auto then = r.closer->turn();
+        check(then == PopupCloser::Turn::NotClosed && r.game.escs == 1 && r.game.clicks == 1 && r.game.missed == 0 &&
+                  r.game.has("book") && r.game.has("menu") &&
+                  // Covered (its page under the menu) or still seen under it:
+                  // either way not closed.
+                  (r.said("the ESC menu GoBot's ESC brought up still covers Yêu Quái Bách Khoa: not taken for closed") ||
+                   r.said("Yêu Quái Bách Khoa is still up after closing it with ESC (try 1)")) &&
+                  !r.said("closed Yêu Quái Bách Khoa") &&
+                  r.closer->last_vi() == "Đã thử đóng Yêu Quái Bách Khoa mà vẫn còn: thử lại sau 30 giây.",
+              "the menu still over the book when the watch ends: not closed, and the tab says so -- " +
+                  std::string(PopupCloser::turn_name(then)) + ", escs " + std::to_string(r.game.escs) + ", clicks " +
+                  std::to_string(r.game.clicks) + ", missed " + std::to_string(r.game.missed) + ", book " +
+                  (r.game.has("book") ? "up" : "gone") + ", menu " + (r.game.has("menu") ? "up" : "gone") + " / " +
+                  r.closer->last_vi() + " / " + (r.log.empty() ? std::string() : r.log.back()));
     }
     {
         // The player opened the ESC menu and then the book from it, and the
@@ -1018,10 +1416,19 @@ void test_book() {
         add_book(r.game, false);
         add_notice(r.game, 900, 420);
         r.game.shown.back().control = ScreenRect{};
-        r.run(60);
-        check(r.game.escs == 0, "the book without its X, and the notice up too: no ESC, for a minute");
-        check(r.game.clicks == 2 && r.game.missed == 2,
-              "the notice clicked twice -- at 3 s and after 30 s -- and then left alone");
+        r.run(100);
+        check(r.game.escs == 0, "the book without its X, and the notice up too: no ESC, for 100 s");
+        check(r.game.clicks == 2 && r.game.missed == 2 && r.game.pressed_at[0] == 3'000 &&
+                  r.game.pressed_at[1] == 3'000 + PopupCloser::kCheckMs + PopupCloser::kBackoffMs,
+              "the notice clicked twice in 100 s -- at 3 s, and 30 s after the 30 s its first click was watched for");
+        // And on, every time, never left alone (2026.11.24): the third click 30
+        // s after the second's watch, the book still getting no ESC.
+        r.run(40);
+        check(r.game.clicks == 3 && r.game.escs == 0 &&
+                  r.game.pressed_at[2] == 3'000 + 2 * (PopupCloser::kCheckMs + PopupCloser::kBackoffMs) &&
+                  r.said("the check-in notice is still up after closing it with its Xác Nhận (try 3); trying again in "
+                         "30 s"),
+              "a third click 30 s after the second's watch -- never left alone -- and still no ESC for the book");
     }
 }
 
@@ -1294,8 +1701,9 @@ void test_hold() {
         check(r.said("closed the check-in notice"), "and the look that it is gone, after, holds nothing");
     }
     {
-        // A click that does not take: the notice still up for the 1.5 s it is
-        // given -- looked at with the game let go all the same.
+        // A click that does not take: the notice still up for the 30 s it is
+        // given (kCheckMs, 1.5 s before 2026-11-15) -- looked at with the game
+        // let go all the same.
         Rig r;
         r.grab_ms = 150;
         Timed timed;
@@ -1304,8 +1712,9 @@ void test_hold() {
         r.game.shown.back().control = ScreenRect{};
         r.run(6);
         check(r.game.clicks == 1 && r.game.missed == 1 && timed.dones == 1 && timed.gone == r.game.pressed_at[0] &&
-                  timed.held() <= PopupCloser::kHoldMs && r.said("is still up after closing it"),
-              fmt("a click that did not take: the hold let go at the click, %llu ms in, not after the 1.5 s "
+                  timed.held() <= PopupCloser::kHoldMs && r.said("is still up after closing it") &&
+                  r.said("nothing after 30 s: the check-in notice still up"),
+              fmt("a click that did not take: the hold let go at the click, %llu ms in, not after the 30 s "
                   "looking", static_cast<unsigned long long>(timed.held())));
     }
     {
@@ -1384,6 +1793,498 @@ void test_hold() {
     }
 }
 
+void test_idle_looks() {
+    section("Popups: a look every 2 s (3 s in light mode) after one that saw nothing, and GoC's book picture on "
+            "every 5th of those (2026-11-16)");
+    using P = PopupCloser;
+    // The worker's wait after each turn: 2 s after one that saw nothing, 3 s
+    // in light mode, and a second after anything else -- a popup waiting its
+    // 3 s, put off, blocked, tried, closed, or no frame at all.
+    bool others = true;
+    for (const P::Turn t : { P::Turn::Blind, P::Turn::Waiting, P::Turn::Blocked, P::Turn::Held, P::Turn::Closed,
+                             P::Turn::NotClosed })
+        others = others && P::next_look_ms(t, false) == P::kLookMs && P::next_look_ms(t, true) == P::kLookMs;
+    check(P::kLookMs == 1000 && P::kIdleLookMs == 2000 && P::kIdleLookLightMs == 3000 && P::kGocBookEvery == 5 &&
+              P::next_look_ms(P::Turn::Nothing, false) == 2000 && P::next_look_ms(P::Turn::Nothing, true) == 3000 &&
+              others,
+          "next_look_ms: 2 s after a look that saw nothing, 3 s in light mode; 1 s after any other turn");
+    if (skip_without_kit()) return;
+    const Kit& k = kit();
+    const auto book_in = [](const std::vector<PopupSeen>& seen) {
+        return std::any_of(seen.begin(), seen.end(), [](const PopupSeen& s) { return s.kind == PopupKind::MonsterBook; });
+    };
+    {
+        // GoC's picture alone on the screen: found with goc_book, not without.
+        Pretend p;
+        p.base = k.base;
+        add_book(p, true);
+        const Frame f = p.render();
+        if (bag::find_book(f, k.store, nullptr).found) {
+            skip("the live book's tab is found in GoC's picture of the book here\n");
+            return;
+        }
+        check(book_in(k.eyes.popups(f, false)) && !book_in(k.eyes.popups(f, false, nullptr, kAllPopups, false)),
+              "popups(): GoC's book picture looked for with goc_book, left out without it");
+    }
+    {
+        // The live book's tab without its X, and GoC's picture of the book
+        // with its X elsewhere: some book is up, so GoC's picture is looked
+        // for even without goc_book -- and found, with its X.
+        Pretend p;
+        p.base = k.base;
+        const Frame& goc = *k.get("inven/1/monsterf");
+        const int gx = p.base.width - goc.width - 10, gy = 10;
+        if (!add_live_book(p, false, 20, 20)) {
+            skip("no pictures of the live book here\n");
+        } else if (20 + bag::kBookXDx + 40 > gx || gy + goc.height > p.base.height) {
+            skip("GoC's book picture does not fit beside the live tab on this frame\n");
+        } else {
+            add_book(p, true, gx, gy);
+            const auto seen = k.eyes.popups(p.render(), false, nullptr, kAllPopups, false);
+            const auto book = std::find_if(seen.begin(), seen.end(),
+                                           [](const PopupSeen& s) { return s.kind == PopupKind::MonsterBook; });
+            check(book != seen.end() && book->control && std::abs(book->at.x - gx) <= PopupEyes::kSlack &&
+                      std::abs(book->at.y - gy) <= PopupEyes::kSlack,
+                  "the live tab found without its X: GoC's picture looked for at once, and its book with its X "
+                  "found");
+        }
+    }
+    {
+        // On the pretend game: the first look has GoC's picture; the book put
+        // up after it is missed by the next four looks that see nothing, and
+        // found by the fifth of them -- then closed by its X 3 s on.
+        Rig r;
+        const P::Turn first = r.closer->turn();
+        r.game.t += P::kIdleLookMs;
+        add_book(r.game, true);
+        std::vector<P::Turn> turns;
+        std::vector<bool> up;
+        for (int i = 0; i < P::kGocBookEvery; ++i) {
+            turns.push_back(r.closer->turn());
+            up.push_back(r.closer->up(PopupKind::MonsterBook));
+            r.game.t += P::kIdleLookMs;
+        }
+        bool missed = true;
+        for (int i = 0; i + 1 < P::kGocBookEvery; ++i) missed = missed && turns[i] == P::Turn::Nothing && !up[i];
+        check(first == P::Turn::Nothing && missed && turns.back() == P::Turn::Waiting && up.back(),
+              "GoC's book picture: on the first look, then on every 5th look in a row that saw nothing");
+        r.run(3);
+        check(r.game.clicks == 1 && r.game.missed == 0 && r.game.escs == 0 && !r.game.has("book"),
+              "and once seen, looked for on every turn: closed by its X after its 3 s");
+    }
+    {
+        // While anything else is up the picture is looked for on every look:
+        // a book put up beside a notice is seen on the very next turn.
+        Rig r;
+        r.closer->turn();
+        r.game.t += P::kIdleLookMs;
+        add_notice(r.game, 900, 420);       // clear of the book
+        const P::Turn notice = r.closer->turn();
+        r.game.t += P::kLookMs;
+        add_book(r.game, true);
+        r.closer->turn();
+        check(notice == P::Turn::Waiting && r.closer->up(PopupKind::MonsterBook),
+              "with the notice up, GoC's book picture on the very next look");
+    }
+}
+
+// ------------------------------------------------------------ 2026.11.17c
+//
+// The owner, 2026-11-17: "check lại phần tắt thông báo, có bảng điểm danh hiển
+// thị mà không thấy tự tắt". The run's log: the board seen at 21:36:17, its ESC
+// due at 21:36:47 -- and at 21:36:55 the board said as newly up, its 30 s
+// started over: a look between had missed it, and nothing said why no ESC
+// went. The worker's own frames show the game's lines of news drawn over the
+// board, just under its title.
+
+void test_board_missed_look() {
+    section("Popups: the check-in board missed by a look keeps its first sight; every reason for no ESC said "
+            "(2026.11.17c)");
+    if (skip_without_board()) return;
+    using P = PopupCloser;
+    check(P::kBoardGapMs == 15'000 && P::kBoardGraceMs == 60'000 && kCheckinBoardCoveredScore == 0.60f &&
+              kCheckinBoardCoveredScore < kCheckinBoardScore,
+          "a board seen again within 15 s where it was is the same board; covered, its title told at 0.60 there "
+          "within 60 s of its last sight whole");
+    {
+        // The run of 2026-11-17: the arrival, the board at once, one look at
+        // 20 s that does not see it -- its ESC 30 s after the arrival all the
+        // same, not 30 s after it was seen again.
+        Rig r;
+        r.arrived = 1'000;
+        r.skip_to(1'000);
+        add_board(r.game, board_picture(true));
+        const auto before = r.run(19);
+        r.game.shown.clear();
+        const auto missed = r.closer->turn();
+        r.game.t += 1000;
+        add_board(r.game, board_picture(true));
+        const auto after = r.run(10);
+        const bool waited = std::none_of(before.begin(), before.end(), [](P::Turn t) { return t == P::Turn::Closed; }) &&
+                            std::none_of(after.begin(), after.end(), [](P::Turn t) { return t == P::Turn::Closed; });
+        check(missed == P::Turn::Nothing && waited && r.game.escs == 0 && r.game.t == 31'000,
+              "seen at 1 s, missed at 20 s, seen again at 21 s: nothing pressed up to 30 s");
+        const auto due = r.closer->turn();
+        check(due == P::Turn::Closed && r.game.escs == 1 && r.game.pressed_at[0] == 31'000 && r.game.clicks == 0,
+              std::string("and its ESC at 31 s, 30 s after the arrival -- ") + P::turn_name(due));
+        check(r.said_times("the check-in board (Sự kiện và điểm danh) is up at") == 1 &&
+                  r.said_times("the check-in board waits for its ESC until") == 1 &&
+                  r.said("the check-in board is up again at 200,60 after 2000 ms out of sight (title 1.00): the same "
+                         "board -- its wait still counts from its first sight, 20 s ago"),
+              "said once as up, once as waiting, and once as seen again with its wait kept");
+    }
+    {
+        // Out of sight for longer than kBoardGapMs: a board of its own.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.run(5);
+        r.game.shown.clear();
+        r.turn_at(5'000);
+        r.skip_to(5'000 + P::kBoardGapMs + 1'000);
+        r.closer->turn();
+        add_board(r.game, board_picture(true));
+        const std::uint64_t back = r.game.t + 1'000;
+        r.turn_at(back);
+        const auto at29 = r.turn_at(back + 29'999);
+        check(at29 == P::Turn::Waiting && r.game.escs == 0 &&
+                  r.said_times("the check-in board (Sự kiện và điểm danh) is up at") == 2,
+              "gone for over 15 s: seen again, it is a new board and waits its own 30 s");
+        r.turn_at(back + 30'000);
+        check(r.game.escs == 1, "and gets its ESC at their end");
+    }
+    {
+        // The player closes it with its X at 8 s and opens it again at 25 s
+        // to do the check-in (review of 2026.11.17c): a new board, given its
+        // own 30 s to be read -- not its ESC 5 s after it was opened.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.run(8);
+        r.game.shown.clear();
+        for (std::uint64_t s = 8; s <= 24; s += 2) r.turn_at(s * 1000);
+        add_board(r.game, board_picture(true));
+        r.turn_at(25'000);
+        const auto at30 = r.turn_at(30'000);
+        const auto at54 = r.turn_at(54'999);
+        check(at30 == P::Turn::Waiting && at54 == P::Turn::Waiting && r.game.escs == 0 &&
+                  r.said_times("the check-in board (Sự kiện và điểm danh) is up at") == 2 &&
+                  !r.said("is up again at"),
+              "closed by the player at 8 s, opened again at 25 s: a new board, no ESC at 30 s nor before 55 s");
+        r.turn_at(55'000);
+        check(r.game.escs == 1 && r.game.pressed_at[0] == 55'000, "and its ESC at 55 s, 30 s after it was opened");
+    }
+    {
+        // Due during a gap of 8 s and seen again at 33 s: kept, but no ESC on
+        // the turn that found it again -- only once it has been back 3 s.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        r.turn_at(25'000);
+        r.game.shown.clear();
+        for (std::uint64_t s = 27; s <= 31; s += 2) r.turn_at(s * 1000);
+        add_board(r.game, board_picture(true));
+        const auto t33 = r.turn_at(33'000);
+        const auto t34 = r.turn_at(34'000);
+        const auto t35 = r.turn_at(35'000);
+        check(t33 == P::Turn::Waiting && t34 == P::Turn::Waiting && t35 == P::Turn::Waiting && r.game.escs == 0 &&
+                  r.said("the check-in board is up again at 200,60 after 8000 ms out of sight"),
+              std::string("due while out of sight, seen again at 33 s: no ESC on that turn nor the next two -- ") +
+                  P::turn_name(t33));
+        const auto t36 = r.turn_at(36'000);
+        check(t36 == P::Turn::Closed && r.game.escs == 1 && r.game.pressed_at[0] == 36'000,
+              std::string("and its ESC at 36 s, 3 s after it was back -- ") + P::turn_name(t36));
+    }
+    {
+        // As above, with Yêu Quái Bách Khoa opened while the board was out of
+        // sight, its X not found (lit under the pointer): the look that finds
+        // the board again comes after three that saw nothing, so without
+        // GoC's picture of the book. In 17c's first cut the ESC went on that
+        // turn -- to the book. Now the next look, with the picture, sees the
+        // book beside the board, and no ESC goes. Where the live book's tab
+        // is found in GoC's picture (this machine's pictures), every look
+        // finds the book, and this shows only the outcome.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        r.turn_at(25'000);
+        r.game.shown.clear();
+        for (std::uint64_t s = 27; s <= 31; s += 2) r.turn_at(s * 1000);
+        add_board(r.game, board_picture(true));
+        add_book(r.game, false, 30, 120);
+        const auto t33 = r.turn_at(33'000);
+        const bool book_unseen = !r.closer->up(PopupKind::MonsterBook);
+        for (std::uint64_t s = 34; s <= 40; ++s) r.turn_at(s * 1000);
+        check(t33 == P::Turn::Waiting && r.game.escs == 0 && r.game.clicks == 0 &&
+                  r.closer->up(PopupKind::MonsterBook) &&
+                  r.said_times("the check-in board is due its ESC, but Yêu Quái Bách Khoa is up too") == 1,
+              std::string("the book opened while the board was out of sight (") +
+                  (book_unseen ? "not looked for on the turn that found the board again" : "found by every look here") +
+                  "), seen beside it: no ESC for either -- " + P::turn_name(t33));
+    }
+    {
+        // The hold refused when asked for (Guard::take) -- the party job's
+        // click holding the mouse, a key under way -- until 32 s: the due
+        // board put off 5 s, not 30, and that said once.
+        Rig r;
+        PopupCloser::Guard g;
+        g.take = [&r] { return r.game.t >= 32'000; };
+        r.closer->set_guard(g);
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        r.skip_to(30'000);
+        r.run(10);
+        check(r.game.escs == 1 && !r.game.pressed_at.empty() && r.game.pressed_at[0] == 30'000 + P::kBlockedMs &&
+                  r.said_times("not closing the check-in board now: not the moment") == 1,
+              fmt("the hold refused at 30 s: the board's ESC at %llu ms, the refusal said %d time(s)",
+                  static_cast<unsigned long long>(r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0]),
+                  r.said_times("not closing the check-in board now: not the moment")));
+    }
+    {
+        // A new arrival in the world since it was last seen: a new board.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.run(10);
+        r.game.shown.clear();
+        r.closer->turn();
+        r.arrived = 10'500;
+        add_board(r.game, board_picture(true));
+        r.turn_at(11'000);
+        const auto at40 = r.turn_at(40'999);
+        check(at40 == P::Turn::Waiting && r.game.escs == 0 &&
+                  r.said_times("the check-in board (Sự kiện và điểm danh) is up at") == 2 &&
+                  !r.said("is up again at"),
+              "a new arrival between two sights: the second is a new board, 30 s from that arrival");
+        r.turn_at(41'000);
+        check(r.game.escs == 1, "and its ESC 30 s after it was first seen after the arrival");
+    }
+    {
+        // Closed, and up again where it was a moment later: a new board too.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        r.run_board(2);
+        check(r.game.escs == 1 && !r.game.has("board"), "closed at 30 s");
+        add_board(r.game, board_picture(true));
+        r.turn_at(33'000);
+        const auto at62 = r.turn_at(62'999);
+        check(at62 == P::Turn::Waiting && r.game.escs == 1, "up again at 33 s: no ESC before its own 30 s");
+        r.turn_at(63'000);
+        check(r.game.escs == 2, "and one at 63 s");
+    }
+    {
+        // A gate over at 41 s, 11 s into the board's due time: its ESC within
+        // kBlockedMs of it, not half a minute on; the reason said once.
+        Rig r;
+        PopupCloser::Guard g;
+        g.gates = [&r]() -> std::string { return r.game.t < 41'000 ? "a hold is on (trash cleaning)" : ""; };
+        r.closer->set_guard(g);
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        r.skip_to(30'000);
+        r.run(20);
+        check(r.game.escs == 1 && !r.game.pressed_at.empty() && r.game.pressed_at[0] >= 41'000 &&
+                  r.game.pressed_at[0] <= 41'000 + P::kBlockedMs &&
+                  r.said_times("not closing the check-in board now: a hold is on (trash cleaning)") == 1,
+              fmt("a hold on until 41 s: the board's ESC at %llu ms, the hold said once (%d)",
+                  static_cast<unsigned long long>(r.game.pressed_at.empty() ? 0 : r.game.pressed_at[0]),
+                  r.said_times("not closing the check-in board now")));
+    }
+    {
+        // Not found again under the hold -- twice: said once, nothing
+        // pressed, looked at again on the very next turn, and after the
+        // second miss in a row put off kBlockedMs; then its ESC.
+        Rig r;
+        int hide = 2;
+        bool hidden = false;
+        PopupCloser::Guard g;
+        g.take = [&] {
+            if (hide > 0) {
+                --hide;
+                hidden = true;
+                r.game.shown.clear();
+            }
+            return true;
+        };
+        g.done = [&] {
+            if (hidden) add_board(r.game, board_picture(true));
+            hidden = false;
+        };
+        r.closer->set_guard(g);
+        add_board(r.game, board_picture(true));
+        r.run(3);
+        const auto t30 = r.turn_at(30'000);
+        const auto t31 = r.turn_at(31'000);
+        check(t30 == P::Turn::Held && t31 == P::Turn::Held && r.game.escs == 0 &&
+                  r.said_times("the check-in board is due its ESC, but the look under the hold did not find it again "
+                               "round 200,60, whole or covered: nothing pressed; looked for again on the next turn") == 1 &&
+                  P::next_look_ms(t30, false) == P::kLookMs,
+              std::string("missed under the hold at 30 s and 31 s: nothing pressed, said once, looked at again a "
+                          "second later -- ") + P::turn_name(t30));
+        int takes_off = 0;
+        g.take = [&] {
+            ++takes_off;
+            return true;
+        };
+        g.done = [] {};
+        r.closer->set_guard(g);
+        r.skip_to(32'000);
+        r.run(4);
+        check(r.game.escs == 0 && takes_off == 0 && r.game.t == 36'000,
+              "two misses in a row: put off 5 s, no hold taken meanwhile");
+        const auto t36 = r.turn_at(36'000);
+        check(t36 == P::Turn::Closed && r.game.escs == 1 && takes_off == 1,
+              std::string("and the ESC at 36 s -- ") + P::turn_name(t36));
+    }
+    {
+        // The book without its X beside the board: no ESC for either, and
+        // why said once.
+        Rig r;
+        add_board(r.game, board_picture(true));
+        add_book(r.game, false, 30, 120);
+        r.run_board(8);
+        check(r.game.escs == 0 && r.game.clicks == 0 &&
+                  r.said_times("the check-in board is due its ESC, but Yêu Quái Bách Khoa is up too and an ESC would "
+                               "go to it first: no ESC while it is") == 1,
+              "the board due beside the book without its X: no ESC, and why said once");
+    }
+}
+
+/// `live` with the game's two lines of news drawn `dy` px higher -- their
+/// letters only: green, white and their dark edge -- over the board's title,
+/// as more lines under them push them up the screen.
+Frame news_over_title(const Frame& live, int dy) {
+    Frame g = live;
+    for (int y = 76; y < 106; ++y)
+        for (int x = 378; x < 612; ++x) {
+            const std::uint8_t* s = &live.pixels[(static_cast<std::size_t>(y) * live.width + x) * 4];
+            const int b = s[0], gr = s[1], r = s[2];
+            const bool green = gr > 170 && r < 170 && b < 170 && gr - r > 50;
+            const bool white = r > 215 && gr > 215 && b > 215;
+            const bool dark = r < 60 && gr < 60 && b < 60;
+            if (!(green || white || dark) || y - dy < 0) continue;
+            std::uint8_t* d = &g.pixels[(static_cast<std::size_t>(y - dy) * live.width + x) * 4];
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+        }
+    return g;
+}
+
+/// `live` with the board gone: its place a flat dark panel.
+Frame board_gone(const Frame& live) {
+    Frame g = live;
+    for (int y = 34; y < 34 + 600; ++y)
+        for (int x = 73; x < 73 + 878; ++x) {
+            std::uint8_t* d = &g.pixels[(static_cast<std::size_t>(y) * g.width + x) * 4];
+            d[0] = 20;
+            d[1] = 22;
+            d[2] = 30;
+        }
+    return g;
+}
+
+void test_board_live_frame() {
+    section("Popups: the live check-in board of 2026-11-17 -- whole, and with the game's lines of news over its title "
+            "(2026.11.17c)");
+    if (skip_without_board()) return;
+    const Kit& k = kit();
+    if (!k.board_live.valid()) {
+        skip("the frame of the live board (checkin_live_1024x768.png) was not handed over with these tests\n");
+        return;
+    }
+    using P = PopupCloser;
+    const Frame& live = k.board_live;
+    const ScreenRect at{ 73, 34, 878, 600 };
+    const unsigned board = popup_bit(PopupKind::CheckinBoard);
+    {
+        // As the worker's turn looks, and as it looks again under the hold.
+        const auto seen = k.eyes.popups(live, false);
+        const auto up = std::find_if(seen.begin(), seen.end(),
+                                     [](const PopupSeen& p) { return p.kind == PopupKind::CheckinBoard; });
+        const bool told = up != seen.end() && up->at.x == 73 && up->at.y == 34 && up->score >= 0.99f && up->by_esc;
+        const auto again = k.eyes.popups(live, false, &at, board);
+        check(told && seen.size() == 1 && k.eyes.blockers(live, seen).empty() && again.size() == 1 &&
+                  again[0].at.x == 73 && again[0].at.y == 34,
+              fmt("the frame of 21:36:32: the board at %d,%d (title %.2f), nothing else up; found again round its "
+                  "place under the hold (%zu)",
+                  told ? up->at.x : -1, told ? up->at.y : -1, told ? static_cast<double>(up->score) : 0.0,
+                  again.size()));
+    }
+    {
+        // The lines of news pushed up over its title: no first sight there,
+        // but the board seen whole a moment ago is still there.
+        int missed = 0, covered = 0;
+        std::string scores;
+        for (const int dy : { 22, 30, 38, 45 }) {
+            const Frame f = news_over_title(live, dy);
+            const auto seen = k.eyes.popups(f, false);
+            if (std::none_of(seen.begin(), seen.end(),
+                             [](const PopupSeen& p) { return p.kind == PopupKind::CheckinBoard; }))
+                ++missed;
+            PopupSeen c;
+            if (k.eyes.board_covered_at(f, at, &c) && c.covered && c.at.x == 73 && c.at.y == 34 && c.by_esc &&
+                k.eyes.popups(f, false, &at, board).empty())
+                ++covered;
+            scores += fmt(" %.2f", static_cast<double>(c.score));
+        }
+        check(missed == 4 && covered == 4,
+              fmt("news 22 to 45 px up over the title: %d of 4 missed as a first sight, %d of 4 still told where it "
+                  "was, covered (title%s)",
+                  missed, covered, scores.c_str()));
+        check(!k.eyes.board_covered_at(board_gone(live), at) && !k.eyes.board_covered_at(plain_frame(), at) &&
+                  !k.eyes.board_covered_at(news_over_title(live, 30), ScreenRect{ 73 + 12, 34, 878, 600 }) &&
+                  !k.eyes.board_covered_at(k.base, ScreenRect{ kBoardX, kBoardY, 878, 600 }),
+              "the board gone, a plain frame, 12 px off its place, the base frame: not the board");
+    }
+    // A closer on the live frame: an ESC takes the board away, or -- for the
+    // last case -- does nothing.
+    const auto rig_on = [&](Rig& r, bool esc_closes) {
+        r.game.base = live;
+        PopupCloser::Hands h;
+        h.click = [&r](int x, int y) { return r.game.click(x, y); };
+        h.esc = [&r, &live, esc_closes] {
+            ++r.game.escs;
+            r.game.pressed_at.push_back(r.game.t);
+            if (esc_closes) r.game.base = board_gone(live);
+            return true;
+        };
+        r.closer->set_hands(h);
+    };
+    {
+        // The run of 2026-11-17 as the frames had it: seen whole at the
+        // arrival, the news over its title from 15 s, a look at 20 s that sees
+        // no board at all, whole again from 21 s, the news over it again from
+        // 29 s: its ESC at 30 s, on a look that told it covered.
+        Rig r;
+        rig_on(r, true);
+        const Frame news = news_over_title(live, 30), gone = board_gone(live);
+        P::Turn last = P::Turn::Blind;
+        for (std::uint64_t s = 0; s <= 30; ++s) {
+            r.game.t = s * 1000;
+            r.game.base = s == 20 ? gone : (s >= 15 && s < 20) || s >= 29 ? news : live;
+            last = r.closer->turn();
+            if (last == P::Turn::Closed) break;
+        }
+        check(last == P::Turn::Closed && r.game.escs == 1 && r.game.pressed_at[0] == 30'000 && r.game.clicks == 0 &&
+                  r.said_times("the check-in board (Sự kiện và điểm danh) is up at 73,34") == 1 &&
+                  r.said("the check-in board's title at 73,34 is partly covered") &&
+                  r.said("the check-in board is up again at 73,34 after 2000 ms out of sight") &&
+                  r.said("closed the check-in board at 73,34"),
+              std::string("covered from 15 s, missed at 20 s, covered at 30 s: one ESC at 30 s, and closed -- ") +
+                  P::turn_name(last));
+    }
+    {
+        // An ESC that does nothing while the news cover its title: still up,
+        // not taken for closed.
+        Rig r;
+        rig_on(r, false);
+        r.run(3);
+        r.game.base = news_over_title(live, 30);
+        const auto t30 = r.turn_at(30'000);
+        check(t30 == P::Turn::NotClosed && r.game.escs == 1 && r.closer->closed() == 0 &&
+                  r.said("the check-in board is still up after closing it with ESC (try 1)"),
+              std::string("its ESC ignored, the news over its title: still up after it -- ") + P::turn_name(t30));
+    }
+}
+
 void test_real_frames() {
     section("Popups: frames from the live rounds -- nothing is taken for a popup (PU-A6)");
     if (skip_without_kit()) return;
@@ -1419,7 +2320,7 @@ void test_real_frames() {
         Frame f;
         if (!load_png(p, f)) continue;
         const std::string name = p.substr(p.find_last_of('\\') + 1);
-        // As the worker looks every second: the ESC menu is only looked for
+        // As the worker looks all run long: the ESC menu is only looked for
         // straight after GoBot's own ESC.
         const std::vector<PopupSeen> up = eyes.popups(f, false);
         if (name.rfind("fragq_A_", 0) == 0 || name.rfind("book_A_", 0) == 0 || name.rfind("frag_A_", 0) == 0) {
@@ -1484,6 +2385,16 @@ void test_settings() {
               src.find("WindowFromPoint") == std::string::npos && src.find("GA_ROOT") == std::string::npos,
           "and its one click goes through click_on_game, the stop asked again before the press, with no "
           "check of its own before it");
+    // blockers()' searches side by side only with cores to spare: on a PC
+    // with 2 or fewer, one after the other on the worker's own thread, the
+    // same results (2026-11-16).
+    int launched = 0;
+    for (std::size_t at = src.find("std::async(how, "); at != std::string::npos; at = src.find("std::async(how, ", at + 1))
+        ++launched;
+    check(src.find("return cpus <= 2 ? std::launch::deferred : std::launch::async;") != std::string::npos &&
+              src.find("const std::launch how = blockers_launch();") != std::string::npos &&
+              src.find("std::async(std::launch::async") == std::string::npos && launched == 9,
+          "blockers(): every search through blockers_launch() -- run inline on a PC with 2 cores or fewer");
     const std::string gui = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/simple_popups.cpp");
     check(!gui.empty() && gui.find("if (!ui.enabled || ui.running) return;") != std::string::npos,
           "the worker does not start while \"Tự đóng thông báo\" is unticked");
@@ -1540,18 +2451,63 @@ void test_board_sources() {
               popups.find("close_checkin") == npos && view.find("close_checkin") == npos,
           "the board closed only by the \"Tự đóng thông báo\" worker, started only for a run when ticked -- no "
           "close_checkin, nothing from the keeper's one-shot login");
-    // A look a second, as before; the pictures for the owner kept between
-    // turns, never under a hold; the probe's from its own thread.
+    // A look a second while anything is up, every 2 s (3 s in light mode)
+    // after one that saw nothing (2026-11-16); the pictures for the owner
+    // kept between turns, never under a hold, from the closer's own last
+    // look; the probe's from its own thread.
     const std::string loop = body_of(popups, "void GuiApp::popup_loop() {");
     const std::size_t turn = loop.find("const PopupCloser::Turn turn = closer.turn();");
     const std::size_t due = loop.find("shots.due(now_ms()");
-    const std::size_t keep = loop.find("keep_popup_frame(debug_dir, last, shot, false)");
+    const std::size_t keep = loop.find("keep_popup_frame(debug_dir, closer.last_look(), shot, false)");
     const std::size_t take = loop.find("guard.take = [&]() {"), set = loop.find("closer.set_guard(guard);");
-    const std::size_t second = loop.find("for (int i = 0; i < 10 && !ui.stop; ++i) "
-                                         "std::this_thread::sleep_for(std::chrono::milliseconds(100));");
-    check(second != npos && turn != npos && due != npos && keep != npos && take != npos && set != npos &&
-              second < turn && turn < due && due < keep && set < turn && count_of(loop, "keep_popup_frame(") == 1,
-          "popup_loop: a turn a second; the board's pictures kept after the turn, outside the hold's code");
+    const std::size_t wait = loop.find("for (int slept = 0; slept < wait_ms && !ui.stop; slept += 100)\n"
+                                       "            std::this_thread::sleep_for(std::chrono::milliseconds(100));");
+    const std::size_t next = loop.find("wait_ms = PopupCloser::next_look_ms(turn, print_window_verdicts().light());");
+    check(wait != npos && turn != npos && next != npos && due != npos && keep != npos && take != npos &&
+              set != npos && wait < turn && turn < next && next < due && due < keep && set < turn &&
+              count_of(loop, "keep_popup_frame(") == 1 && count_of(loop, "wait_ms = ") == 2 &&
+              loop.find("for (int i = 0; i < 10 && !ui.stop; ++i)") == npos,
+          "popup_loop: its wait after each turn from next_look_ms, light mode read each time; the board's "
+          "pictures kept after the turn, outside the hold's code");
+    // No 3 MB copy of every grab for the HUD gate and the pictures: they read
+    // the closer's last look. And the worker's thread named, then quietened
+    // (no wake-up boost), on its first lines.
+    const std::size_t named = loop.find("name_this_thread(\"popups\");\n    quiet_this_thread();");
+    check(named != npos && named < loop.find("TemplateStore::shared_best(") && loop.find("last = f") == npos &&
+              loop.find("Frame last;") == npos && loop.find("const Frame& last = closer.last_look();") != npos &&
+              loop.find("AutoLogin::plate_at(last, &landmark)") != npos,
+          "popup_loop: quiet_this_thread() after its name; the HUD gate reads closer.last_look(), no copy per grab");
+    // 2026.11.24 (the owner: "Kiểm tra các phần khác xem có phần nào không làm
+    // được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác"): no
+    // pictures, or one the eyes need missing, no longer ends the worker at its
+    // start -- it waits, closing nothing, looks again every 30 s (the set
+    // asked for again, the eyes loaded again from it), and its stop ends the
+    // wait at once.
+    {
+        const std::size_t from = loop.find("constexpr int kPicturesAgainMs = 30'000;");
+        const std::size_t to = loop.find("Frame landmark;");
+        const std::string start = from != npos && to != npos && from < to ? loop.substr(from, to - from) : std::string();
+        const auto ordered = [&](std::initializer_list<const char*> parts) {
+            std::size_t at = 0;
+            for (const char* p : parts) {
+                const std::size_t f = start.find(p, at);
+                if (f == npos) return false;
+                at = f + 1;
+            }
+            return true;
+        };
+        check(ordered({ "PopupEyes eyes;", "for (;;) {",
+                        "std::shared_ptr<const TemplateStore> store = TemplateStore::shared_best(",
+                        "if (store->size() == 0) {", "why = \"hình giao diện\";",
+                        "eyes.load(std::move(store), exe_relative(\"configs\"));", "if (eyes.ready(&why)) break;",
+                        "if (why != said) {", "say_popups(\"Thiếu hình giao diện của game (\" + why + \") — GoBot thử lại sau \" +",
+                        "said = why;", "slept < kPicturesAgainMs && !ui.stop", "if (ui.stop) {", "leave({});",
+                        "return;" }) &&
+                  start.find("nên không tự đóng gì") == npos && start.find("not starting") == npos &&
+                  loop.find("leave(\"Không có hình giao diện của game") == npos,
+              "popup_loop: missing pictures wait -- said once each, looked for again every 30 s, the stop ending the "
+              "wait; never the old end at the start");
+    }
     const std::string row = body_of(popups, "void GuiApp::simple_popups_row() {");
     const std::size_t async = row.find("ui.probe = std::async(std::launch::async");
     const std::size_t probe = row.find("keep_popup_frame(exe_relative(kPopupDebug), f, {}, true)");
@@ -1559,14 +2515,28 @@ void test_board_sources() {
     check(async != npos && probe != npos && drawn != npos && async < probe && probe < drawn &&
               count_of(row, "keep_popup_frame(") == 1,
           "Thử xem keeps its picture from its own thread, not the window's");
-    check(popups.find("bảng Sự kiện và điểm danh, lúc vào game và lúc qua 00:00: bấm ESC sau khi bảng đứng yên 3 "
-                      "giây") != npos &&
-              popups.find("Chỉ đóng: thông báo nhận quà điểm danh, bảng Sự kiện và điểm danh (bấm ESC") != npos &&
-              popups.find("(sẽ bấm ESC khi bật Tự đóng thông báo)") != npos,
-          "the tick's tooltip, its line and Thử xem name the board");
-    check(gui.find("    crossed_in_ms_ = now_ms();      // the check-in board comes up now: pictured 15 s on\n"
-                   "    return Crossed::In;") != npos,
-          "the keeper's arrival kept for the in15 picture");
+    // Its ESC 30 s after the arrival, and at the day's turn from 00:03 (the
+    // owner, 2026-11-15) -- said so on the tick's tooltip and its line.
+    check(popups.find("bảng Sự kiện và điểm danh, lúc vào game và lúc qua 00:00: bấm ESC 30 giây sau khi vào game; "
+                      "\"\n        \"qua ngày thì chờ tới 00:03 mới bấm ESC") != npos &&
+              popups.find("Chỉ đóng: thông báo nhận quà điểm danh, bảng Sự kiện và điểm danh (bấm ESC 30 giây sau khi "
+                          "vào \"\n                    \"game; qua ngày thì sau 00:03)") != npos &&
+              popups.find("(sẽ bấm ESC khi bật Tự đóng thông báo)") != npos &&
+              popups.find("bảng đứng yên 3 giây") == npos,
+          "the tick's tooltip, its line and Thử xem name the board, its 30 s and 00:03 -- no 3 s for it any more");
+    // The arrival kept before the worker's gate "the keeper is crossing"
+    // opens: under the same lock, before keeper_flow_ is cleared -- set after
+    // it, the worker could take an old arrival for this one for a moment.
+    const std::string crossing = body_of(gui, "GuiApp::Crossed GuiApp::run_crossing(");
+    const std::size_t kept_in = crossing.find("        if (in) crossed_in_ms_ = now_ms();      // the check-in board "
+                                              "comes up now: its ESC 30 s on\n        keeper_flow_ = nullptr;");
+    check(kept_in != npos && count_of(gui, "crossed_in_ms_ = ") == 1,
+          "the keeper's arrival kept, once, before the gate opens -- for the in15 picture and the board's 30 s");
+    // The worker hands the closer that arrival and the PC's time of day.
+    check(loop.find("clock.arrived_ms = [this] { return crossed_in_ms_.load(); };") != npos &&
+              loop.find("clock.local_second = [] { return local_second_of_day(); };") != npos &&
+              loop.find("closer.set_clock(clock);") != npos && loop.find("closer.set_clock(clock);") < turn,
+          "popup_loop gives the closer the keeper's arrival and the PC's second of the day, before its first turn");
     // With the tick off the bag jobs and the quest wait for the board on
     // their own, a minute at a time, and say what would close it.
     check(gui.find("\" Bật \\\"Tự đóng thông báo\\\" (thẻ Đánh quái) để GoBot tự tắt bảng điểm danh.\"") != npos &&
@@ -1633,6 +2603,8 @@ void test_popups(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_board_menu();
     test_board_gates();
     test_board_hold();
+    test_board_wait();
+    test_check_wait();
     test_board_lookalikes();
     test_board_shots();
     test_book();
@@ -1641,6 +2613,9 @@ void test_popups(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_blockers();
     test_gates();
     test_hold();
+    test_idle_looks();
+    test_board_missed_look();
+    test_board_live_frame();
     test_real_frames();
     test_settings();
     test_board_sources();

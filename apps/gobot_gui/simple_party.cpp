@@ -126,7 +126,7 @@ bool reader_ready(PartyHudReader& reader, bool& loaded, const TemplateStore& sto
 } // namespace
 
 bool GuiApp::party_may_invite(const std::string& who, const PartyLook& look, const TemplateStore& store,
-                              bool always_leader) {
+                              bool always_leader, PartyHud* read) {
     PartyHudUi& ui = *party_hud_ui_;
     // GoC's "Coordinator Denied (Another action running)": nothing while
     // something else of GoBot's holds the game -- a chat line being typed, a
@@ -138,6 +138,19 @@ bool GuiApp::party_may_invite(const std::string& who, const PartyLook& look, con
         say_party(who + " asked while GoBot was busy (" + held + "); not invited");
         return false;
     }
+    // Nor in a dungeon run's boss fight or reward room (2026.11.21, the
+    // audit's B6; TripQuietFlag): the player list opened and clicked through
+    // there held the hunter, and the reward room's 30 s, off. Not invited, as
+    // for a hold above -- the asker asks again, and is invited once it is
+    // over. An invitation to us is still answered: a box over the game.
+    {
+        const TripQuiet trip = trip_quiet_.at(now_ms());
+        if (trip != TripQuiet::None) {
+            GB_INFO("Party: %s asked during a dungeon run's %s; not invited", who.c_str(), trip_quiet_name(trip));
+            say_party(who + " asked during a dungeon run's " + trip_quiet_name(trip) + "; not invited");
+            return false;
+        }
+    }
     // Without its pictures the reader reads nothing at all, which the gate
     // takes as a HUD not read. The look as it was grabbed -- trusted, then --
     // and held up against what GoBot has done to the party since: a look
@@ -145,6 +158,7 @@ bool GuiApp::party_may_invite(const std::string& who, const PartyLook& look, con
     // at all (read_party).
     reader_ready(ui.reader, ui.loaded, store);
     const PartyHud hud = read_party(ui.reader, look, ui.events, party_from_game());
+    if (read != nullptr) *read = hud;
     if (ui.reader.ready()) {
         std::lock_guard<std::mutex> lock(worker_mutex_);
         ui.line_vi = party_hud_line_vi(hud);
@@ -169,6 +183,14 @@ bool GuiApp::party_may_invite(const std::string& who, const PartyLook& look, con
             party_hud_text(hud).c_str());
     say_party("Không mời " + who + ". " + gate.reason_vi + ".");
     return false;
+}
+
+PartyHud GuiApp::party_read(const PartyLook& look, const TemplateStore& store) {
+    // Without its pictures the reader reads nothing at all: Unknown, which
+    // InviteTries counts as no join -- it cannot tell one.
+    PartyHudUi& ui = *party_hud_ui_;
+    reader_ready(ui.reader, ui.loaded, store);
+    return read_party(ui.reader, look, ui.events, party_from_game());
 }
 
 void GuiApp::party_hud_tick(const PartyLook& look, const TemplateStore& store) {

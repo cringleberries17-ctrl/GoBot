@@ -651,7 +651,7 @@ void test_out_of_view() {
 
 void test_ramp_foot() {
     section("Seek 3: 23:04:42 replayed -- from 945,666 the ramp's foot monster at 1007,578 hit from up the slope "
-            "(walked left to about 849, turned to it near 870), never walked right into the box's bottom edge; those "
+            "(walked left to about 842, turned to it near 870), never walked right into the box's bottom edge; those "
             "off their floor or outside never walked to");
     if (game_data().empty()) {
         skip("no copies of the game's map files here: the ramp's foot\n");
@@ -758,8 +758,10 @@ void test_jump_seek() {
             r.run(3000);
         });
         const bool one = r.w.jumps.size() == 1 && r.w.jumps[0].kind == JumpKind::CtrlUp;
-        check(one && r.w.jumps[0].x >= 778 && r.w.jumps[0].x <= 830 && r.st().jumps_worked == 1,
-              fmt("one Ctrl+Up from x %d (about 810), worked", one ? r.w.jumps[0].x : 0));
+        // 2026.11.12c: anywhere in the run's take-offs 695..1002 (about 810
+        // until 11.12b, Ctrl+Up's lowest peak 392 then).
+        check(one && r.w.jumps[0].x >= 695 && r.w.jumps[0].x <= 1002 && r.st().jumps_worked == 1,
+              fmt("one Ctrl+Up from x %d (695..1002), worked", one ? r.w.jumps[0].x : 0));
         check(r.w.me_y == stand_y(p, r.w.me_x, 273) && r.w.downs_of('Z', land) >= 1 && r.w.arrows_in_air() == 0,
               fmt("on the ledge at %d,%d, attacked there (%d), no arrow in the air", r.w.me_x, r.w.me_y,
                   r.w.downs_of('Z', land)));
@@ -1019,8 +1021,9 @@ void test_seek_hold() {
 }
 
 void test_seek_caps() {
-    section("Seek 13: a ledge monster whose jumps up are used up -- kJumpUpsPerTarget presses that did nothing, then "
-            "no more walks to the take-off: JumpsUsed, grey, not \"jump-ups off\"");
+    section("Seek 13: a ledge monster whose jumps up did nothing -- kJumpUpsPerTarget presses in kTargetCountMs, then "
+            "greyed JumpsUsed (not \"jump-ups off\") until the last of them is that old, then tried again "
+            "(2026.11.24: refused for the rest of the run until then)");
     if (game_data().empty()) {
         skip("no copies of the game's map files here: the seek's jump caps\n");
         return;
@@ -1029,29 +1032,46 @@ void test_seek_caps() {
     const GameMapBook::Page& p = *probe.get("t52_s2");
     SeekRig r(owner_config(), 961, stand_y(p, 961, 672));
     r.w.answer = Answer::Nothing;
-    std::size_t lefts_after = 0;
+    bool used = false;
+    Hunter::Status between;
     std::vector<std::string> log = info_lines([&] {
         settle(r);
         r.w.mobs = { mob_at(683, 273, 12) };
-        r.run(3 * 2 * 4000 + 4000);
-        // Moved away along the ground: never walked back to the take-off.
-        r.w.place(961, stand_y(p, 961, 672));
-        const std::uint64_t from = r.w.t;
-        r.run(10'000);
-        lefts_after = static_cast<std::size_t>(r.w.downs_of(VK_LEFT, from));
+        r.until([&] { return r.w.jumps.size() >= 2; }, 20'000);
+        // Between the second press and the third: greyed JumpsUsed, nothing
+        // to seek -- never counted as "above with no way up".
+        r.until([&] {
+            const Hunter::Status s = r.st();
+            for (const Hunter::Status::SeekGrey& g : s.seek_grey)
+                if (g.slot == 12 && g.why == SeekNo::JumpsUsed && r.w.jumps.size() == 2) {
+                    used = true;
+                    between = s;
+                }
+            return r.w.jumps.size() >= 3;
+        },
+                Hunter::kTargetCountMs + 15'000);
     });
-    const Hunter::Status st = r.st();
-    bool used = false;
-    for (const Hunter::Status::SeekGrey& g : st.seek_grey)
-        if (g.slot == 12 && g.why == SeekNo::JumpsUsed) used = true;
-    check(r.w.jumps.size() == static_cast<std::size_t>(Hunter::kJumpUpsPerTarget) && lefts_after == 0 &&
-              lines_with(log, "-- no jump up to it for now") == 0,
-          fmt("%zu presses (kJumpUpsPerTarget %d), no walk back toward the take-off after (%zu)", r.w.jumps.size(),
-              Hunter::kJumpUpsPerTarget, lefts_after));
-    check(used && st.seek_above_no_way == 0 && st.seek_none_why == Hunter::SeekNone::NoWay &&
-              seek_above(owner_config(), st) == SeekAbove::None && st.jump_off == Hunter::JumpUpOff::None,
-          fmt("grey for JumpsUsed, none counted as above with no way up (%d), nothing to seek: %s",
-              st.seek_above_no_way, Hunter::seek_none_name(st.seek_none_why)));
+    check(r.w.jumps.size() >= 3 && lines_with(log, "-- no jump up to it for now") == 0,
+          fmt("%zu presses: kJumpUpsPerTarget (%d), then another once their window was over", r.w.jumps.size(),
+              Hunter::kJumpUpsPerTarget));
+    // The first press of a row that did not get there passes the monster over
+    // only kRetryPassOverMs, by the seek's skip too (2026.11.15): the second
+    // press follows within seconds -- it followed the 8 s of a pass-over before.
+    const std::uint64_t retry_gap = r.w.jumps.size() >= 2 ? r.w.jumps[1].at - r.w.jumps[0].at : 0;
+    check(r.w.jumps.size() >= 2 && retry_gap >= Hunter::kDropGapMs && retry_gap < 6000,
+          fmt("the first press that did nothing: the seek's monster skipped %llu ms (kRetryPassOverMs), the second "
+              "press %llu ms after it",
+              static_cast<unsigned long long>(Hunter::kRetryPassOverMs), static_cast<unsigned long long>(retry_gap)));
+    // Two presses for the monster in kTargetCountMs: no third until the last
+    // of them is that old -- then it is tried again (2026.11.24).
+    const std::uint64_t again_gap = r.w.jumps.size() >= 3 ? r.w.jumps[2].at - r.w.jumps[1].at : 0;
+    check(r.w.jumps.size() >= 3 && again_gap >= Hunter::kTargetCountMs && again_gap < Hunter::kTargetCountMs + 8000,
+          fmt("the third press %llu ms after the second: the window of kTargetCountMs (%llu ms) over, tried again",
+              static_cast<unsigned long long>(again_gap), static_cast<unsigned long long>(Hunter::kTargetCountMs)));
+    check(used && between.seek_above_no_way == 0 && between.seek_none_why == Hunter::SeekNone::NoWay &&
+              seek_above(owner_config(), between) == SeekAbove::None,
+          fmt("between them: grey for JumpsUsed, none counted as above with no way up (%d), nothing to seek: %s",
+              between.seek_above_no_way, Hunter::seek_none_name(between.seek_none_why)));
 }
 
 void test_seek_arc() {
@@ -1063,7 +1083,11 @@ void test_seek_arc() {
     }
     GameMapBook probe(game_data());
     const GameMapBook::Page& p = *probe.get("t52_s2");
-    SeekRig r(owner_config(), 1200, stand_y(p, 1200, 437));
+    // The upper bar at the owner's 10 (2026.11.12c): the monster 163 px up is
+    // past one plain Up's air band (143) -- the planned Ctrl+Up, not the bar's Up.
+    HunterConfig c = owner_config();
+    c.up_reach = 10;
+    SeekRig r(c, 1200, stand_y(p, 1200, 437));
     bool flew = false, back_first = false, let_go = false;
     int top = INT_MAX;
     std::vector<std::string> log = info_lines([&] {
@@ -1085,8 +1109,9 @@ void test_seek_arc() {
         r.run(1500);
     });
     check(flew && r.w.jumps.size() == 1 && r.w.jumps[0].x > 1048 && top < 174 - kZoneOutsideBackPx,
-          fmt("one Ctrl+Up from x %d, its peak at %d -- over %d px above the box's top (174)",
-              r.w.jumps.empty() ? 0 : r.w.jumps[0].x, top, kZoneOutsideBackPx));
+          fmt("one Ctrl+Up from x %d, its peak at %d -- over %d px above the box's top (174); %zu jump(s)%s",
+              r.w.jumps.empty() ? 0 : r.w.jumps[0].x, top, kZoneOutsideBackPx, r.w.jumps.size(),
+              r.w.jumps.empty() ? "" : (std::string(", the first ") + jump_kind_name(r.w.jumps[0].kind)).c_str()));
     check(!back_first && !let_go && lines_with(log, "Hunter: seeking slot 20") == 1 &&
               lines_with(log, "not seeking slot 20", "the seek is not on") == 0,
           "in the air: no walk back first, the goal kept, said once: \"" + line_with(log, "Hunter: seeking slot 20") +
@@ -1236,8 +1261,9 @@ void test_seek_drop_kept() {
 }
 
 void test_both_watched() {
-    section("Seek 19: a map change with a jump up's and a drop's press both still watched -- both undone and learned, "
-            "both switched off, one stop for the window (DropStop::BothMapChanged), whichever came first");
+    section("Seek 19: a map change with a jump up's and a drop's press both still watched -- both undone and learned "
+            "as gates, one word for the window (PressGate::Both, 2026.11.24), whichever came first; nothing switched "
+            "off, the hunt going on");
     if (game_data().empty()) {
         skip("no copies of the game's map files here: two presses watched\n");
         return;
@@ -1272,15 +1298,21 @@ void test_both_watched() {
         const Hunter::Status st = r.st();
         const bool watched = !r.w.jumps.empty() && !r.w.drops.empty() &&
                              r.w.drops[0] < r.w.jumps[0].at + Hunter::kPressWatchMs;
-        check(watched && r.hunter.drop_stop() == Hunter::DropStop::BothMapChanged &&
-                  st.drop_off == Hunter::DropOff::MapChanged && st.jump_off == Hunter::JumpUpOff::MapChanged &&
-                  st.drop_map_changed && st.jump_map_changed,
-              fmt("the jump up first (x %d), the drop %llu ms after it: both off, BothMapChanged",
+        const Hunter::PressGate gate = r.hunter.take_press_gate();
+        const Hunter::PressGate again = r.hunter.take_press_gate();
+        // 2026.11.24: both learned as gates, the hunt going on -- nothing
+        // switched off, unticked or stopped (BothMapChanged until then).
+        check(watched && gate == Hunter::PressGate::Both && again == Hunter::PressGate::None && st.press_gates == 2 &&
+                  r.hunter.running() && r.hunter.config().drop_down && r.hunter.config().jump_up,
+              fmt("the jump up first (x %d), the drop %llu ms after it: PressGate::Both once, %d gates this run, the "
+                  "hunter running with both ticks on",
                   r.w.jumps.empty() ? 0 : r.w.jumps[0].x,
-                  watched ? static_cast<unsigned long long>(r.w.drops[0] - r.w.jumps[0].at) : 0ull));
+                  watched ? static_cast<unsigned long long>(r.w.drops[0] - r.w.jumps[0].at) : 0ull, st.press_gates));
         check(lines_with(log, "MAP CHANGED", "after Ctrl+Up at") == 1 && lines_with(log, "MAP CHANGED", "after Ctrl+Down at") == 1 &&
+                  lines_with(log, "MAP CHANGED", "hunting goes on") == 2 && lines_with(log, "hunting STOPS") == 0 &&
                   near_gate(r, r.w.jumps.empty() ? -999 : r.w.jumps[0].x) && near_gate(r, drop_x),
-              "both said, both take-offs learned as gates: \"" + line_with(log, "after Ctrl+Up at") + "\"");
+              "both said, both take-offs learned as gates, the hunt going on: \"" + line_with(log, "after Ctrl+Up at") +
+                  "\"");
     }
     {
         // The other order: the drop from the ledge at 600 to a ground monster,
@@ -1300,16 +1332,16 @@ void test_both_watched() {
         const Hunter::Status st = r.st();
         const bool watched = !r.w.jumps.empty() && !r.w.drops.empty() &&
                              r.w.jumps[0].at < r.w.drops[0] + Hunter::kPressWatchMs;
-        check(watched && r.hunter.drop_stop() == Hunter::DropStop::BothMapChanged &&
-                  st.drop_off == Hunter::DropOff::MapChanged && st.jump_off == Hunter::JumpUpOff::MapChanged &&
-                  lines_with(log, "MAP CHANGED") == 2,
-              fmt("the drop first, the jump up %llu ms after it: both off, BothMapChanged",
+        check(watched && r.hunter.take_press_gate() == Hunter::PressGate::Both && st.press_gates == 2 &&
+                  r.hunter.running() && lines_with(log, "MAP CHANGED") == 2,
+              fmt("the drop first, the jump up %llu ms after it: PressGate::Both, both learned, the hunter running",
                   watched ? static_cast<unsigned long long>(r.w.jumps[0].at - r.w.drops[0]) : 0ull));
     }
 }
 
 void test_jump_keys_owed() {
-    section("Seek 20: a high jump's Up left owed -- the hunt halts with JumpKeysStuck, said as Up and Ctrl, not Down");
+    section("Seek 20: a high jump's Up left owed -- every key let go of, said as Up and Ctrl, not Down; held still "
+            "while owed, hunting on by itself once the key-ups go out (2026.11.24: no halt, no stop)");
     if (game_data().empty()) {
         skip("no copies of the game's map files here: a high jump's key owed\n");
         return;
@@ -1317,16 +1349,38 @@ void test_jump_keys_owed() {
     GameMapBook probe(game_data());
     const GameMapBook::Page& p = *probe.get("t52_s2");
     SeekRig r(owner_config(), 961, stand_y(p, 961, 672));
+    std::size_t keys_owed_at = 0, keys_held = 0;
+    bool stuck = false;
     std::vector<std::string> log = info_lines([&] {
         settle(r);
         r.w.owed = true;
         r.w.up_owed = true;
         r.run(1000);
+        stuck = r.st().drop_keys_stuck;
+        // A monster in reach meanwhile: nothing pressed while the key-ups are
+        // owed -- the per-pass hold.
+        keys_owed_at = r.w.keys.size();
+        r.w.mobs = { mob_at(r.w.me_x + 60, r.w.me_y, 5) };
+        r.run(2000);
+        keys_held = r.w.keys.size() - keys_owed_at;
+        // The key-ups go out: the hunt goes on by itself.
+        r.w.owed = false;
+        r.w.up_owed = false;
+        r.run(3000);
     });
-    check(r.hunter.drop_stop() == Hunter::DropStop::JumpKeysStuck && r.st().drop_keys_stuck &&
+    // 2026.11.24: no halt for the window to stop the hunt (JumpKeysStuck until
+    // then) -- every key let go of once, the hunter holding still pass by pass
+    // until the key-ups go out, then hunting on.
+    check(stuck && keys_held == 0 && r.hunter.running() &&
               lines_with(log, "Hunter: keys owed after a jump up (Up or Ctrl up not sent, ") == 1 &&
+              lines_with(log, "every key let go of; nothing pressed until Windows takes the key-ups") == 1 &&
               lines_with(log, "keys owed after a drop") == 0,
-          "halted, JumpKeysStuck: \"" + line_with(log, "keys owed after") + "\"");
+          "a high jump's Up owed: every key let go of, said as Up -- nothing pressed while owed (" +
+              std::to_string(keys_held) + " keys): \"" + line_with(log, "keys owed after") + "\"");
+    check(!r.st().drop_keys_stuck && r.w.keys.size() > keys_owed_at &&
+              lines_with(log, "Hunter: the owed key-ups went out -- hunting goes on") == 1,
+          fmt("the key-ups out: the hold ends by itself, %zu keys since -- \"%s\"", r.w.keys.size() - keys_owed_at,
+              line_with(log, "owed key-ups went out").c_str()));
 }
 
 void test_seek_source() {

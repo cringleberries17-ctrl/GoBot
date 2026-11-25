@@ -69,6 +69,10 @@ GuiApp::KeeperWake GuiApp::keeper_wake(CrashWatch::Move move, CrashWatch& watch,
     // for a crossing, not for a crashed or hung game to be ended.
     if (!fine) {
         if (!keeper_oneshot_) return KeeperWake::None;
+        // A request asked again after a crossing not in (2026.11.24) goes
+        // with this keeper: left set, the next press of the key would read
+        // as withdrawing it (stop_keeper).
+        keeper_login_now_ = false;
         GB_WARN("Keeper: the login key's crossing is not made -- %s", seen.detail.c_str());
         say_keeper("login key: not crossing -- " + seen.detail);
         say_keeper_vi("Game đang không chạy bình thường nên GoBot không vào game. Hãy xem lại game.",
@@ -155,10 +159,13 @@ void GuiApp::simple_stall_option() {
     ImGui::SameLine();
     label("phút");
     ImGui::EndDisabled();
+    // Counted in max_restarts' hour like a crash since 2026.11.24 (it was the
+    // run's number, then a stop, until then).
     hint(trial_hint(kTrialStall,
                     "Không bao giờ vào lại vì: nhân vật chết, cửa sổ game bị che hay thu nhỏ, hoặc GoBot đang "
                     "làm việc khác trong game. Game đang tải thì chờ tới 15 phút mới vào lại. Mỗi lần vào lại "
-                    "như vậy được tính vào số lần vào lại tối đa. Chỉ chạy khi bật \"Tự vào lại game\".").c_str());
+                    "như vậy được tính vào số lần vào lại tối đa trong 1 giờ. Chỉ chạy khi bật \"Tự vào lại "
+                    "game\".").c_str());
     ImGui::Unindent(mark_indent());
 }
 
@@ -190,15 +197,42 @@ bool GuiApp::keeper_key_crossing(CrashWatch& watch, const CrashWatch::Settings& 
     // the client first: nothing fell over, so it is no restart by itself. A
     // client the crossing ends on a screen it does not know is one, counted
     // as any other.
-    switch (run_crossing(Crossing::Key, watch, watch_settings, login, store)) {
+    const Crossed got = run_crossing(Crossing::Key, watch, watch_settings, login, store);
+    switch (got) {
         case Crossed::In:
         case Crossed::Cancelled:
             return watching();
         case Crossed::Stopped:
-        case Crossed::GaveUp:
+        case Crossed::NotElevated:
+            return false;
+        case Crossed::Retry:
+        case Crossed::Wait:
             break;
     }
-    return false;
+
+    // Not in (2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào
+    // không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác"):
+    // the key's request is asked again -- kCrossAgainMs on, or once the hour's
+    // restarts allow one more -- and the next look takes it up, the world
+    // looked at first (a person may have logged in meanwhile). The key
+    // pressed again meanwhile cancels it, as it cancels its crossing
+    // (keeper_key_crossing_ is still this request's); DỪNG and F12 stop the
+    // keeper. Until then a watching keeper stopped here for a person, and a
+    // one-shot one ended.
+    keeper_waiting_ = true;
+    const std::uint64_t until =
+        got == Crossed::Wait ? keeper_wait_until_ms_ : now_ms() + static_cast<std::uint64_t>(CrashWatch::kCrossAgainMs);
+    const bool on = keeper_nap_until(until, &keeper_key_cancel_);
+    keeper_waiting_ = false;
+    if (!on) return false;
+    if (keeper_key_cancel_.exchange(false)) {
+        keeper_note("login key: cancelled while waiting to cross again");
+        say_keeper_vi("Đã huỷ vào game.");
+        return watching();
+    }
+    keeper_note("login key: crossing again");
+    keeper_login_now_ = true;
+    return true;
 }
 
 } // namespace gobot

@@ -35,6 +35,15 @@ namespace gobot {
 /// under its name. `name` is copied.
 void name_this_thread(const char* name);
 
+/// For a thread that only looks around in the background (popups, keeper,
+/// detector, alerts, the one-job workers...): Windows' wake-up boost is
+/// turned off for it, so a wake no longer pre-empts the game mid-frame on a
+/// one-core PC -- the thread waits for the game's slice to end, a few ms.
+/// Its priority stays Normal: a lower one could starve it while it holds the
+/// log's or the game mouse's lock, and hold up the potions behind it.
+/// Never for the macro, the hunter, the vitals reader or the input threads.
+void quiet_this_thread();
+
 /// Microseconds on the high-resolution clock (QueryPerformanceCounter): for
 /// timing a piece of work, never for the time of day.
 std::uint64_t load_clock_us();
@@ -105,8 +114,8 @@ GrabOwners& grab_owners();
 
 /// What else GoBot counts for the Load line, process-wide.
 struct LoadMeters {
-    /// The detector's work on a frame: the plates, its own character's name,
-    /// the minimap and the camera -- timed, since its Cost has counts only.
+    /// The detector's work on a frame: the plates and its own character's
+    /// name -- timed, since its Cost has counts only.
     LoadTimer detect;
     /// The front keeper's tries to bring the game forward, and how long each
     /// held GoBot's own thread, the one that reads F12.
@@ -228,7 +237,7 @@ struct LoadSnapshot {
     /// The frames the capture handed over, by kind (FrameTally::take), for
     /// a "frames:" line under "reads:"; empty for none in this entry -- the
     /// window fills it every ten minutes, at a hunt's start and end, and when
-    /// what the game sends changes. `frames_filtered`: Apply's opcode filter
+    /// what the game sends changes. `frames_filtered`: an opcode filter
     /// was on, so only the listed opcodes were counted.
     std::string frame_kinds;
     bool        frames_filtered = false;

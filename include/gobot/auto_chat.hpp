@@ -3,6 +3,7 @@
 #include "gobot/bag.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/party_invite.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -106,7 +107,13 @@ struct ChatSettings {
     /// Not measured on the live client yet; gobot_cli --chatcheck with the
     /// line open and empty prints it as ink=.
     int         empty_ink = 12;
-    /// Lines that failed one after another before Tự chat stops itself.
+    /// Lines that failed one after another before the tab and the phone are
+    /// told (the chat_stopped alert) -- no longer a stop (2026.11.24, the
+    /// owner: "Kiểm tra các phần khác xem có phần nào không làm được thì dừng
+    /// không, cần thay cơ chế này bằng 1 cơ chế khác"): the line keeps its turn
+    /// and is tried again (chat_retry_ms) however many fail, and the count is
+    /// told once a streak -- a line sent starts it again. Until 2026.11.24 Tự
+    /// chat stopped itself here.
     int         max_failures = 3;
     /// What gobot_cli --chat-once types: something short and plain, for the
     /// live test, set here so that the test cannot be handed other words.
@@ -125,8 +132,11 @@ struct ChatSettings {
     /// 131.)
     int         hold_min_ms = 0;
     int         hold_max_ms = 0;
-    /// How long an Enter pressed to open the line is watched for the line to
-    /// open, a look every 100 ms, before another is pressed: 750, eight looks.
+    /// The least the Enter pressed to open the line is watched for the line
+    /// to open, a look every 100 ms: 750. Since 2026-11-15 (the owner, for
+    /// slow PCs: "sẽ có thêm 30 giây chờ phản ứng") it is watched on until
+    /// the line shows open, up to kReactMs from the Enter
+    /// (ChatSender::react_ms), and no other Enter is pressed inside that.
     int         enter_gap_ms = 750;
     /// Nothing pressed for this long, with everything else of the bot held
     /// off, before the first Enter of a line: 150 -- the keys already let go,
@@ -135,9 +145,14 @@ struct ChatSettings {
     /// From the line seen cleared to its first letter: 0.
     int         type_wait_ms = 0;
     /// Enters pressed to open the line before it is given up as not opened:
-    /// 2, from 1 to 4. A game that takes Enters late shuts, with the next
-    /// one, what the last opened: more only once the trace shows Enters the
-    /// game dropped, not ones it took late.
+    /// 2, from 1 to 4. Since 2026-11-15 each is watched up to kReactMs
+    /// (enter_gap_ms) and the next goes only after that whole wait, on a look
+    /// that still shows the line shut: the Enter toggles the line, and one
+    /// pressed sooner on a slow game shuts what the one before opened late
+    /// (the owner: after an action, up to 30 s for the screen to react). The
+    /// game drops some short presses, and such an Enter is pressed again that
+    /// way; a line not opened after them all is a failure, tried again at its
+    /// next time.
     int         max_enters = 2;
     /// Times the line is typed into the open, empty line before "the game
     /// does not take the text": 1, or 2. The second only after every look at
@@ -298,6 +313,20 @@ private:
     int           failures_ = 0;
 };
 
+/// How long a line that was not sent waits for its next try, its turn kept
+/// (2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không làm
+/// được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác"): kChatRetryMs,
+/// as ever -- and, for a line GoBot could not judge or close (`doubtful`:
+/// ChatSender::Result::stop, the bar like neither picture after an Enter or
+/// the line that would not shut), a whole line interval
+/// (ChatSettings::clamp_interval, so never under 30 s), which Tự chat counts
+/// from the moment that line's doubt ends: each such try may leave the line in
+/// doubt again, with every key held until it is seen shut. Until 2026.11.24
+/// either of those stopped Tự chat for the session, and so did max_failures
+/// lines in a row; now nothing does.
+constexpr std::uint64_t kChatRetryMs = 30'000;
+std::uint64_t chat_retry_ms(bool doubtful, const ChatSettings& s);
+
 /// What Tự chat does with the line whose turn it is when that line is ticked
 /// "Chỉ khi chưa có tổ đội" (ChatSettings::only_alone) -- GoC's party-request
 /// lines, which its queue passes over in a party ("Skipping party-request
@@ -400,6 +429,11 @@ struct ChatGateInput {
     std::string held_by;            ///< the reason for somebody else's hold
     bool        trash = false;      ///< a trash pass, its hold, or a stop's doubt
     bool        user_active = false;    ///< the mouse or keyboard was used just now
+    /// A dungeon run's boss fight or reward room, and the line a timed one
+    /// (2026.11.21, the audit's B6; TripQuietFlag): it waits that out -- a
+    /// line typed there held the hunter, and the reward room's 30 s, off.
+    /// The words for the card, empty for none.
+    std::string dungeon;
 
     /// The rest comes from a look at the screen. Without one only the above
     /// is judged; with one, this is what it showed.
@@ -409,6 +443,10 @@ struct ChatGateInput {
     int          hp_floor = 50;     ///< under this a line waits
     std::string  dialog;            ///< the dialog that is up, or empty
     ChatBarState bar = ChatBarState::Unknown;
+    /// Why the chat bar cannot be seen at all -- the bottom of the game off
+    /// the screen or under the taskbar (2026.11.13c) -- or empty. Said instead
+    /// of "not found" when the bar is not seen shut.
+    std::string  unseen;
 };
 
 /// Whether a line may be started, and if not, when to look again and why --
@@ -518,6 +556,11 @@ public:
     void set_dialog_check(DialogCheck d) { dialog_ = std::move(d); }
     void set_guard(Guard g) { guard_ = std::move(g); }
     void set_ready_check(Ready r) { ready_ = std::move(r); }
+    /// Asked when the chat bar is not seen shut: why it cannot be seen at all
+    /// -- the bottom of the game off the screen or under the taskbar
+    /// (2026.11.13c) -- said instead of "not found"; or empty. Optional.
+    using Unseen = std::function<std::string()>;
+    void set_unseen(Unseen u) { unseen_ = std::move(u); }
     void on_report(Report r) { report_ = std::move(r); }
     /// Called once a line, just before the Enter that sends it goes down --
     /// on the look that shows the text in the open line and no dialog, with
@@ -545,6 +588,14 @@ public:
     /// (now_ms() unless a test's own). The line's report of how long it took
     /// then says how long the potions waited, which starts before the line.
     void set_held_since(std::uint64_t ms) { held_since_ = ms; }
+    /// How long, from a key, the sender waits for the game to show what it
+    /// did -- the line open after its Enter, the typed text drawn, the
+    /// Backspaces' work, the line shut after the sending Enter or the closing
+    /// one -- before it gives that step up as it always did: kReactMs (the
+    /// owner, 2026-11-15: 30 s for slow PCs). Each look of it still asks the
+    /// stop and the guard. Settable for a test.
+    void set_react_ms(int ms) { react_ms_ = ms; }
+    int  react_ms() const { return react_ms_; }
 
     /// Stop the line at the next key, and press nothing more -- not a
     /// Backspace, not an Enter: the player has taken over (DỪNG, F12,
@@ -609,8 +660,12 @@ public:
         /// slow to take, or is out of sight. Whatever runs the sender keeps
         /// everything that presses keys held off until a look shows it shut.
         bool        left_open = false;
-        /// Stop Tự chat, a person should look: the line would not close, or
-        /// did not look like either picture after an Enter.
+        /// A person should look: the line would not close, or did not look
+        /// like either picture after an Enter -- or, after a stop (DỪNG, F12),
+        /// was left as it was (kLeftAsIs). Until 2026.11.24 Tự chat stopped
+        /// for the session on it; since, GoBot's own two are tried again a
+        /// whole line interval after the line is seen shut (chat_retry_ms),
+        /// its doubt holding every key meanwhile as ever.
         bool        stop = false;
         /// What the field showed once cleared, before typing: an empty line's
         /// caret. -1 when not measured, or when it showed more than
@@ -706,6 +761,7 @@ private:
     DialogCheck          dialog_;
     Guard                guard_;
     Ready                ready_;
+    Unseen               unseen_;
     Report               report_;
     SendPressed          send_pressed_;
     std::string          debug_dir_;
@@ -724,6 +780,7 @@ private:
     std::uint64_t        enter_ms_ = 0;         ///< when, on clock_ms()
     std::uint64_t        held_since_ = 0;       ///< see set_held_since; 0 for not given
     std::string          halted_;               ///< the guard's reason that ended a wait
+    int                  react_ms_ = kReactMs;  ///< see set_react_ms
 };
 
 /// A chat line that may have been left open, held on to until it is seen shut.
@@ -755,7 +812,19 @@ public:
         std::function<bool(const std::function<bool()>& close)> when_quiet;
         /// Why it is still held, in Vietnamese: said each step it is.
         std::function<void(const std::string&)> say;
+        /// Asked only on a look that found no chat bar (Unseen): whether a
+        /// fresh frame shows a page of the login -- the sign-in, the channel
+        /// list, the character select -- where no chat line can be open
+        /// (2026.11.21, the audit's B4: a line in doubt as the server dropped
+        /// the session to the login page in the same window held every key,
+        /// and the keeper's watchdog, all night, so the game was never logged
+        /// back into). Unset, never.
+        std::function<bool()> no_line_here;
     };
+    /// How many looks a second apart, one after the other, must find a page
+    /// of the login before the doubt ends on it: one odd frame does not
+    /// decide it, as for the line seen shut.
+    static constexpr int kNoLineLooks = 2;
 
     ChatDoubt() = default;
     explicit ChatDoubt(Hooks hooks) : hooks_(std::move(hooks)) {}
@@ -783,6 +852,7 @@ private:
     std::uint64_t next_ms_ = 0;
     int           empty_ink_ = -1;  ///< what the line showed once cleared, if measured
     int           rub_ = 0;
+    int           no_line_looks_ = 0;   ///< looks in a row that found a page of the login
 };
 
 /// The system clock, in ms since 1970: for SaidLately.

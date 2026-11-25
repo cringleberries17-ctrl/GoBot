@@ -380,9 +380,11 @@ void test_pieces() {
     }
     const bool jump_ok = ledge != nullptr && ledge->jumps == 1 && ledge->legs.size() == 1 &&
                          ledge->legs[0].kind == SeekLeg::Kind::Jump && ledge->legs[0].jump &&
-                         ledge->legs[0].jump->kind == JumpKind::CtrlUp && std::abs(ledge->legs[0].walk_x - 810) <= 16;
+                         ledge->legs[0].jump->kind == JumpKind::CtrlUp && std::abs(ledge->legs[0].walk_x - 880) <= 16;
+    // 2026.11.12c: Ctrl+Up's lowest peak 432 -- headroom enough under the
+    // ledge where the character stands, 880 (about 810 until 11.12b).
     check(m.pieces.size() == 3 && jump_ok && ledge->use_l == 472 && ledge->use_r == 1104,
-          fmt("with jump rules: 3 floors -- the ledge 472..1104, all usable, by one Ctrl+Up at %d (about 810) --",
+          fmt("with jump rules: 3 floors -- the ledge 472..1104, all usable, by one Ctrl+Up at %d (about 880) --",
               ledge && !ledge->legs.empty() ? ledge->legs[0].walk_x : 0) +
               describe(m));
     check(ramp != nullptr && ramp->use_l == 992 && ramp->use_r == 1351 && ramp->falls == 1 && ramp->jumps == 1 &&
@@ -422,15 +424,16 @@ void test_attack_points() {
     // 23:04:42: from 945,666 the target at 1007,578 on the ramp's foot -- hit
     // from up the slope, walking LEFT; 05 walked right into the box's bottom
     // edge at 1035. The prototype's 873,630 is the band's edge: the turn to
-    // the monster after the walk left walks the character 21 px back down
-    // the slope, 10 px of height, out of it -- so the point is kSeekTurnPx
-    // further up, about 849, and the turn ends near 870.
+    // the monster after the walk left walks the character 28 px back down
+    // the slope (kTurnTapMs 80 ms since 2026.11.12; 21 px before), out of it
+    // -- so the point is kSeekTurnPx further up, about 842, and the turn ends
+    // near 870.
     SeekNo why = SeekNo::None;
     SeekMap m = seek_map(p, z, at(945, 666), owner_rules());
     std::optional<SeekPlan> a = seek_attack(m, z, mob(1007, 578, 579), owner_rules(), &why);
-    check(a && a->tier == SeekTier::OwnFloor && std::abs(a->attack.x - 849) <= 4 && a->legs.empty() &&
-              a->first.kind == SeekLeg::Kind::Walk && a->attack.x < 945,
-          "23:04:42, 945,666 -> 1007,578: " + plan_text(a, why) + " (about 849, walking left; the turn back to it "
+    check(kSeekTurnPx == 31 && a && a->tier == SeekTier::OwnFloor && std::abs(a->attack.x - 842) <= 4 &&
+              a->legs.empty() && a->first.kind == SeekLeg::Kind::Walk && a->attack.x < 945,
+          "23:04:42, 945,666 -> 1007,578: " + plan_text(a, why) + " (about 842, walking left; the turn back to it "
                                                                   "ends near 870)");
     SeekRules no_turn = owner_rules();
     no_turn.turn_px = 0;
@@ -472,12 +475,13 @@ void test_attack_points() {
     }
     check(outside && !kSeekOutsideHit, "1237,729, 1429,589, 1122,715 and 174,548: outside the box, never gone to");
 
-    // A ledge monster from under the home: above, by Ctrl + Up at about 810.
+    // A ledge monster from under the home: above, by Ctrl + Up where it stands
+    // (2026.11.12c; about 810 until 11.12b).
     m = seek_map(p, z, at(880, 634), owner_rules(&up));
     a = seek_attack(m, z, mob(769, 272), owner_rules(&up), &why);
     check(a && a->tier == SeekTier::Above && a->first.kind == SeekLeg::Kind::Jump && a->first.jump &&
-              a->first.jump->kind == JumpKind::CtrlUp && std::abs(a->first.walk_x - 810) <= 16,
-          "880,634 -> 769,272 on the ledge: " + plan_text(a, why) + " (above, Ctrl+Up about 810)");
+              a->first.jump->kind == JumpKind::CtrlUp && std::abs(a->first.walk_x - 880) <= 16,
+          "880,634 -> 769,272 on the ledge: " + plan_text(a, why) + " (above, Ctrl+Up about 880)");
     // Phantoms and another player's monster.
     a = seek_attack(m, z, mob(700, 400, -1), owner_rules(&up), &why);
     check(!a && why == SeekNo::NoFloor, "a monster on no floor: " + plan_text(a, why));

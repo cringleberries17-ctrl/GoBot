@@ -124,13 +124,10 @@ public:
 /// capture, guess a layout, watch the decode, correct it. Making that loop
 /// require a recompile would be the wrong trade.
 ///
-/// That loop runs with the capture going. The GUI rewrites the table on its
-/// drawing thread -- Apply, Apply all above 70%, Apply layout, Reload configs
-/// -- while the capture thread decodes every frame through it. So the table
-/// locks itself: a write takes the lock alone, a read shares it, and decode()
-/// keeps it for as long as it walks a layout. Before it did, a rewrite in the
-/// middle of a decode freed the field list being walked, and the elevated GUI
-/// crashed or put garbage HP and positions into GameState.
+/// The table locks itself: a write takes the lock alone, a read shares it,
+/// and decode() keeps it for as long as it walks a layout. Before it did, a
+/// rewrite on one thread in the middle of a decode on another freed the field
+/// list being walked, and the elevated GUI crashed.
 class OpcodeRegistry {
 public:
     OpcodeRegistry() = default;

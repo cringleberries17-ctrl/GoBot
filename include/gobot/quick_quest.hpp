@@ -2,6 +2,7 @@
 
 #include "gobot/checkin_board.hpp"
 #include "gobot/quiet_second.hpp"
+#include "gobot/react_wait.hpp"
 #include "gobot/screen_capture.hpp"
 #include "gobot/template_matcher.hpp"
 
@@ -66,7 +67,12 @@ struct QuestSettings {
     /// The key that opens and closes the window. U is GoC's own default --
     /// its label says Q, its code and the player's GoC file say U.
     std::uint32_t quest_key = 85;
-    /// Failed rounds in a row before it stops itself and says so.
+    /// Failed rounds in a row before the tab and the phone are told (the
+    /// quest_trouble alert), once a streak -- a done round starts the count
+    /// again. No longer a stop (2026.11.24, the owner: "Kiểm tra các phần
+    /// khác xem có phần nào không làm được thì dừng không, cần thay cơ chế này
+    /// bằng 1 cơ chế khác"): the rounds go on at their interval, as after any
+    /// failed round. Until then it stopped itself here.
     int           max_failures = 3;
     /// Look less often while the box stays ticked: after three rounds in a
     /// row that find it on, the interval doubles, up to half an hour.
@@ -140,15 +146,28 @@ struct QuestSettings {
     float off_drop = 0.50f;
 
     // ---- [Timing], in milliseconds: GoC's own waits.
+    //
+    // Since 2026-11-15 (the owner, for slow PCs: "khi GoBot thực hiện thao
+    // tác, sẽ có thêm 30 giây chờ phản ứng") these are only the pause before
+    // the first look and the least a step looks for: after the key or a click
+    // a round goes on looking, every quarter of a second, until the game has
+    // shown what it did -- the window up, Tự Động on NV Phụ, the box changed,
+    // the window gone -- for up to kReactMs from the key or click, and goes on
+    // at once on the look that shows it (QuestRound::react_ms). The file's
+    // numbers stay as they were, so a fast game's round is as quick as ever.
     int open_hold_ms = 50;          ///< the key held, opening
     int close_hold_ms = 100;        ///< and closing
-    int open_wait_ms = 500;
-    int open_look_ms = 1500;        ///< then looked for every 250 ms for this long
-    int tab_wait_ms = 500;
+    int open_wait_ms = 500;         ///< before the first look for the window
+    int open_look_ms = 1500;        ///< looked for at least this long after that; up to kReactMs from the key
+    int tab_wait_ms = 500;          ///< before the first look for Tự Động: not the old tab's frame
     int click_wait_ms = 300;
-    int hover_wait_ms = 200;
-    int close_wait_ms = 1000;       ///< for the window to go once the key is pressed
-    int round_limit_ms = 10000;     ///< a round never presses anything after this
+    int hover_wait_ms = 200;        ///< a pointer move settling, and the gap of the two still looks
+    int close_wait_ms = 1000;       ///< the least the window is waited for to go; up to kReactMs
+    /// A round never presses anything after this much of its OWN time: the
+    /// waits for the game to show what a key or click did -- each up to
+    /// kReactMs -- are not counted in it, so a slow game's reaction is never
+    /// cut short by it. A backstop for a round that loops, as before.
+    int round_limit_ms = 10000;
 
     static constexpr int kMinInterval = 1;
     static constexpr int kMaxInterval = 60;
@@ -386,7 +405,10 @@ enum class QuestOutcome {
     Cancelled,      ///< stopped part way
     TooSlow,        ///< the round ran out of time
     /// Not started, because something else needs the game, or given up part
-    /// way because HP fell under the potion's mark. Not a failure.
+    /// way because HP fell under the round's floor (Hands::low_hp: GoBot's
+    /// window gives the character down since 2026.11.12b), or under the
+    /// potion's mark while it waited for the game (Hands::under_potion_mark).
+    /// Not a failure.
     NotNow,
 };
 /// "turned_on", "already_on", ... for the log and the command line.
@@ -436,6 +458,10 @@ struct QuestResult {
     /// QuestRound::run returned included. The wait for a spoiled one starts
     /// from its first step again.
     bool         quiet = false;
+    /// A step waited this many seconds for the game to show what its key or
+    /// click did, and saw nothing (QuestRound::react_ms): what ended the
+    /// round, said with it in Vietnamese. 0 when no wait ran out.
+    int          react_s = 0;
     /// The whole round in one line of English, with its scores and points.
     std::string  log;
     /// The last frame looked at, to keep when the round went wrong.
@@ -456,7 +482,13 @@ std::string quest_trouble_why(const QuestResult& r);
 /// One round: open the window if it is not, go to NV Phụ, tick Tự Động if it
 /// is off, and close the window again if this round opened it.
 ///
-/// At most two key presses and two clicks, and nothing after round_limit_ms.
+/// At most two key presses and two clicks, and nothing after round_limit_ms
+/// of the round's own time. After each key and click the game is given up to
+/// react_ms() to show what it did -- looked at every quarter of a second, the
+/// round going on at the first look that shows it -- and only then is the step
+/// given up, as it always was; that wait is not counted in round_limit_ms.
+/// Nothing is ever pressed again for a game that is only slow: the key opens
+/// as well as shuts the window, and the box is clicked once.
 /// Every key and click is asked about first -- a stop, F12, the keeper
 /// starting a crossing, HP falling under the potion's mark -- and nothing at
 /// all is pressed after one, not even the key that would close the window:
@@ -493,6 +525,20 @@ public:
         /// a player who often switches windows would otherwise have quick
         /// quest stop itself, with an alert, over nothing.
         std::function<bool()>                             behind;
+        /// Asked only in the round's waits for the game's reactions -- the
+        /// looks every quarter of a second after a key or click, which press
+        /// nothing -- once such a wait has run past kReactSlowMs from its key
+        /// or click, so that a game answering at its usual pace still has the
+        /// round done: true when HP is under what the HP potion fires at (Tự
+        /// chat's floor, chat_hp_floor_ in the GUI). The round ends there as
+        /// for low_hp: not now, nothing more pressed, a window it opened left
+        /// for the next round to close. Why only there (2026-11-15): the round
+        /// still starts, and goes on between its looks, at any HP -- the
+        /// owner's 2026.11.12b -- but since 2026-11-15 each of those waits can
+        /// run kReactMs, and the round's hold keeps the potions off all that
+        /// time, where before the whole round was over in a few seconds. Unset,
+        /// as in Thử xem and gobot_cli, it is never asked.
+        std::function<bool()>                             under_potion_mark;
     };
     using Report = std::function<void(const std::string&)>;
 
@@ -507,18 +553,27 @@ public:
     /// not for the player's, which would stay open all run. A window the
     /// player opened since is closed with it; there is no telling them apart.
     void adopt_open_window(bool yes) { adopt_ = yes; }
+    /// How long a step waits, from its key or click, for the game to show what
+    /// it did: kReactMs (the owner, 2026-11-15: 30 s for slow PCs). Settable
+    /// for a test; never under the step's own [Timing] numbers.
+    void set_react_ms(int ms) { react_ms_ = ms; }
+    int  react_ms() const { return react_ms_; }
 
     QuestResult run();
 
 private:
     /// Why a round stops part way, once it has: kept, so that a stop stays a
     /// stop.
-    enum class Halt { None, Stop, LowHp, Behind };
+    enum class Halt { None, Stop, LowHp, Behind, PotionMark };
     bool halted();
     /// The outcome for a round that halted: cancelled for a stop, not now for
     /// HP. A window that was GoBot's to close may be open still.
     void set_halted(QuestResult& r, const std::string& where);
     bool wait(int ms);                  ///< false when halted meanwhile
+    /// wait(), for a gap between two looks of a wait for the game's reaction
+    /// to a key or click made at `since`: false also when HP is under the
+    /// potion's mark (Hands::under_potion_mark) once kReactSlowMs have passed.
+    bool react_wait(int ms, std::uint64_t since);
     bool look(Frame& f);
     bool press(QuestResult& r, int hold_ms);
     bool click(QuestResult& r, const ScreenRect& window, int x, int y, const char* what);
@@ -528,6 +583,14 @@ private:
     bool close(QuestResult& r);
     void note(QuestResult& r, const std::string& part);
     std::uint64_t clock();
+    /// A wait for the game's reaction that began at `since` has ended, `seen`
+    /// or not: its time is kept out of the round's own (own_ms), a slow one
+    /// said in the log with how long it took, one that ran out said as
+    /// nothing after react_ms() and kept in QuestResult::react_s.
+    void reacted(QuestResult& r, std::uint64_t since, bool seen, const char* what);
+    /// The round's time so far, less its waits for the game's reactions: what
+    /// round_limit_ms is counted against.
+    std::uint64_t own_ms();
 
     const QuestPictures& pictures_;
     QuestSettings        settings_;
@@ -537,6 +600,8 @@ private:
     Halt                 halt_ = Halt::None;
     bool                 adopt_ = false;
     std::uint64_t        started_ = 0;
+    std::uint64_t        reacting_ = 0;     ///< ms spent waiting for the game's reactions
+    int                  react_ms_ = kReactMs;
     int                  client_w_ = 0, client_h_ = 0;
 };
 
@@ -628,6 +693,10 @@ struct QuestGateInput {
     /// Asked for with Làm ngay 1 lần, by a person at GoBot's window: that
     /// round may bring the game forward itself, as the trash tab's buttons do.
     bool        asked = false;
+    /// A dungeon run's boss fight or reward room, in the card's words; empty
+    /// for none (2026.11.21, the audit's B6; TripQuietFlag). A timed round --
+    /// the one 30 s after a revive too -- waits it out; one asked for goes.
+    std::string dungeon;
 };
 
 /// Whether a round may start, and if not why, in Vietnamese.
@@ -650,7 +719,13 @@ struct QuestCall {
 };
 
 /// Quick quest for the length of a run, or for one round asked for: the
-/// schedule, the gates, the failures in a row and the stop they lead to.
+/// schedule, the gates, and the failures in a row -- told once a streak, as
+/// they reach max_failures, and never a stop since 2026.11.24 (the owner:
+/// "Kiểm tra các phần khác xem có phần nào không làm được thì dừng không, cần
+/// thay cơ chế này bằng 1 cơ chế khác"): the next round comes at its interval,
+/// as after any failed round. Pictures missing put the next look off
+/// kPostponeMs, said once, until they are there (the round looks for them
+/// again); only the English client, which is not supported, stops it.
 ///
 /// No threads and no clock: every call is told the time, and the rounds, the
 /// gates and the alert come through hooks, so a test can run an hour of it in
@@ -699,6 +774,8 @@ public:
     void step(std::uint64_t now);
 
     bool running() const { return running_; }
+    /// Only for the English client since 2026.11.24: failed rounds in a row
+    /// and missing pictures no longer stop it.
     bool stopped_itself() const { return stopped_; }
     /// Why, in Vietnamese, for the tab.
     const std::string& stopped_why() const { return stopped_why_; }
@@ -751,6 +828,9 @@ private:
     std::string   waiting_for_;
     std::uint64_t said_at_ = 0;
     std::string   said_;
+    /// "Thiếu hình ..." said for the rounds that found the pictures missing,
+    /// until one finds them (2026.11.24).
+    bool          no_pictures_said_ = false;
     bool          has_last_ = false;
     QuestResult   last_;
 };

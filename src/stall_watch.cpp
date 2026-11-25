@@ -183,11 +183,12 @@ bool stall_window_is_the_games(void* window, const std::string& game_process,
 
 bool login_page_up(const Frame& f, const AutoLogin::Settings& login, const TemplateStore& pages) {
     if (!f.valid()) return false;
-    const ScreenRect all{ 0, 0, f.width, f.height };
+    // The crossing's own lookup (2026.11.13c): the channel list by its panel
+    // too, and the character select by its "Bắt Đầu Game" half on a game of
+    // another size -- a page the crossing finds is never a hung game here.
     for (const AutoLogin::Page& page : login.pages) {
         if (page.on != AutoLogin::On::Game || page.picture.empty()) continue;
-        const Frame* picture = pages.get(page.picture);
-        if (picture != nullptr && TemplateMatcher::find(f, all, *picture, page.score).found) return true;
+        if (AutoLogin::page_found(page, f, pages).found) return true;
     }
     return false;
 }

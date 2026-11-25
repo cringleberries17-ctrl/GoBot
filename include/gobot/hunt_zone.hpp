@@ -39,6 +39,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -95,6 +96,12 @@ inline constexpr bool kSpotHereMovesZone = true;
 /// the character is, and it walks home.
 inline constexpr int  kZoneTakePx = 150;
 inline constexpr bool kZoneTakeAnywhere = false;
+/// The owner's Q5 of 2026.11.12c ((a) until answered): relogged or fallen
+/// under the box -- across within kZoneTakePx of it, no more than this under
+/// its bottom -- the zone takes over too, and the way back goes: t23_s14's
+/// relog of 2026-11-12 23:47:34 at 1757,1810, 224 px under the box.
+inline constexpr bool kZoneTakeFallen = true;
+inline constexpr int  kZoneTakeBelowPx = 600;
 
 /// Why a zone waiting at the hunter takes over, or that it waits (zone_take).
 enum class ZoneTake : std::uint8_t {
@@ -104,6 +111,7 @@ enum class ZoneTake : std::uint8_t {
     Near,       ///< within kZoneTakePx of the box
     Back,       ///< back within kZoneTakePx of where the zone's spot was left
     Anywhere,   ///< kZoneTakeAnywhere
+    Below,      ///< under it, fallen or relogged there: kZoneTakeFallen (2026.11.12c)
 };
 const char* zone_take_name(ZoneTake t);     ///< for the log: "inside", "near", ...
 /// The Q1 rule, for a settled fix at x, y: `edit_in_use` -- the zone is the
@@ -265,6 +273,38 @@ inline constexpr double kZoneWalkOffShares[] = { 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0 
 /// one jump, never three.
 inline constexpr int kZoneReturnFallsMax = 3;
 inline constexpr int kZoneReturnJumpsMax = 2;
+/// The owner's Q4 of 2026-11-11 ("Tìm cách quay lại chỗ cũ, khi bị rơi xuống
+/// thì tìm platform có thể nhảy lên theo map rồi thực hiện nhảy cao nếu cần"):
+/// fallen out of the box where no leg landing inside it gets back, the way
+/// back goes over the map's other floors as well -- along them, off their
+/// ends onto a floor (never into a pit, below every floor), and straight up
+/// by ↑, ↑↑ or Ctrl + ↑ -- a floor at a time (return_point's `legs`, the whole
+/// map: zone_whole_map). At most these walk-offs and jumps up on one such way,
+/// and these floors looked at: walking and falling alone, or with jumps up --
+/// each floor then looked along for its take-offs, the dearest part.
+inline constexpr int kZoneTravelFallsMax = 32;
+inline constexpr int kZoneTravelJumpsMax = 4;
+inline constexpr int kZoneTravelFloorsMax = 256;
+/// 64 until 2026.11.12b: on t23_s14 with drops on, 37-48 are used, 13-30 of
+/// them going down before any jump is looked at.
+inline constexpr int kZoneTravelJumpFloorsMax = 96;
+/// Over the whole map, a floor's jumps up are looked for from where the way
+/// comes onto it and every this far along it either way -- each look takes
+/// kJumpUpSearchPx either side of its point.
+inline constexpr int kZoneTravelJumpEveryPx = 1000;
+/// And with drops able to go (2026.11.12 review, the owner's Q4 "drop where it
+/// leads down"): Ctrl + ↓ through a platform, judged as the drop rule judges
+/// one (zone_drop_from), from where the way comes onto a floor and every this
+/// far along it either way, kZoneTravelDropsMax on one way at most. On
+/// t62_s5 a platform runs the whole width of the map at about 3000: from the
+/// top, where the game puts a character back after a pit, only Ctrl + ↓ goes
+/// below it.
+inline constexpr int kZoneTravelDropsMax = 8;
+inline constexpr int kZoneTravelDropEveryPx = 160;
+/// A drop's take-off is walked to within this across and settled there: the
+/// landing is planned to hold kDropMarginPressPx and this much more either
+/// side, and a gate this much further, so the press's own rule holds too.
+inline constexpr int kZoneDropLeadPx = 24;
 /// A way back that first walks off the floor it starts on is walked toward
 /// this far past that floor's end (ZoneReturn::walk_x).
 inline constexpr int kZoneWalkOffPastPx = 16;
@@ -338,6 +378,39 @@ std::vector<ZoneLegs::Fall> zone_falls(const GameMapBook::Page& p, const HuntZon
 /// and -- with `up` -- the jumps up jump_legs_from finds by those rules.
 ZoneLegs zone_legs_from(const GameMapBook::Page& p, const HuntZone& z, MapPoint at, const JumpRules* up = nullptr);
 
+/// What a way back's drops go by (return_point's `down`, 2026.11.12 review):
+/// the map's gates -- its .prj's and those learned -- refused within gate_px
+/// (drop_gate_px) across in a fall's band, and the points Ctrl + ↓ did not
+/// drop at this session (GameMapBook::no_drop_near; none: no such look).
+struct ZoneDropRules {
+    std::vector<MapGate> gates;
+    int                  gate_px = 0;
+    std::function<bool(MapPoint)> no_drop;
+};
+/// One drop on a way back: standing at `take` (top - 1) on a platform whose
+/// top is `stand_y`, Ctrl + ↓, landing at `land` on the floor whose top is
+/// `land_y`.
+struct ZoneDrop {
+    MapPoint take;
+    int      stand_y = 0;
+    MapPoint land;
+    int      land_y = 0;
+};
+/// The landing's floor -- its top land_y under x0 -- followed m columns
+/// `dir`, the same floor kDropSameFloorPx up or down as the character's own
+/// floor from x0, y0 followed there, with no floor between: the drop rule's
+/// "the same floor either side", sloping or flat (Hunter::drop_rule).
+bool drop_landing_holds(const GameMapBook::Page& p, int x0, int y0, int land_y, int dir, int m);
+/// A drop from the standing point `at` by `r`, as the drop rule has it at a
+/// press -- a platform, not the bottom ground nor a wall; the first floor
+/// below (floor_below, kDropFeetPx) at least Hunter::kDropMinFallPx down,
+/// inside `in`; the landing holding kDropMarginPressPx + kZoneDropLeadPx either
+/// side (drop_landing_holds); no gate within gate_px + kZoneDropLeadPx across
+/// from kDropGateSpanPx above to kDropGateSpanPx under the landing; no point
+/// where Ctrl + ↓ did not drop. None for a pit: nothing below.
+std::optional<ZoneDrop> zone_drop_from(const GameMapBook::Page& p, const HuntZone& in, MapPoint at,
+                                       const ZoneDropRules& r);
+
 /// The way back into a zone from where the character stands (return_point).
 struct ZoneReturn {
     MapPoint at;                ///< where it ends: a standing point (top - 1) in the box -- the home when the way gets there
@@ -359,9 +432,18 @@ struct ZoneReturn {
     /// hop never -- a hop off the floor walked along leaves the way. Never so
     /// when jumps may go: those are planned, or there is no way.
     bool     as_before = false;
+    /// Its legs judged over the whole map (2026.11.12, the owner's Q4): the way
+    /// lands on floors outside the box before it comes back into it --
+    /// return_point's `legs` given. Its jumps up are pressed and judged by
+    /// that box (zone_whole_map), not the area's.
+    bool     travel = false;
+    /// Drops through a platform on the way (2026.11.12 review), and the one it
+    /// starts with, when it does: walked to (walk_x), settled, Ctrl + ↓.
+    int      drops = 0;
+    std::optional<ZoneDrop> drop;
 
-    /// Walking alone gets there: never a hop, never a jump.
-    bool own_floor() const { return falls == 0 && jumps == 0 && !as_before; }
+    /// Walking alone gets there: never a hop, never a jump, never a drop.
+    bool own_floor() const { return falls == 0 && jumps == 0 && drops == 0 && !as_before; }
 };
 /// The way back into the box from `from`: the floor it stands on followed both
 /// ways to its ends (Page::follow), and off them -- each fall landing on a
@@ -378,8 +460,30 @@ struct ZoneReturn {
 /// 880,274 on the spawn ledge -- the ground it stands on, at x 880: floor 635,
 /// standing at 880,634, left of it; with jumps, the home itself: left along the
 /// ground to x 810 or so, and Ctrl + ↑.
+///
+/// With `legs` (2026.11.12, the owner's Q4): the falls and jumps are judged in
+/// that box instead -- the whole map, zone_whole_map -- so a way may land on
+/// floors outside `z` on its way back into it: kZoneTravelFallsMax walk-offs
+/// and kZoneTravelJumpsMax jumps up at most, kZoneTravelFloorsMax floors
+/// (kZoneTravelJumpFloorsMax with jumps)
+/// looked at; never as_before. The way found is marked `travel`. With `down`
+/// as well (2026.11.12 review): drops through platforms too (zone_drop_from),
+/// kZoneTravelDropsMax at most, a way with fewer drops before one with fewer
+/// walk-offs.
+/// `stats` (2026.11.12c), when given: how many floors were looked at, how
+/// many points looked along for jumps up, and whether the floor budget cut
+/// the search short -- what the hunter says of a way it did not find.
+struct ZoneReturnStats {
+    int  floors = 0;
+    int  jump_looks = 0;
+    bool capped = false;
+};
 std::optional<ZoneReturn> return_point(const GameMapBook::Page& p, const HuntZone& z, MapPoint from,
-                                       const JumpRules* up = nullptr);
+                                       const JumpRules* up = nullptr, const HuntZone* legs = nullptr,
+                                       const ZoneDropRules* down = nullptr, ZoneReturnStats* stats = nullptr);
+/// The whole of `p`'s map as a box, `z`'s home its own: the box a way back's
+/// legs outside the area are judged in (return_point's `legs`).
+HuntZone zone_whole_map(const GameMapBook::Page& p, const HuntZone& z);
 
 /// The owner's Q2 of 04d ((a) until answered): further outside the box than
 /// this, with a way back the map shows (not as_before), the character walks

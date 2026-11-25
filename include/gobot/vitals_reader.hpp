@@ -139,8 +139,42 @@ public:
     /// how much more.
     static float shadowed_percent(float measured, int value, int max);
     /// Left of where any caption begins -- an 11-character one at 56-58% --
-    /// the fill measures true (BarCheck::kBarTrueBelowPct likewise).
+    /// the fill measures true.
     static constexpr float kCaptionShadowPct = 54.0f;
+
+    /// Whether figures read off a bar are short of the bar's own fill
+    /// (2026.11.17): `current` has fewer digits than `maximum`, and the fill
+    /// measures (`measured_pct`, measure()) more than kBehindFillPct points
+    /// past what they say. Such a read lost its first digits under something
+    /// drawn over them -- on 2026-11-17 the EXP bar's glowing tip, which
+    /// rides along the bar under MP's and sat on "15542/16813": it read
+    /// 542/16813 (3%), with no hole on the pitch to show it, as the caption
+    /// is right-aligned and the digits left are where a real 542 would be.
+    /// The fill is drawn from the bar's left edge and neither white digits
+    /// nor a pink glow are its colour, so the measure can come out short
+    /// (the caption paints out the end of the fill) but never long: a bar
+    /// filled to 57% cannot carry 3%. The reader refuses such a read as it
+    /// refuses a hole, the figures kept before it standing in. False with no
+    /// measure, or no figures.
+    static bool figure_behind_fill(float measured_pct, int current, int maximum);
+    /// About one digit cell and a pixel (6 px of 159 is 3.8 points): the
+    /// least a lost leading digit puts between the figures and the fill on
+    /// the owner's MP of 16813 is 15 points, and an honest read sits on its
+    /// fill within a pixel.
+    static constexpr float kBehindFillPct = 5.0f;
+
+    /// Whether MP reads as nothing because its caption is covered or
+    /// unreadable while its fill reaches into it (2026.11.17): the figures
+    /// unread, none kept -- forgotten after forget_after_misses reads, or
+    /// none read yet -- and the measure kCaptionShadowPct or more. That
+    /// measure says only "this much or more" -- it stops where the caption,
+    /// or the EXP bar's tip, begins -- and handed on as MP it read a full bar
+    /// as 57%, under the owner's MP mark of 62, so the MP potion went every
+    /// few seconds whenever the packets had no MP to give. A measure under
+    /// kCaptionShadowPct is true and still handed on. HP is never made
+    /// nothing so: an unread HP is how GoBot tells the character is out of
+    /// the world, and nothing that covers MP's caption reaches HP's.
+    bool mp_covered() const { return mp_covered_.load(); }
 
     /// When HP last read as a figure -- 0..100, not -1 -- on now_ms()'s clock;
     /// 0 before the first. A read that made out neither the figures nor the
@@ -181,8 +215,8 @@ public:
     ///
     /// Kept through a read that misses them, for forget_after_misses reads:
     /// `hp_now` and `mp_now` say whether the last read made them out itself.
-    /// Only those are the bar's at that read -- what the packets' check
-    /// (packets_vitals.cpp) may hold against 0x0051.
+    /// Only those are the bar's at that read -- what the log sets beside the
+    /// packets (BarCompare, packets_vitals.cpp).
     struct Vitals {
         int hp = -1, hp_max = -1;
         int mp = -1, mp_max = -1;
@@ -206,8 +240,40 @@ public:
     /// The caption is right-aligned inside the bar and sits a little below its
     /// middle, so where to look follows from the bar's own geometry and needs
     /// no separate calibration.
+    ///
+    /// A read with a digit missing is refused rather than given short
+    /// (2026.11.13). The set has narrow lookalikes the reader can take a
+    /// digit for -- 'l', 'i' and 'I' are 1 px stems beside the 3 px '1', 'O'
+    /// and 'D' sit over a '0' and the slash beside it -- and every glyph that
+    /// is not a digit is passed over, so a digit read as one left no trace:
+    /// on 2026-11-13 "11552/18590" came back as 1/552 (0%) and "18590/18590"
+    /// as 1859/18590 (10%), and the packets' check of then took them for the
+    /// truth.
+    /// On the game's fixed pitch a missed digit still shows: next to the
+    /// slash the step across is two and a half cells, not one and a half
+    /// (kMissedStepCells); inside a figure it is a two-cell step beside the
+    /// slash's own. `refused`, when given, is set when figures were there and
+    /// the read was refused for such a hole -- not "nothing read".
     static bool read_numbers(const Frame& f, const BarSpec& spec,
-                             const GlyphFont& font, int& current, int& maximum);
+                             const GlyphFont& font, int& current, int& maximum,
+                             bool* refused = nullptr);
+    /// A step across the slash of more than this many cells has a digit
+    /// missing beside it. Measured on the owner's captures of 2026-11-10 and
+    /// 2026-11-13 ("14915/16209", "15047/18590", "18873/18873"): digits 6 px
+    /// apart, the '1' at its cell's start, the slash 3 px -- across it 9 px,
+    /// 1.5 cells; with a digit missing beside it 15 px, 2.5 cells; a hole
+    /// inside a figure 12 px, 2 cells. Two sits 3 px from either.
+    static constexpr double kMissedStepCells = 2.0;
+
+    /// The maximum a read gives, against the one believed (2026.11.13).
+    /// A maximum is believed once seen twice in a row, as before; a read
+    /// whose maximum is not the believed one gives no figures until it is --
+    /// a stray maximum on one read is a misread, not HP at 0%. (A misread
+    /// held for two reads is believed as any maximum is; the holes above and
+    /// figure_behind_fill stand before it, and with the packets on, the
+    /// packets' maximum goes instead.) True where no maximum is believed yet,
+    /// or this read's is it.
+    static bool max_believed(int max, int& believed, int& pending, int& seen);
 
     /// Where the caption is, given the bar. Exposed so the calibration view
     /// can draw the box it is reading.
@@ -387,6 +453,11 @@ public:
         /// means the font is missing or the caption box is in the wrong place,
         /// and the numbers on show are stale.
         std::uint64_t number_reads = 0;
+
+        /// Figures refused for being short of their bar's fill
+        /// (figure_behind_fill), HP's and MP's, since the reader started.
+        std::uint64_t behind_fill_hp = 0;
+        std::uint64_t behind_fill_mp = 0;
     };
     Stats stats() const;
 
@@ -423,22 +494,38 @@ private:
     std::atomic<float> hp_{-1.0f};
     std::atomic<float> mp_{-1.0f};
     std::atomic<float> pet_{-1.0f};
+    std::atomic<bool>  mp_covered_{false};   ///< see mp_covered
     std::atomic<std::uint64_t> read_at_ms_{0};
     std::atomic<std::uint64_t> hp_seen_ms_{0};
     std::thread        thread_;
 
     /// The frame of the first read that makes out no HP after one that did,
     /// kept in vitals_debug for what was on it -- at most one every
-    /// kKeepFrameGapMs, the newest kKeptFrames -- written off the reader's
-    /// thread (keeping_). The reader thread's alone.
+    /// kKeepFrameGapMs for the first kFramesAtFirst of the run, then one every
+    /// kKeepFrameLaterGapMs (2026.11.16); the newest kKeptFrames -- written
+    /// off the reader's thread (keeping_). The reader thread's alone.
     void keep_unreadable_frame(const Frame& f, bool from_screen, float mp_pct);
     bool          hp_was_read_ = false;
     std::uint64_t kept_frame_ms_ = 0;
+    std::size_t   kept_frames_ = 0;           ///< kept since GoBot started
     static constexpr std::uint64_t kKeepFrameGapMs = 10000;
+    static constexpr std::size_t   kFramesAtFirst = 20;
+    static constexpr std::uint64_t kKeepFrameLaterGapMs = 600'000;
     static constexpr std::size_t   kKeptFrames = 20;
     /// A kept frame being written; its destructor waits for the write, which
     /// touches nothing of the reader's.
     std::future<void> keeping_;
+
+    /// A picture of the game at a client size other than the 1024x768 most of
+    /// GoBot was measured on, kept once a session for each size, HP read on it
+    /// by the HUD's landmark (2026.11.13c): vitals_debug\size_<W>x<H>_<when>.png,
+    /// the newest kSizeSamplesKept of them -- apart from the vitals_*.png --
+    /// written off the reader's thread (keeping_size_). The reader thread's
+    /// alone, and never on a test's grab: only the real window's.
+    void keep_size_sample(const Frame& f);
+    std::vector<std::uint64_t> sizes_kept_;
+    static constexpr std::size_t kSizeSamplesKept = 6;
+    std::future<void> keeping_size_;
 
     /// The pet's bar, followed: the reader thread's alone -- locate_anchor,
     /// on that thread, moves it with the landmark. pet_bar_, under mutex_,
@@ -475,6 +562,22 @@ private:
     /// not changed in a minute. "Enough" is forget_after_misses at the pace
     /// the reads are asked at: about two seconds, whatever the pace.
     int hp_misses_ = 0, mp_misses_ = 0;
+    /// Of those, the ones where nothing was read (2026.11.13): a read refused
+    /// for a hole in its figures, or for a maximum not believed, found the
+    /// caption where it was, so it is no sign the HUD has moved -- only these
+    /// send the reader looking for the landmark again. All misses still
+    /// forget the figures.
+    int hp_blank_ = 0, mp_blank_ = 0;
+
+    /// Figures refused for being short of their fill (figure_behind_fill),
+    /// and MP read as nothing for a covered caption (mp_covered): each said
+    /// in the log at most once in kCoverSayMs a bar, with how many more
+    /// there were since -- a run that refuses an honest read would show it.
+    /// The reader thread's alone. [0] HP, [1] MP.
+    std::uint64_t behind_said_ms_[2] = { 0, 0 };
+    std::uint64_t behind_unsaid_[2] = { 0, 0 };
+    std::uint64_t covered_said_ms_ = 0;
+    static constexpr std::uint64_t kCoverSayMs = 60'000;
 
     /// Find the landmark again when it has been lost, but not every frame:
     /// it does not move while the HUD is up, so re-finding it constantly is
@@ -499,6 +602,11 @@ private:
     HudLayout          layout_;
     ScreenRect         anchor_at_{};
     bool               anchor_found_ = false;
+    /// When the landmark was last looked for while lost, now_ms(); 0 to look
+    /// at the next read (a bar or the landmark given). Once in
+    /// kAnchorLookGapMs at most (2026.11.16).
+    std::uint64_t      anchor_looked_ms_ = 0;
+    static constexpr std::uint64_t kAnchorLookGapMs = 1000;
 
     mutable std::mutex stats_mutex_;
     Stats              stats_;

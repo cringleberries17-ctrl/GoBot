@@ -271,6 +271,13 @@ bool any_key_on(const MacroConfig& cfg) {
                        [](const MacroKey& k) { return k.enabled && k.keycode != 0; });
 }
 
+/// Said after the reason wherever a start owed waits (2026.11.24,
+/// gobot/owed_start.hpp): GoBot asks again by itself, with the number the
+/// code asks by.
+std::string owed_again_vi() {
+    return " GoBot tự thử lại mỗi " + std::to_string(kOwedAskMs / 1000) + " giây.";
+}
+
 /// A card: a bordered panel sized to what is in it, a shade lighter than the
 /// window so the three of them read as separate steps.
 ///
@@ -446,6 +453,16 @@ void GuiApp::draw_simple_view() {
             simple_quest_tab();
             ImGui::EndTabItem();
         }
+        if (tab("Đào khoáng", expedition_running_ && mining_on_, "mining")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_mining_tab();
+            ImGui::EndTabItem();
+        }
+        if (tab("Phó bản", expedition_running_ && dungeon_on_, "expedition")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            simple_expedition_tab();
+            ImGui::EndTabItem();
+        }
         // Last: it watches the others rather than doing anything itself.
         if (tab("Thông báo", alerts_dot(), "alerts")) {
             ImGui::Dummy(ImVec2(0, 4));
@@ -564,6 +581,27 @@ void GuiApp::simple_checklist() {
         ImGui::Unindent(mark_indent());
     }
 
+    // ---- part of it off the screen, or under the taskbar ----
+    //
+    // A 1366x768 game in a window on a screen 768 px tall has its bottom past
+    // the edge and under the taskbar, where the hotbar and the chat are
+    // (2026.11.13c): read off the screen, what is there reads black, or as
+    // the taskbar. Only shown when rows or columns are really hidden
+    // (check_game_scaling's look). On a machine where the game draws itself
+    // for GoBot (the reader's frames not off the screen) nothing is lost to
+    // it, which the line says, with a dot rather than a cross; before the
+    // reader has read, as off the screen -- most machines.
+    if (have_game && game_fit_.hides()) {
+        const VitalsReader::Stats seen = vitals_.stats();
+        const bool off_screen = seen.reads == 0 || seen.capture_from_screen;
+        mark(off_screen ? Mark::Bad : Mark::Wait);
+        ImGui::SameLine();
+        label("Game không nằm trọn trên màn hình");
+        ImGui::Indent(mark_indent());
+        hint(AutoLogin::fit_advice(game_fit_, off_screen).c_str());
+        ImGui::Unindent(mark_indent());
+    }
+
     // ---- Windows scaling it ----
     //
     // Above 100% display scale Windows enlarges a game that does not handle DPI
@@ -665,12 +703,20 @@ void GuiApp::simple_checklist() {
     // ---- HP and MP ----
     {
         const bool hp = vitals_running_ && vitals_.hp_percent() >= 0.0f;
-        const bool mp = vitals_running_ && vitals_.mp_percent() >= 0.0f;
+        // MP whose figures are covered -- the EXP bar's glowing tip rides
+        // under them as EXP grows (2026.11.17) -- is found, not lost: no
+        // "Tự tìm" for it, which would find the same bars.
+        const bool covered = vitals_running_ && vitals_.mp_covered();
+        const bool mp = vitals_running_ && (vitals_.mp_percent() >= 0.0f || covered);
         mark(hp && mp ? Mark::Good : hp || !have_game ? Mark::Wait : Mark::Bad);
         ImGui::SameLine();
-        if (hp && mp)  label("Đọc được HP và MP");
-        else if (hp)   label("Đọc được HP, chưa đọc được MP");
-        else           label("Chưa đọc được HP và MP");
+        // With the packets' MP going, the covered figures cost nothing.
+        const bool mp_packets = covered && mp_percent_now() >= 0.0f;
+        if (hp && mp && mp_packets) label("Đọc được HP; MP theo gói tin (số MP trên thanh đang bị che)");
+        else if (hp && mp && covered) label("Đọc được HP; số MP đang bị che (đầu thanh EXP) -- chờ");
+        else if (hp && mp)       label("Đọc được HP và MP");
+        else if (hp)             label("Đọc được HP, chưa đọc được MP");
+        else                     label("Chưa đọc được HP và MP");
 
         if (have_game && !(hp && mp)) {
             ImGui::SameLine();
@@ -1291,10 +1337,13 @@ void GuiApp::simple_jobs() {
         }
     }
     ImGui::TableNextColumn();
+    // Since 2026.11.24 the bot is not stopped when the 3 tries fail (the
+    // owner: "... không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ
+    // chế khác"): another round 30 s on (Reviver::kRoundGapMs), without end.
     hint(simple_ui::trial_hint(simple_ui::kTrialRevive,
                                "Khi nhân vật chết, bấm Sử dụng vật phẩm hồi sinh rồi Xác Nhận. Thử "
-                               "tối đa 3 lần; không được thì dừng bot. Không hồi sinh tại làng, "
-                               "không dùng Cash.").c_str());
+                               "3 lần; chưa được thì 30 giây sau thử lại (không dừng bot). Không hồi "
+                               "sinh tại làng, không dùng Cash.").c_str());
     simple_popups_row();        // "Tự đóng thông báo", simple_popups.cpp
 
     ImGui::EndTable();
@@ -1438,17 +1487,17 @@ void GuiApp::simple_start_block() {
     if (!begin_card("##state")) { end_card(); return; }
 
     const bool focused = input_.window_focused();
-    std::string keeper_now, keeper_problem;
+    std::string keeper_now, keeper_problem, revive_wait;
     {
         std::lock_guard<std::mutex> lock(worker_mutex_);
         keeper_now = keeper_vi_;
         keeper_problem = keeper_problem_vi_;
+        revive_wait = revive_wait_vi_;
     }
-    if (!running && !simple_stopped_vi_.empty()) {
-        // The bot stopped itself -- the revive ran out of tries -- and says
-        // why until the next BẮT ĐẦU.
-        coloured(kBad, simple_stopped_vi_.c_str());
-    } else if (!running) {
+    // Nothing stops the bot by itself any more (2026.11.24): the revive out of
+    // tries, its one way of doing so, tries again instead -- and the red line
+    // it left here until the next BẮT ĐẦU is gone with it.
+    if (!running) {
         if (!can_start)
             coloured(kWait, "Chưa chạy. Làm xong các mục đỏ ở trên trước.");
         else if (!have_game)
@@ -1559,9 +1608,21 @@ void GuiApp::simple_start_block() {
     if (running && hunt_config_.enabled && !hunting_ && !hunt_named())
         coloured(kBad, "Tự đánh quái chưa chạy: chưa gõ tên nhân vật ở phần \"Trước khi bắt "
                        "đầu\". Gõ tên rồi bấm ra ngoài ô, Tự đánh quái sẽ chạy.");
-    // Likewise for "Chỗ đánh quái" with no packets to go by (start_hunt).
+    // Likewise for "Chỗ đánh quái" with no packets to go by (start_hunt) --
+    // and, owed, that GoBot asks again by itself (2026.11.24).
     else if (running && hunt_config_.enabled && !hunting_ && hunt_config_.spot && !spot_refused_vi_.empty())
-        coloured(kBad, ("Tự đánh quái chưa chạy: " + spot_refused_vi_).c_str());
+        coloured(kBad, ("Tự đánh quái chưa chạy: " + spot_refused_vi_ + (hunt_owed_ ? owed_again_vi() : std::string()))
+                           .c_str());
+    // Refused for anything else with the run on -- a doubt, the detector --
+    // and owed: said in amber, so that "Đang chạy" above is not all it says.
+    else if (running && hunt_config_.enabled && !hunting_ && hunt_owed_)
+        coloured(kWait, ("Tự đánh quái chưa chạy được." + owed_again_vi()).c_str());
+    // The cold start's jobs refused by a doubt, the keeper alone running
+    // (2026.11.24): asked again by themselves.
+    if (running && jobs_owed_)
+        coloured(kWait, ("Chưa bật các việc đã chọn: GoBot chưa chắc ô chat hoặc hộp thoại thùng rác trong game "
+                         "đã đóng." + owed_again_vi())
+                            .c_str());
 
     // ---- the parts that run beside it ----
     if (party_running_)
@@ -1573,18 +1634,37 @@ void GuiApp::simple_start_block() {
     if (keeper_running_ && !simple_cold_start_) {
         const int restarts = keeper_restarts_.load();
         const std::string now = keeper_now.empty() ? std::string("Đang theo dõi game.") : keeper_now;
-        hint(("Tự đăng nhập: " + now +
-              (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần." : std::string()))
-                 .c_str());
+        const std::string line = "Tự đăng nhập: " + now +
+                                 (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần." : std::string());
+        // Waiting to cross again, or for the hour's restarts (2026.11.24): in
+        // amber, as the keeper goes on by itself.
+        if (keeper_waiting_) coloured(kWait, line.c_str());
+        else                 hint(line.c_str());
     } else if (!keeper_running_ && simple_opts_.keep_alive && !keeper_problem.empty()) {
-        // Stopped for a person: why, where it will be seen.
+        // Stopped for a person -- since 2026.11.24 only GoBot not running as
+        // administrator: why, where it will be seen.
         coloured(kBad, ("Tự đăng nhập đã dừng: " + keeper_problem).c_str());
     }
     if (revive_running_) {
-        const int revived = revive_count_.load();
-        hint(("Tự hồi sinh: đang theo dõi" +
-              (revived > 0 ? ", đã hồi sinh " + std::to_string(revived) + " lần" : std::string()) +
-              ".").c_str());
+        const std::uint64_t round_at = revive_round_ms_.load();
+        if (!revive_wait.empty()) {
+            // Waiting at its start for the pictures it needs (2026.11.24; it
+            // ended there until then): in red, as a death would not be seen.
+            coloured(kBad, ("Tự hồi sinh chưa chạy: " + revive_wait).c_str());
+        } else if (round_at != 0) {
+            // Dead, a round of 3 tries run out, the next one on its way
+            // (2026.11.24; the bot stopped here until then).
+            const std::uint64_t now = now_ms();
+            const std::uint64_t left = round_at > now ? (round_at - now + 999) / 1000 : 0;
+            coloured(kWait, ("Tự hồi sinh: 3 lần chưa được — có thể đã hết giấy/bùa hồi sinh. Thử lại sau " +
+                             std::to_string(left) + " giây; hồi sinh bằng tay thì bot tự chạy tiếp.")
+                                .c_str());
+        } else {
+            const int revived = revive_count_.load();
+            hint(("Tự hồi sinh: đang theo dõi" +
+                  (revived > 0 ? ", đã hồi sinh " + std::to_string(revived) + " lần" : std::string()) +
+                  ".").c_str());
+        }
     }
     if (trash_running_ && !trash_oneshot_) {
         const int thrown = trash_thrown_.load();
@@ -1718,7 +1798,6 @@ void GuiApp::simple_window_list() {
 
 void GuiApp::simple_start() {
     if (simple_running()) return;
-    simple_stopped_vi_.clear();     // what stopped the last run is old news
 
     const bool any_key = any_key_on(macro_config_);
     Party::Settings party_rules;
@@ -1777,6 +1856,21 @@ void GuiApp::simple_start() {
                         "hoặc \"Chọn cửa sổ…\" ở thẻ Đánh quái.", 10000);
             return;
         }
+        // No game runs (game_running above): a closed game holds no item in
+        // the bin's dialog and no open chat line (2026.11.21, the audit's
+        // B22). A stop's doubt about either, left from the game before, is
+        // over here -- else the start deferred to the login (tick) met it in
+        // keys_may_start, whose one look at the arrival could refuse, and
+        // nothing asked again: logged in, the keeper alone running. Any look
+        // at the doubt under way counts for nothing (the gens).
+        if (trash_left_held_) {
+            ++left_held_gen_;
+            bin_seen_clear();
+        }
+        if (chat_doubt_ && !chat_doubt_watched_) {
+            ++chat_doubt_gen_;
+            chat_seen_shut();
+        }
         // Told to the keeper before it starts, so its very first look knows:
         // a game that comes up while it loads its pictures is followed, and
         // what was ticked starts on it.
@@ -1805,11 +1899,31 @@ void GuiApp::simple_start_jobs() {
     const bool chat = chat_rules.load(exe_relative("configs/chat.ini")) && chat_rules.enabled;
     QuestSettings quest_rules;
     const bool quest = quest_rules.load(exe_relative("configs/quest.ini")) && quest_rules.enabled;
+    ExpeditionSettings trips;
+    const bool expedition = trips.load(exe_relative("configs/expedition.ini")) &&
+                            (trips.mining.enabled || trips.cothu.enabled || trips.colong.enabled);
 
+    // BẮT ĐẦU starts it all: nothing is left for resume_after_bin (2026.11.21),
+    // and nothing owed (2026.11.24) -- what refuses below is owed afresh, and
+    // every refusal of this start is said (owed_why_).
+    left_held_resume_hunt_ = false;
+    left_held_resume_macro_ = false;
+    hunt_owed_ = false;
+    macro_owed_ = false;
+    owed_why_.clear();
     // Nothing at all starts while a stop may have left the bin's dialog, or
     // the game's chat line, open: the macro and the hunter would press keys
-    // into it, and the rest would start without them.
-    if (!keys_may_start()) return;
+    // into it, and the rest would start without them. The cold start's,
+    // refused so with its keeper alone running (tick(): the keeper in the
+    // world), is owed since 2026.11.24 -- asked again every 30 s while that
+    // keeper runs, and at once when the doubt is seen over; until then nothing
+    // else ever started. BẮT ĐẦU pressed with the game up is the player's own:
+    // said, and pressed again.
+    if (!keys_may_start()) {
+        if (keeper_running_ && !keeper_oneshot_ && !keeper_stop_) owe_start(jobs_owed_, "The run's jobs");
+        return;
+    }
+    jobs_owed_ = false;
 
     // The tallies start here, before anything can press a key, rather than
     // when the tick next notices the bot is running.
@@ -1823,12 +1937,10 @@ void GuiApp::simple_start_jobs() {
     apply_macro_config();
     if (any_key) start_macro();
 
-    // The hunter, always, never the packet bot: that one goes by protocol.ini's
-    // layouts, and none of them can place your character (your position comes
-    // only in the client's own UDP reports); the full screen's Attack switch
-    // makes the same choice. The hunter sees by the name plates, or -- with
-    // "Vị trí từ gói tin" ticked and the packets healthy -- by the game's own
-    // frames (PacketEyes), whose capture runs all session by itself. Not
+    // The hunter, as the full screen's Attack switch starts it. It sees by
+    // the name plates, or -- with "Vị trí từ gói tin" ticked and the packets
+    // healthy -- by the game's own frames (PacketEyes), whose capture runs all
+    // session by itself. Not
     // without your character's name, which the screen finds you by and which
     // the screen is the fallback for: the rest starts, and the card says in
     // red why the fighting did not.
@@ -1845,14 +1957,23 @@ void GuiApp::simple_start_jobs() {
     if (trash) start_trash();
     if (chat) start_chat();
     if (quest) start_quest();
+    if (expedition) start_expedition();
     start_popups();             // when "Tự đóng thông báo" is ticked
+    // Tự đánh quái asked and refused with the run on (2026.11.24): owed,
+    // asked again every 30 s (owed_tick) -- Npcap or its service up late after
+    // the PC's start, the detector not up the first time. After every start
+    // above, so that whether the run is on is known; with nothing else
+    // running there is no run, and BẮT ĐẦU is pressed again. Not for a name
+    // not typed: typing it starts the hunt (simple_changed).
+    if (hunt_config_.enabled && !unnamed && !hunting_) owe_start(hunt_owed_, "Hunting");
     if (unnamed)
         simple_note("Đã bắt đầu, nhưng chưa bật Tự đánh quái: chưa gõ tên nhân vật.", 12000);
     // Refused for "Chỗ đánh quái" with no packets to go by (start_hunt): its
     // reason, not "Đã bắt đầu" over it -- nor at all, when it was the only job.
+    // Owed, it says GoBot tries again (2026.11.24).
     else if (hunt_config_.enabled && !hunting_ && !spot_refused_vi_.empty())
         simple_note((simple_running() ? "Đã bắt đầu, nhưng chưa bật Tự đánh quái: " : "Chưa bật Tự đánh quái: ") +
-                        spot_refused_vi_,
+                        spot_refused_vi_ + (hunt_owed_ ? owed_again_vi() : std::string()),
                     15000);
     else
         simple_note("Đã bắt đầu.");
@@ -1866,7 +1987,7 @@ void GuiApp::simple_stop() {
     // window would freeze for. The player has taken over: a chat
     // line still in doubt after that is handed over to tick(), not waited on.
     // Not said over the word that the bin's dialog may still be open.
-    const bool bin_note = stop_jobs(false);
+    const bool bin_note = stop_jobs();
     simple_track_run(false);
     if (!bin_note) simple_note("Đã dừng.");
 }
@@ -1951,11 +2072,21 @@ void GuiApp::simple_changed() {
 
     // Running: follow the switches. Ticking fighting on mid-run starts it,
     // ticking it off stops it, and a key switched on when the timers were not
-    // running starts them.
+    // running starts them. One refused is owed (2026.11.24): asked again every
+    // 30 s while the run is on (owed_tick) -- until then only the next change
+    // of a setting asked again. Ticked off, nothing is owed: the player's own
+    // stop.
     if (simple_running()) {
-        if (hunt_config_.enabled && !hunting_) start_hunt();
+        if (hunt_config_.enabled && !hunting_) {
+            start_hunt();
+            if (!hunting_) owe_start(hunt_owed_, "Hunting");
+        }
+        if (!hunt_config_.enabled) hunt_owed_ = false;
         if (!hunt_config_.enabled && hunting_) stop_hunt();
-        if (any_key_on(macro_config_) && !macro_running_) start_macro();
+        if (any_key_on(macro_config_) && !macro_running_) {
+            start_macro();
+            if (!macro_running_) owe_start(macro_owed_, "The macro");
+        }
     }
 
     // No Save button on this screen: a setting a player has to remember to
@@ -1963,6 +2094,139 @@ void GuiApp::simple_changed() {
     const bool ok = macro_config_.save(exe_relative("configs/macro.ini")) &&
                     hunt_config_.save(exe_relative("configs/hunt.ini"));
     if (!ok) simple_note("Không lưu được cài đặt vào thư mục configs.", 8000);
+}
+
+int GuiApp::resume_after_bin() {
+    // Asked once: whatever comes of it, the doubt's stop is over.
+    const bool hunt = left_held_resume_hunt_.exchange(false);
+    const bool macro = left_held_resume_macro_.exchange(false);
+    // DỪNG meanwhile, or nothing else left running: BẮT ĐẦU starts it all.
+    if (!simple_running() || simple_cold_start_) return 0;
+    bool asked = false;
+    int out = 0;
+    // The potions first, as BẮT ĐẦU starts them (simple_start_jobs); each
+    // only as its switch still says, and through its own start -- which asks
+    // keys_may_start, so a chat line in doubt still keeps them off, and says
+    // why.
+    if (macro && any_key_on(macro_config_) && !macro_running_) {
+        apply_macro_config();
+        start_macro();
+        asked = true;
+        out |= macro_running_ ? kResumedMacro : kResumeRefused;
+        // Refused -- a chat line in doubt, the game's window gone -- it is owed
+        // (2026.11.24): asked again every 30 s while the run is on (owed_tick).
+        // Until then the resume was lost here, its flag cleared above.
+        if (!macro_running_) owe_start(macro_owed_, "The macro");
+    }
+    // Asked as BẮT ĐẦU would: hunt_named() left out here, so that a hunter
+    // with no character name is refused by start_hunt, which says why.
+    if (hunt && hunt_config_.enabled && !hunting_) {
+        if (hunter_) hunter_->set_config(hunt_config_);
+        start_hunt();
+        asked = true;
+        out |= hunting_ ? kResumedHunt : kResumeRefused;
+        // Likewise owed: Npcap not up yet for the spot, a chat line in doubt.
+        if (!hunting_) owe_start(hunt_owed_, "Hunting");
+    }
+    if (out & (kResumedMacro | kResumedHunt))
+        GB_INFO("Trash: the bin seen clear with the run still on -- %s the doubt stopped started again%s",
+                (out & kResumedMacro) && (out & kResumedHunt) ? "the hunter and the macro"
+                : (out & kResumedHunt)                        ? "the hunter"
+                                                              : "the macro",
+                (out & kResumeRefused) ? " (the other refused by its own start)" : "");
+    return (out & (kResumedMacro | kResumedHunt)) ? out : asked ? -1 : 0;
+}
+
+// ------------------------------------------------------- a start owed
+//
+// 2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không làm
+// được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác" -- and of the
+// drops, "thử lại luôn". A start the run asked for and that was refused by
+// something that passes stayed refused until the next BẮT ĐẦU: Npcap's service
+// up a minute after the PC's start cost the night's fighting, the rest of the
+// run going on without it. It is asked again instead (gobot/owed_start.hpp).
+
+// What an owed ask started, for the card: the macro alone is the potions and
+// the buffs, not the fight (as resumed_note has it for the bin's doubt).
+static const char* owed_note(bool hunt, bool macro) {
+    return hunt && macro ? "GoBot thử lại: đánh quái, bình và buff đã chạy."
+           : hunt        ? "GoBot thử lại: Tự đánh quái đã chạy."
+                         : "GoBot thử lại: bình và buff đã chạy.";
+}
+
+void GuiApp::owe_start(std::atomic<bool>& owed, const char* what) {
+    // Only for a run that is on, and not under a cold start, whose jobs are
+    // asked once the keeper is in the world (tick). With nothing else running
+    // there is no run to go on: BẮT ĐẦU said why, and is pressed again.
+    if (!simple_running() || simple_cold_start_) return;
+    // The refusal just now was an ask: the next one kOwedAskMs on.
+    owed_ms_ = now_ms();
+    if (!owed.exchange(true))
+        GB_INFO("%s not started with the run on -- owed: asked again every %llu s until it starts, never after the "
+                "player's stop (the big button, F12, F11) or its tick taken off",
+                what, static_cast<unsigned long long>(kOwedAskMs / 1000));
+}
+
+bool GuiApp::owed_now() {
+    if (!hunt_owed_ && !macro_owed_ && !jobs_owed_) return false;
+    owed_ms_ = 0;
+    return true;
+}
+
+void GuiApp::owed_tick() {
+    if (!hunt_owed_ && !macro_owed_ && !jobs_owed_) return;
+    // A cold start's jobs are asked once the keeper is in the world (tick's
+    // keeper_reattach_), never from here.
+    if (simple_cold_start_) return;
+    const bool run = simple_running();
+    const bool keeper = keeper_running_ && !keeper_oneshot_ && !keeper_stop_;
+    const bool keys = any_key_on(macro_config_);
+    // Owed no longer: the run over -- every job ended by itself; DỪNG, F12
+    // and closing GoBot forget it in stop_jobs -- Tự đánh quái unticked, no
+    // key on, the cold start's keeper gone, or started meanwhile by whatever
+    // asked.
+    if (hunt_owed_ && owed_dropped(run, hunt_config_.enabled, hunting_)) hunt_owed_ = false;
+    if (macro_owed_ && owed_dropped(run, keys, macro_running_)) macro_owed_ = false;
+    if (jobs_owed_ && owed_dropped(run && keeper, true, false)) jobs_owed_ = false;
+    // No sooner than kOwedAskMs (30 s) after the last ask, or at once after a
+    // doubt seen over (owed_now).
+    const std::uint64_t now = now_ms();
+    const bool jobs = jobs_owed_ && owed_due(now, owed_ms_, run && keeper, true, false);
+    const bool hunt = hunt_owed_ && owed_due(now, owed_ms_, run, hunt_config_.enabled, hunting_);
+    const bool macro = macro_owed_ && owed_due(now, owed_ms_, run, keys, macro_running_);
+    if (!jobs && !hunt && !macro) return;
+    // Not into a doubt keys_may_start would look at here, on the window's
+    // thread -- a quarter of a second a look, and its note every 30 s: the
+    // bin's left by a stop, a chat line with no worker watching it, a Tự chat
+    // on its way out. Their watchers look every 2 s and, the doubt over, ask
+    // at once (owed_now). Nor with no game window: nothing starts without
+    // one, and a reattach brings it back. The ask waits; nothing is dropped.
+    if (trash_left_held_ || (chat_doubt_ && !chat_doubt_watched_) || (chat_running_ && chat_quit_)) return;
+    if (!input_.window_valid()) return;
+    owed_ms_ = now;
+    owed_asking_ = true;
+    if (jobs) {
+        // Everything that is ticked, as BẮT ĐẦU starts it -- or owed again,
+        // said by keys_may_start; once it starts, it says "Đã bắt đầu".
+        GB_INFO("Owed: asking again for the run's jobs -- the cold start's start of them was refused by a doubt");
+        simple_start_jobs();
+    } else {
+        // Each through its own start and its checks -- keys_may_start, the
+        // spot's packets, the detector -- which bring the game forward only
+        // once they pass, as at BẮT ĐẦU. A refusal for the reason said last
+        // is not said again (owed_why_).
+        if (macro) start_macro();
+        if (hunt) start_hunt();
+        const bool macro_up = macro && macro_running_, hunt_up = hunt && hunting_;
+        if (macro_up || hunt_up) {
+            GB_INFO("Owed: asked again -- %s started",
+                    macro_up && hunt_up ? "the hunter and the macro" : hunt_up ? "the hunter" : "the macro");
+            const std::string note = owed_note(hunt_up, macro_up);
+            simple_note(note, 12000);
+            if (!simple_view_) set_status(note, 12000);
+        }
+    }
+    owed_asking_ = false;
 }
 
 void GuiApp::simple_note(const std::string& msg, std::uint32_t ms) {
@@ -2017,7 +2281,8 @@ void GuiApp::simple_light_row() {
                           "Máy đỡ nặng, đỡ giật.\n"
                           "Bot vẫn đánh quái, bơm máu và nghe phím tắt như thường; khi bot chạy, HP/MP được đọc\n"
                           "mỗi 0,25 giây thay vì 0,15 giây.\n"
-                          "Lúc đầu GoBot tự bật ô này khi thấy máy ảo VMware hoặc máy không có card đồ hoạ thật.\n"
+                          "Lúc đầu GoBot tự bật ô này khi thấy máy ảo VMware, máy không có card đồ hoạ thật,\n"
+                          "hoặc máy yếu (chỉ 1-2 nhân, hoặc RAM dùng được dưới 4 GB).\n"
                           "Bạn bấm vào ô thì GoBot làm theo lựa chọn của bạn từ đó về sau.");
     // Why it is on when nobody ticked it: the player may wonder.
     if (light_.by_auto && !light_.why_vi.empty()) {
@@ -2048,10 +2313,9 @@ void GuiApp::keep_game_in_front() {
 
     FrontKeeper::Look look;
     look.on = simple_opts_.refocus;
-    // Whatever DỪNG LẠI would stop, and the full screen's packet bot: the
-    // keys need the game in front, and the chat, the quest and the bag wait
-    // for it.
-    look.running = simple_running() || bot_running_;
+    // Whatever DỪNG LẠI would stop: the keys need the game in front, and the
+    // chat, the quest and the bag wait for it.
+    look.running = simple_running();
     look.window = look.on && look.running && input_.window_valid();
     look.in_front = look.window && input_.window_focused();
     const HWND fg = GetForegroundWindow();
@@ -2376,6 +2640,9 @@ void GuiApp::simple_trash_tab() {
     heading(strong_font_, "Dọn rác");
     if (ImGui::Checkbox("Tự dọn rác", &simple_clean_.enabled)) {
         put("enabled", simple_clean_.enabled ? "true" : "false");
+        // Ticked on: the first timed pass a whole interval from now, in the
+        // worker running or the next (2026.11.12, trash_loop).
+        if (simple_clean_.enabled) ++pass_ticked_;
         if (simple_clean_.enabled && simple_running()) start_trash();
         if (!simple_clean_.enabled && !simple_clean_.use_charms && !simple_clean_.buy_potions && trash_running_ && !trash_oneshot_) stop_trash();
     }
@@ -2397,13 +2664,19 @@ void GuiApp::simple_trash_tab() {
             ImGui::EndCombo();
         }
     }
-    hint("Chọn món cần bỏ một lần ở dưới. Khi bot chạy, GoBot tự mở túi đồ, bỏ những món "
-         "đó rồi đóng túi lại: lần đầu ngay sau khi bấm BẮT ĐẦU, sau đó theo giờ ở trên. "
-         "Trong lúc dọn, bot đứng yên không đánh quái; các phím chữ cái (Z, X, C, V…), Space, "
-         "Home, End, PgUp, PgDn, Insert và Delete của kỹ năng, bình và buff vẫn bấm giữa các lần "
-         "GoBot bấm chuột, khi không có hộp thoại nào mở. Phím số (bình, buff ở phím 1–9…) chờ dọn "
-         "xong mới bấm: muốn bình HP, MP được bấm trong lúc dọn thì đặt chúng ở phím chữ cái hoặc "
-         "Home, End, PgUp, PgDn, Insert, Delete.");
+    // The first timed pass a whole interval after BẮT ĐẦU or the tick
+    // (2026.11.12, the owner: "khi bật thì bắt đầu đếm thời gian").
+    hint(("Chọn món cần bỏ một lần ở dưới. Khi bot chạy, GoBot tự mở túi đồ, bỏ những món đó rồi đóng túi "
+          "lại theo giờ ở trên, đếm từ lúc bấm BẮT ĐẦU (hay lúc đánh dấu Tự dọn rác): lần đầu là " +
+          std::to_string(simple_clean_.interval_minutes) +
+          " phút sau đó, không dọn ngay lúc bật; muốn dọn ngay thì bấm Dọn ngay. DỪNG rồi BẮT ĐẦU lại khi "
+          "chưa tới giờ dọn thì giờ đang đếm được giữ. "
+          "Trong lúc dọn, bot đứng yên không đánh quái; các phím chữ cái (Z, X, C, V…), Space, "
+          "Home, End, PgUp, PgDn, Insert và Delete của kỹ năng, bình và buff vẫn bấm giữa các lần "
+          "GoBot bấm chuột, khi không có hộp thoại nào mở. Phím số (bình, buff ở phím 1–9…) chờ dọn "
+          "xong mới bấm: muốn bình HP, MP được bấm trong lúc dọn thì đặt chúng ở phím chữ cái hoặc "
+          "Home, End, PgUp, PgDn, Insert, Delete.")
+             .c_str());
 
     // How fast GoBot presses in the bag jobs: one value for Dọn rác, Dùng bùa
     // and Tự mua bình (CleanSettings::press_ms).
@@ -2731,17 +3004,14 @@ void GuiApp::simple_trash_tab() {
     }
     ImGui::BeginDisabled(!input_.window_valid());
     if (ImGui::Button("Chụp túi đồ")) {
-        if (!simple_store_loaded_) {
-            simple_store_loaded_ = true;
-            simple_store_.load_best(exe_relative("configs/templates.ini"));
-        }
+        if (!simple_store_) simple_store_ = TemplateStore::shared_best(exe_relative("configs/templates.ini"));
         ScreenCapture capture;
         capture.set_label("bag");
         Frame frame;
         if (!capture.grab(input_.target_window(), frame) || !frame.valid()) {
             simple_note("Không chụp được màn hình game.", 7000);
         } else {
-            const BagView view = bag::find(frame, simple_store_, simple_clean_.layout);
+            const BagView view = bag::find(frame, *simple_store_, simple_clean_.layout);
             if (!view.found) {
                 simple_note("Không thấy túi đồ trên màn hình. Mở túi đồ trong game (phím " +
                             InputManager::key_name(simple_clean_.bag_key) +
@@ -2850,9 +3120,9 @@ void GuiApp::simple_trash_tab() {
     ImGui::SetItemTooltip("%s", !charm_listed ? "Chưa có bùa nào trong danh sách Dùng."
                                 : !simple_clean_.use_charms ? "Bật ô \"Dùng bùa\" ở đầu thẻ trước."
                                 : "Dùng mỗi loại bùa trong danh sách một cái ngay bây giờ, không chờ giờ. "
-                                  "Kỹ năng, bình và buff tạm dừng vài giây (khoảng 3 giây mỗi loại, tối đa 20 "
-                                  "đến 40 giây), tất cả trong một lượt. Không dùng khi máu thấp, đang chat hay "
-                                  "bot đang bận việc khác.");
+                                  "Kỹ năng và buff tạm dừng vài giây (khoảng 3 giây mỗi loại, tối đa 20 đến 40 "
+                                  "giây), tất cả trong một lượt; GoBot tự bấm bình HP/MP giữa hai bùa, nên dùng "
+                                  "ở mọi mức máu. Không dùng khi đang chat hay bot đang bận việc khác.");
     ImGui::SameLine(0, 18);
     simple_hotkey_box(true);
     if (chat_open)
@@ -3141,18 +3411,17 @@ void GuiApp::simple_login_look() {
     if (main_hwnd_ != nullptr && IsIconic(static_cast<HWND>(main_hwnd_))) return;
     login_looked_ms_ = now_ms();
 
-    // One look at a time, so the pictures loaded here are only ever the
-    // look's. The first one loads them, which takes a few seconds.
+    // One look at a time, so login_store_ is only ever the look's to set. The
+    // first one asks for the program's one set of pictures -- the ones
+    // AutoLogin::load_pictures gives with no folder named -- which takes a few
+    // seconds when no job has them loaded yet.
     login_look_ = std::async(std::launch::async, [this] {
         LoginLook out;
-        if (!login_store_loaded_) {
-            login_store_loaded_ = true;
-            AutoLogin::load_pictures(login_store_, exe_relative("configs/templates.ini"));
-        }
+        if (!login_store_) login_store_ = TemplateStore::shared_best(exe_relative("configs/templates.ini"));
         AutoLogin::Settings login;
         login.load(exe_relative("configs/login.ini"));     // what ships, with no file
         out.pages = login.pages.size();
-        out.recognised = login.recognised(login_store_);
+        out.recognised = login.recognised(*login_store_);
 
         // Where a running VTCZone is, remembered: the tab shows it, and the
         // crossing starts it from there, when login.ini's path names nothing.
@@ -3167,7 +3436,7 @@ void GuiApp::simple_login_look() {
             capture.set_label("login look");
             Frame frame;
             if (capture.grab(hwnd, frame)) {
-                AutoLogin::Publisher seen = AutoLogin::look_at_publisher(frame, login_store_, login);
+                AutoLogin::Publisher seen = AutoLogin::look_at_publisher(frame, *login_store_, login);
                 // A frame read off the screen is whatever is over VTCZone, and
                 // a blue button on some other window is not VTCZone signed out.
                 // This only looks, so it cannot bring VTCZone to the front as
@@ -3232,12 +3501,19 @@ void GuiApp::simple_login_tab() {
             else                         stop_keeper();
         }
     }
+    // Since 2026.11.24 (the owner: "... không làm được thì dừng không, cần thay
+    // cơ chế này bằng 1 cơ chế khác") max_restarts counts over an hour and is
+    // waited out, and a crossing not in is made again 30 s on: GoBot stops for
+    // neither -- until then it stopped and waited for the player past
+    // max_restarts in a run.
     hint("GoBot theo dõi game. Nếu game tắt, bị treo hoặc hiện bảng lỗi, GoBot đóng game, bấm "
          "Chơi game trong VTCZone rồi vào đúng kênh và nhân vật dưới đây. VTCZone phải đang mở "
          "(hoặc mở được) và đã đăng nhập sẵn — GoBot không cần, không hỏi và không lưu tên đăng "
          "nhập hay mật khẩu. Mỗi lần game phải đóng rồi vào lại được tính một lần, kể cả khi GoBot "
          "phải tắt game kẹt giữa chừng lúc đang vào (cả khi vào bằng phím vào game ngay); quá số lần "
-         "tối đa (max_restarts trong configs/app.ini, mặc định 5) thì GoBot dừng và chờ bạn.");
+         "tối đa trong 1 giờ (max_restarts trong configs/app.ini, mặc định 5) thì GoBot không đóng game "
+         "nữa, chờ tới khi lần cũ nhất đã qua 1 giờ rồi tự vào lại. Lần vào nào chưa được thì 30 giây "
+         "sau GoBot thử lại, không dừng.");
     hint("Game đang tắt? Bật ô này rồi bấm BẮT ĐẦU: GoBot mở game và vào nhân vật trước, rồi "
          "mới chạy đánh quái, bình và buff.");
     simple_stall_option();
@@ -3391,13 +3667,17 @@ void GuiApp::simple_login_tab() {
     }
     if (keeper_running_) {
         const int restarts = keeper_restarts_.load();
-        coloured(kGood, ((now.empty() ? std::string("Đang theo dõi game.") : now) +
-                         (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần."
-                                       : std::string())).c_str());
+        // In amber while it waits to cross again or for the hour's restarts
+        // (2026.11.24): it goes on by itself.
+        coloured(keeper_waiting_ ? kWait : kGood,
+                 ((now.empty() ? std::string("Đang theo dõi game.") : now) +
+                  (restarts > 0 ? " Đã vào lại " + std::to_string(restarts) + " lần." : std::string()))
+                     .c_str());
     } else {
         coloured(kDim, simple_opts_.keep_alive ? "Sẽ bật khi bấm BẮT ĐẦU." : "Đang tắt.");
     }
-    // What stopped it last, in words; the English is in gobot.log.
+    // Why the last crossing did not get in -- cleared once back in the world
+    // (2026.11.24) -- or what stopped the keeper; the English is in gobot.log.
     if (!problem.empty()) coloured(kBad, problem.c_str());
     end_card();
 }

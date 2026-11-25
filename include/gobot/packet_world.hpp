@@ -195,6 +195,15 @@ public:
         float         report_x = 0.0f;
         float         report_y = 0.0f;
         std::optional<OwnReport> kind;  ///< what the last fix was: none for a map entry
+        /// When your last cast (0x0031) came, read or not; 0 for none since
+        /// the start, a reset or a map entry (2026.11.12: a turn's tap is
+        /// tapped again only once they stop, WorldFix::cast_ms).
+        std::uint64_t cast_ms = 0;
+        /// The last report came at y 0, which is no place -- t1901_s2's right
+        /// wall reports 999,0 and stands there -- and y and report_y are the
+        /// last real report's on this map: its x, facing, cast and all else
+        /// taken (2026.11.12 review). Cleared by the next report at y 1 or more.
+        bool          y_kept = false;
     };
 
     /// One report of yours as it came, for judging a jump by (own_since): its
@@ -295,7 +304,7 @@ public:
     };
 
     /// The place as it stands, worked out to no moment: cheap enough to ask
-    /// at every tick, as the GUI does for a map change (map_change_by).
+    /// at every tick, as the Bản đồ tab and the map-entry log do.
     struct Place {
         std::uint16_t map = 0;
         std::uint16_t area = 0;
@@ -434,6 +443,9 @@ public:
         std::uint64_t air_landed = 0;
         std::uint64_t air_other = 0;
         std::uint64_t casts_in_air = 0;
+        /// Your reports at y 0 whose height was kept at the last real one
+        /// (Me::y_kept, 2026.11.12).
+        std::uint64_t y_kept = 0;
         /// Of air_jumps, those at a vertical speed of 0 or down: walking off
         /// an edge (+1.4, +12.2), not a jump (-20). Counted beside air_jumps,
         /// which they stay in (2026.11.05b).
@@ -546,6 +558,78 @@ public:
     /// 0x0027; 2 casts of yours in it; <keys>".
     static std::string own_walk_line(const OwnWalk& w, const std::string& keys);
 
+    // ---- your moves with no walk, and the dash (2026.11.12)
+    //
+    // On 2026-11-11 the character went 21,149 px on t23_s14 between its walks
+    // -- 43% of its travel -- in moves of about 214 and 319 px, each after a
+    // cast of yours: a skill that carries the character (the owner's Q1 of
+    // 2026-11-11: C, V or Space, which is not known). Each such move is a
+    // line, and the skill whose casts come before them is learned: the dash,
+    // whose key the macro holds near the area's edge or a floor's end.
+
+    /// A report of yours this far across from the one before it, with no
+    /// walk of yours under way, none of your 0x002A between and no map entry,
+    /// is a move with no walk (OwnMove).
+    static constexpr int           kNoWalkMovePx = 100;
+    /// A move is put down to your last cast when that came this long before
+    /// the report that shows it at most.
+    static constexpr std::uint64_t kDashCastMs = 1500;
+    /// The dash (dash()): the skill whose casts came before at least
+    /// kDashLearnMoves of the last kDashMoves moves put down to a cast, and
+    /// before kDashLearnPct% of them. A move further across than kDashMostPx
+    /// is no dash -- a door, the game putting you back -- and votes for none.
+    static constexpr std::size_t   kDashMoves = 20;
+    static constexpr int           kDashLearnMoves = 3;
+    static constexpr int           kDashLearnPct = 70;
+    static constexpr int           kDashMostPx = 600;
+    /// Its length: the longest of its moves with another within this of it
+    /// -- 214 and 319 px came again and again -- or, none such, its longest.
+    static constexpr int           kDashClassPx = 24;
+    /// Move lines written in a minute at most, by the frames' clock; the rest
+    /// are counted in the minute's line (dash_line).
+    static constexpr int           kMoveLinesPerMinute = 30;
+
+    /// One move of yours with no walk: from the report before to the one that
+    /// shows it, which way you faced, and your last cast within kDashCastMs.
+    struct OwnMove {
+        float         from_x = 0.0f, from_y = 0.0f;
+        float         to_x = 0.0f, to_y = 0.0f;
+        std::uint64_t from_ms = 0, to_ms = 0;   ///< the frames' clock
+        std::uint16_t report_op = 0;            ///< the opcode of the report that shows it
+        int           facing = 0;               ///< Me::facing before it: +1, -1, 0 not known
+        std::uint32_t skill = 0;                ///< your last cast's skill; 0 for none
+        std::uint64_t cast_ms = 0;              ///< when that cast came
+    };
+    /// Asked for each move as set_walk_keys' is for a walk, on the capture's
+    /// thread with the lock let go of: the key the skill is cast with and
+    /// GoBot's own keys about it. Unset, the line goes without them.
+    void set_move_keys(std::function<std::string(const OwnMove&)> f);
+    /// "Positions: moved +214 px with no walk, 1000,800 -> 1214,800 by
+    /// 0x0027, facing right; your cast of skill 51205 180 ms before; <keys>".
+    static std::string own_move_line(const OwnMove& m, const std::string& keys);
+
+    /// The dash as learned so far; skill 0 while it is not.
+    struct Dash {
+        std::uint32_t skill = 0;
+        int           px = 0;       ///< its length
+        int           agree = 0;    ///< of the last moves put down to a cast, those after its casts
+        int           of = 0;
+    };
+    Dash dash() const;
+
+    /// The minute's moves with no walk since the last call, and the dash.
+    struct DashMinute {
+        int  moves = 0;
+        int  px = 0;            ///< across, in all
+        int  unsaid = 0;        ///< past kMoveLinesPerMinute: no line of their own
+        Dash dash;
+    };
+    DashMinute take_dash_minute();
+    /// "Dash (packets): 7 moves of yours with no walk this minute (1712 px);
+    /// the dash is skill 51205, key C, about 214 px (6 of 7)" -- `key` the
+    /// words for its key, "" for none known; "" with no move and no dash.
+    static std::string dash_line(const DashMinute& m, const std::string& key);
+
     /// The opcodes it reads, for a capture's opcode filter: your reports
     /// 0x0027, 0x0028, 0x0029, 0x002A and 0x0031; the monsters' 0x0038, 0x003F
     /// and 0x0042; and the map entry, 0x0086.
@@ -605,7 +689,21 @@ private:
         double        rise = 0.0;          ///< vertical speed at it, px/s, below 0 upward; 0 where y holds
         std::uint64_t air_from_ms = 0;     ///< when the last 0x002A that has you in the air came
         bool          id_locked = false;   ///< reports under another id than me.id are not yours
+        /// Your last cast since the map entry -- its skill, 0 for none -- and
+        /// when: what a move with no walk is put down to (2026.11.12).
+        std::uint32_t cast_skill = 0;
+        std::uint64_t cast_ms = 0;
+        /// Your last take-off's vertical speed, px a step, and when (2026.11.12c):
+        /// what a second push in the air is told from.
+        float         air_vy0 = 0.0f;
+        std::uint64_t air_off_ms = 0;
     };
+
+    /// A move of yours with no walk to `r`, from the report before, at `t`:
+    /// counted, voted for the dash, and said (2026.11.12). Under the lock.
+    void note_move(const OwnPosition& r, std::uint64_t t);
+    /// The dash worked out again from dash_votes_, said when it changes.
+    void learn_dash();
 
     /// The last frame that placed a slot's monster (Mob::frame_x, frame_y),
     /// as it came: what it was, its speed and facing, and when -- for the far
@@ -663,12 +761,19 @@ private:
     Stats                         stats_;
     /// How many frames of each unknown state have gone to the log.
     std::array<std::uint8_t, 256> unknown_logged_{};
+    /// Your 0x002A states other than 0, 1, 2 and 6 said once a session
+    /// (2026.11.12c): never cleared.
+    std::vector<std::uint32_t>    air_states_said_;
     /// Mob::gen's last number: never cleared, so a number is never given to
     /// two monsters, whatever started again in between.
     std::uint32_t                 gens_ = 0;
     /// The id "your id is" last said: said again only for another. Never
     /// cleared: a map entry unlocks the id at every door.
     std::uint32_t                 id_said_ = 0;
+    /// When a report at y 0 whose height was kept (Me::y_kept) was last said
+    /// at INFO -- once a minute at most -- and how many since, not said.
+    std::uint64_t                 y_kept_said_ms_ = 0;
+    int                           y_kept_unsaid_ = 0;
     /// The first kill since the start or reset(), and whether "never seen
     /// as a hitter" has been said since then.
     std::uint64_t                 first_kill_ms_ = 0;
@@ -693,33 +798,25 @@ private:
     OwnWalk                       walk_;
     std::vector<OwnWalk>          walks_done_;
     std::function<std::string(const OwnWalk&)> walk_keys_;
+    /// Your moves with no walk since the last batch, to be written, and who
+    /// is asked of the keys about them (set_move_keys); the minute's lines
+    /// and counts (2026.11.12).
+    std::vector<OwnMove>          moves_done_;
+    std::function<std::string(const OwnMove&)> move_keys_;
+    std::uint64_t                 move_minute_ms_ = 0;
+    int                           move_lines_ = 0;
+    int                           minute_moves_ = 0;
+    int                           minute_move_px_ = 0;
+    int                           minute_unsaid_ = 0;
+    /// The last kDashMoves moves put down to a cast: its skill, how far
+    /// across. Kept through reset() and relink(), as the dash learned is:
+    /// they are the character's skills, not the capture's.
+    struct DashVote {
+        std::uint32_t skill = 0;
+        int           px = 0;
+    };
+    std::vector<DashVote>         dash_votes_;
+    Dash                          dash_;
 };
-
-/// Who says the map has changed, as the GUI's tick asks it.
-enum class MapChangeBy : std::uint8_t {
-    Minimap,    ///< the minimap's fingerprint, as before the packets
-    Packets,    ///< the packets' map entries (View::map_epoch)
-};
-
-/// How quiet the server may have been, and how long ago the place may have
-/// been settled afresh by a relink, for the packets to say.
-constexpr std::uint64_t kMapByPacketsQuietMs = 5'000;
-constexpr std::uint64_t kMapByPacketsSettleMs = 10'000;
-
-/// The packets, at `now`, once all of these hold; otherwise the minimap:
-///   - a map entry has been seen since the world last started afresh
-///     (`place.entries`): a capture started on another game, or a map entry
-///     missed while none ran, leaves the map not known until the next one;
-///   - the capture is on the game's own process (`on_game`);
-///   - a frame from the server came within kMapByPacketsQuietMs
-///     (`last_server_ms`, 0 for none);
-///   - no relink in the last kMapByPacketsSettleMs: an entry missed while the
-///     capture started again would leave the epoch where it was. A relink
-///     settles the place afresh, so its time is place.since_ms, not the
-///     entry's.
-/// The minimap's fingerprint changed six times in a minute and a half of one
-/// hunt with no door taken (gobot_gui.log of 2026-11-02).
-MapChangeBy map_change_by(const PacketWorld::Place& place, bool on_game, std::uint64_t last_server_ms,
-                          std::uint64_t now);
 
 } // namespace gobot

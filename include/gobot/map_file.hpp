@@ -1,9 +1,8 @@
 #pragma once
 
-#include "gobot/pathfinder.hpp"
-
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gobot {
@@ -54,12 +53,6 @@ public:
 
     /// Total surface pixels across both layers — a quick sanity figure.
     std::size_t surface_count() const;
-
-    /// Rasterise into the tile grid PathFinder consumes.
-    ///
-    /// `tile_size` trades resolution against graph size: 8 keeps slopes
-    /// recognisable while giving PathFinder a grid it can walk quickly.
-    MapData to_map_data(int tile_size = 8, int layer_mask = 0x3) const;
 
     /// Find a map by its file stem (e.g. "t14_s0") under `dir`.
     static std::string find(const std::string& dir, const std::string& stem);

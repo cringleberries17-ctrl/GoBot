@@ -111,7 +111,7 @@ Logged logged(LogLevel level, const std::function<void()>& run) {
 
 /// The pretend game. A direction held 50 ms or more -- a walking step, a
 /// step back, or a turn's tap of Hunter::kTurnTapMs, which walks the real
-/// character 21 px as a key held that long does -- moves the character at
+/// character 28 px as a key held that long does -- moves the character at
 /// 355 px a second, unless there is a wall; with `follow` the monsters keep
 /// their distance by walking after it, and `ledge` drops it that far with the
 /// next step.
@@ -209,7 +209,7 @@ struct World {
     }
     /// Whether a direction held `hold` ms is a turn: the hunter's tap of
     /// Hunter::kTurnTapMs. No step here is held that long -- a step back is
-    /// held backstep_ms and kTurnTapMs more, 110 ms at the least where no
+    /// held backstep_ms and kTurnTapMs more, 130 ms at the least where no
     /// hunting spot's edge cuts it, a walking step step_ms -- so a turn and a
     /// step are never taken for each other.
     static bool turn(int hold) { return hold == Hunter::kTurnTapMs; }
@@ -714,19 +714,19 @@ void test_keep_distance() {
         Rig r(keeping());
         r.w.mobs = { plate(720, 400, "Moc") };        // 80 px to the right
         r.pass();
-        // GoC's 169 ms, and the turn's 60 more: the turn after it walks the
-        // character back in as far.
+        // GoC's 169 ms, and the turn's 80 more (60 until 2026.11.12): the
+        // turn after it walks the character back in as far.
         const bool stepped = r.w.presses.size() == 1 && r.w.presses[0].vk == VK_LEFT &&
-                             r.w.presses[0].hold >= 219 && r.w.presses[0].hold <= 239;
+                             r.w.presses[0].hold >= 239 && r.w.presses[0].hold <= 259;
         r.pass();
         check(stepped && r.w.presses.size() == 3 && r.w.presses[1].vk == VK_RIGHT &&
                   r.w.presses[1].hold == Hunter::kTurnTapMs && r.w.presses[2].vk == 'Z',
               "min 120, a target at dx=80: a step back held " +
                   std::to_string(r.w.presses.empty() ? 0 : r.w.presses[0].hold) +
-                  " ms, then one 60-ms turn toward it, then the attack");
+                  " ms, then one 80-ms turn toward it, then the attack");
         r.run(3000);
         check(r.w.steps(VK_LEFT) == 1 && r.w.taps(VK_RIGHT) == 1 && r.st().backsteps == 1 && r.st().dx == 140,
-              "far enough after it, the turn having walked it 21 px back in: 140 px off, 20 past the minimum as "
+              "far enough after it, the turn having walked it 28 px back in: 140 px off, 20 past the minimum as "
               "GoC's step means, no more steps back, and no more turns -- " + std::to_string(r.st().dx) + " px");
     }
     {
@@ -737,7 +737,7 @@ void test_keep_distance() {
         r.pass();
         check(r.w.presses.size() == 1 && r.w.presses[0].vk == VK_LEFT &&
                   std::abs(r.w.presses[0].hold - 113 - Hunter::kTurnTapMs) <= 5,
-              "no minimum set and dx=30: GoC's 50 px, a step held about 113 ms -- and the turn's 60 more");
+              "no minimum set and dx=30: GoC's 50 px, a step held about 113 ms -- and the turn's 80 more");
     }
     {
         // One that follows: dx stays 80 however far it steps.
@@ -1224,11 +1224,11 @@ void test_engaged() {
     }
     {
         // No style: turned to it by one tap, as with one -- fighting, from
-        // where that tap walked the character: 21 px nearer.
+        // where that tap walked the character: 28 px nearer (kTurnTapMs).
         Rig r(HunterConfig{});
         r.w.mobs = { plate(700, 400, "Moc") };
         r.run(600);
-        check(r.hunter.engaged() && r.hunter.engaged_dx() == 60 - 21,
+        check(r.hunter.engaged() && r.hunter.engaged_dx() == 60 - 28,
               "with no style too: attacking and turned to it is fighting -- " +
                   std::to_string(r.hunter.engaged_dx()) + " px off");
     }
@@ -1249,34 +1249,55 @@ void test_spot_keep_distance() {
     section("Chỗ đánh quái: a step back goes no further than the area's edge");
 
     {
+        // 50 px from the edge: 40 until 2026.11.12, when the turn's tap grew
+        // to 80 ms -- a step needs 50 ms and the tap's 80 of room
+        // (kSpotStepRoomPx).
         Rig r(keeping_spot(), false, true);
         r.pass();
-        r.w.put(900);                               // world 4900: 40 px from the right edge
-        r.w.mobs = { plate(820, 400, "Moc") };      // 80 px to the left: too close
+        r.w.put(890);                               // world 4890: 50 px from the right edge
+        r.w.mobs = { plate(810, 400, "Moc") };      // 80 px to the left: too close
         r.pass();
         const std::vector<World::Press> steps = r.w.of(VK_RIGHT, 50);
-        check(steps.size() == 1 && steps[0].hold == 113 && Hunter::backstep_ms(120, 80) == 169 &&
+        check(steps.size() == 1 && steps[0].hold == 141 && Hunter::backstep_ms(120, 80) == 169 &&
                   r.w.world_x == 4940,
-              "40 px from the area's right edge: the step back held 113 ms, as far as the edge, not 169 and the "
-              "turn's 60 -- " +
+              "50 px from the area's right edge: the step back held 141 ms, as far as the edge, not 169 and the "
+              "turn's 80 -- " +
                   std::to_string(steps.empty() ? 0 : steps[0].hold) + " ms");
-        // The turn back to it walks the character 21 px in from the edge:
-        // room for a step of 59 ms, but the turn after that one would walk
+        // The turn back to it walks the character 28 px in from the edge:
+        // room for a step of 79 ms, but the turn after that one would walk
         // all of it back -- none, and the monster fought from there.
         r.run(3000);
-        check(r.w.steps(VK_RIGHT) == 1 && r.w.taps(VK_LEFT) == 1 && r.w.world_x == 4919 && r.st().backsteps == 1 &&
+        check(r.w.steps(VK_RIGHT) == 1 && r.w.taps(VK_LEFT) == 1 && r.w.world_x == 4912 && r.st().backsteps == 1 &&
                   !r.w.of('Z').empty(),
-              "then one turn back, 21 px in from the edge: too little room for another step, so none -- " +
+              "then one turn back, 28 px in from the edge: too little room for another step, so none -- " +
                   std::to_string(r.w.steps(VK_RIGHT)) + " step(s), at world " + std::to_string(r.w.world_x));
     }
     {
         Rig r(keeping_spot(), false, true);
         r.pass();
-        r.w.put(380);                               // world 4380: 40 px from the left edge
-        r.w.mobs = { plate(460, 400, "Moc") };      // 80 px to the right
+        r.w.put(390);                               // world 4390: 50 px from the left edge
+        r.w.mobs = { plate(470, 400, "Moc") };      // 80 px to the right
         r.pass();
         const std::vector<World::Press> steps = r.w.of(VK_LEFT, 50);
-        check(steps.size() == 1 && steps[0].hold == 113, "and the same toward the left edge");
+        check(steps.size() == 1 && steps[0].hold == 141, "and the same toward the left edge");
+    }
+    {
+        // 40 px from it -- room for a step of 113 ms, less than 50 and the
+        // turn's 80: no step at first since 2026.11.12. The turn's tap walks
+        // the character 28 px in, and from there one step to the edge, and
+        // the turn after it 28 px in again: no more.
+        Rig r(keeping_spot(), false, true);
+        r.pass();
+        r.w.put(900);
+        r.w.mobs = { plate(820, 400, "Moc") };
+        r.pass();
+        const bool first = r.w.steps(VK_RIGHT) == 0 && r.w.taps(VK_LEFT) == 1;
+        int most_x = r.w.world_x;
+        r.run(3000, [&] { most_x = std::max(most_x, r.w.world_x); });
+        check(first && r.w.steps(VK_RIGHT) == 1 && most_x == 4940 && r.w.world_x == 4912 && !r.w.of('Z').empty(),
+              "40 px from it: no step at first, the turn's tap walking it 28 px in; then one step to the edge and "
+              "no further -- " + std::to_string(r.w.steps(VK_RIGHT)) + " step(s), at most world " +
+                  std::to_string(most_x) + ", at " + std::to_string(r.w.world_x));
     }
     {
         Rig r(keeping_spot(), false, true);
@@ -1316,8 +1337,9 @@ void test_spot_keep_distance() {
 void test_zone_keep_distance() {
     section("Chỗ đánh quái: a step back goes no further than the map tab's area's own edge, each side");
 
-    // The character at world 4640, its home; the box 40 px to its left and
-    // 600 to its right -- or the other way round.
+    // The character at world 4640, its home; the box 50 px to its left and
+    // 600 to its right -- or the other way round. 40 px until 2026.11.12, too
+    // little for a step and the turn's 80-ms tap after it since.
     const auto zone = [](float left, float right) {
         Hunter::Zone z;
         z.stem = "t11_s1";
@@ -1335,19 +1357,22 @@ void test_zone_keep_distance() {
         const int away = near_left ? VK_RIGHT : VK_LEFT;
         {
             Rig r(keeping_spot(), false, true);
-            r.hunter.set_zone(near_left ? zone(4600.0f, 5240.0f) : zone(4040.0f, 4680.0f));
+            r.hunter.set_zone(near_left ? zone(4590.0f, 5240.0f) : zone(4040.0f, 4690.0f));
             r.pass();
             r.w.mobs = { plate(near_left ? 720 : 560, 400, "Moc") };   // 80 px off: too close
             r.pass();
             const std::vector<World::Press> steps = r.w.of(static_cast<std::uint32_t>(toward), 50);
-            check(r.hunter.spot().from_map && steps.size() == 1 && steps[0].hold == 113,
+            check(r.hunter.spot().from_map && steps.size() == 1 && steps[0].hold == 141,
                   std::string(near_left ? "its left edge" : "its right edge") +
-                      " 40 px off: the step back that way held 113 ms, as far as the edge -- " +
+                      " 50 px off: the step back that way held 141 ms, as far as the edge -- " +
                       std::to_string(steps.empty() ? 0 : steps[0].hold) + " ms");
         }
         {
+            // The near edge 100 px off this time: the monster 80 px that way
+            // is inside the box -- one outside it is never fought (2026.11.12,
+            // the owner's Q3), in reach or not.
             Rig r(keeping_spot(), false, true);
-            r.hunter.set_zone(near_left ? zone(4600.0f, 5240.0f) : zone(4040.0f, 4680.0f));
+            r.hunter.set_zone(near_left ? zone(4540.0f, 5240.0f) : zone(4040.0f, 4740.0f));
             r.pass();
             r.w.mobs = { plate(near_left ? 560 : 720, 400, "Moc") };   // 80 px off, the other side
             r.pass();

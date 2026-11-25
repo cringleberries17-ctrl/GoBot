@@ -36,8 +36,7 @@
 
 namespace gobot {
 
-/// Which map the character is on, as the tab knows it. (Not the minimap's
-/// MapIdentity of map_mapper.hpp, a fingerprint of its title.)
+/// Which map the character is on, as the tab knows it.
 struct KnownMap {
     enum class By : std::uint8_t {
         None,
@@ -334,15 +333,14 @@ const GameMapBook::Page* dot_floors(const GameMapBook::Page* page, MapShows show
 
 /// Whether the tab draws living monster `m` grey -- "bot không đi tới" --
 /// while the hunter goes by an area (`area_on`): outside the box it publishes
-/// (Status::spot_left..spot_bottom) and out of reach of you at you_x, you_y
-/// (none with `you` false), as the hunter has the plate -- packet_scale both
-/// ways, packet_dy on the height; or in reach too while it walks back first
-/// (Status::spot_back_first), when Hunter::mark_out_of_area lets what is in
-/// reach outside the box be; and every one, in the box too, while the walk
-/// back first is latched (Status::spot_back_walk, 2026.11.10), when nothing
-/// is fought until the character is inside. The hunter's current target
-/// (`target`) only once Hunter::kSpotKeepPx past the edge, as
-/// Hunter::mark_out_of_area lets it go.
+/// (Status::spot_left..spot_bottom), in reach of you or not (2026.11.12, the
+/// owner's Q3 "Chỉ đánh quái trong vùng": Hunter::mark_out_of_area lets it be
+/// -- until then one in reach of you at you_x, you_y was red, fought where
+/// it stood; `cfg`, `you`, you_x and you_y are no longer gone by); and every
+/// one, in the box too, while the walk back first is latched
+/// (Status::spot_back_walk, 2026.11.10), when nothing is fought until the
+/// character is inside. The hunter's current target (`target`) only once
+/// Hunter::kSpotKeepPx past the edge, as Hunter::mark_out_of_area lets it go.
 /// Judged where the hunter's plates put it, the world's own m.x and m.y --
 /// never its dot, whose height the hunter does not go by (the owner's Q2 (a)):
 /// a grey of the tab's own heights would grey what the hunter fights, and
@@ -381,12 +379,97 @@ const Hunter::Status::SeekGrey* seek_grey_of(const Hunter::Status& hs, const Pac
 /// from below this session. None for a point on no floor.
 std::vector<MapRun> solid_marks(const GameMapBook::Page& p, std::span<const MapPoint> on);
 
+// ---------------------------------------- the band's two bars (2026.11.12)
+//
+// The owner's Q6 of 2026-11-11, "thể hiện 2 thanh trên và dưới trên bản đồ để
+// có thể thiết định xem bot sẽ nhảy xuống ở mức bao nhiêu pixel": an upper and
+// a lower bar across the area, up() above the character's feet and down()
+// below them -- the hunter's own band (HunterConfig::up_reach, down_reach) --
+// set by dragging a bar or in the px boxes beside the map, 0..kBandMaxPx, and
+// saved into hunt.ini by the tab's worker (HunterConfig::save_band). Past the
+// lower bar a monster is dropped to, past the upper one jumped up to -- where
+// the map lets a drop or a jump go -- and between them fought from where the
+// character stands: the owner's Q7, the bars the only heights the drops and
+// jumps go by. In the world the band is its screen pixels times packet_scale,
+// as the hunter lays a plate's height over the packets' world -- hung from the
+// feet less packet_dy times packet_scale (band_feet_y), as a plate's height has
+// packet_dy in it.
+
+/// The px boxes' step, and a drag's: whole kBandStepPx.
+inline constexpr int kBandStepPx = 5;
+/// A bar is gripped within this many screen pixels of its line.
+inline constexpr double kBandGripPx = 5.0;
+
+enum class BandBar : std::uint8_t { None, Up, Down };
+
+/// The band's two numbers, px: up() and down().
+struct Band {
+    int up_px = 0;
+    int down_px = 0;
+    bool operator==(const Band&) const = default;
+};
+
+/// The bars' heights in the world: the feet's less up_px, and plus down_px,
+/// each times `scale` (packet_scale; 1 for none, or one not above 0).
+struct BandBars {
+    double up_y = 0.0;
+    double down_y = 0.0;
+};
+BandBars band_bars(double feet_y, const Band& band, double scale);
+/// Where the bars hang from, world y: the character's feet less packet_dy
+/// times `scale` (2026.11.12 review). A plate's height is its world height
+/// over the scale plus packet_dy (packet_eyes.cpp), and the hunter lays that
+/// against the band -- so the bars sit where its own lines are, as the
+/// target ring and the Chi tiết box already did. With packet_dy 0, the feet.
+double band_feet_y(double you_y, int packet_dy, double scale);
+
+/// Across what the bars are drawn, world x: the area's box (`box`; null for
+/// none) -- out to the character's x when it stands outside the box -- else
+/// the view's, vx0..vx1.
+struct BandSpan {
+    double x0 = 0.0;
+    double x1 = 0.0;
+};
+BandSpan band_span(const HuntZone* box, double you_x, double vx0, double vx1);
+
+/// The bar under `mouse`: within kBandGripPx of its line on the screen, and
+/// across its span, as much to spare; the nearer when both are.
+BandBar band_grip(const BandBars& b, const BandSpan& s, const MapCamera& cam, MapCamera::P origin, MapCamera::P size,
+                  MapCamera::P mouse);
+
+/// A drag on a bar, from its press: the feet's height, the scale, the band
+/// and the camera as they were then -- the camera frozen, as a zone's drag
+/// freezes it, and the bars hung from the feet of the press, so what is under
+/// the mouse stays what was under it.
+struct BandGesture {
+    BandBar      bar = BandBar::None;
+    double       feet_y = 0.0;
+    double       scale = 1.0;
+    Band         from;
+    MapCamera    cam;
+    MapCamera::P origin, size, press;
+};
+/// The band the drag makes with the mouse at `mouse`, through the gesture's
+/// own camera: the bar moved as far as the mouse moved, over the scale, in
+/// whole kBandStepPx, 0..kBandMaxPx -- dragged past the feet, 0 -- the other
+/// bar as it was.
+Band band_drag(const BandGesture& g, MapCamera::P mouse);
+
+/// A number typed or stepped in the px boxes: 0..kBandMaxPx.
+int band_clamp(int px);
+
+/// A bar's label on the map: "+10 px" for the upper, "-20 px" for the lower.
+std::string band_label(BandBar bar, int px);
+
 /// The owner's Q3 of 2026.11.05 ((a) until answered): how many frames a
 /// second GoBot's window is drawn at while the tab is shown, behind the game
 /// and in front with nobody touching it -- 5 until 04d, a walker's dot
 /// stepping some 21 px of the world a frame and the view 69 while you walk.
-/// With "Nhẹ máy", kMapTabLightFps, as before.
-inline constexpr int kMapTabFps = 10;
+/// With "Nhẹ máy", kMapTabLightFps, as before. 30 since 2026.11.12, the rate
+/// of a window in use (FramePacer::normal_rates): at 10 your dot stepped 36 px
+/// of the world a frame while you walked, and the owner saw the dots "chưa
+/// mượt, chưa khớp".
+inline constexpr int kMapTabFps = 30;
 inline constexpr int kMapTabLightFps = 2;
 
 } // namespace gobot

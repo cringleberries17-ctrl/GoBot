@@ -55,6 +55,9 @@ std::size_t OneWorker::done() const {
 
 void OneWorker::loop() {
     name_this_thread(name_.c_str());
+    // Its jobs -- a capture's start, a socket look, the log's lines -- can
+    // wait for the game's slice to end on a one-core PC.
+    quiet_this_thread();
     for (;;) {
         std::function<void()> job;
         {

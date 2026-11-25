@@ -12,7 +12,9 @@
 // 2026.11.10's purchase count with no cap of GoBot's own, and that release's
 // notes -- the pet, the walk back, the bag pass, the key window, the death the
 // screen alone read -- against the code the same way; and 2026.11.11's -- the
-// shop right after the pass, HP during the bag jobs, the six keys, the digits.
+// shop right after the pass, HP during the bag jobs, the six keys, the digits;
+// and 2026.11.12's -- the turns, the holds, the dash, the area, the way back,
+// the pit, the two bars and the bag jobs counted from the start.
 //
 // Nothing here goes near the desktop, the pointer, the keyboard's state or the
 // game. The glances at the pointer are a pretend desktop's (InputGlancer's
@@ -22,21 +24,30 @@
 // does a thing, its source is read.
 
 #include "gobot/alerts.hpp"
+#include "gobot/auto_chat.hpp"
 #include "gobot/bag.hpp"
 #include "gobot/cast_match.hpp"
 #include "gobot/checkin_board.hpp"
 #include "gobot/common.hpp"
 #include "gobot/config.hpp"
+#include "gobot/crash_watch.hpp"
 #include "gobot/execution_coordinator.hpp"
 #include "gobot/hunt_zone.hpp"
 #include "gobot/hunter.hpp"
 #include "gobot/input_manager.hpp"
 #include "gobot/logger.hpp"
+#include "gobot/machine_info.hpp"
 #include "gobot/macro.hpp"
+#include "gobot/owed_start.hpp"
+#include "gobot/packet_eyes.hpp"
 #include "gobot/packet_world.hpp"
+#include "gobot/party_invite.hpp"
 #include "gobot/popup_closer.hpp"
 #include "gobot/quick_quest.hpp"
 #include "gobot/quiet_second.hpp"
+#include "gobot/react_wait.hpp"
+#include "gobot/reviver.hpp"
+#include "gobot/vitals_reader.hpp"
 #include "gobot/vitals_trust.hpp"
 #include "test_support.hpp"
 
@@ -197,7 +208,8 @@ void test_resumed_clock() {
 
     const std::uint64_t now = 5'000'000;
     check(resumed_clock(0, now, 8'000) == now + 8'000 && resumed_clock(0, now, 45'000) == now + 45'000,
-          "none kept: the charms 8 s on and the shop 45 s on, as every start had them");
+          "none kept: the charms 8 s on and the shop 45 s on, as every start had them (the shop until 2026.11.12: "
+          "a whole interval since, bag::start_due_ms)");
     check(resumed_clock(now - 60'000, now, 45'000) == now + 45'000,
           "a clock already past -- due while the macro was off -- waits a start's 45 s still");
     check(resumed_clock(now + 600'000, now, 8'000) == now + 600'000,
@@ -528,11 +540,11 @@ void test_buff_skill_clash() {
 // ------------------------------------------------------------ the rotation's status
 
 void test_pace_status_text() {
-    section("\"Ra chiêu theo vòng\": its status in a few words, off as shipped (W1's switch)");
+    section("\"Ra chiêu theo vòng\": its status in a few words, on as shipped since 2026.11.16b (W1's switch)");
 
     MacroConfig shipped_default;
     shipped_default.apply_defaults();
-    check(!MacroConfig{}.cast_paced && !shipped_default.cast_paced, "off in a config built in code");
+    check(MacroConfig{}.cast_paced && shipped_default.cast_paced, "on in a config built in code (2026.11.16b)");
 
     MacroEngine::PaceStatus s;
     s.mode = MacroEngine::PaceStatus::Mode::Paced;
@@ -540,6 +552,10 @@ void test_pace_status_text() {
     s.rounds = 12;
     check(MacroEngine::pace_status_vi(s) == "Đang theo vòng — khóa chiêu ước 680 ms, 12 vòng.",
           "paced: \"" + MacroEngine::pace_status_vi(s) + "\"");
+    s.hunting = true;
+    check(MacroEngine::pace_status_vi(s) == "Đang theo vòng cùng Tự đánh quái — khóa chiêu ước 680 ms, 12 vòng.",
+          "paced with the hunter (2026.11.16b): \"" + MacroEngine::pace_status_vi(s) + "\"");
+    s.hunting = false;
     s.mode = MacroEngine::PaceStatus::Mode::Fallback;
     s.last_cast_ms = 0;
     check(MacroEngine::pace_status_vi(s) == "Tạm theo giờ: chưa thấy gói tin ra chiêu nào của bạn.",
@@ -548,14 +564,21 @@ void test_pace_status_text() {
     check(MacroEngine::pace_status_vi(s) ==
               "Tạm theo giờ vì không thấy gói tin ra chiêu — khóa chiêu ước 680 ms; thấy lại thì theo vòng tiếp.",
           "fallen back: \"" + MacroEngine::pace_status_vi(s) + "\"");
+    // Off with the switch on: since 2026.11.16b neither the hunter nor the
+    // skills following the fight keep it so -- only the key sequence, or the
+    // moment before the first pass.
     s.mode = MacroEngine::PaceStatus::Mode::Off;
-    check(MacroEngine::pace_status_vi(s) == "Kỹ năng đang theo trận đánh (Tự đánh quái), nên không theo vòng.",
-          "off with the switch on -- the skills following the fight: \"" + MacroEngine::pace_status_vi(s) + "\"");
+    check(MacroEngine::pace_status_vi(s) == "Chưa theo vòng: mỗi phím bấm theo giờ riêng.",
+          "off with the switch on, nothing else on: \"" + MacroEngine::pace_status_vi(s) + "\"");
     s.others = true;
     check(MacroEngine::pace_status_vi(s) ==
-              "Tự đánh quái hoặc chuỗi phím cũng đang bấm phím, nên không theo vòng: mỗi phím bấm theo giờ như thường.",
-          "off with the switch on -- the hunter or the sequence pressing keys too: \"" +
-              MacroEngine::pace_status_vi(s) + "\"");
+              "Chuỗi phím (Sequence) đang bật, nên không theo vòng: mỗi phím bấm theo giờ như thường.",
+          "off with the switch on -- the key sequence pressing keys too: \"" + MacroEngine::pace_status_vi(s) + "\"");
+    s.hunting = true;
+    const std::string with_hunter = MacroEngine::pace_status_vi(s);
+    check(with_hunter.find("Tự đánh quái") == std::string::npos && with_hunter.find("Kỹ năng đang theo trận đánh") ==
+                                                                         std::string::npos,
+          "no status says the hunter or the fight keeps it off any more: \"" + with_hunter + "\"");
 }
 
 // ------------------------------------------------------------ the wiring
@@ -707,40 +730,76 @@ void test_jobs_wiring() {
           "passed as quiet, and the round run after it too, however it ended");
 
     // ---- R5: the clocks kept ----
-    // 2026.11.09: with no clock of the last worker's, the shop's first look is
-    // what is left of the plan time saved in shop_clock.txt, clamped to 45 s
-    // and one interval (bag::shop_first_wait_s) -- never 45 s whatever was
-    // saved, which bought a plan again at every BẮT ĐẦU.
+    // 2026.11.12 (the owner: "khi bật thì bắt đầu đếm thời gian. Lúc nào tới
+    // thời gian thì mới bắt đầu thực hiện"): the timed pass and the shop count
+    // a whole interval from a start (bag::start_due_ms) -- no longer 15 s and
+    // 45 s, nor the plan time saved in shop_clock.txt, which 2026.11.09 waited
+    // for -- but for a clock the last worker left still counting, kept as the
+    // charms' is, never sooner than 15 s and 45 s. The charms as they were.
     check(has(gui, "constexpr std::uint64_t kCharmFirstMs = 8'000;") &&
+              has(gui, "constexpr std::uint64_t kPassFirstMs = 15'000;") &&
               has(gui, "constexpr std::uint64_t kShopFirstMs = 45'000;") &&
               in_order(loop, { "std::lock_guard<std::mutex> lock(trash_clocks_mutex_);", "kept = trash_clocks_;",
+                               "if (kept.pass_ticks_seen != pass_ticks) kept.pass_due_ms = 0;",
                                "resumed_clock(kept.charm_check_ms, now_ms(), kCharmFirstMs)",
-                               "CharmClock shop_clock(shop_clock_path());", "shop_clock.load();",
-                               "bag::shop_first_wait_s(",
-                               "kept.shop_due_ms != 0 ? resumed_clock(kept.shop_due_ms, now_ms(), kShopFirstMs) : "
-                               "shop_first_due();",
-                               "owed.hp = kept.owed_hp;", "std::uint64_t plan_due_ms = kept.plan_due_ms;",
-                               "shop_quiet.set_level(kept.shop_quiet_level);" }) &&
-              !has(loop, "now_ms() + 8'000;") && !has(loop, "now_ms() + 45'000;") &&
-              !has(loop, "now_ms() + kShopFirstMs;"),
-          "trash_loop: the charms' and the shop's clocks resumed from the last worker's, never sooner than 8 s and "
-          "45 s; with none kept, the shop waits for the plan time saved, clamped to 45 s and one interval");
+                               "std::uint64_t next = 0;", "std::uint64_t shop_due_ms = 0;", "bool counting = false;",
+                               "CharmClock shop_clock(shop_clock_path());", "owed.hp = kept.owed_hp;",
+                               "std::uint64_t plan_due_ms = kept.plan_due_ms;",
+                               "shop_quiet.set_level(kept.shop_quiet_level);", "const auto start_counting = [&] {",
+                               "counting = true;",
+                               "next = bag::start_due_ms(kept.pass_due_ms, now, settings.interval_minutes, "
+                               "kPassFirstMs);",
+                               "shop_due_ms = bag::start_due_ms(kept.shop_due_ms, now, settings.buy_every_minutes, "
+                               "kShopFirstMs);",
+                               "GB_INFO(\"Trash: counting from the start -- the first timed pass at %s, the shop's "
+                               "first look at %s\",",
+                               "while (!trash_stop_) {", "if (!counting && !trash_oneshot_) start_counting();",
+                               "const int request = trash_request_.exchange(0);" }) &&
+              count_in(gui, "start_counting()") == 1 && count_in(gui, "bag::start_due_ms(") == 4 &&
+              !has(gui, "shop_clock.load()") && !has(gui, "shop_first_wait_s") && !has(gui, "shop_first_due") &&
+              !has(loop, "now_ms() + 15'000;") && !has(loop, "now_ms() + 8'000;") &&
+              !has(loop, "now_ms() + 45'000;") && !has(loop, "now_ms() + kShopFirstMs;"),
+          "trash_loop: the pass's and the shop's clocks count once the worker is here for a run -- from the start, or "
+          "a button's worker become one -- a whole interval on, or the last worker's still counting, 15 s and 45 s "
+          "at least; the charms' resumed as before, 8 s at least; shop_clock.txt no longer read");
     const std::size_t last_loop = loop.rfind("while (!trash_stop_) {");
     const std::size_t kept_at = loop.rfind("trash_clocks_.shop_due_ms = shop_due_ms;");
     const std::size_t ends = loop.rfind("trash_running_ = false;");
     check(last_loop != std::string::npos && kept_at != std::string::npos && ends != std::string::npos &&
               last_loop < kept_at && kept_at < ends && has(loop, "trash_clocks_.charm_check_ms = charm_check_ms;") &&
-              has(loop, "trash_clocks_.shop_quiet_level = shop_quiet.level();") &&
+              in_order(loop.substr(last_loop == std::string::npos ? 0 : last_loop),
+                       { "trash_clocks_.charm_check_ms = charm_check_ms;", "if (counting) {",
+                         "trash_clocks_.pass_due_ms = next;", "trash_clocks_.pass_ticks_seen = pass_ticks;",
+                         "trash_clocks_.shop_due_ms = shop_due_ms;", "trash_clocks_.shop_ticks_seen = shop_ticks;",
+                         "}", "trash_clocks_.shop_quiet_level = shop_quiet.level();",
+                         "trash_clocks_.charm_ticks_seen = charm_ticks;" }) &&
+              count_in(loop, "trash_clocks_.pass_due_ms = ") == 1 &&
+              count_in(loop, "trash_clocks_.shop_due_ms = ") == 1 &&
               in_order(loop.substr(kept_at == std::string::npos ? 0 : kept_at),
                        { "trash_clocks_.owed_hp = owed.hp;", "trash_clocks_.plan_due_ms = plan_due_ms;",
                          "trash_clocks_.shop_troubles = owed.troubles;", "shop_look_at_s_ = 0;",
                          "shop_owed_ = owed.hp + owed.mp;", "trash_running_ = false;" }),
-          "and kept for the next as the worker ends, whichever way its loop is left -- the shop's plan with them, "
+          "and kept for the next as the worker ends, whichever way its loop is left -- the pass's and the shop's "
+          "only by a worker that counted them, never one here for a button alone -- the shop's plan with them, "
           "and the card told no worker buys it now");
-    check(in_order(loop, { "if (shop_ticked_.load() != shop_ticks) {", "owed = bag::ShopOwed{};",
-                           "shop_due_ms = shop_first_due();", "shop_quiet.reset();",
-                           "if (charm_ticked_.load() != charm_ticks) {", "charm_check_ms = now_ms() + kCharmFirstMs;" }) &&
-              count_in(loop, "shop_due_ms = shop_first_due();") == 2 && !has(gui, "shop_blocked") &&
+    check(in_order(loop, { "if (settings.enabled != pass_was_on) {", "if (pass_was_on) pass_afresh();",
+                           "if (pass_ticked_.load() != pass_ticks) {", "pass_afresh();",
+                           "if (settings.buy_potions != shop_was_on) {", "shop_afresh();",
+                           "if (shop_ticked_.load() != shop_ticks) {", "owed = bag::ShopOwed{};", "shop_afresh();",
+                           "shop_quiet.reset();", "if (charm_ticked_.load() != charm_ticks) {",
+                           "charm_check_ms = now_ms() + kCharmFirstMs;" }) &&
+              in_order(loop, { "const auto pass_afresh = [&] {",
+                               "if (counting) next = bag::start_due_ms(0, now_ms(), settings.interval_minutes, "
+                               "kPassFirstMs);",
+                               "else kept.pass_due_ms = 0;", "const auto shop_afresh = [&] {",
+                               "if (counting) shop_due_ms = bag::start_due_ms(0, now_ms(), settings.buy_every_minutes, "
+                               "kShopFirstMs);",
+                               "else kept.shop_due_ms = 0;" }) &&
+              // And the third (2026.11.13b): "Mua ngay sau khi dọn rác" gone,
+              // the clock buying again.
+              count_in(loop, "shop_afresh();") == 3 && count_in(loop, "pass_afresh();") == 2 &&
+              has(loop, "if (!after_now && settings.buy_potions && owed.hp + owed.mp == 0) shop_afresh();") &&
+              !has(gui, "shop_blocked") &&
               has(loop, "if (kept.charm_ticks_seen != charm_ticks) kept.charm_check_ms = 0;") &&
               in_order(loop, { "if (kept.shop_ticks_seen != shop_ticks) {", "kept.owed_hp = kept.owed_mp = 0;",
                                "kept.plan_due_ms = 0;" }) &&
@@ -748,11 +807,17 @@ void test_jobs_wiring() {
                                           "if (simple_clean_.buy_potions) { ++shop_ticked_; shop_owed_ = 0; }",
                                           "if (simple_clean_.buy_potions && simple_running()) start_trash();" }) &&
               count_in(shop_card, "++shop_ticked_;") == 1 &&
+              in_order(flat(view), { "if (ImGui::Checkbox(\"Tự dọn rác\", &simple_clean_.enabled)) {",
+                                     "if (simple_clean_.enabled) ++pass_ticked_;",
+                                     "if (simple_clean_.enabled && simple_running()) start_trash();" }) &&
+              count_in(view, "++pass_ticked_;") == 1 &&
               has(use, "if (simple_clean_.use_charms) ++charm_ticked_;") &&
-              has(hpp, "std::atomic<unsigned>    charm_ticked_{0};"),
-          "\"Dùng bùa\" and \"Tự mua bình\" ticked on again: that job's clock, and the shop's back-off, afresh -- the "
-          "shop owing nothing, its first look as at a start (the plan time saved, not 45 s); the worker running or "
-          "the next; the window's thread moves an atomic only; no shop_blocked anywhere");
+              has(hpp, "std::atomic<unsigned>    charm_ticked_{0};") &&
+              has(hpp, "std::atomic<unsigned>    pass_ticked_{0};"),
+          "\"Tự dọn rác\", \"Tự mua bình\" and \"Dùng bùa\" ticked on again: that job's clock afresh -- the pass and "
+          "the shop a whole interval from now (in a worker not counting, from the next start), the shop owing "
+          "nothing with its back-off reset; the worker running or the next; the window's thread moves an atomic "
+          "only; no shop_blocked anywhere");
     const std::string shop_job =
         slice(gui, "const auto run_shop = [&](bool forced, bool dry, bool after_pass) {", "while (!trash_stop_) {");
     const std::string charm_job = slice(gui, "const auto run_charms = [&](bool forced) {", "// ---- the potion shop ----");
@@ -763,13 +828,45 @@ void test_jobs_wiring() {
                                "else if (hp_stop) shop_due_ms = now_ms() + bag::kHpStoppedAgainMs;",
                                "else if (end == bag::ShopEnd::Paused) shop_due_ms = now_ms() + "
                                "BagCleaner::kShopPartGapMs;",
-                               "else if (end == bag::ShopEnd::Trouble) shop_due_ms = minutes(10);",
+                               "else if (end == bag::ShopEnd::Trouble) shop_due_ms = now_ms() + "
+                               "bag::kShopTroubleAgainMs;",
                                "else shop_due_ms = now_ms() + BagCleaner::kShopPartGapMs;" }) &&
               has(charm_job, "if (!forced && !trash_stop_ && ((!r.ran && (!only_message || !r.trouble.empty())) ||") &&
               has(charm_job, "if (!forced && r.tab_unsure) charm_check_ms = now_ms() + kCharmTabRetryMs;"),
-          "a shop run cut by DỪNG/F10 owing the rest leaves its clock as it was (the next worker resumes from 45 s), a "
-          "charm run's too (8 s) -- but a plan bought in full waits for the next plan whatever ended its round; one "
-          "its guard stopped for HP is looked at again in 15 s (2026.11.11)");
+          "a shop run cut by DỪNG/F10 owing the rest leaves its clock as it was (due already: the next worker counts "
+          "a whole interval from its start since 2026.11.12, 45 s before), a charm run's too (8 s) -- but a plan "
+          "bought in full waits for the next plan whatever ended its round; one its guard stopped for HP is looked "
+          "at again in 15 s (2026.11.11)");
+    // 2026.11.24 (the owner: "Kiểm tra các phần khác xem có phần nào không làm
+    // được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác"): a shop
+    // trouble never drops the plan -- every one tried again 30 s on, said on
+    // the card from the second in a row -- and a charm's message two clicks
+    // did not close is clicked again by the next charm run, a minute on.
+    check(!has(shop_job, "bool dropped") && !has(gui, "owed.dropped") && !has(gui, "kShopTroublesToDrop") &&
+              !has(shop_job, "if (dropped)") && !has(shop_job, "add(\"Hai lần mua liền bị lỗi") &&
+              in_order(shop_job, { "const bag::ShopEnd end = bag::shop_end(seen);",
+                                   "else if (end == bag::ShopEnd::Trouble) shop_due_ms = now_ms() + "
+                                   "bag::kShopTroubleAgainMs;",
+                                   "if (end == bag::ShopEnd::Trouble && next_part) {",
+                                   "\"Trash: shop -- %d trouble(s) in a row: owed %d+%d kept, tried again %llu s on\"",
+                                   "troubled = owed.troubles >= 2 && !trash_oneshot_ && !trash_stop_;",
+                                   "if (!r.trouble.empty() && !troubled) line +=", "if (troubled) {",
+                                   "add(\"Mua bình bị lỗi \" + std::to_string(owed.troubles) + \" lần liền\" +",
+                                   "\": GoBot thử lại sau \" + in_said + \".\");",
+                                   "} else if (!dry && left > 0 && (!r.board_up || trash_oneshot_) && !trash_stop_) {",
+                                   "\", mua tiếp sau \" + in_said + \".\"" }) &&
+              has(shop_job, "in_s < 60 ? std::to_string(in_s) + \" giây\" : std::to_string((in_ms + 59'999) / "
+                            "60'000) + \" phút\";") &&
+              in_order(charm_job, { "} else if (!r.notice_carried || charm_notice_ms == 0 || r.notice_clicked) {",
+                                    "if (r.yielded && !trash_stop_) charm_check_ms = now_ms() + bag::kHpStoppedAgainMs;",
+                                    "if (r.notice_left && r.notice_clicked && !trash_stop_) charm_check_ms = now_ms() "
+                                    "+ kCharmNoticeAgainMs;" }) &&
+              has(gui, "constexpr std::uint64_t kCharmNoticeAgainMs = 60'000;") &&
+              has(gui, "constexpr std::uint64_t kCharmTabRetryMs = 60'000;"),
+          "2026.11.24: a shop trouble keeps what is owed and is tried again 30 s on without limit -- logged with its "
+          "count, the card saying \"Mua bình bị lỗi N lần liền (...): GoBot thử lại sau 30 giây.\" from the second "
+          "in a row, a part's wait in seconds under a minute; a charm message clicked and still up keeps its two "
+          "minutes from that run and is clicked again a minute on; the charm tab's retry a minute");
 
     // ---- 2026.11.09: the shop's plan ----
     const std::size_t plan_at = shop_job.find("owed = bag::shop_new_plan(settings.buy_hp_slots, settings.buy_mp_slots);");
@@ -780,7 +877,8 @@ void test_jobs_wiring() {
               run_at != std::string::npos && clock_at < plan_at && plan_at < hold_at && hold_at < run_at &&
               count_in(gui, "shop_clock.set_next(") == 1 &&
               in_order(shop_job, { "if (!dry) {", "owed.hp = std::min(owed.hp, settings.buy_hp_slots);",
-                                   "if (forced || now_ms() >= plan_due_ms) {",
+                                   "if (bag::shop_plan_begins(forced, after_pass_buys, look_owed, now_ms() >= "
+                                   "plan_due_ms)) {",
                                    "if (!shop_clock.set_next(kShopClockId,", "owed = bag::ShopOwed{};",
                                    "shop_due_ms = forced ? due_before : minutes(5);", "return;",
                                    "owed = bag::shop_new_plan(", "if (owed.hp + owed.mp == 0) {",
@@ -854,15 +952,33 @@ void test_jobs_wiring() {
                   "&macro_config_.cast_paced);"),
           "\"Ra chiêu theo vòng\": a tick beside \"Dùng skill tuần tự\" and \"Tốc độ bấm kỹ năng\", saved as the "
           "window saves the rest; and on the full screen");
+    // 2026.11.16b: on the "Tự dùng kỹ năng" row itself too, the same switch,
+    // saved and handed over at once, with a short hover.
+    const std::string line = body(skills, "void GuiApp::simple_skills_line() {");
+    check(has(skills, "const char* const kCastPacedShort = \"Ra chiêu theo vòng\";") &&
+              in_order(line, { "if (skill_gap_combo(cfg)) simple_changed();",
+                               "if (ImGui::Checkbox(kCastPacedShort, &cfg.cast_paced)) simple_changed();",
+                               "ImGui::SetItemTooltip(\"Có dấu (mặc định): kỹ năng ra lần lượt theo thứ tự phím",
+                               "Chạy cả khi Tự đánh quái bật.\\nBỏ dấu: mỗi phím bấm theo giờ riêng như trước.\");",
+                               "if (cfg.cast_paced) hint(cast_paced_status_vi().c_str());" }),
+          "\"Ra chiêu theo vòng\" on the \"Tự dùng kỹ năng\" row (2026.11.16b): after \"Tốc độ bấm kỹ năng\", saved at "
+          "once, its short hover saying it is on by default and runs with Tự đánh quái, its status under the row");
     const std::string tip = body(skills, "const char* GuiApp::cast_paced_tip_vi() {");
     const std::string status = body(skills, "std::string GuiApp::cast_paced_status_vi() const {");
-    check(has(tip, "gói tin") && has(tip, "2 giây") && has(tip, "tạm bấm theo giờ") && has(tip, "Tự đánh quái tắt") &&
-              has(tip, "khoảng chờ ngắn nhất") && has(tip, "Bỏ dấu (mặc định)") &&
-              has(status, "MacroEngine::pace_status_vi(st)") && has(status, "!follows && !st.others") &&
+    check(has(tip, "gói tin") && has(tip, "2 giây") && has(tip, "tạm bấm theo giờ") &&
+              has(tip, "Chạy cả khi Tự đánh quái bật") && !has(tip, "Tự đánh quái tắt") &&
+              has(tip, "khoảng chờ ngắn nhất") && has(tip, "không phím nào bị bỏ đói") &&
+              has(tip, "Có dấu (mặc định)") && !has(tip, "Bỏ dấu (mặc định)") &&
+              has(tip, "Phím đánh mà cũng là kỹ năng thì ra theo lượt của nó, bot không bấm thêm") &&
+              has(tip, "Chuỗi phím (Sequence) bật thì ô này tạm không có tác dụng") &&
+              has(status, "MacroEngine::pace_status_vi(st)") &&
+              has(status, "st.mode == MacroEngine::PaceStatus::Mode::Off && !st.others") &&
+              !has(status, "follows") && !has(status, "chỉ dành cho macro chạy một mình") &&
               !has(status, "save(") && !has(status, "load(") &&
               !has(status, "exe_relative") && !has(skills, "macro_config_.save("),
-          "its hover says what it does, that it needs the packets and falls back after 2 s, the macro alone, and the "
-          "interval as the least wait; its status reads no file and writes none");
+          "its hover says what it does, on by default, with Tự đánh quái too, that it needs the packets and falls "
+          "back after 2 s, the sequence alone keeping it off, and the interval as the least wait; its status reads "
+          "no file and writes none");
 
     // ---- R8: the words ----
     check(!has(skills, "Như GoC") &&
@@ -1009,26 +1125,42 @@ void test_notes_1108() {
           "the charms' and the shop's first waits after a BẮT ĐẦU, " + n(charm_first) + " and " + n(shop_first) +
               " ms -- as kCharmFirstMs and kShopFirstMs have them");
 
-    // ---- W1: the switch, off as shipped, and where it is ----
+    // ---- W1: the switch -- on as shipped since 2026.11.16b -- and where it is ----
     const std::string label = literal_after(skills, "const char* const kCastPacedLabel = \"");
+    const std::string short_label = literal_after(skills, "const char* const kCastPacedShort = \"");
     MacroConfig built;
     built.apply_defaults();
     MacroConfig ships;
     const bool shipped = ships.load(std::string(GOBOT_SOURCE_DIR) + "/configs/macro.ini");
-    check(!label.empty() && !MacroConfig{}.cast_paced && !built.cast_paced && shipped && !ships.cast_paced &&
-              has(ini, "cast_paced=false") &&
-              has(ini, "Off, and in a file without it: every key on its own timer, as always.") &&
-              has(ini, "the tick \"" + label + "\" in the \"Kỹ năng\" window (Chi tiết… on the \"Tự dùng kỹ năng\" "
-                       "row), and in the full screen's Timed keys.") &&
+    check(!label.empty() && short_label == "Ra chiêu theo vòng" && MacroConfig{}.cast_paced && built.cast_paced &&
+              shipped && ships.cast_paced && std::string(MacroConfig::kCastPacedKey) == "cast_paced_v2" &&
+              has(ini, "cast_paced=true") && has(ini, "cast_paced_v2=true") && !has(ini, "cast_paced=false") &&
+              !has(ini, "Off, and in a file without it: every key on its own timer, as always.") &&
+              has(ini, "the tick \"" + short_label + "\" on the \"Tự dùng kỹ năng\" row, \"" + label +
+                           "\" in the \"Kỹ năng\" window (Chi tiết… on that row), and in the full screen's Timed keys "
+                           "-- one switch.") &&
+              has(ini, "Only the key sequence on, with a key in it, keeps it off.") &&
+              has(ini, "cast_paced_v2 is the switch read since 2026.11.16b; a file without it was written before and "
+                       "is read as on, whatever its cast_paced says (that false was the old default).") &&
+              has(ini, "To switch it off by hand: cast_paced_v2=false, with GoBot closed.") &&
               has(ini, "(VI) Bấm kỹ năng theo nhịp chiêu ra: lần lượt từng chiêu theo thứ tự phím, chỉ bấm chiêu sau "
-                       "khi game đã ra chiêu trước (xem qua gói tin). Mặc định tắt.") &&
-              has(doc, "Ô mới \"" + label + "\" (thử nghiệm, mặc định KHÔNG có dấu)") &&
-              has(doc, "macro.ini không có dòng cast_paced thì coi như ô này không có dấu") &&
+                       "khi game đã ra chiêu trước (xem qua gói tin), cả khi Tự đánh quái chạy. Mặc định bật từ bản "
+                       "2026.11.16b; muốn tắt thì bỏ dấu ô \"Ra chiêu theo vòng\" ở dòng Tự dùng kỹ năng.") &&
+              !has(ini, "Mặc định tắt.") &&
+              has(doc, "Ô mới \"" + label + "\" (thử nghiệm; trong bản này mặc định KHÔNG có dấu, từ bản 2026.11.16b "
+                       "mặc định CÓ dấu và chạy cả khi Tự đánh quái chạy)") &&
+              has(doc, "Trong bản này, macro.ini không có dòng cast_paced thì coi như ô này không có dấu. Từ bản "
+                       "2026.11.16b ô nằm ngay ở dòng Tự dùng kỹ năng, mặc định có dấu, và sửa tay là dòng "
+                       "cast_paced_v2 trong phần [Macro], lúc GoBot đã tắt.") &&
+              !has(doc, "sửa tay thì là cast_paced=true") &&
               has(readme, "*" + label + "*") &&
-              has(readme, "Off as shipped, and a `macro.ini` without `cast_paced` reads false") &&
-              has(pack, "OFF as shipped, cast_paced in configs\\macro.ini"),
-          "\"" + label + "\": off in code, in the shipped macro.ini (named by its tick) and in one without it, as "
-          "every note says");
+              has(readme, "On as shipped since 2026.11.16b, and a `macro.ini` without `cast_paced_v2` reads on, "
+                          "whatever its old `cast_paced` says") &&
+              !has(readme, "Off as shipped, and a `macro.ini` without `cast_paced` reads false") &&
+              has(pack, "OFF as shipped in this version, ON and with Tu danh quai too since 2026.11.16b, below") &&
+              !has(pack, "OFF as shipped, cast_paced in configs\\macro.ini"),
+          "\"" + label + "\": on in code, in the shipped macro.ini (named by its ticks) and in one without "
+          "cast_paced_v2 -- 2026.11.08's notes say it was off then and is on since 2026.11.16b");
     check(has(gui, "draw_feature(\"Timed keys\", &macro_on,") &&
               has(gui, "ImGui::Checkbox(\"" + label + "##macro\", &macro_config_.cast_paced);") &&
               has(doc, "sau \"Dùng skill tuần tự\" và \"Tốc độ bấm kỹ năng\". Màn hình Nâng cao, phần \"Timed keys\", có "
@@ -1403,13 +1535,14 @@ void test_notes_1109() {
     const std::string over = body(bag_cpp, "bool BagCleaner::board_over_question(const Frame& f) const {");
     const std::string close_shop = slice(bag_cpp, "const auto close_shop = [&] {", "shop_up = !closed;");
     check(has(gui, "#include \"gobot/checkin_board.hpp\"") &&
-              has(clear, "if (shop_held && (bag::shop_left_up(f, store) || checkin_board_title(f, store))) return;") &&
+              has(clear, "const bool board = held && checkin_board_title(f, store);") &&
+              has(clear, "if (shop_held && (bag::shop_left_up(f, store) || board)) return;") &&
               count_in(cancel, "board_over_question(") == 3 &&
               has(cancel, "if (!seen_at(shop_q_) || board_over_question(f)) return false;") &&
               has(cancel, "if (shop_q_.valid() && (!seen_at(shop_q_) || board_over_question(f))) return false;") &&
               has(over, "checkin_board_title(f, store_, &title)") && has(over, "kCheckinBoardFromTitle") &&
               has(over, "board.overlaps(bag::message_box(shop_q_))") &&
-              has(bag_cpp, "((shop_q_.valid() || (res.board_up && res.shop_opened)) && checkin_board_title(g, store_))"),
+              has(bag_cpp, "((shop_q_.valid() || (res.board_up && res.shop_opened)) && checkin_board_title(h, store_))"),
           "a quantity box under the check-in board is never taken for gone (shop_cancel), the run's end holds for it "
           "and for a shop opened under the board, and the trash worker keeps a shop's hold while the board is up");
     check(in_order(close_shop, { "if (!open.found) {", "if (bag::shop_row_up(g, store_)) {",
@@ -1461,63 +1594,118 @@ void test_notes_1109() {
           "BagCleaner::shop_deadline_ms has it");
 
     // ---- the plan's clock on disk ----
+    // Still written as a plan begins; since 2026.11.12 a start counts a whole
+    // interval and no longer waits by it (bag::start_due_ms). The 2026.11.09
+    // entries say the rule of then, 45 s to an interval, as it was.
     const std::string clock_file = shop_clock_path();
     const std::string tail = "\\shop_clock.txt";
-    const std::int64_t now_s = 1'000'000;
+    const std::uint64_t start = 7'000'000;
     check(clock_file.size() > tail.size() &&
               clock_file.compare(clock_file.size() - tail.size(), tail.size(), tail) == 0 &&
-              bag::shop_first_wait_s(0, now_s, 60) == bag::kShopFirstWaitS &&
-              bag::shop_first_wait_s(now_s + 600, now_s, 60) == 600 &&
-              bag::shop_first_wait_s(now_s + 99'999, now_s, 60) == 3600 &&
+              bag::start_due_ms(0, start, 60, 45'000) == start + 3'600'000 &&
+              bag::start_due_ms(start + 600'000, start, 60, 45'000) == start + 600'000 &&
               has(doc, "Giờ mua được ghi vào %LOCALAPPDATA%\\GoBot\\shop_clock.txt TRƯỚC khi bấm gì") &&
-              has(doc, "(ít nhất " + n(bag::kShopFirstWaitS) + " giây, nhiều nhất một khoảng \"mua mỗi\")") &&
+              has(doc, "(ít nhất 45 giây, nhiều nhất một khoảng \"mua mỗi\")") &&
               has(readme, "`%LOCALAPPDATA%\\GoBot\\shop_clock.txt`") &&
-              has(readme, "`kShopFirstWaitS` (" + n(bag::kShopFirstWaitS) + " s) at least and one interval at most "
-                          "(`bag::shop_first_wait_s`)") &&
+              has(readme, "`kShopFirstWaitS` (45 s) at least and one interval at most (`bag::shop_first_wait_s`)") &&
               has(trash_ini, "%LOCALAPPDATA%\\GoBot\\shop_clock.txt before anything is clicked") &&
-              has(trash_ini, n(bag::kShopFirstWaitS) + " seconds at least, one interval at most") &&
+              has(trash_ini, "Since 2026.11.12 the first time comes buy_every_minutes after BẮT ĐẦU (F10), "
+                                         "or after \"Tự mua bình\" is ticked on -- nothing is bought at the start "
+                                         "itself (\"Mua ngay\" is for that); a DỪNG and BẮT ĐẦU again before it is "
+                                         "due keeps the time still counting.") &&
+              has(trash_ini, "GoBot started again counts a whole interval from its start, so it never "
+                                         "buys early (until 2026.11.12 it waited what was left -- 45 seconds at "
+                                         "least, one interval at most).") &&
+              has(trash_ini, "Since 2026.11.12 the first timed pass comes interval_minutes after BẮT ĐẦU "
+                                         "(F10), or after the box is ticked on -- none at the start itself (\"Dọn "
+                                         "ngay\" is for that)") &&
               has(pack, "%LOCALAPPDATA%\\GoBot\\shop_clock.txt, so a restart never buys early"),
-          "the plan's time in shop_clock.txt, a restart waiting what is left, " + n(bag::kShopFirstWaitS) +
-              " s at least and an interval at most -- as bag::shop_first_wait_s has it");
+          "the plan's time in shop_clock.txt, still written; a start's first look a whole interval on, a clock still "
+          "counting kept -- as bag::start_due_ms has it -- trash.ini saying so for the pass and the shop, and the "
+          "2026.11.09 entries the rule of then");
 
     // ---- the bag full, a message, trouble ----
     const int full_gap = hpp_int("kShopFullGapMs"), full_late = hpp_int("kShopFullLateMs");
-    check(full_gap > 0 && full_late == 1000 && bag::kShopTroublesToDrop == 2 &&
+    // Troubles in a row (2026.11.24, the owner: "Kiểm tra các phần khác xem
+    // có phần nào không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ
+    // chế khác"): never the plan dropped -- every one tried again 30 s on --
+    // where the second in a row dropped it until then (kShopTroublesToDrop,
+    // gone). The bag full and a message still end it.
+    bag::ShopOwed rows = bag::shop_new_plan(2, 2);
+    for (int i = 0; i < 4; ++i) rows = bag::shop_owed_after(rows, 0, 0, 0, 0, bag::ShopEnd::Trouble);
+    check(full_gap > 0 && full_late == 1000 && rows.hp == 2 && rows.mp == 2 && rows.troubles == 4 &&
               has(doc, "chỉ coi là đã đóng khi hai lần nhìn cách nhau " + vi_s(static_cast<std::uint64_t>(full_gap)) +
                            " giây đều không còn thấy") &&
               has(readme, "closed only when two looks " + n(full_gap) + " ms apart no longer see it; never an ESC while "
                           "it is up") &&
               has(readme, "for a second after Xác Nhận (`kShopFullLateMs`)") &&
-              has(doc, "hai lượt liền có lỗi thì GoBot bỏ phần còn lại") &&
-              has(readme, "the second in a row (`kShopTroublesToDrop`) drops what is left of the plan") &&
+              has(doc, "Lượt có lỗi thì chờ 30 giây (trước bản 2026.11.15b là 10 phút) rồi mua tiếp phần còn lại, "
+                       "lượt nào có lỗi cũng vậy, không giới hạn (từ bản 2026.11.24; trước đó hai lượt liền có lỗi "
+                       "thì GoBot bỏ phần còn lại, tới giờ sau mới mua lại).") &&
+              has(readme, "and so does every one after it, without limit: since 2026.11.24 troubles in a row never "
+                          "drop the plan (until then the second in a row, `kShopTroublesToDrop`, dropped what was "
+                          "left of it until the next)") &&
+              !has(readme, "the second in a row (`kShopTroublesToDrop`) drops what is left of the plan") &&
               has(doc, "Ô \"Tự mua bình\" VẪN CÓ DẤU: tới giờ sau GoBot mua lại.") &&
               has(doc, "giữ ảnh shop_message trong trash_debug") && has(bag_cpp, "keep(f, \"shop_message\");") &&
               has(doc, "giữ ảnh shop_full_stuck") && has(bag_cpp, "keep(g, \"shop_full_stuck\");"),
           "the full message closed when two looks " + n(full_gap) + " ms apart miss it, looked for a second after "
-          "Xác Nhận, never ESC; two troubles in a row drop the plan -- as bag.hpp has them");
+          "Xác Nhận, never ESC; troubles in a row never drop the plan since 2026.11.24 (four in a row: 2 + 2 still "
+          "owed) -- as bag.hpp has them");
 
     // ---- the check-in board: how it is told and closed ----
-    check(P::kSteadyMs % 1000 == 0 && P::kHoldMs % 1000 == 0 && P::kTriesWindowMs % 60'000 == 0 && P::kTries == 2 &&
-              has(doc, "bảng hiện (lúc vào game, lúc qua 00:00) và đứng yên " + n(P::kSteadyMs / 1000) +
-                           " giây thì GoBot bấm ESC một lần") &&
+    // Since 2026.11.15d (the owner: "chờ 30 giây rồi mới ấn ESC ... qua ngày
+    // thì chờ tới 00:03"): the ESC kCheckinBoardLoginWaitMs after the arrival
+    // or the first sight, still for kSteadyMs, never in the night hold. Since
+    // 2026.11.24 (the owner: "Kiểm tra các phần khác xem có phần nào không làm
+    // được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác") an ESC that
+    // left it up is followed by another kBackoffMs on, as often as it takes --
+    // no more kTries (2) in kTriesWindowMs (10 minutes), then left alone.
+    const std::string board_wait_s = n(kCheckinBoardLoginWaitMs / 1000);
+    const std::string again_s = n(P::kBackoffMs / 1000);
+    check(P::kSteadyMs % 1000 == 0 && P::kHoldMs % 1000 == 0 && P::kBackoffMs == 30'000 &&
+              kCheckinBoardLoginWaitMs % 1000 == 0 && kCheckinNightFromS == 23 * 3600 + 55 * 60 &&
+              kCheckinNightToS == 3 * 60 &&
+              has(doc, "bảng hiện (lúc vào game, lúc qua 00:00) thì GoBot bấm ESC một lần " + board_wait_s +
+                           " giây sau khi nhân vật vào game (GoBot tự vào: tính từ lúc vào; vào bằng tay: tính từ "
+                           "lúc thấy bảng), bảng phải đứng yên ít nhất " + n(P::kSteadyMs / 1000) +
+                           " giây; từ 23:55 tới 00:03 theo đồng hồ máy thì không bấm, qua ngày GoBot chờ tới 00:03 "
+                           "mới bấm ESC") &&
+              !has(doc, "bảng hiện (lúc vào game, lúc qua 00:00) và đứng yên " + n(P::kSteadyMs / 1000) +
+                            " giây thì GoBot bấm ESC một lần") &&
               has(doc, "các phím khác chờ tối đa " + n(P::kHoldMs / 1000) + " giây") &&
-              has(doc, "Bấm ESC " + n(P::kTries) + " lần trong " + n(P::kTriesWindowMs / 60'000) +
-                           " phút mà bảng vẫn còn") &&
-              has(readme, "presses ESC once the board has stayed put " + n(P::kSteadyMs / 1000) + " s") &&
+              has(doc, "Bấm ESC mà bảng vẫn còn thì " + again_s + " giây sau GoBot bấm lại, cứ thế tới khi bảng tắt") &&
+              has(doc, "(từ bản 2026.11.24; trước đó bấm ESC 2 lần trong 10 phút mà bảng vẫn còn thì GoBot để yên "
+                       "cho bạn tự tắt)") &&
+              has(readme, "presses ESC once the board is due with nothing else of its list up") &&
+              has(readme, "`kCheckinBoardLoginWaitMs` (" + board_wait_s + " s) after the later of the character's "
+                          "arrival in the world (the keeper's crossing) and the board's first sight, having stayed "
+                          "put `kSteadyMs` (" + n(P::kSteadyMs / 1000) + " s), and never while the PC's clock reads "
+                          "23:55:00 to 00:03:00 (`checkin_night_hold`)") &&
+              !has(readme, "presses ESC once the board has stayed put " + n(P::kSteadyMs / 1000) + " s") &&
               has(readme, "a hold of at most " + n(P::kHoldMs / 1000) + " s, a fresh look, ESC by " +
                               en_s(P::kEscPressByMs) + " s") &&
-              has(readme, "Two tries in " + n(P::kTriesWindowMs / 60'000) + " minutes") &&
+              has(readme, "Since 2026.11.24 an ESC that left it up is followed by another `kBackoffMs` (" + again_s +
+                              " s) later, as often as it takes") &&
+              has(readme, "until then two tries in 10 minutes, then it was left alone and the tab said so") &&
+              !has(readme, "Two tries in 10 minutes, then it is left alone") &&
               has(readme, "within " + n(kCheckinRelookSlack) + " px of where it was") &&
               kCheckinBoardScore > 0.899f && kCheckinBoardScore < 0.901f && has(readme, "`kCheckinBoardScore` 0.90") &&
               has(readme, "(\"Sự kiện và điểm danh\", " + n(kCheckinBoardFromTitle.w) + "x" +
                               n(kCheckinBoardFromTitle.h) + ", with its *Điểm danh* calendar)") &&
               has(app_ini, "each once it has stayed in one place for " + n(P::kSteadyMs / 1000) + " seconds") &&
-              has(app_ini, "bảng Sự kiện và điểm danh (lúc vào game và lúc qua 00:00, bấm ESC sau khi bảng đứng yên " +
-                               n(P::kSteadyMs / 1000) + " giây)") &&
+              has(app_ini, "-- since 2026.11.15d only " + board_wait_s + " seconds after the character comes into "
+                           "the game (or the board is first seen), and never from 23:55 to 00:03 by the PC's clock: "
+                           "at the day's turn it waits until 00:03;") &&
+              has(app_ini, "bảng Sự kiện và điểm danh (lúc vào game và lúc qua 00:00, bấm ESC " + board_wait_s +
+                               " giây sau khi vào game, qua ngày thì chờ tới 00:03)") &&
+              !has(app_ini, "bấm ESC sau khi bảng đứng yên") &&
               has(app_ini, "(ESC, never its X, and only with nothing else of these up: the notice goes first)") &&
               std::string(popup_kind_name(PopupKind::CheckinBoard)) == "the check-in board",
-          "the board ESC'd after " + n(P::kSteadyMs) + " ms still, under a hold of " + n(P::kHoldMs) + " ms, " +
-              n(P::kTries) + " tries in " + n(P::kTriesWindowMs) + " ms, re-looked within " + n(kCheckinRelookSlack) +
+          "the board ESC'd " + n(kCheckinBoardLoginWaitMs) + " ms (kCheckinBoardLoginWaitMs) after the arrival or "
+              "its first sight, " + n(P::kSteadyMs) + " ms still, never in the night hold (checkin_night_hold, "
+              "23:55 to 00:03), under a hold of " + n(P::kHoldMs) + " ms, tried again " + n(P::kBackoffMs) +
+              " ms after an ESC that left it up, without end, re-looked within " + n(kCheckinRelookSlack) +
               " px -- as PopupCloser and checkin_board.hpp have them");
 
     // ---- the jobs put off while it is up; the pictures kept ----
@@ -1558,8 +1746,13 @@ void test_notes_1109() {
               has(doc, "\"Cả hai số ô đều là 0: không có gì để mua.\"") &&
               has(gui, "std::string(\"Thử mua: game báo túi đồ [Tiêu thụ] đã đầy.\")") &&
               has(doc, "\"Thử mua: game báo túi đồ [Tiêu thụ] đã đầy.\"") &&
-              has(closer, "\"Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm ESC: GoBot để yên, bạn tắt giúp.\"") &&
-              has(doc, "\"Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm ESC: GoBot để yên, bạn tắt giúp.\"") &&
+              // The board still up after its ESC (2026.11.24): tried again,
+              // never "GoBot để yên, bạn tắt giúp" any more.
+              has(closer, "last_vi_ = board ? \"Đã bấm ESC mà bảng Sự kiện và điểm danh vẫn còn: thử lại sau \" +") &&
+              has(closer, ": std::string(\"Đã thử đóng \") + popup_kind_vi(kind) + \" mà vẫn còn: thử lại sau \" +") &&
+              has(doc, "\"Đã bấm ESC mà bảng Sự kiện và điểm danh vẫn còn: thử lại sau " + n(P::kBackoffMs / 1000) +
+                           " giây.\"") &&
+              !has(closer, "bạn tắt giúp") && !has(doc, "\"Bảng Sự kiện và điểm danh vẫn còn sau 2 lần bấm ESC") &&
               has(popups, "return \"Tự đóng thông báo: đang bật\" + (n > 0 ? \", đã đóng \" + std::to_string(n)") &&
               has(popups, "(boards > 0 ? \" (bảng điểm danh: \" + std::to_string(boards) + \")\"") &&
               has(doc, "\"Tự đóng thông báo: đang bật, đã đóng N (bảng điểm danh: M).\"") &&
@@ -1567,8 +1760,8 @@ void test_notes_1109() {
               has(doc, "\"Thử xem\" phải nói thấy \"bảng Sự kiện và điểm danh ở x,y\"") &&
               has(popups, "out += \" ở \" + std::to_string(up[i].at.x) + \",\" + std::to_string(up[i].at.y) +") &&
               has(doc, "thấy \"" + std::string(popup_kind_vi(PopupKind::CheckinBoard)) + " ở x,y\""),
-          "the card's \"" + bought + "\", the both-0 and trial lines, the board left alone, the line under BẮT ĐẦU "
-          "and Thử xem -- as the GUI and the closer word them");
+          "the card's \"" + bought + "\", the both-0 and trial lines, the board tried again (never left alone), the "
+          "line under BẮT ĐẦU and Thử xem -- as the GUI and the closer word them");
 
     // ---- the log's words the notes quote ----
     char plan[160], buy[96], done[160];
@@ -1579,19 +1772,28 @@ void test_notes_1109() {
                   CleanSettings::kBuyQuantity);
     std::snprintf(done, sizeof done, "Trash: shop done -- bought %d+%d, unsure %d, full %s%s; owed %d+%d; %s %s", 5, 5,
                   0, "no", "", 5, 5, "next part", (n(gap_s) + " s on").c_str());
-    const std::string troubles =
-        "Trash: shop -- " + n(bag::kShopTroublesToDrop) + " troubles in a row: owed dropped until the next plan ";
+    // Troubles in a row since 2026.11.24: the rest kept and tried again 30 s
+    // on, said with their count -- no longer "owed dropped until the next
+    // plan", which the second in a row was until then.
+    char troubles[160];
+    std::snprintf(troubles, sizeof troubles,
+                  "Trash: shop -- %d trouble(s) in a row: owed %d+%d kept, tried again %llu s on", 2, 5, 5,
+                  static_cast<unsigned long long>(bag::kShopTroubleAgainMs / 1000));
+    const std::string dropped_line = "Trash: shop -- 2 troubles in a row: owed dropped until the next plan ";
     check(has(gui, "\"Trash: shop plan HP %d + MP %d (owed %d+%d, at most %d a hold%s); clock saved, next plan %s\"") &&
               has(bag_cpp, "\"Trash: shop purchase %d/%d %s -- bought (%d read back)\"") &&
               has(gui, "\"Trash: shop done -- bought %d+%d, unsure %d, full %s%s; owed %d+%d; %s %s\"") &&
               has(gui, "\" s on\"") && has(gui, "next_part ? \"next part\" : \"next plan\"") &&
-              has(gui, "\"Trash: shop -- %d troubles in a row: owed dropped until the next plan %s\"") &&
+              has(gui, "\"Trash: shop -- %d trouble(s) in a row: owed %d+%d kept, tried again %llu s on\"") &&
+              !has(gui, "owed dropped until the next plan") &&
               has(doc, "\"" + std::string(plan) + "\"") && has(readme, "`" + std::string(plan) + "`") &&
               has(doc, "\"" + std::string(buy) + "\"") && has(readme, "`" + std::string(buy) + "`") &&
               has(doc, "\"" + std::string(done) + "\"") && has(readme, "`" + std::string(done) + "`") &&
-              has(doc, "\"" + troubles + "...\"") && has(readme, "`" + troubles + "…`"),
-          "the shop's plan, purchase, done and troubles lines -- \"" + std::string(plan) + "\" -- as the worker and "
-          "the cleaner write them");
+              has(doc, "\"" + std::string(troubles) + "\" (từ bản 2026.11.24; trước đó \"" + dropped_line +
+                           "...\")") &&
+              has(readme, "`" + std::string(troubles) + "` (since 2026.11.24; until then `" + dropped_line + "…`)"),
+          "the shop's plan, purchase, done and troubles lines -- \"" + std::string(plan) + "\", \"" +
+              std::string(troubles) + "\" -- as the worker and the cleaner write them");
     check(has(bag_cpp, "\"Trash: shop full message at %d,%d closed by %s (seen gone twice, %d click(s))\"") &&
               has(bag_cpp, "by = \"its label\";") && has(doc, "closed by its label (seen gone twice, 1 click(s))") &&
               has(readme, "closed by its label (seen gone twice, 1 click(s))`") &&
@@ -2232,7 +2434,39 @@ void test_notes_1111() {
                                      "Delete, theo điều người dùng báo và câu trả lời của bạn ngày 11/11; chưa thử trên "
                                      "game thật):");
     const std::size_t e10 = doc.find("- Mới trong bản 2026.11.10 (");
-    // 2026.11.11b's entry on top of it since, its step 15 after step 14.
+    // 2026.11.11b's entry on top of it since, its step 15 after step 14,
+    // 2026.11.11c's (the notice closed by GoBot) on top of that, and
+    // 2026.11.12's (the hunt: turns, the area, falls, the bars) on top of all
+    // -- and 2026.11.12b's (the charms and more at any HP) on top of it,
+    // 2026.11.12c's on that, 2026.11.13's (the bars' figures) on it,
+    // 2026.11.13b's (the shop after the pass, the login's message) on that and
+    // 2026.11.13c's (the three game sizes) on it, 2026.11.14's (the game in
+    // the corner after a login) on that, and 2026.11.14b's (the shop after a
+    // pass, ESC after 10 s, the message after an invite) -- and 2026.11.15's
+    // (one lost key press is no evidence) before that, and 2026.11.15b's (the
+    // shop and the party again after 30 s) first of those, and 2026.11.15c's
+    // (a report in mid-air is no landing) on them, and 2026.11.15d's (thirty
+    // seconds for the game to react, the board's ESC after a login) on all of
+    // those, and 2026.11.16's (lighter on weak PCs, old features removed)
+    // on them, and 2026.11.16b's (the skills in turn while hunting too) on
+    // those, and 2026.11.17's (the MP bar, HP/MP by the packets alone, the
+    // skills even while hunting) first of all.
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (");
+    const std::size_t e16 = doc.find("- Mới trong bản 2026.11.16 (");
+    const std::size_t e15d = doc.find("- Mới trong bản 2026.11.15d (");
+    const std::size_t e15c = doc.find("- Mới trong bản 2026.11.15c (");
+    const std::size_t e15b = doc.find("- Mới trong bản 2026.11.15b (");
+    const std::size_t e15 = doc.find("- Mới trong bản 2026.11.15 (");
+    const std::size_t e14b = doc.find("- Mới trong bản 2026.11.14b (");
+    const std::size_t e14 = doc.find("- Mới trong bản 2026.11.14 (");
+    const std::size_t e13c = doc.find("- Mới trong bản 2026.11.13c (");
+    const std::size_t e13b = doc.find("- Mới trong bản 2026.11.13b (");
+    const std::size_t e13 = doc.find("- Mới trong bản 2026.11.13 (");
+    const std::size_t e12c = doc.find("- Mới trong bản 2026.11.12c (");
+    const std::size_t e12b = doc.find("- Mới trong bản 2026.11.12b (");
+    const std::size_t e12 = doc.find("- Mới trong bản 2026.11.12 (");
+    const std::size_t e11c = doc.find("- Mới trong bản 2026.11.11c (tự tắt thông báo lạ khi mua bình;");
     const std::size_t e11b = doc.find("- Mới trong bản 2026.11.11b (mua bình và dọn rác ở mọi mức máu, GoBot tự");
     const std::size_t step15 = doc.find("15. Mua bình và dọn rác ở mọi mức máu, GoBot tự bấm bình (bản 2026.11.11b,");
     const std::size_t try14 = doc.find("Thử như bước 14 ở mục 6.");
@@ -2244,7 +2478,22 @@ void test_notes_1111() {
     const std::size_t r11 =
         readme.find("### The shop after the pass, HP during the bag jobs, and six more keys (2026.11.11)");
     const std::size_t rmacro = readme.find("## Keyboard macro");
-    check(sec5 != npos && e11b != npos && e11 != npos && e10 != npos && doc.find("- Mới trong bản", sec5) == e11b &&
+    check(sec5 != npos && e14b != npos && e14 != npos && e13c != npos && e13b != npos && e13 != npos &&
+              e12c != npos && e12b != npos && e12 != npos && e11c != npos && e11b != npos && e11 != npos &&
+              e10 != npos && e17 != npos && e16b != npos && e16 != npos && e15d != npos && e15c != npos &&
+              e15b != npos && e15 != npos && doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 &&
+              doc.find("- Mới trong bản", e17 + 1) == e16b &&
+              doc.find("- Mới trong bản", e16b + 1) == e16 && doc.find("- Mới trong bản", e16 + 1) == e15d &&
+              doc.find("- Mới trong bản", e15d + 1) == e15c &&
+              doc.find("- Mới trong bản", e15c + 1) == e15b && doc.find("- Mới trong bản", e15b + 1) == e15 &&
+              doc.find("- Mới trong bản", e15 + 1) == e14b &&
+              doc.find("- Mới trong bản", e14b + 1) == e14 && doc.find("- Mới trong bản", e14 + 1) == e13c &&
+              doc.find("- Mới trong bản", e13c + 1) == e13b && doc.find("- Mới trong bản", e13b + 1) == e13 &&
+              doc.find("- Mới trong bản", e13 + 1) == e12c && doc.find("- Mới trong bản", e12c + 1) == e12b &&
+              doc.find("- Mới trong bản", e12b + 1) == e12 &&
+              e12 < e11c && doc.find("- Mới trong bản", e12 + 1) == e11c &&
+              e11c < e11b && doc.find("- Mới trong bản", e11c + 1) == e11b &&
               e11b < e11 && doc.find("- Mới trong bản", e11b + 1) == e11 && e11 < e10 &&
               try14 != npos && e11 < try14 && try14 < e10 && step13 != npos && step14 != npos && revive != npos &&
               step15 != npos && step13 < step14 && step14 < step15 && step15 < revive && rkeys != npos &&
@@ -2252,8 +2501,9 @@ void test_notes_1111() {
               r11 < rmacro && has(readme, "Since 2026.11.11 (not yet run on the game).") &&
               has(pack, "The shop right after the pass, potions during the bag jobs, and six more keys (2026.11.11, "
                         "not yet tried on the game)."),
-          "DOC-TRUOC.txt: the 2026.11.11 entry first in section 5, on top of 2026.11.10's, not yet tried on the game, "
-          "its live test step 14 after step 13; README's section after the key window's, and START-HERE, say it too");
+          "DOC-TRUOC.txt: the 2026.11.11 entry on top of 2026.11.10's -- under 11.13's, 11.12c's, 11.12b's, 11.12's, 11.11c's and "
+          "11.11b's, in that order -- not yet tried on the game, its live test step 14 after step 13; README's section after "
+          "the key window's, and START-HERE, say it too");
 
     // ---- the users' words and the owner's answers, as written ----
     const std::string feedback =
@@ -2302,7 +2552,7 @@ void test_notes_1111() {
               has(shop_card, "\"phím, không chờ thêm. Vừa dọn xong chưa tới \" + std::to_string(bag::kRideFreshMs / "
                              "60'000) +") &&
               has(shop_card, "\" phút thì mua luôn, không dọn lại.\";") &&
-              has(shop_card, "if (simple_clean_.buy_potions && simple_clean_.enabled) {") &&
+              has(shop_card, "if (simple_clean_.buy_potions && simple_clean_.enabled && !after_pass) {") &&
               has(doc, "thẻ Tự mua bình ghi \"" + ride_hint + "\"") && has(readme, "*" + ride_hint + "*") &&
               has(doc, "Vừa dọn xong chưa tới " + mins + " phút thì không dọn lại") &&
               has(readme, "`bag::kRideFreshMs` (" + n(fresh / 1000) + " s)") &&
@@ -2310,7 +2560,8 @@ void test_notes_1111() {
               has(trash_ini, "a pass ended less than a minute before is not made again."),
           "a pass ended less than " + n(fresh) + " ms ago pulls none, an older one or none yet pulls one, Dọn rác "
           "off never -- as bag::ride_turn has it -- and the card's hint quoted as simple_shop.cpp builds it");
-    check(has(gui, "ride = bag::ride_turn(was, shop_due, settings.enabled, cannot_pull, now_ms(), last_pass_end_ms);") &&
+    check(has(gui, "ride = bag::ride_turn(was, ride_due, settings.enabled, cannot_pull, now_ms(), last_pass_end_ms);") &&
+              has(gui, "const bool ride_due = shop_due && owed.troubles == 0;") &&
               in_order(gui, { "const bool pulled = ride == bag::ShopRide::Pending && request == 0;",
                               "if (rides) {", "run_shop(false, false, true);" }) &&
               count_in(gui, "run_shop(false, false, true);") == 1 &&
@@ -2342,7 +2593,9 @@ void test_notes_1111() {
               has(gui, "\"ended %s)\", since_pass().c_str());") &&
               has(gui, ": std::to_string((now_ms() - last_pass_end_ms) / 1000) + \" s ago\";") &&
               has(gui, "GB_INFO(\"Trash: shop rides the pass -- the same hold, no quiet second (%s)\",") &&
-              has(gui, "pulled ? \"the look that pulled it\" : \"come due while it ran\");") &&
+              has(gui, "pulled ? \"the look that pulled it\"") &&
+              has(gui, ": look_owed ? \"right after each timed pass, buy_after_trash\"") &&
+              has(gui, ": \"come due while it ran\");") &&
               has(gui, "GB_INFO(\"Trash: shop -- no ride on the pass it pulled (%s): it goes on its own\", no_ride);") &&
               has(gui, "\"%d unsure, full %s; %s, the last pass ended %s\",") &&
               has(gui, "after_pass ? \"right after the pass\" : forced ? \"Mua ngay\" : dry ? \"Thử mua\" : \"on its "
@@ -2512,7 +2765,9 @@ void test_notes_1111() {
                            "at %d,%d (row \"") &&
               has(bag_cpp, "\"%.2f, buttons %.2f), look %d of %d\",") &&
               has(bag_cpp, "static_cast<double>(s.buttons_score), again + 1, kShopRowRelooks + 1);") &&
-              has(bag_cpp, "const std::string name = hp ? \"Thịt bò khô\" : \"Rượu lá tre\";") &&
+              // The pet's Thịt bò named apart since 2026.11.24.
+              has(bag_cpp, "const std::string name = pet ? std::string(CleanSettings::kBuyPetShown) + \" (HP pet)\"") &&
+              has(bag_cpp, ": hp ? \"Thịt bò khô\" : \"Rượu lá tre\";") &&
               has(bag_cpp, "res.trouble = \"không thấy hàng Thịt bò khô và Rượu lá tre trong cửa hàng trước khi chọn "
                            "\" + name +") &&
               has(bag_cpp, "\" (danh sách có thể đã bị cuộn), nên không bấm\";") &&
@@ -2619,7 +2874,9 @@ void test_notes_1111() {
     // after one with nothing to do (R1, R2); HP unread waits a ridden round
     // too (R3); the H gates only with every HP line from half the mark up let
     // through (HP-1); a lone message closed with HP low (HP-2).
-    check(has(doc, "lần xem mua đầu " + n(bag::kShopFirstWaitS) + " giây sau, rồi mỗi đồng hồ tính từ lượt của chính "
+    // (The 2026.11.11 entry's first waits, 15 s and 45 s, as they were then:
+    // a whole interval since 2026.11.12.)
+    check(has(doc, "lần xem mua đầu 45 giây sau, rồi mỗi đồng hồ tính từ lượt của chính "
                    "nó. Nên khi \"mua mỗi\" chia hết cho \"dọn mỗi\" (như 10 và 60 của bản zip, hay 5 hoặc 15 với "
                    "15), mỗi lần mua theo giờ thường tới trong vòng " + mins + " phút sau một lượt dọn theo giờ") &&
               has(readme, "so when `buy_every_minutes` is a multiple of `interval_minutes` -- the shipped 10 and 60, or "
@@ -2657,6 +2914,2276 @@ void test_notes_1111() {
 #endif
 }
 
+// ------------------------------------------------ 2026.11.12: the notes
+
+/// 2026.11.12's notes against the code: DOC-TRUOC.txt's entry -- on top of
+/// 11.11c's -- and its live test step 16, README.md's release section,
+/// START-HERE (package.ps1), the comments of hunt.ini and macro.ini, and
+/// docs/goc-comparison.md: the owner's report and eight answers as written,
+/// and the numbers, the card's words and the log lines they quote as the code
+/// has them -- the confirmed turns, the attack's reach, the skill holds, the
+/// dash, the area kept, the way back, the pit, the two bars, the minimums gone
+/// and the bag jobs counted from the start.
+void test_notes_1112() {
+    section("The 2026.11.12 notes against the code: turns, holds, the dash, the area, the way back, the pit, the two "
+            "bars, the start count, the words quoted");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string hunt_raw = source("/configs/hunt.ini");
+    const std::string hunt_ini = flat(hunt_raw, true);
+    const std::string macro_ini = flat(source("/configs/macro.ini"), true);
+    const std::string goc = flat(source("/docs/goc-comparison.md"));
+    const std::string hunter = source("/src/hunter.cpp");
+    const std::string drop = source("/src/hunter_drop.cpp");
+    const std::string macro = source("/src/macro.cpp");
+    const std::string world = source("/src/packet_world.cpp");
+    const std::string more = source("/apps/gobot_gui/packets_more.cpp");
+    const std::string spot = source("/apps/gobot_gui/simple_spot.cpp");
+    const std::string map = source("/apps/gobot_gui/simple_map.cpp");
+    const std::string map_view = source("/src/map_view.cpp") + source("/include/gobot/map_view.hpp");
+    const std::string style = source("/apps/gobot_gui/simple_style.cpp");
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    const std::string shop_card = source("/apps/gobot_gui/simple_shop.cpp");
+    if (doc.empty() || readme.empty() || pack.empty() || hunt_raw.empty() || macro_ini.empty() || goc.empty() ||
+        hunter.empty() || drop.empty() || macro.empty() || world.empty() || more.empty() || spot.empty() ||
+        map.empty() || map_view.empty() || style.empty() || gui.empty() || view.empty() || shop_card.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    // A time as the notes write it: 300 ms "0,3", 150 "0,15", 1000 "1".
+    const auto vi_s = [](std::uint64_t ms) {
+        std::string s = std::to_string(ms / 1000);
+        if (ms % 1000 != 0) {
+            std::string frac = std::to_string(1000 + ms % 1000).substr(1);
+            while (!frac.empty() && frac.back() == '0') frac.pop_back();
+            s += "," + frac;
+        }
+        return s;
+    };
+
+    // ---- where: in section 5 under 11.12c's and 11.12b's, on 11.11c's; step 16 after step 15 ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (");
+    const std::size_t e16 = doc.find("- Mới trong bản 2026.11.16 (");
+    const std::size_t e15d = doc.find("- Mới trong bản 2026.11.15d (");
+    const std::size_t e15c = doc.find("- Mới trong bản 2026.11.15c (");
+    const std::size_t e15b = doc.find("- Mới trong bản 2026.11.15b (");
+    const std::size_t e15 = doc.find("- Mới trong bản 2026.11.15 (");
+    const std::size_t e14b = doc.find("- Mới trong bản 2026.11.14b (");
+    const std::size_t e14 = doc.find("- Mới trong bản 2026.11.14 (");
+    const std::size_t e13c = doc.find("- Mới trong bản 2026.11.13c (");
+    const std::size_t e13b = doc.find("- Mới trong bản 2026.11.13b (");
+    const std::size_t e13 = doc.find("- Mới trong bản 2026.11.13 (");
+    const std::size_t e12c = doc.find("- Mới trong bản 2026.11.12c (");
+    const std::size_t e12b = doc.find("- Mới trong bản 2026.11.12b (");
+    const std::size_t e12 = doc.find("- Mới trong bản 2026.11.12 (đánh quái và di chuyển: quay mặt, rơi xuống, đi "
+                                     "lạc, hai vạch trên tab Bản đồ; và Dọn rác, Tự mua bình đếm giờ từ lúc bật; theo "
+                                     "điều bạn báo tối 11/11 và câu trả lời của bạn; chưa thử trên game thật):");
+    const std::size_t e11c = doc.find("- Mới trong bản 2026.11.11c (");
+    const std::size_t try16 = doc.find("Thử như bước 16 ở mục 6.");
+    const std::size_t step15 = doc.find("15. Mua bình và dọn rác ở mọi mức máu, GoBot tự bấm bình (bản 2026.11.11b,");
+    const std::size_t step16 = doc.find("16. Quay mặt, chỉ đánh trong vùng, rơi xuống và hai vạch (bản 2026.11.12, chưa "
+                                        "thử trên game thật; cần Npcap và Vị trí từ gói tin có dấu; chỉ thử khi ngồi "
+                                        "xem, tay gần F12):");
+    const std::size_t revive = doc.find("- Tự hồi sinh: thử ở bản đồ dễ");
+    const std::size_t r11 =
+        readme.find("### The shop after the pass, HP during the bag jobs, and six more keys (2026.11.11)");
+    const std::size_t r12 = readme.find("### Turns, the area, falls and two bars (2026.11.12)");
+    const std::size_t rmacro = readme.find("## Keyboard macro");
+    check(sec5 != npos && e17 != npos && e16b != npos && e16 != npos && e15d != npos && e15c != npos &&
+              e15b != npos && e15 != npos && e14b != npos && e14 != npos && e13c != npos && e13b != npos &&
+              e13 != npos && e12c != npos && e12b != npos && e12 != npos && e11c != npos &&
+              doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 && doc.find("- Mới trong bản", e17 + 1) == e16b &&
+              doc.find("- Mới trong bản", e16b + 1) == e16 &&
+              doc.find("- Mới trong bản", e16 + 1) == e15d &&
+              doc.find("- Mới trong bản", e15d + 1) == e15c && doc.find("- Mới trong bản", e15c + 1) == e15b &&
+              doc.find("- Mới trong bản", e15b + 1) == e15 && doc.find("- Mới trong bản", e15 + 1) == e14b &&
+              doc.find("- Mới trong bản", e14b + 1) == e14 &&
+              doc.find("- Mới trong bản", e14 + 1) == e13c && doc.find("- Mới trong bản", e13c + 1) == e13b &&
+              doc.find("- Mới trong bản", e13b + 1) == e13 && doc.find("- Mới trong bản", e13 + 1) == e12c &&
+              doc.find("- Mới trong bản", e12c + 1) == e12b &&
+              doc.find("- Mới trong bản", e12b + 1) == e12 &&
+              doc.find("- Mới trong bản", e12 + 1) == e11c && try16 != npos && e12 < try16 && try16 < e11c &&
+              step15 != npos && step16 != npos && revive != npos && step15 < step16 && step16 < revive &&
+              r11 != npos && r12 != npos && rmacro != npos && r11 < r12 && r12 < rmacro &&
+              has(readme, "Since 2026.11.12 (not yet run on the game).") &&
+              has(pack, "Turns, the area, falls and two bars (2026.11.12, not yet tried on the game)."),
+          "DOC-TRUOC.txt: the 2026.11.12 entry in section 5 under 11.12b's alone, on top of 11.11c's, not yet tried "
+          "on the game, its live test step 16 after step 15; README's section after 11.11's, and START-HERE, say it "
+          "too");
+    // 2026.11.12b's (the charms, drops, the quick quest and popups at any HP):
+    // the owner's words, not yet tried on the game, in all three.
+    check(has(doc, "- Mới trong bản 2026.11.12b (bùa, nhảy xuống/lên, Nhiệm vụ nhanh và Tự đóng") &&
+              has(doc, "bạn; chưa thử trên game thật). Bạn báo: \"hiện tại còn lỗi máu thấp thì") &&
+              has(readme, "### Charms, drops, the quick quest and popups at any HP (2026.11.12b)") &&
+              has(readme, "Since 2026.11.12b (not yet run on the game).") &&
+              readme.find("### Charms, drops, the quick quest and popups at any HP (2026.11.12b)") <
+                  readme.find("### The bag jobs at any HP, and their own potions (2026.11.11b)") &&
+              has(pack, "Charms, drops, the quick quest and popups at any HP (2026.11.12b, not yet"),
+          "the 2026.11.12b entry, README's section on top of 11.11b's and START-HERE: the owner's words, not yet "
+          "tried on the game");
+    // 2026.11.12c's (the jumps past the two bars, the wall foot, the way back):
+    // first in section 5, its step 17 after step 16, README's section after
+    // 11.12's, START-HERE, the owner's words and the eight questions.
+    {
+        const std::size_t step17 = doc.find("17. Nhảy lên/xuống theo hai vạch và đường về vùng (bản 2026.11.12c, chưa "
+                                            "thử trên game thật; cần Npcap và Vị trí từ gói tin có dấu; chỉ thử khi "
+                                            "ngồi xem, tay gần F12):");
+        const std::size_t try17 = doc.find("Thử như bước 17 ở mục 6.");
+        const std::size_t r12c = readme.find("### Jumps past the two bars, the wall foot, and the way back (2026.11.12c)");
+        const char* const questions[] = {
+            "1. Quái ngang tầm và quái cao hơn vạch trên cùng trong tầm: đánh con gần hơn (mặc định) hay con ngang tầm "
+            "trước?",
+            "2. Nhảy thường đánh quái trên cao tối đa mấy lần/phút (mặc định 10)?",
+            "3. Ở t53_s2, chỗ nào nhảy ↑ có thể rơi lên trên vùng thì không nhảy (mặc định) hay kéo vạch trên của vùng "
+            "lên?",
+            "4. Ctrl+↓ rơi thấp hơn quái nhưng còn trong một lần ↑: cho (mặc định) hay chỉ khi rơi đúng tầng quái?",
+            "5. Đăng nhập lại hay rơi xuống dưới vùng (tới 600 px): bot tự nhận vùng và tìm đường về (mặc định)?",
+            "6. Chưa tin bản đồ mà kẹt ngoài vùng: cho bot đi vài bước 80 px trên sàn đang đứng để tin bản đồ (mặc "
+            "định)?",
+            "7. Giữ skill macro khi đi tới chỗ rơi/nhảy của đường tìm quái và lúc đứng chờ nhảy (mặc định)?",
+            "8. Ctrl+↑ ở chân bậc t49_s5: lên bục 1639 bên cạnh, hay lên tấm ván 1287 phía trên?",
+            // The review of 2026.11.12c: the 650 px rule per key, asked.
+            "9. Luật 650 px: giữ như bản này (↑ xét 245 px, ↑↑ 413 px, Ctrl+↑ 650 px; mặc định) hay quay lại 650 px "
+            "cho mọi kiểu nhảy (ít chỗ nhảy hơn)?",
+        };
+        bool asked = true;
+        for (const char* q : questions) asked = asked && doc.find(q, e12c) != npos && doc.find(q, e12c) < e12b;
+        check(has(doc, "- Mới trong bản 2026.11.12c (nhảy lên/xuống theo hai vạch, nhảy Ctrl+↑ ở chân bậc, tự về "
+                       "vùng đánh quái chắc hơn; theo điều bạn báo tối 12/11 và câu trả lời của bạn; chưa thử trên "
+                       "game thật).") &&
+                  has(doc, "\"cũng được nhưng mình thấy phần tự quay về vùng đánh quái khi ở ngoài hoạt động chưa ổn "
+                           "đâu\"") &&
+                  has(doc, "\"Chỉ Ctrl+↑ tại chỗ\"") && has(doc, "hoặc ngay dưới vùng (tới 600 px)") && asked &&
+                  try17 != npos && e12c < try17 && try17 < e12b && step17 != npos && step16 < step17 &&
+                  step17 < revive && r12c != npos && r12 < r12c && r12c < rmacro &&
+                  has(readme, "Since 2026.11.12c (not yet run on the game).") &&
+                  has(pack, "Jumps past the two bars, the wall foot and the way back (2026.11.12c, not yet tried on "
+                            "the game)."),
+              "the 2026.11.12c entry under 11.13's in section 5 with the owner's words and the nine questions, its step "
+              "17 after step 16, README's section after 11.12's and START-HERE's paragraph -- not yet tried on the game");
+    }
+    // 2026.11.13's (a digit of the bars' figures missed): first in section 5,
+    // README's section after 11.12c's, START-HERE -- not yet tried on the game.
+    {
+        const std::size_t r12c = readme.find("### Jumps past the two bars, the wall foot, and the way back (2026.11.12c)");
+        const std::size_t r13 = readme.find("### HP and MP figures with a digit missed (2026.11.13)");
+        check(has(doc, "- Mới trong bản 2026.11.13 (sửa lỗi đọc sót chữ số máu/mana trên thanh; theo") &&
+                  has(doc, "chưa thử trên game thật). + Lỗi: khi số máu hay mana có hai chữ \"1\" liền nhau") &&
+                  e13 < e12c && r12c != npos && r13 != npos && r12c < r13 && r13 < rmacro &&
+                  has(readme, "Since 2026.11.13 (not yet run on the game).") &&
+                  has(pack, "HP and MP figures with a digit missed (2026.11.13, not yet tried on the"),
+              "the 2026.11.13 entry first in section 5, README's section after 11.12c's and START-HERE's paragraph -- "
+              "not yet tried on the game");
+    }
+    // 2026.11.13b's (the shop right after the pass, the login's message):
+    // first in section 5 with the users' words and the owner's answers,
+    // README's section after 11.13's, START-HERE -- not yet tried on the game.
+    {
+        const std::size_t r13 = readme.find("### HP and MP figures with a digit missed (2026.11.13)");
+        const std::size_t r13b = readme.find("### Buy right after the pass, and the game's message at login (2026.11.13b)");
+        check(has(doc, "- Mới trong bản 2026.11.13b (mua bình ngay sau khi dọn rác, và tự đăng nhập lại khi game báo") &&
+                  has(doc, "\"Thêm 1 checkbox \"Mua ngay sau khi dọn rác\": Bằng checkbox này thì không cần thiết định "
+                           "thời gian mua HP/MP nữa, sẽ ngay lập tức thực hiện mua sau khi dọn rác xong\"") &&
+                  has(doc, "\"khi auto login xong thì có thông báo dialog \"Tài khoản đã bị chặn\", cần ấn nút xác nhận "
+                           "ở dialog này rồi thực hiện login lại\"") &&
+                  has(doc, "\"Thử lại ngay, không giới hạn\"") && e13b < e13 && r13 != npos && r13b != npos &&
+                  r13 < r13b && r13b < rmacro && has(readme, "Since 2026.11.13b (not yet run on the game).") &&
+                  has(pack, "Buy right after the pass, and the game's message at login (2026.11.13b, not yet tried on "
+                            "the game)."),
+              "the 2026.11.13b entry first in section 5 with the users' words and the owner's answer, README's section "
+              "after 11.13's and START-HERE's paragraph -- not yet tried on the game");
+    }
+    // 2026.11.13c's (the game at 1024x768, 1280x720 and 1366x768): first in
+    // section 5 with the owner's words, README's section after 11.13b's,
+    // START-HERE after 11.13b's paragraph -- not yet tried on the game.
+    {
+        const std::size_t r13b = readme.find("### Buy right after the pass, and the game's message at login (2026.11.13b)");
+        const std::size_t r13c = readme.find("### The game at 1024x768, 1280x720 and 1366x768 (2026.11.13c)");
+        const std::size_t p13b = pack.find("Buy right after the pass, and the game's message at login (2026.11.13b,");
+        const std::size_t p13c = pack.find("The game at 1024x768, 1280x720 and 1366x768 (2026.11.13c, not yet tried on "
+                                           "the game at 1280x720 and 1366x768).");
+        check(has(doc, "- Mới trong bản 2026.11.13c (game cỡ 1024x768, 1280x720 và 1366x768; theo yêu cầu của bạn "
+                       "ngày 13/11; chưa thử trên game thật ở 1280x720 và 1366x768).") &&
+                  has(doc, "\"nhớ là cần làm cho đối ứng các độ phân giải: 1080 x 768, 1280 x 720, 1366 x 768\"") &&
+                  has(doc, "\"Game không nằm trọn trên màn hình\"") && e13c < e13b && r13b != npos && r13c != npos &&
+                  r13b < r13c && r13c < rmacro && has(readme, "Since 2026.11.13c (not yet run on the game).") &&
+                  p13b != npos && p13c != npos && p13b < p13c,
+              "the 2026.11.13c entry under 11.14's in section 5 with the owner's words, README's section after "
+              "11.13b's and START-HERE's paragraph after 11.13b's -- not yet tried on the game at 1280x720 and "
+              "1366x768");
+    }
+    // 2026.11.14's (the game's window in the corner after a login): first in
+    // section 5 with the owner's two answers, README's section after 11.13c's,
+    // START-HERE after 11.13c's paragraph, login.ini's key -- not yet tried.
+    {
+        const std::size_t r13c = readme.find("### The game at 1024x768, 1280x720 and 1366x768 (2026.11.13c)");
+        const std::size_t r14 = readme.find("### The game's window in the corner after a login (2026.11.14)");
+        const std::size_t p13c = pack.find("The game at 1024x768, 1280x720 and 1366x768 (2026.11.13c,");
+        const std::size_t p14 = pack.find("The game's window in the corner after a login (2026.11.14, not yet tried on "
+                                          "the game).");
+        check(has(doc, "- Mới trong bản 2026.11.14 (tự kéo game lên góc trái trên sau khi tự đăng nhập; theo câu trả "
+                       "lời của bạn ngày 14/11; chưa thử trên game thật).") &&
+                  has(doc, "\"Mặc định sẽ kéo lên góc trên bên trái đi\"") &&
+                  has(doc, "\"chỉ kéo lên sau khi auto login thôi\"") && has(doc, "move_game_to_corner") &&
+                  e14 < e13c && r13c != npos && r14 != npos && r13c < r14 && r14 < rmacro &&
+                  has(readme, "Since 2026.11.14 (not yet run on the game).") && p13c != npos && p14 != npos &&
+                  p13c < p14,
+              "the 2026.11.14 entry first in section 5 with the owner's answers, README's section after 11.13c's and "
+              "START-HERE's paragraph after 11.13c's -- not yet tried on the game");
+    }
+    // 2026.11.14b's (the shop after a pass, ESC after 10 s stuck, the game's
+    // message after an invite): first in section 5 with the owner's three
+    // reports and his word on 00, README's section after 11.14's, START-HERE
+    // after 11.14's paragraph -- not yet tried on the game.
+    {
+        const std::size_t r14 = readme.find("### The game's window in the corner after a login (2026.11.14)");
+        const std::size_t r14b = readme.find("### The shop after a pass, ESC after 10 s stuck, and the game's message "
+                                             "after an invite (2026.11.14b)");
+        const std::size_t p14 = pack.find("The game's window in the corner after a login (2026.11.14,");
+        const std::size_t p14b = pack.find("The shop after a pass, ESC after 10 s stuck, and the game's message after "
+                                           "an invite (2026.11.14b, not yet tried on the game).");
+        const char* const said[] = {
+            "Khi dọn rác xong thì tắt luôn túi đồ khiến xử lý mua HPMP bị dừng => trước khi thực hiện xử lý mua HPMP "
+            "cần check xem túi đồ có đang mở không, nếu có thì thực hiện luôn, còn không thì mở túi đồ lên và thao tác "
+            "mua",
+            "Khi thao tác mua nếu không may click vào chỗ khác sẽ khiến không ấn được số 00 để mua. Trường hợp bị dừng "
+            "quá 10s thì tắt toàn bộ hiển thị shop, túi đồ trên màn hình bằng phím ESC. Xử lý này thực hiện cho cả "
+            "khi hộp nhập số lượng không biến mất",
+            // As sent ("Về 2 : hắc chắn ..."), its first letter given back
+            // and shown so (the review of 2026.11.14b).
+            "[c]hắc chắn khi dialog mua HPMP hiện ra và không click vào đâu nữa thì sẽ có thể ấn được 00 luôn",
+            "Khi thực hiện auto pt, nếu chẳng may pt trúng người đã vào pt thì sẽ bị hiện dialog mà không tự động tắt "
+            "=> chỉ cần ấn enter hoặc click xác nhận trong dialog",
+        };
+        bool quoted = true;
+        for (const char* s : said)
+            quoted = quoted && has(doc, "\"" + std::string(s) + "\"") && has(readme, "*\"" + std::string(s) + "\"*");
+        check(has(doc, "- Mới trong bản 2026.11.14b (mua bình ngay sau khi dọn rác, kẹt quá 10 giây thì bấm ESC, "
+                       "và thông báo của game khi mời tổ đội; theo ba lỗi bạn báo ngày 14/11; chưa thử trên game "
+                       "thật).") &&
+                  quoted && has(doc, "Dùng bùa không bao giờ bấm ESC hay Enter.") &&
+                  has(doc, "GoBot bấm Xác Nhận để tắt (không bấm Enter") && e14b < e14 && r14 != npos &&
+                  r14b != npos && r14 < r14b && r14b < rmacro &&
+                  has(readme, "Since 2026.11.14b (not yet run on the game).") && p14 != npos && p14b != npos &&
+                  p14 < p14b,
+              "the 2026.11.14b entry first in section 5 with the owner's three reports and his word on 00, README's "
+              "section after 11.14's and START-HERE's paragraph after 11.14's -- not yet tried on the game");
+        // What its review changed (2026-11-15): ESC on the bin's question
+        // said to be expected to delete nothing, not known; the owner asked
+        // to try it; 21:37's pictures asked for; the party's minute's pause
+        // for a click refused too; no ESC with the character down; and the
+        // living reference's Khác clicks.
+        check(has(doc, "ESC được cho là không xoá đồ (chỉ Xác Nhận mới xoá), nhưng điều này chưa thấy trên game "
+                       "thật: bạn thử tay giúp một lần") &&
+                  !has(doc, "ESC không xoá đồ") &&
+                  has(doc, "*_not_in_bin.png và *_tab_unsure_shop_other_tab.png") &&
+                  has(doc, "hoặc không bấm được vì một việc khác của GoBot đang giữ game") &&
+                  has(doc, "GoBot bấm Xác Nhận tắt nó trước rồi mới mời") && has(doc, "Nhân vật đã chết thì không bấm ESC.") &&
+                  has(readme, "ESC is taken to delete nothing (only Xác Nhận deletes) -- not yet seen on the live client") &&
+                  !has(readme, "ESC deletes nothing") && !has(readme, "The pass worker sets `set_hold_check` too") &&
+                  has(readme, "clicked once more (the shop's Khác up to four times in all, since 2026.11.14b)."),
+              "the 2026.11.14b entry after its review: ESC on the bin's question expected, not known, to delete "
+              "nothing, the owner asked to try it; 21:37's pictures asked for; the party's pause for a refused click; "
+              "no ESC with the character down; Getting started's Khác clicks");
+    }
+    // 2026.11.15b's (the owner, 2026-11-15: the shop and the party again after
+    // 30 s, not 10 minutes): the two waits, the lines that use them, and the
+    // entry first in section 5, README's section after 11.15's, START-HERE's
+    // paragraph after 11.15's -- not yet tried on the game.
+    {
+        const std::size_t r15 = readme.find("### One lost key press, pauses instead of \"off until the next start\", "
+                                            "and the way back asked sooner (2026.11.15)");
+        const std::size_t r15b = readme.find("### The shop and the party again after 30 s (2026.11.15b)");
+        const std::size_t p15 =
+            pack.find("Walls, a lost key press and the way back (2026.11.15, not yet tried on the game).");
+        const std::size_t p15b =
+            pack.find("The shop and the party again after 30 s (2026.11.15b, not yet tried on the game).");
+        const std::string said = "về việc thực hiện lại xử lý thì giờ mua HPMP nếu bị kẹt sẽ thực hiện lại sau 10 "
+                                 "phút tương tự với việc tổ đội. Cần thực hiện lại sau 30s chứ không phải 10 phút";
+        // The party's 30 s gave way to InviteTries' minute -- ten after two in
+        // a row -- in 2026.11.17b, the owner's later choice (A).
+        // The second trouble in a row dropped the plan until 2026.11.24; since,
+        // every one is tried again 30 s on (kShopTroublesToDrop gone).
+        check(bag::kShopTroubleAgainMs == 30'000 && InviteTries::kFailHoldMs == 60'000 &&
+                  InviteReply::kStuckMs == 60'000 &&
+                  has(readme, "`kShopTroublesToDrop`-th trouble in a row dropped what was left of the plan until "
+                              "the next until 2026.11.24") &&
+                  has(gui, "else if (end == bag::ShopEnd::Trouble) shop_due_ms = now_ms() + bag::kShopTroubleAgainMs;") &&
+                  !has(gui, "shop_due_ms = minutes(10);") && !has(gui, "InviteReply::kHoldMs") &&
+                  has(gui, "\"Party: invite to %s did not lead to a join (%s) -- %d in a row; not invited again for %d s\",") &&
+                  has(gui, "minutes_vi(o.hold_ms) + \" nữa mới mời lại\"") &&
+                  !has(gui, "10 phút nữa mới mời lại") && e15b != npos && e15 != npos && e15b < e15 &&
+                  has(doc, "- Mới trong bản 2026.11.15b (mua bình và mời tổ đội thử lại sau 30 giây, không phải 10 "
+                           "phút; theo lời bạn ngày 15/11; chưa thử trên game thật).") &&
+                  has(doc, "\"" + said + "\"") && has(readme, "*\"" + said + "\"*") &&
+                  has(doc, "Lượt có lỗi thì chờ 30 giây (trước bản 2026.11.15b là 10 phút)") &&
+                  r15 != npos && r15b != npos && rmacro != npos && r15 < r15b && r15b < rmacro &&
+                  has(readme, "Since 2026.11.15b (not yet run on the game).") && p15 != npos && p15b != npos &&
+                  p15 < p15b,
+              "2026.11.15b: a shop round in trouble tried again 30 s on, and a player whose invite the game answered "
+              "held off 30 s -- not 10 minutes, the owner's word (a minute since 2026.11.17b, ten after two in a row, "
+              "the owner's later choice); the second trouble in a row dropped the plan until 2026.11.24, said so; "
+              "the entry first in section 5, README's section after 11.15's, START-HERE's paragraph after 11.15's");
+    }
+
+    // ---- the owner's report and the eight answers, as written ----
+    const char* const report[] = { "Quay mặt sai, đánh hụt", "Rơi xuống, không về chỗ", "Đi lung tung, đi lạc xa" };
+    const char* const answers[] = {
+        "C, V hoặc Space",
+        "GoBot giữ skill lúc nguy hiểm",
+        "Chỉ đánh quái trong vùng",
+        "Tìm cách quay lại chỗ cũ, khi bị rơi xuống thì tìm platform có thể nhảy lên theo map rồi thực hiện nhảy "
+        "cao nếu cần",
+        "không, nhân vật bị rơi xuống vực nên bị di chuyển lên trên đỉnh",
+        "nó vẫn thuộc vùng đánh quái nhưng bot không biết cần cho nhảy xuống. Nên thể hiện 2 thanh trên và dưới "
+        "trên bản đồ để có thể thiết định xem bot sẽ nhảy xuống ở mức bao nhiêu pixel.",
+        "Ngoài ra hiện tại đang giới hạn không cho bot nhảy xuống hoặc nhảy lên nếu không quá 30 pixel, cần bỏ giới "
+        "hạn này",
+        "vậy thêm 1 chỉnh sửa vào lần fix lần này, đó là khi bật thì bắt đầu đếm thời gian. Lúc nào tới thời gian "
+        "thì mới bắt đầu thực hiện",
+    };
+    bool quoted = has(doc, "Bạn báo tối 11/11, về đánh quái và di chuyển: \"Quay mặt sai, đánh hụt\", \"Rơi xuống, "
+                           "không về chỗ\", \"Đi lung tung, đi lạc xa\".");
+    for (const char* r : report) quoted = quoted && has(readme, "*\"" + std::string(r) + "\"*");
+    for (const char* a : answers)
+        quoted = quoted && has(doc, "\"" + std::string(a) + "\"") && has(readme, "*\"" + std::string(a) + "\"*");
+    check(quoted && has(doc, "1. Phím lướt: \"C, V hoặc Space\".") &&
+              has(doc, "2. Kỹ năng: \"GoBot giữ skill lúc nguy hiểm\".") &&
+              has(doc, "3. Quái ngoài vùng mà trong tầm: \"Chỉ đánh quái trong vùng\".") &&
+              has(doc, "5. Lần nhân vật lên đỉnh ĐồiĐen[5] lúc 21:50:37: \"không, nhân vật bị rơi xuống vực") &&
+              has(doc, "6. Vùng hai tầng ở PhòngSinhTử[4]: \"nó vẫn thuộc vùng đánh quái") &&
+              has(doc, "8. Dọn rác và mua bình khi bấm BẮT ĐẦU: \"vậy thêm 1 chỉnh sửa"),
+          "the owner's three symptoms and eight answers of 2026-11-11 and -12, quoted as written in DOC-TRUOC.txt "
+          "and README");
+
+    // ---- the turns: confirmed by the packets, and no back and forth ----
+    check(Hunter::kTurnTapMs == 80 && Hunter::kFacingMissedMs == 300 && Hunter::kTurnQuietMs == 150 &&
+              Hunter::kTurnCapMs == 1000 && Hunter::kTurnSlackPx == 25 && Hunter::kTurnStayMs == 250 &&
+              has(doc, "bot bấm quay lại sau " + vi_s(Hunter::kFacingMissedMs) + " giây (trước là 0,5 giây), khi đã " +
+                           vi_s(Hunter::kTurnQuietMs) + " giây không có chiêu nào của bạn ra; quá " +
+                           vi_s(Hunter::kTurnCapMs) + " giây thì coi như đã quay. Phím quay giữ " +
+                           n(Hunter::kTurnTapMs) + " ms (trước là 60 ms).") &&
+              has(doc, "thì chỉ quay khi nó ở phía sau quá \"Hạn chế quay người\" (facing_tolerance, của bạn 12 px) "
+                       "thêm " + n(Hunter::kTurnSlackPx) + " px suốt " + vi_s(Hunter::kTurnStayMs) + " giây") &&
+              // The band a wait, not a facing (the review of 2026.11.12).
+              Hunter::kTurnBandStayMs == 600 &&
+              has(doc, "hoặc ở phía sau quá \"Hạn chế quay người\" suốt " + vi_s(Hunter::kTurnBandStayMs) +
+                           " giây (con quái đứng sau lưng để đánh") &&
+              has(readme, "or past `facing_tolerance` at all for `kTurnBandStayMs` (" + n(Hunter::kTurnBandStayMs) +
+                              " ms)") &&
+              has(hunt_ini, "or past it at all for " + vi_s(Hunter::kTurnBandStayMs).replace(1, 1, ".") +
+                                " s (one that stays behind to hit)") &&
+              has(goc, "or past `facing_tolerance` for " + vi_s(Hunter::kTurnBandStayMs).replace(1, 1, ".") +
+                           " s (one that stays behind)") &&
+              has(readme, "`Hunter::kFacingMissedMs` (" + n(Hunter::kFacingMissedMs) + " ms; 500 before)") &&
+              has(readme, "`kTurnQuietMs` (" + n(Hunter::kTurnQuietMs) + " ms)") &&
+              has(readme, "`kTurnCapMs` (" + n(Hunter::kTurnCapMs) + " ms). `kTurnTapMs` is " + n(Hunter::kTurnTapMs) +
+                              " ms (60 before)") &&
+              has(readme, "`facing_tolerance` + `kTurnSlackPx` (" + n(Hunter::kTurnSlackPx) + ") for `kTurnStayMs` (" +
+                              n(Hunter::kTurnStayMs) + " ms)") &&
+              has(pack, "(" + n(Hunter::kTurnCapMs / 1000) + " s at most; the tap is " + n(Hunter::kTurnTapMs) +
+                            " ms)") &&
+              has(hunt_ini, "the same one only once it has stayed the other side more than " +
+                                n(Hunter::kTurnSlackPx) + " px past it for a quarter of a second") &&
+              has(goc, "the swing waits for the game's report of the turn (" + n(Hunter::kTurnCapMs / 1000) +
+                           " s at most, the tap tried again after 0.3 s)") &&
+              has(hunter, "\"%d turns (%d taps; %d confirmed by the packets%s; %d not confirmed in %llu ms; %d facings "
+                          "put right \"") &&
+              has(hunter, "\"by the packets; keys the game missed: %d turn taps, %d walk holds)\"") &&
+              has(hunter, "\", the report %llu ms after its tap on average, %llu at most\"") &&
+              has(doc, "\"N turns (T taps; C confirmed by the packets, the report A ms after its tap on average, M at "
+                       "most; K not confirmed in " + n(Hunter::kTurnCapMs) + " ms; P facings put right by the packets; "
+                       "keys the game missed: X turn taps, Y walk holds)\"") &&
+              has(readme, "`N turns (T taps; C confirmed by the packets, the report A ms after its tap on average, M at "
+                          "most; K not confirmed in 1000 ms; P facings put right by the packets; keys the game missed: "
+                          "X turn taps, Y walk holds)`"),
+          "the turn: a tap of " + n(Hunter::kTurnTapMs) + " ms, tapped again " + n(Hunter::kFacingMissedMs) +
+              " ms on after " + n(Hunter::kTurnQuietMs) + " ms with no cast, taken as made at " +
+              n(Hunter::kTurnCapMs) + " ms; a target behind past facing_tolerance + " + n(Hunter::kTurnSlackPx) +
+              " px for " + n(Hunter::kTurnStayMs) + " ms -- the notes, hunt.ini and GoC's row, and the minute line "
+              "as hunter.cpp writes it");
+
+    // ---- the attack's reach, and a skill's range on its own timer ----
+    HunterConfig shipped_hunt;
+    const bool hunt_loaded = shipped_hunt.load(std::string(GOBOT_SOURCE_DIR) + "/configs/hunt.ini");
+    check(Hunter::kAttackReachSlackPx == 24 && CastMatch::kReachCasts == 5 && HunterConfig{}.attack_range_px == 0 &&
+              hunt_loaded && shipped_hunt.attack_range_px == 0 && has(hunt_raw, "\nattack_range_px=0") &&
+              has(doc, "(sau " + n(CastMatch::kReachCasts) + " lần ra chiêu có tên con quái) cộng " +
+                           n(Hunter::kAttackReachSlackPx) + " px, hay số attack_range_px mới trong hunt.ini (0 = theo "
+                           "tầm đo được)") &&
+              has(readme, "`CastMatch::kReachCasts` (" + n(CastMatch::kReachCasts) + ")") &&
+              has(readme, "`kAttackReachSlackPx` (" + n(Hunter::kAttackReachSlackPx) + ")") &&
+              has(hunt_ini, "plus " + n(Hunter::kAttackReachSlackPx) + " px -- and at any distance until " +
+                                n(CastMatch::kReachCasts) + " of them have been seen") &&
+              has(hunter, "\"; own attack key let be %d times beyond its reach (%d px), %d at an edge as the "
+                                 "dash's\"") &&
+              has(doc, "\"; own attack key let be N times beyond its reach (L px), M at an edge as the dash's\"") &&
+              has(readme, "`; own attack key let be N times beyond its reach (L px), M at an edge as the dash's`") &&
+              has(doc, "\"Tầm (px)\" của từng kỹ năng (cửa sổ Kỹ năng, nút \"Chi tiết…\") nay có tác dụng cả khi \"Chỉ "
+                       "khi đang đánh quái\" không có dấu, lúc bot đang đánh một con quái") &&
+              has(macro_ini, "Since 2026.11.12 it counts on the key's own timer too -- always_timer, or "
+                             "skills_follow_fight off -- while the hunter fights a monster"),
+          "the hunter's own attack key within attack_range_px (0 as shipped) or the reach learned from " +
+              n(CastMatch::kReachCasts) + " named casts plus " + n(Hunter::kAttackReachSlackPx) + " px, and range_px "
+              "on a key's own timer -- as the notes and the ini comments say");
+
+    // ---- the holds, and the dash ----
+    check(kZoneOutsideBackPx == 60 &&
+              has(macro, "\"Skills: %llu held for the hunter -- %llu turning, %llu a drop settling or in its "
+                                "fall, \"") &&
+              has(macro, "\"%llu nothing to fight in the area, %llu outside the area or stranded, %llu a leg of the "
+                         "seek's \"") &&
+              has(doc, "\"Skills: N held for the hunter -- T turning, D a drop settling or in its fall, I nothing to "
+                       "fight in the area, O outside the area or stranded, L a leg of the seek's way, J a jump up; K of "
+                       "the dash's key near an edge\"") &&
+              has(readme, "`Skills: N held for the hunter -- T turning, D a drop settling or in its fall, I nothing to "
+                          "fight in the area, O outside the area or stranded, L a leg of the seek's way, J a jump up; K "
+                          "of the dash's key near an edge`") &&
+              has(doc, "ở ngoài vùng quá " + n(kZoneOutsideBackPx) + " px mà không đi về được") &&
+              has(doc, "macro giữ phím kỹ năng, cả phím \"Luôn bấm theo giờ\" (bình và buff vẫn bấm)") &&
+              has(macro_ini, "Since 2026.11.12 (the owner's \"GoBot giữ skill lúc nguy hiểm\"), with the hunter "
+                             "running, on or off, the skill keys -- always_timer and the [Sequence] steps too, never "
+                             "potions or buffs -- are held") &&
+              has(hunt_ini, "Since 2026.11.12 (the owner's Q2) the macro also holds its skill keys -- never potions or "
+                            "buffs --"),
+          "the skill keys held -- turning, a drop, nothing to fight, outside -- never potions or buffs, and the "
+          "minute's Skills line, as macro.cpp writes it");
+    check(PacketWorld::kNoWalkMovePx == 100 && PacketWorld::kDashLearnMoves == 3 && PacketWorld::kDashLearnPct == 70 &&
+              PacketWorld::kMoveLinesPerMinute == 30 && Hunter::kDashGuessPx == 320 &&
+              has(world, "\"Positions: moved %+d px with no walk, %d,%d -> %d,%d by 0x%04X, facing %s; %s\"") &&
+              has(world, "\"your cast of skill %u %llu ms before\"") &&
+              has(world, "\"Positions: the dash is skill %u, about %d px -- %d of the last %d moves of yours with no "
+                         "walk \"") &&
+              has(world, "\"Dash (packets): %d move%s of yours with no walk this minute (%d px\"") &&
+              has(world, "\"); the dash is skill %u, %s, about %d px (%d of %d)\"") &&
+              // 2026.11.17: no key guessed while none is learned. The notes'
+              // own words below are the docs' to change with it.
+              has(world, "\"); the dash not learned yet -- no key held for it\"") &&
+              has(world, "\"after its casts; no key is held for a dash until one is learned\"") &&
+              has(more, "out = vk != 0 ? \"its key \" + InputManager::key_name(vk)") &&
+              has(more, "dash_vk != 0 ? \"key \" + InputManager::key_name(dash_vk)") &&
+              has(doc, "Mỗi lần nhân vật dời ít nhất " + n(PacketWorld::kNoWalkMovePx) + " px mà không đi bộ") &&
+              has(doc, "(tối đa " + n(PacketWorld::kMoveLinesPerMinute) + " dòng mỗi phút)") &&
+              has(doc, "Khi ít nhất " + n(PacketWorld::kDashLearnMoves) + " lần như vậy, và từ " +
+                           n(PacketWorld::kDashLearnPct) + "% số lần trở lên") &&
+              // 2026.11.12's words kept as that release's, with 2026.11.17's
+              // correction beside them: no key guessed since.
+              has(doc, "Chưa học được thì C, V và Space đều coi là phím lướt, dài " + n(Hunter::kDashGuessPx) +
+                           " px. (Từ bản 2026.11.17: chưa học được thì không phím nào bị giữ vì lướt; " +
+                           n(Hunter::kDashGuessPx) + " px chỉ còn là độ dài của phím lướt đã học mà chưa đo được.)") &&
+              has(doc, "\"Positions: moved +214 px with no walk, A,B -> C,D by 0x0027, facing right; your cast of "
+                       "skill S M ms before; its key C; GoBot: ...\"") &&
+              has(doc, "\"Positions: the dash is skill S, about 214 px -- ...\"") &&
+              has(doc, "\"Dash (packets): N moves of yours with no walk this minute (N px); the dash is skill S, key C, "
+                       "about 214 px (A of B)\"") &&
+              has(readme, "`PacketWorld::kNoWalkMovePx` (" + n(PacketWorld::kNoWalkMovePx) + ")") &&
+              has(readme, "`kDashLearnMoves` (" + n(PacketWorld::kDashLearnMoves) + ")") &&
+              has(readme, "`kDashLearnPct` (" + n(PacketWorld::kDashLearnPct) + "%)") &&
+              has(readme, "`Hunter::kDashGuessPx` (" + n(Hunter::kDashGuessPx) + ")") &&
+              has(readme, "`Positions: moved +214 px with no walk, A,B -> C,D by 0x0027, facing right; your cast of "
+                          "skill S M ms before; its key C; GoBot: …`") &&
+              has(readme, "`Dash (packets): N moves of yours with no walk this minute (N px); the dash is skill S, key "
+                          "C, about 214 px (A of B)`") &&
+              has(pack, "until then C, V and Space -- since 2026.11.17 no key until one is learned)") &&
+              has(readme, "since 2026.11.17 no key until one is learned, `kDashGuessPx` only the length of a "
+                          "learned dash with none measured") &&
+              has(hunt_ini, "chưa học được thì C, V và Space; từ bản 2026.11.17 chưa học được thì không phím nào)") &&
+              has(macro_ini, "C, V and Space until then; since 2026.11.17 no key until one is learned --"),
+          "the dash: a move of " + n(PacketWorld::kNoWalkMovePx) + " px or more with no walk logged, learned from " +
+              n(PacketWorld::kDashLearnMoves) + " votes and " + n(PacketWorld::kDashLearnPct) + "%, C, V and Space "
+              "at " + n(Hunter::kDashGuessPx) + " px until then (no key since 2026.11.17, the notes say) -- and its "
+              "lines as packet_world.cpp writes them");
+
+    // ---- the area kept, the way back, standing stranded ----
+    check(Hunter::kSpotKeepPx == 60 && kZoneTravelJumpsMax == 4 &&
+              has(doc, "(con đang đánh vẫn được giữ tới khi nó ra ngoài vùng quá " + n(Hunter::kSpotKeepPx) + " px)") &&
+              has(spot, "\" — bot vẫn đánh quái trong vùng tới trong tầm\" + reach + \"; hết quái thì đi bộ về \" + way + "
+                        "\".\";") &&
+              has(doc, "\"... bot vẫn đánh quái trong vùng tới trong tầm (tầm đánh N px); hết quái thì đi bộ về X, "
+                       "Y.\"") &&
+              has(doc, "và nhảy lên ↑ (khoảng 133 px), ↑↑ (khoảng 280 px), Ctrl+↑ (khoảng 432 px) \"Theo GoC\", từng "
+                       "tầng một, tối đa " + n(kZoneTravelJumpsMax) + " lần nhảy, tới bục của chỗ về.") &&
+              // Ctrl+Down on the way back, Nhảy xuống ticked (the review of
+              // 2026.11.12): the drop's own rules, kZoneTravelDropsMax.
+              kZoneTravelDropsMax == 8 && has(doc, "Đường về không bao giờ đi qua cửa.") &&
+              has(doc, "thì đường về còn nhảy xuống Ctrl+↓ qua bục, theo luật của Nhảy xuống: không gần cửa, không "
+                       "xuống vực, không ở chỗ Ctrl+↓ đã không xuống được, tối đa " + n(kZoneTravelDropsMax) +
+                           " lần một đường về") &&
+              has(drop, "\"Hunter: drop (Ctrl+Down) on the way back: %d px down -- you at %d,%d on floor %d of %s "
+                        "(trusted: %s), \"") &&
+              has(doc, "\"Hunter: drop (Ctrl+Down) on the way back: N px down -- ...\"") &&
+              has(hunter, "\"no way back the map shows but by Ctrl+Down, and Nhảy xuống is off\"") &&
+              has(doc, "\"... no way back the map shows but by Ctrl+Down, and Nhảy xuống is off: standing where it is "
+                       "...\"") &&
+              has(readme, "`kZoneTravelDropsMax` (" + n(kZoneTravelDropsMax) + ")") &&
+              has(readme, "`kZoneTravelJumpsMax`, " + n(kZoneTravelJumpsMax)) &&
+              has(hunt_ini, "and with jump_up up to " + n(kZoneTravelJumpsMax) + " jumps up; with drop_down, Ctrl + "
+                            "Down through platforms by the drop's own rules (no gate near, never into a pit), " +
+                                n(kZoneTravelDropsMax) + " at most -- never through a gate") &&
+              has(hunt_ini, "a monster outside the area is never faced, fought or walked to, in reach or not.") &&
+              has(hunt_ini, "Từ bản 2026.11.12 chỉ đánh quái trong vùng: quái ở ngoài vùng thì không đánh, cả khi ở "
+                            "trong tầm đánh") &&
+              has(spot, "\" — không có đường về vùng: bot đứng yên ở đây, không đánh quái ngoài vùng, kỹ năng tạm dừng "
+                        "\"") &&
+              has(spot, "\"(bình và buff vẫn bấm), tới khi có đường về.\"") &&
+              has(doc, "\"... không có đường về vùng: bot đứng yên ở đây, không đánh quái ngoài vùng, kỹ năng tạm dừng "
+                       "(bình và buff vẫn bấm), tới khi có đường về.\"") &&
+              has(spot, "\" px, quá một lần nhảy: bot không đi về được, đứng yên ở đây. Tự đưa nhân vật về, \"") &&
+              has(doc, "(\"... quá một lần nhảy: bot không đi về được, đứng yên ở đây.\")") &&
+              has(spot, "\" không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đứng yên ở đây. Tự \"") &&
+              has(doc, "\"... không có đường đi bộ, rơi xuống hay nhảy lên nào về vùng: bot đứng yên ở đây. ...\"") &&
+              // 2026.11.12c: each key's reason at the stand, " (here: ...)", after the why.
+              has(hunter, "\"Hunter: %d px outside the hunting area at %d,%d -- %s%s%s%s: standing where it is until a "
+                          "way back \"") &&
+              has(hunter, "\"shows (no walk, nothing outside the area fought, the macro's skills held)\"") &&
+              has(doc, "\"Hunter: N px outside the hunting area at X,Y -- ...: standing where it is until a way back "
+                       "shows (no walk, nothing outside the area fought, the macro's skills held)\"") &&
+              has(readme, "`Hunter: N px outside the hunting area at X,Y -- <why>: standing where it is until a way "
+                          "back shows (no walk, nothing outside the area fought, the macro's skills held)`") &&
+              has(goc, "since 2026.11.12, with the map's file trusted, over the map's other floors too -- walking, off "
+                       "floors' ends, and jumping up -- never through a gate"),
+          "only monsters in the area, the target kept " + n(Hunter::kSpotKeepPx) + " px past its edge; the way back "
+          "over other floors with " + n(kZoneTravelJumpsMax) + " jumps up and, Nhảy xuống ticked, " +
+              n(kZoneTravelDropsMax) + " drops at most, never a gate; no way, standing -- the card's and the log's "
+              "words as simple_spot.cpp, hunter.cpp and hunter_drop.cpp say them");
+
+    // ---- the pit: the put-back, the walks stopped, the gap left ----
+    check(Hunter::kPutBackPx == 1000 && Hunter::kPutBackAgreePx == 400 && Hunter::kPutBackWaitMs == 3000 &&
+              has(doc, "gói tin báo nhân vật cao hơn lần trước quá " + n(Hunter::kPutBackPx) + " px mà không đi, không "
+                       "nhảy, không qua cửa") &&
+              has(doc, "(trong " + n(Hunter::kPutBackAgreePx) + " px) hay " + n(Hunter::kPutBackWaitMs / 1000) +
+                           " giây") &&
+              has(spot, "\"Chỗ đánh quái: gói tin vừa báo nhân vật ở rất xa chỗ cũ mà không đi, không nhảy, không \"") &&
+              has(spot, "\"qua cửa (rơi xuống vực thì game đưa lên trên) — bot đứng yên, chờ gói tin sau báo đúng \"") &&
+              has(spot, "\"chỗ rồi mới tính đường về.\"") &&
+              has(doc, "(thẻ: \"Chỗ đánh quái: gói tin vừa báo nhân vật ở rất xa chỗ cũ mà không đi, không nhảy, không "
+                       "qua cửa (rơi xuống vực thì game đưa lên trên) — bot đứng yên, chờ gói tin sau báo đúng chỗ rồi "
+                       "mới tính đường về.\")") &&
+              has(hunter, "\"Hunter: the game put you at %d,%d, %d px from %d,%d (%d px %s) with no walk, jump or map "
+                          "entry \"") &&
+              has(doc, "\"Hunter: the game put you at X,Y, N px from A,B (N px up) ...\"") &&
+              has(readme, "`Hunter::kPutBackPx` (" + n(Hunter::kPutBackPx) + ")") &&
+              has(readme, "`kPutBackAgreePx` (" + n(Hunter::kPutBackAgreePx) + ")") &&
+              has(readme, "`kPutBackWaitMs` (" + n(Hunter::kPutBackWaitMs / 1000) + " s)") &&
+              has(hunt_ini, "A rise of more than " + n(Hunter::kPutBackPx) + " px with no walk, jump or map entry is a "
+                            "fall into a pit the game put back up top") &&
+              has(pack, "A rise of more than " + n(Hunter::kPutBackPx) + " px with no walk, jump or door is a fall into "
+                        "a pit put back up top") &&
+              has(hunter, "\"Hunter: not walking %s -- the floor ends at %d,%d with nothing of the map file \"") &&
+              has(hunter, "\"; walks stopped at a pit's edge %d\"") &&
+              has(doc, "\"Hunter: not walking left -- the floor ends at X,Y with nothing of the map file under it (a "
+                       "pit ...)\"") &&
+              has(doc, "\"; walks stopped at a pit's edge N\"") &&
+              has(doc, "Đỉnh ĐồiĐen[5] (t62_s5): sau khi game đưa nhân vật lên đỉnh (3166,723), mọi đường đi bộ và rơi "
+                       "xuống đều dừng ở một bục dài ngang cả bản đồ") &&
+              !has(doc, "Chưa làm được: đường về không dùng Ctrl+↓.") &&
+              has(readme, "From the top of `t62_s5` (3166,723) every walk and fall ends on the platform spanning the "
+                          "map at about y 3000: with *Nhảy xuống* ticked the way back drops through it") &&
+              !has(readme, "Not done: no Ctrl+Down leg on a way back"),
+          "a rise past " + n(Hunter::kPutBackPx) + " px with nothing to make it: a pit's put-back, agreed within " +
+              n(Hunter::kPutBackAgreePx) + " px or after " + n(Hunter::kPutBackWaitMs) + " ms; walks stopped at a "
+              "pit's edge; the top of t62_s5 left by Ctrl+Down with Nhảy xuống ticked -- the words as the code has "
+              "them");
+
+    // ---- the review of 2026.11.12: the long wait (since 2026.11.24 spot_retry_ms and a new round), the far
+    // below, y 0 kept, the spawn, the turn's pit ----
+    check(Hunter::kSpotMaxTries == 3 && Hunter::kSpotFarBelowPx == 461 &&
+              has(hunter, "\"Hunter: walks back given up on %d times in a row -- the next round of tries in %llu s, "
+                          "or sooner \"") &&
+              has(hunter, "\"Hunter: trying the walk back again -- %s (at %d,%d): a new round of %d tries\"") &&
+              !has(hunter, "kSpotGaveUpRetryMinMs") &&
+              has(doc, "\"Hunter: walks back given up on 3 times in a row -- the next round of tries in N s\"") &&
+              has(readme, "the round's wait is `spot_retry_ms` (30 s), then a new round of `Hunter::kSpotMaxTries` "
+                          "(3) tries") &&
+              has(hunter, "\"more than a view above it, no map to go by\"") &&
+              has(doc, "(\"... more than a view above it, no map to go by\")") &&
+              has(readme, "`kSpotFarBelowPx` (" + n(Hunter::kSpotFarBelowPx) + ", a view)") &&
+              has(world, "\"Positions: your report at %d,0 (opcode 0x%04X) -- y 0 is no place: height kept at %d%s\"") &&
+              has(doc, "\"Positions: your report at X,0 (opcode ...) -- y 0 is no place: height kept at Y\"") &&
+              has(hunter, "\"no trusted map file to say; taken at your next cast or walk report\"") &&
+              has(hunter, "\"Hunter: not turning %s toward %s -- the floor ends at %d,%d with nothing of the map file \"") &&
+              has(doc, "\"Hunter: not turning right toward ... (a pit), and a turn's tap walks the character; passed "
+                       "over for N s\"") &&
+              has(doc, "(trừ packet_dy, như vòng quanh con quái đang đánh; của bạn là 0)") &&
+              has(map_view, "double band_feet_y(double you_y, int packet_dy, double scale)"),
+          "the review of 2026.11.12 and 2026.11.24: " + n(Hunter::kSpotMaxTries) + " walks back given up on wait "
+              "spot_retry_ms and try again, a new round of " + n(Hunter::kSpotMaxTries) + "; a spot more than " +
+              n(Hunter::kSpotFarBelowPx) + " px below with no map not walked to blind; y 0 kept at the last height; "
+              "the spawn's 0x0028 alone refused; no turn's tap off a pit; the bars less packet_dy -- as the code and "
+              "the notes say them");
+
+    // ---- the trust: the drop's landings, the points mid-fall, the spot ----
+    check(GameMapBook::kNoDropXPx == 64 && MapTrust::kMobStandMs == 300 &&
+              has(drop, "\"Hunter: drop landed at %d,%d, %d px down, %s -- not floor %d the map file gave from %d,%d; "
+                        "\"") &&
+              has(drop, "\"arrow held: something else moved you; nothing learned, %s's file still gone by\"") &&
+              has(drop, "\"another floor, %d map changes, %d unknown)\"") &&
+              has(doc, "\"Hunter: drop landed at X,Y, N px down, on floor F (attr A) -- not floor L the map file gave "
+                       "...\"") &&
+              has(doc, "thêm \"N on another floor\"") &&
+              has(doc, "bị dời xa hơn " + n(GameMapBook::kNoDropXPx) + " px (một kỹ năng dời nhân vật)") &&
+              has(doc, "(\"... something else moved you\")") &&
+              has(doc, "khi có báo vị trí sau đó ít nhất " + vi_s(MapTrust::kMobStandMs) + " giây ở cùng độ cao") &&
+              has(readme, "`GameMapBook::kNoDropXPx` (" + n(GameMapBook::kNoDropXPx) + ")") &&
+              has(readme, "`MapTrust::kMobStandMs` (" + n(MapTrust::kMobStandMs) + " ms)") &&
+              has(hunter, "\" -- on the floor under %d,%d, by the map file\"") &&
+              has(doc, "(log thêm \"-- on the floor under X,Y, by the map file\")") &&
+              has(hunter, "\"Hunter: no hunting spot at the map entry's spawn %d,%d -- perhaps in the air above its "
+                          "floor, and \"") &&
+              has(doc, "(\"Hunter: no hunting spot at the map entry's spawn X,Y -- ...\")"),
+          "a landing on another floor of the file kept, one " + n(GameMapBook::kNoDropXPx) + " px along the take-off "
+          "floor not a fail, a point off the floors confirmed " + n(MapTrust::kMobStandMs) + " ms on, the spot on "
+          "its floor or not at the spawn -- the lines as the code writes them");
+
+    // ---- the two bars ----
+    check(kBandMaxPx == 1000 &&
+              has(map_view, "inline constexpr int kBandStepPx = 5;") &&
+              has(map_view, "return (bar == BandBar::Up ? \"+\" : \"-\") + std::to_string(px) + \" px\";") &&
+              has(map, "\"Quái thấp hơn vạch dưới: bot nhảy xuống; cao hơn vạch trên: bot nhảy lên; giữa hai vạch: "
+                       "đánh tại chỗ.\\n\"") &&
+              has(map, "box(\"Vạch trên\", \"##band_up\", up);") &&
+              has(map, "box(\"Vạch dưới\", \"##band_down\", down);") &&
+              has(map, "{ Sym::Band, \"vạch trên, dưới\" }") &&
+              has(map, "\"Không lưu được hai vạch vào configs\\\\hunt.ini — GoBot thử lại sau ít giây.\"") &&
+              has(style, "\"Nhảy xuống (Ctrl + ↓) khi quái thấp hơn vạch dưới (\" + std::to_string(c.down()) +") &&
+              has(style, "number(\"Cao nhất (px)\", \"Vị trí cao nhất có thể tấn công (vạch trên ở tab Bản đồ).\", up, 0, "
+                         "kBandMaxPx, 1);") &&
+              has(doc, "vạch trên ghi \"+10 px\", vạch dưới \"-20 px\" (số của bạn)") &&
+              has(doc, "(mỗi nấc 5 px; lúc kéo, bản đồ đứng yên)") &&
+              has(doc, "\"Vạch trên [..] px Vạch dưới [..] px\"") && has(doc, "(0 tới " + n(kBandMaxPx) + ")") &&
+              has(doc, "\"Không lưu được hai vạch vào configs\\hunt.ini — GoBot thử lại sau ít giây.\"") &&
+              has(doc, "(nay tới " + n(kBandMaxPx) + " px, trước là 400)") &&
+              has(doc, "\"Quái thấp hơn vạch dưới: bot nhảy xuống; cao hơn vạch trên: bot nhảy lên; giữa hai vạch: đánh "
+                       "tại chỗ.\"") &&
+              count_in(doc, "\"Nhảy xuống (Ctrl + ↓) khi quái thấp hơn vạch dưới (N px), ...\"") == 2 &&
+              !has(doc, "Dưới hàng Tự đánh quái phải có \"Nhảy xuống (Ctrl + ↓) khi quái thấp hơn quá 100 px") &&
+              has(readme, "`kBandStepPx` (5)") && has(readme, "0-`kBandMaxPx`, 1000") &&
+              has(readme, "*Quái thấp hơn vạch dưới: bot nhảy xuống; cao hơn vạch trên: bot nhảy lên; giữa hai vạch: "
+                          "đánh tại chỗ.*") &&
+              has(pack, "(0 to " + n(kBandMaxPx) + " px; up_reach and down_reach in hunt.ini, also Cao nhat and Thap "
+                        "nhat)") &&
+              has(hunt_ini, "Since 2026.11.12 up_reach and down_reach are the two bars drawn on the \"Bản đồ\" tab's "
+                            "map") &&
+              has(goc, "Since 2026.11.12 drawn as two bars on **Bản đồ**, dragged or typed (0-" + n(kBandMaxPx) +
+                           " px), and the only heights a drop or a jump up goes by"),
+          "the two bars: labelled +N and -N px from the feet, steps of 5, 0 to " + n(kBandMaxPx) + ", the boxes, the "
+          "tip, the red line and the drop's hint quoted as simple_map.cpp and simple_style.cpp say them");
+
+    // ---- the minimums gone, and those kept ----
+    HunterConfig band;
+    band.up_reach = 10;
+    band.down_reach = 20;
+    band.up_no_jump = 30;
+    band.down_no_jump = 30;
+    check(Hunter::kDropMinFallPx == Hunter::kDropLandPx + 1 && Hunter::kDropMinFallPx == 25 && band.up_nj() == 10 &&
+              band.down_nj() == 20 && !has(hunt_raw, "\ndrop_min_px=") &&
+              has(doc, "drop_min_px (100 px: nhảy xuống chỉ khi quái thấp hơn quá số lớn hơn giữa \"Thấp nhất\" và 100): "
+                       "bỏ. hunt.ini cũ còn dòng đó thì GoBot không đọc nữa.") &&
+              has(doc, "Lần rơi ngắn nhất GoBot nhận là nhảy xuống: 60 px xuống " + n(Hunter::kDropMinFallPx) +
+                                 " px.") &&
+              has(doc, "(vạch 10 và 20 thì hiện 10 và 20)") &&
+              has(doc, "từ bản 2026.11.12 chỉ theo \"Thấp nhất\", tức vạch dưới ở tab Bản đồ: drop_min_px không còn "
+                       "được đọc") &&
+              has(doc, "Từ bản 2026.11.12 hunt.ini không còn dòng drop_min_px (hunt.ini cũ còn dòng đó thì GoBot không "
+                       "đọc)") &&
+              has(doc, "Giữ nguyên, vì là luật an toàn hay không phải mức độ cao: không nhảy gần cửa "
+                                 "(drop_gate_px 150)") &&
+              has(readme, "`Hunter::kDropMinFallPx` from 60 to `kDropLandPx` + 1 (" + n(Hunter::kDropMinFallPx) + ")") &&
+              has(readme, "an older file's `drop_min_px` is no longer read") &&
+              !has(readme, "with `drop_min_px` 100, `drop_side_px` 120") &&
+              has(style, "hint(\"Hai số này không lớn hơn Cao nhất và Thấp nhất. Nhảy lên, nhảy xuống chỉ theo Cao nhất và "
+                         "Thấp nhất.\");") &&
+              has(pack, "drop_min_px (100) and the other hidden minimums are gone") &&
+              has(pack, "A hunt.ini from before 2026.11.12 may hold drop_min_px: it is no longer read"),
+          "drop_min_px gone from the code and the shipped hunt.ini, the least fall " + n(Hunter::kDropMinFallPx) +
+              " px, the no-jump pair under bars of 10 and 20 read 10 and 20 -- each said, and what is kept");
+
+    // ---- the start count ----
+    const std::uint64_t pass_least = source_ms(gui, "kPassFirstMs"), shop_least = source_ms(gui, "kShopFirstMs");
+    const std::uint64_t t0 = 50'000'000;
+    CleanSettings ships;
+    const bool trash_loaded = ships.load(std::string(GOBOT_SOURCE_DIR) + "/configs/trash.ini");
+    check(pass_least == 15'000 && shop_least == 45'000 &&
+              bag::start_due_ms(0, t0, 10, pass_least) == t0 + 600'000 &&
+              bag::start_due_ms(t0 + 5'000, t0, 10, pass_least) == t0 + pass_least &&
+              bag::start_due_ms(t0 + 300'000, t0, 10, pass_least) == t0 + 300'000 &&
+              bag::start_due_ms(t0 - 1, t0, 60, shop_least) == t0 + 3'600'000 && trash_loaded &&
+              ships.interval_minutes == 10 && ships.buy_every_minutes == 60 &&
+              has(gui, "GB_INFO(\"Trash: counting from the start -- the first timed pass at %s, the shop's first look at "
+                       "%s\",") &&
+              has(gui, "std::string(\" (kept from the last run)\")") && has(gui, "\" min from the start)\"") &&
+              has(gui, "\"Trash: Tự dọn rác ticked on -- the first timed pass at %s, %d min from now\"") &&
+              has(gui, "\"Trash: Tự mua bình ticked on -- the first look at %s, %d min from now, owing nothing\"") &&
+              has(doc, "\"Trash: counting from the start -- the first timed pass at HH:MM (" +
+                           n(ships.interval_minutes) + " min from the start), the shop's first look at HH:MM (" +
+                           n(ships.buy_every_minutes) + " min from the start)\" (hay \"(kept from the last run)\")") &&
+              has(doc, "\"Trash: Tự dọn rác ticked on -- the first timed pass at HH:MM, N min from now\"") &&
+              has(doc, "\"Trash: Tự mua bình ticked on -- the first look at HH:MM, N min from now, owing nothing\"") &&
+              has(readme, "`Trash: counting from the start -- the first timed pass at HH:MM (10 min from the start), "
+                          "the shop's first look at HH:MM (60 min from the start)`") &&
+              has(doc, "lượt dọn rác theo giờ đầu tiên tới sau cả một khoảng \"dọn mỗi\" (trước đây " +
+                           n(pass_least / 1000) + " giây sau)") &&
+              has(doc, "(nhưng không sớm hơn " + n(pass_least / 1000) + " giây cho dọn rác, " + n(shop_least / 1000) +
+                           " giây cho mua bình)") &&
+              has(readme, "`kPassFirstMs` (" + n(pass_least / 1000) + " s)") &&
+              has(readme, "`kShopFirstMs` (" + n(shop_least / 1000) + " s)") &&
+              has(doc, "từ bản 2026.11.12 lần đầu là cả một khoảng \"mua mỗi\" sau khi bấm BẮT ĐẦU hay đánh dấu "
+                                 "ô này") &&
+              !has(doc, "lần đầu không sớm hơn 45 giây sau khi bấm BẮT ĐẦU)") &&
+              has(view, "\"lại theo giờ ở trên, đếm từ lúc bấm BẮT ĐẦU (hay lúc đánh dấu Tự dọn rác): lần đầu là \"") &&
+              has(shop_card, "Giờ mua đếm từ lúc bấm BẮT ĐẦU (hay lúc đánh dấu ô này): lần mua đầu là một khoảng ") &&
+              has(pack, "the first timed pass comes interval_minutes after BAT DAU, the first shop look "
+                        "buy_every_minutes after it") &&
+              has(goc, "the first a whole interval after START since 2026.11.12") &&
+              has(goc, "since 2026.11.12 the first a whole interval after the bot starts, or what is left of the last "
+                       "one after a quick stop and start"),
+          "the start count: a whole interval from BẮT ĐẦU, a clock still counting kept at " + n(pass_least) + " / " +
+              n(shop_least) + " ms at least, one run out counted afresh -- as bag::start_due_ms has it, and the log's "
+              "lines as trash_loop writes them");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------ 2026.11.15d
+
+/// 2026.11.15d's notes against the code: the owner's 30 s for the game to
+/// react (react_wait.hpp) and the check-in board's ESC 30 s after a login, never
+/// from 23:55 to 00:03 (checkin_board.hpp) -- DOC-TRUOC.txt's entry in
+/// section 5 under 2026.11.16's alone, README's section after 2026.11.15c's,
+/// START-HERE's paragraph after 15c's, the ini comments and gobot_cli's words,
+/// each number as the constants have it.
+void test_notes_1115d() {
+    section("The 2026.11.15d notes against the code: 30 s for the game to react, the board's ESC after a login");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string trash_ini = flat(source("/configs/trash.ini"), true);
+    const std::string quest_ini = flat(source("/configs/quest.ini"), true);
+    const std::string chat_ini = flat(source("/configs/chat.ini"), true);
+    const std::string party_ini = flat(source("/configs/party.ini"), true);
+    const std::string app_ini = flat(source("/configs/app.ini"), true);
+    const std::string login_ini = flat(source("/configs/login.ini"), true);
+    const std::string cli = source("/apps/gobot_cli/main.cpp");
+    const std::string closer = source("/src/popup_closer.cpp");
+    const std::string chat_cpp = source("/src/auto_chat.cpp");
+    const std::string chat_hpp = flat(source("/include/gobot/auto_chat.hpp"));
+    const std::string reviver_hpp = flat(source("/include/gobot/reviver.hpp"));
+    const std::string login_hpp = flat(source("/include/gobot/auto_login.hpp"));
+    const std::string login_cpp = flat(source("/src/auto_login.cpp"));
+    if (doc.empty() || readme.empty() || pack.empty() || trash_ini.empty() || quest_ini.empty() || chat_ini.empty() ||
+        party_ini.empty() || app_ini.empty() || login_ini.empty() || cli.empty() || closer.empty() ||
+        chat_cpp.empty() || chat_hpp.empty() || reviver_hpp.empty() || login_hpp.empty() || login_cpp.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    // A second of the day as the notes write it: 23:55, 00:03.
+    const auto hhmm = [](int s) {
+        char out[32];
+        std::snprintf(out, sizeof out, "%02d:%02d", s / 3600, s / 60 % 60);
+        return std::string(out);
+    };
+    using P = PopupCloser;
+    const std::string react_s = n(kReactMs / 1000);
+    const std::string slow_s = n(kReactSlowMs / 1000);
+    const std::string board_s = n(kCheckinBoardLoginWaitMs / 1000);
+    const std::string night_from = hhmm(kCheckinNightFromS), night_to = hhmm(kCheckinNightToS);
+    const std::string asked_react = "khi GoBot thực hiện thao tác, sẽ có thêm 30 giây chờ phản ứng. Nếu màn hình phản "
+                                    "ứng luôn thì thực hiện tiếp bước tiếp theo, còn nếu màn hình không phản ứng gì "
+                                    "thì sẽ dừng xử lý.";
+    const std::string asked_board = "Sau khi chọn nhân vật xong và vào tới màn hình game thì sẽ chờ 30 giây rồi mới ấn "
+                                    "ESC để tắt thông báo. Trường hợp qua ngày thì chờ tới 00:03 mới ấn ESC.";
+
+    // ---- the constants the notes quote ----
+    check(kReactMs == 30'000 && kReactSlowMs == 2'000 && BagCleaner::kStuckMs == kReactMs &&
+              P::kCheckMs == kReactMs && P::kAfterMenuMs == 1500 && P::kHoldMs == 2000 && P::kSteadyMs == 3000 &&
+              InviteReply::kFirstGoneMs == kReactMs && InviteReply::kGoneMs == 2500 &&
+              InviteReply::kWatchMs == 2500 && kCheckinBoardLoginWaitMs == 30'000 &&
+              night_from == "23:55" && night_to == "00:03" && kCheckinNightFromS % 60 == 0 &&
+              kCheckinNightToS % 60 == 0 && checkin_night_hold(kCheckinNightFromS) &&
+              checkin_night_hold(kCheckinNightToS - 1) && !checkin_night_hold(kCheckinNightToS) &&
+              !checkin_night_hold(kCheckinNightFromS - 1) &&
+              QuestSettings{}.round_limit_ms == 10000 &&
+              has(reviver_hpp, "static constexpr int kQuestionWaitMs = kReactMs;") &&
+              has(reviver_hpp, "static constexpr int kReviveWaitMs = kReactMs;") &&
+              has(chat_hpp, "int max_enters = 2;") &&
+              has(login_hpp, "static constexpr int kMessageClicks = 3;") &&
+              has(login_hpp, "static constexpr int kMessageGoneMs = 2500;") &&
+              has(login_cpp, "constexpr int kChannelTookMs = 2000;") && has(login_cpp, "constexpr int kChannelTries = 3;"),
+          "kReactMs " + n(kReactMs) + " ms (kStuckMs, kCheckMs, kFirstGoneMs and the reviver's waits with it), "
+              "kReactSlowMs " + n(kReactSlowMs) + " ms, the board's " + n(kCheckinBoardLoginWaitMs) +
+              " ms and its night hold " + night_from + " to " + night_to + ", two Enters, three clicks at login");
+
+    // ---- DOC-TRUOC.txt: the entry under 2026.11.16's alone, the owner's words ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (");
+    const std::size_t e16 = doc.find("- Mới trong bản 2026.11.16 (");
+    const std::size_t e15d = doc.find("- Mới trong bản 2026.11.15d (");
+    const std::size_t e15c = doc.find("- Mới trong bản 2026.11.15c (");
+    check(sec5 != npos && e17 != npos && e16b != npos && e16 != npos && e15d != npos && e15c != npos &&
+              doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 && doc.find("- Mới trong bản", e17 + 1) == e16b &&
+              doc.find("- Mới trong bản", e16b + 1) == e16 &&
+              doc.find("- Mới trong bản", e16 + 1) == e15d && doc.find("- Mới trong bản", e15d + 1) == e15c &&
+              has(doc, "- Mới trong bản 2026.11.15d (máy chậm: mỗi thao tác của GoBot chờ game phản ứng tới " +
+                           react_s + " giây; bảng điểm danh tắt " + board_s + " giây sau khi vào game, qua ngày "
+                           "thì chờ tới " + night_to + "; theo lời bạn ngày 15/11; chưa thử trên game thật).") &&
+              has(doc, "\"" + asked_react + "\"") && has(doc, "\"" + asked_board + "\"") &&
+              has(readme, "*\"" + asked_react + "\"*") && has(readme, "*\"" + asked_board + "\"*"),
+          "DOC-TRUOC.txt: the 2026.11.15d entry in section 5 under 2026.11.17's, 16b's and 16's, over 15c's, with the "
+          "owner's "
+          "two requests as written -- quoted in README too");
+    check(has(doc, "Hết " + react_s + " giây mà không thấy gì thì bỏ bước đó như trước") &&
+              has(doc, "Luật \"kẹt quá 10 giây thì bấm ESC\" (bản 2026.11.14b) nay là kẹt quá " +
+                           n(BagCleaner::kStuckMs / 1000) + " giây, tính từ thao tác cuối của GoBot trong bước đó.") &&
+              has(doc, "được cộng thêm phần game chậm quá " + slow_s + " giây ở mỗi bước") &&
+              has(doc, "(round_limit_ms) nay không tính thời gian chờ game.") &&
+              has(doc, "lần bấm Xác Nhận đầu chờ tới " + n(InviteReply::kFirstGoneMs / 1000) + " giây, lần hai 2,5 "
+                       "giây.") &&
+              has(doc, "\"Không mở được ô chat (đã bấm Enter 2 lần, mỗi lần chờ " + react_s +
+                           " giây) — bỏ qua câu này.\"") &&
+              has(chat_cpp, "(enters > 1 ? \"mỗi lần chờ \" : \"chờ \")") &&
+              has(chat_cpp, "\" giây) — bỏ qua câu này.\";") &&
+              has(doc, "GoBot bấm ESC " + board_s + " giây sau khi nhân vật vào game (GoBot tự vào: tính từ lúc vào; "
+                       "vào bằng tay: tính từ lúc thấy bảng), bảng phải đứng yên ít nhất " +
+                       n(P::kSteadyMs / 1000) + " giây. Từ " + night_from + " tới " + night_to +
+                       " theo đồng hồ máy thì không bấm: qua ngày GoBot chờ tới " + night_to + " mới bấm ESC") &&
+              has(doc, "\"Thấy bảng Sự kiện và điểm danh: chờ " + board_s +
+                           " giây sau khi vào game rồi mới bấm ESC.\"") &&
+              has(closer, "\"Thấy bảng Sự kiện và điểm danh: chờ 30 giây sau khi vào game rồi mới bấm ESC.\"") &&
+              has(doc, "\"Qua ngày: chờ tới " + night_to + " rồi mới bấm ESC tắt bảng Sự kiện và điểm danh.\"") &&
+              has(closer, "\"Qua ngày: chờ tới 00:03 rồi mới bấm ESC tắt bảng Sự kiện và điểm danh.\"") &&
+              has(doc, "game bỏ sót một phím thì nay GoBot chờ tới " + react_s + " giây mới bỏ bước đó") &&
+              has(doc, "\"the game took N ms to show ...\"") && has(doc, "\"nothing after " + react_s + " s ...\"") &&
+              has(doc, "\"the check-in board waits for its ESC until ...\"") &&
+              has(closer, "\"the check-in board waits for its ESC until \""),
+          "DOC-TRUOC.txt's 2026.11.15d entry: " + react_s + " s a reaction, the stuck rule from the last input, "
+          "the deadlines moved on past " + slow_s + " s, the chat's two Enters, the party's first click, the board's " +
+          board_s + " s and " + night_from + "-" + night_to + ", the tab's words and the log lines to send -- as the "
+          "code says them");
+
+    // ---- README: the section after 2026.11.15c's, before the macro's ----
+    const std::size_t r15c = readme.find("### A report in mid-air is no landing, whatever its kind (2026.11.15c)");
+    const std::size_t r15d =
+        readme.find("### Thirty seconds for the game to react, and the board's ESC after a login (2026.11.15d)");
+    const std::size_t rmacro = readme.find("## Keyboard macro");
+    check(r15c != npos && r15d != npos && rmacro != npos && r15c < r15d && r15d < rmacro &&
+              has(readme, "Since 2026.11.15d (not yet run on the game).") &&
+              has(readme, "(`gobot/react_wait.hpp`, `kReactMs` = " + react_s + " s)") &&
+              has(readme, "A reaction later than `kReactSlowMs` (" + slow_s + " s) is said in the log") &&
+              has(readme, "`BagCleaner::kStuckMs` is `kReactMs`, counted from the step's last input of GoBot's own") &&
+              has(readme, "up to " + react_s + " s (`InviteReply::kFirstGoneMs`), the second `InviteReply::kGoneMs` "
+                          "(2.5 s)") &&
+              has(readme, "`max_enters` (" + n(ChatSettings{}.max_enters) + " shipped)") &&
+              has(readme, "(`Reviver::kQuestionWaitMs`, `kReviveWaitMs`)") &&
+              has(readme, "`kChannelTries` / `kMessageClicks` (3) clicks spread over " + react_s + " s from the first") &&
+              has(readme, "`PopupCloser::kCheckMs` (= `kReactMs`)") &&
+              has(readme, "watched only `kAfterMenuMs` (" + n(P::kAfterMenuMs / 1000) + "." +
+                              n(P::kAfterMenuMs % 1000 / 100) + " s) longer") &&
+              has(readme, "`kCheckinBoardLoginWaitMs` (" + board_s + " s) after the later of the character's arrival in "
+                          "the world") &&
+              has(readme, "from `kCheckinNightFromS` (" + night_from + ":00) to `kCheckinNightToS` (" + night_to +
+                              ":00) (`checkin_night_hold`)") &&
+              has(readme, "a key press the game loses now costs up to " + react_s + " s before its step is given up") &&
+              has(readme, "Since 2026.11.15d the board waits longer: its ESC goes " + board_s + " s after the "
+                          "character's arrival in the game"),
+          "README: the 2026.11.15d section after 15c's and before the macro's -- kReactMs, kReactSlowMs, kStuckMs, "
+          "the party's, the chat's, the reviver's, auto login's and the popup closer's waits, the board's "
+          "kCheckinBoardLoginWaitMs and night hold, and the cost -- and Getting started's popups line");
+
+    // ---- START-HERE (package.ps1): the paragraph after 15c's ----
+    const std::size_t p15c = pack.find("A report in mid-air is no landing (2026.11.15c, not yet tried on the game).");
+    const std::size_t p15d = pack.find("Thirty seconds for the game to react, and the board's ESC after a login "
+                                       "(2026.11.15d, not yet tried on the game).");
+    check(p15c != npos && p15d != npos && p15c < p15d &&
+              has(pack, "GoBot now waits up to " + react_s + " s for the screen to show what it did") &&
+              has(pack, "a step stuck " + n(BagCleaner::kStuckMs / 1000) + " s, not 10 s, gets the ESCs") &&
+              has(pack, "ESC " + board_s + " s after the character comes into the game, and never from " +
+                            night_from + " to " + night_to + " by the PC's clock") &&
+              has(pack, "A key press the game loses now costs up to " + react_s + " s."),
+          "START-HERE: the 2026.11.15d paragraph after 15c's, with the " + react_s + " s and the board's " + board_s +
+              " s and " + night_from + " to " + night_to);
+
+    // ---- the ini comments and gobot_cli's words ----
+    check(has(trash_ini, "a step stuck more than 10 s (the quantity box, a message that will not close; " +
+                             n(BagCleaner::kStuckMs / 1000) + " s since GoBot's last input for it, since "
+                             "2026.11.15d) is shut with ESC") &&
+              has(trash_ini, "Từ bản 2026.11.15d: mỗi bước chờ game phản ứng tới " + react_s +
+                                 " giây, và một bước mua kẹt quá " + n(BagCleaner::kStuckMs / 1000) +
+                                 " giây (không phải 10) mới bấm ESC.") &&
+              has(trash_ini, "Since 2026.11.15d the question is waited for up to " + react_s + " s") &&
+              has(quest_ini, "tối đa " + react_s + " giây tính từ phím hay cú bấm;") &&
+              has(quest_ini, "chỉ tính thời gian của chính lần làm, không tính lúc chờ game phản ứng.") &&
+              has(chat_ini, "the Enter is watched until the line shows open, up to " + react_s + " s") &&
+              has(chat_ini, "Since 2026.11.15d each Enter is watched up to " + react_s +
+                                " s and the next goes only after that whole wait, on a look that still shows the "
+                                "line shut;") &&
+              has(party_ini, "Req Party is clicked once two looks in a row show it -- up to " + react_s +
+                                 " s, or this if it is longer, from the row's click; never blind.") &&
+              has(login_ini, "since 2026.11.15d spread over " + react_s + " s from the first click") &&
+              has(app_ini, "-- since 2026.11.15d only " + board_s + " seconds after the character comes into the game") &&
+              has(cli, "only 30 s after its first sight, and never from 23:55 to 00:03 by the PC's clock.") &&
+              !has(cli, "a popup is closed once it has stayed 3 s.\\n\"") &&
+              has(cli, " ms and up to 30 s, up to ") &&
+              has(cli, " Enters (each after the one before's whole 30 s), "),
+          "trash.ini, quest.ini, chat.ini, party.ini, login.ini and app.ini say the " + react_s + " s and the board's " +
+              board_s + " s; gobot_cli's popup and chat lines say them too");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------ 2026.11.16
+
+/// 2026.11.16's notes against the code: lighter on a weak PC -- the popups'
+/// idle look, the name-plate reader's rest, HP and MP with the pet's key,
+/// light mode by CPUs and RAM -- and the old features gone. DOC-TRUOC.txt's
+/// entry first in section 5, README's section after 2026.11.15c's and before
+/// 15d's, START-HERE's paragraph after 15d's, app.ini's comments; and the
+/// deleted features no longer described as there.
+void test_notes_1116() {
+    section("The 2026.11.16 notes against the code: lighter on a weak PC, and the old features gone");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string app_ini = flat(source("/configs/app.ini"), true);
+    if (doc.empty() || readme.empty() || pack.empty() || app_ini.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    using P = PopupCloser;
+    const std::string idle_s = n(P::kIdleLookMs / 1000), idle_light_s = n(P::kIdleLookLightMs / 1000);
+    const std::string rest_s = n(DetectorPace::kRestMs / 1000);
+
+    // ---- the numbers the notes quote ----
+    check(P::kIdleLookMs == 2000 && P::kIdleLookLightMs == 3000 && DetectorPace::kRestMs == 2000 &&
+              kRestPetMs == 500 && kWeakCpus == 2 && kWeakRamMb == 4096,
+          "the popups' idle look " + n(P::kIdleLookMs) + " ms (" + n(P::kIdleLookLightMs) +
+              " ms light), the detector's rest " + n(DetectorPace::kRestMs) + " ms, the bars' rest with a pet key " +
+              n(kRestPetMs) + " ms, light mode at " + n(kWeakCpus) + " CPUs or under " + n(kWeakRamMb) + " MB");
+
+    // ---- DOC-TRUOC.txt: the entry first in section 5, over 15d's ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e16 = doc.find("- Mới trong bản 2026.11.16 (GoBot nhẹ máy hơn cho máy yếu, và bỏ các phần cũ "
+                                     "không còn ai dùng; theo lời bạn ngày 16/11; chưa thử trên game thật).");
+    const std::size_t e15d = doc.find("- Mới trong bản 2026.11.15d (");
+    // 2026.11.16b's entry on top of it since, and 2026.11.17's on that.
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (");
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    check(sec5 != npos && e17 != npos && e16b != npos && e16 != npos && e15d != npos &&
+              doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 && doc.find("- Mới trong bản", e17 + 1) == e16b &&
+              doc.find("- Mới trong bản", e16b + 1) == e16 && doc.find("- Mới trong bản", e16 + 1) == e15d &&
+              has(doc, "lần nhìn không thấy gì thì " + idle_s + " giây sau mới nhìn lại (" + idle_light_s +
+                           " giây khi bật Nhẹ máy), thay vì 1 giây") &&
+              has(doc, "Đọc tên quái lúc bot đánh theo gói tin: mỗi " + rest_s + " giây thay vì 0,6 giây.") &&
+              has(doc, "GoBot đọc mỗi 0,5 giây (máu thú cưng chỉ đọc được trên màn hình)") &&
+              has(doc, "chỉ có 1 hoặc 2 nhân, hoặc RAM dưới 4 GB") &&
+              has(doc, "(16462 đọc thành 462) không còn bị coi là lệch với gói tin") &&
+              has(doc, "khoảng 11,5 giây CPU mỗi phút") && has(doc, "Đó chỉ là ước tính, chưa đo") &&
+              has(doc, "đây là chỗ duy nhất màn hình đơn giản đổi"),
+          "DOC-TRUOC.txt: the 2026.11.16 entry in section 5 under 17's and 16b's, over 15d's, with the popups' " + idle_s +
+              " s (" +
+              idle_light_s + " s), the detector's " + rest_s + " s, the pet key's 0.5 s, light mode by cores and "
+              "RAM, the MP fix, the measured 11.5 s and the estimate said to be one");
+
+    // ---- README: the section after 2026.11.15c's, before 15d's ----
+    const std::size_t r15c = readme.find("### A report in mid-air is no landing, whatever its kind (2026.11.15c)");
+    const std::size_t r16 = readme.find("### Lighter on weak PCs, and old features removed (2026.11.16)");
+    const std::size_t r15d =
+        readme.find("### Thirty seconds for the game to react, and the board's ESC after a login (2026.11.15d)");
+    check(r15c != npos && r16 != npos && r15d != npos && r15c < r16 && r16 < r15d &&
+              has(readme, "Since 2026.11.16 (not yet run on the game).") &&
+              has(readme, "the next comes " + idle_s + " s later (" + idle_light_s + " s in light mode,") &&
+              has(readme, "(`DetectorPace::kRestMs`): " + n(DetectorPace::kRestMs) + " ms instead of 600") &&
+              has(readme, "the bars are read every " + n(kRestPetMs) + " ms (`kRestPetMs`)") &&
+              has(readme, "`auto` now also counts two or fewer logical CPUs, or under " + n(kWeakRamMb) +
+                              " MB of RAM") &&
+              has(readme, "-- an estimate, not a measurement,"),
+          "README: the 2026.11.16 section between 15c's and 15d's, with the constants it names");
+
+    // ---- START-HERE (package.ps1): the paragraph after 15d's ----
+    const std::size_t p15d = pack.find("Thirty seconds for the game to react, and the board's ESC after a login "
+                                       "(2026.11.15d, not yet tried on the game).");
+    const std::size_t p16 = pack.find("Lighter on weak PCs, and old features removed (2026.11.16, not yet tried "
+                                      "on the game).");
+    check(p15d != npos && p16 != npos && p15d < p16 &&
+              has(pack, "Tu dong thong bao looks every " + idle_s + " s (" + idle_light_s + " s with Nhe may)") &&
+              has(pack, "the monsters' names are read every " + rest_s + " s, not 0.6 s") &&
+              has(pack, "an estimate only, not measured"),
+          "START-HERE: the 2026.11.16 paragraph after 15d's, with the " + idle_s + " s and the " + rest_s + " s");
+
+    // ---- app.ini's comments ----
+    check(has(app_ini, "or since 2026.11.16 a PC with " + n(kWeakCpus) + " logical CPUs or fewer or under " +
+                           n(kWeakRamMb) + " MB of RAM") &&
+              has(app_ini, "máy chỉ có 1-2 nhân hoặc RAM dưới 4 GB") &&
+              has(app_ini, "every " + rest_s + " s (0.6 s before 2026.11.16) instead of every 0.14 s."),
+          "app.ini: light mode by CPUs and RAM, and the name plates' rest of " + rest_s + " s");
+
+    // ---- what went is no longer described as there ----
+    check(!has(readme, "## Packet-capture bot") && !has(readme, "gobot_cli --status") &&
+              !has(readme, "| `configs/bot_default.ini` |") && !has(readme, "**Dashboard → \"Set up automatically\"**") &&
+              !has(readme, "a walk to a saved point") && !has(readme, "`gobot_gui` and `gobot_cli`'s packet bot") &&
+              !has(doc, "\"Map changed -- minimap\"") && !has(doc, "mở thẻ Radar ở màn hình Nâng cao") &&
+              !has(doc, "\"Detector: every 600 ms\";") && !has(pack, "Phim nhay khi di toi diem da luu la Space: se") &&
+              !has(app_ini, "bot_config=") && !has(app_ini, "autostart="),
+          "README, DOC-TRUOC.txt, START-HERE and app.ini no longer describe the packet-only bot, the Radar, the "
+          "minimap's map changes or bot_default.ini as there");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------ 2026.11.16b
+
+/// 2026.11.16b's notes against the code: the skills in turn while hunting
+/// too, on by default -- DOC-TRUOC.txt's entry first in section 5, README's
+/// section right before 2026.11.16's, START-HERE's paragraph after 16's,
+/// macro.ini's comment; each number and log line as the code has it.
+void test_notes_1116b() {
+    section("The 2026.11.16b notes against the code: the skills in turn while hunting too, on by default");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string ini = flat(source("/configs/macro.ini"), true);
+    const std::string pace = source("/src/macro_pace.cpp");
+    const std::string skills = source("/apps/gobot_gui/simple_skills.cpp");
+    if (doc.empty() || readme.empty() || pack.empty() || ini.empty() || pace.empty() || skills.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    using E = MacroEngine;
+    const std::string asked = "Hiện tại dùng skill đang không được đều, cần chỉnh lại";
+
+    // ---- the numbers the notes quote ----
+    check(E::kPaceRepressMs == 160 && E::kPaceConfirmMs == 220 && E::kSkillRetryMs == 30 &&
+              E::kPaceSkillLearn == 3 && E::kPaceSkillUnlearn == 3 && E::kPaceGiveBackMost == 2 &&
+              MacroConfig{}.cast_paced && std::string(MacroConfig::kCastPacedKey) == "cast_paced_v2",
+          "the re-press at " + n(E::kPaceRepressMs) + " ms, the skip at " + n(E::kPaceConfirmMs) + " ms, a busy key "
+          "again after " + n(E::kSkillRetryMs) + " ms, a key's skill after " + n(E::kPaceSkillLearn) +
+          " casts, a press given back " + n(E::kPaceGiveBackMost) + " times a turn; on in code, read from "
+          "cast_paced_v2");
+
+    // ---- DOC-TRUOC.txt: the entry in section 5 under 2026.11.17's alone, over 16's ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (kỹ năng ra đều, theo vòng cả khi đánh quái; theo "
+                                      "lời bạn ngày 16/11; chưa thử trên game thật).");
+    const std::size_t e16 = doc.find("- Mới trong bản 2026.11.16 (");
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    check(sec5 != npos && e17 != npos && e16b != npos && e16 != npos && doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 &&
+              doc.find("- Mới trong bản", e17 + 1) == e16b &&
+              doc.find("- Mới trong bản", e16b + 1) == e16 && has(doc, "Bạn báo: \"" + asked + "\"") &&
+              has(doc, "Bạn chọn \"Ra chiêu theo vòng cả khi đánh quái\", bật sẵn.") &&
+              has(doc, "Ô \"Ra chiêu theo vòng\" nay mặc định CÓ dấu, kể cả với macro.ini cũ của bạn (dòng "
+                       "cast_paced=false trong đó là mặc định cũ, không phải bạn chọn).") &&
+              has(doc, "Ô nằm ngay ở dòng Tự dùng kỹ năng (thẻ Đánh quái), ngay dưới \"Tốc độ bấm kỹ năng\".") &&
+              has(doc, "phím chưa tới giờ thì nhường lượt ngay, tới giờ thì ra ở lượt kế của nó, nên không phím nào "
+                       "bị bỏ đói") &&
+              has(doc, "Nay chạy cả khi Tự đánh quái chạy, có hay không \"Chỉ khi đang đánh quái\".") &&
+              has(doc, "vòng đứng chờ ở phím đang tới lượt, hết giữ thì đi tiếp từ phím đó, mỗi lần một phím, không "
+                       "bấm dồn") &&
+              has(doc, "lúc theo vòng, Z ra theo lượt của nó, bot không bấm thêm Z mỗi 0,7 giây nữa") &&
+              has(doc, "bấm lại sau " + n(E::kPaceRepressMs) + " ms, vẫn không ra trong " + n(E::kPaceConfirmMs) +
+                           " ms thì vòng qua phím kế ngay") &&
+              has(doc, "thì thử lại sau " + n(E::kSkillRetryMs) + " ms thay vì 100 ms") &&
+              has(doc, "Muốn tắt: thẻ Đánh quái, dòng Tự dùng kỹ năng, bỏ dấu ô \"Ra chiêu theo vòng\" (lưu ngay; mở "
+                       "lại GoBot vẫn tắt). Sửa tay thì là dòng cast_paced_v2=false trong phần [Macro] của "
+                       "configs\\macro.ini, lúc GoBot đã tắt.") &&
+              has(doc, "\"Đang theo vòng cùng Tự đánh quái — khóa chiêu ước 680 ms, 12 vòng.\"") &&
+              has(doc, "\"now paced with the hunter\"") && has(doc, "\"given back N\"") && has(doc, "\"held N s\"") &&
+              has(doc, "(\"per key pressed/cast: Z 9/9, X 9/8, ...\")"),
+          "DOC-TRUOC.txt: the 2026.11.16b entry in section 5 under 17's alone, over 16's, with the owner's words, on by "
+          "default for old files too, the tick on the row, no key starved, the holds, the attack key, the " +
+              n(E::kPaceRepressMs) + "/" + n(E::kPaceConfirmMs) + " ms, how to untick, and the log's new words");
+
+    // ---- the review of 2026.11.16b: what the notes say against what the code does ----
+    // The tick is drawn on a line of its own, under the combo: no SameLine
+    // between the two.
+    const std::string row = body(skills, "void GuiApp::simple_skills_line() {");
+    const std::size_t combo = row.find("if (skill_gap_combo(cfg)) simple_changed();");
+    const std::size_t tick = row.find("if (ImGui::Checkbox(kCastPacedShort, &cfg.cast_paced)) simple_changed();");
+    // A key out of reach, or the dash's near an edge, passes its turn
+    // (turn_of's Turn::Waiting) -- never among the holds that stop the round.
+    // A cast by hand is told apart only once the key's skill is learned.
+    // "Dùng skill tuần tự" does nothing while the rotation has the skills.
+    check(combo != npos && tick != npos && combo < tick &&
+              row.substr(combo, tick - combo).find("SameLine") == npos &&
+              has(readme, "on a line of its own right below *Tốc độ bấm kỹ năng*") && !has(doc, "cạnh \"Tốc độ bấm") &&
+              has(pace, "if (waits(k)) return Turn::Waiting;") &&
+              !has(doc, "phím lướt gần mép, quái xa quá tầm của phím") &&
+              has(doc, "Còn phím mà quái xa quá tầm của nó, hay phím lướt lúc gần mép, thì chỉ nhường lượt: vòng "
+                       "đi tiếp phím kế, các phím khác vẫn ra.") &&
+              has(doc, "phím đánh mà cũng là kỹ năng cũng nhường lượt khi quái xa quá tầm đánh của bot") &&
+              !has(pack, "a jump, out of range;") &&
+              has(pack, "A key whose monster is out of its reach, or the dash key near an edge, only passes its "
+                        "turn: the round goes on with the next key.") &&
+              !has(ini, "outside the area, out of range,") &&
+              has(ini, "a key whose monster is out of its reach, or the dash key near an edge, only passes its turn "
+                       "and the round goes on with the next key.") &&
+              !has(doc, "hay do bạn tự bấm không bị tính nhầm") &&
+              has(doc, "Chiêu bạn tự bấm cũng vậy, khi GoBot đã nhớ phím đó ra chiêu nào (sau " +
+                           n(E::kPaceSkillLearn) + " lần ra chiêu đầu của phím đó, mỗi lần mở GoBot)") &&
+              has(skills, "\"Khi \\\"Ra chiêu theo vòng\\\" có dấu và GoBot thấy gói tin ra chiêu, kỹ năng ra theo "
+                          "vòng \"") &&
+              has(skills, "\"và ô này không có tác dụng; nó chỉ dùng lúc tạm bấm theo giờ (không có gói tin) hoặc "
+                          "\"") &&
+              has(readme, "`Hunter::attack_far`: `attack_limit_px`, F3") &&
+              has(readme, "Under a turn not yet confirmed, nothing to fight and, following the"),
+          "the review's notes: the tick under \"Tốc độ bấm kỹ năng\", a key out of reach or the dash's near an edge "
+          "passing its turn (not a hold), a cast by hand told apart once learned, \"Dùng skill tuần tự\" idle while "
+          "paced, and the attack key's reach and the swing's hand-off in the README");
+    // Its status and the log's words as the code has them.
+    E::PaceStatus ps;
+    ps.mode = E::PaceStatus::Mode::Paced;
+    ps.lock_ms = 680;
+    ps.rounds = 12;
+    ps.hunting = true;
+    check(has(doc, "\"" + E::pace_status_vi(ps) + "\"") && has(readme, "*" + E::pace_status_vi(ps) + "*") &&
+              has(pace, "if (m == Mode::Paced && hunting) return \"paced with the hunter\";") &&
+              in_order(pace, { "\"%s; fallback %s; lock_est %u ms; other casts %llu; now %s\"",
+                               "\"; given back %llu; held %.1f s; per key pressed/cast: %s%s\"," }) &&
+              has(pace, "GB_INFO(\"Paced: on, with the hunter -- the skills one after another in the order of the "
+                        "keys (%s), \"") &&
+              has(pace, "\"Paced: %s\", hunting ? \"the hunter runs -- the rotation goes on beside it, under its "
+                        "holds\"") &&
+              has(readme, "`Paced: on, with the hunter -- …` and `Paced: the hunter runs -- the rotation goes on "
+                          "beside it, under its holds`") &&
+              has(readme, "`…; other casts 0; now paced with the hunter; given back N; held N.N s; per key "
+                          "pressed/cast: Z 9/9, X 9/8, …`"),
+          "the status with the hunter, \"" + E::pace_status_vi(ps) + "\", and the minute's new words -- as "
+          "macro_pace.cpp writes them and the notes quote them");
+
+    // ---- README: the section right before 2026.11.16's ----
+    const std::size_t r15c = readme.find("### A report in mid-air is no landing, whatever its kind (2026.11.15c)");
+    const std::size_t r16b = readme.find("### Skills in turn while hunting too (2026.11.16b)");
+    const std::size_t r16 = readme.find("### Lighter on weak PCs, and old features removed (2026.11.16)");
+    check(r15c != npos && r16b != npos && r16 != npos && r15c < r16b && r16b < r16 &&
+              readme.find("### ", r16b + 1) == r16 && has(readme, "Since 2026.11.16b (not yet run on the game).") &&
+              has(readme, "*\"" + asked + "\"*") &&
+              has(readme, "the switch is read from `cast_paced_v2` (`MacroConfig::kCastPacedKey`)") &&
+              has(readme, "`kPaceSkillLearn` (" + n(E::kPaceSkillLearn) + ")") &&
+              has(readme, "`kPaceSkillUnlearn` (" + n(E::kPaceSkillUnlearn) + ")") &&
+              has(readme, "`kPaceGiveBackMost` (" + n(E::kPaceGiveBackMost) + ")") &&
+              has(readme, "`kSkillRetryMs` (" + n(E::kSkillRetryMs) + " ms), not 100") &&
+              has(readme, "`MacroEngine::swing_yields` tells the hunter (`Hunter::set_swing_yield`)") &&
+              has(readme, "This was chosen over leaving the attack key out of the rotation"),
+          "README: the 2026.11.16b section right before 16's, with the constants it names and the R2 choice");
+
+    // ---- START-HERE (package.ps1): the paragraph after 16's ----
+    const std::size_t p16 = pack.find("Lighter on weak PCs, and old features removed (2026.11.16, not yet tried "
+                                      "on the game).");
+    const std::size_t p16b = pack.find("Skills in turn while hunting too (2026.11.16b, not yet tried on the game).");
+    check(p16 != npos && p16b != npos && p16 < p16b &&
+              has(pack, "The tick Ra chieu theo vong is now ON by default, also for a macro.ini saved before") &&
+              has(pack, "the round presses it in its turn and the hunter does not press it on top") &&
+              has(pack, "To switch it off: untick Ra chieu theo vong on the Tu dung ky nang row (kept after a "
+                        "restart; by hand, cast_paced_v2=false in configs\\macro.ini with GoBot closed)."),
+          "START-HERE: the 2026.11.16b paragraph after 16's, on by default, the attack key, and how to untick");
+
+    // ---- no note says it is off while hunting, or off as shipped, as of now ----
+    check(!has(skills, "chỉ dành cho macro chạy một mình") && !has(skills, "Bỏ dấu (mặc định)") &&
+              !has(readme, "The hunter's `run_skills` is not paced in this release") &&
+              has(readme, "Since 2026.11.16b it paces with the hunter running too") &&
+              !has(pack, "Only with Tu danh quai off.") && has(pack, "In this version only with Tu danh quai off.") &&
+              !has(ini, "no hunter running, no key sequence") &&
+              has(doc, "Trong bản này (từ bản 2026.11.16b thì khác: chạy cả khi Tự đánh quái chạy, xem bản đó) ô chỉ "
+                       "dùng khi Tự đánh quái tắt"),
+          "the old \"only with Tự đánh quái off\" and \"off as shipped\" words gone or said to be 2026.11.08's");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------ 2026.11.17
+
+/// 2026.11.17's notes against the code: the MP bar the EXP bar's tip covered,
+/// HP and MP by the packets alone (the owner's "chỉ dùng gói tin"), the
+/// potions' brake, and the skills even while hunting -- DOC-TRUOC.txt's entry
+/// first in section 5, README's section right before 2026.11.16b's,
+/// START-HERE's paragraph after 16b's, macro.ini's and app.ini's comments;
+/// each number and log line as the code has it, and no note left saying the
+/// old check decides HP and MP.
+void test_notes_1117() {
+    section("The 2026.11.17 notes against the code: the MP bar, HP/MP by the packets alone, the skills while hunting");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string ini = flat(source("/configs/macro.ini"), true);
+    const std::string app_ini = flat(source("/configs/app.ini"), true);
+    const std::string trust_hpp = source("/include/gobot/vitals_trust.hpp");
+    const std::string macro_hpp = source("/include/gobot/macro.hpp");
+    const std::string hunter_hpp = source("/include/gobot/hunter.hpp");
+    const std::string vitals_gui = source("/apps/gobot_gui/packets_vitals.cpp");
+    const std::string reader = source("/src/vitals_reader.cpp");
+    const std::string macro = source("/src/macro.cpp");
+    const std::string pace = source("/src/macro_pace.cpp");
+    const std::string world = source("/src/packet_world.cpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    if (doc.empty() || readme.empty() || pack.empty() || ini.empty() || app_ini.empty() || trust_hpp.empty() ||
+        macro_hpp.empty() || hunter_hpp.empty() || vitals_gui.empty() || reader.empty() || macro.empty() ||
+        pace.empty() || world.empty() || view.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    using E = MacroEngine;
+    using R = VitalsReader;
+    const std::string asked = "check lại log mới nhất nhé, tìm thanh MP lỗi, skill ra không đồng đều";
+    const std::string chose = "không mình muốn đổi sang theo phương án chỉ dùng gói tin";
+    // The tenths the Vietnamese notes write with a comma: 0,5% and 0,8 giây.
+    const std::string down_pct_vi = n(static_cast<int>(E::kDownHpPct)) + "," +
+                                    n(static_cast<int>(E::kDownHpPct * 10.0f) % 10);
+    const std::string down_s_vi = n(E::kSkillsDownMs / 1000) + "," + n(E::kSkillsDownMs % 1000 / 100);
+    const int shadow = static_cast<int>(R::kCaptionShadowPct);
+    const int behind = static_cast<int>(R::kBehindFillPct);
+
+    // ---- the numbers the notes quote ----
+    check(BarCompare::kBeforeMs == 400 && BarCompare::kLeadMs == 900 && kLinkQuietMs == 5000 &&
+              R::kCaptionShadowPct == 54.0f && R::kBehindFillPct == 5.0f &&
+              has(macro_hpp, "static constexpr int kBrakeAfterChecks = 3;") &&
+              has(vitals_gui, "constexpr std::uint64_t kSwitchGapMs = 60'000;") && E::kPaceFloorMaxMs == 12'000 &&
+              E::kPaceSettleMs == 1'000 && E::kPaceFloorCheckTurns == 3 && E::kPaceFloorUses == 20 &&
+              E::kPaceProbeMs == 1'000 && E::kSkillsDownMs == 800 && E::kDownHpPct == 0.5f &&
+              E::kPaceStaleMs == 2000 && Hunter::kDashGuessPx == 320,
+          "the compare's " + n(BarCompare::kBeforeMs) + "/" + n(BarCompare::kLeadMs) + " ms, the server quiet " +
+              n(kLinkQuietMs) + " ms, the fill " + n(behind) + " points and the shadow " + n(shadow) +
+              "%, the brake after 3, a switch said once a minute; floors at most " + n(E::kPaceFloorMaxMs) +
+              " ms, settling " + n(E::kPaceSettleMs) + " ms, checked after " + n(E::kPaceFloorCheckTurns) +
+              " turns up to " + n(E::kPaceFloorUses) + ", a probe every " + n(E::kPaceProbeMs) + " ms, down after " +
+              n(E::kSkillsDownMs) + " ms under " + down_pct_vi + "%");
+
+    // ---- the code the notes describe: no gate, its lines, the brake, the probe, no guessed dash ----
+    check(!has(trust_hpp, "class BarCheck") && !has(trust_hpp, "HandOver") && !has(trust_hpp, "MpStandIn") &&
+              has(trust_hpp, "class BarCompare") && has(trust_hpp, "bool vitals_usable(const VitalsUsable& in") &&
+              has(vitals_gui, "\"Vitals: %s from the packets -- the potions, the jobs' HP guards and the pace%s\"") &&
+              has(vitals_gui, "\"Vitals: %s from the screen until the packets have it again -- %s%s\"") &&
+              has(vitals_gui, "line << \"Vitals: from the packets HP \"") &&
+              has(vitals_gui, "\" of the minute (to and from the screen: HP \"") &&
+              has(vitals_gui, "\"); the bars' figures beside them, for the log: HP \"") &&
+              !has(vitals_gui, "Vitals check:") &&
+              has(reader, "\"Vitals: %s figures %d/%d (%.0f%%) refused -- the bar is filled to %.0f%%: its \"") &&
+              has(reader, "\"first digits covered (the EXP bar's tip?)%s\"") &&
+              has(macro, "\"Potion check: %s key %s pressed %d times and the reading never rose (%.0f%%) -- the \"") &&
+              has(macro, "\"Potion check: %s key %s -- the reading %s (%.0f%%): its quicker presses back\"") &&
+              has(pace, "\"Paced: no cast of yours for %s while %llu key(s) went out, the packets coming -- the game \"") &&
+              has(pace, "\"takes no key: one key a second until your next cast\"") &&
+              has(pace, "\"Paced: your cast came after %s of the game taking no key -- the skills one after another "
+                        "again\"") &&
+              has(pace, "\"; skips taught %llu, not taught: %llu after a hold or wait, %llu beside another's cast, "
+                        "%llu \"") &&
+              has(pace, "\"longer than its re-cast, %llu probing; floors capped %llu; probing %s; held dead %.1f s; "
+                        "buff \"") &&
+              has(pace, "if (k.min_recast_ms != 0) part += \", re-cast \" + pace_seconds(k.min_recast_ms);") &&
+              has(world, "\"); the dash not learned yet -- no key held for it\"") && !has(hunter_hpp, "kDashGuessKeys") &&
+              has(view, "label(\"Đọc được HP; MP theo gói tin (số MP trên thanh đang bị che)\");") &&
+              has(view, "label(\"Đọc được HP; số MP đang bị che (đầu thanh EXP) -- chờ\");"),
+          "the code as the notes say: no BarCheck, HandOver or stand-in; the switch, minute, refusal, brake, probe "
+          "and Paced lines; the per-key re-cast; no dash key guessed; the checklist's two covered-MP lines");
+
+    // ---- DOC-TRUOC.txt: the entry first in section 5, over 16b's ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (sửa thanh MP đọc sai làm bình MP bị bấm liên tục, "
+                                     "HP/MP nay chỉ theo gói tin, và kỹ năng ra không đều khi đánh quái; theo log của "
+                                     "bạn đêm 16/11 sang 17/11; chưa thử trên game thật).");
+    const std::size_t e16b = doc.find("- Mới trong bản 2026.11.16b (");
+    check(sec5 != npos && e17 != npos && e16b != npos && doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == doc.find("- Mới trong bản 2026.11.17c (") && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == doc.find("- Mới trong bản 2026.11.17b (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17b (") + 1) == e17 &&
+              doc.find("- Mới trong bản", e17 + 1) == e16b && has(doc, "Bạn nhờ: \"" + asked + "\".") &&
+              has(doc, "\"15542/16813\" bị đọc thành \"542/16813\" (3%)") &&
+              has(doc, "Bạn chọn \"chỉ dùng gói tin\": HP và MP nay theo gói tin, không so với màn hình nữa. Có "
+                       "gói tin là dùng ngay; thanh HP/MP trên màn hình chỉ được dùng khi không có gói tin:") &&
+              has(doc, "hay game im hơn " + n(kLinkQuietMs / 1000) + " giây. Có gói tin lại là dùng gói tin ngay.") &&
+              has(doc, "Không còn \"20 lần khớp\", \"đang nghi\" hay \"thôi tin\".") &&
+              has(doc, "Đổi lại: nếu một ngày game đổi cách gửi HP/MP thì GoBot không tự biết.") &&
+              has(doc, "nhỏ hơn hẳn (quá " + n(behind) + " điểm %) phần thanh đang có màu thì bị coi là bị che") &&
+              has(doc, "MP đo được từ " + n(shadow) + "% trở lên thì GoBot coi là chưa đọc được MP") &&
+              has(doc, "\"Đọc được HP; MP theo gói tin (số MP trên thanh đang bị che)\"") &&
+              has(doc, "\"Đọc được HP; số MP đang bị che (đầu thanh EXP) -- chờ\"") &&
+              has(doc, "Phanh bình: một phím bình bấm 3 lần liền mà số đọc được không tăng") &&
+              has(doc, "\"Potion check: MP key G pressed 3 times and the reading never rose (3%) -- ...\"") &&
+              has(doc, "Nay chưa học được thì không phím nào bị coi là phím lướt") &&
+              has(doc, "và không quá " + n(E::kPaceFloorMaxMs / 1000) + " giây") &&
+              has(doc, "lần game không nhận phím trong " + n(E::kPaceSettleMs / 1000) + " giây sau lúc giữ kỹ năng") &&
+              has(doc, "được bấm thử lại sau " + n(E::kPaceFloorCheckTurns) + " lượt (trước đây " +
+                           n(E::kPaceFloorUses) + " lượt)") &&
+              has(doc, "không thấy chiêu nào ra trong " + n(E::kPaceStaleMs / 1000) + " giây") &&
+              has(doc, "chỉ bấm thử một phím mỗi giây tới khi chiêu ra lại") &&
+              has(doc, "HP dưới " + down_pct_vi + "% quá " + down_s_vi + " giây thì không bấm phím kỹ năng nào") &&
+              has(doc, "thấy chiêu buff đã ra thì không bấm nốt các lần còn lại") &&
+              has(doc, "\"Vitals: MP from the screen until the packets have it again -- ...\"") &&
+              has(doc, "\"Vitals: MP figures ... refused\"") && has(doc, "\"skips taught N, not taught: ...\"") &&
+              has(doc, "\"Paced: no cast of yours for ...\"") && has(doc, "\"Dash (packets):\""),
+          "DOC-TRUOC.txt: the 2026.11.17 entry first in section 5, over 16b's, with the owner's words and choice, "
+          "the packets whenever they have it, the covered figures, the brake, the four skill causes and the log "
+          "lines to send");
+
+    // ---- the old check no longer said to decide HP and MP, in the notes still read as now ----
+    check(has(doc, "(Bỏ ở bản 2026.11.17, theo lựa chọn của bạn: HP/MP có gói tin là dùng ngay, không so với màn "
+                   "hình nữa; thanh trên màn hình chỉ dùng khi không có gói tin. Xem bản 2026.11.17.)") &&
+              has(doc, "vitals=auto (HP/MP; từ bản 2026.11.17 auto là có gói tin là dùng, không so trước)") &&
+              !has(readme, "| `vitals` | `auto` | your HP and MP from the packets once each bar's check trusts them:") &&
+              has(readme, "| `vitals` | `auto` | your HP and MP from the packets whenever they have them, with no "
+                          "check first since 2026.11.17") &&
+              has(readme, "go by the packets whenever the packets have them, since 2026.11.17 with no check against "
+                          "the bars on the screen first") &&
+              has(readme, "Until 2026.11.16b they went through a check per bar against the bars on the screen, as "
+                          "follows; none of it decides anything now.") &&
+              !has(readme, "A bar is trusted after 20 agreements") &&
+              has(readme, "your HP and MP whenever they have them (unchecked since 2026.11.17)") &&
+              !has(readme, "your HP and MP, the bag, **Thử** and map changes still use the packets once checked") &&
+              has(app_ini, "Not checked first (2026.11.17): auto takes them from the packets whenever the packets "
+                           "have them, and reads the bars on the screen only when they do not.") &&
+              has(app_ini, "all but vitals, which since 2026.11.17 is not checked first") &&
+              has(ini, "Since 2026.11.17 HP and MP go by the game's packets whenever GoBot has them ([Packets] vitals "
+                       "in app.ini), with no check against these bars first"),
+          "README, DOC-TRUOC.txt, app.ini and macro.ini: HP and MP by the packets whenever they have them, the old "
+          "trust check said to be gone where the notes read as now");
+
+    // ---- the 2026.11.17 review: the notes as the code and the log have it ----
+    // The intro and the diagram no longer say HP and MP are checked against
+    // the screen; a map load is no switch to the screen (vitals_unusable_why
+    // has no such rule: the last values carry across it); the skills' flood
+    // of 169-230 a minute is the death of 00:07-00:09 alone, the 00:21-00:22
+    // minute being re-presses against wrong floors; and the death hold goes by
+    // the HP GoBot goes by, which the packets kept at 27% through that death.
+    check(!has(readme, "your HP and MP, each checked against the screen") &&
+              has(readme, "your HP and MP -- since 2026.11.17 taken from the packets whenever they have them, the "
+                          "bars read only without them") &&
+              !has(readme, "the monsters, your place, HP, MP and bag, each") &&
+              has(readme, "HP and MP straight from the packets (2026.11.17)") &&
+              !has(readme, "before the first value after a start or a map load") &&
+              has(readme, "A map load does not switch to the screen") &&
+              !has(readme, "or stunned (00:07:19, 00:21:37-00:22:40)") && !has(readme, "169-230") &&
+              has(readme, "220-230 presses a minute. The 169 of the minute to 00:22:55 were") &&
+              has(readme, "In the 00:07 death the packets kept HP at 27% while the screen read 0") &&
+              !has(doc, "vừa mở GoBot hay vừa qua cửa mà game") &&
+              has(doc, "Qua cửa thì không chuyển sang màn hình") && !has(doc, "Bị choáng hay đã chết") &&
+              !has(doc, "169-230") && has(doc, "3. Nhân vật đã chết (HP 0 trên thanh lúc 00:07:17") &&
+              has(doc, "lần chết lúc 00:07 gói tin vẫn báo") &&
+              !has(pack, "just after a start or a door") &&!has(pack, "With the character down or stunned") &&
+              has(pack, "With the character dead (00:07-00:09 that night)"),
+          "README, DOC-TRUOC.txt and START-HERE after the 2026.11.17 review: no HP/MP check in the intro or the "
+          "diagram, no screen after a map load, the flood the death's alone, the death hold by the HP gone by");
+
+    // ---- README: the section right before 2026.11.16b's ----
+    const std::size_t r17 = readme.find("### MP bar and skills while hunting (2026.11.17)");
+    const std::size_t r16b = readme.find("### Skills in turn while hunting too (2026.11.16b)");
+    check(r17 != npos && r16b != npos && r17 < r16b && readme.find("### ", r17 + 1) == r16b &&
+              has(readme, "Since 2026.11.17 (not yet run on the game).") && has(readme, "*\"" + asked + "\"*") &&
+              has(readme, "*\"" + chose + "\"*") &&
+              has(readme, "within `kLinkQuietMs` (" + n(kLinkQuietMs / 1000) + " s)") &&
+              has(readme, "`BarCheck`, `HandOver` and the 20 agreements are deleted") &&
+              has(readme, "`kBeforeMs` (" + n(BarCompare::kBeforeMs) + " ms)") &&
+              has(readme, "`kLeadMs` (" + n(BarCompare::kLeadMs) + " ms)") &&
+              has(readme, "`kBehindFillPct` (" + n(behind) + ")") &&
+              has(readme, "`kCaptionShadowPct` (" + n(shadow) + "%)") && has(readme, "`kBrakeAfterChecks`, 3") &&
+              has(readme, "`kPaceFloorMaxMs` (" + n(E::kPaceFloorMaxMs / 1000) + " s)") &&
+              has(readme, "`kPaceSettleMs` (" + n(E::kPaceSettleMs / 1000) + " s)") &&
+              has(readme, "`kPaceFloorCheckTurns` (" + n(E::kPaceFloorCheckTurns) + ")") &&
+              has(readme, "`kPaceProbeMs` (" + n(E::kPaceProbeMs / 1000) + " s)") &&
+              has(readme, "`kSkillsDownMs` (" + n(E::kSkillsDownMs) + " ms)") &&
+              has(readme, "`Vitals: MP from the screen until the packets have it again -- <why>`") &&
+              has(readme, "`Vitals: MP from the packets -- the potions, the jobs' HP guards and the pace`") &&
+              has(readme, "`Vitals: MP figures 542/16813 (3%) refused -- the bar is filled to 57%: its first digits "
+                          "covered (the EXP bar's tip?)`") &&
+              has(readme, "`Paced: no cast of yours for … the packets coming -- the game takes no key: one key a "
+                          "second until your next cast`") &&
+              has(readme, "`; skips taught N, not taught: N after a hold or wait, N beside another's cast, N longer "
+                          "than its re-cast, N probing; floors capped N; probing N.N s; held dead N.N s; buff presses "
+                          "spared N`") &&
+              has(readme, "`Dash (packets): … the dash not learned yet -- no key held for it`"),
+          "README: the 2026.11.17 section right before 16b's, with the owner's words and choice, the constants it "
+          "names and the log lines as the code writes them");
+
+    // ---- START-HERE (package.ps1): the paragraph after 16b's ----
+    const std::size_t p16b = pack.find("Skills in turn while hunting too (2026.11.16b, not yet tried on the game).");
+    const std::size_t p17 = pack.find("MP bar and skills while hunting (2026.11.17, not yet tried on the game).");
+    const std::size_t walk = pack.find("Walking to a monster, the hunter holds the arrow key down");
+    check(p16b != npos && p17 != npos && walk != npos && p16b < p17 && p17 < walk &&
+              has(pack, "HP and MP now go by the game's packets whenever GoBot has them, with no check against the "
+                        "screen first (the owner's choice)") &&
+              has(pack, "the game quiet for " + n(kLinkQuietMs / 1000) + " s") &&
+              has(pack, "now no key is held for a dash until one is learned") &&
+              has(pack, "and at " + n(E::kPaceFloorMaxMs / 1000) + " s.") &&
+              has(pack, "A potion pressed 3 times in a row with no rise goes at its own cooldown"),
+          "START-HERE: the 2026.11.17 paragraph after 16b's: the packets with no check, the bars without them, no "
+          "dash guessed, the floors' cap and the brake");
+
+    // ---- macro.ini: what the settings now do ----
+    check(has(ini, "Since 2026.11.17, 3 presses in a row with no rise (HP not falling further either) stop it, and "
+                   "potion_urgent_ms below, until the reading rises") &&
+              has(ini, "a learned cooldown is never longer than the shortest gap the skill was ever cast again after, "
+                       "nor " + n(E::kPaceFloorMaxMs / 1000) + " s, and is checked after " +
+                           n(E::kPaceFloorCheckTurns) + " turns") &&
+              has(ini, "the buff's cast seen ends the rest of its presses: buff_presses is the most"),
+          "macro.ini: the potions' brake, the floors' cap and the buff's presses ended by its cast");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------ 2026.11.17b
+
+/// 2026.11.17b's notes against the code: inviting somebody already in a party
+/// (the owner's "cứ mở khung pt", and "ok làm A B C đi") -- an invite that
+/// did not lead to a join held off, the notice clicked with the mouse held
+/// 2.5 s at most, the player list shut after every turn. DOC-TRUOC.txt's
+/// entry first in section 5, README's section right before 2026.11.17's,
+/// START-HERE's paragraph after 17's; each number and log line as the code
+/// has it.
+void test_notes_1117b() {
+    section("The 2026.11.17b notes against the code: invites that came to nothing held off, the notice closed with "
+            "a short hold, the player list shut");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string list_cpp = source("/src/player_list.cpp");
+    const std::string list_hpp = source("/include/gobot/player_list.hpp");
+    if (doc.empty() || readme.empty() || pack.empty() || gui.empty() || list_cpp.empty() || list_hpp.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    using T = InviteTries;
+    using R = InviteReply;
+    const std::string asked = "Hiện tại có bug khi pt người đã có pt thì hiển thị thông báo sau đó bot không phản ứng "
+                              "gì nữa và cứ mở khung pt.";
+    const std::string chose = "ok làm A B C đi";
+
+    // ---- the numbers the notes quote ----
+    check(T::kJoinWaitMs == 15'000 && T::kFailHoldMs == 60'000 && T::kFailHoldLongMs == 600'000 &&
+              T::kFailsForLong == 2 && T::kStaleWaitMs == 10'000 && R::kCloseHoldMs == 2500 && R::kCloseTries == 3 &&
+              R::kRetryGapMs == 1'000 && R::kStuckMs == 60'000 && has(list_hpp, "static constexpr int kCloseWaitMs = 3000;") &&
+              has(list_hpp, "static constexpr int kCloseSettleMs = 300;"),
+          "judged " + n(T::kJoinWaitMs / 1000) + " s on, held " + n(T::kFailHoldMs / 1000) + " s, " +
+              n(T::kFailHoldLongMs / 60'000) + " min from the " + n(T::kFailsForLong) + "nd in a row; the notice's "
+              "click held " + n(R::kCloseHoldMs) + " ms, " + n(R::kCloseTries) + " clicks; the list given 3 s");
+
+    // ---- the log lines the notes quote, as the code writes them ----
+    check(has(gui, "\"Party: invite to %s did not lead to a join (%s) -- %d in a row; not invited again for %d s\",") &&
+              has(gui, "GB_INFO(\"Party: %s joined after the invite -- %s\", o.who.c_str(), o.why.c_str());") &&
+              has(gui, "\"Party: %s asked; held off %d s more after an invite that did not lead to a join -- \"") &&
+              has(gui, "\"Party: the game's message after the invite to %s at %d,%d, %s: \\\"%s\\\" -- closed with its Xác \"") &&
+              has(gui, "\"Party: the game's message is still up after %d clicks on its Xác Nhận -- no invite for %d s\",") &&
+              has(gui, "GB_INFO(\"Party: the player list did not shut after %s's turn -- %s; left as it is\",") &&
+              has(list_cpp, "bool PlayerList::close(") && !has(gui, "VK_ESCAPE"),
+          "gui_app.cpp: the Party: lines README and DOC-TRUOC.txt quote, and no ESC");
+
+    // ---- DOC-TRUOC.txt: the entry first in section 5, over 17's ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e17b = doc.find("- Mới trong bản 2026.11.17b (mời tổ đội người đã có tổ đội: không còn mở danh "
+                                      "sách người chơi liên tục, không còn giữ chuột lâu; theo lời bạn ngày 17/11; "
+                                      "chưa thử trên game thật).");
+    const std::size_t e17 = doc.find("- Mới trong bản 2026.11.17 (");
+    check(sec5 != npos && e17b != npos && e17 != npos && doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.17c (") + 1) == e17b &&
+              doc.find("- Mới trong bản", e17b + 1) == e17 && has(doc, "Bạn báo: \"" + asked + "\"") &&
+              has(doc, "Bạn chọn: \"" + chose + "\".") &&
+              has(doc, n(T::kJoinWaitMs / 1000) + " giây sau lời mời, GoBot xem khung tổ đội của game") &&
+              has(doc, "Không vào thì " + n(T::kFailHoldMs / 60'000) + " phút nữa mới mời lại người đó; không vào " +
+                           n(T::kFailsForLong) + " lần liền thì " + n(T::kFailHoldLongMs / 60'000) + " phút.") &&
+              has(doc, "Người đang bị tạm ngưng có chat từ khoá thì GoBot không mở danh sách người chơi.") &&
+              has(doc, "GoBot chỉ giữ chuột chờ hộp tắt tối đa 2,5 giây (trước đây tới " + n(kReactMs / 1000) +
+                           " giây") &&
+              has(doc, "tối đa " + n(R::kCloseTries) + " lần; vẫn không tắt thì ngưng mời " + n(R::kStuckMs / 60'000) +
+                           " phút") &&
+              has(doc, "dùng được ở 1024x768, 1280x720 và 1366x768") &&
+              has(doc, "Bấm một lần, chờ tối đa 3 giây; không đóng được thì ghi log một lần và để vậy.") &&
+              has(doc, "1 phút, 10 phút nếu 2 lần liền không vào"),
+          "DOC-TRUOC.txt: the 2026.11.17b entry in section 5 right after 17c's, over 17's, with the owner's words and choice, "
+          "the holds, the short click, the list shut at the three sizes; 15b's entry says what replaced its 30 s");
+
+    // ---- README: the section right before 2026.11.17's ----
+    const std::size_t r17b = readme.find("### Party: inviting somebody already in a party (2026.11.17b)");
+    const std::size_t r17 = readme.find("### MP bar and skills while hunting (2026.11.17)");
+    check(r17b != npos && r17 != npos && r17b < r17 && readme.find("### ", r17b + 1) == r17 &&
+              has(readme, "Since 2026.11.17b (not yet run on the game).") && has(readme, "*\"" + chose + "\"*") &&
+              has(readme, "`kJoinWaitMs` (" + n(T::kJoinWaitMs / 1000) + " s)") &&
+              has(readme, "`kStaleWaitMs` (" + n(T::kStaleWaitMs / 1000) + " s)") &&
+              has(readme, "`kFailHoldMs` (" + n(T::kFailHoldMs / 60'000) + " min)") &&
+              has(readme, "`kFailHoldLongMs` (" + n(T::kFailHoldLongMs / 60'000) + " min)") &&
+              has(readme, "`kFailsForLong`-th (" + n(T::kFailsForLong) + ")") &&
+              has(readme, "`kCloseHoldMs` (" + n(R::kCloseHoldMs / 1000) + ".5 s)") &&
+              has(readme, "`kRetryGapMs` (" + n(R::kRetryGapMs / 1000) + " s)") &&
+              has(readme, "`kCloseTries` (" + n(R::kCloseTries) + ")") &&
+              has(readme, "`kStuckMs` (" + n(R::kStuckMs / 1000) + " s)") &&
+              has(readme, "`kCloseSettleMs` (300 ms)") && has(readme, "`kCloseWaitMs` (3 s)") &&
+              has(readme, "`Party: the player list did not shut after <who>'s turn -- <why>; left as it is`") &&
+              has(readme, "`Party: invite to <who> did not lead to a join (<why>) -- N in a row; not invited again "
+                          "for N s`"),
+          "README: the 2026.11.17b section right before 17's, with the owner's words and choice, the constants it "
+          "names and the log lines as the code writes them");
+
+    // ---- START-HERE (package.ps1): the paragraph after 17's ----
+    const std::size_t p17 = pack.find("MP bar and skills while hunting (2026.11.17, not yet tried on the game).");
+    const std::size_t p17b =
+        pack.find("Party: inviting somebody already in a party (2026.11.17b, not yet tried on the game).");
+    const std::size_t walk = pack.find("Walking to a monster, the hunter holds the arrow key down");
+    check(p17 != npos && p17b != npos && walk != npos && p17 < p17b && p17b < walk &&
+              has(pack, "is not invited again for 1 minute, 10 minutes after 2 in a row") &&
+              has(pack, "with the game's mouse held 2.5 s at most, not 30 s") &&
+              has(pack, "clicked again on a later pass, 3 clicks in all, then no invite for 1 minute") &&
+              has(pack, "picture at 1024x768, 1280x720 and 1366x768"),
+          "START-HERE: the 2026.11.17b paragraph after 17's: the holds, the short click, the list shut");
+
+    // ---- the review's fixes, said as the code does them ----
+    check(T::kNotListedHoldMs == 60'000 &&
+              has(gui, "\"Party: %s asked but is not among the %d on the player list -- not asked again for %d s\",") &&
+              has(readme, "`kNotListedHoldMs` (" + n(T::kNotListedHoldMs / 1000) + " s), the same every time, never "
+                          "counted towards the 10 minutes") &&
+              !has(readme, "An asker not on the list counts as a miss as well.") &&
+              has(doc, "không tính là một lần không vào: GoBot chỉ bỏ qua từ khoá của người đó " +
+                           n(T::kNotListedHoldMs / 60'000) + " phút") &&
+              !has(doc, "cũng tính là một lần không vào") &&
+              has(doc, "Hai người được mời gần nhau mà cả hai đều vào thì cả hai được tính là đã vào.") &&
+              has(doc, "kể cả những người khác chat từ khoá cùng lúc (họ chờ lượt sau)."),
+          "the review of 2026.11.17b: an asker not on the list held " + n(T::kNotListedHoldMs / 1000) +
+              " s in the chat, never counted; two joins at once both credited; a message waiting holds the pass's "
+              "other askers -- in the code, README and DOC-TRUOC.txt alike");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+// ------------------------------------------------------------ 2026.11.17c
+
+/// 2026.11.17c's notes against the code: the check-in board that stayed up
+/// (the owner's "có bảng điểm danh hiển thị mà không thấy tự tắt") -- a look
+/// that misses it no longer starts its 30 s over, its title under the game's
+/// lines of news is still told where it was, and every reason no ESC went is
+/// said. DOC-TRUOC.txt's entry first in section 5, README's section right
+/// before 2026.11.17b's, START-HERE's paragraph after 17b's; each number and
+/// log line as the code has it.
+void test_notes_1117c() {
+    section("The 2026.11.17c notes against the code: the check-in board's first sight kept through a missed look, "
+            "its title told under the game's news, every reason for no ESC said");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string pack = flat(source("/package.ps1"));
+    const std::string closer = source("/src/popup_closer.cpp");
+    const std::string popups = source("/apps/gobot_gui/simple_popups.cpp");
+    if (doc.empty() || readme.empty() || pack.empty() || closer.empty() || popups.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    const std::size_t npos = std::string::npos;
+    const auto n = [](auto v) { return std::to_string(v); };
+    using P = PopupCloser;
+    const std::string asked = "check lại phần tắt thông báo, có bảng điểm danh hiển thị mà không thấy tự tắt";
+
+    // ---- the numbers the notes quote ----
+    check(P::kBoardGapMs == 15'000 && P::kBoardGraceMs == 60'000 && kCheckinBoardCoveredScore == 0.60f &&
+              kCheckinBoardScore == 0.90f && P::kBlockedMs == 5'000 && P::kBackoffMs == 30'000 &&
+              P::kLookMs == 1'000 && P::kSteadyMs == 3'000 && kCheckinBoardLoginWaitMs == 30'000 &&
+              has(popups, "constexpr int kBoardUnfocusedSayMs = 10'000;"),
+          "the board's sighting kept " + n(P::kBoardGapMs / 1000) + " s out of sight, its covered title at 0.60 " +
+              n(P::kBoardGraceMs / 1000) + " s after a whole sight, a gate or a refused hold " +
+              n(P::kBlockedMs / 1000) + " s, seen again " + n(P::kSteadyMs / 1000) +
+              " s before its ESC, the game behind another window said after 10 s");
+
+    // ---- the log lines the notes quote, as the code writes them ----
+    check(has(closer, "\"the check-in board is up again at \"") &&
+              has(closer, "\"): the same board -- its wait still counts from its first sight, \"") &&
+              has(closer, "\"the check-in board's title at \"") &&
+              has(closer, "\" is partly covered (\"") &&
+              has(closer, "\", the game's lines of news over it?): still taken as up\"") &&
+              has(closer, "\"the check-in board is due its ESC, but the look under the hold did not find it again round \"") &&
+              has(closer, "\", whole or covered: nothing pressed; looked for again on the \"") &&
+              has(closer, "\" is up too and an ESC would go to it first: no ESC while it is\"") &&
+              has(closer, "\" now: not the moment\"") &&
+              has(popups, "\"Popups: the check-in board is up and gets no ESC: the game has not been in front for %d s \"") &&
+              has(popups, "\"-- nothing is looked at or pressed until it is\","),
+          "popup_closer.cpp and simple_popups.cpp: the Popups: lines README quotes");
+
+    // ---- DOC-TRUOC.txt: the entry first in section 5, over 17b's ----
+    const std::size_t sec5 = doc.find("5. CÓ GÌ MỚI, PHẦN NÀO LÀ THỬ NGHIỆM");
+    const std::size_t e17c = doc.find("- Mới trong bản 2026.11.17c (bảng Sự kiện và điểm danh: vẫn được tắt bằng ESC "
+                                      "dù có lúc GoBot nhìn không thấy nó; theo lời bạn ngày 17/11; chưa thử trên game "
+                                      "thật).");
+    const std::size_t e17b = doc.find("- Mới trong bản 2026.11.17b (");
+    // Under 2026.11.24's (the pet's HP food on reaching TổCổLong) since then.
+    check(sec5 != npos && e17c != npos && e17b != npos &&
+              doc.find("- Mới trong bản", sec5) == doc.find("- Mới trong bản 2026.11.24 (") &&
+              doc.find("- Mới trong bản", doc.find("- Mới trong bản 2026.11.24 (") + 1) == e17c &&
+              doc.find("- Mới trong bản", e17c + 1) == e17b && has(doc, "Bạn báo: \"" + asked + "\".") &&
+              has(doc, "Nay bảng thấy lại ở đúng chỗ cũ trong vòng " + n(P::kBoardGapMs / 1000) +
+                           " giây là cùng một bảng: vẫn bấm ESC " + n(kCheckinBoardLoginWaitMs / 1000) +
+                           " giây sau khi vào game") &&
+              has(doc, "hoặc không thấy quá " + n(P::kBoardGapMs / 1000) + " giây thì mới đếm lại từ đầu.") &&
+              has(doc, "bạn tắt rồi mở lại bảng để điểm danh thì đó là bảng mới, vẫn có đủ " +
+                           n(kCheckinBoardLoginWaitMs / 1000) + " giây để đọc.") &&
+              has(doc, "cũng chờ thêm " + n(P::kSteadyMs / 1000) + " giây mới bấm ESC") &&
+              has(doc, "hay bạn vừa chạm chuột, bàn phím thì") &&
+              has(doc, "Qua ngày vẫn chờ tới 00:03 như cũ.") &&
+              has(doc, "chỉ ở đúng chỗ bảng vừa được thấy rõ trong " + n(P::kBoardGraceMs / 1000) +
+                           " giây trước, không bao giờ để nhận một bảng mới") &&
+              has(doc, "game không ở trên cùng quá 10 giây") &&
+              has(doc, "thì " + n(P::kBlockedMs / 1000) + " giây sau thử lại, không phải " +
+                           n(P::kBackoffMs / 1000) + " giây.") &&
+              has(doc, "không bao giờ bấm vào bảng."),
+          "DOC-TRUOC.txt: the 2026.11.17c entry first in section 5, over 17b's, with the owner's words, the 15 s, "
+          "the player's own board, the 3 s, the covered title's 60 s, the reasons said and the 5 s");
+
+    // ---- README: the section right before 2026.11.17b's ----
+    const std::size_t r17c = readme.find("### Check-in board closed even after a missed look (2026.11.17c)");
+    const std::size_t r17b = readme.find("### Party: inviting somebody already in a party (2026.11.17b)");
+    check(r17c != npos && r17b != npos && r17c < r17b && readme.find("### ", r17c + 1) == r17b &&
+              has(readme, "Since 2026.11.17c (not yet run on the game).") && has(readme, "*\"" + asked + "\"*") &&
+              has(readme, "`PopupCloser::kBoardGapMs` (" + n(P::kBoardGapMs / 1000) + " s)") &&
+              has(readme, "one out of sight for over " + n(P::kBoardGapMs / 1000) + " s") &&
+              has(readme, "been back `kSteadyMs` (" + n(P::kSteadyMs / 1000) + " s)") &&
+              has(readme, "60 s (`PopupCloser::kBoardGraceMs`)") &&
+              has(readme, "`Popups: not closing the check-in board now: not the moment`") &&
+              has(readme, "`kCheckinBoardCoveredScore` (0.60)") && has(readme, "`kCheckinBoardScore` (0.90)") &&
+              has(readme, "`kBlockedMs` (" + n(P::kBlockedMs / 1000) + " s), not `kBackoffMs` (" +
+                              n(P::kBackoffMs / 1000) + " s)") &&
+              has(readme, "`Popups: the check-in board is up again at X,Y after N ms out of sight (...): the same "
+                          "board -- its wait still counts from its first sight, N s ago`") &&
+              has(readme, "`Popups: the check-in board is due its ESC, but the look under the hold did not find it "
+                          "again round X,Y, whole or covered: nothing pressed; looked for again on the next turn`") &&
+              has(readme, "`Popups: the check-in board is up and gets no ESC: the game has not been in front for 10 s "
+                          "-- nothing is looked at or pressed until it is`") &&
+              has(readme, "`build\\handoff\\popups\\testdata\\checkin_live_1024x768.png`"),
+          "README: the 2026.11.17c section right before 17b's, with the owner's words, the constants it names, the "
+          "log lines as the code writes them and the saved frame the tests read");
+
+    // ---- START-HERE (package.ps1): the paragraph after 17b's ----
+    const std::size_t p17b =
+        pack.find("Party: inviting somebody already in a party (2026.11.17b, not yet tried on the game).");
+    const std::size_t p17c = pack.find("Check-in board closed even after a missed look (2026.11.17c, not yet tried on "
+                                       "the game).");
+    const std::size_t walk = pack.find("Walking to a monster, the hunter holds the arrow key down");
+    check(p17b != npos && p17c != npos && walk != npos && p17b < p17c && p17c < walk &&
+              has(pack, "a board seen again where it was within 15 s is the same board") &&
+              has(pack, "one the player closes and opens again later is a new board") &&
+              has(pack, "and seen again it gets no ESC for 3 s") &&
+              has(pack, "another job's hold puts the board off 5 s, not 30 s"),
+          "START-HERE: the 2026.11.17c paragraph after 17b's: the 15 s, the player's own board, the 3 s, the covered "
+          "title, the 5 s");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// A start owed (2026.11.24, the owner: "Kiểm tra các phần khác xem có phần
+/// nào không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế
+/// khác"): Tự đánh quái, the macro a resume or a tick asked for, and the cold
+/// start's jobs, refused by something that passes -- Npcap's service up late,
+/// a doubt seen over a moment later, the detector -- asked again every 30 s
+/// while the run is on, and at once when a watcher sees its doubt over; never
+/// after the player's own stop. The rule is pure (gobot/owed_start.hpp);
+/// where GoBot's window asks by it is read off its source.
+void test_owed_start() {
+    section("A start owed (2026.11.24): Tự đánh quái, the macro and the cold start's jobs refused by something that "
+            "passes, asked again every 30 s while the run is on -- never after the player's own stop");
+
+    // ---- the rule ----
+    check(kOwedAskMs == static_cast<std::uint64_t>(kReactMs) && kOwedAskMs == 30'000,
+          "asked again every kReactMs: the owner's 30 s for laggy PCs");
+    const std::uint64_t t = 5'000'000;
+    check(!owed_due(t + 29'999, t, true, true, false) && owed_due(t + 30'000, t, true, true, false) &&
+              owed_due(t + 95'000, t, true, true, false),
+          "no sooner than 30 s after the last ask, and at any time after it");
+    check(owed_due(t, 0, true, true, false) && owed_due(1, 0, true, true, false),
+          "a last ask of 0 is at once -- a watcher saw its doubt over -- even on a clock less than 30 s old");
+    check(!owed_due(t + 60'000, t, false, true, false) && !owed_due(t + 60'000, t, true, false, false) &&
+              !owed_due(t + 60'000, t, true, true, true) && !owed_due(t, 0, false, true, false) &&
+              !owed_due(t, 0, true, true, true),
+          "never with the run over, the tick taken off or no key on, or the start made meanwhile -- at once or not");
+    check(!owed_due(t, t + 1'000, true, true, false),
+          "a last ask later than now is no ask due: the clocks' difference never wraps round");
+    check(owed_dropped(false, true, false) && owed_dropped(true, false, false) && owed_dropped(true, true, true) &&
+              !owed_dropped(true, true, false),
+          "forgotten once the run is over, it is no longer wanted or it started; kept while it waits");
+    {
+        // Refused at 0 and refused at every ask: asked again at 30, 60, 90
+        // and 120 s -- each ask moves the clock -- never in between.
+        std::uint64_t asked = t;
+        std::vector<std::uint64_t> at;
+        for (std::uint64_t now = t; now <= t + 120'000; now += 100)
+            if (owed_due(now, asked, true, true, false)) {
+                at.push_back(now - t);
+                asked = now;
+            }
+        check(at == std::vector<std::uint64_t>{ 30'000, 60'000, 90'000, 120'000 },
+              "a start refused at 0 and at every ask after: asked at " + ms_list(at));
+    }
+
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string hpp = source("/apps/gobot_gui/gui_app.hpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    if (gui.empty() || hpp.empty() || view.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+
+    // ---- tick() asks, after the doubts' watchers and before the cold start ----
+    const std::string tick = body(gui, "void GuiApp::tick() {");
+    check(in_order(tick, { "watch_left_held();", "watch_chat_doubt();", "owed_tick();",
+                           "if (keeper_reattach_.exchange(false)) {" }),
+          "tick(): what is owed asked after watch_left_held and watch_chat_doubt -- in the very tick either sees its "
+          "doubt over -- and before a cold start's jobs");
+    const std::string owed = body(view, "void GuiApp::owed_tick() {");
+    check(in_order(owed, { "if (!hunt_owed_ && !macro_owed_ && !jobs_owed_) return;", "if (simple_cold_start_) return;",
+                           "if (hunt_owed_ && owed_dropped(run, hunt_config_.enabled, hunting_)) hunt_owed_ = false;",
+                           "if (macro_owed_ && owed_dropped(run, keys, macro_running_)) macro_owed_ = false;",
+                           "if (jobs_owed_ && owed_dropped(run && keeper, true, false)) jobs_owed_ = false;",
+                           "const bool jobs = jobs_owed_ && owed_due(now, owed_ms_, run && keeper, true, false);",
+                           "const bool hunt = hunt_owed_ && owed_due(now, owed_ms_, run, hunt_config_.enabled, "
+                           "hunting_);",
+                           "const bool macro = macro_owed_ && owed_due(now, owed_ms_, run, keys, macro_running_);",
+                           "if (trash_left_held_ || (chat_doubt_ && !chat_doubt_watched_) || (chat_running_ && "
+                           "chat_quit_)) return;",
+                           "if (!input_.window_valid()) return;", "owed_ms_ = now;", "owed_asking_ = true;",
+                           "simple_start_jobs();", "if (macro) start_macro();", "if (hunt) start_hunt();",
+                           "owed_asking_ = false;" }) &&
+              has(owed, "const bool run = simple_running();") &&
+              has(owed, "const bool keeper = keeper_running_ && !keeper_oneshot_ && !keeper_stop_;") &&
+              has(owed, "const bool keys = any_key_on(macro_config_);"),
+          "owed_tick: forgotten once not wanted; asked no sooner than kOwedAskMs after the last ask (owed_due), with "
+          "the run on and no cold start under way; a doubt keys_may_start would look at, or no game window, waits; "
+          "through simple_start_jobs, start_macro and start_hunt");
+    check(!has(owed, "keys_may_start()") && !has(owed, "focus_game_to_start(") && !has(owed, "grab(") &&
+              !has(owed, "bin_looks_clear(") && !has(owed, "chat_line_looks_shut(") && !has(owed, "hunter_->start()") &&
+              !has(owed, "macro_->start()"),
+          "owed_tick itself looks at nothing, brings nothing forward and starts no engine: each start's own checks do, "
+          "as at BẮT ĐẦU");
+    check(in_order(owed, { "GB_INFO(\"Owed: asked again -- %s started\",", "simple_note(note, 12000);" }) &&
+              has(view, "\"GoBot thử lại: Tự đánh quái đã chạy.\""),
+          "and what it started is said once, in the log and on the card");
+
+    // ---- what becomes owed: only through owe_start, only with the run on ----
+    const std::string owe = body(view, "void GuiApp::owe_start(std::atomic<bool>& owed, const char* what) {");
+    check(in_order(owe, { "if (!simple_running() || simple_cold_start_) return;", "owed_ms_ = now_ms();",
+                          "if (!owed.exchange(true))", "GB_INFO(" }) &&
+              !has(gui + view, "_owed_ = true") && !has(gui + view, "_owed_.store(true"),
+          "owe_start, the one way a start becomes owed: with the run on and no cold start under way, the refusal "
+          "counted as the last ask, said in the log once as it becomes owed");
+    const std::string resume = body(view, "int GuiApp::resume_after_bin() {");
+    check(in_order(resume, { "out |= macro_running_ ? kResumedMacro : kResumeRefused;",
+                             "if (!macro_running_) owe_start(macro_owed_, \"The macro\");",
+                             "out |= hunting_ ? kResumedHunt : kResumeRefused;",
+                             "if (!hunting_) owe_start(hunt_owed_, \"Hunting\");" }),
+          "resume_after_bin: the macro or the hunter its start refused is owed -- no longer lost with the flags it "
+          "cleared");
+    const std::string changed = body(view, "void GuiApp::simple_changed() {");
+    check(in_order(changed, { "if (hunt_config_.enabled && !hunting_) {", "start_hunt();",
+                              "if (!hunting_) owe_start(hunt_owed_, \"Hunting\");",
+                              "if (!hunt_config_.enabled) hunt_owed_ = false;",
+                              "if (!hunt_config_.enabled && hunting_) stop_hunt();", "start_macro();",
+                              "if (!macro_running_) owe_start(macro_owed_, \"The macro\");" }),
+          "simple_changed: Tự đánh quái ticked on mid-run and refused is owed, a key's macro likewise; Tự đánh quái "
+          "ticked off owes nothing");
+    const std::string jobs = body(view, "void GuiApp::simple_start_jobs() {");
+    check(in_order(jobs, { "left_held_resume_macro_ = false;", "hunt_owed_ = false;", "macro_owed_ = false;",
+                           "owed_why_.clear();", "if (!keys_may_start()) {",
+                           "if (keeper_running_ && !keeper_oneshot_ && !keeper_stop_) owe_start(jobs_owed_, "
+                           "\"The run's jobs\");",
+                           "return;", "jobs_owed_ = false;", "simple_track_run(true);", "start_hunt();",
+                           "start_popups();",
+                           "if (hunt_config_.enabled && !unnamed && !hunting_) owe_start(hunt_owed_, \"Hunting\");",
+                           "spot_refused_vi_ + (hunt_owed_ ? owed_again_vi() : std::string())" }),
+          "simple_start_jobs: BẮT ĐẦU forgets what was owed and says each refusal; its keys_may_start refusal "
+          "owed only with the cold start's keeper running (BẮT ĐẦU with the game up is the player's own); Tự đánh "
+          "quái refused owed after every other start, once whether the run is on is known");
+
+    // ---- the doubts' watchers ask at once ----
+    const std::string now_ask = body(view, "bool GuiApp::owed_now() {");
+    const std::string watch = body(gui, "void GuiApp::watch_left_held() {");
+    const std::string chat_watch = body(gui, "void GuiApp::watch_chat_doubt() {");
+    check(in_order(now_ask, { "if (!hunt_owed_ && !macro_owed_ && !jobs_owed_) return false;", "owed_ms_ = 0;",
+                              "return true;" }) &&
+              in_order(watch, { "bin_seen_clear();", "const int resumed = resume_after_bin();",
+                                "const bool owed = owed_now();",
+                                "if (resumed < 0 || (resumed > 0 && (resumed & kResumeRefused))) return;",
+                                "\"Thùng rác không còn giữ gì: GoBot thử bật lại những việc chưa bật được.\"",
+                                "Bấm DỪNG LẠI rồi BẮT ĐẦU" }) &&
+              has(watch, "const int resumed = resume_after_bin();\n        owed_now();") &&
+              in_order(chat_watch, { "chat_seen_shut();", "const bool owed = owed_now();",
+                                     "\"Ô chat trong game đã đóng: GoBot thử bật lại những việc chưa bật được.\"",
+                                     "\"Ô chat trong game đã đóng. Bấm BẮT ĐẦU" }),
+          "watch_left_held and watch_chat_doubt: the doubt over asks what is owed in this tick, and the note says "
+          "GoBot tries rather than \"Bấm BẮT ĐẦU\"");
+
+    // ---- forgotten at the player's own hand, kept through the bin's doubt ----
+    check(in_order(slice(gui, "bool GuiApp::stop_jobs() {", "take_hold(kStopHold);"),
+                   { "left_held_resume_macro_ = false;", "hunt_owed_ = false;", "macro_owed_ = false;",
+                     "jobs_owed_ = false;" }),
+          "stop_jobs -- DỪNG, F12, closing GoBot -- forgets all that is owed, beside the bin's resume");
+    const std::string features = body(gui, "void GuiApp::draw_feature_list() {");
+    // The 2026.11.24 review: the owed flag cleared on the stop branch only; a
+    // start the player asks for that is refused (Npcap up late) is owed like
+    // any other -- clearing it there ended the 30 s retry for good.
+    check(in_order(body(gui, "void GuiApp::toggle_hunt() {"),
+                   { "if (hunting_) {", "hunt_owed_ = false;", "stop_hunt();", "return;", "start_hunt();",
+                     "if (!hunting_ && hunt_config_.enabled) owe_start(hunt_owed_, \"Hunting\");" }) &&
+              in_order(features, { "if (attacking != hunting_) {", "if (attacking) {", "start_hunt();",
+                                   "if (!hunting_ && hunt_config_.enabled) owe_start(hunt_owed_, \"Hunting\");",
+                                   "} else {", "hunt_owed_ = false;", "stop_hunt();" }) &&
+              in_order(features, { "if (macro_on != macro_running_) {", "if (macro_on) {", "start_macro();",
+                                   "owe_start(macro_owed_, \"The macro\");", "} else {", "macro_owed_ = false;",
+                                   "stop_macro();" }) &&
+              in_order(body(gui, "void GuiApp::toggle_macro() {"),
+                       { "if (macro_running_) {", "macro_owed_ = false;", "stop_macro();", "return;", "start_macro();",
+                         "owe_start(macro_owed_, \"The macro\");" }) &&
+              in_order(body(gui, "void GuiApp::draw_run_bar() {"),
+                       { "if (ImGui::Button(running ? \"STOP\" : \"START\", ImVec2(110, 32))) {", "if (running) {",
+                         "macro_owed_ = false;", "stop_macro();", "start_macro();",
+                         "owe_start(macro_owed_, \"The macro\");" }),
+          "F11, the full screen's Attack and Timed keys switches, its F10, START MACRO and START/STOP: the player's "
+          "own stop -- nothing owed is asked afterwards; a start they ask for that is refused is owed");
+    // The 2026.11.24 review: Tự chat stopped by the player with the line in
+    // doubt stops the hunter and the macro -- owed now, started again once the
+    // line is seen shut, as the bin's doubt resumes what it stopped.
+    check(in_order(gui, { "if (chat_handover_.exchange(false)) {",
+                          "const bool was_hunting = hunting_, was_macro = macro_running_;", "stop_hunt();",
+                          "stop_macro();", "stopping = stopping_;",
+                          "if (was_hunting && hunt_config_.enabled) owe_start(hunt_owed_, \"Hunting\");",
+                          "if (was_macro) owe_start(macro_owed_, \"The macro\");",
+                          "GoBot tự bật lại khi thấy ô chat " }) &&
+              has(body(gui, "void GuiApp::watch_chat_doubt() {"), "Bấm DỪNG LẠI rồi BẮT ĐẦU"),
+          "the chat hand-over: what it stopped owed, started again once the line is seen shut");
+    check(!has(body(gui, "void GuiApp::stop_hunt() {"), "_owed_") &&
+              !has(body(gui, "void GuiApp::stop_macro() {"), "_owed_") &&
+              !has(slice(gui, "bool GuiApp::stop_trash(bool wait) {", "void GuiApp::bin_seen_clear() {"), "_owed_"),
+          "stop_hunt, stop_macro and the bin's doubt (stop_trash) keep what is owed: a start the doubt refused is "
+          "asked once the doubt is over");
+
+    // ---- start_hunt says a refusal once a reason; owed no longer once it runs ----
+    const std::string hunt = body(gui, "void GuiApp::start_hunt() {");
+    check(has(hunt, "const bool again = owed_asking_ && owed_why_ == why;") && has(hunt, "owed_why_ = why;") &&
+              in_order(hunt, { "if (!hunt_named()) {", "if (say(\"no character name typed\")) {", "simple_note(",
+                               "GB_WARN(", "return;", "if (const char* why = spot_refusal(spot_refused_vi_)) {",
+                               "if (say(why)) {", "simple_note(\"Chưa bật Tự đánh quái: \" + spot_refused_vi_, 15000);",
+                               "GB_WARN(", "return;", "if (!keys_may_start()) return;",
+                               "focus_game_to_start(\"hunting\")", "hunter_->start();", "hunting_ = true;",
+                               "hunt_owed_ = false;", "owed_why_.clear();" }),
+          "start_hunt: a refusal said -- the card, the status line, the log -- unless an owed ask meets the reason it "
+          "said last; the game brought forward only once every check passed; owed no longer once it runs, and the "
+          "next refusal said whatever its reason");
+    check(in_order(body(gui, "void GuiApp::start_macro() {"),
+                   { "if (!keys_may_start()) return;", "focus_game_to_start(\"the macro\")", "macro_->start();",
+                     "macro_running_ = true;", "macro_owed_ = false;" }),
+          "start_macro: owed no longer once it runs; the game brought forward only after keys_may_start");
+
+    // ---- where it is kept, and what the card says ----
+    check(has(hpp, "#include \"gobot/owed_start.hpp\"") && has(hpp, "std::atomic<bool> hunt_owed_{false};") &&
+              has(hpp, "std::atomic<bool> macro_owed_{false};") && has(hpp, "std::atomic<bool> jobs_owed_{false};") &&
+              has(hpp, "std::uint64_t     owed_ms_ = 0;") && has(hpp, "std::string       owed_why_;") &&
+              has(hpp, "bool              owed_asking_ = false;"),
+          "gui_app.hpp: the three starts owed, the last ask, the last reason said and the ask under way");
+    check(has(view, "return \" GoBot tự thử lại mỗi \" + std::to_string(kOwedAskMs / 1000) + \" giây.\";") &&
+              has(view, "(\"Tự đánh quái chưa chạy: \" + spot_refused_vi_ + (hunt_owed_ ? owed_again_vi() : "
+                        "std::string()))") &&
+              has(view, "coloured(kWait, (\"Tự đánh quái chưa chạy được.\" + owed_again_vi()).c_str());") &&
+              has(view, "if (running && jobs_owed_)"),
+          "the card under BẮT ĐẦU: Tự đánh quái refused and the cold start's jobs, owed, say GoBot asks again every "
+          "30 s -- by the number the code asks by");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// 2026.11.24, the owner: "Kiểm tra các phần khác xem có phần nào không làm
+/// được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác" -- with his
+/// correction: retry at once or after a short gap, never a long pause. Tự
+/// chat, Làm nhiệm vụ nhanh and Tự đóng thông báo no longer stop themselves:
+/// their own next turn tries again, and the phone is told once. Against the
+/// code that runs them (chat_loop needs the live game, so its words are read)
+/// and the notes that say it.
+void test_self_stops_1124() {
+    section("2026.11.24: Tự chat, Làm nhiệm vụ nhanh and Tự đóng thông báo never stop themselves");
+    {
+        ChatSettings s;
+        s.interval_s = 120;
+        ChatSettings fast = s;
+        fast.interval_s = 10;
+        check(chat_retry_ms(false, s) == 30'000 && chat_retry_ms(true, s) == 120'000 &&
+                  chat_retry_ms(true, fast) == 30'000 && ChatSettings{}.max_failures == 3 &&
+                  QuestSettings{}.max_failures == 3 && PopupCloser::kBackoffMs == 30'000 &&
+                  QuestRun::kPostponeMs == 30'000,
+              "the gaps: a chat line 30 s, or max(30 s, the line interval) when GoBot could not judge or close it; "
+              "the quest's missing pictures 30 s; a popup still up 30 s; the phone told at the 3rd in a row");
+    }
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string chat_cpp = source("/src/auto_chat.cpp");
+    const std::string quest = source("/src/quick_quest.cpp");
+    const std::string closer = source("/src/popup_closer.cpp");
+    const std::string closer_h = source("/include/gobot/popup_closer.hpp");
+    const std::string popups = source("/apps/gobot_gui/simple_popups.cpp");
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string chat_ini = flat(source("/configs/chat.ini"), true);
+    const std::string quest_ini = flat(source("/configs/quest.ini"), true);
+    if (gui.empty() || chat_cpp.empty() || quest.empty() || closer.empty() || closer_h.empty() || popups.empty() ||
+        doc.empty() || readme.empty() || chat_ini.empty() || quest_ini.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+
+    // ---- Tự chat ----
+    const std::string loop = body(gui, "void GuiApp::chat_loop() {");
+    check(!loop.empty() && !has(loop, "bool stopped_self") && !has(loop, "stopped_self =") &&
+              !has(loop, "tell(\"Tự chat đã dừng.\");") && !has(loop, "— Tự chat đã dừng.\"") &&
+              has(loop, "if (chat_stop_ || chat_oneshot_) break;"),
+          "chat_loop: nothing of its own ends a run any more -- no stopped_self, no \"Tự chat đã dừng.\"; only "
+          "DỪNG, F12, unticking, or a one-off's end");
+    const std::string asked = slice(loop, "if (request == 2) {", "if (doubt.active()) {");
+    // The 2026.11.24 review: its r.stop puts the next timed try a line
+    // interval after the doubt (gap_after_doubt), as a timed line's does --
+    // the turn and the failures untouched.
+    check(has(asked, "const ChatSender::Result r = attempt(line, true);") && has(asked, "note_doubt(r);") &&
+              has(asked, "if (r.stop) gap_after_doubt = std::max(gap_after_doubt, chat_retry_ms(true, settings));") &&
+              !has(asked, "schedule."),
+          "Gửi thử meeting a line it could not judge or close: its doubt noted as ever, the next timed try a line "
+          "interval after it ends, the timed run's turn untouched -- never the run's end");
+    check(in_order(loop, { "} else if (r.aborted && !r.stop) {", "} else if (chat_quit_ || chat_stop_) {",
+                           "schedule.postpone(end, 3000);", "} else {", "schedule.failed(end, retry_ms);",
+                           "alert(\"chat_stopped\", told);" }),
+          "chat_loop: a line cut by DỪNG, F12 or an unticking is put off, never counted as a failure nor told to "
+          "the phone");
+    check(in_order(loop, { "if (doubt.active()) {", "doubt.step(*closer, now_ms());", "if (doubt.active()) continue;",
+                           "if (gap_after_doubt != 0) {",
+                           "if (schedule.due_at() < now + gap_after_doubt) schedule.postpone(now, gap_after_doubt);",
+                           "gap_after_doubt = 0;", "if (chat_stop_ || chat_oneshot_) break;" }) &&
+              in_order(loop, { "} else if (r.sent) {", "schedule.sent(end);",
+                               "if (r.stop) gap_after_doubt = chat_retry_ms(true, settings);",
+                               "} else if (r.aborted && !r.stop) {",
+                               "const std::uint64_t retry_ms = chat_retry_ms(r.stop, settings);",
+                               "schedule.failed(end, retry_ms);", "if (r.stop) gap_after_doubt = retry_ms;",
+                               "if (schedule.failures() == settings.max_failures) {",
+                               "const std::string told = alert_text::chat_stopped(schedule.failures());",
+                               "tell(told);", "alert(\"chat_stopped\", told);" }) &&
+              !has(loop, "schedule.failed(end, 30'000);") && !has(loop, "schedule.failures() >= settings.max_failures"),
+          "chat_loop: a line that failed tried again chat_retry_ms on -- after its doubt, a whole line interval, for "
+          "one it could not judge or close (r.stop), sent or not -- the phone told once, at max_failures");
+    check(has(chat_cpp, "const char* const kNotClosed  = \"Không đóng được ô chat sau khi gửi — GoBot thử lại ở lượt "
+                        "sau.\";") &&
+              has(chat_cpp, "\"GoBot thử lại ở lượt sau. Ảnh màn hình lúc đó ở thư mục chat_debug.\";") &&
+              !has(chat_cpp, "— Tự chat đã dừng.\"") && !has(chat_cpp, "\"Tự chat đã dừng. Ảnh") &&
+              !has(chat_cpp, "Tu chat stops") &&
+              has(chat_ini, "Since 2026.11.24 no longer a stop: the line keeps its turn and is tried again 30 s on"),
+          "the sender's words and the trace: GoBot tries again at the next turn, Tự chat stops no more; chat.ini's "
+          "max_failures says so");
+
+    // ---- Làm nhiệm vụ nhanh ----
+    const std::string step = body(quest, "void QuestRun::step(std::uint64_t now) {");
+    check(in_order(step, { "if (r.outcome == QuestOutcome::Cancelled) {", "if (r.outcome == QuestOutcome::NoPictures) {",
+                           "if (running_ && settings_.enabled) schedule_.postpone(now, kPostponeMs);",
+                           "if (!no_pictures_said_ && hooks_.say)", "no_pictures_said_ = true;", "return;",
+                           "no_pictures_said_ = false;", "schedule_.done(now, r);",
+                           "if (r.outcome == QuestOutcome::English) {", "stop_itself(",
+                           "if (running_ && r.failed() && schedule_.failures() == settings_.max_failures) {",
+                           "GoBot vẫn thử lại mỗi lượt. Xem ảnh trong quest_debug.",
+                           "hooks_.alert(\"quest_trouble\", alert_text::quest_trouble(n, alert_why));" }) &&
+              count_in(step, "stop_itself(") == 1 && !has(step, "stop_itself(\"Đã tự tắt") &&
+              !has(step, "stop_itself(\"Thiếu hình"),
+          "QuestRun::step: the pictures missing put off 30 s and said once; failed rounds told once at "
+          "max_failures, the next round at the interval; only the English client stops it");
+    check(has(quest_ini, "Hỏng chừng này lần liền thì báo, một lần cho mỗi đợt (1-20). Từ bản 2026.11.24 không tự tắt "
+                         "nữa: GoBot vẫn thử lại mỗi lượt"),
+          "quest.ini's max_failures says it no longer stops it");
+
+    // ---- Tự đóng thông báo ----
+    check(!has(closer_h, "LeftAlone,") && !has(closer_h, "static constexpr int kTries") &&
+              !has(closer_h, "kTriesWindowMs = ") && has(closer_h, "static constexpr std::uint64_t kBackoffMs = 30'000;") &&
+              !has(closer, "case Turn::LeftAlone") && !has(closer, "Turn::LeftAlone;") &&
+              !has(closer, "\"; leaving it alone\"") && !has(closer, "tr.tries.erase(") &&
+              has(closer, "\"); trying again in \" + std::to_string(kBackoffMs / 1000) + \" s\"") &&
+              !has(popups, "LeftAlone"),
+          "the popup closer: no cap of tries and no Turn::LeftAlone -- a popup still up is tried again kBackoffMs "
+          "later, as often as it takes");
+
+    // ---- the notes ----
+    check(has(doc, "Cũng trong bản này, cùng lời bạn ở trên, Tự chat, Làm nhiệm vụ nhanh và Tự đóng thông báo không "
+                   "còn tự dừng (chưa thử trên game thật):") &&
+              has(doc, "\"" + alert_text::chat_stopped(3) + "\"") &&
+              has(doc, "\"Không làm được 3 lần liền (lý do) — GoBot vẫn thử lại mỗi lượt. Xem ảnh trong quest_debug.\"") &&
+              has(doc, "\"Thiếu hình nhận diện cửa sổ Nhiệm Vụ — GoBot thử lại sau 30 giây.\"") &&
+              has(doc, "log ghi \"Popups: ... is still up after closing it with ESC (try N); trying again in 30 s\"") &&
+              has(doc, "3 lần liền thì GoBot báo một lần và vẫn thử lại (từ bản 2026.11.24; trước đó Tự chat tự dừng).") &&
+              has(readme, "### Tự chat, the quick quest and the popups: never stopped by themselves (2026.11.24)") &&
+              has(readme, "*" + alert_text::chat_stopped(3) + "*") &&
+              has(readme, "Three failed rounds in a row are told on the tab and the phone") &&
+              !has(readme, "Three failed rounds in a row stop it") &&
+              has(readme, "`Popups: the check-in board is still up after closing it with ESC (try 3); trying again "
+                          "in 30 s`"),
+          "DOC-TRUOC.txt and README.md: the three no longer stop themselves, in the words the code says");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// 2026.11.24, the same request -- "Kiểm tra các phần khác xem có phần nào
+/// không làm được thì dừng không, cần thay cơ chế này bằng 1 cơ chế khác" --
+/// for Tự hồi sinh and Tự vào lại game: the revive out of tries no longer
+/// stops the bot, max_restarts counts over an hour and is waited out, a
+/// crossing not in is made again 30 s on, and a relogin's window not found is
+/// looked for again. The Reviver and CrashWatch's hour are tried on their own
+/// in main.cpp; here, what only GoBot's window does, by its source, and the
+/// notes.
+void test_revive_keeper_1124() {
+    section("2026.11.24: Tự hồi sinh and Tự vào lại game never stop the bot or themselves");
+    check(Reviver::kRoundGapMs == kReactMs && CrashWatch::kCrossAgainMs == 30'000 &&
+              CrashWatch::kRestartWindowMs == 3'600'000,
+          "the gaps: another round of revive tries 30 s on, a crossing not in made again 30 s on, max_restarts "
+          "counted over an hour");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string hpp = source("/apps/gobot_gui/gui_app.hpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    const std::string keeper = source("/apps/gobot_gui/simple_keeper.cpp");
+    const std::string login = source("/src/auto_login.cpp");
+    const std::string doc = flat(source("/DOC-TRUOC.txt"));
+    const std::string readme = flat(source("/README.md"));
+    const std::string app_ini = flat(source("/configs/app.ini"), true);
+    const std::string alerts_ini = flat(source("/configs/alerts.ini"), true);
+    if (gui.empty() || hpp.empty() || view.empty() || keeper.empty() || login.empty() || doc.empty() ||
+        readme.empty() || app_ini.empty() || alerts_ini.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+
+    // ---- Tự hồi sinh ----
+    check(!has(hpp, "simple_stopped_vi_") && !has(view, "simple_stopped_vi_") && !has(gui, "simple_stopped_vi_"),
+          "nothing stops the bot by itself any more: the red \"why the bot stopped itself\" line is gone");
+    const std::string card = slice(view, "if (revive_running_) {", "if (trash_running_ && !trash_oneshot_) {");
+    check(in_order(card, { "const std::uint64_t round_at = revive_round_ms_.load();", "if (round_at != 0) {",
+                           "coloured(kWait, (\"Tự hồi sinh: 3 lần chưa được — có thể đã hết giấy/bùa hồi sinh. Thử "
+                           "lại sau \" +",
+                           "\" giây; hồi sinh bằng tay thì bot tự chạy tiếp.\")", "} else {",
+                           "hint((\"Tự hồi sinh: đang theo dõi\" +" }) &&
+              has(gui, "revive_round_ms_ = next_round_ms;") && has(gui, "revive_round_ms_ = 0;"),
+          "the card: dead with a round run out, in amber with the seconds to the next round; else as ever");
+    check(has(view, "\"Khi nhân vật chết, bấm Sử dụng vật phẩm hồi sinh rồi Xác Nhận. Thử \"") &&
+              has(view, "\"3 lần; chưa được thì 30 giây sau thử lại (không dừng bot). Không hồi \"") &&
+              has(view, "\"sinh tại làng, không dùng Cash.\").c_str());") && !has(view, "không được thì dừng bot."),
+          "Tự hồi sinh's tooltip: \"Thử 3 lần; chưa được thì 30 giây sau thử lại (không dừng bot). Không hồi sinh tại "
+          "làng, không dùng Cash.\"");
+
+    // ---- Tự vào lại game ----
+    check(has(gui, "ImGui::Text(\"Restarts   at most %d an hour\", s.max_restarts);") &&
+              !has(gui, "Gives up   after %d restart(s)"),
+          "the full screen: \"Restarts at most %d an hour\", no longer \"Gives up after\"");
+    check(has(view, "tối đa trong 1 giờ (max_restarts trong configs/app.ini, mặc định 5) thì GoBot không đóng game") &&
+              has(view, "\"sau GoBot thử lại, không dừng.\");") && !has(view, "thì GoBot dừng và chờ bạn.\"") &&
+              has(keeper, "như vậy được tính vào số lần vào lại tối đa trong 1 giờ.") &&
+              has(view, "if (keeper_waiting_) coloured(kWait, line.c_str());") && has(view, "hint(line.c_str());") &&
+              has(view, "coloured(keeper_waiting_ ? kWait : kGood,"),
+          "the Tự đăng nhập tab and the run card: max_restarts in an hour, waited out; a crossing not in tried again "
+          "30 s on; the keeper's line in amber while it waits");
+    check(has(login, "nhập VTCZone (chọn ghi nhớ nếu có) — GoBot tự thử lại sau đó.\";") &&
+              has(login, "xem và trả lời hộp đó — GoBot tự thử lại sau đó.\";") &&
+              !has(login, "rồi bấm BẮT ĐẦU lại."),
+          "the sign-in form's and the Security Alert's words: GoBot tries again by itself -- no longer \"rồi bấm BẮT "
+          "ĐẦU lại\" (that button says DỪNG LẠI with the run on)");
+    check(has(hpp, "std::vector<std::uint64_t> keeper_restart_times_;") &&
+              in_order(body(gui, "void GuiApp::start_keeper(bool oneshot) {"),
+                       { "join_pumping(keeper_thread_);", "keeper_restarts_ = 0;", "keeper_restart_times_.clear();",
+                         "keeper_wait_until_ms_ = 0;", "keeper_wait_told_ = false;", "keeper_retry_told_ = false;",
+                         "keeper_again_ = false;", "keeper_waiting_ = false;",
+                         "keeper_thread_ = std::thread([this] { keeper_loop(); });" }),
+          "start_keeper: the hour's restarts, a wait and the crossings owed counted from none, as the run's number "
+          "was -- once the last keeper's thread is joined");
+    check(in_order(body(keeper, "GuiApp::KeeperWake GuiApp::keeper_wake("),
+                   { "if (!keeper_oneshot_) return KeeperWake::None;", "keeper_login_now_ = false;",
+                     "return KeeperWake::Quit;" }),
+          "a one-shot keeper ending on a game not running normally drops the key's request asked again");
+
+    // ---- the game's window after a log in, looked for again ----
+    const std::string tick = body(gui, "void GuiApp::tick() {");
+    check(has(hpp, "static constexpr std::uint64_t kReattachAgainMs = 5'000;") &&
+              in_order(tick, { "owed_tick();",
+                               "if (reattach_missed_ && keeper_running_ && !keeper_stop_ && now_ms() - "
+                               "reattach_missed_ms_ >= kReattachAgainMs &&",
+                               "!keeper_crossing())", "keeper_reattach_ = true;",
+                               "if (keeper_reattach_.exchange(false)) {",
+                               "const bool again = reattach_missed_;", "const bool found = reattach_game();",
+                               "if (found) {", "where_pending_ms_ = now_ms();",
+                               "if (hunter_ && hunter_->running() && (found || !again)) hunter_->suspend_spot();",
+                               "if (found) simple_map_lose();",
+                               "if (found && macro_ && macro_->running()) macro_->recast_buffs(\"logging back in\");",
+                               "simple_start_jobs();" }) &&
+              in_order(body(gui, "bool GuiApp::reattach_game() {"),
+                       { "reattach_missed_ = true;", "reattach_missed_ms_ = now_ms();", "return false;",
+                         "reattach_missed_ = false;" }),
+          "tick(): a relogin's window not found is looked for again every kReattachAgainMs while the keeper runs, "
+          "and the look that finds it does every follow-up of a log in -- the spot set aside once, at the log in, "
+          "and on the look that finds it");
+
+    // ---- the notes ----
+    check(has(readme, "### Tự hồi sinh and Tự vào lại game: never stopped by themselves (2026.11.24)") &&
+              has(readme, "*" + Reviver::out_of_tries_vi() + "*") &&
+              has(readme, "*" + alert_text::gave_up_restarts(5, "hh:mm:ss") + "*") &&
+              has(readme, "`back_in` says *Đã vào lại game (lần N trong 1 giờ qua). Bot chạy tiếp.*") &&
+              has(readme, "*Vào lại game chưa được (VTCZone đang hiện màn hình đăng nhập) — GoBot thử lại sau 30 "
+                          "giây.*") &&
+              has(readme, "`Revive: out of tries (round 1) -- nothing stopped: …`") &&
+              has(readme, "`Revive: round 2 at this death: another 3 tries -- still never the village, never Cash`") &&
+              has(readme, "At most `max_restarts` restarts in any hour") &&
+              !has(readme, "It stops for a person after `max_restarts` restarts"),
+          "README.md: the section of 2026.11.24, in the words and the log lines the code says, and Tự đăng nhập's "
+          "summary");
+    check(has(doc, "Cũng trong bản này, cùng lời bạn ở trên, Tự hồi sinh và Tự vào lại game không còn dừng bot hay tự "
+                   "dừng (chưa thử trên game thật):") &&
+              has(doc, "\"" + Reviver::out_of_tries_vi() + "\"") &&
+              has(doc, "\"Đã vào lại game 5 lần trong 1 giờ — GoBot chờ tới hh:mm:ss rồi tự vào lại.\"") &&
+              has(doc, "\"Tạm nghỉ tự vào lại\"") &&
+              has(doc, "\"Đã vào lại game (lần N trong 1 giờ qua). Bot chạy tiếp.\"") &&
+              has(doc, "\"Vào lại game chưa được (lý do) — GoBot thử lại sau 30 giây.\"") &&
+              has(doc, "\"Tự hồi sinh: 3 lần chưa được — có thể đã hết giấy/bùa hồi sinh. Thử lại sau N giây; hồi sinh "
+                       "bằng tay thì bot tự chạy tiếp.\""),
+          "DOC-TRUOC.txt: the 2026.11.24 paragraph, in the words the screen and the phone say");
+    check(has(app_ini, "At most this many restarts in any hour. One more waits -- nothing ended or clicked -- until the "
+                       "oldest of them is an hour old") &&
+              has(app_ini, "Counted in max_restarts' hour like a crash.") &&
+              has(alerts_ini, "Tạm nghỉ tự vào lại: đã vào lại game max_restarts lần trong 1 giờ") &&
+              has(alerts_ini, "Từ bản 2026.11.24 bot không dừng nữa: 30 giây sau GoBot thử thêm 3 lần"),
+          "configs/app.ini's max_restarts and configs/alerts.ini's two ticks say it (the repo's templates)");
+#else
+    skip("no source folder\n");
+#endif
+}
+
+/// 2026.11.24: Tổ đội, Tự hồi sinh, Dọn rác and Tự chat no longer end at their
+/// start for missing pictures, nor Tổ đội for a party.ini that does not read
+/// (the owner: "Kiểm tra các phần khác xem có phần nào không làm được thì dừng
+/// không, cần thay cơ chế này bằng 1 cơ chế khác"). They wait, pressing
+/// nothing, and look again -- every 30 s for the pictures, every 2 s for the
+/// file -- their stop flags ending the wait at once. By their source: the
+/// waits need the live program's threads.
+void test_worker_waits_1124() {
+    section("2026.11.24: workers short of pictures or of party.ini wait and look again, never end at their start");
+#ifdef GOBOT_SOURCE_DIR
+    const std::string gui = source("/apps/gobot_gui/gui_app.cpp");
+    const std::string hpp = source("/apps/gobot_gui/gui_app.hpp");
+    const std::string view = source("/apps/gobot_gui/simple_view.cpp");
+    if (gui.empty() || hpp.empty() || view.empty()) {
+        skip("the source tree is not here to read\n");
+        return;
+    }
+    // ---- the shared wait ----
+    const std::string wait = body(gui, "bool wait_for_pictures(");
+    check(has(gui, "constexpr int kPicturesAgainMs = 30'000;") &&
+              in_order(wait, { "for (;;) {", "if (stopped()) return false;",
+                               "const std::string what = pictures ? missing(*pictures) : std::string(\"hình giao diện\");",
+                               "if (what.empty()) {", "return true;", "if (what != said) {", "say_waiting(what);",
+                               "said = what;", "std::chrono::milliseconds(kPicturesAgainMs);",
+                               "if (stopped()) return false;", "std::this_thread::sleep_for(std::chrono::milliseconds(50));",
+                               "if (stopped()) return false;", "pictures = TemplateStore::shared_best(name_map_ini);" }) &&
+              !has(wait, "key") && !has(wait, "click"),
+          "wait_for_pictures: what is missing said once per thing, the stop asked every 50 ms, the program's one set "
+          "asked for again every 30 s, true as soon as nothing is missing -- nothing pressed");
+    check(has(gui, "return \"Thiếu hình giao diện của game (\" + what + \") — GoBot thử lại sau \" +") &&
+              has(gui, "std::to_string(kPicturesAgainMs / 1000) + \" giây.\";"),
+          "its line: \"Thiếu hình giao diện của game (<cái gì>) — GoBot thử lại sau 30 giây.\"");
+
+    // ---- Tổ đội ----
+    const std::string party = body(gui, "void GuiApp::party_loop() {");
+    const std::string party_start = slice(party, "FileWatch rules_watch(2000);", "while (!party_stop_) {");
+    check(!party_start.empty() &&
+              in_order(party_start,
+                       { "bool read = rules.load(config);", "if (!read) {",
+                         "say_party(\"Chưa đọc được configs/party.ini — Tổ đội chờ, chưa làm gì; đọc lại mỗi 2 giây.\");",
+                         "while (!read) {", "slept < 2000 && !party_stop_", "if (party_stop_) {",
+                         "party_running_ = false;", "return;", "rules_watch.forget();", "rules_watch.due(config);",
+                         "read = rules.load(config);", "IniFile ini;", "ini.load(config);" }) &&
+              !has(party_start, "rồi bấm BẮT ĐẦU lại") && !has(party_start, "not started"),
+          "party_loop: party.ini that does not read is read again every 2 s, nothing acted on meanwhile, never the "
+          "code's defaults; only the stop ends the wait");
+    check(in_order(party_start, { "std::shared_ptr<const TemplateStore> pictures =", "if (!wait_for_pictures(",
+                                  "[this] { return party_stop_.load(); },", "party_running_ = false;", "return;",
+                                  "const TemplateStore& store = *pictures;" }) &&
+              !has(party_start, "No UI pictures") && !has(party_start, "if (store.size() == 0)"),
+          "party_loop: no return on no pictures -- the 30 s wait, its stop ending it");
+
+    // ---- Tự hồi sinh ----
+    const std::string revive = body(gui, "void GuiApp::revive_loop() {");
+    const std::string revive_start = slice(revive, "name_this_thread(\"revive\");", "reviver.set_stop(");
+    check(in_order(revive_start,
+                   { "std::shared_ptr<const TemplateStore> pictures =", "const bool have_pictures = wait_for_pictures(",
+                     "if (s.size() == 0) return std::string(\"hình giao diện\");",
+                     "return Reviver(input_, s, grab).ready(&why) ? std::string() : why;",
+                     "[this] { return revive_stop_.load(); },", "revive_wait_vi_ = line;", "tell(line);",
+                     "revive_wait_vi_.clear();", "if (!have_pictures) {", "revive_running_ = false;",
+                     "const TemplateStore& store = *pictures;", "Reviver reviver(input_, store, grab);" }) &&
+              !has(revive_start, "death panel cannot be recognised") && !has(revive_start, "if (store.size() == 0)"),
+          "revive_loop: no pictures, or not the reviver's (ready() false), wait and are looked for again every 30 s; "
+          "the stop ends the wait");
+    check(has(hpp, "std::string              revive_wait_vi_;") &&
+              in_order(slice(view, "if (revive_running_) {", "if (trash_running_ && !trash_oneshot_) {"),
+                       { "if (!revive_wait.empty()) {", "coloured(kBad, (\"Tự hồi sinh chưa chạy: \" + revive_wait).c_str());",
+                         "} else if (round_at != 0) {" }) &&
+              has(view, "revive_wait = revive_wait_vi_;"),
+          "the card: the revive's wait in red, as a death would not be seen");
+    // The 2026.11.24 review: the HP figure's death alert stays on while the
+    // reviver waits (it watches no death panel then).
+    check(has(hpp, "std::atomic<bool>        revive_waiting_{false};") &&
+              in_order(revive_start, { "revive_waiting_ = true;", "const bool have_pictures = wait_for_pictures(",
+                                       "revive_waiting_ = false;", "if (!have_pictures) {" }) &&
+              has(source("/apps/gobot_gui/simple_alerts.cpp"),
+                  "const bool by_hp = running && vitals_running_ && (!revive_running_ || revive_waiting_.load());"),
+          "revive_loop: waiting for its pictures, the death alert by the HP figure stays on");
+    check(in_order(revive, { "if (turn == Reviver::Turn::OutOfTries) {", "if (!holding && !under_other && take_hold(\"reviving\")) {",
+                             "holding = true;", "input_.release_all();" }),
+          "revive_loop: out of tries with the hold let go by a flicker -- taken again, no key at the death panel");
+
+    // ---- Dọn rác ----
+    const std::string trash = body(gui, "void GuiApp::trash_loop() {");
+    const std::string trash_start = slice(trash, "name_this_thread(\"trash\");", "CountReader counts;");
+    check(in_order(trash_start, { "std::shared_ptr<const TemplateStore> pictures =",
+                                  "if (pictures->size() == 0 && trash_oneshot_) {", "finish(", "return;",
+                                  "if (!wait_for_pictures(", "if (trash_request_.exchange(0) != 0) tell(pictures_again_vi(trash_missing));", "return trash_stop_.load();",
+                                  "trash_running_ = false;", "return;", "const TemplateStore& store = *pictures;" }),
+          "trash_loop: a run waits for the pictures, 30 s a look, its stop ending it; a one-off button still says so "
+          "at once");
+
+    // ---- Tự chat ----
+    const std::string chat = body(gui, "void GuiApp::chat_loop() {");
+    const std::string chat_start = slice(chat, "name_this_thread(\"chat\");", "ChatDialogs dialogs;");
+    check(in_order(chat_start,
+                   { "std::shared_ptr<const TemplateStore> pictures =", "const auto missing = [&](const TemplateStore& s)",
+                     "if (s.size() == 0) return \"hình giao diện\";",
+                     "if (!can_look_for_chat(s, settings)) return \"hình ô chat \" + settings.open_picture;",
+                     "if (!ChatDialogs::can_check(s)) return \"hình hộp thoại\";", "if (chat_oneshot_) {", "finish(",
+                     "for (;;) {", "const bool have = wait_for_pictures(", "if (fresh.load(config)) settings = fresh;",
+                     "if (chat_request_.exchange(0) != 0) tell(pictures_again_vi(chat_missing));", "return chat_stop_.load() || chat_quit_.load();", "if (have) break;",
+                     "if (!stays()) return;", "chat_restart_ = false;", "const TemplateStore& store = *pictures;" }) &&
+              !has(chat_start, "finish(\"Không có hình ô chat") && !has(chat_start, "finish(\"Không có hình hộp thoại") &&
+              !has(chat_start, "if (store.size() == 0)"),
+          "chat_loop: no pictures, no chat bar's, no dialogs': a run waits, 30 s a look, chat.ini read again too; "
+          "unticking ends the wait, a run asked again keeps it; a one-off still says so at once");
+#else
+    skip("no source folder\n");
+#endif
+}
+
 } // namespace
 
 void test_jobs_gui(void (*check_fn)(bool, const std::string&), void (*section_fn)(const char*)) {
@@ -2674,4 +5201,15 @@ void test_jobs_gui(void (*check_fn)(bool, const std::string&), void (*section_fn
     test_buy_count_1110();
     test_notes_1110();
     test_notes_1111();
+    test_notes_1112();
+    test_notes_1115d();
+    test_notes_1116();
+    test_notes_1116b();
+    test_notes_1117();
+    test_notes_1117b();
+    test_notes_1117c();
+    test_owed_start();
+    test_self_stops_1124();
+    test_revive_keeper_1124();
+    test_worker_waits_1124();
 }

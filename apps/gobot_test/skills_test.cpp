@@ -625,6 +625,59 @@ void test_skills_returning() {
 #endif
 }
 
+// ------------------ the hunter holding the skills (Fight::Mode::Held, 2026.11.12)
+
+void test_skills_held_hunter() {
+    section("Skills held while the hunter holds them (Fight::Mode::Held, 2026.11.12: a drop settling or in its fall) "
+            "-- on their own timers or following the fight; potions, the pet and a buff as ever");
+
+    for (const bool follow : { false, true }) {
+        Rig rig({ skill('Z', 500, 0, true), skill('X', 500, 0, true), skill('C', 1000), buff('6', 60'000),
+                  potion(MacroTrigger::HpBelow, 'G', 50), potion(MacroTrigger::PetHpBelow, 'Q', 50) },
+                follow);
+        rig.mode = Mode::Held;
+        rig.hp = 40.0f;
+        rig.pet = 40.0f;
+        const std::uint64_t t0 = rig.t;
+        rig.run(3000);
+        const auto st = rig.engine.stats();
+        const bool held = rig.count('Z', t0) == 0 && rig.count('X', t0) == 0 && rig.count('C', t0) == 0 &&
+                          st.held_hunter > 0 && st.held_returning == 0;
+        const bool rest = rig.count('G', t0) >= 1 && rig.count('6', t0) == 1 && rig.count('Q', t0) >= 1;
+        rig.mode = follow ? Mode::Fighting : Mode::Idle;
+        const std::uint64_t t1 = rig.t;
+        rig.run(300);
+        const auto z = rig.when('Z', t1);
+        check(held && rest && !z.empty() && z[0] - t1 <= 110,
+              std::string(follow ? "following the fight" : "on their own timers") + ": 3 s held -- Z, X and C never "
+                  "pressed (" + std::to_string(st.held_hunter) + " held, counted apart from walking back), the "
+                  "potion, the pet and the buff as ever; let go, Z at +" + ms_list(z, t1) + " ms");
+    }
+    // The minute says them on a line of their own.
+    Rig rig({ skill('Z', 500, 0, true) }, false);
+    rig.mode = Mode::Held;
+    check(logged_line(LogLevel::Info, [&] { rig.run(61'000); },
+                      { "Skills: ", " held for the hunter -- 0 turning, 0 a drop settling or in its fall, " }),
+          "the minute's line of their own: \"Skills: N held for the hunter -- 0 turning, 0 a drop settling or in its "
+          "fall, ...\" (no reason said here: counted in the whole only)");
+#ifdef GOBOT_SOURCE_DIR
+    const auto read = [](const char* rel) {
+        std::FILE* f = nullptr;
+        std::string out;
+        if (fopen_s(&f, (std::string(GOBOT_SOURCE_DIR) + rel).c_str(), "rb") != 0 || f == nullptr) return out;
+        char buf[4096];
+        for (std::size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) out.append(buf, n);
+        std::fclose(f);
+        return out;
+    };
+    const std::string gui = read("/apps/gobot_gui/gui_app.cpp");
+    const std::string cli = read("/apps/gobot_cli/main.cpp");
+    check(gui.find("f.mode = hunter_->skills_held() ? MacroEngine::Fight::Mode::Held") != std::string::npos &&
+              cli.find("f.mode = hunter.skills_held() ? MacroEngine::Fight::Mode::Held") != std::string::npos,
+          "the GUI and the command line tell the macro Held from the hunter's own skills_held(), first");
+#endif
+}
+
 // ------------------------------------ the pet pressed over and over (11.10)
 
 void test_pet_takes_turns() {
@@ -985,6 +1038,7 @@ void test_skills(void (*check_fn)(bool, const std::string&), void (*section_fn)(
     test_skills_off_as_before();
     test_skills_timed_gap();
     test_skills_returning();
+    test_skills_held_hunter();
     test_pet_takes_turns();
     test_skills_config();
     test_settings_changes();

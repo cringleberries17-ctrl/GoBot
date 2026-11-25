@@ -87,8 +87,11 @@ std::string plan_line(std::int64_t plan_at_s, std::int64_t look_at_s, int owed, 
         }
         return line + ".";
     }
+    // With no worker, at the first timed look after BẮT ĐẦU -- a whole
+    // interval on since 2026.11.12 -- where a plan come due begins afresh.
     if (owed > 0)
-        return "Còn " + std::to_string(owed) + " lần mua của lượt trước: GoBot mua tiếp khi bot chạy (BẮT ĐẦU).";
+        return "Còn " + std::to_string(owed) +
+               " lần mua của lượt trước: GoBot mua ở lần mua theo giờ đầu tiên sau khi bấm BẮT ĐẦU.";
     return std::string();
 }
 
@@ -103,8 +106,9 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
     // The switch, off as shipped, and how often a plan is bought.
     if (ImGui::Checkbox("Tự mua bình", &simple_clean_.buy_potions)) {
         put("buy_potions", simple_clean_.buy_potions ? "true" : "false");
-        // Ticked on: nothing owed, the shop's clock and its waits for a quiet
-        // second afresh, in the worker running or the next (trash_loop).
+        // Ticked on: nothing owed, the shop's clock -- a whole interval to the
+        // first look (2026.11.12) -- and its waits for a quiet second afresh,
+        // in the worker running or the next (trash_loop).
         if (simple_clean_.buy_potions) {
             ++shop_ticked_;
             shop_owed_ = 0;
@@ -122,7 +126,10 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
             ("Mỗi khoảng thời gian bên cạnh, GoBot bấm chuột phải vào món Người Giữ Sân ở ngăn Khác và mua số ô đã "
              "đặt bên dưới, xen kẽ Thịt bò khô và Rượu lá tre (mỗi ô là một lần mua " +
              std::to_string(CleanSettings::kBuyQuantity) +
-             "). Khi Dọn rác bật, tới giờ mua GoBot dọn rác trước rồi mua liền sau đó, trong cùng một lần dừng "
+             "). Giờ mua đếm từ lúc bấm BẮT ĐẦU (hay lúc đánh dấu ô này): lần mua đầu là một khoảng \"mua mỗi\" "
+             "sau đó, không mua ngay lúc bật; muốn mua ngay thì bấm Mua ngay. DỪNG rồi BẮT ĐẦU lại khi chưa tới "
+             "giờ mua thì giờ đang đếm được giữ. "
+             "Khi Dọn rác bật, tới giờ mua GoBot dọn rác trước rồi mua liền sau đó, trong cùng một lần dừng "
              "phím. GoBot không đếm bình trong túi nữa. Khi game báo túi đồ đã đầy, GoBot đóng thông báo và cửa hàng "
              "rồi dừng lượt đó; tới giờ sau mua lại. Mỗi lượt giữ phím mua tối đa " +
              std::to_string(BagCleaner::kShopBuysPerHold) + " lần, phần còn lại mua tiếp sau " +
@@ -139,7 +146,11 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
                 .c_str());
         ImGui::SetItemTooltip("%s", tip.c_str());
     }
+    // "Mua ngay sau khi dọn rác" (2026.11.13b) ticked, with Dọn rác on: no
+    // clock to set -- the plan is bought right after each timed pass.
+    const bool after_pass = simple_clean_.buy_after_trash && simple_clean_.enabled;
     ImGui::SameLine(0, 16);
+    ImGui::BeginDisabled(after_pass);
     label("mua mỗi");
     ImGui::SameLine();
     {
@@ -157,9 +168,27 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
             ImGui::EndCombo();
         }
     }
+    ImGui::EndDisabled();
+    if (after_pass) ImGui::SetItemTooltip("Không dùng khi \"Mua ngay sau khi dọn rác\" đang đánh dấu và Dọn rác bật.");
     if (simple_clean_.buy_potions && !can_buy()) {
         ImGui::SameLine();
         coloured(kWait, "GoBot chưa có hình của game để làm việc này, nên chưa mua.");
+    }
+    // Right after each timed pass instead of by the clock (2026.11.13b; users,
+    // via the owner: "Bằng checkbox này thì không cần thiết định thời gian mua
+    // HP/MP nữa, sẽ ngay lập tức thực hiện mua sau khi dọn rác xong").
+    if (ImGui::Checkbox("Mua ngay sau khi dọn rác", &simple_clean_.buy_after_trash))
+        put("buy_after_trash", simple_clean_.buy_after_trash ? "true" : "false");
+    ImGui::SetItemTooltip(
+        "%s", "Đánh dấu: mỗi lần Dọn rác theo giờ xong, GoBot mua bình liền sau đó, trong cùng một lần dừng phím, "
+              "không chờ thêm; không cần đặt giờ mua (ô \"mua mỗi\" không dùng). Phần còn lại của một lượt mua "
+              "nhiều ô vẫn mua tiếp như cũ. Danh sách đồ bỏ đi trống thì tới giờ dọn vẫn mua. Lần mua đó chưa chạy "
+              "được (chưa đọc được máu, đang có bảng Sự kiện...) "
+              "thì GoBot thử lại theo luật mua bình. \"Dọn ngay\" và \"Thử tìm\" không mua. Cần bật cả Dọn rác: Dọn "
+              "rác tắt thì GoBot mua theo giờ \"mua mỗi\" như cũ.");
+    if (simple_clean_.buy_after_trash && simple_clean_.buy_potions && !simple_clean_.enabled) {
+        ImGui::SameLine();
+        coloured(kWait, "Dọn rác đang tắt: mua theo giờ \"mua mỗi\".");
     }
 
     // How many purchases of 100 of each potion each time -- a slot each -- 0
@@ -207,20 +236,80 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
          "và dừng, giữ ảnh trong thư mục trash_debug. Thử mua một lần trước khi bật, và lần đầu nên đặt 1 ô mỗi "
          "loại.");
     // The plan, as the worker last left it: atomics, no file.
-    if (simple_clean_.buy_potions) {
+    if (simple_clean_.buy_potions && after_pass) {
+        // Buying after each pass (2026.11.13b): no plan time; a part still
+        // owed, and when it is bought.
+        const int owed = shop_owed_.load();
+        const std::int64_t look_at = shop_look_at_s_.load();
+        std::string line = "Mua bình ngay sau mỗi lần Dọn rác theo giờ.";
+        if (owed > 0 && look_at > 0) {
+            const std::int64_t in_s = std::max<std::int64_t>(0, look_at - static_cast<std::int64_t>(std::time(nullptr)));
+            line += " Còn " + std::to_string(owed) + " lần của lượt này, mua tiếp sau " +
+                    std::to_string(std::max<std::int64_t>(1, (in_s + 59) / 60)) + " phút.";
+        }
+        hint(line.c_str());
+    } else if (simple_clean_.buy_potions) {
         const std::string line = plan_line(shop_plan_at_s_.load(), shop_look_at_s_.load(), shop_owed_.load(),
                                            static_cast<std::int64_t>(std::time(nullptr)));
         if (!line.empty()) hint(line.c_str());
     }
     // With Dọn rác on, the round rides a pass (2026.11.11, the owner: "Tới giờ
     // mua: dọn rồi mua"; GuiApp::trash_loop, bag::ShopRide).
-    if (simple_clean_.buy_potions && simple_clean_.enabled) {
+    if (simple_clean_.buy_potions && simple_clean_.enabled && !after_pass) {
         static const std::string ride =
             "Dọn rác đang bật: tới giờ mua, GoBot dọn rác trước rồi mua bình liền sau đó, trong cùng một lần dừng "
             "phím, không chờ thêm. Vừa dọn xong chưa tới " + std::to_string(bag::kRideFreshMs / 60'000) +
             " phút thì mua luôn, không dọn lại.";
         hint(ride.c_str());
     }
+
+    // The pet's HP food on reaching TổCổLong (2026.11.24, the owner: "Khi ra
+    // tới bản đồ TổCổLong thì cần mua lại HP cho pet. Cái này ở trong tab Linh
+    // Thú của người giữ sân và là item "Thịtbò" => cần có lựa chọn để mua và
+    // mua bao nhiêu slot tương tự như mua HP MP"): its own box, off as shipped,
+    // and its slots as the potions' -- a purchase of 100 a slot, nothing
+    // counted, the game's message that its bag is full the end of it. Bought
+    // at each arrival there with the bot running (GuiApp::pet_arrival_tick,
+    // PetRestock), whatever "Tự mua bình" and the other bag jobs say.
+    ImGui::Dummy(ImVec2(0, 4));
+    if (ImGui::Checkbox("Mua HP pet (Thịt bò) khi ra tới TổCổLong", &simple_clean_.buy_pet))
+        put("buy_pet", simple_clean_.buy_pet ? "true" : "false");
+    {
+        static const std::string pet_tip =
+            "Mỗi lần nhân vật ra tới bản đồ TổCổLong (sảnh Cổ Long, chỗ ra sau mỗi lượt phó bản) khi bot đang chạy, "
+            "GoBot mở cửa hàng của món Người Giữ Sân, sang ngăn Linh Thú và mua số ô đặt bên dưới của món Thịtbò "
+            "(thức ăn hồi HP cho pet; không phải Thịt bò khô của nhân vật), mỗi ô một lần mua " +
+            std::to_string(CleanSettings::kBuyQuantity) +
+            ", gõ số rồi đọc lại trước khi bấm Xác Nhận như khi mua bình. Phó bản chờ lượt mua này, tối đa " +
+            std::to_string(PetRestock::kWaitMostMs / 1000) +
+            " giây rồi đi tiếp. Mua chưa được thì thử lại sau " + std::to_string(PetRestock::kAgainMs / 1000) +
+            " giây nếu còn ở TổCổLong (trong " + std::to_string(PetRestock::kWaitMostMs / 1000) +
+            " giây đầu), không thì ở lần ra TổCổLong sau. Game báo túi đồ [Linh Thú] đã đầy thì GoBot "
+            "đóng thông báo và thôi mua lượt đó. Chạy cả khi các ô khác của thẻ này tắt. Tắt thì không làm gì.";
+        ImGui::SetItemTooltip("%s", pet_tip.c_str());
+    }
+    ImGui::PushID("pet");
+    label("Thịt bò (HP pet):");
+    ImGui::SameLine(0, 10);
+    label("mỗi lần mua");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(95);
+    if (ImGui::InputInt("##petslots", &simple_clean_.buy_pet_slots, 1, 10)) {
+        simple_clean_.buy_pet_slots = std::clamp(simple_clean_.buy_pet_slots, 0, CleanSettings::kBuySlotsPerRunMost);
+        put("buy_pet_slots", std::to_string(simple_clean_.buy_pet_slots));
+    }
+    {
+        static const std::string pet_slots_tip =
+            "Số lần mua " + std::to_string(CleanSettings::kBuyQuantity) + " Thịtbò mỗi lần ra tới TổCổLong, từ 0 tới " +
+            std::to_string(CleanSettings::kBuySlotsPerRunMost) + ". 0: không mua.";
+        ImGui::SetItemTooltip("%s", pet_slots_tip.c_str());
+    }
+    ImGui::SameLine();
+    label("ô");
+    ImGui::PopID();
+    if (simple_clean_.buy_pet && simple_clean_.buy_pet_slots <= 0)
+        coloured(kWait, "0 ô: ra tới TổCổLong GoBot không mua gì cho pet.");
+    if (simple_clean_.buy_pet && !can_buy()) coloured(kWait, "GoBot chưa có hình của game để làm việc này, nên chưa mua.");
 
     // Now, and a trial that buys nothing.
     const bool busy = trash_running_ && (trash_oneshot_ || trash_request_ != 0 || trash_pass_);
@@ -239,7 +328,8 @@ void GuiApp::simple_shop_card(const std::function<void(const char*, const std::s
         "đa " + std::to_string(BagCleaner::kShopMaxBuys) + " lần; phần còn lại mua tiếp, mỗi " +
         std::to_string(BagCleaner::kShopPartGapMs / 60'000) + " phút một lượt " +
         std::to_string(BagCleaner::kShopBuysPerHold) +
-        " lần, khi bot chạy (bot đang dừng thì sau khi bấm BẮT ĐẦU). Game báo túi đồ đã đầy thì dừng lượt đó. "
+        " lần, khi bot chạy (bot đang dừng thì ở lần mua theo giờ đầu tiên sau khi bấm BẮT ĐẦU). "
+        "Game báo túi đồ đã đầy thì dừng lượt đó. "
         "Trong lượt mua, phím chữ cái, Space, Home, End, PgUp, PgDn, Insert và Delete của kỹ năng, bình và buff "
         "chỉ bấm giữa hai lần mua; phím số chờ xong lượt.";
     ImGui::SetItemTooltip("%s", simple_clean_.buy_potions ? buy_now_tip.c_str() : "Bật ô \"Tự mua bình\" trước.");

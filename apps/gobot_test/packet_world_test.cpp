@@ -121,11 +121,13 @@ void test_nearest_first() {
     } else {
         const std::string mobs = body_of(src, "std::vector<Nameplate> MobDetector::mobs() const");
         const std::string player = body_of(src, "bool MobDetector::player(Nameplate& out, bool* fresh) const");
-        const std::string rule = "last_player_ms_ != 0 && now_ms() - last_player_ms_ <= kPlayerMemoryMs";
+        const std::string rule =
+            "last_player_ms_ != 0 && now_ms() - last_player_ms_ <= player_memory_ms(period_ms_.load())";
         check(mobs.find("last_player_;") != std::string::npos && mobs.find(rule) != std::string::npos &&
                   player.find(rule) != std::string::npos,
               "MobDetector::mobs() sorts from your remembered plate, last_player_, while yours is not in the "
-              "frame -- by player()'s own rule, for no longer than kPlayerMemoryMs");
+              "frame -- by player()'s own rule, for no longer than player_memory_ms at the wait in use "
+              "(kPlayerMemoryMs at 140 ms)");
         check(mobs.find("nearest_first(") != std::string::npos && mobs.find("sort(") == std::string::npos,
               "and in nearest_first's order, decided in that one place");
     }
@@ -459,6 +461,147 @@ void test_own_walk_line() {
           "GoBot's keys: \"" + a + "\" / \"" + b + "\" / \"" + c + "\" / \"" + d + "\"");
 }
 
+/// 0x0031 of `skill`, where you cast it.
+Built cast_of(std::uint16_t x, std::uint16_t y, std::uint32_t skill) {
+    Built f = cast_frame(x, y);
+    f.u32(20, skill);
+    return f;
+}
+
+/// Your moves with no walk (2026.11.12, the owner's Q1 of 2026-11-11): a
+/// report of yours 100 px or more across from the one before, no walk under
+/// way, no 0x002A between -- a line naming your last cast's skill, and that
+/// skill learned as the dash once its casts come before most of them.
+/// t1901_s2's right wall reports 999,0, and the character stands there: the
+/// hunter, its skills held, saw every monster thousands of px below it and
+/// sent nothing that would bring a real report (2026.11.12 review).
+void test_own_y_kept() {
+    section("Packet world (2026.11.12 review): a report of yours at y 0 -- its height the last real one's, its x and "
+            "facing taken, marked, said once a minute; the next real one clears it");
+
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(400);
+    log.clear_ring();
+    log.set_level(LogLevel::Info);
+    const auto lines = [&log](const char* with) {
+        std::size_t n = 0;
+        for (const LogLine& l : log.ring())
+            if (l.text.find(with) != std::string::npos) ++n;
+        return n;
+    };
+
+    PacketWorld w;
+    const std::uint64_t t = kT0;
+    w.on_packets({ from_client(move_frame(994.0f, 630.0f, 0.0f, 1), t) });
+    w.on_packets({ from_client(move_frame(999.0f, 0.0f, 0.0f, -1), t + 100) });
+    PacketWorld::View v = w.view(t + 150);
+    const bool kept = v.me.y_kept && v.me.x == 999.0f && v.me.y == 630.0f && v.me.report_x == 999.0f &&
+                      v.me.report_y == 630.0f && v.me.said_facing == -1 && v.me.facing_ms == t + 100;
+    w.on_packets({ from_client(move_frame(999.0f, 0.0f, 0.0f, -1), t + 400) });
+    check(kept && lines("Positions: your report at 999,0 (opcode 0x0027) -- y 0 is no place: height kept at 630") == 1 &&
+              w.stats().y_kept == 2,
+          "994,630, then 999,0 twice: at 999,630, facing left as said, marked -- said once, both counted");
+    w.on_packets({ from_client(move_frame(981.0f, 632.0f, 0.0f, -1), t + 900) });
+    v = w.view(t + 950);
+    check(!v.me.y_kept && v.me.x == 981.0f && v.me.y == 632.0f && lines("with no walk") == 0,
+          "then 981,632: cleared -- and no move with no walk made of one from y 0");
+    // With no real height on this map before it: as it came, unmarked.
+    PacketWorld fresh;
+    fresh.on_packets({ from_client(move_frame(999.0f, 0.0f, 0.0f, -1), t) });
+    const PacketWorld::View f = fresh.view(t + 50);
+    check(!f.me.y_kept && f.me.y == 0.0f, "a first report at y 0, nothing real before it: as it came, unmarked");
+    log.set_level(was);
+}
+
+void test_own_moves() {
+    section("Packet world (2026.11.12): a move of yours with no walk -- one line naming the cast before it; the dash "
+            "learned from three");
+
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(400);
+    log.clear_ring();
+    log.set_level(LogLevel::Info);
+    const auto lines = [&log](const char* with) {
+        std::vector<std::string> out;
+        for (const LogLine& l : log.ring())
+            if (l.text.find(with) != std::string::npos) out.push_back(l.text);
+        return out;
+    };
+
+    PacketWorld w;
+    std::uint64_t t = kT0;
+    // A cast of skill 51205 at 1000,800, then a stop 214 px on.
+    w.on_packets({ from_client(cast_of(1000, 800, 51205), t) });
+    w.on_packets({ from_client(move_frame(1214.0f, 800.0f, 0.0f, 1), t + 180) });
+    const std::vector<std::string> one = lines("with no walk");
+    check(one.size() == 1 &&
+              one[0].find("Positions: moved +214 px with no walk, 1000,800 -> 1214,800 by 0x0027, facing not known; "
+                          "your cast of skill 51205 180 ms before") != std::string::npos,
+          "a cast at 1000 and a stop at 1214: one line naming the skill -- \"" +
+              (one.empty() ? std::string() : one[0]) + "\"");
+    check(w.dash().skill == 0, "one such move learns nothing yet");
+
+    // The keys asked of whoever says them.
+    int asked = 0;
+    w.set_move_keys([&](const PacketWorld::OwnMove& m) {
+        ++asked;
+        return m.skill == 51205 ? std::string("its key C; GoBot: no arrow within 300 ms") : std::string();
+    });
+    t += 2000;
+    w.on_packets({ from_client(cast_of(1214, 800, 51205), t) });
+    w.on_packets({ from_client(cast_of(1000, 800, 51102), t + 300) });   // -214, the next cast
+    const std::vector<std::string> two = lines("with no walk");
+    check(asked == 1 && two.size() == 2 &&
+              two[1].find("moved -214 px with no walk, 1214,800 -> 1000,800 by 0x0031, facing right; your cast of "
+                          "skill 51205 300 ms before; its key C; GoBot: no arrow within 300 ms") != std::string::npos,
+          "the next cast 214 px back: put down to the cast before it, with the keys said -- \"" +
+              (two.size() < 2 ? std::string() : two[1]) + "\"");
+
+    // Walking, or a 0x002A between, or a map entry, or y 0: no move.
+    t += 2000;
+    w.on_packets({ from_client(move_frame(1000.0f, 800.0f, 9.0f, 1), t) });
+    w.on_packets({ from_client(move_frame(1400.0f, 800.0f, 0.0f, 1), t + 1100) });
+    w.on_packets({ from_client(air_frame(1, 1400.0f, 800.0f, 0.0f, -20.0f), t + 2000) });
+    w.on_packets({ from_client(air_frame(0, 1700.0f, 800.0f, 0.0f, 0.0f), t + 2600) });
+    w.on_packets({ from_server(entry_frame(11, 1, 300, 600), t + 3000) });
+    w.on_packets({ from_client(move_frame(900.0f, 600.0f, 0.0f, 1), t + 3100) });
+    w.on_packets({ from_client(move_frame(1200.0f, 0.0f, 0.0f, 1), t + 3200) });
+    check(lines("with no walk").size() == 2,
+          "a walk of 400 px, a jump's landing 300 px on, the first report after a map entry and one at y 0: no move");
+
+    // Three after casts of 51205, one of them 318 px: the dash learned.
+    t += 5000;
+    w.on_packets({ from_client(move_frame(1000.0f, 600.0f, 0.0f, 1), t) });
+    w.on_packets({ from_client(cast_of(1000, 600, 51205), t + 100) });
+    w.on_packets({ from_client(move_frame(1318.0f, 600.0f, 0.0f, 1), t + 400) });
+    w.on_packets({ from_client(cast_of(1318, 600, 51205), t + 1000) });
+    w.on_packets({ from_client(move_frame(1532.0f, 600.0f, 0.0f, 1), t + 1300) });
+    const PacketWorld::Dash d = w.dash();
+    check(d.skill == 51205 && d.px == 214 && d.agree == 4 && d.of == 4 &&
+              lines("Positions: the dash is skill 51205, about 214 px -- 3 of the last 3 moves").size() == 1 &&
+              lines("Positions: the dash is").size() == 1,
+          "the dash learned: skill 51205, about 214 px -- the longest seen twice, not the 318 seen once (" +
+              std::to_string(d.px) + ")");
+    // A move after no cast of yours within 1.5 s votes for none.
+    w.on_packets({ from_client(move_frame(1832.0f, 600.0f, 0.0f, 1), t + 9000) });
+    check(lines("no cast of yours in the 1.5 s before").size() == 1 && w.dash().of == 4,
+          "a move with no cast in the 1.5 s before: said so, and no vote");
+
+    // The minute's line.
+    const PacketWorld::DashMinute m = w.take_dash_minute();
+    const std::string line = PacketWorld::dash_line(m, "key C");
+    check(m.moves == 5 && line == "Dash (packets): 5 moves of yours with no walk this minute (1260 px); the dash is "
+                                  "skill 51205, key C, about 214 px (4 of 4)",
+          "the minute: \"" + line + "\"");
+    check(w.take_dash_minute().moves == 0 &&
+              PacketWorld::dash_line(PacketWorld::DashMinute{}, "") == "",
+          "and a new minute from nothing; no move and no dash, no line");
+    log.set_level(was);
+    log.set_ring_capacity(0);
+}
+
 /// A skill cast says where you cast it, in whole pixels, and nothing of how
 /// you move: a walk goes on from there.
 void test_own_cast() {
@@ -656,6 +799,50 @@ void test_own_trace() {
         check(d.air_jumps == 1 && d.air_walkoffs == 1 && d.air_second == 0 && w.stats().air_walkoffs == 0,
               "counted from a moment on (since) as the others are; none after a reset");
     }
+}
+
+/// The client of 2026-11-12 sent no state 1, 2 or 6 in the air (2026.11.12c):
+/// a take-off of another state judged by its vertical speed -- -36 a high
+/// jump, -20 a jump, +3 a walk-off -- a push up again in the air past a free
+/// flight's speed a second jump; each such state said once.
+void test_air_by_speed() {
+    section("Packet world 2026.11.12c: a 0x002A of another state judged by its vertical speed");
+
+    Logger& log = Logger::instance();
+    const LogLevel was = log.level();
+    log.set_ring_capacity(200);
+    log.clear_ring();
+    log.set_level(LogLevel::Info);
+    PacketWorld w;
+    const std::uint64_t t = kT0;
+    w.on_packets({ from_client(move_frame(900.0f, 700.0f, 0.0f, 1), t) });
+    w.on_packets({ from_client(air_frame(7, 900.0f, 700.0f, 0.0f, -36.0f), t + 100) });         // high
+    w.on_packets({ from_client(air_frame(7, 900.0f, 620.0f, 0.0f, -19.0f), t + 380) });         // its free flight
+    w.on_packets({ from_client(air_frame(0, 900.0f, 700.0f, 0.0f, 0.0f), t + 1400) });
+    const PacketWorld::Stats a = w.stats();
+    w.on_packets({ from_client(air_frame(7, 900.0f, 700.0f, 0.0f, -20.0f), t + 2000) });        // a jump
+    w.on_packets({ from_client(air_frame(7, 900.0f, 600.0f, 0.0f, -20.0f), t + 2340) });        // its second
+    w.on_packets({ from_client(air_frame(0, 900.0f, 700.0f, 0.0f, 0.0f), t + 3000) });
+    w.on_packets({ from_client(air_frame(7, 900.0f, 700.0f, 0.0f, 3.0f), t + 4000) });          // off an edge
+    const PacketWorld::Stats s = w.stats();
+    int said = 0;
+    for (const LogLine& l : log.ring())
+        if (l.text.find("Packets: your 0x002A state 7 (0x00000007) at vy -36.0 -- not 0/1/2/6; judged by its vertical "
+                        "speed (high jump)") != std::string::npos)
+            ++said;
+    int any = 0;
+    for (const LogLine& l : log.ring())
+        if (l.text.find("Packets: your 0x002A state 7") != std::string::npos) ++any;
+    log.set_level(was);
+    log.set_ring_capacity(0);
+    check(a.air_high == 1 && a.air_second == 0 && a.air_jumps == 0,
+          "state 7 at -36: a high jump; its free flight's -19 at +280 ms (a free flight's -19.2) no second jump");
+    check(s.air_high == 1 && s.air_jumps == 2 && s.air_walkoffs == 1 && s.air_second == 1 && s.air_other == 5,
+          "state 7 at -20: a jump, and its push to -20 at +340 ms a second; at +3 a jump and a walk-off (high " +
+              std::to_string(s.air_high) + ", jumps " + std::to_string(s.air_jumps) + ", walk-offs " +
+              std::to_string(s.air_walkoffs) + ", second " + std::to_string(s.air_second) + ", other " +
+              std::to_string(s.air_other) + ")");
+    check(said == 1 && any == 1, "each state said once: " + std::to_string(any) + " line(s)");
 }
 
 /// A jump: up at its vertical speed, slowing under gravity, to its top, where
@@ -1974,89 +2161,25 @@ void test_hurt_counts_since() {
           "and each hitter's blows since, by its id: 759 once, 0x55C once");
 }
 
-/// Who says the map has changed (map_change_by): the packets, once a map
-/// entry has been seen since the world started afresh and they are live on
-/// the game and not just relinked; the minimap otherwise, as before.
-void test_map_change_by() {
-    section("Map changes: the packets' map entries, or the minimap (map_change_by)");
+/// Where the world says you are (place), as the GUI follows it at every tick:
+/// the map entries counted, under an epoch a reset keeps and a relink does not
+/// move -- what the Bản đồ tab and the map entries' lines go by.
+void test_place() {
+    section("The world's place: its entries, its epoch, through a relink and a reset");
 
-    const std::uint64_t now = kT0 + 60'000;
-    PacketWorld::Place p;
-    p.entries = 1;
-    p.epoch = 1;
-    p.since_ms = p.entry_ms = kT0;
-    check(map_change_by(p, true, now - 500, now) == MapChangeBy::Packets,
-          "an entry seen, on the game, the server heard half a second ago: the packets");
-    PacketWorld::Place none = p;
-    none.entries = 0;
-    check(map_change_by(none, true, now - 500, now) == MapChangeBy::Minimap,
-          "no entry since the world started afresh: the minimap");
-    check(map_change_by(p, false, now - 500, now) == MapChangeBy::Minimap, "not on the game's process: the minimap");
-    check(map_change_by(p, true, now - kMapByPacketsQuietMs, now) == MapChangeBy::Packets &&
-              map_change_by(p, true, now - kMapByPacketsQuietMs - 1, now) == MapChangeBy::Minimap &&
-              map_change_by(p, true, 0, now) == MapChangeBy::Minimap,
-          "the server quiet 5 s: still the packets; a moment longer, or never heard: the minimap");
-    PacketWorld::Place relinked = p;
-    relinked.since_ms = now - kMapByPacketsSettleMs + 1;
-    PacketWorld::Place settled = p;
-    settled.since_ms = now - kMapByPacketsSettleMs;
-    check(map_change_by(relinked, true, now - 500, now) == MapChangeBy::Minimap &&
-              map_change_by(settled, true, now - 500, now) == MapChangeBy::Packets,
-          "relinked under 10 s ago: the minimap; 10 s on: the packets");
-
-    // The world's own place, asked as the GUI asks it.
     PacketWorld w;
     check(w.place().entries == 0 && w.place().epoch == 0, "nothing yet: no entry, epoch 0");
     w.on_packets({ from_server(entry_frame(10, 4, 690, 1145), kT0) });
     const PacketWorld::Place in = w.place();
     check(in.map == 10 && in.area == 4 && in.epoch == 1 && in.entries == 1 && in.since_ms == kT0 &&
-              in.entry_ms == kT0 && map_change_by(in, true, kT0 + 1000, kT0 + 1000) == MapChangeBy::Packets,
-          "an entry: its place, epoch 1, and the packets say");
+              in.entry_ms == kT0,
+          "an entry: its place, epoch 1");
     w.relink(kT0 + 2000);
     const PacketWorld::Place again = w.place();
-    check(again.epoch == 1 && again.entries == 1 && again.since_ms == kT0 + 2000 &&
-              map_change_by(again, true, kT0 + 3000, kT0 + 3000) == MapChangeBy::Minimap &&
-              map_change_by(again, true, kT0 + 12'000, kT0 + 12'000) == MapChangeBy::Packets,
-          "a relink: the minimap for 10 s, then the packets again");
+    check(again.epoch == 1 && again.entries == 1 && again.since_ms == kT0 + 2000,
+          "a relink: the same epoch and entries, followed since the relink");
     w.reset();
-    check(map_change_by(w.place(), true, kT0 + 20'000, kT0 + 20'000) == MapChangeBy::Minimap &&
-              w.place().epoch == 1,
-          "a reset: the minimap until the next entry, the epoch kept");
-
-#ifdef GOBOT_SOURCE_DIR
-    const std::string src = read_all(std::string(GOBOT_SOURCE_DIR) + "/apps/gobot_gui/gui_app.cpp");
-    if (src.empty()) {
-        skip("the source tree is not here, so gui_app.cpp is not read\n");
-    } else {
-        const std::string tick = body_of(src, "void GuiApp::tick() {");
-        const std::size_t npos = std::string::npos;
-        const std::size_t followed = tick.find("const bool packet_entered = packet_place.epoch != map_epoch_seen_;");
-        const std::size_t running = tick.find("if (detector_running_) {");
-        const std::size_t taken = tick.find("const bool fingerprint = minimap_.take_changed();");
-        const std::size_t asked =
-            tick.find("map_change_by(packet_place, on_game, packet_self_.link(at).last_server_ms, at)");
-        const std::size_t under = tick.find("if (by_packets ? packet_entered : fingerprint) {");
-        const std::size_t reset = under == npos ? npos : tick.find("camera_.reset();", under);
-        const std::size_t anchor = under == npos ? npos : tick.find("anchor_.reset();", under);
-        check(followed != npos && running != npos && followed < running && taken != npos && asked != npos &&
-                  under != npos && taken < under && asked < under && reset != npos && reset - under < 80 &&
-                  anchor != npos && anchor - under < 120 && tick.find("if (minimap_.take_changed()) {") == npos &&
-                  tick.find("++minimap_overruled_;") != npos,
-              "tick(): the minimap's reset sits under the packets' test -- an entry when they say, the fingerprint "
-              "otherwise -- the entries followed at every tick, and a fingerprint they overrule counted");
-        // One line a change: the tracker's own goes to the debug log, tick()
-        // says the fingerprint once -- with "ignored" when the packets overrule it.
-        const std::string tracker = read_all(std::string(GOBOT_SOURCE_DIR) + "/src/minimap_tracker.cpp");
-        const std::size_t ignored = tick.find("-- ignored");
-        const std::size_t ignored_from = ignored == npos ? npos : tick.rfind("GB_INFO(", ignored);
-        const std::size_t acts = tick.find("if (!by_packets && fingerprint)");
-        check(!tracker.empty() && tracker.find("GB_INFO(\"Map changed") == npos &&
-                  tracker.find("GB_DEBUG(\"Map changed") != npos && ignored_from != npos &&
-                  tick.find("%016llx", ignored_from) < ignored && acts != npos && under != npos && acts < under,
-              "one \"Map changed -- minimap fingerprint\" line a change: the tracker's at debug, tick()'s with the "
-              "fingerprint, and \"ignored\" on it when the packets overrule");
-    }
-#endif
+    check(w.place().entries == 0 && w.place().epoch == 1, "a reset: no entry until the next, the epoch kept");
 }
 
 } // namespace
@@ -2068,11 +2191,14 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_map_entry();
     test_own_walk();
     test_own_walk_line();
+    test_own_moves();
+    test_own_y_kept();
     test_own_cast();
     test_own_facing();
     test_own_jump();
     test_air_counts();
     test_own_trace();
+    test_air_by_speed();
     test_not_yours();
     test_monster_table();
     test_kill_respawn();
@@ -2092,5 +2218,5 @@ void test_packet_world(void (*check_fn)(bool, const std::string&), void (*sectio
     test_generations();
     test_actor_checked();
     test_hurt_counts_since();
-    test_map_change_by();
+    test_place();
 }

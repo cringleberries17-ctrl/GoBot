@@ -175,6 +175,9 @@ struct GuiApp::PotionsUi {
     bool           was_running = false;
     std::map<std::uint32_t, SlotReading> logged;    ///< what the log last said, per key
     std::string    trouble;                 ///< why nothing can be read, in Vietnamese
+    /// Why nothing is read now: the bottom of the game off the screen or under
+    /// the taskbar (2026.11.13c), in Vietnamese; empty when it is all there.
+    std::string    unseen;
     /// Per key, the frame of the newest look that read its count wild: held
     /// until the count comes back (a misread: written to potion_debug) or the
     /// drop is believed (dropped).
@@ -215,6 +218,7 @@ void GuiApp::potions_tick() {
         ui.logged.clear();
         ui.wild_frames.clear();
         ui.bag_low_said.clear();
+        ui.unseen.clear();
         ui.next_ms = now_ms() + 3000;
         std::lock_guard<std::mutex> lock(potion_slots_mutex_);
         potion_slots_.clear();
@@ -460,6 +464,14 @@ void GuiApp::potions_tick() {
     ui.reads_seen = reads;
     ui.next_ms = now_ms() + static_cast<std::uint64_t>(ui.settings.read_every_s) * 1000;
 
+    // The bottom of the game past the screen's edge or under the taskbar
+    // (2026.11.13c, game_fit_), on the reader's frames read off the screen:
+    // the slots there read black, or as the taskbar -- no count, and no empty
+    // slot either. Not looked at; the line says why instead of "Chưa đọc được
+    // số bình". Frames the game draws itself have those rows all the same.
+    ui.unseen = game_unseen(kHotbarRowsUnder, "đếm được số bình trên thanh phím", vitals_.stats().capture_from_screen);
+    if (!ui.unseen.empty()) return;
+
     // Off the drawing thread: a search along the bottom of the screen takes a
     // couple of dozen milliseconds when the hotbar is not where it was.
     const HotbarSpot was = ui.spot;
@@ -541,6 +553,9 @@ void GuiApp::simple_potion_stock(const MacroKey& key) {
         // Read only during a run: the last run's count, left up after
         // DỪNG, would look like today's.
         line = "Số bình được đọc khi bot chạy.";
+    } else if (!ui.unseen.empty()) {
+        line = ui.unseen;
+        colour = kWait;
     } else if (ui.watch.believed(key.keycode, r)) {
         line = potion_line_vi(r, name);
         if (r.state == SlotState::Empty) colour = kBad;

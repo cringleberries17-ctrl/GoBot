@@ -112,6 +112,8 @@ MapViewResult MapViewJob::run(const PacketWorld::View& view, const PacketWorld::
     look.entry_y = round_px(f.entry_y);
     look.report_op = f.report_op;
     look.air_reports = f.air_reports;
+    look.airborne = f.airborne;
+    look.y_kept = f.y_kept;
     if (look.capture) look.mobs = packet_stands(view, PacketEyes::kStandsMax);
     ws.view_trust.update(look, kWorkMs);
     // The owner's one-click choice of the map (2026.11.10): asked of the GUI,
@@ -348,13 +350,14 @@ bool mob_grey(const HunterConfig& cfg, const Hunter::Status& hs, bool area_on, b
     const double keep = target ? static_cast<double>(Hunter::kSpotKeepPx) : 0.0;
     const bool in_area = m.x >= hs.spot_left - keep && m.x <= hs.spot_right + keep && m.y >= hs.spot_top - keep &&
                          m.y <= hs.spot_bottom + keep;
-    if (in_area) return false;
-    if (hs.spot_back_first) return true;
-    const double scale = cfg.packet_scale > 0.0f ? static_cast<double>(cfg.packet_scale) : 1.0;
-    // As the hunter has the plate: packet_dy on the height (PacketEyes::make_plates).
-    const bool reach = you && Hunter::in_reach(cfg, round_px((m.x - you_x) / scale),
-                                               round_px((m.y - you_y) / scale) + cfg.packet_dy);
-    return !reach;
+    // Outside it: never fought, in reach or not (2026.11.12, the owner's Q3
+    // "Chỉ đánh quái trong vùng") -- until then one in reach was red, fought
+    // where it stood.
+    (void)cfg;
+    (void)you;
+    (void)you_x;
+    (void)you_y;
+    return !in_area;
 }
 
 // ------------------------------------- the jumps up and the seek (2026.11.05b)
@@ -410,6 +413,64 @@ std::vector<MapRun> solid_marks(const GameMapBook::Page& p, std::span<const MapP
         out.push_back(std::move(r));
     }
     return out;
+}
+
+// ------------------------------------------------------- the band's bars
+
+namespace {
+
+double band_scale(double scale) { return scale > 0.0 ? scale : 1.0; }
+
+} // namespace
+
+BandBars band_bars(double feet_y, const Band& band, double scale) {
+    const double s = band_scale(scale);
+    BandBars b;
+    b.up_y = feet_y - band.up_px * s;
+    b.down_y = feet_y + band.down_px * s;
+    return b;
+}
+
+double band_feet_y(double you_y, int packet_dy, double scale) { return you_y - packet_dy * band_scale(scale); }
+
+BandSpan band_span(const HuntZone* box, double you_x, double vx0, double vx1) {
+    if (box == nullptr) return BandSpan{ std::min(vx0, vx1), std::max(vx0, vx1) };
+    return BandSpan{ std::min(static_cast<double>(box->left), you_x), std::max(static_cast<double>(box->right), you_x) };
+}
+
+BandBar band_grip(const BandBars& b, const BandSpan& s, const MapCamera& cam, MapCamera::P origin, MapCamera::P size,
+                  MapCamera::P mouse) {
+    // Its left end on the upper bar, its right end on the lower one.
+    const MapCamera::P upper = cam.to_screen({ s.x0, b.up_y }, origin, size);
+    const MapCamera::P lower = cam.to_screen({ s.x1, b.down_y }, origin, size);
+    if (mouse.x < std::min(upper.x, lower.x) - kBandGripPx || mouse.x > std::max(upper.x, lower.x) + kBandGripPx)
+        return BandBar::None;
+    const double up = std::abs(mouse.y - upper.y), down = std::abs(mouse.y - lower.y);
+    // Both bars within the grip -- a band of a few pixels, zoomed out -- the
+    // nearer; the lower on a tie, which the drop goes by.
+    if (down <= kBandGripPx && down <= up) return BandBar::Down;
+    if (up <= kBandGripPx) return BandBar::Up;
+    return BandBar::None;
+}
+
+Band band_drag(const BandGesture& g, MapCamera::P mouse) {
+    Band out = g.from;
+    const double zoom = g.cam.zoom > 0.0 ? g.cam.zoom : MapCamera::kFollowZoom;
+    // The world pixels the mouse moved down, as the band's own.
+    const double moved = (mouse.y - g.press.y) / zoom / band_scale(g.scale);
+    const auto stepped = [](double px) {
+        const long v = std::lround(px / kBandStepPx) * kBandStepPx;
+        return static_cast<int>(std::clamp<long>(v, 0, kBandMaxPx));
+    };
+    if (g.bar == BandBar::Up) out.up_px = stepped(g.from.up_px - moved);
+    else if (g.bar == BandBar::Down) out.down_px = stepped(g.from.down_px + moved);
+    return out;
+}
+
+int band_clamp(int px) { return std::clamp(px, 0, kBandMaxPx); }
+
+std::string band_label(BandBar bar, int px) {
+    return (bar == BandBar::Up ? "+" : "-") + std::to_string(px) + " px";
 }
 
 } // namespace gobot

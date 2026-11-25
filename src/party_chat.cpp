@@ -331,6 +331,12 @@ std::vector<std::string> PartyChat::saw(const std::vector<std::string>& raw_line
                 cooling_down = true;
                 break;
             }
+        // Held off: the game answered the last invite with a message.
+        for (const auto& [who, until] : held_until_)
+            if (now_ms < until && alike(who, key) >= settings_.min_name_match) {
+                cooling_down = true;
+                break;
+            }
 
         if (cooling_down) continue;
 
@@ -342,9 +348,16 @@ std::vector<std::string> PartyChat::saw(const std::vector<std::string>& raw_line
     return ready;
 }
 
+void PartyChat::hold_off(const std::string& who, std::uint64_t now_ms, std::uint64_t for_ms) {
+    if (who.empty()) return;
+    std::uint64_t& until = held_until_[who];
+    until = std::max(until, now_ms + for_ms);
+}
+
 void PartyChat::reset() {
     counting_.clear();
     invited_at_.clear();
+    held_until_.clear();
     own_speakers_.clear();
     reading_ms_ = 0;
     last_look_ms_ = 0;
@@ -359,6 +372,13 @@ std::map<std::string, int> PartyChat::cooling(std::uint64_t now_ms) const {
     for (const auto& [who, when] : invited_at_) {
         if (now_ms - when >= cooldown) continue;
         out[who] = static_cast<int>((cooldown - (now_ms - when)) / 1000);
+    }
+    // The longer of the two waits, for a name held off as well.
+    for (const auto& [who, until] : held_until_) {
+        if (now_ms >= until) continue;
+        const int left = static_cast<int>((until - now_ms) / 1000);
+        auto it = out.find(who);
+        if (it == out.end() || it->second < left) out[who] = left;
     }
     return out;
 }

@@ -272,8 +272,9 @@ are marked as such. Option names are the INI keys in `bot_s0_default.ini`.
     a confirmation: GoC presses blind, as GoBot's timers did (corrected
     2026-11-08). GoBot's "Chỉ khi đang đánh quái" follows the rest of this,
     with a cooldown of its own on every skill in both modes, since no server
-    paces GoBot's presses; its "Ra chiêu theo vòng" (2026.11.08, the macro
-    alone, off by default) does wait for your own cast in the packets.
+    paces GoBot's presses; its "Ra chiêu theo vòng" (2026.11.08; on by
+    default and with the hunter too since 2026.11.16b) does wait for your own
+    cast in the packets.
   - **Jump attack** (mode 1). A target more than `higher_threshold` px off
     vertically, and within that + 132 px, gets one jump. Further than that gets
     a double jump. It goes by |dy|, so a monster below qualifies too; there is
@@ -336,10 +337,13 @@ thresholds (132, 280) and the high jump's peak by the formula (432).
 The 133 and 432 are the formula's (v²/2g). GoC's own 0.05-s steps give rises
 of 114 and 396, from a point it starts 33 px above the feet, so its graph is
 conservative. 2026.11.05b's jump up keeps a range of its own instead
-(`gobot/jump_plan.hpp`: gravity 2240..2640, peaks ↑ 121..143, ↑↑ 213..286,
-Ctrl + ↑ 392..463), and the game's own second jump is −800 again (state 6;
-[protocol-findings.md](protocol-findings.md)), not the −1440 the pathfinder
-can model after a high jump.
+(`gobot/jump_plan.hpp`: gravity 1900..2400 since 2026.11.12c, 2240..2640
+before; peaks ↑ 133..169, ↑↑ 250..337, Ctrl + ↑ 432..546), and the game's
+own second jump is −800 again (state 6; [protocol-findings.md](protocol-findings.md)),
+not the −1440 the pathfinder can model after a high jump. On the 2026-11-12
+client an airborne 0x002A carried another state value than 1, 2 or 6:
+GoBot judges by the vertical speed -- −28 a step or more upward a high jump,
+upward a jump, a later push past a free flight's speed a second.
 
 Graph edges and their costs:
 

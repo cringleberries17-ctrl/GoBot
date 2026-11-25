@@ -286,10 +286,10 @@ void GuiApp::simple_charm_switch(const std::function<void(const char*, const std
                                            "Xác Nhận đúng hộp thoại giống của mảnh ghép, rồi bấm Xác Nhận trên "
                                            "thông báo của game để đóng nó. Mỗi màu bùa là một loại riêng. Mỗi lần "
                                            "mất một cái, có hiệu lực một giờ, nên mỗi loại chỉ dùng một cái rồi chờ "
-                                           "hết giờ. Trong lúc dùng bùa, kỹ năng, bình và buff tạm dừng vài giây "
-                                           "(khoảng 3 giây mỗi loại, tối đa 20 đến 40 giây); không dùng khi máu "
-                                           "thấp, đang chat hay bot đang bận việc khác. Tắt thì chỉ báo chỗ có bùa, "
-                                           "không bấm gì.")
+                                           "hết giờ. Trong lúc dùng bùa, kỹ năng và buff tạm dừng vài giây "
+                                           "(khoảng 3 giây mỗi loại, tối đa 20 đến 40 giây); GoBot tự bấm bình "
+                                           "HP/MP giữa hai bùa, nên dùng ở mọi mức máu. Không dùng khi đang chat "
+                                           "hay bot đang bận việc khác. Tắt thì chỉ báo chỗ có bùa, không bấm gì.")
                                     .c_str());
     ImGui::SameLine(0, 12);
     label("dùng lại sau");
